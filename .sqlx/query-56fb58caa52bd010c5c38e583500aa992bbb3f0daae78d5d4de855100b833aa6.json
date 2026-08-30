@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT group_code, (group_ratio * 1000000)::bigint AS \"ratio_scaled!\" FROM price_groups",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "56fb58caa52bd010c5c38e583500aa992bbb3f0daae78d5d4de855100b833aa6"
+}

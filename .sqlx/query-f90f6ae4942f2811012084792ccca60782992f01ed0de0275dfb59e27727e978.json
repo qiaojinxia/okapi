@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels SET provider = $2, api_base = NULLIF($3, ''),\n                   models = $4, priority = $5, status = $6, updated_at = now()\n                   WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Text",
+        "Jsonb",
+        "Int4",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f90f6ae4942f2811012084792ccca60782992f01ed0de0275dfb59e27727e978"
+}

@@ -1,0 +1,18 @@
+---
+description: 计费红线（domain/pricing/ledger 与 Lua 脚本专属，最高优先级）
+globs: "crates/okapi-domain/**,crates/okapi-pricing/**,crates/okapi-ledger/**,**/*.lua"
+alwaysApply: false
+---
+
+# 计费红线：这里的代码 = 钱
+
+任何改动默认高危。除 `rust-backend.mdc` 全部约束外，本区域追加：
+
+1. **绝对禁止浮点**：`f32` / `f64` / `as f64` 不得出现，包括中间计算、常量与测试断言（测试用整数精确断言，不用近似比较）。
+2. 禁 `unwrap` / `expect` / `panic!`（**含不变量场景**）：一切失败路径返回错误并进对账/告警，宁可拒绝服务不可错账（fail-closed 定案）。
+3. 每笔计算必须产出完整 `pricing_snapshot`（epoch、model/completion/cache 三倍率、group_ratio、user_multiplier、rules 链每步乘数、final 单价）——形状见 DESIGN §3.4，缺字段=账单不可解释=bug。
+4. 公式改动三同步：DESIGN §3 + parity fixtures + proptest 断言，三者都改才算完成。
+5. `reserve` / `commit` / `refund` 必须幂等（重复调用不得二次动账）；新增 billing 事件类型必须同时接入：事件枚举、chsink 消费、对账逻辑、`docs/database.md`。
+6. 四金额列（amount / original_amount / discount / upstream_cost）全链路一致：动其一必须同步 PG `billing_records`、CH `request_log_raw`、事件 payload 三处及文档。
+7. Lua 脚本：KEYS 必须同 `{uid}` 槽；KPI 等跨槽计数不得进脚本（走 pipeline）；返回值结构与 `docs/database.md` §2.2 契约一致。
+8. 改动后必须跑：`cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger` + parity 套件，并在回复中给出结果。

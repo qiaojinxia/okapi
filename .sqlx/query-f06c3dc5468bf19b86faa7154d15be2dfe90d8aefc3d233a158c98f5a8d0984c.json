@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT rule_code, rule_type, scope, params, priority, valid_from, valid_to\n        FROM pricing_rules\n        WHERE enabled\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rule_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "rule_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "rule_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "rule_type"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "scope",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "scope"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "params",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "params"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "valid_from",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "valid_from"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "valid_to",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "valid_to"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "f06c3dc5468bf19b86faa7154d15be2dfe90d8aefc3d233a158c98f5a8d0984c"
+}

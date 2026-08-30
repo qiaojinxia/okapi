@@ -1,0 +1,46 @@
+---
+description: Rust 后端代码约束（crates/bins/迁移）
+globs: "**/*.rs,**/Cargo.toml,migrations/**"
+alwaysApply: false
+---
+
+# Rust 约束
+
+## 基线
+
+- Edition 2024；workspace 根 `#![deny(unsafe_code)]`；clippy `all + pedantic` 开警告，CI `-D warnings`。
+- 非测试代码禁 `.unwrap()` / `.expect()`；确属不变量的 `expect` 必须写明理由字符串。禁 `panic!` / `todo!` / `unimplemented!` 进主干。
+- 禁 `println!` / `eprintln!` / `dbg!`——一律 `tracing`（span 携带 `request_id`）；日志中的密钥/凭证必须打码。
+
+## 错误处理
+
+- 每个 crate 用 `thiserror` 定义自己的错误枚举；`anyhow` 只允许出现在 `bins/`，库 crate 禁用。
+- HTTP 层（gateway/console）统一 `AppError` + `impl IntoResponse`：JSON 形如 `{"error":{"code":"<error_code>","params":{...}}}`，映射 HTTP 状态码集中在一处。**响应体不得包含自然语言句子**（i18n 定案）。
+- 用 `?` 传播；禁止只为传播错误写 match。
+
+## async / tokio
+
+- 禁在 async 上下文做阻塞或重 CPU 工作：tiktoken 计数等用 `spawn_blocking` 或专用线程池。
+- 一切对外 IO（上游 HTTP、PG、Redis、CH、NATS）必须有显式超时；reqwest 区分连接/首字/整体超时。
+- `tokio::spawn` 的任务必须持有 JoinHandle 或注释说明 detach 理由；`select!` 分支注意取消安全（丢弃即取消副作用要显式处理）。
+
+## sqlx / PostgreSQL
+
+- 一律 `sqlx::query!` / `query_as!` 编译期校验；CI 用 `SQLX_OFFLINE=true`，`.sqlx/` 快照提交仓库（本地改 SQL 后跑 `cargo sqlx prepare`）。
+- 迁移只前滚（`migrations/` 顺序号），禁修改已合并迁移；大表加列须可空或带默认。
+- 多步写包事务；INSERT/UPDATE 用 `RETURNING` 避免二次 SELECT；禁字符串拼接 SQL。
+- DB 行结构体与 API DTO 分离，`From`/`Into` 显式转换（DTO 在 `okapi-api`）。
+
+## 领域规范
+
+- 金额只用 `Money`（i64 micro-USD）newtype，运算只经其方法；算术用 `checked_*` / `saturating_*` 显式选择，禁裸 `+ - *`。倍率 decimal 定点只存在于配置/编译层，进 PriceBook 后为定点整数。
+- ID 一律 newtype（`UserId` / `ChannelId` / `RequestId`…），防止参数错位。
+- 状态机（计费状态、channel_key 状态）用 enum + 穷举 `match`，**状态转移代码禁 `_ =>` 兜底**。
+- Redis Lua：单脚本只允许操作同一 hash-tag（`{uid}`）槽内的键；脚本语义改动必须同步 `docs/database.md` §2.2 契约。
+- crate 依赖方向：`domain ← pricing/ledger ← providers/store ← api ← bins`，禁反向引用。
+
+## 测试
+
+- 计费公式：proptest 性质测试 + new-api 对拍 fixtures（同输入同输出，零差异）。
+- 状态机：转移矩阵穷举单测。测试代码允许 unwrap。
+- 老仓库 pytest parity 套件是黑盒验收基线，行为变更需先改 fixture 并说明。

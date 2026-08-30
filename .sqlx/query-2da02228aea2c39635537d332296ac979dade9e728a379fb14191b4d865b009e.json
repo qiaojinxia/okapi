@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO model_pricing (model_id, pricing_mode, per_call_price_micro)\n        VALUES ($1, 'per_call', $2)\n        ON CONFLICT (model_id) DO UPDATE SET\n            pricing_mode = 'per_call',\n            per_call_price_micro = EXCLUDED.per_call_price_micro,\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2da02228aea2c39635537d332296ac979dade9e728a379fb14191b4d865b009e"
+}

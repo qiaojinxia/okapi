@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO user_groups (user_id, group_code, priority)\n            SELECT $1, code, prio FROM unnest($2::varchar[], $3::int[]) AS t(code, prio)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "VarcharArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "968adef4604d1ff66aec099146f35f7c9f18a7456d8963c46f89c59495043245"
+}

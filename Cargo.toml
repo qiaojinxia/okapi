@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/okapi-domain",
+    "crates/okapi-pricing",
+    "crates/okapi-ledger",
+    "crates/okapi-providers",
+    "crates/okapi-store",
+    "crates/okapi-api",
+    "bins/okapi",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/qiaojinxia/okapi"
+
+[workspace.dependencies]
+okapi-domain = { path = "crates/okapi-domain" }
+okapi-pricing = { path = "crates/okapi-pricing" }
+okapi-ledger = { path = "crates/okapi-ledger" }
+okapi-providers = { path = "crates/okapi-providers" }
+okapi-store = { path = "crates/okapi-store" }
+okapi-api = { path = "crates/okapi-api" }
+
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+arc-swap = "1"
+clap = { version = "4", features = ["derive"] }
+proptest = "1"
+
+async-nats = "0.50"
+argon2 = "0.5"
+aes-gcm = "0.10"
+base64 = "0.22"
+bcrypt = "0.17"
+hmac = "0.13"
+sha1 = "0.11"
+base32 = "0.5"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
+md-5 = "0.10"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["multipart", "ws"] }
+bytes = "1.12.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+dotenvy = "0.15.7"
+eventsource-stream = "0.2.3"
+fred = { version = "10.1.0", features = ["i-scripts"] }
+futures = "0.3.34"
+hex = "0.4.3"
+moka = { version = "0.12.16", features = ["future"] }
+rand = "0.10.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "http2", "multipart"] }
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono", "uuid", "json"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.0", features = ["trace", "cors", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+uuid = { version = "1.26.0", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# 项目取舍：错误/panic 文档由 thiserror 与红线规则承担；文档语言为中文
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"

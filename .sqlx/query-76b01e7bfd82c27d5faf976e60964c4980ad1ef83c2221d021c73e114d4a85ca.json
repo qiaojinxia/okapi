@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.model_name AS canonical, m.max_output\n        FROM models m\n        WHERE m.status = 1\n          AND (\n                m.model_name = $1\n                OR m.model_name = (\n                    SELECT target_model FROM model_aliases\n                    WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(pattern, '*', '%'))\n                    ORDER BY (pattern = $1) DESC, priority DESC, pattern\n                    LIMIT 1\n                )\n              )\n        ORDER BY (m.model_name = $1) DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "canonical",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "max_output",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "max_output"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "76b01e7bfd82c27d5faf976e60964c4980ad1ef83c2221d021c73e114d4a85ca"
+}

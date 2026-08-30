@@ -1,0 +1,35 @@
+---
+description: React 19 + TypeScript 前端约束
+globs: "frontend/**"
+alwaysApply: false
+---
+
+# 前端约束（Vite + React 19 + TS + TanStack + Tailwind v4 + shadcn/ui）
+
+## TypeScript
+
+- `strict: true`；禁 `any`（未知类型用 `unknown` + 收窄）；禁 `@ts-ignore`，必要时 `@ts-expect-error` 并注明理由。
+- 组件 Props 用显式 `interface`；绝对导入 `@/`；组件文件 kebab-case，组件名 PascalCase。
+
+## 组件与数据
+
+- 只写函数组件 + hooks；复杂逻辑抽 custom hook（`@/hooks` 或 feature 目录内）。
+- UI 优先用 shadcn/ui 组件，类名合并一律 `cn()`（`@/lib/utils`）；不重复造基础组件。
+- **服务端状态一律 TanStack Query**：禁 `useEffect + fetch + useState` 拉数据；query key 用集中式工厂，禁字符串散写；mutation 在 `onSuccess` 用工厂 key invalidate；数据依赖优先 `useSuspenseQuery`。
+- 路由用 TanStack Router 文件式路由；search params 一律 zod schema 校验，禁手工 `URLSearchParams`。
+- 表单 zod + react-hook-form；SSE/实时数据（KPI 看板、Playground）封装专用 hook，不在组件里裸写 EventSource。
+
+## 样式与主题
+
+- Tailwind v4 CSS-first（`@theme`）；颜色/圆角等设计令牌走 CSS 变量以支持多主题（亮/暗/科技风），**禁在组件里硬编码色值**；禁 `@apply`（设计系统层除外）。
+- 移动优先；数据密集表格（用量日志/账单）用 TanStack Table + 虚拟滚动；图表默认 Recharts，复杂场景 VChart。
+
+## i18n 红线（CI 会拦）
+
+- JSX 与用户可见字符串**禁止裸中英文文案**，一律 `t('namespace:key')`；命名空间：common / console / admin / pricing / errors。
+- 新增 key 必须同时写入 `zh-CN` 与 `en` 两套语言包；后端 `error_code` 在 `errors` 命名空间映射。
+- 日期/数字/货币用 Intl + dayjs locale，禁手写格式化。
+
+## 金额显示
+
+- 一切金额来自后端 micro-USD 整数：显示必须经 `formatMoney()` / `formatQuota()`（quota = USD × 500,000）统一工具，**禁在组件内手写换算**；均值类指标遵循 token 加权口径（IMPLEMENTATION §10）。

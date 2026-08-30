@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO price_groups (group_code, group_ratio, description)\n        VALUES ($1, ($2::text)::numeric, $3)\n        ON CONFLICT (group_code) DO UPDATE SET\n            group_ratio = EXCLUDED.group_ratio,\n            description = EXCLUDED.description\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Text",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "473733cf3ce5bbd1c05911d6d143f5a4b5a925df854e9717c60008b0bb8445ad"
+}

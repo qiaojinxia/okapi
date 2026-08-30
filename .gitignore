@@ -1,0 +1,15 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# 前端（M3）
+node_modules/
+frontend/dist/
+
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# 系统
+.DS_Store

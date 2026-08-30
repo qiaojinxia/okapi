@@ -1,0 +1,32 @@
+---
+description: Okapi 项目地图与冻结决策（始终生效）
+globs:
+alwaysApply: true
+---
+
+# Okapi 项目总规
+
+Okapi 是 AI API 中转网关（ok-api v2 重构）：Rust 后端 + React 19 前端，倍率计费模型。
+
+## 权威文档（改代码前先查，冲突时以文档为准）
+
+- `DESIGN.md`：调研结论 + 倍率计费模型 v3（§3 公式与 pricing_snapshot 是计费唯一语义）
+- `IMPLEMENTATION.md`：选型定案（§1 冻结）、3 角色架构、调度/RBAC/MCP/i18n 规范、M0–M4 里程碑
+- `docs/database.md`：存储层唯一权威（PG DDL / Redis 键与 Lua 契约 / CH 表与 MV / NATS 拓扑）
+
+设计变更必须先改文档再改代码；schema、Redis 键、Lua 契约改动必须同步 `docs/database.md`。
+
+## 不可违背的架构决策
+
+1. 3 角色单二进制：`okapi gateway|console|worker|all`；gateway 热路径零跨服务调用（只碰 Redis + 上游）。
+2. 存储 PG-only（sqlx 编译期校验）；PG 只做账本与点查，看板聚合一律走 ClickHouse / Redis。
+3. 金额一律 micro-USD `i64`（$1 = 1,000,000），计费路径全线禁浮点；quota 视图 = USD × 500,000 仅展示层。
+4. 后端 API 错误只返回 `error_code` + 参数，禁止返回自然语言文案（i18n 由前端语言包渲染）。
+5. providers 协议转换按方向拆模块（如 `anthropic_to_openai.rs`），禁引入统一中间 IR。
+6. 工程布局：cargo workspace 6 crates（domain / pricing / ledger / providers / store / api）+ `bins/okapi` + `frontend/`；crate 依赖方向禁反向。
+
+## 通用约定
+
+- 代码标识符、日志、错误码用英文；文档与注释可用中文。
+- 不要主动提交 git、不要引入未在 IMPLEMENTATION §1 定案清单内的框架级依赖。
+- **本机环境红线**：禁止改动用户的网络/代理配置（ClashX、系统代理、DNS、hosts 等）；禁止在本机安装服务类软件（PG/Redis 等一律走容器，`scripts/dev-deps.sh`）；镜像拉取走 public.ecr.aws。

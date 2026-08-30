@@ -1,0 +1,222 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, request_id, model_name, log_type, status,\n                  prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,\n                  amount_micro, original_amount_micro, discount_micro,\n                  pricing_snapshot, error_code, latency_ms, is_stream, created_at\n           FROM billing_records\n           WHERE user_id = $1 AND ($2::bigint IS NULL OR id < $2)\n           ORDER BY id DESC LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "log_type",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "log_type"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "prompt_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "prompt_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "cached_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "cached_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "completion_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "completion_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "reasoning_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "reasoning_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "original_amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "original_amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "discount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "discount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "pricing_snapshot",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pricing_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "error_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "error_code"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "latency_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "latency_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "is_stream",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "is_stream"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "fcdff27a3354358eb30eebbf1f255073039ad7ac87fdf0954050c7d9c5e76682"
+}

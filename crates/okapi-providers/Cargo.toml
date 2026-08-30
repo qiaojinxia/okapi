@@ -1,0 +1,24 @@
+[package]
+name = "okapi-providers"
+version.workspace = true
+edition.workspace = true
+description = "Okapi 上游适配：Provider trait + 按方向拆的协议转换（M1+）"
+
+[dependencies]
+okapi-api = { workspace = true }
+okapi-domain = { workspace = true }
+
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+eventsource-stream = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

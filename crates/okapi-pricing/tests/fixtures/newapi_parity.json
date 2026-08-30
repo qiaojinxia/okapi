@@ -1,0 +1,128 @@
+[
+  {
+    "name": "base_ratio_one",
+    "model": { "mode": "ratio", "model_ratio": "1", "completion_ratio": "1", "cache_ratio": "1" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 1000 },
+    "expect": { "micro": 4000, "original": 4000, "discount": 0, "quota": 2000 }
+  },
+  {
+    "name": "gpt4o_three_ratios",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "1" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 500 },
+    "expect": { "micro": 7500, "original": 7500, "discount": 0, "quota": 3750 }
+  },
+  {
+    "name": "cache_ratio_half",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "0.5" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 800, "completion": 0 },
+    "expect": { "micro": 1500, "original": 1500, "discount": 0, "quota": 750 }
+  },
+  {
+    "name": "group_ratio_vip",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "1" },
+    "group_ratio": "0.9",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 500 },
+    "expect": { "micro": 6750, "original": 6750, "discount": 0, "quota": 3375 }
+  },
+  {
+    "name": "user_multiplier_not_in_list_price",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "1" },
+    "group_ratio": "0.9",
+    "user_multiplier": "0.8",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 500 },
+    "expect": { "micro": 5400, "original": 6750, "discount": 1350, "quota": 2700 }
+  },
+  {
+    "name": "night_discount_rule",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "1" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [
+      { "code": "night", "kind": "time_based", "multiplier": "0.8", "start_minute": 1320, "end_minute": 360 }
+    ],
+    "ctx": { "monthly_tokens": 0, "local_minute": 1380, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 500 },
+    "expect": { "micro": 6000, "original": 7500, "discount": 1500, "quota": 3000 }
+  },
+  {
+    "name": "per_call_with_group",
+    "model": { "mode": "per_call", "price_usd": "0.1" },
+    "group_ratio": "0.9",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 123, "cached": 0, "completion": 456 },
+    "expect": { "micro": 90000, "original": 90000, "discount": 0, "quota": 45000 }
+  },
+  {
+    "name": "free_model_zero_ratio",
+    "model": { "mode": "ratio", "model_ratio": "0", "completion_ratio": "1", "cache_ratio": "1" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 1000 },
+    "expect": { "micro": 0, "original": 0, "discount": 0, "quota": 0 }
+  },
+  {
+    "name": "free_group_zero_ratio",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "1" },
+    "group_ratio": "0",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 500 },
+    "expect": { "micro": 0, "original": 0, "discount": 0, "quota": 0 }
+  },
+  {
+    "name": "tiered_high_bracket",
+    "model": { "mode": "tiered", "completion_ratio": "1", "cache_ratio": "1", "tiers": "0:2.5,128000:5" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 200000, "cached": 0, "completion": 0 },
+    "expect": { "micro": 1000000, "original": 1000000, "discount": 0, "quota": 500000 }
+  },
+  {
+    "name": "floor_truncation_parity",
+    "model": { "mode": "ratio", "model_ratio": "0.3", "completion_ratio": "1", "cache_ratio": "1" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "rules": [],
+    "ctx": { "monthly_tokens": 0, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 5, "cached": 0, "completion": 0 },
+    "expect": { "micro": 3, "original": 3, "discount": 0, "quota": 1 }
+  },
+  {
+    "name": "override_and_stack",
+    "model": { "mode": "ratio", "model_ratio": "1.25", "completion_ratio": "4", "cache_ratio": "1" },
+    "group_ratio": "1",
+    "user_multiplier": "1",
+    "user_override": { "mode": "ratio", "model_ratio": "1", "completion_ratio": "1", "cache_ratio": "1" },
+    "rules": [
+      { "code": "promo", "kind": "discount", "multiplier": "0.95" },
+      { "code": "vol", "kind": "volume", "multiplier": "0.9", "min_monthly_tokens": 1000000 }
+    ],
+    "ctx": { "monthly_tokens": 2000000, "local_minute": 720, "surge": false },
+    "usage": { "prompt": 1000, "cached": 0, "completion": 0 },
+    "expect": { "micro": 1710, "original": 2000, "discount": 290, "quota": 855 }
+  }
+]

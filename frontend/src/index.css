@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 设计令牌（亮色缺省；暗色经 .dark 覆盖 CSS 变量，组件禁硬编码色值） */
+@theme {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-card: var(--card);
+  --color-card-foreground: var(--fg);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-fg);
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-fg);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --radius-lg: 0.625rem;
+  --radius-md: 0.5rem;
+}
+
+:root {
+  --bg: oklch(0.985 0.002 250);
+  --fg: oklch(0.2 0.02 260);
+  --card: oklch(1 0 0);
+  --muted: oklch(0.955 0.005 250);
+  --muted-fg: oklch(0.5 0.02 260);
+  --border: oklch(0.91 0.005 250);
+  --primary: oklch(0.55 0.18 260);
+  --primary-fg: oklch(0.99 0 0);
+  --destructive: oklch(0.6 0.2 25);
+  --success: oklch(0.6 0.15 155);
+}
+
+.dark {
+  --bg: oklch(0.17 0.015 260);
+  --fg: oklch(0.93 0.005 250);
+  --card: oklch(0.21 0.015 260);
+  --muted: oklch(0.26 0.015 260);
+  --muted-fg: oklch(0.65 0.01 255);
+  --border: oklch(0.3 0.015 260);
+  --primary: oklch(0.68 0.16 260);
+  --primary-fg: oklch(0.15 0.02 260);
+  --destructive: oklch(0.65 0.2 25);
+  --success: oklch(0.68 0.14 155);
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+}

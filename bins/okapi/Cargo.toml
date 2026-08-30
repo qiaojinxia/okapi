@@ -1,0 +1,59 @@
+[package]
+name = "okapi"
+version.workspace = true
+edition.workspace = true
+description = "Okapi 单二进制多角色入口：gateway / console / worker / all"
+
+[dependencies]
+okapi-api = { workspace = true }
+okapi-domain = { workspace = true }
+okapi-ledger = { workspace = true }
+okapi-pricing = { workspace = true }
+okapi-providers = { workspace = true }
+okapi-store = { workspace = true }
+
+anyhow = { workspace = true }
+async-nats = { workspace = true }
+base32 = { workspace = true }
+base64 = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+fred = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+moka = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+sqlx.workspace = true
+chrono.workspace = true
+
+rust-embed = { workspace = true, optional = true }
+mime_guess = { workspace = true, optional = true }
+md-5 = { workspace = true }
+tokio-tungstenite = { workspace = true }
+reqwest = { workspace = true }
+
+[features]
+# 发布形态：前端产物嵌入二进制（构建前需 `pnpm -C frontend build`）
+embed-web = ["dep:rust-embed", "dep:mime_guess"]
+
+[dev-dependencies]
+reqwest = { workspace = true }
+bcrypt = { workspace = true }
+
+[lints]
+workspace = true

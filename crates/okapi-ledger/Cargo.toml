@@ -1,0 +1,23 @@
+[package]
+name = "okapi-ledger"
+version.workspace = true
+edition.workspace = true
+description = "Okapi 账本：Redis Lua 预扣/结算 + PG 事件溯源 + outbox（M1）"
+
+[dependencies]
+okapi-domain = { workspace = true }
+okapi-pricing = { workspace = true }
+okapi-store = { workspace = true }
+
+chrono = { workspace = true }
+fred = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

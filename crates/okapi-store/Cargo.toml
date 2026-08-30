@@ -1,0 +1,31 @@
+[package]
+name = "okapi-store"
+version.workspace = true
+edition.workspace = true
+description = "Okapi 存储薄封装：sqlx / fred（M1）；clickhouse / async-nats（M2）"
+
+[dependencies]
+okapi-domain = { workspace = true }
+
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+bcrypt = { workspace = true }
+base32 = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+uuid = { workspace = true }
+
+chrono = { workspace = true }
+fred = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

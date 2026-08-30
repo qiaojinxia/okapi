@@ -1,0 +1,98 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # 编译期 SQL 校验走 .sqlx 离线快照；集成测试运行期连接 services
+  SQLX_OFFLINE: "true"
+  DATABASE_URL: postgres://okapi:okapi_dev@localhost:5432/okapi
+  OKAPI_REDIS_URL: redis://localhost:6379
+  OKAPI_CLICKHOUSE_URL: http://okapi:okapi_dev@localhost:8123
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: okapi
+          POSTGRES_PASSWORD: okapi_dev
+          POSTGRES_DB: okapi
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U okapi"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_DB: okapi
+          CLICKHOUSE_USER: okapi
+          CLICKHOUSE_PASSWORD: okapi_dev
+        ports:
+          - 8123:8123
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: 格式检查
+        run: cargo fmt --all --check
+      - name: 计费红线守卫
+        run: bash scripts/guard-no-float.sh
+      - name: clippy（-D warnings）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 测试（对拍 + proptest + M1 集成）
+        run: cargo test --workspace
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - name: 构建（vite + tsc）
+        run: pnpm build
+        working-directory: frontend
+      - name: lint（oxlint）
+        run: pnpm lint
+        working-directory: frontend
+      - name: i18n 红线守卫
+        run: bash scripts/guard-i18n.sh

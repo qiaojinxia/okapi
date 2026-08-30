@@ -1,0 +1,50 @@
+// 金额统一入口：后端一律 micro-USD 整数（$1 = 1_000_000），
+// quota 视图 = USD × 500_000（仅展示层，DESIGN §3）。组件禁手写换算。
+
+const QUOTA_PER_USD = 500_000
+
+export function formatMoney(micro: number, locale: string): string {
+  const usd = micro / 1_000_000
+  return new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(usd)
+}
+
+export function formatQuota(micro: number, locale: string): string {
+  const quota = (micro / 1_000_000) * QUOTA_PER_USD
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(quota)
+}
+
+export function formatCount(n: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { notation: n >= 100_000 ? 'compact' : 'standard' }).format(n)
+}
+
+export interface SimulatorInput {
+  modelRatio: number
+  completionRatio: number
+  cacheRatio: number
+  /// 缓存写入倍率（Anthropic cache_creation；缺省 1 = 按常规输入计）。
+  cacheWriteRatio?: number
+  groupRatio: number
+  promptTokens: number
+  cachedTokens: number
+  cacheWriteTokens?: number
+  completionTokens: number
+}
+
+/// 定价模拟器（展示层估算；权威语义在后端 pricing 引擎）：
+/// (常规×1 + 缓存读×cache + 缓存写×cacheWrite + 补全×completion) × model × group × $2/1M。
+/// prompt 三段互斥，与后端 `TokenUsage::prompt_uncached()` 同口径。
+export function simulateChargeMicro(input: SimulatorInput): number {
+  const cached = Math.min(input.cachedTokens, input.promptTokens)
+  const cacheWrite = Math.min(input.cacheWriteTokens ?? 0, input.promptTokens - cached)
+  const weighted =
+    (input.promptTokens - cached - cacheWrite) +
+    cached * input.cacheRatio +
+    cacheWrite * (input.cacheWriteRatio ?? 1) +
+    input.completionTokens * input.completionRatio
+  return Math.round(weighted * input.modelRatio * input.groupRatio * 2)
+}

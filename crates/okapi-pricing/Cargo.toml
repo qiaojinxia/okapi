@@ -1,0 +1,19 @@
+[package]
+name = "okapi-pricing"
+version.workspace = true
+edition.workspace = true
+description = "Okapi 定价域：PriceBook 编译器、修饰器栈、计费引擎（纯乘加）、ArcSwap 热更"
+
+[dependencies]
+okapi-domain = { workspace = true }
+
+arc-swap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

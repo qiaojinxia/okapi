@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_outbox (topic, payload) VALUES ('billing.completed', $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4b8fcc807eaea6960a8cfda85d791894254631ec1c01b1fe7dd9055cbb3e606"
+}

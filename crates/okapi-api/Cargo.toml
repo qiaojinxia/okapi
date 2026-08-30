@@ -1,0 +1,16 @@
+[package]
+name = "okapi-api"
+version.workspace = true
+edition.workspace = true
+description = "Okapi API 层：OpenAI 兼容 DTO + error_code 契约（M1）"
+
+[dependencies]
+okapi-domain = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

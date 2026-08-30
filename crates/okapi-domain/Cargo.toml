@@ -1,0 +1,12 @@
+[package]
+name = "okapi-domain"
+version.workspace = true
+edition.workspace = true
+description = "Okapi 领域基元：金额（i64 micro-USD）、token 用量、计费状态机、ID newtypes"
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

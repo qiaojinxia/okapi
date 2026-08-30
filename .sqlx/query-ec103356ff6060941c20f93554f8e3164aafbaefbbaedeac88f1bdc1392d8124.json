@@ -1,0 +1,95 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT up.user_id,\n               m.model_name,\n               up.override_kind,\n               (up.custom_model_ratio * 1000000)::bigint AS custom_model_ratio_scaled,\n               (up.custom_completion_ratio * 1000000)::bigint AS custom_completion_ratio_scaled,\n               (up.custom_cache_ratio * 1000000)::bigint AS custom_cache_ratio_scaled,\n               up.custom_input_per_1m_micro,\n               up.custom_output_per_1m_micro\n        FROM user_pricing up\n        JOIN models m ON m.id = up.model_id\n        WHERE up.expires_at IS NULL OR up.expires_at > now()\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_pricing",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "override_kind",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_pricing",
+            "name": "override_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "custom_model_ratio_scaled",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "custom_completion_ratio_scaled",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "custom_cache_ratio_scaled",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "custom_input_per_1m_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_pricing",
+            "name": "custom_input_per_1m_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "custom_output_per_1m_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_pricing",
+            "name": "custom_output_per_1m_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "ec103356ff6060941c20f93554f8e3164aafbaefbbaedeac88f1bdc1392d8124"
+}

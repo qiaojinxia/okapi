@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oauth_identities (provider, subject, user_id, display)\n           VALUES ($1, $2, $3, $4)\n           ON CONFLICT (provider, subject) DO NOTHING RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "oauth_identities",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dc6ae72fba4bdeb2a4b27bace8709e2e74b0701f14857ab56c75b47e12d0e61a"
+}

@@ -1,0 +1,17 @@
+{
+  "ignorePatterns": [
+    "dist",
+    "node_modules",
+    "src/routeTree.gen.ts"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "src/routes/**"
+      ],
+      "rules": {
+        "react/only-export-components": "off"
+      }
+    }
+  ]
+}

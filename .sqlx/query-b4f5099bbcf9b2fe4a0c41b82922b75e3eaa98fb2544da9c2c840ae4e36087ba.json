@@ -1,0 +1,148 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT user_id, api_key_id, group_code, model_name, channel_id, channel_key_id,\n               amount_micro, original_amount_micro, discount_micro, is_stream, node\n        FROM billing_records\n        WHERE request_id = $1 AND status = 20\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "api_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "api_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "channel_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "channel_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "original_amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "original_amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "discount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "discount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "is_stream",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "is_stream"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "node",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "node"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b4f5099bbcf9b2fe4a0c41b82922b75e3eaa98fb2544da9c2c840ae4e36087ba"
+}
