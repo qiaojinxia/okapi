@@ -52,6 +52,9 @@ pub struct ModelListRow {
     pub completion_ratio: Option<String>,
     pub cache_ratio: Option<String>,
     pub cache_write_ratio: Option<String>,
+    pub audio_ratio: Option<String>,
+    pub audio_completion_ratio: Option<String>,
+    pub image_ratio: Option<String>,
     pub per_call_price_micro: Option<i64>,
     pub tier_expr: Option<String>,
     pub tier_ratios: Option<serde_json::Value>,
@@ -69,6 +72,9 @@ pub async fn list_models(pool: &PgPool) -> Result<Vec<ModelListRow>, StoreError>
                p.completion_ratio::text  AS completion_ratio,
                p.cache_ratio::text       AS cache_ratio,
                p.cache_write_ratio::text AS cache_write_ratio,
+               p.audio_ratio::text            AS audio_ratio,
+               p.audio_completion_ratio::text AS audio_completion_ratio,
+               p.image_ratio::text            AS image_ratio,
                p.per_call_price_micro, p.tier_expr, p.tier_ratios
         FROM models m
         LEFT JOIN model_pricing p ON p.model_id = m.id
@@ -92,6 +98,9 @@ pub async fn list_models(pool: &PgPool) -> Result<Vec<ModelListRow>, StoreError>
             completion_ratio: r.completion_ratio,
             cache_ratio: r.cache_ratio,
             cache_write_ratio: r.cache_write_ratio,
+            audio_ratio: r.audio_ratio,
+            audio_completion_ratio: r.audio_completion_ratio,
+            image_ratio: r.image_ratio,
             per_call_price_micro: r.per_call_price_micro,
             tier_expr: r.tier_expr,
             tier_ratios: r.tier_ratios,

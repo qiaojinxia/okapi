@@ -554,10 +554,25 @@ new-api `web/src/features/pricing/types.ts` 的 `PricingModel` 完整价格面�
 （本站命名 `cache_write_ratio`，见 §13-M4 与 DESIGN §3.2）：Anthropic 缓存**写入**官方
 1.25×@5m TTL，与缓存**读取** 0.1× 方向相反；单轴无法同时表达，写入段被混入常规输入按 1.0×
 计费，实测每笔漏收 ~20%（回归断言锁定 2250 micro 差额）。
-余下 image / audio / audio_completion 三轴的缺失同属计费正确性问题（gpt-4o-audio 音频输入
-$40/1M 是文本 $2.5/1M 的 16 倍，统一按 model_ratio 计会严重少收）——**列为下一批**，
-因其还需先在 usage 解析层引入模态 token 细分（OpenAI `input_token_details`、
-Gemini `promptTokensDetails.modality`），改动面比缓存轴大一档。
+余下 image / audio / audio_completion 三轴**已于 2026-08-31 补齐**（迁移 0014）：
+以 gpt-4o-audio-preview 官方价对拍（text in $2.5/1M、audio in $40/1M、audio out $80/1M
+→ model 1.25 / completion 4 / audio 16 / audio_completion 2），逐段核算 178000 micro
+与引擎输出完全一致；同一请求若不分轴只收 35000 micro，**漏收 80%**（断言锁定差额）。
+
+usage 解析无需起别名：`PromptTokensDetails` 的 `audio_tokens` / `image_tokens` /
+`cache_write_tokens` 与 OpenAI 官方字段（openai-python `completion_usage.py`）**同名**，
+上游响应可直接反序列化。Anthropic 无模态细分（图片并入 input_tokens）；
+Gemini 的 `promptTokensDetails` 是带 modality 的数组，解析待接入（当前填 0，
+即按文本计——保守方向，不会少收）。
+
+实现中被测试抓出一处语义陷阱并修正：**模态轴缺省 1.0 并非零影响**。文本输出走
+completion_ratio（如 4×），而音频输出走 audio × audio_completion（缺省 1×），
+会把既有音频输出悄悄打折。故音频输出倍率在两轴均未配置时**回落为 completion_ratio**，
+用例断言"三轴全 1 时账单与无模态分轴完全一致"。
+
+另一处设计决策：用户专属**绝对价**覆盖时，模态轴从模型级**继承**而非退化为 1.0——
+audio_ratio 表达"音频相对文本的倍数"，属模型固有属性（gpt-4o-audio 音频恒为文本 16×），
+不因用户而变；若退化为 1.0，签了专属价的大客户用音频会严重少收。
 另 `usable_group`（每模型的可用分组清单及倍率）我们语义已由渠道可见性矩阵承载，
 仅公开价格页未按模型展开（现为全局分组列表 + 按分组查看实价）——展示层 backlog。
 

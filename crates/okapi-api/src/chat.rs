@@ -172,43 +172,66 @@ pub struct UsageProbe {
     pub completion_tokens_details: CompletionTokensDetails,
 }
 
+/// 字段名与 OpenAI 官方 `prompt_tokens_details` 一致（openai-python
+/// `completion_usage.py`），故 OpenAI 系响应可直接反序列化。
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 pub struct PromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: u32,
-    /// 缓存**写入** token。OpenAI 口径无此字段（隐式缓存不单独计价），
-    /// 由 Anthropic 方向的 `cache_creation_input_tokens` 填入。
+    /// 缓存**写入** token。官方亦有此字段；Anthropic 方向由
+    /// `cache_creation_input_tokens` 映射填入。
     #[serde(default)]
     pub cache_write_tokens: u32,
+    /// 音频输入 token（gpt-4o-audio 系；官方单价约为文本 16×）。
+    #[serde(default)]
+    pub audio_tokens: u32,
+    /// 图片输入 token。
+    #[serde(default)]
+    pub image_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
 pub struct CompletionTokensDetails {
     #[serde(default)]
     pub reasoning_tokens: u32,
+    /// 音频输出 token（官方字段同名）。
+    #[serde(default)]
+    pub audio_tokens: u32,
 }
 
 impl UsageProbe {
     /// 转领域用量。
     ///
-    /// 脏数据收敛（fail-safe 而非 fail-closed：上游 usage 不可信，但不能因此拒绝已完成的请求）：
-    /// cached 先收敛到 prompt，cache_write 再收敛到剩余额度，保证
-    /// `cached + cache_write <= prompt` 恒成立、常规输入段不被截断。
+    /// 脏数据收敛（fail-safe 而非 fail-closed：上游 usage 不可信，但不能因此拒绝
+    /// 已完成的请求）：prompt 侧各段按 cached → cache_write → audio → image 的顺序
+    /// 依次收敛到剩余额度，保证 `Σ段 ≤ prompt_tokens` 恒成立、常规文本段不被截断。
+    ///
+    /// 收敛顺序即优先级：先保住高倍率的缓存写入与音频段，宁可挤压常规文本段——
+    /// 反向挤压会让高倍率段被低估，造成少收。
     #[must_use]
     pub fn to_token_usage(self) -> TokenUsage {
-        let cached = self
-            .prompt_tokens_details
-            .cached_tokens
-            .min(self.prompt_tokens);
-        let cache_write = self
-            .prompt_tokens_details
-            .cache_write_tokens
-            .min(self.prompt_tokens - cached);
+        let d = self.prompt_tokens_details;
+        let mut left = self.prompt_tokens;
+        let mut take = |n: u32| {
+            let v = n.min(left);
+            left -= v;
+            v
+        };
+        let cached = take(d.cached_tokens);
+        let cache_write = take(d.cache_write_tokens);
+        let audio_in = take(d.audio_tokens);
+        let image_in = take(d.image_tokens);
         TokenUsage {
             prompt_tokens: self.prompt_tokens,
             cached_tokens: cached,
             cache_write_tokens: cache_write,
+            audio_prompt_tokens: audio_in,
+            image_prompt_tokens: image_in,
             completion_tokens: self.completion_tokens,
+            audio_completion_tokens: self
+                .completion_tokens_details
+                .audio_tokens
+                .min(self.completion_tokens),
             reasoning_tokens: self
                 .completion_tokens_details
                 .reasoning_tokens

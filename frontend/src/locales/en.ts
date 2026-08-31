@@ -127,6 +127,10 @@ export default {
     enter: 'Enter console',
   },
   admin: {
+    audioRatio: 'Audio input ratio (official 16)',
+    audioCompletionRatio: 'Audio output ratio (stacked, official 2)',
+    audioRatioShort: 'Audio',
+    imageRatio: 'Image ratio',
     channelKeys: 'Channel key parameters',
     channelKeysHint: 'Weight drives weighted-random pick; leave concurrency blank for unlimited. Failure counts and cooldown are maintained by the state machine.',
     keyWeight: 'Weight',
@@ -334,6 +338,9 @@ export default {
     rolePermissions: 'Permissions (comma separated)',
   },
   pricing: {
+    audioInPrice: 'Audio in',
+    audioOutPrice: 'Audio out',
+    imageInPrice: 'Image in',
     title: 'Model pricing',
     baseNote: 'Ratio base: 1.0 = $2 / 1M tokens. Charge = usage × model ratio × group ratio × personal multiplier.',
     model: 'Model',

@@ -120,6 +120,10 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
                 output_per_1m,
                 cache_ratio,
                 cache_write_ratio,
+                // 模态轴从模型级继承：audio_ratio 是"音频相对文本的倍数"，属模型固有
+                // 属性（gpt-4o-audio 音频恒为文本 16×），不因用户而变。专属绝对价只
+                // 覆盖文本单价；若退化为 1.0，专属价大客户用音频会严重少收。
+                models.get(&entry.model).map(modal_axes),
             )?,
         };
         if overrides
@@ -160,6 +164,26 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
 }
 
 /// absolute 专属价 → 倍率三元组（DESIGN §3.2 换算，整数定点，floor）。
+/// 从已编译的模型定价里取出三条模态轴（per_call 模式无 token 轴 → 全 1.0）。
+fn modal_axes(mode: &PricingMode) -> (RatioFp, RatioFp, RatioFp) {
+    match mode {
+        PricingMode::Ratio {
+            audio_ratio,
+            audio_completion_ratio,
+            image_ratio,
+            ..
+        }
+        | PricingMode::Tiered {
+            audio_ratio,
+            audio_completion_ratio,
+            image_ratio,
+            ..
+        } => (*audio_ratio, *audio_completion_ratio, *image_ratio),
+        PricingMode::PerCall { .. } => (RatioFp::ONE, RatioFp::ONE, RatioFp::ONE),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn absolute_to_ratio(
     user: UserId,
     model: &ModelCode,
@@ -167,6 +191,8 @@ fn absolute_to_ratio(
     output_per_1m: Money,
     cache_ratio: RatioFp,
     cache_write_ratio: RatioFp,
+    // 模型级模态轴；None = 该模型无定价行（罕见，按 1.0 处理）
+    axes: Option<(RatioFp, RatioFp, RatioFp)>,
 ) -> Result<PricingMode, CompileError> {
     let input = input_per_1m.as_micros();
     let output = output_per_1m.as_micros();
@@ -200,11 +226,16 @@ fn absolute_to_ratio(
         .and_then(RatioFp::from_scaled)
         .ok_or_else(|| invalid("completion ratio out of range"))?;
 
+    let (audio_ratio, audio_completion_ratio, image_ratio) =
+        axes.unwrap_or((RatioFp::ONE, RatioFp::ONE, RatioFp::ONE));
     Ok(PricingMode::Ratio {
         model_ratio,
         completion_ratio,
         cache_ratio,
         cache_write_ratio,
+        audio_ratio,
+        audio_completion_ratio,
+        image_ratio,
     })
 }
 
@@ -291,6 +322,7 @@ mod tests {
             Money::from_micros(10_000_000),
             RatioFp::ONE,
             RatioFp::ONE,
+            None,
         )?;
         let PricingMode::Ratio {
             model_ratio,
@@ -379,6 +411,9 @@ mod tests {
                 completion_ratio: RatioFp::ONE,
                 cache_ratio: RatioFp::ONE,
                 cache_write_ratio: RatioFp::ONE,
+                audio_ratio: RatioFp::ONE,
+                audio_completion_ratio: RatioFp::ONE,
+                image_ratio: RatioFp::ONE,
             },
             tier_ratios: Vec::new(),
         };

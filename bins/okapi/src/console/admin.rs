@@ -817,6 +817,16 @@ pub struct UpsertModelReq {
     /// 兼容 new-api 键名 `create_cache_ratio`。
     #[serde(default = "default_one", alias = "create_cache_ratio")]
     pub cache_write_ratio: String,
+    /// 音频输入倍率（相对文本；gpt-4o-audio 官方 16）。
+    #[serde(default = "default_one")]
+    pub audio_ratio: String,
+    /// 音频输出倍率（叠乘在 audio_ratio 之上；官方 2）。缺省 1 且 audio_ratio 也为 1 时，
+    /// 音频输出回落到 completion_ratio（详见 DESIGN §3.2）。
+    #[serde(default = "default_one")]
+    pub audio_completion_ratio: String,
+    /// 图片输入倍率（相对文本）。
+    #[serde(default = "default_one")]
+    pub image_ratio: String,
     /// service_tier 档位倍率（如 {"flex":"0.5","priority":"2.0"}；
     /// None=不改动，空对象=清除，DESIGN §3-4.5）。
     #[serde(default)]
@@ -839,6 +849,9 @@ pub async fn upsert_model(
         &req.completion_ratio,
         &req.cache_ratio,
         &req.cache_write_ratio,
+        &req.audio_ratio,
+        &req.audio_completion_ratio,
+        &req.image_ratio,
     ] {
         if literal.parse::<okapi_pricing::RatioFp>().is_err() {
             return Err(AppError::bad_request().with_param("ratio"));
@@ -847,10 +860,15 @@ pub async fn upsert_model(
     let model_id = okapi_store::admin::upsert_model_ratio(
         &state.pg,
         &req.model_name,
-        &req.model_ratio,
-        &req.completion_ratio,
-        &req.cache_ratio,
-        &req.cache_write_ratio,
+        okapi_store::admin::RatioAxes {
+            model: &req.model_ratio,
+            completion: &req.completion_ratio,
+            cache: &req.cache_ratio,
+            cache_write: &req.cache_write_ratio,
+            audio: &req.audio_ratio,
+            audio_completion: &req.audio_completion_ratio,
+            image: &req.image_ratio,
+        },
     )
     .await?;
     if let Some(tiers) = &req.tier_ratios {
@@ -887,6 +905,9 @@ pub async fn upsert_model(
             "completion_ratio": req.completion_ratio,
             "cache_ratio": req.cache_ratio,
             "cache_write_ratio": req.cache_write_ratio,
+            "audio_ratio": req.audio_ratio,
+            "audio_completion_ratio": req.audio_completion_ratio,
+            "image_ratio": req.image_ratio,
         }),
     )
     .await;
@@ -1585,6 +1606,15 @@ pub struct ImportNewApiReq {
     /// new-api 缓存**写入**倍率（其键名为 create_cache_ratio）。
     #[serde(default, alias = "cache_write_ratio")]
     pub create_cache_ratio: serde_json::Map<String, Value>,
+    /// new-api 音频输入倍率（相对文本）。
+    #[serde(default)]
+    pub audio_ratio: serde_json::Map<String, Value>,
+    /// new-api 音频输出倍率（叠乘在 audio_ratio 之上）。
+    #[serde(default)]
+    pub audio_completion_ratio: serde_json::Map<String, Value>,
+    /// new-api 图片输入倍率。
+    #[serde(default)]
+    pub image_ratio: serde_json::Map<String, Value>,
     /// new-api 按次价（USD）。
     #[serde(default)]
     pub model_price: serde_json::Map<String, Value>,
@@ -1631,10 +1661,26 @@ pub async fn import_newapi_pricing(
             .get(model)
             .and_then(ratio_literal)
             .unwrap_or_else(|| "1".to_owned());
+        let pick = |m: &serde_json::Map<String, Value>| {
+            m.get(model)
+                .and_then(ratio_literal)
+                .unwrap_or_else(|| "1".to_owned())
+        };
+        let audio = pick(&req.audio_ratio);
+        let audio_completion = pick(&req.audio_completion_ratio);
+        let image = pick(&req.image_ratio);
         // 复用定价域解析器做入库前校验（纯整数定点，禁浮点）
-        if [&model_ratio, &completion, &cache, &cache_write]
-            .iter()
-            .any(|s| s.parse::<okapi_pricing::RatioFp>().is_err())
+        if [
+            &model_ratio,
+            &completion,
+            &cache,
+            &cache_write,
+            &audio,
+            &audio_completion,
+            &image,
+        ]
+        .iter()
+        .any(|s| s.parse::<okapi_pricing::RatioFp>().is_err())
         {
             skipped.push(model.clone());
             continue;
@@ -1642,10 +1688,15 @@ pub async fn import_newapi_pricing(
         okapi_store::admin::upsert_model_ratio(
             &state.pg,
             model,
-            &model_ratio,
-            &completion,
-            &cache,
-            &cache_write,
+            okapi_store::admin::RatioAxes {
+                model: &model_ratio,
+                completion: &completion,
+                cache: &cache,
+                cache_write: &cache_write,
+                audio: &audio,
+                audio_completion: &audio_completion,
+                image: &image,
+            },
         )
         .await?;
         imported += 1;

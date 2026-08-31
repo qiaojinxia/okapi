@@ -5,13 +5,41 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 /// 模型 + 倍率定价 upsert（倍率以十进制字符串精确入库）。返回 model_id。
+/// 倍率制的全部 token 侧轴（十进制字符串，精确入库；禁浮点）。
+///
+/// 用结构体而非位置参数：轴已达七条，位置参数极易错位——把 audio 填进 image
+/// 不会报错，只会静默错价。
+#[derive(Debug, Clone, Copy)]
+pub struct RatioAxes<'a> {
+    pub model: &'a str,
+    pub completion: &'a str,
+    pub cache: &'a str,
+    pub cache_write: &'a str,
+    pub audio: &'a str,
+    pub audio_completion: &'a str,
+    pub image: &'a str,
+}
+
+impl<'a> RatioAxes<'a> {
+    /// 只给三层基础倍率，其余轴取 1.0（缺省 = 按文本计，语义见 DESIGN §3.2）。
+    #[must_use]
+    pub const fn basic(model: &'a str, completion: &'a str, cache: &'a str) -> Self {
+        Self {
+            model,
+            completion,
+            cache,
+            cache_write: "1",
+            audio: "1",
+            audio_completion: "1",
+            image: "1",
+        }
+    }
+}
+
 pub async fn upsert_model_ratio(
     pool: &PgPool,
     model_name: &str,
-    model_ratio: &str,
-    completion_ratio: &str,
-    cache_ratio: &str,
-    cache_write_ratio: &str,
+    axes: RatioAxes<'_>,
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
     let model_id = sqlx::query_scalar!(
@@ -27,22 +55,30 @@ pub async fn upsert_model_ratio(
     sqlx::query!(
         r#"
         INSERT INTO model_pricing
-            (model_id, pricing_mode, model_ratio, completion_ratio, cache_ratio, cache_write_ratio)
+            (model_id, pricing_mode, model_ratio, completion_ratio, cache_ratio,
+             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio)
         VALUES ($1, 'ratio', ($2::text)::numeric, ($3::text)::numeric, ($4::text)::numeric,
-                ($5::text)::numeric)
+                ($5::text)::numeric, ($6::text)::numeric, ($7::text)::numeric,
+                ($8::text)::numeric)
         ON CONFLICT (model_id) DO UPDATE SET
             pricing_mode = 'ratio',
             model_ratio = EXCLUDED.model_ratio,
             completion_ratio = EXCLUDED.completion_ratio,
             cache_ratio = EXCLUDED.cache_ratio,
             cache_write_ratio = EXCLUDED.cache_write_ratio,
+            audio_ratio = EXCLUDED.audio_ratio,
+            audio_completion_ratio = EXCLUDED.audio_completion_ratio,
+            image_ratio = EXCLUDED.image_ratio,
             updated_at = now()
         "#,
         model_id,
-        model_ratio,
-        completion_ratio,
-        cache_ratio,
-        cache_write_ratio
+        axes.model,
+        axes.completion,
+        axes.cache,
+        axes.cache_write,
+        axes.audio,
+        axes.audio_completion,
+        axes.image
     )
     .execute(&mut *tx)
     .await?;

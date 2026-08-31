@@ -116,13 +116,22 @@ new-api（及其上游 one-api、衍生的 one-hub/done-hub 等）已经把"倍�
 基准价 base_unit = $2 / 1M tokens（与 new-api/one-api 对齐）
 
 token 费用 = base_unit × model_ratio
-           × ( prompt_uncached                              ← 常规输入（三段互斥）
-             + cached_tokens      × cache_ratio             ← 缓存读取（命中折扣）
-             + cache_write_tokens × cache_write_ratio       ← 缓存写入（创建加价）
-             + completion_tokens  × completion_ratio )
+           × ( prompt_uncached                              ← 常规文本输入（五段互斥）
+             + cached_tokens          × cache_ratio         ← 缓存读取（命中折扣）
+             + cache_write_tokens     × cache_write_ratio   ← 缓存写入（创建加价）
+             + audio_prompt_tokens    × audio_ratio         ← 音频输入（官方 16×）
+             + image_prompt_tokens    × image_ratio         ← 图片输入
+             + text_completion        × completion_ratio    ← 文本输出（两段互斥）
+             + audio_completion_tokens× audio_out_ratio )   ← 音频输出（见下）
            × group_ratio
            × user_multiplier
            × Π rule_modifier_i        ← 规则修饰器栈（可为空）
+
+其中 audio_out_ratio = audio_ratio × audio_completion_ratio（与 new-api 同语义：
+音频输出相对音频输入再乘一档）；**但两轴均未配置（都是 1.0）时回落为 completion_ratio**
+——否则文本输出按 completion_ratio（如 4×）而音频输出按 1× 计，会把既有音频输出
+悄悄打折，与"模态轴缺省应零影响"的约定相悖（回归断言见 parity.rs
+`openai_audio_official_pricing_parity`）。
 
 按次费用   = per_call_price × group_ratio × user_multiplier × Π rule_modifier_i
 媒体/时长  = media_price × 数量 × group_ratio × …（同上）
@@ -132,14 +141,28 @@ token 费用 = base_unit × model_ratio
 倍率与绝对价换算（无损、双向）：
 
 ```
-model_ratio       = input_price_per_1M / 2
-completion_ratio  = output_price_per_1M / input_price_per_1M
-cache_ratio       = cache_read_price  / input_price
-cache_write_ratio = cache_write_price / input_price
+model_ratio            = input_price_per_1M / 2
+completion_ratio       = output_price_per_1M / input_price_per_1M
+cache_ratio            = cache_read_price  / input_price
+cache_write_ratio      = cache_write_price / input_price
+audio_ratio            = audio_input_price / input_price
+audio_completion_ratio = audio_output_price / audio_input_price
+image_ratio            = image_input_price / input_price
 例：GPT-4o            $2.5/$10 per 1M  →  model_ratio=1.25, completion_ratio=4
 例：claude-3-5-sonnet $3/$15，缓存读 $0.3、写 $3.75
     →  model_ratio=1.5, completion_ratio=5, cache_ratio=0.1, cache_write_ratio=1.25
 ```
+
+**模态分轴（多模态模型的必需项）**：多模态模型各模态**不同价**。以
+gpt-4o-audio-preview 官方价为例（text in $2.5/1M、text out $10/1M、audio in $40/1M、
+audio out $80/1M）：反解得 model_ratio=1.25、completion_ratio=4、audio_ratio=16、
+audio_completion_ratio=2。若不分轴而全按文本计，实测该场景漏收约 **80%**。
+
+**维度交叉的近似**：OpenAI 语义中"缓存"与"模态"是交叉维度（一段音频也可能被缓存命中），
+而计费需要互斥分段。本实现按互斥处理——音频/图片段先从 prompt 扣除，剩余再分
+常规/缓存读/缓存写。依据是当前各家缓存均只作用于文本（Anthropic cache_control 仅接受
+文本块、OpenAI 隐式缓存按文本前缀命中），交叉部分实测为 0；若未来上游开放多模态缓存，
+需改为二维矩阵定价并同步本节。
 
 **prompt 三段互斥（不可省的一段）**：`prompt_tokens` = 常规 + 缓存读 + 缓存写，
 `prompt_uncached = prompt − cached − cache_write`。缓存读打折（Anthropic 0.1×）与缓存写加价
@@ -202,7 +225,7 @@ pricing_snapshot（存入 billing_records，jsonb）示例：
 {
   "epoch": 1042,
   "model_ratio": 1.25, "completion_ratio": 4, "cache_ratio": 0.5,
-  "cache_write_ratio": 1.25,
+  "cache_write_ratio": 1.25, "audio_ratio": 16, "audio_completion_ratio": 2,
   "group": "vip", "group_ratio": 0.9,
   "user_multiplier": 1.0,
   "rules": [
@@ -232,6 +255,9 @@ model_pricing                    -- 真理源：倍率制
   completion_ratio    decimal(12,6)      -- 默认 1
   cache_ratio         decimal(6,4)       -- 缓存读取；默认 1（无缓存优惠）
   cache_write_ratio   decimal(6,4)       -- 缓存写入；默认 1（= 按常规输入计）
+  audio_ratio         decimal(12,6)      -- 音频输入（相对文本；gpt-4o-audio = 16）
+  audio_completion_ratio decimal(12,6)   -- 音频输出（叠乘在 audio_ratio 之上 = 2）
+  image_ratio         decimal(12,6)      -- 图片输入（相对文本）
   per_call_price_micro bigint            -- micro-USD/次（per_call 模式）
   tier_expr           text               -- 阶梯表达式（tiered 模式）
   media_prices        jsonb              -- image/audio/video 单价

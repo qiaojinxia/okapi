@@ -15,6 +15,12 @@ pub enum PricingMode {
         cache_ratio: RatioFp,
         /// 缓存**写入**倍率（Anthropic 官方 1.25×@5m；缺省 1.0 = 按常规输入计）。
         cache_write_ratio: RatioFp,
+        /// 音频输入倍率（gpt-4o-audio 官方 16×；缺省 1.0 = 按文本计）。
+        audio_ratio: RatioFp,
+        /// 音频输出倍率，**叠乘在 audio_ratio 之上**（与 new-api 同语义）。
+        audio_completion_ratio: RatioFp,
+        /// 图片输入倍率（缺省 1.0 = 按文本计）。
+        image_ratio: RatioFp,
     },
     /// 按次计费：`per_call_price × 分组 × 个人 × 规则`。
     PerCall { price: Money },
@@ -23,6 +29,9 @@ pub enum PricingMode {
         completion_ratio: RatioFp,
         cache_ratio: RatioFp,
         cache_write_ratio: RatioFp,
+        audio_ratio: RatioFp,
+        audio_completion_ratio: RatioFp,
+        image_ratio: RatioFp,
         tiers: TierTable,
     },
 }

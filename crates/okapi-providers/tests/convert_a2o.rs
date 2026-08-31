@@ -134,6 +134,8 @@ fn usage_chunk(prompt: u32, cached: u32, completion: u32) -> ChatEvent {
             prompt_tokens_details: okapi_api::PromptTokensDetails {
                 cached_tokens: cached,
                 cache_write_tokens: 0,
+                audio_tokens: 0,
+                image_tokens: 0,
             },
             completion_tokens_details: okapi_api::CompletionTokensDetails::default(),
         }),

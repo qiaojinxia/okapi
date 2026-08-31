@@ -816,10 +816,11 @@ pub async fn run_okapi_old(
                 okapi_store::admin::upsert_model_ratio(
                     pg,
                     code,
-                    &e6_to_dec(model_ratio_e6),
-                    &e6_to_dec(completion_e6),
-                    &e6_to_dec(cache_e6),
-                    "1",
+                    okapi_store::admin::RatioAxes::basic(
+                        &e6_to_dec(model_ratio_e6),
+                        &e6_to_dec(completion_e6),
+                        &e6_to_dec(cache_e6),
+                    ),
                 )
                 .await?;
             }

@@ -127,6 +127,10 @@ export default {
     enter: '进入控制台',
   },
   admin: {
+    audioRatio: '音频输入倍率（官方 16）',
+    audioCompletionRatio: '音频输出倍率（叠乘，官方 2）',
+    audioRatioShort: '音频倍率',
+    imageRatio: '图片倍率',
     channelKeys: '渠道 key 参数',
     channelKeysHint: '权重用于加权随机；并发上限留空 = 不限。失败计数与冷却由状态机自动维护。',
     keyWeight: '权重',
@@ -334,6 +338,9 @@ export default {
     rolePermissions: '权限点（逗号分隔）',
   },
   pricing: {
+    audioInPrice: '音频输入',
+    audioOutPrice: '音频输出',
+    imageInPrice: '图片输入',
     title: '模型价格',
     baseNote: '倍率基准：1.0 倍率 = $2 / 1M tokens；实际扣费 = 用量 × 模型倍率 × 分组倍率 × 个人系数。',
     model: '模型',

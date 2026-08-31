@@ -74,6 +74,24 @@ pub struct PricingSnapshot {
         serialize_with = "ser_ratio_opt"
     )]
     pub cache_write_ratio: Option<RatioFp>,
+    /// 音频输入倍率（仅本次含音频输入时出现）。
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "ser_ratio_opt"
+    )]
+    pub audio_ratio: Option<RatioFp>,
+    /// 音频输出倍率（叠乘在 audio_ratio 之上；仅本次含音频输出时出现）。
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "ser_ratio_opt"
+    )]
+    pub audio_completion_ratio: Option<RatioFp>,
+    /// 图片输入倍率（仅本次含图片输入时出现）。
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "ser_ratio_opt"
+    )]
+    pub image_ratio: Option<RatioFp>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "ser_usd_opt"

@@ -48,7 +48,7 @@ pub struct Quote {
     pub snapshot: PricingSnapshot,
 }
 
-/// 一次计费用到的四条 token 侧倍率轴（DESIGN §3.2）。
+/// 一次计费用到的 token 侧倍率轴（DESIGN §3.2）。
 struct RatioSet {
     model: RatioFp,
     completion: RatioFp,
@@ -56,6 +56,12 @@ struct RatioSet {
     cache: RatioFp,
     /// 缓存写入（创建加价）。
     cache_write: RatioFp,
+    /// 音频输入（相对文本的倍数）。
+    audio: RatioFp,
+    /// 音频输出（叠乘在 audio 之上）。
+    audio_completion: RatioFp,
+    /// 图片输入（相对文本的倍数）。
+    image: RatioFp,
 }
 
 /// 单步乘法：value × ratio / SCALE（floor）。
@@ -121,12 +127,18 @@ pub fn calculate(
             completion_ratio,
             cache_ratio,
             cache_write_ratio,
+            audio_ratio,
+            audio_completion_ratio,
+            image_ratio,
         } => {
             let set = RatioSet {
                 model: mul_ratio(*model_ratio, tier_r)?,
                 completion: *completion_ratio,
                 cache: *cache_ratio,
                 cache_write: *cache_write_ratio,
+                audio: *audio_ratio,
+                audio_completion: *audio_completion_ratio,
+                image: *image_ratio,
             };
             calc_tokens(book, ctx, usage, &set, group_ratio, "ratio", tier.as_ref())
         }
@@ -134,6 +146,9 @@ pub fn calculate(
             completion_ratio,
             cache_ratio,
             cache_write_ratio,
+            audio_ratio,
+            audio_completion_ratio,
+            image_ratio,
             tiers,
         } => {
             let price = tiers
@@ -144,6 +159,9 @@ pub fn calculate(
                 completion: *completion_ratio,
                 cache: *cache_ratio,
                 cache_write: *cache_write_ratio,
+                audio: *audio_ratio,
+                audio_completion: *audio_completion_ratio,
+                image: *image_ratio,
             };
             calc_tokens(book, ctx, usage, &set, group_ratio, "tiered", tier.as_ref())
         }
@@ -205,9 +223,27 @@ fn calc_tokens(
     mode: &'static str,
     tier: Option<&(String, RatioFp)>,
 ) -> Result<Quote, PricingError> {
-    // 有效 token 数（×SCALE 定点）：uncached + cached×cache + cache_write×cache_write
-    //                              + completion×completion。
-    // 四项均 ≤ u32::MAX × 1e6 ≈ 4.3e15，求和远小于 i128 上限，checked 仅防御。
+    // 有效 token 数（×SCALE 定点），prompt 五段 + completion 两段各乘自己的轴：
+    //   uncached×1 + cached×cache + cache_write×cache_write
+    // + audio_in×audio + image_in×image
+    // + text_out×completion + audio_out×audio×audio_completion
+    // 每项 ≤ u32::MAX × 1e6 ≈ 4.3e15（音频输出为两轴叠乘，≤ 4.3e15×1e6 仍远小于
+    // i128 上限 1.7e38），checked 仅作防御。
+    // 音频输出倍率 = audio × audio_completion（new-api 同语义）。
+    //
+    // 但两轴均未配置（都是 1.0）时必须**回落到 completion_ratio**：文本输出走
+    // completion_ratio（如 4×），若音频输出按 1× 计就成了意外降价——模态轴的缺省值
+    // 本应是"零影响"，而非把已有的音频输出打折。
+    let audio_out_scaled = if set.audio.as_scaled() == RatioFp::ONE.as_scaled()
+        && set.audio_completion.as_scaled() == RatioFp::ONE.as_scaled()
+    {
+        i128::from(set.completion.as_scaled())
+    } else {
+        i128::from(set.audio.as_scaled())
+            .checked_mul(i128::from(set.audio_completion.as_scaled()))
+            .map(|v| v.div_euclid(i128::from(RATIO_SCALE)))
+            .ok_or(PricingError::Overflow)?
+    };
     let eff = i128::from(usage.prompt_uncached())
         .checked_mul(i128::from(RATIO_SCALE))
         .and_then(|acc| {
@@ -220,8 +256,21 @@ fn calc_tokens(
         })
         .and_then(|acc| {
             acc.checked_add(
-                i128::from(usage.completion_tokens) * i128::from(set.completion.as_scaled()),
+                i128::from(usage.audio_prompt_tokens) * i128::from(set.audio.as_scaled()),
             )
+        })
+        .and_then(|acc| {
+            acc.checked_add(
+                i128::from(usage.image_prompt_tokens) * i128::from(set.image.as_scaled()),
+            )
+        })
+        .and_then(|acc| {
+            acc.checked_add(
+                i128::from(usage.text_completion()) * i128::from(set.completion.as_scaled()),
+            )
+        })
+        .and_then(|acc| {
+            acc.checked_add(i128::from(usage.audio_completion_tokens) * audio_out_scaled)
         })
         .ok_or(PricingError::Overflow)?;
 
@@ -251,8 +300,14 @@ fn calc_tokens(
         model_ratio: Some(set.model),
         completion_ratio: Some(set.completion),
         cache_ratio: Some(set.cache),
-        // 缓存写入倍率仅在实际发生写入时入快照（避免 OpenAI 等无此段的账单出现无意义字段）
+        // 各模态轴仅在本次实际发生该段用量时入快照——避免纯文本账单出现一堆
+        // 无意义的 1.0 字段，账单解释器也就不必逐个判空
         cache_write_ratio: (usage.cache_write_tokens > 0).then_some(set.cache_write),
+        audio_ratio: (usage.audio_prompt_tokens > 0 || usage.audio_completion_tokens > 0)
+            .then_some(set.audio),
+        audio_completion_ratio: (usage.audio_completion_tokens > 0)
+            .then_some(set.audio_completion),
+        image_ratio: (usage.image_prompt_tokens > 0).then_some(set.image),
         per_call_price_usd: None,
         service_tier: tier.map(|(t, _)| t.clone()),
         tier_ratio: tier.map(|(_, r)| *r),
@@ -296,6 +351,9 @@ fn calc_per_call(
         completion_ratio: None,
         cache_ratio: None,
         cache_write_ratio: None,
+        audio_ratio: None,
+        audio_completion_ratio: None,
+        image_ratio: None,
         per_call_price_usd: Some(price),
         service_tier: tier.map(|(t, _)| t.clone()),
         tier_ratio: tier.map(|(_, r)| *r),

@@ -21,6 +21,9 @@ fn row_to_mode(row: &ModelPricingRow) -> Option<PricingMode> {
             completion_ratio: fp(row.completion_ratio_scaled)?,
             cache_ratio: fp(row.cache_ratio_scaled)?,
             cache_write_ratio: fp(row.cache_write_ratio_scaled)?,
+            audio_ratio: fp(row.audio_ratio_scaled)?,
+            audio_completion_ratio: fp(row.audio_completion_ratio_scaled)?,
+            image_ratio: fp(row.image_ratio_scaled)?,
         }),
         "per_call" => Some(PricingMode::PerCall {
             price: Money::from_micros(row.per_call_price_micro?),
@@ -29,6 +32,9 @@ fn row_to_mode(row: &ModelPricingRow) -> Option<PricingMode> {
             completion_ratio: fp(row.completion_ratio_scaled)?,
             cache_ratio: fp(row.cache_ratio_scaled)?,
             cache_write_ratio: fp(row.cache_write_ratio_scaled)?,
+            audio_ratio: fp(row.audio_ratio_scaled)?,
+            audio_completion_ratio: fp(row.audio_completion_ratio_scaled)?,
+            image_ratio: fp(row.image_ratio_scaled)?,
             tiers: TierTable::parse(row.tier_expr.as_deref()?).ok()?,
         }),
         _ => None,
@@ -42,6 +48,10 @@ fn row_to_override(row: &UserPricingRow) -> Option<OverrideSpec> {
             completion_ratio: fp(row.custom_completion_ratio_scaled.unwrap_or(1_000_000))?,
             cache_ratio: fp(row.custom_cache_ratio_scaled.unwrap_or(1_000_000))?,
             cache_write_ratio: fp(row.custom_cache_write_ratio_scaled.unwrap_or(1_000_000))?,
+            // 模态轴不做用户级覆盖：它表达"音频相对文本的倍数"，属模型固有属性
+            audio_ratio: RatioFp::ONE,
+            audio_completion_ratio: RatioFp::ONE,
+            image_ratio: RatioFp::ONE,
         })),
         "absolute" => Some(OverrideSpec::Absolute {
             input_per_1m: Money::from_micros(row.custom_input_per_1m_micro?),

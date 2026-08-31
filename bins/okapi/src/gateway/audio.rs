@@ -115,7 +115,10 @@ async fn handle_speech(
         prompt_tokens: chars,
         cached_tokens: 0,
         cache_write_tokens: 0,
+        audio_prompt_tokens: 0,
+        image_prompt_tokens: 0,
         completion_tokens: 0,
+        audio_completion_tokens: 0,
         reasoning_tokens: 0,
     };
     let book = state.pricebook.load();

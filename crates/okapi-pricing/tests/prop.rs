@@ -57,6 +57,9 @@ fn build_book_with_cache_write(
                 completion_ratio: fp(completion_fp),
                 cache_ratio: fp(cache_fp),
                 cache_write_ratio: fp(cache_write_fp),
+                audio_ratio: RatioFp::ONE,
+                audio_completion_ratio: RatioFp::ONE,
+                image_ratio: RatioFp::ONE,
             },
             tier_ratios: Vec::new(),
         }],
@@ -89,7 +92,10 @@ fn usage_of(prompt: u32, cached: u32, completion: u32) -> TokenUsage {
         prompt_tokens: prompt,
         cached_tokens: cached,
         cache_write_tokens: 0,
+        audio_prompt_tokens: 0,
+        image_prompt_tokens: 0,
         completion_tokens: completion,
+        audio_completion_tokens: 0,
         reasoning_tokens: 0,
     }
 }
@@ -99,7 +105,10 @@ fn usage_split(prompt: u32, cached: u32, cache_write: u32, completion: u32) -> T
         prompt_tokens: prompt,
         cached_tokens: cached,
         cache_write_tokens: cache_write,
+        audio_prompt_tokens: 0,
+        image_prompt_tokens: 0,
         completion_tokens: completion,
+        audio_completion_tokens: 0,
         reasoning_tokens: 0,
     }
 }

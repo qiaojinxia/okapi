@@ -323,9 +323,13 @@ pub fn usage_from_anthropic(usage: Option<&Value>) -> UsageProbe {
         prompt_tokens_details: PromptTokensDetails {
             cached_tokens: cache_read,
             cache_write_tokens: cache_creation,
+            // Anthropic 无模态细分（图片并入 input_tokens）
+            audio_tokens: 0,
+            image_tokens: 0,
         },
         completion_tokens_details: CompletionTokensDetails {
             reasoning_tokens: 0,
+            audio_tokens: 0,
         },
     }
 }
@@ -513,9 +517,13 @@ impl StreamState {
             prompt_tokens_details: PromptTokensDetails {
                 cached_tokens: self.cache_read,
                 cache_write_tokens: self.cache_creation,
+            // Anthropic 无模态细分（图片并入 input_tokens）
+                audio_tokens: 0,
+                image_tokens: 0,
             },
             completion_tokens_details: CompletionTokensDetails {
                 reasoning_tokens: 0,
+                audio_tokens: 0,
             },
         };
         vec![

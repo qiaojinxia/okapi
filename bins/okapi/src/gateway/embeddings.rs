@@ -151,7 +151,10 @@ async fn handle(
         prompt_tokens: est_prompt,
         cached_tokens: 0,
         cache_write_tokens: 0,
+        audio_prompt_tokens: 0,
+        image_prompt_tokens: 0,
         completion_tokens: 0,
+        audio_completion_tokens: 0,
         reasoning_tokens: 0,
     };
     let est_quote = calculate(&book, &calc, est_usage)?;
@@ -210,7 +213,10 @@ async fn handle(
                 prompt_tokens: est_prompt,
                 cached_tokens: 0,
                 cache_write_tokens: 0,
+                audio_prompt_tokens: 0,
+                image_prompt_tokens: 0,
                 completion_tokens: 0,
+                audio_completion_tokens: 0,
                 reasoning_tokens: 0,
             });
             let quote = calculate(&book, &calc, usage).map_err(AppError::from);

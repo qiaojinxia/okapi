@@ -14,6 +14,12 @@ pub struct ModelPricingRow {
     pub cache_ratio_scaled: i64,
     /// 缓存写入倍率（缺省 1.0 = 按常规输入计）。
     pub cache_write_ratio_scaled: i64,
+    /// 音频输入倍率（相对文本；缺省 1.0）。
+    pub audio_ratio_scaled: i64,
+    /// 音频输出倍率（叠乘在 audio 之上；缺省 1.0）。
+    pub audio_completion_ratio_scaled: i64,
+    /// 图片输入倍率（相对文本；缺省 1.0）。
+    pub image_ratio_scaled: i64,
     pub per_call_price_micro: Option<i64>,
     pub tier_expr: Option<String>,
     /// service_tier 档位倍率（JSONB，如 {"flex":"0.5"}；NULL=全档 1.0）。
@@ -82,6 +88,9 @@ pub async fn load_pricing_source_rows(pool: &PgPool) -> Result<PricingSourceRows
                (p.completion_ratio * 1000000)::bigint AS "completion_ratio_scaled!",
                (p.cache_ratio * 1000000)::bigint AS "cache_ratio_scaled!",
                (p.cache_write_ratio * 1000000)::bigint AS "cache_write_ratio_scaled!",
+               (p.audio_ratio * 1000000)::bigint AS "audio_ratio_scaled!",
+               (p.audio_completion_ratio * 1000000)::bigint AS "audio_completion_ratio_scaled!",
+               (p.image_ratio * 1000000)::bigint AS "image_ratio_scaled!",
                p.per_call_price_micro,
                p.tier_expr
         FROM model_pricing p
@@ -100,6 +109,9 @@ pub async fn load_pricing_source_rows(pool: &PgPool) -> Result<PricingSourceRows
         completion_ratio_scaled: r.completion_ratio_scaled,
         cache_ratio_scaled: r.cache_ratio_scaled,
         cache_write_ratio_scaled: r.cache_write_ratio_scaled,
+        audio_ratio_scaled: r.audio_ratio_scaled,
+        audio_completion_ratio_scaled: r.audio_completion_ratio_scaled,
+        image_ratio_scaled: r.image_ratio_scaled,
         per_call_price_micro: r.per_call_price_micro,
         tier_expr: r.tier_expr,
         tier_ratios: r.tier_ratios,

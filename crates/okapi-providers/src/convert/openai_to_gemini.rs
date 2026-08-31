@@ -355,9 +355,13 @@ fn usage_from_gemini(meta: Option<&Value>) -> UsageProbe {
             cached_tokens: get("cachedContentTokenCount"),
             // Gemini 显式缓存的创建走独立的 cachedContents API 计费，不在生成响应的 usage 里
             cache_write_tokens: 0,
+            // Gemini 的 promptTokensDetails 是带 modality 的数组，解析待接入
+            audio_tokens: 0,
+            image_tokens: 0,
         },
         completion_tokens_details: CompletionTokensDetails {
             reasoning_tokens: thoughts,
+            audio_tokens: 0,
         },
     }
 }

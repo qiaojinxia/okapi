@@ -108,6 +108,9 @@ pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>
                   p.completion_ratio::text AS completion_ratio,
                   p.cache_ratio::text AS cache_ratio,
                   p.cache_write_ratio::text AS cache_write_ratio,
+                  p.audio_ratio::text AS audio_ratio,
+                  p.audio_completion_ratio::text AS audio_completion_ratio,
+                  p.image_ratio::text AS image_ratio,
                   p.per_call_price_micro
            FROM models m JOIN model_pricing p ON p.model_id = m.id
            WHERE m.status = 1 ORDER BY m.sort_order, m.model_name"#
@@ -132,6 +135,9 @@ pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>
             "completion_ratio": m.completion_ratio,
             "cache_ratio": m.cache_ratio,
             "cache_write_ratio": m.cache_write_ratio,
+            "audio_ratio": m.audio_ratio,
+            "audio_completion_ratio": m.audio_completion_ratio,
+            "image_ratio": m.image_ratio,
             "per_call_price_micro": m.per_call_price_micro,
         })).collect::<Vec<_>>(),
         "groups": groups.into_iter().map(|g| json!({

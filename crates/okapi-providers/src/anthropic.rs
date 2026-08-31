@@ -193,9 +193,13 @@ impl MetaScanner {
                         cached_tokens: self.cache_read,
                         // 缓存写入独立成段：官方 1.25×@5m TTL，混入常规输入段会漏计费
                         cache_write_tokens: self.cache_creation,
+                        // Anthropic 无模态细分：图片计入 input_tokens，音频不支持
+                        audio_tokens: 0,
+                        image_tokens: 0,
                     },
                     completion_tokens_details: okapi_api::CompletionTokensDetails {
                         reasoning_tokens: 0,
+                        audio_tokens: 0,
                     },
                 });
             }

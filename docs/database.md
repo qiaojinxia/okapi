@@ -225,6 +225,8 @@ CREATE TABLE model_aliases (                          -- 全局别名/通配（#
 ```sql
 -- 缓存双轨：cache_ratio = 读取（打折），cache_write_ratio = 写入（加价，见 0013 迁移）。
 -- 两者方向相反，合并为单轴会导致 Anthropic 缓存写入漏计费约 20%（DESIGN §3.2）。
+-- 模态三轴（0014）：音频/图片与文本不同价，gpt-4o-audio 音频输入是文本 16×，
+-- 不分轴则该场景漏收约 80%。缺省 1.0 = 按文本计，对纯文本模型零影响。
 CREATE TABLE model_pricing (                          -- 真理源：倍率制
     model_id             BIGINT PRIMARY KEY REFERENCES models(id) ON DELETE CASCADE,
     pricing_mode         VARCHAR(16) NOT NULL DEFAULT 'ratio',  -- ratio|per_call|tiered|media|time
@@ -232,6 +234,9 @@ CREATE TABLE model_pricing (                          -- 真理源：倍率制
     completion_ratio     NUMERIC(12,6) NOT NULL DEFAULT 1,
     cache_ratio          NUMERIC(6,4)  NOT NULL DEFAULT 1,  -- 缓存读取（Anthropic 官方 0.1）
     cache_write_ratio    NUMERIC(6,4)  NOT NULL DEFAULT 1,  -- 缓存写入（官方 1.25@5m / 2.0@1h，0013）
+    audio_ratio          NUMERIC(12,6) NOT NULL DEFAULT 1,  -- 音频输入（gpt-4o-audio 官方 16，0014）
+    audio_completion_ratio NUMERIC(12,6) NOT NULL DEFAULT 1,-- 音频输出（叠乘在 audio 之上，官方 2）
+    image_ratio          NUMERIC(12,6) NOT NULL DEFAULT 1,  -- 图片输入（相对文本）
     per_call_price_micro BIGINT,                      -- per_call 模式
     tier_expr            TEXT,                        -- tiered 模式表达式
     tier_ratios       JSONB,                          -- service_tier 档位倍率（{"flex":"0.5"}；NULL=全档 1.0，0012）

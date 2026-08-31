@@ -24,6 +24,9 @@ interface PricingModel {
   completion_ratio: string | null
   cache_ratio: string | null
   cache_write_ratio: string | null
+  audio_ratio: string | null
+  audio_completion_ratio: string | null
+  image_ratio: string | null
   per_call_price_micro: number | null
 }
 
@@ -117,6 +120,9 @@ function PricingPage() {
                 <Th>{t('pricing:completionPrice')}</Th>
                 <Th>{t('pricing:cachedPrice')}</Th>
                 <Th>{t('pricing:cacheWritePrice')}</Th>
+                <Th>{t('pricing:audioInPrice')}</Th>
+                <Th>{t('pricing:audioOutPrice')}</Th>
+                <Th>{t('pricing:imageInPrice')}</Th>
               </Tr>
             </THead>
             <TBody>
@@ -138,6 +144,25 @@ function PricingPage() {
                   cacheWriteRatio === 1
                     ? null
                     : unitPriceMicro(m.model_ratio, groupFactor * cacheWriteRatio, unit)
+                // 模态倍率为 1 表示该模型不区分模态（纯文本模型），显示 — 而非重复文本价
+                const audioRatio = Number(m.audio_ratio ?? '1')
+                const audioIn =
+                  audioRatio === 1
+                    ? null
+                    : unitPriceMicro(m.model_ratio, groupFactor * audioRatio, unit)
+                const audioOut =
+                  audioRatio === 1
+                    ? null
+                    : unitPriceMicro(
+                        m.model_ratio,
+                        groupFactor * audioRatio * Number(m.audio_completion_ratio ?? '1'),
+                        unit,
+                      )
+                const imageRatio = Number(m.image_ratio ?? '1')
+                const imageIn =
+                  imageRatio === 1
+                    ? null
+                    : unitPriceMicro(m.model_ratio, groupFactor * imageRatio, unit)
                 return (
                   <Tr key={m.model}>
                     <Td>
@@ -150,7 +175,7 @@ function PricingPage() {
                     </Td>
                     {m.mode === 'per_call' ? (
                       <>
-                        <Td colSpan={5}>
+                        <Td colSpan={8}>
                           {t('pricing:perCall', {
                             price: formatMoney(m.per_call_price_micro ?? 0, locale),
                           })}
@@ -165,6 +190,9 @@ function PricingPage() {
                         <Td>
                           {cacheWrite === null ? '—' : formatMoney(cacheWrite, locale)}
                         </Td>
+                        <Td>{audioIn === null ? '—' : formatMoney(audioIn, locale)}</Td>
+                        <Td>{audioOut === null ? '—' : formatMoney(audioOut, locale)}</Td>
+                        <Td>{imageIn === null ? '—' : formatMoney(imageIn, locale)}</Td>
                       </>
                     )}
                   </Tr>

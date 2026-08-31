@@ -36,6 +36,9 @@ interface ModelListRow {
   completion_ratio: string | null
   cache_ratio: string | null
   cache_write_ratio: string | null
+  audio_ratio: string | null
+  audio_completion_ratio: string | null
+  image_ratio: string | null
   per_call_price_micro: number | null
 }
 
@@ -82,6 +85,8 @@ function ModelListCard() {
                 <Th>{t('admin:completionRatio')}</Th>
                 <Th>{t('admin:cacheRatio')}</Th>
                 <Th>{t('admin:cacheWriteRatioShort')}</Th>
+                <Th>{t('admin:audioRatioShort')}</Th>
+                <Th>{t('admin:imageRatio')}</Th>
                 <Th>{t('common:actions')}</Th>
               </Tr>
             </THead>
@@ -100,6 +105,12 @@ function ModelListCard() {
                   <Td>{m.completion_ratio ?? '—'}</Td>
                   <Td>{m.cache_ratio ?? '—'}</Td>
                   <Td>{m.cache_write_ratio ?? '—'}</Td>
+                  <Td>
+                    {m.audio_ratio === null || m.audio_ratio === '1.000000'
+                      ? '—'
+                      : `${m.audio_ratio} ×${m.audio_completion_ratio ?? '1'}`}
+                  </Td>
+                  <Td>{m.image_ratio ?? '—'}</Td>
                   <Td>
                     <Button
                       size="sm"
@@ -262,6 +273,9 @@ function ModelCard() {
     completion_ratio: '1',
     cache_ratio: '1',
     cache_write_ratio: '1',
+    audio_ratio: '1',
+    audio_completion_ratio: '1',
+    image_ratio: '1',
   })
   const [tierJson, setTierJson] = useState('')
 
@@ -308,6 +322,9 @@ function ModelCard() {
     ['completion_ratio', t('admin:completionRatio')],
     ['cache_ratio', t('admin:cacheRatio')],
     ['cache_write_ratio', t('admin:cacheWriteRatio')],
+    ['audio_ratio', t('admin:audioRatio')],
+    ['audio_completion_ratio', t('admin:audioCompletionRatio')],
+    ['image_ratio', t('admin:imageRatio')],
   ] as const
 
   return (
