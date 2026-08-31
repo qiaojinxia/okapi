@@ -18,4 +18,9 @@ pub enum StoreError {
 
     #[error("invalid_stored_data: {0}")]
     InvalidData(&'static str),
+
+    /// 资源被引用/状态冲突，拒绝执行（管理端需先解绑）。
+    /// console 层映射为 HTTP 409 + 该 error_code，前端按语言包渲染文案。
+    #[error("conflict: {0}")]
+    Conflict(&'static str),
 }

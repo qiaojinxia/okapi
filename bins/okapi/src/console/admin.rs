@@ -33,7 +33,7 @@ pub(super) async fn guard(
 }
 
 /// 带 own/all 范围的守卫（#6267）：Denied → 403；返回范围供 handler 做属主过滤。
-async fn guard_scoped(
+pub(super) async fn guard_scoped(
     state: &AppState,
     headers: &HeaderMap,
     base: &str,
@@ -49,7 +49,7 @@ async fn guard_scoped(
 }
 
 /// own 范围下的渠道属主校验。
-async fn ensure_channel_owner(
+pub(super) async fn ensure_channel_owner(
     state: &AppState,
     channel_id: i64,
     actor: &AuthedKey,
@@ -70,7 +70,7 @@ async fn ensure_channel_owner(
 }
 
 /// 角色管理强制 super_admin：防止"默认全权 admin"给自己发角色形成提权链。
-async fn guard_super_admin(
+pub(super) async fn guard_super_admin(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Arc<AuthedKey>, AppError> {
@@ -84,7 +84,7 @@ async fn guard_super_admin(
     Ok(key)
 }
 
-async fn audit(state: &AppState, actor: &AuthedKey, action: &str, target: &str, detail: Value) {
+pub(super) async fn audit(state: &AppState, actor: &AuthedKey, action: &str, target: &str, detail: Value) {
     if let Err(err) = okapi_store::admin::record_audit(
         &state.pg,
         &format!("admin:{}", actor.user_id),
@@ -281,6 +281,344 @@ pub async fn set_channel_groups(
     )
     .await;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 已支持的上游协议（docs/database.md channels.provider）。
+const PROVIDERS: [&str; 5] = [
+    "openai",
+    "openai_compat",
+    "anthropic",
+    "gemini",
+    "custom_pass",
+];
+
+#[derive(Deserialize)]
+pub struct PatchChannelReq {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    #[serde(default)]
+    pub models: Option<Vec<String>>,
+    /// 请求模型 → 上游模型映射（对象）。
+    #[serde(default)]
+    pub model_mapping: Option<Value>,
+    /// channels.settings 整体覆盖（对象）。
+    #[serde(default)]
+    pub settings: Option<Value>,
+    /// 能力声明（tools/vision），驱动能力感知路由。
+    #[serde(default)]
+    pub capabilities: Option<Value>,
+    #[serde(default)]
+    pub priority: Option<i32>,
+    #[serde(default)]
+    pub trust_upstream_usage: Option<bool>,
+}
+
+/// PATCH /admin/channels/{id}：改渠道配置（缺省字段不动）。
+/// 启停仍走 `/status`，凭证走 `/credential`——三者审计语义不同，不合并。
+pub async fn update_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchChannelReq>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    ensure_channel_owner(&state, id, &actor, scope).await?;
+
+    if let Some(provider) = &req.provider
+        && !PROVIDERS.contains(&provider.as_str())
+    {
+        return Err(AppError::bad_request().with_param("provider"));
+    }
+    if let Some(api_base) = &req.api_base {
+        super::ssrf::validate_api_base(&state, api_base).await?;
+    }
+    for (field, value) in [
+        ("model_mapping", req.model_mapping.as_ref()),
+        ("settings", req.settings.as_ref()),
+        ("capabilities", req.capabilities.as_ref()),
+    ] {
+        if let Some(v) = value
+            && !v.is_object()
+        {
+            return Err(AppError::bad_request().with_param(field));
+        }
+    }
+    let models = match &req.models {
+        Some(list) if list.iter().any(|m| m.trim().is_empty()) => {
+            return Err(AppError::bad_request().with_param("models"));
+        }
+        Some(list) => Some(json!(list)),
+        None => None,
+    };
+
+    let patch = okapi_store::admin::ChannelPatch {
+        name: req.name.as_deref(),
+        provider: req.provider.as_deref(),
+        api_base: req.api_base.as_deref(),
+        models: models.as_ref(),
+        model_mapping: req.model_mapping.as_ref(),
+        settings: req.settings.as_ref(),
+        capabilities: req.capabilities.as_ref(),
+        priority: req.priority,
+        trust_upstream_usage: req.trust_upstream_usage,
+    };
+    if !okapi_store::admin::patch_channel(&state.pg, id, patch).await? {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    }
+    state.invalidate_routing_caches();
+    audit(
+        &state,
+        &actor,
+        "channel.update",
+        &id.to_string(),
+        json!({
+            "name": req.name, "provider": req.provider, "api_base": req.api_base,
+            "models": req.models, "priority": req.priority,
+            "trust_upstream_usage": req.trust_upstream_usage,
+        }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/channels/{id}：软删除（历史账单按 channel_id 仍可回溯）。
+pub async fn delete_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    ensure_channel_owner(&state, id, &actor, scope).await?;
+    if !okapi_store::admin::soft_delete_channel(&state.pg, id).await? {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    }
+    state.invalidate_routing_caches();
+    audit(&state, &actor, "channel.delete", &id.to_string(), json!({})).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct RotateCredentialReq {
+    pub credential: String,
+    /// 多把 key 的渠道必填；单把可省。
+    #[serde(default)]
+    pub channel_key_id: Option<i64>,
+}
+
+/// POST /admin/channels/{id}/credential：轮换上游凭证并复位 key 状态机。
+/// 明文凭证不进审计 detail。
+pub async fn rotate_channel_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<RotateCredentialReq>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    ensure_channel_owner(&state, id, &actor, scope).await?;
+    if req.credential.trim().is_empty() {
+        return Err(AppError::bad_request().with_param("credential"));
+    }
+    let outcome = okapi_store::admin::rotate_channel_credential(
+        &state.pg,
+        id,
+        req.channel_key_id,
+        req.credential.trim(),
+    )
+    .await?;
+    let channel_key_id = match outcome {
+        okapi_store::admin::RotateOutcome::Rotated(key_id) => key_id,
+        okapi_store::admin::RotateOutcome::NotFound => {
+            return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+        }
+        okapi_store::admin::RotateOutcome::Ambiguous => {
+            return Err(AppError::bad_request().with_param("channel_key_id"));
+        }
+    };
+    state.invalidate_routing_caches();
+    audit(
+        &state,
+        &actor,
+        "channel.rotate_credential",
+        &id.to_string(),
+        json!({ "channel_key_id": channel_key_id }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "channel_key_id": channel_key_id })))
+}
+
+#[derive(Deserialize)]
+pub struct PatchChannelKeyReq {
+    #[serde(default)]
+    pub weight: Option<i32>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub max_concurrency: Option<Option<i32>>,
+}
+
+/// PATCH /admin/channels/{id}/keys/{key_id}：调单把 key 的权重与并发上限。
+pub async fn update_channel_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((id, key_id)): Path<(i64, i64)>,
+    Json(req): Json<PatchChannelKeyReq>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    ensure_channel_owner(&state, id, &actor, scope).await?;
+    if req.weight.is_some_and(|w| w < 0) {
+        return Err(AppError::bad_request().with_param("weight"));
+    }
+    if req.max_concurrency.flatten().is_some_and(|c| c <= 0) {
+        return Err(AppError::bad_request().with_param("max_concurrency"));
+    }
+    let hit = okapi_store::admin::patch_channel_key(
+        &state.pg,
+        id,
+        key_id,
+        req.weight,
+        req.max_concurrency,
+    )
+    .await?;
+    if !hit {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    }
+    state.invalidate_routing_caches();
+    audit(
+        &state,
+        &actor,
+        "channel.update_key",
+        &format!("{id}/{key_id}"),
+        json!({ "weight": req.weight, "max_concurrency": req.max_concurrency }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- API key 管控（管理面：限额与分组覆盖）----
+
+#[derive(Deserialize)]
+pub struct AdminPatchKeyReq {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub status: Option<i16>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub model_allowlist: Option<Option<Vec<String>>>,
+    /// key 级定价组覆盖；null = 回落用户组。
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub group_override: Option<Option<String>>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub rpm_limit: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub tpm_limit: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub rpd_limit: Option<Option<i32>>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub daily_token_limit: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub max_concurrency: Option<Option<i32>>,
+}
+
+/// 限额一律取正数：0 或负数会把 key 限死成不可用，属于误配而非合法配置。
+// 入参来自 double_option 的三态补丁值，豁免理由同 console::double_option
+#[allow(clippy::option_option)]
+fn ensure_positive(field: &str, value: Option<Option<i64>>) -> Result<(), AppError> {
+    match value.flatten() {
+        Some(v) if v <= 0 => Err(AppError::bad_request().with_param(field.to_owned())),
+        _ => Ok(()),
+    }
+}
+
+/// PATCH /admin/keys/{id}：管理面改任意用户 key 的全部可写字段（含限额与分组覆盖）。
+pub async fn patch_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<AdminPatchKeyReq>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::USER_MANAGE).await?;
+    if let Some(status) = req.status
+        && !matches!(status, 1 | 2)
+    {
+        return Err(AppError::bad_request().with_param("status"));
+    }
+    ensure_positive("rpm_limit", req.rpm_limit.map(|v| v.map(i64::from)))?;
+    ensure_positive("tpm_limit", req.tpm_limit.map(|v| v.map(i64::from)))?;
+    ensure_positive("rpd_limit", req.rpd_limit.map(|v| v.map(i64::from)))?;
+    ensure_positive("daily_token_limit", req.daily_token_limit)?;
+    ensure_positive(
+        "max_concurrency",
+        req.max_concurrency.map(|v| v.map(i64::from)),
+    )?;
+    // 分组前置校验：直接撞 FK 只能回 500，拿不到可渲染的 error_code
+    if let Some(Some(group)) = &req.group_override
+        && !okapi_store::admin::price_group_exists(&state.pg, group).await?
+    {
+        return Err(AppError::bad_request().with_param("group_override"));
+    }
+
+    let patch = okapi_store::admin::ApiKeyPatch {
+        name: req.name.clone().map(|n| n.trim().to_owned()),
+        status: req.status,
+        expires_at: req.expires_at,
+        model_allowlist: req
+            .model_allowlist
+            .clone()
+            .map(super::portal::normalize_allowlist),
+        group_override: req.group_override.clone(),
+        rpm_limit: req.rpm_limit,
+        tpm_limit: req.tpm_limit,
+        rpd_limit: req.rpd_limit,
+        daily_token_limit: req.daily_token_limit,
+        max_concurrency: req.max_concurrency,
+    };
+    let touched = okapi_store::admin::patch_api_key(&state.pg, id, None, &patch).await?;
+    let Some(touched) = touched else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    state.sched.auth_del(&touched.key_hash).await;
+    audit(
+        &state,
+        &actor,
+        "apikey.update",
+        &id.to_string(),
+        json!({
+            "user_id": touched.user_id, "status": req.status,
+            "group_override": req.group_override, "rpm_limit": req.rpm_limit,
+            "tpm_limit": req.tpm_limit, "rpd_limit": req.rpd_limit,
+            "daily_token_limit": req.daily_token_limit,
+            "max_concurrency": req.max_concurrency, "expires_at": req.expires_at,
+        }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "user_id": touched.user_id })))
+}
+
+/// DELETE /admin/keys/{id}：管理面吊销任意 key。
+pub async fn delete_api_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::USER_MANAGE).await?;
+    let touched = okapi_store::admin::soft_delete_api_key(&state.pg, id, None).await?;
+    let Some(touched) = touched else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    state.sched.auth_del(&touched.key_hash).await;
+    audit(
+        &state,
+        &actor,
+        "apikey.delete",
+        &id.to_string(),
+        json!({ "user_id": touched.user_id }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "user_id": touched.user_id })))
 }
 
 // ---- 模型与定价 ----

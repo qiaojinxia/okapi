@@ -9,6 +9,8 @@ pub mod ch;
 pub mod channels;
 pub mod error;
 pub mod identity;
+pub mod listing;
+pub mod mutate;
 pub mod pg;
 pub mod pricing;
 pub mod provision;

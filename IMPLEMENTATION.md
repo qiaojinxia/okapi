@@ -596,6 +596,42 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 按 key 展开成 channel 吸收进来；老库 bcrypt 存 key 哈希是坏设计（不可逆、每请求一次 bcrypt），
 不迁就该形状，改走密文解密重算 SHA-256，解不出的宁缺毋滥。
 
+### 11.6 控制面接口清单（六类面 + 权限分级，2026-08-31 补齐 CRUD 闭环）
+
+验收口径：中转站可用性 = 管理员**不必直连数据库**即可完成全部日常运维。故每类资源
+都要有"增/查（列表）/改/删"的闭环，且列表带占用计数以支撑安全删除。
+路由按域拆分在 `bins/okapi/src/console/mod.rs`（`channel_routes` / `pricing_routes` /
+`user_admin_routes` / `ops_routes` / `portal_routes` / `auth_routes`），与下表逐行对应。
+
+| 接口面 | 端点 | 状态 |
+| --- | --- | --- |
+| **供应商接入**（渠道） | `POST/GET /admin/channels`、`PATCH/DELETE /admin/channels/{id}`、`POST {id}/credential`（凭证轮换）、`PATCH {id}/keys/{key_id}`、`POST {id}/status`、`POST {id}/groups`、`POST {id}/test`、`GET {id}/fetch-models`、`POST /admin/channels/batch`（enable/disable/delete）、`POST {id}/duplicate` | 完整 |
+| **模型配置与定价** | `POST/GET /admin/models`、`DELETE /admin/models/{model}`、`POST/GET /admin/groups`、`DELETE /admin/groups/{code}`、`POST/GET /admin/plans`、`DELETE /admin/plans/{code}`、`POST/GET /admin/redemptions`、`DELETE /admin/redemptions/{batch}`（停用未核销）、`POST/GET /admin/pricing/rules`、`DELETE /admin/pricing/rules/{code}`、`POST {code}/toggle`（活动上下线）、`POST /admin/pricing/publish`、`POST /admin/pricing/import-newapi` | 完整 |
+| **用户与令牌** | `GET /admin/users`（分页+搜索）、`POST /admin/users/{id}/manage`（ban/unban/promote/demote/delete，吸收 new-api 统一动作端点）、`POST {id}/groups`、`POST {id}/credit`、`POST {id}/balance-expiry`、`POST {id}/role`、`GET {id}/overview`、`GET /admin/keys`、`PATCH/DELETE /admin/keys/{id}` | 完整 |
+| **统计** | `GET /admin/stats/overview`（今日/窗口双档 KPI + 毛利 + 活跃用户）、`/stats/models`、`/stats/channels`、`/stats/margin`（按日趋势 + 毛利率）、`GET /admin/leaderboard`、`GET /api/me/stats/daily`（用户自助按日） | 完整 |
+| **系统设置** | `POST/GET /admin/settings`（GET 全量，敏感键脱敏）、`GET /admin/settings/{key}`、`POST /admin/cache/flush`、`GET /admin/reconciliation`、`POST /admin/billing/refund` | 完整 |
+| **权限分级** | `POST/GET /admin/roles`、`DELETE /admin/roles/{code}`、`GET /admin/permissions`（权限点清单，前端角色编辑器数据源） | 完整 |
+| **用户自助**（门户） | `GET /api/me`、`/api/me/usage`、`/api/me/stats/daily`、`GET /api/me/keys`、`PATCH/DELETE /api/me/keys/{id}`、`/api/me/logs`、`POST /api/me/redeem`、`GET /api/me/aff`、`POST /api/me/topup`、`GET /api/pricing`（公开） | 完整 |
+
+**权限点读写分离**（`crates/okapi-api/src/permissions.rs`，全量清单由 `ALL` 常量导出并有
+用例把关"新增常量必须登记"）：新增 `pricing.read` / `user.read` / `settings.read` 三个只读点，
+使"只读运营角色"可查看模型定价与用户列表而不能改动。统计沿用 `billing.read`——统计即账务读，
+不另立 `stats.read` 以免同一类资源出现两套权限点。
+
+**删除语义定案**（`crates/okapi-store/src/mutate.rs`）：
+- **软删**（channels / api_keys / users）：`billing_records` 引用这些 id，硬删会让历史账单
+  失去可解释性；软删同时停用从属资源（删渠道连带停用其 key，防调度器取到孤儿 key；
+  封禁/删用户连带吊销令牌并刷新鉴权缓存，否则缓存 TTL 内已发出的 key 仍能打数据面）。
+- **配置类硬删 + 占用检查**（models / groups / plans / roles）：删除前查引用，被占用返回
+  **409 + error_code**（`group_in_use` / `plan_in_use` / `role_in_use` / `group_is_default`）
+  要求管理端先解绑——**不静默级联**，避免用户悄悄掉回默认组导致计费口径突变。
+- 定价类变更响应带 `requires_publish: true`，提示需发布新 epoch（PriceBook 是编译期快照）。
+
+**安全约束**：`/admin/users/{id}/manage` 不可作用于自己（`self_target`）、不可作用于
+super_admin（`super_admin_protected`，防互踢导致站点失去最高权限）；批量渠道操作要求
+`all` 属主范围（own 范围逐条校验会放大误操作面）；设置列表对含
+secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占位，明文永不出接口。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

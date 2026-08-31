@@ -331,6 +331,12 @@ pub async fn totp_confirm(
 pub struct CreateKeyReq {
     #[serde(default)]
     pub name: Option<String>,
+    /// 过期时间（RFC 3339）；缺省 = 永不过期。
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// 模型白名单；缺省/空数组 = 不限。新建时填写只可能收窄本 key，无提权面。
+    #[serde(default)]
+    pub model_allowlist: Option<Vec<String>>,
 }
 
 pub async fn create_key(
@@ -341,14 +347,17 @@ pub async fn create_key(
     let user_id = require_session(&state, &headers).await?;
     let token = format!("sk-okapi-{}", rand_token(43));
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
-    let name = req.name.as_deref().unwrap_or("web");
+    let name = req.name.as_deref().map_or("web", str::trim);
+    let allowlist = super::portal::normalize_allowlist(req.model_allowlist);
     let key_id = sqlx::query_scalar!(
-        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name)
-           VALUES ($1, $2, $3, $4) RETURNING id"#,
+        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"#,
         user_id,
         key_hash,
         token.chars().take(16).collect::<String>(),
-        name
+        name,
+        req.expires_at,
+        allowlist
     )
     .fetch_one(&state.pg)
     .await

@@ -9,7 +9,7 @@ use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
 use okapi_store::ChClient;
@@ -305,7 +305,9 @@ pub async fn keys(
     let key = authenticate(&state, &headers).await?;
     let rows = sqlx::query!(
         r#"
-        SELECT id, name, key_prefix, status, used_micro, rpm_limit, daily_token_limit, created_at
+        SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,
+               daily_token_limit, max_concurrency, model_allowlist, group_override,
+               expires_at, last_used_at, created_at
         FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id
         "#,
         key.user_id
@@ -339,7 +341,14 @@ pub async fn keys(
                 "status": r.status,
                 "used_micro": r.used_micro,
                 "rpm_limit": r.rpm_limit,
+                "tpm_limit": r.tpm_limit,
+                "rpd_limit": r.rpd_limit,
                 "daily_token_limit": r.daily_token_limit,
+                "max_concurrency": r.max_concurrency,
+                "model_allowlist": r.model_allowlist,
+                "group_override": r.group_override,
+                "expires_at": r.expires_at,
+                "last_used_at": r.last_used_at,
                 "created_at": r.created_at,
                 "amount_micro": agg.map_or(0, |u| ch_i64(u, "amount_micro")),
                 "requests": agg.map_or(0, |u| ch_i64(u, "requests")),
@@ -347,6 +356,80 @@ pub async fn keys(
         })
         .collect();
     Ok(Json(json!({ "data": data })))
+}
+
+/// 自助面可改字段：全部为"收窄自己这把 key"的语义，不含限额与分组覆盖
+/// （那两类是管控项与计价锚点，放开等于用户可自行提额/改价，仅管理面可写）。
+#[derive(Deserialize)]
+pub struct PatchKeyReq {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// 1=启用 2=停用。
+    #[serde(default)]
+    pub status: Option<i16>,
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    /// 字符串数组；null = 解除模型限制。
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub model_allowlist: Option<Option<Vec<String>>>,
+}
+
+/// 模型白名单归一化：空数组等价于"不限"，避免落成一把谁也调不通的死 key。
+pub(super) fn normalize_allowlist(list: Option<Vec<String>>) -> Option<Value> {
+    let items: Vec<String> = list?
+        .into_iter()
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
+        .collect();
+    if items.is_empty() {
+        return None;
+    }
+    Some(json!(items))
+}
+
+/// PATCH /api/me/keys/{id}：改自己 key 的名称/启停/过期/模型白名单。
+pub async fn patch_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchKeyReq>,
+) -> Result<Json<Value>, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    if let Some(status) = req.status
+        && !matches!(status, 1 | 2)
+    {
+        return Err(AppError::bad_request().with_param("status"));
+    }
+    let patch = okapi_store::admin::ApiKeyPatch {
+        name: req.name.map(|n| n.trim().to_owned()),
+        status: req.status,
+        expires_at: req.expires_at,
+        model_allowlist: req.model_allowlist.map(normalize_allowlist),
+        ..Default::default()
+    };
+    let touched =
+        okapi_store::admin::patch_api_key(&state.pg, id, Some(key.user_id), &patch).await?;
+    let Some(touched) = touched else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    // 先落库后失效：并发回源读到的必是新值
+    state.sched.auth_del(&touched.key_hash).await;
+    Ok(Json(json!({ "ok": true, "key_id": id })))
+}
+
+/// DELETE /api/me/keys/{id}：吊销自己的 key（软删除，明文 key 立即失效）。
+pub async fn delete_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    let touched = okapi_store::admin::soft_delete_api_key(&state.pg, id, Some(key.user_id)).await?;
+    let Some(touched) = touched else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    };
+    state.sched.auth_del(&touched.key_hash).await;
+    Ok(Json(json!({ "ok": true, "key_id": id })))
 }
 
 /// GET /api/me/aff：邀请码（惰性生成）+ 邀请人数 + 累计返利（M4 aff）。

@@ -52,9 +52,9 @@ async fn api_clients_keep_json_semantics() {
         .unwrap();
     assert_eq!(resp.status(), 401, "Accept: */* 不构成浏览器导航");
 
-    // 方法不匹配的路径同理（/admin/redemptions 仅 POST）
+    // 方法不匹配的路径同理（/admin/cache/flush 仅 POST）：405 而非被 SPA fallback 吞成 200
     let resp = client
-        .get(format!("http://{addr}/admin/redemptions"))
+        .get(format!("http://{addr}/admin/cache/flush"))
         .header("accept", "application/json")
         .send()
         .await

@@ -746,6 +746,279 @@ pub async fn assign_user_role(
     Ok(result.rows_affected() > 0)
 }
 
+// ---- API key 生命周期（用户自助 + 管理管控）----
+
+/// api_keys 可写字段补丁。
+///
+/// 三态语义：`None` = 不改；`Some(None)` = 置空（解除限制）；`Some(Some(v))` = 设为 v。
+/// 分层由调用方决定：自助面只填前四项（只能把自己的 key 收窄），
+/// 限额与 `group_override` 是管控项与计价锚点，仅管理面填写。
+#[derive(Debug, Default, Clone)]
+pub struct ApiKeyPatch {
+    pub name: Option<String>,
+    /// 1=启用 2=停用（3=expired 由过期时间派生，不接受直接写）。
+    pub status: Option<i16>,
+    pub expires_at: Option<Option<DateTime<Utc>>>,
+    pub model_allowlist: Option<Option<serde_json::Value>>,
+    pub group_override: Option<Option<String>>,
+    pub rpm_limit: Option<Option<i32>>,
+    pub tpm_limit: Option<Option<i32>>,
+    pub rpd_limit: Option<Option<i32>>,
+    pub daily_token_limit: Option<Option<i64>>,
+    pub max_concurrency: Option<Option<i32>>,
+}
+
+/// 被改动的 key 标识：`key_hash` 供调用方精确失效 `auth:key:*` 缓存，
+/// `user_id` 供审计记录归属主体。
+#[derive(Debug, Clone)]
+pub struct TouchedApiKey {
+    pub key_hash: String,
+    pub user_id: i64,
+}
+
+/// 部分更新 api_keys。`owner` = Some(uid) 时限定属主（自助面越权防线，
+/// 与 404 同响应不泄漏他人 key 是否存在）。返回 None = 不存在/非属主。
+pub async fn patch_api_key(
+    pool: &PgPool,
+    key_id: i64,
+    owner: Option<i64>,
+    patch: &ApiKeyPatch,
+) -> Result<Option<TouchedApiKey>, StoreError> {
+    let row = sqlx::query!(
+        r#"
+        UPDATE api_keys SET
+            name              = COALESCE($3, name),
+            status            = COALESCE($4::smallint, status),
+            expires_at        = CASE WHEN $5::bool THEN $6::timestamptz ELSE expires_at END,
+            model_allowlist   = CASE WHEN $7::bool THEN $8::jsonb ELSE model_allowlist END,
+            group_override    = CASE WHEN $9::bool THEN $10::varchar ELSE group_override END,
+            rpm_limit         = CASE WHEN $11::bool THEN $12::int ELSE rpm_limit END,
+            tpm_limit         = CASE WHEN $13::bool THEN $14::int ELSE tpm_limit END,
+            rpd_limit         = CASE WHEN $15::bool THEN $16::int ELSE rpd_limit END,
+            daily_token_limit = CASE WHEN $17::bool THEN $18::bigint ELSE daily_token_limit END,
+            max_concurrency   = CASE WHEN $19::bool THEN $20::int ELSE max_concurrency END
+        WHERE id = $1 AND deleted_at IS NULL
+          AND ($2::bigint IS NULL OR user_id = $2)
+        RETURNING key_hash, user_id
+        "#,
+        key_id,
+        owner,
+        patch.name.as_deref(),
+        patch.status,
+        patch.expires_at.is_some(),
+        patch.expires_at.flatten(),
+        patch.model_allowlist.is_some(),
+        patch.model_allowlist.as_ref().and_then(Option::as_ref),
+        patch.group_override.is_some(),
+        patch.group_override.as_ref().and_then(Option::as_deref),
+        patch.rpm_limit.is_some(),
+        patch.rpm_limit.flatten(),
+        patch.tpm_limit.is_some(),
+        patch.tpm_limit.flatten(),
+        patch.rpd_limit.is_some(),
+        patch.rpd_limit.flatten(),
+        patch.daily_token_limit.is_some(),
+        patch.daily_token_limit.flatten(),
+        patch.max_concurrency.is_some(),
+        patch.max_concurrency.flatten(),
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| TouchedApiKey {
+        key_hash: r.key_hash,
+        user_id: r.user_id,
+    }))
+}
+
+/// 软删除 api_key：保留行以占住 `key_hash` 唯一约束，杜绝同明文 key 复活。
+/// 鉴权回源已按 `deleted_at IS NULL` 过滤，缓存失效后立即失效。
+pub async fn soft_delete_api_key(
+    pool: &PgPool,
+    key_id: i64,
+    owner: Option<i64>,
+) -> Result<Option<TouchedApiKey>, StoreError> {
+    let row = sqlx::query!(
+        r#"
+        UPDATE api_keys SET deleted_at = now()
+        WHERE id = $1 AND deleted_at IS NULL
+          AND ($2::bigint IS NULL OR user_id = $2)
+        RETURNING key_hash, user_id
+        "#,
+        key_id,
+        owner
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| TouchedApiKey {
+        key_hash: r.key_hash,
+        user_id: r.user_id,
+    }))
+}
+
+/// 定价分组是否存在（`group_override` 写入前置校验：
+/// 交给 FK 报错只能得到 500，前置查得到可渲染的 error_code）。
+pub async fn price_group_exists(pool: &PgPool, group_code: &str) -> Result<bool, StoreError> {
+    let hit = sqlx::query_scalar!(
+        r#"SELECT 1 AS "hit!" FROM price_groups WHERE group_code = $1"#,
+        group_code
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(hit.is_some())
+}
+
+// ---- 渠道编辑 ----
+
+/// channels 可写字段补丁（`None` = 不改）。
+///
+/// 这些列都是 NOT NULL 或语义上不该被清空，故只需两态；
+/// 与 `ApiKeyPatch` 的三态不同是因为那边"解除限制"必须能表达。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ChannelPatch<'a> {
+    pub name: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub api_base: Option<&'a str>,
+    pub models: Option<&'a serde_json::Value>,
+    pub model_mapping: Option<&'a serde_json::Value>,
+    pub settings: Option<&'a serde_json::Value>,
+    pub capabilities: Option<&'a serde_json::Value>,
+    pub priority: Option<i32>,
+    pub trust_upstream_usage: Option<bool>,
+}
+
+/// 部分更新渠道配置；返回是否命中（false = 不存在/已删除，调用方转 404）。
+pub async fn patch_channel(
+    pool: &PgPool,
+    channel_id: i64,
+    patch: ChannelPatch<'_>,
+) -> Result<bool, StoreError> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE channels SET
+            name                 = COALESCE($2, name),
+            provider             = COALESCE($3, provider),
+            api_base             = COALESCE($4, api_base),
+            models               = COALESCE($5::jsonb, models),
+            model_mapping        = COALESCE($6::jsonb, model_mapping),
+            settings             = COALESCE($7::jsonb, settings),
+            capabilities         = COALESCE($8::jsonb, capabilities),
+            priority             = COALESCE($9, priority),
+            trust_upstream_usage = COALESCE($10, trust_upstream_usage),
+            updated_at           = now()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+        channel_id,
+        patch.name,
+        patch.provider,
+        patch.api_base,
+        patch.models,
+        patch.model_mapping,
+        patch.settings,
+        patch.capabilities,
+        patch.priority,
+        patch.trust_upstream_usage,
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// 软删除渠道；返回是否命中。调度候选查询已按 `deleted_at IS NULL` 过滤，
+/// 故不必级联改 channel_keys（历史账单仍能按 channel_id 回溯）。
+pub async fn soft_delete_channel(pool: &PgPool, channel_id: i64) -> Result<bool, StoreError> {
+    let affected = sqlx::query!(
+        r#"UPDATE channels SET deleted_at = now(), updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL"#,
+        channel_id
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// 渠道单把 key 的权重/并发上限调整；返回是否命中。
+pub async fn patch_channel_key(
+    pool: &PgPool,
+    channel_id: i64,
+    channel_key_id: i64,
+    weight: Option<i32>,
+    max_concurrency: Option<Option<i32>>,
+) -> Result<bool, StoreError> {
+    let affected = sqlx::query!(
+        r#"
+        UPDATE channel_keys SET
+            weight          = COALESCE($3, weight),
+            max_concurrency = CASE WHEN $4::bool THEN $5::int ELSE max_concurrency END,
+            updated_at      = now()
+        WHERE id = $2 AND channel_id = $1
+        "#,
+        channel_id,
+        channel_key_id,
+        weight,
+        max_concurrency.is_some(),
+        max_concurrency.flatten(),
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// 凭证轮换结果。多把 key 的渠道必须显式指定 `channel_key_id`——
+/// 静默全量覆盖会把一次换 key 变成把整条渠道的凭证写成同一把。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RotateOutcome {
+    Rotated(i64),
+    NotFound,
+    Ambiguous,
+}
+
+/// 轮换渠道凭证，并复位 key 状态机（active / 清冷却 / 清失败计数）。
+/// 复位是必需的：换凭证的场景多半是原凭证已被上游封停打进 invalid(6)，
+/// 不复位则新凭证仍被状态机排除在候选之外。
+pub async fn rotate_channel_credential(
+    pool: &PgPool,
+    channel_id: i64,
+    channel_key_id: Option<i64>,
+    credential: &str,
+) -> Result<RotateOutcome, StoreError> {
+    // 未指定 key 时只在"恰好一把"的情况下自动选定；多把则要求显式指定，
+    // 避免把凭证轮换到运维预期之外的那把 key 上
+    let target = if let Some(id) = channel_key_id {
+        id
+    } else {
+        let ids = sqlx::query_scalar!(
+            r#"SELECT id FROM channel_keys WHERE channel_id = $1 ORDER BY id LIMIT 2"#,
+            channel_id
+        )
+        .fetch_all(pool)
+        .await?;
+        match ids.as_slice() {
+            [] => return Ok(RotateOutcome::NotFound),
+            [only] => *only,
+            _ => return Ok(RotateOutcome::Ambiguous),
+        }
+    };
+    let hit = sqlx::query_scalar!(
+        r#"
+        UPDATE channel_keys SET
+            credential_ciphertext = $3,
+            status = 1, cooldown_until = NULL, failed_count = 0, last_error = NULL,
+            updated_at = now()
+        WHERE id = $2 AND channel_id = $1
+        RETURNING id
+        "#,
+        channel_id,
+        target,
+        credential.as_bytes()
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(hit.map_or(RotateOutcome::NotFound, RotateOutcome::Rotated))
+}
+
 /// 管理操作审计留痕。
 pub async fn record_audit(
     pool: &PgPool,

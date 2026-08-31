@@ -217,6 +217,106 @@ pub async fn models(
 /// **已知边界**：`upstream_cost` 目前全链路恒为 0——chsink `build_ch_row` 硬编码，
 /// 而渠道只配了调度用的相对成本系数（`relative_cost_milli`），无法推出绝对成本。
 /// 故 margin 字段先按公式返回（成本采集落地即生效），前端不据此出图。
+/// overview 今日档与窗口档共用的列集合。`uniqExact(user_id)` 只能在 MV 的原始维度列上
+/// 求值，故两档都直查 mv_user_day 而非在其上二次聚合。
+const OVERVIEW_COLS: &str = "countMerge(requests) AS requests, \
+                             sumMerge(tokens) AS tokens, \
+                             sumMerge(amount) AS amount_micro, \
+                             sumMerge(original) AS original_micro, \
+                             sumMerge(discount) AS discount_micro, \
+                             sumMerge(upstream_cost) AS upstream_cost_micro, \
+                             sumMerge(errors) AS errors, \
+                             uniqExact(user_id) AS active_users";
+
+/// GET /admin/stats/overview：站点即时 KPI（今日 / 窗口双档）。
+///
+/// 与 `margin` 的分工：margin 是**按日明细 + 毛利率**（趋势图数据源），
+/// overview 是**单屏概览数字**（含活跃用户数，margin 未覆盖），
+/// 两者同源 mv_user_day，各取所需，不重复聚合逻辑。
+pub async fn overview(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<WindowQuery>,
+) -> Result<Json<Value>, AppError> {
+    super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
+    let ch = ch_or_disabled(&state)?;
+    let days = q.days();
+
+    let today_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day = today()");
+    let window_sql =
+        format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day >= today() - {days}");
+    let today = ch.query_json_each_row(&today_sql).await?;
+    let window = ch.query_json_each_row(&window_sql).await?;
+
+    let pack = |rows: &[Value]| {
+        let Some(r) = rows.first() else {
+            return json!({});
+        };
+        let amount = ch_i64(r, "amount_micro");
+        let cost = ch_i64(r, "upstream_cost_micro");
+        let requests = ch_i64(r, "requests");
+        let errors = ch_i64(r, "errors");
+        json!({
+            "requests": requests,
+            "errors": errors,
+            "error_rate_bp": rate_bp(errors, requests),
+            "tokens": ch_i64(r, "tokens"),
+            "amount_micro": amount,
+            "original_micro": ch_i64(r, "original_micro"),
+            "discount_micro": ch_i64(r, "discount_micro"),
+            "upstream_cost_micro": cost,
+            // 毛利 = 实付 − 上游成本；可为负（折扣过深/上游涨价的告警信号）
+            "margin_micro": amount.saturating_sub(cost),
+            "margin_rate_bp": rate_bp(amount.saturating_sub(cost), amount),
+            "active_users": ch_i64(r, "active_users"),
+        })
+    };
+
+    Ok(Json(json!({
+        "days": days,
+        "today": pack(&today),
+        "window": pack(&window),
+    })))
+}
+
+/// GET /api/me/stats/daily：我的按日用量（用户门户曲线）。
+///
+/// 对齐 new-api「我的用量按日统计」；只看自己——user_id 取自已鉴权主体而非
+/// 请求参数，从根上排除越权查他人用量。
+pub async fn my_daily(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<WindowQuery>,
+) -> Result<Json<Value>, AppError> {
+    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let ch = ch_or_disabled(&state)?;
+    let days = q.days();
+    let sql = format!(
+        "SELECT day, model, countMerge(requests) AS requests, \
+                sumMerge(tokens) AS tokens, sumMerge(amount) AS amount_micro, \
+                sumMerge(discount) AS discount_micro \
+         FROM mv_user_model_day \
+         WHERE user_id = {} AND day >= today() - {days} \
+         GROUP BY day, model ORDER BY day, amount_micro DESC",
+        key.user_id
+    );
+    let rows = ch.query_json_each_row(&sql).await?;
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "day": r.get("day").and_then(Value::as_str).unwrap_or_default(),
+                "model": r.get("model").and_then(Value::as_str).unwrap_or_default(),
+                "requests": ch_i64(r, "requests"),
+                "tokens": ch_i64(r, "tokens"),
+                "amount_micro": ch_i64(r, "amount_micro"),
+                "discount_micro": ch_i64(r, "discount_micro"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "days": days, "data": data })))
+}
+
 pub async fn margin(
     State(state): State<AppState>,
     headers: HeaderMap,

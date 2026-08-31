@@ -6,6 +6,7 @@
 
 pub mod admin;
 pub mod auth_web;
+pub mod manage;
 pub mod mcp;
 pub mod oauth;
 pub mod pay;
@@ -22,8 +23,23 @@ use axum::extract::Request;
 use axum::http::{Method, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tower_http::trace::TraceLayer;
+
+/// PATCH 补丁字段的三态解码：字段缺省 = 不改（`None`），显式 `null` = 置空
+/// （`Some(None)`），有值 = 赋值（`Some(Some(v))`）。
+/// serde 对 `Option<Option<T>>` 默认把 `null` 折叠成 `None`，与"不改"混淆，故需此包装。
+//
+// 三态语义必须由嵌套 Option 承载：换成单层 Option 会丢掉"未传"与"传 null"的区分，
+// 使 PATCH 无法表达"把字段置空"。故此处豁免 option_option。
+#[allow(clippy::option_option)]
+pub(super) fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
+}
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let state = gateway::build_state(
@@ -47,90 +63,16 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 组装路由（集成测试直接复用）。
+/// 组装路由（集成测试直接复用）。按域拆分子路由，与 IMPLEMENTATION §11.6
+/// 的接口面清单一一对应：供应商接入 / 定价配置 / 用户与权限 / 运维统计 / 用户自助 / 认证。
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route(
-            "/admin/channels",
-            post(admin::create_channel).get(admin::list_channels),
-        )
-        .route(
-            "/admin/channels/{id}/status",
-            post(admin::set_channel_status),
-        )
-        .route(
-            "/admin/channels/{id}/groups",
-            post(admin::set_channel_groups),
-        )
-        .route("/admin/channels/{id}/test", post(admin::test_channel))
-        .route(
-            "/admin/channels/{id}/fetch-models",
-            get(admin::fetch_channel_models),
-        )
-        .route("/admin/models", post(admin::upsert_model))
-        .route("/admin/groups", post(admin::upsert_group))
-        .route("/admin/users/{id}/groups", post(admin::set_user_groups))
-        .route("/admin/settings", post(admin::set_setting))
-        .route("/admin/settings/{key}", get(admin::get_setting))
-        .route("/admin/leaderboard", get(admin::leaderboard))
-        .route("/admin/stats/channels", get(stats::channels))
-        .route("/admin/stats/models", get(stats::models))
-        .route("/admin/stats/margin", get(stats::margin))
-        .route("/admin/pricing/publish", post(admin::publish_pricing))
-        .route(
-            "/admin/pricing/import-newapi",
-            post(admin::import_newapi_pricing),
-        )
-        .route(
-            "/admin/pricing/rules",
-            post(admin::upsert_pricing_rule).get(admin::list_pricing_rules),
-        )
-        .route(
-            "/admin/pricing/rules/{rule_code}",
-            axum::routing::delete(admin::delete_pricing_rule),
-        )
-        .route("/admin/users/{id}/credit", post(admin::credit_user))
-        .route(
-            "/admin/users/{id}/balance-expiry",
-            post(admin::set_balance_expiry),
-        )
-        .route("/admin/users", get(admin::list_users))
-        .route(
-            "/admin/roles",
-            post(admin::create_role).get(admin::list_roles),
-        )
-        .route("/admin/users/{id}/role", post(admin::assign_role))
-        .route("/admin/users/{id}/overview", get(admin::user_overview))
-        .route("/admin/billing/refund", post(admin::refund_by_request))
-        .route("/admin/redemptions", post(admin::create_redemptions))
-        .route("/admin/plans", post(admin::upsert_plan))
-        .route("/admin/cache/flush", post(admin::cache_flush))
-        .route("/admin/reconciliation", get(admin::reconciliation))
-        .route("/api/me", get(portal::me))
-        .route("/api/me/usage", get(portal::usage))
-        .route("/api/me/keys", get(portal::keys))
-        .route("/api/me/logs", get(portal::logs))
-        .route("/api/me/redeem", post(portal::redeem))
-        .route("/api/me/aff", get(portal::aff))
-        .route("/api/me/topup", post(pay::topup))
-        .route("/api/teams", post(teams::create_team))
-        .route("/api/teams/{id}/members", post(teams::upsert_member))
-        .route("/api/teams/{id}/keys", post(teams::create_team_key))
-        .route("/api/teams/{id}/usage", get(teams::team_usage))
-        .route("/pay/callback/epay", get(pay::epay_callback))
-        .route("/pay/callback/stripe", post(pay::stripe_webhook))
-        .route("/api/pricing", get(portal::public_pricing))
-        .route("/api/setup/status", get(setup::status))
-        .route("/api/setup", post(setup::run))
-        .route("/auth/register", post(auth_web::register))
-        .route("/auth/login", post(auth_web::login))
-        .route("/auth/logout", post(auth_web::logout))
-        .route("/auth/totp/enroll", post(auth_web::totp_enroll))
-        .route("/auth/totp/confirm", post(auth_web::totp_confirm))
-        .route("/auth/keys", post(auth_web::create_key))
-        .route("/auth/oauth-providers", get(oauth::list_providers))
-        .route("/auth/oauth/{provider}", get(oauth::start))
-        .route("/auth/oauth/{provider}/callback", get(oauth::callback))
+        .merge(channel_routes())
+        .merge(pricing_routes())
+        .merge(user_admin_routes())
+        .merge(ops_routes())
+        .merge(portal_routes())
+        .merge(auth_routes())
         .route("/mcp", post(mcp::endpoint))
         .route("/healthz", get(|| async { "ok" }))
         .merge(spa_router())
@@ -178,6 +120,176 @@ async fn spa_index_bytes() -> Option<Vec<u8>> {
 #[cfg(feature = "embed-web")]
 async fn spa_index_bytes() -> Option<Vec<u8>> {
     WebAssets::get("index.html").map(|file| file.data.to_vec())
+}
+
+type ConsoleRouter = Router<AppState>;
+
+/// 供应商接入面（渠道）：CRUD + 凭证轮换 + 状态机 + 可见组 + 批量/复制 + 测活 + 模型发现。
+fn channel_routes() -> ConsoleRouter {
+    Router::new()
+        .route(
+            "/admin/channels",
+            post(admin::create_channel).get(admin::list_channels),
+        )
+        .route(
+            "/admin/channels/{id}",
+            axum::routing::patch(admin::update_channel).delete(admin::delete_channel),
+        )
+        .route(
+            "/admin/channels/{id}/credential",
+            post(admin::rotate_channel_credential),
+        )
+        .route(
+            "/admin/channels/{id}/keys/{key_id}",
+            axum::routing::patch(admin::update_channel_key),
+        )
+        .route(
+            "/admin/channels/{id}/status",
+            post(admin::set_channel_status),
+        )
+        .route(
+            "/admin/channels/{id}/groups",
+            post(admin::set_channel_groups),
+        )
+        .route("/admin/channels/batch", post(manage::batch_channels))
+        .route(
+            "/admin/channels/{id}/duplicate",
+            post(manage::duplicate_channel),
+        )
+        .route("/admin/channels/{id}/test", post(admin::test_channel))
+        .route(
+            "/admin/channels/{id}/fetch-models",
+            get(admin::fetch_channel_models),
+        )
+}
+
+/// 模型配置与定价面：模型 / 分组 / 套餐 / 兑换码 / 活动规则 / 发布与导入。
+fn pricing_routes() -> ConsoleRouter {
+    Router::new()
+        .route(
+            "/admin/models",
+            post(admin::upsert_model).get(manage::list_models),
+        )
+        .route("/admin/models/{model}", delete(manage::delete_model))
+        .route(
+            "/admin/groups",
+            post(admin::upsert_group).get(manage::list_groups),
+        )
+        .route("/admin/groups/{code}", delete(manage::delete_group))
+        .route(
+            "/admin/plans",
+            post(admin::upsert_plan).get(manage::list_plans),
+        )
+        .route("/admin/plans/{code}", delete(manage::delete_plan))
+        .route(
+            "/admin/redemptions",
+            post(admin::create_redemptions).get(manage::list_redemptions),
+        )
+        .route(
+            "/admin/redemptions/{batch}",
+            delete(manage::disable_redemption_batch),
+        )
+        .route(
+            "/admin/pricing/rules",
+            post(admin::upsert_pricing_rule).get(admin::list_pricing_rules),
+        )
+        .route(
+            "/admin/pricing/rules/{rule_code}",
+            axum::routing::delete(admin::delete_pricing_rule),
+        )
+        .route(
+            "/admin/pricing/rules/{code}/toggle",
+            post(manage::toggle_rule),
+        )
+        .route("/admin/pricing/publish", post(admin::publish_pricing))
+        .route(
+            "/admin/pricing/import-newapi",
+            post(admin::import_newapi_pricing),
+        )
+}
+
+/// 用户与令牌管理 + 权限分级（角色 / 权限点清单）。
+fn user_admin_routes() -> ConsoleRouter {
+    Router::new()
+        .route("/admin/users", get(admin::list_users))
+        .route("/admin/users/{id}/manage", post(manage::manage_user))
+        .route("/admin/users/{id}/groups", post(admin::set_user_groups))
+        .route("/admin/users/{id}/credit", post(admin::credit_user))
+        .route(
+            "/admin/users/{id}/balance-expiry",
+            post(admin::set_balance_expiry),
+        )
+        .route("/admin/users/{id}/role", post(admin::assign_role))
+        .route("/admin/users/{id}/overview", get(admin::user_overview))
+        .route("/admin/keys", get(manage::list_keys))
+        .route(
+            "/admin/keys/{id}",
+            axum::routing::patch(admin::patch_api_key).delete(admin::delete_api_key),
+        )
+        .route(
+            "/admin/roles",
+            post(admin::create_role).get(admin::list_roles),
+        )
+        .route("/admin/roles/{code}", delete(manage::delete_role))
+        .route("/admin/permissions", get(manage::list_permissions))
+}
+
+/// 运维面：系统设置 / 统计（CH 物化视图）/ 账务 / 对账 / 缓存。
+fn ops_routes() -> ConsoleRouter {
+    Router::new()
+        .route(
+            "/admin/settings",
+            post(admin::set_setting).get(manage::list_settings),
+        )
+        .route("/admin/settings/{key}", get(admin::get_setting))
+        .route("/admin/leaderboard", get(admin::leaderboard))
+        .route("/admin/stats/overview", get(stats::overview))
+        .route("/admin/stats/channels", get(stats::channels))
+        .route("/admin/stats/models", get(stats::models))
+        .route("/admin/stats/margin", get(stats::margin))
+        .route("/admin/billing/refund", post(admin::refund_by_request))
+        .route("/admin/reconciliation", get(admin::reconciliation))
+        .route("/admin/cache/flush", post(admin::cache_flush))
+}
+
+/// 用户自助面（门户）+ 团队 + 支付回调 + 公开价格。
+fn portal_routes() -> ConsoleRouter {
+    Router::new()
+        .route("/api/me", get(portal::me))
+        .route("/api/me/usage", get(portal::usage))
+        .route("/api/me/stats/daily", get(stats::my_daily))
+        .route("/api/me/keys", get(portal::keys))
+        .route(
+            "/api/me/keys/{id}",
+            axum::routing::patch(portal::patch_key).delete(portal::delete_key),
+        )
+        .route("/api/me/logs", get(portal::logs))
+        .route("/api/me/redeem", post(portal::redeem))
+        .route("/api/me/aff", get(portal::aff))
+        .route("/api/me/topup", post(pay::topup))
+        .route("/api/teams", post(teams::create_team))
+        .route("/api/teams/{id}/members", post(teams::upsert_member))
+        .route("/api/teams/{id}/keys", post(teams::create_team_key))
+        .route("/api/teams/{id}/usage", get(teams::team_usage))
+        .route("/pay/callback/epay", get(pay::epay_callback))
+        .route("/pay/callback/stripe", post(pay::stripe_webhook))
+        .route("/api/pricing", get(portal::public_pricing))
+}
+
+/// 认证面：注册 / 登录 / 2FA / OAuth + 初始化向导。
+fn auth_routes() -> ConsoleRouter {
+    Router::new()
+        .route("/api/setup/status", get(setup::status))
+        .route("/api/setup", post(setup::run))
+        .route("/auth/register", post(auth_web::register))
+        .route("/auth/login", post(auth_web::login))
+        .route("/auth/logout", post(auth_web::logout))
+        .route("/auth/totp/enroll", post(auth_web::totp_enroll))
+        .route("/auth/totp/confirm", post(auth_web::totp_confirm))
+        .route("/auth/keys", post(auth_web::create_key))
+        .route("/auth/oauth-providers", get(oauth::list_providers))
+        .route("/auth/oauth/{provider}", get(oauth::start))
+        .route("/auth/oauth/{provider}/callback", get(oauth::callback))
 }
 
 /// 前端 SPA 静态托管：

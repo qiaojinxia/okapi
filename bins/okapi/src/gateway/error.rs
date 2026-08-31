@@ -95,6 +95,11 @@ impl IntoResponse for AppError {
 
 impl From<StoreError> for AppError {
     fn from(err: StoreError) -> Self {
+        // 资源占用冲突是可预期的管理端结果（非故障）：回 409 + error_code 供前端渲染，
+        // 且不打 error 日志以免污染告警
+        if let StoreError::Conflict(code) = err {
+            return Self::new(StatusCode::CONFLICT, code);
+        }
         tracing::error!(error = %err, "store error");
         Self::internal()
     }
