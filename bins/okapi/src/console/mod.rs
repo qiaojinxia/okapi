@@ -267,7 +267,10 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me/redeem", post(portal::redeem))
         .route("/api/me/aff", get(portal::aff))
         .route("/api/me/topup", post(pay::topup))
-        .route("/api/teams", post(teams::create_team))
+        .route(
+            "/api/teams",
+            post(teams::create_team).get(teams::list_my_teams),
+        )
         .route("/api/teams/{id}/members", post(teams::upsert_member))
         .route("/api/teams/{id}/keys", post(teams::create_team_key))
         .route("/api/teams/{id}/usage", get(teams::team_usage))

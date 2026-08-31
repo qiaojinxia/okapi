@@ -15,6 +15,8 @@ export const qk = {
   channelModels: (id: number) => ['admin', 'channel-models', id] as const,
   statsOverview: (days: number) => ['admin', 'stats', 'overview', days] as const,
   myDaily: (days: number) => ['me', 'stats', 'daily', days] as const,
+  myTeams: ['me', 'teams'] as const,
+  teamUsage: (id: number) => ['team', 'usage', id] as const,
   statsChannels: (days: number) => ['admin', 'stats', 'channels', days] as const,
   statsModels: (days: number) => ['admin', 'stats', 'models', days] as const,
   statsMargin: (days: number) => ['admin', 'stats', 'margin', days] as const,

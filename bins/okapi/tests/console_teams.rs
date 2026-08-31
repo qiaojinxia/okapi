@@ -281,4 +281,75 @@ async fn team_wallet_member_limit_full_cycle() {
         .await
         .unwrap();
     assert_eq!(denied.status(), 403);
+
+    // ---- 我所属团队列表（UI 入口；没有它前端无从知道自己在哪些团）----
+    let mine: Value = client
+        .get(format!("http://{}/api/teams", env.console))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = mine["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["team_id"].as_i64() == Some(team_id))
+        .expect("owner 必须看到自己建的团");
+    assert_eq!(row["name"], "acme", "展示名须剥掉唯一性后缀");
+    assert_eq!(row["role"], "owner");
+    assert_eq!(row["member_count"], 2, "owner + bob");
+    assert_eq!(
+        row["balance_micro"].as_i64().unwrap(),
+        1_000_000 - expected_spend,
+        "列表余额与分账口径一致"
+    );
+
+    // bob 也能看到该团，且角色是 member
+    let bob_teams: Value = client
+        .get(format!("http://{}/api/teams", env.console))
+        .header(reqwest::header::COOKIE, &bob_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let bob_view = bob_teams["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["team_id"].as_i64() == Some(team_id))
+        .expect("成员必须看到所属团");
+    assert_eq!(bob_view["role"], "member");
+    assert_eq!(bob_view["monthly_spend_limit_micro"], 600);
+
+    // 非成员的列表里不含该团（越权可见性）
+    let outsider_teams: Value = client
+        .get(format!("http://{}/api/teams", env.console))
+        .header(reqwest::header::COOKIE, &outsider_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !outsider_teams["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["team_id"].as_i64() == Some(team_id)),
+        "非成员不得在列表中看到该团"
+    );
+
+    // 无会话（仅 API key 单轨）访问：401——前端据此降级提示改用邮箱密码登录
+    let no_session = client
+        .get(format!("http://{}/api/teams", env.console))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_session.status(), 401);
 }

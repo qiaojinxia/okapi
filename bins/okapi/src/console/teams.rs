@@ -95,6 +95,50 @@ pub async fn create_team(
     Ok(Json(json!({ "team_id": team_id, "name": name })))
 }
 
+/// 建团时 username 存为 `team:{name}:{短uuid}`（保证全局唯一）；此处反解出展示名。
+/// 取中间段而非首尾，因为团名本身可能含 `:`。
+fn display_name(username: &str) -> String {
+    let body = username.strip_prefix("team:").unwrap_or(username);
+    body.rsplit_once(':').map_or(body, |(name, _)| name).to_owned()
+}
+
+/// GET /api/teams：我所属的团队列表（UI 入口——没有它前端无从知道自己在哪些团）。
+pub async fn list_my_teams(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let me = require_session(&state, &headers).await?;
+    let rows = sqlx::query!(
+        r#"
+        SELECT tm.team_user_id, u.username, tm.role, tm.monthly_spend_limit_micro,
+               (SELECT COUNT(*) FROM team_members x WHERE x.team_user_id = tm.team_user_id)
+                   AS "member_count!"
+        FROM team_members tm
+        JOIN users u ON u.id = tm.team_user_id
+        WHERE tm.member_user_id = $1 AND u.deleted_at IS NULL
+        ORDER BY tm.team_user_id
+        "#,
+        me
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let mut data = Vec::with_capacity(rows.len());
+    for r in rows {
+        // 团钱包余额走热账本（团数量少，逐个查可接受）
+        let balance = state.ledger.balance(r.team_user_id).await?;
+        data.push(json!({
+            "team_id": r.team_user_id,
+            "name": display_name(&r.username),
+            "role": r.role,
+            "member_count": r.member_count,
+            "monthly_spend_limit_micro": r.monthly_spend_limit_micro,
+            "balance_micro": balance.as_micros(),
+        }));
+    }
+    Ok(Json(json!({ "data": data })))
+}
+
 // ---- 成员管理 ----
 
 #[derive(Deserialize)]
@@ -254,4 +298,18 @@ pub async fn team_usage(
         "balance_micro": balance.as_micros(),
         "members": data,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_name;
+
+    #[test]
+    fn display_name_strips_uniqueness_suffix() {
+        assert_eq!(display_name("team:Acme:a1b2c3"), "Acme");
+        // 团名含冒号时只剥最后一段后缀
+        assert_eq!(display_name("team:a:b:ffffff"), "a:b");
+        // 非团格式（防御）原样返回
+        assert_eq!(display_name("plain"), "plain");
+    }
 }

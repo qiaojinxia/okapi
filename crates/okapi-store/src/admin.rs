@@ -362,6 +362,8 @@ pub struct ChannelKeyRow {
     pub failed_count: i32,
     pub cooldown_until: Option<DateTime<Utc>>,
     pub last_error: Option<String>,
+    /// 加权随机的权重（多 key 渠道的核心调度参数，管理端需可见可调）。
+    pub weight: i32,
     pub max_concurrency: Option<i32>,
 }
 
@@ -643,7 +645,8 @@ pub async fn set_setting(
 pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, StoreError> {
     let rows = sqlx::query!(
         r#"
-        SELECT id, channel_id, status, failed_count, cooldown_until, last_error, max_concurrency
+        SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
+               weight, max_concurrency
         FROM channel_keys ORDER BY channel_id, id
         "#
     )
@@ -658,6 +661,7 @@ pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, Stor
             failed_count: r.failed_count,
             cooldown_until: r.cooldown_until,
             last_error: r.last_error,
+            weight: r.weight,
             max_concurrency: r.max_concurrency,
         })
         .collect())

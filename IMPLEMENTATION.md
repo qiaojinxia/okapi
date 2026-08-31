@@ -640,9 +640,16 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 
 e2e 覆盖"权限分级"链路：普通用户 key 对六类管理面一律 403，且前端在 403 下呈现可读错误而非白屏。
 
-仍待接入 UI（后端已就绪，可用 API 操作）：Team 层四端点、按日志退款、
-渠道 key 级权重/并发（`PATCH {id}/keys/{key_id}`）、TOTP 自助绑定
-（受 web session 约束——门户为 key 单轨，需先邮箱密码登录，接入时要做降级提示）。
+Team 层 UI 已接入门户 `/portal/teams`（建团/成员增改与月度上限/自助发团 key/按成员分账），
+并**补齐后端缺失的 `GET /api/teams`**——此前只有 `POST`，前端无从知道自己属于哪些团，
+属 UI 驱动出的接口缺口；展示名从 `team:{name}:{短uuid}` 反解（取中间段，容忍团名含 `:`）。
+Team 全部端点为 web session 鉴权（成员自助，与门户 key 单轨不同），故页面对 401
+降级为"请改用邮箱密码登录"提示而非显示空列表；用例覆盖成员/非成员可见性与无会话 401。
+按日志退款已接入运维页（幂等，重复提交回 already_refunded）；渠道 key 级权重与并发
+已接入渠道编辑面板（并发留空提交 null = 解除上限，与"不改"区分；为此给
+`ChannelKeyRow` 补上 `weight` 字段——加权随机的核心调度参数此前管理端不可见）。
+
+仍待接入 UI：TOTP 自助绑定（受 web session 约束，同 Team 层，需引导邮箱密码登录后再开启）。
 
 **安全约束**：`/admin/users/{id}/manage` 不可作用于自己（`self_target`）、不可作用于
 super_admin（`super_admin_protected`，防互踢导致站点失去最高权限）；批量渠道操作要求
