@@ -1,5 +1,7 @@
 export default {
   common: {
+    openNav: '打开导航',
+    closeNav: '关闭导航',
     appName: 'Okapi',
     login: '登录',
     logout: '退出登录',
@@ -66,6 +68,8 @@ export default {
     enabled: '两步验证已开启',
   },
   portal: {
+    navBilling: '额度与账单',
+    navAccount: '账号与协作',
     byModelTitle: '按模型消费分布',
     dashboard: '总览',
     affNav: '邀请',
@@ -127,6 +131,11 @@ export default {
     enter: '进入控制台',
   },
   admin: {
+    navSupply: '供应商接入',
+    navPricing: '模型与定价',
+    navIdentity: '用户与权限',
+    navInsight: '数据统计',
+    navSystem: '系统',
     pickModels: '从已配定价的模型中选择',
     pickModelsHint: '勾选即填入上方"模型"框；上游有而本站未配定价的模型可直接在该框手输。',
     pickModelsEmpty: '尚无模型，请先在定价页配置。',

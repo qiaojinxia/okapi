@@ -1,5 +1,7 @@
 export default {
   common: {
+    openNav: 'Open navigation',
+    closeNav: 'Close navigation',
     appName: 'Okapi',
     login: 'Sign in',
     logout: 'Sign out',
@@ -66,6 +68,8 @@ export default {
     enabled: 'Two-factor authentication enabled',
   },
   portal: {
+    navBilling: 'Billing',
+    navAccount: 'Account',
     byModelTitle: 'Spend by model',
     affNav: 'Referral',
     affTitle: 'Referral rewards',
@@ -127,6 +131,11 @@ export default {
     enter: 'Enter console',
   },
   admin: {
+    navSupply: 'Supply',
+    navPricing: 'Models & pricing',
+    navIdentity: 'Users & access',
+    navInsight: 'Insights',
+    navSystem: 'System',
     pickModels: 'Pick from priced models',
     pickModelsHint: 'Checking fills the Models field above; models not yet priced here can still be typed manually.',
     pickModelsEmpty: 'No models yet — configure them on the pricing page first.',
