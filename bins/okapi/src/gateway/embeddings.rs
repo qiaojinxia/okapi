@@ -361,7 +361,7 @@ async fn forward(
     request_id: Uuid,
 ) -> Result<ForwardOk, (AppError, Option<(i64, i64)>, i16)> {
     let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, canonical, &key.visibility_groups)
+        okapi_store::channels::candidates_for_model(&state.pg, canonical, key.pool_code.as_deref())
             .await
             .map_err(|e| (AppError::from(e), None, 0))?;
     let candidates: Vec<_> = super::scheduler::order_candidates(rows)

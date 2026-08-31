@@ -134,7 +134,7 @@ async fn handle(
 
     // —— 预扣已建立 ——
     let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, &canonical, &key.visibility_groups)
+        okapi_store::channels::candidates_for_model(&state.pg, &canonical, key.pool_code.as_deref())
             .await
             .map_err(AppError::from);
     let candidates: Vec<_> = match rows {

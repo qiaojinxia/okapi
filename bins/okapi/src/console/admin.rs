@@ -114,9 +114,9 @@ pub struct CreateChannelReq {
     pub trust_upstream_usage: bool,
     #[serde(default)]
     pub max_concurrency: Option<i32>,
-    /// 可见组绑定（空 = 不绑定，宽松模式下全可见）。
+    /// 所属渠道池（空 = 不入池，宽松模式下对所有人可见）。
     #[serde(default)]
-    pub groups: Vec<String>,
+    pub pools: Vec<String>,
     /// 渠道高级设置（channels.settings 对象整体；已注册键见 docs/database.md：
     /// thinking_to_content / bill_by_response_model / strip_request_fields / pass_paths）。
     #[serde(default)]
@@ -180,8 +180,8 @@ pub async fn create_channel(
     }
     // 属主传播（#6267）：创建人即属主，own 范围据此过滤
     okapi_store::admin::set_channel_owner(&state.pg, channel_id, actor.user_id).await?;
-    if !req.groups.is_empty() {
-        okapi_store::admin::set_channel_groups(&state.pg, channel_id, &req.groups).await?;
+    if !req.pools.is_empty() {
+        okapi_store::admin::set_channel_pools(&state.pg, channel_id, &req.pools).await?;
     }
     state.invalidate_routing_caches();
     audit(
@@ -257,27 +257,27 @@ pub async fn set_channel_status(
 }
 
 #[derive(Deserialize)]
-pub struct SetGroupsReq {
-    pub groups: Vec<String>,
+pub struct SetPoolsReq {
+    pub pools: Vec<String>,
 }
 
-/// 覆盖式设置渠道可见组（§6.3 可见性矩阵）。
-pub async fn set_channel_groups(
+/// 覆盖式设置渠道所属的池（可见性由池表达，docs/database.md §3.7）。
+pub async fn set_channel_pools(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<SetGroupsReq>,
+    Json(req): Json<SetPoolsReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
-    okapi_store::admin::set_channel_groups(&state.pg, id, &req.groups).await?;
+    okapi_store::admin::set_channel_pools(&state.pg, id, &req.pools).await?;
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
-        "channel.set_groups",
+        "channel.set_pools",
         &id.to_string(),
-        json!({ "groups": req.groups }),
+        json!({ "pools": req.pools }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -630,6 +630,9 @@ pub struct UpsertGroupReq {
     pub group_ratio: String,
     #[serde(default)]
     pub description: String,
+    /// 该分组走哪个渠道池；null/缺省 = 不限（全部渠道可见）。
+    #[serde(default)]
+    pub pool_code: Option<String>,
 }
 
 /// 定价分组 upsert（改倍率后需 publish 生效）。
@@ -647,14 +650,61 @@ pub async fn upsert_group(
         &req.group_code,
         &req.group_ratio,
         &req.description,
+        req.pool_code.as_deref(),
     )
     .await?;
+    state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "pricing.upsert_group",
         &req.group_code,
-        json!({ "group_ratio": req.group_ratio }),
+        json!({ "group_ratio": req.group_ratio, "pool_code": req.pool_code }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 渠道池取值：与库 CHECK 一致，前端下拉也用这份清单。
+const ROUTING_STRATEGIES: &[&str] = &["priority_weighted", "least_latency"];
+
+#[derive(Deserialize)]
+pub struct UpsertPoolReq {
+    pub pool_code: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub routing_strategy: Option<String>,
+}
+
+/// 渠道池 upsert（池 = 一组渠道 + 在这组里怎么选，docs/database.md §3.7）。
+pub async fn upsert_pool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UpsertPoolReq>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    let strategy = req.routing_strategy.as_deref().unwrap_or("priority_weighted");
+    if !ROUTING_STRATEGIES.contains(&strategy) {
+        return Err(AppError::bad_request().with_param("routing_strategy"));
+    }
+    if req.pool_code.trim().is_empty() {
+        return Err(AppError::bad_request().with_param("pool_code"));
+    }
+    okapi_store::admin::upsert_channel_pool(
+        &state.pg,
+        req.pool_code.trim(),
+        &req.description,
+        strategy,
+    )
+    .await?;
+    state.invalidate_routing_caches();
+    audit(
+        &state,
+        &actor,
+        "channel.upsert_pool",
+        &req.pool_code,
+        json!({ "routing_strategy": strategy }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))

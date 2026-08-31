@@ -117,19 +117,60 @@ pub struct GroupListRow {
     pub sort_order: i32,
     /// 绑定该分组的用户数（删除前占用检查）。
     pub user_count: i64,
-    /// 绑定该分组可见的渠道数。
+    /// 该分组的池内渠道数（无池 = 0，语义是"不限"而非"零个"，由前端区分展示）。
     pub channel_count: i64,
+}
+
+/// 渠道池列表行。
+pub struct PoolListRow {
+    pub pool_code: String,
+    pub description: Option<String>,
+    pub routing_strategy: String,
+    /// 池内渠道数。
+    pub channel_count: i64,
+    /// 引用该池的分组数 + 令牌数（>0 时删除会被拒）。
+    pub group_count: i64,
+    pub key_count: i64,
+}
+
+pub async fn list_pools(pool: &PgPool) -> Result<Vec<PoolListRow>, StoreError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT p.pool_code, p.description, p.routing_strategy,
+               (SELECT COUNT(*) FROM pool_channels pc WHERE pc.pool_code = p.pool_code)
+                   AS "channel_count!",
+               (SELECT COUNT(*) FROM price_groups g WHERE g.pool_code = p.pool_code)
+                   AS "group_count!",
+               (SELECT COUNT(*) FROM api_keys k
+                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS "key_count!"
+        FROM channel_pools p
+        ORDER BY p.pool_code
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| PoolListRow {
+            pool_code: r.pool_code,
+            description: r.description,
+            routing_strategy: r.routing_strategy,
+            channel_count: r.channel_count,
+            group_count: r.group_count,
+            key_count: r.key_count,
+        })
+        .collect())
 }
 
 pub async fn list_groups(pool: &PgPool) -> Result<Vec<GroupListRow>, StoreError> {
     let rows = sqlx::query!(
         r#"
         SELECT g.group_code, g.group_ratio::text AS group_ratio, g.description,
-               g.is_default, g.sort_order,
+               g.is_default, g.sort_order, g.pool_code,
                (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_code = g.group_code)
                    AS "user_count!",
-               (SELECT COUNT(*) FROM group_channel_bindings gb
-                 WHERE gb.group_code = g.group_code) AS "channel_count!"
+               (SELECT COUNT(*) FROM pool_channels pc
+                 WHERE pc.pool_code = g.pool_code) AS "channel_count!"
         FROM price_groups g
         ORDER BY g.sort_order, g.group_code
         "#

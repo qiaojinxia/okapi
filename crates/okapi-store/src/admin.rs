@@ -400,6 +400,11 @@ pub struct ChannelRow {
     pub models: serde_json::Value,
     pub trust_upstream_usage: bool,
     pub owner_id: Option<i64>,
+    /// 渠道行为开关（thinking_to_content / bill_by_response_model / strip_request_fields）。
+    /// 管理端要按当前值渲染开关，否则编辑表单只能默认全关——保存即静默清掉已生效的配置。
+    pub settings: serde_json::Value,
+    /// 所属渠道池代码。同理由：不回显当前值，编辑面一保存就把池成员关系清空。
+    pub pools: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -422,10 +427,17 @@ pub async fn list_channels(
 ) -> Result<Vec<ChannelRow>, StoreError> {
     let rows = sqlx::query!(
         r#"
-        SELECT id, name, provider, api_base, status, priority, models, trust_upstream_usage, owner_id
-        FROM channels
-        WHERE deleted_at IS NULL AND ($1::bigint IS NULL OR owner_id = $1)
-        ORDER BY priority DESC, id
+        SELECT c.id, c.name, c.provider, c.api_base, c.status, c.priority, c.models,
+               c.trust_upstream_usage, c.owner_id,
+               COALESCE(c.settings, '{}'::jsonb) AS "settings!",
+               COALESCE(
+                   (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
+                      FROM pool_channels pc WHERE pc.channel_id = c.id),
+                   ARRAY[]::varchar[]
+               ) AS "pools!"
+        FROM channels c
+        WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)
+        ORDER BY c.priority DESC, c.id
         "#,
         owner
     )
@@ -443,6 +455,8 @@ pub async fn list_channels(
             models: r.models,
             trust_upstream_usage: r.trust_upstream_usage,
             owner_id: r.owner_id,
+            settings: r.settings,
+            pools: r.pools,
         })
         .collect())
 }
@@ -477,27 +491,30 @@ pub async fn set_channel_owner(
     Ok(())
 }
 
-/// 覆盖式设置渠道的可见组绑定（空数组 = 清空绑定）。
-pub async fn set_channel_groups(
+/// 覆盖式设置该渠道所属的池（空数组 = 从所有池移出）。
+///
+/// 从渠道这一侧维护成员关系：管理员的动作通常是"这个渠道给哪些档位用"，
+/// 而不是逐个池去挑渠道。
+pub async fn set_channel_pools(
     pool: &PgPool,
     channel_id: i64,
-    groups: &[String],
+    pools: &[String],
 ) -> Result<(), StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query!(
-        r#"DELETE FROM group_channel_bindings WHERE channel_id = $1"#,
+        r#"DELETE FROM pool_channels WHERE channel_id = $1"#,
         channel_id
     )
     .execute(&mut *tx)
     .await?;
-    if !groups.is_empty() {
+    if !pools.is_empty() {
         sqlx::query!(
             r#"
-            INSERT INTO group_channel_bindings (group_code, channel_id)
+            INSERT INTO pool_channels (pool_code, channel_id)
             SELECT unnest($2::varchar[]), $1
             "#,
             channel_id,
-            groups
+            pools
         )
         .execute(&mut *tx)
         .await?;
@@ -512,18 +529,46 @@ pub async fn upsert_price_group(
     group_code: &str,
     group_ratio: &str,
     description: &str,
+    pool_code: Option<&str>,
 ) -> Result<(), StoreError> {
     sqlx::query!(
         r#"
-        INSERT INTO price_groups (group_code, group_ratio, description)
-        VALUES ($1, ($2::text)::numeric, $3)
+        INSERT INTO price_groups (group_code, group_ratio, description, pool_code)
+        VALUES ($1, ($2::text)::numeric, $3, $4)
         ON CONFLICT (group_code) DO UPDATE SET
             group_ratio = EXCLUDED.group_ratio,
-            description = EXCLUDED.description
+            description = EXCLUDED.description,
+            pool_code   = EXCLUDED.pool_code
         "#,
         group_code,
         group_ratio,
-        description
+        description,
+        pool_code
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 渠道池 upsert。策略取值由库 CHECK 兜底，非法值回 400 而不是写坏数据。
+pub async fn upsert_channel_pool(
+    pool: &PgPool,
+    pool_code: &str,
+    description: &str,
+    routing_strategy: &str,
+) -> Result<(), StoreError> {
+    sqlx::query!(
+        r#"
+        INSERT INTO channel_pools (pool_code, description, routing_strategy)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (pool_code) DO UPDATE SET
+            description      = EXCLUDED.description,
+            routing_strategy = EXCLUDED.routing_strategy,
+            updated_at       = now()
+        "#,
+        pool_code,
+        description,
+        routing_strategy
     )
     .execute(pool)
     .await?;

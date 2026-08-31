@@ -72,6 +72,23 @@ async fn drain(pg: &PgPool, ch: &ChClient) {
     panic!("outbox 100 批未排空");
 }
 
+/// drain 到本用例自己那行进入 CH 为止。
+///
+/// outbox 是全局队列且 `process_once` 用 `FOR UPDATE SKIP LOCKED`：并行的其它
+/// 测试二进制持锁时，本用例的 drain 会提前收敛到 0，此刻自己播的行还没进 CH。
+/// 故必须"drain + 查询"重试，而不是 drain 一次就断言（同 console_stats::poll_row）。
+async fn drain_until_visible(pg: &PgPool, ch: &ChClient, user_id: i64) -> i64 {
+    for _ in 0..50 {
+        drain(pg, ch).await;
+        let n = ch_count(ch, user_id).await;
+        if n > 0 {
+            return n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    0
+}
+
 async fn ch_count(ch: &ChClient, user_id: i64) -> i64 {
     let rows = ch
         .query_json_each_row(&format!(
@@ -100,9 +117,12 @@ async fn chsink_pipeline_then_dlq() {
     let user_id = 1_000_000_000 + i64::from(rand_suffix());
     let request_id = Uuid::new_v4();
     insert_outbox(&pg, &outbox_payload(user_id, request_id, 4242)).await;
-    drain(&pg, &ch).await;
 
-    assert_eq!(ch_count(&ch, user_id).await, 1, "明细应恰好一行");
+    assert_eq!(
+        drain_until_visible(&pg, &ch, user_id).await,
+        1,
+        "明细应恰好一行"
+    );
     let mv = ch
         .query_json_each_row(&format!(
             "SELECT sumMerge(amount) AS a, countMerge(requests) AS r \

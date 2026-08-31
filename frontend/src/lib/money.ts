@@ -13,6 +13,22 @@ export function formatMoney(micro: number, locale: string): string {
   }).format(usd)
 }
 
+/// 聚合金额（KPI / 报表合计）。
+///
+/// 与 formatMoney 分开是刻意的：单笔调用可能只花 $0.0012，两位小数会显示成
+/// $0.00 像是免费，故 formatMoney 保留四位；而站点级合计带四位小数（$485.4252）
+/// 只是噪音，且金额大到百万时需要紧凑记法才不撑破卡片。
+export function formatMoneyAggregate(micro: number, locale: string): string {
+  const usd = micro / 1_000_000
+  return new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency: 'USD',
+    notation: Math.abs(usd) >= 1_000_000 ? 'compact' : 'standard',
+    minimumFractionDigits: Math.abs(usd) >= 1_000_000 ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(usd)
+}
+
 export function formatQuota(micro: number, locale: string): string {
   const quota = (micro / 1_000_000) * QUOTA_PER_USD
   return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(quota)

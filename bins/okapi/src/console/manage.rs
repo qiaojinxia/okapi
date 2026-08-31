@@ -245,6 +245,39 @@ pub async fn delete_model(
     Ok(Json(json!({ "ok": true, "requires_publish": true })))
 }
 
+/// 渠道池列表：带渠道数与引用数，前端据此提示"被 N 个分组引用，先解绑"。
+pub async fn list_pools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::CHANNEL_READ).await?;
+    let rows = okapi_store::listing::list_pools(&state.pg).await?;
+    Ok(Json(json!({
+        "data": rows.iter().map(|r| json!({
+            "pool_code": r.pool_code,
+            "description": r.description,
+            "routing_strategy": r.routing_strategy,
+            "channel_count": r.channel_count,
+            "group_count": r.group_count,
+            "key_count": r.key_count,
+        })).collect::<Vec<_>>()
+    })))
+}
+
+pub async fn delete_pool(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    if !mutate::delete_channel_pool(&state.pg, &code).await? {
+        return Err(not_found());
+    }
+    state.invalidate_routing_caches();
+    audit(&state, &actor, "channel.delete_pool", &code, json!({})).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
 pub async fn delete_group(
     State(state): State<AppState>,
     headers: HeaderMap,

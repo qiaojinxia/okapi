@@ -96,3 +96,7 @@ jobs:
         working-directory: frontend
       - name: i18n 红线守卫
         run: bash scripts/guard-i18n.sh
+      - name: i18n 键完备性（缺键会把原始键渲染到界面）
+        run: python3 scripts/guard-i18n-keys.py
+      - name: 前端权限点存在性（写错会对自定义角色永久隐藏入口）
+        run: python3 scripts/guard-frontend-permissions.py

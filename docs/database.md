@@ -111,7 +111,8 @@ CREATE TABLE price_groups (
     group_ratio NUMERIC(6,4) NOT NULL DEFAULT 1,
     description VARCHAR(255),
     is_default  BOOLEAN NOT NULL DEFAULT false,
-    sort_order  INT NOT NULL DEFAULT 0
+    sort_order  INT NOT NULL DEFAULT 0,
+    pool_code   VARCHAR(32)                           -- 该分组走哪个渠道池；null = 不限（FK 在 channel_pools 后补）
 );
 
 CREATE TABLE user_groups (
@@ -121,12 +122,32 @@ CREATE TABLE user_groups (
     PRIMARY KEY (user_id, group_code)
 );
 
-CREATE TABLE group_channel_bindings (                 -- 渠道可见性矩阵（#6977）
-    group_code VARCHAR(32) NOT NULL REFERENCES price_groups(group_code),
-    channel_id BIGINT NOT NULL,                       -- FK 在 channels 建表后补
-    PRIMARY KEY (group_code, channel_id)
+-- 渠道池：一组渠道 + 在这组里怎么选（见 §3.7 论证）。
+-- 与 price_groups 正交：分组只管"付多少钱"，池只管"打哪些上游、怎么选"。
+CREATE TABLE channel_pools (
+    pool_code        VARCHAR(32) PRIMARY KEY,          -- stable / fast / cheap ...
+    description      VARCHAR(255),
+    routing_strategy VARCHAR(24) NOT NULL DEFAULT 'priority_weighted',
+    -- priority_weighted：priority 分层 + 层内成本修正加权随机（历史行为，默认）
+    -- least_latency  ：层内按 Redis 时延 EWMA 升序（需 lat:ck:* 有数据，缺数据退化为 priority_weighted）
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT channel_pools_strategy_chk
+        CHECK (routing_strategy IN ('priority_weighted', 'least_latency'))
 );
--- settings.strict_group_isolation = true：未绑定即不可见；false：绑定为空 = 全可见
+
+CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对多）
+    pool_code  VARCHAR(32) NOT NULL REFERENCES channel_pools(pool_code) ON DELETE CASCADE,
+    channel_id BIGINT NOT NULL,                       -- FK 在 channels 建表后补
+    PRIMARY KEY (pool_code, channel_id)
+);
+
+-- 池的解析顺序：api_keys.pool_override > 生效定价组的 price_groups.pool_code > 无池。
+-- 可见性两侧同时约束（与改造前 group_channel_bindings 语义一致）：
+--   有池 = 只看池内渠道；
+--   无池 = 只看未被任何池认领的渠道（宽松，默认），strict_group_isolation=true 时无候选。
+-- "入池即专属"：否则把高价渠道放进 vip 池后无池用户照样打得到，池就只是标签而非隔离手段。
+-- 历史 group_channel_bindings 已在 0015 迁移为 pool_<group_code> 并删表（同一件事只留一处）。
 -- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ strip_request_fields（不透传的请求顶层字段，new-api rc.23 #6847；model/messages/stream 受保护）/ pass_paths（custom_pass 白名单）
 
 CREATE TABLE api_keys (
@@ -142,6 +163,7 @@ CREATE TABLE api_keys (
     used_micro        BIGINT NOT NULL DEFAULT 0,
     model_allowlist   JSONB,                          -- null = 不限
     group_override    VARCHAR(32) REFERENCES price_groups(group_code),  -- 令牌分组（对齐 new-api）
+    pool_override     VARCHAR(32),                    -- 令牌钉住某渠道池（优先于分组的池；FK 在 channel_pools 后补）
     rpm_limit         INT, tpm_limit INT, rpd_limit INT,                -- 覆盖用户级限速
     daily_token_limit BIGINT,                         -- 日 token 上限（#6458/#5252）
     max_concurrency   INT,
@@ -177,8 +199,10 @@ CREATE TABLE channels (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at           TIMESTAMPTZ
 );
-ALTER TABLE group_channel_bindings
+ALTER TABLE pool_channels
     ADD FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE;
+ALTER TABLE price_groups ADD FOREIGN KEY (pool_code) REFERENCES channel_pools(pool_code);
+ALTER TABLE api_keys     ADD FOREIGN KEY (pool_override) REFERENCES channel_pools(pool_code);
 
 CREATE TABLE channel_keys (                           -- key 级状态机（Sub2API 吸收项 3）
     id                    BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -192,6 +216,12 @@ CREATE TABLE channel_keys (                           -- key 级状态机（Sub2
     last_error            VARCHAR(255),
     weight                INT NOT NULL DEFAULT 1,
     max_concurrency       INT,                        -- 在途计数在 Redis conc:ck:*
+    -- 以下三项为 key 级配额（0016）。同一渠道下不同 key 的权限与限额常常不同：
+    -- 同组织的两把 OpenAI key 可能一把有 gpt-4 权限、一把没有；套餐不同则 RPM 不同。
+    -- 只有渠道级 models/限额时，这类差异只能靠拆渠道表达，base_url 与设置被迫重复。
+    model_subset          JSONB,                      -- null = 继承 channels.models；非空 = 该 key 只服务这些模型
+    rpm_limit             INT,                        -- null = 不限；固定窗口计数在 Redis rpm:ck:*
+    daily_spend_cap_micro BIGINT,                     -- null = 不限；当日累计消费在 Redis spend:ck:*（结算时累加）
     quota_snapshot        JSONB,                      -- 被动采集上游 rate-limit 响应头
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -207,6 +237,10 @@ CREATE TABLE models (
     context_window INT, max_output INT,
     status         SMALLINT NOT NULL DEFAULT 1,
     sort_order     INT NOT NULL DEFAULT 0,
+    -- 模型级降级链（0016）：本模型**无任何可用候选**时按序改投这些模型。
+    -- 只在"渠道都挂了/都被限住"时触发，不覆盖上游 4xx 与用户参数错误——
+    -- 那些换模型也不会好，只会把错误藏起来。计费与响应都按实际服务模型走（见 DESIGN §3）。
+    fallback_models JSONB NOT NULL DEFAULT '[]',
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -495,6 +529,9 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/redeem；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
 | `conc:ck:<channel_key_id>` | STRING | 无（对账清理） | 渠道 key 在途并发信号量 |
+| `rpm:ck:<channel_key_id>:<分钟桶>` | STRING 计数 | 120s | 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。固定分钟窗，与 `crl:*` 同机制；超限即把该 key 从候选里摘掉而非拒绝请求——同渠道其它 key 仍可承接 |
+| `spend:ck:<channel_key_id>:<yyyymmdd>` | STRING | 48h | 渠道 key 当日累计消费 micro（`channel_keys.daily_spend_cap_micro`）。结算后累加、选路前比较：软实时，宁可略超也不阻塞热路径 |
+| `lat:ck:<channel_key_id>` | STRING | 10min | 时延 EWMA（毫秒）。结算侧按 `new = old*0.7 + sample*0.3` 更新；`least_latency` 池按此升序。无数据的 key 视为中位数，避免新 key 因"无历史"被永久冷落或被优先灌流 |
 | `stick:resp:{<uid>}:v1:<response_id>` | STRING | 30min | 粘性 L1 → channel_key_id |
 | `stick:sess:{<uid>}:v1:<session_hash>` | STRING | 1h 滑动 | 粘性 L2 → channel_key_id |
 | `auth:key:<sha256>` | STRING(JSON) | 60s | 鉴权缓存（key 元数据+限额+可见组）。值内嵌写入时版本号 |
@@ -713,6 +750,29 @@ DECIMAL 列建议 `::text` 保精度）。
 | models.hourly/monthly_price | 不迁 | 无对应计价语义，告警 |
 | pricing_rules + 4 张 binding 表 | 不迁（语义等价替代） | Okapi 用 price_groups + user_pricing + model_pricing.tier_ratios 表达；见 IMPLEMENTATION §11.4 吸收判据 |
 | plugins / proxy_ip* / audit_logs / request_logs / usage_stats_daily | 不迁 | 运维与历史统计域：日志留源库，CH 从新开始 |
+
+### 3.7 渠道 / 模型 / key 关系的取舍（2026-08-31 五方对照定案）
+
+对照 new-api（QuantumNous main）、Sub2API、LiteLLM Router、老 ok-api 与本项目，五种关系模型的差异集中在三个问题上：
+
+| | 调度单元 | 模型身份 | "谁能用哪些上游" | 路由策略归属 |
+| --- | --- | --- | --- | --- |
+| **Okapi** | channel(1) → channel_keys(N) 建表 | 全局唯一 + 一等定价 | pool（本次改造前为 price_group 直绑） | channel_pools.routing_strategy |
+| new-api | channel 一行多 key，**key 状态存 JSON map** | 仅字符串 | 物化 `abilities(group, model, channel_id)` | 无 |
+| Sub2API | account = 凭证即单元 | 仅字符串 | api_key → group（账号池） | group.model_routing JSONB |
+| LiteLLM | deployment = 模型×凭证×端点 | public 别名 | 同名 deployment 隐式成组 | routing_strategy + fallbacks |
+| 老 ok-api | provider_api_key = 凭证即单元 | **按 provider 分域** | api_key → model_group → 模型+凭证 | model_groups.routing_mode |
+
+**保留本项目的两处**：
+
+1. `channel(1) → channel_keys(N)` 建表。new-api 把每把 key 的状态放在按数组下标索引的 JSON map（`MultiKeyStatusList map[int]int`）里，删一把 key 下标即错位，也无法按 key 查冷却、出统计；Sub2API / LiteLLM / 老 ok-api 则以凭证为调度单元，20 把同端点 key 要重复 20 份 base_url 与模型清单。建表方案两个问题都没有。
+2. 全局唯一模型名 + 一等定价。老 ok-api 的 `UNIQUE(provider_id, model_code)` 使同一个 gpt-4o 跨两家上游成为两行，要定价两次，用户侧模型名还会歧义。
+
+**改掉的一处**：`price_groups` 原本同时承担"付多少钱"（group_ratio）与"能打哪些渠道"（group_channel_bindings）。这两件事没有内在关联，"同价不同池"（stable / fast 同价）或"同池不同价"（限时促销）都得复制分组并手工同步倍率。更要紧的连带后果是**没有任何一张表拥有"怎么在候选里选"**，所以 least_latency、模型级 fallback 这类能力没有归属处。故拆出 `channel_pools`（§1.2）。
+
+**借入的四项能力**（各有出处）：`channel_keys.rpm_limit` / `daily_spend_cap_micro`（老 ok-api provider_api_keys、Sub2API account 并发）、`channel_keys.model_subset`（老 ok-api supported_models）、`models.fallback_models`（LiteLLM fallbacks、老 ok-api fallback_model_code）、`channel_pools.routing_strategy`（老 ok-api routing_mode、LiteLLM routing_strategy）。
+
+**明确不借**：老 ok-api 的 provider 分域模型（定价重复 + 名字歧义）、绝对价存储（倍率心智已与主流对齐，见 §11.5）、new-api 的物化 `abilities` 表——候选查询当前不是瓶颈，物化会引入一致性维护成本，待真成瓶颈再议（届时 pool 已把可见性收敛为一次 join，物化更容易）。
 
 ## 4. NATS JetStream
 

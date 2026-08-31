@@ -84,7 +84,7 @@ async fn setup() -> Env {
         .await
         .unwrap();
     let group = format!("g-mg-{suffix}");
-    okapi_store::admin::upsert_price_group(&pg, &group, "0.9", "测试组")
+    okapi_store::admin::upsert_price_group(&pg, &group, "0.9", "测试组", None)
         .await
         .unwrap();
 

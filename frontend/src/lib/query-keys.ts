@@ -9,6 +9,7 @@ export const qk = {
   adminUsers: (q: string) => ['admin', 'users', q] as const,
   adminRoles: ['admin', 'roles'] as const,
   adminPermissions: ['admin', 'permissions'] as const,
+  adminPools: ['admin', 'pools'] as const,
   adminGroups: ['admin', 'groups'] as const,
   adminModels: ['admin', 'models'] as const,
   adminKeys: (userId: number | null, q: string) => ['admin', 'keys', userId, q] as const,

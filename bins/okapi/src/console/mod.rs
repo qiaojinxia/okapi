@@ -148,8 +148,14 @@ fn channel_routes() -> ConsoleRouter {
             post(admin::set_channel_status),
         )
         .route(
-            "/admin/channels/{id}/groups",
-            post(admin::set_channel_groups),
+            "/admin/channels/{id}/pools",
+            post(admin::set_channel_pools),
+        )
+        .route(
+            "/admin/pools",
+            get(manage::list_pools).post(admin::upsert_pool),
+        )
+        .route("/admin/pools/{code}", delete(manage::delete_pool)
         )
         .route("/admin/channels/batch", post(manage::batch_channels))
         .route(

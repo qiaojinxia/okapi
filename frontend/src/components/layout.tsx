@@ -5,7 +5,7 @@ import type { LucideIcon } from 'lucide-react'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { useMe } from '@/hooks/use-auth'
+import { useMe, usePermission } from '@/hooks/use-auth'
 import { apiFetch, clearKey } from '@/lib/api'
 import { switchLanguage } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -15,6 +15,9 @@ export interface NavItem {
   to: string
   label: string
   icon?: LucideIcon
+  /// 需要的权限点；缺省 = 人人可见。无权者该入口直接不出现——
+  /// 让用户点进去吃 403 是把后端的拦截当成了交互设计。
+  permission?: string
 }
 
 /// 导航分组：功能一多，平铺列表就找不着东西——按域分组是主流后台的通行做法。
@@ -28,10 +31,19 @@ export interface NavGroup {
 ///
 /// 侧栏在窄屏折叠为抽屉（`md` 断点）——中转后台常在手机上临时处置渠道故障，
 /// 折叠比横向滚动可用得多；抽屉展开时铺一层遮罩，点击即关。
-export function Shell({ nav, children }: { nav: NavGroup[]; children: React.ReactNode }) {
+export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: React.ReactNode }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
+  const can = usePermission()
+
+  // 按权限裁剪导航；整组被裁空时连小标题一起去掉，避免留下空标题
+  const nav = rawNav
+    .map((g) => ({
+      ...g,
+      items: g.items.filter((i) => i.permission === undefined || can(i.permission)),
+    }))
+    .filter((g) => g.items.length > 0)
 
   // 当前页标题：取最长匹配的导航项，避免 /admin 抢走 /admin/channels
   const current = nav

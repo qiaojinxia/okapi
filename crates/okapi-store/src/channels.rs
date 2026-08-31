@@ -16,6 +16,10 @@ pub struct ChannelCandidate {
     pub trust_upstream_usage: bool,
     /// key 级并发上限（null = 不限；在途计数在 Redis conc:ck:*）。
     pub max_concurrency: Option<i32>,
+    /// key 级 RPM 上限（null = 不限；固定分钟窗在 Redis rpm:ck:*）。
+    pub rpm_limit: Option<i32>,
+    /// key 级当日消费上限 micro（null = 不限；累计在 Redis spend:ck:*）。
+    pub daily_spend_cap_micro: Option<i64>,
     /// 对外模型名 → 上游模型名（无映射则原名透传）。
     pub model_mapping: serde_json::Value,
     /// 渠道开关：思维链转 <think> 正文（channels.settings.thinking_to_content）。
@@ -44,15 +48,19 @@ impl ChannelCandidate {
 }
 
 /// 服务指定模型的可用渠道 key 候选：
-/// 渠道启用 + key active + 不在冷却期 + 分组可见（§6.3），按渠道 priority 降序。
+/// 渠道启用 + key active + 不在冷却期 + 在池内 + key 模型子集允许，按渠道 priority 降序。
 ///
-/// 可见性两态（settings.strict_group_isolation）：
-/// - 宽松（默认）：渠道无任何绑定 = 全可见；有绑定 = 仅绑定组可见；
-/// - 严格：必须显式绑定到用户所在组之一。
+/// 可见性由渠道池表达（docs/database.md §3.7）：
+/// - `pool_code = Some(p)`：只有池 p 内的渠道是候选；
+/// - `pool_code = None`：只看未入任何池的渠道（宽松，默认）；
+///   `settings.strict_group_isolation = true` 时无候选。
+///
+/// "入池即专属"是刻意的：否则把高价渠道放进 vip 池后，无池用户照样打得到，
+/// 池就只是个标签而不是隔离手段。
 pub async fn candidates_for_model(
     pool: &PgPool,
     model: &str,
-    visibility_groups: &[String],
+    pool_code: Option<&str>,
 ) -> Result<Vec<ChannelCandidate>, StoreError> {
     let model_json = serde_json::json!([model]);
     let rows = sqlx::query!(
@@ -78,6 +86,8 @@ pub async fn candidates_for_model(
                ck.id AS channel_key_id,
                ck.weight,
                ck.max_concurrency,
+               ck.rpm_limit,
+               ck.daily_spend_cap_micro,
                ck.credential_ciphertext
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id, cfg
@@ -86,22 +96,27 @@ pub async fn candidates_for_model(
           AND c.models @> $1
           AND ck.status = 1
           AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())
+          AND (ck.model_subset IS NULL OR ck.model_subset @> $1)
           AND (
-                EXISTS (
-                    SELECT 1 FROM group_channel_bindings b
-                    WHERE b.channel_id = c.id AND b.group_code = ANY($2)
-                )
+                -- 有池：只看池内渠道
+                ($2::varchar IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM pool_channels pc
+                    WHERE pc.channel_id = c.id AND pc.pool_code = $2
+                ))
+                -- 无池：只看"未被任何池认领"的渠道。入池即专属，否则把渠道放进
+                -- vip 池后免费用户照样能打到它——池就失去了保护渠道的意义。
                 OR (
-                    NOT cfg.strict
+                    $2::varchar IS NULL
+                    AND NOT cfg.strict
                     AND NOT EXISTS (
-                        SELECT 1 FROM group_channel_bindings b WHERE b.channel_id = c.id
+                        SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id
                     )
                 )
               )
         ORDER BY c.priority DESC, ck.id
         "#,
         model_json,
-        visibility_groups
+        pool_code
     )
     .fetch_all(pool)
     .await?;
@@ -121,6 +136,8 @@ pub async fn candidates_for_model(
                 weight: r.weight,
                 trust_upstream_usage: r.trust_upstream_usage,
                 max_concurrency: r.max_concurrency,
+                rpm_limit: r.rpm_limit,
+                daily_spend_cap_micro: r.daily_spend_cap_micro,
                 model_mapping: r.model_mapping,
                 thinking_to_content: r.thinking_to_content,
                 bill_by_response_model: r.bill_by_response_model,
@@ -178,7 +195,7 @@ pub async fn channel_key_ref(
 pub async fn custom_pass_channel(
     pool: &PgPool,
     channel_id: i64,
-    visibility_groups: &[String],
+    pool_code: Option<&str>,
 ) -> Result<Option<PassChannel>, StoreError> {
     let row = sqlx::query!(
         r#"
@@ -197,14 +214,18 @@ pub async fn custom_pass_channel(
           AND c.deleted_at IS NULL
           AND ck.status = 1
           AND (
-                EXISTS (
-                    SELECT 1 FROM group_channel_bindings b
-                    WHERE b.channel_id = c.id AND b.group_code = ANY($2)
-                )
+                -- 有池：只看池内渠道
+                ($2::varchar IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM pool_channels pc
+                    WHERE pc.channel_id = c.id AND pc.pool_code = $2
+                ))
+                -- 无池：只看"未被任何池认领"的渠道。入池即专属，否则把渠道放进
+                -- vip 池后免费用户照样能打到它——池就失去了保护渠道的意义。
                 OR (
-                    NOT cfg.strict
+                    $2::varchar IS NULL
+                    AND NOT cfg.strict
                     AND NOT EXISTS (
-                        SELECT 1 FROM group_channel_bindings b WHERE b.channel_id = c.id
+                        SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id
                     )
                 )
               )
@@ -212,7 +233,7 @@ pub async fn custom_pass_channel(
         LIMIT 1
         "#,
         channel_id,
-        visibility_groups
+        pool_code
     )
     .fetch_optional(pool)
     .await?;

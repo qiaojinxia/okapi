@@ -222,6 +222,73 @@ impl SchedulerRedis {
         count <= limit
     }
 
+    /// 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。
+    ///
+    /// 超限返回 false，调用方把该 key 摘出候选而不是拒绝整个请求——同渠道其它 key
+    /// 仍可承接。Redis 故障时放行：宁可短暂超上游限速，也不因缓存抖动打挂全站。
+    pub async fn channel_key_rate_ok(&self, channel_key_id: i64, limit: i64) -> bool {
+        let minute = chrono::Utc::now().timestamp() / 60;
+        let key = format!("rpm:ck:{channel_key_id}:{minute}");
+        let count: i64 = match self.client.incr(&key).await {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::debug!(error = %err, "channel_key_rate incr 失败（放行）");
+                return true;
+            }
+        };
+        if count == 1 {
+            let _: Result<bool, _> = self.client.expire(&key, 120, None).await;
+        }
+        count <= limit
+    }
+
+    /// 渠道 key 当日累计消费（micro）。读不到按 0 处理 = 不拦。
+    pub async fn channel_key_spend_get(&self, channel_key_id: i64) -> i64 {
+        let key = Self::channel_key_spend_key(channel_key_id);
+        self.client.get::<Option<i64>, _>(&key).await.ok().flatten().unwrap_or(0)
+    }
+
+    /// 结算后累加渠道 key 当日消费。软实时：先花后记，可能略超上限。
+    pub async fn channel_key_spend_add(&self, channel_key_id: i64, amount_micro: i64) {
+        let key = Self::channel_key_spend_key(channel_key_id);
+        if let Err(err) = self.client.incr_by::<i64, _>(&key, amount_micro).await {
+            tracing::debug!(error = %err, "channel_key_spend 累加失败");
+            return;
+        }
+        let _: Result<bool, _> = self.client.expire(&key, 172_800, None).await;
+    }
+
+    fn channel_key_spend_key(channel_key_id: i64) -> String {
+        let day = chrono::Utc::now().format("%Y%m%d");
+        format!("spend:ck:{channel_key_id}:{day}")
+    }
+
+    /// 渠道 key 时延 EWMA（毫秒）。无样本返回 None，调用方按中位数处理，
+    /// 避免新 key 因"没有历史"被永久冷落，也避免被误判为最快而被灌流。
+    pub async fn channel_key_latency(&self, channel_key_id: i64) -> Option<u32> {
+        self.client
+            .get::<Option<u32>, _>(&format!("lat:ck:{channel_key_id}"))
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// 更新时延 EWMA：`new = old * 0.7 + sample * 0.3`（整数运算，非计费路径）。
+    /// 权重偏向历史，单次抖动不足以改变选路；10min TTL 让长期不用的 key 自然回到无样本。
+    pub async fn channel_key_latency_record(&self, channel_key_id: i64, sample_ms: u32) {
+        let key = format!("lat:ck:{channel_key_id}");
+        let next = match self.client.get::<Option<u32>, _>(&key).await {
+            Ok(Some(old)) => (u64::from(old) * 7 + u64::from(sample_ms) * 3) / 10,
+            _ => u64::from(sample_ms),
+        };
+        let next = u32::try_from(next).unwrap_or(u32::MAX);
+        if let Err(err) = self.client.set::<(), _, _>(&key, next, None, None, false).await {
+            tracing::debug!(error = %err, "时延 EWMA 写入失败");
+            return;
+        }
+        let _: Result<bool, _> = self.client.expire(&key, 600, None).await;
+    }
+
     /// 团成员本月消费计数（软实时限额语义，IMPLEMENTATION §6.1）。
     pub async fn member_spend_get(&self, team: i64, member: i64) -> i64 {
         let key = Self::member_spend_key(team, member);

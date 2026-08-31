@@ -231,9 +231,24 @@ pricing_snapshot（存入 billing_records，jsonb）示例：
   "rules": [
     {"code": "night-discount", "type": "time_based", "multiplier": 0.8}
   ],
-  "final_unit_price_input_per_1m_usd": 1.8
+  "final_unit_price_input_per_1m_usd": 1.8,
+  "requested_model": "gpt-4o"
 }
 ```
+
+`requested_model` 仅在**发生模型级降级**时出现（否则与账单的 model 相同，属冗余）。
+
+### 3.4.1 模型级降级的计费口径
+
+`models.fallback_models` 允许"本模型无任何可用候选时改投另一个模型"。这引出一个必须先定死的问题：**按谁计费？**
+
+定为**按实际服务的模型计费**，理由是反过来会算错钱：gpt-4o 降级到 gpt-4o-mini 后若仍按 4o 计价，用户为 mini 的输出付了 4o 的价（超收）；反向降级（mini 顶不住改投 4o）若按 mini 计价则站方倒贴（少收）。按实际模型计价两个方向都不会错。
+
+配套三条约束：
+
+1. **触发条件收窄**：仅当请求模型在当前池内**零可用候选**（渠道停用/冷却/超限/无 key）时降级。上游 4xx、用户参数错误、内容审查拒绝都不触发——换个模型同样会失败，只会把真实错误藏起来，让用户为两次调用付钱。
+2. **单跳**：降级链只走一层，不递归。`a → b → c` 只尝试 a、b；否则一次请求可能横跨多个模型，账单与时延都不可预期。
+3. **对客户端可见**：响应体 `model` 字段返回实际服务的模型（OpenAI 兼容语义本就如此），账单同时记 `requested_model` 与 `model`，用户能自己核对"我要的是 A、实际用了 B、按 B 计价"。
 
 ### 3.5 生态兼容
 

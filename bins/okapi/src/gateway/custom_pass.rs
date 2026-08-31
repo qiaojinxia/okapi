@@ -69,7 +69,7 @@ async fn handle(
 
     // 渠道点查（透传非热路径，直接 PG；可见性与 chat 同一矩阵语义）
     let channel =
-        okapi_store::channels::custom_pass_channel(&state.pg, channel_id, &key.visibility_groups)
+        okapi_store::channels::custom_pass_channel(&state.pg, channel_id, key.pool_code.as_deref())
             .await?
             .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NO_AVAILABLE_CHANNEL))?;
 

@@ -67,7 +67,7 @@ async fn first_candidate(
     key: &okapi_store::AuthedKey,
 ) -> Result<okapi_store::ChannelCandidate, AppError> {
     let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, canonical, &key.visibility_groups)
+        okapi_store::channels::candidates_for_model(&state.pg, canonical, key.pool_code.as_deref())
             .await?;
     super::scheduler::order_candidates(rows)
         .into_iter()

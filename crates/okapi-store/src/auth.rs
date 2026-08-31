@@ -25,8 +25,12 @@ pub struct AuthedKey {
     /// 自定义子角色的权限点集合（admin_roles.permissions）；
     /// None = 未绑定自定义角色（admin 默认全权，对齐 new-api 迁移习惯）。
     pub permissions: Option<Vec<String>>,
-    /// 渠道可见性组集合 = 用户全部分组 ∪ 生效定价组（§6.3：可见性取并集）。
-    pub visibility_groups: Vec<String>,
+    /// 生效渠道池：api_keys.pool_override > 生效定价组的 price_groups.pool_code > None。
+    /// None = 不限（全部渠道可见）；settings.strict_group_isolation = true 时 None = 无候选。
+    pub pool_code: Option<String>,
+    /// 该池的选路策略（随鉴权缓存一起带下来，热路径不再查库）。
+    /// None = 无池，按默认 priority_weighted。
+    pub pool_strategy: Option<String>,
     /// 生效定价分组：key 分组覆盖 > 用户最高优先级组 > 默认组。
     pub group_code: String,
     /// users.price_multiplier × 1e6（定点，避免浮点穿透计费路径）。
@@ -103,49 +107,64 @@ pub async fn find_key_by_hash(
     pool: &PgPool,
     key_hash: &str,
 ) -> Result<Option<AuthedKey>, StoreError> {
+    // 用 CTE 先定生效分组，再由它推出池：池默认跟随生效定价分组，
+    // 这样"改分组"同时改价与改可用上游，符合直觉；key 可用 pool_override 单独钉住。
     let row = sqlx::query!(
         r#"
-        SELECT k.id AS key_id,
-               k.user_id,
-               k.status AS key_status,
-               u.status AS user_status,
-               u.role,
-               ar.permissions AS admin_permissions,
-               COALESCE(
-                   (SELECT array_agg(ug.group_code) FROM user_groups ug WHERE ug.user_id = u.id),
-                   ARRAY[]::varchar[]
-               ) AS "user_group_codes!",
-               (u.price_multiplier * 1000000)::bigint AS "multiplier_scaled!",
-               k.rpm_limit, k.tpm_limit, k.rpd_limit, k.max_concurrency,
-               k.model_allowlist,
-               k.expires_at,
-               k.member_user_id,
-               tm.monthly_spend_limit_micro AS "member_monthly_limit_micro?",
-               COALESCE(
-                   k.group_override,
-                   (SELECT ug.group_code FROM user_groups ug
-                     WHERE ug.user_id = u.id ORDER BY ug.priority DESC LIMIT 1),
-                   (SELECT pg2.group_code FROM price_groups pg2 WHERE pg2.is_default LIMIT 1),
-                   'default'
-               ) AS "group_code!"
-        FROM api_keys k
-        JOIN users u ON u.id = k.user_id
-        LEFT JOIN admin_roles ar ON ar.id = u.admin_role_id
-        LEFT JOIN team_members tm
-               ON tm.team_user_id = k.user_id AND tm.member_user_id = k.member_user_id
-        WHERE k.key_hash = $1 AND k.deleted_at IS NULL AND u.deleted_at IS NULL
+        WITH resolved AS (
+            SELECT k.id AS key_id,
+                   k.user_id,
+                   k.status AS key_status,
+                   u.status AS user_status,
+                   u.role,
+                   ar.permissions AS admin_permissions,
+                   (u.price_multiplier * 1000000)::bigint AS multiplier_scaled,
+                   k.rpm_limit, k.tpm_limit, k.rpd_limit, k.max_concurrency,
+                   k.model_allowlist,
+                   k.expires_at,
+                   k.member_user_id,
+                   k.pool_override,
+                   tm.monthly_spend_limit_micro AS member_monthly_limit_micro,
+                   COALESCE(
+                       k.group_override,
+                       (SELECT ug.group_code FROM user_groups ug
+                         WHERE ug.user_id = u.id ORDER BY ug.priority DESC LIMIT 1),
+                       (SELECT pg2.group_code FROM price_groups pg2 WHERE pg2.is_default LIMIT 1),
+                       'default'
+                   ) AS group_code
+            FROM api_keys k
+            JOIN users u ON u.id = k.user_id
+            LEFT JOIN admin_roles ar ON ar.id = u.admin_role_id
+            LEFT JOIN team_members tm
+                   ON tm.team_user_id = k.user_id AND tm.member_user_id = k.member_user_id
+            WHERE k.key_hash = $1 AND k.deleted_at IS NULL AND u.deleted_at IS NULL
+        )
+        SELECT r.key_id AS "key_id!",
+               r.user_id AS "user_id!",
+               r.key_status AS "key_status!",
+               r.user_status AS "user_status!",
+               r.role AS "role!",
+               r.admin_permissions,
+               r.multiplier_scaled AS "multiplier_scaled!",
+               r.rpm_limit, r.tpm_limit, r.rpd_limit, r.max_concurrency,
+               r.model_allowlist,
+               r.expires_at,
+               r.member_user_id,
+               r.member_monthly_limit_micro,
+               r.group_code AS "group_code!",
+               COALESCE(r.pool_override, pg.pool_code) AS pool_code,
+               cp.routing_strategy AS "pool_strategy?"
+        FROM resolved r
+        LEFT JOIN price_groups pg ON pg.group_code = r.group_code
+        LEFT JOIN channel_pools cp
+               ON cp.pool_code = COALESCE(r.pool_override, pg.pool_code)
         "#,
         key_hash
     )
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| {
-        let mut visibility_groups = r.user_group_codes;
-        if !visibility_groups.contains(&r.group_code) {
-            visibility_groups.push(r.group_code.clone());
-        }
-        AuthedKey {
+    Ok(row.map(|r| AuthedKey {
             key_id: r.key_id,
             user_id: r.user_id,
             key_status: r.key_status,
@@ -154,7 +173,8 @@ pub async fn find_key_by_hash(
             permissions: r
                 .admin_permissions
                 .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
-            visibility_groups,
+            pool_code: r.pool_code,
+            pool_strategy: r.pool_strategy,
             group_code: r.group_code,
             multiplier_scaled: r.multiplier_scaled,
             rpm_limit: r.rpm_limit,
@@ -165,6 +185,5 @@ pub async fn find_key_by_hash(
             expires_at: r.expires_at,
             member_user_id: r.member_user_id,
             member_monthly_limit_micro: r.member_monthly_limit_micro,
-        }
     }))
 }

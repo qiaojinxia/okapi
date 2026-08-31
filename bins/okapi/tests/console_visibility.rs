@@ -255,22 +255,38 @@ async fn own_scope_isolates_channel_admins() {
     assert_eq!(r.status(), 200);
 }
 
-/// 分组可见性 + 分组定价：绑定组渠道仅组内可用且按组倍率计价；严格模式未绑定即不可见。
+/// 池可见性 + 分组定价：池内渠道仅该池的分组可用、并按组倍率计价；
+/// 严格模式下未入池的渠道对所有人不可见。
+///
+/// 这一对语义在改造前由 price_groups 一张表兼任，现在拆成 price_groups（价）
+/// 与 channel_pools（可见性 + 选路）；本测试同时守住"拆开后行为不变"。
+// 线性场景用例：建池建组建渠道 → 宽松模式断言 → 切严格模式再断言。
+// 拆开会把"同一组前置数据"复制两遍，读者反而要来回对照才知道断言基于什么状态。
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn group_visibility_matrix_and_group_pricing() {
     let env = setup().await;
     let (super_id, super_token) = mk_user(&env.pg, 100, None).await;
     let suffix = Uuid::new_v4().simple().to_string();
     let vip = format!("vip-{}", &suffix[..8]);
+    let vip_pool = format!("pool-vip-{}", &suffix[..8]);
     let m_bound = format!("m-vb-{}", &suffix[..8]);
     let m_free = format!("m-vf-{}", &suffix[..8]);
 
-    // 组（半价）+ 两个模型 + 两条渠道（一条绑定 vip，一条不绑定）
+    // 池 + 组（半价，指向该池）+ 两个模型 + 两条渠道（一条入池，一条不入池）
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/pools",
+        json!({"pool_code": vip_pool, "description": "vip 专属"}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
     let r = cpost(
         &env,
         &super_token,
         "/admin/groups",
-        json!({"group_code": vip, "group_ratio": "0.5"}),
+        json!({"group_code": vip, "group_ratio": "0.5", "pool_code": vip_pool}),
     )
     .await;
     assert_eq!(r.status(), 200);
@@ -289,7 +305,7 @@ async fn group_visibility_matrix_and_group_pricing() {
         &super_token,
         "/admin/channels",
         json!({"name": format!("vb-{suffix}"), "api_base": format!("http://{}/ok/v1", env.mock),
-               "credential": "c", "models": [m_bound], "groups": [vip]}),
+               "credential": "c", "models": [m_bound], "pools": [vip_pool]}),
     )
     .await;
     assert_eq!(r.status(), 200);
@@ -329,15 +345,15 @@ async fn group_visibility_matrix_and_group_pricing() {
             .unwrap();
     }
 
-    // 宽松模式：绑定渠道仅 vip 可用；未绑定渠道人人可用
+    // 宽松模式：池内渠道仅 vip 可用；未入池渠道人人可用
     let resp = chat(&env, &d_token, &m_bound).await;
-    assert_eq!(resp.status(), 503, "默认组不应看见 vip 绑定渠道");
+    assert_eq!(resp.status(), 503, "默认组（无池）不应看见 vip 池内渠道");
     let resp = chat(&env, &u_token, &m_bound).await;
-    assert_eq!(resp.status(), 200, "vip 用户应可用绑定渠道");
+    assert_eq!(resp.status(), 200, "vip 用户应可用其池内渠道");
     let amount = settled_amount(&env.pg, resp).await;
-    assert_eq!(amount, 120, "vip 组倍率 0.5：240 → 120");
+    assert_eq!(amount, 120, "vip 组倍率 0.5：240 → 120（价与可见性拆开后倍率照旧生效）");
     let resp = chat(&env, &d_token, &m_free).await;
-    assert_eq!(resp.status(), 200, "宽松模式未绑定渠道全可见");
+    assert_eq!(resp.status(), 200, "宽松模式未入池渠道全可见");
     let _ = settled_amount(&env.pg, resp).await;
 
     // 严格模式：未绑定渠道对所有人不可见
@@ -350,9 +366,9 @@ async fn group_visibility_matrix_and_group_pricing() {
     .await;
     assert_eq!(r.status(), 200);
     let resp = chat(&env, &d_token, &m_free).await;
-    assert_eq!(resp.status(), 503, "严格模式未绑定渠道不可见");
+    assert_eq!(resp.status(), 503, "严格模式下无池用户看不到任何渠道");
     let resp = chat(&env, &u_token, &m_bound).await;
-    assert_eq!(resp.status(), 200, "严格模式绑定组内仍可用");
+    assert_eq!(resp.status(), 200, "严格模式下有池用户仍可用池内渠道");
     let _ = resp.text().await;
 
     // 归位宽松，避免影响并行/后续测试

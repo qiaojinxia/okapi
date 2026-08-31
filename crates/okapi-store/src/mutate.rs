@@ -181,8 +181,8 @@ pub async fn duplicate_channel(
     .await?;
     sqlx::query!(
         r#"
-        INSERT INTO group_channel_bindings (group_code, channel_id)
-        SELECT group_code, $2 FROM group_channel_bindings WHERE channel_id = $1
+        INSERT INTO pool_channels (pool_code, channel_id)
+        SELECT pool_code, $2 FROM pool_channels WHERE channel_id = $1
         "#,
         channel_id,
         new_id
@@ -191,6 +191,29 @@ pub async fn duplicate_channel(
     .await?;
     tx.commit().await?;
     Ok(Some(new_id))
+}
+
+/// 删除渠道池。被分组或令牌引用时回 `Conflict`——那些主体会因此失去可见渠道，
+/// 静默解绑等于悄悄放开可见性。池内渠道成员关系随 FK CASCADE 清理，不算占用。
+pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool, StoreError> {
+    let refs = sqlx::query!(
+        r#"
+        SELECT (SELECT COUNT(*) FROM price_groups WHERE pool_code = $1) AS "groups!",
+               (SELECT COUNT(*) FROM api_keys
+                 WHERE pool_override = $1 AND deleted_at IS NULL)       AS "keys!"
+        "#,
+        pool_code
+    )
+    .fetch_one(pool)
+    .await?;
+    if refs.groups > 0 || refs.keys > 0 {
+        return Err(StoreError::Conflict("pool_in_use"));
+    }
+    let affected = sqlx::query!(r#"DELETE FROM channel_pools WHERE pool_code = $1"#, pool_code)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(affected > 0)
 }
 
 /// 删除模型及其定价（硬删；user_pricing 覆盖随 FK CASCADE 清理）。
@@ -202,7 +225,8 @@ pub async fn delete_model(pool: &PgPool, model_name: &str) -> Result<bool, Store
     Ok(affected > 0)
 }
 
-/// 删除定价分组。默认组与被占用（用户/令牌/渠道可见性/套餐）时返回 `Conflict`。
+/// 删除定价分组。默认组与被占用（用户/令牌/套餐）时返回 `Conflict`。
+/// 渠道可见性已移到池，分组只是引用池，删分组不影响池本身。
 pub async fn delete_price_group(pool: &PgPool, group_code: &str) -> Result<bool, StoreError> {
     let Some(is_default) = sqlx::query_scalar!(
         r#"SELECT is_default FROM price_groups WHERE group_code = $1"#,
@@ -221,14 +245,13 @@ pub async fn delete_price_group(pool: &PgPool, group_code: &str) -> Result<bool,
         SELECT (SELECT COUNT(*) FROM user_groups WHERE group_code = $1)            AS "users!",
                (SELECT COUNT(*) FROM api_keys
                  WHERE group_override = $1 AND deleted_at IS NULL)                 AS "keys!",
-               (SELECT COUNT(*) FROM group_channel_bindings WHERE group_code = $1) AS "channels!",
                (SELECT COUNT(*) FROM plans WHERE group_code = $1)                  AS "plans!"
         "#,
         group_code
     )
     .fetch_one(pool)
     .await?;
-    if refs.users > 0 || refs.keys > 0 || refs.channels > 0 || refs.plans > 0 {
+    if refs.users > 0 || refs.keys > 0 || refs.plans > 0 {
         return Err(StoreError::Conflict("group_in_use"));
     }
     sqlx::query!(

@@ -31,18 +31,34 @@ fn ch_i64(row: &Value, key: &str) -> i64 {
     })
 }
 
-/// GET /api/me：身份与余额（热余额为准，快照列对账用）。
+/// GET /api/me：身份、余额与**生效权限点**（热余额为准，快照列对账用）。
+///
+/// 权限点给前端用来决定"哪些入口该出现"，而不是让用户点进去再吃 403——
+/// 一个只读运维角色看到十个改配置的按钮，每个都点不动，是很糟的体验。
+/// 语义与后端 `AuthedKey::has_permission` 一致：`["*"]` 表示全权。
 pub async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let balance = state.ledger.balance(key.user_id).await?;
+    // super_admin 与"未绑定自定义角色的 admin"都是全权（对齐 new-api 迁移习惯）
+    let permissions: Vec<String> = if key.role >= 100 {
+        vec!["*".to_owned()]
+    } else if key.role >= 10 {
+        key.permissions
+            .clone()
+            .unwrap_or_else(|| vec!["*".to_owned()])
+    } else {
+        Vec::new()
+    };
     Ok(Json(json!({
         "user_id": key.user_id,
         "key_id": key.key_id,
         "group": key.group_code,
         "balance_micro": balance.as_micros(),
+        "role": key.role,
+        "permissions": permissions,
     })))
 }
 

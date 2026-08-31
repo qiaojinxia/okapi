@@ -733,6 +733,80 @@ secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占
 计数（限流本就按 IP，后端限流用例同样这么做）；③ 断言失败消息带上状态码，
 撞限流时一眼可辨而非只看到 `Received: false`。改后连跑五轮均 6/6 绿。
 
+### 11.9 渠道 / 模型 / key 关系五方对照与定案（2026-08-31）
+
+对照 new-api（QuantumNous main 源码）、Sub2API、LiteLLM Router、老 ok-api（zip 源码）
+与本项目。完整对照表与逐项论证见 `docs/database.md` §3.7；此处只记决策与理由。
+
+**保留本项目原有的两处优势**
+
+1. `channel(1) → channel_keys(N)` 建表。new-api 把每把 key 的状态存在按数组下标索引的
+   JSON map（`ChannelInfo.MultiKeyStatusList map[int]int`）里，删一把 key 下标即错位，
+   也无法按 key 查冷却、出统计；Sub2API（account）、LiteLLM（deployment）、
+   老 ok-api（provider_api_keys）都以凭证为调度单元，20 把同端点 key 要重复 20 份
+   base_url 与模型清单。建表方案两个问题都没有。
+2. 全局唯一模型名 + 一等定价。老 ok-api 的 `UNIQUE(provider_id, model_code)` 让同一个
+   gpt-4o 跨两家上游成为两行、要定价两次，用户侧模型名还会歧义。
+
+**改掉的一处：`price_groups` 兼任两职**
+
+`group_ratio` 定价 + `group_channel_bindings` 定可见性，两件事无内在关联。
+"同价不同池"（stable / fast 同价）或"同池不同价"（限时促销）都得复制分组并手工
+同步倍率；更要紧的是**没有任何一张表拥有"怎么在候选里选"**，导致 least_latency、
+模型级 fallback 这类能力无处安放。故拆出 `channel_pools`（池 = 一组渠道 + 选路策略），
+`price_groups.pool_code` 与 `api_keys.pool_override` 引用之。
+
+可见性两侧同时约束，与改造前语义一致：**有池 = 只看池内渠道；无池 = 只看未被任何池
+认领的渠道**（strict_group_isolation=true 时无候选）。"入池即专属"是刻意的——
+第一版只按用户侧过滤（无池 = 全部可见），结果把高价渠道放进 vip 池后免费用户照样
+打得到，池退化成标签而非隔离手段；`console_visibility` 用例正是在这里报红。
+
+**借入的四项能力（各有出处）**
+
+| 能力 | 出处 | 落点 |
+| --- | --- | --- |
+| per-key RPM 上限 | 老 ok-api `provider_api_keys.rate_limit_rpm` | `channel_keys.rpm_limit` + Redis `rpm:ck:*`；超限**摘出候选**而非拒绝请求，同渠道其它 key 仍承接 |
+| per-key 日消费上限 | Sub2API account 级限额 | `channel_keys.daily_spend_cap_micro` + Redis `spend:ck:*`（结算后累加，软实时） |
+| per-key 模型子集 | 老 ok-api `supported_models` | `channel_keys.model_subset`（null = 继承渠道）；同组织两把 key 的模型权限常不一致，此前只能靠拆渠道表达 |
+| 可配路由策略 | 老 ok-api `routing_mode` / LiteLLM `routing_strategy` | `channel_pools.routing_strategy`：`priority_weighted`（默认，历史行为）/ `least_latency` |
+
+`least_latency` 落到实处而非只存一个字符串：结算侧按 `new = old*0.7 + sample*0.3`
+写 Redis `lat:ck:*`（只采成功请求，失败请求的耗时多是超时，混进去会把刚恢复的 key
+长期压在队尾），层内按 EWMA 升序；**无样本的 key 按本层中位数参与**——给 0 会让新 key
+抢下全部流量，给极大值则永远排不上。priority 分层在两种策略下都严格生效：层是运维
+显式表达的"先用谁"，不该被时延推翻。
+
+热路径成本：默认池零额外 Redis 往返；`least_latency` 池才逐 key 取 EWMA；
+RPM 与日消费闸仅在该 key 配了上限时才发起 Redis 调用。
+
+**明确不借**：老 ok-api 的 provider 分域模型（定价重复 + 名字歧义）、绝对价存储
+（倍率心智已与主流对齐，§11.5）、new-api 的物化 `abilities` 表——候选查询当前不是
+瓶颈，物化要额外维护一致性；待真成瓶颈再议（届时池已把可见性收敛为一次 join）。
+
+**开放项**：`models.fallback_models`（模型级降级链）schema 与计费口径已定案
+（DESIGN §3.4.1：按实际服务模型计费、仅零候选时触发、单跳、响应与账单同时记
+requested_model），网关侧实现列下一增量。
+
+### 11.10 迁移压平与开发环境重置（2026-08-31）
+
+发布前把 `migrations/0001–0016` 压成单文件。理由：项目无生产部署，16 个增量里一半
+是"加一列"，且 0015 把 0004 建的表整张替换掉——保留链条只会让新读者沿着已被推翻的
+中间态读一遍。
+
+压平的等价性用机器验证而非肉眼 diff：按增量链条建的库与按压平文件建的库逐项对拍
+列定义 / 索引 / 约束（328 列、74 约束全等，唯一差异是一个索引名——旧路径先建 `code`
+列再改名 `code_hash`，索引名留在了旧名上，压平后名字反而与列一致）。此后由
+`bins/okapi/tests/schema_shape.rs` 长期守形状：关键列在、废弃表不在、明文列不在、
+池策略 CHECK 生效；该守卫做过变异验证（故意加一个不存在的必需列与一张废弃表，
+两处都被抓出）。
+
+**`scripts/dev-reset.sh`**：改 0001 后已应用的库会因校验和不符报
+`Migrate(VersionMismatch)`；而只重建 PG 又会让 Redis 与 ClickHouse 里旧 user_id 的
+存量数据串味——PG 的 id 从 1 重新开始，旧聚合会被算进新用户的账，表现为对账与 CH
+用例莫名失败（本轮实际踩到两次）。故三处必须一起清，脚本一条命令完成重置并灌注
+演示数据（超管 / 模型含多模态轴 / 三个池 / 五条渠道 / 分组绑池 / 发布 epoch）。
+
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

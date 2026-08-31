@@ -93,6 +93,15 @@ test('权限分级：普通用户被管理面拒绝，且前端不因 403 崩溃
   await page.goto('/admin/users')
   // 页面骨架仍渲染（标题可见），数据区给出可读的权限错误
   await expect(page.getByText(/权限|permission/i).first()).toBeVisible({ timeout: 10_000 })
+
+  // 导航按权限裁剪：无权的入口不该出现，而不是点进去再吃 403。
+  // 普通用户 permissions=[] → 所有带 permission 标注的管理入口都应消失。
+  const sidebar = page.getByRole('complementary')
+  for (const label of [/渠道池|Channel pools/, /价格分组|Price groups/, /角色与权限|Roles & permissions/]) {
+    await expect(sidebar.getByRole('link', { name: label })).toHaveCount(0)
+  }
+  // 不需要权限的入口仍在（否则就是把导航整个裁没了）
+  await expect(sidebar.getByRole('link', { name: /门户|Portal/ })).toBeVisible()
 })
 
 test('session 鉴权面在 key 单轨下降级提示而非空白', async ({ page, request }) => {
@@ -141,3 +150,50 @@ test('API key 登录直达门户总览与三区布局', async ({ page, request }
   // 用 i 标志：标题带 uppercase 样式，Playwright 匹配的是渲染后文本
   await expect(page.getByText(/额度与账单|billing/i).first()).toBeVisible()
 })
+
+test('删除密钥需二次确认：直接点删除不生效，取消后密钥仍在', async ({ page, request }) => {
+  // 删除不可逆（密钥一删，用它的调用立刻全挂），此前点即执行——列表里相邻两行的
+  // 删除按钮只差几十像素，误点没有挽回机会。用门户自助删密钥这条普通用户权限内的
+  // 路径验证确认框；管理面（渠道/模型/角色）用的是同一组件同一行为。
+  const user = await sharedUser(request)
+
+  // 先重新登录：前面的登出用例会让共享 request 上的 session 失效，
+  // 而建密钥走 session 鉴权。登录不限流（只有 register 限），可安全重来。
+  const relogin = await request.post('/auth/login', {
+    data: { email: user.email, password: PASSWORD },
+  })
+  expect(relogin.ok(), `重新登录失败（${relogin.status()}）`).toBeTruthy()
+
+  // 造一个专供删除的密钥，避免动到其他用例赖以登录的那把
+  const victim = `e2e-confirm-${Date.now()}`
+  const created = await request.post('/auth/keys', { data: { name: victim } })
+  expect(created.ok(), `建密钥失败（${created.status()}）`).toBeTruthy()
+
+  await signInWithKey(page, user.apiKey)
+  await page.goto('/portal/keys')
+  const row = page.getByRole('row').filter({ hasText: victim })
+  await expect(row).toBeVisible()
+
+  // 点删除：只应弹确认框，密钥不能就这么消失
+  await row.getByRole('button', { name: /^删除$|^Delete$/ }).click()
+  const dialog = page.getByRole('alertdialog')
+  await expect(dialog).toBeVisible()
+  await expect(row).toBeVisible()
+
+  // 高危项要求手输名称，没输之前确认按钮必须禁用
+  await expect(dialog.getByRole('button', { name: /^删除$|^Delete$/ })).toBeDisabled()
+
+  // 取消后密钥仍在（确认框自身无副作用）
+  await dialog.getByRole('button', { name: /^取消$|^Cancel$/ }).click()
+  await expect(dialog).toBeHidden()
+  await page.reload()
+  await expect(page.getByRole('row').filter({ hasText: victim })).toBeVisible()
+
+  // 输对名称后才放行，删除真正生效
+  await page.getByRole('row').filter({ hasText: victim }).getByRole('button', { name: /^删除$|^Delete$/ }).click()
+  const dialog2 = page.getByRole('alertdialog')
+  await dialog2.locator('#confirm-text').fill(victim)
+  await dialog2.getByRole('button', { name: /^删除$|^Delete$/ }).click()
+  await expect(page.getByRole('row').filter({ hasText: victim })).toBeHidden()
+})
+

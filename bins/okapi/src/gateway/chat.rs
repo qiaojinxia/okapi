@@ -6,7 +6,7 @@ use super::clients::detect_client_type;
 use super::error::AppError;
 use super::estimate::{estimate_completion_tokens, estimate_prompt_tokens};
 use super::sched_redis::session_hash;
-use super::scheduler::order_candidates;
+use super::scheduler::{Strategy, order_candidates, order_candidates_by_latency};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -102,7 +102,8 @@ struct RequestBilling {
     /// 客户端 IP（CDN 头按序，§14.2）。
     client_ip: Option<String>,
     /// 渠道可见性组（用户全部组并集，§6.3）。
-    visibility: Vec<String>,
+    pool_code: Option<String>,
+    pool_strategy: Option<String>,
     /// 请求声明的 service_tier（预扣按此档估；结算只降不升，DESIGN §3-4.5）。
     service_tier: Option<String>,
     /// 模型是否配置了档位倍率（据此决定是否采集响应档位）。
@@ -516,7 +517,8 @@ async fn handle_chat(
         session: info.session.clone(),
         client_type: detect_client_type(headers),
         client_ip: super::clients::detect_client_ip(headers),
-        visibility: key.visibility_groups.clone(),
+        pool_code: key.pool_code.clone(),
+        pool_strategy: key.pool_strategy.clone(),
         service_tier: info.service_tier.clone(),
         has_tier_pricing: book.has_tiers(&ModelCode::from(bill_model_for_tier.as_str())),
     };
@@ -543,16 +545,15 @@ async fn forward(
     body: &Bytes,
 ) -> Result<Response, ForwardFailure> {
     // 候选 5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL 收敛）
-    let mut vis_key = bill.visibility.clone();
-    vis_key.sort_unstable();
-    let cache_key = format!("{}|{}", bill.model, vis_key.join(","));
+    // 缓存键含池：不同池的候选集合不同，混用会把别的池的渠道发给用户
+    let cache_key = format!("{}|{}", bill.model, bill.pool_code.as_deref().unwrap_or(""));
     let raw = if let Some(hit) = bill.state.cand_cache.get(&cache_key).await {
         hit
     } else {
         let rows = okapi_store::channels::candidates_for_model(
             &bill.state.pg,
             &bill.model,
-            &bill.visibility,
+            bill.pool_code.as_deref(),
         )
         .await
         .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
@@ -563,7 +564,20 @@ async fn forward(
             .await;
         rows
     };
-    let mut candidates = order_candidates(raw.as_ref().clone());
+    let mut candidates = match Strategy::parse(bill.pool_strategy.as_deref()) {
+        Strategy::PriorityWeighted => order_candidates(raw.as_ref().clone()),
+        Strategy::LeastLatency => {
+            // 只对候选集内的 key 取时延，逐个 GET；候选规模是个位数到几十，
+            // 且仅 least_latency 池付这个成本，默认池零额外往返。
+            let mut latency = std::collections::HashMap::new();
+            for c in raw.as_ref() {
+                if let Some(ms) = bill.state.sched.channel_key_latency(c.channel_key_id).await {
+                    latency.insert(c.channel_key_id, ms);
+                }
+            }
+            order_candidates_by_latency(raw.as_ref().clone(), &latency)
+        }
+    };
     // Anthropic 入口暂不路由 gemini 渠道（不做 anthropic→openai→gemini 双跳）
     if bill.ingress == Ingress::Anthropic {
         candidates.retain(|c| c.provider != "gemini");
@@ -607,6 +621,29 @@ async fn forward(
     for cand in candidates {
         if attempted >= MAX_ATTEMPTS {
             break;
+        }
+        // key 级 RPM 闸：未配置上限时不产生任何 Redis 往返
+        if let Some(limit) = cand.rpm_limit
+            && !bill
+                .state
+                .sched
+                .channel_key_rate_ok(cand.channel_key_id, i64::from(limit))
+                .await
+        {
+            tracing::debug!(channel_key = cand.channel_key_id, "key RPM 超限，跳过候选");
+            continue;
+        }
+        // key 级当日消费闸（软实时：结算后累加，故可能略超）
+        if let Some(cap) = cand.daily_spend_cap_micro
+            && bill
+                .state
+                .sched
+                .channel_key_spend_get(cand.channel_key_id)
+                .await
+                >= cap
+        {
+            tracing::debug!(channel_key = cand.channel_key_id, "key 当日消费已达上限，跳过候选");
+            continue;
         }
         // 渠道 key 级并发信号量（§3.5 第二层）：满则跳过该候选（不计 failover）
         if !bill
@@ -1627,6 +1664,15 @@ async fn settle_commit(
                 bill.member_user_id,
                 quote.amount.as_micros(),
                 usage.total_raw(),
+            )
+            .await;
+            // 选路反馈：时延 EWMA 供 least_latency 池排序，key 日消费供上限闸。
+            // 放在结算之后 = 不占热路径，且只有成功请求才计入时延样本。
+            super::auth::record_channel_key_feedback(
+                &bill.state,
+                info.key,
+                ttft_ms.unwrap_or_else(|| elapsed_ms_i32(bill.started)),
+                quote.amount.as_micros(),
             )
             .await;
         }

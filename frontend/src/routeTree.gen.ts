@@ -16,9 +16,15 @@ import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminChannelsRouteImport } from './routes/admin.channels'
 import { Route as AdminCodesRouteImport } from './routes/admin.codes'
+import { Route as AdminGroupsRouteImport } from './routes/admin.groups'
 import { Route as AdminKeysRouteImport } from './routes/admin.keys'
 import { Route as AdminOpsRouteImport } from './routes/admin.ops'
+import { Route as AdminPlansRouteImport } from './routes/admin.plans'
+import { Route as AdminPoolsRouteImport } from './routes/admin.pools'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
+import { Route as AdminRolesRouteImport } from './routes/admin.roles'
+import { Route as AdminRulesRouteImport } from './routes/admin.rules'
+import { Route as AdminSettingsRouteImport } from './routes/admin.settings'
 import { Route as AdminStatsRouteImport } from './routes/admin.stats'
 import { Route as AdminUsersRouteImport } from './routes/admin.users'
 import { Route as PortalIndexRouteImport } from './routes/portal.index'
@@ -64,6 +70,11 @@ const AdminCodesRoute = AdminCodesRouteImport.update({
   path: '/codes',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminGroupsRoute = AdminGroupsRouteImport.update({
+  id: '/groups',
+  path: '/groups',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AdminKeysRoute = AdminKeysRouteImport.update({
   id: '/keys',
   path: '/keys',
@@ -74,9 +85,34 @@ const AdminOpsRoute = AdminOpsRouteImport.update({
   path: '/ops',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminPlansRoute = AdminPlansRouteImport.update({
+  id: '/plans',
+  path: '/plans',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminPoolsRoute = AdminPoolsRouteImport.update({
+  id: '/pools',
+  path: '/pools',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AdminPricingRoute = AdminPricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminRolesRoute = AdminRolesRouteImport.update({
+  id: '/roles',
+  path: '/roles',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminRulesRoute = AdminRulesRouteImport.update({
+  id: '/rules',
+  path: '/rules',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminSettingsRoute = AdminSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminStatsRoute = AdminStatsRouteImport.update({
@@ -132,9 +168,15 @@ export interface FileRoutesByFullPath {
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/ops': typeof AdminOpsRoute
+  '/admin/plans': typeof AdminPlansRoute
+  '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/roles': typeof AdminRolesRoute
+  '/admin/rules': typeof AdminRulesRoute
+  '/admin/settings': typeof AdminSettingsRoute
   '/admin/stats': typeof AdminStatsRoute
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
@@ -151,9 +193,15 @@ export interface FileRoutesByTo {
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/ops': typeof AdminOpsRoute
+  '/admin/plans': typeof AdminPlansRoute
+  '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/roles': typeof AdminRolesRoute
+  '/admin/rules': typeof AdminRulesRoute
+  '/admin/settings': typeof AdminSettingsRoute
   '/admin/stats': typeof AdminStatsRoute
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
@@ -173,9 +221,15 @@ export interface FileRoutesById {
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/ops': typeof AdminOpsRoute
+  '/admin/plans': typeof AdminPlansRoute
+  '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/roles': typeof AdminRolesRoute
+  '/admin/rules': typeof AdminRulesRoute
+  '/admin/settings': typeof AdminSettingsRoute
   '/admin/stats': typeof AdminStatsRoute
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
@@ -196,9 +250,15 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/groups'
     | '/admin/keys'
     | '/admin/ops'
+    | '/admin/plans'
+    | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/roles'
+    | '/admin/rules'
+    | '/admin/settings'
     | '/admin/stats'
     | '/admin/users'
     | '/portal/aff'
@@ -215,9 +275,15 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/groups'
     | '/admin/keys'
     | '/admin/ops'
+    | '/admin/plans'
+    | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/roles'
+    | '/admin/rules'
+    | '/admin/settings'
     | '/admin/stats'
     | '/admin/users'
     | '/portal/aff'
@@ -236,9 +302,15 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/groups'
     | '/admin/keys'
     | '/admin/ops'
+    | '/admin/plans'
+    | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/roles'
+    | '/admin/rules'
+    | '/admin/settings'
     | '/admin/stats'
     | '/admin/users'
     | '/portal/aff'
@@ -309,6 +381,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminCodesRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/groups': {
+      id: '/admin/groups'
+      path: '/groups'
+      fullPath: '/admin/groups'
+      preLoaderRoute: typeof AdminGroupsRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/keys': {
       id: '/admin/keys'
       path: '/keys'
@@ -323,11 +402,46 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminOpsRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/plans': {
+      id: '/admin/plans'
+      path: '/plans'
+      fullPath: '/admin/plans'
+      preLoaderRoute: typeof AdminPlansRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/pools': {
+      id: '/admin/pools'
+      path: '/pools'
+      fullPath: '/admin/pools'
+      preLoaderRoute: typeof AdminPoolsRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/pricing': {
       id: '/admin/pricing'
       path: '/pricing'
       fullPath: '/admin/pricing'
       preLoaderRoute: typeof AdminPricingRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/roles': {
+      id: '/admin/roles'
+      path: '/roles'
+      fullPath: '/admin/roles'
+      preLoaderRoute: typeof AdminRolesRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/rules': {
+      id: '/admin/rules'
+      path: '/rules'
+      fullPath: '/admin/rules'
+      preLoaderRoute: typeof AdminRulesRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/settings': {
+      id: '/admin/settings'
+      path: '/settings'
+      fullPath: '/admin/settings'
+      preLoaderRoute: typeof AdminSettingsRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/stats': {
@@ -399,9 +513,15 @@ declare module '@tanstack/react-router' {
 interface AdminRouteChildren {
   AdminChannelsRoute: typeof AdminChannelsRoute
   AdminCodesRoute: typeof AdminCodesRoute
+  AdminGroupsRoute: typeof AdminGroupsRoute
   AdminKeysRoute: typeof AdminKeysRoute
   AdminOpsRoute: typeof AdminOpsRoute
+  AdminPlansRoute: typeof AdminPlansRoute
+  AdminPoolsRoute: typeof AdminPoolsRoute
   AdminPricingRoute: typeof AdminPricingRoute
+  AdminRolesRoute: typeof AdminRolesRoute
+  AdminRulesRoute: typeof AdminRulesRoute
+  AdminSettingsRoute: typeof AdminSettingsRoute
   AdminStatsRoute: typeof AdminStatsRoute
   AdminUsersRoute: typeof AdminUsersRoute
   AdminIndexRoute: typeof AdminIndexRoute
@@ -410,9 +530,15 @@ interface AdminRouteChildren {
 const AdminRouteChildren: AdminRouteChildren = {
   AdminChannelsRoute: AdminChannelsRoute,
   AdminCodesRoute: AdminCodesRoute,
+  AdminGroupsRoute: AdminGroupsRoute,
   AdminKeysRoute: AdminKeysRoute,
   AdminOpsRoute: AdminOpsRoute,
+  AdminPlansRoute: AdminPlansRoute,
+  AdminPoolsRoute: AdminPoolsRoute,
   AdminPricingRoute: AdminPricingRoute,
+  AdminRolesRoute: AdminRolesRoute,
+  AdminRulesRoute: AdminRulesRoute,
+  AdminSettingsRoute: AdminSettingsRoute,
   AdminStatsRoute: AdminStatsRoute,
   AdminUsersRoute: AdminUsersRoute,
   AdminIndexRoute: AdminIndexRoute,
