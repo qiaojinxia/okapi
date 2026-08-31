@@ -22,6 +22,20 @@ export function formatCount(n: number, locale: string): string {
   return new Intl.NumberFormat(locale, { notation: n >= 100_000 ? 'compact' : 'standard' }).format(n)
 }
 
+/// 后端占比一律以基点（万分之一）整数下发，展示层统一转百分比。
+export function formatBp(bp: number, locale: string): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'percent',
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 2,
+  }).format(bp / 10_000)
+}
+
+/// 生成速度后端下发「每千秒 token 数」整数（避免浮点），展示层还原 tok/s。
+export function formatTokensPerSec(per1kSec: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(per1kSec / 1_000)
+}
+
 export interface SimulatorInput {
   modelRatio: number
   completionRatio: number

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT batch_id, max_per_ip, bind_user_id\n           FROM redemption_codes WHERE code_hash = $1 AND status = 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "batch_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "batch_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "max_per_ip",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "max_per_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "bind_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "bind_user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "54b5653879574d299fa2e904117ee4d7b1878b939446782c71ce355ba3d5546b"
+}

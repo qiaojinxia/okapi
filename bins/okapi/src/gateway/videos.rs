@@ -94,6 +94,7 @@ async fn handle_create(
     }
 
     let book = state.pricebook.load();
+    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
     let minute_of_day =
         u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
@@ -102,10 +103,10 @@ async fn handle_create(
         model: ModelCode::from(canonical.as_str()),
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: 0,
+        monthly_tokens: rules_in.monthly_tokens,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
-        surge_active: false,
+        surge_active: rules_in.surge_active,
         service_tier: None,
     };
     let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
@@ -395,11 +396,12 @@ async fn commit_and_record(
                 event_type: "commit",
             };
             state.settle_write(input).await;
-            super::auth::record_member_spend(
+            super::auth::record_settlement_counters(
                 state,
                 key.user_id,
                 key.member_user_id,
                 quote.amount.as_micros(),
+                0,
             )
             .await;
         }

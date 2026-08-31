@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM pricing_rules WHERE rule_code = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e37b7bf3f285b0a9f91bd3633bf6a3a4cda2dbe1520990433227e3edea286966"
+}

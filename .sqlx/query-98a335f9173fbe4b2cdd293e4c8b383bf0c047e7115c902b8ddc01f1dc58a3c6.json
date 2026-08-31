@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT plan_code, grant_micro, group_code, balance_valid_days\n               FROM plans WHERE id = $1 AND status = 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "grant_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "grant_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "balance_valid_days",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "balance_valid_days"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "98a335f9173fbe4b2cdd293e4c8b383bf0c047e7115c902b8ddc01f1dc58a3c6"
+}

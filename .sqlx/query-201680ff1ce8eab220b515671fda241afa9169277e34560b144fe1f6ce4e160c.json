@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT delta_micro, actor FROM billing_events\n           WHERE user_id = $1 AND event_type = 'expire'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "delta_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "delta_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "actor",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "actor"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "201680ff1ce8eab220b515671fda241afa9169277e34560b144fe1f6ce4e160c"
+}

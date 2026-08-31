@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, cooldown_until FROM channel_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "cooldown_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "cooldown_until"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "0ecac77a7eb7c1b285312fdf3aacd8b22a9aeb215da42802e851cb214d2d97b1"
+}

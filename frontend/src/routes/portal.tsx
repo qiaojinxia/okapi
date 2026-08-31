@@ -20,6 +20,7 @@ function PortalLayout() {
         { to: '/portal', label: t('portal:dashboard') },
         { to: '/portal/logs', label: t('logs:title') },
         { to: '/portal/keys', label: t('portal:keys') },
+        { to: '/portal/topup', label: t('portal:topupNav') },
         { to: '/portal/aff', label: t('portal:affNav') },
         { to: '/pricing', label: t('pricing:title') },
         { to: '/admin', label: t('common:admin') },

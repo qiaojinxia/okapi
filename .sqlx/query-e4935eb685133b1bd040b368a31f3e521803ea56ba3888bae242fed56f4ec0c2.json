@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO pricing_rules\n            (rule_code, rule_type, scope, params, priority, enabled, valid_from, valid_to)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        ON CONFLICT (rule_code) DO UPDATE SET\n            rule_type = EXCLUDED.rule_type,\n            scope = EXCLUDED.scope,\n            params = EXCLUDED.params,\n            priority = EXCLUDED.priority,\n            enabled = EXCLUDED.enabled,\n            valid_from = EXCLUDED.valid_from,\n            valid_to = EXCLUDED.valid_to,\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Jsonb",
+        "Jsonb",
+        "Int4",
+        "Bool",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e4935eb685133b1bd040b368a31f3e521803ea56ba3888bae242fed56f4ec0c2"
+}

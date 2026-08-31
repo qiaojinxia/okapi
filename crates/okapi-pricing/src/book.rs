@@ -3,7 +3,7 @@
 use crate::error::{CompileError, PricingError};
 use crate::model::PricingMode;
 use crate::ratio::{RATIO_SCALE, RatioFp};
-use crate::rules::PricingRule;
+use crate::rules::{PricingRule, RuleKind};
 use okapi_domain::{GroupCode, ModelCode, Money, UserId};
 use std::collections::HashMap;
 
@@ -67,6 +67,9 @@ pub struct PriceBook {
     overrides: HashMap<(UserId, ModelCode), PricingMode>,
     /// 已按 类间固定序 → priority → code 排序。
     rules: Vec<PricingRule>,
+    /// 编译期算好的触发输入门控：无此类规则时 gateway 不采集对应输入（热路径零开销）。
+    has_volume_rules: bool,
+    has_surge_rules: bool,
 }
 
 /// 解析结果：用户专属覆盖优先于模型定价（DESIGN §3.4 优先级 1–2）。
@@ -139,6 +142,11 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
         ))
     });
 
+    let has_volume_rules = rules
+        .iter()
+        .any(|r| matches!(r.kind, RuleKind::Volume { .. }));
+    let has_surge_rules = rules.iter().any(|r| matches!(r.kind, RuleKind::Surge));
+
     Ok(PriceBook {
         epoch: source.epoch,
         models,
@@ -146,6 +154,8 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
         groups,
         overrides,
         rules,
+        has_volume_rules,
+        has_surge_rules,
     })
 }
 
@@ -208,6 +218,18 @@ impl PriceBook {
     #[must_use]
     pub fn has_tiers(&self, model: &ModelCode) -> bool {
         self.tiers.contains_key(model)
+    }
+
+    /// 是否存在启用的 volume 规则（gateway 据此决定是否读 `tok:{uid}:<yyyymm>`）。
+    #[must_use]
+    pub const fn has_volume_rules(&self) -> bool {
+        self.has_volume_rules
+    }
+
+    /// 是否存在启用的 surge 规则（gateway 据此决定是否读在途计数与阈值设置）。
+    #[must_use]
+    pub const fn has_surge_rules(&self) -> bool {
+        self.has_surge_rules
     }
 
     /// 档位倍率查询（未配置模型/档位名 → None，调用方按 1.0 处理）。
@@ -310,6 +332,41 @@ mod tests {
         let book = compile(source)?;
         let codes: Vec<&str> = book.rules().iter().map(|r| r.code.as_str()).collect();
         assert_eq!(codes, ["vol", "a-discount", "b-discount", "z-surge"]);
+        Ok(())
+    }
+
+    /// 触发输入门控：gateway 据此决定是否采集 volume/surge 输入，
+    /// 误判为 false 会让规则静默失效，误判为 true 则给未用该能力的站点加热路径开销。
+    #[test]
+    fn compile_flags_rule_kinds_needing_runtime_inputs() -> Result<(), CompileError> {
+        let empty = compile(PriceBookSource {
+            epoch: 1,
+            models: Vec::new(),
+            groups: Vec::new(),
+            overrides: Vec::new(),
+            rules: vec![rule("d", RuleKind::Discount, 0)],
+        })?;
+        assert!(!empty.has_volume_rules(), "仅 discount 规则不需要月度计数");
+        assert!(!empty.has_surge_rules());
+
+        let both = compile(PriceBookSource {
+            epoch: 1,
+            models: Vec::new(),
+            groups: Vec::new(),
+            overrides: Vec::new(),
+            rules: vec![
+                rule(
+                    "v",
+                    RuleKind::Volume {
+                        min_monthly_tokens: 1,
+                    },
+                    0,
+                ),
+                rule("s", RuleKind::Surge, 0),
+            ],
+        })?;
+        assert!(both.has_volume_rules());
+        assert!(both.has_surge_rules());
         Ok(())
     }
 

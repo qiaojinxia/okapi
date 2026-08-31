@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_outbox (topic, payload)\n           SELECT 'request_log', p FROM UNNEST($1::jsonb[]) AS p",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "JsonbArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d02f4d151708e735b5155d892c0e63761c5f590c9dc9d0f68f237ddf833c17d6"
+}

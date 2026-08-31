@@ -246,6 +246,34 @@ impl SchedulerRedis {
         format!("spend:tm:{team}:{member}:{month}")
     }
 
+    /// 用户本月累计 token（volume 规则唯一输入，docs/database.md §2.1）。
+    /// 读失败按 0 返回——量级折扣宁可不打，也不能因 Redis 抖动错算。
+    pub async fn monthly_tokens_get(&self, user_id: i64) -> u64 {
+        let key = Self::monthly_tokens_key(user_id);
+        let value: Option<String> = self.client.get(&key).await.ok().flatten();
+        value.and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    /// 结算后累加实际 usage 总量（40d TTL 覆盖整月 + 复核余量）。
+    pub async fn monthly_tokens_add(&self, user_id: i64, tokens: u64) {
+        let Ok(delta) = i64::try_from(tokens) else {
+            return;
+        };
+        if delta <= 0 {
+            return;
+        }
+        let key = Self::monthly_tokens_key(user_id);
+        let incr: Result<i64, _> = self.client.incr_by(&key, delta).await;
+        if incr.is_ok() {
+            let _: Result<bool, _> = self.client.expire(&key, 40 * 24 * 3600, None).await;
+        }
+    }
+
+    fn monthly_tokens_key(user_id: i64) -> String {
+        let month = chrono::Utc::now().format("%Y%m");
+        format!("tok:{{{user_id}}}:{month}")
+    }
+
     /// 关键接口每 IP 固定窗计数（60s；对齐 new-api rc.24 关键路由限流）。
     /// 返回窗口内计数；Redis 故障返回 0（放行，与其余限流失败语义一致）。
     pub async fn crit_rate_incr(&self, scope: &str, ip: &str) -> i64 {

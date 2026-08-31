@@ -100,7 +100,10 @@ impl ChClient {
         )
         .await?;
 
-        for statement in include_str!("ch_schema.sql").split(";\n") {
+        // Windows 检出（core.autocrlf）会带 CRLF，切不开则整份当作一条语句下发，
+        // 而 ClickHouse HTTP 接口拒绝 multi-statement。
+        let schema = include_str!("ch_schema.sql").replace('\r', "");
+        for statement in schema.split(";\n") {
             let sql = statement.trim();
             if sql.is_empty() || sql.lines().all(|l| l.trim_start().starts_with("--")) {
                 continue;

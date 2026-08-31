@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settings (key, value) VALUES ('model_rpm_limits', $1)\n               ON CONFLICT (key) DO UPDATE SET\n                   value = settings.value || EXCLUDED.value",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cbd95639abb3b1370764b59bca452e614cbaa67ad7f7d49e7bcf00003b7cac61"
+}

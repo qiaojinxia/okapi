@@ -1,0 +1,110 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT rule_code, rule_type, scope, params, priority, enabled, valid_from, valid_to\n        FROM pricing_rules\n        ORDER BY\n            CASE rule_type\n                WHEN 'volume' THEN 0\n                WHEN 'time_based' THEN 1\n                WHEN 'discount' THEN 2\n                ELSE 3\n            END,\n            priority,\n            rule_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rule_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "rule_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "rule_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "rule_type"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "scope",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "scope"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "params",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "params"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "enabled"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "valid_from",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "valid_from"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "valid_to",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pricing_rules",
+            "name": "valid_to"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0b09c91218f1f4d58f31307e3a7494d72d8dc5a037b3fd307a545e37a1ee9a8e"
+}

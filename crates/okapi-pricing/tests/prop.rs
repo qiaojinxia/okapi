@@ -18,7 +18,14 @@ fn build_book(
     group_fp: i64,
     rule_fp: Option<i64>,
 ) -> PriceBook {
-    build_book_with_cache_write(model_fp, completion_fp, cache_fp, 1_000_000, group_fp, rule_fp)
+    build_book_with_cache_write(
+        model_fp,
+        completion_fp,
+        cache_fp,
+        1_000_000,
+        group_fp,
+        rule_fp,
+    )
 }
 
 fn build_book_with_cache_write(

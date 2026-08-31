@@ -261,7 +261,11 @@ CREATE TABLE pricing_rules (                          -- 修饰器栈（保留 o
     rule_code  VARCHAR(64) PRIMARY KEY,
     rule_type  VARCHAR(16) NOT NULL,                  -- volume|time_based|discount|surge
     scope      JSONB NOT NULL DEFAULT '{}',           -- {"groups":[],"models":[],"users":[]} 选择器
-    params     JSONB NOT NULL,                        -- {"threshold":1000000,"discount_rate":0.1}...
+    params     JSONB NOT NULL,                        -- 必含 multiplier（十进制字符串，命中即乘）；
+                                                      -- volume 追加 min_monthly_tokens（读 tok:{uid}:<yyyymm>）；
+                                                      -- time_based 追加 start_minute/end_minute（[start,end) 分钟窗，
+                                                      -- 支持跨零点回绕；start==end=空窗永不命中）；
+                                                      -- discount 无条件命中；surge 读 settings.surge_inflight_threshold
     priority   INT NOT NULL DEFAULT 0,                -- 同类内排序；类间固定序 volume→time→discount→surge
     enabled    BOOLEAN NOT NULL DEFAULT true,
     valid_from TIMESTAMPTZ, valid_to TIMESTAMPTZ,
@@ -452,6 +456,8 @@ CREATE TABLE settings (                               -- 全局 KV（strict_grou
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
 `notify_channels`（通知多路配置数组）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
 `critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/redeem，0=关）、
+`surge_inflight_threshold`（surge 规则的负载判定阈值：单 gateway 进程在途计费请求数 ≥ 该值即
+`surge_active`，缺省 0=永不触发；仅当价簿含启用的 surge 规则时才读取该设置）、
 `response_header_whitelist`（backlog 未启用）。
 
 ### 1.8 M4 预留（概要，实施时出迁移）
@@ -491,6 +497,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面专用；门户/数据面仍 API key 单轨，§6.4） |
 | `oauth:state:<token>` | STRING | 10min | OAuth authorization-code 流 CSRF state（一次性，校验即删） |
 | `spend:tm:{team}:{member}:<yyyymm>` | STRING | 40d | 团成员月度消费计数（结算后累加，预扣前比较；软实时限额） |
+| `tok:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计 token（`pricing_rules` volume 规则的唯一输入）。结算后累加实际 usage 总量、报价前读取，语义与团成员计数同构（软实时：跨月自然滚动、Redis 故障按 0 处理即不打折，宁少算不错算）。**仅当生效 PriceBook 含启用的 volume 规则时才产生读写**（`PriceBook::has_volume_rules`），无此类规则时热路径零额外 Redis 往返 |
 | `pb:epoch` | STRING | 永久 | 【M3 接入】当前 PriceBook epoch。当前实现：gateway 每 30s 直接轮询 PG `MAX(epoch)`（单机/中小规模更简，见 §2.3） |
 | `pb:data:<epoch>` | STRING(bin) | 保留 2 版 | 【M3 接入】编译后 PriceBook 快照（多副本大表分发 + PG 减负时启用） |
 | `ch:cool:<channel_key_id>` | STRING | =冷却时长 | 状态机冷却镜像 |

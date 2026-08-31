@@ -159,15 +159,9 @@ async fn okapi_old_sample_migration_full_check() {
     assert_eq!(count, 0, "dry-run 不得写入");
 
     // —— 正式迁移 ——
-    let stats = migrate::run_okapi_old(
-        &env.pg,
-        Some(&env.ledger),
-        &env.dir,
-        Some(ENC_PASS),
-        false,
-    )
-    .await
-    .unwrap();
+    let stats = migrate::run_okapi_old(&env.pg, Some(&env.ledger), &env.dir, Some(ENC_PASS), false)
+        .await
+        .unwrap();
     assert_eq!(stats.users, 3);
     assert_eq!(stats.users_credited, 1);
     assert!(
@@ -176,7 +170,10 @@ async fn okapi_old_sample_migration_full_check() {
         stats.skipped
     );
     assert!(
-        stats.skipped.iter().any(|w| w.contains("pricing_type=hourly")),
+        stats
+            .skipped
+            .iter()
+            .any(|w| w.contains("pricing_type=hourly")),
         "无对应语义的计价类型必须告警：{:?}",
         stats.skipped
     );
@@ -347,7 +344,11 @@ async fn okapi_old_sample_migration_full_check() {
     .await
     .unwrap();
     assert_eq!(per_call.pricing_mode, "per_call");
-    assert_eq!(per_call.per_call_price_micro, Some(20_000), "$0.02 → 20000µ");
+    assert_eq!(
+        per_call.per_call_price_micro,
+        Some(20_000),
+        "$0.02 → 20000µ"
+    );
     let unpriced = sqlx::query_scalar!(
         r#"SELECT COUNT(*)::bigint AS "c!" FROM models WHERE model_name = ANY($1)"#,
         &[format!("old-hourly-{sfx}"), format!("old-dead-{sfx}")][..]
@@ -368,15 +369,10 @@ async fn okapi_old_sample_migration_full_check() {
     .await
     .unwrap();
 
-    let stats2 = migrate::run_okapi_old(
-        &env.pg,
-        Some(&env.ledger),
-        &env.dir,
-        Some(ENC_PASS),
-        false,
-    )
-    .await
-    .unwrap();
+    let stats2 =
+        migrate::run_okapi_old(&env.pg, Some(&env.ledger), &env.dir, Some(ENC_PASS), false)
+            .await
+            .unwrap();
     assert_eq!(stats2.users, 3);
     assert_eq!(
         env.ledger.balance(alice.id).await.unwrap().as_micros(),

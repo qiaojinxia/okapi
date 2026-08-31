@@ -414,7 +414,8 @@ fn dec_str_to_micro(s: &str, allow_neg: bool) -> Option<i64> {
     if int_part.is_empty() && frac_part.is_empty() {
         return None;
     }
-    if !int_part.bytes().all(|b| b.is_ascii_digit()) || !frac_part.bytes().all(|b| b.is_ascii_digit())
+    if !int_part.bytes().all(|b| b.is_ascii_digit())
+        || !frac_part.bytes().all(|b| b.is_ascii_digit())
     {
         return None;
     }
@@ -633,9 +634,9 @@ pub async fn run_okapi_old(
         };
         if !plain.starts_with("sk-") {
             stats.keys_undecryptable += 1;
-            stats
-                .skipped
-                .push(format!("api_keys:{prefix_hint} 解密结果非 sk- 前缀，疑口令错误"));
+            stats.skipped.push(format!(
+                "api_keys:{prefix_hint} 解密结果非 sk- 前缀，疑口令错误"
+            ));
             continue;
         }
         stats.keys += 1;
@@ -687,7 +688,9 @@ pub async fn run_okapi_old(
             continue;
         };
         let Some(credential) = s(&row, "api_key") else {
-            stats.skipped.push(format!("provider_api_keys:{code} 缺 api_key"));
+            stats
+                .skipped
+                .push(format!("provider_api_keys:{code} 缺 api_key"));
             continue;
         };
         let key_name = s(&row, "key_name").unwrap_or("default");
@@ -698,7 +701,9 @@ pub async fn run_okapi_old(
                 .skipped
                 .push(format!("channels:{name} 按 openai_compat 导入"));
         }
-        let base_url = s(&row, "base_url").filter(|b| !b.is_empty()).unwrap_or(endpoint);
+        let base_url = s(&row, "base_url")
+            .filter(|b| !b.is_empty())
+            .unwrap_or(endpoint);
         let models = model_list(&row, "supported_models");
         let row_status = old_status(s(&row, "status"));
         let priority = i(&row, "priority")
@@ -735,7 +740,13 @@ pub async fn run_okapi_old(
         } else {
             let model_refs: Vec<&str> = models.iter().map(String::as_str).collect();
             let (channel_id, key_id) = okapi_store::provision::create_channel(
-                pg, &name, provider, base_url, credential, &model_refs, false,
+                pg,
+                &name,
+                provider,
+                base_url,
+                credential,
+                &model_refs,
+                false,
             )
             .await?;
             sqlx::query!(
@@ -768,16 +779,16 @@ pub async fn run_okapi_old(
             continue;
         }
         if !seen_models.insert(code.to_owned()) {
-            stats
-                .skipped
-                .push(format!("models:{code} 重名（多 provider 同码），首个已生效"));
+            stats.skipped.push(format!(
+                "models:{code} 重名（多 provider 同码），首个已生效"
+            ));
             continue;
         }
         let pricing_type = s(&row, "pricing_type").unwrap_or("token");
         match pricing_type {
             "token" => {
-                let Some(in_micro) = dec_field(&row, "input_price")
-                    .and_then(|p| dec_str_to_micro(&p, false))
+                let Some(in_micro) =
+                    dec_field(&row, "input_price").and_then(|p| dec_str_to_micro(&p, false))
                 else {
                     stats.skipped.push(format!("models:{code} 缺 input_price"));
                     continue;
@@ -813,10 +824,12 @@ pub async fn run_okapi_old(
                 .await?;
             }
             "request" | "per_call" => {
-                let Some(per_call) = dec_field(&row, "request_price")
-                    .and_then(|p| dec_str_to_micro(&p, false))
+                let Some(per_call) =
+                    dec_field(&row, "request_price").and_then(|p| dec_str_to_micro(&p, false))
                 else {
-                    stats.skipped.push(format!("models:{code} 缺 request_price"));
+                    stats
+                        .skipped
+                        .push(format!("models:{code} 缺 request_price"));
                     continue;
                 };
                 stats.models += 1;
@@ -826,9 +839,9 @@ pub async fn run_okapi_old(
                 okapi_store::admin::upsert_model_per_call(pg, code, per_call).await?;
             }
             other => {
-                stats
-                    .skipped
-                    .push(format!("models:{code} pricing_type={other} 不迁（无对应语义）"));
+                stats.skipped.push(format!(
+                    "models:{code} pricing_type={other} 不迁（无对应语义）"
+                ));
             }
         }
     }

@@ -93,6 +93,7 @@ async fn handle(
     };
 
     let book = state.pricebook.load();
+    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
     let minute_of_day =
         u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
@@ -101,10 +102,10 @@ async fn handle(
         model: ModelCode::from(billing_model),
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: 0,
+        monthly_tokens: rules_in.monthly_tokens,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
-        surge_active: false,
+        surge_active: rules_in.surge_active,
         service_tier: None,
     };
     // per_call：金额与 usage 无关，预扣即终额
@@ -317,11 +318,12 @@ async fn settle(
     };
     state.settle_write(input).await;
     if success {
-        super::auth::record_member_spend(
+        super::auth::record_settlement_counters(
             state,
             key.user_id,
             key.member_user_id,
             amount.as_micros(),
+            0,
         )
         .await;
     }

@@ -87,7 +87,9 @@ async fn main() -> anyhow::Result<()> {
                     .or_else(|| std::env::var("OKAPI_OLD_ENC_PASSPHRASE").ok())
                     .filter(|p| !p.is_empty());
                 if pass.is_none() {
-                    tracing::warn!("未提供 --enc-passphrase：API key 将全部跳过（bcrypt 不可转换）");
+                    tracing::warn!(
+                        "未提供 --enc-passphrase：API key 将全部跳过（bcrypt 不可转换）"
+                    );
                 }
                 let stats =
                     migrate::run_okapi_old(&pg, ledger.as_ref(), &dir, pass.as_deref(), dry_run)

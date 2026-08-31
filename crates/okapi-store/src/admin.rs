@@ -480,6 +480,114 @@ pub async fn upsert_price_group(
     Ok(())
 }
 
+/// 定价规则写入参数（具名字段防相邻同类型参数错位）。
+#[derive(Debug, Clone, Copy)]
+pub struct PricingRuleInput<'a> {
+    pub rule_code: &'a str,
+    /// volume | time_based | discount | surge。
+    pub rule_type: &'a str,
+    pub scope: &'a serde_json::Value,
+    pub params: &'a serde_json::Value,
+    pub priority: i32,
+    pub enabled: bool,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+}
+
+/// 一条定价规则（管理端列表）。
+#[derive(Debug, Clone)]
+pub struct PricingRuleRow {
+    pub rule_code: String,
+    pub rule_type: String,
+    pub scope: serde_json::Value,
+    pub params: serde_json::Value,
+    pub priority: i32,
+    pub enabled: bool,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+}
+
+/// 定价规则 upsert（rule_code 为幂等锚；改动后需 publish 才进价簿）。
+/// 语义合法性（rule_type × params 组合）由 console 侧校验，本层只落库。
+pub async fn upsert_pricing_rule(
+    pool: &PgPool,
+    input: PricingRuleInput<'_>,
+) -> Result<(), StoreError> {
+    sqlx::query!(
+        r#"
+        INSERT INTO pricing_rules
+            (rule_code, rule_type, scope, params, priority, enabled, valid_from, valid_to)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (rule_code) DO UPDATE SET
+            rule_type = EXCLUDED.rule_type,
+            scope = EXCLUDED.scope,
+            params = EXCLUDED.params,
+            priority = EXCLUDED.priority,
+            enabled = EXCLUDED.enabled,
+            valid_from = EXCLUDED.valid_from,
+            valid_to = EXCLUDED.valid_to,
+            updated_at = now()
+        "#,
+        input.rule_code,
+        input.rule_type,
+        input.scope,
+        input.params,
+        input.priority,
+        input.enabled,
+        input.valid_from,
+        input.valid_to
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 列出全部定价规则（含停用；按生效序返回便于管理端核对叠加顺序）。
+pub async fn list_pricing_rules(pool: &PgPool) -> Result<Vec<PricingRuleRow>, StoreError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT rule_code, rule_type, scope, params, priority, enabled, valid_from, valid_to
+        FROM pricing_rules
+        ORDER BY
+            CASE rule_type
+                WHEN 'volume' THEN 0
+                WHEN 'time_based' THEN 1
+                WHEN 'discount' THEN 2
+                ELSE 3
+            END,
+            priority,
+            rule_code
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| PricingRuleRow {
+            rule_code: r.rule_code,
+            rule_type: r.rule_type,
+            scope: r.scope,
+            params: r.params,
+            priority: r.priority,
+            enabled: r.enabled,
+            valid_from: r.valid_from,
+            valid_to: r.valid_to,
+        })
+        .collect())
+}
+
+/// 删除定价规则；返回是否命中（false = 不存在，调用方转 404）。
+pub async fn delete_pricing_rule(pool: &PgPool, rule_code: &str) -> Result<bool, StoreError> {
+    let affected = sqlx::query!(
+        r#"DELETE FROM pricing_rules WHERE rule_code = $1"#,
+        rule_code
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
 /// 覆盖式设置用户分组（定价取最高 priority，可见性取并集，§6.3）。
 pub async fn set_user_groups(
     pool: &PgPool,

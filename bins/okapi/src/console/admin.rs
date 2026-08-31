@@ -17,7 +17,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// 权限点守卫（IMPLEMENTATION §6.2）：403 时 param 携带缺失的权限点，便于排障。
-async fn guard(
+pub(super) async fn guard(
     state: &AppState,
     headers: &HeaderMap,
     permission: &str,
@@ -555,6 +555,162 @@ pub async fn upsert_model(
     Ok(Json(json!({ "model_id": model_id })))
 }
 
+// ---- 定价规则栈（DESIGN §3.4）----
+
+#[derive(Deserialize)]
+pub struct UpsertRuleReq {
+    pub rule_code: String,
+    /// volume | time_based | discount | surge。
+    pub rule_type: String,
+    /// 命中时施加的乘数（十进制字符串，禁浮点入库）。
+    pub multiplier: String,
+    /// volume 必填：本月累计 token 阈值。
+    #[serde(default)]
+    pub min_monthly_tokens: Option<u64>,
+    /// time_based 必填：[start, end) 本地分钟窗，允许跨零点回绕。
+    #[serde(default)]
+    pub start_minute: Option<u16>,
+    #[serde(default)]
+    pub end_minute: Option<u16>,
+    /// 作用域选择器 {"groups":[],"models":[],"users":[]}；缺省不限。
+    #[serde(default)]
+    pub scope: Option<Value>,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub valid_to: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// 按 rule_type 组装并校验 params——非法组合一律 400，绝不让"配得上却永不命中"
+/// 的规则进库（本端点补齐前 pricing_rules 只能手写 SQL，正是该类事故的来源）。
+fn rule_params(req: &UpsertRuleReq) -> Result<Value, AppError> {
+    if req.multiplier.parse::<okapi_pricing::RatioFp>().is_err() {
+        return Err(AppError::bad_request().with_param("multiplier"));
+    }
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "multiplier".to_owned(),
+        Value::String(req.multiplier.clone()),
+    );
+    match req.rule_type.as_str() {
+        "volume" => {
+            let threshold = req
+                .min_monthly_tokens
+                .ok_or_else(|| AppError::bad_request().with_param("min_monthly_tokens"))?;
+            params.insert("min_monthly_tokens".to_owned(), json!(threshold));
+        }
+        "time_based" => {
+            let (start, end) = req
+                .start_minute
+                .zip(req.end_minute)
+                .ok_or_else(|| AppError::bad_request().with_param("minute_window"))?;
+            if start >= 1440 || end >= 1440 {
+                return Err(AppError::bad_request().with_param("minute_window"));
+            }
+            // start == end 是空窗（永不命中），对齐 new-api rc.27 #6934 的反面语义：
+            // 与其静默退化成全天生效，不如在配置期就拒绝
+            if start == end {
+                return Err(AppError::bad_request().with_param("minute_window_empty"));
+            }
+            params.insert("start_minute".to_owned(), json!(start));
+            params.insert("end_minute".to_owned(), json!(end));
+        }
+        "discount" | "surge" => {}
+        _ => return Err(AppError::bad_request().with_param("rule_type")),
+    }
+    Ok(Value::Object(params))
+}
+
+/// 定价规则 upsert（改动后需 publish 才进价簿；与模型/分组同一发布闸）。
+pub async fn upsert_pricing_rule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UpsertRuleReq>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let params = rule_params(&req)?;
+    let scope = req.scope.clone().unwrap_or_else(|| json!({}));
+    if !scope.is_object() {
+        return Err(AppError::bad_request().with_param("scope"));
+    }
+    if req
+        .valid_from
+        .zip(req.valid_to)
+        .is_some_and(|(f, t)| f >= t)
+    {
+        return Err(AppError::bad_request().with_param("valid_window"));
+    }
+    okapi_store::admin::upsert_pricing_rule(
+        &state.pg,
+        okapi_store::admin::PricingRuleInput {
+            rule_code: &req.rule_code,
+            rule_type: &req.rule_type,
+            scope: &scope,
+            params: &params,
+            priority: req.priority,
+            enabled: req.enabled,
+            valid_from: req.valid_from,
+            valid_to: req.valid_to,
+        },
+    )
+    .await?;
+    audit(
+        &state,
+        &actor,
+        "pricing.upsert_rule",
+        &req.rule_code,
+        json!({ "rule_type": req.rule_type, "params": params, "enabled": req.enabled }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 规则列表（按生效叠加序返回，管理端据此核对多规则连乘结果）。
+pub async fn list_pricing_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let rows = okapi_store::admin::list_pricing_rules(&state.pg).await?;
+    let data: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "rule_code": r.rule_code,
+                "rule_type": r.rule_type,
+                "scope": r.scope,
+                "params": r.params,
+                "priority": r.priority,
+                "enabled": r.enabled,
+                "valid_from": r.valid_from,
+                "valid_to": r.valid_to,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
+
+pub async fn delete_pricing_rule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(rule_code): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    if !okapi_store::admin::delete_pricing_rule(&state.pg, &rule_code).await? {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    }
+    audit(&state, &actor, "pricing.delete_rule", &rule_code, json!({})).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// 发布定价 epoch：**发布前全量编译校验（fail-closed，DESIGN §3.3）**——
 /// 配置编译不过即拒绝发布；snapshot 存发布时刻配置全量（历史/回滚/diff）。
 pub async fn publish_pricing(
@@ -788,6 +944,108 @@ pub async fn refund_by_request(
 }
 
 // ---- 代客查看（#1790-2，强审计）----
+
+#[derive(Deserialize)]
+pub struct UserListQuery {
+    /// 用户名/邮箱模糊匹配（走 bind 参数，不拼字符串）。
+    #[serde(default)]
+    pub q: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
+}
+
+/// GET /admin/users：用户列表（此前只能按 ID 操作，没有列表入口）。
+pub async fn list_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UserListQuery>,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::USER_MANAGE).await?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    // 空查询用 NULL 表示"不过滤"，避免 '%%' 走不上索引的语义歧义
+    let needle =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("%{s}%"));
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, username, email, role, status, balance_micro, admin_role_id,
+               price_multiplier::text AS "multiplier!", created_at
+        FROM users
+        WHERE deleted_at IS NULL
+          AND ($1::text IS NULL OR username ILIKE $1 OR email ILIKE $1)
+        ORDER BY id DESC
+        LIMIT $2 OFFSET $3
+        "#,
+        needle,
+        limit,
+        offset
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+
+    let total = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*)::bigint AS "c!" FROM users
+        WHERE deleted_at IS NULL
+          AND ($1::text IS NULL OR username ILIKE $1 OR email ILIKE $1)
+        "#,
+        needle
+    )
+    .fetch_one(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+
+    let data: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "username": r.username,
+                "email": r.email,
+                "role": r.role,
+                "status": r.status,
+                "balance_micro": r.balance_micro,
+                "admin_role_id": r.admin_role_id,
+                "price_multiplier": r.multiplier,
+                "created_at": r.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "total": total, "data": data })))
+}
+
+/// GET /admin/roles：自定义管理角色列表（供分配下拉使用）。
+pub async fn list_roles(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::ROLE_MANAGE).await?;
+    let rows = sqlx::query!(
+        r#"SELECT id, role_code, display_name, permissions FROM admin_roles ORDER BY id"#
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let data: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "role_code": r.role_code,
+                "display_name": r.display_name,
+                "permissions": r.permissions,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
 
 pub async fn user_overview(
     State(state): State<AppState>,

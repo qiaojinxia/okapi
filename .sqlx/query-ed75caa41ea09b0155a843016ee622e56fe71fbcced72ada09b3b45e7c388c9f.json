@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key = 'balance_low_threshold_micro'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ed75caa41ea09b0155a843016ee622e56fe71fbcced72ada09b3b45e7c388c9f"
+}

@@ -397,6 +397,7 @@ async fn handle_chat(
     }
 
     let book = state.pricebook.load();
+    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
     let minute_of_day =
         u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
@@ -405,10 +406,10 @@ async fn handle_chat(
         model: ModelCode::from(canonical.as_str()),
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: 0, // volume 规则输入接 Redis KPI（M2）
+        monthly_tokens: rules_in.monthly_tokens,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
-        surge_active: false,
+        surge_active: rules_in.surge_active,
         // 预扣按请求声明档估（贵档多预扣；结算档只降不升另选）
         service_tier: info.service_tier.clone(),
     };
@@ -1611,11 +1612,12 @@ async fn settle_commit(
                 event_type: "commit",
             };
             bill.state.settle_write(input).await;
-            super::auth::record_member_spend(
+            super::auth::record_settlement_counters(
                 &bill.state,
                 bill.user_id,
                 bill.member_user_id,
                 quote.amount.as_micros(),
+                usage.total_raw(),
             )
             .await;
         }

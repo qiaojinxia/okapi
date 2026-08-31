@@ -110,17 +110,19 @@ async fn prepare(
     }
     super::auth::check_member_limit(state, key).await?;
 
+    let book = state.pricebook.load();
+    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
     let calc = CalcContext {
         user: UserId::new(key.user_id),
         model: ModelCode::from(canonical.as_str()),
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: 0,
+        monthly_tokens: rules_in.monthly_tokens,
         local_minute_of_day: u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440))
             .unwrap_or(0),
         now_unix: now.timestamp(),
-        surge_active: false,
+        surge_active: rules_in.surge_active,
         service_tier: None,
     };
     let cap = meta
@@ -134,7 +136,6 @@ async fn prepare(
         completion_tokens: cap,
         reasoning_tokens: 0,
     };
-    let book = state.pricebook.load();
     let est = calculate(&book, &calc, est_usage)?;
 
     // §14.4：per-key WS 连接租约（settings.realtime_max_conns_per_key 缺省 4）
@@ -483,11 +484,12 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
                 event_type: "commit",
             };
             state.settle_write(input).await;
-            super::auth::record_member_spend(
+            super::auth::record_settlement_counters(
                 state,
                 prep.key.user_id,
                 prep.key.member_user_id,
                 quote.amount.as_micros(),
+                usage.total_raw(),
             )
             .await;
         }

@@ -190,6 +190,10 @@ flowchart LR
     升档而多收）；未配置档位名按 1.0。快照记录 service_tier 与 tier_ratio（账单可解释）。
 5. 规则修饰器栈             （按 rule_type 固定序 volume → time_based → discount → surge，
                             同类按 priority、rule_code 排序；每步输出乘数或增量，写入快照）
+   四类规则的触发输入：volume 读 Redis `tok:{uid}:<yyyymm>`（本月累计 token，结算后累加）；
+   time_based 读站点本地分钟窗；discount 无条件；surge 读单 gateway 进程在途计费请求数与
+   `settings.surge_inflight_threshold` 比较（缺省 0 = 永不触发）。volume 与 surge 的输入采集
+   均由价簿内是否存在该类启用规则门控，无规则时热路径不产生任何额外读取。
 ```
 
 pricing_snapshot（存入 billing_records，jsonb）示例：

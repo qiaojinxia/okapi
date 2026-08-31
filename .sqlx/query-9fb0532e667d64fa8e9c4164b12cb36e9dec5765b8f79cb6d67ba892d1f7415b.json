@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO users (email, username, password_hash, role, status)\n                VALUES ($1, $2, $3, $4, $5)\n                ON CONFLICT (email) DO UPDATE SET\n                    role = EXCLUDED.role, status = EXCLUDED.status, updated_at = now()\n                RETURNING id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9fb0532e667d64fa8e9c4164b12cb36e9dec5765b8f79cb6d67ba892d1f7415b"
+}

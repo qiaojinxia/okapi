@@ -228,32 +228,42 @@ async fn admin_refund_full_cycle() {
         .unwrap();
     assert_eq!(r.status(), 404, "重复退款必须拒绝");
 
-    // CH 冲销：drain 后该用户金额聚合归零（240 + (-240)）
+    // CH 冲销：drain 后该用户金额聚合归零（240 + (-240)）。
+    // outbox 是全局队列，同二进制内并行用例的 chsink 会抢走本用例的行，
+    // 因此轮询"有行且和为零"——空结果集的和也是 0，不能只断言总和。
     if let Some(ch) = &env.state.ch {
         ch.ensure_schema().await.unwrap();
-        for _ in 0..100 {
-            if chsink::process_once(&env.pg, ch).await.unwrap() == 0 {
+        let mut seen: Option<i64> = None;
+        for _ in 0..50 {
+            let _ = chsink::process_once(&env.pg, ch).await.unwrap();
+            let rows = ch
+                .query_json_each_row(&format!(
+                    "SELECT sumMerge(amount) AS a FROM mv_user_day WHERE user_id = {} GROUP BY user_id, day",
+                    env.user_id
+                ))
+                .await
+                .unwrap();
+            if rows.is_empty() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            let total: i64 = rows
+                .iter()
+                .map(|r| {
+                    r.get("a").map_or(0, |v| {
+                        v.as_str()
+                            .map_or_else(|| v.as_i64(), |s| s.parse().ok())
+                            .unwrap_or(0)
+                    })
+                })
+                .sum();
+            seen = Some(total);
+            if total == 0 {
                 break;
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let rows = ch
-            .query_json_each_row(&format!(
-                "SELECT sumMerge(amount) AS a FROM mv_user_day WHERE user_id = {} GROUP BY user_id, day",
-                env.user_id
-            ))
-            .await
-            .unwrap();
-        let total: i64 = rows
-            .iter()
-            .map(|r| {
-                r.get("a").map_or(0, |v| {
-                    v.as_str()
-                        .map_or_else(|| v.as_i64(), |s| s.parse().ok())
-                        .unwrap_or(0)
-                })
-            })
-            .sum();
-        assert_eq!(total, 0, "CH 口径应被负额行冲平");
+        assert_eq!(seen, Some(0), "CH 口径应被负额行冲平");
     }
 
     // 对账干净（消费-240 + 退款+240 + 充值 1_000_000 = redis 余额）

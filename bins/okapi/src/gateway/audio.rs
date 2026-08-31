@@ -30,18 +30,22 @@ struct SpeechProbe {
     input: String,
 }
 
-fn calc_ctx(key: &okapi_store::AuthedKey, model: &str) -> CalcContext {
+fn calc_ctx(
+    key: &okapi_store::AuthedKey,
+    model: &str,
+    rules_in: super::rule_inputs::RuleInputs,
+) -> CalcContext {
     let now = chrono::Utc::now();
     CalcContext {
         user: UserId::new(key.user_id),
         model: ModelCode::from(model),
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: 0,
+        monthly_tokens: rules_in.monthly_tokens,
         local_minute_of_day: u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440))
             .unwrap_or(0),
         now_unix: now.timestamp(),
-        surge_active: false,
+        surge_active: rules_in.surge_active,
         service_tier: None,
     }
 }
@@ -115,7 +119,8 @@ async fn handle_speech(
         reasoning_tokens: 0,
     };
     let book = state.pricebook.load();
-    let calc = calc_ctx(&key, &canonical);
+    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
+    let calc = calc_ctx(&key, &canonical, rules_in);
     let quote = calculate(&book, &calc, usage)?;
     super::auth::check_member_limit(state, &key).await?;
 
@@ -308,7 +313,8 @@ async fn handle_transcriptions(
 
     // per_call：预扣即终额（时长无法本地解码，§4.4 定案）
     let book = state.pricebook.load();
-    let calc = calc_ctx(&key, &canonical);
+    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
+    let calc = calc_ctx(&key, &canonical, rules_in);
     let quote = calculate(&book, &calc, TokenUsage::default())?;
     if quote.snapshot.mode != "per_call" {
         return Err(AppError::bad_request().with_param("transcriptions_requires_per_call_model"));
@@ -478,11 +484,12 @@ async fn settle(
                 event_type: "commit",
             };
             state.settle_write(input).await;
-            super::auth::record_member_spend(
+            super::auth::record_settlement_counters(
                 state,
                 key.user_id,
                 key.member_user_id,
                 quote.amount.as_micros(),
+                usage.total_raw(),
             )
             .await;
         }

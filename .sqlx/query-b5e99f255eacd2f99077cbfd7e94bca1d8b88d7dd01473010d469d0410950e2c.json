@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT actor, event_type FROM billing_events WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "actor",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "actor"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "event_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "event_type"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b5e99f255eacd2f99077cbfd7e94bca1d8b88d7dd01473010d469d0410950e2c"
+}

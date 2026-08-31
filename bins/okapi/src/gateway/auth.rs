@@ -58,12 +58,14 @@ pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(),
     Ok(())
 }
 
-/// 结算后累计成员消费（团 key 才计）。
-pub async fn record_member_spend(
+/// 结算后累计两个软实时计数：团成员消费（团 key 才计）与用户本月 token
+/// （volume 规则输入，仅在价簿含该类规则时才写）。
+pub async fn record_settlement_counters(
     state: &AppState,
     key_user_id: i64,
     member: Option<i64>,
     amount_micro: i64,
+    tokens: u64,
 ) {
     if let Some(member) = member {
         state
@@ -71,4 +73,5 @@ pub async fn record_member_spend(
             .member_spend_add(key_user_id, member, amount_micro)
             .await;
     }
+    super::rule_inputs::record_tokens(state, key_user_id, tokens).await;
 }

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT relname AS \"name!\" FROM pg_class\n           WHERE relname ~ '^(billing_records|billing_events|audit_logs)_y\\d{4}m\\d{2}$'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "name!",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relname"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "083932e4327c06d1ef6751a0b9439150882af2a54f9e24e0dcb225b9e098f3f3"
+}

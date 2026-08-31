@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key = 'realtime_max_conns_per_key'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "bd673ff53223f27d13a672191ab74219d5afe23745592a7b9021330ab91f7bae"
+}

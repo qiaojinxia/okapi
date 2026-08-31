@@ -14,6 +14,7 @@ pub mod images;
 pub mod models;
 pub mod pricing_loader;
 pub mod realtime;
+pub mod rule_inputs;
 pub mod sched_redis;
 pub mod scheduler;
 pub mod state;
@@ -104,6 +105,7 @@ pub async fn build_state(
                 .unwrap_or(16)
                 .div_ceil(2),
         )),
+        in_flight: Arc::new(std::sync::atomic::AtomicI64::new(0)),
     })
 }
 
@@ -229,6 +231,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(models::list_models))
         .route("/healthz", get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rule_inputs::track_in_flight,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

@@ -43,6 +43,9 @@ pub struct AppState {
     /// 后台结算任务先过信号量再碰 PG，把 pool 竞争者钳制住——
     /// 高 RPS 下等待发生在信号量（无超时）而非 pool acquire（5s 超时丢账）。
     pub settle_gate: std::sync::Arc<tokio::sync::Semaphore>,
+    /// 本进程在途数据面请求数（surge 规则的负载输入，DESIGN §3.4）。
+    /// 计数覆盖响应体流完为止；仅在价簿含 surge 规则时才挂计数中间件。
+    pub in_flight: Arc<std::sync::atomic::AtomicI64>,
 }
 
 impl AppState {

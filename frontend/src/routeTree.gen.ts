@@ -15,13 +15,16 @@ import { Route as PortalRouteImport } from './routes/portal'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminChannelsRouteImport } from './routes/admin.channels'
+import { Route as AdminCodesRouteImport } from './routes/admin.codes'
 import { Route as AdminOpsRouteImport } from './routes/admin.ops'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
+import { Route as AdminStatsRouteImport } from './routes/admin.stats'
 import { Route as AdminUsersRouteImport } from './routes/admin.users'
 import { Route as PortalIndexRouteImport } from './routes/portal.index'
 import { Route as PortalAffRouteImport } from './routes/portal.aff'
 import { Route as PortalKeysRouteImport } from './routes/portal.keys'
 import { Route as PortalLogsRouteImport } from './routes/portal.logs'
+import { Route as PortalTopupRouteImport } from './routes/portal.topup'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -53,6 +56,11 @@ const AdminChannelsRoute = AdminChannelsRouteImport.update({
   path: '/channels',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminCodesRoute = AdminCodesRouteImport.update({
+  id: '/codes',
+  path: '/codes',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AdminOpsRoute = AdminOpsRouteImport.update({
   id: '/ops',
   path: '/ops',
@@ -61,6 +69,11 @@ const AdminOpsRoute = AdminOpsRouteImport.update({
 const AdminPricingRoute = AdminPricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminStatsRoute = AdminStatsRouteImport.update({
+  id: '/stats',
+  path: '/stats',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminUsersRoute = AdminUsersRouteImport.update({
@@ -88,6 +101,11 @@ const PortalLogsRoute = PortalLogsRouteImport.update({
   path: '/logs',
   getParentRoute: () => PortalRoute,
 } as any)
+const PortalTopupRoute = PortalTopupRouteImport.update({
+  id: '/topup',
+  path: '/topup',
+  getParentRoute: () => PortalRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -95,12 +113,15 @@ export interface FileRoutesByFullPath {
   '/portal': typeof PortalRouteWithChildren
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
+  '/admin/codes': typeof AdminCodesRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/stats': typeof AdminStatsRoute
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/topup': typeof PortalTopupRoute
   '/admin/': typeof AdminIndexRoute
   '/portal/': typeof PortalIndexRoute
 }
@@ -108,12 +129,15 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
+  '/admin/codes': typeof AdminCodesRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/stats': typeof AdminStatsRoute
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/topup': typeof PortalTopupRoute
   '/admin': typeof AdminIndexRoute
   '/portal': typeof PortalIndexRoute
 }
@@ -124,12 +148,15 @@ export interface FileRoutesById {
   '/portal': typeof PortalRouteWithChildren
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
+  '/admin/codes': typeof AdminCodesRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/stats': typeof AdminStatsRoute
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/topup': typeof PortalTopupRoute
   '/admin/': typeof AdminIndexRoute
   '/portal/': typeof PortalIndexRoute
 }
@@ -141,12 +168,15 @@ export interface FileRouteTypes {
     | '/portal'
     | '/pricing'
     | '/admin/channels'
+    | '/admin/codes'
     | '/admin/ops'
     | '/admin/pricing'
+    | '/admin/stats'
     | '/admin/users'
     | '/portal/aff'
     | '/portal/keys'
     | '/portal/logs'
+    | '/portal/topup'
     | '/admin/'
     | '/portal/'
   fileRoutesByTo: FileRoutesByTo
@@ -154,12 +184,15 @@ export interface FileRouteTypes {
     | '/'
     | '/pricing'
     | '/admin/channels'
+    | '/admin/codes'
     | '/admin/ops'
     | '/admin/pricing'
+    | '/admin/stats'
     | '/admin/users'
     | '/portal/aff'
     | '/portal/keys'
     | '/portal/logs'
+    | '/portal/topup'
     | '/admin'
     | '/portal'
   id:
@@ -169,12 +202,15 @@ export interface FileRouteTypes {
     | '/portal'
     | '/pricing'
     | '/admin/channels'
+    | '/admin/codes'
     | '/admin/ops'
     | '/admin/pricing'
+    | '/admin/stats'
     | '/admin/users'
     | '/portal/aff'
     | '/portal/keys'
     | '/portal/logs'
+    | '/portal/topup'
     | '/admin/'
     | '/portal/'
   fileRoutesById: FileRoutesById
@@ -230,6 +266,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminChannelsRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/codes': {
+      id: '/admin/codes'
+      path: '/codes'
+      fullPath: '/admin/codes'
+      preLoaderRoute: typeof AdminCodesRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/ops': {
       id: '/admin/ops'
       path: '/ops'
@@ -242,6 +285,13 @@ declare module '@tanstack/react-router' {
       path: '/pricing'
       fullPath: '/admin/pricing'
       preLoaderRoute: typeof AdminPricingRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/stats': {
+      id: '/admin/stats'
+      path: '/stats'
+      fullPath: '/admin/stats'
+      preLoaderRoute: typeof AdminStatsRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/users': {
@@ -279,21 +329,32 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortalLogsRouteImport
       parentRoute: typeof PortalRoute
     }
+    '/portal/topup': {
+      id: '/portal/topup'
+      path: '/topup'
+      fullPath: '/portal/topup'
+      preLoaderRoute: typeof PortalTopupRouteImport
+      parentRoute: typeof PortalRoute
+    }
   }
 }
 
 interface AdminRouteChildren {
   AdminChannelsRoute: typeof AdminChannelsRoute
+  AdminCodesRoute: typeof AdminCodesRoute
   AdminOpsRoute: typeof AdminOpsRoute
   AdminPricingRoute: typeof AdminPricingRoute
+  AdminStatsRoute: typeof AdminStatsRoute
   AdminUsersRoute: typeof AdminUsersRoute
   AdminIndexRoute: typeof AdminIndexRoute
 }
 
 const AdminRouteChildren: AdminRouteChildren = {
   AdminChannelsRoute: AdminChannelsRoute,
+  AdminCodesRoute: AdminCodesRoute,
   AdminOpsRoute: AdminOpsRoute,
   AdminPricingRoute: AdminPricingRoute,
+  AdminStatsRoute: AdminStatsRoute,
   AdminUsersRoute: AdminUsersRoute,
   AdminIndexRoute: AdminIndexRoute,
 }
@@ -304,6 +365,7 @@ interface PortalRouteChildren {
   PortalAffRoute: typeof PortalAffRoute
   PortalKeysRoute: typeof PortalKeysRoute
   PortalLogsRoute: typeof PortalLogsRoute
+  PortalTopupRoute: typeof PortalTopupRoute
   PortalIndexRoute: typeof PortalIndexRoute
 }
 
@@ -311,6 +373,7 @@ const PortalRouteChildren: PortalRouteChildren = {
   PortalAffRoute: PortalAffRoute,
   PortalKeysRoute: PortalKeysRoute,
   PortalLogsRoute: PortalLogsRoute,
+  PortalTopupRoute: PortalTopupRoute,
   PortalIndexRoute: PortalIndexRoute,
 }
 
