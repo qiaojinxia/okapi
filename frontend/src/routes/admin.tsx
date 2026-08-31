@@ -21,6 +21,7 @@ function AdminLayout() {
         { to: '/admin/channels', label: t('admin:channels') },
         { to: '/admin/pricing', label: t('admin:pricing') },
         { to: '/admin/users', label: t('admin:users') },
+        { to: '/admin/keys', label: t('admin:keysNav') },
         { to: '/admin/codes', label: t('admin:redeemNav') },
         { to: '/admin/stats', label: t('admin:statNav') },
         { to: '/admin/ops', label: t('admin:ops') },

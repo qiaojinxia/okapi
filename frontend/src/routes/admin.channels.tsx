@@ -361,6 +361,25 @@ function ChannelEditor({
     onError: (err) => setMsg(describeError(err)),
   })
 
+  // 可见性矩阵（§6.3）：哪些定价分组能看到本渠道。空集 = 不限（全部可见）
+  const groups = useQuery({
+    queryKey: qk.adminGroups,
+    queryFn: () => apiFetch<{ data: { group_code: string }[] }>('/admin/groups'),
+  })
+  const [visible, setVisible] = useState<Set<string>>(new Set())
+  const saveGroups = useMutation({
+    mutationFn: () =>
+      apiFetch(`/admin/channels/${id}/groups`, {
+        method: 'POST',
+        body: { groups: [...visible] },
+      }),
+    onSuccess: () => {
+      setMsg(t('admin:visibilitySaved'))
+      onDone()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
   // 模型发现：手动触发，不随面板打开自动外呼上游
   const discovered = useQuery({
     queryKey: qk.channelModels(id),
@@ -448,6 +467,33 @@ function ChannelEditor({
             </button>
           </p>
         )}
+
+        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+          <Label>{t('admin:visibility')}</Label>
+          <p className="text-xs text-muted-foreground">{t('admin:visibilityHint')}</p>
+          <div className="flex flex-wrap gap-3">
+            {(groups.data?.data ?? []).map((g) => (
+              <label key={g.group_code} className="flex items-center gap-2 font-mono text-xs">
+                <input
+                  type="checkbox"
+                  checked={visible.has(g.group_code)}
+                  onChange={() =>
+                    setVisible((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(g.group_code)) next.delete(g.group_code)
+                      else next.add(g.group_code)
+                      return next
+                    })
+                  }
+                />
+                {g.group_code}
+              </label>
+            ))}
+            <Button size="sm" variant="outline" onClick={() => saveGroups.mutate()}>
+              {t('admin:saveVisibility')}
+            </Button>
+          </div>
+        </div>
 
         <div className="flex items-center gap-3">
           <Button disabled={save.isPending} onClick={() => save.mutate()}>

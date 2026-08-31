@@ -125,6 +125,76 @@ function Dashboard() {
           )}
         </CardContent>
       </Card>
+
+      <ModelBreakdownCard days={days} />
     </div>
+  )
+}
+
+interface DailyRow {
+  day: string
+  model: string
+  requests: number
+  tokens: number
+  amount_micro: number
+  discount_micro: number
+}
+
+/// 我的消费按模型细分（/api/me/stats/daily 走 CH mv_user_model_day）。
+/// 与上方按日曲线互补：曲线回答"何时花的"，这里回答"花在哪个模型上"。
+function ModelBreakdownCard({ days }: { days: number }) {
+  const { t, i18n } = useTranslation()
+  const locale = i18n.language
+  const daily = useQuery({
+    queryKey: qk.myDaily(days),
+    queryFn: () => apiFetch<{ days: number; data: DailyRow[] }>(`/api/me/stats/daily?days=${days}`),
+    // CH 未启用时后端 501，属预期，不重试
+    retry: false,
+  })
+
+  // 后端按 (day, model) 返回，这里合并到模型维度出占比
+  const byModel = new Map<string, { amount: number; requests: number; tokens: number }>()
+  for (const r of daily.data?.data ?? []) {
+    const cur = byModel.get(r.model) ?? { amount: 0, requests: 0, tokens: 0 }
+    cur.amount += Number(r.amount_micro)
+    cur.requests += Number(r.requests)
+    cur.tokens += Number(r.tokens)
+    byModel.set(r.model, cur)
+  }
+  const rows = [...byModel.entries()]
+    .map(([model, v]) => ({ model, ...v }))
+    .sort((a, b) => b.amount - a.amount)
+  const total = rows.reduce((sum, r) => sum + r.amount, 0)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('portal:byModelTitle')}</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {daily.isError ? (
+          <p className="text-sm text-muted-foreground">{describeError(daily.error)}</p>
+        ) : rows.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t('common:empty')}</p>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {rows.map((r) => (
+              <div key={r.model} className="flex items-center gap-3">
+                <span className="w-48 shrink-0 truncate font-mono text-xs">{r.model}</span>
+                <div className="h-2 flex-1 overflow-hidden rounded bg-muted">
+                  <div
+                    className="h-full bg-primary"
+                    style={{ width: total > 0 ? `${(r.amount / total) * 100}%` : '0%' }}
+                  />
+                </div>
+                <span className="w-24 shrink-0 text-right text-xs">
+                  {formatMoney(r.amount, locale)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }

@@ -162,6 +162,8 @@ function UserActionsCard({ userId }: { userId: number }) {
   const [reason, setReason] = useState('')
   const [role, setRole] = useState('')
   const [adminRoleId, setAdminRoleId] = useState('')
+  const [groupsDraft, setGroupsDraft] = useState('')
+  const [expiryDraft, setExpiryDraft] = useState('')
   const [msg, setMsg] = useState<string | null>(null)
 
   const overview = useQuery({
@@ -204,6 +206,34 @@ function UserActionsCard({ userId }: { userId: number }) {
           role: role === '' ? undefined : Number(role),
           admin_role_id: adminRoleId === '' ? undefined : Number(adminRoleId),
         },
+      }),
+    onSuccess: () => {
+      setMsg(t('common:success'))
+      invalidate()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
+  // 覆盖式设置分组：后端按 (group_code, priority) 全量替换，故 UI 也是全量提交
+  const setGroups = useMutation({
+    mutationFn: (codes: string[]) =>
+      apiFetch(`/admin/users/${userId}/groups`, {
+        method: 'POST',
+        body: { groups: codes.map((group_code, idx) => ({ group_code, priority: codes.length - idx })) },
+      }),
+    onSuccess: () => {
+      setMsg(t('common:success'))
+      invalidate()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
+  const setExpiry = useMutation({
+    mutationFn: (expires_at: string | null) =>
+      apiFetch(`/admin/users/${userId}/balance-expiry`, {
+        method: 'POST',
+        // null 表示取消有效期（永不过期）
+        body: { expires_at },
       }),
     onSuccess: () => {
       setMsg(t('common:success'))
@@ -278,6 +308,50 @@ function UserActionsCard({ userId }: { userId: number }) {
             {t('admin:softDelete')}
           </Button>
           <span className="text-xs text-muted-foreground">{t('admin:banHint')}</span>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="ugroups">{t('admin:userGroups')}</Label>
+            <Input
+              id="ugroups"
+              className="w-64 font-mono text-xs"
+              value={groupsDraft}
+              placeholder="vip,default"
+              onChange={(e) => setGroupsDraft(e.target.value)}
+            />
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setGroups.mutate(
+                groupsDraft
+                  .split(',')
+                  .map((g) => g.trim())
+                  .filter(Boolean),
+              )
+            }
+          >
+            {t('common:save')}
+          </Button>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="uexpiry">{t('admin:balanceExpiry')}</Label>
+            <Input
+              id="uexpiry"
+              className="w-44"
+              value={expiryDraft}
+              placeholder="2026-12-31T00:00:00Z"
+              onChange={(e) => setExpiryDraft(e.target.value)}
+            />
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setExpiry.mutate(expiryDraft.trim() === '' ? null : expiryDraft.trim())}
+          >
+            {expiryDraft.trim() === '' ? t('admin:clearExpiry') : t('common:save')}
+          </Button>
         </div>
 
         <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">

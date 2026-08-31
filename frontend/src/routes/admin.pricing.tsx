@@ -20,8 +20,236 @@ function PricingPage() {
   return (
     <div className="flex flex-col gap-4">
       <ModelCard />
+      <ModelListCard />
+      <GroupsCard />
       <RulesCard />
     </div>
+  )
+}
+
+interface ModelListRow {
+  model_name: string
+  vendor: string | null
+  status: number
+  pricing_mode: string | null
+  model_ratio: string | null
+  completion_ratio: string | null
+  cache_ratio: string | null
+  cache_write_ratio: string | null
+  per_call_price_micro: number | null
+}
+
+/// 已配置模型总览 + 删除。
+/// 未定价模型（pricing_mode 为空）高亮标注——建了模型却没定价会让请求直接被拒。
+function ModelListCard() {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [msg, setMsg] = useState<string | null>(null)
+
+  const models = useQuery({
+    queryKey: qk.adminModels,
+    queryFn: () => apiFetch<{ data: ModelListRow[] }>('/admin/models'),
+  })
+
+  const remove = useMutation({
+    mutationFn: (name: string) =>
+      apiFetch<{ requires_publish: boolean }>(`/admin/models/${encodeURIComponent(name)}`, {
+        method: 'DELETE',
+      }),
+    onSuccess: (r) => {
+      setMsg(r.requires_publish ? t('admin:requiresPublish') : t('common:success'))
+      void queryClient.invalidateQueries({ queryKey: qk.adminModels })
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('admin:modelListTitle')}</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        {msg !== null && <span className="text-xs text-muted-foreground">{msg}</span>}
+        {models.isError ? (
+          <p className="text-sm text-destructive">{describeError(models.error)}</p>
+        ) : (
+          <Table>
+            <THead>
+              <Tr>
+                <Th>{t('admin:modelName')}</Th>
+                <Th>{t('admin:pricingMode')}</Th>
+                <Th>{t('admin:modelRatio')}</Th>
+                <Th>{t('admin:completionRatio')}</Th>
+                <Th>{t('admin:cacheRatio')}</Th>
+                <Th>{t('admin:cacheWriteRatioShort')}</Th>
+                <Th>{t('common:actions')}</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {(models.data?.data ?? []).map((m) => (
+                <Tr key={m.model_name}>
+                  <Td className="font-mono text-xs">{m.model_name}</Td>
+                  <Td>
+                    {m.pricing_mode === null ? (
+                      <Badge variant="destructive">{t('admin:unpriced')}</Badge>
+                    ) : (
+                      <Badge variant="muted">{m.pricing_mode}</Badge>
+                    )}
+                  </Td>
+                  <Td>{m.model_ratio ?? '—'}</Td>
+                  <Td>{m.completion_ratio ?? '—'}</Td>
+                  <Td>{m.cache_ratio ?? '—'}</Td>
+                  <Td>{m.cache_write_ratio ?? '—'}</Td>
+                  <Td>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={() => remove.mutate(m.model_name)}
+                    >
+                      {t('common:delete')}
+                    </Button>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+interface GroupListRow {
+  group_code: string
+  group_ratio: string | null
+  description: string | null
+  is_default: boolean
+  user_count: number
+  channel_count: number
+}
+
+/// 分组倍率：新建 / 列表 / 删除。
+/// 列表带占用计数——被用户或渠道引用时后端回 409，这里先把数字摆出来避免无谓尝试。
+function GroupsCard() {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [form, setForm] = useState({ group_code: '', group_ratio: '1', description: '' })
+  const [msg, setMsg] = useState<string | null>(null)
+
+  const groups = useQuery({
+    queryKey: qk.adminGroups,
+    queryFn: () => apiFetch<{ data: GroupListRow[] }>('/admin/groups'),
+  })
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminGroups })
+
+  const upsert = useMutation({
+    mutationFn: () =>
+      apiFetch('/admin/groups', {
+        method: 'POST',
+        body: {
+          group_code: form.group_code.trim(),
+          group_ratio: form.group_ratio.trim(),
+          description: form.description.trim(),
+        },
+      }),
+    onSuccess: () => {
+      setMsg(t('admin:requiresPublish'))
+      setForm({ group_code: '', group_ratio: '1', description: '' })
+      invalidate()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
+  const remove = useMutation({
+    mutationFn: (code: string) =>
+      apiFetch(`/admin/groups/${encodeURIComponent(code)}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      setMsg(t('admin:requiresPublish'))
+      invalidate()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
+  const fields = [
+    ['group_code', t('admin:groupCode')],
+    ['group_ratio', t('admin:groupRatio')],
+    ['description', t('admin:groupDesc')],
+  ] as const
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('admin:groupsTitle')}</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {fields.map(([field, label]) => (
+            <div key={field} className="flex flex-col gap-1.5">
+              <Label htmlFor={`g-${field}`}>{label}</Label>
+              <Input
+                id={`g-${field}`}
+                value={form[field]}
+                onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            disabled={upsert.isPending || form.group_code.trim() === ''}
+            onClick={() => upsert.mutate()}
+          >
+            {t('common:save')}
+          </Button>
+          {msg !== null && <span className="text-xs text-muted-foreground">{msg}</span>}
+        </div>
+
+        {groups.isError ? (
+          <p className="text-sm text-destructive">{describeError(groups.error)}</p>
+        ) : (
+          <Table>
+            <THead>
+              <Tr>
+                <Th>{t('admin:groupCode')}</Th>
+                <Th>{t('admin:groupRatio')}</Th>
+                <Th>{t('admin:groupDesc')}</Th>
+                <Th>{t('admin:groupUsers')}</Th>
+                <Th>{t('admin:groupChannels')}</Th>
+                <Th>{t('common:actions')}</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {(groups.data?.data ?? []).map((g) => (
+                <Tr key={g.group_code}>
+                  <Td className="font-mono text-xs">
+                    {g.group_code}
+                    {g.is_default && (
+                      <Badge variant="muted" className="ml-2">
+                        {t('admin:groupDefault')}
+                      </Badge>
+                    )}
+                  </Td>
+                  <Td>{g.group_ratio ?? '—'}</Td>
+                  <Td>{g.description ?? '—'}</Td>
+                  <Td>{g.user_count}</Td>
+                  <Td>{g.channel_count}</Td>
+                  <Td>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={g.is_default}
+                      onClick={() => remove.mutate(g.group_code)}
+                    >
+                      {t('common:delete')}
+                    </Button>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -219,6 +447,20 @@ function RulesCard() {
     onError: (err) => setMsg(describeError(err)),
   })
 
+  // 活动上下线：不删配置便于复用（如每年双十一复用同一规则）
+  const toggle = useMutation({
+    mutationFn: (arg: { code: string; enabled: boolean }) =>
+      apiFetch(`/admin/pricing/rules/${encodeURIComponent(arg.code)}/toggle`, {
+        method: 'POST',
+        body: { enabled: arg.enabled },
+      }),
+    onSuccess: () => {
+      setMsg(t('admin:requiresPublish'))
+      invalidate()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
   const typeFields: ReadonlyArray<readonly [keyof typeof form, string]> =
     ruleType === 'volume'
       ? [['min_monthly_tokens', t('admin:ruleThreshold')]]
@@ -330,10 +572,20 @@ function RulesCard() {
                       {r.enabled ? t('common:enabled') : t('common:disabled')}
                     </Badge>
                   </Td>
-                  <Td>
+                  <Td className="flex flex-wrap gap-1.5">
                     <Button
                       size="sm"
                       variant="outline"
+                      disabled={toggle.isPending}
+                      onClick={() =>
+                        toggle.mutate({ code: r.rule_code, enabled: !r.enabled })
+                      }
+                    >
+                      {r.enabled ? t('common:disabled') : t('common:enabled')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
                       disabled={remove.isPending}
                       onClick={() => remove.mutate(r.rule_code)}
                     >

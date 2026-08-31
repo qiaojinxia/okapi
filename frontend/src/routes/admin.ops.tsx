@@ -1,10 +1,12 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input, Label } from '@/components/ui/input'
+import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -27,7 +29,123 @@ function OpsPage() {
       <LeaderboardCard />
       <RetentionCard />
       <NotifyCard />
+      <SettingsCard />
     </div>
+  )
+}
+
+interface SettingRow {
+  key: string
+  value: unknown
+  is_secret: boolean
+  configured: boolean
+  updated_at: string
+}
+
+/// 系统设置总览 + 就地编辑。
+/// 敏感键（含 secret/key/token/password/webhook/credential）后端只回
+/// `configured` 布尔占位，明文永不出接口——故此处只能覆写、不能读回。
+function SettingsCard() {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState<string | null>(null)
+  const [draft, setDraft] = useState('')
+  const [msg, setMsg] = useState<string | null>(null)
+
+  const settings = useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => apiFetch<{ data: SettingRow[] }>('/admin/settings'),
+  })
+
+  const save = useMutation({
+    mutationFn: (key: string) =>
+      apiFetch('/admin/settings', {
+        method: 'POST',
+        // 值按 JSON 解析：设置项类型多样（布尔/数字/对象/数组），统一交由后端 JSONB 承载
+        body: { key, value: JSON.parse(draft) as unknown },
+      }),
+    onSuccess: () => {
+      setMsg(t('common:success'))
+      setEditing(null)
+      setDraft('')
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+    },
+    onError: (err) =>
+      setMsg(err instanceof SyntaxError ? t('admin:advancedBadJson') : describeError(err)),
+  })
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('admin:settingsTitle')}</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-3">
+        <p className="text-xs text-muted-foreground">{t('admin:settingsHint')}</p>
+        {settings.isError ? (
+          <p className="text-sm text-destructive">{describeError(settings.error)}</p>
+        ) : (
+          <Table>
+            <THead>
+              <Tr>
+                <Th>{t('admin:settingKey')}</Th>
+                <Th>{t('admin:settingValue')}</Th>
+                <Th>{t('common:actions')}</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {(settings.data?.data ?? []).map((s) => (
+                <Tr key={s.key}>
+                  <Td className="font-mono text-xs">{s.key}</Td>
+                  <Td className="max-w-72 truncate font-mono text-xs">
+                    {s.is_secret ? (
+                      <Badge variant={s.configured ? 'success' : 'muted'}>
+                        {s.configured ? t('admin:settingSet') : t('admin:settingUnset')}
+                      </Badge>
+                    ) : (
+                      JSON.stringify(s.value)
+                    )}
+                  </Td>
+                  <Td>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setEditing(s.key)
+                        // 敏感键无明文可回填，留空强制显式覆写
+                        setDraft(s.is_secret ? '' : JSON.stringify(s.value))
+                      }}
+                    >
+                      {t('common:edit')}
+                    </Button>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+        {editing !== null && (
+          <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">
+            <div className="flex min-w-64 flex-1 flex-col gap-1.5">
+              <Label htmlFor="set-val">{editing}</Label>
+              <Input
+                id="set-val"
+                className="font-mono text-xs"
+                value={draft}
+                placeholder='"value" / 123 / true / {"k":"v"}'
+                onChange={(e) => setDraft(e.target.value)}
+              />
+            </div>
+            <Button size="sm" disabled={draft.trim() === ''} onClick={() => save.mutate(editing)}>
+              {t('common:save')}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>
+              {t('common:cancel')}
+            </Button>
+          </div>
+        )}
+        {msg !== null && <span className="text-xs text-muted-foreground">{msg}</span>}
+      </CardContent>
+    </Card>
   )
 }
 

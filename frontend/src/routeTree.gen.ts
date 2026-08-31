@@ -16,6 +16,7 @@ import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminChannelsRouteImport } from './routes/admin.channels'
 import { Route as AdminCodesRouteImport } from './routes/admin.codes'
+import { Route as AdminKeysRouteImport } from './routes/admin.keys'
 import { Route as AdminOpsRouteImport } from './routes/admin.ops'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
 import { Route as AdminStatsRouteImport } from './routes/admin.stats'
@@ -59,6 +60,11 @@ const AdminChannelsRoute = AdminChannelsRouteImport.update({
 const AdminCodesRoute = AdminCodesRouteImport.update({
   id: '/codes',
   path: '/codes',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminKeysRoute = AdminKeysRouteImport.update({
+  id: '/keys',
+  path: '/keys',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminOpsRoute = AdminOpsRouteImport.update({
@@ -114,6 +120,7 @@ export interface FileRoutesByFullPath {
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/keys': typeof AdminKeysRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/pricing': typeof AdminPricingRoute
   '/admin/stats': typeof AdminStatsRoute
@@ -130,6 +137,7 @@ export interface FileRoutesByTo {
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/keys': typeof AdminKeysRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/pricing': typeof AdminPricingRoute
   '/admin/stats': typeof AdminStatsRoute
@@ -149,6 +157,7 @@ export interface FileRoutesById {
   '/pricing': typeof PricingRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/keys': typeof AdminKeysRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/pricing': typeof AdminPricingRoute
   '/admin/stats': typeof AdminStatsRoute
@@ -169,6 +178,7 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/keys'
     | '/admin/ops'
     | '/admin/pricing'
     | '/admin/stats'
@@ -185,6 +195,7 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/keys'
     | '/admin/ops'
     | '/admin/pricing'
     | '/admin/stats'
@@ -203,6 +214,7 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/keys'
     | '/admin/ops'
     | '/admin/pricing'
     | '/admin/stats'
@@ -271,6 +283,13 @@ declare module '@tanstack/react-router' {
       path: '/codes'
       fullPath: '/admin/codes'
       preLoaderRoute: typeof AdminCodesRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/keys': {
+      id: '/admin/keys'
+      path: '/keys'
+      fullPath: '/admin/keys'
+      preLoaderRoute: typeof AdminKeysRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/ops': {
@@ -342,6 +361,7 @@ declare module '@tanstack/react-router' {
 interface AdminRouteChildren {
   AdminChannelsRoute: typeof AdminChannelsRoute
   AdminCodesRoute: typeof AdminCodesRoute
+  AdminKeysRoute: typeof AdminKeysRoute
   AdminOpsRoute: typeof AdminOpsRoute
   AdminPricingRoute: typeof AdminPricingRoute
   AdminStatsRoute: typeof AdminStatsRoute
@@ -352,6 +372,7 @@ interface AdminRouteChildren {
 const AdminRouteChildren: AdminRouteChildren = {
   AdminChannelsRoute: AdminChannelsRoute,
   AdminCodesRoute: AdminCodesRoute,
+  AdminKeysRoute: AdminKeysRoute,
   AdminOpsRoute: AdminOpsRoute,
   AdminPricingRoute: AdminPricingRoute,
   AdminStatsRoute: AdminStatsRoute,
