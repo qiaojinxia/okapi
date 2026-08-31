@@ -54,6 +54,17 @@ export default {
     monthSpend: 'This month',
     totalSpend: 'Total',
   },
+  security: {
+    nav: 'Security',
+    title: 'Two-factor authentication (TOTP)',
+    hint: 'Once enabled, email/password login also requires a rotating code. The secret is stored server-side under envelope encryption; binding is two-step: fetch the secret, then confirm with a code.',
+    sessionRequired: 'TOTP requires email/password login (session auth). You are signed in with an API key — sign out and use email/password.',
+    start: 'Start binding',
+    otpauthUrl: 'otpauth URL',
+    otpauthHint: 'Copy into an authenticator app (1Password / Google Authenticator) to add manually, then enter the 6-digit code it shows.',
+    confirm: 'Confirm & enable',
+    enabled: 'Two-factor authentication enabled',
+  },
   portal: {
     byModelTitle: 'Spend by model',
     affNav: 'Referral',

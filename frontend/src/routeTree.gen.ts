@@ -25,6 +25,7 @@ import { Route as PortalIndexRouteImport } from './routes/portal.index'
 import { Route as PortalAffRouteImport } from './routes/portal.aff'
 import { Route as PortalKeysRouteImport } from './routes/portal.keys'
 import { Route as PortalLogsRouteImport } from './routes/portal.logs'
+import { Route as PortalSecurityRouteImport } from './routes/portal.security'
 import { Route as PortalTeamsRouteImport } from './routes/portal.teams'
 import { Route as PortalTopupRouteImport } from './routes/portal.topup'
 
@@ -108,6 +109,11 @@ const PortalLogsRoute = PortalLogsRouteImport.update({
   path: '/logs',
   getParentRoute: () => PortalRoute,
 } as any)
+const PortalSecurityRoute = PortalSecurityRouteImport.update({
+  id: '/security',
+  path: '/security',
+  getParentRoute: () => PortalRoute,
+} as any)
 const PortalTeamsRoute = PortalTeamsRouteImport.update({
   id: '/teams',
   path: '/teams',
@@ -134,6 +140,7 @@ export interface FileRoutesByFullPath {
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
   '/portal/topup': typeof PortalTopupRoute
   '/admin/': typeof AdminIndexRoute
@@ -152,6 +159,7 @@ export interface FileRoutesByTo {
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
   '/portal/topup': typeof PortalTopupRoute
   '/admin': typeof AdminIndexRoute
@@ -173,6 +181,7 @@ export interface FileRoutesById {
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
   '/portal/topup': typeof PortalTopupRoute
   '/admin/': typeof AdminIndexRoute
@@ -195,6 +204,7 @@ export interface FileRouteTypes {
     | '/portal/aff'
     | '/portal/keys'
     | '/portal/logs'
+    | '/portal/security'
     | '/portal/teams'
     | '/portal/topup'
     | '/admin/'
@@ -213,6 +223,7 @@ export interface FileRouteTypes {
     | '/portal/aff'
     | '/portal/keys'
     | '/portal/logs'
+    | '/portal/security'
     | '/portal/teams'
     | '/portal/topup'
     | '/admin'
@@ -233,6 +244,7 @@ export interface FileRouteTypes {
     | '/portal/aff'
     | '/portal/keys'
     | '/portal/logs'
+    | '/portal/security'
     | '/portal/teams'
     | '/portal/topup'
     | '/admin/'
@@ -360,6 +372,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortalLogsRouteImport
       parentRoute: typeof PortalRoute
     }
+    '/portal/security': {
+      id: '/portal/security'
+      path: '/security'
+      fullPath: '/portal/security'
+      preLoaderRoute: typeof PortalSecurityRouteImport
+      parentRoute: typeof PortalRoute
+    }
     '/portal/teams': {
       id: '/portal/teams'
       path: '/teams'
@@ -405,6 +424,7 @@ interface PortalRouteChildren {
   PortalAffRoute: typeof PortalAffRoute
   PortalKeysRoute: typeof PortalKeysRoute
   PortalLogsRoute: typeof PortalLogsRoute
+  PortalSecurityRoute: typeof PortalSecurityRoute
   PortalTeamsRoute: typeof PortalTeamsRoute
   PortalTopupRoute: typeof PortalTopupRoute
   PortalIndexRoute: typeof PortalIndexRoute
@@ -414,6 +434,7 @@ const PortalRouteChildren: PortalRouteChildren = {
   PortalAffRoute: PortalAffRoute,
   PortalKeysRoute: PortalKeysRoute,
   PortalLogsRoute: PortalLogsRoute,
+  PortalSecurityRoute: PortalSecurityRoute,
   PortalTeamsRoute: PortalTeamsRoute,
   PortalTopupRoute: PortalTopupRoute,
   PortalIndexRoute: PortalIndexRoute,

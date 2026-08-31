@@ -54,6 +54,17 @@ export default {
     monthSpend: '本月消费',
     totalSpend: '累计消费',
   },
+  security: {
+    nav: '安全',
+    title: '两步验证（TOTP）',
+    hint: '开启后邮箱密码登录需额外输入动态验证码。密钥在服务端以信封加密存储，绑定过程分两步：先取密钥、再用验证码确认。',
+    sessionRequired: '两步验证需邮箱密码登录（会话鉴权）。当前以 API Key 方式登录，请退出后用邮箱密码登录。',
+    start: '开始绑定',
+    otpauthUrl: 'otpauth 链接',
+    otpauthHint: '复制到 Authenticator 应用（如 1Password / Google Authenticator）手动添加，然后输入其显示的 6 位验证码。',
+    confirm: '确认开启',
+    enabled: '两步验证已开启',
+  },
   portal: {
     byModelTitle: '按模型消费分布',
     dashboard: '总览',

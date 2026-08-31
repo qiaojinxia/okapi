@@ -22,6 +22,10 @@ export default defineConfig({
     proxy: {
       '/api': CONSOLE,
       '/admin': CONSOLE,
+      '/auth': CONSOLE,
+      '/pay': CONSOLE,
+      '/mcp': CONSOLE,
+      '/healthz': CONSOLE,
     },
   },
 })

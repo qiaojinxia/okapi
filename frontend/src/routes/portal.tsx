@@ -22,6 +22,7 @@ function PortalLayout() {
         { to: '/portal/keys', label: t('portal:keys') },
         { to: '/portal/topup', label: t('portal:topupNav') },
         { to: '/portal/teams', label: t('team:nav') },
+        { to: '/portal/security', label: t('security:nav') },
         { to: '/portal/aff', label: t('portal:affNav') },
         { to: '/pricing', label: t('pricing:title') },
         { to: '/admin', label: t('common:admin') },
