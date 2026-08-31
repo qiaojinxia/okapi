@@ -86,6 +86,34 @@ test('session 鉴权面在 key 单轨下降级提示而非空白', async ({ page
   await expect(page.getByRole('button', { name: /开始绑定|Start binding/ })).toBeVisible()
 })
 
+test('登出同时清服务端 session（共享设备不留残留会话）', async ({ page }) => {
+  // 邮箱密码登录会建 Redis session；只清本地 key 会留下可用 session，
+  // 下一个人仍能操作 Team / TOTP 等 session 鉴权页面。
+  const suffix = Math.random().toString(36).slice(2, 10)
+  const email = `e2e-out-${suffix}@ok.test`
+  const password = 'hunter2-strong'
+  await page.request.post('/auth/register', {
+    data: { email, username: `e2e-out-${suffix}`, password },
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: /邮箱登录|Email login/ }).click()
+  await page.locator('#email').fill(email)
+  await page.locator('#password').fill(password)
+  await page.getByRole('button', { name: /^登录$|^Sign in$/ }).click()
+  await expect(page).toHaveURL(/\/portal/)
+
+  // 登录后 session 有效：session 鉴权端点可达
+  const before = await page.request.get('/api/teams')
+  expect(before.status(), 'session 应有效').toBe(200)
+
+  await page.getByRole('button', { name: /退出登录|Sign out/ }).click()
+  await expect(page).toHaveURL(/^http:\/\/[^/]+\/$/)
+
+  const after = await page.request.get('/api/teams')
+  expect(after.status(), '登出必须使服务端 session 失效').toBe(401)
+})
+
 test('API key 登录直达门户总览', async ({ page, request }) => {
   // 全走真实 API：注册 → 登录会话 → 兑 key
   const suffix = Math.random().toString(36).slice(2, 10)

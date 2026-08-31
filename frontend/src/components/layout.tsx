@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Languages, LogOut, Moon, Sun } from 'lucide-react'
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { clearKey } from '@/lib/api'
+import { apiFetch, clearKey } from '@/lib/api'
 import { switchLanguage } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 
@@ -24,9 +24,16 @@ export function Shell({ nav, children }: { nav: NavItem[]; children: React.React
   const toggleLang = () => {
     switchLanguage(i18n.language === 'zh-CN' ? 'en' : 'zh-CN')
   }
+  // 邮箱密码登录会在服务端建 Redis session（Team / TOTP 等页面靠它鉴权）。
+  // 只清本地 key 会留下有效 session，共享设备上下一个人仍能操作那些页面——
+  // 故先请服务端清 session，再清本地。服务端清理失败不阻塞本地登出。
   const logout = () => {
-    clearKey()
-    void navigate({ to: '/' })
+    void apiFetch('/auth/logout', { method: 'POST', body: {} })
+      .catch(() => undefined)
+      .finally(() => {
+        clearKey()
+        void navigate({ to: '/' })
+      })
   }
 
   return (
