@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input, Label } from '@/components/ui/input'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { Textarea } from '@/components/ui/textarea'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -39,7 +38,7 @@ interface RoleRow {
 }
 
 interface Overview {
-  user: { id: number; username: string; role: number; balance_micro: number }
+  user: { id: number; username: string; role: number; status: number; balance_micro: number }
   groups: { code: string; priority: number }[]
   keys: { id: number; name: string; key_prefix: string; status: number; used_micro: number }[]
 }
@@ -213,7 +212,19 @@ function UserActionsCard({ userId }: { userId: number }) {
     onError: (err) => setMsg(describeError(err)),
   })
 
+  // 统一管理动作端点：封禁/删除会连带吊销该用户令牌并刷新鉴权缓存
+  const manage = useMutation({
+    mutationFn: (action: 'ban' | 'unban' | 'promote' | 'demote' | 'delete') =>
+      apiFetch(`/admin/users/${userId}/manage`, { method: 'POST', body: { action } }),
+    onSuccess: () => {
+      setMsg(t('common:success'))
+      invalidate()
+    },
+    onError: (err) => setMsg(describeError(err)),
+  })
+
   const ov = overview.data
+  const banned = ov?.user.status === 2
 
   return (
     <Card>
@@ -242,8 +253,32 @@ function UserActionsCard({ userId }: { userId: number }) {
             <Badge variant="muted">
               {t('portal:keys')} {(ov?.keys ?? []).length}
             </Badge>
+            <Badge variant={banned ? 'muted' : 'success'}>
+              {banned ? t('common:disabled') : t('common:enabled')}
+            </Badge>
           </div>
         )}
+
+        <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+          <span className="text-sm">{t('admin:userActions')}</span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => manage.mutate(banned ? 'unban' : 'ban')}
+          >
+            {banned ? t('admin:unban') : t('admin:ban')}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => manage.mutate('promote')}>
+            {t('admin:promote')}
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => manage.mutate('demote')}>
+            {t('admin:demote')}
+          </Button>
+          <Button size="sm" variant="destructive" onClick={() => manage.mutate('delete')}>
+            {t('admin:softDelete')}
+          </Button>
+          <span className="text-xs text-muted-foreground">{t('admin:banHint')}</span>
+        </div>
 
         <div className="flex flex-wrap items-end gap-3 border-t border-border pt-3">
           <div className="flex flex-col gap-1.5">
@@ -311,13 +346,20 @@ function RolesCard() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [form, setForm] = useState({ role_code: '', display_name: '' })
-  const [perms, setPerms] = useState('')
+  const [picked, setPicked] = useState<Set<string>>(new Set())
   const [msg, setMsg] = useState<string | null>(null)
 
   const roles = useQuery({
     queryKey: qk.adminRoles,
     queryFn: () => apiFetch<{ data: RoleRow[] }>('/admin/roles'),
   })
+  // 权限点清单由后端导出，避免前端硬编码字符串与后端漂移
+  const permissions = useQuery({
+    queryKey: qk.adminPermissions,
+    queryFn: () => apiFetch<{ data: string[] }>('/admin/permissions'),
+  })
+
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminRoles })
 
   const create = useMutation({
     mutationFn: () =>
@@ -326,20 +368,36 @@ function RolesCard() {
         body: {
           role_code: form.role_code.trim(),
           display_name: form.display_name.trim(),
-          permissions: perms
-            .split(',')
-            .map((p) => p.trim())
-            .filter(Boolean),
+          permissions: [...picked],
         },
       }),
     onSuccess: () => {
       setMsg(t('common:success'))
       setForm({ role_code: '', display_name: '' })
-      setPerms('')
-      void queryClient.invalidateQueries({ queryKey: qk.adminRoles })
+      setPicked(new Set())
+      invalidate()
     },
     onError: (err) => setMsg(describeError(err)),
   })
+
+  const remove = useMutation({
+    mutationFn: (code: string) =>
+      apiFetch(`/admin/roles/${encodeURIComponent(code)}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      setMsg(t('common:success'))
+      invalidate()
+    },
+    // 仍有用户绑定时后端回 409 role_in_use，此处直接展示 error_code 的语言包文案
+    onError: (err) => setMsg(describeError(err)),
+  })
+
+  const togglePerm = (p: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev)
+      if (next.has(p)) next.delete(p)
+      else next.add(p)
+      return next
+    })
 
   return (
     <Card>
@@ -367,19 +425,22 @@ function RolesCard() {
           </div>
         </div>
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="perms">{t('admin:rolePermissions')}</Label>
-          <Textarea
-            id="perms"
-            rows={2}
-            className="font-mono text-xs"
-            value={perms}
-            placeholder="channel.read, channel.write, pricing.write, billing.read"
-            onChange={(e) => setPerms(e.target.value)}
-          />
+          <Label>{t('admin:rolePermissions')}</Label>
+          <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+            {(permissions.data?.data ?? []).map((p) => (
+              <label key={p} className="flex items-center gap-2 font-mono text-xs">
+                <input type="checkbox" checked={picked.has(p)} onChange={() => togglePerm(p)} />
+                {p}
+              </label>
+            ))}
+          </div>
+          {permissions.isError && (
+            <span className="text-xs text-destructive">{describeError(permissions.error)}</span>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <Button
-            disabled={create.isPending || form.role_code.trim() === '' || perms.trim() === ''}
+            disabled={create.isPending || form.role_code.trim() === '' || picked.size === 0}
             onClick={() => create.mutate()}
           >
             {t('common:create')}
@@ -394,6 +455,7 @@ function RolesCard() {
               <Th>{t('admin:roleCode')}</Th>
               <Th>{t('admin:roleName')}</Th>
               <Th>{t('admin:rolePermissions')}</Th>
+              <Th>{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
@@ -404,6 +466,15 @@ function RolesCard() {
                 <Td>{r.display_name}</Td>
                 <Td className="max-w-72 truncate font-mono text-xs">
                   {JSON.stringify(r.permissions)}
+                </Td>
+                <Td>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => remove.mutate(r.role_code)}
+                  >
+                    {t('common:delete')}
+                  </Button>
                 </Td>
               </Tr>
             ))}
