@@ -127,6 +127,10 @@ export default {
     enter: '进入控制台',
   },
   admin: {
+    pickModels: '从已配定价的模型中选择',
+    pickModelsHint: '勾选即填入上方"模型"框；上游有而本站未配定价的模型可直接在该框手输。',
+    pickModelsEmpty: '尚无模型，请先在定价页配置。',
+    vendorOther: '未归类',
     audioRatio: '音频输入倍率（官方 16）',
     audioCompletionRatio: '音频输出倍率（叠乘，官方 2）',
     audioRatioShort: '音频倍率',

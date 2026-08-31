@@ -127,6 +127,10 @@ export default {
     enter: 'Enter console',
   },
   admin: {
+    pickModels: 'Pick from priced models',
+    pickModelsHint: 'Checking fills the Models field above; models not yet priced here can still be typed manually.',
+    pickModelsEmpty: 'No models yet — configure them on the pricing page first.',
+    vendorOther: 'Unclassified',
     audioRatio: 'Audio input ratio (official 16)',
     audioCompletionRatio: 'Audio output ratio (stacked, official 2)',
     audioRatioShort: 'Audio',

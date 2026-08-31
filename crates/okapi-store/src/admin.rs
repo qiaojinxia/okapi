@@ -42,13 +42,19 @@ pub async fn upsert_model_ratio(
     axes: RatioAxes<'_>,
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
+    // vendor 按模型名前缀自动归类（仅在为空时填，管理员显式值永不被覆盖）——
+    // 省掉建模型时的一次手填，列表页也就能按供应商分组筛选
+    let vendor = crate::vendor::classify(model_name);
     let model_id = sqlx::query_scalar!(
         r#"
-        INSERT INTO models (model_name) VALUES ($1)
-        ON CONFLICT (model_name) DO UPDATE SET updated_at = now()
+        INSERT INTO models (model_name, vendor) VALUES ($1, $2)
+        ON CONFLICT (model_name) DO UPDATE SET
+            vendor = COALESCE(models.vendor, EXCLUDED.vendor),
+            updated_at = now()
         RETURNING id
         "#,
-        model_name
+        model_name,
+        vendor
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -349,13 +355,19 @@ pub async fn upsert_model_per_call(
     per_call_price_micro: i64,
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
+    // vendor 按模型名前缀自动归类（仅在为空时填，管理员显式值永不被覆盖）——
+    // 省掉建模型时的一次手填，列表页也就能按供应商分组筛选
+    let vendor = crate::vendor::classify(model_name);
     let model_id = sqlx::query_scalar!(
         r#"
-        INSERT INTO models (model_name) VALUES ($1)
-        ON CONFLICT (model_name) DO UPDATE SET updated_at = now()
+        INSERT INTO models (model_name, vendor) VALUES ($1, $2)
+        ON CONFLICT (model_name) DO UPDATE SET
+            vendor = COALESCE(models.vendor, EXCLUDED.vendor),
+            updated_at = now()
         RETURNING id
         "#,
-        model_name
+        model_name,
+        vendor
     )
     .fetch_one(&mut *tx)
     .await?;

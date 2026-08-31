@@ -14,6 +14,7 @@ pub mod mutate;
 pub mod pg;
 pub mod pricing;
 pub mod provision;
+pub mod vendor;
 pub mod redis;
 
 pub use auth::AuthedKey;
