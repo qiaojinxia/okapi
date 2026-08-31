@@ -683,6 +683,35 @@ super_admin（`super_admin_protected`，防互踢导致站点失去最高权限�
 `all` 属主范围（own 范围逐条校验会放大误操作面）；设置列表对含
 secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占位，明文永不出接口。
 
+### 11.7 核心链路开箱体验（供应商 → 模型 → 渠道，2026-08-31）
+
+对照 new-api 的"渠道配置 → 模型绑定"链路补齐两处开箱缺口。链路本身早已通
+（建渠道 → 配定价 → 发布 epoch → 生效），差的是**少手填、少拼错**。
+
+**模型名 → 供应商自动归类**（`crates/okapi-store/src/vendor.rs`）。new-api 把供应商
+建成独立 `Vendor` 表并在启动时自动 upsert；我们**不新增表**——`models.vendor` 已是
+字符串列，供应商在本系统只用于展示分组与筛选，没有需外键约束的属性（图标属前端资源），
+符合 §11.4 吸收判据②。归类仅在 vendor 为空时生效，管理员显式值永不被覆盖。
+
+规则不凭印象罗列：以 LiteLLM `model_prices_and_context_window.json`（3400+ 条真实
+模型清单）反查覆盖率，初版只有 **76.7%**，据此补齐后达 **98.4%**。该过程暴露一个
+凭印象绝对想不到的缺陷——**Bedrock/Vertex 的区域前缀**（`us.` / `eu.` / `apac.` /
+`global.`）会让 `us.amazon.nova-lite-v1:0` 匹配不上任何规则，这不是加规则能解决的，
+必须先剥离前缀。快照固化在 `crates/okapi-store/tests/fixtures/model_catalog.txt`，
+`coverage_over_real_model_catalog` 用例把覆盖率纪律钉住（阈值 95%，留清单波动余量），
+新增厂商系列漏登记会被它拦下。匹配取**最长命中**而非声明顺序首次命中，否则
+`chatglm` 会被 `glm` 抢走、加规则时极易踩顺序坑。
+
+**渠道创建时的模型选择器**：从已配定价的模型按供应商分组勾选，未定价者标红
+（建了渠道却没定价，请求同样被拒）。手输框保留为兜底——上游有而本站未定价的模型
+仍可手打。此前只能手输逗号分隔字符串，而模型名拼错的后果是请求直接 404 且不易排查。
+
+**顺带修掉的测试基建缺陷**：`cargo test` 并行时每个测试二进制各建两个连接池
+（setup + build_state），默认 16 连接 × 十余个池 > PG 的 100 上限，导致 `build_state`
+偶发失败、测试随机红。已把 `dev-deps.sh` 的 PG `max_connections` 提到 300，
+并在 `.env.example` 给出 `OKAPI_PG_POOL=6` 的本地建议值。这类随机失败比真失败更坏
+——它会训练人忽略红灯。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
