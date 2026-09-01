@@ -149,10 +149,14 @@ async fn handle_create(
     }
 
     // —— 预扣已建立 ——
-    let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, &canonical, key.pool_code.as_deref())
-            .await
-            .map_err(AppError::from);
+    let rows = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        &canonical,
+        key.pool_code.as_deref(),
+        state.master_key.as_deref(),
+    )
+    .await
+    .map_err(AppError::from);
     let candidates: Vec<_> = match rows {
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()
@@ -280,7 +284,13 @@ async fn relay_task(
     let Some(channel_key_id) = state.sched.video_task_get(key.user_id, task_id).await else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND).with_param("task"));
     };
-    let Some(ch) = okapi_store::channels::channel_key_ref(&state.pg, channel_key_id).await? else {
+    let Some(ch) = okapi_store::channels::channel_key_ref(
+        &state.pg,
+        channel_key_id,
+        state.master_key.as_deref(),
+    )
+    .await?
+    else {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             codes::NO_AVAILABLE_CHANNEL,

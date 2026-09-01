@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels SET status = $2, updated_at = now()\n           WHERE id = ANY($1) AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b114a4b9039dd814454770a4b2a765b454d309667cd25557055615e4c3d6aebf"
+}

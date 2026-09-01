@@ -1,0 +1,138 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.name, c.provider, c.api_base, c.status, c.priority, c.models,\n               c.trust_upstream_usage, c.owner_id,\n               COALESCE(c.settings, '{}'::jsonb) AS \"settings!\",\n               COALESCE(\n                   (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)\n                      FROM pool_channels pc WHERE pc.channel_id = c.id),\n                   ARRAY[]::varchar[]\n               ) AS \"pools!\"\n        FROM channels c\n        WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)\n        ORDER BY c.priority DESC, c.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "models",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "models"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "trust_upstream_usage",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "trust_upstream_usage"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "owner_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "owner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "settings!",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "pools!",
+        "type_info": "VarcharArray",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "14bf2946aae2d9608ff362963e5845585ba3eb660ba44db34ccb32ab3374fc91"
+}

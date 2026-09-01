@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.pool_code, p.description, p.routing_strategy,\n               (SELECT COUNT(*) FROM pool_channels pc WHERE pc.pool_code = p.pool_code)\n                   AS \"channel_count!\",\n               (SELECT COUNT(*) FROM price_groups g WHERE g.pool_code = p.pool_code)\n                   AS \"group_count!\",\n               (SELECT COUNT(*) FROM api_keys k\n                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS \"key_count!\"\n        FROM channel_pools p\n        ORDER BY p.pool_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "pool_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "description",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "routing_strategy",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "routing_strategy"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "group_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "key_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "093a8643aa32ef6cf941a5bba88fd783e087cd572b98fb380e75b2bc6ebc4ba8"
+}

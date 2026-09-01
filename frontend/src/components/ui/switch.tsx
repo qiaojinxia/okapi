@@ -26,7 +26,11 @@ export function Switch({ checked, onChange, label, description, disabled = false
           <span className="text-xs text-muted-foreground">{description}</span>
         )}
       </span>
-      <span className="relative inline-flex shrink-0 pt-0.5">
+      {/*
+        轨道用 span 画、input 透明覆盖——不能把 checkbox 本身做成胶囊。
+        原生 checkbox 保持 1:1，w-9 会把高度一起撑到 36px，看起来像竖着的药丸。
+      */}
+      <span className="relative mt-0.5 inline-flex h-4 w-7 shrink-0">
         <input
           type="checkbox"
           role="switch"
@@ -34,9 +38,10 @@ export function Switch({ checked, onChange, label, description, disabled = false
           disabled={disabled}
           aria-label={label}
           onChange={(e) => onChange(e.target.checked)}
-          className="peer h-5 w-9 cursor-inherit appearance-none rounded-full bg-input outline-none transition-colors checked:bg-primary focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed"
+          className="peer absolute inset-0 z-10 cursor-inherit appearance-none opacity-0"
         />
-        <span className="pointer-events-none absolute top-1 left-1 h-3 w-3 rounded-full bg-card transition-transform peer-checked:translate-x-4" />
+        <span className="h-4 w-7 rounded-full bg-input transition-colors peer-checked:bg-primary peer-focus-visible:ring-2 peer-focus-visible:ring-primary/40" />
+        <span className="pointer-events-none absolute top-0.5 left-0.5 h-3 w-3 rounded-full bg-card transition-transform peer-checked:translate-x-3" />
       </span>
     </label>
   )

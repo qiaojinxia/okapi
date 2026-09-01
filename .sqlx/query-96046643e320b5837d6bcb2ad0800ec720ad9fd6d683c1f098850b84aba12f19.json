@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE api_keys SET deleted_at = now()\n        WHERE id = $1 AND deleted_at IS NULL\n          AND ($2::bigint IS NULL OR user_id = $2)\n        RETURNING key_hash, user_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key_hash",
+        "type_info": "Bpchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "key_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "96046643e320b5837d6bcb2ad0800ec720ad9fd6d683c1f098850b84aba12f19"
+}

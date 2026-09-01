@@ -209,10 +209,13 @@ pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool,
     if refs.groups > 0 || refs.keys > 0 {
         return Err(StoreError::Conflict("pool_in_use"));
     }
-    let affected = sqlx::query!(r#"DELETE FROM channel_pools WHERE pool_code = $1"#, pool_code)
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let affected = sqlx::query!(
+        r#"DELETE FROM channel_pools WHERE pool_code = $1"#,
+        pool_code
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
     Ok(affected > 0)
 }
 
@@ -363,26 +366,22 @@ pub async fn manage_user(
 ) -> Result<bool, StoreError> {
     let mut tx = pool.begin().await?;
     let affected = match action {
-        UserAction::Ban => {
-            sqlx::query!(
-                r#"UPDATE users SET status = 2, updated_at = now()
+        UserAction::Ban => sqlx::query!(
+            r#"UPDATE users SET status = 2, updated_at = now()
                    WHERE id = $1 AND deleted_at IS NULL"#,
-                user_id
-            )
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-        }
-        UserAction::Unban => {
-            sqlx::query!(
-                r#"UPDATE users SET status = 1, updated_at = now()
+            user_id
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected(),
+        UserAction::Unban => sqlx::query!(
+            r#"UPDATE users SET status = 1, updated_at = now()
                    WHERE id = $1 AND deleted_at IS NULL"#,
-                user_id
-            )
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-        }
+            user_id
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected(),
         UserAction::Promote | UserAction::Demote => {
             let role: i16 = if action == UserAction::Promote { 10 } else { 1 };
             // role < 100 守卫：super_admin 不可被降权，即便调用方越过上层校验
@@ -396,16 +395,14 @@ pub async fn manage_user(
             .await?
             .rows_affected()
         }
-        UserAction::Delete => {
-            sqlx::query!(
-                r#"UPDATE users SET deleted_at = now(), status = 2, updated_at = now()
+        UserAction::Delete => sqlx::query!(
+            r#"UPDATE users SET deleted_at = now(), status = 2, updated_at = now()
                    WHERE id = $1 AND deleted_at IS NULL"#,
-                user_id
-            )
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-        }
+            user_id
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected(),
     };
     if affected > 0 && matches!(action, UserAction::Ban | UserAction::Delete) {
         sqlx::query!(

@@ -93,6 +93,7 @@ async fn setup(tier_ratios: Option<Value>) -> TestEnv {
         "mock-credential",
         &[model.as_str()],
         true,
+        None,
     )
     .await
     .unwrap();

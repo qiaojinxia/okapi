@@ -98,6 +98,7 @@ async fn mk_channel(env: &TestEnv, credential: &str, base: &str) -> i64 {
         credential,
         &["m-x"],
         false,
+        None,
     )
     .await
     .unwrap();

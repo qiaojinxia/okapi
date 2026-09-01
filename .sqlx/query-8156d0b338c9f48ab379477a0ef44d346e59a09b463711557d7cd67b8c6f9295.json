@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pricing_rules SET enabled = $2, updated_at = now() WHERE rule_code = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8156d0b338c9f48ab379477a0ef44d346e59a09b463711557d7cd67b8c6f9295"
+}

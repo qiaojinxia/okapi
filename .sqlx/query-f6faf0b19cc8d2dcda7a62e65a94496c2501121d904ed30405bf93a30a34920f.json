@@ -1,0 +1,123 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.model_name,\n               p.pricing_mode,\n               (p.model_ratio * 1000000)::bigint AS model_ratio_scaled,\n               p.tier_ratios,\n               (p.completion_ratio * 1000000)::bigint AS \"completion_ratio_scaled!\",\n               (p.cache_ratio * 1000000)::bigint AS \"cache_ratio_scaled!\",\n               (p.cache_write_ratio * 1000000)::bigint AS \"cache_write_ratio_scaled!\",\n               (p.audio_ratio * 1000000)::bigint AS \"audio_ratio_scaled!\",\n               (p.audio_completion_ratio * 1000000)::bigint AS \"audio_completion_ratio_scaled!\",\n               (p.image_ratio * 1000000)::bigint AS \"image_ratio_scaled!\",\n               p.per_call_price_micro,\n               p.tier_expr\n        FROM model_pricing p\n        JOIN models m ON m.id = p.model_id\n        WHERE m.status = 1\n          AND (p.effective_from IS NULL OR p.effective_from <= now())\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "pricing_mode",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "pricing_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_ratio_scaled",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "tier_ratios",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "tier_ratios"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "completion_ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "cache_ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "cache_write_ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "audio_ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "audio_completion_ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "image_ratio_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "per_call_price_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "per_call_price_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "tier_expr",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "tier_expr"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "f6faf0b19cc8d2dcda7a62e65a94496c2501121d904ed30405bf93a30a34920f"
+}

@@ -141,7 +141,7 @@ async fn okapi_old_sample_migration_full_check() {
     let sfx = &env.suffix;
 
     // —— dry-run：只统计，零写入 ——
-    let stats = migrate::run_okapi_old(&env.pg, None, &env.dir, Some(ENC_PASS), true)
+    let stats = migrate::run_okapi_old(&env.pg, None, &env.dir, Some(ENC_PASS), true, None)
         .await
         .unwrap();
     assert_eq!(stats.users, 3);
@@ -159,9 +159,16 @@ async fn okapi_old_sample_migration_full_check() {
     assert_eq!(count, 0, "dry-run 不得写入");
 
     // —— 正式迁移 ——
-    let stats = migrate::run_okapi_old(&env.pg, Some(&env.ledger), &env.dir, Some(ENC_PASS), false)
-        .await
-        .unwrap();
+    let stats = migrate::run_okapi_old(
+        &env.pg,
+        Some(&env.ledger),
+        &env.dir,
+        Some(ENC_PASS),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(stats.users, 3);
     assert_eq!(stats.users_credited, 1);
     assert!(
@@ -369,10 +376,16 @@ async fn okapi_old_sample_migration_full_check() {
     .await
     .unwrap();
 
-    let stats2 =
-        migrate::run_okapi_old(&env.pg, Some(&env.ledger), &env.dir, Some(ENC_PASS), false)
-            .await
-            .unwrap();
+    let stats2 = migrate::run_okapi_old(
+        &env.pg,
+        Some(&env.ledger),
+        &env.dir,
+        Some(ENC_PASS),
+        false,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(stats2.users, 3);
     assert_eq!(
         env.ledger.balance(alice.id).await.unwrap().as_micros(),
@@ -414,7 +427,7 @@ async fn okapi_old_sample_migration_full_check() {
     assert_eq!(keys, 1, "key upsert 不重复");
 
     // —— 无口令：key 全部跳过但用户/渠道/定价照迁 ——
-    let stats3 = migrate::run_okapi_old(&env.pg, Some(&env.ledger), &env.dir, None, true)
+    let stats3 = migrate::run_okapi_old(&env.pg, Some(&env.ledger), &env.dir, None, true, None)
         .await
         .unwrap();
     assert_eq!(stats3.keys, 0);

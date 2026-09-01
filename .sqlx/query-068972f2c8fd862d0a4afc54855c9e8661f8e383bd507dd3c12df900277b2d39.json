@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channel_keys SET\n            credential_ciphertext = $3,\n            status = 1, cooldown_until = NULL, failed_count = 0, last_error = NULL,\n            updated_at = now()\n        WHERE id = $2 AND channel_id = $1\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "068972f2c8fd862d0a4afc54855c9e8661f8e383bd507dd3c12df900277b2d39"
+}

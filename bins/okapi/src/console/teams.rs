@@ -99,7 +99,9 @@ pub async fn create_team(
 /// 取中间段而非首尾，因为团名本身可能含 `:`。
 fn display_name(username: &str) -> String {
     let body = username.strip_prefix("team:").unwrap_or(username);
-    body.rsplit_once(':').map_or(body, |(name, _)| name).to_owned()
+    body.rsplit_once(':')
+        .map_or(body, |(name, _)| name)
+        .to_owned()
 }
 
 /// GET /api/teams：我所属的团队列表（UI 入口——没有它前端无从知道自己在哪些团）。

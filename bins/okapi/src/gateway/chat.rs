@@ -26,7 +26,8 @@ use okapi_providers::convert::{
 };
 use okapi_providers::reasoning::{self, ReasoningDirective};
 use okapi_providers::{
-    ChatEvent, ChatResponse, StreamHandle, UpstreamError, rewrite_model, split_reasoning_suffix,
+    ChatEvent, ChatResponse, StreamHandle, UpstreamError, ensure_stream_usage, rewrite_model,
+    split_reasoning_suffix,
 };
 use okapi_store::ChannelCandidate;
 use okapi_store::channels::KeyFailure;
@@ -554,6 +555,7 @@ async fn forward(
             &bill.state.pg,
             &bill.model,
             bill.pool_code.as_deref(),
+            bill.state.master_key.as_deref(),
         )
         .await
         .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
@@ -642,7 +644,10 @@ async fn forward(
                 .await
                 >= cap
         {
-            tracing::debug!(channel_key = cand.channel_key_id, "key 当日消费已达上限，跳过候选");
+            tracing::debug!(
+                channel_key = cand.channel_key_id,
+                "key 当日消费已达上限，跳过候选"
+            );
             continue;
         }
         // 渠道 key 级并发信号量（§3.5 第二层）：满则跳过该候选（不计 failover）
@@ -665,9 +670,21 @@ async fn forward(
                 convert::request_openai_to_anthropic(body, &upstream_model, bill.completion_cap)
             }
             (Ingress::OpenAi, "gemini") => conv_gem::request_openai_to_gemini(body),
-            (Ingress::Anthropic, "anthropic") | (Ingress::OpenAi, _) => {
+            // Anthropic 同方言：透传（stream_options 是 OpenAI 概念，此路不注入）
+            (Ingress::Anthropic, "anthropic") => {
                 rewrite_model(body, &info.requested_model, &upstream_model)
             }
+            // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
+            // 转换器早已强制注入，唯独这条最常用的路曾漏掉——客户端不主动开
+            // stream_options 时上游不返 usage，结算落字符估算，实测漏收约七成。
+            (Ingress::OpenAi, _) => rewrite_model(body, &info.requested_model, &upstream_model)
+                .and_then(|b| {
+                    if info.stream {
+                        ensure_stream_usage(&b)
+                    } else {
+                        Ok(b)
+                    }
+                }),
             (Ingress::Anthropic, _) => conv_a2o::request_anthropic_to_openai(body, &upstream_model),
             (Ingress::Responses, provider) => {
                 conv_resp::request_responses_to_chat(body, &upstream_model).and_then(|chat_body| {

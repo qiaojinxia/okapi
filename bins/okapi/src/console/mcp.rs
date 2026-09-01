@@ -750,7 +750,14 @@ async fn channel_create(
         return Err(AppError::bad_request().with_param("models"));
     }
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
-        &state.pg, name, provider, api_base, credential, &models, false,
+        &state.pg,
+        name,
+        provider,
+        api_base,
+        credential,
+        &models,
+        false,
+        state.master_key.as_deref(),
     )
     .await?;
     okapi_store::admin::set_channel_owner(&state.pg, channel_id, key.user_id).await?;

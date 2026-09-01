@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO channel_keys (channel_id, credential_ciphertext, weight, max_concurrency)\n        SELECT $2, credential_ciphertext, weight, max_concurrency\n        FROM channel_keys WHERE channel_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c369ec155817635cebafb91618537ab3b369e48d673a5a9cdbd0b0cb6b4fc33e"
+}

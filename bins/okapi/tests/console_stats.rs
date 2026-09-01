@@ -69,6 +69,7 @@ async fn setup() -> Env {
         "mock",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();

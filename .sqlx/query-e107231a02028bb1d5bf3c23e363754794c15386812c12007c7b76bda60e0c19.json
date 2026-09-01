@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO channel_pools (pool_code, description, routing_strategy)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (pool_code) DO UPDATE SET\n            description      = EXCLUDED.description,\n            routing_strategy = EXCLUDED.routing_strategy,\n            updated_at       = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e107231a02028bb1d5bf3c23e363754794c15386812c12007c7b76bda60e0c19"
+}

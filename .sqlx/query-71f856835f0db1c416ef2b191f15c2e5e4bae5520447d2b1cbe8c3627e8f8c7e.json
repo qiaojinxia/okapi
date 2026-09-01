@@ -1,0 +1,213 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH cfg AS (\n            SELECT COALESCE(\n                (SELECT (value #>> '{}')::boolean FROM settings WHERE key = 'strict_group_isolation'),\n                false\n            ) AS strict\n        )\n        SELECT c.id AS channel_id,\n               c.name AS channel_name,\n               c.provider,\n               c.api_base,\n               c.priority,\n               c.trust_upstream_usage,\n               c.model_mapping,\n               COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS \"thinking_to_content!\",\n               COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS \"bill_by_response_model!\",\n               c.settings -> 'strip_request_fields' AS strip_request_fields,\n               c.capabilities,\n               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS \"cost_milli!\",\n               ck.id AS channel_key_id,\n               ck.weight,\n               ck.max_concurrency,\n               ck.rpm_limit,\n               ck.daily_spend_cap_micro,\n               ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id, cfg\n        WHERE c.status = 1\n          AND c.deleted_at IS NULL\n          AND c.models @> $1\n          AND ck.status = 1\n          AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())\n          AND (ck.model_subset IS NULL OR ck.model_subset @> $1)\n          AND (\n                -- 有池：只看池内渠道\n                ($2::varchar IS NOT NULL AND EXISTS (\n                    SELECT 1 FROM pool_channels pc\n                    WHERE pc.channel_id = c.id AND pc.pool_code = $2\n                ))\n                -- 无池：只看\"未被任何池认领\"的渠道。入池即专属，否则把渠道放进\n                -- vip 池后免费用户照样能打到它——池就失去了保护渠道的意义。\n                OR (\n                    $2::varchar IS NULL\n                    AND NOT cfg.strict\n                    AND NOT EXISTS (\n                        SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id\n                    )\n                )\n              )\n        ORDER BY c.priority DESC, ck.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "trust_upstream_usage",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "trust_upstream_usage"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "model_mapping",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "model_mapping"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "thinking_to_content!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "bill_by_response_model!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "strip_request_fields",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "capabilities",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "capabilities"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "cost_milli!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 12,
+        "name": "channel_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "weight",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "max_concurrency"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "daily_spend_cap_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "daily_spend_cap_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "71f856835f0db1c416ef2b191f15c2e5e4bae5520447d2b1cbe8c3627e8f8c7e"
+}

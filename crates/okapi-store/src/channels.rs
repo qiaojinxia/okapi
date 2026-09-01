@@ -9,7 +9,7 @@ pub struct ChannelCandidate {
     pub channel_name: String,
     pub provider: String,
     pub api_base: Option<String>,
-    /// M1 过渡：credential_ciphertext 按明文字节读取；AES-GCM 信封在 M2 接入。
+    /// 已解封的上游凭证（落库为 AES-256-GCM 信封，见 `crate::credential`）。
     pub credential: String,
     pub priority: i32,
     pub weight: i32,
@@ -61,6 +61,7 @@ pub async fn candidates_for_model(
     pool: &PgPool,
     model: &str,
     pool_code: Option<&str>,
+    master_key: Option<&str>,
 ) -> Result<Vec<ChannelCandidate>, StoreError> {
     let model_json = serde_json::json!([model]);
     let rows = sqlx::query!(
@@ -123,8 +124,7 @@ pub async fn candidates_for_model(
 
     rows.into_iter()
         .map(|r| {
-            let credential = String::from_utf8(r.credential_ciphertext)
-                .map_err(|_| StoreError::InvalidData("channel_key credential not utf-8"))?;
+            let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             Ok(ChannelCandidate {
                 channel_id: r.channel_id,
                 channel_key_id: r.channel_key_id,
@@ -173,6 +173,7 @@ pub struct ChannelKeyRef {
 pub async fn channel_key_ref(
     pool: &PgPool,
     channel_key_id: i64,
+    master_key: Option<&str>,
 ) -> Result<Option<ChannelKeyRef>, StoreError> {
     let row = sqlx::query!(
         r#"
@@ -185,17 +186,23 @@ pub async fn channel_key_ref(
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|r| ChannelKeyRef {
-        channel_id: r.channel_id,
-        api_base: r.api_base,
-        credential: String::from_utf8_lossy(&r.credential_ciphertext).into_owned(),
-    }))
+    // 曾经是 from_utf8_lossy：解不出就悄悄发一串替换字符给上游，只会换来一个
+    // 难查的 401。信封化后一律走 open，失败即 Err。
+    row.map(|r| {
+        Ok(ChannelKeyRef {
+            channel_id: r.channel_id,
+            api_base: r.api_base,
+            credential: crate::credential::open(master_key, &r.credential_ciphertext)?,
+        })
+    })
+    .transpose()
 }
 
 pub async fn custom_pass_channel(
     pool: &PgPool,
     channel_id: i64,
     pool_code: Option<&str>,
+    master_key: Option<&str>,
 ) -> Result<Option<PassChannel>, StoreError> {
     let row = sqlx::query!(
         r#"
@@ -238,8 +245,7 @@ pub async fn custom_pass_channel(
     .fetch_optional(pool)
     .await?;
     row.map(|r| {
-        let credential = String::from_utf8(r.credential_ciphertext)
-            .map_err(|_| StoreError::InvalidData("channel_key credential not utf-8"))?;
+        let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
         Ok(PassChannel {
             api_base: r.api_base.unwrap_or_default(),
             credential,

@@ -56,6 +56,33 @@ pub fn rewrite_model(
     Ok(Bytes::from(bytes))
 }
 
+/// 流式补 `stream_options.include_usage`（对齐 new-api `ForceStreamOption`
+/// 与 ok-api 各 provider stream adapter）：OpenAI 方言上游只有被显式要求时才在
+/// 流末尾发 usage 帧，缺了它结算就只能落到 `estimate_completion_tokens` 的字符
+/// 估算——实测 405 汉字的 prompt 落账 108 tokens，少算三到四倍。
+///
+/// 客户端已显式声明 `stream_options` 时不覆盖（尊重其取舍）。**调用方须自行
+/// 保证 `body` 是流式请求**：非流式带此字段会被 OpenAI 判 400，故不在此处再
+/// 解析一次 body 复核。挑食的兼容上游可用渠道
+/// `settings.strip_request_fields = ["stream_options"]` 逐个摘掉。
+pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    if obj.contains_key("stream_options") {
+        return Ok(body.clone());
+    }
+    obj.insert(
+        "stream_options".to_owned(),
+        serde_json::json!({"include_usage": true}),
+    );
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
 #[derive(Clone)]
 pub struct OpenAiUpstream {
     http: reqwest::Client,

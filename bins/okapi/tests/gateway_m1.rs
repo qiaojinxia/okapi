@@ -161,6 +161,7 @@ async fn setup(pricing: (&str, &str, &str), balance: Money, channels: &[(&str, i
             "mock-credential",
             &[model.as_str()],
             false,
+            None,
         )
         .await
         .unwrap();

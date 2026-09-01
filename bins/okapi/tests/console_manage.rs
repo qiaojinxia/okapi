@@ -96,6 +96,7 @@ async fn setup() -> Env {
         "mock-credential",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();
@@ -561,7 +562,10 @@ async fn stats_surface_exposes_clickhouse_views() {
                 body["window"][field].is_i64(),
                 "overview.window 缺字段 {field}：{body}"
             );
-            assert!(body["today"][field].is_i64(), "overview.today 缺字段 {field}");
+            assert!(
+                body["today"][field].is_i64(),
+                "overview.today 缺字段 {field}"
+            );
         }
         assert_eq!(body["days"], 7, "缺省窗口 7 天");
         // 窗口参数钳制：超大 days 收敛到 90

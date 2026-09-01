@@ -1080,6 +1080,7 @@ pub async fn rotate_channel_credential(
     channel_id: i64,
     channel_key_id: Option<i64>,
     credential: &str,
+    master_key: Option<&str>,
 ) -> Result<RotateOutcome, StoreError> {
     // 未指定 key 时只在"恰好一把"的情况下自动选定；多把则要求显式指定，
     // 避免把凭证轮换到运维预期之外的那把 key 上
@@ -1109,7 +1110,7 @@ pub async fn rotate_channel_credential(
         "#,
         channel_id,
         target,
-        credential.as_bytes()
+        crate::credential::seal_or_plain(master_key, credential)?
     )
     .fetch_optional(pool)
     .await?;

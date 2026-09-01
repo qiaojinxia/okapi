@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (SELECT COUNT(*) FROM users u\n                 WHERE u.admin_role_id = r.id AND u.deleted_at IS NULL) AS \"c!\"\n        FROM admin_roles r WHERE r.role_code = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1bff4089927a6042a6629329713955afdd054511e895b692a0461af5d87c68b3"
+}

@@ -1,0 +1,223 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT k.id, k.user_id, u.username, k.team_id, k.name, k.key_prefix, k.status,\n               k.quota_mode, k.quota_micro, k.used_micro, k.model_allowlist,\n               k.group_override, k.rpm_limit, k.max_concurrency,\n               k.expires_at, k.last_used_at, k.created_at\n        FROM api_keys k JOIN users u ON u.id = k.user_id\n        WHERE k.deleted_at IS NULL\n          AND ($1::bigint IS NULL OR k.user_id = $1)\n          AND ($2::text IS NULL OR k.name ILIKE $2 OR u.username ILIKE $2)\n        ORDER BY k.id DESC\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "username",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "team_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "team_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "key_prefix",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "key_prefix"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "quota_mode",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "quota_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "quota_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "quota_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "used_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "used_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "model_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "model_allowlist"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "group_override",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "group_override"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "max_concurrency"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "last_used_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "last_used_at"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "92b6085759ea22304c269f79d534fbca3688d1252a3af78a3977a89de89d3c97"
+}

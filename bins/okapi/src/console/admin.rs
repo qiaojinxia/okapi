@@ -84,7 +84,13 @@ pub(super) async fn guard_super_admin(
     Ok(key)
 }
 
-pub(super) async fn audit(state: &AppState, actor: &AuthedKey, action: &str, target: &str, detail: Value) {
+pub(super) async fn audit(
+    state: &AppState,
+    actor: &AuthedKey,
+    action: &str,
+    target: &str,
+    detail: Value,
+) {
     if let Err(err) = okapi_store::admin::record_audit(
         &state.pg,
         &format!("admin:{}", actor.user_id),
@@ -143,6 +149,7 @@ pub async fn create_channel(
         &req.credential,
         &models,
         req.trust_upstream_usage,
+        state.master_key.as_deref(),
     )
     .await?;
     if let Some(settings) = &req.settings {
@@ -427,6 +434,7 @@ pub async fn rotate_channel_credential(
         id,
         req.channel_key_id,
         req.credential.trim(),
+        state.master_key.as_deref(),
     )
     .await?;
     let channel_key_id = match outcome {
@@ -447,7 +455,9 @@ pub async fn rotate_channel_credential(
         json!({ "channel_key_id": channel_key_id }),
     )
     .await;
-    Ok(Json(json!({ "ok": true, "channel_key_id": channel_key_id })))
+    Ok(Json(
+        json!({ "ok": true, "channel_key_id": channel_key_id }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -684,7 +694,10 @@ pub async fn upsert_pool(
     Json(req): Json<UpsertPoolReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
-    let strategy = req.routing_strategy.as_deref().unwrap_or("priority_weighted");
+    let strategy = req
+        .routing_strategy
+        .as_deref()
+        .unwrap_or("priority_weighted");
     if !ROUTING_STRATEGIES.contains(&strategy) {
         return Err(AppError::bad_request().with_param("routing_strategy"));
     }
@@ -1824,7 +1837,7 @@ pub(crate) async fn probe_channel(state: &AppState, channel_id: i64) -> Result<V
         )
     })?;
     let credential =
-        String::from_utf8(row.credential_ciphertext).map_err(|_| AppError::internal())?;
+        okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let base = row.api_base.unwrap_or_default();
     let base = base.trim_end_matches('/');
 
@@ -1908,7 +1921,7 @@ pub async fn fetch_channel_models(
         )
     })?;
     let credential =
-        String::from_utf8(row.credential_ciphertext).map_err(|_| AppError::internal())?;
+        okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let base = row.api_base.unwrap_or_default();
     let base = base.trim_end_matches('/');
     let (url, auth_header, auth_value) = match row.provider.as_str() {

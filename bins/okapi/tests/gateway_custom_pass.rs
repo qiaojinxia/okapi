@@ -96,6 +96,7 @@ async fn setup() -> TestEnv {
         "mock-credential",
         &[],
         false,
+        None,
     )
     .await
     .unwrap();

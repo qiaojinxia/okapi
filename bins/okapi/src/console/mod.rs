@@ -147,16 +147,12 @@ fn channel_routes() -> ConsoleRouter {
             "/admin/channels/{id}/status",
             post(admin::set_channel_status),
         )
-        .route(
-            "/admin/channels/{id}/pools",
-            post(admin::set_channel_pools),
-        )
+        .route("/admin/channels/{id}/pools", post(admin::set_channel_pools))
         .route(
             "/admin/pools",
             get(manage::list_pools).post(admin::upsert_pool),
         )
-        .route("/admin/pools/{code}", delete(manage::delete_pool)
-        )
+        .route("/admin/pools/{code}", delete(manage::delete_pool))
         .route("/admin/channels/batch", post(manage::batch_channels))
         .route(
             "/admin/channels/{id}/duplicate",

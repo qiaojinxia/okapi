@@ -91,7 +91,11 @@ pub async fn build_state(
         node: Arc::from(node),
         ch,
         nats,
-        master_key: std::env::var("OKAPI_MASTER_KEY").ok().map(Arc::from),
+        master_key: {
+            let key = std::env::var("OKAPI_MASTER_KEY").ok();
+            okapi_store::credential::warn_if_unprotected(key.as_deref());
+            key.map(Arc::from)
+        },
         settings_cache: moka::future::Cache::builder()
             .max_capacity(256)
             .time_to_live(std::time::Duration::from_mins(1))

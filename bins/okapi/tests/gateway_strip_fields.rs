@@ -83,6 +83,7 @@ async fn setup(strip: Option<Value>) -> TestEnv {
         "mock-credential",
         &[model.as_str()],
         true,
+        None,
     )
     .await
     .unwrap();

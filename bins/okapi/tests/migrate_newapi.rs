@@ -72,7 +72,7 @@ async fn newapi_sample_migration_full_check() {
     let env = setup().await;
 
     // —— dry-run：只统计，零写入 ——
-    let stats = migrate::run_newapi(&env.pg, None, &env.dir, true)
+    let stats = migrate::run_newapi(&env.pg, None, &env.dir, true, None)
         .await
         .unwrap();
     assert_eq!(stats.users, 2);
@@ -88,7 +88,7 @@ async fn newapi_sample_migration_full_check() {
     assert_eq!(count, 0, "dry-run 不得写入");
 
     // —— 正式迁移 ——
-    let stats = migrate::run_newapi(&env.pg, Some(&env.ledger), &env.dir, false)
+    let stats = migrate::run_newapi(&env.pg, Some(&env.ledger), &env.dir, false, None)
         .await
         .unwrap();
     assert_eq!(stats.users, 2);
@@ -169,7 +169,7 @@ async fn newapi_sample_migration_full_check() {
     assert_eq!(weird.provider, "openai_compat", "未知 type 兜底");
 
     // —— 幂等二跑：余额不翻倍、行数不增 ——
-    let stats2 = migrate::run_newapi(&env.pg, Some(&env.ledger), &env.dir, false)
+    let stats2 = migrate::run_newapi(&env.pg, Some(&env.ledger), &env.dir, false, None)
         .await
         .unwrap();
     assert_eq!(stats2.users, 2);

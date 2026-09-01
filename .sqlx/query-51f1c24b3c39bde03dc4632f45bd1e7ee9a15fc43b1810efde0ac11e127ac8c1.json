@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO models (model_name, vendor) VALUES ($1, $2)\n        ON CONFLICT (model_name) DO UPDATE SET\n            vendor = COALESCE(models.vendor, EXCLUDED.vendor),\n            updated_at = now()\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "51f1c24b3c39bde03dc4632f45bd1e7ee9a15fc43b1810efde0ac11e127ac8c1"
+}

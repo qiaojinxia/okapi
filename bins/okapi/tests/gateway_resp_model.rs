@@ -107,6 +107,7 @@ async fn setup(bill_by_response_model: bool, seed_upstream_price: bool) -> TestE
         "mock-credential",
         &[model.as_str()],
         true, // trust_upstream_usage
+        None,
     )
     .await
     .unwrap();

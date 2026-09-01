@@ -234,6 +234,7 @@ async fn cooled_keys_recover_after_deadline() {
         "cred",
         &[&format!("m-cool-{suffix}")],
         false,
+        None,
     )
     .await
     .unwrap();

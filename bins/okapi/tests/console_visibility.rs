@@ -351,7 +351,10 @@ async fn group_visibility_matrix_and_group_pricing() {
     let resp = chat(&env, &u_token, &m_bound).await;
     assert_eq!(resp.status(), 200, "vip 用户应可用其池内渠道");
     let amount = settled_amount(&env.pg, resp).await;
-    assert_eq!(amount, 120, "vip 组倍率 0.5：240 → 120（价与可见性拆开后倍率照旧生效）");
+    assert_eq!(
+        amount, 120,
+        "vip 组倍率 0.5：240 → 120（价与可见性拆开后倍率照旧生效）"
+    );
     let resp = chat(&env, &d_token, &m_free).await;
     assert_eq!(resp.status(), 200, "宽松模式未入池渠道全可见");
     let _ = settled_amount(&env.pg, resp).await;

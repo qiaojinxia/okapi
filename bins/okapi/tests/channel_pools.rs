@@ -53,6 +53,7 @@ async fn setup() -> Env {
         "cred",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();
@@ -64,6 +65,7 @@ async fn setup() -> Env {
         "cred",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();
@@ -126,7 +128,7 @@ async fn key_in_group(
 }
 
 async fn candidate_channels(pg: &PgPool, model: &str, pool: Option<&str>) -> Vec<i64> {
-    let mut ids: Vec<i64> = okapi_store::channels::candidates_for_model(pg, model, pool)
+    let mut ids: Vec<i64> = okapi_store::channels::candidates_for_model(pg, model, pool, None)
         .await
         .unwrap()
         .into_iter()
@@ -173,14 +175,12 @@ async fn pool_scopes_candidates_and_key_override_wins() {
         "cred",
         &[env.model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();
     let all = candidate_channels(&env.pg, &env.model, None).await;
-    assert!(
-        all.contains(&orphan),
-        "未入池渠道应对无池用户可见：{all:?}"
-    );
+    assert!(all.contains(&orphan), "未入池渠道应对无池用户可见：{all:?}");
 
     // 3) 令牌 pool_override 优先于分组的池：把 vip 用户的 key 钉到 stable 池
     let stable_pool = sqlx::query_scalar!(

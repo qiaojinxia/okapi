@@ -147,11 +147,15 @@ mod tests {
     fn least_latency_orders_within_layer_only() {
         let mut lat = HashMap::new();
         lat.insert(1, 900_u32); // 高优先层里的慢 key
-        lat.insert(2, 100);     // 高优先层里的快 key
-        lat.insert(3, 10);      // 低优先层里最快的 key
+        lat.insert(2, 100); // 高优先层里的快 key
+        lat.insert(3, 10); // 低优先层里最快的 key
 
         let ordered = order_candidates_by_latency(
-            vec![cand_with_key(1, 10), cand_with_key(2, 10), cand_with_key(3, 0)],
+            vec![
+                cand_with_key(1, 10),
+                cand_with_key(2, 10),
+                cand_with_key(3, 0),
+            ],
             &lat,
         );
         assert_eq!(
@@ -169,7 +173,11 @@ mod tests {
         lat.insert(2, 500);
         // key 3 无样本 → 取中位数（50 与 500 排序后取 index 1 = 500）
         let ordered = order_candidates_by_latency(
-            vec![cand_with_key(1, 0), cand_with_key(2, 0), cand_with_key(3, 0)],
+            vec![
+                cand_with_key(1, 0),
+                cand_with_key(2, 0),
+                cand_with_key(3, 0),
+            ],
             &lat,
         );
         let pos = |k: i64| ordered.iter().position(|c| c.channel_key_id == k).unwrap();
@@ -183,8 +191,14 @@ mod tests {
     /// 策略解析：未知值退回默认，避免库里出现新值时热路径 panic。
     #[test]
     fn strategy_parse_falls_back_to_default() {
-        assert_eq!(Strategy::parse(Some("least_latency")), Strategy::LeastLatency);
-        assert_eq!(Strategy::parse(Some("nonsense")), Strategy::PriorityWeighted);
+        assert_eq!(
+            Strategy::parse(Some("least_latency")),
+            Strategy::LeastLatency
+        );
+        assert_eq!(
+            Strategy::parse(Some("nonsense")),
+            Strategy::PriorityWeighted
+        );
         assert_eq!(Strategy::parse(None), Strategy::PriorityWeighted);
     }
 }

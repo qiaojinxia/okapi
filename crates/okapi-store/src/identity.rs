@@ -3,8 +3,9 @@
 //! web 会话存 Redis（console 层），本模块只管凭证与密钥学。
 
 use crate::StoreError;
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use crate::credential::master_cipher;
+use aes_gcm::aead::{Aead, AeadCore, OsRng};
+use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng as HashOsRng;
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -207,18 +208,6 @@ fn totp_at(secret: &[u8], counter: u64) -> u32 {
 }
 
 // ---- TOTP 密钥信封加密 ----
-
-fn master_cipher(master_key_hex: &str) -> Result<Aes256Gcm, StoreError> {
-    let bytes = hex::decode(master_key_hex.trim())
-        .map_err(|_| StoreError::InvalidData("master_key_not_hex"))?;
-    if bytes.len() != 32 {
-        return Err(StoreError::InvalidData("master_key_must_be_32_bytes"));
-    }
-    let key: [u8; 32] = bytes
-        .try_into()
-        .map_err(|_| StoreError::InvalidData("master_key_must_be_32_bytes"))?;
-    Ok(Aes256Gcm::new(&Key::<Aes256Gcm>::from(key)))
-}
 
 /// AES-256-GCM 加密（nonce 12B 前置拼接存储）。
 pub fn seal_totp_secret(master_key_hex: &str, secret: &[u8]) -> Result<Vec<u8>, StoreError> {

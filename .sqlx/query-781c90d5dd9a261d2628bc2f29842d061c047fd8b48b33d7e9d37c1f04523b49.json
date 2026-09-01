@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO channels\n            (name, provider, api_base, status, priority, weight, models, model_mapping,\n             capabilities, settings, retry_policy, upstream_unit_cost,\n             trust_upstream_usage, owner_id)\n        SELECT $2, provider, api_base, 2, priority, weight, models, model_mapping,\n               capabilities, settings, retry_policy, upstream_unit_cost,\n               trust_upstream_usage, owner_id\n        FROM channels WHERE id = $1 AND deleted_at IS NULL\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "781c90d5dd9a261d2628bc2f29842d061c047fd8b48b33d7e9d37c1f04523b49"
+}

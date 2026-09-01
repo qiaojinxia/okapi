@@ -131,6 +131,7 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
             "mock-credential",
             &[model.as_str()],
             false,
+            None,
         )
         .await
         .unwrap();

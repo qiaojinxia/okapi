@@ -156,6 +156,8 @@ pub async fn create_model_ratio(
 }
 
 /// 创建渠道 + 一把 key（种子/测试）。
+// 种子/测试用的直插助手：参数即建表列，聚成结构体反而在调用点更啰嗦
+#[allow(clippy::too_many_arguments)]
 pub async fn create_channel(
     pool: &PgPool,
     name: &str,
@@ -164,6 +166,7 @@ pub async fn create_channel(
     credential: &str,
     models: &[&str],
     trust_upstream_usage: bool,
+    master_key: Option<&str>,
 ) -> Result<(i64, i64), StoreError> {
     let models_json = serde_json::json!(models);
     let channel_id = sqlx::query_scalar!(
@@ -188,7 +191,7 @@ pub async fn create_channel(
         RETURNING id
         "#,
         channel_id,
-        credential.as_bytes()
+        crate::credential::seal_or_plain(master_key, credential)?
     )
     .fetch_one(pool)
     .await?;

@@ -1,0 +1,95 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT g.group_code, g.group_ratio::text AS group_ratio, g.description,\n               g.is_default, g.sort_order, g.pool_code,\n               (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_code = g.group_code)\n                   AS \"user_count!\",\n               (SELECT COUNT(*) FROM pool_channels pc\n                 WHERE pc.pool_code = g.pool_code) AS \"channel_count!\"\n        FROM price_groups g\n        ORDER BY g.sort_order, g.group_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "group_ratio",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "is_default",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "is_default"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "sort_order",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "sort_order"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "pool_code"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "user_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      null,
+      true,
+      false,
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "a4ba0eabf47d1f1894f8a5738a00dcc8deae9dabf25c6af0ddd2abb53168abc6"
+}

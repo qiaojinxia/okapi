@@ -66,9 +66,13 @@ async fn first_candidate(
     canonical: &str,
     key: &okapi_store::AuthedKey,
 ) -> Result<okapi_store::ChannelCandidate, AppError> {
-    let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, canonical, key.pool_code.as_deref())
-            .await?;
+    let rows = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        canonical,
+        key.pool_code.as_deref(),
+        state.master_key.as_deref(),
+    )
+    .await?;
     super::scheduler::order_candidates(rows)
         .into_iter()
         .find(|c| c.provider != "anthropic" && c.provider != "gemini")

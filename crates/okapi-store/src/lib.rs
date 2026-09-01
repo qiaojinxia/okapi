@@ -7,6 +7,7 @@ pub mod admin;
 pub mod auth;
 pub mod ch;
 pub mod channels;
+pub mod credential;
 pub mod error;
 pub mod identity;
 pub mod listing;
@@ -14,8 +15,8 @@ pub mod mutate;
 pub mod pg;
 pub mod pricing;
 pub mod provision;
-pub mod vendor;
 pub mod redis;
+pub mod vendor;
 
 pub use auth::AuthedKey;
 pub use ch::ChClient;

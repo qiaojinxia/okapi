@@ -88,6 +88,7 @@ async fn setup(balance_micro: i64) -> TestEnv {
         "mock-credential",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();

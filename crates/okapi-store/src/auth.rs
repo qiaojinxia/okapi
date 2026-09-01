@@ -165,25 +165,25 @@ pub async fn find_key_by_hash(
     .await?;
 
     Ok(row.map(|r| AuthedKey {
-            key_id: r.key_id,
-            user_id: r.user_id,
-            key_status: r.key_status,
-            user_status: r.user_status,
-            role: r.role,
-            permissions: r
-                .admin_permissions
-                .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
-            pool_code: r.pool_code,
-            pool_strategy: r.pool_strategy,
-            group_code: r.group_code,
-            multiplier_scaled: r.multiplier_scaled,
-            rpm_limit: r.rpm_limit,
-            tpm_limit: r.tpm_limit,
-            rpd_limit: r.rpd_limit,
-            max_concurrency: r.max_concurrency,
-            model_allowlist: r.model_allowlist,
-            expires_at: r.expires_at,
-            member_user_id: r.member_user_id,
-            member_monthly_limit_micro: r.member_monthly_limit_micro,
+        key_id: r.key_id,
+        user_id: r.user_id,
+        key_status: r.key_status,
+        user_status: r.user_status,
+        role: r.role,
+        permissions: r
+            .admin_permissions
+            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
+        pool_code: r.pool_code,
+        pool_strategy: r.pool_strategy,
+        group_code: r.group_code,
+        multiplier_scaled: r.multiplier_scaled,
+        rpm_limit: r.rpm_limit,
+        tpm_limit: r.tpm_limit,
+        rpd_limit: r.rpd_limit,
+        max_concurrency: r.max_concurrency,
+        model_allowlist: r.model_allowlist,
+        expires_at: r.expires_at,
+        member_user_id: r.member_user_id,
+        member_monthly_limit_micro: r.member_monthly_limit_micro,
     }))
 }

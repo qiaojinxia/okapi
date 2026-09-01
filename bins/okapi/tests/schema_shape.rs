@@ -12,11 +12,22 @@ const REQUIRED: &[(&str, &[&str])] = &[
     ("channel_pools", &["pool_code", "routing_strategy"]),
     ("pool_channels", &["pool_code", "channel_id"]),
     ("price_groups", &["group_ratio", "pool_code"]),
-    ("api_keys", &["pool_override", "member_user_id", "group_override"]),
-    ("users", &["kind", "balance_expires_at", "aff_code", "inviter_id"]),
+    (
+        "api_keys",
+        &["pool_override", "member_user_id", "group_override"],
+    ),
+    (
+        "users",
+        &["kind", "balance_expires_at", "aff_code", "inviter_id"],
+    ),
     (
         "channel_keys",
-        &["model_subset", "rpm_limit", "daily_spend_cap_micro", "max_concurrency"],
+        &[
+            "model_subset",
+            "rpm_limit",
+            "daily_spend_cap_micro",
+            "max_concurrency",
+        ],
     ),
     ("models", &["fallback_models", "vendor"]),
     (
@@ -32,7 +43,10 @@ const REQUIRED: &[(&str, &[&str])] = &[
         ],
     ),
     ("user_pricing", &["custom_cache_write_ratio"]),
-    ("redemption_codes", &["code_hash", "plan_id", "bind_user_id", "max_per_ip"]),
+    (
+        "redemption_codes",
+        &["code_hash", "plan_id", "bind_user_id", "max_per_ip"],
+    ),
     ("plans", &["plan_code", "grant_micro", "balance_valid_days"]),
     ("recharge_orders", &["order_no", "gateway"]),
     ("team_members", &["monthly_spend_limit_micro"]),

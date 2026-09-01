@@ -1,0 +1,151 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT r.id, r.batch_id, r.amount_micro, r.status, p.plan_code AS \"plan_code?\",\n               r.bind_user_id, r.max_per_ip, r.redeemed_by, r.redeemed_at,\n               r.expires_at, r.created_at\n        FROM redemption_codes r\n        LEFT JOIN plans p ON p.id = r.plan_id\n        WHERE ($1::uuid IS NULL OR r.batch_id = $1)\n          AND ($2::smallint IS NULL OR r.status = $2)\n        ORDER BY r.id DESC\n        LIMIT $3 OFFSET $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "batch_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "batch_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "plan_code?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "bind_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "bind_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "max_per_ip",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "max_per_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "redeemed_by",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "redeemed_by"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "redeemed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "redeemed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "7fc3642c7dec1dd73023d28beb313232ae02b53a3fdeff172eca1cf4590882df"
+}

@@ -36,6 +36,8 @@ enum Role {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// 存量渠道凭证一次性信封加密（幂等；需 OKAPI_MASTER_KEY）
+    SealCredentials,
 }
 
 #[tokio::main]
@@ -51,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::from_env()?;
 
     match cli.role {
+        Role::SealCredentials => seal_credentials(&cfg).await,
         Role::Gateway => gateway::run(cfg).await,
         Role::Worker => worker::run(cfg).await,
         Role::Console => console::run(cfg).await,
@@ -91,9 +94,15 @@ async fn main() -> anyhow::Result<()> {
                         "未提供 --enc-passphrase：API key 将全部跳过（bcrypt 不可转换）"
                     );
                 }
-                let stats =
-                    migrate::run_okapi_old(&pg, ledger.as_ref(), &dir, pass.as_deref(), dry_run)
-                        .await?;
+                let stats = migrate::run_okapi_old(
+                    &pg,
+                    ledger.as_ref(),
+                    &dir,
+                    pass.as_deref(),
+                    dry_run,
+                    cfg.master_key.as_deref(),
+                )
+                .await?;
                 tracing::info!(
                     users = stats.users,
                     users_credited = stats.users_credited,
@@ -109,7 +118,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
-            let stats = migrate::run_newapi(&pg, ledger.as_ref(), &dir, dry_run).await?;
+            let stats = migrate::run_newapi(
+                &pg,
+                ledger.as_ref(),
+                &dir,
+                dry_run,
+                cfg.master_key.as_deref(),
+            )
+            .await?;
             tracing::info!(
                 users = stats.users,
                 users_credited = stats.users_credited,
@@ -124,4 +140,24 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// `okapi seal-credentials`：把存量明文渠道凭证一次性封成 AES-GCM 信封。
+/// 幂等，可反复跑；已封的行原样跳过。
+async fn seal_credentials(cfg: &Config) -> anyhow::Result<()> {
+    let Some(master_key) = cfg.master_key.as_deref() else {
+        anyhow::bail!("需要 OKAPI_MASTER_KEY（32 字节 hex）才能封装凭证");
+    };
+    let pg = okapi_store::connect_pg(&cfg.database_url).await?;
+    let stats = okapi_store::credential::seal_existing(&pg, master_key).await?;
+    tracing::info!(
+        sealed = stats.sealed,
+        already_sealed = stats.already_sealed,
+        unreadable = stats.unreadable.len(),
+        "存量渠道凭证封装完成"
+    );
+    for id in &stats.unreadable {
+        tracing::warn!(channel_key_id = id, "凭证非 UTF-8，已跳过");
+    }
+    Ok(())
 }

@@ -245,7 +245,12 @@ impl SchedulerRedis {
     /// 渠道 key 当日累计消费（micro）。读不到按 0 处理 = 不拦。
     pub async fn channel_key_spend_get(&self, channel_key_id: i64) -> i64 {
         let key = Self::channel_key_spend_key(channel_key_id);
-        self.client.get::<Option<i64>, _>(&key).await.ok().flatten().unwrap_or(0)
+        self.client
+            .get::<Option<i64>, _>(&key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0)
     }
 
     /// 结算后累加渠道 key 当日消费。软实时：先花后记，可能略超上限。
@@ -282,7 +287,11 @@ impl SchedulerRedis {
             _ => u64::from(sample_ms),
         };
         let next = u32::try_from(next).unwrap_or(u32::MAX);
-        if let Err(err) = self.client.set::<(), _, _>(&key, next, None, None, false).await {
+        if let Err(err) = self
+            .client
+            .set::<(), _, _>(&key, next, None, None, false)
+            .await
+        {
             tracing::debug!(error = %err, "时延 EWMA 写入失败");
             return;
         }

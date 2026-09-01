@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH cfg AS (\n            SELECT COALESCE(\n                (SELECT (value #>> '{}')::boolean FROM settings WHERE key = 'strict_group_isolation'),\n                false\n            ) AS strict\n        )\n        SELECT c.api_base, c.settings, ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id, cfg\n        WHERE c.id = $1\n          AND c.provider = 'custom_pass'\n          AND c.status = 1\n          AND c.deleted_at IS NULL\n          AND ck.status = 1\n          AND (\n                -- 有池：只看池内渠道\n                ($2::varchar IS NOT NULL AND EXISTS (\n                    SELECT 1 FROM pool_channels pc\n                    WHERE pc.channel_id = c.id AND pc.pool_code = $2\n                ))\n                -- 无池：只看\"未被任何池认领\"的渠道。入池即专属，否则把渠道放进\n                -- vip 池后免费用户照样能打到它——池就失去了保护渠道的意义。\n                OR (\n                    $2::varchar IS NULL\n                    AND NOT cfg.strict\n                    AND NOT EXISTS (\n                        SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id\n                    )\n                )\n              )\n        ORDER BY ck.id\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "settings",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "settings"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "2425e499cc8897136ad71e3060b962710d5ece362294b437938a50ddbdb78d51"
+}

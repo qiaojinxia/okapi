@@ -106,6 +106,7 @@ async fn setup() -> TestEnv {
         "mock-credential",
         &[tts_model.as_str(), stt_model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();

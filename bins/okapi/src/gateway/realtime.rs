@@ -207,9 +207,13 @@ async fn prepare(
     }
 
     // 候选：openai 协议渠道（anthropic/gemini 无 Realtime 面；能力显式 false 排除）
-    let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, &canonical, key.pool_code.as_deref())
-            .await;
+    let rows = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        &canonical,
+        key.pool_code.as_deref(),
+        state.master_key.as_deref(),
+    )
+    .await;
     let cand = match rows {
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()

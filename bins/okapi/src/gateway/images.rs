@@ -133,10 +133,14 @@ async fn handle(
     }
 
     // —— 预扣已建立 ——
-    let rows =
-        okapi_store::channels::candidates_for_model(&state.pg, &canonical, key.pool_code.as_deref())
-            .await
-            .map_err(AppError::from);
+    let rows = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        &canonical,
+        key.pool_code.as_deref(),
+        state.master_key.as_deref(),
+    )
+    .await
+    .map_err(AppError::from);
     let candidates: Vec<_> = match rows {
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()

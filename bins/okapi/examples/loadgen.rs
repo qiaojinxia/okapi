@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         "bench-credential",
         &[model.as_str()],
         true, // trust_upstream_usage：结算直接采信
+        None,
     )
     .await?;
     // 引导余额（走 SQL 直写 Redis 不可——用 ledger）

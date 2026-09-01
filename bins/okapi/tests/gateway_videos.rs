@@ -105,6 +105,7 @@ async fn setup(balance: Money, base_path: &str) -> TestEnv {
         "mock-credential",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();

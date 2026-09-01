@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE redemption_codes SET status = 3 WHERE batch_id = $1 AND status = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "14b904502b6f31a9c2cef1f85b6a850490e05937f235b09187a75d1454775b2d"
+}

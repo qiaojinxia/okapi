@@ -96,6 +96,7 @@ pub async fn run_newapi(
     ledger: Option<&okapi_ledger::BalanceLedger>,
     dir: &Path,
     dry_run: bool,
+    master_key: Option<&str>,
 ) -> anyhow::Result<MigrateStats> {
     let mut stats = MigrateStats::default();
 
@@ -299,6 +300,7 @@ pub async fn run_newapi(
                 credential,
                 &model_refs,
                 false,
+                master_key,
             )
             .await?;
             sqlx::query!(
@@ -504,6 +506,7 @@ pub async fn run_okapi_old(
     dir: &Path,
     enc_passphrase: Option<&str>,
     dry_run: bool,
+    master_key: Option<&str>,
 ) -> anyhow::Result<OldStats> {
     let mut stats = OldStats::default();
     let enc_key = enc_passphrase.map(derive_old_key);
@@ -747,6 +750,7 @@ pub async fn run_okapi_old(
                 credential,
                 &model_refs,
                 false,
+                master_key,
             )
             .await?;
             sqlx::query!(

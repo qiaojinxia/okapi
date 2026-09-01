@@ -77,6 +77,7 @@ async fn setup(model_rpm: Option<i64>) -> TestEnv {
         "mock-credential",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();

@@ -113,6 +113,7 @@ async fn setup(with_volume_rule: Option<u64>) -> Env {
         "mock",
         &[model.as_str()],
         false,
+        None,
     )
     .await
     .unwrap();
