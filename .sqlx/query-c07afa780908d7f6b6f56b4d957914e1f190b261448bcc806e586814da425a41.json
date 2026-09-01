@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channel_keys SET model_subset = '[\"other-model\"]'::jsonb WHERE channel_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c07afa780908d7f6b6f56b4d957914e1f190b261448bcc806e586814da425a41"
+}

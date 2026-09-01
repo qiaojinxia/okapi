@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT actor, delta_micro, event_type FROM billing_events WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "actor",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "actor"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "delta_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "delta_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "event_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "event_type"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "458322d4c7e93849a04060f878c673bee022049e2b48003810652f9e5b535154"
+}

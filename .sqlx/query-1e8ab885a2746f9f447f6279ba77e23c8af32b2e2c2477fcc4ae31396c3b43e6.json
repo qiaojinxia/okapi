@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE((value #>> '{}')::boolean, false) AS \"v!\"\n           FROM settings WHERE key = 'mcp_write_enabled'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "v!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1e8ab885a2746f9f447f6279ba77e23c8af32b2e2c2477fcc4ae31396c3b43e6"
+}

@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_records (\n            request_id, upstream_request_id, log_type, user_id, api_key_id,\n            group_code, model_name, channel_id, channel_key_id, status,\n            prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,\n            amount_micro, original_amount_micro, discount_micro,\n            pricing_epoch, pricing_snapshot,\n            latency_ms, ttft_ms, is_stream, retry_count, failover_count,\n            upstream_status, error_code, node, sticky_layer, client_type\n        ) VALUES (\n            $1, $2, $3, $4, $5,\n            $6, $7, $8, $9, $10,\n            $11, $12, $13, $14,\n            $15, $16, $17,\n            $18, $19,\n            $20, $21, $22, $23, $24,\n            $25, $26, $27, $28, $29\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar",
+        "Int2",
+        "Int8",
+        "Int8",
+        "Varchar",
+        "Varchar",
+        "Int8",
+        "Int8",
+        "Int2",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Jsonb",
+        "Int4",
+        "Int4",
+        "Bool",
+        "Int2",
+        "Int2",
+        "Int2",
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "81eb67c1c6c96d3d79ff7f8de3b1fe2049050512689a045ae5ecefcd7acda5e3"
+}

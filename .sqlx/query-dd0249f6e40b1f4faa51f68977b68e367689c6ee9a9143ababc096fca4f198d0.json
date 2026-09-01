@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.status AS user_status,\n                  (SELECT COUNT(*)::bigint FROM api_keys k\n                    WHERE k.user_id = u.id AND k.status = 1) AS \"active_keys!\"\n           FROM users u WHERE u.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "active_keys!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "dd0249f6e40b1f4faa51f68977b68e367689c6ee9a9143ababc096fca4f198d0"
+}

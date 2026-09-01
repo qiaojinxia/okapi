@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT amount_micro, pricing_snapshot FROM billing_records\n               WHERE user_id = $1 AND model_name = $2 AND log_type = 2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "pricing_snapshot",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pricing_snapshot"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "560cf18b7cf4f0785d3a5b533fe9ece92411a81c2035ff0581ed07f6a785031a"
+}

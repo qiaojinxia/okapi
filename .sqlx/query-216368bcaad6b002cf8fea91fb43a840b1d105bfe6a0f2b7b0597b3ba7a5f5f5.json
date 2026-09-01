@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_records (request_id, user_id, api_key_id, group_code, model_name,\n                                     status, amount_micro, log_type)\n        VALUES ($1, $2, 1, 'default', 'm-sweep', 20, 240, 2)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "216368bcaad6b002cf8fea91fb43a840b1d105bfe6a0f2b7b0597b3ba7a5f5f5"
+}

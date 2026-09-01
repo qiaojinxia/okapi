@@ -1,0 +1,103 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request_id, user_id, model_name, status, amount_micro, error_code, created_at\n           FROM billing_records\n           WHERE ($1::bigint IS NULL OR user_id = $1)\n             AND ($2::text IS NULL OR model_name = $2)\n             AND ($3::smallint IS NULL OR status = $3)\n           ORDER BY created_at DESC LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "error_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "error_code"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int2",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "4b6bf0a421a7c2e7d9262a1fc42b5be74bf5194523fc31f7692c9835b5b2685a"
+}

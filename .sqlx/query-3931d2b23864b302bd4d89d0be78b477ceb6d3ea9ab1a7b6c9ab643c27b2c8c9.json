@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pool_code FROM pool_channels WHERE channel_id = $1 AND pool_code <> $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pool_channels",
+            "name": "pool_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3931d2b23864b302bd4d89d0be78b477ceb6d3ea9ab1a7b6c9ab643c27b2c8c9"
+}

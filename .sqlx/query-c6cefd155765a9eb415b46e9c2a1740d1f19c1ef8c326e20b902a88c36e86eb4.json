@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT model_allowlist, rpm_limit, key_prefix FROM api_keys WHERE key_hash = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "model_allowlist"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "key_prefix",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "key_prefix"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bpchar"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "c6cefd155765a9eb415b46e9c2a1740d1f19c1ef8c326e20b902a88c36e86eb4"
+}

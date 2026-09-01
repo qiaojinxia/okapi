@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO users (username, email, role, status)\n            VALUES ($1, $2, $3, $4)\n            ON CONFLICT (username) DO UPDATE SET\n                email = COALESCE(EXCLUDED.email, users.email),\n                role = EXCLUDED.role,\n                status = EXCLUDED.status,\n                updated_at = now()\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3a4c6379786b01a29c66744030626b597c53635eea6e191a5dc377ba4a24d643"
+}

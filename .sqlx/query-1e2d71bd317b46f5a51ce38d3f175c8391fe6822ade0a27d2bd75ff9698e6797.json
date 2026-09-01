@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT amount_micro, prompt_tokens, completion_tokens\n               FROM billing_records WHERE request_id = $1 AND status = 20",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "prompt_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "prompt_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "completion_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "completion_tokens"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1e2d71bd317b46f5a51ce38d3f175c8391fe6822ade0a27d2bd75ff9698e6797"
+}

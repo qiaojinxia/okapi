@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT tm.member_user_id, u.username, tm.role, tm.monthly_spend_limit_micro,\n               COALESCE(SUM(k.used_micro), 0)::bigint AS \"used_micro!\"\n        FROM team_members tm\n        JOIN users u ON u.id = tm.member_user_id\n        LEFT JOIN api_keys k\n               ON k.user_id = tm.team_user_id AND k.member_user_id = tm.member_user_id\n              AND k.deleted_at IS NULL\n        WHERE tm.team_user_id = $1\n        GROUP BY tm.member_user_id, u.username, tm.role, tm.monthly_spend_limit_micro\n        ORDER BY tm.member_user_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "member_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "team_members",
+            "name": "member_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "role",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "team_members",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "monthly_spend_limit_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "team_members",
+            "name": "monthly_spend_limit_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "used_micro!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "68d26c200dc7a16d6e1bdcd2da56893eab099954a1a9fc8002a4907e361538e9"
+}

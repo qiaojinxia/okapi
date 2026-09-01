@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO model_aliases (pattern, target_model, priority) VALUES ($1, $2, 0), ($3, $2, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ec65ceae3f475c34b878dad6a500c6b3ff83d655b8fbd8a9a0aed21c86ddbba9"
+}

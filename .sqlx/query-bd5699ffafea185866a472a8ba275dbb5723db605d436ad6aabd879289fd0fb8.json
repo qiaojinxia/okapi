@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT value #>> '{}' AS \"v!\" FROM settings WHERE key = 'turnstile_secret'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "v!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "bd5699ffafea185866a472a8ba275dbb5723db605d436ad6aabd879289fd0fb8"
+}
