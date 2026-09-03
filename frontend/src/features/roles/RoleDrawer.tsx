@@ -23,10 +23,32 @@ export function groupPermissions(all: string[]): [string, string[]][] {
 }
 
 
-export function RoleDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+/// 编辑态回填所需字段。
+export interface RoleInitial {
+  role_code: string
+  display_name: string
+  permissions: unknown
+}
+
+/// 角色抽屉；`initial` 给出即为编辑（role_code 锁定，后端按 code upsert 并全量失效鉴权缓存）。
+export function RoleDrawer({
+  onClose,
+  onDone,
+  initial,
+}: {
+  onClose: () => void
+  onDone: () => void
+  initial?: RoleInitial
+}) {
   const { t } = useTranslation()
-  const [form, setForm] = useState({ role_code: '', display_name: '' })
-  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const editing = initial !== undefined
+  const [form, setForm] = useState({
+    role_code: initial?.role_code ?? '',
+    display_name: initial?.display_name ?? '',
+  })
+  const [picked, setPicked] = useState<Set<string>>(
+    new Set(Array.isArray(initial?.permissions) ? (initial.permissions as string[]) : []),
+  )
   const [msg, setMsg] = useState<string | null>(null)
 
   // 权限点清单由后端导出，避免前端硬编码字符串与后端漂移
@@ -66,7 +88,7 @@ export function RoleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
     <Drawer
       open
       onClose={onClose}
-      title={t('admin:roleCreate')}
+      title={editing ? t('admin:roleEdit', { code: initial.role_code }) : t('admin:roleCreate')}
       description={t('admin:roleDrawerDesc')}
       footer={
         <>
@@ -92,6 +114,7 @@ export function RoleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
               className="font-mono text-sm"
               value={form.role_code}
               placeholder="ops_readonly"
+              disabled={editing}
               onChange={(e) => setForm((f) => ({ ...f, role_code: e.target.value }))}
             />
           </div>

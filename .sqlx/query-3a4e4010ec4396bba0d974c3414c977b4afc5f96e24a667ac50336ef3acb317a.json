@@ -1,0 +1,119 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id AS channel_id, c.name, c.provider, c.status, c.priority, c.models,\n               pc.priority_override, pc.weight_override,\n               (SELECT COUNT(*) FROM channel_keys k\n                 WHERE k.channel_id = c.id AND k.status = 1\n                   AND (k.cooldown_until IS NULL OR k.cooldown_until < now())) AS \"active_keys!\"\n        FROM pool_channels pc\n        JOIN channels c ON c.id = pc.channel_id\n        WHERE pc.pool_code = $1 AND c.deleted_at IS NULL\n        ORDER BY COALESCE(pc.priority_override, c.priority) DESC, c.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "models",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "models"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "priority_override",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pool_channels",
+            "name": "priority_override"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "weight_override",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pool_channels",
+            "name": "weight_override"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "active_keys!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "3a4e4010ec4396bba0d974c3414c977b4afc5f96e24a667ac50336ef3acb317a"
+}

@@ -14,14 +14,18 @@ import { Route as AdminRouteImport } from './routes/admin'
 import { Route as PortalRouteImport } from './routes/portal'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
+import { Route as AdminAuditRouteImport } from './routes/admin.audit'
 import { Route as AdminChannelsRouteImport } from './routes/admin.channels'
 import { Route as AdminCodesRouteImport } from './routes/admin.codes'
 import { Route as AdminGroupsRouteImport } from './routes/admin.groups'
 import { Route as AdminKeysRouteImport } from './routes/admin.keys'
+import { Route as AdminLogsRouteImport } from './routes/admin.logs'
 import { Route as AdminOpsRouteImport } from './routes/admin.ops'
 import { Route as AdminPlansRouteImport } from './routes/admin.plans'
 import { Route as AdminPoolsRouteImport } from './routes/admin.pools'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
+import { Route as AdminQualityRouteImport } from './routes/admin.quality'
+import { Route as AdminRevenueRouteImport } from './routes/admin.revenue'
 import { Route as AdminRolesRouteImport } from './routes/admin.roles'
 import { Route as AdminRulesRouteImport } from './routes/admin.rules'
 import { Route as AdminSettingsRouteImport } from './routes/admin.settings'
@@ -30,6 +34,7 @@ import { Route as AdminUsersRouteImport } from './routes/admin.users'
 import { Route as PortalIndexRouteImport } from './routes/portal.index'
 import { Route as PortalAffRouteImport } from './routes/portal.aff'
 import { Route as PortalKeysRouteImport } from './routes/portal.keys'
+import { Route as PortalLedgerRouteImport } from './routes/portal.ledger'
 import { Route as PortalLogsRouteImport } from './routes/portal.logs'
 import { Route as PortalSecurityRouteImport } from './routes/portal.security'
 import { Route as PortalTeamsRouteImport } from './routes/portal.teams'
@@ -60,6 +65,11 @@ const AdminIndexRoute = AdminIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminAuditRoute = AdminAuditRouteImport.update({
+  id: '/audit',
+  path: '/audit',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AdminChannelsRoute = AdminChannelsRouteImport.update({
   id: '/channels',
   path: '/channels',
@@ -80,6 +90,11 @@ const AdminKeysRoute = AdminKeysRouteImport.update({
   path: '/keys',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminLogsRoute = AdminLogsRouteImport.update({
+  id: '/logs',
+  path: '/logs',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AdminOpsRoute = AdminOpsRouteImport.update({
   id: '/ops',
   path: '/ops',
@@ -98,6 +113,16 @@ const AdminPoolsRoute = AdminPoolsRouteImport.update({
 const AdminPricingRoute = AdminPricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminQualityRoute = AdminQualityRouteImport.update({
+  id: '/quality',
+  path: '/quality',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminRevenueRoute = AdminRevenueRouteImport.update({
+  id: '/revenue',
+  path: '/revenue',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminRolesRoute = AdminRolesRouteImport.update({
@@ -140,6 +165,11 @@ const PortalKeysRoute = PortalKeysRouteImport.update({
   path: '/keys',
   getParentRoute: () => PortalRoute,
 } as any)
+const PortalLedgerRoute = PortalLedgerRouteImport.update({
+  id: '/ledger',
+  path: '/ledger',
+  getParentRoute: () => PortalRoute,
+} as any)
 const PortalLogsRoute = PortalLogsRouteImport.update({
   id: '/logs',
   path: '/logs',
@@ -166,14 +196,18 @@ export interface FileRoutesByFullPath {
   '/admin': typeof AdminRouteWithChildren
   '/portal': typeof PortalRouteWithChildren
   '/pricing': typeof PricingRoute
+  '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
+  '/admin/logs': typeof AdminLogsRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/quality': typeof AdminQualityRoute
+  '/admin/revenue': typeof AdminRevenueRoute
   '/admin/roles': typeof AdminRolesRoute
   '/admin/rules': typeof AdminRulesRoute
   '/admin/settings': typeof AdminSettingsRoute
@@ -181,6 +215,7 @@ export interface FileRoutesByFullPath {
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
+  '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -191,14 +226,18 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/pricing': typeof PricingRoute
+  '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
+  '/admin/logs': typeof AdminLogsRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/quality': typeof AdminQualityRoute
+  '/admin/revenue': typeof AdminRevenueRoute
   '/admin/roles': typeof AdminRolesRoute
   '/admin/rules': typeof AdminRulesRoute
   '/admin/settings': typeof AdminSettingsRoute
@@ -206,6 +245,7 @@ export interface FileRoutesByTo {
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
+  '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -219,14 +259,18 @@ export interface FileRoutesById {
   '/admin': typeof AdminRouteWithChildren
   '/portal': typeof PortalRouteWithChildren
   '/pricing': typeof PricingRoute
+  '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
+  '/admin/logs': typeof AdminLogsRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/quality': typeof AdminQualityRoute
+  '/admin/revenue': typeof AdminRevenueRoute
   '/admin/roles': typeof AdminRolesRoute
   '/admin/rules': typeof AdminRulesRoute
   '/admin/settings': typeof AdminSettingsRoute
@@ -234,6 +278,7 @@ export interface FileRoutesById {
   '/admin/users': typeof AdminUsersRoute
   '/portal/aff': typeof PortalAffRoute
   '/portal/keys': typeof PortalKeysRoute
+  '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -248,14 +293,18 @@ export interface FileRouteTypes {
     | '/admin'
     | '/portal'
     | '/pricing'
+    | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
     | '/admin/groups'
     | '/admin/keys'
+    | '/admin/logs'
     | '/admin/ops'
     | '/admin/plans'
     | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/quality'
+    | '/admin/revenue'
     | '/admin/roles'
     | '/admin/rules'
     | '/admin/settings'
@@ -263,6 +312,7 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/portal/aff'
     | '/portal/keys'
+    | '/portal/ledger'
     | '/portal/logs'
     | '/portal/security'
     | '/portal/teams'
@@ -273,14 +323,18 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/pricing'
+    | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
     | '/admin/groups'
     | '/admin/keys'
+    | '/admin/logs'
     | '/admin/ops'
     | '/admin/plans'
     | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/quality'
+    | '/admin/revenue'
     | '/admin/roles'
     | '/admin/rules'
     | '/admin/settings'
@@ -288,6 +342,7 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/portal/aff'
     | '/portal/keys'
+    | '/portal/ledger'
     | '/portal/logs'
     | '/portal/security'
     | '/portal/teams'
@@ -300,14 +355,18 @@ export interface FileRouteTypes {
     | '/admin'
     | '/portal'
     | '/pricing'
+    | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
     | '/admin/groups'
     | '/admin/keys'
+    | '/admin/logs'
     | '/admin/ops'
     | '/admin/plans'
     | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/quality'
+    | '/admin/revenue'
     | '/admin/roles'
     | '/admin/rules'
     | '/admin/settings'
@@ -315,6 +374,7 @@ export interface FileRouteTypes {
     | '/admin/users'
     | '/portal/aff'
     | '/portal/keys'
+    | '/portal/ledger'
     | '/portal/logs'
     | '/portal/security'
     | '/portal/teams'
@@ -367,6 +427,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminIndexRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/audit': {
+      id: '/admin/audit'
+      path: '/audit'
+      fullPath: '/admin/audit'
+      preLoaderRoute: typeof AdminAuditRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/channels': {
       id: '/admin/channels'
       path: '/channels'
@@ -395,6 +462,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminKeysRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/logs': {
+      id: '/admin/logs'
+      path: '/logs'
+      fullPath: '/admin/logs'
+      preLoaderRoute: typeof AdminLogsRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/ops': {
       id: '/admin/ops'
       path: '/ops'
@@ -421,6 +495,20 @@ declare module '@tanstack/react-router' {
       path: '/pricing'
       fullPath: '/admin/pricing'
       preLoaderRoute: typeof AdminPricingRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/quality': {
+      id: '/admin/quality'
+      path: '/quality'
+      fullPath: '/admin/quality'
+      preLoaderRoute: typeof AdminQualityRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/revenue': {
+      id: '/admin/revenue'
+      path: '/revenue'
+      fullPath: '/admin/revenue'
+      preLoaderRoute: typeof AdminRevenueRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/roles': {
@@ -479,6 +567,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortalKeysRouteImport
       parentRoute: typeof PortalRoute
     }
+    '/portal/ledger': {
+      id: '/portal/ledger'
+      path: '/ledger'
+      fullPath: '/portal/ledger'
+      preLoaderRoute: typeof PortalLedgerRouteImport
+      parentRoute: typeof PortalRoute
+    }
     '/portal/logs': {
       id: '/portal/logs'
       path: '/logs'
@@ -511,14 +606,18 @@ declare module '@tanstack/react-router' {
 }
 
 interface AdminRouteChildren {
+  AdminAuditRoute: typeof AdminAuditRoute
   AdminChannelsRoute: typeof AdminChannelsRoute
   AdminCodesRoute: typeof AdminCodesRoute
   AdminGroupsRoute: typeof AdminGroupsRoute
   AdminKeysRoute: typeof AdminKeysRoute
+  AdminLogsRoute: typeof AdminLogsRoute
   AdminOpsRoute: typeof AdminOpsRoute
   AdminPlansRoute: typeof AdminPlansRoute
   AdminPoolsRoute: typeof AdminPoolsRoute
   AdminPricingRoute: typeof AdminPricingRoute
+  AdminQualityRoute: typeof AdminQualityRoute
+  AdminRevenueRoute: typeof AdminRevenueRoute
   AdminRolesRoute: typeof AdminRolesRoute
   AdminRulesRoute: typeof AdminRulesRoute
   AdminSettingsRoute: typeof AdminSettingsRoute
@@ -528,14 +627,18 @@ interface AdminRouteChildren {
 }
 
 const AdminRouteChildren: AdminRouteChildren = {
+  AdminAuditRoute: AdminAuditRoute,
   AdminChannelsRoute: AdminChannelsRoute,
   AdminCodesRoute: AdminCodesRoute,
   AdminGroupsRoute: AdminGroupsRoute,
   AdminKeysRoute: AdminKeysRoute,
+  AdminLogsRoute: AdminLogsRoute,
   AdminOpsRoute: AdminOpsRoute,
   AdminPlansRoute: AdminPlansRoute,
   AdminPoolsRoute: AdminPoolsRoute,
   AdminPricingRoute: AdminPricingRoute,
+  AdminQualityRoute: AdminQualityRoute,
+  AdminRevenueRoute: AdminRevenueRoute,
   AdminRolesRoute: AdminRolesRoute,
   AdminRulesRoute: AdminRulesRoute,
   AdminSettingsRoute: AdminSettingsRoute,
@@ -549,6 +652,7 @@ const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 interface PortalRouteChildren {
   PortalAffRoute: typeof PortalAffRoute
   PortalKeysRoute: typeof PortalKeysRoute
+  PortalLedgerRoute: typeof PortalLedgerRoute
   PortalLogsRoute: typeof PortalLogsRoute
   PortalSecurityRoute: typeof PortalSecurityRoute
   PortalTeamsRoute: typeof PortalTeamsRoute
@@ -559,6 +663,7 @@ interface PortalRouteChildren {
 const PortalRouteChildren: PortalRouteChildren = {
   PortalAffRoute: PortalAffRoute,
   PortalKeysRoute: PortalKeysRoute,
+  PortalLedgerRoute: PortalLedgerRoute,
   PortalLogsRoute: PortalLogsRoute,
   PortalSecurityRoute: PortalSecurityRoute,
   PortalTeamsRoute: PortalTeamsRoute,

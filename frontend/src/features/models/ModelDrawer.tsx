@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { Input, Label } from '@/components/ui/input'
+import { TagInput } from '@/components/ui/tag-input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
@@ -35,6 +36,9 @@ export function ModelDrawer({
     image_ratio: model?.image_ratio ?? '1',
   })
   const [tiers, setTiers] = useState<{ tier: string; ratio: string }[]>([])
+  // 从现值起手：编辑倍率时不该顺手清掉已配的降级链（后端 None=不改动，
+  // 但始终回传现值让"清空"也是显式操作）
+  const [fallbacks, setFallbacks] = useState<string[]>(model?.fallback_models ?? [])
 
   const upsert = useMutation({
     mutationFn: () =>
@@ -50,6 +54,7 @@ export function ModelDrawer({
                   tiers.filter((x) => x.tier.trim() !== '').map((x) => [x.tier.trim(), x.ratio]),
                 )
               : undefined,
+          fallback_models: fallbacks,
         },
       }),
     onSuccess: () => {
@@ -75,7 +80,7 @@ export function ModelDrawer({
     <Drawer
       open
       onClose={onClose}
-      title={model ? t('admin:editModel', { name: model.model_name }) : t('admin:upsertModel')}
+      title={model ? t('admin:editModel', { name: model.model_name }) : t('admin:createModel')}
       description={t('admin:modelDrawerDesc')}
       footer={
         <>
@@ -109,6 +114,15 @@ export function ModelDrawer({
 
       <FieldGroup title={t('admin:axesModal')} hint={t('admin:axesModalHint')}>
         <div className="grid grid-cols-2 gap-3">{MODAL_AXES.map(axisField)}</div>
+      </FieldGroup>
+
+      <FieldGroup title={t('admin:fallbackModels')} hint={t('admin:fallbackModelsHint')}>
+        <TagInput
+          id="m-fallbacks"
+          value={fallbacks}
+          onChange={setFallbacks}
+          placeholder="gpt-4o-mini"
+        />
       </FieldGroup>
 
       <FieldGroup title={t('admin:tierRatios')} hint={t('admin:tierRatiosHint')}>

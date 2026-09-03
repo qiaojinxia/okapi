@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT mn.name AS \"model_name!\", pc.pool_code AS \"pool_code!\"\n           FROM channels c\n           CROSS JOIN LATERAL jsonb_array_elements_text(c.models) AS mn(name)\n           JOIN pool_channels pc ON pc.channel_id = c.id\n           WHERE c.status = 1 AND c.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_name!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "pool_code!",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pool_channels",
+            "name": "pool_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      false
+    ]
+  },
+  "hash": "c6ca8211f0e8cccf32fe3d7c348b6c1c4e26f629476b7246719feaef2040de53"
+}

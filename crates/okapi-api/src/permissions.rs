@@ -28,6 +28,9 @@ pub const USER_ASSIST: &str = "user.assist";
 pub const CACHE_FLUSH: &str = "cache.flush";
 /// MCP 写工具总闸（叠加资源权限与 settings.mcp_write_enabled，§7.3 三道闸）。
 pub const MCP_WRITE: &str = "mcp.write";
+/// 审计日志只读（谁在何时改了什么；含登录记录）。独立权限点：合规/只读运营角色
+/// 需要它却不该顺带拿到系统设置。
+pub const AUDIT_READ: &str = "audit.read";
 
 /// 全部权限点清单：由 `GET /admin/permissions` 暴露给前端角色编辑器，
 /// 避免前端硬编码字符串与后端漂移。新增权限点必须同步登记到此处（有用例把关）。
@@ -48,6 +51,7 @@ pub const ALL: &[&str] = &[
     SETTINGS_WRITE,
     CACHE_FLUSH,
     MCP_WRITE,
+    AUDIT_READ,
 ];
 
 #[cfg(test)]

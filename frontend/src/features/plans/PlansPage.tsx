@@ -1,9 +1,11 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
+import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { PlanDrawer } from '@/features/plans/PlanDrawer'
@@ -32,8 +34,7 @@ interface PlanRow {
 export function PlansPage() {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
-  const [msg, setMsg] = useState<string | null>(null)
-  const [drawer, setDrawer] = useState(false)
+  const [drawer, setDrawer] = useState<'create' | PlanRow | null>(null)
   const { confirm, dialog } = useConfirm()
 
   const plans = useQuery({
@@ -46,10 +47,10 @@ export function PlansPage() {
     mutationFn: (code: string) =>
       apiFetch(`/admin/plans/${encodeURIComponent(code)}`, { method: 'DELETE' }),
     onSuccess: () => {
-      setMsg(t('common:success'))
+      toast.success(t('common:success'))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const rows = plans.data?.data ?? []
@@ -60,18 +61,18 @@ export function PlansPage() {
         title={t('admin:planListTitle')}
         description={t('admin:planHint')}
         action={
-          <Button onClick={() => setDrawer(true)}>
+          <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
-            {t('admin:planUpsert')}
+            {t('admin:planCreate')}
           </Button>
         }
       />
-
-      {msg !== null && <p className="text-xs text-muted-foreground">{msg}</p>}
       {dialog}
 
       {plans.isError ? (
-        <ErrorState message={describeError(plans.error)} />
+        <ErrorState message={describeError(plans.error)} onRetry={() => void plans.refetch()} />
+      ) : plans.isPending ? (
+        <TableSkeleton rows={6} cols={6} />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:plansEmptyHint')} />
       ) : (
@@ -97,18 +98,25 @@ export function PlansPage() {
                 <Td>{p.balance_valid_days ?? '—'}</Td>
                 <Td>{p.code_count}</Td>
                 <Td>
-                  <IconButton
-                    icon={Trash2}
-                    label={t('common:delete')}
-                    variant="destructive"
-                    onClick={() =>
-                      confirm({
-                        title: t('common:confirmDeleteTitle', { name: p.plan_code }),
-                        description: t('common:confirmPlanDelete'),
-                        onConfirm: () => remove.mutate(p.plan_code),
-                      })
-                    }
-                  />
+                  <div className="flex items-center gap-0.5">
+                    <IconButton
+                      icon={Pencil}
+                      label={t('common:edit')}
+                      onClick={() => setDrawer(p)}
+                    />
+                    <IconButton
+                      icon={Trash2}
+                      label={t('common:delete')}
+                      variant="destructive"
+                      onClick={() =>
+                        confirm({
+                          title: t('common:confirmDeleteTitle', { name: p.plan_code }),
+                          description: t('common:confirmPlanDelete'),
+                          onConfirm: () => remove.mutate(p.plan_code),
+                        })
+                      }
+                    />
+                  </div>
                 </Td>
               </Tr>
             ))}
@@ -116,11 +124,12 @@ export function PlansPage() {
         </Table>
       )}
 
-      {drawer && (
+      {drawer !== null && (
         <PlanDrawer
-          onClose={() => setDrawer(false)}
+          initial={drawer === 'create' ? undefined : drawer}
+          onClose={() => setDrawer(null)}
           onDone={() => {
-            setMsg(t('common:success'))
+            toast.success(t('common:success'))
             invalidate()
           }}
         />

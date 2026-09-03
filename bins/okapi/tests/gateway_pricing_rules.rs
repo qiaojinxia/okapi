@@ -51,17 +51,19 @@ struct Env {
     suffix: String,
 }
 
-/// 规则在 build_state 之前入库才会进价簿——本函数由调用方在建 state 前调用。
-async fn insert_volume_rule(pg: &PgPool, code: &str, user_id: i64, model: &str, threshold: u64) {
+/// 待插入规则：(rule_type, params)。规则在 build_state 之前入库才会进价簿。
+type RuleSeed = (&'static str, Value);
+
+async fn insert_rule(pg: &PgPool, code: &str, user_id: i64, model: &str, seed: &RuleSeed) {
     okapi_store::admin::upsert_pricing_rule(
         pg,
         okapi_store::admin::PricingRuleInput {
             rule_code: code,
-            rule_type: "volume",
+            rule_type: seed.0,
             // 必须限定到本用例的用户与模型：pricing_rules 是全局表，
             // 无作用域的规则会污染并行跑的其它计费用例
             scope: &json!({ "users": [user_id], "models": [model] }),
-            params: &json!({ "multiplier": "0.5", "min_monthly_tokens": threshold }),
+            params: &seed.1,
             priority: 0,
             enabled: true,
             valid_from: None,
@@ -72,7 +74,7 @@ async fn insert_volume_rule(pg: &PgPool, code: &str, user_id: i64, model: &str, 
     .unwrap();
 }
 
-async fn setup(with_volume_rule: Option<u64>) -> Env {
+async fn setup(rules: &[RuleSeed]) -> Env {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -118,8 +120,8 @@ async fn setup(with_volume_rule: Option<u64>) -> Env {
     .await
     .unwrap();
 
-    if let Some(threshold) = with_volume_rule {
-        insert_volume_rule(&pg, &format!("vol-{suffix}"), user_id, &model, threshold).await;
+    for (i, seed) in rules.iter().enumerate() {
+        insert_rule(&pg, &format!("r{i}-{suffix}"), user_id, &model, seed).await;
     }
 
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
@@ -184,7 +186,11 @@ async fn wait_committed_nth(pg: &PgPool, user_id: i64, n: usize) -> (i64, Value)
 /// 这条链路任一环断开（计数没写 / 报价没读 / 规则没进价簿）本用例都会失败。
 #[tokio::test]
 async fn volume_rule_fires_once_monthly_tokens_cross_threshold() {
-    let env = setup(Some(100)).await;
+    let env = setup(&[(
+        "volume",
+        json!({ "multiplier": "0.5", "min_monthly_tokens": 100 }),
+    )])
+    .await;
 
     chat(&env).await;
     let (first, snap1) = wait_committed_nth(&env.pg, env.user_id, 1).await;
@@ -201,7 +207,7 @@ async fn volume_rule_fires_once_monthly_tokens_cross_threshold() {
     let rules = snap2["rules"].as_array().expect("命中规则必须进快照");
     assert_eq!(rules.len(), 1, "应恰好命中一条 volume 规则：{snap2}");
     assert_eq!(rules[0]["type"], "volume");
-    assert_eq!(rules[0]["code"], format!("vol-{}", env.suffix));
+    assert_eq!(rules[0]["code"], format!("r0-{}", env.suffix));
 
     // 计数键按用户隔离，取值可精确断言：两笔各 120 token
     // （门控本身"无规则不采集"由 okapi-pricing 的 compile 单测覆盖——
@@ -224,10 +230,64 @@ async fn volume_rule_fires_once_monthly_tokens_cross_threshold() {
     );
 }
 
+/// 消费额轴（§11.5"贵模型大客户用量少但付费多"）：结算累计 usd 计数，
+/// 越过阈值后按 0.5 计价；token 轴缺省 0 视为恒达标。
+#[tokio::test]
+async fn volume_rule_fires_on_monthly_spend_axis() {
+    let env = setup(&[(
+        "volume",
+        json!({ "multiplier": "0.5", "min_monthly_spend_micro": 300 }),
+    )])
+    .await;
+
+    chat(&env).await;
+    let (first, _) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    assert_eq!(first, 240, "首笔消费计数为 0，不打折");
+
+    chat(&env).await;
+    let (second, _) = wait_committed_nth(&env.pg, env.user_id, 2).await;
+    assert_eq!(second, 240, "累计 240 micro < 阈值 300，仍不打折");
+
+    chat(&env).await;
+    let (third, snap) = wait_committed_nth(&env.pg, env.user_id, 3).await;
+    assert_eq!(third, 120, "累计 480 micro ≥ 300 → 0.5 倍率");
+    assert_eq!(
+        snap["rules"].as_array().map_or(0, Vec::len),
+        1,
+        "命中的消费额规则应进快照：{snap}"
+    );
+}
+
+/// stacking best_for_user 端到端：8 折与 9 折两条活动同时在线，
+/// 账单只乘 0.8——无脑连乘的 0.72 失控形状被钉死。
+#[tokio::test]
+async fn best_for_user_applies_single_cheapest_rule() {
+    let env = setup(&[
+        (
+            "discount",
+            json!({ "multiplier": "0.8", "stacking_mode": "best_for_user" }),
+        ),
+        (
+            "discount",
+            json!({ "multiplier": "0.9", "stacking_mode": "best_for_user" }),
+        ),
+    ])
+    .await;
+
+    chat(&env).await;
+    let (amount, snap) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    assert_eq!(amount, 192, "240 × 0.8；若错误连乘会是 172（0.72 floor）");
+    let rules = snap["rules"].as_array().expect("胜者应进快照");
+    assert_eq!(rules.len(), 1, "桶内只留一条：{snap}");
+    assert_eq!(rules[0]["code"], format!("r0-{}", env.suffix), "0.8 的胜出");
+}
+
 /// 控制面：CRUD 打通 + 非法组合在配置期就被拒（而非入库后静默失效）。
+// 线性校验清单：每个非法形状一次请求一次断言，拆开反而丢失"同一套输入面"的上下文
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn console_rule_crud_and_validation() {
-    let env = setup(None).await;
+    let env = setup(&[]).await;
     let client = reqwest::Client::new();
     let url = format!("http://{}/admin/pricing/rules", env.console);
     let code = format!("t-{}", &env.suffix[..12]);
@@ -240,11 +300,46 @@ async fn console_rule_crud_and_validation() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        400,
-        "volume 规则缺 min_monthly_tokens 必须拒绝"
-    );
+    assert_eq!(resp.status(), 400, "volume 规则两个阈值轴全缺必须拒绝");
+
+    // 仅配消费额轴 → 合法（token 轴不再强制，§11.5 消费额轴）
+    let spend_code = format!("sp-{}", &env.suffix[..12]);
+    let resp = client
+        .post(&url)
+        .bearer_auth(&env.super_token)
+        .json(
+            &json!({ "rule_code": spend_code, "rule_type": "volume", "multiplier": "0.8",
+                       "min_monthly_spend_micro": 50_000_000,
+                       "scope": { "models": [env.model] } }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "只配消费额阈值的 volume 应被接受");
+
+    // 非法星期（7）→ 400；未知 stacking_mode → 400（静默当 stackable 会超额折扣）
+    let resp = client
+        .post(&url)
+        .bearer_auth(&env.super_token)
+        .json(
+            &json!({ "rule_code": code, "rule_type": "time_based", "multiplier": "0.8",
+                       "start_minute": 0, "end_minute": 1439, "weekdays": [7] }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "星期取值只能是 0–6");
+    let resp = client
+        .post(&url)
+        .bearer_auth(&env.super_token)
+        .json(
+            &json!({ "rule_code": code, "rule_type": "discount", "multiplier": "0.8",
+                       "stacking_mode": "nonsense" }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400, "stacking_mode 白名单外必须拒绝");
 
     // start == end 空窗 → 400（对齐 new-api rc.27 #6934 的反面：不静默退化为全天）
     let resp = client
@@ -267,13 +362,14 @@ async fn console_rule_crud_and_validation() {
         .unwrap();
     assert_eq!(resp.status(), 400);
 
-    // 合法 time_based 落库
+    // 合法 time_based 落库（含周末掩码与叠加语义）
     let resp = client
         .post(&url)
         .bearer_auth(&env.super_token)
         .json(
             &json!({ "rule_code": code, "rule_type": "time_based", "multiplier": "0.8",
                        "start_minute": 1320, "end_minute": 360,
+                       "weekdays": [6, 0], "stacking_mode": "best_for_user",
                        "scope": { "models": [env.model] } }),
         )
         .send()
@@ -298,6 +394,12 @@ async fn console_rule_crud_and_validation() {
         .expect("新建规则应出现在列表");
     assert_eq!(mine["params"]["multiplier"], "0.8");
     assert_eq!(mine["params"]["start_minute"], 1320);
+    assert_eq!(
+        mine["params"]["weekdays"],
+        json!([0, 6]),
+        "掩码往返应归一化为升序日列表"
+    );
+    assert_eq!(mine["params"]["stacking_mode"], "best_for_user");
 
     // 普通用户无 pricing.write → 403
     let resp = client

@@ -257,10 +257,271 @@ pub async fn list_pools(
             "pool_code": r.pool_code,
             "description": r.description,
             "routing_strategy": r.routing_strategy,
+            "fallback_pool_code": r.fallback_pool_code,
+            "builtin": r.pool_code == okapi_store::channels::DEFAULT_POOL,
             "channel_count": r.channel_count,
             "group_count": r.group_count,
             "key_count": r.key_count,
+            "fallback_ref_count": r.fallback_ref_count,
         })).collect::<Vec<_>>()
+    })))
+}
+
+/// 池详情：成员渠道（含覆盖）、能服务的模型并集、引用它的分组。
+/// 分组抽屉据此把"分组 → 池 → 渠道 → 模型"三跳在一处展示，不必跨三个页面拼。
+pub async fn pool_detail(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::CHANNEL_READ).await?;
+    let detail = okapi_store::listing::pool_detail(&state.pg, &code)
+        .await?
+        .ok_or_else(not_found)?;
+    Ok(Json(json!(detail)))
+}
+
+// ---- 路由诊断（"为什么这个请求没有候选"）----
+
+#[derive(Deserialize)]
+pub struct DiagnoseQuery {
+    pub model: String,
+    /// 按分组诊断（分组的 pool_code 决定可见范围）；缺省 = default 分组的池（即 default 池）。
+    #[serde(default)]
+    pub group: Option<String>,
+    /// 直接钉住某池（模拟令牌 pool_override，优先于分组的池）。
+    #[serde(default)]
+    pub pool: Option<String>,
+}
+
+/// key 静态淘汰原因（与生产过滤 `ck.status = 1 AND cooldown 过期 AND subset 允许` 对应）。
+fn key_reason(status: i16, cooling: bool, subset_ok: bool) -> Option<&'static str> {
+    match status {
+        2 => Some("key_cooling"),
+        3 => Some("key_rate_limited"),
+        4 => Some("key_quota_exhausted"),
+        5 => Some("key_banned"),
+        6 => Some("key_invalid"),
+        _ if cooling => Some("key_cooling"),
+        _ if !subset_ok => Some("model_subset_mismatch"),
+        _ => None,
+    }
+}
+
+/// 路由诊断：给定 模型 ×（分组 | 池），逐环回答"令牌→分组→池→渠道→key"
+/// 每一跳的解析结果与淘汰原因。竞品共同的配置故障形态是"链路断在中间看不见"
+/// （new-api FAQ '无可用渠道'三连查），本端点把三连查合成一次调用。
+///
+/// 幸存者集合直接复用生产查询 `candidates_for_model`——诊断口径与真实调度
+/// 永不漂移；本函数只负责给"没进幸存者集合"的渠道/key 找出原因。
+// 逐环线性拼装报告，拆分反而打断"模型→范围→渠道→兜底"的叙事
+#[allow(clippy::too_many_lines)]
+pub async fn diagnose_route(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<DiagnoseQuery>,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::CHANNEL_READ).await?;
+    let requested = q.model.trim();
+    if requested.is_empty() {
+        return Err(AppError::bad_request().with_param("model"));
+    }
+
+    // 环节 1：模型身份（别名感知、不过滤 status——"已停用"与"不存在"是两种病）
+    let model_row = sqlx::query!(
+        r#"
+        SELECT m.model_name AS canonical, m.status, m.fallback_models,
+               (p.model_id IS NOT NULL) AS "priced!"
+        FROM models m
+        LEFT JOIN model_pricing p ON p.model_id = m.id
+        WHERE m.model_name = $1
+           OR m.model_name = (
+               SELECT target_model FROM model_aliases
+               WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(pattern, '*', '%'))
+               ORDER BY (pattern = $1) DESC, priority DESC, pattern
+               LIMIT 1
+           )
+        ORDER BY (m.model_name = $1) DESC
+        LIMIT 1
+        "#,
+        requested
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+
+    // 环节 2：分组 → 池（显式 pool 参数模拟令牌 pool_override，优先）；分组必有池，
+    // 未给分组时按 default 池——与鉴权解析 COALESCE(override, group.pool, 'default') 同口径
+    let group_row = if let Some(code) = q.group.as_deref().filter(|s| !s.is_empty()) {
+        let row = sqlx::query!(
+            r#"SELECT group_ratio::text AS "group_ratio!", pool_code
+               FROM price_groups WHERE group_code = $1"#,
+            code
+        )
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+        Some(row.ok_or_else(|| not_found().with_param("group"))?)
+    } else {
+        None
+    };
+    let explicit_pool = q.pool.as_deref().filter(|s| !s.is_empty());
+    let (pool_code, pool_source) = match (explicit_pool, group_row.as_ref()) {
+        (Some(p), _) => (p.to_owned(), "param"),
+        (None, Some(g)) => (g.pool_code.clone(), "group"),
+        (None, None) => (okapi_store::channels::DEFAULT_POOL.to_owned(), "default"),
+    };
+    let pool_row = sqlx::query!(
+        r#"SELECT routing_strategy, fallback_pool_code FROM channel_pools WHERE pool_code = $1"#,
+        pool_code
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?
+    .ok_or_else(|| not_found().with_param("pool"))?;
+    let routing_strategy = pool_row.routing_strategy;
+    // 池链：主池 → 降级池（单跳）。候选与"为何被淘汰"都按链判定
+    let mut pool_chain: Vec<String> = vec![pool_code.clone()];
+    if let Some(fb) = pool_row.fallback_pool_code.filter(|fb| *fb != pool_code) {
+        pool_chain.push(fb);
+    }
+    let chain_refs: Vec<&str> = pool_chain.iter().map(String::as_str).collect();
+
+    // 模型不存在时 canonical 无从谈起，直接短路（渠道环节无意义）
+    let Some(model_row) = model_row else {
+        return Ok(Json(json!({
+            "model": {"requested": requested, "canonical": null, "active": false,
+                       "priced": false, "via_alias": false, "fallback_models": []},
+            "scope": {"group_code": q.group, "group_ratio": group_row.map(|g| g.group_ratio),
+                       "pool_code": pool_code, "pool_source": pool_source,
+                       "pool_chain": pool_chain, "routing_strategy": routing_strategy},
+            "channels": [], "candidates": 0,
+            "verdict": "model_not_found", "fallbacks": []
+        })));
+    };
+    let canonical = model_row.canonical;
+    let active = model_row.status == 1;
+    let fallback_chain: Vec<String> =
+        serde_json::from_value(model_row.fallback_models).unwrap_or_default();
+
+    // 环节 3：渠道与 key 全集（不过滤）+ 生产口径的幸存者集合
+    let channels = okapi_store::channels::diagnose_channels(&state.pg, &canonical).await?;
+    let survivors: std::collections::HashSet<i64> = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        &canonical,
+        &chain_refs,
+        state.master_key.as_deref(),
+    )
+    .await
+    .map(|v| v.iter().map(|c| c.channel_key_id).collect())
+    .unwrap_or_default();
+
+    let now = chrono::Utc::now();
+    let channel_reports: Vec<Value> = channels
+        .iter()
+        .map(|ch| {
+            let excluded = if ch.status != 1 {
+                Some("channel_disabled")
+            } else if ch.pools.is_empty() {
+                // 孤儿：不在任何池里，对谁都不可达——这是"渠道只服务它所在的池"的直接后果
+                Some("orphan_channel")
+            } else if !ch.pools.iter().any(|c| pool_chain.contains(c)) {
+                Some("not_in_pool")
+            } else {
+                None
+            };
+            // 经降级池才可见的渠道单独标注：正常时它不接流量
+            let via_fallback =
+                excluded.is_none() && !ch.pools.contains(&pool_code) && pool_chain.len() > 1;
+            let keys: Vec<Value> = ch
+                .keys
+                .iter()
+                .map(|k| {
+                    let cooling = k.cooldown_until.is_some_and(|t| t > now);
+                    let reason = key_reason(k.status, cooling, k.subset_ok);
+                    json!({
+                        "key_id": k.key_id,
+                        "status": k.status,
+                        "cooldown_until": k.cooldown_until,
+                        "weight": k.weight,
+                        "ok": survivors.contains(&k.key_id),
+                        "reason": reason,
+                        "caps": {"rpm": k.rpm_limit, "daily_spend_micro": k.daily_spend_cap_micro,
+                                  "concurrency": k.max_concurrency},
+                    })
+                })
+                .collect();
+            json!({
+                "channel_id": ch.channel_id, "name": &ch.name, "provider": &ch.provider,
+                "status": ch.status, "priority": ch.priority, "pools": &ch.pools,
+                "via_fallback": via_fallback,
+                "excluded": excluded, "keys": keys,
+            })
+        })
+        .collect();
+    let candidates = survivors.len();
+
+    // 环节 4：降级链逐环可投性预览（与网关 fallback_billing 同判据：存在且启用 + 有价 + 有候选）
+    let mut fallbacks: Vec<Value> = Vec::new();
+    for fb in &fallback_chain {
+        let resolved = okapi_store::channels::resolve_model(&state.pg, fb).await?;
+        let entry = if let Some(m) = resolved {
+            let priced = sqlx::query_scalar!(
+                r#"SELECT EXISTS(
+                       SELECT 1 FROM model_pricing p JOIN models m ON m.id = p.model_id
+                       WHERE m.model_name = $1
+                   ) AS "e!""#,
+                m.canonical
+            )
+            .fetch_one(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?;
+            let fb_candidates = okapi_store::channels::candidates_for_model(
+                &state.pg,
+                &m.canonical,
+                &chain_refs,
+                state.master_key.as_deref(),
+            )
+            .await
+            .map_or(0, |v| v.len());
+            let reason = if !priced {
+                Some("unpriced")
+            } else if fb_candidates == 0 {
+                Some("no_available_channel")
+            } else {
+                None
+            };
+            json!({"model": m.canonical, "viable": priced && fb_candidates > 0,
+                    "candidates": fb_candidates, "reason": reason})
+        } else {
+            json!({"model": fb, "viable": false, "candidates": 0, "reason": "missing_or_disabled"})
+        };
+        fallbacks.push(entry);
+    }
+
+    let verdict = if !active {
+        "model_disabled"
+    } else if !model_row.priced {
+        "model_unpriced"
+    } else if channels.is_empty() {
+        "no_channel_serves_model"
+    } else if candidates == 0 {
+        "no_available_channel"
+    } else {
+        "ok"
+    };
+
+    Ok(Json(json!({
+        "model": {"requested": requested, "canonical": canonical, "active": active,
+                   "priced": model_row.priced, "via_alias": canonical != requested,
+                   "fallback_models": fallback_chain},
+        "scope": {"group_code": q.group, "group_ratio": group_row.map(|g| g.group_ratio),
+                   "pool_code": pool_code, "pool_source": pool_source,
+                   "pool_chain": pool_chain, "routing_strategy": routing_strategy},
+        "channels": channel_reports,
+        "candidates": candidates,
+        "verdict": verdict,
+        "fallbacks": fallbacks,
     })))
 }
 

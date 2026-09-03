@@ -120,9 +120,10 @@ pub struct CreateChannelReq {
     pub trust_upstream_usage: bool,
     #[serde(default)]
     pub max_concurrency: Option<i32>,
-    /// 所属渠道池（空 = 不入池，宽松模式下对所有人可见）。
+    /// 所属渠道池。缺省（不传）= 进内置 default 池；显式传空数组 = 孤儿（对谁都不可达，
+    /// 只在"先建好、稍后再放进专属池"时有意义）。元素可为池码字符串或带覆盖的对象。
     #[serde(default)]
-    pub pools: Vec<String>,
+    pub pools: Option<Vec<PoolMemberReq>>,
     /// 渠道高级设置（channels.settings 对象整体；已注册键见 docs/database.md：
     /// thinking_to_content / bill_by_response_model / strip_request_fields / pass_paths）。
     #[serde(default)]
@@ -131,6 +132,61 @@ pub struct CreateChannelReq {
 
 fn default_provider() -> String {
     "openai".to_owned()
+}
+
+/// 池成员写入形态：`"vip"` 或 `{"pool_code":"vip","priority_override":5,"weight_override":2}`。
+/// 字符串形态保留是为了老客户端与测试脚本不用改。
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum PoolMemberReq {
+    Code(String),
+    Full(okapi_store::admin::PoolMember),
+}
+
+impl PoolMemberReq {
+    fn into_member(self) -> okapi_store::admin::PoolMember {
+        match self {
+            Self::Code(pool_code) => okapi_store::admin::PoolMember {
+                pool_code,
+                priority_override: None,
+                weight_override: None,
+            },
+            Self::Full(m) => m,
+        }
+    }
+}
+
+/// 池成员列表归一化：去空白、去重、校验池存在（不存在回 404 而非让 FK 报 500）。
+async fn normalize_members(
+    state: &AppState,
+    reqs: Vec<PoolMemberReq>,
+) -> Result<Vec<okapi_store::admin::PoolMember>, AppError> {
+    let mut members: Vec<okapi_store::admin::PoolMember> = Vec::new();
+    for r in reqs {
+        let m = r.into_member();
+        let pool_code = m.pool_code.trim();
+        if pool_code.is_empty() || members.iter().any(|x| x.pool_code == pool_code) {
+            continue;
+        }
+        members.push(okapi_store::admin::PoolMember {
+            pool_code: pool_code.to_owned(),
+            ..m
+        });
+    }
+    let codes: Vec<String> = members.iter().map(|m| m.pool_code.clone()).collect();
+    let known = sqlx::query_scalar!(
+        r#"SELECT pool_code FROM channel_pools WHERE pool_code = ANY($1)"#,
+        &codes
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    if let Some(missing) = codes.iter().find(|c| !known.contains(c)) {
+        return Err(
+            AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param(missing.clone())
+        );
+    }
+    Ok(members)
 }
 
 pub async fn create_channel(
@@ -187,16 +243,21 @@ pub async fn create_channel(
     }
     // 属主传播（#6267）：创建人即属主，own 范围据此过滤
     okapi_store::admin::set_channel_owner(&state.pg, channel_id, actor.user_id).await?;
-    if !req.pools.is_empty() {
-        okapi_store::admin::set_channel_pools(&state.pg, channel_id, &req.pools).await?;
-    }
+    // provision 已把新渠道放进 default 池；显式给了 pools 才覆盖（空数组 = 孤儿）
+    let pool_codes: Vec<String> = if let Some(reqs) = req.pools {
+        let members = normalize_members(&state, reqs).await?;
+        okapi_store::admin::set_channel_pools(&state.pg, channel_id, &members).await?;
+        members.into_iter().map(|m| m.pool_code).collect()
+    } else {
+        vec![okapi_store::channels::DEFAULT_POOL.to_owned()]
+    };
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "channel.create",
         &channel_id.to_string(),
-        json!({ "name": req.name, "provider": req.provider, "models": req.models }),
+        json!({ "name": req.name, "provider": req.provider, "models": req.models, "pools": pool_codes }),
     )
     .await;
     Ok(Json(
@@ -215,6 +276,9 @@ pub async fn list_channels(
     };
     let channels = okapi_store::admin::list_channels(&state.pg, owner_filter).await?;
     let keys = okapi_store::admin::list_channel_keys(&state.pg).await?;
+    // 最近测活结果一次 MGET 回填（Redis 30 天 TTL；没测过 / 已过期 = null）
+    let ids: Vec<i64> = channels.iter().map(|c| c.id).collect();
+    let mut last_tests = state.sched.channel_test_get_many(&ids).await;
     let data: Vec<Value> = channels
         .into_iter()
         .map(|c| {
@@ -224,7 +288,11 @@ pub async fn list_channels(
                 "id": c.id, "name": c.name, "provider": c.provider,
                 "api_base": c.api_base, "status": c.status, "priority": c.priority,
                 "models": c.models, "trust_upstream_usage": c.trust_upstream_usage,
+                // 列表也带池：空数组 = 孤儿渠道（对谁都不可达），列表页要能一眼看见
+                "pools": c.pools,
+                "pool_members": c.pool_members,
                 "keys": keys,
+                "last_test": last_tests.remove(&c.id),
             })
         })
         .collect();
@@ -265,10 +333,11 @@ pub async fn set_channel_status(
 
 #[derive(Deserialize)]
 pub struct SetPoolsReq {
-    pub pools: Vec<String>,
+    pub pools: Vec<PoolMemberReq>,
 }
 
-/// 覆盖式设置渠道所属的池（可见性由池表达，docs/database.md §3.7）。
+/// 覆盖式设置渠道所属的池及成员级覆盖（可见性由池表达，docs/database.md §3.7）。
+/// 空数组 = 从所有池移出 → 孤儿渠道，响应带 `orphan: true` 让前端明示后果。
 pub async fn set_channel_pools(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -277,17 +346,18 @@ pub async fn set_channel_pools(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
-    okapi_store::admin::set_channel_pools(&state.pg, id, &req.pools).await?;
+    let members = normalize_members(&state, req.pools).await?;
+    okapi_store::admin::set_channel_pools(&state.pg, id, &members).await?;
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "channel.set_pools",
         &id.to_string(),
-        json!({ "pools": req.pools }),
+        json!({ "pools": members }),
     )
     .await;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "orphan": members.is_empty() })))
 }
 
 /// 已支持的上游协议（docs/database.md channels.provider）。
@@ -640,9 +710,12 @@ pub struct UpsertGroupReq {
     pub group_ratio: String,
     #[serde(default)]
     pub description: String,
-    /// 该分组走哪个渠道池；null/缺省 = 不限（全部渠道可见）。
+    /// 该分组的用户打哪个渠道池；null/缺省 = 内置 default 池（分组必有池）。
     #[serde(default)]
     pub pool_code: Option<String>,
+    /// 用户可否在门户为自己的 key 自选此分组（new-api UserUsableGroups 的对应物）。
+    #[serde(default)]
+    pub self_select: bool,
 }
 
 /// 定价分组 upsert（改倍率后需 publish 生效）。
@@ -655,24 +728,52 @@ pub async fn upsert_group(
     if req.group_ratio.parse::<okapi_pricing::RatioFp>().is_err() {
         return Err(AppError::bad_request().with_param("group_ratio"));
     }
+    let pool_code = req
+        .pool_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(okapi_store::channels::DEFAULT_POOL);
+    ensure_pool_exists(&state, pool_code).await?;
     okapi_store::admin::upsert_price_group(
         &state.pg,
-        &req.group_code,
-        &req.group_ratio,
-        &req.description,
-        req.pool_code.as_deref(),
+        okapi_store::admin::PriceGroupInput {
+            group_code: &req.group_code,
+            group_ratio: &req.group_ratio,
+            description: &req.description,
+            pool_code: Some(pool_code),
+            self_select: req.self_select,
+        },
     )
     .await?;
+    // 分组的池变了，绑定该组的 key 鉴权缓存里还是旧池——与改角色同一动作，全量失效
+    state.sched.auth_flush().await;
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "pricing.upsert_group",
         &req.group_code,
-        json!({ "group_ratio": req.group_ratio, "pool_code": req.pool_code }),
+        json!({ "group_ratio": req.group_ratio, "pool_code": pool_code, "self_select": req.self_select }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 池存在性校验：不存在回 404 带 param，而不是让外键违约变成 500。
+async fn ensure_pool_exists(state: &AppState, pool_code: &str) -> Result<(), AppError> {
+    let exists = sqlx::query_scalar!(
+        r#"SELECT EXISTS(SELECT 1 FROM channel_pools WHERE pool_code = $1) AS "e!""#,
+        pool_code
+    )
+    .fetch_one(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param("pool_code"))
+    }
 }
 
 /// 渠道池取值：与库 CHECK 一致，前端下拉也用这份清单。
@@ -685,6 +786,9 @@ pub struct UpsertPoolReq {
     pub description: String,
     #[serde(default)]
     pub routing_strategy: Option<String>,
+    /// 本池对某模型无可用候选时退到的池（单跳；不能是自己）。
+    #[serde(default)]
+    pub fallback_pool_code: Option<String>,
 }
 
 /// 渠道池 upsert（池 = 一组渠道 + 在这组里怎么选，docs/database.md §3.7）。
@@ -701,23 +805,38 @@ pub async fn upsert_pool(
     if !ROUTING_STRATEGIES.contains(&strategy) {
         return Err(AppError::bad_request().with_param("routing_strategy"));
     }
-    if req.pool_code.trim().is_empty() {
+    let pool_code = req.pool_code.trim();
+    if pool_code.is_empty() {
         return Err(AppError::bad_request().with_param("pool_code"));
+    }
+    let fallback = req
+        .fallback_pool_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(fb) = fallback {
+        if fb == pool_code {
+            return Err(AppError::bad_request().with_param("fallback_pool_code"));
+        }
+        ensure_pool_exists(&state, fb).await?;
     }
     okapi_store::admin::upsert_channel_pool(
         &state.pg,
-        req.pool_code.trim(),
+        pool_code,
         &req.description,
         strategy,
+        fallback,
     )
     .await?;
+    // 池的策略 / 降级目标随鉴权缓存下发，改了要让持有旧值的 key 重新解析
+    state.sched.auth_flush().await;
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "channel.upsert_pool",
-        &req.pool_code,
-        json!({ "routing_strategy": strategy }),
+        pool_code,
+        json!({ "routing_strategy": strategy, "fallback_pool_code": fallback }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -768,7 +887,7 @@ pub struct SetSettingReq {
     pub value: Value,
 }
 
-/// 全局设置写入（如 strict_group_isolation）。
+/// 全局设置写入（如 site_notice / model_rpm_limits）。
 pub async fn set_setting(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -777,6 +896,9 @@ pub async fn set_setting(
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
     okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.user_id).await?;
     state.invalidate_routing_caches();
+    // settings 热路径缓存按键失效：同进程立即生效（公告发布、限流阈值调整不必等 60s TTL），
+    // 多副本靠 TTL 收敛——与鉴权缓存"本机即时、跨副本 TTL"同一取舍
+    state.settings_cache.invalidate(&req.key).await;
     audit(
         &state,
         &actor,
@@ -894,6 +1016,54 @@ pub struct UpsertModelReq {
     /// None=不改动，空对象=清除，DESIGN §3-4.5）。
     #[serde(default)]
     pub tier_ratios: Option<serde_json::Map<String, Value>>,
+    /// 模型级降级链（DESIGN §3.4.1）：零可用候选时按序改投。
+    /// None=不改动，空数组=清除。条目须为已存在的模型名——写入时校验，
+    /// 拼错的降级模型只会在最脆弱的时刻（主模型已全挂）暴露，必须前置拦截。
+    #[serde(default)]
+    pub fallback_models: Option<Vec<String>>,
+}
+
+/// 降级链上限：链是兜底不是路由表，过长说明在拿降级当调度用。
+const MAX_FALLBACK_CHAIN: usize = 8;
+
+/// 校验并落库模型降级链：归一化（去空白/自引用/保序去重）→ 上限 →
+/// 条目须为已存在模型（不要求 active：临时停用的模型保留在链上，恢复即生效）。
+async fn apply_fallback_models(
+    state: &AppState,
+    model_id: i64,
+    model_name: &str,
+    raw_chain: &[String],
+) -> Result<(), AppError> {
+    let mut chain: Vec<String> = Vec::new();
+    for entry in raw_chain {
+        let name = entry.trim();
+        if name.is_empty() || name == model_name || chain.iter().any(|c| c == name) {
+            continue;
+        }
+        chain.push(name.to_owned());
+    }
+    if chain.len() > MAX_FALLBACK_CHAIN {
+        return Err(AppError::bad_request().with_param("fallback_models"));
+    }
+    let known = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "n!" FROM models WHERE model_name = ANY($1)"#,
+        &chain
+    )
+    .fetch_one(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    if usize::try_from(known).unwrap_or(0) != chain.len() {
+        return Err(AppError::bad_request().with_param("fallback_models"));
+    }
+    sqlx::query!(
+        r#"UPDATE models SET fallback_models = $2, updated_at = now() WHERE id = $1"#,
+        model_id,
+        serde_json::json!(chain)
+    )
+    .execute(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    Ok(())
 }
 
 fn default_one() -> String {
@@ -957,6 +1127,9 @@ pub async fn upsert_model(
         .await
         .map_err(okapi_store::StoreError::from)?;
     }
+    if let Some(raw_chain) = &req.fallback_models {
+        apply_fallback_models(&state, model_id, &req.model_name, raw_chain).await?;
+    }
     state.invalidate_routing_caches();
     audit(
         &state,
@@ -971,6 +1144,7 @@ pub async fn upsert_model(
             "audio_ratio": req.audio_ratio,
             "audio_completion_ratio": req.audio_completion_ratio,
             "image_ratio": req.image_ratio,
+            "fallback_models": req.fallback_models,
         }),
     )
     .await;
@@ -986,14 +1160,24 @@ pub struct UpsertRuleReq {
     pub rule_type: String,
     /// 命中时施加的乘数（十进制字符串，禁浮点入库）。
     pub multiplier: String,
-    /// volume 必填：本月累计 token 阈值。
+    /// volume：本月累计 token 阈值（与消费额阈值二者至少一项；同配 = AND）。
     #[serde(default)]
     pub min_monthly_tokens: Option<u64>,
+    /// volume：本月累计消费阈值 micro-USD（贵模型大客户用量少但付费多，§11.5）。
+    #[serde(default)]
+    pub min_monthly_spend_micro: Option<u64>,
     /// time_based 必填：[start, end) 本地分钟窗，允许跨零点回绕。
     #[serde(default)]
     pub start_minute: Option<u16>,
     #[serde(default)]
     pub end_minute: Option<u16>,
+    /// time_based 可选：星期列表 0=周日…6=周六（缺省每天；与分钟窗同为 UTC 钟源）。
+    #[serde(default)]
+    pub weekdays: Option<Vec<u8>>,
+    /// 多命中叠加语义：stackable（缺省，连乘）/ exclusive（桶内 priority 最高独占）/
+    /// best_for_user（桶内取对用户最优一条）。
+    #[serde(default)]
+    pub stacking_mode: Option<String>,
     /// 作用域选择器 {"groups":[],"models":[],"users":[]}；缺省不限。
     #[serde(default)]
     pub scope: Option<Value>,
@@ -1024,10 +1208,18 @@ fn rule_params(req: &UpsertRuleReq) -> Result<Value, AppError> {
     );
     match req.rule_type.as_str() {
         "volume" => {
-            let threshold = req
-                .min_monthly_tokens
-                .ok_or_else(|| AppError::bad_request().with_param("min_monthly_tokens"))?;
-            params.insert("min_monthly_tokens".to_owned(), json!(threshold));
+            // 双阈值轴至少一项 > 0；两轴全空的 volume 就是无条件规则冒充，拒绝
+            let tokens = req.min_monthly_tokens.unwrap_or(0);
+            let spend = req.min_monthly_spend_micro.unwrap_or(0);
+            if tokens == 0 && spend == 0 {
+                return Err(AppError::bad_request().with_param("volume_threshold"));
+            }
+            if tokens > 0 {
+                params.insert("min_monthly_tokens".to_owned(), json!(tokens));
+            }
+            if spend > 0 {
+                params.insert("min_monthly_spend_micro".to_owned(), json!(spend));
+            }
         }
         "time_based" => {
             let (start, end) = req
@@ -1044,9 +1236,23 @@ fn rule_params(req: &UpsertRuleReq) -> Result<Value, AppError> {
             }
             params.insert("start_minute".to_owned(), json!(start));
             params.insert("end_minute".to_owned(), json!(end));
+            if let Some(days) = &req.weekdays {
+                // 空列表/非法值与"缺省每天"是三回事：空掩码永不命中，属配置错误
+                let mask = okapi_pricing::WeekdayMask::from_days(days)
+                    .ok_or_else(|| AppError::bad_request().with_param("weekdays"))?;
+                params.insert("weekdays".to_owned(), json!(mask.days()));
+            }
         }
         "discount" | "surge" => {}
         _ => return Err(AppError::bad_request().with_param("rule_type")),
+    }
+    if let Some(raw) = req.stacking_mode.as_deref() {
+        let mode = okapi_pricing::Stacking::parse(raw)
+            .ok_or_else(|| AppError::bad_request().with_param("stacking_mode"))?;
+        // 缺省值不落库：params 里只存显式偏离，与 weekdays 同一策略
+        if mode != okapi_pricing::Stacking::Stackable {
+            params.insert("stacking_mode".to_owned(), json!(mode.tag()));
+        }
     }
     Ok(Value::Object(params))
 }
@@ -1271,10 +1477,12 @@ pub async fn create_role(
         &permissions,
     )
     .await?;
+    // upsert 可能改了已绑定管理员的权限集合：全量失效鉴权缓存（与改用户角色同一动作）
+    state.sched.auth_flush().await;
     audit(
         &state,
         &actor,
-        "role.create",
+        "role.upsert",
         &req.role_code,
         json!({ "permissions": req.permissions }),
     )
@@ -1330,7 +1538,60 @@ pub struct RefundReq {
     pub reason: String,
 }
 
+/// 按 request_id 查账单摘要（billing.read）：退款前的预览步——
+/// 让管理员先看清"退的是谁的哪笔、多少钱、当前什么状态"，而不是对着一个
+/// UUID 盲按退款按钮。LEFT JOIN 用户名，退款资格由 status 判定。
+pub async fn billing_record_lookup(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    guard(&state, &headers, permissions::BILLING_READ).await?;
+    let row = sqlx::query!(
+        r#"
+        SELECT br.user_id, u.username, br.model_name, br.status, br.log_type,
+               br.amount_micro, br.original_amount_micro,
+               br.prompt_tokens, br.completion_tokens,
+               br.error_code, br.created_at
+        FROM billing_records br
+        LEFT JOIN users u ON u.id = br.user_id
+        WHERE br.request_id = $1
+        ORDER BY br.created_at DESC
+        LIMIT 1
+        "#,
+        request_id
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let Some(r) = row else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param("request_id"));
+    };
+    Ok(Json(json!({
+        "request_id": request_id,
+        "user_id": r.user_id,
+        "username": r.username,
+        "model": r.model_name,
+        "status": r.status,
+        "log_type": r.log_type,
+        "amount_micro": r.amount_micro,
+        "original_amount_micro": r.original_amount_micro,
+        "prompt_tokens": r.prompt_tokens,
+        "completion_tokens": r.completion_tokens,
+        "error_code": r.error_code,
+        "created_at": r.created_at,
+        // 只有成功扣费（committed）的记录有款可退
+        "refundable": r.status == 20,
+    })))
+}
+
 /// 按日志退款（§5.3）：事件溯源冲销，账单/统计/余额三处口径自动一致；幂等。
+/// 三种结局分开说（此前"已退过"与"id 不存在"都混在 404 里，管理员分不清
+/// "打错了"还是"重复点了但幂等安全"）：
+/// - 成功 → outcome=refunded + 金额与退款后余额；
+/// - 已退过 → 200 outcome=already_refunded（幂等语义，不是错误）；
+/// - 存在但未成功扣费（失败/预扣中）→ 409 refund_not_committed（无款可退）；
+/// - 不存在 → 404。
 pub async fn refund_by_request(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1346,7 +1607,21 @@ pub async fn refund_by_request(
     .await
     .map_err(AppError::from)?;
     let Some(refund) = outcome else {
-        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param("request_id"));
+        let status = sqlx::query_scalar!(
+            r#"SELECT status FROM billing_records WHERE request_id = $1
+               ORDER BY created_at DESC LIMIT 1"#,
+            req.request_id
+        )
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+        return match status {
+            Some(30) => Ok(Json(json!({ "outcome": "already_refunded" }))),
+            Some(_) => Err(AppError::new(StatusCode::CONFLICT, "refund_not_committed")),
+            None => {
+                Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param("request_id"))
+            }
+        };
     };
     // Redis 热余额回补（PG 已提交；此处失败由对账检出并修复）
     let balance_after = state.ledger.credit(refund.user_id, refund.amount).await?;
@@ -1359,6 +1634,7 @@ pub async fn refund_by_request(
     )
     .await;
     Ok(Json(json!({
+        "outcome": "refunded",
         "user_id": refund.user_id,
         "refunded_micro": refund.amount.as_micros(),
         "balance_after_micro": balance_after.as_micros(),
@@ -1379,12 +1655,15 @@ pub struct UserListQuery {
 }
 
 /// GET /admin/users：用户列表（此前只能按 ID 操作，没有列表入口）。
+/// 只读点 `user.read` 即可（与 /admin/keys 列表一致，§11.6 读写分离）：此前守的是
+/// `user.manage`，只读运营角色在侧栏看得见"用户"却点进去 403——文档、导航与后端三处
+/// 里后端是那个错的。管理动作（manage/credit/role/groups）仍要 `user.manage`。
 pub async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<UserListQuery>,
 ) -> Result<Json<Value>, AppError> {
-    guard(&state, &headers, permissions::USER_MANAGE).await?;
+    guard(&state, &headers, permissions::USER_READ).await?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
     // 空查询用 NULL 表示"不过滤"，避免 '%%' 走不上索引的语义歧义
@@ -1525,6 +1804,121 @@ pub async fn user_overview(
             "id": k.id, "name": k.name, "key_prefix": k.key_prefix,
             "status": k.status, "used_micro": k.used_micro,
         })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct UserUsageQuery {
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+/// GET /admin/users/{id}/usage：代客视角的用量与余额变动史（老 ok-api 用户详情
+/// UsageOverviewTab / UsageTrendChart 的吸收）。
+///
+/// 管理员调余额、处理"为什么扣这么多"之前要先看两件事：他平时花多少（按日/按模型，
+/// CH mv_key_model_day 用户前缀）与上次动过什么账（PG billing_events，含 actor——
+/// 这是管理面，谁调的账要看得见，与门户端点隐去管理员 id 相反）。
+/// CH 未启用时用量部分为空数组而非整体 501：余额变动史不依赖 CH，不该被连坐。
+pub async fn user_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<i64>,
+    Query(q): Query<UserUsageQuery>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::USER_ASSIST).await?;
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+
+    let mut daily: Vec<Value> = Vec::new();
+    let mut by_model: Vec<Value> = Vec::new();
+    if let Some(ch) = state.ch.as_ref() {
+        let rows = ch
+            .query_json_each_row(&format!(
+                "SELECT day, model, countMerge(requests) AS reqs, sumMerge(amount) AS spend, \
+                        sumMerge(prompt_tokens) + sumMerge(completion_tokens) AS toks \
+                 FROM mv_key_model_day WHERE user_id = {user_id} AND day >= today() - {days} \
+                 GROUP BY day, model ORDER BY day"
+            ))
+            .await?;
+        // BTreeMap：按日键有序输出，前端直接画不用再排
+        let mut per_day: std::collections::BTreeMap<String, (i64, i64)> =
+            std::collections::BTreeMap::new();
+        let mut per_model: std::collections::HashMap<String, (i64, i64, i64)> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            let day = r.get("day").and_then(Value::as_str).unwrap_or_default();
+            let model = r.get("model").and_then(Value::as_str).unwrap_or_default();
+            let (reqs, spend, toks) = (
+                super::stats::ch_i64(r, "reqs"),
+                super::stats::ch_i64(r, "spend"),
+                super::stats::ch_i64(r, "toks"),
+            );
+            let d = per_day.entry(day.to_owned()).or_default();
+            d.0 += reqs;
+            d.1 += spend;
+            let m = per_model.entry(model.to_owned()).or_default();
+            m.0 += reqs;
+            m.1 += spend;
+            m.2 += toks;
+        }
+        daily = per_day
+            .into_iter()
+            .map(|(day, (reqs, spend))| json!({ "day": day, "requests": reqs, "amount_micro": spend }))
+            .collect();
+        let mut models: Vec<(String, (i64, i64, i64))> = per_model.into_iter().collect();
+        models.sort_by_key(|m| std::cmp::Reverse(m.1.1));
+        by_model = models
+            .into_iter()
+            .take(10)
+            .map(|(model, (reqs, spend, toks))| {
+                json!({ "model": model, "requests": reqs, "amount_micro": spend, "tokens": toks })
+            })
+            .collect();
+    }
+
+    let events = sqlx::query!(
+        r#"SELECT event_id, event_type, delta_micro, balance_after_micro, payload, actor, created_at
+           FROM billing_events
+           WHERE user_id = $1
+             AND event_type IN ('recharge', 'adjust', 'refund', 'expire')
+             AND delta_micro <> 0
+           ORDER BY event_id DESC LIMIT 10"#,
+        user_id
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let ledger: Vec<Value> = events
+        .into_iter()
+        .map(|e| {
+            json!({
+                "event_id": e.event_id,
+                "event_type": e.event_type,
+                "delta_micro": e.delta_micro,
+                "balance_after_micro": e.balance_after_micro,
+                "actor": e.actor,
+                "tags": e.payload.as_ref().and_then(|p| p.get("tags")).cloned().unwrap_or(Value::Array(vec![])),
+                "reason": e.payload.as_ref().and_then(|p| p.get("reason")).cloned(),
+                "created_at": e.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    audit(
+        &state,
+        &actor,
+        "user.assist.usage",
+        &user_id.to_string(),
+        json!({ "days": days }),
+    )
+    .await;
+
+    Ok(Json(json!({
+        "days": days,
+        "stats_available": state.ch.is_some(),
+        "daily": daily,
+        "by_model": by_model,
+        "ledger": ledger,
     })))
 }
 
@@ -1874,17 +2268,20 @@ pub(crate) async fn probe_channel(state: &AppState, channel_id: i64) -> Result<V
         })
         .await;
     let latency_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    let at = chrono::Utc::now().to_rfc3339();
     let result = match outcome {
         Ok(okapi_providers::custom_pass::PassResponse::Ok { status, .. }) => {
-            json!({"ok": true, "http_status": status, "latency_ms": latency_ms})
+            json!({"ok": true, "http_status": status, "latency_ms": latency_ms, "at": at})
         }
         Ok(okapi_providers::custom_pass::PassResponse::ErrStatus { status, .. }) => {
-            json!({"ok": false, "http_status": status, "latency_ms": latency_ms})
+            json!({"ok": false, "http_status": status, "latency_ms": latency_ms, "at": at})
         }
         Err(err) => {
-            json!({"ok": false, "error_code": err.error_code(), "latency_ms": latency_ms})
+            json!({"ok": false, "error_code": err.error_code(), "latency_ms": latency_ms, "at": at})
         }
     };
+    // 留痕供列表页"最近测试"列回填（new-api 的 response_time/test_time 语义）
+    state.sched.channel_test_record(channel_id, &result).await;
     Ok(result)
 }
 
@@ -2046,11 +2443,22 @@ pub async fn reconciliation(
             tracing::error!(error = %err, "对账查询失败");
             AppError::internal()
         })?;
+    // 带上用户名：漂移行只有 user_id 时，管理员还得去用户页反查一趟
+    let ids: Vec<i64> = drifts.iter().map(|d| d.user_id).collect();
+    let names: std::collections::HashMap<i64, String> =
+        sqlx::query!(r#"SELECT id, username FROM users WHERE id = ANY($1)"#, &ids)
+            .fetch_all(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?
+            .into_iter()
+            .map(|r| (r.id, r.username))
+            .collect();
     let data: Vec<Value> = drifts
         .iter()
         .map(|d| {
             json!({
                 "user_id": d.user_id,
+                "username": names.get(&d.user_id),
                 "events_sum_micro": d.events_sum_micro,
                 "redis_effective_micro": d.redis_effective_micro,
                 "pg_snapshot_micro": d.pg_snapshot_micro,

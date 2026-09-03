@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO price_groups (group_code, group_ratio, self_select) VALUES ($1, 1, true)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bf0c213bc8d5a1b8fd98d0b285e4a4fa85fe064eb95a84149dbf1b5937113ede"
+}

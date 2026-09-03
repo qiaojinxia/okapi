@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"total!\",\n                  count(*) FILTER (WHERE status = 1) AS \"active!\",\n                  count(*) FILTER (WHERE created_at >= date_trunc('day', now())) AS \"new_today!\",\n                  count(*) FILTER (WHERE created_at >= now() - interval '7 days') AS \"new_7d!\"\n           FROM users WHERE deleted_at IS NULL AND kind = 'user'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "active!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "new_today!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "new_7d!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "106dcce509dcb2834fee3ab08eae4dac00687a99c656e7ca9946198ea486ee7b"
+}

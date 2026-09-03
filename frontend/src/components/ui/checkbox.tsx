@@ -34,6 +34,8 @@ export function Checkbox({
         disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
         className,
       )}
+      // 点击不冒泡：勾选框常放在可点击的行里，勾一下不该同时触发行的展开
+      onClick={(e) => e.stopPropagation()}
     >
       <span className="relative inline-flex h-4 w-4 shrink-0">
         <input
@@ -42,12 +44,13 @@ export function Checkbox({
           disabled={disabled}
           aria-label={srLabel ?? label}
           aria-checked={indeterminate ? 'mixed' : checked}
+          data-indeterminate={indeterminate || undefined}
           onChange={(e) => onChange(e.target.checked)}
-          className="peer h-4 w-4 cursor-inherit appearance-none rounded border border-input bg-card outline-none checked:border-primary checked:bg-primary focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed"
+          className="peer h-4 w-4 cursor-inherit appearance-none rounded border border-input bg-card shadow-xs transition-colors outline-none hover:border-muted-foreground/50 checked:border-primary checked:bg-primary data-[indeterminate]:border-primary data-[indeterminate]:bg-primary focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed"
         />
         {(checked || indeterminate) && (
           <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-primary-foreground">
-            {indeterminate ? <Minus className="h-3 w-3" /> : <Check className="h-3 w-3" />}
+            {indeterminate ? <Minus className="h-3 w-3" /> : <Check className="h-3 w-3" strokeWidth={3} />}
           </span>
         )}
       </span>

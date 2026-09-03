@@ -146,7 +146,25 @@ impl ChClient {
         &self,
         sql: &str,
     ) -> Result<Vec<serde_json::Value>, StoreError> {
-        let url = format!("{}/?database={}&{}", self.base, self.database, QUERY_GUARD);
+        self.query_with_params(sql, &[]).await
+    }
+
+    /// 带绑定参数的查询：SQL 里写 `{name:String}` 占位，值经 `param_name=` 传递，
+    /// 由 ClickHouse 服务端完成类型解析与转义。
+    ///
+    /// 存在的理由是**日志检索要吃用户输入的字符串**（模型名/错误码/请求 ID）。
+    /// 看板端点只拼 clamp 过的整数所以能用 `format!`，检索面不行——
+    /// 与其在 Rust 侧手写转义（每加一处过滤都要重新审一遍），不如把转义交给服务端。
+    pub async fn query_with_params(
+        &self,
+        sql: &str,
+        params: &[(&str, &str)],
+    ) -> Result<Vec<serde_json::Value>, StoreError> {
+        let mut url = format!("{}/?database={}&{}", self.base, self.database, QUERY_GUARD);
+        for (name, value) in params {
+            use std::fmt::Write as _;
+            let _ = write!(url, "&param_{}={}", urlencode(name), urlencode(value));
+        }
         let text = self.post(url, format!("{sql} FORMAT JSONEachRow")).await?;
         let mut rows = Vec::new();
         for line in text.lines() {

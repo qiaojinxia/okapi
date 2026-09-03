@@ -23,5 +23,5 @@ pub use error::{CompileError, PricingError};
 pub use handle::PriceBookHandle;
 pub use model::{PricingMode, Tier, TierTable};
 pub use ratio::RatioFp;
-pub use rules::{PricingRule, RuleKind, RuleScope};
+pub use rules::{PricingRule, RuleKind, RuleScope, Stacking, WeekdayMask};
 pub use snapshot::{AppliedRule, PricingSnapshot};

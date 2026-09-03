@@ -517,7 +517,7 @@ impl StreamState {
             prompt_tokens_details: PromptTokensDetails {
                 cached_tokens: self.cache_read,
                 cache_write_tokens: self.cache_creation,
-            // Anthropic 无模态细分（图片并入 input_tokens）
+                // Anthropic 无模态细分（图片并入 input_tokens）
                 audio_tokens: 0,
                 image_tokens: 0,
             },

@@ -1,0 +1,121 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, order_no, amount_micro, currency, pay_amount::text AS \"pay_amount?\",\n                  gateway, status, paid_at, created_at\n           FROM recharge_orders\n           WHERE user_id = $1 AND ($2::bigint IS NULL OR id < $2)\n           ORDER BY id DESC LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "order_no",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "order_no"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "pay_amount?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "gateway",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "gateway"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "paid_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "paid_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "8ad38fcb31d8edd1c67de1106e9b865b956a40de9a3bedeb362c97640fe162dd"
+}

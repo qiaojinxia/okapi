@@ -133,6 +133,70 @@ AS SELECT
 FROM request_log_raw
 GROUP BY channel_id, ts5;
 
+-- 错误分布：只吃失败行（WHERE 在 MV 里即插入期过滤），故行数 =
+-- 错误码 × 小时 × 渠道 × 模型，与总请求量无关。
+-- 存在的理由：「错误率 3%」不可行动，「3% 里九成是某渠道的 429」才可行动；
+-- 而 error_code 只在 raw 明细里，没有这张 MV 就得扫全分区才能出分布。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_error_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (error_code, hour, channel_id, model)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    error_code,
+    toStartOfHour(ts) AS hour,
+    channel_id,
+    model,
+    countState() AS errors,
+    maxState(upstream_status) AS upstream_status
+FROM request_log_raw
+WHERE is_error = 1
+GROUP BY error_code, hour, channel_id, model;
+
+-- 门户明细维度（user × key × model × day）+ token 四轴构成。
+-- 服务用户门户的三张图：按模型堆叠趋势 / 模型分布 / Token 构成——且在
+-- key 视角（合作商员工只见自己那把 key）下同样成立；此前 mv_user_model_day
+-- 只按用户，key 视角没有任何按模型拆分。主键前缀 (user_id, api_key_id) 使
+-- 两种视角都是前缀扫描。行数 ∝ 活跃 key × 当日用到的模型数，与请求量无关。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_key_model_day
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (user_id, api_key_id, model, day)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    user_id,
+    api_key_id,
+    model,
+    toDate(ts) AS day,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens)) AS prompt_tokens,
+    sumState(toUInt64(cached_tokens)) AS cached_tokens,
+    sumState(toUInt64(completion_tokens)) AS completion_tokens,
+    sumState(toUInt64(reasoning_tokens)) AS reasoning_tokens,
+    sumState(amount_micro) AS amount,
+    sumState(discount_micro) AS discount,
+    sumState(toUInt64(is_error)) AS errors
+FROM request_log_raw
+GROUP BY user_id, api_key_id, model, day;
+
+-- 客户端类型分布（#5277）：UA 解析列按日聚合。uniqState(user_id) 让
+-- "多少用户在用 Claude Code"可答——这比请求数更能说明生态渗透。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_client_day
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (client_type, day)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    client_type,
+    toDate(ts) AS day,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens) + toUInt64(completion_tokens)) AS tokens,
+    sumState(amount_micro) AS amount,
+    sumState(toUInt64(is_error)) AS errors,
+    uniqState(user_id) AS users
+FROM request_log_raw
+GROUP BY client_type, day;
+
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_user_model_day
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(day)
@@ -148,3 +212,38 @@ AS SELECT
     sumState(discount_micro) AS discount
 FROM request_log_raw
 GROUP BY user_id, model, day;
+
+-- 分析立方体（IMPLEMENTATION §11.13）：hour × user × key × group × model × channel。
+-- 上面的单维 MV 各答一个固定问题，答不了"这个用户走了哪些渠道""这条渠道上
+-- 谁在用什么模型"这类**带过滤的任意维度组合**（new-api #7150 / Sub2API TrendParams
+-- 的诉求；new-api 的 quota_data 八维表就是同一思路）。行数 ∝ 每小时出现过的
+-- (user,key,group,model,channel) 组合数，上界是请求数、实际远小于它；
+-- 主键以 hour 开头让时间窗裁剪先生效。刻意不放 quantilesState：每行一个 sketch
+-- 在这种基数下代价太高，时延只留和（avg = sum / n），分位数仍走 mv_model_hour /
+-- mv_channel_5min。provider 是 channel_id 的函数，查询时从 PG 回填，不进键。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cube_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (hour, user_id, api_key_id, group_code, model, channel_id)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfHour(ts) AS hour,
+    user_id,
+    api_key_id,
+    group_code,
+    model,
+    channel_id,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens)) AS prompt_tokens,
+    sumState(toUInt64(cached_tokens)) AS cached_tokens,
+    sumState(toUInt64(completion_tokens)) AS completion_tokens,
+    sumState(toUInt64(reasoning_tokens)) AS reasoning_tokens,
+    sumState(amount_micro) AS amount,
+    sumState(discount_micro) AS discount,
+    sumState(upstream_cost_micro) AS upstream_cost,
+    sumState(toUInt64(is_error)) AS errors,
+    sumState(toUInt64(latency_ms)) AS latency_sum,
+    sumState(toUInt64(ttft_ms)) AS ttft_sum,
+    countIfState(ttft_ms > 0) AS ttft_samples
+FROM request_log_raw
+GROUP BY hour, user_id, api_key_id, group_code, model, channel_id;

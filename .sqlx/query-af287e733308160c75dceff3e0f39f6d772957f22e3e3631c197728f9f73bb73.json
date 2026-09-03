@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO api_keys (user_id, key_hash, key_prefix, name, status, group_override)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ON CONFLICT (key_hash) DO UPDATE SET status = EXCLUDED.status,\n                                                 group_override = EXCLUDED.group_override\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bpchar",
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af287e733308160c75dceff3e0f39f6d772957f22e3e3631c197728f9f73bb73"
+}

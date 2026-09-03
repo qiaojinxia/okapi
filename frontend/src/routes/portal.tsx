@@ -4,6 +4,7 @@ import {
   Gift,
   KeyRound,
   LayoutDashboard,
+  Receipt,
   ShieldCheck,
   Sliders,
   Tags,
@@ -38,6 +39,7 @@ function PortalLayout() {
       title: t('portal:navBilling'),
       items: [
         { to: '/portal/topup', label: t('portal:topupNav'), icon: Wallet },
+        { to: '/portal/ledger', label: t('portal:ledgerNav'), icon: Receipt },
         { to: '/portal/aff', label: t('portal:affNav'), icon: Gift },
         { to: '/pricing', label: t('pricing:title'), icon: Tags },
       ],

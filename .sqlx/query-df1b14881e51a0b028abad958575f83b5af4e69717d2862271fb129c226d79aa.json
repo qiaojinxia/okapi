@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pc.pool_code FROM pool_channels pc JOIN channels c ON c.id = pc.channel_id\n           WHERE c.name = $1 ORDER BY pc.pool_code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "pool_channels",
+            "name": "pool_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "df1b14881e51a0b028abad958575f83b5af4e69717d2862271fb129c226d79aa"
+}

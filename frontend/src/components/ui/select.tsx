@@ -1,4 +1,5 @@
 import { ChevronDown } from 'lucide-react'
+import { inputClass } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 
 export interface SelectOption {
@@ -15,6 +16,7 @@ interface SelectProps {
   id?: string
   disabled?: boolean
   className?: string
+  'aria-label'?: string
 }
 
 /// 原生 `select` 外观统一封装。
@@ -29,6 +31,7 @@ export function Select({
   id,
   disabled = false,
   className,
+  ...rest
 }: SelectProps) {
   return (
     <span className={cn('relative inline-flex', className)}>
@@ -36,8 +39,9 @@ export function Select({
         id={id}
         value={value}
         disabled={disabled}
+        aria-label={rest['aria-label']}
         onChange={(e) => onChange(e.target.value)}
-        className="h-9 w-full appearance-none rounded-md border border-input bg-card pr-8 pl-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-not-allowed disabled:opacity-50"
+        className={cn(inputClass, 'h-9 w-full appearance-none pr-8 pl-3')}
       >
         {placeholder !== undefined && <option value="">{placeholder}</option>}
         {options.map((o) => (
@@ -46,7 +50,7 @@ export function Select({
           </option>
         ))}
       </select>
-      <ChevronDown className="pointer-events-none absolute top-1/2 right-2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <ChevronDown className="pointer-events-none absolute top-1/2 right-2.5 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
     </span>
   )
 }

@@ -2,6 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import { toast } from '@/components/ui/toast'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input, Label } from '@/components/ui/input'
 import { apiFetch } from '@/lib/api'
@@ -12,7 +13,6 @@ import { useConfirm } from '@/components/ui/confirm'
 export function RetentionCard() {
   const { t } = useTranslation()
   const [months, setMonths] = useState('')
-  const [msg, setMsg] = useState<string | null>(null)
   const { confirm, dialog } = useConfirm()
 
   const current = useQuery({
@@ -27,10 +27,10 @@ export function RetentionCard() {
         body: { key: 'retention_months', value: Number(months) },
       }),
     onSuccess: () => {
-      setMsg(t('admin:saved'))
+      toast.success(t('admin:saved'))
       void current.refetch()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const shrinking =
@@ -81,7 +81,6 @@ export function RetentionCard() {
           >
             {t('common:save')}
           </Button>
-          {msg !== null && <span className="pb-2 text-xs text-muted-foreground">{msg}</span>}
         </div>
       </CardContent>
     </Card>

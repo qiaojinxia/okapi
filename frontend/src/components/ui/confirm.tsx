@@ -1,5 +1,6 @@
 import { AlertTriangle } from 'lucide-react'
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,6 +13,8 @@ interface ConfirmRequest {
   /// 高危操作要求手输该串才放行（如渠道名/模型名），防手滑点穿。
   requireText?: string
   confirmLabel?: string
+  /// 非破坏性确认（如"重投"）用主色按钮；缺省按删除处理。
+  tone?: 'destructive' | 'default'
   onConfirm: () => void
 }
 
@@ -32,35 +35,61 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
   const { t } = useTranslation()
   const [typed, setTyped] = useState('')
 
-  if (req === null) return null
-  const needText = req.requireText !== undefined && req.requireText !== ''
-  const ready = !needText || typed.trim() === req.requireText
+  const needText = req !== null && req.requireText !== undefined && req.requireText !== ''
+  const ready = req !== null && (!needText || typed.trim() === req.requireText)
 
-  const close = () => {
+  const close = useCallback(() => {
     setTyped('')
     onClose()
-  }
+  }, [onClose])
 
-  return (
+  // Esc 取消；需手输名称时在输入框里回车即确认（无需手输时确认按钮自带焦点，
+  // 原生回车触发点击，这里不再重复处理以免执行两次）
+  useEffect(() => {
+    if (req === null) return undefined
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+      if (e.key === 'Enter' && needText && ready) {
+        e.preventDefault()
+        req.onConfirm()
+        close()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [req, needText, ready, close])
+
+  if (req === null) return null
+  const destructive = (req.tone ?? 'destructive') === 'destructive'
+
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
         type="button"
         aria-label={t('common:cancel')}
-        className="absolute inset-0 bg-black/50"
+        className="absolute inset-0 bg-black/50 backdrop-blur-[2px] animate-fade-in"
         onClick={close}
       />
       <div
         role="alertdialog"
         aria-modal="true"
         aria-label={req.title}
-        className="relative z-10 flex w-full max-w-md flex-col gap-3 rounded-lg border border-border bg-card p-5 shadow-lg"
+        className="relative z-10 flex w-full max-w-md flex-col gap-4 rounded-xl border border-border bg-card p-5 shadow-popover animate-zoom-in"
       >
         <div className="flex items-start gap-3">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-destructive" />
-          <div className="flex flex-col gap-1">
-            <h2 className="text-sm font-semibold">{req.title}</h2>
+          <span
+            className={
+              destructive
+                ? 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-destructive/12 text-destructive'
+                : 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary'
+            }
+          >
+            <AlertTriangle className="h-4 w-4" />
+          </span>
+          <div className="flex min-w-0 flex-col gap-1 pt-1">
+            <h2 className="text-sm font-semibold break-words">{req.title}</h2>
             {req.description !== undefined && (
-              <p className="text-xs text-muted-foreground">{req.description}</p>
+              <p className="text-xs leading-5 text-muted-foreground">{req.description}</p>
             )}
           </div>
         </div>
@@ -74,6 +103,7 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
               id="confirm-text"
               value={typed}
               autoFocus
+              autoComplete="off"
               className="font-mono text-xs"
               onChange={(e) => setTyped(e.target.value)}
             />
@@ -85,9 +115,10 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
             {t('common:cancel')}
           </Button>
           <Button
-            variant="destructive"
+            variant={destructive ? 'destructive' : 'default'}
             size="sm"
             disabled={!ready}
+            autoFocus={!needText}
             onClick={() => {
               req.onConfirm()
               close()
@@ -97,6 +128,7 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

@@ -275,6 +275,149 @@ async fn model_latency_quantiles_exposed() {
     assert_eq!(row["tokens_per_1k_sec"], 200_000);
 }
 
+/// 模型消耗趋势：Top N 按窗口消耗排序，其余折叠进 `__other`，折叠不丢钱。
+///
+/// 共享 CH 里有海量历史测试模型，用大额（每模型 ≥ $2000）把本用例的两个
+/// 模型顶进 Top 2——与排行榜用例同一手法。模型名**刻意取固定值**而非随机后缀：
+/// 随机名会让每次重跑各铸两条 $3000/$2000 的"鲸鱼"序列，跑十次就把 Top 20
+/// 挤满、旧跑挤掉新跑（首跑绿、复跑红的自污染）；固定名让重跑累加进同两条
+/// 序列，永远稳居 Top 2。`limit=1` 档验证折叠语义。
+#[tokio::test]
+async fn model_trend_folds_tail_into_other() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
+        return;
+    }
+    let model_a = "trend-stat-model-a".to_owned();
+    let model_b = "trend-stat-model-b".to_owned();
+    // A 消耗 > B：断言排序时不依赖字典序（每次重跑同比例累加，A>B 恒成立）
+    let mut rows: Vec<Value> = Vec::new();
+    for (model, amount, n) in [(&model_a, 300_000_000_i64, 10), (&model_b, 200_000_000, 10)] {
+        for _ in 0..n {
+            let mut p = payload(&env, amount, 0, 100, false);
+            p["model"] = json!(model);
+            rows.push(p);
+        }
+    }
+    sqlx::query!(
+        r#"INSERT INTO billing_outbox (topic, payload)
+           SELECT 'request_log', p FROM UNNEST($1::jsonb[]) AS p"#,
+        &rows
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+
+    // 某个序列（模型名或 __other）在全部桶上的合计
+    let series_total = |body: &Value, series: &str| -> i64 {
+        body["data"].as_array().map_or(0, |buckets| {
+            buckets
+                .iter()
+                .map(|b| b["values"][series]["amount_micro"].as_i64().unwrap_or(0))
+                .sum()
+        })
+    };
+    // 轮询直到两个模型按消耗降序进 Top 2 且本轮增量已合并
+    // （固定名跨跑累加，总额只能 ≥ 单轮值，不能断言相等）
+    let mut wide = Value::Null;
+    for _ in 0..50 {
+        drain(&env).await;
+        let (status, body) = get(
+            &env,
+            "/admin/stats/model-trend?days=1&limit=20",
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let models: Vec<&str> = body["models"]
+            .as_array()
+            .map(|m| m.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if models.first() == Some(&model_a.as_str())
+            && models.get(1) == Some(&model_b.as_str())
+            && series_total(&body, &model_a) >= 3_000_000_000
+            && series_total(&body, &model_b) >= 2_000_000_000
+        {
+            wide = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        !wide.is_null(),
+        "轮询超时：两个大额模型未按消耗降序进 Top 2（检查排序或合并）"
+    );
+    assert_eq!(wide["granularity"], "hour", "单日窗口应按小时出桶");
+    assert!(
+        series_total(&wide, &model_a) > series_total(&wide, &model_b),
+        "排序锚点：A 恒大于 B"
+    );
+    let a_wide = series_total(&wide, &model_a);
+
+    // limit=1：仅第一名保留名字，其余（含 model_b 与历史杂讯）折叠进 __other。
+    // 守恒断言只锚定本用例专属的模型序列（全站总额会被并行用例的写入扰动）。
+    let (status, narrow) = get(
+        &env,
+        "/admin/stats/model-trend?days=1&limit=1",
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let models: Vec<&str> = narrow["models"]
+        .as_array()
+        .map(|m| m.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    assert_eq!(models, vec![model_a.as_str(), "__other"], "折叠形态");
+    assert!(
+        series_total(&narrow, &model_a) >= a_wide,
+        "第一名金额不受折叠影响（并发写入只增不减）"
+    );
+    assert!(
+        series_total(&narrow, "__other") >= 2_000_000_000,
+        "折叠不丢钱：__other 至少含 B 的全额"
+    );
+}
+
+/// 客户端类型分布（#5277）：按 client_type 归并，去重用户数与错误率齐备。
+///
+/// client_type 取唯一值（不像模型趋势有 Top N 挤出问题——这里 limit=100
+/// 而站点上真实的客户端种类只有十几种，不会被挤出）。
+#[tokio::test]
+async fn client_distribution_groups_by_client_type() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
+        return;
+    }
+    let client = format!("cli-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    let mut rows: Vec<Value> = Vec::new();
+    for i in 0..5 {
+        let mut p = payload(&env, 1_000, 0, 100, i == 4);
+        p["client_type"] = json!(client);
+        rows.push(p);
+    }
+    sqlx::query!(
+        r#"INSERT INTO billing_outbox (topic, payload)
+           SELECT 'request_log', p FROM UNNEST($1::jsonb[]) AS p"#,
+        &rows
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+
+    let row = poll_row(&env, "/admin/stats/clients?days=1&limit=100", |r| {
+        r["client_type"].as_str() == Some(client.as_str()) && r["requests"].as_i64() == Some(5)
+    })
+    .await;
+    assert_eq!(row["errors"], 1);
+    assert_eq!(row["error_rate_bp"], 2_000, "1/5 = 2000 基点");
+    assert_eq!(row["users"], 1, "同一用户播的 5 笔 → 去重后 1 人");
+    assert_eq!(row["tokens"], 1_500, "5 × (100+200)");
+    assert_eq!(row["amount_micro"], 5_000);
+    assert!(row["share_bp"].as_i64().unwrap() > 0, "占比按整数基点");
+}
+
 /// 经营口径：实收 / 标价 / 让利逐日聚合，毛利 = 实收 − 上游成本。全整数。
 ///
 /// 注：`upstream_cost_micro` 目前全链路恒为 0（chsink `build_ch_row` 硬编码，

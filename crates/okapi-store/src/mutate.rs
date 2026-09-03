@@ -196,17 +196,24 @@ pub async fn duplicate_channel(
 /// 删除渠道池。被分组或令牌引用时回 `Conflict`——那些主体会因此失去可见渠道，
 /// 静默解绑等于悄悄放开可见性。池内渠道成员关系随 FK CASCADE 清理，不算占用。
 pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool, StoreError> {
+    // 内置 default 池是"分组必有池"这条规则的兜底，不可删
+    if pool_code == crate::channels::DEFAULT_POOL {
+        return Err(StoreError::Conflict("builtin_pool"));
+    }
     let refs = sqlx::query!(
         r#"
         SELECT (SELECT COUNT(*) FROM price_groups WHERE pool_code = $1) AS "groups!",
                (SELECT COUNT(*) FROM api_keys
-                 WHERE pool_override = $1 AND deleted_at IS NULL)       AS "keys!"
+                 WHERE pool_override = $1 AND deleted_at IS NULL)       AS "keys!",
+               (SELECT COUNT(*) FROM channel_pools
+                 WHERE fallback_pool_code = $1)                          AS "fallbacks!"
         "#,
         pool_code
     )
     .fetch_one(pool)
     .await?;
-    if refs.groups > 0 || refs.keys > 0 {
+    // 被别的池当降级目标同样算引用：静默删掉等于那些池悄悄失去兜底
+    if refs.groups > 0 || refs.keys > 0 || refs.fallbacks > 0 {
         return Err(StoreError::Conflict("pool_in_use"));
     }
     let affected = sqlx::query!(
@@ -220,7 +227,22 @@ pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool,
 }
 
 /// 删除模型及其定价（硬删；user_pricing 覆盖随 FK CASCADE 清理）。
+/// 仍被其他模型的降级链引用时回 `Conflict`——静默删除会让那些模型的兜底
+/// 悄悄变短，且只在主模型全挂的最脆弱时刻才暴露。
 pub async fn delete_model(pool: &PgPool, model_name: &str) -> Result<bool, StoreError> {
+    let referrers = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*)::bigint AS "c!"
+        FROM models
+        WHERE model_name <> $1 AND fallback_models @> to_jsonb($1::text)
+        "#,
+        model_name
+    )
+    .fetch_one(pool)
+    .await?;
+    if referrers > 0 {
+        return Err(StoreError::Conflict("model_in_fallback_chain"));
+    }
     let affected = sqlx::query!(r#"DELETE FROM models WHERE model_name = $1"#, model_name)
         .execute(pool)
         .await?

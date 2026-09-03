@@ -11,6 +11,8 @@ export interface ModelListRow {
   audio_completion_ratio: string | null
   image_ratio: string | null
   per_call_price_micro: number | null
+  /// 模型级降级链：零可用候选时按序改投（单跳），计费按实际服务模型。
+  fallback_models: string[]
 }
 
 

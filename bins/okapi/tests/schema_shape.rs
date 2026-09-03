@@ -9,9 +9,20 @@ use uuid::Uuid;
 
 /// 必须存在的表 → 关键列。只列压平时真正容易漏的（新表、后续加的列）。
 const REQUIRED: &[(&str, &[&str])] = &[
-    ("channel_pools", &["pool_code", "routing_strategy"]),
-    ("pool_channels", &["pool_code", "channel_id"]),
-    ("price_groups", &["group_ratio", "pool_code"]),
+    (
+        "channel_pools",
+        &["pool_code", "routing_strategy", "fallback_pool_code"],
+    ),
+    (
+        "pool_channels",
+        &[
+            "pool_code",
+            "channel_id",
+            "priority_override",
+            "weight_override",
+        ],
+    ),
+    ("price_groups", &["group_ratio", "pool_code", "self_select"]),
     (
         "api_keys",
         &["pool_override", "member_user_id", "group_override"],
@@ -66,6 +77,8 @@ const FORBIDDEN_COLUMNS: &[(&str, &str)] = &[
 ];
 
 #[tokio::test]
+// 形状核对是一份逐项清单：拆成多个函数会让"必须在 / 必须不在 / 约束生效"三类断言散开
+#[allow(clippy::too_many_lines)]
 async fn migrations_produce_expected_schema_shape() {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
@@ -146,6 +159,46 @@ async fn migrations_produce_expected_schema_shape() {
     .await;
     if bad.is_ok() {
         problems.push("channel_pools.routing_strategy 缺 CHECK 约束".to_owned());
+    }
+
+    // 池语义统一（0002）：内置 default 池存在；分组必有池（NOT NULL + 缺省 default）；
+    // 降级不可自引用
+    let default_pool: i64 =
+        sqlx::query("SELECT count(*) FROM channel_pools WHERE pool_code = 'default'")
+            .fetch_one(&fresh)
+            .await
+            .unwrap()
+            .get(0);
+    if default_pool != 1 {
+        problems.push("内置 default 池缺失".to_owned());
+    }
+    let nullable: String = sqlx::query(
+        "SELECT is_nullable FROM information_schema.columns
+         WHERE table_name = 'price_groups' AND column_name = 'pool_code'",
+    )
+    .fetch_one(&fresh)
+    .await
+    .unwrap()
+    .get(0);
+    if nullable != "NO" {
+        problems.push("price_groups.pool_code 应 NOT NULL（分组必有池）".to_owned());
+    }
+    let seeded_default_group: String =
+        sqlx::query("SELECT pool_code FROM price_groups WHERE group_code = 'default'")
+            .fetch_one(&fresh)
+            .await
+            .unwrap()
+            .get(0);
+    if seeded_default_group != "default" {
+        problems.push("种子 default 分组应指向 default 池".to_owned());
+    }
+    let self_ref = sqlx::query(
+        "UPDATE channel_pools SET fallback_pool_code = 'default' WHERE pool_code = 'default'",
+    )
+    .execute(&fresh)
+    .await;
+    if self_ref.is_ok() {
+        problems.push("channel_pools.fallback_pool_code 缺自引用 CHECK".to_owned());
     }
 
     drop(fresh);

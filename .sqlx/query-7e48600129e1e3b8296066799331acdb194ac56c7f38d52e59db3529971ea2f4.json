@@ -1,0 +1,210 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id AS channel_id,\n               c.name AS channel_name,\n               c.provider,\n               c.api_base,\n               COALESCE(pc.priority_override, c.priority) AS \"priority!\",\n               c.trust_upstream_usage,\n               c.model_mapping,\n               COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS \"thinking_to_content!\",\n               COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS \"bill_by_response_model!\",\n               c.settings -> 'strip_request_fields' AS strip_request_fields,\n               c.capabilities,\n               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS \"cost_milli!\",\n               ck.id AS channel_key_id,\n               COALESCE(pc.weight_override, ck.weight) AS \"weight!\",\n               ck.max_concurrency,\n               ck.rpm_limit,\n               ck.daily_spend_cap_micro,\n               ck.credential_ciphertext,\n               (array_position($2::varchar[], pc.pool_code::varchar) - 1) AS \"pool_rank!\"\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        JOIN pool_channels pc ON pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])\n        WHERE c.status = 1\n          AND c.deleted_at IS NULL\n          AND c.models @> $1\n          AND ck.status = 1\n          AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())\n          AND (ck.model_subset IS NULL OR ck.model_subset @> $1)\n        ORDER BY array_position($2::varchar[], pc.pool_code::varchar),\n                 COALESCE(pc.priority_override, c.priority) DESC,\n                 ck.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "trust_upstream_usage",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "trust_upstream_usage"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "model_mapping",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "model_mapping"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "thinking_to_content!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "bill_by_response_model!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "strip_request_fields",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "capabilities",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "capabilities"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "cost_milli!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 12,
+        "name": "channel_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "weight!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 14,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "max_concurrency"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "daily_spend_cap_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "daily_spend_cap_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "pool_rank!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "VarcharArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      null,
+      null,
+      null,
+      false,
+      null,
+      false,
+      null,
+      true,
+      true,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "7e48600129e1e3b8296066799331acdb194ac56c7f38d52e59db3529971ea2f4"
+}

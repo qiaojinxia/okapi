@@ -52,6 +52,20 @@ impl AppState {
     /// 结算记账统一入口：信号量准入 + 瞬时失败退避重试（200ms/800ms/3.2s），
     /// 三试仍败才 ERROR 留给对账兜底（把"对账修复"从常态变成极端态）。
     pub async fn settle_write(&self, input: okapi_ledger::SettlementInput<'_>) {
+        // 实时 KPI 挂在这里而非各计费端点：七个端点（chat/embeddings/images/
+        // audio/videos/realtime/custom_pass）全部经此收口，加一处即全覆盖，
+        // 且本函数已在结算后台任务内，不占客户端可见路径。
+        // 只计数据面请求（2 消费 / 5 错误）——退款与管理事件是账务更正，
+        // 计进 QPS 会凭空抬高流量读数。
+        if matches!(input.log_type, 2 | 5) {
+            self.sched
+                .kpi_record(
+                    input.usage.total_raw(),
+                    input.amount.as_micros(),
+                    input.log_type == 5,
+                )
+                .await;
+        }
         // 信号量关闭不可能（进程生命周期内不 close）；acquire 失败按直写降级
         let _permit = self.settle_gate.acquire().await;
         let mut delay = std::time::Duration::from_millis(200);

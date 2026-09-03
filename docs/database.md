@@ -112,7 +112,8 @@ CREATE TABLE price_groups (
     description VARCHAR(255),
     is_default  BOOLEAN NOT NULL DEFAULT false,
     sort_order  INT NOT NULL DEFAULT 0,
-    pool_code   VARCHAR(32)                           -- 该分组走哪个渠道池；null = 不限（FK 在 channel_pools 后补）
+    pool_code   VARCHAR(32) NOT NULL DEFAULT 'default', -- 该分组的用户打哪个池；分组必有池（FK 在 channel_pools 后补）
+    self_select BOOLEAN NOT NULL DEFAULT false        -- 用户可在门户为自己的 key 选此分组（价随组走）
 );
 
 CREATE TABLE user_groups (
@@ -124,30 +125,38 @@ CREATE TABLE user_groups (
 
 -- 渠道池：一组渠道 + 在这组里怎么选（见 §3.7 论证）。
 -- 与 price_groups 正交：分组只管"付多少钱"，池只管"打哪些上游、怎么选"。
+-- 内置池 `default`（迁移种子，不可删）：新渠道缺省加入，未指定池的分组走这里。
 CREATE TABLE channel_pools (
-    pool_code        VARCHAR(32) PRIMARY KEY,          -- stable / fast / cheap ...
-    description      VARCHAR(255),
-    routing_strategy VARCHAR(24) NOT NULL DEFAULT 'priority_weighted',
+    pool_code          VARCHAR(32) PRIMARY KEY,        -- default / stable / fast / cheap ...
+    description        VARCHAR(255),
+    routing_strategy   VARCHAR(24) NOT NULL DEFAULT 'priority_weighted',
     -- priority_weighted：priority 分层 + 层内成本修正加权随机（历史行为，默认）
     -- least_latency  ：层内按 Redis 时延 EWMA 升序（需 lat:ck:* 有数据，缺数据退化为 priority_weighted）
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    fallback_pool_code VARCHAR(32) REFERENCES channel_pools(pool_code), -- 本池无候选时退到的池（单跳）
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT channel_pools_strategy_chk
-        CHECK (routing_strategy IN ('priority_weighted', 'least_latency'))
+        CHECK (routing_strategy IN ('priority_weighted', 'least_latency')),
+    CONSTRAINT channel_pools_fallback_not_self
+        CHECK (fallback_pool_code IS NULL OR fallback_pool_code <> pool_code)
 );
 
 CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对多）
-    pool_code  VARCHAR(32) NOT NULL REFERENCES channel_pools(pool_code) ON DELETE CASCADE,
-    channel_id BIGINT NOT NULL,                       -- FK 在 channels 建表后补
+    pool_code         VARCHAR(32) NOT NULL REFERENCES channel_pools(pool_code) ON DELETE CASCADE,
+    channel_id        BIGINT NOT NULL,                -- FK 在 channels 建表后补
+    priority_override INT,                            -- 本池内优先级覆盖；NULL = 用 channels.priority
+    weight_override   INT,                            -- 本池内权重覆盖（作用于该渠道全部 key）；NULL = 用各 key weight
     PRIMARY KEY (pool_code, channel_id)
 );
 
--- 池的解析顺序：api_keys.pool_override > 生效定价组的 price_groups.pool_code > 无池。
--- 可见性两侧同时约束（与改造前 group_channel_bindings 语义一致）：
---   有池 = 只看池内渠道；
---   无池 = 只看未被任何池认领的渠道（宽松，默认），strict_group_isolation=true 时无候选。
--- "入池即专属"：否则把高价渠道放进 vip 池后无池用户照样打得到，池就只是标签而非隔离手段。
--- 历史 group_channel_bindings 已在 0015 迁移为 pool_<group_code> 并删表（同一件事只留一处）。
+-- 池的解析：api_keys.pool_override > 生效定价组的 price_groups.pool_code > 'default'；
+-- 池链 = [主池, 主池.fallback_pool_code]（单跳不递归）。
+-- 可见性只有一条规则（IMPLEMENTATION §11.14）：**渠道只服务它所在的池**——
+--   候选 = 池链内任一池的成员；排序 (池序, 有效优先级 DESC, key id)，同渠道两池共存只按靠前的池算；
+--   不在任何池的渠道 = 孤儿，对谁都不可达（列表页与站点规模条标红）。
+-- 此前的"无池只看未入池 / strict_group_isolation 三态"已由 0002 迁移退役：那套规则让 vip 组
+-- 看不到任何公共渠道、UI 文案又与之相反。0002 把未入池渠道并入 default 池、无池分组指向 default 池，
+-- 老部署行为不变。历史 group_channel_bindings 已在 0015 迁移为 pool_<group_code> 并删表。
 -- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ strip_request_fields（不透传的请求顶层字段，new-api rc.23 #6847；model/messages/stream 受保护）/ pass_paths（custom_pass 白名单）
 
 CREATE TABLE api_keys (
@@ -162,8 +171,8 @@ CREATE TABLE api_keys (
     quota_micro       BIGINT,                         -- 独立限额剩余
     used_micro        BIGINT NOT NULL DEFAULT 0,
     model_allowlist   JSONB,                          -- null = 不限
-    group_override    VARCHAR(32) REFERENCES price_groups(group_code),  -- 令牌分组（对齐 new-api）
-    pool_override     VARCHAR(32),                    -- 令牌钉住某渠道池（优先于分组的池；FK 在 channel_pools 后补）
+    group_override    VARCHAR(32) REFERENCES price_groups(group_code),  -- 令牌分组（对齐 new-api）；用户可在 self_select 组 ∪ 已分配组内自选（§11.14 R4）
+    pool_override     VARCHAR(32),                    -- 令牌钉住某渠道池（优先于分组的池；FK 在 channel_pools 后补，仅管理面）
     rpm_limit         INT, tpm_limit INT, rpd_limit INT,                -- 覆盖用户级限速
     daily_token_limit BIGINT,                         -- 日 token 上限（#6458/#5252）
     max_concurrency   INT,
@@ -301,10 +310,15 @@ CREATE TABLE pricing_rules (                          -- 修饰器栈（保留 o
     rule_type  VARCHAR(16) NOT NULL,                  -- volume|time_based|discount|surge
     scope      JSONB NOT NULL DEFAULT '{}',           -- {"groups":[],"models":[],"users":[]} 选择器
     params     JSONB NOT NULL,                        -- 必含 multiplier（十进制字符串，命中即乘）；
-                                                      -- volume 追加 min_monthly_tokens（读 tok:{uid}:<yyyymm>）；
+                                                      -- volume 追加 min_monthly_tokens（读 tok:{uid}:<yyyymm>）
+                                                      --   与/或 min_monthly_spend_micro（读 usd:{uid}:<yyyymm>；
+                                                      --   两轴至少一项，同配 = AND，§11.5 消费额轴）；
                                                       -- time_based 追加 start_minute/end_minute（[start,end) 分钟窗，
-                                                      -- 支持跨零点回绕；start==end=空窗永不命中）；
-                                                      -- discount 无条件命中；surge 读 settings.surge_inflight_threshold
+                                                      -- 支持跨零点回绕；start==end=空窗永不命中）
+                                                      --   与可选 weekdays（0=周日…6=周六 数组，缺省每天，UTC 钟源）；
+                                                      -- discount 无条件命中；surge 读 settings.surge_inflight_threshold；
+                                                      -- 可选 stacking_mode（stackable 缺省/exclusive/best_for_user，
+                                                      --   桶内裁决语义见 okapi-pricing rules.rs；未知值装载期拒绝）
     priority   INT NOT NULL DEFAULT 0,                -- 同类内排序；类间固定序 volume→time→discount→surge
     enabled    BOOLEAN NOT NULL DEFAULT true,
     valid_from TIMESTAMPTZ, valid_to TIMESTAMPTZ,
@@ -470,8 +484,8 @@ CREATE INDEX idx_redemption_code_ip ON redemption_records (code_id, ip);
 ```sql
 CREATE TABLE audit_logs (                             -- 管理操作审计（独立于业务日志，分区表）
     id         BIGINT GENERATED ALWAYS AS IDENTITY,
-    actor      VARCHAR(64) NOT NULL,                  -- admin:{id} / mcp:{key_id} / system
-    action     VARCHAR(64) NOT NULL,                  -- channel.update / pricing.publish / user.assist ...
+    actor      VARCHAR(64) NOT NULL,                  -- admin:{id} / mcp:{key_id} / user:{id}（登录）/ anon（未知邮箱的登录失败）/ system
+    action     VARCHAR(64) NOT NULL,                  -- channel.update / pricing.publish / user.assist / user.login / user.login_failed ...
     target     VARCHAR(128),
     detail     JSONB,
     ip         INET,
@@ -479,7 +493,7 @@ CREATE TABLE audit_logs (                             -- 管理操作审计（�
     PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
-CREATE TABLE settings (                               -- 全局 KV（strict_group_isolation / 调度权重 / 内容审计三态 ...）
+CREATE TABLE settings (                               -- 全局 KV（site_notice / model_rpm_limits / 内容审计三态 ...）
     key        VARCHAR(128) PRIMARY KEY,
     value      JSONB NOT NULL,
     updated_by BIGINT,
@@ -539,13 +553,15 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面专用；门户/数据面仍 API key 单轨，§6.4） |
 | `oauth:state:<token>` | STRING | 10min | OAuth authorization-code 流 CSRF state（一次性，校验即删） |
 | `spend:tm:{team}:{member}:<yyyymm>` | STRING | 40d | 团成员月度消费计数（结算后累加，预扣前比较；软实时限额） |
-| `tok:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计 token（`pricing_rules` volume 规则的唯一输入）。结算后累加实际 usage 总量、报价前读取，语义与团成员计数同构（软实时：跨月自然滚动、Redis 故障按 0 处理即不打折，宁少算不错算）。**仅当生效 PriceBook 含启用的 volume 规则时才产生读写**（`PriceBook::has_volume_rules`），无此类规则时热路径零额外 Redis 往返 |
+| `tok:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计 token（`pricing_rules` volume 规则的 token 轴输入）。结算后累加实际 usage 总量、报价前读取，语义与团成员计数同构（软实时：跨月自然滚动、Redis 故障按 0 处理即不打折，宁少算不错算）。**仅当生效 PriceBook 含启用的 volume 规则时才产生读写**（`PriceBook::has_volume_rules`），无此类规则时热路径零额外 Redis 往返 |
+| `usd:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计消费 micro（volume 规则的**消费额轴**输入，服务"贵模型大客户用量少但付费多"）。与 tok 计数完全同构；门控独立为 `PriceBook::has_spend_rules`（含 min_monthly_spend_micro>0 的规则才读写），只用 token 阈值的站点不付此往返 |
 | `pb:epoch` | STRING | 永久 | 【M3 接入】当前 PriceBook epoch。当前实现：gateway 每 30s 直接轮询 PG `MAX(epoch)`（单机/中小规模更简，见 §2.3） |
 | `pb:data:<epoch>` | STRING(bin) | 保留 2 版 | 【M3 接入】编译后 PriceBook 快照（多副本大表分发 + PG 减负时启用） |
 | `ch:cool:<channel_key_id>` | STRING | =冷却时长 | 状态机冷却镜像 |
+| `ch:test:<channel_id>` | STRING(JSON) | 30d | 最近一次测活结果（ok/latency_ms/http_status/error_code/at），渠道列表"最近测试"列回填（IMPLEMENTATION §11.12）。提示性信息不进 PG，过期即消失 |
 | `ch:stat:<channel_id>` | HASH | 5min | 错误率/TTFT EMA（打分输入） |
 | `lock:cred:<channel_key_id>` | STRING NX | 30s | 凭证刷新分布式锁 |
-| `kpi:sec:<unix_s>` / `kpi:rpm` / `kpi:tpm` | STRING/ZSET | 短 | 平台秒级 QPS 与 60s 滑动窗 |
+| `kpi:{kpi}:<req\|tok\|amt\|err>:<unix_s>` | STRING 计数 | 360s | 平台实时 KPI 秒桶（四序列各一键/秒；单 Lua 四路累加，读侧 MGET 整窗且跳过累加中的当前秒）。`{kpi}` hash-tag 同槽使跨秒 MGET 在 Cluster 下成立。弃初稿 ZSET 滑窗——按请求存成员的内存 ∝ 流量，秒桶与流量无关（IMPLEMENTATION §11.12）。写入挂 gateway `settle_write` 收口处，只计 log_type 2/5 |
 
 `{<uid>}` 为 Redis Cluster hash-tag：同一用户的 余额/限速/并发 键同槽，保证 Lua 原子性与线性扩容（档位二关键，IMPLEMENTATION §12.1）。
 
@@ -553,7 +569,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 
 `bal:{uid}` HASH 结构：`avail` = 可用余额（micro）；每笔在途预扣一个字段 `r:<request_id>` = `"<reserved_micro>|<deadline_unix_ms>|<api_key_id>"`（deadline = 预扣时刻 + 10min；api_key_id 供释放对应并发槽与终态补偿定位）。过期预扣由 commit/refund 正常清理，泄漏者由 reconciler 按 deadline 懒清理（M2）。
 
-精度约束：Lua number 为 double，余额比较的精度上限为 2^53 micro ≈ $90 亿；超出该量级的单账户余额视为配置错误（reserve.lua 内注释同此）。M1 实现细节：Lua 脚本经 EVAL 全量下发（EVALSHA/Script 缓存 M2）；KPI 计数暂缓（M2 与看板一起接入）。
+精度约束：Lua number 为 double，余额比较的精度上限为 2^53 micro ≈ $90 亿；超出该量级的单账户余额视为配置错误（reserve.lua 内注释同此）。M1 实现细节：Lua 脚本经 EVAL 全量下发（EVALSHA/Script 缓存 M2）；KPI 计数已随 §11.12 实时看板落地（`kpi:*` 秒桶，写入在结算旁路 fire-and-forget）。
 
 ```text
 reserve ────────────────────────────────────────────────
@@ -630,7 +646,7 @@ ORDER BY (user_id, ts)
 TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1）
 ```
 
-### 3.2 MV 矩阵（AggregatingMergeTree ×6）
+### 3.2 MV 矩阵（AggregatingMergeTree ×9）
 
 | MV | 主键 | 服务场景 |
 | --- | --- | --- |
@@ -640,6 +656,38 @@ TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1
 | mv_group_day | (group_code, day) | 分组经营 |
 | mv_channel_5min | (channel_id, ts5) | 渠道健康红绿灯（错误率/TTFT 分位/切换率/粘性命中率全部免费派生——Sub2API 需专门 worker 回填的东西是我们的 MV 副产品） |
 | mv_user_model_day | (user_id, model, day) | 用户下钻 |
+| mv_error_hour | (error_code, hour, channel_id, model) | 错误码分布（IMPLEMENTATION §11.12）。MV 内 `WHERE is_error = 1` 插入期过滤，行数 ∝ 错误码×小时×渠道×模型，与总请求量无关 |
+| mv_client_day | (client_type, day) | 客户端类型分布（#5277）。含 `uniqState(user_id)`——"多少用户在用 Claude Code"比请求数更能说明生态渗透 |
+| mv_key_model_day | (user_id, api_key_id, model, day) | 用户门户看板单一数据源（IMPLEMENTATION §11.12）：token 四轴（prompt/cached/completion/reasoning）+ amount/discount/errors。主键前缀使 key 视角 `(user_id, api_key_id)` 与 user 视角 `(user_id)` 都是前缀扫描；行数 ∝ 活跃 key × 当日模型数 |
+| mv_cube_hour | (hour, user_id, api_key_id, group_code, model, channel_id) | **分析立方体**（IMPLEMENTATION §11.13）：管理端"带任意维度过滤的趋势 / 拆分 / 流向"三个端点的唯一数据源。上面各单维 MV 各答一个固定问题；这张答"过滤到某用户/某渠道/某模型之后，按另一个维度怎么分、随时间怎么走"（new-api #7150 与 Sub2API `TrendParams` 的诉求；new-api 的 quota_data 八维表同一思路）。列：requests、token 四轴、amount/discount/upstream_cost、errors、latency_sum、ttft_sum/ttft_samples（avg = sum/n；**不放 quantilesState**——每行一个 sketch 在这种基数下代价过高，分位数仍走 mv_model_hour / mv_channel_5min）。行数 ∝ 每小时出现过的五元组合数（上界为请求数，实际压缩极大）；主键以 hour 开头让时间窗裁剪先生效。provider 是 channel_id 的函数，查询时由 PG 回填，不进键 |
+
+**MV 只向前聚合**：`ensure_schema` 的 `CREATE ... IF NOT EXISTS` 对已存在的库只新建缺失的 MV，且 MV 只捕获创建之后写入 raw 的行。新增 MV 后若需历史数据，手动回填一次即可（AggregatingMergeTree 接受 `-State` 插入）：
+
+```sql
+INSERT INTO mv_key_model_day
+SELECT user_id, api_key_id, model, toDate(ts) AS day, countState(), sumState(toUInt64(prompt_tokens)),
+       sumState(toUInt64(cached_tokens)), sumState(toUInt64(completion_tokens)), sumState(toUInt64(reasoning_tokens)),
+       sumState(amount_micro), sumState(discount_micro), sumState(toUInt64(is_error))
+FROM request_log_raw WHERE ts < '<MV 创建时刻>' GROUP BY user_id, api_key_id, model, day;
+```
+
+时间上界必须取 MV 创建时刻，否则创建后写入的行会被算两遍。开发环境直接 `scripts/dev-reset.sh`。
+
+`mv_cube_hour` 同法（创建时刻取 `SELECT metadata_modification_time FROM system.tables WHERE name = 'mv_cube_hour'`）：
+
+```sql
+INSERT INTO mv_cube_hour
+SELECT toStartOfHour(ts) AS hour, user_id, api_key_id, group_code, model, channel_id,
+       countState(), sumState(toUInt64(prompt_tokens)), sumState(toUInt64(cached_tokens)),
+       sumState(toUInt64(completion_tokens)), sumState(toUInt64(reasoning_tokens)),
+       sumState(amount_micro), sumState(discount_micro), sumState(upstream_cost_micro),
+       sumState(toUInt64(is_error)), sumState(toUInt64(latency_ms)), sumState(toUInt64(ttft_ms)),
+       countIfState(ttft_ms > 0)
+FROM request_log_raw WHERE ts < '<MV 创建时刻>'
+GROUP BY hour, user_id, api_key_id, group_code, model, channel_id;
+```
+
+（列序与 MV 定义一致。）不回填的后果不是报错而是**用量分析页的数字小于总览页**——两者数据源不同，前者只见 MV 创建之后的流量。
 
 通用状态列：`countState()、sumState(tokens/amount/original/discount/upstream_cost)、sumState(is_error)`；性能类加 `quantilesState(0.5,0.95,0.99)(ttft_ms / latency_ms)`、`sumState(completion_tokens)+sumState(latency_ms)`（token 加权速度，#5029）。完整示例：
 
@@ -721,7 +769,7 @@ GROUP BY day ORDER BY day;
 | node_name 处理节点 | node 列（gateway 实例名） |
 | count / quota / token_used 三度量 | countState / sumState(amount) / sumState(tokens)，超集 |
 
-**日志页统计条（Stat = 消耗 quota + 最近 60s RPM/TPM，可按用户/令牌/模型/渠道/分组过滤）**：无过滤走 Redis KPI 滑动窗（秒级）；带维度过滤走 CH raw 60s 窗口查询（仅扫最新分区，毫秒级）。
+**日志页统计条（Stat = 消耗 quota + 最近 60s RPM/TPM，可按用户/令牌/模型/渠道/分组过滤）**：无过滤走 Redis KPI 秒桶（秒级）；带维度过滤走 CH raw 60s 窗口查询（仅扫最新分区，毫秒级）。【已实现：`GET /admin/logs/stat`，响应 `rate_source` 字段标注数据源；明细检索 `GET /admin/logs` 同批落地，字符串过滤走 CH 服务端绑定参数（`query_with_params`），见 IMPLEMENTATION §11.12】
 
 另注：new-api 已支持将 logs 表放入 ClickHouse（LOG_DB 双方言），佐证本设计 CH 承载日志分析的路线；其看板表 quota_data 需站长开启 DataExportEnabled 且靠内存定时合并，我们的 MV 随写随聚合、无此开关与丢数窗口。
 
@@ -773,6 +821,8 @@ DECIMAL 列建议 `::text` 保精度）。
 **借入的四项能力**（各有出处）：`channel_keys.rpm_limit` / `daily_spend_cap_micro`（老 ok-api provider_api_keys、Sub2API account 并发）、`channel_keys.model_subset`（老 ok-api supported_models）、`models.fallback_models`（LiteLLM fallbacks、老 ok-api fallback_model_code）、`channel_pools.routing_strategy`（老 ok-api routing_mode、LiteLLM routing_strategy）。
 
 **明确不借**：老 ok-api 的 provider 分域模型（定价重复 + 名字歧义）、绝对价存储（倍率心智已与主流对齐，见 §11.5）、new-api 的物化 `abilities` 表——候选查询当前不是瓶颈，物化会引入一致性维护成本，待真成瓶颈再议（届时 pool 已把可见性收敛为一次 join，物化更容易）。
+
+**2026-09-02 复核后的四处修正（IMPLEMENTATION §11.14）**：① 可见性收敛为一条规则"渠道只服务它所在的池"，内置 `default` 池 + 分组必有池，退役 strict 三态；② 池级降级 `fallback_pool_code`（对应 new-api 令牌 `auto` 分组的核心诉求：vip 优先专属渠道、打不通退公共渠道，计费仍按分组倍率）；③ `pool_channels` 成员级 priority / weight 覆盖（Sub2API `account_groups.priority` 对齐：同一渠道在 stable 池主力、fast 池备胎）；④ `price_groups.self_select` 用户自选档位（new-api `UserUsableGroups`）。
 
 ## 4. NATS JetStream
 

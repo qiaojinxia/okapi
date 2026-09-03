@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.model_name AS canonical, m.status, m.fallback_models,\n               (p.model_id IS NOT NULL) AS \"priced!\"\n        FROM models m\n        LEFT JOIN model_pricing p ON p.model_id = m.id\n        WHERE m.model_name = $1\n           OR m.model_name = (\n               SELECT target_model FROM model_aliases\n               WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(pattern, '*', '%'))\n               ORDER BY (pattern = $1) DESC, priority DESC, pattern\n               LIMIT 1\n           )\n        ORDER BY (m.model_name = $1) DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "canonical",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "fallback_models",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "fallback_models"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "priced!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "2809ec6dc864621bf46502975a2f35fb468126b0bf7b944bd03b2dd5a5900b3f"
+}

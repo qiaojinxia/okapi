@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pool_code, self_select FROM price_groups WHERE group_code = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "pool_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "self_select",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "self_select"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "12653d91cf3c6eda1e926a92a22d669f6a68ceef00c67c971f5d092c4db8020f"
+}

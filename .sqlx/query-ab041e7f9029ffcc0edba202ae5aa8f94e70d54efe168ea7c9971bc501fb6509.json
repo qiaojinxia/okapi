@@ -1,0 +1,256 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT b.id, b.request_id, b.model_name, b.log_type, b.status, b.api_key_id,\n                  COALESCE(k.name, '') AS \"key_name!\",\n                  b.prompt_tokens, b.cached_tokens, b.completion_tokens, b.reasoning_tokens,\n                  b.amount_micro, b.original_amount_micro, b.discount_micro,\n                  b.pricing_snapshot, b.error_code, b.latency_ms, b.ttft_ms, b.is_stream, b.created_at\n           FROM billing_records b\n           LEFT JOIN api_keys k ON k.id = b.api_key_id\n           WHERE b.user_id = $1\n             AND ($2::bigint IS NULL OR b.id < $2)\n             AND ($3::bigint IS NULL OR b.api_key_id = $3)\n             AND ($4::text IS NULL OR b.model_name = $4)\n             AND (NOT $5::boolean OR b.status <> 20)\n           ORDER BY b.id DESC LIMIT $6",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "log_type",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "log_type"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "api_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "api_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "key_name!",
+        "type_info": "Varchar",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "prompt_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "prompt_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "cached_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "cached_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "completion_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "completion_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "reasoning_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "reasoning_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "original_amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "original_amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "discount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "discount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "pricing_snapshot",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pricing_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "error_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "error_code"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "latency_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "latency_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "ttft_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "ttft_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "is_stream",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "is_stream"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Bool",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ab041e7f9029ffcc0edba202ae5aa8f94e70d54efe168ea7c9971bc501fb6509"
+}

@@ -1,10 +1,12 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
+import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { RoleDrawer } from '@/features/roles/RoleDrawer'
@@ -29,8 +31,7 @@ interface RoleRow {
 export function RolesPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [msg, setMsg] = useState<string | null>(null)
-  const [drawer, setDrawer] = useState(false)
+  const [drawer, setDrawer] = useState<'create' | RoleRow | null>(null)
   const { confirm, dialog } = useConfirm()
 
   const roles = useQuery({
@@ -43,11 +44,11 @@ export function RolesPage() {
     mutationFn: (code: string) =>
       apiFetch(`/admin/roles/${encodeURIComponent(code)}`, { method: 'DELETE' }),
     onSuccess: () => {
-      setMsg(t('common:success'))
+      toast.success(t('common:success'))
       invalidate()
     },
     // 仍有用户绑定时后端回 409 role_in_use，此处直接展示 error_code 的语言包文案
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const rows = roles.data?.data ?? []
@@ -59,18 +60,18 @@ export function RolesPage() {
         title={t('admin:rolesTitle')}
         description={t('admin:roleHint')}
         action={
-          <Button onClick={() => setDrawer(true)}>
+          <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
             {t('admin:roleCreate')}
           </Button>
         }
       />
-
-      {msg !== null && <p className="text-xs text-muted-foreground">{msg}</p>}
       {dialog}
 
       {roles.isError ? (
-        <ErrorState message={describeError(roles.error)} />
+        <ErrorState message={describeError(roles.error)} onRetry={() => void roles.refetch()} />
+      ) : roles.isPending ? (
+        <TableSkeleton rows={6} cols={5} />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:rolesEmptyHint')} />
       ) : (
@@ -80,7 +81,7 @@ export function RolesPage() {
               <Th>ID</Th>
               <Th>{t('admin:roleCode')}</Th>
               <Th>{t('admin:roleName')}</Th>
-              <Th>{t('admin:rolePermissions')}</Th>
+              <Th>{t('admin:rolePermissionsCol')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -106,18 +107,25 @@ export function RolesPage() {
                   </div>
                 </Td>
                 <Td>
-                  <IconButton
-                    icon={Trash2}
-                    label={t('common:delete')}
-                    variant="destructive"
-                    onClick={() =>
-                      confirm({
-                        title: t('common:confirmDeleteTitle', { name: r.role_code }),
-                        description: t('common:confirmRoleDelete'),
-                        onConfirm: () => remove.mutate(r.role_code),
-                      })
-                    }
-                  />
+                  <div className="flex items-center gap-0.5">
+                    <IconButton
+                      icon={Pencil}
+                      label={t('common:edit')}
+                      onClick={() => setDrawer(r)}
+                    />
+                    <IconButton
+                      icon={Trash2}
+                      label={t('common:delete')}
+                      variant="destructive"
+                      onClick={() =>
+                        confirm({
+                          title: t('common:confirmDeleteTitle', { name: r.role_code }),
+                          description: t('common:confirmRoleDelete'),
+                          onConfirm: () => remove.mutate(r.role_code),
+                        })
+                      }
+                    />
+                  </div>
                 </Td>
               </Tr>
             ))}
@@ -125,11 +133,12 @@ export function RolesPage() {
         </Table>
       )}
 
-      {drawer && (
+      {drawer !== null && (
         <RoleDrawer
-          onClose={() => setDrawer(false)}
+          initial={drawer === 'create' ? undefined : drawer}
+          onClose={() => setDrawer(null)}
           onDone={() => {
-            setMsg(t('common:success'))
+            toast.success(t('common:success'))
             invalidate()
           }}
         />

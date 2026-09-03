@@ -1,0 +1,90 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.pool_code, p.description, p.routing_strategy, p.fallback_pool_code,\n               (SELECT COUNT(*) FROM pool_channels pc\n                  JOIN channels c ON c.id = pc.channel_id\n                 WHERE pc.pool_code = p.pool_code AND c.deleted_at IS NULL)\n                   AS \"channel_count!\",\n               (SELECT COUNT(*) FROM price_groups g WHERE g.pool_code = p.pool_code)\n                   AS \"group_count!\",\n               (SELECT COUNT(*) FROM api_keys k\n                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS \"key_count!\",\n               (SELECT COUNT(*) FROM channel_pools f\n                 WHERE f.fallback_pool_code = p.pool_code) AS \"fallback_ref_count!\"\n        FROM channel_pools p\n        ORDER BY (p.pool_code <> 'default'), p.pool_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "pool_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "description",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "routing_strategy",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "routing_strategy"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "fallback_pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "fallback_pool_code"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "group_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "key_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "fallback_ref_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f360e22472ebbee8b7e0a57d9ca036b698c7aedab5182ebd0e5f4922bca27b0f"
+}

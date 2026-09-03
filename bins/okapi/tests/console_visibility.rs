@@ -68,15 +68,6 @@ async fn setup() -> Env {
     .execute(&pg)
     .await
     .unwrap();
-    // 本测试会切换全局 strict 开关，先归位（并行测试互不干扰依赖宽松默认）
-    sqlx::query!(
-        r#"INSERT INTO settings (key, value) VALUES ('strict_group_isolation', 'false'::jsonb)
-           ON CONFLICT (key) DO UPDATE SET value = 'false'::jsonb"#
-    )
-    .execute(&pg)
-    .await
-    .unwrap();
-
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -266,14 +257,14 @@ async fn own_scope_isolates_channel_admins() {
 #[tokio::test]
 async fn group_visibility_matrix_and_group_pricing() {
     let env = setup().await;
-    let (super_id, super_token) = mk_user(&env.pg, 100, None).await;
+    let (_super_id, super_token) = mk_user(&env.pg, 100, None).await;
     let suffix = Uuid::new_v4().simple().to_string();
     let vip = format!("vip-{}", &suffix[..8]);
     let vip_pool = format!("pool-vip-{}", &suffix[..8]);
     let m_bound = format!("m-vb-{}", &suffix[..8]);
     let m_free = format!("m-vf-{}", &suffix[..8]);
 
-    // 池 + 组（半价，指向该池）+ 两个模型 + 两条渠道（一条入池，一条不入池）
+    // 池 + 组（半价，指向该池）+ 两个模型 + 两条渠道（一条只在 vip 池，一条缺省进 default 池）
     let r = cpost(
         &env,
         &super_token,
@@ -309,6 +300,7 @@ async fn group_visibility_matrix_and_group_pricing() {
     )
     .await;
     assert_eq!(r.status(), 200);
+    // 不传 pools = 缺省进 default 池（站长第一条渠道建出来就能用）
     let r = cpost(
         &env,
         &super_token,
@@ -318,6 +310,9 @@ async fn group_visibility_matrix_and_group_pricing() {
     )
     .await;
     assert_eq!(r.status(), 200);
+    let free_channel = r.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
 
     // 发布（组倍率进 PriceBook）并热更
     let r = cpost(&env, &super_token, "/admin/pricing/publish", json!({})).await;
@@ -345,9 +340,13 @@ async fn group_visibility_matrix_and_group_pricing() {
             .unwrap();
     }
 
-    // 宽松模式：池内渠道仅 vip 可用；未入池渠道人人可用
+    // 唯一规则：渠道只服务它所在的池
     let resp = chat(&env, &d_token, &m_bound).await;
-    assert_eq!(resp.status(), 503, "默认组（无池）不应看见 vip 池内渠道");
+    assert_eq!(
+        resp.status(),
+        503,
+        "默认组（default 池）不应看见 vip 池内渠道"
+    );
     let resp = chat(&env, &u_token, &m_bound).await;
     assert_eq!(resp.status(), 200, "vip 用户应可用其池内渠道");
     let amount = settled_amount(&env.pg, resp).await;
@@ -356,32 +355,108 @@ async fn group_visibility_matrix_and_group_pricing() {
         "vip 组倍率 0.5：240 → 120（价与可见性拆开后倍率照旧生效）"
     );
     let resp = chat(&env, &d_token, &m_free).await;
-    assert_eq!(resp.status(), 200, "宽松模式未入池渠道全可见");
+    assert_eq!(resp.status(), 200, "default 池渠道对 default 组可用");
     let _ = settled_amount(&env.pg, resp).await;
+    // 此前从未测过的一格：vip 用户打 default 池渠道——未配降级时不可达。
+    // 旧语义下这一格永远是 503 且没人知道（vip 比 default 能用的还少）。
+    let resp = chat(&env, &u_token, &m_free).await;
+    assert_eq!(
+        resp.status(),
+        503,
+        "未配降级：vip 池用户看不到 default 池渠道"
+    );
+    let _ = resp.text().await;
 
-    // 严格模式：未绑定渠道对所有人不可见
+    // 池级降级：vip 池 → default 池。vip 用户可用 default 池渠道，且仍按 vip 倍率计费
     let r = cpost(
         &env,
         &super_token,
-        "/admin/settings",
-        json!({"key": "strict_group_isolation", "value": true}),
+        "/admin/pools",
+        json!({"pool_code": vip_pool, "description": "vip 专属", "fallback_pool_code": "default"}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let resp = chat(&env, &u_token, &m_free).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "配了降级后 vip 用户应能经 default 池打到公共渠道"
+    );
+    let amount = settled_amount(&env.pg, resp).await;
+    assert_eq!(
+        amount, 120,
+        "经降级池服务仍按请求者分组倍率（0.5）计费，不按池"
+    );
+
+    // 自引用降级被拒
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/pools",
+        json!({"pool_code": vip_pool, "fallback_pool_code": vip_pool}),
+    )
+    .await;
+    assert_eq!(r.status(), 400, "池不能把自己配成降级目标");
+
+    // 孤儿：显式移出所有池 → 对谁都不可达，响应明示 orphan
+    let r = cpost(
+        &env,
+        &super_token,
+        &format!("/admin/channels/{free_channel}/pools"),
+        json!({"pools": []}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["orphan"], true);
+    let resp = chat(&env, &d_token, &m_free).await;
+    assert_eq!(resp.status(), 503, "孤儿渠道对 default 组不可达");
+    let resp = chat(&env, &u_token, &m_free).await;
+    assert_eq!(resp.status(), 503, "孤儿渠道经降级链也不可达");
+    let _ = resp.text().await;
+
+    // 放回 default 池（带成员级覆盖）后恢复；不存在的池 404 带 param
+    let r = cpost(
+        &env,
+        &super_token,
+        &format!("/admin/channels/{free_channel}/pools"),
+        json!({"pools": [{"pool_code": "default", "priority_override": 5, "weight_override": 3}]}),
     )
     .await;
     assert_eq!(r.status(), 200);
     let resp = chat(&env, &d_token, &m_free).await;
-    assert_eq!(resp.status(), 503, "严格模式下无池用户看不到任何渠道");
-    let resp = chat(&env, &u_token, &m_bound).await;
-    assert_eq!(resp.status(), 200, "严格模式下有池用户仍可用池内渠道");
-    let _ = resp.text().await;
-
-    // 归位宽松，避免影响并行/后续测试
+    assert_eq!(resp.status(), 200);
+    let _ = settled_amount(&env.pg, resp).await;
     let r = cpost(
         &env,
         &super_token,
-        "/admin/settings",
-        json!({"key": "strict_group_isolation", "value": false}),
+        &format!("/admin/channels/{free_channel}/pools"),
+        json!({"pools": ["pool-that-does-not-exist"]}),
     )
     .await;
-    assert_eq!(r.status(), 200);
-    let _ = super_id;
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["param"],
+        "pool-that-does-not-exist"
+    );
+
+    // 分组指向不存在的池 → 404；内置 default 池不可删 → 409
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/groups",
+        json!({"group_code": vip, "group_ratio": "0.5", "pool_code": "nope-pool"}),
+    )
+    .await;
+    assert_eq!(r.status(), 404);
+    let r = reqwest::Client::new()
+        .delete(format!("http://{}/admin/pools/default", env.console))
+        .bearer_auth(&super_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["code"],
+        "builtin_pool"
+    );
 }

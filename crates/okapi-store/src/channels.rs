@@ -34,7 +34,13 @@ pub struct ChannelCandidate {
     pub capabilities: serde_json::Value,
     /// 相对成本千分比（层内权重除数，缺省 1000 = 中性）。
     pub cost_milli: i64,
+    /// 所属池在池链里的序号（0 = 主池，1 = 降级池）。调度先耗尽低序号的全部层，
+    /// 再进入下一序号——降级池的高优先级渠道也排在主池最低优先级之后。
+    pub pool_rank: i32,
 }
+
+/// 内置默认池：新渠道缺省加入、未指定池的分组走这里。
+pub const DEFAULT_POOL: &str = "default";
 
 impl ChannelCandidate {
     /// 解析上游实际模型名。
@@ -48,35 +54,34 @@ impl ChannelCandidate {
 }
 
 /// 服务指定模型的可用渠道 key 候选：
-/// 渠道启用 + key active + 不在冷却期 + 在池内 + key 模型子集允许，按渠道 priority 降序。
+/// 渠道启用 + key active + 不在冷却期 + 在池链内 + key 模型子集允许。
 ///
-/// 可见性由渠道池表达（docs/database.md §3.7）：
-/// - `pool_code = Some(p)`：只有池 p 内的渠道是候选；
-/// - `pool_code = None`：只看未入任何池的渠道（宽松，默认）；
-///   `settings.strict_group_isolation = true` 时无候选。
+/// 可见性只有一条规则（IMPLEMENTATION §11.14）：**渠道只服务它所在的池**。
+/// `pools` 是有序池链（主池 → 降级池，见 `channel_pools.fallback_pool_code`），
+/// 返回序 = (池序, 有效优先级降序, key id)；同一渠道同时在两个池里只算进靠前的那个。
+/// 有效优先级 / 权重取成员级覆盖（`pool_channels.priority_override / weight_override`），
+/// 缺省继承渠道与 key 自身——同一渠道可以在 stable 池当主力、在 fast 池当备胎。
 ///
-/// "入池即专属"是刻意的：否则把高价渠道放进 vip 池后，无池用户照样打得到，
-/// 池就只是个标签而不是隔离手段。
+/// 未入任何池的渠道（孤儿）对谁都不可达；空池链按 `DEFAULT_POOL` 兜底。
 pub async fn candidates_for_model(
     pool: &PgPool,
     model: &str,
-    pool_code: Option<&str>,
+    pools: &[&str],
     master_key: Option<&str>,
 ) -> Result<Vec<ChannelCandidate>, StoreError> {
     let model_json = serde_json::json!([model]);
+    let chain: Vec<String> = if pools.is_empty() {
+        vec![DEFAULT_POOL.to_owned()]
+    } else {
+        pools.iter().map(|p| (*p).to_owned()).collect()
+    };
     let rows = sqlx::query!(
         r#"
-        WITH cfg AS (
-            SELECT COALESCE(
-                (SELECT (value #>> '{}')::boolean FROM settings WHERE key = 'strict_group_isolation'),
-                false
-            ) AS strict
-        )
         SELECT c.id AS channel_id,
                c.name AS channel_name,
                c.provider,
                c.api_base,
-               c.priority,
+               COALESCE(pc.priority_override, c.priority) AS "priority!",
                c.trust_upstream_usage,
                c.model_mapping,
                COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS "thinking_to_content!",
@@ -85,44 +90,35 @@ pub async fn candidates_for_model(
                c.capabilities,
                GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS "cost_milli!",
                ck.id AS channel_key_id,
-               ck.weight,
+               COALESCE(pc.weight_override, ck.weight) AS "weight!",
                ck.max_concurrency,
                ck.rpm_limit,
                ck.daily_spend_cap_micro,
-               ck.credential_ciphertext
+               ck.credential_ciphertext,
+               (array_position($2::varchar[], pc.pool_code::varchar) - 1) AS "pool_rank!"
         FROM channels c
-        JOIN channel_keys ck ON ck.channel_id = c.id, cfg
+        JOIN channel_keys ck ON ck.channel_id = c.id
+        JOIN pool_channels pc ON pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])
         WHERE c.status = 1
           AND c.deleted_at IS NULL
           AND c.models @> $1
           AND ck.status = 1
           AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())
           AND (ck.model_subset IS NULL OR ck.model_subset @> $1)
-          AND (
-                -- 有池：只看池内渠道
-                ($2::varchar IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM pool_channels pc
-                    WHERE pc.channel_id = c.id AND pc.pool_code = $2
-                ))
-                -- 无池：只看"未被任何池认领"的渠道。入池即专属，否则把渠道放进
-                -- vip 池后免费用户照样能打到它——池就失去了保护渠道的意义。
-                OR (
-                    $2::varchar IS NULL
-                    AND NOT cfg.strict
-                    AND NOT EXISTS (
-                        SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id
-                    )
-                )
-              )
-        ORDER BY c.priority DESC, ck.id
+        ORDER BY array_position($2::varchar[], pc.pool_code::varchar),
+                 COALESCE(pc.priority_override, c.priority) DESC,
+                 ck.id
         "#,
         model_json,
-        pool_code
+        &chain
     )
     .fetch_all(pool)
     .await?;
 
+    // 同一把 key 经两个池各出一行：保留池序靠前的那行（SQL 已按池序排好）
+    let mut seen = std::collections::HashSet::new();
     rows.into_iter()
+        .filter(|r| seen.insert(r.channel_key_id))
         .map(|r| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             Ok(ChannelCandidate {
@@ -147,6 +143,7 @@ pub async fn candidates_for_model(
                     .unwrap_or_default(),
                 capabilities: r.capabilities,
                 cost_milli: r.cost_milli,
+                pool_rank: r.pool_rank,
             })
         })
         .collect()
@@ -201,46 +198,34 @@ pub async fn channel_key_ref(
 pub async fn custom_pass_channel(
     pool: &PgPool,
     channel_id: i64,
-    pool_code: Option<&str>,
+    pools: &[&str],
     master_key: Option<&str>,
 ) -> Result<Option<PassChannel>, StoreError> {
+    let chain: Vec<String> = if pools.is_empty() {
+        vec![DEFAULT_POOL.to_owned()]
+    } else {
+        pools.iter().map(|p| (*p).to_owned()).collect()
+    };
     let row = sqlx::query!(
         r#"
-        WITH cfg AS (
-            SELECT COALESCE(
-                (SELECT (value #>> '{}')::boolean FROM settings WHERE key = 'strict_group_isolation'),
-                false
-            ) AS strict
-        )
         SELECT c.api_base, c.settings, ck.credential_ciphertext
         FROM channels c
-        JOIN channel_keys ck ON ck.channel_id = c.id, cfg
+        JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1
           AND c.provider = 'custom_pass'
           AND c.status = 1
           AND c.deleted_at IS NULL
           AND ck.status = 1
-          AND (
-                -- 有池：只看池内渠道
-                ($2::varchar IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM pool_channels pc
-                    WHERE pc.channel_id = c.id AND pc.pool_code = $2
-                ))
-                -- 无池：只看"未被任何池认领"的渠道。入池即专属，否则把渠道放进
-                -- vip 池后免费用户照样能打到它——池就失去了保护渠道的意义。
-                OR (
-                    $2::varchar IS NULL
-                    AND NOT cfg.strict
-                    AND NOT EXISTS (
-                        SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id
-                    )
-                )
-              )
+          -- 可见性与候选查询同一条规则：渠道只服务它所在的池（链内任一池即可）
+          AND EXISTS (
+                SELECT 1 FROM pool_channels pc
+                WHERE pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])
+          )
         ORDER BY ck.id
         LIMIT 1
         "#,
         channel_id,
-        pool_code
+        &chain
     )
     .fetch_optional(pool)
     .await?;
@@ -353,11 +338,107 @@ pub async fn mark_key_failure(
     Ok(())
 }
 
-/// 模型解析结果（canonical 名 + 预扣估算用的补全上限）。
+/// 路由诊断的 key 视图（不过滤，静态事实 + 配置的运行期闸）。
+#[derive(Debug, serde::Serialize)]
+pub struct DiagKey {
+    pub key_id: i64,
+    pub status: i16,
+    pub cooldown_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub weight: i32,
+    /// model_subset 为 NULL（继承渠道）或包含目标模型。
+    pub subset_ok: bool,
+    pub rpm_limit: Option<i32>,
+    pub daily_spend_cap_micro: Option<i64>,
+    pub max_concurrency: Option<i32>,
+}
+
+/// 路由诊断的渠道视图（服务目标模型的全集，含被淘汰者）。
+#[derive(Debug, serde::Serialize)]
+pub struct DiagChannel {
+    pub channel_id: i64,
+    pub name: String,
+    pub provider: String,
+    pub status: i16,
+    pub priority: i32,
+    /// 渠道所属的池（空 = 未入池）。
+    pub pools: Vec<String>,
+    pub keys: Vec<DiagKey>,
+}
+
+/// 路由诊断（console 只读）：返回**声称服务该模型**的渠道全集——与生产查询
+/// `candidates_for_model` 相反，不过滤状态/池/冷却，专供"为什么没有候选"
+/// 生成逐环淘汰原因。幸存者判定仍以生产查询为准，本函数只提供事实底座。
+pub async fn diagnose_channels(pool: &PgPool, model: &str) -> Result<Vec<DiagChannel>, StoreError> {
+    let model_json = serde_json::json!([model]);
+    let rows = sqlx::query!(
+        r#"
+        SELECT c.id AS channel_id,
+               c.name,
+               c.provider,
+               c.status,
+               c.priority,
+               COALESCE(
+                   (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
+                    FROM pool_channels pc WHERE pc.channel_id = c.id),
+                   '{}'
+               ) AS "pools!",
+               ck.id AS "key_id?",
+               ck.status AS "key_status?",
+               ck.cooldown_until,
+               ck.weight AS "key_weight?",
+               (ck.model_subset IS NULL OR ck.model_subset @> $1) AS "subset_ok?",
+               ck.rpm_limit,
+               ck.daily_spend_cap_micro,
+               ck.max_concurrency
+        FROM channels c
+        LEFT JOIN channel_keys ck ON ck.channel_id = c.id
+        WHERE c.deleted_at IS NULL AND c.models @> $1
+        ORDER BY c.priority DESC, c.id, ck.id
+        "#,
+        model_json
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut channels: Vec<DiagChannel> = Vec::new();
+    for r in rows {
+        if channels.last().is_none_or(|c| c.channel_id != r.channel_id) {
+            channels.push(DiagChannel {
+                channel_id: r.channel_id,
+                name: r.name,
+                provider: r.provider,
+                status: r.status,
+                priority: r.priority,
+                pools: r.pools,
+                keys: Vec::new(),
+            });
+        }
+        if let (Some(key_id), Some(status), Some(weight), Some(subset_ok)) =
+            (r.key_id, r.key_status, r.key_weight, r.subset_ok)
+            && let Some(ch) = channels.last_mut()
+        {
+            ch.keys.push(DiagKey {
+                key_id,
+                status,
+                cooldown_until: r.cooldown_until,
+                weight,
+                subset_ok,
+                rpm_limit: r.rpm_limit,
+                daily_spend_cap_micro: r.daily_spend_cap_micro,
+                max_concurrency: r.max_concurrency,
+            });
+        }
+    }
+    Ok(channels)
+}
+
+/// 模型解析结果（canonical 名 + 预扣估算用的补全上限 + 模型级降级链）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedModel {
     pub canonical: String,
     pub max_output: Option<i32>,
+    /// 降级链（DESIGN §3.4.1）：本模型零可用候选时按序改投；单跳不递归。
+    pub fallback_models: Vec<String>,
 }
 
 /// 模型解析（#3001 + §5.1 预扣缺省）：模型真名直命中优先；
@@ -368,7 +449,7 @@ pub async fn resolve_model(
 ) -> Result<Option<ResolvedModel>, StoreError> {
     let row = sqlx::query!(
         r#"
-        SELECT m.model_name AS canonical, m.max_output
+        SELECT m.model_name AS canonical, m.max_output, m.fallback_models
         FROM models m
         WHERE m.status = 1
           AND (
@@ -390,5 +471,6 @@ pub async fn resolve_model(
     Ok(row.map(|r| ResolvedModel {
         canonical: r.canonical,
         max_output: r.max_output,
+        fallback_models: serde_json::from_value(r.fallback_models).unwrap_or_default(),
     }))
 }

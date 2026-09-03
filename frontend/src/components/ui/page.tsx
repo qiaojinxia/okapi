@@ -1,3 +1,4 @@
+import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /// 页头：标题 + 这一页负责什么 + 主操作（通常是"新建"）。
@@ -7,46 +8,64 @@ import { cn } from '@/lib/utils'
 export function PageHeader({
   title,
   description,
+  icon: Icon,
+  meta,
   action,
+  className,
 }: {
   title: string
   description?: string
+  icon?: LucideIcon
+  /// 标题右侧的小徽章（计数 / 状态）。
+  meta?: React.ReactNode
   action?: React.ReactNode
+  className?: string
 }) {
   return (
-    <header className="flex flex-wrap items-start justify-between gap-3">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-lg font-semibold">{title}</h1>
-        {description !== undefined && (
-          <p className="text-xs text-muted-foreground">{description}</p>
+    <header className={cn('flex flex-wrap items-start justify-between gap-3', className)}>
+      <div className="flex min-w-0 items-start gap-3">
+        {Icon && (
+          <span className="mt-0.5 hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
+            <Icon className="h-4.5 w-4.5" />
+          </span>
         )}
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+            {meta}
+          </div>
+          {description !== undefined && (
+            <p className="max-w-3xl text-sm leading-5 text-muted-foreground">{description}</p>
+          )}
+        </div>
       </div>
-      {action}
+      {action !== undefined && <div className="flex flex-wrap items-center gap-2">{action}</div>}
     </header>
   )
 }
 
-/// 工具栏：搜索/过滤在左，批量操作在右。
+/// 工具栏：搜索/过滤在左，右侧放计数或次级动作。
 ///
-/// 批量操作只在选中若干条后出现（`selection` 非空），避免无对象时摆一排死按钮
-/// 让人猜"这是对全部生效还是对选中生效"。
+/// 批量操作不再放这里——选中若干条后由底部浮起的 `SelectionBar` 承载，
+/// 顶部只留"怎么筛"。
 export function Toolbar({
   filters,
   selection,
   className,
 }: {
   filters?: React.ReactNode
+  /// 右侧区（计数、发布按钮等）。
   selection?: React.ReactNode
   className?: string
 }) {
   return (
     <div
       className={cn(
-        'flex flex-wrap items-end justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2.5',
+        'flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5 shadow-card',
         className,
       )}
     >
-      <div className="flex flex-wrap items-end gap-2">{filters}</div>
+      <div className="flex flex-wrap items-center gap-2">{filters}</div>
       {selection !== undefined && (
         <div className="flex flex-wrap items-center gap-2">{selection}</div>
       )}
@@ -54,35 +73,7 @@ export function Toolbar({
   )
 }
 
-/// 页内分段：同一职责下的次级视图（如"模型定价"页里的 倍率 / 固定单价 两种模式）。
-export function Tabs({
-  tabs,
-  active,
-  onChange,
-}: {
-  tabs: { id: string; label: string }[]
-  active: string
-  onChange: (id: string) => void
-}) {
-  return (
-    <div role="tablist" className="flex gap-1 border-b border-border">
-      {tabs.map((tb) => (
-        <button
-          key={tb.id}
-          type="button"
-          role="tab"
-          aria-selected={active === tb.id}
-          onClick={() => onChange(tb.id)}
-          className={cn(
-            '-mb-px border-b-2 px-3 py-2 text-sm transition-colors',
-            active === tb.id
-              ? 'border-primary font-medium text-foreground'
-              : 'border-transparent text-muted-foreground hover:text-foreground',
-          )}
-        >
-          {tb.label}
-        </button>
-      ))}
-    </div>
-  )
+/// 页面内容的统一纵向节奏。
+export function PageBody({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+  return <div className={cn('flex flex-col gap-4 animate-fade-in', className)} {...props} />
 }

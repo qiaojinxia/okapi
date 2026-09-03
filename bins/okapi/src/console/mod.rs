@@ -5,12 +5,17 @@
 //! 用户门户 API 与 MCP 端点在后续批次接入。
 
 pub mod admin;
+pub mod analytics;
+pub mod audit;
 pub mod auth_web;
+pub mod dlq;
+pub mod logs;
 pub mod manage;
 pub mod mcp;
 pub mod oauth;
 pub mod pay;
 pub mod portal;
+pub mod registration;
 pub mod setup;
 pub mod ssrf;
 pub mod stats;
@@ -152,7 +157,10 @@ fn channel_routes() -> ConsoleRouter {
             "/admin/pools",
             get(manage::list_pools).post(admin::upsert_pool),
         )
-        .route("/admin/pools/{code}", delete(manage::delete_pool))
+        .route(
+            "/admin/pools/{code}",
+            get(manage::pool_detail).delete(manage::delete_pool),
+        )
         .route("/admin/channels/batch", post(manage::batch_channels))
         .route(
             "/admin/channels/{id}/duplicate",
@@ -163,6 +171,7 @@ fn channel_routes() -> ConsoleRouter {
             "/admin/channels/{id}/fetch-models",
             get(admin::fetch_channel_models),
         )
+        .route("/admin/diagnose/route", get(manage::diagnose_route))
 }
 
 /// 模型配置与定价面：模型 / 分组 / 套餐 / 兑换码 / 活动规则 / 发布与导入。
@@ -223,6 +232,7 @@ fn user_admin_routes() -> ConsoleRouter {
         )
         .route("/admin/users/{id}/role", post(admin::assign_role))
         .route("/admin/users/{id}/overview", get(admin::user_overview))
+        .route("/admin/users/{id}/usage", get(admin::user_usage))
         .route("/admin/keys", get(manage::list_keys))
         .route(
             "/admin/keys/{id}",
@@ -249,9 +259,38 @@ fn ops_routes() -> ConsoleRouter {
         .route("/admin/stats/channels", get(stats::channels))
         .route("/admin/stats/models", get(stats::models))
         .route("/admin/stats/margin", get(stats::margin))
+        .route("/admin/stats/realtime", get(stats::realtime))
+        .route("/admin/stats/errors", get(stats::errors))
+        .route("/admin/stats/cashflow", get(stats::cashflow))
+        .route("/admin/stats/model-trend", get(stats::model_trend))
+        .route("/admin/stats/clients", get(stats::clients))
+        .route("/admin/stats/groups", get(stats::groups))
+        .route(
+            "/admin/stats/channels/{id}/timeline",
+            get(stats::channel_timeline),
+        )
+        // 用量分析（mv_cube_hour）：任意维度过滤下的趋势 / 拆分 / 流向
+        .route("/admin/stats/trend", get(analytics::trend))
+        .route("/admin/stats/breakdown", get(analytics::breakdown))
+        .route("/admin/stats/flow", get(analytics::flow))
+        .route("/admin/stats/inventory", get(analytics::inventory))
+        .route("/admin/stats/entity-usage", get(analytics::entity_usage))
+        .route("/admin/diagnose", get(stats::diagnose))
+        .route("/admin/logs", get(logs::search))
+        .route("/admin/logs/stat", get(logs::stat))
         .route("/admin/billing/refund", post(admin::refund_by_request))
+        .route(
+            "/admin/billing/record/{request_id}",
+            get(admin::billing_record_lookup),
+        )
         .route("/admin/reconciliation", get(admin::reconciliation))
+        .route("/admin/dlq", get(dlq::list))
+        .route("/admin/dlq/requeue", post(dlq::requeue_handler))
+        .route("/admin/dlq/discard", post(dlq::discard_handler))
         .route("/admin/cache/flush", post(admin::cache_flush))
+        // 审计读取面：谁在何时改了什么（含登录记录）
+        .route("/admin/audit", get(audit::list))
+        .route("/admin/audit/actions", get(audit::actions))
 }
 
 /// 用户自助面（门户）+ 团队 + 支付回调 + 公开价格。
@@ -260,12 +299,17 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me", get(portal::me))
         .route("/api/me/usage", get(portal::usage))
         .route("/api/me/stats/daily", get(stats::my_daily))
+        .route("/api/me/stats/breakdown", get(stats::my_breakdown))
         .route("/api/me/keys", get(portal::keys))
+        .route("/api/me/groups", get(portal::groups))
+        .route("/api/me/logins", get(audit::my_logins))
         .route(
             "/api/me/keys/{id}",
             axum::routing::patch(portal::patch_key).delete(portal::delete_key),
         )
         .route("/api/me/logs", get(portal::logs))
+        .route("/api/me/ledger", get(portal::ledger))
+        .route("/api/me/orders", get(portal::orders))
         .route("/api/me/redeem", post(portal::redeem))
         .route("/api/me/aff", get(portal::aff))
         .route("/api/me/topup", post(pay::topup))
@@ -279,12 +323,14 @@ fn portal_routes() -> ConsoleRouter {
         .route("/pay/callback/epay", get(pay::epay_callback))
         .route("/pay/callback/stripe", post(pay::stripe_webhook))
         .route("/api/pricing", get(portal::public_pricing))
+        .route("/api/notice", get(portal::notice))
 }
 
 /// 认证面：注册 / 登录 / 2FA / OAuth + 初始化向导。
 fn auth_routes() -> ConsoleRouter {
     Router::new()
         .route("/api/setup/status", get(setup::status))
+        .route("/api/registration", get(registration::public_policy))
         .route("/api/setup", post(setup::run))
         .route("/auth/register", post(auth_web::register))
         .route("/auth/login", post(auth_web::login))

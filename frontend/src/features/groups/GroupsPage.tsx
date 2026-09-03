@@ -5,13 +5,16 @@ import { useTranslation } from 'react-i18next'
 import type { GroupListRow } from '@/features/groups/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
+import { toast } from '@/components/ui/toast'
 import { GroupDrawer } from '@/features/groups/GroupDrawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { useConfirm } from '@/components/ui/confirm'
 
@@ -22,7 +25,6 @@ import { useConfirm } from '@/components/ui/confirm'
 export function GroupsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [msg, setMsg] = useState<string | null>(null)
   const [drawer, setDrawer] = useState<{ group?: GroupListRow } | null>(null)
   const { confirm, dialog } = useConfirm()
 
@@ -36,10 +38,10 @@ export function GroupsPage() {
     mutationFn: (code: string) =>
       apiFetch(`/admin/groups/${encodeURIComponent(code)}`, { method: 'DELETE' }),
     onSuccess: () => {
-      setMsg(t('admin:requiresPublish'))
+      toast.warning(t('admin:requiresPublish'))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const rows = groups.data?.data ?? []
@@ -56,12 +58,12 @@ export function GroupsPage() {
           </Button>
         }
       />
-
-      {msg !== null && <p className="text-xs text-muted-foreground">{msg}</p>}
       {dialog}
 
       {groups.isError ? (
-        <ErrorState message={describeError(groups.error)} />
+        <ErrorState message={describeError(groups.error)} onRetry={() => void groups.refetch()} />
+      ) : groups.isPending ? (
+        <TableSkeleton rows={6} cols={6} />
       ) : rows.length === 0 ? (
         <EmptyState />
       ) : (
@@ -72,6 +74,7 @@ export function GroupsPage() {
               <Th>{t('admin:groupRatio')}</Th>
               <Th>{t('admin:groupDesc')}</Th>
               <Th>{t('admin:groupUsers')}</Th>
+              <Th>{t('admin:groupPool')}</Th>
               <Th>{t('admin:groupChannels')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
@@ -86,13 +89,26 @@ export function GroupsPage() {
                       {t('admin:groupDefault')}
                     </Badge>
                   )}
+                  {g.self_select && (
+                    <Badge variant="success" className="ml-2">
+                      {t('admin:groupSelfSelectBadge')}
+                    </Badge>
+                  )}
                 </Td>
-                <Td>×{g.group_ratio ?? '1'}</Td>
+                <Td>×{formatRatio(g.group_ratio ?? '1')}</Td>
                 <Td className="max-w-64 truncate text-xs text-muted-foreground">
                   {g.description ?? '—'}
                 </Td>
                 <Td>{g.user_count}</Td>
-                <Td>{g.channel_count}</Td>
+                <Td className="font-mono text-xs">{g.pool_code}</Td>
+                <Td>
+                  {/* 池里零渠道 = 这个分组的用户什么都打不到，与"未定价"同类的配了一半 */}
+                  {g.channel_count === 0 ? (
+                    <Badge variant="destructive">{t('admin:poolNoChannel')}</Badge>
+                  ) : (
+                    g.channel_count
+                  )}
+                </Td>
                 <Td>
                   <div className="flex items-center gap-0.5">
                     <IconButton
@@ -126,7 +142,7 @@ export function GroupsPage() {
           group={drawer.group}
           onClose={() => setDrawer(null)}
           onDone={() => {
-            setMsg(t('admin:requiresPublish'))
+            toast.warning(t('admin:requiresPublish'))
             invalidate()
           }}
         />

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET inviter_id = $2, updated_at = now() WHERE id = $1 AND $2 <> $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "50db2ce64cac9a1782b6d5ad7b727b0d1534b3ba2734e336200b8c06cbbd3dd5"
+}

@@ -1,31 +1,22 @@
-import { Plus, Power, PowerOff, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
+import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { RuleDrawer } from '@/features/rules/RuleDrawer'
+import { STACKING_LABEL, WEEKDAY_LABEL } from '@/features/rules/types'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { useConfirm } from '@/components/ui/confirm'
-
-interface RuleRow {
-  rule_code: string
-  rule_type: string
-  scope: { groups?: string[]; models?: string[]; users?: number[] }
-  params: Record<string, unknown>
-  priority: number
-  enabled: boolean
-  valid_from: string | null
-  valid_to: string | null
-}
-
-
+import type { RuleRow } from '@/features/rules/types'
 
 /// 计费规则页（阶梯 / 时段 / 折扣 / 加价）。
 ///
@@ -34,8 +25,8 @@ interface RuleRow {
 export function RulesPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [msg, setMsg] = useState<string | null>(null)
-  const [drawer, setDrawer] = useState(false)
+  // null = 关闭；'create' = 新建；RuleRow = 编辑该条
+  const [drawer, setDrawer] = useState<'create' | RuleRow | null>(null)
   const { confirm, dialog } = useConfirm()
 
   const rules = useQuery({
@@ -48,10 +39,10 @@ export function RulesPage() {
     mutationFn: (code: string) =>
       apiFetch(`/admin/pricing/rules/${encodeURIComponent(code)}`, { method: 'DELETE' }),
     onSuccess: () => {
-      setMsg(t('admin:requiresPublish'))
+      toast.warning(t('admin:requiresPublish'))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   // 活动上下线：不删配置便于复用（如每年双十一复用同一规则）
@@ -62,10 +53,10 @@ export function RulesPage() {
         body: { enabled: arg.enabled },
       }),
     onSuccess: () => {
-      setMsg(t('admin:requiresPublish'))
+      toast.warning(t('admin:requiresPublish'))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const rows = rules.data?.data ?? []
@@ -76,20 +67,46 @@ export function RulesPage() {
     const p = r.params
     const mult = typeof p.multiplier === 'string' ? p.multiplier : String(p.multiplier ?? '1')
     if (r.rule_type === 'volume') {
-      return t('admin:paramsVolume', { n: String(p.min_monthly_tokens ?? 0), mult })
+      const conds: string[] = []
+      if (Number(p.min_monthly_tokens ?? 0) > 0) {
+        conds.push(t('admin:paramsVolumeTokens', { n: String(p.min_monthly_tokens) }))
+      }
+      if (Number(p.min_monthly_spend_micro ?? 0) > 0) {
+        conds.push(
+          t('admin:paramsVolumeSpend', {
+            usd: String(Number(p.min_monthly_spend_micro) / 1_000_000),
+          }),
+        )
+      }
+      return t('admin:paramsVolume', { conds: conds.join(' + '), mult })
     }
     if (r.rule_type === 'time_based') {
       const hhmm = (v: unknown) => {
         const m = Number(v ?? 0)
         return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
       }
-      return t('admin:paramsTime', {
+      const days = Array.isArray(p.weekdays)
+        ? (p.weekdays as number[])
+            .filter((d) => d >= 0 && d <= 6)
+            .map((d) => t(WEEKDAY_LABEL[d]))
+            .join('')
+        : null
+      const window = t('admin:paramsTime', {
         from: hhmm(p.start_minute),
         to: hhmm(p.end_minute),
         mult,
       })
+      return days === null ? window : `${t('admin:paramsWeekdays', { days })} ${window}`
     }
     return t('admin:paramsMult', { mult })
+  }
+  /// 非缺省叠加语义在类型列旁挂标签——排他/最优规则不标出来，
+  /// 运营对着"两条都启用却只生效一条"会以为是 bug。
+  const stackingBadge = (r: RuleRow) => {
+    const raw = r.params.stacking_mode
+    if (typeof raw !== 'string' || raw === 'stackable') return null
+    const key = STACKING_LABEL[raw as keyof typeof STACKING_LABEL]
+    return key === undefined ? null : <Badge variant="warning">{t(key)}</Badge>
   }
   const describeScope = (s: RuleRow['scope']) => {
     const parts: string[] = []
@@ -105,18 +122,18 @@ export function RulesPage() {
         title={t('admin:rulesTitle')}
         description={t('admin:rulesHint')}
         action={
-          <Button onClick={() => setDrawer(true)}>
+          <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
-            {t('admin:ruleUpsert')}
+            {t('admin:ruleCreate')}
           </Button>
         }
       />
-
-      {msg !== null && <p className="text-xs text-muted-foreground">{msg}</p>}
       {dialog}
 
       {rules.isError ? (
-        <ErrorState message={describeError(rules.error)} />
+        <ErrorState message={describeError(rules.error)} onRetry={() => void rules.refetch()} />
+      ) : rules.isPending ? (
+        <TableSkeleton rows={6} cols={7} />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:rulesEmptyHint')} />
       ) : (
@@ -137,7 +154,10 @@ export function RulesPage() {
               <Tr key={r.rule_code}>
                 <Td className="font-mono text-xs">{r.rule_code}</Td>
                 <Td>
-                  <Badge>{r.rule_type}</Badge>
+                  <div className="flex items-center gap-1">
+                    <Badge>{r.rule_type}</Badge>
+                    {stackingBadge(r)}
+                  </div>
                 </Td>
                 <Td className="max-w-64 truncate text-xs">{describeParams(r)}</Td>
                 <Td className="max-w-64 truncate text-xs text-muted-foreground">
@@ -151,6 +171,7 @@ export function RulesPage() {
                 </Td>
                 <Td>
                   <div className="flex items-center gap-0.5">
+                    <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer(r)} />
                     <IconButton
                       icon={r.enabled ? PowerOff : Power}
                       label={r.enabled ? t('common:disabled') : t('common:enabled')}
@@ -177,11 +198,12 @@ export function RulesPage() {
         </Table>
       )}
 
-      {drawer && (
+      {drawer !== null && (
         <RuleDrawer
-          onClose={() => setDrawer(false)}
+          initial={drawer === 'create' ? undefined : drawer}
+          onClose={() => setDrawer(null)}
           onDone={() => {
-            setMsg(t('admin:requiresPublish'))
+            toast.warning(t('admin:requiresPublish'))
             invalidate()
           }}
         />

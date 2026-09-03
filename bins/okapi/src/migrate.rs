@@ -5,11 +5,17 @@
 //! 导出（在 new-api 库上执行，任一能出 JSONL 的方式均可，如 mysql-shell
 //! `util.exportTable` 或 `SELECT JSON_OBJECT(...)`）：
 //!   users.jsonl    ：id, username, email, role, status, quota, "group"
-//!   tokens.jsonl   ：user_id, name, key, status, expired_time
-//!   channels.jsonl ：name, type, key, base_url, models, priority, weight, status
+//!   tokens.jsonl   ：user_id, name, key, status, expired_time, "group"
+//!   channels.jsonl ：name, type, key, base_url, models, priority, weight, status, "group"
 //!
 //! 语义：quota→micro ×2（500000 quota = $1）；幂等 upsert；余额走
 //! billing_events（actor system:migrate）+ Redis credit；日志表不迁。
+//!
+//! 分组映射（IMPLEMENTATION §11.14）：new-api 的"分组"同时是价档与渠道集合，Okapi 拆成
+//! 价格分组 + 渠道池。每个出现过的分组名 G 建同名池 `G` 与同名价格分组 `G`（倍率 1，
+//! 站长事后按 GroupRatio 调）并让分组指向该池；渠道 `group="default,vip"` → 入 default 与
+//! vip 两个池；用户 `group` → user_groups；令牌 `group`（非 auto/空）→ group_override。
+//! new-api 的 `auto` 令牌分组没有一一对应物（我方靠池级降级表达），按跟随用户分组处理。
 //!
 //! ## 老 ok-api：JSONL 五表导出（PG `\copy (SELECT row_to_json(t)) TO ...`）
 //!
@@ -154,6 +160,22 @@ pub async fn run_newapi(
         .await?;
         user_map.insert(src_id, user_id);
 
+        // 用户分组 → user_groups（同名价格分组按需建，指向同名池）
+        if let Some(group) = s(&row, "group")
+            .map(str::trim)
+            .filter(|g| !g.is_empty() && *g != "default")
+        {
+            ensure_group_and_pool(pg, group).await?;
+            sqlx::query!(
+                r#"INSERT INTO user_groups (user_id, group_code, priority) VALUES ($1, $2, 10)
+                   ON CONFLICT (user_id, group_code) DO NOTHING"#,
+                user_id,
+                group
+            )
+            .execute(pg)
+            .await?;
+        }
+
         // 余额：幂等锚 = 每用户一条 newapi_import 事件
         if balance_micro > 0 {
             let already = sqlx::query_scalar!(
@@ -211,17 +233,26 @@ pub async fn run_newapi(
         } else {
             2
         };
+        // 令牌分组：new-api 令牌可钉住某分组（价随组走）；auto / 空 = 跟随用户分组
+        let token_group = s(&row, "group")
+            .map(str::trim)
+            .filter(|g| !g.is_empty() && *g != "auto" && *g != "default");
+        if let Some(g) = token_group {
+            ensure_group_and_pool(pg, g).await?;
+        }
         sqlx::query!(
             r#"
-            INSERT INTO api_keys (user_id, key_hash, key_prefix, name, status)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (key_hash) DO UPDATE SET status = EXCLUDED.status
+            INSERT INTO api_keys (user_id, key_hash, key_prefix, name, status, group_override)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (key_hash) DO UPDATE SET status = EXCLUDED.status,
+                                                 group_override = EXCLUDED.group_override
             "#,
             new_user,
             key_hash,
             prefix,
             name,
-            row_status
+            row_status,
+            token_group
         )
         .execute(pg)
         .await?;
@@ -253,6 +284,17 @@ pub async fn run_newapi(
                     .collect()
             })
             .unwrap_or_default();
+        // 渠道分组 CSV → 所属池；空 = 只进 default 池
+        let channel_groups: Vec<String> = s(&row, "group")
+            .map(|g| {
+                g.split(',')
+                    .map(str::trim)
+                    .filter(|x| !x.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .unwrap_or_else(|| vec![okapi_store::channels::DEFAULT_POOL.to_owned()]);
         stats.channels += 1;
         if dry_run {
             continue;
@@ -319,9 +361,45 @@ pub async fn run_newapi(
             .execute(pg)
             .await?;
         }
+        // 池成员关系：按 new-api 的分组 CSV 覆盖式写入（每个分组名一个同名池）
+        let target = sqlx::query_scalar!(
+            r#"SELECT id FROM channels WHERE name = $1 AND deleted_at IS NULL"#,
+            name
+        )
+        .fetch_one(pg)
+        .await?;
+        for g in &channel_groups {
+            ensure_group_and_pool(pg, g).await?;
+        }
+        okapi_store::admin::set_channel_pool_codes(pg, target, &channel_groups).await?;
     }
 
     Ok(stats)
+}
+
+/// new-api 分组名 → 同名池 + 同名价格分组（倍率 1，站长事后按 GroupRatio 调）。
+/// `default` 已由迁移 0002 内置，直接跳过。幂等。
+async fn ensure_group_and_pool(pg: &PgPool, group: &str) -> anyhow::Result<()> {
+    if group == okapi_store::channels::DEFAULT_POOL {
+        return Ok(());
+    }
+    sqlx::query!(
+        r#"INSERT INTO channel_pools (pool_code, description, routing_strategy)
+           VALUES ($1, 'new-api 分组导入', 'priority_weighted')
+           ON CONFLICT (pool_code) DO NOTHING"#,
+        group
+    )
+    .execute(pg)
+    .await?;
+    sqlx::query!(
+        r#"INSERT INTO price_groups (group_code, group_ratio, description, pool_code)
+           VALUES ($1, 1, 'new-api 分组导入（倍率待按 GroupRatio 调整）', $1)
+           ON CONFLICT (group_code) DO NOTHING"#,
+        group
+    )
+    .execute(pg)
+    .await?;
+    Ok(())
 }
 
 // ============ 老 ok-api（Go/UUID schema） ============

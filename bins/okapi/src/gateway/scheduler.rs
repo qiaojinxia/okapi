@@ -5,7 +5,9 @@
 //! - `least_latency`：按时延 EWMA 升序，无样本者按本层中位数插队。
 //!
 //! priority 分层在两种策略下都严格生效——层是运维显式表达的"先用谁"，
-//! 不该被时延或权重推翻。
+//! 不该被时延或权重推翻。分层键是 (pool_rank, priority)：主池的全部层排完才进
+//! 降级池（IMPLEMENTATION §11.14）——降级池里优先级再高的渠道，也是"主池打不通
+//! 才轮到"的备胎。
 
 use okapi_store::ChannelCandidate;
 use rand::RngExt;
@@ -33,16 +35,24 @@ fn effective_weight(c: &ChannelCandidate) -> i64 {
     (i64::from(c.weight.max(1)) * 1000 / c.cost_milli.max(1)).max(1)
 }
 
-/// 按 priority 分层（降序）。
-fn layer(candidates: Vec<ChannelCandidate>) -> Vec<(i32, Vec<ChannelCandidate>)> {
-    let mut groups: Vec<(i32, Vec<ChannelCandidate>)> = Vec::new();
+/// 分层键：池序升序（主池先）、层内 priority 降序。
+type LayerKey = (i32, std::cmp::Reverse<i32>);
+
+fn layer_key(c: &ChannelCandidate) -> LayerKey {
+    (c.pool_rank, std::cmp::Reverse(c.priority))
+}
+
+/// 按 (pool_rank 升序, priority 降序) 分层。
+fn layer(candidates: Vec<ChannelCandidate>) -> Vec<(LayerKey, Vec<ChannelCandidate>)> {
+    let mut groups: Vec<(LayerKey, Vec<ChannelCandidate>)> = Vec::new();
     for cand in candidates {
-        match groups.iter_mut().find(|(p, _)| *p == cand.priority) {
+        let key = layer_key(&cand);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
             Some((_, bucket)) => bucket.push(cand),
-            None => groups.push((cand.priority, vec![cand])),
+            None => groups.push((key, vec![cand])),
         }
     }
-    groups.sort_by_key(|(priority, _)| std::cmp::Reverse(*priority));
+    groups.sort_by_key(|(key, _)| *key);
     groups
 }
 
@@ -116,7 +126,39 @@ mod tests {
             strip_request_fields: Vec::new(),
             capabilities: serde_json::json!({}),
             cost_milli,
+            pool_rank: 0,
         }
+    }
+
+    fn cand_in_pool(key: i64, pool_rank: i32, priority: i32) -> ChannelCandidate {
+        let mut c = cand(priority, 1, 1000);
+        c.channel_key_id = key;
+        c.pool_rank = pool_rank;
+        c
+    }
+
+    /// 降级池整体排在主池之后：备池里 priority 100 的渠道也要等主池 priority 0 的层用完。
+    #[test]
+    fn fallback_pool_layers_after_primary() {
+        let ordered = order_candidates(vec![
+            cand_in_pool(1, 1, 100),
+            cand_in_pool(2, 0, 0),
+            cand_in_pool(3, 0, 10),
+        ]);
+        assert_eq!(
+            ordered.iter().map(|c| c.channel_key_id).collect::<Vec<_>>(),
+            vec![3, 2, 1],
+            "主池按 priority 降序排完，降级池最后"
+        );
+        let mut lat = HashMap::new();
+        lat.insert(1, 1_u32);
+        lat.insert(2, 900);
+        let by_lat =
+            order_candidates_by_latency(vec![cand_in_pool(1, 1, 0), cand_in_pool(2, 0, 0)], &lat);
+        assert_eq!(
+            by_lat[0].channel_key_id, 2,
+            "least_latency 也不能把降级池提到主池之前"
+        );
     }
 
     /// 成本感知：便宜渠道权重放大、贵渠道缩小；下限 1 防止饿死。

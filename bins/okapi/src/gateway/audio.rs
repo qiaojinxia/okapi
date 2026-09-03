@@ -42,6 +42,7 @@ fn calc_ctx(
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
         monthly_tokens: rules_in.monthly_tokens,
+        monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440))
             .unwrap_or(0),
         now_unix: now.timestamp(),
@@ -69,7 +70,7 @@ async fn first_candidate(
     let rows = okapi_store::channels::candidates_for_model(
         &state.pg,
         canonical,
-        key.pool_code.as_deref(),
+        &key.pool_chain(),
         state.master_key.as_deref(),
     )
     .await?;

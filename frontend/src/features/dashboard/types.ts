@@ -15,6 +15,8 @@ export interface OverviewBucket {
 export interface OverviewResp {
   days: number
   today: OverviewBucket
+  /// 昨日全天（环比锚点；后端按 mv_user_day 整日聚合，非"昨日同一时刻"）。
+  yesterday: OverviewBucket
   window: OverviewBucket
 }
 

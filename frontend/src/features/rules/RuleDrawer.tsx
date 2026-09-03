@@ -1,48 +1,96 @@
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { RuleType } from '@/features/rules/types'
+import type { RuleRow, RuleType, StackingMode } from '@/features/rules/types'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
-import { RULE_TYPES, TYPE_HINT, TYPE_LABEL } from '@/features/rules/types'
+import {
+  RULE_TYPES,
+  STACKING_LABEL,
+  STACKING_MODES,
+  TYPE_HINT,
+  TYPE_LABEL,
+  WEEKDAY_LABEL,
+} from '@/features/rules/types'
 import { Select } from '@/components/ui/select'
 import { TagInput } from '@/components/ui/tag-input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
+const str = (v: unknown, fallback = ''): string =>
+  v === undefined || v === null ? fallback : String(v)
+
 /// 规则抽屉。按类型只显示该类型用得到的参数——四种类型的必填项互不相同，
 /// 全部平铺会让人不知道哪几个字段对当前类型有效。
-export function RuleDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+///
+/// `initial` 给出即为编辑：全部字段回填、rule_code 锁定（它是规则的身份，
+/// 后端按 code upsert）。此前没有编辑入口，改一条规则要记住 code 重新走新建表单。
+export function RuleDrawer({
+  onClose,
+  onDone,
+  initial,
+}: {
+  onClose: () => void
+  onDone: () => void
+  initial?: RuleRow
+}) {
   const { t } = useTranslation()
+  const editing = initial !== undefined
+  const p = initial?.params ?? {}
   const [msg, setMsg] = useState<string | null>(null)
-  const [ruleType, setRuleType] = useState<RuleType>('discount')
+  const [ruleType, setRuleType] = useState<RuleType>(
+    (initial?.rule_type as RuleType | undefined) ?? 'discount',
+  )
   const [form, setForm] = useState({
-    rule_code: '',
-    multiplier: '0.9',
-    min_monthly_tokens: '',
-    start_minute: '',
-    end_minute: '',
-    priority: '0',
+    rule_code: initial?.rule_code ?? '',
+    multiplier: str(p.multiplier, '0.9'),
+    min_monthly_tokens: Number(p.min_monthly_tokens ?? 0) > 0 ? str(p.min_monthly_tokens) : '',
+    min_monthly_spend_usd:
+      Number(p.min_monthly_spend_micro ?? 0) > 0
+        ? String(Number(p.min_monthly_spend_micro) / 1_000_000)
+        : '',
+    start_minute: p.start_minute === undefined ? '' : str(p.start_minute),
+    end_minute: p.end_minute === undefined ? '' : str(p.end_minute),
+    priority: str(initial?.priority, '0'),
   })
-  const [groups, setGroups] = useState<string[]>([])
-  const [models, setModels] = useState<string[]>([])
-  const [users, setUsers] = useState<string[]>([])
+  const [stacking, setStacking] = useState<StackingMode>(
+    (typeof p.stacking_mode === 'string' ? (p.stacking_mode as StackingMode) : undefined) ??
+      'stackable',
+  )
+  // 全不勾 = 每天生效（不发字段）；勾了才收窄
+  const [weekdays, setWeekdays] = useState<Set<number>>(
+    new Set(Array.isArray(p.weekdays) ? (p.weekdays as number[]) : []),
+  )
+  const [groups, setGroups] = useState<string[]>(initial?.scope.groups ?? [])
+  const [models, setModels] = useState<string[]>(initial?.scope.models ?? [])
+  const [users, setUsers] = useState<string[]>((initial?.scope.users ?? []).map(String))
 
   const upsert = useMutation({
-    mutationFn: () =>
-      apiFetch('/admin/pricing/rules', {
+    mutationFn: () => {
+      // 消费阈值以 USD 输入、以 micro 整数落库（配置值一次换算，非计费热路径）
+      const spendUsd = Number(form.min_monthly_spend_usd)
+      const spendMicro =
+        ruleType === 'volume' && Number.isFinite(spendUsd) && spendUsd > 0
+          ? Math.round(spendUsd * 1_000_000)
+          : undefined
+      return apiFetch('/admin/pricing/rules', {
         method: 'POST',
         body: {
           rule_code: form.rule_code.trim(),
           rule_type: ruleType,
           multiplier: form.multiplier,
           priority: Number(form.priority) || 0,
+          stacking_mode: stacking,
           // 后端按 rule_type 校验必填项，这里只负责不发送无关字段
           min_monthly_tokens:
             ruleType === 'volume' ? Number(form.min_monthly_tokens) || 0 : undefined,
+          min_monthly_spend_micro: spendMicro,
           start_minute: ruleType === 'time_based' ? Number(form.start_minute) || 0 : undefined,
           end_minute: ruleType === 'time_based' ? Number(form.end_minute) || 0 : undefined,
+          weekdays:
+            ruleType === 'time_based' && weekdays.size > 0 ? [...weekdays].sort() : undefined,
           // 空数组要发成 undefined：{} 与 {"groups":[]} 语义不同，后者会命中零个分组
           scope: {
             groups: groups.length > 0 ? groups : undefined,
@@ -50,7 +98,8 @@ export function RuleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
             users: users.length > 0 ? users.map(Number).filter((n) => !Number.isNaN(n)) : undefined,
           },
         },
-      }),
+      })
+    },
     onSuccess: () => {
       onDone()
       onClose()
@@ -62,7 +111,7 @@ export function RuleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
     <Drawer
       open
       onClose={onClose}
-      title={t('admin:ruleUpsert')}
+      title={editing ? t('admin:ruleEdit', { code: initial.rule_code }) : t('admin:ruleCreate')}
       description={t('admin:ruleDrawerDesc')}
       footer={
         <>
@@ -98,6 +147,8 @@ export function RuleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
             className="font-mono text-sm"
             value={form.rule_code}
             placeholder="night-discount"
+            // 编辑态锁定：code 是规则身份，改它等于新建一条、旧的留着
+            disabled={editing}
             onChange={(e) => setForm((f) => ({ ...f, rule_code: e.target.value }))}
           />
         </div>
@@ -124,15 +175,29 @@ export function RuleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
             />
           </div>
           {ruleType === 'volume' && (
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="r-thr">{t('admin:ruleThreshold')}</Label>
-              <Input
-                id="r-thr"
-                inputMode="numeric"
-                value={form.min_monthly_tokens}
-                onChange={(e) => setForm((f) => ({ ...f, min_monthly_tokens: e.target.value }))}
-              />
-            </div>
+            <>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="r-thr">{t('admin:ruleThreshold')}</Label>
+                <Input
+                  id="r-thr"
+                  inputMode="numeric"
+                  value={form.min_monthly_tokens}
+                  onChange={(e) => setForm((f) => ({ ...f, min_monthly_tokens: e.target.value }))}
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="r-spend">{t('admin:ruleSpendThreshold')}</Label>
+                <Input
+                  id="r-spend"
+                  inputMode="decimal"
+                  placeholder="50"
+                  value={form.min_monthly_spend_usd}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, min_monthly_spend_usd: e.target.value }))
+                  }
+                />
+              </div>
+            </>
           )}
           {ruleType === 'time_based' && (
             <>
@@ -162,9 +227,46 @@ export function RuleDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
         {ruleType === 'time_based' && (
           <p className="text-xs text-muted-foreground">{t('admin:ruleMinuteHint')}</p>
         )}
+        {ruleType === 'volume' && (
+          <p className="text-xs text-muted-foreground">{t('admin:ruleVolumeAxesHint')}</p>
+        )}
         {ruleType === 'surge' && (
           <p className="text-xs text-muted-foreground">{t('admin:ruleSurgeHint')}</p>
         )}
+        {ruleType === 'time_based' && (
+          <div className="flex flex-col gap-1.5">
+            <Label>{t('admin:ruleWeekdays')}</Label>
+            <div className="flex flex-wrap gap-3">
+              {WEEKDAY_LABEL.map((key, day) => (
+                <Checkbox
+                  key={key}
+                  label={t(key)}
+                  checked={weekdays.has(day)}
+                  onChange={() =>
+                    setWeekdays((prev) => {
+                      const next = new Set(prev)
+                      if (next.has(day)) next.delete(day)
+                      else next.add(day)
+                      return next
+                    })
+                  }
+                />
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">{t('admin:ruleWeekdaysHint')}</p>
+          </div>
+        )}
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="r-stacking">{t('admin:stackingMode')}</Label>
+          <Select
+            id="r-stacking"
+            className="w-56"
+            value={stacking}
+            onChange={(v) => setStacking(v as StackingMode)}
+            options={STACKING_MODES.map((m) => ({ value: m, label: t(STACKING_LABEL[m]) }))}
+          />
+          <p className="text-xs text-muted-foreground">{t('admin:stackingModeHint')}</p>
+        </div>
       </FieldGroup>
 
       <FieldGroup title={t('admin:ruleScope')} hint={t('admin:ruleScopeHint')}>

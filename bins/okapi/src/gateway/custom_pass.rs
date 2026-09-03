@@ -71,7 +71,7 @@ async fn handle(
     let channel = okapi_store::channels::custom_pass_channel(
         &state.pg,
         channel_id,
-        key.pool_code.as_deref(),
+        &key.pool_chain(),
         state.master_key.as_deref(),
     )
     .await?
@@ -107,6 +107,7 @@ async fn handle(
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
         monthly_tokens: rules_in.monthly_tokens,
+        monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
         surge_active: rules_in.surge_active,

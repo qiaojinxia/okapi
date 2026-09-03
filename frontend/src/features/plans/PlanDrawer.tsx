@@ -10,15 +10,37 @@ import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
-export function PlanDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+/// 套餐抽屉；`initial` 给出即为编辑（plan_code 锁定，后端按 code upsert）。
+/// 编辑态回填所需的最小字段（与 PlansPage 的 PlanRow 兼容）。
+export interface PlanInitial {
+  plan_code: string
+  display_name: string
+  grant_micro: number
+  group_code: string | null
+  balance_valid_days: number | null
+}
+
+export function PlanDrawer({
+  onClose,
+  onDone,
+  initial,
+}: {
+  onClose: () => void
+  onDone: () => void
+  initial?: PlanInitial
+}) {
   const { t, i18n } = useTranslation()
+  const editing = initial !== undefined
   const [msg, setMsg] = useState<string | null>(null)
   const [form, setForm] = useState({
-    plan_code: '',
-    display_name: '',
-    grant_usd: '10',
-    group_code: '',
-    balance_valid_days: '',
+    plan_code: initial?.plan_code ?? '',
+    display_name: initial?.display_name ?? '',
+    grant_usd: initial ? String(initial.grant_micro / 1_000_000) : '10',
+    group_code: initial?.group_code ?? '',
+    balance_valid_days:
+      initial?.balance_valid_days === null || initial?.balance_valid_days === undefined
+        ? ''
+        : String(initial.balance_valid_days),
   })
 
   // 分组从后端拉，避免手输不存在的 group_code（后端会 400，但太晚）
@@ -55,7 +77,7 @@ export function PlanDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
     <Drawer
       open
       onClose={onClose}
-      title={t('admin:planUpsert')}
+      title={editing ? t('admin:planEdit', { code: initial.plan_code }) : t('admin:planCreate')}
       description={t('admin:planDrawerDesc')}
       footer={
         <>
@@ -81,6 +103,7 @@ export function PlanDrawer({ onClose, onDone }: { onClose: () => void; onDone: (
               className="font-mono text-sm"
               value={form.plan_code}
               placeholder="starter"
+              disabled={editing}
               onChange={(e) => setForm((f) => ({ ...f, plan_code: e.target.value }))}
             />
           </div>

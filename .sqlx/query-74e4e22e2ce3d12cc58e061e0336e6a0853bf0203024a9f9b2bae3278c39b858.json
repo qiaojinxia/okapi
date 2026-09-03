@@ -1,0 +1,81 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.group_code AS code, g.description AS name, g.group_ratio::text AS ratio,\n                  g.pool_code, g.self_select, p.fallback_pool_code\n           FROM price_groups g\n           LEFT JOIN channel_pools p ON p.pool_code = g.pool_code\n           ORDER BY g.sort_order, g.group_code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "ratio",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "pool_code"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "self_select",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "self_select"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "fallback_pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "fallback_pool_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      null,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "74e4e22e2ce3d12cc58e061e0336e6a0853bf0203024a9f9b2bae3278c39b858"
+}

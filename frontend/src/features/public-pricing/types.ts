@@ -11,4 +11,6 @@ export interface PricingModel {
   audio_completion_ratio: string | null
   image_ratio: string | null
   per_call_price_micro: number | null
+  /// 可用分组（按池可见性折算的静态视图）；空 = 当前没有渠道服务该模型。
+  groups: string[]
 }

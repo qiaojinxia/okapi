@@ -43,7 +43,8 @@ def used_keys() -> dict[str, set[str]]:
         if '/locales/' in f:
             continue
         src = open(f, encoding='utf-8').read()
-        for m in re.finditer(r"t\('([A-Za-z0-9_]+:[A-Za-z0-9_]+)'", src):
+        # 前置断言排除 `format('HH:mm')` 这类以 t 结尾的方法名——那不是翻译调用
+        for m in re.finditer(r"(?<![A-Za-z0-9_.$])t\('([A-Za-z0-9_]+:[A-Za-z0-9_]+)'", src):
             out.setdefault(m.group(1), set()).add(f)
     return out
 

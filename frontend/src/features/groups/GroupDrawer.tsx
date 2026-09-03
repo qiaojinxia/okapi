@@ -6,6 +6,9 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
+import { PoolReach } from '@/features/pools/PoolReach'
+import { DEFAULT_POOL } from '@/features/pools/types'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
 import { describeError } from '@/lib/i18n'
@@ -21,11 +24,13 @@ export function GroupDrawer({
 }) {
   const { t } = useTranslation()
   const [msg, setMsg] = useState<string | null>(null)
+  // 分组必有池：新建缺省 default（新渠道也缺省进 default，两端对齐后"建完就能用"）
   const [form, setForm] = useState({
     group_code: group?.group_code ?? '',
     group_ratio: group?.group_ratio ?? '1',
     description: group?.description ?? '',
-    pool_code: group?.pool_code ?? '',
+    pool_code: group?.pool_code ?? DEFAULT_POOL,
+    self_select: group?.self_select ?? false,
   })
 
   // 池清单从后端取：手输池代码会因不存在而被 FK 拒绝，且提示不直观
@@ -42,8 +47,8 @@ export function GroupDrawer({
           group_code: form.group_code.trim(),
           group_ratio: form.group_ratio.trim(),
           description: form.description.trim(),
-          // 空串表示"不限"，要发 null 而不是 ""（后者会被当成池代码去查 FK）
-          pool_code: form.pool_code === '' ? null : form.pool_code,
+          pool_code: form.pool_code,
+          self_select: form.self_select,
         },
       }),
     onSuccess: () => {
@@ -107,17 +112,26 @@ export function GroupDrawer({
         </div>
       </FieldGroup>
 
-      <FieldGroup title={t('admin:poolMembership')} hint={t('admin:groupPoolHint')}>
+      <FieldGroup title={t('admin:groupPool')} hint={t('admin:groupPoolHint')}>
         <Select
           id="g-pool"
           className="w-56"
           value={form.pool_code}
           onChange={(v) => setForm((f) => ({ ...f, pool_code: v }))}
-          placeholder={t('admin:poolUnlimited')}
           options={(pools.data?.data ?? []).map((p) => ({
             value: p.pool_code,
-            label: p.pool_code,
+            label: p.pool_code === DEFAULT_POOL ? t('admin:poolDefaultOption') : p.pool_code,
           }))}
+        />
+        {/* 选了池就地看它给得出什么：分组 → 池 → 渠道 → 模型 三跳一处看全 */}
+        <PoolReach poolCode={form.pool_code} />
+      </FieldGroup>
+
+      <FieldGroup title={t('admin:groupSelfSelect')} hint={t('admin:groupSelfSelectHint')}>
+        <Switch
+          label={t('admin:groupSelfSelectLabel')}
+          checked={form.self_select}
+          onChange={(v) => setForm((f) => ({ ...f, self_select: v }))}
         />
       </FieldGroup>
     </Drawer>

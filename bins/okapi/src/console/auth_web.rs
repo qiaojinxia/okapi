@@ -132,27 +132,32 @@ pub async fn register(
     if !email.contains('@') || req.username.trim().is_empty() || req.password.len() < 8 {
         return Err(AppError::bad_request().with_param("register_fields"));
     }
+    // 注册策略（§11.16）：关闭 / 邀请制 / 邮箱域名——在 Turnstile 与写库之前判定
+    let policy = super::registration::RegistrationPolicy::load(&state).await;
+    super::registration::check(&policy, &email)?;
+    let inviter = super::registration::resolve_inviter(&state, req.aff_code.as_deref()).await?;
+    if policy.mode == super::registration::RegisterMode::InviteOnly && inviter.is_none() {
+        return Err(AppError::new(StatusCode::FORBIDDEN, "invite_required"));
+    }
     verify_turnstile(&state, req.turnstile_token.as_deref()).await?;
     let user_id = identity::register_user(&state.pg, &email, req.username.trim(), &req.password)
         .await?
         .ok_or_else(|| AppError::new(StatusCode::CONFLICT, "email_taken"))?;
-    bind_inviter(&state, user_id, req.aff_code.as_deref()).await;
+    bind_inviter(&state, user_id, inviter).await;
+    super::registration::grant_credits(&state, &policy, user_id, inviter).await;
     Ok(Json(json!({ "user_id": user_id })))
 }
 
-/// aff 邀请绑定（M4）：注册主流程不因 aff 失败——无效码/自邀静默忽略。
-async fn bind_inviter(state: &AppState, user_id: i64, aff_code: Option<&str>) {
-    let Some(code) = aff_code.map(str::trim).filter(|c| !c.is_empty()) else {
+/// aff 邀请绑定（M4）：邀请人已在策略层解析；自邀不可能（新用户还没有 aff 码）。
+/// 绑定失败不阻注册——邀请关系是增益信息。
+async fn bind_inviter(state: &AppState, user_id: i64, inviter: Option<i64>) {
+    let Some(inviter_id) = inviter else {
         return;
     };
     let result = sqlx::query!(
-        r#"
-        UPDATE users SET inviter_id = inviter.id, updated_at = now()
-        FROM (SELECT id FROM users WHERE aff_code = $2 AND deleted_at IS NULL) AS inviter
-        WHERE users.id = $1 AND inviter.id <> $1
-        "#,
+        r#"UPDATE users SET inviter_id = $2, updated_at = now() WHERE id = $1 AND $2 <> $1"#,
         user_id,
-        code
+        inviter_id
     )
     .execute(&state.pg)
     .await;
@@ -237,28 +242,21 @@ pub async fn login(
 ) -> Result<Response, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "login", 10).await?;
     let email = req.email.trim().to_lowercase();
-    let user = identity::find_login_user(&state.pg, &email, &req.password)
-        .await?
-        .ok_or_else(|| AppError::unauthorized("invalid_credentials"))?;
+    let ip = crate::gateway::clients::detect_client_ip(&headers)
+        .or_else(|| conn.0.as_ref().map(|a| a.ip().to_string()));
 
-    if user.totp_enabled {
-        let Some(code) = req.totp_code.as_deref() else {
-            return Err(AppError::unauthorized("totp_required"));
-        };
-        let master = state
-            .master_key
-            .as_deref()
-            .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"))?;
-        let sealed = user
-            .totp_secret_ciphertext
-            .as_deref()
-            .ok_or_else(AppError::internal)?;
-        let secret =
-            identity::open_totp_secret(master, sealed).map_err(|_| AppError::internal())?;
-        if !identity::verify_totp(&secret, code, chrono::Utc::now().timestamp()) {
-            return Err(AppError::unauthorized("totp_invalid"));
+    // 凭证与 TOTP 校验单独成段：成功与失败都要落审计（§3.5 登录 = 审计 user.login），
+    // 失败原因只进审计，对客户端仍是同一个 401
+    let verified = verify_login(&state, &email, &req).await;
+    let user = match verified {
+        Ok(user) => user,
+        Err((reason, err)) => {
+            super::audit::record_login(&state, &email, None, false, Some(reason), ip, &headers)
+                .await;
+            return Err(err);
         }
-    }
+    };
+    super::audit::record_login(&state, &email, Some(user.user_id), true, None, ip, &headers).await;
 
     let sid = rand_token(48);
     state.sched.web_session_set(&sid, user.user_id).await;
@@ -268,6 +266,45 @@ pub async fn login(
         resp.headers_mut().insert(header::SET_COOKIE, value);
     }
     Ok(resp)
+}
+
+/// 密码 + TOTP 校验；`Err((审计原因, 对外错误))`。
+async fn verify_login(
+    state: &AppState,
+    email: &str,
+    req: &LoginReq,
+) -> Result<identity::LoginUser, (&'static str, AppError)> {
+    let user = identity::find_login_user(&state.pg, email, &req.password)
+        .await
+        .map_err(|e| ("store_error", AppError::from(e)))?
+        .ok_or_else(|| {
+            (
+                "invalid_credentials",
+                AppError::unauthorized("invalid_credentials"),
+            )
+        })?;
+
+    if user.totp_enabled {
+        let Some(code) = req.totp_code.as_deref() else {
+            return Err(("totp_required", AppError::unauthorized("totp_required")));
+        };
+        let master = state.master_key.as_deref().ok_or_else(|| {
+            (
+                "totp_disabled",
+                AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"),
+            )
+        })?;
+        let sealed = user
+            .totp_secret_ciphertext
+            .as_deref()
+            .ok_or_else(|| ("totp_secret_missing", AppError::internal()))?;
+        let secret = identity::open_totp_secret(master, sealed)
+            .map_err(|_| ("totp_secret_unreadable", AppError::internal()))?;
+        if !identity::verify_totp(&secret, code, chrono::Utc::now().timestamp()) {
+            return Err(("totp_invalid", AppError::unauthorized("totp_invalid")));
+        }
+    }
+    Ok(user)
 }
 
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
@@ -337,6 +374,9 @@ pub struct CreateKeyReq {
     /// 模型白名单；缺省/空数组 = 不限。新建时填写只可能收窄本 key，无提权面。
     #[serde(default)]
     pub model_allowlist: Option<Vec<String>>,
+    /// 档位（须在 /api/me/groups 可选集合内）；缺省 = 跟随用户分组。
+    #[serde(default)]
+    pub group_code: Option<String>,
 }
 
 pub async fn create_key(
@@ -349,15 +389,24 @@ pub async fn create_key(
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
     let name = req.name.as_deref().map_or("web", str::trim);
     let allowlist = super::portal::normalize_allowlist(req.model_allowlist);
+    let group_code = req
+        .group_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(code) = group_code {
+        super::portal::ensure_selectable(&state, user_id, code).await?;
+    }
     let key_id = sqlx::query_scalar!(
-        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id"#,
+        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id"#,
         user_id,
         key_hash,
         token.chars().take(16).collect::<String>(),
         name,
         req.expires_at,
-        allowlist
+        allowlist,
+        group_code
     )
     .fetch_one(&state.pg)
     .await

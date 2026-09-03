@@ -58,6 +58,8 @@ pub struct ModelListRow {
     pub per_call_price_micro: Option<i64>,
     pub tier_expr: Option<String>,
     pub tier_ratios: Option<serde_json::Value>,
+    /// 模型级降级链（零候选时按序改投，DESIGN §3.4.1）。
+    pub fallback_models: Vec<String>,
 }
 
 /// 模型配置列表（含定价四轴）。倍率以 `::text` 出库保精度，展示层不做浮点运算。
@@ -66,7 +68,7 @@ pub async fn list_models(pool: &PgPool) -> Result<Vec<ModelListRow>, StoreError>
     let rows = sqlx::query!(
         r#"
         SELECT m.model_name, m.display_name, m.vendor, m.status, m.sort_order,
-               m.capabilities, m.context_window,
+               m.capabilities, m.context_window, m.fallback_models,
                p.pricing_mode            AS "pricing_mode?",
                p.model_ratio::text       AS model_ratio,
                p.completion_ratio::text  AS completion_ratio,
@@ -104,6 +106,7 @@ pub async fn list_models(pool: &PgPool) -> Result<Vec<ModelListRow>, StoreError>
             per_call_price_micro: r.per_call_price_micro,
             tier_expr: r.tier_expr,
             tier_ratios: r.tier_ratios,
+            fallback_models: serde_json::from_value(r.fallback_models).unwrap_or_default(),
         })
         .collect())
 }
@@ -117,8 +120,12 @@ pub struct GroupListRow {
     pub sort_order: i32,
     /// 绑定该分组的用户数（删除前占用检查）。
     pub user_count: i64,
-    /// 该分组的池内渠道数（无池 = 0，语义是"不限"而非"零个"，由前端区分展示）。
+    /// 该分组的池（分组必有池，缺省 default）。
+    pub pool_code: String,
+    /// 该分组的池内渠道数。
     pub channel_count: i64,
+    /// 用户可否在门户为自己的 key 自选此分组。
+    pub self_select: bool,
 }
 
 /// 渠道池列表行。
@@ -126,25 +133,131 @@ pub struct PoolListRow {
     pub pool_code: String,
     pub description: Option<String>,
     pub routing_strategy: String,
+    /// 本池无候选时退到的池（单跳）。
+    pub fallback_pool_code: Option<String>,
     /// 池内渠道数。
     pub channel_count: i64,
-    /// 引用该池的分组数 + 令牌数（>0 时删除会被拒）。
+    /// 引用该池的分组数 + 令牌数 + 把它当降级目标的池数（>0 时删除会被拒）。
     pub group_count: i64,
     pub key_count: i64,
+    pub fallback_ref_count: i64,
+}
+
+/// 池详情的一个成员渠道。
+#[derive(Debug, Serialize)]
+pub struct PoolMemberRow {
+    pub channel_id: i64,
+    pub name: String,
+    pub provider: String,
+    pub status: i16,
+    pub priority: i32,
+    pub priority_override: Option<i32>,
+    pub weight_override: Option<i32>,
+    pub models: Vec<String>,
+    /// 该渠道当前可用 key 数（status=1 且不在冷却）。
+    pub active_keys: i64,
+}
+
+/// 池详情：成员、能服务的模型并集、引用它的分组。
+/// 分组抽屉与池抽屉都用它把"分组 → 池 → 渠道 → 模型"三跳在一处看全。
+#[derive(Debug, Serialize)]
+pub struct PoolDetail {
+    pub pool_code: String,
+    pub description: Option<String>,
+    pub routing_strategy: String,
+    pub fallback_pool_code: Option<String>,
+    pub members: Vec<PoolMemberRow>,
+    pub models: Vec<String>,
+    pub groups: Vec<String>,
+}
+
+pub async fn pool_detail(pool: &PgPool, pool_code: &str) -> Result<Option<PoolDetail>, StoreError> {
+    let head = sqlx::query!(
+        r#"SELECT pool_code, description, routing_strategy, fallback_pool_code
+           FROM channel_pools WHERE pool_code = $1"#,
+        pool_code
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(head) = head else {
+        return Ok(None);
+    };
+    let members = sqlx::query!(
+        r#"
+        SELECT c.id AS channel_id, c.name, c.provider, c.status, c.priority, c.models,
+               pc.priority_override, pc.weight_override,
+               (SELECT COUNT(*) FROM channel_keys k
+                 WHERE k.channel_id = c.id AND k.status = 1
+                   AND (k.cooldown_until IS NULL OR k.cooldown_until < now())) AS "active_keys!"
+        FROM pool_channels pc
+        JOIN channels c ON c.id = pc.channel_id
+        WHERE pc.pool_code = $1 AND c.deleted_at IS NULL
+        ORDER BY COALESCE(pc.priority_override, c.priority) DESC, c.id
+        "#,
+        pool_code
+    )
+    .fetch_all(pool)
+    .await?;
+    let groups = sqlx::query_scalar!(
+        r#"SELECT group_code FROM price_groups WHERE pool_code = $1 ORDER BY sort_order, group_code"#,
+        pool_code
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut models: Vec<String> = Vec::new();
+    let members: Vec<PoolMemberRow> = members
+        .into_iter()
+        .map(|r| {
+            let served: Vec<String> = serde_json::from_value(r.models).unwrap_or_default();
+            if r.status == 1 {
+                for m in &served {
+                    if !models.contains(m) {
+                        models.push(m.clone());
+                    }
+                }
+            }
+            PoolMemberRow {
+                channel_id: r.channel_id,
+                name: r.name,
+                provider: r.provider,
+                status: r.status,
+                priority: r.priority,
+                priority_override: r.priority_override,
+                weight_override: r.weight_override,
+                models: served,
+                active_keys: r.active_keys,
+            }
+        })
+        .collect();
+    models.sort();
+    Ok(Some(PoolDetail {
+        pool_code: head.pool_code,
+        description: head.description,
+        routing_strategy: head.routing_strategy,
+        fallback_pool_code: head.fallback_pool_code,
+        members,
+        models,
+        groups,
+    }))
 }
 
 pub async fn list_pools(pool: &PgPool) -> Result<Vec<PoolListRow>, StoreError> {
     let rows = sqlx::query!(
         r#"
-        SELECT p.pool_code, p.description, p.routing_strategy,
-               (SELECT COUNT(*) FROM pool_channels pc WHERE pc.pool_code = p.pool_code)
+        SELECT p.pool_code, p.description, p.routing_strategy, p.fallback_pool_code,
+               (SELECT COUNT(*) FROM pool_channels pc
+                  JOIN channels c ON c.id = pc.channel_id
+                 WHERE pc.pool_code = p.pool_code AND c.deleted_at IS NULL)
                    AS "channel_count!",
                (SELECT COUNT(*) FROM price_groups g WHERE g.pool_code = p.pool_code)
                    AS "group_count!",
                (SELECT COUNT(*) FROM api_keys k
-                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS "key_count!"
+                 WHERE k.pool_override = p.pool_code AND k.deleted_at IS NULL) AS "key_count!",
+               (SELECT COUNT(*) FROM channel_pools f
+                 WHERE f.fallback_pool_code = p.pool_code) AS "fallback_ref_count!"
         FROM channel_pools p
-        ORDER BY p.pool_code
+        ORDER BY (p.pool_code <> 'default'), p.pool_code
         "#
     )
     .fetch_all(pool)
@@ -155,9 +268,11 @@ pub async fn list_pools(pool: &PgPool) -> Result<Vec<PoolListRow>, StoreError> {
             pool_code: r.pool_code,
             description: r.description,
             routing_strategy: r.routing_strategy,
+            fallback_pool_code: r.fallback_pool_code,
             channel_count: r.channel_count,
             group_count: r.group_count,
             key_count: r.key_count,
+            fallback_ref_count: r.fallback_ref_count,
         })
         .collect())
 }
@@ -166,11 +281,12 @@ pub async fn list_groups(pool: &PgPool) -> Result<Vec<GroupListRow>, StoreError>
     let rows = sqlx::query!(
         r#"
         SELECT g.group_code, g.group_ratio::text AS group_ratio, g.description,
-               g.is_default, g.sort_order, g.pool_code,
+               g.is_default, g.sort_order, g.pool_code, g.self_select,
                (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_code = g.group_code)
                    AS "user_count!",
                (SELECT COUNT(*) FROM pool_channels pc
-                 WHERE pc.pool_code = g.pool_code) AS "channel_count!"
+                  JOIN channels c ON c.id = pc.channel_id
+                 WHERE pc.pool_code = g.pool_code AND c.deleted_at IS NULL) AS "channel_count!"
         FROM price_groups g
         ORDER BY g.sort_order, g.group_code
         "#
@@ -186,7 +302,9 @@ pub async fn list_groups(pool: &PgPool) -> Result<Vec<GroupListRow>, StoreError>
             is_default: r.is_default,
             sort_order: r.sort_order,
             user_count: r.user_count,
+            pool_code: r.pool_code,
             channel_count: r.channel_count,
+            self_select: r.self_select,
         })
         .collect())
 }

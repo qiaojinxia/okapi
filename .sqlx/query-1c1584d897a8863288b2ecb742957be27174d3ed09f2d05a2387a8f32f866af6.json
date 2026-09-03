@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT routing_strategy, fallback_pool_code FROM channel_pools WHERE pool_code = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "routing_strategy",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "routing_strategy"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "fallback_pool_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "fallback_pool_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "1c1584d897a8863288b2ecb742957be27174d3ed09f2d05a2387a8f32f866af6"
+}

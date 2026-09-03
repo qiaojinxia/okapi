@@ -42,6 +42,16 @@ pub async fn me(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let balance = state.ledger.balance(key.user_id).await?;
+    // 余额有效期（#1790-6）是本站独有的机制：钱会在某一天被清零，用户必须能在
+    // 首页看到那一天——不在鉴权缓存里（低频字段），点查 PG 一次。
+    let balance_expires_at = sqlx::query_scalar!(
+        r#"SELECT balance_expires_at FROM users WHERE id = $1"#,
+        key.user_id
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?
+    .flatten();
     // super_admin 与"未绑定自定义角色的 admin"都是全权（对齐 new-api 迁移习惯）
     let permissions: Vec<String> = if key.role >= 100 {
         vec!["*".to_owned()]
@@ -57,6 +67,7 @@ pub async fn me(
         "key_id": key.key_id,
         "group": key.group_code,
         "balance_micro": balance.as_micros(),
+        "balance_expires_at": balance_expires_at.map(|t| t.to_rfc3339()),
         "role": key.role,
         "permissions": permissions,
     })))
@@ -115,8 +126,9 @@ pub async fn usage(
     })))
 }
 
-/// GET /api/pricing：公开价格页（无鉴权）——模型倍率/按次价 + 分组倍率。
-/// 只暴露定价事实，不含渠道/成本信息。
+/// GET /api/pricing：公开价格页（无鉴权）——模型倍率/按次价 + 分组倍率 +
+/// 每模型可用分组（new-api usable_group 对齐，§11.5 展示层收口）。
+/// 只暴露定价与可见性事实，不含渠道/成本信息。
 pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
     let models = sqlx::query!(
         r#"SELECT m.model_name, m.display_name, m.vendor, p.pricing_mode,
@@ -135,14 +147,54 @@ pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>
     .await
     .map_err(okapi_store::StoreError::from)?;
     let groups = sqlx::query!(
-        r#"SELECT group_code AS code, description AS name, group_ratio::text AS ratio
-           FROM price_groups ORDER BY sort_order, group_code"#
+        r#"SELECT g.group_code AS code, g.description AS name, g.group_ratio::text AS ratio,
+                  g.pool_code, g.self_select, p.fallback_pool_code
+           FROM price_groups g
+           LEFT JOIN channel_pools p ON p.pool_code = g.pool_code
+           ORDER BY g.sort_order, g.group_code"#
     )
     .fetch_all(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+
+    // 可见性事实：启用渠道声称服务的 (模型, 所在池) 对。渠道只服务它所在的池，
+    // 分组经其池链（主池 → 降级池）能到达的池里有人服务该模型即"可用"——
+    // 与 candidates_for_model 同一套规则的静态视图；key 级健康属瞬态，价格页不看。
+    let served = sqlx::query!(
+        r#"SELECT DISTINCT mn.name AS "model_name!", pc.pool_code AS "pool_code!"
+           FROM channels c
+           CROSS JOIN LATERAL jsonb_array_elements_text(c.models) AS mn(name)
+           JOIN pool_channels pc ON pc.channel_id = c.id
+           WHERE c.status = 1 AND c.deleted_at IS NULL"#
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let mut pools_of: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
+    for row in &served {
+        pools_of
+            .entry(row.model_name.as_str())
+            .or_default()
+            .push(row.pool_code.as_str());
+    }
+    let usable_groups = |model: &str| -> Vec<&str> {
+        let Some(pools) = pools_of.get(model) else {
+            return Vec::new();
+        };
+        groups
+            .iter()
+            .filter(|g| {
+                pools.contains(&g.pool_code.as_str())
+                    || g.fallback_pool_code
+                        .as_deref()
+                        .is_some_and(|fb| pools.contains(&fb))
+            })
+            .map(|g| g.code.as_str())
+            .collect()
+    };
+
     Ok(Json(json!({
-        "models": models.into_iter().map(|m| json!({
+        "models": models.iter().map(|m| json!({
             "model": m.model_name,
             "display_name": m.display_name,
             "vendor": m.vendor,
@@ -155,9 +207,10 @@ pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>
             "audio_completion_ratio": m.audio_completion_ratio,
             "image_ratio": m.image_ratio,
             "per_call_price_micro": m.per_call_price_micro,
+            "groups": usable_groups(&m.model_name),
         })).collect::<Vec<_>>(),
-        "groups": groups.into_iter().map(|g| json!({
-            "code": g.code, "name": g.name, "ratio": g.ratio,
+        "groups": groups.iter().map(|g| json!({
+            "code": g.code, "name": g.name, "ratio": g.ratio, "self_select": g.self_select,
         })).collect::<Vec<_>>(),
     })))
 }
@@ -169,6 +222,15 @@ pub struct LogsQuery {
     /// 游标：取该 id 之前的记录（created_at 倒序翻页）。
     #[serde(default)]
     pub before: Option<i64>,
+    /// `key`（缺省）| `user`：与 /api/me/usage 同一语义——合作商员工缺省只见自己那把 key。
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// 精确模型名过滤。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 只看失败（status ≠ 20 的记录：上游失败/空回复/拒绝）。
+    #[serde(default)]
+    pub errors_only: Option<bool>,
 }
 
 fn default_limit() -> i64 {
@@ -176,6 +238,11 @@ fn default_limit() -> i64 {
 }
 
 /// GET /api/me/logs：本用户账单明细（含 pricing_snapshot——前端账单解释器数据源）。
+///
+/// **缺省 `scope=key`**：此前只按 user_id 过滤，合作商的员工 key 能翻到同一钱包下
+/// 所有员工的请求——与 §6.1"员工只见自己"的门户缺省相悖。usage/breakdown/logs
+/// 三个门户端点现在同一套 scope 语义。key 名一并回填：`scope=user` 时合作商
+/// 要能看出"这笔是谁发的"，否则汇总视角没有意义。
 pub async fn logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -183,16 +250,29 @@ pub async fn logs(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let limit = q.limit.clamp(1, 200);
+    let user_scope = q.scope.as_deref() == Some("user");
+    let key_filter = if user_scope { None } else { Some(key.key_id) };
+    let model = q.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    let errors_only = q.errors_only == Some(true);
     let rows = sqlx::query!(
-        r#"SELECT id, request_id, model_name, log_type, status,
-                  prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,
-                  amount_micro, original_amount_micro, discount_micro,
-                  pricing_snapshot, error_code, latency_ms, is_stream, created_at
-           FROM billing_records
-           WHERE user_id = $1 AND ($2::bigint IS NULL OR id < $2)
-           ORDER BY id DESC LIMIT $3"#,
+        r#"SELECT b.id, b.request_id, b.model_name, b.log_type, b.status, b.api_key_id,
+                  COALESCE(k.name, '') AS "key_name!",
+                  b.prompt_tokens, b.cached_tokens, b.completion_tokens, b.reasoning_tokens,
+                  b.amount_micro, b.original_amount_micro, b.discount_micro,
+                  b.pricing_snapshot, b.error_code, b.latency_ms, b.ttft_ms, b.is_stream, b.created_at
+           FROM billing_records b
+           LEFT JOIN api_keys k ON k.id = b.api_key_id
+           WHERE b.user_id = $1
+             AND ($2::bigint IS NULL OR b.id < $2)
+             AND ($3::bigint IS NULL OR b.api_key_id = $3)
+             AND ($4::text IS NULL OR b.model_name = $4)
+             AND (NOT $5::boolean OR b.status <> 20)
+           ORDER BY b.id DESC LIMIT $6"#,
         key.user_id,
         q.before,
+        key_filter,
+        model,
+        errors_only,
         limit
     )
     .fetch_all(&state.pg)
@@ -208,6 +288,8 @@ pub async fn logs(
                 "model": r.model_name,
                 "log_type": r.log_type,
                 "status": r.status,
+                "api_key_id": r.api_key_id,
+                "key_name": r.key_name,
                 "usage": {
                     "prompt_tokens": r.prompt_tokens,
                     "cached_tokens": r.cached_tokens,
@@ -220,7 +302,187 @@ pub async fn logs(
                 "pricing_snapshot": r.pricing_snapshot,
                 "error_code": r.error_code,
                 "latency_ms": r.latency_ms,
+                "ttft_ms": r.ttft_ms,
                 "is_stream": r.is_stream,
+                "created_at": r.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "scope": if user_scope { "user" } else { "key" },
+        "data": data,
+        "next_before": next_before,
+    })))
+}
+
+/// GET /api/notice：站点公告（无鉴权，登录页也要显示）。
+///
+/// 存 `settings.site_notice`（吸收判据②：能用现有表表达就不新增表），经 60s 进程缓存
+/// 读取——发布后一分钟内全站可见，足够。对外只透出四个白名单字段并做类型收口：
+/// settings 的写入口是泛型 key/value，不能假设值形状；`level` 收敛到三档枚举，
+/// 正文截断到 4000 字——公告是横幅，不是文章。
+pub async fn notice(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+    let raw = state.setting_cached("site_notice").await;
+    let Some(v) = raw.as_ref() else {
+        return Ok(Json(json!({ "notice": Value::Null })));
+    };
+    let enabled = v.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let body = v
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    if !enabled || body.is_empty() {
+        return Ok(Json(json!({ "notice": Value::Null })));
+    }
+    let level = match v.get("level").and_then(Value::as_str) {
+        Some("warning") => "warning",
+        Some("critical") => "critical",
+        _ => "info",
+    };
+    let clipped: String = body.chars().take(4000).collect();
+    Ok(Json(json!({
+        "notice": {
+            "title": v.get("title").and_then(Value::as_str).unwrap_or_default().trim(),
+            "body": clipped,
+            "level": level,
+            // 前端用它做"已读"锚点：重新发布（updated_at 变）会再次弹出
+            "updated_at": v.get("updated_at").and_then(Value::as_str).unwrap_or_default(),
+        }
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct LedgerQuery {
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    /// 游标：取该 event_id 之前的记录。
+    #[serde(default)]
+    pub before: Option<i64>,
+}
+
+/// GET /api/me/ledger：账户流水——余额的**非消费**变动（充值 / 兑换与补偿 /
+/// 管理调整 / 退款 / 过期清零），每条带变动后余额。
+///
+/// 与日志页的分工：日志页是"钱怎么花的"（逐请求，billing_records），这里是
+/// "钱怎么来、怎么被动过"（billing_events 里 commit 之外的动账事件）。
+/// 网关失败路径也写 `refund` 事件但 delta=0（预扣全额释放、不动账），
+/// 用 `delta_micro <> 0` 挡掉——否则每笔上游失败都会在流水里冒一条 $0 退款。
+///
+/// actor 不原样透出：`admin:42` 对用户只该是"管理员"，管理员 id 属内部信息。
+pub async fn ledger(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LedgerQuery>,
+) -> Result<Json<Value>, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    let limit = q.limit.clamp(1, 200);
+    let rows = sqlx::query!(
+        r#"SELECT event_id, event_type, delta_micro, balance_after_micro, payload, actor,
+                  request_id, created_at
+           FROM billing_events
+           WHERE user_id = $1
+             AND event_type IN ('recharge', 'adjust', 'refund', 'expire')
+             AND delta_micro <> 0
+             AND ($2::bigint IS NULL OR event_id < $2)
+           ORDER BY event_id DESC LIMIT $3"#,
+        key.user_id,
+        q.before,
+        limit
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let next_before = rows.last().map(|r| r.event_id);
+    let data: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            let tags: Vec<String> = r
+                .payload
+                .as_ref()
+                .and_then(|p| p.get("tags"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            json!({
+                "event_id": r.event_id,
+                "event_type": r.event_type,
+                "delta_micro": r.delta_micro,
+                "balance_after_micro": r.balance_after_micro,
+                "source": ledger_source(&r.actor, &tags),
+                "tags": tags,
+                // 退款锚到具体请求：用户可去日志页核对被退的那一笔
+                "request_id": r.request_id,
+                "created_at": r.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": data, "next_before": next_before })))
+}
+
+/// actor + tags → 用户可读的来源枚举（前端按枚举映射文案，§8 后端不拼人类语言）。
+fn ledger_source(actor: &str, tags: &[String]) -> &'static str {
+    if tags.iter().any(|t| t == "aff_rebate") {
+        return "aff";
+    }
+    match actor.split(':').next().unwrap_or_default() {
+        // MCP 写工具经管理员 key 操作，对用户而言同为"管理员操作"
+        "admin" | "mcp" => "admin",
+        "system" => match actor {
+            "system:payment" => "payment",
+            "system:redeem" => "redeem",
+            "system:aff" => "aff",
+            "system:worker" => "expiry",
+            a if a.starts_with("system:migrate") => "migration",
+            _ => "system",
+        },
+        _ => "system",
+    }
+}
+
+/// GET /api/me/orders：我的充值订单（recharge_orders，含未支付/失败——
+/// 流水里只有已支付成功的那条 recharge 事件，用户找"我付了钱怎么没到账"
+/// 要看的是订单状态而非流水）。
+pub async fn orders(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<LedgerQuery>,
+) -> Result<Json<Value>, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    let limit = q.limit.clamp(1, 200);
+    let rows = sqlx::query!(
+        r#"SELECT id, order_no, amount_micro, currency, pay_amount::text AS "pay_amount?",
+                  gateway, status, paid_at, created_at
+           FROM recharge_orders
+           WHERE user_id = $1 AND ($2::bigint IS NULL OR id < $2)
+           ORDER BY id DESC LIMIT $3"#,
+        key.user_id,
+        q.before,
+        limit
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let next_before = rows.last().map(|r| r.id);
+    let data: Vec<Value> = rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "order_no": r.order_no,
+                "amount_micro": r.amount_micro,
+                "currency": r.currency,
+                // 原币种支付金额按 NUMERIC 文本透出（展示层再格式化，不走浮点）
+                "pay_amount": r.pay_amount,
+                "gateway": r.gateway,
+                // 0 created 1 paid 2 failed 3 refunded
+                "status": r.status,
+                "paid_at": r.paid_at.map(|t| t.to_rfc3339()),
                 "created_at": r.created_at.to_rfc3339(),
             })
         })
@@ -319,6 +581,90 @@ pub async fn redeem(
     })))
 }
 
+/// 用户可为自己的 key 选择的分组（IMPLEMENTATION §11.14 R4，对齐 new-api UserUsableGroups）：
+/// 管理员分配给他的组 ∪ 标为 `self_select` 的公开档位 ∪ 默认组。
+/// 价随组走：选了 vip 就按 vip 倍率计费、走 vip 池——这是产品层的"自选套餐档位"。
+pub(super) struct SelectableGroup {
+    pub code: String,
+    pub ratio: String,
+    pub description: Option<String>,
+    /// assigned | self_select | default
+    pub source: &'static str,
+}
+
+pub(super) async fn selectable_groups(
+    state: &AppState,
+    user_id: i64,
+) -> Result<Vec<SelectableGroup>, AppError> {
+    let rows = sqlx::query!(
+        r#"SELECT g.group_code, g.group_ratio::text AS "ratio!", g.description, g.is_default,
+                  g.self_select,
+                  EXISTS(SELECT 1 FROM user_groups ug
+                          WHERE ug.user_id = $1 AND ug.group_code = g.group_code) AS "assigned!"
+           FROM price_groups g
+           WHERE g.self_select OR g.is_default
+              OR EXISTS(SELECT 1 FROM user_groups ug
+                         WHERE ug.user_id = $1 AND ug.group_code = g.group_code)
+           ORDER BY g.sort_order, g.group_code"#,
+        user_id
+    )
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| SelectableGroup {
+            source: if r.assigned {
+                "assigned"
+            } else if r.self_select {
+                "self_select"
+            } else {
+                "default"
+            },
+            code: r.group_code,
+            ratio: r.ratio,
+            description: r.description,
+        })
+        .collect())
+}
+
+/// 校验用户想给 key 选的分组是否在可选集合内；不在 → 403 `group_not_selectable`。
+/// 不是 404：组可能存在，只是他没资格选——两种事要分开说。
+pub(super) async fn ensure_selectable(
+    state: &AppState,
+    user_id: i64,
+    group_code: &str,
+) -> Result<(), AppError> {
+    let ok = selectable_groups(state, user_id)
+        .await?
+        .iter()
+        .any(|g| g.code == group_code);
+    if ok {
+        Ok(())
+    } else {
+        Err(
+            AppError::new(StatusCode::FORBIDDEN, codes::GROUP_NOT_SELECTABLE)
+                .with_param(group_code.to_owned()),
+        )
+    }
+}
+
+/// GET /api/me/groups：我能选的分组 + 当前生效分组。
+/// 门户建 key / 改 key 的档位下拉据此渲染；空的 self_select 站点只会看到自己被分配的组。
+pub async fn groups(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    let list = selectable_groups(&state, key.user_id).await?;
+    Ok(Json(json!({
+        "current": key.group_code,
+        "data": list.iter().map(|g| json!({
+            "code": g.code, "ratio": g.ratio, "description": g.description, "source": g.source,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
 /// GET /api/me/keys：本用户全部 key 及累计分账（合作商查员工用量）。
 pub async fn keys(
     State(state): State<AppState>,
@@ -380,8 +726,9 @@ pub async fn keys(
     Ok(Json(json!({ "data": data })))
 }
 
-/// 自助面可改字段：全部为"收窄自己这把 key"的语义，不含限额与分组覆盖
-/// （那两类是管控项与计价锚点，放开等于用户可自行提额/改价，仅管理面可写）。
+/// 自助面可改字段：收窄自己这把 key（名字 / 状态 / 过期 / 白名单），外加**在可选集合内**
+/// 换分组——分组是计价锚点，但可选集合由管理员通过 `self_select` 与用户分组划定，
+/// 用户只能在划定的档位里挑，不构成自行改价。限额仍只有管理面可写。
 #[derive(Deserialize)]
 pub struct PatchKeyReq {
     #[serde(default)]
@@ -394,6 +741,9 @@ pub struct PatchKeyReq {
     /// 字符串数组；null = 解除模型限制。
     #[serde(default, deserialize_with = "super::double_option")]
     pub model_allowlist: Option<Option<Vec<String>>>,
+    /// 档位：字符串 = 选定分组（须在 /api/me/groups 可选集合内）；null = 跟随用户分组。
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub group_code: Option<Option<String>>,
 }
 
 /// 模型白名单归一化：空数组等价于"不限"，避免落成一把谁也调不通的死 key。
@@ -422,11 +772,21 @@ pub async fn patch_key(
     {
         return Err(AppError::bad_request().with_param("status"));
     }
+    let group_override = match req.group_code {
+        Some(Some(code)) => {
+            let code = code.trim().to_owned();
+            ensure_selectable(&state, key.user_id, &code).await?;
+            Some(Some(code))
+        }
+        Some(None) => Some(None),
+        None => None,
+    };
     let patch = okapi_store::admin::ApiKeyPatch {
         name: req.name.map(|n| n.trim().to_owned()),
         status: req.status,
         expires_at: req.expires_at,
         model_allowlist: req.model_allowlist.map(normalize_allowlist),
+        group_override,
         ..Default::default()
     };
     let touched =

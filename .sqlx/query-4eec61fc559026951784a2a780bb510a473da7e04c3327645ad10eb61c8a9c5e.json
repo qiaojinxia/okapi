@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH moved AS (\n            DELETE FROM billing_dlq WHERE id = ANY($1) AND status = 0 RETURNING payload\n        ), ins AS (\n            INSERT INTO billing_outbox (topic, payload)\n            SELECT 'billing.completed', payload FROM moved\n            RETURNING 1\n        )\n        SELECT COUNT(*)::bigint AS \"c!\" FROM ins\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4eec61fc559026951784a2a780bb510a473da7e04c3327645ad10eb61c8a9c5e"
+}

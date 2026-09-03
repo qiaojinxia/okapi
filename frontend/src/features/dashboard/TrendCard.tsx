@@ -71,7 +71,7 @@ export function TrendCard({ days }: { days: number }) {
                       : n.toLocaleString(i18n.language)
                   }}
                 />
-                <Legend />
+                <Legend itemSorter={null} />
                 <Area
                   yAxisId="l"
                   type="monotone"
@@ -79,6 +79,7 @@ export function TrendCard({ days }: { days: number }) {
                   name={t('admin:kpiRequests')}
                   stroke="var(--color-primary)"
                   fill="url(#g-req)"
+                  isAnimationActive={false}
                 />
                 <Area
                   yAxisId="r"
@@ -87,6 +88,7 @@ export function TrendCard({ days }: { days: number }) {
                   name={t('admin:kpiRevenue')}
                   stroke="var(--color-success)"
                   fill="url(#g-rev)"
+                  isAnimationActive={false}
                 />
               </AreaChart>
             </ResponsiveContainer>

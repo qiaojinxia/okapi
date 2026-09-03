@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import type { ModelRow } from '@/features/stats/types'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -40,7 +41,15 @@ export function ModelLatencyCard({ days }: { days: number }) {
             <TBody>
               {(q.data?.data ?? []).map((m) => (
                 <Tr key={m.model}>
-                  <Td className="max-w-56 truncate font-mono text-xs">{m.model}</Td>
+                  <Td className="max-w-56 truncate font-mono text-xs">
+                    <Link
+                      to="/admin/logs"
+                      search={{ model: m.model, hours: days * 24 }}
+                      className="underline decoration-dotted hover:text-foreground"
+                    >
+                      {m.model}
+                    </Link>
+                  </Td>
                   <Td>{formatCount(m.requests, i18n.language)}</Td>
                   <Td>{formatCount(m.tokens, i18n.language)}</Td>
                   <Td className="font-mono text-xs">

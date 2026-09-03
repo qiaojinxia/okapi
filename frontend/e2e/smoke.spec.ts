@@ -116,6 +116,9 @@ test('session 鉴权面在 key 单轨下降级提示而非空白', async ({ page
   })
   await page.goto('/portal/security')
   await expect(page.getByRole('button', { name: /开始绑定|Start binding/ })).toBeVisible()
+  // 最近登录卡：该用户注册后走过邮箱登录（sharedUser），至少一条成功记录
+  await expect(page.getByText(/最近登录|Recent sign-ins/)).toBeVisible()
+  await expect(page.getByText(/^成功$|^OK$/).first()).toBeVisible({ timeout: 10_000 })
 })
 
 test('登出同时清服务端 session（共享设备不留残留会话）', async ({ page, request }) => {
@@ -141,14 +144,228 @@ test('登出同时清服务端 session（共享设备不留残留会话）', asy
   expect(after.status(), '登出必须使服务端 session 失效').toBe(401)
 })
 
-test('API key 登录直达门户总览与三区布局', async ({ page, request }) => {
+test('API key 登录直达门户总览：六卡 KPI + 三页签零请求切换', async ({ page, request }) => {
   await signInWithKey(page, (await sharedUser(request)).apiKey)
-  // 三区布局：顶部栏常驻身份区（余额徽章）+ 内容区总览卡片，两者都应在
+  // 三区布局：顶部栏常驻身份区（余额徽章）+ 内容区 KPI 卡，两者都应在
   await expect(page.getByText(/^(余额|Balance) \$/)).toBeVisible()
-  await expect(page.getByRole('heading', { name: /^余额$|^Balance$/ })).toBeVisible()
+  const main = page.getByRole('main')
+  // 六张 KPI 的标签（new-api 数据看板对齐 + "已为你节省"是本站特有的让利呈现）
+  for (const label of [/^余额$|^Balance$/, /周期消费|Period spend/, /已为你节省|Saved for you/, /^请求数$|^Requests$/]) {
+    await expect(main.getByText(label).first()).toBeVisible()
+  }
   // 侧栏分组标题：宽屏下可见（窄屏折叠为抽屉）。
   // 用 i 标志：标题带 uppercase 样式，Playwright 匹配的是渲染后文本
   await expect(page.getByText(/额度与账单|billing/i).first()).toBeVisible()
+
+  // 三个页签是同一份数据的不同切法：新用户零调用，每签都应给出"还没有调用"的空态
+  // 而非报错或白屏
+  for (const tab of [/模型分布|By model/, /Token 构成|Token mix/, /消费趋势|Spend trend/]) {
+    await page.getByRole('tab', { name: tab }).click()
+    await expect(main.getByText(/还没有调用|No calls in this window/)).toBeVisible()
+  }
+  // 范围切换（本密钥 / 全账户）不报错
+  await page.getByRole('button', { name: /全账户|Whole account/ }).click()
+  await expect(main.getByText(/还没有调用|No calls in this window/)).toBeVisible()
+})
+
+test('门户日志页：过滤卡 + 空态；账户流水页：两页签空态；充值页挂流水入口', async ({ page, request }) => {
+  await signInWithKey(page, (await sharedUser(request)).apiKey)
+
+  // 日志页：范围开关（缺省本密钥）、只看失败、模型过滤都在；新用户空态给下一步提示
+  await page.goto('/portal/logs')
+  await expect(page.getByText(/^范围$|^Scope$/)).toBeVisible()
+  await expect(page.getByRole('switch', { name: /只看失败|Errors only/ })).toBeVisible()
+  await expect(page.getByText(/还没有调用|No calls in this window/)).toBeVisible()
+  // 导出按钮在空表时禁用——没有行可导不该给一个会下载空文件的按钮
+  await expect(page.getByRole('button', { name: /导出 CSV|Export CSV/ })).toBeDisabled()
+
+  // 账户流水：余额变动 / 充值订单 两签，各自空态
+  // （顶部栏也有同名 h1——那是"当前页标题"，限定 main 才是页内标题）
+  await page.goto('/portal/ledger')
+  await expect(
+    page.getByRole('main').getByRole('heading', { name: /账户流水|Account ledger/ }),
+  ).toBeVisible()
+  await expect(page.getByText(/还没有余额变动|No balance changes yet/)).toBeVisible()
+  await page.getByRole('tab', { name: /充值订单|Top-up orders/ }).click()
+  await expect(page.getByText(/还没有充值订单|No top-up orders yet/)).toBeVisible()
+
+  // 充值页：付完钱最常见的追问是"到账了吗"，答案所在页面的入口就在提问处
+  await page.goto('/portal/topup')
+  await page.getByRole('link', { name: /查看订单与到账记录|View orders & credits/ }).click()
+  await expect(page).toHaveURL(/\/portal\/ledger/)
+})
+
+/// 演示超管（scripts/dev-reset.sh 灌注，凭据确定）。库里没有就整组跳过——
+/// 在别人的环境里制造"假红"比少一组覆盖更糟。登录一次拿 session，再兑一把 admin key。
+/// 返回 key 与其 id：用例结束要把这把 key 删掉，否则每跑一轮演示超管就多一把垃圾 key。
+async function demoAdminKey(
+  request: APIRequestContext,
+): Promise<{ apiKey: string; keyId: number } | null> {
+  const login = await request.post('/auth/login', {
+    headers: { 'x-real-ip': `198.51.100.${1 + Math.floor(Math.random() * 250)}` },
+    data: { email: 'root@okapi.local', password: 'okapi-demo-2026' },
+  })
+  if (!login.ok()) return null
+  const keyResp = await request.post('/auth/keys', { data: { name: `e2e-admin-${Date.now()}` } })
+  if (!keyResp.ok()) return null
+  const body = (await keyResp.json()) as { api_key: string; key_id: number }
+  return { apiKey: body.api_key, keyId: body.key_id }
+}
+
+test('管理端：总览实时条 + 健康芯片 + 日志页统计条/过滤 + 洞察三页', async ({
+  page,
+  request,
+}) => {
+  const admin = await demoAdminKey(request)
+  test.skip(admin === null, '当前库无演示超管（scripts/dev-reset.sh 未跑），跳过管理端冒烟')
+  const { apiKey: adminKey, keyId } = admin as { apiKey: string; keyId: number }
+
+  await page.goto('/')
+  await page.getByRole('button', { name: 'API Key' }).click()
+  await page.locator('#key').fill(adminKey)
+  await page.getByRole('button', { name: /^登录$|^Sign in$/ }).click()
+  await expect(page).toHaveURL(/\/portal/)
+
+  // 总览：实时条（Redis 秒桶，CH 无关）、五张 KPI、"需要注意"卡头四枚组件芯片
+  await page.goto('/admin')
+  const main = page.getByRole('main')
+  await expect(main.getByText(/^实时$|^Live$/)).toBeVisible()
+  await expect(main.getByText('QPS')).toBeVisible()
+  await expect(main.getByText(/^请求数$|^Requests$/).first()).toBeVisible()
+  for (const chip of ['PG', 'Redis', 'CH', 'NATS']) {
+    await expect(main.getByText(chip, { exact: true })).toBeVisible()
+  }
+
+  // 日志页：统计条 RPM/TPM 标签 + 过滤器 + 窗口选择器 + 导出按钮
+  await page.goto('/admin/logs')
+  await expect(main.getByText('RPM', { exact: true })).toBeVisible({ timeout: 10_000 })
+  await expect(main.getByText('TPM', { exact: true })).toBeVisible()
+  await expect(main.getByRole('switch', { name: /只看失败|Errors only/ })).toBeVisible()
+  await expect(main.getByRole('button', { name: /^7 天$|^7 days$/ })).toBeVisible()
+  // 深链：带 errors_only 的地址落地后开关应为开——URL 是过滤条件的唯一真相
+  await page.goto('/admin/logs?errors_only=true&hours=168')
+  await expect(main.getByRole('switch', { name: /只看失败|Errors only/ })).toBeChecked()
+
+  // 用量分析：三视图可切且进 URL；过滤深链落地即出芯片、KPI 环比条常驻
+  await page.goto('/admin/stats')
+  await expect(main.getByText(/对比上一个|vs previous/).first()).toBeVisible({ timeout: 10_000 })
+  for (const [tab, view] of [
+    [/^拆分$|^Breakdown$/, 'breakdown'],
+    [/^流向$|^Flow$/, 'flow'],
+    [/^趋势$|^Trend$/, undefined],
+  ] as const) {
+    await main.getByRole('tab', { name: tab }).click()
+    await expect(main.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true')
+    if (view !== undefined) await expect(page).toHaveURL(new RegExp(`view=${view}`))
+  }
+  // 拆分签：按渠道拆分时"渠道"分段生效且表头随维度变化
+  await page.goto('/admin/stats?view=breakdown&by=channel&days=30')
+  await expect(main.getByRole('button', { name: /^渠道$|^Channel$/, pressed: true })).toBeVisible({
+    timeout: 10_000,
+  })
+  // 过滤深链：model 过滤芯片出现，且"模型"维度被置灰（再按它拆只剩一行）
+  await page.goto('/admin/stats?view=breakdown&model=nonexistent-model-e2e')
+  await expect(main.getByText('nonexistent-model-e2e')).toBeVisible()
+  await expect(main.getByRole('button', { name: /^模型$|^Model$/, pressed: false })).toBeDisabled()
+
+  // 服务质量与经营报表：从旧统计页拆出的两页，各自页签可切
+  await page.goto('/admin/quality')
+  for (const tab of [/渠道健康|Channel health/, /模型时延|Model latency/, /错误分布|Error breakdown/, /客户端分布|Client breakdown/]) {
+    await main.getByRole('tab', { name: tab }).click()
+    await expect(main.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true')
+  }
+  await page.goto('/admin/revenue')
+  await main.getByRole('tab', { name: /用户消耗排行|Top spenders/ }).click()
+  await main.getByRole('tab', { name: /收入与让利|Revenue/ }).click()
+  // 收入签里"按分组"表与"资金流入"行至少有一个渲染（演示库有 default/vip/free 三组）
+  await expect(main.getByText(/资金流入|Cash inflow/)).toBeVisible({ timeout: 10_000 })
+
+  // 总览站点规模条（PG-only）：四项存量都在
+  await page.goto('/admin')
+  await expect(main.getByText(/站点规模|Site inventory/)).toBeVisible({ timeout: 10_000 })
+  await expect(main.getByText(/^活跃密钥$|^Active keys$/)).toBeVisible()
+
+  // 审计页：本用例开头的邮箱登录已落 user.login，按动作过滤深链落地即见；
+  // 点行展开详情（IP / UA 键值行）
+  await page.goto('/admin/audit?action=user.login&target=root@okapi.local')
+  await expect(main.getByRole('columnheader', { name: /^动作$|^Action$/ })).toBeVisible({
+    timeout: 10_000,
+  })
+  const auditRow = main.getByRole('row').filter({ hasText: 'user.login' }).first()
+  await expect(auditRow).toBeVisible()
+  await auditRow.click()
+  await expect(main.getByText(/^ip$/).first()).toBeVisible()
+
+  // 渠道页：渠道级"启用"之外要看得见 key 状态机汇总与近 24h 健康两列
+  await page.goto('/admin/channels')
+  await expect(main.getByRole('columnheader', { name: /最近测试|Last test/ })).toBeVisible()
+  await expect(main.getByRole('columnheader', { name: /近 24h|Last 24h/ })).toBeVisible()
+
+  // 运维页死信签：待办里"到运维页重投或排查"必须真有落地——列表 + 待处理计数徽章
+  await page.goto('/admin/ops')
+  await main.getByRole('tab', { name: /死信队列|Dead-letter queue/ }).click()
+  await expect(main.getByText(/条待处理|pending/).first()).toBeVisible({ timeout: 10_000 })
+  await expect(main.getByRole('button', { name: /^重投|^Requeue/ })).toBeDisabled()
+
+  // 用户抽屉：落地签是"用量"（先看行为再动手），且含"最近余额变动"块。
+  // 开发库有上千个测试用户，rootadmin 不在首页——走页面自己的搜索（回车检索）
+  await page.goto('/admin/users')
+  await page.locator('#u-search').fill('rootadmin')
+  await page.locator('#u-search').press('Enter')
+  const row = main.getByRole('row').filter({ hasText: 'rootadmin' })
+  await expect(row).toBeVisible({ timeout: 10_000 })
+  await row.getByRole('button', { name: /^管理$|^Manage$/ }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.getByRole('tab', { name: /^用量$|^Usage$/ })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  await expect(drawer.getByText(/最近余额变动|Recent balance changes/)).toBeVisible({
+    timeout: 10_000,
+  })
+
+  // 清理：删掉本轮兑的 admin key（session 鉴权，前面登录的 request 上下文仍有效）
+  const cleanup = await request.delete(`/api/me/keys/${keyId}`, {
+    headers: { authorization: `Bearer ${adminKey}` },
+  })
+  expect(cleanup.ok(), `清理 e2e key 失败（${cleanup.status()}）`).toBeTruthy()
+})
+
+test('站点公告：发布后登录页即见、可关闭并记住、下架后消失', async ({ page, request }) => {
+  const admin = await demoAdminKey(request)
+  test.skip(admin === null, '当前库无演示超管，跳过公告冒烟')
+  const { apiKey, keyId } = admin as { apiKey: string; keyId: number }
+  const auth = { authorization: `Bearer ${apiKey}` }
+  const stamp = `e2e-${Date.now()}`
+
+  // 发布（后端公开端点有 60s 进程缓存；e2e 的 console 是刚起的进程，首读即新值）
+  const publish = await request.post('/admin/settings', {
+    headers: auth,
+    data: {
+      key: 'site_notice',
+      value: { enabled: true, title: stamp, body: '维护窗口 02:00-03:00', level: 'warning', updated_at: stamp },
+    },
+  })
+  expect(publish.ok(), `发布失败（${publish.status()}）`).toBeTruthy()
+
+  try {
+    // 未登录的登录页就该看到——停服通知对还没登录的人同样成立
+    await page.goto('/')
+    const banner = page.getByRole('status').filter({ hasText: stamp })
+    await expect(banner).toBeVisible({ timeout: 10_000 })
+    // 关闭后同一版不再出现，刷新也不回来
+    await banner.getByRole('button', { name: /^关闭$|^Close$/ }).click()
+    await expect(banner).toBeHidden()
+    await page.reload()
+    await expect(page.getByRole('status').filter({ hasText: stamp })).toHaveCount(0)
+  } finally {
+    // 下架 + 清理 key：无论断言成败都不能把 e2e 公告留在共享环境里
+    await request.post('/admin/settings', {
+      headers: auth,
+      data: { key: 'site_notice', value: { enabled: false, title: '', body: '', level: 'info' } },
+    })
+    await request.delete(`/api/me/keys/${keyId}`, { headers: auth })
+  }
 })
 
 test('删除密钥需二次确认：直接点删除不生效，取消后密钥仍在', async ({ page, request }) => {

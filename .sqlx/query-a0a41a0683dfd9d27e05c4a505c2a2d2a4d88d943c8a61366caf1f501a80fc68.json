@@ -1,0 +1,229 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH resolved AS (\n            SELECT k.id AS key_id,\n                   k.user_id,\n                   k.status AS key_status,\n                   u.status AS user_status,\n                   u.role,\n                   ar.permissions AS admin_permissions,\n                   (u.price_multiplier * 1000000)::bigint AS multiplier_scaled,\n                   k.rpm_limit, k.tpm_limit, k.rpd_limit, k.max_concurrency,\n                   k.model_allowlist,\n                   k.expires_at,\n                   k.member_user_id,\n                   k.pool_override,\n                   tm.monthly_spend_limit_micro AS member_monthly_limit_micro,\n                   COALESCE(\n                       k.group_override,\n                       (SELECT ug.group_code FROM user_groups ug\n                         WHERE ug.user_id = u.id ORDER BY ug.priority DESC LIMIT 1),\n                       (SELECT pg2.group_code FROM price_groups pg2 WHERE pg2.is_default LIMIT 1),\n                       'default'\n                   ) AS group_code\n            FROM api_keys k\n            JOIN users u ON u.id = k.user_id\n            LEFT JOIN admin_roles ar ON ar.id = u.admin_role_id\n            LEFT JOIN team_members tm\n                   ON tm.team_user_id = k.user_id AND tm.member_user_id = k.member_user_id\n            WHERE k.key_hash = $1 AND k.deleted_at IS NULL AND u.deleted_at IS NULL\n        )\n        SELECT r.key_id AS \"key_id!\",\n               r.user_id AS \"user_id!\",\n               r.key_status AS \"key_status!\",\n               r.user_status AS \"user_status!\",\n               r.role AS \"role!\",\n               r.admin_permissions,\n               r.multiplier_scaled AS \"multiplier_scaled!\",\n               r.rpm_limit, r.tpm_limit, r.rpd_limit, r.max_concurrency,\n               r.model_allowlist,\n               r.expires_at,\n               r.member_user_id,\n               r.member_monthly_limit_micro,\n               r.group_code AS \"group_code!\",\n               COALESCE(r.pool_override, pg.pool_code, 'default') AS \"pool_code!\",\n               cp.routing_strategy AS \"pool_strategy?\",\n               cp.fallback_pool_code AS \"pool_fallback?\"\n        FROM resolved r\n        LEFT JOIN price_groups pg ON pg.group_code = r.group_code\n        LEFT JOIN channel_pools cp\n               ON cp.pool_code = COALESCE(r.pool_override, pg.pool_code, 'default')\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "key_status!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "user_status!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "role!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "admin_permissions",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "admin_roles",
+            "name": "permissions"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "multiplier_scaled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "tpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "tpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "rpd_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "rpd_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "max_concurrency"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "model_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "model_allowlist"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "member_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "member_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "member_monthly_limit_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "team_members",
+            "name": "monthly_spend_limit_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "group_code!",
+        "type_info": "Varchar",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 16,
+        "name": "pool_code!",
+        "type_info": "Varchar",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 17,
+        "name": "pool_strategy?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "routing_strategy"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "pool_fallback?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_pools",
+            "name": "fallback_pool_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bpchar"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      null,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "a0a41a0683dfd9d27e05c4a505c2a2d2a4d88d943c8a61366caf1f501a80fc68"
+}

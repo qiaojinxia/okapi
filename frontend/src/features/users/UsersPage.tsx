@@ -1,4 +1,4 @@
-import { Settings2 } from 'lucide-react'
+import { Settings2, Users } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -6,10 +6,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
-import { Input, Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
+import { SearchInput } from '@/components/ui/search-input'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { UsageCell, useEntityUsage } from '@/features/analytics/UsageCell'
 import { UserDrawer } from '@/features/users/UserDrawer'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -55,30 +57,40 @@ export function UsersPage() {
   })
 
   const rows = users.data?.data ?? []
+  // 行内用量（Sub2API 用户列表同有）：找人时"他花不花钱、最近活跃吗"与余额同样重要
+  const usage = useEntityUsage(
+    'user',
+    rows.map((u) => u.id),
+  )
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title={t('admin:usersTitle')} description={t('admin:usersDesc')} />
+      <PageHeader
+        title={t('admin:usersTitle')}
+        description={t('admin:usersDesc')}
+        icon={Users}
+        meta={
+          users.data && (
+            <Badge variant="muted">{t('admin:usersTotal', { total: users.data.total })}</Badge>
+          )
+        }
+      />
 
       <Toolbar
         filters={
           <>
-            <div className="flex flex-col gap-1.5">
-              <Label htmlFor="u-search">{t('admin:usersSearch')}</Label>
-              <Input
-                id="u-search"
-                className="w-64"
-                value={search}
-                placeholder={t('admin:usersSearchHint')}
-                onChange={(e) => setSearch(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    setOffset(0)
-                    setQuery(search.trim())
-                  }
-                }}
-              />
-            </div>
+            <SearchInput
+              id="u-search"
+              className="w-72"
+              aria-label={t('admin:usersSearch')}
+              value={search}
+              placeholder={t('admin:usersSearchHint')}
+              onChange={setSearch}
+              onSubmit={() => {
+                setOffset(0)
+                setQuery(search.trim())
+              }}
+            />
             <Button
               size="sm"
               onClick={() => {
@@ -88,19 +100,37 @@ export function UsersPage() {
             >
               {t('common:search')}
             </Button>
+            {query !== '' && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => {
+                  setSearch('')
+                  setQuery('')
+                  setOffset(0)
+                }}
+              >
+                {t('common:clearFilters')}
+              </Button>
+            )}
           </>
         }
         selection={
           <span className="text-xs text-muted-foreground">
-            {t('admin:usersTotal', { total: users.data?.total ?? 0 })}
+            {query !== '' ? t('admin:usersSearchingFor', { q: query }) : t('admin:usersSearchEnterHint')}
           </span>
         }
       />
 
       {users.isError ? (
-        <ErrorState message={describeError(users.error)} />
+        <ErrorState message={describeError(users.error)} onRetry={() => void users.refetch()} />
+      ) : users.isPending ? (
+        <TableSkeleton rows={10} cols={8} />
       ) : rows.length === 0 ? (
-        <EmptyState />
+        <EmptyState
+          title={query !== '' ? t('common:noResults') : undefined}
+          hint={query !== '' ? t('common:noResultsHint') : undefined}
+        />
       ) : (
         <Table>
           <THead>
@@ -111,6 +141,7 @@ export function UsersPage() {
               <Th>{t('admin:usersRole')}</Th>
               <Th>{t('common:status')}</Th>
               <Th>{t('common:balance')}</Th>
+              {usage.enabled && <Th>{t('admin:usageColumn')}</Th>}
               <Th>{t('admin:usersMultiplier')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
@@ -135,6 +166,15 @@ export function UsersPage() {
                   </Badge>
                 </Td>
                 <Td>{formatMoney(u.balance_micro, i18n.language)}</Td>
+                {usage.enabled && (
+                  <Td>
+                    <UsageCell
+                      usage={usage.data?.[String(u.id)]}
+                      unavailable={usage.unavailable}
+                      link={{ user_id: u.id }}
+                    />
+                  </Td>
+                )}
                 <Td className="font-mono text-xs">×{u.price_multiplier}</Td>
                 <Td>
                   <IconButton

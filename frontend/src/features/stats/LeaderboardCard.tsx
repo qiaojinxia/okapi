@@ -1,11 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatMoney } from '@/lib/money'
+import { formatCount, formatMoney } from '@/lib/money'
 
 export interface LeaderboardRow {
   user_id: number | string
@@ -51,10 +52,19 @@ export function LeaderboardCard({ days }: { days: number }) {
               {(board.data?.data ?? []).map((row, i) => (
                 <Tr key={String(row.user_id)}>
                   <Td className="text-muted-foreground">{i + 1}</Td>
-                  <Td>{String(row.user_id)}</Td>
+                  <Td>
+                    {/* 榜首用户消费异常时，下一步永远是"看他都调了什么"——直达明细 */}
+                    <Link
+                      to="/admin/logs"
+                      search={{ user_id: Number(row.user_id), hours: days * 24 }}
+                      className="underline decoration-dotted hover:text-foreground"
+                    >
+                      {String(row.user_id)}
+                    </Link>
+                  </Td>
                   <Td>{row.username || '—'}</Td>
-                  <Td>{String(row.requests)}</Td>
-                  <Td>{String(row.tokens)}</Td>
+                  <Td>{formatCount(Number(row.requests), i18n.language)}</Td>
+                  <Td>{formatCount(Number(row.tokens), i18n.language)}</Td>
                   <Td>{formatMoney(Number(row.amount_micro), i18n.language)}</Td>
                 </Tr>
               ))}

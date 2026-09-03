@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, payload, actor)\n               VALUES ($1, $2, $3, $4, '{}', $5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid",
+        "Varchar",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49de60dda49eb9bf8dd784766def4314b1c9bfad9f985fa910be0b1a5078a1ab"
+}

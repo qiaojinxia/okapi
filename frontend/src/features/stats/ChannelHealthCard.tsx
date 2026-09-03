@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import type { ChannelRow } from '@/features/stats/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
@@ -51,7 +52,20 @@ export function ChannelHealthCard({ days }: { days: number }) {
             <TBody>
               {(q.data?.data ?? []).map((c) => (
                 <Tr key={c.channel_id}>
-                  <Td className="max-w-48 truncate">{c.name || `#${c.channel_id}`}</Td>
+                  <Td className="max-w-48 truncate">
+                    {/* 红灯渠道 → 一键到该渠道的失败明细，不必记 id 再去日志页手敲 */}
+                    <Link
+                      to="/admin/logs"
+                      search={{
+                        channel_id: c.channel_id,
+                        hours: days * 24,
+                        errors_only: c.error_rate_bp >= WARN_BP ? true : undefined,
+                      }}
+                      className="underline decoration-dotted hover:text-foreground"
+                    >
+                      {c.name || `#${c.channel_id}`}
+                    </Link>
+                  </Td>
                   <Td>
                     <Badge variant="muted">{c.provider}</Badge>
                   </Td>

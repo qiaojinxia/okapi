@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_events (user_id, event_type, delta_micro, payload, actor)\n           VALUES ($1, 'recharge', 9_000_000, '{}', 'system:payment')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "435dcbc668c79c9686beb0177e726e608ac7a45b54b93816962e904dd06ff8cf"
+}

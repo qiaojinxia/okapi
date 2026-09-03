@@ -23,6 +23,8 @@ use std::task::{Context, Poll};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RuleInputs {
     pub monthly_tokens: u64,
+    /// 本月累计消费 micro（volume 规则消费额轴；仅价簿含该类阈值时采集）。
+    pub monthly_spend_micro: u64,
     pub surge_active: bool,
 }
 
@@ -33,6 +35,11 @@ pub async fn collect(state: &AppState, book: &PriceBook, user_id: i64) -> RuleIn
     } else {
         0
     };
+    let monthly_spend_micro = if book.has_spend_rules() {
+        state.sched.monthly_spend_get(user_id).await
+    } else {
+        0
+    };
     let surge_active = if book.has_surge_rules() {
         surge_active(state).await
     } else {
@@ -40,14 +47,20 @@ pub async fn collect(state: &AppState, book: &PriceBook, user_id: i64) -> RuleIn
     };
     RuleInputs {
         monthly_tokens,
+        monthly_spend_micro,
         surge_active,
     }
 }
 
-/// 结算后累加本月 token（仅在存在 volume 规则时写，避免给未用该能力的站点留垃圾键）。
-pub async fn record_tokens(state: &AppState, user_id: i64, tokens: u64) {
-    if state.pricebook.load().has_volume_rules() {
+/// 结算后累加本月 token 与消费（各自仅在存在对应规则时写，
+/// 避免给未用该能力的站点留垃圾键）。
+pub async fn record_tokens(state: &AppState, user_id: i64, tokens: u64, amount_micro: i64) {
+    let book = state.pricebook.load();
+    if book.has_volume_rules() {
         state.sched.monthly_tokens_add(user_id, tokens).await;
+    }
+    if book.has_spend_rules() {
+        state.sched.monthly_spend_add(user_id, amount_micro).await;
     }
 }
 

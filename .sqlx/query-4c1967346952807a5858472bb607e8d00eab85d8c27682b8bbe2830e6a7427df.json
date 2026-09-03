@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT group_code, group_ratio::text AS \"ratio!\" FROM price_groups\n               WHERE group_code = ANY($1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "4c1967346952807a5858472bb607e8d00eab85d8c27682b8bbe2830e6a7427df"
+}

@@ -58,8 +58,8 @@ pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(),
     Ok(())
 }
 
-/// 结算后累计两个软实时计数：团成员消费（团 key 才计）与用户本月 token
-/// （volume 规则输入，仅在价簿含该类规则时才写）。
+/// 结算后累计软实时计数：团成员消费（团 key 才计）与用户本月 token/消费
+/// （volume 规则的两个阈值轴输入，各自仅在价簿含对应规则时才写）。
 pub async fn record_settlement_counters(
     state: &AppState,
     key_user_id: i64,
@@ -73,7 +73,7 @@ pub async fn record_settlement_counters(
             .member_spend_add(key_user_id, member, amount_micro)
             .await;
     }
-    super::rule_inputs::record_tokens(state, key_user_id, tokens).await;
+    super::rule_inputs::record_tokens(state, key_user_id, tokens, amount_micro).await;
 }
 
 /// 渠道 key 的选路反馈：时延 EWMA（least_latency 池排序输入）+ 当日消费（上限闸输入）。

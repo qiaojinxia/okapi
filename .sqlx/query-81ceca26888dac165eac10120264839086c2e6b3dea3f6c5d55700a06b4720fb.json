@@ -1,0 +1,174 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id AS channel_id,\n               c.name,\n               c.provider,\n               c.status,\n               c.priority,\n               COALESCE(\n                   (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)\n                    FROM pool_channels pc WHERE pc.channel_id = c.id),\n                   '{}'\n               ) AS \"pools!\",\n               ck.id AS \"key_id?\",\n               ck.status AS \"key_status?\",\n               ck.cooldown_until,\n               ck.weight AS \"key_weight?\",\n               (ck.model_subset IS NULL OR ck.model_subset @> $1) AS \"subset_ok?\",\n               ck.rpm_limit,\n               ck.daily_spend_cap_micro,\n               ck.max_concurrency\n        FROM channels c\n        LEFT JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.deleted_at IS NULL AND c.models @> $1\n        ORDER BY c.priority DESC, c.id, ck.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "pools!",
+        "type_info": "VarcharArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "key_id?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "key_status?",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "cooldown_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "cooldown_until"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "key_weight?",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "subset_ok?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "daily_spend_cap_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "daily_spend_cap_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "max_concurrency"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false,
+      false,
+      true,
+      false,
+      null,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "81ceca26888dac165eac10120264839086c2e6b3dea3f6c5d55700a06b4720fb"
+}

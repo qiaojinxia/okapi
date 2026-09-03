@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
@@ -9,6 +9,7 @@ import { ROUTING_STRATEGIES, STRATEGY_HINT, STRATEGY_LABEL } from '@/features/po
 import type { PoolRow } from '@/features/pools/types'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 
 type Strategy = (typeof ROUTING_STRATEGIES)[number]
 
@@ -28,12 +29,27 @@ export function PoolDrawer({
   const [strategy, setStrategy] = useState<Strategy>(
     (pool?.routing_strategy as Strategy | undefined) ?? 'priority_weighted',
   )
+  const [fallback, setFallback] = useState(pool?.fallback_pool_code ?? '')
+
+  // 降级目标候选：其它池（不能选自己）
+  const pools = useQuery({
+    queryKey: qk.adminPools,
+    queryFn: () => apiFetch<{ data: PoolRow[] }>('/admin/pools'),
+  })
+  const fallbackOptions = (pools.data?.data ?? [])
+    .filter((p) => p.pool_code !== code.trim())
+    .map((p) => ({ value: p.pool_code, label: p.pool_code }))
 
   const save = useMutation({
     mutationFn: () =>
       apiFetch('/admin/pools', {
         method: 'POST',
-        body: { pool_code: code.trim(), description, routing_strategy: strategy },
+        body: {
+          pool_code: code.trim(),
+          description,
+          routing_strategy: strategy,
+          fallback_pool_code: fallback === '' ? null : fallback,
+        },
       }),
     onSuccess: () => {
       onDone()
@@ -91,6 +107,17 @@ export function PoolDrawer({
           options={ROUTING_STRATEGIES.map((s) => ({ value: s, label: t(STRATEGY_LABEL[s]) }))}
         />
         <p className="text-xs text-muted-foreground">{t(STRATEGY_HINT[strategy])}</p>
+      </FieldGroup>
+
+      <FieldGroup title={t('admin:poolFallback')} hint={t('admin:poolFallbackHint')}>
+        <Select
+          id="pool-fallback"
+          className="w-56"
+          value={fallback}
+          onChange={setFallback}
+          placeholder={t('admin:poolFallbackNone')}
+          options={fallbackOptions}
+        />
       </FieldGroup>
     </Drawer>
   )

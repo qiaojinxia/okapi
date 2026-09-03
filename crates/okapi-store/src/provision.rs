@@ -196,5 +196,16 @@ pub async fn create_channel(
     .fetch_one(pool)
     .await?;
 
+    // 新渠道缺省进内置 default 池：渠道只服务它所在的池，不入池即对谁都不可达。
+    // 调用方要专属可见性时再用 set_channel_pools 覆盖成员关系。
+    sqlx::query!(
+        r#"INSERT INTO pool_channels (pool_code, channel_id) VALUES ($1, $2)
+           ON CONFLICT DO NOTHING"#,
+        crate::channels::DEFAULT_POOL,
+        channel_id
+    )
+    .execute(pool)
+    .await?;
+
     Ok((channel_id, key_id))
 }

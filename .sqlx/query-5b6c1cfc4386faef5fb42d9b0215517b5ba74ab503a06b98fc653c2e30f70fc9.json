@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT group_code FROM price_groups WHERE pool_code = $1 ORDER BY sort_order, group_code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "group_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5b6c1cfc4386faef5fb42d9b0215517b5ba74ab503a06b98fc653c2e30f70fc9"
+}

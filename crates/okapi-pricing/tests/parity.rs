@@ -128,10 +128,12 @@ fn build_rule(spec: &RuleSpec) -> PricingRule {
     let kind = match spec.kind.as_str() {
         "volume" => RuleKind::Volume {
             min_monthly_tokens: spec.min_monthly_tokens,
+            min_monthly_spend_micro: 0,
         },
         "time_based" => RuleKind::TimeBased {
             start_minute: spec.start_minute,
             end_minute: spec.end_minute,
+            weekdays: okapi_pricing::WeekdayMask::ALL,
         },
         "discount" => RuleKind::Discount,
         "surge" => RuleKind::Surge,
@@ -143,6 +145,7 @@ fn build_rule(spec: &RuleSpec) -> PricingRule {
         multiplier: ratio(&spec.multiplier),
         scope: RuleScope::default(),
         priority: 0,
+        stacking: okapi_pricing::Stacking::Stackable,
         valid_from: None,
         valid_to: None,
     }
@@ -190,6 +193,7 @@ fn newapi_parity_fixtures() {
             group: group_code,
             user_multiplier: ratio(&case.user_multiplier),
             monthly_tokens: case.ctx.monthly_tokens,
+            monthly_spend_micro: 0,
             local_minute_of_day: case.ctx.local_minute,
             now_unix: 1_756_500_000,
             surge_active: case.ctx.surge,
@@ -279,10 +283,12 @@ fn snapshot_json_shape_matches_design() {
             kind: RuleKind::TimeBased {
                 start_minute: 1320,
                 end_minute: 360,
+                weekdays: okapi_pricing::WeekdayMask::ALL,
             },
             multiplier: ratio("0.8"),
             scope: RuleScope::default(),
             priority: 0,
+            stacking: okapi_pricing::Stacking::Stackable,
             valid_from: None,
             valid_to: None,
         }],
@@ -294,6 +300,7 @@ fn snapshot_json_shape_matches_design() {
         group: group_code,
         user_multiplier: ratio("1"),
         monthly_tokens: 0,
+        monthly_spend_micro: 0,
         local_minute_of_day: 1380,
         now_unix: 0,
         surge_active: false,
@@ -376,6 +383,7 @@ fn openai_audio_official_pricing_parity() {
         group: group_code.clone(),
         user_multiplier: ratio("1"),
         monthly_tokens: 0,
+        monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
         surge_active: false,
@@ -405,12 +413,20 @@ fn openai_audio_official_pricing_parity() {
 
     // 快照必须带上本次用到的模态轴（账单可解释）
     let snap = &quote.snapshot;
-    assert_eq!(snap.audio_ratio.map(|r| r.to_string()).as_deref(), Some("16"));
     assert_eq!(
-        snap.audio_completion_ratio.map(|r| r.to_string()).as_deref(),
+        snap.audio_ratio.map(|r| r.to_string()).as_deref(),
+        Some("16")
+    );
+    assert_eq!(
+        snap.audio_completion_ratio
+            .map(|r| r.to_string())
+            .as_deref(),
         Some("2")
     );
-    assert_eq!(snap.image_ratio.map(|r| r.to_string()).as_deref(), Some("1.5"));
+    assert_eq!(
+        snap.image_ratio.map(|r| r.to_string()).as_deref(),
+        Some("1.5")
+    );
 
     // 未配置模态轴（三轴均 1.0）必须完全等价于"无模态分轴"的旧行为：
     // 输入全按文本 1.0、输出全按 completion_ratio 4.0（音频输出走回落，不被打折）
@@ -494,6 +510,7 @@ fn anthropic_cache_write_is_billed_as_separate_segment() {
         group: group_code.clone(),
         user_multiplier: ratio("1"),
         monthly_tokens: 0,
+        monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
         surge_active: false,

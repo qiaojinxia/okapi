@@ -405,6 +405,18 @@ pub struct ChannelRow {
     pub settings: serde_json::Value,
     /// 所属渠道池代码。同理由：不回显当前值，编辑面一保存就把池成员关系清空。
     pub pools: Vec<String>,
+    /// 池成员关系明细（含成员级调度参数覆盖）。
+    pub pool_members: Vec<PoolMember>,
+}
+
+/// 渠道在某个池里的成员关系：覆盖为 None 时继承渠道 / key 自身的调度参数。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PoolMember {
+    pub pool_code: String,
+    #[serde(default)]
+    pub priority_override: Option<i32>,
+    #[serde(default)]
+    pub weight_override: Option<i32>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -434,7 +446,16 @@ pub async fn list_channels(
                    (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
                    ARRAY[]::varchar[]
-               ) AS "pools!"
+               ) AS "pools!",
+               COALESCE(
+                   (SELECT jsonb_agg(jsonb_build_object(
+                               'pool_code', pc.pool_code,
+                               'priority_override', pc.priority_override,
+                               'weight_override', pc.weight_override
+                           ) ORDER BY pc.pool_code)
+                      FROM pool_channels pc WHERE pc.channel_id = c.id),
+                   '[]'::jsonb
+               ) AS "pool_members!"
         FROM channels c
         WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)
         ORDER BY c.priority DESC, c.id
@@ -457,6 +478,7 @@ pub async fn list_channels(
             owner_id: r.owner_id,
             settings: r.settings,
             pools: r.pools,
+            pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
         })
         .collect())
 }
@@ -491,14 +513,15 @@ pub async fn set_channel_owner(
     Ok(())
 }
 
-/// 覆盖式设置该渠道所属的池（空数组 = 从所有池移出）。
+/// 覆盖式设置该渠道所属的池（空数组 = 从所有池移出 → 孤儿，对谁都不可达）。
 ///
 /// 从渠道这一侧维护成员关系：管理员的动作通常是"这个渠道给哪些档位用"，
-/// 而不是逐个池去挑渠道。
+/// 而不是逐个池去挑渠道。成员级覆盖随成员关系一起写：同一渠道在 stable 池当主力、
+/// 在 fast 池当备胎，靠的就是这两列。
 pub async fn set_channel_pools(
     pool: &PgPool,
     channel_id: i64,
-    pools: &[String],
+    members: &[PoolMember],
 ) -> Result<(), StoreError> {
     let mut tx = pool.begin().await?;
     sqlx::query!(
@@ -507,14 +530,19 @@ pub async fn set_channel_pools(
     )
     .execute(&mut *tx)
     .await?;
-    if !pools.is_empty() {
+    for m in members {
         sqlx::query!(
             r#"
-            INSERT INTO pool_channels (pool_code, channel_id)
-            SELECT unnest($2::varchar[]), $1
+            INSERT INTO pool_channels (pool_code, channel_id, priority_override, weight_override)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (pool_code, channel_id) DO UPDATE SET
+                priority_override = EXCLUDED.priority_override,
+                weight_override   = EXCLUDED.weight_override
             "#,
+            m.pool_code,
             channel_id,
-            pools
+            m.priority_override,
+            m.weight_override
         )
         .execute(&mut *tx)
         .await?;
@@ -523,27 +551,56 @@ pub async fn set_channel_pools(
     Ok(())
 }
 
-/// 定价分组 upsert（倍率十进制字符串精确入库）。
+/// 便捷形式：只给池码、不带覆盖（测试与迁移器用）。
+pub async fn set_channel_pool_codes(
+    pool: &PgPool,
+    channel_id: i64,
+    pools: &[String],
+) -> Result<(), StoreError> {
+    let members: Vec<PoolMember> = pools
+        .iter()
+        .map(|p| PoolMember {
+            pool_code: p.clone(),
+            priority_override: None,
+            weight_override: None,
+        })
+        .collect();
+    set_channel_pools(pool, channel_id, &members).await
+}
+
+/// 定价分组 upsert 参数。
+#[derive(Debug, Clone, Copy)]
+pub struct PriceGroupInput<'a> {
+    pub group_code: &'a str,
+    /// 倍率十进制字符串，精确入库。
+    pub group_ratio: &'a str,
+    pub description: &'a str,
+    /// 该分组的用户打哪个池；None = 内置 default 池。
+    pub pool_code: Option<&'a str>,
+    /// 用户可否在门户为自己的 key 选择此分组。
+    pub self_select: bool,
+}
+
+/// 定价分组 upsert。分组必有池（缺省 default）——"无池"这个状态不再存在。
 pub async fn upsert_price_group(
     pool: &PgPool,
-    group_code: &str,
-    group_ratio: &str,
-    description: &str,
-    pool_code: Option<&str>,
+    input: PriceGroupInput<'_>,
 ) -> Result<(), StoreError> {
     sqlx::query!(
         r#"
-        INSERT INTO price_groups (group_code, group_ratio, description, pool_code)
-        VALUES ($1, ($2::text)::numeric, $3, $4)
+        INSERT INTO price_groups (group_code, group_ratio, description, pool_code, self_select)
+        VALUES ($1, ($2::text)::numeric, $3, $4, $5)
         ON CONFLICT (group_code) DO UPDATE SET
             group_ratio = EXCLUDED.group_ratio,
             description = EXCLUDED.description,
-            pool_code   = EXCLUDED.pool_code
+            pool_code   = EXCLUDED.pool_code,
+            self_select = EXCLUDED.self_select
         "#,
-        group_code,
-        group_ratio,
-        description,
-        pool_code
+        input.group_code,
+        input.group_ratio,
+        input.description,
+        input.pool_code.unwrap_or(crate::channels::DEFAULT_POOL),
+        input.self_select
     )
     .execute(pool)
     .await?;
@@ -551,24 +608,28 @@ pub async fn upsert_price_group(
 }
 
 /// 渠道池 upsert。策略取值由库 CHECK 兜底，非法值回 400 而不是写坏数据。
+/// `fallback_pool_code`：本池无候选时退到的池（单跳；自引用由 CHECK 拒绝）。
 pub async fn upsert_channel_pool(
     pool: &PgPool,
     pool_code: &str,
     description: &str,
     routing_strategy: &str,
+    fallback_pool_code: Option<&str>,
 ) -> Result<(), StoreError> {
     sqlx::query!(
         r#"
-        INSERT INTO channel_pools (pool_code, description, routing_strategy)
-        VALUES ($1, $2, $3)
+        INSERT INTO channel_pools (pool_code, description, routing_strategy, fallback_pool_code)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (pool_code) DO UPDATE SET
-            description      = EXCLUDED.description,
-            routing_strategy = EXCLUDED.routing_strategy,
-            updated_at       = now()
+            description        = EXCLUDED.description,
+            routing_strategy   = EXCLUDED.routing_strategy,
+            fallback_pool_code = EXCLUDED.fallback_pool_code,
+            updated_at         = now()
         "#,
         pool_code,
         description,
-        routing_strategy
+        routing_strategy,
+        fallback_pool_code
     )
     .execute(pool)
     .await?;
@@ -804,10 +865,15 @@ pub async fn create_admin_role(
     display_name: &str,
     permissions: &serde_json::Value,
 ) -> Result<i64, StoreError> {
+    // 按 role_code upsert：权限点集合随功能增长要改（新增只读端点时给"只读运营"补权限），
+    // 此前纯 INSERT 让角色一经创建就不可修改，只能删了重建——而删除会被"仍有用户绑定"拒绝
     let id = sqlx::query_scalar!(
         r#"
         INSERT INTO admin_roles (role_code, display_name, permissions)
         VALUES ($1, $2, $3)
+        ON CONFLICT (role_code) DO UPDATE
+            SET display_name = EXCLUDED.display_name,
+                permissions = EXCLUDED.permissions
         RETURNING id
         "#,
         role_code,

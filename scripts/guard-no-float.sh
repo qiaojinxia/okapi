@@ -19,7 +19,22 @@ for crate in "${CRATES[@]}"; do
             fail=1
         fi
     done
-    if [ -d "$crate/src" ] && grep -rnE "$PANIC_PATTERN" "$crate/src"; then
+    # panic 类调用只查生产代码：#[cfg(test)] 之后的内容是模块内单测，unwrap 在断言语境里正当。
+    # 约定测试模块位于文件末尾（rustfmt/社区惯例），故从首个 #[cfg(test)] 起截断。
+    if [ -d "$crate/src" ] && ! python3 - "$crate/src" "$PANIC_PATTERN" <<'PY'
+import pathlib, re, sys
+root, pattern = pathlib.Path(sys.argv[1]), re.compile(sys.argv[2])
+hits = []
+for path in sorted(root.rglob('*.rs')):
+    for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        if line.strip().startswith('#[cfg(test)]'):
+            break
+        if pattern.search(line):
+            hits.append(f'{path}:{lineno}:{line}')
+print('\n'.join(hits))
+sys.exit(1 if hits else 0)
+PY
+    then
         echo "❌ 计费红线：$crate/src 中出现 unwrap/expect/panic 类调用" >&2
         fail=1
     fi

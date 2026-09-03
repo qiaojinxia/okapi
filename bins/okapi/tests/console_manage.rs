@@ -84,9 +84,18 @@ async fn setup() -> Env {
         .await
         .unwrap();
     let group = format!("g-mg-{suffix}");
-    okapi_store::admin::upsert_price_group(&pg, &group, "0.9", "测试组", None)
-        .await
-        .unwrap();
+    okapi_store::admin::upsert_price_group(
+        &pg,
+        okapi_store::admin::PriceGroupInput {
+            group_code: &group,
+            group_ratio: "0.9",
+            description: "测试组",
+            pool_code: None,
+            self_select: false,
+        },
+    )
+    .await
+    .unwrap();
 
     let (channel_id, _key_id) = okapi_store::provision::create_channel(
         &pg,
@@ -188,7 +197,10 @@ async fn admin_list_surface_covers_every_resource() {
         .expect("分组必须在列表");
     assert_eq!(g["group_ratio"], "0.9000");
     assert_eq!(g["user_count"], 0);
-    assert_eq!(g["channel_count"], 0);
+    // 分组必有池：未指定即 default 池，渠道数 = default 池成员数（新渠道缺省都在里面）
+    assert_eq!(g["pool_code"], "default");
+    assert_eq!(g["self_select"], false);
+    assert!(g["channel_count"].as_i64().unwrap() >= 0);
 
     // ---- 令牌列表：管理员跨用户 + 按用户过滤 + 只回前缀 ----
     let (status, body) = get(

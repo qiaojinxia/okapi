@@ -7,6 +7,8 @@ export interface Me {
   key_id: number
   group: string
   balance_micro: number
+  /// 余额有效期（#1790-6）；null = 不过期。RFC3339。
+  balance_expires_at: string | null
   /// 1=user 10=admin 100=super_admin（对齐 new-api）。
   role: number
   /// 生效权限点；`["*"]` = 全权，空数组 = 无管理权限。

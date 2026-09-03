@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO channel_pools (pool_code, description, routing_strategy)\n           VALUES ($1, 'new-api 分组导入', 'priority_weighted')\n           ON CONFLICT (pool_code) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1d96eafb845928ea7fabc121de904e0e33789691d947dcd6f073de4b430d43fd"
+}

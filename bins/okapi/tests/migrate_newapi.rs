@@ -31,17 +31,20 @@ async fn setup() -> Env {
     let users = [
         json!({"id": 1, "username": format!("na-alice-{suffix}"), "email": format!("alice-{suffix}@na.test"),
                "role": 100, "status": 1, "quota": 5_000_000, "group": "default"}),
-        json!({"id": 2, "username": format!("na-bob-{suffix}"), "role": 1, "status": 2, "quota": 0}),
+        json!({"id": 2, "username": format!("na-bob-{suffix}"), "role": 1, "status": 2, "quota": 0,
+               "group": format!("vip-{suffix}")}),
     ];
     let tokens = [
-        json!({"user_id": 1, "name": "cli", "key": format!("naKeyAlice{suffix}"), "status": 1}),
-        json!({"user_id": 2, "name": "app", "key": format!("sk-naKeyBob{suffix}"), "status": 1}),
+        json!({"user_id": 1, "name": "cli", "key": format!("naKeyAlice{suffix}"), "status": 1,
+               "group": format!("vip-{suffix}")}),
+        json!({"user_id": 2, "name": "app", "key": format!("sk-naKeyBob{suffix}"), "status": 1,
+               "group": "auto"}),
         json!({"user_id": 99, "name": "orphan", "key": "sk-orphan", "status": 1}),
     ];
     let channels = [
         json!({"name": format!("na-oai-{suffix}"), "type": 1, "key": "up-key-1",
                "base_url": "https://oai.example/v1", "models": "gpt-4o,gpt-4o-mini",
-               "priority": 5, "weight": 3, "status": 1}),
+               "priority": 5, "weight": 3, "status": 1, "group": format!("default,vip-{suffix}")}),
         json!({"name": format!("na-weird-{suffix}"), "type": 999, "key": "up-key-2",
                "base_url": "https://weird.example/v1", "models": "x-model", "status": 1}),
     ];
@@ -167,6 +170,74 @@ async fn newapi_sample_migration_full_check() {
     .await
     .unwrap();
     assert_eq!(weird.provider, "openai_compat", "未知 type 兜底");
+
+    // 分组映射：渠道 group CSV → 同名池成员；用户 group → user_groups；令牌 group → group_override；
+    // auto 令牌 → 跟随用户分组（无覆盖）；无 group 的渠道 → 只在 default 池
+    let vip = format!("vip-{}", env.suffix);
+    let oai_pools = sqlx::query_scalar!(
+        r#"SELECT pc.pool_code FROM pool_channels pc JOIN channels c ON c.id = pc.channel_id
+           WHERE c.name = $1 ORDER BY pc.pool_code"#,
+        format!("na-oai-{}", env.suffix)
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        oai_pools,
+        vec!["default".to_owned(), vip.clone()],
+        "渠道分组 CSV → 两个池"
+    );
+    let weird_pools = sqlx::query_scalar!(
+        r#"SELECT pc.pool_code FROM pool_channels pc JOIN channels c ON c.id = pc.channel_id
+           WHERE c.name = $1"#,
+        format!("na-weird-{}", env.suffix)
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        weird_pools,
+        vec!["default".to_owned()],
+        "无分组渠道只进 default 池"
+    );
+    let vip_group = sqlx::query!(
+        r#"SELECT pool_code, group_ratio::text AS "ratio!" FROM price_groups WHERE group_code = $1"#,
+        vip
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(vip_group.pool_code, vip, "同名价格分组指向同名池");
+    assert_eq!(
+        vip_group.ratio, "1.0000",
+        "倍率占位 1，待站长按 GroupRatio 调"
+    );
+    assert_eq!(
+        found.group_code, vip,
+        "alice 的令牌 group=vip → group_override，生效分组即 vip"
+    );
+    assert_eq!(found.pool_code.as_deref(), Some(vip.as_str()));
+    let bob_groups = sqlx::query_scalar!(
+        r#"SELECT ug.group_code FROM user_groups ug JOIN users u ON u.id = ug.user_id
+           WHERE u.username = $1"#,
+        format!("na-bob-{}", env.suffix)
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(bob_groups, vec![vip.clone()], "用户 group → user_groups");
+    let bob_key_override = sqlx::query_scalar!(
+        r#"SELECT k.group_override FROM api_keys k JOIN users u ON u.id = k.user_id
+           WHERE u.username = $1"#,
+        format!("na-bob-{}", env.suffix)
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(
+        bob_key_override.is_none(),
+        "auto 令牌不写覆盖，跟随用户分组"
+    );
 
     // —— 幂等二跑：余额不翻倍、行数不增 ——
     let stats2 = migrate::run_newapi(&env.pg, Some(&env.ledger), &env.dir, false, None)

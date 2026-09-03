@@ -25,12 +25,14 @@ pub struct AuthedKey {
     /// 自定义子角色的权限点集合（admin_roles.permissions）；
     /// None = 未绑定自定义角色（admin 默认全权，对齐 new-api 迁移习惯）。
     pub permissions: Option<Vec<String>>,
-    /// 生效渠道池：api_keys.pool_override > 生效定价组的 price_groups.pool_code > None。
-    /// None = 不限（全部渠道可见）；settings.strict_group_isolation = true 时 None = 无候选。
+    /// 生效渠道池：api_keys.pool_override > 生效定价组的 price_groups.pool_code > default。
+    /// 保留 Option 只为鉴权缓存的序列化兼容；解析后恒为 Some（缺省 `default`）。
     pub pool_code: Option<String>,
     /// 该池的选路策略（随鉴权缓存一起带下来，热路径不再查库）。
-    /// None = 无池，按默认 priority_weighted。
     pub pool_strategy: Option<String>,
+    /// 主池对某模型无候选时退到的池（channel_pools.fallback_pool_code，单跳）。
+    #[serde(default)]
+    pub pool_fallback: Option<String>,
     /// 生效定价分组：key 分组覆盖 > 用户最高优先级组 > 默认组。
     pub group_code: String,
     /// users.price_multiplier × 1e6（定点，避免浮点穿透计费路径）。
@@ -88,6 +90,22 @@ impl AuthedKey {
                 }
             }
         }
+    }
+
+    /// 有序池链：主池 → 降级池（去重）。候选查询与 custom_pass 点查都吃这个。
+    #[must_use]
+    pub fn pool_chain(&self) -> Vec<&str> {
+        let primary = self
+            .pool_code
+            .as_deref()
+            .unwrap_or(crate::channels::DEFAULT_POOL);
+        let mut chain = vec![primary];
+        if let Some(fb) = self.pool_fallback.as_deref()
+            && fb != primary
+        {
+            chain.push(fb);
+        }
+        chain
     }
 
     /// 模型白名单检查（null = 不限）。
@@ -152,12 +170,13 @@ pub async fn find_key_by_hash(
                r.member_user_id,
                r.member_monthly_limit_micro,
                r.group_code AS "group_code!",
-               COALESCE(r.pool_override, pg.pool_code) AS pool_code,
-               cp.routing_strategy AS "pool_strategy?"
+               COALESCE(r.pool_override, pg.pool_code, 'default') AS "pool_code!",
+               cp.routing_strategy AS "pool_strategy?",
+               cp.fallback_pool_code AS "pool_fallback?"
         FROM resolved r
         LEFT JOIN price_groups pg ON pg.group_code = r.group_code
         LEFT JOIN channel_pools cp
-               ON cp.pool_code = COALESCE(r.pool_override, pg.pool_code)
+               ON cp.pool_code = COALESCE(r.pool_override, pg.pool_code, 'default')
         "#,
         key_hash
     )
@@ -173,8 +192,9 @@ pub async fn find_key_by_hash(
         permissions: r
             .admin_permissions
             .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
-        pool_code: r.pool_code,
+        pool_code: Some(r.pool_code),
         pool_strategy: r.pool_strategy,
+        pool_fallback: r.pool_fallback,
         group_code: r.group_code,
         multiplier_scaled: r.multiplier_scaled,
         rpm_limit: r.rpm_limit,

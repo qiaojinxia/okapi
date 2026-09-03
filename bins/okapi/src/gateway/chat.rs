@@ -103,12 +103,17 @@ struct RequestBilling {
     /// 客户端 IP（CDN 头按序，§14.2）。
     client_ip: Option<String>,
     /// 渠道可见性组（用户全部组并集，§6.3）。
-    pool_code: Option<String>,
+    /// 有序池链（主池 → 降级池）：候选查询与缓存键都吃它。
+    pool_chain: Vec<String>,
     pool_strategy: Option<String>,
     /// 请求声明的 service_tier（预扣按此档估；结算只降不升，DESIGN §3-4.5）。
     service_tier: Option<String>,
     /// 模型是否配置了档位倍率（据此决定是否采集响应档位）。
     has_tier_pricing: bool,
+    /// 模型级降级链（DESIGN §3.4.1；已过 key 白名单，仅零候选时消费）。
+    fallback_models: Arc<Vec<String>>,
+    /// 发生模型级降级时 = 客户端请求的 canonical 模型（写入 pricing_snapshot）。
+    downgraded_from: Option<String>,
 }
 
 enum FailureReply {
@@ -409,6 +414,7 @@ async fn handle_chat(
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
         monthly_tokens: rules_in.monthly_tokens,
+        monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
         surge_active: rules_in.surge_active,
@@ -498,6 +504,14 @@ async fn handle_chat(
     }
 
     // —— 预扣已建立：此后一切失败路径必须退款（settle_failure）——
+    // 降级链在此过 key 白名单：降级模型同样受令牌 allowlist 约束，
+    // 否则降级会成为绕过模型白名单的后门。
+    let fallback_models: Vec<String> = meta
+        .fallback_models
+        .iter()
+        .filter(|fb| *fb != &canonical && key.allows_model(fb))
+        .cloned()
+        .collect();
     let bill_model_for_tier = canonical.clone();
     let bill = RequestBilling {
         state: state.clone(),
@@ -518,10 +532,12 @@ async fn handle_chat(
         session: info.session.clone(),
         client_type: detect_client_type(headers),
         client_ip: super::clients::detect_client_ip(headers),
-        pool_code: key.pool_code.clone(),
+        pool_chain: key.pool_chain().into_iter().map(str::to_owned).collect(),
         pool_strategy: key.pool_strategy.clone(),
         service_tier: info.service_tier.clone(),
         has_tier_pricing: book.has_tiers(&ModelCode::from(bill_model_for_tier.as_str())),
+        fallback_models: Arc::new(fallback_models),
+        downgraded_from: None,
     };
 
     match forward(&bill, info, body).await {
@@ -538,23 +554,108 @@ async fn handle_chat(
     }
 }
 
-// failover 主循环：候选过滤/粘性/信号量/状态机联动的完整语义在同一视野内更可读
-#[allow(clippy::too_many_lines)]
+/// 模型级降级（DESIGN §3.4.1）：请求模型**零可用候选**（渠道停用/冷却/全被限住）
+/// 时按 `models.fallback_models` 顺序改投。三条铁律：
+/// - 只有 `no_available_channel` 触发——上游 4xx/5xx 是"打过了没打通"，
+///   换模型只会藏住真实错误并让用户为两次调用付钱；
+/// - 单跳：只读请求模型自己的链，不递归降级模型的链；
+/// - 按实际服务模型计费（fallback_billing 重建计费上下文，快照记 requested_model）。
 async fn forward(
     bill: &RequestBilling,
     info: &ProbeInfo,
     body: &Bytes,
 ) -> Result<Response, ForwardFailure> {
+    let first = try_model(bill, info, body).await;
+    let zero_candidates = matches!(
+        &first,
+        Err(f) if f.error_code == codes::NO_AVAILABLE_CHANNEL
+    );
+    if !zero_candidates || bill.fallback_models.is_empty() {
+        return first;
+    }
+    for fb in bill.fallback_models.iter() {
+        let Some(fb_bill) = fallback_billing(bill, info, fb).await else {
+            continue; // 不存在/停用/无定价/自引用：跳过该环，试链上下一个
+        };
+        tracing::info!(
+            request_id = %bill.request_id,
+            requested = %bill.model,
+            fallback = %fb_bill.model,
+            "请求模型零可用候选，模型级降级"
+        );
+        match try_model(&fb_bill, info, body).await {
+            // 降级模型同样零候选 → 链上下一个
+            Err(f) if f.error_code == codes::NO_AVAILABLE_CHANNEL => {}
+            // 成功或真实上游失败：终止。降级只救"无人可打"，不救"打了没打通"
+            other => return other,
+        }
+    }
+    first
+}
+
+/// 为降级模型重建计费上下文。返回 None = 该环不可投：
+/// 模型不存在/停用、解析后与请求模型相同（自引用）、或价簿无其定价
+/// （无价强行投出会在结算时 fail-closed 退款，用户白等一场还打了上游）。
+async fn fallback_billing(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    fb: &str,
+) -> Option<RequestBilling> {
+    let meta = resolve_model_cached(&bill.state, fb).await.ok()?;
+    let meta = meta.as_ref().as_ref()?.clone();
+    if meta.canonical == bill.model {
+        return None;
+    }
+    let mut calc = bill.calc.clone();
+    calc.model = ModelCode::from(meta.canonical.as_str());
+    // 预扣补全上限按降级模型口径重算（显式请求值仍优先）
+    let model_default_cap = meta
+        .max_output
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(DEFAULT_COMPLETION_CAP);
+    let completion_cap = info
+        .completion_cap_req
+        .unwrap_or(model_default_cap)
+        .min(MAX_COMPLETION_CAP);
+    let est_usage = TokenUsage {
+        prompt_tokens: bill.est_prompt,
+        completion_tokens: completion_cap,
+        ..TokenUsage::default()
+    };
+    if calculate(&bill.book, &calc, est_usage).is_err() {
+        return None;
+    }
+    let has_tier_pricing = bill.book.has_tiers(&calc.model);
+    Some(RequestBilling {
+        calc,
+        completion_cap,
+        model: meta.canonical.clone(),
+        has_tier_pricing,
+        // 单跳：降级请求不再携带链，杜绝递归
+        fallback_models: Arc::new(Vec::new()),
+        downgraded_from: Some(bill.model.clone()),
+        ..bill.clone()
+    })
+}
+
+// failover 主循环：候选过滤/粘性/信号量/状态机联动的完整语义在同一视野内更可读
+#[allow(clippy::too_many_lines)]
+async fn try_model(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    body: &Bytes,
+) -> Result<Response, ForwardFailure> {
     // 候选 5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL 收敛）
-    // 缓存键含池：不同池的候选集合不同，混用会把别的池的渠道发给用户
-    let cache_key = format!("{}|{}", bill.model, bill.pool_code.as_deref().unwrap_or(""));
+    // 缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户
+    let cache_key = format!("{}|{}", bill.model, bill.pool_chain.join(">"));
     let raw = if let Some(hit) = bill.state.cand_cache.get(&cache_key).await {
         hit
     } else {
+        let chain: Vec<&str> = bill.pool_chain.iter().map(String::as_str).collect();
         let rows = okapi_store::channels::candidates_for_model(
             &bill.state.pg,
             &bill.model,
-            bill.pool_code.as_deref(),
+            &chain,
             bill.state.master_key.as_deref(),
         )
         .await
@@ -1641,7 +1742,14 @@ async fn settle_commit(
         .await
     {
         Ok(CommitOutcome::Committed { balance_after, .. }) => {
-            let snapshot = serde_json::to_value(&quote.snapshot).ok();
+            let mut snapshot = serde_json::to_value(&quote.snapshot).ok();
+            // 模型级降级的账单可解释性（DESIGN §3.4）：仅降级时写 requested_model，
+            // 用户能核对"我要的是 A、实际用了 B、按 B 计价"
+            if let Some(from) = &bill.downgraded_from
+                && let Some(serde_json::Value::Object(map)) = snapshot.as_mut()
+            {
+                map.insert("requested_model".into(), serde_json::json!(from));
+            }
             let input = SettlementInput {
                 request_id: bill.request_id,
                 log_type: 2,

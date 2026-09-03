@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ug.group_code FROM user_groups ug JOIN users u ON u.id = ug.user_id\n           WHERE u.username = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_groups",
+            "name": "group_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0007097bdb89f18cb8ec09902d47ed7beca67ca48e8d4ac16ae3f1b96338046a"
+}

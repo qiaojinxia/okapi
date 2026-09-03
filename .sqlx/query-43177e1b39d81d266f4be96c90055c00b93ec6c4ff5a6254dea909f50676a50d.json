@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.api_base, c.settings, ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1\n          AND c.provider = 'custom_pass'\n          AND c.status = 1\n          AND c.deleted_at IS NULL\n          AND ck.status = 1\n          -- 可见性与候选查询同一条规则：渠道只服务它所在的池（链内任一池即可）\n          AND EXISTS (\n                SELECT 1 FROM pool_channels pc\n                WHERE pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])\n          )\n        ORDER BY ck.id\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "settings",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "settings"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "VarcharArray"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "43177e1b39d81d266f4be96c90055c00b93ec6c4ff5a6254dea909f50676a50d"
+}

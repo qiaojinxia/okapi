@@ -4,11 +4,15 @@ import {
   Boxes,
   Coins,
   Gift,
+  HeartPulse,
+  History,
   KeyRound,
+  Landmark,
   Layers,
   LayoutDashboard,
   Package,
   Percent,
+  ScrollText,
   Server,
   Settings,
   ShieldCheck,
@@ -66,14 +70,22 @@ function AdminLayout() {
       ],
     },
     {
+      // 洞察按"谁在看、问什么"拆三页：产品视角问用量构成、运维视角问服务质量、
+      // 财务视角问经营；此前七个页签挤在一页，三种人都要在里面找自己那一签
       title: t('admin:navInsight'),
-      items: [{ to: '/admin/stats', label: t('admin:statNav'), icon: BarChart3, permission: 'billing.read' }],
+      items: [
+        { to: '/admin/stats', label: t('analytics:title'), icon: BarChart3, permission: 'billing.read' },
+        { to: '/admin/quality', label: t('analytics:qualityTitle'), icon: HeartPulse, permission: 'billing.read' },
+        { to: '/admin/revenue', label: t('analytics:revenueTitle'), icon: Landmark, permission: 'billing.read' },
+        { to: '/admin/logs', label: t('admin:logsNav'), icon: ScrollText, permission: 'billing.read' },
+      ],
     },
     {
       title: t('admin:navSystem'),
       items: [
         { to: '/admin/settings', label: t('admin:settingsTitle'), icon: Settings, permission: 'settings.read' },
         { to: '/admin/ops', label: t('admin:opsTitle'), icon: Wrench, permission: 'settings.write' },
+        { to: '/admin/audit', label: t('admin:auditTitle'), icon: History, permission: 'audit.read' },
       ],
     },
     { items: [{ to: '/portal', label: t('common:portal'), icon: User }] },

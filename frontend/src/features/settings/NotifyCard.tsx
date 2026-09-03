@@ -3,6 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import { toast } from '@/components/ui/toast'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EVENT_LABEL, NOTIFY_EVENTS } from '@/features/settings/types'
@@ -27,7 +28,6 @@ export interface NotifyChannel {
 export function NotifyCard() {
   const { t } = useTranslation()
   const [rows, setRows] = useState<NotifyChannel[] | null>(null)
-  const [msg, setMsg] = useState<string | null>(null)
 
   const current = useQuery({
     queryKey: ['setting', 'notify_channels'],
@@ -46,10 +46,10 @@ export function NotifyCard() {
         body: { key: 'notify_channels', value: list },
       }),
     onSuccess: () => {
-      setMsg(t('admin:saved'))
+      toast.success(t('admin:saved'))
       void current.refetch()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const patch = (i: number, next: Partial<NotifyChannel>) =>
@@ -128,7 +128,6 @@ export function NotifyCard() {
           <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
             {t('common:save')}
           </Button>
-          {msg !== null && <span className="text-xs text-muted-foreground">{msg}</span>}
         </div>
       </CardContent>
     </Card>

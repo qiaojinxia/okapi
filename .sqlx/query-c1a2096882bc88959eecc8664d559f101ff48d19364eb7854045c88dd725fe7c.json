@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.group_code, g.group_ratio::text AS \"ratio!\", g.description, g.is_default,\n                  g.self_select,\n                  EXISTS(SELECT 1 FROM user_groups ug\n                          WHERE ug.user_id = $1 AND ug.group_code = g.group_code) AS \"assigned!\"\n           FROM price_groups g\n           WHERE g.self_select OR g.is_default\n              OR EXISTS(SELECT 1 FROM user_groups ug\n                         WHERE ug.user_id = $1 AND ug.group_code = g.group_code)\n           ORDER BY g.sort_order, g.group_code",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "description",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "is_default",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "is_default"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "self_select",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "self_select"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "assigned!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      true,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "c1a2096882bc88959eecc8664d559f101ff48d19364eb7854045c88dd725fe7c"
+}

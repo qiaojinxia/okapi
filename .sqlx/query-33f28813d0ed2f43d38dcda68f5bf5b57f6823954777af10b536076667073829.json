@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_groups (user_id, group_code, priority) VALUES ($1, $2, 10)\n                   ON CONFLICT (user_id, group_code) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "33f28813d0ed2f43d38dcda68f5bf5b57f6823954777af10b536076667073829"
+}

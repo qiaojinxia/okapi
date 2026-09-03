@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO price_groups (group_code, group_ratio, description, pool_code)\n           VALUES ($1, 1, 'new-api 分组导入（倍率待按 GroupRatio 调整）', $1)\n           ON CONFLICT (group_code) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "761f870a0ff20e61d7f07f66ff0047bbaf316965e834d5d9b06f966234138772"
+}

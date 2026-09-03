@@ -69,6 +69,9 @@ pub struct PriceBook {
     rules: Vec<PricingRule>,
     /// 编译期算好的触发输入门控：无此类规则时 gateway 不采集对应输入（热路径零开销）。
     has_volume_rules: bool,
+    /// volume 规则的消费额轴（min_monthly_spend_micro > 0）单独门控：
+    /// 只用 token 阈值的站点不为消费额计数付 Redis 往返。
+    has_spend_rules: bool,
     has_surge_rules: bool,
 }
 
@@ -149,6 +152,15 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
     let has_volume_rules = rules
         .iter()
         .any(|r| matches!(r.kind, RuleKind::Volume { .. }));
+    let has_spend_rules = rules.iter().any(|r| {
+        matches!(
+            r.kind,
+            RuleKind::Volume {
+                min_monthly_spend_micro: 1..,
+                ..
+            }
+        )
+    });
     let has_surge_rules = rules.iter().any(|r| matches!(r.kind, RuleKind::Surge));
 
     Ok(PriceBook {
@@ -159,6 +171,7 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
         overrides,
         rules,
         has_volume_rules,
+        has_spend_rules,
         has_surge_rules,
     })
 }
@@ -257,6 +270,13 @@ impl PriceBook {
         self.has_volume_rules
     }
 
+    /// 是否存在带消费额阈值的 volume 规则（gateway 据此决定是否读写
+    /// `usd:{uid}:<yyyymm>`）。
+    #[must_use]
+    pub const fn has_spend_rules(&self) -> bool {
+        self.has_spend_rules
+    }
+
     /// 是否存在启用的 surge 规则（gateway 据此决定是否读在途计数与阈值设置）。
     #[must_use]
     pub const fn has_surge_rules(&self) -> bool {
@@ -307,6 +327,7 @@ mod tests {
             multiplier: RatioFp::ONE,
             scope: RuleScope::default(),
             priority,
+            stacking: crate::rules::Stacking::Stackable,
             valid_from: None,
             valid_to: None,
         }
@@ -356,6 +377,7 @@ mod tests {
                     "vol",
                     RuleKind::Volume {
                         min_monthly_tokens: 1,
+                        min_monthly_spend_micro: 0,
                     },
                     9,
                 ),
@@ -391,6 +413,7 @@ mod tests {
                     "v",
                     RuleKind::Volume {
                         min_monthly_tokens: 1,
+                        min_monthly_spend_micro: 0,
                     },
                     0,
                 ),
@@ -399,6 +422,27 @@ mod tests {
         })?;
         assert!(both.has_volume_rules());
         assert!(both.has_surge_rules());
+        assert!(
+            !both.has_spend_rules(),
+            "仅 token 阈值不该触发消费额计数采集"
+        );
+
+        let spend = compile(PriceBookSource {
+            epoch: 1,
+            models: Vec::new(),
+            groups: Vec::new(),
+            overrides: Vec::new(),
+            rules: vec![rule(
+                "sp",
+                RuleKind::Volume {
+                    min_monthly_tokens: 0,
+                    min_monthly_spend_micro: 50_000_000,
+                },
+                0,
+            )],
+        })?;
+        assert!(spend.has_volume_rules());
+        assert!(spend.has_spend_rules());
         Ok(())
     }
 

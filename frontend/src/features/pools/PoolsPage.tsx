@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -7,7 +7,9 @@ import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
+import { toast } from '@/components/ui/toast'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { PoolDrawer } from '@/features/pools/PoolDrawer'
 import type { PoolRow } from '@/features/pools/types'
@@ -23,7 +25,6 @@ import { qk } from '@/lib/query-keys'
 export function PoolsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [msg, setMsg] = useState<string | null>(null)
   const [drawer, setDrawer] = useState<{ pool?: PoolRow } | null>(null)
   const { confirm, dialog } = useConfirm()
 
@@ -37,10 +38,10 @@ export function PoolsPage() {
     mutationFn: (code: string) =>
       apiFetch(`/admin/pools/${encodeURIComponent(code)}`, { method: 'DELETE' }),
     onSuccess: () => {
-      setMsg(t('common:success'))
+      toast.success(t('common:success'))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const rows = pools.data?.data ?? []
@@ -57,12 +58,12 @@ export function PoolsPage() {
           </Button>
         }
       />
-
-      {msg !== null && <p className="text-xs text-muted-foreground">{msg}</p>}
       {dialog}
 
       {pools.isError ? (
-        <ErrorState message={describeError(pools.error)} />
+        <ErrorState message={describeError(pools.error)} onRetry={() => void pools.refetch()} />
+      ) : pools.isPending ? (
+        <TableSkeleton rows={6} cols={6} />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:poolsEmptyHint')} />
       ) : (
@@ -71,6 +72,7 @@ export function PoolsPage() {
             <Tr>
               <Th>{t('admin:poolCode')}</Th>
               <Th>{t('admin:poolStrategy')}</Th>
+              <Th>{t('admin:poolFallback')}</Th>
               <Th>{t('common:description')}</Th>
               <Th>{t('admin:poolChannels')}</Th>
               <Th>{t('admin:poolRefs')}</Th>
@@ -79,10 +81,15 @@ export function PoolsPage() {
           </THead>
           <TBody>
             {rows.map((p) => {
-              const refs = p.group_count + p.key_count
+              const refs = p.group_count + p.key_count + p.fallback_ref_count
               return (
                 <Tr key={p.pool_code}>
-                  <Td className="font-mono text-xs">{p.pool_code}</Td>
+                  <Td>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="font-mono text-xs">{p.pool_code}</span>
+                      {p.builtin && <Badge variant="muted">{t('admin:poolBuiltin')}</Badge>}
+                    </span>
+                  </Td>
                   <Td>
                     <Badge variant={p.routing_strategy === 'least_latency' ? 'default' : 'muted'}>
                       {t(
@@ -91,6 +98,9 @@ export function PoolsPage() {
                           : 'admin:strategyPriorityWeighted',
                       )}
                     </Badge>
+                  </Td>
+                  <Td className="font-mono text-xs">
+                    {p.fallback_pool_code ?? <span className="text-muted-foreground">—</span>}
                   </Td>
                   <Td className="max-w-64 truncate text-xs text-muted-foreground">
                     {p.description ?? '—'}
@@ -108,15 +118,24 @@ export function PoolsPage() {
                       : t('admin:poolRefsDetail', {
                           groups: p.group_count,
                           keys: p.key_count,
-                        })}
+                        }) +
+                        (p.fallback_ref_count > 0
+                          ? ` · ${t('admin:poolRefsFallback', { n: p.fallback_ref_count })}`
+                          : '')}
                   </Td>
                   <Td>
                     <div className="flex items-center gap-0.5">
+                      {/* 抽屉早就支持 pool 回填（策略/说明），页面却一直没给编辑入口 */}
+                      <IconButton
+                        icon={Pencil}
+                        label={t('common:edit')}
+                        onClick={() => setDrawer({ pool: p })}
+                      />
                       <IconButton
                         icon={Trash2}
                         label={t('common:delete')}
                         variant="destructive"
-                        disabled={refs > 0}
+                        disabled={refs > 0 || p.builtin}
                         onClick={() =>
                           confirm({
                             title: t('common:confirmDeleteTitle', { name: p.pool_code }),
@@ -139,7 +158,7 @@ export function PoolsPage() {
           pool={drawer.pool}
           onClose={() => setDrawer(null)}
           onDone={() => {
-            setMsg(t('common:success'))
+            toast.success(t('common:success'))
             invalidate()
           }}
         />

@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"total!\",\n                  count(*) FILTER (WHERE c.status = 1 AND EXISTS (\n                      SELECT 1 FROM channel_keys k WHERE k.channel_id = c.id AND k.status = 1\n                  )) AS \"healthy!\",\n                  count(*) FILTER (WHERE c.status = 1 AND NOT EXISTS (\n                      SELECT 1 FROM channel_keys k WHERE k.channel_id = c.id AND k.status = 1\n                  )) AS \"no_key!\",\n                  count(*) FILTER (WHERE c.status = 3) AS \"auto_disabled!\",\n                  count(*) FILTER (WHERE c.status = 2) AS \"disabled!\",\n                  count(*) FILTER (WHERE NOT EXISTS (\n                      SELECT 1 FROM pool_channels pc WHERE pc.channel_id = c.id\n                  )) AS \"orphan!\"\n           FROM channels c WHERE c.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "healthy!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "no_key!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "auto_disabled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "disabled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "orphan!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "3d89b4406fb920a184f31c3f24bf731b7c66dad513b842d5ff9ec392d79a88d0"
+}

@@ -679,7 +679,9 @@ async fn mcp_audit(state: &AppState, key: &AuthedKey, action: &str, target: &str
 }
 
 /// 全链路健康检查（对标老仓库 make diagnose）。
-async fn diagnose(state: &AppState) -> Result<Value, AppError> {
+/// 全链路健康快照。MCP `diagnose` 工具与 HTTP `GET /admin/diagnose` 共用——
+/// AI 远程巡检与站长后台看到的必须是同一份事实。
+pub(super) async fn diagnose(state: &AppState) -> Result<Value, AppError> {
     let pg_ok = sqlx::query_scalar!(r#"SELECT 1 AS "one!""#)
         .fetch_one(&state.pg)
         .await
@@ -696,10 +698,8 @@ async fn diagnose(state: &AppState) -> Result<Value, AppError> {
     .fetch_one(&state.pg)
     .await
     .unwrap_or(-1);
-    let dlq_depth = sqlx::query_scalar!(r#"SELECT COUNT(*)::bigint AS "c!" FROM billing_dlq"#)
-        .fetch_one(&state.pg)
-        .await
-        .unwrap_or(-1);
+    // 只数未处理的：已丢弃的毒消息不该让健康面板永远红
+    let dlq_depth = super::dlq::pending_depth(&state.pg).await.unwrap_or(-1);
     let cooling_keys = sqlx::query_scalar!(
         r#"SELECT COUNT(*)::bigint AS "c!" FROM channel_keys
            WHERE status <> 1 AND cooldown_until > now()"#
@@ -928,23 +928,8 @@ async fn dlq_requeue(state: &AppState, key: &AuthedKey, args: &Value) -> Result<
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Ok(json!({"dry_run": true, "ids": ids}));
     }
-    // DLQ 行 payload 重入 outbox（原 topic 缺省 billing.completed），随后删除 DLQ 行
-    let requeued = sqlx::query_scalar!(
-        r#"
-        WITH moved AS (
-            DELETE FROM billing_dlq WHERE id = ANY($1) RETURNING payload
-        ), ins AS (
-            INSERT INTO billing_outbox (topic, payload)
-            SELECT 'billing.completed', payload FROM moved
-            RETURNING 1
-        )
-        SELECT COUNT(*)::bigint AS "c!" FROM ins
-        "#,
-        &ids
-    )
-    .fetch_one(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
+    // 与 HTTP /admin/dlq/requeue 同一函数：AI 与人执行的必须是同一个动作
+    let requeued = super::dlq::requeue(&state.pg, &ids).await?;
     mcp_audit(
         state,
         key,
@@ -1040,7 +1025,7 @@ async fn dlq_list(state: &AppState, args: &Value) -> Result<Value, AppError> {
         .clamp(1, 200);
     let rows = sqlx::query!(
         r#"SELECT id, source, error, retry_count, created_at FROM billing_dlq
-           ORDER BY id DESC LIMIT $1"#,
+           WHERE status = 0 ORDER BY id DESC LIMIT $1"#,
         limit
     )
     .fetch_all(&state.pg)

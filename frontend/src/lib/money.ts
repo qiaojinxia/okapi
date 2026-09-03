@@ -38,6 +38,18 @@ export function formatCount(n: number, locale: string): string {
   return new Intl.NumberFormat(locale, { notation: n >= 100_000 ? 'compact' : 'standard' }).format(n)
 }
 
+/// 倍率展示：后端 NUMERIC 原样下发（"1.000000" / "0.9000"），表格里一列六位零
+/// 是噪音——去掉尾零、最多保留 4 位（对齐 new-api 倍率表的写法 1 / 2.5 / 0.075）。
+/// 字符串处理不经浮点：倍率进 JS Number 再回字符串会把 0.075 变成 0.07500000000000001 之类。
+export function formatRatio(raw: string | number | null | undefined): string {
+  if (raw === null || raw === undefined || raw === '') return '—'
+  const s = String(raw)
+  if (!s.includes('.')) return s
+  const [int, frac] = s.split('.')
+  const trimmed = frac.slice(0, 4).replace(/0+$/, '')
+  return trimmed === '' ? int : `${int}.${trimmed}`
+}
+
 /// 后端占比一律以基点（万分之一）整数下发，展示层统一转百分比。
 export function formatBp(bp: number, locale: string): string {
   return new Intl.NumberFormat(locale, {

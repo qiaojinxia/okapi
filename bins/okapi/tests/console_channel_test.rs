@@ -139,6 +139,52 @@ async fn channel_test_probes_reachability() {
     let r = test_channel(&env, dead).await;
     assert_eq!(r["ok"], false);
     assert!(r["error_code"].is_string(), "{r}");
+    assert!(r["at"].is_string(), "测活结果带时间戳供列表回填：{r}");
+
+    // 测活结果留痕：列表页每行回填 last_test（new-api response_time/test_time 语义）
+    let list: Value = reqwest::Client::new()
+        .get(format!("http://{}/admin/channels", env.addr))
+        .bearer_auth(&env.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = |id: i64| {
+        list["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"].as_i64() == Some(id))
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(row(good)["last_test"]["ok"], true, "{}", row(good));
+    assert_eq!(row(good)["last_test"]["http_status"], 200);
+    assert_eq!(row(bad)["last_test"]["http_status"], 401);
+    assert_eq!(row(dead)["last_test"]["ok"], false);
+    assert!(row(dead)["last_test"]["error_code"].is_string());
+    let never = mk_channel(&env, "never-tested", &format!("http://{}/v1", env.mock)).await;
+    let list2: Value = reqwest::Client::new()
+        .get(format!("http://{}/admin/channels", env.addr))
+        .bearer_auth(&env.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let never_row = list2["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"].as_i64() == Some(never))
+        .unwrap();
+    assert!(
+        never_row["last_test"].is_null(),
+        "没测过的渠道 last_test 为 null"
+    );
 
     // 上游模型发现（§11.3）：openai 形状 data[].id
     let models: Value = reqwest::Client::new()

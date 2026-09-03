@@ -106,16 +106,35 @@ fn scope_from_json(value: &serde_json::Value) -> RuleScope {
 fn row_to_rule(row: &RuleRow) -> Option<PricingRule> {
     let multiplier = ratio_from_json(row.params.get("multiplier"))?;
     let kind = match row.rule_type.as_str() {
-        "volume" => RuleKind::Volume {
-            min_monthly_tokens: u64_from_json(row.params.get("min_monthly_tokens"))?,
-        },
+        "volume" => {
+            // 双阈值轴（AND；0 = 该轴不设）。两轴全空 = 无条件规则冒充 volume，
+            // 属配置错误 → 按脏行跳过（console 写入口会拦，这里防直写库）
+            let min_monthly_tokens =
+                u64_from_json(row.params.get("min_monthly_tokens")).unwrap_or(0);
+            let min_monthly_spend_micro =
+                u64_from_json(row.params.get("min_monthly_spend_micro")).unwrap_or(0);
+            if min_monthly_tokens == 0 && min_monthly_spend_micro == 0 {
+                return None;
+            }
+            RuleKind::Volume {
+                min_monthly_tokens,
+                min_monthly_spend_micro,
+            }
+        }
         "time_based" => RuleKind::TimeBased {
             start_minute: u16_from_json(row.params.get("start_minute"))?,
             end_minute: u16_from_json(row.params.get("end_minute"))?,
+            weekdays: weekdays_from_json(row.params.get("weekdays"))?,
         },
         "discount" => RuleKind::Discount,
         "surge" => RuleKind::Surge,
         _ => return None,
+    };
+    // 未知 stacking_mode 按脏行跳过（fail-closed）：静默当 stackable 会让本应
+    // 排他的活动错误叠加，造成超额折扣——老 ok-api 同一决策
+    let stacking = match row.params.get("stacking_mode").and_then(|v| v.as_str()) {
+        None => okapi_pricing::Stacking::Stackable,
+        Some(raw) => okapi_pricing::Stacking::parse(raw)?,
     };
     Some(PricingRule {
         code: row.rule_code.clone(),
@@ -123,9 +142,23 @@ fn row_to_rule(row: &RuleRow) -> Option<PricingRule> {
         multiplier,
         scope: scope_from_json(&row.scope),
         priority: row.priority,
+        stacking,
         valid_from: row.valid_from.map(|t| t.timestamp()),
         valid_to: row.valid_to.map(|t| t.timestamp()),
     })
+}
+
+/// params.weekdays（0–6 数组）→ 掩码；缺省 = 每天；非法值/空数组 = 脏行（None）。
+fn weekdays_from_json(value: Option<&serde_json::Value>) -> Option<okapi_pricing::WeekdayMask> {
+    let Some(value) = value else {
+        return Some(okapi_pricing::WeekdayMask::ALL);
+    };
+    let days: Vec<u8> = value
+        .as_array()?
+        .iter()
+        .map(|v| v.as_u64().and_then(|d| u8::try_from(d).ok()))
+        .collect::<Option<Vec<u8>>>()?;
+    okapi_pricing::WeekdayMask::from_days(&days)
 }
 
 /// 行集 → 编译源（脏条目跳过并告警）。

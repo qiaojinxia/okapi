@@ -179,13 +179,33 @@ async fn chat_settled(env: &Env) -> (Uuid, i64) {
     panic!("结算未出现");
 }
 
-/// 退款闭环：余额回补、状态翻转、事件留痕、CH 负额冲销、幂等。
+/// 退款闭环：查账预览、余额回补、状态翻转、事件留痕、CH 负额冲销、幂等。
+// 线性生命周期用例：查→退→复退→复查一气呵成，拆开就丢了状态推进的因果
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn admin_refund_full_cycle() {
     let env = setup().await;
     let (request_id, amount) = chat_settled(&env).await;
     assert_eq!(amount, 240);
     let balance_before = env.state.ledger.balance(env.user_id).await.unwrap();
+
+    // 退款前查账预览（先查后退的第一步）：能看到是谁的哪笔、可退
+    let preview: Value = reqwest::Client::new()
+        .get(format!(
+            "http://{}/admin/billing/record/{request_id}",
+            env.console
+        ))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["amount_micro"], 240);
+    assert_eq!(preview["user_id"], env.user_id);
+    assert_eq!(preview["refundable"], true, "committed 记录应可退");
+    assert!(preview["username"].is_string(), "预览应带用户名");
 
     let r = reqwest::Client::new()
         .post(format!("http://{}/admin/billing/refund", env.console))
@@ -196,6 +216,7 @@ async fn admin_refund_full_cycle() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let body: Value = r.json().await.unwrap();
+    assert_eq!(body["outcome"], "refunded");
     assert_eq!(body["refunded_micro"], 240);
 
     // 余额回补 + 状态翻转 + 事件留痕
@@ -219,7 +240,8 @@ async fn admin_refund_full_cycle() {
     .unwrap();
     assert_eq!(events, 1);
 
-    // 幂等：再退一次 → 404
+    // 幂等：再退一次 → 200 already_refunded（此前与"id 不存在"混在 404 里，
+    // 管理员分不清"打错了"还是"重复点了但安全"）
     let r = reqwest::Client::new()
         .post(format!("http://{}/admin/billing/refund", env.console))
         .bearer_auth(&env.super_token)
@@ -227,7 +249,43 @@ async fn admin_refund_full_cycle() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 404, "重复退款必须拒绝");
+    assert_eq!(r.status(), 200, "重复退款是幂等语义而非错误");
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["outcome"], "already_refunded");
+
+    // 退款后查账：状态翻转、不可再退
+    let preview: Value = reqwest::Client::new()
+        .get(format!(
+            "http://{}/admin/billing/record/{request_id}",
+            env.console
+        ))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview["status"], 30);
+    assert_eq!(preview["refundable"], false);
+
+    // 不存在的 id：查账与退款都 404
+    let ghost = Uuid::new_v4();
+    for (method, path) in [
+        ("GET", format!("/admin/billing/record/{ghost}")),
+        ("POST", "/admin/billing/refund".to_owned()),
+    ] {
+        let client = reqwest::Client::new();
+        let req = if method == "GET" {
+            client.get(format!("http://{}{path}", env.console))
+        } else {
+            client
+                .post(format!("http://{}{path}", env.console))
+                .json(&json!({"request_id": ghost, "reason": "ghost"}))
+        };
+        let r = req.bearer_auth(&env.super_token).send().await.unwrap();
+        assert_eq!(r.status(), 404, "{method} {path} 对不存在 id 应 404");
+    }
 
     // CH 冲销：drain 后该用户金额聚合归零（240 + (-240)）。
     // outbox 是全局队列，同二进制内并行用例的 chsink 会抢走本用例的行，

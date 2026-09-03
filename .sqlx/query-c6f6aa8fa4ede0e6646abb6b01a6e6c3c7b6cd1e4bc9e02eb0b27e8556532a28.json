@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO channel_pools (pool_code) VALUES ($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c6f6aa8fa4ede0e6646abb6b01a6e6c3c7b6cd1e4bc9e02eb0b27e8556532a28"
+}

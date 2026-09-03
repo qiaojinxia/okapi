@@ -44,6 +44,7 @@ fn build_book_with_cache_write(
             multiplier: fp(mult),
             scope: RuleScope::default(),
             priority: 0,
+            stacking: okapi_pricing::Stacking::Stackable,
             valid_from: None,
             valid_to: None,
         });
@@ -80,6 +81,7 @@ fn ctx(user_fp: i64) -> CalcContext {
         group: GroupCode::from("g"),
         user_multiplier: fp(user_fp),
         monthly_tokens: 0,
+        monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
         surge_active: false,

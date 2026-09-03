@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH upd AS (\n               UPDATE billing_dlq SET status = 2, resolved_at = now(), resolved_by = $2\n               WHERE id = ANY($1) AND status = 0 RETURNING 1\n           ) SELECT COUNT(*)::bigint AS \"c!\" FROM upd",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f35ff156a416fb7856a7cbeaad0fc56f93be6e5662cef328de366c5e3c77b9ef"
+}

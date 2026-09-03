@@ -1,10 +1,13 @@
 import { Ban, Plus } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
+import { toast } from '@/components/ui/toast'
 import { GenerateDrawer } from '@/features/codes/GenerateDrawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { Label } from '@/components/ui/input'
@@ -42,7 +45,6 @@ export function RedemptionsPage() {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
   const [status, setStatus] = useState('')
-  const [msg, setMsg] = useState<string | null>(null)
   const [drawer, setDrawer] = useState(false)
   const { confirm, dialog } = useConfirm()
 
@@ -61,10 +63,10 @@ export function RedemptionsPage() {
     mutationFn: (batch: string) =>
       apiFetch<{ affected: number }>(`/admin/redemptions/${batch}`, { method: 'DELETE' }),
     onSuccess: (r) => {
-      setMsg(t('admin:batchDisabled', { n: r.affected }))
+      toast.success(t('admin:batchDisabled', { n: r.affected }))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const statusLabel = (s: number) => {
@@ -90,7 +92,7 @@ export function RedemptionsPage() {
 
       <Toolbar
         filters={
-          <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2">
             <Label htmlFor="cstatus">{t('common:status')}</Label>
             <Select
               id="cstatus"
@@ -112,12 +114,12 @@ export function RedemptionsPage() {
           </span>
         }
       />
-
-      {msg !== null && <p className="text-xs text-muted-foreground">{msg}</p>}
       {dialog}
 
       {codes.isError ? (
-        <ErrorState message={describeError(codes.error)} />
+        <ErrorState message={describeError(codes.error)} onRetry={() => void codes.refetch()} />
+      ) : codes.isPending ? (
+        <TableSkeleton rows={6} cols={8} />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:codesEmptyHint')} />
       ) : (
@@ -126,10 +128,12 @@ export function RedemptionsPage() {
             <Tr>
               <Th>ID</Th>
               <Th>{t('admin:codeBatch')}</Th>
-              <Th>{t('common:amount')}</Th>
+              <Th>{t('admin:codeFaceValue')}</Th>
               <Th>{t('common:status')}</Th>
               <Th>{t('admin:codePlan')}</Th>
+              <Th>{t('admin:codeCreated')}</Th>
               <Th>{t('admin:codeRedeemedBy')}</Th>
+              <Th>{t('admin:codeRedeemedAt')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -145,7 +149,11 @@ export function RedemptionsPage() {
                   </Badge>
                 </Td>
                 <Td>{c.plan_code ?? '—'}</Td>
+                <Td className="whitespace-nowrap text-xs">{dayjs(c.created_at).format('MM-DD HH:mm')}</Td>
                 <Td>{c.redeemed_by ?? '—'}</Td>
+                <Td className="whitespace-nowrap text-xs">
+                  {c.redeemed_at ? dayjs(c.redeemed_at).format('MM-DD HH:mm') : '—'}
+                </Td>
                 <Td>
                   <IconButton
                     icon={Ban}
