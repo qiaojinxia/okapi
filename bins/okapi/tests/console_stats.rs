@@ -174,6 +174,27 @@ async fn drain(env: &Env) {
     }
 }
 
+/// drain + 查询直到谓词成立。
+///
+/// 光调 `drain` 是不够的：outbox 是全局队列，并行用例持锁时 `process_once` 会
+/// 返回 0（没有可认领的行）而本用例的行其实还在排队，drain 于是提前收敛，紧接着
+/// 的断言就读到少一行的结果。这在长期 dev 库上表现为随机红。
+async fn poll_until<F>(env: &Env, path: &str, token: &str, ready: F) -> Value
+where
+    F: Fn(&Value) -> bool,
+{
+    for _ in 0..50 {
+        drain(env).await;
+        let (status, body) = get(env, path, token).await;
+        assert_eq!(status, 200, "{path} 应 200：{body}");
+        if ready(&body) {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{path} 轮询超时");
+}
+
 async fn get(env: &Env, path: &str, token: &str) -> (u16, Value) {
     let resp = reqwest::Client::new()
         .get(format!("http://{}{path}", env.addr))
@@ -336,10 +357,7 @@ async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
         .execute(&env.pg)
         .await
         .unwrap();
-    drain(&env).await;
-    let (status, report) = get(&env, path, &env.user_token).await;
-    assert_eq!(status, 200);
-    assert_eq!(report["total"]["requests"], 3);
+    let report = poll_until(&env, path, &env.user_token, |b| b["total"]["requests"] == 3).await;
     assert!(report["total"]["cache_write_tokens"].is_null());
     assert_eq!(report["total"]["cache_write_known_requests"], 2);
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT c.id AS channel_id,\n               c.name AS channel_name,\n               c.provider,\n               c.api_base,\n               COALESCE(pc.priority_override, c.priority) AS \"priority!\",\n               c.trust_upstream_usage,\n               c.model_mapping,\n               COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS \"thinking_to_content!\",\n               COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS \"bill_by_response_model!\",\n               c.settings -> 'strip_request_fields' AS strip_request_fields,\n               c.capabilities,\n               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS \"cost_milli!\",\n               ck.id AS channel_key_id,\n               COALESCE(pc.weight_override, ck.weight) AS \"weight!\",\n               ck.max_concurrency,\n               ck.rpm_limit,\n               ck.daily_spend_cap_micro,\n               ck.credential_ciphertext,\n               (array_position($2::varchar[], pc.pool_code::varchar) - 1) AS \"pool_rank!\"\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        JOIN pool_channels pc ON pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])\n        WHERE c.status = 1\n          AND c.deleted_at IS NULL\n          AND c.models @> $1\n          AND ck.status = 1\n          AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())\n          AND (ck.model_subset IS NULL OR ck.model_subset @> $1)\n        ORDER BY array_position($2::varchar[], pc.pool_code::varchar),\n                 COALESCE(pc.priority_override, c.priority) DESC,\n                 ck.id\n        ",
+  "query": "\n        SELECT c.id AS channel_id,\n               c.name AS channel_name,\n               c.provider,\n               c.api_base,\n               COALESCE(pc.priority_override, c.priority) AS \"priority!\",\n               c.trust_upstream_usage,\n               c.model_mapping,\n               COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS \"thinking_to_content!\",\n               COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS \"bill_by_response_model!\",\n               c.settings -> 'strip_request_fields' AS strip_request_fields,\n               c.settings ->> 'data_retention' AS data_retention,\n               c.capabilities,\n               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS \"cost_milli!\",\n               c.retry_policy,\n               ck.id AS channel_key_id,\n               COALESCE(pc.weight_override, ck.weight) AS \"weight!\",\n               ck.max_concurrency,\n               ck.rpm_limit,\n               ck.daily_spend_cap_micro,\n               ck.credential_ciphertext,\n               (array_position($2::varchar[], pc.pool_code::varchar) - 1) AS \"pool_rank!\"\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        JOIN pool_channels pc ON pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])\n        WHERE c.status = 1\n          AND c.deleted_at IS NULL\n          AND c.models @> $1\n          AND ck.status = 1\n          AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())\n          AND (ck.model_subset IS NULL OR ck.model_subset @> $1)\n        ORDER BY array_position($2::varchar[], pc.pool_code::varchar),\n                 COALESCE(pc.priority_override, c.priority) DESC,\n                 ck.id\n        ",
   "describe": {
     "columns": [
       {
@@ -95,6 +95,12 @@
       },
       {
         "ordinal": 10,
+        "name": "data_retention",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
         "name": "capabilities",
         "type_info": "Jsonb",
         "origin": {
@@ -105,13 +111,24 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "cost_milli!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
+        "name": "retry_policy",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "retry_policy"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
         "name": "channel_key_id",
         "type_info": "Int8",
         "origin": {
@@ -122,13 +139,13 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 15,
         "name": "weight!",
         "type_info": "Int4",
         "origin": "Expression"
       },
       {
-        "ordinal": 14,
+        "ordinal": 16,
         "name": "max_concurrency",
         "type_info": "Int4",
         "origin": {
@@ -139,7 +156,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 17,
         "name": "rpm_limit",
         "type_info": "Int4",
         "origin": {
@@ -150,7 +167,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 18,
         "name": "daily_spend_cap_micro",
         "type_info": "Int8",
         "origin": {
@@ -161,7 +178,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 19,
         "name": "credential_ciphertext",
         "type_info": "Bytea",
         "origin": {
@@ -172,7 +189,7 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 20,
         "name": "pool_rank!",
         "type_info": "Int4",
         "origin": "Expression"
@@ -195,8 +212,10 @@
       null,
       null,
       null,
+      null,
       false,
       null,
+      true,
       false,
       null,
       true,
@@ -206,5 +225,5 @@
       null
     ]
   },
-  "hash": "7e48600129e1e3b8296066799331acdb194ac56c7f38d52e59db3529971ea2f4"
+  "hash": "2b3cd5d9e4987985f1ad8d9fe04ba83408f947afacd2769fe215b43ee3c0d6af"
 }

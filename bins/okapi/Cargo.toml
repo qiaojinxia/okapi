@@ -5,6 +5,7 @@ edition.workspace = true
 description = "Okapi 单二进制多角色入口：gateway / console / worker / all"
 
 [dependencies]
+tiktoken-rs = { workspace = true }
 okapi-api = { workspace = true }
 okapi-domain = { workspace = true }
 okapi-ledger = { workspace = true }

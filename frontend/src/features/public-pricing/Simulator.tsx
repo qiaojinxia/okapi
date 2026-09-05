@@ -1,82 +1,53 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { PricingModel } from '@/features/public-pricing/types'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import type { PricingModel } from './types'
+import { modelPrice, nonnegative } from './catalog-data'
 import { Input, Label } from '@/components/ui/input'
-import { Select } from '@/components/ui/select'
-import { formatMoney, simulateChargeMicro } from '@/lib/money'
+import { formatUnitPrice } from '@/lib/money'
 
-/// 定价模拟器（展示层估算，权威语义在后端计费引擎与账单快照）。
-export function Simulator({ models }: { models: PricingModel[] }) {
+// 跟随当前模型和分组，避免用户在两个独立选择器之间重复操作。
+export function Simulator({ model, groupFactor }: { model: PricingModel; groupFactor: number | null }) {
   const { t, i18n } = useTranslation()
-  const locale = i18n.language
-  const ratioModels = models.filter((m) => m.mode !== 'per_call')
-  const [model, setModel] = useState('')
-  const [form, setForm] = useState({
-    prompt: '1000',
-    cached: '0',
-    cacheWrite: '0',
-    completion: '500',
-    group: '1',
-  })
-  const selected = ratioModels.find((m) => m.model === model) ?? ratioModels[0]
-
-  const estimate = selected
-    ? simulateChargeMicro({
-        modelRatio: Number(selected.model_ratio ?? '1'),
-        completionRatio: Number(selected.completion_ratio ?? '1'),
-        cacheRatio: Number(selected.cache_ratio ?? '1'),
-        cacheWriteRatio: Number(selected.cache_write_ratio ?? '1'),
-        groupRatio: Number(form.group) || 1,
-        promptTokens: Number(form.prompt) || 0,
-        cachedTokens: Number(form.cached) || 0,
-        cacheWriteTokens: Number(form.cacheWrite) || 0,
-        completionTokens: Number(form.completion) || 0,
+  const [form, setForm] = useState({ prompt: '1000', cached: '0', cacheWrite: '0', completion: '500', calls: '1' })
+  const fields = model.mode === 'per_call'
+    ? [['calls', t('catalog:simCalls')]] as const
+    : [['prompt', t('pricing:simPrompt')], ['completion', t('pricing:simCompletion')],
+      ['cached', t('pricing:simCached')], ['cacheWrite', t('pricing:simCacheWrite')]] as const
+  const values = Object.fromEntries(Object.entries(form).map(([key, value]) => [key, nonnegative(value)]))
+  const invalid = fields.some(([key]) => values[key] === null || !Number.isSafeInteger(values[key]))
+    || (model.mode === 'ratio' && values.cached! + values.cacheWrite! > values.prompt!)
+  let estimate: number | null = null
+  if (!invalid) {
+    if (model.mode === 'per_call') {
+      const price = modelPrice(model, 'call', groupFactor)
+      estimate = price === null ? null : Math.round(price * values.calls!)
+    } else if (model.mode === 'ratio') {
+      const parts = [
+        ['input', values.prompt! - values.cached! - values.cacheWrite!], ['output', values.completion!],
+        ['cache', values.cached!], ['cacheWrite', values.cacheWrite!],
+      ] as const
+      const costs = parts.map(([field, tokens]) => {
+        const price = modelPrice(model, field, groupFactor)
+        return tokens === 0 ? 0 : price === null ? null : price * tokens / 1_000_000
       })
-    : 0
-
-  const fields = [
-    ['prompt', t('pricing:simPrompt')],
-    ['cached', t('pricing:simCached')],
-    ['cacheWrite', t('pricing:simCacheWrite')],
-    ['completion', t('pricing:simCompletion')],
-    ['group', t('pricing:simGroup')],
-  ] as const
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t('pricing:simulator')}</CardTitle>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="sim-model">{t('pricing:model')}</Label>
-            <Select
-              id="sim-model"
-              value={selected?.model ?? ''}
-              onChange={setModel}
-              options={ratioModels.map((m) => ({ value: m.model, label: m.model }))}
-            />
-          </div>
-          {fields.map(([field, label]) => (
-            <div key={field} className="flex flex-col gap-1.5">
-              <Label htmlFor={`sim-${field}`}>{label}</Label>
-              <Input
-                id={`sim-${field}`}
-                inputMode="numeric"
-                value={form[field]}
-                onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
-              />
-            </div>
-          ))}
-        </div>
-        <div className="flex items-baseline gap-3">
-          <span className="text-sm text-muted-foreground">{t('pricing:simResult')}</span>
-          <span className="text-xl font-bold">{formatMoney(estimate, locale)}</span>
-          <span className="text-xs text-muted-foreground">{t('pricing:simNote')}</span>
-        </div>
-      </CardContent>
-    </Card>
-  )
+      if (costs.every((cost) => cost !== null)) estimate = Math.round(costs.reduce((sum, cost) => sum + cost, 0))
+    }
+  }
+  return <section className="rounded-xl border border-border bg-muted/25 p-4">
+    <h3 className="text-sm font-semibold">{t('pricing:simulator')}</h3>
+    <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('catalog:simContext')}</p>
+    <div className="mt-4 grid grid-cols-2 gap-3">
+      {fields.map(([key, label]) => <div key={key} className="flex flex-col gap-1.5">
+        <Label htmlFor={`sim-${key}`}>{label}</Label>
+        <Input id={`sim-${key}`} type="number" min={0} step={1} inputMode="numeric" value={form[key]}
+          onChange={(e) => setForm((old) => ({ ...old, [key]: e.target.value }))} />
+      </div>)}
+    </div>
+    {invalid && <p role="alert" className="mt-3 text-xs text-destructive">{t('catalog:simInvalid')}</p>}
+    <div className="mt-4 flex items-baseline justify-between gap-2 border-t border-border pt-3" aria-live="polite">
+      <span className="text-xs text-muted-foreground">{t('pricing:simResult')}</span>
+      <strong className="text-xl tracking-tight">{formatUnitPrice(estimate, i18n.language)}</strong>
+    </div>
+    <p className="mt-2 text-xs leading-5 text-muted-foreground">{t('pricing:simNote')}</p>
+  </section>
 }

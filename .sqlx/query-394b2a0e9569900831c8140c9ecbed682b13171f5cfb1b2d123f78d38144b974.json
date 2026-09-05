@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channel_keys SET status = 1, failed_count = 0, cooldown_until = NULL\n           WHERE channel_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "394b2a0e9569900831c8140c9ecbed682b13171f5cfb1b2d123f78d38144b974"
+}

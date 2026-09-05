@@ -522,22 +522,40 @@ async fn inventory_counts_without_clickhouse() {
     .execute(&env.pg)
     .await
     .unwrap();
+    // inventory 数的是**全站**渠道，并行用例随时在建/停渠道，两次读之间的全局
+    // 计数必然漂移——此前这里断言精确差值 healthy_before - 1，于是在长期 dev 库上
+    // 随机红。改为「本渠道确实落到了该状态」（DB 事实，不受并发影响）+ 端点侧的
+    // 方向性断言（本渠道必然贡献至少一个 no_key）。
     let (_, after) = get(&env, "/admin/stats/inventory", &env.super_token).await;
-    assert_eq!(
-        after["channels"]["healthy"].as_i64().unwrap(),
-        healthy_before - 1
+    let still_active: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "c!" FROM channel_keys WHERE channel_id = $1 AND status = 1"#,
+        env.channel_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(still_active, 0, "本渠道的 key 已全部停用");
+    assert!(
+        after["channels"]["no_key"].as_i64().unwrap() >= 1,
+        "无可用 key 的渠道要计进 no_key：{after}"
     );
-    assert!(after["channels"]["no_key"].as_i64().unwrap() >= 1);
 
     // 孤儿渠道（不在任何池）单独计数：对谁都不可达，落地页要能看见
-    let orphan_before = after["channels"]["orphan"].as_i64().unwrap();
     okapi_store::admin::set_channel_pool_codes(&env.pg, env.channel_id, &[])
         .await
         .unwrap();
     let (_, after) = get(&env, "/admin/stats/inventory", &env.super_token).await;
-    assert_eq!(
-        after["channels"]["orphan"].as_i64().unwrap(),
-        orphan_before + 1
+    let pools: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "c!" FROM pool_channels WHERE channel_id = $1"#,
+        env.channel_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(pools, 0, "本渠道已退出所有池");
+    assert!(
+        after["channels"]["orphan"].as_i64().unwrap() >= 1,
+        "不在任何池的渠道要计进 orphan：{after}"
     );
 }
 

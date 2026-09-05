@@ -476,6 +476,8 @@ pub struct ChannelRow {
     /// 相对成本系数（千分比；1000 = 官方标价）。既是调度加权除数，也是毛利核算里
     /// "官方价 × 系数 = 上游成本"的系数（§11.18）。
     pub cost_milli: i64,
+    /// 上游数据留存声明（none / transient / trains；None = 未声明）。
+    pub data_retention: Option<String>,
 }
 
 /// 渠道在某个池里的成员关系：覆盖为 None 时继承渠道 / key 自身的调度参数。
@@ -512,6 +514,7 @@ pub async fn list_channels(
                c.trust_upstream_usage, c.owner_id,
                COALESCE(c.settings, '{}'::jsonb) AS "settings!",
                GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!",
+               c.settings ->> 'data_retention' AS data_retention,
                COALESCE(
                    (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
@@ -550,6 +553,7 @@ pub async fn list_channels(
             pools: r.pools,
             pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
             cost_milli: r.cost_milli,
+            data_retention: r.data_retention,
         })
         .collect())
 }
@@ -1160,6 +1164,8 @@ pub struct ChannelPatch<'a> {
     pub trust_upstream_usage: Option<bool>,
     /// 相对成本系数（千分比）；写入 `upstream_unit_cost.relative_cost_milli`，其余键保留。
     pub cost_milli: Option<i64>,
+    /// 上游数据留存声明；写入 `settings.data_retention`。Some("") = 清除声明。
+    pub data_retention: Option<&'a str>,
 }
 
 /// 部分更新渠道配置；返回是否命中（false = 不存在/已删除，调用方转 404）。
@@ -1176,7 +1182,15 @@ pub async fn patch_channel(
             api_base             = COALESCE($4, api_base),
             models               = COALESCE($5::jsonb, models),
             model_mapping        = COALESCE($6::jsonb, model_mapping),
-            settings             = COALESCE($7::jsonb, settings),
+            -- settings 一次赋完：先取整体覆盖（$7，缺省保留原值），再按 $12 单独合并
+            -- data_retention（''=删该键）。分成两条 SET 会被 PG 判成对同列重复赋值。
+            settings             = CASE
+                                     WHEN $12::text IS NULL THEN COALESCE($7::jsonb, settings)
+                                     WHEN $12::text = ''
+                                       THEN COALESCE($7::jsonb, settings, '{}'::jsonb) - 'data_retention'
+                                     ELSE COALESCE($7::jsonb, settings, '{}'::jsonb)
+                                          || jsonb_build_object('data_retention', $12::text)
+                                   END,
             capabilities         = COALESCE($8::jsonb, capabilities),
             priority             = COALESCE($9, priority),
             trust_upstream_usage = COALESCE($10, trust_upstream_usage),
@@ -1197,6 +1211,7 @@ pub async fn patch_channel(
         patch.priority,
         patch.trust_upstream_usage,
         patch.cost_milli,
+        patch.data_retention,
     )
     .execute(pool)
     .await?

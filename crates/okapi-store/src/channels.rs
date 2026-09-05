@@ -22,6 +22,10 @@ pub struct ChannelCandidate {
     pub daily_spend_cap_micro: Option<i64>,
     /// 对外模型名 → 上游模型名（无映射则原名透传）。
     pub model_mapping: serde_json::Value,
+    /// 上游数据留存声明（channels.settings.data_retention）：
+    /// `none` 不留存 / `transient` 短期留存不训练 / `trains` 可能用于训练；
+    /// **None = 未声明**——请求要求零留存时按"不知道"处理，即排除（fail-closed）。
+    pub data_retention: Option<String>,
     /// 渠道开关：思维链转 <think> 正文（channels.settings.thinking_to_content）。
     pub thinking_to_content: bool,
     /// 渠道开关：按上游响应报告的模型计费（channels.settings.bill_by_response_model，
@@ -34,6 +38,14 @@ pub struct ChannelCandidate {
     pub capabilities: serde_json::Value,
     /// 相对成本千分比（层内权重除数，缺省 1000 = 中性）。
     pub cost_milli: i64,
+    /// 瞬态失败时同一把 key 的重试次数（channels.retry_policy，缺省 1）。
+    pub same_key_retries: i16,
+    /// 首字窗口秒数（channels.retry_policy，缺省 30）。
+    ///
+    /// 这一项按渠道配是有实义的：直连官方与经两跳转售的上游，首 token 该等多久
+    /// 差一个数量级，一个全局常数要么把慢渠道误判成超时，要么让快渠道的故障
+    /// 拖满 30 秒才换。
+    pub first_output_timeout_secs: u64,
     /// 所属池在池链里的序号（0 = 主池，1 = 降级池）。调度先耗尽低序号的全部层，
     /// 再进入下一序号——降级池的高优先级渠道也排在主池最低优先级之后。
     pub pool_rank: i32,
@@ -87,8 +99,10 @@ pub async fn candidates_for_model(
                COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS "thinking_to_content!",
                COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS "bill_by_response_model!",
                c.settings -> 'strip_request_fields' AS strip_request_fields,
+               c.settings ->> 'data_retention' AS data_retention,
                c.capabilities,
                GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS "cost_milli!",
+               c.retry_policy,
                ck.id AS channel_key_id,
                COALESCE(pc.weight_override, ck.weight) AS "weight!",
                ck.max_concurrency,
@@ -135,6 +149,7 @@ pub async fn candidates_for_model(
                 rpm_limit: r.rpm_limit,
                 daily_spend_cap_micro: r.daily_spend_cap_micro,
                 model_mapping: r.model_mapping,
+                data_retention: r.data_retention,
                 thinking_to_content: r.thinking_to_content,
                 bill_by_response_model: r.bill_by_response_model,
                 strip_request_fields: r
@@ -143,10 +158,43 @@ pub async fn candidates_for_model(
                     .unwrap_or_default(),
                 capabilities: r.capabilities,
                 cost_milli: r.cost_milli,
+                same_key_retries: retry_policy_i64(
+                    r.retry_policy.as_ref(),
+                    "same_key_retries",
+                    1,
+                    0,
+                    3,
+                ) as i16,
+                first_output_timeout_secs: retry_policy_i64(
+                    r.retry_policy.as_ref(),
+                    "first_output_timeout_secs",
+                    30,
+                    5,
+                    300,
+                ) as u64,
                 pool_rank: r.pool_rank,
             })
         })
         .collect()
+}
+
+/// 从 `channels.retry_policy` 取一个整数项，并夹在 [min, max]。
+///
+/// 夹取而不是照单全收：这是渠道级配置，写错一个 0 或多一个零，代价分别是
+/// "永不重试"和"一个坏渠道把请求吊死几分钟"。缺省值 = 夹取前的历史常数，
+/// 未配置的渠道行为一字不变。
+fn retry_policy_i64(
+    policy: Option<&serde_json::Value>,
+    key: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> i64 {
+    policy
+        .and_then(|p| p.get(key))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(default)
+        .clamp(min, max)
 }
 
 /// custom_pass 渠道点查结果。

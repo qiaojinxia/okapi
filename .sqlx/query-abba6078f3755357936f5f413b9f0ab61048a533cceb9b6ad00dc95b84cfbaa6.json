@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key = 'mcp_write_enabled'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "abba6078f3755357936f5f413b9f0ab61048a533cceb9b6ad00dc95b84cfbaa6"
+}

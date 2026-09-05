@@ -55,6 +55,7 @@ export function ChannelDrawer({
     api_base: channel?.api_base ?? '',
     priority: String(channel?.priority ?? 0),
     cost: costMilliToRatio(channel?.cost_milli ?? 1000),
+    dataRetention: channel?.data_retention ?? '',
   })
   const costMilli = ratioToCostMilli(form.cost)
   const [models, setModels] = useState<string[]>(channel?.models ?? [])
@@ -78,6 +79,8 @@ export function ChannelDrawer({
           settings,
           pools: newPools,
           cost_milli: costMilli ?? undefined,
+          // 空串 = 清除声明；后端据此把键从 settings 里删掉
+          data_retention: form.dataRetention,
         },
       }),
     onSuccess: () => {
@@ -98,6 +101,7 @@ export function ChannelDrawer({
           priority: Number(form.priority) || 0,
           settings,
           cost_milli: costMilli ?? undefined,
+          data_retention: form.dataRetention,
         },
       }),
     onSuccess: () => {
@@ -287,6 +291,24 @@ export function ChannelDrawer({
                 onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
               />
             </div>
+            <Field
+              label={t('admin:channelDataRetention')}
+              htmlFor="d-retention"
+              hint={t('admin:channelDataRetentionHint')}
+            >
+              <Select
+                id="d-retention"
+                className="w-44"
+                value={form.dataRetention}
+                onChange={(v) => setForm((f) => ({ ...f, dataRetention: v }))}
+                placeholder={t('admin:channelRetentionUnset')}
+                options={[
+                  { value: 'none', label: t('admin:channelRetentionNone') },
+                  { value: 'transient', label: t('admin:channelRetentionTransient') },
+                  { value: 'trains', label: t('admin:channelRetentionTrains') },
+                ]}
+              />
+            </Field>
             <Field
               label={t('admin:channelCostMilli')}
               htmlFor="d-cost"

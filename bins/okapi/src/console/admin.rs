@@ -131,6 +131,23 @@ pub struct CreateChannelReq {
     /// 相对成本系数（千分比；缺省 1000 = 按官方标价采购）。0 = 自建 / 免费上游。
     #[serde(default)]
     pub cost_milli: Option<i64>,
+    /// 上游数据留存声明：none / transient / trains（缺省 = 未声明）。
+    #[serde(default)]
+    pub data_retention: Option<String>,
+}
+
+/// 数据留存声明的取值域。
+///
+/// 三档：`none` 上游不留存（可满足零留存要求）/ `transient` 短期留存但不用于训练 /
+/// `trains` 可能用于训练。**未声明 ≠ none**——请求要求零留存时，未声明的渠道会被排除，
+/// 因为"不知道对方留不留"不能当成"不留"。
+fn ensure_data_retention(value: Option<&str>) -> Result<(), AppError> {
+    match value {
+        Some(v) if !matches!(v, "" | "none" | "transient" | "trains") => {
+            Err(AppError::bad_request().with_param("data_retention"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// 相对成本系数取值域：0（免费）～ 100×官方价，负数与离谱值都是手滑。
@@ -210,6 +227,7 @@ pub async fn create_channel(
     let (actor, _) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     super::ssrf::validate_api_base(&state, &req.api_base).await?;
     ensure_cost_milli(req.cost_milli)?;
+    ensure_data_retention(req.data_retention.as_deref())?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
         &state.pg,
@@ -255,12 +273,13 @@ pub async fn create_channel(
         .await
         .map_err(okapi_store::StoreError::from)?;
     }
-    if req.cost_milli.is_some() {
+    if req.cost_milli.is_some() || req.data_retention.is_some() {
         okapi_store::admin::patch_channel(
             &state.pg,
             channel_id,
             okapi_store::admin::ChannelPatch {
                 cost_milli: req.cost_milli,
+                data_retention: req.data_retention.as_deref(),
                 ..Default::default()
             },
         )
@@ -317,6 +336,7 @@ pub async fn list_channels(
                 "pools": c.pools,
                 "pool_members": c.pool_members,
                 "cost_milli": c.cost_milli,
+                "data_retention": c.data_retention,
                 "keys": keys,
                 "last_test": last_tests.remove(&c.id),
             })
@@ -421,6 +441,9 @@ pub struct PatchChannelReq {
     /// 相对成本系数（千分比）。
     #[serde(default)]
     pub cost_milli: Option<i64>,
+    /// 数据留存声明；空串 = 清除声明。
+    #[serde(default)]
+    pub data_retention: Option<String>,
 }
 
 /// PATCH /admin/channels/{id}：改渠道配置（缺省字段不动）。
@@ -461,6 +484,7 @@ pub async fn update_channel(
         None => None,
     };
     ensure_cost_milli(req.cost_milli)?;
+    ensure_data_retention(req.data_retention.as_deref())?;
 
     let patch = okapi_store::admin::ChannelPatch {
         name: req.name.as_deref(),
@@ -473,6 +497,7 @@ pub async fn update_channel(
         priority: req.priority,
         trust_upstream_usage: req.trust_upstream_usage,
         cost_milli: req.cost_milli,
+        data_retention: req.data_retention.as_deref(),
     };
     if !okapi_store::admin::patch_channel(&state.pg, id, patch).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
@@ -488,6 +513,7 @@ pub async fn update_channel(
             "models": req.models, "priority": req.priority,
             "trust_upstream_usage": req.trust_upstream_usage,
             "cost_milli": req.cost_milli,
+            "data_retention": req.data_retention,
         }),
     )
     .await;

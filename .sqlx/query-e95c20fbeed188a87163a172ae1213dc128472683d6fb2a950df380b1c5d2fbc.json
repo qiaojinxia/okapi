@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels SET api_base = 'http://127.0.0.1:9/v1' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e95c20fbeed188a87163a172ae1213dc128472683d6fb2a950df380b1c5d2fbc"
+}

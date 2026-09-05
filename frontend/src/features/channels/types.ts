@@ -52,6 +52,8 @@ export interface ChannelRow {
   pool_members: PoolMember[]
   /// 相对成本系数（千分比；1000 = 官方标价）。毛利核算与调度加权共用。
   cost_milli: number
+  /// 上游数据留存声明：none / transient / trains；null = 未声明。
+  data_retention: string | null
   last_test: ChannelProbe | null
 }
 

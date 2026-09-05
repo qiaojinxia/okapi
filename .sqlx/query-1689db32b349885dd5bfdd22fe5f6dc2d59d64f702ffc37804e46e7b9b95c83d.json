@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT prompt_tokens, completion_tokens FROM billing_records\n               WHERE request_id = $1 AND status = 20",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "prompt_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "prompt_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "completion_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "completion_tokens"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1689db32b349885dd5bfdd22fe5f6dc2d59d64f702ffc37804e46e7b9b95c83d"
+}

@@ -57,19 +57,34 @@ test('登录页渲染两种登录方式与价格页链接', async ({ page }) => 
   await page.goto('/')
   await expect(page.getByRole('button', { name: /邮箱登录|Email login/ })).toBeVisible()
   await expect(page.getByRole('button', { name: 'API Key' })).toBeVisible()
-  await expect(page.getByRole('link', { name: /模型价格|Model pricing/ })).toBeVisible()
+  await expect(page.getByRole('link', { name: /模型广场|Model catalog/ })).toBeVisible()
 })
 
-test('公开价格页无鉴权可达且渲染表头', async ({ page }) => {
+test('公开模型广场无鉴权可达，卡片、表格与详情分层展示', async ({ page }) => {
   await page.goto('/pricing')
-  await expect(page.getByRole('heading', { name: /模型价格|Model pricing/ })).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: /^输入$|^Input$/ })).toBeVisible()
-  // 缓存双轨：读取与写入分列展示（DESIGN §3.2）
-  await expect(page.getByRole('columnheader', { name: /缓存读取|Cache read/ })).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: /缓存写入|Cache write/ })).toBeVisible()
-  // 1K/1M 计价单位切换（对齐 new-api 展示习惯）
+  await expect(page.getByRole('heading', { name: /模型广场|Model catalog/ })).toBeVisible()
+  await expect(page.getByRole('navigation', { name: /模型厂商|Model vendors/ })).toBeVisible()
   await expect(page.getByLabel(/计价单位|Price unit/)).toBeVisible()
-  await expect(page.getByText(/定价模拟器|Pricing simulator/)).toBeVisible()
+  const response = await page.request.get('/api/pricing')
+  expect(response.ok()).toBe(true)
+  const catalog = await response.json() as { models: Array<{ model: string; mode: string }> }
+  if (catalog.models.length === 0) {
+    await expect(page.getByText(/本站暂未发布模型价格|No model prices have been published/)).toBeVisible()
+    return
+  }
+  await expect(page.locator('article[data-model]').first()).toBeVisible()
+  await page.getByRole('button', { name: /^表格$|^Table$/ }).click()
+  await expect(page.getByRole('columnheader', { name: /输入 \/|Input \// })).toBeVisible()
+  // 细分缓存价格与模拟器在详情中，目录首屏用于发现与比较模型。
+  const ratioModel = catalog.models.find((m) => m.mode === 'ratio')
+  if (ratioModel) {
+    await page.getByRole('searchbox').fill(ratioModel.model)
+    await page.locator('tbody tr').first().getByRole('button').first().click()
+    const drawer = page.getByRole('dialog')
+    await expect(drawer.getByText(/缓存读取|Cache read/, { exact: true })).toBeVisible()
+    await expect(drawer.getByText(/缓存写入|Cache write/, { exact: true })).toBeVisible()
+    await expect(drawer.getByText(/定价模拟器|Pricing simulator/)).toBeVisible()
+  }
 })
 
 test('权限分级：普通用户被管理面拒绝，且前端不因 403 崩溃', async ({ page, request }) => {
@@ -413,4 +428,3 @@ test('删除密钥需二次确认：直接点删除不生效，取消后密钥�
   await dialog2.getByRole('button', { name: /^删除$|^Delete$/ }).click()
   await expect(page.getByRole('row').filter({ hasText: victim })).toBeHidden()
 })
-

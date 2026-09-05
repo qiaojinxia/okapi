@@ -3,7 +3,7 @@ import { defineConfig } from '@playwright/test'
 // 独立交互回归：使用构建产物与接口桩，无需数据库，也不修改演示账号或站点配置。
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['interactions.spec.ts', 'charts.spec.ts'],
+  testMatch: ['interactions.spec.ts', 'charts.spec.ts', 'catalog.spec.ts', 'request-examples.spec.ts'],
   timeout: 20_000,
   use: {
     baseURL: 'http://127.0.0.1:4175',

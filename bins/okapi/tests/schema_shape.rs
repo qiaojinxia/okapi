@@ -76,6 +76,14 @@ const FORBIDDEN_COLUMNS: &[(&str, &str)] = &[
     ("users", "password"),
 ];
 
+/// 0003 删掉的死列：建了从没接线，零引用零数据。与 FORBIDDEN_COLUMNS 分开列，
+/// 是因为两者的理由不同——那边是"出现即安全事故"，这边是"别把已经清掉的
+/// 半成品又搬回来"。真要重做这两件事，形状多半也不是当初设想的样子。
+const DROPPED_COLUMNS: &[(&str, &str)] = &[
+    ("channel_keys", "quota_snapshot"),
+    ("model_pricing", "media_prices"),
+];
+
 #[tokio::test]
 // 形状核对是一份逐项清单：拆成多个函数会让"必须在 / 必须不在 / 约束生效"三类断言散开
 #[allow(clippy::too_many_lines)]
@@ -98,7 +106,7 @@ async fn migrations_produce_expected_schema_shape() {
     let fresh = okapi_store::connect_pg(&fresh_url).await.unwrap();
     okapi_store::run_migrations(&fresh)
         .await
-        .expect("0001 应能从零干净应用");
+        .expect("迁移链应能从零干净应用");
 
     let mut problems: Vec<String> = Vec::new();
 
@@ -132,6 +140,22 @@ async fn migrations_produce_expected_schema_shape() {
         .get(0);
         if found > 0 {
             problems.push(format!("已废弃的表又出现了：{table}"));
+        }
+    }
+
+    for (table, column) in DROPPED_COLUMNS {
+        let found: i64 = sqlx::query(
+            "SELECT count(*) FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_one(&fresh)
+        .await
+        .unwrap()
+        .get(0);
+        if found > 0 {
+            problems.push(format!("0003 删掉的死列又回来了：{table}.{column}"));
         }
     }
 

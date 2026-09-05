@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM billing_outbox WHERE payload->>'request_id' = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0138af323d9f2d276968e771bfe65b153d4f359fc078ba894365dcd4c973292e"
+}

@@ -27,6 +27,10 @@ pub mod codes {
     pub const IP_NOT_ALLOWED: &str = "ip_not_allowed";
     /// 该账户此刻正在结算，账目在动——对账修复要等它稳定下来再来（隔几秒重试）。
     pub const RECONCILE_UNSTABLE: &str = "reconcile_unstable";
+    /// 报价单价超过请求声明的 `provider.max_price` 上限（param = 超限的那一轴与实际单价）。
+    pub const PRICE_ABOVE_MAX: &str = "price_above_max";
+    /// 请求要求零数据留存，但没有渠道声明不留存（param = 该模型的候选数）。
+    pub const NO_ZERO_RETENTION_CHANNEL: &str = "no_zero_retention_channel";
 }
 
 #[derive(Debug, Clone, Serialize)]

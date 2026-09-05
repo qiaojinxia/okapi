@@ -45,6 +45,16 @@ impl ChatRequestProbe {
             .map(|m| content_chars(&m.content))
             .sum()
     }
+
+    /// prompt 可见文本片段（分词估算输入）。
+    #[must_use]
+    pub fn prompt_segments(&self) -> Vec<&str> {
+        let mut out = Vec::with_capacity(self.messages.len());
+        for m in &self.messages {
+            push_text(&m.content, &mut out);
+        }
+        out
+    }
 }
 
 fn content_chars(value: &serde_json::Value) -> usize {
@@ -62,6 +72,25 @@ fn content_chars(value: &serde_json::Value) -> usize {
         | serde_json::Value::Bool(_)
         | serde_json::Value::Number(_)
         | serde_json::Value::Object(_) => 0,
+    }
+}
+
+/// 与 [`content_chars`] 同构的取文本版：把可见文本片段借出来交给分词器。
+/// 返回借用而非拼接的 String——prompt 可以很大，热路径上不该多一次整段拷贝。
+fn push_text<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(s) => out.push(s),
+        serde_json::Value::Array(parts) => {
+            for part in parts {
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push(t);
+                }
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::Object(_) => {}
     }
 }
 
@@ -95,6 +124,17 @@ impl MessagesRequestProbe {
             .map(|m| content_chars(&m.content))
             .sum();
         msg_chars + content_chars(&self.system)
+    }
+
+    /// prompt 可见文本片段（含顶层 system）。
+    #[must_use]
+    pub fn prompt_segments(&self) -> Vec<&str> {
+        let mut out = Vec::with_capacity(self.messages.len() + 1);
+        push_text(&self.system, &mut out);
+        for m in &self.messages {
+            push_text(&m.content, &mut out);
+        }
+        out
     }
 }
 
@@ -133,6 +173,24 @@ impl ResponsesRequestProbe {
                     .sum(),
                 _ => 0,
             }
+    }
+
+    /// prompt 可见文本片段（instructions + input，含 input 项内嵌 content）。
+    #[must_use]
+    pub fn prompt_segments(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        if let Some(s) = self.instructions.as_deref() {
+            out.push(s);
+        }
+        push_text(&self.input, &mut out);
+        if let serde_json::Value::Array(items) = &self.input {
+            for item in items {
+                if let Some(c) = item.get("content") {
+                    push_text(c, &mut out);
+                }
+            }
+        }
+        out
     }
 
     /// input → 消息探针（会话粘性种子用；string 视为单条 user）。

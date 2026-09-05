@@ -1565,6 +1565,57 @@ N 个副本就是 N 倍并发写压向同一个 PG，闸的效力随副本数线
 「压测确认 PG 写瓶颈后引入」——没有压测数据就动热路径写批，是拿正确性换想象中的性能，
 故按其自身前提继续挂着。
 
+### 11.24 请求级路由偏好与渠道数据留存声明（2026-09-05，吸收 OpenRouter）
+
+**发现**（三方对照：OpenRouter / new-api / Sub2API / experiential）：okapi 的路由控制**全在
+配置侧**——`api_keys.pool_override` > 生效分组 `price_groups.pool_code` > `default`，调用方
+一点也管不着。三件事表达不了：「这次别路由到贵渠道」「这次失败就直接返回、别换渠道重试」
+「只走不会留存我数据的上游」。第三件尤其要紧：`data_retention` 这个维度**全仓零命中**，
+企业客户问「我的数据会不会被拿去训练」，既答不出也保证不了。
+
+取 OpenRouter 的 `provider` 对象形状（存量客户端已经在发它），先落三个子集：
+
+- **`zdr: true` / `data_collection: "deny"`** → 只保留声明 `data_retention='none'` 的候选。
+  **未声明按不满足处理**（fail-closed）：不知道对方留不留，不能当成不留。筛空时给**专门的
+  错误码** `no_zero_retention_channel`（param = 筛前候选数）而不是 `no_available_channel`
+  ——后者会让运维以为渠道全挂了。
+- **`max_price.{prompt,completion}`**（USD / 1M token）→ 判在**预扣之前**：超限直接
+  `402 price_above_max`（param 回显是哪一轴超了、实际单价多少），不扣费也不打上游。
+  比较基准取快照里的 `final_unit_price_input_per_1m_usd`——它已过模型/分组/个人系数与
+  修饰器全链，正是这次真会按之的价；输出侧单价 = 它 × `completion_ratio`。
+- **`allow_fallbacks: false`** → 首次失败即返回，不改投。**先判再自增 `failover_count`**：
+  它记的是"这次请求换了几回渠道"，拒绝改投时一次也没换，记成 1 会把分析面的 failover
+  指标虚高一截。key 状态机照常登记——这条渠道确实出过问题，不因调用方不要 failover 而当没发生。
+
+**实现要点**：
+
+- 解析从**原文**做（`routing_prefs::parse`），与入口方言无关，chat / responses / messages
+  三个入口共用；请求体没有 `provider` 键时先做一次子串预检，零解析开销。
+- **偏好写错不拒请求**：解析失败一律回落缺省。这是路由提示不是计费输入，不该让一个拼错的
+  字段打断主链（与 §3.7 fail-safe 取向一致）。负数/NaN 的价格上限当没写——当成"上限 0"
+  会把请求全拒光。
+- **转发前必须剥掉 `provider`**：它是 okapi 自己的指令，上游不认识会 400。剥在
+  `dispatch_chat` 唯一收口处，与渠道级 `strip_request_fields` 分开——那是管理员配置，
+  这是协议要求，不可关。
+- 渠道侧 `channels.settings.data_retention`（`none|transient|trains`，空串=清除声明），
+  复用 settings 不新增表（吸收判据②）；`patch_channel` 的 settings 赋值合成一条 CASE
+  ——分成两条 SET 会被 PG 判成对同列重复赋值。前端渠道抽屉「调度」页签加三档下拉。
+
+**验收**：`routing_prefs` 六个单测（缺省回落 / 三子集解析 / `data_collection:deny` 等价 /
+脏值上限当没写 / 剥指令只剥它 / 未声明 fail-closed）+ `gateway_routing_prefs.rs` 四用例
+（zdr 换渠道 + 筛空给专门错误码 + 不要求时照常、上限在预扣前拒且零记账行、
+`allow_fallbacks:false` 失败即返回且 failover 计数为 0、指令不出现在上游请求体里）。
+
+**用例踩到的两个真实语义**（值得记下来）：① 第一次 failover 成功后 **L2 会话粘性**会记住
+那条渠道，两次同文请求走的是粘性而非候选排序——验路由选择的用例必须逐次换文；
+② 失败渠道连续 3 次转冷却后会被候选查询直接排除，"要不要改投"的前提随之消失，
+用例需显式复位 key 状态。
+
+**未取**（同轮对照的其余项）：`order/only/ignore/sort/require_parameters` 留待后续；
+计费插件化与 JS 沙箱撞 §1 红线①；experiential 的 OTel trace 驱动路由优化——思路好，
+但要引 collector + 热路径埋点（撞红线①③），而 okapi 的 CH 明细已含模型/渠道/时延/TTFT/
+成本/错误码，规划中的 L3 打分器吃这份现成数据即可，不必再引一套遥测栈。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

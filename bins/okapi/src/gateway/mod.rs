@@ -14,6 +14,7 @@ pub mod images;
 pub mod models;
 pub mod pricing_loader;
 pub mod realtime;
+pub mod routing_prefs;
 pub mod rule_inputs;
 pub mod sched_redis;
 pub mod scheduler;
@@ -39,6 +40,8 @@ pub async fn build_state(
     clickhouse_url: Option<&str>,
     nats_url: Option<&str>,
 ) -> anyhow::Result<AppState> {
+    // 分词表建表 ~2.5ms，放在启动而非线上第一个请求上
+    super::gateway::estimate::warm_up();
     let pg = okapi_store::connect_pg(database_url).await?;
     okapi_store::run_migrations(&pg).await?;
     let redis = okapi_store::connect_redis(redis_url).await?;

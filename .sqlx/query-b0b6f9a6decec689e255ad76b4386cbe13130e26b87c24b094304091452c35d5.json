@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channels SET\n            name                 = COALESCE($2, name),\n            provider             = COALESCE($3, provider),\n            api_base             = COALESCE($4, api_base),\n            models               = COALESCE($5::jsonb, models),\n            model_mapping        = COALESCE($6::jsonb, model_mapping),\n            -- settings 一次赋完：先取整体覆盖（$7，缺省保留原值），再按 $12 单独合并\n            -- data_retention（''=删该键）。分成两条 SET 会被 PG 判成对同列重复赋值。\n            settings             = CASE\n                                     WHEN $12::text IS NULL THEN COALESCE($7::jsonb, settings)\n                                     WHEN $12::text = ''\n                                       THEN COALESCE($7::jsonb, settings, '{}'::jsonb) - 'data_retention'\n                                     ELSE COALESCE($7::jsonb, settings, '{}'::jsonb)\n                                          || jsonb_build_object('data_retention', $12::text)\n                                   END,\n            capabilities         = COALESCE($8::jsonb, capabilities),\n            priority             = COALESCE($9, priority),\n            trust_upstream_usage = COALESCE($10, trust_upstream_usage),\n            upstream_unit_cost   = CASE WHEN $11::bigint IS NULL THEN upstream_unit_cost\n                                        ELSE COALESCE(upstream_unit_cost, '{}'::jsonb)\n                                             || jsonb_build_object('relative_cost_milli', $11::bigint) END,\n            updated_at           = now()\n        WHERE id = $1 AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Jsonb",
+        "Int4",
+        "Bool",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b0b6f9a6decec689e255ad76b4386cbe13130e26b87c24b094304091452c35d5"
+}

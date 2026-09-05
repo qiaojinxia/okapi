@@ -13,6 +13,16 @@ export function formatMoney(micro: number, locale: string): string {
   }).format(usd)
 }
 
+/// 目录单价可低于一笔账单的精度，切成 1K 时仍不能把非零价格显示为免费。
+export function formatUnitPrice(micro: number | null, locale: string): string {
+  if (micro === null || !Number.isFinite(micro) || micro < 0) return '—'
+  const thresholdMicro = 0.01
+  const formatted = new Intl.NumberFormat(locale, {
+    style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 8,
+  }).format((micro > 0 && micro < thresholdMicro ? thresholdMicro : micro) / 1_000_000)
+  return micro > 0 && micro < thresholdMicro ? `<${formatted}` : formatted
+}
+
 /// 聚合金额（KPI / 报表合计）。
 ///
 /// 与 formatMoney 分开是刻意的：单笔调用可能只花 $0.0012，两位小数会显示成

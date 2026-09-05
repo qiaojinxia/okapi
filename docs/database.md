@@ -141,6 +141,26 @@ CREATE TABLE channel_pools (
         CHECK (fallback_pool_code IS NULL OR fallback_pool_code <> pool_code)
 );
 
+
+`trust_upstream_usage = false` 时，结算前按 tiktoken 分词与本次请求实测的
+token/字符密度重算 prompt 与 completion，取与上游报告值中的**较大者**：上游可以
+报得比本地算的多，但不能更少——这个开关的用途就是防转售型上游少报。缓存 /
+音频 / 图片轴只有上游知道，本地无从复核，原样保留。本地计数对 OpenAI 方言是
+权威的，对 Anthropic / Gemini 只是同量级近似（它们的分词器不在本进程内），
+取 max 也正是为了不让近似偏低反过来伤到诚实上报的渠道。
+
+
+`retry_policy` 两项，均按渠道生效、写入后由 gateway 夹取到安全区间：
+
+- `same_key_retries`（缺省 1，夹 0..=3）：瞬态失败（连接 / 超时 / 5xx）时同一把 key
+  重试几次。空回复不适用——那种情况直接换渠道。
+- `first_output_timeout_secs`（缺省 30，夹 5..=300）：首字窗口（连接 + 首个产出事件）。
+  按渠道配是有实义的：直连官方与经两跳转售的上游，首 token 该等多久差一个数量级，
+  一个全局常数要么把慢渠道误判成超时，要么让快渠道的故障拖满 30 秒才换。
+
+夹取而不是照单全收，是因为这是渠道级配置：写错一个 0 或多一个零，代价分别是
+"永不重试"和"一个坏渠道把请求吊死几分钟"。
+
 CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对多）
     pool_code         VARCHAR(32) NOT NULL REFERENCES channel_pools(pool_code) ON DELETE CASCADE,
     channel_id        BIGINT NOT NULL,                -- FK 在 channels 建表后补
@@ -199,8 +219,8 @@ CREATE TABLE channels (
     models               JSONB NOT NULL DEFAULT '[]', -- 服务的对外模型名
     model_mapping        JSONB NOT NULL DEFAULT '{}', -- 对外名 → 上游名
     capabilities         JSONB NOT NULL DEFAULT '{}', -- {"tools":true,"vision":true,...} 能力感知路由
-    trust_upstream_usage BOOLEAN NOT NULL DEFAULT false,   -- #1790-19 跳过本地 token 复核
-    retry_policy         JSONB,                       -- 覆盖全局重试矩阵，null=默认
+    trust_upstream_usage BOOLEAN NOT NULL DEFAULT false,   -- true=照单全收上游 usage；false=结算前本地复核（见下）
+    retry_policy         JSONB,                       -- {same_key_retries, first_output_timeout_secs}；null=默认
     settings             JSONB NOT NULL DEFAULT '{}', -- 超时/代理/自定义头/透传路径白名单
     owner_id             BIGINT REFERENCES users(id), -- 渠道属主（#6267，own/all 权限范围）
     upstream_unit_cost   JSONB,                       -- relative_cost_milli 整数千分比（缺省 1000 = 官方标价）：调度层内权重除数，也是毛利核算的成本系数（§11.18）
@@ -231,7 +251,6 @@ CREATE TABLE channel_keys (                           -- key 级状态机（Sub2
     model_subset          JSONB,                      -- null = 继承 channels.models；非空 = 该 key 只服务这些模型
     rpm_limit             INT,                        -- null = 不限；固定窗口计数在 Redis rpm:ck:*
     daily_spend_cap_micro BIGINT,                     -- null = 不限；当日累计消费在 Redis spend:ck:*（结算时累加）
-    quota_snapshot        JSONB,                      -- 被动采集上游 rate-limit 响应头
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -283,7 +302,6 @@ CREATE TABLE model_pricing (                          -- 真理源：倍率制
     per_call_price_micro BIGINT,                      -- per_call 模式
     tier_expr            TEXT,                        -- tiered 模式表达式
     tier_ratios       JSONB,                          -- service_tier 档位倍率（{"flex":"0.5"}；NULL=全档 1.0，0012）
-    media_prices         JSONB,                       -- image/audio/video 单价（micro）
     effective_from       TIMESTAMPTZ,                 -- 定价生效预告
     updated_by           BIGINT REFERENCES users(id),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()

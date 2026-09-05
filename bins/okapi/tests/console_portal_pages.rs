@@ -55,6 +55,10 @@ async fn public_pricing_no_auth() {
     okapi_store::provision::create_model_ratio(&env.pg, &model, "1.25", "4", "0.5")
         .await
         .unwrap();
+    sqlx::query("UPDATE models SET display_name = 'Catalog model', vendor = 'OpenAI', context_window = 128000, max_output = 4096, capabilities = $2 WHERE model_name = $1")
+        .bind(&model)
+        .bind(json!({"vision": true, "tools": false, "audio": "yes", "internal_note": "not public"}))
+        .execute(&env.pg).await.unwrap();
 
     let body: Value = reqwest::Client::new()
         .get(format!("http://{}/api/pricing", env.addr))
@@ -72,6 +76,14 @@ async fn public_pricing_no_auth() {
         .expect("新模型必须出现在公开价格页");
     assert_eq!(entry["model_ratio"], "1.250000");
     assert_eq!(entry["completion_ratio"], "4.000000");
+    assert_eq!(entry["display_name"], "Catalog model");
+    assert_eq!(entry["vendor"], "OpenAI");
+    assert_eq!(entry["context_window"], 128_000);
+    assert_eq!(entry["max_output"], 4096);
+    assert_eq!(
+        entry["capabilities"],
+        json!({"vision": true, "tools": false})
+    );
     assert!(entry.get("api_base").is_none(), "不得泄漏渠道信息");
     assert!(body["groups"].is_array());
 }

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"c!\" FROM channel_keys\n           WHERE channel_id = $1 AND status = 1\n             AND (cooldown_until IS NULL OR cooldown_until < now())",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e002b7e49107b7d3e2b7deb3188f65b5b79183f67ea400ae061d42b2115eb6bf"
+}

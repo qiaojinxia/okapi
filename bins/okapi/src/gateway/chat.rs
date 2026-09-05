@@ -4,7 +4,7 @@
 
 use super::clients::detect_client_type;
 use super::error::AppError;
-use super::estimate::{estimate_completion_tokens, estimate_prompt_tokens};
+use super::estimate::{self, estimate_prompt_tokens};
 use super::sched_redis::session_hash;
 use super::scheduler::{Strategy, order_candidates, order_candidates_by_latency};
 use super::state::AppState;
@@ -40,6 +40,7 @@ const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
 const DEFAULT_GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 /// 首字窗口（连接 + 首个产出事件）；窗口内失败可无痕 failover。
+/// 缺省值——渠道可用 `retry_policy.first_output_timeout_secs` 覆盖（5..=300）。
 const FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
 /// 单请求最多尝试的渠道 key 数。
 const MAX_ATTEMPTS: usize = 3;
@@ -63,8 +64,9 @@ struct ProbeInfo {
     stream: bool,
     /// 显式请求的补全上限（openai: max_completion_tokens>max_tokens；anthropic: max_tokens）。
     completion_cap_req: Option<u32>,
+    /// prompt 精确分词结果（tiktoken；预扣与密度的共同输入）。
+    prompt_tokens: u32,
     prompt_chars: usize,
-    message_count: usize,
     /// L2 会话标识（头优先，缺省消息前缀哈希）。
     session: Option<String>,
     /// 请求特征（能力感知路由输入，§3.8）。
@@ -87,10 +89,14 @@ struct RequestBilling {
     member_user_id: Option<i64>,
     request_id: Uuid,
     est_prompt: u32,
+    /// 本次请求实测的 token/千字符 密度（补全侧只有字符数，用它折算）。
+    density: u32,
     /// 预扣补全上限（anthropic 转换的 max_tokens 兜底也用它）。
     completion_cap: u32,
     /// reasoning 模型名后缀指令（-high/-thinking-N，注入上游请求参数）。
     directive: Option<ReasoningDirective>,
+    /// 请求级路由偏好（§11.24；缺省即此前行为）。
+    prefs: super::routing_prefs::RoutingPrefs,
     /// canonical 模型名（别名解析后；记账与调度用）。
     model: String,
     requested_model: String,
@@ -157,6 +163,39 @@ enum AttemptError {
     },
     /// 不可重试：立即向客户端返回。
     Fatal(ForwardFailure),
+}
+
+/// 报价单价是否越过请求声明的上限；越过则返回 "轴:实际单价" 供 param 回显。
+///
+/// 快照里的 `final_unit_price_input_per_1m_usd` 是**输入**侧最终单价；输出侧单价 =
+/// 它 × completion_ratio（补全倍率就是"输出比输入贵多少倍"的定义）。
+fn price_above_max(
+    quote: &okapi_pricing::Quote,
+    prefs: &super::routing_prefs::RoutingPrefs,
+) -> Option<String> {
+    if prefs.max_price.prompt.is_none() && prefs.max_price.completion.is_none() {
+        return None;
+    }
+    let snap = serde_json::to_value(&quote.snapshot).ok()?;
+    let input = snap
+        .get("final_unit_price_input_per_1m_usd")
+        .and_then(serde_json::Value::as_f64)?;
+    if let Some(cap) = prefs.max_price.prompt
+        && input > cap
+    {
+        return Some(format!("prompt:{input}"));
+    }
+    if let Some(cap) = prefs.max_price.completion {
+        let ratio = snap
+            .get("completion_ratio")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(1.0);
+        let output = input * ratio;
+        if output > cap {
+            return Some(format!("completion:{output}"));
+        }
+    }
+    None
 }
 
 /// 上游错误 → key 状态机类别（§3.6 重试矩阵）。
@@ -237,8 +276,12 @@ pub async fn chat_completions(
         requested_model: probe.model.clone(),
         stream: probe.stream,
         completion_cap_req: probe.max_completion_tokens.or(probe.max_tokens),
+        prompt_tokens: estimate_prompt_tokens(
+            &probe.model,
+            &probe.prompt_segments(),
+            probe.messages.len(),
+        ),
         prompt_chars: probe.prompt_chars(),
-        message_count: probe.messages.len(),
         session: session_hash(&headers, &probe.messages),
         service_tier: probe.service_tier.clone(),
         needs_tools,
@@ -273,8 +316,12 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         requested_model: probe.model.clone(),
         stream: probe.stream,
         completion_cap_req: probe.completion_cap_req(),
+        prompt_tokens: estimate_prompt_tokens(
+            &probe.model,
+            &probe.prompt_segments(),
+            input_messages.len().max(1),
+        ),
         prompt_chars: probe.prompt_chars(),
-        message_count: input_messages.len().max(1),
         session: session_hash(&headers, &input_messages),
         service_tier: None,
         needs_tools,
@@ -308,8 +355,12 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
         requested_model: probe.model.clone(),
         stream: probe.stream,
         completion_cap_req: probe.max_tokens,
+        prompt_tokens: estimate_prompt_tokens(
+            &probe.model,
+            &probe.prompt_segments(),
+            probe.messages.len(),
+        ),
         prompt_chars: probe.prompt_chars(),
-        message_count: probe.messages.len(),
         session: session_hash(&headers, &probe.messages),
         service_tier: None,
         needs_tools,
@@ -453,7 +504,8 @@ async fn handle_chat(
     };
 
     // 估价（预扣补全缺省 = models.max_output，无则 2048，§5.1）
-    let est_prompt = estimate_prompt_tokens(info.prompt_chars, info.message_count);
+    let est_prompt = info.prompt_tokens;
+    let density = estimate::prompt_density(est_prompt, info.prompt_chars);
     let model_default_cap = meta
         .max_output
         .and_then(|v| u32::try_from(v).ok())
@@ -473,6 +525,14 @@ async fn handle_chat(
         reasoning_tokens: 0,
     };
     let est_quote = calculate(&book, &calc, est_usage)?;
+
+    // 请求级单价上限（§11.24）：拿快照里的**最终**单价判——它已经过模型/分组/个人系数与
+    // 修饰器全链，正是这次真会按之的价。判在预扣之前：超限直接拒，别扣了钱再让用户发现贵。
+    let prefs = super::routing_prefs::parse(body);
+    if let Some(over) = price_above_max(&est_quote, &prefs) {
+        return Err(AppError::new(StatusCode::PAYMENT_REQUIRED, codes::PRICE_ABOVE_MAX)
+            .with_param(over));
+    }
 
     // 团成员月度限额（§6.1 软实时）
     super::auth::check_member_limit(state, &key).await?;
@@ -548,11 +608,13 @@ async fn handle_chat(
         ingress,
         book: Arc::clone(&book),
         calc,
+        prefs,
         user_id: key.user_id,
         key_id: key.key_id,
         member_user_id: key.member_user_id,
         request_id,
         est_prompt,
+        density,
         completion_cap,
         directive,
         model: canonical,
@@ -660,6 +722,8 @@ async fn fallback_billing(
     Some(RequestBilling {
         calc,
         completion_cap,
+        // 降级模型沿用同一次请求的偏好：用户的意图没变
+        prefs: bill.prefs,
         model: meta.canonical.clone(),
         has_tier_pricing,
         // 单跳：降级请求不再携带链，杜绝递归
@@ -725,6 +789,23 @@ async fn try_model(
     }
     if info.needs_vision {
         candidates.retain(|c| !denies(c, "vision"));
+    }
+    // 零留存要求（§11.24）：只留声明 data_retention='none' 的渠道。
+    // 未声明按不满足处理——"不知道对方留不留"不能当成"不留"。
+    // 单独给错误码：候选被这一条筛空时，回 no_available_channel 会让人以为渠道全挂了。
+    if bill.prefs.zero_retention {
+        let before = candidates.len();
+        candidates.retain(|c| {
+            super::routing_prefs::retention_ok(c.data_retention.as_deref(), true)
+        });
+        if candidates.is_empty() {
+            return Err(ForwardFailure::app(
+                AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_ZERO_RETENTION_CHANNEL)
+                    .with_param(before.to_string()),
+                0,
+                None,
+            ));
+        }
     }
     if candidates.is_empty() {
         return Err(ForwardFailure::app(
@@ -872,7 +953,8 @@ async fn try_model(
             3
         };
 
-        // §3.6：连接/超时/5xx 允许同 key 先重试 1 次；空回复直接换渠道
+        // §3.6：连接/超时/5xx 允许同 key 先重试；次数按渠道配（缺省 1，空回复直接换渠道）
+        let same_key_retries = cand.same_key_retries;
         let mut retry: i16 = 0;
         let attempt = loop {
             let result = if info.stream {
@@ -906,11 +988,13 @@ async fn try_model(
                     ..
                 }) if *code != codes::EMPTY_COMPLETION
             );
-            if retry == 0 && transient {
-                retry = 1;
+            if retry < same_key_retries && transient {
+                retry += 1;
                 tracing::debug!(
                     channel_key = cand.channel_key_id,
-                    "瞬态失败，同 key 重试 1 次"
+                    retry,
+                    same_key_retries,
+                    "瞬态失败，同 key 重试"
                 );
                 continue;
             }
@@ -950,9 +1034,22 @@ async fn try_model(
                     failure_kind,
                 )
                 .await;
-                failover = failover.saturating_add(1);
                 last_code = code;
                 last_status = upstream_status;
+                // allow_fallbacks:false（§11.24）——失败即返回，不改投其它渠道。
+                //
+                // 先判再自增：`failover_count` 记的是"这次请求换了几回渠道"，我们**拒绝**
+                // 改投时一次也没换，记成 1 会把分析面的 failover 指标虚高一截。
+                // key 状态机照常登记（上面的 mark_key_failure 已做）：这条渠道确实出过
+                // 问题，不能因为调用方不要 failover 就当没发生。
+                if !bill.prefs.allow_fallbacks {
+                    tracing::debug!(
+                        request_id = %bill.request_id,
+                        "请求声明 allow_fallbacks=false，不再改投"
+                    );
+                    break;
+                }
+                failover = failover.saturating_add(1);
             }
             Err(AttemptError::Fatal(mut failure)) => {
                 bill.state
@@ -1088,6 +1185,9 @@ async fn dispatch_chat(
     stream: bool,
 ) -> Result<ChatResponse, UpstreamError> {
     use futures::StreamExt as _;
+    // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
+    // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
+    let body = super::routing_prefs::strip(&body).unwrap_or(body);
     let body = if cand.strip_request_fields.is_empty() {
         body
     } else {
@@ -1254,7 +1354,8 @@ async fn attempt_stream(
 ) -> Result<Response, AttemptError> {
     let channel = (cand.channel_id, cand.channel_key_id);
     let connect = dispatch_chat(bill, cand, base, body, true);
-    let resp = match tokio::time::timeout(FIRST_OUTPUT_TIMEOUT, connect).await {
+    let first_output_window = first_output_window(cand);
+    let resp = match tokio::time::timeout(first_output_window, connect).await {
         Err(_) => {
             return Err(AttemptError::Retriable {
                 code: codes::UPSTREAM_TIMEOUT,
@@ -1275,7 +1376,7 @@ async fn attempt_stream(
 
     // 首字前只缓冲：窗口内失败/空回复对客户端无痕（§3.7-1/2）
     let mut buffered: Vec<ChatEvent> = Vec::new();
-    let first = tokio::time::timeout(FIRST_OUTPUT_TIMEOUT, async {
+    let first = tokio::time::timeout(first_output_window, async {
         loop {
             match handle.events.next().await {
                 Some(Ok(event @ ChatEvent::Data { .. })) => {
@@ -1347,8 +1448,19 @@ struct CandInfo {
     upstream_request_id: Option<String>,
     /// 渠道开关：按上游响应模型计费（Sub2API 0.1.175 对齐）。
     bill_resp_model: bool,
+    /// 渠道开关：不信任上游 usage，结算前本地复核（取两者较大值）。
+    trust_usage: bool,
     upstream_model: String,
     upstream_endpoint: String,
+}
+
+/// 该渠道的首字窗口：未配 `retry_policy.first_output_timeout_secs` 时用全局缺省。
+fn first_output_window(cand: &ChannelCandidate) -> Duration {
+    if cand.first_output_timeout_secs == FIRST_OUTPUT_TIMEOUT.as_secs() {
+        FIRST_OUTPUT_TIMEOUT
+    } else {
+        Duration::from_secs(cand.first_output_timeout_secs)
+    }
 }
 
 fn cand_info(
@@ -1367,6 +1479,7 @@ fn cand_info(
         retry,
         upstream_request_id: None,
         bill_resp_model: cand.bill_by_response_model,
+        trust_usage: cand.trust_upstream_usage,
         upstream_model: cand.upstream_model(model).to_owned(),
         upstream_endpoint: upstream_endpoint(cand, stream, ingress).to_owned(),
     }
@@ -1527,20 +1640,18 @@ async fn settle_stream(
     client_gone: bool,
     resp_meta: RespMeta,
 ) {
-    // usage 缺失（未开 include_usage / 客户端提前断开）→ 兜底估算；
-    // trust_upstream_usage=false 的本地 tokenizer 复核在 M2 接入 tiktoken 后启用。
+    // usage 缺失（客户端显式关了 include_usage / 提前断开 / 上游不认这个字段）
+    // → 按本次实测密度兜底；渠道声明不信任上游 usage 时再做一次本地复核。
     let usage = usage.map_or_else(
-        || TokenUsage {
-            prompt_tokens: bill.est_prompt,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            audio_prompt_tokens: 0,
-            image_prompt_tokens: 0,
-            completion_tokens: estimate_completion_tokens(content_chars),
-            audio_completion_tokens: 0,
-            reasoning_tokens: 0,
+        || estimate::fallback_usage(bill.est_prompt, content_chars, bill.density),
+        |u| {
+            let reported = u.to_token_usage();
+            if info.trust_usage {
+                reported
+            } else {
+                estimate::recount_untrusted(reported, bill.est_prompt, content_chars, bill.density)
+            }
         },
-        UsageProbe::to_token_usage,
     );
     if client_gone {
         tracing::info!(request_id = %bill.request_id, "客户端提前断开，按已产出结算");
@@ -1613,21 +1724,22 @@ async fn attempt_json(
             body,
             usage,
         }) => {
+            let content_chars = non_stream_content_chars(bill.ingress, &body);
             let usage = usage.map_or_else(
-                || TokenUsage {
-                    prompt_tokens: bill.est_prompt,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                    audio_prompt_tokens: 0,
-                    image_prompt_tokens: 0,
-                    completion_tokens: estimate_completion_tokens(non_stream_content_chars(
-                        bill.ingress,
-                        &body,
-                    )),
-                    audio_completion_tokens: 0,
-                    reasoning_tokens: 0,
+                || estimate::fallback_usage(bill.est_prompt, content_chars, bill.density),
+                |u| {
+                    let reported = u.to_token_usage();
+                    if cand.trust_upstream_usage {
+                        reported
+                    } else {
+                        estimate::recount_untrusted(
+                            reported,
+                            bill.est_prompt,
+                            content_chars,
+                            bill.density,
+                        )
+                    }
                 },
-                UsageProbe::to_token_usage,
             );
             let mut info = cand_info(
                 cand,
@@ -1909,6 +2021,8 @@ async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
             retry: 0,
             upstream_request_id: None,
             bill_resp_model: false,
+            // 失败路径不结算 usage，复核开关取不影响结果的一侧
+            trust_usage: true,
             upstream_model: failure
                 .upstream
                 .as_ref()

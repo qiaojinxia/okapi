@@ -126,12 +126,30 @@ pub async fn usage(
     })))
 }
 
-/// GET /api/pricing：公开价格页（无鉴权）——模型倍率/按次价 + 分组倍率 +
-/// 每模型可用分组（new-api usable_group 对齐，§11.5 展示层收口）。
-/// 只暴露定价与可见性事实，不含渠道/成本信息。
+#[derive(sqlx::FromRow)]
+struct PublicPricingModel {
+    model_name: String,
+    display_name: Option<String>,
+    vendor: Option<String>,
+    capabilities: Value,
+    context_window: Option<i32>,
+    max_output: Option<i32>,
+    pricing_mode: String,
+    model_ratio: Option<String>,
+    completion_ratio: Option<String>,
+    cache_ratio: Option<String>,
+    cache_write_ratio: Option<String>,
+    audio_ratio: Option<String>,
+    audio_completion_ratio: Option<String>,
+    image_ratio: Option<String>,
+    per_call_price_micro: Option<i64>,
+}
+
+/// GET /api/pricing：公开模型规格、价格和分组可见性；不含渠道或成本信息。
 pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let models = sqlx::query!(
-        r#"SELECT m.model_name, m.display_name, m.vendor, p.pricing_mode,
+    let models = sqlx::query_as::<_, PublicPricingModel>(
+        r"SELECT m.model_name, m.display_name, m.vendor, p.pricing_mode,
+                  m.capabilities, m.context_window, m.max_output,
                   p.model_ratio::text AS model_ratio,
                   p.completion_ratio::text AS completion_ratio,
                   p.cache_ratio::text AS cache_ratio,
@@ -141,7 +159,7 @@ pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>
                   p.image_ratio::text AS image_ratio,
                   p.per_call_price_micro
            FROM models m JOIN model_pricing p ON p.model_id = m.id
-           WHERE m.status = 1 ORDER BY m.sort_order, m.model_name"#
+           WHERE m.status = 1 ORDER BY m.sort_order, m.model_name",
     )
     .fetch_all(&state.pg)
     .await
@@ -198,6 +216,13 @@ pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>
             "model": m.model_name,
             "display_name": m.display_name,
             "vendor": m.vendor,
+            // 公开目录仅发已声明的布尔能力，不透传管理员可能存入的扩展数据。
+            "capabilities": (["vision", "tools", "json", "reasoning", "audio", "video", "embedding", "realtime"]
+                .into_iter().filter_map(|key| m.capabilities.get(key).and_then(Value::as_bool)
+                    .map(|value| (key.to_owned(), json!(value))))
+                .collect::<serde_json::Map<String, Value>>()),
+            "context_window": m.context_window.filter(|v| *v > 0),
+            "max_output": m.max_output.filter(|v| *v > 0),
             "mode": m.pricing_mode,
             "model_ratio": m.model_ratio,
             "completion_ratio": m.completion_ratio,
