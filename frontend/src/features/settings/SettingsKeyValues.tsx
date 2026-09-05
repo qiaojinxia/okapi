@@ -72,7 +72,10 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
       {settings.isError ? <ErrorState message={describeError(settings.error)} onRetry={() => void settings.refetch()} />
         : settings.isPending ? <TableSkeleton rows={6} cols={2} />
         : count === 0 ? <EmptyState title={filter || category !== 'all' ? t('common:noResults') : undefined} hint={t('admin:settingEmptyHint')} />
-        : <div className="grid items-start gap-4 xl:grid-cols-2">
+        // 分组竖排、组内条目再分列。此前是按"组"两列排，而各组条目数差得很远
+        // （支付十几条、身份两条），右列必然留一大片空白；把分列下沉到组内就没有死区，
+        // 组的多少也不再影响版面
+        : <div className="flex flex-col gap-4">
           {visible.map((group) => {
             const Icon = GROUP_ICONS[group.id]
             return (
@@ -82,12 +85,16 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
                   <h2 className="flex-1 text-sm font-semibold">{t(group.label)}</h2>
                   <span className="text-xs text-muted-foreground">{t('common:resultCount', { n: group.rows.length })}</span>
                 </div>
-                <div className="divide-y divide-border">
+                <div className="grid gap-3 p-3 sm:grid-cols-2 2xl:grid-cols-3">
                   {group.rows.map((row) => {
                     const meta = settingMeta(row.key)
                     const label = meta.label ? t(meta.label) : row.key
                     return (
-                      <article key={row.key} aria-label={label} className="flex flex-col gap-3 p-4">
+                      <article
+                        key={row.key}
+                        aria-label={label}
+                        className="flex min-w-0 flex-col gap-2.5 rounded-lg border border-border p-3"
+                      >
                         <div className="flex items-start gap-3">
                           <div className="min-w-0 flex-1">
                             <h3 className="text-sm font-medium break-words">{label}</h3>

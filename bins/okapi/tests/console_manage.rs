@@ -257,6 +257,9 @@ async fn admin_list_surface_covers_every_resource() {
     }
 
     // ---- 系统设置：敏感键脱敏 ----
+    // 注：这只是一个"名字看起来像密钥"的夹具，用来验脱敏；生产的收款配置是单个
+    // payment_epay 对象，不存在 epay_key_* 这种键。用完必须删——settings 是站点级表，
+    // 每跑一轮就多一条，系统设置页会被几十条一模一样的"支付凭证"塞满。
     let secret_key = format!("epay_key_{}", env.suffix);
     sqlx::query!(
         r#"INSERT INTO settings (key, value) VALUES ($1, $2)
@@ -299,6 +302,12 @@ async fn admin_list_surface_covers_every_resource() {
         let (status, _) = get(env.console, path, &env.plain_token).await;
         assert_eq!(status, 403, "{path} 必须拒绝普通用户");
     }
+    // 收尾：删掉本用例造的敏感键夹具
+    sqlx::query!(r#"DELETE FROM settings WHERE key = $1"#, secret_key)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
 }
 
 #[tokio::test]
@@ -569,7 +578,7 @@ async fn stats_surface_exposes_clickhouse_views() {
     if env.ch_enabled {
         let (_, body) = get(env.console, "/admin/stats/overview", t).await;
         // 站点 KPI 必备字段：毛利与活跃用户是 margin 端点未覆盖的增量价值
-        for field in ["requests", "amount_micro", "margin_micro", "active_users"] {
+        for field in ["requests", "amount_micro", "active_users"] {
             assert!(
                 body["window"][field].is_i64(),
                 "overview.window 缺字段 {field}：{body}"
@@ -578,6 +587,29 @@ async fn stats_surface_exposes_clickhouse_views() {
                 body["today"][field].is_i64(),
                 "overview.today 缺字段 {field}"
             );
+        }
+        // margin_micro 按契约只在成本覆盖率 100% 时给值，否则显式 null（见
+        // stats::apply_cost_coverage）。断言"必须是数字"会把本用例绑死在
+        // 空 ClickHouse 上：长期 dev 库里攒着成本特性之前的历史行，覆盖率
+        // 永远回不到 100%，CI 绿而本地必红。这里改为校验那条契约本身。
+        for scope in ["window", "today"] {
+            let row = &body[scope];
+            let coverage_full = row["cost_coverage_bp"].as_i64() == Some(10_000);
+            assert!(
+                row.get("margin_micro").is_some(),
+                "overview.{scope} 缺字段 margin_micro：{body}"
+            );
+            if coverage_full {
+                assert!(
+                    row["margin_micro"].is_i64(),
+                    "覆盖率 100% 时 margin_micro 必须有值：{body}"
+                );
+            } else {
+                assert!(
+                    row["margin_micro"].is_null(),
+                    "覆盖率不足时 margin_micro 必须是 null 而非估算值：{body}"
+                );
+            }
         }
         assert_eq!(body["days"], 7, "缺省窗口 7 天");
         // 窗口参数钳制：超大 days 收敛到 90
