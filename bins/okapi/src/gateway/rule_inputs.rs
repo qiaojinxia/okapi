@@ -4,7 +4,7 @@
 //! 热路径不产生任何额外 Redis 往返、不包装响应体，与 service_tier 的 `has_tiers`
 //! 门控同构：
 //! - volume → Redis `tok:{uid}:<yyyymm>`（docs/database.md §2.1）
-//! - surge  → 本进程在途请求数 vs `settings.surge_inflight_threshold`
+//! - surge  → **集群**在途请求数 vs `settings.surge_inflight_threshold`
 
 use super::state::AppState;
 use axum::body::Body;
@@ -64,6 +64,12 @@ pub async fn record_tokens(state: &AppState, user_id: i64, tokens: u64, amount_m
     }
 }
 
+/// surge 判定用**集群**在途量，不是本进程的。
+///
+/// 此前读的是进程内 `AtomicI64`：阈值配 100，单 pod 部署时是"集群 100 并发触发"，
+/// 扩到 10 个 pod 就变成"要 1000 并发才触发"，而且只对恰好落在撞线那个 pod 上的请求加价。
+/// surge 是**计价**规则不是限流——同一份配置在不同副本数下收不同的钱、同一时刻不同用户
+/// 按运气收不同的价，账单没法解释。改读 Redis 量表后阈值语义与副本数无关。
 async fn surge_active(state: &AppState) -> bool {
     let threshold = state
         .setting_cached("surge_inflight_threshold")
@@ -72,7 +78,10 @@ async fn surge_active(state: &AppState) -> bool {
         .as_ref()
         .and_then(serde_json::Value::as_i64)
         .filter(|v| *v > 0);
-    threshold.is_some_and(|t| state.in_flight.load(Ordering::Relaxed) >= t)
+    let Some(threshold) = threshold else {
+        return false;
+    };
+    state.sched.inflight_total().await >= threshold
 }
 
 /// 在途计数中间件：价簿无 surge 规则时直接放行（不计数、不包装响应体）。
@@ -81,14 +90,30 @@ pub async fn track_in_flight(State(state): State<AppState>, req: Request, next: 
         return next.run(req).await;
     }
     let guard = InFlightGuard::enter(Arc::clone(&state.in_flight));
+    report_inflight(&state).await;
     let resp = next.run(req).await;
     // 流式响应在 handler 返回后才真正占用资源，计数必须活到响应体读完
     let (parts, body) = resp.into_parts();
     let guarded = GuardedBody {
         inner: Box::pin(body.into_data_stream()),
         _guard: guard,
+        state,
+        done: false,
     };
     Response::from_parts(parts, Body::from_stream(guarded))
+}
+
+/// 上报节流：每秒至多一次，但"降到 0"一定立即上报——否则实例空下来之后，
+/// 量表里还挂着它最后那个非零读数直到过期，surge 会凭空多加价好几秒。
+async fn report_inflight(state: &AppState) {
+    let count = state.in_flight.load(Ordering::Relaxed);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let last = state.surge_reported_at.load(Ordering::Relaxed);
+    if count > 0 && now_ms.saturating_sub(last) < 1000 {
+        return;
+    }
+    state.surge_reported_at.store(now_ms, Ordering::Relaxed);
+    state.sched.inflight_report(&state.node, count).await;
 }
 
 struct InFlightGuard(Arc<AtomicI64>);
@@ -110,12 +135,22 @@ impl Drop for InFlightGuard {
 struct GuardedBody {
     inner: Pin<Box<axum::body::BodyDataStream>>,
     _guard: InFlightGuard,
+    state: AppState,
+    done: bool,
 }
 
 impl Stream for GuardedBody {
     type Item = Result<Bytes, axum::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
+        let polled = self.inner.as_mut().poll_next(cx);
+        // 流结束（正常读完或客户端中断）时补一次上报：Drop 里 await 不了，
+        // 只能在这最后一次 poll 里把"我这边空下来了"告诉量表
+        if matches!(polled, Poll::Ready(None)) && !self.done {
+            self.done = true;
+            let state = self.state.clone();
+            tokio::spawn(async move { report_inflight(&state).await });
+        }
+        polled
     }
 }

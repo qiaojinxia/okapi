@@ -10,6 +10,17 @@ struct TestEnv {
     addr: SocketAddr,
 }
 
+/// 每次调用给一个独一无二的来源 IP。
+///
+/// login / register / totp / redeem 都过 `critical_rate_guard`（每 IP 5～10 次/分，对齐
+/// new-api rc.24）。此前测试既不带转发头、服务器也没挂 connect info，识别不到来源 IP 于是
+/// 限流整段跳过；现在信任闸以 socket 对端兜底（§14.2），同一条环回地址上的用例会互相把
+/// 对方的配额吃掉。逐请求换 IP——真正验限流的用例自己固定同一个 IP。
+fn uniq_ip() -> String {
+    let h = Uuid::new_v4().simple().to_string();
+    format!("2001:db8:{}:{}::1", &h[0..4], &h[4..8])
+}
+
 async fn setup() -> TestEnv {
     setup_with_policy(None).await
 }
@@ -38,7 +49,13 @@ async fn setup_with_policy(policy: Option<Value>) -> TestEnv {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // 按生产形态挂 connect info：转发头信任闸要拿 socket 对端做锚点（§14.2）
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     TestEnv { addr }
 }
@@ -79,6 +96,7 @@ async fn register_login_key_totp_full_flow() {
     // 注册
     let resp = client
         .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "username": format!("web-{suffix}"), "password": "hunter2-strong"}))
         .send()
         .await
@@ -88,6 +106,7 @@ async fn register_login_key_totp_full_flow() {
     // 重复邮箱 409
     let dup = client
         .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "username": format!("web2-{suffix}"), "password": "hunter2-strong"}))
         .send()
         .await
@@ -97,6 +116,7 @@ async fn register_login_key_totp_full_flow() {
     // 错密码 401
     let bad = client
         .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "wrong-password"}))
         .send()
         .await
@@ -106,6 +126,7 @@ async fn register_login_key_totp_full_flow() {
     // 登录 → cookie
     let login = client
         .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "hunter2-strong"}))
         .send()
         .await
@@ -136,6 +157,7 @@ async fn register_login_key_totp_full_flow() {
     // TOTP 两段式
     let enroll: Value = client
         .post(format!("http://{}/auth/totp/enroll", env.addr))
+        .header("x-real-ip", uniq_ip())
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .await
@@ -158,6 +180,7 @@ async fn register_login_key_totp_full_flow() {
     // 错码拒绝
     let bad_code = client
         .post(format!("http://{}/auth/totp/confirm", env.addr))
+        .header("x-real-ip", uniq_ip())
         .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({"pending": pending, "code": "000000"}))
         .send()
@@ -167,6 +190,7 @@ async fn register_login_key_totp_full_flow() {
 
     let confirm = client
         .post(format!("http://{}/auth/totp/confirm", env.addr))
+        .header("x-real-ip", uniq_ip())
         .header(reqwest::header::COOKIE, &cookie)
         .json(&json!({"pending": pending, "code": totp_now(&secret)}))
         .send()
@@ -177,6 +201,7 @@ async fn register_login_key_totp_full_flow() {
     // 启用后：无码登录 401 totp_required；带码成功
     let no_code = client
         .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "hunter2-strong"}))
         .send()
         .await
@@ -187,6 +212,7 @@ async fn register_login_key_totp_full_flow() {
 
     let with_code = client
         .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "hunter2-strong",
             "totp_code": totp_now(&secret)}))
         .send()
@@ -276,6 +302,7 @@ async fn critical_rate_limit_guards_login() {
     // 无 IP（测试裸 serve 无 ConnectInfo、无 CDN 头）：放行
     let no_ip = client
         .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&bad_login)
         .send()
         .await
@@ -321,12 +348,14 @@ async fn self_select_group_on_own_keys() {
     let email = format!("g-{suffix}@ok.test");
     client
         .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "username": format!("g-{suffix}"), "password": "hunter2-strong"}))
         .send()
         .await
         .unwrap();
     let login = client
         .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "hunter2-strong"}))
         .send()
         .await

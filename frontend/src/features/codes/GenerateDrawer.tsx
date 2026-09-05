@@ -7,6 +7,7 @@ import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -22,7 +23,6 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
     max_per_ip: '',
     expires_at: '',
   })
-  const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<CreateResp | null>(null)
   const [copied, setCopied] = useState(false)
 
@@ -51,14 +51,13 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
         },
       }),
     onSuccess: (data) => {
-      setError(null)
       setCopied(false)
       setResult(data)
       onDone()
     },
     onError: (err) => {
       setResult(null)
-      setError(describeError(err))
+      toast.error(describeError(err))
     },
   })
 
@@ -75,7 +74,6 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
       description={t('admin:redeemHint')}
       footer={
         <>
-          {error !== null && <span className="mr-auto text-xs text-destructive">{error}</span>}
           <Button variant="ghost" onClick={onClose}>
             {result === null ? t('common:cancel') : t('common:close')}
           </Button>

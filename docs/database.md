@@ -176,7 +176,7 @@ CREATE TABLE api_keys (
     rpm_limit         INT, tpm_limit INT, rpd_limit INT,                -- 覆盖用户级限速
     daily_token_limit BIGINT,                         -- 日 token 上限（#6458/#5252）
     max_concurrency   INT,
-    ip_allowlist      JSONB,
+    ip_allowlist      JSONB,                         -- 来源 IP 白名单（地址 / CIDR 数组；null = 不限）。只约束 /v1 数据面，门户登录不受限（§11.17）
     expires_at        TIMESTAMPTZ,
     last_used_at      TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -203,7 +203,7 @@ CREATE TABLE channels (
     retry_policy         JSONB,                       -- 覆盖全局重试矩阵，null=默认
     settings             JSONB NOT NULL DEFAULT '{}', -- 超时/代理/自定义头/透传路径白名单
     owner_id             BIGINT REFERENCES users(id), -- 渠道属主（#6267，own/all 权限范围）
-    upstream_unit_cost   JSONB,                       -- 渠道成本参考价；relative_cost_milli 整数千分比 = 调度层内权重除数（缺省 1000）
+    upstream_unit_cost   JSONB,                       -- relative_cost_milli 整数千分比（缺省 1000 = 官方标价）：调度层内权重除数，也是毛利核算的成本系数（§11.18）
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at           TIMESTAMPTZ
@@ -358,7 +358,7 @@ CREATE TABLE billing_records (                        -- 请求级明细（分�
     amount_micro          BIGINT NOT NULL DEFAULT 0,  -- 实付
     original_amount_micro BIGINT NOT NULL DEFAULT 0,  -- 标价（无规则/个人折扣）
     discount_micro        BIGINT NOT NULL DEFAULT 0,  -- 原价 − 实付（账单「已节省」/让利报表）
-    upstream_cost_micro   BIGINT,                     -- 渠道成本（毛利分析）
+    upstream_cost_micro   BIGINT,                     -- 上游成本 = 官方价（乘分组倍率前）× 渠道 relative_cost_milli / 1000；结算时由 settle_write 折算；失败 / 退款 NULL（§11.18）
     pricing_epoch    BIGINT,
     pricing_snapshot JSONB,                           -- 形状见 DESIGN §3.4
     latency_ms       INT, ttft_ms INT,
@@ -493,7 +493,7 @@ CREATE TABLE audit_logs (                             -- 管理操作审计（�
     PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
-CREATE TABLE settings (                               -- 全局 KV（site_notice / model_rpm_limits / 内容审计三态 ...）
+CREATE TABLE settings (                               -- 全局 KV（site_notice / registration_policy / model_rpm_limits / 内容审计三态 ...）
     key        VARCHAR(128) PRIMARY KEY,
     value      JSONB NOT NULL,
     updated_by BIGINT,
@@ -626,6 +626,7 @@ CREATE TABLE request_log_raw (
     node            LowCardinality(String),   -- 处理节点（gateway 实例名，对齐 quota_data.node_name）
     -- 用量
     prompt_tokens     UInt32, cached_tokens UInt32,
+    cache_write_tokens Nullable(UInt32) DEFAULT NULL, -- 未采集历史为 NULL；已采集且未写缓存为 0
     completion_tokens UInt32, reasoning_tokens UInt32,
     media_units       String,                 -- JSON
     -- 金额（售价/原价/优惠/成本 四列 = 毛利与让利分析，new-api 均缺失）
@@ -646,7 +647,7 @@ ORDER BY (user_id, ts)
 TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1）
 ```
 
-### 3.2 MV 矩阵（AggregatingMergeTree ×9）
+### 3.2 MV 矩阵（AggregatingMergeTree）
 
 | MV | 主键 | 服务场景 |
 | --- | --- | --- |
@@ -659,9 +660,14 @@ TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1
 | mv_error_hour | (error_code, hour, channel_id, model) | 错误码分布（IMPLEMENTATION §11.12）。MV 内 `WHERE is_error = 1` 插入期过滤，行数 ∝ 错误码×小时×渠道×模型，与总请求量无关 |
 | mv_client_day | (client_type, day) | 客户端类型分布（#5277）。含 `uniqState(user_id)`——"多少用户在用 Claude Code"比请求数更能说明生态渗透 |
 | mv_key_model_day | (user_id, api_key_id, model, day) | 用户门户看板单一数据源（IMPLEMENTATION §11.12）：token 四轴（prompt/cached/completion/reasoning）+ amount/discount/errors。主键前缀使 key 视角 `(user_id, api_key_id)` 与 user 视角 `(user_id)` 都是前缀扫描；行数 ∝ 活跃 key × 当日模型数 |
-| mv_cube_hour | (hour, user_id, api_key_id, group_code, model, channel_id) | **分析立方体**（IMPLEMENTATION §11.13）：管理端"带任意维度过滤的趋势 / 拆分 / 流向"三个端点的唯一数据源。上面各单维 MV 各答一个固定问题；这张答"过滤到某用户/某渠道/某模型之后，按另一个维度怎么分、随时间怎么走"（new-api #7150 与 Sub2API `TrendParams` 的诉求；new-api 的 quota_data 八维表同一思路）。列：requests、token 四轴、amount/discount/upstream_cost、errors、latency_sum、ttft_sum/ttft_samples（avg = sum/n；**不放 quantilesState**——每行一个 sketch 在这种基数下代价过高，分位数仍走 mv_model_hour / mv_channel_5min）。行数 ∝ 每小时出现过的五元组合数（上界为请求数，实际压缩极大）；主键以 hour 开头让时间窗裁剪先生效。provider 是 channel_id 的函数，查询时由 PG 回填，不进键 |
+| mv_cache_write_day | (user_id, api_key_id, model, day) | 缓存写入附加聚合：`write_tokens` 求和状态与 `known_requests` 已知样本计数。门户按日／模型与用量主表对齐，只有已知样本数等于请求数才返回缓存写入总数，否则为 null。 |
+| mv_cube_hour | (hour, user_id, api_key_id, group_code, model, channel_id) | **分析立方体**（IMPLEMENTATION §11.13）：管理端"带任意维度过滤的趋势 / 拆分 / 流向"三个端点的历史基础聚合，与新增 `mv_analysis_hour` 的覆盖残差合并。上面各单维 MV 各答一个固定问题；这张答"过滤到某用户/某渠道/某模型之后，按另一个维度怎么分、随时间怎么走"（new-api #7150 与 Sub2API `TrendParams` 的诉求；new-api 的 quota_data 八维表同一思路）。列：requests、token 四轴、amount/discount/upstream_cost、errors、latency_sum、ttft_sum/ttft_samples（avg = sum/n；**不放 quantilesState**——每行一个 sketch 在这种基数下代价过高，分位数仍走 mv_model_hour / mv_channel_5min）。行数 ∝ 每小时出现过的五元组合数（上界为请求数，实际压缩极大）；主键以 hour 开头让时间窗裁剪先生效。provider 是 channel_id 的函数，查询时由 PG 回填，不进键 |
 
 **MV 只向前聚合**：`ensure_schema` 的 `CREATE ... IF NOT EXISTS` 对已存在的库只新建缺失的 MV，且 MV 只捕获创建之后写入 raw 的行。新增 MV 后若需历史数据，手动回填一次即可（AggregatingMergeTree 接受 `-State` 插入）：
+
+高级分析升级同样由 `ensure_schema` 添加 raw 字段并创建 `mv_analysis_hour`：请求模型、上游模型、双向规范化端点、调用类型、计价方式、成本已知标记和实际入库时间。新 MV 在原六个键上增加这些维度及 node/stream，保存基础度量、缓存写入已知样本、成本已知样本及对应收入/成本、事件/入库最大时间。管理分析查询将新聚合与旧 `mv_cube_hour` 减去已覆盖部分的残差合并，残差新维度为空、stream=2（未知）；不回填、不双算。已有的非零历史成本仍保留在上游成本合计中，但缺少已知标记的历史记录不能被用于全量毛利断言。先启动新 worker 应用幂等 schema，再切换新控制台；新网关产生的新字段随后自然入库。
+
+缓存写入升级由 `ensure_schema` 先执行 `ADD COLUMN IF NOT EXISTS`，再建 `mv_cache_write_day`。先升级／启动 worker 完成 schema 初始化，再让新控制台读取新统计字段。新网关的结算 outbox 携带 `cache_write_tokens`，旧 outbox 缺字段时 chsink 写 `NULL`。旧链路未采集的缓存写入无法补算，不能用 0 或已知部分和覆盖整段历史。门户的耗时与 TTFT 附加指标读取已有 `mv_cube_hour`，也按样本覆盖完整性返回值或 `null`。完整口径及差异见 [图表对照](chart-parity.md)。
 
 ```sql
 INSERT INTO mv_key_model_day

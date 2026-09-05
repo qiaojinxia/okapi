@@ -7,6 +7,7 @@ import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { ROUTING_STRATEGIES, STRATEGY_HINT, STRATEGY_LABEL } from '@/features/pools/types'
 import type { PoolRow } from '@/features/pools/types'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -23,7 +24,6 @@ export function PoolDrawer({
   onDone: () => void
 }) {
   const { t } = useTranslation()
-  const [msg, setMsg] = useState<string | null>(null)
   const [code, setCode] = useState(pool?.pool_code ?? '')
   const [description, setDescription] = useState(pool?.description ?? '')
   const [strategy, setStrategy] = useState<Strategy>(
@@ -55,7 +55,7 @@ export function PoolDrawer({
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (
@@ -66,7 +66,6 @@ export function PoolDrawer({
       description={t('admin:poolDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>

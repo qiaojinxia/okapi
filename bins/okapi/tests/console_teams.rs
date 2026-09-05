@@ -10,6 +10,17 @@ use serde_json::{Value, json};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+/// 每次调用给一个独一无二的来源 IP。
+///
+/// login / register / totp / redeem 都过 `critical_rate_guard`（每 IP 5～10 次/分，对齐
+/// new-api rc.24）。此前测试既不带转发头、服务器也没挂 connect info，识别不到来源 IP 于是
+/// 限流整段跳过；现在信任闸以 socket 对端兜底（§14.2），同一条环回地址上的用例会互相把
+/// 对方的配额吃掉。逐请求换 IP——真正验限流的用例自己固定同一个 IP。
+fn uniq_ip() -> String {
+    let h = Uuid::new_v4().simple().to_string();
+    format!("2001:db8:{}:{}::1", &h[0..4], &h[4..8])
+}
+
 async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
     axum::Json(json!({
         "id":"cmpl","object":"chat.completion",
@@ -91,6 +102,7 @@ async fn register_login(env: &TestEnv, client: &reqwest::Client) -> (i64, String
     let email = format!("tm-{suffix}@ok.test");
     let reg: Value = client
         .post(format!("http://{}/auth/register", env.console))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "username": format!("tm-{suffix}"),
             "password": "hunter2-strong"}))
         .send()
@@ -102,6 +114,7 @@ async fn register_login(env: &TestEnv, client: &reqwest::Client) -> (i64, String
     let user_id = reg["user_id"].as_i64().unwrap();
     let login = client
         .post(format!("http://{}/auth/login", env.console))
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "hunter2-strong"}))
         .send()
         .await

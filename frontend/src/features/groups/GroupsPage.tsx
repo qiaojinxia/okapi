@@ -1,4 +1,4 @@
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Layers, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -49,8 +49,10 @@ export function GroupsPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
+        icon={Layers}
         title={t('admin:groupsTitle')}
         description={t('admin:groupsDesc')}
+        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />
@@ -65,7 +67,15 @@ export function GroupsPage() {
       ) : groups.isPending ? (
         <TableSkeleton rows={6} cols={6} />
       ) : rows.length === 0 ? (
-        <EmptyState />
+        <EmptyState
+          hint={t('admin:groupsDesc')}
+          action={
+            <Button onClick={() => setDrawer({})}>
+              <Plus className="h-4 w-4" />
+              {t('admin:groupCreate')}
+            </Button>
+          }
+        />
       ) : (
         <Table>
           <THead>
@@ -73,9 +83,9 @@ export function GroupsPage() {
               <Th>{t('admin:groupCode')}</Th>
               <Th>{t('admin:groupRatio')}</Th>
               <Th>{t('admin:groupDesc')}</Th>
-              <Th>{t('admin:groupUsers')}</Th>
+              <Th numeric>{t('admin:groupUsers')}</Th>
               <Th>{t('admin:groupPool')}</Th>
-              <Th>{t('admin:groupChannels')}</Th>
+              <Th numeric>{t('admin:groupChannels')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -99,7 +109,7 @@ export function GroupsPage() {
                 <Td className="max-w-64 truncate text-xs text-muted-foreground">
                   {g.description ?? '—'}
                 </Td>
-                <Td>{g.user_count}</Td>
+                <Td numeric>{g.user_count}</Td>
                 <Td className="font-mono text-xs">{g.pool_code}</Td>
                 <Td>
                   {/* 池里零渠道 = 这个分组的用户什么都打不到，与"未定价"同类的配了一半 */}

@@ -1,5 +1,5 @@
 import { Plus, Trash2 } from 'lucide-react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
@@ -27,6 +27,7 @@ export interface NotifyChannel {
 /// 事件名拼错不会报错，只是永远收不到通知。改成每路一行的结构化编辑。
 export function NotifyCard() {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const [rows, setRows] = useState<NotifyChannel[] | null>(null)
 
   const current = useQuery({
@@ -47,7 +48,9 @@ export function NotifyCard() {
       }),
     onSuccess: () => {
       toast.success(t('admin:saved'))
+      setRows(null)
       void current.refetch()
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
     },
     onError: (err) => toast.error(describeError(err)),
   })

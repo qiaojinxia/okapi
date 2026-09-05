@@ -102,18 +102,33 @@ export function ChannelsPage() {
     onError: fail,
   })
 
-  const probeOne = (id: number) =>
-    apiFetch<{ ok: boolean; latency_ms?: number; error_code?: string }>(
-      `/admin/channels/${id}/test`,
-      { method: 'POST', body: {} },
-    )
+  const probeOne = (id: number, model?: string) =>
+    apiFetch<{
+      ok: boolean
+      latency_ms?: number
+      error_code?: string
+      http_status?: number
+      scope?: string
+      upstream_body?: string
+    }>(`/admin/channels/${id}/test`, { method: 'POST', body: model === undefined ? {} : { model } })
   const test = useMutation({
     mutationFn: (c: ChannelRow) => {
       setTestingId(c.id)
-      return probeOne(c.id)
+      // 单条测活直接验第一个模型：只探 /models 只能说明"凭证认、网络通"，
+      // 聚合型上游按套餐授权模型，那种 ok 会对一个实际 403 的模型报成功
+      return probeOne(c.id, c.models[0])
     },
     onSuccess: (r, c) => {
       if (r.ok) toast.success(c.name, t('admin:testOk', { ms: r.latency_ms ?? 0 }))
+      else if (r.scope === 'model')
+        toast.error(
+          c.name,
+          t('admin:testModelFail', {
+            model: c.models[0] ?? '',
+            code: r.error_code ?? String(r.http_status ?? ''),
+            detail: (r.upstream_body ?? '').slice(0, 120),
+          }),
+        )
       else toast.error(c.name, t('admin:testFail', { code: r.error_code ?? 'unknown' }))
       // 结果已在服务端留痕，刷新列表让"最近测试"列跟上
       invalidate()
@@ -303,7 +318,7 @@ export function ChannelsPage() {
           />
         )
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th className="w-10">

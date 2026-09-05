@@ -171,10 +171,11 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "channel_test",
-        description: "Probe channel reachability/latency (models endpoint per protocol).",
+        description: "Probe a channel. Without `model`: credential + reachability only. With `model`: sends a real 1-token completion to verify that specific model is callable (aggregator upstreams authorize per model, so a credential probe alone can report ok for a model that 403s).",
         schema: || {
             json!({"type": "object", "required": ["channel_id"], "properties": {
-                "channel_id": {"type": "integer"}}})
+                "channel_id": {"type": "integer"},
+                "model": {"type": "string"}}})
         },
         permission: Some(permissions::CHANNEL_WRITE),
         write: true,
@@ -806,7 +807,13 @@ async fn mcp_channel_test(
         .get("channel_id")
         .and_then(Value::as_i64)
         .ok_or_else(|| AppError::bad_request().with_param("channel_id"))?;
-    let result = super::admin::probe_channel(state, channel_id).await?;
+    // 可选 model：给了就真验这个模型调不调得通，不给只验凭证与连通性
+    let model = args
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    let result = super::admin::probe_channel(state, channel_id, model).await?;
     mcp_audit(
         state,
         key,

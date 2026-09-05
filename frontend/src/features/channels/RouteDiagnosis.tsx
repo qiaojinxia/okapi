@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -92,7 +93,6 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
   const [group, setGroup] = useState('')
   const [pool, setPool] = useState('')
   const [report, setReport] = useState<DiagReport | null>(null)
-  const [msg, setMsg] = useState<string | null>(null)
 
   const groups = useQuery({
     queryKey: qk.adminGroups,
@@ -111,10 +111,9 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
       return apiFetch<DiagReport>(`/admin/diagnose/route?${params.toString()}`)
     },
     onSuccess: (r) => {
-      setMsg(null)
       setReport(r)
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const reasonText = (reason: string | null) => {
@@ -131,7 +130,6 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
       description={t('admin:diagDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:close')}
           </Button>

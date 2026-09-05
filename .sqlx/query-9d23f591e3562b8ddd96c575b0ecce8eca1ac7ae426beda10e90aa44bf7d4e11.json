@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT user_id, api_key_id, group_code, model_name, channel_id, channel_key_id,\n               amount_micro, original_amount_micro, discount_micro, is_stream, node\n        FROM billing_records\n        WHERE request_id = $1 AND status = 20\n        FOR UPDATE\n        ",
+  "query": "\n        SELECT user_id, api_key_id, group_code, model_name, channel_id, channel_key_id,\n               amount_micro, original_amount_micro, discount_micro, upstream_cost_micro,\n               is_stream, node\n        FROM billing_records\n        WHERE request_id = $1 AND status = 20\n        FOR UPDATE\n        ",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,17 @@
       },
       {
         "ordinal": 9,
+        "name": "upstream_cost_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "upstream_cost_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
         "name": "is_stream",
         "type_info": "Bool",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "node",
         "type_info": "Varchar",
         "origin": {
@@ -140,9 +151,10 @@
       false,
       false,
       false,
+      true,
       false,
       true
     ]
   },
-  "hash": "b4f5099bbcf9b2fe4a0c41b82922b75e3eaa98fb2544da9c2c840ae4e36087ba"
+  "hash": "9d23f591e3562b8ddd96c575b0ecce8eca1ac7ae426beda10e90aa44bf7d4e11"
 }

@@ -674,7 +674,7 @@ pub async fn keys(
     let rows = sqlx::query!(
         r#"
         SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,
-               daily_token_limit, max_concurrency, model_allowlist, group_override,
+               daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,
                expires_at, last_used_at, created_at
         FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id
         "#,
@@ -715,6 +715,7 @@ pub async fn keys(
                 "max_concurrency": r.max_concurrency,
                 "model_allowlist": r.model_allowlist,
                 "group_override": r.group_override,
+                "ip_allowlist": r.ip_allowlist,
                 "expires_at": r.expires_at,
                 "last_used_at": r.last_used_at,
                 "created_at": r.created_at,
@@ -744,6 +745,29 @@ pub struct PatchKeyReq {
     /// 档位：字符串 = 选定分组（须在 /api/me/groups 可选集合内）；null = 跟随用户分组。
     #[serde(default, deserialize_with = "super::double_option")]
     pub group_code: Option<Option<String>>,
+    /// IP 白名单：地址或 CIDR 数组；null / 空数组 = 解除限制。每条须可解析，否则 400——
+    /// 一条拼错的白名单会把 key 锁死而毫无提示。
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub ip_allowlist: Option<Option<Vec<String>>>,
+}
+
+/// IP 白名单归一化：去空白、去重、逐条校验；空数组等价于"不限"（存 null）。
+pub(super) fn normalize_ip_allowlist(list: Option<Vec<String>>) -> Result<Option<Value>, AppError> {
+    let Some(list) = list else {
+        return Ok(None);
+    };
+    let mut out: Vec<String> = Vec::new();
+    for raw in list {
+        let entry = raw.trim().to_owned();
+        if entry.is_empty() || out.contains(&entry) {
+            continue;
+        }
+        if !okapi_store::netmatch::is_valid_entry(&entry) {
+            return Err(AppError::bad_request().with_param(format!("ip_allowlist:{entry}")));
+        }
+        out.push(entry);
+    }
+    Ok((!out.is_empty()).then(|| json!(out)))
 }
 
 /// 模型白名单归一化：空数组等价于"不限"，避免落成一把谁也调不通的死 key。
@@ -781,12 +805,17 @@ pub async fn patch_key(
         Some(None) => Some(None),
         None => None,
     };
+    let ip_allowlist = match req.ip_allowlist {
+        Some(list) => Some(normalize_ip_allowlist(list)?),
+        None => None,
+    };
     let patch = okapi_store::admin::ApiKeyPatch {
         name: req.name.map(|n| n.trim().to_owned()),
         status: req.status,
         expires_at: req.expires_at,
         model_allowlist: req.model_allowlist.map(normalize_allowlist),
         group_override,
+        ip_allowlist,
         ..Default::default()
     };
     let touched =

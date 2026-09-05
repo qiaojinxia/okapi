@@ -5,8 +5,8 @@ export interface OverviewBucket {
   original_micro: number
   discount_micro: number
   upstream_cost_micro: number
-  margin_micro: number
-  margin_rate_bp: number
+  margin_micro: number | null
+  margin_rate_bp: number | null
   errors: number
   error_rate_bp: number
   active_users: number
@@ -28,6 +28,7 @@ export interface MarginDay {
 }
 
 export interface MarginResp {
+  window?: { start_date: string; end_date: string; timezone: string }
   days: number
   data: MarginDay[]
 }

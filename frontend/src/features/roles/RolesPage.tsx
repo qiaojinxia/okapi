@@ -1,4 +1,4 @@
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Shield, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -57,8 +57,10 @@ export function RolesPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
+        icon={Shield}
         title={t('admin:rolesTitle')}
         description={t('admin:roleHint')}
+        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
@@ -73,7 +75,15 @@ export function RolesPage() {
       ) : roles.isPending ? (
         <TableSkeleton rows={6} cols={5} />
       ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:rolesEmptyHint')} />
+        <EmptyState
+          hint={t('admin:rolesEmptyHint')}
+          action={
+            <Button onClick={() => setDrawer('create')}>
+              <Plus className="h-4 w-4" />
+              {t('admin:roleCreate')}
+            </Button>
+          }
+        />
       ) : (
         <Table>
           <THead>

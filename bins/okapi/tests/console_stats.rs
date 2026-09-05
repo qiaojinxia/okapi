@@ -186,6 +186,164 @@ async fn get(env: &Env, path: &str, token: &str) -> (u16, Value) {
     (status, body)
 }
 
+/// 个人年度活动覆盖闰日与年末，默认当前 key，全账户也不能越过 user 边界。
+#[tokio::test]
+async fn personal_activity_covers_calendar_year_and_isolates_owners() {
+    let env = setup().await;
+    let path = "/api/me/stats/activity?year=2024";
+    assert_eq!(get(&env, path, "invalid-key").await.0, 401);
+    let Some(ch) = env.state.ch.as_ref() else {
+        assert_eq!(get(&env, path, &env.user_token).await.0, 501);
+        return;
+    };
+    ch.ensure_schema().await.unwrap();
+    let (_, me) = get(&env, "/api/me", &env.user_token).await;
+    let key_id = me["key_id"].as_i64().unwrap();
+    // 直接播长期 MV：验证的是历史聚合，不依赖 raw TTL 或 outbox 到达时机。
+    for (user, key, day) in [
+        (env.user_id, key_id, "2024-02-28"),
+        (env.user_id, key_id, "2024-02-29"),
+        (env.user_id, key_id, "2024-12-31"),
+        (env.user_id, key_id, "2025-01-01"),
+        (env.user_id, 0, "2024-02-29"),
+        (0, key_id, "2024-02-29"),
+    ] {
+        ch.execute(&format!(
+            "INSERT INTO mv_key_model_day \
+             (user_id, api_key_id, model, day, requests, prompt_tokens, cached_tokens, \
+              completion_tokens, reasoning_tokens, amount, discount, errors) \
+             SELECT toUInt64({user}), toUInt64({key}), '{}', toDate('{day}'), countState(), \
+              sumState(toUInt64(1000)), sumState(toUInt64(400)), sumState(toUInt64(500)), \
+              sumState(toUInt64(200)), sumState(toInt64(12500)), sumState(toInt64(0)), sumState(toUInt64(0)) \
+             FROM numbers(1)", env.model
+        )).await.unwrap();
+    }
+    let (status, activity) = get(&env, path, &env.user_token).await;
+    assert_eq!(status, 200, "{activity}");
+    assert_eq!(activity["year"], 2024);
+    assert_eq!(activity["first_year"], 2024);
+    assert_eq!(activity["scope"], "key");
+    assert!(activity["timezone"].as_str().is_some_and(|s| !s.is_empty()));
+    let rows = activity["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 3, "年末应包含，下年元旦应排除");
+    let leap = rows.iter().find(|row| row["day"] == "2024-02-29").unwrap();
+    assert_eq!(
+        leap["requests"], 1,
+        "默认 key 范围不能混入其他 key 或其他用户"
+    );
+    assert_eq!(leap["prompt_tokens"], 1000);
+    assert_eq!(leap["completion_tokens"], 500);
+    assert_eq!(leap["amount_micro"], 12500);
+    let (status, account) = get(&env, &format!("{path}&scope=user"), &env.user_token).await;
+    assert_eq!(status, 200);
+    let leap = account["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["day"] == "2024-02-29")
+        .unwrap();
+    assert_eq!(leap["requests"], 2, "全账户应合并两个 key，仍排除其他用户");
+    assert_eq!(
+        get(&env, "/api/me/stats/activity?year=65535", &env.user_token)
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        get(
+            &env,
+            "/api/me/stats/activity?scope=invalid",
+            &env.user_token
+        )
+        .await
+        .0,
+        400
+    );
+    let (status, empty) = get(&env, "/api/me/stats/activity?year=2023", &env.user_token).await;
+    assert_eq!(status, 200);
+    assert!(empty["data"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
+    let env = setup().await;
+    let Some(ch) = env.state.ch.as_ref() else {
+        return;
+    };
+    ch.ensure_schema().await.unwrap();
+    let (_, me) = get(&env, "/api/me", &env.user_token).await;
+    let key_id = me["key_id"].as_i64().unwrap();
+    for writes in [20, 0] {
+        let mut row = payload(&env, 1000, 250, 100, false);
+        row["api_key_id"] = json!(key_id);
+        row["cache_write_tokens"] = json!(writes);
+        sqlx::query("INSERT INTO billing_outbox (topic, payload) VALUES ('request_log', $1)")
+            .bind(row)
+            .execute(&env.pg)
+            .await
+            .unwrap();
+    }
+    drain(&env).await;
+    let path = "/api/me/stats/breakdown?days=7";
+    let (status, report) = get(&env, path, &env.user_token).await;
+    assert_eq!(status, 200, "{report}");
+    assert_eq!(report["days"], 7);
+    let start = chrono::NaiveDate::parse_from_str(
+        report["window"]["start_date"].as_str().unwrap(),
+        "%Y-%m-%d",
+    )
+    .unwrap();
+    let end = chrono::NaiveDate::parse_from_str(
+        report["window"]["end_date"].as_str().unwrap(),
+        "%Y-%m-%d",
+    )
+    .unwrap();
+    assert_eq!((end - start).num_days(), 6, "7 天含首尾，不应变成 8 天");
+    assert_eq!(report["total"]["cache_write_tokens"], 20);
+    assert_eq!(report["total"]["tokens"], 600, "缓存写入仍含在输入中");
+    assert_eq!(report["total"]["original_micro"], 2500);
+    assert_eq!(report["total"]["avg_latency_ms"], 1000);
+    assert_eq!(report["total"]["avg_ttft_ms"], 100);
+    assert_eq!(report["total"]["tokens_per_1k_sec"], 200000);
+    let today = report["window"]["today"].as_str().unwrap();
+    let (status, one_day) = get(
+        &env,
+        &format!("{path}&start_date={today}&end_date={today}"),
+        &env.user_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(one_day["days"], 1);
+    assert_eq!(one_day["total"]["requests"], 2);
+    for range in [
+        "start_date=2024-03-01&end_date=2024-02-29",
+        "start_date=2023-02-29&end_date=2024-02-29",
+        "start_date=2024-01-01",
+        "start_date=2020-01-01&end_date=2024-01-01",
+    ] {
+        assert_eq!(
+            get(&env, &format!("{path}&{range}"), &env.user_token)
+                .await
+                .0,
+            400
+        );
+    }
+    // 旧事件缺此字段：已知零与未采集不能合并成同一种显示。
+    let mut legacy = payload(&env, 1000, 250, 100, false);
+    legacy["api_key_id"] = json!(key_id);
+    sqlx::query("INSERT INTO billing_outbox (topic, payload) VALUES ('request_log', $1)")
+        .bind(legacy)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    drain(&env).await;
+    let (status, report) = get(&env, path, &env.user_token).await;
+    assert_eq!(status, 200);
+    assert_eq!(report["total"]["requests"], 3);
+    assert!(report["total"]["cache_write_tokens"].is_null());
+    assert_eq!(report["total"]["cache_write_known_requests"], 2);
+}
+
 /// 轮询直到 `data` 里出现命中行。
 ///
 /// outbox 是全局队列且 `process_once` 用 `FOR UPDATE SKIP LOCKED`——同文件的并行
@@ -449,7 +607,7 @@ async fn margin_report_sums_amount_and_discount() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let (status, body) = get(&env, "/admin/stats/margin?days=1", &env.super_token).await;
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{body}");
     let mine = ch
         .query_json_each_row(&format!(
             "SELECT sumMerge(amount) AS a, sumMerge(upstream_cost) AS c, \
@@ -474,11 +632,28 @@ async fn margin_report_sums_amount_and_discount() {
     // 端点侧：总计字段齐备且毛利恒等于 实收 − 成本
     let total = &body["total"];
     let amount = total["amount_micro"].as_i64().unwrap();
-    let cost = total["upstream_cost_micro"].as_i64().unwrap();
-    assert_eq!(total["margin_micro"].as_i64().unwrap(), amount - cost);
+    assert!(total["cost_known_requests"].as_i64().unwrap() < total["requests"].as_i64().unwrap());
+    assert!(
+        total["margin_micro"].is_null(),
+        "legacy costs cannot imply total profit"
+    );
+    if let Some(margin) = total["known_margin_micro"].as_i64() {
+        assert_eq!(
+            margin,
+            total["known_amount_micro"].as_i64().unwrap()
+                - total["known_cost_micro"].as_i64().unwrap()
+        );
+    }
     assert!(amount >= 4_000, "全站实收应含本用例两笔");
     assert!(total["discount_micro"].as_i64().unwrap() >= 1_000);
     assert!(total["error_rate_bp"].is_i64());
+    let (status, overview) = get(&env, "/admin/stats/overview?days=1", &env.super_token).await;
+    assert_eq!(status, 200, "{overview}");
+    assert!(overview["today"]["margin_micro"].is_null());
+    assert_eq!(
+        overview["today"]["requests"], overview["window"]["requests"],
+        "one calendar day includes today only"
+    );
     // 逐日明细含标价列（账单解释器同源口径）
     assert!(
         body["data"].as_array().is_some_and(|d| d

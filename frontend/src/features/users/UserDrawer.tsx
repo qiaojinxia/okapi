@@ -10,9 +10,11 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { ErrorState } from '@/components/ui/state'
 import { GroupsSection } from '@/features/users/GroupsSection'
+import { MultiplierSection } from '@/features/users/MultiplierSection'
 import { RoleSection } from '@/features/users/RoleSection'
 import { UsageSection } from '@/features/users/UsageSection'
 import { Tabs } from '@/components/ui/tabs'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -34,7 +36,6 @@ type UserTab = (typeof USER_TABS)[number]
 export function UserDrawer({ userId, onClose }: { userId: number; onClose: () => void }) {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
-  const [msg, setMsg] = useState<string | null>(null)
   const [tab, setTab] = useState<UserTab>('usage')
   const { confirm, dialog } = useConfirm()
 
@@ -62,10 +63,10 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
     mutationFn: (action: 'ban' | 'unban' | 'promote' | 'demote' | 'delete') =>
       apiFetch(`/admin/users/${userId}/manage`, { method: 'POST', body: { action } }),
     onSuccess: () => {
-      setMsg(t('common:success'))
+      toast.success(t('common:success'))
       invalidate()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (
@@ -76,7 +77,6 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
       description={t('admin:userDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:close')}
           </Button>
@@ -195,16 +195,24 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
         <RoleSection
           userId={userId}
           roles={roles.data?.data ?? []}
-          onMsg={setMsg}
           onDone={invalidate}
         />
       )}
-      {tab === 'balance' && <BalanceSection userId={userId} onMsg={setMsg} onDone={invalidate} />}
+      {tab === 'balance' && (
+        <>
+          <BalanceSection userId={userId} onDone={invalidate} />
+          {/* 系数与余额同属"这个人的钱"，放一起：调完价立刻能在余额段看到下一笔的效果 */}
+          <MultiplierSection
+            userId={userId}
+            current={ov?.user.price_multiplier ?? '1'}
+            onDone={invalidate}
+          />
+        </>
+      )}
       {tab === 'groups' && (
         <GroupsSection
           userId={userId}
           current={(ov?.groups ?? []).map((g) => g.code)}
-          onMsg={setMsg}
           onDone={invalidate}
         />
       )}

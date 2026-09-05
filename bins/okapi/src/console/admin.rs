@@ -128,6 +128,19 @@ pub struct CreateChannelReq {
     /// thinking_to_content / bill_by_response_model / strip_request_fields / pass_paths）。
     #[serde(default)]
     pub settings: Option<Value>,
+    /// 相对成本系数（千分比；缺省 1000 = 按官方标价采购）。0 = 自建 / 免费上游。
+    #[serde(default)]
+    pub cost_milli: Option<i64>,
+}
+
+/// 相对成本系数取值域：0（免费）～ 100×官方价，负数与离谱值都是手滑。
+fn ensure_cost_milli(value: Option<i64>) -> Result<(), AppError> {
+    match value {
+        Some(v) if !(0..=100_000).contains(&v) => {
+            Err(AppError::bad_request().with_param("cost_milli"))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn default_provider() -> String {
@@ -196,6 +209,7 @@ pub async fn create_channel(
 ) -> Result<Json<Value>, AppError> {
     let (actor, _) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     super::ssrf::validate_api_base(&state, &req.api_base).await?;
+    ensure_cost_milli(req.cost_milli)?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
         &state.pg,
@@ -240,6 +254,17 @@ pub async fn create_channel(
         .execute(&state.pg)
         .await
         .map_err(okapi_store::StoreError::from)?;
+    }
+    if req.cost_milli.is_some() {
+        okapi_store::admin::patch_channel(
+            &state.pg,
+            channel_id,
+            okapi_store::admin::ChannelPatch {
+                cost_milli: req.cost_milli,
+                ..Default::default()
+            },
+        )
+        .await?;
     }
     // 属主传播（#6267）：创建人即属主，own 范围据此过滤
     okapi_store::admin::set_channel_owner(&state.pg, channel_id, actor.user_id).await?;
@@ -291,6 +316,7 @@ pub async fn list_channels(
                 // 列表也带池：空数组 = 孤儿渠道（对谁都不可达），列表页要能一眼看见
                 "pools": c.pools,
                 "pool_members": c.pool_members,
+                "cost_milli": c.cost_milli,
                 "keys": keys,
                 "last_test": last_tests.remove(&c.id),
             })
@@ -392,6 +418,9 @@ pub struct PatchChannelReq {
     pub priority: Option<i32>,
     #[serde(default)]
     pub trust_upstream_usage: Option<bool>,
+    /// 相对成本系数（千分比）。
+    #[serde(default)]
+    pub cost_milli: Option<i64>,
 }
 
 /// PATCH /admin/channels/{id}：改渠道配置（缺省字段不动）。
@@ -431,6 +460,7 @@ pub async fn update_channel(
         Some(list) => Some(json!(list)),
         None => None,
     };
+    ensure_cost_milli(req.cost_milli)?;
 
     let patch = okapi_store::admin::ChannelPatch {
         name: req.name.as_deref(),
@@ -442,6 +472,7 @@ pub async fn update_channel(
         capabilities: req.capabilities.as_ref(),
         priority: req.priority,
         trust_upstream_usage: req.trust_upstream_usage,
+        cost_milli: req.cost_milli,
     };
     if !okapi_store::admin::patch_channel(&state.pg, id, patch).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
@@ -456,6 +487,7 @@ pub async fn update_channel(
             "name": req.name, "provider": req.provider, "api_base": req.api_base,
             "models": req.models, "priority": req.priority,
             "trust_upstream_usage": req.trust_upstream_usage,
+            "cost_milli": req.cost_milli,
         }),
     )
     .await;
@@ -536,9 +568,15 @@ pub struct PatchChannelKeyReq {
     pub weight: Option<i32>,
     #[serde(default, deserialize_with = "super::double_option")]
     pub max_concurrency: Option<Option<i32>>,
+    /// 状态：1 启用 / 2 停用。置状态同时清零失败计数、冷却与 last_error。
+    #[serde(default)]
+    pub status: Option<i16>,
 }
 
-/// PATCH /admin/channels/{id}/keys/{key_id}：调单把 key 的权重与并发上限。
+/// PATCH /admin/channels/{id}/keys/{key_id}：调单把 key 的权重、并发上限与状态。
+///
+/// `status=1` 即「重新启用」——被 401/403 打成 `status=6`（凭证失效，无冷却不自愈）的 key
+/// 此前只能靠重置凭证救回，运维排查完上游侧问题后没有一键恢复的路径。
 pub async fn update_channel_key(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -553,12 +591,17 @@ pub async fn update_channel_key(
     if req.max_concurrency.flatten().is_some_and(|c| c <= 0) {
         return Err(AppError::bad_request().with_param("max_concurrency"));
     }
+    // 只放 1/2：其余状态位是状态机自己的（冷却/限流/配额/失效），手工写进去只会骗过调度器
+    if req.status.is_some_and(|s| !matches!(s, 1 | 2)) {
+        return Err(AppError::bad_request().with_param("status"));
+    }
     let hit = okapi_store::admin::patch_channel_key(
         &state.pg,
         id,
         key_id,
         req.weight,
         req.max_concurrency,
+        req.status,
     )
     .await?;
     if !hit {
@@ -570,7 +613,11 @@ pub async fn update_channel_key(
         &actor,
         "channel.update_key",
         &format!("{id}/{key_id}"),
-        json!({ "weight": req.weight, "max_concurrency": req.max_concurrency }),
+        json!({
+            "weight": req.weight,
+            "max_concurrency": req.max_concurrency,
+            "status": req.status,
+        }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -601,6 +648,9 @@ pub struct AdminPatchKeyReq {
     pub daily_token_limit: Option<Option<i64>>,
     #[serde(default, deserialize_with = "super::double_option")]
     pub max_concurrency: Option<Option<i32>>,
+    /// IP 白名单（地址 / CIDR 数组；null / 空 = 解除）。
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub ip_allowlist: Option<Option<Vec<String>>>,
 }
 
 /// 限额一律取正数：0 或负数会把 key 限死成不可用，属于误配而非合法配置。
@@ -655,6 +705,10 @@ pub async fn patch_api_key(
         rpd_limit: req.rpd_limit,
         daily_token_limit: req.daily_token_limit,
         max_concurrency: req.max_concurrency,
+        ip_allowlist: match req.ip_allowlist.clone() {
+            Some(list) => Some(super::portal::normalize_ip_allowlist(list)?),
+            None => None,
+        },
     };
     let touched = okapi_store::admin::patch_api_key(&state.pg, id, None, &patch).await?;
     let Some(touched) = touched else {
@@ -1016,6 +1070,11 @@ pub struct UpsertModelReq {
     /// None=不改动，空对象=清除，DESIGN §3-4.5）。
     #[serde(default)]
     pub tier_ratios: Option<serde_json::Map<String, Value>>,
+    /// 阶梯计价表 `"0:2.5,128000:5"`（from_tokens:USD_per_1M，首档须从 0 起、严格升序）。
+    /// 给非空串 = 切 tiered 模式（`model_ratio` 由阶梯查表替代，其余倍率轴照旧）；
+    /// 给空串 = 切回 ratio；None = 不改动模式。
+    #[serde(default)]
+    pub tier_expr: Option<String>,
     /// 模型级降级链（DESIGN §3.4.1）：零可用候选时按序改投。
     /// None=不改动，空数组=清除。条目须为已存在的模型名——写入时校验，
     /// 拼错的降级模型只会在最脆弱的时刻（主模型已全挂）暴露，必须前置拦截。
@@ -1090,20 +1149,26 @@ pub async fn upsert_model(
             return Err(AppError::bad_request().with_param("ratio"));
         }
     }
-    let model_id = okapi_store::admin::upsert_model_ratio(
-        &state.pg,
-        &req.model_name,
-        okapi_store::admin::RatioAxes {
-            model: &req.model_ratio,
-            completion: &req.completion_ratio,
-            cache: &req.cache_ratio,
-            cache_write: &req.cache_write_ratio,
-            audio: &req.audio_ratio,
-            audio_completion: &req.audio_completion_ratio,
-            image: &req.image_ratio,
-        },
-    )
-    .await?;
+    let axes = okapi_store::admin::RatioAxes {
+        model: &req.model_ratio,
+        completion: &req.completion_ratio,
+        cache: &req.cache_ratio,
+        cache_write: &req.cache_write_ratio,
+        audio: &req.audio_ratio,
+        audio_completion: &req.audio_completion_ratio,
+        image: &req.image_ratio,
+    };
+    // 阶梯表非空 → tiered；空串 → 切回 ratio；None → 保持既有模式的 ratio 写入路径。
+    // 校验放在写库前：阶梯表配错只会在**编译价簿**时炸，那时改动已发布，整本价簿一起装载失败。
+    let tier_expr = req.tier_expr.as_deref().map(str::trim).filter(|e| !e.is_empty());
+    let model_id = match tier_expr {
+        Some(expr) => {
+            okapi_pricing::TierTable::check_expr(expr)
+                .map_err(|reason| AppError::bad_request().with_param(format!("tier_expr:{reason}")))?;
+            okapi_store::admin::upsert_model_tiered(&state.pg, &req.model_name, axes, expr).await?
+        }
+        None => okapi_store::admin::upsert_model_ratio(&state.pg, &req.model_name, axes).await?,
+    };
     if let Some(tiers) = &req.tier_ratios {
         for v in tiers.values() {
             let ok = v
@@ -1144,6 +1209,7 @@ pub async fn upsert_model(
             "audio_ratio": req.audio_ratio,
             "audio_completion_ratio": req.audio_completion_ratio,
             "image_ratio": req.image_ratio,
+            "tier_expr": req.tier_expr,
             "fallback_models": req.fallback_models,
         }),
     )
@@ -1380,6 +1446,48 @@ pub struct CreditReq {
     pub amount_micro: i64,
     #[serde(default)]
     pub reason: String,
+}
+
+#[derive(Deserialize)]
+pub struct SetMultiplierReq {
+    /// 十进制字符串（如 "1.25"、"0.8"）。0 = 免单；禁浮点入库故不收 f64。
+    pub multiplier: String,
+}
+
+/// POST /admin/users/{id}/multiplier：设用户个人计价系数。
+///
+/// 权限走 `pricing.write` 而非 `user.manage`：它是计价链上与模型倍率、分组倍率并列的
+/// 一个乘数（`amount = eff × model × group × **user** × 规则`），改它等于改这个人的价目表。
+///
+/// 取值 [0, 1000]：0 = 免单（内部账号常用），上限只是防手滑把小数点点丢。
+/// 改完必须刷鉴权缓存——系数随 `AuthedKey` 缓存，不刷的话最长一分钟仍按旧价计费。
+pub async fn set_user_multiplier(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user_id): Path<i64>,
+    Json(req): Json<SetMultiplierReq>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    let raw = req.multiplier.trim();
+    let value: f64 = raw
+        .parse()
+        .map_err(|_| AppError::bad_request().with_param("multiplier"))?;
+    if !(0.0..=1000.0).contains(&value) || !value.is_finite() {
+        return Err(AppError::bad_request().with_param("multiplier"));
+    }
+    if !okapi_store::admin::set_user_multiplier(&state.pg, user_id, raw).await? {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    }
+    state.sched.auth_flush().await;
+    audit(
+        &state,
+        &actor,
+        "user.set_multiplier",
+        &user_id.to_string(),
+        json!({ "multiplier": raw }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "multiplier": raw })))
 }
 
 pub async fn credit_user(
@@ -2189,14 +2297,25 @@ pub async fn import_newapi_pricing(
 /// 渠道测活：按渠道协议发轻量探测（models 列表/根路径），返回可达性与延迟。
 /// 语义：2xx = ok；401/403 = 可达但凭证问题（http_status 供管理员判断）；
 /// 网络失败 = 不可达。own 范围管理员只能测自己名下渠道。
+#[derive(Deserialize, Default)]
+pub struct TestChannelReq {
+    /// 给了就真发一次 1 token 的最小补全验这个模型；不给只验凭证与连通性。
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
 pub async fn test_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(channel_id): Path<i64>,
+    // Option<Json>：老调用方不带 body（也就没有 content-type），必须仍然能测
+    body: Option<Json<TestChannelReq>>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, channel_id, &actor, scope).await?;
-    let result = probe_channel(&state, channel_id).await?;
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    let result = probe_channel(&state, channel_id, model).await?;
     audit(
         &state,
         &actor,
@@ -2208,8 +2327,67 @@ pub async fn test_channel(
     Ok(Json(result))
 }
 
+/// 探测补全的输出上限。取 16 而非 1：实测有上游把 `max_tokens=1` 直接 400
+/// （`max_tokens must be greater than 2`），好模型会被误报成不可用；16 仍然便宜到可忽略，
+/// 兼容性却好得多（推理模型的最小输出预算也常常大于 1）。
+const PROBE_MAX_TOKENS: u32 = 16;
+
+/// 按协议与探测范围拼探测请求：`(method, url, body)`。
+/// 无 model = GET 协议各自的模型列表端点；有 model = POST 一次最小补全。
+fn probe_request(
+    provider: &str,
+    base: &str,
+    model: Option<&str>,
+) -> Result<(axum::http::Method, String, bytes::Bytes), AppError> {
+    let Some(m) = model else {
+        let url = if provider == "custom_pass" {
+            base.to_owned()
+        } else {
+            format!("{base}/models")
+        };
+        return Ok((axum::http::Method::GET, url, bytes::Bytes::new()));
+    };
+    let (url, payload) = match provider {
+        "anthropic" => (
+            format!("{base}/v1/messages"),
+            json!({"model": m, "max_tokens": PROBE_MAX_TOKENS,
+                   "messages": [{"role": "user", "content": "ping"}]}),
+        ),
+        "gemini" => (
+            format!("{base}/models/{m}:generateContent"),
+            json!({"contents": [{"parts": [{"text": "ping"}]}],
+                   "generationConfig": {"maxOutputTokens": PROBE_MAX_TOKENS}}),
+        ),
+        // custom_pass 是任意路径透传，没有「一次最小补全」的通用形状
+        "custom_pass" => {
+            return Err(AppError::bad_request().with_param("model_probe_unsupported"));
+        }
+        _ => (
+            format!("{base}/chat/completions"),
+            json!({"model": m, "max_tokens": PROBE_MAX_TOKENS,
+                   "messages": [{"role": "user", "content": "ping"}]}),
+        ),
+    };
+    Ok((
+        axum::http::Method::POST,
+        url,
+        bytes::Bytes::from(serde_json::to_vec(&payload).unwrap_or_default()),
+    ))
+}
+
 /// 渠道探测核心（REST 与 MCP channel_test 共用）。
-pub(crate) async fn probe_channel(state: &AppState, channel_id: i64) -> Result<Value, AppError> {
+///
+/// `model = None`：只打 `/models`，验的是「凭证认不认、网络通不通」。
+/// `model = Some(m)`：真发一次 1 token 的最小补全，验的是「**这个模型**调得通吗」。
+///
+/// 为什么要分两种：聚合型上游的凭证是全站有效的，但模型按套餐授权——只探 `/models`
+/// 会对一个实际返回 403 的模型报 `ok: true`，把运维直接引到错误结论上（实测复现过）。
+/// 模型探测会在上游真实产生一次调用（`max_tokens=1`），是管理员显式动作，不计站内账。
+pub(crate) async fn probe_channel(
+    state: &AppState,
+    channel_id: i64,
+    model: Option<&str>,
+) -> Result<Value, AppError> {
     let row = sqlx::query!(
         r#"
         SELECT c.provider, c.api_base, ck.credential_ciphertext
@@ -2236,48 +2414,45 @@ pub(crate) async fn probe_channel(state: &AppState, channel_id: i64) -> Result<V
     let base = base.trim_end_matches('/');
 
     // 按协议选探测端点与凭证头
-    let (url, auth_header, auth_value) = match row.provider.as_str() {
-        "anthropic" => (format!("{base}/models"), "x-api-key".to_owned(), credential),
-        "gemini" => (
-            format!("{base}/models"),
-            "x-goog-api-key".to_owned(),
-            credential,
-        ),
-        "custom_pass" => (
-            base.to_owned(),
-            "authorization".to_owned(),
-            format!("Bearer {credential}"),
-        ),
-        _ => (
-            format!("{base}/models"),
-            "authorization".to_owned(),
-            format!("Bearer {credential}"),
-        ),
+    let (auth_header, auth_value) = match row.provider.as_str() {
+        "anthropic" => ("x-api-key".to_owned(), credential),
+        "gemini" => ("x-goog-api-key".to_owned(), credential),
+        _ => ("authorization".to_owned(), format!("Bearer {credential}")),
     };
+    let (method, url, body) = probe_request(&row.provider, base, model)?;
+    let content_type = (!body.is_empty()).then(|| "application/json".to_owned());
 
     let started = std::time::Instant::now();
     let outcome = state
         .pass
         .forward(okapi_providers::custom_pass::PassRequest {
-            method: axum::http::Method::GET,
+            method,
             url,
             auth_header,
             auth_value,
-            content_type: None,
-            body: bytes::Bytes::new(),
+            content_type,
+            body,
         })
         .await;
     let latency_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     let at = chrono::Utc::now().to_rfc3339();
+    // scope 让调用方一眼知道这个 ok 是什么意思：credential=只验了凭证与连通性，
+    // model=这个模型真的调得通。少了它，两种探测的 `ok:true` 长得一模一样。
+    let scope = if model.is_some() { "model" } else { "credential" };
     let result = match outcome {
         Ok(okapi_providers::custom_pass::PassResponse::Ok { status, .. }) => {
-            json!({"ok": true, "http_status": status, "latency_ms": latency_ms, "at": at})
+            json!({"ok": true, "http_status": status, "latency_ms": latency_ms, "at": at,
+                   "scope": scope, "model": model})
         }
-        Ok(okapi_providers::custom_pass::PassResponse::ErrStatus { status, .. }) => {
-            json!({"ok": false, "http_status": status, "latency_ms": latency_ms, "at": at})
+        Ok(okapi_providers::custom_pass::PassResponse::ErrStatus { status, body }) => {
+            // 失败带上游原文（截断）：403 到底是凭证问题还是模型没开通，全在这句话里
+            let detail: String = String::from_utf8_lossy(&body).chars().take(300).collect();
+            json!({"ok": false, "http_status": status, "latency_ms": latency_ms, "at": at,
+                   "scope": scope, "model": model, "upstream_body": detail})
         }
         Err(err) => {
-            json!({"ok": false, "error_code": err.error_code(), "latency_ms": latency_ms, "at": at})
+            json!({"ok": false, "error_code": err.error_code(), "latency_ms": latency_ms,
+                   "at": at, "scope": scope, "model": model})
         }
     };
     // 留痕供列表页"最近测试"列回填（new-api 的 response_time/test_time 语义）
@@ -2429,6 +2604,96 @@ pub struct ReconQuery {
 
 fn default_limit() -> i64 {
     1000
+}
+
+#[derive(Deserialize)]
+pub struct RepairReq {
+    /// 只修这一个用户。与 `all` 二选一。
+    #[serde(default)]
+    pub user_id: Option<i64>,
+    /// 修当前扫出的全部漂移用户。
+    #[serde(default)]
+    pub all: bool,
+    /// `all` 时的扫描上限（与对账视图同一口径）。
+    #[serde(default = "default_recon_limit")]
+    pub limit: i64,
+}
+
+const fn default_recon_limit() -> i64 {
+    1000
+}
+
+/// POST /admin/reconciliation/repair：按账本重建热余额与展示快照。
+///
+/// 为什么需要：Redis 是唯一热账本且 `reserve.lua` 对缺键按余额 0 处理、不回源 PG，
+/// 所以「Redis 活着但数据没了」（没开持久化重启 / 切到空副本 / maxmemory 淘汰 /
+/// 手滑 FLUSHDB）会让全站付费请求静默拒服务，且**不会自愈**——对账任务此前只报不修，
+/// 全仓也没有第二个入口能把余额写回去，站长只能眼看着差额挂在页面上。
+///
+/// 权威源是 `billing_events` 求和，操作幂等；在途预扣保持不动（`avail + 在途 == 账本`）。
+pub async fn repair_reconciliation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<RepairReq>,
+) -> Result<Json<Value>, AppError> {
+    // 它会改余额，权限跟充值/扣减同一道闸——虽然改的方向是"改回账本说的数"
+    let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
+    let repaired = match (req.user_id, req.all) {
+        (Some(user_id), false) => {
+            // 先确认漂移是稳定的：结算是异步的，「Redis 已扣、PG 事件还没落」的中间态
+            // 看起来和真丢数据一模一样，照着修等于把正在结算的那笔退回去
+            match crate::worker::stable_drift(&state.pg, &state.ledger, user_id).await {
+                Ok(None) => {
+                    let exists = sqlx::query_scalar!(
+                        r#"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)
+                           AS "e!""#,
+                        user_id
+                    )
+                    .fetch_one(&state.pg)
+                    .await
+                    .map_err(okapi_store::StoreError::from)?;
+                    return Err(if exists {
+                        // 账目正在变动 → 让管理员过几秒重试，而不是拿一个半截的账本去覆写
+                        AppError::new(StatusCode::CONFLICT, codes::RECONCILE_UNSTABLE)
+                    } else {
+                        AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND)
+                    });
+                }
+                Err(err) => {
+                    tracing::error!(error = %err, user_id, "对账稳定性判定失败");
+                    return Err(AppError::internal());
+                }
+                Ok(Some(_)) => {}
+            }
+            match crate::worker::repair_balance(&state.pg, &state.ledger, user_id).await {
+                Ok(Some(one)) => vec![one],
+                Ok(None) => return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND)),
+                Err(err) => {
+                    tracing::error!(error = %err, user_id, "对账修复失败");
+                    return Err(AppError::internal());
+                }
+            }
+        }
+        (None, true) => crate::worker::repair_drifted(&state.pg, &state.ledger, req.limit)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "批量对账修复失败");
+                AppError::internal()
+            })?,
+        // 既没指定用户又没给 all：批量改余额不该是手滑的默认行为
+        _ => return Err(AppError::bad_request().with_param("user_id_or_all")),
+    };
+    audit(
+        &state,
+        &actor,
+        "billing.reconcile_repair",
+        &req.user_id.map_or_else(|| "all".to_owned(), |id| id.to_string()),
+        json!({ "repaired": repaired.len(), "detail": repaired }),
+    )
+    .await;
+    Ok(Json(
+        json!({ "repaired": repaired.len(), "data": repaired }),
+    ))
 }
 
 pub async fn reconciliation(

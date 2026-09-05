@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
+import { useModalFocus } from '@/hooks/use-modal-focus'
 import { cn } from '@/lib/utils'
 
 interface DrawerProps {
@@ -20,6 +21,12 @@ interface DrawerProps {
 
 const SIZE = { md: 'max-w-xl', lg: 'max-w-2xl', xl: 'max-w-4xl' } as const
 
+/// 进场焦点：优先第一个可输入控件（多页签抽屉则是当前页签），而不是标题旁的关闭按钮。
+const firstField = (root: HTMLElement) =>
+  root.querySelector<HTMLElement>(
+    'input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled]), [role=tab][aria-selected=true]',
+  )
+
 /// 右侧抽屉：承载单条记录的新建与编辑。
 ///
 /// 为什么不继续用内联表单：列表页原本把"新建表单 + 列表 + 展开式编辑器"堆在一屏，
@@ -27,7 +34,8 @@ const SIZE = { md: 'max-w-xl', lg: 'max-w-2xl', xl: 'max-w-4xl' } as const
 /// 抽屉把"浏览"与"编辑"分成两个层次：列表始终是列表，编辑浮在其上并明确标题指向对象。
 ///
 /// portal 到 body + 锁 body 滚动：抽屉打开时页面底下的表格不该还能滚。
-/// 打开即把焦点送进第一个可输入控件——建渠道的人手已经在键盘上了。
+/// 打开即把焦点送进第一个可输入控件——建渠道的人手已经在键盘上了；焦点在层内循环，
+/// 关闭后还给打开它的那个按钮（`useModalFocus`）。
 export function Drawer({
   open,
   onClose,
@@ -39,6 +47,7 @@ export function Drawer({
 }: DrawerProps) {
   const { t } = useTranslation()
   const panel = useRef<HTMLElement>(null)
+  useModalFocus(open, panel, firstField)
 
   // Esc 关闭：抽屉是模态层，键盘用户需要一个不用找关闭按钮的退出方式
   useEffect(() => {
@@ -49,16 +58,9 @@ export function Drawer({
     window.addEventListener('keydown', onKey)
     const prevOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
-    const focusTimer = window.setTimeout(() => {
-      const first = panel.current?.querySelector<HTMLElement>(
-        'input:not([type=hidden]):not([disabled]), textarea:not([disabled]), select:not([disabled]), [role=tab][aria-selected=true]',
-      )
-      first?.focus({ preventScroll: true })
-    }, 30)
     return () => {
       window.removeEventListener('keydown', onKey)
       document.body.style.overflow = prevOverflow
-      window.clearTimeout(focusTimer)
     }
   }, [open, onClose])
 

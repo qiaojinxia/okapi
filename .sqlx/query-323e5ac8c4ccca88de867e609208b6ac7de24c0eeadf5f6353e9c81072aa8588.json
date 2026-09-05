@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, balance_micro FROM users\n           WHERE deleted_at IS NULL AND balance_micro < $1 AND balance_micro >= 0\n           ORDER BY balance_micro DESC LIMIT 20",
+  "query": "SELECT id, balance_micro FROM users\n           WHERE deleted_at IS NULL AND balance_micro < $1 AND balance_micro >= 0\n           ORDER BY balance_micro DESC, id DESC LIMIT 20",
   "describe": {
     "columns": [
       {
@@ -36,5 +36,5 @@
       false
     ]
   },
-  "hash": "0e268c023913c40659ae550664e647316e6a97eecf4a0280708ddba7fcf6669f"
+  "hash": "323e5ac8c4ccca88de867e609208b6ac7de24c0eeadf5f6353e9c81072aa8588"
 }

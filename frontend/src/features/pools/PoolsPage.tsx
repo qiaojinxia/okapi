@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Boxes, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -49,8 +49,10 @@ export function PoolsPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
+        icon={Boxes}
         title={t('admin:poolsTitle')}
         description={t('admin:poolsDesc')}
+        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />
@@ -65,7 +67,15 @@ export function PoolsPage() {
       ) : pools.isPending ? (
         <TableSkeleton rows={6} cols={6} />
       ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:poolsEmptyHint')} />
+        <EmptyState
+          hint={t('admin:poolsEmptyHint')}
+          action={
+            <Button onClick={() => setDrawer({})}>
+              <Plus className="h-4 w-4" />
+              {t('admin:poolCreate')}
+            </Button>
+          }
+        />
       ) : (
         <Table>
           <THead>

@@ -278,4 +278,12 @@ async fn mcp_write_full_scenario() {
         .as_i64()
         .expect("必须返回新 epoch");
     assert!(epoch > before);
+
+    // 收尾：把 MCP 写开关关回去。它是**站点级**设置，本用例开了不收拾的话，
+    // 开发库上就永远挂着一个没人打开过的写工具面——三道闸的第一道形同虚设，
+    // 而且从设置页上看不出这是测试留下的。
+    sqlx::query!(r#"DELETE FROM settings WHERE key = 'mcp_write_enabled'"#)
+        .execute(&env.pg)
+        .await
+        .unwrap();
 }

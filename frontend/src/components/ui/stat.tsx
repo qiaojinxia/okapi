@@ -1,3 +1,4 @@
+import { ArrowDownRight, ArrowUpRight, Minus } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { StatSkeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
@@ -16,6 +17,8 @@ interface StatProps {
   /// 右侧附加区（sparkline / 徽章）。
   aside?: React.ReactNode
   className?: string
+  /// 窄卡片将图标放在标签行，给数值保留整行宽度。
+  layout?: 'inline' | 'stacked'
   /// 可点击（跳转到明细）。
   onClick?: () => void
 }
@@ -50,6 +53,7 @@ export function Stat({
   loading = false,
   aside,
   className,
+  layout = 'inline',
   onClick,
 }: StatProps) {
   if (loading) return <StatSkeleton />
@@ -59,19 +63,19 @@ export function Stat({
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={cn(
-        'flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-card',
+        'relative flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-card',
         onClick && 'transition-colors hover:border-primary/40 hover:bg-accent/40',
         className,
       )}
     >
       {Icon && (
-        <span className={cn('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md', TONE_ICON[tone])}>
+        <span className={cn('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md', layout === 'stacked' && 'absolute right-4 top-3 h-7 w-7', TONE_ICON[tone])}>
           <Icon className="h-4 w-4" />
         </span>
       )}
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-xs font-medium text-muted-foreground">{label}</span>
-        <span className={cn('truncate text-xl font-semibold tracking-tight', TONE_VALUE[tone])}>
+        <span className={cn('text-xs font-medium text-muted-foreground', layout === 'stacked' ? 'min-h-7 pr-8' : 'truncate')}>{label}</span>
+        <span title={typeof value === 'string' ? value : undefined} className={cn('text-xl font-semibold tracking-tight tabular-nums', layout === 'stacked' ? 'break-words' : 'truncate', TONE_VALUE[tone])}>
           {value}
         </span>
         {sub !== undefined && sub !== '' && (
@@ -100,5 +104,52 @@ export function InlineStat({
       <span className="text-[11px] font-medium text-muted-foreground">{label}</span>
       <span className={cn('text-base font-semibold tabular-nums', TONE_VALUE[tone])}>{value}</span>
     </div>
+  )
+}
+
+/// 环比芯片：把"今天 1,560 / 昨日 1,678"这道心算交给界面来做。
+///
+/// 为什么需要：KPI 卡的副行一直给着昨日与窗口两个锚点，但"涨了还是跌了、涨多少"
+/// 得读数的人自己两位两位比——五张卡就是五次心算，而这恰恰是打开总览页第一眼想知道的。
+///
+/// 极性可反转：错误率涨是坏事、跌是好事，跟请求数正相反；`invert` 让颜色跟着语义走
+/// 而不是跟着箭头方向走。基数为 0 时不出芯片——"从 0 涨到 5"没有百分比可言，
+/// 硬写 +∞% 只会添噪。
+export function DeltaChip({
+  current,
+  previous,
+  invert = false,
+  locale,
+}: {
+  current: number
+  previous: number
+  /// true = 数值变大是坏事（错误率、延迟）。
+  invert?: boolean
+  locale: string
+}) {
+  if (previous === 0) return null
+  const pct = ((current - previous) / Math.abs(previous)) * 100
+  // ±0.5% 以内当持平：整点抖动不该被涂成红绿
+  if (Math.abs(pct) < 0.5) {
+    return (
+      <span className="inline-flex items-center gap-0.5 text-muted-foreground">
+        <Minus className="h-3 w-3" />
+        0%
+      </span>
+    )
+  }
+  const up = pct > 0
+  const good = invert ? !up : up
+  const Icon = up ? ArrowUpRight : ArrowDownRight
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center gap-0.5 font-medium tabular-nums',
+        good ? 'text-success' : 'text-destructive',
+      )}
+    >
+      <Icon className="h-3 w-3" />
+      {Math.abs(pct).toLocaleString(locale, { maximumFractionDigits: 1 })}%
+    </span>
   )
 }

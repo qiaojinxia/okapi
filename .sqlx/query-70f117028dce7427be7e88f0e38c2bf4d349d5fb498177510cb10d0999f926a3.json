@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channel_keys SET status = 6, failed_count = 7, last_error = 'boom',\n                                   cooldown_until = now() + interval '1 hour' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "70f117028dce7427be7e88f0e38c2bf4d349d5fb498177510cb10d0999f926a3"
+}

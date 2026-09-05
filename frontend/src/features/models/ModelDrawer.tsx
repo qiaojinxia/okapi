@@ -9,6 +9,7 @@ import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { Input, Label } from '@/components/ui/input'
 import { TagInput } from '@/components/ui/tag-input'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
@@ -24,7 +25,6 @@ export function ModelDrawer({
   onDone: () => void
 }) {
   const { t } = useTranslation()
-  const [msg, setMsg] = useState<string | null>(null)
   const [name, setName] = useState(model?.model_name ?? '')
   const [axes, setAxes] = useState<Record<string, string>>({
     model_ratio: model?.model_ratio ?? '1',
@@ -36,6 +36,9 @@ export function ModelDrawer({
     image_ratio: model?.image_ratio ?? '1',
   })
   const [tiers, setTiers] = useState<{ tier: string; ratio: string }[]>([])
+  // 阶梯计价表 "0:2.5,128000:5"（from_tokens:USD_per_1M）。空串 = ratio 模式。
+  // 与 model_ratio 互斥：填了阶梯，每 token 基准单价改由查表得出，model_ratio 不再参与。
+  const [tierExpr, setTierExpr] = useState(model?.tier_expr ?? '')
   // 从现值起手：编辑倍率时不该顺手清掉已配的降级链（后端 None=不改动，
   // 但始终回传现值让"清空"也是显式操作）
   const [fallbacks, setFallbacks] = useState<string[]>(model?.fallback_models ?? [])
@@ -55,13 +58,15 @@ export function ModelDrawer({
                 )
               : undefined,
           fallback_models: fallbacks,
+          // 始终回传：空串是"切回 ratio"的显式表达，undefined 才是"不改动"
+          tier_expr: tierExpr.trim(),
         },
       }),
     onSuccess: () => {
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const axisField = (key: keyof typeof AXIS_LABEL) => (
@@ -84,7 +89,6 @@ export function ModelDrawer({
       description={t('admin:modelDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>
@@ -114,6 +118,21 @@ export function ModelDrawer({
 
       <FieldGroup title={t('admin:axesModal')} hint={t('admin:axesModalHint')}>
         <div className="grid grid-cols-2 gap-3">{MODAL_AXES.map(axisField)}</div>
+      </FieldGroup>
+
+      <FieldGroup title={t('admin:tierExpr')} hint={t('admin:tierExprHint')}>
+        <Input
+          id="m-tier-expr"
+          className="font-mono"
+          placeholder="0:2.5,128000:5"
+          value={tierExpr}
+          onChange={(e) => setTierExpr(e.target.value)}
+        />
+        <p className="text-xs text-muted-foreground">
+          {tierExpr.trim() === ''
+            ? t('admin:tierExprModeRatio')
+            : t('admin:tierExprModeTiered')}
+        </p>
       </FieldGroup>
 
       <FieldGroup title={t('admin:fallbackModels')} hint={t('admin:fallbackModelsHint')}>

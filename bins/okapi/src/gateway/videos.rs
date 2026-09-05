@@ -55,6 +55,7 @@ fn scale_quote(quote: &Quote, units: u32) -> Quote {
         amount: Money::from_micros(quote.amount.as_micros().saturating_mul(n)),
         original: Money::from_micros(quote.original.as_micros().saturating_mul(n)),
         discount: Money::from_micros(quote.discount.as_micros().saturating_mul(n)),
+        list_price: Money::from_micros(quote.list_price.as_micros().saturating_mul(n)),
         snapshot,
     }
 }
@@ -77,7 +78,7 @@ async fn handle_create(
     request_id: Uuid,
     started: Instant,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
     let probe: VideosProbe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     let units = parse_seconds(probe.seconds.as_ref());
 
@@ -209,7 +210,16 @@ async fn handle_create(
                     tracing::warn!(request_id = %request_id, "videos 上游响应缺 id，任务不可轮询");
                 }
                 commit_and_record(
-                    state, &key, &canonical, &quote, units, request_id, started, &cand, failover,
+                    state,
+                    &key,
+                    &canonical,
+                    &probe.model,
+                    &quote,
+                    units,
+                    request_id,
+                    started,
+                    &cand,
+                    failover,
                     headers,
                 )
                 .await;
@@ -280,7 +290,7 @@ async fn relay_task(
     task_id: &str,
     content: bool,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
     // 键含 user_id：他人任务/过期/未知一律 404（不泄露存在性）
     let Some(channel_key_id) = state.sched.video_task_get(key.user_id, task_id).await else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND).with_param("task"));
@@ -359,6 +369,7 @@ async fn commit_and_record(
     state: &AppState,
     key: &okapi_store::AuthedKey,
     canonical: &str,
+    requested_model: &str,
     quote: &Quote,
     _units: u32,
     request_id: Uuid,
@@ -375,6 +386,12 @@ async fn commit_and_record(
     {
         Ok(CommitOutcome::Committed { balance_after, .. }) => {
             let input = SettlementInput {
+                dimensions: okapi_ledger::pg::UsageDimensions::new(
+                    requested_model,
+                    cand.upstream_model(canonical),
+                    "/v1/videos",
+                    "/v1/videos",
+                ),
                 request_id,
                 log_type: 2,
                 user_id: key.user_id,
@@ -388,6 +405,8 @@ async fn commit_and_record(
                 amount: quote.amount,
                 original: quote.original,
                 discount: quote.discount,
+                list_price: quote.list_price,
+                upstream_cost: None,
                 pricing_epoch: Some(book.epoch()),
                 pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
                 latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),

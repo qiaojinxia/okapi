@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { cloneElement, createContext, useContext, useEffect, useId, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 interface MenuCtx {
@@ -8,8 +8,8 @@ interface MenuCtx {
 const Ctx = createContext<MenuCtx>({ close: () => undefined })
 
 interface MenuProps {
-  /// 触发器：会被包在一个 span 里接管点击；触发器自己不要再绑 onClick。
-  trigger: React.ReactNode
+  /// 单个按钮或透传原生按钮 props 的组件（如 Button）。
+  trigger: React.ReactElement<React.ButtonHTMLAttributes<HTMLButtonElement>>
   align?: 'start' | 'end'
   /// 弹层最小宽度类，如 `min-w-56`。
   className?: string
@@ -19,41 +19,93 @@ interface MenuProps {
 /// 下拉菜单（无依赖）：点击切换、外点关闭、Esc 关闭、选中后自动关闭。
 ///
 /// 用在顶栏身份菜单与表格行的"更多"动作——五个以上的行动作平铺成一排图标已经
-/// 认不出谁是谁，折进菜单给文字。不做复杂的键盘漫游，Tab 顺序按 DOM 即可。
+/// 认不出谁是谁，折进菜单给文字。方向键定位，Enter / Space 选择，Esc 返回触发器。
 export function Menu({ trigger, align = 'end', className, children }: MenuProps) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
+  const panel = useRef<HTMLDivElement>(null)
+  const startAtEnd = useRef(false)
+  const id = useId()
+  const focusTrigger = () => root.current?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true })
+  const close = () => {
+    focusTrigger()
+    setOpen(false)
+  }
 
   useEffect(() => {
     if (!open) return undefined
-    const onDown = (e: MouseEvent) => {
+    const items = panel.current?.querySelectorAll<HTMLButtonElement>('[role=menuitem]:not(:disabled)')
+    const first = startAtEnd.current ? items?.[items.length - 1] : items?.[0]
+    ;(first ?? panel.current)?.focus({ preventScroll: true })
+    const onDown = (e: PointerEvent) => {
       if (root.current && !root.current.contains(e.target as Node)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onDown)
     return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onDown)
     }
   }, [open])
 
   return (
-    <div ref={root} className="relative inline-flex">
-      <span
-        className="inline-flex"
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        {trigger}
-      </span>
+    <div
+      ref={root}
+      className="relative inline-flex"
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget)) setOpen(false)
+      }}
+    >
+      {cloneElement(trigger, {
+        id: trigger.props.id ?? `${id}-trigger`,
+        'aria-haspopup': 'menu',
+        'aria-expanded': open,
+        'aria-controls': open ? id : undefined,
+        onClick: (e) => {
+          trigger.props.onClick?.(e)
+          if (e.defaultPrevented) return
+          startAtEnd.current = false
+          setOpen((v) => !v)
+        },
+        onKeyDown: (e) => {
+          trigger.props.onKeyDown?.(e)
+          if (e.defaultPrevented || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return
+          e.preventDefault()
+          startAtEnd.current = e.key === 'ArrowUp'
+          setOpen(true)
+        },
+      })}
       {open && (
-        <Ctx.Provider value={{ close: () => setOpen(false) }}>
+        <Ctx.Provider value={{ close }}>
           <div
+            ref={panel}
+            id={id}
             role="menu"
+            aria-labelledby={trigger.props.id ?? `${id}-trigger`}
+            tabIndex={-1}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault()
+                e.stopPropagation()
+                close()
+                return
+              }
+              if (e.key === 'Tab') {
+                // 从触发器继续自然 Tab 顺序；Shift+Tab 则回到触发器。
+                if (e.shiftKey) e.preventDefault()
+                close()
+                return
+              }
+              const items = [...e.currentTarget.querySelectorAll<HTMLButtonElement>('[role=menuitem]:not(:disabled)')]
+              if (items.length === 0) return
+              const index = items.indexOf(document.activeElement as HTMLButtonElement)
+              const next = e.key === 'Home' ? 0
+                : e.key === 'End' ? items.length - 1
+                : e.key === 'ArrowDown' ? (index + 1) % items.length
+                : e.key === 'ArrowUp' ? (index - 1 + items.length) % items.length
+                : null
+              if (next === null) return
+              e.preventDefault()
+              items[next]?.focus({ preventScroll: true })
+            }}
             className={cn(
               'absolute top-full z-50 mt-1.5 flex min-w-48 flex-col gap-0.5 rounded-lg border border-border bg-popover p-1 shadow-popover animate-zoom-in',
               align === 'end' ? 'right-0 origin-top-right' : 'left-0 origin-top-left',
@@ -89,13 +141,14 @@ export function MenuItem({
     <button
       type="button"
       role="menuitem"
+      tabIndex={-1}
       disabled={disabled}
       onClick={() => {
-        onSelect?.()
         close()
+        onSelect?.()
       }}
       className={cn(
-        'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors',
+        'flex min-h-11 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm outline-none transition-colors md:min-h-8',
         'focus-visible:bg-accent disabled:pointer-events-none disabled:opacity-50',
         destructive ? 'text-destructive hover:bg-destructive/10' : 'hover:bg-accent',
       )}

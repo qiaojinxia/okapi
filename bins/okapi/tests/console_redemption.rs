@@ -16,6 +16,17 @@ struct TestEnv {
     user_id: i64,
 }
 
+/// 每次调用给一个独一无二的来源 IP。
+///
+/// 核销走 `critical_rate_guard`（每 IP 10 次/分，对齐 new-api rc.24）。此前测试不带任何
+/// 转发头、服务器也没挂 connect info，识别不到来源 IP 于是限流整段跳过；现在信任闸以
+/// socket 对端兜底（§14.2），同一条环回地址上跑十几次核销就会撞上限流。用例要验的是
+/// 一次性 / 并发原子性，不是限流，故逐请求换 IP——真正验限流的用例自己固定同一个 IP。
+fn uniq_ip() -> String {
+    let h = Uuid::new_v4().simple().to_string();
+    format!("2001:db8:{}:{}::1", &h[0..4], &h[4..8])
+}
+
 async fn setup() -> TestEnv {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
@@ -56,7 +67,13 @@ async fn setup() -> TestEnv {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // 按生产形态挂 connect info：转发头信任闸要拿 socket 对端做锚点（§14.2）
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     TestEnv {
         pg,
@@ -99,6 +116,7 @@ async fn redemption_lifecycle() {
     let redeemed: Value = client
         .post(format!("http://{}/api/me/redeem", env.addr))
         .bearer_auth(&env.user_token)
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"code": codes[0]}))
         .send()
         .await
@@ -124,6 +142,7 @@ async fn redemption_lifecycle() {
     let replay = client
         .post(format!("http://{}/api/me/redeem", env.addr))
         .bearer_auth(&env.user_token)
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"code": codes[0]}))
         .send()
         .await
@@ -146,6 +165,7 @@ async fn redemption_lifecycle() {
             client
                 .post(url)
                 .bearer_auth(token)
+                .header("x-real-ip", uniq_ip())
                 .json(&json!({"code": code}))
                 .send()
                 .await
@@ -177,6 +197,7 @@ async fn redemption_lifecycle() {
     let expired = client
         .post(format!("http://{}/api/me/redeem", env.addr))
         .bearer_auth(&env.user_token)
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"code": codes[2]}))
         .send()
         .await
@@ -249,6 +270,7 @@ async fn redemption_plan_bind_and_ip_cap() {
     let redeemed: Value = client
         .post(format!("http://{}/api/me/redeem", env.addr))
         .bearer_auth(&env.user_token)
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"code": plan_code_str}))
         .send()
         .await
@@ -306,6 +328,7 @@ async fn redemption_plan_bind_and_ip_cap() {
     let denied = client
         .post(format!("http://{}/api/me/redeem", env.addr))
         .bearer_auth(&env.user_token)
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"code": bound_code}))
         .send()
         .await
@@ -314,6 +337,7 @@ async fn redemption_plan_bind_and_ip_cap() {
     let allowed = client
         .post(format!("http://{}/api/me/redeem", env.addr))
         .bearer_auth(&env.admin_token)
+        .header("x-real-ip", uniq_ip())
         .json(&json!({"code": bound_code}))
         .send()
         .await

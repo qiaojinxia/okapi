@@ -6,6 +6,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { ErrorState } from '@/components/ui/state'
 import { Input, Label } from '@/components/ui/input'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -49,8 +50,6 @@ export function RoleDrawer({
   const [picked, setPicked] = useState<Set<string>>(
     new Set(Array.isArray(initial?.permissions) ? (initial.permissions as string[]) : []),
   )
-  const [msg, setMsg] = useState<string | null>(null)
-
   // 权限点清单由后端导出，避免前端硬编码字符串与后端漂移
   const permissions = useQuery({
     queryKey: qk.adminPermissions,
@@ -71,7 +70,7 @@ export function RoleDrawer({
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const toggle = (p: string) =>
@@ -92,7 +91,6 @@ export function RoleDrawer({
       description={t('admin:roleDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>

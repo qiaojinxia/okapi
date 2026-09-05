@@ -88,10 +88,9 @@ function AdminLayout() {
         { to: '/admin/audit', label: t('admin:auditTitle'), icon: History, permission: 'audit.read' },
       ],
     },
-    { items: [{ to: '/portal', label: t('common:portal'), icon: User }] },
   ]
   return (
-    <Shell nav={nav}>
+    <Shell nav={nav} workspace={{ to: '/portal', label: t('common:portal'), icon: User }}>
       <Outlet />
     </Shell>
   )

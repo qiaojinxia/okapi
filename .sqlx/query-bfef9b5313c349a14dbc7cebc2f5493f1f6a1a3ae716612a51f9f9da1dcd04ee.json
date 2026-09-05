@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ip_allowlist FROM api_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ip_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "ip_allowlist"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "bfef9b5313c349a14dbc7cebc2f5493f1f6a1a3ae716612a51f9f9da1dcd04ee"
+}

@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -14,11 +15,9 @@ import { formatMoney } from '@/lib/money'
 /// 格式差一个字符后端就 400。
 export function BalanceSection({
   userId,
-  onMsg,
   onDone,
 }: {
   userId: number
-  onMsg: (m: string) => void
   onDone: () => void
 }) {
   const { t, i18n } = useTranslation()
@@ -34,11 +33,11 @@ export function BalanceSection({
         body: { amount_micro: Math.round((Number(amount) || 0) * 1_000_000), reason },
       }),
     onSuccess: (r) => {
-      onMsg(`${t('admin:balanceAfter')} ${formatMoney(r.balance_after_micro, i18n.language)}`)
+      toast.success(`${t('admin:balanceAfter')} ${formatMoney(r.balance_after_micro, i18n.language)}`)
       setAmount('')
       onDone()
     },
-    onError: (err) => onMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const setBalanceExpiry = useMutation({
@@ -49,10 +48,10 @@ export function BalanceSection({
         body: { expires_at },
       }),
     onSuccess: () => {
-      onMsg(t('common:success'))
+      toast.success(t('common:success'))
       onDone()
     },
-    onError: (err) => onMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (

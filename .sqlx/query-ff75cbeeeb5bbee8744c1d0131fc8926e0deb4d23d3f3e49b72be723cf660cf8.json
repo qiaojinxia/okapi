@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override)\n           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+  "query": "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override, ip_allowlist)\n           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
   "describe": {
     "columns": [
       {
@@ -23,12 +23,13 @@
         "Varchar",
         "Timestamptz",
         "Jsonb",
-        "Varchar"
+        "Varchar",
+        "Jsonb"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "350b807845f26996e985393f898b612bee11a42ac673b7741a3bd356c10c47c1"
+  "hash": "ff75cbeeeb5bbee8744c1d0131fc8926e0deb4d23d3f3e49b72be723cf660cf8"
 }

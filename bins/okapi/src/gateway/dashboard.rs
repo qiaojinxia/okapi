@@ -10,7 +10,7 @@ use axum::http::HeaderMap;
 use serde_json::{Value, json};
 
 async fn totals(state: &AppState, headers: &HeaderMap) -> Result<(i64, i64), AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
     let balance = state.ledger.balance(key.user_id).await?.as_micros();
     let used = sqlx::query_scalar!(
         r#"SELECT COALESCE(SUM(used_micro), 0)::bigint AS "u!"

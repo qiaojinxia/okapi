@@ -1,26 +1,29 @@
 import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import {
-  ChevronLeft,
   ChevronRight,
   Languages,
   LogOut,
   Menu as MenuIcon,
   Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Sun,
   X,
 } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BrandLockup } from '@/components/brand'
 import { NoticeBanner } from '@/components/notice-banner'
+import { NavLink, SidebarNav } from '@/components/sidebar-nav'
+import type { NavGroup, NavItem } from '@/components/sidebar-nav'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Menu, MenuItem, MenuLabel } from '@/components/ui/menu'
 import { Tooltip } from '@/components/ui/tooltip'
 import { useMe, usePermission } from '@/hooks/use-auth'
 import { useMediaQuery } from '@/hooks/use-media-query'
+import { useModalFocus } from '@/hooks/use-modal-focus'
 import { apiFetch, clearKey } from '@/lib/api'
 import { switchLanguage } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -28,21 +31,7 @@ import { useTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 import { roleLabel } from '@/features/users/types'
 
-export interface NavItem {
-  to: string
-  label: string
-  icon?: LucideIcon
-  /// 需要的权限点；缺省 = 人人可见。无权者该入口直接不出现——
-  /// 让用户点进去吃 403 是把后端的拦截当成了交互设计。
-  permission?: string
-}
-
-/// 导航分组：功能一多，平铺列表就找不着东西——按域分组是主流后台的通行做法。
-/// `title` 省略表示不带小标题的顶层组（如"总览"）。
-export interface NavGroup {
-  title?: string
-  items: NavItem[]
-}
+export type { NavItem, NavGroup } from '@/components/sidebar-nav'
 
 const SIDEBAR_STORAGE = 'okapi.sidebar'
 
@@ -56,7 +45,11 @@ function loadCollapsed(): boolean {
 /// 折叠比横向滚动可用得多；抽屉展开时铺一层遮罩，点击即关。
 /// 桌面端可收成图标栏（记忆到 localStorage）：宽表格的页面（日志/渠道）多出的
 /// 190px 正好少一次横向滚动。
-export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: React.ReactNode }) {
+export function Shell({ nav: rawNav, workspace, children }: {
+  nav: NavGroup[]
+  workspace?: NavItem
+  children: React.ReactNode
+}) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [collapsedPref, setCollapsedPref] = useState(loadCollapsed)
@@ -65,6 +58,16 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
   const rail = collapsedPref && desktop
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const can = usePermission()
+  const panel = useRef<HTMLElement>(null)
+  const mobileOpen = open && !desktop
+  useModalFocus(mobileOpen, panel)
+
+  useEffect(() => {
+    if (!mobileOpen) return
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = previous }
+  }, [mobileOpen])
 
   const toggleCollapsed = () => {
     setCollapsedPref((v) => {
@@ -76,7 +79,7 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
   // 换页即关移动端抽屉
   useEffect(() => {
     setOpen(false)
-  }, [pathname])
+  }, [pathname, desktop])
 
   // 按权限裁剪导航；整组被裁空时连小标题一起去掉，避免留下空标题
   const nav = rawNav
@@ -94,20 +97,40 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
 
   return (
     <div className="flex min-h-screen bg-background">
-      {open && (
-        <button
-          type="button"
-          aria-label={t('common:closeNav')}
-          className="fixed inset-0 z-20 bg-black/40 backdrop-blur-[2px] animate-fade-in md:hidden"
+      <a
+        href="#main-content"
+        className="sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:w-auto focus:rounded-md focus:bg-primary focus:p-3 focus:text-primary-foreground focus:not-sr-only"
+        inert={mobileOpen}
+      >
+        {t('common:skipToContent')}
+      </a>
+      {mobileOpen && (
+        <div
+          aria-hidden
+          className="fixed inset-0 z-30 bg-black/40 backdrop-blur-[2px] animate-fade-in md:hidden"
           onClick={() => setOpen(false)}
         />
       )}
 
       <aside
+        id="app-navigation"
+        ref={panel}
+        role={mobileOpen ? 'dialog' : undefined}
+        aria-modal={mobileOpen || undefined}
+        aria-label={t('common:navigation')}
+        aria-hidden={!desktop && !open || undefined}
+        inert={!desktop && !open}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && mobileOpen) {
+            e.preventDefault()
+            e.stopPropagation()
+            setOpen(false)
+          }
+        }}
         className={cn(
           'fixed inset-y-0 left-0 z-30 flex shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground',
           'transition-[transform,width] duration-200 ease-out md:sticky md:top-0 md:h-screen md:translate-x-0',
-          rail ? 'w-[68px]' : 'w-64',
+          rail ? 'w-[68px]' : 'w-72 max-w-[calc(100vw-3rem)] md:w-64',
           open ? 'translate-x-0 shadow-drawer' : '-translate-x-full',
         )}
       >
@@ -119,6 +142,7 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
         >
           <Link
             to={nav[0]?.items[0]?.to ?? '/'}
+            onClick={() => setOpen(false)}
             className="rounded-md outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
           >
             <BrandLockup compact={rail} />
@@ -126,7 +150,7 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
           <Button
             variant="ghost"
             size="icon"
-            className="h-8 w-8 md:hidden"
+            className="h-11 w-11 md:hidden"
             aria-label={t('common:closeNav')}
             onClick={() => setOpen(false)}
           >
@@ -134,47 +158,32 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
           </Button>
         </div>
 
-        <nav
-          className={cn(
-            'flex flex-1 flex-col gap-5 overflow-x-hidden overflow-y-auto py-4',
-            rail ? 'px-2.5' : 'px-3',
-          )}
-        >
-          {nav.map((group, gi) => (
-            <div key={group.title ?? `g${gi}`} className="flex flex-col gap-0.5">
-              {group.title !== undefined &&
-                (rail ? (
-                  <span className="mx-2 mb-1 h-px bg-sidebar-border" aria-hidden />
-                ) : (
-                  <span className="mb-1 px-3 text-[11px] font-semibold tracking-wider text-muted-foreground/80 uppercase">
-                    {group.title}
-                  </span>
-                ))}
-              {group.items.map((item) => (
-                <NavLink key={item.to} item={item} rail={rail} />
-              ))}
-            </div>
-          ))}
-        </nav>
+        <SidebarNav
+          pathname={pathname}
+          nav={nav}
+          rail={rail}
+          onExpand={toggleCollapsed}
+          onNavigate={() => setOpen(false)}
+        />
 
-        <SidebarFooter rail={rail} />
-
-        {/* 折叠开关挂在侧栏右缘中部，鼠标划过边线即见 */}
-        <Tooltip content={rail ? t('common:expandNav') : t('common:collapseNav')} side="bottom">
-          <button
-            type="button"
-            aria-label={rail ? t('common:expandNav') : t('common:collapseNav')}
-            onClick={toggleCollapsed}
-            className="absolute top-1/2 -right-3 z-10 hidden h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-card transition-colors hover:text-foreground md:flex"
-          >
-            {rail ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronLeft className="h-3.5 w-3.5" />}
-          </button>
-        </Tooltip>
+        {workspace && (workspace.permission === undefined || can(workspace.permission)) && (
+          <div className={cn('shrink-0 border-t border-sidebar-border py-2', rail ? 'px-2.5' : 'px-3')}>
+            {!rail && <p className="px-3 pb-1 text-[11px] text-muted-foreground">{t('common:switchWorkspace')}</p>}
+            <NavLink item={workspace} rail={rail} onClick={() => setOpen(false)} />
+          </div>
+        )}
+        <SidebarFooter rail={rail} onNavigate={() => setOpen(false)} />
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar title={current?.label ?? ''} onOpenNav={() => setOpen(true)} />
-        <main className="flex-1 px-4 py-5 sm:px-6 lg:px-8">
+      <div className="flex min-w-0 flex-1 flex-col" inert={mobileOpen}>
+        <TopBar
+          title={pathname === '/portal/profile' ? t('profile:title') : current?.label ?? ''}
+          navOpen={mobileOpen}
+          onOpenNav={() => setOpen(true)}
+          collapsed={rail}
+          onToggleNav={toggleCollapsed}
+        />
+        <main id="main-content" tabIndex={-1} className="flex-1 scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8">
           <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4">
             {/* 站点公告置于所有页面内容之上：换页不丢，关掉即记住 */}
             <NoticeBanner />
@@ -188,59 +197,37 @@ export function Shell({ nav: rawNav, children }: { nav: NavGroup[]; children: Re
   )
 }
 
-function NavLink({ item, rail }: { item: NavItem; rail: boolean }) {
-  return (
-    <Tooltip content={rail ? item.label : ''} className="w-full">
-      <Link
-        to={item.to}
-        activeOptions={{ exact: true }}
-        className={cn(
-          'relative flex w-full items-center gap-2.5 rounded-md py-2 text-sm text-sidebar-foreground/85 transition-colors outline-none',
-          'hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40',
-          rail ? 'justify-center px-0' : 'px-3',
-        )}
-        activeProps={{
-          className:
-            'bg-sidebar-accent font-medium text-foreground before:absolute before:top-2 before:bottom-2 before:left-0 before:w-0.5 before:rounded-full before:bg-primary',
-        }}
-      >
-        {item.icon ? (
-          <item.icon className="h-4 w-4 shrink-0 opacity-90" />
-        ) : (
-          <span className="h-4 w-4 shrink-0" />
-        )}
-        {!rail && <span className="truncate">{item.label}</span>}
-      </Link>
-    </Tooltip>
-  )
-}
-
-/// 侧栏底部身份卡：角色 + 用户号 + 价格组。
-/// 顶栏已有余额徽章（最常被问的数字），这里补"我是谁、在哪一档"。
-function SidebarFooter({ rail }: { rail: boolean }) {
+/// 侧栏最底部的身份卡即个人中心入口；折叠与移动端保留相同可访问名称。
+function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => void }) {
   const { t } = useTranslation()
   const me = useMe()
   if (!me.data) return null
   const role = roleLabel(me.data.role, t)
   const initial = role.slice(0, 1).toUpperCase()
   return (
-    <div
-      className={cn(
-        'flex shrink-0 items-center gap-3 border-t border-sidebar-border',
-        rail ? 'justify-center px-0 py-3' : 'px-4 py-3',
-      )}
-    >
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-semibold text-primary">
-        {initial}
-      </span>
-      {!rail && (
-        <div className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium">{role}</span>
-          <span className="truncate text-xs text-muted-foreground">
-            {t('common:userId', { id: me.data.user_id })} · {me.data.group}
+    <div className="shrink-0 border-t border-sidebar-border p-2">
+      <Tooltip content={rail ? t('profile:title') : ''} className="flex w-full">
+        <Link
+          to="/portal/profile"
+          aria-label={t('profile:title')}
+          onClick={onNavigate}
+          activeProps={{ className: 'bg-primary/10 text-primary', 'aria-current': 'page' }}
+          className={cn('flex min-h-12 w-full items-center gap-3 rounded-lg outline-none transition-colors hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-primary/40', rail ? 'justify-center' : 'px-2 py-2')}
+        >
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-semibold text-primary">
+            {initial}
           </span>
-        </div>
-      )}
+          {!rail && (
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate text-sm font-medium">{t('profile:title')}</span>
+              <span className="truncate text-xs text-muted-foreground">
+                {t('common:userId', { id: me.data.user_id })} · {me.data.group}
+              </span>
+            </div>
+          )}
+          {!rail && <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />}
+        </Link>
+      </Tooltip>
     </div>
   )
 }
@@ -249,7 +236,15 @@ function SidebarFooter({ rail }: { rail: boolean }) {
 ///
 /// 身份区展示余额与分组：中转后台最常被问的两个问题就是"我还有多少钱"和
 /// "我在哪个价格组"，放在常驻位置省掉一次跳转。
-function TopBar({ title, onOpenNav }: { title: string; onOpenNav: () => void }) {
+/// 侧栏收放也在这里：窄屏是抽屉菜单，桌面是收起/展开切换——同一位置一个按钮
+/// 只随断点换职责，比塞在侧栏底部更符合"控制不在它所控制的东西里面"的直觉。
+function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav }: {
+  title: string
+  navOpen: boolean
+  onOpenNav: () => void
+  collapsed: boolean
+  onToggleNav: () => void
+}) {
   const { t, i18n } = useTranslation()
   const navigate = useNavigate()
   const me = useMe()
@@ -276,11 +271,23 @@ function TopBar({ title, onOpenNav }: { title: string; onOpenNav: () => void }) 
       <Button
         variant="ghost"
         size="icon"
-        className="-ml-2 h-9 w-9 md:hidden"
+        className="-ml-2 h-11 w-11 md:hidden"
         aria-label={t('common:openNav')}
+        aria-controls="app-navigation"
+        aria-expanded={navOpen}
         onClick={onOpenNav}
       >
         <MenuIcon className="h-4.5 w-4.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        className="-ml-2 hidden h-9 w-9 md:inline-flex"
+        aria-label={collapsed ? t('common:expandNav') : t('common:collapseNav')}
+        aria-controls="app-navigation"
+        onClick={onToggleNav}
+      >
+        {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
       </Button>
       <h1 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h1>
 
@@ -301,7 +308,7 @@ function TopBar({ title, onOpenNav }: { title: string; onOpenNav: () => void }) 
         align="end"
         className="min-w-44"
         trigger={
-          <Button variant="ghost" size="icon" className="h-9 w-9" aria-label={t('common:language')}>
+          <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" aria-label={t('common:language')}>
             <Languages className="h-4 w-4" />
           </Button>
         }
@@ -319,7 +326,7 @@ function TopBar({ title, onOpenNav }: { title: string; onOpenNav: () => void }) 
         align="end"
         className="min-w-44"
         trigger={
-          <Button variant="ghost" size="icon" className="h-9 w-9" aria-label={t('common:theme')}>
+          <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" aria-label={t('common:theme')}>
             <ThemeIcon className="h-4 w-4" />
           </Button>
         }
@@ -337,7 +344,7 @@ function TopBar({ title, onOpenNav }: { title: string; onOpenNav: () => void }) 
       </Menu>
 
       <Tooltip content={t('common:logout')} side="bottom">
-        <Button variant="ghost" size="icon" className="h-9 w-9" onClick={logout} aria-label={t('common:logout')}>
+        <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" onClick={logout} aria-label={t('common:logout')}>
           <LogOut className="h-4 w-4" />
         </Button>
       </Tooltip>

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT GREATEST(COALESCE((upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS \"cost_milli!\"\n           FROM channels WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cost_milli!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ba9ec0dcb37b6c9f20635dc6e16d64ecd831f90fc9e0ed95cf1662e5989e0b19"
+}

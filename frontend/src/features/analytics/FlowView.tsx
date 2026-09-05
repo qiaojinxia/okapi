@@ -8,6 +8,9 @@ import { FLOW_METRICS } from '@/routes/admin.stats'
 import { Card, CardContent } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
+import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { flowIdentity, flowShortName } from './flow-labels'
+import { selectClass } from './AnalysisControls'
 import { cleanSearch, cubeParams } from '@/features/analytics/search'
 import type { FlowNode, FlowResp } from '@/features/analytics/types'
 import { apiFetch } from '@/lib/api'
@@ -16,7 +19,7 @@ import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoneyAggregate } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
-const STAGE_ORDER: FlowNode['stage'][] = ['user', 'api_key', 'group', 'model', 'channel']
+const STAGE_ORDER: FlowNode['stage'][] = ['user', 'node', 'api_key', 'group', 'model', 'channel']
 
 /// 阶段配色：同一阶段同色，跨阶段用分类色板的相邻色——读者按列识别阶段，
 /// 而不是按节点识别实体（实体名写在节点旁）。
@@ -24,7 +27,7 @@ function stageColor(stage: FlowNode['stage']): string {
   return chartColor(STAGE_ORDER.indexOf(stage))
 }
 
-/// 流向视图：用户 → 密钥 → 分组 → 模型 → 渠道 的桑基图（new-api 数据看板 Flow 的对应物）。
+/// 流向视图：用户 → 网关节点 → 密钥 → 分组 → 模型 → 渠道 的桑基图（new-api 数据看板 Flow 的对应物）。
 ///
 /// 它回答别的图答不了的一类问题——"这条渠道的流量是谁打的""这个用户的钱经过
 /// 哪些模型流向了哪几家上游"。每列只留 Top N，其余折成灰色"其他"；点击具名节点
@@ -35,12 +38,15 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
   const locale = i18n.language
   const navigate = useNavigate({ from: '/admin/stats' })
   const metric: FlowMetric = search.metric ?? 'amount'
-  const params = cubeParams(search, { metric, limit: '6' })
+  const configuredStages = STAGE_ORDER.filter((s) => !search.stages || search.stages.includes(s))
+  const params = cubeParams(search, { metric, limit: String(search.limit ?? 6), stages: search.stages ? JSON.stringify(search.stages) : undefined })
   const q = useQuery({
     queryKey: qk.statsFlow(params),
     queryFn: () => apiFetch<FlowResp>(`/admin/stats/flow?${params}`),
     retry: false,
   })
+
+  const stages = q.data?.stages?.length ? STAGE_ORDER.filter((s) => q.data?.stages.includes(s)) : configuredStages
 
   const metricLabel: Record<FlowMetric, string> = {
     amount: t('analytics:kpiSpend'),
@@ -49,6 +55,7 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
   }
   const stageLabel: Record<FlowNode['stage'], string> = {
     user: t('analytics:dimUser'),
+    node: t('analysis:node'),
     api_key: t('analytics:dimApiKey'),
     group: t('analytics:dimGroup'),
     model: t('analytics:dimModel'),
@@ -69,19 +76,18 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
     return { nodes, links }
   }, [q.data])
 
-  const nodeName = (n: FlowNode): string => {
-    if (n.other) return t('analytics:other')
-    if (n.label) return n.label
-    return n.stage === 'model' || n.stage === 'group' ? n.key : `#${n.key}`
+  const nodeName = (n: FlowNode) => flowIdentity(n, t).primary
+  const nodeDetail = (n: FlowNode) => {
+    const identity = flowIdentity(n, t)
+    return [stageLabel[n.stage], identity.primary, identity.detail, fmt(n.value), q.data?.total ? formatBp(Math.round(n.value / q.data.total * 10_000), locale) : ''].filter(Boolean).join(' · ')
   }
-  // 节点旁只放得下二十来个字符：长名字截断，完整名进 <title>（悬停可见）
-  const shortName = (n: FlowNode): string => {
-    const s = nodeName(n)
-    return s.length > 22 ? `${s.slice(0, 21)}…` : s
-  }
+  const actualStages = STAGE_ORDER.filter((stage) => graph?.nodes.some((n) => n.stage === stage))
+  const maxStageNodes = Math.max(1, ...actualStages.map((s) => graph?.nodes.filter((n) => n.stage === s).length ?? 0))
+  const graphHeight = Math.max(420, maxStageNodes * 42 + 48)
+  const missingNames = graph?.nodes.some((n) => flowIdentity(n, t).missing)
 
   const focus = (n: FlowNode) => {
-    if (n.other) return
+    if (n.other || !n.key || (['user', 'api_key', 'channel'].includes(n.stage) && n.key === '0')) return
     const patch: Partial<AnalyticsSearch> = {}
     switch (n.stage) {
       case 'user':
@@ -96,6 +102,7 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
       case 'model':
         patch.model = n.key
         break
+      case 'node': patch.node = n.key; break
       case 'group':
         patch.group = n.key
         break
@@ -125,16 +132,7 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
           )}
         </div>
 
-        {/* 列头：让读者先知道五列各是什么，再读节点 */}
-        <div className="grid grid-cols-5 text-center text-[11px] text-muted-foreground">
-          {STAGE_ORDER.map((s) => (
-            <span key={s} className="flex items-center justify-center gap-1">
-              <span className="inline-block h-2 w-2 rounded-sm" style={{ background: stageColor(s) }} />
-              {stageLabel[s]}
-            </span>
-          ))}
-        </div>
-
+        <div className="flex flex-wrap items-center gap-3 rounded-lg bg-muted/30 p-3 text-xs"><span className="text-muted-foreground">{t('analysis:stages')}</span>{STAGE_ORDER.map((stage) => <label key={stage} className="flex min-h-8 cursor-pointer items-center gap-1.5"><input type="checkbox" checked={stages.includes(stage)} disabled={stages.includes(stage) && stages.length <= 2} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, stages: e.target.checked ? STAGE_ORDER.filter((s) => stages.includes(s) || s === stage) : stages.filter((s) => s !== stage) }) })} />{stageLabel[stage]}</label>)}<label className="flex items-center gap-2">{t('analysis:top')}<select className={selectClass} value={search.limit ?? 6} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, limit: Number(e.target.value) }) })}>{[3, 6, 10, 20].map((n) => <option key={n}>{n}</option>)}</select></label></div>
         {q.isError ? (
           <ErrorState message={describeError(q.error)} />
         ) : q.isLoading || graph === null ? (
@@ -142,18 +140,17 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
         ) : graph.nodes.length === 0 || graph.links.length === 0 ? (
           <EmptyState hint={t('admin:trendEmptyHint')} />
         ) : (
-          <div className="h-[28rem]">
+          <div className="max-w-full overflow-x-auto"><div style={{ height: graphHeight, minWidth: Math.max(620, actualStages.length * 145 + 40) }}>
             <ResponsiveContainer width="100%" height="100%">
               <Sankey
                 data={{
-                  nodes: graph.nodes.map((n) => ({ name: nodeName(n) })),
+                  nodes: graph.nodes.map((n) => ({ name: [nodeName(n), flowIdentity(n, t).detail].filter(Boolean).join(' · ') })),
                   links: graph.links,
                 }}
                 nodeWidth={12}
-                nodePadding={14}
-                // 右侧留出最后一列标签的位置：五列标签统一放节点右侧，避免相邻两列的
-                // 左/右标签在同一条空隙里对撞
-                margin={{ top: 8, right: 190, bottom: 8, left: 8 }}
+                nodePadding={28}
+                // 右侧留出两行标签的空间；标题由节点实际 x 坐标绘制，兼容不同阶段数。
+                margin={{ top: 44, right: 148, bottom: 24, left: 8 }}
                 // 链接按来源列着色：一眼能看出"这条带子从哪一列流出来"
                 link={(props) => {
                   const sourceNode = graph.nodes[graph.links[props.index]?.source ?? -1]
@@ -173,10 +170,15 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
                   const n = graph.nodes[props.index]
                   if (!n) return <g />
                   const fill = n.other ? OTHER_COLOR : stageColor(n.stage)
-                  const clickable = !n.other
+                  const clickable = !n.other && !!n.key && !(['user', 'api_key', 'channel'].includes(n.stage) && n.key === '0')
+                  const identity = flowIdentity(n, t)
+                  const firstInStage = graph.nodes.findIndex((node) => node.stage === n.stage) === props.index
+                  const secondary = [identity.missing ? identity.id : '', fmt(n.value), identity.deleted ? t('flow:deleted') : ''].filter(Boolean).join(' · ')
                   return (
-                    <Layer key={n.id}>
-                      <title>{`${nodeName(n)} · ${fmt(n.value)}`}</title>
+                    <g key={n.id}>
+                      {firstInStage && <g data-flow-stage={n.stage}><circle cx={props.x + 4} cy={18} r={3.5} fill={stageColor(n.stage)} /><text x={props.x + 14} y={22} fontSize={11} className="fill-muted-foreground">{stageLabel[n.stage]}</text></g>}
+                    <Layer data-flow-node={n.id} role={clickable ? 'button' : undefined} tabIndex={clickable ? 0 : undefined} aria-label={nodeDetail(n)} onKeyDown={(e) => { if (clickable && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); focus(n) } }}>
+                      <title>{nodeDetail(n)}</title>
                       <Rectangle
                         x={props.x}
                         y={props.y}
@@ -188,36 +190,27 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
                         className={clickable ? 'cursor-pointer' : undefined}
                         onClick={() => focus(n)}
                       />
-                      {/* 太矮的节点不写字：相邻几个 1% 的节点各写一行会叠成一团，悬停 title 仍可见 */}
-                      {props.height >= 9 && (
-                        <text
-                          x={props.x + props.width + 6}
-                          y={props.y + props.height / 2}
-                          textAnchor="start"
-                          dominantBaseline="middle"
-                          fontSize={11}
-                          className={clickable ? 'cursor-pointer fill-foreground' : 'fill-muted-foreground'}
-                          onClick={() => focus(n)}
-                        >
-                          {shortName(n)}
-                          <tspan className="fill-muted-foreground" dx={4}>
-                            {fmt(n.value)}
-                          </tspan>
-                        </text>
-                      )}
+                      <text x={props.x + props.width + 6} y={props.y + props.height / 2 - 3}
+                        fontSize={11} fontWeight={500} className={clickable ? 'cursor-pointer fill-foreground' : 'fill-muted-foreground'} onClick={() => focus(n)}>
+                        <tspan data-flow-name="true">{flowShortName(nodeName(n))}</tspan>
+                        <tspan x={props.x + props.width + 6} dy={15} fontSize={10} fontWeight={400} className="fill-muted-foreground">{flowShortName(secondary)}</tspan>
+                      </text>
                     </Layer>
+                    </g>
                   )
                 }}
               >
                 <Tooltip
                   formatter={(v) => fmt(Number(v))}
-                  contentStyle={{ fontSize: 12 }}
+                  contentStyle={{ fontSize: 12, maxWidth: 360, whiteSpace: 'normal', overflowWrap: 'anywhere', background: 'var(--color-popover)', color: 'var(--color-popover-foreground)', borderColor: 'var(--color-border)', borderRadius: 10 }}
                 />
               </Sankey>
             </ResponsiveContainer>
-          </div>
+          </div></div>
         )}
-        <p className="text-xs text-muted-foreground">{t('analytics:flowHint')}</p>
+        {missingNames && <p className="text-xs text-muted-foreground">{t('flow:missingHint')}</p>}
+        {graph && graph.nodes.length > 0 && <details className="rounded-lg border border-border"><summary className="cursor-pointer px-3 py-2 text-sm font-medium">{t('flow:details')} · {graph.nodes.length}</summary><Table><THead><Tr><Th>{t('analysis:stages')}</Th><Th>{t('flow:name')}</Th><Th>{t('flow:identity')}</Th><Th>{metricLabel[metric]}</Th><Th>{t('flow:share')}</Th></Tr></THead><TBody>{actualStages.flatMap((stage) => graph.nodes.filter((n) => n.stage === stage).sort((a, b) => b.value - a.value)).map((n) => <Tr key={n.id}><Td>{stageLabel[n.stage]}</Td><Td><button type="button" className="text-left font-medium hover:text-primary disabled:cursor-default disabled:text-muted-foreground" disabled={n.other || !n.key || n.key === '0'} onClick={() => focus(n)}>{nodeName(n)}</button></Td><Td className="text-xs text-muted-foreground">{flowIdentity(n, t).detail || '—'}</Td><Td>{fmt(n.value)}</Td><Td>{q.data?.total ? formatBp(Math.round(n.value / q.data.total * 10_000), locale) : '—'}</Td></Tr>)}</TBody></Table></details>}
+        <p className="text-xs text-muted-foreground">{t('analytics:flowHint', { n: search.limit ?? 6 })} {t('analysis:stageHint')}</p>
       </CardContent>
     </Card>
   )

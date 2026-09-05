@@ -312,20 +312,34 @@ pub async fn overview(
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
-    let days = q.days();
+    let calendar = super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;
+    let days = calendar.days();
+    let range = calendar.day_filter();
 
     let today_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day = today()");
     // 昨日同档：单看"今日 1485 次请求"无法判断好坏，环比才是运营真正读的那个数。
     // 取整日而非"昨日同一时刻"——同比对齐时刻要按小时聚合，mv_user_day 是日粒度；
     // 前端据此标注为「昨日全天」，不假装是等时长对比。
     let yesterday_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day = today() - 1");
-    let window_sql =
-        format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day >= today() - {days}");
+    let window_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE {range}");
     let today = ch.query_json_each_row(&today_sql).await?;
     let yesterday = ch.query_json_each_row(&yesterday_sql).await?;
     let window = ch.query_json_each_row(&window_sql).await?;
 
-    let pack = |rows: &[Value]| {
+    let coverage = ch.query_json_each_row(&format!("SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} OR day = today() - 1 GROUP BY day")).await?;
+    let known_for = |start: &str, end: &str| {
+        let mut sums = [0_i64; 3];
+        for row in coverage
+            .iter()
+            .filter(|r| r["day"].as_str().is_some_and(|d| d >= start && d <= end))
+        {
+            for (sum, key) in sums.iter_mut().zip(["known", "revenue", "cost"]) {
+                *sum = sum.saturating_add(ch_i64(row, key));
+            }
+        }
+        sums
+    };
+    let pack = |rows: &[Value], known: [i64; 3]| {
         let Some(r) = rows.first() else {
             return json!({});
         };
@@ -333,7 +347,7 @@ pub async fn overview(
         let cost = ch_i64(r, "upstream_cost_micro");
         let requests = ch_i64(r, "requests");
         let errors = ch_i64(r, "errors");
-        json!({
+        let mut result = json!({
             "requests": requests,
             "errors": errors,
             "error_rate_bp": rate_bp(errors, requests),
@@ -346,14 +360,17 @@ pub async fn overview(
             "margin_micro": amount.saturating_sub(cost),
             "margin_rate_bp": rate_bp(amount.saturating_sub(cost), amount),
             "active_users": ch_i64(r, "active_users"),
-        })
+        });
+        apply_cost_coverage(&mut result, requests, known);
+        result
     };
 
+    let yesterday_date = (calendar.end - chrono::Days::new(1)).to_string();
     Ok(Json(json!({
         "days": days,
-        "today": pack(&today),
-        "yesterday": pack(&yesterday),
-        "window": pack(&window),
+        "today": pack(&today, known_for(&calendar.today, &calendar.today)),
+        "yesterday": pack(&yesterday, known_for(&yesterday_date, &yesterday_date)),
+        "window": pack(&window, known_for(&calendar.start.to_string(), &calendar.today)),
     })))
 }
 
@@ -794,6 +811,8 @@ pub struct BreakdownQuery {
     /// `key`（缺省：只看当前这把 key，合作商员工视角）| `user`（钱包主体汇总）。
     #[serde(default)]
     pub scope: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
 }
 
 /// GET /api/me/stats/breakdown：门户看板的单一数据源（mv_key_model_day）。
@@ -812,7 +831,15 @@ pub async fn my_breakdown(
 ) -> Result<Json<Value>, AppError> {
     let key = crate::gateway::auth::authenticate(&state, &headers).await?;
     let ch = ch_or_disabled(&state)?;
-    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let window = super::usage_details::CalendarWindow::read(
+        ch,
+        q.days.unwrap_or(7),
+        q.start_date.as_deref(),
+        q.end_date.as_deref(),
+    )
+    .await?;
+    let days = window.days();
+    let range = window.day_filter();
     let user_scope = q.scope.as_deref() == Some("user");
     let key_filter = if user_scope {
         String::new()
@@ -826,14 +853,14 @@ pub async fn my_breakdown(
                 sumMerge(completion_tokens) AS completion, sumMerge(reasoning_tokens) AS reasoning, \
                 sumMerge(amount) AS spend, sumMerge(discount) AS saved, sumMerge(errors) AS errs \
          FROM mv_key_model_day \
-         WHERE user_id = {}{key_filter} AND day >= today() - {days} \
+         WHERE user_id = {}{key_filter} AND {range} \
          GROUP BY day, model ORDER BY day, spend DESC",
         key.user_id
     );
     let rows = ch.query_json_each_row(&sql).await?;
 
     let mut total = [0_i64; 7]; // reqs, prompt, cached, completion, reasoning, spend, saved
-    let data: Vec<Value> = rows
+    let mut data: Vec<Value> = rows
         .iter()
         .map(|r| {
             let cells = [
@@ -865,7 +892,7 @@ pub async fn my_breakdown(
 
     // 平均 RPM/TPM 对齐 new-api 数据看板口径：窗口总量 ÷ 窗口分钟数。
     // 用百万分位：个人用户一天 2 笔 = 0.0007/min，千分位仍截成 0。
-    let minutes = i64::from(days) * 1_440;
+    let minutes = days * 1_440;
     let tokens = total[1].saturating_add(total[3]);
 
     // 钱包级窗口消费（与 scope 无关，恒按用户聚合）：余额是钱包的属性，"还能撑几天"
@@ -873,7 +900,7 @@ pub async fn my_breakdown(
     // 会把公司钱包的寿命高估好几倍。mv_user_day 主键前缀点查，≤ days 行。
     let wallet_sql = format!(
         "SELECT sumMerge(amount) AS spend FROM mv_user_day \
-         WHERE user_id = {} AND day >= today() - {days}",
+         WHERE user_id = {} AND {range}",
         key.user_id
     );
     let wallet_spend = ch
@@ -899,9 +926,13 @@ pub async fn my_breakdown(
         })
     };
 
-    Ok(Json(json!({
+    let owner = format!("user_id = {}{key_filter}", key.user_id);
+    let extra = super::usage_details::enrich(ch, &owner, &range, &mut data).await?;
+    let errors: i64 = data.iter().map(|row| ch_i64(row, "errors")).sum();
+    let mut response = json!({
         "scope": if user_scope { "user" } else { "key" },
         "days": days,
+        "window": window.json(),
         "total": {
             "requests": total[0],
             "prompt_tokens": total[1],
@@ -911,6 +942,9 @@ pub async fn my_breakdown(
             "tokens": tokens,
             "amount_micro": total[5],
             "discount_micro": total[6],
+            "original_micro": total[5].saturating_add(total[6]),
+            "errors": errors,
+            "success_rate_bp": if total[0] > 0 { json!(rate_bp(total[0].saturating_sub(errors), total[0])) } else { Value::Null },
             "cache_hit_bp": rate_bp(total[2], total[1]),
             "avg_rpm_micro": total[0].saturating_mul(1_000_000) / minutes,
             "avg_tpm_micro": tokens.saturating_mul(1_000_000) / minutes,
@@ -919,7 +953,11 @@ pub async fn my_breakdown(
         "wallet_window_spend_micro": wallet_spend,
         "live": live,
         "data": data,
-    })))
+    });
+    if let (Some(total), Some(extra)) = (response["total"].as_object_mut(), extra.as_object()) {
+        total.extend(extra.clone());
+    }
+    Ok(Json(response))
 }
 
 /// GET /api/me/stats/daily：我的按日用量（用户门户曲线）。
@@ -967,7 +1005,9 @@ pub async fn margin(
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
-    let days = q.days();
+    let window = super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;
+    let days = window.days();
+    let range = window.day_filter();
 
     let sql = format!(
         "SELECT day, \
@@ -977,11 +1017,15 @@ pub async fn margin(
                 sumMerge(discount) AS discount_micro, \
                 sumMerge(upstream_cost) AS upstream_cost_micro, \
                 sumMerge(errors) AS errors \
-         FROM mv_user_day WHERE day >= today() - {days} \
+         FROM mv_user_day WHERE {range} \
          GROUP BY day ORDER BY day"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
 
+    let coverage = ch.query_json_each_row(&format!(
+        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {} GROUP BY day", range
+    )).await?;
+    let mut known_totals = [0_i64; 3];
     let mut total_amount = 0_i64;
     let mut total_cost = 0_i64;
     let mut total_discount = 0_i64;
@@ -998,20 +1042,29 @@ pub async fn margin(
             total_discount = total_discount.saturating_add(discount);
             total_requests = total_requests.saturating_add(ch_i64(r, "requests"));
             total_errors = total_errors.saturating_add(ch_i64(r, "errors"));
-            json!({
+            let day = r.get("day").and_then(Value::as_str).unwrap_or_default();
+            let known = coverage.iter().find(|c| c["day"] == day);
+            let values =
+                ["known", "revenue", "cost"].map(|field| known.map_or(0, |c| ch_i64(c, field)));
+            for (acc, v) in known_totals.iter_mut().zip(values) {
+                *acc = acc.saturating_add(v);
+            }
+            let mut row = json!({
                 "day": r.get("day").and_then(Value::as_str).unwrap_or_default(),
                 "requests": ch_i64(r, "requests"),
                 "amount_micro": amount,
                 "original_micro": ch_i64(r, "original_micro"),
                 "discount_micro": discount,
                 "upstream_cost_micro": cost,
-                "margin_micro": amount.saturating_sub(cost),
-            })
+            });
+            apply_cost_coverage(&mut row, ch_i64(r, "requests"), values);
+            row
         })
         .collect();
 
-    Ok(Json(json!({
+    let mut result = json!({
         "days": days,
+        "window": window.json(),
         "data": data,
         "total": {
             "requests": total_requests,
@@ -1023,5 +1076,37 @@ pub async fn margin(
             "margin_micro": total_amount.saturating_sub(total_cost),
             "margin_rate_bp": rate_bp(total_amount.saturating_sub(total_cost), total_amount),
         },
-    })))
+    });
+    apply_cost_coverage(&mut result["total"], total_requests, known_totals);
+    result["window"]["freshness"] = super::analysis_freshness::read(&state).await?;
+    Ok(Json(result))
+}
+
+/// Known zero cost counts as covered; absent historical costs never become fictitious margin.
+fn apply_cost_coverage(row: &mut Value, requests: i64, values: [i64; 3]) {
+    let [known, revenue, cost] = values;
+    let margin = revenue.saturating_sub(cost);
+    row["cost_known_requests"] = json!(known);
+    row["cost_coverage_bp"] = if requests > 0 {
+        json!(rate_bp(known, requests))
+    } else {
+        Value::Null
+    };
+    row["known_cost_micro"] = json!(cost);
+    row["known_amount_micro"] = json!(revenue);
+    row["known_margin_micro"] = if known > 0 {
+        json!(margin)
+    } else {
+        Value::Null
+    };
+    row["margin_micro"] = if known == requests && requests > 0 {
+        json!(margin)
+    } else {
+        Value::Null
+    };
+    row["margin_rate_bp"] = if known == requests && revenue > 0 {
+        json!(rate_bp(margin, revenue))
+    } else {
+        Value::Null
+    };
 }

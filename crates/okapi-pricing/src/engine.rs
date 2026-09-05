@@ -48,6 +48,10 @@ pub struct Quote {
     pub original: Money,
     /// original − amount（负值 = surge 加价）。
     pub discount: Money,
+    /// 官方价：乘分组倍率之前的模型标价（模型 × 补全 × 缓存 × 档位）。
+    /// 上游按这条价收钱，渠道相对成本系数乘在它上面得上游成本（§11.18）；
+    /// 分组倍率是站内加价 / 折扣，不进上游成本。
+    pub list_price: Money,
     /// 每笔账可解释的完整快照。
     pub snapshot: PricingSnapshot,
 }
@@ -322,6 +326,7 @@ fn calc_tokens(
         .ok_or(PricingError::Overflow)?;
 
     let v = step(eff, set.model)?;
+    let list_price = micro_from_token_scaled(v)?;
     let v = step(v, group_ratio)?;
     let original = micro_from_token_scaled(v)?;
 
@@ -369,6 +374,7 @@ fn calc_tokens(
         amount,
         original,
         discount,
+        list_price,
         snapshot,
     })
 }
@@ -415,6 +421,7 @@ fn calc_per_call(
         amount,
         original,
         discount,
+        list_price: price,
         snapshot,
     })
 }

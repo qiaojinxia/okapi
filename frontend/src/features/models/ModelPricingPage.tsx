@@ -147,7 +147,7 @@ export function ModelPricingPage() {
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:modelsEmptyHint')} />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>{t('admin:modelName')}</Th>

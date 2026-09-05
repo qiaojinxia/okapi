@@ -132,7 +132,7 @@ export function UsersPage() {
           hint={query !== '' ? t('common:noResultsHint') : undefined}
         />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>ID</Th>

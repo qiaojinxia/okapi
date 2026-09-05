@@ -138,6 +138,8 @@ interface LogRow {
   amount_micro: number
   original_amount_micro: number
   discount_micro: number
+  /// 上游成本（官方价 × 渠道相对成本系数）；成本采集上线前的历史行为 0。
+  upstream_cost_micro: number
   latency_ms: number
   ttft_ms: number
   is_stream: boolean
@@ -505,7 +507,7 @@ function LogTable({
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />
       ) : (
-        <Table dense>
+        <Table dense stickyHeader>
           <THead>
             <Tr>
               <Th className="w-6" />
@@ -802,6 +804,18 @@ function RowDetail({ row }: { row: LogRow }) {
             {row.discount_micro > 0 &&
               item(t('logs:discount'), `-${formatMoney(row.discount_micro, locale)}`)}
             {item(t('logs:final'), <strong>{formatMoney(row.amount_micro, locale)}</strong>)}
+            {/* 成本与毛利只在有成本数据时出现；负毛利标红——这一笔在亏钱 */}
+            {row.upstream_cost_micro > 0 && (
+              <>
+                {item(t('admin:statUpstreamCost'), formatMoney(row.upstream_cost_micro, locale))}
+                {item(
+                  t('admin:statMargin'),
+                  <span className={row.amount_micro < row.upstream_cost_micro ? 'text-destructive' : 'text-success'}>
+                    {formatMoney(row.amount_micro - row.upstream_cost_micro, locale)}
+                  </span>,
+                )}
+              </>
+            )}
             {row.ratio_snapshot && (
               <div className="col-span-2 flex min-w-0 flex-col gap-0.5 sm:col-span-3">
                 <span className="text-[11px] text-muted-foreground">{t('admin:logsRatioSnapshot')}</span>

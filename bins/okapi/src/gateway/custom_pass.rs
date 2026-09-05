@@ -65,7 +65,7 @@ async fn handle(
     request_id: Uuid,
     started: Instant,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
 
     // 渠道点查（透传非热路径，直接 PG；可见性与 chat 同一矩阵语义）
     let channel = okapi_store::channels::custom_pass_channel(
@@ -290,6 +290,12 @@ async fn settle(
         (BillingState::Failed, 5_i16, "refund", 0, Money::ZERO)
     };
     let input = SettlementInput {
+        dimensions: okapi_ledger::pg::UsageDimensions::new(
+            "",
+            "",
+            "/pass/{path}",
+            "/{custom_path}",
+        ),
         request_id,
         log_type,
         user_id: key.user_id,
@@ -303,6 +309,8 @@ async fn settle(
         amount,
         original: quote.original,
         discount: quote.discount,
+        list_price: quote.list_price,
+        upstream_cost: None,
         pricing_epoch: Some(book.epoch()),
         pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),

@@ -32,9 +32,20 @@ echo "▶ 清空 Redis（余额热账本按 user_id 索引，旧键会串到新�
 docker exec "$REDIS_CONTAINER" redis-cli FLUSHDB >/dev/null
 
 if [[ -n "$CH_URL" ]]; then
-  echo "▶ 清空 ClickHouse 明细与 MV"
-  for t in request_log_raw mv_apikey_day mv_channel_5min mv_group_day \
-           mv_model_hour mv_user_day mv_user_model_day; do
+  # 表名从 system.tables 现查，不写死清单。
+  #
+  # 上一版是硬编码的 7 张表，而 schema 早已长到 13 张——漏掉的 6 张（mv_key_model_day /
+  # mv_client_day / mv_error_hour / mv_cube_hour / mv_analysis_hour / mv_cache_write_day）
+  # 会带着**重置前的 user_id** 活下来。PG 的 id 从 1 重新开始后，新用户正好撞上旧聚合，
+  # 门户里就会看到上一茬用户的用量——本文件开头警告的正是这件事，清单却自己漂了。
+  # 改成现查即可免疫后续加表。
+  echo "▶ 清空 ClickHouse 明细与全部 MV"
+  CH_TABLES=$(curl -sS "$CH_URL/" --data-binary \
+    "SELECT name FROM system.tables WHERE database='okapi' AND name NOT LIKE '.inner%' FORMAT TSV" || true)
+  if [[ -z "$CH_TABLES" ]]; then
+    echo "  ⚠ 未能列出 ClickHouse 表，跳过（旧聚合可能串味）" >&2
+  fi
+  for t in $CH_TABLES; do
     curl -sS "$CH_URL/" --data-binary "TRUNCATE TABLE IF EXISTS okapi.$t" >/dev/null || true
   done
 fi

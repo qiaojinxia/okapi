@@ -48,6 +48,7 @@ fn scale_quote(quote: &Quote, units: u32) -> Quote {
         amount: Money::from_micros(quote.amount.as_micros().saturating_mul(n)),
         original: Money::from_micros(quote.original.as_micros().saturating_mul(n)),
         discount: Money::from_micros(quote.discount.as_micros().saturating_mul(n)),
+        list_price: Money::from_micros(quote.list_price.as_micros().saturating_mul(n)),
         snapshot,
     }
 }
@@ -61,7 +62,7 @@ async fn handle(
     request_id: Uuid,
     started: Instant,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
     let probe: ImagesProbe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     let units = probe.n.unwrap_or(1).clamp(1, MAX_IMAGES);
 
@@ -188,7 +189,16 @@ async fn handle(
         {
             Ok(resp) => {
                 commit_and_record(
-                    state, &key, &canonical, &quote, units, request_id, started, &cand, failover,
+                    state,
+                    &key,
+                    &canonical,
+                    &probe.model,
+                    &quote,
+                    units,
+                    request_id,
+                    started,
+                    &cand,
+                    failover,
                     headers,
                 )
                 .await;
@@ -238,6 +248,7 @@ async fn commit_and_record(
     state: &AppState,
     key: &okapi_store::AuthedKey,
     canonical: &str,
+    requested_model: &str,
     quote: &Quote,
     _units: u32,
     request_id: Uuid,
@@ -254,6 +265,12 @@ async fn commit_and_record(
     {
         Ok(CommitOutcome::Committed { balance_after, .. }) => {
             let input = SettlementInput {
+                dimensions: okapi_ledger::pg::UsageDimensions::new(
+                    requested_model,
+                    cand.upstream_model(canonical),
+                    "/v1/images/generations",
+                    "/v1/images/generations",
+                ),
                 request_id,
                 log_type: 2,
                 user_id: key.user_id,
@@ -267,6 +284,8 @@ async fn commit_and_record(
                 amount: quote.amount,
                 original: quote.original,
                 discount: quote.discount,
+                list_price: quote.list_price,
+                upstream_cost: None,
                 pricing_epoch: Some(book.epoch()),
                 pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
                 latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),

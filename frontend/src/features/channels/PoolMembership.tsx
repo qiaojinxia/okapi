@@ -9,6 +9,7 @@ import { FieldGroup } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
 import type { PoolMember, PoolRow } from '@/features/pools/types'
 import { DEFAULT_POOL } from '@/features/pools/types'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -114,12 +115,10 @@ export function PoolMembership({
   channelId,
   current,
   onDone,
-  onMsg,
 }: {
   channelId: number
   current: PoolMember[]
   onDone: () => void
-  onMsg: (m: string) => void
 }) {
   const { t } = useTranslation()
   const [members, setMembers] = useState<PoolMember[]>(current)
@@ -131,10 +130,10 @@ export function PoolMembership({
         body: { pools: members },
       }),
     onSuccess: (r) => {
-      onMsg(r.orphan ? t('admin:poolsSavedOrphan') : t('admin:poolsSaved'))
+      toast.success(r.orphan ? t('admin:poolsSavedOrphan') : t('admin:poolsSaved'))
       onDone()
     },
-    onError: (err) => onMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (

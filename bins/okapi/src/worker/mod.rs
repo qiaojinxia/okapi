@@ -138,7 +138,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                                 events_sum = d.events_sum_micro,
                                 redis_effective = d.redis_effective_micro,
                                 pg_snapshot = d.pg_snapshot_micro,
-                                "对账差异（需人工确认）"
+                                "对账差异（不会自愈：按账本修复走 /admin/reconciliation/repair）"
                             );
                         }
                         let users: Vec<i64> = drifts.iter().take(20).map(|d| d.user_id).collect();
@@ -375,6 +375,145 @@ pub async fn reconcile_balances(
         }
     }
     Ok(drifts)
+}
+
+/// 一个用户的对账修复结果。
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct BalanceRepair {
+    pub user_id: i64,
+    /// 账本权威值（`billing_events` 求和）。
+    pub events_sum_micro: i64,
+    pub redis_before_micro: i64,
+    pub redis_after_micro: i64,
+    /// 被保留的在途预扣合计（`avail + 在途 == 账本` 才是对账不变式）。
+    pub inflight_micro: i64,
+    pub pg_snapshot_before_micro: i64,
+}
+
+/// 按账本重建单个用户的热余额与展示快照。返回 None = 用户不存在/已删除。
+///
+/// 先写 Redis 再写 PG 快照：Redis 是**唯一**决定能不能扣费的那份数据（`reserve.lua`
+/// 只读它、不回源 PG），中途失败的话宁可留一个滞后的展示快照，也不要留一个仍然
+/// 拒服务的热账本。两步都幂等，重跑即可收敛。
+pub async fn repair_balance(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    user_id: i64,
+) -> anyhow::Result<Option<BalanceRepair>> {
+    let Some(row) = sqlx::query!(
+        r#"
+        SELECT u.balance_micro,
+               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id), 0)::bigint
+                   AS "events_sum!"
+        FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
+        "#,
+        user_id
+    )
+    .fetch_optional(pg)
+    .await?
+    else {
+        return Ok(None);
+    };
+    let target = okapi_domain::Money::from_micros(row.events_sum);
+    let outcome = ledger.repair(user_id, target).await?;
+    sqlx::query!(
+        r#"UPDATE users SET balance_micro = $2, updated_at = now() WHERE id = $1"#,
+        user_id,
+        row.events_sum
+    )
+    .execute(pg)
+    .await?;
+    Ok(Some(BalanceRepair {
+        user_id,
+        events_sum_micro: row.events_sum,
+        redis_before_micro: outcome.before.as_micros(),
+        redis_after_micro: outcome.after.as_micros(),
+        inflight_micro: outcome.inflight.as_micros(),
+        pg_snapshot_before_micro: row.balance_micro,
+    }))
+}
+
+/// 结算窗口：Redis commit 与 PG 事件落库不在同一瞬间（结算是响应返回后的后台任务，
+/// 还要过 `settle_gate` 信号量），窗口内 Redis 比账本**低一笔**——对账会把它看成漂移。
+///
+/// 这对修复是致命的：照着尚未记入那笔扣费的账本去重建，等于把正在结算的钱退回去。
+/// 所以修复前采两次样，只有两次完全一致才动手。
+const SETTLE_WINDOW: Duration = Duration::from_millis(1500);
+
+/// 漂移是否稳定（不是结算窗口的瞬时态）。稳定则返回该用户的账本权威值。
+pub async fn stable_drift(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    user_id: i64,
+) -> anyhow::Result<Option<i64>> {
+    let sample = |uid: i64| async move {
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = $1), 0)::bigint
+                       AS "events_sum!"
+            FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
+            "#,
+            uid
+        )
+        .fetch_optional(pg)
+        .await?;
+        let Some(row) = row else {
+            return Ok::<Option<(i64, i64)>, anyhow::Error>(None);
+        };
+        let avail = ledger.balance(uid).await?.as_micros();
+        let inflight: i64 = ledger
+            .list_reservations(uid)
+            .await?
+            .iter()
+            .map(|r| r.amount.as_micros())
+            .sum();
+        Ok(Some((row.events_sum, avail.saturating_add(inflight))))
+    };
+
+    let Some(first) = sample(user_id).await? else {
+        return Ok(None);
+    };
+    tokio::time::sleep(SETTLE_WINDOW).await;
+    let Some(second) = sample(user_id).await? else {
+        return Ok(None);
+    };
+    Ok((first == second).then_some(second.0))
+}
+
+/// 批量修复当前扫出的全部漂移用户。
+///
+/// 两遍对账中间隔一个结算窗口，只修**两遍都在漂且数字没变**的用户——有流量时总有请求
+/// 正处在「Redis 已扣、PG 事件还没落」的中间态，一遍扫描分不清它和真丢数据。
+pub async fn repair_drifted(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    limit: i64,
+) -> anyhow::Result<Vec<BalanceRepair>> {
+    let first = reconcile_balances(pg, ledger, limit).await?;
+    if first.is_empty() {
+        return Ok(Vec::new());
+    }
+    tokio::time::sleep(SETTLE_WINDOW).await;
+    let second = reconcile_balances(pg, ledger, limit).await?;
+    let stable: std::collections::HashMap<i64, &BalanceDrift> =
+        second.iter().map(|d| (d.user_id, d)).collect();
+
+    let mut out = Vec::new();
+    for d in &first {
+        // 两遍数字完全一致才算真漂移；结算中的账户两遍必然不同，跳过
+        let Some(again) = stable.get(&d.user_id) else {
+            continue;
+        };
+        if again.events_sum_micro != d.events_sum_micro
+            || again.redis_effective_micro != d.redis_effective_micro
+        {
+            continue;
+        }
+        if let Some(fixed) = repair_balance(pg, ledger, d.user_id).await? {
+            out.push(fixed);
+        }
+    }
+    Ok(out)
 }
 
 /// 提前创建下月分区（本月数据走当月/DEFAULT 分区；未来行仅来自时钟漂移，忽略）。

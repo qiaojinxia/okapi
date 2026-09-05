@@ -5,9 +5,10 @@ import type { ChannelRow, ChannelSettings } from '@/features/channels/types'
 import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
+import { Field } from '@/components/ui/field'
 import { KeyParamRow } from '@/features/channels/KeyParamRow'
 import { ModelPicker } from '@/features/channels/ModelPicker'
-import { PROVIDERS, readSettings } from '@/features/channels/types'
+import { PROVIDERS, costMilliToRatio, ratioToCostMilli, readSettings } from '@/features/channels/types'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs } from '@/components/ui/tabs'
@@ -18,6 +19,7 @@ import {
   defaultMembership,
 } from '@/features/channels/PoolMembership'
 import type { PoolMember } from '@/features/pools/types'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -46,14 +48,15 @@ export function ChannelDrawer({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const isEdit = channel !== undefined
-  const [msg, setMsg] = useState<string | null>(null)
   const [tab, setTab] = useState<EditTab>('conn')
   const [form, setForm] = useState({
     name: channel?.name ?? '',
     provider: channel?.provider ?? 'openai',
     api_base: channel?.api_base ?? '',
     priority: String(channel?.priority ?? 0),
+    cost: costMilliToRatio(channel?.cost_milli ?? 1000),
   })
+  const costMilli = ratioToCostMilli(form.cost)
   const [models, setModels] = useState<string[]>(channel?.models ?? [])
   const [credential, setCredential] = useState('')
   const [settings, setSettings] = useState<ChannelSettings>(readSettings(channel?.settings ?? null))
@@ -74,13 +77,14 @@ export function ChannelDrawer({
           priority: Number(form.priority) || 0,
           settings,
           pools: newPools,
+          cost_milli: costMilli ?? undefined,
         },
       }),
     onSuccess: () => {
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const save = useMutation({
@@ -93,13 +97,14 @@ export function ChannelDrawer({
           models,
           priority: Number(form.priority) || 0,
           settings,
+          cost_milli: costMilli ?? undefined,
         },
       }),
     onSuccess: () => {
-      setMsg(t('common:success'))
+      toast.success(t('common:success'))
       onDone()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const rotate = useMutation({
@@ -110,10 +115,10 @@ export function ChannelDrawer({
       }),
     onSuccess: () => {
       setCredential('')
-      setMsg(t('admin:credentialRotated'))
+      toast.success(t('admin:credentialRotated'))
       onDone()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   const canSubmit = isEdit
@@ -128,7 +133,6 @@ export function ChannelDrawer({
       description={t('admin:channelDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>
@@ -253,9 +257,9 @@ export function ChannelDrawer({
                   })
                   .then((r) => {
                     setModels(r.data)
-                    setMsg(t('admin:discovered', { n: r.data.length }))
+                    toast.success(t('admin:discovered', { n: r.data.length }))
                   })
-                  .catch((err: unknown) => setMsg(describeError(err)))
+                  .catch((err: unknown) => toast.error(describeError(err)))
               }
             >
               {t('admin:fetchModels')}
@@ -283,6 +287,23 @@ export function ChannelDrawer({
                 onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
               />
             </div>
+            <Field
+              label={t('admin:channelCostMilli')}
+              htmlFor="d-cost"
+              hint={t('admin:channelCostMilliHint')}
+              error={costMilli === null ? t('errors:bad_request', { param: 'cost_milli' }) : undefined}
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">×</span>
+                <Input
+                  id="d-cost"
+                  className="w-24"
+                  inputMode="decimal"
+                  value={form.cost}
+                  onChange={(e) => setForm((f) => ({ ...f, cost: e.target.value }))}
+                />
+              </div>
+            </Field>
             {(channel.keys ?? []).length > 0 && (
               <div className="flex flex-col gap-2">
                 <Label>{t('admin:channelKeys')}</Label>
@@ -293,7 +314,6 @@ export function ChannelDrawer({
                     channelId={channel.id}
                     row={k}
                     onDone={onDone}
-                    onMsg={setMsg}
                   />
                 ))}
               </div>
@@ -303,7 +323,6 @@ export function ChannelDrawer({
             channelId={channel.id}
             current={channel.pool_members ?? []}
             onDone={onDone}
-            onMsg={setMsg}
           />
         </>
       )}

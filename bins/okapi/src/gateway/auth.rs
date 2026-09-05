@@ -42,6 +42,35 @@ pub async fn authenticate(
     Ok(authed)
 }
 
+/// 数据面鉴权 = `authenticate` + key 级 IP 白名单（§11.17）。
+///
+/// 白名单只约束 `/v1/*` 数据面：门户用同一把 key 登录，若把"只许我服务器的 IP 调用"
+/// 也套到门户上，用户在自己笔记本上就再也进不了门户查账——那是把 new-api 令牌
+/// IP 白名单（只作用于中继请求）的语义做错。来源 IP 由 `clients::client_ip` 按 §14.2
+/// 信任闸判定（不可信来源不认转发头，只认 socket 对端）；配了名单却拿不到 IP 按不在
+/// 名单上处理（fail-closed）。
+pub async fn authenticate_data_plane(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Arc<AuthedKey>, AppError> {
+    let authed = authenticate(state, headers).await?;
+    if authed
+        .ip_allowlist
+        .as_deref()
+        .is_some_and(|l| !l.is_empty())
+    {
+        let ip = super::clients::client_ip(headers);
+        if !authed.allows_ip(ip) {
+            return Err(
+                AppError::new(axum::http::StatusCode::FORBIDDEN, codes::IP_NOT_ALLOWED).with_param(
+                    ip.map(|i| i.to_string()).unwrap_or_default(),
+                ),
+            );
+        }
+    }
+    Ok(authed)
+}
+
 /// 团成员月度限额检查（软实时：结算后计数、预扣前比较，§6.1）。
 /// 各计费端点在 reserve 前调用；非团 key / 未配限额直接放行。
 pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(), AppError> {

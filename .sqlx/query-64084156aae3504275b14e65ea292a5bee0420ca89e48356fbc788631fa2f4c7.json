@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key = 'record_ip_log'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "64084156aae3504275b14e65ea292a5bee0420ca89e48356fbc788631fa2f4c7"
+}

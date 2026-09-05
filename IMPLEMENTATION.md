@@ -1236,6 +1236,335 @@ detail 缺省只露前两个键、点行展开为**键值行**而非整块 JSON�
 展开 ip 键、安全页最近登录卡；`screenshots.spec` 增两张。`permissions::ALL` 单测自动核对
 新权限点已登记。
 
+### 11.16 注册策略与邀请赠送（2026-09-02）
+
+**调研**：new-api 的注册相关开关散在"系统设置"一页里（`RegisterEnabled` / `EmailVerificationEnabled` /
+`EmailDomainRestrictionEnabled` + 白名单 / `QuotaForNewUser` / `QuotaForInviter` / `QuotaForInvitee`），
+issue 里反复出现的三类痛点：① 关了注册但登录页仍显示注册入口（#2xxx 系列"点了没反应"）；② 邮箱
+域名白名单只能"允许"不能"拒绝"（临时邮箱刷号要维护一份永远追不上的白名单）；③ 邀请奖励只在
+"充值返利"里有，注册即送要靠手工调额。Sub2API 走邀请码 + 管理员审批，老 ok-api 只有开关。
+
+**定案**：一个 JSON 设置键 `registration_policy`（`settings` 表，60s 进程缓存），六个字段：
+
+- `mode`：`open` / `invite_only` / `closed`。`closed` 时登录页**不渲染注册页签**并给出说明（读公开端点
+  `GET /api/registration`，不需要登录）；`invite_only` 把邀请码变成必填，缺码 403 `invite_required`。
+- `email_domain_mode` + `email_domains`：`any` / `allowlist` / `blocklist`，支持 `*.edu.cn` 通配后缀。
+  **allowlist 才把清单透给注册者**（"仅接受以下域名"）；blocklist 不透——那是给刷号者的对照表。
+- `new_user_credit_micro` / `invitee_credit_micro` / `inviter_credit_micro`：注册成功后由
+  `system:register` 入账，`billing_events` 标 `new_user_gift` / `invite_reward`，资金流入里落"送出"桶，
+  与充值分列（否则会高估现金流）。被邀请人赠送叠加在新用户赠送之上；邀请人奖励在被邀请人注册
+  成功即到账（充值返利仍是 `aff_percent_bp` 的事，两者不混）。
+- 顺序：策略校验 → 邀请人解析 → Turnstile → 建号 → 绑邀请关系 → 入账。前三步失败不消耗任何状态。
+
+**前端**：设置页新增"注册与风控"页签（`RegistrationCard`：分段选择器 + 域名 TagInput + 三个 USD
+输入），与"通知""公告"并列而不是塞进 KV 表；登录页按公开策略渲染（隐藏注册 / 邀请码字段 /
+允许域名提示 / "注册即送 $x"）。
+
+**验收**：`console_auth_web.rs::registration_policy_gates_signup`（closed 403 / allowlist 通配 /
+blocklist / invite_only 缺码 403 / 有效邀请码三方入账金额）+ `registration.rs` 单测（域名匹配、缺省策略）。
+
+### 11.17 key 级 IP 白名单真正执行（2026-09-03）
+
+**发现**：`api_keys.ip_allowlist JSONB` 自 schema 定稿起就在，文档也写着"来源 IP 白名单"，但网关
+从未读过它——配了等于没配，属安全缺口而非功能缺失。new-api 的令牌 IP 白名单（`allow_ips`）只作用于
+中继请求；Sub2API 无此项；老 ok-api 有字段同样未执行。
+
+**定案**：
+
+- 来源 IP 由 `clients::client_ip` 给出：**先过 §14.2 信任闸**（见 §11.19——初版漏掉这一步，
+  白名单一度可被一个 `X-Forwarded-For` 绕过），可信来源才读 CDN 头 / XFF 最右非信任跳，
+  否则只认 `stamp_peer_ip` 写入的内部头 `x-okapi-peer-ip`（`into_make_service_with_connect_info`
+  取 socket 对端）。中间件**先剥再写**：客户端伪造内部头无效。拿不到 IP 而名单非空 → 拒
+  （fail-closed）。
+- 匹配：精确地址或 CIDR（v4 / v6，不跨族），`okapi_store::netmatch`。空名单 = 不限。
+- **只约束数据面** `/v1/*`（`auth::authenticate_data_plane`）：门户用同一把 key 登录，若白名单也套到
+  门户，用户把 key 锁到服务器 IP 后就再也进不了门户查账——这是照搬 new-api 语义时最容易做错的一处。
+- 写入面：门户 `PATCH /api/me/keys/{id}` 与建 key、管理面 `PATCH /admin/keys/{id}` 接受 `ip_allowlist`
+  （数组 / null 解除）；逐条校验可解析，否则 400 `param=ip_allowlist:<条目>`——一条拼错的名单会把 key
+  锁死且毫无提示。去空白去重，空数组存 null。改后 `auth_del` 立即生效。
+- 拒绝码 `403 ip_not_allowed`，`param` 回显识别到的来源 IP（用户排查"为什么被拒"的第一手信息）。
+
+**前端**：门户密钥抽屉（新建 / 编辑同一张）加 IP 白名单 TagInput，提示明说"只约束 /v1、不影响登录"；
+列表行名字下方"限 N 个来源"小字（悬停看清单）；管理端令牌列表加"限 N 个来源 IP"徽章（与限模型 /
+覆盖分组并列——都是"这把 key 为什么打不通"的线索）。
+
+**验收**：`gateway_ip_allowlist.rs` 两用例——CDN 头命中 / 未命中 403 + param / v6 CIDR / XFF 取首个 /
+无头回退 socket 对端 / 伪造内部头无效 / 只放行本机对端的 key 靠 connect info 放行 / 无名单不受影响；
+门户 PATCH 非法条目 400、合法条目去重落库、改后下一请求即按新名单判定、门户接口本身不受名单限制、
+置 null 解除。
+
+### 11.18 上游成本采集与毛利（2026-09-03）
+
+**发现**：`billing_records.upstream_cost_micro` 与 CH `upstream_cost` 列一直存在，`/stats/margin`
+也按公式返回毛利，但 chsink 硬编码 0、结算从不写——毛利永远"待采集"。渠道上早有 `relative_cost_milli`
+（调度加权除数），却没有任何控制面入口能改它。
+
+**调研**：new-api 完全没有成本概念（只有 quota），issue 里"能不能看到每个渠道赚不赚钱"是长期诉求；
+Sub2API 把官方标价当成本、把倍率后的实收当收入，差值即"利润"——这在自己直连官方时成立，走折扣代理 /
+自建模型时全错。取两者之长：**成本 = 官方价 × 渠道相对成本系数**，系数缺省 1.0（= Sub2API 口径），
+折扣代理填 0.5、自建填 0，站长只需按渠道填一个数。
+
+**定案**：
+
+- 定价引擎 `Quote` 新增 `list_price`（乘分组倍率**之前**的模型标价，含档位倍率）。分组倍率是站内加价 /
+  折扣，不进上游成本；`original`（含分组倍率）保持不变。per_call / images / videos 的乘张数同步缩放。
+- `SettlementInput` 新增 `list_price` + `upstream_cost: Option<Money>`；**集中在 `settle_write`
+  折算**（七个计费端点全部经它收口）：成功计费且选中渠道 → `list_price × cost_milli / 1000`，渠道系数
+  经进程缓存（60s，`invalidate_routing_caches` 同步失效）；失败 / 退款为 None（CH 记 0）。退款 outbox
+  行带负成本，MV 口径自动一致。
+- `channels.upstream_unit_cost.relative_cost_milli` 成为正式配置项：`ChannelPatch.cost_milli`、
+  `POST/PATCH /admin/channels` 的 `cost_milli`（0 ～ 100000，越界 400）、列表回显。
+- 历史行成本为 0：所有"毛利"展示都以"窗口内有成本数据"为出现条件，避免把历史算成 100% 毛利。
+
+**前端**：渠道抽屉"调度"页签加"相对成本 ×"输入（倍数字面，整数千分比落库，计费链路不碰浮点）；
+收入页合计徽章加"上游成本"与"毛利 · 毛利率"（负毛利红），柱图加成本柱；分析拆解表加"毛利"列
+（按渠道 / 分组拆解时最该回答的问题：折扣组打在贵渠道上是不是在亏）；KPI 消费卡副行优先显示毛利；
+管理日志详情账单块加成本与单笔毛利。
+
+**验收**：`gateway_upstream_cost.rs`——vip ×2 分组 + 系数 0.5 渠道：实收 = 2 × 官方价、成本 = 官方价 / 2
+（分组倍率不进成本）、outbox 载荷带成本、管理面改系数为 0 后下一笔成本为 0 且列表回显、负系数 400。
+
+### 11.19 转发头信任闸：IP 白名单曾可被一个请求头绕过（2026-09-04）
+
+**发现**：§11.17 把 key 级 IP 白名单接到了 `detect_client_ip` 上，而后者**无条件**信任
+`X-Forwarded-For` / `CF-Connecting-IP` 等转发头并取最左值。转发头是调用方可写的：
+
+```
+curl -H "Authorization: Bearer <泄露的 key>" -H "X-Forwarded-For: <白名单内 IP>" https://gw/v1/chat/completions
+```
+
+直连部署下这直接绕过白名单；**套上项目自带的 `deploy/nginx-sse.conf` 也绕得过**——
+`$proxy_add_x_forwarded_for` 是**追加**而非覆盖，客户端塞的值原样留在链首，而我们取的正是
+链首。同一条路让日志 `client_ip` 列、登录 / 注册 / TOTP / 兑换码的每 IP 限流一起失真；
+白名单尤其致命，因为它是**访问控制**而非统计口径。§14.2 早就写明了正确做法（"edge secret
+验证 → XFF 最右非信任跳；不可信来源一律取 socket 对端"），实现却只落了"按序取首个有效值"
+那半句，信任闸从未存在。
+
+**定案**（补齐 §14.2 两模式，`gateway::clients::TrustPolicy`）：
+
+- **来源可信才读转发头**。可信 = 对端落在 `OKAPI_TRUSTED_PROXIES`（地址 / CIDR 名单）内，
+  或请求带着对得上 `OKAPI_EDGE_KEY` 的 `X-Okapi-Edge-Key`（模式二 #6502，免维护回源段）。
+  缺省（**未设置**该变量）= 仅信任环回，同机反代开箱即用；显式设空串 = 谁都不信，
+  网关直连公网时的正确配置。**容器 / K8s 里反代与网关不同 IP，必须显式配网段**——
+  `deploy/docker-compose.yml` 已给出私网缺省值。
+- 不可信来源一律取 socket 对端（`stamp_peer_ip` 中间件写入的内部头，先剥再写）。
+  **拿不到对端且无边缘凭证 → 不可信**：不知道你从哪来，不该换来"那就信你自己说的"。
+- 可信来源下 XFF 取**最右非信任跳**：反代追加的那一段才是它亲眼看到的对端，更左侧全是
+  上一跳转述。整条链都在信任域内时取最左。
+- `stamp_peer_ip` 同步挂到 console 路由：登录 / 兑换的每 IP 限流与审计 IP 走同一把闸。
+- 反代模板同步硬化：`X-Real-IP` 补设，`CF-Connecting-IP` / `True-Client-IP` /
+  `X-Okapi-Peer-IP` 一律清空后由反代重设——nginx 默认原样透传这些头，网关"信任来源"
+  只能保证**这台反代**可信，保证不了它转述的内容干净。
+
+**验收**：`clients.rs` 五个单测（不可信来源四类头全部无效 / 无对端不退化为信头 /
+最右非信任跳含伪造链首 / 边缘凭证给信任且错凭证不给 / 可信下 CDN 头优先且回落对端）+
+`gateway_ip_allowlist.rs` 补伪造链首用例（链首写白名单内地址、真实对端在最右 → 403 且
+param 回显真实对端）+ `gateway_compat.rs` client_ip 断言改最右跳。
+
+### 11.20 接真实上游实测计费全链路（2026-09-04）
+
+**做法**：清库重置后接一个真实的聚合型上游（OpenAI 兼容，`provider=openai`，
+`cost_milli=500` 半价采购），跑「建模型定价 → 建渠道 → 发布 epoch → 测活 → 发 key 充值 →
+流式对话 → 结算记账 → outbox → CH → 管理面/门户」整条链。结果：
+
+- 快乐路径 ✓：249 帧 SSE 正常透传 + `[DONE]`；prompt 14 / completion 249（含 reasoning 197），
+  `14 + 249×3 = 761` 有效 token ×`model_ratio 0.05`×基准 $2/1M = **76 micro**，与余额扣减一致；
+  上游成本 `76 × 500 / 1000 = 38`，`/admin/stats/margin` 给出毛利率 **5000bp**——§11.18 在真实
+  渠道上口径自洽。快照 / ttft / client_type / outbox → CH 全链无缺口，outbox 0 积压。
+- 失败路径 ✓：上游 403 → 网关 502 `upstream_status`（带 request_id）、预扣**原额退回**、
+  记 `log_type=5 / status=40 / amount=0 / upstream_cost=NULL`（失败不进毛利分母）。
+
+**实测揪出的缺陷（已修）**：`billing_records.client_ip` 建了列却从没写过——`SettlementInput`
+带着它、outbox 载荷里也有（所以 CH 侧一直是对的），唯独 PG 的 INSERT 列清单漏了它，
+永远 NULL。docs §数据字典写的是「client_ip（PG + CH）」。**未接 ClickHouse 的部署因此完全
+查不到来源 IP**，且这列会静默说谎。修：INSERT 补 `$31::text::inet`（按 text 绑定再 cast，
+不为一列去开 sqlx 的 ipnetwork feature；值只可能来自已 parse 的 `clients::client_ip`）。
+
+**实测暴露、尚未处置的三项**：
+
+1. **上游 403 会把渠道 key 打成「永久失效」且控制面没有复活入口**。403/401 → `KeyFailure::Invalid`
+   → `status=6, cooldown_until=NULL`，冷却恢复 worker 只捞 `status IN (2,3,4)`，
+   `PATCH /admin/channels/{id}/keys/{key_id}` 只认 `weight` / `max_concurrency`（传 `status`
+   被静默忽略并返回 `ok:true`）——唯一能拉回 `status=1` 的路径是**重置凭证**。
+   对聚合型上游这条很扎手：它们用 403 表达「这个模型你的套餐没有」而 key 本身完全有效，
+   一次调用一个未开通的模型就会连带把该渠道所有模型打死。至少要区分「凭证无效」与
+   「该模型无权」，并补一个显式的 key 重新启用端点 + 前端按钮。
+2. **渠道测活只验凭证与连通性，不验模型可用性**：`probe_channel` 打的是 `{base}/models`，
+   请求体里的 `model` 字段被忽略。实测里 `gpt-5.2` 测活报 `ok:true / http 200`，真调用却是 403。
+3. **`settings.record_ip_log` 开关从未实现**：docs 对齐表把它标了 ✓（对齐 new-api 的用户级
+   RecordIpLog），但全仓无任何引用——来源 IP 一律记录，站长关不掉，属隐私合规缺口。
+
+### 11.21 补齐「引擎实现了、控制面配不了」的五个缺口（2026-09-04）
+
+§11.20 用真实上游把计费链路跑了一遍，暴露出的不是算错账，而是**配不出来**与**救不回来**。
+逐项处置：
+
+**① 上游 403 不再一律判凭证失效。** 401 = 没通过认证 → 凭证必然有问题；403 = 认证过了但
+不被允许，本质是**按资源**的判定。聚合型上游普遍拿 403 表达「这个模型你的套餐没开通」
+（实测原文 `access_denied / Deposit required to unlock premium models`），而 key 完全有效。
+此前两者一并判 `Invalid`（`status=6`，无冷却、不自愈），于是调一次未开通的模型就把该渠道
+**所有**模型打死。现在 403 只在 body 明说凭证问题（`invalid_api_key` / `unauthorized` 等
+八个特征串）时才判失效，否则按瞬时失败走冷却重试。
+
+**② 失效 key 有了复活入口。** `PATCH /admin/channels/{id}/keys/{key_id}` 增 `status`
+（只收 1/2，其余状态位是状态机自己的），置状态连带清零 `failed_count / cooldown_until /
+last_error`。此前该端点只认 `weight` / `max_concurrency`，传 `status` 被**静默忽略还返回
+`ok:true`**；冷却恢复 worker 只捞 `status IN (2,3,4)`，`6` 谁也捞不着——唯一救法是重置凭证。
+前端：key 行状态非 1 时出「重新启用」按钮，`status=6` 另给一句「不自动恢复」的说明。
+
+**③ 渠道测活可以真验模型。** `probe_channel` 增 `model` 参数：不给 = 原样打 `/models`
+（验凭证与连通性），给了 = 按协议发一次 `max_tokens=1` 的最小补全（openai / anthropic /
+gemini 三种形状；custom_pass 无通用形状，明确 400）。结果加 `scope` 字段区分两种 ok，
+失败带上游原文（截断 300 字）。**前端单条测活改为直接验渠道的第一个模型**——只探 `/models`
+会对一个实际 403 的模型报 `ok:true`，把运维引到错误结论上（§11.20 实测复现过）。
+MCP `channel_test` 同步支持。
+
+**④ 用户个人计价系数有了写入口。** `POST /admin/users/{id}/multiplier`，权限走
+`pricing.write`（它是计价链上与模型倍率、分组倍率并列的乘数，改它等于改这个人的价目表），
+取值 [0, 1000]，改完刷鉴权缓存（系数随 `AuthedKey` 缓存，不刷最长一分钟仍按旧价）。
+此前 `users.price_multiplier` 全仓**只读**：鉴权读它、`/admin/users` 返回它、前端用户列表
+还专门有一列 `×{price_multiplier}` 在展示，却没有任何 UPDATE——那一列永远只能是 ×1。
+前端：用户抽屉「余额」页签加系数编辑（与余额同属「这个人的钱」）。
+
+**⑤ 阶梯计价有了写入口。** `UpsertModelReq` 增 `tier_expr`（`"0:2.5,128000:5"` =
+from_tokens:USD_per_1M）：非空 → `upsert_model_tiered` 写 `pricing_mode='tiered'`；
+空串 → 切回 ratio **并清空阶梯表**（留着它，下次误切 tiered 会拿到一张过期旧表）。
+校验用新增的 `TierTable::check_expr` 在**写入这一步**拦下——阶梯表配错只会在编译价簿时炸，
+那时改动早已发布，整本价簿一起装载失败。此前引擎（`PricingMode::Tiered`）、价簿加载器、
+解析器、schema 用例全都在，唯独没有写入路径：三种计价模式，控制面只配得出 ratio，
+per_call 还得绕 new-api 导入。前端：模型抽屉加阶梯表输入 + 当前模式提示。
+
+**⑥ `settings.record_ip_log` 落地。** 收口在 `settle_write`（七个计费端点全经它），关掉后
+PG 的 `client_ip` 列与 outbox 载荷（→ CH）同时不落；缺省 true——存量站点一直在记，
+缺省关掉会让日志无声地少一列。docs 数据字典早写着「记录与否走 settings.record_ip_log」，
+但此前全仓无人读它，站长关不掉，属隐私合规缺口。前端：设置页新增「隐私与留痕」页签。
+
+**验收**：`channel_key_lifecycle.rs` 三用例（模型级 403 不打死 key / 凭证级 403 仍判失效、
+复活入口含非法状态位 400、测活两种 scope 且失败带上游原文）+ `console_pricing_write.rs`
+三用例（系数非法值 400 / 生效计费 / 进快照 / 404，阶梯表三种非法形态 400 + 命中档位计费 +
+切回 ratio 清表，IP 开关关闭后 PG 列与 outbox 载荷同时为空）。
+
+### 11.22 对账修复入口：热余额丢了此前不可自愈（2026-09-04）
+
+**发现**（运维页实景排查）：三方对账页整表标红，几十个用户「账本有钱、线上余额 0」。
+根因是热账本被清空过，但真正的问题在后面两层：
+
+1. **Redis 是唯一热账本，且 `reserve.lua` 对缺键按余额 0 处理、不回源 PG**
+   （`local bal = tonumber(redis.call('HGET', KEYS[1], 'avail') or '0')`）。
+   所以「Redis 活着但数据没了」——没开持久化的实例重启、故障切到空副本、
+   maxmemory 把 `bal:{}` 淘汰、或者谁手滑 FLUSHDB——会让全站付费请求静默拒服务
+   （429 `insufficient_quota`）。DESIGN §12.2 故障模式表只覆盖了「Redis **挂了** →
+   fail-closed 拒绝」，没覆盖更常见的「Redis **活着但空了**」。
+2. **不会自愈，且没有任何入口能修**。`reconcile_balances` 只算差异、打 ERROR 日志、
+   发 drift 通知，全仓 `BalanceDrift` 仅此三处引用，没有任何写回动作；
+   `BalanceLedger` 的写操作只有 `credit`（加）/`drain`（清零），没有「设成某个值」。
+   而运维页的提示文案却写着「后台对账任务会按账本自动校准」——**站长照着这句话等，
+   会一直等下去**。
+
+**定案**：
+
+- `lua/repair.lua` + `BalanceLedger::repair(user_id, target)`：按账本权威值
+  （`billing_events` 求和）重建 `avail`。**在途预扣不动**——它们各自会按结算/退款路径
+  终结，抹掉会让那些请求结算时凭空多扣或少扣；故设 `avail = 账本 − Σ在途`，
+  保证对账不变式 `avail + 在途 == 账本`。扫描与写入同一脚本内完成，与并发 reserve 原子互斥。
+  不夹逼到 0：账本为负说明确实欠着，夹成 0 等于凭空送钱。
+- `worker::repair_balance`（单用户）/ `repair_drifted`（批量）：先写 Redis 再写 PG 快照——
+  Redis 是唯一决定能否扣费的那份数据，中途失败宁可留一个滞后的展示快照，
+  也不要留一个仍在拒服务的热账本。两步都幂等。
+- **结算窗口保护**（实测发现）：结算是响应返回后的后台任务，Redis commit 与 PG 事件落库
+  之间有个窗口，窗口内 Redis 比账本**低一笔**，一遍对账分不清它和真丢数据。
+  照着修等于把正在结算的钱退回去。故 `stable_drift` 采两次样（间隔 1.5s），
+  两次数字完全一致才动手；批量路径同理只修「两遍都在漂且数字没变」的用户。
+  单用户路径在账目变动时返回 `409 reconcile_unstable`，让管理员隔几秒重试。
+- `POST /admin/reconciliation/repair`：`{"user_id":N}` 或 `{"all":true}`，
+  权限 `user.balance_adjust`（它确实在改余额，尽管方向是改回账本说的数），
+  两者都不给 → 400（批量改余额不该是手滑的默认行为），全程审计。
+- 前端：三方对账每行加「按账本校准」、表头加「全部校准」（带二次确认说明后果），
+  **并把那句错的提示改成实话**——对账只报不修，且热余额丢了不是显示问题。
+
+**实测**（真实上游 + 真实丢数据）：`DEL bal:{3}` → 请求 **429**、对账扫出
+`账本 99995946 / 线上 0` → 点校准 → `redis 0 → 99995946` → 请求 **200**、差额归零。
+
+**验收**：`worker_reconcile_repair.rs` 三用例——按账本重建 + 幂等 + 不存在用户返回 None；
+在途预扣保留（`avail = 账本 − 在途`，不变式成立）；端点权限 403 / 无参 400 /
+不存在 404 / 单修与批量修生效 / **账目变动中返回 409** / 审计留痕。
+
+**未处置**：`reserve` 侧的兜底（缺键时回源 PG 重建后再判）——那要动热路径 Lua 与并发
+重建竞态，单列。当前修复是运维动作，不是自动兜底。
+
+### 11.23 图表可读性与统计完整性复核（2026-09-04）
+
+门户、管理趋势、质量及经营报表使用共享 `TimeChart`：主题色、面积／柱状切换、图例开关、单位、精确数据表和 CSV；按响应窗口补齐日期，比例与缺失性能留空。门户新增自定义日历日期、标价消费、缓存／成功率／耗时趋势及性能摘要；缓存写入补齐 outbox→CH→聚合→门户／个人中心，历史缺失返回 null。窄卡片为金额保留整行，单日数据保留可见标记。
+
+此次同时复核 new-api 与 Sub2API 上游类型；**尚未全量对齐**的模型来源、端点、调用／计费类型、节点路径等维度及验收条件见 [图表对照清单](docs/chart-parity.md)。年度热力图从左下角头像进入，保留账户隔离、逐日详情与键盘操作。
+
+### 11.23 多副本（pod 横向扩展）的三处进程内假设（2026-09-04）
+
+**背景**：架构本身支持横向扩展——决定正确性的状态全在 Redis 且是原子 Lua（余额预扣、
+rpm/tpm/rpd/并发四类准入、渠道并发槽、三层粘性、鉴权缓存、web session、Realtime WS 连接
+租约、渠道时延 EWMA、月度用量/消费、团队分账），§12.1 的 `{user}` hash-tag 单槽保证也让
+Redis 自身能扩到 Cluster。k8s manifest 已配 gateway HPA 2→10、console 2、worker 1。
+
+worker 多副本也核过一遍是安全的：relay/chsink 走 `FOR UPDATE SKIP LOCKED` + JetStream
+durable 消费者天然互斥；通知有 Redis `SET NX EX` 频率闸；余额到期清零靠 `drain` 的原子性
+幂等；冷却恢复 / 建分区是幂等 UPDATE / `IF NOT EXISTS`；对账只读。只是**周期任务不互斥、
+只是各跑各的**，而 `sweep_expired_reservations` 是全量用户扫描——多副本是 N 倍无用功，
+故 `replicas: 1` 是对的，只有 chsink 吞吐不够时才值得加。
+
+真正会随副本数变味的是三处进程内假设：
+
+**① surge 加价的负载输入曾是进程内计数（最要紧，因为它改的是钱）。**
+`state.in_flight` 是 `AtomicI64`，阈值判的是**单个 pod** 的在途数：配 100，单 pod 部署时
+是「集群 100 并发触发」，扩到 10 个 pod 就变成「要 1000 并发才触发」，且只对恰好落在撞线
+那个 pod 上的请求加价。surge 是**计价**规则不是限流——同一份配置在不同副本数下收不同的钱、
+同一时刻不同用户按运气收不同的价，账单没法解释。
+
+改为 Redis 集群量表 `inflight:gauge`：每个实例只写自己那格（`node → "<count>|<unix_ms>"`），
+读侧求和。**为什么不用单个 INCR/DECR 计数器**：pod 崩在请求中间就再也减不回来，计数单调
+漂高，surge 会永久卡在加价状态且没人察觉。按实例分格 + 带时间戳，崩掉的实例超过 10s
+即不计入、超过 5min 直接删格（pod 反复重建不会把 hash 撑大）。上报每秒至多一次，
+但**降到 0 立即上报**——否则实例空下来后量表还挂着它最后那个非零读数，会凭空多加价几秒。
+
+**② `OKAPI_NODE` 缺省是固定串，多副本会挤在同一格。** 它是区分实例的唯一凭据（记账 node
+列 + 上面那张量表都靠它），缺省 `"okapi-1"` 意味着 compose 的 `deploy.replicas: 2` 两个副本
+互相覆盖、集群在途数直接算少。改为缺省退到 `HOSTNAME`（Docker/K8s 都会设成唯一的
+容器/Pod 名），compose 没法给每个副本发不同环境变量的问题也一并解决。
+
+**③ 管理面改配置只在本进程生效。** `invalidate_routing_caches()` 是纯本地调用，NATS 广播
+此前**只覆盖 `pricing.epoch`**。于是：改定价全集群秒级生效，改 key 权限走 Redis
+`auth_flush` 也是即时的，但**改渠道/池/模型/系统设置，其余 pod 要等各自 TTL**——候选集 5s、
+模型 60s、settings 60s。「禁用一条出问题的渠道」这种应急操作，管理员点完看着已生效，
+实际另外几个 pod 还会继续往那条渠道打近一分钟。
+
+复用同一条 NATS 通道加 `routing.invalidate` 主题：gateway 与 console 都订阅（console 也是
+多副本、各有各的缓存），收到只清本地不再转发（否则打环）。发布是 spawn 出去的
+fire-and-forget——调用点近二十处且都在同步上下文，为一次通知全改 async 不值当；
+丢广播由 TTL 兜底，与 epoch 同一套容错口径。无 NATS 的单机部署行为不变。
+
+**部署侧：连接数是扩容第一个撞墙的地方。** 每个 pod 各开一套 PG 池，总连接 =
+Σ(副本数 × `OKAPI_PG_POOL`)。走缺省 16 时 gateway 10 + console 2 + worker 1 = **208 条**，
+而 PostgreSQL 缺省 `max_connections=100`——扩到一半开始耗尽，且现象是 `acquire_timeout`
+超时而非"连不上"，很难一眼归因。故：manifest 里三个角色各自配死（12 / 8 / 16，合计 152，
+文件头写明算法与「max_connections 至少 200，否则上 PgBouncer transaction 模式」），
+compose 同步给出算式，`connect_pg` 启动即把生效值打进日志。
+
+**验收**：`gateway_multipod.rs` 两用例——量表跨实例求和 + 实例空闲立即退出合计 + 脏值防御
+（断言用增量而非绝对值，量表是共享 hash，拿绝对值断言就是又一个测试互相污染的坑）；
+路由失效广播让另一个实例立即弃用旧缓存而非等 TTL。
+
+**副产品（排查上面那两处时揪出的）**：`scripts/dev-reset.sh` 清 ClickHouse 时写死了 7 张表，
+而 schema 早已长到 13 张——漏掉的 6 张（`mv_key_model_day` / `mv_client_day` / `mv_error_hour` /
+`mv_cube_hour` / `mv_analysis_hour` / `mv_cache_write_day`）会带着**重置前的 user_id** 活下来。
+PG 的 id 重置后从 1 开始，新用户正好撞上旧聚合，门户 `/api/me/stats/breakdown`（读的正是
+`mv_key_model_day`）就会把上一茬用户的用量算进来——表现为 `console_portal` 偶发挂在
+"requests 6 ≠ 3"。**该文件开头的注释警告的恰恰是这件事**（"三处必须一起清"），清单却自己漂了。
+改成从 `system.tables` 现查，后续加表自动覆盖。
+
+**未处置**：gateway 微批组提交。结算背压闸 `settle_gate = OKAPI_PG_POOL/2` 同样是 per-pod，
+N 个副本就是 N 倍并发写压向同一个 PG，闸的效力随副本数线性稀释。§12.1 早写明这条
+「压测确认 PG 写瓶颈后引入」——没有压测数据就动热路径写批，是拿正确性换想象中的性能，
+故按其自身前提继续挂着。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
@@ -1251,6 +1580,7 @@ detail 缺省只露前两个键、点行展开为**键值行**而非整块 JSON�
 | 故障 | 行为 |
 | --- | --- |
 | Redis 挂 | 付费链路 fail-closed 拒绝（宁停不错账） |
+| Redis 活着但数据没了（重启无持久化 / 切空副本 / maxmemory 淘汰 `bal:{}`） | 余额读作 0 → 全站付费请求 429 拒绝，**不自愈**；对账扫出差异后走 `/admin/reconciliation/repair` 按账本重建（§11.22） |
 | PG 挂 | 同上；依赖 PG HA 恢复 |
 | NATS 挂 | 同事务 outbox 兜底，worker 恢复后重投 |
 | CH 挂 | chsink spill 落盘重放；统计查询 fail-closed 501 |
@@ -1333,6 +1663,10 @@ reverse_proxy okapi-gateway:8080 {
 1. 回源 IP 段 CIDR 白名单（传统模式，需维护 CDN IP 列表）。
 2. **trusted-header-secret**（#6502）：边缘注入 `X-Okapi-Edge-Key: <secret>`，验证通过才信任 `X-Forwarded-For`；免维护 IP 段。
    真实 IP 提取顺序：edge secret 验证 → XFF 最右非信任跳；不可信来源一律取 socket 对端。
+
+   **【已实现，见 §11.19】** `OKAPI_TRUSTED_PROXIES`（模式一）+ `OKAPI_EDGE_KEY`（模式二），
+   两者任一命中即信任来源；缺省仅环回。此前只落了"按序取首个有效值"而无信任闸，
+   §11.17 的 key 级 IP 白名单因此可被一个 `X-Forwarded-For` 绕过。
    多级 CDN 场景（M2，Sub2API 吸收）：信任验证通过后可配第三方客户端 IP 头名列表（如 `True-Client-IP`，按声明序取首个有效值；头名规范化去重，上限 16）；未配置默认 XFF 规则。头名列表仅在信任验证通过后生效，不构成独立信任来源。
 
 ### 14.3 优雅下线

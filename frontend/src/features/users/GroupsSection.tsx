@@ -4,18 +4,17 @@ import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { FieldGroup } from '@/components/ui/drawer'
 import { TagInput } from '@/components/ui/tag-input'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
 export function GroupsSection({
   userId,
   current,
-  onMsg,
   onDone,
 }: {
   userId: number
   current: string[]
-  onMsg: (m: string) => void
   onDone: () => void
 }) {
   const { t } = useTranslation()
@@ -34,10 +33,10 @@ export function GroupsSection({
         },
       }),
     onSuccess: () => {
-      onMsg(t('common:success'))
+      toast.success(t('common:success'))
       onDone()
     },
-    onError: (err) => onMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (

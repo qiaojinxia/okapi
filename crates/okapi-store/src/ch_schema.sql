@@ -61,6 +61,24 @@ AS SELECT
 FROM request_log_raw
 GROUP BY user_id, day;
 
+-- 增量升级：历史缓存写入未采集时为 NULL；通过样本覆盖数区分未知与零。
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_tokens Nullable(UInt32) DEFAULT NULL;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_write_day
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (user_id, api_key_id, model, day)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    user_id,
+    api_key_id,
+    model,
+    toDate(ts) AS day,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS write_tokens,
+    countIfState(isNotNull(cache_write_tokens)) AS known_requests
+FROM request_log_raw
+GROUP BY user_id, api_key_id, model, day;
+
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_apikey_day
 ENGINE = AggregatingMergeTree()
 PARTITION BY toYYYYMM(day)
@@ -247,3 +265,44 @@ AS SELECT
     countIfState(ttft_ms > 0) AS ttft_samples
 FROM request_log_raw
 GROUP BY hour, user_id, api_key_id, group_code, model, channel_id;
+
+-- 分析附加维度；不改旧聚合键，升级不会丢失旧统计。
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS requested_model LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_model LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS endpoint LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_endpoint LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS billing_type LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS request_type LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_cost_known UInt8 DEFAULT 0;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3) DEFAULT toDateTime64(0, 3);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_analysis_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (hour, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfHour(ts) AS hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens)) AS prompt_tokens,
+    sumState(toUInt64(cached_tokens)) AS cached_tokens,
+    sumState(toUInt64(completion_tokens)) AS completion_tokens,
+    sumState(toUInt64(reasoning_tokens)) AS reasoning_tokens,
+    sumState(amount_micro) AS amount,
+    sumState(discount_micro) AS discount,
+    sumState(upstream_cost_micro) AS upstream_cost,
+    sumState(toUInt64(is_error)) AS errors,
+    sumState(toUInt64(latency_ms)) AS latency_sum,
+    sumState(toUInt64(ttft_ms)) AS ttft_sum,
+    countIfState(ttft_ms > 0) AS ttft_samples,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS writes,
+    countIfState(isNotNull(cache_write_tokens)) AS writes_known,
+    countIfState(upstream_cost_known = 1) AS cost_known,
+    sumState(if(upstream_cost_known = 1, amount_micro, toInt64(0))) AS known_amount,
+    sumState(if(upstream_cost_known = 1, upstream_cost_micro, toInt64(0))) AS known_cost,
+    maxState(ts) AS last_event,
+    maxState(ingested_at) AS last_ingested
+FROM request_log_raw
+GROUP BY hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;

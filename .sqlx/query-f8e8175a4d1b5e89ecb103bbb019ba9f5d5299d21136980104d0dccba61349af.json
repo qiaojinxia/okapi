@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,\n               daily_token_limit, max_concurrency, model_allowlist, group_override,\n               expires_at, last_used_at, created_at\n        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id\n        ",
+  "query": "\n        SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,\n               daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,\n               expires_at, last_used_at, created_at\n        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id\n        ",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,17 @@
       },
       {
         "ordinal": 12,
+        "name": "ip_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "ip_allowlist"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "expires_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "last_used_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -189,8 +200,9 @@
       true,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "33b1aed2655e11055144c54d6b2c4c77ff1960e7fa2dd54db1e2acace7b9606d"
+  "hash": "f8e8175a4d1b5e89ecb103bbb019ba9f5d5299d21136980104d0dccba61349af"
 }

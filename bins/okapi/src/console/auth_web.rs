@@ -377,6 +377,9 @@ pub struct CreateKeyReq {
     /// 档位（须在 /api/me/groups 可选集合内）；缺省 = 跟随用户分组。
     #[serde(default)]
     pub group_code: Option<String>,
+    /// IP 白名单（地址 / CIDR；只约束数据面调用）；缺省 = 不限。
+    #[serde(default)]
+    pub ip_allowlist: Option<Vec<String>>,
 }
 
 pub async fn create_key(
@@ -397,16 +400,18 @@ pub async fn create_key(
     if let Some(code) = group_code {
         super::portal::ensure_selectable(&state, user_id, code).await?;
     }
+    let ip_allowlist = super::portal::normalize_ip_allowlist(req.ip_allowlist)?;
     let key_id = sqlx::query_scalar!(
-        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id"#,
+        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override, ip_allowlist)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"#,
         user_id,
         key_hash,
         token.chars().take(16).collect::<String>(),
         name,
         req.expires_at,
         allowlist,
-        group_code
+        group_code,
+        ip_allowlist
     )
     .fetch_one(&state.pg)
     .await

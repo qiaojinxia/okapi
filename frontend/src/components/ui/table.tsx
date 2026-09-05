@@ -5,7 +5,8 @@ interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> {
   wrapperClassName?: string
   /// 紧凑行高：日志这类一屏要看几十行的表。
   dense?: boolean
-  /// 表头随容器滚动固定；容器需有高度上限才有意义（`wrapperClassName="max-h-[70vh]"`）。
+  /// 表头随容器滚动固定。不另给 `wrapperClassName` 时自带一个视口高度上限——
+  /// 只写 `stickyHeader` 却忘了限高，表头没有可粘的滚动容器，等于没开。
   stickyHeader?: boolean
 }
 
@@ -21,6 +22,8 @@ export function Table({
     <div
       className={cn(
         'relative w-full overflow-auto rounded-lg border border-border bg-card shadow-card',
+        // 限高由调用方覆盖；缺省留出顶栏 + 页头 + 工具条的高度，长列表才不会把分页器推到天边
+        stickyHeader && 'max-h-[calc(100vh-19rem)] min-h-40',
         wrapperClassName,
       )}
     >
@@ -28,7 +31,10 @@ export function Table({
         className={cn(
           'w-full caption-bottom text-sm',
           dense ? '[&_td]:py-1.5 [&_th]:py-2' : '',
-          stickyHeader && '[&_thead]:sticky [&_thead]:top-0 [&_thead]:z-10',
+          // 粘性表头必须**不透明**：THead 的 bg-muted/60 是半透明的，行会从表头底下透出来。
+          // 另外 sticky 元素上的 border-bottom 不随边框合并渲染，靠 th 的 box-shadow 补一条分隔线。
+          stickyHeader &&
+            '[&_thead]:sticky [&_thead]:top-0 [&_thead]:z-10 [&_thead]:bg-card [&_thead_th]:bg-muted [&_thead_th]:shadow-[inset_0_-1px_0_var(--border)]',
           className,
         )}
         {...props}

@@ -1,5 +1,15 @@
 /// 立方体端点共用的一组度量（比率全部基点，金额 micro-USD）。
+export interface Freshness { last_event_at: string | null; last_ingested_at: string | null; pending_events: number; failed_events: number; queue_age_seconds: number | null; event_gap_seconds: number | null; stale: boolean; checked_at: string }
 export interface CubeMetrics {
+  cost_known_requests?: number
+  cost_coverage_bp?: number | null
+  known_margin_micro?: number | null
+  margin_micro?: number | null
+  known_amount_micro?: number
+  known_cost_micro?: number
+  cache_write_tokens?: number | null
+  avg_output_tps_milli?: number | null
+  ttft_samples?: number
   requests: number
   errors: number
   error_rate_bp: number
@@ -31,10 +41,11 @@ export interface TrendBucket extends CubeMetrics {
 
 export interface StackedBucket {
   bucket: string
-  values: Record<string, { requests: number; amount_micro: number; errors: number; tokens: number }>
+  values: Record<string, CubeMetrics>
 }
 
 export interface TrendResp {
+  window?: { start_at: string; end_at: string; timezone: string; generated_at: string; today?: string; start_date?: string; end_date?: string; freshness?: Freshness }
   days: number
   granularity: 'hour' | 'day'
   scope: ScopeEcho
@@ -77,7 +88,11 @@ export interface BreakdownResp {
 
 export interface FlowNode {
   id: string
-  stage: 'user' | 'api_key' | 'group' | 'model' | 'channel'
+  stage: 'user' | 'node' | 'api_key' | 'group' | 'model' | 'channel'
+  entity_status?: 'active' | 'deleted' | 'missing' | 'unassigned' | null
+  owner_name?: string | null
+  key_prefix?: string | null
+  provider?: string | null
   key: string
   label: string | null
   other: boolean

@@ -5,7 +5,8 @@ import { NoticeBanner } from '@/components/notice-banner'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toast'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input, Label, Textarea } from '@/components/ui/input'
+import { Field } from '@/components/ui/field'
+import { Input, Textarea } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { apiFetch } from '@/lib/api'
@@ -47,6 +48,7 @@ export function NoticeCard() {
       toast.success(t('admin:noticeSaved'))
       setDraft(null)
       void current.refetch()
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
       // 横幅读的是公开端点（60s 服务端缓存），本地立即失效以便预览刷新
       void queryClient.invalidateQueries({ queryKey: qk.notice })
     },
@@ -70,17 +72,15 @@ export function NoticeCard() {
           description={t('admin:noticeEnabledHint')}
         />
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-          <div className="flex flex-col gap-1.5 sm:col-span-2">
-            <Label htmlFor="notice-title">{t('admin:noticeField_title')}</Label>
+          <Field label={t('admin:noticeField_title')} htmlFor="notice-title" className="sm:col-span-2">
             <Input
               id="notice-title"
               value={form.title}
               maxLength={80}
               onChange={(e) => patch({ title: e.target.value })}
             />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="notice-level">{t('admin:noticeField_level')}</Label>
+          </Field>
+          <Field label={t('admin:noticeField_level')} htmlFor="notice-level">
             <Select
               id="notice-level"
               value={form.level}
@@ -91,18 +91,16 @@ export function NoticeCard() {
                 { value: 'critical', label: t('admin:noticeLevel_critical') },
               ]}
             />
-          </div>
+          </Field>
         </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="notice-body">{t('admin:noticeField_body')}</Label>
+        <Field label={t('admin:noticeField_body')} htmlFor="notice-body" hint={t('admin:noticeBodyHint')}>
           <Textarea
             id="notice-body"
             value={form.body}
             maxLength={4000}
             onChange={(e) => patch({ body: e.target.value })}
           />
-          <span className="text-xs text-muted-foreground">{t('admin:noticeBodyHint')}</span>
-        </div>
+        </Field>
 
         <div className="flex items-center gap-3">
           <Button disabled={save.isPending || draft === null} onClick={() => save.mutate()}>
@@ -111,10 +109,9 @@ export function NoticeCard() {
         </div>
 
         {/* 当前线上效果：所见即所得，省一次切到门户去看 */}
-        <div className="flex flex-col gap-1.5">
-          <Label>{t('admin:noticePreview')}</Label>
+        <Field label={t('admin:noticePreview')}>
           <NoticeBanner />
-        </div>
+        </Field>
       </CardContent>
     </Card>
   )

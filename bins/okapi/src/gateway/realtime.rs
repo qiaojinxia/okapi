@@ -52,13 +52,13 @@ pub async fn realtime(
     let request_id = Uuid::new_v4();
     // 鉴权在升级前完成：拒绝直接走 HTTP 错误（客户端拿到 401/403 而非握手失败裸断）
     let key = if headers.contains_key(axum::http::header::AUTHORIZATION) {
-        super::auth::authenticate(&state, &headers).await
+        super::auth::authenticate_data_plane(&state, &headers).await
     } else if let Some(token) = token_from_subprotocol(&headers) {
         let mut synth = HeaderMap::new();
         if let Ok(v) = axum::http::HeaderValue::from_str(&format!("Bearer {token}")) {
             synth.insert(axum::http::header::AUTHORIZATION, v);
         }
-        super::auth::authenticate(&state, &synth).await
+        super::auth::authenticate_data_plane(&state, &synth).await
     } else {
         Err(AppError::unauthorized(codes::INVALID_API_KEY))
     };
@@ -81,6 +81,7 @@ struct Prep {
     key: std::sync::Arc<okapi_store::AuthedKey>,
     request_id: Uuid,
     canonical: String,
+    dimensions: okapi_ledger::pg::UsageDimensions,
     upstream_url: String,
     credential: String,
     channel: (i64, i64),
@@ -251,6 +252,12 @@ async fn prepare(
     Ok(Prep {
         key: std::sync::Arc::clone(key),
         request_id,
+        dimensions: okapi_ledger::pg::UsageDimensions::new(
+            requested_model,
+            &upstream_model,
+            "/v1/realtime",
+            "/v1/realtime",
+        ),
         canonical,
         upstream_url,
         credential: cand.credential.clone(),
@@ -460,6 +467,7 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
     {
         Ok(CommitOutcome::Committed { balance_after, .. }) => {
             let input = SettlementInput {
+                dimensions: prep.dimensions.clone(),
                 request_id: prep.request_id,
                 log_type: 2,
                 user_id: prep.key.user_id,
@@ -473,6 +481,8 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
                 amount: quote.amount,
                 original: quote.original,
                 discount: quote.discount,
+                list_price: quote.list_price,
+                upstream_cost: None,
                 pricing_epoch: Some(book.epoch()),
                 pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
                 latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),
@@ -519,6 +529,7 @@ async fn record_failure(
 ) {
     let book = state.pricebook.load();
     let input = SettlementInput {
+        dimensions: prep.dimensions.clone(),
         request_id: prep.request_id,
         log_type: 5,
         user_id: prep.key.user_id,
@@ -532,6 +543,8 @@ async fn record_failure(
         amount: Money::ZERO,
         original: Money::ZERO,
         discount: Money::ZERO,
+        list_price: Money::ZERO,
+        upstream_cost: None,
         pricing_epoch: Some(book.epoch()),
         pricing_snapshot: None,
         latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),

@@ -196,13 +196,17 @@ export function AuditPage() {
                 }}
               />
             </div>
+            {/* self-end：工具栏是 items-center，不带标签的控件会被居中悬在
+                标签行和输入框行之间；压到输入框那一行才对齐 */}
             <Segmented
               options={HOURS.map((h) => ({ value: h, label: hoursLabel(h) }))}
               value={draft.hours}
               onChange={(h) => submit({ ...draft, hours: h })}
               size="sm"
+              ariaLabel={t('admin:logsRange')}
+              className="self-end"
             />
-            <Button size="sm" onClick={() => submit(draft)}>
+            <Button size="sm" className="self-end" onClick={() => submit(draft)}>
               {t('common:search')}
             </Button>
           </>
@@ -221,7 +225,7 @@ export function AuditPage() {
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:auditEmptyHint')} />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th className="w-6" />

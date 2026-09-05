@@ -324,6 +324,7 @@ pub struct ApiKeyListRow {
     pub used_micro: i64,
     pub model_allowlist: Option<serde_json::Value>,
     pub group_override: Option<String>,
+    pub ip_allowlist: Option<serde_json::Value>,
     pub rpm_limit: Option<i32>,
     pub max_concurrency: Option<i32>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -345,7 +346,7 @@ pub async fn list_api_keys(
         r#"
         SELECT k.id, k.user_id, u.username, k.team_id, k.name, k.key_prefix, k.status,
                k.quota_mode, k.quota_micro, k.used_micro, k.model_allowlist,
-               k.group_override, k.rpm_limit, k.max_concurrency,
+               k.group_override, k.ip_allowlist, k.rpm_limit, k.max_concurrency,
                k.expires_at, k.last_used_at, k.created_at
         FROM api_keys k JOIN users u ON u.id = k.user_id
         WHERE k.deleted_at IS NULL
@@ -388,6 +389,7 @@ pub async fn list_api_keys(
                 used_micro: r.used_micro,
                 model_allowlist: r.model_allowlist,
                 group_override: r.group_override,
+                ip_allowlist: r.ip_allowlist,
                 rpm_limit: r.rpm_limit,
                 max_concurrency: r.max_concurrency,
                 expires_at: r.expires_at,

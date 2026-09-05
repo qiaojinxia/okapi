@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET price_multiplier = ($2::text)::numeric, updated_at = now()\n           WHERE id = $1 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ae5b362753b031efa9c3c38f15b897340283ca081eb8751d2ee6d99d55fc667f"
+}

@@ -1,4 +1,4 @@
-import { Pencil, Plus, Trash2 } from 'lucide-react'
+import { Package, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -58,6 +58,7 @@ export function PlansPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
+        icon={Package}
         title={t('admin:planListTitle')}
         description={t('admin:planHint')}
         action={
@@ -74,17 +75,25 @@ export function PlansPage() {
       ) : plans.isPending ? (
         <TableSkeleton rows={6} cols={6} />
       ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:plansEmptyHint')} />
+        <EmptyState
+          hint={t('admin:plansEmptyHint')}
+          action={
+            <Button onClick={() => setDrawer('create')}>
+              <Plus className="h-4 w-4" />
+              {t('admin:planCreate')}
+            </Button>
+          }
+        />
       ) : (
         <Table>
           <THead>
             <Tr>
               <Th>{t('admin:planCode')}</Th>
               <Th>{t('admin:planName')}</Th>
-              <Th>{t('admin:planGrant')}</Th>
+              <Th numeric>{t('admin:planGrant')}</Th>
               <Th>{t('portal:group')}</Th>
-              <Th>{t('admin:planValidDays')}</Th>
-              <Th>{t('admin:planCodeCount')}</Th>
+              <Th numeric>{t('admin:planValidDays')}</Th>
+              <Th numeric>{t('admin:planCodeCount')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -93,10 +102,10 @@ export function PlansPage() {
               <Tr key={p.id}>
                 <Td className="font-mono text-xs">{p.plan_code}</Td>
                 <Td>{p.display_name}</Td>
-                <Td>{formatMoney(p.grant_micro, i18n.language)}</Td>
+                <Td numeric>{formatMoney(p.grant_micro, i18n.language)}</Td>
                 <Td>{p.group_code ?? '—'}</Td>
-                <Td>{p.balance_valid_days ?? '—'}</Td>
-                <Td>{p.code_count}</Td>
+                <Td numeric>{p.balance_valid_days ?? '—'}</Td>
+                <Td numeric>{p.code_count}</Td>
                 <Td>
                   <div className="flex items-center gap-0.5">
                     <IconButton

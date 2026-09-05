@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"c!\" FROM audit_logs WHERE action = 'billing.reconcile_repair'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6719d010b26d79ad44b47e3927c8837e28a79e7f31b36e24d9312708f0035159"
+}

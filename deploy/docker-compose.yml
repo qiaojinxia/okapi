@@ -14,6 +14,16 @@ x-okapi-env: &okapi-env
   OKAPI_BIND: 0.0.0.0:8080
   OKAPI_CONSOLE_BIND: 0.0.0.0:8081
   OKAPI_MASTER_KEY: ${OKAPI_MASTER_KEY:?run `openssl rand -hex 32`}
+  # 信任反代网段（§14.2）：容器里反代与网关不同 IP，环回缺省不够用。
+  # 只有来自这些来源的 X-Forwarded-For / CDN 头才作数——不配就等于 key 级 IP 白名单、
+  # 每 IP 限流与 client_ip 列可被调用方一个请求头改写。默认给 compose 的私网段；
+  # 前面还有一层公网 CDN 时改配 CDN 回源段，或改用 OKAPI_EDGE_KEY。
+  OKAPI_TRUSTED_PROXIES: ${OKAPI_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8}
+  OKAPI_EDGE_KEY: ${OKAPI_EDGE_KEY:-}
+  # 每个容器各开一套 PG 池，总连接 = Σ(副本数 × 本值)。本文件 multi profile 是
+  # gateway 2 + console 1 + worker 1 = 4 个容器 × 12 = 48 条，PG 缺省 max_connections=100 够用；
+  # 往上扩 gateway 副本数前先把这笔账重算一遍（或上 PgBouncer transaction 模式）。
+  OKAPI_PG_POOL: ${OKAPI_PG_POOL:-12}
 
 x-okapi-image: &okapi-image
   build:

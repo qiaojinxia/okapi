@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channel_keys SET\n            weight          = COALESCE($3, weight),\n            max_concurrency = CASE WHEN $4::bool THEN $5::int ELSE max_concurrency END,\n            status          = COALESCE($6, status),\n            failed_count    = CASE WHEN $6::smallint IS NULL THEN failed_count ELSE 0 END,\n            cooldown_until  = CASE WHEN $6::smallint IS NULL THEN cooldown_until ELSE NULL END,\n            last_error      = CASE WHEN $6::smallint IS NULL THEN last_error ELSE NULL END,\n            updated_at      = now()\n        WHERE id = $2 AND channel_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int4",
+        "Bool",
+        "Int4",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dab371651f3549303e37ca9fa35fd99f4b0f735ec7233b36b1d042098d2fb856"
+}

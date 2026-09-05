@@ -55,7 +55,13 @@ async fn setup() -> Env {
     let addr = listener.local_addr().unwrap();
     let app = console::router(state);
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // 按生产形态挂 connect info：转发头信任闸要拿 socket 对端做锚点（§14.2）
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     Env {
         addr,

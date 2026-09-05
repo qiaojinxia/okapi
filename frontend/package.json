@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build && tsc -b",
     "lint": "oxlint",
+    "test:interactions": "pnpm build && playwright test -c playwright.interactions.config.ts",
     "preview": "vite preview"
   },
   "dependencies": {

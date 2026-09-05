@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.balance_micro,\n               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id), 0)::bigint\n                   AS \"events_sum!\"\n        FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "balance_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "balance_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "events_sum!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "5e5d2a11a7f9b7d8e9fab57ec15423c6a01914f1f240c6cfb6c354651042af3a"
+}

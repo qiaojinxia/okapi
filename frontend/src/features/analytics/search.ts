@@ -7,6 +7,10 @@ export const FILTER_DIMS = ['user_id', 'api_key_id', 'channel_id', 'model', 'gro
 export type FilterDim = (typeof FILTER_DIMS)[number]
 
 export function effectiveDays(s: AnalyticsSearch): number {
+  if (s.start_date && s.end_date) {
+    const days = Math.round((Date.parse(`${s.end_date}T00:00:00Z`) - Date.parse(`${s.start_date}T00:00:00Z`)) / 86400_000) + 1
+    if (days > 0 && days <= 366) return days
+  }
   return s.days ?? DEFAULT_DAYS
 }
 
@@ -19,6 +23,10 @@ export function cubeParams(s: AnalyticsSearch, extra?: Record<string, string | u
   if (s.channel_id !== undefined) p.set('channel_id', String(s.channel_id))
   if (s.model !== undefined) p.set('model', s.model)
   if (s.group !== undefined) p.set('group', s.group)
+  for (const key of ['start_date', 'end_date', 'granularity', 'model_source', 'endpoint', 'upstream_endpoint', 'node', 'request_type', 'billing_type', 'stream'] as const) {
+    if (s[key] !== undefined) p.set(key, String(s[key]))
+  }
+  for (const key of ['models', 'groups'] as const) { if (s[key]?.length) p.set(key, JSON.stringify(s[key])) }
   for (const [k, v] of Object.entries(extra ?? {})) {
     if (v !== undefined && v !== '') p.set(k, v)
   }

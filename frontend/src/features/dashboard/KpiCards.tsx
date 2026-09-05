@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Activity, AlertTriangle, Coins, Cpu, Users } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { Stat } from '@/components/ui/stat'
+import { DeltaChip, Stat } from '@/components/ui/stat'
 import { ErrorState } from '@/components/ui/state'
 import type { OverviewResp } from '@/features/dashboard/types'
 import { apiFetch } from '@/lib/api'
@@ -55,9 +55,21 @@ export function KpiCards({ days }: { days: number }) {
   const today = q.data?.today
   const yday = q.data?.yesterday
   const win = q.data?.window
-  // 两个锚点拆成两个 span，交给父级 flex-wrap 决定同行还是换行
-  const compare = (y: string, w: string) => (
+  // 环比芯片打头 + 两个锚点各一个 span，交给父级 flex-wrap 决定同行还是换行
+  const compare = (
+    y: string,
+    w: string,
+    delta?: { current: number; previous: number; invert?: boolean },
+  ) => (
     <>
+      {delta && (
+        <DeltaChip
+          current={delta.current}
+          previous={delta.previous}
+          invert={delta.invert}
+          locale={locale}
+        />
+      )}
       <span>{t('admin:kpiYesterday', { value: y })}</span>
       <span>{t('admin:kpiWindow', { days, value: w })}</span>
     </>
@@ -74,6 +86,7 @@ export function KpiCards({ days }: { days: number }) {
         window={compare(
           formatCount(yday?.requests ?? 0, locale),
           formatCount(win?.requests ?? 0, locale),
+          { current: today?.requests ?? 0, previous: yday?.requests ?? 0 },
         )}
       />
       <Kpi
@@ -84,6 +97,7 @@ export function KpiCards({ days }: { days: number }) {
         window={compare(
           formatMoneyAggregate(yday?.amount_micro ?? 0, locale),
           formatMoneyAggregate(win?.amount_micro ?? 0, locale),
+          { current: today?.amount_micro ?? 0, previous: yday?.amount_micro ?? 0 },
         )}
       />
       <Kpi
@@ -94,6 +108,7 @@ export function KpiCards({ days }: { days: number }) {
         window={compare(
           formatCount(yday?.tokens ?? 0, locale),
           formatCount(win?.tokens ?? 0, locale),
+          { current: today?.tokens ?? 0, previous: yday?.tokens ?? 0 },
         )}
       />
       <Kpi
@@ -104,6 +119,7 @@ export function KpiCards({ days }: { days: number }) {
         window={compare(
           formatCount(yday?.active_users ?? 0, locale),
           formatCount(win?.active_users ?? 0, locale),
+          { current: today?.active_users ?? 0, previous: yday?.active_users ?? 0 },
         )}
       />
       <Kpi
@@ -114,6 +130,8 @@ export function KpiCards({ days }: { days: number }) {
         window={compare(
           formatBp(yday?.error_rate_bp ?? 0, locale),
           formatBp(win?.error_rate_bp ?? 0, locale),
+          // 错误率涨是坏事：极性反转，涨了涂红而不是涂绿
+          { current: errorBp, previous: yday?.error_rate_bp ?? 0, invert: true },
         )}
         // 阈值与渠道健康卡一致：1% 起提醒，5% 起告警
         tone={errorBp >= 500 ? 'bad' : errorBp >= 100 ? 'warn' : 'default'}

@@ -110,6 +110,11 @@ pub async fn build_state(
                 .div_ceil(2),
         )),
         in_flight: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        surge_reported_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        channel_cost_cache: moka::future::Cache::builder()
+            .max_capacity(4096)
+            .time_to_live(std::time::Duration::from_mins(1))
+            .build(),
     })
 }
 
@@ -126,6 +131,33 @@ pub async fn refresh_pricebook_if_newer(state: &AppState) -> anyhow::Result<bool
     }
     let book = pricing_loader::load_pricebook(&state.pg).await?;
     Ok(state.pricebook.swap_if_newer(book))
+}
+
+/// routing.invalidate 广播订阅：任一实例改了渠道/池/模型/设置，全集群立即弃用旧缓存。
+///
+/// 没有这条通道时，其它 pod 只能等自己的 TTL 过期（候选集 5s、模型 60s、settings 60s）——
+/// "禁用一条出问题的渠道"这种应急操作，管理员点完看着已生效，实际另外几个 pod 还会
+/// 继续往那条渠道打将近一分钟。
+pub fn spawn_routing_invalidate_subscriber(state: AppState) {
+    let Some(client) = state.nats.clone() else {
+        return;
+    };
+    // detach 说明：与进程同生命周期的订阅任务
+    tokio::spawn(async move {
+        use futures::StreamExt as _;
+        let mut sub = match client.subscribe(state::ROUTING_INVALIDATE_SUBJECT).await {
+            Ok(sub) => sub,
+            Err(err) => {
+                tracing::warn!(error = %err, "routing.invalidate 订阅失败（依赖 TTL 兜底）");
+                return;
+            }
+        };
+        while sub.next().await.is_some() {
+            // 只清本地：清完再广播会打环
+            state.invalidate_routing_caches_local();
+            tracing::debug!("路由缓存已按广播失效");
+        }
+    });
 }
 
 /// pricing.epoch 广播订阅（主通道；30s 轮询为丢广播兜底，DESIGN §3.3）。
@@ -196,13 +228,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     }
     spawn_epoch_poller(state.clone());
     spawn_epoch_subscriber(state.clone());
+    spawn_routing_invalidate_subscriber(state.clone());
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!(bind = %cfg.bind, "okapi gateway 启动");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // with_connect_info：直连（无 CDN 头）时 key 级 IP 白名单与 client_ip 列都要用到对端地址
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -239,6 +276,7 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             rule_inputs::track_in_flight,
         ))
+        .layer(axum::middleware::from_fn(clients::stamp_peer_ip))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

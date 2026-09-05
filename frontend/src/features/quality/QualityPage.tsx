@@ -7,8 +7,9 @@ import { ClientsCard } from '@/features/stats/ClientsCard'
 import { DaysPicker } from '@/features/stats/DaysPicker'
 import { ErrorBreakdownCard } from '@/features/stats/ErrorBreakdownCard'
 import { ModelLatencyCard } from '@/features/stats/ModelLatencyCard'
+import { QualityTrend } from './QualityTrend'
 
-const TABS = ['channels', 'models', 'errors', 'clients'] as const
+const TABS = ['trend', 'channels', 'models', 'errors', 'clients'] as const
 type Tab = (typeof TABS)[number]
 
 /// 服务质量：渠道健康 / 模型时延 / 错误分布 / 客户端分布。
@@ -19,9 +20,10 @@ type Tab = (typeof TABS)[number]
 export function QualityPage() {
   const { t } = useTranslation()
   const [days, setDays] = useState(7)
-  const [tab, setTab] = useState<Tab>('channels')
+  const [tab, setTab] = useState<Tab>('trend')
 
   const labels: Record<Tab, string> = {
+    trend: t('charts:qualityTrend'),
     channels: t('admin:statChannels'),
     models: t('admin:statModels'),
     errors: t('admin:statErrors'),
@@ -40,6 +42,7 @@ export function QualityPage() {
         active={tab}
         onChange={(id) => setTab(id as Tab)}
       />
+      {tab === 'trend' && <QualityTrend key={days} days={days} />}
       {tab === 'channels' && <ChannelHealthCard days={days} />}
       {tab === 'models' && <ModelLatencyCard days={days} />}
       {tab === 'errors' && <ErrorBreakdownCard days={days} />}

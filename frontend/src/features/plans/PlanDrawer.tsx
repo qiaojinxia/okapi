@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -31,7 +32,6 @@ export function PlanDrawer({
 }) {
   const { t, i18n } = useTranslation()
   const editing = initial !== undefined
-  const [msg, setMsg] = useState<string | null>(null)
   const [form, setForm] = useState({
     plan_code: initial?.plan_code ?? '',
     display_name: initial?.display_name ?? '',
@@ -70,7 +70,7 @@ export function PlanDrawer({
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (
@@ -81,7 +81,6 @@ export function PlanDrawer({
       description={t('admin:planDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>

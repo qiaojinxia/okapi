@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM billing_dlq\n           WHERE source = 'chsink' AND payload->>'request_id' = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "70f1db01f063f046ac2b3b2c42f570328e9913b8a712977f90b8cd4c685bfae3"
+}

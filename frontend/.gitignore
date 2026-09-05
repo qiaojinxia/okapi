@@ -9,6 +9,9 @@ lerna-debug.log*
 
 node_modules
 dist
+# 设计评审用的旁路构建产物：不进版本库，也别让 oxlint 去 lint 打包后的 chunk
+# （`pnpm lint` 不带路径参数，一个 dist-review 就能淹掉几千条 bundle 警告）
+dist-review
 dist-ssr
 *.local
 

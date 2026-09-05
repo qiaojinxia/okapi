@@ -50,6 +50,8 @@ export interface ChannelRow {
   pools: string[]
   /// 池成员关系明细（含成员级 priority / weight 覆盖）。
   pool_members: PoolMember[]
+  /// 相对成本系数（千分比；1000 = 官方标价）。毛利核算与调度加权共用。
+  cost_milli: number
   last_test: ChannelProbe | null
 }
 
@@ -84,4 +86,16 @@ export function providerConsoleUrl(provider: string, apiBase: string | null): st
       }
     }
   }
+}
+
+/// 相对成本：千分比整数 ↔ 表单里的倍数字符串（"0.5" ↔ 500）。
+/// 计费链路不碰浮点；这里只是把整数换成人看的写法，解析时四舍五入回整数。
+export function costMilliToRatio(milli: number): string {
+  return (milli / 1000).toString()
+}
+
+export function ratioToCostMilli(text: string): number | null {
+  const v = Number(text.trim())
+  if (text.trim() === '' || !Number.isFinite(v) || v < 0 || v > 100) return null
+  return Math.round(v * 1000)
 }

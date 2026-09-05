@@ -143,14 +143,6 @@ async fn partner_employee_keys_see_own_usage() {
             let _ = resp.text().await.unwrap();
         }
     }
-    // 等结算落 outbox，再手动泵入 CH（模拟 worker）
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    for _ in 0..100 {
-        if chsink::process_once(&pg, &ch).await.unwrap() == 0 {
-            break;
-        }
-    }
-
     let get = |token: String, path: String| async move {
         reqwest::Client::new()
             .get(format!("http://{con}{path}"))
@@ -164,10 +156,20 @@ async fn partner_employee_keys_see_own_usage() {
     };
 
     // key 视角：员工 A 只见自己两笔（2×240=480），员工 B 只见一笔（240）
-    let usage_a = get(token_a.clone(), "/api/me/usage?days=2".into()).await;
+    // SSE 关闭后结算仍在后台；全局队列暂时为空不代表本账户已落账。
+    // 等待两个密钥各自的可见金额，不依赖固定 500ms 或其他测试的队列进度。
+    let (mut usage_a, mut usage_b) = (Value::Null, Value::Null);
+    for _ in 0..100 {
+        chsink::process_once(&pg, &ch).await.unwrap();
+        usage_a = get(token_a.clone(), "/api/me/usage?days=2".into()).await;
+        usage_b = get(token_b.clone(), "/api/me/usage?days=2".into()).await;
+        if usage_a["total_amount_micro"] == 480 && usage_b["total_amount_micro"] == 240 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(usage_a["scope"], "key");
     assert_eq!(usage_a["total_amount_micro"], 480, "{usage_a}");
-    let usage_b = get(token_b.clone(), "/api/me/usage?days=2".into()).await;
     assert_eq!(usage_b["total_amount_micro"], 240, "{usage_b}");
 
     // user 视角：合作商汇总三笔 720
@@ -218,6 +220,11 @@ async fn partner_employee_keys_see_own_usage() {
     assert_eq!(total["requests"], 2, "{bd_a}");
     assert_eq!(total["prompt_tokens"], 200);
     assert_eq!(total["cached_tokens"], 80);
+    assert_eq!(
+        total["cache_write_tokens"], 0,
+        "已采集且未写缓存必须为零：{bd_a}"
+    );
+    assert_eq!(total["cache_write_known_requests"], 2);
     assert_eq!(total["completion_tokens"], 40);
     assert_eq!(total["tokens"], 240, "tokens = prompt + completion");
     assert_eq!(total["amount_micro"], 480);

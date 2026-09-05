@@ -93,6 +93,7 @@ struct RequestBilling {
     directive: Option<ReasoningDirective>,
     /// canonical 模型名（别名解析后；记账与调度用）。
     model: String,
+    requested_model: String,
     group: String,
     is_stream: bool,
     started: Instant,
@@ -131,6 +132,7 @@ struct ForwardFailure {
     upstream_status: Option<i16>,
     failover_count: i16,
     channel: Option<(i64, i64)>,
+    upstream: Option<(String, String)>,
 }
 
 impl ForwardFailure {
@@ -141,6 +143,7 @@ impl ForwardFailure {
             failover_count: failover,
             channel,
             reply: FailureReply::App(err),
+            upstream: None,
         }
     }
 }
@@ -169,15 +172,42 @@ fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
         UpstreamError::Status { status: 429, .. } => KeyFailure::RateLimited {
             retry_after_secs: err.retry_after_secs(),
         },
+        UpstreamError::Status { status: 401, .. } => KeyFailure::Invalid,
+        // 403 只在 body 明说凭证问题时才算凭证失效，否则按瞬时失败走冷却（详见
+        // `body_says_credential_rejected`）
         UpstreamError::Status {
-            status: 401 | 403, ..
-        } => KeyFailure::Invalid,
+            status: 403, body, ..
+        } if body_says_credential_rejected(body) => KeyFailure::Invalid,
         UpstreamError::Status { .. }
         | UpstreamError::Connect(_)
         | UpstreamError::Timeout
         | UpstreamError::Stream(_)
         | UpstreamError::Build(_) => KeyFailure::Transient,
     }
+}
+
+/// 上游的 403 是不是真的在说「这把凭证不认」。
+///
+/// 401 = 没通过认证 → 凭证必然有问题；403 = 认证过了但不被允许，本质是**按资源**的判定。
+/// 聚合型上游普遍拿 403 表达「这个模型你的套餐没开通」（实测到的原文：
+/// `access_denied / Deposit required to unlock premium models`），而 key 本身完全有效。
+/// 此前 401 与 403 一并判 `Invalid`（`status=6`，无冷却、不自愈，控制面也没有复活入口），
+/// 于是调一次未开通的模型就把该渠道**所有**模型打死，只能靠重置凭证救回来。
+/// 故 403 改为：body 明说凭证问题才算失效，否则按瞬时失败冷却重试。
+fn body_says_credential_rejected(body: &Bytes) -> bool {
+    let text = String::from_utf8_lossy(body).to_ascii_lowercase();
+    [
+        "invalid_api_key",
+        "invalid api key",
+        "incorrect api key",
+        "invalid_authentication",
+        "authentication_error",
+        "invalid token",
+        "api key not valid",
+        "unauthorized",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 fn body_says_insufficient_quota(body: &Bytes) -> bool {
@@ -387,7 +417,7 @@ async fn handle_chat(
     ingress: Ingress,
     info: &ProbeInfo,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
 
     // 模型解析（#3001 + §5.1）：别名→canonical + max_output；60s 进程缓存消除热路径 PG 读；
     // 未命中剥 reasoning 后缀重试（§4.4）
@@ -526,6 +556,7 @@ async fn handle_chat(
         completion_cap,
         directive,
         model: canonical,
+        requested_model: info.requested_model.clone(),
         group: key.group_code.clone(),
         is_stream: info.stream,
         started,
@@ -720,6 +751,7 @@ async fn try_model(
     let mut last_code: &'static str = codes::UPSTREAM_ERROR;
     let mut last_status: Option<i16> = None;
     let mut last_channel: Option<(i64, i64)> = None;
+    let mut last_upstream = None;
 
     for cand in candidates {
         if attempted >= MAX_ATTEMPTS {
@@ -830,6 +862,10 @@ async fn try_model(
             .to_owned()
         });
         last_channel = Some((cand.channel_id, cand.channel_key_id));
+        last_upstream = Some((
+            upstream_model.clone(),
+            upstream_endpoint(&cand, bill.is_stream, bill.ingress).to_owned(),
+        ));
         let sticky_layer: i16 = if sticky_key == Some(cand.channel_key_id) {
             2
         } else {
@@ -924,6 +960,7 @@ async fn try_model(
                     .release_slot(cand.channel_key_id, cand.max_concurrency)
                     .await;
                 failure.failover_count = failover;
+                failure.upstream = last_upstream.clone();
                 return Err(failure);
             }
         }
@@ -949,6 +986,7 @@ async fn try_model(
         last_channel,
     );
     failure.upstream_status = last_status;
+    failure.upstream = last_upstream;
     Err(failure)
 }
 
@@ -968,6 +1006,7 @@ fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> Att
                 upstream_status: i16::try_from(status).ok(),
                 failover_count: failover,
                 channel: Some(channel),
+                upstream: None,
             };
             failure.error_code = format!("upstream_status_{status}");
             AttemptError::Fatal(failure)
@@ -1279,7 +1318,14 @@ async fn attempt_stream(
             let ttft_ms = elapsed_ms_i32(bill.started);
             Ok(spawn_stream_pump(
                 bill.clone(),
-                cand_info(cand, sticky_layer, retry),
+                cand_info(
+                    cand,
+                    &bill.model,
+                    bill.is_stream,
+                    bill.ingress,
+                    sticky_layer,
+                    retry,
+                ),
                 handle,
                 buffered,
                 ttft_ms,
@@ -1301,9 +1347,18 @@ struct CandInfo {
     upstream_request_id: Option<String>,
     /// 渠道开关：按上游响应模型计费（Sub2API 0.1.175 对齐）。
     bill_resp_model: bool,
+    upstream_model: String,
+    upstream_endpoint: String,
 }
 
-fn cand_info(cand: &ChannelCandidate, sticky_layer: i16, retry: i16) -> CandInfo {
+fn cand_info(
+    cand: &ChannelCandidate,
+    model: &str,
+    stream: bool,
+    ingress: Ingress,
+    sticky_layer: i16,
+    retry: i16,
+) -> CandInfo {
     CandInfo {
         channel: cand.channel_id,
         key: cand.channel_key_id,
@@ -1312,6 +1367,20 @@ fn cand_info(cand: &ChannelCandidate, sticky_layer: i16, retry: i16) -> CandInfo
         retry,
         upstream_request_id: None,
         bill_resp_model: cand.bill_by_response_model,
+        upstream_model: cand.upstream_model(model).to_owned(),
+        upstream_endpoint: upstream_endpoint(cand, stream, ingress).to_owned(),
+    }
+}
+fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) -> &'static str {
+    match (ingress, cand.provider.as_str()) {
+        (_, "anthropic") => "/v1/messages",
+        (Ingress::OpenAi | Ingress::Responses, "gemini") if stream => {
+            "/v1beta/models/{model}:streamGenerateContent"
+        }
+        (Ingress::OpenAi | Ingress::Responses, "gemini") => {
+            "/v1beta/models/{model}:generateContent"
+        }
+        _ => "/v1/chat/completions",
     }
 }
 
@@ -1560,7 +1629,14 @@ async fn attempt_json(
                 },
                 UsageProbe::to_token_usage,
             );
-            let mut info = cand_info(cand, sticky_layer, retry);
+            let mut info = cand_info(
+                cand,
+                &bill.model,
+                bill.is_stream,
+                bill.ingress,
+                sticky_layer,
+                retry,
+            );
             info.upstream_request_id = upstream_request_id;
             // 响应元数据（model 渠道 opt-in / service_tier 模型配档位倍率）
             let resp_meta = if info.bill_resp_model || bill.has_tier_pricing {
@@ -1751,6 +1827,7 @@ async fn settle_commit(
                 map.insert("requested_model".into(), serde_json::json!(from));
             }
             let input = SettlementInput {
+                dimensions: usage_dimensions(bill, info),
                 request_id: bill.request_id,
                 log_type: 2,
                 user_id: bill.user_id,
@@ -1764,6 +1841,8 @@ async fn settle_commit(
                 amount: quote.amount,
                 original: quote.original,
                 discount: quote.discount,
+                list_price: quote.list_price,
+                upstream_cost: None,
                 pricing_epoch: Some(bill.book.epoch()),
                 pricing_snapshot: snapshot,
                 latency_ms: elapsed_ms_i32(bill.started),
@@ -1830,6 +1909,14 @@ async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
             retry: 0,
             upstream_request_id: None,
             bill_resp_model: false,
+            upstream_model: failure
+                .upstream
+                .as_ref()
+                .map_or_else(String::new, |v| v.0.clone()),
+            upstream_endpoint: failure
+                .upstream
+                .as_ref()
+                .map_or_else(String::new, |v| v.1.clone()),
         },
         TokenUsage::default(),
         Money::ZERO,
@@ -1861,6 +1948,7 @@ async fn record_terminal(
     delta_micro: i64,
 ) {
     let input = SettlementInput {
+        dimensions: usage_dimensions(bill, info),
         request_id: bill.request_id,
         log_type,
         user_id: bill.user_id,
@@ -1874,6 +1962,8 @@ async fn record_terminal(
         amount,
         original: Money::ZERO,
         discount: Money::ZERO,
+        list_price: Money::ZERO,
+        upstream_cost: None,
         pricing_epoch: Some(bill.book.epoch()),
         pricing_snapshot: None,
         latency_ms: elapsed_ms_i32(bill.started),
@@ -1893,6 +1983,20 @@ async fn record_terminal(
         event_type,
     };
     bill.state.settle_write(input).await;
+}
+
+fn usage_dimensions(bill: &RequestBilling, info: &CandInfo) -> okapi_ledger::pg::UsageDimensions {
+    let endpoint = match bill.ingress {
+        Ingress::OpenAi => "/v1/chat/completions",
+        Ingress::Anthropic => "/v1/messages",
+        Ingress::Responses => "/v1/responses",
+    };
+    okapi_ledger::pg::UsageDimensions::new(
+        &bill.requested_model,
+        &info.upstream_model,
+        endpoint,
+        &info.upstream_endpoint,
+    )
 }
 
 // ---- 响应工具 ----

@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
+import { useConfirm } from '@/components/ui/confirm'
 import { Badge } from '@/components/ui/badge'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
@@ -29,6 +30,10 @@ export interface ReconResp {
 /// 展示用管理员语言而非架构黑话：三列钱各自"是什么、谁说了算"要一句话讲清，
 /// 差额直接算好标红——此前只给三列原始数字，管理员对着 events_sum 不知道
 /// 该信哪列、差多少、下一步干什么。
+///
+/// 「按账本校准」是唯一能消掉漂移的动作。对账任务只报不修（此前这里的提示文案却写着
+/// "会按账本自动校准"，站长照着等会一直等下去），而热余额丢了不是显示问题——
+/// `reserve.lua` 对缺键按 0 处理且不回源 PG，那些用户的 key 是真的调不通。
 export function ReconciliationCard() {
   const { t, i18n } = useTranslation()
 
@@ -40,6 +45,17 @@ export function ReconciliationCard() {
     mutationFn: () => apiFetch('/admin/cache/flush', { method: 'POST', body: {} }),
     onSuccess: () => {
       toast.success(t('admin:reconFlushed'))
+      void recon.refetch()
+    },
+    onError: (err) => toast.error(describeError(err)),
+  })
+
+  const { confirm, dialog } = useConfirm()
+  const repair = useMutation({
+    mutationFn: (body: { user_id: number } | { all: true; limit: number }) =>
+      apiFetch<{ repaired: number }>('/admin/reconciliation/repair', { method: 'POST', body }),
+    onSuccess: (r) => {
+      toast.success(t('admin:reconRepaired', { n: r.repaired }))
       void recon.refetch()
     },
     onError: (err) => toast.error(describeError(err)),
@@ -58,6 +74,23 @@ export function ReconciliationCard() {
           <Button size="sm" variant="outline" onClick={() => void recon.refetch()}>
             {t('common:refresh')}
           </Button>
+          {drifts.length > 0 && (
+            <Button
+              size="sm"
+              disabled={repair.isPending}
+              onClick={() =>
+                confirm({
+                  title: t('admin:reconRepairAllTitle'),
+                  description: t('admin:reconRepairAllDesc', { n: drifts.length }),
+                  confirmLabel: t('admin:reconRepair'),
+                  tone: 'default',
+                  onConfirm: () => repair.mutate({ all: true, limit: 100000 }),
+                })
+              }
+            >
+              {t('admin:reconRepairAll')}
+            </Button>
+          )}
         </div>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
@@ -78,6 +111,7 @@ export function ReconciliationCard() {
                   <Th>{t('admin:reconLive')}</Th>
                   <Th>{t('admin:reconDelta')}</Th>
                   <Th>{t('admin:reconSnapshot')}</Th>
+                  <Th />
                 </Tr>
               </THead>
               <TBody>
@@ -100,6 +134,16 @@ export function ReconciliationCard() {
                       <Td className="text-muted-foreground">
                         {formatMoney(d.pg_snapshot_micro, i18n.language)}
                       </Td>
+                      <Td>
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          disabled={repair.isPending}
+                          onClick={() => repair.mutate({ user_id: d.user_id })}
+                        >
+                          {t('admin:reconRepair')}
+                        </Button>
+                      </Td>
                     </Tr>
                   )
                 })}
@@ -108,6 +152,7 @@ export function ReconciliationCard() {
           </>
         )}
       </CardContent>
+      {dialog}
     </Card>
   )
 }

@@ -94,7 +94,13 @@ async fn setup(model_rpm: Option<i64>) -> TestEnv {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // 按生产形态挂 connect info：转发头信任闸要拿 socket 对端做锚点（§14.2）
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
 
     TestEnv {
@@ -188,7 +194,8 @@ async fn dashboard_billing_compat() {
     assert!((usage["total_usage"].as_f64().unwrap() - 0.02).abs() < 1e-9);
 }
 
-/// client_ip：CDN 头按序取首个有效值并落 outbox payload。
+/// client_ip 落 outbox payload。XFF 取**最右非信任跳**（§14.2）：链首那段由客户端书写，
+/// 反代（`$proxy_add_x_forwarded_for`）追加的最右一段才是它亲眼看到的对端。
 #[tokio::test]
 async fn client_ip_from_cdn_headers() {
     let env = setup(None).await;
@@ -212,5 +219,9 @@ async fn client_ip_from_cdn_headers() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(ip.as_deref(), Some("203.0.113.9"), "XFF 取首个有效 IP");
+    assert_eq!(
+        ip.as_deref(),
+        Some("10.0.0.1"),
+        "XFF 取最右非信任跳；链首 203.0.113.9 是调用方自述，不作数"
+    );
 }

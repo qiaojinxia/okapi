@@ -79,6 +79,10 @@ export function KpiStrip({
 }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
+  if (!total && !loading) return <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">{[
+    { icon: Activity, label: t('common:requests') }, { icon: Coins, label: t('analytics:kpiSpend') }, { icon: Cpu, label: t('common:tokens') },
+    { icon: AlertTriangle, label: t('admin:errorRate') }, { icon: Database, label: t('analytics:kpiCacheHit') }, { icon: Timer, label: t('analytics:kpiLatency') },
+  ].map((item) => <Stat key={item.label} {...item} layout="stacked" value="—" />)}</div>
   const cur = total ?? {}
   const prev = previous ?? {}
   const vsPrev = <span>{t('analytics:vsPrevious', { days })}</span>
@@ -87,6 +91,7 @@ export function KpiStrip({
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
       <Stat
+        layout="stacked"
         icon={Activity}
         loading={loading}
         label={t('common:requests')}
@@ -99,6 +104,7 @@ export function KpiStrip({
         }
       />
       <Stat
+        layout="stacked"
         icon={Coins}
         loading={loading}
         label={t('analytics:kpiSpend')}
@@ -106,7 +112,11 @@ export function KpiStrip({
         sub={
           <>
             <Delta cur={cur.amount_micro ?? 0} prev={prev.amount_micro} kind="count" locale={locale} />
-            {(cur.discount_micro ?? 0) > 0 ? (
+            {cur.known_margin_micro != null ? (
+              <span title={t('analysis:costHint')} className={cn(cur.known_margin_micro < 0 && 'text-destructive')}>
+                {t('analysis:coveredMargin')} {formatMoneyAggregate(cur.known_margin_micro, locale)} · {t('analysis:coverage', { v: formatBp(cur.cost_coverage_bp ?? 0, locale) })}
+              </span>
+            ) : (cur.discount_micro ?? 0) > 0 ? (
               <span>{t('analytics:kpiSaved', { v: formatMoneyAggregate(cur.discount_micro ?? 0, locale) })}</span>
             ) : (
               vsPrev
@@ -115,6 +125,7 @@ export function KpiStrip({
         }
       />
       <Stat
+        layout="stacked"
         icon={Cpu}
         loading={loading}
         label={t('common:tokens')}
@@ -132,44 +143,47 @@ export function KpiStrip({
         }
       />
       <Stat
+        layout="stacked"
         icon={AlertTriangle}
         loading={loading}
         label={t('admin:errorRate')}
-        value={formatBp(errBp, locale)}
+        value={(cur.requests ?? 0) > 0 ? formatBp(errBp, locale) : '—'}
         tone={errBp >= 500 ? 'bad' : errBp >= 100 ? 'warn' : 'default'}
         sub={
           <>
-            <Delta cur={errBp} prev={prev.error_rate_bp} kind="bp" invert locale={locale} />
+            {(cur.requests ?? 0) > 0 && (prev.requests ?? 0) > 0 && <Delta cur={errBp} prev={prev.error_rate_bp} kind="bp" invert locale={locale} />}
             <span>{t('analytics:kpiErrors', { n: formatCount(cur.errors ?? 0, locale) })}</span>
           </>
         }
       />
       <Stat
+        layout="stacked"
         icon={Database}
         loading={loading}
         label={t('analytics:kpiCacheHit')}
-        value={formatBp(cur.cache_hit_bp ?? 0, locale)}
+        value={(cur.prompt_tokens ?? 0) > 0 ? formatBp(cur.cache_hit_bp ?? 0, locale) : '—'}
         sub={
           <>
-            <Delta cur={cur.cache_hit_bp ?? 0} prev={prev.cache_hit_bp} kind="bp" locale={locale} />
+            {(cur.prompt_tokens ?? 0) > 0 && (prev.prompt_tokens ?? 0) > 0 && <Delta cur={cur.cache_hit_bp ?? 0} prev={prev.cache_hit_bp} kind="bp" locale={locale} />}
             <span>{t('analytics:kpiCached', { n: formatCount(cur.cached_tokens ?? 0, locale) })}</span>
           </>
         }
       />
       <Stat
+        layout="stacked"
         icon={Timer}
         loading={loading}
         label={t('analytics:kpiLatency')}
-        value={`${formatCount(cur.avg_latency_ms ?? 0, locale)} ms`}
+        value={(cur.requests ?? 0) > 0 && cur.avg_latency_ms != null ? `${formatCount(cur.avg_latency_ms, locale)} ms` : '—'}
         sub={
           <>
-            <Delta
+            {(cur.requests ?? 0) > 0 && (prev.requests ?? 0) > 0 && <Delta
               cur={cur.avg_latency_ms ?? 0}
               prev={prev.avg_latency_ms}
               kind="count"
               invert
               locale={locale}
-            />
+            />}
             {(cur.avg_ttft_ms ?? 0) > 0 ? (
               <span>{t('analytics:kpiTtft', { v: formatCount(cur.avg_ttft_ms ?? 0, locale) })}</span>
             ) : (

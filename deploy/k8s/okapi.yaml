@@ -8,6 +8,13 @@
 #     --from-literal=OKAPI_CLICKHOUSE_URL=http://... \
 #     --from-literal=OKAPI_MASTER_KEY=$(openssl rand -hex 32)
 ---
+# 连接数总账（扩容前必须核）：每个 pod 各开一套 PG 池，总连接 = Σ(副本数 × OKAPI_PG_POOL)。
+#   gateway 10（HPA 上限）× 12 = 120
+#   console   2            ×  8 =  16
+#   worker    1            × 16 =  16
+#                              合计 152，另需给迁移/运维/监控留出余量
+# 故 PostgreSQL 的 max_connections 至少要 200。上不去就走 PgBouncer（transaction 模式），
+# 或按实际副本上限把这几个值调小——改 HPA maxReplicas 时记得回来一起改。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,6 +37,12 @@ spec:
           env:
             - name: OKAPI_BIND
               value: 0.0.0.0:8080
+            # 每个 pod 各开一套 PG 池；HPA 上限 10 → 最多 10×12 = 120 条
+            - name: OKAPI_PG_POOL
+              value: "12"
+            # 信任反代网段（§14.2）：不配则转发头一律不作数，client_ip 会变成 Ingress 的地址
+            - name: OKAPI_TRUSTED_PROXIES
+              value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
             - name: OKAPI_NODE
               valueFrom:
                 fieldRef: { fieldPath: metadata.name }
@@ -94,6 +107,11 @@ spec:
           env:
             - name: OKAPI_CONSOLE_BIND
               value: 0.0.0.0:8081
+            # 2 副本 × 8 = 16 条（控制面是点查为主，不需要大池）
+            - name: OKAPI_PG_POOL
+              value: "8"
+            - name: OKAPI_TRUSTED_PROXIES
+              value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
           ports:
             - containerPort: 8081
           readinessProbe:
@@ -130,6 +148,10 @@ spec:
       containers:
         - name: worker
           image: okapi:latest
+          env:
+            # worker 做批量写（outbox relay / chsink），池给大些；单副本 × 16 = 16 条
+            - name: OKAPI_PG_POOL
+              value: "16"
           args: ["worker"]
           envFrom:
             - secretRef: { name: okapi-env }

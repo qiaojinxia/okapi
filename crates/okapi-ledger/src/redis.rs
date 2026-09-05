@@ -1,4 +1,4 @@
-//! Redis 热账本：三个 Lua 契约的强类型封装。
+//! Redis 热账本：四个 Lua 契约的强类型封装。
 //!
 //! M1 用 EVAL 全量下发脚本（正确优先）；EVALSHA/Script 缓存在 M2 引入。
 //! 限速为固定分钟窗计数（GCRA 滑窗 M2），键形状见 docs/database.md §2.1。
@@ -14,6 +14,7 @@ use uuid::Uuid;
 const RESERVE_LUA: &str = include_str!("lua/reserve.lua");
 const COMMIT_LUA: &str = include_str!("lua/commit.lua");
 const REFUND_LUA: &str = include_str!("lua/refund.lua");
+const REPAIR_LUA: &str = include_str!("lua/repair.lua");
 
 /// 预扣悬置时限：超时未结算的预扣由对账任务懒清理（M2 reconciler）。
 const RESERVATION_TTL_MS: i64 = 600_000;
@@ -57,6 +58,14 @@ pub enum CommitOutcome {
 }
 
 /// Redis 余额账本客户端。
+/// `repair` 的结果：修复前后的 avail 与被保留的在途合计。
+#[derive(Debug, Clone, Copy)]
+pub struct RepairOutcome {
+    pub before: Money,
+    pub after: Money,
+    pub inflight: Money,
+}
+
 #[derive(Clone)]
 pub struct BalanceLedger {
     client: Client,
@@ -194,6 +203,43 @@ impl BalanceLedger {
             .eval(LUA, vec![Self::bal_key(user_id)], Vec::<String>::new())
             .await?;
         Ok(Money::from_micros(drained))
+    }
+
+    /// 按账本权威值重建热余额（对账修复）。
+    ///
+    /// 为什么需要：Redis 是**唯一**热账本，而 `reserve.lua` 对不存在的键按余额 0 处理、
+    /// 不回源 PG。实例没开持久化重启一次、故障切到空副本、maxmemory 把 `bal:{}` 淘汰掉、
+    /// 或者谁手滑 FLUSHDB——余额就集体归零，全站付费请求静默拒服务
+    /// （429 insufficient_quota），且**不会自愈**：对账任务此前只报不修，
+    /// 全仓也没有第二个入口能把余额写回去。
+    ///
+    /// 权威源是 `billing_events` 求和，重建幂等：同一个 target 重跑结果相同。
+    /// 在途预扣保持不动，详见 `lua/repair.lua`。
+    pub async fn repair(
+        &self,
+        user_id: i64,
+        target: Money,
+    ) -> Result<RepairOutcome, LedgerError> {
+        let reply: Value = self
+            .client
+            .eval(
+                REPAIR_LUA,
+                vec![Self::bal_key(user_id)],
+                vec![target.as_micros().to_string()],
+            )
+            .await?;
+        let items = as_array(&reply)?;
+        let parse = |i: usize| -> Result<Money, LedgerError> {
+            str_at(items, i)?
+                .parse::<i64>()
+                .map(Money::from_micros)
+                .map_err(|_| LedgerError::UnexpectedReply("repair"))
+        };
+        Ok(RepairOutcome {
+            before: parse(0)?,
+            after: parse(1)?,
+            inflight: parse(2)?,
+        })
     }
 
     /// 读当前热余额（诊断/测试）。

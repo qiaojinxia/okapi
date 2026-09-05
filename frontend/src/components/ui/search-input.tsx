@@ -1,4 +1,5 @@
 import { Search, X } from 'lucide-react'
+import { useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 
@@ -26,14 +27,17 @@ export function SearchInput({
   ...props
 }: SearchInputProps) {
   const { t } = useTranslation()
+  const input = useRef<HTMLInputElement>(null)
   return (
     <div className={cn('relative flex items-center', className)}>
       <Search className="pointer-events-none absolute left-2.5 h-4 w-4 text-muted-foreground" />
       <input
+        ref={input}
         type="search"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {
+          if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return
           if (e.key === 'Enter' && onSubmit) {
             e.preventDefault()
             onSubmit()
@@ -52,8 +56,11 @@ export function SearchInput({
         <button
           type="button"
           aria-label={t('common:clear')}
-          onClick={() => onChange('')}
-          className="absolute right-2 rounded p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          onClick={() => {
+            onChange('')
+            input.current?.focus({ preventScroll: true })
+          }}
+          className="absolute right-0 flex h-full w-8 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40"
         >
           <X className="h-3.5 w-3.5" />
         </button>

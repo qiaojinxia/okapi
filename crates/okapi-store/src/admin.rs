@@ -75,6 +75,8 @@ pub async fn upsert_model_ratio(
             audio_ratio = EXCLUDED.audio_ratio,
             audio_completion_ratio = EXCLUDED.audio_completion_ratio,
             image_ratio = EXCLUDED.image_ratio,
+            -- 改回 ratio 必须清掉阶梯表：留着它，下次误切 tiered 会拿到一张早已过期的旧表
+            tier_expr = NULL,
             updated_at = now()
         "#,
         model_id,
@@ -85,6 +87,70 @@ pub async fn upsert_model_ratio(
         axes.audio,
         axes.audio_completion,
         axes.image
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(model_id)
+}
+
+/// 阶梯计价写入（`pricing_mode='tiered'` + `tier_expr`）。
+///
+/// 与 ratio 模式共用除 `model_ratio` 外的全部倍率轴——阶梯只替换「每 token 基准单价」
+/// 这一段，补全/缓存/多模态轴仍照常叠乘。
+///
+/// 此前引擎（`PricingMode::Tiered`）、价簿加载器（`pricing_loader` 读 `tier_expr`）、
+/// 解析器（`TierTable::parse`）与 schema 用例都在，唯独没有任何写入路径——三种计价模式，
+/// 控制面只配得出 ratio，per_call 得绕 new-api 导入，tiered 只能手改库。
+pub async fn upsert_model_tiered(
+    pool: &PgPool,
+    model_name: &str,
+    axes: RatioAxes<'_>,
+    tier_expr: &str,
+) -> Result<i64, StoreError> {
+    let mut tx = pool.begin().await?;
+    let vendor = crate::vendor::classify(model_name);
+    let model_id = sqlx::query_scalar!(
+        r#"
+        INSERT INTO models (model_name, vendor) VALUES ($1, $2)
+        ON CONFLICT (model_name) DO UPDATE SET
+            vendor = COALESCE(models.vendor, EXCLUDED.vendor),
+            updated_at = now()
+        RETURNING id
+        "#,
+        model_name,
+        vendor
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query!(
+        r#"
+        INSERT INTO model_pricing
+            (model_id, pricing_mode, model_ratio, completion_ratio, cache_ratio,
+             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio, tier_expr)
+        VALUES ($1, 'tiered', ($2::text)::numeric, ($3::text)::numeric, ($4::text)::numeric,
+                ($5::text)::numeric, ($6::text)::numeric, ($7::text)::numeric,
+                ($8::text)::numeric, $9)
+        ON CONFLICT (model_id) DO UPDATE SET
+            pricing_mode = 'tiered',
+            completion_ratio = EXCLUDED.completion_ratio,
+            cache_ratio = EXCLUDED.cache_ratio,
+            cache_write_ratio = EXCLUDED.cache_write_ratio,
+            audio_ratio = EXCLUDED.audio_ratio,
+            audio_completion_ratio = EXCLUDED.audio_completion_ratio,
+            image_ratio = EXCLUDED.image_ratio,
+            tier_expr = EXCLUDED.tier_expr,
+            updated_at = now()
+        "#,
+        model_id,
+        axes.model,
+        axes.completion,
+        axes.cache,
+        axes.cache_write,
+        axes.audio,
+        axes.audio_completion,
+        axes.image,
+        tier_expr
     )
     .execute(&mut *tx)
     .await?;
@@ -407,6 +473,9 @@ pub struct ChannelRow {
     pub pools: Vec<String>,
     /// 池成员关系明细（含成员级调度参数覆盖）。
     pub pool_members: Vec<PoolMember>,
+    /// 相对成本系数（千分比；1000 = 官方标价）。既是调度加权除数，也是毛利核算里
+    /// "官方价 × 系数 = 上游成本"的系数（§11.18）。
+    pub cost_milli: i64,
 }
 
 /// 渠道在某个池里的成员关系：覆盖为 None 时继承渠道 / key 自身的调度参数。
@@ -442,6 +511,7 @@ pub async fn list_channels(
         SELECT c.id, c.name, c.provider, c.api_base, c.status, c.priority, c.models,
                c.trust_upstream_usage, c.owner_id,
                COALESCE(c.settings, '{}'::jsonb) AS "settings!",
+               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!",
                COALESCE(
                    (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
@@ -479,8 +549,44 @@ pub async fn list_channels(
             settings: r.settings,
             pools: r.pools,
             pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
+            cost_milli: r.cost_milli,
         })
         .collect())
+}
+
+/// 用户个人计价系数（`users.price_multiplier`）。十进制字符串入库，计费链路不碰浮点。
+/// 返回是否命中（false = 用户不存在/已删除）。
+///
+/// 此前这一列全仓只读：鉴权链路读它、`/admin/users` 返回它、前端用户列表还专门有一列
+/// `×{price_multiplier}` 在展示，却没有任何写入路径——它永远只能是建表默认的 1.0。
+pub async fn set_user_multiplier(
+    pool: &PgPool,
+    user_id: i64,
+    multiplier: &str,
+) -> Result<bool, StoreError> {
+    let affected = sqlx::query!(
+        r#"UPDATE users SET price_multiplier = ($2::text)::numeric, updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL"#,
+        user_id,
+        multiplier
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(affected > 0)
+}
+
+/// 渠道相对成本系数（千分比；缺省 1000 = 官方标价）。None = 渠道不存在。
+/// 结算路径经进程缓存调用（`AppState::channel_cost_milli`），不在热路径。
+pub async fn channel_cost_milli(pool: &PgPool, channel_id: i64) -> Result<Option<i64>, StoreError> {
+    let row = sqlx::query_scalar!(
+        r#"SELECT GREATEST(COALESCE((upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!"
+           FROM channels WHERE id = $1"#,
+        channel_id
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 /// 渠道属主（外层 None = 渠道不存在）。
@@ -924,6 +1030,8 @@ pub struct ApiKeyPatch {
     pub expires_at: Option<Option<DateTime<Utc>>>,
     pub model_allowlist: Option<Option<serde_json::Value>>,
     pub group_override: Option<Option<String>>,
+    /// IP 白名单（地址 / CIDR 字符串数组；Some(None) = 解除限制）。
+    pub ip_allowlist: Option<Option<serde_json::Value>>,
     pub rpm_limit: Option<Option<i32>>,
     pub tpm_limit: Option<Option<i32>>,
     pub rpd_limit: Option<Option<i32>>,
@@ -959,7 +1067,8 @@ pub async fn patch_api_key(
             tpm_limit         = CASE WHEN $13::bool THEN $14::int ELSE tpm_limit END,
             rpd_limit         = CASE WHEN $15::bool THEN $16::int ELSE rpd_limit END,
             daily_token_limit = CASE WHEN $17::bool THEN $18::bigint ELSE daily_token_limit END,
-            max_concurrency   = CASE WHEN $19::bool THEN $20::int ELSE max_concurrency END
+            max_concurrency   = CASE WHEN $19::bool THEN $20::int ELSE max_concurrency END,
+            ip_allowlist      = CASE WHEN $21::bool THEN $22::jsonb ELSE ip_allowlist END
         WHERE id = $1 AND deleted_at IS NULL
           AND ($2::bigint IS NULL OR user_id = $2)
         RETURNING key_hash, user_id
@@ -984,6 +1093,8 @@ pub async fn patch_api_key(
         patch.daily_token_limit.flatten(),
         patch.max_concurrency.is_some(),
         patch.max_concurrency.flatten(),
+        patch.ip_allowlist.is_some(),
+        patch.ip_allowlist.as_ref().and_then(Option::as_ref),
     )
     .fetch_optional(pool)
     .await?;
@@ -1047,6 +1158,8 @@ pub struct ChannelPatch<'a> {
     pub capabilities: Option<&'a serde_json::Value>,
     pub priority: Option<i32>,
     pub trust_upstream_usage: Option<bool>,
+    /// 相对成本系数（千分比）；写入 `upstream_unit_cost.relative_cost_milli`，其余键保留。
+    pub cost_milli: Option<i64>,
 }
 
 /// 部分更新渠道配置；返回是否命中（false = 不存在/已删除，调用方转 404）。
@@ -1067,6 +1180,9 @@ pub async fn patch_channel(
             capabilities         = COALESCE($8::jsonb, capabilities),
             priority             = COALESCE($9, priority),
             trust_upstream_usage = COALESCE($10, trust_upstream_usage),
+            upstream_unit_cost   = CASE WHEN $11::bigint IS NULL THEN upstream_unit_cost
+                                        ELSE COALESCE(upstream_unit_cost, '{}'::jsonb)
+                                             || jsonb_build_object('relative_cost_milli', $11::bigint) END,
             updated_at           = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -1080,6 +1196,7 @@ pub async fn patch_channel(
         patch.capabilities,
         patch.priority,
         patch.trust_upstream_usage,
+        patch.cost_milli,
     )
     .execute(pool)
     .await?
@@ -1102,18 +1219,29 @@ pub async fn soft_delete_channel(pool: &PgPool, channel_id: i64) -> Result<bool,
 }
 
 /// 渠道单把 key 的权重/并发上限调整；返回是否命中。
+/// 调单把 key 的调度参数与状态。
+///
+/// `status` 同时复位 `failed_count / cooldown_until / last_error`——手动改状态的语义就是
+/// 「我处理过了，重新开始计数」。此前没有这个参数：401/403 把 key 打成 `status=6`
+/// （无冷却、不自愈）之后，冷却恢复 worker 只捞 `status IN (2,3,4)`，控制面又没有别的入口，
+/// 唯一救法是重置凭证。
 pub async fn patch_channel_key(
     pool: &PgPool,
     channel_id: i64,
     channel_key_id: i64,
     weight: Option<i32>,
     max_concurrency: Option<Option<i32>>,
+    status: Option<i16>,
 ) -> Result<bool, StoreError> {
     let affected = sqlx::query!(
         r#"
         UPDATE channel_keys SET
             weight          = COALESCE($3, weight),
             max_concurrency = CASE WHEN $4::bool THEN $5::int ELSE max_concurrency END,
+            status          = COALESCE($6, status),
+            failed_count    = CASE WHEN $6::smallint IS NULL THEN failed_count ELSE 0 END,
+            cooldown_until  = CASE WHEN $6::smallint IS NULL THEN cooldown_until ELSE NULL END,
+            last_error      = CASE WHEN $6::smallint IS NULL THEN last_error ELSE NULL END,
             updated_at      = now()
         WHERE id = $2 AND channel_id = $1
         "#,
@@ -1122,6 +1250,7 @@ pub async fn patch_channel_key(
         weight,
         max_concurrency.is_some(),
         max_concurrency.flatten(),
+        status,
     )
     .execute(pool)
     .await?

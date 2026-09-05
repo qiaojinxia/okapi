@@ -16,6 +16,7 @@ import {
 } from '@/features/rules/types'
 import { Select } from '@/components/ui/select'
 import { TagInput } from '@/components/ui/tag-input'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
@@ -39,7 +40,6 @@ export function RuleDrawer({
   const { t } = useTranslation()
   const editing = initial !== undefined
   const p = initial?.params ?? {}
-  const [msg, setMsg] = useState<string | null>(null)
   const [ruleType, setRuleType] = useState<RuleType>(
     (initial?.rule_type as RuleType | undefined) ?? 'discount',
   )
@@ -104,7 +104,7 @@ export function RuleDrawer({
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (
@@ -115,7 +115,6 @@ export function RuleDrawer({
       description={t('admin:ruleDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>

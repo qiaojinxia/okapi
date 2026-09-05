@@ -213,7 +213,7 @@ pub async fn search(
                 log_type, user_id, api_key_id, group_code, model, channel_id, channel_key_id, \
                 client_type, client_ip, node, \
                 prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, \
-                amount_micro, original_amount_micro, discount_micro, \
+                amount_micro, original_amount_micro, discount_micro, upstream_cost_micro, \
                 latency_ms, ttft_ms, stream, retry_count, failover_count, sticky_layer, \
                 upstream_status, error_code, is_error, ratio_snapshot \
          FROM request_log_raw WHERE {} \
@@ -261,6 +261,8 @@ pub async fn search(
                 "amount_micro": ch_i64(r, "amount_micro"),
                 "original_amount_micro": ch_i64(r, "original_amount_micro"),
                 "discount_micro": ch_i64(r, "discount_micro"),
+                // 上游成本（§11.18）：管理面账单解释器展示毛利；门户接口不透出此字段
+                "upstream_cost_micro": ch_i64(r, "upstream_cost_micro"),
                 "latency_ms": ch_i64(r, "latency_ms"),
                 "ttft_ms": ch_i64(r, "ttft_ms"),
                 "is_stream": ch_i64(r, "stream") == 1,

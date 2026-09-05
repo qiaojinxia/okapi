@@ -7,6 +7,8 @@ export interface ModelListRow {
   completion_ratio: string | null
   cache_ratio: string | null
   cache_write_ratio: string | null
+  /// 阶梯计价表 "0:2.5,128000:5"；非空 = tiered 模式。
+  tier_expr: string | null
   audio_ratio: string | null
   audio_completion_ratio: string | null
   image_ratio: string | null

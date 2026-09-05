@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { KeyRound, Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
+import { KeyRound, Pencil, Plus, Power, PowerOff, ShieldCheck, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Alert } from '@/components/ui/alert'
@@ -20,6 +20,7 @@ import { toast } from '@/components/ui/toast'
 import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { Select } from '@/components/ui/select'
+import { TagInput } from '@/components/ui/tag-input'
 import { formatCount, formatMoney, formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
@@ -35,6 +36,8 @@ interface KeyRow {
   requests: number
   /// 这把 key 钉住的分组；null = 跟随用户分组。
   group_override: string | null
+  /// 数据面来源 IP 白名单（地址 / CIDR）；null = 不限。
+  ip_allowlist: string[] | null
 }
 
 interface SelectableGroup {
@@ -46,7 +49,7 @@ interface SelectableGroup {
 
 type Editor =
   | { mode: 'create' }
-  | { mode: 'rename'; id: number; name: string; group: string | null }
+  | { mode: 'rename'; id: number; name: string; group: string | null; ips: string[] }
 
 /// 门户密钥页：列表 + 自助新建（new-api 令牌页的"添加令牌"）。
 ///
@@ -64,6 +67,8 @@ export function PortalKeysPage() {
   const [draft, setDraft] = useState('')
   // 档位：'' = 跟随用户分组
   const [group, setGroup] = useState('')
+  // IP 白名单草稿：空 = 不限
+  const [ips, setIps] = useState<string[]>([])
   const [minted, setMinted] = useState<{ name: string; api_key: string } | null>(null)
   const [sessionMsg, setSessionMsg] = useState<string | null>(null)
   const { confirm, dialog } = useConfirm()
@@ -87,13 +92,18 @@ export function PortalKeysPage() {
     setEditor(e)
     setDraft(e.mode === 'rename' ? e.name : '')
     setGroup(e.mode === 'rename' ? (e.group ?? '') : '')
+    setIps(e.mode === 'rename' ? e.ips : [])
   }
 
   const create = useMutation({
-    mutationFn: (arg: { name: string; group: string }) =>
+    mutationFn: (arg: { name: string; group: string; ips: string[] }) =>
       apiFetch<{ key_id: number; api_key: string }>('/auth/keys', {
         method: 'POST',
-        body: { name: arg.name, group_code: arg.group === '' ? undefined : arg.group },
+        body: {
+          name: arg.name,
+          group_code: arg.group === '' ? undefined : arg.group,
+          ip_allowlist: arg.ips.length === 0 ? undefined : arg.ips,
+        },
       }),
     onSuccess: (r, arg) => {
       setMinted({ name: arg.name, api_key: r.api_key })
@@ -134,8 +144,16 @@ export function PortalKeysPage() {
   const submitEditor = () => {
     const name = draft.trim()
     if (name === '' || editor === null) return
-    if (editor.mode === 'create') create.mutate({ name, group })
-    else patch.mutate({ id: editor.id, body: { name, group_code: group === '' ? null : group } })
+    if (editor.mode === 'create') create.mutate({ name, group, ips })
+    else
+      patch.mutate({
+        id: editor.id,
+        body: {
+          name,
+          group_code: group === '' ? null : group,
+          ip_allowlist: ips.length === 0 ? null : ips,
+        },
+      })
   }
 
   const groupLabel = (g: SelectableGroup) =>
@@ -224,9 +242,20 @@ export function PortalKeysPage() {
                 <Td className="max-w-56 font-medium" title={k.name}>
                   <div className="flex flex-col leading-tight">
                     <span className="truncate">{k.name}</span>
-                    {k.group_override && (
-                      <span className="text-xs font-normal text-muted-foreground">
-                        {t('portal:keyGroupPinned', { group: k.group_override })}
+                    {(k.group_override || (k.ip_allowlist?.length ?? 0) > 0) && (
+                      <span className="flex flex-wrap items-center gap-x-2 text-xs font-normal text-muted-foreground">
+                        {k.group_override && (
+                          <span>{t('portal:keyGroupPinned', { group: k.group_override })}</span>
+                        )}
+                        {(k.ip_allowlist?.length ?? 0) > 0 && (
+                          <span
+                            className="inline-flex items-center gap-1"
+                            title={k.ip_allowlist?.join(', ')}
+                          >
+                            <ShieldCheck className="h-3 w-3" />
+                            {t('portal:keyIpPinned', { n: k.ip_allowlist?.length ?? 0 })}
+                          </span>
+                        )}
                       </span>
                     )}
                   </div>
@@ -262,7 +291,13 @@ export function PortalKeysPage() {
                       icon={Pencil}
                       label={t('common:edit')}
                       onClick={() =>
-                        openEditor({ mode: 'rename', id: k.id, name: k.name, group: k.group_override })
+                        openEditor({
+                          mode: 'rename',
+                          id: k.id,
+                          name: k.name,
+                          group: k.group_override,
+                          ips: k.ip_allowlist ?? [],
+                        })
                       }
                     />
                     <IconButton
@@ -327,6 +362,15 @@ export function PortalKeysPage() {
               />
             </Field>
           )}
+          {/* 来源 IP 白名单：只约束 /v1 调用，门户登录不受限（否则会把自己锁在门外） */}
+          <Field label={t('portal:keyIp')} htmlFor="key-ips" hint={t('portal:keyIpHint')}>
+            <TagInput
+              id="key-ips"
+              value={ips}
+              onChange={setIps}
+              placeholder={t('portal:keyIpPlaceholder')}
+            />
+          </Field>
         </form>
       </Drawer>
     </div>

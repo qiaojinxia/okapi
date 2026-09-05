@@ -40,25 +40,35 @@ export interface ModelRow {
 
 
 
-export interface MarginDay {
+interface CostCoverage {
+  cost_known_requests?: number
+  cost_coverage_bp?: number | null
+  known_cost_micro?: number
+  known_margin_micro?: number | null
+}
+export interface MarginDay extends CostCoverage {
   day: string
   requests: number
   amount_micro: number
   original_micro: number
   discount_micro: number
+  upstream_cost_micro: number
+  margin_micro: number | null
 }
 
 
 
 export interface MarginResp {
+  window?: { start_date: string; end_date: string; today: string; timezone: string; generated_at: string; freshness?: import('@/features/analytics/types').Freshness }
   data: MarginDay[]
-  total: {
+  total: CostCoverage & {
     requests: number
     errors: number
     error_rate_bp: number
     amount_micro: number
     discount_micro: number
     upstream_cost_micro: number
-    margin_micro: number
+    margin_micro: number | null
+    margin_rate_bp: number | null
   }
 }

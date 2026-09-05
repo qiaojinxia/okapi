@@ -1,9 +1,10 @@
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Input, Label } from '@/components/ui/input'
+import { Field } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
 import { TagInput } from '@/components/ui/tag-input'
 import { toast } from '@/components/ui/toast'
@@ -47,6 +48,7 @@ function usdToMicro(raw: string): number {
 /// 金额按美元填——JSON 键值页里既发现不了可选项，也校验不了 micro 单位。
 export function RegistrationCard() {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
   const [draft, setDraft] = useState<Policy | null>(null)
   const current = useQuery({
     queryKey: ['setting', 'registration_policy'],
@@ -72,6 +74,7 @@ export function RegistrationCard() {
       toast.success(t('admin:regSaved'))
       setDraft(null)
       void current.refetch()
+      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
     },
     onError: (err) => toast.error(describeError(err)),
   })
@@ -99,8 +102,7 @@ export function RegistrationCard() {
     value: number,
     onChange: (micro: number) => void,
   ) => (
-    <div className="flex flex-col gap-1.5">
-      <Label htmlFor={id}>{label}</Label>
+    <Field label={label} htmlFor={id} hint={hint}>
       <div className="flex items-center gap-1.5">
         <span className="text-sm text-muted-foreground">$</span>
         <Input
@@ -112,8 +114,7 @@ export function RegistrationCard() {
           onChange={(e) => onChange(usdToMicro(e.target.value))}
         />
       </div>
-      <p className="text-xs text-muted-foreground">{hint}</p>
-    </div>
+    </Field>
   )
 
   return (
@@ -124,8 +125,7 @@ export function RegistrationCard() {
       <CardContent className="flex flex-col gap-5">
         <p className="text-xs text-muted-foreground">{t('admin:regHint')}</p>
 
-        <div className="flex flex-col gap-1.5">
-          <Label>{t('admin:regMode')}</Label>
+        <Field label={t('admin:regMode')} hint={modeHint[form.mode]}>
           <Segmented
             options={MODES.map((m) => ({ value: m, label: modeLabel[m] }))}
             value={form.mode}
@@ -133,11 +133,9 @@ export function RegistrationCard() {
             size="sm"
             className="self-start"
           />
-          <p className="text-xs text-muted-foreground">{modeHint[form.mode]}</p>
-        </div>
+        </Field>
 
-        <div className="flex flex-col gap-1.5">
-          <Label>{t('admin:regDomain')}</Label>
+        <Field label={t('admin:regDomain')} hint={t('admin:regDomainHint')}>
           <Segmented
             options={DOMAIN_MODES.map((m) => ({ value: m, label: domainLabel[m] }))}
             value={form.email_domain_mode}
@@ -153,8 +151,7 @@ export function RegistrationCard() {
               placeholder={t('admin:regDomainPlaceholder')}
             />
           )}
-          <p className="text-xs text-muted-foreground">{t('admin:regDomainHint')}</p>
-        </div>
+        </Field>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           {money(

@@ -14,5 +14,6 @@ mod error;
 pub use error::LedgerError;
 pub use pg::{SettlementInput, record_settlement};
 pub use redis::{
-    BalanceLedger, CommitOutcome, LimitCaps, Reservation, ReserveOutcome, ReserveRequest,
+    BalanceLedger, CommitOutcome, LimitCaps, RepairOutcome, Reservation, ReserveOutcome,
+    ReserveRequest,
 };

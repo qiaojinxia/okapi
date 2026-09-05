@@ -69,7 +69,7 @@ test('截图：门户与管理端主要页面', async ({ page, request }) => {
   })
   const topName = ((await topResp.json()) as { data: { name: string }[] }).data[0]?.name
   if (topName) {
-    await page.getByPlaceholder(/搜索|Search/).fill(topName)
+    await page.getByRole('main').getByPlaceholder(/搜索|Search/).fill(topName)
     await page.waitForTimeout(800)
     // 点一次测活，让"最近测试"列有值（该测试渠道指向不可达地址 → 失败形态）
     await page.getByRole('button', { name: /^测活$|^Test$/ }).first().click()
@@ -108,7 +108,7 @@ test('截图：门户与管理端主要页面', async ({ page, request }) => {
   if (busyName) {
     await page.goto('/admin/channels')
     await page.waitForTimeout(1_500)
-    await page.getByPlaceholder(/搜索|Search/).first().fill(busyName)
+    await page.getByRole('main').getByPlaceholder(/搜索|Search/).first().fill(busyName)
     await page.waitForTimeout(1_200)
     const cell = page.getByTitle(/健康时间线|health timeline/).first()
     if (await cell.isVisible()) {

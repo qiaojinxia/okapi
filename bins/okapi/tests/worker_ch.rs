@@ -175,7 +175,17 @@ async fn chsink_pipeline_then_dlq() {
     .unwrap();
     assert!(dlq >= 1, "DLQ 必须留痕");
 
-    // 收尾：把阶段 2 波及的其他 pending 行交还真实 CH 排空，不影响并行测试
+    // 收尾：把本用例造的死信删掉。它是故意打 127.0.0.1:9 造出来的，留在共享开发库里
+    // 运维页会一直挂着"N 条待处理"，而站长根本无从判断那是真故障还是测试残渣。
+    sqlx::query!(
+        r#"DELETE FROM billing_dlq
+           WHERE source = 'chsink' AND payload->>'request_id' = $1"#,
+        dead_request.to_string()
+    )
+    .execute(&pg)
+    .await
+    .unwrap();
+    // 把阶段 2 波及的其他 pending 行交还真实 CH 排空，不影响并行测试
     drain(&pg, &ch).await;
 }
 

@@ -455,7 +455,8 @@ async fn flow_links_conserve_and_fold_other() {
     // 每一跳的链接值之和 = 总量（守恒）
     let links = body["links"].as_array().unwrap();
     for (from, to) in [
-        ("user:", "api_key:"),
+        ("user:", "node:"),
+        ("node:", "api_key:"),
         ("api_key:", "group:"),
         ("group:", "model:"),
         ("model:", "channel:"),
@@ -620,4 +621,282 @@ async fn channel_timeline_buckets() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(body["hours"], 168);
+}
+
+async fn insert_values(env: &Env, rows: &[Value], day: Option<&str>) {
+    for row in rows {
+        sqlx::query("INSERT INTO billing_outbox (topic, payload, created_at) VALUES ('request_log', $1, COALESCE($2::text::timestamptz, now()))")
+            .bind(row).bind(day).execute(&env.pg).await.unwrap();
+    }
+}
+fn advanced_payload(
+    env: &Env,
+    upstream: &str,
+    group: &str,
+    latency: i64,
+    known: bool,
+    cost: i64,
+) -> Value {
+    let mut row = payload(env, &env.model_a, 1000, false);
+    row["requested_model"] = json!("client.alias");
+    row["upstream_model"] = json!(upstream);
+    row["endpoint"] = json!("/v1/responses");
+    row["upstream_endpoint"] = json!("/v1/chat/completions");
+    row["billing_type"] = json!("ratio");
+    row["group"] = json!(group);
+    row["latency_ms"] = json!(latency);
+    row["ttft_ms"] = json!(latency / 10);
+    row["upstream_cost_known"] = json!(known);
+    row["upstream_cost_micro"] = json!(cost);
+    row["cache_write_tokens"] = json!(0);
+    row
+}
+
+#[tokio::test]
+async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    let rows = vec![
+        advanced_payload(&env, "up.a", "g,a", 1000, true, 0),
+        advanced_payload(&env, "up.a", "g,a", 3000, true, 500),
+        advanced_payload(&env, "up.b", "g'b", 8000, false, 0),
+    ];
+    insert_values(&env, &rows, Some("2026-08-25 12:00:00+00")).await;
+    insert_values(&env, &[rows[0].clone()], Some("2026-08-24 12:00:00+00")).await;
+    let path = format!(
+        "/admin/stats/trend?start_date=2026-08-25&end_date=2026-08-25&granularity=hour&user_id={}",
+        env.user_id
+    );
+    let body = poll_until(&env, &path, |b| b["total"]["requests"] == 3).await;
+    assert_eq!(body["previous"]["requests"], 1);
+    assert_eq!(
+        body["total"]["cost_known_requests"], 2,
+        "known zero cost is covered"
+    );
+    assert_eq!(body["total"]["cost_coverage_bp"], 6666);
+    assert_eq!(body["total"]["known_margin_micro"], 1500);
+    assert!(
+        body["total"]["margin_micro"].is_null(),
+        "partial coverage cannot be total margin"
+    );
+    assert_eq!(body["total"]["cache_write_tokens"], 0);
+    assert_eq!(body["total"]["avg_latency_ms"], 4000);
+    assert!(body["window"]["freshness"]["last_ingested_at"].is_string());
+    let mut query_url = reqwest::Url::parse("http://localhost/").unwrap();
+    let mut query = query_url.query_pairs_mut();
+    query.extend_pairs([
+        ("start_date", "2026-08-25"),
+        ("end_date", "2026-08-25"),
+        ("model_source", "upstream"),
+        ("models", "[\"up.a\"]"),
+        ("groups", "[\"g,a\"]"),
+        ("endpoint", "/v1/responses"),
+        ("upstream_endpoint", "/v1/chat/completions"),
+        ("request_type", "stream"),
+        ("billing_type", "ratio"),
+        ("node", "test-node"),
+    ]);
+    query.append_pair("user_id", &env.user_id.to_string());
+    drop(query);
+    let query = query_url.query().unwrap();
+    let (status, trend) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&stack=model_group&metric=latency"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{trend}");
+    assert_eq!(trend["total"]["requests"], 2);
+    assert_eq!(trend["total"]["margin_micro"], 1500);
+    assert_eq!(trend["series"][0]["key"], "[\"up.a\",\"g,a\"]");
+    let value = trend["data"][0]["values"]["[\"up.a\",\"g,a\"]"].clone();
+    assert_eq!(value["avg_latency_ms"], 2000);
+    assert_eq!(value["avg_ttft_ms"], 200);
+    assert_eq!(value["avg_output_tps_milli"], 100000);
+    let (status, by) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=model"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{by}");
+    assert_eq!(by["total_requests"], 2);
+    assert_eq!(by["data"][0]["key"], "up.a");
+    assert_eq!(by["data"][0]["known_margin_micro"], 1500);
+    let stages = "stages=%5B%22node%22,%22model%22,%22channel%22%5D";
+    let (status, flow) = get(
+        &env,
+        &format!("/admin/stats/flow?{query}&metric=requests&{stages}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{flow}");
+    assert_eq!(flow["total"], 2);
+    assert_eq!(flow["stages"], json!(["node", "model", "channel"]));
+    assert!(
+        flow["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "model:up.a")
+    );
+    assert!(
+        flow["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["value"] == 2)
+    );
+    let (status, none) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&stream=false"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(none["total"]["requests"], 0);
+}
+
+#[tokio::test]
+async fn legacy_aggregate_remainder_is_preserved_once_and_marked_unknown() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    insert_values(
+        &env,
+        &[advanced_payload(&env, "up.a", "default", 1000, true, 0)],
+        Some("2026-08-26 12:00:00+00"),
+    )
+    .await;
+    drain(&env).await;
+    let ch = env.state.ch.as_ref().unwrap();
+    // Simulate pre-upgrade aggregate history sharing the exact old cube key with one new record.
+    ch.execute(&format!("INSERT INTO mv_cube_hour SELECT toDateTime('2026-08-26 12:00:00') AS hour, toInt64({}) AS user_id, toInt64({}) AS api_key_id, 'default' AS group_code, '{}' AS model, toInt64({}) AS channel_id, countState() AS requests, sumState(toUInt64(100)) AS prompt_tokens, sumState(toUInt64(40)) AS cached_tokens, sumState(toUInt64(200)) AS completion_tokens, sumState(toUInt64(10)) AS reasoning_tokens, sumState(toInt64(1000)) AS amount, sumState(toInt64(250)) AS discount, sumState(toInt64(0)) AS upstream_cost, sumState(toUInt64(0)) AS errors, sumState(toUInt64(5000)) AS latency_sum, sumState(toUInt64(500)) AS ttft_sum, countIfState(toUInt32(500)>0) AS ttft_samples FROM numbers(2) GROUP BY hour, user_id, api_key_id, group_code, model, channel_id", env.user_id, env.key_id, env.model_a, env.channel_id)).await.unwrap();
+    let query = format!(
+        "start_date=2026-08-26&end_date=2026-08-26&user_id={}",
+        env.user_id
+    );
+    let (status, trend) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{trend}");
+    assert_eq!(trend["total"]["requests"], 3);
+    assert_eq!(trend["total"]["amount_micro"], 3000);
+    assert_eq!(trend["total"]["cost_known_requests"], 1);
+    assert_eq!(trend["total"]["avg_latency_ms"], 3666);
+    assert!(trend["total"]["cache_write_tokens"].is_null());
+    let (_, by) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=endpoint"),
+        &env.super_token,
+    )
+    .await;
+    let rows = by["data"].as_array().unwrap();
+    assert_eq!(rows.iter().find(|r| r["key"] == "").unwrap()["requests"], 2);
+    assert_eq!(
+        rows.iter().find(|r| r["key"] == "/v1/responses").unwrap()["requests"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn invalid_analysis_ranges_and_dimensions_are_rejected() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    drain(&env).await;
+    for query in [
+        "start_date=2026-08-01",
+        "start_date=2026-08-30&end_date=2026-08-01",
+        "start_date=2026-02-30&end_date=2026-03-01",
+        "start_date=2099-01-01&end_date=2099-01-02",
+        "start_date=2025-01-01&end_date=2026-08-01",
+        "start_date=2026-06-01&end_date=2026-08-01&granularity=hour",
+        "model_source=invalid",
+        "request_type=invalid",
+        "models=not-json",
+        "groups=%5B%22%22%5D",
+    ] {
+        let (status, body) = get(
+            &env,
+            &format!("/admin/stats/trend?{query}"),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 400, "{query}: {body}");
+    }
+    for stages in [
+        "%5B%22node%22%5D",
+        "%5B%22node%22,%22node%22%5D",
+        "%5B%22node%22,%22oops%22%5D",
+    ] {
+        let (status, body) = get(
+            &env,
+            &format!("/admin/stats/flow?stages={stages}"),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn flow_names_include_safe_context_deleted_and_missing_identities() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    sqlx::query("UPDATE api_keys SET name = '' WHERE id = $1")
+        .bind(env.key_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channels SET deleted_at = now() WHERE id = $1")
+        .bind(env.channel_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let missing = 3_000_000_000_i64 + env.user_id;
+    let mut orphan = payload(&env, &env.model_a, 500, false);
+    orphan["user_id"] = json!(missing);
+    orphan["api_key_id"] = json!(missing);
+    orphan["channel_id"] = json!(missing);
+    insert_values(
+        &env,
+        &[payload(&env, &env.model_a, 1000, false), orphan],
+        None,
+    )
+    .await;
+    let path = format!(
+        "/admin/stats/flow?days=1&model={}&metric=requests",
+        env.model_a
+    );
+    let body = poll_until(&env, &path, |b| b["total"] == 2).await;
+    let nodes = body["nodes"].as_array().unwrap();
+    let node = |stage: &str, id: i64| {
+        nodes
+            .iter()
+            .find(|n| n["id"] == format!("{stage}:{id}"))
+            .unwrap()
+    };
+    assert_eq!(node("user", env.user_id)["label"], env.username);
+    assert_eq!(node("api_key", env.key_id)["label"], "");
+    assert_eq!(node("api_key", env.key_id)["entity_status"], "active");
+    assert_eq!(node("api_key", env.key_id)["owner_name"], env.username);
+    assert_eq!(node("api_key", env.key_id)["key_prefix"], "sk-cube-u");
+    assert!(node("api_key", env.key_id).get("key_hash").is_none());
+    assert_eq!(node("channel", env.channel_id)["label"], env.channel_name);
+    assert_eq!(node("channel", env.channel_id)["provider"], "openai");
+    assert_eq!(node("channel", env.channel_id)["entity_status"], "deleted");
+    for stage in ["user", "api_key", "channel"] {
+        assert!(node(stage, missing)["label"].is_null());
+        assert_eq!(node(stage, missing)["entity_status"], "missing");
+    }
 }

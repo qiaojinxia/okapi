@@ -1,4 +1,4 @@
-import { Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
+import { Percent, Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -119,8 +119,10 @@ export function RulesPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
+        icon={Percent}
         title={t('admin:rulesTitle')}
         description={t('admin:rulesHint')}
+        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
@@ -135,7 +137,15 @@ export function RulesPage() {
       ) : rules.isPending ? (
         <TableSkeleton rows={6} cols={7} />
       ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:rulesEmptyHint')} />
+        <EmptyState
+          hint={t('admin:rulesEmptyHint')}
+          action={
+            <Button onClick={() => setDrawer('create')}>
+              <Plus className="h-4 w-4" />
+              {t('admin:ruleCreate')}
+            </Button>
+          }
+        />
       ) : (
         <Table>
           <THead>
@@ -144,7 +154,7 @@ export function RulesPage() {
               <Th>{t('admin:ruleType')}</Th>
               <Th>{t('admin:ruleParams')}</Th>
               <Th>{t('admin:ruleScope')}</Th>
-              <Th>{t('admin:priority')}</Th>
+              <Th numeric>{t('admin:priority')}</Th>
               <Th>{t('common:status')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
@@ -163,7 +173,7 @@ export function RulesPage() {
                 <Td className="max-w-64 truncate text-xs text-muted-foreground">
                   {describeScope(r.scope)}
                 </Td>
-                <Td>{r.priority}</Td>
+                <Td numeric>{r.priority}</Td>
                 <Td>
                   <Badge variant={r.enabled ? 'success' : 'muted'}>
                     {r.enabled ? t('common:enabled') : t('common:disabled')}

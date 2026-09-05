@@ -3,7 +3,9 @@ import dayjs from 'dayjs'
 import { Activity, Coins, Cpu, Gauge, PiggyBank, Wallet } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ErrorState } from '@/components/ui/state'
+import { ErrorState, LoadingState } from '@/components/ui/state'
+import { DateRangePicker } from '@/components/ui/date-range'
+import type { DateRange } from '@/components/ui/date-range'
 import { PageHeader } from '@/components/ui/page'
 import { Segmented } from '@/components/ui/segmented'
 import { Stat } from '@/components/ui/stat'
@@ -17,7 +19,7 @@ import type { Me } from '@/hooks/use-auth'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatBp, formatCount, formatMoney } from '@/lib/money'
+import { formatBp, formatCount, formatMoney, formatTokensPerSec } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
 const VIEWS = ['trend', 'models', 'tokens'] as const
@@ -35,11 +37,13 @@ export function PortalOverviewPage() {
   const [scope, setScope] = useState<Scope>('key')
   const [days, setDays] = useState(7)
   const [view, setView] = useState<View>('trend')
+  const [range, setRange] = useState<DateRange | null>(null)
+  const rangeParams = range ? `&start_date=${range.start}&end_date=${range.end}` : ''
 
   const q = useQuery({
-    queryKey: qk.myBreakdown(scope, days),
+    queryKey: qk.myBreakdown(scope, days, rangeParams),
     queryFn: () =>
-      apiFetch<BreakdownResp>(`/api/me/stats/breakdown?scope=${scope}&days=${days}`),
+      apiFetch<BreakdownResp>(`/api/me/stats/breakdown?scope=${scope}&days=${days}${rangeParams}`),
     // CH 未启用时 501 属预期；限流器计数每分钟翻桶，30s 刷一次够
     retry: false,
     refetchInterval: 30_000,
@@ -47,6 +51,7 @@ export function PortalOverviewPage() {
   const total = q.data?.total
   const live = q.data?.live ?? null
   const loading = q.isPending
+  const recentWalletSpend = range && q.data?.window?.end_date !== q.data?.window?.today ? undefined : q.data?.wallet_window_spend_micro
 
   const labels: Record<View, string> = {
     trend: t('portal:viewTrend'),
@@ -71,33 +76,38 @@ export function PortalOverviewPage() {
               ]}
             />
             <Segmented
-              value={days}
-              onChange={setDays}
-              options={[7, 30, 90].map((d) => ({ value: d, label: t(`common:days_${d}`) }))}
+              ariaLabel={t('charts:period')}
+              value={range ? 0 : days}
+              onChange={(value) => { setDays(value); setRange(null) }}
+              options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
             />
           </>
         }
       />
+      <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range} onApply={setRange} />
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <Stat
+          layout="stacked"
           icon={Wallet}
           label={t('common:balance')}
           loading={me.isPending}
           value={me.data ? formatMoney(me.data.balance_micro, locale) : '—'}
           // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
           // 两者都没有才退回分组文案。14 天内转黄、3 天内转红。
-          sub={balanceSub(me.data ?? null, q.data?.wallet_window_spend_micro, days, t)}
-          tone={balanceTone(me.data ?? null, q.data?.wallet_window_spend_micro, days)}
+          sub={balanceSub(me.data ?? null, recentWalletSpend, q.data?.days ?? days, t)}
+          tone={balanceTone(me.data ?? null, recentWalletSpend, q.data?.days ?? days)}
         />
         <Stat
+          layout="stacked"
           icon={Coins}
           label={t('portal:totalSpend')}
           loading={loading}
           value={total ? formatMoney(total.amount_micro, locale) : '—'}
-          sub={t('portal:kpiWindow', { days })}
+          sub={t('portal:kpiWindow', { days: q.data?.days ?? days })}
         />
         <Stat
+          layout="stacked"
           icon={PiggyBank}
           label={t('portal:saved')}
           loading={loading}
@@ -106,6 +116,7 @@ export function PortalOverviewPage() {
           tone={total && total.discount_micro > 0 ? 'good' : 'default'}
         />
         <Stat
+          layout="stacked"
           icon={Activity}
           label={t('common:requests')}
           loading={loading}
@@ -117,19 +128,29 @@ export function PortalOverviewPage() {
           }
         />
         <Stat
+          layout="stacked"
           icon={Cpu}
           label={t('common:tokens')}
           loading={loading}
           value={total ? formatCount(total.tokens, locale) : '—'}
-          sub={total ? t('portal:cacheHit', { v: formatBp(total.cache_hit_bp, locale) }) : ''}
+          sub={total ? t('portal:cacheHit', { v: total.prompt_tokens > 0 ? formatBp(total.cache_hit_bp, locale) : '—' }) : ''}
         />
         <LiveRateKpi
           live={live}
           scope={scope}
           loading={loading}
-          avgTpmMicro={total?.avg_tpm_micro ?? 0}
+          avgTpmMicro={total?.avg_tpm_micro}
         />
       </div>
+
+      {total && !q.isError && <div className="grid grid-cols-2 gap-4 rounded-xl border border-border bg-card px-5 py-4 sm:grid-cols-4" aria-label={t('charts:performance')}>
+        {[
+          [t('charts:metric_success'), total.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale)],
+          [t('charts:metric_latency'), total.avg_latency_ms == null ? '—' : `${formatCount(total.avg_latency_ms, locale)} ms`],
+          [t('analytics:ttft'), total.avg_ttft_ms == null ? '—' : `${formatCount(total.avg_ttft_ms, locale)} ms`],
+          [t('charts:throughput'), total.tokens_per_1k_sec == null ? '—' : `${formatTokensPerSec(total.tokens_per_1k_sec, locale)} Token/s`],
+        ].map(([label, value]) => <div key={label}><p className="text-xs text-muted-foreground">{label}</p><p className="mt-1 font-semibold tabular-nums">{value}</p></div>)}
+      </div>}
 
       <Tabs
         items={VIEWS.map((id) => ({ id, label: labels[id] }))}
@@ -138,9 +159,9 @@ export function PortalOverviewPage() {
       />
       {q.isError ? (
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
-      ) : (
+      ) : q.isPending ? <LoadingState /> : (
         <>
-          {view === 'trend' && <SpendTrendView rows={q.data?.data ?? []} />}
+          {view === 'trend' && <SpendTrendView rows={q.data?.data ?? []} days={q.data?.days ?? days} window={q.data?.window} />}
           {view === 'models' && <ModelShareView rows={q.data?.data ?? []} />}
           {view === 'tokens' && <TokenMixView rows={q.data?.data ?? []} total={total ?? null} />}
         </>
@@ -209,17 +230,18 @@ function LiveRateKpi({
   live: BreakdownResp['live']
   scope: Scope
   loading: boolean
-  avgTpmMicro: number
+  avgTpmMicro: number | undefined
 }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   if (scope === 'user' || live === null) {
     return (
       <Stat
+        layout="stacked"
         icon={Gauge}
         label={t('portal:avgTpm')}
         loading={loading}
-        value={fmtMicroRate(avgTpmMicro, locale)}
+        value={avgTpmMicro === undefined ? '—' : fmtMicroRate(avgTpmMicro, locale)}
         sub={t('portal:avgTpmHint')}
       />
     )
@@ -227,6 +249,7 @@ function LiveRateKpi({
   const ratio = live.rpm_limit ? live.rpm / live.rpm_limit : 0
   return (
     <Stat
+      layout="stacked"
       icon={Gauge}
       label={t('portal:liveRpm')}
       loading={loading}

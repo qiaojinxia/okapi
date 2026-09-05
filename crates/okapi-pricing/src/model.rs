@@ -92,6 +92,18 @@ impl TierTable {
         Ok(Self(tiers))
     }
 
+    /// 写入前校验 `tier_expr`：能解析 + 首档从 0 起 + 严格升序。
+    ///
+    /// 控制面写库时用它把关。阶梯表配错（首档不从 0 起 / 档位乱序）只会在**编译价簿**时
+    /// 才炸，那时改动早已发布，整本价簿一起装载失败——必须在写入这一步拦下来。
+    pub fn check_expr(expr: &str) -> Result<(), &'static str> {
+        let table = Self::parse(expr).map_err(|_| "parse")?;
+        table.validate("").map_err(|e| match e {
+            CompileError::InvalidTierTable { reason, .. } => reason,
+            _ => "invalid",
+        })
+    }
+
     fn validate(&self, model: &str) -> Result<(), CompileError> {
         let Some(first) = self.0.first() else {
             return Err(CompileError::InvalidTierTable {

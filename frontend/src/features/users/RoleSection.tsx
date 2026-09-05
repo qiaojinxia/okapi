@@ -7,18 +7,17 @@ import { Button } from '@/components/ui/button'
 import { FieldGroup } from '@/components/ui/drawer'
 import { Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
 export function RoleSection({
   userId,
   roles,
-  onMsg,
   onDone,
 }: {
   userId: number
   roles: RoleRow[]
-  onMsg: (m: string) => void
   onDone: () => void
 }) {
   const { t } = useTranslation()
@@ -35,10 +34,10 @@ export function RoleSection({
         },
       }),
     onSuccess: () => {
-      onMsg(t('common:success'))
+      toast.success(t('common:success'))
       onDone()
     },
-    onError: (err) => onMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (

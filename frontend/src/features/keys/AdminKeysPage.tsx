@@ -35,6 +35,7 @@ interface AdminKeyRow {
   used_micro: number
   model_allowlist: string[] | null
   group_override: string | null
+  ip_allowlist: string[] | null
   rpm_limit: number | null
   max_concurrency: number | null
   expires_at: string | null
@@ -160,7 +161,7 @@ export function AdminKeysPage() {
       ) : rows.length === 0 ? (
         <EmptyState />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>ID</Th>
@@ -188,13 +189,18 @@ export function AdminKeysPage() {
                     <span className="max-w-40 truncate" title={k.name}>
                       {k.name || '—'}
                     </span>
-                    {/* 限模型 / 覆盖分组是排查"为什么这把 key 打不到某模型"的直接线索 */}
-                    {(k.model_allowlist?.length || k.group_override) && (
+                    {/* 限模型 / 覆盖分组 / 限 IP 是排查"为什么这把 key 打不通"的直接线索 */}
+                    {(k.model_allowlist?.length || k.group_override || k.ip_allowlist?.length) && (
                       <span className="flex flex-wrap gap-1 pt-0.5">
                         {k.group_override && <Badge variant="muted">{k.group_override}</Badge>}
                         {k.model_allowlist && k.model_allowlist.length > 0 && (
                           <Badge variant="muted" title={k.model_allowlist.join(', ')}>
                             {t('admin:keyModelsLimited', { n: k.model_allowlist.length })}
+                          </Badge>
+                        )}
+                        {k.ip_allowlist && k.ip_allowlist.length > 0 && (
+                          <Badge variant="muted" title={k.ip_allowlist.join(', ')}>
+                            {t('admin:keyIpLimited', { n: k.ip_allowlist.length })}
                           </Badge>
                         )}
                       </span>

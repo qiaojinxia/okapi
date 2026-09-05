@@ -8,7 +8,7 @@ import type { LogSearch } from '@/routes/admin.logs'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { IconButton } from '@/components/ui/icon-button'
-import { Segmented } from '@/components/ui/segmented'
+import { dimensionLabel, ADVANCED_KEYS, selectClass } from './AnalysisControls'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { cleanSearch, cubeParams, effectiveDays } from '@/features/analytics/search'
@@ -45,6 +45,14 @@ export function effectiveBy(s: AnalyticsSearch): BreakdownDim {
 }
 
 /// 名次变化：▲2 升了两位、▼1 降了一位、"新"上期不在榜、"—"持平。
+/// 毛利 = 实收 − 上游成本（官方价 × 渠道相对成本系数）；负毛利标红——
+/// 折扣组打在贵渠道上就会亏，这是渠道维度拆解最该回答的问题。
+function MarginCell({ row, locale }: { row: BreakdownRow; locale: string }) {
+  const { t } = useTranslation()
+  const margin = row.known_margin_micro
+  return <Td><div className="flex flex-col gap-1"><span className={cn('tabular-nums', margin != null && margin < 0 && 'text-destructive')}>{margin == null ? '—' : formatMoney(margin, locale)}</span><span className="text-xs text-muted-foreground">{t('analysis:coverage', { v: row.cost_coverage_bp == null ? '—' : formatBp(row.cost_coverage_bp, locale) })}</span></div></Td>
+}
+
 function RankChange({ row }: { row: BreakdownRow }) {
   const { t } = useTranslation()
   if (row.previous_rank === null) {
@@ -84,16 +92,10 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
     retry: false,
   })
 
-  const dimLabel: Record<BreakdownDim, string> = {
-    model: t('analytics:dimModel'),
-    channel: t('analytics:dimChannel'),
-    provider: t('analytics:dimProvider'),
-    user: t('analytics:dimUser'),
-    api_key: t('analytics:dimApiKey'),
-    group: t('analytics:dimGroup'),
-  }
+  const dimLabel = Object.fromEntries(BREAKDOWN_DIMS.map((d) => [d, dimensionLabel(t, d)]))
 
   const focus = (row: BreakdownRow) => {
+    if (!row.key) return
     const patch: Partial<AnalyticsSearch> = {}
     switch (by) {
       case 'model':
@@ -111,8 +113,10 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
       case 'group':
         patch.group = row.key
         break
-      default:
-        return
+      case 'requested_model': patch.model_source = 'requested'; patch.model = row.key; break
+      case 'upstream_model': patch.model_source = 'upstream'; patch.model = row.key; break
+      case 'endpoint': case 'upstream_endpoint': case 'node': case 'request_type': case 'billing_type': patch[by] = row.key; break
+      default: return
     }
     // 聚焦后旧的拆分维度已成单行，交给 effectiveBy 换下一层
     void navigate({ search: (prev) => cleanSearch({ ...prev, ...patch, by: undefined }) })
@@ -154,6 +158,9 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
 
   const rows = q.data?.data ?? []
   const maxShare = rows.reduce((m, r) => Math.max(m, r.share_bp), 0)
+  // 毛利列只在窗口内有成本数据时出现：成本采集上线前的历史行全是 0，
+  // 摆一列 100% 毛利只会误导
+  const hasCost = rows.some((r) => (r.cost_known_requests ?? 0) > 0)
 
   return (
     <Card>
@@ -161,16 +168,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <span className="text-xs text-muted-foreground">{t('analytics:breakdownBy')}</span>
-            <Segmented
-              options={BREAKDOWN_DIMS.map((d) => ({
-                value: d,
-                label: dimLabel[d],
-                disabled: dimFiltered(d, search),
-              }))}
-              value={by}
-              onChange={(v) => void navigate({ search: (prev) => cleanSearch({ ...prev, by: v }) })}
-              size="sm"
-            />
+            <select aria-label={t('analytics:breakdownBy')} className={selectClass} value={by} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, by: e.target.value as BreakdownDim }) })}>{BREAKDOWN_DIMS.map((d) => <option key={d} value={d} disabled={dimFiltered(d, search)}>{dimLabel[d]}</option>)}</select>
           </div>
           {q.data && (
             <span className="text-xs text-muted-foreground">
@@ -196,6 +194,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                 <Th>{dimLabel[by]}</Th>
                 <Th className="min-w-48">{t('analytics:kpiSpend')}</Th>
                 <Th>{t('analytics:colDelta')}</Th>
+                {hasCost && <Th>{t('analysis:coveredMargin')}</Th>}
                 <Th>{t('common:requests')}</Th>
                 <Th>{t('common:tokens')}</Th>
                 <Th>{t('analytics:kpiLatency')}</Th>
@@ -214,7 +213,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                   <Td>
                     <div className="flex max-w-64 flex-col leading-tight">
                       <span className="truncate font-medium" title={row.label ?? row.key}>
-                        {row.label ?? (by === 'model' || by === 'group' ? row.key : `#${row.key}`)}
+                        {row.label || row.key || t('analysis:notCollected')}
                       </span>
                       {secondary(row) !== null && (
                         <span className="truncate text-xs text-muted-foreground">{secondary(row)}</span>
@@ -242,6 +241,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                   <Td>
                     <DeltaBadge bp={row.delta_bp} locale={locale} />
                   </Td>
+                  {hasCost && <MarginCell row={row} locale={locale} />}
                   <Td>
                     <div className="flex flex-col leading-tight">
                       <span className="tabular-nums">{formatCount(row.requests, locale)}</span>
@@ -283,14 +283,14 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                   </Td>
                   <Td>
                     <div className="flex gap-1">
-                      {by !== 'provider' && (
+                      {by !== 'provider' && !!row.key && (
                         <IconButton
                           icon={Crosshair}
                           label={t('analytics:focus')}
                           onClick={() => focus(row)}
                         />
                       )}
-                      {by !== 'provider' && by !== 'group' && (
+                      {['model', 'channel', 'user', 'api_key'].includes(by) && !ADVANCED_KEYS.some((k) => search[k] !== undefined) && (
                         <IconButton
                           icon={ScrollText}
                           label={t('analytics:viewLogs')}
@@ -304,6 +304,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
             </TBody>
           </Table>
         )}
+        <p className="text-xs text-muted-foreground">{t('analysis:unknownHint')} {hasCost && t('analysis:costHint')}</p>
       </CardContent>
     </Card>
   )

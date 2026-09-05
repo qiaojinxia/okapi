@@ -12,6 +12,8 @@ import { KpiStrip } from '@/features/analytics/KpiStrip'
 import { TrendView } from '@/features/analytics/TrendView'
 import { cleanSearch, cubeParams, effectiveDays } from '@/features/analytics/search'
 import type { TrendResp } from '@/features/analytics/types'
+import { AnalysisControls } from './AnalysisControls'
+import { FreshnessNotice } from './FreshnessNotice'
 import { DaysPicker } from '@/features/stats/DaysPicker'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
@@ -35,7 +37,7 @@ export function AnalyticsPage() {
   const days = effectiveDays(search)
   const view: AnalyticsView = search.view ?? 'trend'
 
-  const trendParams = cubeParams(search, { stack: view === 'trend' ? search.stack : undefined })
+  const trendParams = cubeParams(search, { stack: view === 'trend' ? search.stack : undefined, metric: search.measure ?? 'amount' })
   const trend = useQuery({
     queryKey: qk.statsTrend(trendParams),
     queryFn: () => apiFetch<TrendResp>(`/admin/stats/trend?${trendParams}`),
@@ -55,12 +57,14 @@ export function AnalyticsPage() {
         description={t('analytics:desc')}
         action={
           <DaysPicker
-            days={days}
-            onPick={(d) => void navigate({ search: (prev) => cleanSearch({ ...prev, days: d }) })}
+            days={search.start_date ? 0 : days}
+            onPick={(d) => void navigate({ search: (prev) => cleanSearch({ ...prev, days: d, start_date: undefined, end_date: undefined, granularity: undefined }) })}
           />
         }
       />
       <FilterBar search={search} scope={trend.data?.scope} />
+      <AnalysisControls value={search} today={trend.data?.window?.today} onApply={(next) => void navigate({ search: cleanSearch(next) })} />
+      <FreshnessNotice value={trend.data?.window?.freshness} />
       <KpiStrip
         total={trend.data?.total}
         previous={trend.data?.previous}

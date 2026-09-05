@@ -4,8 +4,11 @@
 //! 用户入账、对账查询；写路径全量审计。细粒度权限点（admin_roles）、
 //! 用户门户 API 与 MCP 端点在后续批次接入。
 
+pub mod activity;
 pub mod admin;
 pub mod analytics;
+mod analysis_source;
+mod analysis_freshness;
 pub mod audit;
 pub mod auth_web;
 pub mod dlq;
@@ -20,6 +23,7 @@ pub mod setup;
 pub mod ssrf;
 pub mod stats;
 pub mod teams;
+pub(crate) mod usage_details;
 
 use crate::config::Config;
 use crate::gateway::{self, state::AppState};
@@ -55,6 +59,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.nats_url.as_deref(),
     )
     .await?;
+    // console 也是多副本，各有各的缓存：管理员在 A 上改的配置，B 也得立刻弃用旧值，
+    // 否则同一个后台在两个副本上会给出不一样的答案。定价与路由两条广播都要订。
+    gateway::spawn_epoch_subscriber(state.clone());
+    gateway::spawn_routing_invalidate_subscriber(state.clone());
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.console_bind).await?;
     tracing::info!(bind = %cfg.console_bind, "okapi console 启动");
@@ -82,6 +90,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .merge(spa_router())
         .layer(axum::middleware::from_fn(spa_navigation))
+        // 与 gateway 同一把闸：登录 / 注册 / 兑换的每 IP 限流与审计 IP 都经
+        // clients::client_ip，没有对端锚点就无从判断转发头可不可信（§14.2）
+        .layer(axum::middleware::from_fn(
+            crate::gateway::clients::stamp_peer_ip,
+        ))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -227,6 +240,10 @@ fn user_admin_routes() -> ConsoleRouter {
         .route("/admin/users/{id}/groups", post(admin::set_user_groups))
         .route("/admin/users/{id}/credit", post(admin::credit_user))
         .route(
+            "/admin/users/{id}/multiplier",
+            post(admin::set_user_multiplier),
+        )
+        .route(
             "/admin/users/{id}/balance-expiry",
             post(admin::set_balance_expiry),
         )
@@ -284,6 +301,10 @@ fn ops_routes() -> ConsoleRouter {
             get(admin::billing_record_lookup),
         )
         .route("/admin/reconciliation", get(admin::reconciliation))
+        .route(
+            "/admin/reconciliation/repair",
+            post(admin::repair_reconciliation),
+        )
         .route("/admin/dlq", get(dlq::list))
         .route("/admin/dlq/requeue", post(dlq::requeue_handler))
         .route("/admin/dlq/discard", post(dlq::discard_handler))
@@ -300,6 +321,7 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me/usage", get(portal::usage))
         .route("/api/me/stats/daily", get(stats::my_daily))
         .route("/api/me/stats/breakdown", get(stats::my_breakdown))
+        .route("/api/me/stats/activity", get(activity::my_activity))
         .route("/api/me/keys", get(portal::keys))
         .route("/api/me/groups", get(portal::groups))
         .route("/api/me/logins", get(audit::my_logins))

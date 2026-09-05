@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer } from '@/components/ui/drawer'
 import { Label } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 
@@ -13,7 +14,6 @@ import { describeError } from '@/lib/i18n'
 export function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const { t } = useTranslation()
   const [json, setJson] = useState('')
-  const [msg, setMsg] = useState<string | null>(null)
 
   const run = useMutation({
     mutationFn: () => {
@@ -24,11 +24,11 @@ export function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone:
       })
     },
     onSuccess: (r) => {
-      setMsg(t('admin:importResult', { imported: r.imported, skipped: r.skipped.length }))
+      toast.success(t('admin:importResult', { imported: r.imported, skipped: r.skipped.length }))
       onDone()
     },
     onError: (err) =>
-      setMsg(err instanceof SyntaxError ? t('admin:advancedBadJson') : describeError(err)),
+      toast.error(err instanceof SyntaxError ? t('admin:advancedBadJson') : describeError(err)),
   })
 
   return (
@@ -39,7 +39,6 @@ export function ImportDrawer({ onClose, onDone }: { onClose: () => void; onDone:
       description={t('admin:importDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>

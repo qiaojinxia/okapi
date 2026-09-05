@@ -7,14 +7,32 @@ export interface BreakdownRow {
   requests: number
   prompt_tokens: number
   cached_tokens: number
+  cache_write_tokens?: number | null
+  cache_write_known_requests?: number
   completion_tokens: number
   reasoning_tokens: number
   amount_micro: number
   discount_micro: number
   errors: number
+  original_micro?: number
+  avg_latency_ms?: number | null
+  avg_ttft_ms?: number | null
+  tokens_per_1k_sec?: number | null
+  performance_requests?: number
+  latency_sum_ms?: number
+  ttft_sum_ms?: number
+  ttft_samples?: number
 }
 
 export interface BreakdownTotal {
+  cache_write_tokens?: number | null
+  cache_write_known_requests?: number
+  original_micro?: number
+  errors?: number
+  success_rate_bp?: number | null
+  avg_latency_ms?: number | null
+  avg_ttft_ms?: number | null
+  tokens_per_1k_sec?: number | null
   requests: number
   prompt_tokens: number
   cached_tokens: number
@@ -39,6 +57,7 @@ export interface LiveRate {
 }
 
 export interface BreakdownResp {
+  window?: { start_date: string; end_date: string; today: string; timezone: string; generated_at: string }
   scope: Scope
   days: number
   total: BreakdownTotal
@@ -68,6 +87,7 @@ export function sumByModel(rows: BreakdownRow[]): Map<string, BreakdownRow> {
     cur.requests += r.requests
     cur.prompt_tokens += r.prompt_tokens
     cur.cached_tokens += r.cached_tokens
+    cur.cache_write_tokens = cur.cache_write_tokens == null || r.cache_write_tokens == null ? null : cur.cache_write_tokens + r.cache_write_tokens
     cur.completion_tokens += r.completion_tokens
     cur.reasoning_tokens += r.reasoning_tokens
     cur.amount_micro += r.amount_micro

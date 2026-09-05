@@ -7,6 +7,7 @@ import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { toast } from '@/components/ui/toast'
 import { PoolReach } from '@/features/pools/PoolReach'
 import { DEFAULT_POOL } from '@/features/pools/types'
 import { apiFetch } from '@/lib/api'
@@ -23,7 +24,6 @@ export function GroupDrawer({
   onDone: () => void
 }) {
   const { t } = useTranslation()
-  const [msg, setMsg] = useState<string | null>(null)
   // 分组必有池：新建缺省 default（新渠道也缺省进 default，两端对齐后"建完就能用"）
   const [form, setForm] = useState({
     group_code: group?.group_code ?? '',
@@ -55,7 +55,7 @@ export function GroupDrawer({
       onDone()
       onClose()
     },
-    onError: (err) => setMsg(describeError(err)),
+    onError: (err) => toast.error(describeError(err)),
   })
 
   return (
@@ -66,7 +66,6 @@ export function GroupDrawer({
       description={t('admin:groupDrawerDesc')}
       footer={
         <>
-          {msg !== null && <span className="mr-auto text-xs text-muted-foreground">{msg}</span>}
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>

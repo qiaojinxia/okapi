@@ -1,4 +1,6 @@
-import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { FreshnessNotice } from '@/features/analytics/FreshnessNotice'
+import { TimeChart } from '@/components/ui/time-chart'
+import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import type { MarginResp } from '@/features/stats/types'
@@ -10,6 +12,7 @@ import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney } from '@/lib/money'
 import { healthVariant } from '@/features/stats/ChannelHealthCard'
 import { qk } from '@/lib/query-keys'
+import { calendarDays } from '@/features/portal-overview/usage-chart-data'
 
 interface CashflowBucket {
   recharge_micro: number
@@ -128,10 +131,15 @@ export function RevenueCard({ days }: { days: number }) {
     queryFn: () => apiFetch<MarginResp>(`/admin/stats/margin?days=${days}`),
   })
   const total = q.data?.total
-  const chart = (q.data?.data ?? []).map((d) => ({
-    day: d.day.slice(5),
-    amount: d.amount_micro / 1_000_000,
-    discount: d.discount_micro / 1_000_000,
+  // 成本采集上线前的历史行成本恒 0：窗口内一笔成本都没有就不画成本柱、不出毛利
+  const hasCost = (total?.cost_known_requests ?? 0) > 0
+  const source = new Map((q.data?.data ?? []).map((row) => [row.day, row]))
+  const dates = q.data?.window ? calendarDays(q.data.window.start_date, q.data.window.end_date) : [...source.keys()].sort()
+  const chart = dates.map((bucket) => ({
+    bucket,
+    amount: (source.get(bucket)?.amount_micro ?? 0) / 1_000_000,
+    discount: (source.get(bucket)?.discount_micro ?? 0) / 1_000_000,
+    cost: (source.get(bucket)?.cost_known_requests ?? 0) > 0 ? (source.get(bucket)?.known_cost_micro ?? 0) / 1_000_000 : null,
   }))
 
   return (
@@ -142,8 +150,8 @@ export function RevenueCard({ days }: { days: number }) {
       <CardContent className="flex flex-col gap-3">
         <p className="text-xs text-muted-foreground">{t('admin:statRevenueHint')}</p>
         {q.isError ? (
-          <p className="text-sm text-destructive">{describeError(q.error)}</p>
-        ) : (
+          <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
+        ) : q.isPending ? <LoadingState /> : !q.data?.data.length ? <EmptyState hint={t('admin:trendEmptyHint')} /> : (
           <>
             <div className="flex flex-wrap gap-2">
               <Badge variant="muted">
@@ -158,37 +166,30 @@ export function RevenueCard({ days }: { days: number }) {
               <Badge variant={healthVariant(total?.error_rate_bp ?? 0)}>
                 {t('admin:statErrorRate')} {formatBp(total?.error_rate_bp ?? 0, i18n.language)}
               </Badge>
-              {(total?.upstream_cost_micro ?? 0) > 0 ? (
-                <Badge variant="success">
-                  {t('admin:statMargin')} {formatMoney(total?.margin_micro ?? 0, i18n.language)}
-                </Badge>
+              {hasCost ? (
+                <>
+                  <Badge variant="muted">
+                    {t('admin:statUpstreamCost')} {formatMoney(total?.known_cost_micro ?? 0, i18n.language)}
+                  </Badge>
+                  <Badge variant={(total?.known_margin_micro ?? 0) < 0 ? 'destructive' : 'success'}>
+                    {t('analysis:coveredMargin')} {formatMoney(total?.known_margin_micro ?? 0, i18n.language)} · {t('analysis:coverage', { v: formatBp(total?.cost_coverage_bp ?? 0, i18n.language) })}
+                  </Badge>
+                </>
               ) : (
-                <Badge variant="muted">{t('admin:statMarginPending')}</Badge>
+                <Badge variant="muted" title={t('admin:statMarginPendingHint')}>
+                  {t('admin:statMarginPending')}
+                </Badge>
               )}
             </div>
+            <p className="text-xs text-muted-foreground">{t('analysis:costHint')}</p>
+            <FreshnessNotice value={q.data?.window?.freshness} />
             <CashflowRow days={days} />
-            <div className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={chart}>
-                  <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-                  <XAxis dataKey="day" fontSize={12} />
-                  <YAxis fontSize={12} />
-                  <Tooltip />
-                  <Bar
-                    dataKey="amount"
-                    name={t('admin:statAmount')}
-                    fill="var(--color-primary)"
-                    isAnimationActive={false}
-                  />
-                  <Bar
-                    dataKey="discount"
-                    name={t('admin:statDiscount')}
-                    fill="var(--color-muted-foreground)"
-                    isAnimationActive={false}
-                  />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+            <TimeChart key={String(hasCost)} label={t('admin:statRevenue')} data={chart} unit="USD" defaultType="bar" format={(value) => formatMoney(Math.round(value * 1_000_000), i18n.language)} series={[
+              { key: 'amount', label: t('admin:statAmount'), color: 'var(--color-primary)' },
+              { key: 'discount', label: t('admin:statDiscount'), color: 'var(--color-chart-2)' },
+              ...(hasCost ? [{ key: 'cost', label: t('admin:statUpstreamCost'), color: 'var(--color-warning)' }] : []),
+            ]} />
+            {q.data?.window && <p className="text-xs text-muted-foreground">{q.data.window.start_date} — {q.data.window.end_date} · {q.data.window.timezone}</p>}
             {/* 阅读顺序：合计徽章 → 资金流入 → 按日趋势 → 分组下钻表；表在图后，图才不被挤到底 */}
             <GroupsTable days={days} />
           </>

@@ -1,4 +1,4 @@
-import { Ban, Plus } from 'lucide-react'
+import { Ban, Plus, Ticket } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useState } from 'react'
@@ -80,6 +80,7 @@ export function RedemptionsPage() {
   return (
     <div className="flex flex-col gap-4">
       <PageHeader
+        icon={Ticket}
         title={t('admin:codeListTitle')}
         description={t('admin:codesDesc')}
         action={
@@ -121,14 +122,22 @@ export function RedemptionsPage() {
       ) : codes.isPending ? (
         <TableSkeleton rows={6} cols={8} />
       ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:codesEmptyHint')} />
+        <EmptyState
+          hint={t('admin:codesEmptyHint')}
+          action={
+            <Button onClick={() => setDrawer(true)}>
+              <Plus className="h-4 w-4" />
+              {t('admin:redeemGenerate')}
+            </Button>
+          }
+        />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>ID</Th>
               <Th>{t('admin:codeBatch')}</Th>
-              <Th>{t('admin:codeFaceValue')}</Th>
+              <Th numeric>{t('admin:codeFaceValue')}</Th>
               <Th>{t('common:status')}</Th>
               <Th>{t('admin:codePlan')}</Th>
               <Th>{t('admin:codeCreated')}</Th>
@@ -142,7 +151,7 @@ export function RedemptionsPage() {
               <Tr key={c.id}>
                 <Td>{c.id}</Td>
                 <Td className="font-mono text-xs">{c.batch_id.slice(0, 8)}…</Td>
-                <Td>{formatMoney(c.amount_micro, i18n.language)}</Td>
+                <Td numeric>{formatMoney(c.amount_micro, i18n.language)}</Td>
                 <Td>
                   <Badge variant={c.status === CODE_STATUS.unused ? 'success' : 'muted'}>
                     {statusLabel(c.status)}

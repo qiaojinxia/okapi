@@ -5,9 +5,30 @@ use okapi_domain::{BillingState, Money, TokenUsage};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// 统计维度独立于计费模型；空值表示未采集，禁止用计费名冒充请求或上游名。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct UsageDimensions {
+    pub requested_model: String,
+    pub upstream_model: String,
+    pub endpoint: String,
+    pub upstream_endpoint: String,
+}
+
+impl UsageDimensions {
+    pub fn new(requested: &str, upstream: &str, endpoint: &str, upstream_endpoint: &str) -> Self {
+        Self {
+            requested_model: requested.into(),
+            upstream_model: upstream.into(),
+            endpoint: endpoint.into(),
+            upstream_endpoint: upstream_endpoint.into(),
+        }
+    }
+}
+
 /// 一笔请求的结算输入（终态写入）。
 #[derive(Debug, Clone)]
 pub struct SettlementInput<'a> {
+    pub dimensions: UsageDimensions,
     pub request_id: Uuid,
     /// 1充值 2消费 3管理 4系统 5错误 6退款 7登录。
     pub log_type: i16,
@@ -22,6 +43,12 @@ pub struct SettlementInput<'a> {
     pub amount: Money,
     pub original: Money,
     pub discount: Money,
+    /// 官方价（乘分组倍率前；`Quote::list_price`）——上游成本 = 官方价 × 渠道相对成本系数。
+    /// 失败 / 退款记录为零。
+    pub list_price: Money,
+    /// 上游成本（§11.18）：由 `settle_write` 按渠道 `relative_cost_milli` 折算后填入；
+    /// None = 无渠道（未选路即失败）或无法折算，CH 侧记 0 且不计入毛利分母。
+    pub upstream_cost: Option<Money>,
     pub pricing_epoch: Option<i64>,
     pub pricing_snapshot: Option<serde_json::Value>,
     pub latency_ms: i32,
@@ -39,6 +66,9 @@ pub struct SettlementInput<'a> {
     /// UA 识别的客户端类型（#5277）。
     pub client_type: &'a str,
     /// 客户端 IP（CDN 头按序解析，§14.2；统计列）。
+    /// 来源 IP（§14.2 信任闸判定后的值）。**PG 与 CH 两处都要落**：此前只进了 outbox
+    /// 载荷（→ CH），`billing_records.client_ip` 这一列建了却从没写过，永远是 NULL——
+    /// 没接 ClickHouse 的部署因此完全查不到来源 IP，而 docs/database.md 写的是「PG + CH」。
     pub client_ip: Option<&'a str>,
     /// 余额净变动（消费 = −amount；退款/失败 = 0），billing_events 锚点。
     pub delta_micro: i64,
@@ -69,7 +99,8 @@ pub async fn record_settlement(
             amount_micro, original_amount_micro, discount_micro,
             pricing_epoch, pricing_snapshot,
             latency_ms, ttft_ms, is_stream, retry_count, failover_count,
-            upstream_status, error_code, node, sticky_layer, client_type
+            upstream_status, error_code, node, sticky_layer, client_type,
+            upstream_cost_micro, client_ip
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9, $10,
@@ -77,7 +108,11 @@ pub async fn record_settlement(
             $15, $16, $17,
             $18, $19,
             $20, $21, $22, $23, $24,
-            $25, $26, $27, $28, $29
+            $25, $26, $27, $28, $29,
+            -- client_ip 是 INET。写成 $31::text::inet 而非 $31::inet：后者会让 PG 把入参
+            -- 类型报成 inet，sqlx 就要求打开 ipnetwork feature——为一列拉一整套网络类型
+            -- 不值当。先按 text 绑定再转，值只可能来自 `clients::client_ip`（已 parse 过）。
+            $30, $31::text::inet
         )
         "#,
         input.request_id,
@@ -108,7 +143,9 @@ pub async fn record_settlement(
         input.error_code,
         input.node,
         input.sticky_layer,
-        input.client_type
+        input.client_type,
+        input.upstream_cost.map(Money::as_micros),
+        input.client_ip
     )
     .execute(&mut *tx)
     .await?;
@@ -125,6 +162,12 @@ pub async fn record_settlement(
         input.balance_after.map(Money::as_micros),
         serde_json::json!({
             "model": input.model_name,
+            "requested_model": input.dimensions.requested_model,
+            "upstream_model": input.dimensions.upstream_model,
+            "endpoint": input.dimensions.endpoint,
+            "upstream_endpoint": input.dimensions.upstream_endpoint,
+            "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
+            "upstream_cost_known": input.upstream_cost.is_some(),
             "amount_micro": input.amount.as_micros(),
             "error_code": input.error_code,
         })
@@ -157,17 +200,25 @@ pub async fn record_settlement(
             "api_key_id": input.api_key_id,
             "group": input.group_code,
             "model": input.model_name,
+            "requested_model": input.dimensions.requested_model,
+            "upstream_model": input.dimensions.upstream_model,
+            "endpoint": input.dimensions.endpoint,
+            "upstream_endpoint": input.dimensions.upstream_endpoint,
+            "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
+            "upstream_cost_known": input.upstream_cost.is_some(),
             "channel_id": input.channel_id,
             "channel_key_id": input.channel_key_id,
             "log_type": input.log_type,
             "status": input.state.as_i16(),
             "prompt_tokens": input.usage.prompt_tokens,
             "cached_tokens": input.usage.cached_tokens,
+            "cache_write_tokens": input.usage.cache_write_tokens,
             "completion_tokens": input.usage.completion_tokens,
             "reasoning_tokens": input.usage.reasoning_tokens,
             "amount_micro": input.amount.as_micros(),
             "original_amount_micro": input.original.as_micros(),
             "discount_micro": input.discount.as_micros(),
+            "upstream_cost_micro": input.upstream_cost.map_or(0, Money::as_micros),
             "pricing_epoch": input.pricing_epoch,
             "ratio_snapshot": input.pricing_snapshot.as_ref().map(std::string::ToString::to_string).unwrap_or_default(),
             "latency_ms": input.latency_ms,
@@ -214,7 +265,8 @@ pub async fn admin_refund(
     let Some(rec) = sqlx::query!(
         r#"
         SELECT user_id, api_key_id, group_code, model_name, channel_id, channel_key_id,
-               amount_micro, original_amount_micro, discount_micro, is_stream, node
+               amount_micro, original_amount_micro, discount_micro, upstream_cost_micro,
+               is_stream, node
         FROM billing_records
         WHERE request_id = $1 AND status = 20
         FOR UPDATE
@@ -288,6 +340,7 @@ pub async fn admin_refund(
             "amount_micro": -rec.amount_micro,
             "original_amount_micro": -rec.original_amount_micro,
             "discount_micro": -rec.discount_micro,
+            "upstream_cost_micro": -rec.upstream_cost_micro.unwrap_or(0),
             "is_stream": rec.is_stream,
             "retry_count": 0,
             "failover_count": 0,

@@ -1,9 +1,10 @@
 import { AlertTriangle } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { useModalFocus } from '@/hooks/use-modal-focus'
 
 interface ConfirmRequest {
   /// 标题（已本地化的文案）。
@@ -31,9 +32,17 @@ export function useConfirm() {
   return { confirm, dialog }
 }
 
+/// 进场焦点：要手输名称时给输入框，否则给"确认"按钮（回车即执行）。
+const firstControl = (root: HTMLElement) =>
+  root.querySelector<HTMLElement>('input:not([disabled])') ??
+  root.querySelector<HTMLElement>('button:not([disabled])[data-confirm]')
+
 function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: () => void }) {
   const { t } = useTranslation()
   const [typed, setTyped] = useState('')
+  const panel = useRef<HTMLDivElement>(null)
+  // 确认框常开在抽屉之上：焦点必须关在这一层里，否则 Tab 会走回底下那张表单
+  useModalFocus(req !== null, panel, firstControl)
 
   const needText = req !== null && req.requireText !== undefined && req.requireText !== ''
   const ready = req !== null && (!needText || typed.trim() === req.requireText)
@@ -71,6 +80,7 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
         onClick={close}
       />
       <div
+        ref={panel}
         role="alertdialog"
         aria-modal="true"
         aria-label={req.title}
@@ -115,6 +125,7 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
             {t('common:cancel')}
           </Button>
           <Button
+            data-confirm
             variant={destructive ? 'destructive' : 'default'}
             size="sm"
             disabled={!ready}

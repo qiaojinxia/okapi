@@ -573,6 +573,7 @@ async fn realtime_kpi_counts_settlements() {
     for (log_type, error_code) in [(2_i16, None), (5_i16, Some("upstream_error"))] {
         env.state
             .settle_write(okapi_ledger::SettlementInput {
+                dimensions: Default::default(),
                 request_id: Uuid::new_v4(),
                 log_type,
                 user_id: env.user_id,
@@ -590,6 +591,8 @@ async fn realtime_kpi_counts_settlements() {
                 amount: Money::from_micros(1_000),
                 original: Money::from_micros(1_000),
                 discount: Money::ZERO,
+                list_price: Money::ZERO,
+                upstream_cost: None,
                 pricing_epoch: None,
                 pricing_snapshot: None,
                 latency_ms: 5,

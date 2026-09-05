@@ -126,8 +126,9 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         .get("is_stream")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    json!({
+    let mut row = json!({
         "ts": ts,
+        "ingested_at": Utc::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
         "request_id": get_str(payload, "request_id"),
         "upstream_request_id": get_str(payload, "upstream_request_id"),
         "log_type": log_type,
@@ -143,13 +144,15 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "node": get_str(payload, "node"),
         "prompt_tokens": get_i64(payload, "prompt_tokens"),
         "cached_tokens": get_i64(payload, "cached_tokens"),
+        // 旧 outbox 未记录缓存写入，保留 null，不能冒充已知的 0。
+        "cache_write_tokens": payload.get("cache_write_tokens").cloned().unwrap_or(Value::Null),
         "completion_tokens": get_i64(payload, "completion_tokens"),
         "reasoning_tokens": get_i64(payload, "reasoning_tokens"),
         "media_units": "",
         "amount_micro": get_i64(payload, "amount_micro"),
         "original_amount_micro": get_i64(payload, "original_amount_micro"),
         "discount_micro": get_i64(payload, "discount_micro"),
-        "upstream_cost_micro": 0,
+        "upstream_cost_micro": get_i64(payload, "upstream_cost_micro"),
         "pricing_epoch": get_i64(payload, "pricing_epoch"),
         "ratio_snapshot": get_str(payload, "ratio_snapshot"),
         "latency_ms": get_i64(payload, "latency_ms"),
@@ -162,5 +165,20 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "upstream_status": get_i64(payload, "upstream_status"),
         "error_code": get_str(payload, "error_code"),
         "is_error": i32::from(log_type == 5),
-    })
+    });
+    let extra = json!({
+        "requested_model": get_str(payload, "requested_model"),
+        "upstream_model": get_str(payload, "upstream_model"),
+        "endpoint": get_str(payload, "endpoint"),
+        "upstream_endpoint": get_str(payload, "upstream_endpoint"),
+        "billing_type": get_str(payload, "billing_type"),
+        "request_type": match (get_str(payload, "endpoint"), payload.get("is_stream").and_then(Value::as_bool)) {
+            ("/v1/realtime", _) => "websocket", (_, Some(true)) => "stream", (_, Some(false)) => "non_stream", _ => "",
+        },
+        "upstream_cost_known": u8::from(payload.get("upstream_cost_known").and_then(Value::as_bool) == Some(true)),
+    });
+    if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+        row.extend(extra.clone());
+    }
+    row
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT k.id, k.user_id, u.username, k.team_id, k.name, k.key_prefix, k.status,\n               k.quota_mode, k.quota_micro, k.used_micro, k.model_allowlist,\n               k.group_override, k.rpm_limit, k.max_concurrency,\n               k.expires_at, k.last_used_at, k.created_at\n        FROM api_keys k JOIN users u ON u.id = k.user_id\n        WHERE k.deleted_at IS NULL\n          AND ($1::bigint IS NULL OR k.user_id = $1)\n          AND ($2::text IS NULL OR k.name ILIKE $2 OR u.username ILIKE $2)\n        ORDER BY k.id DESC\n        LIMIT $3 OFFSET $4\n        ",
+  "query": "\n        SELECT k.id, k.user_id, u.username, k.team_id, k.name, k.key_prefix, k.status,\n               k.quota_mode, k.quota_micro, k.used_micro, k.model_allowlist,\n               k.group_override, k.ip_allowlist, k.rpm_limit, k.max_concurrency,\n               k.expires_at, k.last_used_at, k.created_at\n        FROM api_keys k JOIN users u ON u.id = k.user_id\n        WHERE k.deleted_at IS NULL\n          AND ($1::bigint IS NULL OR k.user_id = $1)\n          AND ($2::text IS NULL OR k.name ILIKE $2 OR u.username ILIKE $2)\n        ORDER BY k.id DESC\n        LIMIT $3 OFFSET $4\n        ",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,17 @@
       },
       {
         "ordinal": 12,
+        "name": "ip_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "ip_allowlist"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "rpm_limit",
         "type_info": "Int4",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "max_concurrency",
         "type_info": "Int4",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "expires_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -169,7 +180,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "last_used_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -180,7 +191,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "created_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -216,8 +227,9 @@
       true,
       true,
       true,
+      true,
       false
     ]
   },
-  "hash": "92b6085759ea22304c269f79d534fbca3688d1252a3af78a3977a89de89d3c97"
+  "hash": "025bf76e5752af82ed6f72ee5f7801b50420f9db4f22433bcf163d997bbf6e6d"
 }

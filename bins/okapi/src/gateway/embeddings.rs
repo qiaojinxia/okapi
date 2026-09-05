@@ -114,7 +114,7 @@ async fn handle(
     upstream_path: &str,
     est_chars_based: usize,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
 
     let meta = super::chat::resolve_model_cached(state, requested_model).await?;
     let Some(meta) = meta.as_ref() else {
@@ -209,7 +209,7 @@ async fn handle(
     )
     .await
     {
-        Ok((resp_body, status, usage, channel, upstream_request_id, failover)) => {
+        Ok((resp_body, status, usage, channel, upstream_request_id, failover, upstream_model)) => {
             let usage = usage.unwrap_or(TokenUsage {
                 prompt_tokens: est_prompt,
                 cached_tokens: 0,
@@ -231,6 +231,12 @@ async fn handle(
                         Ok(CommitOutcome::Committed { balance_after, .. }) => {
                             let snapshot = serde_json::to_value(&quote.snapshot).ok();
                             let input = SettlementInput {
+                                dimensions: okapi_ledger::pg::UsageDimensions::new(
+                                    requested_model,
+                                    &upstream_model,
+                                    &format!("/v1{upstream_path}"),
+                                    &format!("/v1{upstream_path}"),
+                                ),
                                 request_id,
                                 log_type: 2,
                                 user_id: key.user_id,
@@ -244,6 +250,8 @@ async fn handle(
                                 amount: quote.amount,
                                 original: quote.original,
                                 discount: quote.discount,
+                                list_price: quote.list_price,
+                                upstream_cost: None,
                                 pricing_epoch: Some(book.epoch()),
                                 pricing_snapshot: snapshot,
                                 latency_ms: elapsed_ms(started),
@@ -304,19 +312,31 @@ async fn handle(
                 tracing::error!(request_id = %request_id, error = %rerr, "embeddings 退款失败（悬置待清理）");
             }
             let input = SettlementInput {
+                dimensions: okapi_ledger::pg::UsageDimensions::new(
+                    requested_model,
+                    channel.as_ref().map_or("", |c| c.2.as_str()),
+                    &format!("/v1{upstream_path}"),
+                    &if channel.as_ref().is_some_and(|c| !c.2.is_empty()) {
+                        format!("/v1{upstream_path}")
+                    } else {
+                        String::new()
+                    },
+                ),
                 request_id,
                 log_type: 5,
                 user_id: key.user_id,
                 api_key_id: key.key_id,
                 group_code: &key.group_code,
                 model_name: &canonical,
-                channel_id: channel.map(|c| c.0),
-                channel_key_id: channel.map(|c| c.1),
+                channel_id: channel.as_ref().map(|c| c.0),
+                channel_key_id: channel.as_ref().map(|c| c.1),
                 state: BillingState::Failed,
                 usage: TokenUsage::default(),
                 amount: Money::ZERO,
                 original: Money::ZERO,
                 discount: Money::ZERO,
+                list_price: Money::ZERO,
+                upstream_cost: None,
                 pricing_epoch: Some(book.epoch()),
                 pricing_snapshot: None,
                 latency_ms: elapsed_ms(started),
@@ -348,6 +368,7 @@ type ForwardOk = (
     (i64, i64),
     Option<String>,
     i16,
+    String,
 );
 
 /// 候选循环：anthropic 渠道跳过（无 embeddings 端点）；瞬态失败 failover。
@@ -360,7 +381,7 @@ async fn forward(
     upstream_path: &str,
     body: &Bytes,
     request_id: Uuid,
-) -> Result<ForwardOk, (AppError, Option<(i64, i64)>, i16)> {
+) -> Result<ForwardOk, (AppError, Option<(i64, i64, String)>, i16)> {
     let rows = okapi_store::channels::candidates_for_model(
         &state.pg,
         canonical,
@@ -382,13 +403,13 @@ async fn forward(
     }
 
     let mut failover: i16 = 0;
-    let mut last: Option<(i64, i64)> = None;
+    let mut last: Option<(i64, i64, String)> = None;
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
         let upstream_model = cand.upstream_model(canonical).to_owned();
         let Ok(body_up) = rewrite_model(body, requested_model, &upstream_model) else {
             return Err((
                 AppError::bad_request(),
-                Some((cand.channel_id, cand.channel_key_id)),
+                Some((cand.channel_id, cand.channel_key_id, String::new())),
                 failover,
             ));
         };
@@ -396,7 +417,7 @@ async fn forward(
             .api_base
             .clone()
             .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
-        last = Some((cand.channel_id, cand.channel_key_id));
+        last = Some((cand.channel_id, cand.channel_key_id, upstream_model.clone()));
 
         match state
             .upstream
@@ -411,6 +432,7 @@ async fn forward(
                     (cand.channel_id, cand.channel_key_id),
                     resp.upstream_request_id,
                     failover,
+                    upstream_model,
                 ));
             }
             Err(err) if err.retriable_before_first_token() => {

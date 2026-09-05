@@ -134,4 +134,10 @@ async fn balance_low_scan_respects_threshold() {
         .execute(&pg)
         .await
         .unwrap();
+    // 也清掉自己造的低余额用户：不清就会在开发库里越积越多，同额用户超过 LIMIT 20
+    // 之后本用例必然挂——测试自污染，且现象是"扫不出刚建的用户"这种极难读的失败
+    sqlx::query!(r#"UPDATE users SET deleted_at = now() WHERE id = $1"#, user)
+        .execute(&pg)
+        .await
+        .unwrap();
 }

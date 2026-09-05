@@ -100,7 +100,7 @@ async fn handle_speech(
     request_id: Uuid,
     started: Instant,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
     let probe: SpeechProbe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     let meta = super::chat::resolve_model_cached(state, &probe.model).await?;
     let Some(meta) = meta.as_ref() else {
@@ -194,6 +194,8 @@ async fn handle_speech(
                 state,
                 &key,
                 &canonical,
+                &probe.model,
+                "/v1/audio/speech",
                 &quote,
                 usage,
                 request_id,
@@ -284,7 +286,7 @@ async fn handle_transcriptions(
     started: Instant,
     path: &str,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate(state, headers).await?;
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
 
     // 解析全部 part（file 保留 filename/content-type，重组时 boundary 重生成）
     let mut parts: Vec<(String, Option<String>, Option<String>, Bytes)> = Vec::new();
@@ -400,6 +402,8 @@ async fn handle_transcriptions(
                 state,
                 &key,
                 &canonical,
+                &model,
+                "/v1/audio/transcriptions",
                 &quote,
                 TokenUsage::default(),
                 request_id,
@@ -440,6 +444,8 @@ async fn settle(
     state: &AppState,
     key: &okapi_store::AuthedKey,
     canonical: &str,
+    requested_model: &str,
+    endpoint: &str,
     quote: &Quote,
     usage: TokenUsage,
     request_id: Uuid,
@@ -460,6 +466,12 @@ async fn settle(
                 snapshot.media_units = media_units;
             }
             let input = SettlementInput {
+                dimensions: okapi_ledger::pg::UsageDimensions::new(
+                    requested_model,
+                    cand.map_or("", |c| c.upstream_model(canonical)),
+                    endpoint,
+                    endpoint,
+                ),
                 request_id,
                 log_type: 2,
                 user_id: key.user_id,
@@ -473,6 +485,8 @@ async fn settle(
                 amount: quote.amount,
                 original: quote.original,
                 discount: quote.discount,
+                list_price: quote.list_price,
+                upstream_cost: None,
                 pricing_epoch: Some(book.epoch()),
                 pricing_snapshot: serde_json::to_value(&snapshot).ok(),
                 latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),

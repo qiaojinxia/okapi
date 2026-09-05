@@ -113,6 +113,8 @@ impl Notifier {
 /// 余额低于阈值的用户扫描（settings.balance_low_threshold_micro，缺省 0=关闭）。
 /// 返回 (user_id, balance_micro) 列表（上限 20，防 payload 膨胀）；
 /// 按余额降序：优先展示尚有余额但将耗尽的用户（0 余额沉睡用户排后）。
+/// 同额再按 id 降序兜底排序：没有 tie-break 时 `LIMIT 20` 从同额用户里取谁由 PG 自由决定，
+/// 同一批数据两次轮询能给出不同的 20 个人，通知收件人随机漂移。
 pub async fn scan_balance_low(pg: &PgPool) -> anyhow::Result<Vec<(i64, i64)>> {
     let threshold = sqlx::query_scalar!(
         r#"SELECT (value #>> '{}')::bigint AS "v!" FROM settings
@@ -127,7 +129,7 @@ pub async fn scan_balance_low(pg: &PgPool) -> anyhow::Result<Vec<(i64, i64)>> {
     let rows = sqlx::query!(
         r#"SELECT id, balance_micro FROM users
            WHERE deleted_at IS NULL AND balance_micro < $1 AND balance_micro >= 0
-           ORDER BY balance_micro DESC LIMIT 20"#,
+           ORDER BY balance_micro DESC, id DESC LIMIT 20"#,
         threshold
     )
     .fetch_all(pg)

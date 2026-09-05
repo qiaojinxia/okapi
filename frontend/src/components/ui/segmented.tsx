@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -31,8 +32,23 @@ export function Segmented<T extends string | number>({
   ariaLabel,
   className,
 }: SegmentedProps<T>) {
+  const container = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const node = container.current
+    if (!node) return
+    const reveal = () => {
+      const selected = node.querySelector<HTMLElement>('[aria-pressed="true"]')
+      if (!selected) return
+      const parent = node.getBoundingClientRect(), child = selected.getBoundingClientRect()
+      if (child.left < parent.left || child.right > parent.right) node.scrollLeft += child.left - parent.left - (node.clientWidth - child.width) / 2
+    }
+    reveal()
+    const observer = new ResizeObserver(reveal)
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [value])
   return (
-    <div
+    <div ref={container}
       role="group"
       aria-label={ariaLabel}
       className={cn(

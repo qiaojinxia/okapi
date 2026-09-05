@@ -31,7 +31,17 @@ impl Config {
             .parse()?;
         let single_user_mode =
             std::env::var("OKAPI_SINGLE_USER_MODE").is_ok_and(|v| v == "true" || v == "1");
-        let node = std::env::var("OKAPI_NODE").unwrap_or_else(|_| "okapi-1".to_owned());
+        // 实例名。缺省退到容器/主机名而不是固定串——多副本部署里它是**区分实例**的唯一凭据：
+        // 记账的 node 列、以及 surge 的集群在途量表（每个实例只写自己那格）都靠它。
+        // 都叫 okapi-1 的话，量表会挤在同一格互相覆盖，集群在途数直接算少。
+        // compose 的 `deploy.replicas` 没法给每个副本发不同的环境变量，但 Docker/K8s
+        // 都会把 HOSTNAME 设成唯一的容器/Pod 名，正好够用。
+        let node = std::env::var("OKAPI_NODE")
+            .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok())
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "okapi-1".to_owned());
         let clickhouse_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
         let nats_url = std::env::var("OKAPI_NATS_URL").ok();
         let master_key = std::env::var("OKAPI_MASTER_KEY").ok();

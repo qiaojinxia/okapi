@@ -1,13 +1,14 @@
 import { createFileRoute } from '@tanstack/react-router'
+import { TREND_METRICS, type TrendMetric } from '@/features/analytics/trend-data'
 import { AnalyticsPage } from '@/features/analytics/AnalyticsPage'
 
 export const ANALYTICS_VIEWS = ['trend', 'breakdown', 'flow'] as const
 export type AnalyticsView = (typeof ANALYTICS_VIEWS)[number]
 
-export const BREAKDOWN_DIMS = ['model', 'channel', 'provider', 'user', 'api_key', 'group'] as const
+export const BREAKDOWN_DIMS = ['model', 'channel', 'provider', 'user', 'api_key', 'group', 'requested_model', 'upstream_model', 'endpoint', 'upstream_endpoint', 'node', 'request_type', 'billing_type'] as const
 export type BreakdownDim = (typeof BREAKDOWN_DIMS)[number]
 
-export const STACK_DIMS = ['model', 'channel', 'group', 'user', 'api_key'] as const
+export const STACK_DIMS = ['model', 'model_group', 'channel', 'group', 'user', 'api_key', 'node', 'endpoint', 'request_type', 'billing_type'] as const
 export type StackDim = (typeof STACK_DIMS)[number]
 
 export const FLOW_METRICS = ['amount', 'requests', 'tokens'] as const
@@ -25,9 +26,24 @@ export interface AnalyticsSearch {
   model?: string
   group?: string
   days?: number
+  start_date?: string
+  end_date?: string
+  granularity?: 'hour' | 'day'
+  model_source?: 'billed' | 'requested' | 'upstream'
+  endpoint?: string
+  upstream_endpoint?: string
+  node?: string
+  request_type?: string
+  billing_type?: string
+  stream?: boolean
+  models?: string[]
+  groups?: string[]
   view?: AnalyticsView
   by?: BreakdownDim
   stack?: StackDim
+  measure?: TrendMetric
+  stages?: string[]
+  limit?: number
   metric?: FlowMetric
 }
 
@@ -44,6 +60,11 @@ function oneOf<T extends string>(v: unknown, allowed: readonly T[]): T | undefin
   return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : undefined
 }
 
+function strings(value: unknown): string[] | undefined {
+  if (typeof value === 'string') { try { value = JSON.parse(value) } catch { return undefined } }
+  return Array.isArray(value) && value.length <= 8 && value.every((v) => typeof v === 'string' && v.length > 0 && v.length <= 256) ? value : undefined
+}
+
 export const Route = createFileRoute('/admin/stats')({
   validateSearch: (search: Record<string, unknown>): AnalyticsSearch => ({
     user_id: posInt(search.user_id),
@@ -52,9 +73,18 @@ export const Route = createFileRoute('/admin/stats')({
     model: str(search.model),
     group: str(search.group),
     days: posInt(search.days),
+    start_date: str(search.start_date), end_date: str(search.end_date),
+    granularity: oneOf(search.granularity, ['hour', 'day']),
+    model_source: oneOf(search.model_source, ['billed', 'requested', 'upstream']),
+    endpoint: str(search.endpoint), upstream_endpoint: str(search.upstream_endpoint), node: str(search.node),
+    request_type: str(search.request_type), billing_type: str(search.billing_type),
+    stream: search.stream === true || search.stream === 'true' ? true : search.stream === false || search.stream === 'false' ? false : undefined,
+    models: strings(search.models), groups: strings(search.groups),
     view: oneOf(search.view, ANALYTICS_VIEWS),
     by: oneOf(search.by, BREAKDOWN_DIMS),
     stack: oneOf(search.stack, STACK_DIMS),
+    measure: oneOf(search.measure, TREND_METRICS),
+    stages: strings(search.stages), limit: posInt(search.limit),
     metric: oneOf(search.metric, FLOW_METRICS),
   }),
   component: AnalyticsPage,

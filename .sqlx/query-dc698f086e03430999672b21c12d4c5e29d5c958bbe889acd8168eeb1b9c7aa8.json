@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, failed_count, last_error, cooldown_until FROM channel_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "failed_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "failed_count"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "last_error",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "cooldown_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "cooldown_until"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "dc698f086e03430999672b21c12d4c5e29d5c958bbe889acd8168eeb1b9c7aa8"
+}

@@ -7,7 +7,7 @@ import { sumByModel } from '@/features/portal-overview/types'
 import { formatBp, formatCount } from '@/lib/money'
 
 interface Segment {
-  key: 'input' | 'cached' | 'output' | 'reasoning'
+  key: 'input' | 'cached' | 'write' | 'output' | 'reasoning'
   value: number
   className: string
 }
@@ -17,14 +17,17 @@ interface Segment {
 function segments(t: {
   prompt_tokens: number
   cached_tokens: number
+  cache_write_tokens?: number | null
   completion_tokens: number
   reasoning_tokens: number
 }): Segment[] {
   const cached = Math.min(t.cached_tokens, t.prompt_tokens)
   const reasoning = Math.min(t.reasoning_tokens, t.completion_tokens)
+  const writes = Math.min(t.cache_write_tokens ?? 0, t.prompt_tokens - cached)
   return [
-    { key: 'input', value: t.prompt_tokens - cached, className: 'bg-primary' },
+    { key: 'input', value: t.prompt_tokens - cached - writes, className: 'bg-primary' },
     { key: 'cached', value: cached, className: 'bg-success' },
+    { key: 'write', value: writes, className: 'bg-chart-5' },
     { key: 'output', value: t.completion_tokens - reasoning, className: 'bg-warning' },
     { key: 'reasoning', value: reasoning, className: 'bg-muted-foreground' },
   ]
@@ -57,6 +60,7 @@ export function TokenMixView({
   const label: Record<Segment['key'], string> = {
     input: t('portal:tokInput'),
     cached: t('portal:tokCached'),
+    write: t('charts:cacheWrite'),
     output: t('portal:tokOutput'),
     reasoning: t('portal:tokReasoning'),
   }
@@ -83,9 +87,9 @@ export function TokenMixView({
             <span key={s.key} className="inline-flex items-center gap-1.5">
               <span className={`inline-block h-2.5 w-2.5 rounded-sm ${s.className}`} />
               <span className="text-muted-foreground">{label[s.key]}</span>
-              <span className="font-medium">{formatCount(s.value, locale)}</span>
+              <span className="font-medium">{s.key === 'write' && total.cache_write_tokens == null ? '—' : formatCount(s.value, locale)}</span>
               <span className="text-muted-foreground">
-                {formatBp(sum > 0 ? Math.round((s.value * 10_000) / sum) : 0, locale)}
+                {s.key === 'write' && total.cache_write_tokens == null ? '' : formatBp(sum > 0 ? Math.round((s.value * 10_000) / sum) : 0, locale)}
               </span>
             </span>
           ))}
@@ -93,6 +97,7 @@ export function TokenMixView({
         <p className="text-xs text-muted-foreground">
           {t('portal:tokMixHint', { hit: formatBp(total.cache_hit_bp, locale) })}
         </p>
+        {total.cache_write_tokens == null && <p className="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">{t('charts:missingCacheWrite')}</p>}
 
         <Table>
           <THead>
@@ -100,6 +105,7 @@ export function TokenMixView({
               <Th>{t('pricing:model')}</Th>
               <Th>{t('portal:tokInput')}</Th>
               <Th>{t('portal:tokCached')}</Th>
+              <Th>{t('charts:cacheWrite')}</Th>
               <Th>{t('portal:tokOutput')}</Th>
               <Th>{t('portal:tokReasoning')}</Th>
               <Th>{t('portal:cacheHitShort')}</Th>
@@ -115,7 +121,7 @@ export function TokenMixView({
                   <Td className="font-mono text-xs">{m.model}</Td>
                   {s.map((x) => (
                     <Td key={x.key} className="text-xs">
-                      {formatCount(x.value, locale)}
+                      {x.key === 'write' && m.cache_write_tokens == null ? '—' : formatCount(x.value, locale)}
                     </Td>
                   ))}
                   <Td className="text-xs">{formatBp(hitBp, locale)}</Td>

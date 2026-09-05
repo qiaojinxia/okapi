@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settings (key, value) VALUES ('record_ip_log', 'false'::jsonb)\n           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "fd1b907253afc69bc0f3c9d6f2e05f96c34d641b40b1e12e41882f21931659a2"
+}

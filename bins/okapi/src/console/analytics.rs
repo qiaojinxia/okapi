@@ -15,6 +15,7 @@ use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use chrono::Days;
 use okapi_api::{codes, permissions};
 use okapi_store::ChClient;
 use serde::Deserialize;
@@ -43,6 +44,27 @@ pub struct CubeQuery {
     /// 回看天数（1–90，缺省 7）。
     #[serde(default)]
     pub days: Option<u32>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub granularity: Option<String>,
+    pub model_source: Option<String>,
+    pub endpoint: Option<String>,
+    pub upstream_endpoint: Option<String>,
+    pub node: Option<String>,
+    pub stream: Option<bool>,
+    pub request_type: Option<String>,
+    pub billing_type: Option<String>,
+    /// JSON 数组：同时比较多个模型或分组，避免逗号被误当成模型名分隔符。
+    pub models: Option<String>,
+    pub groups: Option<String>,
+    #[serde(skip)]
+    start: String,
+    #[serde(skip)]
+    end: String,
+    #[serde(skip)]
+    previous_start: String,
+    #[serde(skip)]
+    window_meta: Value,
     #[serde(default)]
     pub user_id: Option<i64>,
     #[serde(default)]
@@ -64,6 +86,7 @@ pub struct CubeQuery {
     /// 趋势堆叠维度（trend 专用）：model | channel | group | user | api_key。
     #[serde(default)]
     pub stack: Option<String>,
+    pub stages: Option<String>,
 }
 
 /// 编译后的过滤：整数已进 SQL，字符串留在绑定参数里。
@@ -83,7 +106,76 @@ impl Scope {
 
 impl CubeQuery {
     fn days(&self) -> u32 {
-        self.days.unwrap_or(7).clamp(1, 90)
+        self.days.unwrap_or(7).clamp(1, 366)
+    }
+
+    async fn prepare(&mut self, ch: &ChClient) -> Result<(), AppError> {
+        let w = super::usage_details::CalendarWindow::read(
+            ch,
+            self.days(),
+            self.start_date.as_deref(),
+            self.end_date.as_deref(),
+        )
+        .await?;
+        let granularity =
+            self.granularity
+                .as_deref()
+                .unwrap_or(if w.days() <= 2 { "hour" } else { "day" });
+        if !matches!(granularity, "hour" | "day") || (granularity == "hour" && w.days() > 31) {
+            return Err(AppError::bad_request().with_param("granularity"));
+        }
+        self.model_column()?;
+        for (name, input) in [("models", &self.models), ("groups", &self.groups)] {
+            parse_choices(name, input.as_deref())?;
+        }
+        if self
+            .request_type
+            .as_deref()
+            .is_some_and(|s| !matches!(s, "stream" | "non_stream" | "websocket"))
+        {
+            return Err(AppError::bad_request().with_param("request_type"));
+        }
+        self.days = Some(u32::try_from(w.days()).unwrap_or(7));
+        self.granularity = Some(granularity.to_owned());
+        self.start = w.start.to_string();
+        self.end = (w.end + Days::new(1)).to_string();
+        self.previous_start = (w.start - Days::new(u64::from(self.days())))
+            .max(chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+            .to_string();
+        self.window_meta = w.json();
+        self.window_meta["start_at"] = json!(format!("{} 00:00:00", self.start));
+        self.window_meta["end_at"] = json!(if w.end.to_string() == w.today {
+            w.generated_at.clone()
+        } else {
+            format!("{} 23:00:00", w.end)
+        });
+        self.window_meta["previous_start_date"] = json!(self.previous_start);
+        self.window_meta["previous_end_date"] = json!((w.start - Days::new(1)).to_string());
+        Ok(())
+    }
+
+    fn model_column(&self) -> Result<&'static str, AppError> {
+        match self.model_source.as_deref().unwrap_or("billed") {
+            "billed" => Ok("model"),
+            "requested" => Ok("requested_model"),
+            "upstream" => Ok("upstream_model"),
+            _ => Err(AppError::bad_request().with_param("model_source")),
+        }
+    }
+
+    fn source(&self, previous: bool) -> String {
+        // 在聚合展开前裁剪常用主键维度。高级维度在外层过滤，历史未采集部分仍保留。
+        let mut base = String::new();
+        for (col, val) in [
+            ("user_id", self.user_id),
+            ("api_key_id", self.api_key_id),
+            ("channel_id", self.channel_id),
+        ] {
+            if let Some(v) = val.filter(|v| *v >= 0) {
+                base.push_str(&format!(" AND {col} = {v}"));
+            }
+        }
+        super::analysis_source::source(&self.window(previous), &base)
     }
 
     fn scope(&self) -> Scope {
@@ -100,12 +192,54 @@ impl CubeQuery {
             }
         }
         if let Some(m) = trimmed(self.model.as_deref()) {
-            clause.push_str(" AND model = {p_model:String}");
+            clause.push_str(&format!(
+                " AND {} = {{p_model:String}}",
+                self.model_column().unwrap_or("model")
+            ));
             params.push(("p_model".to_owned(), m.to_owned()));
         }
         if let Some(g) = trimmed(self.group.as_deref()) {
             clause.push_str(" AND group_code = {p_group:String}");
             params.push(("p_group".to_owned(), g.to_owned()));
+        }
+        for (col, value) in [
+            ("endpoint", &self.endpoint),
+            ("upstream_endpoint", &self.upstream_endpoint),
+            ("node", &self.node),
+            ("request_type", &self.request_type),
+            ("billing_type", &self.billing_type),
+        ] {
+            if let Some(value) = trimmed(value.as_deref()) {
+                clause.push_str(&format!(" AND {col} = {{p_{col}:String}}"));
+                params.push((format!("p_{col}"), value.to_owned()));
+            }
+        }
+        if let Some(stream) = self.stream {
+            clause.push_str(&format!(" AND stream = {}", u8::from(stream)));
+        }
+        for (name, col, values) in [
+            (
+                "models",
+                self.model_column().unwrap_or("model"),
+                &self.models,
+            ),
+            ("groups", "group_code", &self.groups),
+        ] {
+            if let Ok(values) = parse_choices(name, values.as_deref()) {
+                if !values.is_empty() {
+                    let binds = values
+                        .iter()
+                        .enumerate()
+                        .map(|(i, value)| {
+                            let key = format!("p_{name}_{i}");
+                            params.push((key.clone(), value.clone()));
+                            format!("{{{key}:String}}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    clause.push_str(&format!(" AND {col} IN ({binds})"));
+                }
+            }
         }
         Scope { clause, params }
     }
@@ -113,31 +247,30 @@ impl CubeQuery {
     /// 当前窗口 / 等长的上一窗口。环比不是"昨日"那种整日锚点，而是同长度的
     /// 前一段：7 天看板对 7 天，30 天对 30 天，否则周末效应会把对比读歪。
     fn window(&self, previous: bool) -> String {
-        let d = self.days();
-        if previous {
-            format!(
-                "hour >= now() - INTERVAL {} DAY AND hour < now() - INTERVAL {d} DAY",
-                d * 2
-            )
+        let (start, end) = if previous {
+            (&self.previous_start, &self.start)
         } else {
-            format!("hour >= now() - INTERVAL {d} DAY")
-        }
+            (&self.start, &self.end)
+        };
+        format!("hour >= toDateTime('{start}') AND hour < toDateTime('{end}')")
     }
 }
 
 /// 立方体全部度量的 Merge 列表；别名刻意与 MV 列名错开。
-const AGG: &str = "countMerge(requests) AS reqs, \
-                   sumMerge(prompt_tokens) AS prompt, \
-                   sumMerge(cached_tokens) AS cached, \
-                   sumMerge(completion_tokens) AS completion, \
-                   sumMerge(reasoning_tokens) AS reasoning, \
-                   sumMerge(amount) AS spend, \
-                   sumMerge(discount) AS saved, \
-                   sumMerge(upstream_cost) AS cost, \
-                   sumMerge(errors) AS errs, \
-                   sumMerge(latency_sum) AS lat_sum, \
-                   sumMerge(ttft_sum) AS ttft_s, \
-                   countIfMerge(ttft_samples) AS ttft_n";
+const AGG: &str = "sum(requests) AS reqs, \
+                   sum(prompt_tokens) AS prompt, \
+                   sum(cached_tokens) AS cached, \
+                   sum(completion_tokens) AS completion, \
+                   sum(reasoning_tokens) AS reasoning, \
+                   sum(amount) AS spend, \
+                   sum(discount) AS saved, \
+                   sum(upstream_cost) AS cost, \
+                   sum(errors) AS errs, \
+                   sum(latency_sum) AS lat_sum, \
+                   sum(ttft_sum) AS ttft_s, \
+                   sum(ttft_samples) AS ttft_n, \
+                   sum(write_tokens) AS write_sum, sum(write_samples) AS write_n, \
+                   sum(cost_samples) AS cost_n, sum(covered_amount) AS covered_spend, sum(covered_cost) AS covered_cost_sum";
 
 /// 一行聚合 → 展示字段（比率全部基点/整数，避免前端拿浮点二次换算）。
 fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
@@ -148,6 +281,50 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     let errs = ch_i64(r, "errs");
     let ttft_n = ch_i64(r, "ttft_n");
     let mut m = serde_json::Map::new();
+    let known = ch_i64(r, "cost_n");
+    let known_amount = ch_i64(r, "covered_spend");
+    let known_cost = ch_i64(r, "covered_cost_sum");
+    m.insert("cost_known_requests".into(), json!(known));
+    m.insert(
+        "cost_coverage_bp".into(),
+        if reqs > 0 {
+            json!(rate_bp(known, reqs))
+        } else {
+            Value::Null
+        },
+    );
+    m.insert("known_amount_micro".into(), json!(known_amount));
+    m.insert("known_cost_micro".into(), json!(known_cost));
+    m.insert(
+        "known_margin_micro".into(),
+        if known > 0 {
+            json!(known_amount - known_cost)
+        } else {
+            Value::Null
+        },
+    );
+    m.insert(
+        "margin_micro".into(),
+        if known == reqs && reqs > 0 {
+            json!(known_amount - known_cost)
+        } else {
+            Value::Null
+        },
+    );
+    m.insert(
+        "cache_write_known_requests".into(),
+        json!(ch_i64(r, "write_n")),
+    );
+    m.insert(
+        "cache_write_tokens".into(),
+        if ch_i64(r, "write_n") == reqs {
+            json!(ch_i64(r, "write_sum"))
+        } else {
+            Value::Null
+        },
+    );
+    m.insert("latency_sum_ms".into(), json!(ch_i64(r, "lat_sum")));
+    m.insert("ttft_sum_ms".into(), json!(ch_i64(r, "ttft_s")));
     m.insert("requests".into(), json!(reqs));
     m.insert("errors".into(), json!(errs));
     m.insert("error_rate_bp".into(), json!(rate_bp(errs, reqs)));
@@ -161,6 +338,16 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
     m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
     m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
+    let latency = ch_i64(r, "lat_sum");
+    m.insert("ttft_samples".into(), json!(ttft_n));
+    m.insert(
+        "avg_output_tps_milli".into(),
+        if latency > 0 {
+            json!(completion.saturating_mul(1_000_000) / latency)
+        } else {
+            Value::Null
+        },
+    );
     m.insert(
         "avg_latency_ms".into(),
         json!(if reqs > 0 {
@@ -309,32 +496,38 @@ async fn describe_scope(state: &AppState, q: &CubeQuery) -> Result<Value, AppErr
 pub async fn trend(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<CubeQuery>,
+    Query(mut q): Query<CubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
+    q.prepare(ch).await?;
     let days = q.days();
+    let current_source = q.source(false);
+    let previous_source = q.source(true);
     let scope = q.scope();
     let params = scope.borrow();
 
-    let (bucket_expr, granularity) = if days <= 2 {
+    let mut window = q.window_meta.clone();
+    window["freshness"] = super::analysis_freshness::read(&state).await?;
+
+    let (bucket_expr, granularity) = if q.granularity.as_deref() == Some("hour") {
         ("toString(hour)", "hour")
     } else {
         ("toString(toDate(hour))", "day")
     };
     let series_sql = format!(
-        "SELECT {bucket_expr} AS bucket, {AGG} FROM mv_cube_hour \
+        "SELECT {bucket_expr} AS bucket, {AGG} FROM {current_source} \
          WHERE {}{} GROUP BY bucket ORDER BY bucket",
         q.window(false),
         scope.clause
     );
     let total_sql = format!(
-        "SELECT {AGG} FROM mv_cube_hour WHERE {}{}",
+        "SELECT {AGG} FROM {current_source} WHERE {}{}",
         q.window(false),
         scope.clause
     );
     let prev_sql = format!(
-        "SELECT {AGG} FROM mv_cube_hour WHERE {}{}",
+        "SELECT {AGG} FROM {previous_source} WHERE {}{}",
         q.window(true),
         scope.clause
     );
@@ -346,22 +539,40 @@ pub async fn trend(
     };
 
     // 堆叠：按第二维度拆开每个桶（"钱花在哪个模型、占比怎么变"），Top N 之外折进 __other
-    if let Some(stack_col) = trimmed(q.stack.as_deref()).map(breakdown_key).transpose()? {
+    if let Some(stack_col) = trimmed(q.stack.as_deref())
+        .map(|dim| match dim {
+            "model" => q.model_column().map(str::to_owned),
+            "model_group" => q
+                .model_column()
+                .map(|col| format!("toJSONString(tuple({col}, group_code))")),
+            _ => breakdown_key(dim).map(str::to_owned),
+        })
+        .transpose()?
+    {
         let limit = q.limit.unwrap_or(8).clamp(1, 20) as usize;
         let stacked_sql = format!(
-            "SELECT {bucket_expr} AS bucket, {stack_col} AS k, countMerge(requests) AS reqs, \
-                    sumMerge(amount) AS spend, sumMerge(errors) AS errs, \
-                    sumMerge(prompt_tokens) + sumMerge(completion_tokens) AS toks \
-             FROM mv_cube_hour WHERE {}{} GROUP BY bucket, k ORDER BY bucket",
+            "SELECT {bucket_expr} AS bucket, {stack_col} AS k, {AGG} \
+             FROM {current_source} WHERE {}{} GROUP BY bucket, k ORDER BY bucket",
             q.window(false),
             scope.clause
         );
         let rows = ch.query_with_params(&stacked_sql, &params).await?;
-        let (series, data) = fold_stacked(&rows, limit);
+        let (series, data) = fold_stacked(
+            &rows,
+            limit,
+            match q.metric.as_deref() {
+                Some("requests" | "latency" | "ttft" | "error_rate" | "cache" | "throughput") => {
+                    "reqs"
+                }
+                Some("tokens") => "tokens",
+                _ => "spend",
+            },
+        );
         let labels = stack_labels(&state, q.stack.as_deref().unwrap_or_default(), &series).await?;
         return Ok(Json(json!({
             "days": days,
             "granularity": granularity,
+            "window": window,
             "scope": describe_scope(&state, &q).await?,
             "total": pack_one(&total),
             "previous": pack_one(&previous),
@@ -384,6 +595,7 @@ pub async fn trend(
     Ok(Json(json!({
         "days": days,
         "granularity": granularity,
+        "window": window,
         "scope": describe_scope(&state, &q).await?,
         "total": pack_one(&total),
         "previous": pack_one(&previous),
@@ -393,10 +605,14 @@ pub async fn trend(
 
 /// 堆叠行（bucket × k）→ Top N 序列 + 逐桶数值；其余折进 `__other`。
 /// 排名按窗口金额；模型名不进 SQL 省掉 IN 列表转义（与 model_trend 同法）。
-fn fold_stacked(rows: &[Value], limit: usize) -> (Vec<String>, Vec<Value>) {
+fn fold_stacked(rows: &[Value], limit: usize, rank: &str) -> (Vec<String>, Vec<Value>) {
     let mut totals: HashMap<String, i64> = HashMap::new();
     for r in rows {
-        *totals.entry(row_key(r)).or_default() += ch_i64(r, "spend");
+        *totals.entry(row_key(r)).or_default() += if rank == "tokens" {
+            ch_i64(r, "prompt").saturating_add(ch_i64(r, "completion"))
+        } else {
+            ch_i64(r, rank)
+        };
     }
     let mut ranked: Vec<(String, i64)> = totals.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -404,7 +620,7 @@ fn fold_stacked(rows: &[Value], limit: usize) -> (Vec<String>, Vec<Value>) {
     let has_other = ranked.len() > top.len();
 
     let mut order: Vec<String> = Vec::new();
-    let mut folded: HashMap<String, HashMap<String, [i64; 4]>> = HashMap::new();
+    let mut folded: HashMap<String, HashMap<String, Value>> = HashMap::new();
     for r in rows {
         let bucket = ch_str(r, "bucket");
         let key = row_key(r);
@@ -421,10 +637,30 @@ fn fold_stacked(rows: &[Value], limit: usize) -> (Vec<String>, Vec<Value>) {
             .or_default()
             .entry(slot)
             .or_default();
-        cell[0] += ch_i64(r, "reqs");
-        cell[1] += ch_i64(r, "spend");
-        cell[2] += ch_i64(r, "errs");
-        cell[3] += ch_i64(r, "toks");
+        if !cell.is_object() {
+            *cell = json!({});
+        }
+        for field in [
+            "reqs",
+            "spend",
+            "errs",
+            "prompt",
+            "completion",
+            "cached",
+            "reasoning",
+            "saved",
+            "cost",
+            "lat_sum",
+            "ttft_s",
+            "ttft_n",
+            "write_sum",
+            "write_n",
+            "cost_n",
+            "covered_spend",
+            "covered_cost_sum",
+        ] {
+            cell[field] = json!(ch_i64(cell, field).saturating_add(ch_i64(r, field)));
+        }
     }
     let mut series = top;
     if has_other {
@@ -437,12 +673,9 @@ fn fold_stacked(rows: &[Value], limit: usize) -> (Vec<String>, Vec<Value>) {
             let values: serde_json::Map<String, Value> = series
                 .iter()
                 .filter_map(|k| {
-                    cells.get(k).map(|c| {
-                        (
-                            k.clone(),
-                            json!({ "requests": c[0], "amount_micro": c[1], "errors": c[2], "tokens": c[3] }),
-                        )
-                    })
+                    cells
+                        .get(k)
+                        .map(|c| (k.clone(), Value::Object(pack_metrics(c))))
                 })
                 .collect();
             json!({ "bucket": bucket, "values": values })
@@ -486,6 +719,14 @@ fn breakdown_key(by: &str) -> Result<&'static str, AppError> {
         "user" => "user_id",
         "api_key" => "api_key_id",
         "group" => "group_code",
+        "model_group" => "toJSONString(tuple(model, group_code))",
+        "endpoint" => "endpoint",
+        "upstream_endpoint" => "upstream_endpoint",
+        "requested_model" => "requested_model",
+        "upstream_model" => "upstream_model",
+        "node" => "node",
+        "request_type" => "request_type",
+        "billing_type" => "billing_type",
         _ => return Err(AppError::bad_request().with_param("by")),
     })
 }
@@ -546,9 +787,68 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) ->
             let cached = m["cached_tokens"].as_i64().unwrap_or(0);
             m.insert("error_rate_bp".into(), json!(rate_bp(errs, reqs)));
             m.insert("cache_hit_bp".into(), json!(rate_bp(cached, prompt)));
-            // 折叠后的平均时延无法从已求平均的行还原，置 0 表示不适用
-            m.insert("avg_latency_ms".into(), json!(0));
-            m.insert("avg_ttft_ms".into(), json!(0));
+            let latency = m["latency_sum_ms"].as_i64().unwrap_or(0);
+            let ttft_n = m["ttft_samples"].as_i64().unwrap_or(0);
+            m.insert(
+                "avg_latency_ms".into(),
+                if reqs > 0 {
+                    json!(latency / reqs)
+                } else {
+                    Value::Null
+                },
+            );
+            m.insert(
+                "avg_ttft_ms".into(),
+                if ttft_n > 0 {
+                    json!(m["ttft_sum_ms"].as_i64().unwrap_or(0) / ttft_n)
+                } else {
+                    Value::Null
+                },
+            );
+            m.insert(
+                "avg_output_tps_milli".into(),
+                if latency > 0 {
+                    json!(
+                        m["completion_tokens"]
+                            .as_i64()
+                            .unwrap_or(0)
+                            .saturating_mul(1_000_000)
+                            / latency
+                    )
+                } else {
+                    Value::Null
+                },
+            );
+            let known = m["cost_known_requests"].as_i64().unwrap_or(0);
+            let margin = m["known_amount_micro"].as_i64().unwrap_or(0)
+                - m["known_cost_micro"].as_i64().unwrap_or(0);
+            m.insert(
+                "cost_coverage_bp".into(),
+                if reqs > 0 {
+                    json!(rate_bp(known, reqs))
+                } else {
+                    Value::Null
+                },
+            );
+            m.insert(
+                "known_margin_micro".into(),
+                if known > 0 {
+                    json!(margin)
+                } else {
+                    Value::Null
+                },
+            );
+            m.insert(
+                "margin_micro".into(),
+                if known == reqs && reqs > 0 {
+                    json!(margin)
+                } else {
+                    Value::Null
+                },
+            );
+            if m["cache_write_known_requests"].as_i64().unwrap_or(0) != reqs {
+                m.insert("cache_write_tokens".into(), Value::Null);
+            }
         }
         acc.sort_by(|a, b| {
             b.metrics["amount_micro"]
@@ -636,6 +936,8 @@ fn breakdown_sql(
     fold_provider: bool,
     limit: usize,
 ) -> [String; 3] {
+    let current_source = q.source(false);
+    let previous_source = q.source(true);
     let sql_limit = if fold_provider {
         String::new()
     } else {
@@ -643,20 +945,20 @@ fn breakdown_sql(
     };
     [
         format!(
-            "SELECT {key_col} AS k, {AGG} FROM mv_cube_hour WHERE {}{} \
+            "SELECT {key_col} AS k, {AGG} FROM {current_source} WHERE {}{} \
              GROUP BY k ORDER BY spend DESC, k{sql_limit}",
             q.window(false),
             scope.clause
         ),
         format!(
-            "SELECT sumMerge(amount) AS spend, countMerge(requests) AS reqs \
-             FROM mv_cube_hour WHERE {}{}",
+            "SELECT sum(amount) AS spend, sum(requests) AS reqs \
+             FROM {current_source} WHERE {}{}",
             q.window(false),
             scope.clause
         ),
         format!(
-            "SELECT {key_col} AS k, sumMerge(amount) AS spend \
-             FROM mv_cube_hour WHERE {}{} GROUP BY k ORDER BY spend DESC, k",
+            "SELECT {key_col} AS k, sum(amount) AS spend \
+             FROM {previous_source} WHERE {}{} GROUP BY k ORDER BY spend DESC, k",
             q.window(true),
             scope.clause
         ),
@@ -672,12 +974,17 @@ fn breakdown_sql(
 pub async fn breakdown(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<CubeQuery>,
+    Query(mut q): Query<CubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
+    q.prepare(ch).await?;
     let by = q.by.as_deref().unwrap_or("model");
-    let key_col = breakdown_key(by)?;
+    let key_col = if by == "model" {
+        q.model_column()?
+    } else {
+        breakdown_key(by)?
+    };
     let fold_provider = by == "provider";
     let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
     let scope = q.scope();
@@ -762,6 +1069,7 @@ pub async fn breakdown(
 
     Ok(Json(json!({
         "days": q.days(),
+        "window": q.window_meta,
         "by": by,
         "scope": describe_scope(&state, &q).await?,
         "total_amount_micro": total_spend,
@@ -770,9 +1078,8 @@ pub async fn breakdown(
     })))
 }
 
-/// 流向图的五个阶段（new-api Flow 的 user → token → group → model → channel；
-/// node 维度我们不做——单机 / 多副本的处理节点对站长没有经营含义）。
-const FLOW_STAGES: [&str; 5] = ["user", "api_key", "group", "model", "channel"];
+/// 流向阶段按调用路径排列；管理员可以隐藏中间阶段，链接从原始组合重新汇总。
+const FLOW_STAGES: [&str; 6] = ["user", "node", "api_key", "group", "model", "channel"];
 const FLOW_OTHER: &str = "__other";
 /// 五维组合取消耗最高的前 N 个；超出即 `truncated`，`coverage_bp` 标注覆盖比例。
 const FLOW_ROWS: usize = 5_000;
@@ -783,7 +1090,8 @@ fn flow_stage_key(r: &Value, stage_name: &str) -> String {
         "user" => ch_i64(r, "user_id").to_string(),
         "api_key" => ch_i64(r, "api_key_id").to_string(),
         "group" => ch_str(r, "group_code").to_owned(),
-        "model" => ch_str(r, "model").to_owned(),
+        "node" => ch_str(r, "node").to_owned(),
+        "model" => ch_str(r, "flow_model").to_owned(),
         _ => ch_i64(r, "channel_id").to_string(),
     }
 }
@@ -799,13 +1107,13 @@ struct FlowGraph {
 impl FlowGraph {
     /// 每阶段取 Top N 节点（度量降序、键升序稳定），其余折进 `__other`；
     /// 节点 id 形如 `stage:key`，链接只在相邻阶段之间。
-    fn build(combos: &[Value], per_stage: usize, order_col: &str) -> Self {
-        let mut stage_totals: Vec<HashMap<String, i64>> = vec![HashMap::new(); FLOW_STAGES.len()];
+    fn build(combos: &[Value], per_stage: usize, order_col: &str, stages: &[&str]) -> Self {
+        let mut stage_totals: Vec<HashMap<String, i64>> = vec![HashMap::new(); stages.len()];
         let mut covered = 0_i64;
         for r in combos {
             let v = ch_i64(r, order_col);
             covered = covered.saturating_add(v);
-            for (i, stage_name) in FLOW_STAGES.iter().enumerate() {
+            for (i, stage_name) in stages.iter().enumerate() {
                 *stage_totals[i]
                     .entry(flow_stage_key(r, stage_name))
                     .or_default() += v;
@@ -829,14 +1137,14 @@ impl FlowGraph {
             } else {
                 FLOW_OTHER
             };
-            format!("{}:{}", FLOW_STAGES[stage_idx], k)
+            format!("{}:{}", stages[stage_idx], k)
         };
 
         let mut nodes: BTreeMap<String, i64> = BTreeMap::new();
         let mut links: BTreeMap<(String, String), i64> = BTreeMap::new();
         for r in combos {
             let v = ch_i64(r, order_col);
-            let ids: Vec<String> = FLOW_STAGES
+            let ids: Vec<String> = stages
                 .iter()
                 .enumerate()
                 .map(|(i, s)| node_id(i, &flow_stage_key(r, s)))
@@ -864,18 +1172,50 @@ impl FlowGraph {
     }
 }
 
-/// 节点标签：user / api_key / channel 从 PG 回填，group / model 键即标签，`__other` 为 null。
-fn flow_label(stage_name: &str, key: &str, names: &Names) -> Value {
-    if key == FLOW_OTHER {
-        return Value::Null;
+/// Flow identities include lifecycle/context so absent names never masquerade as readable labels.
+/// Read only display names and safe key prefixes; credentials never enter this response.
+async fn flow_identities(
+    state: &AppState,
+    users: &[i64],
+    keys: &[i64],
+    channels: &[i64],
+) -> Result<HashMap<String, Value>, AppError> {
+    let mut identities = HashMap::new();
+    if !users.is_empty() {
+        let rows: Vec<(i64, String, bool)> = sqlx::query_as(
+            "SELECT id, username, deleted_at IS NOT NULL FROM users WHERE id = ANY($1)",
+        )
+        .bind(users)
+        .fetch_all(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+        for (id, name, deleted) in rows {
+            identities.insert(
+                format!("user:{id}"),
+                json!({"label": name, "entity_status": if deleted { "deleted" } else { "active" }}),
+            );
+        }
     }
-    let id = key.parse::<i64>().ok();
-    match stage_name {
-        "user" => json!(id.and_then(|k| names.users.get(&k))),
-        "api_key" => json!(id.and_then(|k| names.keys.get(&k)).map(|k| k.0.clone())),
-        "channel" => json!(id.and_then(|k| names.channels.get(&k)).map(|c| c.0.clone())),
-        _ => json!(key),
+    if !keys.is_empty() {
+        let rows: Vec<(i64, String, String, Option<String>, bool)> = sqlx::query_as("SELECT k.id, k.name, k.key_prefix, u.username, k.deleted_at IS NOT NULL FROM api_keys k LEFT JOIN users u ON u.id = k.user_id WHERE k.id = ANY($1)")
+            .bind(keys).fetch_all(&state.pg).await.map_err(okapi_store::StoreError::from)?;
+        for (id, name, prefix, owner, deleted) in rows {
+            identities.insert(format!("api_key:{id}"), json!({"label": name, "key_prefix": prefix, "owner_name": owner, "entity_status": if deleted { "deleted" } else { "active" }}));
+        }
     }
+    if !channels.is_empty() {
+        let rows: Vec<(i64, String, String, bool)> = sqlx::query_as(
+            "SELECT id, name, provider, deleted_at IS NOT NULL FROM channels WHERE id = ANY($1)",
+        )
+        .bind(channels)
+        .fetch_all(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+        for (id, name, provider, deleted) in rows {
+            identities.insert(format!("channel:{id}"), json!({"label": name, "provider": provider, "entity_status": if deleted { "deleted" } else { "active" }}));
+        }
+    }
+    Ok(identities)
 }
 
 /// GET /admin/stats/flow：桑基图数据（钱 / 请求 / token 从谁、经哪把 key、
@@ -887,10 +1227,11 @@ fn flow_label(stage_name: &str, key: &str, names: &Names) -> Value {
 pub async fn flow(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<CubeQuery>,
+    Query(mut q): Query<CubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
+    q.prepare(ch).await?;
     let per_stage = q.limit.unwrap_or(6).clamp(1, 20) as usize;
     let metric = match q.metric.as_deref().unwrap_or("amount") {
         "amount" => "amount",
@@ -903,23 +1244,38 @@ pub async fn flow(
         "tokens" => "toks",
         _ => "spend",
     };
+    let current_source = q.source(false);
     let scope = q.scope();
     let params = scope.borrow();
 
+    let model_col = q.model_column()?;
+    let selected = parse_choices("stages", q.stages.as_deref())?;
+    if q.stages.is_some()
+        && (selected.len() < 2
+            || selected.iter().any(|s| !FLOW_STAGES.contains(&s.as_str()))
+            || selected.iter().collect::<HashSet<_>>().len() != selected.len())
+    {
+        return Err(AppError::bad_request().with_param("stages"));
+    }
+    let stages: Vec<&str> = FLOW_STAGES
+        .iter()
+        .copied()
+        .filter(|s| selected.is_empty() || selected.iter().any(|v| v == s))
+        .collect();
     let combo_sql = format!(
-        "SELECT user_id, api_key_id, group_code, model, channel_id, \
-                countMerge(requests) AS reqs, sumMerge(amount) AS spend, \
-                sumMerge(prompt_tokens) + sumMerge(completion_tokens) AS toks \
-         FROM mv_cube_hour WHERE {}{} \
-         GROUP BY user_id, api_key_id, group_code, model, channel_id \
+        "SELECT user_id, api_key_id, group_code, {model_col} AS flow_model, channel_id, node, \
+                sum(requests) AS reqs, sum(amount) AS spend, \
+                sum(prompt_tokens) + sum(completion_tokens) AS toks \
+         FROM {current_source} WHERE {}{} \
+         GROUP BY user_id, api_key_id, group_code, flow_model, channel_id, node \
          ORDER BY {order_col} DESC LIMIT {FLOW_ROWS}",
         q.window(false),
         scope.clause
     );
     let total_sql = format!(
-        "SELECT countMerge(requests) AS reqs, sumMerge(amount) AS spend, \
-                sumMerge(prompt_tokens) + sumMerge(completion_tokens) AS toks \
-         FROM mv_cube_hour WHERE {}{}",
+        "SELECT sum(requests) AS reqs, sum(amount) AS spend, \
+                sum(prompt_tokens) + sum(completion_tokens) AS toks \
+         FROM {current_source} WHERE {}{}",
         q.window(false),
         scope.clause
     );
@@ -927,31 +1283,31 @@ pub async fn flow(
     let total = ch.query_with_params(&total_sql, &params).await?;
     let total_metric = total.first().map_or(0, |r| ch_i64(r, order_col));
 
-    let graph = FlowGraph::build(&combos, per_stage, order_col);
-    let names = resolve_names(
-        &state,
-        &graph.kept_ids(0),
-        &graph.kept_ids(1),
-        &graph.kept_ids(4),
-        &[],
-    )
-    .await?;
+    let graph = FlowGraph::build(&combos, per_stage, order_col, &stages);
+    let ids = |name| {
+        stages
+            .iter()
+            .position(|s| *s == name)
+            .map_or_else(Vec::new, |i| graph.kept_ids(i))
+    };
+    let identities =
+        flow_identities(&state, &ids("user"), &ids("api_key"), &ids("channel")).await?;
 
-    let nodes: Vec<Value> = graph
-        .nodes
-        .iter()
-        .map(|(id, v)| {
-            let (stage_name, key) = id.split_once(':').unwrap_or((id, ""));
-            json!({
-                "id": id,
-                "stage": stage_name,
-                "key": key,
-                "label": flow_label(stage_name, key, &names),
-                "other": key == FLOW_OTHER,
-                "value": v,
-            })
-        })
-        .collect();
+    let nodes: Vec<Value> = graph.nodes.iter().map(|(id, v)| {
+        let (stage_name, key) = id.split_once(':').unwrap_or((id, ""));
+        let entity = matches!(stage_name, "user" | "api_key" | "channel");
+        let other = key == FLOW_OTHER;
+        let mut node = json!({
+            "id": id, "stage": stage_name, "key": key,
+            "label": if entity || other { Value::Null } else { json!(key) },
+            "entity_status": if other || !entity { Value::Null } else if key == "0" { json!("unassigned") } else { json!("missing") },
+            "other": other, "value": v,
+        });
+        if let Some(fields) = identities.get(id).and_then(Value::as_object) {
+            node.as_object_mut().unwrap().extend(fields.clone());
+        }
+        node
+    }).collect();
     let links: Vec<Value> = graph
         .links
         .iter()
@@ -960,9 +1316,10 @@ pub async fn flow(
 
     Ok(Json(json!({
         "days": q.days(),
+        "window": q.window_meta,
         "metric": metric,
         "scope": describe_scope(&state, &q).await?,
-        "stages": FLOW_STAGES,
+        "stages": stages,
         "total": total_metric,
         "coverage_bp": rate_bp(graph.covered, total_metric),
         "truncated": combos.len() >= FLOW_ROWS,
@@ -1181,4 +1538,16 @@ pub async fn entity_usage(
         }
     }
     Ok(Json(json!({ "days": days, "data": data })))
+}
+
+fn parse_choices(name: &str, value: Option<&str>) -> Result<Vec<String>, AppError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values: Vec<String> =
+        serde_json::from_str(value).map_err(|_| AppError::bad_request().with_param(name))?;
+    if values.len() > 8 || values.iter().any(|v| v.trim().is_empty() || v.len() > 256) {
+        return Err(AppError::bad_request().with_param(name));
+    }
+    Ok(values)
 }

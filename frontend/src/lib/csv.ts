@@ -7,10 +7,11 @@ import dayjs from 'dayjs'
 /// 前置 BOM 让 Excel 直接按 UTF-8 打开（否则中文模型名/key 名乱码）。
 export function downloadCsv(baseName: string, head: string[], rows: unknown[][]) {
   const cell = (v: unknown) => {
-    const s = v === null || v === undefined ? '' : String(v)
+    let s = v === null || v === undefined ? '' : String(v)
+    if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s) && !/^-?\d+(\.\d+)?$/.test(s)) s = `'${s}`
     return /[",\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s
   }
-  const body = [head.join(','), ...rows.map((r) => r.map(cell).join(','))].join('\n')
+  const body = [head.map(cell).join(','), ...rows.map((r) => r.map(cell).join(','))].join('\n')
   const blob = new Blob([`\uFEFF${body}`], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
