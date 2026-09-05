@@ -157,7 +157,10 @@ mod tests {
         assert_eq!(prefs(r#"{"provider":"openai"}"#), base, "类型不对不该炸");
         assert_eq!(prefs("not json at all"), base);
         assert!(base.is_default());
-        assert!(base.allow_fallbacks, "缺省必须允许 failover（保持既有行为）");
+        assert!(
+            base.allow_fallbacks,
+            "缺省必须允许 failover（保持既有行为）"
+        );
     }
 
     #[test]

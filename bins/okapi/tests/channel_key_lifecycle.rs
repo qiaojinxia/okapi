@@ -74,14 +74,10 @@ async fn setup() -> Bed {
     okapi_store::run_migrations(&pg).await.unwrap();
     let suffix = Uuid::new_v4().simple().to_string()[..10].to_owned();
 
-    let denied_up = serve(
-        Router::new().route("/v1/chat/completions", post(mock_model_denied)),
-    )
-    .await;
-    let rejected_up = serve(
-        Router::new().route("/v1/chat/completions", post(mock_key_rejected)),
-    )
-    .await;
+    let denied_up =
+        serve(Router::new().route("/v1/chat/completions", post(mock_model_denied))).await;
+    let rejected_up =
+        serve(Router::new().route("/v1/chat/completions", post(mock_key_rejected))).await;
 
     // 两个模型各自绑一条渠道：避免同一模型的候选互相 failover 干扰状态断言
     let model = format!("klc-m-{suffix}");
@@ -189,7 +185,10 @@ async fn model_denied_403_does_not_kill_the_key() {
     // ① 「模型没开通」：key 不该被打成 6（此前就是这么死的），仅计一次瞬时失败
     assert_eq!(chat(&bed, &bed.model).await, 502);
     let (status, failed) = key_state(&bed.pg, bed.denied.1).await;
-    assert_ne!(status, 6, "模型级 403 不得判凭证失效（此前 status=6 且不自愈）");
+    assert_ne!(
+        status, 6,
+        "模型级 403 不得判凭证失效（此前 status=6 且不自愈）"
+    );
     assert_eq!(status, 1, "首次瞬时失败保持可用，连续 3 次才转冷却");
     assert_eq!(failed, 1);
 
@@ -226,7 +225,10 @@ async fn disabled_key_can_be_re_enabled() {
     let client = reqwest::Client::new();
     // 非法状态位挡下：状态机自己的位（冷却/限流/配额/失效）不许手工写入
     let bad = client
-        .patch(format!("http://{}/admin/channels/{cid}/keys/{kid}", bed.console))
+        .patch(format!(
+            "http://{}/admin/channels/{cid}/keys/{kid}",
+            bed.console
+        ))
         .bearer_auth(&bed.admin_token)
         .json(&json!({"status": 6}))
         .send()
@@ -235,7 +237,10 @@ async fn disabled_key_can_be_re_enabled() {
     assert_eq!(bad.status(), 400);
 
     let ok = client
-        .patch(format!("http://{}/admin/channels/{cid}/keys/{kid}", bed.console))
+        .patch(format!(
+            "http://{}/admin/channels/{cid}/keys/{kid}",
+            bed.console
+        ))
         .bearer_auth(&bed.admin_token)
         .json(&json!({"status": 1}))
         .send()

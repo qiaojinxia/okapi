@@ -223,7 +223,10 @@ async fn user_multiplier_is_writable_and_billed() {
 
     // 不存在的用户 → 404
     let missing = client
-        .post(format!("http://{}/admin/users/99999999/multiplier", bed.console))
+        .post(format!(
+            "http://{}/admin/users/99999999/multiplier",
+            bed.console
+        ))
         .bearer_auth(&bed.admin_token)
         .json(&json!({"multiplier": "1"}))
         .send()

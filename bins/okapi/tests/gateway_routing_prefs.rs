@@ -94,7 +94,14 @@ async fn setup() -> Bed {
         let m = model.clone();
         async move {
             let (cid, _) = okapi_store::provision::create_channel(
-                &pg, &name, "openai", &base, "cred", &[m.as_str()], true, None,
+                &pg,
+                &name,
+                "openai",
+                &base,
+                "cred",
+                &[m.as_str()],
+                true,
+                None,
             )
             .await
             .unwrap();
@@ -179,7 +186,7 @@ async fn chat(bed: &Bed, provider: Option<Value>) -> (u16, Value) {
 }
 
 /// 等结算落库并返回最新一笔（结算是响应返回后的后台任务）。
-async fn last_record(pg: &PgPool, user_id: i64, n: i64) -> (i64, i64) {
+async fn last_record(pg: &PgPool, user_id: i64, n: usize) -> (i64, i64) {
     for _ in 0..80 {
         let rows = sqlx::query!(
             r#"SELECT channel_id, amount_micro FROM billing_records
@@ -189,8 +196,8 @@ async fn last_record(pg: &PgPool, user_id: i64, n: i64) -> (i64, i64) {
         .fetch_all(pg)
         .await
         .unwrap();
-        if rows.len() as i64 >= n {
-            let r = &rows[(n - 1) as usize];
+        if rows.len() >= n {
+            let r = &rows[n - 1];
             return (r.channel_id.unwrap_or(0), r.amount_micro);
         }
         tokio::time::sleep(std::time::Duration::from_millis(60)).await;
@@ -209,13 +216,18 @@ async fn zero_retention_filters_candidates() {
     assert_eq!(ch, bed.plain_channel, "缺省应投优先级更高的未声明渠道");
 
     // zdr=true：plain 被筛掉，落到声明 none 的渠道
-    assert_eq!(chat_msg(&bed, Some(json!({"zdr": true})), "z2").await.0, 200);
+    assert_eq!(
+        chat_msg(&bed, Some(json!({"zdr": true})), "z2").await.0,
+        200
+    );
     let (ch, _) = last_record(&bed.pg, bed.user_id, 2).await;
     assert_eq!(ch, bed.zero_channel, "要求零留存必须落到声明 none 的渠道");
 
     // data_collection:"deny" 是同一个诉求
     assert_eq!(
-        chat_msg(&bed, Some(json!({"data_collection": "deny"})), "z3").await.0,
+        chat_msg(&bed, Some(json!({"data_collection": "deny"})), "z3")
+            .await
+            .0,
         200
     );
     let (ch, _) = last_record(&bed.pg, bed.user_id, 3).await;
@@ -252,7 +264,10 @@ async fn max_price_rejects_before_reserving() {
     assert_eq!(status, 402, "{body}");
     assert_eq!(body["error"]["code"], "price_above_max");
     assert!(
-        body["error"]["param"].as_str().unwrap_or("").starts_with("prompt:"),
+        body["error"]["param"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("prompt:"),
         "param 要回显是哪一轴超了、实际单价多少：{body}"
     );
     assert_eq!(
@@ -271,7 +286,9 @@ async fn max_price_rejects_before_reserving() {
 
     // 上限放宽到 2.5 → 放行
     assert_eq!(
-        chat(&bed, Some(json!({"max_price": {"prompt": 2.5}}))).await.0,
+        chat(&bed, Some(json!({"max_price": {"prompt": 2.5}})))
+            .await
+            .0,
         200
     );
     // 输出侧独立判：completion_ratio 1.0 → 输出单价也是 2.0
@@ -359,7 +376,9 @@ async fn allow_fallbacks_false_stops_at_first_failure() {
 async fn provider_directive_never_reaches_upstream() {
     let bed = setup().await;
     assert_eq!(
-        chat(&bed, Some(json!({"zdr": true, "allow_fallbacks": false}))).await.0,
+        chat(&bed, Some(json!({"zdr": true, "allow_fallbacks": false})))
+            .await
+            .0,
         200
     );
     let seen = bed.seen.lock().unwrap();

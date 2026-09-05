@@ -133,7 +133,9 @@ impl TrustPolicy {
                 })
                 .collect(),
         };
-        let edge_key = std::env::var("OKAPI_EDGE_KEY").ok().filter(|v| !v.is_empty());
+        let edge_key = std::env::var("OKAPI_EDGE_KEY")
+            .ok()
+            .filter(|v| !v.is_empty());
         if proxies.is_empty() && edge_key.is_none() {
             tracing::info!("无信任来源：转发头一律不作数，来源 IP 只取 socket 对端");
         }
@@ -342,7 +344,10 @@ mod tests {
             ("x-forwarded-for", "10.1.2.3, 10.0.0.1"),
         ]);
         assert_eq!(
-            policy.client_ip(&internal).map(|i| i.to_string()).as_deref(),
+            policy
+                .client_ip(&internal)
+                .map(|i| i.to_string())
+                .as_deref(),
             Some("10.1.2.3")
         );
     }

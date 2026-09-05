@@ -10,6 +10,10 @@ AI API 中转网关（[ok-api](https://github.com/qiaojinxia/ok-api) v2 重构�
 - **多协议双向**：入口支持 OpenAI / Anthropic `/v1/messages` / Gemini / Responses；
   上游渠道同样是这三种协议，入口 × 渠道四象限互转。另有 embeddings / rerank / images /
   audio / videos / realtime WS / custom_pass 透传。
+- **reasoning 归一**：`reasoning_effort`（OpenAI）/ `thinking`（Anthropic）/ 统一
+  `reasoning:{effort,max_tokens}`（OpenRouter 形状）三种写法归一成一个内部指令，
+  再按渠道方言展开成上游各自的参数——客户端不必知道这次会路由到哪家。
+  只能填模型名的客户端另有 `模型名@effort:high` 语法，且变体可单独定价。
 - **计费可解释**：金额全程 i64 micro-USD 定点（计费路径禁浮点，有 CI 守卫）。
   三种计价模式（倍率 / 阶梯 / 按次）× 分组倍率 × 用户系数 × 四类修饰器规则
   （量级 / 时段 / 折扣 / 负载加价），每笔账落一份可回放的定价快照。

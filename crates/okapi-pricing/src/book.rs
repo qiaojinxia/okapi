@@ -264,6 +264,15 @@ impl PriceBook {
         self.tiers.contains_key(model)
     }
 
+    /// 价簿里是否配了这个模型（不含用户级覆盖）。
+    ///
+    /// 修饰符变体定价用（§11.25）：`gpt-5@effort:high` 配了价就按变体收，没配就回退基座。
+    /// 拿它先问一句，好过用 `resolve` 的 `UnknownModel` 错误当分支条件。
+    #[must_use]
+    pub fn has_model(&self, model: &ModelCode) -> bool {
+        self.models.contains_key(model)
+    }
+
     /// 是否存在启用的 volume 规则（gateway 据此决定是否读 `tok:{uid}:<yyyymm>`）。
     #[must_use]
     pub const fn has_volume_rules(&self) -> bool {

@@ -51,11 +51,17 @@ fn openai_injection_respects_explicit_field() {
     let v: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(v["reasoning_effort"], "low");
 
-    // 预算档对 openai 无参数：原样
+    // 预算档折成档位（§11.26 起的行为变更）：openai 没有预算参数、但有档位，
+    // 此前这里是"原样返回"——用户要了思考、上游没收到、钱照收
     let (_, d) = split_reasoning_suffix("m-thinking-2048").unwrap();
     let out = apply_openai(&body(&json!({"model": "m"})), d).unwrap();
     let v: Value = serde_json::from_slice(&out).unwrap();
-    assert!(v.get("reasoning_effort").is_none());
+    assert_eq!(v["reasoning_effort"], "low", "2048 按逆映射落在 low");
+
+    // 但显式字段依然不覆盖
+    let out = apply_openai(&body(&json!({"model": "m", "reasoning_effort": "high"})), d).unwrap();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["reasoning_effort"], "high");
 }
 
 #[test]

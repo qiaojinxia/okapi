@@ -115,7 +115,10 @@ async fn repair_rebuilds_hot_balance_from_the_ledger() {
     assert!(drift_of(&bed).await.is_none(), "起手三处应一致");
 
     lose_hot_balance(&bed).await;
-    assert_eq!(bed.ledger.balance(bed.user_id).await.unwrap().as_micros(), 0);
+    assert_eq!(
+        bed.ledger.balance(bed.user_id).await.unwrap().as_micros(),
+        0
+    );
     let drift = drift_of(&bed).await.expect("热余额丢了应被对账扫出");
     assert_eq!(drift.events_sum_micro, 9_000_000);
     assert_eq!(drift.redis_effective_micro, 0, "这正是全站拒服务的那个 0");
@@ -192,7 +195,10 @@ async fn repair_preserves_in_flight_reservations() {
         fixed.redis_after_micro, 7_000_000,
         "avail = 账本 − 在途，而不是直接写账本值"
     );
-    assert!(drift_of(&bed).await.is_none(), "不变式 avail + 在途 == 账本");
+    assert!(
+        drift_of(&bed).await.is_none(),
+        "不变式 avail + 在途 == 账本"
+    );
 }
 
 /// 端点：权限闸、既不指定用户也不给 all 时拒绝、单用户修复、批量修复。
@@ -281,7 +287,11 @@ async fn repair_endpoint_guards_and_repairs() {
         .send()
         .await
         .unwrap();
-    assert_eq!(unstable.status(), 409, "账目在动时应拒绝修复而不是拿半截账本覆写");
+    assert_eq!(
+        unstable.status(),
+        409,
+        "账目在动时应拒绝修复而不是拿半截账本覆写"
+    );
     let body: Value = unstable.json().await.unwrap();
     assert_eq!(body["error"]["code"], "reconcile_unstable");
     churn.await.unwrap();

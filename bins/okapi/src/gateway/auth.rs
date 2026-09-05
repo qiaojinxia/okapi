@@ -62,9 +62,8 @@ pub async fn authenticate_data_plane(
         let ip = super::clients::client_ip(headers);
         if !authed.allows_ip(ip) {
             return Err(
-                AppError::new(axum::http::StatusCode::FORBIDDEN, codes::IP_NOT_ALLOWED).with_param(
-                    ip.map(|i| i.to_string()).unwrap_or_default(),
-                ),
+                AppError::new(axum::http::StatusCode::FORBIDDEN, codes::IP_NOT_ALLOWED)
+                    .with_param(ip.map(|i| i.to_string()).unwrap_or_default()),
             );
         }
     }

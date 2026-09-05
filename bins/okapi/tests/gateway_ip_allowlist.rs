@@ -187,9 +187,17 @@ async fn allowlist_enforced_with_cdn_header_and_peer_fallback() {
     let (status, _) = chat(&bed, cidr, &[("x-forwarded-for", "10.0.0.1, 203.0.113.5")]).await;
     assert_eq!(status, 200);
     // 反过来就是伪造：调用方把名单内地址写进链首，真实对端 198.51.100.9 由反代追加在最右
-    let (status, body) = chat(&bed, cidr, &[("x-forwarded-for", "203.0.113.5, 198.51.100.9")]).await;
+    let (status, body) = chat(
+        &bed,
+        cidr,
+        &[("x-forwarded-for", "203.0.113.5, 198.51.100.9")],
+    )
+    .await;
     assert_eq!(status, 403, "{body}");
-    assert_eq!(body["error"]["param"], "198.51.100.9", "认最右跳，不认链首自述");
+    assert_eq!(
+        body["error"]["param"], "198.51.100.9",
+        "认最右跳，不认链首自述"
+    );
 
     // 无 CDN 头：来源 = 对端 socket（127.0.0.1）→ 不在 CIDR 名单 → 403；
     // 客户端伪造的内部头被中间件剥掉，不能借此冒充名单内地址

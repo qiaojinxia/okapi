@@ -643,6 +643,13 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 路由按域拆分在 `bins/okapi/src/console/mod.rs`（`channel_routes` / `pricing_routes` /
 `user_admin_routes` / `ops_routes` / `portal_routes` / `auth_routes`），与下表逐行对应。
 
+列表分页约定（2026-09-05 统一）：配置类列表（渠道 / 模型 / 分组 / 池 / 套餐 / 规则 / 角色 /
+门户令牌 / 团队）接受可选 `?limit=&offset=`——不传回全量（下拉选项、全量校验这类调用方），
+传了钳到 `MAX_PAGE`；响应一律附 `total`。渠道列表支持 `q`（名称 / 地址）、`provider`、
+`status` 过滤，模型列表支持 `q`（模型名 / 展示名）、`unpriced`；令牌 / 兑换码 / 用户这类
+大表不传 limit 缺省 50。前端统一经 `usePagination()` + `<Pagination>` 翻页
+（`frontend/src/hooks/use-pagination.ts`），列表表格一律 `stickyHeader` 限高页内滚动。
+
 | 接口面 | 端点 | 状态 |
 | --- | --- | --- |
 | **供应商接入**（渠道） | `POST/GET /admin/channels`、`PATCH/DELETE /admin/channels/{id}`、`POST {id}/credential`（凭证轮换）、`PATCH {id}/keys/{key_id}`、`POST {id}/status`、`POST {id}/groups`、`POST {id}/test`、`GET {id}/fetch-models`、`POST /admin/channels/batch`（enable/disable/delete）、`POST {id}/duplicate`、`GET /admin/diagnose/route`（路由诊断，§11.11） | 完整 |
@@ -1615,6 +1622,100 @@ N 个副本就是 N 倍并发写压向同一个 PG，闸的效力随副本数线
 计费插件化与 JS 沙箱撞 §1 红线①；experiential 的 OTel trace 驱动路由优化——思路好，
 但要引 collector + 热路径埋点（撞红线①③），而 okapi 的 CH 明细已含模型/渠道/时延/TTFT/
 成本/错误码，规划中的 L3 打分器吃这份现成数据即可，不必再引一套遥测栈。
+
+### 11.25 模型修饰符通用化与变体定价（2026-09-05，吸收 new-api rc.32/33）
+
+**发现**：`§4.4` 的 reasoning 后缀只认四个写死的连字符形态（`-high/-medium/-low/-thinking[-N]`）。
+三个后果：加不了新维度；表达不了组合（"高 effort 且开思考"没法说）；**没法给变体单独定价**
+——`gpt-5` 开高 effort 明显更贵，站长却收不了这个差价。new-api rc.32/33 把它换成了
+`base@key:value` 通用语法 + 顺序无关的规范计费名 + 变体无价时回退基座价。
+
+**定案**（`okapi-providers::modifiers`）：
+
+- 语法 `<base>@<key>:<value>[@…]`，分隔符取 `@` 而非 `-`——模型名里连字符太常见，
+  旧后缀天生会跟真实模型（`o3-high`）撞车，只能靠"全名直命中优先"打补丁。
+- **规范名与书写顺序无关**（键升序、同键后写覆盖先写）：`a@effort:high@thinking:on` 与
+  `a@thinking:on@effort:high` 是同一条账。否则同一个变体会因客户端拼接顺序不同分裂成两行，
+  价还得配两遍。
+- **旧后缀继续可用并归一到同一个规范名**：`gpt-5-high` ≡ `gpt-5@effort:high`，
+  存量调用方无感，两种写法不会分裂计费口径。
+- **不认识的键直接判为"不是修饰符语法"**（→ `model_not_found`），不装懂：注入不了却照收钱
+  比报个模型不存在糟得多。
+
+**路由名与计价名必须分开**（本项最容易做错的一处）：
+
+- 计价/记账用**规范变体名**（价簿里配了 `gpt-5@effort:high` 就按它收），
+- 路由与上游请求用**基座 canonical**——渠道声明的是基座模型名，拿变体名去选候选会一个也选不到。
+- 因此 `resolve_with_directive` 的规则是：**名字里带 `@` 一律按修饰符处理**（价簿里带 `@`
+  的行按定义是定价变体、不是上游模型），不带 `@` 才保留"全名直命中优先"以兼容真实存在的
+  `o3-high`。用例里这条踩过一次：变体一旦作为模型行存在，全名直命中就会把它当路由目标，
+  直接 503。
+- 变体没配价 → 回退基座价而不是拒请求：修饰符改的是上游行为，站长愿不愿意为它单独定价
+  是另一回事。
+- `billing_records.model_name` 改记 `bill.calc.model`（实际计价所用的名字）而非路由名，
+  否则账单解释器拿 model_name 回查价会对不上。
+
+**验收**：`modifiers` 五单测（顺序无关 / 同键后写覆盖 / 未知键与越界值不放行 /
+旧后缀归一 / 指令派生含 `thinking:off`）+ `gateway_model_modifiers.rs` 四用例
+（无价回退基座且上游收到基座名、配价按变体收且记账用变体名、反序书写与旧后缀都落同一条账、
+未知修饰符 404 而基座照常可用）。
+
+**未取**：`@temperature:<n>` 一类需要按协议分别注入的修饰符（reasoning 已有三向注入，
+temperature 在 gemini 侧要落到 `generationConfig`）——本轮只放能复用既有注入通路的
+`effort` / `thinking` 两键，键集合扩展是后续独立项。
+
+### 11.26 reasoning 参数归一：模型名之外的另一条路（2026-09-05，吸收 OpenRouter / LiteLLM）
+
+**发现**：`§4.4`/`§11.25` 把 reasoning 意图做全了**模型名**那条路，却漏了主流网关真正的主路
+——**请求体参数**。查了一圈，OpenAI 是 `reasoning_effort`、Anthropic 是
+`thinking:{type,budget_tokens}`、Gemini 是 `thinkingConfig`、OpenRouter/LiteLLM 在最前面加一层
+统一形状（`reasoning:{effort,max_tokens,enabled}`）往下扇出。**名字后缀只是兼容垫片**，
+存在的理由是 Cursor / Cherry Studio 这类客户端只给一个模型名输入框，没地方放 JSON。
+
+顺着这条线发现一个静默失效：跨方言请求转换是**严格白名单**
+（`request_openai_to_anthropic` 只搬 model/max_tokens/system/messages/stop_sequences/tools/tool_choice），
+`reasoning_effort` 到不了 anthropic 上游——请求照样 200、思考从没开过、钱照收。
+反向同样（`apply_openai` 见 `effort` 为空就直接原样返回，anthropic 客户端的预算档丢在半路）。
+**同方言透传时又是好的**，所以很难被发现。这正是 `modifiers` 模块里明写着拒绝在名字那条路上
+犯的错（"注入不了却照收钱"），只是它活在参数那条路上。
+
+**定案**（`okapi-providers::reasoning`）：
+
+- **两条来源、一个内部形状、三向注入**。`parse_request` 把三种方言的写法归一成同一个
+  `ReasoningDirective`，`apply_openai/anthropic/gemini` 照旧展开。跨方言的丢失由此自愈——
+  不用改任何一个白名单转换器。
+- **三态而非两态**：`Unspecified`（没提，交给名字后缀）/ `Disabled`（明确关掉，压过后缀）/
+  `Enabled`。这两个"没有"要是并成一个，`model=x@effort:high` + `reasoning:{enabled:false}`
+  就永远关不掉。
+- **参数优先于名字后缀**：参数是本次请求的显式意图，后缀是模型名里带的默认值。
+- **参数不改计费名**（与 OpenRouter 一致：只有 slug 上的变体改计价，请求参数不改）。
+  所以 `model=x@effort:low` + `reasoning:{effort:"high"}` 是"按 low 的变体价收、按 high 跑"。
+  这不是妥协，是定价口径的定义：站长为之定价的是**他挂出来的那个模型名**。
+- **翻译不了就说翻译不了**，绝不因此拒请求：OpenRouter 的 `max`/`xhigh` 之类档位返回
+  `Unspecified`，同方言下它本来就会原样透传给上游，由上游判对错才对。
+- 新增 `Effort::Minimal`（OpenAI gpt-5 起的真实档位），并让 `Effort::parse` **同时服务两条路**
+  ——否则 `@effort:minimal` 与 `reasoning_effort:"minimal"` 会一个认一个不认。
+- `Effort::budget_tokens` 补上逆映射 `effective_effort`（1024/5000/12000 为界），
+  "客户端只会说预算、上游只认档位"这条路才通。**这是一处行为变更**：`-thinking-N` 打到
+  openai 渠道此前不注入任何东西，现在会注入折算后的档位。
+- 统一 `reasoning` 对象转发前要处理，但**只摘走已消化的键**（`strip_unified`）：
+  消化过的已翻译进原生字段，留着会让不认识它的上游 400；没消化的（`exclude` 我们没实现、
+  `effort:"xhigh"` 我们没看懂）必须原样送出去——上游若是另一个 OpenRouter 兼容网关很可能认得。
+  一把梭全删就是把"我不懂"当成"它不存在"，正是本节要修的那类丢失。对象被摘空了才整个删。
+  这里与 `§11.24` 的 `provider` 不同：`provider` 是 okapi **已经据以选完渠道**的指令，
+  再转发出去会二次路由，所以那个是无条件全删。**原生的 `reasoning_effort`/`thinking` 一概不动**
+  ——那是上游自己的字段。
+
+**验收**：`reasoning` 七单测（沉默不是主张 / 三方言归一成同一形状 / Disabled 与 Unspecified
+分离 / 参数压过后缀 / 只给预算也能折出档位 / 只摘已消化的键 / 不动原生字段）+
+`gateway_reasoning_param.rs` 五用例。后者先按"修复前"跑过一遍确认**五条全红**，
+其中 anthropic 上游收到的请求体里 `reasoning_effort` 与 `thinking` 双双不见，
+正是这次要修的静默丢失。存量的 `reasoning_t2c::openai_injection_respects_explicit_field`
+里"预算档对 openai 原样返回"那条断言被翻成了新行为——它断言的正是这个缺陷本身。
+
+**未取**：`reasoning.exclude`（隐藏思考输出）。它是响应侧的事，要在流式泵送里过滤
+`reasoning_content`，且三个方言只有 gemini 有对应的请求侧开关（`includeThoughts`）——
+只做一半正是本节要修的那类"装作支持"。渠道级 `thinking_to_content` 已覆盖相近诉求。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

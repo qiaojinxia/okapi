@@ -11,6 +11,7 @@ pub mod convert;
 pub mod custom_pass;
 pub mod error;
 pub mod gemini;
+pub mod modifiers;
 pub mod openai;
 pub mod reasoning;
 pub mod types;

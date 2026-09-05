@@ -27,7 +27,6 @@ use okapi_providers::convert::{
 use okapi_providers::reasoning::{self, ReasoningDirective};
 use okapi_providers::{
     ChatEvent, ChatResponse, StreamHandle, UpstreamError, ensure_stream_usage, rewrite_model,
-    split_reasoning_suffix,
 };
 use okapi_store::ChannelCandidate;
 use okapi_store::channels::KeyFailure;
@@ -93,7 +92,8 @@ struct RequestBilling {
     density: u32,
     /// 预扣补全上限（anthropic 转换的 max_tokens 兜底也用它）。
     completion_cap: u32,
-    /// reasoning 模型名后缀指令（-high/-thinking-N，注入上游请求参数）。
+    /// 归一后的 reasoning 指令（模型名后缀 ∪ 请求体参数，参数优先；§11.26）。
+    /// 注入上游时按渠道方言三向展开。
     directive: Option<ReasoningDirective>,
     /// 请求级路由偏好（§11.24；缺省即此前行为）。
     prefs: super::routing_prefs::RoutingPrefs,
@@ -418,8 +418,12 @@ fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
     (needs_tools, needs_vision)
 }
 
-/// 模型解析 + reasoning 后缀（§4.4）：全名（含别名）直命中优先，
-/// 未命中剥 `-high/-medium/-low/-thinking[-N]` 后缀以基名重试。
+/// 模型解析 + 修饰符（§4.4 / §11.25）：全名（含别名）直命中优先，未命中才按修饰符
+/// 语法剥基名重试。`@key:value` 与旧的 `-high/-thinking[-N]` 两种写法都认，且**归一到
+/// 同一个规范计费名**。
+///
+/// 返回的第三项是**规范计费名**（如 `gpt-5@effort:high`）：它只用于定价与记账，
+/// 路由仍走基座 canonical——渠道声明的是基座模型名，拿变体名去选渠道会一个候选都选不到。
 async fn resolve_with_directive(
     state: &AppState,
     requested: &str,
@@ -427,16 +431,30 @@ async fn resolve_with_directive(
     Option<(
         okapi_store::channels::ResolvedModel,
         Option<ReasoningDirective>,
+        Option<String>,
     )>,
     AppError,
 > {
-    if let Some(meta) = resolve_model_cached(state, requested).await?.as_ref() {
-        return Ok(Some((meta.clone(), None)));
-    }
-    if let Some((base, directive)) = split_reasoning_suffix(requested)
-        && let Some(meta) = resolve_model_cached(state, base).await?.as_ref()
+    // 名字里带 `@` 一律按修饰符处理：`@` 是 okapi 自己的分隔符，价簿里叫
+    // `base@effort:high` 的行**是一条定价变体、不是一个上游模型**——若让它走"全名直命中"，
+    // 路由就会拿变体名去选渠道，而渠道声明的是基座名，结果是一个候选都选不到（503）。
+    // 不带 `@` 时仍是全名优先，好让真实存在的 `o3-high` 这类模型不被旧后缀误剥。
+    let has_modifier_sep = requested.contains('@');
+    if !has_modifier_sep && let Some(meta) = resolve_model_cached(state, requested).await?.as_ref()
     {
-        return Ok(Some((meta.clone(), Some(directive))));
+        return Ok(Some((meta.clone(), None, None)));
+    }
+    if let Some(m) = okapi_providers::modifiers::split_model_modifiers(requested)
+        && let Some(meta) = resolve_model_cached(state, m.base()).await?.as_ref()
+    {
+        // 规范名以**解析后的 canonical 基座**为前缀：别名与本名要落到同一条账
+        let variant = m.canonical_name();
+        let variant = variant
+            .split_once('@')
+            .map_or(variant.clone(), |(_, rest)| {
+                format!("{}@{rest}", meta.canonical)
+            });
+        return Ok(Some((meta.clone(), m.reasoning(), Some(variant))));
     }
     Ok(None)
 }
@@ -472,7 +490,8 @@ async fn handle_chat(
 
     // 模型解析（#3001 + §5.1）：别名→canonical + max_output；60s 进程缓存消除热路径 PG 读；
     // 未命中剥 reasoning 后缀重试（§4.4）
-    let Some((meta, directive)) = resolve_with_directive(state, &info.requested_model).await?
+    let Some((meta, directive, variant)) =
+        resolve_with_directive(state, &info.requested_model).await?
     else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };
@@ -489,9 +508,15 @@ async fn handle_chat(
     let now = chrono::Utc::now();
     let minute_of_day =
         u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
+    // 计价名（§11.25）：变体在价簿里配了价就按变体收，否则回退基座——修饰符改的是
+    // 上游行为，站长愿不愿意为它单独定价是另一回事，没配价不该让请求失败。
+    // 路由仍用 `canonical`：渠道声明的是基座模型名。
+    let billing_model = variant
+        .filter(|v| book.has_model(&ModelCode::from(v.as_str())))
+        .unwrap_or_else(|| canonical.clone());
     let calc = CalcContext {
         user: UserId::new(key.user_id),
-        model: ModelCode::from(canonical.as_str()),
+        model: ModelCode::from(billing_model.as_str()),
         group: GroupCode::from(key.group_code.as_str()),
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
         monthly_tokens: rules_in.monthly_tokens,
@@ -526,12 +551,19 @@ async fn handle_chat(
     };
     let est_quote = calculate(&book, &calc, est_usage)?;
 
+    // reasoning 意图归一（§11.26）：模型名后缀是一条路，请求体参数是另一条，
+    // 合并到同一个 directive 后交给三向注入。**参数优先**——它是本次请求的显式意图。
+    // 合并只影响"往上游注入什么"，不影响上面 `variant` 已经定下的计费名：
+    // 与 OpenRouter 一致，只有模型名上的变体改计价，请求参数不改。
+    let directive = reasoning::parse_request(body).merge(directive);
+
     // 请求级单价上限（§11.24）：拿快照里的**最终**单价判——它已经过模型/分组/个人系数与
     // 修饰器全链，正是这次真会按之的价。判在预扣之前：超限直接拒，别扣了钱再让用户发现贵。
     let prefs = super::routing_prefs::parse(body);
     if let Some(over) = price_above_max(&est_quote, &prefs) {
-        return Err(AppError::new(StatusCode::PAYMENT_REQUIRED, codes::PRICE_ABOVE_MAX)
-            .with_param(over));
+        return Err(
+            AppError::new(StatusCode::PAYMENT_REQUIRED, codes::PRICE_ABOVE_MAX).with_param(over),
+        );
     }
 
     // 团成员月度限额（§6.1 软实时）
@@ -795,13 +827,15 @@ async fn try_model(
     // 单独给错误码：候选被这一条筛空时，回 no_available_channel 会让人以为渠道全挂了。
     if bill.prefs.zero_retention {
         let before = candidates.len();
-        candidates.retain(|c| {
-            super::routing_prefs::retention_ok(c.data_retention.as_deref(), true)
-        });
+        candidates
+            .retain(|c| super::routing_prefs::retention_ok(c.data_retention.as_deref(), true));
         if candidates.is_empty() {
             return Err(ForwardFailure::app(
-                AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_ZERO_RETENTION_CHANNEL)
-                    .with_param(before.to_string()),
+                AppError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    codes::NO_ZERO_RETENTION_CHANNEL,
+                )
+                .with_param(before.to_string()),
                 0,
                 None,
             ));
@@ -1188,6 +1222,8 @@ async fn dispatch_chat(
     // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
     // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
     let body = super::routing_prefs::strip(&body).unwrap_or(body);
+    // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）
+    let body = reasoning::strip_unified(&body).unwrap_or(body);
     let body = if cand.strip_request_fields.is_empty() {
         body
     } else {
@@ -1876,13 +1912,16 @@ async fn settle_commit(
     resp_meta: RespMeta,
 ) {
     let calc_override = resolve_billing_calc(bill, resp_meta.model.as_deref(), usage);
+    // 记账的模型名必须与**实际计价所用的名字**一致，否则账单解释器拿 model_name 去查价
+    // 会对不上。`bill.calc.model` 就是那个名字：修饰符变体配了价就是变体名
+    // （`gpt-5@effort:high`），没配价则已回退成基座名（§11.25）。
     let billed_model: String = if calc_override.is_some() {
         resp_meta
             .model
             .clone()
-            .unwrap_or_else(|| bill.model.clone())
+            .unwrap_or_else(|| bill.calc.model.to_string())
     } else {
-        bill.model.clone()
+        bill.calc.model.to_string()
     };
     // service_tier 结算档：只降不升（DESIGN §3-4.5；按最终计费模型查档位倍率）
     let mut calc = calc_override.unwrap_or_else(|| bill.calc.clone());
@@ -2068,7 +2107,8 @@ async fn record_terminal(
         user_id: bill.user_id,
         api_key_id: bill.key_id,
         group_code: &bill.group,
-        model_name: &bill.model,
+        // 与成功记账同口径：记实际计价所用的名字
+        model_name: &bill.calc.model.to_string(),
         channel_id: (info.channel != 0).then_some(info.channel),
         channel_key_id: (info.key != 0).then_some(info.key),
         state,
