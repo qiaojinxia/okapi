@@ -185,6 +185,15 @@ async fn chsink_pipeline_then_dlq() {
     .execute(&pg)
     .await
     .unwrap();
+    // 对应的 outbox 行也删掉：它停在 status=2 终态，运维看到的是一条永远发不出去的
+    // 积压行，而它其实只是本用例故意造的
+    sqlx::query!(
+        r#"DELETE FROM billing_outbox WHERE payload->>'request_id' = $1"#,
+        dead_request.to_string()
+    )
+    .execute(&pg)
+    .await
+    .unwrap();
     // 把阶段 2 波及的其他 pending 行交还真实 CH 排空，不影响并行测试
     drain(&pg, &ch).await;
 }
