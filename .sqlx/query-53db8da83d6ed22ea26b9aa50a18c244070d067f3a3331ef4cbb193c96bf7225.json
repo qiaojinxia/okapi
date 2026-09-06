@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT plan_code FROM plans WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "53db8da83d6ed22ea26b9aa50a18c244070d067f3a3331ef4cbb193c96bf7225"
+}

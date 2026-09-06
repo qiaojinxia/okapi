@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status AS \"s!\" FROM billing_records WHERE request_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e3b0374bda6108b901a264f913c0fd05d327a2a86a4fda4c8fc4a6ddc46ccd34"
+}

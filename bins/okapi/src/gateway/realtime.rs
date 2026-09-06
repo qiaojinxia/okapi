@@ -6,15 +6,16 @@
 //! 首消息 30s、空闲 5min。
 
 use super::error::AppError;
+use super::extract::Query;
 use super::state::AppState;
+use axum::extract::State;
 use axum::extract::ws::{Message as AxumMsg, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use serde::Deserialize;
 use serde_json::Value;
@@ -220,8 +221,9 @@ async fn prepare(
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()
             .find(|c| {
-                c.provider != "anthropic"
-                    && c.provider != "gemini"
+                // azure：Realtime 是 `wss://.../openai/realtime?deployment=&api-version=`
+                // 另一种握手 URL，本期不接（IMPLEMENTATION §11.29）
+                !matches!(c.provider.as_str(), "anthropic" | "gemini" | "azure")
                     && c.capabilities.get("realtime").and_then(Value::as_bool) != Some(false)
             }),
         Err(err) => {
@@ -267,14 +269,24 @@ async fn prepare(
     })
 }
 
-async fn release_reservation_and_slot(state: &AppState, key: &okapi_store::AuthedKey, id: Uuid) {
-    if let Err(err) = state.ledger.refund(key.user_id, key.key_id, id).await {
-        tracing::error!(request_id = %id, error = %err, "realtime 退款失败（悬置待 sweep）");
-    }
+/// 退款 + 释放连接租约；返回预扣所在池（失败记账要写对 pool）。
+async fn release_reservation_and_slot(
+    state: &AppState,
+    key: &okapi_store::AuthedKey,
+    id: Uuid,
+) -> Pool {
+    let pool = match state.ledger.refund(key.user_id, key.key_id, id).await {
+        Ok(r) => r.pool,
+        Err(err) => {
+            tracing::error!(request_id = %id, error = %err, "realtime 退款失败（悬置待 sweep）");
+            Pool::Wallet
+        }
+    };
     state
         .sched
         .ws_lease_release(key.key_id, &id.to_string())
         .await;
+    pool
 }
 
 /// 会话主体：连上游 → 双向泵 → 断开结算（治理超时内置于泵循环）。
@@ -422,21 +434,30 @@ async fn fail_session(state: &AppState, prep: &Prep, mut client: WebSocket, code
     });
     let _ = client.send(AxumMsg::Text(event.to_string().into())).await;
     let _ = client.close().await;
-    release_reservation_and_slot(state, &prep.key, prep.request_id).await;
-    record_failure(state, prep, TokenUsage::default(), Some(code)).await;
+    let pool = release_reservation_and_slot(state, &prep.key, prep.request_id).await;
+    record_failure(state, prep, TokenUsage::default(), Some(code), pool).await;
 }
 
 /// 断开结算：有产出按累计 usage commit；零产出全额退款留痕。
+/// 退款并返回预扣所在池（失败记账要写对 pool）；退款失败按钱包记，预扣留给 sweep。
+async fn refund_pool(state: &AppState, prep: &Prep) -> Pool {
+    match state
+        .ledger
+        .refund(prep.key.user_id, prep.key.key_id, prep.request_id)
+        .await
+    {
+        Ok(r) => r.pool,
+        Err(err) => {
+            tracing::error!(request_id = %prep.request_id, error = %err, "realtime 退款失败（悬置待 sweep）");
+            Pool::Wallet
+        }
+    }
+}
+
 async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, responses: u32) {
     if responses == 0 {
-        if let Err(err) = state
-            .ledger
-            .refund(prep.key.user_id, prep.key.key_id, prep.request_id)
-            .await
-        {
-            tracing::error!(request_id = %prep.request_id, error = %err, "realtime 退款失败（悬置待 sweep）");
-        }
-        record_failure(state, prep, usage, Some(codes::EMPTY_COMPLETION)).await;
+        let pool = refund_pool(state, prep).await;
+        record_failure(state, prep, usage, Some(codes::EMPTY_COMPLETION), pool).await;
         return;
     }
     let book = state.pricebook.load();
@@ -444,14 +465,8 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         Ok(q) => q,
         Err(err) => {
             tracing::error!(request_id = %prep.request_id, error = %err, "realtime 结算算价失败，退款");
-            if let Err(err) = state
-                .ledger
-                .refund(prep.key.user_id, prep.key.key_id, prep.request_id)
-                .await
-            {
-                tracing::error!(request_id = %prep.request_id, error = %err, "realtime 退款失败（悬置待 sweep）");
-            }
-            record_failure(state, prep, usage, Some("pricing_settle_failed")).await;
+            let pool = refund_pool(state, prep).await;
+            record_failure(state, prep, usage, Some("pricing_settle_failed"), pool).await;
             return;
         }
     };
@@ -465,7 +480,11 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         )
         .await
     {
-        Ok(CommitOutcome::Committed { balance_after, .. }) => {
+        Ok(CommitOutcome::Committed {
+            balance_after,
+            pool,
+            ..
+        }) => {
             let input = SettlementInput {
                 dimensions: prep.dimensions.clone(),
                 request_id: prep.request_id,
@@ -500,6 +519,7 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
                 delta_micro: quote.amount.as_micros().saturating_neg(),
                 balance_after: Some(balance_after),
                 event_type: "commit",
+                pool,
             };
             state.settle_write(input).await;
             super::auth::record_settlement_counters(
@@ -526,6 +546,7 @@ async fn record_failure(
     prep: &Prep,
     usage: TokenUsage,
     error_code: Option<&str>,
+    pool: Pool,
 ) {
     let book = state.pricebook.load();
     let input = SettlementInput {
@@ -562,6 +583,7 @@ async fn record_failure(
         delta_micro: 0,
         balance_after: None,
         event_type: "refund",
+        pool,
     };
     state.settle_write(input).await;
 }

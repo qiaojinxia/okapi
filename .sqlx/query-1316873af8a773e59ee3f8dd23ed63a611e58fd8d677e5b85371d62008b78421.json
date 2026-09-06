@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pool AS \"p!\" FROM billing_records WHERE request_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "p!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pool"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1316873af8a773e59ee3f8dd23ed63a611e58fd8d677e5b85371d62008b78421"
+}

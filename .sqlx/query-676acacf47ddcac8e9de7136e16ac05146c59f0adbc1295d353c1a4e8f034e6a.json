@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels\n                   SET model_mapping = COALESCE($2, model_mapping),\n                       settings = CASE WHEN $3::text IS NULL THEN settings\n                                       ELSE settings || jsonb_build_object('api_version', $3::text) END\n                   WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "676acacf47ddcac8e9de7136e16ac05146c59f0adbc1295d353c1a4e8f034e6a"
+}

@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input, Label } from '@/components/ui/input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 import { useConfirm } from '@/components/ui/confirm'
 
 /// 数据保留策略（#1790-1）：retention_months，0=永久；worker 裁剪超期 PG 月分区。
@@ -16,7 +17,7 @@ export function RetentionCard() {
   const { confirm, dialog } = useConfirm()
 
   const current = useQuery({
-    queryKey: ['setting', 'retention_months'],
+    queryKey: qk.setting('retention_months'),
     queryFn: () => apiFetch<{ value: number | null }>('/admin/settings/retention_months'),
   })
 

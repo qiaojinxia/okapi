@@ -1,0 +1,134 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, plan_code, display_name, grant_micro AS quota_micro, group_code, price_micro,\n               period AS \"period!\", duration_days AS \"duration_days!\", sort_order, description\n        FROM plans\n        WHERE kind = 1 AND status = 1\n        ORDER BY sort_order, id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "quota_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "grant_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "price_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "price_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "period!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "duration_days!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "duration_days"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "sort_order",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "sort_order"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "description",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "description"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "3883df1b00372aa278b5502f7babfab43b1fab64b79ce8e560f3cf6032cc0488"
+}

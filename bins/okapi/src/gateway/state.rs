@@ -2,7 +2,9 @@ use super::sched_redis::SchedulerRedis;
 use moka::future::Cache;
 use okapi_ledger::BalanceLedger;
 use okapi_pricing::PriceBookHandle;
-use okapi_providers::{AnthropicUpstream, GeminiUpstream, OpenAiUpstream, PassUpstream};
+use okapi_providers::{
+    AnthropicUpstream, AzureUpstream, GeminiUpstream, OpenAiUpstream, PassUpstream,
+};
 use okapi_store::ChClient;
 use okapi_store::channels::{ChannelCandidate, ResolvedModel};
 use sqlx::PgPool;
@@ -27,6 +29,8 @@ pub struct AppState {
     /// 渠道候选缓存（model|groups → 候选行，5s；渠道状态分钟级变化可容忍）。
     pub cand_cache: Cache<String, Arc<Vec<ChannelCandidate>>>,
     pub upstream: OpenAiUpstream,
+    /// Azure OpenAI 上游（部署 URL + api-key 头 + api-version；与 `upstream` 共用连接池）。
+    pub azure: AzureUpstream,
     /// Anthropic 原生上游（/v1/messages）。
     pub anthropic: AnthropicUpstream,
     /// Gemini 原生上游（generateContent）。
@@ -53,6 +57,8 @@ pub struct AppState {
     pub surge_reported_at: Arc<std::sync::atomic::AtomicI64>,
     /// 渠道相对成本系数缓存（channel_id → 千分比，60s；结算路径折算上游成本用）。
     pub channel_cost_cache: Cache<i64, i64>,
+    /// 后台结算任务计数（响应先行、结算后台的两条 chat 路径）；优雅下线等它归零（§14.3）。
+    pub settlements: crate::shutdown::Pending,
 }
 
 impl AppState {

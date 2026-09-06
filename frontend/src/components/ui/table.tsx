@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import { cn } from '@/lib/utils'
 
 interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> {
@@ -8,6 +9,8 @@ interface TableProps extends React.TableHTMLAttributes<HTMLTableElement> {
   /// 表头随容器滚动固定。不另给 `wrapperClassName` 时自带一个视口高度上限——
   /// 只写 `stickyHeader` 却忘了限高，表头没有可粘的滚动容器，等于没开。
   stickyHeader?: boolean
+  /// 换页或筛选后从首行开始看，保留宽表的横向滚动位置。
+  scrollResetKey?: string
 }
 
 /// 表格外框：白底卡片 + 圆角 + 横向滚动。表头/行样式由子组件负责。
@@ -16,14 +19,21 @@ export function Table({
   wrapperClassName,
   dense = false,
   stickyHeader = false,
+  scrollResetKey,
   ...props
 }: TableProps) {
+  const wrapper = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (scrollResetKey !== undefined && wrapper.current) wrapper.current.scrollTop = 0
+  }, [scrollResetKey])
   return (
     <div
+      ref={wrapper}
       className={cn(
         'relative w-full overflow-auto rounded-lg border border-border bg-card shadow-card',
-        // 限高由调用方覆盖；缺省留出顶栏 + 页头 + 工具条的高度，长列表才不会把分页器推到天边
-        stickyHeader && 'max-h-[calc(100vh-19rem)] min-h-40',
+        // 限高由调用方覆盖；缺省留出顶栏 + 页头 + 工具条的高度，长列表才不会把分页器推到天边。
+        // 不要 min-h：一行/两行的表会被撑出一块空肚皮，短列表看起来像坏了。
+        stickyHeader && 'max-h-[calc(100vh-19rem)]',
         wrapperClassName,
       )}
     >

@@ -12,6 +12,7 @@ import { ErrorState } from '@/components/ui/state'
 import { GroupsSection } from '@/features/users/GroupsSection'
 import { MultiplierSection } from '@/features/users/MultiplierSection'
 import { RoleSection } from '@/features/users/RoleSection'
+import { SubscriptionSection } from '@/features/users/SubscriptionSection'
 import { UsageSection } from '@/features/users/UsageSection'
 import { Tabs } from '@/components/ui/tabs'
 import { toast } from '@/components/ui/toast'
@@ -22,7 +23,7 @@ import { qk } from '@/lib/query-keys'
 import { roleLabel } from '@/features/users/types'
 import { useConfirm } from '@/components/ui/confirm'
 
-const USER_TABS = ['usage', 'actions', 'role', 'balance', 'groups'] as const
+const USER_TABS = ['usage', 'actions', 'role', 'balance', 'subscription', 'groups'] as const
 type UserTab = (typeof USER_TABS)[number]
 
 /// 单个用户的管理抽屉：概览常驻（改任何东西前都该先看清对象），
@@ -52,7 +53,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
     void queryClient.invalidateQueries({ queryKey: qk.userOverview(userId) })
     // 调完余额切回"用量"签，最近变动里就该看到刚那一笔
     void queryClient.invalidateQueries({ queryKey: qk.userUsage(userId) })
-    void queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+    void queryClient.invalidateQueries({ queryKey: qk.adminUsersAll })
   }
 
   const ov = overview.data
@@ -134,6 +135,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
                 actions: 'admin:userActions',
                 role: 'admin:usersRole',
                 balance: 'common:balance',
+                subscription: 'admin:userSubscriptionTab',
                 // 页签用短名；userGroups 是表单字段标签（带"逗号分隔，首个优先"说明），
                 // 当页签名会把页签栏挤成两行
                 groups: 'admin:userGroupsTab',
@@ -209,6 +211,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
           />
         </>
       )}
+      {tab === 'subscription' && <SubscriptionSection userId={userId} onDone={invalidate} />}
       {tab === 'groups' && (
         <GroupsSection
           userId={userId}

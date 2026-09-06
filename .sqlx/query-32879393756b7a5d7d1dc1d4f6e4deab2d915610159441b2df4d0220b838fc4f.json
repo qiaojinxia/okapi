@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO recharge_orders (order_no, user_id, amount_micro, gateway, pay_amount, currency, plan_id)\n        VALUES ($1, $2, $3, $4, ($5::text)::numeric, $6, $7)\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int8",
+        "Int8",
+        "Varchar",
+        "Text",
+        "Varchar",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "32879393756b7a5d7d1dc1d4f6e4deab2d915610159441b2df4d0220b838fc4f"
+}

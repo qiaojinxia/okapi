@@ -46,6 +46,7 @@ rust-embed = { workspace = true, optional = true }
 mime_guess = { workspace = true, optional = true }
 md-5 = { workspace = true }
 tokio-tungstenite = { workspace = true }
+lettre = { workspace = true }
 reqwest = { workspace = true }
 
 [features]

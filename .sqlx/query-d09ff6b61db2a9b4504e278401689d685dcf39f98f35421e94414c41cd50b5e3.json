@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, plan_code, kind, grant_micro, group_code, balance_valid_days\n               FROM plans WHERE id = $1 AND status = 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "grant_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "grant_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "balance_valid_days",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "balance_valid_days"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "d09ff6b61db2a9b4504e278401689d685dcf39f98f35421e94414c41cd50b5e3"
+}

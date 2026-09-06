@@ -2,6 +2,7 @@
 //! 成员经 web session 鉴权自助操作；团 key 归属成员（member_user_id）。
 //! 钱包入账走既有 admin credit（team 的 user_id 即钱包主体）。
 
+use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
@@ -104,14 +105,18 @@ fn display_name(username: &str) -> String {
         .to_owned()
 }
 
-/// GET /api/teams：我所属的团队列表（UI 入口——没有它前端无从知道自己在哪些团）。
+/// GET /api/teams：我所属的团队列表（UI 入口——没有它前端无从知道自己在哪些团）；
+/// `limit/offset` 可选切片，不传回全量。
 pub async fn list_my_teams(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     let me = require_session(&state, &headers).await?;
-    let rows = sqlx::query!(
-        r#"
+    let slice = q.slice();
+    let (rows, total) = tokio::try_join!(
+        sqlx::query!(
+            r#"
         SELECT tm.team_user_id, u.username, tm.role, tm.monthly_spend_limit_micro,
                (SELECT COUNT(*) FROM team_members x WHERE x.team_user_id = tm.team_user_id)
                    AS "member_count!"
@@ -119,12 +124,26 @@ pub async fn list_my_teams(
         JOIN users u ON u.id = tm.team_user_id
         WHERE tm.member_user_id = $1 AND u.deleted_at IS NULL
         ORDER BY tm.team_user_id
+        LIMIT $2 OFFSET $3
         "#,
-        me
+            me,
+            slice.limit,
+            slice.offset
+        )
+        .fetch_all(&state.pg),
+        okapi_store::listing::count_unless_all(
+            slice,
+            sqlx::query_scalar!(
+                r#"SELECT COUNT(*)::bigint AS "c!"
+           FROM team_members tm JOIN users u ON u.id = tm.team_user_id
+           WHERE tm.member_user_id = $1 AND u.deleted_at IS NULL"#,
+                me
+            )
+            .fetch_one(&state.pg)
+        ),
     )
-    .fetch_all(&state.pg)
-    .await
     .map_err(okapi_store::StoreError::from)?;
+    let total = total.unwrap_or_else(|| okapi_store::listing::len_as_total(rows.len()));
     let mut data = Vec::with_capacity(rows.len());
     for r in rows {
         // 团钱包余额走热账本（团数量少，逐个查可接受）
@@ -138,7 +157,7 @@ pub async fn list_my_teams(
             "balance_micro": balance.as_micros(),
         }));
     }
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(json!({ "data": data, "total": total })))
 }
 
 // ---- 成员管理 ----

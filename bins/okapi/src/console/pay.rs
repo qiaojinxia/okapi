@@ -102,9 +102,7 @@ pub struct TopupReq {
     pub gateway: String,
 }
 
-/// POST /api/me/topup：创建订单并返回支付跳转信息。
-// 双网关下单线性分支，拆分割裂订单时序
-#[allow(clippy::too_many_lines)]
+/// POST /api/me/topup：创建钱包充值订单并返回支付跳转信息。
 pub async fn topup(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -114,6 +112,31 @@ pub async fn topup(
     if req.amount_micro < MIN_TOPUP_MICRO {
         return Err(AppError::bad_request().with_param("amount_micro"));
     }
+    let order = place_order(
+        &state,
+        key.user_id,
+        req.amount_micro,
+        &req.gateway,
+        None,
+        "okapi_topup",
+    )
+    .await?;
+    Ok(Json(order))
+}
+
+/// 下单公共体（钱包充值与订阅购买共用，§11.28）：建 `recharge_orders` 行 + 网关跳转信息。
+/// `plan_id` 非空 = 订阅购买单（`amount_micro` 为售价快照，回调激活订阅而不入钱包）。
+/// `item_name` 是支付页上的商品名（ASCII，直接进表单/查询串）。
+// 双网关下单线性分支，拆分割裂订单时序
+#[allow(clippy::too_many_lines)]
+pub async fn place_order(
+    state: &AppState,
+    user_id: i64,
+    amount_micro: i64,
+    gateway: &str,
+    plan_id: Option<i64>,
+    item_name: &str,
+) -> Result<Value, AppError> {
     let order_no = format!(
         "okp{}{}",
         chrono::Utc::now().format("%Y%m%d%H%M%S"),
@@ -124,60 +147,67 @@ pub async fn topup(
             .collect::<String>()
     );
 
-    match req.gateway.as_str() {
+    match gateway {
         "epay" => {
-            let cfg: EpayCfg = load_cfg(&state, "payment_epay").await?;
-            let money = micro_usd_to_cny_string(req.amount_micro, cfg.usd_to_cny_milli);
+            let cfg: EpayCfg = load_cfg(state, "payment_epay").await?;
+            let money = micro_usd_to_cny_string(amount_micro, cfg.usd_to_cny_milli);
             okapi_store::admin::create_recharge_order(
                 &state.pg,
-                &order_no,
-                key.user_id,
-                req.amount_micro,
-                "epay",
-                &money,
-                "CNY",
+                okapi_store::admin::NewOrder {
+                    order_no: &order_no,
+                    user_id,
+                    amount_micro,
+                    gateway: "epay",
+                    pay_amount: &money,
+                    currency: "CNY",
+                    plan_id,
+                },
             )
             .await?;
             let mut params: BTreeMap<&str, String> = BTreeMap::new();
             params.insert("pid", cfg.pid.clone());
             params.insert("type", "alipay".to_owned());
             params.insert("out_trade_no", order_no.clone());
-            params.insert("name", "okapi_topup".to_owned());
+            params.insert("name", item_name.to_owned());
             params.insert("money", money.clone());
             let sign = epay_sign(&params, &cfg.key);
-            Ok(Json(json!({
+            Ok(json!({
                 "order_no": order_no,
                 "gateway": "epay",
                 "pay_url": cfg.gateway_url,
                 // 前端以表单/查询串提交给 epay 网关
                 "params": {
                     "pid": cfg.pid, "type": "alipay", "out_trade_no": order_no,
-                    "name": "okapi_topup", "money": money,
+                    "name": item_name, "money": money,
                     "sign": sign, "sign_type": "MD5",
                 },
-            })))
+            }))
         }
         "stripe" => {
-            let cfg: StripeCfg = load_cfg(&state, "payment_stripe").await?;
-            let usd = micro_to_decimal_string(req.amount_micro);
+            let cfg: StripeCfg = load_cfg(state, "payment_stripe").await?;
+            let usd = micro_to_decimal_string(amount_micro);
             okapi_store::admin::create_recharge_order(
                 &state.pg,
-                &order_no,
-                key.user_id,
-                req.amount_micro,
-                "stripe",
-                &usd,
-                "USD",
+                okapi_store::admin::NewOrder {
+                    order_no: &order_no,
+                    user_id,
+                    amount_micro,
+                    gateway: "stripe",
+                    pay_amount: &usd,
+                    currency: "USD",
+                    plan_id,
+                },
             )
             .await?;
             // 分整数（Stripe unit_amount 为最小货币单位）
-            let cents = req.amount_micro.saturating_add(9_999) / 10_000;
+            let cents = amount_micro.saturating_add(9_999) / 10_000;
             let body = format!(
-                "mode=payment&success_url={}&cancel_url={}&metadata[order_no]={}&line_items[0][quantity]=1&line_items[0][price_data][currency]=usd&line_items[0][price_data][unit_amount]={}&line_items[0][price_data][product_data][name]=okapi_topup",
+                "mode=payment&success_url={}&cancel_url={}&metadata[order_no]={}&line_items[0][quantity]=1&line_items[0][price_data][currency]=usd&line_items[0][price_data][unit_amount]={}&line_items[0][price_data][product_data][name]={}",
                 "https%3A%2F%2Fexample.invalid%2Fok",
                 "https%3A%2F%2Fexample.invalid%2Fcancel",
                 order_no,
-                cents
+                cents,
+                item_name
             );
             let api = cfg
                 .api_base
@@ -194,6 +224,8 @@ pub async fn topup(
                     auth_value: format!("Bearer {}", cfg.secret_key),
                     content_type: Some("application/x-www-form-urlencoded".to_owned()),
                     body: bytes::Bytes::from(body),
+                    proxy_url: None,
+                    extra_headers: Vec::new(),
                 })
                 .await;
             let session = match resp {
@@ -212,12 +244,12 @@ pub async fn topup(
                     ));
                 }
             };
-            Ok(Json(json!({
+            Ok(json!({
                 "order_no": order_no,
                 "gateway": "stripe",
                 "pay_url": session.get("url").and_then(Value::as_str),
                 "session_id": session.get("id").and_then(Value::as_str),
-            })))
+            }))
         }
         _ => Err(AppError::bad_request().with_param("gateway")),
     }
@@ -230,12 +262,46 @@ async fn settle_paid_order(
     order_no: &str,
     trade_no: &str,
 ) -> Result<bool, AppError> {
-    let Some((user_id, amount_micro)) =
-        okapi_store::admin::mark_recharge_paid(&state.pg, order_no, trade_no).await?
+    let Some(order) = okapi_store::admin::mark_recharge_paid(&state.pg, order_no, trade_no).await?
     else {
         // 已核销/不存在：幂等吞掉（回调方期望成功应答停止重试）
         return Ok(false);
     };
+    let user_id = order.user_id;
+    let amount_micro = order.amount_micro;
+    if let Some(plan_id) = order.plan_id {
+        // 订阅购买单（§11.28）：激活 / 续期而**不入钱包**。套餐下架不影响已付款用户。
+        let plan = okapi_store::subscriptions::sub_plan_by_id(&state.pg, plan_id)
+            .await?
+            .ok_or_else(AppError::internal)?;
+        match super::subscriptions::grant(
+            state,
+            user_id,
+            &plan,
+            &format!("purchase:{order_no}"),
+            "system:payment",
+        )
+        .await
+        {
+            Ok(granted) => tracing::info!(
+                order_no,
+                user_id,
+                plan = %plan.plan_code,
+                outcome = granted.kind(),
+                "订阅购买核销"
+            ),
+            // 订单已翻转 paid，激活失败（如期间被发放了别的套餐）留日志人工跟进，不让回调重试
+            Err(err) => tracing::error!(
+                order_no,
+                user_id,
+                plan = %plan.plan_code,
+                error = ?err,
+                "订阅购买已付款但激活失败（人工跟进）"
+            ),
+        }
+        aff_reward(state, user_id, amount_micro, order_no).await;
+        return Ok(true);
+    }
     let amount = okapi_domain::Money::from_micros(amount_micro);
     let balance_after = state.ledger.credit(user_id, amount).await?;
     okapi_ledger::pg::record_credit(

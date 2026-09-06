@@ -18,11 +18,11 @@ use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, UsageProbe, codes};
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp, calculate};
 use okapi_providers::convert::{
-    anthropic_to_openai as conv_a2o, openai_to_anthropic as convert, openai_to_gemini as conv_gem,
-    responses_to_chat as conv_resp,
+    anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o, openai_to_anthropic as convert,
+    openai_to_gemini as conv_gem, responses_to_chat as conv_resp,
 };
 use okapi_providers::reasoning::{self, ReasoningDirective};
 use okapi_providers::{
@@ -52,8 +52,13 @@ const MAX_COMPLETION_CAP: u32 = 32_768;
 enum Ingress {
     OpenAi,
     Anthropic,
-    /// OpenAI Responses API（降级 ChatCompletions 执行，§4.4 #5209）。
+    /// OpenAI Responses API（§4.4）：渠道 `responses_native` 时同方言直转
+    /// （请求原样、事件原样，Codex CLI 的 previous_response_id / reasoning items 全保住），
+    /// 否则降级 ChatCompletions 执行（#5209），出口再合成 Responses 事件骨架。
     Responses,
+    /// Gemini 原生入口 `models/{model}:generateContent|streamGenerateContent`（§4.4）：
+    /// gemini 渠道透传，OpenAI(兼容)/Anthropic 渠道经 `convert/gemini_to_openai` 往返。
+    Gemini,
 }
 
 /// 入口探针归一化结果（两种协议解析为同一形状，主链路协议无关）。
@@ -71,7 +76,7 @@ struct ProbeInfo {
     /// 请求特征（能力感知路由输入，§3.8）。
     needs_tools: bool,
     needs_vision: bool,
-    /// OpenAI service_tier 请求声明（tier 计费轴；anthropic/responses 入口无此概念）。
+    /// OpenAI service_tier 请求声明（tier 计费轴；chat 与 responses 入口有，anthropic 无此概念）。
     service_tier: Option<String>,
 }
 
@@ -303,7 +308,7 @@ pub async fn chat_completions(
     }
 }
 
-/// OpenAI /v1/responses 入口（§4.4 #5209：降级 ChatCompletions 执行）。
+/// OpenAI /v1/responses 入口（§4.4：渠道说 Responses 方言则直转，否则降级 ChatCompletions #5209）。
 pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
@@ -323,7 +328,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         ),
         prompt_chars: probe.prompt_chars(),
         session: session_hash(&headers, &input_messages),
-        service_tier: None,
+        service_tier: probe.service_tier.clone(),
         needs_tools,
         needs_vision,
     };
@@ -340,6 +345,83 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
     {
         Ok(resp) => resp,
         Err(err) => err.into_response_with(Some(request_id)),
+    }
+}
+
+/// Gemini 入口查询串：只认 `key`（SDK 鉴权）；`alt=sse` 等其余参数忽略。
+#[derive(serde::Deserialize)]
+pub struct GeminiQuery {
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// Gemini 原生入口 `POST /v1beta/models/{model}:generateContent|streamGenerateContent`。
+/// 模型名与流式与否都在路径上（`gemini-2.5-pro:streamGenerateContent`）；鉴权除 Bearer 外
+/// 认 Gemini SDK 的 `x-goog-api-key` 头与 `?key=` 查询串。流式一律以 SSE 回（官方 `alt=sse`
+/// 形态；不带 alt 的 JSON 数组流式形态不提供）。
+pub async fn gemini_generate(
+    State(state): State<AppState>,
+    axum::extract::Path(model_action): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GeminiQuery>,
+    mut headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request_id = Uuid::new_v4();
+    let started = Instant::now();
+    let Some((model, action)) = model_action.rsplit_once(':') else {
+        return AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND)
+            .into_gemini_response_with(Some(request_id));
+    };
+    let stream = match action {
+        "generateContent" => false,
+        "streamGenerateContent" => true,
+        _ => {
+            return AppError::bad_request()
+                .with_param(action)
+                .into_gemini_response_with(Some(request_id));
+        }
+    };
+    // `?key=` 查询串鉴权：搬进头里让 authenticate 统一处理（不改鉴权主链）
+    if !headers.contains_key(header::AUTHORIZATION)
+        && !headers.contains_key("x-goog-api-key")
+        && let Some(key) = query.key.as_deref()
+        && let Ok(value) = axum::http::HeaderValue::from_str(key)
+    {
+        headers.insert("x-goog-api-key", value);
+    }
+    let Ok(probe) = serde_json::from_slice::<okapi_api::GeminiRequestProbe>(&body) else {
+        return AppError::bad_request().into_gemini_response_with(Some(request_id));
+    };
+    let input_messages = probe.input_messages();
+    let (needs_tools, needs_vision) = request_features(Ingress::Gemini, &body);
+    let info = ProbeInfo {
+        requested_model: model.to_owned(),
+        stream,
+        completion_cap_req: probe.completion_cap_req(),
+        prompt_tokens: estimate_prompt_tokens(
+            model,
+            &probe.prompt_segments(),
+            input_messages.len().max(1),
+        ),
+        prompt_chars: probe.prompt_chars(),
+        session: session_hash(&headers, &input_messages),
+        service_tier: None,
+        needs_tools,
+        needs_vision,
+    };
+    match handle_chat(
+        &state,
+        &headers,
+        &body,
+        request_id,
+        started,
+        Ingress::Gemini,
+        &info,
+    )
+    .await
+    {
+        Ok(resp) => resp,
+        Err(err) => err.into_gemini_response_with(Some(request_id)),
     }
 }
 
@@ -382,11 +464,92 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
     }
 }
 
+/// Anthropic `POST /v1/messages/count_tokens`：鉴权 + 模型可见，**不计费**。
+/// 有 anthropic 候选则代理上游 tokenizer；否则本地估算（Claude Code 缺此端点会退本地）。
+pub async fn messages_count_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request_id = Uuid::new_v4();
+    match count_tokens_inner(&state, &headers, body).await {
+        Ok(resp) => resp,
+        Err(err) => err.into_anthropic_response_with(Some(request_id)),
+    }
+}
+
+async fn count_tokens_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let key = super::auth::authenticate_data_plane(state, headers).await?;
+    let probe: MessagesRequestProbe =
+        serde_json::from_slice(&body).map_err(|_| AppError::bad_request())?;
+    let meta = resolve_model_cached(state, &probe.model).await?;
+    let Some(meta) = meta.as_ref() else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
+    };
+    let canonical = meta.canonical.clone();
+    if !key.allows_model(&canonical) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            codes::MODEL_NOT_ALLOWED,
+        ));
+    }
+    let rows = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        &canonical,
+        &key.pool_chain(),
+        state.master_key.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    let cand = order_candidates(rows)
+        .into_iter()
+        .find(|c| c.provider == "anthropic");
+    if let Some(cand) = cand {
+        let upstream_model = cand.upstream_model(&canonical).to_owned();
+        let body_up = rewrite_model(&body, &probe.model, &upstream_model)
+            .map_err(|_| AppError::bad_request())?;
+        let base = cand
+            .api_base
+            .clone()
+            .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE.to_owned());
+        let outbound = super::openai_dialect::outbound(&cand);
+        match state
+            .anthropic
+            .count_tokens(&base, &cand.credential, body_up, &outbound)
+            .await
+        {
+            Ok(up) => {
+                return Ok(axum::Json(
+                    serde_json::from_slice::<serde_json::Value>(&up)
+                        .unwrap_or_else(|_| serde_json::json!({"input_tokens": 0})),
+                )
+                .into_response());
+            }
+            Err(_) => {
+                return Err(AppError::new(
+                    StatusCode::BAD_GATEWAY,
+                    codes::UPSTREAM_ERROR,
+                ));
+            }
+        }
+    }
+    let tokens =
+        estimate_prompt_tokens(&probe.model, &probe.prompt_segments(), probe.messages.len());
+    Ok(axum::Json(serde_json::json!({ "input_tokens": tokens })).into_response())
+}
+
 /// 请求特征探测（§3.8 能力感知路由）：tools 数组非空 / 消息含图像部件。
 fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
         return (false, false);
     };
+    if ingress == Ingress::Gemini {
+        return gemini_request_features(&v);
+    }
     let needs_tools = v
         .get("tools")
         .and_then(|t| t.as_array())
@@ -395,6 +558,7 @@ fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
         Ingress::OpenAi => &["image_url"],
         Ingress::Anthropic => &["image"],
         Ingress::Responses => &["input_image"],
+        Ingress::Gemini => &[],
     };
     let containers = match ingress {
         Ingress::Responses => v.get("input"),
@@ -411,6 +575,48 @@ fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
                             p.get("type")
                                 .and_then(|t| t.as_str())
                                 .is_some_and(|t| image_types.contains(&t))
+                        })
+                    })
+            })
+        });
+    (needs_tools, needs_vision)
+}
+
+/// Gemini 形状的请求特征：tools 里有 functionDeclarations 即需要工具；
+/// contents 部件带 inlineData / fileData（图像 mime）即需要视觉。
+fn gemini_request_features(v: &serde_json::Value) -> (bool, bool) {
+    let needs_tools = v
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .is_some_and(|tools| {
+            tools.iter().any(|t| {
+                t.get("functionDeclarations")
+                    .or_else(|| t.get("function_declarations"))
+                    .and_then(|d| d.as_array())
+                    .is_some_and(|d| !d.is_empty())
+            })
+        });
+    let is_image = |media: &serde_json::Value| {
+        media
+            .get("mimeType")
+            .or_else(|| media.get("mime_type"))
+            .and_then(|m| m.as_str())
+            .is_some_and(|m| m.starts_with("image/"))
+    };
+    let needs_vision = v
+        .get("contents")
+        .and_then(|c| c.as_array())
+        .is_some_and(|contents| {
+            contents.iter().any(|c| {
+                c.get("parts")
+                    .and_then(|p| p.as_array())
+                    .is_some_and(|parts| {
+                        parts.iter().any(|p| {
+                            p.get("inlineData")
+                                .or_else(|| p.get("inline_data"))
+                                .or_else(|| p.get("fileData"))
+                                .or_else(|| p.get("file_data"))
+                                .is_some_and(is_image)
                         })
                     })
             })
@@ -868,7 +1074,7 @@ async fn try_model(
     let mut last_channel: Option<(i64, i64)> = None;
     let mut last_upstream = None;
 
-    for cand in candidates {
+    for mut cand in candidates {
         if attempted >= MAX_ATTEMPTS {
             break;
         }
@@ -911,53 +1117,7 @@ async fn try_model(
         attempted += 1;
 
         let upstream_model = cand.upstream_model(&bill.model).to_owned();
-        // 入口协议 × 渠道协议：同方言重写 model 透传，跨方言走出向转换；
-        // Responses 恒先降级 chat，再按渠道协议二段转换
-        let body_built = match (bill.ingress, cand.provider.as_str()) {
-            (Ingress::OpenAi, "anthropic") => {
-                convert::request_openai_to_anthropic(body, &upstream_model, bill.completion_cap)
-            }
-            (Ingress::OpenAi, "gemini") => conv_gem::request_openai_to_gemini(body),
-            // Anthropic 同方言：透传（stream_options 是 OpenAI 概念，此路不注入）
-            (Ingress::Anthropic, "anthropic") => {
-                rewrite_model(body, &info.requested_model, &upstream_model)
-            }
-            // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
-            // 转换器早已强制注入，唯独这条最常用的路曾漏掉——客户端不主动开
-            // stream_options 时上游不返 usage，结算落字符估算，实测漏收约七成。
-            (Ingress::OpenAi, _) => rewrite_model(body, &info.requested_model, &upstream_model)
-                .and_then(|b| {
-                    if info.stream {
-                        ensure_stream_usage(&b)
-                    } else {
-                        Ok(b)
-                    }
-                }),
-            (Ingress::Anthropic, _) => conv_a2o::request_anthropic_to_openai(body, &upstream_model),
-            (Ingress::Responses, provider) => {
-                conv_resp::request_responses_to_chat(body, &upstream_model).and_then(|chat_body| {
-                    match provider {
-                        "anthropic" => convert::request_openai_to_anthropic(
-                            &chat_body,
-                            &upstream_model,
-                            bill.completion_cap,
-                        ),
-                        "gemini" => conv_gem::request_openai_to_gemini(&chat_body),
-                        _ => Ok(chat_body),
-                    }
-                })
-            }
-        };
-        // reasoning 后缀注入（按渠道方向；显式字段不覆盖）
-        let body_built = match (body_built, bill.directive) {
-            (Ok(b), Some(d)) => match cand.provider.as_str() {
-                "anthropic" => reasoning::apply_anthropic(&b, d),
-                "gemini" => reasoning::apply_gemini(&b, d),
-                _ => reasoning::apply_openai(&b, d),
-            },
-            (built, _) => built,
-        };
-        let Ok(body_up) = body_built else {
+        let Ok(mut body_up) = build_upstream_body(bill, info, &cand, body, &upstream_model) else {
             bill.state
                 .sched
                 .release_slot(cand.channel_key_id, cand.max_concurrency)
@@ -1014,6 +1174,34 @@ async fn try_model(
                 )
                 .await
             };
+            // Responses 直转撞上 404/405 = 这个上游根本没有 /responses（"openai" 渠道指着
+            // 只实现了 chat 的第三方地址是常态）。同一候选就地改走降级链再来一次：
+            // 不计 failover、不计 retry、不标 key 失败——渠道没坏，是方言不对。
+            if bill.ingress == Ingress::Responses
+                && cand.responses_native
+                && matches!(
+                    &result,
+                    Err(AttemptError::Fatal(f)) if matches!(f.upstream_status, Some(404 | 405))
+                )
+            {
+                tracing::info!(
+                    request_id = %bill.request_id,
+                    channel = cand.channel_id,
+                    "上游无 /responses，本次改走降级链（可在渠道设置关闭 responses_native）"
+                );
+                cand.responses_native = false;
+                match build_upstream_body(bill, info, &cand, body, &upstream_model) {
+                    Ok(b) => {
+                        body_up = b;
+                        last_upstream = Some((
+                            upstream_model.clone(),
+                            upstream_endpoint(&cand, bill.is_stream, bill.ingress).to_owned(),
+                        ));
+                        continue;
+                    }
+                    Err(_) => break result,
+                }
+            }
             let transient = matches!(
                 &result,
                 Err(AttemptError::Retriable {
@@ -1121,6 +1309,84 @@ async fn try_model(
     Err(failure)
 }
 
+/// 按 入口协议 × 渠道协议 构造上游请求体：同方言重写 model 透传，跨方言走出向转换；
+/// Responses 对说 Responses 方言的渠道直转，否则先降级 chat，再按渠道协议二段转换。
+/// 末尾做 reasoning 后缀注入（按上游方言；显式字段不覆盖）。
+fn build_upstream_body(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    cand: &ChannelCandidate,
+    body: &Bytes,
+    upstream_model: &str,
+) -> Result<Bytes, UpstreamError> {
+    let native_responses = bill.ingress == Ingress::Responses && cand.responses_native;
+    let built = match (bill.ingress, cand.provider.as_str()) {
+        // Responses 同方言：只改 model，其余字段（previous_response_id/store/include/
+        // 内置工具/reasoning）一律原样——这正是直转相对降级链的全部价值。
+        // usage 随 response.completed 必带，无需 stream_options。
+        (Ingress::Responses, _) if native_responses => {
+            rewrite_model(body, &info.requested_model, upstream_model)
+        }
+        (Ingress::OpenAi, "anthropic") => {
+            convert::request_openai_to_anthropic(body, upstream_model, bill.completion_cap)
+        }
+        (Ingress::OpenAi, "gemini") => conv_gem::request_openai_to_gemini(body),
+        // Anthropic 同方言：透传（stream_options 是 OpenAI 概念，此路不注入）
+        (Ingress::Anthropic, "anthropic") => {
+            rewrite_model(body, &info.requested_model, upstream_model)
+        }
+        // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
+        // 转换器早已强制注入，唯独这条最常用的路曾漏掉——客户端不主动开
+        // stream_options 时上游不返 usage，结算落字符估算，实测漏收约七成。
+        (Ingress::OpenAi, _) => rewrite_model(body, &info.requested_model, upstream_model)
+            .and_then(|b| {
+                if info.stream {
+                    ensure_stream_usage(&b)
+                } else {
+                    Ok(b)
+                }
+            }),
+        (Ingress::Anthropic, _) => conv_a2o::request_anthropic_to_openai(body, upstream_model),
+        (Ingress::Responses, provider) => {
+            conv_resp::request_responses_to_chat(body, upstream_model).and_then(|chat_body| {
+                match provider {
+                    "anthropic" => convert::request_openai_to_anthropic(
+                        &chat_body,
+                        upstream_model,
+                        bill.completion_cap,
+                    ),
+                    "gemini" => conv_gem::request_openai_to_gemini(&chat_body),
+                    _ => Ok(chat_body),
+                }
+            })
+        }
+        // Gemini 同方言：原样透传（模型名在 URL 上，body 里没有可重写的 model）
+        (Ingress::Gemini, "gemini") => Ok(body.clone()),
+        // Gemini 客户端 + anthropic 上游：gemini→chat→anthropic 两跳
+        (Ingress::Gemini, "anthropic") => conv_g2o::request_gemini_to_openai(
+            body,
+            upstream_model,
+            info.stream,
+        )
+        .and_then(|chat_body| {
+            convert::request_openai_to_anthropic(&chat_body, upstream_model, bill.completion_cap)
+        }),
+        // Gemini 客户端 + OpenAI(兼容) 上游：转换器已按 stream 注入 stream_options
+        (Ingress::Gemini, _) => {
+            conv_g2o::request_gemini_to_openai(body, upstream_model, info.stream)
+        }
+    }?;
+    match bill.directive {
+        Some(d) if native_responses => reasoning::apply_responses(&built, d),
+        Some(d) => match cand.provider.as_str() {
+            "anthropic" => reasoning::apply_anthropic(&built, d),
+            "gemini" => reasoning::apply_gemini(&built, d),
+            _ => reasoning::apply_openai(&built, d),
+        },
+        None => Ok(built),
+    }
+}
+
 fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> AttemptError {
     if err.retriable_before_first_token() {
         return AttemptError::Retriable {
@@ -1209,6 +1475,28 @@ fn strip_request_fields(body: &Bytes, fields: &[String]) -> Option<Bytes> {
     changed.then(|| Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
 }
 
+/// 渠道强制注入（在 strip 之后）：浅合并顶层键。受保护键跳过。
+fn inject_request_fields(
+    body: &Bytes,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Bytes> {
+    const PROTECTED: [&str; 4] = ["model", "messages", "stream", "provider"];
+    if fields.is_empty() {
+        return None;
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let obj = value.as_object_mut()?;
+    let mut changed = false;
+    for (key, val) in fields {
+        if PROTECTED.contains(&key.as_str()) {
+            continue;
+        }
+        obj.insert(key.clone(), val.clone());
+        changed = true;
+    }
+    changed.then(|| Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
+}
+
 // 入口方言 × 上游协议矩阵的收敛点，拆分损害路由全貌可读性
 #[allow(clippy::too_many_lines)]
 async fn dispatch_chat(
@@ -1222,15 +1510,94 @@ async fn dispatch_chat(
     // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
     // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
     let body = super::routing_prefs::strip(&body).unwrap_or(body);
-    // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）
-    let body = reasoning::strip_unified(&body).unwrap_or(body);
+    let native_responses = bill.ingress == Ingress::Responses && cand.responses_native;
+    // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）。
+    // Responses 直转是唯一的例外——`reasoning.effort` 就是上游的原生键，只摘非原生键。
+    let body = if native_responses {
+        reasoning::strip_unified_for_responses(&body).unwrap_or(body)
+    } else {
+        reasoning::strip_unified(&body).unwrap_or(body)
+    };
     let body = if cand.strip_request_fields.is_empty() {
         body
     } else {
         strip_request_fields(&body, &cand.strip_request_fields).unwrap_or(body)
     };
+    let body = if cand.inject_request_fields.is_empty() {
+        body
+    } else {
+        inject_request_fields(&body, &cand.inject_request_fields).unwrap_or(body)
+    };
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
+    let outbound = super::openai_dialect::outbound(cand);
     let resp = match (bill.ingress, cand.provider.as_str()) {
+        // Responses 客户端 + 说 Responses 方言的上游：直转，事件原样透出
+        (Ingress::Responses, _) if native_responses => {
+            bill.state
+                .upstream
+                .responses(base, &cand.credential, body, stream, &outbound)
+                .await
+        }
+        // Gemini 客户端 + gemini 上游：透传 + 计费元数据扫描
+        (Ingress::Gemini, "gemini") => {
+            match bill
+                .state
+                .gemini
+                .generate(
+                    base,
+                    &cand.credential,
+                    &upstream_model,
+                    body,
+                    stream,
+                    &outbound,
+                )
+                .await?
+            {
+                okapi_providers::gemini::GeminiResponse::Json {
+                    status,
+                    upstream_request_id,
+                    body,
+                } => {
+                    let usage = serde_json::from_slice::<serde_json::Value>(&body)
+                        .ok()
+                        .map(|v| conv_gem::usage_from_gemini(v.get("usageMetadata")));
+                    Ok(ChatResponse::Json {
+                        status,
+                        upstream_request_id,
+                        body,
+                        usage,
+                    })
+                }
+                okapi_providers::gemini::GeminiResponse::Stream(h) => {
+                    let mut scanner = okapi_providers::gemini::MetaScanner::new();
+                    let events = h
+                        .events
+                        .flat_map(move |item| futures::stream::iter(scanner.scan(item)));
+                    Ok(ChatResponse::Stream(StreamHandle {
+                        upstream_request_id: h.upstream_request_id,
+                        events: Box::pin(events),
+                    }))
+                }
+            }
+        }
+        // Gemini 客户端 + anthropic 上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
+        (Ingress::Gemini, "anthropic") => convert::chat(
+            &bill.state.anthropic,
+            base,
+            &cand.credential,
+            body,
+            &upstream_model,
+            stream,
+            &outbound,
+        )
+        .await
+        .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
+        // Gemini 客户端 + OpenAI(兼容 / Azure) 上游：chat 形状 → Gemini 形状
+        (Ingress::Gemini, _) => bill
+            .state
+            .openai_chat(cand, &upstream_model, body, stream)
+            .await
+            .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + gemini 上游：providers 内转回 OpenAI 形状
         (Ingress::OpenAi | Ingress::Responses, "gemini") => {
             conv_gem::chat(
@@ -1240,6 +1607,7 @@ async fn dispatch_chat(
                 body,
                 &upstream_model,
                 stream,
+                &outbound,
             )
             .await
         }
@@ -1252,14 +1620,14 @@ async fn dispatch_chat(
                 body,
                 &upstream_model,
                 stream,
+                &outbound,
             )
             .await
         }
-        // 同方言 OpenAI：原样
+        // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
         (Ingress::OpenAi | Ingress::Responses, _) => {
             bill.state
-                .upstream
-                .chat(base, &cand.credential, body, stream)
+                .openai_chat(cand, &upstream_model, body, stream)
                 .await
         }
         // Anthropic 客户端 + anthropic 上游：透传 + 计费元数据扫描
@@ -1267,7 +1635,7 @@ async fn dispatch_chat(
             match bill
                 .state
                 .anthropic
-                .messages(base, &cand.credential, body, stream)
+                .messages(base, &cand.credential, body, stream, &outbound)
                 .await?
             {
                 okapi_providers::anthropic::MessagesResponse::Json {
@@ -1297,12 +1665,11 @@ async fn dispatch_chat(
                 }
             }
         }
-        // Anthropic 客户端 + OpenAI(兼容) 上游：回向转换为 Anthropic 事件/JSON
+        // Anthropic 客户端 + OpenAI(兼容 / Azure) 上游：回向转换为 Anthropic 事件/JSON
         (Ingress::Anthropic, _) => {
             match bill
                 .state
-                .upstream
-                .chat(base, &cand.credential, body, stream)
+                .openai_chat(cand, &upstream_model, body, stream)
                 .await?
             {
                 ChatResponse::Json {
@@ -1333,6 +1700,11 @@ async fn dispatch_chat(
         }
     };
     let mut resp = resp?;
+    if native_responses {
+        // 直转：上游已是 Responses 形状，reasoning 以原生 reasoning item 呈现，
+        // 既无需合成事件骨架，也不做 thinking_to_content（那是 chat 形状的补丁）
+        return Ok(resp);
+    }
     if matches!(bill.ingress, Ingress::OpenAi | Ingress::Responses) && cand.thinking_to_content {
         resp = wrap_thinking_to_content(resp);
     }
@@ -1522,13 +1894,15 @@ fn cand_info(
 }
 fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) -> &'static str {
     match (ingress, cand.provider.as_str()) {
+        (Ingress::Responses, _) if cand.responses_native => "/v1/responses",
         (_, "anthropic") => "/v1/messages",
-        (Ingress::OpenAi | Ingress::Responses, "gemini") if stream => {
+        (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") if stream => {
             "/v1beta/models/{model}:streamGenerateContent"
         }
-        (Ingress::OpenAi | Ingress::Responses, "gemini") => {
+        (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") => {
             "/v1beta/models/{model}:generateContent"
         }
+        (_, "azure") => "/openai/deployments/{model}/chat/completions",
         _ => "/v1/chat/completions",
     }
 }
@@ -1545,9 +1919,10 @@ fn spawn_stream_pump(
     let request_id = bill.request_id;
     let (mut tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
 
-    // detach 说明：pump 生命周期与上游流绑定；客户端断开经 send 失败感知并取消上游，
-    // 结算在任何退出路径都执行（settle_stream）。
-    tokio::spawn(async move {
+    // pump 生命周期与上游流绑定；客户端断开经 send 失败感知并取消上游，
+    // 结算在任何退出路径都执行（settle_stream）。经 settlements 计数：优雅下线要等它落账。
+    let settlements = bill.state.settlements.clone();
+    settlements.spawn(async move {
         let mut usage: Option<UsageProbe> = None;
         let mut content_chars: usize = 0;
         let mut client_gone = false;
@@ -1658,8 +2033,9 @@ async fn push_event(
         }
         ChatEvent::Done => match ingress {
             Ingress::OpenAi => Event::default().data("[DONE]"),
-            // Anthropic 以 message_stop、Responses 以 response.completed 收尾，无终止帧
-            Ingress::Anthropic | Ingress::Responses => return true,
+            // Anthropic 以 message_stop、Responses 以 response.completed、Gemini 以带
+            // finishReason 的 chunk 收尾，均无终止帧
+            Ingress::Anthropic | Ingress::Responses | Ingress::Gemini => return true,
         },
     };
     tx.send(Ok(sse_event)).await.is_ok()
@@ -1703,15 +2079,18 @@ struct RespMeta {
 }
 
 /// 流式 chunk 的响应元数据采集（开关/tier 定价启用时才调用；首个非空值生效）。
+/// chat chunk 的 model/service_tier 在顶层；Responses 直转事件在 `response` 对象内
+/// （response.created 就带 model，service_tier 到 response.completed 才定）。
 fn capture_chunk_meta(event: &ChatEvent, meta: &mut RespMeta) {
     #[derive(serde::Deserialize)]
     struct MetaOnly {
+        /// Gemini 形状叫 modelVersion
+        #[serde(alias = "modelVersion")]
         model: Option<String>,
         service_tier: Option<String>,
+        response: Option<Box<MetaOnly>>,
     }
-    if let ChatEvent::Data { raw, .. } = event
-        && let Ok(probe) = serde_json::from_str::<MetaOnly>(raw)
-    {
+    fn absorb(meta: &mut RespMeta, probe: MetaOnly) {
         if meta.model.is_none()
             && let Some(model) = probe.model.filter(|m| !m.is_empty())
         {
@@ -1722,6 +2101,14 @@ fn capture_chunk_meta(event: &ChatEvent, meta: &mut RespMeta) {
         {
             meta.service_tier = Some(tier);
         }
+        if let Some(inner) = probe.response {
+            absorb(meta, *inner);
+        }
+    }
+    if let ChatEvent::Data { raw, .. } = event
+        && let Ok(probe) = serde_json::from_str::<MetaOnly>(raw)
+    {
+        absorb(meta, probe);
     }
 }
 
@@ -1729,6 +2116,7 @@ fn capture_chunk_meta(event: &ChatEvent, meta: &mut RespMeta) {
 fn extract_body_meta(body: &Bytes) -> RespMeta {
     #[derive(serde::Deserialize)]
     struct MetaOnly {
+        #[serde(alias = "modelVersion")]
         model: Option<String>,
         service_tier: Option<String>,
     }
@@ -1799,8 +2187,9 @@ async fn attempt_json(
             // 结算移出响应路径（与流式同语义：响应先行、结算后台；
             // Redis commit 幂等 + 悬置由 sweep 兜底，压测驱动优化见 docs/perf-report.md）
             let bill_bg = bill.clone();
-            // detach 说明：结算生命周期独立于响应；所有失败路径内部自兜底
-            tokio::spawn(async move {
+            // 结算生命周期独立于响应；所有失败路径内部自兜底。经 settlements 计数：
+            // 优雅下线等它落账再退出
+            bill.state.settlements.spawn(async move {
                 settle_commit(&bill_bg, &info, usage, None, failover, resp_meta).await;
                 bill_bg.state.sched.release_slot(info.key, info.cap).await;
             });
@@ -1852,6 +2241,16 @@ fn non_stream_content_chars(ingress: Ingress, body: &Bytes) -> usize {
                     .iter()
                     .filter_map(|i| i.get("content").and_then(|c| c.as_array()))
                     .flatten()
+                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                    .map(|s| s.chars().count())
+                    .sum()
+            }),
+        Ingress::Gemini => v
+            .pointer("/candidates/0/content/parts")
+            .and_then(|p| p.as_array())
+            .map_or(0, |parts| {
+                parts
+                    .iter()
                     .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
                     .map(|s| s.chars().count())
                     .sum()
@@ -1938,11 +2337,12 @@ async fn settle_commit(
         Err(err) => {
             // 结算算价失败：退款 + 失败记账（fail-closed，不猜测金额）
             tracing::error!(request_id = %bill.request_id, error = %err, "结算算价失败，退款");
-            let _ = bill
+            let pool = bill
                 .state
                 .ledger
                 .refund(bill.user_id, bill.key_id, bill.request_id)
-                .await;
+                .await
+                .map_or(Pool::Wallet, |r| r.pool);
             record_terminal(
                 bill,
                 info,
@@ -1956,6 +2356,7 @@ async fn settle_commit(
                 failover,
                 "refund",
                 0,
+                pool,
             )
             .await;
             return;
@@ -1968,7 +2369,11 @@ async fn settle_commit(
         .commit(bill.user_id, bill.key_id, bill.request_id, quote.amount)
         .await
     {
-        Ok(CommitOutcome::Committed { balance_after, .. }) => {
+        Ok(CommitOutcome::Committed {
+            balance_after,
+            pool,
+            ..
+        }) => {
             let mut snapshot = serde_json::to_value(&quote.snapshot).ok();
             // 模型级降级的账单可解释性（DESIGN §3.4）：仅降级时写 requested_model，
             // 用户能核对"我要的是 A、实际用了 B、按 B 计价"
@@ -2011,6 +2416,7 @@ async fn settle_commit(
                 delta_micro: quote.amount.as_micros().saturating_neg(),
                 balance_after: Some(balance_after),
                 event_type: "commit",
+                pool,
             };
             bill.state.settle_write(input).await;
             super::auth::record_settlement_counters(
@@ -2041,14 +2447,18 @@ async fn settle_commit(
 }
 
 async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
-    if let Err(err) = bill
+    let pool = match bill
         .state
         .ledger
         .refund(bill.user_id, bill.key_id, bill.request_id)
         .await
     {
-        tracing::error!(request_id = %bill.request_id, error = %err, "退款失败（预扣悬置，待对账清理）");
-    }
+        Ok(r) => r.pool,
+        Err(err) => {
+            tracing::error!(request_id = %bill.request_id, error = %err, "退款失败（预扣悬置，待对账清理）");
+            Pool::Wallet
+        }
+    };
     let (channel, key) = failure.channel.map_or((0, 0), |(c, k)| (c, k));
     record_terminal(
         bill,
@@ -2081,6 +2491,7 @@ async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
         failure.failover_count,
         "refund",
         0,
+        pool,
     )
     .await;
 }
@@ -2099,6 +2510,7 @@ async fn record_terminal(
     failover: i16,
     event_type: &str,
     delta_micro: i64,
+    pool: Pool,
 ) {
     let input = SettlementInput {
         dimensions: usage_dimensions(bill, info),
@@ -2135,6 +2547,7 @@ async fn record_terminal(
         delta_micro,
         balance_after: None,
         event_type,
+        pool,
     };
     bill.state.settle_write(input).await;
 }
@@ -2144,6 +2557,8 @@ fn usage_dimensions(bill: &RequestBilling, info: &CandInfo) -> okapi_ledger::pg:
         Ingress::OpenAi => "/v1/chat/completions",
         Ingress::Anthropic => "/v1/messages",
         Ingress::Responses => "/v1/responses",
+        Ingress::Gemini if bill.is_stream => "/v1beta/models/{model}:streamGenerateContent",
+        Ingress::Gemini => "/v1beta/models/{model}:generateContent",
     };
     okapi_ledger::pg::UsageDimensions::new(
         &bill.requested_model,
@@ -2169,18 +2584,32 @@ fn upstream_passthrough_response(
     request_id: Uuid,
 ) -> Response {
     let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    // Anthropic 入口：上游若非 anthropic 错误壳（如 OpenAI 渠道 400），转译为协议壳
-    let body = if ingress == Ingress::Anthropic && !body_is_anthropic_error(&body) {
-        let message = String::from_utf8_lossy(&body);
-        Bytes::from(
-            serde_json::json!({
-                "type": "error",
-                "error": {"type": "upstream_error", "message": message},
-            })
-            .to_string(),
-        )
-    } else {
-        body
+    // Anthropic / Gemini 入口：上游若非本协议错误壳（如 OpenAI 渠道 400），转译为协议壳
+    let body = match ingress {
+        Ingress::Anthropic if !body_is_anthropic_error(&body) => {
+            let message = String::from_utf8_lossy(&body);
+            Bytes::from(
+                serde_json::json!({
+                    "type": "error",
+                    "error": {"type": "upstream_error", "message": message},
+                })
+                .to_string(),
+            )
+        }
+        Ingress::Gemini if !body_is_gemini_error(&body) => {
+            let message = String::from_utf8_lossy(&body);
+            Bytes::from(
+                serde_json::json!({
+                    "error": {
+                        "code": status.as_u16(),
+                        "message": message,
+                        "status": super::error::gemini_status_name(status),
+                    },
+                })
+                .to_string(),
+            )
+        }
+        Ingress::OpenAi | Ingress::Responses | Ingress::Anthropic | Ingress::Gemini => body,
     };
     let resp = Response::builder()
         .status(status)
@@ -2194,6 +2623,16 @@ fn body_is_anthropic_error(body: &Bytes) -> bool {
     serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .is_some_and(|v| v.get("type").and_then(|t| t.as_str()) == Some("error"))
+}
+
+/// google.rpc.Status 壳：`error.code` 为数字且带 `error.status`。
+fn body_is_gemini_error(body: &Bytes) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").cloned())
+        .is_some_and(|e| {
+            e.get("code").is_some_and(serde_json::Value::is_number) && e.get("status").is_some()
+        })
 }
 
 fn elapsed_ms_i32(started: Instant) -> i32 {

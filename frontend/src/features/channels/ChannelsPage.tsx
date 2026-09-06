@@ -10,7 +10,8 @@ import {
   Stethoscope,
   Trash2,
 } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChannelRow } from '@/features/channels/types'
@@ -29,16 +30,29 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
 import { PROVIDERS, providerConsoleUrl } from '@/features/channels/types'
 import { PageHeader, Toolbar } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
 import { Select } from '@/components/ui/select'
 import { SelectionBar } from '@/components/ui/selection-bar'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
+import { useDraft } from '@/hooks/use-draft'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
+import { oneOf, text } from '@/lib/search-params'
 import { useConfirm } from '@/components/ui/confirm'
+
+const routeApi = getRouteApi('/admin/channels')
+
+/// 列表接口的一页：`total` / `enabled` 都是过滤集内的计数（未筛选时即全站）。
+interface ChannelPage {
+  data: ChannelRow[]
+  total: number
+  enabled: number
+}
 
 /// 渠道列表页。
 ///
@@ -51,20 +65,47 @@ export function ChannelsPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const [picked, setPicked] = useState<Set<number>>(new Set())
-  const [search, setSearch] = useState('')
-  const [providerFilter, setProviderFilter] = useState('')
-  const [drawer, setDrawer] = useState<{ mode: 'create' } | { mode: 'edit'; id: number } | null>(
-    null,
-  )
+  // 关键词 / 协议筛选 / 页码都在地址里（刷新 / 分享 / 后退不丢）。
+  // 搜索：草稿 → 回车 / 点搜索才提交（服务端 ILIKE，与用户 / 令牌列表同一形态）
+  const search = routeApi.useSearch()
+  const navigate = routeApi.useNavigate()
+  const query = search.q ?? ''
+  const providerFilter = search.provider ?? ''
+  const [draft, setDraft] = useDraft(query)
+  const [drawer, setDrawer] = useState<
+    { mode: 'create' } | { mode: 'edit'; channel: ChannelRow } | null
+  >(null)
   const [diagnosing, setDiagnosing] = useState(false)
   const [testingId, setTestingId] = useState<number | null>(null)
   const { confirm, dialog } = useConfirm()
+  const pager = usePagination()
+  // 过滤器与页码同一次导航更新：只按"新条件 + 第一页"请求一次
+  const setFilters = (next: { q?: string; provider?: string }) =>
+    void navigate({
+      search: (prev) => ({
+        ...prev,
+        ...('q' in next ? { q: text(next.q) } : {}),
+        ...('provider' in next ? { provider: oneOf(next.provider, PROVIDERS) } : {}),
+        page: undefined,
+      }),
+    })
 
   // 近 24h 健康：一次整表查询按 channel_id 分发到各行（CH 未启用则各行显示 —）
   const health = useChannelHealth24h()
+  // 过滤与切片都在服务端：几百条渠道每条带 keys / pools，整表拉回来再筛既慢又占内存。
+  // 列表接口不传 limit 才回全量——那是给"测活全部"和模型页的渠道计数用的。
   const channels = useQuery({
-    queryKey: qk.adminChannels,
-    queryFn: () => apiFetch<{ data: ChannelRow[] }>('/admin/channels'),
+    queryKey: [...qk.adminChannels, query, providerFilter, pager.offset, pager.limit],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        limit: String(pager.limit),
+        offset: String(pager.offset),
+      })
+      if (query !== '') params.set('q', query)
+      if (providerFilter !== '') params.set('provider', providerFilter)
+      return apiFetch<ChannelPage>(`/admin/channels?${params}`)
+    },
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminChannels })
   const fail = (err: unknown) => toast.error(describeError(err))
@@ -140,7 +181,10 @@ export function ChannelsPage() {
   // 测试全部启用渠道（new-api 同有）：并发 3 路——太多会让一批上游同时看到探测，
   // 太少几十条渠道要等很久；逐条失败不中断，最后汇总成功/失败数
   const testAll = useMutation({
-    mutationFn: async (ids: number[]) => {
+    mutationFn: async () => {
+      // 测的是全站所有启用渠道，不受当前页 / 筛选影响：不传 limit 拿整表
+      const { data } = await apiFetch<ChannelPage>('/admin/channels?status=1')
+      const ids = data.map((c) => c.id)
       let ok = 0
       let failed = 0
       const queue = [...ids]
@@ -181,21 +225,16 @@ export function ChannelsPage() {
     onError: fail,
   })
 
-  const all = channels.data?.data ?? []
-  // 过滤在前端做：渠道数量是运营规模（几十到几百），拉全量再筛比每次改条件都往
-  // 后端跑一趟更顺手，也省掉一套分页状态。
-  const rows = all.filter((c) => {
-    const kw = search.trim().toLowerCase()
-    const hitKw =
-      kw === '' ||
-      c.name.toLowerCase().includes(kw) ||
-      (c.api_base ?? '').toLowerCase().includes(kw)
-    return hitKw && (providerFilter === '' || c.provider === providerFilter)
-  })
+  const rows = channels.data?.data ?? []
+  const total = channels.data?.total ?? 0
+  // 过滤集内的启用数（未筛选时即全站）：页头徽章据此显示
+  const enabledCount = channels.data?.enabled ?? 0
+  // 表头勾选只管本页；别页勾下的仍留在 picked 里，底部 SelectionBar 的计数会把它们算上
   const allPicked = rows.length > 0 && rows.every((c) => picked.has(c.id))
   const somePicked = rows.some((c) => picked.has(c.id))
-  const filtered = search.trim() !== '' || providerFilter !== ''
-  const enabledCount = all.filter((c) => c.status === 1).length
+  const filtered = query !== '' || providerFilter !== ''
+  const applySearch = () => setFilters({ q: draft })
+  const clearFilters = () => setFilters({ q: '', provider: '' })
 
   const togglePick = (id: number) =>
     setPicked((prev) => {
@@ -205,8 +244,13 @@ export function ChannelsPage() {
       return next
     })
 
+  // 编辑态优先取列表里的最新行（加 key / 改池后 invalidate 会刷新它）；改了优先级或名字后
+  // 这一行可能翻到别页或被搜索词筛掉，此时退回打开抽屉时的快照——find 落空会让抽屉当场
+  // 变成一张空白的"新建"表单。
   const editingChannel =
-    drawer?.mode === 'edit' ? all.find((c) => c.id === drawer.id) : undefined
+    drawer?.mode === 'edit'
+      ? (rows.find((c) => c.id === drawer.channel.id) ?? drawer.channel)
+      : undefined
 
   return (
     <div className="flex flex-col gap-4">
@@ -217,7 +261,7 @@ export function ChannelsPage() {
         meta={
           channels.data && (
             <Badge variant="muted">
-              {t('admin:channelsSummary', { total: all.length, enabled: enabledCount })}
+              {t('admin:channelsSummary', { total, enabled: enabledCount })}
             </Badge>
           )
         }
@@ -226,8 +270,9 @@ export function ChannelsPage() {
             <Button
               variant="outline"
               loading={testAll.isPending}
-              disabled={enabledCount === 0}
-              onClick={() => testAll.mutate(all.filter((c) => c.status === 1).map((c) => c.id))}
+              // 筛选中的"0 启用"不代表全站没有可测的
+              disabled={enabledCount === 0 && !filtered}
+              onClick={() => testAll.mutate()}
             >
               {!testAll.isPending && <Activity className="h-4 w-4" />}
               {testAll.isPending ? t('admin:testAllRunning') : t('admin:testAll')}
@@ -250,28 +295,25 @@ export function ChannelsPage() {
             <SearchInput
               id="ch-search"
               className="w-64"
-              value={search}
+              value={draft}
               placeholder={t('admin:channelSearchHint')}
-              onChange={setSearch}
+              onChange={setDraft}
+              onSubmit={applySearch}
             />
+            <Button size="sm" onClick={applySearch}>
+              {t('common:search')}
+            </Button>
             <Select
               id="ch-provider"
               className="w-40"
               aria-label={t('admin:provider')}
               value={providerFilter}
-              onChange={setProviderFilter}
+              onChange={(provider) => setFilters({ provider })}
               placeholder={t('common:all')}
               options={PROVIDERS.map((p) => ({ value: p, label: p }))}
             />
             {filtered && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setSearch('')
-                  setProviderFilter('')
-                }}
-              >
+              <Button size="sm" variant="ghost" onClick={clearFilters}>
                 {t('common:clearFilters')}
               </Button>
             )}
@@ -279,7 +321,7 @@ export function ChannelsPage() {
         }
         selection={
           <span className="text-xs text-muted-foreground tabular-nums">
-            {t('common:resultCount', { n: rows.length })}
+            {t('common:resultCount', { n: total })}
           </span>
         }
       />
@@ -294,13 +336,7 @@ export function ChannelsPage() {
             title={t('common:noResults')}
             hint={t('common:noResultsHint')}
             action={
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setSearch('')
-                  setProviderFilter('')
-                }}
-              >
+              <Button variant="outline" onClick={clearFilters}>
                 {t('common:clearFilters')}
               </Button>
             }
@@ -326,7 +362,16 @@ export function ChannelsPage() {
                   srLabel={t('admin:batchPickAll')}
                   checked={allPicked}
                   indeterminate={somePicked && !allPicked}
-                  onChange={(on) => setPicked(on ? new Set(rows.map((c) => c.id)) : new Set())}
+                  onChange={(on) =>
+                    setPicked((prev) => {
+                      const next = new Set(prev)
+                      for (const c of rows) {
+                        if (on) next.add(c.id)
+                        else next.delete(c.id)
+                      }
+                      return next
+                    })
+                  }
                 />
               </Th>
               <Th>ID</Th>
@@ -423,7 +468,7 @@ export function ChannelsPage() {
                     <IconButton
                       icon={Pencil}
                       label={t('common:edit')}
-                      onClick={() => setDrawer({ mode: 'edit', id: c.id })}
+                      onClick={() => setDrawer({ mode: 'edit', channel: c })}
                     />
                     <IconButton
                       icon={Copy}
@@ -450,6 +495,8 @@ export function ChannelsPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={channels.data?.total} />
 
       <SelectionBar count={picked.size} onClear={() => setPicked(new Set())}>
         <Button size="sm" variant="outline" loading={batch.isPending} onClick={() => batch.mutate('enable')}>

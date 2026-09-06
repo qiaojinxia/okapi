@@ -6,7 +6,7 @@ export interface SettingRow {
   updated_at: string | null
 }
 
-export type SettingsSection = 'registration' | 'notice' | 'notify'
+export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp'
 export type SettingEditor = 'auto' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
@@ -32,6 +32,8 @@ const CATALOG: Record<string, SettingMeta> = {
   payment_stripe: { label: 'admin:settingStripe', description: 'admin:settingStripeDesc', group: 'payment', editor: 'stripe' },
   oauth_providers: { label: 'admin:settingOAuth', description: 'admin:settingOAuthDesc', group: 'identity', editor: 'oauth' },
   notify_channels: { label: 'admin:notify', description: 'admin:settingNotifyDesc', group: 'identity', editor: 'auto', section: 'notify' },
+  smtp: { label: 'admin:smtpTitle', description: 'admin:settingSmtpDesc', group: 'identity', editor: 'auto', section: 'smtp' },
+  site_url: { label: 'admin:settingSiteUrl', description: 'admin:settingSiteUrlDesc', group: 'identity', editor: 'auto' },
   registration_policy: { label: 'admin:regTitle', description: 'admin:settingRegistrationDesc', group: 'identity', editor: 'auto', section: 'registration' },
   site_notice: { label: 'admin:noticeTitle', description: 'admin:settingNoticeDesc', group: 'identity', editor: 'auto', section: 'notice' },
   model_rpm_limits: { label: 'admin:settingModelLimits', description: 'admin:settingModelLimitsDesc', group: 'traffic', editor: 'limits' },

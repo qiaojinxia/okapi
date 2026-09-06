@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Users } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -13,6 +13,7 @@ import { PageHeader } from '@/components/ui/page'
 import { toast } from '@/components/ui/toast'
 import { TeamDetailCard } from '@/features/teams/TeamDetailCard'
 import { TeamListCard } from '@/features/teams/TeamListCard'
+import { usePagination } from '@/hooks/use-pagination'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 
@@ -32,10 +33,15 @@ export function TeamsPage() {
   const [active, setActive] = useState<number | null>(null)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
+  const pager = usePagination()
 
   const teams = useQuery({
-    queryKey: qk.myTeams,
-    queryFn: () => apiFetch<{ data: TeamRow[] }>('/api/teams'),
+    queryKey: [...qk.myTeams, pager.offset, pager.limit],
+    queryFn: () =>
+      apiFetch<{ data: TeamRow[]; total: number }>(
+        `/api/teams?limit=${pager.limit}&offset=${pager.offset}`,
+      ),
+    placeholderData: keepPreviousData,
     retry: false,
   })
 
@@ -80,6 +86,8 @@ export function TeamsPage() {
       ) : (
         <TeamListCard
           teams={teams.data?.data ?? []}
+          total={teams.data?.total}
+          pager={pager}
           loading={teams.isPending}
           error={teams.isError ? describeError(teams.error) : null}
           onPick={setActive}

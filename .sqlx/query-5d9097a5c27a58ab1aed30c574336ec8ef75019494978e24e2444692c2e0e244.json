@@ -1,0 +1,335 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT log_type, status, prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,\n                  amount_micro, original_amount_micro, discount_micro, upstream_cost_micro,\n                  pricing_epoch, pricing_snapshot, latency_ms, ttft_ms, is_stream, retry_count,\n                  failover_count, upstream_status, error_code, upstream_request_id, node,\n                  sticky_layer, client_type, host(client_ip) AS client_ip, pool, channel_id, channel_key_id\n           FROM billing_records WHERE request_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "log_type",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "log_type"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "prompt_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "prompt_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "cached_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "cached_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "completion_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "completion_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "reasoning_tokens",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "reasoning_tokens"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "original_amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "original_amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "discount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "discount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "upstream_cost_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "upstream_cost_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "pricing_epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pricing_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "pricing_snapshot",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pricing_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "latency_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "latency_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "ttft_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "ttft_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "is_stream",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "is_stream"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "retry_count",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "retry_count"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "failover_count",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "failover_count"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "upstream_status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "upstream_status"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "error_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "error_code"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "upstream_request_id",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "upstream_request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "node",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "node"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "sticky_layer",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "sticky_layer"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "client_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "client_type"
+          }
+        }
+      },
+      {
+        "ordinal": 23,
+        "name": "client_ip",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 24,
+        "name": "pool",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "pool"
+          }
+        }
+      },
+      {
+        "ordinal": 25,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 26,
+        "name": "channel_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "channel_key_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      null,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "5d9097a5c27a58ab1aed30c574336ec8ef75019494978e24e2444692c2e0e244"
+}

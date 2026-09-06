@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, redirect } from '@tanstack/react-router'
+import { Outlet, createFileRoute, redirect, useMatches } from '@tanstack/react-router'
 import {
   BarChart3,
   Boxes,
@@ -36,6 +36,10 @@ export const Route = createFileRoute('/admin')({
 
 function AdminLayout() {
   const { t } = useTranslation()
+  // 哪些页面要撑满视口由叶子路由的 staticData 说了算（见 main.tsx 的类型声明）
+  const fitViewport = useMatches({
+    select: (matches) => matches.some((m) => m.staticData.fitViewport === true),
+  })
   // 分组顺序即运维动线：先看总览 → 接入供应商 → 配模型价 → 管用户 → 看数 → 调系统
   const nav: NavGroup[] = [
     { items: [{ to: '/admin', label: t('admin:overview'), icon: LayoutDashboard }] },
@@ -90,7 +94,11 @@ function AdminLayout() {
     },
   ]
   return (
-    <Shell nav={nav} workspace={{ to: '/portal', label: t('common:portal'), icon: User }}>
+    <Shell
+      nav={nav}
+      workspace={{ to: '/portal', label: t('common:portal'), icon: User }}
+      fitViewport={fitViewport}
+    >
       <Outlet />
     </Shell>
   )

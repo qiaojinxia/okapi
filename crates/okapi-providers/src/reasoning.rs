@@ -261,6 +261,18 @@ fn consumed_key(key: &str, value: &Value) -> bool {
 /// 原生的 `reasoning_effort` / `thinking` 一概不动：那是上游自己的字段。
 #[must_use]
 pub fn strip_unified(body: &Bytes) -> Option<Bytes> {
+    strip_unified_keeping(body, &[])
+}
+
+/// Responses 同方言直转前的处理：`reasoning.effort` 正是上游的原生键，**必须留下**；
+/// 只摘走 OpenRouter 形状里 Responses 不认的 `max_tokens` / `enabled`
+/// （二者已折进 directive，由 [`apply_responses`] 以 effort 档位补回）。
+#[must_use]
+pub fn strip_unified_for_responses(body: &Bytes) -> Option<Bytes> {
+    strip_unified_keeping(body, &["effort"])
+}
+
+fn strip_unified_keeping(body: &Bytes, keep: &[&str]) -> Option<Bytes> {
     if !mentions_reasoning(body) {
         return None;
     }
@@ -268,7 +280,7 @@ pub fn strip_unified(body: &Bytes) -> Option<Bytes> {
     let root = value.as_object_mut()?;
     let obj = root.get_mut(UNIFIED_FIELD)?.as_object_mut()?;
     let before = obj.len();
-    obj.retain(|k, v| !consumed_key(k, v));
+    obj.retain(|k, v| keep.contains(&k.as_str()) || !consumed_key(k, v));
     if obj.len() == before {
         return None; // 一个都没消化：原样透传，别动它
     }
@@ -343,6 +355,34 @@ pub fn apply_openai(body: &Bytes, directive: ReasoningDirective) -> Result<Bytes
     if !obj.contains_key("reasoning_effort") {
         obj.insert("reasoning_effort".into(), json!(effort.as_str()));
     }
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// Responses 方向注入（同方言直转体）：effort → `reasoning.effort`。
+/// 已有 `reasoning.effort` 不覆盖；`reasoning` 对象里的其它原生键（`summary` 等）原样保留。
+pub fn apply_responses(
+    body: &Bytes,
+    directive: ReasoningDirective,
+) -> Result<Bytes, UpstreamError> {
+    let effort = directive.effective_effort();
+    let mut value: Value =
+        serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let Some(obj) = value.as_object_mut() else {
+        return Err(UpstreamError::Build("body_not_object".to_owned()));
+    };
+    let slot = obj
+        .entry(UNIFIED_FIELD)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(reasoning) = slot.as_object_mut() else {
+        // 客户端写了个非对象的 reasoning：不是我们能修的，原样送上游让它报错
+        return Ok(body.clone());
+    };
+    if reasoning.contains_key("effort") {
+        return Ok(body.clone());
+    }
+    reasoning.insert("effort".into(), json!(effort.as_str()));
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
@@ -559,5 +599,65 @@ mod tests {
         // 只有原生字段时零拷贝
         assert!(strip_unified(&Bytes::from(r#"{"reasoning_effort":"high"}"#.to_owned())).is_none());
         assert!(strip_unified(&Bytes::from(r#"{"model":"m"}"#.to_owned())).is_none());
+    }
+
+    #[test]
+    fn responses_native_keeps_effort_and_summary() {
+        // Codex CLI 原样：effort 与 summary 都是 Responses 原生键，一个都不能丢
+        let body = Bytes::from(
+            r#"{"model":"m","reasoning":{"effort":"high","summary":"auto"}}"#.to_owned(),
+        );
+        assert!(
+            strip_unified_for_responses(&body).is_none(),
+            "全是原生键：零拷贝透传"
+        );
+        // OpenRouter 形状混入：只摘 Responses 不认的 max_tokens / enabled
+        let body = Bytes::from(
+            r#"{"reasoning":{"effort":"low","max_tokens":2048,"enabled":true,"summary":"auto"}}"#
+                .to_owned(),
+        );
+        let v: Value =
+            serde_json::from_slice(&strip_unified_for_responses(&body).unwrap()).unwrap();
+        assert_eq!(v["reasoning"], json!({"effort": "low", "summary": "auto"}));
+        // 只剩不认的键 → 整个对象摘掉
+        let body = Bytes::from(r#"{"reasoning":{"max_tokens":2048}}"#.to_owned());
+        let v: Value =
+            serde_json::from_slice(&strip_unified_for_responses(&body).unwrap()).unwrap();
+        assert!(v.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn apply_responses_injects_effort_without_clobbering() {
+        let d = ReasoningDirective {
+            effort: Some(Effort::High),
+            budget_tokens: None,
+        };
+        // 无 reasoning 对象：新建
+        let out = apply_responses(&Bytes::from(r#"{"model":"m"}"#.to_owned()), d).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["reasoning"], json!({"effort": "high"}));
+        // 已有对象但无 effort：补 effort、保留 summary
+        let out = apply_responses(
+            &Bytes::from(r#"{"reasoning":{"summary":"auto"}}"#.to_owned()),
+            d,
+        )
+        .unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["reasoning"], json!({"effort": "high", "summary": "auto"}));
+        // 已有 effort：显式请求优先，不覆盖
+        let body = Bytes::from(r#"{"reasoning":{"effort":"low"}}"#.to_owned());
+        let out = apply_responses(&body, d).unwrap();
+        assert_eq!(out, body);
+        // 只给预算（-thinking-N 后缀）：折成档位
+        let budget_only = ReasoningDirective {
+            effort: None,
+            budget_tokens: Some(2048),
+        };
+        let out = apply_responses(&Bytes::from("{}".to_owned()), budget_only).unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["reasoning"]["effort"],
+            budget_only.effective_effort().as_str()
+        );
     }
 }

@@ -1,8 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link, getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { KeyRound, Power, PowerOff, ScrollText, Trash2 } from 'lucide-react'
-import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { toast } from '@/components/ui/toast'
@@ -17,10 +16,15 @@ import { Pagination } from '@/components/ui/pagination'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { UsageCell, useEntityUsage } from '@/features/analytics/UsageCell'
+import { useDraft } from '@/hooks/use-draft'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { posInt, text } from '@/lib/search-params'
+
+const routeApi = getRouteApi('/admin/keys')
 
 interface AdminKeyRow {
   id: number
@@ -43,8 +47,6 @@ interface AdminKeyRow {
   created_at: string
 }
 
-const LIMIT = 20
-
 /// 令牌管理面：跨用户排查与处置（停用/删除）。
 /// 与门户自助页的区别是可跨用户检索——排查滥用时按用户名/令牌名定位；
 /// 每行给"看它的日志"直达（滥用排查的下一步永远是看它调了什么）。
@@ -55,28 +57,37 @@ export function AdminKeysPage() {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   const queryClient = useQueryClient()
-  const [search, setSearch] = useState('')
-  const [query, setQuery] = useState('')
-  const [userId, setUserId] = useState('')
-  const [offset, setOffset] = useState(0)
+  // 检索条件（关键词 / 用户 id）与页码都在地址里，用户页可以带 user_id 直达
+  const search = routeApi.useSearch()
+  const navigate = routeApi.useNavigate()
+  const query = search.q ?? ''
+  const uid = search.user_id ?? null
+  const [draft, setDraft] = useDraft(query)
+  const [userIdDraft, setUserIdDraft] = useDraft(uid === null ? '' : String(uid))
   const { confirm, dialog } = useConfirm()
 
-  const uid = userId.trim() === '' ? null : Number(userId)
+  const pager = usePagination()
   const keys = useQuery({
-    queryKey: [...qk.adminKeys(uid, query), offset],
+    queryKey: [...qk.adminKeys(uid, query), pager.offset, pager.limit],
     queryFn: () => {
-      const params = new URLSearchParams({ limit: String(LIMIT), offset: String(offset) })
+      const params = new URLSearchParams({
+        limit: String(pager.limit),
+        offset: String(pager.offset),
+      })
       if (query !== '') params.set('q', query)
-      if (uid !== null && Number.isFinite(uid)) params.set('user_id', String(uid))
+      if (uid !== null) params.set('user_id', String(uid))
       return apiFetch<{ total: number; data: AdminKeyRow[] }>(`/admin/keys?${params}`)
     },
+    // 翻页时保留上一页数据：表格不闪成骨架屏
+    placeholderData: keepPreviousData,
   })
 
-  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ['admin', 'keys'] })
-  const applySearch = () => {
-    setOffset(0)
-    setQuery(search.trim())
-  }
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminKeysAll })
+  // 两个条件一起提交，并在同一次导航里回第一页
+  const applySearch = () =>
+    void navigate({
+      search: (prev) => ({ ...prev, q: text(draft), user_id: posInt(userIdDraft), page: undefined }),
+    })
 
   const setStatus = useMutation({
     mutationFn: (arg: { id: number; status: number }) =>
@@ -128,9 +139,9 @@ export function AdminKeysPage() {
               id="kq"
               className="w-64"
               aria-label={t('admin:keySearch')}
-              value={search}
+              value={draft}
               placeholder={t('admin:keySearchHint')}
-              onChange={setSearch}
+              onChange={setDraft}
               onSubmit={applySearch}
             />
             <div className="flex items-center gap-2">
@@ -138,9 +149,9 @@ export function AdminKeysPage() {
               <Input
                 id="kuid"
                 className="w-28"
-                value={userId}
+                value={userIdDraft}
                 inputMode="numeric"
-                onChange={(e) => setUserId(e.target.value)}
+                onChange={(e) => setUserIdDraft(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') applySearch()
                 }}
@@ -263,12 +274,7 @@ export function AdminKeysPage() {
           </TBody>
         </Table>
       )}
-      <Pagination
-        total={keys.data?.total ?? 0}
-        limit={LIMIT}
-        offset={offset}
-        onOffset={setOffset}
-      />
+      <Pagination {...pager} total={keys.data?.total} />
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Boxes, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -7,12 +7,14 @@ import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { PoolDrawer } from '@/features/pools/PoolDrawer'
 import type { PoolRow } from '@/features/pools/types'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -27,10 +29,15 @@ export function PoolsPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<{ pool?: PoolRow } | null>(null)
   const { confirm, dialog } = useConfirm()
+  const pager = usePagination()
 
   const pools = useQuery({
-    queryKey: qk.adminPools,
-    queryFn: () => apiFetch<{ data: PoolRow[] }>('/admin/pools'),
+    queryKey: [...qk.adminPools, pager.offset, pager.limit],
+    queryFn: () =>
+      apiFetch<{ data: PoolRow[]; total: number }>(
+        `/admin/pools?limit=${pager.limit}&offset=${pager.offset}`,
+      ),
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminPools })
 
@@ -52,7 +59,9 @@ export function PoolsPage() {
         icon={Boxes}
         title={t('admin:poolsTitle')}
         description={t('admin:poolsDesc')}
-        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
+        meta={
+          <Badge variant="muted">{t('admin:keyTotal', { n: pools.data?.total ?? 0 })}</Badge>
+        }
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />
@@ -77,7 +86,7 @@ export function PoolsPage() {
           }
         />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>{t('admin:poolCode')}</Th>
@@ -162,6 +171,8 @@ export function PoolsPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={pools.data?.total} />
 
       {drawer !== null && (
         <PoolDrawer

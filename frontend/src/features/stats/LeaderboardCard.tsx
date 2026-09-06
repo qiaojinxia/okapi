@@ -6,6 +6,7 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 import { formatCount, formatMoney } from '@/lib/money'
 
 export interface LeaderboardRow {
@@ -21,7 +22,7 @@ export interface LeaderboardRow {
 export function LeaderboardCard({ days }: { days: number }) {
   const { t, i18n } = useTranslation()
   const board = useQuery({
-    queryKey: ['admin-leaderboard', days],
+    queryKey: qk.adminLeaderboard(days),
     queryFn: () =>
       apiFetch<{ data: LeaderboardRow[] }>(`/admin/leaderboard?days=${days}&limit=20`),
   })

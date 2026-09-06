@@ -15,9 +15,57 @@ const RESERVE_LUA: &str = include_str!("lua/reserve.lua");
 const COMMIT_LUA: &str = include_str!("lua/commit.lua");
 const REFUND_LUA: &str = include_str!("lua/refund.lua");
 const REPAIR_LUA: &str = include_str!("lua/repair.lua");
+const SUB_SET_LUA: &str = include_str!("lua/sub_set.lua");
 
 /// 预扣悬置时限：超时未结算的预扣由对账任务懒清理（M2 reconciler）。
 const RESERVATION_TTL_MS: i64 = 600_000;
+
+/// 结算来源池（IMPLEMENTATION §11.28）：一笔请求的预扣 / 结算 / 退款只动一个池。
+/// `billing_events.pool` / `billing_records.pool` 存 `as_i16()`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Pool {
+    /// 钱包 `bal.avail`（fail-closed：余额 ≥ 预估才放行）。
+    #[default]
+    Wallet,
+    /// 订阅池 `bal.sub`（窗口内有余即用，允许最后一笔越界）。
+    Subscription,
+}
+
+impl Pool {
+    #[must_use]
+    pub const fn as_i16(self) -> i16 {
+        match self {
+            Self::Wallet => 0,
+            Self::Subscription => 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn from_i16(v: i16) -> Self {
+        if v == 1 {
+            Self::Subscription
+        } else {
+            Self::Wallet
+        }
+    }
+
+    /// `bal:{uid}` 里的字段名（repair.lua 的 `pool_field` 参数）。
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::Wallet => "avail",
+            Self::Subscription => "sub",
+        }
+    }
+}
+
+fn pool_at(items: &[Value], idx: usize) -> Pool {
+    // Lua 回的是整数 0/1；缺位（老脚本）按钱包
+    match items.get(idx).and_then(value_i64) {
+        Some(1) => Pool::Subscription,
+        _ => Pool::Wallet,
+    }
+}
 
 /// key 级限额（<=0 表示不限）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -41,20 +89,45 @@ pub struct ReserveRequest {
 
 #[derive(Debug, Clone)]
 pub enum ReserveOutcome {
-    Reserved { balance_after: Money },
-    Insufficient { balance: Money },
-    RateLimited { which: String },
+    /// `balance_after` 为**所选池**的余额。
+    Reserved {
+        balance_after: Money,
+        pool: Pool,
+    },
+    /// 钱包余额不足（订阅池不可用或已耗尽时才到这一步）。
+    Insufficient {
+        balance: Money,
+    },
+    RateLimited {
+        which: String,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum CommitOutcome {
-    /// refund_delta = 预扣 − 实际（正=退，负=补扣）。
+    /// refund_delta = 预扣 − 实际（正=退，负=补扣）；`pool` = 预扣所在池（结算回到同一池）。
     Committed {
         refund_delta: Money,
         balance_after: Money,
+        pool: Pool,
     },
     /// 预扣不存在（重复结算/对账竞争）：调用方不得直接改余额。
     NoReservation,
+}
+
+/// refund 结果：释放金额（幂等重复调用为 0）、所在池余额、池。
+#[derive(Debug, Clone, Copy)]
+pub struct RefundOutcome {
+    pub released: Money,
+    pub balance_after: Money,
+    pub pool: Pool,
+}
+
+/// `sub_set` 结果：置额前后的订阅池值（调用方据 `after − before` 记 pool=1 事件）。
+#[derive(Debug, Clone, Copy)]
+pub struct SubSetOutcome {
+    pub before: Money,
+    pub after: Money,
 }
 
 /// Redis 余额账本客户端。
@@ -122,6 +195,7 @@ impl BalanceLedger {
             caps.concurrency.to_string(),
             est_tokens.to_string(),
             api_key_id.to_string(),
+            now.timestamp().to_string(),
         ];
 
         let reply: Value = self.client.eval(RESERVE_LUA, keys, args).await?;
@@ -129,6 +203,7 @@ impl BalanceLedger {
         match (first_i64(items), second_str(items)) {
             (Some(1), _) => Ok(ReserveOutcome::Reserved {
                 balance_after: money_at(items, 1)?,
+                pool: pool_at(items, 2),
             }),
             (Some(0), Some("INSUFFICIENT")) => Ok(ReserveOutcome::Insufficient {
                 balance: money_at(items, 2)?,
@@ -156,37 +231,107 @@ impl BalanceLedger {
             (Some(1), _) => Ok(CommitOutcome::Committed {
                 refund_delta: money_at(items, 1)?,
                 balance_after: money_at(items, 2)?,
+                pool: pool_at(items, 3),
             }),
             (Some(0), Some("NO_RESERVATION")) => Ok(CommitOutcome::NoReservation),
             _ => Err(LedgerError::UnexpectedReply("commit")),
         }
     }
 
-    /// 全额释放（不计费路径）；幂等。返回释放金额与余额。
+    /// 全额释放（不计费路径）；幂等。返回释放金额、所在池余额与池。
     pub async fn refund(
         &self,
         user_id: i64,
         api_key_id: i64,
         request_id: Uuid,
-    ) -> Result<(Money, Money), LedgerError> {
+    ) -> Result<RefundOutcome, LedgerError> {
         let keys = vec![Self::bal_key(user_id), Self::conc_key(user_id, api_key_id)];
         let args = vec![request_id.to_string()];
         let reply: Value = self.client.eval(REFUND_LUA, keys, args).await?;
         let items = as_array(&reply)?;
         if first_i64(items) == Some(1) {
-            Ok((money_at(items, 1)?, money_at(items, 2)?))
+            Ok(RefundOutcome {
+                released: money_at(items, 1)?,
+                balance_after: money_at(items, 2)?,
+                pool: pool_at(items, 3),
+            })
         } else {
             Err(LedgerError::UnexpectedReply("refund"))
         }
     }
 
-    /// 入账（充值/调整/种子）：热账本侧；PG 事件由调用方另记。
+    /// 入账（充值/调整/种子）：钱包热账本侧；PG 事件由调用方另记。
     pub async fn credit(&self, user_id: i64, amount: Money) -> Result<Money, LedgerError> {
+        self.credit_pool(user_id, amount, Pool::Wallet).await
+    }
+
+    /// 指定池入账（管理员按日志退款要回到原池）。
+    pub async fn credit_pool(
+        &self,
+        user_id: i64,
+        amount: Money,
+        pool: Pool,
+    ) -> Result<Money, LedgerError> {
         let after: i64 = self
             .client
-            .hincrby(Self::bal_key(user_id), "avail", amount.as_micros())
+            .hincrby(Self::bal_key(user_id), pool.field(), amount.as_micros())
             .await?;
         Ok(Money::from_micros(after))
+    }
+
+    /// 订阅池置额（激活 / 滚窗 / 到期；`lua/sub_set.lua`）。`quota` 为新窗额度（到期传 0），
+    /// `sub_until` 为池可用截止 unix 秒（到期传 0）。在途订阅预扣自动加回，见脚本注释。
+    pub async fn sub_set(
+        &self,
+        user_id: i64,
+        quota: Money,
+        sub_until: i64,
+    ) -> Result<SubSetOutcome, LedgerError> {
+        let reply: Value = self
+            .client
+            .eval(
+                SUB_SET_LUA,
+                vec![Self::bal_key(user_id)],
+                vec![quota.as_micros().to_string(), sub_until.to_string()],
+            )
+            .await?;
+        let items = as_array(&reply)?;
+        let parse = |i: usize| -> Result<Money, LedgerError> {
+            str_at(items, i)?
+                .parse::<i64>()
+                .map(Money::from_micros)
+                .map_err(|_| LedgerError::UnexpectedReply("sub_set"))
+        };
+        Ok(SubSetOutcome {
+            before: parse(0)?,
+            after: parse(1)?,
+        })
+    }
+
+    /// 只刷新订阅池可用截止（续期：`expires_at` 后移但窗口与池余额不动）。
+    pub async fn sub_touch_until(&self, user_id: i64, sub_until: i64) -> Result<(), LedgerError> {
+        let _: () = self
+            .client
+            .hset(Self::bal_key(user_id), ("sub_until", sub_until))
+            .await?;
+        Ok(())
+    }
+
+    /// 读订阅池：`(剩余, 可用截止 unix 秒)`；无订阅为 `(0, 0)`。
+    pub async fn sub_balance(&self, user_id: i64) -> Result<(Money, i64), LedgerError> {
+        let raw: Vec<Option<String>> = self
+            .client
+            .hmget(Self::bal_key(user_id), vec!["sub", "sub_until"])
+            .await?;
+        let num = |i: usize| -> Result<i64, LedgerError> {
+            raw.get(i)
+                .and_then(Option::as_deref)
+                .map(str::parse::<i64>)
+                .transpose()
+                .map_err(|_| LedgerError::UnexpectedReply("sub_balance"))
+                .map(|v| v.unwrap_or(0))
+        };
+        Ok((Money::from_micros(num(0)?), num(1)?))
     }
 
     /// 余额有效期到期清零：原子取出全部可用余额并返回（在途预扣不动，
@@ -213,19 +358,20 @@ impl BalanceLedger {
     /// （429 insufficient_quota），且**不会自愈**：对账任务此前只报不修，
     /// 全仓也没有第二个入口能把余额写回去。
     ///
-    /// 权威源是 `billing_events` 求和，重建幂等：同一个 target 重跑结果相同。
+    /// 权威源是 `billing_events` **同池**求和，重建幂等：同一个 target 重跑结果相同。
     /// 在途预扣保持不动，详见 `lua/repair.lua`。
     pub async fn repair(
         &self,
         user_id: i64,
         target: Money,
+        pool: Pool,
     ) -> Result<RepairOutcome, LedgerError> {
         let reply: Value = self
             .client
             .eval(
                 REPAIR_LUA,
                 vec![Self::bal_key(user_id)],
-                vec![target.as_micros().to_string()],
+                vec![target.as_micros().to_string(), pool.field().to_owned()],
             )
             .await?;
         let items = as_array(&reply)?;
@@ -265,7 +411,7 @@ impl BalanceLedger {
             let Ok(request_id) = Uuid::parse_str(id_str) else {
                 continue;
             };
-            // 字段格式 "<amount>|<deadline_ms>|<api_key_id>"（旧格式缺 kid 时取 0）
+            // 字段格式 "<amount>|<deadline_ms>|<api_key_id>|<pool>"（旧格式缺 kid 取 0、缺 pool 取钱包）
             let mut parts = value.split('|');
             let amount = parts
                 .next()
@@ -279,11 +425,16 @@ impl BalanceLedger {
                 .next()
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(0);
+            let pool = parts
+                .next()
+                .and_then(|s| s.parse::<i16>().ok())
+                .map_or(Pool::Wallet, Pool::from_i16);
             out.push(Reservation {
                 request_id,
                 amount: Money::from_micros(amount),
                 deadline_ms,
                 api_key_id,
+                pool,
             });
         }
         Ok(out)
@@ -297,6 +448,8 @@ pub struct Reservation {
     pub amount: Money,
     pub deadline_ms: i64,
     pub api_key_id: i64,
+    /// 预扣所在池（对账按池累计在途）。
+    pub pool: Pool,
 }
 
 // ---- Lua 回复解析（Lua 数字回 RESP integer，tostring 回 bulk string）----

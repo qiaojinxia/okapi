@@ -9,10 +9,11 @@
 //! 与看板端点的另一处不同：这里的过滤条件含**用户输入的字符串**，
 //! 故一律走 `query_with_params` 绑定参数，SQL 里只出现 clamp 过的整数。
 
+use super::query::Query;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_store::ChClient;

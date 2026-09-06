@@ -34,7 +34,7 @@
 | API 文档 | utoipa | OpenAPI 自动生成 |
 | 工程组织 | cargo workspace：6 crate（domain / pricing / ledger / providers / store / api）+ 单二进制 `okapi gateway\|console\|worker\|all` | 布局见 DESIGN §8.3 |
 
-身份体系补充依赖（M3，§6.4 落地随附）：`argon2`（argon2id 密码散列）、`hmac` + `sha1`（RFC 6238 TOTP）、`aes-gcm`（TOTP 密钥信封加密）、`base32`（otpauth 编码）。支付补充依赖（M4，§11.2）：`md-5`（易支付协议签名，协议既定算法）。Realtime 补充依赖（M4，§4.4）：`tokio-tungstenite`（上游 WS 客户端）+ axum `ws` feature（入口升级）。
+身份体系补充依赖（M3，§6.4 落地随附）：`argon2`（argon2id 密码散列）、`hmac` + `sha1`（RFC 6238 TOTP）、`aes-gcm`（TOTP 密钥信封加密）、`base32`（otpauth 编码）。支付补充依赖（M4，§11.2）：`md-5`（易支付协议签名，协议既定算法）。Realtime 补充依赖（M4，§4.4）：`tokio-tungstenite`（上游 WS 客户端）+ axum `ws` feature（入口升级）。邮件补充依赖（M4，§11.27）：`lettre`（SMTP 客户端，`tokio1-rustls-tls` + `builder`，不启 native-tls / pool——与 WS 客户端同属"协议客户端"档，不是框架级依赖；此前 SMTP 列 backlog 的理由是"不引冻结外依赖"，§11.27 说明为何改判）。
 
 ### 1.2 前端
 
@@ -270,15 +270,17 @@ pub trait CredentialProvider: Send + Sync {
 | --- | --- |
 | /v1/chat/completions（流式+非流式） | M1 |
 | /v1/models、/v1/embeddings【已实现：prompt-only 计费 + failover】 | M2 |
-| Anthropic /v1/messages（双向：入口协议 + 上游方向）【已实现：`convert/{openai_to_anthropic,anthropic_to_openai}.rs` + 原生客户端 + x-api-key 鉴权；四象限用例全绿】 | M3 |
-| Gemini generateContent 方向【已实现：`gemini.rs` + `convert/openai_to_gemini.rs`（thoughts 归 reasoning、promptTokenCount 含缓存口径）】 | M3 |
-| /v1/responses（含降级 ChatCompletions）【已实现：`convert/responses_to_chat.rs`，事件骨架合成 + 两跳（responses→chat→anthropic/gemini）】 | M3 |
-| /v1/rerank（#1117）、图像/音频/视频（/v1/images、/v1/audio、/v1/videos/*，媒体计费） | M3【images/generations 已实现：per_call × n（n=1..10），乘数落 pricing_snapshot.media_units；rerank 已实现（Jina/Cohere 形状，prompt-only 计费，与 embeddings 共用泛化中继）；audio 已实现——**speech：输入字符数记为 prompt_tokens 走 ratio（对齐 OpenAI 按字符计价，站长把 model_ratio 配成字符价）或模型配 per_call；transcriptions：per_call 模式必须（时长无法本地解码），上游 verbose_json 的 duration 若在则记入快照供审计**；multipart 经解析重组转发（boundary 重生成，上游无感）；**videos 已实现（M4 补齐）**：POST /v1/videos 提交即 per_call × seconds 计费（缺省 4s、clamp 1..60，乘数落 pricing_snapshot.media_units；时长无法本地验证，与 transcriptions 立场一致），上游失败退款；GET /v1/videos/{id} 轮询与 /content 流式下载按创建时渠道映射回源（Redis video:task:* 48h，键含 user_id 隔离），不计费；JSON 提交，multipart input_reference 列 backlog】 | 
+| Anthropic /v1/messages（双向：入口协议 + 上游方向）【已实现：`convert/{openai_to_anthropic,anthropic_to_openai}.rs` + 原生客户端 + x-api-key 鉴权；四象限用例全绿。**`POST /v1/messages/count_tokens`**：鉴权 + 模型可见性，**不计费**；有 anthropic 候选则代理上游 `/messages/count_tokens`（tokenizer 对齐 Claude Code），否则本地 `estimate_prompt_tokens`；错误壳 Anthropic】 | M3 |
+| Gemini generateContent（双向：入口协议 + 上游方向）【已实现。**上游方向**：`gemini.rs` + `convert/openai_to_gemini.rs`（thoughts 归 reasoning、promptTokenCount 含缓存口径）。**入口**（`gateway/chat.rs::gemini_generate`）：`POST /v1beta/models/{model}:generateContent|streamGenerateContent`，模型名与流式与否都在路径上；鉴权认 Bearer / `x-goog-api-key` / `?key=` 三态（Gemini SDK、gemini-cli 直连）；流式一律 SSE 形态（`alt=sse`，不提供 JSON 数组流），出口无 `[DONE]`；错误壳 google.rpc.Status（`error.{code,message,status}`）。gemini 渠道同方言直转（只重写 URL 模型名，`thinkingConfig` / 内置工具等私有字段全保住；`gemini.rs::MetaScanner` 从 usageMetadata 取 usage）；openai/anthropic 渠道走 `convert/gemini_to_openai.rs`（systemInstruction→system、parts 文本/inlineData/functionCall/functionResponse↔chat 形状、generationConfig→温度/上限/stop、tools functionDeclarations↔chat tools；响应侧 chat→GenerateContentResponse、chat SSE→gemini chunk 流，finishReason+usageMetadata 落最后一个 chunk），anthropic 为两跳 gemini→chat→anthropic。`GET /v1beta/models` 给 `models.list` 形状。backlog：`countTokens`、`embedContent`、`cachedContents` 子资源；`promptTokensDetails` 按 modality 拆分】 | M3 |
+| /v1/responses（原生直转 + 降级 ChatCompletions）【已实现。**直转**（`responses.rs`）：渠道 `settings.responses_native`（openai 缺省 true / openai_compat 缺省 false / 其它协议恒降级）时请求只重写 model 原样送上游 `/responses`——previous_response_id / store / include / 内置工具 / `reasoning.{effort,summary}` 全保住（Codex CLI 续聊与推理项依赖这些，降级链会静默丢），事件原文透出、usage 取 response.completed（含 cached / reasoning 细分）；reasoning 后缀注入为 `reasoning.effort`；上游 404/405 = 没有 /responses → 同候选就地改走降级链（不计 failover、不标 key 失败）。**降级**（`convert/responses_to_chat.rs`，#5209）：事件骨架合成 + 两跳（responses→chat→anthropic/gemini）。backlog：`GET/DELETE /v1/responses/{id}`、`/input_items`、`/cancel` 子资源（store:false 的 Codex 不需要）】 | M3 |
+| /v1/rerank（#1117）、图像/音频/视频（/v1/images、/v1/audio、/v1/videos/*，媒体计费） | M3【images/generations **与 images/edits** 已实现：per_call × n（n=1..10，edits 的 n 取 multipart 字段），乘数落 pricing_snapshot.media_units；edits 走 multipart（image / mask / prompt，重组转发与 transcriptions 同构）；仅 openai / openai_compat / azure。rerank 已实现（Jina/Cohere 形状，prompt-only 计费，与 embeddings 共用泛化中继）；audio 已实现——**speech：输入字符数记为 prompt_tokens 走 ratio（对齐 OpenAI 按字符计价，站长把 model_ratio 配成字符价）或模型配 per_call；transcriptions：per_call 模式必须（时长无法本地解码），上游 verbose_json 的 duration 若在则记入快照供审计**；multipart 经解析重组转发（boundary 重生成，上游无感）；**videos 已实现（M4 补齐）**：POST /v1/videos 提交即 per_call × seconds 计费（缺省 4s、clamp 1..60，乘数落 pricing_snapshot.media_units；时长无法本地验证，与 transcriptions 立场一致），上游失败退款；GET /v1/videos/{id} 轮询与 /content 流式下载按创建时渠道映射回源（Redis video:task:* 48h，键含 user_id 隔离），不计费；JSON 提交，multipart input_reference 列 backlog】 | 
 | custom_pass 透传【已实现，语义定案：`/pass/{channel_id}/{*path}`（任意方法）；渠道 provider=custom_pass；settings 必填 `allowed_paths`（前缀白名单，空拒绝——SSRF 第二道闸，第一道是 api_base 固定）与 `billing_model`（models 表 per_call 模型，按次预扣/结算，禁零费裸透传）；可选 `auth_header`/`auth_scheme`（缺省 Authorization: Bearer）；请求体/查询串原样，响应流式回传仅透 content-type】 | M3 |
 | thinking-to-content 转换（客户端不支持 reasoning 输出时转正文）【已实现：渠道 settings.thinking_to_content，流式+非流式】 | M3 |
 | reasoning effort 模型名后缀（-high/-medium/-low、-thinking、-thinking-128 预算 → 请求参数改写，接在别名解析旁）【已实现：全名直命中优先；openai→reasoning_effort / anthropic→thinking 预算（自动抬 max_tokens）/ gemini→thinkingConfig；计费落基名】 | M3 |
 | OpenAI Realtime API（WebSocket 双向 + 音频 token 计费；WS 治理见 §14.4） | M4【实现定案：入口 `GET /v1/realtime?model=`（升级 WS；鉴权 Bearer 头或 `openai-insecure-api-key.<key>` 子协议）；上游 = openai 渠道 api_base 的 ws(s) 形态；**计费时机**：连接时按模型 max_output 预扣一笔，会话内逐 `response.done` 累计 usage（text+audio tokens 合并按模型倍率，audio 独立倍率列 backlog、细分进快照），断开时按累计 commit（无产出全额退款）；治理：per-key WS 连接租约（ZSET 60s 租约/20s 续期，崩溃自然滚出，docs/database.md §2.1 ws:lease:k:*）、首消息 30s、空闲 5min。四用例已验收（双向泵计费/零产出退款/限连 429/子协议鉴权）】 |
 | Responses WebSocket 入口（Codex CLI 风格 WS ingress → 上游 HTTP/SSE 桥接；出口代理 WS 不稳时全局/渠道级回退 HTTP 开关；连接治理复用 §14.4） | M4 |
+| Azure OpenAI 上游类型（provider=`azure`：`{endpoint}/openai/deployments/{deployment}/…?api-version=` + `api-key` 头；部署名 = model_mapping 值）【已实现，见 §11.29；chat / embeddings / images / audio 四类端点覆盖；videos / realtime 不路由 azure】 | M4 |
+| Bedrock / Vertex AI 上游类型 | 评估结论见 §11.29：**不做**独立 provider（SigV4 / OAuth2 服务账号签名 + 非 OpenAI 形状请求，超出"只换 URL 与鉴权头"的薄适配；两家都已提供 OpenAI 兼容端点 → 走 openai_compat） |
 | 任务型异步中转（Midjourney / Suno / 异步图像/视频：submit → poll/callback → 完成时结算；端点形状对齐生态：`/v1/images/generations/async` + `/v1/images/tasks/{task_id}`） | 开放项（M4 后）；tasks 表与 worker 轮询预留见 database.md §1.8 |
 
 不做：Dify ChatFlow 专属模式（OpenAI 兼容通道覆盖）、订阅型上游账号池（Grok OAuth / Antigravity 等，见 §1.4）。
@@ -364,7 +366,7 @@ group 一个实体、两种绑定：
 | 邮箱密码（argon2id）+ 邮箱验证 | M1 |
 | GitHub / LinuxDO / Telegram / Discord OAuth | M3【已实现（Telegram 除外——其登录部件非标 OAuth，M4 复评）：**配置驱动通用 authorization-code 模块**（`console/oauth.rs`），内置 github/discord/linuxdo 预设（settings.oauth_providers 只填 client_id/secret），任意标准 OAuth2/OIDC 上游可自定义 authorize/token/userinfo 三 URL 接入；state 走 Redis 一次性键；首登自动注册并绑定 (provider, subject)，回调发 web session → 前端兑 key】 |
 | 通用 OIDC（含 group→role/team 映射，#1106） | M3【userinfo 模式已随上覆盖；group→role/team 映射 M4 随 Team 层】 |
-| TOTP 两步验证（2FA，密钥 AES-GCM 加密落库）、Turnstile 注册风控 | M3【邮箱密码+会话+TOTP 已实现；实现定案：**web session（Redis `sess:web:*`，HttpOnly cookie）只服务 `/auth/*` 自助面**——注册/登录/2FA/兑换 key；门户与数据面保持 API key 单轨（登录成功经 `/auth/keys` 兑换 key，前端仍以 key 驱动）。TOTP 密钥 AES-256-GCM 加密（`OKAPI_MASTER_KEY`），RFC 6238 HMAC-SHA1 30s 窗 ±1；Turnstile 经 settings.turnstile_secret 配置，未配置即跳过（缺省关）】 |
+| TOTP 两步验证（2FA，密钥 AES-GCM 加密落库）、Turnstile 注册风控 | M3【邮箱密码+会话+TOTP 已实现；实现定案：**web session（Redis `sess:web:*`，HttpOnly cookie）只服务 `/auth/*` 自助面**——注册/登录/2FA/兑换 key；门户与数据面保持 API key 单轨（登录成功经 `/auth/keys` 兑换 key，前端仍以 key 驱动）。会话索引 `sess:idx:<uid>` + 元数据 `sess:meta:<sid>` 支持门户列举 / 单条吊销 / 一键全吊；密码重置、封禁、删除用户一律清空该用户 web 会话。TOTP 密钥 AES-256-GCM 加密（`OKAPI_MASTER_KEY`），RFC 6238 HMAC-SHA1 30s 窗 ±1；Turnstile 经 settings.turnstile_secret 配置，未配置即跳过（缺省关）】 |
 | LDAP（#5703）、OIDC-IdP 反向输出（#6572） | 企业阶段（M4 后） |
 | 手机注册（#6207） | SMS provider trait 扩展点，不进主线 |
 
@@ -469,9 +471,10 @@ release 构建下启用本模式须同时设 `OKAPI_SINGLE_USER_CONFIRM=true`（
 | #5277 | client_type 识别 | CH 列（M2 预留）+ 看板 | M2/M3 |
 | #1790-13 | 倍率对比合并工作台 | §9 | M3 |
 | #1790-11 / #5029 | 排行榜、token 加权均值 | §10 | M3 |
-| #1790-5 / #2845 / #3388 | 兑换码增强（限用户/限 IP/兑套餐）、套餐×分组 | redemption_codes + plans | M4【已实现：plans 表（grant/加组/余额有效期三语义）+ POST /admin/plans；兑换码可绑 plan_code（核销金额取 grant 覆盖面值）/bind_user_id（他人 404 防探测）/max_per_ip（Redis 批次×IP 7d 计数，预查-闸-翻转-回退时序）；套餐附带失败不回滚入账（日志人工跟进）；max_uses 多次核销列 backlog】 |
+| #1790-5 / #2845 / #3388 | 兑换码增强（限用户/限 IP/兑套餐）、套餐×分组 | redemption_codes + plans | M4【已实现：plans 表（grant/加组/余额有效期三语义）+ POST /admin/plans；兑换码可绑 plan_code（核销金额取 grant 覆盖面值）/bind_user_id（他人 404 防探测）/max_per_ip（Redis 批次×IP 7d 计数，预查-闸-翻转-回退时序）；套餐附带失败不回滚入账（日志人工跟进）；max_uses 多次核销列 backlog。**订阅形态**（`plans.kind=1`）见 §11.28：兑换码绑订阅套餐 = 核销即激活/续期，面值忽略】 |
+| new-api Wallet & Subscriptions | 订阅套餐：自助购买 + 有效期 + 日/周/月配额窗 + 附加分组 | plans.kind=1 + user_subscriptions + Redis `bal.sub` 第二池 | M4【已实现（§11.28）：购买走 recharge_orders.plan_id（回调激活不入钱包）/ 兑换码 / 管理员发放三途径；reserve 选池"订阅优先、允许单笔越界"；worker 60s 滚窗 + 到期收组；两池分别对账；门户套餐页 + 概览订阅行；升降级 / 多订阅并存 / 余额优先偏好列 backlog】 |
 | #1790-6 | 余额有效期 | users.balance_expires_at + worker 冻结任务 | M4【已实现：worker 5min 扫描到期用户，Redis Lua 原子 drain 可用余额（在途预扣按各自路径终结）→ expire 事件（delta 负、actor=system:worker）→ 重置 NULL 幂等防重扫；console POST /admin/users/{id}/balance-expiry 设置/取消；充值不自动延期（延期策略 backlog）】 |
-| #1790-8 | 通知多路 + 事件订阅矩阵 + 频率限制 | settings.notify_channels（worker/notify.rs） | M4【已实现：webhook 通道（SMTP 列 backlog 不引新依赖），事件 drift（对账差异）/channel_cooldown（冷却 key 数）/balance_low（阈值 settings.balance_low_threshold_micro，降序 20 上限），频率闸 Redis notify:mute:* SET NX per-通道×事件（缺省 300s），失败仅日志不阻主循环】 |
+| #1790-8 | 通知多路 + 事件订阅矩阵 + 频率限制 | settings.notify_channels（worker/notify.rs） | M4【已实现：webhook 通道 + email 通道（§11.27，走 settings.smtp），事件 drift（对账差异）/channel_cooldown（冷却 key 数）/balance_low（阈值 settings.balance_low_threshold_micro，降序 20 上限），频率闸 Redis notify:mute:* SET NX per-通道×事件（缺省 300s），失败仅日志不阻主循环】 |
 | #6502 | CDN trusted-header-secret | 部署附录 §14.2 | M2 |
 
 不吸收：长尾 provider 专属渠道（OpenAI 兼容通道覆盖）、纯 UI 细节（浮动按钮等，进前端 backlog）。
@@ -513,8 +516,8 @@ release 构建下启用本模式须同时设 `OKAPI_SINGLE_USER_CONFIRM=true`（
 | 渠道上游模型发现（拉上游 /models 回填）+ 响应大小上限（默认 8MB） | new-api #6184/#5971 + Sub2API 0.1.180 | **本次实现**：`GET /admin/channels/{id}/fetch-models`（按协议探测，返回列表由管理员确认写入，不自动改配置） |
 | 按上游响应模型计费（渠道可选实际返回模型为计费基准） | Sub2API 0.1.175 | **已实现**：channels.settings.bill_by_response_model（缺省关）；响应模型（非流式 body.model / 流式首个报告 model 的 chunk，opt-in 才解析零常态开销）≠ 请求模型且价簿有其精确名定价 → 按其算价并记账（billing_records.model_name 同步）；无价/同名回退请求 canonical（fail-open 不拒付）；别名解析不参与（结算不回 PG）。4 用例（流式/非流式/回退/关断） |
 | service_tier（fast/flex）价格轴 | Sub2API 0.1.179/180 | **已实现**（DESIGN §3-4.5）：model_pricing.tier_ratios（JSONB 档位倍率表，upsert_model 可配）；有效 model_ratio ×= tier_ratio，per_call 同乘；结算档 = 请求声明档与上游响应报告档中倍率较低者（**只降不升**：不为未享受档位付费、上游擅自升档不多收）；预扣按请求档估；快照记 service_tier/tier_ratio；响应档采集与 resp_model 共用元数据通路（模型配了档位才解析，缺省零开销）。4 用例 |
-| 管理接口独立限流（access token / 转账路由） | new-api rc.24 | **已实现**：login/register/totp/redeem 四爆破面每 IP 60s 固定窗（缺省 10/5/10/10 次；settings.critical_rate_limits 覆写，0=关）；IP 取 CDN 头回退直连 socket（console serve 已挂 with_connect_info），两者皆无放行；Redis crl:* 计数故障放行 |
-| 渠道请求字段透传控制（管理员选择透传字段） | new-api rc.23 #6847 | **已实现**：channels.settings.strip_request_fields（字符串数组）——dispatch 前剥除请求顶层字段，方言无关（对入口原文生效，转换路径自然继承）；model/messages/stream 受保护不可剥；缺省空配置零解析开销。2 用例 |
+| 管理接口独立限流（access token / 转账路由） | new-api rc.24 | **已实现**：login/register/totp/redeem 四爆破面每 IP 60s 固定窗（缺省 10/5/10/10 次；settings.critical_rate_limits 覆写，0=关）；**数据面无效 key** 同机制（scope=`invalid_api_key`，缺省 60 次/分）：缺 token / 哈希未命中才计数，鉴权成功后的模型/IP 白名单失败不计；超限 429 `rate_limited` param=`invalid_api_key`（与 401 分开，避免扫 key 打满 401）。IP 取 §14.2 信任闸；Redis 故障放行 |
+| 渠道请求字段透传控制（管理员选择透传字段） | new-api rc.23 #6847 | **已实现**：channels.settings.strip_request_fields（字符串数组）——dispatch 前剥除请求顶层字段；**inject_request_fields**（对象）在 strip 之后浅合并，用来强制覆盖/注入上游参数。二者均方言无关、对入口原文生效；model/messages/stream（及 inject 的 provider）受保护；缺省空配置零解析开销 |
 | （对拍）时间规则区间恒真 bug | new-api rc.27 #6934 修复 | 我方无同类缺陷：minute_in_window 回绕正确、start==end 为空窗永不命中（绝不退化全天折扣）；已加回归用例钉死语义 |
 | （复核 2026-08-30 下午）rc.27 沙盒 JS 插件系统 / GLM responses / Ollama 透传；Sub2API 公开说明停在 0.1.183（镜像 0.1.192 无 notes） | — | 插件运行时不吸收（§1 冻结外的框架依赖 + 热路径纯净）；GLM/Ollama 为 openai_compat 通道覆盖面，无需专门模块 |
 
@@ -530,12 +533,13 @@ SKIP LOCKED 重投、CH AggregatingMergeTree MV、查询缓存。其性能基线
 | chat/embeddings/rerank/responses/realtime/images/audio(speech+stt)/messages/gemini、epay+Stripe、兑换码、子账户、计费试算、outbox/DLQ 管理、OAuth、TOTP、生效价查询 | **已覆盖**（语义等价或超集） |
 | /v1/audio/translations | **本次补齐**（与 transcriptions 同构 per_call） |
 | /v1/completions（legacy） | backlog：转 chat 降级实现，老客户端存量场景按需 |
-| /v1/images/edits | backlog：multipart images，与 transcriptions 重组同构 |
-| 出站代理池（proxy-groups/ips/nodes 全家桶 + 测试/统计/异常） | 不吸收全家桶（订阅模式 §1.4 已排除）；轻量版 channels.settings.proxy_url（per-channel 出站代理 + Client 缓存）列 backlog |
+| /v1/images/edits | **已实现**（2026-09-06）：multipart images，与 transcriptions 重组同构；计费对齐 generations（per_call × n） |
+| 出站代理池（proxy-groups/ips/nodes 全家桶 + 测试/统计/异常） | 不吸收全家桶（订阅模式 §1.4 已排除）；轻量版 **已实现**（§11.30）：`channels.settings.proxy_url` + `extra_headers`，per-channel 出站代理 + Client 缓存 |
 | 计费规则绑定（users/tags/model-groups 维度） | users/models/groups 维度 pricing_rules.scope 已支持 ✓；tags 维度随用户标签 backlog |
 | model-groups（模型分组 + key 绑定组） | 等价能力已有（key model_allowlist + 渠道组可见性），不吸收结构 |
 | 公告系统（admin CRUD + 公开端点） | **已实现**（2026-09-01，§11.12）：settings.site_notice + `GET /api/notice` + 全站横幅，不新增表 |
-| 用户标签/批量操作、外观/api-docs 设置、密码找回、邮件/短信通知、billing 告警收件箱 | backlog（SMTP/SMS 依赖决策维持：不引 §1 冻结外依赖，webhook 已可用） |
+| 密码找回、邮件验证码、邮件通知 | **已实现**（2026-09-05，§11.27）：`settings.smtp` + `lettre`；注册验证码 / 找回密码 / notify_channels `email` 通道 |
+| 用户标签/批量操作、外观/api-docs 设置、短信通知、billing 告警收件箱 | backlog（SMS 依赖决策维持：不引 §1 冻结外依赖，webhook + 邮件已可用） |
 | dashboard 细分图表端点（latency-percentiles/ttft-stats/error-trends/channel-load…） | CH MV 数据面已备（mv_channel_5min 等），端点+图表随前端 dashboard 迭代 backlog |
 | 模型价格历史（price-history） | pricing_epochs 已存快照，查询端点 backlog |
 | 插件市场（plugins/remote） | 不吸收（对齐 rc.27 插件系统同类决策） |
@@ -622,13 +626,13 @@ gateway_pricing_rules 端到端（消费额轴三笔递进命中、best_for_user
 console 校验拒非法星期与未知 stacking）。老库的 `user_tag` / `model_group` 两个绑定维度
 **不吸收**：price_groups 与 models 列表（可加前缀通配）已能表达，引入第二套用户/模型维度
 只会增加认知负担。订阅制套餐（new-api `subscription_plans` + `user_subscriptions`：独立额度池
-+ 周期重置 + 升降级分组 + 限购）是我们 `plans`（仅兑换码充值模板）未覆盖的**商业模式级**缺口，
-单独立项评估。
++ 周期重置 + 升降级分组 + 限购）曾是我们 `plans`（仅兑换码充值模板）未覆盖的**商业模式级**缺口，
+已于 §11.28 落地（`plans.kind=1` + `user_subscriptions` + Redis 第二池；升降级列 backlog）。
 
 **吸收判据（三方对照的统一口径）**：以 new-api 的成熟形状定生态兼容面（端点路径、错误体、
 dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户端和运维习惯都长在这上面；
 以 Sub2API 与老 ok-api 定内部机制的取舍——**取语义、弃结构**。三条红线：
-① 不引入与 §1 冻结选型冲突的依赖（故 SMTP/SMS/插件沙箱/JS 引擎一律不进）；
+① 不引入与 §1 冻结选型冲突的依赖（故 SMS/插件沙箱/JS 引擎一律不进；SMTP 于 §11.27 以"协议客户端"档补入 §1，与 tokio-tungstenite 同理）；
 ② 不把别人的表结构照搬进 PG——同等语义能用现有维度表达就不新增表（老库 pricing_rules
 五表 → price_groups + user_pricing + tier_ratios；model_groups → key allowlist + 渠道可见性矩阵）；
 ③ 热路径只认 Redis + 上游，任何"看起来有用"的旁路能力（代理池全家桶、内容词表）都不进 gateway。
@@ -647,8 +651,24 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 门户令牌 / 团队）接受可选 `?limit=&offset=`——不传回全量（下拉选项、全量校验这类调用方），
 传了钳到 `MAX_PAGE`；响应一律附 `total`。渠道列表支持 `q`（名称 / 地址）、`provider`、
 `status` 过滤，模型列表支持 `q`（模型名 / 展示名）、`unpriced`；令牌 / 兑换码 / 用户这类
-大表不传 limit 缺省 50。前端统一经 `usePagination()` + `<Pagination>` 翻页
-（`frontend/src/hooks/use-pagination.ts`），列表表格一律 `stickyHeader` 限高页内滚动。
+大表不传 limit 缺省 50（`console::query::DEFAULT_LIMIT`），store 层再封顶 `MAX_PAGE`
+（`Slice::capped_limit`，大表不存在"回全量"）。store 层数据与 COUNT 两条查询并行，配置类
+列表全量取时不发 COUNT（`total = data.len()`）。查询串统一由 `console::query::PageQuery`
+承载，非法查询串（如 `limit=abc`）回 400 `bad_request` + `param=query`——`gateway::extract::Query`
+提取器替代 axum 缺省的纯文本拒绝，保住"错误只回 error_code"，gateway（`/v1/realtime?model=`）
+与 console 共用。前端统一经 `usePagination()` +
+`<Pagination>` 翻页（`frontend/src/hooks/use-pagination.ts`），列表表格一律 `stickyHeader`
+限高页内滚动。
+
+分页与过滤状态驻留在路由 search（2026-09-05）：所有列表路由 `validateSearch` 里带
+`pageSearch()`（`?page=`（1 起算，第一页不写）+ `?limit=`（缺省档不写，不在本页档位内当没写）），
+带过滤器的页面把过滤条件一起放进 search（渠道 `q`/`provider`、模型 `q`/`unpriced`、令牌
+`q`/`user_id`、用户 `q`、兑换码 `status`、日志既有全套过滤 + 分页），解析一律走
+`lib/search-params.ts` 的 `text / posInt / flag / oneOf`，非法值视为未设置而非报错。
+刷新、贴链接、从抽屉深链出去再后退都回到原来那一页。历史语义：翻页 / 换页宽 `replace`
+（翻页像滚动，不在历史里堆一串 `page=2,3,4`）；过滤器提交 `push`，且与 `page` 清零在**同一次**
+`navigate` 里完成——数据请求只按"新条件 + 第一页"发一次，不会先按旧页码空跑。搜索框的
+草稿值经 `useDraft(applied)` 跟随地址（后退 / 深链时输入框显示地址里的词）。
 
 | 接口面 | 端点 | 状态 |
 | --- | --- | --- |
@@ -1717,6 +1737,219 @@ temperature 在 gemini 侧要落到 `generationConfig`）——本轮只放能�
 `reasoning_content`，且三个方言只有 gemini 有对应的请求侧开关（`includeThoughts`）——
 只做一半正是本节要修的那类"装作支持"。渠道级 `thinking_to_content` 已覆盖相近诉求。
 
+### 11.27 SMTP：邮件验证码 / 找回密码 / 邮件通知（2026-09-05，对照 new-api 系统设置）
+
+**为何改判**：§11.5 红线①曾把 SMTP 与 SMS / 插件沙箱 / JS 引擎并列为"不进"。复核三方
+（new-api `SMTPServer/SMTPPort/SMTPAccount/SMTPToken/SMTPFrom/SMTPSSLEnabled` + 注册邮箱验证 +
+`/api/reset_password`；Sub2API 亦有 SMTP 与邮箱验证）后，邮件是**自助面闭环的必需件**——没有它
+"忘记密码"只能找管理员改，"邮箱验证"这一最基础的刷号闸也做不了；而 SMS 依赖第三方计费网关、
+插件沙箱要 JS 引擎，那才是框架级。SMTP 客户端与 §1 已收的 `tokio-tungstenite`（WS 客户端）同档：
+一个协议实现，无运行时侵入。`lettre` 只开 `smtp-transport` / `tokio1-rustls-tls` / `builder` /
+`hostname`（rustls 与 reqwest 同栈；不开 pool——邮件是低频面，每次建连即可）。
+
+**定案**：
+
+- 一把设置键 `settings.smtp`（对象）：`host` / `port` / `security`（`starttls` 缺省 / `tls` / `none`）/
+  `username` / `password` / `from_address` / `from_name` / `reply_to`。`host` 空 = 未配置；含密码，
+  `manage::is_secret_key` 增加 `smtp` 词根让列表接口只回"已配置"，单键读取仍走 SETTINGS_WRITE 门槛。
+  `POST /admin/settings/smtp/test {to}` 用**已保存**的配置发测试信（配置页"发送测试邮件"）。
+- **邮件模板双语**（§8 第 5 条）：`mail::templates` 内置 zh-CN / en 两套（验证码 / 重置密码 / 事件通知），
+  语言取请求体 `lang` → `Accept-Language` → 缺省 en；纯文本 + 简单 HTML 双部件。邮件正文是内容不是
+  API 响应，不受"后端只回 error_code"约束。
+- **注册邮箱验证**：`registration_policy.email_verification: bool`（缺省 false）。开启时
+  `POST /auth/email-code {email}` 先过注册策略（关闭 / 域名黑白名单都不给码，免费邮件不该给刷号者），
+  每 IP 限流 scope `email_code`（缺省 3/min）+ 每邮箱 60s 冷却（Redis `verify:email:cd:<email>`），
+  6 位数字码存 Redis `verify:email:<email>`（10 min，覆盖旧码）。`/auth/register` 带 `email_code`，
+  错码 400 `email_code_invalid`，对上即删（一次性）。SMTP 未配置而策略要求验证 → 501
+  `smtp_not_configured`（配置矛盾要暴露，不能静默放行）。`GET /api/registration` 透出
+  `email_verification` 供登录页决定是否画验证码栏。
+- **找回密码**：`POST /auth/password/forgot {email}` → 每 IP `password_forgot` 3/min；无论邮箱是否存在
+  都回 `{ok:true}`（防枚举），存在且有密码（非 OAuth-only）才发信：token 32 位随机，Redis
+  `pwreset:<sha256(token)>` → user_id（30 min，明文 token 只出现在邮件里）；链接
+  `{site_url}/reset-password?token=…`，`site_url` 缺省与 OAuth 回调同源（请求 Host 推导）。
+  `POST /auth/password/reset {token,password}` 校验后 argon2id 重设、删 token；老 bcrypt 用户由此
+  升级为 argon2id。
+- **通知 email 通道**：`notify_channels[]` 新增 `{"type":"email","to":[...],"events":[...],"min_interval_secs"}`，
+  与 webhook 同一订阅 / 频率闸（`notify:mute:<idx>:<event>`）；主题 `[Okapi] <event>`，
+  正文为事件 payload（模板双语，语言取 `lang` 字段缺省 en）。SMTP 未配置只打日志。
+- **不做**：SMS、邮件队列 / 重试（低频面，失败即日志 + 前端提示重发）、HTML 富模板编辑器
+  （new-api 把模板放系统设置里改，实际很少有人改；需要时再开）、邮箱变更验证。
+
+**验收**：`console_smtp.rs`（本地 mock SMTP：注册验证码全流程 / 策略拒绝不发码 / 60s 冷却 /
+找回密码 token 一次性 + 错 token 400 / 未配置 501 / email 通知通道）+ `mail` 单测（配置解析、
+模板双语）。前端：设置页 SMTP 卡（含测试发送）、注册策略卡加"邮箱验证"开关、登录页验证码栏 +
+"忘记密码"、`/reset-password` 页、通知卡 email 通道。
+
+### 11.28 订阅套餐：周期配额池（2026-09-05，对照 new-api Wallet & Subscriptions / Sub2API 订阅限额）
+
+**语义（取语义、弃结构）**：订阅 = 用户在有效期 `duration_days` 内，每个周期（日 / 周 / 月，
+**自激活时刻起算**而非自然日历）获得 `grant_micro` 的**独立额度池**，窗口末**重置、不累积**。
+池内请求与钱包请求走**同一份价簿与公式**——订阅只改"谁付"，不改"多少钱"，DESIGN §3.6 与
+pricing_snapshot 对两池一致（账单解释器不需要知道钱从哪个池出）。可选 `group_code`：有效期内
+把用户加进该分组（价随组走、渠道可见性随组走），到期收回，且**只收回订阅新加的**
+（用户本来就在组里则 `granted_group=false`，到期不动）。
+
+**扣费顺序**：订阅池优先——reserve 时 `sub > 0 且 now < sub_until` 就从 `sub` 扣，否则钱包。
+两点刻意的不对称：① 订阅池**不校验足额、允许单笔越界**（最后一笔可把池打成负数，下窗重置到
+quota）。若按 `sub >= est` 选池，估算（prompt + completion 上限）常常远大于实际，剩 $0.30 的池会
+因为一笔估 $0.50 的请求被推去钱包，用户看到"我还有额度却在扣余额"——搁浅额度比一笔越界更伤信任，
+且越界上限就是一笔请求的实际费用；② 钱包仍 fail-closed（`avail >= est`），这是欠费的边界。
+同一请求只动一个池，commit / refund 按预扣字段第 4 段 `pool` 回到同一池。不提供"余额优先"
+偏好开关（不做：new-api 的偏好开关是因为它的订阅池有模型范围限制，我们的池对所有模型生效，
+没有"想留着订阅额度给贵模型"的场景）。
+
+**结构**：不新增 `subscription_plans`——`plans` 已经是"套餐"，加 `kind`（0 充值模板 / 1 订阅）、
+`price_micro`（0 = 不可自助购买）、`period`、`duration_days`、`sort_order`、`description`；kind 1 时
+`grant_micro` = 每窗额度、`group_code` = 有效期分组、`balance_valid_days` 忽略。兑换码 `plan_id` 绑到
+kind 1 套餐时**核销即激活**（面值忽略），管理面复用同一张表同一个抽屉。`user_subscriptions`
+是 §1.8 预留的兑现（DDL 见 docs/database.md §1.6）：一个用户同一时刻最多一个激活订阅（partial
+unique index）；同套餐再购 / 再发放 = **续期**（`expires_at += duration`，窗口不变）；激活期内买
+另一套餐 → 409 `subscription_active`（升降级要定义未用额度折算规则，列 backlog）。
+`recharge_orders.plan_id` 非空 = 订阅购买单：`amount_micro` 是售价快照，支付回调**激活而不入钱包**；
+返利（aff）照常按售价算。
+
+**热账本第二池（docs/database.md §2.2）**：`bal:{uid}` 增 `sub` / `sub_until` 两字段；预扣字段扩为
+`est|deadline|kid|pool`（缺省 0 兼容老格式）；`reserve.lua` 增 ARGV `now_unix_s` 选池并在返回值末尾
+带 `pool`；`commit` / `refund` 回同池并带 `pool`；`repair.lua` 增 `pool_field` 参数只累计同池在途；
+新 `sub_set.lua`（激活 / 滚窗 / 到期同一脚本）：`new_sub = quota + Σ在途(pool=1)`——老窗口的在途
+请求结算时按各自预扣冲回，不吃新窗额度；返回 `{prev, new}` 供调用方记 `sub_grant` / `sub_reset` /
+`sub_expire` 事件（delta = new − prev）。**两池不变式各自成立**：钱包 `avail + Σ在途₀ == Σ events(pool=0)
+== users.balance_micro`；订阅 `sub + Σ在途₁ == Σ events(pool=1)`（滚窗事件记 delta，跨窗累计自洽）。
+`billing_events.pool` / `billing_records.pool` / CH `request_log_raw.pool` 三处同步；
+`users.balance_micro` 快照只随 pool=0 事件动；`api_keys.used_micro` 两池都累加。reconciler 两池分别核，
+`/admin/reconciliation/repair` 按池修复。
+
+**worker**：`subscriptions::tick` 60s：① 激活订阅 `window_end <= now < expires_at` → 窗口前滚
+（worker 停过就连跳多个周期直到 `window_end > now`，不补发错过的窗）→ `sub_set(quota, min(window_end,
+expires_at))` → `sub_reset`；② `expires_at <= now` → status 2 → `sub_set(0, 0)` → `sub_expire` →
+`granted_group` 时 DELETE user_groups → INCR `auth:ver`。间隙语义：`sub_until` 到点后 worker 还没跑的
+最多 60s 里 reserve 自动落钱包（保守方向），不会多给。
+
+**API**：门户 `GET /api/plans`（kind 1 启用套餐）、`GET /api/me/subscription`（当前订阅 + Redis 池剩余 +
+窗口 / 到期时刻）、`POST /api/me/subscriptions/checkout {plan_code, gateway}`（与 `/api/me/topup` 同响应形状，
+`price_micro = 0` 的套餐 400 `plan_not_purchasable`）。管理 `POST /admin/plans` 请求体扩订阅字段；
+`GET /admin/plans` 列表带 `active_subscribers`；`POST /admin/users/{id}/subscription {plan_code}` 发放 / 续期、
+`DELETE` 立即到期（status 3）；`GET /admin/users/{id}/subscription`。`/v1/dashboard/billing/subscription`
+的 `hard_limit_usd` 计入订阅池剩余（客户端"总额 − 已用 = 剩余"的口径仍对）。
+
+**不做**：升降级、多订阅并存、余额优先偏好、订阅限定模型范围（分组已可表达）、订阅退款、
+自动续费（无卡片托管）。
+
+**验收**：`console_subscriptions.rs`：建订阅套餐 → 管理员发放 → 网关请求走订阅池（钱包不动、
+`billing_records.pool=1`、事件 pool=1）→ 池耗尽落钱包 → 滚窗重置 → 到期收组、池不可用 →
+checkout 建单 + epay 回调激活 → 兑换码绑订阅核销即激活 / 续期 → 两池对账零漂移；Lua 契约用例
+（选池 / 越界 / commit-refund 回同池 / repair 按池 / sub_set 在途保留）。前端【已实现】：管理套餐抽屉"类型"切换 +
+订阅字段；门户 `/portal/plans` 套餐卡（购买 / 续期；激活期内其它在售套餐停用并说明）+ 当前订阅卡（本窗剩余进度、
+重置 / 到期时刻、滚窗间隙提示、历史）；概览余额卡订阅行（订阅池有额度时钱包 0 不算"没钱"）；账本三类新事件标签 +
+"订阅池"徽章（worker 滚窗 / 到期事件来源标"系统"而非"余额到期"）；充值页兑换码核销结果区分钱包入账 / 订阅激活；
+用户抽屉"订阅"签（发放 / 续期 / 立即结束 + 历史）。交互 e2e：`frontend/e2e/subscriptions.spec.ts`（接口桩：无订阅
+下单带 plan_code+网关、有订阅高亮 / 停用 / 概览订阅行）。
+
+### 11.29 Azure OpenAI 上游类型 + Bedrock / Vertex 评估（2026-09-05，对照 new-api Azure 通道 / one-api）
+
+**问题**：Azure OpenAI 与官方 OpenAI 请求 / 响应形状完全一致，但三处不同让它无法伪装成 `openai_compat`：
+鉴权是 `api-key` 头而非 Bearer；URL 按**部署**寻址 `{endpoint}/openai/deployments/{deployment}/chat/completions`
+而非 `/v1/chat/completions`；每个请求必须带 `?api-version=`。老 ok-api 与 new-api 都把它做成独立通道类型（new-api
+type=3，"模型名 = 部署名 / 其它版本号"），这里同样加一个 provider，但坚持 §4 的"按方向拆模块、不引统一 IR"——
+Azure 不是一个新方向，只是 OpenAI 方向换了 URL 与鉴权头。
+
+**定案**：
+
+- `channels.provider = 'azure'`；`api_base` = 资源端点（**必填**，Azure 没有可猜的缺省；贴了 `/openai` 或
+  `/openai/v1` 后缀网关自行剥掉）；`settings.api_version`（`YYYY-MM-DD[-preview]`，管理面写入时校验形状，缺省
+  `2024-10-21` GA）。**部署名 = `model_mapping` 的值**，未映射用模型名本身——Azure 建部署时缺省部署名就是模型名，
+  多数站零配置；重命名过的部署配一条映射即可，不另起"deployment 列"。
+- `okapi-providers::azure`：**薄封装**，只拼 URL 与 `api-key` 头，发送 / 流解析 / 错误分类全部复用 `openai.rs`
+  抽出的 `send_chat / send_json / send_speech / send_multipart`（同一 reqwest client，连接池共享）。gateway 侧
+  收口在 `gateway/openai_dialect.rs`（`AppState::openai_{chat,json,speech,audio_multipart}`）按 provider 分派一次，
+  chat / embeddings / rerank / images / speech / transcriptions / translations 七类端点只换调用名，不感知 provider。
+- 覆盖：四个入口方言（OpenAI / Responses 降级 / Anthropic / Gemini）× azure 上游全部经同一分派；`responses_native`
+  对 azure 恒 false（Azure 的 Responses 在 `/openai/v1/responses` 另一套路径，本期不接）；**videos / realtime 不路由
+  azure 渠道**（Sora 走 `/openai/v1/video/generations/jobs` 任务 API，Realtime 是 `wss://…/openai/realtime?deployment=`
+  另一种握手，都不是"换 URL"能覆盖的）。
+- 管理面：`PROVIDERS` 白名单加 `azure`（**建渠道此前根本没校验 provider，顺手补上**）；azure 缺 api_base 400
+  `api_base`；测活 / 模型探测：凭证探测打 `GET /openai/deployments?api-version=2023-03-15-preview`（数据面早期版本里的
+  资源，新 spec 不再列但端点仍在，one-api / new-api 同此用法），模型探测打部署级 chat completions；探测前**过一遍
+  model_mapping**（此前所有协议都拿规范名直接探，映射改名的场景探的是不存在的模型）；"拉取模型"对 azure 列的是
+  部署而非 `/openai/models` 的可用模型目录——后者对路由没用。
+- 缺 api_base 的 azure 候选在运行期是构造错误（`azure_api_base_missing`）而不回退 `api.openai.com`：回退会把
+  `api-key` 头打到 OpenAI 上，401 触发 key 失效冷却，比直接失败更糟。
+- 前端：协议下拉加 azure；api_base 占位随协议变（azure 显示资源端点格式 + 说明）；azure 渠道接入页多一个"API 版本"
+  输入（空 = 跟随后端缺省，键直接删掉不存空串）；模型页签提示"模型名即部署名"。
+
+**验收**：`gateway_azure.rs`（mock 断言 `api-key` 头 / 无 Authorization / `api-version` 来自 settings / URL 部署名
+来自映射 / body.model 一致；流式 + 非流式 chat 计费、embeddings 走同一分派）；`console_manage.rs::
+azure_channel_write_validation`（协议白名单 / 必填端点 / api_version 形状建改两路）；providers 单测（端点规范化、
+部署 URL 转义）。
+
+**Bedrock / Vertex 评估（结论：不做独立 provider）**：
+
+| | 原生 API 需要什么 | 与"薄适配"的距离 | 落法 |
+| --- | --- | --- | --- |
+| Amazon Bedrock | Converse / InvokeModel：SigV4 签名（access key + secret + region + 逐请求签名）、请求体是 Converse 形状而非 OpenAI | 签名要动 body 哈希与时间戳，且是另一个方向的协议转换 | **走 `openai_compat`**：Bedrock 已在 `bedrock-runtime.{region}.amazonaws.com/openai/v1` 提供 OpenAI 兼容 Chat Completions / Responses（Bedrock API key 作 Bearer）；渠道 api_base 指到该路径、凭证填 Bedrock API key 即可，零代码。注意：AWS 把长期 key 标为"仅探索"、短期 key ≤12h——网关这种常驻场景只能用长期 key，靠 `/credential` 轮换 |
+| Google Vertex AI（完整模式） | OAuth2 服务账号：JWT 换 access token（1h 过期），URL 含 project / location | 凭证不是静态串，需要 token 刷新 worker + 服务账号 JSON 保管 | **不做**。需要项目级配额 / VPC-SC 的站点用 Vertex **express 模式**：API key（`x-goog-api-key`）+ 全局端点 `https://aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent`——形状就是 Gemini，渠道 `provider=gemini`、api_base=`https://aiplatform.googleapis.com/v1/publishers/google` 即可复用现有 gemini 方向，零代码 |
+
+两家都在 2025 年后把"用 OpenAI SDK 只改 base_url 与 key"当成一等公民，独立 provider 的收益只剩"用原生鉴权走
+项目级配额"，代价是 SigV4 / OAuth2 两套签名基础设施进热路径——不值。若日后确有需求，正确的形态是 §1.4 那种
+"凭证代理"侧车而非 provider。
+
+### 11.30 渠道级出站代理 + 自定义请求头（2026-09-06，对照 new-api / 老 ok-api 代理池）
+
+**问题**：站长经常要把某条渠道（海外官方 / 国内中转 / 需要组织头的 Azure）单独走代理或带
+`OpenAI-Organization` / `anthropic-beta` 这类上游私有头。老 ok-api 做了 proxy-groups 全家桶
+（节点池、测速、异常摘除），那是订阅账号转售的配套；new-api 是渠道级 `setting.proxy` + header
+覆盖。我们只要后者。
+
+**定案**：
+
+- `channels.settings.proxy_url`：`http` / `https` / `socks5` / `socks5h`（reqwest `socks` feature，
+  与 rustls 同栈，不是新 crate）。空 = 直连。管理面写入校验 scheme + host；**不走 api_base 的
+  SSRF 闸**——企业代理几乎都在 `127.0.0.1:7890` / `10.x`，拦了就没法用。
+- 代理绑在 reqwest Client 上、不能按请求切换，所以 `okapi-providers::http::HttpPool` 按
+  proxy_url 缓存 Client（缺省池 + `RwLock<HashMap>`；渠道数个位数）。chat / embeddings / images /
+  audio / videos / custom_pass / 测活 / 拉模型全部走同一套；**Realtime WebSocket 不走此代理**
+  （tungstenite 另一条连接，列 backlog）。
+- `channels.settings.extra_headers`：对象 string→string，先于鉴权头写入。写入拒
+  Authorization / api-key / x-api-key / x-goog-api-key / Host / Content-Type / 逐跳头 /
+  `x-okapi-request-id`；热路径再跳过一次。鉴权头后写，站长填了 `Authorization` 也换不掉凭证。
+- 前端：行为页签两个字段（代理 URL + 额外头键值行）。
+
+**验收**：`gateway_outbound.rs`（额外头出现在上游、受保护头被跳过、HTTP 正向代理真正经手）；
+`console_manage.rs` 写入校验（非法 scheme / 受保护头名 400）；providers 单测（URL / 头形状）。
+
+### 11.31 门户新手引导与接入指南（2026-09-06，对照 Sub2API Guide / UseKeyModal）
+
+**问题**：新用户登录后落在总览页，看到的是六张 KPI 和三个图表页签——对一个还没发过一次请求的人，
+全是零。"密钥在哪、模型名怎么拿、Base URL 填什么、Claude Code / Codex 怎么配"这四个问题，
+门户没有任何一处正面回答；模型广场的"调用示例"是按模型给 cURL，不是按客户端给配置。
+Sub2API 做了两件事：driver.js 交互式导览（首次登录自动开始，按角色给步骤）+ "使用此密钥"弹窗
+（按 Claude Code / Codex / Gemini CLI 给环境变量与配置文件）。
+
+**定案**（`frontend/src/features/portal-guide/`，无新依赖）：
+
+- **不做遮罩式导览，做状态驱动的清单**。Sub2API 的导览靠 `data-tour` 锚点与元素等待，页面一改就断，
+  且"看过"只是 localStorage 打卡。我们的四步（拿到密钥 → 选择模型 → 配置客户端 → 首次调用）
+  按账户真实状态推导：`/api/me/keys` 有记录即第 1 步完成；任一 key 的 `last_used_at` / `used_micro` /
+  `requests` 非零即首次调用完成（后三步随之完成）——"你有没有成功调过"后端一直记着，换浏览器也不丢。
+  进度不够 4/4 且未被关闭时，总览页头下方出现"快速开始"卡（进度条 + 四步芯片 + 打开指南 / 不再显示）；
+  关闭按 `okapi.guide.<user_id>` 记忆；全部完成的老用户从不看到它。
+- **接入指南抽屉**（`GuideDrawer`）从三处进入：总览卡、顶栏常驻 `?` 按钮（门户所有页）、密钥页页头
+  与"密钥已创建"回执上的"查看接入方法"。四步竖排，每步一句"为什么 + 去哪"，并带深链：
+  密钥页；模型广场预置 `?available=true&group=<我的分组>`（卡片单价直接就是他会被扣的价）；用量日志与账户流水。
+- **第 3 步是可操作的配置面板**（`ConnectPanel`）：Base URL（缺省 `defaultApiBase`，可改）+ 模型 ID
+  （`datalist` 只列本分组已接入的模型，也可手输）+ 客户端切换：cURL / Python（openai SDK）/
+  Node.js（openai SDK）/ Claude Code（`ANTHROPIC_BASE_URL` 不带 `/v1`，四个档位模型全部指向所选模型，
+  避免它去请求本站没有的默认 haiku；另给 `~/.claude/settings.json`）/ Codex CLI（`~/.codex/config.toml`，
+  `wire_api = "responses"`，`env_key`）/ 通用客户端（Cursor、Cherry Studio、ChatBox 等：接口类型 /
+  Base URL / Key / 模型 ID 四行可复制字段）。片段复用 `public-pricing/request-examples.ts` 的地址归一与 cURL 生成。
+- **密钥填充规则**：只有从"密钥已创建"回执打开时才把明文填进片段（此刻明文本就在屏幕上）；其余入口一律
+  `YOUR_API_KEY` 占位，脚本类片段经环境变量 `OKAPI_API_KEY` 读取。**从不读取浏览器里登录用的那把 key**——
+  它是门户会话凭证，不该被复制进任何配置文件。
+
+**验收**：`frontend/e2e/guide.spec.ts`（接口桩）：新用户总览出现快速开始卡且进度 1/4、抽屉四步与客户端
+片段随 Base URL / 模型联动、`YOUR_API_KEY` 占位、关闭后刷新不再出现、顶栏与密钥页入口可重开、
+已有调用记录的用户不出现卡片；i18n 双语言与守卫脚本全绿。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
@@ -1825,6 +2058,8 @@ reverse_proxy okapi-gateway:8080 {
 
 SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE 排水（上限 5min）→ flush PG/CH 批写与 outbox → 退出。
 
+**【实现状态 2026-09-06】** 三角色共用 `shutdown::signal()`，SIGINT / SIGTERM 均触发（此前只听 Ctrl-C，容器 stop 发的 SIGTERM 会把进程直接掐死，`gateway_shutdown` 用例取证后修正）。gateway / console 走 `axum::serve(..).with_graceful_shutdown`：收到信号即关监听（新连接被拒，等价于 readiness 翻假）、在途连接排到自然结束；SSE 排水**未设 5min 上限**，交给编排层 `terminationGracePeriodSeconds` 兜底。gateway 在连接排完后再等后台结算归零（`shutdown::Pending`，chat 流式 / 非流式两条"响应先行、结算后台"路径经它计数；上限 30s，超时告警交对账）——不等这一步，最后一批请求只剩 Redis 预扣、要靠 sweep 才能收口。worker 的定时循环在同一信号上退出；`okapi all` 三角色一起返回。验收：`bins/okapi/tests/gateway_shutdown.rs`（真实二进制 + SIGTERM：首块后发信号，流完整到 `[DONE]`、新连接被拒、退出码 0、账已 committed 且无悬置预扣）。
+
 ### 14.4 入口硬化
 
 - **上游 URL SSRF 校验**（Sub2API url_allowlist 吸收）：管理员配置 channels.api_base 时校验 scheme（默认仅 https）与目标（默认禁私网/环回/链路本地段），内网上游场景可按部署放开；配合出口侧 egress 白名单。
@@ -1836,7 +2071,7 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 | 项 | 状态 |
 | --- | --- |
 | 开源协议 | 待拍板，倾向 AGPL-3.0：new-api 即 AGPLv3 + Section 7 署名附加条款，Sub2API 为 LGPL-3.0，头部项目均以 copyleft 防闭源魔改；可留商业双许可口 |
-| new-api 全量 DB 迁移工具（用户/令牌/渠道/日志） | 【提前至 M4 已实现】`okapi migrate newapi --dir <dump>`：吃 JSONL 三表导出（users/tokens/channels，字段名=源库列名）；quota→micro 换算（×2，500000 quota=$1）；channels.type 映射（1→openai/14→anthropic/24,25→gemini/其余→openai_compat 并告警）；幂等（users 按 username、keys 按 key_hash、channels 按 name upsert）；余额入 PG 事件（actor system:migrate）+ Redis credit；`--dry-run` 只统计。日志表不迁（历史统计留源库，CH 从新开始）。定价由 ratio JSON 导入覆盖 |
+| new-api 全量 DB 迁移工具（用户/令牌/渠道/日志） | 【提前至 M4 已实现】`okapi migrate newapi --dir <dump>`：吃 JSONL 三表导出（users/tokens/channels，字段名=源库列名）；quota→micro 换算（×2，500000 quota=$1）；channels.type 映射（1→openai/3→azure（`other` 列→settings.api_version）/14→anthropic/24,25→gemini/其余→openai_compat 并告警）；model_mapping 列随行导入（azure 的部署名靠它）；幂等（users 按 username、keys 按 key_hash、channels 按 name upsert）；余额入 PG 事件（actor system:migrate）+ Redis credit；`--dry-run` 只统计。日志表不迁（历史统计留源库，CH 从新开始）。定价由 ratio JSON 导入覆盖 |
 | 老 ok-api（Go/UUID schema）迁移工具 | 【M4 已实现】`okapi migrate okapi-old --dir <dump> [--enc-passphrase X]`：吃 JSONL 五表（users/api_keys/providers/provider_api_keys/models，PG `\copy (SELECT row_to_json(t))` 导出，DECIMAL 建议 `::text` 保精度）。语义定案：① balance DECIMAL(20,8) USD → micro 定点截断（禁浮点），负余额不入账仅告警；② 密码 bcrypt 哈希原样迁移，`identity::verify_password` 按 `$2` 前缀双轨验证（老用户免重置登录，改密后写 argon2id）；③ API key 老库 key_hash 为 **bcrypt 不可逆**，改依赖 `key_encrypted`（AES-256-GCM + PBKDF2-HMAC-SHA256(100k) 派生，与老 Go `pkg/crypto` 逐字节对齐，RFC 7914 向量对拍）解出 `sk-` 明文重算 SHA-256；不可解密者**一律不落库**（宁缺毋滥：错哈希=永久鉴权失败）并计入 `keys_undecryptable` 提示用户重建；④ providers×provider_api_keys → 每 key 一 channel（`old/{code}/{key_name}`，保留独立 base_url/models/weight/priority——吸收老库"key 级路由属性"而非退化为 provider 级）；⑤ models `token` 型 USD/1K → 倍率（基准 $0.002/1K，completion/cache 由单价比推导）、`request` 型 → per_call micro，hourly/monthly 不迁告警；⑥ 幂等锚 = email/key_hash/channel name，二跑不覆盖已改密码（`COALESCE(users.password_hash, ...)`）。**不搬**老库 pricing_rules 五表（规则本体 + 4 张 binding）——Okapi 以 price_groups + user_pricing + tier_ratios 表达同等语义（吸收设计不照搬结构，见 §11.4）；plugins/proxy_ips/audit 等运维域同理不迁 |
 | provider 首发范围 | 定案：openai / anthropic / gemini / deepseek + OpenAI 兼容通道兜底；长尾专属渠道不做 |
 | PG-only 取舍 | 已定案（§1.3）；若未来必须兼容 SQLite 需重估 sqlx 方案，成本高，尽量不回头 |

@@ -58,6 +58,7 @@ pub struct MigrateStats {
 fn provider_of(newapi_type: i64) -> (&'static str, bool) {
     match newapi_type {
         1 => ("openai", true),
+        3 => ("azure", true),
         14 => ("anthropic", true),
         24 | 25 => ("gemini", true),
         _ => ("openai_compat", false),
@@ -368,6 +369,30 @@ pub async fn run_newapi(
         )
         .fetch_one(pg)
         .await?;
+        // 模型映射随行导入（JSON 字符串列；非对象忽略）——对 azure 是必需项：映射值就是部署名。
+        // new-api 把 azure 的 api-version 放在 `other` 列，落到 settings.api_version（§11.29）。
+        let mapping = s(&row, "model_mapping")
+            .and_then(|m| serde_json::from_str::<Value>(m).ok())
+            .filter(Value::is_object);
+        let api_version = (provider == "azure")
+            .then(|| s(&row, "other"))
+            .flatten()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if mapping.is_some() || api_version.is_some() {
+            sqlx::query!(
+                r#"UPDATE channels
+                   SET model_mapping = COALESCE($2, model_mapping),
+                       settings = CASE WHEN $3::text IS NULL THEN settings
+                                       ELSE settings || jsonb_build_object('api_version', $3::text) END
+                   WHERE id = $1"#,
+                target,
+                mapping,
+                api_version
+            )
+            .execute(pg)
+            .await?;
+        }
         for g in &channel_groups {
             ensure_group_and_pool(pg, g).await?;
         }

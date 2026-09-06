@@ -1,7 +1,8 @@
 import { Link, useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, KeyRound, Mail, UserPlus } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import i18n from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { ApiError, apiFetch, setKey } from '@/lib/api'
 import { Alert } from '@/components/ui/alert'
@@ -41,6 +42,27 @@ export function useOauthLanding(onError: (msg: string) => void) {
 
 export type LoginTab = 'password' | 'key' | 'register'
 
+/// 注册 / 找回密码这几条路的 400 带的是 param 而不是独立 error_code
+/// （`bad_request` + `email_code_invalid`），通用 describeError 只会给出"参数有误(email_code_invalid)"；
+/// 这里把用户能自己纠正的几个 param 翻成人话，其余照旧。
+export function describeAuthError(err: unknown): string {
+  if (err instanceof ApiError && err.code === 'bad_request') {
+    switch (err.param) {
+      case 'email_code':
+        return i18n.t('auth:emailCodeRequired')
+      case 'email_code_invalid':
+        return i18n.t('auth:emailCodeInvalid')
+      case 'reset_token_invalid':
+        return i18n.t('auth:resetTokenInvalid')
+      case 'email_verification_disabled':
+        return i18n.t('auth:emailVerificationOff')
+      default:
+        break
+    }
+  }
+  return describeError(err)
+}
+
 /// 登录 / 注册 / API Key 三种入口共用一张卡。
 ///
 /// 三种方式用分段选择器切换（此前是三个实心按钮，看起来像三个动作而不是三个选项）；
@@ -51,10 +73,18 @@ export function LoginForm() {
   const [tab, setTab] = useState<LoginTab>('password')
   const [key, setKeyInput] = useState('')
   const [form, setForm] = useState({ email: '', password: '', totp: '' })
-  const [regForm, setRegForm] = useState({ email: '', username: '', password: '' })
+  const [regForm, setRegForm] = useState({ email: '', username: '', password: '', code: '' })
   const [totpNeeded, setTotpNeeded] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // 邮箱验证码：发送后 60s 冷却（与后端 verify:email:cd 一致），倒计时在按钮上
+  const [codeCooldown, setCodeCooldown] = useState(0)
+  const [codeSending, setCodeSending] = useState(false)
+  useEffect(() => {
+    if (codeCooldown <= 0) return
+    const id = window.setTimeout(() => setCodeCooldown((s) => s - 1), 1000)
+    return () => window.clearTimeout(id)
+  }, [codeCooldown])
   // 邀请链接落地（/?aff=code）：注册请求隐式携带；邀请制下没带链接的人可手填
   const affFromUrl = new URLSearchParams(window.location.search).get('aff')
   const [affInput, setAffInput] = useState('')
@@ -69,11 +99,13 @@ export function LoginForm() {
         new_user_credit_micro: number
         invitee_credit_micro: number
         allowed_domains: string[]
+        email_verification: boolean
       }>('/api/registration'),
     retry: 0,
     staleTime: 60_000,
   })
   const regMode = regPolicy.data?.mode ?? 'open'
+  const emailVerification = regPolicy.data?.email_verification ?? false
   const giftMicro =
     (regPolicy.data?.new_user_credit_micro ?? 0) +
     (affCode ? (regPolicy.data?.invitee_credit_micro ?? 0) : 0)
@@ -105,6 +137,24 @@ export function LoginForm() {
     }
   }
 
+  const sendEmailCode = async () => {
+    const email = regForm.email.trim()
+    if (!email.includes('@') || codeCooldown > 0) return
+    setCodeSending(true)
+    setError(null)
+    try {
+      await apiFetch('/auth/email-code', {
+        method: 'POST',
+        body: { email, lang: i18n.language },
+      })
+      setCodeCooldown(60)
+    } catch (err) {
+      setError(describeAuthError(err))
+    } finally {
+      setCodeSending(false)
+    }
+  }
+
   const submitRegister = async () => {
     setBusy(true)
     setError(null)
@@ -116,6 +166,7 @@ export function LoginForm() {
           username: regForm.username.trim(),
           password: regForm.password,
           aff_code: affCode ?? undefined,
+          email_code: emailVerification ? regForm.code.trim() : undefined,
         },
       })
       // 注册即登录：建会话 → 兑 key 进门户（key 单轨）
@@ -130,7 +181,7 @@ export function LoginForm() {
       setKey(keyResp.api_key)
       await navigate({ to: '/portal' })
     } catch (err) {
-      setError(describeError(err))
+      setError(describeAuthError(err))
     } finally {
       setBusy(false)
     }
@@ -219,6 +270,32 @@ export function LoginForm() {
                 onChange={(e) => setRegForm((f) => ({ ...f, email: e.target.value }))}
               />
             </Field>
+            {emailVerification && (
+              <Field label={t('auth:emailCode')} htmlFor="reg-code" hint={t('auth:emailCodeHint')}>
+                <div className="flex gap-2">
+                  <Input
+                    id="reg-code"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    className="font-mono tracking-[0.3em]"
+                    value={regForm.code}
+                    onChange={(e) => setRegForm((f) => ({ ...f, code: e.target.value }))}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="shrink-0"
+                    loading={codeSending}
+                    disabled={codeCooldown > 0 || !regForm.email.includes('@')}
+                    onClick={() => void sendEmailCode()}
+                  >
+                    {codeCooldown > 0
+                      ? t('auth:resendIn', { seconds: codeCooldown })
+                      : t('auth:sendCode')}
+                  </Button>
+                </div>
+              </Field>
+            )}
             <Field label={t('auth:username')} htmlFor="reg-username">
               <Input
                 id="reg-username"
@@ -267,7 +344,8 @@ export function LoginForm() {
                 !regForm.email.trim() ||
                 !regForm.username.trim() ||
                 regForm.password.length < 8 ||
-                (regMode === 'invite_only' && !affCode)
+                (regMode === 'invite_only' && !affCode) ||
+                (emailVerification && regForm.code.trim().length === 0)
               }
             >
               {t('auth:tabRegister')}
@@ -350,6 +428,13 @@ export function LoginForm() {
               {t('common:login')}
               <ArrowRight className="h-4 w-4" />
             </Button>
+            <Link
+              to="/forgot-password"
+              search={{ email: form.email.trim() || undefined }}
+              className="self-end text-xs text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground"
+            >
+              {t('auth:forgotPassword')}
+            </Link>
           </form>
         )}
 

@@ -1,10 +1,11 @@
+import { ModelInput } from '@/features/models/model-input'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
-import { Input, Label } from '@/components/ui/input'
+import { Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
@@ -142,7 +143,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
       <FieldGroup title={t('admin:diagInputs')} hint={t('admin:diagInputsHint')}>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="diag-model">{t('admin:modelName')}</Label>
-          <Input
+          <ModelInput
             id="diag-model"
             className="font-mono text-sm"
             value={model}

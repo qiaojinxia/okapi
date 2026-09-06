@@ -11,8 +11,10 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
+import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as PortalRouteImport } from './routes/portal'
 import { Route as PricingRouteImport } from './routes/pricing'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminAuditRouteImport } from './routes/admin.audit'
 import { Route as AdminChannelsRouteImport } from './routes/admin.channels'
@@ -36,6 +38,7 @@ import { Route as PortalAffRouteImport } from './routes/portal.aff'
 import { Route as PortalKeysRouteImport } from './routes/portal.keys'
 import { Route as PortalLedgerRouteImport } from './routes/portal.ledger'
 import { Route as PortalLogsRouteImport } from './routes/portal.logs'
+import { Route as PortalPlansRouteImport } from './routes/portal.plans'
 import { Route as PortalProfileRouteImport } from './routes/portal.profile'
 import { Route as PortalSecurityRouteImport } from './routes/portal.security'
 import { Route as PortalTeamsRouteImport } from './routes/portal.teams'
@@ -51,6 +54,11 @@ const AdminRoute = AdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
+  id: '/forgot-password',
+  path: '/forgot-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PortalRoute = PortalRouteImport.update({
   id: '/portal',
   path: '/portal',
@@ -59,6 +67,11 @@ const PortalRoute = PortalRouteImport.update({
 const PricingRoute = PricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminIndexRoute = AdminIndexRouteImport.update({
@@ -176,6 +189,11 @@ const PortalLogsRoute = PortalLogsRouteImport.update({
   path: '/logs',
   getParentRoute: () => PortalRoute,
 } as any)
+const PortalPlansRoute = PortalPlansRouteImport.update({
+  id: '/plans',
+  path: '/plans',
+  getParentRoute: () => PortalRoute,
+} as any)
 const PortalProfileRoute = PortalProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
@@ -200,8 +218,10 @@ const PortalTopupRoute = PortalTopupRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRouteWithChildren
+  '/forgot-password': typeof ForgotPasswordRoute
   '/portal': typeof PortalRouteWithChildren
   '/pricing': typeof PricingRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
@@ -223,6 +243,7 @@ export interface FileRoutesByFullPath {
   '/portal/keys': typeof PortalKeysRoute
   '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/plans': typeof PortalPlansRoute
   '/portal/profile': typeof PortalProfileRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -232,7 +253,9 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/forgot-password': typeof ForgotPasswordRoute
   '/pricing': typeof PricingRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
@@ -254,6 +277,7 @@ export interface FileRoutesByTo {
   '/portal/keys': typeof PortalKeysRoute
   '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/plans': typeof PortalPlansRoute
   '/portal/profile': typeof PortalProfileRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -265,8 +289,10 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRouteWithChildren
+  '/forgot-password': typeof ForgotPasswordRoute
   '/portal': typeof PortalRouteWithChildren
   '/pricing': typeof PricingRoute
+  '/reset-password': typeof ResetPasswordRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
@@ -288,6 +314,7 @@ export interface FileRoutesById {
   '/portal/keys': typeof PortalKeysRoute
   '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
+  '/portal/plans': typeof PortalPlansRoute
   '/portal/profile': typeof PortalProfileRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -300,8 +327,10 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/admin'
+    | '/forgot-password'
     | '/portal'
     | '/pricing'
+    | '/reset-password'
     | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
@@ -323,6 +352,7 @@ export interface FileRouteTypes {
     | '/portal/keys'
     | '/portal/ledger'
     | '/portal/logs'
+    | '/portal/plans'
     | '/portal/profile'
     | '/portal/security'
     | '/portal/teams'
@@ -332,7 +362,9 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/forgot-password'
     | '/pricing'
+    | '/reset-password'
     | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
@@ -354,6 +386,7 @@ export interface FileRouteTypes {
     | '/portal/keys'
     | '/portal/ledger'
     | '/portal/logs'
+    | '/portal/plans'
     | '/portal/profile'
     | '/portal/security'
     | '/portal/teams'
@@ -364,8 +397,10 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/admin'
+    | '/forgot-password'
     | '/portal'
     | '/pricing'
+    | '/reset-password'
     | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
@@ -387,6 +422,7 @@ export interface FileRouteTypes {
     | '/portal/keys'
     | '/portal/ledger'
     | '/portal/logs'
+    | '/portal/plans'
     | '/portal/profile'
     | '/portal/security'
     | '/portal/teams'
@@ -398,8 +434,10 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRouteWithChildren
+  ForgotPasswordRoute: typeof ForgotPasswordRoute
   PortalRoute: typeof PortalRouteWithChildren
   PricingRoute: typeof PricingRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -418,6 +456,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/forgot-password': {
+      id: '/forgot-password'
+      path: '/forgot-password'
+      fullPath: '/forgot-password'
+      preLoaderRoute: typeof ForgotPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/portal': {
       id: '/portal'
       path: '/portal'
@@ -430,6 +475,13 @@ declare module '@tanstack/react-router' {
       path: '/pricing'
       fullPath: '/pricing'
       preLoaderRoute: typeof PricingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin/': {
@@ -593,6 +645,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortalLogsRouteImport
       parentRoute: typeof PortalRoute
     }
+    '/portal/plans': {
+      id: '/portal/plans'
+      path: '/plans'
+      fullPath: '/portal/plans'
+      preLoaderRoute: typeof PortalPlansRouteImport
+      parentRoute: typeof PortalRoute
+    }
     '/portal/profile': {
       id: '/portal/profile'
       path: '/profile'
@@ -673,6 +732,7 @@ interface PortalRouteChildren {
   PortalKeysRoute: typeof PortalKeysRoute
   PortalLedgerRoute: typeof PortalLedgerRoute
   PortalLogsRoute: typeof PortalLogsRoute
+  PortalPlansRoute: typeof PortalPlansRoute
   PortalProfileRoute: typeof PortalProfileRoute
   PortalSecurityRoute: typeof PortalSecurityRoute
   PortalTeamsRoute: typeof PortalTeamsRoute
@@ -685,6 +745,7 @@ const PortalRouteChildren: PortalRouteChildren = {
   PortalKeysRoute: PortalKeysRoute,
   PortalLedgerRoute: PortalLedgerRoute,
   PortalLogsRoute: PortalLogsRoute,
+  PortalPlansRoute: PortalPlansRoute,
   PortalProfileRoute: PortalProfileRoute,
   PortalSecurityRoute: PortalSecurityRoute,
   PortalTeamsRoute: PortalTeamsRoute,
@@ -698,8 +759,10 @@ const PortalRouteWithChildren =
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRouteWithChildren,
+  ForgotPasswordRoute: ForgotPasswordRoute,
   PortalRoute: PortalRouteWithChildren,
   PricingRoute: PricingRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

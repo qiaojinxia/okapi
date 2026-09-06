@@ -13,7 +13,7 @@ pub mod nats_relay;
 pub mod notify;
 
 use crate::config::Config;
-use okapi_ledger::BalanceLedger;
+use okapi_ledger::{BalanceLedger, Pool};
 use sqlx::PgPool;
 use std::time::Duration;
 
@@ -22,8 +22,12 @@ const RECONCILE_INTERVAL: Duration = Duration::from_mins(5);
 const PARTITION_INTERVAL: Duration = Duration::from_hours(6);
 const COOLDOWN_INTERVAL: Duration = Duration::from_secs(30);
 const BALANCE_EXPIRY_INTERVAL: Duration = Duration::from_mins(5);
+/// 订阅滚窗 / 到期扫描周期（IMPLEMENTATION §11.28：间隙内 reserve 自动落钱包，保守方向）。
+const SUBSCRIPTION_INTERVAL: Duration = Duration::from_mins(1);
 /// 对账每轮抽样的用户数上限。
 const RECONCILE_BATCH: i64 = 1000;
+/// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
+const SUBSCRIPTION_BATCH: i64 = 500;
 
 /// 连接 NATS 并确保 JetStream 拓扑；失败回退单机直连形态（None）。
 async fn connect_jetstream(nats_url: Option<&str>) -> Option<async_nats::jetstream::Context> {
@@ -85,7 +89,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     okapi_store::run_migrations(&pg).await?;
     let redis = okapi_store::connect_redis(&cfg.redis_url).await?;
     let notifier = notify::Notifier::new(pg.clone(), redis.clone());
-    let ledger = BalanceLedger::new(redis);
+    let ledger = BalanceLedger::new(redis.clone());
 
     let ch = if let Some(url) = &cfg.clickhouse_url {
         let client = okapi_store::ChClient::new(url, "okapi")
@@ -108,7 +112,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     let js = connect_jetstream(cfg.nats_url.as_deref()).await;
 
-    tracing::info!("okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown）");
+    tracing::info!(
+        "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions）"
+    );
 
     let mut chsink_tick = tokio::time::interval(Duration::from_secs(1));
     let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
@@ -116,10 +122,23 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut partition = tokio::time::interval(PARTITION_INTERVAL);
     let mut cooldown = tokio::time::interval(COOLDOWN_INTERVAL);
     let mut balance_expiry = tokio::time::interval(BALANCE_EXPIRY_INTERVAL);
+    let mut subscriptions = tokio::time::interval(SUBSCRIPTION_INTERVAL);
+    // 信号监听建一次挂在循环外：SIGTERM 处理器要在整个生命周期内常驻
+    let stop = crate::shutdown::signal();
+    tokio::pin!(stop);
 
     loop {
         tokio::select! {
             _ = chsink_tick.tick() => transport_tick(&pg, js.as_ref(), ch.as_ref()).await,
+            _ = subscriptions.tick() => {
+                match subscriptions_tick(&pg, &ledger, &redis, chrono::Utc::now()).await {
+                    Ok(r) if r.rolled + r.expired > 0 => {
+                        tracing::info!(rolled = r.rolled, expired = r.expired, "订阅滚窗 / 到期处理");
+                    }
+                    Ok(_) => {}
+                    Err(err) => tracing::error!(error = %err, "订阅滚窗 / 到期处理失败"),
+                }
+            }
             _ = sweep.tick() => {
                 match sweep_expired_reservations(&pg, &ledger, chrono::Utc::now()).await {
                     Ok(swept) if !swept.is_empty() => {
@@ -205,8 +224,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     Err(err) => tracing::error!(error = %err, "余额低扫描失败"),
                 }
             }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("worker 收到退出信号");
+            () = &mut stop => {
+                tracing::info!("worker 已下线");
                 return Ok(());
             }
         }
@@ -286,23 +305,25 @@ pub async fn sweep_expired_reservations(
                 continue;
             }
 
-            let (released, _balance) = ledger
+            let refund = ledger
                 .refund(user_id, reservation.api_key_id, reservation.request_id)
                 .await?;
+            let released = refund.released;
             if released.is_zero() {
                 continue; // 竞争：已被正常终结
             }
             sqlx::query!(
                 r#"
-                INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, payload, actor)
-                VALUES ($1, $2, 'refund', 0, $3, 'system:worker')
+                INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, payload, actor, pool)
+                VALUES ($1, $2, 'refund', 0, $3, 'system:worker', $4)
                 "#,
                 user_id,
                 reservation.request_id,
                 serde_json::json!({
                     "reason": "reservation_expired",
                     "released_micro": released.as_micros(),
-                })
+                }),
+                refund.pool.as_i16()
             )
             .execute(pg)
             .await?;
@@ -317,16 +338,37 @@ pub async fn sweep_expired_reservations(
     Ok(swept)
 }
 
-/// 对账差异行。
+/// 对账差异行（两池任一不平即入列，IMPLEMENTATION §11.28）。
 #[derive(Debug)]
 pub struct BalanceDrift {
     pub user_id: i64,
-    /// 真理源：billing_events 重放。
+    /// 真理源：billing_events（pool=0）重放。
     pub events_sum_micro: i64,
-    /// Redis 有效余额 = avail + 在途预扣（消除在途噪声后应等于事件和）。
+    /// Redis 钱包有效余额 = avail + 钱包在途（消除在途噪声后应等于事件和）。
     pub redis_effective_micro: i64,
     /// users.balance_micro 快照列。
     pub pg_snapshot_micro: i64,
+    /// 订阅池：billing_events（pool=1）重放。
+    pub sub_events_sum_micro: i64,
+    /// 订阅池：Redis sub + 订阅在途。
+    pub sub_redis_effective_micro: i64,
+}
+
+/// Redis 两池有效值：`(avail + 钱包在途, sub + 订阅在途)`。
+async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result<(i64, i64)> {
+    let avail = ledger.balance(user_id).await?.as_micros();
+    let (sub, _) = ledger.sub_balance(user_id).await?;
+    let mut inflight = (0_i64, 0_i64);
+    for r in ledger.list_reservations(user_id).await? {
+        match r.pool {
+            Pool::Wallet => inflight.0 = inflight.0.saturating_add(r.amount.as_micros()),
+            Pool::Subscription => inflight.1 = inflight.1.saturating_add(r.amount.as_micros()),
+        }
+    }
+    Ok((
+        avail.saturating_add(inflight.0),
+        sub.as_micros().saturating_add(inflight.1),
+    ))
 }
 
 /// 三方对账（docs/database.md §5）：返回不一致的用户。
@@ -339,10 +381,13 @@ pub async fn reconcile_balances(
         r#"
         SELECT u.id AS user_id,
                u.balance_micro,
-               COALESCE(e.sum_delta, 0)::bigint AS "events_sum!"
+               COALESCE(e.wallet_sum, 0)::bigint AS "events_sum!",
+               COALESCE(e.sub_sum, 0)::bigint AS "sub_events_sum!"
         FROM users u
         LEFT JOIN (
-            SELECT user_id, SUM(delta_micro) AS sum_delta
+            SELECT user_id,
+                   SUM(delta_micro) FILTER (WHERE pool = 0) AS wallet_sum,
+                   SUM(delta_micro) FILTER (WHERE pool = 1) AS sub_sum
             FROM billing_events
             GROUP BY user_id
         ) e ON e.user_id = u.id
@@ -357,20 +402,18 @@ pub async fn reconcile_balances(
 
     let mut drifts = Vec::new();
     for row in rows {
-        let avail = ledger.balance(row.user_id).await?.as_micros();
-        let inflight: i64 = ledger
-            .list_reservations(row.user_id)
-            .await?
-            .iter()
-            .map(|r| r.amount.as_micros())
-            .sum();
-        let redis_effective = avail.saturating_add(inflight);
-        if redis_effective != row.events_sum || row.balance_micro != row.events_sum {
+        let (wallet, sub) = redis_effective(ledger, row.user_id).await?;
+        if wallet != row.events_sum
+            || row.balance_micro != row.events_sum
+            || sub != row.sub_events_sum
+        {
             drifts.push(BalanceDrift {
                 user_id: row.user_id,
                 events_sum_micro: row.events_sum,
-                redis_effective_micro: redis_effective,
+                redis_effective_micro: wallet,
                 pg_snapshot_micro: row.balance_micro,
+                sub_events_sum_micro: row.sub_events_sum,
+                sub_redis_effective_micro: sub,
             });
         }
     }
@@ -381,20 +424,24 @@ pub async fn reconcile_balances(
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct BalanceRepair {
     pub user_id: i64,
-    /// 账本权威值（`billing_events` 求和）。
+    /// 钱包账本权威值（`billing_events` pool=0 求和）。
     pub events_sum_micro: i64,
     pub redis_before_micro: i64,
     pub redis_after_micro: i64,
-    /// 被保留的在途预扣合计（`avail + 在途 == 账本` 才是对账不变式）。
+    /// 被保留的钱包在途预扣合计（`avail + 在途 == 账本` 才是对账不变式）。
     pub inflight_micro: i64,
     pub pg_snapshot_before_micro: i64,
+    /// 订阅池账本权威值（pool=1 求和）与修复前后值。
+    pub sub_events_sum_micro: i64,
+    pub sub_redis_before_micro: i64,
+    pub sub_redis_after_micro: i64,
 }
 
-/// 按账本重建单个用户的热余额与展示快照。返回 None = 用户不存在/已删除。
+/// 按账本重建单个用户的两池热余额与展示快照。返回 None = 用户不存在/已删除。
 ///
 /// 先写 Redis 再写 PG 快照：Redis 是**唯一**决定能不能扣费的那份数据（`reserve.lua`
 /// 只读它、不回源 PG），中途失败的话宁可留一个滞后的展示快照，也不要留一个仍然
-/// 拒服务的热账本。两步都幂等，重跑即可收敛。
+/// 拒服务的热账本。各步都幂等，重跑即可收敛。
 pub async fn repair_balance(
     pg: &PgPool,
     ledger: &BalanceLedger,
@@ -403,8 +450,10 @@ pub async fn repair_balance(
     let Some(row) = sqlx::query!(
         r#"
         SELECT u.balance_micro,
-               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id), 0)::bigint
-                   AS "events_sum!"
+               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id AND e.pool = 0), 0)::bigint
+                   AS "events_sum!",
+               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id AND e.pool = 1), 0)::bigint
+                   AS "sub_events_sum!"
         FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
         "#,
         user_id
@@ -414,8 +463,20 @@ pub async fn repair_balance(
     else {
         return Ok(None);
     };
-    let target = okapi_domain::Money::from_micros(row.events_sum);
-    let outcome = ledger.repair(user_id, target).await?;
+    let outcome = ledger
+        .repair(
+            user_id,
+            okapi_domain::Money::from_micros(row.events_sum),
+            Pool::Wallet,
+        )
+        .await?;
+    let sub_outcome = ledger
+        .repair(
+            user_id,
+            okapi_domain::Money::from_micros(row.sub_events_sum),
+            Pool::Subscription,
+        )
+        .await?;
     sqlx::query!(
         r#"UPDATE users SET balance_micro = $2, updated_at = now() WHERE id = $1"#,
         user_id,
@@ -430,6 +491,9 @@ pub async fn repair_balance(
         redis_after_micro: outcome.after.as_micros(),
         inflight_micro: outcome.inflight.as_micros(),
         pg_snapshot_before_micro: row.balance_micro,
+        sub_events_sum_micro: row.sub_events_sum,
+        sub_redis_before_micro: sub_outcome.before.as_micros(),
+        sub_redis_after_micro: sub_outcome.after.as_micros(),
     }))
 }
 
@@ -449,8 +513,10 @@ pub async fn stable_drift(
     let sample = |uid: i64| async move {
         let row = sqlx::query!(
             r#"
-            SELECT COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = $1), 0)::bigint
-                       AS "events_sum!"
+            SELECT COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = $1 AND e.pool = 0), 0)::bigint
+                       AS "events_sum!",
+                   COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = $1 AND e.pool = 1), 0)::bigint
+                       AS "sub_events_sum!"
             FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
             "#,
             uid
@@ -458,16 +524,10 @@ pub async fn stable_drift(
         .fetch_optional(pg)
         .await?;
         let Some(row) = row else {
-            return Ok::<Option<(i64, i64)>, anyhow::Error>(None);
+            return Ok::<Option<(i64, (i64, i64), i64)>, anyhow::Error>(None);
         };
-        let avail = ledger.balance(uid).await?.as_micros();
-        let inflight: i64 = ledger
-            .list_reservations(uid)
-            .await?
-            .iter()
-            .map(|r| r.amount.as_micros())
-            .sum();
-        Ok(Some((row.events_sum, avail.saturating_add(inflight))))
+        let effective = redis_effective(ledger, uid).await?;
+        Ok(Some((row.events_sum, effective, row.sub_events_sum)))
     };
 
     let Some(first) = sample(user_id).await? else {
@@ -506,6 +566,8 @@ pub async fn repair_drifted(
         };
         if again.events_sum_micro != d.events_sum_micro
             || again.redis_effective_micro != d.redis_effective_micro
+            || again.sub_events_sum_micro != d.sub_events_sum_micro
+            || again.sub_redis_effective_micro != d.sub_redis_effective_micro
         {
             continue;
         }
@@ -601,6 +663,25 @@ pub async fn expire_balances(
         .await?;
     }
     Ok(expired)
+}
+
+/// 订阅滚窗 / 到期一轮（IMPLEMENTATION §11.28）。有订阅收回了分组就 INCR `auth:ver`
+/// 让网关鉴权缓存失效（与 console 的 `auth_flush` 同一把键；worker 不持有 scheduler）。
+pub async fn subscriptions_tick(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    redis: &fred::clients::Client,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<okapi_ledger::subscriptions::TickReport> {
+    use fred::interfaces::KeysInterface as _;
+    let report = okapi_ledger::subscriptions::tick(pg, ledger, now, SUBSCRIPTION_BATCH).await?;
+    if report.group_changed {
+        let bumped: Result<i64, _> = redis.incr("auth:ver").await;
+        if let Err(err) = bumped {
+            tracing::warn!(error = %err, "订阅到期收组后 auth:ver 失效失败（依赖 60s TTL 兜底）");
+        }
+    }
+    Ok(report)
 }
 
 /// 数据保留策略（#1790-1）：settings.retention_months（缺省 0=永久保留），

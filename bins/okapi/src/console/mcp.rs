@@ -550,9 +550,16 @@ async fn platform_kpi(state: &AppState) -> Result<Value, AppError> {
 }
 
 async fn channel_health(state: &AppState) -> Result<Value, AppError> {
-    let channels = okapi_store::admin::list_channels(&state.pg, None).await?;
+    let channels = okapi_store::admin::list_channels(
+        &state.pg,
+        okapi_store::admin::ChannelFilter::default(),
+        okapi_store::listing::Slice::ALL,
+    )
+    .await?;
     let keys = okapi_store::admin::list_channel_keys(&state.pg).await?;
     let data: Vec<Value> = channels
+        .page
+        .data
         .into_iter()
         .map(|c| {
             let keys: Vec<Value> = keys
@@ -887,6 +894,7 @@ async fn user_ban(state: &AppState, key: &AuthedKey, args: &Value) -> Result<Val
     .execute(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    state.sched.web_session_revoke_user(user_id).await;
     state.sched.auth_flush().await;
     mcp_audit(state, key, "user.ban", &user_id.to_string(), json!({})).await;
     Ok(json!({"dry_run": false, "banned": true}))

@@ -86,6 +86,97 @@ async fn setup() -> TestEnv {
 }
 
 #[tokio::test]
+async fn redemption_list_pages_fifty_by_default_and_bounds_requests() {
+    let env = setup().await;
+    let suffix = Uuid::new_v4();
+    let codes: Vec<String> = (0..205)
+        .map(|i| format!("page-fixture-{suffix}-{i}"))
+        .collect();
+    // 独立批次，过期且绑定测试用户，不产生可流通的兑换码；验证后只清理该批次。
+    let batch = okapi_store::admin::create_redemption_codes(
+        &env.pg,
+        env.user_id,
+        1,
+        &codes,
+        Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        okapi_store::admin::RedemptionOptions {
+            bind_user_id: Some(env.user_id),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let client = reqwest::Client::new();
+    let list = |query: String| {
+        let client = &client;
+        let env = &env;
+        async move {
+            let response = client
+                .get(format!(
+                    "http://{}/admin/redemptions?batch={batch}{query}",
+                    env.addr
+                ))
+                .bearer_auth(&env.admin_token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            response.json::<Value>().await.unwrap()
+        }
+    };
+    let first = list(String::new()).await;
+    assert_eq!(first["total"], 205);
+    assert_eq!(
+        first["data"].as_array().unwrap().len(),
+        50,
+        "大表不传 limit 缺省 50（IMPLEMENTATION §11.6），不回全量"
+    );
+    let mut ids = Vec::new();
+    for offset in (0..205).step_by(20) {
+        let page = list(format!("&limit=20&offset={offset}")).await;
+        assert_eq!(page["total"], 205, "total 是批次总数，不是本页条数");
+        let rows = page["data"].as_array().unwrap();
+        assert_eq!(rows.len(), 20.min(205 - offset));
+        ids.extend(rows.iter().map(|r| r["id"].as_i64().unwrap()));
+        assert!(rows.iter().all(|r| r.get("code_hash").is_none()));
+    }
+    assert_eq!(ids.len(), 205);
+    assert!(
+        ids.windows(2).all(|w| w[0] > w[1]),
+        "跨页严格降序、不重不漏"
+    );
+    let capped = list("&limit=99999&offset=-1".into()).await;
+    assert_eq!(
+        capped["data"].as_array().unwrap().len(),
+        200,
+        "后端限制单次上限"
+    );
+    assert_eq!(capped["data"][0], first["data"][0]);
+    let minimum = list("&limit=0&offset=-1".into()).await;
+    assert_eq!(minimum["data"].as_array().unwrap().len(), 1);
+    let past_end = list("&limit=20&offset=220".into()).await;
+    assert_eq!(past_end["total"], 205);
+    assert!(past_end["data"].as_array().unwrap().is_empty());
+
+    sqlx::query("UPDATE redemption_codes SET status = 3 WHERE batch_id = $1 AND id = ANY($2)")
+        .bind(batch)
+        .bind(&ids[..5])
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let filtered = list("&status=3&limit=2&offset=2".into()).await;
+    assert_eq!(filtered["total"], 5, "先过滤再分页，计数也遵守相同过滤条件");
+    assert_eq!(filtered["data"].as_array().unwrap().len(), 2);
+    assert_eq!(filtered["data"][0]["id"], ids[2]);
+    sqlx::query("DELETE FROM redemption_codes WHERE batch_id = $1")
+        .bind(batch)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 // 生命周期场景脚本：生成→核销→重放→并发→过期 一体时序
 #[allow(clippy::too_many_lines)]
 async fn redemption_lifecycle() {

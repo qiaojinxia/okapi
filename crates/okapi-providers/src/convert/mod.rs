@@ -3,6 +3,7 @@
 //! （请求出向转换 + 响应/事件流回向转换打包在同一使用场景）。
 
 pub mod anthropic_to_openai;
+pub mod gemini_to_openai;
 pub mod openai_to_anthropic;
 pub mod openai_to_gemini;
 pub mod responses_to_chat;

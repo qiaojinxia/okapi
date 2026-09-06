@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { Input, Label } from '@/components/ui/input'
-import { TagInput } from '@/components/ui/tag-input'
+import { ModelTagsInput } from '@/features/models/model-input'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -136,7 +136,7 @@ export function ModelDrawer({
       </FieldGroup>
 
       <FieldGroup title={t('admin:fallbackModels')} hint={t('admin:fallbackModelsHint')}>
-        <TagInput
+        <ModelTagsInput
           id="m-fallbacks"
           value={fallbacks}
           onChange={setFallbacks}

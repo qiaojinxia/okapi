@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT plan_id FROM recharge_orders WHERE order_no = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plan_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "plan_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "44355ac31ced8a042a4425b368ffbcd09bdcd5ab60ba558565fd05003703f14b"
+}

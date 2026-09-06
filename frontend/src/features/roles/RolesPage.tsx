@@ -1,5 +1,5 @@
 import { Pencil, Plus, Shield, Trash2 } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -9,8 +9,10 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { RoleDrawer } from '@/features/roles/RoleDrawer'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -33,10 +35,15 @@ export function RolesPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<'create' | RoleRow | null>(null)
   const { confirm, dialog } = useConfirm()
+  const pager = usePagination()
 
   const roles = useQuery({
-    queryKey: qk.adminRoles,
-    queryFn: () => apiFetch<{ data: RoleRow[] }>('/admin/roles'),
+    queryKey: [...qk.adminRoles, pager.offset, pager.limit],
+    queryFn: () =>
+      apiFetch<{ data: RoleRow[]; total: number }>(
+        `/admin/roles?limit=${pager.limit}&offset=${pager.offset}`,
+      ),
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminRoles })
 
@@ -60,7 +67,9 @@ export function RolesPage() {
         icon={Shield}
         title={t('admin:rolesTitle')}
         description={t('admin:roleHint')}
-        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
+        meta={
+          <Badge variant="muted">{t('admin:keyTotal', { n: roles.data?.total ?? 0 })}</Badge>
+        }
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
@@ -85,7 +94,7 @@ export function RolesPage() {
           }
         />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>ID</Th>
@@ -142,6 +151,8 @@ export function RolesPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={roles.data?.total} />
 
       {drawer !== null && (
         <RoleDrawer

@@ -10,8 +10,10 @@ pub mod dashboard;
 pub mod embeddings;
 pub mod error;
 pub mod estimate;
+pub mod extract;
 pub mod images;
 pub mod models;
+pub mod openai_dialect;
 pub mod pricing_loader;
 pub mod realtime;
 pub mod routing_prefs;
@@ -73,6 +75,7 @@ pub async fn build_state(
         None => None,
     };
 
+    let upstream = OpenAiUpstream::new().map_err(|e| anyhow::anyhow!("upstream client: {e}"))?;
     Ok(AppState {
         pg,
         ledger,
@@ -86,7 +89,8 @@ pub async fn build_state(
             .time_to_live(Duration::from_secs(5))
             .max_capacity(100_000)
             .build(),
-        upstream: OpenAiUpstream::new().map_err(|e| anyhow::anyhow!("upstream client: {e}"))?,
+        azure: okapi_providers::AzureUpstream::new(upstream.clone()),
+        upstream,
         anthropic: AnthropicUpstream::new()
             .map_err(|e| anyhow::anyhow!("anthropic client: {e}"))?,
         gemini: GeminiUpstream::new().map_err(|e| anyhow::anyhow!("gemini client: {e}"))?,
@@ -118,6 +122,7 @@ pub async fn build_state(
             .max_capacity(4096)
             .time_to_live(std::time::Duration::from_mins(1))
             .build(),
+        settlements: crate::shutdown::Pending::default(),
     })
 }
 
@@ -233,6 +238,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     spawn_epoch_subscriber(state.clone());
     spawn_routing_invalidate_subscriber(state.clone());
 
+    let settlements = state.settlements.clone();
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!(bind = %cfg.bind, "okapi gateway 启动");
@@ -241,20 +247,36 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(crate::shutdown::signal())
     .await?;
+    // 连接排完 ≠ 账已落：流式/非流式 chat 的结算在响应之后的后台任务里，
+    // 这里等它们归零再退出，否则最后一批请求只剩 Redis 预扣、要靠对账才能收口
+    settlements.wait_idle(SETTLE_DRAIN_CAP).await;
+    tracing::info!("okapi gateway 已下线");
     Ok(())
 }
+
+/// 下线时等待后台结算的上限。结算本身只是 Redis commit + 一次 PG 事务（含三次退避重试
+/// 共约 4s），30s 足够；超时留给对账修复而不是无限期拖住编排层的 terminationGracePeriod。
+const SETTLE_DRAIN_CAP: Duration = Duration::from_secs(30);
 
 /// 组装路由（集成测试直接复用）。
 /// 请求体上限 32MB（网关不解压请求体，即为有效字节上限；防超大体/zip bomb，§3.7-8）。
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route(
+            "/v1/messages/count_tokens",
+            post(chat::messages_count_tokens),
+        )
         .route("/v1/messages", post(chat::messages))
         .route("/v1/responses", post(chat::responses))
+        // Gemini 原生入口：`{model_action}` = `gemini-2.5-pro:generateContent`（冒号在段内）
+        .route("/v1beta/models/{model_action}", post(chat::gemini_generate))
+        .route("/v1beta/models", get(models::list_models_gemini))
         .route("/v1/embeddings", post(embeddings::embeddings))
         .route("/v1/images/generations", post(images::images))
+        .route("/v1/images/edits", post(images::edits))
         .route("/v1/rerank", post(embeddings::rerank))
         .route("/v1/realtime", get(realtime::realtime))
         .route("/v1/videos", post(videos::create))
@@ -282,9 +304,4 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(clients::stamp_peer_ip))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
-}
-
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("收到退出信号，开始优雅下线");
 }

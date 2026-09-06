@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
 use serde::Deserialize;
@@ -178,6 +178,8 @@ async fn handle(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         body,
+        proxy_url: okapi_providers::http::proxy_url_from_settings(&channel.settings),
+        extra_headers: okapi_providers::http::extra_headers_from_settings(&channel.settings),
     };
 
     match state.pass.forward(pass_req).await {
@@ -260,18 +262,19 @@ async fn settle(
     upstream_status: Option<i16>,
 ) {
     let book = state.pricebook.load();
-    let (billing_state, log_type, event_type, delta, amount) = if success {
+    let (billing_state, log_type, event_type, delta, amount, pool) = if success {
         match state
             .ledger
             .commit(key.user_id, key.key_id, request_id, quote.amount)
             .await
         {
-            Ok(CommitOutcome::Committed { .. }) => (
+            Ok(CommitOutcome::Committed { pool, .. }) => (
                 BillingState::Committed,
                 2_i16,
                 "commit",
                 quote.amount.as_micros().saturating_neg(),
                 quote.amount,
+                pool,
             ),
             Ok(CommitOutcome::NoReservation) => return,
             Err(err) => {
@@ -280,14 +283,18 @@ async fn settle(
             }
         }
     } else {
-        if let Err(err) = state
+        let pool = match state
             .ledger
             .refund(key.user_id, key.key_id, request_id)
             .await
         {
-            tracing::error!(request_id = %request_id, error = %err, "custom_pass 退款失败（悬置待清理）");
-        }
-        (BillingState::Failed, 5_i16, "refund", 0, Money::ZERO)
+            Ok(r) => r.pool,
+            Err(err) => {
+                tracing::error!(request_id = %request_id, error = %err, "custom_pass 退款失败（悬置待清理）");
+                Pool::Wallet
+            }
+        };
+        (BillingState::Failed, 5_i16, "refund", 0, Money::ZERO, pool)
     };
     let input = SettlementInput {
         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -328,6 +335,7 @@ async fn settle(
         delta_micro: delta,
         balance_after: None,
         event_type,
+        pool,
     };
     state.settle_write(input).await;
     if success {

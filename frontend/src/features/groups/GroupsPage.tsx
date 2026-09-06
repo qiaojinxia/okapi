@@ -1,5 +1,5 @@
 import { Layers, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { GroupListRow } from '@/features/groups/types'
@@ -11,7 +11,9 @@ import { toast } from '@/components/ui/toast'
 import { GroupDrawer } from '@/features/groups/GroupDrawer'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
@@ -27,10 +29,15 @@ export function GroupsPage() {
   const queryClient = useQueryClient()
   const [drawer, setDrawer] = useState<{ group?: GroupListRow } | null>(null)
   const { confirm, dialog } = useConfirm()
+  const pager = usePagination()
 
   const groups = useQuery({
-    queryKey: qk.adminGroups,
-    queryFn: () => apiFetch<{ data: GroupListRow[] }>('/admin/groups'),
+    queryKey: [...qk.adminGroups, pager.offset, pager.limit],
+    queryFn: () =>
+      apiFetch<{ data: GroupListRow[]; total: number }>(
+        `/admin/groups?limit=${pager.limit}&offset=${pager.offset}`,
+      ),
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminGroups })
 
@@ -47,12 +54,15 @@ export function GroupsPage() {
   const rows = groups.data?.data ?? []
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex h-full min-h-0 flex-col gap-4">
       <PageHeader
+        className="shrink-0"
         icon={Layers}
         title={t('admin:groupsTitle')}
         description={t('admin:groupsDesc')}
-        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
+        meta={groups.data?.total === undefined ? undefined : (
+          <Badge variant="muted">{t('admin:keyTotal', { n: groups.data.total })}</Badge>
+        )}
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />
@@ -77,7 +87,12 @@ export function GroupsPage() {
           }
         />
       ) : (
-        <Table>
+        <Table
+          stickyHeader
+          wrapperClassName="min-h-40 max-h-none flex-1 overscroll-contain [scrollbar-gutter:stable]"
+          scrollResetKey={`${pager.offset}:${pager.limit}`}
+          aria-busy={groups.isFetching}
+        >
           <THead>
             <Tr>
               <Th>{t('admin:groupCode')}</Th>
@@ -146,6 +161,8 @@ export function GroupsPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={groups.data?.total} className="shrink-0" />
 
       {drawer !== null && (
         <GroupDrawer

@@ -39,16 +39,14 @@ pub enum MessagesResponse {
 
 #[derive(Clone)]
 pub struct AnthropicUpstream {
-    http: reqwest::Client,
+    http: crate::http::HttpPool,
 }
 
 impl AnthropicUpstream {
     pub fn new() -> Result<Self, UpstreamError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| UpstreamError::Build(e.to_string()))?;
-        Ok(Self { http })
+        Ok(Self {
+            http: crate::http::HttpPool::new()?,
+        })
     }
 
     /// 转发 /v1/messages。`body` 已是 Anthropic 协议 JSON（含 stream 字段）。
@@ -58,11 +56,12 @@ impl AnthropicUpstream {
         credential: &str,
         body: Bytes,
         stream: bool,
+        outbound: &crate::http::Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
         let url = format!("{}/messages", api_base.trim_end_matches('/'));
         let mut req = self
             .http
-            .post(url)
+            .post(outbound, url)?
             .header("x-api-key", credential)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -113,6 +112,38 @@ impl AnthropicUpstream {
                 body,
             })
         }
+    }
+
+    /// `POST /v1/messages/count_tokens`：不计费，原样回 `{input_tokens}`。
+    pub async fn count_tokens(
+        &self,
+        api_base: &str,
+        credential: &str,
+        body: Bytes,
+        outbound: &crate::http::Outbound,
+    ) -> Result<Bytes, UpstreamError> {
+        let url = format!("{}/messages/count_tokens", api_base.trim_end_matches('/'));
+        let resp = self
+            .http
+            .post(outbound, url)?
+            .header("x-api-key", credential)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .timeout(NON_STREAM_TIMEOUT)
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| classify(&e))?;
+        let status = resp.status().as_u16();
+        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        if !(200..300).contains(&status) {
+            return Err(UpstreamError::Status {
+                status,
+                body,
+                retry_after_secs: None,
+            });
+        }
+        Ok(body)
     }
 }
 

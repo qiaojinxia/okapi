@@ -2,16 +2,22 @@
 -- KEYS[1] bal:{uid}  KEYS[2] conc:{uid}:k:<kid>
 -- ARGV[1] request_id  ARGV[2] actual_micro
 -- 幂等：预扣字段不存在 → {0,'NO_RESERVATION'}（调用方转对账路径，不直接改余额）
+-- 回到预扣所在池（字段第 4 段 pool；老格式缺省钱包）。
 
 local field = 'r:' .. ARGV[1]
 local r = redis.call('HGET', KEYS[1], field)
 if not r then return {0, 'NO_RESERVATION'} end
 
-local reserved = tonumber(string.match(r, '^(%d+)'))
+local parts = {}
+for p in string.gmatch(r, '[^|]+') do parts[#parts + 1] = p end
+local reserved = tonumber(parts[1])
+local pool = (parts[4] == '1') and 1 or 0
+local bal_field = (pool == 1) and 'sub' or 'avail'
+
 local actual = tonumber(ARGV[2])
 local delta = reserved - actual
 
-redis.call('HINCRBY', KEYS[1], 'avail', delta)
+redis.call('HINCRBY', KEYS[1], bal_field, delta)
 redis.call('HDEL', KEYS[1], field)
 if tonumber(redis.call('GET', KEYS[2]) or '0') > 0 then redis.call('DECR', KEYS[2]) end
-return {1, tostring(delta), redis.call('HGET', KEYS[1], 'avail')}
+return {1, tostring(delta), redis.call('HGET', KEYS[1], bal_field), pool}

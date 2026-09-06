@@ -32,7 +32,7 @@ export function NoticeCard() {
   const [draft, setDraft] = useState<NoticeDraft | null>(null)
 
   const current = useQuery({
-    queryKey: ['setting', 'site_notice'],
+    queryKey: qk.setting('site_notice'),
     queryFn: () => apiFetch<{ value: Partial<NoticeDraft> | null }>('/admin/settings/site_notice'),
   })
   const loaded: NoticeDraft = { ...EMPTY, ...current.data?.value }
@@ -48,7 +48,7 @@ export function NoticeCard() {
       toast.success(t('admin:noticeSaved'))
       setDraft(null)
       void current.refetch()
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
       // 横幅读的是公开端点（60s 服务端缓存），本地立即失效以便预览刷新
       void queryClient.invalidateQueries({ queryKey: qk.notice })
     },

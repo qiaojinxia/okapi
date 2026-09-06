@@ -87,6 +87,50 @@ impl AppError {
     }
 }
 
+impl AppError {
+    /// Gemini 协议入口的错误壳（`{"error":{"code","message","status"}}`，google.rpc.Status 形状）；
+    /// message 仍只放 error_code（i18n 红线），status 按 HTTP 状态映射到 gRPC 状态名。
+    #[must_use]
+    pub fn into_gemini_response_with(self, request_id: Option<Uuid>) -> Response {
+        let message = match &self.param {
+            Some(p) => format!("{} {p}", self.code),
+            None => self.code.clone(),
+        };
+        let body = serde_json::json!({
+            "error": {
+                "code": self.status.as_u16(),
+                "message": message,
+                "status": gemini_status_name(self.status),
+            },
+            "request_id": request_id.map(|id| id.to_string()),
+        });
+        let mut resp = (self.status, axum::Json(body)).into_response();
+        if let Some(id) = request_id
+            && let Ok(value) = axum::http::HeaderValue::from_str(&id.to_string())
+        {
+            resp.headers_mut().insert("x-okapi-request-id", value);
+        }
+        resp
+    }
+}
+
+/// HTTP 状态 → google.rpc.Code 名（Gemini 错误壳的 `status` 字段）。
+#[must_use]
+pub fn gemini_status_name(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::BAD_REQUEST => "INVALID_ARGUMENT",
+        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+        StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => "PERMISSION_DENIED",
+        StatusCode::NOT_FOUND => "NOT_FOUND",
+        StatusCode::CONFLICT => "ABORTED",
+        StatusCode::TOO_MANY_REQUESTS => "RESOURCE_EXHAUSTED",
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => "DEADLINE_EXCEEDED",
+        StatusCode::NOT_IMPLEMENTED => "UNIMPLEMENTED",
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE => "UNAVAILABLE",
+        _ => "INTERNAL",
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         self.into_response_with(None)
@@ -107,9 +151,18 @@ impl From<StoreError> for AppError {
 
 impl From<LedgerError> for AppError {
     fn from(err: LedgerError) -> Self {
-        // 账本故障 fail-closed：宁停不错账（IMPLEMENTATION §12.2）
-        tracing::error!(error = %err, "ledger error (fail-closed)");
-        Self::internal()
+        match err {
+            // 业务冲突（§11.28 激活期内换套餐）：409 + 当前套餐码
+            LedgerError::SubscriptionActive(plan_code) => {
+                Self::new(StatusCode::CONFLICT, "subscription_active").with_param(plan_code)
+            }
+            LedgerError::Store(err) => Self::from(err),
+            // 账本故障 fail-closed：宁停不错账（IMPLEMENTATION §12.2）
+            err => {
+                tracing::error!(error = %err, "ledger error (fail-closed)");
+                Self::internal()
+            }
+        }
     }
 }
 

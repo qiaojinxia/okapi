@@ -11,6 +11,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Stat } from '@/components/ui/stat'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 import { formatMoney } from '@/lib/money'
 
 export const Route = createFileRoute('/portal/aff')({
@@ -30,7 +31,7 @@ function AffPage() {
   const locale = i18n.language
   const { copy } = useCopy()
   const aff = useQuery({
-    queryKey: ['me-aff'],
+    queryKey: qk.meAff,
     queryFn: () => apiFetch<AffInfo>('/api/me/aff'),
   })
 

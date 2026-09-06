@@ -11,7 +11,16 @@ use serde_json::{Value, json};
 
 async fn totals(state: &AppState, headers: &HeaderMap) -> Result<(i64, i64), AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
-    let balance = state.ledger.balance(key.user_id).await?.as_micros();
+    let wallet = state.ledger.balance(key.user_id).await?.as_micros();
+    // 订阅池剩余计入"可用"（§11.28）：客户端 总额 − 已用 = 剩余 的口径仍对；
+    // 只在池当前可用（now < sub_until）时计入，越界的负值钳 0
+    let (sub, sub_until) = state.ledger.sub_balance(key.user_id).await?;
+    let sub_avail = if sub_until > chrono::Utc::now().timestamp() {
+        sub.as_micros().max(0)
+    } else {
+        0
+    };
+    let balance = wallet.saturating_add(sub_avail);
     let used = sqlx::query_scalar!(
         r#"SELECT COALESCE(SUM(used_micro), 0)::bigint AS "u!"
            FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL"#,

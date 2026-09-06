@@ -10,6 +10,7 @@ import { CopyButton } from '@/components/ui/copy-button'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
+import { ActiveSessionsCard } from '@/features/security/ActiveSessionsCard'
 import { RecentLoginsCard } from '@/features/security/RecentLoginsCard'
 import { toast } from '@/components/ui/toast'
 import { ApiError, apiFetch } from '@/lib/api'
@@ -165,6 +166,7 @@ function SecurityPage() {
             </CardContent>
           </Card>
           {/* 最近登录紧挨两步验证：看到不是自己的记录，动作就在左边那张卡里 */}
+          <ActiveSessionsCard />
           <RecentLoginsCard />
         </div>
       </div>

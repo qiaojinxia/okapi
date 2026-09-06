@@ -73,7 +73,7 @@ impl CalendarWindow {
 fn parse_date(value: &str) -> Result<NaiveDate, AppError> {
     NaiveDate::parse_from_str(value, "%Y-%m-%d")
         .ok()
-        .filter(|date| date.to_string() == value && value >= "1970-01-01" && value <= "2148-12-31")
+        .filter(|date| date.to_string() == value && ("1970-01-01"..="2148-12-31").contains(&value))
         .ok_or_else(|| AppError::bad_request().with_param("date_range"))
 }
 

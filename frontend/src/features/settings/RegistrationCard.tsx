@@ -6,10 +6,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
+import { Switch } from '@/components/ui/switch'
 import { TagInput } from '@/components/ui/tag-input'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 
 const MODES = ['open', 'invite_only', 'closed'] as const
 type Mode = (typeof MODES)[number]
@@ -23,6 +25,7 @@ interface Policy {
   new_user_credit_micro: number
   invitee_credit_micro: number
   inviter_credit_micro: number
+  email_verification: boolean
 }
 
 const EMPTY: Policy = {
@@ -32,6 +35,7 @@ const EMPTY: Policy = {
   new_user_credit_micro: 0,
   invitee_credit_micro: 0,
   inviter_credit_micro: 0,
+  email_verification: false,
 }
 
 /// micro ↔ 美元字符串（表单里填 "1.5"，库里存 1_500_000）；只做展示层换算，不经浮点累加。
@@ -51,7 +55,7 @@ export function RegistrationCard() {
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState<Policy | null>(null)
   const current = useQuery({
-    queryKey: ['setting', 'registration_policy'],
+    queryKey: qk.setting('registration_policy'),
     queryFn: () =>
       apiFetch<{ value: Partial<Policy> | null }>('/admin/settings/registration_policy'),
   })
@@ -74,7 +78,7 @@ export function RegistrationCard() {
       toast.success(t('admin:regSaved'))
       setDraft(null)
       void current.refetch()
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
     },
     onError: (err) => toast.error(describeError(err)),
   })
@@ -152,6 +156,13 @@ export function RegistrationCard() {
             />
           )}
         </Field>
+
+        <Switch
+          label={t('admin:regEmailVerification')}
+          description={t('admin:regEmailVerificationHint')}
+          checked={form.email_verification}
+          onChange={(on) => patch({ email_verification: on })}
+        />
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
           {money(

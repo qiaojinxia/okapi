@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*) AS \"total!\", COUNT(*) FILTER (WHERE c.status = 1) AS \"enabled!\"\n           FROM channels c\n           WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)\n             AND ($2::text IS NULL OR c.name ILIKE $2 OR c.api_base ILIKE $2)\n             AND ($3::text IS NULL OR c.provider = $3)\n             AND ($4::smallint IS NULL OR c.status = $4)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "enabled!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "c2a3a81945f46d02b8bc23a66dd7e29148a7aced9eae64b34687934bef5c4ff1"
+}

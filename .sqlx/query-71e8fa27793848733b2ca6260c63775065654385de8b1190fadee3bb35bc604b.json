@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (SELECT COUNT(*) FROM redemption_codes WHERE plan_id = $1)\n                + (SELECT COUNT(*) FROM user_subscriptions WHERE plan_id = $1) AS \"c!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "71e8fa27793848733b2ca6260c63775065654385de8b1190fadee3bb35bc604b"
+}

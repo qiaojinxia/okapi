@@ -1,8 +1,9 @@
 //! 个人中心年度活动：只读长期日聚合，不受 raw 日志 180 天 TTL 影响。
+use super::query::Query;
 use crate::gateway::{error::AppError, state::AppState};
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
 };
 use okapi_api::codes;

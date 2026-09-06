@@ -2,6 +2,7 @@ import { Link, useNavigate, useRouterState } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import {
   ChevronRight,
+  CircleHelp,
   Languages,
   LogOut,
   Menu as MenuIcon,
@@ -45,10 +46,14 @@ function loadCollapsed(): boolean {
 /// 折叠比横向滚动可用得多；抽屉展开时铺一层遮罩，点击即关。
 /// 桌面端可收成图标栏（记忆到 localStorage）：宽表格的页面（日志/渠道）多出的
 /// 190px 正好少一次横向滚动。
-export function Shell({ nav: rawNav, workspace, children }: {
+export function Shell({ nav: rawNav, workspace, children, fitViewport = false, onHelp }: {
   nav: NavGroup[]
   workspace?: NavItem
   children: React.ReactNode
+  /// 表格工作区由内容区内部分配高度，页头、筛选和分页保持在视口内。
+  fitViewport?: boolean
+  /// 顶栏常驻的"新手引导"入口（门户传入；管理端没有）。
+  onHelp?: () => void
 }) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
@@ -96,7 +101,7 @@ export function Shell({ nav: rawNav, workspace, children }: {
     .sort((a, b) => b.to.length - a.to.length)[0]
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className={cn('flex min-h-screen bg-background', fitViewport && 'h-dvh')}>
       <a
         href="#main-content"
         className="sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:w-auto focus:rounded-md focus:bg-primary focus:p-3 focus:text-primary-foreground focus:not-sr-only"
@@ -182,12 +187,13 @@ export function Shell({ nav: rawNav, workspace, children }: {
           onOpenNav={() => setOpen(true)}
           collapsed={rail}
           onToggleNav={toggleCollapsed}
+          onHelp={onHelp}
         />
-        <main id="main-content" tabIndex={-1} className="flex-1 scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8">
-          <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4">
+        <main id="main-content" tabIndex={-1} className={cn('flex-1 scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8', fitViewport && 'flex min-h-0 flex-col')}>
+          <div className={cn('mx-auto flex w-full max-w-[1600px] flex-col gap-4', fitViewport && 'min-h-0 flex-1 [&>*]:shrink-0')}>
             {/* 站点公告置于所有页面内容之上：换页不丢，关掉即记住 */}
             <NoticeBanner />
-            <div key={pathname} className="animate-fade-up">
+            <div key={pathname} className={cn('animate-fade-up', fitViewport && 'min-h-0 flex-1')}>
               {children}
             </div>
           </div>
@@ -238,12 +244,13 @@ function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => 
 /// "我在哪个价格组"，放在常驻位置省掉一次跳转。
 /// 侧栏收放也在这里：窄屏是抽屉菜单，桌面是收起/展开切换——同一位置一个按钮
 /// 只随断点换职责，比塞在侧栏底部更符合"控制不在它所控制的东西里面"的直觉。
-function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav }: {
+function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
   title: string
   navOpen: boolean
   onOpenNav: () => void
   collapsed: boolean
   onToggleNav: () => void
+  onHelp?: () => void
 }) {
   const { t, i18n } = useTranslation()
   const navigate = useNavigate()
@@ -303,6 +310,15 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav }: {
       )}
 
       <span className="mx-1 hidden h-5 w-px bg-border sm:block" aria-hidden />
+
+      {/* 新手引导常驻顶栏：总览卡关掉之后，"Base URL 填什么"这类问题仍要有地方查 */}
+      {onHelp && (
+        <Tooltip content={t('common:guide')} side="bottom">
+          <Button variant="ghost" size="icon" className="h-11 w-11 md:h-9 md:w-9" onClick={onHelp} aria-label={t('common:guide')}>
+            <CircleHelp className="h-4 w-4" />
+          </Button>
+        </Tooltip>
+      )}
 
       <Menu
         align="end"

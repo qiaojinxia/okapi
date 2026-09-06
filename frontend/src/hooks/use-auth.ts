@@ -9,6 +9,10 @@ export interface Me {
   balance_micro: number
   /// 余额有效期（#1790-6）；null = 不过期。RFC3339。
   balance_expires_at: string | null
+  /// 订阅池当前窗剩余（§11.28）；无订阅 / 窗口外为 0。
+  subscription_remaining_micro: number
+  /// 订阅池可用截止 unix 秒；0 = 无激活订阅。
+  subscription_until_unix: number
   /// 1=user 10=admin 100=super_admin（对齐 new-api）。
   role: number
   /// 生效权限点；`["*"]` = 全权，空数组 = 无管理权限。

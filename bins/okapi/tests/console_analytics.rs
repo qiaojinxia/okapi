@@ -339,10 +339,15 @@ async fn breakdown_by_each_dimension() {
     seed(&env, &env.model_b, 2, 0).await;
 
     let base = format!("&days=1&user_id={}", env.user_id);
+    // 总计与明细是两条先后执行的 CH 查询；别的测试进程若正把本用例的 outbox 行写进
+    // CH，两条查询可能夹在两张 MV 落地之间——谓词必须覆盖后面要断言的两边。
     let body = poll_until(
         &env,
         &format!("/admin/stats/breakdown?by=model{base}"),
-        |b| b["total_requests"].as_i64() == Some(8),
+        |b| {
+            b["total_requests"].as_i64() == Some(8)
+                && b["data"].as_array().is_some_and(|rows| rows.len() == 2)
+        },
     )
     .await;
     let rows = body["data"].as_array().unwrap();
@@ -437,8 +442,11 @@ async fn flow_links_conserve_and_fold_other() {
         "/admin/stats/flow?days=1&metric=requests&limit=2&user_id={}",
         env.user_id
     );
-    let body = poll_until(&env, &path, |b| b["total"].as_i64() == Some(8)).await;
-    assert_eq!(body["coverage_bp"], 10_000);
+    // total 与覆盖率来自先后两条 CH 查询，谓词要一起等（见 poll_until 注释）
+    let body = poll_until(&env, &path, |b| {
+        b["total"].as_i64() == Some(8) && b["coverage_bp"].as_i64() == Some(10_000)
+    })
+    .await;
     assert_eq!(body["truncated"], false);
     let nodes = body["nodes"].as_array().unwrap();
     let find = |id: &str| nodes.iter().find(|n| n["id"] == id).cloned();
@@ -671,6 +679,7 @@ fn advanced_payload(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
     let env = setup().await;
     if !has_ch(&env) {
@@ -687,7 +696,13 @@ async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
         "/admin/stats/trend?start_date=2026-08-25&end_date=2026-08-25&granularity=hour&user_id={}",
         env.user_id
     );
-    let body = poll_until(&env, &path, |b| b["total"]["requests"] == 3).await;
+    // 当期 / 上期 / cost_known 分属不同 CH 查询或 MV，谓词要一起等
+    let body = poll_until(&env, &path, |b| {
+        b["total"]["requests"] == 3
+            && b["previous"]["requests"] == 1
+            && b["total"]["cost_known_requests"] == 2
+    })
+    .await;
     assert_eq!(body["previous"]["requests"], 1);
     assert_eq!(
         body["total"]["cost_known_requests"], 2,
@@ -732,7 +747,7 @@ async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
     let value = trend["data"][0]["values"]["[\"up.a\",\"g,a\"]"].clone();
     assert_eq!(value["avg_latency_ms"], 2000);
     assert_eq!(value["avg_ttft_ms"], 200);
-    assert_eq!(value["avg_output_tps_milli"], 100000);
+    assert_eq!(value["avg_output_tps_milli"], 100_000);
     let (status, by) = get(
         &env,
         &format!("/admin/stats/breakdown?{query}&by=model"),
@@ -797,13 +812,13 @@ async fn legacy_aggregate_remainder_is_preserved_once_and_marked_unknown() {
         "start_date=2026-08-26&end_date=2026-08-26&user_id={}",
         env.user_id
     );
-    let (status, trend) = get(
-        &env,
-        &format!("/admin/stats/trend?{query}"),
-        &env.super_token,
-    )
+    // 新记录可能由并行进程写入 CH：mv_cube_hour 先落地时 requests 已是 3 而
+    // cost_known 仍是 0，须等 mv_analysis_hour 也可见。
+    let trend = poll_until(&env, &format!("/admin/stats/trend?{query}"), |b| {
+        b["total"]["requests"].as_i64() == Some(3)
+            && b["total"]["cost_known_requests"].as_i64() == Some(1)
+    })
     .await;
-    assert_eq!(status, 200, "{trend}");
     assert_eq!(trend["total"]["requests"], 3);
     assert_eq!(trend["total"]["amount_micro"], 3000);
     assert_eq!(trend["total"]["cost_known_requests"], 1);
@@ -896,7 +911,14 @@ async fn flow_names_include_safe_context_deleted_and_missing_identities() {
         "/admin/stats/flow?days=1&model={}&metric=requests",
         env.model_a
     );
-    let body = poll_until(&env, &path, |b| b["total"] == 2).await;
+    let user_node_id = format!("user:{}", env.user_id);
+    let body = poll_until(&env, &path, |b| {
+        b["total"] == 2
+            && b["nodes"]
+                .as_array()
+                .is_some_and(|n| n.iter().any(|x| x["id"] == user_node_id))
+    })
+    .await;
     let nodes = body["nodes"].as_array().unwrap();
     let node = |stage: &str, id: i64| {
         nodes

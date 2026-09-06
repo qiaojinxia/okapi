@@ -634,3 +634,107 @@ async fn registration_policy_gates_signup() {
         json!(["ok.test", "*.edu.cn"])
     );
 }
+
+/// 两次登录各一条会话；门户列举后吊销一条，被吊销的 cookie 不能再兑 key。
+#[tokio::test]
+async fn sessions_list_and_revoke() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let email = format!("sess-{suffix}@ok.test");
+    let register = client
+        .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "username": format!("sess-{suffix}"), "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(register.status(), 200);
+
+    let login_a = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login_a.status(), 200);
+    let cookie_a = cookie_of(&login_a);
+
+    let login_b = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login_b.status(), 200);
+    let cookie_b = cookie_of(&login_b);
+
+    let key_resp: Value = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie_a)
+        .json(&json!({"name": "sess"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let api_key = key_resp["api_key"].as_str().unwrap();
+
+    let listed: Value = client
+        .get(format!("http://{}/api/me/sessions", env.addr))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = listed["data"].as_array().expect("data");
+    assert_eq!(rows.len(), 2, "{listed}");
+
+    let sid_a = cookie_a.split('=').nth(1).unwrap();
+    let rev = client
+        .delete(format!("http://{}/api/me/sessions/{sid_a}", env.addr))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rev.status(), 200);
+
+    let dead = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie_a)
+        .json(&json!({"name": "after-revoke"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dead.status(), 401);
+
+    let alive = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie_b)
+        .json(&json!({"name": "still"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(alive.status(), 200);
+
+    let all = client
+        .delete(format!("http://{}/api/me/sessions", env.addr))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(all.status(), 200);
+    let dead_b = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie_b)
+        .json(&json!({"name": "gone"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dead_b.status(), 401);
+}

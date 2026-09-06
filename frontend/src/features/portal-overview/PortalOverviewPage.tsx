@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { Activity, Coins, Cpu, Gauge, PiggyBank, Wallet } from 'lucide-react'
 import { useState } from 'react'
@@ -15,6 +16,7 @@ import { SpendTrendView } from '@/features/portal-overview/SpendTrendView'
 import { TokenMixView } from '@/features/portal-overview/TokenMixView'
 import type { BreakdownResp, Scope } from '@/features/portal-overview/types'
 import { runwayDays } from '@/features/portal-overview/types'
+import { GettingStartedCard } from '@/features/portal-guide/GettingStartedCard'
 import type { Me } from '@/hooks/use-auth'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
@@ -84,6 +86,8 @@ export function PortalOverviewPage() {
           </>
         }
       />
+      {/* 新用户的第一屏：KPI 全是零时，"下一步做什么"比数据更重要；步骤齐了自动消失 */}
+      <GettingStartedCard />
       <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range} onApply={setRange} />
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -95,7 +99,21 @@ export function PortalOverviewPage() {
           value={me.data ? formatMoney(me.data.balance_micro, locale) : '—'}
           // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
           // 两者都没有才退回分组文案。14 天内转黄、3 天内转红。
-          sub={balanceSub(me.data ?? null, recentWalletSpend, q.data?.days ?? days, t)}
+          // 有订阅时再挂一行订阅剩余（§11.28）——请求先扣它，钱包数字单看会误导。
+          sub={
+            me.data && me.data.subscription_until_unix > 0 ? (
+              <>
+                <span>{balanceSub(me.data, recentWalletSpend, q.data?.days ?? days, t)}</span>
+                <Link to="/portal/plans" className="text-primary underline decoration-dotted">
+                  {t('portal:balanceSubLine', {
+                    amount: formatMoney(me.data.subscription_remaining_micro, locale),
+                  })}
+                </Link>
+              </>
+            ) : (
+              balanceSub(me.data ?? null, recentWalletSpend, q.data?.days ?? days, t)
+            )
+          }
           tone={balanceTone(me.data ?? null, recentWalletSpend, q.data?.days ?? days)}
         />
         <Stat
@@ -177,7 +195,9 @@ function balanceHorizon(
   days: number,
 ): { kind: 'expiry' | 'runway' | 'depleted'; days: number } | null {
   if (me === null) return null
-  if (me.balance_micro <= 0) return { kind: 'depleted', days: 0 }
+  // 订阅池还有额度时钱包为 0 不算"没钱"：请求先扣订阅池
+  if (me.balance_micro <= 0 && me.subscription_remaining_micro <= 0) return { kind: 'depleted', days: 0 }
+  if (me.balance_micro <= 0) return null
   const expiry = me.balance_expires_at ? dayjs(me.balance_expires_at).diff(dayjs(), 'day', true) : null
   const runway = walletSpend === undefined ? null : runwayDays(me.balance_micro, walletSpend, days)
   if (expiry !== null && (runway === null || expiry <= runway)) return { kind: 'expiry', days: expiry }

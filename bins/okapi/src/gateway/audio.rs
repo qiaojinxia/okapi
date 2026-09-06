@@ -21,8 +21,6 @@ use serde_json::Value;
 use std::time::Instant;
 use uuid::Uuid;
 
-const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
-
 #[derive(Deserialize)]
 struct SpeechProbe {
     model: String,
@@ -179,16 +177,7 @@ async fn handle_speech(
             .await;
         return Err(AppError::bad_request());
     };
-    let base = cand
-        .api_base
-        .clone()
-        .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
-
-    match state
-        .upstream
-        .speech(&base, &cand.credential, body_up)
-        .await
-    {
+    match state.openai_speech(&cand, &upstream_model, body_up).await {
         Ok((status, content_type, audio)) => {
             settle(
                 state,
@@ -377,14 +366,8 @@ async fn handle_transcriptions(
             *data = Bytes::from(upstream_model.clone().into_bytes());
         }
     }
-    let base = cand
-        .api_base
-        .clone()
-        .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
-
     match state
-        .upstream
-        .audio_multipart(&base, path, &cand.credential, parts)
+        .openai_audio_multipart(&cand, &upstream_model, path, parts)
         .await
     {
         Ok(resp) => {
@@ -460,7 +443,11 @@ async fn settle(
         .commit(key.user_id, key.key_id, request_id, quote.amount)
         .await
     {
-        Ok(CommitOutcome::Committed { balance_after, .. }) => {
+        Ok(CommitOutcome::Committed {
+            balance_after,
+            pool,
+            ..
+        }) => {
             let mut snapshot = quote.snapshot.clone();
             if media_units.is_some() {
                 snapshot.media_units = media_units;
@@ -504,6 +491,7 @@ async fn settle(
                 delta_micro: quote.amount.as_micros().saturating_neg(),
                 balance_after: Some(balance_after),
                 event_type: "commit",
+                pool,
             };
             state.settle_write(input).await;
             super::auth::record_settlement_counters(

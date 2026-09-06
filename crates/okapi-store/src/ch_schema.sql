@@ -274,6 +274,7 @@ ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_endpoint LowCardin
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS billing_type LowCardinality(String) DEFAULT '';
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS request_type LowCardinality(String) DEFAULT '';
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_cost_known UInt8 DEFAULT 0;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS pool UInt8 DEFAULT 0;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3) DEFAULT toDateTime64(0, 3);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_analysis_hour

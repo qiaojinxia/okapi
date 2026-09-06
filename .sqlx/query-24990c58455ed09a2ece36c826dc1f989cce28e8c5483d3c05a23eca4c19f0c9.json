@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT event_type, delta_micro, balance_after_micro, actor, pool, payload\n               FROM billing_events WHERE request_id = $1 ORDER BY event_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "event_type"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "delta_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "delta_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "balance_after_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "balance_after_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "actor",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "actor"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "pool",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "pool"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "payload",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "payload"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "24990c58455ed09a2ece36c826dc1f989cce28e8c5483d3c05a23eca4c19f0c9"
+}

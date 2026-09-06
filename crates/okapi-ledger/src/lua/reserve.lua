@@ -4,9 +4,12 @@
 -- KEYS[4] rl:{uid}:k:<kid>:rpd:<day>     KEYS[5] conc:{uid}:k:<kid>
 -- ARGV[1] request_id  ARGV[2] est_micro  ARGV[3] deadline_ms
 -- ARGV[4] rpm_cap  ARGV[5] tpm_cap  ARGV[6] rpd_cap  ARGV[7] conc_cap
--- ARGV[8] est_tokens  ARGV[9] api_key_id
+-- ARGV[8] est_tokens  ARGV[9] api_key_id  ARGV[10] now_unix_s
 -- 全部 KEYS 同 {uid} hash-tag（Cluster 单槽原子）。cap<=0 = 不限。
--- 预扣字段值 = "<est_micro>|<deadline_ms>|<api_key_id>"（释放时按 kid 归还并发槽）。
+-- 预扣字段值 = "<est_micro>|<deadline_ms>|<api_key_id>|<pool>"（pool 0 钱包 / 1 订阅池；
+-- 释放时按 kid 归还并发槽、按 pool 回到同一个池）。
+-- 选池（IMPLEMENTATION §11.28）：订阅池 sub > 0 且 now < sub_until → 从 sub 扣，**不校验足额**
+-- （允许最后一笔越界，下窗重置）；否则钱包，avail >= est 才放行（fail-closed）。
 -- 精度注：Lua number 为 double，余额比较精度上限 2^53 micro ≈ $90 亿，超出视为配置错误。
 
 local function over_cap(key, cap, incr)
@@ -30,15 +33,26 @@ if conc_cap > 0 then
 end
 
 local est = tonumber(ARGV[2])
-local bal = tonumber(redis.call('HGET', KEYS[1], 'avail') or '0')
-if bal < est then
-    return {0, 'INSUFFICIENT', redis.call('HGET', KEYS[1], 'avail') or '0'}
+local now = tonumber(ARGV[10] or '0')
+local sub = tonumber(redis.call('HGET', KEYS[1], 'sub') or '0')
+local sub_until = tonumber(redis.call('HGET', KEYS[1], 'sub_until') or '0')
+
+local field = 'avail'
+local pool = 0
+if sub > 0 and now < sub_until then
+    field = 'sub'
+    pool = 1
+else
+    local bal = tonumber(redis.call('HGET', KEYS[1], 'avail') or '0')
+    if bal < est then
+        return {0, 'INSUFFICIENT', redis.call('HGET', KEYS[1], 'avail') or '0'}
+    end
 end
 
-redis.call('HINCRBY', KEYS[1], 'avail', -est)
-redis.call('HSET', KEYS[1], 'r:' .. ARGV[1], ARGV[2] .. '|' .. ARGV[3] .. '|' .. ARGV[9])
+redis.call('HINCRBY', KEYS[1], field, -est)
+redis.call('HSET', KEYS[1], 'r:' .. ARGV[1], ARGV[2] .. '|' .. ARGV[3] .. '|' .. ARGV[9] .. '|' .. pool)
 redis.call('INCR', KEYS[2]); redis.call('EXPIRE', KEYS[2], 120)
 redis.call('INCRBY', KEYS[3], est_tokens); redis.call('EXPIRE', KEYS[3], 120)
 redis.call('INCR', KEYS[4]); redis.call('EXPIRE', KEYS[4], 172800)
 redis.call('INCR', KEYS[5]); redis.call('EXPIRE', KEYS[5], 3600)
-return {1, redis.call('HGET', KEYS[1], 'avail')}
+return {1, redis.call('HGET', KEYS[1], field), pool}

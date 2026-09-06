@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT window_start, window_end FROM user_subscriptions WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "window_start",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_start"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "window_end",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_end"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "9c213a92abb6fb18c360cb2da4f6bdfe84a9ca03fac05d6102ea94203e788ab4"
+}

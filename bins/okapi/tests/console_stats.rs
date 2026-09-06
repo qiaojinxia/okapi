@@ -325,7 +325,7 @@ async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
     assert_eq!(report["total"]["original_micro"], 2500);
     assert_eq!(report["total"]["avg_latency_ms"], 1000);
     assert_eq!(report["total"]["avg_ttft_ms"], 100);
-    assert_eq!(report["total"]["tokens_per_1k_sec"], 200000);
+    assert_eq!(report["total"]["tokens_per_1k_sec"], 200_000);
     let today = report["window"]["today"].as_str().unwrap();
     let (status, one_day) = get(
         &env,

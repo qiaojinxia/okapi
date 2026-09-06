@@ -1,3 +1,4 @@
+import { ModelTagsInput } from '@/features/models/model-input'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -8,7 +9,15 @@ import { Input, Label } from '@/components/ui/input'
 import { Field } from '@/components/ui/field'
 import { KeyParamRow } from '@/features/channels/KeyParamRow'
 import { ModelPicker } from '@/features/channels/ModelPicker'
-import { PROVIDERS, costMilliToRatio, ratioToCostMilli, readSettings } from '@/features/channels/types'
+import {
+  PROVIDERS,
+  apiBasePlaceholder,
+  costMilliToRatio,
+  defaultResponsesNative,
+  ratioToCostMilli,
+  readSettings,
+  speaksOpenAi,
+} from '@/features/channels/types'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs } from '@/components/ui/tabs'
@@ -26,6 +35,126 @@ import { qk } from '@/lib/query-keys'
 
 const EDIT_TABS = ['conn', 'models', 'sched', 'behavior'] as const
 type EditTab = (typeof EDIT_TABS)[number]
+
+function ExtraHeadersEditor({
+  value,
+  onChange,
+}: {
+  value: Record<string, string>
+  onChange: (next: Record<string, string>) => void
+}) {
+  const { t } = useTranslation()
+  const [draft, setDraft] = useState<Array<[string, string]>>(() => Object.entries(value))
+  const commit = (next: Array<[string, string]>) => {
+    setDraft(next)
+    onChange(Object.fromEntries(next.filter(([k]) => k.trim() !== '')))
+  }
+  const setRow = (index: number, name: string, val: string) => {
+    const next = [...draft]
+    next[index] = [name, val]
+    commit(next)
+  }
+  const removeRow = (index: number) => {
+    commit(draft.filter((_, i) => i !== index))
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label>{t('admin:extraHeaders')}</Label>
+      <p className="text-xs text-muted-foreground">{t('admin:extraHeadersHint')}</p>
+      {draft.map(([name, val], i) => (
+        <div key={`${name}-${i}`} className="flex gap-2">
+          <Input
+            value={name}
+            placeholder="OpenAI-Organization"
+            onChange={(e) => setRow(i, e.target.value, val)}
+          />
+          <Input value={val} placeholder="org-…" onChange={(e) => setRow(i, name, e.target.value)} />
+          <Button type="button" variant="ghost" onClick={() => removeRow(i)}>
+            ×
+          </Button>
+        </div>
+      ))}
+      <Button type="button" variant="outline" onClick={() => commit([...draft, ['', '']])}>
+        {t('admin:extraHeadersAdd')}
+      </Button>
+    </div>
+  )
+}
+
+function parseInjectValue(raw: string): unknown {
+  const trimmed = raw.trim()
+  if (trimmed === '') return ''
+  try {
+    return JSON.parse(trimmed) as unknown
+  } catch {
+    return raw
+  }
+}
+
+function formatInjectValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
+function InjectFieldsEditor({
+  value,
+  onChange,
+}: {
+  value: Record<string, unknown>
+  onChange: (next: Record<string, unknown>) => void
+}) {
+  const { t } = useTranslation()
+  const [draft, setDraft] = useState<Array<[string, string]>>(() =>
+    Object.entries(value).map(([k, v]) => [k, formatInjectValue(v)]),
+  )
+  const commit = (next: Array<[string, string]>) => {
+    setDraft(next)
+    const obj: Record<string, unknown> = {}
+    for (const [k, v] of next) {
+      if (k.trim() === '') continue
+      obj[k.trim()] = parseInjectValue(v)
+    }
+    onChange(obj)
+  }
+  const setRow = (index: number, name: string, val: string) => {
+    const next = [...draft]
+    next[index] = [name, val]
+    commit(next)
+  }
+  const removeRow = (index: number) => {
+    commit(draft.filter((_, i) => i !== index))
+  }
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label>{t('admin:injectFields')}</Label>
+      <p className="text-xs text-muted-foreground">{t('admin:injectFieldsHint')}</p>
+      {draft.map(([name, val], i) => (
+        <div key={`${name}-${i}`} className="flex gap-2">
+          <Input
+            value={name}
+            placeholder="temperature"
+            onChange={(e) => setRow(i, e.target.value, val)}
+          />
+          <Input
+            value={val}
+            placeholder='0.2 or "forced"'
+            onChange={(e) => setRow(i, name, e.target.value)}
+          />
+          <Button type="button" variant="ghost" onClick={() => removeRow(i)}>
+            ×
+          </Button>
+        </div>
+      ))}
+      <Button type="button" variant="outline" onClick={() => commit([...draft, ['', '']])}>
+        {t('admin:injectFieldsAdd')}
+      </Button>
+    </div>
+  )
+}
 
 /// 渠道抽屉：新建与编辑共用，但形态不同。
 ///
@@ -201,10 +330,36 @@ export function ChannelDrawer({
                 <Input
                   id="d-base"
                   value={form.api_base}
-                  placeholder="https://api.openai.com/v1"
+                  placeholder={apiBasePlaceholder(form.provider)}
                   onChange={(e) => setForm((f) => ({ ...f, api_base: e.target.value }))}
                 />
+                {form.provider === 'azure' && (
+                  <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>
+                )}
               </div>
+              {form.provider === 'azure' && (
+                <div className="col-span-2">
+                  <Field
+                    label={t('admin:azureApiVersion')}
+                    htmlFor="d-api-version"
+                    hint={t('admin:azureApiVersionHint')}
+                  >
+                    <Input
+                      id="d-api-version"
+                      className="w-56"
+                      value={settings.api_version ?? ''}
+                      placeholder="2024-10-21"
+                      onChange={(e) => {
+                        const v = e.target.value.trim()
+                        // 空 = 跟随后端缺省：把键删掉，而不是存一个空串让后端去猜
+                        setSettings(({ api_version: _drop, ...s }) =>
+                          v === '' ? s : { ...s, api_version: v },
+                        )
+                      }}
+                    />
+                  </Field>
+                </div>
+              )}
             </div>
           </FieldGroup>
 
@@ -236,11 +391,14 @@ export function ChannelDrawer({
       )}
 
       {(!isEdit || tab === 'models') && (
-        <FieldGroup title={t('admin:groupModels')} hint={t('admin:groupModelsHint')}>
+        <FieldGroup
+          title={t('admin:groupModels')}
+          hint={form.provider === 'azure' ? t('admin:azureModelsHint') : t('admin:groupModelsHint')}
+        >
           <ModelPicker value={models} onChange={setModels} />
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="d-models">{t('admin:modelsManual')}</Label>
-            <TagInput
+            <ModelTagsInput
               id="d-models"
               value={models}
               onChange={setModels}
@@ -363,6 +521,14 @@ export function ChannelDrawer({
             checked={settings.bill_by_response_model}
             onChange={(v) => setSettings((s) => ({ ...s, bill_by_response_model: v }))}
           />
+          {speaksOpenAi(channel.provider) && (
+            <Switch
+              label={t('admin:responsesNative')}
+              description={t('admin:responsesNativeHint')}
+              checked={settings.responses_native ?? defaultResponsesNative(channel.provider)}
+              onChange={(v) => setSettings((s) => ({ ...s, responses_native: v }))}
+            />
+          )}
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="d-strip">{t('admin:stripFields')}</Label>
             <p className="text-xs text-muted-foreground">{t('admin:stripFieldsHint')}</p>
@@ -373,6 +539,37 @@ export function ChannelDrawer({
               placeholder="logit_bias"
             />
           </div>
+          <InjectFieldsEditor
+            value={settings.inject_request_fields ?? {}}
+            onChange={(inject_request_fields) =>
+              setSettings(({ inject_request_fields: _drop, ...s }) =>
+                Object.keys(inject_request_fields).length === 0 ? s : { ...s, inject_request_fields },
+              )
+            }
+          />
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="d-proxy">{t('admin:proxyUrl')}</Label>
+            <p className="text-xs text-muted-foreground">{t('admin:proxyUrlHint')}</p>
+            <Input
+              id="d-proxy"
+              value={settings.proxy_url ?? ''}
+              placeholder="socks5://127.0.0.1:1080"
+              onChange={(e) => {
+                const v = e.target.value
+                setSettings(({ proxy_url: _drop, ...s }) =>
+                  v.trim() === '' ? s : { ...s, proxy_url: v },
+                )
+              }}
+            />
+          </div>
+          <ExtraHeadersEditor
+            value={settings.extra_headers ?? {}}
+            onChange={(extra_headers) =>
+              setSettings(({ extra_headers: _drop, ...s }) =>
+                Object.keys(extra_headers).length === 0 ? s : { ...s, extra_headers },
+              )
+            }
+          />
         </FieldGroup>
       )}
     </Drawer>

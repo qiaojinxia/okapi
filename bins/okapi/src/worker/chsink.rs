@@ -176,6 +176,8 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
             ("/v1/realtime", _) => "websocket", (_, Some(true)) => "stream", (_, Some(false)) => "non_stream", _ => "",
         },
         "upstream_cost_known": u8::from(payload.get("upstream_cost_known").and_then(Value::as_bool) == Some(true)),
+        // 结算来源池（§11.28）：0 钱包 1 订阅；老载荷缺省 0
+        "pool": u8::from(payload.get("pool").and_then(Value::as_i64) == Some(1)),
     });
     if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
         row.extend(extra.clone());

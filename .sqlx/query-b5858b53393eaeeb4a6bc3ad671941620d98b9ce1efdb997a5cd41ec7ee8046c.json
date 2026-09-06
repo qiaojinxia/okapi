@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.provider, c.api_base, c.model_mapping, c.settings,\n               NULLIF(c.settings ->> 'api_version', '') AS api_version,\n               ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1 AND c.deleted_at IS NULL\n        ORDER BY ck.id\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_mapping",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "model_mapping"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "settings",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "settings"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "api_version",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "b5858b53393eaeeb4a6bc3ad671941620d98b9ce1efdb997a5cd41ec7ee8046c"
+}

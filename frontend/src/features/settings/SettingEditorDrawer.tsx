@@ -1,3 +1,4 @@
+import { ModelInput } from '@/features/models/model-input'
 import { Plus, Trash2 } from 'lucide-react'
 import { useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -101,7 +102,7 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
           {mode === 'bool' && <Switch label={label} checked={bool} onChange={(v) => { setBool(v); setDirty(true) }} />}
           {mode === 'limits' && <FieldGroup title={t('admin:settingModelLimits')} hint={t('admin:settingRpmHint')}>
             {limits.map((item) => <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_5.5rem_auto] items-end gap-2">
-              <Field label={t('admin:settingModelName')} htmlFor={`${formId}-model-${item.id}`}><Input id={`${formId}-model-${item.id}`} value={item.model} onChange={(e) => { setDirty(true); setLimits(limits.map((row) => row.id === item.id ? { ...row, model: e.target.value } : row)) }} /></Field>
+              <Field label={t('admin:settingModelName')} htmlFor={`${formId}-model-${item.id}`}><ModelInput id={`${formId}-model-${item.id}`} value={item.model} onChange={(e) => { setDirty(true); setLimits(limits.map((row) => row.id === item.id ? { ...row, model: e.target.value } : row)) }} /></Field>
               <Field label="RPM" htmlFor={`${formId}-rpm-${item.id}`}><Input id={`${formId}-rpm-${item.id}`} inputMode="numeric" value={item.rpm} onChange={(e) => { setDirty(true); setLimits(limits.map((row) => row.id === item.id ? { ...row, rpm: e.target.value } : row)) }} /></Field>
               <Button variant="ghost" size="icon" aria-label={t('admin:settingRemoveRule', { n: item.id + 1 })} onClick={() => { setDirty(true); setLimits(limits.filter((row) => row.id !== item.id)) }}><Trash2 aria-hidden className="h-4 w-4" /></Button>
             </div>)}

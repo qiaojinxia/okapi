@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { KeyRound, UserPlus, Wallet } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { UsageResp } from '@/features/teams/types'
+import { teamRoleLabel, type UsageResp } from '@/features/teams/types'
 import { Alert } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -105,11 +105,11 @@ export function TeamDetailCard({ teamId }: { teamId: number }) {
           <Table dense>
             <THead>
               <Tr>
-                <Th>{t('admin:username')}</Th>
-                <Th>{t('team:memberRole')}</Th>
-                <Th numeric>{t('team:monthSpend')}</Th>
-                <Th numeric>{t('team:monthlyLimit')}</Th>
-                <Th numeric>{t('team:totalSpend')}</Th>
+                <Th className="w-full">{t('admin:username')}</Th>
+                <Th className="w-0">{t('team:memberRole')}</Th>
+                <Th numeric className="w-0">{t('team:monthSpend')}</Th>
+                <Th numeric className="w-0">{t('team:monthlyLimit')}</Th>
+                <Th numeric className="w-0">{t('team:totalSpend')}</Th>
               </Tr>
             </THead>
             <TBody>
@@ -117,7 +117,9 @@ export function TeamDetailCard({ teamId }: { teamId: number }) {
                 <Tr key={m.member_user_id}>
                   <Td className="font-medium">{m.username}</Td>
                   <Td>
-                    <Badge variant={m.role === 'owner' ? 'success' : 'muted'}>{m.role}</Badge>
+                    <Badge variant={m.role === 'owner' ? 'success' : 'muted'}>
+                      {teamRoleLabel(m.role, t)}
+                    </Badge>
                   </Td>
                   <Td numeric>{formatMoney(m.month_spend_micro, locale)}</Td>
                   <Td numeric className="text-muted-foreground">
@@ -155,8 +157,8 @@ export function TeamDetailCard({ teamId }: { teamId: number }) {
               value={form.role}
               onChange={(v) => setForm((f) => ({ ...f, role: v }))}
               options={[
-                { value: 'member', label: 'member' },
-                { value: 'admin', label: 'admin' },
+                { value: 'member', label: t('team:roleMember') },
+                { value: 'admin', label: t('team:roleAdmin') },
               ]}
             />
           </Field>

@@ -2,8 +2,10 @@
 //!
 //! 配置 `settings.notify_channels` = JSON 数组：
 //! `[{"type":"webhook","url":"https://...","events":["drift","channel_cooldown","balance_low"],
-//!    "min_interval_secs":300}]`
-//! M4 基线仅 webhook 类型（SMTP 邮件列 backlog：不引入 §1 冻结清单外的框架级依赖）。
+//!    "min_interval_secs":300},
+//!   {"type":"email","to":["ops@example.com"],"events":["drift"],"lang":"zh-CN"}]`
+//! webhook 通道 POST JSON；email 通道走 `settings.smtp`（IMPLEMENTATION §11.27），
+//! 未配置 SMTP 只打日志。
 //! 频率限制：Redis `notify:mute:<idx>:<event>` SET NX EX——静默期内同事件跳过；
 //! Redis 故障放行（通知丢失可容忍，不阻 worker 主循环）。发送失败仅日志。
 
@@ -46,7 +48,8 @@ impl Notifier {
             return;
         };
         for (idx, ch) in channels.iter().enumerate() {
-            if ch.get("type").and_then(Value::as_str) != Some("webhook") {
+            let kind = ch.get("type").and_then(Value::as_str).unwrap_or("");
+            if kind != "webhook" && kind != "email" {
                 continue;
             }
             let subscribed = ch
@@ -56,9 +59,6 @@ impl Notifier {
             if !subscribed {
                 continue;
             }
-            let Some(url) = ch.get("url").and_then(Value::as_str) else {
-                continue;
-            };
             let interval = ch
                 .get("min_interval_secs")
                 .and_then(Value::as_i64)
@@ -67,9 +67,17 @@ impl Notifier {
             if !self.mute_acquire(idx, event, interval).await {
                 continue;
             }
+            let at = chrono::Utc::now().to_rfc3339();
+            if kind == "email" {
+                self.send_email(ch, event, &at, payload).await;
+                continue;
+            }
+            let Some(url) = ch.get("url").and_then(Value::as_str) else {
+                continue;
+            };
             let body = serde_json::json!({
                 "event": event,
-                "at": chrono::Utc::now().to_rfc3339(),
+                "at": at,
                 "payload": payload,
             });
             let result = self
@@ -85,6 +93,43 @@ impl Notifier {
                     tracing::warn!(event, url, status = %resp.status(), "通知 webhook 非 2xx");
                 }
                 Err(err) => tracing::warn!(event, url, error = %err, "通知 webhook 发送失败"),
+            }
+        }
+    }
+
+    /// email 通道：`to` 数组逐个投递（一封一收件人，收件人互不可见）；
+    /// `lang` 选模板语言（缺省 en）；SMTP 未配置只打一条日志。
+    async fn send_email(&self, ch: &Value, event: &str, at: &str, payload: &Value) {
+        let recipients: Vec<&str> = ch
+            .get("to")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        if recipients.is_empty() {
+            return;
+        }
+        let mailer = match crate::mail::Mailer::from_pg(&self.pg).await {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::warn!(event, error = %err, "email 通知通道跳过：SMTP 未配置");
+                return;
+            }
+        };
+        let lang =
+            crate::mail::templates::Lang::resolve(ch.get("lang").and_then(Value::as_str), None);
+        let site = sqlx::query_scalar!(
+            r#"SELECT value #>> '{}' AS "v!" FROM settings WHERE key = 'site_name'"#
+        )
+        .fetch_optional(&self.pg)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "Okapi".to_owned());
+        for to in recipients {
+            let mail = crate::mail::templates::event_notice(lang, &site, to, event, at, payload);
+            if let Err(err) = mailer.send(mail).await {
+                tracing::warn!(event, to, error = %err, "通知邮件发送失败");
             }
         }
     }

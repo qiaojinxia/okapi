@@ -3,7 +3,6 @@ import { getRouteApi } from '@tanstack/react-router'
 import { Fragment, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  ChevronLeft,
   ChevronRight,
   Download,
   RotateCw,
@@ -20,6 +19,7 @@ import { CopyText } from '@/components/ui/copy-button'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { Segmented } from '@/components/ui/segmented'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { InlineStat } from '@/components/ui/stat'
@@ -27,6 +27,7 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Switch } from '@/components/ui/switch'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { usePermission } from '@/hooks/use-auth'
+import { type Pager, usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { downloadCsv, microToUsd } from '@/lib/csv'
 import { describeError } from '@/lib/i18n'
@@ -167,7 +168,7 @@ interface StatResp {
   rate_source: string
 }
 
-function toParams(f: Draft, offset: number): string {
+function toParams(f: Draft, offset: number, limit: number): string {
   const p = new URLSearchParams()
   const from = toIso(f.from)
   if (from !== undefined) {
@@ -177,7 +178,7 @@ function toParams(f: Draft, offset: number): string {
   } else {
     p.set('hours', String(f.hours))
   }
-  p.set('limit', String(PAGE))
+  p.set('limit', String(limit))
   if (offset > 0) p.set('offset', String(offset))
   if (f.model.trim()) p.set('model', f.model.trim())
   if (f.user_id.trim()) p.set('user_id', f.user_id.trim())
@@ -200,15 +201,16 @@ export function AdminLogsPage() {
   const navigate = routeApi.useNavigate()
   const applied = fromSearch(search)
   const [draft, setDraft] = useState<Draft>(applied)
-  const [offset, setOffset] = useState(0)
 
   // 地址变了（看板深链跳过来、浏览器前进后退）→ 表单跟着地址走。
-  // 依赖用序列化后的字符串：search 对象每次渲染都是新引用。
-  const appliedKey = JSON.stringify(search)
+  // 依赖用序列化后的字符串：search 对象每次渲染都是新引用；只看过滤条件，翻页不算。
+  const appliedKey = JSON.stringify(toSearch(applied))
   useEffect(() => {
     setDraft(fromSearch(JSON.parse(appliedKey) as LogSearch))
-    setOffset(0)
   }, [appliedKey])
+  // 页宽档位到 200 为止（后端钳制上限）；CH 明细不 count，翻页靠"本页满 = 可能还有"。
+  // 页码也在地址里；`commit` 整体替换 search 时不带 page，过滤一变自然回第一页
+  const pager = usePagination({ limit: PAGE, pageSizes: [50, 100, 200] })
 
   const commit = (next: Draft) => {
     void navigate({ search: toSearch(next) })
@@ -231,7 +233,7 @@ export function AdminLogsPage() {
       />
       <StatBar applied={applied} />
       <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} />
-      <LogTable applied={applied} offset={offset} onOffset={setOffset} />
+      <LogTable applied={applied} pager={pager} />
     </div>
   )
 }
@@ -303,7 +305,8 @@ function RangePicker({
 function StatBar({ applied }: { applied: Draft }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
-  const params = toParams(applied, 0)
+  // 统计不分页：固定 PAGE 让 query key 不随明细表换页宽而变，避免无谓重算
+  const params = toParams(applied, 0, PAGE)
   const q = useQuery({
     queryKey: qk.adminLogStat(params),
     queryFn: () => apiFetch<StatResp>(`/admin/logs/stat?${params}`),
@@ -429,19 +432,11 @@ function FilterBar({
   )
 }
 
-function LogTable({
-  applied,
-  offset,
-  onOffset,
-}: {
-  applied: Draft
-  offset: number
-  onOffset: (v: number) => void
-}) {
+function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   const [expanded, setExpanded] = useState<string | null>(null)
-  const params = toParams(applied, offset)
+  const params = toParams(applied, pager.offset, pager.limit)
   const q = useQuery({
     queryKey: qk.adminLogs(params),
     queryFn: () => apiFetch<{ data: LogRow[] }>(`/admin/logs?${params}`),
@@ -478,31 +473,7 @@ function LogTable({
           </Button>
         </div>
         {/* CH 明细无 total 计数（count 要多扫一遍），按"整页 = 可能有下一页"翻 */}
-        <div className="flex items-center gap-1">
-          <span className="mr-1 text-xs text-muted-foreground tabular-nums">
-            {t('admin:logsPage', { page: Math.floor(offset / PAGE) + 1 })}
-          </span>
-          <Button
-            size="icon"
-            variant="outline"
-            className="h-8 w-8"
-            aria-label={t('common:prevPage')}
-            disabled={offset === 0}
-            onClick={() => onOffset(Math.max(0, offset - PAGE))}
-          >
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          <Button
-            size="icon"
-            variant="outline"
-            className="h-8 w-8"
-            aria-label={t('common:nextPage')}
-            disabled={rows.length < PAGE}
-            onClick={() => onOffset(offset + PAGE)}
-          >
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
+        <Pagination {...pager} hasMore={rows.length >= pager.limit} />
       </div>
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />

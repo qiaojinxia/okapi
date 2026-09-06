@@ -1,11 +1,12 @@
 //! 管理 API 处理器（M2 第一批）。
 //! 鉴权：Bearer api key → users.role >= 10；写操作全量 audit_logs 留痕。
 
+use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_domain::Money;
@@ -125,7 +126,8 @@ pub struct CreateChannelReq {
     #[serde(default)]
     pub pools: Option<Vec<PoolMemberReq>>,
     /// 渠道高级设置（channels.settings 对象整体；已注册键见 docs/database.md：
-    /// thinking_to_content / bill_by_response_model / strip_request_fields / pass_paths）。
+    /// thinking_to_content / bill_by_response_model / strip_request_fields / inject_request_fields /
+    /// responses_native / pass_paths / api_version（azure）/ proxy_url / extra_headers）。
     #[serde(default)]
     pub settings: Option<Value>,
     /// 相对成本系数（千分比；缺省 1000 = 按官方标价采购）。0 = 自建 / 免费上游。
@@ -225,9 +227,15 @@ pub async fn create_channel(
     Json(req): Json<CreateChannelReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, _) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    if !PROVIDERS.contains(&req.provider.as_str()) {
+        return Err(AppError::bad_request().with_param("provider"));
+    }
+    ensure_azure_api_base(&req.provider, Some(&req.api_base))?;
     super::ssrf::validate_api_base(&state, &req.api_base).await?;
     ensure_cost_milli(req.cost_milli)?;
     ensure_data_retention(req.data_retention.as_deref())?;
+    ensure_settings_api_version(req.settings.as_ref())?;
+    ensure_settings_outbound(req.settings.as_ref())?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
         &state.pg,
@@ -309,21 +317,37 @@ pub async fn create_channel(
     ))
 }
 
+/// GET /admin/channels：`?q=`（名称 / 地址）、`provider`、`status` 过滤，`limit/offset` 切片；
+/// 不传 limit 回全量（模型页统计"每个模型几条渠道在服务"、测活全部等调用方要整表）。
 pub async fn list_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
     let owner_filter = match scope {
         PermScope::Own => Some(actor.user_id),
         PermScope::All | PermScope::Denied => None,
     };
-    let channels = okapi_store::admin::list_channels(&state.pg, owner_filter).await?;
-    let keys = okapi_store::admin::list_channel_keys(&state.pg).await?;
+    let list = okapi_store::admin::list_channels(
+        &state.pg,
+        okapi_store::admin::ChannelFilter {
+            owner: owner_filter,
+            query: q.keyword(),
+            provider: q.provider(),
+            status: q.status,
+        },
+        q.slice(),
+    )
+    .await?;
+    // key 与最近测活结果都只取本页渠道：渠道已切片，附属数据再整表拉就白分页了
+    let ids: Vec<i64> = list.page.data.iter().map(|c| c.id).collect();
+    let keys = okapi_store::admin::list_channel_keys_for(&state.pg, &ids).await?;
     // 最近测活结果一次 MGET 回填（Redis 30 天 TTL；没测过 / 已过期 = null）
-    let ids: Vec<i64> = channels.iter().map(|c| c.id).collect();
     let mut last_tests = state.sched.channel_test_get_many(&ids).await;
-    let data: Vec<Value> = channels
+    let data: Vec<Value> = list
+        .page
+        .data
         .into_iter()
         .map(|c| {
             let keys: Vec<&okapi_store::admin::ChannelKeyRow> =
@@ -342,7 +366,9 @@ pub async fn list_channels(
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(
+        json!({ "data": data, "total": list.page.total, "enabled": list.enabled }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -407,13 +433,94 @@ pub async fn set_channel_pools(
 }
 
 /// 已支持的上游协议（docs/database.md channels.provider）。
-const PROVIDERS: [&str; 5] = [
+const PROVIDERS: [&str; 6] = [
     "openai",
     "openai_compat",
+    "azure",
     "anthropic",
     "gemini",
     "custom_pass",
 ];
+
+/// `settings.api_version`（azure 数据面版本）形状校验：`YYYY-MM-DD` 或 `YYYY-MM-DD-preview`。
+/// 它会原样进每个请求的查询串，错一个字符整条渠道 404，所以在写入时就拦。
+fn ensure_settings_api_version(settings: Option<&Value>) -> Result<(), AppError> {
+    let Some(v) = settings.and_then(|s| s.get("api_version")) else {
+        return Ok(());
+    };
+    let ok = v.as_str().is_some_and(|s| {
+        let (date, suffix) = s.split_at(s.len().min(10));
+        date.len() == 10
+            && date.bytes().enumerate().all(|(i, b)| {
+                if i == 4 || i == 7 {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }
+            })
+            && (suffix.is_empty() || suffix == "-preview")
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::bad_request().with_param("api_version"))
+    }
+}
+
+/// `settings.proxy_url` / `extra_headers` 写入校验（IMPLEMENTATION §11.30）。
+/// 代理不走 api_base 的 SSRF 闸：企业代理常在 RFC1918 / 本机端口，拦了就没法用。
+fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
+    let Some(s) = settings else {
+        return Ok(());
+    };
+    if let Some(v) = s.get("proxy_url") {
+        let raw = v
+            .as_str()
+            .ok_or_else(|| AppError::bad_request().with_param("proxy_url"))?;
+        if !okapi_providers::http::proxy_url_ok(raw) {
+            return Err(AppError::bad_request().with_param("proxy_url"));
+        }
+    }
+    if let Some(v) = s.get("extra_headers")
+        && !okapi_providers::http::extra_headers_ok(v)
+    {
+        return Err(AppError::bad_request().with_param("extra_headers"));
+    }
+    if let Some(v) = s.get("inject_request_fields")
+        && !inject_request_fields_ok(v)
+    {
+        return Err(AppError::bad_request().with_param("inject_request_fields"));
+    }
+    Ok(())
+}
+
+/// `inject_request_fields`：对象、最多 32 键 / 4KB，受保护键不可写。
+fn inject_request_fields_ok(value: &Value) -> bool {
+    const PROTECTED: &[&str] = &["model", "messages", "stream", "provider"];
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+    if obj.len() > 32 {
+        return false;
+    }
+    if serde_json::to_vec(value)
+        .ok()
+        .is_none_or(|b| b.len() > 4096)
+    {
+        return false;
+    }
+    obj.keys()
+        .all(|k| !k.is_empty() && !PROTECTED.contains(&k.as_str()))
+}
+
+/// azure 渠道必须有资源端点：Azure 没有全局缺省地址，缺了只能拼出打向 api.openai.com
+/// 的错误请求。`provider` 是本次生效的协议，`api_base` 是本次生效的地址。
+fn ensure_azure_api_base(provider: &str, api_base: Option<&str>) -> Result<(), AppError> {
+    if provider == "azure" && api_base.is_none_or(|b| b.trim().is_empty()) {
+        return Err(AppError::bad_request().with_param("api_base"));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct PatchChannelReq {
@@ -464,6 +571,21 @@ pub async fn update_channel(
     }
     if let Some(api_base) = &req.api_base {
         super::ssrf::validate_api_base(&state, api_base).await?;
+    }
+    ensure_settings_api_version(req.settings.as_ref())?;
+    ensure_settings_outbound(req.settings.as_ref())?;
+    // 空地址已被上面的 SSRF 校验拦下（scheme 不合法），这里只剩"改成 azure 但本次没给
+    // 地址"一种可能让 azure 渠道没有端点，其余改动不必回源
+    if req.provider.as_deref() == Some("azure") && req.api_base.is_none() {
+        let current = sqlx::query_scalar!(
+            r#"SELECT api_base FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
+            id
+        )
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND))?;
+        ensure_azure_api_base("azure", current.as_deref())?;
     }
     for (field, value) in [
         ("model_mapping", req.model_mapping.as_ref()),
@@ -1005,6 +1127,54 @@ pub async fn get_setting(
 }
 
 #[derive(Deserialize)]
+pub struct SmtpTestReq {
+    pub to: String,
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
+/// POST /admin/settings/smtp/test：用**已保存**的 settings.smtp 发一封测试信（§11.27）。
+/// 未配置 501 `smtp_not_configured`；发送失败 502 `smtp_send_failed` + 参数带上游错误摘要
+/// （SMTP 错误码是排障唯一线索，此处不算"自然语言文案"）。
+pub async fn smtp_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SmtpTestReq>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
+    let to = req.to.trim();
+    if !to.contains('@') {
+        return Err(AppError::bad_request().with_param("to"));
+    }
+    // 绕过 60s 设置缓存：配置页"保存→测试"是连贯操作，必须读到刚保存的值
+    let mailer = crate::mail::Mailer::from_pg(&state.pg)
+        .await
+        .map_err(|_| AppError::new(StatusCode::NOT_IMPLEMENTED, "smtp_not_configured"))?;
+    let accept = headers
+        .get(axum::http::header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok());
+    let lang = crate::mail::templates::Lang::resolve(req.lang.as_deref(), accept);
+    let site = state
+        .setting_cached("site_name")
+        .await
+        .as_ref()
+        .as_ref()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "Okapi".to_owned());
+    if let Err(err) = mailer
+        .send(crate::mail::templates::test_message(lang, &site, to))
+        .await
+    {
+        tracing::warn!(error = %err, "SMTP 测试发送失败");
+        return Err(
+            AppError::new(StatusCode::BAD_GATEWAY, "smtp_send_failed").with_param(err.to_string())
+        );
+    }
+    audit(&state, &actor, "settings.smtp_test", to, json!({})).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
 pub struct LeaderboardQuery {
     #[serde(default)]
     pub days: Option<u32>,
@@ -1016,7 +1186,7 @@ pub struct LeaderboardQuery {
 pub async fn leaderboard(
     State(state): State<AppState>,
     headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<LeaderboardQuery>,
+    Query(q): Query<LeaderboardQuery>,
 ) -> Result<Json<Value>, AppError> {
     let _ = guard(&state, &headers, permissions::BILLING_READ).await?;
     let Some(ch) = state.ch.as_ref() else {
@@ -1186,11 +1356,16 @@ pub async fn upsert_model(
     };
     // 阶梯表非空 → tiered；空串 → 切回 ratio；None → 保持既有模式的 ratio 写入路径。
     // 校验放在写库前：阶梯表配错只会在**编译价簿**时炸，那时改动已发布，整本价簿一起装载失败。
-    let tier_expr = req.tier_expr.as_deref().map(str::trim).filter(|e| !e.is_empty());
+    let tier_expr = req
+        .tier_expr
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
     let model_id = match tier_expr {
         Some(expr) => {
-            okapi_pricing::TierTable::check_expr(expr)
-                .map_err(|reason| AppError::bad_request().with_param(format!("tier_expr:{reason}")))?;
+            okapi_pricing::TierTable::check_expr(expr).map_err(|reason| {
+                AppError::bad_request().with_param(format!("tier_expr:{reason}"))
+            })?;
             okapi_store::admin::upsert_model_tiered(&state.pg, &req.model_name, axes, expr).await?
         }
         None => okapi_store::admin::upsert_model_ratio(&state.pg, &req.model_name, axes).await?,
@@ -1393,14 +1568,16 @@ pub async fn upsert_pricing_rule(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 规则列表（按生效叠加序返回，管理端据此核对多规则连乘结果）。
+/// 规则列表（按生效叠加序返回，管理端据此核对多规则连乘结果）；`limit/offset` 可选切片。
 pub async fn list_pricing_rules(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_WRITE).await?;
-    let rows = okapi_store::admin::list_pricing_rules(&state.pg).await?;
-    let data: Vec<Value> = rows
+    let page = okapi_store::admin::list_pricing_rules(&state.pg, q.slice()).await?;
+    let data: Vec<Value> = page
+        .data
         .into_iter()
         .map(|r| {
             json!({
@@ -1415,7 +1592,7 @@ pub async fn list_pricing_rules(
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(json!({ "data": data, "total": page.total })))
 }
 
 pub async fn delete_pricing_rule(
@@ -1757,14 +1934,21 @@ pub async fn refund_by_request(
             }
         };
     };
-    // Redis 热余额回补（PG 已提交；此处失败由对账检出并修复）
-    let balance_after = state.ledger.credit(refund.user_id, refund.amount).await?;
+    // Redis 热余额回补到**原池**（订阅池付的退回订阅池；PG 已提交，此处失败由对账检出并修复）
+    let balance_after = state
+        .ledger
+        .credit_pool(refund.user_id, refund.amount, refund.pool)
+        .await?;
     audit(
         &state,
         &actor,
         "billing.refund",
         &req.request_id.to_string(),
-        json!({ "amount_micro": refund.amount.as_micros(), "reason": req.reason }),
+        json!({
+            "amount_micro": refund.amount.as_micros(),
+            "reason": req.reason,
+            "pool": refund.pool.as_i16(),
+        }),
     )
     .await;
     Ok(Json(json!({
@@ -1777,38 +1961,26 @@ pub async fn refund_by_request(
 
 // ---- 代客查看（#1790-2，强审计）----
 
-#[derive(Deserialize)]
-pub struct UserListQuery {
-    /// 用户名/邮箱模糊匹配（走 bind 参数，不拼字符串）。
-    #[serde(default)]
-    pub q: Option<String>,
-    #[serde(default)]
-    pub limit: Option<i64>,
-    #[serde(default)]
-    pub offset: Option<i64>,
-}
-
-/// GET /admin/users：用户列表（此前只能按 ID 操作，没有列表入口）。
+/// GET /admin/users：用户列表（此前只能按 ID 操作，没有列表入口）。`?q=` 匹配用户名 / 邮箱，
+/// `limit/offset` 与令牌 / 兑换码同一套 `PageQuery`（大表：不传 limit 缺省 `DEFAULT_LIMIT`）。
 /// 只读点 `user.read` 即可（与 /admin/keys 列表一致，§11.6 读写分离）：此前守的是
 /// `user.manage`，只读运营角色在侧栏看得见"用户"却点进去 403——文档、导航与后端三处
 /// 里后端是那个错的。管理动作（manage/credit/role/groups）仍要 `user.manage`。
 pub async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<UserListQuery>,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::USER_READ).await?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let offset = q.offset.unwrap_or(0).max(0);
-    // 空查询用 NULL 表示"不过滤"，避免 '%%' 走不上索引的语义歧义
-    let needle =
-        q.q.as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| format!("%{s}%"));
+    let slice = q.bounded();
+    let (limit, offset) = (slice.capped_limit(), slice.offset);
+    // 空查询用 NULL 表示"不过滤"，避免 '%%' 走不上索引的语义歧义；`%` `_` 已转义
+    let needle = okapi_store::listing::like_pattern(q.keyword());
 
-    let rows = sqlx::query!(
-        r#"
+    // 大表：limit 被封顶，COUNT 不能省，与数据查询并行
+    let (rows, total) = tokio::try_join!(
+        sqlx::query!(
+            r#"
         SELECT id, username, email, role, status, balance_micro, admin_role_id,
                price_multiplier::text AS "multiplier!", created_at
         FROM users
@@ -1817,24 +1989,21 @@ pub async fn list_users(
         ORDER BY id DESC
         LIMIT $2 OFFSET $3
         "#,
-        needle,
-        limit,
-        offset
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-
-    let total = sqlx::query_scalar!(
-        r#"
+            needle,
+            limit,
+            offset
+        )
+        .fetch_all(&state.pg),
+        sqlx::query_scalar!(
+            r#"
         SELECT COUNT(*)::bigint AS "c!" FROM users
         WHERE deleted_at IS NULL
           AND ($1::text IS NULL OR username ILIKE $1 OR email ILIKE $1)
         "#,
-        needle
+            needle
+        )
+        .fetch_one(&state.pg),
     )
-    .fetch_one(&state.pg)
-    .await
     .map_err(okapi_store::StoreError::from)?;
 
     let data: Vec<Value> = rows
@@ -1856,18 +2025,30 @@ pub async fn list_users(
     Ok(Json(json!({ "total": total, "data": data })))
 }
 
-/// GET /admin/roles：自定义管理角色列表（供分配下拉使用）。
+/// GET /admin/roles：自定义管理角色列表（供分配下拉使用；不传 limit 回全量）。
 pub async fn list_roles(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::ROLE_MANAGE).await?;
-    let rows = sqlx::query!(
-        r#"SELECT id, role_code, display_name, permissions FROM admin_roles ORDER BY id"#
+    let slice = q.slice();
+    let (rows, total) = tokio::try_join!(
+        sqlx::query!(
+            r#"SELECT id, role_code, display_name, permissions FROM admin_roles
+           ORDER BY id LIMIT $1 OFFSET $2"#,
+            slice.limit,
+            slice.offset
+        )
+        .fetch_all(&state.pg),
+        okapi_store::listing::count_unless_all(
+            slice,
+            sqlx::query_scalar!(r#"SELECT COUNT(*)::bigint AS "c!" FROM admin_roles"#)
+                .fetch_one(&state.pg)
+        ),
     )
-    .fetch_all(&state.pg)
-    .await
     .map_err(okapi_store::StoreError::from)?;
+    let total = total.unwrap_or_else(|| okapi_store::listing::len_as_total(rows.len()));
     let data: Vec<Value> = rows
         .into_iter()
         .map(|r| {
@@ -1879,7 +2060,7 @@ pub async fn list_roles(
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(json!({ "data": data, "total": total })))
 }
 
 pub async fn user_overview(
@@ -2068,16 +2249,33 @@ pub struct FlushReq {
 pub struct UpsertPlanReq {
     pub plan_code: String,
     pub display_name: String,
+    /// 0 充值模板（缺省）/ 1 订阅（IMPLEMENTATION §11.28）。
+    #[serde(default)]
+    pub kind: i16,
+    /// kind 0：入账金额；kind 1：每窗额度。
     pub grant_micro: i64,
-    /// 兑换后追加分组（须为已存在的 price_groups.group_code）。
+    /// 兑换后追加分组 / 订阅有效期内附加分组（须为已存在的 price_groups.group_code）。
     #[serde(default)]
     pub group_code: Option<String>,
-    /// 兑换后设置余额有效期（天）。
+    /// kind 0：兑换后设置余额有效期（天）。
     #[serde(default)]
     pub balance_valid_days: Option<i32>,
+    /// kind 1：售价（0 = 不可自助购买）。
+    #[serde(default)]
+    pub price_micro: i64,
+    /// kind 1 必填：1 日 2 周 3 月。
+    #[serde(default)]
+    pub period: Option<i16>,
+    /// kind 1 必填：有效期（天）。
+    #[serde(default)]
+    pub duration_days: Option<i32>,
+    #[serde(default)]
+    pub sort_order: i32,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
-/// 建/改套餐（#1790-5；plan_code 幂等 upsert）。
+/// 建/改套餐（#1790-5；plan_code 幂等 upsert；订阅形态字段校验见 §11.28）。
 pub async fn upsert_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2090,13 +2288,53 @@ pub async fn upsert_plan(
     if req.balance_valid_days.is_some_and(|d| d <= 0) {
         return Err(AppError::bad_request().with_param("balance_valid_days"));
     }
+    if req.price_micro < 0 {
+        return Err(AppError::bad_request().with_param("price_micro"));
+    }
+    let (period, duration_days, balance_valid_days) = match req.kind {
+        0 => (None, None, req.balance_valid_days),
+        1 => {
+            let Some(period) = req.period.filter(|p| (1..=3).contains(p)) else {
+                return Err(AppError::bad_request().with_param("period"));
+            };
+            let Some(days) = req.duration_days.filter(|d| *d > 0) else {
+                return Err(AppError::bad_request().with_param("duration_days"));
+            };
+            (Some(period), Some(days), None)
+        }
+        _ => return Err(AppError::bad_request().with_param("kind")),
+    };
+    if let Some(group) = req.group_code.as_deref() {
+        let exists = sqlx::query_scalar!(
+            r#"SELECT EXISTS(SELECT 1 FROM price_groups WHERE group_code = $1) AS "e!""#,
+            group
+        )
+        .fetch_one(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+        if !exists {
+            return Err(AppError::bad_request().with_param("group_code"));
+        }
+    }
     let id = okapi_store::admin::create_plan(
         &state.pg,
-        req.plan_code.trim(),
-        req.display_name.trim(),
-        req.grant_micro,
-        req.group_code.as_deref(),
-        req.balance_valid_days,
+        &okapi_store::admin::PlanSpec {
+            plan_code: req.plan_code.trim(),
+            display_name: req.display_name.trim(),
+            kind: req.kind,
+            grant_micro: req.grant_micro,
+            group_code: req.group_code.as_deref(),
+            balance_valid_days,
+            price_micro: req.price_micro,
+            period,
+            duration_days,
+            sort_order: req.sort_order,
+            description: req
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+        },
     )
     .await?;
     audit(
@@ -2105,9 +2343,13 @@ pub async fn upsert_plan(
         "plan.upsert",
         &req.plan_code,
         json!({
+            "kind": req.kind,
             "grant_micro": req.grant_micro,
             "group_code": req.group_code,
-            "balance_valid_days": req.balance_valid_days,
+            "balance_valid_days": balance_valid_days,
+            "price_micro": req.price_micro,
+            "period": period,
+            "duration_days": duration_days,
         }),
     )
     .await;
@@ -2340,7 +2582,11 @@ pub async fn test_channel(
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, channel_id, &actor, scope).await?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
     let result = probe_channel(&state, channel_id, model).await?;
     audit(
         &state,
@@ -2358,18 +2604,33 @@ pub async fn test_channel(
 /// 兼容性却好得多（推理模型的最小输出预算也常常大于 1）。
 const PROBE_MAX_TOKENS: u32 = 16;
 
+/// Azure 部署列表端点用的 api-version：`deployments` 是数据面早期版本里的资源，
+/// 新版本 spec 已不再列出但端点仍可用（one-api / new-api 同此用法）。
+/// 站长配的 `settings.api_version` 是给补全端点的，两者不混用。
+const AZURE_DEPLOYMENTS_API_VERSION: &str = "2023-03-15-preview";
+
+/// Azure 部署列表 URL（凭证探测与模型发现共用）。
+fn azure_deployments_url(base: &str) -> String {
+    format!(
+        "{}/openai/deployments?api-version={AZURE_DEPLOYMENTS_API_VERSION}",
+        okapi_providers::azure::normalize_endpoint(base)
+    )
+}
+
 /// 按协议与探测范围拼探测请求：`(method, url, body)`。
 /// 无 model = GET 协议各自的模型列表端点；有 model = POST 一次最小补全。
+/// `model` 已是上游名（azure 下即部署名）；`api_version` 只对 azure 有意义。
 fn probe_request(
     provider: &str,
     base: &str,
     model: Option<&str>,
+    api_version: Option<&str>,
 ) -> Result<(axum::http::Method, String, bytes::Bytes), AppError> {
     let Some(m) = model else {
-        let url = if provider == "custom_pass" {
-            base.to_owned()
-        } else {
-            format!("{base}/models")
+        let url = match provider {
+            "custom_pass" => base.to_owned(),
+            "azure" => azure_deployments_url(base),
+            _ => format!("{base}/models"),
         };
         return Ok((axum::http::Method::GET, url, bytes::Bytes::new()));
     };
@@ -2383,6 +2644,16 @@ fn probe_request(
             format!("{base}/models/{m}:generateContent"),
             json!({"contents": [{"parts": [{"text": "ping"}]}],
                    "generationConfig": {"maxOutputTokens": PROBE_MAX_TOKENS}}),
+        ),
+        "azure" => (
+            okapi_providers::azure::deployment_url(
+                base,
+                m,
+                "/chat/completions",
+                api_version.unwrap_or(okapi_providers::azure::DEFAULT_API_VERSION),
+            ),
+            json!({"model": m, "max_tokens": PROBE_MAX_TOKENS,
+                   "messages": [{"role": "user", "content": "ping"}]}),
         ),
         // custom_pass 是任意路径透传，没有「一次最小补全」的通用形状
         "custom_pass" => {
@@ -2416,7 +2687,9 @@ pub(crate) async fn probe_channel(
 ) -> Result<Value, AppError> {
     let row = sqlx::query!(
         r#"
-        SELECT c.provider, c.api_base, ck.credential_ciphertext
+        SELECT c.provider, c.api_base, c.model_mapping, c.settings,
+               NULLIF(c.settings ->> 'api_version', '') AS api_version,
+               ck.credential_ciphertext
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
@@ -2438,15 +2711,31 @@ pub(crate) async fn probe_channel(
         okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let base = row.api_base.unwrap_or_default();
     let base = base.trim_end_matches('/');
+    // 探的是网关真正会发出去的名字：过一遍 model_mapping（azure 下映射值就是部署名，
+    // 不映射直接打规范名必 404，其它协议映射改名的场景同理）
+    let upstream_model = model.map(|m| {
+        row.model_mapping
+            .get(m)
+            .and_then(Value::as_str)
+            .unwrap_or(m)
+            .to_owned()
+    });
 
     // 按协议选探测端点与凭证头
     let (auth_header, auth_value) = match row.provider.as_str() {
         "anthropic" => ("x-api-key".to_owned(), credential),
         "gemini" => ("x-goog-api-key".to_owned(), credential),
+        "azure" => ("api-key".to_owned(), credential),
         _ => ("authorization".to_owned(), format!("Bearer {credential}")),
     };
-    let (method, url, body) = probe_request(&row.provider, base, model)?;
+    let (method, url, body) = probe_request(
+        &row.provider,
+        base,
+        upstream_model.as_deref(),
+        row.api_version.as_deref(),
+    )?;
     let content_type = (!body.is_empty()).then(|| "application/json".to_owned());
+    let outbound = okapi_providers::Outbound::from_settings(&row.settings);
 
     let started = std::time::Instant::now();
     let outcome = state
@@ -2458,13 +2747,19 @@ pub(crate) async fn probe_channel(
             auth_value,
             content_type,
             body,
+            proxy_url: outbound.proxy_url,
+            extra_headers: outbound.extra_headers,
         })
         .await;
     let latency_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
     let at = chrono::Utc::now().to_rfc3339();
     // scope 让调用方一眼知道这个 ok 是什么意思：credential=只验了凭证与连通性，
     // model=这个模型真的调得通。少了它，两种探测的 `ok:true` 长得一模一样。
-    let scope = if model.is_some() { "model" } else { "credential" };
+    let scope = if model.is_some() {
+        "model"
+    } else {
+        "credential"
+    };
     let result = match outcome {
         Ok(okapi_providers::custom_pass::PassResponse::Ok { status, .. }) => {
             json!({"ok": true, "http_status": status, "latency_ms": latency_ms, "at": at,
@@ -2500,7 +2795,7 @@ pub async fn fetch_channel_models(
     ensure_channel_owner(&state, channel_id, &actor, scope).await?;
     let row = sqlx::query!(
         r#"
-        SELECT c.provider, c.api_base, ck.credential_ciphertext
+        SELECT c.provider, c.api_base, c.settings, ck.credential_ciphertext
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
@@ -2529,6 +2824,13 @@ pub async fn fetch_channel_models(
             "x-goog-api-key".to_owned(),
             credential,
         ),
+        // azure：`/openai/models` 列的是资源可用的模型目录而非已建部署，对路由没用；
+        // 部署列表才是网关能打到的名字（返回 {data:[{id: 部署名, model: 底层模型}]}）
+        "azure" => (
+            azure_deployments_url(base),
+            "api-key".to_owned(),
+            credential,
+        ),
         _ => (
             format!("{base}/models"),
             "authorization".to_owned(),
@@ -2536,6 +2838,7 @@ pub async fn fetch_channel_models(
         ),
     };
 
+    let outbound = okapi_providers::Outbound::from_settings(&row.settings);
     let outcome = state
         .pass
         .forward(okapi_providers::custom_pass::PassRequest {
@@ -2545,6 +2848,8 @@ pub async fn fetch_channel_models(
             auth_value,
             content_type: None,
             body: bytes::Bytes::new(),
+            proxy_url: outbound.proxy_url,
+            extra_headers: outbound.extra_headers,
         })
         .await;
     let body = match outcome {
@@ -2574,7 +2879,13 @@ pub async fn fetch_channel_models(
     };
     let parsed: Value = serde_json::from_slice(&body)
         .map_err(|_| AppError::bad_request().with_param("upstream_models_not_json"))?;
-    // openai/anthropic: {data:[{id}]}；gemini: {models:[{name: "models/x"}]}
+    let models = parse_upstream_model_ids(&parsed);
+    Ok(Json(json!({ "channel_id": channel_id, "models": models })))
+}
+
+/// 上游模型列表 → 去重排序的 id 列表。
+/// openai/anthropic/azure 部署: `{data:[{id}]}`；gemini: `{models:[{name: "models/x"}]}`。
+fn parse_upstream_model_ids(parsed: &Value) -> Vec<String> {
     let mut models: Vec<String> = Vec::new();
     for item in parsed
         .get("data")
@@ -2591,7 +2902,7 @@ pub async fn fetch_channel_models(
     }
     models.sort();
     models.dedup();
-    Ok(Json(json!({ "channel_id": channel_id, "models": models })))
+    models
 }
 
 /// 缓存清理。auth 走 Redis 版本键（跨进程立即生效）；routing/pricebook 为进程内
@@ -2713,7 +3024,8 @@ pub async fn repair_reconciliation(
         &state,
         &actor,
         "billing.reconcile_repair",
-        &req.user_id.map_or_else(|| "all".to_owned(), |id| id.to_string()),
+        &req.user_id
+            .map_or_else(|| "all".to_owned(), |id| id.to_string()),
         json!({ "repaired": repaired.len(), "detail": repaired }),
     )
     .await;

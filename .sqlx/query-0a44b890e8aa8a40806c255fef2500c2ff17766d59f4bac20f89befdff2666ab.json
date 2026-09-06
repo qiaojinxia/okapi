@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id AS channel_id, c.api_base, ck.credential_ciphertext,\n               NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,\n               c.settings -> 'extra_headers' AS extra_headers\n        FROM channel_keys ck\n        JOIN channels c ON c.id = ck.channel_id\n        WHERE ck.id = $1 AND ck.status = 1 AND c.status = 1 AND c.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "proxy_url",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "extra_headers",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "0a44b890e8aa8a40806c255fef2500c2ff17766d59f4bac20f89befdff2666ab"
+}

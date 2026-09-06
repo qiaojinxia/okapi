@@ -6,10 +6,11 @@
 //! SQL 用 format! 拼装但**只插入 clamp 过的整数**（与 leaderboard 同一纪律），
 //! 请求里的字符串一律不进 SQL。
 
+use super::query::Query;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_store::ChClient;
@@ -824,6 +825,7 @@ pub struct BreakdownQuery {
 ///
 /// scope 决定主键前缀：`key` 打 (user_id, api_key_id)，`user` 打 (user_id)；
 /// 两者都是前缀扫描。user_id 一律取自鉴权主体，与 my_daily 同一越权防线。
+#[allow(clippy::too_many_lines)]
 pub async fn my_breakdown(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1023,7 +1025,7 @@ pub async fn margin(
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
 
     let coverage = ch.query_json_each_row(&format!(
-        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {} GROUP BY day", range
+        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} GROUP BY day"
     )).await?;
     let mut known_totals = [0_i64; 3];
     let mut total_amount = 0_i64;

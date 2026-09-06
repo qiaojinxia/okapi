@@ -1,5 +1,5 @@
 import { AlertTriangle, Coins, Pencil, Plus, Rocket, Trash2, Upload } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ModelListRow } from '@/features/models/types'
@@ -12,15 +12,28 @@ import { IconButton } from '@/components/ui/icon-button'
 import { ImportDrawer } from '@/features/models/ImportDrawer'
 import { ModelDrawer } from '@/features/models/ModelDrawer'
 import { PageHeader, Toolbar } from '@/components/ui/page'
-import { SearchInput } from '@/components/ui/search-input'
+import { Pagination } from '@/components/ui/pagination'
+import { ModelSearchInput } from '@/features/models/model-input'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { Link } from '@tanstack/react-router'
+import { Link, getRouteApi } from '@tanstack/react-router'
 import type { ChannelRow } from '@/features/channels/types'
+import { useDraft } from '@/hooks/use-draft'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { text } from '@/lib/search-params'
 import { useConfirm } from '@/components/ui/confirm'
+
+const routeApi = getRouteApi('/admin/pricing')
+
+/// 列表接口的一页：`unpriced` 是搜索范围内的未定价数（"只看未定价"开着时它就等于 total）。
+interface ModelPage {
+  data: ModelListRow[]
+  total: number
+  unpriced: number
+}
 
 /// 模型定价页。
 ///
@@ -29,15 +42,41 @@ import { useConfirm } from '@/components/ui/confirm'
 export function ModelPricingPage() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const [search, setSearch] = useState('')
-  const [onlyUnpriced, setOnlyUnpriced] = useState(false)
+  // 搜索词 / 只看未定价 / 页码都在地址里。
+  // 搜索：草稿 → 回车 / 点搜索才提交（服务端 ILIKE，与用户 / 令牌列表同一形态）
+  const search = routeApi.useSearch()
+  const navigate = routeApi.useNavigate()
+  const query = search.q ?? ''
+  const onlyUnpriced = search.unpriced === true
+  const [draft, setDraft] = useDraft(query)
   const [drawer, setDrawer] = useState<{ model?: ModelListRow } | null>(null)
   const [importing, setImporting] = useState(false)
   const { confirm, dialog } = useConfirm()
+  // 模型表动辄几百行：过滤与切片都在服务端
+  const pager = usePagination()
+  // 过滤器与页码同一次导航更新：只按"新条件 + 第一页"请求一次
+  const setFilters = (next: { q?: string; unpriced?: boolean }) =>
+    void navigate({
+      search: (prev) => ({
+        ...prev,
+        ...('q' in next ? { q: text(next.q) } : {}),
+        ...('unpriced' in next ? { unpriced: next.unpriced ? true : undefined } : {}),
+        page: undefined,
+      }),
+    })
 
   const models = useQuery({
-    queryKey: qk.adminModels,
-    queryFn: () => apiFetch<{ data: ModelListRow[] }>('/admin/models'),
+    queryKey: [...qk.adminModels, query, onlyUnpriced, pager.offset, pager.limit],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        limit: String(pager.limit),
+        offset: String(pager.offset),
+      })
+      if (query !== '') params.set('q', query)
+      if (onlyUnpriced) params.set('unpriced', 'true')
+      return apiFetch<ModelPage>(`/admin/models?${params}`)
+    },
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminModels })
   // 每个模型有几条启用渠道在服务：定了价却没渠道，请求同样会被拒——
@@ -75,13 +114,12 @@ export function ModelPricingPage() {
     onError: (err) => toast.error(describeError(err)),
   })
 
-  const all = models.data?.data ?? []
-  const rows = all.filter((m) => {
-    const kw = search.trim().toLowerCase()
-    const hitKw = kw === '' || m.model_name.toLowerCase().includes(kw)
-    return hitKw && (!onlyUnpriced || m.pricing_mode === null)
-  })
-  const unpricedCount = all.filter((m) => m.pricing_mode === null).length
+  const rows = models.data?.data ?? []
+  const total = models.data?.total ?? 0
+  const unpricedCount = models.data?.unpriced ?? 0
+  const filtered = query !== '' || onlyUnpriced
+  const applySearch = () => setFilters({ q: draft })
+  const clearFilters = () => setFilters({ q: '', unpriced: false })
 
   return (
     <div className="flex flex-col gap-4">
@@ -106,26 +144,35 @@ export function ModelPricingPage() {
       <Toolbar
         filters={
           <>
-            <SearchInput
+            <ModelSearchInput
               id="m-search"
               className="w-64"
-              value={search}
+              value={draft}
               placeholder={t('admin:modelSearchHint')}
-              onChange={setSearch}
+              onChange={(value) => {
+                setDraft(value)
+                // 清空输入框即撤掉搜索词，不必再按一次回车
+                if (value.trim() === '' && query !== '') setFilters({ q: '' })
+              }}
+              onSubmit={applySearch}
             />
-            {unpricedCount > 0 && (
+            <Button size="sm" onClick={applySearch}>
+              {t('common:search')}
+            </Button>
+            {/* 开着时必须一直可见，否则搜索范围内一条未定价都没有就再关不掉 */}
+            {(onlyUnpriced || unpricedCount > 0) && (
               <Button
                 size="sm"
                 variant={onlyUnpriced ? 'destructive' : 'outline'}
                 aria-pressed={onlyUnpriced}
-                onClick={() => setOnlyUnpriced((v) => !v)}
+                onClick={() => setFilters({ unpriced: !onlyUnpriced })}
               >
                 <AlertTriangle className="h-3.5 w-3.5" />
                 {t('admin:onlyUnpriced', { n: unpricedCount })}
               </Button>
             )}
             <span className="text-xs text-muted-foreground tabular-nums">
-              {t('common:resultCount', { n: rows.length })}
+              {t('common:resultCount', { n: total })}
             </span>
           </>
         }
@@ -145,7 +192,19 @@ export function ModelPricingPage() {
       ) : models.isPending ? (
         <TableSkeleton rows={6} cols={12} />
       ) : rows.length === 0 ? (
-        <EmptyState hint={t('admin:modelsEmptyHint')} />
+        filtered ? (
+          <EmptyState
+            title={t('common:noResults')}
+            hint={t('common:noResultsHint')}
+            action={
+              <Button variant="outline" onClick={clearFilters}>
+                {t('common:clearFilters')}
+              </Button>
+            }
+          />
+        ) : (
+          <EmptyState hint={t('admin:modelsEmptyHint')} />
+        )
       ) : (
         <Table stickyHeader>
           <THead>
@@ -235,6 +294,8 @@ export function ModelPricingPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={models.data?.total} />
 
       {dialog}
       {drawer !== null && (

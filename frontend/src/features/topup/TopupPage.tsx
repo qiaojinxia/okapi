@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import dayjs from 'dayjs'
 import { ArrowRight, CreditCard, Receipt, Ticket, Wallet } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -11,6 +12,8 @@ import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
 import { Segmented } from '@/components/ui/segmented'
 import { toast } from '@/components/ui/toast'
+import { gotoPayment } from '@/features/topup/payment'
+import type { TopupResp } from '@/features/topup/payment'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -22,40 +25,16 @@ import { cn } from '@/lib/utils'
 const MIN_TOPUP_USD = 1
 const PRESETS = [5, 10, 20, 50, 100]
 
+/// 核销响应：普通码入钱包（`balance_after_micro`）；绑订阅套餐的码激活 / 续期订阅
+/// （`subscription` + `outcome`，`amount_micro` 为 0，§11.28）。
 interface RedeemResp {
   amount_micro: number
-  balance_after_micro: number
+  balance_after_micro?: number
   plan_code: string | null
-  granted_group: string | null
-  balance_valid_days: number | null
-}
-
-interface TopupResp {
-  order_no: string
-  gateway: string
-  pay_url: string | null
-  params?: Record<string, string>
-}
-
-/// epay 要求以表单 POST 带签名参数跳转；stripe 直接跳 checkout url。
-function gotoPayment(resp: TopupResp): void {
-  if (resp.pay_url === null) return
-  if (resp.params === undefined) {
-    window.location.href = resp.pay_url
-    return
-  }
-  const form = document.createElement('form')
-  form.method = 'POST'
-  form.action = resp.pay_url
-  for (const [name, value] of Object.entries(resp.params)) {
-    const field = document.createElement('input')
-    field.type = 'hidden'
-    field.name = name
-    field.value = value
-    form.append(field)
-  }
-  document.body.append(form)
-  form.submit()
+  granted_group?: string | null
+  balance_valid_days?: number | null
+  subscription?: { display_name: string; remaining_micro: number; expires_at: string }
+  outcome?: 'activated' | 'renewed'
 }
 
 /// 充值页：在线充值为主流程放左侧大卡，兑换码为次流程放右侧；
@@ -105,7 +84,12 @@ function RedeemCard() {
       setError(null)
       setResult(data)
       setCode('')
-      toast.success(t('portal:redeemCredited', { amount: formatMoney(data.amount_micro, i18n.language) }))
+      if (data.subscription !== undefined) {
+        toast.success(data.outcome === 'renewed' ? t('portal:subRenewed') : t('portal:subActivated'))
+        void queryClient.invalidateQueries({ queryKey: qk.mySubscription })
+      } else {
+        toast.success(t('portal:redeemCredited', { amount: formatMoney(data.amount_micro, i18n.language) }))
+      }
       void queryClient.invalidateQueries({ queryKey: qk.me })
     },
     onError: (err) => {
@@ -149,12 +133,36 @@ function RedeemCard() {
           </Button>
         </form>
 
-        {result !== null && (
+        {result !== null && result.subscription !== undefined && (
+          <Alert
+            tone="success"
+            title={result.outcome === 'renewed' ? t('portal:subRenewed') : t('portal:subActivated')}
+            onClose={() => setResult(null)}
+          >
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+              <dt>{t('portal:redeemPlan')}</dt>
+              <dd className="text-foreground">
+                {result.subscription.display_name}{' '}
+                <span className="font-mono text-muted-foreground">{result.plan_code}</span>
+              </dd>
+              <dt>{t('portal:subRemaining')}</dt>
+              <dd className="font-medium text-foreground tabular-nums">
+                {formatMoney(result.subscription.remaining_micro, i18n.language)}
+              </dd>
+              <dt>{t('portal:subEnded')}</dt>
+              <dd className="text-foreground">{dayjs(result.subscription.expires_at).format('YYYY-MM-DD HH:mm')}</dd>
+            </dl>
+            <Link to="/portal/plans" className="mt-2 inline-block text-xs text-primary underline decoration-dotted">
+              {t('portal:plansNav')} →
+            </Link>
+          </Alert>
+        )}
+        {result !== null && result.subscription === undefined && (
           <Alert tone="success" title={t('portal:redeemCredited', { amount: formatMoney(result.amount_micro, i18n.language) })} onClose={() => setResult(null)}>
             <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
               <dt>{t('common:balance')}</dt>
               <dd className="font-medium text-foreground tabular-nums">
-                {formatMoney(result.balance_after_micro, i18n.language)}
+                {formatMoney(result.balance_after_micro ?? 0, i18n.language)}
               </dd>
               {result.plan_code !== null && (
                 <>
@@ -162,13 +170,13 @@ function RedeemCard() {
                   <dd className="font-mono text-foreground">{result.plan_code}</dd>
                 </>
               )}
-              {result.granted_group !== null && (
+              {result.granted_group != null && (
                 <>
                   <dt>{t('portal:redeemGroup')}</dt>
                   <dd className="font-mono text-foreground">{result.granted_group}</dd>
                 </>
               )}
-              {result.balance_valid_days !== null && (
+              {result.balance_valid_days != null && (
                 <>
                   <dt>{t('portal:redeemValidDaysLabel')}</dt>
                   <dd className="text-foreground">

@@ -235,6 +235,33 @@ pub fn open_totp_secret(master_key_hex: &str, sealed: &[u8]) -> Result<Vec<u8>, 
         .map_err(|_| StoreError::InvalidData("totp_open_failed"))
 }
 
+/// 找回密码用：按 email 取**可重设密码**的账户（启用、未删、有密码——OAuth-only 账户没有
+/// 密码可重设，视为不存在；对外不区分，防枚举）。
+pub async fn find_password_account(pool: &PgPool, email: &str) -> Result<Option<i64>, StoreError> {
+    let id = sqlx::query_scalar!(
+        r#"SELECT id FROM users
+           WHERE email = $1 AND status = 1 AND deleted_at IS NULL AND password_hash IS NOT NULL"#,
+        email
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(id)
+}
+
+/// 重设密码（argon2id；老 bcrypt 用户由此升级）。返回 false = 用户不存在 / 已删。
+pub async fn set_password(pool: &PgPool, user_id: i64, password: &str) -> Result<bool, StoreError> {
+    let hash = hash_password(password)?;
+    let done = sqlx::query!(
+        r#"UPDATE users SET password_hash = $2, updated_at = now()
+           WHERE id = $1 AND deleted_at IS NULL"#,
+        user_id,
+        hash
+    )
+    .execute(pool)
+    .await?;
+    Ok(done.rows_affected() == 1)
+}
+
 /// 落库启用 2FA。
 pub async fn enable_totp(pool: &PgPool, user_id: i64, sealed: &[u8]) -> Result<(), StoreError> {
     sqlx::query!(

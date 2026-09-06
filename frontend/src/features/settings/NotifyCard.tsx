@@ -1,7 +1,8 @@
-import { Plus, Trash2 } from 'lucide-react'
+import { Mail, Plus, Trash2, Webhook } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toast'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -10,16 +11,21 @@ import { EVENT_LABEL, NOTIFY_EVENTS } from '@/features/settings/types'
 import { EmptyState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
 import { Input, Label } from '@/components/ui/input'
+import { Segmented } from '@/components/ui/segmented'
+import { TagInput } from '@/components/ui/tag-input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 
+/// 一路通知：webhook（POST JSON 到 url）或 email（走 settings.smtp，逐收件人投递）。
 export interface NotifyChannel {
-  type: string
-  url: string
+  type: 'webhook' | 'email'
+  url?: string
+  to?: string[]
+  lang?: 'en' | 'zh-CN'
   events: string[]
   min_interval_secs: number
 }
-
 
 /// 通知渠道配置（#1790-8）。
 ///
@@ -31,7 +37,7 @@ export function NotifyCard() {
   const [rows, setRows] = useState<NotifyChannel[] | null>(null)
 
   const current = useQuery({
-    queryKey: ['setting', 'notify_channels'],
+    queryKey: qk.setting('notify_channels'),
     queryFn: () => apiFetch<{ value: unknown }>('/admin/settings/notify_channels'),
   })
 
@@ -50,7 +56,7 @@ export function NotifyCard() {
       toast.success(t('admin:saved'))
       setRows(null)
       void current.refetch()
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
     },
     onError: (err) => toast.error(describeError(err)),
   })
@@ -71,16 +77,54 @@ export function NotifyCard() {
         {list.map((row, i) => (
           <div key={i} className="flex flex-col gap-2 rounded-md border border-border p-3">
             <div className="flex items-end gap-2">
-              <div className="flex flex-1 flex-col gap-1.5">
-                <Label htmlFor={`nurl-${i}`}>{t('admin:notifyUrl')}</Label>
-                <Input
-                  id={`nurl-${i}`}
-                  className="font-mono text-xs"
-                  value={row.url}
-                  placeholder="https://hooks.example.com/..."
-                  onChange={(e) => patch(i, { url: e.target.value })}
-                />
-              </div>
+              {row.type === 'email' ? (
+                <div className="flex flex-1 flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor={`nto-${i}`}>{t('admin:notifyRecipients')}</Label>
+                    <Badge variant="outline">
+                      <Mail className="h-3 w-3" />
+                      {t('admin:notifyTypeEmail')}
+                    </Badge>
+                  </div>
+                  <TagInput
+                    id={`nto-${i}`}
+                    value={row.to ?? []}
+                    onChange={(to) => patch(i, { to })}
+                    placeholder="ops@example.com"
+                  />
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor={`nurl-${i}`}>{t('admin:notifyUrl')}</Label>
+                    <Badge variant="outline">
+                      <Webhook className="h-3 w-3" />
+                      {t('admin:notifyTypeWebhook')}
+                    </Badge>
+                  </div>
+                  <Input
+                    id={`nurl-${i}`}
+                    className="font-mono text-xs"
+                    value={row.url ?? ''}
+                    placeholder="https://hooks.example.com/..."
+                    onChange={(e) => patch(i, { url: e.target.value })}
+                  />
+                </div>
+              )}
+              {row.type === 'email' && (
+                <div className="flex flex-col gap-1.5">
+                  <Label>{t('admin:notifyLang')}</Label>
+                  <Segmented
+                    size="sm"
+                    options={[
+                      { value: 'en', label: t('admin:notifyLangEn') },
+                      { value: 'zh-CN', label: t('admin:notifyLangZh') },
+                    ]}
+                    value={row.lang ?? 'en'}
+                    onChange={(lang) => patch(i, { lang })}
+                  />
+                </div>
+              )}
               <div className="flex w-32 flex-col gap-1.5">
                 <Label htmlFor={`nint-${i}`}>{t('admin:notifyInterval')}</Label>
                 <Input
@@ -127,6 +171,19 @@ export function NotifyCard() {
           >
             <Plus className="h-4 w-4" />
             {t('admin:notifyAdd')}
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              setRows([
+                ...list,
+                { type: 'email', to: [], lang: 'en', events: [...NOTIFY_EVENTS], min_interval_secs: 300 },
+              ])
+            }
+          >
+            <Plus className="h-4 w-4" />
+            {t('admin:notifyAddEmail')}
           </Button>
           <Button size="sm" disabled={save.isPending} onClick={() => save.mutate()}>
             {t('common:save')}

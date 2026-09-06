@@ -9,10 +9,11 @@
 //! 用户类动作），翻页用 `before`（id 倒序游标）而非 offset——审计表按月分区且只增，
 //! 游标翻页在翻页期间新写入的行不会造成重叠。
 
+use super::query::Query;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use okapi_api::permissions;
 use serde::Deserialize;

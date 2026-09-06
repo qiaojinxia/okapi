@@ -177,7 +177,13 @@ CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对
 -- 此前的"无池只看未入池 / strict_group_isolation 三态"已由 0002 迁移退役：那套规则让 vip 组
 -- 看不到任何公共渠道、UI 文案又与之相反。0002 把未入池渠道并入 default 池、无池分组指向 default 池，
 -- 老部署行为不变。历史 group_channel_bindings 已在 0015 迁移为 pool_<group_code> 并删表。
--- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ strip_request_fields（不透传的请求顶层字段，new-api rc.23 #6847；model/messages/stream 受保护）/ pass_paths（custom_pass 白名单）
+-- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ strip_request_fields（不透传的请求顶层字段，new-api rc.23 #6847；model/messages/stream 受保护）/ inject_request_fields（对象，dispatch 在 strip 之后浅合并到请求顶层；model/messages/stream/provider 受保护不可注入；缺省空=零开销；写入最多 32 键 / 4KB）/ responses_native（/v1/responses 同方言直转到上游 /responses；缺省 openai=true、openai_compat=false，其它协议忽略恒降级；上游 404/405 自动回退降级）/ pass_paths（custom_pass 白名单）
+-- / api_version（仅 provider=azure：数据面 api-version，`YYYY-MM-DD[-preview]`，管理面写入时校验形状；缺省 2024-10-21；每个出向请求都带 `?api-version=`）
+-- / proxy_url（渠道级出站代理：http / https / socks5 / socks5h；空 = 直连。绑在 reqwest Client 上按 URL 缓存；不走 api_base 的 SSRF 闸——企业代理常在 RFC1918 / 本机端口。Realtime WS 不走此代理）
+-- / extra_headers（对象 string→string，附加到每条上游请求；写入拒 Authorization / api-key / x-api-key / x-goog-api-key / Host / Content-Type / 逐跳头 / x-okapi-request-id，热路径再跳过一次；鉴权头后写覆盖）。
+-- provider=azure 的约定：api_base = 资源端点 `https://{res}.openai.azure.com`（必填，无缺省；贴了 `/openai` 或 `/openai/v1` 后缀网关自行剥掉）；
+-- 出向 URL = `{endpoint}/openai/deployments/{deployment}/{chat/completions|embeddings|images/generations|images/edits|audio/*}?api-version=`，鉴权 `api-key` 头；
+-- **部署名 = model_mapping 的值**（未映射则用模型名本身，Azure 缺省部署名与模型名相同时零配置）。responses_native 对 azure 忽略（恒降级）；videos / realtime 不路由 azure 渠道。
 
 CREATE TABLE api_keys (
     id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -211,7 +217,7 @@ CREATE INDEX idx_api_keys_user ON api_keys(user_id) WHERE deleted_at IS NULL;
 CREATE TABLE channels (
     id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name                 VARCHAR(128) NOT NULL,
-    provider             VARCHAR(32) NOT NULL,        -- openai/anthropic/gemini/openai_compat/custom_pass
+    provider             VARCHAR(32) NOT NULL,        -- openai/openai_compat/azure/anthropic/gemini/custom_pass
     api_base             VARCHAR(255),
     status               SMALLINT NOT NULL DEFAULT 1, -- 1=启用 2=手动停用 3=自动停用
     priority             INT NOT NULL DEFAULT 0,      -- 高优先级层耗尽才降层
@@ -390,6 +396,7 @@ CREATE TABLE billing_records (                        -- 请求级明细（分�
     client_type      VARCHAR(32),                     -- UA 解析（#5277）
     user_agent       VARCHAR(255),
     node             VARCHAR(64),                     -- 处理节点（gateway 实例名）
+    pool             SMALLINT NOT NULL DEFAULT 0,     -- 0 钱包 1 订阅池（这笔由谁付，0004）
     content_ref      JSONB,                           -- 内容审计三态开启时的引用
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (id, created_at)
@@ -402,15 +409,21 @@ CREATE TABLE billing_events (                         -- 余额账本，append-o
     event_id           BIGINT GENERATED ALWAYS AS IDENTITY,
     user_id            BIGINT NOT NULL,
     request_id         UUID,                          -- 消费/退款事件关联
-    event_type         VARCHAR(16) NOT NULL,          -- reserve|commit|refund|recharge|redeem|adjust|expire
-    delta_micro        BIGINT NOT NULL,               -- 余额变动（负=扣）
-    balance_after_micro BIGINT,                       -- 事件后余额（对账锚点）
+    event_type         VARCHAR(16) NOT NULL,          -- reserve|commit|refund|recharge|redeem|adjust|expire|sub_grant|sub_reset|sub_expire
+    delta_micro        BIGINT NOT NULL,               -- 池内余额变动（负=扣）
+    balance_after_micro BIGINT,                       -- 事件后该池余额（对账锚点）
     payload            JSONB,                         -- refund.reason / adjust.tags（开放枚举，如 compensation|goodwill|correction|manual_credit|aff_rebate）
     actor              VARCHAR(64) NOT NULL,          -- user:{id} / admin:{id} / mcp:{key_id} / system[:{component}]（如 system:gateway / system:worker）
+    pool               SMALLINT NOT NULL DEFAULT 0,   -- 0 钱包 1 订阅池（0004；两池各自对账，IMPLEMENTATION §11.28）
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (event_id, created_at)
 ) PARTITION BY RANGE (created_at);
 CREATE INDEX idx_be_user_time ON billing_events (user_id, created_at DESC);
+-- billing_records 同样带 pool SMALLINT NOT NULL DEFAULT 0（这笔请求由哪个池付）。
+-- 不变式（reconciler 两池分别核）：
+--   钱包  Redis bal.avail + Σ在途(pool=0) == Σ delta_micro WHERE pool=0 == users.balance_micro
+--   订阅  Redis bal.sub   + Σ在途(pool=1) == Σ delta_micro WHERE pool=1（sub_reset/sub_expire 记的是池变动 delta，跨窗口累计成立）
+-- users.balance_micro 快照只随 pool=0 事件动；api_keys.used_micro 两池都累加（用量就是用量）。
 
 CREATE TABLE billing_outbox (                         -- 与业务同事务写入，worker SKIP LOCKED 消费
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -450,6 +463,8 @@ CREATE TABLE recharge_orders (
     gateway          VARCHAR(32) NOT NULL,            -- stripe / epay / manual ...
     gateway_trade_no VARCHAR(128),
     status           SMALLINT NOT NULL DEFAULT 0,     -- 0 created 1 paid 2 failed 3 refunded
+    plan_id          BIGINT REFERENCES plans(id),     -- 非空 = 订阅购买单（0004）：amount_micro 为售价快照，
+                                                      --   支付成功激活/续期订阅而**不入钱包**；NULL = 钱包充值
     paid_at          TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -474,16 +489,42 @@ CREATE TABLE redemption_codes (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE plans (                                  -- 套餐模板（#1790-5，0011）
+CREATE TABLE plans (                                  -- 套餐（#1790-5，0011；订阅形态 0004，IMPLEMENTATION §11.28）
     id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     plan_code          VARCHAR(64) NOT NULL UNIQUE,
     display_name       VARCHAR(128) NOT NULL,
-    grant_micro        BIGINT NOT NULL CHECK (grant_micro > 0),
-    group_code         VARCHAR(64),                   -- 兑换后追加分组（须存在于 price_groups）
-    balance_valid_days INT CHECK (balance_valid_days > 0), -- 兑换后设置余额有效期
+    kind               SMALLINT NOT NULL DEFAULT 0,   -- 0 充值模板（兑换即入钱包）1 订阅（周期配额池）
+    grant_micro        BIGINT NOT NULL CHECK (grant_micro > 0), -- kind 0：入账金额；kind 1：**每个周期**的池额度
+    group_code         VARCHAR(64),                   -- kind 0：兑换后追加分组；kind 1：订阅有效期内附加分组（到期收回，只收回订阅授予的）
+    balance_valid_days INT CHECK (balance_valid_days > 0), -- kind 0 专用：兑换后设置余额有效期
+    price_micro        BIGINT NOT NULL DEFAULT 0 CHECK (price_micro >= 0), -- kind 1：自助购买售价（0 = 不可购买，只能兑换码/管理员发放）
+    period             SMALLINT,                      -- kind 1 必填：1 日 2 周 3 月（自激活时刻起算，非自然日历）
+    duration_days      INT CHECK (duration_days > 0), -- kind 1 必填：有效期；同套餐再购 = 续期（expires_at += duration）
+    sort_order         INT NOT NULL DEFAULT 0,        -- 门户套餐页排序
+    description        TEXT,                          -- 门户套餐卡副文案（站长自填，不受 i18n 约束）
     status             SMALLINT NOT NULL DEFAULT 1,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK (kind = 0 OR (period IN (1, 2, 3) AND duration_days IS NOT NULL))
 );
+
+CREATE TABLE user_subscriptions (                     -- 订阅实例（0004；§1.8 预留兑现）
+    id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id        BIGINT NOT NULL REFERENCES users(id),
+    plan_id        BIGINT NOT NULL REFERENCES plans(id),
+    status         SMALLINT NOT NULL DEFAULT 1,       -- 1 active 2 expired 3 cancelled
+    starts_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at     TIMESTAMPTZ NOT NULL,
+    window_start   TIMESTAMPTZ NOT NULL,              -- 当前配额窗 [window_start, window_end)
+    window_end     TIMESTAMPTZ NOT NULL,
+    quota_micro    BIGINT NOT NULL,                   -- 每窗额度快照（套餐改价不影响存量订阅）
+    granted_group  BOOLEAN NOT NULL DEFAULT false,    -- 分组是订阅新加的（到期才收回；用户本来就在组里则不动）
+    source         VARCHAR(96) NOT NULL,              -- purchase:<order_no> / redeem:<code_id> / admin:<uid>
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX uq_user_sub_active ON user_subscriptions (user_id) WHERE status = 1; -- 同一时刻最多一个激活订阅
+CREATE INDEX idx_user_sub_window ON user_subscriptions (window_end) WHERE status = 1;    -- worker 滚窗/到期扫描
+-- 池余额不在 PG：热值在 Redis bal:{uid}.sub（§2.2），权威值 = Σ billing_events(pool=1)。
 
 -- 【蓝图残留清理】以下 records 表为设计期方案，未实现（留痕走 billing_events）：
 CREATE TABLE redemption_records (                     -- backlog：max_uses 多次核销时引入
@@ -526,7 +567,10 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 `model_rate_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（WS 连接租约上限，缺省 4）、
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
 `notify_channels`（通知多路配置数组）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
-`critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/redeem，0=关）、
+`critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key，0=关）、
+`site_url`（对外站点地址；OAuth 回调与找回密码链接的基址，缺省按请求 Host 推导）、
+`smtp`（邮件出口：host/port/security(starttls|tls|none)/username/password/from_address/from_name/reply_to；
+host 空=未配置；含密码故列表接口只回"已配置"，IMPLEMENTATION §11.27）、
 `surge_inflight_threshold`（surge 规则的负载判定阈值：单 gateway 进程在途计费请求数 ≥ 该值即
 `surge_active`，缺省 0=永不触发；仅当价簿含启用的 surge 规则时才读取该设置）、
 `response_header_whitelist`（backlog 未启用）。
@@ -534,7 +578,7 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 ### 1.8 M4 预留（概要，实施时出迁移）
 
 - `teams(id, name, owner_id, balance_micro, settings)`；`team_members(team_id, user_id, role, limits)`——四件套同构。
-- `plans(id, name, quota_micro, duration_days, group_code, price_micro)`；`user_subscriptions(user_id, plan_id, remaining_micro, expires_at)`——套餐×分组绑定（#3388）。
+- ~~`plans(...)`；`user_subscriptions(...)`~~——已于 0004 兑现为 §1.6 的 `plans.kind=1` + `user_subscriptions`（remaining 不落 PG，热值在 Redis `bal.sub`，权威值为 pool=1 事件和）。
 - `notification_channels(kind: email|webhook|dingtalk|feishu|telegram, config)`；`notification_rules(event, channel_id, rate_limit)`——事件订阅矩阵（#1790-8）。
 - `tasks(id, request_id, user_id, api_key_id, kind: mj|suno|image_async|video, channel_id, upstream_task_id, status, payload, result_ref, billed_micro, created_at, updated_at)`——任务型异步中转（submit → worker 轮询/callback → 完成结算，复用 per_call/media 计费与 billing_events；IMPLEMENTATION §4.4）。
 - 邀请返利：不加新表——充值返利记 `billing_events(event_type=adjust, payload.tags=["aff_rebate"], payload.source_order)`，邀请关系在 users.aff_code / inviter_id。
@@ -549,16 +593,19 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 
 | 键 | 类型 | TTL | 说明 |
 | --- | --- | --- | --- |
-| `bal:{<uid>}` | HASH | 永久 | 余额热账本：`avail` + 在途预扣字段 `r:<request_id>` |
+| `bal:{<uid>}` | HASH | 永久 | 余额热账本：`avail`（钱包）+ `sub` / `sub_until`（订阅池剩余 / 窗口截止 unix 秒，§11.28）+ 在途预扣字段 `r:<request_id>` |
 | `rl:{<uid>}:k:<key_id>:rpm:<分钟桶>` / `:tpm:<分钟桶>` | STRING 计数 | 120s | key 级限速（限额四件套配置在 api_keys 行，键按 key 维度，多把 key 互不挤兑）。固定分钟窗计数，GCRA 滑窗为升级项；用户级汇总限速随 Team 层（M4）加第二层键 |
 | `rl:{<uid>}:k:<key_id>:rpd:<yyyymmdd>` | STRING | 48h | key 级每日请求数（RPD） |
 | `rl:{<uid>}:tokd:<key_id>:<yyyymmdd>` | STRING | 48h | key 日 token 上限计数 |
 | `rl:{<uid>}:m:<model>:rpm` | GCRA state | 自然过期 | 用户×模型级限流（可选启用，机制复用） |
 | `ws:lease:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 6h 兜底 | Realtime WS per-key 连接租约：member=连接 id（request_id），score=到期毫秒；准入 Lua 先 ZREMRANGEBYSCORE 清过期再 ZCARD 比上限（settings.realtime_max_conns_per_key 缺省 4），崩溃连接不续期自然滚出（§14.4） |
 | `video:task:{<uid>}:<task_id>` | STRING | 48h | videos 异步任务 → channel_key_id 映射（轮询/下载回源锚点；键含 user_id 天然租户隔离，他人任务 404） |
-| `notify:mute:<idx>:<event>` | STRING | =min_interval_secs | 通知频率闸（SET NX；worker 事件 drift/channel_cooldown/balance_low → settings.notify_channels webhook 分发，#1790-8） |
+| `notify:mute:<idx>:<event>` | STRING | =min_interval_secs | 通知频率闸（SET NX；worker 事件 drift/channel_cooldown/balance_low → settings.notify_channels webhook / email 分发，#1790-8） |
+| `verify:email:<email>` | STRING | 10min | 注册邮箱验证码（6 位数字；重发覆盖旧码；注册对上即 DEL，一次性。IMPLEMENTATION §11.27） |
+| `verify:email:cd:<email>` | STRING | 60s | 同一邮箱验证码重发冷却（SET NX） |
+| `pwreset:<sha256(token)>` | STRING | 30min | 找回密码 token → user_id（明文 token 只出现在邮件链接里；重设成功即 DEL） |
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |
-| `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/redeem；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
+| `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
 | `conc:ck:<channel_key_id>` | STRING | 无（对账清理） | 渠道 key 在途并发信号量 |
 | `rpm:ck:<channel_key_id>:<分钟桶>` | STRING 计数 | 120s | 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。固定分钟窗，与 `crl:*` 同机制；超限即把该 key 从候选里摘掉而非拒绝请求——同渠道其它 key 仍可承接 |
@@ -569,6 +616,8 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `auth:key:<sha256>` | STRING(JSON) | 60s | 鉴权缓存（key 元数据+限额+可见组）。值内嵌写入时版本号 |
 | `auth:ver` | STRING | 永久 | 鉴权缓存全局版本：console 角色/分组变更 INCR 即 O(1) 跨进程失效；key 级精确失效走单键 DEL |
 | `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面专用；门户/数据面仍 API key 单轨，§6.4） |
+| `sess:idx:<user_id>` | SET | 7d 滑动 | 该用户全部 web 会话 sid（列举 / 一键吊销；成员过期靠读时 SREM） |
+| `sess:meta:<sid>` | HASH | 7d 滑动 | 会话展示元数据：`ip` / `ua` / `created_at`（unix 秒） |
 | `oauth:state:<token>` | STRING | 10min | OAuth authorization-code 流 CSRF state（一次性，校验即删） |
 | `spend:tm:{team}:{member}:<yyyymm>` | STRING | 40d | 团成员月度消费计数（结算后累加，预扣前比较；软实时限额） |
 | `tok:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计 token（`pricing_rules` volume 规则的 token 轴输入）。结算后累加实际 usage 总量、报价前读取，语义与团成员计数同构（软实时：跨月自然滚动、Redis 故障按 0 处理即不打折，宁少算不错算）。**仅当生效 PriceBook 含启用的 volume 规则时才产生读写**（`PriceBook::has_volume_rules`），无此类规则时热路径零额外 Redis 往返 |
@@ -585,31 +634,45 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 
 ### 2.2 余额热账本与 Lua 契约
 
-`bal:{uid}` HASH 结构：`avail` = 可用余额（micro）；每笔在途预扣一个字段 `r:<request_id>` = `"<reserved_micro>|<deadline_unix_ms>|<api_key_id>"`（deadline = 预扣时刻 + 10min；api_key_id 供释放对应并发槽与终态补偿定位）。过期预扣由 commit/refund 正常清理，泄漏者由 reconciler 按 deadline 懒清理（M2）。
+`bal:{uid}` HASH 结构：`avail` = 钱包可用余额（micro）；`sub` = 订阅池当前窗剩余（micro，允许短暂为负：最后一笔可越界，下窗重置）、`sub_until` = 池可用截止 unix 秒（= min(window_end, expires_at)；缺省/0 = 无订阅）；每笔在途预扣一个字段 `r:<request_id>` = `"<reserved_micro>|<deadline_unix_ms>|<api_key_id>|<pool>"`（deadline = 预扣时刻 + 10min；api_key_id 供释放对应并发槽与终态补偿定位；pool 0 钱包 / 1 订阅，缺省 0 兼容老格式）。过期预扣由 commit/refund 正常清理，泄漏者由 reconciler 按 deadline 懒清理（M2）。
+
+**选池规则（IMPLEMENTATION §11.28）**：reserve 时 `sub > 0 且 now < sub_until` → 订阅池（不校验足额，允许单笔越界），否则钱包（`avail >= est` fail-closed）。同一请求只动一个池；commit/refund 按预扣字段的 pool 回到同一个池。订阅只改"谁付"，不改价——pricing_snapshot 与 DESIGN §3 公式对两池一致。
 
 精度约束：Lua number 为 double，余额比较的精度上限为 2^53 micro ≈ $90 亿；超出该量级的单账户余额视为配置错误（reserve.lua 内注释同此）。M1 实现细节：Lua 脚本经 EVAL 全量下发（EVALSHA/Script 缓存 M2）；KPI 计数已随 §11.12 实时看板落地（`kpi:*` 秒桶，写入在结算旁路 fire-and-forget）。
 
 ```text
 reserve ────────────────────────────────────────────────
 KEYS = bal:{uid}, rl:{uid}:rpm, rl:{uid}:tpm, rl:{uid}:rpd:<d>, conc:{uid}   （全部同槽）
-ARGV = request_id, est_micro, deadline_ms, rpm_cap, tpm_cap, rpd_cap, conc_cap, est_tokens
-返回 = {1, balance_after}                          成功（已原子完成：限速+并发+预扣）
-       {0, "INSUFFICIENT", balance}                余额不足
+ARGV = request_id, est_micro, deadline_ms, rpm_cap, tpm_cap, rpd_cap, conc_cap, est_tokens, api_key_id, now_unix_s
+返回 = {1, balance_after, pool}                    成功（已原子完成：限速+并发+预扣）；balance_after 为所选池的余额
+       {0, "INSUFFICIENT", balance}                钱包余额不足（订阅池不可用或已耗尽时才到这一步）
        {0, "RATE_LIMITED", which}                  限速/并发超限（不产生任何写入）
-语义 = 检查全部通过后：avail -= est；HSET r:<request_id>；INCR 各计数器；INCR conc
+语义 = 检查全部通过后：选池（sub>0 且 now<sub_until → sub，否则 avail 且须 ≥ est）→ 池 -= est；
+       HSET r:<request_id> = est|deadline|kid|pool；INCR 各计数器；INCR conc
 
 commit ────────────────────────────────────────────────
 KEYS = bal:{uid}, conc:{uid}
 ARGV = request_id, actual_micro
-返回 = {1, delta_micro, balance_after}             delta = reserved − actual（正=退，负=补扣）
+返回 = {1, delta_micro, balance_after, pool}       delta = reserved − actual（正=退，负=补扣）；回到预扣所在池
        {0, "NO_RESERVATION"}                       调用方转对账路径（不直接改余额）
-语义 = 读 r:<request_id> → avail += reserved − actual → HDEL → DECR conc；幂等：重复调用返回 NO_RESERVATION
+语义 = 读 r:<request_id> → 池 += reserved − actual → HDEL → DECR conc；幂等：重复调用返回 NO_RESERVATION
 
 refund ────────────────────────────────────────────────
 KEYS = bal:{uid}, conc:{uid}
 ARGV = request_id
-返回 = {1, released_micro, balance_after}          幂等：无预扣字段时返回 {1, 0, balance}
-语义 = 全额释放（上游失败/空回复不计费路径）
+返回 = {1, released_micro, balance_after, pool}    幂等：无预扣字段时返回 {1, 0, avail, 0}
+语义 = 全额释放回预扣所在池（上游失败/空回复不计费路径）
+
+repair ────────────────────────────────────────────────
+KEYS = bal:{uid}
+ARGV = target_micro, pool_field("avail"|"sub")
+返回 = {prev, next, inflight}                      next = target − Σ同池在途；另一池与全部在途字段不动
+
+sub_set ───────────────────────────────────────────────
+KEYS = bal:{uid}
+ARGV = quota_micro, sub_until_unix_s
+返回 = {prev_sub, new_sub}                         new_sub = quota + Σ在途(pool=1)：老窗口在途请求结算时不吃新窗额度；
+                                                   激活 / 滚窗 / 到期（quota=0, until=0）同一脚本；调用方据 new−prev 记 pool=1 事件
 ```
 
 - KPI 与 `ch:stat` 更新不在 Lua 内（跨槽），走同连接 pipeline fire-and-forget——**账本原子、统计尽力**，统计口径最终以 CH 对账为准。
@@ -658,7 +721,8 @@ CREATE TABLE request_log_raw (
     latency_ms UInt32, ttft_ms UInt32, stream UInt8,
     -- 调度（Sub2API 启发）
     retry_count UInt8, failover_count UInt8, sticky_layer UInt8,
-    upstream_status UInt16, error_code LowCardinality(String), is_error UInt8
+    upstream_status UInt16, error_code LowCardinality(String), is_error UInt8,
+    pool UInt8 DEFAULT 0                      -- 0 钱包 1 订阅池（ch_schema.sql 增量 ALTER）
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(ts)
 ORDER BY (user_id, ts)

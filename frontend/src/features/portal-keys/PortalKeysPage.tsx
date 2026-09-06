@@ -1,6 +1,6 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { KeyRound, Pencil, Plus, Power, PowerOff, ShieldCheck, Trash2 } from 'lucide-react'
+import { BookOpen, KeyRound, Pencil, Plus, Power, PowerOff, ShieldCheck, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Alert } from '@/components/ui/alert'
@@ -13,10 +13,13 @@ import { Field } from '@/components/ui/field'
 import { IconButton } from '@/components/ui/icon-button'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { toast } from '@/components/ui/toast'
+import { useGuide } from '@/features/portal-guide/guide-state'
+import { usePagination } from '@/hooks/use-pagination'
 import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { Select } from '@/components/ui/select'
@@ -72,10 +75,16 @@ export function PortalKeysPage() {
   const [minted, setMinted] = useState<{ name: string; api_key: string } | null>(null)
   const [sessionMsg, setSessionMsg] = useState<string | null>(null)
   const { confirm, dialog } = useConfirm()
+  const guide = useGuide()
+  const pager = usePagination()
 
   const keys = useQuery({
-    queryKey: qk.keys,
-    queryFn: () => apiFetch<{ data: KeyRow[] }>('/api/me/keys'),
+    queryKey: [...qk.keys, pager.offset, pager.limit],
+    queryFn: () =>
+      apiFetch<{ data: KeyRow[]; total: number }>(
+        `/api/me/keys?limit=${pager.limit}&offset=${pager.offset}`,
+      ),
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.keys })
 
@@ -168,14 +177,21 @@ export function PortalKeysPage() {
         icon={KeyRound}
         meta={
           keys.data && (
-            <Badge variant="muted">{t('common:resultCount', { n: rows.length })}</Badge>
+            <Badge variant="muted">{t('common:resultCount', { n: keys.data.total })}</Badge>
           )
         }
         action={
-          <Button onClick={() => openEditor({ mode: 'create' })}>
-            <Plus className="h-4 w-4" />
-            {t('portal:keyCreate')}
-          </Button>
+          <>
+            {/* 密钥页是用户找"怎么用"的第一站：接入指南与新建并列 */}
+            <Button variant="outline" onClick={() => guide.open()}>
+              <BookOpen className="h-4 w-4" />
+              {t('portal:keysGuideAction')}
+            </Button>
+            <Button onClick={() => openEditor({ mode: 'create' })}>
+              <Plus className="h-4 w-4" />
+              {t('portal:keyCreate')}
+            </Button>
+          </>
         }
       />
       {dialog}
@@ -186,15 +202,22 @@ export function PortalKeysPage() {
         </Alert>
       )}
 
-      {/* 明文只此一次：醒目框 + 复制；刷新或离开就没了，文案把话说死 */}
+      {/* 明文只此一次：醒目框 + 复制；刷新或离开就没了，文案把话说死。
+          "查看接入方法"把这把明文带进指南——这是唯一一处配置片段里会出现真密钥的入口 */}
       {minted !== null && (
         <Alert
           tone="warning"
           title={t('portal:keyMinted', { name: minted.name })}
           action={
-            <Button size="sm" variant="outline" onClick={() => setMinted(null)}>
-              {t('portal:keyMintedDone')}
-            </Button>
+            <div className="flex shrink-0 flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => guide.open({ apiKey: minted.api_key })}>
+                <BookOpen className="h-3.5 w-3.5" />
+                {t('portal:keyMintedGuide')}
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setMinted(null)}>
+                {t('portal:keyMintedDone')}
+              </Button>
+            </div>
           }
         >
           <div className="mt-2 flex items-center gap-2 rounded-md border border-border bg-card p-2">
@@ -223,7 +246,7 @@ export function PortalKeysPage() {
           }
         />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>{t('portal:keyName')}</Th>
@@ -320,6 +343,8 @@ export function PortalKeysPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={keys.data?.total} />
 
       <Drawer
         open={editor !== null}

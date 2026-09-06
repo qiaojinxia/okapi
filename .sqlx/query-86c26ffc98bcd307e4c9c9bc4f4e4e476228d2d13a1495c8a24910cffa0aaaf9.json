@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_subscriptions SET window_start = $2, window_end = $3, updated_at = now()\n           WHERE id = $1 AND status = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "86c26ffc98bcd307e4c9c9bc4f4e4e476228d2d13a1495c8a24910cffa0aaaf9"
+}

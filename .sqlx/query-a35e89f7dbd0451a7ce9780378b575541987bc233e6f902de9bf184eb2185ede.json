@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels\n           SET model_mapping = $2, settings = settings || $3\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a35e89f7dbd0451a7ce9780378b575541987bc233e6f902de9bf184eb2185ede"
+}

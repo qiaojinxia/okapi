@@ -9,4 +9,11 @@ pub enum LedgerError {
 
     #[error("ledger_unexpected_reply: {0}")]
     UnexpectedReply(&'static str),
+
+    #[error("ledger_store_error: {0}")]
+    Store(#[from] okapi_store::StoreError),
+
+    /// 激活期内换别的套餐（IMPLEMENTATION §11.28；升降级 backlog）。携带当前套餐码。
+    #[error("subscription_active: {0}")]
+    SubscriptionActive(String),
 }

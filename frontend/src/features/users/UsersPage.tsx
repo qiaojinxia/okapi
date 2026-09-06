@@ -1,5 +1,6 @@
 import { Settings2, Users } from 'lucide-react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -13,15 +14,16 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { UsageCell, useEntityUsage } from '@/features/analytics/UsageCell'
 import { UserDrawer } from '@/features/users/UserDrawer'
+import { useDraft } from '@/hooks/use-draft'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { text } from '@/lib/search-params'
 import { roleLabel } from '@/features/users/types'
 
-const LIMIT = 20
-
-
+const routeApi = getRouteApi('/admin/users')
 
 interface UserRow {
   id: number
@@ -42,18 +44,29 @@ interface UserRow {
 /// 此前两者同页会让人以为编辑角色只影响当前选中的用户。
 export function UsersPage() {
   const { t, i18n } = useTranslation()
-  const [search, setSearch] = useState('')
-  const [query, setQuery] = useState('')
-  const [offset, setOffset] = useState(0)
+  // 搜索词与页码都在地址里：刷新 / 分享 / 从用户抽屉深链出去再后退，都回到原来那一页
+  const search = routeApi.useSearch()
+  const navigate = routeApi.useNavigate()
+  const query = search.q ?? ''
+  const [draft, setDraft] = useDraft(query)
   const [selected, setSelected] = useState<number | null>(null)
+  const pager = usePagination()
+  // 搜索词与页码同一次导航更新：只按"新词 + 第一页"请求一次，不会先按旧页码空跑一趟
+  const applySearch = (value: string) =>
+    void navigate({ search: (prev) => ({ ...prev, q: text(value), page: undefined }) })
 
   const users = useQuery({
-    queryKey: [...qk.adminUsers(query), offset],
+    queryKey: [...qk.adminUsers(query), pager.offset, pager.limit],
     queryFn: () => {
-      const params = new URLSearchParams({ limit: String(LIMIT), offset: String(offset) })
+      const params = new URLSearchParams({
+        limit: String(pager.limit),
+        offset: String(pager.offset),
+      })
       if (query !== '') params.set('q', query)
       return apiFetch<{ total: number; data: UserRow[] }>(`/admin/users?${params}`)
     },
+    // 翻页时保留上一页数据：表格不闪成骨架屏
+    placeholderData: keepPreviousData,
   })
 
   const rows = users.data?.data ?? []
@@ -83,33 +96,16 @@ export function UsersPage() {
               id="u-search"
               className="w-72"
               aria-label={t('admin:usersSearch')}
-              value={search}
+              value={draft}
               placeholder={t('admin:usersSearchHint')}
-              onChange={setSearch}
-              onSubmit={() => {
-                setOffset(0)
-                setQuery(search.trim())
-              }}
+              onChange={setDraft}
+              onSubmit={() => applySearch(draft)}
             />
-            <Button
-              size="sm"
-              onClick={() => {
-                setOffset(0)
-                setQuery(search.trim())
-              }}
-            >
+            <Button size="sm" onClick={() => applySearch(draft)}>
               {t('common:search')}
             </Button>
             {query !== '' && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  setSearch('')
-                  setQuery('')
-                  setOffset(0)
-                }}
-              >
+              <Button size="sm" variant="ghost" onClick={() => applySearch('')}>
                 {t('common:clearFilters')}
               </Button>
             )}
@@ -190,12 +186,7 @@ export function UsersPage() {
         </Table>
       )}
 
-      <Pagination
-        total={users.data?.total ?? 0}
-        limit={LIMIT}
-        offset={offset}
-        onOffset={setOffset}
-      />
+      <Pagination {...pager} total={users.data?.total} />
 
       {selected !== null && (
         <UserDrawer userId={selected} onClose={() => setSelected(null)} />

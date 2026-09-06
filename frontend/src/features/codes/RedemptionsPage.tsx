@@ -1,5 +1,6 @@
 import { Ban, Plus, Ticket } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -9,15 +10,22 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { GenerateDrawer } from '@/features/codes/GenerateDrawer'
+import { CODE_STATUS, CODE_STATUS_FILTERS } from '@/features/codes/types'
 import { IconButton } from '@/components/ui/icon-button'
 import { Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { Select } from '@/components/ui/select'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
+import { qk } from '@/lib/query-keys'
+import { oneOf } from '@/lib/search-params'
 import { useConfirm } from '@/components/ui/confirm'
+
+const routeApi = getRouteApi('/admin/codes')
 
 interface CodeRow {
   id: number
@@ -31,12 +39,6 @@ interface CodeRow {
   created_at: string
 }
 
-
-
-const CODE_STATUS = { unused: 1, used: 2, disabled: 3 } as const
-
-
-
 /// 兑换码页。
 ///
 /// 列表不含码明文（后端只存 SHA-256，生成时一次性返回），故"生成"是一次性动作，
@@ -44,20 +46,31 @@ const CODE_STATUS = { unused: 1, used: 2, disabled: 3 } as const
 export function RedemptionsPage() {
   const { t, i18n } = useTranslation()
   const queryClient = useQueryClient()
-  const [status, setStatus] = useState('')
+  // 状态筛选与页码都在地址里。此前写死 limit=100：一批码就能生成几百上千张，
+  // 超出的那部分在页面上根本看不到
+  const search = routeApi.useSearch()
+  const navigate = routeApi.useNavigate()
+  const status = search.status ?? ''
+  const setStatus = (value: string) =>
+    void navigate({ search: (prev) => ({ ...prev, status: oneOf(value, CODE_STATUS_FILTERS), page: undefined }) })
   const [drawer, setDrawer] = useState(false)
   const { confirm, dialog } = useConfirm()
+  const pager = usePagination()
 
   const codes = useQuery({
-    queryKey: ['admin', 'redemptions', status],
+    queryKey: [...qk.adminRedemptions(status), pager.offset, pager.limit],
     queryFn: () => {
-      const params = new URLSearchParams({ limit: '100' })
+      const params = new URLSearchParams({
+        limit: String(pager.limit),
+        offset: String(pager.offset),
+      })
       if (status !== '') params.set('status', status)
       return apiFetch<{ total: number; data: CodeRow[] }>(`/admin/redemptions?${params}`)
     },
+    // 翻页时保留上一页数据：表格不闪成骨架屏
+    placeholderData: keepPreviousData,
   })
-  const invalidate = () =>
-    void queryClient.invalidateQueries({ queryKey: ['admin', 'redemptions'] })
+  const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminRedemptionsAll })
 
   const disableBatch = useMutation({
     mutationFn: (batch: string) =>
@@ -78,8 +91,9 @@ export function RedemptionsPage() {
   const rows = codes.data?.data ?? []
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex h-full min-h-0 flex-col gap-4">
       <PageHeader
+        className="shrink-0"
         icon={Ticket}
         title={t('admin:codeListTitle')}
         description={t('admin:codesDesc')}
@@ -92,6 +106,7 @@ export function RedemptionsPage() {
       />
 
       <Toolbar
+        className="shrink-0"
         filters={
           <div className="flex items-center gap-2">
             <Label htmlFor="cstatus">{t('common:status')}</Label>
@@ -132,7 +147,12 @@ export function RedemptionsPage() {
           }
         />
       ) : (
-        <Table stickyHeader>
+        <Table
+          stickyHeader
+          wrapperClassName="min-h-40 max-h-none flex-1 overscroll-contain [scrollbar-gutter:stable]"
+          scrollResetKey={`${status}:${pager.offset}:${pager.limit}`}
+          aria-busy={codes.isFetching}
+        >
           <THead>
             <Tr>
               <Th>ID</Th>
@@ -184,6 +204,8 @@ export function RedemptionsPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={codes.data?.total} className="shrink-0" />
 
       {drawer && <GenerateDrawer onClose={() => setDrawer(false)} onDone={invalidate} />}
     </div>

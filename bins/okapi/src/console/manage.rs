@@ -5,15 +5,16 @@
 //!
 //! 统一约定：
 //! - 读走 `*_READ` 权限点，写沿用既有 `*_WRITE`；渠道读写继承 own/all 属主范围；
-//! - 分页统一 `?limit=&offset=`，上限由 store 层 `clamp_page` 钳制；
+//! - 分页统一 `?limit=&offset=`（`super::query::PageQuery`），上限由 store 层 `Slice` 钳制；
 //! - 不存在 → 404；被引用 → 409（error_code 指明占用方，前端渲染文案）；
 //! - 写操作全量落 audit_logs；定价类变更回 `requires_publish` 提示需发布新 epoch。
 
 use super::admin::{audit, ensure_channel_owner, guard, guard_scoped, guard_super_admin};
+use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_store::auth::PermScope;
@@ -21,30 +22,6 @@ use okapi_store::mutate::{self, UserAction};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
-
-#[derive(Deserialize)]
-pub struct PageQuery {
-    #[serde(default = "default_limit")]
-    pub limit: i64,
-    #[serde(default)]
-    pub offset: i64,
-    /// 关键词（令牌列表：name/username 模糊）。
-    #[serde(default)]
-    pub q: Option<String>,
-    /// 过滤：用户 id（令牌列表）。
-    #[serde(default)]
-    pub user_id: Option<i64>,
-    /// 过滤：批次（兑换码列表）。
-    #[serde(default)]
-    pub batch: Option<Uuid>,
-    /// 过滤：状态。
-    #[serde(default)]
-    pub status: Option<i16>,
-}
-
-const fn default_limit() -> i64 {
-    50
-}
 
 fn not_found() -> AppError {
     AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND)
@@ -55,28 +32,34 @@ fn not_found() -> AppError {
 pub async fn list_models(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
-    let data = okapi_store::listing::list_models(&state.pg).await?;
-    Ok(Json(json!({ "data": data })))
+    let list =
+        okapi_store::listing::list_models(&state.pg, q.keyword(), q.unpriced, q.slice()).await?;
+    Ok(Json(
+        json!({ "data": list.page.data, "total": list.page.total, "unpriced": list.unpriced }),
+    ))
 }
 
 pub async fn list_groups(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
-    let data = okapi_store::listing::list_groups(&state.pg).await?;
-    Ok(Json(json!({ "data": data })))
+    let page = okapi_store::listing::list_groups(&state.pg, q.slice()).await?;
+    Ok(Json(json!({ "data": page.data, "total": page.total })))
 }
 
 pub async fn list_plans(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
-    let data = okapi_store::listing::list_plans(&state.pg).await?;
-    Ok(Json(json!({ "data": data })))
+    let page = okapi_store::listing::list_plans(&state.pg, q.slice()).await?;
+    Ok(Json(json!({ "data": page.data, "total": page.total })))
 }
 
 pub async fn list_redemptions(
@@ -86,8 +69,7 @@ pub async fn list_redemptions(
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
     let page =
-        okapi_store::listing::list_redemptions(&state.pg, q.batch, q.status, q.limit, q.offset)
-            .await?;
+        okapi_store::listing::list_redemptions(&state.pg, q.batch, q.status, q.bounded()).await?;
     Ok(Json(json!({ "data": page.data, "total": page.total })))
 }
 
@@ -97,14 +79,8 @@ pub async fn list_keys(
     Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::USER_READ).await?;
-    let page = okapi_store::listing::list_api_keys(
-        &state.pg,
-        q.user_id,
-        q.q.as_deref(),
-        q.limit,
-        q.offset,
-    )
-    .await?;
+    let page =
+        okapi_store::listing::list_api_keys(&state.pg, q.user_id, q.keyword(), q.bounded()).await?;
     Ok(Json(json!({ "data": page.data, "total": page.total })))
 }
 
@@ -119,13 +95,15 @@ pub async fn list_permissions(
 
 /// 敏感设置键判定：列表接口只回"是否已配置"，明文永不出列表。
 fn is_secret_key(key: &str) -> bool {
-    const NEEDLES: [&str; 6] = [
+    const NEEDLES: [&str; 7] = [
         "secret",
         "key",
         "token",
         "password",
         "webhook",
         "credential",
+        // settings.smtp 对象内含密码（§11.27）
+        "smtp",
     ];
     let lower = key.to_ascii_lowercase();
     NEEDLES.iter().any(|n| lower.contains(n))
@@ -249,11 +227,13 @@ pub async fn delete_model(
 pub async fn list_pools(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::CHANNEL_READ).await?;
-    let rows = okapi_store::listing::list_pools(&state.pg).await?;
+    let page = okapi_store::listing::list_pools(&state.pg, q.slice()).await?;
     Ok(Json(json!({
-        "data": rows.iter().map(|r| json!({
+        "total": page.total,
+        "data": page.data.iter().map(|r| json!({
             "pool_code": r.pool_code,
             "description": r.description,
             "routing_strategy": r.routing_strategy,
@@ -667,6 +647,12 @@ pub async fn manage_user(
     if !mutate::manage_user(&state.pg, id, action).await? {
         return Err(not_found());
     }
+    if matches!(
+        action,
+        okapi_store::mutate::UserAction::Ban | okapi_store::mutate::UserAction::Delete
+    ) {
+        state.sched.web_session_revoke_user(id).await;
+    }
     state.sched.auth_flush().await;
     audit(
         &state,
@@ -692,6 +678,7 @@ mod tests {
             "oauth.github.client_secret",
             "turnstile_secret_key",
             "channel_credential",
+            "smtp",
         ] {
             assert!(is_secret_key(key), "{key} 必须被识别为敏感键");
         }

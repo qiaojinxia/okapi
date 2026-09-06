@@ -599,9 +599,10 @@ pub async fn chat(
     body_anthropic: Bytes,
     upstream_model: &str,
     stream: bool,
+    outbound: &crate::http::Outbound,
 ) -> Result<ChatResponse, UpstreamError> {
     match upstream
-        .messages(api_base, credential, body_anthropic, stream)
+        .messages(api_base, credential, body_anthropic, stream, outbound)
         .await?
     {
         MessagesResponse::Json {

@@ -138,7 +138,7 @@ impl MessagesRequestProbe {
     }
 }
 
-/// OpenAI Responses API 请求探针（降级入口解析用）。
+/// OpenAI Responses API 请求探针（入口解析用；直转与降级共用）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ResponsesRequestProbe {
     pub model: String,
@@ -150,6 +150,9 @@ pub struct ResponsesRequestProbe {
     pub input: serde_json::Value,
     #[serde(default)]
     pub instructions: Option<String>,
+    /// Responses 与 chat 同样接受 service_tier（tier 计费轴输入；直转时随体透传）。
+    #[serde(default)]
+    pub service_tier: Option<String>,
 }
 
 impl ResponsesRequestProbe {
@@ -214,6 +217,88 @@ impl ResponsesRequestProbe {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+}
+
+/// Gemini `models/{model}:generateContent` 请求探针（原生入口解析用）。
+/// 模型名与流式与否都在 URL 上，不在 body；这里只解析估算与粘性需要的最小集。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GeminiRequestProbe {
+    #[serde(default)]
+    pub contents: Vec<GeminiContentProbe>,
+    /// `systemInstruction`（camelCase）与 `system_instruction`（snake_case）官方都收。
+    #[serde(default, alias = "system_instruction")]
+    pub system_instruction: Option<GeminiContentProbe>,
+    #[serde(default, alias = "generation_config")]
+    pub generation_config: Option<GeminiGenerationConfigProbe>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GeminiContentProbe {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub parts: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct GeminiGenerationConfigProbe {
+    #[serde(default, alias = "max_output_tokens")]
+    pub max_output_tokens: Option<u32>,
+}
+
+impl GeminiRequestProbe {
+    #[must_use]
+    pub fn completion_cap_req(&self) -> Option<u32> {
+        self.generation_config
+            .as_ref()
+            .and_then(|c| c.max_output_tokens)
+    }
+
+    /// prompt 可见文本总字符数（systemInstruction + contents 的 text 部件）。
+    #[must_use]
+    pub fn prompt_chars(&self) -> usize {
+        self.prompt_segments()
+            .iter()
+            .map(|s| s.chars().count())
+            .sum()
+    }
+
+    /// prompt 可见文本片段（systemInstruction 在前）。
+    #[must_use]
+    pub fn prompt_segments(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        for c in self.system_instruction.iter().chain(self.contents.iter()) {
+            for part in &c.parts {
+                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                    out.push(t);
+                }
+            }
+        }
+        out
+    }
+
+    /// contents → 消息探针（会话粘性种子用）：Gemini 的 `model` 角色映射为 assistant，
+    /// text 部件按 OpenAI 多段形状放进 content，粘性哈希对两种入口一致。
+    #[must_use]
+    pub fn input_messages(&self) -> Vec<MessageProbe> {
+        self.contents
+            .iter()
+            .map(|c| MessageProbe {
+                role: match c.role.as_deref() {
+                    Some("model") => "assistant".to_owned(),
+                    Some(r) if !r.is_empty() => r.to_owned(),
+                    _ => "user".to_owned(),
+                },
+                content: serde_json::Value::Array(
+                    c.parts
+                        .iter()
+                        .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                        .map(|t| serde_json::json!({"type": "text", "text": t}))
+                        .collect(),
+                ),
+            })
+            .collect()
     }
 }
 

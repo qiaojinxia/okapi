@@ -6,7 +6,7 @@
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use okapi_store::identity;
@@ -119,6 +119,9 @@ pub struct RegisterReq {
     /// 邀请码（可选；无效/自邀静默忽略，不阻注册）。
     #[serde(default)]
     pub aff_code: Option<String>,
+    /// 邮箱验证码（策略 `email_verification` 开启时必填，§11.27）。
+    #[serde(default)]
+    pub email_code: Option<String>,
 }
 
 pub async fn register(
@@ -140,12 +143,240 @@ pub async fn register(
         return Err(AppError::new(StatusCode::FORBIDDEN, "invite_required"));
     }
     verify_turnstile(&state, req.turnstile_token.as_deref()).await?;
+    // 邮箱验证码（§11.27）：放在 Turnstile 之后、写库之前——码对上即销毁，
+    // 若后面 email_taken 用户需重新取码，代价可接受（重复邮箱本就是异常路径）
+    if policy.email_verification {
+        let code = req
+            .email_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| AppError::bad_request().with_param("email_code"))?;
+        if !state.sched.email_code_take(&email, code).await {
+            return Err(AppError::bad_request().with_param("email_code_invalid"));
+        }
+    }
     let user_id = identity::register_user(&state.pg, &email, req.username.trim(), &req.password)
         .await?
         .ok_or_else(|| AppError::new(StatusCode::CONFLICT, "email_taken"))?;
     bind_inviter(&state, user_id, inviter).await;
     super::registration::grant_credits(&state, &policy, user_id, inviter).await;
     Ok(Json(json!({ "user_id": user_id })))
+}
+
+// ---- 邮箱验证码 / 找回密码（IMPLEMENTATION §11.27）----
+
+const EMAIL_CODE_TTL_SECS: i64 = 600;
+const EMAIL_CODE_COOLDOWN_SECS: i64 = 60;
+const PWRESET_TTL_SECS: i64 = 1800;
+
+#[derive(Deserialize)]
+pub struct EmailCodeReq {
+    pub email: String,
+    /// 邮件语言（zh-CN / en）；缺省看 Accept-Language。
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
+fn mail_lang(headers: &HeaderMap, explicit: Option<&str>) -> crate::mail::templates::Lang {
+    let accept = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|v| v.to_str().ok());
+    crate::mail::templates::Lang::resolve(explicit, accept)
+}
+
+/// 邮件里的站点名：settings.site_name，缺省 "Okapi"。
+async fn site_name(state: &AppState) -> String {
+    state
+        .setting_cached("site_name")
+        .await
+        .as_ref()
+        .as_ref()
+        .and_then(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "Okapi".to_owned())
+}
+
+/// 对外站点基址：settings.site_url 优先，缺省按请求 Host 推导（与 OAuth 回调同源）。
+async fn site_base_url(state: &AppState, headers: &HeaderMap) -> String {
+    let configured = state
+        .setting_cached("site_url")
+        .await
+        .as_ref()
+        .as_ref()
+        .and_then(|v| {
+            v.as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        });
+    let base = configured.unwrap_or_else(|| {
+        let host = headers
+            .get(header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("localhost");
+        let scheme = headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .filter(|p| *p == "https")
+            .unwrap_or("http");
+        format!("{scheme}://{host}")
+    });
+    base.trim_end_matches('/').to_owned()
+}
+
+fn map_mail_error(err: crate::mail::MailError) -> AppError {
+    match err {
+        crate::mail::MailError::NotConfigured => {
+            AppError::new(StatusCode::NOT_IMPLEMENTED, "smtp_not_configured")
+        }
+        other => {
+            tracing::warn!(error = %other, "邮件发送失败");
+            AppError::new(StatusCode::BAD_GATEWAY, "smtp_send_failed")
+        }
+    }
+}
+
+/// POST /auth/email-code：注册邮箱验证码。先过注册策略（关闭 / 域名黑白名单都不给码），
+/// 每 IP 限流 + 每邮箱 60s 冷却；SMTP 未配置 501。
+pub async fn email_code(
+    State(state): State<AppState>,
+    conn: MaybeConnectInfo,
+    headers: HeaderMap,
+    Json(req): Json<EmailCodeReq>,
+) -> Result<Json<Value>, AppError> {
+    critical_rate_guard(&state, &headers, conn.0.as_ref(), "email_code", 3).await?;
+    let email = req.email.trim().to_lowercase();
+    if !email.contains('@') || email.len() > 254 {
+        return Err(AppError::bad_request().with_param("email"));
+    }
+    let policy = super::registration::RegistrationPolicy::load(&state).await;
+    super::registration::check(&policy, &email)?;
+    if !policy.email_verification {
+        // 策略没开验证却来取码：不是错误，但也没必要发信
+        return Err(AppError::bad_request().with_param("email_verification_disabled"));
+    }
+    let mailer = crate::mail::Mailer::from_state(&state)
+        .await
+        .map_err(map_mail_error)?;
+    if !state
+        .sched
+        .email_code_cooldown_acquire(&email, EMAIL_CODE_COOLDOWN_SECS)
+        .await
+    {
+        return Err(AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "email_code_cooldown",
+        ));
+    }
+    let code = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
+    if !state
+        .sched
+        .email_code_set(&email, &code, EMAIL_CODE_TTL_SECS)
+        .await
+    {
+        return Err(AppError::internal());
+    }
+    let lang = mail_lang(&headers, req.lang.as_deref());
+    let site = site_name(&state).await;
+    let ttl_min = u32::try_from(EMAIL_CODE_TTL_SECS / 60).unwrap_or(10);
+    mailer
+        .send(crate::mail::templates::verification_code(
+            lang, &site, &email, &code, ttl_min,
+        ))
+        .await
+        .map_err(map_mail_error)?;
+    Ok(Json(json!({ "ok": true, "ttl_secs": EMAIL_CODE_TTL_SECS })))
+}
+
+#[derive(Deserialize)]
+pub struct ForgotReq {
+    pub email: String,
+    #[serde(default)]
+    pub lang: Option<String>,
+}
+
+/// POST /auth/password/forgot：无论邮箱是否存在都回 ok（防枚举）；存在且有密码才发信。
+/// SMTP 未配置 501——这是配置问题，前端该提示"联系管理员"而不是假装发出去了。
+pub async fn password_forgot(
+    State(state): State<AppState>,
+    conn: MaybeConnectInfo,
+    headers: HeaderMap,
+    Json(req): Json<ForgotReq>,
+) -> Result<Json<Value>, AppError> {
+    critical_rate_guard(&state, &headers, conn.0.as_ref(), "password_forgot", 3).await?;
+    let email = req.email.trim().to_lowercase();
+    if !email.contains('@') {
+        return Err(AppError::bad_request().with_param("email"));
+    }
+    let mailer = crate::mail::Mailer::from_state(&state)
+        .await
+        .map_err(map_mail_error)?;
+    let Some(user_id) = identity::find_password_account(&state.pg, &email).await? else {
+        return Ok(Json(json!({ "ok": true })));
+    };
+    let token = rand_token(32);
+    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+    if !state
+        .sched
+        .pwreset_set(&token_hash, user_id, PWRESET_TTL_SECS)
+        .await
+    {
+        return Err(AppError::internal());
+    }
+    let link = format!(
+        "{}/reset-password?token={token}",
+        site_base_url(&state, &headers).await
+    );
+    let lang = mail_lang(&headers, req.lang.as_deref());
+    let site = site_name(&state).await;
+    let ttl_min = u32::try_from(PWRESET_TTL_SECS / 60).unwrap_or(30);
+    // 发信失败对外仍 ok：否则"发信失败"与"邮箱不存在"可被区分出来；细节进日志
+    if let Err(err) = mailer
+        .send(crate::mail::templates::password_reset(
+            lang, &site, &email, &link, ttl_min,
+        ))
+        .await
+    {
+        tracing::warn!(user_id, error = %err, "找回密码邮件发送失败");
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct ResetReq {
+    pub token: String,
+    pub password: String,
+}
+
+/// POST /auth/password/reset：token 一次性；成功后吊销该用户全部 web 会话。
+pub async fn password_reset(
+    State(state): State<AppState>,
+    conn: MaybeConnectInfo,
+    headers: HeaderMap,
+    Json(req): Json<ResetReq>,
+) -> Result<Json<Value>, AppError> {
+    critical_rate_guard(&state, &headers, conn.0.as_ref(), "password_reset", 10).await?;
+    if req.password.len() < 8 {
+        return Err(AppError::bad_request().with_param("password"));
+    }
+    let token = req.token.trim();
+    if token.is_empty() || token.len() > 128 {
+        return Err(AppError::bad_request().with_param("token"));
+    }
+    let token_hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let Some(user_id) = state.sched.pwreset_take(&token_hash).await else {
+        return Err(AppError::bad_request().with_param("reset_token_invalid"));
+    };
+    if !identity::set_password(&state.pg, user_id, &req.password).await? {
+        return Err(AppError::bad_request().with_param("reset_token_invalid"));
+    }
+    state.sched.web_session_revoke_user(user_id).await;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// aff 邀请绑定（M4）：邀请人已在策略层解析；自邀不可能（新用户还没有 aff 码）。
@@ -194,6 +425,8 @@ async fn verify_turnstile(state: &AppState, token: Option<&str>) -> Result<(), A
             auth_value: "1".to_owned(),
             content_type: Some("application/x-www-form-urlencoded".to_owned()),
             body: bytes::Bytes::from(body),
+            proxy_url: None,
+            extra_headers: Vec::new(),
         })
         .await;
     match outcome {
@@ -256,10 +489,25 @@ pub async fn login(
             return Err(err);
         }
     };
-    super::audit::record_login(&state, &email, Some(user.user_id), true, None, ip, &headers).await;
+    super::audit::record_login(
+        &state,
+        &email,
+        Some(user.user_id),
+        true,
+        None,
+        ip.clone(),
+        &headers,
+    )
+    .await;
 
     let sid = rand_token(48);
-    state.sched.web_session_set(&sid, user.user_id).await;
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    state
+        .sched
+        .web_session_set(&sid, user.user_id, ip.as_deref(), ua)
+        .await;
     let mut resp = Json(json!({ "user_id": user.user_id, "role": user.role })).into_response();
     let cookie = format!("{SESSION_COOKIE}={sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800");
     if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
@@ -421,4 +669,57 @@ pub async fn create_key(
         // 明文仅本次返回
         "api_key": token,
     })))
+}
+
+/// GET /api/me/sessions：当前用户仍有效的 web 会话（门户 API key 鉴权）。
+pub async fn list_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    let current = session_id(&headers);
+    let data: Vec<Value> = state
+        .sched
+        .web_session_list(key.user_id)
+        .await
+        .into_iter()
+        .map(|s| {
+            json!({
+                "sid": s.sid,
+                "ip": s.ip,
+                "ua": s.ua,
+                "created_at": s.created_at,
+                "current": current.as_deref() == Some(s.sid.as_str()),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
+
+/// DELETE /api/me/sessions/{sid}
+pub async fn revoke_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(sid): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    if sid.is_empty() || sid.len() > 128 {
+        return Err(AppError::bad_request().with_param("session"));
+    }
+    if !state.sched.web_session_revoke(key.user_id, &sid).await {
+        return Err(
+            AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND).with_param("session"),
+        );
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /api/me/sessions：吊销该用户全部 web 会话。
+pub async fn revoke_all_sessions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    let key = crate::gateway::auth::authenticate(&state, &headers).await?;
+    state.sched.web_session_revoke_user(key.user_id).await;
+    Ok(Json(json!({ "ok": true })))
 }

@@ -1,6 +1,7 @@
 //! OpenAI 方向上游客户端（原生 OpenAI 与一切 OpenAI 兼容上游共用）。
 
 use crate::error::UpstreamError;
+use crate::http::{HttpPool, Outbound};
 use crate::types::ChatEvent;
 use bytes::Bytes;
 use eventsource_stream::Eventsource;
@@ -85,17 +86,16 @@ pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
 
 #[derive(Clone)]
 pub struct OpenAiUpstream {
-    http: reqwest::Client,
+    /// 缺省 + 按代理缓存的连接池；`responses` / Azure 共用，不另建。
+    pub(crate) http: HttpPool,
 }
 
 impl OpenAiUpstream {
     /// 连接超时 client 级；读超时按流式/非流式分层（IMPLEMENTATION §1.1）。
     pub fn new() -> Result<Self, UpstreamError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| UpstreamError::Build(e.to_string()))?;
-        Ok(Self { http })
+        Ok(Self {
+            http: HttpPool::new()?,
+        })
     }
 
     /// 转发 chat completions。`body` 已完成模型名映射。
@@ -105,15 +105,25 @@ impl OpenAiUpstream {
         credential: &str,
         body: Bytes,
         stream: bool,
+        outbound: &Outbound,
     ) -> Result<ChatResponse, UpstreamError> {
         let url = format!("{}/chat/completions", api_base.trim_end_matches('/'));
-        let mut req = self
-            .http
-            .post(url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {credential}"),
-            )
+        let req = self.http.post(outbound, url)?.header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {credential}"),
+        );
+        self.send_chat(req, body, stream).await
+    }
+
+    /// chat completions 的发送与响应解析（URL 与鉴权头由调用方装好）：
+    /// OpenAI 方言各变体（Bearer / Azure `api-key`）共用这一段，响应形态相同。
+    pub(crate) async fn send_chat(
+        &self,
+        req: reqwest::RequestBuilder,
+        body: Bytes,
+        stream: bool,
+    ) -> Result<ChatResponse, UpstreamError> {
+        let mut req = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_vec());
         if !stream {
@@ -181,8 +191,9 @@ impl OpenAiUpstream {
         api_base: &str,
         credential: &str,
         body: Bytes,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        self.post_json(api_base, "/images/generations", credential, body)
+        self.post_json(api_base, "/images/generations", credential, body, outbound)
             .await
     }
 
@@ -192,15 +203,23 @@ impl OpenAiUpstream {
         path: &str,
         credential: &str,
         body: Bytes,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {credential}"),
-            )
+        let req = self.http.post(outbound, url)?.header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {credential}"),
+        );
+        self.send_json(req, body).await
+    }
+
+    /// 非流式 JSON 请求的发送与响应解析（URL 与鉴权头由调用方装好）。
+    pub(crate) async fn send_json(
+        &self,
+        req: reqwest::RequestBuilder,
+        body: Bytes,
+    ) -> Result<EmbeddingsResponse, UpstreamError> {
+        let resp = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
             .timeout(NON_STREAM_TIMEOUT)
@@ -244,8 +263,9 @@ impl OpenAiUpstream {
         api_base: &str,
         credential: &str,
         body: Bytes,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        self.post_json(api_base, "/embeddings", credential, body)
+        self.post_json(api_base, "/embeddings", credential, body, outbound)
             .await
     }
 
@@ -255,15 +275,23 @@ impl OpenAiUpstream {
         api_base: &str,
         credential: &str,
         body: Bytes,
+        outbound: &Outbound,
     ) -> Result<(u16, String, Bytes), UpstreamError> {
         let url = format!("{}/audio/speech", api_base.trim_end_matches('/'));
-        let resp = self
-            .http
-            .post(url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {credential}"),
-            )
+        let req = self.http.post(outbound, url)?.header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {credential}"),
+        );
+        self.send_speech(req, body).await
+    }
+
+    /// speech 的发送与二进制响应读取（URL 与鉴权头由调用方装好）。
+    pub(crate) async fn send_speech(
+        &self,
+        req: reqwest::RequestBuilder,
+        body: Bytes,
+    ) -> Result<(u16, String, Bytes), UpstreamError> {
+        let resp = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_vec())
             .timeout(NON_STREAM_TIMEOUT)
@@ -296,9 +324,16 @@ impl OpenAiUpstream {
         api_base: &str,
         credential: &str,
         parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        self.audio_multipart(api_base, "/audio/transcriptions", credential, parts)
-            .await
+        self.audio_multipart(
+            api_base,
+            "/audio/transcriptions",
+            credential,
+            parts,
+            outbound,
+        )
+        .await
     }
 
     /// 音频 multipart 通用转发（transcriptions / translations 同构，老 ok-api 面核对补）。
@@ -308,8 +343,22 @@ impl OpenAiUpstream {
         path: &str,
         credential: &str,
         parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
+        let req = self.http.post(outbound, url)?.header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {credential}"),
+        );
+        self.send_multipart(req, parts).await
+    }
+
+    /// multipart 的组装、发送与 JSON 响应读取（URL 与鉴权头由调用方装好）。
+    pub(crate) async fn send_multipart(
+        &self,
+        req: reqwest::RequestBuilder,
+        parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
+    ) -> Result<EmbeddingsResponse, UpstreamError> {
         let mut form = reqwest::multipart::Form::new();
         for (name, filename, content_type, data) in parts {
             let base = |data: &Bytes, filename: &Option<String>| {
@@ -328,13 +377,7 @@ impl OpenAiUpstream {
             }
             form = form.part(name, part);
         }
-        let resp = self
-            .http
-            .post(url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {credential}"),
-            )
+        let resp = req
             .multipart(form)
             .timeout(NON_STREAM_TIMEOUT)
             .send()
@@ -370,8 +413,10 @@ impl OpenAiUpstream {
         path: &str,
         credential: &str,
         body: Bytes,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        self.post_json(api_base, path, credential, body).await
+        self.post_json(api_base, path, credential, body, outbound)
+            .await
     }
 
     /// 转发 POST /v1/videos（异步任务创建；`body` 已完成模型名映射）。
@@ -380,8 +425,10 @@ impl OpenAiUpstream {
         api_base: &str,
         credential: &str,
         body: Bytes,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        self.post_json(api_base, "/videos", credential, body).await
+        self.post_json(api_base, "/videos", credential, body, outbound)
+            .await
     }
 
     /// GET JSON 中继（videos 任务轮询等只读小体积端点）。
@@ -390,11 +437,12 @@ impl OpenAiUpstream {
         api_base: &str,
         path: &str,
         credential: &str,
+        outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
         let resp = self
             .http
-            .get(url)
+            .get(outbound, url)?
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {credential}"),
@@ -425,10 +473,11 @@ impl OpenAiUpstream {
         api_base: &str,
         path: &str,
         credential: &str,
+        outbound: &Outbound,
     ) -> Result<reqwest::Response, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
         self.http
-            .get(url)
+            .get(outbound, url)?
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {credential}"),
@@ -462,7 +511,7 @@ fn parse_event(data: &str) -> ChatEvent {
     }
 }
 
-fn classify(e: &reqwest::Error) -> UpstreamError {
+pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
     if e.is_timeout() {
         UpstreamError::Timeout
     } else if e.is_connect() {

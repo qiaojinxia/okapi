@@ -339,7 +339,9 @@ fn map_finish(finish: Option<&str>, has_tools: bool) -> &'static str {
     }
 }
 
-fn usage_from_gemini(meta: Option<&Value>) -> UsageProbe {
+/// Gemini `usageMetadata` → OpenAI 口径探针（gemini 入口透传扫描器复用同一口径）。
+#[must_use]
+pub fn usage_from_gemini(meta: Option<&Value>) -> UsageProbe {
     let get = |k: &str| {
         meta.and_then(|m| m.get(k))
             .and_then(Value::as_u64)
@@ -531,9 +533,17 @@ pub async fn chat(
     body_gemini: Bytes,
     upstream_model: &str,
     stream: bool,
+    outbound: &crate::http::Outbound,
 ) -> Result<ChatResponse, UpstreamError> {
     match upstream
-        .generate(api_base, credential, upstream_model, body_gemini, stream)
+        .generate(
+            api_base,
+            credential,
+            upstream_model,
+            body_gemini,
+            stream,
+            outbound,
+        )
         .await?
     {
         GeminiResponse::Json {

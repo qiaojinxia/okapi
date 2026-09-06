@@ -5,9 +5,10 @@
 //! state 走 Redis 一次性键（10min）；首登自动注册 + 绑定 (provider, subject)，
 //! 成功后发 web session（前端经 /auth/keys 兑 key，保持 key 单轨）。
 
+use super::query::Query;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
@@ -205,6 +206,8 @@ pub async fn callback(
             auth_value: "application/json".to_owned(),
             content_type: Some("application/x-www-form-urlencoded".to_owned()),
             body: bytes::Bytes::from(body),
+            proxy_url: None,
+            extra_headers: Vec::new(),
         },
     )
     .await?;
@@ -224,6 +227,8 @@ pub async fn callback(
             auth_value: format!("Bearer {access_token}"),
             content_type: None,
             body: bytes::Bytes::new(),
+            proxy_url: None,
+            extra_headers: Vec::new(),
         },
     )
     .await?;
@@ -251,7 +256,14 @@ pub async fn callback(
         .take(48)
         .map(char::from)
         .collect();
-    state.sched.web_session_set(&sid, user_id).await;
+    let ip = crate::gateway::clients::detect_client_ip(&headers);
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    state
+        .sched
+        .web_session_set(&sid, user_id, ip.as_deref(), ua)
+        .await;
     let cookie = format!("okapi_session={sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800");
     let mut resp = (
         StatusCode::FOUND,

@@ -11,6 +11,7 @@ import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
+import { qk } from '@/lib/query-keys'
 
 /// 生成批次抽屉。生成后码明文只此一次可见，故结果留在抽屉里直到用户主动关闭。
 export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
@@ -27,7 +28,7 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
   const [copied, setCopied] = useState(false)
 
   const plans = useQuery({
-    queryKey: ['admin', 'plans'],
+    queryKey: qk.adminPlans,
     queryFn: () => apiFetch<{ data: { plan_code: string }[] }>('/admin/plans'),
   })
 

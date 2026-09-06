@@ -17,6 +17,7 @@ pub mod pg;
 pub mod pricing;
 pub mod provision;
 pub mod redis;
+pub mod subscriptions;
 pub mod vendor;
 
 pub use auth::AuthedKey;

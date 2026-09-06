@@ -3,6 +3,9 @@ use sqlx::PgPool;
 
 /// 渠道候选（channel × channel_key 展开行，按 priority 降序返回）。
 #[derive(Debug, Clone)]
+// 四个 bool 是彼此独立的渠道开关（settings JSON 的镜像），不是状态机——收成 enum 只会让
+// 每处 `cand.xxx` 读法变长而换不来任何不变量。
+#[allow(clippy::struct_excessive_bools)]
 pub struct ChannelCandidate {
     pub channel_id: i64,
     pub channel_key_id: i64,
@@ -34,6 +37,22 @@ pub struct ChannelCandidate {
     /// 不透传给上游的请求顶层字段（channels.settings.strip_request_fields，
     /// new-api rc.23 #6847 对齐；model/messages/stream 受保护不可剥）。
     pub strip_request_fields: Vec<String>,
+    /// 强制写入请求顶层的字段（channels.settings.inject_request_fields）；
+    /// 在 strip 之后浅合并。model/messages/stream/provider 受保护。
+    pub inject_request_fields: serde_json::Map<String, serde_json::Value>,
+    /// `/v1/responses` 入口对该渠道是否同方言直转（channels.settings.responses_native）。
+    /// 缺省：provider=openai 为 true（官方必支持），openai_compat 为 false（兼容上游
+    /// 多数只实现 chat，先降级保可用；确认支持的再显式打开）；其它 provider 恒 false。
+    pub responses_native: bool,
+    /// 上游数据面版本（channels.settings.api_version）：只对 `azure` 有意义——每个请求
+    /// 都要带 `?api-version=`；None = 用 providers 侧缺省。其它 provider 忽略。
+    pub api_version: Option<String>,
+    /// 出站代理（channels.settings.proxy_url）：http / https / socks5 / socks5h。
+    /// None = 直连。代理绑在 reqwest Client 上，按 URL 缓存（IMPLEMENTATION §11.30）。
+    pub proxy_url: Option<String>,
+    /// 额外请求头（channels.settings.extra_headers）：鉴权 / 逐跳 / Host 等受保护键
+    /// 在写入时已拒，热路径再跳过一次。
+    pub extra_headers: Vec<(String, String)>,
     /// 能力声明（显式 false 才排除，IMPLEMENTATION §3.8）。
     pub capabilities: serde_json::Value,
     /// 相对成本千分比（层内权重除数，缺省 1000 = 中性）。
@@ -53,6 +72,17 @@ pub struct ChannelCandidate {
 
 /// 内置默认池：新渠道缺省加入、未指定池的分组走这里。
 pub const DEFAULT_POOL: &str = "default";
+
+fn extra_headers_from(value: Option<serde_json::Value>) -> Vec<(String, String)> {
+    value
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 impl ChannelCandidate {
     /// 解析上游实际模型名。
@@ -99,7 +129,12 @@ pub async fn candidates_for_model(
                COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS "thinking_to_content!",
                COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS "bill_by_response_model!",
                c.settings -> 'strip_request_fields' AS strip_request_fields,
+               c.settings -> 'inject_request_fields' AS inject_request_fields,
+               (c.settings ->> 'responses_native')::boolean AS responses_native,
                c.settings ->> 'data_retention' AS data_retention,
+               NULLIF(c.settings ->> 'api_version', '') AS api_version,
+               NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,
+               c.settings -> 'extra_headers' AS extra_headers,
                c.capabilities,
                GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS "cost_milli!",
                c.retry_policy,
@@ -135,7 +170,13 @@ pub async fn candidates_for_model(
         .filter(|r| seen.insert(r.channel_key_id))
         .map(|r| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
+            let responses_native = responses_native_for(&r.provider, r.responses_native);
+            let (same_key_retries, first_output_timeout_secs) =
+                retry_knobs(r.retry_policy.as_ref());
             Ok(ChannelCandidate {
+                api_version: r.api_version,
+                proxy_url: r.proxy_url,
+                extra_headers: extra_headers_from(r.extra_headers),
                 channel_id: r.channel_id,
                 channel_key_id: r.channel_key_id,
                 channel_name: r.channel_name,
@@ -156,26 +197,46 @@ pub async fn candidates_for_model(
                     .strip_request_fields
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default(),
+                inject_request_fields: r
+                    .inject_request_fields
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default(),
+                responses_native,
                 capabilities: r.capabilities,
                 cost_milli: r.cost_milli,
-                same_key_retries: retry_policy_i64(
-                    r.retry_policy.as_ref(),
-                    "same_key_retries",
-                    1,
-                    0,
-                    3,
-                ) as i16,
-                first_output_timeout_secs: retry_policy_i64(
-                    r.retry_policy.as_ref(),
-                    "first_output_timeout_secs",
-                    30,
-                    5,
-                    300,
-                ) as u64,
+                same_key_retries,
+                first_output_timeout_secs,
                 pool_rank: r.pool_rank,
             })
         })
         .collect()
+}
+
+/// `channels.retry_policy` 的两个生效值：(同 key 重试次数, 首字窗口秒)。
+fn retry_knobs(policy: Option<&serde_json::Value>) -> (i16, u64) {
+    // 已 clamp 进 [min, max]，窄化不可能失败；try_from 只是免掉 `as` 的静默截断
+    let same_key_retries =
+        i16::try_from(retry_policy_i64(policy, "same_key_retries", 1, 0, 3)).unwrap_or(1);
+    let first_output_timeout_secs = u64::try_from(retry_policy_i64(
+        policy,
+        "first_output_timeout_secs",
+        30,
+        5,
+        300,
+    ))
+    .unwrap_or(30);
+    (same_key_retries, first_output_timeout_secs)
+}
+
+/// `settings.responses_native` 的生效值：显式配置只在说 OpenAI 方言的渠道上有意义，
+/// anthropic / gemini / custom_pass 渠道无论写什么都走降级链（它们根本没有 /responses）。
+#[must_use]
+pub fn responses_native_for(provider: &str, configured: Option<bool>) -> bool {
+    match provider {
+        "openai" => configured.unwrap_or(true),
+        "openai_compat" => configured.unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// 从 `channels.retry_policy` 取一个整数项，并夹在 [min, max]。
@@ -211,6 +272,8 @@ pub struct ChannelKeyRef {
     pub channel_id: i64,
     pub api_base: Option<String>,
     pub credential: String,
+    pub proxy_url: Option<String>,
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// videos 轮询/下载回源：按 channel_key_id 点查渠道连接信息（低频路径）。
@@ -222,7 +285,9 @@ pub async fn channel_key_ref(
 ) -> Result<Option<ChannelKeyRef>, StoreError> {
     let row = sqlx::query!(
         r#"
-        SELECT c.id AS channel_id, c.api_base, ck.credential_ciphertext
+        SELECT c.id AS channel_id, c.api_base, ck.credential_ciphertext,
+               NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,
+               c.settings -> 'extra_headers' AS extra_headers
         FROM channel_keys ck
         JOIN channels c ON c.id = ck.channel_id
         WHERE ck.id = $1 AND ck.status = 1 AND c.status = 1 AND c.deleted_at IS NULL
@@ -238,6 +303,8 @@ pub async fn channel_key_ref(
             channel_id: r.channel_id,
             api_base: r.api_base,
             credential: crate::credential::open(master_key, &r.credential_ciphertext)?,
+            proxy_url: r.proxy_url,
+            extra_headers: extra_headers_from(r.extra_headers),
         })
     })
     .transpose()

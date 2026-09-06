@@ -297,8 +297,10 @@ pub async fn delete_plan(pool: &PgPool, plan_code: &str) -> Result<bool, StoreEr
     else {
         return Ok(false);
     };
+    // 兑换码或订阅实例（含历史，账本事件引用 plan_code）引用即拒删
     let refs = sqlx::query_scalar!(
-        r#"SELECT COUNT(*)::bigint AS "c!" FROM redemption_codes WHERE plan_id = $1"#,
+        r#"SELECT (SELECT COUNT(*) FROM redemption_codes WHERE plan_id = $1)
+                + (SELECT COUNT(*) FROM user_subscriptions WHERE plan_id = $1) AS "c!""#,
         plan_id
     )
     .fetch_one(pool)

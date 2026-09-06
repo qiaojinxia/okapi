@@ -6,9 +6,9 @@
 
 pub mod activity;
 pub mod admin;
-pub mod analytics;
-mod analysis_source;
 mod analysis_freshness;
+mod analysis_source;
+pub mod analytics;
 pub mod audit;
 pub mod auth_web;
 pub mod dlq;
@@ -18,10 +18,12 @@ pub mod mcp;
 pub mod oauth;
 pub mod pay;
 pub mod portal;
+pub mod query;
 pub mod registration;
 pub mod setup;
 pub mod ssrf;
 pub mod stats;
+pub mod subscriptions;
 pub mod teams;
 pub(crate) mod usage_details;
 
@@ -71,7 +73,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(crate::shutdown::signal())
     .await?;
     Ok(())
 }
@@ -247,6 +249,12 @@ fn user_admin_routes() -> ConsoleRouter {
             "/admin/users/{id}/balance-expiry",
             post(admin::set_balance_expiry),
         )
+        .route(
+            "/admin/users/{id}/subscription",
+            get(subscriptions::admin_get)
+                .post(subscriptions::admin_grant)
+                .delete(subscriptions::admin_cancel),
+        )
         .route("/admin/users/{id}/role", post(admin::assign_role))
         .route("/admin/users/{id}/overview", get(admin::user_overview))
         .route("/admin/users/{id}/usage", get(admin::user_usage))
@@ -271,6 +279,7 @@ fn ops_routes() -> ConsoleRouter {
             post(admin::set_setting).get(manage::list_settings),
         )
         .route("/admin/settings/{key}", get(admin::get_setting))
+        .route("/admin/settings/smtp/test", post(admin::smtp_test))
         .route("/admin/leaderboard", get(admin::leaderboard))
         .route("/admin/stats/overview", get(stats::overview))
         .route("/admin/stats/channels", get(stats::channels))
@@ -326,6 +335,14 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me/groups", get(portal::groups))
         .route("/api/me/logins", get(audit::my_logins))
         .route(
+            "/api/me/sessions",
+            get(auth_web::list_sessions).delete(auth_web::revoke_all_sessions),
+        )
+        .route(
+            "/api/me/sessions/{sid}",
+            axum::routing::delete(auth_web::revoke_session),
+        )
+        .route(
             "/api/me/keys/{id}",
             axum::routing::patch(portal::patch_key).delete(portal::delete_key),
         )
@@ -335,6 +352,12 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me/redeem", post(portal::redeem))
         .route("/api/me/aff", get(portal::aff))
         .route("/api/me/topup", post(pay::topup))
+        .route("/api/plans", get(subscriptions::list_public))
+        .route("/api/me/subscription", get(subscriptions::mine))
+        .route(
+            "/api/me/subscriptions/checkout",
+            post(subscriptions::checkout),
+        )
         .route(
             "/api/teams",
             post(teams::create_team).get(teams::list_my_teams),
@@ -355,6 +378,9 @@ fn auth_routes() -> ConsoleRouter {
         .route("/api/registration", get(registration::public_policy))
         .route("/api/setup", post(setup::run))
         .route("/auth/register", post(auth_web::register))
+        .route("/auth/email-code", post(auth_web::email_code))
+        .route("/auth/password/forgot", post(auth_web::password_forgot))
+        .route("/auth/password/reset", post(auth_web::password_reset))
         .route("/auth/login", post(auth_web::login))
         .route("/auth/logout", post(auth_web::logout))
         .route("/auth/totp/enroll", post(auth_web::totp_enroll))
@@ -406,9 +432,4 @@ fn spa_router() -> Router<crate::gateway::state::AppState> {
         resp
     }
     Router::new().fallback(serve)
-}
-
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("console 收到退出信号");
 }

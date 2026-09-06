@@ -115,8 +115,22 @@ async fn mock_openai(body: axum::body::Bytes) -> axum::response::Response {
     }
 }
 
+async fn mock_count_tokens(
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    assert!(headers.get("x-api-key").is_some());
+    let req: Value = serde_json::from_slice(&body).unwrap();
+    assert!(req["model"].as_str().is_some());
+    axum::Json(json!({ "input_tokens": 42 })).into_response()
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
+        .route(
+            "/anthropic/v1/messages/count_tokens",
+            post(mock_count_tokens),
+        )
         .route("/anthropic/v1/messages", post(mock_anthropic))
         .route("/openai/v1/chat/completions", post(mock_openai));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -356,4 +370,55 @@ async fn messages_json_and_error_envelope() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["type"], "error");
     assert_eq!(body["error"]["type"], "invalid_api_key");
+}
+
+async fn post_count(env: &TestEnv) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/messages/count_tokens", env.gateway))
+        .header("x-api-key", &env.token)
+        .header("anthropic-version", "2023-06-01")
+        .json(&json!({
+            "model": env.model,
+            "system": "keep me",
+            "messages": [{"role": "user", "content": "hi there"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// anthropic 渠道：代理上游 tokenizer，不计费。
+#[tokio::test]
+async fn count_tokens_proxies_anthropic() {
+    let env = setup("anthropic").await;
+    let resp = post_count(&env).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["input_tokens"], 42);
+    let n = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!" FROM billing_records WHERE user_id = $1"#,
+        env.user_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(n, 0, "count_tokens 不计费");
+}
+
+/// 无 anthropic 渠道：本地估算仍回 input_tokens，不计费。
+#[tokio::test]
+async fn count_tokens_local_estimate_without_anthropic() {
+    let env = setup("openai").await;
+    let resp = post_count(&env).await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert!(body["input_tokens"].as_u64().unwrap() > 0);
+    let n = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!" FROM billing_records WHERE user_id = $1"#,
+        env.user_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(n, 0);
 }

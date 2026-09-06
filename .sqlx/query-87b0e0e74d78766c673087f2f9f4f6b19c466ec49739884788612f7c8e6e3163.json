@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO plans (plan_code, display_name, kind, grant_micro, group_code, balance_valid_days,\n                           price_micro, period, duration_days, sort_order, description)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\n        ON CONFLICT (plan_code) DO UPDATE\n            SET display_name = EXCLUDED.display_name,\n                kind = EXCLUDED.kind,\n                grant_micro = EXCLUDED.grant_micro,\n                group_code = EXCLUDED.group_code,\n                balance_valid_days = EXCLUDED.balance_valid_days,\n                price_micro = EXCLUDED.price_micro,\n                period = EXCLUDED.period,\n                duration_days = EXCLUDED.duration_days,\n                sort_order = EXCLUDED.sort_order,\n                description = EXCLUDED.description,\n                status = 1\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Int8",
+        "Varchar",
+        "Int4",
+        "Int8",
+        "Int2",
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "87b0e0e74d78766c673087f2f9f4f6b19c466ec49739884788612f7c8e6e3163"
+}

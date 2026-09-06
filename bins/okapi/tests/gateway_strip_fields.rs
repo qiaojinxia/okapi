@@ -49,6 +49,10 @@ struct TestEnv {
 }
 
 async fn setup(strip: Option<Value>) -> TestEnv {
+    setup_with(strip, None).await
+}
+
+async fn setup_with(strip: Option<Value>, inject: Option<Value>) -> TestEnv {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -95,6 +99,19 @@ async fn setup(strip: Option<Value>) -> TestEnv {
                WHERE id = $1"#,
             channel_id,
             strip
+        )
+        .execute(&pg)
+        .await
+        .unwrap();
+    }
+    if let Some(inject) = inject {
+        sqlx::query!(
+            r#"UPDATE channels
+               SET settings = COALESCE(settings, '{}'::jsonb)
+                   || jsonb_build_object('inject_request_fields', $2::jsonb)
+               WHERE id = $1"#,
+            channel_id,
+            inject
         )
         .execute(&pg)
         .await
@@ -170,4 +187,23 @@ async fn passes_through_without_config() {
     let upstream = chat_with_extras(&env).await;
     assert_eq!(upstream["logit_bias"]["50256"], -100, "缺省应原样透传");
     assert_eq!(upstream["user"], "end-user-1");
+}
+
+/// 注入在剥离之后：强制覆盖 temperature，受保护键不可改。
+#[tokio::test]
+async fn injects_after_strip() {
+    let env = setup_with(
+        Some(json!(["logit_bias"])),
+        Some(json!({"temperature": 0.1, "user": "forced", "model": "hijack"})),
+    )
+    .await;
+    let upstream = chat_with_extras(&env).await;
+    assert!(upstream.get("logit_bias").is_none());
+    assert_eq!(upstream["temperature"], 0.1);
+    assert_eq!(upstream["user"], "forced");
+    assert_ne!(
+        upstream["model"].as_str().unwrap_or(""),
+        "hijack",
+        "model 受保护不可注入"
+    );
 }

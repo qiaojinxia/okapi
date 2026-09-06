@@ -17,21 +17,26 @@ pub async fn authenticate(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    // Anthropic 协议客户端（Claude Code 等）用 x-api-key 头
+    // Anthropic 协议客户端（Claude Code 等）用 x-api-key 头；Gemini SDK 用 x-goog-api-key
+    // （`?key=` 查询串由 gemini 入口搬进该头）
     let token = bearer
         .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()))
+        .or_else(|| headers.get("x-goog-api-key").and_then(|v| v.to_str().ok()))
         .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| AppError::unauthorized(codes::INVALID_API_KEY))?;
+        .filter(|v| !v.is_empty());
+    let Some(token) = token else {
+        return Err(reject_invalid_key(state, headers).await);
+    };
 
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
 
     let authed = if let Some(hit) = state.sched.auth_get(&key_hash).await {
         Arc::new(hit)
     } else {
-        let found = okapi_store::auth::find_key_by_hash(&state.pg, &key_hash)
-            .await?
-            .ok_or_else(|| AppError::unauthorized(codes::INVALID_API_KEY))?;
+        let found = okapi_store::auth::find_key_by_hash(&state.pg, &key_hash).await?;
+        let Some(found) = found else {
+            return Err(reject_invalid_key(state, headers).await);
+        };
         state.sched.auth_set(&key_hash, &found).await;
         Arc::new(found)
     };
@@ -40,6 +45,32 @@ pub async fn authenticate(
         return Err(AppError::unauthorized(codes::KEY_DISABLED));
     }
     Ok(authed)
+}
+
+/// 无效凭证计数（缺 token / 哈希未命中）。超限改回 429，避免扫 key 打满 401。
+/// 鉴权成功后的模型 / IP 白名单失败不计——那是授权，不是猜密钥。
+async fn reject_invalid_key(state: &AppState, headers: &HeaderMap) -> AppError {
+    let limit = state
+        .setting_cached("critical_rate_limits")
+        .await
+        .as_ref()
+        .as_ref()
+        .and_then(|v| v.get("invalid_api_key"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(60);
+    if limit > 0
+        && let Some(ip) = super::clients::detect_client_ip(headers)
+    {
+        let count = state.sched.crit_rate_incr("invalid_api_key", &ip).await;
+        if count > limit {
+            return AppError::new(
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                codes::RATE_LIMITED,
+            )
+            .with_param("invalid_api_key");
+        }
+    }
+    AppError::unauthorized(codes::INVALID_API_KEY)
 }
 
 /// 数据面鉴权 = `authenticate` + key 级 IP 白名单（§11.17）。

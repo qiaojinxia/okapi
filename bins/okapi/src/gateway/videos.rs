@@ -162,7 +162,8 @@ async fn handle_create(
     let candidates: Vec<_> = match rows {
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()
-            .filter(|c| c.provider != "anthropic" && c.provider != "gemini")
+            // azure：Sora 走 `/openai/v1/video/generations/jobs` 另一套任务 API，本期不接
+            .filter(|c| !matches!(c.provider.as_str(), "anthropic" | "gemini" | "azure"))
             .collect(),
         Err(err) => {
             refund(state, &key, request_id, "videos").await;
@@ -191,7 +192,12 @@ async fn handle_create(
             .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
         match state
             .upstream
-            .videos_create(&base, &cand.credential, body_up)
+            .videos_create(
+                &base,
+                &cand.credential,
+                body_up,
+                &super::openai_dialect::outbound(&cand),
+            )
             .await
         {
             Ok(resp) => {
@@ -322,7 +328,15 @@ async fn relay_task(
         let path = format!("/videos/{task_id}/content");
         let resp = state
             .upstream
-            .get_stream(&base, &path, &ch.credential)
+            .get_stream(
+                &base,
+                &path,
+                &ch.credential,
+                &okapi_providers::Outbound {
+                    proxy_url: ch.proxy_url.clone(),
+                    extra_headers: ch.extra_headers.clone(),
+                },
+            )
             .await
             .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
         let status =
@@ -343,7 +357,15 @@ async fn relay_task(
         let path = format!("/videos/{task_id}");
         let resp = state
             .upstream
-            .get_json(&base, &path, &ch.credential)
+            .get_json(
+                &base,
+                &path,
+                &ch.credential,
+                &okapi_providers::Outbound {
+                    proxy_url: ch.proxy_url.clone(),
+                    extra_headers: ch.extra_headers.clone(),
+                },
+            )
             .await
             .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
         Ok(Response::builder()
@@ -384,7 +406,11 @@ async fn commit_and_record(
         .commit(key.user_id, key.key_id, request_id, quote.amount)
         .await
     {
-        Ok(CommitOutcome::Committed { balance_after, .. }) => {
+        Ok(CommitOutcome::Committed {
+            balance_after,
+            pool,
+            ..
+        }) => {
             let input = SettlementInput {
                 dimensions: okapi_ledger::pg::UsageDimensions::new(
                     requested_model,
@@ -424,6 +450,7 @@ async fn commit_and_record(
                 delta_micro: quote.amount.as_micros().saturating_neg(),
                 balance_after: Some(balance_after),
                 event_type: "commit",
+                pool,
             };
             state.settle_write(input).await;
             super::auth::record_settlement_counters(

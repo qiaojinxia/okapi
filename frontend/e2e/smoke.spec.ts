@@ -273,15 +273,15 @@ test('管理端：总览实时条 + 健康芯片 + 日志页统计条/过滤 + �
     await expect(main.getByRole('tab', { name: tab })).toHaveAttribute('aria-selected', 'true')
     if (view !== undefined) await expect(page).toHaveURL(new RegExp(`view=${view}`))
   }
-  // 拆分签：按渠道拆分时"渠道"分段生效且表头随维度变化
+  // 拆分签：按渠道拆分时维度下拉选中"渠道"且表头随维度变化
   await page.goto('/admin/stats?view=breakdown&by=channel&days=30')
-  await expect(main.getByRole('button', { name: /^渠道$|^Channel$/, pressed: true })).toBeVisible({
-    timeout: 10_000,
-  })
+  const dimension = main.getByRole('combobox', { name: /^按$|^By$/ })
+  await expect(dimension).toHaveValue('channel', { timeout: 10_000 })
+  await expect(main.getByRole('columnheader', { name: /^渠道$|^Channel$/ })).toBeVisible()
   // 过滤深链：model 过滤芯片出现，且"模型"维度被置灰（再按它拆只剩一行）
   await page.goto('/admin/stats?view=breakdown&model=nonexistent-model-e2e')
   await expect(main.getByText('nonexistent-model-e2e')).toBeVisible()
-  await expect(main.getByRole('button', { name: /^模型$|^Model$/, pressed: false })).toBeDisabled()
+  await expect(dimension.locator('option[value="model"]')).toBeDisabled()
 
   // 服务质量与经营报表：从旧统计页拆出的两页，各自页签可切
   await page.goto('/admin/quality')

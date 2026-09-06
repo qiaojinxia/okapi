@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT failover_count, request_id FROM billing_records\n           WHERE user_id = $1 AND log_type = 2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "failover_count",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "failover_count"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "request_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "03c956464f8d8e012597756d278d17eebdc155570302dc0c7a10c5132b4064fc"
+}

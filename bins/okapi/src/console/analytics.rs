@@ -9,11 +9,12 @@
 //! SQL 纪律同 logs.rs：整数 clamp 后进 SQL，字符串（模型名 / 分组码）走服务端绑定参数。
 //! 聚合别名一律不与 MV 原始列同名（CH 的 WHERE / 聚合参数优先解析 SELECT 别名）。
 
+use super::query::Query;
 use super::stats::{ch_i64, rate_bp};
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use chrono::Days;
 use okapi_api::{codes, permissions};
@@ -164,6 +165,7 @@ impl CubeQuery {
     }
 
     fn source(&self, previous: bool) -> String {
+        use std::fmt::Write as _;
         // 在聚合展开前裁剪常用主键维度。高级维度在外层过滤，历史未采集部分仍保留。
         let mut base = String::new();
         for (col, val) in [
@@ -172,7 +174,7 @@ impl CubeQuery {
             ("channel_id", self.channel_id),
         ] {
             if let Some(v) = val.filter(|v| *v >= 0) {
-                base.push_str(&format!(" AND {col} = {v}"));
+                let _ = write!(base, " AND {col} = {v}");
             }
         }
         super::analysis_source::source(&self.window(previous), &base)
@@ -192,10 +194,11 @@ impl CubeQuery {
             }
         }
         if let Some(m) = trimmed(self.model.as_deref()) {
-            clause.push_str(&format!(
+            let _ = write!(
+                clause,
                 " AND {} = {{p_model:String}}",
                 self.model_column().unwrap_or("model")
-            ));
+            );
             params.push(("p_model".to_owned(), m.to_owned()));
         }
         if let Some(g) = trimmed(self.group.as_deref()) {
@@ -210,12 +213,12 @@ impl CubeQuery {
             ("billing_type", &self.billing_type),
         ] {
             if let Some(value) = trimmed(value.as_deref()) {
-                clause.push_str(&format!(" AND {col} = {{p_{col}:String}}"));
+                let _ = write!(clause, " AND {col} = {{p_{col}:String}}");
                 params.push((format!("p_{col}"), value.to_owned()));
             }
         }
         if let Some(stream) = self.stream {
-            clause.push_str(&format!(" AND stream = {}", u8::from(stream)));
+            let _ = write!(clause, " AND stream = {}", u8::from(stream));
         }
         for (name, col, values) in [
             (
@@ -225,20 +228,20 @@ impl CubeQuery {
             ),
             ("groups", "group_code", &self.groups),
         ] {
-            if let Ok(values) = parse_choices(name, values.as_deref()) {
-                if !values.is_empty() {
-                    let binds = values
-                        .iter()
-                        .enumerate()
-                        .map(|(i, value)| {
-                            let key = format!("p_{name}_{i}");
-                            params.push((key.clone(), value.clone()));
-                            format!("{{{key}:String}}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    clause.push_str(&format!(" AND {col} IN ({binds})"));
-                }
+            if let Ok(values) = parse_choices(name, values.as_deref())
+                && !values.is_empty()
+            {
+                let binds = values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        let key = format!("p_{name}_{i}");
+                        params.push((key.clone(), value.clone()));
+                        format!("{{{key}:String}}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let _ = write!(clause, " AND {col} IN ({binds})");
             }
         }
         Scope { clause, params }
@@ -750,6 +753,7 @@ struct Bucket {
 
 /// 把 CH 行按 `fold_key` 折叠累加。非折叠维度每键恰一行（恒等折叠）；
 /// provider 维度多条渠道折成一行——可加列直接相加，比率与均值列折后重算。
+#[allow(clippy::too_many_lines)]
 fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) -> Vec<Bucket> {
     let mut acc: Vec<Bucket> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();

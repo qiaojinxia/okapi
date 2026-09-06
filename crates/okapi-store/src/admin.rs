@@ -227,12 +227,15 @@ pub async fn create_redemption_codes(
 pub struct ClaimedRedemption {
     pub code_id: i64,
     /// 实际入账金额：绑套餐时 = plans.grant_micro（覆盖面值），否则 = 面值。
+    /// 绑**订阅**套餐时无意义（核销即激活订阅，不入钱包；`subscription_plan_id` 非空）。
     pub amount_micro: i64,
     pub plan_code: Option<String>,
     /// 套餐附带：兑换后追加的分组。
     pub grant_group: Option<String>,
     /// 套餐附带：兑换后设置余额有效期（天）。
     pub balance_valid_days: Option<i32>,
+    /// 绑的是订阅套餐（plans.kind = 1）：调用方走 `subscriptions::activate`（§11.28）。
+    pub subscription_plan_id: Option<i64>,
 }
 
 /// 核销预查（IP 限制闸需要在翻转前拿到批次与限额；只读，不改状态）。
@@ -286,7 +289,7 @@ pub async fn claim_redemption(
     // 套餐为静态配置：两步读无竞态
     let plan = if let Some(plan_id) = r.plan_id {
         sqlx::query!(
-            r#"SELECT plan_code, grant_micro, group_code, balance_valid_days
+            r#"SELECT id, plan_code, kind, grant_micro, group_code, balance_valid_days
                FROM plans WHERE id = $1 AND status = 1"#,
             plan_id
         )
@@ -296,12 +299,22 @@ pub async fn claim_redemption(
         None
     };
     Ok(Some(match plan {
+        // 订阅套餐：核销即激活，钱包不动；分组由 activate 按"是否新加"记录以便到期收回
+        Some(p) if p.kind == 1 => ClaimedRedemption {
+            code_id: r.id,
+            amount_micro: 0,
+            plan_code: Some(p.plan_code),
+            grant_group: None,
+            balance_valid_days: None,
+            subscription_plan_id: Some(p.id),
+        },
         Some(p) => ClaimedRedemption {
             code_id: r.id,
             amount_micro: p.grant_micro,
             plan_code: Some(p.plan_code),
             grant_group: p.group_code,
             balance_valid_days: p.balance_valid_days,
+            subscription_plan_id: None,
         },
         None => ClaimedRedemption {
             code_id: r.id,
@@ -309,36 +322,65 @@ pub async fn claim_redemption(
             plan_code: None,
             grant_group: None,
             balance_valid_days: None,
+            subscription_plan_id: None,
         },
     }))
 }
 
-/// 建套餐（#1790-5）。
-pub async fn create_plan(
-    pool: &PgPool,
-    plan_code: &str,
-    display_name: &str,
-    grant_micro: i64,
-    group_code: Option<&str>,
-    balance_valid_days: Option<i32>,
-) -> Result<i64, StoreError> {
+/// 套餐 upsert 输入（#1790-5；订阅形态 IMPLEMENTATION §11.28）。
+#[derive(Debug, Clone)]
+pub struct PlanSpec<'a> {
+    pub plan_code: &'a str,
+    pub display_name: &'a str,
+    /// 0 充值模板 / 1 订阅。
+    pub kind: i16,
+    /// kind 0：入账金额；kind 1：每窗额度。
+    pub grant_micro: i64,
+    pub group_code: Option<&'a str>,
+    /// kind 0 专用。
+    pub balance_valid_days: Option<i32>,
+    /// kind 1：售价（0 = 不可自助购买）。
+    pub price_micro: i64,
+    /// kind 1 必填：1 日 2 周 3 月。
+    pub period: Option<i16>,
+    /// kind 1 必填：有效期（天）。
+    pub duration_days: Option<i32>,
+    pub sort_order: i32,
+    pub description: Option<&'a str>,
+}
+
+/// 建/改套餐（plan_code 幂等 upsert；改动不影响存量订阅——它们存的是快照）。
+pub async fn create_plan(pool: &PgPool, spec: &PlanSpec<'_>) -> Result<i64, StoreError> {
     let id = sqlx::query_scalar!(
         r#"
-        INSERT INTO plans (plan_code, display_name, grant_micro, group_code, balance_valid_days)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO plans (plan_code, display_name, kind, grant_micro, group_code, balance_valid_days,
+                           price_micro, period, duration_days, sort_order, description)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         ON CONFLICT (plan_code) DO UPDATE
             SET display_name = EXCLUDED.display_name,
+                kind = EXCLUDED.kind,
                 grant_micro = EXCLUDED.grant_micro,
                 group_code = EXCLUDED.group_code,
                 balance_valid_days = EXCLUDED.balance_valid_days,
+                price_micro = EXCLUDED.price_micro,
+                period = EXCLUDED.period,
+                duration_days = EXCLUDED.duration_days,
+                sort_order = EXCLUDED.sort_order,
+                description = EXCLUDED.description,
                 status = 1
         RETURNING id
         "#,
-        plan_code,
-        display_name,
-        grant_micro,
-        group_code,
-        balance_valid_days
+        spec.plan_code,
+        spec.display_name,
+        spec.kind,
+        spec.grant_micro,
+        spec.group_code,
+        spec.balance_valid_days,
+        spec.price_micro,
+        spec.period,
+        spec.duration_days,
+        spec.sort_order,
+        spec.description
     )
     .fetch_one(pool)
     .await?;
@@ -365,53 +407,74 @@ pub async fn add_user_group(
     Ok(())
 }
 
-/// 创建充值订单（status=0）。
-pub async fn create_recharge_order(
-    pool: &PgPool,
-    order_no: &str,
-    user_id: i64,
-    amount_micro: i64,
-    gateway: &str,
-    pay_amount: &str,
-    currency: &str,
-) -> Result<i64, StoreError> {
+/// 新订单输入。
+#[derive(Debug, Clone, Copy)]
+pub struct NewOrder<'a> {
+    pub order_no: &'a str,
+    pub user_id: i64,
+    /// 钱包充值：入账额度；订阅购买：售价快照。
+    pub amount_micro: i64,
+    pub gateway: &'a str,
+    /// 支付金额（原币种小数字符串，仅展示）。
+    pub pay_amount: &'a str,
+    pub currency: &'a str,
+    /// 非空 = 订阅购买单（§11.28）：支付成功激活订阅而不入钱包。
+    pub plan_id: Option<i64>,
+}
+
+/// 创建充值 / 订阅购买订单（status=0）。
+pub async fn create_recharge_order(pool: &PgPool, order: NewOrder<'_>) -> Result<i64, StoreError> {
     let id = sqlx::query_scalar!(
         r#"
-        INSERT INTO recharge_orders (order_no, user_id, amount_micro, gateway, pay_amount, currency)
-        VALUES ($1, $2, $3, $4, ($5::text)::numeric, $6)
+        INSERT INTO recharge_orders (order_no, user_id, amount_micro, gateway, pay_amount, currency, plan_id)
+        VALUES ($1, $2, $3, $4, ($5::text)::numeric, $6, $7)
         RETURNING id
         "#,
-        order_no,
-        user_id,
-        amount_micro,
-        gateway,
-        pay_amount,
-        currency
+        order.order_no,
+        order.user_id,
+        order.amount_micro,
+        order.gateway,
+        order.pay_amount,
+        order.currency,
+        order.plan_id
     )
     .fetch_one(pool)
     .await?;
     Ok(id)
 }
 
-/// 支付回调核销：status 0→1 行级原子翻转（重放/并发恰一次），返回 user 与额度。
+/// 已核销订单：钱包充值或订阅购买。
+#[derive(Debug, Clone, Copy)]
+pub struct PaidOrder {
+    pub user_id: i64,
+    pub amount_micro: i64,
+    /// 非空 = 订阅购买单，调用方激活订阅而非入钱包。
+    pub plan_id: Option<i64>,
+}
+
+/// 支付回调核销：status 0→1 行级原子翻转（重放/并发恰一次）。
 pub async fn mark_recharge_paid(
     pool: &PgPool,
     order_no: &str,
     gateway_trade_no: &str,
-) -> Result<Option<(i64, i64)>, StoreError> {
+) -> Result<Option<PaidOrder>, StoreError> {
     let row = sqlx::query!(
         r#"
         UPDATE recharge_orders
         SET status = 1, gateway_trade_no = $2, paid_at = now()
         WHERE order_no = $1 AND status = 0
-        RETURNING user_id, amount_micro
+        RETURNING user_id, amount_micro, plan_id
         "#,
         order_no,
         gateway_trade_no
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|r| (r.user_id, r.amount_micro)))
+    Ok(row.map(|r| PaidOrder {
+        user_id: r.user_id,
+        amount_micro: r.amount_micro,
+        plan_id: r.plan_id,
+    }))
 }
 
 /// 按次计费模型 upsert（new-api model_price 导入等）。
@@ -503,13 +566,44 @@ pub struct ChannelKeyRow {
     pub max_concurrency: Option<i32>,
 }
 
-/// 渠道列表；`owner` = Some(uid) 时只返回该属主的渠道（own 范围）。
+/// 渠道列表切片 + 过滤集内的启用数（列表页头"共 N 条 · M 启用"不必再拉全量数）。
+#[derive(Debug)]
+pub struct ChannelList {
+    pub page: crate::listing::Page<ChannelRow>,
+    pub enabled: i64,
+}
+
+/// 渠道列表过滤条件；`Default` = 不过滤。
+/// 四个字段里两个同为 `Option<&str>`，用结构体而非位置参数，换位不会静默编译通过。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelFilter<'a> {
+    /// own 范围：只看该属主的渠道。
+    pub owner: Option<i64>,
+    /// 名称 / 地址关键词（ILIKE，通配符由 `like_pattern` 转义）。
+    pub query: Option<&'a str>,
+    /// 协议精确匹配。
+    pub provider: Option<&'a str>,
+    /// 状态精确匹配。
+    pub status: Option<i16>,
+}
+
+/// 渠道列表；`filter` 的四个维度全部落在 SQL 里，`slice` 不分页时回全量。
+/// `ChannelList::enabled` 与 `Page::total` 都是过滤集内的计数。
 pub async fn list_channels(
     pool: &PgPool,
-    owner: Option<i64>,
-) -> Result<Vec<ChannelRow>, StoreError> {
-    let rows = sqlx::query!(
-        r#"
+    filter: ChannelFilter<'_>,
+    slice: crate::listing::Slice,
+) -> Result<ChannelList, StoreError> {
+    let ChannelFilter {
+        owner,
+        query,
+        provider,
+        status,
+    } = filter;
+    let pattern = crate::listing::like_pattern(query);
+    let (rows, counts) = tokio::try_join!(
+        sqlx::query!(
+            r#"
         SELECT c.id, c.name, c.provider, c.api_base, c.status, c.priority, c.models,
                c.trust_upstream_usage, c.owner_id,
                COALESCE(c.settings, '{}'::jsonb) AS "settings!",
@@ -531,13 +625,47 @@ pub async fn list_channels(
                ) AS "pool_members!"
         FROM channels c
         WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)
+          AND ($2::text IS NULL OR c.name ILIKE $2 OR c.api_base ILIKE $2)
+          AND ($3::text IS NULL OR c.provider = $3)
+          AND ($4::smallint IS NULL OR c.status = $4)
         ORDER BY c.priority DESC, c.id
+        LIMIT $5 OFFSET $6
         "#,
-        owner
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
+            owner,
+            pattern.as_deref(),
+            provider,
+            status,
+            slice.limit,
+            slice.offset
+        )
+        .fetch_all(pool),
+        crate::listing::count_unless_all(
+            slice,
+            sqlx::query!(
+                r#"SELECT COUNT(*) AS "total!", COUNT(*) FILTER (WHERE c.status = 1) AS "enabled!"
+           FROM channels c
+           WHERE c.deleted_at IS NULL AND ($1::bigint IS NULL OR c.owner_id = $1)
+             AND ($2::text IS NULL OR c.name ILIKE $2 OR c.api_base ILIKE $2)
+             AND ($3::text IS NULL OR c.provider = $3)
+             AND ($4::smallint IS NULL OR c.status = $4)"#,
+                owner,
+                pattern.as_deref(),
+                provider,
+                status
+            )
+            .fetch_one(pool)
+        ),
+    )?;
+    let (total, enabled) = counts.map_or_else(
+        || {
+            (
+                crate::listing::len_as_total(rows.len()),
+                crate::listing::len_as_total(rows.iter().filter(|r| r.status == 1).count()),
+            )
+        },
+        |c| (c.total, c.enabled),
+    );
+    let data = rows
         .into_iter()
         .map(|r| ChannelRow {
             id: r.id,
@@ -555,7 +683,11 @@ pub async fn list_channels(
             cost_milli: r.cost_milli,
             data_retention: r.data_retention,
         })
-        .collect())
+        .collect();
+    Ok(ChannelList {
+        page: crate::listing::Page { data, total },
+        enabled,
+    })
 }
 
 /// 用户个人计价系数（`users.price_multiplier`）。十进制字符串入库，计费链路不碰浮点。
@@ -808,10 +940,14 @@ pub async fn upsert_pricing_rule(
     Ok(())
 }
 
-/// 列出全部定价规则（含停用；按生效序返回便于管理端核对叠加顺序）。
-pub async fn list_pricing_rules(pool: &PgPool) -> Result<Vec<PricingRuleRow>, StoreError> {
-    let rows = sqlx::query!(
-        r#"
+/// 列出定价规则（含停用；按生效序返回便于管理端核对叠加顺序）；`slice` 不分页时回全量。
+pub async fn list_pricing_rules(
+    pool: &PgPool,
+    slice: crate::listing::Slice,
+) -> Result<crate::listing::Page<PricingRuleRow>, StoreError> {
+    let (rows, total) = tokio::try_join!(
+        sqlx::query!(
+            r#"
         SELECT rule_code, rule_type, scope, params, priority, enabled, valid_from, valid_to
         FROM pricing_rules
         ORDER BY
@@ -823,11 +959,20 @@ pub async fn list_pricing_rules(pool: &PgPool) -> Result<Vec<PricingRuleRow>, St
             END,
             priority,
             rule_code
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
+        LIMIT $1 OFFSET $2
+        "#,
+            slice.limit,
+            slice.offset
+        )
+        .fetch_all(pool),
+        crate::listing::count_unless_all(
+            slice,
+            sqlx::query_scalar!(r#"SELECT COUNT(*)::bigint AS "c!" FROM pricing_rules"#)
+                .fetch_one(pool)
+        ),
+    )?;
+    let total = total.unwrap_or_else(|| crate::listing::len_as_total(rows.len()));
+    let data = rows
         .into_iter()
         .map(|r| PricingRuleRow {
             rule_code: r.rule_code,
@@ -839,7 +984,8 @@ pub async fn list_pricing_rules(pool: &PgPool) -> Result<Vec<PricingRuleRow>, St
             valid_from: r.valid_from,
             valid_to: r.valid_to,
         })
-        .collect())
+        .collect();
+    Ok(crate::listing::Page { data, total })
 }
 
 /// 删除定价规则；返回是否命中（false = 不存在，调用方转 404）。
@@ -906,8 +1052,10 @@ pub async fn set_setting(
     Ok(())
 }
 
+/// 全站渠道 key（健康汇总这类整表调用方用）。列表页翻页请走 [`list_channel_keys_for`]。
 pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, StoreError> {
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as!(
+        ChannelKeyRow,
         r#"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
                weight, max_concurrency
@@ -916,19 +1064,29 @@ pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, Stor
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| ChannelKeyRow {
-            id: r.id,
-            channel_id: r.channel_id,
-            status: r.status,
-            failed_count: r.failed_count,
-            cooldown_until: r.cooldown_until,
-            last_error: r.last_error,
-            weight: r.weight,
-            max_concurrency: r.max_concurrency,
-        })
-        .collect())
+    Ok(rows)
+}
+
+/// 指定渠道的 key：渠道列表已按页切片，key 也只取本页那几条，不再整表拉回内存过滤。
+pub async fn list_channel_keys_for(
+    pool: &PgPool,
+    channel_ids: &[i64],
+) -> Result<Vec<ChannelKeyRow>, StoreError> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as!(
+        ChannelKeyRow,
+        r#"
+        SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
+               weight, max_concurrency
+        FROM channel_keys WHERE channel_id = ANY($1) ORDER BY channel_id, id
+        "#,
+        channel_ids
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 /// 渠道启停（1=启用 2=手动停用）。返回是否命中行。

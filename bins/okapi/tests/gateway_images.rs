@@ -22,8 +22,32 @@ async fn mock_images(body: axum::body::Bytes) -> axum::response::Response {
     .into_response()
 }
 
+async fn mock_edits(multipart: axum::extract::Multipart) -> axum::response::Response {
+    let mut n = 1_u32;
+    let mut saw_image = false;
+    let mut mp = multipart;
+    while let Some(field) = mp.next_field().await.unwrap() {
+        let name = field.name().unwrap_or_default().to_owned();
+        let data = field.bytes().await.unwrap();
+        if name == "n" {
+            n = String::from_utf8_lossy(&data).trim().parse().unwrap_or(1);
+        }
+        if name == "image" {
+            saw_image = true;
+        }
+    }
+    assert!(saw_image, "edits 必须带 image part");
+    axum::Json(json!({
+        "created": 1_700_000_000,
+        "data": (0..n).map(|_| json!({"url": "https://img.example/edit.png"})).collect::<Vec<_>>()
+    }))
+    .into_response()
+}
+
 async fn spawn_mock() -> SocketAddr {
-    let router = Router::new().route("/v1/images/generations", post(mock_images));
+    let router = Router::new()
+        .route("/v1/images/generations", post(mock_images))
+        .route("/v1/images/edits", post(mock_edits));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -177,4 +201,49 @@ async fn images_insufficient_for_batch() {
     assert_eq!(body["error"]["code"], "insufficient_quota");
     let balance = env.ledger.balance(env.user_id).await.unwrap();
     assert_eq!(balance.as_micros(), 300_000, "拒绝时分文未动");
+}
+
+/// multipart edits：n=2 → 80_000；结算端点 /v1/images/edits。
+#[tokio::test]
+async fn images_edits_multipart_bills_n() {
+    let env = setup(1_000_000).await;
+    let form = reqwest::multipart::Form::new()
+        .text("model", env.model.clone())
+        .text("prompt", "make it blue")
+        .text("n", "2")
+        .part(
+            "image",
+            reqwest::multipart::Part::bytes(b"fake-png".as_slice())
+                .file_name("in.png")
+                .mime_str("image/png")
+                .unwrap(),
+        );
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/images/edits", env.gateway))
+        .bearer_auth(&env.token)
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"].as_array().unwrap().len(), 2);
+
+    let mut rec = None;
+    for _ in 0..50 {
+        rec = sqlx::query!(
+            r#"SELECT amount_micro FROM billing_records
+               WHERE user_id = $1 AND log_type = 2"#,
+            env.user_id
+        )
+        .fetch_optional(&env.pg)
+        .await
+        .unwrap();
+        if rec.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let rec = rec.expect("必须记账");
+    assert_eq!(rec.amount_micro, 80_000);
 }

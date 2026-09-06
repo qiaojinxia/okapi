@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_subscriptions SET status = $2, updated_at = now()\n           WHERE id = $1 AND status = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5a23de01bff2046c5fdcee81379b53db93fd306b17b823eab6f2c69be7e66b9c"
+}

@@ -37,7 +37,7 @@ alwaysApply: false
 - ID 一律 newtype（`UserId` / `ChannelId` / `RequestId`…），防止参数错位。
 - 状态机（计费状态、channel_key 状态）用 enum + 穷举 `match`，**状态转移代码禁 `_ =>` 兜底**。
 - Redis Lua：单脚本只允许操作同一 hash-tag（`{uid}`）槽内的键；脚本语义改动必须同步 `docs/database.md` §2.2 契约。
-- crate 依赖方向：`domain ← pricing/ledger ← providers/store ← api ← bins`，禁反向引用。
+- crate 依赖方向（只准沿箭头引用，禁反向）：`domain` 是根，`pricing` / `store` / `api` 只依赖 `domain`；`ledger` 依赖 `domain + pricing + store`；`providers` 依赖 `domain + api`；`bins/okapi` 依赖全部。`store` 与 `api` 互不可见，`ledger` 与 `providers` 互不可见。
 
 ## 测试
 

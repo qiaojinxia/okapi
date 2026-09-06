@@ -1,0 +1,199 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.plan_code, p.display_name, p.kind, p.grant_micro, p.group_code,\n               p.balance_valid_days, p.price_micro, p.period, p.duration_days, p.sort_order,\n               p.description, p.status, p.created_at,\n               (SELECT COUNT(*) FROM redemption_codes r WHERE r.plan_id = p.id)\n                   AS \"code_count!\",\n               (SELECT COUNT(*) FROM user_subscriptions s WHERE s.plan_id = p.id AND s.status = 1)\n                   AS \"active_subscribers!\"\n        FROM plans p ORDER BY p.id DESC\n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "kind",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "grant_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "grant_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "balance_valid_days",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "balance_valid_days"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "price_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "price_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "period",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "duration_days",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "duration_days"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "sort_order",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "sort_order"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "description",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "code_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 15,
+        "name": "active_subscribers!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "31adeef0d483589d0b2d90e5f2a927b1b7ff5a8799f1c7f6278d6a4a9a65c572"
+}

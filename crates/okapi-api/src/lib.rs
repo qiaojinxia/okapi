@@ -10,7 +10,7 @@ pub mod error;
 pub mod permissions;
 
 pub use chat::{
-    ChatRequestProbe, ChunkProbe, CompletionTokensDetails, MessageProbe, MessagesRequestProbe,
-    PromptTokensDetails, ResponsesRequestProbe, UsageProbe,
+    ChatRequestProbe, ChunkProbe, CompletionTokensDetails, GeminiRequestProbe, MessageProbe,
+    MessagesRequestProbe, PromptTokensDetails, ResponsesRequestProbe, UsageProbe,
 };
 pub use error::{ErrorBody, codes};

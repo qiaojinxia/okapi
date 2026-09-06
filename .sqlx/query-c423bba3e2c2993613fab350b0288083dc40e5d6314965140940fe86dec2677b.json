@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels\n               SET settings = COALESCE(settings, '{}'::jsonb)\n                   || jsonb_build_object('inject_request_fields', $2::jsonb)\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c423bba3e2c2993613fab350b0288083dc40e5d6314965140940fe86dec2677b"
+}

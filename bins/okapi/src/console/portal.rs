@@ -5,11 +5,12 @@
 //! `scope=user` 为钱包主体汇总视图。完整 Team 层（独立登录/成员限额）在 M4。
 //! 统计查询走 ClickHouse MV；未启用 CH 时 fail-closed 返回 501 stats_disabled。
 
+use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
 use okapi_store::ChClient;
@@ -42,6 +43,9 @@ pub async fn me(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let balance = state.ledger.balance(key.user_id).await?;
+    // 订阅池（§11.28）：热值一次 HMGET；窗口外 / 越界为负对用户都显示 0
+    let (sub, sub_until) = state.ledger.sub_balance(key.user_id).await?;
+    let sub_active = sub_until > chrono::Utc::now().timestamp();
     // 余额有效期（#1790-6）是本站独有的机制：钱会在某一天被清零，用户必须能在
     // 首页看到那一天——不在鉴权缓存里（低频字段），点查 PG 一次。
     let balance_expires_at = sqlx::query_scalar!(
@@ -68,6 +72,9 @@ pub async fn me(
         "group": key.group_code,
         "balance_micro": balance.as_micros(),
         "balance_expires_at": balance_expires_at.map(|t| t.to_rfc3339()),
+        // 订阅池剩余（窗口内才有；无订阅 / 窗口外 = 0）与池可用截止 unix 秒（0 = 无）
+        "subscription_remaining_micro": if sub_active { sub.as_micros().max(0) } else { 0 },
+        "subscription_until_unix": if sub_active { sub_until } else { 0 },
         "role": key.role,
         "permissions": permissions,
     })))
@@ -404,10 +411,11 @@ pub async fn ledger(
     let limit = q.limit.clamp(1, 200);
     let rows = sqlx::query!(
         r#"SELECT event_id, event_type, delta_micro, balance_after_micro, payload, actor,
-                  request_id, created_at
+                  request_id, created_at, pool
            FROM billing_events
            WHERE user_id = $1
-             AND event_type IN ('recharge', 'adjust', 'refund', 'expire')
+             AND event_type IN ('recharge', 'adjust', 'refund', 'expire',
+                                'sub_grant', 'sub_reset', 'sub_expire')
              AND delta_micro <> 0
              AND ($2::bigint IS NULL OR event_id < $2)
            ORDER BY event_id DESC LIMIT $3"#,
@@ -439,7 +447,9 @@ pub async fn ledger(
                 "event_type": r.event_type,
                 "delta_micro": r.delta_micro,
                 "balance_after_micro": r.balance_after_micro,
-                "source": ledger_source(&r.actor, &tags),
+                // 0 钱包 1 订阅池（§11.28）：订阅事件的 balance_after 是池余额，不是钱包
+                "pool": r.pool,
+                "source": ledger_source(&r.actor, &tags, r.pool),
                 "tags": tags,
                 // 退款锚到具体请求：用户可去日志页核对被退的那一笔
                 "request_id": r.request_id,
@@ -451,7 +461,7 @@ pub async fn ledger(
 }
 
 /// actor + tags → 用户可读的来源枚举（前端按枚举映射文案，§8 后端不拼人类语言）。
-fn ledger_source(actor: &str, tags: &[String]) -> &'static str {
+fn ledger_source(actor: &str, tags: &[String], pool: i16) -> &'static str {
     if tags.iter().any(|t| t == "aff_rebate") {
         return "aff";
     }
@@ -462,6 +472,9 @@ fn ledger_source(actor: &str, tags: &[String]) -> &'static str {
             "system:payment" => "payment",
             "system:redeem" => "redeem",
             "system:aff" => "aff",
+            // worker 既做余额到期也做订阅滚窗 / 到期（pool=1）：后者由 event_type 自述，
+            // 来源只标"系统"，别把额度重置也写成"余额到期"
+            "system:worker" if pool == 1 => "system",
             "system:worker" => "expiry",
             a if a.starts_with("system:migrate") => "migration",
             _ => "system",
@@ -560,6 +573,28 @@ pub async fn redeem(
         }
         return Err(AppError::new(StatusCode::NOT_FOUND, "redemption_invalid"));
     };
+
+    // 绑订阅套餐（§11.28）：核销即激活 / 续期，钱包不动、面值忽略
+    if let Some(plan_id) = claimed.subscription_plan_id {
+        let plan = okapi_store::subscriptions::sub_plan_by_id(&state.pg, plan_id)
+            .await?
+            .ok_or_else(AppError::internal)?;
+        let granted = super::subscriptions::grant(
+            &state,
+            key.user_id,
+            &plan,
+            &format!("redeem:{}", claimed.code_id),
+            "system:redeem",
+        )
+        .await?;
+        let sub = super::subscriptions::view(&state, granted.subscription()).await?;
+        return Ok(Json(json!({
+            "amount_micro": 0,
+            "plan_code": claimed.plan_code,
+            "subscription": sub,
+            "outcome": granted.kind(),
+        })));
+    }
 
     let amount = okapi_domain::Money::from_micros(claimed.amount_micro);
     let balance_after = state.ledger.credit(key.user_id, amount).await?;
@@ -690,24 +725,41 @@ pub async fn groups(
     })))
 }
 
-/// GET /api/me/keys：本用户全部 key 及累计分账（合作商查员工用量）。
+/// GET /api/me/keys：本用户的 key 及累计分账（合作商查员工用量）；`limit/offset` 可选切片，
+/// 不传回全量。
 pub async fn keys(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<PageQuery>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
-    let rows = sqlx::query!(
-        r#"
+    let slice = q.slice();
+    let (rows, total) = tokio::try_join!(
+        sqlx::query!(
+            r#"
         SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,
                daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,
                expires_at, last_used_at, created_at
         FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id
+        LIMIT $2 OFFSET $3
         "#,
-        key.user_id
+            key.user_id,
+            slice.limit,
+            slice.offset
+        )
+        .fetch_all(&state.pg),
+        okapi_store::listing::count_unless_all(
+            slice,
+            sqlx::query_scalar!(
+                r#"SELECT COUNT(*)::bigint AS "c!" FROM api_keys
+           WHERE user_id = $1 AND deleted_at IS NULL"#,
+                key.user_id
+            )
+            .fetch_one(&state.pg)
+        ),
     )
-    .fetch_all(&state.pg)
-    .await
     .map_err(okapi_store::StoreError::from)?;
+    let total = total.unwrap_or_else(|| okapi_store::listing::len_as_total(rows.len()));
 
     // CH 分账（可用时补充按 key 聚合；不可用时仅返回 PG used_micro 累计列）
     let mut ch_usage: Vec<Value> = Vec::new();
@@ -749,7 +801,7 @@ pub async fn keys(
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(json!({ "data": data, "total": total })))
 }
 
 /// 自助面可改字段：收窄自己这把 key（名字 / 状态 / 过期 / 白名单），外加**在可选集合内**

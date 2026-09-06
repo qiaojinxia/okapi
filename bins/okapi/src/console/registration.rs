@@ -51,6 +51,8 @@ pub struct RegistrationPolicy {
     pub invitee_credit_micro: i64,
     /// 邀请人奖励（被邀请人注册成功即入账；充值返利另见 aff_percent_bp）。
     pub inviter_credit_micro: i64,
+    /// 注册须邮箱验证码（§11.27；依赖 settings.smtp，未配置时取码接口回 501）。
+    pub email_verification: bool,
 }
 
 impl RegistrationPolicy {
@@ -181,6 +183,7 @@ pub async fn public_policy(State(state): State<AppState>) -> Json<Value> {
     let policy = RegistrationPolicy::load(&state).await;
     Json(json!({
         "mode": policy.mode,
+        "email_verification": policy.email_verification,
         "new_user_credit_micro": policy.new_user_credit_micro.max(0),
         "invitee_credit_micro": policy.invitee_credit_micro.max(0),
         // 白名单模式把允许的域名告诉用户（省一次失败）；黑名单不透出，避免给刷号者对照表
@@ -231,5 +234,6 @@ mod tests {
             serde_json::from_value(json!({"mode": "closed"})).unwrap();
         assert_eq!(partial.mode, RegisterMode::Closed);
         assert_eq!(partial.new_user_credit_micro, 0, "缺省字段补零");
+        assert!(!partial.email_verification, "老配置缺省不要求邮箱验证");
     }
 }

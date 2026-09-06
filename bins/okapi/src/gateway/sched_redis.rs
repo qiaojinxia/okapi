@@ -5,8 +5,10 @@
 
 use axum::http::HeaderMap;
 use fred::clients::Client;
-use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface, SortedSetsInterface};
-use fred::types::Expiration;
+use fred::interfaces::{
+    HashesInterface, KeysInterface, LuaInterface, SetsInterface, SortedSetsInterface,
+};
+use fred::types::{Expiration, SetOptions};
 use okapi_store::AuthedKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -237,13 +239,31 @@ struct AuthCacheEntry {
 
 const WEB_SESSION_TTL_SECS: i64 = 7 * 24 * 3600;
 
+/// 门户会话列表行（不含 cookie 原文以外的敏感字段；sid 本身是能力令牌，仅回给属主）。
+#[derive(Debug, Clone)]
+pub struct WebSessionRow {
+    pub sid: String,
+    pub ip: Option<String>,
+    pub ua: Option<String>,
+    pub created_at: i64,
+}
+
 impl SchedulerRedis {
-    /// web 会话（/auth/* 自助面专用，§6.4）：7d 滑动过期。
-    pub async fn web_session_set(&self, sid: &str, user_id: i64) {
+    /// web 会话（/auth/* 自助面专用，§6.4）：7d 滑动过期；同步写入用户索引与展示元数据。
+    pub async fn web_session_set(
+        &self,
+        sid: &str,
+        user_id: i64,
+        ip: Option<&str>,
+        ua: Option<&str>,
+    ) {
+        let web = format!("sess:web:{sid}");
+        let idx = format!("sess:idx:{user_id}");
+        let meta = format!("sess:meta:{sid}");
         let result: Result<(), _> = self
             .client
             .set(
-                format!("sess:web:{sid}"),
+                &web,
                 user_id.to_string(),
                 Some(Expiration::EX(WEB_SESSION_TTL_SECS)),
                 None,
@@ -252,7 +272,18 @@ impl SchedulerRedis {
             .await;
         if let Err(err) = result {
             tracing::warn!(error = %err, "web_session_set 失败");
+            return;
         }
+        let _: Result<i64, _> = self.client.sadd(&idx, sid).await;
+        let _: Result<bool, _> = self.client.expire(&idx, WEB_SESSION_TTL_SECS, None).await;
+        let created = chrono::Utc::now().timestamp().to_string();
+        let fields = [
+            ("ip", ip.unwrap_or("")),
+            ("ua", ua.unwrap_or("")),
+            ("created_at", created.as_str()),
+        ];
+        let _: Result<(), _> = self.client.hset(&meta, fields).await;
+        let _: Result<bool, _> = self.client.expire(&meta, WEB_SESSION_TTL_SECS, None).await;
     }
 
     pub async fn web_session_get(&self, sid: &str) -> Option<i64> {
@@ -264,7 +295,74 @@ impl SchedulerRedis {
     }
 
     pub async fn web_session_del(&self, sid: &str) {
-        let _: Result<i64, _> = self.client.del(format!("sess:web:{sid}")).await;
+        if let Some(uid) = self.web_session_get_raw(sid).await {
+            let _: Result<i64, _> = self.client.srem(format!("sess:idx:{uid}"), sid).await;
+        }
+        let _: Result<i64, _> = self
+            .client
+            .del(vec![format!("sess:web:{sid}"), format!("sess:meta:{sid}")])
+            .await;
+    }
+
+    async fn web_session_get_raw(&self, sid: &str) -> Option<i64> {
+        let value: Option<String> = self.client.get(format!("sess:web:{sid}")).await.ok()?;
+        value?.parse().ok()
+    }
+
+    /// 该用户仍有效的 web 会话（过期成员顺手从索引摘掉）。
+    pub async fn web_session_list(&self, user_id: i64) -> Vec<WebSessionRow> {
+        let idx = format!("sess:idx:{user_id}");
+        let members: Vec<String> = self.client.smembers(&idx).await.unwrap_or_default();
+        let mut out = Vec::with_capacity(members.len());
+        for sid in members {
+            match self.web_session_get_raw(&sid).await {
+                Some(uid) if uid == user_id => {
+                    let meta: std::collections::HashMap<String, String> = self
+                        .client
+                        .hgetall(format!("sess:meta:{sid}"))
+                        .await
+                        .unwrap_or_default();
+                    out.push(WebSessionRow {
+                        sid,
+                        ip: meta.get("ip").filter(|s| !s.is_empty()).cloned(),
+                        ua: meta.get("ua").filter(|s| !s.is_empty()).cloned(),
+                        created_at: meta
+                            .get("created_at")
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .unwrap_or(0),
+                    });
+                }
+                _ => {
+                    let _: Result<i64, _> = self.client.srem(&idx, sid.as_str()).await;
+                }
+            }
+        }
+        out.sort_by_key(|row| std::cmp::Reverse(row.created_at));
+        out
+    }
+
+    /// 吊销一条：必须属于该用户。
+    pub async fn web_session_revoke(&self, user_id: i64, sid: &str) -> bool {
+        match self.web_session_get_raw(sid).await {
+            Some(uid) if uid == user_id => {
+                self.web_session_del(sid).await;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 清空该用户全部 web 会话（密码重置 / 封禁 / 删除）。
+    pub async fn web_session_revoke_user(&self, user_id: i64) {
+        let idx = format!("sess:idx:{user_id}");
+        let members: Vec<String> = self.client.smembers(&idx).await.unwrap_or_default();
+        for sid in members {
+            let _: Result<i64, _> = self
+                .client
+                .del(vec![format!("sess:web:{sid}"), format!("sess:meta:{sid}")])
+                .await;
+        }
+        let _: Result<i64, _> = self.client.del(&idx).await;
     }
 
     /// 用户×模型 RPM（§11.1 new-api 吸收；INCR 尽力语义，Redis 故障放行）。
@@ -563,6 +661,93 @@ impl SchedulerRedis {
     pub async fn oauth_state_take(&self, token: &str) -> bool {
         let deleted: Result<i64, _> = self.client.del(format!("oauth:state:{token}")).await;
         deleted.is_ok_and(|n| n == 1)
+    }
+
+    // ---- 邮箱验证码 / 找回密码（IMPLEMENTATION §11.27）----
+
+    /// 同一邮箱重发冷却：NX 抢到 = 允许发送。Redis 故障放行（限流是尽力语义）。
+    pub async fn email_code_cooldown_acquire(&self, email: &str, ttl_secs: i64) -> bool {
+        let set: Result<Option<String>, _> = self
+            .client
+            .set(
+                format!("verify:email:cd:{email}"),
+                "1",
+                Some(Expiration::EX(ttl_secs)),
+                Some(SetOptions::NX),
+                false,
+            )
+            .await;
+        match set {
+            Ok(reply) => reply.is_some(),
+            Err(_) => true,
+        }
+    }
+
+    /// 存验证码（覆盖旧码）。返回 false = Redis 故障，调用方应报错而不是发一封对不上的码。
+    pub async fn email_code_set(&self, email: &str, code: &str, ttl_secs: i64) -> bool {
+        let result: Result<(), _> = self
+            .client
+            .set(
+                format!("verify:email:{email}"),
+                code,
+                Some(Expiration::EX(ttl_secs)),
+                None,
+                false,
+            )
+            .await;
+        if let Err(err) = &result {
+            tracing::warn!(error = %err, "email_code_set 失败");
+        }
+        result.is_ok()
+    }
+
+    /// 校验并销毁：对上即 DEL（一次性）；不对 / 不存在 / Redis 故障 → false。
+    pub async fn email_code_take(&self, email: &str, code: &str) -> bool {
+        let key = format!("verify:email:{email}");
+        let stored: Option<String> = self.client.get(&key).await.ok().flatten();
+        let Some(stored) = stored else {
+            return false;
+        };
+        if stored.len() != code.len()
+            || stored
+                .bytes()
+                .zip(code.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                != 0
+        {
+            return false;
+        }
+        let _: Result<i64, _> = self.client.del(&key).await;
+        true
+    }
+
+    /// 找回密码 token → user_id（键存 token 的 sha256，明文只出现在邮件里）。
+    pub async fn pwreset_set(&self, token_hash: &str, user_id: i64, ttl_secs: i64) -> bool {
+        let result: Result<(), _> = self
+            .client
+            .set(
+                format!("pwreset:{token_hash}"),
+                user_id.to_string(),
+                Some(Expiration::EX(ttl_secs)),
+                None,
+                false,
+            )
+            .await;
+        if let Err(err) = &result {
+            tracing::warn!(error = %err, "pwreset_set 失败");
+        }
+        result.is_ok()
+    }
+
+    /// 取出并销毁 token（GETDEL），返回 user_id。
+    pub async fn pwreset_take(&self, token_hash: &str) -> Option<i64> {
+        let value: Option<String> = self
+            .client
+            .getdel(format!("pwreset:{token_hash}"))
+            .await
+            .ok()
+            .flatten();
+        value?.parse().ok()
     }
 
     /// 平台实时 KPI 秒桶累加（docs/database.md §2.1 `kpi:*`）。

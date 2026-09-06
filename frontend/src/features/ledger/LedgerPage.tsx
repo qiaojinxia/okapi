@@ -47,9 +47,11 @@ export function LedgerPage() {
 
 interface LedgerRow {
   event_id: number
-  event_type: 'recharge' | 'adjust' | 'refund' | 'expire'
+  event_type: 'recharge' | 'adjust' | 'refund' | 'expire' | 'sub_grant' | 'sub_reset' | 'sub_expire'
   delta_micro: number
   balance_after_micro: number | null
+  /// 0 钱包 1 订阅池（§11.28）：订阅事件的"事后余额"是池余额而非钱包。
+  pool: 0 | 1
   source: 'payment' | 'redeem' | 'aff' | 'admin' | 'expiry' | 'migration' | 'system'
   tags: string[]
   request_id: string | null
@@ -126,6 +128,11 @@ function LedgerTable() {
               </Td>
               <Td numeric className="text-xs text-muted-foreground">
                 {r.balance_after_micro === null ? '—' : formatMoney(r.balance_after_micro, locale)}
+                {r.pool === 1 && (
+                  <Badge variant="outline" className="ml-1.5 align-middle">
+                    {t('portal:ledgerPoolSub')}
+                  </Badge>
+                )}
               </Td>
               <Td className="text-xs">
                 {describe(r, t)}
@@ -156,7 +163,7 @@ function LedgerTable() {
 }
 
 function sourceVariant(r: LedgerRow): 'success' | 'muted' | 'destructive' {
-  if (r.event_type === 'expire') return 'destructive'
+  if (r.event_type === 'expire' || r.event_type === 'sub_expire') return 'destructive'
   if (r.delta_micro > 0) return 'success'
   return 'muted'
 }

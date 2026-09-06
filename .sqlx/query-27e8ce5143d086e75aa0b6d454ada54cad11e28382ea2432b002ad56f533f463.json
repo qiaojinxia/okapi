@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"c!\"\n           FROM team_members tm JOIN users u ON u.id = tm.team_user_id\n           WHERE tm.member_user_id = $1 AND u.deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "27e8ce5143d086e75aa0b6d454ada54cad11e28382ea2432b002ad56f533f463"
+}

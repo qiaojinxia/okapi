@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use okapi_providers::{UpstreamError, rewrite_model};
 use okapi_store::channels::KeyFailure;
@@ -20,7 +20,6 @@ use serde::Deserialize;
 use std::time::Instant;
 use uuid::Uuid;
 
-const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 const MAX_ATTEMPTS: usize = 3;
 
 #[derive(Deserialize)]
@@ -228,7 +227,11 @@ async fn handle(
                         .commit(key.user_id, key.key_id, request_id, quote.amount)
                         .await
                     {
-                        Ok(CommitOutcome::Committed { balance_after, .. }) => {
+                        Ok(CommitOutcome::Committed {
+                            balance_after,
+                            pool,
+                            ..
+                        }) => {
                             let snapshot = serde_json::to_value(&quote.snapshot).ok();
                             let input = SettlementInput {
                                 dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -269,6 +272,7 @@ async fn handle(
                                 delta_micro: quote.amount.as_micros().saturating_neg(),
                                 balance_after: Some(balance_after),
                                 event_type: "commit",
+                                pool,
                             };
                             state.settle_write(input).await;
                             super::auth::record_settlement_counters(
@@ -304,13 +308,17 @@ async fn handle(
             Ok(with_request_id(resp, request_id))
         }
         Err((err, channel, failover)) => {
-            if let Err(rerr) = state
+            let pool = match state
                 .ledger
                 .refund(key.user_id, key.key_id, request_id)
                 .await
             {
-                tracing::error!(request_id = %request_id, error = %rerr, "embeddings 退款失败（悬置待清理）");
-            }
+                Ok(r) => r.pool,
+                Err(rerr) => {
+                    tracing::error!(request_id = %request_id, error = %rerr, "embeddings 退款失败（悬置待清理）");
+                    Pool::Wallet
+                }
+            };
             let input = SettlementInput {
                 dimensions: okapi_ledger::pg::UsageDimensions::new(
                     requested_model,
@@ -354,6 +362,7 @@ async fn handle(
                 delta_micro: 0,
                 balance_after: None,
                 event_type: "refund",
+                pool,
             };
             state.settle_write(input).await;
             Err(err)
@@ -413,15 +422,10 @@ async fn forward(
                 failover,
             ));
         };
-        let base = cand
-            .api_base
-            .clone()
-            .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
         last = Some((cand.channel_id, cand.channel_key_id, upstream_model.clone()));
 
         match state
-            .upstream
-            .json_relay(&base, upstream_path, &cand.credential, body_up)
+            .openai_json(&cand, &upstream_model, upstream_path, body_up)
             .await
         {
             Ok(resp) => {

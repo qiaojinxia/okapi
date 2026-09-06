@@ -5,21 +5,30 @@
 //! 有映射时重写 `model`，流式请求补 `stream_options.include_usage`（缺它
 //! 上游不返 usage，结算被迫走字符估算）。
 //! M3：Anthropic 方向（/v1/messages 双向）+ Gemini 方向（generateContent 出向）。
+//! Responses 方向：同方言直转（`responses.rs`）与降级链（`convert/responses_to_chat.rs`）并存，
+//! 按渠道 `responses_native` 选路。
+//! Azure OpenAI（`azure.rs`）：OpenAI 同形态、仅 URL（部署 + api-version）与鉴权头不同，
+//! 复用 `openai.rs` 的发送 / 解析。
 
 pub mod anthropic;
+pub mod azure;
 pub mod convert;
 pub mod custom_pass;
 pub mod error;
 pub mod gemini;
+pub mod http;
 pub mod modifiers;
 pub mod openai;
 pub mod reasoning;
+pub mod responses;
 pub mod types;
 
 pub use anthropic::AnthropicUpstream;
+pub use azure::AzureUpstream;
 pub use custom_pass::PassUpstream;
 pub use error::UpstreamError;
 pub use gemini::GeminiUpstream;
+pub use http::{HttpPool, Outbound};
 pub use openai::{ChatResponse, OpenAiUpstream, StreamHandle, ensure_stream_usage, rewrite_model};
 pub use reasoning::{ReasoningDirective, split_reasoning_suffix};
 pub use types::ChatEvent;

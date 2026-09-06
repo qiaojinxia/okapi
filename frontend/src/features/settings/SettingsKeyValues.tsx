@@ -12,6 +12,7 @@ import { toast } from '@/components/ui/toast'
 import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { SettingEditorDrawer } from './SettingEditorDrawer'
 import { containsSecret, isRecord, SETTING_GROUPS, settingMeta } from './setting-catalog'
@@ -27,7 +28,7 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
   const [filter, setFilter] = useState('')
   const [category, setCategory] = useState<SettingGroup | 'all'>('all')
   const settings = useQuery({
-    queryKey: ['admin', 'settings'],
+    queryKey: qk.adminSettings,
     queryFn: () => apiFetch<{ data: SettingRow[] }>('/admin/settings'),
   })
   const save = useMutation({
@@ -35,8 +36,8 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
     onSuccess: (_r, arg) => {
       toast.success(t('common:saved'))
       setEditing(null)
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
-      void queryClient.invalidateQueries({ queryKey: ['setting', arg.key] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void queryClient.invalidateQueries({ queryKey: qk.setting(arg.key) })
     },
     onError: (err) => toast.error(describeError(err)),
   })

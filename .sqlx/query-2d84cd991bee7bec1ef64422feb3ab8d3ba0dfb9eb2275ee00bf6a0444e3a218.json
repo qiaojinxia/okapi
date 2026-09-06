@@ -1,0 +1,196 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT s.id, s.user_id, s.plan_id, p.plan_code, p.display_name, p.period AS \"period!\", s.status,\n               s.quota_micro, p.group_code, s.granted_group, s.starts_at, s.expires_at,\n               s.window_start, s.window_end, s.source\n        FROM user_subscriptions s JOIN plans p ON p.id = s.plan_id\n        WHERE s.user_id = $1 AND s.status = 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "plan_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "plan_code"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "display_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "period!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "period"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "quota_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "quota_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "plans",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "granted_group",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "granted_group"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "starts_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "starts_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "window_start",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_start"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "window_end",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_end"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "source",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "source"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2d84cd991bee7bec1ef64422feb3ab8d3ba0dfb9eb2275ee00bf6a0444e3a218"
+}

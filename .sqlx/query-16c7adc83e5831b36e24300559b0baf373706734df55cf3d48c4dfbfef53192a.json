@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT event_type, delta_micro FROM billing_events\n               WHERE user_id = $1 AND pool = $2 ORDER BY event_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "event_type"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "delta_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "delta_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "16c7adc83e5831b36e24300559b0baf373706734df55cf3d48c4dfbfef53192a"
+}

@@ -1,5 +1,5 @@
 import { Percent, Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -9,9 +9,11 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
+import { Pagination } from '@/components/ui/pagination'
 import { RuleDrawer } from '@/features/rules/RuleDrawer'
 import { STACKING_LABEL, WEEKDAY_LABEL } from '@/features/rules/types'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -28,10 +30,15 @@ export function RulesPage() {
   // null = 关闭；'create' = 新建；RuleRow = 编辑该条
   const [drawer, setDrawer] = useState<'create' | RuleRow | null>(null)
   const { confirm, dialog } = useConfirm()
+  const pager = usePagination()
 
   const rules = useQuery({
-    queryKey: qk.adminPricingRules,
-    queryFn: () => apiFetch<{ data: RuleRow[] }>('/admin/pricing/rules'),
+    queryKey: [...qk.adminPricingRules, pager.offset, pager.limit],
+    queryFn: () =>
+      apiFetch<{ data: RuleRow[]; total: number }>(
+        `/admin/pricing/rules?limit=${pager.limit}&offset=${pager.offset}`,
+      ),
+    placeholderData: keepPreviousData,
   })
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminPricingRules })
 
@@ -122,7 +129,9 @@ export function RulesPage() {
         icon={Percent}
         title={t('admin:rulesTitle')}
         description={t('admin:rulesHint')}
-        meta={<Badge variant="muted">{t('admin:keyTotal', { n: rows.length })}</Badge>}
+        meta={
+          <Badge variant="muted">{t('admin:keyTotal', { n: rules.data?.total ?? 0 })}</Badge>
+        }
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />
@@ -147,7 +156,7 @@ export function RulesPage() {
           }
         />
       ) : (
-        <Table>
+        <Table stickyHeader>
           <THead>
             <Tr>
               <Th>{t('admin:ruleCode')}</Th>
@@ -207,6 +216,8 @@ export function RulesPage() {
           </TBody>
         </Table>
       )}
+
+      <Pagination {...pager} total={rules.data?.total} />
 
       {drawer !== null && (
         <RuleDrawer

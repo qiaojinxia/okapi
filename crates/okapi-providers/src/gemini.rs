@@ -29,16 +29,14 @@ pub enum GeminiResponse {
 
 #[derive(Clone)]
 pub struct GeminiUpstream {
-    http: reqwest::Client,
+    http: crate::http::HttpPool,
 }
 
 impl GeminiUpstream {
     pub fn new() -> Result<Self, UpstreamError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| UpstreamError::Build(e.to_string()))?;
-        Ok(Self { http })
+        Ok(Self {
+            http: crate::http::HttpPool::new()?,
+        })
     }
 
     /// 转发 generateContent。`body` 已是 Gemini 协议 JSON；模型名走 URL 路径。
@@ -49,6 +47,7 @@ impl GeminiUpstream {
         model: &str,
         body: Bytes,
         stream: bool,
+        outbound: &crate::http::Outbound,
     ) -> Result<GeminiResponse, UpstreamError> {
         let base = api_base.trim_end_matches('/');
         let url = if stream {
@@ -58,7 +57,7 @@ impl GeminiUpstream {
         };
         let mut req = self
             .http
-            .post(url)
+            .post(outbound, url)?
             .header("x-goog-api-key", credential)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_vec());
@@ -104,6 +103,84 @@ impl GeminiUpstream {
                 upstream_request_id,
                 body,
             })
+        }
+    }
+}
+
+/// 透传形态（Gemini 入口 + Gemini 上游）的计费元数据扫描器：
+/// chunk 原样透出（Gemini SSE 无 event 名），仅提取首字判定 / 字符数 / usage。
+/// usage 口径与 `convert::openai_to_gemini::usage_from_gemini` 一致（promptTokenCount 含缓存，
+/// completion = candidates + thoughts）；`finishReason` 出现即终局，其后追加流终止标记。
+#[derive(Default)]
+pub struct MetaScanner {
+    finished: bool,
+}
+
+impl MetaScanner {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 处理一条原生 chunk（data 行 JSON 原文）。
+    pub fn scan(
+        &mut self,
+        item: Result<String, UpstreamError>,
+    ) -> Vec<Result<crate::types::ChatEvent, UpstreamError>> {
+        let raw = match item {
+            Ok(raw) => raw,
+            Err(err) => return vec![Err(err)],
+        };
+        let src: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        if let Some(err) = src.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("upstream_error");
+            return vec![Err(UpstreamError::Stream(msg.to_owned()))];
+        }
+        let mut has_output = false;
+        let mut content_chars = 0usize;
+        for part in src
+            .pointer("/candidates/0/content/parts")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(t) = part.get("text").and_then(serde_json::Value::as_str) {
+                if !t.is_empty() {
+                    has_output = true;
+                }
+                content_chars = content_chars.saturating_add(t.chars().count());
+            }
+            if part.get("functionCall").is_some() {
+                has_output = true;
+            }
+        }
+        // usageMetadata 逐 chunk 累计给出；只在终局 chunk 上交给结算，避免中途值覆盖
+        let finished = src
+            .pointer("/candidates/0/finishReason")
+            .and_then(serde_json::Value::as_str)
+            .is_some();
+        let usage = if finished {
+            Some(crate::convert::openai_to_gemini::usage_from_gemini(
+                src.get("usageMetadata"),
+            ))
+        } else {
+            None
+        };
+        let passthrough = crate::types::ChatEvent::Data {
+            raw,
+            event: None,
+            has_output,
+            content_chars,
+            usage,
+        };
+        if finished && !self.finished {
+            self.finished = true;
+            vec![Ok(passthrough), Ok(crate::types::ChatEvent::Done)]
+        } else {
+            vec![Ok(passthrough)]
         }
     }
 }

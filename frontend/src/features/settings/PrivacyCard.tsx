@@ -5,6 +5,7 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { qk } from '@/lib/query-keys'
 
 /// 隐私与留痕（settings.record_ip_log）。
 ///
@@ -14,7 +15,7 @@ export function PrivacyCard() {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const current = useQuery({
-    queryKey: ['setting', 'record_ip_log'],
+    queryKey: qk.setting('record_ip_log'),
     queryFn: () => apiFetch<{ value: boolean | null }>('/admin/settings/record_ip_log'),
   })
   // 缺省（键不存在）= 记录：存量站点一直在记，缺省关掉会让日志无声地少一列
@@ -29,7 +30,7 @@ export function PrivacyCard() {
     onSuccess: () => {
       toast.success(t('common:success'))
       void current.refetch()
-      void queryClient.invalidateQueries({ queryKey: ['admin', 'settings'] })
+      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
     },
     onError: (err) => toast.error(describeError(err)),
   })

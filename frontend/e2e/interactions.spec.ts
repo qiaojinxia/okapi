@@ -313,7 +313,8 @@ test('门户按任务分组，搜索支持分组、空态、清空和回车跳�
     .toEqual(['/portal/keys', '/pricing', '/portal/logs'])
   const search = page.getByRole('searchbox', { name: 'Find a feature' })
   await search.fill('billing')
-  await expect(nav.getByRole('link')).toHaveCount(3)
+  // 账单分组：充值 / 订阅套餐 / 账户流水 / 邀请
+  await expect(nav.getByRole('link')).toHaveCount(4)
   await search.fill('no-such-feature')
   await expect(nav.getByRole('status')).toContainText('No matching features')
   await search.press('Escape')
@@ -521,4 +522,272 @@ test('中文输入法确认不触发搜索跳转，窄屏页签可定位且页�
   expect(last!.x + last!.width).toBeLessThanOrEqual(list!.x + list!.width + 1)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/interaction-mobile.png', fullPage: true, animations: 'disabled' })
+})
+
+test('已有模型可搜索、联想和勾选，筛选保留已选项，中文确认不误加标签', async ({ page }) => {
+  await prepare(page, ['*'], 'zh-CN')
+  await page.route('**/admin/models', (route) => route.fulfill({ json: { data: [
+    { model_name: 'gpt-demo', vendor: 'OpenAI', pricing_mode: 'ratio' },
+    { model_name: 'claude-demo', vendor: 'Anthropic', pricing_mode: 'ratio' },
+  ] } }))
+  await page.goto('/admin/channels')
+  await page.getByRole('button', { name: '路由诊断', exact: true }).click()
+  const model = page.locator('#diag-model')
+  await model.fill('gpt')
+  const listId = await model.getAttribute('list')
+  await expect(page.locator(`datalist[id="${listId}"] option`)).toHaveCount(1)
+  await expect(page.locator(`datalist[id="${listId}"] option`)).toHaveAttribute('value', 'gpt-demo')
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).last().click()
+  await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
+  const search = page.getByRole('searchbox', { name: '从已配定价的模型中选择' })
+  await search.fill('openai')
+  await page.getByRole('checkbox', { name: 'gpt-demo', exact: true }).check()
+  await expect(page.getByRole('checkbox', { name: 'claude-demo', exact: true })).toHaveCount(0)
+  await search.fill('anthropic')
+  await page.getByRole('checkbox', { name: 'claude-demo', exact: true }).check()
+  await search.fill('')
+  await expect(page.getByRole('checkbox', { name: 'gpt-demo', exact: true })).toBeChecked()
+  const manual = page.locator('#d-models')
+  await manual.fill('自定义')
+  await manual.dispatchEvent('keydown', { key: 'Enter', code: 'Enter', isComposing: true, bubbles: true })
+  await expect(manual).toHaveValue('自定义')
+  await expect(page.getByRole('button', { name: '移除 自定义', exact: true })).toHaveCount(0)
+  await manual.fill('custom-a，custom-b')
+  await manual.press('Enter')
+  await expect(manual).toHaveValue('')
+  await expect(page.getByRole('dialog')).toContainText('custom-a')
+  await expect(page.getByRole('dialog')).toContainText('custom-b')
+  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
+  const queries: string[] = []
+  await page.route('**/admin/models?*', (route) => {
+    queries.push(new URL(route.request().url()).search)
+    return route.fulfill({ json: { data: [], total: 0, unpriced: 0 } })
+  })
+  await page.goto('/admin/pricing')
+  const modelSearch = page.locator('#m-search')
+  await modelSearch.fill('anthropic')
+  const searchList = await modelSearch.getAttribute('list')
+  await expect(page.locator(`datalist[id="${searchList}"] option`)).toHaveAttribute('value', 'claude-demo')
+  await modelSearch.fill('claude-demo')
+  await modelSearch.press('Enter')
+  await expect.poll(() => queries.at(-1)).toContain('q=claude-demo')
+  await modelSearch.fill('')
+  await expect.poll(() => queries.at(-1)).toBe('?limit=20&offset=0')
+})
+
+for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
+  test(`价格分组${viewport.width}：后端每页20条，真实总数与分页常驻，表格内部滚动`, async ({ page }) => {
+    await prepare(page, ['*'], 'zh-CN')
+    await page.setViewportSize(viewport)
+    const hits: string[] = []
+    await page.route('**/admin/groups?*', async (route) => {
+      const url = new URL(route.request().url())
+      hits.push(url.search)
+      const offset = Number(url.searchParams.get('offset'))
+      const limit = Number(url.searchParams.get('limit'))
+      const data = Array.from({ length: Math.min(limit, 45 - offset) }, (_, i) => ({
+        group_code: `group-${offset + i + 1}`, group_ratio: '1.5', description: 'group fixture',
+        user_count: 0, channel_count: 2, pool_code: 'default', is_default: false, self_select: false,
+      }))
+      await route.fulfill({ json: { data, total: 45 } })
+    })
+    await page.goto('/admin/groups')
+    const rows = page.locator('tbody tr')
+    const pager = page.getByRole('navigation', { name: '分页' })
+    await expect(rows).toHaveCount(20)
+    await expect(page.getByRole('main').getByText('共 45 条', { exact: true })).toBeVisible()
+    await expect(pager).toContainText('1–20 / 共 45')
+    await expect(pager).toBeInViewport({ ratio: 1 })
+    expect(hits).toEqual(['?limit=20&offset=0'])
+    const table = page.getByRole('table')
+    expect(await table.evaluate((el) => el.parentElement!.scrollHeight > el.parentElement!.clientHeight)).toBe(true)
+    await table.evaluate((el) => { el.parentElement!.scrollTop = 300 })
+    await expect(page.getByRole('columnheader', { name: '分组码' })).toBeInViewport({ ratio: 1 })
+    await expect(pager).toBeInViewport({ ratio: 1 })
+    await pager.getByRole('button', { name: '下一页' }).click()
+    await expect(rows.first()).toContainText('group-21')
+    expect(hits.at(-1)).toBe('?limit=20&offset=20')
+    expect(await table.evaluate((el) => el.parentElement!.scrollTop)).toBe(0)
+    await pager.getByRole('button', { name: '下一页' }).click()
+    await expect(rows).toHaveCount(5)
+    await expect(pager).toContainText('41–45 / 共 45')
+    await expect(pager.getByRole('button', { name: '下一页' })).toBeDisabled()
+    await expect(pager).toBeInViewport({ ratio: 1 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
+    await pager.getByRole('button', { name: '1', exact: true }).click()
+    await expect(rows).toHaveCount(20)
+    await page.screenshot({ path: `test-results/groups-pagination-${viewport.width}.png`, animations: 'disabled' })
+  })
+}
+
+test('列表分页：服务端按 limit/offset 与筛选取页，页宽切换保留选择，筛选复位并只勾本页', async ({ page }) => {
+  await prepare(page, ['*'], 'zh-CN')
+  const channel = (i: number) => ({
+    id: i + 1, name: `ch-${i + 1}`, provider: i % 3 === 0 ? 'anthropic' : 'openai', api_base: null, status: 1, priority: 1,
+    models: ['gpt-5'], keys: [], settings: null, pools: ['default'], pool_members: [], cost_milli: 1000, data_retention: null, last_test: null,
+  })
+  const channels = Array.from({ length: 45 }, (_, i) => channel(i))
+  const channelHits: string[] = []
+  // 接口桩按真实契约：q / provider 过滤后再按 limit/offset 切片，total / enabled 为过滤集计数
+  await page.route('**/admin/channels?*', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    const url = new URL(route.request().url())
+    channelHits.push(url.search)
+    const q = url.searchParams.get('q')?.toLowerCase() ?? ''
+    const provider = url.searchParams.get('provider')
+    const hit = channels.filter((c) => (q === '' || c.name.includes(q)) && (!provider || c.provider === provider))
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : hit.length
+    return route.fulfill({ json: { data: hit.slice(offset, offset + limit), total: hit.length, enabled: hit.filter((c) => c.status === 1).length } })
+  })
+  await page.goto('/admin/channels')
+  const rows = page.locator('tbody tr')
+  const pager = page.getByRole('navigation', { name: '分页' })
+  await expect(rows).toHaveCount(20)
+  await expect(pager).toContainText('1–20 / 共 45')
+  await expect(page.getByRole('main')).toContainText('共 45 条 · 45 启用')
+  expect(channelHits.at(-1)).toBe('?limit=20&offset=0')
+  await page.screenshot({ path: 'test-results/pagination-channels.png', fullPage: true, animations: 'disabled' })
+  await pager.getByRole('button', { name: '下一页' }).click()
+  await expect(rows.first()).toContainText('ch-21')
+  expect(channelHits.at(-1)).toBe('?limit=20&offset=20')
+  await pager.getByRole('button', { name: '3', exact: true }).click()
+  await expect(rows).toHaveCount(5)
+  await expect(pager.getByRole('button', { name: '下一页' })).toBeDisabled()
+  // 表头全选只勾本页；换页宽后选择保留，正在看的行仍在视野内
+  await page.getByRole('checkbox', { name: '全选本页' }).check()
+  await expect(page.getByRole('toolbar', { name: '已选 5 项' })).toBeVisible()
+  await pager.getByLabel('每页条数').selectOption('50')
+  await expect(rows).toHaveCount(45)
+  await expect(pager.getByRole('button', { name: '1', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('toolbar', { name: '已选 5 项' })).toBeVisible()
+  // 筛选一变回到第一页并带到接口
+  await pager.getByLabel('每页条数').selectOption('20')
+  await pager.getByRole('button', { name: '下一页' }).click()
+  await expect(pager).toContainText('21–40 / 共 45')
+  await page.locator('#ch-provider').selectOption('openai')
+  await expect(pager).toContainText('1–20 / 共 30')
+  expect(channelHits.at(-1)).toBe('?limit=20&offset=0&provider=openai')
+  // 结果不满一页：分页条仍在（页宽切换器是"每页看多少"的唯一入口），只是翻不动
+  await page.locator('#ch-provider').selectOption('anthropic')
+  await expect(rows).toHaveCount(15)
+  await expect(pager).toContainText('1–15 / 共 15')
+  await expect(pager.getByLabel('每页条数')).toBeVisible()
+  await expect(pager.getByRole('button', { name: '上一页' })).toBeDisabled()
+  await expect(pager.getByRole('button', { name: '下一页' })).toBeDisabled()
+  // 搜索回车才提交：q 一起带到接口，关键词与协议过滤组合
+  await page.getByPlaceholder('按名称或地址搜索').fill('ch-4')
+  await page.getByPlaceholder('按名称或地址搜索').press('Enter')
+  await expect(rows).toHaveCount(3)
+  expect(channelHits.at(-1)).toBe('?limit=20&offset=0&q=ch-4&provider=anthropic')
+  await page.getByRole('button', { name: '清空筛选' }).first().click()
+  await expect(rows).toHaveCount(20)
+
+  const hits: string[] = []
+  await page.route('**/admin/users?*', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    const url = new URL(route.request().url())
+    hits.push(url.search)
+    const offset = Number(url.searchParams.get('offset'))
+    const limit = Number(url.searchParams.get('limit'))
+    const total = url.searchParams.get('q') ? 3 : 53
+    const data = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => ({
+      id: offset + i + 1, username: `user-${offset + i + 1}`, email: null, role: 1, status: 1, balance_micro: 0, admin_role_id: null, price_multiplier: '1',
+    }))
+    return route.fulfill({ json: { total, data } })
+  })
+  await page.goto('/admin/users')
+  await expect(rows).toHaveCount(20)
+  await expect(pager).toContainText('1–20 / 共 53')
+  await pager.getByRole('button', { name: '3', exact: true }).click()
+  await expect(rows).toHaveCount(13)
+  await expect(rows.first()).toContainText('user-41')
+  expect(hits.at(-1)).toBe('?limit=20&offset=40')
+  // 换页宽对齐到新页宽：第 41 行仍在 1–50 里
+  await pager.getByLabel('每页条数').selectOption('50')
+  await expect(rows).toHaveCount(50)
+  await expect(pager).toContainText('1–50 / 共 53')
+  expect(hits.at(-1)).toBe('?limit=50&offset=0')
+  // 一页 50 行：超出的部分在表格内滚动，分页条不被推出视口
+  const overflow = await page.locator('table').evaluate((el) => {
+    const wrap = el.parentElement as HTMLElement
+    return wrap.scrollHeight - wrap.clientHeight
+  })
+  expect(overflow).toBeGreaterThan(0)
+  await expect(pager).toBeInViewport()
+  await expect(page.getByRole('columnheader', { name: '用户名' })).toBeInViewport()
+  await page.screenshot({ path: 'test-results/pagination-scroll.png', animations: 'disabled' })
+  await pager.getByRole('button', { name: '下一页' }).click()
+  await expect(rows).toHaveCount(3)
+  expect(hits.at(-1)).toBe('?limit=50&offset=50')
+  // 搜索词一变回到第一页
+  await page.getByLabel('搜索用户名 / 邮箱（回车）').fill('user')
+  await page.getByLabel('搜索用户名 / 邮箱（回车）').press('Enter')
+  await expect(rows).toHaveCount(3)
+  await expect.poll(() => hits.at(-1)).toBe('?limit=50&offset=0&q=user')
+  await expect(pager).toContainText('1–3 / 共 3')
+  // 空结果由空态占位，这时才不画分页条
+  await page.route('**/admin/users?*', (route) => route.request().isNavigationRequest()
+    ? route.fallback()
+    : route.fulfill({ json: { total: 0, data: [] } }))
+  await page.getByLabel('搜索用户名 / 邮箱（回车）').fill('nobody')
+  await page.getByLabel('搜索用户名 / 邮箱（回车）').press('Enter')
+  await expect(page.getByText('没有匹配的结果')).toBeVisible()
+  await expect(pager).toHaveCount(0)
+})
+
+test('分页与筛选在地址里：刷新、深链、后退都回到原来那一页，翻页不堆历史', async ({ page }) => {
+  await prepare(page, ['*'], 'zh-CN')
+  const hits: string[] = []
+  await page.route('**/admin/users?*', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    const url = new URL(route.request().url())
+    hits.push(url.search)
+    const offset = Number(url.searchParams.get('offset'))
+    const limit = Number(url.searchParams.get('limit'))
+    const q = url.searchParams.get('q')
+    const total = q ? 3 : 53
+    const data = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => ({
+      id: offset + i + 1, username: `${q ?? 'user'}-${offset + i + 1}`, email: null, role: 1, status: 1, balance_micro: 0, admin_role_id: null, price_multiplier: '1',
+    }))
+    return route.fulfill({ json: { total, data } })
+  })
+  const rows = page.locator('tbody tr')
+  const pager = page.getByRole('navigation', { name: '分页' })
+  const input = page.getByLabel('搜索用户名 / 邮箱（回车）')
+  // 地址栏里的 search（不关心参数顺序）
+  const address = () => Object.fromEntries(new URL(page.url()).searchParams)
+
+  // 深链直达第三页：只发一次请求，且就是第三页的
+  await page.goto('/admin/users?page=3')
+  await expect(rows.first()).toContainText('user-41')
+  expect(hits).toEqual(['?limit=20&offset=40'])
+  // 刷新仍在第三页
+  await page.reload()
+  await expect(rows.first()).toContainText('user-41')
+  expect(hits.at(-1)).toBe('?limit=20&offset=40')
+  // 换页宽写进地址并对齐页码（第 41 行落在 1–50 里 → 第一页，page 不写）
+  await pager.getByLabel('每页条数').selectOption('50')
+  await expect(rows).toHaveCount(50)
+  await expect.poll(address).toEqual({ limit: '50' })
+  await pager.getByRole('button', { name: '下一页' }).click()
+  await expect(rows).toHaveCount(3)
+  await expect.poll(address).toEqual({ limit: '50', page: '2' })
+  // 搜索：q 与 page 同一次导航更新——只按"新词 + 第一页"请求一次；输入框显示提交的词
+  const before = hits.length
+  await input.fill('abc')
+  await input.press('Enter')
+  await expect(rows.first()).toContainText('abc-1')
+  expect(hits.slice(before)).toEqual(['?limit=50&offset=0&q=abc'])
+  await expect.poll(address).toEqual({ limit: '50', q: 'abc' })
+  await expect(input).toHaveValue('abc')
+  // 翻页是 replace、筛选是 push：后退一步越过所有翻页，直接回到筛选前的最后状态，输入框跟着地址清空
+  await page.goBack()
+  await expect.poll(address).toEqual({ limit: '50', page: '2' })
+  await expect(rows.first()).toContainText('user-51')
+  await expect(input).toHaveValue('')
+  // 地址里乱写的页宽不在档位内 → 当没写，按缺省 20 请求
+  await page.goto('/admin/users?limit=37&page=2')
+  await expect(rows.first()).toContainText('user-21')
+  expect(hits.at(-1)).toBe('?limit=20&offset=20')
 })

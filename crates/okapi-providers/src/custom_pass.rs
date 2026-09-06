@@ -2,6 +2,7 @@
 //! 任意方法 + 路径的透明代理，响应体流式回传；协议语义与计费由 gateway 决策。
 
 use crate::error::UpstreamError;
+use crate::http::{HttpPool, Outbound};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use std::pin::Pin;
@@ -17,6 +18,8 @@ pub struct PassRequest {
     pub auth_value: String,
     pub content_type: Option<String>,
     pub body: Bytes,
+    pub proxy_url: Option<String>,
+    pub extra_headers: Vec<(String, String)>,
 }
 
 pub enum PassResponse {
@@ -32,22 +35,24 @@ pub enum PassResponse {
 
 #[derive(Clone)]
 pub struct PassUpstream {
-    http: reqwest::Client,
+    http: HttpPool,
 }
 
 impl PassUpstream {
     pub fn new() -> Result<Self, UpstreamError> {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| UpstreamError::Build(e.to_string()))?;
-        Ok(Self { http })
+        Ok(Self {
+            http: HttpPool::new()?,
+        })
     }
 
     pub async fn forward(&self, req: PassRequest) -> Result<PassResponse, UpstreamError> {
+        let outbound = Outbound {
+            proxy_url: req.proxy_url,
+            extra_headers: req.extra_headers,
+        };
         let mut builder = self
             .http
-            .request(req.method, req.url)
+            .request(&outbound, req.method, req.url)?
             .timeout(PASS_TIMEOUT)
             .header(req.auth_header.as_str(), req.auth_value.as_str());
         if let Some(ct) = &req.content_type {

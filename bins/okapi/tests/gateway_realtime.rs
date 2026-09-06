@@ -313,6 +313,24 @@ async fn realtime_conn_limit_rejects_fifth() {
     }
 }
 
+/// 缺 `?model=`：握手前就被 `Query` 提取器拒绝，且回的是 error_code JSON 壳而不是
+/// axum 缺省的英文纯文本（i18n 红线，与 console 的 400 同一契约）。
+#[tokio::test]
+async fn realtime_without_model_is_rejected_with_error_code() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/v1/realtime", env.gateway))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.expect("400 应是 JSON 壳，不是纯文本");
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert_eq!(body["error"]["param"], "query");
+}
+
 /// OpenAI 客户端子协议鉴权：无 Authorization 头，凭 openai-insecure-api-key.* 握手成功。
 #[tokio::test]
 async fn realtime_subprotocol_auth_works() {

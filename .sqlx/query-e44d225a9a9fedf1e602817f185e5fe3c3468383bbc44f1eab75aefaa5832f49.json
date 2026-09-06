@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT used_micro, last_used_at FROM api_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "used_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "used_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "last_used_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "last_used_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "e44d225a9a9fedf1e602817f185e5fe3c3468383bbc44f1eab75aefaa5832f49"
+}

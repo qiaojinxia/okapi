@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { ErrorState } from '@/components/ui/state'
 import { Label } from '@/components/ui/input'
+import { SearchInput } from '@/components/ui/search-input'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -28,6 +30,7 @@ export function ModelPicker({
   onChange: (models: string[]) => void
 }) {
   const { t } = useTranslation()
+  const [search, setSearch] = useState('')
   const models = useQuery({
     queryKey: qk.adminModels,
     queryFn: () => apiFetch<{ data: PickerModel[] }>('/admin/models'),
@@ -43,6 +46,7 @@ export function ModelPicker({
 
   const groups = new Map<string, PickerModel[]>()
   for (const m of models.data?.data ?? []) {
+    if (!`${m.model_name} ${m.vendor ?? ''}`.toLowerCase().includes(search.trim().toLowerCase())) continue
     const key = m.vendor ?? ''
     const list = groups.get(key) ?? []
     list.push(m)
@@ -61,9 +65,10 @@ export function ModelPicker({
   return (
     <div className="flex flex-col gap-2">
       <Label>{t('admin:pickModels')}</Label>
+      <SearchInput value={search} onChange={setSearch} placeholder={t('catalog:searchPlaceholder')} aria-label={t('admin:pickModels')} />
       <div className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-md border border-border p-2">
         {ordered.length === 0 ? (
-          <span className="text-xs text-muted-foreground">{t('admin:pickModelsEmpty')}</span>
+          <span className="text-xs text-muted-foreground">{t(models.isPending ? 'common:loading' : search.trim() ? 'common:noResults' : 'admin:pickModelsEmpty')}</span>
         ) : (
           ordered.map(([vendor, list]) => (
             <div key={vendor || 'other'} className="flex flex-col gap-1">

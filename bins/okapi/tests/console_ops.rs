@@ -496,9 +496,10 @@ async fn settings_get_and_leaderboard() {
 
     // 排行榜：灌一笔大额结算（共享 CH 有海量历史测试用户，小额挤不进榜）
     let big = okapi_ledger::SettlementInput {
-        dimensions: Default::default(),
+        dimensions: okapi_ledger::pg::UsageDimensions::default(),
         request_id: Uuid::new_v4(),
         log_type: 2,
+        pool: okapi_ledger::Pool::Wallet,
         user_id: env.user_id,
         api_key_id: 0,
         group_code: "default",

@@ -162,6 +162,204 @@ async fn get(addr: SocketAddr, path: &str, token: &str) -> (u16, Value) {
 }
 
 #[tokio::test]
+async fn price_group_pagination_matches_database_pages() {
+    let env = setup().await;
+    let all = okapi_store::listing::list_groups(&env.pg, okapi_store::listing::Slice::ALL)
+        .await
+        .unwrap();
+    for (limit, offset) in [(20, 0), (20, 20), (99999, 0), (20, all.data.len())] {
+        let (status, body) = get(
+            env.console,
+            &format!("/admin/groups?limit={limit}&offset={offset}"),
+            &env.admin_token,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["total"], all.total, "每一页必须返回真实总数");
+        let actual: Vec<&str> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["group_code"].as_str().unwrap())
+            .collect();
+        let expected: Vec<&str> = all
+            .data
+            .iter()
+            .skip(offset)
+            .take(limit.min(200))
+            .map(|row| row.group_code.as_str())
+            .collect();
+        assert_eq!(actual, expected, "数据库分页必须稳定排序、不漏行、不重复");
+    }
+}
+
+#[tokio::test]
+// 查询串解析失败必须走 AppError：axum 缺省的 text/plain 英文句子违反 i18n 红线
+async fn malformed_query_string_is_rejected_as_error_code() {
+    let env = setup().await;
+    let (status, body) = get(env.console, "/admin/groups?limit=abc", &env.admin_token).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert_eq!(body["error"]["param"], "query");
+    assert_eq!(
+        body["error"]["message"], "bad_request",
+        "message 只放 error_code，不带自然语言"
+    );
+    // 其他接入 Query 的列表同样：兑换码 batch 非 uuid、用户 offset 非整数
+    for path in [
+        "/admin/redemptions?batch=not-a-uuid",
+        "/admin/users?offset=1.5",
+    ] {
+        let (status, body) = get(env.console, path, &env.admin_token).await;
+        assert_eq!(status, 400, "{path}");
+        assert_eq!(body["error"]["code"], "bad_request", "{path}");
+    }
+}
+
+#[tokio::test]
+// azure 渠道的写入校验（§11.29）：协议白名单、必填资源端点、api_version 形状；
+// 改渠道时清空地址 / api_version 写错同样拦在管理面，不让坏配置流到热路径才 404。
+async fn azure_channel_write_validation() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let base = json!({
+        "name": format!("az-{}", env.suffix), "credential": "k", "models": [env.model],
+    });
+    let with = |extra: Value| {
+        let mut b = base.clone();
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+
+    // 协议不在白名单
+    let (status, body) = post(with(
+        json!({"provider": "bogus", "api_base": "https://x.example"}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "provider");
+    // azure 缺资源端点
+    let (status, body) = post(with(json!({"provider": "azure", "api_base": "  "}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+    // api_version 形状不对
+    let (status, body) = post(with(json!({
+        "provider": "azure", "api_base": "https://r.openai.azure.com",
+        "settings": {"api_version": "latest"}
+    })))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_version");
+    // 合法：日期版 / 预览版都收
+    let (status, body) = post(with(json!({
+        "provider": "azure", "api_base": "https://r.openai.azure.com/openai",
+        "settings": {"api_version": "2025-01-01-preview"}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["channel_id"].as_i64().unwrap();
+
+    // 改渠道：清空地址被拦；改 api_version 走同一校验；合法改动放行
+    let patch_path = format!("/admin/channels/{id}");
+    let patch = |body: Value| {
+        req(
+            reqwest::Method::PATCH,
+            env.console,
+            &patch_path,
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let (status, body) = patch(json!({"api_base": ""})).await;
+    assert_eq!(
+        status, 400,
+        "azure 渠道不能失去端点（SSRF 校验先拦下空地址）"
+    );
+    assert_eq!(body["error"]["param"], "api_base_scheme");
+    let (status, body) = patch(json!({"settings": {"api_version": "2024-10"}})).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_version");
+    let (status, _) = patch(json!({"settings": {"api_version": "2024-10-21"}})).await;
+    assert_eq!(status, 200);
+    let stored = sqlx::query_scalar!(
+        r#"SELECT settings ->> 'api_version' FROM channels WHERE id = $1"#,
+        id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some("2024-10-21"));
+}
+
+#[tokio::test]
+async fn outbound_settings_write_validation() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let base = json!({
+        "name": format!("ob-{}", env.suffix),
+        "provider": "openai",
+        "api_base": "https://api.openai.com/v1",
+        "credential": "k",
+        "models": [env.model],
+    });
+    let with = |extra: Value| {
+        let mut b = base.clone();
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+
+    let (status, body) = post(with(json!({"settings": {"proxy_url": "ftp://x"}}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "proxy_url");
+    let (status, body) = post(with(
+        json!({"settings": {"extra_headers": {"Authorization": "x"}}}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "extra_headers");
+    let (status, body) = post(with(json!({
+        "settings": {
+            "proxy_url": "socks5://127.0.0.1:1080",
+            "extra_headers": {"OpenAI-Organization": "org-1"}
+        }
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post(with(
+        json!({"settings": {"inject_request_fields": {"model": "x"}}}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "inject_request_fields");
+    let (status, body) = post(with(json!({
+        "name": format!("ob-inj-{}", env.suffix),
+        "settings": {"inject_request_fields": {"temperature": 0.2}}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test]
 // 接口清单逐资源验收，一体断言便于对照 §11.6
 #[allow(clippy::too_many_lines)]
 async fn admin_list_surface_covers_every_resource() {
@@ -201,6 +399,67 @@ async fn admin_list_surface_covers_every_resource() {
     assert_eq!(g["pool_code"], "default");
     assert_eq!(g["self_select"], false);
     assert!(g["channel_count"].as_i64().unwrap() >= 0);
+    // 配置类列表：不传 limit 回全量并附 total；传了按 offset 切片，total 不变
+    let total = body["total"].as_i64().expect("列表必须附 total");
+    assert!(total >= 2, "至少 default 组 + 测试组");
+    let (status, page) = get(env.console, "/admin/groups?limit=1&offset=1", t).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        page["data"].as_array().unwrap().len(),
+        1,
+        "limit=1 只回一条"
+    );
+    assert!(page["total"].as_i64().unwrap() >= 2, "切片不改变总数");
+
+    // ---- 渠道列表：关键词 + 协议过滤 + 过滤集内启用数；切片越界回空但 total 不变 ----
+    let mine = format!("mg-ch-{}", env.suffix);
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/channels?q={mine}&provider=openai"),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["enabled"], 1);
+    assert_eq!(body["data"][0]["id"], env.channel_id);
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/channels?q={mine}&provider=anthropic"),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 0);
+    assert!(body["data"].as_array().unwrap().is_empty());
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/channels?q={mine}&limit=1&offset=1"),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        body["data"].as_array().unwrap().is_empty(),
+        "offset 越界回空页"
+    );
+    assert_eq!(body["total"], 1, "但 total 仍是过滤集总数");
+
+    // ---- 模型列表：关键词 + 只看未定价（测试模型已定价，不该出现在未定价视图）----
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/models?q={}&unpriced=true", env.model),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["unpriced"], 0);
+    let (status, body) = get(env.console, &format!("/admin/models?q={}", env.model), t).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["unpriced"], 0);
+    assert_eq!(body["data"][0]["model_name"], env.model.as_str());
 
     // ---- 令牌列表：管理员跨用户 + 按用户过滤 + 只回前缀 ----
     let (status, body) = get(
@@ -307,7 +566,6 @@ async fn admin_list_surface_covers_every_resource() {
         .execute(&env.pg)
         .await
         .unwrap();
-
 }
 
 #[tokio::test]
