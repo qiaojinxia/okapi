@@ -553,6 +553,278 @@ test('角色抽屉：权限点来自后端清单、整组切换、无权限不�
   expect(deletes).toEqual(['/admin/roles/ops_readonly'])
 })
 
+test('价格分组抽屉：倍率按字符串提交、池从后端清单选、自选开关落体；编辑态分组码只读；内置默认组不可删', async ({ page }) => {
+  await prepare(page)
+  const posts: Json[] = []
+  const groups = [
+    { group_code: 'default', group_ratio: '1', description: null, is_default: true, user_count: 12, channel_count: 3, pool_code: 'default', self_select: false },
+    { group_code: 'vip', group_ratio: '0.8', description: 'VIP', is_default: false, user_count: 2, channel_count: 1, pool_code: 'premium', self_select: true },
+  ]
+  await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { data: groups, total: groups.length } }))
+  await page.route('**/admin/groups', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/pools', (route) =>
+    route.fulfill({ json: { data: [{ pool_code: 'default' }, { pool_code: 'premium' }] } }),
+  )
+  // 抽屉里"选了池就地看可达"的详情：members / models / groups 三个数组必须在
+  await page.route('**/admin/pools/*', (route) => {
+    const code = decodeURIComponent(new URL(route.request().url()).pathname.split('/').pop() ?? '')
+    return route.fulfill({
+      json: {
+        pool_code: code, description: null, routing_strategy: 'weighted', fallback_pool_code: null,
+        members: [{ channel_id: 1, name: 'openai-main', provider: 'openai', status: 1, priority: 0, priority_override: null, weight_override: null, models: ['gpt-5'], active_keys: 1 }],
+        models: ['gpt-5'], groups: [code === 'premium' ? 'vip' : 'default'],
+      },
+    })
+  })
+
+  await page.goto('/admin/groups')
+  // 内置默认组的删除按钮禁用：删掉它等于把没配分组的用户全体断供
+  await expect(
+    page.getByRole('row').filter({ hasText: 'default' }).first().getByRole('button', { name: '删除', exact: true }),
+  ).toBeDisabled()
+
+  await page.getByRole('row').filter({ hasText: 'vip' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const edit = page.getByRole('dialog')
+  await expect(edit.getByRole('heading', { name: '编辑 vip' })).toBeVisible()
+  await expect(edit.locator('#g-code')).toHaveAttribute('readonly', '')
+  await expect(edit.locator('#g-ratio')).toHaveValue('0.8')
+  await expect(edit.locator('#g-pool')).toHaveValue('premium')
+  await expect(edit.getByRole('switch', { name: '允许用户自选此分组' })).toBeChecked()
+  await edit.locator('#g-ratio').fill(' 0.75 ')
+  await edit.locator('#g-desc').fill(' VIP tier ')
+  await edit.locator('#g-pool').selectOption('default')
+  await edit.getByRole('switch', { name: '允许用户自选此分组' }).click()
+  const saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
+  await edit.getByRole('button', { name: '保存', exact: true }).click()
+  await saved
+  await expect(edit).toBeHidden()
+  expect(posts).toEqual([
+    { group_code: 'vip', group_ratio: '0.75', description: 'VIP tier', pool_code: 'default', self_select: false },
+  ])
+
+  // 新建：分组码为空不放行；缺省倍率 1、缺省池 default、不可自选
+  await page.getByRole('button', { name: '新建分组' }).click()
+  const create = page.getByRole('dialog')
+  const save = create.getByRole('button', { name: '保存', exact: true })
+  await expect(save).toBeDisabled()
+  await create.locator('#g-code').fill('team-a')
+  await expect(create.locator('#g-ratio')).toHaveValue('1')
+  await expect(create.locator('#g-pool')).toHaveValue('default')
+  const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
+  await save.click()
+  await created
+  expect(posts[1]).toEqual({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false })
+})
+
+test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro，空范围不发键，时段星期勾选排序；列表上下线与删除提示需发布', async ({ page }) => {
+  await prepare(page)
+  const posts: Json[] = []
+  const toggles: { path: string; body: Json }[] = []
+  const deletes: string[] = []
+  const rules = [{
+    rule_code: 'night-discount', rule_type: 'time_based', priority: 5, enabled: true, valid_from: null, valid_to: null,
+    scope: { groups: ['vip'] },
+    params: { multiplier: '0.5', start_minute: 0, end_minute: 359, weekdays: [1, 5], stacking_mode: 'exclusive' },
+  }]
+  await page.route('**/admin/pricing/rules?*', (route) => route.fulfill({ json: { data: rules, total: 1 } }))
+  await page.route('**/admin/pricing/rules', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route(/\/admin\/pricing\/rules\/[^/?]+(\/toggle)?$/, async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (request.method() === 'POST') toggles.push({ path, body: request.postDataJSON() as Json })
+    else if (request.method() === 'DELETE') deletes.push(path)
+    else return route.fallback()
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/rules')
+  // 编辑既有时段规则：类型 / 参数 / 星期 / 范围全部回填，code 锁定
+  await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const edit = page.getByRole('dialog')
+  await expect(edit.getByRole('heading', { name: '编辑规则 night-discount' })).toBeVisible()
+  await expect(edit.locator('#r-code')).toBeDisabled()
+  await expect(edit.locator('#r-type')).toHaveValue('time_based')
+  await expect(edit.locator('#r-mult')).toHaveValue('0.5')
+  await expect(edit.locator('#r-start')).toHaveValue('0')
+  await expect(edit.locator('#r-end')).toHaveValue('359')
+  await expect(edit.getByRole('checkbox', { name: '一', exact: true })).toBeChecked()
+  await expect(edit.getByRole('checkbox', { name: '五', exact: true })).toBeChecked()
+  await expect(edit.locator('#r-stacking')).toHaveValue('exclusive')
+  // 再勾周六：提交时按升序
+  await edit.getByRole('checkbox', { name: '六', exact: true }).check()
+  await edit.locator('#r-end').fill('420')
+  let saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pricing/rules'))
+  await edit.getByRole('button', { name: '保存', exact: true }).click()
+  await saved
+  await expect(edit).toBeHidden()
+  expect(posts[0]).toEqual({
+    rule_code: 'night-discount',
+    rule_type: 'time_based',
+    multiplier: '0.5',
+    priority: 5,
+    stacking_mode: 'exclusive',
+    start_minute: 0,
+    end_minute: 420,
+    weekdays: [1, 5, 6],
+    scope: { groups: ['vip'] },
+  })
+  expect('min_monthly_tokens' in posts[0] || 'min_monthly_spend_micro' in posts[0]).toBe(false)
+
+  // 新建阶梯量规则：阈值 USD → micro；时段字段不发；空范围三键都不发
+  await page.getByRole('button', { name: '新建规则' }).click()
+  const create = page.getByRole('dialog')
+  await create.locator('#r-type').selectOption('volume')
+  await create.locator('#r-code').fill('heavy-users')
+  await create.locator('#r-mult').fill('0.85')
+  await create.locator('#r-thr').fill('1000000')
+  await create.locator('#r-spend').fill('49.99')
+  await create.locator('#r-stacking').selectOption('best_for_user')
+  await expect(create.locator('#r-start')).toHaveCount(0)
+  saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pricing/rules'))
+  await create.getByRole('button', { name: '保存', exact: true }).click()
+  await saved
+  expect(posts[1]).toEqual({
+    rule_code: 'heavy-users',
+    rule_type: 'volume',
+    multiplier: '0.85',
+    priority: 0,
+    stacking_mode: 'best_for_user',
+    min_monthly_tokens: 1_000_000,
+    min_monthly_spend_micro: 49_990_000,
+    scope: {},
+  })
+
+  // 列表：上下线打 toggle 端点并提示需发布；删除经确认框
+  const toggled = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/toggle'))
+  await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '停用', exact: true }).click()
+  await toggled
+  // 前面两次保存也各弹过一次"需发布"，取最新的一条即可
+  await expect(page.getByRole('status').filter({ hasText: '需发布定价 epoch' }).last()).toBeVisible()
+  expect(toggles).toEqual([{ path: '/admin/pricing/rules/night-discount/toggle', body: { enabled: false } }])
+  await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '删除', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('删除 night-discount？')
+  const removed = page.waitForRequest((r) => r.method() === 'DELETE' && r.url().includes('/admin/pricing/rules/'))
+  await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await removed
+  expect(deletes).toEqual(['/admin/pricing/rules/night-discount'])
+})
+
+test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、端口越界归零、未保存前测试按钮禁用、测试信按已保存配置发', async ({ page }) => {
+  await prepare(page)
+  const writes: Json[] = []
+  const tests: Json[] = []
+  let saved: Json | null = null
+  await page.route('**/admin/settings/smtp', (route) => route.fulfill({ json: { value: saved } }))
+  await page.route('**/admin/settings/smtp/test', async (route) => {
+    tests.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
+    const body = route.request().postDataJSON() as { key: string; value: Json }
+    writes.push(body)
+    if (body.key === 'smtp') saved = body.value
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/settings')
+  await page.getByRole('tab', { name: '邮件（SMTP）' }).click()
+  const panel = page.getByRole('tabpanel')
+  const save = panel.getByRole('button', { name: '保存', exact: true })
+  const send = panel.getByRole('button', { name: '发送测试邮件' })
+  await expect(save).toBeDisabled()
+  await expect(panel.getByText('先保存主机与发件地址')).toBeVisible()
+  await expect(send).toBeDisabled()
+
+  await panel.locator('#smtp-host').fill('  smtp.example.com ')
+  await panel.locator('#smtp-port').fill('70000')
+  await expect(panel.locator('#smtp-port')).toHaveValue('', { timeout: 2_000 })
+  await panel.locator('#smtp-port').fill('465')
+  await panel.getByRole('button', { name: '隐式 TLS', exact: true }).click()
+  await panel.locator('#smtp-user').fill(' mailer ')
+  await panel.locator('#smtp-pass').fill('s3cret')
+  await panel.locator('#smtp-from').fill(' no-reply@example.com ')
+  await panel.locator('#smtp-from-name').fill(' Okapi ')
+  await panel.locator('#smtp-reply-to').fill('   ')
+  const wrote = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/settings'))
+  await save.click()
+  await wrote
+  await expect(page.getByRole('status').filter({ hasText: 'SMTP 设置已保存' })).toBeVisible()
+  expect(writes).toEqual([{
+    key: 'smtp',
+    value: {
+      host: 'smtp.example.com', port: 465, security: 'tls', username: 'mailer', password: 's3cret',
+      from_address: 'no-reply@example.com', from_name: 'Okapi', reply_to: null,
+    },
+  }])
+
+  // 保存后草稿清空、回显来自单键接口；测试信只能按已保存配置发，且收件人要像邮箱
+  await expect(save).toBeDisabled()
+  await expect(panel.locator('#smtp-host')).toHaveValue('smtp.example.com')
+  await expect(panel.getByText('用已保存的配置发一封测试信')).toBeVisible()
+  await panel.locator('#smtp-test-to').fill('not-mail')
+  await expect(send).toBeDisabled()
+  await panel.locator('#smtp-test-to').fill('me@example.com')
+  const tested = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/smtp/test'))
+  await send.click()
+  await tested
+  await expect(page.getByRole('status').filter({ hasText: '测试邮件已发送至 me@example.com' })).toBeVisible()
+  expect(tests).toEqual([{ to: 'me@example.com', lang: 'zh-CN' }])
+  // 有未保存草稿时不许发测试信：测的是已保存配置，发了也是误导
+  await panel.locator('#smtp-from-name').fill('Okapi Ops')
+  await expect(send).toBeDisabled()
+})
+
+test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位不放行，错码显示错误并可重试，确认后进入已开启态；无会话时降级提示', async ({ page }) => {
+  await prepare(page, { permissions: [] })
+  const confirms: Json[] = []
+  await page.route('**/auth/totp/enroll', (route) =>
+    route.fulfill({ json: { otpauth_url: 'otpauth://totp/Okapi:alice?secret=JBSWY3DPEHPK3PXP&issuer=Okapi', pending: 'pending-blob' } }),
+  )
+  await page.route('**/auth/totp/confirm', async (route) => {
+    const body = route.request().postDataJSON() as { pending: string; code: string }
+    confirms.push(body)
+    if (body.code === '000000') await route.fulfill(apiError(400, 'totp_invalid'))
+    else await route.fulfill({ json: { enabled: true } })
+  })
+
+  await page.goto('/portal/security')
+  await page.getByRole('button', { name: '开始绑定' }).click()
+  await expect(page.getByText('otpauth://totp/Okapi:alice?secret=JBSWY3DPEHPK3PXP&issuer=Okapi')).toBeVisible()
+  const code = page.locator('#code')
+  const confirm = page.getByRole('button', { name: '确认开启' })
+  await code.fill('12345')
+  await expect(confirm).toBeDisabled()
+  await code.fill('000000')
+  await confirm.click()
+  await expect(page.getByText('两步验证码错误')).toBeVisible()
+  await code.fill('654321')
+  await confirm.click()
+  // 成功态：卡片切成"已开启"提示（toast 也叫这个名，故按提示正文断言）
+  await expect(page.getByText('下次邮箱密码登录时将要求输入验证器上的 6 位数字。')).toBeVisible()
+  await expect(code).toHaveCount(0)
+  expect(confirms).toEqual([
+    { pending: 'pending-blob', code: '000000' },
+    { pending: 'pending-blob', code: '654321' },
+  ])
+
+  // API Key 单轨登录没有会话 cookie：后端 401 → 引导改用邮箱密码登录，而不是留一个哑按钮
+  await page.route('**/auth/totp/enroll', (route) => route.fulfill(apiError(401, 'unauthorized')))
+  await page.reload()
+  await page.getByRole('button', { name: '开始绑定' }).click()
+  await expect(page.getByText(/两步验证需邮箱密码登录/)).toBeVisible()
+  await expect(page.getByRole('button', { name: '开始绑定' })).toHaveCount(0)
+})
+
 test('重置密码：缺 token 直接提示无效；长度与一致性校验挡在提交前；成功回登录页；失效 token 提示重新申请', async ({ page }) => {
   await prepare(page, { signedIn: false })
   const posts: Json[] = []

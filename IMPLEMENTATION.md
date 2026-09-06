@@ -2058,7 +2058,7 @@ reverse_proxy okapi-gateway:8080 {
 
 SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE 排水（上限 5min）→ flush PG/CH 批写与 outbox → 退出。
 
-**【实现状态 2026-09-06】** 三角色共用 `shutdown::signal()`，SIGINT / SIGTERM 均触发（此前只听 Ctrl-C，容器 stop 发的 SIGTERM 会把进程直接掐死，`gateway_shutdown` 用例取证后修正）。gateway / console 走 `axum::serve(..).with_graceful_shutdown`：收到信号即关监听（新连接被拒，等价于 readiness 翻假）、在途连接排到自然结束；SSE 排水**未设 5min 上限**，交给编排层 `terminationGracePeriodSeconds` 兜底。gateway 在连接排完后再等后台结算归零（`shutdown::Pending`，chat 流式 / 非流式两条"响应先行、结算后台"路径经它计数；上限 30s，超时告警交对账）——不等这一步，最后一批请求只剩 Redis 预扣、要靠 sweep 才能收口。worker 的定时循环在同一信号上退出；`okapi all` 三角色一起返回。验收：`bins/okapi/tests/gateway_shutdown.rs`（真实二进制 + SIGTERM：首块后发信号，流完整到 `[DONE]`、新连接被拒、退出码 0、账已 committed 且无悬置预扣）。
+**【实现状态 2026-09-06】** 三角色共用 `shutdown::signal()`，SIGINT / SIGTERM 均触发（此前只听 Ctrl-C，容器 stop 发的 SIGTERM 会把进程直接掐死，`gateway_shutdown` 用例取证后修正）。gateway / console 走 `axum::serve(..).with_graceful_shutdown`：收到信号即关监听（新连接被拒，等价于 readiness 翻假）、在途连接排到自然结束；SSE 排水**未设 5min 上限**，交给编排层兜底：`deploy/k8s/okapi.yaml` gateway `terminationGracePeriodSeconds: 330`、`deploy/docker-compose.yml` 应用服务 `stop_grace_period: 5m30s`（5min 排水 + 30s 结算），`scripts/guard-deploy-manifests.py` 守着这两个值不被改小。gateway 在连接排完后再等后台结算归零（`shutdown::Pending`，chat 流式 / 非流式两条"响应先行、结算后台"路径经它计数；上限 30s，超时告警交对账）——不等这一步，最后一批请求只剩 Redis 预扣、要靠 sweep 才能收口。worker 的定时循环在同一信号上退出；`okapi all` 三角色一起返回。验收：`bins/okapi/tests/gateway_shutdown.rs`（真实二进制 + SIGTERM：首块后发信号，流完整到 `[DONE]`、新连接被拒、退出码 0、账已 committed 且无悬置预扣）。
 
 ### 14.4 入口硬化
 

@@ -24,12 +24,12 @@
 
 | 层 | 内容 | 命令 | 依赖 |
 | --- | --- | --- | --- |
-| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources）、前端 tsc / oxlint、四道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py` | 无 |
+| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources）、前端 tsc / oxlint、五道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py` | 部署模板守卫需 PyYAML 或系统 ruby |
 | L1 单元 / 性质 | crate 内 `#[cfg(test)]` 与 `crates/*/tests`（pricing 对拍 + proptest、providers 转换 parity、ledger Lua 契约） | `cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger -p okapi-providers -p okapi-api -p okapi-store` | ledger 契约需 Redis；store 部分用例需 PG |
 | L2 集成 | `bins/okapi/tests/*.rs` 71 个套件（gateway / console / worker / migrate） | `cargo test --workspace --no-fail-fast` | 四容器；CH / NATS 缺失时相关套件自跳过 |
 | L3 前端交互 e2e | 构建产物 + 接口桩，不碰数据库 | `cd frontend && pnpm test:interactions`（= `pnpm build` + `playwright test -c playwright.interactions.config.ts`） | 无（自起 vite preview :4175） |
 | L4 前端冒烟 e2e | 打真实 console（API + SPA 同源），注册真实用户；管理端用例需演示超管（`scripts/dev-reset.sh` 灌注），缺则跳过 | `CARGO_TARGET_DIR=target cargo build --bin okapi && cd frontend && pnpm build && pnpm exec playwright test -c playwright.config.ts smoke.spec.ts` | 四容器 + `target/debug/okapi` + `frontend/dist` |
-| L5 单机形态冒烟 | `okapi all` 一进程三角色：双 healthz、root key 引导、SPA 可达、数据面 fail-closed | `bash scripts/smoke-all.sh` | 四容器；占用 :8080 / :8081 |
+| L5 部署形态 | `okapi all` 一进程三角色：双 healthz、root key 引导、SPA 可达、数据面 fail-closed；embed-web 发布形态：模板守卫 + `--features embed-web` 构建 + 无 dist 目录起 console 服出首页 / 哈希资源 / SPA 深链 / API 不受影响 | `bash scripts/smoke-all.sh` · `bash scripts/verify-deploy.sh` | 四容器；smoke-all 占用 :8080 / :8081；verify-deploy 独立 target 目录 `target/embed-web`，首次约 1 分钟 |
 | L6 性能 | loadgen 缩尺 / Linux 容器复测 | `cargo run --release --example loadgen -- ...`、`scripts/linux-bench.sh`（见 `docs/perf-report.md`） | 独占机器，按需 |
 
 注意事项：
@@ -125,7 +125,11 @@
 | 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案 | `write-forms.spec`（1 例，09-06 新增） | TOTP 绑定流程仍无 e2e |
 | 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | 删除套餐无 e2e |
 | 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案 | `write-forms.spec`（1 例，09-06 第四轮） | — |
-| 池 / 分组 / 规则 / 团队 / SMTP | `/admin/pools`, `/admin/groups`, `/admin/rules`, `/portal/teams`, 设置 SMTP 卡 | — | `screenshots.spec` 非断言 | **写操作表单无 e2e**：分组 / 池 / 规则、团队建团与成员、SMTP 卡 |
+| 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达、自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default | `write-forms.spec`（1 例，09-06 第六轮） | — |
+| 计费规则抽屉与列表 | `/admin/rules` | 编辑态四类字段回填与 code 锁定、按类型只发该类型字段、阈值 USD → micro、星期勾选升序、空范围不发键、上下线打 toggle 且提示需发布、删除经确认框 | `write-forms.spec`（1 例，09-06 第六轮） | — |
+| 设置 SMTP 卡 | `/admin/settings` 邮件页签 | 单键回显、去空格、`reply_to` 空转 null、端口越界归零、加密方式分段、未保存前测试禁用、测试信按已保存配置发且收件人须含 @、有草稿时禁发 | `write-forms.spec`（1 例，09-06 第六轮） | — |
+| TOTP 绑定 | `/portal/security` | 开始绑定拿 otpauth / pending、码不足 6 位禁用、错码 `totp_invalid` 文案可重试、成功切已开启态、无会话 401 降级提示 | `write-forms.spec`（1 例，09-06 第六轮） | — |
+| 池 / 团队 | `/admin/pools`, `/portal/teams` | — | `screenshots.spec` 非断言 | **写操作表单无 e2e**：池抽屉与成员覆盖、团队建团 / 成员 / 发 key |
 | i18n | 全站 | 裸文案零、双语言包键对齐 | `guard-i18n.sh`、`guard-i18n-keys.py`；e2e 断言同时匹配中英正则 | 后端错误码是否全部有 `errors` 命名空间映射：靠 `guard-i18n-keys.py` 的引用键检查，未反向核对后端 `codes::*` 全集 |
 
 ### 2.6 部署与性能
@@ -133,18 +137,19 @@
 | 项 | 维度 | 覆盖 | 缺口 / 备注 |
 | --- | --- | --- | --- |
 | `okapi all` 单机形态 | I | `scripts/smoke-all.sh` 四断言 | — |
-| embed-web 发布构建（`deploy/Dockerfile`） | I | 手工 | 无自动化构建校验 |
-| compose 双 profile / k8s manifests / Nginx SSE 模板 | I | 手工 | 无自动化 |
+| embed-web 发布构建（`deploy/Dockerfile` 的运行时前提） | I | `scripts/verify-deploy.sh`（09-06 第六轮）：`--features embed-web` 构建；在没有 `frontend/dist` 的目录起 console，首页、`/assets/*.js`（text/javascript）、`/admin/users` 深链（Accept: text/html）都从二进制服出，同路径 JSON 请求仍是 API 401 | Docker 镜像本身的构建（多阶段 Dockerfile）未在本机跑 |
+| compose 双 profile / k8s manifests | I | `scripts/guard-deploy-manifests.py`（09-06 第六轮）：文档结构、Service selector ↔ Deployment、容器 image / resources、对外容器 `/healthz` readinessProbe、gateway `terminationGracePeriodSeconds` 与应用服务 `stop_grace_period` ≥ 330s（§14.3 排水口径）、Σ(副本上限 × OKAPI_PG_POOL) ≤ 200、依赖镜像来源与 healthcheck | 无 kubectl / compose 插件，不做 schema 级校验 |
+| Nginx SSE 模板 | I | 手工 | — |
 | 缩尺压测 / Linux 复测 | G | `docs/perf-report.md`（2026-08-30） | 裸金属正式复测、10 万 SSE 整数口径待办 |
 
 ## 3. 覆盖缺口清单（按风险排序）
 
 1. ~~PG 记账不幂等~~ **已修**（09-06 第五轮）：`docs/database.md` §1.5 定案「每 request_id 恰一行」，`record_settlement` 事务开头 `SELECT EXISTS` 幂等闸，重放整笔跳过并告警；`pg_settlement::replaying_a_settled_request_writes_nothing` 钉住。ledger 的 Lua 与 PG 契约至此都有直测。
-2. **前端写操作表单 e2e 尚未收口**：09-06 四轮补了渠道抽屉行为页签、会话吊销卡、忘记 / 重置密码页、用户抽屉、模型定价抽屉、套餐抽屉、角色抽屉；仍缺分组 / 池 / 规则、团队、TOTP 绑定、SMTP 卡、渠道抽屉另三个页签、各页删除动作。
+2. **前端写操作表单 e2e 接近收口**：09-06 六轮补了渠道抽屉行为页签、会话吊销卡、忘记 / 重置密码页、用户抽屉、模型定价抽屉、套餐抽屉、角色抽屉、价格分组抽屉、计费规则抽屉与列表、SMTP 卡、TOTP 绑定；仍缺池抽屉与成员覆盖、团队建团 / 成员 / 发 key、渠道抽屉另三个页签。
 3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁按 §4.3 定案不适用于当前 static_key 主线。剩余：SSE 排水无 5min 上限（依赖编排层 grace period）。
 4. ~~mid-stream 断流语义无专项用例~~ **已补**（09-06 第三轮，`gateway_midstream`）。
 5. **集成测试共享一条 `billing_outbox` 队列**：任一用例的行都可能被别的测试进程 drain 进 CH，因此「drain 后直接读 CH 并断言」天然有竞态。现行约定是走 `poll_until` 且谓词覆盖全部待断言字段（09-06 修了两处漏网的）；新增 CH 用例须照此写，或改为按 user_id 隔离的 drain。
-6. 部署形态（embed-web 构建、compose / k8s）与性能维度不在常规回归。
+6. ~~部署形态不在常规回归~~ **已补**（09-06 第六轮，`verify-deploy.sh` + `guard-deploy-manifests.py`）。剩余：性能维度仍按需执行；Docker 多阶段镜像构建未在本机验证。
 7. OAuth 仅单一 mock IdP；Turnstile 外呼无 mock；SMTP TLS 形态未覆盖。
 
 ## 4. 执行记录
@@ -229,4 +234,15 @@
 - `crates/okapi-ledger/src/pg.rs`：事务开头 `SELECT EXISTS(... WHERE request_id = $1)`，命中即回滚空事务、`warn!` 记录重放、返回 Ok。每笔结算多一次走 `idx_br_request` 的点查，在后台结算路径且受 `settle_gate` 限流，可接受。
 - `pg_settlement::replaying_a_settled_request_writes_nothing`：重放同一 request_id（金额还故意改成 999_999）后记录仍一行、事件仍一条、outbox 仍一条、快照与 key 用量只动一次，且第一笔的列值原样。
 
-复核：计费三 crate 55 / 55；全量 Rust 97 个测试二进制 447 / 447（结算路径多一次点查未影响任何既有用例）；clippy `-D warnings` 干净；`.sqlx` 重生成。
+复核：计费三 crate 55 / 55；全量 Rust 97 个测试二进制 447 / 447（结算路径多一次点查未影响任何既有用例）；clippy `-D warnings` 干净；`.sqlx` 重生成。已提交 `02ee40b`。
+
+### 2026-09-06 第六轮：部署形态进回归 + 四块写操作表单
+
+| 新增 | 内容 | 结果 |
+| --- | --- | --- |
+| `scripts/guard-deploy-manifests.py`（第五道守卫） | compose / K8s 结构断言：文档三要素、Service selector 对得上 Deployment、容器 image 与 resources、对外容器 `/healthz` readinessProbe、gateway `terminationGracePeriodSeconds` 与应用服务 `stop_grace_period` ≥ 330s、Σ(副本上限 × OKAPI_PG_POOL) ≤ 200（当前 152）、依赖镜像来源与 healthcheck | 通过（PyYAML 缺失时借系统 ruby 解析） |
+| `scripts/verify-deploy.sh` | 模板守卫 + `cargo build --features embed-web`（独立 `target/embed-web`）+ 在无 `frontend/dist` 的临时目录起 console：首页 / `/assets/*.js` text/javascript / `/admin/users` 深链回 SPA / 同路径 JSON 仍 401 | 通过；首跑约 1 分钟，增量 13s |
+| `deploy/k8s/okapi.yaml`、`deploy/docker-compose.yml` | gateway 加 `terminationGracePeriodSeconds: 330`，应用服务锚点加 `stop_grace_period: 5m30s` | 第三轮让进程真的响应 SIGTERM 之后，编排层缺省的 30s / 10s 宽限期会把排水又变回硬杀——这是那次修复的配套，此前遗漏 |
+| `frontend/e2e/write-forms.spec.ts` +4 | 价格分组抽屉、计费规则抽屉与列表（含 toggle / 删除）、SMTP 卡、TOTP 绑定（含 401 降级） | 4 / 4 通过；分组用例首跑因桩缺 `/admin/pools/{code}` 详情形状触发前端错误边界，补桩后通过——不是产品缺陷，真实接口有该形状 |
+
+复核：interactions 配置 71 / 71；oxlint / tsc 干净；五道守卫全过。

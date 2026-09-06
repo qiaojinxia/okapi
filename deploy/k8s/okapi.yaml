@@ -28,6 +28,9 @@ spec:
     metadata:
       labels: { app: okapi, role: gateway }
     spec:
+      # SIGTERM 后 gateway 关监听、排完在途 SSE（IMPLEMENTATION §14.3 口径 5min）再等后台结算
+      # 落账（≤30s）才退出；K8s 缺省 30s 就 SIGKILL，长流会被掐在半截、账留在 Redis 预扣
+      terminationGracePeriodSeconds: 330
       containers:
         - name: gateway
           image: okapi:latest

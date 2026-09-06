@@ -30,6 +30,8 @@ x-okapi-image: &okapi-image
     context: ..
     dockerfile: deploy/Dockerfile
   restart: unless-stopped
+  # SIGTERM 后排完在途 SSE（§14.3 口径 5min）再等后台结算落账；compose 缺省 10s 就 SIGKILL
+  stop_grace_period: 5m30s
   depends_on:
     postgres:
       condition: service_healthy
