@@ -48,7 +48,7 @@
 | `okapi-domain` | Money newtype、ID newtype、计费状态机、token 计数 | A B | 单元：`money.rs` / `state.rs` / `tokens.rs`；守卫：`guard-no-float.sh` | 状态机转移矩阵穷举在 `state.rs` 单测 |
 | `okapi-pricing` | PriceBook 编译、三层倍率 / 按次 / 阶梯 / 缓存双轴、规则栈、快照 | A B | `parity.rs`（new-api 对拍 fixtures）、`prop.rs`（proptest）、单元 `book/engine/handle/model/ratio/rules`；集成 `gateway_m1`（cache ratio）、`gateway_tier`、`gateway_pricing_rules`、`gateway_model_modifiers`、`console_pricing_write`、`console_import` | — |
 | `okapi-ledger` | Redis Lua reserve / commit / refund / repair / sub_set + PG 同事务记账 + outbox | A B D | crate 级 `tests/lua_contract.rs`（09-06 新增，7 例）：预扣字段四段 / 多退少补 / 重复 commit 与 refund 任意顺序幂等 / `avail == est` 放行、`avail < est` 拒绝且零写入 / 四个 key 级限额各自 which 且拒绝零写入、并发槽随结算释放 / repair 绕开在途、不动另一池、负目标不夹逼 / drain 只取正余额 / 13 步交错序列逐步验证 `avail + Σ在途 == 入账 − Σ实际`；订阅池选池由 `console_subscriptions::lua_pool_contract` 覆盖；crate 级 `tests/pg_settlement.rs`（09-06 第四轮，5 例）：records / events / users 快照 / api_keys 用量 / outbox 五处同事务且四金额列与 pool 三处一致（含 INET 列真落）、第二条语句失败整体回滚、订阅池结算与订阅事件不动钱包快照、失败请求零金额落 error_code、`admin_refund` 只对 committed 生效一次并逐项回冲；集成：`gateway_m1`、`worker_m2`、`worker_reconcile_repair`、`console_ops`、`console_teams`、`gateway_realtime`；第五轮补 `replaying_a_settled_request_writes_nothing`（重放 request_id 五处零写入） | — |
-| `okapi-providers` | openai / anthropic / gemini / azure / custom_pass / responses 客户端，`convert/*` 按方向转换，modifiers / reasoning，`http.rs` 代理与额外头 | A E | `convert_a2o` / `convert_anthropic` / `convert_gemini` / `reasoning_t2c` / `stream_usage`；单元 `azure` / `gemini_to_openai` / `http` / `modifiers` / `reasoning` / `responses`；集成见 2.2 chat 行 | `gemini_to_openai` 只有单元 + `gateway_gemini_ingress` 集成，无独立 parity fixture 文件 |
+| `okapi-providers` | openai / anthropic / gemini / azure / bedrock / vertex / custom_pass / responses 客户端，`convert/*` 按方向转换，modifiers / reasoning，`http.rs` 代理与额外头，`aws_sigv4` / `aws_eventstream`（§11.35） | A E | `convert_a2o` / `convert_anthropic` / `convert_gemini` / `reasoning_t2c` / `stream_usage`；单元 `azure` / `gemini_to_openai` / `http` / `modifiers` / `reasoning` / `responses` / `aws_sigv4`（AWS 官方派生密钥与 get-vanilla 签名向量、会话令牌、凭证形态、路径编码）/ `aws_eventstream`（跨包切帧、坏 prelude、非字符串头跳过）/ `bedrock`（区域解析、InvokeModel 体、chunk 解码、exception 帧）/ `vertex`（publisher 路由、api_base 形状、rawPredict 体、SA 解析、JWT RS256 三段）；集成见 2.2 chat 行 | `gemini_to_openai` 只有单元 + `gateway_gemini_ingress` 集成，无独立 parity fixture 文件 |
 | `okapi-store` | sqlx 查询、迁移、凭证信封 AES-GCM、身份（argon2 / bcrypt 双轨）、分页、CIDR 匹配、CH schema | A C H | 编译期：`.sqlx` 离线校验全部 `query!`；`schema_shape`（迁移形状守卫）、`channel_credential`（密文落库 / 无主密钥 fail-closed）、`console_manage::price_group_pagination_matches_database_pages`、`gateway_ip_allowlist`（netmatch）、`worker_ch`（CH 表与 MV）；单元 `credential` / `identity` / `listing` / `mutate` / `netmatch` / `subscriptions` / `vendor` | — |
 | `okapi-api` | DTO、`AppError` 错误码壳、权限点清单 | A C | 单元 `permissions.rs`；`console_m2::permission_point_matrix`；守卫 `guard-frontend-permissions.py`（前端引用的权限点都在后端清单） | 后端自然语言检查（i18n-audit §3）为人工 `rg` |
 
@@ -59,7 +59,7 @@
 | `auth.rs` | Bearer / x-api-key / x-goog-api-key 鉴权、无效 key 每 IP 限流、key 级 IP 白名单、分组级 `[rpm, rph]`（§11.32，随鉴权缓存下发、全部计费端点 reserve 前检查） | A C | `gateway_invalid_key_rate`、`gateway_ip_allowlist`、`gateway_group_rate`（09-06：同组每用户各自计数、别组不受影响、rph 小时窗、管理面改限额即失效缓存、负数 400、0 归一 null）、`smoke-all.sh`（无凭证 401 fail-closed）、e2e smoke（普通用户管理面 403） | 分组限流只在 chat 路径有集成用例；其余端点共用同一 `check_group_rate`，靠编译期同构 |
 | `clients.rs` | 真实 IP 提取（信任代理 / edge key）、client_type 识别 | A C | 单元；`gateway_ip_allowlist::allowlist_enforced_with_cdn_header_and_peer_fallback`；`console_stats` 客户端分布 | — |
 | `scheduler.rs` + `sched_redis.rs` | 候选筛选、优先级 / 权重、三层粘性、双层并发、key 状态机、RPM、web 会话、关键接口限流 | A C D | `gateway_m2_sched`、`channel_key_lifecycle`、`channel_pools`、`gateway_capabilities`、`gateway_fallback`、`gateway_routing_prefs`、`gateway_retry_policy`、`gateway_multipod`、`gateway_compat::per_model_rpm_limit`、`console_diagnose`、`worker_m2::cooled_keys_recover_after_deadline`、`console_auth_web::sessions_list_and_revoke`；单元 `scheduler.rs` | 多副本只有 2 例（在途计数汇总、路由失效广播）。「双副本并发凭证刷新锁」按 IMPLEMENTATION §4.3 **主线只实现 static_key**、OAuth refresh 留扩展点——当前没有会刷新的凭证类型，该验收项不适用，OAuth 上游落地时再补 |
-| `chat.rs`（+ `openai_dialect` / `extract` / `estimate` / `rule_inputs`） | `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（+ `count_tokens`）、`/v1beta/models/*:generateContent`；SSE 转发器、failover、usage 复核、reasoning 注入、字段剥离 / 注入 | A B D E | `gateway_m1`（流式精确计费、空回复、首字前 failover、余额不足、缓存 ratio、非流式透传）、`gateway_stream_usage`、`gateway_untrusted_usage`、`gateway_reasoning`、`gateway_reasoning_param`、`gateway_model_modifiers`、`gateway_resp_model`、`gateway_tier`、`gateway_pricing_rules`、`gateway_strip_fields`、`gateway_responses`（原生 / 降级 / 404 回退 / 两跳）、`gateway_messages`、`gateway_gemini_ingress`、`gateway_anthropic`、`gateway_gemini`、`gateway_azure`、`gateway_outbound`（代理 + 额外头）、`gateway_upstream_cost`、`gateway_capabilities`、`gateway_midstream`（09-06 新增：首字后上游掐流 → 不同 key 重试、不 failover 到备用渠道、客户端不见 `[DONE]`、按本地估算结算且余额精确收口、无悬置预扣） | — |
+| `chat.rs`（+ `openai_dialect` / `extract` / `estimate` / `rule_inputs`） | `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（+ `count_tokens`）、`/v1beta/models/*:generateContent`；SSE 转发器、failover、usage 复核、reasoning 注入、字段剥离 / 注入 | A B D E | `gateway_m1`（流式精确计费、空回复、首字前 failover、余额不足、缓存 ratio、非流式透传）、`gateway_stream_usage`、`gateway_untrusted_usage`、`gateway_reasoning`、`gateway_reasoning_param`、`gateway_model_modifiers`、`gateway_resp_model`、`gateway_tier`、`gateway_pricing_rules`、`gateway_strip_fields`、`gateway_responses`（原生 / 降级 / 404 回退 / 两跳）、`gateway_messages`、`gateway_gemini_ingress`、`gateway_anthropic`、`gateway_gemini`、`gateway_azure`、`gateway_bedrock`（§11.35：mock 用同一 secret 重算 SigV4、模型 ID `%3A`、InvokeModel 体去 model/stream 加版本、event-stream 帧流式 + JSON 两路计费、API key 走 Bearer、Anthropic 入口透传、embeddings 不路由）、`gateway_vertex`（服务账号 JWT-bearer 换 token 且两请求只换一次、Gemini generateContent / streamGenerateContent?alt=sse、Claude rawPredict / streamRawPredict 版本字段为 vertex 值、Anthropic 入口透传）、`gateway_outbound`（代理 + 额外头）、`gateway_upstream_cost`、`gateway_capabilities`、`gateway_midstream`（09-06 新增：首字后上游掐流 → 不同 key 重试、不 failover 到备用渠道、客户端不见 `[DONE]`、按本地估算结算且余额精确收口、无悬置预扣） | — |
 | `embeddings.rs` | `/v1/embeddings`、`/v1/rerank` | A B D | `gateway_embeddings`（prompt-only、failover）、`gateway_azure::azure_embeddings_dispatch` | — |
 | `images.rs` | generations / edits（multipart 重组），per_call × n | A B | `gateway_images` | variations 未实现 |
 | `audio.rs` | speech 字符计费 / transcriptions & translations per_call | A B | `gateway_audio` | — |
@@ -77,11 +77,11 @@
 | 模块 | 职责 | 维度 | 覆盖套件 | 缺口 / 备注 |
 | --- | --- | --- | --- | --- |
 | `auth_web.rs` | 注册 / 登录 / TOTP / 兑 key / 会话列举吊销 / 邮箱验证码 / 找回密码 / 关键接口限流 | A C | `console_auth_web`、`console_smtp`（验证码、重置、无 SMTP 501）、`console_audit::login_attempts_are_audited`、e2e smoke（登录 / 登出清 session / session 降级） | 会话数上限未实现 |
-| `oauth.rs` | 通用 OAuth2 / OIDC | A C | `console_oauth`（mock IdP 授权码全流程） | 仅一家 mock IdP，无 Discord / LinuxDO 预设形状用例 |
+| `oauth.rs` | 通用 OAuth2 / OIDC | A C | `console_oauth`（mock IdP 授权码全流程）；`console_oauth_presets`（09-06 第八轮，独立临时库）：github / discord / linuxdo 三预设的 scopes 进授权跳转、数字 / snowflake `id` 作绑定键、`login` / `username` 作展示名与首登用户名；改名不换账号、同名不同 id 是另一个账号且用户名加盐、缺 `id` 拒绝不落绑定、token 端点 500 → `oauth_upstream_error` param `status_500` | — |
 | `registration.rs` + `auth_web::verify_turnstile` | 注册策略、邀请赠送、Turnstile | A C | 单元；`console_auth_web::registration_policy_gates_signup`；`console_turnstile`（09-06 第七轮，独立临时库 + 本地 siteverify mock：缺 token / 校验失败 / 端点不可达三种 param、表单体 `secret=…&response=…`、撤掉秘钥即关闭） | — |
 | `setup.rs` | 空库首启向导 | A | `console_setup`（独立临时库） | — |
 | `portal.rs` | `/api/me/*`（key、日志、流水、订单、公开价格、公告） | A C | `console_portal`、`console_portal_pages`、`console_stats::personal_activity_covers_calendar_year_and_isolates_owners`、e2e smoke 门户页 | — |
-| `manage.rs` / `admin.rs` / `query.rs` | 六类管理面 CRUD、批量、写校验（azure / 出站 / 注入字段）、路由诊断 | A C | `console_manage`、`console_m2`、`console_users`、`console_visibility`（属主范围 / 分组矩阵）、`console_pricing_write`、`console_channel_test`、`console_import`、`console_diagnose`、`gateway_pricing_rules::console_rule_crud_and_validation` | — |
+| `manage.rs` / `admin.rs` / `query.rs` / `cloud_probe.rs` | 六类管理面 CRUD、批量、写校验（azure / bedrock / vertex 地址、aws_region、出站 / 注入字段）、路由诊断、bedrock / vertex 测活与模型发现 | A C | `console_manage`（含 `cloud_channel_write_validation`：两家缺地址 400、vertex 地址形状、aws_region 形状、只改地址仍校验）、`console_m2`、`console_users`、`console_visibility`（属主范围 / 分组矩阵）、`console_pricing_write`、`console_channel_test`、`console_import`、`console_diagnose`、`gateway_pricing_rules::console_rule_crud_and_validation` | bedrock / vertex 测活与拉模型走真实签名 / 换 token，无 mock 端到端（凭证探测 = SigV4 列基础模型 / Bearer 列兼容模型 / vertex 换 token） |
 | `channel_balance.rs` | 上游余额查询（§11.33）：按主机选探针、定点解析、`ch:balance` 留痕 | A | `console_channel_test::channel_balance_probe`（dashboard 口径额度 − 美分用量、凭证错 502 `status_401`、anthropic 400 `balance_unsupported`、列表 `last_balance` 回填）；单元：探针选择 / URL / 四家官方响应形状 / 十进制解析 | DeepSeek 等官方探针只有形状单测，无 mock 端到端 |
 | `margin.rs`（+ `crate::margin`） | 负毛利熔断列出 / 解除（§11.34） | A C | `worker_margin_breaker`（列出含渠道名与 active、lift 后同进程立即放行且审计 `margin.lift`、解除期评估器跳过） | — |
 | `analytics.rs` / `stats.rs` / `logs.rs` / `usage_details.rs` / `activity.rs` / `analysis_*` | CH 立方体三端点、看板、日志检索、实时 KPI、毛利 | A B | `console_analytics`、`console_stats`、`console_logs`、`gateway_upstream_cost`；单元 `activity` / `analysis_freshness` / `usage_details` | `console_analytics` 两例曾在全量并行下偶发（outbox 行被别的进程 drain、两张 MV 先后落地），09-06 改为 `poll_until` 全字段谓词，见第 4 节发现 ① |
@@ -120,12 +120,13 @@
 | 管理端总览 / 日志 / 洞察 / 质量 / 经营 / 审计 / 运维 | `/admin`, `/admin/logs`, `/admin/stats`, `/admin/quality`, `/admin/revenue`, `/admin/audit`, `/admin/ops` | 实时条、健康芯片、深链即状态、三视图、死信签 | `smoke.spec`（管理端 1 大例）、`charts.spec`（管理图表 6 例） | 需演示超管，缺则跳过 |
 | 管理端设置 / 高级配置 / 导航 / 分页 | `/admin/settings`, 侧栏, 列表页 | 分组搜索、敏感值不显示、只读无编辑入口、键盘 / 移动端 / IME、URL 即分页状态 | `interactions.spec`（19 例） | — |
 | 用户 / 密钥 | `/admin/users`, `/portal/keys` | 搜索回车、抽屉落地签、删除二次确认手输名称 | `smoke.spec`（管理端大例内的用户抽屉段 + 删除二次确认 1 例） | — |
-| 用户抽屉写操作 | `/admin/users` 管理抽屉 | 入账 USD → micro 整数（含 0.29 浮点边界）、系数按十进制字符串提交且负数 / 未改动不放行、分组全量覆盖且先出现者优先级高、封禁经确认框且成功后翻成解封 | `write-forms.spec`（1 例，09-06 新增） | 角色 / 订阅 / 余额有效期三段仍无 e2e |
-| 模型定价抽屉 | `/admin/pricing` 编辑 / 新建 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读 | `write-forms.spec`（1 例，09-06 新增） | 发布 epoch 按钮、状态切换无 e2e |
+| 用户抽屉写操作 | `/admin/users` 管理抽屉 | 入账 USD → micro 整数（含 0.29 浮点边界）、系数按十进制字符串提交且负数 / 未改动不放行、分组全量覆盖且先出现者优先级高、封禁经确认框且成功后翻成解封；角色只发改动的那一项、订阅下拉只列在售订阅套餐且发放 / 立即结束各打端点、余额有效期日期 → UTC 零点 RFC3339 且清空发 null | `write-forms.spec`（2 例，09-06 新增 / 第八轮） | — |
+| 模型定价抽屉与发布 | `/admin/pricing` 编辑 / 新建 / 发布 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读；发布按钮 POST `/admin/pricing/publish` 并提示新 epoch | `write-forms.spec`（09-06 新增 / 第八轮） | 模型状态切换无 e2e |
 | 兑换码 | `/admin/codes` | 分页 / 筛选复位 / 末页停用 | `redemptions.spec` | 生成抽屉无 e2e |
 | 订阅套餐 | `/portal/plans` | 在售 / 已订阅高亮 / 停用说明 / 下单参数 | `subscriptions.spec` | 管理端 `/admin/plans` 无 e2e |
 | 渠道抽屉「请求与计费行为」 | `/admin/channels` 编辑抽屉 | 已有 proxy / 额外头回显；注入字段按 JSON 解析（数字 / 带引号字符串）；清空额外头即从 settings 删键；PATCH 体只含有值的键；受保护键 400 → 错误码文案且抽屉不关 | `write-forms.spec`（1 例，09-06 新增） | — |
-| 渠道抽屉接入 / 模型 / 调度 + 新建 | `/admin/channels` | 协议只读；凭证轮换独立端点且成功后清空；拉上游模型覆盖清单并提示数量；成本倍数 → 千分比、留存声明、优先级随 PATCH；池成员单独保存、覆盖值整数化、非整数归 null；新建三件必答事齐才放行、池成员随建渠道提交 | `write-forms.spec`（1 例，09-06 第七轮） | key 级参数行（KeyParamRow）无 e2e |
+| 渠道抽屉接入 / 模型 / 调度 + 新建 | `/admin/channels` | 协议只读；凭证轮换独立端点且成功后清空；拉上游模型覆盖清单并提示数量；成本倍数 → 千分比、留存声明、优先级随 PATCH；池成员单独保存、覆盖值整数化、非整数归 null；新建三件必答事齐才放行、池成员随建渠道提交；key 级参数行权重 / 并发各自 PATCH（空并发 = null）、失效 key 重新启用 | `write-forms.spec`（2 例，09-06 第七 / 八轮） | — |
+| 套餐删除 | `/admin/plans` | 确认框 → `DELETE /admin/plans/{code}` | `write-forms.spec`（09-06 第八轮） | — |
 | 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案 | `write-forms.spec`（1 例，09-06 新增） | TOTP 绑定流程仍无 e2e |
 | 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | 删除套餐无 e2e |
 | 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案 | `write-forms.spec`（1 例，09-06 第四轮） | — |
@@ -152,12 +153,12 @@
 ## 3. 覆盖缺口清单（按风险排序）
 
 1. ~~PG 记账不幂等~~ **已修**（09-06 第五轮）：`docs/database.md` §1.5 定案「每 request_id 恰一行」，`record_settlement` 事务开头 `SELECT EXISTS` 幂等闸，重放整笔跳过并告警；`pg_settlement::replaying_a_settled_request_writes_nothing` 钉住。ledger 的 Lua 与 PG 契约至此都有直测。
-2. ~~前端写操作表单 e2e~~ **已收口**（09-06 七轮，`write-forms.spec` 共 15 例覆盖全部管理面与门户写表单）。剩余零碎：渠道 key 级参数行、用户抽屉角色 / 订阅 / 余额有效期三段、套餐删除、模型页发布按钮。
+2. ~~前端写操作表单 e2e~~ **已收口**（09-06 八轮，`write-forms.spec` 共 17 例覆盖全部管理面与门户写表单，含各段零碎）。
 3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁按 §4.3 定案不适用于当前 static_key 主线。剩余：SSE 排水无 5min 上限（依赖编排层 grace period）。
 4. ~~mid-stream 断流语义无专项用例~~ **已补**（09-06 第三轮，`gateway_midstream`）。
 5. **集成测试共享一条 `billing_outbox` 队列**：任一用例的行都可能被别的测试进程 drain 进 CH，因此「drain 后直接读 CH 并断言」天然有竞态。现行约定是走 `poll_until` 且谓词覆盖全部待断言字段（09-06 修了两处漏网的）；新增 CH 用例须照此写，或改为按 user_id 隔离的 drain。
 6. ~~部署形态不在常规回归~~ **已补**（09-06 第六、七轮，`verify-deploy.sh` + `guard-deploy-manifests.py` + 可选镜像阶段）。剩余：性能维度仍按需执行。
-7. OAuth 仅单一 mock IdP；~~Turnstile 外呼无 mock~~ **已补**（09-06 第七轮 `console_turnstile`，经 `settings.turnstile_verify_url` 指向本地 mock）；SMTP TLS 形态未覆盖。
+7. ~~OAuth 仅单一 mock IdP~~ **已补**（09-06 第八轮 `console_oauth_presets`）；~~Turnstile 外呼无 mock~~ **已补**（第七轮 `console_turnstile`）；SMTP TLS 形态未覆盖（mock SMTP 只走明文 AUTH PLAIN，STARTTLS / 隐式 TLS 需要带证书的 mock，且客户端得有可配的信任锚——暂列不做）。
 
 ## 4. 执行记录
 
@@ -264,4 +265,13 @@
 | `bins/okapi/tests/console_turnstile.rs` | `settings.turnstile_verify_url` 覆写 siteverify 地址（写入 `docs/database.md` 注册表）；独立临时库 + 本地 mock：缺 token → `turnstile_token`、校验失败 → `turnstile_failed`、端点不可达 → `turnstile_unreachable`、表单体 `secret=…&response=…`、撤秘钥即关且不外呼 | 1 / 1 一次通过 |
 | `frontend/e2e/write-forms.spec.ts` +3 | 团队（建团 / 成员上限换算 / 发 key 一次性 / 401 降级）、渠道池抽屉与列表、渠道抽屉接入 / 模型 / 调度页签 + 新建 | 3 / 3 通过；渠道池用例首跑把 `/admin/pools` 导航请求也当接口回了 JSON，路由桩加 `isNavigationRequest` 放行；渠道抽屉用例被右下角 toast 堆叠盖住"取消"，改 Esc 关抽屉 |
 
-复核：interactions 配置 74 / 74；oxlint 干净；Rust 侧因并行会话的半成品（`console/admin.rs` `similar_names`、新文件 `channel_balance.rs` `struct_field_names`）全工作区 clippy 暂不能绿，豁免这两条后本轮改动干净；两条 lint 属对方待收口项。
+复核：interactions 配置 74 / 74；oxlint 干净；Rust 侧因并行会话的半成品（`console/admin.rs` `similar_names`、新文件 `channel_balance.rs` `struct_field_names`）全工作区 clippy 暂不能绿，豁免这两条后本轮改动干净；两条 lint 属对方待收口项。已提交 `4497934`，并从 HEAD 快照重建镜像复核通过。
+
+### 2026-09-06 第八轮：OAuth 预设 + 写表单零碎收口
+
+| 新增 | 内容 | 结果 |
+| --- | --- | --- |
+| `bins/okapi/tests/console_oauth_presets.rs`（独立临时库） | 三预设只配 client 凭证 + 指向 mock 的 URL，字段名与 scopes 走 `preset()`：授权跳转带预设 scopes；GitHub 数字 `id`、Discord snowflake、LinuxDO 数字都转成字符串作绑定键，`login` / `username` 作展示名与首登用户名；**身份稳定性**：改 handle 不换账号（展示名保留首登审计值）、同 handle 不同 `id` 是另一个账号且用户名撞了加盐、userinfo 缺 `id` 拒绝且不落绑定、token 端点 500 → `oauth_upstream_error` / `status_500` | 2 / 2 通过（一处断言按 RFC 3986 修正：`:` 留在 query 里不转义） |
+| `frontend/e2e/write-forms.spec.ts` +2 | 用户抽屉角色 / 订阅 / 余额有效期三段；渠道 key 级参数、套餐删除、模型页发布 | 2 / 2 通过；`write-forms` 累计 17 例 |
+
+复核：oxlint 干净；interactions 配置 75 / 76——唯一失败是既有的 `interactions.spec 列表分页` 用例：并行会话给渠道行新增的 `LastBalance` 组件在夹具缺 `last_balance` 字段时崩掉整行，属对方特性引入的回归，应随其特性一起把夹具补上或让组件容忍 `undefined`；本文件的 17 例均通过。SMTP TLS 与性能维度维持"按需 / 不做"。

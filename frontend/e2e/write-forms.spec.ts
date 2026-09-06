@@ -1100,6 +1100,197 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   })
 })
 
+test('用户抽屉其余页签：角色只发改动的那一项、订阅只列在售订阅套餐且发放 / 结束各打端点、余额有效期按日期换 UTC 零点且清空发 null', async ({ page }) => {
+  await prepare(page)
+  const calls: { path: string; method: string; body: Json }[] = []
+  let subscription: Json | null = null
+  await page.route('**/admin/users?*', (route) =>
+    route.fulfill({ json: { total: 1, data: [{ id: 7, username: 'alice', email: null, role: 1, status: 1, balance_micro: 0, admin_role_id: null, price_multiplier: '1' }] } }),
+  )
+  await page.route('**/admin/users/7/overview', (route) =>
+    route.fulfill({ json: { user: { id: 7, username: 'alice', role: 1, status: 1, balance_micro: 0, price_multiplier: '1' }, groups: [], keys: [] } }),
+  )
+  await page.route('**/admin/users/7/usage?*', (route) =>
+    route.fulfill({ json: { days: 7, stats_available: false, daily: [], by_model: [], ledger: [] } }),
+  )
+  await page.route('**/admin/roles*', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    return route.fulfill({ json: { data: [{ id: 3, role_code: 'ops_readonly', display_name: 'Ops', permissions: ['billing.read'] }], total: 1 } })
+  })
+  await page.route('**/admin/plans?*', (route) =>
+    route.fulfill({
+      json: { total: 3, data: [
+        { plan_code: 'pro-monthly', display_name: 'Pro', kind: 1, status: 1 },
+        { plan_code: 'starter', display_name: 'Starter', kind: 0, status: 1 },
+        { plan_code: 'legacy', display_name: 'Legacy', kind: 1, status: 2 },
+      ] },
+    }),
+  )
+  await page.route(/\/admin\/users\/7\/(role|subscription|balance-expiry)$/, async (route) => {
+    const r = route.request()
+    const path = new URL(r.url()).pathname
+    if (r.method() === 'GET') return route.fulfill({ json: { subscription, history: [] } })
+    calls.push({ path, method: r.method(), body: (r.postDataJSON() ?? null) as Json })
+    if (path.endsWith('/subscription') && r.method() === 'POST') {
+      subscription = {
+        id: 1, plan_code: 'pro-monthly', display_name: 'Pro', period: 3, status: 1, quota_micro: 20_000_000, remaining_micro: 20_000_000,
+        group_code: null, granted_group: false, starts_at: '2026-09-06T00:00:00Z', expires_at: '2026-10-06T00:00:00Z',
+        window_start: '2026-09-06T00:00:00Z', window_end: '2026-10-06T00:00:00Z', pool_until_unix: 1_790_000_000, source: 'admin',
+      }
+      return route.fulfill({ json: { outcome: 'activated' } })
+    }
+    if (path.endsWith('/subscription') && r.method() === 'DELETE') subscription = null
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/users')
+  await page.getByRole('row').filter({ hasText: 'alice' }).getByRole('button', { name: '管理', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+
+  // 角色：两个下拉都"不改动"时按钮禁用；只改内置角色 → 体里只有 role；只改自定义角色 → 只有 admin_role_id
+  await drawer.getByRole('tab', { name: '角色', exact: true }).click()
+  const apply = drawer.getByRole('button', { name: '应用角色' })
+  await expect(apply).toBeDisabled()
+  await drawer.locator('#role').selectOption('10')
+  let done = page.waitForRequest((r) => r.url().endsWith('/role'))
+  await apply.click()
+  await done
+  expect(calls[0]).toEqual({ path: '/admin/users/7/role', method: 'POST', body: { role: 10 } })
+  await drawer.locator('#role').selectOption('')
+  await drawer.locator('#arole').selectOption('3')
+  done = page.waitForRequest((r) => r.url().endsWith('/role'))
+  await apply.click()
+  await done
+  expect(calls[1].body).toEqual({ admin_role_id: 3 })
+
+  // 订阅：下拉只列 kind=1 且在售的套餐；发放后当前订阅出现，"立即结束"经确认框走 DELETE
+  await drawer.getByRole('tab', { name: '订阅', exact: true }).click()
+  await expect(drawer.getByText('当前没有激活的订阅。')).toBeVisible()
+  const planSelect = drawer.locator('#sub-plan')
+  await expect(planSelect.locator('option[value="pro-monthly"]')).toHaveCount(1)
+  await expect(planSelect.locator('option[value="starter"]')).toHaveCount(0)
+  await expect(planSelect.locator('option[value="legacy"]')).toHaveCount(0)
+  const grantBtn = drawer.getByRole('button', { name: '发放 / 续期' })
+  await expect(grantBtn).toBeDisabled()
+  await planSelect.selectOption('pro-monthly')
+  done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/subscription'))
+  await grantBtn.click()
+  await done
+  expect(calls[2]).toEqual({ path: '/admin/users/7/subscription', method: 'POST', body: { plan_code: 'pro-monthly' } })
+  await expect(drawer.getByText('当前没有激活的订阅。')).toHaveCount(0)
+  await drawer.getByRole('button', { name: '立即结束', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  done = page.waitForRequest((r) => r.method() === 'DELETE' && r.url().endsWith('/subscription'))
+  await confirm.getByRole('button', { name: '立即结束', exact: true }).click()
+  await done
+  expect(calls[3]).toMatchObject({ path: '/admin/users/7/subscription', method: 'DELETE' })
+  await expect(drawer.getByText('当前没有激活的订阅。')).toBeVisible()
+
+  // 余额有效期：日期 → 当天 UTC 零点的 RFC3339；清空 → null（永不过期）
+  await drawer.getByRole('tab', { name: '余额', exact: true }).click()
+  await drawer.locator('#uexpiry').fill('2026-12-31')
+  done = page.waitForRequest((r) => r.url().endsWith('/balance-expiry'))
+  // 余额段在系数段之前：填了日期后它的按钮才叫"保存"，取第一个
+  await drawer.getByRole('button', { name: '保存', exact: true }).first().click()
+  await done
+  expect(calls[4]).toEqual({ path: '/admin/users/7/balance-expiry', method: 'POST', body: { expires_at: '2026-12-31T00:00:00.000Z' } })
+  await drawer.locator('#uexpiry').fill('')
+  done = page.waitForRequest((r) => r.url().endsWith('/balance-expiry'))
+  await drawer.getByRole('button', { name: '取消有效期' }).click()
+  await done
+  expect(calls[5].body).toEqual({ expires_at: null })
+})
+
+test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = null），失效 key 可重新启用；套餐删除经确认框；模型页发布提示新 epoch', async ({ page }) => {
+  await prepare(page)
+  const calls: { path: string; method: string; body: Json }[] = []
+  const rec = (route: import('@playwright/test').Route) => {
+    const r = route.request()
+    calls.push({ path: new URL(r.url()).pathname, method: r.method(), body: (r.postDataJSON() ?? null) as Json })
+  }
+  const keys = [
+    { id: 501, status: 1, failed_count: 0, cooldown_until: null, last_error: null, weight: 100, max_concurrency: null },
+    { id: 502, status: 6, failed_count: 4, cooldown_until: null, last_error: 'invalid_api_key', weight: 50, max_concurrency: 8 },
+  ]
+  await page.route('**/admin/channels?*', (route) =>
+    route.fulfill({ json: { data: [{ ...CHANNEL, keys, settings: {} }], total: 1, enabled: 1 } }),
+  )
+  await page.route('**/admin/pools', (route) =>
+    route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [] } }),
+  )
+  await page.route(/\/admin\/channels\/42\/keys\/\d+$/, async (route) => {
+    rec(route)
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/channels')
+  await page.getByRole('row').filter({ hasText: 'openai-main' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await drawer.getByRole('tab', { name: '调度', exact: true }).click()
+  await expect(drawer.locator('#kw-501')).toHaveValue('100')
+  await expect(drawer.locator('#kc-501')).toHaveValue('')
+  await expect(drawer.locator('#kc-502')).toHaveValue('8')
+  await expect(drawer.getByText(/已判凭证失效/)).toBeVisible()
+
+  await drawer.locator('#kw-501').fill('30')
+  await drawer.locator('#kc-501').fill('4')
+  const row501 = drawer.locator('#kw-501').locator('xpath=ancestor::div[contains(@class,"rounded-md")][1]')
+  let done = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith('/keys/501'))
+  await row501.getByRole('button', { name: '保存', exact: true }).click()
+  await done
+  expect(calls[0]).toEqual({ path: '/admin/channels/42/keys/501', method: 'PATCH', body: { weight: 30, max_concurrency: 4 } })
+
+  const row502 = drawer.locator('#kw-502').locator('xpath=ancestor::div[contains(@class,"rounded-md")][1]')
+  await drawer.locator('#kc-502').fill('')
+  done = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith('/keys/502'))
+  await row502.getByRole('button', { name: '保存', exact: true }).click()
+  await done
+  expect(calls[1].body).toEqual({ weight: 50, max_concurrency: null })
+  done = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith('/keys/502'))
+  await row502.getByRole('button', { name: '重新启用' }).click()
+  await done
+  expect(calls[2].body).toEqual({ status: 1 })
+  await page.keyboard.press('Escape')
+
+  // 套餐删除：确认框 → DELETE /admin/plans/{code}
+  const deletes: string[] = []
+  await page.route('**/admin/plans?*', (route) =>
+    route.fulfill({
+      json: { total: 1, data: [{
+        id: 1, plan_code: 'starter', display_name: 'Starter', kind: 0, grant_micro: 10_000_000, group_code: null, balance_valid_days: null,
+        price_micro: 0, period: null, duration_days: null, sort_order: 0, description: null, status: 1, code_count: 0, active_subscribers: 0,
+      }] },
+    }),
+  )
+  await page.route('**/admin/plans/*', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    deletes.push(new URL(route.request().url()).pathname)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.goto('/admin/plans')
+  await page.getByRole('row').filter({ hasText: 'starter' }).getByRole('button', { name: '删除', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('删除 starter？')
+  done = page.waitForRequest((r) => r.method() === 'DELETE')
+  await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await done
+  expect(deletes).toEqual(['/admin/plans/starter'])
+
+  // 模型页发布：POST /admin/pricing/publish，提示新 epoch
+  let published = 0
+  await page.route('**/admin/models?*', (route) => route.fulfill({ json: { data: [], total: 0, unpriced: 0 } }))
+  await page.route('**/admin/pricing/publish', async (route) => {
+    published += 1
+    await route.fulfill({ json: { epoch: 42 } })
+  })
+  await page.goto('/admin/pricing')
+  done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/pricing/publish'))
+  await page.getByRole('button', { name: '发布定价', exact: true }).click()
+  await done
+  await expect(page.getByRole('status').filter({ hasText: '已发布 epoch 42' })).toBeVisible()
+  expect(published).toBe(1)
+})
+
 test('重置密码：缺 token 直接提示无效；长度与一致性校验挡在提交前；成功回登录页；失效 token 提示重新申请', async ({ page }) => {
   await prepare(page, { signedIn: false })
   const posts: Json[] = []
