@@ -86,6 +86,11 @@ fn token_i32(v: u32) -> i32 {
 }
 
 /// 单事务落账（IMPLEMENTATION §2.2 步骤 13：记录 + 事件 + 快照列 + outbox）。
+///
+/// 幂等：同一 request_id 已有记录即整笔跳过（docs/database.md §1.5）。分区表给不了
+/// request_id 唯一约束，而调用方 `settle_write` 会在失败后重试——COMMIT 已成功但回包
+/// 丢失的那一次重试若真写进去，事件流就多一笔 −amount，对账修复还会照着它把 Redis 也
+/// 改成双扣。同一 request_id 没有并发结算（Redis commit 闸只放行一次），EXISTS 足够。
 // 五条 SQL 的直线事务，拆分会破坏事务边界的可读性
 #[allow(clippy::too_many_lines)]
 pub async fn record_settlement(
@@ -93,6 +98,18 @@ pub async fn record_settlement(
     input: SettlementInput<'_>,
 ) -> Result<(), LedgerError> {
     let mut tx = pool.begin().await?;
+
+    let already_recorded = sqlx::query_scalar!(
+        r#"SELECT EXISTS(SELECT 1 FROM billing_records WHERE request_id = $1) AS "exists!""#,
+        input.request_id
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if already_recorded {
+        tracing::warn!(request_id = %input.request_id, "结算重放：request_id 已落账，跳过");
+        tx.rollback().await?;
+        return Ok(());
+    }
 
     sqlx::query!(
         r#"

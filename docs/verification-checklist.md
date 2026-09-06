@@ -47,7 +47,7 @@
 | --- | --- | --- | --- | --- |
 | `okapi-domain` | Money newtype、ID newtype、计费状态机、token 计数 | A B | 单元：`money.rs` / `state.rs` / `tokens.rs`；守卫：`guard-no-float.sh` | 状态机转移矩阵穷举在 `state.rs` 单测 |
 | `okapi-pricing` | PriceBook 编译、三层倍率 / 按次 / 阶梯 / 缓存双轴、规则栈、快照 | A B | `parity.rs`（new-api 对拍 fixtures）、`prop.rs`（proptest）、单元 `book/engine/handle/model/ratio/rules`；集成 `gateway_m1`（cache ratio）、`gateway_tier`、`gateway_pricing_rules`、`gateway_model_modifiers`、`console_pricing_write`、`console_import` | — |
-| `okapi-ledger` | Redis Lua reserve / commit / refund / repair / sub_set + PG 同事务记账 + outbox | A B D | crate 级 `tests/lua_contract.rs`（09-06 新增，7 例）：预扣字段四段 / 多退少补 / 重复 commit 与 refund 任意顺序幂等 / `avail == est` 放行、`avail < est` 拒绝且零写入 / 四个 key 级限额各自 which 且拒绝零写入、并发槽随结算释放 / repair 绕开在途、不动另一池、负目标不夹逼 / drain 只取正余额 / 13 步交错序列逐步验证 `avail + Σ在途 == 入账 − Σ实际`；订阅池选池由 `console_subscriptions::lua_pool_contract` 覆盖；crate 级 `tests/pg_settlement.rs`（09-06 第四轮，5 例）：records / events / users 快照 / api_keys 用量 / outbox 五处同事务且四金额列与 pool 三处一致（含 INET 列真落）、第二条语句失败整体回滚、订阅池结算与订阅事件不动钱包快照、失败请求零金额落 error_code、`admin_refund` 只对 committed 生效一次并逐项回冲；集成：`gateway_m1`、`worker_m2`、`worker_reconcile_repair`、`console_ops`、`console_teams`、`gateway_realtime` | **`record_settlement` 在 PG 层不幂等**：`billing_records` 是分区表，`request_id` 只有普通索引；同一 request_id 重放会再插一行、再记一条事件、再减一次快照与再加一次 key 用量。当前靠 Redis commit 的 NO_RESERVATION 闸挡住正常路径，只剩 `settle_write` 在 COMMIT 已成功但回包丢失时的重试这一极端窗口——见第 3 节第 1 条 |
+| `okapi-ledger` | Redis Lua reserve / commit / refund / repair / sub_set + PG 同事务记账 + outbox | A B D | crate 级 `tests/lua_contract.rs`（09-06 新增，7 例）：预扣字段四段 / 多退少补 / 重复 commit 与 refund 任意顺序幂等 / `avail == est` 放行、`avail < est` 拒绝且零写入 / 四个 key 级限额各自 which 且拒绝零写入、并发槽随结算释放 / repair 绕开在途、不动另一池、负目标不夹逼 / drain 只取正余额 / 13 步交错序列逐步验证 `avail + Σ在途 == 入账 − Σ实际`；订阅池选池由 `console_subscriptions::lua_pool_contract` 覆盖；crate 级 `tests/pg_settlement.rs`（09-06 第四轮，5 例）：records / events / users 快照 / api_keys 用量 / outbox 五处同事务且四金额列与 pool 三处一致（含 INET 列真落）、第二条语句失败整体回滚、订阅池结算与订阅事件不动钱包快照、失败请求零金额落 error_code、`admin_refund` 只对 committed 生效一次并逐项回冲；集成：`gateway_m1`、`worker_m2`、`worker_reconcile_repair`、`console_ops`、`console_teams`、`gateway_realtime`；第五轮补 `replaying_a_settled_request_writes_nothing`（重放 request_id 五处零写入） | — |
 | `okapi-providers` | openai / anthropic / gemini / azure / custom_pass / responses 客户端，`convert/*` 按方向转换，modifiers / reasoning，`http.rs` 代理与额外头 | A E | `convert_a2o` / `convert_anthropic` / `convert_gemini` / `reasoning_t2c` / `stream_usage`；单元 `azure` / `gemini_to_openai` / `http` / `modifiers` / `reasoning` / `responses`；集成见 2.2 chat 行 | `gemini_to_openai` 只有单元 + `gateway_gemini_ingress` 集成，无独立 parity fixture 文件 |
 | `okapi-store` | sqlx 查询、迁移、凭证信封 AES-GCM、身份（argon2 / bcrypt 双轨）、分页、CIDR 匹配、CH schema | A C H | 编译期：`.sqlx` 离线校验全部 `query!`；`schema_shape`（迁移形状守卫）、`channel_credential`（密文落库 / 无主密钥 fail-closed）、`console_manage::price_group_pagination_matches_database_pages`、`gateway_ip_allowlist`（netmatch）、`worker_ch`（CH 表与 MV）；单元 `credential` / `identity` / `listing` / `mutate` / `netmatch` / `subscriptions` / `vendor` | — |
 | `okapi-api` | DTO、`AppError` 错误码壳、权限点清单 | A C | 单元 `permissions.rs`；`console_m2::permission_point_matrix`；守卫 `guard-frontend-permissions.py`（前端引用的权限点都在后端清单） | 后端自然语言检查（i18n-audit §3）为人工 `rg` |
@@ -139,7 +139,7 @@
 
 ## 3. 覆盖缺口清单（按风险排序）
 
-1. **PG 记账不幂等（新发现，待定案）**：Lua 与 PG 契约直测已齐（`lua_contract.rs` / `pg_settlement.rs`），但 `record_settlement` 重放同一 request_id 会双记。触发窗口只有 `settle_write` 的重试撞上「COMMIT 已成功、回包丢失」；一旦发生，事件流多一笔 −amount，对账 repair 又以事件流为权威把 Redis 也改成双扣——是会伤用户的钱的路径。建议（需先改 `docs/database.md` 再动代码）：事务开头 `SELECT 1 FROM billing_records WHERE request_id = $1 FOR UPDATE`，命中即视为已落账直接返回 Ok，让 billing-safety 第 5 条「commit 必须幂等」在 PG 侧也成立。分区表加不了跨分区唯一约束，所以只能靠这一步检查。
+1. ~~PG 记账不幂等~~ **已修**（09-06 第五轮）：`docs/database.md` §1.5 定案「每 request_id 恰一行」，`record_settlement` 事务开头 `SELECT EXISTS` 幂等闸，重放整笔跳过并告警；`pg_settlement::replaying_a_settled_request_writes_nothing` 钉住。ledger 的 Lua 与 PG 契约至此都有直测。
 2. **前端写操作表单 e2e 尚未收口**：09-06 四轮补了渠道抽屉行为页签、会话吊销卡、忘记 / 重置密码页、用户抽屉、模型定价抽屉、套餐抽屉、角色抽屉；仍缺分组 / 池 / 规则、团队、TOTP 绑定、SMTP 卡、渠道抽屉另三个页签、各页删除动作。
 3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁按 §4.3 定案不适用于当前 static_key 主线。剩余：SSE 排水无 5min 上限（依赖编排层 grace period）。
 4. ~~mid-stream 断流语义无专项用例~~ **已补**（09-06 第三轮，`gateway_midstream`）。
@@ -220,3 +220,13 @@
 全量复核：`cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger` 54 / 54；全工作区 clippy `-D warnings`、`cargo fmt --check`、oxlint 干净；interactions 配置 67 / 67；`.sqlx` 重生成（533 文件）。
 
 发现：`record_settlement` 的 PG 侧不幂等（第 3 节第 1 条），本轮只记录、未改——它触及计费写路径的语义，按项目规则应先在 `docs/database.md` 定案再动代码。
+
+### 2026-09-06 第五轮：PG 记账幂等闸
+
+前四轮已提交（`2ac7c94` 功能 / 收口 / 下线，`34edd2b` 清单 / 测试）。本轮按「先文档后代码」处理第 3 节第 1 条：
+
+- `docs/database.md` §1.5：在 `idx_br_request` 旁写明「每 request_id 恰一行」的语义、为什么分区表给不了唯一约束、以及由 `record_settlement` 承担幂等闸。
+- `crates/okapi-ledger/src/pg.rs`：事务开头 `SELECT EXISTS(... WHERE request_id = $1)`，命中即回滚空事务、`warn!` 记录重放、返回 Ok。每笔结算多一次走 `idx_br_request` 的点查，在后台结算路径且受 `settle_gate` 限流，可接受。
+- `pg_settlement::replaying_a_settled_request_writes_nothing`：重放同一 request_id（金额还故意改成 999_999）后记录仍一行、事件仍一条、outbox 仍一条、快照与 key 用量只动一次，且第一笔的列值原样。
+
+复核：计费三 crate 55 / 55；全量 Rust 97 个测试二进制 447 / 447（结算路径多一次点查未影响任何既有用例）；clippy `-D warnings` 干净；`.sqlx` 重生成。

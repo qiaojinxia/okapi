@@ -404,6 +404,12 @@ CREATE TABLE billing_records (                        -- 请求级明细（分�
 CREATE INDEX idx_br_user_time    ON billing_records (user_id, created_at DESC);
 CREATE INDEX idx_br_request      ON billing_records (request_id);
 CREATE INDEX idx_br_channel_time ON billing_records (channel_id, created_at DESC);
+-- 语义上每个 request_id 恰一行（终态由 status 翻转，退款不另起行），但分区表加不了
+-- 不含分区键的唯一约束，所以由 ledger::record_settlement 在事务开头以
+-- `SELECT EXISTS(... WHERE request_id = $1)` 做幂等闸：已落账则整笔跳过（不再写
+-- events / 快照 / key 用量 / outbox），返回 Ok 并告警。覆盖的是 settle_write 重试撞上
+-- 「COMMIT 已成功、回包丢失」的窗口——否则事件流多一笔 −amount，对账 repair 又以事件流
+-- 为权威把 Redis 也改成双扣。同一 request_id 不存在并发结算（Redis commit 闸保证串行）。
 
 CREATE TABLE billing_events (                         -- 余额账本，append-only（分区表）
     event_id           BIGINT GENERATED ALWAYS AS IDENTITY,

@@ -280,6 +280,47 @@ async fn settlement_lands_record_event_snapshot_key_usage_and_outbox_consistentl
     );
 }
 
+/// 幂等：同一 request_id 重放（settle_write 在 COMMIT 成功但回包丢失后的重试）不得再写
+/// 任何一处——记录仍一行、事件仍一条、快照与 key 用量不再变、outbox 不再多一条。
+#[tokio::test]
+async fn replaying_a_settled_request_writes_nothing() {
+    let bed = bed().await;
+    record_credit(
+        &bed.pg,
+        bed.user_id,
+        Money::from_micros(10_000),
+        "recharge",
+        "system:test",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let rid = Uuid::new_v4();
+    record_settlement(&bed.pg, bed.committed(rid))
+        .await
+        .unwrap();
+
+    // 重放同一笔，哪怕金额被改也不能再动账：以第一次落地的为准
+    let mut replay = bed.committed(rid);
+    replay.amount = Money::from_micros(999_999);
+    replay.delta_micro = -999_999;
+    record_settlement(&bed.pg, replay).await.unwrap();
+
+    let records: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "c!" FROM billing_records WHERE request_id = $1"#,
+        rid
+    )
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    assert_eq!(records, 1, "重放不得再插记录行");
+    assert_committed_record(&bed, rid).await;
+    assert_eq!(bed.events(rid).await.len(), 1, "重放不得再记事件");
+    assert_eq!(bed.outbox(rid).await.len(), 1, "重放不得再进 outbox");
+    assert_eq!(bed.wallet_snapshot().await, 10_000 - 240, "快照只扣一次");
+    assert_eq!(bed.key_used().await.0, 240, "key 用量只加一次");
+}
+
 /// 事务原子性：第二条语句失败（events.event_type 是 VARCHAR(16)，塞超长值）→
 /// 已执行成功的第一条 INSERT 必须随事务回滚，五处一处都不落。
 #[tokio::test]
