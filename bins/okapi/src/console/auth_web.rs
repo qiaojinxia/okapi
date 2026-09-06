@@ -397,14 +397,28 @@ async fn bind_inviter(state: &AppState, user_id: i64, inviter: Option<i64>) {
     }
 }
 
+const TURNSTILE_VERIFY_URL: &str = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+
 /// Turnstile 校验（settings.turnstile_secret 未配置即跳过）。
+/// `settings.turnstile_verify_url` 可覆写 siteverify 地址（内网出口代理 / 自动化用例的 mock），
+/// 缺省 Cloudflare 官方端点。
 async fn verify_turnstile(state: &AppState, token: Option<&str>) -> Result<(), AppError> {
-    let secret = sqlx::query_scalar!(
-        r#"SELECT value #>> '{}' AS "v!" FROM settings WHERE key = 'turnstile_secret'"#
+    let rows = sqlx::query!(
+        r#"SELECT key, value #>> '{}' AS "v!" FROM settings
+           WHERE key IN ('turnstile_secret', 'turnstile_verify_url')"#
     )
-    .fetch_optional(&state.pg)
+    .fetch_all(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    let mut secret = None;
+    let mut verify_url = None;
+    for row in rows {
+        match row.key.as_str() {
+            "turnstile_secret" => secret = Some(row.v),
+            "turnstile_verify_url" => verify_url = Some(row.v).filter(|v| !v.trim().is_empty()),
+            _ => {}
+        }
+    }
     let Some(secret) = secret else {
         return Ok(());
     };
@@ -420,7 +434,7 @@ async fn verify_turnstile(state: &AppState, token: Option<&str>) -> Result<(), A
         .pass
         .forward(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::POST,
-            url: "https://challenges.cloudflare.com/turnstile/v0/siteverify".to_owned(),
+            url: verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned()),
             auth_header: "x-okapi-noop".to_owned(),
             auth_value: "1".to_owned(),
             content_type: Some("application/x-www-form-urlencoded".to_owned()),

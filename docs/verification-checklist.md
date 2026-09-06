@@ -56,7 +56,7 @@
 
 | 模块 | 职责 | 维度 | 覆盖套件 | 缺口 / 备注 |
 | --- | --- | --- | --- | --- |
-| `auth.rs` | Bearer / x-api-key / x-goog-api-key 鉴权、无效 key 每 IP 限流、key 级 IP 白名单 | A C | `gateway_invalid_key_rate`、`gateway_ip_allowlist`、`smoke-all.sh`（无凭证 401 fail-closed）、e2e smoke（普通用户管理面 403） | — |
+| `auth.rs` | Bearer / x-api-key / x-goog-api-key 鉴权、无效 key 每 IP 限流、key 级 IP 白名单、分组级 `[rpm, rph]`（§11.32，随鉴权缓存下发、全部计费端点 reserve 前检查） | A C | `gateway_invalid_key_rate`、`gateway_ip_allowlist`、`gateway_group_rate`（09-06：同组每用户各自计数、别组不受影响、rph 小时窗、管理面改限额即失效缓存、负数 400、0 归一 null）、`smoke-all.sh`（无凭证 401 fail-closed）、e2e smoke（普通用户管理面 403） | 分组限流只在 chat 路径有集成用例；其余端点共用同一 `check_group_rate`，靠编译期同构 |
 | `clients.rs` | 真实 IP 提取（信任代理 / edge key）、client_type 识别 | A C | 单元；`gateway_ip_allowlist::allowlist_enforced_with_cdn_header_and_peer_fallback`；`console_stats` 客户端分布 | — |
 | `scheduler.rs` + `sched_redis.rs` | 候选筛选、优先级 / 权重、三层粘性、双层并发、key 状态机、RPM、web 会话、关键接口限流 | A C D | `gateway_m2_sched`、`channel_key_lifecycle`、`channel_pools`、`gateway_capabilities`、`gateway_fallback`、`gateway_routing_prefs`、`gateway_retry_policy`、`gateway_multipod`、`gateway_compat::per_model_rpm_limit`、`console_diagnose`、`worker_m2::cooled_keys_recover_after_deadline`、`console_auth_web::sessions_list_and_revoke`；单元 `scheduler.rs` | 多副本只有 2 例（在途计数汇总、路由失效广播）。「双副本并发凭证刷新锁」按 IMPLEMENTATION §4.3 **主线只实现 static_key**、OAuth refresh 留扩展点——当前没有会刷新的凭证类型，该验收项不适用，OAuth 上游落地时再补 |
 | `chat.rs`（+ `openai_dialect` / `extract` / `estimate` / `rule_inputs`） | `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（+ `count_tokens`）、`/v1beta/models/*:generateContent`；SSE 转发器、failover、usage 复核、reasoning 注入、字段剥离 / 注入 | A B D E | `gateway_m1`（流式精确计费、空回复、首字前 failover、余额不足、缓存 ratio、非流式透传）、`gateway_stream_usage`、`gateway_untrusted_usage`、`gateway_reasoning`、`gateway_reasoning_param`、`gateway_model_modifiers`、`gateway_resp_model`、`gateway_tier`、`gateway_pricing_rules`、`gateway_strip_fields`、`gateway_responses`（原生 / 降级 / 404 回退 / 两跳）、`gateway_messages`、`gateway_gemini_ingress`、`gateway_anthropic`、`gateway_gemini`、`gateway_azure`、`gateway_outbound`（代理 + 额外头）、`gateway_upstream_cost`、`gateway_capabilities`、`gateway_midstream`（09-06 新增：首字后上游掐流 → 不同 key 重试、不 failover 到备用渠道、客户端不见 `[DONE]`、按本地估算结算且余额精确收口、无悬置预扣） | — |
@@ -78,10 +78,12 @@
 | --- | --- | --- | --- | --- |
 | `auth_web.rs` | 注册 / 登录 / TOTP / 兑 key / 会话列举吊销 / 邮箱验证码 / 找回密码 / 关键接口限流 | A C | `console_auth_web`、`console_smtp`（验证码、重置、无 SMTP 501）、`console_audit::login_attempts_are_audited`、e2e smoke（登录 / 登出清 session / session 降级） | 会话数上限未实现 |
 | `oauth.rs` | 通用 OAuth2 / OIDC | A C | `console_oauth`（mock IdP 授权码全流程） | 仅一家 mock IdP，无 Discord / LinuxDO 预设形状用例 |
-| `registration.rs` | 注册策略、邀请赠送、Turnstile | A C | 单元；`console_auth_web::registration_policy_gates_signup` | Turnstile 外呼无 mock 用例 |
+| `registration.rs` + `auth_web::verify_turnstile` | 注册策略、邀请赠送、Turnstile | A C | 单元；`console_auth_web::registration_policy_gates_signup`；`console_turnstile`（09-06 第七轮，独立临时库 + 本地 siteverify mock：缺 token / 校验失败 / 端点不可达三种 param、表单体 `secret=…&response=…`、撤掉秘钥即关闭） | — |
 | `setup.rs` | 空库首启向导 | A | `console_setup`（独立临时库） | — |
 | `portal.rs` | `/api/me/*`（key、日志、流水、订单、公开价格、公告） | A C | `console_portal`、`console_portal_pages`、`console_stats::personal_activity_covers_calendar_year_and_isolates_owners`、e2e smoke 门户页 | — |
 | `manage.rs` / `admin.rs` / `query.rs` | 六类管理面 CRUD、批量、写校验（azure / 出站 / 注入字段）、路由诊断 | A C | `console_manage`、`console_m2`、`console_users`、`console_visibility`（属主范围 / 分组矩阵）、`console_pricing_write`、`console_channel_test`、`console_import`、`console_diagnose`、`gateway_pricing_rules::console_rule_crud_and_validation` | — |
+| `channel_balance.rs` | 上游余额查询（§11.33）：按主机选探针、定点解析、`ch:balance` 留痕 | A | `console_channel_test::channel_balance_probe`（dashboard 口径额度 − 美分用量、凭证错 502 `status_401`、anthropic 400 `balance_unsupported`、列表 `last_balance` 回填）；单元：探针选择 / URL / 四家官方响应形状 / 十进制解析 | DeepSeek 等官方探针只有形状单测，无 mock 端到端 |
+| `margin.rs`（+ `crate::margin`） | 负毛利熔断列出 / 解除（§11.34） | A C | `worker_margin_breaker`（列出含渠道名与 active、lift 后同进程立即放行且审计 `margin.lift`、解除期评估器跳过） | — |
 | `analytics.rs` / `stats.rs` / `logs.rs` / `usage_details.rs` / `activity.rs` / `analysis_*` | CH 立方体三端点、看板、日志检索、实时 KPI、毛利 | A B | `console_analytics`、`console_stats`、`console_logs`、`gateway_upstream_cost`；单元 `activity` / `analysis_freshness` / `usage_details` | `console_analytics` 两例曾在全量并行下偶发（outbox 行被别的进程 drain、两张 MV 先后落地），09-06 改为 `poll_until` 全字段谓词，见第 4 节发现 ① |
 | `audit.rs` | 管理写操作 + 登录审计 | C | `console_audit`、`console_ops::assist_overview_scoped_and_audited`、`console_mcp_write`（`mcp:{key_id}` 落痕） | — |
 | `dlq.rs` | 死信列表 / 重投 / 丢弃 | A D | `console_logs::dlq_list_requeue_and_discard`、`worker_ch::chsink_pipeline_then_dlq`、e2e smoke 运维页 | — |
@@ -102,6 +104,7 @@
 | `worker/nats_relay.rs` | outbox → JetStream → chsink | A D | `worker_nats` | — |
 | `worker/notify.rs` | webhook / email 多路、事件过滤、频率闸、余额低扫描 | A | `worker_notify`、`console_smtp::notify_email_channel_and_admin_test_send` | — |
 | `worker/mod.rs` | 悬置清理、三方对账、分区维护、冷却恢复、余额有效期、保留策略、订阅滚窗 | A B D | `worker_m2`、`worker_reconcile_repair`、`console_subscriptions::worker_rolls_window_and_expires` | — |
+| `worker/margin_breaker.rs` | 负毛利熔断评估（§11.34）：CH 成本已知行按分组×渠道聚合 → `mb:blocks` | A B D | `worker_margin_breaker`（有 CH 才跑：25 笔亏损样本 → tripped 含金额 / 毛利率、网关 503 `margin_blocked`、续期不重复通知、关闭功能清表）；单元 `margin::tests`（阈值边界：样本不足 / 成本过小 / 收入 0 / 负阈值容忍 / 正阈值要求毛利、配置夹取、字段往返） | 通知 `margin_breaker` 事件走 `notifier.dispatch`，未在 mock sink 上断言载荷 |
 | `mail/` | SMTP 投递、模板 | A | 单元；`console_smtp`（本地 mock SMTP，AUTH PLAIN） | STARTTLS / 隐式 TLS 未在 mock 覆盖 |
 | `migrate.rs` | new-api / 老 ok-api JSONL 导入 | A H | 单元；`migrate_newapi`、`migrate_okapi_old`、`schema_shape` | — |
 
@@ -121,15 +124,18 @@
 | 模型定价抽屉 | `/admin/pricing` 编辑 / 新建 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读 | `write-forms.spec`（1 例，09-06 新增） | 发布 epoch 按钮、状态切换无 e2e |
 | 兑换码 | `/admin/codes` | 分页 / 筛选复位 / 末页停用 | `redemptions.spec` | 生成抽屉无 e2e |
 | 订阅套餐 | `/portal/plans` | 在售 / 已订阅高亮 / 停用说明 / 下单参数 | `subscriptions.spec` | 管理端 `/admin/plans` 无 e2e |
-| 渠道抽屉「请求与计费行为」 | `/admin/channels` 编辑抽屉 | 已有 proxy / 额外头回显；注入字段按 JSON 解析（数字 / 带引号字符串）；清空额外头即从 settings 删键；PATCH 体只含有值的键；受保护键 400 → 错误码文案且抽屉不关 | `write-forms.spec`（1 例，09-06 新增） | 接入 / 模型 / 调度三个页签的写操作仍无 e2e |
+| 渠道抽屉「请求与计费行为」 | `/admin/channels` 编辑抽屉 | 已有 proxy / 额外头回显；注入字段按 JSON 解析（数字 / 带引号字符串）；清空额外头即从 settings 删键；PATCH 体只含有值的键；受保护键 400 → 错误码文案且抽屉不关 | `write-forms.spec`（1 例，09-06 新增） | — |
+| 渠道抽屉接入 / 模型 / 调度 + 新建 | `/admin/channels` | 协议只读；凭证轮换独立端点且成功后清空；拉上游模型覆盖清单并提示数量；成本倍数 → 千分比、留存声明、优先级随 PATCH；池成员单独保存、覆盖值整数化、非整数归 null；新建三件必答事齐才放行、池成员随建渠道提交 | `write-forms.spec`（1 例，09-06 第七轮） | key 级参数行（KeyParamRow）无 e2e |
 | 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案 | `write-forms.spec`（1 例，09-06 新增） | TOTP 绑定流程仍无 e2e |
 | 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | 删除套餐无 e2e |
 | 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案 | `write-forms.spec`（1 例，09-06 第四轮） | — |
-| 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达、自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default | `write-forms.spec`（1 例，09-06 第六轮） | — |
+| 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达、自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default | `write-forms.spec`（1 例，09-06 第六轮） | 限流字段组（rpm / rph 空 = null、负数禁保存）与列表"限流"列无 e2e |
+| 渠道列表余额按钮 / 运维页毛利熔断卡 | `/admin/channels`, `/admin/ops` 毛利熔断页签 | 钱包按钮只对 openai / openai_compat 显示、结果 toast 按上游货币 Intl 格式化、"最近测试"列下回填余额；熔断卡配置表单（小时 / 分钟 / 美元 / 百分比 → 后端整数口径）、熔断表与解除按钮按权限裁剪 | — | 09-06 新增，尚无 e2e |
 | 计费规则抽屉与列表 | `/admin/rules` | 编辑态四类字段回填与 code 锁定、按类型只发该类型字段、阈值 USD → micro、星期勾选升序、空范围不发键、上下线打 toggle 且提示需发布、删除经确认框 | `write-forms.spec`（1 例，09-06 第六轮） | — |
 | 设置 SMTP 卡 | `/admin/settings` 邮件页签 | 单键回显、去空格、`reply_to` 空转 null、端口越界归零、加密方式分段、未保存前测试禁用、测试信按已保存配置发且收件人须含 @、有草稿时禁发 | `write-forms.spec`（1 例，09-06 第六轮） | — |
 | TOTP 绑定 | `/portal/security` | 开始绑定拿 otpauth / pending、码不足 6 位禁用、错码 `totp_invalid` 文案可重试、成功切已开启态、无会话 401 降级提示 | `write-forms.spec`（1 例，09-06 第六轮） | — |
-| 池 / 团队 | `/admin/pools`, `/portal/teams` | — | `screenshots.spec` 非断言 | **写操作表单无 e2e**：池抽屉与成员覆盖、团队建团 / 成员 / 发 key |
+| 渠道池抽屉与列表 | `/admin/pools` | 策略 / 降级目标回填、降级目标排除自己、不降级发 null、编辑态池码只读、内置池与被引用池删除禁用、删除经确认框 | `write-forms.spec`（1 例，09-06 第七轮） | — |
+| 团队 | `/portal/teams` | 建团名字去空格、成员上限 USD → micro 且空即 null、提交后表单复位、发团 key 明文只展示一次、列表 401 整页降级且隐藏创建入口 | `write-forms.spec`（1 例，09-06 第七轮） | — |
 | i18n | 全站 | 裸文案零、双语言包键对齐 | `guard-i18n.sh`、`guard-i18n-keys.py`；e2e 断言同时匹配中英正则 | 后端错误码是否全部有 `errors` 命名空间映射：靠 `guard-i18n-keys.py` 的引用键检查，未反向核对后端 `codes::*` 全集 |
 
 ### 2.6 部署与性能
@@ -137,7 +143,8 @@
 | 项 | 维度 | 覆盖 | 缺口 / 备注 |
 | --- | --- | --- | --- |
 | `okapi all` 单机形态 | I | `scripts/smoke-all.sh` 四断言 | — |
-| embed-web 发布构建（`deploy/Dockerfile` 的运行时前提） | I | `scripts/verify-deploy.sh`（09-06 第六轮）：`--features embed-web` 构建；在没有 `frontend/dist` 的目录起 console，首页、`/assets/*.js`（text/javascript）、`/admin/users` 深链（Accept: text/html）都从二进制服出，同路径 JSON 请求仍是 API 401 | Docker 镜像本身的构建（多阶段 Dockerfile）未在本机跑 |
+| embed-web 发布构建（`deploy/Dockerfile` 的运行时前提） | I | `scripts/verify-deploy.sh`（09-06 第六轮）：`--features embed-web` 构建；在没有 `frontend/dist` 的目录起 console，首页、`/assets/*.js`（text/javascript）、`/admin/users` 深链（Accept: text/html）都从二进制服出，同路径 JSON 请求仍是 API 401 | — |
+| 发布镜像（多阶段 Dockerfile） | I | `OKAPI_VERIFY_IMAGE=1 bash scripts/verify-deploy.sh`（09-06 第七轮）：从 `git archive HEAD` 干净快照 `docker build`，`okapi --version` 可执行，对临时空库起 console：healthz、内嵌前端、首启迁移 + Setup 向导、以 65534 运行 | 构建约 5 分钟，不进默认路径；需本机 docker |
 | compose 双 profile / k8s manifests | I | `scripts/guard-deploy-manifests.py`（09-06 第六轮）：文档结构、Service selector ↔ Deployment、容器 image / resources、对外容器 `/healthz` readinessProbe、gateway `terminationGracePeriodSeconds` 与应用服务 `stop_grace_period` ≥ 330s（§14.3 排水口径）、Σ(副本上限 × OKAPI_PG_POOL) ≤ 200、依赖镜像来源与 healthcheck | 无 kubectl / compose 插件，不做 schema 级校验 |
 | Nginx SSE 模板 | I | 手工 | — |
 | 缩尺压测 / Linux 复测 | G | `docs/perf-report.md`（2026-08-30） | 裸金属正式复测、10 万 SSE 整数口径待办 |
@@ -145,12 +152,12 @@
 ## 3. 覆盖缺口清单（按风险排序）
 
 1. ~~PG 记账不幂等~~ **已修**（09-06 第五轮）：`docs/database.md` §1.5 定案「每 request_id 恰一行」，`record_settlement` 事务开头 `SELECT EXISTS` 幂等闸，重放整笔跳过并告警；`pg_settlement::replaying_a_settled_request_writes_nothing` 钉住。ledger 的 Lua 与 PG 契约至此都有直测。
-2. **前端写操作表单 e2e 接近收口**：09-06 六轮补了渠道抽屉行为页签、会话吊销卡、忘记 / 重置密码页、用户抽屉、模型定价抽屉、套餐抽屉、角色抽屉、价格分组抽屉、计费规则抽屉与列表、SMTP 卡、TOTP 绑定；仍缺池抽屉与成员覆盖、团队建团 / 成员 / 发 key、渠道抽屉另三个页签。
+2. ~~前端写操作表单 e2e~~ **已收口**（09-06 七轮，`write-forms.spec` 共 15 例覆盖全部管理面与门户写表单）。剩余零碎：渠道 key 级参数行、用户抽屉角色 / 订阅 / 余额有效期三段、套餐删除、模型页发布按钮。
 3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁按 §4.3 定案不适用于当前 static_key 主线。剩余：SSE 排水无 5min 上限（依赖编排层 grace period）。
 4. ~~mid-stream 断流语义无专项用例~~ **已补**（09-06 第三轮，`gateway_midstream`）。
 5. **集成测试共享一条 `billing_outbox` 队列**：任一用例的行都可能被别的测试进程 drain 进 CH，因此「drain 后直接读 CH 并断言」天然有竞态。现行约定是走 `poll_until` 且谓词覆盖全部待断言字段（09-06 修了两处漏网的）；新增 CH 用例须照此写，或改为按 user_id 隔离的 drain。
-6. ~~部署形态不在常规回归~~ **已补**（09-06 第六轮，`verify-deploy.sh` + `guard-deploy-manifests.py`）。剩余：性能维度仍按需执行；Docker 多阶段镜像构建未在本机验证。
-7. OAuth 仅单一 mock IdP；Turnstile 外呼无 mock；SMTP TLS 形态未覆盖。
+6. ~~部署形态不在常规回归~~ **已补**（09-06 第六、七轮，`verify-deploy.sh` + `guard-deploy-manifests.py` + 可选镜像阶段）。剩余：性能维度仍按需执行。
+7. OAuth 仅单一 mock IdP；~~Turnstile 外呼无 mock~~ **已补**（09-06 第七轮 `console_turnstile`，经 `settings.turnstile_verify_url` 指向本地 mock）；SMTP TLS 形态未覆盖。
 
 ## 4. 执行记录
 
@@ -245,4 +252,16 @@
 | `deploy/k8s/okapi.yaml`、`deploy/docker-compose.yml` | gateway 加 `terminationGracePeriodSeconds: 330`，应用服务锚点加 `stop_grace_period: 5m30s` | 第三轮让进程真的响应 SIGTERM 之后，编排层缺省的 30s / 10s 宽限期会把排水又变回硬杀——这是那次修复的配套，此前遗漏 |
 | `frontend/e2e/write-forms.spec.ts` +4 | 价格分组抽屉、计费规则抽屉与列表（含 toggle / 删除）、SMTP 卡、TOTP 绑定（含 401 降级） | 4 / 4 通过；分组用例首跑因桩缺 `/admin/pools/{code}` 详情形状触发前端错误边界，补桩后通过——不是产品缺陷，真实接口有该形状 |
 
-复核：interactions 配置 71 / 71；oxlint / tsc 干净；五道守卫全过。
+复核：interactions 配置 71 / 71；oxlint / tsc 干净；五道守卫全过。已提交 `2117b4a`（首次提交误把并行会话的分组限流半成品 `git add -A` 进来，软回退后只重新暂存本轮 7 个文件）。
+
+### 2026-09-06 第七轮：发布镜像真跑 + Turnstile mock + 写表单收口
+
+| 新增 / 修正 | 内容 | 结果 |
+| --- | --- | --- |
+| 发布镜像构建（`git archive HEAD` → `docker build`） | 首跑在前端阶段失败：`@/features/logs/LogsPage` 不存在——`frontend/.gitignore` 的 `logs` 规则把 `src/features/logs/` 整个目录挡在版本库外，门户日志页从未提交过，本机能跑、fresh clone / CI / 镜像全挂。改为 `/logs`（只忽略根目录日志）并把 `LogsPage.tsx` 入库；顺手扫了全部 `@/` 导入，无第二处 | **修复** |
+| 同上，第二跑 | 镜像能建，`okapi --version` 报 `GLIBC_2.38 not found`：`rust:1-slim` 已跟到 Debian trixie，运行阶段是 bookworm-slim。builder 钉到 `rust:1-slim-bookworm` | **修复**；重建后 `okapi 0.1.0`、console 对临时空库起立、内嵌前端、Setup 向导、uid 65534 |
+| `scripts/verify-deploy.sh` 增 `OKAPI_VERIFY_IMAGE=1` 阶段 | 上面两步自动化：干净快照构建、`--version`、临时库 console 冒烟（healthz / SPA / setup 状态 / 非 root）、用完删库 | 通过 |
+| `bins/okapi/tests/console_turnstile.rs` | `settings.turnstile_verify_url` 覆写 siteverify 地址（写入 `docs/database.md` 注册表）；独立临时库 + 本地 mock：缺 token → `turnstile_token`、校验失败 → `turnstile_failed`、端点不可达 → `turnstile_unreachable`、表单体 `secret=…&response=…`、撤秘钥即关且不外呼 | 1 / 1 一次通过 |
+| `frontend/e2e/write-forms.spec.ts` +3 | 团队（建团 / 成员上限换算 / 发 key 一次性 / 401 降级）、渠道池抽屉与列表、渠道抽屉接入 / 模型 / 调度页签 + 新建 | 3 / 3 通过；渠道池用例首跑把 `/admin/pools` 导航请求也当接口回了 JSON，路由桩加 `isNavigationRequest` 放行；渠道抽屉用例被右下角 toast 堆叠盖住"取消"，改 Esc 关抽屉 |
+
+复核：interactions 配置 74 / 74；oxlint 干净；Rust 侧因并行会话的半成品（`console/admin.rs` `similar_names`、新文件 `channel_balance.rs` `struct_field_names`）全工作区 clippy 暂不能绿，豁免这两条后本轮改动干净；两条 lint 属对方待收口项。

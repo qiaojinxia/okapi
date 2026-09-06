@@ -569,7 +569,7 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 已注册键（M4 收口清单；读写走 `POST /admin/settings` + `GET /admin/settings/{key}`）：
 `strict_group_isolation`（组可见性两态）、`ssrf_policy`（渠道 api_base 校验策略）、
 `mcp_write_enabled`（MCP 写工具总闸）、`single_user_release_ack`（单用户模式生产确认）、
-`turnstile_secret`、`oauth_providers`、`payment_epay` / `payment_stripe`、
+`turnstile_secret`、`turnstile_verify_url`（siteverify 地址覆写，缺省 Cloudflare 官方端点；内网出口代理或自动化用例的 mock 用）、`oauth_providers`、`payment_epay` / `payment_stripe`、
 `model_rate_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（WS 连接租约上限，缺省 4）、
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
 `notify_channels`（通知多路配置数组）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、

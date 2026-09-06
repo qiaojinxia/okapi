@@ -78,6 +78,7 @@ const CHANNEL = {
   cost_milli: 1000,
   data_retention: null,
   last_test: null,
+  last_balance: null,
 }
 
 test('渠道抽屉：注入字段按 JSON 解析、代理与额外头可改可清，保存体只含有值的键；受保护键的 400 以错误码文案提示', async ({ page }) => {
@@ -602,9 +603,11 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await edit.getByRole('button', { name: '保存', exact: true }).click()
   await saved
   await expect(edit).toBeHidden()
-  expect(posts).toEqual([
+  // 只钉这五个字段的形状：分组抽屉还在长新字段（如分组级限流），用 toMatchObject 免得每加一列就红
+  expect(posts).toHaveLength(1)
+  expect(posts[0]).toMatchObject(
     { group_code: 'vip', group_ratio: '0.75', description: 'VIP tier', pool_code: 'default', self_select: false },
-  ])
+  )
 
   // 新建：分组码为空不放行；缺省倍率 1、缺省池 default、不可自选
   await page.getByRole('button', { name: '新建分组' }).click()
@@ -617,7 +620,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
   await save.click()
   await created
-  expect(posts[1]).toEqual({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false })
+  expect(posts[1]).toMatchObject({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false })
 })
 
 test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro，空范围不发键，时段星期勾选排序；列表上下线与删除提示需发布', async ({ page }) => {
@@ -823,6 +826,278 @@ test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位�
   await page.getByRole('button', { name: '开始绑定' }).click()
   await expect(page.getByText(/两步验证需邮箱密码登录/)).toBeVisible()
   await expect(page.getByRole('button', { name: '开始绑定' })).toHaveCount(0)
+})
+
+test('团队：建团提交去空格的名字，成员表单把月度上限 USD 换 micro 且空即不限，发团 key 明文只展示一次；无会话时整页降级', async ({ page }) => {
+  await prepare(page, { permissions: [] })
+  const posts: { path: string; body: Json }[] = []
+  let teams: Json[] = []
+  const members: Json[] = [
+    { member_user_id: 1, username: 'alice', role: 'owner', monthly_spend_limit_micro: null, total_spend_micro: 3_000_000, month_spend_micro: 250_000 },
+  ]
+  await page.route('**/api/teams?*', (route) => route.fulfill({ json: { data: teams, total: teams.length } }))
+  await page.route('**/api/teams', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    const body = route.request().postDataJSON() as Json
+    posts.push({ path: '/api/teams', body })
+    teams = [{ team_id: 9, name: body.name, role: 'owner', member_count: 1, monthly_spend_limit_micro: null, balance_micro: 0 }]
+    await route.fulfill({ json: { team_id: 9 } })
+  })
+  await page.route('**/api/teams/9/usage', (route) =>
+    route.fulfill({ json: { team_id: 9, balance_micro: 12_500_000, members } }),
+  )
+  await page.route(/\/api\/teams\/9\/(members|keys)$/, async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const body = route.request().postDataJSON() as Json
+    posts.push({ path, body })
+    if (path.endsWith('/members')) {
+      members.push({ member_user_id: body.user_id, username: `user-${body.user_id}`, role: body.role, monthly_spend_limit_micro: body.monthly_spend_limit_micro, total_spend_micro: 0, month_spend_micro: 0 })
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({ json: { api_key: 'sk-okapi-team-plaintext-once' } })
+    }
+  })
+
+  await page.goto('/portal/teams')
+  await page.getByRole('button', { name: '创建团队' }).first().click()
+  const createDrawer = page.getByRole('dialog')
+  const create = createDrawer.getByRole('button', { name: '创建团队', exact: true })
+  await expect(create).toBeDisabled()
+  await createDrawer.locator('#tname').fill('  Data Team ')
+  const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/api/teams'))
+  await create.click()
+  await created
+  expect(posts[0]).toEqual({ path: '/api/teams', body: { name: 'Data Team' } })
+
+  // 列表出现新团 → 管理抽屉：钱包、成员表、加成员、发 key
+  await page.getByRole('row').filter({ hasText: 'Data Team' }).getByRole('button', { name: '管理', exact: true }).click()
+  const detail = page.getByRole('dialog')
+  await expect(detail.getByRole('heading', { name: 'Data Team' })).toBeVisible()
+  await expect(detail.getByRole('row').filter({ hasText: 'alice' })).toContainText('所有者')
+
+  const add = detail.getByRole('button', { name: '加入 / 更新成员' })
+  await expect(add).toBeDisabled()
+  await detail.locator('#muid').fill('42')
+  await detail.locator('#mrole').selectOption('admin')
+  await detail.locator('#mlimit').fill('19.99')
+  const upserted = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/members'))
+  await add.click()
+  await upserted
+  expect(posts[1]).toEqual({ path: '/api/teams/9/members', body: { user_id: 42, role: 'admin', monthly_spend_limit_micro: 19_990_000 } })
+  await expect(detail.getByRole('row').filter({ hasText: 'user-42' })).toContainText('管理员')
+  // 提交后表单清空；上限留空 = 不限（null）
+  await expect(detail.locator('#muid')).toHaveValue('')
+  await detail.locator('#muid').fill('43')
+  await add.click()
+  await expect.poll(() => posts.length).toBe(3)
+  expect(posts[2].body).toEqual({ user_id: 43, role: 'member', monthly_spend_limit_micro: null })
+
+  await detail.getByRole('button', { name: '给自己发团 key' }).click()
+  await expect(detail.getByText('sk-okapi-team-plaintext-once')).toBeVisible()
+  await expect(detail.getByText('明文仅此一次可见')).toBeVisible()
+  expect(posts[3]).toEqual({ path: '/api/teams/9/keys', body: { name: 'team' } })
+
+  // API Key 单轨登录没有会话：列表 401 → 整页降级提示，不显示空态或哑按钮
+  await page.route('**/api/teams?*', (route) => route.fulfill(apiError(401, 'unauthorized')))
+  await page.reload()
+  await expect(page.getByText(/团队功能需邮箱密码登录/)).toBeVisible()
+  await expect(page.getByRole('button', { name: '创建团队' })).toHaveCount(0)
+})
+
+test('渠道池抽屉：策略与降级目标可选且不能选自己，不降级发 null；内置池与被引用的池不可删', async ({ page }) => {
+  await prepare(page)
+  const posts: Json[] = []
+  const deletes: string[] = []
+  const pools = [
+    { pool_code: 'default', description: null, routing_strategy: 'priority_weighted', fallback_pool_code: null, builtin: true, channel_count: 3, group_count: 2, key_count: 0, fallback_ref_count: 1 },
+    { pool_code: 'premium', description: 'paid', routing_strategy: 'least_latency', fallback_pool_code: 'default', builtin: false, channel_count: 1, group_count: 1, key_count: 0, fallback_ref_count: 0 },
+    { pool_code: 'spare', description: null, routing_strategy: 'priority_weighted', fallback_pool_code: null, builtin: false, channel_count: 0, group_count: 0, key_count: 0, fallback_ref_count: 0 },
+  ]
+  await page.route('**/admin/pools?*', (route) => route.fulfill({ json: { data: pools, total: pools.length } }))
+  await page.route('**/admin/pools', async (route) => {
+    // 同一路径既是 SPA 深链（导航）又是接口：导航要回应用壳，不能被池 JSON 顶掉
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'GET') return route.fulfill({ json: { data: pools } })
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/pools/*', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    deletes.push(new URL(route.request().url()).pathname)
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/pools')
+  const rowOf = (code: string) => page.getByRole('row').filter({ hasText: code }).first()
+  await expect(rowOf('default').getByRole('button', { name: '删除', exact: true })).toBeDisabled()
+  await expect(rowOf('premium').getByRole('button', { name: '删除', exact: true })).toBeDisabled()
+  await expect(rowOf('spare').getByRole('button', { name: '删除', exact: true })).toBeEnabled()
+
+  await rowOf('premium').getByRole('button', { name: '编辑', exact: true }).click()
+  const edit = page.getByRole('dialog')
+  await expect(edit.getByRole('heading', { name: '编辑 premium' })).toBeVisible()
+  await expect(edit.locator('#pool-code')).toHaveAttribute('readonly', '')
+  await expect(edit.locator('#pool-strategy')).toHaveValue('least_latency')
+  await expect(edit.locator('#pool-fallback')).toHaveValue('default')
+  // 降级目标里不能有自己
+  await expect(edit.locator('#pool-fallback option[value="premium"]')).toHaveCount(0)
+  await edit.locator('#pool-strategy').selectOption('priority_weighted')
+  await edit.locator('#pool-fallback').selectOption('')
+  await edit.locator('#pool-desc').fill('paid tier')
+  let saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pools'))
+  await edit.getByRole('button', { name: '保存', exact: true }).click()
+  await saved
+  expect(posts[0]).toEqual({ pool_code: 'premium', description: 'paid tier', routing_strategy: 'priority_weighted', fallback_pool_code: null })
+
+  await page.getByRole('button', { name: '新建池' }).click()
+  const create = page.getByRole('dialog')
+  const save = create.getByRole('button', { name: '保存', exact: true })
+  await expect(save).toBeDisabled()
+  await create.locator('#pool-code').fill(' stable ')
+  await create.locator('#pool-fallback').selectOption('default')
+  saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pools'))
+  await save.click()
+  await saved
+  expect(posts[1]).toEqual({ pool_code: 'stable', description: '', routing_strategy: 'priority_weighted', fallback_pool_code: 'default' })
+
+  await rowOf('spare').getByRole('button', { name: '删除', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText('删除 spare？')
+  const removed = page.waitForRequest((r) => r.method() === 'DELETE')
+  await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await removed
+  expect(deletes).toEqual(['/admin/pools/spare'])
+})
+
+test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉上游模型覆盖清单；调度页签的成本 / 留存随保存走，池成员单独保存并按覆盖值落体；新建同时带池成员', async ({ page }) => {
+  await prepare(page)
+  const calls: { path: string; method: string; body: Json }[] = []
+  const record = (route: import('@playwright/test').Route) => {
+    const r = route.request()
+    calls.push({ path: new URL(r.url()).pathname, method: r.method(), body: (r.postDataJSON() ?? null) as Json })
+  }
+  await page.route('**/admin/channels?*', (route) =>
+    route.fulfill({ json: { data: [{ ...CHANNEL, settings: {}, pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }] }], total: 1, enabled: 1 } }),
+  )
+  await page.route('**/admin/pools', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    return route.fulfill({
+      json: { data: [
+        { pool_code: 'default', description: null, routing_strategy: 'priority_weighted', fallback_pool_code: null, builtin: true, channel_count: 1, group_count: 1, key_count: 0, fallback_ref_count: 0 },
+        { pool_code: 'premium', description: null, routing_strategy: 'least_latency', fallback_pool_code: 'default', builtin: false, channel_count: 0, group_count: 0, key_count: 0, fallback_ref_count: 0 },
+      ] },
+    })
+  })
+  await page.route('**/admin/channels/42/credential', async (route) => {
+    record(route)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/channels/42/fetch-models', async (route) => {
+    record(route)
+    // 响应形状正在从 data 迁到 models（上游余额 / 拉模型统一改造中），两把钥匙都给
+    const found = ['gpt-5', 'gpt-5-mini', 'o4']
+    await route.fulfill({ json: { data: found, models: found } })
+  })
+  await page.route('**/admin/channels/42/pools', async (route) => {
+    record(route)
+    await route.fulfill({ json: { ok: true, orphan: false } })
+  })
+  await page.route('**/admin/channels/42', async (route) => {
+    record(route)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/channels', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    record(route)
+    await route.fulfill({ json: { id: 43 } })
+  })
+
+  await page.goto('/admin/channels')
+  await page.getByRole('row').filter({ hasText: 'openai-main' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+
+  // 接入页签：协议只读；凭证轮换是独立端点，不并进"保存"，成功后输入清空
+  await expect(drawer.locator('#d-provider')).toHaveAttribute('readonly', '')
+  const rotate = drawer.getByRole('button', { name: '轮换', exact: true })
+  await expect(rotate).toBeDisabled()
+  await drawer.locator('#d-cred').fill('sk-new-secret')
+  const rotated = page.waitForRequest((r) => r.url().endsWith('/credential'))
+  await rotate.click()
+  await rotated
+  await expect(page.getByRole('status').filter({ hasText: '凭证已轮换' })).toBeVisible()
+  await expect(drawer.locator('#d-cred')).toHaveValue('')
+  expect(calls).toEqual([{ path: '/admin/channels/42/credential', method: 'POST', body: { credential: 'sk-new-secret' } }])
+
+  // 模型页签：拉上游模型直接覆盖清单，并提示发现数量
+  await drawer.getByRole('tab', { name: '模型', exact: true }).click()
+  await drawer.getByRole('button', { name: '拉取上游模型' }).click()
+  await expect(page.getByRole('status').filter({ hasText: '发现 3 个模型' })).toBeVisible()
+  expect(calls[1]).toMatchObject({ path: '/admin/channels/42/fetch-models', method: 'GET' })
+
+  // 调度页签：成本倍数 → 千分比、留存声明随主"保存"提交；池成员单独保存，覆盖值按整数、留空 null
+  await drawer.getByRole('tab', { name: '调度', exact: true }).click()
+  await drawer.locator('#d-priority').fill('7')
+  await drawer.locator('#d-cost').fill('0.5')
+  await drawer.locator('#d-retention').selectOption('transient')
+  await drawer.getByRole('checkbox', { name: 'premium', exact: true }).check()
+  const premiumRow = drawer.getByRole('checkbox', { name: 'premium', exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded-md")][1]')
+  await premiumRow.getByLabel('优先级').fill('3')
+  await premiumRow.getByLabel('权重').fill('2.5')
+  const poolsSaved = page.waitForRequest((r) => r.url().endsWith('/pools'))
+  await drawer.getByRole('button', { name: '保存池成员关系' }).click()
+  await poolsSaved
+  await expect(page.getByRole('status').filter({ hasText: '池成员关系已保存' })).toBeVisible()
+  expect(calls[2]).toEqual({
+    path: '/admin/channels/42/pools',
+    method: 'POST',
+    body: { pools: [
+      { pool_code: 'default', priority_override: null, weight_override: null },
+      { pool_code: 'premium', priority_override: 3, weight_override: null },
+    ] },
+  })
+
+  const saved = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith('/admin/channels/42'))
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await saved
+  expect(calls[3]).toEqual({
+    path: '/admin/channels/42',
+    method: 'PATCH',
+    body: {
+      name: 'openai-main', api_base: 'https://api.openai.com/v1', models: ['gpt-5', 'gpt-5-mini', 'o4'], priority: 7,
+      settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
+      cost_milli: 500, data_retention: 'transient',
+    },
+  })
+  // 右下角还堆着几条成功 toast，会盖住抽屉页脚的"取消"，用 Esc 关抽屉
+  await page.keyboard.press('Escape')
+  await expect(drawer).toBeHidden()
+
+  // 新建：三件必答事（名 / 凭证 / 模型）齐了才放行，池成员随建渠道一起提交，缺省进 default
+  await page.getByRole('button', { name: '新建渠道' }).first().click()
+  const create = page.getByRole('dialog')
+  const submit = create.getByRole('button', { name: '新建', exact: true })
+  await create.locator('#d-name').fill('anthropic-eu')
+  await create.locator('#d-provider').selectOption('anthropic')
+  await expect(submit).toBeDisabled()
+  await create.locator('#d-cred').fill('sk-ant-1')
+  await expect(submit).toBeDisabled()
+  const manual = create.locator('#d-models')
+  await manual.fill('claude-sonnet-4')
+  await manual.press('Enter')
+  await expect(submit).toBeEnabled()
+  const createdReq = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/channels'))
+  await submit.click()
+  await createdReq
+  expect(calls[4]).toEqual({
+    path: '/admin/channels',
+    method: 'POST',
+    body: {
+      name: 'anthropic-eu', provider: 'anthropic', api_base: '', credential: 'sk-ant-1', models: ['claude-sonnet-4'], priority: 0,
+      settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
+      pools: [{ pool_code: 'default', priority_override: null, weight_override: null }],
+      cost_milli: 1000, data_retention: '',
+    },
+  })
 })
 
 test('重置密码：缺 token 直接提示无效；长度与一致性校验挡在提交前；成功回登录页；失效 token 提示重新申请', async ({ page }) => {

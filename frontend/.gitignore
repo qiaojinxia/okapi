@@ -1,5 +1,6 @@
-# Logs
-logs
+# Logs（只忽略项目根的日志目录：不加斜杠会把 src/features/logs 这种源码目录一起吞掉——
+# 门户日志页 LogsPage.tsx 曾因此从未进过版本库，本机能跑、镜像与 CI 全挂）
+/logs
 *.log
 npm-debug.log*
 yarn-debug.log*

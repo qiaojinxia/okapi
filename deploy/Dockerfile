@@ -11,7 +11,9 @@ COPY frontend/ frontend/
 RUN cd frontend && pnpm build
 
 # ---- 后端 ----
-FROM public.ecr.aws/docker/library/rust:1-slim AS builder
+# 构建与运行阶段必须钉在同一个 Debian 发行版：`rust:1-slim` 已跟到 trixie（glibc 2.41），
+# 二进制拿到 bookworm-slim 运行时会 `GLIBC_2.38 not found` 直接起不来（scripts/verify-deploy.sh 抓到）
+FROM public.ecr.aws/docker/library/rust:1-slim-bookworm AS builder
 WORKDIR /src
 RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY . .
