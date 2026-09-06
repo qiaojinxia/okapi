@@ -36,6 +36,7 @@
 - 本机 Cursor 沙箱会把 `CARGO_TARGET_DIR` 重定向到缓存目录，L4 / L5 依赖的 `target/debug/okapi` 必须显式 `CARGO_TARGET_DIR=target` 构建，否则跑的是旧二进制。
 - `.sqlx` 快照必须用 `cargo sqlx prepare --workspace -- --all-targets` 生成；不带 `--all-targets` 会漏掉测试里的 `query!`，CI 离线编译即红。
 - L4 与 L5 都占 :8081，顺序执行；L4 的 Playwright `webServer` 在 `reuseExistingServer: true` 下会复用已在跑的 console。
+- 想在 worktree 或第二份 checkout 上独立验证时，`.env` 不够：`dotenvy` 不覆盖已导出的环境变量，shell 里 `set -a; . .env` 过的 `DATABASE_URL` 会让 worktree 连回主库（迁移版本不一致即 `VersionMissing`）；必须显式传 `DATABASE_URL=…`。同时 Redis / CH 也要隔离——两套 PG 的自增 id 会在同一 Redis（`bal:{uid}`）与同一 CH 库里串味，余额与聚合断言随机失败。Redis 用逻辑库号（`redis://…:63790/7` + `redis-cli -n 7 flushdb`）零成本隔离；CH 库名在测试里写死 `okapi`，暂无法隔离，相关两例（`entity_usage_batches_by_ids`、`admin_refund_full_cycle`）以主库结果为准。
 
 ## 2. 覆盖矩阵
 
@@ -76,7 +77,7 @@
 
 | 模块 | 职责 | 维度 | 覆盖套件 | 缺口 / 备注 |
 | --- | --- | --- | --- | --- |
-| `auth_web.rs` | 注册 / 登录 / TOTP / 兑 key / 会话列举吊销 / 邮箱验证码 / 找回密码 / 关键接口限流 | A C | `console_auth_web`、`console_smtp`（验证码、重置、无 SMTP 501）、`console_audit::login_attempts_are_audited`、e2e smoke（登录 / 登出清 session / session 降级） | 会话数上限未实现 |
+| `auth_web.rs` | 注册 / 登录 / TOTP / 兑 key / 会话列举吊销 / 会话数上限（§11.37，`settings.web_session_limit`，踢最早）/ 邮箱验证码 / 找回密码 / 关键接口限流 | A C | `console_auth_web`（含 `session_limit_evicts_oldest`：上限 2 连登三次，最早 cookie 兑 key 401、后两条有效、列表两条并回 `limit`）、`console_smtp`（验证码、重置、无 SMTP 501）、`console_audit::login_attempts_are_audited`、e2e smoke（登录 / 登出清 session / session 降级） | OAuth 回调走同一 `open_web_session`，靠编译期同构，无 OAuth 路径的上限用例 |
 | `oauth.rs` | 通用 OAuth2 / OIDC | A C | `console_oauth`（mock IdP 授权码全流程）；`console_oauth_presets`（09-06 第八轮，独立临时库）：github / discord / linuxdo 三预设的 scopes 进授权跳转、数字 / snowflake `id` 作绑定键、`login` / `username` 作展示名与首登用户名；改名不换账号、同名不同 id 是另一个账号且用户名加盐、缺 `id` 拒绝不落绑定、token 端点 500 → `oauth_upstream_error` param `status_500` | — |
 | `registration.rs` + `auth_web::verify_turnstile` | 注册策略、邀请赠送、Turnstile | A C | 单元；`console_auth_web::registration_policy_gates_signup`；`console_turnstile`（09-06 第七轮，独立临时库 + 本地 siteverify mock：缺 token / 校验失败 / 端点不可达三种 param、表单体 `secret=…&response=…`、撤掉秘钥即关闭） | — |
 | `setup.rs` | 空库首启向导 | A | `console_setup`（独立临时库） | — |
@@ -84,6 +85,7 @@
 | `manage.rs` / `admin.rs` / `query.rs` / `cloud_probe.rs` | 六类管理面 CRUD、批量、写校验（azure / bedrock / vertex 地址、aws_region、出站 / 注入字段）、路由诊断、bedrock / vertex 测活与模型发现 | A C | `console_manage`（含 `cloud_channel_write_validation`：两家缺地址 400、vertex 地址形状、aws_region 形状、只改地址仍校验）、`console_m2`、`console_users`、`console_visibility`（属主范围 / 分组矩阵）、`console_pricing_write`、`console_channel_test`、`console_import`、`console_diagnose`、`gateway_pricing_rules::console_rule_crud_and_validation` | bedrock / vertex 测活与拉模型走真实签名 / 换 token，无 mock 端到端（凭证探测 = SigV4 列基础模型 / Bearer 列兼容模型 / vertex 换 token） |
 | `channel_balance.rs` | 上游余额查询（§11.33）：按主机选探针、定点解析、`ch:balance` 留痕 | A | `console_channel_test::channel_balance_probe`（dashboard 口径额度 − 美分用量、凭证错 502 `status_401`、anthropic 400 `balance_unsupported`、列表 `last_balance` 回填）；单元：探针选择 / URL / 四家官方响应形状 / 十进制解析 | DeepSeek 等官方探针只有形状单测，无 mock 端到端 |
 | `margin.rs`（+ `crate::margin`） | 负毛利熔断列出 / 解除（§11.34） | A C | `worker_margin_breaker`（列出含渠道名与 active、lift 后同进程立即放行且审计 `margin.lift`、解除期评估器跳过） | — |
+| `ratio_sync.rs` | 上游倍率在线同步（§11.36）：三种源形状识别、逐模型逐轴差异、择项应用 | A B C | `console_ratio_sync`（ratio_config / new-api pricing 两源 + 非 JSON + 不可达：`current` / `same` / 缺失三态、按次与倍率不混比、单源失败不阻塞、源数与重名 400；apply 只改选中轴其余保持本地值、按次价 → micro、审计 `pricing.sync_apply`、非法轴 / 负值 400）；单元：三种形状解析、micro ↔ USD 字面量、`1.250000 == 1.25` 规范化、十进制不经浮点 | Okapi `/api/pricing` 形状只有单测；出站走 `ssrf::validate_api_base` 同一把闸 |
 | `analytics.rs` / `stats.rs` / `logs.rs` / `usage_details.rs` / `activity.rs` / `analysis_*` | CH 立方体三端点、看板、日志检索、实时 KPI、毛利 | A B | `console_analytics`、`console_stats`、`console_logs`、`gateway_upstream_cost`；单元 `activity` / `analysis_freshness` / `usage_details` | `console_analytics` 两例曾在全量并行下偶发（outbox 行被别的进程 drain、两张 MV 先后落地），09-06 改为 `poll_until` 全字段谓词，见第 4 节发现 ① |
 | `audit.rs` | 管理写操作 + 登录审计 | C | `console_audit`、`console_ops::assist_overview_scoped_and_audited`、`console_mcp_write`（`mcp:{key_id}` 落痕） | — |
 | `dlq.rs` | 死信列表 / 重投 / 丢弃 | A D | `console_logs::dlq_list_requeue_and_discard`、`worker_ch::chsink_pipeline_then_dlq`、e2e smoke 运维页 | — |
@@ -148,7 +150,7 @@
 | 发布镜像（多阶段 Dockerfile） | I | `OKAPI_VERIFY_IMAGE=1 bash scripts/verify-deploy.sh`（09-06 第七轮）：从 `git archive HEAD` 干净快照 `docker build`，`okapi --version` 可执行，对临时空库起 console：healthz、内嵌前端、首启迁移 + Setup 向导、以 65534 运行 | 构建约 5 分钟，不进默认路径；需本机 docker |
 | compose 双 profile / k8s manifests | I | `scripts/guard-deploy-manifests.py`（09-06 第六轮）：文档结构、Service selector ↔ Deployment、容器 image / resources、对外容器 `/healthz` readinessProbe、gateway `terminationGracePeriodSeconds` 与应用服务 `stop_grace_period` ≥ 330s（§14.3 排水口径）、Σ(副本上限 × OKAPI_PG_POOL) ≤ 200、依赖镜像来源与 healthcheck | 无 kubectl / compose 插件，不做 schema 级校验 |
 | Nginx SSE 模板 | I | 手工 | — |
-| 缩尺压测 / Linux 复测 | G | `docs/perf-report.md`（2026-08-30） | 裸金属正式复测、10 万 SSE 整数口径待办 |
+| 缩尺压测 / Linux 复测 | G | `docs/perf-report.md`（2026-08-30）；09-06 第九轮在 HEAD `018d963` release 上复跑 baseline / json / stream / c=1 四档，无回归，同时暴露结算积压问题（第 3 节第 8 条） | 裸金属正式复测、10 万 SSE 整数口径待办；本机负载高时同档两跑相差 2.5 倍，只能看方向 |
 
 ## 3. 覆盖缺口清单（按风险排序）
 
@@ -157,8 +159,9 @@
 3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁按 §4.3 定案不适用于当前 static_key 主线。剩余：SSE 排水无 5min 上限（依赖编排层 grace period）。
 4. ~~mid-stream 断流语义无专项用例~~ **已补**（09-06 第三轮，`gateway_midstream`）。
 5. **集成测试共享一条 `billing_outbox` 队列**：任一用例的行都可能被别的测试进程 drain 进 CH，因此「drain 后直接读 CH 并断言」天然有竞态。现行约定是走 `poll_until` 且谓词覆盖全部待断言字段（09-06 修了两处漏网的）；新增 CH 用例须照此写，或改为按 user_id 隔离的 drain。
-6. ~~部署形态不在常规回归~~ **已补**（09-06 第六、七轮，`verify-deploy.sh` + `guard-deploy-manifests.py` + 可选镜像阶段）。剩余：性能维度仍按需执行。
+6. ~~部署形态不在常规回归~~ **已补**（09-06 第六、七轮，`verify-deploy.sh` + `guard-deploy-manifests.py` + 可选镜像阶段）。性能维度 09-06 第九轮已按需跑过一次（无回归），仍不进默认路径。
 7. ~~OAuth 仅单一 mock IdP~~ **已补**（09-06 第八轮 `console_oauth_presets`）；~~Turnstile 外呼无 mock~~ **已补**（第七轮 `console_turnstile`）；SMTP TLS 形态未覆盖（mock SMTP 只走明文 AUTH PLAIN，STARTTLS / 隐式 TLS 需要带证书的 mock，且客户端得有可配的信任锚——暂列不做）。
+8. **后台结算积压无上界（09-06 第九轮压测发现，待设计定案）**：响应先行、结算后台的路径里，`settle_gate` 信号量只钳制同时碰 PG 的任务数，不限制排队深度。本机 Docker PG 落账峰值约 1000 笔 / 秒，而零延迟 mock 上游下 gateway 进 4.7k–11.7k RPS，8 分钟压测结束时内存里堆着 **260,101** 笔已在 Redis 扣款、未进 PG 的结算任务；SIGTERM 后按设计等满 30s 上限即放弃（`后台结算未在下线窗口内完成，交由对账修复 pending=260101`），最终 PG 只有 166k / 426k 笔记录。连带影响：worker 对账的 `SETTLE_WINDOW`（1.5s 双采样）假设"Redis 比账本低一笔是瞬时态"，积压持续数分钟时会被判成稳定漂移并按账本回填余额，等积压落账后再反向修一次——中间用户余额虚高。真实上游延迟下单实例 RPS 远低于此，属过载态问题，但溢出无声、退出丢账，值得定案：方案 A 有界队列 + 超阈值对数据面施压（拒绝或降级）；方案 B 结算意图先落 Redis 持久队列由 worker 消费（进程退出不丢）。涉及计费语义，按规则先改 DESIGN / IMPLEMENTATION 再动代码。
 
 ## 4. 执行记录
 
@@ -275,3 +278,30 @@
 | `frontend/e2e/write-forms.spec.ts` +2 | 用户抽屉角色 / 订阅 / 余额有效期三段；渠道 key 级参数、套餐删除、模型页发布 | 2 / 2 通过；`write-forms` 累计 17 例 |
 
 复核：oxlint 干净；interactions 配置 75 / 76——唯一失败是既有的 `interactions.spec 列表分页` 用例：并行会话给渠道行新增的 `LastBalance` 组件在夹具缺 `last_balance` 字段时崩掉整行，属对方特性引入的回归，应随其特性一起把夹具补上或让组件容忍 `undefined`；本文件的 17 例均通过。SMTP TLS 与性能维度维持"按需 / 不做"。
+
+### 2026-09-06 第九轮：已提交 HEAD 的隔离全量 + 性能对照
+
+目的：工作树混着并行会话约 84 个未提交文件（含一处编译错误），前八轮的 Rust 侧全工作区 clippy / 测试都是带豁免跑的。本轮用 `git worktree add --detach /tmp/okapi-head HEAD`（`018d963`）+ 独立库 `okapi_head` + Redis 逻辑库 7，对**已提交状态**做一次干净验证，再用 release 构建对照 `docs/perf-report.md` 基线看今天的热路径改动（结算幂等点查、后台结算计数）有没有拖慢。
+
+| 层 | 结果 | 数字 | 说明 |
+| --- | --- | --- | --- |
+| L0 rustfmt / 五道守卫 | 通过 | i18n 键 1377、前端权限点 9、部署模板 Σ 池 152 / 200 | — |
+| L0 cargo-deny | licenses 仅 7 个自有 crate `unlicensed` | — | 与前几轮一致，等 §15 许可证定案 |
+| L0 clippy `-D warnings --all-targets` | **通过（全工作区、无豁免）** | — | 并行会话的两条 lint 与 `hmac::KeyInit` 编译错误都不在 HEAD 里，证实是对方未提交半成品 |
+| L1 + L2 全量 | 首跑 197 / 450，253 失败全是 `Migrate(VersionMissing(5))` | — | 环境问题：shell 早前导出的 `DATABASE_URL` 盖住了 worktree `.env`，测试连到被并行会话迁到 0005 的主库。已写进第 1 节注意事项 |
+| L1 + L2 全量（显式 `DATABASE_URL`） | 436 / 450 | 14 失败 | 全部是 Redis 串味：`okapi_head` 的小整数 uid 与主库用户共用 `bal:{uid}`（如 `images_insufficient_for_batch` 期望 300000 实得 299460；`newapi_sample_migration_full_check` 换算多出 7000） |
+| 14 例所在的 13 个套件（Redis 逻辑库 7） | 12 / 14 恢复 | 余 2 | `entity_usage_batches_by_ids`、`admin_refund_full_cycle` 只剩 CH 串味（CH 库名写死 `okapi`，两套 PG 的 api_key / user id 在同一张聚合表里相加）；两例今日早先在主库上均通过，代码未变 |
+| L6 性能（release，同机 Docker 四容器，负载均值 15、Docker VM 340% CPU） | 无回归 | 见下 | 机器很吵，同档两跑相差 2.5 倍，只做方向判断 |
+
+性能数字（loadgen，与 08-30 基线同机同口径）：
+
+| 档位 | 08-30 基线 | 09-06 HEAD | 判读 |
+| --- | --- | --- | --- |
+| baseline（mock 直连，c=64） | 未记录（Linux 容器 101–106k） | 77,858 RPS · P50 0.60ms · P99 3.71ms | 本机 HTTP 栈本底 |
+| c=64 json | 4,016 RPS · P50 6.65 · P99 16.8ms | 4,663 RPS · P50 12.4 · P99 36.6ms；复跑 11,708 RPS · P50 5.39 · P99 7.19ms | 两跑都 ≥ 基线；差 2.5 倍说明数字被机器负载主导 |
+| c=64 stream | 3,098 RPS · P99 18.7ms | 11,447 RPS · P50 5.46 · P99 8.60ms | 3.7 倍于基线 |
+| c=1 json（纯开销口径） | 580 RPS · P50 1.52 · P99 5.04ms | 420 / 427 RPS · P50 2.34 / 2.33 · P99 3.86 / 3.39ms | P50 慢 0.8ms、P99 快 1.2ms；两跑一致。今天两处改动都不在响应路径上（幂等点查在后台结算事务里、计数是原子加减），更像负载差异，待安静机器复测才能下结论 |
+
+压测全程 gateway 0 条 ERROR / WARN；请求错误 0。SIGTERM 下线走完整流程（"收到退出信号" → 30s 上限 → "已下线"），但暴露了第 3 节第 8 条：**结算积压 260,101 笔被放弃**，PG 只落了 166k / 426k 笔，Redis 侧扣款全部完成（`bal:{uid}` 无残留 `r:*` 预扣字段），即整段差额将由对账按账本回填。这是过载态下"响应先行"设计的代价，本轮只记录不改（计费语义变更须先改文档）。
+
+其他：release 网关若用 `( nohup … & )` 子 shell 起，随工具调用结束一起被收走，必须作为常驻后台任务起。收尾已 `git worktree remove` 并删除 `okapi_head` 库、清空 Redis 逻辑库 7。
