@@ -2844,7 +2844,7 @@ pub(crate) async fn probe_channel(
     let started = std::time::Instant::now();
     let outcome = state
         .pass
-        .forward(okapi_providers::custom_pass::PassRequest {
+        .probe(okapi_providers::custom_pass::PassRequest {
             method,
             url,
             auth_header,
@@ -2956,7 +2956,7 @@ pub async fn fetch_channel_models(
     let outbound = okapi_providers::Outbound::from_settings(&row.settings);
     let outcome = state
         .pass
-        .forward(okapi_providers::custom_pass::PassRequest {
+        .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::GET,
             url,
             auth_header,

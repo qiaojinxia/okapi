@@ -117,35 +117,52 @@ pub fn is_forbidden_header(name: &str) -> bool {
 }
 
 /// 缺省 client + 按代理 URL 缓存的 client。`Clone` 共享同一份缓存。
+///
+/// 两族 client：数据面转发用的（跟随重定向，reqwest 缺省）与管理面探针用的（**不跟随**）。
+/// SSRF 闸（`console::ssrf`）只校验管理员填进来的那个 URL，跟着 30x 走就能被一个公网地址
+/// 引到私网 / 云元数据地址；测活、拉模型、余额、OAuth 换 token、Turnstile、支付回调这些
+/// 外呼都没有跟随重定向的正当理由。数据面保留缺省：`/videos/{id}/content` 这类下载透传
+/// 可能就靳上游 302 到 CDN。
 #[derive(Clone)]
 pub struct HttpPool {
     default: reqwest::Client,
     proxied: std::sync::Arc<RwLock<HashMap<String, reqwest::Client>>>,
+    probe_default: reqwest::Client,
+    probe_proxied: std::sync::Arc<RwLock<HashMap<String, reqwest::Client>>>,
 }
 
 impl HttpPool {
     pub fn new() -> Result<Self, UpstreamError> {
         Ok(Self {
-            default: build_client(None)?,
+            default: build_client(None, true)?,
             proxied: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            probe_default: build_client(None, false)?,
+            probe_proxied: std::sync::Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
     /// 取出站 client：无代理用缺省池；有代理按 URL 缓存（锁中毒则当场再建，不 panic）。
     pub fn client(&self, proxy_url: Option<&str>) -> Result<reqwest::Client, UpstreamError> {
-        let Some(url) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(self.default.clone());
-        };
-        if let Ok(guard) = self.proxied.read()
-            && let Some(hit) = guard.get(url)
-        {
-            return Ok(hit.clone());
-        }
-        let built = build_client(Some(url))?;
-        if let Ok(mut guard) = self.proxied.write() {
-            guard.insert(url.to_owned(), built.clone());
-        }
-        Ok(built)
+        cached_client(&self.default, &self.proxied, proxy_url, true)
+    }
+
+    /// 管理面探针 client：同样按代理缓存，但不跟随重定向。
+    pub fn probe_client(&self, proxy_url: Option<&str>) -> Result<reqwest::Client, UpstreamError> {
+        cached_client(&self.probe_default, &self.probe_proxied, proxy_url, false)
+    }
+
+    /// 管理面探针请求（与 `request` 同形，换用不跟随重定向的 client）。
+    pub fn probe(
+        &self,
+        outbound: &Outbound,
+        method: reqwest::Method,
+        url: impl reqwest::IntoUrl,
+    ) -> Result<reqwest::RequestBuilder, UpstreamError> {
+        let client = self.probe_client(outbound.proxy_url.as_deref())?;
+        Ok(apply_extra_headers(
+            client.request(method, url),
+            &outbound.extra_headers,
+        ))
     }
 
     pub fn post(
@@ -178,8 +195,35 @@ impl HttpPool {
     }
 }
 
-fn build_client(proxy_url: Option<&str>) -> Result<reqwest::Client, UpstreamError> {
+fn cached_client(
+    default: &reqwest::Client,
+    cache: &RwLock<HashMap<String, reqwest::Client>>,
+    proxy_url: Option<&str>,
+    follow_redirects: bool,
+) -> Result<reqwest::Client, UpstreamError> {
+    let Some(url) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(default.clone());
+    };
+    if let Ok(guard) = cache.read()
+        && let Some(hit) = guard.get(url)
+    {
+        return Ok(hit.clone());
+    }
+    let built = build_client(Some(url), follow_redirects)?;
+    if let Ok(mut guard) = cache.write() {
+        guard.insert(url.to_owned(), built.clone());
+    }
+    Ok(built)
+}
+
+fn build_client(
+    proxy_url: Option<&str>,
+    follow_redirects: bool,
+) -> Result<reqwest::Client, UpstreamError> {
     let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    if !follow_redirects {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
     if let Some(raw) = proxy_url {
         let url =
             parse_proxy_url(raw).ok_or_else(|| UpstreamError::Build("proxy_url".to_owned()))?;

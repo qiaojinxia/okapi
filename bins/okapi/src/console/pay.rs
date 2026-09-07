@@ -217,7 +217,7 @@ pub async fn place_order(
                 .to_owned();
             let resp = state
                 .pass
-                .forward(PassRequest {
+                .probe(PassRequest {
                     method: axum::http::Method::POST,
                     url: format!("{api}/v1/checkout/sessions"),
                     auth_header: "authorization".to_owned(),

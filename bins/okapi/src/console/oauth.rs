@@ -266,7 +266,7 @@ pub async fn callback(
 
 /// 经 PassUpstream 请求并解析 JSON（token/userinfo 共用）。
 async fn fetch_json(state: &AppState, req: PassRequest) -> Result<Value, AppError> {
-    match state.pass.forward(req).await {
+    match state.pass.probe(req).await {
         Ok(PassResponse::Ok { mut stream, .. }) => {
             use futures::StreamExt as _;
             let mut buf = Vec::new();

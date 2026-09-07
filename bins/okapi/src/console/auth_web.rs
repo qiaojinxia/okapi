@@ -432,7 +432,7 @@ async fn verify_turnstile(state: &AppState, token: Option<&str>) -> Result<(), A
     );
     let outcome = state
         .pass
-        .forward(okapi_providers::custom_pass::PassRequest {
+        .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::POST,
             url: verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned()),
             auth_header: "x-okapi-noop".to_owned(),

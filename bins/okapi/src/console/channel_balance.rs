@@ -256,7 +256,7 @@ async fn get_json(
 ) -> Result<Value, AppError> {
     let outcome = state
         .pass
-        .forward(okapi_providers::custom_pass::PassRequest {
+        .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::GET,
             url,
             auth_header: "authorization".to_owned(),

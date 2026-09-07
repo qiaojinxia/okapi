@@ -8,6 +8,8 @@ use okapi::{console, gateway};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 
 async fn mock_models(headers: axum::http::HeaderMap) -> axum::response::Response {
@@ -310,4 +312,49 @@ async fn channel_balance_probe() {
         .unwrap();
     assert_eq!(row["last_balance"]["balance_micro"], 87_655_000, "{row}");
     assert_eq!(row["last_balance"]["currency"], "USD");
+}
+
+/// 管理面探针不跟随重定向：SSRF 闸只看得到管理员填的 api_base，上游一跳 302 不能把探测
+/// 引到别的地址（私网 / 元数据）。测活拿到的是 302 本身，重定向目标零命中。
+#[tokio::test]
+async fn channel_test_does_not_follow_redirects() {
+    let env = setup().await;
+    let leaked = Arc::new(AtomicUsize::new(0));
+    let router = axum::Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(axum::http::header::LOCATION, "/leak")],
+                )
+            }),
+        )
+        .route(
+            "/leak",
+            axum::routing::get({
+                let leaked = Arc::clone(&leaked);
+                move || {
+                    let leaked = Arc::clone(&leaked);
+                    async move {
+                        leaked.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"data": []}))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let redirecting = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let id = mk_channel(&env, "sk-good", &format!("http://{redirecting}/v1")).await;
+    let body = test_channel(&env, id).await;
+    assert_eq!(body["ok"], false, "{body}");
+    assert_eq!(
+        body["http_status"], 302,
+        "拿到的是 302 本身而非跟过去的 200：{body}"
+    );
+    assert_eq!(leaked.load(Ordering::SeqCst), 0, "重定向目标不得被请求");
 }
