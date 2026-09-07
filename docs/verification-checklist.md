@@ -414,3 +414,5 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | 前端 | `价格分组抽屉` 用例补分组级限流字段与列表限流列（第 2.5 节最后一条备注收口，`e316f80`）；interactions 83 / 83 | — |
 
 至此第 2.5 节前端覆盖表不再有"无 e2e"备注；第 3 节只剩第 11 条（订阅凭证合规边界）待定。
+
+**收尾复核（同日，无新发现）**：`sched_redis.rs` 新增键（`sess:web/idx/meta`、`lock:cred`、`oauth:cred`、`mb:blocks`、`ch:balance`）全部登记在 database.md，`oauth:cred:<state>` 用 GETDEL 一次性取走、`lock:cred` 30s 自愈 ✅；worker 每 5 分钟评估熔断，多副本各评各的但写同一 HASH、通知经 `notify:mute` 去重，幂等 ✅；`cloud_probe` 只被 `test_channel` / `fetch_channel_models` 调用，守卫与属主校验在调用方 ✅；`RatioSyncPanel` 的应用按钮不按 `pricing.write` 隐藏——与全站"路由按读权限进、写动作靠后端 403 + 错误码文案"的约定一致，不算缺口。当日特性 review 至此完成：三处已修（越权、SSRF 重定向 / token URL 后门、SigV4 双重编码），一处待定（第 3 节第 11 条）。
