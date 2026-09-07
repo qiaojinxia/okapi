@@ -170,6 +170,8 @@
 7. ~~OAuth 仅单一 mock IdP~~ **已补**（09-06 第八轮 `console_oauth_presets`）；~~Turnstile 外呼无 mock~~ **已补**（第七轮 `console_turnstile`）；SMTP TLS 形态未覆盖（mock SMTP 只走明文 AUTH PLAIN，STARTTLS / 隐式 TLS 需要带证书的 mock，且客户端得有可配的信任锚——暂列不做）。
 8. ~~后台结算积压无上界~~ **已修并合入 main（09-06 第十轮，`4e411ce`）**。第九轮压测发现：`settle_gate` 只钳制同时碰 PG 的任务数不限排队深度，本机 PG 落账约 1000 笔 / 秒而进量 4.7k–11.7k RPS，8 分钟后堆了 260,101 笔"Redis 已扣、PG 未记"的结算，SIGTERM 等满 30s 即放弃，PG 只落 166k / 426k 笔。定案走方案 A（有界 + 数据面拒绝）：`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000 ≈ 记账速率 × 30s 下线窗口，0 不设限）超界后鉴权前 503 `overloaded`，滞回恢复，IMPLEMENTATION §12.2 / §12.3 / §14.3 与 `docs/perf-report.md` 先行改定，压测口径分"网关自身开销（=0）"与"可持续吞吐（缺省）"两种。方案 B（持久结算队列 / 微批组提交）仍是 §11.23 挂着的终态方向。对账 1.5s 双采样窗口的误判风险随之收敛到最长约 20s，积压期间不要手动修复（已写进 §12.3）。
 9. ~~临时库套件从不删库~~ **已修并合入 main（09-06 第十轮，`575f630`）**：`console_setup` / `console_ssrf` / `console_oauth_presets` / `console_turnstile` 各建独立库不清，开发 PG 里一天攒了 157 个；用例末尾 `DROP DATABASE … WITH (FORCE)`，本机残留已手工清空。新写临时库用例照 `schema_shape` / 上述四个的收尾。
+10. **出站请求跟随重定向绕过 SSRF 闸（09-07 第十四轮 review 发现，部分已修）**：`ssrf::validate_api_base` 只校验管理员填进来的那个 URL，而所有出站 reqwest client（`okapi_providers::http::build_client` 共享池 + `ratio_sync` 自建）都按缺省跟随 30x，公网地址一跳重定向就能把请求引到私网 / 云元数据地址（DNS rebinding 文档里已列 backlog，重定向此前没人提）。`ratio_sync::fetch_one` 自建 client 已改 `Policy::none()`（`f737892`）；共享池未动——数据面 `/videos/{id}/content` 这类透传可能依赖上游 302 到 CDN，全局关掉有回归风险。建议：给 `HttpPool` 加一个不跟随重定向的探针 client，供 `channel_test` / `channel_balance` / `cloud_probe` / `channel_oauth` 换 token / Turnstile / OAuth userinfo 这些管理面外呼使用；数据面保留缺省。
+11. **自用订阅凭证（anthropic_max / codex）的合规边界（09-07 第十四轮 review 备注，不改代码）**：出向会前置 Claude Code 系统提示首句、合并 `claude-code-20250219` 等 beta、转发客户端身份头，本质是让上游把网关流量当成 Claude Code / Codex CLI。README 已标"实验性 / 自用"、"明确不做"里写了不做订阅账号池转售；但一旦这类渠道被放进对外分组，就是拿订阅额度转售，违反两家的使用条款且会被封号。建议在渠道抽屉与文档里把"仅限本人 / 内部分组"写成硬约束（例如 OAuth 渠道不允许绑定可注册用户可见的分组），至少在清单里挂着。另注：系统提示前置会改变非 Claude Code 客户端拿到的模型行为，属该 provider 的已知语义。
 
 ## 4. 执行记录
 
@@ -376,3 +378,23 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | CI 环境与本机的差异会不会再挂一批 | 用干净 HEAD worktree（无 `.env`）、`env -i` 只给 `DATABASE_URL` / `OKAPI_REDIS_URL` / `OKAPI_CLICKHOUSE_URL` + `SQLX_OFFLINE`（无 NATS、无主密钥，与 `ci.yml` 一致）跑 `cargo test --workspace --no-fail-fast` | **523 / 523**，108 个测试二进制；依赖 NATS 的套件按设计软跳过，主密钥各用例自生成 |
 
 三条都不改产品代码。`check` job 的下一次运行才是这条流水线第一次真正的 L0–L2 结论，推送后要回头看一眼。
+
+### 2026-09-07 第十四轮：review 当日落地的特性（约 1.2 万行）
+
+按 A–E 维度过一遍并行会话 `e4dfbf1` / `07c1fa8` / `349fdb6` 三笔的后端：倍率在线同步、上游余额、负毛利熔断、Bedrock / Vertex 传输层、订阅 OAuth 凭证（四步锁刷新、方言分派、身份头透传）、Playground 中继、分组限流、会话上限。前端与 e2e 部分沿用第十一轮结论。
+
+| 模块 | 结论 | 处置 |
+| --- | --- | --- |
+| `console/channel_oauth.rs` `exchange` | **越权（C）**：带 `channel_id` 追加 key 时把 `guard_scoped` 给的范围丢了，own 范围渠道管理员能往别人的渠道塞订阅凭证；且属主 / provider 校验都在换码之后，被拒也先把一次性授权码烧掉 | **已修** `f737892`：`ensure_channel_owner` + 一致性检查前移到换码前；`gateway_oauth_channels::own_scope_cannot_attach_oauth_key_to_foreign_channel`（403 owner、token 端点零调用、key 数不变） |
+| 出站重定向 | **SSRF 闸可绕（C）**：见第 3 节第 10 条 | `ratio_sync` 自建 client 已修；共享池留建议 |
+| `console/ratio_sync.rs` | 数值全程十进制字面量经 `RatioFp`，不经浮点 ✅；RBAC（fetch=`pricing.read`、apply=`pricing.write`）+ 审计 ✅；不自动发布 epoch ✅。小问题：同一模型同时勾了倍率轴与按次价时按次价被静默丢弃但仍计入 `applied`；`fetch` 只要 `pricing.read` 就能让服务器对任意（过闸的）URL 发 GET，出站副作用与只读权限不太匹配 | 记录，不改 |
+| `console/channel_balance.rs` | 金额经 `parse_scaled_1e6` 定点、美分 ÷ 100 整数 ✅；own 范围 `ensure_channel_owner` ✅；凭证从密文解封、走渠道自己的代理 / 额外头 ✅；8KB 体上限 ✅；`ch:balance:*` 已登记 database.md ✅ | — |
+| `margin.rs` / `worker/margin_breaker.rs` / `console/margin.rs` | 万分比全整数、i128 防溢出、配置越界夹取、缺省关 ✅；`mb:blocks` 契约已登记 ✅；console list=`channel.read` / lift=`channel.write` + 审计 ✅ | — |
+| `gateway/oauth_cred.rs` | 四步锁：进程内单飞 → `lock:cred` `SET NX EX 30`（自愈）→ 加锁重读 → 刷新回写；无锁方就用未过期旧 token；`invalid_grant` 二次重读识别他副本轮转，否则 key 置 invalid ✅。边角：回写 PG 失败时本次用新 token 但不落库，下次会拿旧 refresh token 再刷——对 refresh token 轮转的提供方等于把 key 刷成 invalid（只在 PG 写失败时发生） | 记录，不改 |
+| `gateway/dialect.rs` | `(provider, model)` → 三种方言的分派干净，bedrock / vertex 缺 `api_base` 是构造错误不回退公网 ✅ | — |
+| `console/playground.rs` | 直调 `gateway::chat::chat_completions`，鉴权 / 限流 / 计费 / 结算积压准入与真实 SDK 一致 ✅；1MB 体上限、强制流式 ✅；预设白名单收口 ✅。两点备注：① 拆分部署时 console 进程因此成为数据面节点（要有上游出网、同一 `OKAPI_MASTER_KEY`、结算积压计数各算各的）；② `/api/playground/presets` 无鉴权公开，站点预设的 `system` 提示词对匿名可见，按设计但站长得知道 | 记录 |
+| `gateway/sched_redis.rs` 分组限流 / `auth_web.rs` 会话上限 | 固定窗计数、TTL 与键名与 database.md 一致 ✅；会话上限踢最早、新建那条永不被踢 ✅ | — |
+| Bedrock / Vertex 传输层 | 无浮点；服务账号 JWT 用 `aws-lc-rs`（已在依赖树），`hmac` / `sha2` 做 SigV4，IMPLEMENTATION §11.35 已登记依赖 ✅。签名正确性无真实上游可验，靠 `gateway_bedrock` / `gateway_vertex` 的 mock 形状用例 | — |
+| 合规边界 | 见第 3 节第 11 条 | 记录 |
+
+另：`console_stats.rs` 上一笔提交漏了 `cargo fmt`，CI 的格式检查会红，随 `f737892` 一并格式化。
