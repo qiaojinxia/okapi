@@ -136,14 +136,22 @@ pub async fn build_state(
             .build(),
         refresh_gate: Arc::default(),
         settlements: crate::shutdown::Pending::default(),
+        settle_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        // 缺省 ≈ 档位一 PG 记账速率（约 1k TPS）× 30s 下线窗口（§12.2 / §14.3）
+        settle_backlog_max: std::env::var("OKAPI_SETTLE_BACKLOG_MAX")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(20_000),
+        settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
 
 /// PriceBook 热更兜底：PG 最新 epoch 比当前新则重载替换。
 /// M2 的 NATS 广播是主通道，本轮询是丢广播时的 30s 自校验（DESIGN §3.3 失效路径）。
 pub async fn refresh_pricebook_if_newer(state: &AppState) -> anyhow::Result<bool> {
+    // 空表读作 0，与 `load_pricing_source_rows` 一致：首次发布（epoch 1）才判得出"更新"
     let latest = sqlx::query_scalar!(
-        r#"SELECT COALESCE(MAX(epoch), 1)::bigint AS "epoch!" FROM pricing_epochs"#
+        r#"SELECT COALESCE(MAX(epoch), 0)::bigint AS "epoch!" FROM pricing_epochs"#
     )
     .fetch_one(&state.pg)
     .await?;

@@ -183,8 +183,10 @@ pub async fn load_pricing_source_rows(pool: &PgPool) -> Result<PricingSourceRows
     })
     .collect();
 
+    // 空表读作 0 而非 1：首次发布的 epoch 就是 1（IDENTITY 从 1 起），读作 1 会让
+    // 在跑的 gateway 把第一次发布当成"不比当前新"而永不热更，直到第二次发布或重启
     let epoch =
-        sqlx::query!(r#"SELECT COALESCE(MAX(epoch), 1)::bigint AS "epoch!" FROM pricing_epochs"#)
+        sqlx::query!(r#"SELECT COALESCE(MAX(epoch), 0)::bigint AS "epoch!" FROM pricing_epochs"#)
             .fetch_one(pool)
             .await?
             .epoch;
