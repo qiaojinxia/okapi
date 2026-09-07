@@ -140,7 +140,7 @@
 | 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | —（删除见上「套餐删除」行，第八轮已覆盖） |
 | 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案 | `write-forms.spec`（1 例，09-06 第四轮） | — |
 | 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达、自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default | `write-forms.spec`（1 例，09-06 第六轮） | 限流字段组（rpm / rph 空 = null、负数禁保存）与列表"限流"列无 e2e |
-| 渠道列表余额按钮 / 运维页毛利熔断卡 | `/admin/channels`, `/admin/ops` 毛利熔断页签 | 钱包按钮只对 openai / openai_compat 显示、结果 toast 按上游货币 Intl 格式化、"最近测试"列下回填余额；熔断卡配置表单（小时 / 分钟 / 美元 / 百分比 → 后端整数口径）、熔断表与解除按钮按权限裁剪 | — | 09-06 新增，尚无 e2e |
+| 渠道列表余额按钮 / 运维页毛利熔断卡 | `/admin/channels`, `/admin/ops` 毛利熔断页签 | 钱包按钮只对 openai / openai_compat 显示、结果 toast 按上游货币 Intl 格式化、"最近测试"列下回填余额、`balance_shape` 等错误码文案；熔断卡配置表单（美元 → micro、百分比 → 万分比含负号、分 → 秒、时 → 秒，非法数字禁保存、未改动禁保存）、负毛利行标红、解除只带分组 × 渠道定位对并提示到期 | `write-forms.spec`（2 例，09-07 第十四轮） | — |
 | 计费规则抽屉与列表 | `/admin/rules` | 编辑态四类字段回填与 code 锁定、按类型只发该类型字段、阈值 USD → micro、星期勾选升序、空范围不发键、上下线打 toggle 且提示需发布、删除经确认框 | `write-forms.spec`（1 例，09-06 第六轮） | — |
 | 设置 SMTP 卡 | `/admin/settings` 邮件页签 | 单键回显、去空格、`reply_to` 空转 null、端口越界归零、加密方式分段、未保存前测试禁用、测试信按已保存配置发且收件人须含 @、有草稿时禁发 | `write-forms.spec`（1 例，09-06 第六轮） | — |
 | TOTP 绑定 | `/portal/security` | 开始绑定拿 otpauth / pending、码不足 6 位禁用、错码 `totp_invalid` 文案可重试、成功切已开启态、无会话 401 降级提示 | `write-forms.spec`（1 例，09-06 第六轮） | — |
@@ -398,3 +398,5 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | 合规边界 | 见第 3 节第 11 条 | 记录 |
 
 另：`console_stats.rs` 上一笔提交漏了 `cargo fmt`，CI 的格式检查会红，随 `f737892` 一并格式化。
+
+**续（同日）**：第 3 节第 10 条落地 `8a92e2a`（`HttpPool` 探针 client 族 + `PassUpstream::probe` + 七处管理面调用点 + `channel_test_does_not_follow_redirects`），IMPLEMENTATION §14.4 记录定案。第 2.5 节最后一条"尚无 e2e"补齐（`2578eab`：毛利熔断卡、查上游余额）。顺带把 interactions 配置里两处并行抖动挖到根：① 抽屉打开 30ms 后 `use-modal-focus` 才把焦点送进第一个输入框，并行负载下 `fill` 卡在这之前就被打断、字打进别的框——第十一轮以来偶发的 `套餐抽屉` / `价格分组抽屉` 失败（"display_name: Starter30.9"）就是它，`write-forms.spec` 加 `openedDialog` 助手等焦点进对话框再填，21 处统一换用；② `playground.spec 一键导入` 的 "New key" 页头与空态各一个，列表桩回空后才出现第二个，strict 模式随时序偶发 2 元素，取第一个。interactions 连跑三遍 83 / 83，一键导入重复 12 次全过。
