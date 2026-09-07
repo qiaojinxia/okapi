@@ -416,3 +416,16 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 至此第 2.5 节前端覆盖表不再有"无 e2e"备注；第 3 节只剩第 11 条（订阅凭证合规边界）待定。
 
 **收尾复核（同日，无新发现）**：`sched_redis.rs` 新增键（`sess:web/idx/meta`、`lock:cred`、`oauth:cred`、`mb:blocks`、`ch:balance`）全部登记在 database.md，`oauth:cred:<state>` 用 GETDEL 一次性取走、`lock:cred` 30s 自愈 ✅；worker 每 5 分钟评估熔断，多副本各评各的但写同一 HASH、通知经 `notify:mute` 去重，幂等 ✅；`cloud_probe` 只被 `test_channel` / `fetch_channel_models` 调用，守卫与属主校验在调用方 ✅；`RatioSyncPanel` 的应用按钮不按 `pricing.write` 隐藏——与全站"路由按读权限进、写动作靠后端 403 + 错误码文案"的约定一致，不算缺口。当日特性 review 至此完成：三处已修（越权、SSRF 重定向 / token URL 后门、SigV4 双重编码），一处待定（第 3 节第 11 条）。
+
+### 2026-09-07 第十六轮：review 修完后的 HEAD 全量，外加一次 CI 等价的"三件全新"
+
+`9a7fcca`（review 全部修复落地后）在干净 worktree、`env -i` 只给 CI 那三个连接串下：
+
+| 层 | 结果 | 说明 |
+| --- | --- | --- |
+| L0 rustfmt / clippy `-D warnings --all-targets` / cargo-deny | **全部通过**（deny 四项 ok，第十三轮起） | — |
+| L0 六道守卫 | 全过：i18n 键 1479、权限点 9、部署模板 Σ 池 152 / 200、56 个 error_code 双语齐 | — |
+| L1 + L2 全量（共享开发库 + 共享 Redis / CH） | **526 / 526**，108 个二进制 | 与第十三轮 523 相比多的三例是 review 期间新增的用例 |
+| L1 + L2 全量（**三件全新**：空 PG 库 `okapi_fresh`、空 Redis 逻辑库 8、按 `ci.yml` 同一镜像与探活参数新起的 ClickHouse 容器） | 525 / 526 → 修一例后 11 / 11 × 3 | 唯一失败 `console_analytics::advanced_filters_calendar_quality_and_partial_cost_are_consistent`：`window.freshness.last_ingested_at` 读 `mv_analysis_hour`，全新 CH 上它比 `total` 所在的 MV 晚一拍，而轮询谓词没等它——共享库里该 MV 总有历史行所以从未暴露。**CI 的 ClickHouse 正是全新的**，不修 check job 第一次真正跑就会红。把该字段并进 `poll_until` 谓词（`0b971bb`，第 3 节第 5 条同一套约定） |
+
+这轮的意义：第十三轮的 CI 仿真是在共享开发库上做的，"库不是空的"这个隐含前提没有被挑战过；三件全新的一跑把它挑出来了。以后要对 CI 结论负责的验证，按这个口径跑（`docker run … clickhouse-server:24.8-alpine` 一台新 CH 只要十秒）。第 3 节第 11 条仍是唯一待定项；第 2 / 3 节其余全部收口。
