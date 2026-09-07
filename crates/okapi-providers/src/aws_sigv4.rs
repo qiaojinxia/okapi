@@ -154,14 +154,18 @@ pub fn uri_encode(input: &str) -> String {
     out
 }
 
-/// 规范 URI：URL 里的路径已由调用方按段编码（`uri_encode`），此处原样使用；空路径为 `/`。
+/// 规范 URI：请求路径已由调用方按段编码过一次（`uri_encode`），非 S3 服务的规范要求在此之上
+/// **再编码一次**（`%3A` → `%253A`，`/` 分隔符保留）——AWS 文档「Each path segment must be
+/// URI-encoded twice (except for Amazon S3)」，botocore / JS / Go SDK 同此。空路径为 `/`。
 fn canonical_uri(url: &reqwest::Url) -> String {
     let path = url.path();
     if path.is_empty() {
-        "/".to_owned()
-    } else {
-        path.to_owned()
+        return "/".to_owned();
     }
+    path.split('/')
+        .map(uri_encode)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// 规范查询串：键值各自编码后按键（再按值）排序，`&` 连接；无查询串为空行。
@@ -278,6 +282,50 @@ mod tests {
             headers
                 .iter()
                 .any(|(k, v)| k == "x-amz-security-token" && v == "tok")
+        );
+    }
+
+    /// 路径段含 `%3A` 的 Bedrock 请求：规范 URI 要在请求路径（已编码一次）之上**再编码一次**
+    /// （`%3A` → `%253A`，非 S3 服务的规范要求）。向量由 botocore 1.42.97 生成；此前只签单次
+    /// 编码的路径，mock 用同一实现重算所以对得上，真实 AWS 回 SignatureDoesNotMatch——
+    /// 而 Bedrock 的 Anthropic 模型 ID 全部带 `:0`。
+    #[test]
+    fn encoded_path_segment_is_double_encoded_like_botocore() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIDEXAMPLE".to_owned(),
+            secret_access_key: SECRET.to_owned(),
+            session_token: None,
+        };
+        let url = reqwest::Url::parse(
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-haiku-20240307-v1%3A0/invoke",
+        )
+        .unwrap();
+        assert_eq!(
+            canonical_uri(&url),
+            "/model/anthropic.claude-3-haiku-20240307-v1%253A0/invoke"
+        );
+        let body = br#"{"anthropic_version":"bedrock-2023-05-31","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}"#;
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let headers = sign(
+            &creds,
+            &SignParams {
+                method: "POST",
+                url: &url,
+                region: "us-east-1",
+                service: "bedrock",
+                headers: &[("content-type", "application/json")],
+                payload_hash: &payload_hash(body),
+                timestamp: ts,
+            },
+        );
+        let auth = headers.iter().find(|(k, _)| k == "authorization").unwrap();
+        assert_eq!(
+            auth.1,
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260907/us-east-1/bedrock/aws4_request, \
+             SignedHeaders=content-type;host;x-amz-date, \
+             Signature=c74bd26dfefd8594aaaab983b4ae4a7f880cf2bde42af3ea451d058cf085e667"
         );
     }
 
