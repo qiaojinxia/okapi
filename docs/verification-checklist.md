@@ -312,3 +312,17 @@
 压测全程 gateway 0 条 ERROR / WARN；请求错误 0。SIGTERM 下线走完整流程（"收到退出信号" → 30s 上限 → "已下线"），但暴露了第 3 节第 8 条：**结算积压 260,101 笔被放弃**，PG 只落了 166k / 426k 笔，Redis 侧扣款全部完成（`bal:{uid}` 无残留 `r:*` 预扣字段），即整段差额将由对账按账本回填。这是过载态下"响应先行"设计的代价，本轮只记录不改（计费语义变更须先改文档）。
 
 其他：release 网关若用 `( nohup … & )` 子 shell 起，随工具调用结束一起被收走，必须作为常驻后台任务起。收尾已 `git worktree remove` 并删除 `okapi_head` 库、清空 Redis 逻辑库 7。
+
+### 2026-09-06 第十轮：结算积压上界（分支 `settle-backlog`）
+
+主工作树里并行会话正改着 `gateway/{auth,chat,state,mod}.rs`、`IMPLEMENTATION.md`、`okapi-api/error.rs`，恰是本项要碰的文件，故在 `git worktree add -b settle-backlog`（基于 `8a7074c`）+ 独立库 `okapi_backlog` + Redis 逻辑库 7 上做，三笔提交，**待并行会话提交后 `git merge --ff-only settle-backlog` 合入 main**（分支只比 main 多这三笔；若 main 先动了则 `git rebase main settle-backlog` 再 ff）。
+
+| 提交 | 内容 | 验证 |
+| --- | --- | --- |
+| `091ed41` 结算积压上界 | 先改 IMPLEMENTATION §12.2（故障模式表新行）/ §12.3（第 4 条：PG 记账速率是单进程可持续吞吐硬上限，压测口径分两种）/ §14.3（30s 与上界配套）与 `docs/perf-report.md`（修正 #4 + 复现命令），再动代码：`settle_write` 进出计数、`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000，0 不设限）、`authenticate_data_plane` 最前面 `check_settle_backlog` → 503 `overloaded`（param = 积压数），滞回 3/4 恢复、进出各一条 WARN；gateway TraceLayer 的 `on_failure` 跳过 503；错误码进 `okapi_api::codes` 与中英语言包；`linux-bench.sh` 显式 `=0` 保持网关自身开销口径 | `gateway_backlog` 1 / 1；鉴权路径相关 15 个 gateway 套件 44 / 44；全工作区 clippy 无豁免通过；i18n 键守卫 1377 对齐 |
+| `6ad44dc` 空表 epoch | 在隔离库跑 loadgen 撞到：`pricing_epochs` 为空时价簿与 30s 自校验都把 epoch 读作 1，首次发布拿到的正是 1，`swap_if_newer` 判"不比当前新"永不装载——**全新安装的第一次定价发布对在跑的 gateway 无效**，直到第二次发布或重启；共享开发库 epochs 从不为空所以此前无用例能碰到。两处 `COALESCE(MAX(epoch), 0)` | `gateway_first_epoch`（临时空库：epoch 0 → 发布得 1 → 热更 true → 同 epoch 不重复）1 / 1 |
+| `d6b2247` 临时库用完即删 | 四个临时库套件收尾 `DROP DATABASE … WITH (FORCE)`；本机 157 个残留库手工清空 | 五个临时库套件 7 / 7，跑前跑后库数不变 |
+
+release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 / 37,888 被拒（503）**，可持续 1727 RPS ≈ PG 记账速率；日志全程 **3 条 WARN、0 条 ERROR**（首版无滞回时阈值附近每秒翻转十几次、TraceLayer 每个 503 一条 ERROR 共 7109 行，修掉后才是这个数）；压完**立即 SIGTERM，25s 退出**，PG 新增 25,906 = 成功数 + 预热 1 笔，**零丢账**（第九轮同场景放弃 26 万笔）。`OKAPI_SETTLE_BACKLOG_MAX=0`：5s 59,550 成功 0 拒绝、11.8k RPS，与第九轮口径一致。
+
+分支顶端全量（隔离库 + Redis 逻辑库 7）：448 / 452，4 例失败（`admin_refund_full_cycle`、`partner_employee_keys_see_own_usage`、`margin_report_sums_amount_and_discount`、`client_distribution_groups_by_client_type`）全部是 CH 聚合把主库同 id 实体的行加了进来（如"实收 4038 ≠ 4000"、"CH 口径应被冲平 720 ≠ 0"），与第九轮同因，CH 库名写死无法隔离；四例代码未动、在主库上均通过。收尾：删 `okapi_backlog` 库、清 Redis 逻辑库 7、`git worktree remove`（分支保留）。
