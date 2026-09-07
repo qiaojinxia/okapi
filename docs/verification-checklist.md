@@ -24,7 +24,7 @@
 
 | 层 | 内容 | 命令 | 依赖 |
 | --- | --- | --- | --- |
-| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources）、前端 tsc / oxlint、六道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板 / 后端错误码反向核对） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py && python3 scripts/guard-error-codes.py` | 部署模板守卫需 PyYAML 或系统 ruby |
+| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources，09-07 起四项全 ok）、前端 tsc / oxlint、六道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板 / 后端错误码反向核对） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py && python3 scripts/guard-error-codes.py` | 部署模板守卫需 PyYAML 或系统 ruby |
 | L1 单元 / 性质 | crate 内 `#[cfg(test)]` 与 `crates/*/tests`（pricing 对拍 + proptest、providers 转换 parity、ledger Lua 契约） | `cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger -p okapi-providers -p okapi-api -p okapi-store` | ledger 契约需 Redis；store 部分用例需 PG |
 | L2 集成 | `bins/okapi/tests/*.rs` 71 个套件（gateway / console / worker / migrate） | `cargo test --workspace --no-fail-fast` | 四容器；CH / NATS 缺失时相关套件自跳过 |
 | L3 前端交互 e2e | 构建产物 + 接口桩，不碰数据库 | `cd frontend && pnpm test:interactions`（= `pnpm build` + `playwright test -c playwright.interactions.config.ts`） | 无（自起 vite preview :4175） |
@@ -362,3 +362,17 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | 第十轮落地 | `settle-backlog` 三笔 rebase 到 `e4dfbf1` 后 ff 合入（见第十轮记录）；分支上原有第四笔（`client_distribution` 占比断言改为对合计核算）因并行会话已在主树做了等价修正而撤下，以对方的为准 | rebase 后全工作区 clippy 通过；隔离库全量 505 / 520，15 例失败全是 CH 串味（改到共享库跑 `console_analytics` 11 / 11、`console_portal` 1 / 1、`console_logs` 12 / 12、`gateway_upstream_cost` 2 / 2、`console_stats` 8 / 8） |
 
 顺手修正第 2.5 节四条过时备注（模型状态切换本无 UI、`/admin/plans` 与套餐删除、TOTP 绑定早已覆盖）与第 2.2 节 `/v1/models` 的描述（无鉴权列全部启用模型是与公开价格页一致的既定行为，按 key 过滤属特性待定）。并行会话本机残留的 10 个临时库（旧代码跑出来的）再清一次，之后不会再长。
+
+### 2026-09-07 第十三轮：CI 其实从未跑过 Rust 这一路
+
+顺手查 GitHub 上 `main` 的 ci 结论：连续 6 次（09-05 起）全红，`frontend` job 绿、`deny` 与 `check` 红。
+`check` 每次都死在 **Initialize containers**（约 3 分钟 = 30 次 × 5s 探活超时），也就是 fmt / clippy /
+`cargo test --workspace` 一次都没在 CI 上执行过——本清单前十二轮的 L0–L2 全部只在本机跑过。
+
+| 发现 | 取证 | 处置 |
+| --- | --- | --- |
+| ClickHouse service 永远不 healthy | 本地用 CI 同一镜像（`clickhouse-server:24.8-alpine`）+ 同一 `--health-cmd` 起容器：服务 40s 后已在 `0.0.0.0:8123` 监听，探活却一直 `Connection refused`。容器内 `/etc/hosts` 把 `localhost` 同时映到 `127.0.0.1` 与 `::1`，busybox wget 先走 `::1`；而容器网络没有 IPv6，clickhouse 日志 `Listen [::]:8123 failed … Address family not supported`，只绑了 IPv4。`wget http://127.0.0.1:8123/ping` 立即 `Ok.` | `ci.yml` 探活改 `127.0.0.1`，本地同参数复现 10s 内 `healthy`（`435ae59`） |
+| `deny` job 常红 | 7 个自有 crate 无 `license` 字段 → `error[unlicensed]`；第三方依赖的 advisories / bans / sources 三项其实一直是 ok，被这一项压成整体红 | 自有 crate 标 `publish = false`（单二进制产品，事实如此），`deny.toml` `private = { ignore = true }`；项目许可证仍留 §15 定案。`cargo deny check` 四项全 ok，12 个 duplicate 仍是 warn |
+| CI 环境与本机的差异会不会再挂一批 | 用干净 HEAD worktree（无 `.env`）、`env -i` 只给 `DATABASE_URL` / `OKAPI_REDIS_URL` / `OKAPI_CLICKHOUSE_URL` + `SQLX_OFFLINE`（无 NATS、无主密钥，与 `ci.yml` 一致）跑 `cargo test --workspace --no-fail-fast` | **523 / 523**，108 个测试二进制；依赖 NATS 的套件按设计软跳过，主密钥各用例自生成 |
+
+三条都不改产品代码。`check` job 的下一次运行才是这条流水线第一次真正的 L0–L2 结论，推送后要回头看一眼。
