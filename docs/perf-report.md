@@ -102,10 +102,25 @@ NAT 单程 ~0.5-1ms）；裸金属本地 Redis（RTT <0.1ms）预计削减 2-4ms
 预扣在途 10 万笔属 Redis hash 常量级。10 万整数口径需多源 IP（loopback /8 别名）或独立
 压测机拆客户端端口瓶颈，属裸金属正式复测项；本缩尺已证明**长持有路径无泄漏、无抖动**。
 
+## 结算积压上界（2026-09-06 补，压测驱动修正 #4）
+
+09-06 在 macOS 缩尺环境复跑本报告各档（HEAD `018d963`，数字见 `docs/verification-checklist.md`
+第九轮）时量到了"队列拉长"的尽头：本机 Docker PG 落账峰值约 **1000 笔 / 秒**，json / stream 档进量
+4.7k–11.7k RPS，8 分钟压测结束时进程内堆着 **260,101** 笔已在 Redis 扣款、尚未进 PG 的结算任务；
+SIGTERM 后按 §14.3 等满 30s 上限即放弃，PG 最终只有 166k / 426k 笔记录，差额只能靠对账回填。
+修正：`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000，`0` 不设限）给积压设上界，超界后数据面在鉴权前
+直接 503 `overloaded`（不预扣、不碰上游），回落即恢复；进入 / 退出泄压各一条 WARN。
+
+这意味着本报告的端到端数字要分两种口径读：上面各档量的是**网关自身开销**（结算在后台无界排队，
+突发吸收能力），要复现须显式 `OKAPI_SETTLE_BACKLOG_MAX=0`；缺省上界下量到的是**可持续吞吐**，
+数值 ≈ PG 记账速率，超出的部分表现为 503 而不是无声的内存增长与退出丢账。§12.1 档位一写的
+"PG 单机峰值约 1k TPS 记账事务"就是这条硬上限，微批组提交（下条）是抬高它的路。
+
 ## 已知瓶颈与后续
 
 - 结算批量化（有界 mpsc + 单事务批量 INSERT）仍是终态方向：当前信号量方案在池饱和时结算延迟
   随队列拉长（记账最终一致，不影响响应路径），批量化可把 PG 写放大降一个量级。列 backlog。
+  09-06 起队列有上界（上节），拉长的尽头是 503 而非丢账。
 - 正式复测待办：裸金属/云 8vCPU Linux、PG/Redis 本地实例、loadgen 独立机器、mock 直连基线对拍
   （拆解网关自身开销）、30min soak、10 万 SSE 整数口径（多源 IP）。
 
@@ -114,7 +129,8 @@ NAT 单程 ~0.5-1ms）；裸金属本地 Redis（RTT <0.1ms）预计削减 2-4ms
 ```bash
 scripts/dev-deps.sh up
 cargo build --release --bin okapi --example loadgen
-./target/release/okapi gateway &          # 需 .env
+# 需 .env；不设 OKAPI_SETTLE_BACKLOG_MAX=0 量到的是可持续吞吐（≈ PG 记账速率，超出部分 503）
+OKAPI_SETTLE_BACKLOG_MAX=0 ./target/release/okapi gateway &
 ./target/release/examples/loadgen 64 10          # json 档
 ./target/release/examples/loadgen 64 10 stream   # 流式档
 

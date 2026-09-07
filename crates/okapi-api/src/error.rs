@@ -33,6 +33,9 @@ pub mod codes {
     pub const NO_ZERO_RETENTION_CHANNEL: &str = "no_zero_retention_channel";
     /// 该分组对此模型的全部候选渠道都因负毛利被熔断（IMPLEMENTATION §11.34；param = 摘掉的候选数）。
     pub const MARGIN_BLOCKED: &str = "margin_blocked";
+    /// 本进程的后台结算积压超过上界（IMPLEMENTATION §12.2）：数据面在鉴权前拒绝，
+    /// 未预扣、未碰上游，客户端稍后重试即可（param = 当前积压笔数）。
+    pub const OVERLOADED: &str = "overloaded";
 }
 
 #[derive(Debug, Clone, Serialize)]

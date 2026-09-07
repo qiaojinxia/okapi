@@ -73,7 +73,10 @@ async fn reject_invalid_key(state: &AppState, headers: &HeaderMap) -> AppError {
     AppError::unauthorized(codes::INVALID_API_KEY)
 }
 
-/// 数据面鉴权 = `authenticate` + key 级 IP 白名单（§11.17）。
+/// 数据面鉴权 = 过载准入 + `authenticate` + key 级 IP 白名单（§11.17）。
+///
+/// 过载准入在最前面：本进程后台结算积压超过上界时直接 503 `overloaded`（§12.2），
+/// 不预扣、不碰上游，也不再产生新的结算——这是积压的唯一减法。
 ///
 /// 白名单只约束 `/v1/*` 数据面：门户用同一把 key 登录，若把"只许我服务器的 IP 调用"
 /// 也套到门户上，用户在自己笔记本上就再也进不了门户查账——那是把 new-api 令牌
@@ -84,6 +87,7 @@ pub async fn authenticate_data_plane(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Arc<AuthedKey>, AppError> {
+    state.check_settle_backlog()?;
     let authed = authenticate(state, headers).await?;
     if authed
         .ip_allowlist

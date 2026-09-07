@@ -80,12 +80,80 @@ pub struct AppState {
     pub refresh_gate: Arc<super::oauth_cred::RefreshGate>,
     /// 后台结算任务计数（响应先行、结算后台的两条 chat 路径）；优雅下线等它归零（§14.3）。
     pub settlements: crate::shutdown::Pending,
+    /// 正在 `settle_write` 里排队或写 PG 的结算数（与 `settlements` 不同：不含仍在流式
+    /// 泵送的请求）。PG 记账速率是它的唯一出口，进量持续高于出口就无界增长——
+    /// 超过 `settle_backlog_max` 时数据面泄压（§12.2）。
+    pub settle_backlog: Arc<std::sync::atomic::AtomicUsize>,
+    /// 结算积压上界（`OKAPI_SETTLE_BACKLOG_MAX`，缺省 20000；0 = 不设限，压测网关自身开销用）。
+    pub settle_backlog_max: usize,
+    /// 当前是否处于泄压态——只在状态翻转时各记一条 WARN，不按请求刷日志。
+    pub settle_shedding: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// `settle_backlog` 的进出计数：Drop 归还，覆盖提前 return 与任务被取消的路径。
+struct BacklogGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> BacklogGuard<'a> {
+    fn enter(counter: &'a std::sync::atomic::AtomicUsize) -> Self {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(counter)
+    }
+}
+
+impl Drop for BacklogGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl AppState {
+    /// 数据面准入（IMPLEMENTATION §12.2）：后台结算积压超过上界即 503 `overloaded`。
+    /// 放在鉴权之前——被拒的请求不预扣、不碰上游，连 Redis 鉴权往返也省掉。
+    /// 带滞回：超过上界进入泄压，回落到上界的 3/4 以下才恢复——不然积压在阈值附近
+    /// 每落几笔就放几笔，状态每秒翻转十来次，翻转日志本身就成了刷屏。
+    pub fn check_settle_backlog(&self) -> Result<(), super::error::AppError> {
+        use std::sync::atomic::Ordering;
+        let max = self.settle_backlog_max;
+        if max == 0 {
+            return Ok(());
+        }
+        let pending = self.settle_backlog.load(Ordering::Relaxed);
+        let was_shedding = self.settle_shedding.load(Ordering::Relaxed);
+        let shedding = if was_shedding {
+            pending > max - max / 4
+        } else {
+            pending > max
+        };
+        if shedding != was_shedding
+            && self
+                .settle_shedding
+                .compare_exchange(was_shedding, shedding, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            if shedding {
+                tracing::warn!(
+                    pending,
+                    max,
+                    "结算积压超过上界，数据面开始泄压（503 overloaded）"
+                );
+            } else {
+                tracing::warn!(pending, max, "结算积压回落，数据面恢复");
+            }
+        }
+        if shedding {
+            return Err(super::error::AppError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                okapi_api::codes::OVERLOADED,
+            )
+            .with_param(pending.to_string()));
+        }
+        Ok(())
+    }
+
     /// 结算记账统一入口：信号量准入 + 瞬时失败退避重试（200ms/800ms/3.2s），
     /// 三试仍败才 ERROR 留给对账兜底（把"对账修复"从常态变成极端态）。
     pub async fn settle_write(&self, mut input: okapi_ledger::SettlementInput<'_>) {
+        let _backlog = BacklogGuard::enter(&self.settle_backlog);
         // 来源 IP 记录开关（settings.record_ip_log，缺省 true）。收口在这里而非各端点：
         // 七个计费端点全部经 settle_write，关一处即全站不落 IP（PG 列与 CH 列一起）。
         // docs/database.md 早写着「记录与否走 settings.record_ip_log」，但此前全仓无人读它，

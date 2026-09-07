@@ -1858,6 +1858,7 @@ export default {
     permission_denied: '没有本操作的权限',
     insufficient_quota: '余额不足',
     rate_limited: '触发限流（{{param}}）',
+    overloaded: '网关结算积压过载（{{param}} 笔待落账），请稍后重试',
     member_limit_exceeded: '已达团队成员月度限额',
     model_not_found: '模型不存在',
     model_not_allowed: '该 Key 不允许调用此模型',

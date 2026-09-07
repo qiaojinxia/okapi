@@ -2276,12 +2276,14 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
 | CH 挂 | chsink spill 落盘重放；统计查询 fail-closed 501 |
 | console 挂 | 数据面不受影响（PriceBook L1 副本 + 30s epoch 自校验） |
 | worker 挂 | 多副本 leader gate / consumer 分区防重，恢复后追赶 |
+| PG 记账吞吐跟不上数据面进量（持续过载 / PG 变慢） | "响应先行、结算后台"的积压**有上界**（`OKAPI_SETTLE_BACKLOG_MAX`，缺省 20000 笔 / 进程，`0` = 不设限）：等待或正在写 PG 的结算数超过上界时，数据面在鉴权之前直接 503 `overloaded`——不预扣、不碰上游、不产生新结算；回落到上界的 3/4 以下自动恢复（滞回，免得在阈值附近每秒翻转十几次），进入 / 退出泄压各记一条 WARN，且 gateway 的 TraceLayer 不再给 503 按请求刷 ERROR（泄压与"无可用渠道"各有自己的信号）。上界 ≈ 记账速率 × 30s 下线窗口（档位一 PG 约 1k TPS），保证 SIGTERM 时积压能在 `SETTLE_DRAIN_CAP` 内落完而不是被放弃 |
 
 ### 12.3 已知边界（诚实声明）
 
 1. 超大单用户打满单 Redis 分片——缓解：用户级限流 + 大客户拆 Team 子 key。
 2. 流式 token 增量计数的 CPU 成本——tiktoken-rs 增量计数，M1 压测确认。
 3. 跨区多活不在范围（单区 HA 足够）。
+4. **PG 记账速率是单进程可持续吞吐的硬上限**（2026-09-06 压测取证：零延迟 mock 上游下 gateway 进 4.7k–11.7k RPS，本机 Docker PG 落账约 1k 笔 / 秒，8 分钟后内存里堆了 26 万笔"Redis 已扣、PG 未记"的结算，SIGTERM 等满 30s 后被放弃，PG 只落了 166k / 426k 笔）。"响应先行、结算后台"只吸收突发，不放大持续吞吐；上界之内的积压仍会让 Redis 余额在最长「上界 ÷ 记账速率」（缺省约 20s）内低于账本，对账在这段窗口里会把"空闲但有未落账结算"的用户报成漂移，`/admin/reconciliation/repair` 的双采样稳定性判定不能覆盖这么长的窗口，积压期间不要手动修复。根治仍是 §11.23 挂着的微批组提交 / 持久结算队列。压测因此分两种口径：`OKAPI_SETTLE_BACKLOG_MAX=0` 量网关自身开销（`docs/perf-report.md` 现有数字），缺省上界量可持续吞吐（≈ PG 记账速率）。
 
 ## 13. 里程碑与验收（M0–M4）
 
@@ -2363,7 +2365,7 @@ reverse_proxy okapi-gateway:8080 {
 
 SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE 排水（上限 5min）→ flush PG/CH 批写与 outbox → 退出。
 
-**【实现状态 2026-09-06】** 三角色共用 `shutdown::signal()`，SIGINT / SIGTERM 均触发（此前只听 Ctrl-C，容器 stop 发的 SIGTERM 会把进程直接掐死，`gateway_shutdown` 用例取证后修正）。gateway / console 走 `axum::serve(..).with_graceful_shutdown`：收到信号即关监听（新连接被拒，等价于 readiness 翻假）、在途连接排到自然结束；SSE 排水**未设 5min 上限**，交给编排层兜底：`deploy/k8s/okapi.yaml` gateway `terminationGracePeriodSeconds: 330`、`deploy/docker-compose.yml` 应用服务 `stop_grace_period: 5m30s`（5min 排水 + 30s 结算），`scripts/guard-deploy-manifests.py` 守着这两个值不被改小。gateway 在连接排完后再等后台结算归零（`shutdown::Pending`，chat 流式 / 非流式两条"响应先行、结算后台"路径经它计数；上限 30s，超时告警交对账）——不等这一步，最后一批请求只剩 Redis 预扣、要靠 sweep 才能收口。worker 的定时循环在同一信号上退出；`okapi all` 三角色一起返回。验收：`bins/okapi/tests/gateway_shutdown.rs`（真实二进制 + SIGTERM：首块后发信号，流完整到 `[DONE]`、新连接被拒、退出码 0、账已 committed 且无悬置预扣）。
+**【实现状态 2026-09-06】** 三角色共用 `shutdown::signal()`，SIGINT / SIGTERM 均触发（此前只听 Ctrl-C，容器 stop 发的 SIGTERM 会把进程直接掐死，`gateway_shutdown` 用例取证后修正）。gateway / console 走 `axum::serve(..).with_graceful_shutdown`：收到信号即关监听（新连接被拒，等价于 readiness 翻假）、在途连接排到自然结束；SSE 排水**未设 5min 上限**，交给编排层兜底：`deploy/k8s/okapi.yaml` gateway `terminationGracePeriodSeconds: 330`、`deploy/docker-compose.yml` 应用服务 `stop_grace_period: 5m30s`（5min 排水 + 30s 结算），`scripts/guard-deploy-manifests.py` 守着这两个值不被改小。gateway 在连接排完后再等后台结算归零（`shutdown::Pending`，chat 流式 / 非流式两条"响应先行、结算后台"路径经它计数；上限 30s，超时告警交对账）——不等这一步，最后一批请求只剩 Redis 预扣、要靠 sweep 才能收口。30s 上限与结算积压上界（§12.2 最后一行，缺省 20000 笔）配套：按档位一记账速率约 20s 落完；调大上界须同步评估 `SETTLE_DRAIN_CAP` 与编排层 grace period，否则又回到"等满即放弃"。worker 的定时循环在同一信号上退出；`okapi all` 三角色一起返回。验收：`bins/okapi/tests/gateway_shutdown.rs`（真实二进制 + SIGTERM：首块后发信号，流完整到 `[DONE]`、新连接被拒、退出码 0、账已 committed 且无悬置预扣）。
 
 ### 14.4 入口硬化
 

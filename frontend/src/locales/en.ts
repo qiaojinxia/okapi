@@ -1873,6 +1873,7 @@ export default {
     permission_denied: 'Permission denied',
     insufficient_quota: 'Insufficient balance',
     rate_limited: 'Rate limited ({{param}})',
+    overloaded: 'Gateway settlement backlog overloaded ({{param}} pending); retry shortly',
     member_limit_exceeded: 'Team member monthly limit reached',
     model_not_found: 'Model not found',
     model_not_allowed: 'Model not allowed for this key',

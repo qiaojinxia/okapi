@@ -14,7 +14,10 @@ cd /work
 echo "== rustc: $(rustc --version) / nproc: $(nproc) / kernel: $(uname -r) =="
 cargo build --release --bin okapi --example loadgen 2>&1 | tail -2
 echo "== 启动 gateway（日志入 /tmp/gw.log）=="
-OKAPI_GATEWAY_BIND=127.0.0.1:8080 /build-target/release/okapi gateway >/tmp/gw.log 2>&1 &
+# 本脚本量的是网关自身开销口径（结算后台无界排队）；缺省的结算积压上界会把超出 PG 记账速率的
+# 请求变成 503，那是可持续吞吐口径，见 docs/perf-report.md「结算积压上界」
+OKAPI_SETTLE_BACKLOG_MAX="${OKAPI_SETTLE_BACKLOG_MAX:-0}" OKAPI_GATEWAY_BIND=127.0.0.1:8080 \
+  /build-target/release/okapi gateway >/tmp/gw.log 2>&1 &
 GW=$!
 sleep 2
 

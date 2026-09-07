@@ -37,6 +37,7 @@ use okapi_providers::{
 use state::AppState;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 
 /// 装配 gateway 共享状态（bin 启动与集成测试共用）。
@@ -314,6 +315,18 @@ pub fn router(state: AppState) -> Router {
             rule_inputs::track_in_flight,
         ))
         .layer(axum::middleware::from_fn(clients::stamp_peer_ip))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().on_failure(
+            |class: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span| {
+                // 503 是数据面的"此刻不可用"（结算积压泄压、无可用渠道），各有自己的信号
+                // （泄压翻转 WARN、错误落账进 CH 错误分布）；过载时每个 503 再刷一条 ERROR，
+                // 只会重演 perf-report 修正 #3 里"错误刷屏拖垮进程"的雪崩
+                if matches!(class, ServerErrorsFailureClass::StatusCode(s)
+                    if s == axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                {
+                    return;
+                }
+                tracing::error!(classification = %class, latency = ?latency, "response failed");
+            },
+        ))
         .with_state(state)
 }
