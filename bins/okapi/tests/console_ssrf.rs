@@ -99,6 +99,11 @@ async fn ssrf_default_policy_blocks_private_targets() {
     // 公网 https：放行
     let resp = create("https://api.example.com/v1").await;
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let channel_id = resp.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
+
+    oauth_token_url_goes_through_the_same_gate(&client, &addr, &token, channel_id).await;
 
     // 用完即删：临时库不清，跑一天测试就在开发 PG 里留下上百个库
     pg.close().await;
@@ -107,4 +112,44 @@ async fn ssrf_default_policy_blocks_private_targets() {
     )))
     .execute(&admin_pool)
     .await;
+}
+
+/// settings.oauth_token_url 过同一道闸：网关刷新 token 时会往它 POST refresh token，
+/// 渠道设置的通用写入口不能成为绕过 OAuth 登录端点校验的后门。
+async fn oauth_token_url_goes_through_the_same_gate(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    token: &str,
+    channel_id: i64,
+) {
+    for (settings, param) in [
+        (
+            json!({"oauth_token_url": "http://169.254.169.254/token"}),
+            "api_base_scheme_https_only",
+        ),
+        (
+            json!({"oauth_token_url": "https://10.0.0.8/token"}),
+            "api_base_private_target",
+        ),
+        (json!({"oauth_token_url": 42}), "oauth_token_url"),
+    ] {
+        let resp = client
+            .patch(format!("http://{addr}/admin/channels/{channel_id}"))
+            .bearer_auth(token)
+            .json(&json!({"settings": settings}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "{settings}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["param"], param, "{settings}");
+    }
+    let resp = client
+        .patch(format!("http://{addr}/admin/channels/{channel_id}"))
+        .bearer_auth(token)
+        .json(&json!({"settings": {"oauth_token_url": "https://auth.example.com/oauth/token"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
 }

@@ -236,6 +236,7 @@ pub async fn create_channel(
     ensure_data_retention(req.data_retention.as_deref())?;
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;
+    ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
         &state.pg,
@@ -534,6 +535,27 @@ fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     Ok(())
 }
 
+/// `settings.oauth_token_url`（订阅 OAuth 的 token 端点覆写）与 api_base 过同一道 SSRF 闸：
+/// 网关刷新 token 时会把 refresh token POST 到这个地址，OAuth 登录端点写它时已校验，
+/// 但渠道设置的通用写入口此前没有——改一下 JSON 就能把刷新请求指向私网 / 元数据地址。
+async fn ensure_settings_oauth_token_url(
+    state: &AppState,
+    settings: Option<&Value>,
+) -> Result<(), AppError> {
+    let Some(v) = settings.and_then(|s| s.get("oauth_token_url")) else {
+        return Ok(());
+    };
+    if v.is_null() {
+        return Ok(());
+    }
+    let url = v
+        .as_str()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| AppError::bad_request().with_param("oauth_token_url"))?;
+    super::ssrf::validate_api_base(state, url).await
+}
+
 /// `inject_request_fields`：对象、最多 32 键 / 4KB，受保护键不可写。
 fn inject_request_fields_ok(value: &Value) -> bool {
     const PROTECTED: &[&str] = &["model", "messages", "stream", "provider"];
@@ -621,6 +643,7 @@ pub async fn update_channel(
     }
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;
+    ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
     // 空地址已被上面的 SSRF 校验拦下（scheme 不合法）。要地址的三家（azure / bedrock / vertex）：
     // 本次给了地址就按新协议校验形状；改协议但没给地址则回源看现有地址合不合新协议
     if let Some(provider) = req
