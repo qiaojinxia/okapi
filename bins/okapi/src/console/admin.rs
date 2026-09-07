@@ -232,6 +232,7 @@ pub async fn create_channel(
     }
     ensure_azure_api_base(&req.provider, Some(&req.api_base))?;
     super::ssrf::validate_api_base(&state, &req.api_base).await?;
+    super::ssrf::validate_credential(&state, &req.credential).await?;
     ensure_cost_milli(req.cost_milli)?;
     ensure_data_retention(req.data_retention.as_deref())?;
     ensure_settings_api_version(req.settings.as_ref())?;
@@ -772,6 +773,7 @@ pub async fn rotate_channel_credential(
     if req.credential.trim().is_empty() {
         return Err(AppError::bad_request().with_param("credential"));
     }
+    super::ssrf::validate_credential(&state, &req.credential).await?;
     let outcome = okapi_store::admin::rotate_channel_credential(
         &state.pg,
         id,

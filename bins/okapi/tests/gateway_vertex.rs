@@ -353,6 +353,56 @@ async fn vertex_gemini_stream_and_json_share_one_token() {
     );
 }
 
+/// 服务账号 `token_uri` 是管理员贴进来的地址：换 token 不跟随重定向，302 原样当上游错误，
+/// 重定向目标一次也不能被请求（否则 SSRF 闸校验过的公网地址一跳就能引到私网）。
+#[tokio::test]
+async fn vertex_token_endpoint_redirect_is_not_followed() {
+    let leaked = Arc::new(AtomicUsize::new(0));
+    let router = Router::new()
+        .route(
+            "/token",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(axum::http::header::LOCATION, "/leak")],
+                )
+            }),
+        )
+        .route(
+            "/leak",
+            post({
+                let leaked = Arc::clone(&leaked);
+                move || {
+                    let leaked = Arc::clone(&leaked);
+                    async move {
+                        leaked.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({"access_token": "ya29.leaked", "expires_in": 3600}))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let vertex = okapi_providers::vertex::VertexUpstream::new().unwrap();
+    let credential = service_account_json(&format!("http://{mock}/token"));
+    let err = vertex
+        .access_token(&credential, &okapi_providers::Outbound::default())
+        .await
+        .expect_err("302 不是 token");
+    assert!(
+        matches!(
+            err,
+            okapi_providers::UpstreamError::Status { status: 302, .. }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(leaked.load(Ordering::SeqCst), 0, "重定向目标不得被请求");
+}
+
 /// Claude on Vertex：rawPredict / streamRawPredict，版本字段为 vertex 值（mock 侧断言）。
 #[tokio::test]
 async fn vertex_claude_raw_predict_end_to_end() {

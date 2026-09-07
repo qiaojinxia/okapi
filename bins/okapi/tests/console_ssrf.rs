@@ -104,6 +104,7 @@ async fn ssrf_default_policy_blocks_private_targets() {
         .unwrap();
 
     oauth_token_url_goes_through_the_same_gate(&client, &addr, &token, channel_id).await;
+    vertex_token_uri_goes_through_the_same_gate(&client, &addr, &token).await;
 
     // 用完即删：临时库不清，跑一天测试就在开发 PG 里留下上百个库
     pg.close().await;
@@ -152,4 +153,89 @@ async fn oauth_token_url_goes_through_the_same_gate(
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+}
+
+/// Vertex 服务账号 JSON 里的 `token_uri` 也是网关会 POST 的地址（JWT 换 access token），
+/// 而且测活会把它的非 2xx 响应体回给管理员：凭证的三个写入口（建渠道 / 轮换 / MCP 同函数）
+/// 都得过闸，按凭证形状而不按 provider 判断。
+async fn vertex_token_uri_goes_through_the_same_gate(
+    client: &reqwest::Client,
+    addr: &SocketAddr,
+    token: &str,
+) {
+    let service_account = |token_uri: Option<&str>| {
+        let mut sa = json!({"type": "service_account", "client_email": "x@p.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n"});
+        if let Some(uri) = token_uri {
+            sa["token_uri"] = json!(uri);
+        }
+        sa.to_string()
+    };
+    let create = |provider: &str, credential: String| {
+        let client = client.clone();
+        let provider = provider.to_owned();
+        let name = format!("vx-{}", Uuid::new_v4().simple());
+        async move {
+            client
+                .post(format!("http://{addr}/admin/channels"))
+                .bearer_auth(token)
+                .json(&json!({"name": name, "provider": provider, "models": ["m-x"],
+                    "api_base": "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1",
+                    "credential": credential}))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    for (provider, token_uri) in [
+        ("vertex", "http://169.254.169.254/computeMetadata/v1/token"),
+        ("vertex", "https://10.0.0.8/token"),
+        // 先按别的协议存下再改成 vertex 也不行：闸看凭证形状
+        ("openai", "https://127.0.0.1:8123/token"),
+    ] {
+        let resp = create(provider, service_account(Some(token_uri))).await;
+        assert_eq!(resp.status(), 400, "{provider} {token_uri}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(
+            body["error"]["param"], "credential_token_uri",
+            "{token_uri}"
+        );
+    }
+
+    // 缺省 token_uri（oauth2.googleapis.com）放行
+    let resp = create("vertex", service_account(None)).await;
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let channel_id = resp.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
+
+    // 轮换凭证是另一个写入口
+    for (credential, status, param) in [
+        (
+            service_account(Some("http://169.254.169.254/token")),
+            400,
+            Some("credential_token_uri"),
+        ),
+        (
+            service_account(Some("https://oauth2.googleapis.com/token")),
+            200,
+            None,
+        ),
+    ] {
+        let resp = client
+            .post(format!(
+                "http://{addr}/admin/channels/{channel_id}/credential"
+            ))
+            .bearer_auth(token)
+            .json(&json!({"credential": credential}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), status, "{credential}");
+        if let Some(param) = param {
+            let body: Value = resp.json().await.unwrap();
+            assert_eq!(body["error"]["param"], param);
+        }
+    }
 }

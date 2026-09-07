@@ -184,7 +184,7 @@ impl BedrockUpstream {
         );
         let mut req = self
             .http
-            .get(outbound, url)?
+            .probe(outbound, reqwest::Method::GET, url)?
             .header("x-amz-content-sha256", hash.as_str())
             .timeout(NON_STREAM_TIMEOUT);
         for (k, v) in &signed {
@@ -212,6 +212,7 @@ impl BedrockUpstream {
     }
 
     /// 数据面 OpenAI 兼容模型列表（Bearer 形态凭证的测活用：只验 key 认不认）。
+    /// 与其它测活一样走不跟随重定向的探针 client。
     pub async fn list_openai_models(
         &self,
         api_base: &str,
@@ -221,7 +222,7 @@ impl BedrockUpstream {
         let url = format!("{}/openai/v1/models", api_base.trim_end_matches('/'));
         let resp = self
             .http
-            .get(outbound, url)?
+            .probe(outbound, reqwest::Method::GET, url)?
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {credential}"),

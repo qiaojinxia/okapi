@@ -89,7 +89,8 @@ pub fn account_id_from_id_token(id_token: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// 换码（表单体，与 Codex CLI 一致）。
+/// 换码（表单体，与 Codex CLI 一致）。token 端点走不跟随重定向的探针 client：
+/// 地址可被管理员覆写（`oauth_token_url`），SSRF 闸只看得到填进来的那个 URL。
 pub async fn exchange(
     http: &crate::http::HttpPool,
     token_url: &str,
@@ -104,7 +105,11 @@ pub async fn exchange(
         ("code_verifier", verifier),
     ]);
     let resp = http
-        .post(&crate::http::Outbound::default(), token_url)?
+        .probe(
+            &crate::http::Outbound::default(),
+            reqwest::Method::POST,
+            token_url,
+        )?
         .timeout(TOKEN_TIMEOUT)
         .header(
             reqwest::header::CONTENT_TYPE,
@@ -124,7 +129,11 @@ pub async fn refresh(
     refresh_token: &str,
 ) -> Result<Tokens, UpstreamError> {
     let resp = http
-        .post(&crate::http::Outbound::default(), token_url)?
+        .probe(
+            &crate::http::Outbound::default(),
+            reqwest::Method::POST,
+            token_url,
+        )?
         .timeout(TOKEN_TIMEOUT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(

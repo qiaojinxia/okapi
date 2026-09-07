@@ -156,9 +156,10 @@ impl VertexUpstream {
         let form = format!(
             "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}"
         );
+        // token_uri 来自管理员贴进来的服务账号 JSON：不跟随重定向，闸只校验过它本身
         let resp = self
             .http
-            .post(outbound, sa.token_uri.as_str())?
+            .probe(outbound, reqwest::Method::POST, sa.token_uri.as_str())?
             .timeout(TOKEN_TIMEOUT)
             .header(
                 reqwest::header::CONTENT_TYPE,

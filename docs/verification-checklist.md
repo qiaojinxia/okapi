@@ -99,7 +99,7 @@
 | `subscriptions.rs` | 套餐 CRUD、购买、配额窗、订阅池优先扣 | A B | `console_subscriptions`（Lua 契约、网关优先扣、worker 滚窗、回调激活、校验）、e2e `subscriptions.spec`（接口桩） | 升降级 / 多订阅并存 backlog |
 | `teams.rs` | 建团 / 成员限额 / 团 key / 分账 | A B C | 单元；`console_teams` 全生命周期 | — |
 | 兑换码（manage + portal） | 批量生成、核销、绑用户、限 IP | A C | `console_redemption`（并发恰一成功、过期拒绝、IP 上限）、e2e `redemptions.spec` | 多次核销 `max_uses` backlog |
-| `ssrf.rs` | 上游 URL 校验 | C | 单元；`console_ssrf` | — |
+| `ssrf.rs` | 上游 URL 校验：`api_base`、`settings.oauth_token_url`、Vertex 服务账号 `token_uri`（凭证三个写入口） | C | 单元；`console_ssrf`（三种地址各自的 400 参数与放行） | — |
 | SPA 托管 / 内容协商 | `/admin/*` 同挂 API 与 SPA | A | `console_spa_navigation` | — |
 | 公告 / settings | `site_notice` 公开端点、设置读写 | A | `console_portal_pages::public_notice_whitelists_and_gates`、`console_ops::settings_get_and_leaderboard`、e2e smoke 公告 | — |
 | `playground.rs` | Playground 同源流式中继 + 站点预设（§11.39） | A B C | `console_playground`（中继强制流式回 SSE、逐块透出与记账落同一 key、无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口）；单元 `force_stream` / `sanitize_presets` | 中继直调数据面处理器，鉴权 / 限流 / 计费全部复用 gateway，不另测 |
@@ -171,7 +171,7 @@
 7. ~~OAuth 仅单一 mock IdP~~ **已补**（09-06 第八轮 `console_oauth_presets`）；~~Turnstile 外呼无 mock~~ **已补**（第七轮 `console_turnstile`）；SMTP TLS 形态未覆盖（mock SMTP 只走明文 AUTH PLAIN，STARTTLS / 隐式 TLS 需要带证书的 mock，且客户端得有可配的信任锚——暂列不做）。
 8. ~~后台结算积压无上界~~ **已修并合入 main（09-06 第十轮，`4e411ce`）**。第九轮压测发现：`settle_gate` 只钳制同时碰 PG 的任务数不限排队深度，本机 PG 落账约 1000 笔 / 秒而进量 4.7k–11.7k RPS，8 分钟后堆了 260,101 笔"Redis 已扣、PG 未记"的结算，SIGTERM 等满 30s 即放弃，PG 只落 166k / 426k 笔。定案走方案 A（有界 + 数据面拒绝）：`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000 ≈ 记账速率 × 30s 下线窗口，0 不设限）超界后鉴权前 503 `overloaded`，滞回恢复，IMPLEMENTATION §12.2 / §12.3 / §14.3 与 `docs/perf-report.md` 先行改定，压测口径分"网关自身开销（=0）"与"可持续吞吐（缺省）"两种。方案 B（持久结算队列 / 微批组提交）仍是 §11.23 挂着的终态方向。对账 1.5s 双采样窗口的误判风险随之收敛到最长约 20s，积压期间不要手动修复（已写进 §12.3）。
 9. ~~临时库套件从不删库~~ **已修并合入 main（09-06 第十轮，`575f630`）**：`console_setup` / `console_ssrf` / `console_oauth_presets` / `console_turnstile` 各建独立库不清，开发 PG 里一天攒了 157 个；用例末尾 `DROP DATABASE … WITH (FORCE)`，本机残留已手工清空。新写临时库用例照 `schema_shape` / 上述四个的收尾。
-10. ~~出站请求跟随重定向绕过 SSRF 闸~~ **已修（09-07 第十四轮，`f737892` + `8a92e2a`）**：`ssrf::validate_api_base` 只校验管理员填进来的那个 URL，而所有出站 reqwest client（`okapi_providers::http::build_client` 共享池 + `ratio_sync` 自建）都按缺省跟随 30x，公网地址一跳重定向就能把请求引到私网 / 云元数据地址（DNS rebinding 文档里已列 backlog，重定向此前没人提）。`ratio_sync::fetch_one` 自建 client 改 `Policy::none()`（`f737892`）；`HttpPool` 加一族不跟随重定向的探针 client，`PassUpstream::probe` 走它，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付七处管理面调用点换过去（`8a92e2a`，`console_channel_test::channel_test_does_not_follow_redirects` 钉住：上游 302 → 拿到 302 本身、目标零命中）；数据面透传保留缺省（下载类端点依赖上游 302 到 CDN）。未换的：订阅 OAuth 换 token / 刷新（`providers/oauth/*`，并行会话正在改）、Bedrock 列模型、Vertex 换 token——URL 是官方地址或经闸的覆写 / 校验过的 region，风险最低，IMPLEMENTATION §14.4 列为下一步统一。
+10. ~~出站请求跟随重定向绕过 SSRF 闸~~ **已修（09-07 第十四轮，`f737892` + `8a92e2a`）**：`ssrf::validate_api_base` 只校验管理员填进来的那个 URL，而所有出站 reqwest client（`okapi_providers::http::build_client` 共享池 + `ratio_sync` 自建）都按缺省跟随 30x，公网地址一跳重定向就能把请求引到私网 / 云元数据地址（DNS rebinding 文档里已列 backlog，重定向此前没人提）。`ratio_sync::fetch_one` 自建 client 改 `Policy::none()`（`f737892`）；`HttpPool` 加一族不跟随重定向的探针 client，`PassUpstream::probe` 走它，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付七处管理面调用点换过去（`8a92e2a`，`console_channel_test::channel_test_does_not_follow_redirects` 钉住：上游 302 → 拿到 302 本身、目标零命中）；数据面透传保留缺省（下载类端点依赖上游 302 到 CDN）。~~未换的：订阅 OAuth 换 token / 刷新、Bedrock 列模型、Vertex 换 token~~ **第十八轮统一换成探针 client**，顺带发现 Vertex 服务账号 JSON 的 `token_uri` 从未过闸（见第十八轮）。仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（16 token 补全，与真实请求同一条路）。
 11. **自用订阅凭证（anthropic_max / codex）的合规边界（09-07 第十四轮 review 备注，不改代码）**：出向会前置 Claude Code 系统提示首句、合并 `claude-code-20250219` 等 beta、转发客户端身份头，本质是让上游把网关流量当成 Claude Code / Codex CLI。README 已标"实验性 / 自用"、"明确不做"里写了不做订阅账号池转售；但一旦这类渠道被放进对外分组，就是拿订阅额度转售，违反两家的使用条款且会被封号。建议在渠道抽屉与文档里把"仅限本人 / 内部分组"写成硬约束（例如 OAuth 渠道不允许绑定可注册用户可见的分组），至少在清单里挂着。另注：系统提示前置会改变非 Claude Code 客户端拿到的模型行为，属该 provider 的已知语义。
 
 ## 4. 执行记录
@@ -442,3 +442,15 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | 提交前复核 | 1.98.1 与 1.95 两个版本的 `cargo fmt --check` 与 clippy 全绿；1.98.1 全量 `cargo test --workspace`（CI 同款 `env -i` 三连接串）108 个二进制，唯一失败 `console_manage::price_group_pagination_matches_database_pages`（API 总数 991 ≠ DB 计数 986）——当时机器上并行会话另有三个 `cargo test --workspace` 和一个常驻 `okapi all` 打着同一套开发库，两次计数之间被别人插了 5 条价格分组；单独重跑 8 / 8 | 不改代码；这正是第 1 节"跑 L2 之前先确认没有常驻进程"那条注意事项的又一次注脚，并行会话同时跑全量时也一样 |
 
 推送 `c8d3e53` 后 [run 34167474171](https://github.com/qiaojinxia/okapi/actions/runs/34167474171) **三个 job 全绿**：`check` 690s（clippy 97s、`cargo test --workspace` 534s，全新 PG / Redis / ClickHouse 容器，与第十六轮"三件全新"的本地结论一致）、`deny` 38s、`frontend` 26s。这是这条流水线自 09-05 建立以来第一次整体通过，也是 L0–L2 第一次拿到 CI 侧结论。第 1 节 L0 行与注意事项据此补上"用 CI 的 stable 跑 clippy、deny 带 `--all-features`"。第 3 节第 11 条仍是唯一待定项。
+
+### 2026-09-07 第十八轮：第 3 节第 10 条的尾巴——三处外呼统一，顺手抓到 Vertex `token_uri` 没过闸
+
+第十四轮把七处管理面外呼换成不跟随重定向的探针 client 时，把订阅 OAuth 换码 / 刷新、Vertex 服务账号换 token、Bedrock 列模型三处留作"下一步"。这轮把它们收掉，过程中按"网关会往哪些管理员给的地址发请求"逐个对照 SSRF 闸的覆盖面，多出一条。
+
+| 模块 | 结论 | 处置 |
+| --- | --- | --- |
+| `providers/oauth/{codex,anthropic_max}.rs` 换码 / 刷新、`vertex.rs` 换 token、`bedrock.rs` 列基础模型 / 列兼容模型 | 五处都是"POST / GET 一次、拿 JSON 回来解析"，没有跟随重定向的理由；其中 OAuth 的 `token_url` 与 Vertex 的 `token_uri` 都是管理员可控地址 | 全部换 `HttpPool::probe`；`gateway_oauth_channels::token_endpoint_redirect_is_not_followed`（两家 × 换码 / 刷新四条路：302 原样成 `UpstreamError::Status`，目标零命中）、`gateway_vertex::vertex_token_endpoint_redirect_is_not_followed` 钉住 |
+| Vertex 服务账号 JSON 的 `token_uri` | **SSRF 后门（C），与第十五轮 `oauth_token_url` 同类**：网关按它 POST JWT 断言换 access token；`api_base` 与 `oauth_token_url` 都过闸，这个字段藏在凭证里从未过。有 `channel.write` 的人贴一份 `token_uri` 指向私网 / 元数据地址的服务账号 JSON，点"测活（凭证）"就能拿回目标非 2xx 响应体的前 300 字（`cloud_probe` 的 `upstream_body`）；凭证密封存储，读侧看不见，写入口是唯一能校验的地方 | `console::ssrf::validate_credential`：能解析成服务账号 JSON 就把 `token_uri` 过 `validate_api_base`，违规回 `credential_token_uri`（管理员没动 api_base，不该看到 api_base 的参数名）；接在建渠道、轮换凭证、MCP 建渠道三处。按凭证形状而不按 provider 判断——先以 openai 存下再 PATCH 成 vertex 也绕不过。`console_ssrf::vertex_token_uri_goes_through_the_same_gate`（元数据地址 / 私网 / 换 provider 三种 400、缺省地址放行、轮换入口同样拒放） |
+| 顺带核对 | Bedrock 列模型的主机由 `aws_region`（写入时限 `[a-z0-9-]`）拼成 `bedrock.<region>.amazonaws.com`，无逃逸 ✅；订阅 OAuth 换码 / 刷新用 `Outbound::default()`，即**不走渠道自己的 `proxy_url`**——配了代理的订阅渠道刷新会直连出去，功能层面的缺口，不涉安全 | 记录，不改（并行会话的特性） |
+
+复核：1.98.1 与 1.95 两版 fmt / clippy 全绿；受影响八个套件（`console_ssrf` / `gateway_vertex` / `gateway_oauth_channels` / `gateway_bedrock` / `console_channel_test` / `console_mcp_write` / `console_manage` / `channel_credential`）29 / 29。第 3 节第 10 条至此没有尾巴；仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（16 token 补全，和真实请求同一条路，api_base 已过闸）。

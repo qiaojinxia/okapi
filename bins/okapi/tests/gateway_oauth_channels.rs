@@ -658,6 +658,63 @@ async fn oauth_state_is_single_use_and_provider_checked() {
     assert_eq!(body["error"]["code"], "oauth_state_invalid");
 }
 
+/// token 端点（可被 `oauth_token_url` 覆写）不跟随重定向：两家的换码 / 刷新拿到 302 就按上游
+/// 错误处理，重定向目标零请求——否则 SSRF 闸校验过的公网地址一跳就能把 refresh token 送进私网。
+#[tokio::test]
+async fn token_endpoint_redirect_is_not_followed() {
+    let leaked = Arc::new(AtomicUsize::new(0));
+    let router = Router::new()
+        .route(
+            "/token",
+            post(|| async {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(axum::http::header::LOCATION, "/leak")],
+                )
+            }),
+        )
+        .route(
+            "/leak",
+            post({
+                let leaked = Arc::clone(&leaked);
+                move || {
+                    let leaked = Arc::clone(&leaked);
+                    async move {
+                        leaked.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(json!({"access_token": "leaked", "expires_in": 3600}))
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let http = okapi_providers::HttpPool::new().unwrap();
+    let token_url = format!("http://{mock}/token");
+
+    let is_302 = |r: Result<okapi_providers::oauth::Tokens, okapi_providers::UpstreamError>| {
+        matches!(
+            r,
+            Err(okapi_providers::UpstreamError::Status { status: 302, .. })
+        )
+    };
+    assert!(is_302(
+        okapi_providers::oauth::anthropic_max::refresh(&http, &token_url, "rt").await
+    ));
+    assert!(is_302(
+        okapi_providers::oauth::anthropic_max::exchange(&http, &token_url, "code", "v").await
+    ));
+    assert!(is_302(
+        okapi_providers::oauth::codex::refresh(&http, &token_url, "rt").await
+    ));
+    assert!(is_302(
+        okapi_providers::oauth::codex::exchange(&http, &token_url, "code", "v").await
+    ));
+    assert_eq!(leaked.load(Ordering::SeqCst), 0, "重定向目标不得被请求");
+}
+
 /// own 范围的渠道管理员不能把 OAuth key 追加到别人的渠道；拒绝发生在换码之前，
 /// 一次性的授权码不被白白烧掉（token 端点零调用）。
 #[tokio::test]

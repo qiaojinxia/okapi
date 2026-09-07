@@ -749,6 +749,7 @@ async fn channel_create(
         .get("credential")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request().with_param("credential"))?;
+    super::ssrf::validate_credential(state, credential).await?;
     let models: Vec<&str> = args
         .get("models")
         .and_then(Value::as_array)

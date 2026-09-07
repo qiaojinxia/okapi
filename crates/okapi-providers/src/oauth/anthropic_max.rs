@@ -102,13 +102,19 @@ pub async fn refresh(
     .await
 }
 
+/// token 端点走不跟随重定向的探针 client：地址可被管理员覆写（`oauth_token_url`），
+/// SSRF 闸只看得到填进来的那个 URL。
 async fn post_token(
     http: &crate::http::HttpPool,
     token_url: &str,
     body: Value,
 ) -> Result<Tokens, UpstreamError> {
     let resp = http
-        .post(&crate::http::Outbound::default(), token_url)?
+        .probe(
+            &crate::http::Outbound::default(),
+            reqwest::Method::POST,
+            token_url,
+        )?
         .timeout(TOKEN_TIMEOUT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.to_string())

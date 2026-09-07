@@ -2407,7 +2407,7 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 
 ### 14.4 入口硬化
 
-- **上游 URL SSRF 校验**（Sub2API url_allowlist 吸收）：管理员配置 channels.api_base 时校验 scheme（默认仅 https）与目标（默认禁私网/环回/链路本地段），内网上游场景可按部署放开；配合出口侧 egress 白名单。**【2026-09-07】管理面外呼不跟随重定向**：闸只校验得到管理员填的那个 URL，跟着 30x 走就能被公网地址引到私网 / 云元数据地址；`HttpPool` 分两族 client，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付 / 倍率同步走 `probe`（`Policy::none()`），数据面透传保留缺省（下载类端点依赖上游 302 到 CDN）。订阅 OAuth 的换 token / 刷新与 Bedrock 列模型、Vertex 换 token 仍走缺省 client——它们的 URL 是官方地址或经闸的覆写，重定向风险最低，列为下一步统一。DNS rebinding 仍在 backlog。
+- **上游 URL SSRF 校验**（Sub2API url_allowlist 吸收）：管理员配置 channels.api_base 时校验 scheme（默认仅 https）与目标（默认禁私网/环回/链路本地段），内网上游场景可按部署放开；配合出口侧 egress 白名单。**【2026-09-07】管理面外呼不跟随重定向**：闸只校验得到管理员填的那个 URL，跟着 30x 走就能被公网地址引到私网 / 云元数据地址；`HttpPool` 分两族 client，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付 / 倍率同步走 `probe`（`Policy::none()`），数据面透传保留缺省（下载类端点依赖上游 302 到 CDN）。同日续：订阅 OAuth 的换码 / 刷新、Vertex 服务账号换 token、Bedrock 列模型也换成 `probe`——凡是"拿一个 JSON 回来解析"的外呼都不跟随重定向；仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（和真实请求同一条路）。**闸覆盖的地址不止 `api_base`**：`settings.oauth_token_url`（订阅 OAuth 刷新地址覆写）与 Vertex 服务账号 JSON 里的 `token_uri` 都是网关会 POST 的地址，凭证密封存储、写入口是唯一能校验的地方，建渠道 / 轮换凭证 / MCP 建渠道三处按凭证形状（能解析成服务账号 JSON 即查）过同一道闸，违规回 `credential_token_uri`。DNS rebinding 仍在 backlog。
 - WS 治理（Realtime / Responses WS 入口，M4）：per-key 客户端连接数上限（Redis 60s 租约 / 20s 续期）、首消息总超时、turn 间空闲超时。
 - 请求体/行缓冲上限见 §3.7；管理后台与门户接口独立限流。
 

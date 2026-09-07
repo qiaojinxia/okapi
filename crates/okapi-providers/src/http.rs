@@ -120,9 +120,9 @@ pub fn is_forbidden_header(name: &str) -> bool {
 ///
 /// 两族 client：数据面转发用的（跟随重定向，reqwest 缺省）与管理面探针用的（**不跟随**）。
 /// SSRF 闸（`console::ssrf`）只校验管理员填进来的那个 URL，跟着 30x 走就能被一个公网地址
-/// 引到私网 / 云元数据地址；测活、拉模型、余额、OAuth 换 token、Turnstile、支付回调这些
-/// 外呼都没有跟随重定向的正当理由。数据面保留缺省：`/videos/{id}/content` 这类下载透传
-/// 可能就靳上游 302 到 CDN。
+/// 引到私网 / 云元数据地址；测活、拉模型、余额、Turnstile、支付回调、订阅 OAuth 换码 / 刷新、
+/// Vertex 服务账号换 token、Bedrock 列模型这些外呼都没有跟随重定向的正当理由。数据面保留
+/// 缺省：`/videos/{id}/content` 这类下载透传可能就靠上游 302 到 CDN。
 #[derive(Clone)]
 pub struct HttpPool {
     default: reqwest::Client,

@@ -1,5 +1,6 @@
 //! 上游 URL SSRF 校验（IMPLEMENTATION §14.4，Sub2API url_allowlist 吸收）：
-//! 管理面写入 channels.api_base 时执行——scheme 默认仅 https、
+//! 管理面写入 channels.api_base、`settings.oauth_token_url` 与 Vertex 服务账号 `token_uri`
+//! 时执行——scheme 默认仅 https、
 //! 目标默认禁私网/环回/链路本地（IP 字面量层面；DNS rebinding 深化列 backlog，
 //! 配合出口 egress 白名单）。内网上游场景经 settings.ssrf_policy 放开：
 //! `{"allow_http": bool, "allow_private": bool}`。
@@ -86,6 +87,19 @@ pub async fn validate_api_base(state: &AppState, api_base: &str) -> Result<(), A
         return Err(AppError::bad_request().with_param("api_base_private_target"));
     }
     Ok(())
+}
+
+/// 凭证里藏着的出站地址也过闸：Vertex 服务账号 JSON 的 `token_uri`——网关换 access token 时
+/// 把 JWT 断言 POST 到它，测活还会把非 2xx 响应体前 300 字回给管理员。凭证密封存储，写入口是
+/// 唯一能看见它的地方；按凭证形状判断而不按 provider，先以别的协议存下再 PATCH 成 vertex 也
+/// 绕不过去。违规统一回 `credential_token_uri`（管理员没动 api_base，不该看到 api_base 的参数名）。
+pub async fn validate_credential(state: &AppState, credential: &str) -> Result<(), AppError> {
+    let Some(sa) = okapi_providers::vertex::ServiceAccount::parse(credential) else {
+        return Ok(());
+    };
+    validate_api_base(state, &sa.token_uri)
+        .await
+        .map_err(|_| AppError::bad_request().with_param("credential_token_uri"))
 }
 
 #[cfg(test)]
