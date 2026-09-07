@@ -55,6 +55,14 @@ async function prepare(page: Page, { permissions = ['*'], signedIn = true } = {}
   return requests
 }
 
+/// 抽屉打开后 30ms 才把焦点送进第一个输入框（`use-modal-focus`）。在那之前 fill 会被这次聚焦
+/// 打断，字打进别的框——并行负载下偶发的"display_name 里多了 30.9"就是它。等焦点进了对话框再动手。
+async function openedDialog(page: Page) {
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.locator(':focus')).toHaveCount(1)
+  return dialog
+}
+
 function apiError(status: number, code: string, param?: string) {
   return { status, json: { error: { code, ...(param === undefined ? {} : { param }) } } }
 }
@@ -104,7 +112,7 @@ test('渠道抽屉：注入字段按 JSON 解析、代理与额外头可改可�
     .filter({ hasText: 'openai-main' })
     .getByRole('button', { name: '编辑', exact: true })
     .click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
   await expect(drawer.getByRole('heading', { name: /编辑渠道/ })).toBeVisible()
   await drawer.getByRole('tab', { name: '请求与计费行为' }).click()
 
@@ -270,7 +278,7 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
 
   await page.goto('/admin/users')
   await page.getByRole('row').filter({ hasText: 'alice' }).getByRole('button', { name: '管理', exact: true }).click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
   await expect(drawer.getByRole('heading', { name: '用户 #7' })).toBeVisible()
 
   // 余额：界面填 USD，提交 micro 整数；浮点边界值也必须落到整数
@@ -345,7 +353,7 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
 
   await page.goto('/admin/pricing')
   await page.getByRole('row').filter({ hasText: 'gpt-5' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
   await expect(drawer.getByRole('heading', { name: '编辑 gpt-5' })).toBeVisible()
   await expect(drawer.locator('#m-name')).toHaveValue('gpt-5')
   await expect(drawer.locator('#m-name')).toHaveAttribute('readonly', '')
@@ -381,7 +389,7 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
 
   // 新建 + 阶梯表：模式提示随表达式切换；无档位时不发 tier_ratios 键
   await page.getByRole('button', { name: '新建模型' }).click()
-  const create = page.getByRole('dialog')
+  const create = await openedDialog(page)
   await create.locator('#m-name').fill('my-model')
   await expect(create.getByText('当前：ratio 模式', { exact: false })).toBeVisible()
   await create.locator('#m-tier-expr').fill(' 0:2.5,128000:5 ')
@@ -427,7 +435,7 @@ test('套餐抽屉：充值模板与订阅两种形态字段互斥，USD 换 mic
   // 编辑既有充值模板：代码锁定、金额回填为 USD，改有效期与分组后提交
   await page.goto('/admin/plans')
   await page.getByRole('row').filter({ hasText: 'starter' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const edit = page.getByRole('dialog')
+  const edit = await openedDialog(page)
   await expect(edit.getByRole('heading', { name: '编辑套餐 starter' })).toBeVisible()
   await expect(edit.locator('#p-code')).toBeDisabled()
   await expect(edit.locator('#p-grant')).toHaveValue('10')
@@ -453,7 +461,7 @@ test('套餐抽屉：充值模板与订阅两种形态字段互斥，USD 换 mic
 
   // 新建订阅：切到订阅形态后字段区替换；有效期为空不放行；售价空 = 不售卖（0）
   await page.getByRole('button', { name: '新建套餐' }).click()
-  const create = page.getByRole('dialog')
+  const create = await openedDialog(page)
   await create.locator('#p-code').fill('pro-monthly')
   await create.locator('#p-name').fill('Pro')
   await create.getByRole('group', { name: '类型', exact: true }).getByRole('button', { name: '订阅', exact: true }).click()
@@ -512,7 +520,7 @@ test('角色抽屉：权限点来自后端清单、整组切换、无权限不�
 
   await page.goto('/admin/roles')
   await page.getByRole('button', { name: '新建角色' }).click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
   const create = drawer.getByRole('button', { name: '新建', exact: true })
   await drawer.locator('#rcode').fill('finance')
   await drawer.locator('#rname').fill('Finance')
@@ -538,7 +546,7 @@ test('角色抽屉：权限点来自后端清单、整组切换、无权限不�
 
   // 编辑既有角色：code 锁定、已有权限预勾
   await page.getByRole('row').filter({ hasText: 'ops_readonly' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const edit = page.getByRole('dialog')
+  const edit = await openedDialog(page)
   await expect(edit.getByRole('heading', { name: '编辑角色 ops_readonly' })).toBeVisible()
   await expect(edit.locator('#rcode')).toBeDisabled()
   await expect(edit.getByRole('checkbox', { name: 'billing.read', exact: true })).toBeChecked()
@@ -589,7 +597,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   ).toBeDisabled()
 
   await page.getByRole('row').filter({ hasText: 'vip' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const edit = page.getByRole('dialog')
+  const edit = await openedDialog(page)
   await expect(edit.getByRole('heading', { name: '编辑 vip' })).toBeVisible()
   await expect(edit.locator('#g-code')).toHaveAttribute('readonly', '')
   await expect(edit.locator('#g-ratio')).toHaveValue('0.8')
@@ -611,7 +619,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
 
   // 新建：分组码为空不放行；缺省倍率 1、缺省池 default、不可自选
   await page.getByRole('button', { name: '新建分组' }).click()
-  const create = page.getByRole('dialog')
+  const create = await openedDialog(page)
   const save = create.getByRole('button', { name: '保存', exact: true })
   await expect(save).toBeDisabled()
   await create.locator('#g-code').fill('team-a')
@@ -651,7 +659,7 @@ test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro
   await page.goto('/admin/rules')
   // 编辑既有时段规则：类型 / 参数 / 星期 / 范围全部回填，code 锁定
   await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const edit = page.getByRole('dialog')
+  const edit = await openedDialog(page)
   await expect(edit.getByRole('heading', { name: '编辑规则 night-discount' })).toBeVisible()
   await expect(edit.locator('#r-code')).toBeDisabled()
   await expect(edit.locator('#r-type')).toHaveValue('time_based')
@@ -683,7 +691,7 @@ test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro
 
   // 新建阶梯量规则：阈值 USD → micro；时段字段不发；空范围三键都不发
   await page.getByRole('button', { name: '新建规则' }).click()
-  const create = page.getByRole('dialog')
+  const create = await openedDialog(page)
   await create.locator('#r-type').selectOption('volume')
   await create.locator('#r-code').fill('heavy-users')
   await create.locator('#r-mult').fill('0.85')
@@ -860,7 +868,7 @@ test('团队：建团提交去空格的名字，成员表单把月度上限 USD 
 
   await page.goto('/portal/teams')
   await page.getByRole('button', { name: '创建团队' }).first().click()
-  const createDrawer = page.getByRole('dialog')
+  const createDrawer = await openedDialog(page)
   const create = createDrawer.getByRole('button', { name: '创建团队', exact: true })
   await expect(create).toBeDisabled()
   await createDrawer.locator('#tname').fill('  Data Team ')
@@ -871,7 +879,7 @@ test('团队：建团提交去空格的名字，成员表单把月度上限 USD 
 
   // 列表出现新团 → 管理抽屉：钱包、成员表、加成员、发 key
   await page.getByRole('row').filter({ hasText: 'Data Team' }).getByRole('button', { name: '管理', exact: true }).click()
-  const detail = page.getByRole('dialog')
+  const detail = await openedDialog(page)
   await expect(detail.getByRole('heading', { name: 'Data Team' })).toBeVisible()
   await expect(detail.getByRole('row').filter({ hasText: 'alice' })).toContainText('所有者')
 
@@ -934,7 +942,7 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   await expect(rowOf('spare').getByRole('button', { name: '删除', exact: true })).toBeEnabled()
 
   await rowOf('premium').getByRole('button', { name: '编辑', exact: true }).click()
-  const edit = page.getByRole('dialog')
+  const edit = await openedDialog(page)
   await expect(edit.getByRole('heading', { name: '编辑 premium' })).toBeVisible()
   await expect(edit.locator('#pool-code')).toHaveAttribute('readonly', '')
   await expect(edit.locator('#pool-strategy')).toHaveValue('least_latency')
@@ -950,7 +958,7 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   expect(posts[0]).toEqual({ pool_code: 'premium', description: 'paid tier', routing_strategy: 'priority_weighted', fallback_pool_code: null })
 
   await page.getByRole('button', { name: '新建池' }).click()
-  const create = page.getByRole('dialog')
+  const create = await openedDialog(page)
   const save = create.getByRole('button', { name: '保存', exact: true })
   await expect(save).toBeDisabled()
   await create.locator('#pool-code').fill(' stable ')
@@ -1014,7 +1022,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
 
   await page.goto('/admin/channels')
   await page.getByRole('row').filter({ hasText: 'openai-main' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
 
   // 接入页签：协议只读；凭证轮换是独立端点，不并进"保存"，成功后输入清空
   await expect(drawer.locator('#d-provider')).toHaveAttribute('readonly', '')
@@ -1074,7 +1082,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
 
   // 新建：三件必答事（名 / 凭证 / 模型）齐了才放行，池成员随建渠道一起提交，缺省进 default
   await page.getByRole('button', { name: '新建渠道' }).first().click()
-  const create = page.getByRole('dialog')
+  const create = await openedDialog(page)
   const submit = create.getByRole('button', { name: '新建', exact: true })
   await create.locator('#d-name').fill('anthropic-eu')
   await create.locator('#d-provider').selectOption('anthropic')
@@ -1145,7 +1153,7 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
 
   await page.goto('/admin/users')
   await page.getByRole('row').filter({ hasText: 'alice' }).getByRole('button', { name: '管理', exact: true }).click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
 
   // 角色：两个下拉都"不改动"时按钮禁用；只改内置角色 → 体里只有 role；只改自定义角色 → 只有 admin_role_id
   await drawer.getByRole('tab', { name: '角色', exact: true }).click()
@@ -1225,7 +1233,7 @@ test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = nul
 
   await page.goto('/admin/channels')
   await page.getByRole('row').filter({ hasText: 'openai-main' }).getByRole('button', { name: '编辑', exact: true }).click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
   await expect(drawer.locator('#kw-501')).toHaveValue('100')
   await expect(drawer.locator('#kc-501')).toHaveValue('')
@@ -1353,7 +1361,7 @@ test('兑换码生成抽屉：面值 USD 换 micro 整数（0.29 边界）、绑
 
   await page.goto('/admin/codes')
   await page.getByRole('button', { name: '生成', exact: true }).first().click()
-  const drawer = page.getByRole('dialog')
+  const drawer = await openedDialog(page)
   await expect(drawer.getByText('批量生成兑换码')).toBeVisible()
   await expect(drawer.locator('#c-count')).toHaveValue('10')
   await expect(drawer.locator('#c-amount')).toHaveValue('10')
@@ -1405,4 +1413,121 @@ test('兑换码生成抽屉：面值 USD 换 micro 整数（0.29 边界）、绑
   await drawer.getByRole('button', { name: '取消', exact: true }).waitFor({ state: 'detached' })
   await drawer.getByText('关闭', { exact: true }).click()
   await expect(drawer).toHaveCount(0)
+})
+
+test('毛利熔断卡：配置以人看的单位回显并按整数口径提交（USD→micro、百分比→万分比含负号、分→秒、时→秒），未改动不放行；解除按分组×渠道打端点', async ({ page }) => {
+  await prepare(page)
+  const settingsPosts: Json[] = []
+  const lifts: Json[] = []
+  const now = Math.floor(Date.now() / 1000)
+  await page.route('**/admin/margin-breaker', (route) =>
+    route.request().isNavigationRequest()
+      ? route.fallback()
+      : route.fulfill({
+          json: {
+            config: {
+              enabled: true, window_hours: 24, min_requests: 20, min_cost_micro: 100_000,
+              margin_bp: 0, cooldown_secs: 3600, lift_secs: 86_400,
+            },
+            data: [{
+              group_code: 'vip', channel_id: 42, channel_name: 'openai-main', state: 'blocked', active: true,
+              since: now - 600, until: now + 3000, requests: 35, amount_micro: 1_000_000, cost_micro: 1_250_000, margin_bp: -2500,
+            }],
+          },
+        }),
+  )
+  await page.route('**/admin/margin-breaker/lift', async (route) => {
+    lifts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { until: now + 86_400 } })
+  })
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    settingsPosts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+
+  await page.goto('/admin/ops')
+  await page.getByRole('tab', { name: '毛利熔断', exact: true }).click()
+  // 生效值按人看的单位回显：0.1 USD、0%、60 分钟、24 小时
+  await expect(page.locator('#mb-min_cost_usd')).toHaveValue('0.1')
+  await expect(page.locator('#mb-threshold_pct')).toHaveValue('0')
+  await expect(page.locator('#mb-cooldown_min')).toHaveValue('60')
+  await expect(page.locator('#mb-lift_hours')).toHaveValue('24')
+  const save = page.getByRole('button', { name: '保存', exact: true })
+  await expect(save).toBeDisabled()
+
+  await page.locator('#mb-min_cost_usd').fill('0.29')
+  await page.locator('#mb-threshold_pct').fill('-2.5')
+  await page.locator('#mb-cooldown_min').fill('90')
+  await page.locator('#mb-lift_hours').fill('48')
+  // 非法数字挡在提交前
+  await page.locator('#mb-window_hours').fill('abc')
+  await expect(save).toBeDisabled()
+  await page.locator('#mb-window_hours').fill('12')
+  await expect(save).toBeEnabled()
+  const saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/settings'))
+  await save.click()
+  await saved
+  expect(settingsPosts[0]).toEqual({
+    key: 'margin_breaker',
+    value: {
+      enabled: true, window_hours: 12, min_requests: 20, min_cost_micro: 290_000,
+      margin_bp: -250, cooldown_secs: 5400, lift_secs: 172_800,
+    },
+  })
+  await expect(page.getByRole('status').filter({ hasText: '已保存' })).toBeVisible()
+
+  // 被暂停的分组 × 渠道：负毛利行可解除，解除体只带定位对
+  const row = page.getByRole('row').filter({ hasText: 'openai-main' })
+  await expect(row.getByText('已暂停')).toBeVisible()
+  await expect(row.getByText('-25.0%')).toBeVisible()
+  await expect(row.getByText('35 笔 · 收入 US$1.00 · 成本 US$1.25')).toBeVisible()
+  const lifted = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/margin-breaker/lift'))
+  await row.getByRole('button', { name: '解除', exact: true }).click()
+  await lifted
+  expect(lifts).toEqual([{ group_code: 'vip', channel_id: 42 }])
+  await expect(page.getByRole('status').filter({ hasText: '已解除' })).toBeVisible()
+})
+
+test('渠道列表查上游余额：只对支持的协议露出按钮，成功按币种格式化并回填"余额"徽章，不支持 / 形状不认以错误码文案提示', async ({ page }) => {
+  await prepare(page)
+  let balanceCalls = 0
+  let lastBalance: Json | null = null
+  await page.route('**/admin/channels?*', (route) =>
+    route.fulfill({
+      json: {
+        data: [
+          { ...CHANNEL, settings: {}, last_balance: lastBalance },
+          { ...CHANNEL, id: 43, name: 'claude-main', provider: 'anthropic', settings: {}, last_balance: null },
+        ],
+        total: 2, enabled: 2,
+      },
+    }),
+  )
+  await page.route('**/admin/channels/42/balance', async (route) => {
+    balanceCalls += 1
+    if (balanceCalls === 1) return route.fulfill(apiError(400, 'bad_request', 'balance_shape'))
+    lastBalance = {
+      channel_id: 42, probe: 'deepseek', currency: 'CNY', balance_micro: 110_500_000,
+      total_micro: null, used_micro: null, at: new Date().toISOString(),
+    }
+    await route.fulfill({ json: lastBalance })
+  })
+
+  await page.goto('/admin/channels')
+  const openai = page.getByRole('row').filter({ hasText: 'openai-main' })
+  const anthropic = page.getByRole('row').filter({ hasText: 'claude-main' })
+  await expect(openai.getByRole('button', { name: '查上游余额', exact: true })).toBeVisible()
+  await expect(anthropic.getByRole('button', { name: '查上游余额', exact: true })).toHaveCount(0)
+
+  // 形状不认 → 错误码 + param 文案
+  await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('请求参数有误（balance_shape）')
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+
+  // 成功：人民币 110.5 → ¥110.50，probe 口径进提示；列表刷新后"余额"徽章回填
+  await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: /余额 ¥110\.50（deepseek 口径）/ })).toBeVisible()
+  await expect(openai.getByText('¥110.50')).toBeVisible()
+  expect(balanceCalls).toBe(2)
 })

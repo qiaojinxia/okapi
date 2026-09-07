@@ -149,7 +149,10 @@ test('预设保存 / 载入，站点预设一键导入', async ({ page }) => {
 test('密钥回执上的一键导入链接形状正确', async ({ page }) => {
   await prepare(page)
   await page.goto('/portal/keys')
-  await page.getByRole('button', { name: 'New key' }).click()
+  // 页头与空态各有一个 "New key"：列表桩回空后空态才出现，按钮数量随时序在 1 / 2 之间跳，取第一个
+  await page.getByRole('button', { name: 'New key' }).first().click()
+  // 抽屉开后 30ms 才把焦点送进第一个输入框；等它进去再填，否则并行负载下 fill 会被打断
+  await expect(page.getByRole('dialog').locator(':focus')).toHaveCount(1)
   await page.getByLabel('Name', { exact: true }).fill('cli')
   await page.getByRole('button', { name: 'Create' }).click()
 
