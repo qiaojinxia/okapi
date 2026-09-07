@@ -35,6 +35,60 @@ pub fn is_oauth_provider(provider: &str) -> bool {
     matches!(provider, "anthropic_max" | "codex")
 }
 
+/// 真实 Claude Code / Codex CLI 经网关出去时原样带到上游的客户端身份头（§11.38）。
+/// 网关不编造这些头：客户端带了就转发，没带就没有。
+const CLIENT_HEADERS: [&str; 13] = [
+    "user-agent",
+    "accept-language",
+    // Anthropic 族
+    "x-app",
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    // Codex 族
+    "originator",
+    "version",
+    "session_id",
+    "conversation_id",
+    "openai-beta",
+    "x-codex-beta-features",
+    "x-codex-installation-id",
+    "x-codex-window-id",
+];
+const CLIENT_HEADER_PREFIXES: [&str; 2] = ["x-stainless-", "x-codex-turn-"];
+
+/// 从入口请求里挑出可透传的身份头（只在订阅 provider 的出向上生效；受保护头由
+/// `okapi_providers::http::is_forbidden_header` 在写入时再拦一次）。
+#[must_use]
+pub fn client_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| {
+            let name = name.as_str();
+            CLIENT_HEADERS.contains(&name)
+                || CLIENT_HEADER_PREFIXES.iter().any(|p| name.starts_with(p))
+        })
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|v| (name.as_str().to_owned(), v.to_owned()))
+        })
+        .collect()
+}
+
+/// 订阅渠道的出向修饰 = 渠道设置里的代理 / 额外头 + 客户端身份头；其它渠道原样。
+#[must_use]
+pub fn outbound_with_client(
+    cand: &ChannelCandidate,
+    client: &[(String, String)],
+) -> okapi_providers::Outbound {
+    let mut outbound = super::openai_dialect::outbound(cand);
+    if is_oauth_provider(&cand.provider) {
+        outbound.extra_headers.extend(client.iter().cloned());
+    }
+    outbound
+}
+
 /// 刷新所需的最小上下文：候选行或管理面探测都能凑出来。
 pub struct OAuthKey<'a> {
     pub channel_key_id: i64,

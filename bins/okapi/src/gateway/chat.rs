@@ -114,6 +114,8 @@ struct RequestBilling {
     client_type: &'static str,
     /// 客户端 IP（CDN 头按序，§14.2）。
     client_ip: Option<String>,
+    /// 客户端身份头（只在订阅 provider 的出向上透传，§11.38）。
+    client_headers: Arc<Vec<(String, String)>>,
     /// 渠道可见性组（用户全部组并集，§6.3）。
     /// 有序池链（主池 → 降级池）：候选查询与缓存键都吃它。
     pool_chain: Vec<String>,
@@ -516,7 +518,10 @@ async fn count_tokens_inner(
             .api_base
             .clone()
             .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE.to_owned());
-        let outbound = super::openai_dialect::outbound(&cand);
+        let outbound = super::oauth_cred::outbound_with_client(
+            &cand,
+            &super::oauth_cred::client_headers(headers),
+        );
         let counted = if cand.provider == "anthropic_max" {
             match super::oauth_cred::fresh_credential(state, &cand).await {
                 Ok(cred) => {
@@ -881,6 +886,7 @@ async fn handle_chat(
         session: info.session.clone(),
         client_type: detect_client_type(headers),
         client_ip: super::clients::detect_client_ip(headers),
+        client_headers: Arc::new(super::oauth_cred::client_headers(headers)),
         pool_chain: key.pool_chain().into_iter().map(str::to_owned).collect(),
         pool_strategy: key.pool_strategy.clone(),
         service_tier: info.service_tier.clone(),
@@ -1563,7 +1569,8 @@ async fn dispatch_chat(
         inject_request_fields(&body, &cand.inject_request_fields).unwrap_or(body)
     };
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
-    let outbound = super::openai_dialect::outbound(cand);
+    // 订阅 provider 额外带上客户端身份头（真实 Claude Code / Codex CLI 经网关出去时上游看到它自己）
+    let outbound = super::oauth_cred::outbound_with_client(cand, &bill.client_headers);
     // 方言臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
     let dialect = super::dialect::upstream_dialect(&cand.provider, &upstream_model);
     let resp = match (bill.ingress, dialect) {
@@ -1625,7 +1632,7 @@ async fn dispatch_chat(
         // Gemini 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
         (Ingress::Gemini, "anthropic") => bill
             .state
-            .messages_via(cand, base, &upstream_model, body, stream)
+            .messages_via(cand, base, &upstream_model, body, stream, &outbound)
             .await
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model))
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
@@ -1644,7 +1651,7 @@ async fn dispatch_chat(
         // OpenAI/Responses 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状
         (Ingress::OpenAi | Ingress::Responses, "anthropic") => bill
             .state
-            .messages_via(cand, base, &upstream_model, body, stream)
+            .messages_via(cand, base, &upstream_model, body, stream, &outbound)
             .await
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model)),
         // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
@@ -1657,7 +1664,7 @@ async fn dispatch_chat(
         (Ingress::Anthropic, "anthropic") => {
             match bill
                 .state
-                .messages_via(cand, base, &upstream_model, body, stream)
+                .messages_via(cand, base, &upstream_model, body, stream, &outbound)
                 .await?
             {
                 okapi_providers::anthropic::MessagesResponse::Json {

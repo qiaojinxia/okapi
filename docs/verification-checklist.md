@@ -36,6 +36,7 @@
 - 本机 Cursor 沙箱会把 `CARGO_TARGET_DIR` 重定向到缓存目录，L4 / L5 依赖的 `target/debug/okapi` 必须显式 `CARGO_TARGET_DIR=target` 构建，否则跑的是旧二进制。
 - `.sqlx` 快照必须用 `cargo sqlx prepare --workspace -- --all-targets` 生成；不带 `--all-targets` 会漏掉测试里的 `query!`，CI 离线编译即红。
 - L4 与 L5 都占 :8081，顺序执行；L4 的 Playwright `webServer` 在 `reuseExistingServer: true` 下会复用已在跑的 console。
+- **跑 L2 之前先 `lsof -nP -iTCP:8080 -iTCP:8081 -sTCP:LISTEN` 确认没有常驻的 `okapi all` / `okapi worker`**：它连着同一套 PG / Redis，其 worker 会抢先消费通知、上报在途量表、写 settings 缓存，让 `worker_notify` / `gateway_multipod` / `console_smtp` 等五个套件随机红（第十一轮实测）。
 - 想在 worktree 或第二份 checkout 上独立验证时，`.env` 不够：`dotenvy` 不覆盖已导出的环境变量，shell 里 `set -a; . .env` 过的 `DATABASE_URL` 会让 worktree 连回主库（迁移版本不一致即 `VersionMissing`）；必须显式传 `DATABASE_URL=…`。同时 Redis / CH 也要隔离——两套 PG 的自增 id 会在同一 Redis（`bal:{uid}`）与同一 CH 库里串味，余额与聚合断言随机失败。Redis 用逻辑库号（`redis://…:63790/7` + `redis-cli -n 7 flushdb`）零成本隔离；CH 库名在测试里写死 `okapi`，暂无法隔离，相关两例（`entity_usage_batches_by_ids`、`admin_refund_full_cycle`）以主库结果为准。
 
 ## 2. 覆盖矩阵
@@ -326,3 +327,28 @@
 release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 / 37,888 被拒（503）**，可持续 1727 RPS ≈ PG 记账速率；日志全程 **3 条 WARN、0 条 ERROR**（首版无滞回时阈值附近每秒翻转十几次、TraceLayer 每个 503 一条 ERROR 共 7109 行，修掉后才是这个数）；压完**立即 SIGTERM，25s 退出**，PG 新增 25,906 = 成功数 + 预热 1 笔，**零丢账**（第九轮同场景放弃 26 万笔）。`OKAPI_SETTLE_BACKLOG_MAX=0`：5s 59,550 成功 0 拒绝、11.8k RPS，与第九轮口径一致。
 
 分支顶端全量（隔离库 + Redis 逻辑库 7）：448 / 452，4 例失败（`admin_refund_full_cycle`、`partner_employee_keys_see_own_usage`、`margin_report_sums_amount_and_discount`、`client_distribution_groups_by_client_type`）全部是 CH 聚合把主库同 id 实体的行加了进来（如"实收 4038 ≠ 4000"、"CH 口径应被冲平 720 ≠ 0"），与第九轮同因，CH 库名写死无法隔离；四例代码未动、在主库上均通过。收尾：删 `okapi_backlog` 库、清 Redis 逻辑库 7、`git worktree remove`（分支保留）。
+
+### 2026-09-07 第十一轮：当日全部特性落地后的主工作树全量
+
+待验证的工作树 = 09-06 全天：分组限流 / 上游余额 / 负毛利熔断 / Bedrock + Vertex / 倍率同步 / 会话上限 / 自用订阅凭证 / Playground + 客户端一键导入（均未提交）。另一个会话已停止改动，工作区安静。
+
+| 层 | 结果 | 数字 | 说明 |
+| --- | --- | --- | --- |
+| L0 rustfmt | 通过 | 0 文件 | 并行会话已把它那批 OAuth 文件格式化 |
+| L0 clippy `-D warnings --all-targets` | **通过（全工作区、无豁免）** | — | 第七轮记的两条对方 lint 均已收口 |
+| L0 sqlx 离线快照 | 通过 | 0 条缺失 | `SQLX_OFFLINE=true cargo check --all-targets` |
+| L0 cargo-deny | licenses 仅 7 个自有 crate `unlicensed` | 12 个重复 crate 警告 | 与前几轮一致，等 §15 定案；重复 crate 为 `sha2 0.10/0.11`、`base64`、`hmac` 等两代并存，非新增 |
+| L0 前端 tsc / oxlint / 五道守卫 | 通过 | i18n 键 1479 双语对齐；权限点 9；部署模板 Σ 池 152 / 200 | — |
+| L1 + L2 Rust 全量 | 首跑 512 / 518；停掉残留进程后干净复跑 **518 / 518** | 106 个测试二进制 | 见发现 ① ② |
+| L3 前端交互 e2e | 通过 | 80 / 80（新增 `playground.spec` 4 例） | — |
+| L4 前端冒烟 e2e（真实 console） | 通过 | 10 / 10 | 演示超管在位，管理端用例真实执行 |
+| L5 `okapi all` 冒烟 | 通过 | 4 断言（root 已存在跳过 key 断言） | 需先停掉并行会话残留的 `okapi all`（占 :8080 / :8081 近 15 小时） |
+| L5 embed-web 发布形态 | 通过 | 首页 / 哈希资源 / SPA 深链 / API 401 | `verify-deploy.sh` 62s |
+| L6 性能 | 未执行 | — | 第九、十轮已做，本轮无热路径改动 |
+
+发现与处置：
+
+1. **五例失败的根因是残留的常驻进程，不是测试互相干扰**：首跑时并行会话留下的 `okapi all`（含 worker）仍连着同一套 PG / Redis——worker 消费 `notify:mute` 频率闸、往 `inflight:gauge` 上报在途数、按 `settings.notify_channels` 往 mock SMTP 投递，正好对应 `worker_notify::notify_dispatch_and_mute`（订阅事件 0 ≠ 1，被 worker 先消费）、`gateway_multipod::inflight_gauge_sums_across_instances`（24 ≠ 12，多一个实例在上报）、`console_smtp::notify_email_channel_and_admin_test_send`（多出一个收件人）三例；`console_portal_pages` 公告与 `console_oauth` 的 RowNotFound 同属该进程的 settings 缓存 / 会话写入串味。**停掉该进程后干净复跑：106 个测试二进制 518 / 518，0 失败**。结论：全量测试前必须确认 8080 / 8081 无常驻 okapi 进程（已写进第 1 节注意事项）。
+2. **`console_stats::client_distribution_groups_by_client_type` 单跑也失败（已修用例）**：断言 `share_bp > 0`，但长期 dev 库近一日已有 7 万多笔请求日志，本用例的 5 笔不足万分之一，整数基点截断为 0——用例假设"库是空的"。改为断言基点在 `0..=10000` 且全表各行之和 ≤ 10000（截断只会少不会多）。产品行为正确，是用例对共享库的假设过时。
+3. 并行会话留下的 `RUST_LOG=info ./target/debug/okapi all` 常驻进程占着 8080 / 8081，`smoke-all.sh` 会因端口冲突起不来；本轮 SIGTERM 后正常退出再跑。以后长驻进程应在收尾时停掉。
+4. **同一个常驻 `okapi all` 还会让 `console_stats` 的 `poll_until` 超时**（另一会话串行复跑时 `portal_charts_expose_cache_writes_performance_and_exact_date_window` 报"轮询超时"，其余 7 例通过；停掉进程后 8 / 8）。根因：它配了 NATS，worker 的 `nats_relay::relay_once` 用 `SKIP LOCKED` 抢到测试刚播进 `billing_outbox` 的 `request_log` 行，但 BILLING 流只收 `billing.>`，发布失败后把该行推进 5s → 10s → … 的退避（进程日志里 `NATS 发布失败 count=1` 与该行 `retry_count` 逐次对应），`chsink::process_once` 的 `next_retry_at <= now()` 过滤随即看不到它，用例 5 秒轮询必然超时。`request_log` 主题只有测试在播、生产代码只写 `billing.completed / refunded`，故不改代码；只是再一次说明测试期间不能有共用 dev 库的常驻进程。

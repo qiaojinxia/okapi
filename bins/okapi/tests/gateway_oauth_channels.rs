@@ -21,6 +21,30 @@ struct Mock {
     token_calls: Arc<AtomicUsize>,
     /// 下一次刷新是否回 invalid_grant。
     reject_refresh: Arc<std::sync::atomic::AtomicBool>,
+    /// 上游最近一次收到的请求头（断言客户端身份头透传）。
+    last_headers: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl Mock {
+    fn record(&self, headers: &axum::http::HeaderMap) {
+        *self.last_headers.lock().unwrap() = headers
+            .iter()
+            .filter_map(|(k, v)| {
+                v.to_str()
+                    .ok()
+                    .map(|v| (k.as_str().to_owned(), v.to_owned()))
+            })
+            .collect();
+    }
+
+    fn seen(&self, name: &str) -> Option<String> {
+        self.last_headers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
 }
 
 /// token 端点：换码回 access-1 / refresh-1；刷新回 access-N（N 为第几次调用）并轮转 refresh。
@@ -73,11 +97,19 @@ fn base64url(input: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input)
 }
 
-/// Anthropic 订阅上游：断言 Bearer / oauth beta / 系统首句 / 无 x-api-key，回一条 Messages JSON。
+/// Anthropic 订阅上游：断言 `?beta=true` / Bearer / 必备 beta / 系统首句 / 无 x-api-key，回一条 Messages JSON。
 async fn mock_messages(
+    State(st): State<Mock>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
+    st.record(&headers);
+    assert_eq!(
+        query.as_deref(),
+        Some("beta=true"),
+        "订阅路径 URL 带 ?beta=true"
+    );
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -87,14 +119,19 @@ async fn mock_messages(
         "订阅 token 走 Bearer：{auth}"
     );
     assert!(headers.get("x-api-key").is_none(), "不得再带 x-api-key");
+    assert_eq!(
+        headers.get_all("anthropic-beta").iter().count(),
+        1,
+        "anthropic-beta 只能有一行（客户端的已合并进来）"
+    );
     let beta = headers
         .get("anthropic-beta")
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    assert!(
-        beta.split(',').any(|b| b.trim() == "oauth-2025-04-20"),
-        "beta 头：{beta}"
-    );
+    let betas: Vec<&str> = beta.split(',').map(str::trim).collect();
+    for required in ["oauth-2025-04-20", "claude-code-20250219"] {
+        assert!(betas.contains(&required), "beta 头缺 {required}：{beta}");
+    }
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         req["system"][0]["text"], "You are Claude Code, Anthropic's official CLI for Claude.",
@@ -114,11 +151,14 @@ async fn mock_messages(
         .into_response()
 }
 
-/// Codex 订阅上游：断言 chatgpt-account-id / originator / store=false，回 Responses 对象。
+/// Codex 订阅上游：断言 chatgpt-account-id / accept / 请求体整形（store=false、stream=true、
+/// instructions 存在、system→developer、previous_response_id 被剥），只回 SSE（该后端只有流式面）。
 async fn mock_codex_responses(
+    State(st): State<Mock>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
+    st.record(&headers);
     let auth = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -132,18 +172,30 @@ async fn mock_codex_responses(
         "account id 来自 id_token claim"
     );
     assert_eq!(
-        headers.get("originator").and_then(|v| v.to_str().ok()),
-        Some("codex_cli_rs")
+        headers.get("accept").and_then(|v| v.to_str().ok()),
+        Some("text/event-stream")
     );
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(req["store"], false, "Codex 后端不持久化：store 强制 false");
-    axum::Json(json!({
-        "id": "resp_o", "object": "response", "status": "completed", "model": "gpt-5",
-        "output": [{"type": "message", "id": "m1", "role": "assistant", "status": "completed",
-                    "content": [{"type": "output_text", "text": "Hello codex", "annotations": []}]}],
-        "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
-    }))
-    .into_response()
+    assert_eq!(req["stream"], true, "Codex 后端只有流式面");
+    assert!(req["instructions"].is_string(), "instructions 键必须存在");
+    assert!(
+        req.get("previous_response_id").is_none(),
+        "store=false 下无意义，剥掉"
+    );
+    assert!(
+        req["input"]
+            .as_array()
+            .is_none_or(|items| items.iter().all(|i| i["role"] != "system")),
+        "system 角色改 developer"
+    );
+    let sse = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_o\",\"status\":\"in_progress\"}}\n\n",
+        "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello codex\"}\n\n",
+        "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello codex\",\"annotations\":[]}]}}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_o\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5\",\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150}}}\n\n",
+    );
+    ([("content-type", "text/event-stream")], sse).into_response()
 }
 
 async fn spawn_mock(mock: Mock) -> SocketAddr {
@@ -217,6 +269,7 @@ async fn setup() -> Env {
     let mock_state = Mock {
         token_calls: Arc::new(AtomicUsize::new(0)),
         reject_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        last_headers: Arc::default(),
     };
     let mock = spawn_mock(mock_state.clone()).await;
 
@@ -416,17 +469,41 @@ async fn anthropic_max_login_request_refresh_and_invalidate() {
     assert_eq!(cred.refresh_token, "refresh-2", "refresh 轮转须回写");
     assert!(cred.expires_at > chrono::Utc::now().timestamp() + 3600);
 
-    // Anthropic 入口透传同样可用
+    // Anthropic 入口透传同样可用；真实 Claude Code 客户端的身份头原样到上游，
+    // 它自带的 beta 与必备项合并，鉴权头不受客户端影响
     let resp = reqwest::Client::new()
         .post(format!("http://{}/v1/messages", env.gateway))
         .header("x-api-key", &env.user_token)
         .header("anthropic-version", "2023-06-01")
+        .header("user-agent", "claude-cli/9.9.9 (external, cli)")
+        .header("x-app", "cli")
+        .header("x-stainless-lang", "js")
+        .header("anthropic-beta", "context-1m-2025-08-07")
         .json(&json!({"model": env.model, "max_tokens": 64,
             "messages": [{"role": "user", "content": "hi"}]}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        env.mock_state.seen("user-agent").as_deref(),
+        Some("claude-cli/9.9.9 (external, cli)"),
+        "客户端 UA 原样透传"
+    );
+    assert_eq!(env.mock_state.seen("x-app").as_deref(), Some("cli"));
+    assert_eq!(
+        env.mock_state.seen("x-stainless-lang").as_deref(),
+        Some("js")
+    );
+    let beta = env.mock_state.seen("anthropic-beta").unwrap();
+    assert!(
+        beta.contains("context-1m-2025-08-07") && beta.contains("oauth-2025-04-20"),
+        "客户端 beta 与必备项合并：{beta}"
+    );
+    assert!(
+        env.mock_state.seen("x-api-key").is_none(),
+        "客户端给网关的 x-api-key（用户 token）绝不能透传到上游"
+    );
 
     // 刷新被拒（invalid_grant）→ key 进 invalid(6)，请求无候选
     env.mock_state.reject_refresh.store(true, Ordering::SeqCst);
@@ -462,17 +539,75 @@ async fn codex_login_routes_only_responses_ingress() {
         "account_id 取自 id_token claim"
     );
 
-    // /v1/responses 入口 → Codex 后端（mock 断言 account id / originator / store=false）
+    // /v1/responses 非流式入口 → Codex 后端（mock 断言请求体整形，只回 SSE）→ 网关聚合回 JSON
     let resp = reqwest::Client::new()
         .post(format!("http://{}/v1/responses", env.gateway))
         .bearer_auth(&env.user_token)
-        .json(&json!({"model": env.model, "input": "hi", "store": true}))
+        .json(&json!({"model": env.model, "store": true, "previous_response_id": "resp_prev",
+            "input": [{"role": "system", "content": "be terse"}, {"role": "user", "content": "hi"}]}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["output"][0]["content"][0]["text"], "Hello codex");
+    assert_eq!(
+        body["output"][0]["content"][0]["text"], "Hello codex",
+        "终态事件 output 为空时用 output_item.done 拼回：{body}"
+    );
+    assert_eq!(body["usage"]["input_tokens"], 100);
+    assert_eq!(
+        env.mock_state.seen("originator").as_deref(),
+        Some("codex_cli_rs"),
+        "客户端没带 originator 时用缺省值"
+    );
+
+    // 真实 Codex CLI 的身份头透传；流式请求原样透出 SSE
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.user_token)
+        .header("originator", "codex_vscode")
+        .header("session_id", "sess-1")
+        .header("user-agent", "codex_vscode/1.2.3 (Mac OS 15; arm64)")
+        .json(&json!({"model": env.model, "input": "hi", "stream": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("text/event-stream"))
+    );
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("response.completed"), "{text}");
+    assert_eq!(
+        env.mock_state.seen("originator").as_deref(),
+        Some("codex_vscode")
+    );
+    assert_eq!(env.mock_state.seen("session_id").as_deref(), Some("sess-1"));
+    assert_eq!(
+        env.mock_state.seen("user-agent").as_deref(),
+        Some("codex_vscode/1.2.3 (Mac OS 15; arm64)")
+    );
+
+    // 计费：两笔成功请求都从 usage 结算（非流式那笔的 usage 来自聚合出的终态事件）；
+    // 流式结算在流结束后异步落库，轮询等待
+    let mut settled = 0;
+    for _ in 0..50 {
+        settled = sqlx::query_scalar!(
+            r#"SELECT count(*) AS "n!" FROM billing_records WHERE user_id = $1 AND log_type = 2 AND status = 20"#,
+            env.user_id
+        )
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+        if settled == 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(settled, 2, "两笔都应按 usage 结算");
 
     // chat 入口不路由 codex 渠道：该模型只有 codex 候选 → 503 无可用渠道
     let resp = chat(&env).await;

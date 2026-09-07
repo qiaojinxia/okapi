@@ -2165,11 +2165,29 @@ JWT 三段形状。
 **边界先说清**：§1.4 放弃的是 Sub2API 那种**把消费级订阅容量卖给别人**的商业模式。本节做的是另一件事——
 站长把**自己的**Claude / ChatGPT 订阅登录进网关，让自己的 Claude Code / Codex CLI 在多个账号与 API key
 渠道之间按现有调度切换（就是 ccswitch / claude-code-router 的用法，只是多了本项目的计费、失败状态机、
-粘性与统计）。实现上不做设备指纹、不伪装官方 User-Agent、不做媒体资格探测那套"像官方客户端"的工程；
-只发上游为这条 OAuth 路径**文档化要求**的两样东西（beta 头、系统提示首句）。这些客户端 client_id 与端点
-是各家私有的、随时会变的，`anthropic_max` / `codex` 两个 provider 因此在文档与前端都标为**实验性**，
-一旦上游收口就按 key 状态机自然进入 invalid，不会影响 API key 渠道。**只做这两家**：Antigravity 与 Grok
-的客户端 OAuth 细节手头没有可靠来源，不凭记忆编。
+粘性与统计）。实现上不做设备指纹、不**编造**官方 User-Agent、不做媒体资格探测那套"像官方客户端"的工程；
+只发上游为这条 OAuth 路径**要求**的东西（beta 头、系统提示首句、Codex 后端的请求体形状），外加把**真实客户端
+自己带来的身份头原样转发**（见下"客户端身份头透传"——反向代理本就该这么做，而且这条路径的凭证本来就是给
+Claude Code / Codex CLI 用的）。这些客户端 client_id 与端点是各家私有的、随时会变的，`anthropic_max` /
+`codex` 两个 provider 因此在文档与前端都标为**实验性**，一旦上游收口就按 key 状态机自然进入 invalid，
+不会影响 API key 渠道。**只做这两家**：Antigravity 与 Grok 的客户端 OAuth 细节手头没有可靠来源，不凭记忆编。
+
+**对照 Sub2API 核对结论（2026-09-06，读 Wei-Shaw/sub2api v0.2.2 源码 + router-for-me/CLIProxyAPI +
+openai/codex `login/src/auth/manager.rs` + opencode-anthropic-auth 0.0.13）**：刷新流程（进程内互斥 →
+分布式锁 → 加锁后重读 DB → 二次判定 → 刷新 → 回写；`invalid_grant` 重读恢复竞争）与本节 §4.3 四步锁**结构
+一致**，无需改；其余差异分三类——(a) **端点已迁**：Claude Code CLI 的 token / 回调页已从 `console.anthropic.com`
+迁到 `platform.claude.com`（2026-01），授权页迁到 `claude.com/cai/oauth/authorize`（2026-08）；实测旧回调
+URL 已 301 到新域，故本节端点随 CLI 更新（旧 token 端点仍存活，仅作兜底）。(b) **协议硬要求补齐**：
+Anthropic 侧 `?beta=true` 与 `claude-code-20250219` beta（缺它上游可能把请求当非 Claude Code 拒收或计入
+"extra usage"）；Codex 后端 `stream` 必须 true（非流式客户端由网关把 SSE 聚合回 JSON）、`instructions`
+键必须存在、`input[].role=system` 不接受（改 `developer`）、`previous_response_id` / 采样参数等不支持字段
+剥掉——这些两家实现都在做，是后端要求而非指纹工程。(c) **不采纳**：Sub2API 对非 Claude Code 客户端的
+"全套模仿"（编造 `claude-cli/x.y.z` UA、伪造 `x-anthropic-billing-header` 计费归因块、把用户 system 挪进
+messages、注入 Codex base prompt）——那是把订阅卖给第三方客户端才需要的东西，与 §1.4 边界冲突；本节只
+**转发真实客户端的头**。另两处小改：刷新失败分类补 codex-rs 的 `refresh_token_expired|reused|invalidated`；
+Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推冷却时长（订阅 5h 窗口耗尽时
+不再每 60s 撞一次）。Sub2API 另有后台定时预刷新（5min 巡检、到期前 30min）、5h/7d 窗口利用率调度、
+账号级粘性等，均属多账号商用池需求，自用不做。
 
 **定案**：
 
@@ -2183,13 +2201,17 @@ JWT 三段形状。
   仍失败 → `mark_key_failure(Invalid)`（仅人工恢复：重新登录）。到期前 120s 即视为需刷新；刷新失败但旧
   token 尚未过期则先用旧的。刷新只在请求路径上惰性发生（站长自用，请求量小，不值得再开 worker 任务）。
 - **`provider = anthropic_max`**（Anthropic 方言，`okapi-providers::oauth::anthropic_max`）：
-  PKCE S256，`claude.ai/oauth/authorize`（`code=true`，scope `org:create_api_key user:profile user:inference`，
-  `state = verifier`），换码 / 刷新都 POST JSON 到 `console.anthropic.com/v1/oauth/token`（client_id
-  `9d1c250a-e61b-44d9-88ed-5944d1962f5e`）；access token 8h。请求：`Authorization: Bearer`（**不是**
-  `x-api-key`）+ `anthropic-beta: oauth-2025-04-20`（用户自带的 beta 头合并去重）+ system 数组首元素前置
-  `"You are Claude Code, Anthropic's official CLI for Claude."`（上游按此判定；已是首句则不重复）。
-  其余与 `anthropic` 直连完全一致（含 `count_tokens`、Anthropic 入口透传、OpenAI 入口转换）。
-  `api_base` 缺省 `https://api.anthropic.com/v1`。
+  PKCE S256，`claude.com/cai/oauth/authorize`（`code=true`，scope 与 Claude Code CLI 一致：
+  `org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`，
+  `state = verifier`），回调页 `platform.claude.com/oauth/code/callback`，换码 / 刷新都 POST JSON 到
+  `platform.claude.com/v1/oauth/token`（client_id `9d1c250a-e61b-44d9-88ed-5944d1962f5e`）；access token 8h。
+  请求：`POST {api_base}/messages?beta=true`，`Authorization: Bearer`（**不是** `x-api-key`）+
+  `anthropic-beta` = `claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14` 与客户端自带的
+  beta 头合并去重 + system 数组首元素前置 `"You are Claude Code, Anthropic's official CLI for Claude."`
+  （上游按此判定；已是首句则不重复）。其余与 `anthropic` 直连完全一致（含 `count_tokens`、Anthropic 入口
+  透传、OpenAI 入口转换）。`api_base` 缺省 `https://api.anthropic.com/v1`。上游 429 若无 `Retry-After`，
+  用 `anthropic-ratelimit-unified-reset`（unix 秒）推 `retry_after`，再进 §3.6 rate_limited 冷却（仍受 3600s
+  封顶，5h 窗口耗尽时每小时探一次）。
 - **`provider = codex`**（OpenAI Responses 方言，`okapi-providers::oauth::codex`）：PKCE S256，
   `auth.openai.com/oauth/authorize`（scope `openid profile email offline_access`，附
   `id_token_add_organizations=true` / `codex_cli_simplified_flow=true` / `originator=codex_cli_rs`），
@@ -2197,10 +2219,23 @@ JWT 三段形状。
   刷新用 JSON，与 openai/codex 源码一致）；`account_id` 从 id_token 的 `https://api.openai.com/auth.
   chatgpt_account_id` claim 取，落进凭证 JSON。请求只走 **Responses**：`POST {api_base}/responses`
   （`api_base` 缺省 `https://chatgpt.com/backend-api/codex`），头 `Authorization: Bearer` +
-  `chatgpt-account-id` + `originator: codex_cli_rs` + `OpenAI-Beta: responses=experimental`；
-  `store` 强制 false（该后端不持久化）。`responses_native` 恒 true；**只路由 `/v1/responses` 入口**
-  （Codex CLI 说的就是这个方言）——OpenAI chat / Anthropic / Gemini 入口不路由 codex 渠道，
-  chat→responses 的请求方向转换本期不做（没有真实客户端需要它）。
+  `chatgpt-account-id` + `accept: text/event-stream` + `originator` / `OpenAI-Beta`（客户端带了就透传它的，
+  没带缺省 `codex_cli_rs` / `responses=experimental`）。**请求体按该后端的硬要求整形**（`codex::prepare_body`）：
+  `store=false`、`stream=true`（后端只有流式面；客户端要非流式时网关消费 SSE，取终态事件的 `response`
+  对象回 JSON，`output` 缺失则用 `response.output_item.done` 逐项拼）、`instructions` 键缺省补空串、
+  `input[].role = system` 改 `developer`、剥掉 `previous_response_id` / `stream_options` /
+  `prompt_cache_retention` / `safety_identifier` / `max_output_tokens` / `max_completion_tokens` /
+  `temperature` / `top_p` / `frequency_penalty` / `presence_penalty` / `user` / `metadata` / `truncation` /
+  `stop_sequences` / `chat_template_kwargs`（该后端不接受）。`responses_native` 恒 true；**只路由
+  `/v1/responses` 入口**（Codex CLI 说的就是这个方言）——OpenAI chat / Anthropic / Gemini 入口不路由 codex
+  渠道，chat→responses 的请求方向转换本期不做（没有真实客户端需要它）。
+- **客户端身份头透传**（`gateway::oauth_cred::client_headers`，只对这两个 provider 生效）：入口请求里
+  的一组允许名单头原样进 `Outbound.extra_headers`——Anthropic 族 `user-agent` / `x-app` / `anthropic-beta` /
+  `anthropic-dangerous-direct-browser-access` / `x-stainless-*`；Codex 族 `user-agent` / `originator` /
+  `version` / `session_id` / `conversation_id` / `openai-beta` / `accept-language` / `x-codex-*`。真实
+  Claude Code / Codex CLI 经网关出去时上游看到的就是它自己；其它客户端（SDK、curl）不带就不带，网关
+  **不编造**。鉴权 / Host / Content-Type 等受保护头仍由 `is_forbidden_header` 拦住。API key 渠道不受影响
+  （`extra_headers` 对它们仍只来自渠道设置）。
 - **登录流程在控制面**：`POST /admin/channels/oauth/start {provider}` → 生成 verifier，Redis
   `oauth:cred:<state>`（10min），回 `{authorize_url, state}`；站长在浏览器里登录，把回调页显示的
   `code`（Anthropic 是 `code#state` 形态）贴回 `POST /admin/channels/oauth/exchange {state, code,
@@ -2213,11 +2248,14 @@ JWT 三段形状。
 - **前端**：协议下拉加两家（标"实验性"）；新建渠道选到它们时凭证区变成"登录"按钮 + 贴 code 输入框；
   列表行显示凭证到期时间（`credential_expires_at`，从 JSON 取，列表接口回填）。
 
-**验收**：`gateway_oauth_channels.rs`——mock 授权服务器 + 上游：anthropic_max 换码后建渠道，请求带 Bearer /
-oauth beta 头 / 系统提示首句，`x-api-key` 不出现；access token 过期后请求触发刷新、refresh 轮转回写 DB、
-并发两请求只刷一次（Redis 锁）；`invalid_grant` → key 状态 invalid；codex 换码取出 account_id，Responses
-请求带 `chatgpt-account-id` / `originator`，`store=false`；embeddings 不路由。providers 单测：PKCE 派生、
-授权 URL 参数、系统提示前置幂等、beta 头合并、id_token claim 解析。
+**验收**：`gateway_oauth_channels.rs`——mock 授权服务器 + 上游：anthropic_max 换码后建渠道，请求打到
+`/v1/messages?beta=true`、带 Bearer / 三个必备 beta / 系统提示首句 / 客户端 `user-agent` 与 `x-app` 原样透传，
+`x-api-key` 不出现；access token 过期后请求触发刷新、refresh 轮转回写 DB、并发两请求只刷一次（Redis 锁）；
+`invalid_grant` → key 状态 invalid；codex 换码取出 account_id，Responses 请求带 `chatgpt-account-id` /
+`originator`（客户端带了透传、没带缺省）/ `accept: text/event-stream`，`store=false`、`stream=true`、
+`instructions` 键存在、`previous_response_id` 被剥、system 角色改 developer；非流式客户端拿到由 SSE 聚合
+出的 JSON（含 usage 计费）；embeddings 不路由。providers 单测：PKCE 派生、授权 URL 参数、系统提示前置幂等、
+beta 头合并、id_token claim 解析、Codex 请求体整形、SSE 聚合。
 
 ### 11.39 Playground 试用台 + 聊天客户端一键导入（2026-09-06，对照 new-api 操练场 / 聊天应用集成）
 

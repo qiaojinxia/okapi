@@ -82,6 +82,7 @@ pub(crate) fn parse_tokens(body: &[u8]) -> Result<Tokens, UpstreamError> {
 
 /// 刷新失败的分类：`invalid_grant`（refresh token 已失效 / 被吊销）与其它瞬态错误要分开——
 /// 前者重试无意义，key 该进 invalid；后者保留旧 token 下次再试。
+/// 三个 `refresh_token_*` 是 auth.openai.com 的细分码（codex-rs 同样按终态处理）。
 #[must_use]
 pub fn is_invalid_grant(status: u16, body: &[u8]) -> bool {
     if status == 401 {
@@ -90,11 +91,22 @@ pub fn is_invalid_grant(status: u16, body: &[u8]) -> bool {
     let v: Value = serde_json::from_slice(body).unwrap_or_default();
     let code = v
         .get("error")
-        .and_then(|e| e.as_str().or_else(|| e.get("type").and_then(Value::as_str)))
+        .and_then(|e| {
+            e.as_str().or_else(|| {
+                e.get("code")
+                    .or_else(|| e.get("type"))
+                    .and_then(Value::as_str)
+            })
+        })
         .unwrap_or_default();
     matches!(
         code,
-        "invalid_grant" | "invalid_request" | "unauthorized_client"
+        "invalid_grant"
+            | "invalid_request"
+            | "unauthorized_client"
+            | "refresh_token_expired"
+            | "refresh_token_reused"
+            | "refresh_token_invalidated"
     )
 }
 
@@ -160,6 +172,10 @@ mod tests {
             br#"{"error":{"type":"invalid_grant","message":"x"}}"#
         ));
         assert!(is_invalid_grant(401, b""));
+        assert!(is_invalid_grant(
+            400,
+            br#"{"error":{"code":"refresh_token_reused","message":"x"}}"#
+        ));
         assert!(!is_invalid_grant(500, b"upstream down"));
         assert!(!is_invalid_grant(429, br#"{"error":"rate_limited"}"#));
     }

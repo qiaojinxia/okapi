@@ -7,9 +7,9 @@
 use super::openai_dialect::outbound;
 use super::state::AppState;
 use bytes::Bytes;
-use okapi_providers::UpstreamError;
 use okapi_providers::anthropic::MessagesResponse;
 use okapi_providers::gemini::GeminiResponse;
+use okapi_providers::{Outbound, UpstreamError};
 use okapi_store::channels::ChannelCandidate;
 
 /// 渠道对某上游模型的出向方言。`codex` 是 OpenAI 方言但**只有 Responses 面**，
@@ -47,6 +47,7 @@ fn required_base(cand: &ChannelCandidate) -> Result<&str, UpstreamError> {
 
 impl AppState {
     /// Anthropic 方言一跳：直连 / Bedrock InvokeModel / Vertex rawPredict 按 provider 选。
+    /// `outbound` 由调用方给：订阅 provider 的那份还带着客户端身份头（`oauth_cred::outbound_with_client`）。
     pub async fn messages_via(
         &self,
         cand: &ChannelCandidate,
@@ -54,8 +55,8 @@ impl AppState {
         upstream_model: &str,
         body: Bytes,
         stream: bool,
+        outbound: &Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
-        let outbound = outbound(cand);
         match cand.provider.as_str() {
             "bedrock" => {
                 self.bedrock
@@ -66,7 +67,7 @@ impl AppState {
                         upstream_model,
                         body,
                         stream,
-                        &outbound,
+                        outbound,
                     )
                     .await
             }
@@ -79,7 +80,7 @@ impl AppState {
                     &cred.access_token,
                     body,
                     stream,
-                    &outbound,
+                    outbound,
                 )
                 .await
             }
@@ -91,13 +92,13 @@ impl AppState {
                         upstream_model,
                         body,
                         stream,
-                        &outbound,
+                        outbound,
                     )
                     .await
             }
             _ => {
                 self.anthropic
-                    .messages(base, &cand.credential, body, stream, &outbound)
+                    .messages(base, &cand.credential, body, stream, outbound)
                     .await
             }
         }

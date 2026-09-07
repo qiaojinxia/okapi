@@ -591,7 +591,18 @@ async fn client_distribution_groups_by_client_type() {
     assert_eq!(row["users"], 1, "同一用户播的 5 笔 → 去重后 1 人");
     assert_eq!(row["tokens"], 1_500, "5 × (100+200)");
     assert_eq!(row["amount_micro"], 5_000);
-    assert!(row["share_bp"].as_i64().unwrap() > 0, "占比按整数基点");
+    // 占比是整数基点：在长期 dev 库上本用例的 5 笔可能不足万分之一（截断为 0），
+    // 所以不断言 > 0，只断言它是合法基点，且全表各行之和不超过 10000（截断只会少不会多）
+    let share = row["share_bp"].as_i64().expect("share_bp 应为整数基点");
+    assert!((0..=10_000).contains(&share), "占比基点越界：{share}");
+    let (_, all) = get(&env, "/admin/stats/clients?days=1&limit=100", &env.super_token).await;
+    let sum: i64 = all["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["share_bp"].as_i64().unwrap_or(0))
+        .sum();
+    assert!(sum <= 10_000, "各行占比之和不得超过 10000：{sum}");
 }
 
 /// 经营口径：实收 / 标价 / 让利逐日聚合，毛利 = 实收 − 上游成本。全整数。

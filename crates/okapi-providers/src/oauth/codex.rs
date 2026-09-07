@@ -3,13 +3,19 @@
 //! 后端只有 Responses 一种面（`https://chatgpt.com/backend-api/codex/responses`），请求头比官方
 //! API 多两项：`chatgpt-account-id`（从 id_token 的 claim 取）与 `originator`。事件形状与官方
 //! Responses 一致，传输直接复用 `responses::send_responses_at`。
+//!
+//! 该后端对请求体有一组硬要求（2026-09 对照 Sub2API 与 CLIProxyAPI 两家实现一致）：只有流式面、
+//! `store` 必须 false、`instructions` 键必须存在、不接受 `role: system` 与一批官方 API 参数。
+//! `prepare_body` 负责整形；客户端要非流式时由 `collect_json` 把 SSE 聚合回一个 Responses 对象。
 
 use super::{Pkce, Tokens, form_encode, parse_tokens};
 use crate::error::UpstreamError;
-use crate::openai::ChatResponse;
-use crate::openai::classify;
+use crate::openai::{ChatResponse, StreamHandle, classify};
+use crate::responses::usage_from_responses;
+use crate::types::ChatEvent;
 use base64::Engine as _;
 use bytes::Bytes;
+use futures::StreamExt as _;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -148,7 +154,27 @@ async fn read_tokens(resp: reqwest::Response) -> Result<Tokens, UpstreamError> {
     parse_tokens(&bytes)
 }
 
-/// Responses 请求体改成 Codex 后端接受的形状：`store` 强制 false（该后端不持久化 response）。
+/// 该后端不接受的官方 Responses 参数（带上会 400）。`store=false` 让 `previous_response_id` 无意义。
+const UNSUPPORTED_FIELDS: [&str; 15] = [
+    "previous_response_id",
+    "stream_options",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "max_output_tokens",
+    "max_completion_tokens",
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "user",
+    "metadata",
+    "truncation",
+    "stop_sequences",
+    "chat_template_kwargs",
+];
+
+/// Responses 请求体改成 Codex 后端接受的形状：`store=false`、`stream=true`（只有流式面）、
+/// `instructions` 键缺省补空串、`input[].role=system` 改 `developer`、剥掉不支持的参数。
 pub fn prepare_body(body: &[u8]) -> Result<Vec<u8>, UpstreamError> {
     let mut value: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
@@ -156,10 +182,31 @@ pub fn prepare_body(body: &[u8]) -> Result<Vec<u8>, UpstreamError> {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
     obj.insert("store".to_owned(), Value::Bool(false));
+    obj.insert("stream".to_owned(), Value::Bool(true));
+    if obj.get("instructions").is_none_or(|v| !v.is_string()) {
+        obj.insert("instructions".to_owned(), Value::String(String::new()));
+    }
+    for field in UNSUPPORTED_FIELDS {
+        obj.remove(field);
+    }
+    if let Some(items) = obj.get_mut("input").and_then(Value::as_array_mut) {
+        for item in items.iter_mut() {
+            if item.get("role").and_then(Value::as_str) == Some("system") {
+                item["role"] = Value::String("developer".to_owned());
+            }
+        }
+    }
     serde_json::to_vec(&value).map_err(|e| UpstreamError::Build(e.to_string()))
 }
 
-/// 用订阅 access token 发一次 Responses。
+fn has_header(outbound: &crate::http::Outbound, name: &str) -> bool {
+    outbound
+        .extra_headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case(name))
+}
+
+/// 用订阅 access token 发一次 Responses。上游永远走流式；`stream=false` 时在此聚合回 JSON。
 pub async fn responses(
     http: &crate::http::HttpPool,
     api_base: &str,
@@ -174,13 +221,82 @@ pub async fn responses(
     let bearer = format!("Bearer {access_token}");
     let mut headers: Vec<(&str, &str)> = vec![
         ("authorization", bearer.as_str()),
-        ("originator", ORIGINATOR),
-        ("openai-beta", "responses=experimental"),
+        ("accept", "text/event-stream"),
     ];
+    // 真实 Codex 客户端自带的 originator / OpenAI-Beta 已经透传在 extra_headers 里，不覆盖
+    if !has_header(outbound, "originator") {
+        headers.push(("originator", ORIGINATOR));
+    }
+    if !has_header(outbound, "openai-beta") {
+        headers.push(("openai-beta", "responses=experimental"));
+    }
     if let Some(id) = account_id {
         headers.push(("chatgpt-account-id", id));
     }
-    crate::responses::send_responses_at(http, url, &headers, body, stream, outbound).await
+    let resp =
+        crate::responses::send_responses_at(http, url, &headers, body, true, outbound).await?;
+    match resp {
+        ChatResponse::Stream(handle) if !stream => collect_json(handle).await,
+        other => Ok(other),
+    }
+}
+
+/// 把 Responses SSE 聚合成一个非流式 Responses 对象：取终态事件（`response.completed` /
+/// `.incomplete` / `.failed`）的 `response`；其 `output` 为空时用 `response.output_item.done`
+/// 按 `output_index` 逐项拼回（该后端的终态事件有时不带完整 output）。
+async fn collect_json(mut handle: StreamHandle) -> Result<ChatResponse, UpstreamError> {
+    let mut items: Vec<(u64, Value)> = Vec::new();
+    let mut terminal: Option<Value> = None;
+    while let Some(event) = handle.events.next().await {
+        let ChatEvent::Data { raw, .. } = event? else {
+            break;
+        };
+        let Ok(parsed) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        match parsed
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "response.output_item.done" => {
+                if let Some(item) = parsed.get("item").cloned() {
+                    let index = parsed.get("output_index").and_then(Value::as_u64);
+                    items.push((index.unwrap_or(u64::MAX), item));
+                }
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                terminal = parsed.get("response").cloned();
+                break;
+            }
+            "error" => {
+                return Err(UpstreamError::Status {
+                    status: 502,
+                    body: Bytes::from(raw),
+                    retry_after_secs: None,
+                });
+            }
+            _ => {}
+        }
+    }
+    let mut response =
+        terminal.ok_or_else(|| UpstreamError::Stream("codex_no_terminal_event".to_owned()))?;
+    let output_missing = response
+        .get("output")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
+    if output_missing && !items.is_empty() {
+        items.sort_by_key(|(index, _)| *index);
+        response["output"] = Value::Array(items.into_iter().map(|(_, item)| item).collect());
+    }
+    let usage = usage_from_responses(response.get("usage"));
+    let body = serde_json::to_vec(&response).map_err(|e| UpstreamError::Stream(e.to_string()))?;
+    Ok(ChatResponse::Json {
+        status: 200,
+        upstream_request_id: handle.upstream_request_id,
+        body: Bytes::from(body),
+        usage,
+    })
 }
 
 #[cfg(test)]
@@ -241,10 +357,122 @@ mod tests {
     }
 
     #[test]
-    fn prepare_body_forces_store_false() {
-        let out = prepare_body(br#"{"model":"gpt-5","input":"hi","store":true}"#).unwrap();
+    fn prepare_body_matches_codex_backend_requirements() {
+        let out = prepare_body(
+            br#"{"model":"gpt-5","input":[{"role":"system","content":"be terse"},{"role":"user","content":"hi"}],
+            "store":true,"stream":false,"temperature":0.2,"max_output_tokens":10,"previous_response_id":"resp_0",
+            "metadata":{"a":"b"},"reasoning":{"effort":"high"},"tools":[]}"#,
+        )
+        .unwrap();
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["store"], false);
+        assert_eq!(v["stream"], true, "该后端只有流式面");
+        assert_eq!(v["instructions"], "", "instructions 键必须存在");
+        assert_eq!(v["input"][0]["role"], "developer", "system 角色不被接受");
+        assert_eq!(v["input"][1]["role"], "user");
+        for field in UNSUPPORTED_FIELDS {
+            assert!(v.get(field).is_none(), "{field} 应被剥掉");
+        }
+        assert_eq!(v["reasoning"]["effort"], "high", "原生字段保留");
         assert_eq!(v["model"], "gpt-5");
+
+        let kept =
+            prepare_body(br#"{"model":"m","input":"hi","instructions":"you are x"}"#).unwrap();
+        let v: Value = serde_json::from_slice(&kept).unwrap();
+        assert_eq!(
+            v["instructions"], "you are x",
+            "客户端给的 instructions 不动"
+        );
+    }
+
+    // 测试流的元素类型就是 Result，这里统一包一层 Ok
+    #[allow(clippy::unnecessary_wraps)]
+    fn data(raw: &str) -> Result<ChatEvent, UpstreamError> {
+        Ok(ChatEvent::Data {
+            raw: raw.to_owned(),
+            event: None,
+            has_output: false,
+            content_chars: 0,
+            usage: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn collect_json_rebuilds_output_from_items_when_terminal_lacks_it() {
+        let events = vec![
+            data(r#"{"type":"response.created","response":{"id":"resp_1"}}"#),
+            data(
+                r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"m2","content":[{"type":"output_text","text":"second"}]}}"#,
+            ),
+            data(
+                r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"r1","summary":[]}}"#,
+            ),
+            data(
+                r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],
+                "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}"#,
+            ),
+        ];
+        let handle = StreamHandle {
+            upstream_request_id: Some("req-1".to_owned()),
+            events: Box::pin(futures::stream::iter(events)),
+        };
+        let ChatResponse::Json {
+            status,
+            upstream_request_id,
+            body,
+            usage,
+        } = collect_json(handle).await.unwrap()
+        else {
+            panic!("expected json");
+        };
+        assert_eq!(status, 200);
+        assert_eq!(upstream_request_id.as_deref(), Some("req-1"));
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["id"], "resp_1");
+        assert_eq!(v["output"][0]["id"], "r1", "按 output_index 排序");
+        assert_eq!(v["output"][1]["content"][0]["text"], "second");
+        assert_eq!(usage.unwrap().prompt_tokens, 10);
+    }
+
+    #[tokio::test]
+    async fn collect_json_keeps_terminal_output_and_surfaces_stream_errors() {
+        let handle = StreamHandle {
+            upstream_request_id: None,
+            events: Box::pin(futures::stream::iter(vec![
+                data(
+                    r#"{"type":"response.output_item.done","output_index":0,"item":{"id":"stale"}}"#,
+                ),
+                data(
+                    r#"{"type":"response.completed","response":{"id":"r","output":[{"id":"fresh"}],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                ),
+            ])),
+        };
+        let ChatResponse::Json { body, .. } = collect_json(handle).await.unwrap() else {
+            panic!("expected json");
+        };
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["output"][0]["id"], "fresh", "终态自带 output 时以它为准");
+
+        let failing = StreamHandle {
+            upstream_request_id: None,
+            events: Box::pin(futures::stream::iter(vec![data(
+                r#"{"type":"error","code":"server_error","message":"boom"}"#,
+            )])),
+        };
+        assert!(matches!(
+            collect_json(failing).await,
+            Err(UpstreamError::Status { status: 502, .. })
+        ));
+
+        let truncated = StreamHandle {
+            upstream_request_id: None,
+            events: Box::pin(futures::stream::iter(vec![data(
+                r#"{"type":"response.created","response":{}}"#,
+            )])),
+        };
+        assert!(matches!(
+            collect_json(truncated).await,
+            Err(UpstreamError::Stream(_))
+        ));
     }
 }

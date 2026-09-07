@@ -112,6 +112,22 @@ impl AnthropicUpstream {
     }
 }
 
+/// 429 的冷却时长：`Retry-After` 优先；订阅路径的 429 只带 `anthropic-ratelimit-unified-reset`
+/// （unix 秒，5h/7d 窗口的重置点），据它推出剩余秒数（§11.38；API key 响应没有这个头）。
+fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<i64> {
+    let parse = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<i64>().ok())
+    };
+    parse("retry-after").or_else(|| {
+        let reset_at = parse("anthropic-ratelimit-unified-reset")?;
+        let remaining = reset_at - chrono::Utc::now().timestamp();
+        (remaining > 0).then_some(remaining)
+    })
+}
+
 /// 向任意 URL 发一次 Anthropic Messages 形状的请求（鉴权头由调用方给）：直连官方走
 /// `x-api-key`，Vertex rawPredict 走 Bearer（IMPLEMENTATION §11.35）。流式响应按 SSE 切事件，
 /// 非流式整读；两者的错误分类与请求 ID 提取同一份。
@@ -143,11 +159,7 @@ pub async fn send_messages_at(
         .map(str::to_owned);
 
     if !(200..300).contains(&status) {
-        let retry_after_secs = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.parse::<i64>().ok());
+        let retry_after_secs = retry_after_secs(resp.headers());
         let body = resp.bytes().await.unwrap_or_default();
         return Err(UpstreamError::Status {
             status,
@@ -297,5 +309,35 @@ pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
         UpstreamError::Connect(e.to_string())
     } else {
         UpstreamError::Stream(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn retry_after_prefers_header_then_unified_reset() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(retry_after_secs(&headers), None);
+
+        let reset = chrono::Utc::now().timestamp() + 1800;
+        headers.insert(
+            "anthropic-ratelimit-unified-reset",
+            HeaderValue::from_str(&reset.to_string()).unwrap(),
+        );
+        let derived = retry_after_secs(&headers).unwrap();
+        assert!((1795..=1800).contains(&derived), "{derived}");
+
+        headers.insert("retry-after", HeaderValue::from_static("30"));
+        assert_eq!(retry_after_secs(&headers), Some(30));
+
+        let mut past = HeaderMap::new();
+        past.insert(
+            "anthropic-ratelimit-unified-reset",
+            HeaderValue::from_static("1"),
+        );
+        assert_eq!(retry_after_secs(&past), None, "已过去的重置点不冷却");
     }
 }
