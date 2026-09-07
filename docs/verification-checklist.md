@@ -24,7 +24,7 @@
 
 | 层 | 内容 | 命令 | 依赖 |
 | --- | --- | --- | --- |
-| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources，09-07 起四项全 ok）、前端 tsc / oxlint、六道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板 / 后端错误码反向核对） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py && python3 scripts/guard-error-codes.py` | 部署模板守卫需 PyYAML 或系统 ruby |
+| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标，**用 CI 的 stable 版本**，见注意事项）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources，09-07 起四项全 ok）、前端 tsc / oxlint、六道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板 / 后端错误码反向核对） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny --all-features check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py && python3 scripts/guard-error-codes.py` | 部署模板守卫需 PyYAML 或系统 ruby |
 | L1 单元 / 性质 | crate 内 `#[cfg(test)]` 与 `crates/*/tests`（pricing 对拍 + proptest、providers 转换 parity、ledger Lua 契约） | `cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger -p okapi-providers -p okapi-api -p okapi-store` | ledger 契约需 Redis；store 部分用例需 PG |
 | L2 集成 | `bins/okapi/tests/*.rs` 71 个套件（gateway / console / worker / migrate） | `cargo test --workspace --no-fail-fast` | 四容器；CH / NATS 缺失时相关套件自跳过 |
 | L3 前端交互 e2e | 构建产物 + 接口桩，不碰数据库 | `cd frontend && pnpm test:interactions`（= `pnpm build` + `playwright test -c playwright.interactions.config.ts`） | 无（自起 vite preview :4175） |
@@ -37,6 +37,7 @@
 - `.sqlx` 快照必须用 `cargo sqlx prepare --workspace -- --all-targets` 生成；不带 `--all-targets` 会漏掉测试里的 `query!`，CI 离线编译即红。
 - L4 与 L5 都占 :8081，顺序执行；L4 的 Playwright `webServer` 在 `reuseExistingServer: true` 下会复用已在跑的 console。
 - **跑 L2 之前先 `lsof -nP -iTCP:8080 -iTCP:8081 -sTCP:LISTEN` 确认没有常驻的 `okapi all` / `okapi worker`**：它连着同一套 PG / Redis，其 worker 会抢先消费通知、上报在途量表、写 settings 缓存，让 `worker_notify` / `gateway_multipod` / `console_smtp` 等五个套件随机红（第十一轮实测）。
+- **L0 的 clippy 与 deny 要按 CI 的口径跑，本机绿不等于 CI 绿**（第十七轮实测）：CI 用 `dtolnay/rust-toolchain@stable`，跟着最新 stable 走（09-07 是 1.98.1，本机 1.95），每个新版本都会带新的默认 lint；推送前用 `rustup toolchain install <CI 的 stable> --profile minimal --component clippy` 后 `cargo +<版本> clippy --workspace --all-targets -- -D warnings`，或干脆 `rustup update`。`cargo-deny-action` 缺省带 `--all-features`，所以要跑 `cargo deny --all-features check`（`embed-web` 特性的依赖树只有这样才进来）。
 - 想在 worktree 或第二份 checkout 上独立验证时，`.env` 不够：`dotenvy` 不覆盖已导出的环境变量，shell 里 `set -a; . .env` 过的 `DATABASE_URL` 会让 worktree 连回主库（迁移版本不一致即 `VersionMissing`）；必须显式传 `DATABASE_URL=…`。同时 Redis / CH 也要隔离——两套 PG 的自增 id 会在同一 Redis（`bal:{uid}`）与同一 CH 库里串味，余额与聚合断言随机失败。Redis 用逻辑库号（`redis://…:63790/7` + `redis-cli -n 7 flushdb`）零成本隔离；CH 库名在测试里写死 `okapi`，暂无法隔离，相关两例（`entity_usage_batches_by_ids`、`admin_refund_full_cycle`）以主库结果为准。
 
 ## 2. 覆盖矩阵
@@ -429,3 +430,15 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | L1 + L2 全量（**三件全新**：空 PG 库 `okapi_fresh`、空 Redis 逻辑库 8、按 `ci.yml` 同一镜像与探活参数新起的 ClickHouse 容器） | 525 / 526 → 修一例后 11 / 11 × 3 | 唯一失败 `console_analytics::advanced_filters_calendar_quality_and_partial_cost_are_consistent`：`window.freshness.last_ingested_at` 读 `mv_analysis_hour`，全新 CH 上它比 `total` 所在的 MV 晚一拍，而轮询谓词没等它——共享库里该 MV 总有历史行所以从未暴露。**CI 的 ClickHouse 正是全新的**，不修 check job 第一次真正跑就会红。把该字段并进 `poll_until` 谓词（`0b971bb`，第 3 节第 5 条同一套约定） |
 
 这轮的意义：第十三轮的 CI 仿真是在共享开发库上做的，"库不是空的"这个隐含前提没有被挑战过；三件全新的一跑把它挑出来了。以后要对 CI 结论负责的验证，按这个口径跑（`docker run … clickhouse-server:24.8-alpine` 一台新 CH 只要十秒）。第 3 节第 11 条仍是唯一待定项；第 2 / 3 节其余全部收口。
+
+### 2026-09-07 第十七轮：CI 第一次真正跑完 Rust 这一路
+
+`75a8325` 推送后的 [run 34161541108](https://github.com/qiaojinxia/okapi/actions/runs/34161541108)：`frontend` 绿，`deny` 红，`check` 过了容器探活、第一次跑到 clippy 就红。第十三轮的仿真只复现了"环境"（无 `.env` / 无 NATS / 空库），没复现"工具链"——两处都是本机绿、CI 红。
+
+| 发现 | 取证 | 处置 |
+| --- | --- | --- |
+| clippy 工具链漂移 | CI 的 `dtolnay/rust-toolchain@stable` 当天解析到 **1.98.1**，本机 1.95。装同版本后 `cargo +1.98.1 clippy --workspace --all-targets -- -D warnings` 本地复现 8 处：`unused_async_trait_impl` ×2（`gateway/extract.rs` 的 `Query<T>` 与 `console/auth_web.rs` 的 `MaybeConnectInfo`，两个提取器的 `async fn from_request_parts` 体内没有 `.await`）；`result_large_err` ×4（1.98 起默认开，`chat.rs` 返回 `ForwardFailure` / `AttemptError` 的四个函数，错误约 160 字节 > 缺省阈值 128）；`map_or_identity`（新默认 lint）与 `manual_is_variant_and`（pedantic，1.98 起认得 `.ok().is_some_and`）各 1 | `c8d3e53`：提取器改为直接返回 `std::future::ready(..)`（`Query<T>` 因返回 `impl Future + Send` 需补 `T: Send`，语义不变，`console_manage::malformed_query_string_is_rejected_as_error_code` 仍钉住拒绝路径）；`result_large_err` 不逐处 allow，在 `clippy.toml` 把阈值放到 256——Err 只在失败路径出现、Ok 侧的 `Response` 本身更大，装箱只是给失败路径多一次分配；两处表达式直接简化 |
+| `deny` job 红 | `cargo-deny-action@v2` 缺省 `--all-features`，`embed-web` 特性经 `rust-embed-impl → shellexpand → dirs → dirs-sys` 拉进 `option-ext`（MPL-2.0）；本机 `cargo deny check` 不带特性所以一直 ok | `deny.toml` 按 crate 放行 `option-ext` 的 MPL-2.0（只在编译期帮 proc-macro 找配置目录，不进产物），不把 MPL 加进全局 allow；`cargo deny check` 与 `cargo deny --all-features check` 四项全 ok |
+| 提交前复核 | 1.98.1 与 1.95 两个版本的 `cargo fmt --check` 与 clippy 全绿；1.98.1 全量 `cargo test --workspace`（CI 同款 `env -i` 三连接串）108 个二进制，唯一失败 `console_manage::price_group_pagination_matches_database_pages`（API 总数 991 ≠ DB 计数 986）——当时机器上并行会话另有三个 `cargo test --workspace` 和一个常驻 `okapi all` 打着同一套开发库，两次计数之间被别人插了 5 条价格分组；单独重跑 8 / 8 | 不改代码；这正是第 1 节"跑 L2 之前先确认没有常驻进程"那条注意事项的又一次注脚，并行会话同时跑全量时也一样 |
+
+推送 `c8d3e53` 后 [run 34167474171](https://github.com/qiaojinxia/okapi/actions/runs/34167474171) **三个 job 全绿**：`check` 690s（clippy 97s、`cargo test --workspace` 534s，全新 PG / Redis / ClickHouse 容器，与第十六轮"三件全新"的本地结论一致）、`deny` 38s、`frontend` 26s。这是这条流水线自 09-05 建立以来第一次整体通过，也是 L0–L2 第一次拿到 CI 侧结论。第 1 节 L0 行与注意事项据此补上"用 CI 的 stable 跑 clippy、deny 带 `--all-features`"。第 3 节第 11 条仍是唯一待定项。
