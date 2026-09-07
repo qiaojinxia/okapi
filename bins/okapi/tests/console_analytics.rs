@@ -696,11 +696,14 @@ async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
         "/admin/stats/trend?start_date=2026-08-25&end_date=2026-08-25&granularity=hour&user_id={}",
         env.user_id
     );
-    // 当期 / 上期 / cost_known 分属不同 CH 查询或 MV，谓词要一起等
+    // 当期 / 上期 / cost_known / 水位分属不同 CH 查询或 MV，谓词要一起等：
+    // 水位读的是 mv_analysis_hour，全新 CH 上它可能比 total 所在的 MV 晚一拍落地
+    // （共享库里总有历史行，所以此前看不出来）
     let body = poll_until(&env, &path, |b| {
         b["total"]["requests"] == 3
             && b["previous"]["requests"] == 1
             && b["total"]["cost_known_requests"] == 2
+            && b["window"]["freshness"]["last_ingested_at"].is_string()
     })
     .await;
     assert_eq!(body["previous"]["requests"], 1);
