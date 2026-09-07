@@ -30,6 +30,21 @@ struct Bed {
     pg: sqlx::PgPool,
     seen: Seen,
     mock: SocketAddr,
+    admin_pool: sqlx::PgPool,
+    db_name: String,
+}
+
+impl Bed {
+    /// 用完即删：临时库不清，跑一天测试就在开发 PG 里留下上百个库。
+    async fn teardown(self) {
+        self.pg.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            self.db_name
+        )))
+        .execute(&self.admin_pool)
+        .await;
+    }
 }
 
 async fn bed() -> Bed {
@@ -101,6 +116,8 @@ async fn bed() -> Bed {
         pg,
         seen,
         mock,
+        admin_pool,
+        db_name,
     }
 }
 
@@ -172,4 +189,5 @@ async fn turnstile_gates_registration_and_reports_each_failure_mode() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(bed.seen.0.lock().unwrap().len(), 2);
     let _ = bed.mock;
+    bed.teardown().await;
 }

@@ -62,6 +62,21 @@ struct Bed {
     console: SocketAddr,
     idp: Idp,
     client: reqwest::Client,
+    admin_pool: PgPool,
+    db_name: String,
+}
+
+impl Bed {
+    /// 用完即删：临时库不清，跑一天测试就在开发 PG 里留下上百个库。
+    async fn teardown(self) {
+        self.pg.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
+            self.db_name
+        )))
+        .execute(&self.admin_pool)
+        .await;
+    }
 }
 
 async fn bed() -> Bed {
@@ -132,6 +147,8 @@ async fn bed() -> Bed {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap(),
+        admin_pool: admin,
+        db_name,
     }
 }
 
@@ -241,6 +258,7 @@ async fn presets_bind_on_stable_id_and_use_handle_as_display() {
             "首登用户名 = provider-handle"
         );
     }
+    bed.teardown().await;
 }
 
 /// 身份稳定性：改名不换账号；同名的另一个 id 是另一个人；缺 id 拒绝；token 端点故障拒绝。
@@ -302,4 +320,5 @@ async fn renamed_handle_keeps_account_and_same_handle_cannot_hijack() {
     assert_eq!(status, 401, "{body}");
     assert_eq!(body["error"]["code"], "oauth_upstream_error");
     assert_eq!(body["error"]["param"], "status_500");
+    bed.teardown().await;
 }

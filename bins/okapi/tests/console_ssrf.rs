@@ -99,4 +99,12 @@ async fn ssrf_default_policy_blocks_private_targets() {
     // 公网 https：放行
     let resp = create("https://api.example.com/v1").await;
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+
+    // 用完即删：临时库不清，跑一天测试就在开发 PG 里留下上百个库
+    pg.close().await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await;
 }

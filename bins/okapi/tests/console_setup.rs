@@ -97,6 +97,13 @@ async fn setup_wizard_on_fresh_database() {
         .await
         .unwrap();
     assert_eq!(status["needs_setup"], false);
+
+    // 用完即删：临时库不清，跑一天测试就在开发 PG 里留下上百个库
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await;
 }
 
 /// 已初始化的共享测试库：status false + POST 409（负路径守卫）。
