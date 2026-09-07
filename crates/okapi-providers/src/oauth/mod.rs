@@ -2,7 +2,8 @@
 //!
 //! 只有两家有足够公开资料可以做实：Anthropic（Claude Pro/Max，`anthropic_max`）与 OpenAI Codex
 //! （ChatGPT 订阅，`codex`）。两家的 client_id / 端点都是官方客户端私有的、随时会变——本模块
-//! 只发上游为这条路径文档化要求的东西，不做设备指纹、不伪装 User-Agent。
+//! 只发上游为这条路径要求的东西，不做设备指纹、不编造 User-Agent；真实客户端自带的身份头由
+//! gateway 透传进 `Outbound.extra_headers`（2026-09 对照 Sub2API / CLIProxyAPI 核对过要求项）。
 //!
 //! 共用件：PKCE（S256）、授权 URL 拼装、token 响应形状；两家的差异在各自子模块。
 
