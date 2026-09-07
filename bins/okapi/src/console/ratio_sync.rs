@@ -323,9 +323,11 @@ async fn fetch_one(
     if super::ssrf::validate_api_base(state, url).await.is_err() {
         return Err("source_url_rejected");
     }
+    // 不跟随重定向：SSRF 闸只看得到管理员填的这个 URL，跟着 30x 走就能被引到私网 / 元数据地址
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "client_build")?;
     let resp = client

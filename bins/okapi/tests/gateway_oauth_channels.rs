@@ -657,3 +657,97 @@ async fn oauth_state_is_single_use_and_provider_checked() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["code"], "oauth_state_invalid");
 }
+
+/// own 范围的渠道管理员不能把 OAuth key 追加到别人的渠道；拒绝发生在换码之前，
+/// 一次性的授权码不被白白烧掉（token 端点零调用）。
+#[tokio::test]
+async fn own_scope_cannot_attach_oauth_key_to_foreign_channel() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    // 超管登出来的渠道 = 别人的渠道
+    let (foreign_channel, _) = login_channel(&env, "anthropic_max").await;
+    let keys_before = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!" FROM channel_keys WHERE channel_id = $1"#,
+        foreign_channel
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+
+    // own 范围渠道管理员
+    let role_code = format!("oa-chadmin-{}", Uuid::new_v4().simple());
+    let role: Value = client
+        .post(format!("http://{}/admin/roles", env.console))
+        .bearer_auth(&env.admin_token)
+        .json(
+            &json!({"role_code": role_code, "display_name": "渠道管理员",
+                      "permissions": ["channel.read.own", "channel.write.own"]}),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let role_id = role["admin_role_id"].as_i64().unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let own_admin = okapi_store::provision::create_user(&env.pg, &format!("oa-own-{suffix}"))
+        .await
+        .unwrap();
+    sqlx::query!(
+        "UPDATE users SET role = 10, admin_role_id = $2 WHERE id = $1",
+        own_admin,
+        role_id
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    let own_token = format!("sk-okapi-oa-own-{suffix}");
+    okapi_store::provision::create_api_key(&env.pg, own_admin, &hash(&own_token), "sk-oa-own")
+        .await
+        .unwrap();
+
+    let token_calls_before = env.mock_state.token_calls.load(Ordering::SeqCst);
+    let started: Value = client
+        .post(format!("http://{}/admin/channels/oauth/start", env.console))
+        .bearer_auth(&own_token)
+        .json(&json!({"provider": "anthropic_max"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let state = started["state"].as_str().unwrap();
+    let resp = client
+        .post(format!(
+            "http://{}/admin/channels/oauth/exchange",
+            env.console
+        ))
+        .bearer_auth(&own_token)
+        .json(&json!({
+            "state": state, "code": format!("auth-code-2#{state}"),
+            "channel_id": foreign_channel,
+            "token_url": format!("http://{}/token", env.mock),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "permission_denied", "{body}");
+    assert_eq!(body["error"]["param"], "owner");
+    assert_eq!(
+        env.mock_state.token_calls.load(Ordering::SeqCst),
+        token_calls_before,
+        "属主校验必须在换码之前，授权码不得被消耗"
+    );
+    let keys_after = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "n!" FROM channel_keys WHERE channel_id = $1"#,
+        foreign_channel
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(keys_after, keys_before, "别人的渠道没有多出 key");
+}

@@ -595,7 +595,12 @@ async fn client_distribution_groups_by_client_type() {
     // 所以不断言 > 0，只断言它是合法基点，且全表各行之和不超过 10000（截断只会少不会多）
     let share = row["share_bp"].as_i64().expect("share_bp 应为整数基点");
     assert!((0..=10_000).contains(&share), "占比基点越界：{share}");
-    let (_, all) = get(&env, "/admin/stats/clients?days=1&limit=100", &env.super_token).await;
+    let (_, all) = get(
+        &env,
+        "/admin/stats/clients?days=1&limit=100",
+        &env.super_token,
+    )
+    .await;
     let sum: i64 = all["data"]
         .as_array()
         .unwrap()

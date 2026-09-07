@@ -5,7 +5,7 @@
 //! 登录，把回调页 / 地址栏里的 code 贴回 `exchange`，这里换 token → 建渠道或给既有渠道加一把 key。
 //! 不监听本地回调端口：网关多半跑在服务器上、浏览器在站长电脑上，贴回 code 对所有形态都成立。
 
-use super::admin::{audit, guard_scoped};
+use super::admin::{audit, ensure_channel_owner, guard_scoped};
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
@@ -103,7 +103,7 @@ pub async fn exchange(
     headers: HeaderMap,
     Json(req): Json<ExchangeReq>,
 ) -> Result<Json<Value>, AppError> {
-    let (actor, _) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     let stored = state
         .sched
         .oauth_cred_state_take(&req.state)
@@ -122,6 +122,22 @@ pub async fn exchange(
         .filter(|s| !s.is_empty());
     if let Some(url) = token_url {
         super::ssrf::validate_api_base(&state, url).await?;
+    }
+    // 追加到既有渠道：属主范围与 provider 一致性在换码**之前**判——授权码一次性，
+    // 被拒的请求不该先把它烧掉；own 范围的渠道管理员也不能往别人的渠道里塞 key
+    if let Some(channel_id) = req.channel_id {
+        ensure_channel_owner(&state, channel_id, &actor, scope).await?;
+        let existing = sqlx::query_scalar!(
+            r#"SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
+            channel_id
+        )
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
+        if existing != provider {
+            return Err(AppError::bad_request().with_param("channel_provider_mismatch"));
+        }
     }
 
     let http = state.upstream.http();
@@ -169,17 +185,6 @@ pub async fn exchange(
     let plaintext = cred.to_plaintext();
 
     let (channel_id, channel_key_id) = if let Some(channel_id) = req.channel_id {
-        let existing = sqlx::query_scalar!(
-            r#"SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
-            channel_id
-        )
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?
-        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
-        if existing != provider {
-            return Err(AppError::bad_request().with_param("channel_provider_mismatch"));
-        }
         let key_id = okapi_store::admin::add_channel_key(
             &state.pg,
             channel_id,
