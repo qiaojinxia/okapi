@@ -100,3 +100,7 @@ jobs:
         run: python3 scripts/guard-i18n-keys.py
       - name: 前端权限点存在性（写错会对自定义角色永久隐藏入口）
         run: python3 scripts/guard-frontend-permissions.py
+      - name: 后端 error_code 全集反向核对（缺文案用户只看到"未知错误 (code)"）
+        run: python3 scripts/guard-error-codes.py
+      - name: 部署模板守卫（healthz 探针、下线宽限期、PG 连接预算）
+        run: python3 scripts/guard-deploy-manifests.py
