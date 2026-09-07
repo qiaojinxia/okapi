@@ -24,7 +24,7 @@
 
 | 层 | 内容 | 命令 | 依赖 |
 | --- | --- | --- | --- |
-| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources）、前端 tsc / oxlint、五道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py` | 部署模板守卫需 PyYAML 或系统 ruby |
+| L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources）、前端 tsc / oxlint、六道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板 / 后端错误码反向核对） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py && python3 scripts/guard-error-codes.py` | 部署模板守卫需 PyYAML 或系统 ruby |
 | L1 单元 / 性质 | crate 内 `#[cfg(test)]` 与 `crates/*/tests`（pricing 对拍 + proptest、providers 转换 parity、ledger Lua 契约） | `cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger -p okapi-providers -p okapi-api -p okapi-store` | ledger 契约需 Redis；store 部分用例需 PG |
 | L2 集成 | `bins/okapi/tests/*.rs` 71 个套件（gateway / console / worker / migrate） | `cargo test --workspace --no-fail-fast` | 四容器；CH / NATS 缺失时相关套件自跳过 |
 | L3 前端交互 e2e | 构建产物 + 接口桩，不碰数据库 | `cd frontend && pnpm test:interactions`（= `pnpm build` + `playwright test -c playwright.interactions.config.ts`） | 无（自起 vite preview :4175） |
@@ -68,7 +68,7 @@
 | `videos.rs` | 提交 / 轮询 / 下载，per_call × seconds，任务隔离 | A B C D | `gateway_videos`（跨用户隔离、上游失败退款） | — |
 | `realtime.rs` | WS 桥接、连接租约、断开结算 | A B C D | `gateway_realtime`（断开计费、零输出全退、第五连接拒绝、子协议鉴权） | 不走渠道 `proxy_url`（backlog） |
 | `custom_pass.rs` | `/pass/{channel_id}/*` 白名单透传 | A B C | `gateway_custom_pass` | — |
-| `models.rs` | `/v1/models`、`/v1beta/models` | A | `gateway_gemini_ingress::models_list_is_gemini_shaped`、`console_channel_test` | `/v1/models` 按分组 / key 可见性过滤无直接断言 |
+| `models.rs` | `/v1/models`、`/v1beta/models` | A | `gateway_gemini_ingress::models_list_is_gemini_shaped`、`console_channel_test` | `/v1/models` 无鉴权、列出全部启用模型（目录与公开价格页同为公开信息，`public_pricing_no_auth`）；按 key / 分组过滤属特性待定，非缺口 |
 | `dashboard.rs` | new-api 兼容余额端点 | A | `gateway_compat::dashboard_billing_compat` | — |
 | `pricing_loader.rs` / `bootstrap.rs` / `state.rs` | PriceBook L1、epoch 订阅热更、`build_state` | A D | `console_m2::pricing_publish_hot_reload_e2e`、`worker_m2::pricebook_hot_reloads_on_new_epoch`、`worker_nats::epoch_broadcast_hot_reload`、`console_ops::cache_flush_pricebook_hotfix`；`gateway_first_epoch`（09-06 第十轮，分支 `settle-backlog`，临时空库：空 `pricing_epochs` 读作 0，首次发布 epoch 1 判得出"更新"） | — |
 | 结算积压上界（`state.rs::check_settle_backlog` / `settle_write`） | 排队 + 在写 PG 的结算数超过 `OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000，0 不设限）→ 数据面鉴权前 503 `overloaded`，不预扣不碰上游；回落到 3/4 以下恢复（滞回）；进出各一条 WARN，TraceLayer 不给 503 刷 ERROR | B D G | `gateway_backlog`（09-06 第十轮，分支 `settle-backlog`：占满 `settle_gate` 后第三笔 503、param = 积压数、余额与预扣分文未动、上游未被打到；放开闸后积压归零、三笔全部落账、余额吻合；0 = 不设限）；release loadgen 复测见第 4 节第十轮 | 单进程口径；多副本各自计数（与 `settle_gate` 同为 per-pod） |
@@ -129,15 +129,15 @@
 | 管理端设置 / 高级配置 / 导航 / 分页 | `/admin/settings`, 侧栏, 列表页 | 分组搜索、敏感值不显示、只读无编辑入口、键盘 / 移动端 / IME、URL 即分页状态 | `interactions.spec`（19 例） | — |
 | 用户 / 密钥 | `/admin/users`, `/portal/keys` | 搜索回车、抽屉落地签、删除二次确认手输名称 | `smoke.spec`（管理端大例内的用户抽屉段 + 删除二次确认 1 例） | — |
 | 用户抽屉写操作 | `/admin/users` 管理抽屉 | 入账 USD → micro 整数（含 0.29 浮点边界）、系数按十进制字符串提交且负数 / 未改动不放行、分组全量覆盖且先出现者优先级高、封禁经确认框且成功后翻成解封；角色只发改动的那一项、订阅下拉只列在售订阅套餐且发放 / 立即结束各打端点、余额有效期日期 → UTC 零点 RFC3339 且清空发 null | `write-forms.spec`（2 例，09-06 新增 / 第八轮） | — |
-| 模型定价抽屉与发布 | `/admin/pricing` 编辑 / 新建 / 发布 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读；发布按钮 POST `/admin/pricing/publish` 并提示新 epoch | `write-forms.spec`（09-06 新增 / 第八轮） | 模型状态切换无 e2e |
-| 兑换码 | `/admin/codes` | 分页 / 筛选复位 / 末页停用 | `redemptions.spec` | 生成抽屉无 e2e |
+| 模型定价抽屉与发布 | `/admin/pricing` 编辑 / 新建 / 发布 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读；发布按钮 POST `/admin/pricing/publish` 并提示新 epoch | `write-forms.spec`（09-06 新增 / 第八轮） | 模型没有状态切换 UI（`status` 只随导入 / 删除变化），此前备注有误 |
+| 兑换码 | `/admin/codes` | 分页 / 筛选复位 / 末页停用；生成抽屉：面值 USD → micro（0.29 边界）、绑定用户去空格转数字、空限额不发键、过期时间按浏览器本地换 UTC、面值 0 禁提交、400 错误码文案且可重发、成功态明文一次性 + 复制全部 | `redemptions.spec`；`write-forms.spec`（1 例，09-07 第十二轮） | — |
 | Playground 试用台 + 一键导入 | `/portal/playground`、密钥回执 | 模型下拉只列本分组可用、发送 → 流式内容 + usage 脚注、停止按钮中断、预设保存 / 载入 / 站点预设导入、密钥回执四个客户端导入链接形状 | `playground.spec`（4 例，SSE 桩） | 流式桩为一次性回包（Playwright 限制），逐字动画不逐块验证 |
-| 订阅套餐 | `/portal/plans` | 在售 / 已订阅高亮 / 停用说明 / 下单参数 | `subscriptions.spec` | 管理端 `/admin/plans` 无 e2e |
+| 订阅套餐 | `/portal/plans` | 在售 / 已订阅高亮 / 停用说明 / 下单参数 | `subscriptions.spec`；管理端见下「套餐抽屉」「套餐删除」两行 | — |
 | 渠道抽屉「请求与计费行为」 | `/admin/channels` 编辑抽屉 | 已有 proxy / 额外头回显；注入字段按 JSON 解析（数字 / 带引号字符串）；清空额外头即从 settings 删键；PATCH 体只含有值的键；受保护键 400 → 错误码文案且抽屉不关 | `write-forms.spec`（1 例，09-06 新增） | — |
 | 渠道抽屉接入 / 模型 / 调度 + 新建 | `/admin/channels` | 协议只读；凭证轮换独立端点且成功后清空；拉上游模型覆盖清单并提示数量；成本倍数 → 千分比、留存声明、优先级随 PATCH；池成员单独保存、覆盖值整数化、非整数归 null；新建三件必答事齐才放行、池成员随建渠道提交；key 级参数行权重 / 并发各自 PATCH（空并发 = null）、失效 key 重新启用 | `write-forms.spec`（2 例，09-06 第七 / 八轮） | — |
 | 套餐删除 | `/admin/plans` | 确认框 → `DELETE /admin/plans/{code}` | `write-forms.spec`（09-06 第八轮） | — |
-| 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案 | `write-forms.spec`（1 例，09-06 新增） | TOTP 绑定流程仍无 e2e |
-| 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | 删除套餐无 e2e |
+| 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案 | `write-forms.spec`（1 例，09-06 新增） | —（TOTP 绑定见下行，第六轮已覆盖） |
+| 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | —（删除见上「套餐删除」行，第八轮已覆盖） |
 | 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案 | `write-forms.spec`（1 例，09-06 第四轮） | — |
 | 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达、自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default | `write-forms.spec`（1 例，09-06 第六轮） | 限流字段组（rpm / rph 空 = null、负数禁保存）与列表"限流"列无 e2e |
 | 渠道列表余额按钮 / 运维页毛利熔断卡 | `/admin/channels`, `/admin/ops` 毛利熔断页签 | 钱包按钮只对 openai / openai_compat 显示、结果 toast 按上游货币 Intl 格式化、"最近测试"列下回填余额；熔断卡配置表单（小时 / 分钟 / 美元 / 百分比 → 后端整数口径）、熔断表与解除按钮按权限裁剪 | — | 09-06 新增，尚无 e2e |
@@ -146,7 +146,7 @@
 | TOTP 绑定 | `/portal/security` | 开始绑定拿 otpauth / pending、码不足 6 位禁用、错码 `totp_invalid` 文案可重试、成功切已开启态、无会话 401 降级提示 | `write-forms.spec`（1 例，09-06 第六轮） | — |
 | 渠道池抽屉与列表 | `/admin/pools` | 策略 / 降级目标回填、降级目标排除自己、不降级发 null、编辑态池码只读、内置池与被引用池删除禁用、删除经确认框 | `write-forms.spec`（1 例，09-06 第七轮） | — |
 | 团队 | `/portal/teams` | 建团名字去空格、成员上限 USD → micro 且空即 null、提交后表单复位、发团 key 明文只展示一次、列表 401 整页降级且隐藏创建入口 | `write-forms.spec`（1 例，09-06 第七轮） | — |
-| i18n | 全站 | 裸文案零、双语言包键对齐 | `guard-i18n.sh`、`guard-i18n-keys.py`；e2e 断言同时匹配中英正则 | 后端错误码是否全部有 `errors` 命名空间映射：靠 `guard-i18n-keys.py` 的引用键检查，未反向核对后端 `codes::*` 全集 |
+| i18n | 全站 | 裸文案零、双语言包键对齐 | `guard-i18n.sh`、`guard-i18n-keys.py`；`guard-error-codes.py`（09-07 第十二轮：后端 `codes::*` + `AppError::new / unauthorized` + `StoreError::Conflict` + 模块级 const 的字面量全集 → 两语言包 `errors` 命名空间反向核对，进 CI）；e2e 断言同时匹配中英正则 | — |
 
 ### 2.6 部署与性能
 
@@ -168,8 +168,8 @@
 5. **集成测试共享一条 `billing_outbox` 队列**：任一用例的行都可能被别的测试进程 drain 进 CH，因此「drain 后直接读 CH 并断言」天然有竞态。现行约定是走 `poll_until` 且谓词覆盖全部待断言字段（09-06 修了两处漏网的）；新增 CH 用例须照此写，或改为按 user_id 隔离的 drain。
 6. ~~部署形态不在常规回归~~ **已补**（09-06 第六、七轮，`verify-deploy.sh` + `guard-deploy-manifests.py` + 可选镜像阶段）。性能维度 09-06 第九轮已按需跑过一次（无回归），仍不进默认路径。
 7. ~~OAuth 仅单一 mock IdP~~ **已补**（09-06 第八轮 `console_oauth_presets`）；~~Turnstile 外呼无 mock~~ **已补**（第七轮 `console_turnstile`）；SMTP TLS 形态未覆盖（mock SMTP 只走明文 AUTH PLAIN，STARTTLS / 隐式 TLS 需要带证书的 mock，且客户端得有可配的信任锚——暂列不做）。
-8. ~~后台结算积压无上界~~ **已修，在分支 `settle-backlog`（09-06 第十轮，待并行会话提交后 ff 合入 main）**。第九轮压测发现：`settle_gate` 只钳制同时碰 PG 的任务数不限排队深度，本机 PG 落账约 1000 笔 / 秒而进量 4.7k–11.7k RPS，8 分钟后堆了 260,101 笔"Redis 已扣、PG 未记"的结算，SIGTERM 等满 30s 即放弃，PG 只落 166k / 426k 笔。定案走方案 A（有界 + 数据面拒绝）：`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000 ≈ 记账速率 × 30s 下线窗口，0 不设限）超界后鉴权前 503 `overloaded`，滞回恢复，IMPLEMENTATION §12.2 / §12.3 / §14.3 与 `docs/perf-report.md` 先行改定，压测口径分"网关自身开销（=0）"与"可持续吞吐（缺省）"两种。方案 B（持久结算队列 / 微批组提交）仍是 §11.23 挂着的终态方向。对账 1.5s 双采样窗口的误判风险随之收敛到最长约 20s，积压期间不要手动修复（已写进 §12.3）。
-9. **临时库套件从不删库（09-06 第十轮发现，已在分支 `settle-backlog` 修）**：`console_setup` / `console_ssrf` / `console_oauth_presets` / `console_turnstile` 各建独立库不清，开发 PG 里一天攒了 157 个；用例末尾 `DROP DATABASE … WITH (FORCE)`，本机残留已手工清空。新写临时库用例照 `schema_shape` / 上述四个的收尾。
+8. ~~后台结算积压无上界~~ **已修并合入 main（09-06 第十轮，`4e411ce`）**。第九轮压测发现：`settle_gate` 只钳制同时碰 PG 的任务数不限排队深度，本机 PG 落账约 1000 笔 / 秒而进量 4.7k–11.7k RPS，8 分钟后堆了 260,101 笔"Redis 已扣、PG 未记"的结算，SIGTERM 等满 30s 即放弃，PG 只落 166k / 426k 笔。定案走方案 A（有界 + 数据面拒绝）：`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000 ≈ 记账速率 × 30s 下线窗口，0 不设限）超界后鉴权前 503 `overloaded`，滞回恢复，IMPLEMENTATION §12.2 / §12.3 / §14.3 与 `docs/perf-report.md` 先行改定，压测口径分"网关自身开销（=0）"与"可持续吞吐（缺省）"两种。方案 B（持久结算队列 / 微批组提交）仍是 §11.23 挂着的终态方向。对账 1.5s 双采样窗口的误判风险随之收敛到最长约 20s，积压期间不要手动修复（已写进 §12.3）。
+9. ~~临时库套件从不删库~~ **已修并合入 main（09-06 第十轮，`575f630`）**：`console_setup` / `console_ssrf` / `console_oauth_presets` / `console_turnstile` 各建独立库不清，开发 PG 里一天攒了 157 个；用例末尾 `DROP DATABASE … WITH (FORCE)`，本机残留已手工清空。新写临时库用例照 `schema_shape` / 上述四个的收尾。
 
 ## 4. 执行记录
 
@@ -314,15 +314,15 @@
 
 其他：release 网关若用 `( nohup … & )` 子 shell 起，随工具调用结束一起被收走，必须作为常驻后台任务起。收尾已 `git worktree remove` 并删除 `okapi_head` 库、清空 Redis 逻辑库 7。
 
-### 2026-09-06 第十轮：结算积压上界（分支 `settle-backlog`）
+### 2026-09-06 第十轮：结算积压上界（分支 `settle-backlog`，已 ff 合入）
 
-主工作树里并行会话正改着 `gateway/{auth,chat,state,mod}.rs`、`IMPLEMENTATION.md`、`okapi-api/error.rs`，恰是本项要碰的文件，故在 `git worktree add -b settle-backlog`（基于 `8a7074c`）+ 独立库 `okapi_backlog` + Redis 逻辑库 7 上做，三笔提交，**待并行会话提交后 `git merge --ff-only settle-backlog` 合入 main**（分支只比 main 多这三笔；若 main 先动了则 `git rebase main settle-backlog` 再 ff）。
+主工作树里并行会话正改着 `gateway/{auth,chat,state,mod}.rs`、`IMPLEMENTATION.md`、`okapi-api/error.rs`，恰是本项要碰的文件，故在 `git worktree add -b settle-backlog`（基于 `8a7074c`）+ 独立库 `okapi_backlog` + Redis 逻辑库 7 上做，三笔提交。当日并行会话提交 `e4dfbf1` 后 rebase（仅 `okapi-api/error.rs` 常量区一处相邻冲突）、隔离库全量复验，再 `git merge --ff-only` 合入 main，落地哈希 `4e411ce` / `58803c3` / `575f630`（下表按落地哈希）。
 
 | 提交 | 内容 | 验证 |
 | --- | --- | --- |
-| `091ed41` 结算积压上界 | 先改 IMPLEMENTATION §12.2（故障模式表新行）/ §12.3（第 4 条：PG 记账速率是单进程可持续吞吐硬上限，压测口径分两种）/ §14.3（30s 与上界配套）与 `docs/perf-report.md`（修正 #4 + 复现命令），再动代码：`settle_write` 进出计数、`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000，0 不设限）、`authenticate_data_plane` 最前面 `check_settle_backlog` → 503 `overloaded`（param = 积压数），滞回 3/4 恢复、进出各一条 WARN；gateway TraceLayer 的 `on_failure` 跳过 503；错误码进 `okapi_api::codes` 与中英语言包；`linux-bench.sh` 显式 `=0` 保持网关自身开销口径 | `gateway_backlog` 1 / 1；鉴权路径相关 15 个 gateway 套件 44 / 44；全工作区 clippy 无豁免通过；i18n 键守卫 1377 对齐 |
-| `6ad44dc` 空表 epoch | 在隔离库跑 loadgen 撞到：`pricing_epochs` 为空时价簿与 30s 自校验都把 epoch 读作 1，首次发布拿到的正是 1，`swap_if_newer` 判"不比当前新"永不装载——**全新安装的第一次定价发布对在跑的 gateway 无效**，直到第二次发布或重启；共享开发库 epochs 从不为空所以此前无用例能碰到。两处 `COALESCE(MAX(epoch), 0)` | `gateway_first_epoch`（临时空库：epoch 0 → 发布得 1 → 热更 true → 同 epoch 不重复）1 / 1 |
-| `d6b2247` 临时库用完即删 | 四个临时库套件收尾 `DROP DATABASE … WITH (FORCE)`；本机 157 个残留库手工清空 | 五个临时库套件 7 / 7，跑前跑后库数不变 |
+| `4e411ce` 结算积压上界 | 先改 IMPLEMENTATION §12.2（故障模式表新行）/ §12.3（第 4 条：PG 记账速率是单进程可持续吞吐硬上限，压测口径分两种）/ §14.3（30s 与上界配套）与 `docs/perf-report.md`（修正 #4 + 复现命令），再动代码：`settle_write` 进出计数、`OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000，0 不设限）、`authenticate_data_plane` 最前面 `check_settle_backlog` → 503 `overloaded`（param = 积压数），滞回 3/4 恢复、进出各一条 WARN；gateway TraceLayer 的 `on_failure` 跳过 503；错误码进 `okapi_api::codes` 与中英语言包；`linux-bench.sh` 显式 `=0` 保持网关自身开销口径 | `gateway_backlog` 1 / 1；鉴权路径相关 15 个 gateway 套件 44 / 44；全工作区 clippy 无豁免通过；i18n 键守卫 1377 对齐 |
+| `58803c3` 空表 epoch | 在隔离库跑 loadgen 撞到：`pricing_epochs` 为空时价簿与 30s 自校验都把 epoch 读作 1，首次发布拿到的正是 1，`swap_if_newer` 判"不比当前新"永不装载——**全新安装的第一次定价发布对在跑的 gateway 无效**，直到第二次发布或重启；共享开发库 epochs 从不为空所以此前无用例能碰到。两处 `COALESCE(MAX(epoch), 0)` | `gateway_first_epoch`（临时空库：epoch 0 → 发布得 1 → 热更 true → 同 epoch 不重复）1 / 1 |
+| `575f630` 临时库用完即删 | 四个临时库套件收尾 `DROP DATABASE … WITH (FORCE)`；本机 157 个残留库手工清空 | 五个临时库套件 7 / 7，跑前跑后库数不变 |
 
 release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 / 37,888 被拒（503）**，可持续 1727 RPS ≈ PG 记账速率；日志全程 **3 条 WARN、0 条 ERROR**（首版无滞回时阈值附近每秒翻转十几次、TraceLayer 每个 503 一条 ERROR 共 7109 行，修掉后才是这个数）；压完**立即 SIGTERM，25s 退出**，PG 新增 25,906 = 成功数 + 预热 1 笔，**零丢账**（第九轮同场景放弃 26 万笔）。`OKAPI_SETTLE_BACKLOG_MAX=0`：5s 59,550 成功 0 拒绝、11.8k RPS，与第九轮口径一致。
 
@@ -352,3 +352,13 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 2. **`console_stats::client_distribution_groups_by_client_type` 单跑也失败（已修用例）**：断言 `share_bp > 0`，但长期 dev 库近一日已有 7 万多笔请求日志，本用例的 5 笔不足万分之一，整数基点截断为 0——用例假设"库是空的"。改为断言基点在 `0..=10000` 且全表各行之和 ≤ 10000（截断只会少不会多）。产品行为正确，是用例对共享库的假设过时。
 3. 并行会话留下的 `RUST_LOG=info ./target/debug/okapi all` 常驻进程占着 8080 / 8081，`smoke-all.sh` 会因端口冲突起不来；本轮 SIGTERM 后正常退出再跑。以后长驻进程应在收尾时停掉。
 4. **同一个常驻 `okapi all` 还会让 `console_stats` 的 `poll_until` 超时**（另一会话串行复跑时 `portal_charts_expose_cache_writes_performance_and_exact_date_window` 报"轮询超时"，其余 7 例通过；停掉进程后 8 / 8）。根因：它配了 NATS，worker 的 `nats_relay::relay_once` 用 `SKIP LOCKED` 抢到测试刚播进 `billing_outbox` 的 `request_log` 行，但 BILLING 流只收 `billing.>`，发布失败后把该行推进 5s → 10s → … 的退避（进程日志里 `NATS 发布失败 count=1` 与该行 `retry_count` 逐次对应），`chsink::process_once` 的 `next_retry_at <= now()` 过滤随即看不到它，用例 5 秒轮询必然超时。`request_log` 主题只有测试在播、生产代码只写 `billing.completed / refunded`，故不改代码；只是再一次说明测试期间不能有共用 dev 库的常驻进程。
+
+### 2026-09-07 第十二轮：错误码反向守卫 + 兑换码生成 e2e + 第十轮落地
+
+| 提交 | 内容 | 验证 |
+| --- | --- | --- |
+| `88cb85c` `scripts/guard-error-codes.py` | 第 2.5 节 i18n 行挂了一天的缺口：`guard-i18n-keys` 只核对前端引用到的键，后端能返回却没文案的 error_code 会掉进 `describeError` 的"未知错误 (code)"。新守卫解析 `okapi_api::codes` 常量、`AppError::new / unauthorized`、`StoreError::Conflict`、`ErrorBody::new`、`Self::new(StatusCode…)` 与模块级 `const` 的字面量（12 处变量 code 无法静态核对，均为 `codes::*` 二选一或透传），首跑抓到 **11 个**缺失：`redemption_invalid`、`payment_not_configured`、`payment_gateway_error`（门户用户直接可见）、`oauth_token_exchange_failed` / `oauth_upstream_{error,not_json,unreachable}` / `oauth_userinfo_missing_subject`（第三方登录失败全部显示成未知错误）、`no_zero_retention_channel`、`price_above_max`、`record_not_found`。两语言包补齐；守卫与第六轮的部署模板守卫一并接入 `ci.yml` | 56 个 error_code 全部有文案；`guard-i18n-keys` 1479 对齐；tsc / oxlint 干净 |
+| `dad7845` `write-forms.spec` +1 | 兑换码生成抽屉（第 2.5 节唯一还标"无 e2e"的钱相关表单）：0.29 → 290000 micro、面值 0 禁提交、绑定用户 ` 77 ` → 77、空限额不发键、`datetime-local` 按浏览器本地换 UTC（期望值在同一浏览器里算，与运行机时区无关）、400 `bad_request` param 渲染成文案且表单留在原地、成功态批次 / 明文 / 复制全部进剪贴板 / 取消变关闭 | 单跑通过；interactions 配置两跑 80 / 81 → 81 / 81，唯一一次失败是并行会话新增的 `playground.spec 一键导入链接` 在并行下抖动（单跑与复跑均过） |
+| 第十轮落地 | `settle-backlog` 三笔 rebase 到 `e4dfbf1` 后 ff 合入（见第十轮记录）；分支上原有第四笔（`client_distribution` 占比断言改为对合计核算）因并行会话已在主树做了等价修正而撤下，以对方的为准 | rebase 后全工作区 clippy 通过；隔离库全量 505 / 520，15 例失败全是 CH 串味（改到共享库跑 `console_analytics` 11 / 11、`console_portal` 1 / 1、`console_logs` 12 / 12、`gateway_upstream_cost` 2 / 2、`console_stats` 8 / 8） |
+
+顺手修正第 2.5 节四条过时备注（模型状态切换本无 UI、`/admin/plans` 与套餐删除、TOTP 绑定早已覆盖）与第 2.2 节 `/v1/models` 的描述（无鉴权列全部启用模型是与公开价格页一致的既定行为，按 key 过滤属特性待定）。并行会话本机残留的 10 个临时库（旧代码跑出来的）再清一次，之后不会再长。
