@@ -47,8 +47,11 @@ jobs:
           CLICKHOUSE_PASSWORD: okapi_dev
         ports:
           - 8123:8123
+        # 探活必须写 127.0.0.1：alpine 里 localhost 先解析到 ::1，而容器网络没有 IPv6，
+        # clickhouse 只绑到了 0.0.0.0，用 localhost 探活会一直 Connection refused，
+        # service 永远起不来，整个 check job 在 Initialize containers 就挂（本地容器复现取证）
         options: >-
-          --health-cmd "wget -qO- http://localhost:8123/ping || exit 1"
+          --health-cmd "wget -qO- http://127.0.0.1:8123/ping || exit 1"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30

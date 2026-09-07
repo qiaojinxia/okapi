@@ -2,6 +2,8 @@
 name = "okapi"
 version.workspace = true
 edition.workspace = true
+# 单二进制产品，crate 不发布到 crates.io（cargo-deny 据此跳过自有 crate 的许可证核对）
+publish = false
 description = "Okapi 单二进制多角色入口：gateway / console / worker / all"
 
 [dependencies]

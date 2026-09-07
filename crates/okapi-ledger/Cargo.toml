@@ -2,6 +2,8 @@
 name = "okapi-ledger"
 version.workspace = true
 edition.workspace = true
+# 单二进制产品，crate 不发布到 crates.io（cargo-deny 据此跳过自有 crate 的许可证核对）
+publish = false
 description = "Okapi 账本：Redis Lua 预扣/结算 + PG 事件溯源 + outbox（M1）"
 
 [dependencies]

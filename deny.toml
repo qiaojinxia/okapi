@@ -3,6 +3,9 @@ version = 2
 
 [licenses]
 version = 2
+# 自有 crate 全部 publish = false：项目许可证仍是 IMPLEMENTATION §15 的开放项，但不能让它把
+# 第三方依赖的许可证 / 漏洞 / 来源检查一起压成常红（常红的守卫等于没有守卫）
+private = { ignore = true }
 allow = [
     "0BSD",
     "MIT",

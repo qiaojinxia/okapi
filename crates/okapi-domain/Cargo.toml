@@ -2,6 +2,8 @@
 name = "okapi-domain"
 version.workspace = true
 edition.workspace = true
+# 单二进制产品，crate 不发布到 crates.io（cargo-deny 据此跳过自有 crate 的许可证核对）
+publish = false
 description = "Okapi 领域基元：金额（i64 micro-USD）、token 用量、计费状态机、ID newtypes"
 
 [dependencies]
