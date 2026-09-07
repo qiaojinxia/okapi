@@ -116,6 +116,7 @@ async fn handle(
     // per_call：金额与 usage 无关，预扣即终额
     let quote = calculate(&book, &calc, TokenUsage::default())?;
     super::auth::check_member_limit(state, &key).await?;
+    super::auth::check_group_rate(state, &key).await?;
 
     let cap = |v: Option<i32>| v.map_or(0, i64::from);
     let caps = LimitCaps {

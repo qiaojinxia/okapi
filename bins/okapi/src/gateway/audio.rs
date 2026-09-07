@@ -72,10 +72,23 @@ async fn first_candidate(
         state.master_key.as_deref(),
     )
     .await?;
-    super::scheduler::order_candidates(rows)
+    let mut candidates: Vec<_> = super::scheduler::order_candidates(rows)
         .into_iter()
-        .find(|c| c.provider != "anthropic" && c.provider != "gemini")
-        .ok_or_else(|| AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL))
+        .filter(|c| {
+            c.provider != "anthropic"
+                && c.provider != "gemini"
+                && !super::dialect::chat_only(&c.provider)
+        })
+        .collect();
+    let margin_removed = state
+        .retain_margin_ok(&key.group_code, &mut candidates)
+        .await;
+    candidates.into_iter().next().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            super::state::no_candidates_code(margin_removed),
+        )
+    })
 }
 
 // ---- speech ----
@@ -129,6 +142,7 @@ async fn handle_speech(
     let calc = calc_ctx(&key, &canonical, rules_in);
     let quote = calculate(&book, &calc, usage)?;
     super::auth::check_member_limit(state, &key).await?;
+    super::auth::check_group_rate(state, &key).await?;
 
     match state
         .ledger
@@ -319,6 +333,7 @@ async fn handle_transcriptions(
         return Err(AppError::bad_request().with_param("transcriptions_requires_per_call_model"));
     }
     super::auth::check_member_limit(state, &key).await?;
+    super::auth::check_group_rate(state, &key).await?;
 
     match state
         .ledger

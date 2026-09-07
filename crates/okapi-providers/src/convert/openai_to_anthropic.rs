@@ -601,10 +601,19 @@ pub async fn chat(
     stream: bool,
     outbound: &crate::http::Outbound,
 ) -> Result<ChatResponse, UpstreamError> {
-    match upstream
+    let resp = upstream
         .messages(api_base, credential, body_anthropic, stream, outbound)
-        .await?
-    {
+        .await?;
+    wrap_messages(resp, upstream_model)
+}
+
+/// 已取到的 Anthropic 响应 → OpenAI 形状（纯转换半跳）。Bedrock / Vertex 这类只换传输的
+/// 上游取到 `MessagesResponse` 后走这里，与直连共享同一套转换（IMPLEMENTATION §11.35）。
+pub fn wrap_messages(
+    resp: MessagesResponse,
+    upstream_model: &str,
+) -> Result<ChatResponse, UpstreamError> {
+    match resp {
         MessagesResponse::Json {
             status,
             upstream_request_id,

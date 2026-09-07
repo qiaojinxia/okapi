@@ -28,8 +28,37 @@ async fn mock_models(headers: axum::http::HeaderMap) -> axum::response::Response
     }
 }
 
+/// new-api / one-api 生态的余额两端点：凭证不对 401，对了给额度 100 美元 / 用量 1234.5 美分。
+async fn mock_subscription(headers: axum::http::HeaderMap) -> axum::response::Response {
+    if !authorized(&headers) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    axum::Json(
+        json!({"object": "billing_subscription", "hard_limit_usd": 100.0,
+        "has_payment_method": true, "soft_limit_usd": 100.0}),
+    )
+    .into_response()
+}
+
+async fn mock_usage(headers: axum::http::HeaderMap) -> axum::response::Response {
+    if !authorized(&headers) {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    axum::Json(json!({"object": "list", "total_usage": 1234.5})).into_response()
+}
+
+fn authorized(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "Bearer good-credential")
+}
+
 async fn spawn_mock() -> SocketAddr {
-    let router = Router::new().route("/v1/models", get(mock_models));
+    let router = Router::new()
+        .route("/v1/models", get(mock_models))
+        .route("/v1/dashboard/billing/subscription", get(mock_subscription))
+        .route("/v1/dashboard/billing/usage", get(mock_usage));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -213,4 +242,72 @@ async fn channel_test_probes_reachability() {
     .await
     .unwrap();
     assert!(audits >= 3);
+}
+
+/// 上游余额查询（§11.33）：dashboard 口径 = 额度 − 用量（美分）；结果留痕回填列表；
+/// 凭证错 502 带上游状态；anthropic 没有余额接口 → 400 balance_unsupported。
+#[tokio::test]
+async fn channel_balance_probe() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let balance = |id: i64| {
+        client
+            .get(format!("http://{}/admin/channels/{id}/balance", env.addr))
+            .bearer_auth(&env.admin_token)
+            .send()
+    };
+
+    let good = mk_channel(&env, "good-credential", &format!("http://{}/v1", env.mock)).await;
+    let resp = balance(good).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["probe"], "openai_dashboard", "{body}");
+    assert_eq!(body["currency"], "USD");
+    assert_eq!(body["total_micro"], 100_000_000);
+    assert_eq!(body["used_micro"], 12_345_000);
+    assert_eq!(body["balance_micro"], 87_655_000);
+    assert!(body["at"].is_string());
+
+    let bad = mk_channel(&env, "bad-credential", &format!("http://{}/v1", env.mock)).await;
+    let resp = balance(bad).await.unwrap();
+    assert_eq!(resp.status(), 502);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "upstream_error");
+    assert_eq!(body["error"]["param"], "status_401");
+
+    let (anthropic, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("claude-{}", Uuid::new_v4().simple()),
+        "anthropic",
+        "https://api.anthropic.com/v1",
+        "x",
+        &["m-x"],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let resp = balance(anthropic).await.unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["param"], "balance_unsupported");
+
+    // 列表回填 last_balance（与 last_test 同一留痕机制）
+    let list: Value = client
+        .get(format!("http://{}/admin/channels", env.addr))
+        .bearer_auth(&env.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"].as_i64() == Some(good))
+        .unwrap();
+    assert_eq!(row["last_balance"]["balance_micro"], 87_655_000, "{row}");
+    assert_eq!(row["last_balance"]["currency"], "USD");
 }

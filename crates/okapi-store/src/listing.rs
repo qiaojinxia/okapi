@@ -235,6 +235,9 @@ pub struct GroupListRow {
     pub channel_count: i64,
     /// 用户可否在门户为自己的 key 自选此分组。
     pub self_select: bool,
+    /// 分组内每用户分钟 / 小时请求上限（§11.32）；None = 不限。
+    pub rpm_limit: Option<i32>,
+    pub rph_limit: Option<i32>,
 }
 
 /// 渠道池列表行。
@@ -403,6 +406,7 @@ pub async fn list_groups(pool: &PgPool, slice: Slice) -> Result<Page<GroupListRo
             r#"
         SELECT g.group_code, g.group_ratio::text AS group_ratio, g.description,
                g.is_default, g.sort_order, g.pool_code, g.self_select,
+               g.rpm_limit, g.rph_limit,
                (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_code = g.group_code)
                    AS "user_count!",
                (SELECT COUNT(*) FROM pool_channels pc
@@ -435,6 +439,8 @@ pub async fn list_groups(pool: &PgPool, slice: Slice) -> Result<Page<GroupListRo
             pool_code: r.pool_code,
             channel_count: r.channel_count,
             self_select: r.self_select,
+            rpm_limit: r.rpm_limit,
+            rph_limit: r.rph_limit,
         })
         .collect();
     Ok(Page { data, total })

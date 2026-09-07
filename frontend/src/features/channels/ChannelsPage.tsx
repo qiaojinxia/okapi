@@ -9,18 +9,20 @@ import {
   Server,
   Stethoscope,
   Trash2,
+  Wallet,
 } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { ChannelRow } from '@/features/channels/types'
+import type { ChannelBalance, ChannelRow } from '@/features/channels/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
 import {
   Health24h,
   KeyStateSummary,
+  LastBalance,
   LastProbe,
   useChannelHealth24h,
 } from '@/features/channels/ChannelHealthCell'
@@ -28,7 +30,7 @@ import { RouteDiagnosisDrawer } from '@/features/channels/RouteDiagnosis'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
-import { PROVIDERS, providerConsoleUrl } from '@/features/channels/types'
+import { PROVIDERS, balanceSupported, providerConsoleUrl } from '@/features/channels/types'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
@@ -41,6 +43,7 @@ import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { formatUpstreamBalance } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { oneOf, text } from '@/lib/search-params'
 import { useConfirm } from '@/components/ui/confirm'
@@ -62,7 +65,7 @@ interface ChannelPage {
 /// 操作反馈全部走 toast：测活结果、批量结果、失败原因此前都是工具栏下一行 12px 灰字，
 /// 测活成功与失败长得一样，看完也不会消失。
 export function ChannelsPage() {
-  const { t } = useTranslation()
+  const { i18n, t } = useTranslation()
   const queryClient = useQueryClient()
   const [picked, setPicked] = useState<Set<number>>(new Set())
   // 关键词 / 协议筛选 / 页码都在地址里（刷新 / 分享 / 后退不丢）。
@@ -77,6 +80,7 @@ export function ChannelsPage() {
   >(null)
   const [diagnosing, setDiagnosing] = useState(false)
   const [testingId, setTestingId] = useState<number | null>(null)
+  const [balancingId, setBalancingId] = useState<number | null>(null)
   const { confirm, dialog } = useConfirm()
   const pager = usePagination()
   // 过滤器与页码同一次导航更新：只按"新条件 + 第一页"请求一次
@@ -176,6 +180,26 @@ export function ChannelsPage() {
     },
     onError: fail,
     onSettled: () => setTestingId(null),
+  })
+
+  // 上游余额（§11.33）：结果留痕在服务端，刷新列表让"余额"回填跟上
+  const balance = useMutation({
+    mutationFn: (c: ChannelRow) => {
+      setBalancingId(c.id)
+      return apiFetch<ChannelBalance>(`/admin/channels/${c.id}/balance`)
+    },
+    onSuccess: (r, c) => {
+      toast.success(
+        c.name,
+        t('admin:balanceResult', {
+          amount: formatUpstreamBalance(r.balance_micro, r.currency, i18n.language),
+          probe: r.probe,
+        }),
+      )
+      invalidate()
+    },
+    onError: fail,
+    onSettled: () => setBalancingId(null),
   })
 
   // 测试全部启用渠道（new-api 同有）：并发 3 路——太多会让一批上游同时看到探测，
@@ -444,7 +468,10 @@ export function ChannelsPage() {
                   </div>
                 </Td>
                 <Td>
-                  <LastProbe probe={c.last_test} />
+                  <div className="flex flex-col gap-1">
+                    <LastProbe probe={c.last_test} />
+                    <LastBalance balance={c.last_balance} />
+                  </div>
                 </Td>
                 <Td>
                   <Health24h
@@ -465,6 +492,14 @@ export function ChannelsPage() {
                       loading={testingId === c.id}
                       onClick={() => test.mutate(c)}
                     />
+                    {balanceSupported(c.provider) && (
+                      <IconButton
+                        icon={Wallet}
+                        label={t('admin:balanceQuery')}
+                        loading={balancingId === c.id}
+                        onClick={() => balance.mutate(c)}
+                      />
+                    )}
                     <IconButton
                       icon={Pencil}
                       label={t('common:edit')}

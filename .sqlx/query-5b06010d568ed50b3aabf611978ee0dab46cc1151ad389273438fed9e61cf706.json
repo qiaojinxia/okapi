@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT amount_micro FROM billing_records WHERE user_id = $1 AND log_type = 2 AND status = 20",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5b06010d568ed50b3aabf611978ee0dab46cc1151ad389273438fed9e61cf706"
+}

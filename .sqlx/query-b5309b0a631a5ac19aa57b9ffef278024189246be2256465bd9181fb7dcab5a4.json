@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT g.group_code, g.group_ratio::text AS group_ratio, g.description,\n               g.is_default, g.sort_order, g.pool_code, g.self_select,\n               (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_code = g.group_code)\n                   AS \"user_count!\",\n               (SELECT COUNT(*) FROM pool_channels pc\n                  JOIN channels c ON c.id = pc.channel_id\n                 WHERE pc.pool_code = g.pool_code AND c.deleted_at IS NULL) AS \"channel_count!\"\n        FROM price_groups g\n        ORDER BY g.sort_order, g.group_code\n        LIMIT $1 OFFSET $2\n        ",
+  "query": "\n        SELECT g.group_code, g.group_ratio::text AS group_ratio, g.description,\n               g.is_default, g.sort_order, g.pool_code, g.self_select,\n               g.rpm_limit, g.rph_limit,\n               (SELECT COUNT(*) FROM user_groups ug WHERE ug.group_code = g.group_code)\n                   AS \"user_count!\",\n               (SELECT COUNT(*) FROM pool_channels pc\n                  JOIN channels c ON c.id = pc.channel_id\n                 WHERE pc.pool_code = g.pool_code AND c.deleted_at IS NULL) AS \"channel_count!\"\n        FROM price_groups g\n        ORDER BY g.sort_order, g.group_code\n        LIMIT $1 OFFSET $2\n        ",
   "describe": {
     "columns": [
       {
@@ -77,12 +77,34 @@
       },
       {
         "ordinal": 7,
+        "name": "rpm_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "rpm_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "rph_limit",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "price_groups",
+            "name": "rph_limit"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
         "name": "user_count!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 8,
+        "ordinal": 10,
         "name": "channel_count!",
         "type_info": "Int8",
         "origin": "Expression"
@@ -102,9 +124,11 @@
       false,
       false,
       false,
+      true,
+      true,
       null,
       null
     ]
   },
-  "hash": "23aaa5bf3b1f5998504d18f38be7e5fdde7d02123ac9b5723527ff3b829f5c70"
+  "hash": "b5309b0a631a5ac19aa57b9ffef278024189246be2256465bd9181fb7dcab5a4"
 }

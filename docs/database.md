@@ -113,7 +113,9 @@ CREATE TABLE price_groups (
     is_default  BOOLEAN NOT NULL DEFAULT false,
     sort_order  INT NOT NULL DEFAULT 0,
     pool_code   VARCHAR(32) NOT NULL DEFAULT 'default', -- 该分组的用户打哪个池；分组必有池（FK 在 channel_pools 后补）
-    self_select BOOLEAN NOT NULL DEFAULT false        -- 用户可在门户为自己的 key 选此分组（价随组走）
+    self_select BOOLEAN NOT NULL DEFAULT false,       -- 用户可在门户为自己的 key 选此分组（价随组走）
+    rpm_limit   INT CHECK (rpm_limit IS NULL OR rpm_limit > 0),  -- 分组内每用户每分钟请求上限；NULL = 不限（IMPLEMENTATION §11.32）
+    rph_limit   INT CHECK (rph_limit IS NULL OR rph_limit > 0)   -- 分组内每用户每小时请求上限；NULL = 不限。随鉴权缓存下发，Redis rl:{uid}:g:*
 );
 
 CREATE TABLE user_groups (
@@ -179,11 +181,23 @@ CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对
 -- 老部署行为不变。历史 group_channel_bindings 已在 0015 迁移为 pool_<group_code> 并删表。
 -- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ strip_request_fields（不透传的请求顶层字段，new-api rc.23 #6847；model/messages/stream 受保护）/ inject_request_fields（对象，dispatch 在 strip 之后浅合并到请求顶层；model/messages/stream/provider 受保护不可注入；缺省空=零开销；写入最多 32 键 / 4KB）/ responses_native（/v1/responses 同方言直转到上游 /responses；缺省 openai=true、openai_compat=false，其它协议忽略恒降级；上游 404/405 自动回退降级）/ pass_paths（custom_pass 白名单）
 -- / api_version（仅 provider=azure：数据面 api-version，`YYYY-MM-DD[-preview]`，管理面写入时校验形状；缺省 2024-10-21；每个出向请求都带 `?api-version=`）
+-- / aws_region（仅 provider=bedrock：SigV4 签名区域覆写；缺省从 api_base 主机名 `bedrock-runtime.{region}.amazonaws.com` 解析，VPC 端点等解析不出时必填）
 -- / proxy_url（渠道级出站代理：http / https / socks5 / socks5h；空 = 直连。绑在 reqwest Client 上按 URL 缓存；不走 api_base 的 SSRF 闸——企业代理常在 RFC1918 / 本机端口。Realtime WS 不走此代理）
 -- / extra_headers（对象 string→string，附加到每条上游请求；写入拒 Authorization / api-key / x-api-key / x-goog-api-key / Host / Content-Type / 逐跳头 / x-okapi-request-id，热路径再跳过一次；鉴权头后写覆盖）。
 -- provider=azure 的约定：api_base = 资源端点 `https://{res}.openai.azure.com`（必填，无缺省；贴了 `/openai` 或 `/openai/v1` 后缀网关自行剥掉）；
 -- 出向 URL = `{endpoint}/openai/deployments/{deployment}/{chat/completions|embeddings|images/generations|images/edits|audio/*}?api-version=`，鉴权 `api-key` 头；
 -- **部署名 = model_mapping 的值**（未映射则用模型名本身，Azure 缺省部署名与模型名相同时零配置）。responses_native 对 azure 忽略（恒降级）；videos / realtime 不路由 azure 渠道。
+-- provider=bedrock（IMPLEMENTATION §11.35）：api_base = `https://bedrock-runtime.{region}.amazonaws.com`（必填；region 从主机名解析，解析不出用 settings.aws_region）；
+-- 凭证 `ACCESS_KEY_ID:SECRET[:SESSION_TOKEN]` → SigV4，否则视为 Bedrock API key → Bearer；出向 = InvokeModel `/model/{modelId}/invoke[-with-response-stream]`，
+-- 请求体 Anthropic Messages（去 model/stream、加 anthropic_version=bedrock-2023-05-31）；**模型 ID = model_mapping 的值**（`us.anthropic.claude-…-v1:0`）。只服务 Anthropic 方言模型。
+-- provider=vertex（IMPLEMENTATION §11.35）：api_base = `https://{loc}-aiplatform.googleapis.com/v1/projects/{project}/locations/{loc}`（必填，须含 /projects/ 与 /locations/）；
+-- 凭证 = 服务账号 JSON 原文（JWT RS256 换 access token，进程内缓存）或现成 access token；`claude*` → publishers/anthropic `:rawPredict|:streamRawPredict`
+-- （anthropic_version=vertex-2023-10-16），其余 → publishers/google `:generateContent|:streamGenerateContent?alt=sse`。两家只路由 chat 族入口。
+-- provider=anthropic_max / codex（IMPLEMENTATION §11.38，实验性）：站长自己的订阅经 OAuth 登录；channel_keys.credential_ciphertext 里是
+-- JSON `{"kind":"oauth","access_token","refresh_token","expires_at"(unix 秒),"account_id"?}`（仍经 AES-GCM 信封，非 JSON 凭证照旧当静态 key）。
+-- 刷新按 §4.3 四步锁惰性发生（Redis `lock:cred:<key_id>`），refresh token 轮转即回写；invalid_grant → key status=6。
+-- anthropic_max：api_base 缺省 `https://api.anthropic.com/v1`，Bearer + `anthropic-beta: oauth-2025-04-20` + system 首句前置；
+-- codex：api_base 缺省 `https://chatgpt.com/backend-api/codex`，只走 Responses，头 `chatgpt-account-id` / `originator: codex_cli_rs`，store 恒 false。
 
 CREATE TABLE api_keys (
     id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -217,7 +231,7 @@ CREATE INDEX idx_api_keys_user ON api_keys(user_id) WHERE deleted_at IS NULL;
 CREATE TABLE channels (
     id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     name                 VARCHAR(128) NOT NULL,
-    provider             VARCHAR(32) NOT NULL,        -- openai/openai_compat/azure/anthropic/gemini/custom_pass
+    provider             VARCHAR(32) NOT NULL,        -- openai/openai_compat/azure/anthropic/gemini/bedrock/vertex/anthropic_max/codex/custom_pass
     api_base             VARCHAR(255),
     status               SMALLINT NOT NULL DEFAULT 1, -- 1=启用 2=手动停用 3=自动停用
     priority             INT NOT NULL DEFAULT 0,      -- 高优先级层耗尽才降层
@@ -570,7 +584,7 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 `strict_group_isolation`（组可见性两态）、`ssrf_policy`（渠道 api_base 校验策略）、
 `mcp_write_enabled`（MCP 写工具总闸）、`single_user_release_ack`（单用户模式生产确认）、
 `turnstile_secret`、`turnstile_verify_url`（siteverify 地址覆写，缺省 Cloudflare 官方端点；内网出口代理或自动化用例的 mock 用）、`oauth_providers`、`payment_epay` / `payment_stripe`、
-`model_rate_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（WS 连接租约上限，缺省 4）、
+`model_rpm_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（WS 连接租约上限，缺省 4）、
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
 `notify_channels`（通知多路配置数组）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
 `critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key，0=关）、
@@ -579,6 +593,12 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 host 空=未配置；含密码故列表接口只回"已配置"，IMPLEMENTATION §11.27）、
 `surge_inflight_threshold`（surge 规则的负载判定阈值：单 gateway 进程在途计费请求数 ≥ 该值即
 `surge_active`，缺省 0=永不触发；仅当价簿含启用的 surge 规则时才读取该设置）、
+`margin_breaker`（负毛利自动熔断，IMPLEMENTATION §11.34：`{enabled, window_hours, min_requests,
+min_cost_micro, margin_bp, cooldown_secs, lift_secs}`，缺省关；worker 读取，状态在 Redis `mb:blocks`）、
+`playground_presets`（站点聊天预设数组 `[{name, model, system, temperature, max_tokens, top_p}]`，
+公开只读 `GET /api/playground/presets` 白名单收口，IMPLEMENTATION §11.39）、
+`web_session_limit`（每用户同时有效的 web 会话数上限，整数，缺省 0=不限；登录 / OAuth 回调建会话后超限即踢
+最早的会话，刚建的这条永不被踢，IMPLEMENTATION §11.37）、
 `response_header_whitelist`（backlog 未启用）。
 
 ### 1.8 M4 预留（概要，实施时出迁移）
@@ -603,10 +623,12 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `rl:{<uid>}:k:<key_id>:rpm:<分钟桶>` / `:tpm:<分钟桶>` | STRING 计数 | 120s | key 级限速（限额四件套配置在 api_keys 行，键按 key 维度，多把 key 互不挤兑）。固定分钟窗计数，GCRA 滑窗为升级项；用户级汇总限速随 Team 层（M4）加第二层键 |
 | `rl:{<uid>}:k:<key_id>:rpd:<yyyymmdd>` | STRING | 48h | key 级每日请求数（RPD） |
 | `rl:{<uid>}:tokd:<key_id>:<yyyymmdd>` | STRING | 48h | key 日 token 上限计数 |
-| `rl:{<uid>}:m:<model>:rpm` | GCRA state | 自然过期 | 用户×模型级限流（可选启用，机制复用） |
+| `rl:{<uid>}:m:<model>:rpm:<分钟桶>` | STRING 计数 | 120s | 用户×模型级 RPM（settings.model_rpm_limits；INCR 固定分钟窗，尽力语义，Redis 故障放行） |
+| `rl:{<uid>}:g:<group>:rpm:<分钟桶>` / `:rph:<小时桶>` | STRING 计数 | 120s / 7200s | 分组级限流（`price_groups.rpm_limit / rph_limit`，IMPLEMENTATION §11.32）：分组内**每用户**固定窗计数，全部计费端点在 reserve 前检查；超限 429 `rate_limited` param=group_rpm / group_rph；限额随鉴权缓存下发，未配置零往返 |
 | `ws:lease:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 6h 兜底 | Realtime WS per-key 连接租约：member=连接 id（request_id），score=到期毫秒；准入 Lua 先 ZREMRANGEBYSCORE 清过期再 ZCARD 比上限（settings.realtime_max_conns_per_key 缺省 4），崩溃连接不续期自然滚出（§14.4） |
 | `video:task:{<uid>}:<task_id>` | STRING | 48h | videos 异步任务 → channel_key_id 映射（轮询/下载回源锚点；键含 user_id 天然租户隔离，他人任务 404） |
-| `notify:mute:<idx>:<event>` | STRING | =min_interval_secs | 通知频率闸（SET NX；worker 事件 drift/channel_cooldown/balance_low → settings.notify_channels webhook / email 分发，#1790-8） |
+| `notify:mute:<idx>:<event>` | STRING | =min_interval_secs | 通知频率闸（SET NX；worker 事件 drift/channel_cooldown/balance_low/margin_breaker → settings.notify_channels webhook / email 分发，#1790-8） |
+| `mb:blocks` | HASH | 永久（字段按 `until` 由 worker 剪除） | 负毛利熔断状态（IMPLEMENTATION §11.34）：字段 `<group>\|<channel_id>` → JSON `{state: blocked\|lifted, since, until, requests, amount_micro, cost_micro, margin_bp}`。worker 每 5 分钟按 settings.margin_breaker 评估 CH mv_analysis_hour 写入；gateway 10s 进程缓存一次 HGETALL，`blocked` 且未到 `until` 的对从候选里摘掉（Redis 故障 = 不熔）；`lifted` 为管理员解除，期间评估器跳过该对；关闭功能时整键删除 |
 | `verify:email:<email>` | STRING | 10min | 注册邮箱验证码（6 位数字；重发覆盖旧码；注册对上即 DEL，一次性。IMPLEMENTATION §11.27） |
 | `verify:email:cd:<email>` | STRING | 60s | 同一邮箱验证码重发冷却（SET NX） |
 | `pwreset:<sha256(token)>` | STRING | 30min | 找回密码 token → user_id（明文 token 只出现在邮件链接里；重设成功即 DEL） |
@@ -622,8 +644,8 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `auth:key:<sha256>` | STRING(JSON) | 60s | 鉴权缓存（key 元数据+限额+可见组）。值内嵌写入时版本号 |
 | `auth:ver` | STRING | 永久 | 鉴权缓存全局版本：console 角色/分组变更 INCR 即 O(1) 跨进程失效；key 级精确失效走单键 DEL |
 | `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面专用；门户/数据面仍 API key 单轨，§6.4） |
-| `sess:idx:<user_id>` | SET | 7d 滑动 | 该用户全部 web 会话 sid（列举 / 一键吊销；成员过期靠读时 SREM） |
-| `sess:meta:<sid>` | HASH | 7d 滑动 | 会话展示元数据：`ip` / `ua` / `created_at`（unix 秒） |
+| `sess:idx:<user_id>` | SET | 7d 滑动 | 该用户全部 web 会话 sid（列举 / 一键吊销 / 会话数上限裁剪；成员过期靠读时 SREM） |
+| `sess:meta:<sid>` | HASH | 7d 滑动 | 会话展示元数据：`ip` / `ua` / `created_at`（unix 秒，展示）/ `created_ms`（unix 毫秒，会话上限裁剪的排序键——同秒多次登录要分先后） |
 | `oauth:state:<token>` | STRING | 10min | OAuth authorization-code 流 CSRF state（一次性，校验即删） |
 | `spend:tm:{team}:{member}:<yyyymm>` | STRING | 40d | 团成员月度消费计数（结算后累加，预扣前比较；软实时限额） |
 | `tok:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计 token（`pricing_rules` volume 规则的 token 轴输入）。结算后累加实际 usage 总量、报价前读取，语义与团成员计数同构（软实时：跨月自然滚动、Redis 故障按 0 处理即不打折，宁少算不错算）。**仅当生效 PriceBook 含启用的 volume 规则时才产生读写**（`PriceBook::has_volume_rules`），无此类规则时热路径零额外 Redis 往返 |
@@ -632,8 +654,10 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `pb:data:<epoch>` | STRING(bin) | 保留 2 版 | 【M3 接入】编译后 PriceBook 快照（多副本大表分发 + PG 减负时启用） |
 | `ch:cool:<channel_key_id>` | STRING | =冷却时长 | 状态机冷却镜像 |
 | `ch:test:<channel_id>` | STRING(JSON) | 30d | 最近一次测活结果（ok/latency_ms/http_status/error_code/at），渠道列表"最近测试"列回填（IMPLEMENTATION §11.12）。提示性信息不进 PG，过期即消失 |
+| `ch:balance:<channel_id>` | STRING(JSON) | 30d | 最近一次上游余额查询结果（probe/currency/balance_micro/at，IMPLEMENTATION §11.33），列表 `last_balance` 回填；与 `ch:test` 同一取舍 |
 | `ch:stat:<channel_id>` | HASH | 5min | 错误率/TTFT EMA（打分输入） |
-| `lock:cred:<channel_key_id>` | STRING NX | 30s | 凭证刷新分布式锁 |
+| `lock:cred:<channel_key_id>` | STRING NX | 30s | 凭证刷新分布式锁（§4.3 四步锁第二步；`anthropic_max` / `codex` 的 OAuth 刷新，IMPLEMENTATION §11.38） |
+| `oauth:cred:<state>` | STRING(JSON) | 10min | 渠道 OAuth 登录流程的 PKCE verifier + provider（`POST /admin/channels/oauth/start` 写、`/exchange` 一次性读删） |
 | `kpi:{kpi}:<req\|tok\|amt\|err>:<unix_s>` | STRING 计数 | 360s | 平台实时 KPI 秒桶（四序列各一键/秒；单 Lua 四路累加，读侧 MGET 整窗且跳过累加中的当前秒）。`{kpi}` hash-tag 同槽使跨秒 MGET 在 Cluster 下成立。弃初稿 ZSET 滑窗——按请求存成员的内存 ∝ 流量，秒桶与流量无关（IMPLEMENTATION §11.12）。写入挂 gateway `settle_write` 收口处，只计 log_type 2/5 |
 
 `{<uid>}` 为 Redis Cluster hash-tag：同一用户的 余额/限速/并发 键同槽，保证 Lua 原子性与线性扩容（档位二关键，IMPLEMENTATION §12.1）。

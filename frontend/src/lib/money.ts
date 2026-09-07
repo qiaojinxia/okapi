@@ -13,6 +13,17 @@ export function formatMoney(micro: number, locale: string): string {
   }).format(usd)
 }
 
+/// 上游余额（IMPLEMENTATION §11.33）：不是站内账，货币随上游（DeepSeek / Moonshot 为 CNY），
+/// 后端给的是该货币的 micro 整数。与 formatMoney 分开，站内金额永远是 USD。
+export function formatUpstreamBalance(micro: number, currency: string, locale: string): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(micro / 1_000_000)
+}
+
 /// 目录单价可低于一笔账单的精度，切成 1K 时仍不能把非零价格显示为免费。
 export function formatUnitPrice(micro: number | null, locale: string): string {
   if (micro === null || !Number.isFinite(micro) || micro < 0) return '—'

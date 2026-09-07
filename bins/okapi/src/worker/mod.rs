@@ -9,6 +9,7 @@
 //! chsink（outbox → ClickHouse）已接入（单机直连形态）；NATS 传输在后续批次拆分。
 
 pub mod chsink;
+pub mod margin_breaker;
 pub mod nats_relay;
 pub mod notify;
 
@@ -24,6 +25,8 @@ const COOLDOWN_INTERVAL: Duration = Duration::from_secs(30);
 const BALANCE_EXPIRY_INTERVAL: Duration = Duration::from_mins(5);
 /// 订阅滚窗 / 到期扫描周期（IMPLEMENTATION §11.28：间隙内 reserve 自动落钱包，保守方向）。
 const SUBSCRIPTION_INTERVAL: Duration = Duration::from_mins(1);
+/// 负毛利熔断评估周期（IMPLEMENTATION §11.34；立方体按小时聚合，更密没有意义）。
+const MARGIN_BREAKER_INTERVAL: Duration = Duration::from_mins(5);
 /// 对账每轮抽样的用户数上限。
 const RECONCILE_BATCH: i64 = 1000;
 /// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
@@ -113,7 +116,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let js = connect_jetstream(cfg.nats_url.as_deref()).await;
 
     tracing::info!(
-        "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions）"
+        "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions/margin_breaker）"
     );
 
     let mut chsink_tick = tokio::time::interval(Duration::from_secs(1));
@@ -123,6 +126,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut cooldown = tokio::time::interval(COOLDOWN_INTERVAL);
     let mut balance_expiry = tokio::time::interval(BALANCE_EXPIRY_INTERVAL);
     let mut subscriptions = tokio::time::interval(SUBSCRIPTION_INTERVAL);
+    let mut margin = tokio::time::interval(MARGIN_BREAKER_INTERVAL);
     // 信号监听建一次挂在循环外：SIGTERM 处理器要在整个生命周期内常驻
     let stop = crate::shutdown::signal();
     tokio::pin!(stop);
@@ -200,6 +204,29 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     notifier
                         .dispatch("channel_cooldown", &serde_json::json!({ "count": cooling }))
                         .await;
+                }
+            }
+            _ = margin.tick() => {
+                match margin_breaker::evaluate(&pg, ch.as_ref(), &redis, chrono::Utc::now()).await {
+                    Ok(report) => {
+                        if !report.tripped.is_empty() {
+                            tracing::warn!(
+                                tripped = report.tripped.len(),
+                                blocked_total = report.blocked_total,
+                                "负毛利熔断：分组×渠道已从候选摘除（/admin/margin-breaker 可解除）"
+                            );
+                            notifier
+                                .dispatch(
+                                    "margin_breaker",
+                                    &serde_json::json!({
+                                        "tripped": report.tripped,
+                                        "blocked_total": report.blocked_total,
+                                    }),
+                                )
+                                .await;
+                        }
+                    }
+                    Err(err) => tracing::error!(error = %err, "负毛利熔断评估失败"),
                 }
             }
             _ = balance_expiry.tick() => {

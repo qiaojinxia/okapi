@@ -7,7 +7,7 @@ export interface SettingRow {
 }
 
 export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp'
-export type SettingEditor = 'auto' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth'
+export type SettingEditor = 'auto' | 'number' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
 export const SETTING_GROUPS = [
@@ -36,8 +36,11 @@ const CATALOG: Record<string, SettingMeta> = {
   site_url: { label: 'admin:settingSiteUrl', description: 'admin:settingSiteUrlDesc', group: 'identity', editor: 'auto' },
   registration_policy: { label: 'admin:regTitle', description: 'admin:settingRegistrationDesc', group: 'identity', editor: 'auto', section: 'registration' },
   site_notice: { label: 'admin:noticeTitle', description: 'admin:settingNoticeDesc', group: 'identity', editor: 'auto', section: 'notice' },
+  playground_presets: { label: 'admin:settingPlaygroundPresets', description: 'admin:settingPlaygroundPresetsDesc', group: 'identity', editor: 'auto' },
   model_rpm_limits: { label: 'admin:settingModelLimits', description: 'admin:settingModelLimitsDesc', group: 'traffic', editor: 'limits' },
+  margin_breaker: { label: 'admin:marginBreakerTitle', description: 'admin:settingMarginBreakerDesc', group: 'traffic', editor: 'auto' },
   mcp_write_enabled: { label: 'admin:settingMcpWrite', description: 'admin:settingMcpWriteDesc', group: 'security', editor: 'auto' },
+  web_session_limit: { label: 'admin:settingSessionLimit', description: 'admin:settingSessionLimitDesc', group: 'security', editor: 'number' },
   ssrf_policy: { label: 'admin:settingAccess', description: 'admin:settingAccessDesc', group: 'security', editor: 'ssrf' },
 }
 

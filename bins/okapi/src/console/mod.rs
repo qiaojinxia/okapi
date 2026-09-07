@@ -11,14 +11,20 @@ mod analysis_source;
 pub mod analytics;
 pub mod audit;
 pub mod auth_web;
+pub mod channel_balance;
+pub mod channel_oauth;
+mod cloud_probe;
 pub mod dlq;
 pub mod logs;
 pub mod manage;
+pub mod margin;
 pub mod mcp;
 pub mod oauth;
 pub mod pay;
+pub mod playground;
 pub mod portal;
 pub mod query;
+pub mod ratio_sync;
 pub mod registration;
 pub mod setup;
 pub mod ssrf;
@@ -186,6 +192,16 @@ fn channel_routes() -> ConsoleRouter {
             "/admin/channels/{id}/fetch-models",
             get(admin::fetch_channel_models),
         )
+        .route(
+            "/admin/channels/{id}/balance",
+            get(channel_balance::fetch_channel_balance),
+        )
+        // 订阅 OAuth 登录（§11.38）：start 拿授权链接，exchange 贴回 code 建渠道
+        .route("/admin/channels/oauth/start", post(channel_oauth::start))
+        .route(
+            "/admin/channels/oauth/exchange",
+            post(channel_oauth::exchange),
+        )
         .route("/admin/diagnose/route", get(manage::diagnose_route))
 }
 
@@ -232,6 +248,9 @@ fn pricing_routes() -> ConsoleRouter {
             "/admin/pricing/import-newapi",
             post(admin::import_newapi_pricing),
         )
+        // 上游倍率在线同步（§11.36）：先看差异，再勾选应用
+        .route("/admin/pricing/sync/fetch", post(ratio_sync::fetch))
+        .route("/admin/pricing/sync/apply", post(ratio_sync::apply))
 }
 
 /// 用户与令牌管理 + 权限分级（角色 / 权限点清单）。
@@ -317,6 +336,9 @@ fn ops_routes() -> ConsoleRouter {
         .route("/admin/dlq", get(dlq::list))
         .route("/admin/dlq/requeue", post(dlq::requeue_handler))
         .route("/admin/dlq/discard", post(dlq::discard_handler))
+        // 负毛利熔断（§11.34）：列出 / 解除
+        .route("/admin/margin-breaker", get(margin::list))
+        .route("/admin/margin-breaker/lift", post(margin::lift))
         .route("/admin/cache/flush", post(admin::cache_flush))
         // 审计读取面：谁在何时改了什么（含登录记录）
         .route("/admin/audit", get(audit::list))
@@ -369,6 +391,9 @@ fn portal_routes() -> ConsoleRouter {
         .route("/pay/callback/stripe", post(pay::stripe_webhook))
         .route("/api/pricing", get(portal::public_pricing))
         .route("/api/notice", get(portal::notice))
+        // Playground（§11.39）：同源流式中继到数据面处理器 + 站点预设公开读
+        .route("/api/me/playground/chat", post(playground::chat))
+        .route("/api/playground/presets", get(playground::presets))
 }
 
 /// 认证面：注册 / 登录 / 2FA / OAuth + 初始化向导。

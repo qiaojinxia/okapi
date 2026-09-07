@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, channel_id, status, failed_count, cooldown_until, last_error,\n               weight, max_concurrency\n        FROM channel_keys WHERE channel_id = ANY($1) ORDER BY channel_id, id\n        ",
+  "query": "\n        SELECT id, channel_id, status, failed_count, cooldown_until, last_error,\n               weight, max_concurrency, credential_kind\n        FROM channel_keys WHERE channel_id = ANY($1) ORDER BY channel_id, id\n        ",
   "describe": {
     "columns": [
       {
@@ -90,6 +90,17 @@
             "name": "max_concurrency"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "credential_kind",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_kind"
+          }
+        }
       }
     ],
     "parameters": {
@@ -105,8 +116,9 @@
       true,
       true,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "8800f933013bc90bcf51bd9762d3d21637679e73bc7925b3ed67442873061c76"
+  "hash": "0db8f7b55f011afa79ed80b4c089bbc9111b24d2adaae3fbcce041a3233c871f"
 }

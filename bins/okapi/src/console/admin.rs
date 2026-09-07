@@ -343,15 +343,39 @@ pub async fn list_channels(
     // key 与最近测活结果都只取本页渠道：渠道已切片，附属数据再整表拉就白分页了
     let ids: Vec<i64> = list.page.data.iter().map(|c| c.id).collect();
     let keys = okapi_store::admin::list_channel_keys_for(&state.pg, &ids).await?;
-    // 最近测活结果一次 MGET 回填（Redis 30 天 TTL；没测过 / 已过期 = null）
+    // 订阅 OAuth key（§11.38）：把 access token 到期时间解出来给列表看——只对 credential_kind=1 解密
+    let mut oauth_expiry: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for k in keys
+        .iter()
+        .filter(|k| k.credential_kind == okapi_store::admin::CREDENTIAL_KIND_OAUTH)
+    {
+        if let Ok(Some(plain)) =
+            okapi_store::admin::read_key_credential(&state.pg, k.id, state.master_key.as_deref())
+                .await
+            && let Some(cred) = okapi_store::credential::OAuthCredential::parse(&plain)
+        {
+            oauth_expiry.insert(k.id, cred.expires_at);
+        }
+    }
+    // 最近测活 / 余额查询结果各一次 MGET 回填（Redis 30 天 TTL；没测过 / 已过期 = null）
     let mut last_tests = state.sched.channel_test_get_many(&ids).await;
+    let mut last_balances = state.sched.channel_balance_get_many(&ids).await;
     let data: Vec<Value> = list
         .page
         .data
         .into_iter()
         .map(|c| {
-            let keys: Vec<&okapi_store::admin::ChannelKeyRow> =
-                keys.iter().filter(|k| k.channel_id == c.id).collect();
+            let keys: Vec<Value> = keys
+                .iter()
+                .filter(|k| k.channel_id == c.id)
+                .map(|k| {
+                    let mut v = serde_json::to_value(k).unwrap_or_default();
+                    if let Some(exp) = oauth_expiry.get(&k.id) {
+                        v["credential_expires_at"] = json!(exp);
+                    }
+                    v
+                })
+                .collect();
             json!({
                 "id": c.id, "name": c.name, "provider": c.provider,
                 "api_base": c.api_base, "status": c.status, "priority": c.priority,
@@ -363,6 +387,7 @@ pub async fn list_channels(
                 "data_retention": c.data_retention,
                 "keys": keys,
                 "last_test": last_tests.remove(&c.id),
+                "last_balance": last_balances.remove(&c.id),
             })
         })
         .collect();
@@ -433,12 +458,16 @@ pub async fn set_channel_pools(
 }
 
 /// 已支持的上游协议（docs/database.md channels.provider）。
-const PROVIDERS: [&str; 6] = [
+const PROVIDERS: [&str; 10] = [
     "openai",
     "openai_compat",
     "azure",
     "anthropic",
     "gemini",
+    "bedrock",
+    "vertex",
+    "anthropic_max",
+    "codex",
     "custom_pass",
 ];
 
@@ -491,6 +520,17 @@ fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     {
         return Err(AppError::bad_request().with_param("inject_request_fields"));
     }
+    // aws_region（bedrock SigV4 区域覆写）：`us-east-1` 这类小写字母 / 数字 / 连字符
+    if let Some(v) = s.get("aws_region")
+        && !v.as_str().is_some_and(|r| {
+            !r.is_empty()
+                && r.len() <= 32
+                && r.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+    {
+        return Err(AppError::bad_request().with_param("aws_region"));
+    }
     Ok(())
 }
 
@@ -513,13 +553,20 @@ fn inject_request_fields_ok(value: &Value) -> bool {
         .all(|k| !k.is_empty() && !PROTECTED.contains(&k.as_str()))
 }
 
-/// azure 渠道必须有资源端点：Azure 没有全局缺省地址，缺了只能拼出打向 api.openai.com
-/// 的错误请求。`provider` 是本次生效的协议，`api_base` 是本次生效的地址。
+/// azure / bedrock / vertex 渠道必须有地址：三家都没有全局缺省，缺了只能拼出打向
+/// api.openai.com 的错误请求。vertex 还要求带 `/projects/{p}/locations/{l}`（§11.35）。
+/// `provider` 是本次生效的协议，`api_base` 是本次生效的地址。
 fn ensure_azure_api_base(provider: &str, api_base: Option<&str>) -> Result<(), AppError> {
-    if provider == "azure" && api_base.is_none_or(|b| b.trim().is_empty()) {
-        return Err(AppError::bad_request().with_param("api_base"));
+    let base = api_base.map(str::trim).filter(|b| !b.is_empty());
+    match provider {
+        "azure" | "bedrock" if base.is_none() => {
+            Err(AppError::bad_request().with_param("api_base"))
+        }
+        "vertex" if !base.is_some_and(okapi_providers::vertex::api_base_ok) => {
+            Err(AppError::bad_request().with_param("api_base"))
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -574,18 +621,41 @@ pub async fn update_channel(
     }
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;
-    // 空地址已被上面的 SSRF 校验拦下（scheme 不合法），这里只剩"改成 azure 但本次没给
-    // 地址"一种可能让 azure 渠道没有端点，其余改动不必回源
-    if req.provider.as_deref() == Some("azure") && req.api_base.is_none() {
-        let current = sqlx::query_scalar!(
-            r#"SELECT api_base FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
+    // 空地址已被上面的 SSRF 校验拦下（scheme 不合法）。要地址的三家（azure / bedrock / vertex）：
+    // 本次给了地址就按新协议校验形状；改协议但没给地址则回源看现有地址合不合新协议
+    if let Some(provider) = req
+        .provider
+        .as_deref()
+        .filter(|p| matches!(*p, "azure" | "bedrock" | "vertex"))
+    {
+        if req.api_base.is_some() {
+            ensure_azure_api_base(provider, req.api_base.as_deref())?;
+        } else {
+            let current = sqlx::query_scalar!(
+                r#"SELECT api_base FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
+                id
+            )
+            .fetch_optional(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?
+            .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND))?;
+            ensure_azure_api_base(provider, current.as_deref())?;
+        }
+    } else if req.provider.is_none()
+        && let Some(api_base) = req.api_base.as_deref()
+    {
+        // 只改地址不改协议：vertex 渠道的新地址仍要满足形状（其它协议无形状约束）
+        let provider = sqlx::query_scalar!(
+            r#"SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
             id
         )
         .fetch_optional(&state.pg)
         .await
         .map_err(okapi_store::StoreError::from)?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND))?;
-        ensure_azure_api_base("azure", current.as_deref())?;
+        if provider == "vertex" {
+            ensure_azure_api_base("vertex", Some(api_base))?;
+        }
     }
     for (field, value) in [
         ("model_mapping", req.model_mapping.as_ref()),
@@ -918,9 +988,14 @@ pub struct UpsertGroupReq {
     /// 用户可否在门户为自己的 key 自选此分组（new-api UserUsableGroups 的对应物）。
     #[serde(default)]
     pub self_select: bool,
+    /// 分组内每用户分钟 / 小时请求上限（§11.32）；null / 0 = 不限。
+    #[serde(default)]
+    pub rpm_limit: Option<i32>,
+    #[serde(default)]
+    pub rph_limit: Option<i32>,
 }
 
-/// 定价分组 upsert（改倍率后需 publish 生效）。
+/// 定价分组 upsert（改倍率后需 publish 生效；限额随鉴权缓存失效即时生效）。
 pub async fn upsert_group(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -930,6 +1005,14 @@ pub async fn upsert_group(
     if req.group_ratio.parse::<okapi_pricing::RatioFp>().is_err() {
         return Err(AppError::bad_request().with_param("group_ratio"));
     }
+    // 0 与 null 同义（不限）；负数是笔误而不是"不限"，拒掉让人改
+    let limit = |v: Option<i32>, param: &'static str| match v {
+        Some(n) if n < 0 => Err(AppError::bad_request().with_param(param)),
+        Some(0) | None => Ok(None),
+        Some(n) => Ok(Some(n)),
+    };
+    let per_minute = limit(req.rpm_limit, "rpm_limit")?;
+    let per_hour = limit(req.rph_limit, "rph_limit")?;
     let pool_code = req
         .pool_code
         .as_deref()
@@ -945,10 +1028,12 @@ pub async fn upsert_group(
             description: &req.description,
             pool_code: Some(pool_code),
             self_select: req.self_select,
+            rpm_limit: per_minute,
+            rph_limit: per_hour,
         },
     )
     .await?;
-    // 分组的池变了，绑定该组的 key 鉴权缓存里还是旧池——与改角色同一动作，全量失效
+    // 分组的池 / 限额变了，绑定该组的 key 鉴权缓存里还是旧值——与改角色同一动作，全量失效
     state.sched.auth_flush().await;
     state.invalidate_routing_caches();
     audit(
@@ -956,7 +1041,8 @@ pub async fn upsert_group(
         &actor,
         "pricing.upsert_group",
         &req.group_code,
-        json!({ "group_ratio": req.group_ratio, "pool_code": pool_code, "self_select": req.self_select }),
+        json!({ "group_ratio": req.group_ratio, "pool_code": pool_code, "self_select": req.self_select,
+                "rpm_limit": per_minute, "rph_limit": per_hour }),
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -2680,6 +2766,8 @@ fn probe_request(
 /// 为什么要分两种：聚合型上游的凭证是全站有效的，但模型按套餐授权——只探 `/models`
 /// 会对一个实际返回 403 的模型报 `ok: true`，把运维直接引到错误结论上（实测复现过）。
 /// 模型探测会在上游真实产生一次调用（`max_tokens=1`），是管理员显式动作，不计站内账。
+// 协议 × 探测范围的分派与结果留痕放同一视野
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn probe_channel(
     state: &AppState,
     channel_id: i64,
@@ -2689,7 +2777,7 @@ pub(crate) async fn probe_channel(
         r#"
         SELECT c.provider, c.api_base, c.model_mapping, c.settings,
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
-               ck.credential_ciphertext
+               ck.id AS channel_key_id, ck.credential_ciphertext
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
@@ -2720,6 +2808,22 @@ pub(crate) async fn probe_channel(
             .unwrap_or(m)
             .to_owned()
     });
+
+    // bedrock / vertex 要签名 / 换 token，走各自客户端（§11.35）
+    if super::cloud_probe::is_cloud(&row.provider) {
+        let result = super::cloud_probe::probe(
+            state,
+            &row.provider,
+            base,
+            &row.settings,
+            &credential,
+            row.channel_key_id,
+            upstream_model.as_deref(),
+        )
+        .await;
+        state.sched.channel_test_record(channel_id, &result).await;
+        return Ok(result);
+    }
 
     // 按协议选探测端点与凭证头
     let (auth_header, auth_value) = match row.provider.as_str() {
@@ -2817,6 +2921,17 @@ pub async fn fetch_channel_models(
         okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let base = row.api_base.unwrap_or_default();
     let base = base.trim_end_matches('/');
+    if super::cloud_probe::is_cloud(&row.provider) {
+        let models = super::cloud_probe::fetch_models(
+            &state,
+            &row.provider,
+            base,
+            &row.settings,
+            &credential,
+        )
+        .await?;
+        return Ok(Json(json!({ "channel_id": channel_id, "models": models })));
+    }
     let (url, auth_header, auth_value) = match row.provider.as_str() {
         "anthropic" => (format!("{base}/models"), "x-api-key".to_owned(), credential),
         "gemini" => (

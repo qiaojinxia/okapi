@@ -507,7 +507,7 @@ async fn count_tokens_inner(
     .map_err(AppError::from)?;
     let cand = order_candidates(rows)
         .into_iter()
-        .find(|c| c.provider == "anthropic");
+        .find(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"));
     if let Some(cand) = cand {
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         let body_up = rewrite_model(&body, &probe.model, &upstream_model)
@@ -517,11 +517,27 @@ async fn count_tokens_inner(
             .clone()
             .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE.to_owned());
         let outbound = super::openai_dialect::outbound(&cand);
-        match state
-            .anthropic
-            .count_tokens(&base, &cand.credential, body_up, &outbound)
-            .await
-        {
+        let counted = if cand.provider == "anthropic_max" {
+            match super::oauth_cred::fresh_credential(state, &cand).await {
+                Ok(cred) => {
+                    okapi_providers::oauth::anthropic_max::count_tokens(
+                        state.anthropic.http(),
+                        &base,
+                        &cred.access_token,
+                        body_up,
+                        &outbound,
+                    )
+                    .await
+                }
+                Err(err) => Err(err),
+            }
+        } else {
+            state
+                .anthropic
+                .count_tokens(&base, &cand.credential, body_up, &outbound)
+                .await
+        };
+        match counted {
             Ok(up) => {
                 return Ok(axum::Json(
                     serde_json::from_slice::<serde_json::Value>(&up)
@@ -774,6 +790,8 @@ async fn handle_chat(
 
     // 团成员月度限额（§6.1 软实时）
     super::auth::check_member_limit(state, &key).await?;
+    // 分组级 [rpm, rph]（§11.32，限额随鉴权缓存下发）
+    super::auth::check_group_rate(state, &key).await?;
     // 用户×模型 RPM（settings.model_rpm_limits，全局按用户；§11.1）
     let model_limits = state.setting_cached("model_rpm_limits").await;
     if let Some(limit) = model_limits
@@ -1014,9 +1032,15 @@ async fn try_model(
             order_candidates_by_latency(raw.as_ref().clone(), &latency)
         }
     };
-    // Anthropic 入口暂不路由 gemini 渠道（不做 anthropic→openai→gemini 双跳）
+    // Anthropic 入口暂不路由 gemini 方言渠道（不做 anthropic→openai→gemini 双跳；含 vertex 上的 Gemini）
     if bill.ingress == Ingress::Anthropic {
-        candidates.retain(|c| c.provider != "gemini");
+        candidates.retain(|c| {
+            super::dialect::upstream_dialect(&c.provider, c.upstream_model(&bill.model)) != "gemini"
+        });
+    }
+    // Codex 订阅后端只有 Responses 面（§11.38）：其它入口不路由，否则 chat 形状会打到 /responses 上 400
+    if bill.ingress != Ingress::Responses {
+        candidates.retain(|c| c.provider != "codex");
     }
     // 能力感知路由（§3.8）：渠道显式声明 false 才排除
     let denies = |c: &okapi_store::ChannelCandidate, cap: &str| {
@@ -1047,9 +1071,17 @@ async fn try_model(
             ));
         }
     }
+    // 负毛利熔断（§11.34）：该分组打这条渠道在亏钱，摘掉让同池其它渠道承接
+    let margin_removed = bill
+        .state
+        .retain_margin_ok(&bill.group, &mut candidates)
+        .await;
     if candidates.is_empty() {
         return Err(ForwardFailure::app(
-            AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL),
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                super::state::no_candidates_code(margin_removed),
+            ),
             0,
             None,
         ));
@@ -1130,8 +1162,11 @@ async fn try_model(
         };
         let base = cand.api_base.clone().unwrap_or_else(|| {
             match cand.provider.as_str() {
-                "anthropic" => DEFAULT_ANTHROPIC_BASE,
+                "anthropic" | "anthropic_max" => DEFAULT_ANTHROPIC_BASE,
                 "gemini" => DEFAULT_GEMINI_BASE,
+                "codex" => okapi_providers::oauth::codex::DEFAULT_API_BASE,
+                // bedrock / vertex 没有可猜的缺省：留空，传输层按构造错误拒绝（与 azure 同理）
+                "bedrock" | "vertex" => "",
                 _ => DEFAULT_OPENAI_BASE,
             }
             .to_owned()
@@ -1320,7 +1355,9 @@ fn build_upstream_body(
     upstream_model: &str,
 ) -> Result<Bytes, UpstreamError> {
     let native_responses = bill.ingress == Ingress::Responses && cand.responses_native;
-    let built = match (bill.ingress, cand.provider.as_str()) {
+    // 按出向方言分派（bedrock = anthropic 方言、vertex 按模型），传输层差异在 dialect.rs
+    let dialect = super::dialect::upstream_dialect(&cand.provider, upstream_model);
+    let built = match (bill.ingress, dialect) {
         // Responses 同方言：只改 model，其余字段（previous_response_id/store/include/
         // 内置工具/reasoning）一律原样——这正是直转相对降级链的全部价值。
         // usage 随 response.completed 必带，无需 stream_options。
@@ -1347,19 +1384,16 @@ fn build_upstream_body(
                 }
             }),
         (Ingress::Anthropic, _) => conv_a2o::request_anthropic_to_openai(body, upstream_model),
-        (Ingress::Responses, provider) => {
-            conv_resp::request_responses_to_chat(body, upstream_model).and_then(|chat_body| {
-                match provider {
-                    "anthropic" => convert::request_openai_to_anthropic(
-                        &chat_body,
-                        upstream_model,
-                        bill.completion_cap,
-                    ),
-                    "gemini" => conv_gem::request_openai_to_gemini(&chat_body),
-                    _ => Ok(chat_body),
-                }
-            })
-        }
+        (Ingress::Responses, dialect) => conv_resp::request_responses_to_chat(body, upstream_model)
+            .and_then(|chat_body| match dialect {
+                "anthropic" => convert::request_openai_to_anthropic(
+                    &chat_body,
+                    upstream_model,
+                    bill.completion_cap,
+                ),
+                "gemini" => conv_gem::request_openai_to_gemini(&chat_body),
+                _ => Ok(chat_body),
+            }),
         // Gemini 同方言：原样透传（模型名在 URL 上，body 里没有可重写的 model）
         (Ingress::Gemini, "gemini") => Ok(body.clone()),
         // Gemini 客户端 + anthropic 上游：gemini→chat→anthropic 两跳
@@ -1378,7 +1412,7 @@ fn build_upstream_body(
     }?;
     match bill.directive {
         Some(d) if native_responses => reasoning::apply_responses(&built, d),
-        Some(d) => match cand.provider.as_str() {
+        Some(d) => match dialect {
             "anthropic" => reasoning::apply_anthropic(&built, d),
             "gemini" => reasoning::apply_gemini(&built, d),
             _ => reasoning::apply_openai(&built, d),
@@ -1530,7 +1564,23 @@ async fn dispatch_chat(
     };
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
     let outbound = super::openai_dialect::outbound(cand);
-    let resp = match (bill.ingress, cand.provider.as_str()) {
+    // 方言臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
+    let dialect = super::dialect::upstream_dialect(&cand.provider, &upstream_model);
+    let resp = match (bill.ingress, dialect) {
+        // Codex 订阅后端（§11.38）：只有 Responses 面，候选过滤已保证只有 Responses 入口到这里
+        (Ingress::Responses, _) if cand.provider == "codex" => {
+            let cred = super::oauth_cred::fresh_credential(&bill.state, cand).await?;
+            okapi_providers::oauth::codex::responses(
+                bill.state.upstream.http(),
+                base,
+                &cred.access_token,
+                cred.account_id.as_deref(),
+                body,
+                stream,
+                &outbound,
+            )
+            .await
+        }
         // Responses 客户端 + 说 Responses 方言的上游：直转，事件原样透出
         (Ingress::Responses, _) if native_responses => {
             bill.state
@@ -1538,19 +1588,11 @@ async fn dispatch_chat(
                 .responses(base, &cand.credential, body, stream, &outbound)
                 .await
         }
-        // Gemini 客户端 + gemini 上游：透传 + 计费元数据扫描
+        // Gemini 客户端 + gemini 方言上游：透传 + 计费元数据扫描
         (Ingress::Gemini, "gemini") => {
             match bill
                 .state
-                .gemini
-                .generate(
-                    base,
-                    &cand.credential,
-                    &upstream_model,
-                    body,
-                    stream,
-                    &outbound,
-                )
+                .generate_via(cand, base, &upstream_model, body, stream)
                 .await?
             {
                 okapi_providers::gemini::GeminiResponse::Json {
@@ -1580,62 +1622,42 @@ async fn dispatch_chat(
                 }
             }
         }
-        // Gemini 客户端 + anthropic 上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
-        (Ingress::Gemini, "anthropic") => convert::chat(
-            &bill.state.anthropic,
-            base,
-            &cand.credential,
-            body,
-            &upstream_model,
-            stream,
-            &outbound,
-        )
-        .await
-        .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
+        // Gemini 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状，再回 Gemini 形状
+        (Ingress::Gemini, "anthropic") => bill
+            .state
+            .messages_via(cand, base, &upstream_model, body, stream)
+            .await
+            .and_then(|resp| convert::wrap_messages(resp, &upstream_model))
+            .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // Gemini 客户端 + OpenAI(兼容 / Azure) 上游：chat 形状 → Gemini 形状
         (Ingress::Gemini, _) => bill
             .state
             .openai_chat(cand, &upstream_model, body, stream)
             .await
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
-        // OpenAI/Responses 客户端 + gemini 上游：providers 内转回 OpenAI 形状
-        (Ingress::OpenAi | Ingress::Responses, "gemini") => {
-            conv_gem::chat(
-                &bill.state.gemini,
-                base,
-                &cand.credential,
-                body,
-                &upstream_model,
-                stream,
-                &outbound,
-            )
+        // OpenAI/Responses 客户端 + gemini 方言上游：providers 内转回 OpenAI 形状
+        (Ingress::OpenAi | Ingress::Responses, "gemini") => bill
+            .state
+            .generate_via(cand, base, &upstream_model, body, stream)
             .await
-        }
-        // OpenAI/Responses 客户端 + anthropic 上游：providers 内转回 OpenAI 形状
-        (Ingress::OpenAi | Ingress::Responses, "anthropic") => {
-            convert::chat(
-                &bill.state.anthropic,
-                base,
-                &cand.credential,
-                body,
-                &upstream_model,
-                stream,
-                &outbound,
-            )
+            .and_then(|resp| conv_gem::wrap_generate(resp, &upstream_model)),
+        // OpenAI/Responses 客户端 + anthropic 方言上游：providers 内转回 OpenAI 形状
+        (Ingress::OpenAi | Ingress::Responses, "anthropic") => bill
+            .state
+            .messages_via(cand, base, &upstream_model, body, stream)
             .await
-        }
+            .and_then(|resp| convert::wrap_messages(resp, &upstream_model)),
         // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
         (Ingress::OpenAi | Ingress::Responses, _) => {
             bill.state
                 .openai_chat(cand, &upstream_model, body, stream)
                 .await
         }
-        // Anthropic 客户端 + anthropic 上游：透传 + 计费元数据扫描
+        // Anthropic 客户端 + anthropic 方言上游：透传 + 计费元数据扫描
         (Ingress::Anthropic, "anthropic") => {
             match bill
                 .state
-                .anthropic
-                .messages(base, &cand.credential, body, stream, &outbound)
+                .messages_via(cand, base, &upstream_model, body, stream)
                 .await?
             {
                 okapi_providers::anthropic::MessagesResponse::Json {
@@ -1896,6 +1918,10 @@ fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) ->
     match (ingress, cand.provider.as_str()) {
         (Ingress::Responses, _) if cand.responses_native => "/v1/responses",
         (_, "anthropic") => "/v1/messages",
+        (_, "bedrock") if stream => "/model/{model}/invoke-with-response-stream",
+        (_, "bedrock") => "/model/{model}/invoke",
+        (_, "vertex") if stream => "/publishers/{publisher}/models/{model}:stream",
+        (_, "vertex") => "/publishers/{publisher}/models/{model}:predict",
         (Ingress::OpenAi | Ingress::Responses | Ingress::Gemini, "gemini") if stream => {
             "/v1beta/models/{model}:streamGenerateContent"
         }

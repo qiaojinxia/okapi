@@ -130,6 +130,8 @@ mod tests {
             inject_request_fields: serde_json::Map::new(),
             responses_native: true,
             api_version: None,
+            aws_region: None,
+            oauth_token_url: None,
             proxy_url: None,
             extra_headers: Vec::new(),
             capabilities: serde_json::json!({}),

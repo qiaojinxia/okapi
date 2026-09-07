@@ -245,7 +245,10 @@ pub struct WebSessionRow {
     pub sid: String,
     pub ip: Option<String>,
     pub ua: Option<String>,
+    /// 建立时刻（unix 秒，展示用）。
     pub created_at: i64,
+    /// 建立时刻（unix 毫秒，排序用）：同秒内多次登录要分得出先后，会话上限才能踢对人。
+    pub created_ms: i64,
 }
 
 impl SchedulerRedis {
@@ -276,11 +279,14 @@ impl SchedulerRedis {
         }
         let _: Result<i64, _> = self.client.sadd(&idx, sid).await;
         let _: Result<bool, _> = self.client.expire(&idx, WEB_SESSION_TTL_SECS, None).await;
-        let created = chrono::Utc::now().timestamp().to_string();
+        let now = chrono::Utc::now();
+        let created = now.timestamp().to_string();
+        let created_ms = now.timestamp_millis().to_string();
         let fields = [
             ("ip", ip.unwrap_or("")),
             ("ua", ua.unwrap_or("")),
             ("created_at", created.as_str()),
+            ("created_ms", created_ms.as_str()),
         ];
         let _: Result<(), _> = self.client.hset(&meta, fields).await;
         let _: Result<bool, _> = self.client.expire(&meta, WEB_SESSION_TTL_SECS, None).await;
@@ -322,14 +328,20 @@ impl SchedulerRedis {
                         .hgetall(format!("sess:meta:{sid}"))
                         .await
                         .unwrap_or_default();
+                    let created_at = meta
+                        .get("created_at")
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(0);
                     out.push(WebSessionRow {
                         sid,
                         ip: meta.get("ip").filter(|s| !s.is_empty()).cloned(),
                         ua: meta.get("ua").filter(|s| !s.is_empty()).cloned(),
-                        created_at: meta
-                            .get("created_at")
+                        created_at,
+                        // 旧会话没有毫秒字段：按秒补齐（同秒并列时靠 keep 钉住新会话即可）
+                        created_ms: meta
+                            .get("created_ms")
                             .and_then(|s| s.parse::<i64>().ok())
-                            .unwrap_or(0),
+                            .unwrap_or(created_at.saturating_mul(1000)),
                     });
                 }
                 _ => {
@@ -337,8 +349,30 @@ impl SchedulerRedis {
                 }
             }
         }
-        out.sort_by_key(|row| std::cmp::Reverse(row.created_at));
+        out.sort_by_key(|row| std::cmp::Reverse(row.created_ms));
         out
+    }
+
+    /// 会话数上限裁剪（§11.37）：按建立时刻（毫秒）降序保留前 `limit` 条，其余删掉；
+    /// `keep` 是刚建立的那条，钉在首位永不被踢（毫秒也可能并列，不靠排序保证）。
+    /// 返回被踢的 sid 数；`limit <= 0` = 不限。
+    pub async fn web_session_trim(&self, user_id: i64, limit: i64, keep: &str) -> usize {
+        let Ok(limit) = usize::try_from(limit) else {
+            return 0;
+        };
+        if limit == 0 {
+            return 0;
+        }
+        let mut rows = self.web_session_list(user_id).await;
+        if let Some(pos) = rows.iter().position(|r| r.sid == keep) {
+            let current = rows.remove(pos);
+            rows.insert(0, current);
+        }
+        let evicted: Vec<WebSessionRow> = rows.drain(limit.min(rows.len())..).collect();
+        for row in &evicted {
+            self.web_session_del(&row.sid).await;
+        }
+        evicted.len()
     }
 
     /// 吊销一条：必须属于该用户。
@@ -365,41 +399,102 @@ impl SchedulerRedis {
         let _: Result<i64, _> = self.client.del(&idx).await;
     }
 
-    /// 用户×模型 RPM（§11.1 new-api 吸收；INCR 尽力语义，Redis 故障放行）。
-    pub async fn model_rate_ok(&self, user_id: i64, model: &str, limit: i64) -> bool {
-        let minute = chrono::Utc::now().timestamp() / 60;
-        let key = format!("rl:{{{user_id}}}:m:{model}:rpm:{minute}");
-        let count: i64 = match self.client.incr(&key).await {
+    /// 固定窗计数闸：INCR 后比上限（先计后判的"尽力语义"）；首次写入挂 TTL。
+    /// Redis 故障放行——保护性限流宁可短暂失守，也不因缓存抖动打挂全站（账本才 fail-closed）。
+    async fn fixed_window_ok(&self, key: &str, ttl_secs: i64, limit: i64) -> bool {
+        let count: i64 = match self.client.incr(key).await {
             Ok(n) => n,
             Err(err) => {
-                tracing::debug!(error = %err, "model_rate incr 失败（放行）");
+                tracing::debug!(error = %err, key, "固定窗计数 incr 失败（放行）");
                 return true;
             }
         };
         if count == 1 {
-            let _: Result<bool, _> = self.client.expire(&key, 120, None).await;
+            let _: Result<bool, _> = self.client.expire(key, ttl_secs, None).await;
         }
         count <= limit
+    }
+
+    /// 用户×模型 RPM（§11.1 new-api 吸收）。
+    pub async fn model_rate_ok(&self, user_id: i64, model: &str, limit: i64) -> bool {
+        let minute = chrono::Utc::now().timestamp() / 60;
+        let key = format!("rl:{{{user_id}}}:m:{model}:rpm:{minute}");
+        self.fixed_window_ok(&key, 120, limit).await
+    }
+
+    /// 分组级限流（§11.32）：分组内每用户的分钟 / 小时固定窗。
+    /// 返回超限的那一轴（`group_rpm` / `group_rph`）供错误 param；None = 放行。
+    /// 未配置的轴不产生 Redis 往返。
+    pub async fn group_rate_check(
+        &self,
+        user_id: i64,
+        group: &str,
+        rpm: Option<i64>,
+        rph: Option<i64>,
+    ) -> Option<&'static str> {
+        let now = chrono::Utc::now().timestamp();
+        if let Some(limit) = rpm {
+            let key = format!("rl:{{{user_id}}}:g:{group}:rpm:{}", now / 60);
+            if !self.fixed_window_ok(&key, 120, limit).await {
+                return Some("group_rpm");
+            }
+        }
+        if let Some(limit) = rph {
+            let key = format!("rl:{{{user_id}}}:g:{group}:rph:{}", now / 3600);
+            if !self.fixed_window_ok(&key, 7200, limit).await {
+                return Some("group_rph");
+            }
+        }
+        None
     }
 
     /// 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。
     ///
     /// 超限返回 false，调用方把该 key 摘出候选而不是拒绝整个请求——同渠道其它 key
-    /// 仍可承接。Redis 故障时放行：宁可短暂超上游限速，也不因缓存抖动打挂全站。
+    /// 仍可承接。
     pub async fn channel_key_rate_ok(&self, channel_key_id: i64, limit: i64) -> bool {
         let minute = chrono::Utc::now().timestamp() / 60;
         let key = format!("rpm:ck:{channel_key_id}:{minute}");
-        let count: i64 = match self.client.incr(&key).await {
-            Ok(n) => n,
-            Err(err) => {
-                tracing::debug!(error = %err, "channel_key_rate incr 失败（放行）");
-                return true;
-            }
-        };
-        if count == 1 {
-            let _: Result<bool, _> = self.client.expire(&key, 120, None).await;
+        self.fixed_window_ok(&key, 120, limit).await
+    }
+
+    /// 凭证刷新分布式锁（§4.3 四步锁第二步；`lock:cred:<key_id>`，30s 自愈）。
+    /// 返回 true = 本副本拿到锁；Redis 故障也按拿到处理——宁可多刷一次，不能把请求卡住。
+    pub async fn cred_lock_acquire(&self, channel_key_id: i64) -> bool {
+        let set: Result<Option<String>, _> = self
+            .client
+            .set(
+                format!("lock:cred:{channel_key_id}"),
+                "1",
+                Some(Expiration::EX(30)),
+                Some(SetOptions::NX),
+                false,
+            )
+            .await;
+        match set {
+            Ok(reply) => reply.is_some(),
+            Err(_) => true,
         }
-        count <= limit
+    }
+
+    pub async fn cred_lock_release(&self, channel_key_id: i64) {
+        let _: Result<i64, _> = self.client.del(format!("lock:cred:{channel_key_id}")).await;
+    }
+
+    /// 负毛利熔断表整读（§11.34，`mb:blocks`）；Redis 故障 None = 调用方按不熔处理。
+    pub async fn margin_blocks(
+        &self,
+    ) -> Option<std::collections::HashMap<String, crate::margin::BlockEntry>> {
+        crate::margin::load_blocks(&self.client).await
+    }
+
+    /// 写一条熔断表条目（管理面解除 / 测试用）。
+    pub async fn margin_block_set(
+        &self,
+        field: &str,
+        entry: &crate::margin::BlockEntry,
+    ) -> Result<(), fred::error::Error> {
+        crate::margin::set_block(&self.client, field, entry).await
     }
 
     /// 渠道 key 当日累计消费（micro）。读不到按 0 处理 = 不拦。
@@ -663,6 +758,30 @@ impl SchedulerRedis {
         deleted.is_ok_and(|n| n == 1)
     }
 
+    /// 渠道 OAuth 登录流程的 PKCE 状态（`oauth:cred:<state>`，§11.38）。返回 false = Redis 故障。
+    pub async fn oauth_cred_state_set(&self, state: &str, payload: &str, ttl_secs: i64) -> bool {
+        let result: Result<(), _> = self
+            .client
+            .set(
+                format!("oauth:cred:{state}"),
+                payload,
+                Some(Expiration::EX(ttl_secs)),
+                None,
+                false,
+            )
+            .await;
+        result.is_ok()
+    }
+
+    /// 取出并销毁（GETDEL）；不存在 / 已用 / 过期 = None。
+    pub async fn oauth_cred_state_take(&self, state: &str) -> Option<String> {
+        self.client
+            .getdel::<Option<String>, _>(format!("oauth:cred:{state}"))
+            .await
+            .ok()
+            .flatten()
+    }
+
     // ---- 邮箱验证码 / 找回密码（IMPLEMENTATION §11.27）----
 
     /// 同一邮箱重发冷却：NX 抢到 = 允许发送。Redis 故障放行（限流是尽力语义）。
@@ -828,7 +947,18 @@ impl SchedulerRedis {
     /// 提示性信息不进 PG：new-api 把 response_time/test_time 存在 channels 表上，
     /// 我们用 Redis——它天然会过期，列表上不会挂着半年前的"200ms"误导人。
     pub async fn channel_test_record(&self, channel_id: i64, result: &serde_json::Value) {
-        let key = format!("ch:test:{channel_id}");
+        self.channel_note_record("ch:test", channel_id, result)
+            .await;
+    }
+
+    /// 记录渠道最近一次上游余额查询结果（`ch:balance:<channel_id>`，30 天 TTL，§11.33）。
+    pub async fn channel_balance_record(&self, channel_id: i64, result: &serde_json::Value) {
+        self.channel_note_record("ch:balance", channel_id, result)
+            .await;
+    }
+
+    async fn channel_note_record(&self, prefix: &str, channel_id: i64, result: &serde_json::Value) {
+        let key = format!("{prefix}:{channel_id}");
         let value = result.to_string();
         if let Err(err) = self
             .client
@@ -841,7 +971,7 @@ impl SchedulerRedis {
             )
             .await
         {
-            tracing::debug!(error = %err, "channel_test_record 失败（忽略）");
+            tracing::debug!(error = %err, key, "渠道留痕写入失败（忽略）");
         }
     }
 
@@ -850,12 +980,28 @@ impl SchedulerRedis {
         &self,
         channel_ids: &[i64],
     ) -> std::collections::HashMap<i64, serde_json::Value> {
+        self.channel_note_get_many("ch:test", channel_ids).await
+    }
+
+    /// 批量读最近余额查询结果（同 MGET 回填）。
+    pub async fn channel_balance_get_many(
+        &self,
+        channel_ids: &[i64],
+    ) -> std::collections::HashMap<i64, serde_json::Value> {
+        self.channel_note_get_many("ch:balance", channel_ids).await
+    }
+
+    async fn channel_note_get_many(
+        &self,
+        prefix: &str,
+        channel_ids: &[i64],
+    ) -> std::collections::HashMap<i64, serde_json::Value> {
         if channel_ids.is_empty() {
             return std::collections::HashMap::new();
         }
         let keys: Vec<String> = channel_ids
             .iter()
-            .map(|id| format!("ch:test:{id}"))
+            .map(|id| format!("{prefix}:{id}"))
             .collect();
         let values: Vec<Option<String>> = self.client.mget(keys).await.unwrap_or_default();
         channel_ids

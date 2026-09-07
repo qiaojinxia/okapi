@@ -39,6 +39,7 @@ import { Route as PortalKeysRouteImport } from './routes/portal.keys'
 import { Route as PortalLedgerRouteImport } from './routes/portal.ledger'
 import { Route as PortalLogsRouteImport } from './routes/portal.logs'
 import { Route as PortalPlansRouteImport } from './routes/portal.plans'
+import { Route as PortalPlaygroundRouteImport } from './routes/portal.playground'
 import { Route as PortalProfileRouteImport } from './routes/portal.profile'
 import { Route as PortalSecurityRouteImport } from './routes/portal.security'
 import { Route as PortalTeamsRouteImport } from './routes/portal.teams'
@@ -194,6 +195,11 @@ const PortalPlansRoute = PortalPlansRouteImport.update({
   path: '/plans',
   getParentRoute: () => PortalRoute,
 } as any)
+const PortalPlaygroundRoute = PortalPlaygroundRouteImport.update({
+  id: '/playground',
+  path: '/playground',
+  getParentRoute: () => PortalRoute,
+} as any)
 const PortalProfileRoute = PortalProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
@@ -244,6 +250,7 @@ export interface FileRoutesByFullPath {
   '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
   '/portal/plans': typeof PortalPlansRoute
+  '/portal/playground': typeof PortalPlaygroundRoute
   '/portal/profile': typeof PortalProfileRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -278,6 +285,7 @@ export interface FileRoutesByTo {
   '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
   '/portal/plans': typeof PortalPlansRoute
+  '/portal/playground': typeof PortalPlaygroundRoute
   '/portal/profile': typeof PortalProfileRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -315,6 +323,7 @@ export interface FileRoutesById {
   '/portal/ledger': typeof PortalLedgerRoute
   '/portal/logs': typeof PortalLogsRoute
   '/portal/plans': typeof PortalPlansRoute
+  '/portal/playground': typeof PortalPlaygroundRoute
   '/portal/profile': typeof PortalProfileRoute
   '/portal/security': typeof PortalSecurityRoute
   '/portal/teams': typeof PortalTeamsRoute
@@ -353,6 +362,7 @@ export interface FileRouteTypes {
     | '/portal/ledger'
     | '/portal/logs'
     | '/portal/plans'
+    | '/portal/playground'
     | '/portal/profile'
     | '/portal/security'
     | '/portal/teams'
@@ -387,6 +397,7 @@ export interface FileRouteTypes {
     | '/portal/ledger'
     | '/portal/logs'
     | '/portal/plans'
+    | '/portal/playground'
     | '/portal/profile'
     | '/portal/security'
     | '/portal/teams'
@@ -423,6 +434,7 @@ export interface FileRouteTypes {
     | '/portal/ledger'
     | '/portal/logs'
     | '/portal/plans'
+    | '/portal/playground'
     | '/portal/profile'
     | '/portal/security'
     | '/portal/teams'
@@ -652,6 +664,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PortalPlansRouteImport
       parentRoute: typeof PortalRoute
     }
+    '/portal/playground': {
+      id: '/portal/playground'
+      path: '/playground'
+      fullPath: '/portal/playground'
+      preLoaderRoute: typeof PortalPlaygroundRouteImport
+      parentRoute: typeof PortalRoute
+    }
     '/portal/profile': {
       id: '/portal/profile'
       path: '/profile'
@@ -733,6 +752,7 @@ interface PortalRouteChildren {
   PortalLedgerRoute: typeof PortalLedgerRoute
   PortalLogsRoute: typeof PortalLogsRoute
   PortalPlansRoute: typeof PortalPlansRoute
+  PortalPlaygroundRoute: typeof PortalPlaygroundRoute
   PortalProfileRoute: typeof PortalProfileRoute
   PortalSecurityRoute: typeof PortalSecurityRoute
   PortalTeamsRoute: typeof PortalTeamsRoute
@@ -746,6 +766,7 @@ const PortalRouteChildren: PortalRouteChildren = {
   PortalLedgerRoute: PortalLedgerRoute,
   PortalLogsRoute: PortalLogsRoute,
   PortalPlansRoute: PortalPlansRoute,
+  PortalPlaygroundRoute: PortalPlaygroundRoute,
   PortalProfileRoute: PortalProfileRoute,
   PortalSecurityRoute: PortalSecurityRoute,
   PortalTeamsRoute: PortalTeamsRoute,

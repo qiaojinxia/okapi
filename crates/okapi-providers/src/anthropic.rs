@@ -14,7 +14,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
-const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// 原生 Anthropic SSE 事件（event 行 + data 行原文）。
 #[derive(Debug, Clone)]
@@ -49,6 +49,12 @@ impl AnthropicUpstream {
         })
     }
 
+    /// 共享连接池（`anthropic_max` 订阅路径复用，§11.38）。
+    #[must_use]
+    pub fn http(&self) -> &crate::http::HttpPool {
+        &self.http
+    }
+
     /// 转发 /v1/messages。`body` 已是 Anthropic 协议 JSON（含 stream 字段）。
     pub async fn messages(
         &self,
@@ -59,59 +65,18 @@ impl AnthropicUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
         let url = format!("{}/messages", api_base.trim_end_matches('/'));
-        let mut req = self
-            .http
-            .post(outbound, url)?
-            .header("x-api-key", credential)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec());
-        if !stream {
-            req = req.timeout(NON_STREAM_TIMEOUT);
-        }
-
-        let resp = req.send().await.map_err(|e| classify(&e))?;
-        let status = resp.status().as_u16();
-        let upstream_request_id = resp
-            .headers()
-            .get("request-id")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
-
-        if !(200..300).contains(&status) {
-            let retry_after_secs = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<i64>().ok());
-            let body = resp.bytes().await.unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
-            });
-        }
-
-        if stream {
-            let events = resp.bytes_stream().eventsource().map(|item| match item {
-                Ok(event) => Ok(AnthropicEvent {
-                    event: event.event,
-                    data: event.data,
-                }),
-                Err(e) => Err(UpstreamError::Stream(e.to_string())),
-            });
-            Ok(MessagesResponse::Stream(MessagesStream {
-                upstream_request_id,
-                events: Box::pin(events),
-            }))
-        } else {
-            let body = resp.bytes().await.map_err(|e| classify(&e))?;
-            Ok(MessagesResponse::Json {
-                status,
-                upstream_request_id,
-                body,
-            })
-        }
+        send_messages_at(
+            &self.http,
+            url,
+            &[
+                ("x-api-key", credential),
+                ("anthropic-version", ANTHROPIC_VERSION),
+            ],
+            body,
+            stream,
+            outbound,
+        )
+        .await
     }
 
     /// `POST /v1/messages/count_tokens`：不计费，原样回 `{input_tokens}`。
@@ -144,6 +109,72 @@ impl AnthropicUpstream {
             });
         }
         Ok(body)
+    }
+}
+
+/// 向任意 URL 发一次 Anthropic Messages 形状的请求（鉴权头由调用方给）：直连官方走
+/// `x-api-key`，Vertex rawPredict 走 Bearer（IMPLEMENTATION §11.35）。流式响应按 SSE 切事件，
+/// 非流式整读；两者的错误分类与请求 ID 提取同一份。
+pub async fn send_messages_at(
+    http: &crate::http::HttpPool,
+    url: String,
+    auth_headers: &[(&str, &str)],
+    body: Bytes,
+    stream: bool,
+    outbound: &crate::http::Outbound,
+) -> Result<MessagesResponse, UpstreamError> {
+    let mut req = http
+        .post(outbound, url)?
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_vec());
+    for (name, value) in auth_headers {
+        req = req.header(*name, *value);
+    }
+    if !stream {
+        req = req.timeout(NON_STREAM_TIMEOUT);
+    }
+
+    let resp = req.send().await.map_err(|e| classify(&e))?;
+    let status = resp.status().as_u16();
+    let upstream_request_id = ["request-id", "x-request-id"]
+        .iter()
+        .find_map(|h| resp.headers().get(*h))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    if !(200..300).contains(&status) {
+        let retry_after_secs = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok());
+        let body = resp.bytes().await.unwrap_or_default();
+        return Err(UpstreamError::Status {
+            status,
+            body,
+            retry_after_secs,
+        });
+    }
+
+    if stream {
+        let events = resp.bytes_stream().eventsource().map(|item| match item {
+            Ok(event) => Ok(AnthropicEvent {
+                event: event.event,
+                data: event.data,
+            }),
+            Err(e) => Err(UpstreamError::Stream(e.to_string())),
+        });
+        Ok(MessagesResponse::Stream(MessagesStream {
+            upstream_request_id,
+            events: Box::pin(events),
+        }))
+    } else {
+        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        Ok(MessagesResponse::Json {
+            status,
+            upstream_request_id,
+            body,
+        })
     }
 }
 
@@ -259,7 +290,7 @@ impl MetaScanner {
     }
 }
 
-fn classify(e: &reqwest::Error) -> UpstreamError {
+pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
     if e.is_timeout() {
         UpstreamError::Timeout
     } else if e.is_connect() {

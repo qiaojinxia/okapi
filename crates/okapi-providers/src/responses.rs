@@ -150,75 +150,92 @@ impl OpenAiUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<ChatResponse, UpstreamError> {
         let url = format!("{}/responses", api_base.trim_end_matches('/'));
-        let mut req = self
-            .http
-            .post(outbound, url)?
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {credential}"),
-            )
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec());
-        if !stream {
-            req = req.timeout(NON_STREAM_TIMEOUT);
-        }
+        send_responses_at(
+            &self.http,
+            url,
+            &[("authorization", &format!("Bearer {credential}"))],
+            body,
+            stream,
+            outbound,
+        )
+        .await
+    }
+}
 
-        let resp = req.send().await.map_err(|e| crate::openai::classify(&e))?;
-        let status = resp.status().as_u16();
-        let upstream_request_id = resp
+/// 向任意 URL 发一次 Responses 请求（鉴权 / 附加头由调用方给）：官方走 Bearer，Codex 订阅后端
+/// 还要 `chatgpt-account-id` / `originator`（IMPLEMENTATION §11.38）。事件解析与 usage 提取同一份。
+pub async fn send_responses_at(
+    http: &crate::http::HttpPool,
+    url: String,
+    headers: &[(&str, &str)],
+    body: Bytes,
+    stream: bool,
+    outbound: &crate::http::Outbound,
+) -> Result<ChatResponse, UpstreamError> {
+    let mut req = http
+        .post(outbound, url)?
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_vec());
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    if !stream {
+        req = req.timeout(NON_STREAM_TIMEOUT);
+    }
+
+    let resp = req.send().await.map_err(|e| crate::openai::classify(&e))?;
+    let status = resp.status().as_u16();
+    let upstream_request_id = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+
+    if !(200..300).contains(&status) {
+        let retry_after_secs = resp
             .headers()
-            .get("x-request-id")
+            .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
+            .and_then(|v| v.parse::<i64>().ok());
+        let body = resp.bytes().await.unwrap_or_default();
+        return Err(UpstreamError::Status {
+            status,
+            body,
+            retry_after_secs,
+        });
+    }
 
-        if !(200..300).contains(&status) {
-            let retry_after_secs = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<i64>().ok());
-            let body = resp.bytes().await.unwrap_or_default();
-            return Err(UpstreamError::Status {
-                status,
-                body,
-                retry_after_secs,
+    if stream {
+        let events = resp
+            .bytes_stream()
+            .eventsource()
+            .flat_map(|item| match item {
+                Ok(event) => futures::stream::iter(
+                    parse_event(&event.event, &event.data)
+                        .into_iter()
+                        .map(Ok)
+                        .collect::<Vec<_>>(),
+                ),
+                Err(e) => futures::stream::iter(vec![Err(UpstreamError::Stream(e.to_string()))]),
             });
-        }
-
-        if stream {
-            let events = resp
-                .bytes_stream()
-                .eventsource()
-                .flat_map(|item| match item {
-                    Ok(event) => futures::stream::iter(
-                        parse_event(&event.event, &event.data)
-                            .into_iter()
-                            .map(Ok)
-                            .collect::<Vec<_>>(),
-                    ),
-                    Err(e) => {
-                        futures::stream::iter(vec![Err(UpstreamError::Stream(e.to_string()))])
-                    }
-                });
-            Ok(ChatResponse::Stream(StreamHandle {
-                upstream_request_id,
-                events: Box::pin(events),
-            }))
-        } else {
-            let body = resp
-                .bytes()
-                .await
-                .map_err(|e| crate::openai::classify(&e))?;
-            let usage = serde_json::from_slice::<Value>(&body)
-                .ok()
-                .and_then(|v| usage_from_responses(v.get("usage")));
-            Ok(ChatResponse::Json {
-                status,
-                upstream_request_id,
-                body,
-                usage,
-            })
-        }
+        Ok(ChatResponse::Stream(StreamHandle {
+            upstream_request_id,
+            events: Box::pin(events),
+        }))
+    } else {
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| crate::openai::classify(&e))?;
+        let usage = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| usage_from_responses(v.get("usage")));
+        Ok(ChatResponse::Json {
+            status,
+            upstream_request_id,
+            body,
+            usage,
+        })
     }
 }
 

@@ -23,10 +23,11 @@ export function ActiveSessionsCard() {
   const queryClient = useQueryClient()
   const q = useQuery({
     queryKey: qk.mySessions,
-    queryFn: () => apiFetch<{ data: SessionRow[] }>('/api/me/sessions'),
+    queryFn: () => apiFetch<{ data: SessionRow[]; limit: number | null }>('/api/me/sessions'),
     staleTime: 15_000,
   })
   const rows = q.data?.data ?? []
+  const limit = q.data?.limit ?? null
   const shortUa = (ua: string | null) => (ua ? (ua.split(' ')[0] ?? ua).slice(0, 40) : '—')
 
   const invalidate = () => {
@@ -56,7 +57,10 @@ export function ActiveSessionsCard() {
     <Card>
       <CardHeader>
         <CardTitle>{t('security:sessionsTitle')}</CardTitle>
-        <CardDescription>{t('security:sessionsDesc')}</CardDescription>
+        <CardDescription>
+          {t('security:sessionsDesc')}
+          {limit !== null && <> {t('security:sessionsLimitHint', { n: limit })}</>}
+        </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 pt-2">
         {q.isError || rows.length === 0 ? (

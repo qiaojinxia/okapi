@@ -3,16 +3,34 @@ import type { PoolMember } from '@/features/pools/types'
 /// 渠道协议：决定请求如何被转换后送往上游（见 §4.4 四象限）。
 /// `openai` = 官方 OpenAI（/v1/responses 缺省直转）；`openai_compat` = 一切 OpenAI 兼容上游
 /// （只保证 chat，Responses 缺省降级）；`azure` = Azure OpenAI（部署 URL + api-key 头 +
-/// api-version，模型映射的值即部署名）——与后端 docs/database.md channels.provider 枚举一致。
+/// api-version，模型映射的值即部署名）；`bedrock` = Amazon Bedrock（InvokeModel，Anthropic 方言，
+/// SigV4 或 Bedrock API key）；`vertex` = Google Vertex AI（服务账号 OAuth，Claude / Gemini）
+/// ——与后端 docs/database.md channels.provider 枚举一致。
 export const PROVIDERS = [
   'openai',
   'openai_compat',
   'azure',
   'anthropic',
   'gemini',
+  'bedrock',
+  'vertex',
+  'anthropic_max',
+  'codex',
   'custom_pass',
 ] as const
 export type Provider = (typeof PROVIDERS)[number]
+
+/// 只服务 chat 族入口、且 api_base 必填的云厂商托管上游（IMPLEMENTATION §11.35）。
+export function isCloudManaged(provider: string): boolean {
+  return provider === 'bedrock' || provider === 'vertex'
+}
+
+/// 站长自己的订阅经 OAuth 登录（IMPLEMENTATION §11.38，实验性）：凭证不是手填的 key，
+/// 而是登录换来的 token；新建走登录卡而非凭证输入框。
+export type OAuthProvider = 'anthropic_max' | 'codex'
+export function isOAuthProvider(provider: string): provider is OAuthProvider {
+  return provider === 'anthropic_max' || provider === 'codex'
+}
 
 /// 说 OpenAI 方言、因而有 Responses 直转/降级之选的协议。
 /// azure 虽同方言，但其 Responses 走另一套 `/openai/v1` 路径，本期不给直转选项。
@@ -29,6 +47,14 @@ export function apiBasePlaceholder(provider: string): string {
       return 'https://api.anthropic.com'
     case 'gemini':
       return 'https://generativelanguage.googleapis.com/v1beta'
+    case 'bedrock':
+      return 'https://bedrock-runtime.us-east-1.amazonaws.com'
+    case 'vertex':
+      return 'https://us-central1-aiplatform.googleapis.com/v1/projects/{project}/locations/us-central1'
+    case 'anthropic_max':
+      return 'https://api.anthropic.com/v1'
+    case 'codex':
+      return 'https://chatgpt.com/backend-api/codex'
     default:
       return 'https://api.openai.com/v1'
   }
@@ -57,6 +83,10 @@ export interface ChannelKeyRow {
   last_error: string | null
   weight: number
   max_concurrency: number | null
+  /// 0 = 静态 key，1 = OAuth 订阅凭证（§11.38）。
+  credential_kind: number
+  /// OAuth 凭证的 access token 到期（unix 秒）；静态 key 无此字段。
+  credential_expires_at?: number
 }
 
 
@@ -72,6 +102,8 @@ export interface ChannelSettings {
   responses_native?: boolean
   /// Azure 数据面 api-version（`YYYY-MM-DD[-preview]`）；undefined = 后端缺省。只对 azure 有意义。
   api_version?: string
+  /// Bedrock SigV4 区域覆写；undefined = 从 api_base 主机名解析。只对 bedrock 有意义。
+  aws_region?: string
   /// 出站代理（http / https / socks5 / socks5h）。undefined = 直连。
   proxy_url?: string
   /// 额外请求头（对象）。鉴权 / Host / 逐跳头后端会拒。
@@ -89,6 +121,23 @@ export interface ChannelProbe {
   http_status?: number
   error_code?: string
   at: string
+}
+
+/// 最近一次上游余额查询（Redis 30 天 TTL；没查过 / 已过期为 null，IMPLEMENTATION §11.33）。
+/// 金额是 `currency` 的 micro 整数，不是站内 USD 账。
+export interface ChannelBalance {
+  probe: string
+  currency: string
+  balance_micro: number
+  total_micro: number | null
+  used_micro: number | null
+  at: string
+}
+
+/// 哪些协议有可查的余额接口（与后端 `Probe::for_channel` 一致）：
+/// anthropic / gemini / azure / custom_pass 没有公开余额接口，按钮不显示。
+export function balanceSupported(provider: string): boolean {
+  return provider === 'openai' || provider === 'openai_compat'
 }
 
 export interface ChannelRow {
@@ -110,6 +159,7 @@ export interface ChannelRow {
   /// 上游数据留存声明：none / transient / trains；null = 未声明。
   data_retention: string | null
   last_test: ChannelProbe | null
+  last_balance: ChannelBalance | null
 }
 
 
@@ -124,6 +174,9 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
     ...(typeof raw?.responses_native === 'boolean' ? { responses_native: raw.responses_native } : {}),
     ...(typeof raw?.api_version === 'string' && raw.api_version !== ''
       ? { api_version: raw.api_version }
+      : {}),
+    ...(typeof raw?.aws_region === 'string' && raw.aws_region !== ''
+      ? { aws_region: raw.aws_region }
       : {}),
     ...(typeof raw?.proxy_url === 'string' && raw.proxy_url.trim() !== ''
       ? { proxy_url: raw.proxy_url }
@@ -153,6 +206,14 @@ export function providerConsoleUrl(provider: string, apiBase: string | null): st
     case 'azure':
       // 资源端点是数据面地址，控制台在 Azure Portal / AI Foundry；部署管理走后者
       return 'https://ai.azure.com/'
+    case 'bedrock':
+      return 'https://console.aws.amazon.com/bedrock/'
+    case 'vertex':
+      return 'https://console.cloud.google.com/vertex-ai'
+    case 'anthropic_max':
+      return 'https://claude.ai/settings/usage'
+    case 'codex':
+      return 'https://chatgpt.com/'
     default: {
       if (apiBase === null) return null
       try {

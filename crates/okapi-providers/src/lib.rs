@@ -9,22 +9,31 @@
 //! 按渠道 `responses_native` 选路。
 //! Azure OpenAI（`azure.rs`）：OpenAI 同形态、仅 URL（部署 + api-version）与鉴权头不同，
 //! 复用 `openai.rs` 的发送 / 解析。
+//! Bedrock（`bedrock.rs`，SigV4 / API key + InvokeModel event-stream）与 Vertex AI（`vertex.rs`，
+//! 服务账号 OAuth + rawPredict / generateContent）：Anthropic / Gemini 方言换传输，
+//! 协议转换全部复用（IMPLEMENTATION §11.35）。
 
 pub mod anthropic;
+pub mod aws_eventstream;
+pub mod aws_sigv4;
 pub mod azure;
+pub mod bedrock;
 pub mod convert;
 pub mod custom_pass;
 pub mod error;
 pub mod gemini;
 pub mod http;
 pub mod modifiers;
+pub mod oauth;
 pub mod openai;
 pub mod reasoning;
 pub mod responses;
 pub mod types;
+pub mod vertex;
 
 pub use anthropic::AnthropicUpstream;
 pub use azure::AzureUpstream;
+pub use bedrock::BedrockUpstream;
 pub use custom_pass::PassUpstream;
 pub use error::UpstreamError;
 pub use gemini::GeminiUpstream;
@@ -32,3 +41,4 @@ pub use http::{HttpPool, Outbound};
 pub use openai::{ChatResponse, OpenAiUpstream, StreamHandle, ensure_stream_usage, rewrite_model};
 pub use reasoning::{ReasoningDirective, split_reasoning_suffix};
 pub use types::ChatEvent;
+pub use vertex::VertexUpstream;

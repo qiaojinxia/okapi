@@ -111,6 +111,7 @@ async fn prepare(
         ));
     }
     super::auth::check_member_limit(state, key).await?;
+    super::auth::check_group_rate(state, key).await?;
 
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
@@ -217,25 +218,31 @@ async fn prepare(
         state.master_key.as_deref(),
     )
     .await;
-    let cand = match rows {
+    let mut candidates: Vec<_> = match rows {
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()
-            .find(|c| {
+            .filter(|c| {
                 // azure：Realtime 是 `wss://.../openai/realtime?deployment=&api-version=`
                 // 另一种握手 URL，本期不接（IMPLEMENTATION §11.29）
-                !matches!(c.provider.as_str(), "anthropic" | "gemini" | "azure")
-                    && c.capabilities.get("realtime").and_then(Value::as_bool) != Some(false)
-            }),
+                !matches!(
+                    c.provider.as_str(),
+                    "anthropic" | "gemini" | "azure" | "bedrock" | "vertex"
+                ) && c.capabilities.get("realtime").and_then(Value::as_bool) != Some(false)
+            })
+            .collect(),
         Err(err) => {
             release_reservation_and_slot(state, key, request_id).await;
             return Err(err.into());
         }
     };
-    let Some(cand) = cand else {
+    let margin_removed = state
+        .retain_margin_ok(&key.group_code, &mut candidates)
+        .await;
+    let Some(cand) = candidates.into_iter().next() else {
         release_reservation_and_slot(state, key, request_id).await;
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            codes::NO_AVAILABLE_CHANNEL,
+            super::state::no_candidates_code(margin_removed),
         ));
     };
     let upstream_model = cand.upstream_model(&canonical).to_owned();

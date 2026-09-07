@@ -83,6 +83,8 @@ async fn setup() -> Bed {
             description: "",
             pool_code: None,
             self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
         },
     )
     .await

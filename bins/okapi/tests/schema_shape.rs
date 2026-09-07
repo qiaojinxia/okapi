@@ -22,7 +22,16 @@ const REQUIRED: &[(&str, &[&str])] = &[
             "weight_override",
         ],
     ),
-    ("price_groups", &["group_ratio", "pool_code", "self_select"]),
+    (
+        "price_groups",
+        &[
+            "group_ratio",
+            "pool_code",
+            "self_select",
+            "rpm_limit",
+            "rph_limit",
+        ],
+    ),
     (
         "api_keys",
         &["pool_override", "member_user_id", "group_override"],

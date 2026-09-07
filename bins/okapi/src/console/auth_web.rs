@@ -514,20 +514,52 @@ pub async fn login(
     )
     .await;
 
+    let sid = open_web_session(&state, user.user_id, ip.as_deref(), &headers).await;
+    let mut resp = Json(json!({ "user_id": user.user_id, "role": user.role })).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&session_cookie(&sid)) {
+        resp.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    Ok(resp)
+}
+
+/// 建一条 web 会话并按 `settings.web_session_limit` 裁剪该用户的旧会话（§11.37）。
+/// 登录与 OAuth 回调都经这里：上限只有一处生效点，刚建的这条永不被踢。
+pub(super) async fn open_web_session(
+    state: &AppState,
+    user_id: i64,
+    ip: Option<&str>,
+    headers: &HeaderMap,
+) -> String {
     let sid = rand_token(48);
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
-    state
-        .sched
-        .web_session_set(&sid, user.user_id, ip.as_deref(), ua)
-        .await;
-    let mut resp = Json(json!({ "user_id": user.user_id, "role": user.role })).into_response();
-    let cookie = format!("{SESSION_COOKIE}={sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800");
-    if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, value);
+    state.sched.web_session_set(&sid, user_id, ip, ua).await;
+    let limit = web_session_limit(state).await;
+    if limit > 0 {
+        let evicted = state.sched.web_session_trim(user_id, limit, &sid).await;
+        if evicted > 0 {
+            tracing::info!(user_id, evicted, limit, "web 会话超上限，已踢最早的会话");
+        }
     }
-    Ok(resp)
+    sid
+}
+
+/// `settings.web_session_limit`（缺省 0 = 不限）。
+pub(super) async fn web_session_limit(state: &AppState) -> i64 {
+    state
+        .setting_cached("web_session_limit")
+        .await
+        .as_ref()
+        .as_ref()
+        .and_then(serde_json::Value::as_i64)
+        .filter(|v| *v > 0)
+        .unwrap_or(0)
+}
+
+/// 会话 cookie（HttpOnly，7 天，与 `sess:web` TTL 对齐）。
+pub(super) fn session_cookie(sid: &str) -> String {
+    format!("{SESSION_COOKIE}={sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800")
 }
 
 /// 密码 + TOTP 校验；`Err((审计原因, 对外错误))`。
@@ -707,7 +739,11 @@ pub async fn list_sessions(
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data })))
+    // 上限回给前端显示"最多同时 N 个"；0 = 不限回 null
+    let limit = web_session_limit(&state).await;
+    Ok(Json(
+        json!({ "data": data, "limit": (limit > 0).then_some(limit) }),
+    ))
 }
 
 /// DELETE /api/me/sessions/{sid}

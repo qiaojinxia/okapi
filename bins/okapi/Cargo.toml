@@ -56,6 +56,8 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 [dev-dependencies]
 reqwest = { workspace = true }
 bcrypt = { workspace = true }
+# gateway_vertex：现场生成服务账号 RSA 私钥（不在仓库里放任何真实密钥材料）
+aws-lc-rs = { workspace = true }
 
 [lints]
 workspace = true

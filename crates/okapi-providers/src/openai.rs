@@ -98,6 +98,12 @@ impl OpenAiUpstream {
         })
     }
 
+    /// 共享连接池（订阅 OAuth 的 token 端点与 Codex 后端复用，§11.38）。
+    #[must_use]
+    pub fn http(&self) -> &HttpPool {
+        &self.http
+    }
+
     /// 转发 chat completions。`body` 已完成模型名映射。
     pub async fn chat(
         &self,

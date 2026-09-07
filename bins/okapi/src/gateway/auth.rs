@@ -117,6 +117,28 @@ pub async fn check_member_limit(state: &AppState, key: &AuthedKey) -> Result<(),
     Ok(())
 }
 
+/// 分组级限流（§11.32）：生效分组的每用户分钟 / 小时上限，随鉴权缓存下发。
+/// 各计费端点紧接 `check_member_limit` 调用；分组未配限额时零 Redis 往返。
+pub async fn check_group_rate(state: &AppState, key: &AuthedKey) -> Result<(), AppError> {
+    let cap = |v: Option<i32>| v.filter(|n| *n > 0).map(i64::from);
+    let (rpm, rph) = (cap(key.group_rpm_limit), cap(key.group_rph_limit));
+    if rpm.is_none() && rph.is_none() {
+        return Ok(());
+    }
+    if let Some(which) = state
+        .sched
+        .group_rate_check(key.user_id, &key.group_code, rpm, rph)
+        .await
+    {
+        return Err(AppError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            codes::RATE_LIMITED,
+        )
+        .with_param(which));
+    }
+    Ok(())
+}
+
 /// 结算后累计软实时计数：团成员消费（团 key 才计）与用户本月 token/消费
 /// （volume 规则的两个阈值轴输入，各自仅在价簿含对应规则时才写）。
 pub async fn record_settlement_counters(

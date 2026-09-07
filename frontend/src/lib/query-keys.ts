@@ -66,10 +66,14 @@ export const qk = {
   adminLogs: (params: string) => ['admin', 'logs', params] as const,
   adminLogStat: (params: string) => ['admin', 'logs', 'stat', params] as const,
   reconciliation: ['admin', 'reconciliation'] as const,
+  /// 负毛利熔断表 + 生效配置（§11.34）。
+  marginBreaker: ['admin', 'margin-breaker'] as const,
   userOverview: (id: number) => ['admin', 'user-overview', id] as const,
   userUsage: (id: number) => ['admin', 'user-usage', id] as const,
   publicPricing: ['public-pricing'] as const,
   notice: ['public-notice'] as const,
+  /// 站点聊天预设（公开，§11.39）。
+  playgroundPresets: ['playground-presets'] as const,
   logs: (params: string) => ['logs', params] as const,
   myLedger: ['me', 'ledger'] as const,
   myOrders: ['me', 'orders'] as const,

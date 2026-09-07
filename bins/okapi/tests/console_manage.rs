@@ -92,6 +92,8 @@ async fn setup() -> Env {
             description: "测试组",
             pool_code: None,
             self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
         },
     )
     .await
@@ -299,6 +301,77 @@ async fn azure_channel_write_validation() {
     .await
     .unwrap();
     assert_eq!(stored.as_deref(), Some("2024-10-21"));
+}
+
+/// bedrock / vertex（§11.35）：地址必填、vertex 须含 projects/locations、aws_region 形状。
+#[tokio::test]
+async fn cloud_channel_write_validation() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let base = json!({
+        "name": format!("cloud-{}", env.suffix), "credential": "AKIAIOSFODNN7EXAMPLE:secret",
+        "models": [env.model],
+    });
+    let with = |extra: Value| {
+        let mut b = base.clone();
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+
+    let (status, body) = post(with(json!({"provider": "bedrock", "api_base": " "}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+    let (status, body) = post(with(json!({
+        "provider": "bedrock", "api_base": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "settings": {"aws_region": "US East"}
+    })))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "aws_region");
+    let (status, body) = post(with(json!({
+        "provider": "bedrock", "api_base": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "settings": {"aws_region": "us-east-1"}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // vertex：缺 /projects/{p}/locations/{l} 的地址拒
+    let (status, body) = post(with(json!({
+        "name": format!("vx-{}", env.suffix),
+        "provider": "vertex", "api_base": "https://aiplatform.googleapis.com/v1"
+    })))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+    let (status, body) = post(with(json!({
+        "name": format!("vx-{}", env.suffix),
+        "provider": "vertex",
+        "api_base": "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1"
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["channel_id"].as_i64().unwrap();
+    // 只改地址：仍按 vertex 形状校验
+    let (status, body) = req(
+        reqwest::Method::PATCH,
+        env.console,
+        &format!("/admin/channels/{id}"),
+        &env.admin_token,
+        Some(json!({"api_base": "https://aiplatform.googleapis.com/v1/publishers/google"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
 }
 
 #[tokio::test]

@@ -308,9 +308,9 @@ test('门户按任务分组，搜索支持分组、空态、清空和回车跳�
   await page.goto('/portal/ledger')
   const nav = page.getByRole('navigation', { name: 'Navigation', exact: true })
   const usage = nav.locator('div').filter({ has: page.getByText('API & usage', { exact: true }) })
-  await expect(usage.getByRole('link')).toHaveCount(3)
+  await expect(usage.getByRole('link')).toHaveCount(4)
   expect(await usage.locator('a').evaluateAll((links) => links.map((link) => link.getAttribute('href'))))
-    .toEqual(['/portal/keys', '/pricing', '/portal/logs'])
+    .toEqual(['/portal/keys', '/pricing', '/portal/playground', '/portal/logs'])
   const search = page.getByRole('searchbox', { name: 'Find a feature' })
   await search.fill('billing')
   // 账单分组：充值 / 订阅套餐 / 账户流水 / 邀请

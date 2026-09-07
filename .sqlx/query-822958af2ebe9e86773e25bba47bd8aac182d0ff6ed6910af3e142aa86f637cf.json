@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settings (key, value) VALUES ('ssrf_policy', '{\"allow_http\": true, \"allow_private\": true}')\n           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "822958af2ebe9e86773e25bba47bd8aac182d0ff6ed6910af3e142aa86f637cf"
+}

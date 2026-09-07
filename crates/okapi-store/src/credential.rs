@@ -80,6 +80,54 @@ pub fn open(master_key_hex: Option<&str>, stored: &[u8]) -> Result<String, Store
         .map_err(|_| StoreError::InvalidData("channel_key credential not utf-8"))
 }
 
+/// OAuth 订阅凭证（IMPLEMENTATION §11.38）：与静态 key 共用同一个 `credential_ciphertext` 列，
+/// 明文是一份 JSON。识别靠 `kind = "oauth"`，非 JSON / 非此形状的凭证一律是静态 key。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OAuthCredential {
+    pub access_token: String,
+    pub refresh_token: String,
+    /// access token 到期 unix 秒。
+    pub expires_at: i64,
+    /// ChatGPT 账号 id（codex 必带；anthropic_max 为 None）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
+impl OAuthCredential {
+    /// 从明文凭证里认出 OAuth 形态；静态 key 返回 None。
+    #[must_use]
+    pub fn parse(plaintext: &str) -> Option<Self> {
+        let trimmed = plaintext.trim_start();
+        if !trimmed.starts_with('{') {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+        if value.get("kind").and_then(serde_json::Value::as_str) != Some("oauth") {
+            return None;
+        }
+        serde_json::from_value(value).ok()
+    }
+
+    /// 落库明文。
+    #[must_use]
+    pub fn to_plaintext(&self) -> String {
+        let mut value = serde_json::to_value(self).unwrap_or_default();
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "kind".to_owned(),
+                serde_json::Value::String("oauth".to_owned()),
+            );
+        }
+        value.to_string()
+    }
+
+    /// 到期前 `margin_secs` 内即视为需要刷新。
+    #[must_use]
+    pub fn needs_refresh(&self, now: i64, margin_secs: i64) -> bool {
+        self.expires_at - now <= margin_secs
+    }
+}
+
 /// 未配主密钥时提示一次：凭证会明文落库。
 pub fn warn_if_unprotected(master_key_hex: Option<&str>) {
     if master_key_hex.is_none() {
@@ -216,5 +264,26 @@ mod tests {
     fn short_prefixed_value_is_treated_as_plaintext() {
         // 恰好以 okc1 开头但长度不足信封的历史明文，不该被当密文
         assert_eq!(open(Some(&key()), b"okc1").unwrap(), "okc1");
+    }
+
+    #[test]
+    fn oauth_credential_roundtrip_and_static_key_passthrough() {
+        let cred = OAuthCredential {
+            access_token: "sk-ant-oat01-x".to_owned(),
+            refresh_token: "sk-ant-ort01-y".to_owned(),
+            expires_at: 1_700_000_000,
+            account_id: None,
+        };
+        let text = cred.to_plaintext();
+        assert!(text.contains(r#""kind":"oauth""#));
+        assert_eq!(OAuthCredential::parse(&text).unwrap(), cred);
+        // 静态 key、别的 JSON 都不是 OAuth 凭证
+        assert!(OAuthCredential::parse("sk-ant-api03-plain").is_none());
+        assert!(
+            OAuthCredential::parse(r#"{"type":"service_account","client_email":"x"}"#).is_none()
+        );
+        // 到期判定含边界
+        assert!(cred.needs_refresh(1_700_000_000 - 120, 120));
+        assert!(!cred.needs_refresh(1_700_000_000 - 121, 120));
     }
 }

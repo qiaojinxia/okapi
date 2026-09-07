@@ -1,9 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
-import { FileCode2, Terminal } from 'lucide-react'
+import { ExternalLink, FileCode2, Terminal } from 'lucide-react'
 import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CLIENTS, buildSnippets, resolveConnectConfig } from './connect-snippets'
 import type { ClientId, ConnectConfig, Snippet } from './connect-snippets'
+import { buildImportLinks } from './import-links'
+import type { ImportTarget } from './import-links'
 import { CopyButton, CopyText } from '@/components/ui/copy-button'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
@@ -80,9 +82,45 @@ export function ConnectPanel({ apiKey, group }: { apiKey?: string; group: string
         ? <AppFields cfg={cfg} />
         : buildSnippets(client, cfg, t('catalog:samplePrompt')).map((snippet, i) => <SnippetBlock key={`${client}-${i}`} snippet={snippet} />))}
 
+      {/* 一键导入只在明文在场时出现：链接里必然带 key，占位符没有意义（§11.31 同一规则） */}
+      {cfg && apiKey !== undefined && <ImportLinks cfg={cfg} />}
+
       <p className="text-xs leading-5 text-muted-foreground">
         {apiKey === undefined ? t('portal:guideKeyPlaceholder') : t('portal:guideKeyFilled')}
       </p>
+    </div>
+  )
+}
+
+const IMPORT_LABEL: Record<ImportTarget, string> = {
+  'ccswitch-claude': 'portal:guideImportCcClaude',
+  'ccswitch-codex': 'portal:guideImportCcCodex',
+  nextchat: 'portal:guideImportNextChat',
+  cherry: 'portal:guideImportCherry',
+}
+
+/// 聊天客户端一键导入（§11.39）：cc-switch / NextChat / Cherry Studio。
+export function ImportLinks({ cfg }: { cfg: ConnectConfig }) {
+  const { t } = useTranslation()
+  const links = buildImportLinks(cfg, window.location.hostname)
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-border p-3" data-testid="import-links">
+      <span className="text-xs font-medium">{t('portal:guideImportTo')}</span>
+      <div className="flex flex-wrap gap-2">
+        {links.map((link) => (
+          <a
+            key={link.target}
+            href={link.href}
+            target={link.scheme ? undefined : '_blank'}
+            rel={link.scheme ? undefined : 'noreferrer noopener'}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-3 text-xs font-medium hover:bg-accent/60"
+          >
+            <ExternalLink aria-hidden className="h-3.5 w-3.5 text-muted-foreground" />
+            {t(IMPORT_LABEL[link.target])}
+          </a>
+        ))}
+      </div>
+      <p className="text-xs leading-5 text-muted-foreground">{t('portal:guideImportHint')}</p>
     </div>
   )
 }

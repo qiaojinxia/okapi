@@ -47,6 +47,12 @@ pub struct ChannelCandidate {
     /// 上游数据面版本（channels.settings.api_version）：只对 `azure` 有意义——每个请求
     /// 都要带 `?api-version=`；None = 用 providers 侧缺省。其它 provider 忽略。
     pub api_version: Option<String>,
+    /// SigV4 签名区域覆写（channels.settings.aws_region）：只对 `bedrock` 有意义；
+    /// None = 从 api_base 主机名解析（IMPLEMENTATION §11.35）。
+    pub aws_region: Option<String>,
+    /// OAuth token 端点覆写（channels.settings.oauth_token_url）：只对 `anthropic_max` / `codex`
+    /// 有意义，测试 mock / 企业代理用；None = 各家官方地址（IMPLEMENTATION §11.38）。
+    pub oauth_token_url: Option<String>,
     /// 出站代理（channels.settings.proxy_url）：http / https / socks5 / socks5h。
     /// None = 直连。代理绑在 reqwest Client 上，按 URL 缓存（IMPLEMENTATION §11.30）。
     pub proxy_url: Option<String>,
@@ -105,6 +111,8 @@ impl ChannelCandidate {
 /// 缺省继承渠道与 key 自身——同一渠道可以在 stable 池当主力、在 fast 池当备胎。
 ///
 /// 未入任何池的渠道（孤儿）对谁都不可达；空池链按 `DEFAULT_POOL` 兜底。
+// 一条大查询 + 逐列装配：拆开只会让 SQL 与结构体字段两处失联
+#[allow(clippy::too_many_lines)]
 pub async fn candidates_for_model(
     pool: &PgPool,
     model: &str,
@@ -133,6 +141,8 @@ pub async fn candidates_for_model(
                (c.settings ->> 'responses_native')::boolean AS responses_native,
                c.settings ->> 'data_retention' AS data_retention,
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
+               NULLIF(c.settings ->> 'aws_region', '') AS aws_region,
+               NULLIF(c.settings ->> 'oauth_token_url', '') AS oauth_token_url,
                NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,
                c.settings -> 'extra_headers' AS extra_headers,
                c.capabilities,
@@ -175,6 +185,8 @@ pub async fn candidates_for_model(
                 retry_knobs(r.retry_policy.as_ref());
             Ok(ChannelCandidate {
                 api_version: r.api_version,
+                aws_region: r.aws_region,
+                oauth_token_url: r.oauth_token_url,
                 proxy_url: r.proxy_url,
                 extra_headers: extra_headers_from(r.extra_headers),
                 channel_id: r.channel_id,
@@ -235,6 +247,8 @@ pub fn responses_native_for(provider: &str, configured: Option<bool>) -> bool {
     match provider {
         "openai" => configured.unwrap_or(true),
         "openai_compat" => configured.unwrap_or(false),
+        // Codex 订阅后端只有 Responses 面，没有可降级的 chat（§11.38）
+        "codex" => true,
         _ => false,
     }
 }

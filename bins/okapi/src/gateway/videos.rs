@@ -113,6 +113,7 @@ async fn handle_create(
     };
     let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
     super::auth::check_member_limit(state, &key).await?;
+    super::auth::check_group_rate(state, &key).await?;
 
     let cap = |v: Option<i32>| v.map_or(0, i64::from);
     let caps = LimitCaps {
@@ -159,22 +160,30 @@ async fn handle_create(
     )
     .await
     .map_err(AppError::from);
-    let candidates: Vec<_> = match rows {
+    let mut candidates: Vec<_> = match rows {
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()
             // azure：Sora 走 `/openai/v1/video/generations/jobs` 另一套任务 API，本期不接
-            .filter(|c| !matches!(c.provider.as_str(), "anthropic" | "gemini" | "azure"))
+            .filter(|c| {
+                !matches!(
+                    c.provider.as_str(),
+                    "anthropic" | "gemini" | "azure" | "bedrock" | "vertex"
+                )
+            })
             .collect(),
         Err(err) => {
             refund(state, &key, request_id, "videos").await;
             return Err(err);
         }
     };
+    let margin_removed = state
+        .retain_margin_ok(&key.group_code, &mut candidates)
+        .await;
     if candidates.is_empty() {
         refund(state, &key, request_id, "videos").await;
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            codes::NO_AVAILABLE_CHANNEL,
+            super::state::no_candidates_code(margin_removed),
         ));
     }
 

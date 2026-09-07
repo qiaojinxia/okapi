@@ -7,12 +7,14 @@ pub mod chat;
 pub mod clients;
 pub mod custom_pass;
 pub mod dashboard;
+pub mod dialect;
 pub mod embeddings;
 pub mod error;
 pub mod estimate;
 pub mod extract;
 pub mod images;
 pub mod models;
+pub mod oauth_cred;
 pub mod openai_dialect;
 pub mod pricing_loader;
 pub mod realtime;
@@ -28,7 +30,10 @@ use axum::Router;
 use axum::routing::{get, post};
 use okapi_ledger::BalanceLedger;
 use okapi_pricing::PriceBookHandle;
-use okapi_providers::{AnthropicUpstream, GeminiUpstream, OpenAiUpstream, PassUpstream};
+use okapi_providers::{
+    AnthropicUpstream, BedrockUpstream, GeminiUpstream, OpenAiUpstream, PassUpstream,
+    VertexUpstream,
+};
 use state::AppState;
 use std::sync::Arc;
 use std::time::Duration;
@@ -94,6 +99,8 @@ pub async fn build_state(
         anthropic: AnthropicUpstream::new()
             .map_err(|e| anyhow::anyhow!("anthropic client: {e}"))?,
         gemini: GeminiUpstream::new().map_err(|e| anyhow::anyhow!("gemini client: {e}"))?,
+        bedrock: BedrockUpstream::new().map_err(|e| anyhow::anyhow!("bedrock client: {e}"))?,
+        vertex: VertexUpstream::new().map_err(|e| anyhow::anyhow!("vertex client: {e}"))?,
         pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,
         node: Arc::from(node),
         ch,
@@ -122,6 +129,11 @@ pub async fn build_state(
             .max_capacity(4096)
             .time_to_live(std::time::Duration::from_mins(1))
             .build(),
+        margin_cache: moka::future::Cache::builder()
+            .max_capacity(1)
+            .time_to_live(Duration::from_secs(10))
+            .build(),
+        refresh_gate: Arc::default(),
         settlements: crate::shutdown::Pending::default(),
     })
 }

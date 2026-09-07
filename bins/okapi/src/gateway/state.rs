@@ -3,7 +3,8 @@ use moka::future::Cache;
 use okapi_ledger::BalanceLedger;
 use okapi_pricing::PriceBookHandle;
 use okapi_providers::{
-    AnthropicUpstream, AzureUpstream, GeminiUpstream, OpenAiUpstream, PassUpstream,
+    AnthropicUpstream, AzureUpstream, BedrockUpstream, GeminiUpstream, OpenAiUpstream,
+    PassUpstream, VertexUpstream,
 };
 use okapi_store::ChClient;
 use okapi_store::channels::{ChannelCandidate, ResolvedModel};
@@ -12,6 +13,17 @@ use std::sync::Arc;
 
 /// 路由/配置缓存失效广播主题（与 `pricing.epoch` 同一条 NATS 通道）。
 pub const ROUTING_INVALIDATE_SUBJECT: &str = "routing.invalidate";
+
+/// 候选筛空时的错误码：被负毛利熔断筛空回 `margin_blocked`——回 `no_available_channel`
+/// 会让人以为渠道全挂了（§11.34）。
+#[must_use]
+pub fn no_candidates_code(margin_removed: usize) -> &'static str {
+    if margin_removed > 0 {
+        okapi_api::codes::MARGIN_BLOCKED
+    } else {
+        okapi_api::codes::NO_AVAILABLE_CHANNEL
+    }
+}
 
 /// gateway 共享状态：热路径只碰 Redis 与上游（IMPLEMENTATION §2.1）。
 /// 鉴权缓存在 Redis（docs/database.md §2.1 auth:key:*，console 跨进程失效）；
@@ -35,6 +47,10 @@ pub struct AppState {
     pub anthropic: AnthropicUpstream,
     /// Gemini 原生上游（generateContent）。
     pub gemini: GeminiUpstream,
+    /// Amazon Bedrock（InvokeModel，Anthropic 方言 + SigV4 / API key；§11.35）。
+    pub bedrock: BedrockUpstream,
+    /// Google Vertex AI（服务账号 OAuth；Claude rawPredict / Gemini generateContent；§11.35）。
+    pub vertex: VertexUpstream,
     /// custom_pass 透传传输。
     pub pass: PassUpstream,
     pub node: Arc<str>,
@@ -57,6 +73,11 @@ pub struct AppState {
     pub surge_reported_at: Arc<std::sync::atomic::AtomicI64>,
     /// 渠道相对成本系数缓存（channel_id → 千分比，60s；结算路径折算上游成本用）。
     pub channel_cost_cache: Cache<i64, i64>,
+    /// 负毛利熔断表进程缓存（§11.34）：单键 → 此刻生效的 `<group>|<channel_id>` 集合，10s；
+    /// 一次 HGETALL 供所有请求共用，HASH 为空时只是一次空往返。
+    pub margin_cache: Cache<u8, Arc<std::collections::HashSet<String>>>,
+    /// 订阅 OAuth 凭证刷新的进程内单飞闸（§11.38，四步锁第一步）。
+    pub refresh_gate: Arc<super::oauth_cred::RefreshGate>,
     /// 后台结算任务计数（响应先行、结算后台的两条 chat 路径）；优雅下线等它归零（§14.3）。
     pub settlements: crate::shutdown::Pending,
 }
@@ -131,6 +152,43 @@ impl AppState {
             .flatten()?;
         self.channel_cost_cache.insert(channel_id, value).await;
         Some(value)
+    }
+
+    /// 此刻生效的负毛利熔断对（`<group>|<channel_id>`，10s 进程缓存；§11.34）。
+    /// Redis 故障按空集处理（fail-open：熔断是止损手段，不该因缓存抖动把请求拒掉）。
+    pub async fn margin_blocked_fields(&self) -> Arc<std::collections::HashSet<String>> {
+        if let Some(hit) = self.margin_cache.get(&0).await {
+            return hit;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let set: std::collections::HashSet<String> = self
+            .sched
+            .margin_blocks()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, e)| e.blocks_at(now))
+            .map(|(k, _)| k)
+            .collect();
+        let set = Arc::new(set);
+        self.margin_cache.insert(0, Arc::clone(&set)).await;
+        set
+    }
+
+    /// 把该分组当前被熔断的渠道从候选里摘掉；返回摘掉的条数，供调用方区分
+    /// "被熔断筛空"（`margin_blocked`）与"本来就没候选"（`no_available_channel`）。
+    pub async fn retain_margin_ok(
+        &self,
+        group: &str,
+        candidates: &mut Vec<ChannelCandidate>,
+    ) -> usize {
+        let blocked = self.margin_blocked_fields().await;
+        if blocked.is_empty() {
+            return 0;
+        }
+        let before = candidates.len();
+        candidates.retain(|c| !blocked.contains(&crate::margin::field(group, c.channel_id)));
+        before - candidates.len()
     }
 
     /// 是否记录请求来源 IP（`settings.record_ip_log`）。缺省 true——此前一直在记，

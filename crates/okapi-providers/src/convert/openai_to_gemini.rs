@@ -535,7 +535,7 @@ pub async fn chat(
     stream: bool,
     outbound: &crate::http::Outbound,
 ) -> Result<ChatResponse, UpstreamError> {
-    match upstream
+    let resp = upstream
         .generate(
             api_base,
             credential,
@@ -544,8 +544,16 @@ pub async fn chat(
             stream,
             outbound,
         )
-        .await?
-    {
+        .await?;
+    wrap_generate(resp, upstream_model)
+}
+
+/// 已取到的 Gemini 响应 → OpenAI 形状（纯转换半跳；Vertex 取到响应后走这里，§11.35）。
+pub fn wrap_generate(
+    resp: GeminiResponse,
+    upstream_model: &str,
+) -> Result<ChatResponse, UpstreamError> {
+    match resp {
         GeminiResponse::Json {
             status,
             upstream_request_id,

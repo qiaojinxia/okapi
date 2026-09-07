@@ -31,7 +31,13 @@ export function GroupDrawer({
     description: group?.description ?? '',
     pool_code: group?.pool_code ?? DEFAULT_POOL,
     self_select: group?.self_select ?? false,
+    // 限额以文本保存：空串 = 不限，提交时才转数字，避免输入过程被强制成 0
+    rpm_limit: group?.rpm_limit === null || group?.rpm_limit === undefined ? '' : String(group.rpm_limit),
+    rph_limit: group?.rph_limit === null || group?.rph_limit === undefined ? '' : String(group.rph_limit),
   })
+  const limitValue = (text: string) => (text.trim() === '' ? null : Number(text.trim()))
+  const limitInvalid = (text: string) =>
+    text.trim() !== '' && (!Number.isInteger(Number(text.trim())) || Number(text.trim()) < 0)
 
   // 池清单从后端取：手输池代码会因不存在而被 FK 拒绝，且提示不直观
   const pools = useQuery({
@@ -49,6 +55,8 @@ export function GroupDrawer({
           description: form.description.trim(),
           pool_code: form.pool_code,
           self_select: form.self_select,
+          rpm_limit: limitValue(form.rpm_limit),
+          rph_limit: limitValue(form.rph_limit),
         },
       }),
     onSuccess: () => {
@@ -70,7 +78,12 @@ export function GroupDrawer({
             {t('common:cancel')}
           </Button>
           <Button
-            disabled={form.group_code.trim() === '' || upsert.isPending}
+            disabled={
+              form.group_code.trim() === '' ||
+              limitInvalid(form.rpm_limit) ||
+              limitInvalid(form.rph_limit) ||
+              upsert.isPending
+            }
             onClick={() => upsert.mutate()}
           >
             {t('common:save')}
@@ -132,6 +145,35 @@ export function GroupDrawer({
           checked={form.self_select}
           onChange={(v) => setForm((f) => ({ ...f, self_select: v }))}
         />
+      </FieldGroup>
+
+      <FieldGroup title={t('admin:groupRateLimit')} hint={t('admin:groupRateLimitHint')}>
+        <div className="flex flex-wrap gap-4">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="g-rpm">{t('admin:groupRpm')}</Label>
+            <Input
+              id="g-rpm"
+              className="w-36"
+              inputMode="numeric"
+              value={form.rpm_limit}
+              placeholder={t('admin:groupRateUnlimited')}
+              aria-invalid={limitInvalid(form.rpm_limit) || undefined}
+              onChange={(e) => setForm((f) => ({ ...f, rpm_limit: e.target.value }))}
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="g-rph">{t('admin:groupRph')}</Label>
+            <Input
+              id="g-rph"
+              className="w-36"
+              inputMode="numeric"
+              value={form.rph_limit}
+              placeholder={t('admin:groupRateUnlimited')}
+              aria-invalid={limitInvalid(form.rph_limit) || undefined}
+              onChange={(e) => setForm((f) => ({ ...f, rph_limit: e.target.value }))}
+            />
+          </div>
+        </div>
       </FieldGroup>
     </Drawer>
   )

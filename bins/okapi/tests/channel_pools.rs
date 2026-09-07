@@ -91,6 +91,8 @@ async fn setup() -> Env {
             description: "vip",
             pool_code: Some(&fast_pool),
             self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
         },
     )
     .await
@@ -401,6 +403,8 @@ async fn pool_delete_blocked_while_referenced() {
             description: "vip",
             pool_code: Some(&env.stable_pool),
             self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
         },
     )
     .await
@@ -454,6 +458,8 @@ async fn pool_delete_blocked_while_referenced() {
             description: "vip",
             pool_code: None,
             self_select: true,
+            rpm_limit: None,
+            rph_limit: None,
         },
     )
     .await

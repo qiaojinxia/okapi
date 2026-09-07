@@ -77,6 +77,8 @@ struct Bed {
     suffix: String,
 }
 
+// 套餐 / 分组 / 三角色装配放同一视野
+#[allow(clippy::too_many_lines)]
 async fn setup() -> Bed {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
@@ -113,6 +115,8 @@ async fn setup() -> Bed {
             description: "",
             pool_code: None,
             self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
         },
     )
     .await

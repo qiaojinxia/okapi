@@ -1,6 +1,7 @@
 import { Outlet, createFileRoute, redirect, useRouterState } from '@tanstack/react-router'
 import {
   FileText,
+  FlaskConical,
   Gift,
   KeyRound,
   LayoutDashboard,
@@ -47,6 +48,7 @@ function PortalLayout() {
       items: [
         { to: '/portal/keys', label: t('portal:keys'), icon: KeyRound },
         { to: '/pricing', label: t('pricing:title'), icon: Tags },
+        { to: '/portal/playground', label: t('portal:playgroundTitle'), icon: FlaskConical },
         { to: '/portal/logs', label: t('logs:title'), icon: FileText },
       ],
     },

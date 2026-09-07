@@ -4,11 +4,11 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { ChannelTimelineDrawer } from '@/features/channels/ChannelTimelineDrawer'
-import type { ChannelKeyRow, ChannelProbe } from '@/features/channels/types'
+import type { ChannelBalance, ChannelKeyRow, ChannelProbe } from '@/features/channels/types'
 import type { ChannelRow as ChannelStatRow } from '@/features/stats/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
 import { apiFetch } from '@/lib/api'
-import { formatBp, formatCount } from '@/lib/money'
+import { formatBp, formatCount, formatUpstreamBalance } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
 /// channel_keys.status：1 active / 2 cooling / 3 rate_limited / 4 quota_exhausted / 5 banned / 6 invalid
@@ -43,6 +43,7 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
         <span className="text-xs text-muted-foreground">
           {t('admin:keyStateAllActive', { n: keys.length })}
         </span>
+        <OAuthExpiry keys={keys} />
       </span>
     )
   }
@@ -73,7 +74,28 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
           {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(soonest.diff(dayjs(), 'minute', true))) })}
         </span>
       )}
+      <OAuthExpiry keys={keys} />
     </div>
+  )
+}
+
+/// 订阅 OAuth 凭证（§11.38）的 access token 到期：最早到期的那把。过期不是故障——
+/// 下次请求会刷新——所以只是灰字提示，不进状态徽章。
+function OAuthExpiry({ keys }: { keys: ChannelKeyRow[] }) {
+  const { t } = useTranslation()
+  const soonest = keys
+    .map((k) => k.credential_expires_at)
+    .filter((v): v is number => typeof v === 'number')
+    .sort((a, b) => a - b)[0]
+  if (soonest === undefined) return null
+  const when = dayjs.unix(soonest)
+  const stamp = when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm')
+  return (
+    <span className="text-xs text-muted-foreground" title={when.format('YYYY-MM-DD HH:mm')}>
+      {when.isAfter(dayjs())
+        ? t('admin:keyOAuthExpires', { when: stamp })
+        : t('admin:keyOAuthExpired')}
+    </span>
   )
 }
 
@@ -100,6 +122,26 @@ export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
       <Badge variant="destructive">
         {probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))}
+      </Badge>
+      <span className="text-xs text-muted-foreground">{stamp}</span>
+    </span>
+  )
+}
+
+/// 最近一次上游余额（§11.33）：金额随上游货币；余额 ≤ 0 标红——这条渠道已经打不动了。
+/// 没查过不占位：不是每条渠道都有余额可查。
+export function LastBalance({ balance }: { balance: ChannelBalance | null | undefined }) {
+  const { i18n, t } = useTranslation()
+  if (balance === null || balance === undefined) return null
+  const when = dayjs(balance.at)
+  const stamp = when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm')
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 whitespace-nowrap"
+      title={t('admin:balanceProbe', { probe: balance.probe })}
+    >
+      <Badge variant={balance.balance_micro <= 0 ? 'destructive' : 'muted'}>
+        {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language)}
       </Badge>
       <span className="text-xs text-muted-foreground">{stamp}</span>
     </span>

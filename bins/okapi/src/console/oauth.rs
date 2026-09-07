@@ -250,27 +250,15 @@ pub async fn callback(
         okapi_store::identity::link_oauth_user(&state.pg, &provider.code, &subject, &display)
             .await?;
 
-    // web session + 回前端（?oauth=done 触发兑 key）
-    let sid: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(48)
-        .map(char::from)
-        .collect();
+    // web session（含会话数上限裁剪，§11.37）+ 回前端（?oauth=done 触发兑 key）
     let ip = crate::gateway::clients::detect_client_ip(&headers);
-    let ua = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok());
-    state
-        .sched
-        .web_session_set(&sid, user_id, ip.as_deref(), ua)
-        .await;
-    let cookie = format!("okapi_session={sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800");
+    let sid = super::auth_web::open_web_session(&state, user_id, ip.as_deref(), &headers).await;
     let mut resp = (
         StatusCode::FOUND,
         [(header::LOCATION, "/?oauth=done".to_owned())],
     )
         .into_response();
-    if let Ok(value) = axum::http::HeaderValue::from_str(&cookie) {
+    if let Ok(value) = axum::http::HeaderValue::from_str(&super::auth_web::session_cookie(&sid)) {
         resp.headers_mut().insert(header::SET_COOKIE, value);
     }
     Ok(resp)

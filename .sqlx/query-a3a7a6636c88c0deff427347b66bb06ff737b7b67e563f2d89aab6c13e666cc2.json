@@ -1,0 +1,99 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.model_name, p.pricing_mode,\n                  p.model_ratio::text AS model_ratio,\n                  p.completion_ratio::text AS \"completion_ratio!\",\n                  p.cache_ratio::text AS \"cache_ratio!\",\n                  p.cache_write_ratio::text AS \"cache_write_ratio!\",\n                  p.audio_ratio::text AS \"audio_ratio!\",\n                  p.audio_completion_ratio::text AS \"audio_completion_ratio!\",\n                  p.image_ratio::text AS \"image_ratio!\",\n                  p.per_call_price_micro\n           FROM model_pricing p JOIN models m ON m.id = p.model_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "models",
+            "name": "model_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "pricing_mode",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "pricing_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "model_ratio",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "completion_ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "cache_ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "cache_write_ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "audio_ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "audio_completion_ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "image_ratio!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "per_call_price_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "per_call_price_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "a3a7a6636c88c0deff427347b66bb06ff737b7b67e563f2d89aab6c13e666cc2"
+}

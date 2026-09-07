@@ -4,6 +4,7 @@ pub mod config;
 pub mod console;
 pub mod gateway;
 pub mod mail;
+pub mod margin;
 pub mod migrate;
 pub mod shutdown;
 pub mod worker;

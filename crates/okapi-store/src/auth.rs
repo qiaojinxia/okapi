@@ -35,6 +35,12 @@ pub struct AuthedKey {
     pub pool_fallback: Option<String>,
     /// 生效定价分组：key 分组覆盖 > 用户最高优先级组 > 默认组。
     pub group_code: String,
+    /// 生效分组的每用户分钟 / 小时请求上限（`price_groups.rpm_limit / rph_limit`，§11.32）；
+    /// 随鉴权缓存下发，热路径不查库。None = 不限。
+    #[serde(default)]
+    pub group_rpm_limit: Option<i32>,
+    #[serde(default)]
+    pub group_rph_limit: Option<i32>,
     /// users.price_multiplier × 1e6（定点，避免浮点穿透计费路径）。
     pub multiplier_scaled: i64,
     pub rpm_limit: Option<i32>,
@@ -185,6 +191,8 @@ pub async fn find_key_by_hash(
                r.member_user_id,
                r.member_monthly_limit_micro,
                r.group_code AS "group_code!",
+               pg.rpm_limit AS "group_rpm_limit?",
+               pg.rph_limit AS "group_rph_limit?",
                COALESCE(r.pool_override, pg.pool_code, 'default') AS "pool_code!",
                cp.routing_strategy AS "pool_strategy?",
                cp.fallback_pool_code AS "pool_fallback?"
@@ -211,6 +219,8 @@ pub async fn find_key_by_hash(
         pool_strategy: r.pool_strategy,
         pool_fallback: r.pool_fallback,
         group_code: r.group_code,
+        group_rpm_limit: r.group_rpm_limit,
+        group_rph_limit: r.group_rph_limit,
         multiplier_scaled: r.multiplier_scaled,
         rpm_limit: r.rpm_limit,
         tpm_limit: r.tpm_limit,

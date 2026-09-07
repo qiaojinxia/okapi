@@ -9,11 +9,14 @@ import { Input, Label } from '@/components/ui/input'
 import { Field } from '@/components/ui/field'
 import { KeyParamRow } from '@/features/channels/KeyParamRow'
 import { ModelPicker } from '@/features/channels/ModelPicker'
+import { OAuthLoginCard } from '@/features/channels/OAuthLoginCard'
 import {
   PROVIDERS,
   apiBasePlaceholder,
   costMilliToRatio,
   defaultResponsesNative,
+  isCloudManaged,
+  isOAuthProvider,
   ratioToCostMilli,
   readSettings,
   speaksOpenAi,
@@ -254,9 +257,11 @@ export function ChannelDrawer({
     onError: (err) => toast.error(describeError(err)),
   })
 
+  // OAuth 协议新建不走这个按钮：渠道由登录卡的 exchange 一步建出来
+  const oauth = isOAuthProvider(form.provider)
   const canSubmit = isEdit
     ? form.name.trim() !== ''
-    : form.name.trim() !== '' && credential.trim() !== '' && models.length > 0
+    : !oauth && form.name.trim() !== '' && credential.trim() !== '' && models.length > 0
 
   return (
     <Drawer
@@ -336,7 +341,36 @@ export function ChannelDrawer({
                 {form.provider === 'azure' && (
                   <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>
                 )}
+                {form.provider === 'bedrock' && (
+                  <p className="text-xs text-muted-foreground">{t('admin:bedrockApiBaseHint')}</p>
+                )}
+                {form.provider === 'vertex' && (
+                  <p className="text-xs text-muted-foreground">{t('admin:vertexApiBaseHint')}</p>
+                )}
               </div>
+              {form.provider === 'bedrock' && (
+                <div className="col-span-2">
+                  <Field
+                    label={t('admin:bedrockRegion')}
+                    htmlFor="d-aws-region"
+                    hint={t('admin:bedrockRegionHint')}
+                  >
+                    <Input
+                      id="d-aws-region"
+                      className="w-56"
+                      value={settings.aws_region ?? ''}
+                      placeholder="us-east-1"
+                      onChange={(e) => {
+                        const v = e.target.value.trim()
+                        // 空 = 从 api_base 主机名解析：删键而不是存空串
+                        setSettings(({ aws_region: _drop, ...s }) =>
+                          v === '' ? s : { ...s, aws_region: v },
+                        )
+                      }}
+                    />
+                  </Field>
+                </div>
+              )}
               {form.provider === 'azure' && (
                 <div className="col-span-2">
                   <Field
@@ -363,6 +397,20 @@ export function ChannelDrawer({
             </div>
           </FieldGroup>
 
+          {oauth && isOAuthProvider(form.provider) ? (
+            <FieldGroup title={t('admin:oauthLoginTitle')} hint={t('admin:oauthLoginHint')}>
+              <OAuthLoginCard
+                provider={form.provider}
+                name={form.name}
+                models={models}
+                channelId={channel?.id}
+                onDone={() => {
+                  onDone()
+                  if (!isEdit) onClose()
+                }}
+              />
+            </FieldGroup>
+          ) : (
           <FieldGroup title={t('admin:groupCredential')} hint={t('admin:groupCredentialHint')}>
             <div className="flex items-end gap-2">
               <div className="flex flex-1 flex-col gap-1.5">
@@ -372,9 +420,21 @@ export function ChannelDrawer({
                 <Input
                   id="d-cred"
                   value={credential}
-                  placeholder="sk-..."
+                  placeholder={
+                    form.provider === 'bedrock'
+                      ? 'AKIA…:SECRET[:SESSION_TOKEN]'
+                      : form.provider === 'vertex'
+                        ? '{"type":"service_account",…}'
+                        : 'sk-...'
+                  }
                   onChange={(e) => setCredential(e.target.value)}
                 />
+                {form.provider === 'bedrock' && (
+                  <p className="text-xs text-muted-foreground">{t('admin:bedrockCredentialHint')}</p>
+                )}
+                {form.provider === 'vertex' && (
+                  <p className="text-xs text-muted-foreground">{t('admin:vertexCredentialHint')}</p>
+                )}
               </div>
               {isEdit && (
                 <Button
@@ -387,13 +447,22 @@ export function ChannelDrawer({
               )}
             </div>
           </FieldGroup>
+          )}
         </>
       )}
 
       {(!isEdit || tab === 'models') && (
         <FieldGroup
           title={t('admin:groupModels')}
-          hint={form.provider === 'azure' ? t('admin:azureModelsHint') : t('admin:groupModelsHint')}
+          hint={
+            form.provider === 'azure'
+              ? t('admin:azureModelsHint')
+              : isCloudManaged(form.provider)
+                ? t('admin:cloudModelsHint')
+                : oauth
+                  ? t('admin:oauthModelsHint')
+                  : t('admin:groupModelsHint')
+          }
         >
           <ModelPicker value={models} onChange={setModels} />
           <div className="flex flex-col gap-1.5">
@@ -415,11 +484,11 @@ export function ChannelDrawer({
                   .fetchQuery({
                     queryKey: qk.channelModels(channel.id),
                     queryFn: () =>
-                      apiFetch<{ data: string[] }>(`/admin/channels/${channel.id}/fetch-models`),
+                      apiFetch<{ models: string[] }>(`/admin/channels/${channel.id}/fetch-models`),
                   })
                   .then((r) => {
-                    setModels(r.data)
-                    toast.success(t('admin:discovered', { n: r.data.length }))
+                    setModels(r.models)
+                    toast.success(t('admin:discovered', { n: r.models.length }))
                   })
                   .catch((err: unknown) => toast.error(describeError(err)))
               }

@@ -564,6 +564,8 @@ pub struct ChannelKeyRow {
     /// 加权随机的权重（多 key 渠道的核心调度参数，管理端需可见可调）。
     pub weight: i32,
     pub max_concurrency: Option<i32>,
+    /// 0 = static_key，1 = oauth_refresh（§11.38；列表据此决定是否解出到期时间）。
+    pub credential_kind: i16,
 }
 
 /// 渠道列表切片 + 过滤集内的启用数（列表页头"共 N 条 · M 启用"不必再拉全量数）。
@@ -821,6 +823,9 @@ pub struct PriceGroupInput<'a> {
     pub pool_code: Option<&'a str>,
     /// 用户可否在门户为自己的 key 选择此分组。
     pub self_select: bool,
+    /// 分组内每用户分钟 / 小时请求上限（§11.32）；None = 不限。
+    pub rpm_limit: Option<i32>,
+    pub rph_limit: Option<i32>,
 }
 
 /// 定价分组 upsert。分组必有池（缺省 default）——"无池"这个状态不再存在。
@@ -830,19 +835,24 @@ pub async fn upsert_price_group(
 ) -> Result<(), StoreError> {
     sqlx::query!(
         r#"
-        INSERT INTO price_groups (group_code, group_ratio, description, pool_code, self_select)
-        VALUES ($1, ($2::text)::numeric, $3, $4, $5)
+        INSERT INTO price_groups (group_code, group_ratio, description, pool_code, self_select,
+                                  rpm_limit, rph_limit)
+        VALUES ($1, ($2::text)::numeric, $3, $4, $5, $6, $7)
         ON CONFLICT (group_code) DO UPDATE SET
             group_ratio = EXCLUDED.group_ratio,
             description = EXCLUDED.description,
             pool_code   = EXCLUDED.pool_code,
-            self_select = EXCLUDED.self_select
+            self_select = EXCLUDED.self_select,
+            rpm_limit   = EXCLUDED.rpm_limit,
+            rph_limit   = EXCLUDED.rph_limit
         "#,
         input.group_code,
         input.group_ratio,
         input.description,
         input.pool_code.unwrap_or(crate::channels::DEFAULT_POOL),
-        input.self_select
+        input.self_select,
+        input.rpm_limit,
+        input.rph_limit
     )
     .execute(pool)
     .await?;
@@ -1058,7 +1068,7 @@ pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, Stor
         ChannelKeyRow,
         r#"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
-               weight, max_concurrency
+               weight, max_concurrency, credential_kind
         FROM channel_keys ORDER BY channel_id, id
         "#
     )
@@ -1079,7 +1089,7 @@ pub async fn list_channel_keys_for(
         ChannelKeyRow,
         r#"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
-               weight, max_concurrency
+               weight, max_concurrency, credential_kind
         FROM channel_keys WHERE channel_id = ANY($1) ORDER BY channel_id, id
         "#,
         channel_ids
@@ -1483,6 +1493,64 @@ pub async fn rotate_channel_credential(
     .fetch_optional(pool)
     .await?;
     Ok(hit.map_or(RotateOutcome::NotFound, RotateOutcome::Rotated))
+}
+
+/// 读一把 key 的当前凭证明文（OAuth 刷新四步锁的"加锁后重读"，IMPLEMENTATION §11.38）。
+/// None = key 不存在。
+pub async fn read_key_credential(
+    pool: &PgPool,
+    channel_key_id: i64,
+    master_key: Option<&str>,
+) -> Result<Option<String>, StoreError> {
+    let row = sqlx::query_scalar!(
+        r#"SELECT credential_ciphertext FROM channel_keys WHERE id = $1"#,
+        channel_key_id
+    )
+    .fetch_optional(pool)
+    .await?;
+    row.map(|c| crate::credential::open(master_key, &c))
+        .transpose()
+}
+
+/// 静默回写刷新后的凭证：**不动**状态机（与 `rotate_channel_credential` 相反）——
+/// 刷新是例行动作，不该把一把正在冷却的 key 顺手复位成 active。
+pub async fn write_key_credential(
+    pool: &PgPool,
+    channel_key_id: i64,
+    credential: &str,
+    master_key: Option<&str>,
+) -> Result<(), StoreError> {
+    sqlx::query!(
+        r#"UPDATE channel_keys SET credential_ciphertext = $2, updated_at = now() WHERE id = $1"#,
+        channel_key_id,
+        crate::credential::seal_or_plain(master_key, credential)?
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// `channel_keys.credential_kind`：1 = oauth_refresh（docs/database.md §1.3）。
+pub const CREDENTIAL_KIND_OAUTH: i16 = 1;
+
+/// 给既有渠道追加一把 key（OAuth 登录把第二个账号挂到同一条渠道上）。
+pub async fn add_channel_key(
+    pool: &PgPool,
+    channel_id: i64,
+    credential: &str,
+    credential_kind: i16,
+    master_key: Option<&str>,
+) -> Result<i64, StoreError> {
+    let id = sqlx::query_scalar!(
+        r#"INSERT INTO channel_keys (channel_id, credential_ciphertext, credential_kind)
+           VALUES ($1, $2, $3) RETURNING id"#,
+        channel_id,
+        crate::credential::seal_or_plain(master_key, credential)?,
+        credential_kind
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
 }
 
 /// 管理操作审计留痕。

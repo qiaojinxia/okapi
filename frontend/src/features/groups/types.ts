@@ -9,4 +9,7 @@ export interface GroupListRow {
   pool_code: string
   /// 用户可在门户为自己的 key 自选此分组。
   self_select: boolean
+  /// 分组内每用户每分钟 / 每小时请求上限；null = 不限。
+  rpm_limit: number | null
+  rph_limit: number | null
 }

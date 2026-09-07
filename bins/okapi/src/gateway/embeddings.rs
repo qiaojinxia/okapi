@@ -159,6 +159,7 @@ async fn handle(
     };
     let est_quote = calculate(&book, &calc, est_usage)?;
     super::auth::check_member_limit(state, &key).await?;
+    super::auth::check_group_rate(state, &key).await?;
 
     let cap = |v: Option<i32>| v.map_or(0, i64::from);
     let caps = LimitCaps {
@@ -399,13 +400,19 @@ async fn forward(
     )
     .await
     .map_err(|e| (AppError::from(e), None, 0))?;
-    let candidates: Vec<_> = super::scheduler::order_candidates(rows)
+    let mut candidates: Vec<_> = super::scheduler::order_candidates(rows)
         .into_iter()
-        .filter(|c| c.provider != "anthropic")
+        .filter(|c| c.provider != "anthropic" && !super::dialect::chat_only(&c.provider))
         .collect();
+    let margin_removed = state
+        .retain_margin_ok(&key.group_code, &mut candidates)
+        .await;
     if candidates.is_empty() {
         return Err((
-            AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL),
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                super::state::no_candidates_code(margin_removed),
+            ),
             None,
             0,
         ));

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.pricing_mode, p.per_call_price_micro\n           FROM model_pricing p JOIN models m ON m.id = p.model_id WHERE m.model_name = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pricing_mode",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "pricing_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "per_call_price_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "per_call_price_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "cf0a097ad1da2e963b6d3201f0c03b1d8c14f65a129d1501abd8685655314a42"
+}

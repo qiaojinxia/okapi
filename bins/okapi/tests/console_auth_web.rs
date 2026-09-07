@@ -25,9 +25,13 @@ async fn setup() -> TestEnv {
     setup_with_policy(None).await
 }
 
-/// 注册策略经进程内 settings 缓存注入而不写库：其它用例并行注册时不受影响
-/// （写共享库里的 registration_policy = closed 会让同时在跑的注册用例莫名 403）。
 async fn setup_with_policy(policy: Option<Value>) -> TestEnv {
+    setup_with(policy, None).await
+}
+
+/// 注册策略 / 会话上限经进程内 settings 缓存注入而不写库：其它用例并行注册时不受影响
+/// （写共享库里的 registration_policy = closed 会让同时在跑的注册用例莫名 403）。
+async fn setup_with(policy: Option<Value>, session_limit: Option<i64>) -> TestEnv {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -43,6 +47,13 @@ async fn setup_with_policy(policy: Option<Value>) -> TestEnv {
         .insert(
             "registration_policy".to_owned(),
             std::sync::Arc::new(policy),
+        )
+        .await;
+    state
+        .settings_cache
+        .insert(
+            "web_session_limit".to_owned(),
+            std::sync::Arc::new(session_limit.map(Value::from)),
         )
         .await;
     let app = console::router(state);
@@ -339,6 +350,8 @@ async fn self_select_group_on_own_keys() {
                 description: "tier",
                 pool_code: None,
                 self_select,
+                rpm_limit: None,
+                rph_limit: None,
             },
         )
         .await
@@ -737,4 +750,60 @@ async fn sessions_list_and_revoke() {
         .await
         .unwrap();
     assert_eq!(dead_b.status(), 401);
+}
+
+/// 会话数上限（§11.37）：上限 2、连登三次 → 最早的 cookie 失效，后两条有效，列表恰两条并回 limit。
+#[tokio::test]
+async fn session_limit_evicts_oldest() {
+    let env = setup_with(None, Some(2)).await;
+    let client = reqwest::Client::new();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let email = format!("lim-{suffix}@ok.test");
+    let register = client
+        .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "username": format!("lim-{suffix}"), "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(register.status(), 200);
+
+    let mut cookies = Vec::new();
+    for _ in 0..3 {
+        let login = client
+            .post(format!("http://{}/auth/login", env.addr))
+            .header("x-real-ip", uniq_ip())
+            .json(&json!({"email": email, "password": "hunter2-strong"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(login.status(), 200);
+        cookies.push(cookie_of(&login));
+    }
+
+    let exchange = |cookie: &str| {
+        client
+            .post(format!("http://{}/auth/keys", env.addr))
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&json!({"name": "lim"}))
+            .send()
+    };
+    let first = exchange(&cookies[0]).await.unwrap();
+    assert_eq!(first.status(), 401, "最早的会话应被踢下线");
+    let second = exchange(&cookies[1]).await.unwrap();
+    assert_eq!(second.status(), 200);
+    let third: Value = exchange(&cookies[2]).await.unwrap().json().await.unwrap();
+    let api_key = third["api_key"].as_str().expect("最新会话必须仍有效");
+
+    let listed: Value = client
+        .get(format!("http://{}/api/me/sessions", env.addr))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["data"].as_array().unwrap().len(), 2, "{listed}");
+    assert_eq!(listed["limit"], 2);
 }

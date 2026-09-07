@@ -101,6 +101,7 @@ export function GroupsPage() {
               <Th numeric>{t('admin:groupUsers')}</Th>
               <Th>{t('admin:groupPool')}</Th>
               <Th numeric>{t('admin:groupChannels')}</Th>
+              <Th>{t('admin:groupRateLimit')}</Th>
               <Th>{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -133,6 +134,14 @@ export function GroupsPage() {
                   ) : (
                     g.channel_count
                   )}
+                </Td>
+                <Td className="text-xs text-muted-foreground tabular-nums">
+                  {g.rpm_limit === null && g.rph_limit === null
+                    ? '—'
+                    : t('admin:groupRateCell', {
+                        rpm: g.rpm_limit ?? '∞',
+                        rph: g.rph_limit ?? '∞',
+                      })}
                 </Td>
                 <Td>
                   <div className="flex items-center gap-0.5">

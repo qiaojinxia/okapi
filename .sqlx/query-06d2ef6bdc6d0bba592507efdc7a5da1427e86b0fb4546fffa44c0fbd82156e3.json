@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT c.provider, c.api_base, c.model_mapping, c.settings,\n               NULLIF(c.settings ->> 'api_version', '') AS api_version,\n               ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1 AND c.deleted_at IS NULL\n        ORDER BY ck.id\n        LIMIT 1\n        ",
+  "query": "\n        SELECT c.provider, c.api_base, c.model_mapping, c.settings,\n               NULLIF(c.settings ->> 'api_version', '') AS api_version,\n               ck.id AS channel_key_id, ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1 AND c.deleted_at IS NULL\n        ORDER BY ck.id\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -55,6 +55,17 @@
       },
       {
         "ordinal": 5,
+        "name": "channel_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
         "name": "credential_ciphertext",
         "type_info": "Bytea",
         "origin": {
@@ -76,8 +87,9 @@
       false,
       false,
       null,
+      false,
       false
     ]
   },
-  "hash": "b5858b53393eaeeb4a6bc3ad671941620d98b9ce1efdb997a5cd41ec7ee8046c"
+  "hash": "06d2ef6bdc6d0bba592507efdc7a5da1427e86b0fb4546fffa44c0fbd82156e3"
 }
