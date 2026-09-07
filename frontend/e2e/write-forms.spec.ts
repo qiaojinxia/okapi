@@ -1329,3 +1329,80 @@ test('重置密码：缺 token 直接提示无效；长度与一致性校验挡�
   await expect(page.getByRole('alert')).toContainText('重置链接无效或已过期')
   expect(posts).toHaveLength(2)
 })
+
+test('兑换码生成抽屉：面值 USD 换 micro 整数（0.29 边界）、绑定用户去空格转数字、空限额不发键、过期时间按本地换 UTC；面值 0 不放行；结果明文只此一次、可整批复制；400 以错误码文案提示', async ({ page, context }) => {
+  await prepare(page)
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+  const posts: Json[] = []
+  let failFirst = true
+  await page.route('**/admin/redemptions?*', (route) => route.fulfill({ json: { total: 0, data: [] } }))
+  await page.route('**/admin/plans', (route) =>
+    route.request().isNavigationRequest()
+      ? route.fallback()
+      : route.fulfill({ json: { data: [{ plan_code: 'starter' }, { plan_code: 'pro-month' }] } }),
+  )
+  await page.route('**/admin/redemptions', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    if (failFirst) {
+      failFirst = false
+      return route.fulfill(apiError(400, 'bad_request', 'count'))
+    }
+    await route.fulfill({ json: { batch_id: 'b-20260907', codes: ['OKAPI-AAAA-1111', 'OKAPI-BBBB-2222'] } })
+  })
+
+  await page.goto('/admin/codes')
+  await page.getByRole('button', { name: '生成', exact: true }).first().click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.getByText('批量生成兑换码')).toBeVisible()
+  await expect(drawer.locator('#c-count')).toHaveValue('10')
+  await expect(drawer.locator('#c-amount')).toHaveValue('10')
+  const submit = drawer.getByRole('button', { name: '生成', exact: true })
+
+  // 面值 0 → 0 micro，生成按钮禁用；输入 0.29 这个浮点边界值，换算后必须恰是 290000
+  await drawer.locator('#c-amount').fill('0')
+  await expect(submit).toBeDisabled()
+  await drawer.locator('#c-amount').fill('0.29')
+  await expect(submit).toBeEnabled()
+  await drawer.locator('#c-count').fill('25')
+  await drawer.locator('#c-plan').selectOption('pro-month')
+  await drawer.locator('#c-bind').fill(' 77 ')
+  await drawer.locator('#c-exp').fill('2026-12-31T23:30')
+  // datetime-local 没有时区，前端按浏览器本地时间换 UTC ISO；期望值在同一浏览器里算，与运行机时区无关
+  const expiresAt = await page.evaluate(() => new Date('2026-12-31T23:30').toISOString())
+
+  // 第一次 400：错误码 + param 渲染成文案，抽屉留在表单态可改可重发
+  let done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/redemptions'))
+  await submit.click()
+  await done
+  const alert = page.getByRole('alert')
+  await expect(alert).toContainText('请求参数有误（count）')
+  await expect(drawer.locator('#c-count')).toHaveValue('25')
+  expect(posts[0]).toEqual({
+    count: 25,
+    amount_micro: 290_000,
+    plan_code: 'pro-month',
+    bind_user_id: 77,
+    expires_at: expiresAt,
+  })
+  // 右下角的错误 toast 盖住抽屉页脚，先关掉再点
+  await alert.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(alert).toHaveCount(0)
+
+  // 第二次成功：结果态展示批次与明文，生成按钮消失、取消变关闭，整批复制进剪贴板
+  done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/redemptions'))
+  await submit.click()
+  await done
+  expect(posts).toHaveLength(2)
+  await expect(drawer.getByText('批次 b-20260907')).toBeVisible()
+  await expect(drawer.getByText('明文仅此一次可见，离开本页后无法再取回。')).toBeVisible()
+  await expect(drawer.locator('textarea')).toHaveValue('OKAPI-AAAA-1111\nOKAPI-BBBB-2222')
+  await expect(drawer.getByRole('button', { name: '生成', exact: true })).toHaveCount(0)
+  await drawer.getByRole('button', { name: '复制全部', exact: true }).click()
+  await expect(drawer.getByRole('button', { name: '已复制', exact: true })).toBeVisible()
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('OKAPI-AAAA-1111\nOKAPI-BBBB-2222')
+  // 页脚的"取消"已变成"关闭"（抽屉头部还有一个同名图标按钮，按可见文本取页脚那个）
+  await drawer.getByRole('button', { name: '取消', exact: true }).waitFor({ state: 'detached' })
+  await drawer.getByText('关闭', { exact: true }).click()
+  await expect(drawer).toHaveCount(0)
+})
