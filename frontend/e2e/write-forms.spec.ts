@@ -566,8 +566,8 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await prepare(page)
   const posts: Json[] = []
   const groups = [
-    { group_code: 'default', group_ratio: '1', description: null, is_default: true, user_count: 12, channel_count: 3, pool_code: 'default', self_select: false },
-    { group_code: 'vip', group_ratio: '0.8', description: 'VIP', is_default: false, user_count: 2, channel_count: 1, pool_code: 'premium', self_select: true },
+    { group_code: 'default', group_ratio: '1', description: null, is_default: true, user_count: 12, channel_count: 3, pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: null },
+    { group_code: 'vip', group_ratio: '0.8', description: 'VIP', is_default: false, user_count: 2, channel_count: 1, pool_code: 'premium', self_select: true, rpm_limit: 60, rph_limit: null },
   ]
   await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { data: groups, total: groups.length } }))
   await page.route('**/admin/groups', async (route) => {
@@ -596,6 +596,11 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
     page.getByRole('row').filter({ hasText: 'default' }).first().getByRole('button', { name: '删除', exact: true }),
   ).toBeDisabled()
 
+  // 列表"限流"列：两边都不限显示 —；只配了每分钟则另一边显示 ∞
+  await expect(page.getByRole('row').filter({ hasText: 'vip' }).getByText('60 / 分 · ∞ / 时')).toBeVisible()
+  // default 行的描述列也是 —，限流列取该行第二个
+  await expect(page.getByRole('row').filter({ hasText: 'default' }).first().getByText('—', { exact: true })).toHaveCount(2)
+
   await page.getByRole('row').filter({ hasText: 'vip' }).getByRole('button', { name: '编辑', exact: true }).click()
   const edit = await openedDialog(page)
   await expect(edit.getByRole('heading', { name: '编辑 vip' })).toBeVisible()
@@ -607,6 +612,17 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await edit.locator('#g-desc').fill(' VIP tier ')
   await edit.locator('#g-pool').selectOption('default')
   await edit.getByRole('switch', { name: '允许用户自选此分组' }).click()
+  // 分组级限流：回显、负数 / 小数挡在提交前（aria-invalid）、清空 = null、整数原样
+  await expect(edit.locator('#g-rpm')).toHaveValue('60')
+  await expect(edit.locator('#g-rph')).toHaveValue('')
+  await edit.locator('#g-rpm').fill('-1')
+  await expect(edit.locator('#g-rpm')).toHaveAttribute('aria-invalid', 'true')
+  await expect(edit.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await edit.locator('#g-rpm').fill('1.5')
+  await expect(edit.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await edit.locator('#g-rpm').fill('')
+  await edit.locator('#g-rph').fill(' 1200 ')
+  await expect(edit.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
   const saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
   await edit.getByRole('button', { name: '保存', exact: true }).click()
   await saved
@@ -614,7 +630,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   // 只钉这五个字段的形状：分组抽屉还在长新字段（如分组级限流），用 toMatchObject 免得每加一列就红
   expect(posts).toHaveLength(1)
   expect(posts[0]).toMatchObject(
-    { group_code: 'vip', group_ratio: '0.75', description: 'VIP tier', pool_code: 'default', self_select: false },
+    { group_code: 'vip', group_ratio: '0.75', description: 'VIP tier', pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: 1200 },
   )
 
   // 新建：分组码为空不放行；缺省倍率 1、缺省池 default、不可自选
@@ -628,7 +644,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
   await save.click()
   await created
-  expect(posts[1]).toMatchObject({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false })
+  expect(posts[1]).toMatchObject({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: null })
 })
 
 test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro，空范围不发键，时段星期勾选排序；列表上下线与删除提示需发布', async ({ page }) => {
