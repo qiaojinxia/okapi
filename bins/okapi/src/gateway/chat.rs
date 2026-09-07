@@ -2492,7 +2492,7 @@ async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
             Pool::Wallet
         }
     };
-    let (channel, key) = failure.channel.map_or((0, 0), |(c, k)| (c, k));
+    let (channel, key) = failure.channel.unwrap_or((0, 0));
     record_terminal(
         bill,
         &CandInfo {
@@ -2654,8 +2654,7 @@ fn upstream_passthrough_response(
 
 fn body_is_anthropic_error(body: &Bytes) -> bool {
     serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .is_some_and(|v| v.get("type").and_then(|t| t.as_str()) == Some("error"))
+        .is_ok_and(|v| v.get("type").and_then(|t| t.as_str()) == Some("error"))
 }
 
 /// google.rpc.Status 壳：`error.code` 为数字且带 `error.status`。

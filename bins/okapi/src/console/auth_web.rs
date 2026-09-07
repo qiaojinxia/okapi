@@ -28,16 +28,17 @@ where
 {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(
+    // 没有真正的 .await：直接给一个就绪的 Future（clippy 1.98 `unused_async_trait_impl`）
+    fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        Ok(Self(
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self(
             parts
                 .extensions
                 .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
                 .map(|c| c.0),
-        ))
+        )))
     }
 }
 

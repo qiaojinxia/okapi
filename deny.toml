@@ -18,6 +18,12 @@ allow = [
     "Unicode-3.0",
     "Zlib",
 ]
+# CI 的 cargo-deny-action 缺省带 --all-features：embed-web 特性经 rust-embed 的 proc-macro
+# （rust-embed-impl → shellexpand → dirs → dirs-sys）拉进 option-ext（MPL-2.0）。它只在编译期
+# 帮 proc-macro 找配置目录，不进产物；按 crate 单独放行而不把 MPL 加进全局 allow
+[[licenses.exceptions]]
+crate = "option-ext"
+allow = ["MPL-2.0"]
 
 [bans]
 multiple-versions = "warn"

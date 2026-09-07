@@ -19,17 +19,23 @@ pub struct Query<T>(pub T);
 
 impl<T, S> FromRequestParts<S> for Query<T>
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + Send,
     S: Send + Sync,
 {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        axum::extract::Query::<T>::try_from_uri(&parts.uri)
-            .map(|axum::extract::Query(inner)| Self(inner))
-            .map_err(|err| {
-                tracing::debug!(error = %err, path = %parts.uri.path(), "bad query string");
-                AppError::bad_request().with_param("query")
-            })
+    // 没有真正的 .await：直接给一个就绪的 Future（clippy 1.98 `unused_async_trait_impl`）
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(
+            axum::extract::Query::<T>::try_from_uri(&parts.uri)
+                .map(|axum::extract::Query(inner)| Self(inner))
+                .map_err(|err| {
+                    tracing::debug!(error = %err, path = %parts.uri.path(), "bad query string");
+                    AppError::bad_request().with_param("query")
+                }),
+        )
     }
 }

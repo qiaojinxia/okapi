@@ -1,0 +1,4 @@
+# result_large_err（clippy 1.98 起默认开）：gateway 的 ForwardFailure / AttemptError 带着上游原文摘要、
+# 分类与渠道定位，约 160 字节；Ok 侧的 axum Response 本身更大，把 Err 装箱只是给失败路径多一次分配。
+# 阈值从缺省 128 放到 256，真正离谱的错误类型仍会被抓到。
+large-error-threshold = 256
