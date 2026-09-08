@@ -111,6 +111,15 @@ pub fn is_invalid_grant(status: u16, body: &[u8]) -> bool {
     )
 }
 
+/// token 端点的出站修饰：走渠道自己的代理（刷新与 API 请求得从同一个出口出去，
+/// 只有代理能出网的部署也才刷得动），但不带渠道给上游 API 配的额外头。
+pub(crate) fn token_outbound(proxy_url: Option<&str>) -> crate::http::Outbound {
+    crate::http::Outbound {
+        proxy_url: proxy_url.map(str::to_owned),
+        extra_headers: Vec::new(),
+    }
+}
+
 /// 表单编码（RFC 3986 非保留字符不编，与 `aws_sigv4::uri_encode` 同规则）。
 pub(crate) fn form_encode(pairs: &[(&str, &str)]) -> String {
     pairs

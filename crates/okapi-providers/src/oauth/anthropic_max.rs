@@ -7,7 +7,7 @@
 //! 端点与 scope 跟随 Claude Code CLI（2026-09 对照 Sub2API 与实测：旧 `console.anthropic.com`
 //! 回调页已 301 到 `platform.claude.com`）。
 
-use super::{Pkce, Tokens, form_encode, parse_tokens};
+use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
 use crate::anthropic::{ANTHROPIC_VERSION, MessagesResponse, classify, send_messages_at};
 use crate::error::UpstreamError;
 use bytes::Bytes;
@@ -62,12 +62,13 @@ pub fn split_pasted_code(pasted: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// 换码（JSON 体）。
+/// 换码（JSON 体）。`proxy_url` = 渠道代理，刷新与 API 请求同一出口。
 pub async fn exchange(
     http: &crate::http::HttpPool,
     token_url: &str,
     code: &str,
     verifier: &str,
+    proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
     post_token(
         http,
@@ -80,6 +81,7 @@ pub async fn exchange(
             "code_verifier": verifier,
             "state": verifier,
         }),
+        proxy_url,
     )
     .await
 }
@@ -89,6 +91,7 @@ pub async fn refresh(
     http: &crate::http::HttpPool,
     token_url: &str,
     refresh_token: &str,
+    proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
     post_token(
         http,
@@ -98,6 +101,7 @@ pub async fn refresh(
             "client_id": CLIENT_ID,
             "refresh_token": refresh_token,
         }),
+        proxy_url,
     )
     .await
 }
@@ -108,13 +112,10 @@ async fn post_token(
     http: &crate::http::HttpPool,
     token_url: &str,
     body: Value,
+    proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
     let resp = http
-        .probe(
-            &crate::http::Outbound::default(),
-            reqwest::Method::POST,
-            token_url,
-        )?
+        .probe(&token_outbound(proxy_url), reqwest::Method::POST, token_url)?
         .timeout(TOKEN_TIMEOUT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body.to_string())

@@ -124,20 +124,23 @@ pub async fn exchange(
         super::ssrf::validate_api_base(&state, url).await?;
     }
     // 追加到既有渠道：属主范围与 provider 一致性在换码**之前**判——授权码一次性，
-    // 被拒的请求不该先把它烧掉；own 范围的渠道管理员也不能往别人的渠道里塞 key
+    // 被拒的请求不该先把它烧掉；own 范围的渠道管理员也不能往别人的渠道里塞 key。
+    // 换码走该渠道的代理（新建渠道此刻还没有设置，直连）
+    let mut proxy_url: Option<String> = None;
     if let Some(channel_id) = req.channel_id {
         ensure_channel_owner(&state, channel_id, &actor, scope).await?;
-        let existing = sqlx::query_scalar!(
-            r#"SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
+        let existing = sqlx::query!(
+            r#"SELECT provider, settings FROM channels WHERE id = $1 AND deleted_at IS NULL"#,
             channel_id
         )
         .fetch_optional(&state.pg)
         .await
         .map_err(okapi_store::StoreError::from)?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
-        if existing != provider {
+        if existing.provider != provider {
             return Err(AppError::bad_request().with_param("channel_provider_mismatch"));
         }
+        proxy_url = okapi_providers::http::proxy_url_from_settings(&existing.settings);
     }
 
     let http = state.upstream.http();
@@ -148,6 +151,7 @@ pub async fn exchange(
             token_url.unwrap_or(anthropic_max::TOKEN_URL),
             code,
             &verifier,
+            proxy_url.as_deref(),
         )
         .await
     } else {
@@ -157,6 +161,7 @@ pub async fn exchange(
             token_url.unwrap_or(codex::TOKEN_URL),
             &code,
             &verifier,
+            proxy_url.as_deref(),
         )
         .await
     }

@@ -45,6 +45,7 @@ pub(super) async fn probe(
             .get("oauth_token_url")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty()),
+        proxy_url: outbound.proxy_url.as_deref(),
     };
     let started = std::time::Instant::now();
     let outcome: Result<u16, UpstreamError> = match (provider, upstream_model) {

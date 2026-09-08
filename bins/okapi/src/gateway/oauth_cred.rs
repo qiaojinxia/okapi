@@ -95,6 +95,9 @@ pub struct OAuthKey<'a> {
     pub provider: &'a str,
     /// `settings.oauth_token_url` 覆写；None = 官方地址。
     pub token_url: Option<&'a str>,
+    /// 渠道代理：刷新得和 API 请求走同一个出口（订阅账号对出口 IP 敏感，
+    /// 只有代理能出网的部署也才刷得动）。
+    pub proxy_url: Option<&'a str>,
 }
 
 impl<'a> From<&'a ChannelCandidate> for OAuthKey<'a> {
@@ -103,6 +106,7 @@ impl<'a> From<&'a ChannelCandidate> for OAuthKey<'a> {
             channel_key_id: cand.channel_key_id,
             provider: &cand.provider,
             token_url: cand.oauth_token_url.as_deref(),
+            proxy_url: cand.proxy_url.as_deref(),
         }
     }
 }
@@ -253,6 +257,7 @@ async fn do_refresh(
                 http,
                 key.token_url.unwrap_or(anthropic_max::TOKEN_URL),
                 &basis.refresh_token,
+                key.proxy_url,
             )
             .await
         }
@@ -261,6 +266,7 @@ async fn do_refresh(
                 http,
                 key.token_url.unwrap_or(codex::TOKEN_URL),
                 &basis.refresh_token,
+                key.proxy_url,
             )
             .await
         }

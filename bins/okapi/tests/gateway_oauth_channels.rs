@@ -701,18 +701,146 @@ async fn token_endpoint_redirect_is_not_followed() {
         )
     };
     assert!(is_302(
-        okapi_providers::oauth::anthropic_max::refresh(&http, &token_url, "rt").await
+        okapi_providers::oauth::anthropic_max::refresh(&http, &token_url, "rt", None).await
     ));
     assert!(is_302(
-        okapi_providers::oauth::anthropic_max::exchange(&http, &token_url, "code", "v").await
+        okapi_providers::oauth::anthropic_max::exchange(&http, &token_url, "code", "v", None).await
     ));
     assert!(is_302(
-        okapi_providers::oauth::codex::refresh(&http, &token_url, "rt").await
+        okapi_providers::oauth::codex::refresh(&http, &token_url, "rt", None).await
     ));
     assert!(is_302(
-        okapi_providers::oauth::codex::exchange(&http, &token_url, "code", "v").await
+        okapi_providers::oauth::codex::exchange(&http, &token_url, "code", "v", None).await
     ));
     assert_eq!(leaked.load(Ordering::SeqCst), 0, "重定向目标不得被请求");
+}
+
+/// 最小 HTTP 正向代理：把绝对 URI 原样转发给目标，记下经手的每个 URI。
+async fn spawn_recording_proxy(seen: Arc<std::sync::Mutex<Vec<String>>>) -> SocketAddr {
+    let router = Router::new().fallback(move |req: axum::extract::Request| {
+        let seen = Arc::clone(&seen);
+        async move {
+            let uri = req.uri().to_string();
+            seen.lock().unwrap().push(uri.clone());
+            let method = req.method().clone();
+            let headers = req.headers().clone();
+            let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
+            let mut b = reqwest::Client::new().request(method, uri);
+            for (k, v) in &headers {
+                if k == axum::http::header::HOST || k == axum::http::header::CONNECTION {
+                    continue;
+                }
+                b = b.header(k, v);
+            }
+            match b.body(body).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let ct = resp
+                        .headers()
+                        .get(axum::http::header::CONTENT_TYPE)
+                        .cloned();
+                    let bytes = resp.bytes().await.unwrap_or_default();
+                    let mut out = axum::response::Response::new(axum::body::Body::from(bytes));
+                    *out.status_mut() = status;
+                    if let Some(ct) = ct {
+                        out.headers_mut()
+                            .insert(axum::http::header::CONTENT_TYPE, ct);
+                    }
+                    out
+                }
+                Err(_) => axum::http::StatusCode::BAD_GATEWAY.into_response(),
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    addr
+}
+
+/// 渠道配了 `proxy_url` 时，token 刷新与追加 key 的换码都得和 API 请求一样走这个代理：
+/// 订阅账号对出口 IP 敏感，只有代理能出网的部署也才刷得动。
+#[tokio::test]
+async fn token_refresh_and_attach_exchange_use_channel_proxy() {
+    let env = setup().await;
+    let (channel_id, key_id) = login_channel(&env, "anthropic_max").await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let proxy = spawn_recording_proxy(Arc::clone(&seen)).await;
+    sqlx::query!(
+        r#"UPDATE channels SET settings = settings || $2 WHERE id = $1"#,
+        channel_id,
+        json!({"proxy_url": format!("http://{proxy}")})
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    env.state.invalidate_routing_caches();
+
+    expire_cred(&env, key_id).await;
+    let resp = chat(&env).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        env.mock_state.token_calls.load(Ordering::SeqCst),
+        2,
+        "登录一次 + 刷新一次"
+    );
+    let through_proxy = |path: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|u| u.contains(path))
+            .count()
+    };
+    assert_eq!(
+        through_proxy("/token"),
+        1,
+        "刷新经代理：{:?}",
+        seen.lock().unwrap()
+    );
+    assert_eq!(
+        through_proxy("/v1/messages"),
+        1,
+        "API 请求经代理：{:?}",
+        seen.lock().unwrap()
+    );
+
+    // 给这条渠道追加一把 key：换码也走它的代理
+    let client = reqwest::Client::new();
+    let started: Value = client
+        .post(format!("http://{}/admin/channels/oauth/start", env.console))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"provider": "anthropic_max"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let state = started["state"].as_str().unwrap();
+    let resp = client
+        .post(format!(
+            "http://{}/admin/channels/oauth/exchange",
+            env.console
+        ))
+        .bearer_auth(&env.admin_token)
+        .json(
+            &json!({"state": state, "code": format!("auth-code-2#{state}"),
+            "channel_id": channel_id, "token_url": format!("http://{}/token", env.mock)}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        through_proxy("/token"),
+        2,
+        "换码经代理：{:?}",
+        seen.lock().unwrap()
+    );
 }
 
 /// own 范围的渠道管理员不能把 OAuth key 追加到别人的渠道；拒绝发生在换码之前，

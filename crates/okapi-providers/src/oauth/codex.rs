@@ -8,7 +8,7 @@
 //! `store` 必须 false、`instructions` 键必须存在、不接受 `role: system` 与一批官方 API 参数。
 //! `prepare_body` 负责整形；客户端要非流式时由 `collect_json` 把 SSE 聚合回一个 Responses 对象。
 
-use super::{Pkce, Tokens, form_encode, parse_tokens};
+use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
 use crate::error::UpstreamError;
 use crate::openai::{ChatResponse, StreamHandle, classify};
 use crate::responses::usage_from_responses;
@@ -90,12 +90,14 @@ pub fn account_id_from_id_token(id_token: &str) -> Option<String> {
 }
 
 /// 换码（表单体，与 Codex CLI 一致）。token 端点走不跟随重定向的探针 client：
-/// 地址可被管理员覆写（`oauth_token_url`），SSRF 闸只看得到填进来的那个 URL。
+/// 地址可被管理员覆写（`oauth_token_url`），SSRF 闸只看得到填进来的那个 URL；
+/// `proxy_url` = 渠道代理，刷新与 API 请求同一出口。
 pub async fn exchange(
     http: &crate::http::HttpPool,
     token_url: &str,
     code: &str,
     verifier: &str,
+    proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
     let form = form_encode(&[
         ("grant_type", "authorization_code"),
@@ -105,11 +107,7 @@ pub async fn exchange(
         ("code_verifier", verifier),
     ]);
     let resp = http
-        .probe(
-            &crate::http::Outbound::default(),
-            reqwest::Method::POST,
-            token_url,
-        )?
+        .probe(&token_outbound(proxy_url), reqwest::Method::POST, token_url)?
         .timeout(TOKEN_TIMEOUT)
         .header(
             reqwest::header::CONTENT_TYPE,
@@ -127,13 +125,10 @@ pub async fn refresh(
     http: &crate::http::HttpPool,
     token_url: &str,
     refresh_token: &str,
+    proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
     let resp = http
-        .probe(
-            &crate::http::Outbound::default(),
-            reqwest::Method::POST,
-            token_url,
-        )?
+        .probe(&token_outbound(proxy_url), reqwest::Method::POST, token_url)?
         .timeout(TOKEN_TIMEOUT)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(

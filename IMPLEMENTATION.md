@@ -2200,6 +2200,9 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   直接用）→ 调 provider 的 refresh → 回写新 JSON（refresh token 若轮转则替换）。`invalid_grant` 二次重读；
   仍失败 → `mark_key_failure(Invalid)`（仅人工恢复：重新登录）。到期前 120s 即视为需刷新；刷新失败但旧
   token 尚未过期则先用旧的。刷新只在请求路径上惰性发生（站长自用，请求量小，不值得再开 worker 任务）。
+  **换码 / 刷新走渠道自己的 `proxy_url`**（不带渠道给上游 API 配的额外头）：订阅账号对出口 IP 敏感，
+  刷新与 API 请求必须从同一个出口出去，只有代理能出网的部署也才刷得动；登录时新建的渠道此刻还没有
+  设置，直连，追加 key 到既有渠道则用该渠道的代理。
 - **`provider = anthropic_max`**（Anthropic 方言，`okapi-providers::oauth::anthropic_max`）：
   PKCE S256，`claude.com/cai/oauth/authorize`（`code=true`，scope 与 Claude Code CLI 一致：
   `org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload`，
