@@ -260,7 +260,7 @@ async fn first_output_window_is_per_channel() {
     });
 
     let t0 = std::time::Instant::now();
-    let status = reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(format!("http://{gw}/v1/chat/completions"))
         .bearer_auth(&token)
         .json(&json!({
@@ -269,11 +269,18 @@ async fn first_output_window_is_per_channel() {
         }))
         .send()
         .await
-        .unwrap()
-        .status()
-        .as_u16();
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap_or(Value::Null);
     let elapsed = t0.elapsed();
     assert_ne!(status, 200);
+    // 光看"不是 200"不够：候选耗尽、余额不足、渠道被摘都不是 200，
+    // 那样即便首字窗口整个失灵（比如窗口没读到配置、直接走了别的失败分支），用例照样绿。
+    // 上游一个字都没吐，最后落到客户端的必须是 upstream_timeout。
+    assert_eq!(
+        body["error"]["code"], "upstream_timeout",
+        "挂死的上游应报首字超时：{status} {body}"
+    );
     assert!(
         elapsed < Duration::from_secs(20),
         "配了 5 秒窗口就不该等满 30 秒缺省，实耗 {elapsed:?}"

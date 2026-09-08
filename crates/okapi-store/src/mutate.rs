@@ -200,6 +200,7 @@ pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool,
     if pool_code == crate::channels::DEFAULT_POOL {
         return Err(StoreError::Conflict("builtin_pool"));
     }
+    let mut tx = pool.begin().await?;
     let refs = sqlx::query!(
         r#"
         SELECT (SELECT COUNT(*) FROM price_groups WHERE pool_code = $1) AS "groups!",
@@ -210,19 +211,28 @@ pub async fn delete_channel_pool(pool: &PgPool, pool_code: &str) -> Result<bool,
         "#,
         pool_code
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     // 被别的池当降级目标同样算引用：静默删掉等于那些池悄悄失去兜底
     if refs.groups > 0 || refs.keys > 0 || refs.fallbacks > 0 {
         return Err(StoreError::Conflict("pool_in_use"));
     }
+    // 软删令牌上的覆盖是死引用（key 已停用），但外键无 ON DELETE，留着池就永远删不掉
+    sqlx::query!(
+        r#"UPDATE api_keys SET pool_override = NULL
+           WHERE pool_override = $1 AND deleted_at IS NOT NULL"#,
+        pool_code
+    )
+    .execute(&mut *tx)
+    .await?;
     let affected = sqlx::query!(
         r#"DELETE FROM channel_pools WHERE pool_code = $1"#,
         pool_code
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
+    tx.commit().await?;
     Ok(affected > 0)
 }
 
@@ -253,11 +263,12 @@ pub async fn delete_model(pool: &PgPool, model_name: &str) -> Result<bool, Store
 /// 删除定价分组。默认组与被占用（用户/令牌/套餐）时返回 `Conflict`。
 /// 渠道可见性已移到池，分组只是引用池，删分组不影响池本身。
 pub async fn delete_price_group(pool: &PgPool, group_code: &str) -> Result<bool, StoreError> {
+    let mut tx = pool.begin().await?;
     let Some(is_default) = sqlx::query_scalar!(
         r#"SELECT is_default FROM price_groups WHERE group_code = $1"#,
         group_code
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     else {
         return Ok(false);
@@ -274,17 +285,26 @@ pub async fn delete_price_group(pool: &PgPool, group_code: &str) -> Result<bool,
         "#,
         group_code
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     if refs.users > 0 || refs.keys > 0 || refs.plans > 0 {
         return Err(StoreError::Conflict("group_in_use"));
     }
+    // 同 `delete_channel_pool`：软删令牌上的覆盖是死引用，不清就撞外键、分组永远删不掉
+    sqlx::query!(
+        r#"UPDATE api_keys SET group_override = NULL
+           WHERE group_override = $1 AND deleted_at IS NOT NULL"#,
+        group_code
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query!(
         r#"DELETE FROM price_groups WHERE group_code = $1"#,
         group_code
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(true)
 }
 

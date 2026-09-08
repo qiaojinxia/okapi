@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET balance_micro = 12_345 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "17e849153fbcaf0abaa34fb75c32bb2e64ad71d38331319009ced8d4bbb651b6"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO settings (key, value) VALUES ('balance_low_threshold_micro', '101'::jsonb)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "99053e5fa56b9c74e0f0f01ff6dcc36d08c230bfbe86473f679e6f63193e9c4a"
+}

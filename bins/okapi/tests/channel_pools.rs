@@ -474,3 +474,92 @@ async fn pool_delete_blocked_while_referenced() {
     assert_eq!(row.pool_code, okapi_store::channels::DEFAULT_POOL);
     assert!(row.self_select);
 }
+
+/// 同一类缺陷的第二、三处（09-08 第十九轮，`delete_role` 之后按 `REFERENCES` 逐列排查出来的）。
+///
+/// 形状：令牌是**软删**（只置 `deleted_at`），可它的 `group_override` / `pool_override` 是
+/// **无 `ON DELETE`** 的外键，绑定原样留着；两处占用检查却都带 `deleted_at IS NULL`——墓碑上的
+/// 死引用既不算占用、又拦得住硬删，于是删分组 / 删池撞外键报 `internal_error`，而且这个分组
+/// 或池从此永远删不掉。修法与 `delete_role` 一致：确认没有活着的引用之后，在同一事务里把软删
+/// 令牌上的覆盖置 NULL 再删。活着的令牌引用仍然 409，一个不放。
+#[tokio::test]
+async fn deleting_group_or_pool_ignores_soft_deleted_key_overrides() {
+    let env = setup().await;
+
+    // —— 池：活令牌绑着 → pool_in_use；软删之后应可删 ——
+    let live = key_in_group(&env.pg, None, Some(&env.stable_pool)).await;
+    let err = okapi_store::mutate::delete_channel_pool(&env.pg, &env.stable_pool).await;
+    assert!(
+        matches!(err, Err(okapi_store::StoreError::Conflict("pool_in_use"))),
+        "活令牌绑着的池不得删，实际 {err:?}"
+    );
+    assert!(
+        okapi_store::mutate::delete_api_key(&env.pg, live.key_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        okapi_store::mutate::delete_channel_pool(&env.pg, &env.stable_pool)
+            .await
+            .unwrap(),
+        "只剩软删令牌引用时应能删（改前撞外键报 internal_error）"
+    );
+    let dangling = sqlx::query_scalar!(
+        r#"SELECT pool_override FROM api_keys WHERE id = $1"#,
+        live.key_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(dangling.is_none(), "墓碑上的死引用要一并清掉");
+
+    // —— 分组：同样两步 ——
+    let solo_group = format!("g-tomb-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    okapi_store::admin::upsert_price_group(
+        &env.pg,
+        PriceGroupInput {
+            group_code: &solo_group,
+            group_ratio: "1",
+            description: "t",
+            pool_code: None,
+            self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+    let live = key_in_group(&env.pg, None, None).await;
+    sqlx::query!(
+        "UPDATE api_keys SET group_override = $1 WHERE id = $2",
+        solo_group,
+        live.key_id
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    let err = okapi_store::mutate::delete_price_group(&env.pg, &solo_group).await;
+    assert!(
+        matches!(err, Err(okapi_store::StoreError::Conflict("group_in_use"))),
+        "活令牌绑着的分组不得删，实际 {err:?}"
+    );
+    assert!(
+        okapi_store::mutate::delete_api_key(&env.pg, live.key_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        okapi_store::mutate::delete_price_group(&env.pg, &solo_group)
+            .await
+            .unwrap(),
+        "只剩软删令牌引用时应能删"
+    );
+    let dangling = sqlx::query_scalar!(
+        r#"SELECT group_override FROM api_keys WHERE id = $1"#,
+        live.key_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(dangling.is_none(), "墓碑上的死引用要一并清掉");
+}

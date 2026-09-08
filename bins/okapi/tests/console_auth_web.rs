@@ -82,8 +82,13 @@ fn cookie_of(resp: &reqwest::Response) -> String {
 
 /// RFC 6238 本地生成当前码（与服务端同算法，测试专用）。
 fn totp_now(secret: &[u8]) -> String {
+    totp_at(secret, chrono::Utc::now().timestamp())
+}
+
+/// 指定时刻的码：用来造"过期窗口"的错码，验容忍窗没被开得过宽。
+fn totp_at(secret: &[u8], unix: i64) -> String {
     use hmac::{Hmac, KeyInit as _, Mac};
-    let counter = u64::try_from(chrono::Utc::now().timestamp() / 30).unwrap();
+    let counter = u64::try_from(unix / 30).unwrap();
     let mut mac = <Hmac<sha1::Sha1>>::new_from_slice(secret).unwrap();
     mac.update(&counter.to_be_bytes());
     let digest = mac.finalize().into_bytes();
@@ -220,6 +225,41 @@ async fn register_login_key_totp_full_flow() {
     assert_eq!(no_code.status(), 401);
     let body: Value = no_code.json().await.unwrap();
     assert_eq!(body["error"]["code"], "totp_required");
+
+    // 错码 401 totp_invalid（09-08 第十九轮补）：此前只喂过正确的码，
+    // 于是"校验恒真"这种把 2FA 变成摆设的实现也能让本用例全绿。
+    // 三种错法都试：纯错的、位数不对的、以及**上一个时间窗**的码——
+    // 后者最要紧，容忍窗口开得太宽等于把有效期从 30 秒拉长到几分钟。
+    let now = chrono::Utc::now().timestamp();
+    for (label, code) in [
+        ("纯错码", "000000".to_owned()),
+        ("位数不对", "1234".to_owned()),
+        ("早已过期的窗口", totp_at(&secret, now - 3600)),
+    ] {
+        let bad = client
+            .post(format!("http://{}/auth/login", env.addr))
+            .header("x-real-ip", uniq_ip())
+            .json(&json!({"email": email, "password": "hunter2-strong",
+                "totp_code": code}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), 401, "{label}不得放行");
+        let body: Value = bad.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "totp_invalid", "{label}：{body}");
+    }
+    // 密码错 + 码对：报的仍是 invalid_credentials，不能因为码对了就漏出"密码错了"之外的信息
+    let wrong_pw = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "password": "not-the-password",
+            "totp_code": totp_now(&secret)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_pw.status(), 401);
+    let body: Value = wrong_pw.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "invalid_credentials", "{body}");
 
     let with_code = client
         .post(format!("http://{}/auth/login", env.addr))

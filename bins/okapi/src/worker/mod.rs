@@ -153,27 +153,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 }
             }
             _ = reconcile.tick() => {
-                match reconcile_balances(&pg, &ledger, RECONCILE_BATCH).await {
-                    Ok(drifts) if !drifts.is_empty() => {
-                        for d in &drifts {
-                            tracing::error!(
-                                user_id = d.user_id,
-                                events_sum = d.events_sum_micro,
-                                redis_effective = d.redis_effective_micro,
-                                pg_snapshot = d.pg_snapshot_micro,
-                                "对账差异（不会自愈：按账本修复走 /admin/reconciliation/repair）"
-                            );
-                        }
-                        let users: Vec<i64> = drifts.iter().take(20).map(|d| d.user_id).collect();
-                        notifier
-                            .dispatch(
-                                "drift",
-                                &serde_json::json!({ "count": drifts.len(), "user_ids": users }),
-                            )
-                            .await;
-                    }
-                    Ok(_) => tracing::debug!("对账零差异"),
-                    Err(err) => tracing::error!(error = %err, "对账失败"),
+                if let Err(err) =
+                    reconcile_and_notify(&pg, &ledger, RECONCILE_BATCH, &notifier).await
+                {
+                    tracing::error!(error = %err, "对账失败");
                 }
             }
             _ = partition.tick() => {
@@ -198,12 +181,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     Ok(n) => tracing::info!(recovered = n, "渠道 key 冷却到期恢复"),
                     Err(err) => tracing::error!(error = %err, "冷却恢复失败"),
                 }
-                if let Ok(cooling) = notify::count_cooling_keys(&pg).await
-                    && cooling > 0
-                {
-                    notifier
-                        .dispatch("channel_cooldown", &serde_json::json!({ "count": cooling }))
-                        .await;
+                if let Err(err) = notify::channel_cooldown_and_notify(&pg, &notifier).await {
+                    tracing::error!(error = %err, "冷却告警失败");
                 }
             }
             _ = margin.tick() => {
@@ -223,18 +202,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(err) => tracing::error!(error = %err, "余额有效期清零失败"),
                 }
-                match notify::scan_balance_low(&pg).await {
-                    Ok(low) if !low.is_empty() => {
-                        let users: Vec<_> = low
-                            .iter()
-                            .map(|(id, bal)| serde_json::json!({ "user_id": id, "balance_micro": bal }))
-                            .collect();
-                        notifier
-                            .dispatch("balance_low", &serde_json::json!({ "users": users }))
-                            .await;
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!(error = %err, "余额低扫描失败"),
+                if let Err(err) = notify::balance_low_and_notify(&pg, &notifier).await {
+                    tracing::error!(error = %err, "余额低扫描失败");
                 }
             }
             () = &mut stop => {
@@ -382,6 +351,39 @@ async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result
         avail.saturating_add(inflight.0),
         sub.as_micros().saturating_add(inflight.1),
     ))
+}
+
+/// 对账一轮 + 告警：有差异就逐条 error 日志并派发 `drift`（只带前 20 个用户，够运维定位即可）。
+///
+/// 载荷拼在这里而不是 worker 主循环的 `select!` 臂里，理由同 `notify::balance_low_and_notify`。
+pub async fn reconcile_and_notify(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    limit: i64,
+    notifier: &notify::Notifier,
+) -> anyhow::Result<Vec<BalanceDrift>> {
+    let drifts = reconcile_balances(pg, ledger, limit).await?;
+    if drifts.is_empty() {
+        tracing::debug!("对账零差异");
+        return Ok(drifts);
+    }
+    for d in &drifts {
+        tracing::error!(
+            user_id = d.user_id,
+            events_sum = d.events_sum_micro,
+            redis_effective = d.redis_effective_micro,
+            pg_snapshot = d.pg_snapshot_micro,
+            "对账差异（不会自愈：按账本修复走 /admin/reconciliation/repair）"
+        );
+    }
+    let users: Vec<i64> = drifts.iter().take(20).map(|d| d.user_id).collect();
+    notifier
+        .dispatch(
+            "drift",
+            &serde_json::json!({ "count": drifts.len(), "user_ids": users }),
+        )
+        .await;
+    Ok(drifts)
 }
 
 /// 三方对账（docs/database.md §5）：返回不一致的用户。

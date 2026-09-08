@@ -129,7 +129,10 @@ async fn register_login(env: &TestEnv, client: &reqwest::Client) -> (i64, String
     (user_id, cookie)
 }
 
-async fn chat(env: &TestEnv, key: &str) -> u16 {
+/// 返回 (状态码, error_code)。光看状态码不够：限额到点是 429 `member_limit_exceeded`，
+/// 而 429 还有 `rate_limited`（分组窗 / 无效 key 反扫）等好几个来源，
+/// 只断言 429 的话，哪天限额判错、恰好被别的闸挡下，用例照样绿。
+async fn chat(env: &TestEnv, key: &str) -> (u16, String) {
     let resp = reqwest::Client::new()
         .post(format!("http://{}/v1/chat/completions", env.gateway))
         .bearer_auth(key)
@@ -138,7 +141,14 @@ async fn chat(env: &TestEnv, key: &str) -> u16 {
         .send()
         .await
         .unwrap();
-    resp.status().as_u16()
+    let status = resp.status().as_u16();
+    let code = resp
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|v| v["error"]["code"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    (status, code)
 }
 
 #[tokio::test]
@@ -221,7 +231,7 @@ async fn team_wallet_member_limit_full_cycle() {
     let bob_key = key_resp["api_key"].as_str().unwrap();
 
     // 第一次请求：扣团钱包（(100+150)×1×$2/1M = 500 micro）
-    assert_eq!(chat(&env, bob_key).await, 200);
+    assert_eq!(chat(&env, bob_key).await.0, 200);
     // 结算是后台任务：等团钱包扣款到位
     let mut balance = 0;
     for _ in 0..50 {
@@ -236,18 +246,25 @@ async fn team_wallet_member_limit_full_cycle() {
     // 后续请求直至限额生效（软实时：结算后计数，落账前的并发窗口可能多放行 1-2 笔，
     // §6.1 明示语义）；统计实际成功次数
     let mut ok_count: i64 = 1; // 首笔已成功
-    let mut denied_code = 0;
+    let mut denied = (0, String::new());
     for _ in 0..50 {
-        let code = chat(&env, bob_key).await;
-        if code == 429 {
-            denied_code = 429;
+        let got = chat(&env, bob_key).await;
+        if got.0 == 429 {
+            denied = got;
             break;
         }
-        assert_eq!(code, 200);
+        assert_eq!(
+            got.0, 200,
+            "非 429 的失败说明限额之外还有别的东西在拦：{got:?}"
+        );
         ok_count += 1;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert_eq!(denied_code, 429, "月度限额必须最终生效");
+    assert_eq!(
+        denied,
+        (429, "member_limit_exceeded".to_owned()),
+        "月度限额必须最终生效，且拦下它的得是限额本身"
+    );
     assert!(ok_count >= 2, "限额 600 至少放行 2 笔（每笔 500）");
 
     // 分账端点：与实际成功笔数一致

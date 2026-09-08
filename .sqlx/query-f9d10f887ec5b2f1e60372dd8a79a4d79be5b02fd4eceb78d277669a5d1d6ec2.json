@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key = 'surge_inflight_threshold'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f9d10f887ec5b2f1e60372dd8a79a4d79be5b02fd4eceb78d277669a5d1d6ec2"
+}

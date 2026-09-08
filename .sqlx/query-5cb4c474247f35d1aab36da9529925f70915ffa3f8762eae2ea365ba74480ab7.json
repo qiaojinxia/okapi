@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT model_allowlist FROM api_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "model_allowlist",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "model_allowlist"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5cb4c474247f35d1aab36da9529925f70915ffa3f8762eae2ea365ba74480ab7"
+}

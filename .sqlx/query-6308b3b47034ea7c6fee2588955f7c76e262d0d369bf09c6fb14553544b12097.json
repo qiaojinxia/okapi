@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pool_override FROM api_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pool_override",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "pool_override"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6308b3b47034ea7c6fee2588955f7c76e262d0d369bf09c6fb14553544b12097"
+}

@@ -260,6 +260,80 @@ async fn volume_rule_fires_on_monthly_spend_axis() {
     );
 }
 
+/// surge 加价端到端（09-08 第十九轮补：这条链路此前只有 `okapi-pricing` 的规则单测，
+/// 网关这半段——读 `settings.surge_inflight_threshold`、取**集群**在途量、把
+/// `ctx.surge_active` 送进报价——一个集成用例都没有）。
+///
+/// 三个环节各自都可能独立断掉，且断了都是静默的：设置键读不到（返回 None 就恒不加价）、
+/// 在途量读的是进程内计数（多副本下阈值语义随副本数变味，§11.23 修过一次）、
+/// 规则进不了价簿。任一环断掉，账单只是"没加价"——没有报错、没有日志，
+/// 只有月底对账才发现高峰期白跑。所以这里从真实请求的**账单金额**倒着验。
+///
+/// 负载由**另一个实例**上报，而不是靠本进程并发造压：一来在途量本就是集群口径
+/// （§11.23 的定案就是"阈值语义与副本数无关"），从别的 node 报进来才验得到这一点；
+/// 二来本进程自报有 1 秒节流且请求一结束就归零，串行请求追不上自己。
+#[tokio::test]
+async fn surge_rule_reads_cluster_inflight_and_marks_up_the_bill() {
+    let env = setup(&[("surge", json!({ "multiplier": "1.5" }))]).await;
+    // 另一台 pod 正扛着 5 个在途请求
+    let peer = format!("surge-peer-{}", &env.suffix[..12]);
+    env.state.sched.inflight_report(&peer, 5).await;
+    let set_threshold = async |v: Option<i64>| {
+        match v {
+            Some(v) => sqlx::query!(
+                r#"INSERT INTO settings (key, value) VALUES ('surge_inflight_threshold', $1)
+                   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
+                json!(v)
+            )
+            .execute(&env.pg)
+            .await
+            .unwrap(),
+            None => sqlx::query!(r#"DELETE FROM settings WHERE key = 'surge_inflight_threshold'"#)
+                .execute(&env.pg)
+                .await
+                .unwrap(),
+        };
+        // settings 有 60s 进程缓存，管理面改设置走 invalidate_routing_caches；这里同路
+        env.state.invalidate_routing_caches();
+    };
+
+    // 没配阈值：规则在价簿里也不该加价（否则装了 surge 规则的站点会一直高价）
+    set_threshold(None).await;
+    chat(&env).await;
+    let (base, snap) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    assert_eq!(base, 240, "未配阈值时按标价");
+    assert_eq!(
+        snap["rules"].as_array().map_or(0, Vec::len),
+        0,
+        "未命中不得进快照：{snap}"
+    );
+
+    // 0 = 关闭（不是"零并发就算高峰"——那会让每一笔都加价）
+    set_threshold(Some(0)).await;
+    chat(&env).await;
+    let (off, _) = wait_committed_nth(&env.pg, env.user_id, 2).await;
+    assert_eq!(off, 240, "阈值 0 视为关闭");
+
+    // 阈值 5：邻居那 5 个在途请求刚好撞线（判定是 >=）→ 240 × 1.5
+    set_threshold(Some(5)).await;
+    chat(&env).await;
+    let (surged, snap) = wait_committed_nth(&env.pg, env.user_id, 3).await;
+    assert_eq!(surged, 360, "别的实例扛着的负载也算数，应加价 1.5 倍");
+    let rules = snap["rules"].as_array().expect("命中规则必须进快照");
+    assert_eq!(rules.len(), 1, "{snap}");
+    assert_eq!(rules[0]["type"], "surge");
+    assert_eq!(rules[0]["code"], format!("r0-{}", env.suffix));
+
+    // 邻居空下来：同一份阈值配置立刻回标价——加价确实由在途量决定，
+    // 不是"配了阈值就一直加"，也不是撞过一次就黏住
+    env.state.sched.inflight_report(&peer, 0).await;
+    chat(&env).await;
+    let (back, _) = wait_committed_nth(&env.pg, env.user_id, 4).await;
+    assert_eq!(back, 240, "负载退下去就不该继续加价");
+
+    set_threshold(None).await;
+}
+
 /// stacking best_for_user 端到端：8 折与 9 折两条活动同时在线，
 /// 账单只乘 0.8——无脑连乘的 0.72 失控形状被钉死。
 #[tokio::test]

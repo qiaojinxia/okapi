@@ -694,7 +694,9 @@ async fn gateway_bills_subscription_pool_first() {
     assert_eq!(bed.chat().await, 200);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(bed.wallet().await, WALLET - 3 * amount);
-    // 套餐被订阅实例引用 → 拒删
+    // 套餐被订阅实例引用 → 拒删。断到 error_code 而不止 409：
+    // 409 还有 group_in_use / role_in_use 等好几个来源，只看状态码的话，
+    // 这条守卫哪天判错、恰好被别的冲突挡下，用例照样绿。
     let del = client
         .delete(format!("http://{}/admin/plans/{code}", bed.console))
         .bearer_auth(&bed.admin_token)
@@ -702,6 +704,31 @@ async fn gateway_bills_subscription_pool_first() {
         .await
         .unwrap();
     assert_eq!(del.status(), 409);
+    let body: Value = del.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "plan_in_use", "{body}");
+
+    // 反面：没人引用的套餐删得掉，否则"拒删"可能只是这个端点根本删不动
+    let spare = format!("{code}-spare");
+    assert_eq!(
+        bed.upsert_plan(bed.sub_plan(&spare, 1000, 1000, false))
+            .await
+            .status(),
+        200
+    );
+    let del = client
+        .delete(format!("http://{}/admin/plans/{spare}", bed.console))
+        .bearer_auth(&bed.admin_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 200, "{:?}", del.text().await);
+    let gone = client
+        .delete(format!("http://{}/admin/plans/{spare}", bed.console))
+        .bearer_auth(&bed.admin_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), 404, "删过之后再删是 404");
 }
 
 // ---- worker：滚窗 / 到期 ----

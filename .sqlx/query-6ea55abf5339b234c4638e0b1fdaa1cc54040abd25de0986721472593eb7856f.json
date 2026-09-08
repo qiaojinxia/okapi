@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT group_override FROM api_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_override",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "group_override"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6ea55abf5339b234c4638e0b1fdaa1cc54040abd25de0986721472593eb7856f"
+}

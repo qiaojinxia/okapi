@@ -419,6 +419,8 @@ async fn reset_expect_400(env: &TestEnv, token: &str, password: &str, want_param
 
 /// 不存在的邮箱也回 ok 且不发信；存在的邮箱收到含 token 链接（基址按 Host 推导）；
 /// 错 token 400；对 token 重设成功后旧密码失效、新密码可登录；token 一次性。
+// 发信→改基址→再发→重设→token 一次性→新旧密码，是一条时序，拆开就丢了 token 的因果
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn password_reset_flow() {
     let (smtp, inbox) = spawn_smtp().await;
@@ -462,6 +464,44 @@ async fn password_reset_flow() {
     );
     let token = extract_after(data, "reset-password?token=").expect("正文含 token");
     assert_eq!(token.len(), 32);
+
+    // settings.site_url 压过请求 Host（09-08 第十九轮补：此前只验了 Host 推导那一支）。
+    // 站点挂在反代后面时 Host 常常是内网名字，重设链接照它拼出来用户根本打不开，
+    // site_url 就是唯一的补救口；它不生效等于找回密码整条链路作废。尾斜杠要吃掉，
+    // 否则拼出 `https://ok.example.com//reset-password`。
+    // settings 走进程缓存，且本套件的配置一律注进缓存而不写共享库（写了会污染并行用例）
+    env.state
+        .settings_cache
+        .insert(
+            "site_url".to_owned(),
+            Arc::new(Some(json!("https://ok.example.com/"))),
+        )
+        .await;
+    let resp = post(&env, "/auth/password/forgot", json!({"email": email})).await;
+    assert_eq!(resp.status(), 200);
+    let mails = wait_inbox(&inbox, 2).await;
+    assert!(
+        qp_decode(&mails[1].data).contains("https://ok.example.com/reset-password?token="),
+        "配了 site_url 就该用它，且不留双斜杠：{}",
+        mails[1].data
+    );
+    // 空白串不算配置（管理员清空输入框时会发空串过来），回落 Host 推导
+    env.state
+        .settings_cache
+        .insert("site_url".to_owned(), Arc::new(Some(json!("   "))))
+        .await;
+    let resp = post(&env, "/auth/password/forgot", json!({"email": email})).await;
+    assert_eq!(resp.status(), 200);
+    let mails = wait_inbox(&inbox, 3).await;
+    assert!(
+        qp_decode(&mails[2].data).contains(&marker),
+        "空白 site_url 应回落按 Host 推导：{}",
+        mails[2].data
+    );
+    env.state
+        .settings_cache
+        .insert("site_url".to_owned(), Arc::new(None))
+        .await;
 
     // 错 token / 短密码：都是 400 + param
     reset_expect_400(&env, "nope-nope", "new-password-22", "reset_token_invalid").await;

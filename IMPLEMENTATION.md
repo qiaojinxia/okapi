@@ -700,12 +700,17 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 - **配置类硬删 + 占用检查**（models / groups / plans / roles）：删除前查引用，被占用返回
   **409 + error_code**（`group_in_use` / `plan_in_use` / `role_in_use` / `group_is_default`）
   要求管理端先解绑——**不静默级联**，避免用户悄悄掉回默认组导致计费口径突变。
-  - **【2026-09-08】"占用"只算活着的引用**：`users.admin_role_id` 是无 `ON DELETE` 的外键，而用户
-    是软删（只置 `deleted_at`，绑定原样留着）。原先的占用检查带 `deleted_at IS NULL`，于是墓碑上的
-    死引用既不算占用、又拦得住 `DELETE FROM admin_roles`——角色从此 500 且永远删不掉。定案：
-    `delete_role` 在事务里先把**软删用户**的 `admin_role_id` 置 NULL 再删角色。这不违背"不静默级联"：
-    那条规矩防的是活人被悄悄改了计费口径，而软删用户已经 `status=2`、令牌全停，它身上的角色绑定
-    不产生任何权限或计费效果。活人绑着仍是 409，一个不放。
+  - **【2026-09-08】"占用"只算活着的引用**：软删主体（users / api_keys）身上指向配置表的外键列
+    都是无 `ON DELETE` 的，软删只置 `deleted_at`、绑定原样留着；而占用检查一律带 `deleted_at IS NULL`。
+    两者一撞，墓碑上的死引用就成了"既不算占用、又拦得住硬删"——报 `internal_error` 500，而且这个
+    配置项从此**永远删不掉**。按 `0001_init.sql` 的 `REFERENCES` 列逐个排查，命中三处，全部按同一
+    形状修：`delete_role`（`users.admin_role_id`）、`delete_price_group`（`api_keys.group_override`）、
+    `delete_channel_pool`（`api_keys.pool_override`）——确认没有活着的引用之后，**在同一事务里**把软删
+    主体上的那一列置 NULL 再硬删。这不违背"不静默级联"：那条规矩防的是活人被悄悄改了计费口径，
+    而软删主体已经 `status=2`、令牌全停，绑定不产生任何权限或计费效果。活人引用仍是 409，一个不放。
+    其余 `REFERENCES` 列要么指向不软删的表（`plans` / `models` / `channel_pools` 之间），要么已带
+    `ON DELETE CASCADE`（`user_groups` / `team_members`），不在此列。**新加配置类硬删时照此办理**：
+    占用检查滤掉软删行的，就必须在同一事务里把那些行的引用列清掉。
 - 定价类变更响应带 `requires_publish: true`，提示需发布新 epoch（PriceBook 是编译期快照）。
 
 **前端接入状态**（2026-08-31）：管理后台已覆盖六类接口面——

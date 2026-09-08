@@ -182,6 +182,36 @@ pub async fn scan_balance_low(pg: &PgPool) -> anyhow::Result<Vec<(i64, i64)>> {
     Ok(rows.into_iter().map(|r| (r.id, r.balance_micro)).collect())
 }
 
+/// 扫一轮低余额并派发 `balance_low`；阈值关闭或无人低于阈值时不吵。
+///
+/// 载荷在这里拼而不是在 worker 主循环的 `select!` 臂里：拼在循环里的话，用例只能照抄一份
+/// `json!` 自娱自乐，字段改坏了照样绿（`margin_breaker` 同理，见 `margin_breaker::evaluate_and_notify`）。
+pub async fn balance_low_and_notify(pg: &PgPool, notifier: &Notifier) -> anyhow::Result<usize> {
+    let low = scan_balance_low(pg).await?;
+    if low.is_empty() {
+        return Ok(0);
+    }
+    let users: Vec<Value> = low
+        .iter()
+        .map(|(id, bal)| serde_json::json!({ "user_id": id, "balance_micro": bal }))
+        .collect();
+    notifier
+        .dispatch("balance_low", &serde_json::json!({ "users": users }))
+        .await;
+    Ok(low.len())
+}
+
+/// 数一轮冷却中的渠道 key 并派发 `channel_cooldown`；零冷却不吵。
+pub async fn channel_cooldown_and_notify(pg: &PgPool, notifier: &Notifier) -> anyhow::Result<i64> {
+    let cooling = count_cooling_keys(pg).await?;
+    if cooling > 0 {
+        notifier
+            .dispatch("channel_cooldown", &serde_json::json!({ "count": cooling }))
+            .await;
+    }
+    Ok(cooling)
+}
+
 /// 当前处于冷却/受限状态的渠道 key 数（channel_cooldown 事件源）。
 pub async fn count_cooling_keys(pg: &PgPool) -> anyhow::Result<i64> {
     let n = sqlx::query_scalar!(
