@@ -176,6 +176,69 @@ async fn group_rph_caps_hourly() {
     assert_eq!(body["error"]["param"], "group_rph");
 }
 
+/// 不计费但会打上游的两个端点同样进窗（§11.32，09-08 补）：`count_tokens` 有 anthropic 候选时
+/// 代理上游 tokenizer，视频任务轮询 / 下载拿渠道凭证打上游——此前两者鉴权后直接放行，
+/// 一把 key 就能无限消耗渠道配额。限速在任务查找之前，所以连不存在的 task_id 也先 429 而非 404。
+#[tokio::test]
+async fn non_billing_upstream_endpoints_are_rate_limited() {
+    let env = setup(Some(2), None).await;
+    let client = reqwest::Client::new();
+
+    // count_tokens：本用例没有 anthropic 渠道，前两笔走本地估算 200，第三笔进不来
+    let ct_token = user_with_key(&env, "ct", Some(&env.group)).await;
+    let count_tokens = || {
+        client
+            .post(format!("http://{}/v1/messages/count_tokens", env.gateway))
+            .bearer_auth(&ct_token)
+            .json(&json!({"model": env.model, "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hello"}]}))
+            .send()
+    };
+    for i in 0..2 {
+        let resp = count_tokens().await.unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "第 {i} 笔应放行：{:?}",
+            resp.text().await
+        );
+    }
+    let resp = count_tokens().await.unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    // Anthropic 入口的错误壳：{"type":"error","error":{"type":<code>,"message":"<code> <param>"}}
+    assert_eq!(body["error"]["type"], "rate_limited", "{body}");
+    assert_eq!(body["error"]["message"], "rate_limited group_rpm", "{body}");
+
+    // 视频任务轮询：任务不存在本该 404，超限后先撞 429（证明限速在查找之前）
+    let v_token = user_with_key(&env, "vd", Some(&env.group)).await;
+    let poll = |suffix: &str| {
+        client
+            .get(format!("http://{}/v1/videos/task-{suffix}", env.gateway))
+            .bearer_auth(&v_token)
+            .send()
+    };
+    for i in 0..2 {
+        assert_eq!(poll("missing").await.unwrap().status(), 404, "第 {i} 笔");
+    }
+    let resp = poll("missing").await.unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+    assert_eq!(body["error"]["param"], "group_rpm", "{body}");
+    // 下载入口与轮询共用同一段准入
+    let resp = client
+        .get(format!(
+            "http://{}/v1/videos/task-missing/content",
+            env.gateway
+        ))
+        .bearer_auth(&v_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429, "{:?}", resp.text().await);
+}
+
 /// 管理面改限额：写入即失效鉴权缓存，下一请求按新值判；负数 400 带 param；列表回显。
 #[tokio::test]
 async fn console_updates_group_limits() {

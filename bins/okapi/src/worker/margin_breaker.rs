@@ -28,6 +28,37 @@ pub struct Tripped {
     pub margin_bp: i64,
 }
 
+/// 一轮评估 + 通知：本轮**新**熔断的对告警一条并派发 `margin_breaker` 事件（续期不重复吵）。
+///
+/// 载荷在这里拼而不是在 worker 主循环里，是为了让用例能在 mock sink 上核对真实形状——
+/// 拼在循环里的话，测试只能照抄一份 json!，改坏了也照样绿。
+pub async fn evaluate_and_notify(
+    pg: &PgPool,
+    ch: Option<&ChClient>,
+    redis: &fred::clients::Client,
+    now: chrono::DateTime<chrono::Utc>,
+    notifier: &super::notify::Notifier,
+) -> anyhow::Result<Report> {
+    let report = evaluate(pg, ch, redis, now).await?;
+    if !report.tripped.is_empty() {
+        tracing::warn!(
+            tripped = report.tripped.len(),
+            blocked_total = report.blocked_total,
+            "负毛利熔断：分组×渠道已从候选摘除（/admin/margin-breaker 可解除）"
+        );
+        notifier
+            .dispatch(
+                "margin_breaker",
+                &serde_json::json!({
+                    "tripped": report.tripped,
+                    "blocked_total": report.blocked_total,
+                }),
+            )
+            .await;
+    }
+    Ok(report)
+}
+
 /// 读配置（PG settings；缺省关）。
 pub async fn load_config(pg: &PgPool) -> anyhow::Result<BreakerConfig> {
     let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = 'margin_breaker'"#)

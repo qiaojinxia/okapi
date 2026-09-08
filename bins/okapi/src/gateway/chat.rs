@@ -486,6 +486,9 @@ async fn count_tokens_inner(
     body: Bytes,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
+    // 不计费，但有 anthropic 候选时会拿渠道凭证打上游 tokenizer：按分组窗限速（§11.32）。
+    // 不过 check_member_limit——那是月度消费上限，不该挡住不花钱的调用
+    super::auth::check_group_rate(state, &key).await?;
     let probe: MessagesRequestProbe =
         serde_json::from_slice(&body).map_err(|_| AppError::bad_request())?;
     let meta = resolve_model_cached(state, &probe.model).await?;

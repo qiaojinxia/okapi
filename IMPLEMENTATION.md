@@ -1972,6 +1972,13 @@ new-api 的分组限流正是这个语义（按用户分组设窗口配额）。
   videos / realtime / custom_pass），在 `check_member_limit` 之后、reserve 之前检查；超限 429
   `rate_limited` param=`group_rpm` / `group_rph`。INCR 在检查前（与 model_rpm 同"尽力语义"）；
   Redis 故障放行，与其余保护性限流一致（账本才 fail-closed）。
+- **【2026-09-08】外加两个不计费但会打上游的端点**：`/v1/messages/count_tokens`（有 anthropic 候选时
+  代理上游 tokenizer）与 `/v1/videos/{task_id}`、`/v1/videos/{task_id}/content`（拿渠道凭证轮询 / 下载）。
+  它们不花用户的钱，所以此前不在"计费端点"这条口径里，可它们照样消耗渠道配额与上游速率，且用户能
+  无限打——限流的意义本就是护上游，按"会不会打上游"而不是"扣不扣钱"划界。这两处**只过
+  `check_group_rate`，不过 `check_member_limit`**：后者是团成员的月度**消费**上限，用它挡住不花钱的
+  轮询与下载，会让一个刚好花超的成员连已经付过费的视频都取不回来。`/v1/dashboard/billing/*` 只读
+  本地库、不碰上游，维持不设限。
 - 热路径零 PG：两列随鉴权缓存下发（`AuthedKey.group_rpm_limit / group_rph_limit`，
   `#[serde(default)]` 兼容滚动发布期间的旧缓存值）；`POST /admin/groups` 本就 `auth_flush`，
   改限额下一请求即生效。未配置的分组不产生任何 Redis 往返。
@@ -1979,7 +1986,8 @@ new-api 的分组限流正是这个语义（按用户分组设窗口配额）。
   列表回显。前端分组抽屉加"限流"字段组，列表加"限流"列。
 
 **验收**：`gateway_group_rate.rs`——vip 组 rpm=2：同用户第 3 请求 429 param=group_rpm，另一组用户不受影响；
-rph=1 时第 2 请求 429 param=group_rph；未配限额的分组零额外行为。
+rph=1 时第 2 请求 429 param=group_rph；未配限额的分组零额外行为；`count_tokens` 与视频任务轮询同样
+按窗计数并在超限时 429（且不受 `check_member_limit` 影响）。
 
 ### 11.33 上游余额查询（2026-09-06，对照 new-api 渠道"更新余额"）
 

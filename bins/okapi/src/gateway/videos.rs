@@ -306,6 +306,9 @@ async fn relay_task(
     content: bool,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
+    // 轮询与下载都拿渠道凭证打上游，不计费也要按分组窗限速（§11.32）。
+    // 不过 check_member_limit——花超的成员仍得取回已经付过费的视频
+    super::auth::check_group_rate(state, &key).await?;
     // 键含 user_id：他人任务/过期/未知一律 404（不泄露存在性）
     let Some(channel_key_id) = state.sched.video_task_get(key.user_id, task_id).await else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND).with_param("task"));

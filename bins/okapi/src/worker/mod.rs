@@ -207,26 +207,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 }
             }
             _ = margin.tick() => {
-                match margin_breaker::evaluate(&pg, ch.as_ref(), &redis, chrono::Utc::now()).await {
-                    Ok(report) => {
-                        if !report.tripped.is_empty() {
-                            tracing::warn!(
-                                tripped = report.tripped.len(),
-                                blocked_total = report.blocked_total,
-                                "负毛利熔断：分组×渠道已从候选摘除（/admin/margin-breaker 可解除）"
-                            );
-                            notifier
-                                .dispatch(
-                                    "margin_breaker",
-                                    &serde_json::json!({
-                                        "tripped": report.tripped,
-                                        "blocked_total": report.blocked_total,
-                                    }),
-                                )
-                                .await;
-                        }
-                    }
-                    Err(err) => tracing::error!(error = %err, "负毛利熔断评估失败"),
+                if let Err(err) = margin_breaker::evaluate_and_notify(
+                    &pg, ch.as_ref(), &redis, chrono::Utc::now(), &notifier,
+                )
+                .await
+                {
+                    tracing::error!(error = %err, "负毛利熔断评估失败");
                 }
             }
             _ = balance_expiry.tick() => {
