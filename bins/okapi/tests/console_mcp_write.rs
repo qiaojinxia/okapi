@@ -92,6 +92,17 @@ async fn call(env: &TestEnv, tool: &str, args: Value) -> Value {
     rpc(env, "tools/call", json!({"name": tool, "arguments": args})).await
 }
 
+/// 工具**内部**的报错走 `result.isError`（内容是 error_code），
+/// 只有准入闸（写开关 / 权限）才走 JSON-RPC 的 `error` 通道——两条路别混着断言。
+fn assert_tool_error(resp: &Value, code: &str) {
+    assert_eq!(resp["result"]["isError"], true, "应是工具级错误：{resp}");
+    assert_eq!(resp["result"]["content"][0]["text"], code, "{resp}");
+    assert!(
+        resp["error"].is_null(),
+        "工具级错误不该占用 RPC error 通道：{resp}"
+    );
+}
+
 async fn set_gate(env: &TestEnv, enabled: bool) {
     sqlx::query!(
         r#"INSERT INTO settings (key, value) VALUES ('mcp_write_enabled', $1)
@@ -278,6 +289,131 @@ async fn mcp_write_full_scenario() {
         .as_i64()
         .expect("必须返回新 epoch");
     assert!(epoch > before);
+
+    // —— 阶段 6：redemption_create / cache_flush（09-08 第十九轮补，此前两个写工具零调用）——
+    // redemption_create 是唯一能凭空造出可入账凭证的 MCP 工具，两段式那道闸尤其不能漏。
+    assert_tool_error(
+        &call(
+            &env,
+            "redemption_create",
+            json!({"count": 0, "amount_micro": 1}),
+        )
+        .await,
+        "bad_request",
+    );
+    assert_tool_error(
+        &call(
+            &env,
+            "redemption_create",
+            json!({"count": 1, "amount_micro": 0}),
+        )
+        .await,
+        "bad_request",
+    );
+
+    let before = sqlx::query_scalar!(r#"SELECT COUNT(*)::bigint AS "c!" FROM redemption_codes"#)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let dry = call(
+        &env,
+        "redemption_create",
+        json!({"count": 3, "amount_micro": 2_000_000}),
+    )
+    .await;
+    let sc = &dry["result"]["structuredContent"];
+    assert_eq!(sc["dry_run"], true);
+    assert!(sc["codes"].is_null(), "预览不得吐出明文码：{dry}");
+    assert_eq!(
+        sqlx::query_scalar!(r#"SELECT COUNT(*)::bigint AS "c!" FROM redemption_codes"#)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap(),
+        before,
+        "dry-run 一张码都不许落库"
+    );
+
+    let minted = call(
+        &env,
+        "redemption_create",
+        json!({"count": 3, "amount_micro": 2_000_000, "confirm": true}),
+    )
+    .await;
+    let sc = &minted["result"]["structuredContent"];
+    assert_eq!(sc["dry_run"], false);
+    let codes = sc["codes"].as_array().expect("确认后返回明文码");
+    assert_eq!(codes.len(), 3);
+    assert!(
+        codes
+            .iter()
+            .all(|c| c.as_str().unwrap().starts_with("okapi-"))
+    );
+    let batch = uuid::Uuid::parse_str(sc["batch_id"].as_str().unwrap()).unwrap();
+    let rows = sqlx::query!(
+        r#"SELECT amount_micro, status, code_hash FROM redemption_codes WHERE batch_id = $1"#,
+        batch
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter()
+            .all(|r| r.amount_micro == 2_000_000 && r.status == 1),
+        "三张都该是可用的 $2 码"
+    );
+    // 落库的是哈希不是明文——MCP 那头返回的明文是唯一一次，库里翻不出来
+    let plain = codes[0].as_str().unwrap();
+    let want = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(plain.as_bytes()))
+    };
+    assert!(
+        rows.iter().any(|r| r.code_hash == want),
+        "库里应存明文的 sha256"
+    );
+    assert!(!rows.iter().any(|r| r.code_hash == plain), "明文不得落库");
+
+    // cache_flush：三种范围各刷一次；范围不认得 400
+    for scope in ["auth", "routing", "pricebook"] {
+        let flushed = call(&env, "cache_flush", json!({ "scope": scope })).await;
+        assert_eq!(
+            flushed["result"]["structuredContent"]["ok"], true,
+            "{scope}: {flushed}"
+        );
+    }
+    assert_tool_error(
+        &call(&env, "cache_flush", json!({"scope": "everything"})).await,
+        "bad_request",
+    );
+
+    // 两个工具的写操作都以 mcp:{key_id} 留痕，cache.flush 的 target 是范围本身
+    let flushed_scopes = sqlx::query_scalar!(
+        r#"SELECT target FROM audit_logs WHERE actor = $1 AND action = 'cache.flush'
+           ORDER BY created_at, id"#,
+        format!("mcp:{}", env.admin_key_id)
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        flushed_scopes,
+        vec![
+            Some("auth".to_owned()),
+            Some("routing".to_owned()),
+            Some("pricebook".to_owned())
+        ]
+    );
+    let minted_audit = sqlx::query_scalar!(
+        r#"SELECT COUNT(*)::bigint AS "c!" FROM audit_logs
+           WHERE actor = $1 AND action = 'redemption.create' AND target = $2"#,
+        format!("mcp:{}", env.admin_key_id),
+        batch.to_string()
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(minted_audit, 1, "只有确认那次留痕，预览不留");
 
     // 收尾：把 MCP 写开关关回去。它是**站点级**设置，本用例开了不收拾的话，
     // 开发库上就永远挂着一个没人打开过的写工具面——三道闸的第一道形同虚设，

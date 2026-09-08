@@ -480,3 +480,111 @@ fn rand_octet() -> u8 {
     use rand::RngExt;
     rand::rng().random_range(1..=254)
 }
+
+/// 批量停用（`DELETE /admin/redemptions/{batch}`）此前零集成覆盖：前端 e2e 只桩过按钮，
+/// 后端没人打过。这是印错了一批码之后唯一的补救手段，得保证它**只停未核销的**——
+/// 把已核销的一并翻成"已停用"，对账时那笔入账就成了无源之水。
+#[tokio::test]
+async fn disable_batch_stops_only_unredeemed_codes() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+
+    let created: Value = client
+        .post(format!("http://{}/admin/redemptions", env.addr))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"count": 3, "amount_micro": 1_000_000}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let batch = created["batch_id"].as_str().unwrap().to_owned();
+    let codes: Vec<String> = created["codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap().to_owned())
+        .collect();
+
+    // 先核销一张，让批次里出现"已核销"与"未核销"两种状态
+    let redeem = async |code: &str| {
+        client
+            .post(format!("http://{}/api/me/redeem", env.addr))
+            .bearer_auth(&env.user_token)
+            .header("x-real-ip", uniq_ip())
+            .json(&json!({ "code": code }))
+            .send()
+            .await
+            .unwrap()
+    };
+    assert_eq!(redeem(&codes[0]).await.status(), 200);
+    let after_redeem = env.ledger.balance(env.user_id).await.unwrap().as_micros();
+    assert_eq!(after_redeem, 1_000_000);
+
+    let disable = async |token: &str, batch: &str| {
+        client
+            .delete(format!("http://{}/admin/redemptions/{batch}", env.addr))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+    };
+    // 普通用户没有 pricing.write，停不了别人的批次
+    assert_eq!(disable(&env.user_token, &batch).await.status(), 403);
+
+    let resp = disable(&env.admin_token, &batch).await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["affected"], 2, "只该停掉两张未核销的：{body}");
+
+    // 库里：已核销的仍是 2（不是 3），剩下两张翻 3
+    let statuses = sqlx::query_scalar!(
+        r#"SELECT status FROM redemption_codes WHERE batch_id = $1::uuid ORDER BY status"#,
+        Uuid::parse_str(&batch).unwrap()
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(statuses, vec![2, 3, 3], "已核销的那张不许被改状态");
+
+    // 停用后的码核销不动，也不入账
+    assert_eq!(redeem(&codes[1]).await.status(), 404);
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        after_redeem,
+        "停用码不得入账"
+    );
+
+    // 再停一次：幂等，affected 归零（不会把已核销的也算进去）
+    let body: Value = disable(&env.admin_token, &batch)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["affected"], 0, "重复停用应无副作用：{body}");
+
+    // 不存在的批次：200 + affected 0（不泄露批次是否存在）；批次号不是 uuid → 400
+    let body: Value = disable(&env.admin_token, &Uuid::new_v4().to_string())
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["affected"], 0);
+    assert_eq!(disable(&env.admin_token, "not-a-uuid").await.status(), 400);
+
+    // 两次有效停用都留痕，detail 带 affected
+    let audited = sqlx::query!(
+        r#"SELECT detail FROM audit_logs WHERE action = 'redemption.disable_batch' AND target = $1
+           ORDER BY created_at, id"#,
+        batch
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    let affected: Vec<Value> = audited
+        .iter()
+        .map(|r| r.detail.clone().unwrap_or(Value::Null)["affected"].clone())
+        .collect();
+    assert_eq!(affected, vec![json!(2), json!(0)]);
+}

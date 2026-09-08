@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT amount_micro, status, code_hash FROM redemption_codes WHERE batch_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "code_hash",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "redemption_codes",
+            "name": "code_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a0bf7edbf79a6611d3eeeecd7d0cb0b595139fcaba7d10f5fdaba278e32398bf"
+}

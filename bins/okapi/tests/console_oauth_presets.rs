@@ -322,3 +322,63 @@ async fn renamed_handle_keeps_account_and_same_handle_cannot_hijack() {
     assert_eq!(body["error"]["param"], "status_500");
     bed.teardown().await;
 }
+
+/// 登录页据以决定露出哪些第三方按钮的公开端点。此前零集成覆盖，而它读的正是那条同时装着
+/// `client_secret` 的 `settings.oauth_providers`——只要哪天顺手把整行 value 回出去，秘钥就跟着
+/// 到了未登录的登录页上。这里钉住"无需鉴权、只出 code、整个响应里搜不到任何凭证字段"，
+/// 外加设置缺失 / 形状不认时回空列表而不是 500（否则登录页整页挂掉）。
+#[tokio::test]
+async fn provider_list_is_public_and_leaks_no_credentials() {
+    let bed = bed().await;
+    let get = async || -> (u16, String) {
+        // 不带任何 cookie / bearer：这就是登录页的调法
+        let resp = bed
+            .client
+            .get(format!("http://{}/auth/oauth-providers", bed.console))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        (status, resp.text().await.unwrap())
+    };
+
+    let (status, raw) = get().await;
+    assert_eq!(status, 200, "未登录也要能拿到：{raw}");
+    let body: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        body,
+        json!({ "providers": ["github", "discord", "linuxdo"] }),
+        "只出 code，且保持配置顺序（登录页按钮次序）"
+    );
+    for leaked in ["sec-", "cid-", "client_secret", "client_id", "token_url"] {
+        assert!(!raw.contains(leaked), "响应里不该出现 {leaked}：{raw}");
+    }
+
+    // 形状不认（比如有人手改设置写成了对象）：回空列表，登录页只是不露第三方按钮
+    sqlx::query!(
+        r#"UPDATE settings SET value = $1 WHERE key = 'oauth_providers'"#,
+        json!({"github": "x"})
+    )
+    .execute(&bed.pg)
+    .await
+    .unwrap();
+    let (status, raw) = get().await;
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        json!({ "providers": [] })
+    );
+
+    // 压根没配：同样是空列表，不是 500
+    sqlx::query!(r#"DELETE FROM settings WHERE key = 'oauth_providers'"#)
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+    let (status, raw) = get().await;
+    assert_eq!(status, 200, "{raw}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        json!({ "providers": [] })
+    );
+    bed.teardown().await;
+}

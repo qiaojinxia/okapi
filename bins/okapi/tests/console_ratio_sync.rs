@@ -47,7 +47,24 @@ async fn spawn_mock(ratio_model: String, per_call_model: String, new_model: Stri
             {"model_name": &n2, "quota_type": 0, "model_ratio": "3", "completion_ratio": 8}
         ]})
     };
+    // 第三种形状：另一台 Okapi 的 /api/pricing（`{models: [...]}`，按次价是 micro 整数）。
+    // 倍率给规范化后与本地相同的字面量（1.250000 == 1.25），缓存倍率给不同值。
+    let (r3, p3) = (ratio_model.clone(), per_call_model.clone());
+    let okapi_pricing = move || {
+        json!({"models": [
+            {"model": &r3, "mode": "ratio", "model_ratio": "1.250000",
+             "completion_ratio": "4", "cache_ratio": "0.75"},
+            {"model": &p3, "mode": "per_call", "per_call_price_micro": 60_000}
+        ], "groups": []})
+    };
     let router = Router::new()
+        .route(
+            "/api/okapi-pricing",
+            get(move || {
+                let body = okapi_pricing();
+                async move { axum::Json(body).into_response() }
+            }),
+        )
         .route(
             "/api/ratio_config",
             get(move || {
@@ -163,6 +180,7 @@ async fn fetch_builds_three_state_differences_and_reports_bad_sources() {
         json!({"sources": [
             {"name": "cfg", "url": format!("http://{}/api/ratio_config", env.mock)},
             {"name": "napi", "url": format!("http://{}/api/pricing", env.mock)},
+            {"name": "okapi", "url": format!("http://{}/api/okapi-pricing", env.mock)},
             {"name": "html", "url": format!("http://{}/not-json", env.mock)},
             {"name": "dead", "url": "http://127.0.0.1:9/api/pricing"}
         ]}),
@@ -174,6 +192,8 @@ async fn fetch_builds_three_state_differences_and_reports_bad_sources() {
     assert_eq!(by_name("cfg")["status"], "ok");
     assert_eq!(by_name("cfg")["models"], 3);
     assert_eq!(by_name("napi")["status"], "ok");
+    assert_eq!(by_name("okapi")["status"], "ok", "Okapi 自家形状要认得");
+    assert_eq!(by_name("okapi")["models"], 2);
     assert_eq!(by_name("html")["status"], "error");
     assert_eq!(by_name("html")["error"], "not_json");
     assert_eq!(by_name("dead")["status"], "error");
@@ -185,14 +205,27 @@ async fn fetch_builds_three_state_differences_and_reports_bad_sources() {
     // 有一个源不同时整轴进表；与本地相同的源标 "same"，让人看见哪些源是一致的
     assert_eq!(mr["upstreams"]["cfg"], "same");
     assert_eq!(mr["upstreams"]["napi"], "1.5");
+    // Okapi 源写的是 "1.250000"：规范化后等于本地 1.25，判 same 而不是"变了"（不经浮点）
+    assert_eq!(mr["upstreams"]["okapi"], "same", "{mr}");
     assert!(
         diff[&env.ratio_model].get("completion_ratio").is_none(),
-        "两源 completion 都与本地相同，整轴不进表"
+        "三源 completion 都与本地相同，整轴不进表"
+    );
+    // 缓存倍率只有 Okapi 源不同 → 进表；给了值的源标 same，没给这一轴的 napi 整个键缺席（第三态）
+    let cr = &diff[&env.ratio_model]["cache_ratio"];
+    assert_eq!(cr["current"], "0.5", "{cr}");
+    assert_eq!(cr["upstreams"]["okapi"], "0.75");
+    assert_eq!(cr["upstreams"]["cfg"], "same");
+    assert!(
+        cr["upstreams"].get("napi").is_none(),
+        "源里没这一轴就不出现，不能糊成 same：{cr}"
     );
     // 按次模型：本地 0.04，cfg 给 0.05；不和倍率轴混比
     let pc = &diff[&env.per_call_model]["per_call_price"];
     assert_eq!(pc["current"], "0.04");
     assert_eq!(pc["upstreams"]["cfg"], "0.05");
+    // Okapi 源给的是 micro 整数 60000，取回来是 USD 字面量
+    assert_eq!(pc["upstreams"]["okapi"], "0.06", "{pc}");
     assert!(diff[&env.per_call_model].get("model_ratio").is_none());
     // 本地没有的模型：current null，两源各给值
     let nm = &diff[&env.new_model]["model_ratio"];

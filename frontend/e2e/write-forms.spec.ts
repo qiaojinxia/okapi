@@ -1547,3 +1547,74 @@ test('渠道列表查上游余额：只对支持的协议露出按钮，成功�
   await expect(openai.getByText('¥110.50')).toBeVisible()
   expect(balanceCalls).toBe(2)
 })
+
+test('充值下单：快捷档与最低额挡在提交前，下单体是 micro 整数与所选网关；epay 以带签名参数的表单 POST 跳转、Stripe 直接跳链接、网关不给地址则原地提示', async ({ page }) => {
+  await prepare(page)
+  const orders: Json[] = []
+  let reply: Json = {
+    order_no: 'OK-1',
+    gateway: 'epay',
+    pay_url: 'https://pay.example.com/submit',
+    params: { pid: '1001', money: '10.00', sign: 'abc123' },
+  }
+  await page.route('**/api/me/topup', async (route) => {
+    orders.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: reply })
+  })
+  // 支付页不在本站：把跳转接住，记下方法与表单体
+  const pays: { url: string; method: string; body: string | null }[] = []
+  await page.route('https://pay.example.com/**', async (route) => {
+    const r = route.request()
+    pays.push({ url: r.url(), method: r.method(), body: r.postData() })
+    await route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>pay</title>' })
+  })
+
+  await page.goto('/portal/topup')
+  const amount = page.getByLabel('金额（USD）')
+  const submit = page.getByRole('button', { name: /去支付/ })
+
+  // 低于最低额：提示 + 禁提交 + 「将入账」按 0 显示，一个请求都不发
+  await amount.fill('0.5')
+  await expect(page.getByText('低于最低充值额 $1')).toBeVisible()
+  await expect(submit).toBeDisabled()
+  expect(orders).toHaveLength(0)
+
+  // 快捷档写回金额输入框并标记选中态
+  await page.getByRole('button', { name: '$20', exact: true }).click()
+  await expect(amount).toHaveValue('20')
+  await expect(page.getByRole('button', { name: '$20', exact: true })).toHaveAttribute('aria-pressed', 'true')
+
+  // 小数金额也按 micro 整数提交（0.1 + 0.2 这类浮点尾巴不能漏出去）
+  await amount.fill('12.34')
+  await submit.click()
+  await expect.poll(() => orders.length).toBe(1)
+  expect(orders[0]).toEqual({ amount_micro: 12_340_000, gateway: 'epay' })
+
+  // epay：表单 POST 到 pay_url，签名参数原样进隐藏域
+  await expect.poll(() => pays.length).toBe(1)
+  expect(pays[0].method).toBe('POST')
+  expect(pays[0].url).toBe('https://pay.example.com/submit')
+  expect(pays[0].body).toContain('pid=1001')
+  expect(pays[0].body).toContain('sign=abc123')
+
+  // Stripe：没有 params，直接跳 checkout 链接（GET）
+  reply = { order_no: 'OK-2', gateway: 'stripe', pay_url: 'https://pay.example.com/checkout/cs_test_1' }
+  await page.goto('/portal/topup')
+  await page.getByRole('group', { name: '支付网关' }).getByRole('button', { name: 'Stripe' }).click()
+  await page.getByLabel('金额（USD）').fill('50')
+  await page.getByRole('button', { name: /去支付/ }).click()
+  await expect.poll(() => orders.length).toBe(2)
+  expect(orders[1]).toEqual({ amount_micro: 50_000_000, gateway: 'stripe' })
+  await expect.poll(() => pays.length).toBe(2)
+  expect(pays[1].method).toBe('GET')
+  expect(pays[1].url).toBe('https://pay.example.com/checkout/cs_test_1')
+
+  // 网关没给地址：原地报错，不跳走
+  reply = { order_no: 'OK-3', gateway: 'epay', pay_url: null }
+  await page.goto('/portal/topup')
+  await page.getByLabel('金额（USD）').fill('10')
+  await page.getByRole('button', { name: /去支付/ }).click()
+  await expect(page.getByRole('alert')).toContainText('网关未返回支付地址')
+  expect(pays).toHaveLength(2)
+  expect(page.url()).toContain('/portal/topup')
+})

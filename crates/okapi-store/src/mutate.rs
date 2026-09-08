@@ -314,13 +314,18 @@ pub async fn delete_plan(pool: &PgPool, plan_code: &str) -> Result<bool, StoreEr
     Ok(true)
 }
 
-/// 删除自定义管理角色；仍有用户绑定时返回 `Conflict`（防批量掉权）。
+/// 删除自定义管理角色；仍有**活着的**用户绑定时返回 `Conflict`（防批量掉权）。
+///
+/// 软删用户身上的绑定是死引用：它已经 `status=2`、令牌全停，角色对它不产生任何权限或计费效果。
+/// 但 `users.admin_role_id` 是无 `ON DELETE` 的外键，留着它 `DELETE FROM admin_roles` 会撞外键，
+/// 角色从此永远删不掉，所以在同一事务里先把墓碑上的引用置 NULL（IMPLEMENTATION §删除语义定案）。
 pub async fn delete_role(pool: &PgPool, role_code: &str) -> Result<bool, StoreError> {
+    let mut tx = pool.begin().await?;
     let Some(role_id) = sqlx::query_scalar!(
         r#"SELECT id FROM admin_roles WHERE role_code = $1"#,
         role_code
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     else {
         return Ok(false);
@@ -330,14 +335,22 @@ pub async fn delete_role(pool: &PgPool, role_code: &str) -> Result<bool, StoreEr
            WHERE admin_role_id = $1 AND deleted_at IS NULL"#,
         role_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
     if bound > 0 {
         return Err(StoreError::Conflict("role_in_use"));
     }
+    sqlx::query!(
+        r#"UPDATE users SET admin_role_id = NULL
+           WHERE admin_role_id = $1 AND deleted_at IS NOT NULL"#,
+        role_id
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query!(r#"DELETE FROM admin_roles WHERE id = $1"#, role_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(true)
 }
 

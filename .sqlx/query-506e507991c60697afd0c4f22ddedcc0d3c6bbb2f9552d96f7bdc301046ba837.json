@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE settings SET value = $1 WHERE key = 'oauth_providers'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "506e507991c60697afd0c4f22ddedcc0d3c6bbb2f9552d96f7bdc301046ba837"
+}

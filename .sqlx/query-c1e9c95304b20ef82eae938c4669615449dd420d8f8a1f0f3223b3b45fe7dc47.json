@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM settings WHERE key = 'oauth_providers'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c1e9c95304b20ef82eae938c4669615449dd420d8f8a1f0f3223b3b45fe7dc47"
+}

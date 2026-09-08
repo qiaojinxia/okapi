@@ -42,6 +42,7 @@ async fn serve(app: Router) -> SocketAddr {
 
 struct Env {
     pg: PgPool,
+    state: gateway::state::AppState,
     gateway: SocketAddr,
     console: SocketAddr,
     token: String,
@@ -133,10 +134,11 @@ async fn setup(rules: &[RuleSeed]) -> Env {
         .await
         .unwrap();
     let gw = serve(gateway::router(state.clone())).await;
-    let console_addr = serve(console::router(state)).await;
+    let console_addr = serve(console::router(state.clone())).await;
 
     Env {
         pg,
+        state,
         gateway: gw,
         console: console_addr,
         token,
@@ -426,4 +428,135 @@ async fn console_rule_crud_and_validation() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// 规则上下线（`POST /admin/pricing/rules/{code}/toggle`）此前零集成覆盖——前端 e2e 只桩过
+/// "点了会打这个端点"，后端从没被真打过，更没人验证过下线**真的会让账单回到原价**。
+///
+/// 这条链路上有个容易踩空的地方：PriceBook 是编译期快照，toggle 只改库并回 `requires_publish`，
+/// 不发布的话在跑的网关照旧打折。所以既钉"改完没发布仍按老价"（这是定案语义，不是 bug），
+/// 也钉"发布 + 热更后回原价"，以及"重新上线还能用同一份配置"（下线不删配置就是为了复用）。
+// 下线→发布→上线是一条时序，拆成三个用例就得各自重建规则与渠道，反而看不出"同一份配置"
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn rule_toggle_needs_publish_then_stops_and_resumes_discount() {
+    let env = setup(&[(
+        "discount",
+        json!({ "multiplier": "0.8", "stacking_mode": "best_for_user" }),
+    )])
+    .await;
+    let client = reqwest::Client::new();
+    let code = format!("r0-{}", env.suffix);
+    let toggle_url = format!("http://{}/admin/pricing/rules/{code}/toggle", env.console);
+    let toggle = async |enabled: bool, token: &str| {
+        client
+            .post(&toggle_url)
+            .bearer_auth(token)
+            .json(&json!({ "enabled": enabled }))
+            .send()
+            .await
+            .unwrap()
+    };
+    let publish_and_reload = async || {
+        let resp = client
+            .post(format!("http://{}/admin/pricing/publish", env.console))
+            .bearer_auth(&env.super_token)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        gateway::refresh_pricebook_if_newer(&env.state)
+            .await
+            .unwrap();
+    };
+
+    chat(&env).await;
+    assert_eq!(
+        wait_committed_nth(&env.pg, env.user_id, 1).await.0,
+        192,
+        "在线的 8 折应生效：240 × 0.8"
+    );
+
+    // 没有 pricing.write 的普通用户改不动活动上下线
+    assert_eq!(toggle(false, &env.token).await.status(), 403);
+
+    let resp = toggle(false, &env.super_token).await;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["requires_publish"], true, "下线要提示发布：{body}");
+
+    // 只改库不发布：在跑的网关拿的还是老快照，照旧 8 折（定案语义）
+    chat(&env).await;
+    assert_eq!(
+        wait_committed_nth(&env.pg, env.user_id, 2).await.0,
+        192,
+        "未发布前 PriceBook 仍是老快照，价格不该变"
+    );
+
+    // 发布 + 热更：回原价，且快照里不再有这条规则
+    publish_and_reload().await;
+    chat(&env).await;
+    let (third, snap) = wait_committed_nth(&env.pg, env.user_id, 3).await;
+    assert_eq!(third, 240, "下线并发布后应回标价");
+    assert_eq!(
+        snap["rules"].as_array().map_or(0, Vec::len),
+        0,
+        "下线的规则不得再进快照：{snap}"
+    );
+
+    // 列表回显 enabled=false，配置本身还在（不是删掉）
+    let listed: Value = client
+        .get(format!("http://{}/admin/pricing/rules", env.console))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mine = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["rule_code"] == code.as_str())
+        .expect("下线只改状态，配置应还在列表里");
+    assert_eq!(mine["enabled"], false);
+    assert_eq!(mine["params"]["multiplier"], "0.8", "参数原样保留以便复用");
+
+    // 重新上线：同一份配置直接生效，不用重配
+    assert_eq!(toggle(true, &env.super_token).await.status(), 200);
+    publish_and_reload().await;
+    chat(&env).await;
+    let (fourth, snap) = wait_committed_nth(&env.pg, env.user_id, 4).await;
+    assert_eq!(fourth, 192, "重新上线应恢复 8 折");
+    assert_eq!(snap["rules"][0]["code"], code.as_str(), "{snap}");
+
+    // 不认识的 code：404
+    let resp = client
+        .post(format!(
+            "http://{}/admin/pricing/rules/{code}-nope/toggle",
+            env.console
+        ))
+        .bearer_auth(&env.super_token)
+        .json(&json!({ "enabled": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // 两次上下线各落一条审计，detail 带上目标状态
+    let audited = sqlx::query!(
+        r#"SELECT detail FROM audit_logs WHERE action = 'pricing.toggle_rule' AND target = $1
+           ORDER BY created_at, id"#,
+        code
+    )
+    .fetch_all(&env.pg)
+    .await
+    .unwrap();
+    let states: Vec<Value> = audited
+        .iter()
+        .map(|r| r.detail.clone().unwrap_or(Value::Null)["enabled"].clone())
+        .collect();
+    assert_eq!(states, vec![json!(false), json!(true)], "上下线都要留痕");
 }

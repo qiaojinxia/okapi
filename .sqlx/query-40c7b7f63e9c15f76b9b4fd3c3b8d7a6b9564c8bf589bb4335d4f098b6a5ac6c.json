@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT target FROM audit_logs WHERE actor = $1 AND action = 'cache.flush'\n           ORDER BY created_at, id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "target",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "audit_logs",
+            "name": "target"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "40c7b7f63e9c15f76b9b4fd3c3b8d7a6b9564c8bf589bb4335d4f098b6a5ac6c"
+}

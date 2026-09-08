@@ -700,6 +700,12 @@ dashboard/subscription 响应形状、ratio JSON 导入），因为存量客户�
 - **配置类硬删 + 占用检查**（models / groups / plans / roles）：删除前查引用，被占用返回
   **409 + error_code**（`group_in_use` / `plan_in_use` / `role_in_use` / `group_is_default`）
   要求管理端先解绑——**不静默级联**，避免用户悄悄掉回默认组导致计费口径突变。
+  - **【2026-09-08】"占用"只算活着的引用**：`users.admin_role_id` 是无 `ON DELETE` 的外键，而用户
+    是软删（只置 `deleted_at`，绑定原样留着）。原先的占用检查带 `deleted_at IS NULL`，于是墓碑上的
+    死引用既不算占用、又拦得住 `DELETE FROM admin_roles`——角色从此 500 且永远删不掉。定案：
+    `delete_role` 在事务里先把**软删用户**的 `admin_role_id` 置 NULL 再删角色。这不违背"不静默级联"：
+    那条规矩防的是活人被悄悄改了计费口径，而软删用户已经 `status=2`、令牌全停，它身上的角色绑定
+    不产生任何权限或计费效果。活人绑着仍是 409，一个不放。
 - 定价类变更响应带 `requires_publish: true`，提示需发布新 epoch（PriceBook 是编译期快照）。
 
 **前端接入状态**（2026-08-31）：管理后台已覆盖六类接口面——
