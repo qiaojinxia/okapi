@@ -4,6 +4,7 @@
 
 use super::clients::detect_client_type;
 use super::error::AppError;
+use super::error::with_request_id;
 use super::estimate::{self, estimate_prompt_tokens};
 use super::sched_redis::session_hash;
 use super::scheduler::{Strategy, order_candidates, order_candidates_by_latency};
@@ -2605,13 +2606,6 @@ fn usage_dimensions(bill: &RequestBilling, info: &CandInfo) -> okapi_ledger::pg:
 }
 
 // ---- 响应工具 ----
-
-fn with_request_id(mut resp: Response, request_id: Uuid) -> Response {
-    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id.to_string()) {
-        resp.headers_mut().insert("x-okapi-request-id", value);
-    }
-    resp
-}
 
 fn upstream_passthrough_response(
     ingress: Ingress,

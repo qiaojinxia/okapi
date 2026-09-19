@@ -4,6 +4,7 @@
 
 use super::clients::detect_client_type;
 use super::error::AppError;
+use super::error::with_request_id;
 use super::state::AppState;
 use crate::gateway::extract::Multipart;
 use axum::body::Body;
@@ -38,7 +39,7 @@ pub async fn edits(
     let request_id = Uuid::new_v4();
     let started = Instant::now();
     match handle_edits(&state, &headers, multipart, request_id, started).await {
-        Ok(resp) => resp,
+        Ok(resp) => with_request_id(resp, request_id),
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }
@@ -47,7 +48,7 @@ pub async fn images(State(state): State<AppState>, headers: HeaderMap, body: Byt
     let request_id = Uuid::new_v4();
     let started = Instant::now();
     match handle(&state, &headers, &body, request_id, started).await {
-        Ok(resp) => resp,
+        Ok(resp) => with_request_id(resp, request_id),
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }

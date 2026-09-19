@@ -8,6 +8,7 @@
 
 use super::clients::detect_client_type;
 use super::error::AppError;
+use super::error::with_request_id;
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -64,7 +65,7 @@ pub async fn create(State(state): State<AppState>, headers: HeaderMap, body: Byt
     let request_id = Uuid::new_v4();
     let started = Instant::now();
     match handle_create(&state, &headers, &body, request_id, started).await {
-        Ok(resp) => resp,
+        Ok(resp) => with_request_id(resp, request_id),
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }
@@ -281,7 +282,7 @@ pub async fn get_task(
 ) -> Response {
     let request_id = Uuid::new_v4();
     match relay_task(&state, &headers, &task_id, false).await {
-        Ok(resp) => resp,
+        Ok(resp) => with_request_id(resp, request_id),
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }
@@ -294,7 +295,7 @@ pub async fn get_content(
 ) -> Response {
     let request_id = Uuid::new_v4();
     match relay_task(&state, &headers, &task_id, true).await {
-        Ok(resp) => resp,
+        Ok(resp) => with_request_id(resp, request_id),
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }

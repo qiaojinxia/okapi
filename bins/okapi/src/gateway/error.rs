@@ -183,3 +183,16 @@ impl From<PricingError> for AppError {
         }
     }
 }
+
+/// 成功响应挂 `x-okapi-request-id`。
+///
+/// 错误路径由 `into_response_with` 负责（本文件上方三处）；成功路径此前各端点各写
+/// 一份私有副本，images / videos 干脆没写——于是这两个**计费**端点扣了钱却不给
+/// request_id，用户看到账单对不回是哪次调用。收成一份共用的。
+#[must_use]
+pub fn with_request_id(mut resp: Response, request_id: uuid::Uuid) -> Response {
+    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id.to_string()) {
+        resp.headers_mut().insert("x-okapi-request-id", value);
+    }
+    resp
+}

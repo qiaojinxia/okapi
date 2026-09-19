@@ -4,6 +4,7 @@
 
 use super::clients::detect_client_type;
 use super::error::AppError;
+use super::error::with_request_id;
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -489,13 +490,6 @@ async fn forward(
         last,
         failover,
     ))
-}
-
-fn with_request_id(mut resp: Response, request_id: Uuid) -> Response {
-    if let Ok(value) = axum::http::HeaderValue::from_str(&request_id.to_string()) {
-        resp.headers_mut().insert("x-okapi-request-id", value);
-    }
-    resp
 }
 
 fn elapsed_ms(started: Instant) -> i32 {

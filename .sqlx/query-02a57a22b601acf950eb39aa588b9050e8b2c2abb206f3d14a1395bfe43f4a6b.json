@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(SUM(amount_micro), 0)::bigint AS \"s!\" FROM billing_records\n           WHERE user_id = $1 AND status = 20",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "02a57a22b601acf950eb39aa588b9050e8b2c2abb206f3d14a1395bfe43f4a6b"
+}

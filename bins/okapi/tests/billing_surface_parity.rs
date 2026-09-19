@@ -53,6 +53,41 @@ async fn mock_ok(body: axum::body::Bytes) -> axum::response::Response {
     .into_response()
 }
 
+async fn mock_embeddings(_body: axum::body::Bytes) -> axum::response::Response {
+    axum::Json(json!({
+        "object": "list",
+        "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+        "usage": {"prompt_tokens": UP_PROMPT, "total_tokens": UP_PROMPT}
+    }))
+    .into_response()
+}
+
+async fn mock_rerank(_body: axum::body::Bytes) -> axum::response::Response {
+    axum::Json(json!({
+        "results": [{"index": 0, "relevance_score": 0.9}],
+        "usage": {"prompt_tokens": UP_PROMPT, "total_tokens": UP_PROMPT}
+    }))
+    .into_response()
+}
+
+async fn mock_images(body: axum::body::Bytes) -> axum::response::Response {
+    let req: Value = serde_json::from_slice(&body).unwrap();
+    let n = usize::try_from(req["n"].as_u64().unwrap_or(1)).unwrap_or(1);
+    axum::Json(json!({
+        "created": 1_700_000_000,
+        "data": (0..n).map(|_| json!({"url": "https://img.example/x.png"})).collect::<Vec<_>>()
+    }))
+    .into_response()
+}
+
+async fn mock_speech(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
+        vec![0xFFu8, 0xFB, 0x90, 0x00],
+    )
+        .into_response()
+}
+
 async fn serve(router: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -74,9 +109,68 @@ struct Bed {
     key_id: i64,
     token: String,
     model: String,
+    emb_model: String,
+    tts_model: String,
+    img_model: String,
     gateway: SocketAddr,
     console: SocketAddr,
     admin_token: String,
+}
+
+/// 种四个模型 + 一条挂着它们的渠道。
+///
+/// 每个计费端点一个模型，定价形态刻意不同（ratio 与 per_call 各有），
+/// 好让对账断言同时压到两条算价路径。
+async fn seed_models(
+    pg: &PgPool,
+    suffix: &str,
+    mock: SocketAddr,
+) -> (String, String, String, String) {
+    let model = format!("parity-m-{suffix}");
+    okapi_store::provision::create_model_ratio(pg, &model, "1.25", "4.0", "1.0")
+        .await
+        .unwrap();
+    // 每个计费端点自带一个模型：定价形态不同（ratio / per_call），但对账口径一样
+    let emb_model = format!("parity-e-{suffix}");
+    okapi_store::provision::create_model_ratio(pg, &emb_model, "0.5", "1.0", "1.0")
+        .await
+        .unwrap();
+    let tts_model = format!("parity-t-{suffix}");
+    okapi_store::provision::create_model_ratio(pg, &tts_model, "2.0", "1.0", "1.0")
+        .await
+        .unwrap();
+    let img_model = format!("parity-i-{suffix}");
+    let img_id = okapi_store::provision::create_model_ratio(pg, &img_model, "1", "1", "1")
+        .await
+        .unwrap();
+    // 图片按次计费 $0.04/张
+    sqlx::query!(
+        r#"UPDATE model_pricing SET pricing_mode = 'per_call', per_call_price_micro = 40000
+           WHERE model_id = $1"#,
+        img_id
+    )
+    .execute(pg)
+    .await
+    .unwrap();
+    okapi_store::provision::create_channel(
+        pg,
+        &format!("parity-ch-{suffix}"),
+        "openai",
+        &format!("http://{mock}/v1"),
+        "cred",
+        &[
+            model.as_str(),
+            emb_model.as_str(),
+            tts_model.as_str(),
+            img_model.as_str(),
+        ],
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+
+    (model, emb_model, tts_model, img_model)
 }
 
 async fn setup() -> Bed {
@@ -87,23 +181,16 @@ async fn setup() -> Bed {
     okapi_store::run_migrations(&pg).await.unwrap();
     let suffix = Uuid::new_v4().simple().to_string()[..10].to_owned();
 
-    let mock = serve(Router::new().route("/v1/chat/completions", post(mock_ok))).await;
-    let model = format!("parity-m-{suffix}");
-    okapi_store::provision::create_model_ratio(&pg, &model, "1.25", "4.0", "1.0")
-        .await
-        .unwrap();
-    okapi_store::provision::create_channel(
-        &pg,
-        &format!("parity-ch-{suffix}"),
-        "openai",
-        &format!("http://{mock}/v1"),
-        "cred",
-        &[model.as_str()],
-        true,
-        None,
+    let mock = serve(
+        Router::new()
+            .route("/v1/chat/completions", post(mock_ok))
+            .route("/v1/embeddings", post(mock_embeddings))
+            .route("/v1/rerank", post(mock_rerank))
+            .route("/v1/images/generations", post(mock_images))
+            .route("/v1/audio/speech", post(mock_speech)),
     )
-    .await
-    .unwrap();
+    .await;
+    let (model, emb_model, tts_model, img_model) = seed_models(&pg, &suffix, mock).await;
 
     let user_id = okapi_store::provision::create_user(&pg, &format!("parity-u-{suffix}"))
         .await
@@ -152,6 +239,9 @@ async fn setup() -> Bed {
         key_id,
         token,
         model,
+        emb_model,
+        tts_model,
+        img_model,
         gateway: gateway_addr,
         console: console_addr,
         admin_token,
@@ -187,9 +277,10 @@ async fn get(addr: SocketAddr, path: &str, token: &str) -> (u16, Value) {
 /// 全程整数、比字符串：`total_usage` 是 JSON number，用 f64 读回来比较既踩计费红线
 /// （禁浮点），也会被 `to_string` 的舍入摆一道。serde_json 开了 `arbitrary_precision`，
 /// 数字保持字面形态，逐字符比才是准确的。
-fn usd_literal(amount_micro: i64) -> String {
+fn usd_literal(amount_micro: i64) -> Value {
     let cents = amount_micro.saturating_mul(100) / 10_000;
-    format!("{}.{:02}", cents / 100, (cents % 100).abs())
+    let literal = format!("{}.{:02}", cents / 100, (cents % 100).abs());
+    serde_json::from_str(&literal).expect("按整数拼出来的小数一定是合法 JSON number")
 }
 
 async fn snapshot_micro(pg: &PgPool, user_id: i64) -> i64 {
@@ -323,7 +414,7 @@ async fn one_request_reports_the_same_amount_on_every_surface() {
     let (status, dash) = get(bed.gateway, "/v1/dashboard/billing/usage", &bed.token).await;
     assert_eq!(status, 200, "{dash}");
     assert_eq!(
-        dash["total_usage"].to_string(),
+        dash["total_usage"],
         usd_literal(amount),
         "生态兼容口径与结算金额不一致：{dash}"
     );
@@ -445,8 +536,167 @@ async fn refund_restores_every_surface() {
     let (code, dash) = get(bed.gateway, "/v1/dashboard/billing/usage", &bed.token).await;
     assert_eq!(code, 200, "{dash}");
     assert_eq!(
-        dash["total_usage"].to_string(),
+        dash["total_usage"],
         usd_literal(0),
         "退款后生态口径仍报用量：{dash}"
+    );
+}
+
+/// 按 request_id 取权威结算行（表驱动用例里一次打多个端点，不能再按 user_id 取唯一行）。
+async fn wait_record_by_id(pg: &PgPool, request_id: Uuid) -> (i64, i64, i64) {
+    for _ in 0..80 {
+        if let Some(r) = sqlx::query!(
+            r#"SELECT amount_micro, prompt_tokens, completion_tokens
+               FROM billing_records WHERE request_id = $1 AND status = 20"#,
+            request_id
+        )
+        .fetch_optional(pg)
+        .await
+        .unwrap()
+        {
+            return (
+                r.amount_micro,
+                i64::from(r.prompt_tokens),
+                i64::from(r.completion_tokens),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("8s 内没等到 request_id={request_id} 的结算行");
+}
+
+/// 单个计费端点的对账：权威结算行 → 门户日志金额。
+async fn check_one_endpoint(
+    bed: &Bed,
+    client: &reqwest::Client,
+    name: &str,
+    path: &str,
+    body: &Value,
+    problems: &mut Vec<String>,
+) {
+    let resp = client
+        .post(format!("http://{}{path}", bed.gateway))
+        .bearer_auth(&bed.token)
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let request_id = resp
+        .headers()
+        .get("x-okapi-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok());
+    if status != 200 {
+        let text = resp.text().await.unwrap_or_default();
+        problems.push(format!(
+            "{name} {path} → {status}：{}",
+            text.chars().take(160).collect::<String>()
+        ));
+        return;
+    }
+    let Some(request_id) = request_id else {
+        problems.push(format!(
+            "{name} {path}：响应缺 x-okapi-request-id，无从对账"
+        ));
+        return;
+    };
+    drop(resp);
+
+    let (amount, _, _) = wait_record_by_id(&bed.pg, request_id).await;
+    if amount <= 0 {
+        problems.push(format!(
+            "{name}：结算金额为 {amount}，这笔没真扣到钱，后面全是假绿"
+        ));
+        return;
+    }
+
+    let (_, logs) = get(bed.console, "/api/me/logs", &bed.token).await;
+    let row = logs["data"].as_array().and_then(|rows| {
+        rows.iter()
+            .find(|r| r["request_id"] == json!(request_id.to_string()))
+    });
+    match row {
+        None => problems.push(format!("{name}：门户日志里找不到 {request_id}")),
+        Some(r) if r["amount_micro"] != json!(amount) => problems.push(format!(
+            "{name}：门户日志金额 {} ≠ 结算行 {amount}",
+            r["amount_micro"]
+        )),
+        Some(_) => {}
+    }
+}
+
+/// **每一个**计费端点都要在全部读出口报同一个数。
+///
+/// `one_request_reports_the_same_amount_on_every_surface` 只驱动了 `/v1/chat/completions`
+/// 一个端点——但落结算的是七个模块（chat / embeddings / images / audio / videos /
+/// realtime / custom_pass），单笔 chat 对上账不代表另外六个也对得上：它们各自拼
+/// `SettlementInput`，字段漏填或填错只有自己那条路径看得见。
+///
+/// 这里表驱动扫能用简单 HTTP mock 驱动的四条（含两种定价形态：ratio 与 per_call），
+/// 每条都走同一套断言：权威行 → 门户日志 → 门户用量 → 生态口径。
+/// videos（异步任务）与 realtime（WebSocket）形态不同，各自套件已有专项覆盖，不在此表。
+#[tokio::test]
+async fn every_billing_endpoint_agrees_across_surfaces() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+
+    let cases: Vec<(&str, &str, Value)> = vec![
+        (
+            "chat",
+            "/v1/chat/completions",
+            json!({"model": bed.model, "stream": false,
+                   "messages": [{"role": "user", "content": "hello"}]}),
+        ),
+        (
+            "embeddings",
+            "/v1/embeddings",
+            json!({"model": bed.emb_model, "input": "hello"}),
+        ),
+        (
+            "rerank",
+            "/v1/rerank",
+            json!({"model": bed.emb_model, "query": "q", "documents": ["a", "b"]}),
+        ),
+        (
+            "images",
+            "/v1/images/generations",
+            json!({"model": bed.img_model, "prompt": "a cat", "n": 2}),
+        ),
+        (
+            "audio.speech",
+            "/v1/audio/speech",
+            json!({"model": bed.tts_model, "input": "hello world", "voice": "alloy"}),
+        ),
+    ];
+
+    let mut problems: Vec<String> = Vec::new();
+    for (name, path, body) in &cases {
+        check_one_endpoint(&bed, &client, name, path, body, &mut problems).await;
+    }
+
+    // 生态口径的累计值 = 本轮全部结算之和（它读 api_keys.used_micro）
+    let total: i64 = sqlx::query_scalar!(
+        r#"SELECT COALESCE(SUM(amount_micro), 0)::bigint AS "s!" FROM billing_records
+           WHERE user_id = $1 AND status = 20"#,
+        bed.user_id
+    )
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    let (_, dash) = get(bed.gateway, "/v1/dashboard/billing/usage", &bed.token).await;
+    if dash["total_usage"] != usd_literal(total) {
+        problems.push(format!(
+            "生态口径 {} ≠ 全部结算之和 {}（{total} micro）",
+            dash["total_usage"],
+            usd_literal(total)
+        ));
+    }
+
+    assert!(
+        problems.is_empty(),
+        "{} 个计费端点对账不一致：\n{}",
+        problems.len(),
+        problems.join("\n")
     );
 }

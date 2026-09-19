@@ -1241,3 +1241,50 @@ smoke 只验流水空签与登录能进门；质量页图表套件只验共享�
 把被测性质在实现侧故意破坏一处，确认探针报红且点名准确。探针自己绿不等于它在探——
 本轮三个探针都按此验过（第二十二轮的跨出口对账同）。
 
+### 2026-09-19 第二十四轮：把"每个接口"的准确性做实——计费端点全覆盖 + 翻页恒等式
+
+第二十二/二十三轮的探针是**机械扫全量路由**，但扫的是错误壳与权限闸这两个横切面。
+复盘时点破一件事：**机械路由扫 ≠ 端到端准确性**；`billing_surface_parity` 当时只驱动了
+`/v1/chat/completions` 一条，而落结算的是七个模块，单笔 chat 对上账不代表另外六个也对得上
+（它们各自拼 `SettlementInput`，字段漏填或填错只有自己那条路径看得见）。这轮补两块。
+
+#### 一：每个计费端点都要在全出口对上账（`every_billing_endpoint_agrees_across_surfaces`）
+
+表驱动扫 chat / embeddings / rerank / images / audio.speech 五条，含两种定价形态
+（ratio 与 per_call），每条走同一套断言：权威结算行 → 门户日志 → 生态口径累计。
+videos（异步任务）与 realtime（WebSocket）形态不同，各自套件已有专项覆盖，不进此表。
+
+**抓到一个真缺陷**：`/v1/images/generations` 与 `/v1/videos` **不回 `x-okapi-request-id`**。
+chat / embeddings / audio / custom_pass 都回，errors 路径也回——只有这两个漏了，
+而它们都是**计费**端点：用户看到扣款却拿不到 request_id，对不回是哪次调用。
+顺带发现 `with_request_id` 被复制了两份（chat 与 embeddings 各一），已收成 `error.rs`
+里一份共用的，四处统一引用。
+
+#### 二：列表端点翻页不重不漏（`list_pagination`）
+
+分页机制本身有单测（`page_params_are_clamped`），逐端点集成此前只有
+`price_group_pagination_matches_database_pages` 一条；其余只验过"能调用、回了 200"。
+而这一类最典型的缺陷恰恰是 200 下的错：`limit` 接了但 `offset` 没进 SQL、
+或排序键不唯一导致两页在边界重叠/漏行。
+
+判据用不依赖库内容的恒等式，对并发写入不敏感，也不必把全表拉下来
+（`/admin/users` 开发库里上千行）：
+
+```text
+A = ?limit=2N&offset=0 ； B = ?limit=N&offset=0 ； C = ?limit=N&offset=N
+要求  B ++ C == A（逐 id 等且同序）、B ∩ C == ∅、三次 total 相同
+```
+
+覆盖 `/admin/keys`、`/admin/pools`、`/admin/users`、`/api/me/keys` 四条真列表端点；
+`/admin/stats/*` 那几个回 `{data,total}` 的是 CH 聚合，分页语义不同，不进此表。
+
+变异验证：把 `PageParams` 的 `offset` 钉死成 0，四条全部报红并列出重叠的行 id。
+
+#### 仍未覆盖的两类（判断：机械做不动，留给按端点的业务用例）
+
+- **参数组合约束**（"A=x 时 B 必须为 y"）：没有统一的声明式来源，机械探针无从知道
+  哪些组合非法；逐端点手写等于把业务语义抄第二遍。现状是各套件按自己的语义验。
+- **特定输入 → 特定 error_code**（超限回 429 还是 403 还是 400）：判定条件散在各 handler，
+  同样没有可机械对照的真值表。第二十三轮的 65 个错误码覆盖验的是"码都能被触发到"，
+  不是"该触发哪个码"。两者都建议随新端点在其自己的套件里写，不追求机械全覆盖。
+
