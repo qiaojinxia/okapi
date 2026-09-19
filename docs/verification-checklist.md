@@ -1424,3 +1424,40 @@ harness 在 scratchpad（`mut.sh`：注入 → 跑指定套件 → 还原 → �
    顺带覆盖"的健壮性差一个量级——后者会随邻居的改动无声失效。判断覆盖质量时要看
    报红的是哪一条用例，不能只看红没红。
 
+### 2026-09-19 第二十九轮：把计费规则的分母列出来，17 条穷举变异
+
+第二十八轮只变异了 6 条规则，**分母没交代**——"抽样 6 条全中"和"总共就 17 条、条条都中"
+是两个强度完全不同的结论。这轮先把总体机械枚举出来，再逐条打。
+
+总体取**计费引擎的全部规则点**（从源码枚举，不是拍脑袋挑的）：
+`RatioSet` 的 7 条倍率轴 + 2 个全局乘子（分组 / 用户）+ 1 个档位修饰
++ `RuleKind` 的 4 个变体 + `PricingMode` 的 3 种模式 = **17 条**。
+
+| 类别 | 条目 | 结果 |
+| --- | --- | --- |
+| 倍率轴（7） | model / completion / cache / cache_write / audio / image / audio_completion | 全 CAUGHT |
+| 全局乘子（2） | group_ratio / user_multiplier | 全 CAUGHT |
+| 档位修饰（1） | tier_ratio | CAUGHT（`gateway_tier`，不在定价 crate） |
+| 规则类型（4） | Volume / TimeBased / Discount / Surge | 全 CAUGHT |
+| 定价模式（3） | Ratio / PerCall / Tiered | 全 CAUGHT |
+
+**17 / 17 CAUGHT。** 过程中发现并修掉的唯一实质缺口是上一轮那条（`image_ratio`
+只被音频 fixture 顺带覆盖，已补专属对拍）。
+
+#### 这轮最该记住的：变异测试的主要失败模式是 harness 自己搞错范围
+
+本轮三次判出 SURVIVED，**三次都是假阳**：
+
+1. `audio_completion_ratio` / `image_ratio`：只跑了 `gateway_audio` / `gateway_images`，
+   而这两条轴的对拍在 `okapi-pricing` 的 `parity.rs`。
+2. `tier_ratio`：只跑了 `-p okapi-pricing`，而档位的集成用例在 `gateway_tier`。
+3. `TimeBased`：harness 写成 `cargo test -p okapi-pricing -p okapi --test gateway_pricing_rules`
+   —— **`--test` 会把范围过滤到那一个 target，定价 crate 的测试压根没跑**。
+
+换层重跑后三条全部 CAUGHT。所以变异测试的通则要写死：
+
+> **SURVIVED 不能直接当结论**，必须先确认"该规则的测试到底在哪一层"并重跑。
+> 跨 crate 的规则尤其容易踩：`--test <name>` 与多个 `-p` 同时用会静默缩小范围。
+> 宁可把整个 workspace 跑一遍（慢但不会骗人），也别信一次范围可疑的 SURVIVED——
+> 假阳会让人去"修"一个本来就正确的实现，比漏测更贵。
+
