@@ -347,6 +347,86 @@ fn snapshot_json_shape_matches_design() {
 ///   audio_completion_ratio = 80/40 = 2   ← 叠乘：2×1.25×16×2 = $80/1M ✓
 ///
 /// 本用例同时锁定**缺失模态轴时的漏收幅度**：全按文本计只收 35000 micro，
+/// 图片输入倍率的**专属**对拍。
+///
+/// 由来：对既有套件做变异测试时，把 `image: *image_ratio` 改成恒 1.0，
+/// 唯一报红的是上面那条**音频**用例——因为它的 fixture 恰好也带了 2000 图片 token。
+/// 也就是说 `image_ratio` 此前没有自己的用例，只是被别人的混合模态 fixture 顺带兜住：
+/// 谁把那条 fixture 简化掉（比如只留音频两轴），图片轴就会**悄无声息地失去覆盖**。
+/// 这里钉一条只动图片轴的，让它不再依赖邻居。
+#[test]
+fn openai_image_input_ratio_parity() {
+    let model_code = ModelCode::from("gpt-4o");
+    let group_code = GroupCode::from("default");
+    let build = |image: &str| {
+        book::compile(PriceBookSource {
+            epoch: 11,
+            models: vec![ModelEntry {
+                model: model_code.clone(),
+                pricing: PricingMode::Ratio {
+                    model_ratio: ratio("1.25"),
+                    completion_ratio: ratio("4"),
+                    cache_ratio: ratio("1"),
+                    cache_write_ratio: ratio("1"),
+                    audio_ratio: ratio("1"),
+                    audio_completion_ratio: ratio("1"),
+                    image_ratio: ratio(image),
+                },
+                tier_ratios: Vec::new(),
+            }],
+            groups: vec![GroupEntry {
+                group: group_code.clone(),
+                ratio: ratio("1"),
+            }],
+            overrides: Vec::new(),
+            rules: Vec::new(),
+        })
+        .unwrap()
+    };
+    let ctx = CalcContext {
+        user: UserId::new(1),
+        model: model_code.clone(),
+        group: group_code.clone(),
+        user_multiplier: ratio("1"),
+        monthly_tokens: 0,
+        monthly_spend_micro: 0,
+        local_minute_of_day: 0,
+        now_unix: 0,
+        surge_active: false,
+        service_tier: None,
+    };
+    // prompt 4000 = 文本 3000 + 图片 1000；无音频、无补全，只让图片轴说话
+    let usage = TokenUsage {
+        prompt_tokens: 4_000,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+        audio_prompt_tokens: 0,
+        image_prompt_tokens: 1_000,
+        completion_tokens: 0,
+        audio_completion_tokens: 0,
+        reasoning_tokens: 0,
+    };
+    assert!(usage.validate().is_ok());
+
+    //   文本入 3000 × 1.25 × 2micro       =  7500
+    //   图片入 1000 × 1.25 × 2 × 2micro   =  5000（image_ratio 2.0）
+    let quote = calculate(&build("2"), &ctx, usage).unwrap();
+    assert_eq!(quote.amount.as_micros(), 12_500, "图片轴按 2× 计入");
+    assert_eq!(
+        quote.snapshot.image_ratio.map(|r| r.to_string()).as_deref(),
+        Some("2"),
+        "用到的图片轴必须进快照（账单可解释）"
+    );
+
+    // 轴为 1.0 时必须与"图片按文本计"完全等价：4000 × 1.25 × 2micro = 10000
+    let flat = calculate(&build("1"), &ctx, usage).unwrap();
+    assert_eq!(
+        flat.amount.as_micros(),
+        10_000,
+        "image_ratio 缺省 1.0 必须零影响"
+    );
+}
+
 /// 而按官方价应收 178000 micro——音频场景漏收 80%。
 #[test]
 fn openai_audio_official_pricing_parity() {
