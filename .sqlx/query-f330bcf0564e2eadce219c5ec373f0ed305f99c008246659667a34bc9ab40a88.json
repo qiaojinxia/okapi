@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE model_pricing SET pricing_mode = 'per_call', per_call_price_micro = 10000\n           WHERE model_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f330bcf0564e2eadce219c5ec373f0ed305f99c008246659667a34bc9ab40a88"
+}

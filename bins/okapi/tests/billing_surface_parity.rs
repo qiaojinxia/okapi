@@ -88,6 +88,15 @@ async fn mock_speech(_body: axum::body::Bytes) -> axum::response::Response {
         .into_response()
 }
 
+async fn mock_video_create(_body: axum::body::Bytes) -> axum::response::Response {
+    axum::Json(json!({"id": "video_parity1", "object": "video", "status": "queued"}))
+        .into_response()
+}
+
+async fn mock_pass() -> axum::response::Response {
+    axum::Json(json!({"ok": true})).into_response()
+}
+
 async fn serve(router: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -112,6 +121,8 @@ struct Bed {
     emb_model: String,
     tts_model: String,
     img_model: String,
+    vid_model: String,
+    pass_channel_id: i64,
     gateway: SocketAddr,
     console: SocketAddr,
     admin_token: String,
@@ -173,6 +184,58 @@ async fn seed_models(
     (model, emb_model, tts_model, img_model)
 }
 
+/// 种 videos 模型（per_call × 秒）与 custom_pass 透传渠道。
+///
+/// 与 `seed_models` 分开：这两个是"异步任务"与"任意路径透传"两种形态，
+/// 和前面四个同步 JSON 端点不是一类，放一起会让 setup 读不下去。
+async fn seed_async_surfaces(pg: &PgPool, suffix: &str, mock: SocketAddr) -> (String, i64) {
+    // videos：per_call 0.01 USD/秒
+    let vid_model = format!("parity-v-{suffix}");
+    let vid_id = okapi_store::provision::create_model_ratio(pg, &vid_model, "1", "1", "1")
+        .await
+        .unwrap();
+    sqlx::query!(
+        r#"UPDATE model_pricing SET pricing_mode = 'per_call', per_call_price_micro = 10000
+           WHERE model_id = $1"#,
+        vid_id
+    )
+    .execute(pg)
+    .await
+    .unwrap();
+    sqlx::query!(
+        "UPDATE channels SET models = models || $2::jsonb WHERE name = $1",
+        format!("parity-ch-{suffix}"),
+        json!([vid_model])
+    )
+    .execute(pg)
+    .await
+    .unwrap();
+    // custom_pass：按次计费的透传渠道，路径白名单只放 /ok
+    let (pass_channel_id, _) = okapi_store::provision::create_channel(
+        pg,
+        &format!("parity-pass-{suffix}"),
+        "custom_pass",
+        &format!("http://{mock}"),
+        "cred",
+        &[],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query!(
+        "UPDATE channels SET settings = $2 WHERE id = $1",
+        pass_channel_id,
+        json!({"allowed_paths": ["/ok"], "billing_model": vid_model,
+               "auth_header": "x-api-key", "auth_scheme": ""})
+    )
+    .execute(pg)
+    .await
+    .unwrap();
+
+    (vid_model, pass_channel_id)
+}
+
 async fn setup() -> Bed {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
@@ -187,10 +250,14 @@ async fn setup() -> Bed {
             .route("/v1/embeddings", post(mock_embeddings))
             .route("/v1/rerank", post(mock_rerank))
             .route("/v1/images/generations", post(mock_images))
-            .route("/v1/audio/speech", post(mock_speech)),
+            .route("/v1/audio/speech", post(mock_speech))
+            .route("/v1/videos", post(mock_video_create))
+            .route("/ok", axum::routing::get(mock_pass)),
     )
     .await;
     let (model, emb_model, tts_model, img_model) = seed_models(&pg, &suffix, mock).await;
+
+    let (vid_model, pass_channel_id) = seed_async_surfaces(&pg, &suffix, mock).await;
 
     let user_id = okapi_store::provision::create_user(&pg, &format!("parity-u-{suffix}"))
         .await
@@ -242,6 +309,8 @@ async fn setup() -> Bed {
         emb_model,
         tts_model,
         img_model,
+        vid_model,
+        pass_channel_id,
         gateway: gateway_addr,
         console: console_addr,
         admin_token,
@@ -574,13 +643,15 @@ async fn check_one_endpoint(
     body: &Value,
     problems: &mut Vec<String>,
 ) {
-    let resp = client
-        .post(format!("http://{}{path}", bed.gateway))
-        .bearer_auth(&bed.token)
-        .json(body)
-        .send()
-        .await
-        .unwrap();
+    // body 为 Null = GET（custom_pass 透传面用 GET）
+    let req = if body.is_null() {
+        client.get(format!("http://{}{path}", bed.gateway))
+    } else {
+        client
+            .post(format!("http://{}{path}", bed.gateway))
+            .json(body)
+    };
+    let resp = req.bearer_auth(&bed.token).send().await.unwrap();
     let status = resp.status().as_u16();
     let request_id = resp
         .headers()
@@ -635,7 +706,8 @@ async fn check_one_endpoint(
 ///
 /// 这里表驱动扫能用简单 HTTP mock 驱动的四条（含两种定价形态：ratio 与 per_call），
 /// 每条都走同一套断言：权威行 → 门户日志 → 门户用量 → 生态口径。
-/// videos（异步任务）与 realtime（WebSocket）形态不同，各自套件已有专项覆盖，不在此表。
+/// 七条里唯一缺的是 realtime：它是 WebSocket 升级，HTTP 表驱动装不下（不是"另有覆盖"
+/// 这种理由，是协议形态不同）；其结算同样经 `settle_write`，而那条路径被表里这七条钉住。
 #[tokio::test]
 async fn every_billing_endpoint_agrees_across_surfaces() {
     let bed = setup().await;
@@ -668,7 +740,17 @@ async fn every_billing_endpoint_agrees_across_surfaces() {
             "/v1/audio/speech",
             json!({"model": bed.tts_model, "input": "hello world", "voice": "alloy"}),
         ),
+        // videos：异步任务面，提交即按 per_call × seconds 预扣并结算
+        (
+            "videos",
+            "/v1/videos",
+            json!({"model": bed.vid_model, "prompt": "a cat", "seconds": "8"}),
+        ),
     ];
+    // custom_pass 的路径带渠道 id，单独拼；GET 透传故 body 传 Null
+    let pass_path = format!("/pass/{}/ok", bed.pass_channel_id);
+    let mut cases = cases;
+    cases.push(("custom_pass", pass_path.as_str(), Value::Null));
 
     let mut problems: Vec<String> = Vec::new();
     for (name, path, body) in &cases {
