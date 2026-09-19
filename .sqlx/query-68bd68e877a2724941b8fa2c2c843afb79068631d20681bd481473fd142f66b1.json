@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE api_keys SET expires_at = now() - interval '1 day' WHERE key_hash = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bpchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "68bd68e877a2724941b8fa2c2c843afb79068631d20681bd481473fd142f66b1"
+}

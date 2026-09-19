@@ -134,6 +134,12 @@ async fn handle_edits(
         service_tier: None,
     };
     let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
+    // 图片请求没有 token，ratio 定价算出来恒为 0——预扣 0 必过，于是余额为空的
+    // 调用方也能一路打到上游（白嫖运营方的上游额度）。audio 的 transcriptions
+    // 早有同款闸（那里时长同样本地不可知），images 此前漏了。
+    if quote.snapshot.mode != "per_call" {
+        return Err(AppError::bad_request().with_param("images_requires_per_call_model"));
+    }
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
@@ -317,6 +323,12 @@ async fn handle(
         service_tier: None,
     };
     let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
+    // 图片请求没有 token，ratio 定价算出来恒为 0——预扣 0 必过，于是余额为空的
+    // 调用方也能一路打到上游（白嫖运营方的上游额度）。audio 的 transcriptions
+    // 早有同款闸（那里时长同样本地不可知），images 此前漏了。
+    if quote.snapshot.mode != "per_call" {
+        return Err(AppError::bad_request().with_param("images_requires_per_call_model"));
+    }
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 

@@ -20,6 +20,11 @@
 //! 这样既不必把全表拉下来（`/admin/users` 在开发库里上千行），也对并发写入不敏感——
 //! 三次取的是同一个窗口的不同切法。
 //!
+//! 第二个用例走另一条轴：**越界参数必须被夹取或拒绝，不能被静默当真**。
+//! 这是"参数组合约束"里唯一机械可判的那部分——不必知道每个端点的业务语义，
+//! 只要求 `limit=999999` 不能真回 99 万行（未夹的 limit 就是个 DoS 面）、
+//! 负数与 0 不能把 handler 打崩。`listing::MAX_PAGE` 是全局上限，用它当判据。
+//!
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
 use okapi::{console, gateway};
@@ -201,6 +206,77 @@ async fn list_endpoints_paginate_without_overlap_or_gaps() {
     assert!(
         problems.is_empty(),
         "{} 个列表端点翻页不正确：\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
+/// 越界的分页 / 窗口参数必须被夹取或拒绝，不得 5xx、不得真回超限行数。
+///
+/// 与上一条用例的分工：那条验"正常取值下翻页对不对"，这条验"喂垃圾值会怎样"。
+/// 后者此前只有 `listing::page_params_are_clamped` 这一个**单元**测试——
+/// 它验的是 `PageParams::new` 本身，不保证每个端点真的经由它取参
+/// （手写 `limit` 解析绕开夹取，单测照样绿）。
+#[tokio::test]
+async fn out_of_range_params_are_clamped_not_honoured() {
+    /// 与 `crates/okapi-store/src/listing.rs` 的 `MAX_PAGE` 同值。
+    const MAX_PAGE: usize = 200;
+
+    let bed = setup().await;
+
+    let cases: Vec<(&str, &str)> = vec![
+        ("/admin/keys", "admin"),
+        ("/admin/pools", "admin"),
+        ("/admin/users", "admin"),
+        ("/api/me/keys", "user"),
+    ];
+    // 每个都该被夹住或拒掉，不该 5xx
+    let hostile = ["limit=999999", "limit=0", "limit=-1", "offset=-5"];
+
+    let mut problems: Vec<String> = Vec::new();
+    for (path, who) in &cases {
+        let token = if *who == "admin" {
+            &bed.admin_token
+        } else {
+            &bed.user_token
+        };
+        for q in hostile {
+            let url = format!("http://{}{path}?{q}", bed.console);
+            let resp = reqwest::Client::new()
+                .get(&url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap();
+            let status = resp.status().as_u16();
+            if status >= 500 {
+                problems.push(format!("{path}?{q} → {status}：越界参数把 handler 打崩了"));
+                continue;
+            }
+            if status >= 400 {
+                continue; // 明确拒绝也是合规答复
+            }
+            // 行数上限只在**显式传了 limit** 时断言。
+            // 不传 limit 的语义是 `Slice::ALL`——配置类列表（渠道池、分组这些供
+            // 下拉用的）刻意回全量，只有大表走 `capped_limit`。把"没传 limit 也不许
+            // 超 MAX_PAGE"当判据是错的，会把设计当成缺陷（实测 /admin/pools 回 810 行，
+            // 查 listing.rs 的注释确认是刻意如此）。
+            if !q.starts_with("limit=") {
+                continue;
+            }
+            let body = resp.json::<Value>().await.unwrap_or(Value::Null);
+            let n = body["data"].as_array().map_or(0, Vec::len);
+            if n > MAX_PAGE {
+                problems.push(format!(
+                    "{path}?{q} → 回了 {n} 行，超过 MAX_PAGE={MAX_PAGE}：limit 没夹住"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        problems.is_empty(),
+        "{} 处越界参数未被夹取：\n{}",
         problems.len(),
         problems.join("\n")
     );
