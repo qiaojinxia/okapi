@@ -97,6 +97,44 @@ async fn mock_pass() -> axum::response::Response {
     axum::Json(json!({"ok": true})).into_response()
 }
 
+async fn mock_realtime(
+    headers: axum::http::HeaderMap,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    let authed = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v == "Bearer cred");
+    if !authed {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    ws.on_upgrade(|mut sock: axum::extract::ws::WebSocket| async move {
+        use axum::extract::ws::Message;
+        let created = json!({"type": "session.created", "session": {"id": "sess_parity"}});
+        if sock
+            .send(Message::Text(created.to_string().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        while let Some(Ok(msg)) = sock.recv().await {
+            if let Message::Text(t) = msg {
+                let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                if v["type"] == "response.create" {
+                    let done = json!({"type": "response.done", "response": {"usage": {
+                        "input_tokens": UP_PROMPT,
+                        "output_tokens": UP_COMPLETION,
+                        "input_token_details": {"cached_tokens": 0, "audio_tokens": 0},
+                        "output_token_details": {"audio_tokens": 0}
+                    }}});
+                    let _ = sock.send(Message::Text(done.to_string().into())).await;
+                }
+            }
+        }
+    })
+}
+
 async fn serve(router: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -252,7 +290,8 @@ async fn setup() -> Bed {
             .route("/v1/images/generations", post(mock_images))
             .route("/v1/audio/speech", post(mock_speech))
             .route("/v1/videos", post(mock_video_create))
-            .route("/ok", axum::routing::get(mock_pass)),
+            .route("/ok", axum::routing::get(mock_pass))
+            .route("/v1/realtime", axum::routing::get(mock_realtime)),
     )
     .await;
     let (model, emb_model, tts_model, img_model) = seed_models(&pg, &suffix, mock).await;
@@ -781,4 +820,141 @@ async fn every_billing_endpoint_agrees_across_surfaces() {
         problems.len(),
         problems.join("\n")
     );
+}
+
+/// realtime 也要进对账——它只是装不进 HTTP 表，不是不该验。
+///
+/// 此前两轮把它写成"形态不同、各自套件已有专项覆盖，不在此表"。后半句是站不住的：
+/// "各自套件已覆盖"恰恰是跨出口对账要推翻的那种理由。真实的限制只有一条——
+/// WebSocket 不能和 POST/GET 共用一张表驱动的 case 列表，于是单写一例，
+/// **走与表里七条完全相同的断言**：权威结算行 → 门户日志 → 门户用量 → 生态口径。
+#[tokio::test]
+async fn realtime_agrees_across_surfaces_too() {
+    use futures::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::Message as CliMsg;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+
+    let bed = setup().await;
+    let before = settled_total(&bed.pg, bed.user_id).await;
+
+    let url = format!("ws://{}/v1/realtime?model={}", bed.gateway, bed.model);
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", bed.token).parse().unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(req)
+        .await
+        .expect("realtime 应能连上");
+
+    // 先收 session.created，再要一次响应
+    let _ = ws.next().await;
+    ws.send(CliMsg::Text(
+        json!({"type": "response.create"}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    // 等到 response.done 透回来（usage 就在它里面）
+    for _ in 0..20 {
+        match ws.next().await {
+            Some(Ok(CliMsg::Text(t))) => {
+                let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                if v["type"] == "response.done" {
+                    break;
+                }
+            }
+            Some(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    // 断开即结算（§realtime：连接预扣 → response.done 累计 → 断开 commit）
+    ws.close(None).await.ok();
+    drop(ws);
+
+    // 权威：本轮新增的那笔结算
+    let (request_id, amount) = wait_new_settlement(&bed.pg, bed.user_id, before).await;
+    assert!(amount > 0, "realtime 这笔必须真扣到钱，否则后面是假绿");
+    let total_after = settled_total(&bed.pg, bed.user_id).await;
+
+    // 独立累加器：它们不是 billing_records 的派生视图，是各写各的。
+    // 少了这一段，本用例就只能发现"派生视图之间打架"，发现不了
+    // "记账行与 ledger 扣款对不上"——实测变异（记账行减半、ledger 不变）能从这里露出来。
+    let commit_delta = sqlx::query_scalar!(
+        r#"SELECT COALESCE(SUM(delta_micro), 0)::bigint AS "d!" FROM billing_events
+           WHERE request_id = $1 AND event_type = 'commit'"#,
+        request_id
+    )
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        commit_delta, -amount,
+        "realtime：事件流的扣减与结算行金额对不上"
+    );
+    let hot = bed
+        .state
+        .ledger
+        .balance(bed.user_id)
+        .await
+        .unwrap()
+        .as_micros();
+    assert_eq!(
+        hot,
+        CREDIT_MICRO - total_after,
+        "realtime：Redis 热余额与结算总额漂移"
+    );
+
+    let (_, logs) = get(bed.console, "/api/me/logs", &bed.token).await;
+    let row = logs["data"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|r| r["request_id"] == json!(request_id.to_string()))
+        })
+        .unwrap_or_else(|| panic!("门户日志里找不到 realtime 这笔：{logs}"));
+    assert_eq!(
+        row["amount_micro"],
+        json!(amount),
+        "realtime 的门户日志金额与结算行不一致"
+    );
+
+    let (_, dash) = get(bed.gateway, "/v1/dashboard/billing/usage", &bed.token).await;
+    assert_eq!(
+        dash["total_usage"],
+        usd_literal(total_after),
+        "realtime 计入后生态口径与结算总额不一致：{dash}"
+    );
+}
+
+/// 该用户已 committed 的结算总额。
+async fn settled_total(pg: &PgPool, user_id: i64) -> i64 {
+    sqlx::query_scalar!(
+        r#"SELECT COALESCE(SUM(amount_micro), 0)::bigint AS "s!" FROM billing_records
+           WHERE user_id = $1 AND status = 20"#,
+        user_id
+    )
+    .fetch_one(pg)
+    .await
+    .unwrap()
+}
+
+/// 等一笔**新**结算落地（总额变了即认），回 (request_id, 该笔金额)。
+async fn wait_new_settlement(pg: &PgPool, user_id: i64, before: i64) -> (Uuid, i64) {
+    for _ in 0..80 {
+        let rows = sqlx::query!(
+            r#"SELECT request_id, amount_micro FROM billing_records
+               WHERE user_id = $1 AND status = 20 ORDER BY id DESC LIMIT 1"#,
+            user_id
+        )
+        .fetch_all(pg)
+        .await
+        .unwrap();
+        if settled_total(pg, user_id).await != before
+            && let Some(r) = rows.first()
+        {
+            return (r.request_id, r.amount_micro);
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("8s 内没等到 realtime 的结算行");
 }

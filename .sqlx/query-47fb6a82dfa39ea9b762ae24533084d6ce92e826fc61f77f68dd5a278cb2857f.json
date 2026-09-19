@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request_id, amount_micro FROM billing_records\n               WHERE user_id = $1 AND status = 20 ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_records",
+            "name": "amount_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "47fb6a82dfa39ea9b762ae24533084d6ce92e826fc61f77f68dd5a278cb2857f"
+}
