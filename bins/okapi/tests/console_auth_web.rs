@@ -792,6 +792,59 @@ async fn sessions_list_and_revoke() {
     assert_eq!(dead_b.status(), 401);
 }
 
+/// 不配 web_session_limit 时也必须有上限：缺省值要真的到达用户（列表回 limit）。
+/// 此前缺省 0 = 不限，会话卡会无限长。
+#[tokio::test]
+async fn session_limit_has_a_sane_default_when_unset() {
+    let env = setup_with(None, None).await;
+    let client = reqwest::Client::new();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let email = format!("dfl-{suffix}@ok.test");
+    let register = client
+        .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "username": format!("dfl-{suffix}"), "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(register.status(), 200);
+    let login = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200);
+    let cookie = cookie_of(&login);
+
+    let key: Value = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"name": "dfl"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let api_key = key["api_key"].as_str().unwrap();
+
+    let listed: Value = client
+        .get(format!("http://{}/api/me/sessions", env.addr))
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        listed["limit"], 10,
+        "未配置时应回缺省上限而非 null（null = 不限）：{listed}"
+    );
+}
+
 /// 会话数上限（§11.37）：上限 2、连登三次 → 最早的 cookie 失效，后两条有效，列表恰两条并回 limit。
 #[tokio::test]
 async fn session_limit_evicts_oldest() {

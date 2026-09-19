@@ -5,8 +5,9 @@
 use super::clients::detect_client_type;
 use super::error::AppError;
 use super::state::AppState;
+use crate::gateway::extract::Multipart;
 use axum::body::Body;
-use axum::extract::{Multipart, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -32,7 +33,7 @@ struct ImagesProbe {
 pub async fn edits(
     State(state): State<AppState>,
     headers: HeaderMap,
-    multipart: Multipart,
+    Multipart(multipart): Multipart,
 ) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
@@ -69,7 +70,7 @@ fn scale_quote(quote: &Quote, units: u32) -> Quote {
 async fn handle_edits(
     state: &AppState,
     headers: &HeaderMap,
-    mut multipart: Multipart,
+    mut multipart: axum::extract::Multipart,
     request_id: Uuid,
     started: Instant,
 ) -> Result<Response, AppError> {

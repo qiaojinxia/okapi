@@ -6,6 +6,7 @@
 use super::admin::{audit, guard};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -140,7 +141,7 @@ pub struct CheckoutReq {
 pub async fn checkout(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CheckoutReq>,
+    ExtractJson(req): ExtractJson<CheckoutReq>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let plan = store::find_sub_plan(&state.pg, req.plan_code.trim())
@@ -192,7 +193,7 @@ pub async fn admin_grant(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(user_id): Path<i64>,
-    Json(req): Json<AdminGrantReq>,
+    ExtractJson(req): ExtractJson<AdminGrantReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
     let exists = sqlx::query_scalar!(

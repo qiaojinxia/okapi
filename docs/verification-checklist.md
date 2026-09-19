@@ -120,34 +120,41 @@
 
 | 功能面 | 路由 | 维度 F 子项 | 覆盖 spec | 缺口 / 备注 |
 | --- | --- | --- | --- | --- |
-| 登录 / 会话 / 权限裁剪 | `/`、`/portal/*` 守卫 | 双登录方式、403 不白屏、导航按权限裁剪、登出清服务端 session | `smoke.spec`（4 例） | — |
-| 找回 / 重置密码 | `/forgot-password`, `/reset-password` | 登录页链接带邮箱、提交体 email+lang、防枚举成功态、未配 SMTP 501 文案；缺 token 提示、长度与一致性前置校验、成功回登录、失效 token 400 文案 | `write-forms.spec`（2 例，09-06 新增） | — |
+| 登录 / 会话 / 权限裁剪 | `/`、`/portal/*` 守卫 | 双登录方式、403 不白屏、导航按权限裁剪、登出清服务端 session；注册关闭不摆表单、邀请制必填 aff、`?aff=` 不手填、验证码 `{email,lang}`、OAuth 只跳 `/auth/oauth/{code}`；邮箱登录 `totp_required` 后才带 `totp_code`；API Key 登录 trim 后作 Bearer；`needs_setup` 才出首启向导；登出 POST `/auth/logout` 空体；`?oauth=done` 兑 key `{name:oauth}`；注册赠送 `new_user_credit_micro` + 邀请码后叠加 `invitee_credit_micro`；首启明文 Key 可复制 | `smoke.spec`（4 例）；`missing-surfaces.spec`（注册 / OAuth / TOTP / API Key / 向导 / 登出 / OAuth 着陆 / 注册赠送，09-08 第二十一轮续） | — |
+| 找回 / 重置密码 | `/forgot-password`, `/reset-password` | 登录页链接带邮箱、提交体 email+lang、防枚举成功态、未配 SMTP 501 文案；缺 token 提示、长度与一致性前置校验、成功回登录、失效 token 400 文案；找回 / 重置 500 走 `internal_error` 文案 | `write-forms.spec`（2 例，09-06 新增） | — |
 | 新手引导 | `/portal` 快速开始卡 + 顶栏入口 + 密钥页页头 | 进度推导、四步抽屉、客户端片段联动、关闭记忆、移动端与深色 | `guide.spec`（4 例，09-06 新增） | — |
-| 试用台 / 聊天客户端一键导入 | `/portal/playground`、密钥回执 → 指南 | 模型只列本分组可用、发送经同源中继且强制流式、流式内容 + usage / 模型脚注、停止按钮中断、预设保存 / 载入 / 站点预设导入、cc-switch（Claude 不带 /v1、Codex 带 /v1）/ NextChat / Cherry Studio 链接形状 | `playground.spec`（4 例，09-06 新增） | 助手正文纯文本渲染，无 markdown |
-| 门户总览 / 日志 / 流水 / 充值 | `/portal`, `/portal/logs`, `/portal/ledger`, `/portal/topup` | KPI 六卡、页签零请求、空态、导出禁用、流水入口 | `smoke.spec`（2 例）、`charts.spec`（门户图表 5 例）、`interactions.spec`（年度日历 / 热力图 / 个人中心 4 例）、`write-forms.spec`（充值下单 1 例：快捷档回填、最低额挡在提交前、下单体 `amount_micro` 整数、epay 表单 POST 带签名隐藏域 / Stripe 直接跳链接 / 网关不给地址原地报错） | — |
-| 公开模型广场 / 调用示例 | `/pricing` | 厂商归一、单位切换、深链、阶梯价、模拟器、移动端深色、分页、加载 / 失败 / 空态 | `smoke.spec`（1 例）、`catalog.spec`（10 例）、`request-examples.spec`（4 例） | — |
-| 管理端总览 / 日志 / 洞察 / 质量 / 经营 / 审计 / 运维 | `/admin`, `/admin/logs`, `/admin/stats`, `/admin/quality`, `/admin/revenue`, `/admin/audit`, `/admin/ops` | 实时条、健康芯片、深链即状态、三视图、死信签 | `smoke.spec`（管理端 1 大例）、`charts.spec`（管理图表 6 例） | 需演示超管，缺则跳过 |
-| 管理端设置 / 高级配置 / 导航 / 分页 | `/admin/settings`, 侧栏, 列表页 | 分组搜索、敏感值不显示、只读无编辑入口、键盘 / 移动端 / IME、URL 即分页状态 | `interactions.spec`（19 例） | — |
-| 用户 / 密钥 | `/admin/users`, `/portal/keys` | 搜索回车、抽屉落地签、删除二次确认手输名称 | `smoke.spec`（管理端大例内的用户抽屉段 + 删除二次确认 1 例） | — |
-| 用户抽屉写操作 | `/admin/users` 管理抽屉 | 入账 USD → micro 整数（含 0.29 浮点边界）、系数按十进制字符串提交且负数 / 未改动不放行、分组全量覆盖且先出现者优先级高、封禁经确认框且成功后翻成解封；角色只发改动的那一项、订阅下拉只列在售订阅套餐且发放 / 立即结束各打端点、余额有效期日期 → UTC 零点 RFC3339 且清空发 null | `write-forms.spec`（2 例，09-06 新增 / 第八轮） | — |
-| 模型定价抽屉与发布 | `/admin/pricing` 编辑 / 新建 / 发布 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读；发布按钮 POST `/admin/pricing/publish` 并提示新 epoch | `write-forms.spec`（09-06 新增 / 第八轮） | 模型没有状态切换 UI（`status` 只随导入 / 删除变化），此前备注有误 |
-| 兑换码 | `/admin/codes` | 分页 / 筛选复位 / 末页停用；生成抽屉：面值 USD → micro（0.29 边界）、绑定用户去空格转数字、空限额不发键、过期时间按浏览器本地换 UTC、面值 0 禁提交、400 错误码文案且可重发、成功态明文一次性 + 复制全部 | `redemptions.spec`；`write-forms.spec`（1 例，09-07 第十二轮） | — |
+| 试用台 / 聊天客户端一键导入 | `/portal/playground`、密钥回执 → 指南 | 模型只列本分组可用、发送经同源中继且强制流式、流式内容 + usage / 模型脚注、停止按钮中断、预设保存 / 载入 / 站点预设导入、cc-switch（Claude 不带 /v1、Codex 带 /v1）/ NextChat / Cherry Studio 链接形状；发送 500 在助手气泡内走英文 `internal_error`（Playground 固定 `en`） | `playground.spec`（4 例，09-06 新增） | 助手正文纯文本渲染，无 markdown |
+| 门户总览 / 日志 / 流水 / 充值 | `/portal`, `/portal/logs`, `/portal/ledger`, `/portal/topup` | KPI 六卡、页签零请求、空态、导出禁用、流水入口；充值下单 + 兑换卡；下单 / 核销 500 走 `internal_error`；门户日志 `scope` / 模型 trim / `errors_only` 进查询、展开账单快照、展开行复制 `request_id`、加载更多 `before`、空表禁 CSV；CSV UTF-8 BOM、金额六位 USD、`=` 公式注入前缀、失败行 `error_code`、仅全账户 scope 带 key 列；流水 micro→USD、标签、退款深链、`before` 翻页；订单 `order_no` 可复制进剪贴板、原币文本、空态与 500；流水 500 与订单 500 均走 ErrorState；总览 `scope`/`days`、key 视角本分钟 RPM、全账户平均 TPM、订阅剩余与到期清零；趋势空窗 `emptyUsageHint`；breakdown 500 走 ErrorState + 重试；门户日志 500 走 ErrorState + 重试；流水空表 hint | `smoke.spec`（2 例）、`charts.spec`（门户图表 5 例）、`interactions.spec`（年度日历 / 热力图 / 个人中心 4 例）、`write-forms.spec`（充值下单 1 例）、`list-writes.spec`（兑换卡：trim、micro 入账、套餐/分组/有效期、`redemption_invalid` 文案，09-08 第二十一轮）、`missing-surfaces.spec`（门户日志 + CSV + 流水 + 总览查询，09-08 第二十一轮续） | — |
+| 公开模型广场 / 调用示例 | `/pricing` | 厂商归一、单位切换、深链、阶梯价、模拟器、移动端深色、分页、加载 / 失败 / 空态；未知 `?model=` 走「此模型未发布或已下架」并可关掉 | `smoke.spec`（1 例）、`catalog.spec`（10 例）、`request-examples.spec`（4 例） | — |
+| 管理端总览 / 日志 / 洞察 / 质量 / 经营 / 审计 / 运维 | `/admin`, `/admin/logs`, `/admin/stats`, `/admin/quality`, `/admin/revenue`, `/admin/audit`, `/admin/ops` | 实时条、健康芯片、深链即状态、三视图、死信签；运维写：退款先查后退、DLQ 重投/丢弃、对账校准、缩短保留期确认；退款 / 重投 / 清缓存 / 缩短保留 500 走 toast；审计过滤进 URL、行展开 detail、加载更多 `before` 游标、接口 500 走 ErrorState；管理日志过滤进 URL / `hours` / 展开 request_id / 空表禁导出、CSV UTF-8 BOM 与六位 USD；总览待办芯片与深链；组件宕机（PG/Redis/CH）fail-closed 文案、outbox ≥1000 积压、冷却 key；全清「没有待办」；diagnose 500 收起健康芯片、不伪装成组件宕机；消耗排行 micro→USD 且链到日志 `hours=天数×24`，空表 / 500 不伪装成零；日志行内退款仅成功扣费行，`already_refunded` 走幂等文案；质量卡 `days`+`limit` 与高错误率 `errors_only` 深链；错误占比 `formatBp`、top 渠道/模型；空错误码 `(empty)` 走 `errors_only`、upstream 0 与无名渠道显示 `—` / `#id`；空表「窗口内没有失败请求」；错误/客户端 500 走 ErrorState（无重试）；渠道健康 / 模型时延 500 走 destructive 文案（无 ErrorState）；客户端空表走 `trendEmptyHint`；站点规模自动停用 / 未定价深链；站点规模 500 收起整条；实时条 500 收起（不占版面）；KPI `overview?days=` 与实时条 `window=60`，切窗同步 `margin?days=`，趋势卡切「实际消费」；用量分析过滤条深链 `user_id` 进 trend 查询、芯片回填名、加模型、点 × 移除、KPI 环比 `▲ +N%` / 持平与 token mix、万元以上紧凑记法与已采集毛利、有让利时「含让利」；拆分 `by`/`limit=50`、日志 `hours=天数×24`、聚焦后下一层 `by=channel`、名次 `▲`/`▼`/`新`/`—`（名次不变）与环比 `+N%`/`-N%`、切「按」select 保留已有 filter、成本覆盖列、负毛利红字；拆分 500 走 ErrorState（无重试）；空 `data` 走 `trendEmptyHint`；趋势空窗 `trendEmptyHint`；流向空 `nodes`/`links` 走 `trendEmptyHint`；经营资金流入四桶 + 分组表 `groups?days=` + 已采集毛利徽章；cashflow 500 收起资金流入行；groups 500 收起分组表；经营 margin 500 走 ErrorState + 重试；空 `data` 走 `trendEmptyHint`；渠道健康 / 模型时延空表不挂渠道/模型链；死信 500 走 ErrorState（无重试）；对账零差异文案；对账 500 走 ErrorState（无重试）；流向 500 走 ErrorState（无重试）；运维退款查无此单 / 未扣费禁退 / 幂等预览翻已退款；质量趋势缺省 `metric=error_rate`，切平均时延 / 首 Token / 吞吐量与 stack，换天数因 `key={days}` 重挂回默认 metric，高级筛选 `granularity=hour` 进 trend 查询并可重置；只填开始日期不填结束日期会拦下并提示无效区间；按小时且区间超过 31 天不发查询；空窗提示无调用记录；trend 500 走 ErrorState；管理日志 CSV 对 `=…` 单元格加 `'` 前缀，展开行复制 `request_id`；总览趋势卡有 margin 序列时数据表请求数 / 实际消费（micro→USD）；趋势卡 500 走 ErrorState + 重试 | `smoke.spec`（管理端 1 大例）、`charts.spec`（管理图表 6 例）、`write-forms.spec`（毛利熔断）、`list-writes.spec`（DLQ / 退款 / 对账 / 保留，09-08 第二十一轮）、`missing-surfaces.spec`（审计 + 管理日志 / 待办 / 排行 / 行内退款 / 质量卡 / 规模条 / KPI / 实时条 / 排行空态 / 退款幂等 / 过滤条 / 经营分组 / 运维退款三结局 / 拆分 / 质量趋势，09-08 第二十一轮续） | 需演示超管，缺则跳过 |
+| 管理端设置 / 高级配置 / 导航 / 分页 | `/admin/settings`, 侧栏, 列表页 | 分组搜索、敏感值不显示、只读无编辑入口、键盘 / 移动端 / IME、URL 即分页状态；公告发布、注册 USD→micro、隐私开关、MCP 写入抽屉、通知多路 Webhook/邮件；高级设置列表 GET `/admin/settings` 500 走 ErrorState + 重试；无筛选空表「暂无数据」+ `settingEmptyHint`；筛选无匹配走同一 hint；站点公告横幅 warning 按 `updated_at` 关掉、换版再出、critical 不可关；通知保存 / 公告再发 500 走 toast | `interactions.spec`（19 例）；`write-forms.spec`（SMTP）；`list-writes.spec`（公告 / 注册 / 隐私 / MCP / 通知多路，09-08 第二十一轮）；`missing-surfaces.spec`（公告横幅，09-08 第二十一轮续） | 隐私 / 公告 / SMTP 单键 GET 失败不走 ErrorState（表单按缺省空值渲染） |
+| 用户 / 密钥 | `/admin/users`, `/portal/keys`, `/admin/keys` | 搜索回车、抽屉落地签、删除二次确认手输名称；用户列表 `q` trim 进 URL 与查询、空结果、停用态、倍率原样；无筛选空表「暂无数据」；列表 500 走 ErrorState + 重试；令牌管理检索进 URL 与查询串、空检索「暂无数据」、到期日、限模型/IP 徽章、累计用量、日志深链 `api_key_id`、停用 PATCH `status`、停用后列表翻成启用再 PATCH `status: 1`、删除经确认框；列表 500 换检索后走 ErrorState + 重试；门户新建 `/auth/keys` 带分组与 IP；401 关抽屉并提示需邮箱密码会话；明文 Key 可复制；停用后列表翻成启用再 PATCH `{status:1}`；列表钉住档位 / 来源数 / 用量 / RPM；重命名 PATCH `{name, group_code, ip_allowlist}`（空名禁保存、trim、跟随分组发 null）；行内用量 `entity-usage?kind=&ids=&days=7`，501 显示 — 不伪装成零；空表 hint 与空态「新建密钥」打开抽屉；列表 500 走 ErrorState + 重试 | `smoke.spec`（门户删除二次确认）；`missing-surfaces.spec`（`/admin/keys` + 行内用量 + 用户搜索，09-08 第二十一轮续）；`list-writes.spec`（门户新建 / 401 会话 / 重命名 / 停用 / 启用 / 删除 / 列表钉住，09-08 第二十一轮续） | — |
+| 用户抽屉写操作 | `/admin/users` 管理抽屉 | 入账 USD → micro 整数（含 0.29 浮点边界）、系数按十进制字符串提交且负数 / 未改动不放行、分组全量覆盖且先出现者优先级高、封禁经确认框且成功后翻成解封；解封无确认框、提为管理员 / 降为普通用户直接 POST `{action}`、软删除经确认框；入账 / 系数 / 分组 / 封禁 / 发放订阅 500 走 toast；角色只发改动的那一项、订阅下拉只列在售订阅套餐且发放 / 立即结束各打端点、余额有效期日期 → UTC 零点 RFC3339 且清空发 null；用量签 `usage?days=7`、近 7 天消费 micro→USD、流水操作者、日志深链 `hours=168`；空 daily / ledger 走默认 EmptyState；`stats_available: false` 提示 `stats_disabled`；overview / usage 500 走 ErrorState；订阅 GET 500 走 ErrorState | `write-forms.spec`（2 例，09-06 新增 / 第八轮）；`missing-surfaces.spec`（用量签，09-08 第二十一轮续） | — |
+| 模型定价抽屉与发布 | `/admin/pricing` 编辑 / 新建 / 发布 | 七个倍率轴按十进制字符串提交、空档位行过滤、`tier_expr` 去空格回传且模式提示随之切换、无档位不发 `tier_ratios` 键、降级链原样回传、编辑态模型名只读；发布按钮 POST `/admin/pricing/publish` 并提示新 epoch；发布 500 走 toast；列表「仅看未定价」进 URL 与 `unpriced=true`，搜索 `q` 一并带上，空检索「没有匹配的结果」可清空；已定价行列倍率 / `$ / 1M` / 音频轴 / 无渠道 vs 渠道深链；删除手输模型名打 `DELETE /admin/models/{name}`，`requires_publish` 提示需发布；无筛选空表 hint；列表 500 走 ErrorState + 重试 | `write-forms.spec`（09-06 新增 / 第八轮）；`missing-surfaces.spec`（仅看未定价 / 删除，09-08 第二十一轮续） | 模型没有状态切换 UI（`status` 只随导入 / 删除变化），此前备注有误 |
+| 兑换码 | `/admin/codes` | 分页 / 筛选复位 / 末页停用；生成抽屉：面值 USD → micro（0.29 边界）、绑定用户去空格转数字、空限额不发键、过期时间按浏览器本地换 UTC、面值 0 禁提交、400 错误码文案且可重发、生成 500 走 toast、成功态明文一次性 + 复制全部；列表「停用整批」仅未使用可点，确认后 `DELETE /admin/redemptions/{batch}`，toast `affected` 张数，已核销禁点；空表 hint 与空态「生成」打开抽屉；列表 500 走 ErrorState + 重试 | `redemptions.spec`；`write-forms.spec`（1 例，09-07 第十二轮）；`missing-surfaces.spec`（停用整批，09-08 第二十一轮续） | — |
 | Playground 试用台 + 一键导入 | `/portal/playground`、密钥回执 | 模型下拉只列本分组可用、发送 → 流式内容 + usage 脚注、停止按钮中断、预设保存 / 载入 / 站点预设导入、密钥回执四个客户端导入链接形状 | `playground.spec`（4 例，SSE 桩） | 流式桩为一次性回包（Playwright 限制），逐字动画不逐块验证 |
-| 订阅套餐 | `/portal/plans` | 在售 / 已订阅高亮 / 停用说明 / 下单参数 | `subscriptions.spec`；管理端见下「套餐抽屉」「套餐删除」两行 | — |
-| 渠道抽屉「请求与计费行为」 | `/admin/channels` 编辑抽屉 | 已有 proxy / 额外头回显；注入字段按 JSON 解析（数字 / 带引号字符串）；清空额外头即从 settings 删键；PATCH 体只含有值的键；受保护键 400 → 错误码文案且抽屉不关 | `write-forms.spec`（1 例，09-06 新增） | — |
-| 渠道抽屉接入 / 模型 / 调度 + 新建 | `/admin/channels` | 协议只读；凭证轮换独立端点且成功后清空；拉上游模型覆盖清单并提示数量；成本倍数 → 千分比、留存声明、优先级随 PATCH；池成员单独保存、覆盖值整数化、非整数归 null；新建三件必答事齐才放行、池成员随建渠道提交；key 级参数行权重 / 并发各自 PATCH（空并发 = null）、失效 key 重新启用 | `write-forms.spec`（2 例，09-06 第七 / 八轮） | — |
+| 订阅套餐 | `/portal/plans` | 在售 / 已订阅高亮 / 停用说明 / 下单参数；空表「暂无在售套餐」；列表 500 走 ErrorState + 重试；我的订阅 500 走 ErrorState（无重试） | `subscriptions.spec`；管理端见下「套餐抽屉」「套餐删除」两行 | — |
+| 渠道抽屉「请求与计费行为」 | `/admin/channels` 编辑抽屉 | 已有 proxy / 额外头回显；注入字段按 JSON 解析（数字 / 带引号字符串）；清空额外头即从 settings 删键；PATCH 体只含有值的键；受保护键 400 → 错误码文案且抽屉不关；保存 500 走 toast | `write-forms.spec`（1 例，09-06 新增） | — |
+| 渠道抽屉接入 / 模型 / 调度 + 新建 | `/admin/channels` | 协议只读；凭证轮换独立端点且成功后清空；拉上游模型覆盖清单并提示数量；成本倍数 → 千分比、留存声明、优先级随 PATCH；池成员单独保存、覆盖值整数化、非整数归 null；清空全部池成员就地红字并 toast 孤儿不可达；新建三件必答事齐才放行、池成员随建渠道提交；新建抽屉 ModelPicker 空表「尚无模型」；`GET /admin/models` 500 走 ErrorState；key 级参数行权重 / 并发各自 PATCH（空并发 = null）、失效 key 重新启用；拉上游模型 / 凭证轮换 / 池成员保存 / 新建渠道 / key PATCH 500 走 toast | `write-forms.spec`（2 例，09-06 第七 / 八轮） | — |
 | 套餐删除 | `/admin/plans` | 确认框 → `DELETE /admin/plans/{code}` | `write-forms.spec`（09-06 第八轮） | — |
-| 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案 | `write-forms.spec`（1 例，09-06 新增） | —（TOTP 绑定见下行，第六轮已覆盖） |
-| 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定 | `write-forms.spec`（1 例，09-06 第四轮） | —（删除见上「套餐删除」行，第八轮已覆盖） |
-| 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案 | `write-forms.spec`（1 例，09-06 第四轮） | — |
-| 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达、自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default | `write-forms.spec`（1 例，09-06 第六轮；09-07 第十五轮补限流字段：回显、负数 / 小数 aria-invalid 禁保存、清空发 null、整数原样，列表列 `60 / 分 · ∞ / 时` 与两边不限 `—`） | — |
-| 渠道列表余额按钮 / 运维页毛利熔断卡 | `/admin/channels`, `/admin/ops` 毛利熔断页签 | 钱包按钮只对 openai / openai_compat 显示、结果 toast 按上游货币 Intl 格式化、"最近测试"列下回填余额、`balance_shape` 等错误码文案；熔断卡配置表单（美元 → micro、百分比 → 万分比含负号、分 → 秒、时 → 秒，非法数字禁保存、未改动禁保存）、负毛利行标红、解除只带分组 × 渠道定位对并提示到期 | `write-forms.spec`（2 例，09-07 第十四轮） | — |
-| 计费规则抽屉与列表 | `/admin/rules` | 编辑态四类字段回填与 code 锁定、按类型只发该类型字段、阈值 USD → micro、星期勾选升序、空范围不发键、上下线打 toggle 且提示需发布、删除经确认框 | `write-forms.spec`（1 例，09-06 第六轮） | — |
-| 设置 SMTP 卡 | `/admin/settings` 邮件页签 | 单键回显、去空格、`reply_to` 空转 null、端口越界归零、加密方式分段、未保存前测试禁用、测试信按已保存配置发且收件人须含 @、有草稿时禁发 | `write-forms.spec`（1 例，09-06 第六轮） | — |
-| TOTP 绑定 | `/portal/security` | 开始绑定拿 otpauth / pending、码不足 6 位禁用、错码 `totp_invalid` 文案可重试、成功切已开启态、无会话 401 降级提示 | `write-forms.spec`（1 例，09-06 第六轮） | — |
-| 渠道池抽屉与列表 | `/admin/pools` | 策略 / 降级目标回填、降级目标排除自己、不降级发 null、编辑态池码只读、内置池与被引用池删除禁用、删除经确认框 | `write-forms.spec`（1 例，09-06 第七轮） | — |
-| 团队 | `/portal/teams` | 建团名字去空格、成员上限 USD → micro 且空即 null、提交后表单复位、发团 key 明文只展示一次、列表 401 整页降级且隐藏创建入口 | `write-forms.spec`（1 例，09-06 第七轮） | — |
-| i18n | 全站 | 裸文案零、双语言包键对齐 | `guard-i18n.sh`、`guard-i18n-keys.py`；`guard-error-codes.py`（09-07 第十二轮：后端 `codes::*` + `AppError::new / unauthorized` + `StoreError::Conflict` + 模块级 const 的字面量全集 → 两语言包 `errors` 命名空间反向核对，进 CI）；e2e 断言同时匹配中英正则 | — |
+| 安全页会话卡 | `/portal/security` | 列表 + 当前浏览器徽章、单条吊销打 `DELETE /api/me/sessions/{sid}`、全部吊销打 `DELETE /api/me/sessions`、空态文案；吊销 500 走 toast | `write-forms.spec`（1 例，09-06 新增） | —（TOTP 绑定见下行，第六轮已覆盖） |
+| 安全页最近登录 | `/portal/security` | 预览 8 行、失败原因、仅失败筛选、展开其余；接口 500 走空态文案、不伪装成零 | `missing-surfaces.spec`（1 例，09-08 第二十一轮续） | — |
+| 套餐抽屉 | `/admin/plans` 编辑 / 新建 | 充值模板与订阅两形态字段互斥（切换即替换字段区）、USD → micro、天数 `Math.trunc`、空值不发键、订阅缺有效期禁用保存、售价空 = 0 不售卖、编辑态代码锁定；列表充值模板 vs 订阅列（每窗额度 / 周期、不售卖、订阅人数）；空表 hint 与空态「新建套餐」打开抽屉；列表 500 走 ErrorState + 重试 | `write-forms.spec`（1 例，09-06 第四轮）；`missing-surfaces.spec`（列表列，09-08 第二十一轮续） | —（删除见上「套餐删除」行，第八轮已覆盖） |
+| 角色抽屉 | `/admin/roles` | 权限点来自 `/admin/permissions`、整组切换、无权限点禁用创建、编辑态 code 锁定且已有权限预勾、删除经确认框、后端 409 `role_in_use` 渲染成文案；权限清单 500 走 ErrorState（无重试）；列表前 4 个权限点 + `+N 项`；空表提示内置三档无需配置，空态按钮打开新建抽屉；列表 500 走 ErrorState + 重试 | `write-forms.spec`（1 例，09-06 第四轮）；`missing-surfaces.spec`（列表截断，09-08 第二十一轮续） | — |
+| 价格分组抽屉 | `/admin/groups` | 倍率字符串去空格、池从 `/admin/pools` 选、`PoolReach` 就地可达；池详情 500 时摘要收起；自选开关、编辑态分组码只读、内置默认组删除禁用、新建缺省倍率 1 / 池 default；列表「可自选」徽章、零渠道「空池」、限流列 `60 / 分 · ∞ / 时` 与两边不限 `—`；空表 hint 与空态「新建分组」打开抽屉；列表 500 走 ErrorState + 重试 | `write-forms.spec`（1 例，09-06 第六轮；09-07 第十五轮补限流字段：回显、负数 / 小数 aria-invalid 禁保存、清空发 null、整数原样；09-08 第二十一轮续补列表徽章） | — |
+| 渠道列表余额按钮 / 运维页毛利熔断卡 | `/admin/channels`, `/admin/ops` 毛利熔断页签 | 钱包按钮只对 openai / openai_compat 显示、结果 toast 按上游货币 Intl 格式化、"最近测试"列下回填余额、`balance_shape` 等错误码文案；熔断卡配置表单（美元 → micro、百分比 → 万分比含负号、分 → 秒、时 → 秒，非法数字禁保存、未改动禁保存）、负毛利行标红、解除只带分组 × 渠道定位对并提示到期；启用且无暂停对时空表 hint；未启用走 disabled hint；列表 500 走 ErrorState（无重试） | `write-forms.spec`（2 例，09-07 第十四轮） | — |
+| 计费规则抽屉与列表 | `/admin/rules` | 编辑态四类字段回填与 code 锁定、按类型只发该类型字段、阈值 USD → micro、星期勾选升序、空范围不发键、上下线打 toggle 且提示需发布、删除经确认框；列表阶梯/时段人话化、独占/最优叠加标签、范围「全部」vs 分组·模型·用户；空表 hint 与空态「新建规则」打开抽屉；列表 500 走 ErrorState + 重试 | `write-forms.spec`（1 例，09-06 第六轮）；`missing-surfaces.spec`（列表人话化，09-08 第二十一轮续） | — |
+| 设置 SMTP 卡 | `/admin/settings` 邮件页签 | 单键回显、去空格、`reply_to` 空转 null、端口越界归零、加密方式分段、未保存前测试禁用、测试信按已保存配置发且收件人须含 @、有草稿时禁发；测试信 / 保存 500 走 toast | `write-forms.spec`（1 例，09-06 第六轮） | 单键 GET 失败不走 ErrorState（表单按缺省空值渲染） |
+| TOTP 绑定 | `/portal/security` | 开始绑定拿 otpauth / pending、码不足 6 位禁用、错码 `totp_invalid` 文案可重试、成功切已开启态、无会话 401 降级提示；otpauth 链接可复制；enroll / confirm 500 走 destructive 文案 | `write-forms.spec`（1 例，09-06 第六轮） | — |
+| 渠道池抽屉与列表 | `/admin/pools` | 策略 / 降级目标回填、降级目标排除自己、不降级发 null、编辑态池码只读、内置池与被引用池删除禁用、删除经确认框；列表「内置」徽章、空池标红、策略文案、引用 `N 个分组 / M 个令牌` 与降级目标计数；空表 hint 与空态「新建池」打开抽屉；列表 500 走 ErrorState + 重试 | `write-forms.spec`（1 例，09-06 第七轮）；`missing-surfaces.spec`（列表徽章，09-08 第二十一轮续） | — |
+| 团队 | `/portal/teams` | 建团名字去空格、成员上限 USD → micro 且空即 null、提交后表单复位、发团 key 明文只展示一次且可复制、列表 401 整页降级且隐藏创建入口；列表角色「所有者」与钱包 micro→USD；详情抽屉钱包 / 本月 / 累计 micro→USD，空上限显示「不限」；空表 hint；列表 500 走 ErrorState（无重试）；usage 500 成员表 ErrorState | `write-forms.spec`（1 例，09-06 第七轮）；`missing-surfaces.spec`（列表 + 详情用量，09-08 第二十一轮续） | usage 失败时成员表走 ErrorState，钱包仍 `?? 0` 显示 $0（未改产品） |
+| 邀请返利 | `/portal/aff` | 链接带 `?aff=`、人数与累计返利按 micro 格式化、接口失败不伪装零；复制邀请链接写入剪贴板 | `missing-surfaces.spec`（1 例，09-08 第二十轮 / 第二十一轮续） | — |
+| 导入定价 / 在线同步 | `/admin/pricing` 导入抽屉 | 粘贴 JSON 整段 POST `/admin/pricing/import-newapi`；非法 JSON 原地报错；在线同步空源不拉、拉取体是去空白的源列表、默认不选、点源值才 POST `/admin/pricing/sync/apply`（`changes: [{model,axis,value}]`）；无差异走 `syncNoDiff`；粘贴导入 / 拉取 / 应用 500 走 toast | `missing-surfaces.spec`（1 例，09-08 第二十轮） | — |
+| 渠道列表批量 / 复制 / 测活 | `/admin/channels` 列表 | 复制 POST `{name:-copy}`；行测活带第一个模型；测全部只打 `status=1` 且空体；测全部失败汇总 toast（`role=status`）；行测活 `scope=model` 走 `testModelFail`（`role=alert`）；无 scope 走 `testFail`（`测活失败：{{code}}`）；批量 `enable/disable/delete`；单删手输名称打 `DELETE /admin/channels/{id}`；搜索 `q` trim 与协议 `provider` 进 URL，空结果可清空；无筛选空表 hint 与空态「新建渠道」打开抽屉；列表 500 走 ErrorState + 重试；供应商控制台链（openai / anthropic 固定站、`openai_compat` 取 `api_base` origin、非法 `api_base` 不显示）；列表自带 `last_balance` 按上游币种格式化（含余额 0） | `list-writes.spec`（1 例，09-08 第二十一轮）；`missing-surfaces.spec`（搜索 / 控制台链 / 列表余额，09-08 第二十一轮续） | — |
+| 路由诊断抽屉 | `/admin/channels` | 缺模型禁用诊断；查询 `model` trim + `group` / `pool`；结论文案、渠道淘汰原因、经降级池标记；接口 500 走 toast | `missing-surfaces.spec`（1 例，09-08 第二十一轮续）；此前 `interactions.spec` 只验模型联想 | — |
+| 渠道健康时间线 | `/admin/channels` 近 24h 列 | 点开会抽屉；`hours` 进查询；无流量空态；日志深链带 `channel_id` / `hours` / `errors_only`，分析深链带 `days`；列表级 `days=1&limit=100`、部分可用 / 冷却 / 未入池、错误率 `formatBp`；OAuth token 已过期灰字；无流量行 `—`；测活成功 `N ms` / 失败 `HTTP 429` / 无 key「没有 key」；全部可用文案；渠道级停用显示「停用」；`last_test` 空显示未测过；时间线 500 走 ErrorState | `missing-surfaces.spec`（时间线抽屉 + 列表 key 状态 / 近 24h / 测活，09-08 第二十一轮续）；此前只有 `screenshots.spec` | — |
+| 订阅 OAuth 登录卡 | `/admin/channels` 抽屉 | 实验性提示；`start` 只带 `provider`；缺名 / 模型不换码；新建发 `name`+`models`，追加发 `channel_id`；成功换码后须再点「打开登录页」才回到粘贴区；追加失败后按钮翻成「重新打开登录页」；`start` / `exchange` 500 走 toast | `missing-surfaces.spec`（1 例，09-08 第二十轮） | — |
+| i18n | 全站 | 裸文案零、双语言包键对齐；顶栏语言菜单切 `en` 写 `okapi.lang`；主题菜单深色挂 `html.dark` 并写 `okapi.theme`，跟随系统则清除 | `guard-i18n.sh`、`guard-i18n-keys.py`；`guard-error-codes.py`（09-07 第十二轮：后端 `codes::*` + `AppError::new / unauthorized` + `StoreError::Conflict` + 模块级 const 的字面量全集 → 两语言包 `errors` 命名空间反向核对，进 CI）；e2e 断言同时匹配中英正则；`missing-surfaces.spec`（语言 / 主题菜单，09-08 第二十一轮续） | — |
 
 ### 2.6 部署与性能
 
@@ -174,6 +181,7 @@
 10. ~~出站请求跟随重定向绕过 SSRF 闸~~ **已修（09-07 第十四轮，`f737892` + `8a92e2a`）**：`ssrf::validate_api_base` 只校验管理员填进来的那个 URL，而所有出站 reqwest client（`okapi_providers::http::build_client` 共享池 + `ratio_sync` 自建）都按缺省跟随 30x，公网地址一跳重定向就能把请求引到私网 / 云元数据地址（DNS rebinding 文档里已列 backlog，重定向此前没人提）。`ratio_sync::fetch_one` 自建 client 改 `Policy::none()`（`f737892`）；`HttpPool` 加一族不跟随重定向的探针 client，`PassUpstream::probe` 走它，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付七处管理面调用点换过去（`8a92e2a`，`console_channel_test::channel_test_does_not_follow_redirects` 钉住：上游 302 → 拿到 302 本身、目标零命中）；数据面透传保留缺省（下载类端点依赖上游 302 到 CDN）。~~未换的：订阅 OAuth 换 token / 刷新、Bedrock 列模型、Vertex 换 token~~ **第十八轮统一换成探针 client**，顺带发现 Vertex 服务账号 JSON 的 `token_uri` 从未过闸（见第十八轮）。仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（16 token 补全，与真实请求同一条路）。
 11. **自用订阅凭证（anthropic_max / codex）的合规边界（09-07 第十四轮 review 备注，不改代码）**：出向会前置 Claude Code 系统提示首句、合并 `claude-code-20250219` 等 beta、转发客户端身份头，本质是让上游把网关流量当成 Claude Code / Codex CLI。README 已标"实验性 / 自用"、"明确不做"里写了不做订阅账号池转售；但一旦这类渠道被放进对外分组，就是拿订阅额度转售，违反两家的使用条款且会被封号。建议在渠道抽屉与文档里把"仅限本人 / 内部分组"写成硬约束（例如 OAuth 渠道不允许绑定可注册用户可见的分组），至少在清单里挂着。另注：系统提示前置会改变非 Claude Code 客户端拿到的模型行为，属该 provider 的已知语义。
 12. ~~软删留下的外键死引用未逐一排查~~ **已排查完毕并全部修掉（09-08 第十九轮）**：形状是"占用检查滤掉软删行 + 外键无 `ON DELETE`"两个前提同时成立，墓碑上的死引用就既不算占用、又拦得住硬删，撞出 500 且那个配置项**永远删不掉**。按 `0001_init.sql` 的 `REFERENCES` 列逐个对谓词，三处命中全修：`delete_role`（`users.admin_role_id`）、`delete_price_group` 与 `delete_channel_pool`（软删 `api_keys` 的 `group_override` / `pool_override`，后两处比角色更容易撞——令牌删得比用户勤）。修法统一为"确认无活引用后在同一事务里把软删主体的引用列置 NULL 再硬删"，回归见 `console_users::role_delete_guards_live_bindings_and_ignores_deleted_users` 与 `channel_pools::deleting_group_or_pool_ignores_soft_deleted_key_overrides`。通则已写进 IMPLEMENTATION §删除语义定案：**新加配置类硬删时，占用检查滤掉软删行的就必须在同一事务里清掉那些行的引用列**。
+13. ~~列表级写操作与少量 HTTP 路由仍无前端 / 直打覆盖~~ **已补（09-08 第二十一轮）**：前端 `list-writes.spec` 覆盖渠道列表批量 / 复制 / 测活、运维 DLQ / 退款 / 对账 / 保留、充值兑换卡、设置公告 / 注册 / 隐私 / MCP / 通知多路、门户密钥新建。后端 HTTP：`GET /admin/pools/{code}`、`GET /v1/models`、`DELETE /admin/channels/{id}`（只盖 tombstone，与 batch 的停用+停 key 不同）、`DELETE /admin/keys/{id}`、`DELETE /api/me/keys/{id}`。审计里标成零覆盖、但第十九轮已有集成的不要重做：规则 toggle、余额有效期、角色删除、OAuth provider 列表、兑换批次停用、令牌 PATCH。
 
 ## 4. 执行记录
 
@@ -539,3 +547,697 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 - `bedrock.rs` 的 `list_foundation_models` 把控制面主机固定成 `https://bedrock.{region}.amazonaws.com`（有意为之，VPC 端点用户也走公网控制面），mock 接不上，所以 SigV4 形态的"验凭证"与"拉模型"两条分支只有 `aws_sigv4` 单测和真实凭证能验；本轮补的 bedrock 用例覆盖的是 Bearer 形态与 InvokeModel 那条。
 
 另：开始前发现 8080 / 8081 上又挂着一个跑了 **23 小时**的 `okapi all`（前几轮验证留下的）。这轮 L1–L3 走隔离环境不受影响，L4 / L5 要用这两个端口，停掉后跑的。第 1 节那条注意事项到此已是第三次被同一个东西验证，跑全量前请务必先看一眼。
+
+### 2026-09-08 第二十轮：按前端路由表把 e2e 补全并实测
+
+对照 `frontend/src/routeTree.gen.ts` 的全部路由与第 2.5 节写操作面，此前 L3 的 `playwright.interactions.config.ts` 漏了四个有独立页面 / 抽屉的功能面（邀请返利、令牌管理、导入定价 / 在线同步、订阅 OAuth 登录卡）——它们只有截图套件或后端集成，没有"前端真的把约定形状送出去"的断言。
+
+| 层 | 结果 | 说明 |
+| --- | --- | --- |
+| L3 既有 spec（补测前） | **84 / 84**，56.7s 量级（本轮复跑 57.3s） | `interactions` / `charts` / `catalog` / `request-examples` / `redemptions` / `subscriptions` / `guide` / `write-forms` / `playground` |
+| L3 新增 `missing-surfaces.spec` | **4 / 4** | 见下；并入 `playwright.interactions.config.ts` 后再跑全量 **88 / 88**（56.7s） |
+| L4 `smoke.spec.ts` | **10 / 10**，25.4s | 打真实 console（`target/debug/okapi` + `frontend/dist`）；演示超管在位，管理端大例未跳过 |
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| `/portal/aff` | 此前只有 `screenshots.spec` 走过页面 | 钉住 `?aff=` 链接、邀请码、人数 3、累计返利 micro→USD、`/api/me/aff` 500 出错误态 + 重试、不伪装零 |
+| `/admin/keys` | smoke 只对普通用户走 403 | 检索 `q` / `user_id` 进 URL；停用 `PATCH {status:2}`；删除经 `alertdialog` 打 `DELETE` |
+| `/admin/pricing` 导入抽屉 | 粘贴 JSON 与在线同步（`RatioSyncPanel`）零 e2e | 非法 JSON → `alert`「JSON 格式错误」且零请求；合法 JSON 整段 POST `import-newapi`；空源禁用拉取；fetch 体是去空白的源列表；默认不选、点 `1.5` 才 apply `{model,axis,value:"1.500000"}` |
+| 渠道抽屉订阅 OAuth 卡 | 后端 `gateway_oauth_channels` 有流程，前端卡没有 | `start` 只带 `provider`；缺名 / 模型禁用换码并提示；新建发 `name`+`models`，编辑追加发 `channel_id` |
+| 其余路由 | 登录 / 门户 / 管理端写表单 / 套餐 / 团队 / 安全 / 广场 均已有 L3 或 L4 | 不重复造 |
+
+未纳入本轮默认路径的：`screenshots.spec.ts`（视觉回归，不在 interactions 配置里）；Playground 助手正文仍是纯文本（第 2.5 节既有备注）；第 3 节第 11 条仍是产品决策；第 3 节第 13 条的列表级写操作与少量 HTTP 直打（第二十一轮已把前端写操作补上）。结构上做不了前端 e2e 的两处（四家官方余额探针按主机名选、Bedrock 控制面主机写死）见第十九轮。
+
+另：隔离环境 `/tmp/okapi-r19` 上 `OKAPI_VERIFY_IMAGE=1 bash scripts/verify-deploy.sh` 再过一遍（exit 0）：embed-web 四断言 + 发布镜像五断言（229MB、65534、空库首启 + Setup）。同环境 `cargo test --workspace` 的唯一失败是 `okapi-store` doctest 缺 sqlx 离线缓存（`mutate.rs` `delete_role`），属隔离树快照过期，当前工作树已有对应 `.sqlx`，不按产品缺陷记。
+
+### 2026-09-08 第二十一轮：列表级写操作 e2e（第 3 节第 13 条前端）
+
+对照第 2.5 节与第 3 节第 13 条，补 `list-writes.spec.ts`（6 例）并入 `playwright.interactions.config.ts`。桩接口、断言请求体形状；不碰数据库。
+
+| 层 | 结果 | 说明 |
+| --- | --- | --- |
+| L3 `list-writes.spec` | **7 / 7**（初记 6，续 + 通知多路） | 见下 |
+| L3 全量 interactions | **94 / 94**，1.1 min（8 workers） | 第二十轮 88 + 本轮 6；并行下渠道批量勾选曾被列表 invalidate 冲掉，已改成等选择条消失再勾 |
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 渠道列表 | 批量 / 复制 / 测活 / 单删此前只有抽屉与余额 | 复制 `{name:-copy}`；行测活 `{model}`；测全部空体且只打启用；批量 `enable/disable/delete`；单删手输名称 `DELETE /admin/channels/{id}` |
+| 运维 DLQ | 只截过图 | 全选只含待处理；重投 / 丢弃经 `alertdialog`，体 `{ids}` |
+| 充值兑换卡 | 只有下单 e2e | trim 后 POST `/api/me/redeem`；成功态套餐/分组/有效期；`redemption_invalid` 文案 |
+| 运维退款 / 对账 / 保留 | 熔断已有 | 先查后退 `reason` trim；单用户 `{user_id}` / 全部 `{all,limit}`；缩短保留期二次确认 |
+| 设置 | SMTP / 高级搜索已有 | 公告 `site_notice` 带 `updated_at`；注册 `0.29`→290000 micro；隐私即时 POST；MCP 写入抽屉 bool |
+| 门户密钥 | smoke 只覆盖删除确认 | 新建 `/auth/keys` 带 `group_code` + `ip_allowlist`；停用 PATCH `status`；删除手输名称 |
+
+未纳入：`screenshots.spec.ts`；第 3 节第 11 条产品决策。通知渠道卡、后端 `GET /v1/models` 与 `GET /admin/pools/{code}` 见本轮续记。
+
+#### 续：通知多路 + 两条 HTTP 直打
+
+| 项 | 结果 |
+| --- | --- |
+| L3 `list-writes` 通知多路 +1 | **7 / 7**。Webhook URL / 间隔 / 取消勾选 `margin_breaker`；邮件 `to` + `lang: zh-CN`；POST `notify_channels` 两路分行 |
+| `GET /admin/pools/{code}` | `console_manage::admin_list_surface`：default 池含本用例渠道与模型并集；不存在 404 `not_found`；普通用户 403 |
+| `GET /v1/models` | `gateway_compat::list_models_is_openai_shaped_and_skips_disabled`：`object=list`、条目 `owned_by=okapi`、停用后消失；**无 Bearer 也 200**（探测用，不是疏忽漏鉴权——有 key 同样 200） |
+
+#### 再续：L4 冒烟 + 单条吊销 HTTP
+
+| 项 | 结果 |
+| --- | --- |
+| L4 `smoke.spec.ts` | **10 / 10**，25.7s。真实 console（`target/debug/okapi`）；演示超管在位，管理端大例未跳过 |
+| `DELETE /admin/channels/{id}` | `console_manage::channel_batch_and_user_actions`：软删盖 `deleted_at`、再删 404。与 batch 不同：单条**不**把 `status` 改成 2、也**不**停 key（调度仍按 `deleted_at IS NULL` 过滤） |
+| `DELETE /admin/keys/{id}` / `DELETE /api/me/keys/{id}` | 同用例：门户只吊销自己的、管理面按 id、重复 404、普通用户打管理面 403 |
+
+#### 三续：最近登录 / 健康时间线 / 审计过滤
+
+此前只有截图或 smoke 深链、没有「前端真把约定形状送出去」的断言。补进 `missing-surfaces.spec`（+3），L3 全量 **98 / 98**，58.7s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 最近登录卡 | 安全页只有会话吊销 e2e | 预览 8 行、失败原因、仅失败筛选、展开 / 收起；500 走空态文案，不画成零条成功 |
+| 渠道健康时间线 | 只有 `screenshots.spec` | 点近 24h 开抽屉；空流量提示；切 6h / 7 天改 `hours`；日志链带 `errors_only`，分析链 `days` 随窗 |
+| `/admin/audit` | smoke 只打开过带 query 的 URL | 动作 / 对象 / 操作者进 URL；行展开多出的 detail 键；空条件提示；加载更多带 `before` 游标 |
+
+#### 四续：管理日志过滤 / 路由诊断 / 注册入口
+
+| 项 | 结果 |
+| --- | --- |
+| L3 全量 interactions | **101 / 101**，59.0s（8 workers）。渠道列表标题改为钉 `#main-content`（顶栏与页头各一个「渠道」） |
+| 管理端日志 | 模型 / 用户 / 渠道 / request_id trim、只看失败进 URL 且列表与 `/admin/logs/stat` 同条件；切 7 天写 `hours=168`；展开露出 request_id；空表禁用导出 |
+| 路由诊断 | 缺模型禁用；`model` trim + `group` / `pool`；结论文案、渠道已停用、经降级池、key 冷却 |
+| 注册 / OAuth | 关闭不摆表单；邀请制无码禁提交；`?aff=` 只提示不手填；验证码 `{email, lang: zh-CN}`；OAuth 按钮只跳 `/auth/oauth/{code}` |
+
+#### 五续：门户日志 / 总览待办 / 消耗排行 / 行内退款 / 登录 TOTP
+
+此前门户日志只有 smoke 空表 + 禁导出；总览待办、消耗排行、日志行内退款、邮箱登录二次验证都没有「前端把约定形状送出去」的断言。补进 `missing-surfaces.spec`（+5），L3 全量 **106 / 106**，58.7s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 门户用量日志 | smoke 只验空表 | `scope` / 模型 trim / `errors_only` 进 `/api/me/logs`；展开账单快照（原价 / 实扣 / 规则链）；加载更多带 `before`；CSV 文件名 `okapi-usage-`；空表禁用导出 |
+| 总览「需要注意」 | smoke 打开过落地页 | 芯片 PG / Redis / CH / NATS；Redis 挂了、死信 / 未定价 / 空池 / 高错误率 / 对账漂移深链；切近 30 天重拉 `channels?days=`；全清文案 |
+| 用户消耗排行 | 图表套件只验共享交互 | `$1.23` 来自 `1_230_000` micro；用户链 `/admin/logs?user_id=&hours=天数×24`；切窗改 `days` |
+| 日志行内退款 | 运维页退款卡已覆盖，行内没有 | 失败行不出现退款；成功扣费行确认后 POST `{request_id, reason}`（reason trim） |
+| 邮箱登录 TOTP | 绑定流程已有，登录重试没有 | 首次 `{email, password}`；`totp_required` 后露出 `#totp`；第二次才带 `totp_code` |
+
+#### 六续：账户流水 / 首启向导 / 服务质量卡 / 站点公告 / API Key 登录
+
+smoke 只验流水空签与登录能进门；质量页图表套件只验共享交互。补进 `missing-surfaces.spec`（+5），L3 全量 **111 / 111**，54.5s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 账户流水 | smoke 两签空态 | 进账 `+$1.23` 来自 micro；退款标签 + `/portal/logs` 深链；订阅池徽章；`limit=50` / `before` 翻页；订单原币 `88.00 CNY` 不经浮点；空表与 500 不伪装成零 |
+| 首启向导 | 只有 `smoke-all.sh` 后端 | `needs_setup` 才出向导、无登录分段；空用户名禁提交；POST `{username}` trim；Key 展示一次后进 `/admin` |
+| 服务质量卡 | `charts.spec` 只验趋势图交互 | 渠道 / 模型 / 错误 / 客户端 `days`+`limit`；高错误率渠道链带 `errors_only`；模型 / 错误码 `hours=天数×24`；空 `client_type` 显示未识别；切 30 天重拉 |
+| 站点公告横幅 | 设置页发布已覆盖，落地横幅没有 | warning 按 `updated_at` 关掉、同版刷新不再出、换版再出；critical 无关闭钮 |
+| API Key 登录 | smoke 用整串 key | 空白禁提交；`'  sk-…  '` 探活 `/api/me` 的 Bearer 已 trim |
+
+#### 七续：门户总览查询 / 站点规模 / 用户用量 / 登出 / OAuth 着陆
+
+图表套件已验门户切签零请求与日期范围，但没钉 `scope`/`days`、本分钟 RPM、订阅剩余。规模条、用户用量签、登出体、OAuth 兑 key 也缺形状断言。补进 `missing-surfaces.spec`（+5），L3 全量 **116 / 116**，58.7s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 门户总览查询 | `charts.spec` 不验 scope / 90 天 | 缺省 `scope=key&days=7`；全账户改 `scope=user`；近 90 天改 `days=90`；key 视角 `12 / 60` RPM，全账户改平均 TPM；订阅剩余链 `/portal/plans`；余额到期清零 |
+| 站点规模条 | smoke 只看得到标题 | 自动停用 / 未定价文案；深链用户 / 密钥 / 渠道 / 定价 |
+| 用户用量抽屉 | write-forms 把 usage 桩成空 | `usage?days=7`；近 7 天 `$1.23`；流水类型 / 补偿标签 / 操作者；日志链 `user_id` + `hours=168` |
+| 登出 | smoke 点过按钮 | POST `/auth/logout` 体 `{}` 后回登录页 |
+| OAuth 着陆 | 只覆盖登录页跳 `/auth/oauth/{code}` | `?oauth=done` 兑 key `{name:oauth}` 后进门户 |
+
+#### 八续：行内用量 / 未定价筛选 / KPI 实时条 / 语言主题 / 排行空态 / 退款幂等
+
+列表页用量格子、定价「仅看未定价」、总览 KPI / 实时查询串、顶栏语言与主题、排行失败态、行内退款幂等此前没有形状断言。补进 `missing-surfaces.spec`（+6），L3 全量 **122 / 122**，58.2s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用户 / 密钥行内用量 | keys 页把 entity-usage 桩成 `{}`；用户页只验抽屉 | `kind` + `ids` + `days=7`；今日 / 7 天 micro→USD；深链 `user_id` / `api_key_id`；501 显示 —，`$1.23` 消失 |
+| 仅看未定价 | write-forms 只覆盖抽屉提交 | 按钮进 URL `unpriced=true` 且查询带上；与搜索 `q=gpt-5` 并存；再点一次从查询串拿掉 |
+| 总览 KPI / 实时条 | smoke 只看到 QPS 标签 | `overview?days=7` 切 30 天重拉；`realtime?window=60`；QPS 由 `qps_milli` 换算 |
+| 语言 / 主题菜单 | 深色只靠 initScript | English 后页头 Dashboard、写 `okapi.lang`；深色挂 `html.dark` 写 `okapi.theme`；跟随系统清除 |
+| 消耗排行空态 / 500 | 只有 happy path | 空表「暂无数据」不见 `$0`；500 走错误码文案 |
+| 行内退款幂等 | 只覆盖 `refunded` | `already_refunded` 显示幂等保护文案，不出现「已退款 $…」 |
+
+#### 九续：用量分析过滤条 / 运维退款三结局 / 经营分组表 / 模型删除 / 注册赠送
+
+`charts.spec` 覆盖高级筛选，但过滤条芯片与深链 `user_id` 没钉；运维退款只有成功路径；经营页分组表与资金流入四桶、模型删除手输名称、注册赠送金额都缺形状断言。补进 `missing-surfaces.spec`（+4，注册例加赠送金额），L3 全量 **126 / 126**，54.8s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用量分析过滤条 | 高级筛选已覆盖，过滤条没有 | 深链 `user_id=7` 进 `trend?user_id=7&days=7`；芯片回填 alice；加 `model=gpt-5`；点 × 拿掉 `user_id` |
+| 运维退款三结局 | list-writes 只覆盖可退成功 | 404 `record_not_found`；未扣费禁退并给提示；`already_refunded` toast 且预览翻成已退款 |
+| 经营资金流入 / 分组 | smoke 只看到「资金流入」标题 | 四桶 micro→USD（含扣减 / 过期，>0 才出）；分组 `groups?days=`；切 30 天两接口都重拉 |
+| 模型删除 | write-forms 只覆盖抽屉与发布 | 确认框手输 `gpt-5` 后 `DELETE /admin/models/gpt-5`；`requires_publish` 提示需发布 epoch |
+| 注册赠送 | 已覆盖邀请制 / 验证码，没钉金额 | 无邀请码 `$1.00`；填 aff / `?aff=` 后叠加成 `$1.50` |
+
+#### 十续：用量拆分聚焦 / 渠道 key 状态 / 质量趋势 / KPI 毛利窗
+
+`charts.spec` 覆盖趋势图交互，但拆分表的 `by`/`limit`、日志链与聚焦下钻没钉；渠道列表近 24h 只有点开抽屉；质量页默认趋势签的 `metric`/`stack` 没进查询串；KPI 切窗只验了 overview。补进 `missing-surfaces.spec`（+3，KPI 例加 `margin?days=`），L3 全量 **129 / 129**，1.0m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用量分析拆分 | 过滤条已覆盖，拆分表没有 | 缺省 `by=model&limit=50`；日志链 `hours=168`；聚焦把行变成 `model=` 且下一层 `by=channel` |
+| 渠道 key 状态 / 近 24h | 时间线抽屉已覆盖，列表列没有 | `days=1&limit=100`；`1/2 可用` + 冷却 + 约 N 分钟后恢复；`pools: []` → 未入池；错误率 25.0% / 80 次 |
+| 服务质量趋势 | 质量卡覆盖 channels/models/errors/clients，默认趋势签没有 | 缺省 `metric=error_rate&days=7`；切平均时延 + 对比维度 model；换 30 天因 `key={days}` 重挂，metric 回到 `error_rate` |
+| 总览 KPI 毛利 | 已覆盖 overview / realtime | 切窗同步 `margin?days=` 7 → 30 |
+
+#### 十一续：拆分名次环比 / 渠道空闲与 OAuth 过期 / 团队详情用量
+
+十续钉了拆分下钻与渠道部分可用，但名次/环比、切「按」、无流量行、OAuth 过期灰字、团队钱包金额都还没形状断言。补进既有拆分 / 渠道例（+1 团队），L3 全量 **130 / 130**，1.0m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 拆分名次 / 环比 / 按 | 十续只钉 by/limit/聚焦 | `previous_rank` 升 1 显示 ▲1；`delta_bp` 2300 → +23%；切「按」用户仍带 `model=gpt-5` |
+| 渠道空闲 / OAuth / 未测 | 十续只钉部分可用与错误率 | 过期 token 灰字；`last_test` 空 → 未测过；无 24h 流量行显示 — |
+| 团队详情用量 | write-forms 只覆盖建团写路径 | `/api/teams/{id}/usage` 钱包 $12.50；alice 本月 $0.25 / 累计 $3.00；空上限「不限」 |
+
+#### 十二续：日志 CSV 内容 / 测活徽章 / 用量 KPI 环比
+
+文件名已覆盖，但 CSV 正文（六位 USD、公式注入、失败 status、key 列）没读；测活列只有「未测过」；用量页 KPI 环比没钉。补进 `missing-surfaces.spec`（+1 CSV，过滤条 / 管理日志 / 渠道例加断言），L3 全量 **131 / 131**，58.8s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 门户 / 管理日志 CSV | 只断言文件名前缀 | UTF-8 BOM；金额 `toFixed(6)`；模型 `=1+2` 前加 `'`；失败行 `upstream_error`；本密钥无 key 列，全账户才有 |
+| 渠道测活 / 无 key | 十一续只钉未测过 | 成功 `120 ms`；失败 `HTTP 429`；`keys: []` → 没有 key |
+| 用量 KPI 环比 | 过滤条只钉金额 | 请求 ▲ +25%、消费 ▲ +23%、tokens 持平、对比上一个 7 天、输入/输出 mix |
+
+#### 十三续：拆分/经营毛利列 / KPI 万元紧凑 / 用户列表搜索 / 渠道停用
+
+成本覆盖列和 KPI 紧凑记法此前没有形状断言；用户列表搜索只在文档里写了「搜索回车」。补进 `missing-surfaces.spec`（+2），L3 全量 **133 / 133**，1.0m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 拆分 / 经营毛利 | 有成本才出列 | 拆分 `cost_known_requests>0` 出「已采集部分毛利」与覆盖率 80%；经营徽章同口径 |
+| 用量 KPI 紧凑 | 小额已覆盖 | ≥$10k 显示 `7.2万`；副行已采集毛利 |
+| 用户列表搜索 | 行内用量已覆盖，搜索没有 | `q` trim 进 URL；空结果；停用态；倍率 `×1.250000` 原样 |
+| 渠道停用 / 全可用 | 十二续只钉测活 | `status=2` → 停用；idle 行「1 把 key 全部可用」 |
+
+#### 十四续：渠道列表搜索 / 令牌限制徽章 / 拆分名次跌落 / 质量 ttft 与吞吐 / 含让利
+
+渠道页搜索与协议筛选、令牌限模型/IP 与日志链、拆分「新」与下跌、质量趋势另外两个 metric、KPI 含让利都还没钉。补进 `missing-surfaces.spec`（+1 渠道搜索，其余加在既有例上），L3 全量 **134 / 134**，54.4s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 渠道列表搜索 | list-writes 只覆盖写操作 | `q` trim、协议 `provider` 进 URL 与查询；交叉过滤空结果；清空筛选 |
+| 令牌限制 / 日志链 | 只钉 URL 与停用删除 | 查询串带 `q`+`user_id`；限 1 个模型 / IP；累计 $0.50；日志链 `api_key_id=9` |
+| 拆分名次跌落 | 只钉 ▲1 / +23% | 上期不在榜「新」；跌 2 位 ▼2；环比 -23% |
+| 质量趋势其余 metric | 十续只钉 latency | `ttft`、`throughput` 进查询 |
+| KPI 含让利 | 无成本时折扣没钉 | `discount_micro` → 「含让利 $0.20」 |
+
+#### 十五续：兑换码停用整批 / 渠道池列表徽章 / 供应商控制台 / 负毛利与名次持平
+
+兑换批次停用只有后端集成、前端按钮未走交互；池列表只验删除禁用；渠道搜索没钉控制台链与列表自带余额；拆分没钉名次不变与负毛利红字。补进 `missing-surfaces.spec`（+2，渠道搜索 / 拆分例加断言），L3 全量 **136 / 136**，54.3s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 兑换码停用整批 | 生成抽屉与分页已覆盖，停用没有 | 未使用可点；已核销禁点；`DELETE /admin/redemptions/{batch}`；toast「已停用 3 张未核销码」 |
+| 渠道池列表徽章 | write-forms 只覆盖抽屉与删禁用 | 内置；空池；优先级 + 加权 / 最低时延；`2 个分组 / 1 个令牌 · 1 个池的降级目标` |
+| 供应商控制台 / 列表余额 | 搜索只钉 q/provider | openai / anthropic 固定站；compat 取 origin；非法 api_base 不显示；列表 CNY `¥110.50` 与 USD `$0.00` |
+| 拆分负毛利 / 名次持平 | 只钉 ▲/▼/新 | `previous_rank === rank` → —；`known_margin_micro < 0` 红字 `-$0.10` |
+
+#### 十六续：套餐/角色/规则列表列 / 令牌空检索 / 门户密钥钉住 / 分组空池
+
+抽屉写路径早已覆盖，但管理端套餐/角色/规则列表列、令牌空检索、门户列表档位钉住、分组「可自选」与空池都还没形状断言。补进 `missing-surfaces.spec`（+3）并加在既有令牌 / 门户密钥 / 分组例上，L3 全量 **139 / 139**，1.0m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 管理端套餐列表 | 抽屉已覆盖形态互斥 | 充值模板 `$10` / 90 天；订阅 `$5 / 每日`、不售卖、人数 12 |
+| 角色列表截断 | 抽屉已覆盖权限勾选 | 前 4 个权限点；第 5 个收进 `+1 项` |
+| 计费规则列表人话化 | 抽屉已覆盖字段回填 | 阶梯 `月用量 ≥ 100 tokens + 月消费 ≥ $1 时 ×0.9`；时段 `周一五 每天 00:00–05:59 ×0.5`；独占 / 最优；范围拼接；折扣 `×0.8` / 全部 |
+| 令牌空检索 / 到期 | 有命中检索与徽章 | `q` 无命中 → 暂无数据；到期 `2099-06-15` |
+| 门户密钥钉住 | 只覆盖新建写路径 | 档位：vip；限 1 个来源；用量 `$1.23`；RPM 60 |
+| 分组可自选 / 空池 | 只钉限流列 | 列表「可自选」；`channel_count=0` → 空池 |
+
+#### 十七续：门户密钥重命名 / 定价列表列 / 质量粒度 / 团队列表
+
+新建/停用/删除已覆盖，但门户密钥改名 PATCH、定价列表倍率与渠道列、质量页高级筛选粒度、团队列表角色/余额都还没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，58.5s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 门户密钥重命名 | 只覆盖新建 / 停用 / 删除 | 空名禁保存；trim；跟随分组 `group_code: null`；清 IP 后新名单；toast 已保存 |
+| 定价列表列 | 只钉未定价过滤 | `ratio` / `1.25` / `$2.50 / $20.00` / `2 ×1.5`；已定价无渠道；未定价 `1 条渠道` 深链 |
+| 质量趋势粒度 | charts.spec 只在统计页 | 高级筛选 `granularity=hour` 进 `/admin/stats/trend` |
+| 团队列表 | 只钉详情抽屉 | 所有者徽章；列表钱包 `$12.50` |
+
+#### 十八续：令牌启用 / 用户动作 / 定价空检索 / 质量重置 / 总览趋势卡
+
+令牌例标题写了启用却只 PATCH 停用；用户抽屉封禁后没点解封 / 升降级 / 软删；定价空检索、质量筛选重置、总览趋势切消费都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，58.5s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 令牌启用 | 标题写了启用，体只停用 | 停用后列表翻成启用；PATCH `{status:1}` |
+| 用户动作 | 只钉封禁确认框 | 解封无确认；promote / demote 直接 POST；软删除经确认框 `{action:delete}` |
+| 定价空检索 | 有命中 q | `q=nope` → 没有匹配的结果；清空筛选 |
+| 质量筛选重置 | 十七续只钉 hour | 「重置高级条件」去掉 `granularity` |
+| 总览趋势卡 | KPI 切窗已覆盖 | 切「实际消费」`aria-pressed` |
+
+#### 十九续：门户密钥 401 / 启用、邀请链接复制、质量日期校验
+
+管理端令牌启用已钉，门户密钥仍只停用不翻启用；新建 401 关抽屉的会话文案、邀请链接剪贴板、质量只填开始日期的区间拦截都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，50.9s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 门户密钥 401 | 只钉成功新建 | POST `/auth/keys` 401 → 抽屉关掉，提示需邮箱密码登录 |
+| 门户密钥启用 | 只钉停用 PATCH | stub 翻 `status`；停用后点启用 PATCH `{status:1}` |
+| 邀请链接复制 | 只验按钮可见 | `clipboard.writeText` 含 `/?aff=`；toast 已复制 |
+| 质量日期校验 | 十八续只钉重置 | 只填开始日期 → `role=alert` 无效区间，不发查询 |
+
+#### 二十续：趋势卡有数据、日志 CSV 公式前缀、明文/订单号复制
+
+总览趋势卡此前只切 Segmented（空 `data` 不挂 TimeChart）；管理日志 CSV 没钉公式注入；流水订单号、门户明文 Key、首启 Root Key 的复制都没读剪贴板。加在既有例上（无新增用例），L3 全量 **139 / 139**，59.0s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 总览趋势卡 | 十八续空序列只切指标 | margin 有日点后数据表 `42`；切「实际消费」`US$1.23` |
+| 管理日志 CSV | 只钉表头与六位 USD | `error_code` 为 `=1+1` → CSV `'=1+1`；展开行复制 `request_id` |
+| 流水订单号 | 只验 `ord-paid` 可见 | 行内复制写入剪贴板 |
+| 明文 Key | 门户/首启只验可见 | 复制 `sk-okapi-new-plain` / `sk-okapi-root-once` |
+
+#### 二十一续：otpauth / 团 key / 门户日志复制，质量空态与超 31 天按小时
+
+明文复制已覆盖门户/首启/流水，TOTP otpauth、团 key、门户日志 `request_id` 还没读剪贴板；质量页空窗、按小时跨过 31 天、trend 500 也没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.0m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| TOTP otpauth | 只验 URL 可见 | 「复制 otpauth 链接」写入剪贴板 |
+| 团 key 明文 | 只验可见 | 抽屉内复制 `sk-okapi-team-plaintext-once` |
+| 门户日志 request_id | 只验可见 | 展开行复制 `req-50` |
+| 质量空态 / 超窗 / 500 | 十九续只钉缺结束日 | 空窗文案；hour + 39 天不发查询；500 → 重试 |
+
+#### 二十二续：待办组件宕机 / 规模条分支、池孤儿、审计 500、角色空态
+
+待办只钉了 Redis 挂与死信，PG/CH 宕、outbox 积压、冷却 key 都已在 stub 里却没断言；规模条 `auto_disabled` 盖住了无 key / 近 7 天 / 全定价分支；池成员从不走到 `orphan: true`；审计无 500；角色空态带新建入口没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.1m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 总览待办 | Redis 挂、死信已钉 | PG/Redis/CH 不可达；outbox 1000；冷却 2 把 key |
+| 站点规模条 | 只钉自动停用 + 未定价 | 近 7 天 +5；启用但无可用 key；5 个有启用渠道 |
+| 池成员孤儿 | 只钉非空保存 | 全不勾红字警告；POST `pools: []`；toast 对所有人不可达 |
+| 审计 500 | 只钉空态与翻页 | 500 → ErrorState + 重试 |
+| 角色空态 | 只钉权限截断 | 空表 hint；空态「新建角色」打开抽屉 |
+
+#### 二十三续：测活失败 toast、错误占比、渠道/套餐空态
+
+测全部此前只钉成功汇总；行测活只钉成功 ms；错误分布只钉码与 502；渠道/套餐空态带新建入口没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，58.4s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 渠道测全部失败 | 只钉空体 + 1 可达 | `测试完成：0 可达 / 1 失败（共 1）`（warning / `role=status`） |
+| 行测活模型失败 | 只钉 `连通正常（12 ms）` | `scope: model` → `模型 gpt-5 调不通（model_not_found）：unknown model xyz` |
+| 错误分布列 | 只钉码 / 502 / 深链 | 占比 `75.0%`；top 渠道 `openai-main`；top 模型 `gpt-5` |
+| 渠道空表 | 搜索空结果可清空 | 无筛选空表 hint；空态「新建渠道」打开抽屉 |
+| 套餐空表 | 只钉列形态 | 空表 hint；空态「新建套餐」打开抽屉 |
+
+#### 二十四续：通用测活失败、空错误码、池/规则/分组/密钥/团队空态
+
+测活只钉了 `scope=model`；错误码空串、upstream 0、无名渠道没钉；池/规则/分组/门户密钥/团队空态带新建入口没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.0m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 行测活通用失败 | 二十三续只钉 scope=model | 无 scope → `测活失败：upstream_timeout` |
+| 空错误码 | 只钉有码行 | `(empty)` 深链 `errors_only`；status `—`；渠道 `#7` |
+| 错误空表 | 只钉有数据 | 「窗口内没有失败请求」 |
+| 渠道池空表 | 只钉徽章 | 空表 hint；空态「新建池」打开抽屉 |
+| 计费规则空表 | 只钉人话化 | 空表 hint；空态「新建规则」打开抽屉 |
+| 价格分组空表 | 只钉徽章 | 空表 hint；空态「新建分组」打开抽屉 |
+| 门户密钥空表 | 只钉列表列 | 空表 hint；空态「新建密钥」打开抽屉 |
+| 团队空表 | 只钉列表列 | 空表 hint |
+
+#### 二十五续：sync 无差异、趋势卡 500、模型/兑换码/门户套餐/熔断/客户端空态
+
+在线同步从不走到 `differences: {}`；总览趋势卡只钉有数据；模型/兑换码/门户套餐/熔断空表、客户端空表、门户总览空窗 hint 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，56.6s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 在线同步无差异 | 只钉有差异 apply | `differences: {}` → syncNoDiff |
+| 总览趋势卡 500 | 二十续只钉有日点 | `internal_error` → ErrorState + 重试 |
+| 模型空表 | 只钉检索空结果 | 无筛选 hint「还没有模型…」 |
+| 兑换码空表 | 只钉停用整批 | 空表 hint；空态「生成」打开抽屉 |
+| 门户套餐空表 | 只钉在售/续期 | 「暂无在售套餐」 |
+| 毛利熔断空表 | 只钉暂停行 | 启用且无对 → 空表 hint |
+| 客户端空表 | 只钉 sdk / 未识别 | `trendEmptyHint` |
+| 门户总览空窗 | 只钉 KPI / 切窗 | `emptyUsageHint` |
+
+#### 二十六续：死信/熔断关闭、用户/KPI/总览/日志/时间线/团队 500、目录未知模型
+
+死信从不走到空表；熔断只钉启用态；用户无筛选空表与列表 500、KPI overview 500、门户 breakdown 500、管理日志 500、时间线 500、团 usage 500、流水空表、目录未知 `?model=` 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，53.0s（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 死信空表 | 只钉重投 / 丢弃 | 「没有死信。统计与账本一致。」 |
+| 熔断未启用 | 二十五续只钉启用空表 | `enabled: false` → disabled hint |
+| 用户空表 / 500 | 只钉检索空结果 | 无筛选「暂无数据」；500 → ErrorState + 重试 |
+| KPI overview 500 | 二十五续只钉趋势卡 500 | overview 500 → ErrorState + 重试 |
+| 门户总览 500 | 二十五续只钉空窗 | breakdown 500 → ErrorState + 重试 |
+| 管理日志 500 | 只钉空表禁导出 | 换过滤后 500 → ErrorState + 重试 |
+| 渠道时间线 500 | 只钉空流量 / 深链 | 切 hours 后 ErrorState |
+| 团 usage 500 | 只钉成功用量 | 成员表 ErrorState；钱包仍 `$0` |
+| 流水空表 | 只钉订单空 + 流水 500 | 余额变动空 hint |
+| 目录未知模型 | 只钉已发布深链 | `?model=does-not-exist` → 未发布并可关掉 |
+
+#### 二十七续：管理端/门户列表页 500
+
+二十六续只钉了用户列表与看板 500，渠道 / 池 / 套餐 / 角色 / 规则 / 分组 / 模型 / 兑换码 / 令牌 / 门户密钥 / 门户日志 / 门户套餐列表失败都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.0m（8 workers）。令牌页 URL 仍带 `q=` 时不能 `reload`（`**/admin/keys?*` 会把文档写成 JSON），改成换检索词打缓存。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 渠道 / 池 / 套餐 / 角色 / 规则 / 分组 / 模型 / 兑换码 | 只钉空表 + 新建 | 列表 500 → ErrorState + 重试 |
+| 管理端令牌 | 只钉检索 / 启停删 | 换 `q` 后 500 → ErrorState + 重试 |
+| 门户密钥 / 日志 / 套餐 | 只钉空表或检索 | 500 → ErrorState + 重试 |
+
+#### 二十八续：质量卡 / 经营 / 死信 / 熔断 / 高级设置 500
+
+质量四卡只钉有数据与空表；经营只钉四桶与切窗；死信 / 熔断 / 高级设置只钉写路径与空态。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.1m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 错误分布 / 客户端 | 只钉空表 | 500 → ErrorState，无重试按钮 |
+| 渠道健康 / 模型时延 | 只钉深链 | 500 → destructive 文案（不是 ErrorState） |
+| 经营 cashflow | 只钉四桶 | 500 → 资金流入行收起 |
+| 经营 margin | 总览趋势卡已钉 500 | 经营页切窗后 ErrorState + 重试 |
+| 死信 / 熔断 | 只钉空表 | 500 → ErrorState，无重试 |
+| 高级设置列表 | 只钉 MCP 写入 | GET `/admin/settings` 500 → ErrorState + 重试 |
+
+#### 二十九续：抽屉 500、对账空表、实时/规模/分组收起、流向 500
+
+列表页 500 已钉完，抽屉内 overview / usage / 订阅 / 权限清单 / ModelPicker、对账空表、实时条与规模条失败收起、经营分组表收起、流水订单 500、门户「我的订阅」500、分析流向 500 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.2m（8 workers）。并行下 `interactions` 易支付 `pid` 填入偶发未进 POST（第十一轮已知焦点时序），单跑与复跑全量均过。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用户抽屉 overview / usage | 只钉成功用量 | 两个 ErrorState |
+| 用户抽屉订阅 | 只钉发放 / 结束 | GET 500 → ErrorState |
+| 角色权限清单 | 只钉勾选提交 | `/admin/permissions` 500 |
+| 新建渠道 ModelPicker | 只钉手动补模型 | `GET /admin/models` 500 |
+| 三方对账 | 只钉有漂移校准 | 零差异文案；500 无重试 |
+| 实时条 / 规模条 | 只钉有数据 | 500 收起，不占版面 |
+| 经营分组表 | 二十八续只钉 cashflow 收起 | groups 500 收起 |
+| 充值订单 500 | 只钉流水 500 | 切签后 ErrorState |
+| 门户我的订阅 | 只钉套餐列表 500 | `/api/me/subscription` 500 |
+| 分析流向 | 只钉阶段 / 下钻 | 切窗后 ErrorState |
+
+#### 三十续：拆分/趋势空窗、经营空表、抽屉用量空表、团队列表 500
+
+二十九续钉了抽屉与看板 500，拆分 500、趋势空窗、经营空 `data`、质量空表、用量空 daily/ledger、`stats_disabled`、团队列表 500、高级设置无匹配 hint 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.2m（8 workers）。无易支付 flake。L4 `smoke.spec` **10 / 10**，26.3s（:8080 / :8081 空闲）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用量分析趋势 | 拆分例只走 `view=breakdown` | `/admin/stats` 空 `data` → `trendEmptyHint` |
+| 用量分析拆分 | 只钉成功下钻 | 切 `by=group` 后 500 → ErrorState，无重试 |
+| 经营报表 | 只钉四桶 / 500 | 重试后空 `data` → `trendEmptyHint` |
+| 渠道健康 / 模型时延 | 二十八续只钉 500 文案 | 切 30 天后空表无渠道/模型链 |
+| 用户用量抽屉 | 二十九续只钉 500 | 空 daily/ledger → 「暂无数据」 |
+| 用户抽屉用量签 | 只钉角色/订阅写路径 | `stats_available: false` → `stats_disabled` |
+| 团队列表 | 只钉 401 降级 | 500 → ErrorState，无重试 |
+| 高级设置筛选 | 只钉 article 计数归零 | 无匹配 hint `settingEmptyHint` |
+
+#### 三十一续：拆分/流向空表、PoolReach 500、诊断/拉模型/导入/OAuth toast
+
+三十续钉了拆分 500 与经营空表，拆分空 `data`、流向空桑基、分组抽屉池详情失败收起、路由诊断 / 拉模型 / 粘贴导入 / OAuth start 的 500 toast、待办 diagnose 失败收起芯片、ModelPicker 空表都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.3m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用量分析拆分 | 三十续只钉 500 | 切 `by=provider` 后空 `data` → `trendEmptyHint` |
+| 用量分析流向 | 二十九续只钉 500 | 切 30 天后空 `nodes`/`links` → `trendEmptyHint` |
+| 价格分组 PoolReach | 只钉成功摘要 | 池详情 500 收起，不占版面 |
+| 路由诊断 | 只钉成功结论 | 再点诊断 500 → toast |
+| 拉上游模型 | 只钉成功覆盖 | 再点拉取 500 → toast |
+| 导入定价 | 只钉成功 / 无差异 | 粘贴再导入 500 → toast |
+| 订阅 OAuth | 只钉 start / exchange | start 500 → toast |
+| 总览待办 | 只钉全清 | diagnose 500 收起 PG 芯片 |
+| 新建渠道 ModelPicker | 二十九续只钉 500 | 空清单「尚无模型」 |
+
+#### 三十二续：写路径 500 toast、Playground 发送失败、设置空表
+
+三十一续钉了读路径空表 / 收起与诊断、拉模型、粘贴导入、OAuth start 的 toast。写路径再点一次失败（拉取同步、OAuth 换码、凭证轮换、池成员、发布、吊销会话、SMTP 测试、通知保存）以及 Playground 发送 500、高级设置无筛选空表都没钉。加在既有例上（无新增用例）。OAuth 成功换码后 `onSuccess` 会卸掉粘贴区，须再点「打开登录页」才能测 exchange 500；失败后按钮是「重新打开登录页」。L3 全量 **139 / 139**，1.3m（8 workers）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 在线同步拉取 | 三十一续只钉粘贴导入 500 | 无差异后再点拉取 500 → toast |
+| 订阅 OAuth 换码 | 三十一续只钉 start 500 | 再打开登录页后 exchange 500；失败后再点「重新打开登录页」500 |
+| 凭证轮换 / 池成员 | 只钉成功清空 / 孤儿 toast | 再点轮换 / 保存池成员 500 → toast |
+| 发布定价 | 只钉 epoch toast | 再点发布 500 → toast |
+| 安全页会话 | 只钉吊销端点 | 吊销 500 → toast |
+| SMTP 测试 | 只钉成功发送 | 再点测试 500 → toast |
+| 通知多路 | 只钉保存体形状 | 再点保存 500 → toast |
+| Playground 发送 | 只钉流式成功 | 发送 500 → 助手气泡内英文 alert |
+| 高级设置空表 | 三十续只钉筛选无匹配 | 无筛选 `data: []` → 「暂无数据」+ hint |
+
+#### 三十三续：其余写路径 500
+
+三十二续钉了同步拉取、OAuth 换码、轮换/池/发布/会话/SMTP 测试/通知保存。入账、封禁、渠道 PATCH/新建、同步 apply、TOTP enroll、key PATCH、兑换码生成、SMTP 保存、找回密码的 500 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.3m（8 workers）。隐私 / 公告 / SMTP 单键 GET 失败仍按缺省空表单渲染，不走 ErrorState（产品行为，不改）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用户入账 / 封禁 | 只钉成功 micro 与动作序列 | 入账 500 / 封禁 500 → toast |
+| 渠道 PATCH | 只钉 400 受保护键 | 400 后再保存 500 → toast |
+| 新建渠道 | 只钉成功 POST 与 ModelPicker 500 | 新建 500 → toast |
+| 在线同步 apply | 三十二续只钉拉取 500 | 应用前 500 → toast，再应用成功 |
+| TOTP enroll | 只钉 401 降级 | enroll 500 → destructive Alert，再点走 401 |
+| 渠道 key PATCH | 只钉权重 / 并发 / 启用 | 再点保存 500 → toast |
+| 兑换码生成 | 只钉 400 后成功 | 400 与成功之间 500 → toast |
+| SMTP 保存 | 三十二续只钉测试 500 | 有草稿后再保存 500 → toast |
+| 找回密码 | 只钉 501 SMTP | 再点发送 500 → `internal_error` |
+
+#### 三十四续：抽屉创建与运维写路径 500
+
+三十三续钉了入账 / 封禁 / 渠道 PATCH / apply / TOTP enroll。系数、分组、发放订阅、套餐 / 角色 / 池 / 建团保存、TOTP confirm、公告再发、死信重投、退款、清缓存、保留、毛利保存、核销、充值下单、重置密码的 500 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.3m（8 workers）。公告再发须等首次发布把「保存并发布」置禁用后再改标题，否则并行下 `onSuccess` 会把草稿清掉。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 用户系数 / 分组 | 三十三续只钉入账 / 封禁 | 改系数 / 再保存分组 500 → toast |
+| 发放订阅 | 只钉成功发放 | 发放前 500 → toast，再发放成功 |
+| 套餐 / 角色 / 池 / 建团 | 只钉成功保存 | 保存前 500 → toast，再提交成功 |
+| TOTP confirm | 三十三续只钉 enroll | 错码后再确认 500 → 字段文案 |
+| 站点公告 | 只钉发布体形状 | 发布成功后再改标题 500 → toast |
+| 死信重投 | 只钉成功重投 | 再重投 500 → toast |
+| 运维退款 / 清缓存 / 保留 | 只钉成功体形状 | 退款前 / 再清缓存 / 再保存保留 500 |
+| 毛利熔断保存 | 只钉成功保存 | 改窗后再保存 500 → toast |
+| 核销 / 充值下单 / 重置密码 | 只钉 400 / 无地址 / 失效 token | 再提交 500 → `internal_error` |
+
+#### 三十五续：其余写路径 500（保存 / 删除 / 校准 / 解除）
+
+三十四续钉了系数、分组、发放订阅、套餐 / 角色 / 池 / 建团保存、TOTP confirm、公告再发、死信重投、退款、清缓存、保留、毛利保存、核销、充值下单、重置密码。模型 / 分组 / 规则保存、规则再停用、池 / 套餐 / 模型删除、兑换码停用整批、团队加成员、门户新建密钥、注册保存、隐私再切、渠道复制、毛利解除、对账校准、死信丢弃、角色应用、结束订阅、余额有效期、令牌再停用的 500 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.4m（8 workers）。抽屉脚部被上次成功 toast（`role=status`）挡住时须先关掉再点保存。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 模型 / 分组 / 规则保存 | 只钉成功体形状 | 保存前 500 → toast，再提交成功 |
+| 规则再停用 | 只钉一次 toggle | 再点停用 500 → toast |
+| 池 / 套餐 / 模型删除 | 只钉确认后成功 | 确认后 500 → toast，再删成功 |
+| 兑换码停用整批 | 只钉成功张数 | 确认后 500 → toast，再停用成功 |
+| 团队加成员 | 只钉成功 upsert | 加入前 500 → toast，再加入成功 |
+| 门户新建密钥 | 只钉 401 后成功 | 新建前 500 → toast，再新建成功 |
+| 注册保存 / 隐私再切 | 只钉成功体形状 | 保存 / 再切 500 → toast |
+| 渠道复制 | 只钉 `-copy` 体 | 再复制 500 → toast |
+| 毛利解除 / 对账校准 / 死信丢弃 | 只钉成功体形状 | 解除 / 再校准 / 丢弃前 500 → toast |
+| 角色应用 / 结束订阅 / 余额有效期 | 三十四续只钉发放 500 | 应用 / 结束 / 保存前 500 → toast |
+| 令牌再停用 | 只钉停用→启用 | 再点停用 500 → toast |
+
+#### 三十六续：列表删除 / 批量 / 测活 / 密钥 500
+
+三十五续钉了保存与大部分删除。渠道行测活 HTTP 500、行停用、批量启用、单删、分组 / 规则 / 角色删除（角色仍落到 409）、团 key、门户停用与删除、管理令牌删除、失效 key 再启用、查上游余额的 500 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.4m（8 workers）。渠道列表会叠多条 `role=alert` toast，关关闭钮须按文案过滤或先清掉全部 toast，不能 `getByRole('alert')` 一把关。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 渠道行测活 | 只钉 ok:false 文案 | HTTP 500 → toast |
+| 渠道行停用 / 批量启用 / 单删 | 只钉成功体形状 | 再停用 / 启用前 / 确认后 500 → toast |
+| 分组 / 规则删除 | 只钉成功需发布 | 确认后 500 → toast，再删成功 |
+| 角色删除 | 只钉 409 `role_in_use` | 500 → toast，再删仍 409 |
+| 团 key / 门户停用与删除 / 令牌删除 | 只钉成功体形状 | 发 key / 停用 / 确认后 500 → toast |
+| 失效 key 再启用 | 只钉 `status: 1` | 再启用前 500 → toast |
+| 查上游余额 | 只钉 400 形状 + 成功 CNY | 400 后再点 500 → toast，再查成功 |
+
+#### 三十七续：门户改名 / 批量删除 / 返利保存 500；复跑 L4
+
+三十六续钉了行测活、行停用、批量启用、单删。门户密钥改名 PATCH、渠道批量删除、高级设置返利比例保存的 500 都没钉。加在既有例上（无新增用例），L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，25.3s。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 门户密钥改名 | 三十六续只钉停用 / 删除 500 | 保存前 500 → toast，再保存成功 |
+| 渠道批量删除 | 三十六续只钉批量启用 500 | 确认后 500 → toast，再删成功 |
+| 充值返利保存 | 只钉 12.35% → 1235 bp | 保存前 500 → toast，再保存成功 |
+
+#### 三十八续：模型限流 / SSRF / OAuth 保存 500；复跑 L5
+
+三十七续钉了返利比例保存 500。模型 RPM、上游访问策略、第三方登录这三处 `POST /admin/settings` 仍只钉成功体形状。加在既有例上（无新增用例），500 后必须把 POST+GET 路由还原，否则同例后续保存会一直吃 500。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）；脚本 trap 已清监听。不额外点易支付保存（第十一轮焦点时序 flake）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 模型请求限流 | 只钉 `model-a: 2` / `model-b: 0` | 首次保存前 500 → toast，还原路由后再保存成功 |
+| 上游访问策略 | 只钉 `allow_http: false` + 扩展字段 | 切「允许 HTTP 上游」后保存前 500 → toast，再保存成功 |
+| 第三方登录 | 只钉 github + `client-new` 且保留密钥 | 改客户端 ID 后保存前 500 → toast，再保存成功 |
+
+#### 三十九续：Stripe / 扩展 JSON / MCP 保存 500；复跑 L4
+
+三十八续钉了模型限流、SSRF、OAuth 保存 500。Stripe 抽屉此前没有写路径（列表只验密钥不进 HTML），扩展 JSON 只钉非法 JSON 禁保存后取消，MCP 只钉成功体再验列表 GET 500。加在既有例上（无新增用例）。非法 API 地址禁保存；合法 JSON 保存前 500 后须还原 POST+GET。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，25.2s。不额外点易支付保存。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| Stripe 支付 | 无写路径 e2e | 非法 `api_base` 禁保存；保存前 500 → toast，再保存成功且密钥保留 |
+| 扩展 JSON | 只钉非法 JSON 禁保存后取消 | 合法 JSON 保存前 500 → toast，再保存 `retries: 5` |
+| MCP 写入 | 只钉 `value: true` + 列表 GET 500 | 保存前 500 → toast，再保存成功，列表 GET 500 仍走 ErrorState |
+
+#### 四十续：密钥 / 数字 / 字符串设置编辑器 500；复跑 L5
+
+三十九续钉了 Stripe / 扩展 JSON / MCP。支付凭证（secret）、Web 会话数上限（number）、站点地址（string）三种通用编辑器此前没有写路径。加在既有「高级配置按用途分组」例上（无新增用例）；保存成功 toast 会挡住下一张抽屉的保存按钮，须先关掉 `role=status`。桩里补上 `web_session_limit` / `site_url` 后列表 12 条、访问与安全 3 条。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）；脚本 trap 已清监听。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 支付凭证 | 只钉 `is_secret` 不进 HTML | 空值禁保存；保存前 500 → toast，再保存成功且新密钥不进列表 |
+| Web 会话数上限 | 无写路径 e2e | 非数字禁保存；保存前 500 → toast，再保存 `0` |
+| 站点地址 | 无写路径 e2e | 保存前 500 → toast，再保存新 URL |
+
+#### 四十一续：试用台预设 JSON / 自定义 OAuth 服务商；复跑 L4
+
+四十续钉了 secret / number / string 编辑器。试用台预设（catalog JSON 数组）和第三方登录「添加服务商」此前没有写路径。加在既有例上（无新增用例）。自定义标识缺三地址禁保存；与 github 重复禁保存；github 的 `custom` 扩展字段仍保留。桩里补上 `playground_presets` 后列表 13 条。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，25.3s。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 试用台预设 | 试用台只钉公开 GET 导入 | 非法 JSON 禁保存；保存前 500 → toast，再保存两项数组 |
+| 添加登录服务商 | 只钉改已有 github 的 client_id | 标识重复 / 自定义缺 URL 禁保存；保存前 500 → toast，再保存 github+custom-idp |
+
+#### 四十二续：移除限流规则 / 移除登录服务商；复跑 L5
+
+四十一续钉了添加自定义服务商和试用台预设 JSON。限流规则与登录服务商的移除按钮此前没有写路径。加在既有例上（无新增用例）：去掉第 2 条 RPM 后只留 `model-a`；去掉 custom-idp 后 github 的 `custom` 仍保留。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 移除限流规则 | 只钉添加 + 重复标识禁保存 | 移除第 2 条后保存前 500 → toast，再保存只剩 `model-a: 2` |
+| 移除登录服务商 | 四十一续只钉添加 custom-idp | 移除第 2 家后保存前 500 → toast，再保存只剩 github |
+
+#### 四十三续：清空限流规则 / Discord 预设服务商；复跑 L4
+
+四十二续钉了移除第二条 RPM / 第二家 OAuth。清空全部限流规则、以及 github/discord/linuxdo 预设（不填三地址）此前没有写路径。加在既有例上（无新增用例）。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，26.3s。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 清空限流规则 | 四十二续只钉剩 `model-a` | 再移除第 1 条，保存前 500 → toast，再保存 `{}` |
+| Discord 预设 | 四十一续只钉自定义三地址 | 添加 discord 不填 URL；保存前 500 → toast，再保存 github+discord |
+
+#### 四十四续：OAuth 可选字段 / 清空服务商 / 删除通知渠道；复跑 L5
+
+四十三续钉了 Discord 预设。授权范围、清空全部登录服务商、通知多路删掉邮件渠道此前没有写路径。加在既有例上（无新增用例）。通知卡保存成功后 `setRows(null)` 并重拉单键 GET，须把 `/admin/settings/notify_channels` 桩成已保存值，否则删除按钮会随表单卸掉。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| Discord 授权范围 | 四十三续只钉 code/id/secret | 展开可选字段填 `identify`；保存前 500 → toast，再保存带 `scopes` |
+| 清空登录服务商 | 四十二续只钉移除第 2 家 | 两家都移除后保存前 500 → toast，再保存 `[]` |
+| 通知多路删除 | 只钉两路一起保存 + 再保存 500 | 删邮件后 500 → toast，再保存只剩 webhook |
+
+#### 四十五续：清空通知渠道；复跑 L4
+
+四十四续钉了删掉邮件只留 webhook。最后一路 webhook 删掉后保存空数组此前没有写路径。加在既有例上（无新增用例）。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，27.5s。
+
+| 功能面 | 结论 | 处置 |
+| --- | --- | --- |
+| 清空通知渠道 | 四十四续只钉剩 webhook | 再删最后一路，空态文案出现；保存前 500 → toast，再保存 `[]` |
+
+#### 四十六续：复跑 L3 / L5，无新缺口
+
+四十五续之后，现有功能面的前端写路径与失败 toast 已钉完；本轮不再加用例。未纳入：易支付额外保存 500（第十一轮焦点时序 flake）；`CopyButton` 剪贴板失败；Playground 助手正文仍是纯文本；`screenshots.spec.ts` 视觉套件不在 interactions 配置里；第 3 节第 11 条订阅凭证合规边界（产品决策）；隐私 / 公告 / SMTP 单键 GET 失败仍按缺省空表单渲染。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）。
+
+#### 四十七续：复跑 L3 / L4，无新缺口
+
+与四十六续相同口径，不加用例。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，26.3s。
+
+#### 四十八续：复跑 L3 / L5，无新缺口
+
+与四十六续相同口径，不加用例。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）。
+
+#### 四十九续：复跑 L3 / L4，无新缺口
+
+与四十六续相同口径，不加用例。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，25.7s。
+
+#### 五十续：复跑 L3 / L5，无新缺口
+
+与四十六续相同口径，不加用例。L3 全量 **139 / 139**，1.3m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）。
+
+#### 五十一续：复跑 L3 / L4，无新缺口
+
+与四十六续相同口径，不加用例。L3 全量 **139 / 139**，1.4m（8 workers）。:8080 / :8081 空闲，L4 `smoke.spec` **10 / 10**，25.0s。
+
+#### 五十二续：复跑 L3 / L5，无新缺口
+
+与四十六续相同口径，不加用例。L3 全量 **139 / 139**，1.3m（8 workers）。:8080 / :8081 空闲，L5 `smoke-all.sh` 前端可达 + 数据面 fail-closed + 单机形态通过（root 已存在跳过 key 断言）。
+
+### 2026-09-16 第二十二轮：换"每个接口的准确性"这条轴——跨出口对账 + 全路由错误壳
+
+前两轮把**可达性**收口了（路由×方法机械对表，零覆盖归零）。这轮换一个判定口径重跑：
+不问"有没有用例打到"，问**"打到之后断言了什么"**。两条轴各自抓到东西。
+
+#### 轴一：同一笔账在多个出口是否报同一个数（`billing_surface_parity`，2 例）
+
+既有套件是按出口切的——`console_logs` 验日志、`console_stats` 验统计、`console_portal` 验门户、
+`pg_settlement` 验落库，每个都**自己造数据自己断言**。于是"同一笔账在两个出口对不上"这类缺陷
+谁都看不见：各自的用例都是绿的。
+
+新用例反过来走：打一笔真请求，把 `billing_records.amount_micro` 当唯一权威，要求其余出口逐个等于它。
+钉住五个**互相独立的写侧累加器**（不是同一份数据的不同视图，是五处各写各的）——
+`billing_records` / `billing_events` / `users.balance_micro` / Redis 热余额 / `api_keys.used_micro`——
+外加四个读出口（`/api/me/logs`、`/api/me/usage`、`/v1/dashboard/billing/usage`、`/admin/logs`）。
+第二例验退款后九处同步回冲。
+
+**变异验证**：往 `dashboard.rs` 注入 1 分偏差，两例精确报红（46 vs 45、0.01 vs 0.0），已还原。
+新增对账类用例都该这么验一次——用例自己绿不等于它抓得住漂移。
+
+口径注记：`ledger.credit` 只动 Redis（"PG 事件由调用方另记"），种子充值不进 `users.balance_micro`，
+故该列断言走**增量**而非绝对值；`/api/me/usage` 与 `/admin/logs` 由 CH 支撑，必须 drain + 轮询，
+且 `build_state` 要传 CH URL（传 None 会静默退化成 501 `stats_disabled`，对账就只剩 PG 半边）。
+
+#### 轴二：全路由错误壳（`route_error_envelope`，1 例覆盖 163 条路由×方法）
+
+用例**从源码现抽路由表**（解析 `.route("…", get(…))`），新增端点自动进覆盖，不会随迭代腐化——
+这是它存在的理由，不要改成硬编码清单。判定只钉不该退让的那条线：2xx/3xx 放行（按设计公开），
+4xx/5xx 必须有机器可读的分类标识，且匿名探测不得打到 5xx。三种方言壳都认
+（Okapi `error.code` 字符串 / Anthropic `error.type` / Gemini `error.code` 数字 + `status`）。
+
+**首跑 46 条不合规，根因只有一个**：axum 内置提取器的拒绝绕过 `AppError`，回 `text/plain` 英文句子。
+`extract.rs` 早就为 `Query<T>` 写过替身、理由白纸黑字（违反"后端错误只回 error_code"），
+但**另外两半从没做**：`Json<T>` 42 条、`Multipart` 3 条。
+
+比 i18n 更要紧的是顺序：**提取器跑在 handler 体之前，也就跑在 `guard()` 鉴权之前**。
+于是匿名调用方 POST 一个 `{}` 到任意管理面端点，就能把内部请求结构体的字段名逐个问出来
+（实测 `POST /admin/billing/refund` → `missing field \`request_id\``）。
+
+修法照 `Query` 的既有设计：`extract::Json` / `extract::Multipart` 两个替身，拒绝时回
+`{"error":{"code":"bad_request","param":"body"|"multipart"}}`，具体字段只进 debug 日志。
+54 个提取点机械换过去（返回位的 `axum::Json` 不动）。修完 163 / 163 全绿。
+
+通则：**新加 axum 内置提取器（`Form`、`TypedHeader` 等）前先确认它的 Rejection 走不走 `AppError`**；
+不走就照 `extract.rs` 补替身，否则等于在鉴权之前开了一个回英文的洞。
+
+### 2026-09-19 第二十三轮：把"越权"这条轴补完——两类探针都是机械扫全量
+
+第二十二轮的错误壳探针只探**匿名**，它有个盲区：没带 key 一律止步于 `authenticate`，
+所以**区分不出 handler 里到底有没有 `guard()`**——漏挂权限闸的端点在匿名探测下同样是 401，
+看着很安全。这轮补两类"带身份"的探针。
+
+#### 一：管理面权限闸（`route_error_envelope::every_admin_route_rejects_an_authenticated_but_unprivileged_user`）
+
+用**已登录但无权限**的普通用户（role=1、无 admin 角色）扫全部 `/admin/*`：能过 `authenticate`、
+必须倒在 `guard()`。判据是不得 2xx（越权）也不得 5xx（闸没拦住、打进业务逻辑才炸）。
+
+**95 条管理面路由全绿**——这是个阴性结论，但现在被钉住了：既有的
+`console_m2::permission_point_matrix` 验的是机制本身（角色→权限点→放行/拒绝），
+只在 `/admin/channels` 两个端点上验，哪条新路由忘了挂闸它照样绿。
+
+变异验证：摘掉 `margin.rs` 的一个 `guard`，探针精确点名 `GET /admin/margin-breaker → 200`。
+
+#### 二：门户归属校验（`portal_ownership`，IDOR 面）
+
+权限闸管的是"有没有权限进这个面"；门户是另一回事——**A 和 B 都有权用 `/api/me/keys/{id}`，
+问题是 A 能不能拿 B 的 id 去用**。这层权限闸无感，得逐个端点在 SQL 的 `WHERE user_id = $me` 上兜。
+
+既有套件里没有"拿别人的 id"这类用例：`console_portal` / `console_teams` 各自用自己的资源
+跑通正向流程，反向没人打。新用例覆盖 `console/mod.rs` 全部五条带 id 的门户路由
+（keys 的 PATCH/DELETE、sessions 的 DELETE、teams 的 members/keys/usage），全绿。
+
+用例内建**反向对照**（受害者删自己的 key 必须成功），防"端点整个坏了所以全拒"的假阳；
+变异验证：把 `delete_key` 的 `Some(key.user_id)` 改成 `None` 即红。
+
+#### 这轮顺带确认的阴性结论（不要重做）
+
+- 52 个 `*Query*` 结构体字段在用例语料里全部出现过，无"解析了但从没被测过"的参数。
+- `/admin/*` 静态扫 `guard` 调用不可靠（正则抽 handler 名会错配），**以运行时探针为准**。
+
+#### 通则
+
+新增"某类端点必须满足某性质"的机械探针时，配一次**变异验证**再合入：
+把被测性质在实现侧故意破坏一处，确认探针报红且点名准确。探针自己绿不等于它在探——
+本轮三个探针都按此验过（第二十二轮的跨出口对账同）。
+

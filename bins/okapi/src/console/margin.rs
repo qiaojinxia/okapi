@@ -3,6 +3,7 @@
 
 use super::admin::{audit, guard};
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use crate::margin::{self, BlockEntry, BlockState, BreakerConfig};
 use axum::Json;
@@ -75,7 +76,7 @@ pub struct LiftReq {
 pub async fn lift(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<LiftReq>,
+    ExtractJson(req): ExtractJson<LiftReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
     let group = req.group_code.trim();

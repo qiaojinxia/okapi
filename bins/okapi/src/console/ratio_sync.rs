@@ -6,6 +6,7 @@
 
 use super::admin::{audit, guard};
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -359,7 +360,7 @@ async fn fetch_one(
 pub async fn fetch(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<FetchReq>,
+    ExtractJson(req): ExtractJson<FetchReq>,
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
     if req.sources.is_empty() || req.sources.len() > MAX_SOURCES {
@@ -425,7 +426,7 @@ pub struct ApplyReq {
 pub async fn apply(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<ApplyReq>,
+    ExtractJson(req): ExtractJson<ApplyReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     if req.changes.is_empty() || req.changes.len() > 2000 {

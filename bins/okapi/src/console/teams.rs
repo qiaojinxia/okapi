@@ -4,6 +4,7 @@
 
 use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -61,7 +62,7 @@ pub struct CreateTeamReq {
 pub async fn create_team(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateTeamReq>,
+    ExtractJson(req): ExtractJson<CreateTeamReq>,
 ) -> Result<Json<Value>, AppError> {
     let creator = require_session(&state, &headers).await?;
     let name = req.name.trim();
@@ -180,7 +181,7 @@ pub async fn upsert_member(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(team_id): Path<i64>,
-    Json(req): Json<AddMemberReq>,
+    ExtractJson(req): ExtractJson<AddMemberReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = require_session(&state, &headers).await?;
     let role = member_role(&state, team_id, actor).await?;
@@ -227,7 +228,7 @@ pub async fn create_team_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(team_id): Path<i64>,
-    Json(req): Json<TeamKeyReq>,
+    ExtractJson(req): ExtractJson<TeamKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let member = require_session(&state, &headers).await?;
     if member_role(&state, team_id, member).await?.is_none() {

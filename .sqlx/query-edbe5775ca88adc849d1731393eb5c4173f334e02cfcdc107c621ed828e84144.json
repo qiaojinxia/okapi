@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(SUM(delta_micro), 0)::bigint AS \"d!\" FROM billing_events\n           WHERE request_id = $1 AND event_type = 'commit'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "d!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "edbe5775ca88adc849d1731393eb5c4173f334e02cfcdc107c621ed828e84144"
+}

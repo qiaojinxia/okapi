@@ -9,6 +9,7 @@
 
 use super::query::Query;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -85,7 +86,7 @@ pub struct IdsReq {
 pub async fn requeue_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<IdsReq>,
+    ExtractJson(req): ExtractJson<IdsReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = super::admin::guard(&state, &headers, permissions::BILLING_REFUND).await?;
     if req.ids.is_empty() {
@@ -107,7 +108,7 @@ pub async fn requeue_handler(
 pub async fn discard_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<IdsReq>,
+    ExtractJson(req): ExtractJson<IdsReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = super::admin::guard(&state, &headers, permissions::BILLING_REFUND).await?;
     if req.ids.is_empty() {

@@ -9,6 +9,7 @@
 
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{RawQuery, State};
@@ -106,7 +107,7 @@ pub struct TopupReq {
 pub async fn topup(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<TopupReq>,
+    ExtractJson(req): ExtractJson<TopupReq>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     if req.amount_micro < MIN_TOPUP_MICRO {

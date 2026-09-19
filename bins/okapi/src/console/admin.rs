@@ -4,6 +4,7 @@
 use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -224,7 +225,7 @@ async fn normalize_members(
 pub async fn create_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateChannelReq>,
+    ExtractJson(req): ExtractJson<CreateChannelReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, _) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     if !PROVIDERS.contains(&req.provider.as_str()) {
@@ -407,7 +408,7 @@ pub async fn set_channel_status(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<SetStatusReq>,
+    ExtractJson(req): ExtractJson<SetStatusReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     if !matches!(req.status, 1 | 2) {
@@ -441,7 +442,7 @@ pub async fn set_channel_pools(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<SetPoolsReq>,
+    ExtractJson(req): ExtractJson<SetPoolsReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
@@ -629,7 +630,7 @@ pub async fn update_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<PatchChannelReq>,
+    ExtractJson(req): ExtractJson<PatchChannelReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
@@ -766,7 +767,7 @@ pub async fn rotate_channel_credential(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<RotateCredentialReq>,
+    ExtractJson(req): ExtractJson<RotateCredentialReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
@@ -824,7 +825,7 @@ pub async fn update_channel_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path((id, key_id)): Path<(i64, i64)>,
-    Json(req): Json<PatchChannelKeyReq>,
+    ExtractJson(req): ExtractJson<PatchChannelKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
@@ -911,7 +912,7 @@ pub async fn patch_api_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<AdminPatchKeyReq>,
+    ExtractJson(req): ExtractJson<AdminPatchKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_MANAGE).await?;
     if let Some(status) = req.status
@@ -1024,7 +1025,7 @@ pub struct UpsertGroupReq {
 pub async fn upsert_group(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<UpsertGroupReq>,
+    ExtractJson(req): ExtractJson<UpsertGroupReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     if req.group_ratio.parse::<okapi_pricing::RatioFp>().is_err() {
@@ -1108,7 +1109,7 @@ pub struct UpsertPoolReq {
 pub async fn upsert_pool(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<UpsertPoolReq>,
+    ExtractJson(req): ExtractJson<UpsertPoolReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
     let strategy = req
@@ -1173,7 +1174,7 @@ pub async fn set_user_groups(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(user_id): Path<i64>,
-    Json(req): Json<UserGroupsReq>,
+    ExtractJson(req): ExtractJson<UserGroupsReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_MANAGE).await?;
     let groups: Vec<(String, i32)> = req
@@ -1204,7 +1205,7 @@ pub struct SetSettingReq {
 pub async fn set_setting(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<SetSettingReq>,
+    ExtractJson(req): ExtractJson<SetSettingReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
     okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.user_id).await?;
@@ -1250,7 +1251,7 @@ pub struct SmtpTestReq {
 pub async fn smtp_test(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<SmtpTestReq>,
+    ExtractJson(req): ExtractJson<SmtpTestReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
     let to = req.to.trim();
@@ -1439,7 +1440,7 @@ fn default_one() -> String {
 pub async fn upsert_model(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<UpsertModelReq>,
+    ExtractJson(req): ExtractJson<UpsertModelReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     // 倍率字面量校验（复用定价域解析器，非法值 400）
@@ -1639,7 +1640,7 @@ fn rule_params(req: &UpsertRuleReq) -> Result<Value, AppError> {
 pub async fn upsert_pricing_rule(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<UpsertRuleReq>,
+    ExtractJson(req): ExtractJson<UpsertRuleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     let params = rule_params(&req)?;
@@ -1779,7 +1780,7 @@ pub async fn set_user_multiplier(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(user_id): Path<i64>,
-    Json(req): Json<SetMultiplierReq>,
+    ExtractJson(req): ExtractJson<SetMultiplierReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     let raw = req.multiplier.trim();
@@ -1808,7 +1809,7 @@ pub async fn credit_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(user_id): Path<i64>,
-    Json(req): Json<CreditReq>,
+    ExtractJson(req): ExtractJson<CreditReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
     if req.amount_micro <= 0 {
@@ -1849,7 +1850,7 @@ pub async fn set_balance_expiry(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(user_id): Path<i64>,
-    Json(req): Json<BalanceExpiryReq>,
+    ExtractJson(req): ExtractJson<BalanceExpiryReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
     let updated = sqlx::query!(
@@ -1888,7 +1889,7 @@ pub struct CreateRoleReq {
 pub async fn create_role(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateRoleReq>,
+    ExtractJson(req): ExtractJson<CreateRoleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard_super_admin(&state, &headers).await?;
     let permissions = json!(req.permissions);
@@ -1926,7 +1927,7 @@ pub async fn assign_role(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(user_id): Path<i64>,
-    Json(req): Json<AssignRoleReq>,
+    ExtractJson(req): ExtractJson<AssignRoleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard_super_admin(&state, &headers).await?;
     if let Some(role) = req.role
@@ -2017,7 +2018,7 @@ pub async fn billing_record_lookup(
 pub async fn refund_by_request(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RefundReq>,
+    ExtractJson(req): ExtractJson<RefundReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::BILLING_REFUND).await?;
     let outcome = okapi_ledger::pg::admin_refund(
@@ -2390,7 +2391,7 @@ pub struct UpsertPlanReq {
 pub async fn upsert_plan(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<UpsertPlanReq>,
+    ExtractJson(req): ExtractJson<UpsertPlanReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
     if req.grant_micro <= 0 || req.plan_code.trim().is_empty() {
@@ -2488,7 +2489,7 @@ pub struct CreateRedemptionsReq {
 pub async fn create_redemptions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateRedemptionsReq>,
+    ExtractJson(req): ExtractJson<CreateRedemptionsReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
     if req.amount_micro <= 0 || req.count == 0 || req.count > 1000 {
@@ -2579,7 +2580,7 @@ fn ratio_literal(v: &Value) -> Option<String> {
 pub async fn import_newapi_pricing(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<ImportNewApiReq>,
+    ExtractJson(req): ExtractJson<ImportNewApiReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     let mut imported: i64 = 0;
@@ -3050,7 +3051,7 @@ fn parse_upstream_model_ids(parsed: &Value) -> Vec<String> {
 pub async fn cache_flush(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<FlushReq>,
+    ExtractJson(req): ExtractJson<FlushReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::CACHE_FLUSH).await?;
     match req.scope.as_str() {
@@ -3111,7 +3112,7 @@ const fn default_recon_limit() -> i64 {
 pub async fn repair_reconciliation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RepairReq>,
+    ExtractJson(req): ExtractJson<RepairReq>,
 ) -> Result<Json<Value>, AppError> {
     // 它会改余额，权限跟充值/扣减同一道闸——虽然改的方向是"改回账本说的数"
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;

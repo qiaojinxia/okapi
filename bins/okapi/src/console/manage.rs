@@ -12,6 +12,7 @@
 use super::admin::{audit, ensure_channel_owner, guard, guard_scoped, guard_super_admin};
 use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -146,7 +147,7 @@ pub struct BatchChannelReq {
 pub async fn batch_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<BatchChannelReq>,
+    ExtractJson(req): ExtractJson<BatchChannelReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     if scope != PermScope::All {
@@ -185,7 +186,7 @@ pub async fn duplicate_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<DuplicateReq>,
+    ExtractJson(req): ExtractJson<DuplicateReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
@@ -588,7 +589,7 @@ pub async fn toggle_rule(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(code): Path<String>,
-    Json(req): Json<RuleToggleReq>,
+    ExtractJson(req): ExtractJson<RuleToggleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     if !mutate::set_pricing_rule_enabled(&state.pg, &code, req.enabled).await? {
@@ -621,7 +622,7 @@ pub async fn manage_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<ManageUserReq>,
+    ExtractJson(req): ExtractJson<ManageUserReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_MANAGE).await?;
     let Some(action) = UserAction::parse(&req.action) else {

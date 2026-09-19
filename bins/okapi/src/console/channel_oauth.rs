@@ -7,6 +7,7 @@
 
 use super::admin::{audit, ensure_channel_owner, guard_scoped};
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -36,7 +37,7 @@ pub struct StartReq {
 pub async fn start(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<StartReq>,
+    ExtractJson(req): ExtractJson<StartReq>,
 ) -> Result<Json<Value>, AppError> {
     guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     if !is_oauth_provider(&req.provider) {
@@ -101,7 +102,7 @@ pub struct ExchangeReq {
 pub async fn exchange(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<ExchangeReq>,
+    ExtractJson(req): ExtractJson<ExchangeReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     let stored = state

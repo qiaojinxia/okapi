@@ -4,6 +4,7 @@
 //! 单用户模式（OKAPI_SINGLE_USER_MODE，§6.5）是另一条免注册路径，两者互不依赖。
 
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -31,7 +32,7 @@ pub struct SetupReq {
 /// POST /api/setup：创建超管（role=100）与首个 key。
 pub async fn run(
     State(state): State<AppState>,
-    Json(req): Json<SetupReq>,
+    ExtractJson(req): ExtractJson<SetupReq>,
 ) -> Result<Json<Value>, AppError> {
     let username = req.username.trim();
     if username.is_empty() || username.len() > 64 {

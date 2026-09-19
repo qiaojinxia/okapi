@@ -4,6 +4,7 @@
 //! Turnstile：settings.turnstile_secret 配置后校验注册 token，未配置跳过（缺省关）。
 
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -129,7 +130,7 @@ pub async fn register(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<RegisterReq>,
+    ExtractJson(req): ExtractJson<RegisterReq>,
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "register", 5).await?;
     let email = req.email.trim().to_lowercase();
@@ -248,7 +249,7 @@ pub async fn email_code(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<EmailCodeReq>,
+    ExtractJson(req): ExtractJson<EmailCodeReq>,
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "email_code", 3).await?;
     let email = req.email.trim().to_lowercase();
@@ -307,7 +308,7 @@ pub async fn password_forgot(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<ForgotReq>,
+    ExtractJson(req): ExtractJson<ForgotReq>,
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "password_forgot", 3).await?;
     let email = req.email.trim().to_lowercase();
@@ -359,7 +360,7 @@ pub async fn password_reset(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<ResetReq>,
+    ExtractJson(req): ExtractJson<ResetReq>,
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "password_reset", 10).await?;
     if req.password.len() < 8 {
@@ -486,7 +487,7 @@ pub async fn login(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<LoginReq>,
+    ExtractJson(req): ExtractJson<LoginReq>,
 ) -> Result<Response, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "login", 10).await?;
     let email = req.email.trim().to_lowercase();
@@ -546,7 +547,16 @@ pub(super) async fn open_web_session(
     sid
 }
 
-/// `settings.web_session_limit`（缺省 0 = 不限）。
+/// 未配置 `settings.web_session_limit` 时的同时在线会话数。
+///
+/// 此前缺省是 0（不限），于是没人配就永不淘汰：每次登录、每次清 cookie、每个
+/// 测试脚本都留下一条，安全页的"有效登录会话"能长到几十行——用户既认不出哪条
+/// 是自己的，也就不会去吊销可疑的那条，这张卡等于白做。活跃会话越多攻击面越大，
+/// 主流站点（GitHub / Google）都封顶并挤掉最早的，这里跟齐。
+const DEFAULT_WEB_SESSION_LIMIT: i64 = 10;
+
+/// `settings.web_session_limit`：未配置 = [`DEFAULT_WEB_SESSION_LIMIT`]，
+/// **显式配 0 仍是"不限"**——保留这个逃生口，但它得是站长主动选的。
 pub(super) async fn web_session_limit(state: &AppState) -> i64 {
     state
         .setting_cached("web_session_limit")
@@ -554,8 +564,8 @@ pub(super) async fn web_session_limit(state: &AppState) -> i64 {
         .as_ref()
         .as_ref()
         .and_then(serde_json::Value::as_i64)
-        .filter(|v| *v > 0)
-        .unwrap_or(0)
+        .filter(|v| *v >= 0)
+        .unwrap_or(DEFAULT_WEB_SESSION_LIMIT)
 }
 
 /// 会话 cookie（HttpOnly，7 天，与 `sess:web` TTL 对齐）。
@@ -639,7 +649,7 @@ pub async fn totp_confirm(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<TotpConfirmReq>,
+    ExtractJson(req): ExtractJson<TotpConfirmReq>,
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "totp", 10).await?;
     let user_id = require_session(&state, &headers).await?;
@@ -680,7 +690,7 @@ pub struct CreateKeyReq {
 pub async fn create_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateKeyReq>,
+    ExtractJson(req): ExtractJson<CreateKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let user_id = require_session(&state, &headers).await?;
     let token = format!("sk-okapi-{}", rand_token(43));

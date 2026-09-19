@@ -6,6 +6,7 @@
 
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -291,7 +292,7 @@ fn allowed(key: &AuthedKey, spec: &ToolSpec) -> bool {
 pub async fn endpoint(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<Value>,
+    ExtractJson(req): ExtractJson<Value>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let id = req.get("id").cloned().unwrap_or(Value::Null);

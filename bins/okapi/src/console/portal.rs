@@ -8,6 +8,7 @@
 use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -538,7 +539,7 @@ pub async fn redeem(
     State(state): State<AppState>,
     conn: crate::console::auth_web::MaybeConnectInfo,
     headers: HeaderMap,
-    Json(req): Json<RedeemReq>,
+    ExtractJson(req): ExtractJson<RedeemReq>,
 ) -> Result<Json<Value>, AppError> {
     // 兑换码爆破面：每 IP 限速（对齐 new-api rc.24 关键路由限流）
     crate::console::auth_web::critical_rate_guard(&state, &headers, conn.0.as_ref(), "redeem", 10)
@@ -865,7 +866,7 @@ pub async fn patch_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(req): Json<PatchKeyReq>,
+    ExtractJson(req): ExtractJson<PatchKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     if let Some(status) = req.status
