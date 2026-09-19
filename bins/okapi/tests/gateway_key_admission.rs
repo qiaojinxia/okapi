@@ -328,3 +328,50 @@ async fn model_allowlist_gates_per_key_and_applies_immediately() {
         assert_eq!(chat(&bed, &tok, m).await.0, 200, "解除后 {m} 应可用");
     }
 }
+
+/// 属主已封禁、但令牌自身是启用态时，`is_usable` 的 `user_status` 那一道必须拦住。
+///
+/// 由来：对鉴权域做穷举变异时，把 `is_usable` 里的 `self.user_status == 1 &&` 整个删掉，
+/// **全量 557 个用例一个都没红**。原因在上面那条封禁用例的语义——管理端 ban 是"一刀切"，
+/// 同时把名下 `api_keys.status` 也置 2，于是 `key_status` 那道闸先拦住了，
+/// `user_status` 在任何用例里都从不是决定性的那一道。
+///
+/// 可达路径：**ban 是一次性 UPDATE，封禁之后再建的令牌仍是 `status = 1`**。
+/// 新令牌的哈希不在鉴权缓存里，必走一次库，于是 `user_status` 成为唯一能拦住它的闸。
+/// （注意不能改用"直接改库停用属主"来验：那条路绕开管理端的缓存失效，
+/// 本就有 TTL 滞后，是设计而非缺陷——既有用例名里的 `without_ttl_lag` 说的就是这件事。）
+#[tokio::test]
+async fn banned_owner_blocks_keys_minted_after_the_ban() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+
+    let banned = client
+        .post(format!(
+            "http://{}/admin/users/{}/manage",
+            bed.console, bed.user_id
+        ))
+        .bearer_auth(&bed.super_token)
+        .json(&json!({ "action": "ban" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(banned.status(), 200);
+
+    // 封禁之后才建的令牌：ban 那步的一刀切没覆盖到它，自身仍是启用态
+    let (token, key_id) = new_key(&bed.pg, bed.user_id, "post-ban").await;
+    let key_status = sqlx::query_scalar!(
+        r#"SELECT status AS "s!" FROM api_keys WHERE id = $1"#,
+        key_id
+    )
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        key_status, 1,
+        "前提：这把令牌自身是启用态，否则验的还是 key_status 那道闸"
+    );
+
+    let (status, body) = chat(&bed, &token, &bed.model).await;
+    assert_eq!(status, 401, "属主已封禁，其名下新令牌也必须失效：{body}");
+    assert_eq!(body["error"]["code"], "key_disabled", "{body}");
+}
