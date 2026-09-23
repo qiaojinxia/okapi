@@ -220,10 +220,18 @@ async fn every_route_returns_a_well_formed_error_envelope_without_auth() {
                 ));
                 continue;
             };
-            if status >= 500 {
+            // 红线是"**未处理的**内部错误漏成门面"，不是"任何 5xx"。
+            // 501 Not Implemented 配一个具体的 i18n 码、壳也完好，是刻意的答复——
+            // 本部署没开这个可选集成（如 /pay/callback/* 在 settings 无配置时回
+            // payment_not_configured）。支付回调是 webhook，设计上就必须匿名可达，
+            // 把它判成缺陷是假阳性：这条用例曾因开发库里恰好有支付配置而长期绿，
+            // 换一个全新库立刻红——说明判据依赖了环境，不是依赖了语义。
+            // 真正该红的是 500，以及任何带 internal 码的 5xx。
+            let unhandled = status == 500 || code == "internal";
+            if status >= 500 && unhandled {
                 problems.push(format!(
-                    "{method} {path} → {status}（code={code}）：匿名探测打到 5xx，\
-                     说明内部错误被当门面回给了未鉴权调用方"
+                    "{method} {path} → {status}（code={code}）：匿名探测打到未处理的内部错误，\
+                     被当门面回给了未鉴权调用方"
                 ));
             }
         }

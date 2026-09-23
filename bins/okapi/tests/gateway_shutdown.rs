@@ -16,6 +16,38 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// 子进程守卫：用例无论在哪一步 panic，都把 gateway 子进程杀掉并回收。
+///
+/// `std::process::Child` 在 drop 时**不会**杀子进程。此前只要 SIGTERM 之前任一断言
+/// 失败（最常见的是负载高时 `wait_healthy` 30s 超时），服务进程就成了孤儿，并且一直
+/// 攥着继承来的 stderr——通过管道收集输出的调用方（CI、脚本里的 `$(cargo test …)`）
+/// 会因为等不到 EOF 而**永久挂死**，而不是报一个失败。实测留下过一个孤儿跑了 20 小时。
+///
+/// 残余风险：测试进程本身被 SIGKILL（如 CI 超时强杀）时 Drop 不会执行；
+/// macOS 没有 `PR_SET_PDEATHSIG`，这一条不在用例层面兜。
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // 已正常退出时 kill 返回错误，忽略即可
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl std::ops::Deref for KillOnDrop {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for KillOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 const CHUNKS: usize = 8;
 const CHUNK_GAP: Duration = Duration::from_millis(200);
 
@@ -201,6 +233,7 @@ async fn sigterm_drains_in_flight_stream_settles_and_exits_cleanly() {
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
+        .map(KillOnDrop)
         .expect("启动 okapi gateway 子进程");
     wait_healthy(addr).await;
 

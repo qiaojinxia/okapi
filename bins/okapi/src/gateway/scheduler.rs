@@ -220,23 +220,45 @@ mod tests {
     /// 无样本的 key 按本层中位数参与：既不抢占全部流量，也不被永久饿死。
     #[test]
     fn unsampled_key_joins_at_median() {
+        // 判据要钉死的是"**中位数**"，不是"某个来自样本的值"。
+        // 旧版只喂两个样本 {50,500} 并断言相对位置，把 fallback 换成**最小值**
+        // 照样绿（并列时输入序决定胜负，恰好还是原来的相对位置）——变异测试实测活了下来。
+        // 取最小和取 0 一样坏：无样本的新渠道会排到本层最快渠道的位置，
+        // 抢在已验证的好渠道前面拿流量。
+        //
+        // 并列时的胜负由输入序定，而"杀掉取最小"与"杀掉取最大"需要相反的输入序，
+        // 一次排序做不到，故分两个子 case。样本 {10,100,1000}，中位数 = 100。
         let mut lat = HashMap::new();
-        lat.insert(1, 50_u32);
-        lat.insert(2, 500);
-        // key 3 无样本 → 取中位数（50 与 500 排序后取 index 1 = 500）
-        let ordered = order_candidates_by_latency(
+        lat.insert(10, 10_u32);
+        lat.insert(100, 100);
+        lat.insert(1000, 1000);
+        let others = || {
             vec![
-                cand_with_key(1, 0),
-                cand_with_key(2, 0),
-                cand_with_key(3, 0),
-            ],
-            &lat,
-        );
-        let pos = |k: i64| ordered.iter().position(|c| c.channel_key_id == k).unwrap();
-        assert!(pos(1) < pos(3), "有样本的快 key 应排在无样本 key 之前");
+                cand_with_key(10, 0),
+                cand_with_key(100, 0),
+                cand_with_key(1000, 0),
+            ]
+        };
+        let pos_in = |ordered: &[ChannelCandidate], k: i64| {
+            ordered.iter().position(|c| c.channel_key_id == k).unwrap()
+        };
+
+        // A：无样本者排在输入最前。取最小 → 它会并列到最快那个之前，被下面第一条断言杀掉。
+        let mut a = vec![cand_with_key(7, 0)];
+        a.extend(others());
+        let a = order_candidates_by_latency(a, &lat);
         assert!(
-            pos(3) <= pos(2) + 1,
-            "无样本 key 不该被推到队尾之后（它按中位数参与）"
+            pos_in(&a, 10) < pos_in(&a, 7),
+            "无样本 key 不得排到本层最快 key 之前（取最小或取 0 都会这样）"
+        );
+
+        // B：无样本者排在输入最后。取最大 → 它会并列到最慢那个之后，被下面第二条断言杀掉。
+        let mut b = others();
+        b.push(cand_with_key(7, 0));
+        let b = order_candidates_by_latency(b, &lat);
+        assert!(
+            pos_in(&b, 7) < pos_in(&b, 1000),
+            "无样本 key 不得排到本层最慢 key 之后（取最大会这样，等于永远排不上）"
         );
     }
 

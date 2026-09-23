@@ -202,6 +202,48 @@ async fn commit_and_refund_are_idempotent_in_any_order() {
     );
 }
 
+/// 并发键在请求途中过期后再结算，计数不得被减成负数。
+///
+/// `conc:` 键的 TTL 是 3600s，长流式、视频任务、realtime 会话都可能跨过它。
+/// commit / refund 释放槽位前都有一道 `GET > 0 才 DECR` 的守卫；没有它，
+/// 对已过期（不存在）的键 DECR 会凭空建出 `-1`。负数的后果是**限额绕过**：
+/// 下一次 reserve 判 `conc + 1 > conc_cap` 看到的是 0，这把 key 平白多出一个槽，
+/// 反复几次，并发上限就被悄悄抬高了。
+///
+/// 上一条用例里那句"并发槽不会被重复释放成负数"**走不到这道守卫**——
+/// 第二次 commit 在 `NO_RESERVATION` 处就提前返回了。守卫真正起作用的场景是
+/// "预扣还在、并发键已经没了"，变异测试实测把守卫改成无条件 DECR 后全量无一变红。
+#[tokio::test]
+async fn settling_after_conc_key_expired_does_not_go_negative() {
+    let bed = Bed::new().await;
+    bed.ledger
+        .credit(bed.uid, Money::from_micros(5_000))
+        .await
+        .unwrap();
+    let conc_key = format!("conc:{{{}}}:k:{KID}", bed.uid);
+
+    for path in ["commit", "refund"] {
+        let rid = Uuid::new_v4();
+        reserved_balance(&bed.reserve(rid, 1_000).await);
+        assert_eq!(bed.conc(KID).await, 1, "{path}：预扣应占一个槽");
+
+        // 模拟 TTL 到期：预扣字段还在，并发键没了
+        let _: i64 = bed.redis.del(&conc_key).await.unwrap();
+        assert_eq!(bed.conc(KID).await, 0);
+
+        if path == "commit" {
+            committed(&bed.commit(rid, 400).await);
+        } else {
+            bed.ledger.refund(bed.uid, KID, rid).await.unwrap();
+        }
+        assert_eq!(
+            bed.conc(KID).await,
+            0,
+            "{path}：并发键过期后结算把计数减成了负数——下一次 reserve 会多放一个并发"
+        );
+    }
+}
+
 /// 钱包 fail-closed：`avail == est` 放行、`avail < est` 拒绝；拒绝路径零写入
 /// （无预扣字段、不占并发槽、不进限速计数）。
 #[tokio::test]
