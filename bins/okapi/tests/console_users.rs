@@ -7,6 +7,15 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+/// 本文件的用例串行执行。
+///
+/// `auth_flush()` 是**全局**清空：并行用例里任何一次清空（改角色、改分组、改倍率……）都会
+/// 顺带冲掉别的用例刚写进缓存的快照，于是"改完没刷缓存"这类回归会被掩盖——守护它的用例
+/// 随调度时序时灵时不灵。变异测试实测：删掉 `assign_role` 里的 `auth_flush()`，默认并行跑
+/// SURVIVED，单独跑、单线程跑都 CAUGHT。每个用例开头先拿这把锁。
+static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -126,6 +135,7 @@ async fn bind_role(env: &Env, user_id: i64, role: i64, admin_role_id: Option<i64
 /// 列表可按用户名精确检索；普通用户无 user.manage 一律 403。
 #[tokio::test]
 async fn user_list_search_and_rbac() {
+    let _serial = SERIAL.lock().await;
     let env = setup().await;
 
     let (status, _) = req(&env, "GET", "/admin/users", &env.user_token, None).await;
@@ -158,6 +168,7 @@ async fn user_list_search_and_rbac() {
 /// 无 user.assist 权限 403。
 #[tokio::test]
 async fn user_usage_degrades_without_ch_and_shows_ledger() {
+    let _serial = SERIAL.lock().await;
     let env = setup().await;
     for (kind, delta, actor) in [
         ("recharge", 5_000_000_i64, "system:payment"),
@@ -196,6 +207,7 @@ async fn user_usage_degrades_without_ch_and_shows_ledger() {
 /// 角色：创建自定义角色 → 出现在列表 → 分配给用户后列表回显绑定。
 #[tokio::test]
 async fn custom_role_create_list_and_assign() {
+    let _serial = SERIAL.lock().await;
     let env = setup().await;
     let code = format!("r-{}", Uuid::new_v4().simple());
 
@@ -296,6 +308,7 @@ async fn custom_role_create_list_and_assign() {
 /// 外键，于是"活人计数"过闸、`DELETE FROM admin_roles` 撞外键 500，角色从此永远删不掉。
 #[tokio::test]
 async fn role_delete_guards_live_bindings_and_ignores_deleted_users() {
+    let _serial = SERIAL.lock().await;
     let env = setup().await;
     let code = format!("rd-{}", Uuid::new_v4().simple());
     // 给角色配上 role.manage，用来验证"有这个权限点也删不了"
@@ -404,6 +417,7 @@ async fn role_delete_guards_live_bindings_and_ignores_deleted_users() {
 /// worker 扫得到、认得出、到点真清零。
 #[tokio::test]
 async fn balance_expiry_endpoint_feeds_the_worker_sweep() {
+    let _serial = SERIAL.lock().await;
     let env = setup().await;
     let set_expiry = async |token: &str, user: i64, at: Value| {
         req(
@@ -509,4 +523,133 @@ async fn balance_expiry_endpoint_feeds_the_worker_sweep() {
         audited[2].detail.clone().unwrap_or(Value::Null)["expires_at"].is_null(),
         "取消那次 detail 应为 null"
     );
+}
+
+/// 建一个"只绑了某个自定义角色"的新管理员，返回 (user_id, token)。
+///
+/// 绑定发生在这个 token **第一次被使用之前**，鉴权缓存里还没有它的旧快照——
+/// 于是用它测到的只是权限本身，不会和"改完是否刷缓存"那条规则纠缠在一起。
+async fn scoped_admin(env: &Env, tag: &str, permissions: &[&str]) -> (i64, String) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let uid = okapi_store::provision::create_user(&env.pg, &format!("sa-{tag}-{suffix}"))
+        .await
+        .unwrap();
+    let token = format!("sk-okapi-sa-{tag}-{suffix}");
+    okapi_store::provision::create_api_key(&env.pg, uid, &hash(&token), "sk-sa")
+        .await
+        .unwrap();
+    let role = mk_role(env, &format!("sa_{tag}_{}", &suffix[..8]), permissions).await;
+    bind_role(env, uid, 10, Some(role)).await;
+    (uid, token)
+}
+
+/// 自定义管理员只能做它权限点里写明的写操作。
+///
+/// RBAC 横切扫描（`route_error_envelope`）只证明"完全没有管理权限的用户会被拒"，
+/// 它发现不了**用错了权限点**：变异测试把 `set_user_groups` 的 `user.manage` 换成
+/// `user.read`、把 `set_user_multiplier` 的 `pricing.write` 换成 `user.manage`，
+/// 全量都没有一个用例变红——前者等于只读权限能执行写操作，后者等于只有用户管理权的人
+/// 能改别人的价目表（倍率是计价链上的一个乘数）。每条都带正向对照，确保 403 来自权限而不是别的。
+#[tokio::test]
+async fn scoped_admins_cannot_write_beyond_their_permissions() {
+    let _serial = SERIAL.lock().await;
+    let env = setup().await;
+    let target = env.user_id;
+    let groups_path = format!("/admin/users/{target}/groups");
+    let mult_path = format!("/admin/users/{target}/multiplier");
+    let empty_groups = serde_json::json!({ "groups": [] });
+    let mult = serde_json::json!({ "multiplier": "1" });
+
+    // 只读：能看、不能改分组
+    let (_, reader) = scoped_admin(&env, "read", &["user.read"]).await;
+    let (status, _) = req(&env, "GET", "/admin/users", &reader, None).await;
+    assert_eq!(
+        status, 200,
+        "user.read 应能列用户（确认这把 token 确实是管理员）"
+    );
+    let (status, body) = req(
+        &env,
+        "POST",
+        &groups_path,
+        &reader,
+        Some(empty_groups.clone()),
+    )
+    .await;
+    assert_eq!(status, 403, "只有 user.read 却改动了用户分组：{body}");
+
+    // 用户管理：能改分组、不能改倍率
+    let (_, manager) = scoped_admin(&env, "manage", &["user.manage"]).await;
+    let (status, body) = req(&env, "POST", &groups_path, &manager, Some(empty_groups)).await;
+    assert_eq!(status, 200, "user.manage 应能改分组（正向对照）：{body}");
+    let (status, body) = req(&env, "POST", &mult_path, &manager, Some(mult.clone())).await;
+    assert_eq!(status, 403, "只有 user.manage 却改动了计价倍率：{body}");
+
+    // 计价写：能改倍率（正向对照）
+    let (_, pricer) = scoped_admin(&env, "pricing", &["pricing.write"]).await;
+    let (status, body) = req(&env, "POST", &mult_path, &pricer, Some(mult)).await;
+    assert_eq!(status, 200, "pricing.write 应能改倍率（正向对照）：{body}");
+}
+
+/// 降权必须立刻生效，不能等鉴权缓存过期。
+///
+/// `assign_role` 写完库后调 `auth_flush()`；变异测试把这一行删掉，全量没有一个用例变红。
+/// 后果是安全上的：超管把一个可疑管理员降为普通用户，对方在缓存过期前仍然握着旧权限。
+/// 这里先用对方的 token 访问一次管理面，**让它的管理员快照进缓存**，再降权、立刻重访。
+#[tokio::test]
+async fn demotion_takes_effect_without_waiting_for_the_auth_cache() {
+    let _serial = SERIAL.lock().await;
+    let env = setup().await;
+    let (uid, token) = scoped_admin(&env, "demote", &["user.read"]).await;
+
+    let (status, _) = req(&env, "GET", "/admin/users", &token, None).await;
+    assert_eq!(
+        status, 200,
+        "降权前应能访问（这一次顺带把管理员快照写进缓存）"
+    );
+
+    bind_role(&env, uid, 1, None).await;
+    let (status, body) = req(&env, "GET", "/admin/users", &token, None).await;
+    assert_eq!(
+        status, 403,
+        "降为普通用户后仍能访问管理面——鉴权缓存没有随改角色刷新：{body}"
+    );
+}
+
+/// 角色只能是 1（用户）/ 10（管理员）/ 100（超管）。
+///
+/// 变异测试删掉取值白名单，全量无一变红。后端的角色判断全是阈值式（`>= 100` / `>= 10`），
+/// 越界值会落进最近的档位（999 等同超管、50 等同管理员）——只有超管能改角色，所以这不是提权；
+/// 白名单守的是"库里的角色值始终是文档约定的三个之一"，按精确值展示或统计的地方才不会冒出未知角色。
+#[tokio::test]
+async fn role_outside_the_whitelist_is_rejected() {
+    let _serial = SERIAL.lock().await;
+    let env = setup().await;
+    let path = format!("/admin/users/{}/role", env.user_id);
+    for bad in [0, 2, 50, 99, 101, 999, -1] {
+        let (status, body) = req(
+            &env,
+            "POST",
+            &path,
+            &env.super_token,
+            Some(serde_json::json!({ "role": bad })),
+        )
+        .await;
+        assert_eq!(status, 400, "role={bad} 应被拒：{body}");
+        assert_eq!(
+            body["error"]["param"], "role",
+            "role={bad} 的错误应指向 role 字段：{body}"
+        );
+    }
+    let stored = sqlx::query_scalar!(
+        // 与 manage.rs 那句逐字相同，复用 .sqlx 里已有的离线缓存（CI 以 SQLX_OFFLINE=true 编译）
+        r#"SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL"#,
+        env.user_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(stored, 1, "被拒的写入不得落库");
+
+    // 正向对照：白名单内的值照常生效
+    bind_role(&env, env.user_id, 10, None).await;
 }

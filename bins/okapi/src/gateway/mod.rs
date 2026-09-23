@@ -216,7 +216,9 @@ pub fn spawn_epoch_subscriber(state: AppState) {
     });
 }
 
-fn spawn_epoch_poller(state: AppState) {
+/// 30s 自校验轮询：广播丢失时的兜底（DESIGN §3.3）。gateway 与 console 两个角色都要起——
+/// console 也是多副本，只订阅广播的话，未配 NATS 时价簿停在启动那一刻，丢一条广播也再追不上。
+pub fn spawn_epoch_poller(state: AppState) {
     // detach 说明：与进程同生命周期的兜底轮询
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(30));

@@ -1632,3 +1632,101 @@ Cursor、各家 SDK）发现可用模型时第一个调用的接口。归属要�
 - console 写入面 8 条：超管守卫、角色取值、三处改完必刷的鉴权缓存、倍率范围，以及两条
   **权限错配**——RBAC 横切 sweep 只证明"完全没权限的用户会被拒"，`PRICING_WRITE` 错写成
   `USER_MANAGE` 它发现不了。
+
+### 2026-09-23 第三十二轮：console 写入面与 Anthropic 转换逐条变异；三个用户侧 500，以及守护缓存刷新的用例在并行下失灵
+
+两批规则级变异，均在独立 worktree 上、对已提交的树跑（第三十一轮第 7 条）。
+
+#### 结果
+
+| 批次 | 规则点 | 初判 | 复核后 |
+| --- | --- | --- | --- |
+| `openai_to_anthropic` | 17 | 13 CAUGHT（专属用例当场），2 SURVIVED，2 CAUGHT(全量) | **4 条真缺口**，已补 |
+| console 写入面 | 8 | 3 CAUGHT，5 SURVIVED | **5 条真缺口**，已补 |
+
+#### 两个 CAUGHT(全量) 都是假的
+
+`max_tokens → length` 与 `cache_write = cache_creation` 被记成全量里抓住，抓手却是
+`channel_batch_and_user_actions`、`invalid_key_*`、`videos_create_poll_download_bills_per_seconds`——
+与停止原因、缓存计量毫不相干。按第三十一轮第 2 条复跑：变异后跑全量、跳过这三条，**零失败**。
+所以两条在本轮之前都是真缺口，其中 `cache_write_tokens` 直接对着钱：它为 0 时 Claude 的缓存写入
+按普通 prompt 计价（计价引擎有单独的 cache_write 轴）。既有用例断言了 `cached_tokens`，偏偏漏了它。
+
+这批里按规矩复核了两条，**两条都是假 CAUGHT、底下藏着真缺口**。
+
+顺带记下三条随执行顺序抖动的用例（单独跑全绿，全量里偶发红，本轮未修）：
+`console_manage::channel_batch_and_user_actions`、
+`gateway_invalid_key_rate::{invalid_key_trips_per_ip_limit, invalid_key_limit_is_per_ip}`
+（限流按 IP 计数，全体用例都来自 127.0.0.1，前序用例留在窗口里的计数会让它提前跳闸）、
+`gateway_videos::videos_create_poll_download_bills_per_seconds`。
+
+#### `openai_to_anthropic` 补上的四条
+
+`max_completion_tokens` 优先于 `max_tokens`（新版 SDK 两个都带、取值不同时取错）；
+`refusal → content_filter`（映射成 `stop` 等于把拒答伪装成正常结束）；`max_tokens → length`；
+`cache_write_tokens = cache_creation`。停止原因改成全表断言，四条变异均精确报红。
+
+#### console 写入面：权限错配是 RBAC 横切扫描的盲区
+
+5 条 SURVIVED：改角色后刷缓存、改分组后刷缓存、角色取值白名单，以及两条**权限错配**——
+`set_user_multiplier` 的 `pricing.write` 换成 `user.manage`、`set_user_groups` 的 `user.manage`
+换成 `user.read`（后者等于只读权限能执行写操作）。`route_error_envelope` 的 RBAC 扫描只证明
+"完全没有管理权限的人会被拒"，**用错了权限点它看不见**。补 `scoped_admins_cannot_write_beyond_their_permissions`：
+造只带单个权限点的管理员，每条都带正向对照，确认 403 来自权限而不是别的。
+
+写权限用例时有个耦合要避开：若"先绑 A、测、再改绑 B、测"，改绑那一步本身就依赖刚才 SURVIVED 的
+缓存刷新，两条规则会缠在一起。改为每个场景一个新用户，绑定发生在它的 token 第一次被使用之前。
+
+角色白名单那条，注释里我起初写了"其它按 `== 10` 分支的地方不认越界值"，核实后是错的：
+后端的角色判断全是阈值式（`>= 100` / `>= 10`），越界值会落进最近的档位，且只有超管能改角色，
+**不构成提权**。白名单守的是库里的值始终是文档约定的三个之一。已改正注释。
+
+#### 写用例时撞出三个用户侧 500（均已修）
+
+分组那条用例第一版在**未变异代码上就红**，第二笔请求回 500。又是第三十轮那个坑——我直接往库里
+插了分组，绕开了"发布"，网关价簿不认识它。但这次追下去，同一个坏状态**纯走 API 也到得了**：
+
+1. **把用户放进未发布的分组**：建分组 200、分配 200，之后该用户**每笔请求都回 500**
+   （`UnknownGroup` 按设计 fail-closed），直到有人发布定价。价簿从实时表加载，epoch 只是
+   "该重载了"的信号，所以分组写进表不等于进了价簿。现在写入时回 400 `group_not_published`。
+2. **放进不存在的分组**：撞 `user_groups` 外键回 500。现在回 400 `group_code`。
+3. **给不存在的用户设分组**：撞 `user_id` 外键回 500。现在回 404，与改角色 / 改倍率一致
+   （查询与 `manage.rs` 那句逐字相同，复用已有 `.sqlx` 缓存条目，不必重新生成）。
+
+第 1 条的校验要查"本进程当前价簿"，这又牵出一个缺陷：**console 角色只订阅 NATS 广播，没有
+gateway 那个 30s 轮询兜底**，未配 NATS 时 console 的价簿停在启动那一刻（MCP 健康工具报的
+`pricebook_epoch` 也是旧的）。若直接拿它校验，刚发布的分组会被误拒。两处处理：写入前先按需
+`refresh_pricebook_if_newer`（一条 `SELECT MAX(epoch)`），落后只会误拒、不会放进坏状态；
+console 角色补上轮询，与 DESIGN §3.3 和 console 注释里"多副本答案要一致"的意图对齐。
+
+#### 守护缓存刷新的用例，在默认并行下时灵时不灵
+
+降权用例补上后，变异 `cw_role_flush` 仍 SURVIVED。单独跑、`--test-threads=1` 跑都 CAUGHT。
+原因：`auth_flush()` 是**全局**清空，同一二进制里并行的其他用例每次改角色 / 分组 / 倍率都会触发它，
+恰好把"降权后没刷缓存"冲掉。CI 用的正是默认并行——删掉刷新的回归可能照样过 CI。
+倍率、分组两条同样受影响，只是验证那一轮时序凑巧。`console_users`、`console_pricing_write`
+两个文件的用例改为拿同一把静态 `tokio::sync::Mutex` 串行执行（`std` 的锁跨 await 持有会被
+clippy `await_holding_lock` 以 `-D warnings` 拦下）。
+
+#### 加锁后的验证（默认并行模式，对最终代码）
+
+| 变异 / 撤回 | 结果 | 抓手 |
+| --- | --- | --- |
+| 角色取值白名单 | CAUGHT | `role_outside_the_whitelist_is_rejected` |
+| 改角色后刷缓存 | **3/3 CAUGHT**（加锁前 SURVIVED） | `demotion_takes_effect_without_waiting_for_the_auth_cache` |
+| 改分组后刷缓存 | CAUGHT | `group_assignment_is_validated_and_billed_immediately` |
+| 改倍率后刷缓存 | CAUGHT | `user_multiplier_is_writable_and_billed` |
+| 倍率需 pricing.write / 分组需 user.manage | CAUGHT | `scoped_admins_cannot_write_beyond_their_permissions` |
+| 撤回"未发布分组拒绝" / "不存在分组 400" / "按需追 epoch" / "不存在用户 404" | 均 CAUGHT | `group_assignment_is_validated_and_billed_immediately` |
+
+#### 方法学增量
+
+1. **守护"副作用必须发生"的用例，要证明它在默认并行下也能抓住变异。** 单独跑能抓住不够；
+   共享的全局副作用（缓存清空、限流计数）会被并行用例互相掩盖。
+2. **"未变异代码上就红"这次指向了真缺陷。** 第三十轮它指向的是我的前提错误；这次前提也错了
+   （直接改库），但把路径换成 API 之后，坏状态依然到得了——所以换路径重试是必要的一步，
+   不能停在"是我写错了"。
+3. **提交闸必须以 `SQLX_OFFLINE=true` 跑。** CI 是离线编译的，本地连实库编译会把"缺 `.sqlx` 缓存"
+   整个掩盖掉。本轮离线一跑，测试里新写的两条 `query!` 都没有缓存——推上去 CI 必挂。一条改成
+   与既有缓存逐字相同的查询文本，一条（仅测试用）改成运行期检查的 `query_scalar`。
+   第三十一轮那次提交闸是连实库跑的，当时恰好没新增查询才没出事——闸的步骤本身不完整。

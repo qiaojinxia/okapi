@@ -70,6 +70,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // console 也是多副本，各有各的缓存：管理员在 A 上改的配置，B 也得立刻弃用旧值，
     // 否则同一个后台在两个副本上会给出不一样的答案。定价与路由两条广播都要订。
     gateway::spawn_epoch_subscriber(state.clone());
+    gateway::spawn_epoch_poller(state.clone());
     gateway::spawn_routing_invalidate_subscriber(state.clone());
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.console_bind).await?;

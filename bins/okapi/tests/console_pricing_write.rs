@@ -19,6 +19,15 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+/// 本文件的用例串行执行。
+///
+/// `auth_flush()` 是**全局**清空：并行用例里任何一次清空（改角色、改分组、改倍率……）都会
+/// 顺带冲掉别的用例刚写进缓存的快照，于是"改完没刷缓存"这类回归会被掩盖——守护它的用例
+/// 随调度时序时灵时不灵。变异测试实测：删掉 `assign_role` 里的 `auth_flush()`，默认并行跑
+/// SURVIVED，单独跑、单线程跑都 CAUGHT。每个用例开头先拿这把锁。
+static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// 固定 usage，便于反算：1000 prompt + 200 completion。
 async fn mock_ok(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
@@ -181,6 +190,7 @@ async fn settlements(pg: &PgPool, user_id: i64, n: usize) -> Vec<(i64, Value, Op
 /// 用户个人系数：写得进去、进快照、参与连乘、改完立刻生效（鉴权缓存要刷）。
 #[tokio::test]
 async fn user_multiplier_is_writable_and_billed() {
+    let _serial = SERIAL.lock().await;
     let bed = setup().await;
     let client = reqwest::Client::new();
     let url = format!(
@@ -238,6 +248,7 @@ async fn user_multiplier_is_writable_and_billed() {
 /// 阶梯计价：写得进去、切得回来、非法表在写入这一步就拦下（而不是等编译价簿时炸）。
 #[tokio::test]
 async fn tiered_pricing_is_writable_and_billed() {
+    let _serial = SERIAL.lock().await;
     let bed = setup().await;
     let client = reqwest::Client::new();
     let url = format!("http://{}/admin/models", bed.console);
@@ -318,6 +329,7 @@ async fn tiered_pricing_is_writable_and_billed() {
 /// 「一次请求 + 立即复原」，且改的是缺省缺失的键——跑完即删，不留状态。
 #[tokio::test]
 async fn record_ip_log_switch_suppresses_client_ip() {
+    let _serial = SERIAL.lock().await;
     let bed = setup().await;
 
     // 缺省（键不存在）= 记录
@@ -374,4 +386,110 @@ async fn record_ip_log_switch_suppresses_client_ip() {
         payload_ip.is_none(),
         "outbox 载荷（→ CH）同样不得带 IP，实际 {payload_ip:?}"
     );
+}
+
+/// 改用户分组：写入前校验、写入后立刻按新分组计价。
+///
+/// 四件事此前都没被钉住，前三件都会回 500：
+/// - 分组写进 `price_groups` 要等发布才进价簿。放进一个**未发布**的分组，写入照样 200，
+///   而该用户之后每笔请求都撞 `UnknownGroup`（fail-closed 回 500），直到有人发布——
+///   现在写入这一步就回 400 `group_not_published`，用户不受影响；
+/// - 放进**不存在**的分组撞 `user_groups` 外键，被当成内部错误回 500——现在回 400 `group_code`；
+/// - 给**不存在**的用户设分组撞 `user_id` 外键回 500——现在回 404，与改角色 / 改倍率一致；
+/// - 生效分组随 `AuthedKey` 缓存，写完调 `auth_flush()`；变异测试删掉这一行全量无一变红。
+///
+/// 发布后**不显式刷新价簿**就去改分组：`set_user_groups` 自己会按需追最新 epoch——
+/// 未配 NATS 的 console 靠这一步才不会把刚发布的分组误拒。
+/// 新分组沿用当前生效分组的渠道池，两笔请求路由相同、只有倍率不同。
+#[tokio::test]
+async fn group_assignment_is_validated_and_billed_immediately() {
+    let _serial = SERIAL.lock().await;
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let post = |path: String, body: Value| {
+        let client = client.clone();
+        let url = format!("http://{}{path}", bed.console);
+        let token = bed.admin_token.clone();
+        async move {
+            let r = client
+                .post(url)
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            let status = r.status().as_u16();
+            (status, r.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+    let groups_path = format!("/admin/users/{}/groups", bed.user_id);
+
+    // 基线：默认分组 → (1000 + 200) × $2/1M = 2400 micro
+    assert_eq!(chat(&bed).await, 200);
+    assert_eq!(settlements(&bed.pg, bed.user_id, 1).await[0].0, 2400);
+
+    let group = format!("cpwg{}", &Uuid::new_v4().simple().to_string()[..10]);
+    // 运行期检查的查询：只在本用例里用，不值得为它进 .sqlx 离线缓存（CI 以 SQLX_OFFLINE=true 编译）
+    let pool: String = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT pool_code FROM price_groups WHERE is_default LIMIT 1), 'default')",
+    )
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    let (status, body) = post(
+        "/admin/groups".to_owned(),
+        json!({"group_code": group, "group_ratio": "0.5", "pool_code": pool}),
+    )
+    .await;
+    assert_eq!(status, 200, "建分组应成功：{body}");
+
+    // 未发布：拒绝，且用户照常按旧分组计价
+    let (status, body) = post(
+        groups_path.clone(),
+        json!({"groups": [{"group_code": group, "priority": 10}]}),
+    )
+    .await;
+    assert_eq!(status, 400, "未发布的分组不得分配给用户：{body}");
+    assert_eq!(body["error"]["param"], "group_not_published", "{body}");
+    assert_eq!(chat(&bed).await, 200, "被拒的分配不得影响用户的请求");
+
+    // 不存在：拒绝（而不是撞外键回 500）
+    let (status, body) = post(
+        groups_path.clone(),
+        json!({"groups": [{"group_code": "no-such-group-cpw", "priority": 1}]}),
+    )
+    .await;
+    assert_eq!(status, 400, "不存在的分组应 400 而不是 500：{body}");
+    assert_eq!(body["error"]["param"], "group_code", "{body}");
+
+    // 发布后分配：不显式刷新价簿，由写入端按需追 epoch
+    let (status, body) = post("/admin/pricing/publish".to_owned(), json!({})).await;
+    assert_eq!(status, 200, "发布应成功：{body}");
+    let (status, body) = post(
+        groups_path,
+        json!({"groups": [{"group_code": group, "priority": 10}]}),
+    )
+    .await;
+    assert_eq!(status, 200, "已发布的分组应能分配：{body}");
+
+    // 不存在的用户：404，与改角色 / 改倍率一致——此前非空分组会撞 user_id 外键回 500
+    let (status, body) = post(
+        "/admin/users/999999999/groups".to_owned(),
+        json!({"groups": [{"group_code": group, "priority": 10}]}),
+    )
+    .await;
+    assert_eq!(status, 404, "不存在的用户应 404 而不是 500：{body}");
+
+    // 下一笔立刻按新分组计价
+    assert_eq!(chat(&bed).await, 200);
+    let three = settlements(&bed.pg, bed.user_id, 3).await;
+    let amounts: Vec<i64> = three.iter().map(|r| r.0).collect();
+    assert_eq!(
+        amounts,
+        vec![1200, 2400, 2400],
+        "改分组后的下一笔应按新组倍率 0.5 计价——鉴权缓存没有随改分组刷新"
+    );
+    let (_, snap, _) = &three[0];
+    assert_eq!(snap["group"], group.as_str(), "生效分组进快照，账单可解释");
+    assert_eq!(snap["group_ratio"], 0.5);
 }

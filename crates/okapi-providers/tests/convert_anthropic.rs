@@ -142,6 +142,9 @@ fn response_maps_text_tools_and_cache_usage() {
     let probe = usage.unwrap();
     assert_eq!(probe.prompt_tokens, 950);
     assert_eq!(probe.prompt_tokens_details.cached_tokens, 800);
+    // 缓存写入单独计价（cache_write 轴）：探针里这一项若丢成 0，
+    // Claude 的缓存写入就按普通 prompt 计。此前只断言了 cached_tokens。
+    assert_eq!(probe.prompt_tokens_details.cache_write_tokens, 50);
 }
 
 fn ev(event: &str, data: &Value) -> Result<AnthropicEvent, okapi_providers::UpstreamError> {
@@ -311,4 +314,49 @@ fn stream_error_event_maps_to_stream_error() {
     ));
     assert_eq!(outs.len(), 1);
     assert!(outs[0].is_err());
+}
+
+/// 客户端同时带 `max_completion_tokens` 与 `max_tokens` 时以前者为准。
+///
+/// OpenAI 新版 SDK 用 `max_completion_tokens`（`max_tokens` 已标弃用），有的客户端两个都带、
+/// 取值还不同。变异测试把两者的优先级对调，全量无一变红。
+#[test]
+fn request_prefers_max_completion_tokens_over_max_tokens() {
+    let msgs = json!([{"role": "user", "content": "hi"}]);
+    let both = convert_req(&json!({
+        "max_completion_tokens": 300, "max_tokens": 50, "messages": msgs
+    }));
+    assert_eq!(
+        both["max_tokens"], 300,
+        "两个都带时应取 max_completion_tokens"
+    );
+    let legacy = convert_req(&json!({"max_tokens": 50, "messages": msgs}));
+    assert_eq!(legacy["max_tokens"], 50);
+    let neither = convert_req(&json!({"messages": msgs}));
+    assert_eq!(neither["max_tokens"], 4096, "都没带时用渠道配置的缺省值");
+}
+
+/// Anthropic `stop_reason` → OpenAI `finish_reason` 全表。
+///
+/// 此前只有 `tool_use` 一项被直接断言。`refusal → content_filter` 改坏后全量无一变红——
+/// 客户端靠 `content_filter` 判断"模型拒答"，映射成 `stop` 就把拒答伪装成了正常结束。
+#[test]
+fn response_stop_reason_table() {
+    let finish = |stop: Value| {
+        let body = json!({
+            "id": "m", "type": "message", "role": "assistant", "model": "claude-x",
+            "content": [{"type": "text", "text": "x"}],
+            "stop_reason": stop,
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let (out, _) =
+            response_anthropic_to_openai(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        serde_json::from_slice::<Value>(&out).unwrap()["choices"][0]["finish_reason"].clone()
+    };
+    assert_eq!(finish(json!("max_tokens")), "length");
+    assert_eq!(finish(json!("tool_use")), "tool_calls");
+    assert_eq!(finish(json!("refusal")), "content_filter");
+    assert_eq!(finish(json!("end_turn")), "stop");
+    assert_eq!(finish(json!("stop_sequence")), "stop");
+    assert_eq!(finish(Value::Null), "stop");
 }

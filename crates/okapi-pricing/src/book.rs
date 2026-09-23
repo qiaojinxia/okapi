@@ -273,6 +273,16 @@ impl PriceBook {
         self.models.contains_key(model)
     }
 
+    /// 本价簿是否认识该分组。
+    ///
+    /// 分组写进 `price_groups` 后要等下一次发布才进价簿；把用户放进一个价簿还不认识的分组，
+    /// 他的每笔请求都会在 `resolve` 处撞 `UnknownGroup`（fail-closed 回 500）。管理端写入前
+    /// 用它先问一句，把这类配置错误拦在写入这一步。
+    #[must_use]
+    pub fn has_group(&self, group: &GroupCode) -> bool {
+        self.groups.contains_key(group)
+    }
+
     /// 是否存在启用的 volume 规则（gateway 据此决定是否读 `tok:{uid}:<yyyymm>`）。
     #[must_use]
     pub const fn has_volume_rules(&self) -> bool {

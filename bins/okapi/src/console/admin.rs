@@ -1182,6 +1182,38 @@ pub async fn set_user_groups(
         .iter()
         .map(|g| (g.group_code.clone(), g.priority))
         .collect();
+    // 用户不存在（或已软删）→ 404，与改角色 / 改倍率一致；否则非空分组会撞 user_id 外键回 500。
+    // 查询文本与 manage.rs 同一句逐字相同，复用 .sqlx 里已有的离线缓存条目。
+    let live = sqlx::query_scalar!(
+        r#"SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL"#,
+        user_id
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    if live.is_none() {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+    }
+    // 两道写入前校验，把配置错误拦在这一步，而不是让它变成用户侧的 500：
+    // 1) 分组必须存在——否则撞 user_groups 外键，被当成内部错误回 500；
+    // 2) 分组必须已进价簿——分组写进 price_groups 要等下一次发布才进价簿，把用户放进价簿
+    //    还不认识的分组，他之后的每笔请求都会在计价处撞 UnknownGroup（fail-closed 回 500），
+    //    直到有人发布。校验前先追一次最新 epoch：本进程价簿可能落后（console 只订阅广播、
+    //    未配 NATS 时从不刷新），落后只会造成误拒，不会放进坏状态。
+    if !groups.is_empty() {
+        if let Err(err) = crate::gateway::refresh_pricebook_if_newer(&state).await {
+            tracing::warn!(error = %err, "改分组前刷新价簿失败，按当前价簿校验");
+        }
+        let book = state.pricebook.load();
+        for (code, _) in &groups {
+            if !okapi_store::admin::price_group_exists(&state.pg, code).await? {
+                return Err(AppError::bad_request().with_param("group_code"));
+            }
+            if !book.has_group(&okapi_domain::GroupCode::from(code.as_str())) {
+                return Err(AppError::bad_request().with_param("group_not_published"));
+            }
+        }
+    }
     okapi_store::admin::set_user_groups(&state.pg, user_id, &groups).await?;
     state.sched.auth_flush().await;
     audit(
