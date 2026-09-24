@@ -335,11 +335,17 @@ pub fn usage_from_anthropic(usage: Option<&Value>) -> UsageProbe {
 }
 
 fn usage_json(u: UsageProbe) -> Value {
+    let mut details = json!({"cached_tokens": u.prompt_tokens_details.cached_tokens});
+    // 缓存写入单独计价（cache_write 轴）。带出去，下游网关（串联部署）才能按它计费；
+    // 字段名与 UsageProbe 的反序列化一致。仅非零时出现，无缓存写入时响应形状不变。
+    if u.prompt_tokens_details.cache_write_tokens > 0 {
+        details["cache_write_tokens"] = json!(u.prompt_tokens_details.cache_write_tokens);
+    }
     json!({
         "prompt_tokens": u.prompt_tokens,
         "completion_tokens": u.completion_tokens,
         "total_tokens": u.prompt_tokens + u.completion_tokens,
-        "prompt_tokens_details": {"cached_tokens": u.prompt_tokens_details.cached_tokens},
+        "prompt_tokens_details": details,
     })
 }
 

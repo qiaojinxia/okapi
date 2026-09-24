@@ -233,3 +233,78 @@ fn stream_empty_then_done_still_emits_skeleton() {
         vec!["message_start", "message_delta", "message_stop"]
     );
 }
+
+/// `tool_choice` 全表。Anthropic 有四个取值：auto / any / tool / none。
+///
+/// 此前 `none` 落进兜底分支被当成 auto：客户端明确要求"不许调工具"，上游拿到的却是工具列表 +
+/// 缺省 auto，模型照样可能去调。OpenAI 同样支持 `tool_choice: "none"`，原样映射过去。
+#[test]
+fn tool_choice_maps_all_four_values() {
+    let with_choice = |choice: Value| {
+        convert_req(&json!({
+            "model": "claude-x", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+            "tool_choice": choice
+        }))["tool_choice"]
+            .clone()
+    };
+    assert_eq!(
+        with_choice(json!({"type": "none"})),
+        "none",
+        "none 不得被当成 auto"
+    );
+    assert_eq!(with_choice(json!({"type": "any"})), "required");
+    assert_eq!(
+        with_choice(json!({"type": "tool", "name": "get_weather"})),
+        json!({"type": "function", "function": {"name": "get_weather"}})
+    );
+    // auto 是 OpenAI 的缺省，不带即可
+    assert_eq!(with_choice(json!({"type": "auto"})), Value::Null);
+}
+
+/// 两跳往返：Anthropic usage → `openai_to_anthropic` 转成 OpenAI 形状 → `anthropic_to_openai`
+/// 再转回 Anthropic 形状，四个数必须原样还原，第二跳的计费探针也必须带着缓存写入。
+///
+/// 场景是网关串网关（Okapi 前面再挂一层 Okapi / 同类网关，上游走 OpenAI 兼容协议）。
+/// 此前两处各丢一半：OpenAI 形状的 usage 只带 `cached_tokens`、不带缓存写入；
+/// 转回 Anthropic 时 `cache_creation_input_tokens` 又写死为 0。结果是缓存写入被并进
+/// `input_tokens`——下游那一跳把它按普通 prompt 计费（计价引擎有单独的 cache_write 轴），
+/// Claude Code 按分项单价估算的成本也随之偏低。
+#[test]
+fn usage_round_trips_through_two_hops() {
+    use okapi_providers::convert::openai_to_anthropic::response_anthropic_to_openai;
+
+    let original = json!({
+        "input_tokens": 100,
+        "cache_read_input_tokens": 800,
+        "cache_creation_input_tokens": 50,
+        "output_tokens": 20
+    });
+    let anthropic_msg = json!({
+        "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-x",
+        "content": [{"type": "text", "text": "ok"}],
+        "stop_reason": "end_turn",
+        "usage": original
+    });
+
+    // 第一跳：Anthropic 上游 → OpenAI 形状
+    let (openai_body, _) =
+        response_anthropic_to_openai(&Bytes::from(serde_json::to_vec(&anthropic_msg).unwrap()))
+            .unwrap();
+    // 第二跳：OpenAI 形状 → Anthropic 形状（这一跳自己的计费探针也从这里来）
+    let (back, probe) = response_openai_to_anthropic(&openai_body).unwrap();
+    let back: Value = serde_json::from_slice(&back).unwrap();
+
+    assert_eq!(back["usage"], original, "两跳之后 usage 必须原样还原");
+    let probe = probe.unwrap();
+    assert_eq!(
+        probe.prompt_tokens, 950,
+        "prompt = input + cache_read + cache_creation"
+    );
+    assert_eq!(probe.prompt_tokens_details.cached_tokens, 800);
+    assert_eq!(
+        probe.prompt_tokens_details.cache_write_tokens, 50,
+        "第二跳的计费探针丢了缓存写入，会按普通 prompt 计价"
+    );
+}

@@ -1730,3 +1730,42 @@ clippy `await_holding_lock` 以 `-D warnings` 拦下）。
    整个掩盖掉。本轮离线一跑，测试里新写的两条 `query!` 都没有缓存——推上去 CI 必挂。一条改成
    与既有缓存逐字相同的查询文本，一条（仅测试用）改成运行期检查的 `query_scalar`。
    第三十一轮那次提交闸是连实库跑的，当时恰好没新增查询才没出事——闸的步骤本身不完整。
+
+### 2026-09-24 第三十三轮（进行中）：Anthropic 入口转换逐条变异；读代码发现两处并已修
+
+`anthropic_to_openai` 是 Anthropic 方言客户端（Claude Code 走 `/v1/messages`）打 OpenAI 兼容上游的那一侧，
+客户端统计页里编程 agent 是主力调用方，所以排在剩余转换器之前。
+
+#### 读代码时发现、已修复并钉住的两处
+
+1. **`tool_choice: {"type": "none"}` 被当成 auto。** Anthropic 的 `tool_choice` 有四个取值
+   （官方文档原文："`none` prevents Claude from using any tools"），`none` 却落进了兜底分支——
+   客户端明确要求不许调工具，上游拿到的是工具列表 + 缺省 auto。现映射为 OpenAI 的 `"none"`；
+   补 `tool_choice_maps_all_four_values`（四个取值全表）。
+2. **缓存写入在两跳链路上丢失，两边各丢一半。** `openai_to_anthropic` 输出 OpenAI 形状的 usage 时
+   只带 `cached_tokens`；`anthropic_to_openai` 转回 Anthropic 形状时 `cache_creation_input_tokens`
+   写死为 0。网关串网关（前面再挂一层 Okapi / 同类网关、上游走 OpenAI 兼容协议）时，缓存写入被并进
+   `input_tokens`：下游那一跳按普通 prompt 计费（计价引擎有单独的 cache_write 轴），Claude Code 按分项
+   单价估的成本也偏低。补 `usage_round_trips_through_two_hops`：Anthropic usage 过两跳后四个数原样还原、
+   第二跳的计费探针带着缓存写入。修复前精确变红（`input_tokens` 150 / `cache_creation` 0，原值 100 / 50）；
+   分别撤回三处修复，均被精确抓住——往返恒等对两边的半截缺陷各自独立都能抓住。
+
+#### 规则级变异结果（对修复前的 `fde0c77`）
+
+| 结果 | 条数 | 明细 |
+| --- | --- | --- |
+| 专属用例当场抓住 | 13 | |
+| **SURVIVED（全量确认）** | **6** | url 图片透传、temperature 透传、`input_schema → parameters`、`length → max_tokens`、`content_filter → refusal`、cached 夹到 prompt 以内（防 u32 下溢） |
+| CAUGHT(全量)，抓手与转换层无关 | 3 | 多段 system 以空行拼接（`sigterm_drains…`）、tool 结果多段拼接（`portal_charts…`）、tool 转指名调用（`group_rph_caps_hourly` 等） |
+| 未测 | 1 | base64 图片转 data URI（见下） |
+
+**待办（下一步）**：给 6 条 SURVIVED 补用例；按第三十一轮第 2 条复跑那 3 条可疑 CAUGHT；补跑未测的那条。
+
+#### 方法学：清单的规则名不能含空格
+
+"base64图转data URI" 里的空格让清单按空白切分时整行错位：文件名被当成 "URI"，靶串名成了"路径 + 靶串名"，
+`sweep.sh` 找不到 `.old` 文件，转去走"脚本式变异"又找不到脚本，最后记成 `SKIP 脚本未注入`——**原因写错了，
+而且是静默的**。应当在读清单时校验字段数，错位直接报错中止，而不是落到一个貌似合理的 SKIP 上。
+
+另记：本轮全量升级已跳过第三十二轮登记的三条抖动用例，但仍出现了三条抓手无关的 CAUGHT(全量)，
+其中 `group_rph_caps_hourly` 等是按时间窗计数的分组限流用例——抖动用例的名单还没列全。

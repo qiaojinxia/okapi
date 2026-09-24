@@ -1,7 +1,8 @@
 //! Anthropic 协议客户端 → OpenAI(兼容) 上游：
 //! 请求 Anthropic→OpenAI；响应与事件流 OpenAI→Anthropic（原生事件形状）。
-//! usage 口径（与 openai_to_anthropic 互逆）：Anthropic 的 input_tokens 不含缓存，
-//! 故 input = prompt - cached，cache_read = cached；计费探针仍用 OpenAI 口径。
+//! usage 口径（与 openai_to_anthropic 互逆）：Anthropic 的 input_tokens 不含缓存读写，
+//! 故 input = prompt - cached - cache_write，cache_read = cached，cache_creation = cache_write；
+//! 计费探针仍用 OpenAI 口径。
 
 use crate::error::UpstreamError;
 use crate::types::ChatEvent;
@@ -219,6 +220,11 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
                 );
             }
         }
+        // none = 不许调工具（Anthropic 四个取值之一）。此前落进兜底被当成 auto，
+        // 上游拿到工具列表 + 缺省 auto，模型照样可能去调。
+        Some("none") => {
+            out.insert("tool_choice".into(), json!("none"));
+        }
         _ => {} // auto 缺省
     }
 }
@@ -302,10 +308,17 @@ fn map_finish_reason(finish: Option<&str>) -> &'static str {
 /// OpenAI 口径探针 → Anthropic usage JSON（input 不含缓存）。
 fn anthropic_usage_json(u: UsageProbe) -> Value {
     let cached = u.prompt_tokens_details.cached_tokens.min(u.prompt_tokens);
+    // 缓存读写都不计入 Anthropic 的 input_tokens——与 openai_to_anthropic::usage_from_anthropic 互逆。
+    // 此前 cache_creation 写死为 0，缓存写入被并进 input：客户端按分项单价估的成本偏低，
+    // 网关串联时下一跳也拿不到它。
+    let written = u
+        .prompt_tokens_details
+        .cache_write_tokens
+        .min(u.prompt_tokens - cached);
     json!({
-        "input_tokens": u.prompt_tokens - cached,
+        "input_tokens": u.prompt_tokens - cached - written,
         "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": 0,
+        "cache_creation_input_tokens": written,
         "output_tokens": u.completion_tokens,
     })
 }
