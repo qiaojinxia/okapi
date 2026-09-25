@@ -1938,7 +1938,8 @@ CI 不带 `--no-fail-fast`，第一个失败的测试二进制之后的都没跑
 - **提交闸改为在上述 CI 复现环境里跑**（`.verify/ci_emulate.sh`：拒绝在含 `.env` 的 worktree 上运行）。
   此前所有轮次的闸都带着 `.env`——这一类"本地有、CI 没有"的依赖此前一直查不出来。
 - 顺带：CI 的 `deny` job 至少从 09-19 起一直红，与测试无关。本机 `cargo deny check` 的结论是
-  `rustls 0.23.43` 命中 RUSTSEC-2026-0285（需 ≥ 0.23.45）；单独处理。
+  `rustls 0.23.43` 命中 RUSTSEC-2026-0285（09-14 发布，需 ≥ 0.23.45）。已随后单独修复：`cargo update -p rustls`
+  升到 0.23.45，`cargo deny --all-features check`（CI 的缺省口径）四项全过。
 
 #### 剩余
 
