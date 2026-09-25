@@ -69,7 +69,7 @@
 | `videos.rs` | 提交 / 轮询 / 下载，per_call × seconds，任务隔离 | A B C D | `gateway_videos`（跨用户隔离、上游失败退款） | — |
 | `realtime.rs` | WS 桥接、连接租约、断开结算 | A B C D | `gateway_realtime`（断开计费、零输出全退、第五连接拒绝、子协议鉴权） | 不走渠道 `proxy_url`（backlog） |
 | `custom_pass.rs` | `/pass/{channel_id}/*` 白名单透传 | A B C | `gateway_custom_pass` | — |
-| `models.rs` | `/v1/models`、`/v1beta/models` | A | `gateway_gemini_ingress::models_list_is_gemini_shaped`、`console_channel_test` | `/v1/models` 无鉴权、列出全部启用模型（目录与公开价格页同为公开信息，`public_pricing_no_auth`）；按 key / 分组过滤属特性待定，非缺口 |
+| `models.rs` | `/v1/models`、`/v1beta/models` | A | `gateway_models_list::lists_enabled_models_and_hides_disabled_ones`（09-24 第三十五轮）、`gateway_gemini_ingress::models_list_is_gemini_shaped`、`console_channel_test` | `/v1/models` 无鉴权、列出全部启用模型（目录与公开价格页同为公开信息，`public_pricing_no_auth`）；按 key / 分组过滤属特性待定，非缺口 |
 | `dashboard.rs` | new-api 兼容余额端点 | A | `gateway_compat::dashboard_billing_compat` | — |
 | `pricing_loader.rs` / `bootstrap.rs` / `state.rs` | PriceBook L1、epoch 订阅热更、`build_state` | A D | `console_m2::pricing_publish_hot_reload_e2e`、`worker_m2::pricebook_hot_reloads_on_new_epoch`、`worker_nats::epoch_broadcast_hot_reload`、`console_ops::cache_flush_pricebook_hotfix`；`gateway_first_epoch`（09-06 第十轮，分支 `settle-backlog`，临时空库：空 `pricing_epochs` 读作 0，首次发布 epoch 1 判得出"更新"） | — |
 | 结算积压上界（`state.rs::check_settle_backlog` / `settle_write`） | 排队 + 在写 PG 的结算数超过 `OKAPI_SETTLE_BACKLOG_MAX`（缺省 20000，0 不设限）→ 数据面鉴权前 503 `overloaded`，不预扣不碰上游；回落到 3/4 以下恢复（滞回）；进出各一条 WARN，TraceLayer 不给 503 刷 ERROR | B D G | `gateway_backlog`（09-06 第十轮，分支 `settle-backlog`：占满 `settle_gate` 后第三笔 503、param = 积压数、余额与预扣分文未动、上游未被打到；放开闸后积压归零、三笔全部落账、余额吻合；0 = 不设限）；release loadgen 复测见第 4 节第十轮 | 单进程口径；多副本各自计数（与 `settle_gate` 同为 per-pod） |
@@ -1862,3 +1862,88 @@ clippy `await_holding_lock` 以 `-D warnings` 拦下）。
 
 - 25 个只回 `{"ok":true}` 的写接口：内容探针不适用，要换一种判据验"写进去的对不对"。
 - `/v1/models`：随并行会话的 `gateway_compat.rs` 提交关闭。
+
+### 2026-09-24 第三十五轮：只回 `ok` 的 25 个写接口改验副作用；166 个接口全部有着落；提交闸改为按 CI 环境跑
+
+上一轮的内容探针对这 25 个接口不适用——回执只有 `{"ok":true}`，换掉它什么也证明不了，它们的准确性在
+"写进去的对不对"。本轮换判据验副作用，并把上一轮余下的另外 4 个接口逐个落实。途中发现上一轮的提交
+让 CI 的 `check` 变红，查清原因后改了提交闸本身。
+
+#### 判据：副作用变异
+
+每个接口至少一条变异：handler **照常回 `{"ok":true}`**，但跳过它该做的那件事——删除不删、状态不写、
+缓存不清、会话不删、重置令牌不存、测试邮件不发、支付回调不入账……`POST /admin/cache/flush` 的三个作用域
+各一条，共 27 条。判定口径同前几轮：基线绿闸、编不过记 SKIP 不记 SURVIVED、已知抖动用例从抓手名单剔除
+另列旁注。24 条 CAUGHT 逐条核对过：每条至少有一个抓手所在的文件确实调用了被变异的接口。
+
+#### 结果：24 条抓住，3 条存活
+
+| 变异 | 结果 |
+| --- | --- |
+| 其余 23 个接口各一条，加 `cache/flush` 的 `pricebook` 作用域 | 24 条 CAUGHT：原有用例已验副作用 |
+| `DELETE /admin/channels/{id}` 跳过软删除 | **SURVIVED**：删掉的渠道照样接流量，没有用例察觉 |
+| `POST /admin/cache/flush` 的 `auth` 分支改成空操作 | **SURVIVED** |
+| `POST /admin/cache/flush` 的 `routing` 分支改成空操作 | **SURVIVED**：三个作用域只有 `pricebook` 有用例 |
+
+补两条用例（`console_channel_writes.rs`）：
+
+- `deleted_channel_stops_serving_immediately`：先请求一次灌热候选缓存 → 删渠道 → 下一次请求立刻
+  `no_available_channel`，库里 `deleted_at` 已置。另加一条变异"软删了、但不清路由缓存"，同样被它抓住：
+  缓存热着，旧候选在 5 秒 TTL 内还会被选中。
+- `cache_flush_scopes_take_effect`：绕过控制台直接改库（换渠道 key 的凭据；把 API key 置停用），
+  **先断言缓存还在出旧值**，再刷对应作用域，断言下一次请求立刻用上新值（上游收到新凭据；停用的 key 401）。
+  前提断言不能省：没有它，"刷完生效"也可能只是缓存本来就冷或恰好过期，测不到刷缓存本身。
+- 复核：原先存活的 3 条加上"删渠道不清缓存"共 4 条，全部被新用例精确抓住；未变异代码上全绿。
+- 该文件串行执行。理由要说准：路由候选缓存是每个 state 各一份（测试不连 NATS，不跨实例广播），并行
+  互不影响；真正全局的是 Redis 里的鉴权缓存——任何一次 `auth_flush()` 都会让上面的前提断言误红，
+  也会替"刷 auth 什么都不做"的回归把活干了。起初写的理由是"删渠道、改凭据也清全局路由缓存"，不成立，已改。
+
+#### 上一轮余下的 4 个接口
+
+- **`GET /v1/models`**：并行会话的同目的用例一直未提交，本轮另补独立的 `gateway_models_list.rs`：
+  OpenAI 列表形状、启用的模型在列、停用的不在。探针打在该接口上红在 `object`（`Null` ≠ `"list"`），
+  打在 `/v1beta/models` 上仍绿（排除误伤）；把 `list_active_models` 的 `status = 1` 放宽为 `IN (1, 2)`，
+  红在"停用的模型不得出现"。两边合入后保留其一即可。
+- **`GET /auth/oauth/{provider}`**（302 起跳）：`console_oauth.rs` 断言 302、Location 含 `client_id` 与
+  `/oauth/authorize`，并取出 `state` 交给回调——state 不对回调就过不去，起跳的内容因此被端到端用上。
+- **`GET /auth/oauth/{provider}/callback`**：断言 302、`Set-Cookie` 发出会话、第三方身份绑定的展示名为
+  `octocat`，再带这个 cookie 访问需登录的接口。
+- **`/v1/realtime`**（101 升级）：`gateway_realtime`（断开计费、零输出全退、第五连接拒绝、子协议鉴权）
+  与第二十七轮的 `billing_surface_parity` 跨出口对账。
+
+#### 166 个接口的最终账
+
+| 状态 | 数量 |
+| --- | --- |
+| 返回内容端到端核对（第三十四轮：原有 114 + 改判 3 + 补 20） | 137 |
+| 返回内容端到端核对（本轮补 `/v1/models`） | 1 |
+| 只回 `ok` 的写接口，副作用由原有用例验过 | 23 |
+| 只回 `ok` 的写接口，副作用本轮补用例后验过（删渠道、刷缓存） | 2 |
+| 3xx / 101，内容探针不适用，替代覆盖已逐条核对 | 3 |
+| **合计** | **166** |
+
+#### 方法学事故：上一轮的提交让 CI 的 `check` 变红，本地闸看不见
+
+`f6efcd1` 推上去后 CI 的测试步骤失败（`5a137d9` 上还是绿的）。原因：`rotated_credential_…` 从环境变量读
+`OKAPI_MASTER_KEY`。本机 `.env` 里有它，CI 的 `env` 里没有；没有主密钥时改凭据按设计明文落库，用例红在
+"必须加密落库"那一行。本地提交闸是在 worktree 里 source 了 `.env` 跑的，所以看不见。
+
+CI 不带 `--no-fail-fast`，第一个失败的测试二进制之后的都没跑，后面可能还藏着别的。故在本机按 CI 原样
+复现：用 CI 的三个同款镜像起全新的临时容器（空库、空 Redis、空 ClickHouse，和开发库隔离），`env -i`
+清空环境后只给 CI 设的那几个变量，worktree 里不放 `.env`，`cargo test --workspace --no-fail-fast`。
+118 个测试二进制，**只有这一处失败**，与 CI 的失败对上。
+
+- 修法照已有惯例（`channel_credential`、`console_auth_web`）：固定的测试主密钥直接放进 state，读回用同一把，
+  不读环境变量。
+- **提交闸改为在上述 CI 复现环境里跑**（`.verify/ci_emulate.sh`：拒绝在含 `.env` 的 worktree 上运行）。
+  此前所有轮次的闸都带着 `.env`——这一类"本地有、CI 没有"的依赖此前一直查不出来。
+- 顺带：CI 的 `deny` job 至少从 09-19 起一直红，与测试无关。本机 `cargo deny check` 的结论是
+  `rustls 0.23.43` 命中 RUSTSEC-2026-0285（需 ≥ 0.23.45）；单独处理。
+
+#### 剩余
+
+- 副作用变异每个接口一到三条，只证明"最主要的那件事有人验"，不证明所有副作用都有人验
+  （例如审计日志：27 条变异里没有一条是"不记审计"）。
+- 两条缓存用例的判定依赖"前提断言 → 刷缓存 → 复查"在 TTL 内完成（候选缓存 5 秒、鉴权缓存 60 秒）；
+  超过 TTL，"刷缓存什么都不做"的回归会被自然过期掩盖。这只会让变异漏网，不会让用例误红。
+- `/v1/models` 带 Bearer 时是否按 key 的模型白名单过滤（见第三十四轮前的备注）：产品待定。
