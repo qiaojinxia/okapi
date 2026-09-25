@@ -1125,3 +1125,92 @@ async fn plan_validation() {
         .await;
     assert_eq!(ok.status(), 200);
 }
+
+/// 管理端订阅三件套的回执与一致性。
+///
+/// 逐接口端到端探针把 `POST /admin/plans`、`GET/DELETE /admin/users/{id}/subscription`
+/// 的响应体换成错误内容，此前没有任何用例察觉——后两个在用例里根本没被调用过：
+/// 建套餐回的 `plan_id` 必须就是库里那一行；管理端查某用户的订阅，必须与该用户自己在门户
+/// 看到的逐字相同（两边同一函数出数，视图里没有随时间变化的字段）；取消的回执要带着被取消的
+/// 那条订阅；取消后两边都看不到活动订阅；没有活动订阅时再取消回 404。
+#[tokio::test]
+async fn admin_subscription_views_agree_with_portal_and_cancel_reports_what_ended() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let code = format!("adm-{}", bed.suffix);
+
+    let resp = bed
+        .upsert_plan(bed.sub_plan(&code, 5_000_000, 0, false))
+        .await;
+    let status = resp.status();
+    let created: Value = resp.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, 200, "{created}");
+    let stored: i64 = sqlx::query_scalar("SELECT id FROM plans WHERE plan_code = $1")
+        .bind(&code)
+        .fetch_one(&bed.pg)
+        .await
+        .unwrap();
+    assert_eq!(
+        created["plan_id"], stored,
+        "回执里的 plan_id 应是库里那一行"
+    );
+
+    let admin_url = format!(
+        "http://{}/admin/users/{}/subscription",
+        bed.console, bed.user_id
+    );
+    let admin_view = || {
+        let client = client.clone();
+        let url = admin_url.clone();
+        let token = bed.admin_token.clone();
+        async move {
+            let r = client.get(url).bearer_auth(token).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            r.json::<Value>().await.unwrap()
+        }
+    };
+
+    assert!(
+        admin_view().await["subscription"].is_null(),
+        "授予前没有活动订阅"
+    );
+    assert_eq!(bed.admin_grant(&code).await.status(), 200);
+    let admin = admin_view().await;
+    assert_eq!(admin["subscription"]["plan_code"], code, "{admin}");
+    assert_eq!(
+        admin,
+        bed.mine().await,
+        "管理端看到的订阅必须与用户自己在门户看到的一致"
+    );
+    let sub_id = admin["subscription"]["id"].as_i64().expect("订阅应带 id");
+
+    let cancelled = client
+        .delete(&admin_url)
+        .bearer_auth(&bed.admin_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status(), 200);
+    let receipt: Value = cancelled.json().await.unwrap();
+    assert_eq!(receipt["ok"], true, "{receipt}");
+    assert_eq!(
+        receipt["subscription"]["id"], sub_id,
+        "回执应带被取消的那条订阅"
+    );
+    assert_eq!(receipt["subscription"]["plan_code"], code);
+
+    let after = admin_view().await;
+    assert!(
+        after["subscription"].is_null(),
+        "取消后不应再有活动订阅：{after}"
+    );
+    assert_eq!(after, bed.mine().await, "取消后两边仍须一致");
+
+    let again = client
+        .delete(&admin_url)
+        .bearer_auth(&bed.admin_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), 404, "没有活动订阅时再取消应 404");
+}

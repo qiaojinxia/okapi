@@ -20,6 +20,30 @@ async fn mock_tool(headers: axum::http::HeaderMap) -> axum::response::Response {
     axum::Json(json!({"ok": true, "tool": "result"})).into_response()
 }
 
+/// 回显上游收到的一切：方法、查询串、Content-Type、请求体，以及是否带了客户端的 Authorization。
+async fn mock_echo(
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    let h = |k: &str| {
+        headers
+            .get(k)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    axum::Json(json!({
+        "method": method.as_str(),
+        "query": uri.query().unwrap_or(""),
+        "content_type": h("content-type"),
+        "x_api_key": h("x-api-key"),
+        "authorization": h("authorization"),
+        "body": String::from_utf8_lossy(&body),
+    }))
+    .into_response()
+}
+
 async fn mock_boom() -> axum::response::Response {
     (
         axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -31,6 +55,7 @@ async fn mock_boom() -> axum::response::Response {
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
         .route("/ok/tool", post(mock_tool).get(mock_tool))
+        .route("/ok/echo", post(mock_echo))
         .route("/ok/boom", get(mock_boom));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -220,4 +245,52 @@ async fn upstream_failure_refunds() {
     assert_eq!(amount, 0);
     let balance = env.ledger.balance(env.user_id).await.unwrap();
     assert_eq!(balance.as_micros(), 1_000_000, "失败必须全额退款");
+}
+
+/// POST 透传：方法、查询串、Content-Type、请求体原样到上游，上游响应原样回客户端，照常按次计费；
+/// 客户端的 Okapi token 不得随请求转发给上游（上游凭证由渠道配置另行注入）。
+///
+/// 路由是 `any(...)`，但此前的用例全走 GET——逐接口端到端探针按 POST 探时全绿：
+/// 请求体转发从没被任何用例验过，而调各类 API 时 POST 才是常态。
+#[tokio::test]
+async fn post_forwards_method_query_and_body_verbatim() {
+    let env = setup().await;
+    let payload = r#"{"q":"weather","n":2}"#;
+    let resp = reqwest::Client::new()
+        .post(format!(
+            "http://{}/pass/{}/ok/echo?lang=zh&page=2",
+            env.gateway, env.channel_id
+        ))
+        .bearer_auth(&env.token)
+        .header("content-type", "application/json")
+        .body(payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let echo: Value = resp.json().await.unwrap();
+    assert_eq!(echo["method"], "POST");
+    assert_eq!(echo["query"], "lang=zh&page=2", "查询串必须原样转发");
+    assert_eq!(echo["content_type"], "application/json");
+    assert_eq!(echo["body"], payload, "请求体必须逐字节原样转发");
+    assert_eq!(
+        echo["x_api_key"], "mock-credential",
+        "上游凭证按渠道 settings 注入"
+    );
+    assert!(
+        !echo["authorization"]
+            .as_str()
+            .is_some_and(|a| a.contains(&env.token)),
+        "客户端的 Okapi token 泄露给了上游：{echo}"
+    );
+
+    for _ in 0..50 {
+        if record_of(&env.pg, env.user_id, 2).await.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (status, amount) = record_of(&env.pg, env.user_id, 2).await.expect("必须记账");
+    assert_eq!(status, 20);
+    assert_eq!(amount, 5000, "per_call $0.005");
 }

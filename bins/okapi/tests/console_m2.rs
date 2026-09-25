@@ -247,6 +247,10 @@ async fn pricing_publish_hot_reload_e2e() {
     )
     .await;
     assert_eq!(r.status(), 200);
+    // 回执里的入账后余额：新用户从 0 起，入账 10 USD 后正好是这个数。
+    // 逐接口探针把这个接口的响应体换掉，此前没有任何用例察觉。
+    let credited: Value = r.json().await.unwrap();
+    assert_eq!(credited["balance_after_micro"], 10_000_000, "{credited}");
 
     // 第一笔：ratio 1 → 240 micro
     let amount1 = chat_and_settle(&env, &user_token, &model).await;

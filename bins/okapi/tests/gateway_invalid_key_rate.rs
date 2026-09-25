@@ -32,11 +32,25 @@ async fn setup(limit: i64) -> (SocketAddr, String) {
         .await
         .unwrap();
     });
-    let ip = format!(
-        "203.0.113.{}",
-        u32::from_str_radix(&Uuid::new_v4().simple().to_string()[..2], 16).unwrap_or(1) % 250 + 1
-    );
-    (addr, ip)
+    (addr, unique_ip())
+}
+
+/// 每次调用都给一个全新的客户端 IP（IPv6 文档前缀 2001:db8::/32，后缀取 64 位随机）。
+///
+/// 计数器 `crl:invalid_api_key:{ip}` 在共享 Redis 里、60s 固定窗口，跨用例也跨轮次。
+/// 此前用的是 `203.0.113.{1..250}`（只有 250 个取值）和写死的 `198.51.100.9`：
+/// 60s 内把本文件跑上三遍（变异 sweep、反复本地重跑都会），写死的那个 IP 就攒够了计数，
+/// "另一个 IP 不受牵连"的断言拿到 429；随机的那个也会撞上还没过期的旧计数。
+/// 于是这两条用例随执行顺序时红时绿，并在变异测试里被记成"假抓手"。
+fn unique_ip() -> String {
+    let u = Uuid::new_v4().as_u128();
+    format!(
+        "2001:db8:{:x}:{:x}:{:x}:{:x}::1",
+        (u >> 48) & 0xffff,
+        (u >> 32) & 0xffff,
+        (u >> 16) & 0xffff,
+        u & 0xffff
+    )
 }
 
 async fn hit(addr: SocketAddr, ip: &str, key: &str) -> reqwest::Response {
@@ -71,6 +85,6 @@ async fn invalid_key_limit_is_per_ip() {
     assert_eq!(hit(addr, &ip, "sk-a").await.status(), 401);
     assert_eq!(hit(addr, &ip, "sk-a").await.status(), 401);
     assert_eq!(hit(addr, &ip, "sk-a").await.status(), 429);
-    let other = "198.51.100.9";
-    assert_eq!(hit(addr, other, "sk-a").await.status(), 401);
+    let other = unique_ip();
+    assert_eq!(hit(addr, &other, "sk-a").await.status(), 401);
 }

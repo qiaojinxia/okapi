@@ -224,6 +224,9 @@ async fn user_multiplier_is_writable_and_billed() {
         .await
         .unwrap();
     assert_eq!(ok.status(), 200);
+    // 回执回显写入的系数（十进制字符串，原样）。此前没有任何用例核对。
+    let receipt: Value = ok.json().await.unwrap();
+    assert_eq!(receipt, json!({"ok": true, "multiplier": "0.25"}));
     assert_eq!(chat(&bed).await, 200);
     let two = settlements(&bed.pg, bed.user_id, 2).await;
     let amounts: Vec<i64> = two.iter().map(|r| r.0).collect();

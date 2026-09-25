@@ -308,3 +308,105 @@ fn usage_round_trips_through_two_hops() {
         "第二跳的计费探针丢了缓存写入，会按普通 prompt 计价"
     );
 }
+
+/// 请求侧此前没被钉住的映射（规则级变异 SURVIVED，或只被不相干的用例顺带撞到）：
+/// url 形式的图片、temperature / top_p 透传、`input_schema → parameters`、
+/// system 块数组以空行拼接、tool_result 多段内容以换行拼接。
+#[test]
+fn request_maps_url_images_sampling_schema_and_multipart_text() {
+    let schema = json!({
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+    });
+    let out = convert_req(&json!({
+        "model": "claude-alias", "max_tokens": 64,
+        "temperature": 0.3, "top_p": 0.8,
+        "system": [{"type": "text", "text": "rule one"}, {"type": "text", "text": "rule two"}],
+        "tools": [{"name": "get_weather", "input_schema": schema}],
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "what is this"},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "get_weather", "input": {"city": "SF"}}
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1",
+                 "content": [{"type": "text", "text": "line one"}, {"type": "text", "text": "line two"}]}
+            ]}
+        ]
+    }));
+    assert_eq!(out["temperature"], 0.3);
+    assert_eq!(out["top_p"], 0.8);
+    assert_eq!(
+        out["tools"][0]["function"]["parameters"], schema,
+        "工具参数表丢了，上游模型不知道该传什么"
+    );
+    let msgs = out["messages"].as_array().unwrap();
+    assert_eq!(
+        msgs[0],
+        json!({"role": "system", "content": "rule one\n\nrule two"})
+    );
+    assert_eq!(
+        msgs[1]["content"][1],
+        json!({"type": "image_url", "image_url": {"url": "https://example.com/a.png"}})
+    );
+    assert_eq!(
+        msgs[3],
+        json!({"role": "tool", "tool_call_id": "tu_1", "content": "line one\nline two"})
+    );
+}
+
+/// OpenAI `finish_reason` → Anthropic `stop_reason` 全表。此前只有 `tool_calls` 一项被直接断言；
+/// `length → max_tokens`、`content_filter → refusal` 改坏后全量无一变红——
+/// Claude Code 靠 `max_tokens` 判断输出被截断、靠 `refusal` 判断拒答。
+#[test]
+fn response_finish_reason_table() {
+    let stop = |finish: Value| {
+        let body = json!({
+            "id": "c", "model": "gpt-x",
+            "choices": [{"index": 0, "finish_reason": finish,
+                         "message": {"role": "assistant", "content": "x"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let (out, _) =
+            response_openai_to_anthropic(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        serde_json::from_slice::<Value>(&out).unwrap()["stop_reason"].clone()
+    };
+    assert_eq!(stop(json!("length")), "max_tokens");
+    assert_eq!(stop(json!("tool_calls")), "tool_use");
+    assert_eq!(stop(json!("content_filter")), "refusal");
+    assert_eq!(stop(json!("stop")), "end_turn");
+    assert_eq!(stop(Value::Null), "end_turn");
+}
+
+/// 上游报的缓存计数超过 prompt 时要夹住。不夹的话 `prompt - cached` 是 u32 下溢：
+/// debug 下 panic，release 下回绕成四十亿级的 `input_tokens` 回给客户端。
+#[test]
+fn usage_clamps_cache_counts_that_exceed_prompt() {
+    let usage_of = |usage: Value| {
+        let body = json!({
+            "id": "c", "model": "gpt-x",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": "x"}}],
+            "usage": usage
+        });
+        let (out, _) =
+            response_openai_to_anthropic(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        serde_json::from_slice::<Value>(&out).unwrap()["usage"].clone()
+    };
+    assert_eq!(
+        usage_of(json!({"prompt_tokens": 10, "completion_tokens": 1,
+                        "prompt_tokens_details": {"cached_tokens": 50}})),
+        json!({"input_tokens": 0, "cache_read_input_tokens": 10,
+               "cache_creation_input_tokens": 0, "output_tokens": 1})
+    );
+    assert_eq!(
+        usage_of(json!({"prompt_tokens": 10, "completion_tokens": 1,
+                        "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 20}})),
+        json!({"input_tokens": 0, "cache_read_input_tokens": 4,
+               "cache_creation_input_tokens": 6, "output_tokens": 1})
+    );
+}

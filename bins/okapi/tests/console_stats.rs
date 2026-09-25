@@ -304,10 +304,11 @@ async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
             .await
             .unwrap();
     }
-    drain(&env).await;
+    // 必须轮询到两行都可见再断言：drain 一次就查，并行用例持着 outbox 锁时本用例的行
+    // 还在排队（见 poll_until 的注释）。此处此前漏了迁移——这条用例是全量跑里最常见的
+    // "随机红"，在变异测试里三次被记成与被测代码无关的假抓手。
     let path = "/api/me/stats/breakdown?days=7";
-    let (status, report) = get(&env, path, &env.user_token).await;
-    assert_eq!(status, 200, "{report}");
+    let report = poll_until(&env, path, &env.user_token, |b| b["total"]["requests"] == 2).await;
     assert_eq!(report["days"], 7);
     let start = chrono::NaiveDate::parse_from_str(
         report["window"]["start_date"].as_str().unwrap(),

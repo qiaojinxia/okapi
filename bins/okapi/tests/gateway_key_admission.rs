@@ -178,6 +178,9 @@ async fn disabled_expired_and_banned_keys_are_rejected_without_ttl_lag() {
         .await
         .unwrap();
     assert_eq!(patched.status(), 200);
+    // 回执指明这把 key 的属主（管理端据此刷新该用户的 key 列表）。此前没有任何用例核对。
+    let receipt: Value = patched.json().await.unwrap();
+    assert_eq!(receipt, json!({"ok": true, "user_id": bed.user_id}));
     let (status, body) = chat(&bed, &tok, &bed.model).await;
     assert_eq!(status, 401, "停用后应立刻拒，而不是等缓存过期：{body}");
     assert_eq!(body["error"]["code"], "key_disabled", "{body}");

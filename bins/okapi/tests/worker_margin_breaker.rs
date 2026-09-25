@@ -450,6 +450,15 @@ async fn breaker_trips_blocks_lists_lifts_and_clears() {
         .await
         .unwrap();
     assert_eq!(lifted.status(), 200);
+    // 回执里的解除期（Unix 秒）：落在"现在"与"现在 + lift_secs(600)"之间。
+    // 逐接口探针把这个接口的响应体换掉，此前没有任何用例察觉。
+    let lifted: Value = lifted.json().await.unwrap();
+    let until = lifted["until"].as_i64().expect("回执应带解除期");
+    let wall = chrono::Utc::now().timestamp();
+    assert!(
+        until > wall - 5 && until <= wall + 600 + 5,
+        "解除期应约为现在 + 600s：until={until} now={wall}"
+    );
     assert_eq!(chat(&env).await.0, 200, "解除后同进程立即放行");
     let after_lift = margin_breaker::evaluate(&env.pg, Some(&ch), &env.redis, now)
         .await

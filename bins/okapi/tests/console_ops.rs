@@ -494,7 +494,30 @@ async fn settings_get_and_leaderboard() {
         .await
         .unwrap();
 
-    // 排行榜：灌一笔大额结算（共享 CH 有海量历史测试用户，小额挤不进榜）
+    // 排行榜：灌一笔**比当前榜首还高**的结算，保证本用户稳居第一。
+    //
+    // 此前写死 77 美元，靠"大额"挤进 7 天 Top 100。但这条用例自己每跑一次就多一个 77 美元的
+    // 用户：反复跑全量（变异 sweep、本地重跑）几天后，7 天内 ≥77 美元的用户实测已有 122 个，
+    // 超过 Top 100，并列名次排序任意，新用户时有时无——随时间越跑越红。
+    // CH 的 JSONEachRow 默认把 64 位整数加引号输出，字符串和数字都要认。
+    let top: i64 = client
+        .get(format!(
+            "http://{}/admin/leaderboard?days=7&limit=1",
+            env.console
+        ))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .map_or(0, |b| {
+            let v = &b["data"][0]["amount_micro"];
+            v.as_str()
+                .map_or_else(|| v.as_i64(), |s| s.parse().ok())
+                .unwrap_or(0)
+        });
+    let amount = (top + 1_000_000).max(77_000_000);
     let big = okapi_ledger::SettlementInput {
         dimensions: okapi_ledger::pg::UsageDimensions::default(),
         request_id: Uuid::new_v4(),
@@ -508,8 +531,8 @@ async fn settings_get_and_leaderboard() {
         channel_key_id: None,
         state: okapi_domain::BillingState::Committed,
         usage: okapi_domain::TokenUsage::default(),
-        amount: Money::from_micros(77_000_000),
-        original: Money::from_micros(77_000_000),
+        amount: Money::from_micros(amount),
+        original: Money::from_micros(amount),
         discount: Money::ZERO,
         list_price: Money::ZERO,
         upstream_cost: None,
@@ -527,20 +550,21 @@ async fn settings_get_and_leaderboard() {
         sticky_layer: 0,
         client_type: "test",
         client_ip: None,
-        delta_micro: -77_000_000,
+        delta_micro: -amount,
         balance_after: None,
         event_type: "commit",
     };
     okapi_ledger::record_settlement(&env.pg, big).await.unwrap();
     if let Some(ch) = env.state.ch.as_ref() {
-        for _ in 0..50 {
-            if chsink::process_once(&env.pg, ch).await.unwrap() == 0 {
-                break;
-            }
-        }
-        // CH 异步合并：轮询直到本用户上榜
+        // 每轮都先 drain 再查：outbox 是全局队列，并行用例持锁时 process_once 返回 0，
+        // 本用例的行其实还在排队——只在轮询前 drain 一次，这一行可能永远进不了 CH。
         let mut found = false;
-        for _ in 0..30 {
+        for _ in 0..50 {
+            for _ in 0..50 {
+                if chsink::process_once(&env.pg, ch).await.unwrap() == 0 {
+                    break;
+                }
+            }
             let board: Value = client
                 .get(format!(
                     "http://{}/admin/leaderboard?days=7&limit=100",

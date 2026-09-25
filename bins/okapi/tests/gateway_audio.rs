@@ -232,6 +232,10 @@ async fn transcriptions_per_call_with_multipart() {
 }
 
 /// /v1/audio/translations（老 ok-api 面核对补）：与 transcriptions 同构 per_call。
+///
+/// 此前名为"按次计费"，却只断言了 200——计费和返回内容都没验。逐接口端到端探针
+/// （把这个接口的 2xx 响应体换掉）实测全绿，是个名实不符的空壳。现按 transcriptions 同一契约
+/// 核对：上游返回体原样透给客户端，按 per_call × 时长单位计费并进快照。
 #[tokio::test]
 async fn translations_bills_per_call() {
     let env = setup().await;
@@ -252,4 +256,11 @@ async fn translations_bills_per_call() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "translations 应可用");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["text"], "hello", "上游返回体应原样透给客户端：{body}");
+
+    let (amount, snapshot) = wait_record(&env.pg, env.user_id, &env.stt_model).await;
+    assert_eq!(amount, 6000, "与 transcriptions 同构：per_call $0.006");
+    let snapshot = snapshot.expect("计费快照必须存在");
+    assert_eq!(snapshot["media_units"], 4, "duration 3.4s 向上取整入快照");
 }

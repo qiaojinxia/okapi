@@ -276,7 +276,11 @@ async fn email_verification_full_flow() {
 
     // 取码
     let resp = post(&env, "/auth/email-code", json!({"email": email})).await;
-    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let status = resp.status();
+    let sent: Value = resp.json().await.unwrap_or(Value::Null);
+    assert_eq!(status, 200, "{sent}");
+    // 回执里的有效期（秒）：前端据此显示倒计时。此前没有任何用例核对。
+    assert_eq!(sent["ttl_secs"], 600, "{sent}");
     let mails = wait_inbox(&inbox, 1).await;
     let mail = &mails[0];
     assert_eq!(mail.from, "<no-reply@okapi.test>");

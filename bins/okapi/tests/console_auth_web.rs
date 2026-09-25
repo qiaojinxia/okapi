@@ -213,6 +213,9 @@ async fn register_login_key_totp_full_flow() {
         .await
         .unwrap();
     assert_eq!(confirm.status(), 200);
+    // 回执明确告诉前端二步验证已开启。此前没有任何用例核对。
+    let confirmed: Value = confirm.json().await.unwrap();
+    assert_eq!(confirmed, json!({"enabled": true}));
 
     // 启用后：无码登录 401 totp_required；带码成功
     let no_code = client
@@ -498,6 +501,9 @@ async fn self_select_group_on_own_keys() {
         .await
         .unwrap();
     assert_eq!(patch.status(), 200);
+    // 回执指明改的是哪把 key。此前没有任何用例核对。
+    let receipt: Value = patch.json().await.unwrap();
+    assert_eq!(receipt, json!({"ok": true, "key_id": key_id}));
     let me: Value = client
         .get(format!("http://{}/api/me", env.addr))
         .bearer_auth(api_key)
