@@ -5,10 +5,12 @@ import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { PageBody, PageHeader } from '@/components/ui/page'
+import { UsageScope } from '@/components/usage-scope'
 import { Segmented } from '@/components/ui/segmented'
+import { useUsageScope } from '@/hooks/use-usage-scope'
 import { Stat } from '@/components/ui/stat'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
-import type { Scope } from '@/features/portal-overview/types'
+import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/table'
 import { roleLabel } from '@/features/users/types'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
@@ -22,12 +24,14 @@ import { UsageHeatmap } from './UsageHeatmap'
 export function ProfilePage() {
   const { t, i18n } = useTranslation()
   const me = useMe()
-  const [scope, setScope] = useState<Scope>('key')
+  const usageScope = useUsageScope()
+  const { scope } = usageScope
   const [year, setYear] = useState<number>()
   const query = useQuery({
     queryKey: qk.myActivity(scope, year),
     queryFn: () => apiFetch<ActivityResponse>(`/api/me/stats/activity?scope=${scope}${year === undefined ? '' : `&year=${year}`}`),
     retry: false,
+    enabled: usageScope.ready,
     refetchInterval: 60_000,
   })
   const currentYear = Number(query.data?.today.slice(0, 4) ?? new Date().getUTCFullYear())
@@ -59,9 +63,7 @@ export function ProfilePage() {
           <p className="mt-1 text-xs text-muted-foreground">{scope === 'key' ? t('profile:keyScopeHint', { id: me.data?.key_id ?? '—' }) : t('profile:userScopeHint')}</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Segmented ariaLabel={t('profile:scope')} value={scope} onChange={setScope} options={[
-            { value: 'key', label: t('portal:scopeKey') }, { value: 'user', label: t('portal:scopeUser') },
-          ]} className="[&_button]:min-h-10" />
+          <UsageScope {...usageScope} ariaLabel={t('profile:scope')} onChange={usageScope.setScope} />
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <label htmlFor="profile-year">{t('profile:year')}</label>
             <select id="profile-year" value={selectedYear} onChange={(e) => setYear(Number(e.target.value))} className="h-11 rounded-lg border border-border bg-card px-3 font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
@@ -135,28 +137,28 @@ function DayDetails({ day }: { day: ActivityDay }) {
       <dl className="grid grid-cols-2 gap-x-4 gap-y-5 sm:grid-cols-3 xl:grid-cols-6">
         {[
           [t('profile:tokens'), count(day.tokens), ''],
-          [t('profile:input'), count(day.prompt_tokens), `${t('profile:cached', { count: day.cached_tokens })} · ${t('charts:cacheWrite')} ${day.cache_write_tokens == null ? '—' : count(day.cache_write_tokens)}`],
+          [t('profile:input'), count(day.prompt_tokens), `${t('portal:tokCached')} ${day.cache_read_known_requests === day.requests ? count(day.cached_tokens) : '—'} · ${t('charts:cacheWrite')} ${day.cache_write_tokens == null ? '—' : count(day.cache_write_tokens)}`],
           [t('profile:output'), count(day.completion_tokens), t('profile:reasoning', { count: day.reasoning_tokens })],
           [t('profile:requests'), count(day.requests), ''],
           [t('profile:spend'), formatMoney(day.amount_micro, i18n.language), ''],
           [t('profile:errors'), count(day.errors), ''],
         ].map(([label, value, hint]) => <div key={label} className="min-w-0"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="mt-1 break-all text-lg font-semibold tabular-nums">{value}</dd>{hint && <dd className="mt-1 text-xs text-muted-foreground">{hint}</dd>}</div>)}
       </dl>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <caption className="mb-3 text-left font-medium">{t('profile:models')}</caption>
-          <thead><tr className="border-b border-border text-xs text-muted-foreground">
-            {[t('profile:model'), t('profile:tokens'), t('profile:requests'), t('profile:spend')].map((label, index) => <th key={label} className={`px-2 py-2 font-medium whitespace-nowrap ${index ? 'text-right' : 'text-left'}`}>{label}</th>)}
-          </tr></thead>
-          <tbody>{[...day.models].sort((a, b) => (b.prompt_tokens + b.completion_tokens) - (a.prompt_tokens + a.completion_tokens)).map((model) => (
-            <tr key={model.model} className="border-b border-border/60 last:border-0">
-              <td className="max-w-64 break-all px-2 py-3 font-medium">{model.model}</td>
-              <td className="px-2 py-3 text-right whitespace-nowrap tabular-nums">{count(model.prompt_tokens + model.completion_tokens)}</td>
-              <td className="px-2 py-3 text-right whitespace-nowrap tabular-nums">{count(model.requests)}</td>
-              <td className="px-2 py-3 text-right whitespace-nowrap tabular-nums">{formatMoney(model.amount_micro, i18n.language)}</td>
-            </tr>
-          ))}</tbody>
-        </table>
+      <div className="min-w-0 space-y-3">
+        <h3 className="text-sm font-medium">{t('profile:models')}</h3>
+        <Table stickyHeader aria-label={t('profile:models')}>
+          <THead><Tr>
+            {[t('profile:model'), t('profile:tokens'), t('profile:requests'), t('profile:spend')].map((label, index) => <Th key={label} numeric={index > 0}>{label}</Th>)}
+          </Tr></THead>
+          <TBody>{[...day.models].sort((a, b) => (b.prompt_tokens + b.completion_tokens) - (a.prompt_tokens + a.completion_tokens)).map((model) => (
+            <Tr key={model.model}>
+              <Td className="max-w-64 break-all font-medium">{model.model}</Td>
+              <Td numeric>{count(model.prompt_tokens + model.completion_tokens)}</Td>
+              <Td numeric>{count(model.requests)}</Td>
+              <Td numeric>{formatMoney(model.amount_micro, i18n.language)}</Td>
+            </Tr>
+          ))}</TBody>
+        </Table>
       </div>
     </div>
   )

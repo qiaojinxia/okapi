@@ -70,6 +70,6 @@ export function ModelDetails({ model, groups, group, factor, unit, tab, onTab, o
     </FieldGroup>
     {(model.mode === 'ratio' || model.mode === 'per_call') && <Simulator key={model.model} model={model} groupFactor={factor} />}
     </div>
-    <div role="tabpanel" id="model-code-panel" aria-labelledby="model-detail-tabs-code" hidden={tab !== 'code'}><RequestExamples model={model} /></div>
+    <div role="tabpanel" id="model-code-panel" aria-labelledby="model-detail-tabs-code" hidden={tab !== 'code'}><RequestExamples model={model} group={group} /></div>
   </Drawer>
 }

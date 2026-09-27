@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,plan_snapshot FROM subscription_grants WHERE user_id=$1 AND source=$2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "subscription_grants",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_snapshot",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "subscription_grants",
+            "name": "plan_snapshot"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "530f15df370829f91ddfd78bde7e16e23cf6e231e915518d6adcb4368fbaa548"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE recharge_orders SET status=1,gateway_trade_no=$2,paid_at=now() WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e74ff81019cc00afe58394f12461f8d224b822404a9033342288f115ba3b4eb1"
+}

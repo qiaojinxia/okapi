@@ -1,0 +1,167 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,user_id,amount_micro,plan_id,subscription_snapshot,status,\n                  gateway,currency,(pay_amount*100)::bigint AS amount_minor,\n                  merchant_id,checkout_session_id,payment_contract_version,gateway_trade_no\n           FROM recharge_orders WHERE order_no=$1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "plan_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "plan_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "subscription_snapshot",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "subscription_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "gateway",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "gateway"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "currency",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "amount_minor",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "merchant_id",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "merchant_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "checkout_session_id",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "checkout_session_id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "payment_contract_version",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "payment_contract_version"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "gateway_trade_no",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "recharge_orders",
+            "name": "gateway_trade_no"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "d4676823117948abfbb95b8ff3c8bb9088146f85eb66ea55ac08f691f1789363"
+}

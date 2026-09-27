@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO redemption_codes\n                (code_hash, amount_micro, batch_id, created_by, expires_at,\n                 plan_id, bind_user_id, max_per_ip,subscription_snapshot)\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,$9)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int8",
+        "Uuid",
+        "Int8",
+        "Timestamptz",
+        "Int8",
+        "Int8",
+        "Int4",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af489f19a302728f8e69e87296ca9215c7194777976d8d0f4d2c2a616bd46d0b"
+}

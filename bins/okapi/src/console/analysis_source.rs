@@ -46,17 +46,21 @@ pub fn source(window: &str, scope: &str) -> String {
     format!(
         "(WITH \
         d AS (SELECT {KEYS}, {DIMS}, {merged}, \
-            toInt64(sumMerge(writes)) AS write_tokens, toInt64(countIfMerge(writes_known)) AS write_samples, \
+            toInt64(sumMerge(writes)) AS write_tokens, toInt64(max(ifNull(cr.write_n, 0))) AS write_samples, \
+            toInt64(max(ifNull(cr.read_n, 0))) AS read_samples, \
             toInt64(countIfMerge(cost_known)) AS cost_samples, sumMerge(known_amount) AS covered_amount, sumMerge(known_cost) AS covered_cost, \
             maxMerge(last_event) AS event_at, maxMerge(last_ingested) AS ingested_at \
-            FROM mv_analysis_hour WHERE {window}{scope} GROUP BY {KEYS}, {DIMS}), \
+            FROM mv_analysis_hour LEFT JOIN (SELECT {KEYS}, {DIMS}, \
+                countIfMerge(read_known) AS read_n, countIfMerge(write_known) AS write_n \
+                FROM mv_cache_reporting_hour WHERE {window}{scope} GROUP BY {KEYS}, {DIMS}) cr \
+                USING ({KEYS}, {DIMS}) WHERE {window}{scope} GROUP BY {KEYS}, {DIMS}), \
         l AS (SELECT {KEYS}, {merged} FROM mv_cube_hour WHERE {window}{scope} GROUP BY {KEYS}), \
         c AS (SELECT {KEYS}, {sums} FROM d GROUP BY {KEYS}) \
-        SELECT {KEYS}, {DIMS}, {detailed}, write_tokens, write_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM d \
+        SELECT {KEYS}, {DIMS}, {detailed}, write_tokens, write_samples, read_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM d \
         UNION ALL \
         SELECT {legacy_keys}, '' AS requested_model, '' AS upstream_model, '' AS endpoint, '' AS upstream_endpoint, '' AS node, \
             toUInt8(2) AS stream, '' AS request_type, '' AS billing_type, {remainder}, \
-            toInt64(0) AS write_tokens, toInt64(0) AS write_samples, toInt64(0) AS cost_samples, toInt64(0) AS covered_amount, toInt64(0) AS covered_cost, \
+            toInt64(0) AS write_tokens, toInt64(0) AS write_samples, toInt64(0) AS read_samples, toInt64(0) AS cost_samples, toInt64(0) AS covered_amount, toInt64(0) AS covered_cost, \
             toDateTime64(0, 3) AS event_at, toDateTime64(0, 3) AS ingested_at \
         FROM l LEFT JOIN c USING ({KEYS}) WHERE l.v_requests > ifNull(c.c_requests, 0))"
     )

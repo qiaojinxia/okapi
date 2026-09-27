@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (value #>> '{}')::bigint AS \"v!\" FROM settings WHERE key='retention_months'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "v!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d25777cca7d34b8a58ac2fd27d18ea8a913d74e2e1732955205a8823a6a70ba2"
+}

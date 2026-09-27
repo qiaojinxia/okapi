@@ -181,17 +181,17 @@ pub async fn create_redemption_codes(
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
     opts: RedemptionOptions<'_>,
 ) -> Result<Option<uuid::Uuid>, StoreError> {
-    let plan_id = if let Some(plan_code) = opts.plan_code {
-        let id = sqlx::query_scalar!(
-            r#"SELECT id FROM plans WHERE plan_code = $1 AND status = 1"#,
+    let plan = if let Some(plan_code) = opts.plan_code {
+        let row = sqlx::query!(
+            r#"SELECT id,subscription_plan_snapshot(plans) AS snapshot FROM plans WHERE plan_code = $1 AND status = 1"#,
             plan_code
         )
         .fetch_optional(pool)
         .await?;
-        let Some(id) = id else {
+        let Some(row) = row else {
             return Ok(None);
         };
-        Some(id)
+        Some((row.id, row.snapshot))
     } else {
         None
     };
@@ -202,17 +202,18 @@ pub async fn create_redemption_codes(
             r#"
             INSERT INTO redemption_codes
                 (code_hash, amount_micro, batch_id, created_by, expires_at,
-                 plan_id, bind_user_id, max_per_ip)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 plan_id, bind_user_id, max_per_ip,subscription_snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8,$9)
             "#,
             code_hash(code),
             amount_micro,
             batch_id,
             created_by,
             expires_at,
-            plan_id,
+            plan.as_ref().map(|p| p.0),
             opts.bind_user_id,
-            opts.max_per_ip
+            opts.max_per_ip,
+            plan.as_ref().and_then(|p| p.1.as_ref())
         )
         .execute(&mut *tx)
         .await?;
@@ -236,6 +237,7 @@ pub struct ClaimedRedemption {
     pub balance_valid_days: Option<i32>,
     /// 绑的是订阅套餐（plans.kind = 1）：调用方走 `subscriptions::activate`（§11.28）。
     pub subscription_plan_id: Option<i64>,
+    pub subscription_snapshot: Option<serde_json::Value>,
 }
 
 /// 核销预查（IP 限制闸需要在翻转前拿到批次与限额；只读，不改状态）。
@@ -268,6 +270,18 @@ pub async fn claim_redemption(
     code: &str,
     user_id: i64,
 ) -> Result<Option<ClaimedRedemption>, StoreError> {
+    let mut tx = pool.begin().await?;
+    let result = claim_redemption_in_tx(&mut tx, code, user_id).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Caller owns the business/ledger transaction.
+pub async fn claim_redemption_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    code: &str,
+    user_id: i64,
+) -> Result<Option<ClaimedRedemption>, StoreError> {
     // 原子翻转（bind_user 条件内联：他人核销与不存在同响应，防探测）
     let row = sqlx::query!(
         r#"
@@ -276,24 +290,37 @@ pub async fn claim_redemption(
         WHERE code_hash = $1 AND status = 1
           AND (expires_at IS NULL OR expires_at > now())
           AND (bind_user_id IS NULL OR bind_user_id = $2)
-        RETURNING id, amount_micro, plan_id
+        RETURNING id, amount_micro, plan_id,subscription_snapshot
         "#,
         code_hash(code),
         user_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(r) = row else {
         return Ok(None);
     };
-    // 套餐为静态配置：两步读无竞态
+    if let Some(snapshot) = r.subscription_snapshot {
+        let plan: crate::subscriptions::SubPlan = serde_json::from_value(snapshot.clone())
+            .map_err(|_| StoreError::InvalidData("subscription_snapshot"))?;
+        return Ok(Some(ClaimedRedemption {
+            code_id: r.id,
+            amount_micro: 0,
+            plan_code: Some(plan.plan_code),
+            grant_group: None,
+            balance_valid_days: None,
+            subscription_plan_id: Some(plan.id),
+            subscription_snapshot: Some(snapshot),
+        }));
+    }
+    // 在同一事务读取套餐；权益与核销、账本一起提交。
     let plan = if let Some(plan_id) = r.plan_id {
         sqlx::query!(
             r#"SELECT id, plan_code, kind, grant_micro, group_code, balance_valid_days
                FROM plans WHERE id = $1 AND status = 1"#,
             plan_id
         )
-        .fetch_optional(pool)
+        .fetch_optional(&mut **tx)
         .await?
     } else {
         None
@@ -307,6 +334,7 @@ pub async fn claim_redemption(
             grant_group: None,
             balance_valid_days: None,
             subscription_plan_id: Some(p.id),
+            subscription_snapshot: None,
         },
         Some(p) => ClaimedRedemption {
             code_id: r.id,
@@ -315,6 +343,7 @@ pub async fn claim_redemption(
             grant_group: p.group_code,
             balance_valid_days: p.balance_valid_days,
             subscription_plan_id: None,
+            subscription_snapshot: None,
         },
         None => ClaimedRedemption {
             code_id: r.id,
@@ -323,6 +352,7 @@ pub async fn claim_redemption(
             grant_group: None,
             balance_valid_days: None,
             subscription_plan_id: None,
+            subscription_snapshot: None,
         },
     }))
 }
@@ -408,26 +438,28 @@ pub async fn add_user_group(
 }
 
 /// 新订单输入。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NewOrder<'a> {
     pub order_no: &'a str,
     pub user_id: i64,
     /// 钱包充值：入账额度；订阅购买：售价快照。
     pub amount_micro: i64,
     pub gateway: &'a str,
-    /// 支付金额（原币种小数字符串，仅展示）。
+    /// 支付报价（原币种小数字符串，回调必须精确匹配）。
     pub pay_amount: &'a str,
     pub currency: &'a str,
+    pub merchant_id: Option<&'a str>,
     /// 非空 = 订阅购买单（§11.28）：支付成功激活订阅而不入钱包。
     pub plan_id: Option<i64>,
+    pub subscription_snapshot: Option<serde_json::Value>,
 }
 
 /// 创建充值 / 订阅购买订单（status=0）。
 pub async fn create_recharge_order(pool: &PgPool, order: NewOrder<'_>) -> Result<i64, StoreError> {
     let id = sqlx::query_scalar!(
         r#"
-        INSERT INTO recharge_orders (order_no, user_id, amount_micro, gateway, pay_amount, currency, plan_id)
-        VALUES ($1, $2, $3, $4, ($5::text)::numeric, $6, $7)
+        INSERT INTO recharge_orders (order_no, user_id, amount_micro, gateway, pay_amount, currency, plan_id,subscription_snapshot,merchant_id,payment_contract_version)
+        VALUES ($1, $2, $3, $4, ($5::text)::numeric, $6, $7,$8,$9,1)
         RETURNING id
         "#,
         order.order_no,
@@ -436,7 +468,9 @@ pub async fn create_recharge_order(pool: &PgPool, order: NewOrder<'_>) -> Result
         order.gateway,
         order.pay_amount,
         order.currency,
-        order.plan_id
+        order.plan_id,
+        order.subscription_snapshot,
+        order.merchant_id
     )
     .fetch_one(pool)
     .await?;
@@ -444,37 +478,13 @@ pub async fn create_recharge_order(pool: &PgPool, order: NewOrder<'_>) -> Result
 }
 
 /// 已核销订单：钱包充值或订阅购买。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PaidOrder {
     pub user_id: i64,
     pub amount_micro: i64,
     /// 非空 = 订阅购买单，调用方激活订阅而非入钱包。
     pub plan_id: Option<i64>,
-}
-
-/// 支付回调核销：status 0→1 行级原子翻转（重放/并发恰一次）。
-pub async fn mark_recharge_paid(
-    pool: &PgPool,
-    order_no: &str,
-    gateway_trade_no: &str,
-) -> Result<Option<PaidOrder>, StoreError> {
-    let row = sqlx::query!(
-        r#"
-        UPDATE recharge_orders
-        SET status = 1, gateway_trade_no = $2, paid_at = now()
-        WHERE order_no = $1 AND status = 0
-        RETURNING user_id, amount_micro, plan_id
-        "#,
-        order_no,
-        gateway_trade_no
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|r| PaidOrder {
-        user_id: r.user_id,
-        amount_micro: r.amount_micro,
-        plan_id: r.plan_id,
-    }))
+    pub subscription_snapshot: Option<serde_json::Value>,
 }
 
 /// 按次计费模型 upsert（new-api model_price 导入等）。

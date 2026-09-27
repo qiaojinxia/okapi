@@ -64,7 +64,7 @@ export function TeamsPage() {
   const activeTeam = (teams.data?.data ?? []).find((tm) => tm.team_id === active)
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('team:title')}
         description={t('team:hint')}

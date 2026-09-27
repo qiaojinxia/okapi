@@ -146,6 +146,8 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "cached_tokens": get_i64(payload, "cached_tokens"),
         // 旧 outbox 未记录缓存写入，保留 null，不能冒充已知的 0。
         "cache_write_tokens": payload.get("cache_write_tokens").cloned().unwrap_or(Value::Null),
+        "cache_read_reported": payload.get("cache_read_reported").and_then(Value::as_bool).map(u8::from),
+        "cache_write_reported": payload.get("cache_write_reported").and_then(Value::as_bool).map(u8::from),
         "completion_tokens": get_i64(payload, "completion_tokens"),
         "reasoning_tokens": get_i64(payload, "reasoning_tokens"),
         "media_units": "",

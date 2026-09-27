@@ -75,6 +75,24 @@ test('目录按显式厂商归一，零价、未知价和不同计费单位分�
   expect([models[4], models[12], models[0], models[9]].sort((a, b) => compareModels(a, b, 'input', 1, 'en')).slice(0, 2).map((m) => m.model)).toEqual(['qwen-plus', 'gpt-4.1'])
 })
 
+test('调用示例按分组过滤协议，仅 Responses 时不再提供 Chat 模板', async ({ page }) => {
+  await prepare(page, [model('gpt-test', 'OpenAI', 'GPT Test', { chat_endpoints_by_group: {
+    default: ['/v1/responses', '/v1/responses/compact'], economy: ['/v1/chat/completions', '/v1/responses'],
+  } })])
+  await page.goto('/pricing?model=gpt-test&tab=code&group=default')
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.getByLabel('接口模板', { exact: true })).toHaveValue('responses')
+  await expect(drawer.locator('#example-template option')).toHaveCount(1)
+  await expect(drawer.getByLabel('生成的调用示例')).toContainText('/v1/responses')
+  await expect(drawer.getByLabel('生成的调用示例')).toContainText('"input":')
+  await page.screenshot({ path: 'test-results/responses-only-example.png', animations: 'disabled' })
+  await drawer.getByRole('tab', { name: '价格与详情' }).click()
+  await drawer.getByLabel('按分组查看').selectOption('economy')
+  await drawer.getByRole('tab', { name: '调用示例' }).click()
+  await drawer.getByLabel('接口模板', { exact: true }).selectOption('chat')
+  await expect(drawer.getByLabel('生成的调用示例')).toContainText('/v1/chat/completions')
+})
+
 test('桌面厂商图标、搜索和能力筛选清晰可用，无额外请求', async ({ page }) => {
   const { calls, errors } = await prepare(page)
   await page.setViewportSize({ width: 1440, height: 1100 })
@@ -118,6 +136,10 @@ test('分组联动按次费用和零价，详情复制与模拟器校验，关�
   await expect(drawer.locator('[aria-live="polite"]')).toContainText('US$0.00')
   await drawer.getByLabel('调用次数').fill('-1')
   await expect(drawer.getByRole('alert')).toBeVisible()
+  // fill/selectOption do not move the pointer off the copy button. Dismiss its
+  // hover tooltip first: Escape belongs to the topmost layer while it is open.
+  await drawer.getByLabel('调用次数').hover()
+  await expect(page.getByRole('tooltip')).toHaveCount(0)
   await page.keyboard.press('Escape')
   await expect(drawer).toHaveCount(0)
   await expect(card.getByRole('button', { name: '价格与详情' })).toBeFocused()
@@ -161,6 +183,15 @@ test('阶梯价不冒充固定价，未声明能力不推断；小额 1K 单价�
   await page.keyboard.press('Escape')
   await page.goto('/pricing?vendor=alibaba&unit=1K&q=plus')
   await expect(page.locator('article')).toContainText('US$0.00000001')
+
+  await page.goto('/pricing?model=does-not-exist')
+  await expect(page.getByText('此模型未发布或已下架。')).toBeVisible()
+  await page
+    .getByText('此模型未发布或已下架。')
+    .locator('xpath=ancestor::div[contains(@class,"border-dashed")]')
+    .getByRole('button', { name: '关闭' })
+    .click()
+  await expect(page).not.toHaveURL(/model=/)
 })
 
 test('移动端深色英文目录与详情不横向溢出', async ({ page }) => {

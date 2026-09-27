@@ -82,6 +82,106 @@ async fn diagnose_json(env: &Env, query: &str) -> Value {
     resp.json().await.unwrap()
 }
 
+#[tokio::test]
+async fn endpoint_compatibility_matches_gateway_and_public_examples() {
+    let env = setup().await;
+    let model = env.name("dg-codex");
+    okapi_store::provision::create_model_ratio(&env.pg, &model, "1", "1", "1")
+        .await
+        .unwrap();
+    let (channel, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &env.name("dg-codex-ch"),
+        "codex",
+        "http://127.0.0.1:9",
+        "cred",
+        &[&model],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let chat = diagnose_json(&env, &format!("model={model}")).await;
+    assert_eq!(chat["endpoint"], "/v1/chat/completions");
+    assert_eq!(chat["verdict"], "unsupported_endpoint");
+    assert_eq!(chat["candidates"], 0);
+    assert_eq!(chat["channels"][0]["excluded"], "unsupported_endpoint");
+    assert_eq!(chat["channels"][0]["keys"][0]["ok"], false);
+    assert!(
+        chat["available_endpoints"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("/v1/responses"))
+    );
+    let responses = diagnose_json(&env, &format!("model={model}&ingress=responses")).await;
+    assert_eq!(responses["verdict"], "ok");
+    assert_eq!(responses["candidates"], 1);
+    assert_eq!(
+        diagnose(
+            &env,
+            &env.admin_token,
+            &format!("model={model}&ingress=typo")
+        )
+        .await
+        .status(),
+        400
+    );
+
+    let mut pricing_url =
+        reqwest::Url::parse(&format!("http://{}/api/pricing", env.console)).unwrap();
+    pricing_url
+        .query_pairs_mut()
+        .extend_pairs([("model", model.as_str()), ("group", "default")]);
+    let pricing: Value = reqwest::Client::new()
+        .get(pricing_url)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let item = pricing["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == model)
+        .unwrap();
+    let endpoints = item["chat_endpoints_by_group"]["default"]
+        .as_array()
+        .unwrap();
+    assert!(endpoints.contains(&json!("/v1/responses")));
+    assert!(!endpoints.contains(&json!("/v1/chat/completions")));
+    assert!(!item.to_string().contains("127.0.0.1:9"));
+
+    // 无可用渠道仍是可用性故障，不误导用户只需切换接口。
+    sqlx::query("UPDATE channels SET status=2 WHERE id=$1")
+        .bind(channel)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let disabled = diagnose_json(&env, &format!("model={model}")).await;
+    assert_eq!(disabled["verdict"], "no_available_channel");
+    assert_eq!(disabled["available_endpoints"], json!([]));
+
+    // 新增兼容渠道后，相同模型的 chat 请求必须能路由。
+    okapi_store::provision::create_channel(
+        &env.pg,
+        &env.name("dg-openai-ch"),
+        "openai",
+        "http://127.0.0.1:9",
+        "cred",
+        &[&model],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        diagnose_json(&env, &format!("model={model}")).await["verdict"],
+        "ok"
+    );
+}
+
 /// 池认领语义 + 幸存者口径：入池渠道对无池请求给出 pool_claimed，
 /// 钉住该池后同一渠道变为可用候选。
 #[tokio::test]

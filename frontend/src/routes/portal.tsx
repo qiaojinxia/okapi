@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, redirect, useRouterState } from '@tanstack/react-router'
+import { Outlet, createFileRoute, redirect, useMatches, useRouterState } from '@tanstack/react-router'
 import {
   FileText,
   FlaskConical,
@@ -34,6 +34,7 @@ export const Route = createFileRoute('/portal')({
 
 function PortalLayout() {
   const { t } = useTranslation()
+  const fitViewport = useMatches({ select: (matches) => matches.some((match) => match.staticData.fitViewport) })
   const me = useMe()
   // 引导抽屉挂在外壳层：顶栏 ?、总览卡、密钥页都能打开同一个实例；
   // 点了抽屉里的深链（管理密钥 / 用量日志）即关，不然抽屉会盖在目标页上
@@ -72,6 +73,7 @@ function PortalLayout() {
   return (
     <GuideContext.Provider value={{ open: (req) => setGuide(req ?? {}) }}>
       <Shell
+        fitViewport={fitViewport}
         nav={nav}
         workspace={me.data?.permissions.length ? { to: '/admin', label: t('common:admin'), icon: Sliders } : undefined}
         onHelp={() => setGuide({})}

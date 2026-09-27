@@ -11,6 +11,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/paged_lists.rs"]
+mod paged_lists;
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -440,7 +443,7 @@ async fn admin_list_surface_covers_every_resource() {
     let t = &env.admin_token;
 
     // ---- 模型配置列表（四轴倍率 text 精确出库）----
-    let (status, body) = get(env.console, "/admin/models", t).await;
+    let (status, body) = get(env.console, &format!("/admin/models?q={}", env.model), t).await;
     assert_eq!(status, 200);
     let mine = body["data"]
         .as_array()
@@ -458,7 +461,7 @@ async fn admin_list_surface_covers_every_resource() {
     );
 
     // ---- 分组列表（含占用计数，供删除前检查）----
-    let (status, body) = get(env.console, "/admin/groups", t).await;
+    let (status, body) = paged_lists::get_all(env.console, "/admin/groups", t).await;
     assert_eq!(status, 200);
     let g = body["data"]
         .as_array()
@@ -472,7 +475,7 @@ async fn admin_list_surface_covers_every_resource() {
     assert_eq!(g["pool_code"], "default");
     assert_eq!(g["self_select"], false);
     assert!(g["channel_count"].as_i64().unwrap() >= 0);
-    // 配置类列表：不传 limit 回全量并附 total；传了按 offset 切片，total 不变
+    // 完整列表由调用方逐页读取；每页 total 是总数，不受 limit/offset 影响
     let total = body["total"].as_i64().expect("列表必须附 total");
     assert!(total >= 2, "至少 default 组 + 测试组");
     let (status, page) = get(env.console, "/admin/groups?limit=1&offset=1", t).await;
@@ -483,6 +486,30 @@ async fn admin_list_surface_covers_every_resource() {
         "limit=1 只回一条"
     );
     assert!(page["total"].as_i64().unwrap() >= 2, "切片不改变总数");
+
+    // ---- 池详情（`GET /admin/pools/{code}` 此前零 HTTP 直打）----
+    let (status, body) = get(env.console, "/admin/pools/default", t).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["pool_code"], "default");
+    assert!(
+        body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["channel_id"] == env.channel_id),
+        "新渠道缺省进 default 池：{body}"
+    );
+    assert!(
+        body["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == env.model.as_str()),
+        "成员模型并集必须含本用例模型：{body}"
+    );
+    let (status, body) = get(env.console, "/admin/pools/nope-no-such", t).await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
 
     // ---- 渠道列表：关键词 + 协议过滤 + 过滤集内启用数；切片越界回空但 total 不变 ----
     let mine = format!("mg-ch-{}", env.suffix);
@@ -630,6 +657,7 @@ async fn admin_list_surface_covers_every_resource() {
         "/admin/permissions",
         "/admin/redemptions",
         "/admin/stats/overview",
+        "/admin/pools/default",
     ] {
         let (status, _) = get(env.console, path, &env.plain_token).await;
         assert_eq!(status, 403, "{path} 必须拒绝普通用户");
@@ -741,6 +769,43 @@ async fn channel_batch_and_user_actions() {
     .await
     .unwrap();
     assert_eq!(key_status, 2, "key 必须同步停用，防调度取到孤儿");
+
+    // ---- 单条软删（`DELETE /admin/channels/{id}` 此前只走 batch）----
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/channels/{id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true);
+    let gone = sqlx::query!(
+        r#"SELECT deleted_at, status FROM channels WHERE id = $1"#,
+        id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(
+        gone.deleted_at.is_some(),
+        "单条删除是软删，调度按 deleted_at 过滤"
+    );
+    assert_eq!(
+        gone.status, 1,
+        "单条 DELETE 只盖 tombstone，不像 batch 那样顺手 status=2 并停 key"
+    );
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/channels/{id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["code"], "not_found");
 
     // ---- 分组占用冲突 409（不静默解绑，避免计费口径突变）----
     okapi_store::admin::add_user_group(&env.pg, env.victim_id, &env.group)
@@ -868,6 +933,74 @@ async fn channel_batch_and_user_actions() {
     .await;
     assert_eq!(status, 403);
     assert_eq!(body["error"]["param"], "super_admin_protected");
+
+    // ---- 吊销令牌：门户只动自己的；管理面按 id；重复删 404 ----
+    let plain_id = sqlx::query_scalar!(
+        r#"SELECT id FROM users WHERE username = $1"#,
+        format!("mg-p-{}", env.suffix)
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let extra = format!("sk-okapi-mg-x-{}", env.suffix);
+    let extra_id =
+        okapi_store::provision::create_api_key(&env.pg, plain_id, &hash(&extra), "sk-mg-x")
+            .await
+            .unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/api/me/keys/{extra_id}"),
+        &env.plain_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["key_id"], extra_id);
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/api/me/keys/{extra_id}"),
+        &env.plain_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    let managed_token = format!("sk-okapi-mg-y-{}", env.suffix);
+    let managed_key_id =
+        okapi_store::provision::create_api_key(&env.pg, plain_id, &hash(&managed_token), "sk-mg-y")
+            .await
+            .unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/keys/{managed_key_id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true);
+    let (status, _) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/keys/{managed_key_id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    let (status, _) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/keys/{managed_key_id}"),
+        &env.plain_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "管理面吊销对普通用户仍是 403");
 
     // ---- 模型删除需提示重新发布 epoch ----
     let (status, body) = req(

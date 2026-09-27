@@ -81,7 +81,7 @@ pub struct CubeQuery {
     pub by: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
-    /// 流向图度量（flow 专用）：amount | requests | tokens。
+    /// 排行排序 / 流向图度量：amount | requests | tokens。
     #[serde(default)]
     pub metric: Option<String>,
     /// 趋势堆叠维度（trend 专用）：model | channel | group | user | api_key。
@@ -273,6 +273,7 @@ const AGG: &str = "sum(requests) AS reqs, \
                    sum(ttft_sum) AS ttft_s, \
                    sum(ttft_samples) AS ttft_n, \
                    sum(write_tokens) AS write_sum, sum(write_samples) AS write_n, \
+                   sum(read_samples) AS read_n, \
                    sum(cost_samples) AS cost_n, sum(covered_amount) AS covered_spend, sum(covered_cost) AS covered_cost_sum";
 
 /// 一行聚合 → 展示字段（比率全部基点/整数，避免前端拿浮点二次换算）。
@@ -337,7 +338,14 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m.insert("reasoning_tokens".into(), json!(ch_i64(r, "reasoning")));
     m.insert("tokens".into(), json!(prompt.saturating_add(completion)));
     // 口径与门户 breakdown 一致：命中 token / 输入 token
-    m.insert("cache_hit_bp".into(), json!(rate_bp(cached, prompt)));
+    m.insert(
+        "cache_read_known_requests".into(),
+        json!(ch_i64(r, "read_n")),
+    );
+    m.insert(
+        "cache_hit_bp".into(),
+        super::usage_details::cache_rate(cached, prompt, reqs, ch_i64(r, "read_n")),
+    );
     m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
     m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
     m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
@@ -790,7 +798,11 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) ->
             let prompt = m["prompt_tokens"].as_i64().unwrap_or(0);
             let cached = m["cached_tokens"].as_i64().unwrap_or(0);
             m.insert("error_rate_bp".into(), json!(rate_bp(errs, reqs)));
-            m.insert("cache_hit_bp".into(), json!(rate_bp(cached, prompt)));
+            let read_known = m["cache_read_known_requests"].as_i64().unwrap_or(0);
+            m.insert(
+                "cache_hit_bp".into(),
+                super::usage_details::cache_rate(cached, prompt, reqs, read_known),
+            );
             let latency = m["latency_sum_ms"].as_i64().unwrap_or(0);
             let ttft_n = m["ttft_samples"].as_i64().unwrap_or(0);
             m.insert(
@@ -854,12 +866,6 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) ->
                 m.insert("cache_write_tokens".into(), Value::Null);
             }
         }
-        acc.sort_by(|a, b| {
-            b.metrics["amount_micro"]
-                .as_i64()
-                .cmp(&a.metrics["amount_micro"].as_i64())
-                .then_with(|| a.key.cmp(&b.key))
-        });
     }
     acc
 }
@@ -868,17 +874,20 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) ->
 fn previous_ranks(
     prev: &[Value],
     fold_key: &dyn Fn(&str) -> String,
+    metric: BreakdownMetric,
 ) -> HashMap<String, (i64, usize)> {
-    let mut spend: BTreeMap<String, i64> = BTreeMap::new();
+    let mut spend: BTreeMap<String, (i64, i64)> = BTreeMap::new();
     for r in prev {
-        *spend.entry(fold_key(&row_key(r))).or_default() += ch_i64(r, "spend");
+        let values = spend.entry(fold_key(&row_key(r))).or_default();
+        values.0 = values.0.saturating_add(ch_i64(r, "spend"));
+        values.1 = values.1.saturating_add(ch_i64(r, metric.sql_column()));
     }
-    let mut ranked: Vec<(String, i64)> = spend.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let mut ranked: Vec<_> = spend.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.0.cmp(&b.0)));
     ranked
         .into_iter()
         .enumerate()
-        .map(|(i, (k, v))| (k, (v, i + 1)))
+        .map(|(i, (k, v))| (k, (v.0, i + 1)))
         .collect()
 }
 
@@ -928,20 +937,71 @@ fn label_bucket(
     }
 }
 
-/// 拆分的三条 SQL：当前窗口按键聚合 / 当前窗口汇总（占比分母）/ 上一窗口按键金额。
-///
-/// provider 要拿全部渠道行来折叠，故不在 SQL 里 LIMIT；其余维度 SQL 侧截断，
-/// 占比分母另起一条汇总查询（LIMIT 之外的长尾也要算进分母）。上一窗口只取金额、
-/// 不截断：掉出榜单的实体也要给到上期名次。
+#[derive(Clone, Copy)]
+enum BreakdownMetric {
+    Amount,
+    Requests,
+    Tokens,
+}
+
+impl BreakdownMetric {
+    fn parse(value: Option<&str>) -> Result<Self, AppError> {
+        match value.unwrap_or("amount") {
+            "amount" => Ok(Self::Amount),
+            "requests" => Ok(Self::Requests),
+            "tokens" => Ok(Self::Tokens),
+            _ => Err(AppError::bad_request().with_param("metric")),
+        }
+    }
+
+    fn sql_column(self) -> &'static str {
+        match self {
+            Self::Amount => "spend",
+            Self::Requests => "reqs",
+            Self::Tokens => "tokens",
+        }
+    }
+
+    fn field(self) -> &'static str {
+        match self {
+            Self::Amount => "amount_micro",
+            Self::Requests => "requests",
+            Self::Tokens => "tokens",
+        }
+    }
+
+    fn top_buckets(
+        self,
+        rows: &[Value],
+        fold_key: &dyn Fn(&str) -> String,
+        fold_provider: bool,
+        limit: usize,
+    ) -> Vec<Bucket> {
+        let mut buckets = fold_rows(rows, fold_key, fold_provider);
+        buckets.sort_by(|a, b| {
+            b.metrics[self.field()]
+                .as_i64()
+                .cmp(&a.metrics[self.field()].as_i64())
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        buckets.truncate(limit);
+        buckets
+    }
+}
+
+/// 当前排行在 SQL 侧排序后截断，provider 则取全渠道折叠再取 Top N。
+/// 分母查询和上期排行不截断，分别用于全量占比、上期名次及金额环比。
 fn breakdown_sql(
     q: &CubeQuery,
     scope: &Scope,
     key_col: &str,
     fold_provider: bool,
     limit: usize,
+    metric: BreakdownMetric,
 ) -> [String; 3] {
     let current_source = q.source(false);
     let previous_source = q.source(true);
+    let order = metric.sql_column();
     let sql_limit = if fold_provider {
         String::new()
     } else {
@@ -949,24 +1009,65 @@ fn breakdown_sql(
     };
     [
         format!(
-            "SELECT {key_col} AS k, {AGG} FROM {current_source} WHERE {}{} \
-             GROUP BY k ORDER BY spend DESC, k{sql_limit}",
+            "SELECT {key_col} AS k, {AGG}, sum(prompt_tokens) + sum(completion_tokens) AS tokens \
+             FROM {current_source} WHERE {}{} \
+             GROUP BY k ORDER BY {order} DESC, k{sql_limit}",
             q.window(false),
             scope.clause
         ),
         format!(
-            "SELECT sum(amount) AS spend, sum(requests) AS reqs \
+            "SELECT sum(amount) AS spend, sum(requests) AS reqs, \
+             sum(prompt_tokens) + sum(completion_tokens) AS tokens \
              FROM {current_source} WHERE {}{}",
             q.window(false),
             scope.clause
         ),
         format!(
-            "SELECT {key_col} AS k, sum(amount) AS spend \
-             FROM {previous_source} WHERE {}{} GROUP BY k ORDER BY spend DESC, k",
+            "SELECT {key_col} AS k, sum(amount) AS spend, sum(requests) AS reqs, \
+             sum(prompt_tokens) + sum(completion_tokens) AS tokens \
+             FROM {previous_source} WHERE {}{} GROUP BY k ORDER BY {order} DESC, k",
             q.window(true),
             scope.clause
         ),
     ]
+}
+
+/// 排名按所选指标变化；各类占比与金额环比仍保留各自的单位和全量分母。
+fn ranked_metrics(
+    b: &Bucket,
+    rank: usize,
+    prev: Option<&(i64, usize)>,
+    total_spend: i64,
+    total_reqs: i64,
+    total_tokens: i64,
+) -> serde_json::Map<String, Value> {
+    let mut m = b.metrics.clone();
+    let spend = m["amount_micro"].as_i64().unwrap_or(0);
+    let reqs = m["requests"].as_i64().unwrap_or(0);
+    m.insert("key".into(), json!(b.key));
+    m.insert("rank".into(), json!(rank));
+    m.insert("previous_rank".into(), json!(prev.map(|p| p.1)));
+    m.insert(
+        "previous_amount_micro".into(),
+        json!(prev.map_or(0, |p| p.0)),
+    );
+    // 环比（基点）：上期为 0 时无意义给 null，前端显示"新"
+    m.insert(
+        "delta_bp".into(),
+        json!(
+            prev.map(|p| p.0)
+                .filter(|p| *p > 0)
+                .map(|p| spend.saturating_sub(p).saturating_mul(10_000) / p)
+        ),
+    );
+    m.insert("share_bp".into(), json!(rate_bp(spend, total_spend)));
+    m.insert("request_share_bp".into(), json!(rate_bp(reqs, total_reqs)));
+    let tokens = m["tokens"].as_i64().unwrap_or(0);
+    m.insert(
+        "token_share_bp".into(),
+        json!(rate_bp(tokens, total_tokens)),
+    );
+    m
 }
 
 /// GET /admin/stats/breakdown?by=：过滤后按另一维度拆分（Sub2API UserBreakdown 的
@@ -981,6 +1082,7 @@ pub async fn breakdown(
     Query(mut q): Query<CubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
+    let metric = BreakdownMetric::parse(q.metric.as_deref())?;
     let ch = ch_or_disabled(&state)?;
     q.prepare(ch).await?;
     let by = q.by.as_deref().unwrap_or("model");
@@ -994,7 +1096,8 @@ pub async fn breakdown(
     let scope = q.scope();
     let params = scope.borrow();
 
-    let [cur_sql, total_sql, prev_sql] = breakdown_sql(&q, &scope, key_col, fold_provider, limit);
+    let [cur_sql, total_sql, prev_sql] =
+        breakdown_sql(&q, &scope, key_col, fold_provider, limit, metric);
     let cur = ch.query_with_params(&cur_sql, &params).await?;
     let total = ch.query_with_params(&total_sql, &params).await?;
     let prev = ch.query_with_params(&prev_sql, &params).await?;
@@ -1034,38 +1137,24 @@ pub async fn breakdown(
             raw.to_owned()
         }
     };
-    let prev_ranks = previous_ranks(&prev, &fold_key);
-    let mut buckets = fold_rows(&cur, &fold_key, fold_provider);
-    buckets.truncate(limit);
+    let prev_ranks = previous_ranks(&prev, &fold_key, metric);
+    let buckets = metric.top_buckets(&cur, &fold_key, fold_provider, limit);
 
     let total_spend = total.first().map_or(0, |r| ch_i64(r, "spend"));
     let total_reqs = total.first().map_or(0, |r| ch_i64(r, "reqs"));
+    let total_tokens = total.first().map_or(0, |r| ch_i64(r, "tokens"));
     let data: Vec<Value> = buckets
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let mut m = b.metrics.clone();
-            let spend = m["amount_micro"].as_i64().unwrap_or(0);
-            let reqs = m["requests"].as_i64().unwrap_or(0);
-            let prev = prev_ranks.get(&b.key);
-            m.insert("key".into(), json!(b.key));
-            m.insert("rank".into(), json!(i + 1));
-            m.insert("previous_rank".into(), json!(prev.map(|p| p.1)));
-            m.insert(
-                "previous_amount_micro".into(),
-                json!(prev.map_or(0, |p| p.0)),
+            let mut m = ranked_metrics(
+                b,
+                i + 1,
+                prev_ranks.get(&b.key),
+                total_spend,
+                total_reqs,
+                total_tokens,
             );
-            // 环比（基点）：上期为 0 时无意义给 null，前端显示"新"
-            m.insert(
-                "delta_bp".into(),
-                json!(
-                    prev.map(|p| p.0)
-                        .filter(|p| *p > 0)
-                        .map(|p| spend.saturating_sub(p).saturating_mul(10_000) / p)
-                ),
-            );
-            m.insert("share_bp".into(), json!(rate_bp(spend, total_spend)));
-            m.insert("request_share_bp".into(), json!(rate_bp(reqs, total_reqs)));
             label_bucket(&mut m, by, b, &names, &owners);
             Value::Object(m)
         })
@@ -1078,6 +1167,7 @@ pub async fn breakdown(
         "scope": describe_scope(&state, &q).await?,
         "total_amount_micro": total_spend,
         "total_requests": total_reqs,
+        "total_tokens": total_tokens,
         "data": data,
     })))
 }

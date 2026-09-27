@@ -90,7 +90,7 @@ async fn setup() -> Env {
     .await
     .unwrap();
 
-    let state = gateway::build_state(
+    let mut state = gateway::build_state(
         &database_url,
         &redis_url,
         "test-node",
@@ -99,6 +99,10 @@ async fn setup() -> Env {
     )
     .await
     .unwrap();
+    if let (Some(url), Ok(database)) = (ch_url.as_deref(), std::env::var("OKAPI_TEST_CH_DATABASE"))
+    {
+        state.ch = Some(okapi_store::ChClient::new(url, &database).unwrap());
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = console::router(state.clone());
@@ -134,6 +138,7 @@ fn payload(env: &Env, model: &str, amount: i64, is_error: bool) -> Value {
         "log_type": if is_error { 5 } else { 2 },
         "prompt_tokens": 100,
         "cached_tokens": 40,
+        "cache_read_reported": true,
         "completion_tokens": 200,
         "reasoning_tokens": 10,
         "amount_micro": amount,
@@ -427,6 +432,112 @@ async fn breakdown_by_each_dimension() {
     assert_eq!(status, 400);
 }
 
+/// Top N 必须在数据库按所选指标截断，免费高频模型也能上榜；分母包含榜外数据。
+#[tokio::test]
+async fn breakdown_metric_ranks_before_limit_and_preserves_totals() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    let token_model = format!("{}-tokens", env.model_a);
+    let (other_channel, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("{}-other", env.channel_name),
+        "anthropic",
+        "http://127.0.0.1:1/v1",
+        "mock",
+        &[env.model_b.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let expensive = payload(&env, &env.model_a, 100_000, false);
+    let mut heavy = payload(&env, &token_model, 1_000, false);
+    heavy["prompt_tokens"] = json!(1_000);
+    let mut rows = vec![expensive, heavy];
+    for _ in 0..3 {
+        let mut free = payload(&env, &env.model_b, 0, false);
+        free["channel_id"] = json!(other_channel);
+        rows.push(free);
+    }
+    insert_values(&env, &rows, None).await;
+    let base = format!("days=1&user_id={}&limit=1", env.user_id);
+    poll_until(
+        &env,
+        &format!("/admin/stats/breakdown?by=model&{base}"),
+        |b| b["total_requests"] == 5 && b["total_tokens"] == 2_400,
+    )
+    .await;
+
+    for (metric, model, provider, share_field, expected_share) in [
+        ("amount", env.model_a.as_str(), "openai", "share_bp", 9_900),
+        (
+            "requests",
+            env.model_b.as_str(),
+            "anthropic",
+            "request_share_bp",
+            6_000,
+        ),
+        (
+            "tokens",
+            token_model.as_str(),
+            "openai",
+            "token_share_bp",
+            5_000,
+        ),
+    ] {
+        for (by, key) in [("model", model), ("provider", provider)] {
+            let (status, body) = get(
+                &env,
+                &format!("/admin/stats/breakdown?by={by}&metric={metric}&{base}"),
+                &env.super_token,
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(body["data"].as_array().unwrap().len(), 1);
+            assert_eq!(body["data"][0]["key"], key);
+            assert_eq!(body["total_requests"], 5);
+            assert_eq!(body["total_tokens"], 2_400);
+            assert_eq!(body["total_amount_micro"], 101_000);
+            if by == "model" {
+                assert_eq!(body["data"][0][share_field], expected_share);
+            }
+        }
+    }
+    // 历史名次跟随所选指标，而金额环比继续使用真实金额。
+    let yesterday = chrono::Utc::now().date_naive() - chrono::Duration::days(1);
+    let mut previous = rows.clone();
+    for row in &mut previous {
+        row["request_id"] = json!(Uuid::new_v4());
+    }
+    insert_values(&env, &previous, Some(&format!("{yesterday}T12:00:00Z"))).await;
+    poll_until(
+        &env,
+        &format!("/admin/stats/breakdown?by=model&metric=requests&{base}"),
+        |b| b["data"][0]["previous_rank"] == 1,
+    )
+    .await;
+    let (_, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?by=model&metric=tokens&{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(body["data"][0]["previous_rank"], 1);
+    assert_eq!(body["data"][0]["previous_amount_micro"], 1_000);
+    assert_eq!(body["data"][0]["delta_bp"], 0);
+
+    let (status, body) = get(
+        &env,
+        &format!("/admin/stats/breakdown?metric=unknown&{base}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "metric");
+}
+
 /// 流向：五阶段节点齐全、相邻链接守恒、限定单用户时覆盖率 100%、
 /// limit=1 时次要模型折进 `__other`。
 #[tokio::test]
@@ -655,6 +766,46 @@ async fn insert_values(env: &Env, rows: &[Value], day: Option<&str>) {
             .bind(row).bind(day).execute(&env.pg).await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn cache_reporting_distinguishes_unknown_from_zero_across_admin_views() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        return;
+    }
+    let mut known = payload(&env, &env.model_a, 1000, false);
+    known["cached_tokens"] = json!(0);
+    known["cache_write_tokens"] = json!(0);
+    known["cache_write_reported"] = json!(true);
+    insert_values(&env, &[known.clone()], None).await;
+    let path = format!("/admin/stats/trend?user_id={}&days=7", env.user_id);
+    let report = poll_until(&env, &path, |body| body["total"]["requests"] == 1).await;
+    assert_eq!(report["total"]["cache_hit_bp"], 0);
+    assert_eq!(report["total"]["cache_read_known_requests"], 1);
+    assert_eq!(report["total"]["cache_write_tokens"], 0);
+    known["request_id"] = json!(Uuid::new_v4());
+    known["cache_read_reported"] = json!(false);
+    known["cache_write_reported"] = json!(false);
+    insert_values(&env, &[known], None).await;
+    let report = poll_until(&env, &path, |body| body["total"]["requests"] == 2).await;
+    assert!(report["total"]["cache_hit_bp"].is_null());
+    assert!(report["total"]["cache_write_tokens"].is_null());
+    assert_eq!(report["total"]["cache_read_known_requests"], 1);
+    for path in [
+        format!("/admin/stats/breakdown?user_id={}&by=model", env.user_id),
+        format!("/admin/logs/stat?user_id={}", env.user_id),
+    ] {
+        let (status, body) = get(&env, &path, &env.super_token).await;
+        assert_eq!(status, 200, "{body}");
+        let row = body
+            .get("data")
+            .and_then(Value::as_array)
+            .and_then(|data| data.first())
+            .unwrap_or(&body);
+        assert!(row["cache_hit_bp"].is_null(), "{body}");
+        assert_eq!(row["cache_read_known_requests"], 1, "{body}");
+    }
+}
 fn advanced_payload(
     env: &Env,
     upstream: &str,
@@ -675,6 +826,7 @@ fn advanced_payload(
     row["upstream_cost_known"] = json!(known);
     row["upstream_cost_micro"] = json!(cost);
     row["cache_write_tokens"] = json!(0);
+    row["cache_write_reported"] = json!(true);
     row
 }
 

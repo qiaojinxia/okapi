@@ -1,9 +1,11 @@
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  ChevronRight,
+  CalendarDays,
+  ChevronDown,
+  SlidersHorizontal,
   Download,
   RotateCw,
   ScrollText,
@@ -21,6 +23,11 @@ import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { Segmented } from '@/components/ui/segmented'
+import { RowExpander } from '@/components/ui/row-expander'
+import { ModelSearchInput } from '@/features/models/model-input'
+import { EntitySearchInput, malformedEntityId, validEntityId } from '@/features/entity-search/EntitySearchInput'
+import type { EntityKind, EntityOption } from '@/features/entity-search/EntitySearchInput'
+import type { ScopeEcho } from '@/features/analytics/types'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { InlineStat } from '@/components/ui/stat'
 import { EmptyState, ErrorState } from '@/components/ui/state'
@@ -33,7 +40,6 @@ import { downloadCsv, microToUsd } from '@/lib/csv'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney, formatMoneyAggregate } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
-import { cn } from '@/lib/utils'
 
 /// 检索条件（受控草稿 → 点查询才提交）。
 ///
@@ -56,6 +62,15 @@ interface Draft {
 
 const DEFAULT_HOURS = 24
 const PAGE = 50
+const numericFilters = ['user_id', 'api_key_id', 'channel_id'] as const
+function invalidId(value: string): boolean {
+  return !validEntityId(value)
+}
+
+function validRange(draft: Pick<Draft, 'from' | 'to'>): boolean {
+  const from = toIso(draft.from), to = toIso(draft.to)
+  return from !== undefined && (draft.to === '' || (to !== undefined && Date.parse(to) >= Date.parse(from)))
+}
 
 /// RFC3339（UTC）→ datetime-local 输入值（本地时区，分钟精度）。
 function toLocalInput(iso: string | undefined): string {
@@ -121,6 +136,8 @@ interface LogRow {
   user_id: number
   username: string
   api_key_id: number
+  key_name?: string
+  key_prefix?: string
   group: string
   model: string
   channel_id: number
@@ -162,7 +179,7 @@ interface StatResp {
   discount_micro: number
   users: number
   cached_tokens: number
-  cache_hit_bp: number
+  cache_hit_bp: number | null
   rpm: number
   tpm: number
   rate_source: string
@@ -211,29 +228,43 @@ export function AdminLogsPage() {
   // 页宽档位到 200 为止（后端钳制上限）；CH 明细不 count，翻页靠"本页满 = 可能还有"。
   // 页码也在地址里；`commit` 整体替换 search 时不带 page，过滤一变自然回第一页
   const pager = usePagination({ limit: PAGE, pageSizes: [50, 100, 200] })
+  const logs = useAdminLogs(applied, pager)
+  const rows = logs.isError || logs.isPlaceholderData ? [] : logs.data?.data ?? []
+  const scope = logs.isError || logs.isPlaceholderData ? undefined : logs.data?.scope
+  const known: Partial<Record<EntityKind, EntityOption[]>> = {
+    user: rows.filter((row) => row.username).map((row) => ({ id: row.user_id, name: row.username })),
+    channel: rows.filter((row) => row.channel_name && row.channel_id > 0).map((row) => ({ id: row.channel_id, name: row.channel_name, description: row.provider })),
+    api_key: rows.filter((row) => row.key_name || row.key_prefix).map((row) => ({ id: row.api_key_id, name: row.key_name || t('flow:unnamed_api_key'), description: [row.username, row.key_prefix ? `${row.key_prefix}…` : undefined].filter(Boolean).join(' · ') })),
+  }
+  // 回填按已提交 ID 匹配；旧页占位数据和其他对象的名字不能套到新条件上。
+  if (scope?.user && scope.user.id === search.user_id && scope.user.username != null) known.user?.push({ id: scope.user.id, name: scope.user.username || t('flow:unnamed_user') })
+  if (scope?.channel && scope.channel.id === search.channel_id && scope.channel.name != null) known.channel?.push({ id: scope.channel.id, name: scope.channel.name || t('flow:unnamed_channel'), description: scope.channel.provider ?? undefined })
+  if (scope?.api_key && scope.api_key.id === search.api_key_id && scope.api_key.name != null) known.api_key?.push({
+    id: scope.api_key.id, name: scope.api_key.name || t('flow:unnamed_api_key'),
+    description: [scope.api_key.username, scope.api_key.key_prefix ? `${scope.api_key.key_prefix}…` : undefined].filter(Boolean).join(' · '),
+  })
 
   const commit = (next: Draft) => {
+    if (numericFilters.some((field) => invalidId(next[field])) || ((next.from || next.to) && !validRange(next))) return
     void navigate({ search: toSearch(next) })
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('admin:logsNav')}
         description={t('admin:logsDesc')}
         icon={ScrollText}
-        action={
-          <RangePicker
-            draft={draft}
-            onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
-            onRange={(from, to) => setDraft({ ...draft, from, to })}
-            onApplyRange={() => commit(draft)}
-          />
-        }
+      />
+      <RangePicker
+        draft={draft}
+        onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
+        onRange={(from, to) => setDraft({ ...draft, from, to })}
+        onApplyRange={() => commit(draft)}
       />
       <StatBar applied={applied} />
-      <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} />
-      <LogTable applied={applied} pager={pager} />
+      <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} known={known} />
+      <LogTable applied={applied} pager={pager} q={logs} />
     </div>
   )
 }
@@ -260,43 +291,58 @@ function RangePicker({
     { h: 720, label: t('admin:logsHours720') },
   ]
   const absolute = draft.from !== ''
+  const [customOpen, setCustomOpen] = useState(Boolean(draft.from || draft.to))
+  useEffect(() => { if (draft.from || draft.to) setCustomOpen(true) }, [draft.from, draft.to])
+  const valid = validRange(draft)
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') onApplyRange()
+    if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (valid) onApplyRange() }
   }
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <section aria-label={t('admin:logsRange')} className="flex min-w-0 flex-wrap items-start justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2">
       <Segmented
         size="sm"
         ariaLabel={t('admin:logsRange')}
         // 绝对区间生效时没有预设被选中：传一个不存在的值让全部熄灭
         value={absolute ? -1 : draft.hours}
-        onChange={(h) => onPreset(h)}
+        onChange={(h) => { setCustomOpen(false); onPreset(h) }}
         options={options.map((o) => ({ value: o.h, label: o.label }))}
       />
-      <span className="mx-1 hidden h-5 w-px bg-border sm:block" aria-hidden />
-      <div className="flex items-center gap-1.5">
-        <Input
-          type="datetime-local"
-          className="h-8 w-44 text-xs"
-          aria-label={t('admin:logsFrom')}
-          value={draft.from}
-          onChange={(e) => onRange(e.target.value, draft.to)}
-          onKeyDown={onKey}
-        />
-        <span className="text-xs text-muted-foreground">→</span>
-        <Input
-          type="datetime-local"
-          className="h-8 w-44 text-xs"
-          aria-label={t('admin:logsTo')}
-          value={draft.to}
-          onChange={(e) => onRange(draft.from, e.target.value)}
-          onKeyDown={onKey}
-        />
-        <Button size="sm" variant={absolute ? 'default' : 'outline'} disabled={!absolute} onClick={onApplyRange}>
-          {t('admin:logsApplyRange')}
-        </Button>
-      </div>
-    </div>
+      <details open={customOpen} onToggle={(event) => setCustomOpen(event.currentTarget.open)} className="min-w-0 max-w-full open:w-full">
+        <summary className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40">
+          <CalendarDays aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <span className="break-words">{absolute ? `${draft.from.replace('T', ' ')} — ${draft.to.replace('T', ' ') || t('admin:logsUntilNow')}` : t('admin:logsCustomRange')}</span>
+        </summary>
+        <div className="mt-2 grid min-w-0 gap-3 border-t border-border pt-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,20rem)_max-content] sm:items-end">
+          <Field label={t('admin:logsFrom')} htmlFor="logs-from">
+            <Input
+              id="logs-from"
+              type="datetime-local"
+              className="h-11 min-w-0 w-full md:h-9"
+              aria-label={t('admin:logsFrom')}
+              value={draft.from}
+              onChange={(e) => onRange(e.target.value, draft.to)}
+              onKeyDown={onKey}
+            />
+          </Field>
+          <Field label={t('admin:logsTo')} htmlFor="logs-to">
+            <Input
+              id="logs-to"
+              type="datetime-local"
+              className="h-11 min-w-0 w-full md:h-9"
+              aria-label={t('admin:logsTo')}
+              value={draft.to}
+              onChange={(e) => onRange(draft.from, e.target.value)}
+              onKeyDown={onKey}
+            />
+          </Field>
+          <Button className="min-h-11 md:min-h-9" variant={absolute ? 'default' : 'outline'} disabled={!valid} onClick={onApplyRange}>
+            {t('admin:logsApplyRange')}
+          </Button>
+        </div>
+        <p className="mt-2 text-xs text-muted-foreground">{t('admin:logsLocalTime')}</p>
+        {(draft.from || draft.to) && !valid && <p role="alert" className="mt-1 text-xs text-destructive">{t('admin:logsInvalidRange')}</p>}
+      </details>
+    </section>
   )
 }
 
@@ -334,7 +380,7 @@ function StatBar({ applied }: { applied: Draft }) {
           errBp >= 500 ? 'bad' : errBp >= 100 ? 'warn' : undefined,
         )}
         {cell(t('admin:kpiTokens'), s ? formatCount(s.tokens, locale) : '—')}
-        {cell(t('admin:logsStatCacheHit'), s ? formatBp(s.cache_hit_bp, locale) : '—')}
+        {cell(t('admin:logsStatCacheHit'), s?.cache_hit_bp != null ? formatBp(s.cache_hit_bp, locale) : '—')}
         {cell(t('admin:logsStatUsers'), s ? formatCount(s.users, locale) : '—')}
         {cell('RPM', s ? formatCount(s.rpm, locale) : '—')}
         {cell('TPM', s ? formatCount(s.tpm, locale) : '—')}
@@ -352,27 +398,48 @@ function FilterBar({
   draft,
   onChange,
   onApply,
+  known,
 }: {
   draft: Draft
   onChange: (d: Draft) => void
   onApply: () => void
+  known: Partial<Record<EntityKind, EntityOption[]>>
 }) {
   const { t } = useTranslation()
+  const advancedValues = [draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id]
+  const advancedKey = JSON.stringify(advancedValues)
+  const advancedCount = advancedValues.filter((value) => value.trim()).length
+  const [advancedOpen, setAdvancedOpen] = useState(advancedCount > 0)
+  const [blurred, setBlurred] = useState<Partial<Record<(typeof numericFilters)[number], boolean>>>({})
+  useEffect(() => { if ((JSON.parse(advancedKey) as string[]).some((value) => value.trim())) setAdvancedOpen(true) }, [advancedKey])
+  const invalid = numericFilters.some((field) => invalidId(draft[field])) || Boolean((draft.from || draft.to) && !validRange(draft))
   const text = (
-    field: 'model' | 'user_id' | 'api_key_id' | 'channel_id' | 'error_code' | 'request_id',
+    field: 'error_code' | 'request_id',
     label: string,
     placeholder?: string,
   ) => (
     <Field label={label} htmlFor={`lf-${field}`}>
       <Input
         id={`lf-${field}`}
-        className="h-8 font-mono text-xs"
+        className="h-11 font-mono text-sm md:h-9 md:text-xs"
         value={draft[field]}
         placeholder={placeholder}
         onChange={(e) => onChange({ ...draft, [field]: e.target.value })}
       />
     </Field>
   )
+  const entity = (field: (typeof numericFilters)[number], kind: EntityKind, label: string) => {
+    const error = invalidId(draft[field]) && (blurred[field] || malformedEntityId(draft[field]))
+    return <Field label={label} htmlFor={`lf-${field}`}>
+      <EntitySearchInput id={`lf-${field}`} kind={kind} knownOptions={known[kind]} value={draft[field]}
+        inputClassName="h-11 md:h-9"
+        aria-invalid={error || undefined} aria-describedby={error ? `lf-${field}-error` : undefined}
+        onChange={(value) => { setBlurred((prev) => ({ ...prev, [field]: false })); onChange({ ...draft, [field]: value }) }}
+        onBlur={() => setBlurred((prev) => ({ ...prev, [field]: true }))}
+        onSubmit={() => { setBlurred((prev) => ({ ...prev, [field]: true })); if (!invalid) onApply() }} />
+      {error && <span id={`lf-${field}-error`} className="text-xs text-destructive">{t(malformedEntityId(draft[field]) ? 'analytics:invalidFilterId' : 'analytics:entitySelectionRequired')}</span>}
+    </Field>
+  }
   const active = [draft.model, draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id]
     .filter((v) => v.trim() !== '').length + (draft.errors_only ? 1 : 0)
   return (
@@ -380,25 +447,21 @@ function FilterBar({
       <form
         onSubmit={(e) => {
           e.preventDefault()
-          onApply()
+          if (!invalid) onApply()
         }}
+        onKeyDown={(event) => { if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault() }}
       >
         <CardContent className="flex flex-col gap-3 p-4">
-          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
-            {text('model', t('pricing:model'), 'gpt-4o')}
-            {text('user_id', t('admin:logsUserId'), '42')}
-            {text('api_key_id', t('admin:logsKeyId'), '7')}
-            {text('channel_id', t('admin:logsChannelId'), '7')}
-            {text('error_code', t('admin:logsErrorCode'), 'upstream_error')}
-            {text('request_id', t('admin:logsRequestId'), 'uuid')}
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <ModelSearchInput id="lf-model" className="w-full md:max-w-sm md:flex-1 md:basis-72" aria-label={t('pricing:model')}
+              inputClassName="h-11 md:h-9" placeholder={t('portal:logsModelHint')}
+              value={draft.model} onChange={(model) => onChange({ ...draft, model })} onSubmit={() => { if (!invalid) onApply() }} />
             <Switch
               checked={draft.errors_only}
               onChange={(v) => onChange({ ...draft, errors_only: v })}
               label={t('admin:logsErrorsOnly')}
             />
-            <div className="flex items-center gap-2">
+            <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
               {active > 0 && (
                 <Button
                   type="button"
@@ -420,40 +483,61 @@ function FilterBar({
                   {t('common:clearFilters')}
                 </Button>
               )}
-              <Button type="submit" size="sm">
+              <Button type="submit" size="sm" className="min-h-11 md:min-h-9" disabled={invalid}>
                 <Search className="h-3.5 w-3.5" />
                 {t('common:search')}
               </Button>
             </div>
           </div>
+          <details open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)} className="group min-w-0 border-t border-border pt-2">
+            <summary className="flex min-h-9 cursor-pointer items-center gap-2 rounded text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40">
+              <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />{t('admin:logsMoreFilters')}{advancedCount > 0 && <Badge variant="muted">{advancedCount}</Badge>}
+              <ChevronDown aria-hidden className="ml-auto h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="mt-2 grid items-start gap-3 md:grid-cols-[repeat(3,minmax(0,20rem))]">
+              {entity('user_id', 'user', t('analytics:dimUser'))}
+              {entity('api_key_id', 'api_key', t('analytics:dimApiKey'))}
+              {entity('channel_id', 'channel', t('analytics:dimChannel'))}
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,32rem)]">
+              {text('error_code', t('admin:logsErrorCode'), 'upstream_error')}
+              {text('request_id', t('admin:logsRequestId'), 'uuid')}
+            </div>
+          </details>
         </CardContent>
       </form>
     </Card>
   )
 }
 
-function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
-  const { t, i18n } = useTranslation()
-  const locale = i18n.language
-  const [expanded, setExpanded] = useState<string | null>(null)
+function useAdminLogs(applied: Draft, pager: Pager) {
   const params = toParams(applied, pager.offset, pager.limit)
-  const q = useQuery({
+  return useQuery({
     queryKey: qk.adminLogs(params),
-    queryFn: () => apiFetch<{ data: LogRow[] }>(`/admin/logs?${params}`),
+    queryFn: () => apiFetch<{ data: LogRow[]; scope?: ScopeEcho }>(`/admin/logs?${params}`),
     // 翻页时保留上一页数据，避免表格闪空
     placeholderData: keepPreviousData,
     retry: false,
   })
+}
+
+function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: ReturnType<typeof useAdminLogs> }) {
+  const { t, i18n } = useTranslation()
+  const locale = i18n.language
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const detailId = useId()
+  const params = toParams(applied, pager.offset, pager.limit)
+  useEffect(() => { setExpanded(null) }, [params])
 
   if (q.isError) {
     return <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
   }
   if (q.isPending) {
-    return <TableSkeleton rows={10} cols={9} />
+    return <TableSkeleton dense rows={10} cols={9} />
   }
   const rows = q.data.data
   return (
-    <div className="flex flex-col gap-2">
+    <div className="list-page-section">
       {/* 工具栏两组按钮窄屏下允许整组换行；按钮自身永不折行（Button 基类） */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2">
@@ -472,13 +556,11 @@ function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
             {t('portal:logsExport')}
           </Button>
         </div>
-        {/* CH 明细无 total 计数（count 要多扫一遍），按"整页 = 可能有下一页"翻 */}
-        <Pagination {...pager} hasMore={rows.length >= pager.limit} />
       </div>
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />
       ) : (
-        <Table dense stickyHeader>
+        <Table dense stickyHeader wrapperClassName="[container-type:inline-size]">
           <THead>
             <Tr>
               <Th className="w-6" />
@@ -504,8 +586,8 @@ function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
                   aria-expanded={open}
                   onClick={() => setExpanded(open ? null : r.request_id)}
                 >
-                  <Td className="pr-0 text-muted-foreground">
-                    <ChevronRight className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-90')} />
+                  <Td className="px-1 text-muted-foreground">
+                    <RowExpander open={open} name={r.request_id} controls={`${detailId}-${r.request_id}`} onToggle={() => setExpanded(open ? null : r.request_id)} />
                   </Td>
                   <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{r.ts.slice(5, 19)}</Td>
                   <Td>
@@ -515,13 +597,13 @@ function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
                       <Badge dot variant="success">{t('logs:ok')}</Badge>
                     )}
                   </Td>
-                  <Td className="max-w-28 truncate text-xs">
-                    {r.username || `#${r.user_id}`}
+                  <Td className="max-w-28 truncate text-xs" title={r.username || undefined}>
+                    {r.username || `ID ${r.user_id}`}
                   </Td>
                   {/* 表格已可横向滚动，模型名不该在格内被从中间折断 */}
                   <Td className="whitespace-nowrap font-mono text-xs">{r.model}</Td>
-                  <Td className="max-w-32 truncate text-xs">
-                    {r.channel_name || (r.channel_id > 0 ? `#${r.channel_id}` : '—')}
+                  <Td className="max-w-32 truncate text-xs" title={r.channel_name || undefined}>
+                    {r.channel_name || (r.channel_id > 0 ? `ID ${r.channel_id}` : t('admin:dashboardUnassignedChannel'))}
                   </Td>
                   <Td numeric className="whitespace-nowrap text-xs">
                     {formatCount(r.usage.prompt_tokens, locale)}
@@ -544,7 +626,7 @@ function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
                   <Td className="text-xs text-muted-foreground">{r.client_type || '—'}</Td>
                 </Tr>
                 {open && (
-                  <Tr className="hover:bg-transparent">
+                  <Tr id={`${detailId}-${r.request_id}`} className="hover:bg-transparent">
                     <Td colSpan={10} className="bg-muted/30 p-0">
                       <RowDetail row={r} />
                     </Td>
@@ -556,6 +638,8 @@ function LogTable({ applied, pager }: { applied: Draft; pager: Pager }) {
           </TBody>
         </Table>
       )}
+      {/* CH 明细无 total 计数，按“整页 = 可能有下一页”翻。 */}
+      <Pagination {...pager} hasMore={rows.length >= pager.limit} />
     </div>
   )
 }
@@ -592,6 +676,8 @@ function exportCsv(rows: LogRow[]) {
       'request_id',
       'upstream_request_id',
       'node',
+      'key_name',
+      'key_prefix',
     ],
     rows.map((r) => [
       r.ts,
@@ -622,6 +708,8 @@ function exportCsv(rows: LogRow[]) {
       r.request_id,
       r.upstream_request_id,
       r.node,
+      r.key_name ?? '',
+      r.key_prefix ?? '',
     ]),
   )
 }
@@ -734,7 +822,18 @@ function RowDetail({ row }: { row: LogRow }) {
     </div>
   )
   return (
-    <div className="flex flex-col gap-3 px-4 py-3 text-xs animate-fade-in">
+    <div className="sticky left-0 flex w-[100cqw] max-w-full flex-col gap-3 px-4 py-3 text-xs animate-fade-in">
+      <dl aria-label={t('admin:logsObjects')} className="grid gap-3 rounded-lg border border-border bg-card p-3 sm:grid-cols-3">
+        {[
+          { label: t('analytics:dimUser'), name: row.username, id: row.user_id },
+          { label: t('analytics:dimApiKey'), name: row.key_name || (row.key_prefix ? t('flow:unnamed_api_key') : undefined), id: row.api_key_id, prefix: row.key_prefix },
+          { label: t('analytics:dimChannel'), name: row.channel_name || (row.channel_id <= 0 ? t('admin:dashboardUnassignedChannel') : undefined), id: row.channel_id },
+        ].map((object) => <div key={object.label} className="min-w-0 space-y-1">
+          <dt className="text-xs text-muted-foreground">{object.label}</dt>
+          <dd className="break-words text-sm font-medium [overflow-wrap:anywhere]">{object.name || t('admin:logsNameUnavailable')}</dd>
+          <dd className="break-all text-xs text-muted-foreground">{object.id > 0 ? `ID ${object.id}` : '—'}{object.prefix ? ` · ${object.prefix}…` : ''}</dd>
+        </div>)}
+      </dl>
       <div className="grid gap-3 lg:grid-cols-3">
         {section(
           t('admin:logsDetailIdentity'),
@@ -752,14 +851,13 @@ function RowDetail({ row }: { row: LogRow }) {
             {item(t('admin:logsNode'), row.node || '—')}
             {row.client_ip && item('IP', row.client_ip)}
             {item(t('logs:group'), row.group)}
-            {item('Key', `#${row.api_key_id}`)}
           </>,
         )}
         {section(
           t('admin:logsDetailRouting'),
           <>
             {item(t('admin:provider'), row.provider || '—')}
-            {item(t('admin:logsChannelKey'), `#${row.channel_key_id}`)}
+            {item(t('admin:logsChannelKey'), row.channel_key_id > 0 ? `ID ${row.channel_key_id}` : '—')}
             {item(t('admin:logsUpstreamStatus'), String(row.upstream_status || '—'))}
             {item(t('admin:logsRetries'), String(row.retry_count))}
             {item(t('admin:statFailovers'), String(row.failover_count))}

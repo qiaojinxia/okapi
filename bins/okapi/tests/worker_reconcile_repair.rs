@@ -201,6 +201,87 @@ async fn repair_preserves_in_flight_reservations() {
     );
 }
 
+/// Durable provider jobs must survive the synchronous timeout sweeper and cold Redis repair.
+#[tokio::test]
+async fn durable_holds_survive_expiry_sweeps_and_worker_repair()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use fred::interfaces::KeysInterface;
+    use okapi_ledger::holds::{self, Admission, Reserve};
+    use okapi_pricing::{PricingSnapshot, RatioFp};
+    let bed = setup().await;
+    let id = Uuid::new_v4();
+    let pricing = PricingSnapshot {
+        epoch: 7,
+        mode: "per_call",
+        model_ratio: None,
+        completion_ratio: None,
+        cache_ratio: None,
+        cache_write_ratio: None,
+        audio_ratio: None,
+        audio_completion_ratio: None,
+        image_ratio: None,
+        per_call_price_usd: Some(Money::from_micros(500_000)),
+        service_tier: None,
+        tier_ratio: None,
+        group: "default".into(),
+        group_ratio: RatioFp::ONE,
+        user_multiplier: RatioFp::ONE,
+        rules: vec![],
+        media_units: Some(3),
+        final_unit_price_input_per_1m_usd: None,
+    };
+    let request = || Reserve {
+        id,
+        user_id: bed.user_id,
+        api_key_id: bed.api_key_id,
+        model: "batch-image",
+        request_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        maximum: Money::from_micros(1_500_000),
+        pricing: &pricing,
+    };
+    assert!(matches!(
+        holds::reserve(&bed.pg, &bed.ledger, request(), chrono::Utc::now()).await?,
+        Admission::Held {
+            replayed: false,
+            ..
+        }
+    ));
+    assert!(drift_of(&bed).await.is_none());
+    let future = chrono::Utc::now()
+        .checked_add_signed(chrono::TimeDelta::days(2))
+        .ok_or("test time")?;
+    worker::sweep_expired_reservations(&bed.pg, &bed.ledger, future).await?;
+    assert_eq!(
+        bed.ledger.balance(bed.user_id).await?.as_micros(),
+        7_500_000
+    );
+    assert_eq!(
+        holds::inflight(&bed.ledger, bed.user_id)
+            .await?
+            .0
+            .as_micros(),
+        1_500_000
+    );
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
+    let _: i64 = redis
+        .del(vec![
+            format!("bal:{{{}}}", bed.user_id),
+            format!("hold:{{{}}}:{id}", bed.user_id),
+        ])
+        .await?;
+    let repaired = worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+        .await?
+        .ok_or("missing user")?;
+    assert_eq!(repaired.redis_after_micro, 7_500_000);
+    assert_eq!(repaired.inflight_micro, 1_500_000);
+    assert!(matches!(
+        holds::reserve(&bed.pg, &bed.ledger, request(), chrono::Utc::now()).await?,
+        Admission::Held { replayed: true, .. }
+    ));
+    assert!(drift_of(&bed).await.is_none());
+    Ok(())
+}
+
 /// 端点：权限闸、既不指定用户也不给 all 时拒绝、单用户修复、批量修复。
 #[tokio::test]
 async fn repair_endpoint_guards_and_repairs() {

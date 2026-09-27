@@ -157,6 +157,9 @@ impl From<LedgerError> for AppError {
                 Self::new(StatusCode::CONFLICT, "subscription_active").with_param(plan_code)
             }
             LedgerError::Store(err) => Self::from(err),
+            LedgerError::UserNotFound => {
+                Self::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param("user_id")
+            }
             // 账本故障 fail-closed：宁停不错账（IMPLEMENTATION §12.2）
             err => {
                 tracing::error!(error = %err, "ledger error (fail-closed)");

@@ -36,8 +36,9 @@ export type { NavItem, NavGroup } from '@/components/sidebar-nav'
 
 const SIDEBAR_STORAGE = 'okapi.sidebar'
 
-function loadCollapsed(): boolean {
-  return localStorage.getItem(SIDEBAR_STORAGE) === 'rail'
+function loadCollapsed(): boolean | null {
+  const saved = localStorage.getItem(SIDEBAR_STORAGE)
+  return saved === 'rail' ? true : saved === 'full' ? false : null
 }
 
 /// 三区布局：左侧分组导航 + 顶部栏（当前页标题 / 身份 / 工具）+ 内容区。
@@ -59,8 +60,10 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
   const [open, setOpen] = useState(false)
   const [collapsedPref, setCollapsedPref] = useState(loadCollapsed)
   const desktop = useMediaQuery('(min-width: 768px)')
+  const wideDesktop = useMediaQuery('(min-width: 1280px)')
   // 图标栏只是桌面形态；移动端同一状态渲染成全宽抽屉
-  const rail = collapsedPref && desktop
+  // 未作选择时为小桌面让出内容空间；显式展开或收起后始终尊重该偏好。
+  const rail = desktop && (collapsedPref ?? !wideDesktop)
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const can = usePermission()
   const panel = useRef<HTMLElement>(null)
@@ -75,10 +78,9 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
   }, [mobileOpen])
 
   const toggleCollapsed = () => {
-    setCollapsedPref((v) => {
-      localStorage.setItem(SIDEBAR_STORAGE, v ? 'full' : 'rail')
-      return !v
-    })
+    const next = !rail
+    localStorage.setItem(SIDEBAR_STORAGE, next ? 'rail' : 'full')
+    setCollapsedPref(next)
   }
 
   // 换页即关移动端抽屉

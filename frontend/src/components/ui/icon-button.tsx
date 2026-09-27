@@ -45,7 +45,7 @@ export function IconButton({
           onClick()
         }}
         className={cn(
-          'h-7 w-7 text-muted-foreground hover:text-foreground [&_svg]:h-3.5 [&_svg]:w-3.5',
+          'h-11 w-11 shrink-0 text-muted-foreground hover:text-foreground md:h-8 md:w-8 [&_svg]:h-4 [&_svg]:w-4',
           variant === 'destructive' && 'hover:bg-destructive/10 hover:text-destructive',
           className,
         )}

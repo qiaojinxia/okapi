@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
 use serde::Deserialize;
@@ -125,7 +125,7 @@ async fn handle(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    match state
+    let reservation_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -140,7 +140,7 @@ async fn handle(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -152,7 +152,7 @@ async fn handle(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     // —— 预扣已建立：失败路径必须退款 ——
     let url = format!(
@@ -198,8 +198,9 @@ async fn handle(
                 started,
                 true,
                 None,
+                reservation_pool,
             )
-            .await;
+            .await?;
             let mut out = Response::builder()
                 .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
                 .header(header::CONTENT_TYPE, content_type)
@@ -220,8 +221,9 @@ async fn handle(
                 started,
                 false,
                 Some(i16::try_from(status).unwrap_or(0)),
+                reservation_pool,
             )
-            .await;
+            .await?;
             let out = Response::builder()
                 .status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY))
                 .header(header::CONTENT_TYPE, "application/json")
@@ -240,8 +242,9 @@ async fn handle(
                 started,
                 false,
                 None,
+                reservation_pool,
             )
-            .await;
+            .await?;
             Err(AppError::new(
                 StatusCode::BAD_GATEWAY,
                 codes::UPSTREAM_ERROR,
@@ -261,38 +264,29 @@ async fn settle(
     started: Instant,
     success: bool,
     upstream_status: Option<i16>,
-) {
+    reservation_pool: Pool,
+) -> Result<(), AppError> {
     let book = state.pricebook.load();
     let (billing_state, log_type, event_type, delta, amount, pool) = if success {
-        match state
-            .ledger
-            .commit(key.user_id, key.key_id, request_id, quote.amount)
-            .await
-        {
-            Ok(CommitOutcome::Committed { pool, .. }) => (
-                BillingState::Committed,
-                2_i16,
-                "commit",
-                quote.amount.as_micros().saturating_neg(),
-                quote.amount,
-                pool,
-            ),
-            Ok(CommitOutcome::NoReservation) => return,
-            Err(err) => {
-                tracing::error!(request_id = %request_id, error = %err, "custom_pass 结算失败（悬置待清理）");
-                return;
-            }
-        }
+        (
+            BillingState::Committed,
+            2_i16,
+            "commit",
+            quote.amount.as_micros().saturating_neg(),
+            quote.amount,
+            reservation_pool,
+        )
     } else {
         let pool = match state
             .ledger
             .refund(key.user_id, key.key_id, request_id)
             .await
         {
-            Ok(r) => r.pool,
+            Ok(r) if !r.released.is_zero() => r.pool,
+            Ok(_) => reservation_pool,
             Err(err) => {
                 tracing::error!(request_id = %request_id, error = %err, "custom_pass 退款失败（悬置待清理）");
-                Pool::Wallet
+                reservation_pool
             }
         };
         (BillingState::Failed, 5_i16, "refund", 0, Money::ZERO, pool)
@@ -338,8 +332,9 @@ async fn settle(
         event_type,
         pool,
     };
-    state.settle_write(input).await;
-    if success {
+    if !success {
+        state.settle_write(input).await;
+    } else if state.settle_success(input).await? {
         super::auth::record_settlement_counters(
             state,
             key.user_id,
@@ -349,4 +344,5 @@ async fn settle(
         )
         .await;
     }
+    Ok(())
 }

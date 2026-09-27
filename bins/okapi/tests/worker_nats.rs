@@ -1,8 +1,7 @@
 //! M2 NATS 传输拆分验收：outbox → relay → JetStream → chsink(JS) → ClickHouse，
 //! 以及 pricing.epoch 广播即时热更（30s 轮询兜底之上的主通道）。
 //! 需要 OKAPI_NATS_URL + OKAPI_CLICKHOUSE_URL（scripts/dev-deps.sh up）；未配置时软跳过。
-//! 注：CI 的 GitHub services 无法给 nats 镜像传 `-js` 参数，因此 CI 不设 OKAPI_NATS_URL，
-//! 本文件在 CI 软跳过，由本地/dev 环境覆盖。
+//! CI 单独启动带 -js 的 NATS。已配置服务但连接失败必须报错，不能伪装为测试通过。
 
 use okapi::worker::nats_relay;
 use okapi_store::ChClient;
@@ -37,13 +36,9 @@ async fn setup() -> Option<NatsEnv> {
     let ch = ChClient::new(&ch_url, "okapi").unwrap();
     assert!(ch.ping().await, "ClickHouse 不可达：{ch_url}");
     ch.ensure_schema().await.unwrap();
-    let client = match async_nats::connect(&nats_url).await {
-        Ok(c) => c,
-        Err(err) => {
-            eprintln!("跳过：NATS 不可达（{err}）");
-            return None;
-        }
-    };
+    let client = async_nats::connect(&nats_url)
+        .await
+        .expect("已配置 OKAPI_NATS_URL，但 NATS 不可达");
     let js = nats_relay::ensure_topology(&client).await.unwrap();
     Some(NatsEnv {
         pg,

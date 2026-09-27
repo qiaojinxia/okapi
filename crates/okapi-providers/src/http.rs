@@ -107,6 +107,11 @@ pub fn is_forbidden_header(name: &str) -> bool {
             | "connection"
             | "keep-alive"
             | "upgrade"
+            | "sec-websocket-key"
+            | "sec-websocket-accept"
+            | "sec-websocket-version"
+            | "sec-websocket-protocol"
+            | "sec-websocket-extensions"
             | "te"
             | "trailer"
             | "api-key"
@@ -118,37 +123,83 @@ pub fn is_forbidden_header(name: &str) -> bool {
 
 /// 缺省 client + 按代理 URL 缓存的 client。`Clone` 共享同一份缓存。
 ///
-/// 两族 client：数据面转发用的（跟随重定向，reqwest 缺省）与管理面探针用的（**不跟随**）。
+/// 数据面 client 跟随重定向，管理面探针与 WebSocket 握手不跟随。
+/// WS 单独限制为 HTTP/1：仅给请求设置 version 不会限制 TLS 的 ALPN 协商。
 /// SSRF 闸（`console::ssrf`）只校验管理员填进来的那个 URL，跟着 30x 走就能被一个公网地址
 /// 引到私网 / 云元数据地址；测活、拉模型、余额、Turnstile、支付回调、订阅 OAuth 换码 / 刷新、
 /// Vertex 服务账号换 token、Bedrock 列模型这些外呼都没有跟随重定向的正当理由。数据面保留
 /// 缺省：`/videos/{id}/content` 这类下载透传可能就靠上游 302 到 CDN。
 #[derive(Clone)]
 pub struct HttpPool {
+    clients: std::sync::Arc<Clients>,
+}
+
+struct Clients {
     default: reqwest::Client,
-    proxied: std::sync::Arc<RwLock<HashMap<String, reqwest::Client>>>,
+    proxied: RwLock<HashMap<String, reqwest::Client>>,
     probe_default: reqwest::Client,
-    probe_proxied: std::sync::Arc<RwLock<HashMap<String, reqwest::Client>>>,
+    probe_proxied: RwLock<HashMap<String, reqwest::Client>>,
+    websocket_default: reqwest::Client,
+    websocket_proxied: RwLock<HashMap<String, reqwest::Client>>,
+}
+
+#[derive(Clone, Copy)]
+enum ClientPolicy {
+    Forward,
+    Probe,
+    WebSocket,
 }
 
 impl HttpPool {
     pub fn new() -> Result<Self, UpstreamError> {
         Ok(Self {
-            default: build_client(None, true)?,
-            proxied: std::sync::Arc::new(RwLock::new(HashMap::new())),
-            probe_default: build_client(None, false)?,
-            probe_proxied: std::sync::Arc::new(RwLock::new(HashMap::new())),
+            clients: std::sync::Arc::new(Clients {
+                default: build_client(None, ClientPolicy::Forward)?,
+                proxied: RwLock::new(HashMap::new()),
+                probe_default: build_client(None, ClientPolicy::Probe)?,
+                probe_proxied: RwLock::new(HashMap::new()),
+                websocket_default: build_client(None, ClientPolicy::WebSocket)?,
+                websocket_proxied: RwLock::new(HashMap::new()),
+            }),
         })
     }
 
     /// 取出站 client：无代理用缺省池；有代理按 URL 缓存（锁中毒则当场再建，不 panic）。
     pub fn client(&self, proxy_url: Option<&str>) -> Result<reqwest::Client, UpstreamError> {
-        cached_client(&self.default, &self.proxied, proxy_url, true)
+        cached_client(
+            &self.clients.default,
+            &self.clients.proxied,
+            proxy_url,
+            ClientPolicy::Forward,
+        )
     }
 
     /// 管理面探针 client：同样按代理缓存，但不跟随重定向。
     pub fn probe_client(&self, proxy_url: Option<&str>) -> Result<reqwest::Client, UpstreamError> {
-        cached_client(&self.probe_default, &self.probe_proxied, proxy_url, false)
+        cached_client(
+            &self.clients.probe_default,
+            &self.clients.probe_proxied,
+            proxy_url,
+            ClientPolicy::Probe,
+        )
+    }
+
+    /// RFC 6455 upgrade：独立 HTTP/1-only 池，代理与 TLS 校验保持一致。
+    pub(crate) fn websocket(
+        &self,
+        outbound: &Outbound,
+        url: impl reqwest::IntoUrl,
+    ) -> Result<reqwest::RequestBuilder, UpstreamError> {
+        let client = cached_client(
+            &self.clients.websocket_default,
+            &self.clients.websocket_proxied,
+            outbound.proxy_url.as_deref(),
+            ClientPolicy::WebSocket,
+        )?;
+        Ok(apply_extra_headers(
+            client.get(url),
+            &outbound.extra_headers,
+        ))
     }
 
     /// 管理面探针请求（与 `request` 同形，换用不跟随重定向的 client）。
@@ -199,7 +250,7 @@ fn cached_client(
     default: &reqwest::Client,
     cache: &RwLock<HashMap<String, reqwest::Client>>,
     proxy_url: Option<&str>,
-    follow_redirects: bool,
+    policy: ClientPolicy,
 ) -> Result<reqwest::Client, UpstreamError> {
     let Some(url) = proxy_url.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(default.clone());
@@ -209,7 +260,7 @@ fn cached_client(
     {
         return Ok(hit.clone());
     }
-    let built = build_client(Some(url), follow_redirects)?;
+    let built = build_client(Some(url), policy)?;
     if let Ok(mut guard) = cache.write() {
         guard.insert(url.to_owned(), built.clone());
     }
@@ -218,11 +269,23 @@ fn cached_client(
 
 fn build_client(
     proxy_url: Option<&str>,
-    follow_redirects: bool,
+    policy: ClientPolicy,
 ) -> Result<reqwest::Client, UpstreamError> {
+    client_builder(proxy_url, policy)?
+        .build()
+        .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+fn client_builder(
+    proxy_url: Option<&str>,
+    policy: ClientPolicy,
+) -> Result<reqwest::ClientBuilder, UpstreamError> {
     let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
-    if !follow_redirects {
+    if !matches!(policy, ClientPolicy::Forward) {
         builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    if matches!(policy, ClientPolicy::WebSocket) {
+        builder = builder.http1_only();
     }
     if let Some(raw) = proxy_url {
         let url =
@@ -231,10 +294,12 @@ fn build_client(
             .map_err(|e| UpstreamError::Build(format!("proxy_url: {e}")))?;
         builder = builder.proxy(proxy);
     }
-    builder
-        .build()
-        .map_err(|e| UpstreamError::Build(e.to_string()))
+    Ok(builder)
 }
+
+#[cfg(test)]
+#[path = "http_tls_tests.rs"]
+mod tls_tests;
 
 /// 先写额外头（跳过非法 / 受保护名），调用方随后写鉴权与 Content-Type。
 pub fn apply_extra_headers(
@@ -283,6 +348,15 @@ mod tests {
         assert!(!extra_headers_ok(&json!({"Authorization": "Bearer x"})));
         assert!(!extra_headers_ok(&json!({"authorization": "x"})));
         assert!(!extra_headers_ok(&json!({"api-key": "x"})));
+        for header in [
+            "Sec-WebSocket-Key",
+            "sec-websocket-accept",
+            "sec-websocket-version",
+            "sec-websocket-protocol",
+            "sec-websocket-extensions",
+        ] {
+            assert!(!extra_headers_ok(&json!({header: "override"})));
+        }
         assert!(!extra_headers_ok(&json!({"X-Custom": 1})));
         assert!(!extra_headers_ok(&json!(["X-Custom"])));
         assert!(!extra_headers_ok(&json!({"": "x"})));

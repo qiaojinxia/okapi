@@ -5,6 +5,11 @@
 //! `scope=user` 为钱包主体汇总视图。完整 Team 层（独立登录/成员限额）在 M4。
 //! 统计查询走 ClickHouse MV；未启用 CH 时 fail-closed 返回 501 stats_disabled。
 
+mod pricing;
+mod usage_logs;
+pub use pricing::{public_groups, public_models, public_pricing};
+pub use usage_logs::{list as logs, stat as logs_stat};
+
 use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
@@ -17,6 +22,7 @@ use okapi_api::codes;
 use okapi_store::ChClient;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sqlx::Connection;
 
 fn ch_or_disabled(state: &AppState) -> Result<&ChClient, AppError> {
     state
@@ -44,6 +50,16 @@ pub async fn me(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let balance = state.ledger.balance(key.user_id).await?;
+    let has_web_session = super::auth_web::require_session(&state, &headers)
+        .await
+        .is_ok_and(|user_id| user_id == key.user_id);
+    let key_info: Option<(String, String)> =
+        sqlx::query_as("SELECT name, key_prefix FROM api_keys WHERE id = $1 AND user_id = $2")
+            .bind(key.key_id)
+            .bind(key.user_id)
+            .fetch_optional(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?;
     // 订阅池（§11.28）：热值一次 HMGET；窗口外 / 越界为负对用户都显示 0
     let (sub, sub_until) = state.ledger.sub_balance(key.user_id).await?;
     let sub_active = sub_until > chrono::Utc::now().timestamp();
@@ -70,6 +86,9 @@ pub async fn me(
     Ok(Json(json!({
         "user_id": key.user_id,
         "key_id": key.key_id,
+        "key_name": key_info.as_ref().map(|info| &info.0),
+        "key_prefix": key_info.as_ref().map(|info| &info.1),
+        "has_web_session": has_web_session,
         "group": key.group_code,
         "balance_micro": balance.as_micros(),
         "balance_expires_at": balance_expires_at.map(|t| t.to_rfc3339()),
@@ -134,120 +153,6 @@ pub async fn usage(
     })))
 }
 
-#[derive(sqlx::FromRow)]
-struct PublicPricingModel {
-    model_name: String,
-    display_name: Option<String>,
-    vendor: Option<String>,
-    capabilities: Value,
-    context_window: Option<i32>,
-    max_output: Option<i32>,
-    pricing_mode: String,
-    model_ratio: Option<String>,
-    completion_ratio: Option<String>,
-    cache_ratio: Option<String>,
-    cache_write_ratio: Option<String>,
-    audio_ratio: Option<String>,
-    audio_completion_ratio: Option<String>,
-    image_ratio: Option<String>,
-    per_call_price_micro: Option<i64>,
-}
-
-/// GET /api/pricing：公开模型规格、价格和分组可见性；不含渠道或成本信息。
-pub async fn public_pricing(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
-    let models = sqlx::query_as::<_, PublicPricingModel>(
-        r"SELECT m.model_name, m.display_name, m.vendor, p.pricing_mode,
-                  m.capabilities, m.context_window, m.max_output,
-                  p.model_ratio::text AS model_ratio,
-                  p.completion_ratio::text AS completion_ratio,
-                  p.cache_ratio::text AS cache_ratio,
-                  p.cache_write_ratio::text AS cache_write_ratio,
-                  p.audio_ratio::text AS audio_ratio,
-                  p.audio_completion_ratio::text AS audio_completion_ratio,
-                  p.image_ratio::text AS image_ratio,
-                  p.per_call_price_micro
-           FROM models m JOIN model_pricing p ON p.model_id = m.id
-           WHERE m.status = 1 ORDER BY m.sort_order, m.model_name",
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-    let groups = sqlx::query!(
-        r#"SELECT g.group_code AS code, g.description AS name, g.group_ratio::text AS ratio,
-                  g.pool_code, g.self_select, p.fallback_pool_code
-           FROM price_groups g
-           LEFT JOIN channel_pools p ON p.pool_code = g.pool_code
-           ORDER BY g.sort_order, g.group_code"#
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-
-    // 可见性事实：启用渠道声称服务的 (模型, 所在池) 对。渠道只服务它所在的池，
-    // 分组经其池链（主池 → 降级池）能到达的池里有人服务该模型即"可用"——
-    // 与 candidates_for_model 同一套规则的静态视图；key 级健康属瞬态，价格页不看。
-    let served = sqlx::query!(
-        r#"SELECT DISTINCT mn.name AS "model_name!", pc.pool_code AS "pool_code!"
-           FROM channels c
-           CROSS JOIN LATERAL jsonb_array_elements_text(c.models) AS mn(name)
-           JOIN pool_channels pc ON pc.channel_id = c.id
-           WHERE c.status = 1 AND c.deleted_at IS NULL"#
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-    let mut pools_of: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
-    for row in &served {
-        pools_of
-            .entry(row.model_name.as_str())
-            .or_default()
-            .push(row.pool_code.as_str());
-    }
-    let usable_groups = |model: &str| -> Vec<&str> {
-        let Some(pools) = pools_of.get(model) else {
-            return Vec::new();
-        };
-        groups
-            .iter()
-            .filter(|g| {
-                pools.contains(&g.pool_code.as_str())
-                    || g.fallback_pool_code
-                        .as_deref()
-                        .is_some_and(|fb| pools.contains(&fb))
-            })
-            .map(|g| g.code.as_str())
-            .collect()
-    };
-
-    Ok(Json(json!({
-        "models": models.iter().map(|m| json!({
-            "model": m.model_name,
-            "display_name": m.display_name,
-            "vendor": m.vendor,
-            // 公开目录仅发已声明的布尔能力，不透传管理员可能存入的扩展数据。
-            "capabilities": (["vision", "tools", "json", "reasoning", "audio", "video", "embedding", "realtime"]
-                .into_iter().filter_map(|key| m.capabilities.get(key).and_then(Value::as_bool)
-                    .map(|value| (key.to_owned(), json!(value))))
-                .collect::<serde_json::Map<String, Value>>()),
-            "context_window": m.context_window.filter(|v| *v > 0),
-            "max_output": m.max_output.filter(|v| *v > 0),
-            "mode": m.pricing_mode,
-            "model_ratio": m.model_ratio,
-            "completion_ratio": m.completion_ratio,
-            "cache_ratio": m.cache_ratio,
-            "cache_write_ratio": m.cache_write_ratio,
-            "audio_ratio": m.audio_ratio,
-            "audio_completion_ratio": m.audio_completion_ratio,
-            "image_ratio": m.image_ratio,
-            "per_call_price_micro": m.per_call_price_micro,
-            "groups": usable_groups(&m.model_name),
-        })).collect::<Vec<_>>(),
-        "groups": groups.iter().map(|g| json!({
-            "code": g.code, "name": g.name, "ratio": g.ratio, "self_select": g.self_select,
-        })).collect::<Vec<_>>(),
-    })))
-}
-
 #[derive(Deserialize)]
 pub struct LogsQuery {
     #[serde(default = "default_limit")]
@@ -261,91 +166,57 @@ pub struct LogsQuery {
     /// 精确模型名过滤。
     #[serde(default)]
     pub model: Option<String>,
-    /// 只看失败（status ≠ 20 的记录：上游失败/空回复/拒绝）。
+    /// 只看失败（status = 40，不包含已退款记录）。
     #[serde(default)]
     pub errors_only: Option<bool>,
+    pub api_key_id: Option<i64>,
+    pub request_id: Option<uuid::Uuid>,
+    /// 含首尾的日历日期，与门户看板下钻携带的统计时区配套。
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub timezone: Option<String>,
+}
+
+struct LogWindow {
+    start: chrono::NaiveDate,
+    end: chrono::NaiveDate,
+    timezone: String,
+}
+
+impl LogsQuery {
+    async fn window(&self, pg: &sqlx::PgPool) -> Result<Option<LogWindow>, AppError> {
+        if self.start_date.is_none() && self.end_date.is_none() {
+            return Ok(None);
+        }
+        let timezone = self.timezone.as_deref().unwrap_or("UTC");
+        if timezone.len() > 128 {
+            return Err(AppError::bad_request().with_param("timezone"));
+        }
+        // PG 校验 IANA 时区并提供当地今天；不依赖 ClickHouse，也不使用浏览器时钟。
+        let today = sqlx::query_scalar::<_, chrono::NaiveDate>(
+            "SELECT (CURRENT_TIMESTAMP AT TIME ZONE name)::date FROM pg_timezone_names WHERE name = $1",
+        )
+        .bind(timezone)
+        .fetch_optional(pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?
+        .ok_or_else(|| AppError::bad_request().with_param("timezone"))?;
+        let (start, end) = super::usage_details::CalendarWindow::bounds(
+            today,
+            1,
+            self.start_date.as_deref(),
+            self.end_date.as_deref(),
+        )?;
+        Ok(Some(LogWindow {
+            start,
+            end,
+            timezone: timezone.to_owned(),
+        }))
+    }
 }
 
 fn default_limit() -> i64 {
     50
-}
-
-/// GET /api/me/logs：本用户账单明细（含 pricing_snapshot——前端账单解释器数据源）。
-///
-/// **缺省 `scope=key`**：此前只按 user_id 过滤，合作商的员工 key 能翻到同一钱包下
-/// 所有员工的请求——与 §6.1"员工只见自己"的门户缺省相悖。usage/breakdown/logs
-/// 三个门户端点现在同一套 scope 语义。key 名一并回填：`scope=user` 时合作商
-/// 要能看出"这笔是谁发的"，否则汇总视角没有意义。
-pub async fn logs(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Query(q): Query<LogsQuery>,
-) -> Result<Json<Value>, AppError> {
-    let key = authenticate(&state, &headers).await?;
-    let limit = q.limit.clamp(1, 200);
-    let user_scope = q.scope.as_deref() == Some("user");
-    let key_filter = if user_scope { None } else { Some(key.key_id) };
-    let model = q.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
-    let errors_only = q.errors_only == Some(true);
-    let rows = sqlx::query!(
-        r#"SELECT b.id, b.request_id, b.model_name, b.log_type, b.status, b.api_key_id,
-                  COALESCE(k.name, '') AS "key_name!",
-                  b.prompt_tokens, b.cached_tokens, b.completion_tokens, b.reasoning_tokens,
-                  b.amount_micro, b.original_amount_micro, b.discount_micro,
-                  b.pricing_snapshot, b.error_code, b.latency_ms, b.ttft_ms, b.is_stream, b.created_at
-           FROM billing_records b
-           LEFT JOIN api_keys k ON k.id = b.api_key_id
-           WHERE b.user_id = $1
-             AND ($2::bigint IS NULL OR b.id < $2)
-             AND ($3::bigint IS NULL OR b.api_key_id = $3)
-             AND ($4::text IS NULL OR b.model_name = $4)
-             AND (NOT $5::boolean OR b.status <> 20)
-           ORDER BY b.id DESC LIMIT $6"#,
-        key.user_id,
-        q.before,
-        key_filter,
-        model,
-        errors_only,
-        limit
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-    let next_before = rows.last().map(|r| r.id);
-    let data: Vec<Value> = rows
-        .into_iter()
-        .map(|r| {
-            json!({
-                "id": r.id,
-                "request_id": r.request_id,
-                "model": r.model_name,
-                "log_type": r.log_type,
-                "status": r.status,
-                "api_key_id": r.api_key_id,
-                "key_name": r.key_name,
-                "usage": {
-                    "prompt_tokens": r.prompt_tokens,
-                    "cached_tokens": r.cached_tokens,
-                    "completion_tokens": r.completion_tokens,
-                    "reasoning_tokens": r.reasoning_tokens,
-                },
-                "amount_micro": r.amount_micro,
-                "original_amount_micro": r.original_amount_micro,
-                "discount_micro": r.discount_micro,
-                "pricing_snapshot": r.pricing_snapshot,
-                "error_code": r.error_code,
-                "latency_ms": r.latency_ms,
-                "ttft_ms": r.ttft_ms,
-                "is_stream": r.is_stream,
-                "created_at": r.created_at.to_rfc3339(),
-            })
-        })
-        .collect();
-    Ok(Json(json!({
-        "scope": if user_scope { "user" } else { "key" },
-        "data": data,
-        "next_before": next_before,
-    })))
 }
 
 /// GET /api/notice：站点公告（无鉴权，登录页也要显示）。
@@ -566,7 +437,13 @@ pub async fn redeem(
         ip_charge = Some((pre.batch_id, ip));
     }
 
-    let claimed = okapi_store::admin::claim_redemption(&state.pg, code, key.user_id).await?;
+    let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, key.user_id).await?;
+    let mut tx = guard
+        .connection()
+        .begin()
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    let claimed = okapi_store::admin::claim_redemption_in_tx(&mut tx, code, key.user_id).await?;
     let Some(claimed) = claimed else {
         // 预查通过但翻转失败（竞争被抢/绑定他人）：回退 IP 计数
         if let Some((batch, ip)) = ip_charge {
@@ -576,70 +453,96 @@ pub async fn redeem(
     };
 
     // 绑订阅套餐（§11.28）：核销即激活 / 续期，钱包不动、面值忽略
-    if let Some(plan_id) = claimed.subscription_plan_id {
-        let plan = okapi_store::subscriptions::sub_plan_by_id(&state.pg, plan_id)
-            .await?
-            .ok_or_else(AppError::internal)?;
-        let granted = super::subscriptions::grant(
-            &state,
+    if claimed.subscription_plan_id.is_some() {
+        let plan: okapi_store::subscriptions::SubPlan = serde_json::from_value(
+            claimed
+                .subscription_snapshot
+                .ok_or_else(AppError::internal)?,
+        )
+        .map_err(|_| AppError::internal())?;
+        let accepted = okapi_ledger::subscriptions::enqueue(
+            &mut tx,
             key.user_id,
             &plan,
             &format!("redeem:{}", claimed.code_id),
             "system:redeem",
+            false,
         )
-        .await?;
-        let sub = super::subscriptions::view(&state, granted.subscription()).await?;
-        return Ok(Json(json!({
-            "amount_micro": 0,
-            "plan_code": claimed.plan_code,
-            "subscription": sub,
-            "outcome": granted.kind(),
-        })));
-    }
-
-    let amount = okapi_domain::Money::from_micros(claimed.amount_micro);
-    let balance_after = state.ledger.credit(key.user_id, amount).await?;
-    okapi_ledger::pg::record_credit(
-        &state.pg,
-        key.user_id,
-        amount,
-        "adjust",
-        "system:redeem",
-        json!({
-            "tags": ["redemption"],
-            "code_id": claimed.code_id,
-            "plan_code": claimed.plan_code,
-        }),
-    )
-    .await?;
-
-    // 套餐附带语义：加组失败/有效期失败不回滚入账（记日志走人工），核销主流程已成立
-    if let Some(group) = &claimed.grant_group
-        && let Err(err) = okapi_store::admin::add_user_group(&state.pg, key.user_id, group).await
-    {
-        tracing::error!(user_id = key.user_id, group, error = %err, "套餐加组失败（人工跟进）");
-    }
-    if let Some(days) = claimed.balance_valid_days {
-        let expires = chrono::Utc::now() + chrono::Duration::days(i64::from(days));
-        let result = sqlx::query!(
-            r#"UPDATE users SET balance_expires_at = $2, updated_at = now() WHERE id = $1"#,
-            key.user_id,
-            expires
-        )
-        .execute(&state.pg)
         .await;
-        if let Err(err) = result {
-            tracing::error!(user_id = key.user_id, error = %err, "套餐余额有效期设置失败（人工跟进）");
-        }
+        let id = match accepted {
+            Ok(id) => id,
+            Err(error) => {
+                tx.rollback().await.map_err(okapi_store::StoreError::from)?;
+                if let Some((batch, ip)) = &ip_charge {
+                    state.sched.redeem_ip_decr(*batch, ip).await;
+                }
+                return Err(error.into());
+            }
+        };
+        tx.commit().await.map_err(okapi_store::StoreError::from)?;
+        let receipt =
+            okapi_ledger::subscriptions::finish(&mut guard, &state.ledger, key.user_id, id).await;
+        drop(guard);
+        state.sched.auth_flush().await;
+        let mut body = super::subscriptions::receipt_view(&state, &receipt).await?;
+        body["amount_micro"] = json!(0);
+        body["plan_code"] = json!(claimed.plan_code);
+        return Ok(Json(body));
     }
 
+    let operation_id = accept_wallet_redemption(&mut tx, key.user_id, &claimed).await?;
+    tx.commit().await.map_err(okapi_store::StoreError::from)?;
+    let receipt = okapi_ledger::transfers::finish(
+        &mut guard,
+        &state.ledger,
+        key.user_id,
+        operation_id,
+        okapi_ledger::Pool::Wallet,
+    )
+    .await;
     Ok(Json(json!({
         "amount_micro": claimed.amount_micro,
-        "balance_after_micro": balance_after.as_micros(),
+        "balance_after_micro": receipt.balance_after.map(okapi_domain::Money::as_micros),
+        "operation_id": receipt.operation_id,
+        "pending": receipt.balance_after.is_none(),
         "plan_code": claimed.plan_code,
         "granted_group": claimed.grant_group,
         "balance_valid_days": claimed.balance_valid_days,
     })))
+}
+
+/// Keep optional plan benefits in the same transaction as code consumption.
+async fn accept_wallet_redemption(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i64,
+    claimed: &okapi_store::admin::ClaimedRedemption,
+) -> Result<uuid::Uuid, AppError> {
+    let amount = okapi_domain::Money::from_micros(claimed.amount_micro);
+    let operation_id = okapi_ledger::transfers::credit_in_tx(
+        tx,
+        user_id,
+        amount,
+        "adjust",
+        "system:redeem",
+        json!({"tags": ["redemption"], "code_id": claimed.code_id, "plan_code": claimed.plan_code}),
+    )
+    .await?;
+    if let Some(group) = &claimed.grant_group {
+        sqlx::query!("INSERT INTO user_groups(user_id,group_code,priority) VALUES ($1,$2,0) ON CONFLICT (user_id,group_code) DO NOTHING",user_id,group)
+            .execute(&mut **tx).await.map_err(okapi_store::StoreError::from)?;
+    }
+    if let Some(days) = claimed.balance_valid_days {
+        let expires = chrono::Utc::now() + chrono::Duration::days(i64::from(days));
+        sqlx::query!(
+            "UPDATE users SET balance_expires_at=$2,updated_at=now() WHERE id=$1",
+            user_id,
+            expires
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    }
+    Ok(operation_id)
 }
 
 /// 用户可为自己的 key 选择的分组（IMPLEMENTATION §11.14 R4，对齐 new-api UserUsableGroups）：
@@ -727,7 +630,7 @@ pub async fn groups(
 }
 
 /// GET /api/me/keys：本用户的 key 及累计分账（合作商查员工用量）；`limit/offset` 可选切片，
-/// 不传回全量。
+/// 默认每页 20 条并返回总数。
 pub async fn keys(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -982,14 +885,20 @@ pub async fn aff(
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    let mut history = okapi_store::history::read(&state.pg).await?;
     let reward_sum = sqlx::query_scalar!(
         r#"SELECT COALESCE(SUM(delta_micro), 0)::bigint AS "s!"
-           FROM billing_events WHERE user_id = $1 AND actor = 'system:aff'"#,
+           FROM billing_actor_totals WHERE user_id = $1 AND actor = 'system:aff'"#,
         key.user_id
     )
-    .fetch_one(&state.pg)
+    .fetch_one(&mut *history)
     .await
     .map_err(okapi_store::StoreError::from)?;
+
+    history
+        .commit()
+        .await
+        .map_err(okapi_store::StoreError::from)?;
 
     Ok(Json(json!({
         "aff_code": code,

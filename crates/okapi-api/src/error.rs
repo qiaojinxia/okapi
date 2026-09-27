@@ -12,6 +12,8 @@ pub mod codes {
     pub const INSUFFICIENT_QUOTA: &str = "insufficient_quota";
     pub const RATE_LIMITED: &str = "rate_limited";
     pub const NO_AVAILABLE_CHANNEL: &str = "no_available_channel";
+    /// 模型在当前池有可用渠道，但不支持该入口；param 给出可用接口路径。
+    pub const UNSUPPORTED_ENDPOINT: &str = "unsupported_endpoint";
     pub const EMPTY_COMPLETION: &str = "empty_completion";
     pub const UPSTREAM_ERROR: &str = "upstream_error";
     pub const UPSTREAM_TIMEOUT: &str = "upstream_timeout";

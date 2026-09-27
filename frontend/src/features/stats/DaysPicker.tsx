@@ -6,6 +6,7 @@ export function DaysPicker({ days, onPick }: { days: number; onPick: (d: number)
   const { t } = useTranslation()
   return (
     <Segmented
+      ariaLabel={t('charts:period')}
       value={days}
       onChange={onPick}
       options={[1, 7, 30].map((d) => ({ value: d, label: t('admin:lastDays', { days: d }) }))}

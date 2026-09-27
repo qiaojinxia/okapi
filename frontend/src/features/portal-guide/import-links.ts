@@ -53,10 +53,13 @@ function cherry(cfg: ConnectConfig, siteName: string): string {
 }
 
 export function buildImportLinks(cfg: ConnectConfig, siteName: string, nextChatUrl = 'https://app.nextchat.club'): ImportLink[] {
-  return [
+  const links: ImportLink[] = [
     { target: 'ccswitch-claude', href: ccSwitch('claude', cfg, siteName), scheme: true },
     { target: 'ccswitch-codex', href: ccSwitch('codex', cfg, siteName), scheme: true },
     { target: 'nextchat', href: nextChat(cfg, nextChatUrl), scheme: false },
     { target: 'cherry', href: cherry(cfg, siteName), scheme: true },
   ]
+  return links.filter((link) => !cfg.chatEndpoints || cfg.chatEndpoints.includes(
+    link.target === 'ccswitch-claude' ? '/v1/messages' : link.target === 'ccswitch-codex' ? '/v1/responses' : '/v1/chat/completions',
+  ))
 }

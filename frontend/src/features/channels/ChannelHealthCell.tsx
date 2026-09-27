@@ -152,7 +152,7 @@ export function LastBalance({ balance }: { balance: ChannelBalance | null | unde
 /// 整表一次查询、按 channel_id 分发到各行；CH 未启用时静默不显示，不报错。
 export function useChannelHealth24h() {
   return useQuery({
-    queryKey: qk.statsChannels(1),
+    queryKey: qk.statsChannels(1, 100),
     queryFn: () => apiFetch<{ data: ChannelStatRow[] }>('/admin/stats/channels?days=1&limit=100'),
     retry: false,
     staleTime: 60_000,

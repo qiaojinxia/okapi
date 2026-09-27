@@ -1,0 +1,39 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO user_subscriptions\n            (user_id, plan_id, status, starts_at, expires_at, window_start, window_end,\n             quota_micro, granted_group, source,plan_code_snapshot,display_name_snapshot,period_snapshot,group_code_snapshot)\n        VALUES ($1, $2, 1, $3, $4, $3, $5, $6, $7, $8,$9,$10,$11,$12) RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8",
+        "Bool",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6fcdbdbc8e92928ef98cc0a6d51ddd4915e2b02b4f2b46f8c863904eecc20d6c"
+}

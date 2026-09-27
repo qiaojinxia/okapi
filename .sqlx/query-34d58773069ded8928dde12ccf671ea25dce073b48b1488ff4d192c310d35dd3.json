@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(SELECT 1 FROM recharge_orders\n           WHERE gateway=$1 AND gateway_trade_no=$2 AND status IN (1,3) AND id<>$3\n             AND (merchant_id IS NULL OR merchant_id=$4)) AS \"claimed!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "claimed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "34d58773069ded8928dde12ccf671ea25dce073b48b1488ff4d192c310d35dd3"
+}

@@ -172,7 +172,20 @@ pub(super) async fn probe(
     }
 }
 
-/// 模型发现：bedrock 走控制面 ListFoundationModels（只有 SigV4 凭证能列）；vertex 没有稳定的
+/// 上游错误 → AppError：上游状态原样带出（`status_{n}`），其它按错误码归类。
+fn upstream_error(err: UpstreamError) -> AppError {
+    match err {
+        UpstreamError::Status { status, .. } => {
+            AppError::new(StatusCode::BAD_GATEWAY, okapi_api::codes::UPSTREAM_ERROR)
+                .with_param(format!("status_{status}"))
+        }
+        other => AppError::new(StatusCode::BAD_GATEWAY, okapi_api::codes::UPSTREAM_ERROR)
+            .with_param(other.error_code()),
+    }
+}
+
+/// 模型发现：bedrock 走控制面 ListFoundationModels（只有 SigV4 凭证能列）；codex 走
+/// 订阅模型目录 `GET /models`（token 过期先刷新）；vertex / anthropic_max 没有稳定的
 /// 公开列表接口，明确回不支持。
 pub(super) async fn fetch_models(
     state: &AppState,
@@ -180,31 +193,52 @@ pub(super) async fn fetch_models(
     base: &str,
     settings: &Value,
     credential: &str,
+    channel_key_id: i64,
 ) -> Result<Vec<String>, AppError> {
-    // vertex 没有稳定的公开列表接口；订阅登录（anthropic_max / codex）没有模型列表面
-    if provider != "bedrock" {
-        return Err(AppError::bad_request().with_param("fetch_models_unsupported"));
-    }
-    if okapi_providers::aws_sigv4::AwsCredentials::parse(credential).is_none() {
-        return Err(AppError::bad_request().with_param("fetch_models_requires_sigv4"));
-    }
     let outbound = okapi_providers::Outbound::from_settings(settings);
-    let region = settings
-        .get("aws_region")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
-    let mut models = state
-        .bedrock
-        .list_foundation_models(base, region, credential, &outbound)
-        .await
-        .map_err(|err| match err {
-            UpstreamError::Status { status, .. } => {
-                AppError::new(StatusCode::BAD_GATEWAY, okapi_api::codes::UPSTREAM_ERROR)
-                    .with_param(format!("status_{status}"))
+    let mut models = match provider {
+        "bedrock" => {
+            if okapi_providers::aws_sigv4::AwsCredentials::parse(credential).is_none() {
+                return Err(AppError::bad_request().with_param("fetch_models_requires_sigv4"));
             }
-            other => AppError::new(StatusCode::BAD_GATEWAY, okapi_api::codes::UPSTREAM_ERROR)
-                .with_param(other.error_code()),
-        })?;
+            let region = settings
+                .get("aws_region")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            state
+                .bedrock
+                .list_foundation_models(base, region, credential, &outbound)
+                .await
+                .map_err(upstream_error)?
+        }
+        "codex" => {
+            // 模型目录要订阅 token，过期先刷新（OAuthKey 依赖 channel_key_id）
+            let oauth_key = crate::gateway::oauth_cred::OAuthKey {
+                channel_key_id,
+                provider,
+                token_url: settings
+                    .get("oauth_token_url")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty()),
+                proxy_url: outbound.proxy_url.as_deref(),
+            };
+            let cred =
+                crate::gateway::oauth_cred::fresh_credential_for(state, &oauth_key, credential)
+                    .await
+                    .map_err(upstream_error)?;
+            okapi_providers::oauth::codex::list_models(
+                state.upstream.http(),
+                base,
+                &cred.access_token,
+                cred.account_id.as_deref(),
+                &outbound,
+            )
+            .await
+            .map_err(upstream_error)?
+        }
+        // vertex / anthropic_max 没有稳定的公开列表接口
+        _ => return Err(AppError::bad_request().with_param("fetch_models_unsupported")),
+    };
     models.sort();
     models.dedup();
     Ok(models)

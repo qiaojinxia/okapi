@@ -2,6 +2,7 @@
 //! 三者只读 CH 物化视图，此前这些列（errors、ttft_q、upstream_cost）无任何查询出口。
 //! 依赖 .env 与 ClickHouse（scripts/dev-deps.sh up）；未配 CH 时端点按约定 501。
 
+use futures::FutureExt as _;
 use okapi::worker::chsink;
 use okapi::{console, gateway};
 use serde_json::{Value, json};
@@ -27,6 +28,13 @@ struct Env {
 }
 
 async fn setup() -> Env {
+    setup_with_ch_database(
+        &std::env::var("OKAPI_TEST_CH_DATABASE").unwrap_or_else(|_| "okapi".to_owned()),
+    )
+    .await
+}
+
+async fn setup_with_ch_database(ch_database: &str) -> Env {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -74,7 +82,7 @@ async fn setup() -> Env {
     .await
     .unwrap();
 
-    let state = gateway::build_state(
+    let mut state = gateway::build_state(
         &database_url,
         &redis_url,
         "test-node",
@@ -83,6 +91,9 @@ async fn setup() -> Env {
     )
     .await
     .unwrap();
+    if let Some(url) = ch_url.as_deref() {
+        state.ch = Some(okapi_store::ChClient::new(url, ch_database).unwrap());
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = console::router(state.clone());
@@ -298,6 +309,8 @@ async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
         let mut row = payload(&env, 1000, 250, 100, false);
         row["api_key_id"] = json!(key_id);
         row["cache_write_tokens"] = json!(writes);
+        row["cache_read_reported"] = json!(true);
+        row["cache_write_reported"] = json!(true);
         sqlx::query("INSERT INTO billing_outbox (topic, payload) VALUES ('request_log', $1)")
             .bind(row)
             .execute(&env.pg)
@@ -326,6 +339,9 @@ async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
     assert_eq!(report["total"]["original_micro"], 2500);
     assert_eq!(report["total"]["avg_latency_ms"], 1000);
     assert_eq!(report["total"]["avg_ttft_ms"], 100);
+    assert_eq!(report["total"]["ttft_samples"], 2);
+    assert_eq!(report["total"]["cache_read_known_requests"], 2);
+    assert_eq!(report["total"]["cache_hit_bp"], 0, "明确上报的零命中保留 0");
     assert_eq!(report["total"]["tokens_per_1k_sec"], 200_000);
     let today = report["window"]["today"].as_str().unwrap();
     let (status, one_day) = get(
@@ -361,6 +377,41 @@ async fn portal_charts_expose_cache_writes_performance_and_exact_date_window() {
     let report = poll_until(&env, path, &env.user_token, |b| b["total"]["requests"] == 3).await;
     assert!(report["total"]["cache_write_tokens"].is_null());
     assert_eq!(report["total"]["cache_write_known_requests"], 2);
+    assert!(
+        report["total"]["cache_hit_bp"].is_null(),
+        "未上报不等于零命中"
+    );
+    assert_eq!(report["total"]["cache_read_known_requests"], 2);
+}
+
+#[tokio::test]
+async fn portal_identity_matches_web_session_owner_without_exposing_key_secret() {
+    let env = setup().await;
+    let (_, me) = get(&env, "/api/me", &env.user_token).await;
+    assert_eq!(me["has_web_session"], false);
+    assert_eq!(me["key_prefix"], "sk-stat-u");
+    assert!(me["key_name"].is_string());
+    assert!(!me.to_string().contains(&env.user_token));
+    let sid = Uuid::new_v4().to_string();
+    env.state
+        .sched
+        .web_session_set(&sid, env.user_id, None, None)
+        .await;
+    for (token, expected) in [(&env.user_token, true), (&env.super_token, false)] {
+        let response: Value = reqwest::Client::new()
+            .get(format!("http://{}/api/me", env.addr))
+            .bearer_auth(token)
+            .header("Cookie", format!("okapi_session={sid}"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["has_web_session"], expected);
+    }
 }
 
 /// 轮询直到 `data` 里出现命中行。
@@ -452,108 +503,114 @@ async fn model_latency_quantiles_exposed() {
     assert_eq!(row["tokens_per_1k_sec"], 200_000);
 }
 
-/// 模型消耗趋势：Top N 按窗口消耗排序，其余折叠进 `__other`，折叠不丢钱。
-///
-/// 共享 CH 里有海量历史测试模型，用大额（每模型 ≥ $2000）把本用例的两个
-/// 模型顶进 Top 2——与排行榜用例同一手法。模型名**刻意取固定值**而非随机后缀：
-/// 随机名会让每次重跑各铸两条 $3000/$2000 的"鲸鱼"序列，跑十次就把 Top 20
-/// 挤满、旧跑挤掉新跑（首跑绿、复跑红的自污染）；固定名让重跑累加进同两条
-/// 序列，永远稳居 Top 2。`limit=1` 档验证折叠语义。
+/// 在本用例独占的 CH 库中验证真实物化视图、排序、时间粒度与折叠守恒。
+/// 不向共享库写入大额“排名锚点”，也不消费其他用例的 outbox。
 #[tokio::test]
 async fn model_trend_folds_tail_into_other() {
-    let env = setup().await;
-    if env.state.ch.is_none() {
+    let database = format!("okapi_trend_{}", Uuid::new_v4().simple());
+    let env = setup_with_ch_database(&database).await;
+    let Some(ch) = env.state.ch.as_ref() else {
         eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
         return;
-    }
-    let model_a = "trend-stat-model-a".to_owned();
-    let model_b = "trend-stat-model-b".to_owned();
-    // A 消耗 > B：断言排序时不依赖字典序（每次重跑同比例累加，A>B 恒成立）
-    let mut rows: Vec<Value> = Vec::new();
-    for (model, amount, n) in [(&model_a, 300_000_000_i64, 10), (&model_b, 200_000_000, 10)] {
-        for _ in 0..n {
-            let mut p = payload(&env, amount, 0, 100, false);
-            p["model"] = json!(model);
-            rows.push(p);
-        }
-    }
-    sqlx::query!(
-        r#"INSERT INTO billing_outbox (topic, payload)
-           SELECT 'request_log', p FROM UNNEST($1::jsonb[]) AS p"#,
-        &rows
-    )
-    .execute(&env.pg)
-    .await
-    .unwrap();
-
-    // 某个序列（模型名或 __other）在全部桶上的合计
-    let series_total = |body: &Value, series: &str| -> i64 {
-        body["data"].as_array().map_or(0, |buckets| {
-            buckets
-                .iter()
-                .map(|b| b["values"][series]["amount_micro"].as_i64().unwrap_or(0))
-                .sum()
-        })
     };
-    // 轮询直到两个模型按消耗降序进 Top 2 且本轮增量已合并
-    // （固定名跨跑累加，总额只能 ≥ 单轮值，不能断言相等）
-    let mut wide = Value::Null;
-    for _ in 0..50 {
-        drain(&env).await;
-        let (status, body) = get(
-            &env,
-            "/admin/stats/model-trend?days=1&limit=20",
+    ch.ensure_schema().await.unwrap();
+    // 即使断言 panic，也先删掉本测试创建的唯一数据库，再重新抛出失败。
+    let result = std::panic::AssertUnwindSafe(check_model_trend(&env, ch))
+        .catch_unwind()
+        .await;
+    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn check_model_trend(env: &Env, ch: &okapi_store::ChClient) {
+    let path = "/admin/stats/model-trend?days=1&limit=20";
+    let (status, empty) = get(env, path, &env.super_token).await;
+    assert_eq!(status, 200, "{empty}");
+    assert_eq!(empty["models"], json!([]));
+    assert_eq!(empty["data"], json!([]));
+
+    let now = chrono::Utc::now();
+    let mut rows = Vec::new();
+    // 总额故意不按字典序；同额尾部由模型名稳定排序。跨两个小时验证逐桶折叠。
+    for (model, amount, hours_ago) in [
+        ("z-largest", 300, 2),
+        ("z-largest", 100, 1),
+        ("a-second", 200, 2),
+        ("tail-z", 10, 2),
+        ("tail-a", 10, 1),
+    ] {
+        let mut row = payload(env, amount, 0, 100, false);
+        row["model"] = json!(model);
+        row["ts"] = json!(
+            (now - chrono::Duration::hours(hours_ago))
+                .format("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        );
+        rows.push(chsink::js_payload_to_ch_row(&row));
+    }
+    ch.insert_json_each_row("request_log_raw", &rows, &Uuid::new_v4().to_string())
+        .await
+        .unwrap();
+
+    let (status, wide) = get(env, path, &env.super_token).await;
+    assert_eq!(status, 200, "{wide}");
+    assert_eq!(wide["granularity"], "hour");
+    assert_eq!(
+        wide["models"],
+        json!(["z-largest", "a-second", "tail-a", "tail-z"])
+    );
+    let buckets = wide["data"].as_array().unwrap();
+    assert_eq!(buckets.len(), 2);
+    assert!(buckets[0]["bucket"].as_str() < buckets[1]["bucket"].as_str());
+
+    for (days, limit, granularity) in [(1, 1, "hour"), (1, 0, "hour"), (7, 1, "day")] {
+        let (status, narrow) = get(
+            env,
+            &format!("/admin/stats/model-trend?days={days}&limit={limit}"),
             &env.super_token,
         )
         .await;
-        assert_eq!(status, 200, "{body}");
-        let models: Vec<&str> = body["models"]
-            .as_array()
-            .map(|m| m.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        if models.first() == Some(&model_a.as_str())
-            && models.get(1) == Some(&model_b.as_str())
-            && series_total(&body, &model_a) >= 3_000_000_000
-            && series_total(&body, &model_b) >= 2_000_000_000
-        {
-            wide = body;
-            break;
+        assert_eq!(status, 200, "{narrow}");
+        assert_eq!(narrow["granularity"], granularity);
+        assert_eq!(narrow["models"], json!(["z-largest", "__other"]));
+        let series_total = |series: &str, metric: &str| -> i64 {
+            narrow["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|bucket| bucket["values"][series][metric].as_i64().unwrap_or(0))
+                .sum()
+        };
+        assert_eq!(series_total("z-largest", "amount_micro"), 400);
+        assert_eq!(series_total("__other", "amount_micro"), 220);
+        assert_eq!(series_total("z-largest", "requests"), 2);
+        assert_eq!(series_total("__other", "requests"), 3);
+        if days == 1 {
+            let folded = narrow["data"].as_array().unwrap();
+            assert_eq!(folded.len(), buckets.len());
+            for (original, compact) in buckets.iter().zip(folded) {
+                assert_eq!(original["bucket"], compact["bucket"]);
+                assert_eq!(
+                    original["values"]["z-largest"],
+                    compact["values"]["z-largest"]
+                );
+                for metric in ["amount_micro", "requests"] {
+                    let tail: i64 = original["values"]
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .filter(|(model, _)| model.as_str() != "z-largest")
+                        .map(|(_, value)| value[metric].as_i64().unwrap())
+                        .sum();
+                    assert_eq!(compact["values"]["__other"][metric], tail);
+                }
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    assert!(
-        !wide.is_null(),
-        "轮询超时：两个大额模型未按消耗降序进 Top 2（检查排序或合并）"
-    );
-    assert_eq!(wide["granularity"], "hour", "单日窗口应按小时出桶");
-    assert!(
-        series_total(&wide, &model_a) > series_total(&wide, &model_b),
-        "排序锚点：A 恒大于 B"
-    );
-    let a_wide = series_total(&wide, &model_a);
-
-    // limit=1：仅第一名保留名字，其余（含 model_b 与历史杂讯）折叠进 __other。
-    // 守恒断言只锚定本用例专属的模型序列（全站总额会被并行用例的写入扰动）。
-    let (status, narrow) = get(
-        &env,
-        "/admin/stats/model-trend?days=1&limit=1",
-        &env.super_token,
-    )
-    .await;
-    assert_eq!(status, 200);
-    let models: Vec<&str> = narrow["models"]
-        .as_array()
-        .map(|m| m.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(models, vec![model_a.as_str(), "__other"], "折叠形态");
-    assert!(
-        series_total(&narrow, &model_a) >= a_wide,
-        "第一名金额不受折叠影响（并发写入只增不减）"
-    );
-    assert!(
-        series_total(&narrow, "__other") >= 2_000_000_000,
-        "折叠不丢钱：__other 至少含 B 的全额"
-    );
 }
 
 /// 客户端类型分布（#5277）：按 client_type 归并，去重用户数与错误率齐备。

@@ -109,7 +109,10 @@ async fn setup() -> TestEnv {
 
 impl TestEnv {
     async fn chat(&self) -> (u16, Value) {
-        let resp = reqwest::Client::new()
+        let resp = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap()
             .post(format!("http://{}/v1/chat/completions", self.gateway))
             .bearer_auth(&self.token)
             .json(&json!({
@@ -123,7 +126,7 @@ impl TestEnv {
         (status, resp.json().await.unwrap())
     }
 
-    /// 结算任务在响应之后才进入 `settle_write`，等计数追上再发下一笔。
+    /// 成功响应等待持久记账；等后台任务进入写入闸再发下一笔。
     async fn wait_backlog(&self, expected: usize) {
         for _ in 0..50 {
             if self.state.settle_backlog.load(Ordering::SeqCst) == expected {
@@ -150,22 +153,38 @@ impl TestEnv {
 
 #[tokio::test]
 async fn backlog_over_cap_sheds_before_reserve_and_recovers() {
-    let env = setup().await;
+    let env = Arc::new(setup().await);
     let gate = env.state.settle_gate.clone();
-    // 占满结算写入闸：Redis commit 照常完成，PG 记账在闸前排队——正是压测里积压的形态
+    // 占满写入闸：PG 尚未提交，Redis 预扣仍在，成功响应也必须等待。
     let permits = gate
         .clone()
         .acquire_many_owned(u32::try_from(gate.available_permits()).unwrap())
         .await
         .unwrap();
 
-    let (status, _) = env.chat().await;
-    assert_eq!(status, 200);
+    let first = {
+        let env = env.clone();
+        tokio::spawn(async move { env.chat().await })
+    };
     env.wait_backlog(1).await;
-    let (status, _) = env.chat().await;
-    assert_eq!(status, 200, "积压 1 未超过上界 1，仍放行");
+    assert!(!first.is_finished(), "未持久记账不能先返回成功");
+    let second = {
+        let env = env.clone();
+        tokio::spawn(async move { env.chat().await })
+    };
     env.wait_backlog(2).await;
+    assert!(
+        !second.is_finished(),
+        "积压 1 未超过上界 1，仍准入但等待落盘"
+    );
     let balance_before = env.state.ledger.balance(env.user_id).await.unwrap();
+    let reservations_before = env
+        .state
+        .ledger
+        .list_reservations(env.user_id)
+        .await
+        .unwrap();
+    assert_eq!(reservations_before.len(), 2);
     assert_eq!(env.billing_rows().await, 0, "闸被占满，PG 尚无一笔");
 
     let (status, body) = env.chat().await;
@@ -185,14 +204,21 @@ async fn backlog_over_cap_sheds_before_reserve_and_recovers() {
         balance_before,
         "被拒的请求分文未动"
     );
-    assert!(
-        env.state
-            .ledger
-            .list_reservations(env.user_id)
-            .await
-            .unwrap()
-            .is_empty(),
-        "被拒的请求不得留下预扣"
+    let reservations_after = env
+        .state
+        .ledger
+        .list_reservations(env.user_id)
+        .await
+        .unwrap();
+    let ids = |rows: &[okapi_ledger::Reservation]| {
+        rows.iter()
+            .map(|r| r.request_id)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        ids(&reservations_after),
+        ids(&reservations_before),
+        "被拒的请求不得新增预扣，也不能清掉前两笔"
     );
     assert_eq!(
         env.state.settle_backlog.load(Ordering::SeqCst),
@@ -202,6 +228,13 @@ async fn backlog_over_cap_sheds_before_reserve_and_recovers() {
 
     // 泄压：放开闸，积压落账归零，数据面恢复，前两笔一笔不丢
     drop(permits);
+    for request in [first, second] {
+        let (status, body) = tokio::time::timeout(Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, 200, "{body}");
+    }
     env.wait_backlog(0).await;
     assert_eq!(env.billing_rows().await, 2);
     let (status, _) = env.chat().await;

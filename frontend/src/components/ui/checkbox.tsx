@@ -9,6 +9,7 @@ interface CheckboxProps {
   disabled?: boolean
   /// 可见文字标签。
   label?: string
+  description?: React.ReactNode
   /// 只给屏幕阅读器与测试用的名字，不占版面。
   /// 表格里每行一个勾选框，可见文字会把整列撑宽（且"选中 xxx"这种文案对视力用户是噪音），
   /// 但没有可访问名字又无法定位——故与 `label` 分开。
@@ -24,6 +25,7 @@ export function Checkbox({
   indeterminate = false,
   disabled = false,
   label,
+  description,
   srLabel,
   className,
 }: CheckboxProps) {
@@ -54,7 +56,10 @@ export function Checkbox({
           </span>
         )}
       </span>
-      {label !== undefined && <span className="text-sm">{label}</span>}
+      {label !== undefined && <span className="min-w-0 flex-1">
+        <span className="block text-sm [overflow-wrap:anywhere]">{label}</span>
+        {description !== undefined && <span className="mt-1 flex flex-wrap items-center gap-1.5 font-sans text-xs text-muted-foreground">{description}</span>}
+      </span>}
     </label>
   )
 }

@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::fmt::Write as _;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 // ---- mock 上游 ----
@@ -112,7 +113,7 @@ async fn mock_native_responses(
         "直转不能带 chat 方言字段：{req}"
     );
     let usage = json!({"input_tokens": 100, "output_tokens": 20,
-        "input_tokens_details": {"cached_tokens": 40},
+        "input_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 20},
         "output_tokens_details": {"reasoning_tokens": 8}, "total_tokens": 120});
     if req["stream"].as_bool().unwrap_or(false) {
         let events = [
@@ -183,19 +184,94 @@ async fn mock_native_responses(
     }
 }
 
-async fn spawn_mock() -> SocketAddr {
+fn compact_output() -> Value {
+    json!({"id": "cmp-response-1", "object": "response.compaction", "created_at": 1,
+        "output": [
+            {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "retained history ".repeat(1000)}]},
+            {"id": "cmp-1", "type": "compaction", "encrypted_content": "opaque-fixture-context", "opaque": {"preserve": true}}
+        ],
+        "usage": {"input_tokens": 100, "output_tokens": 20,
+            "input_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 20},
+            "output_tokens_details": {"reasoning_tokens": 8}, "total_tokens": 120}})
+}
+
+async fn mock_compact(
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    assert_eq!(headers["authorization"], "Bearer mock-credential");
+    assert_eq!(headers["accept"], "application/json");
+    if uri.path().starts_with("/codex/") {
+        assert_eq!(headers["chatgpt-account-id"], "acct-compact-fixture");
+        assert_eq!(headers["originator"], "codex-fixture");
+        assert_eq!(headers["openai-beta"], "responses=experimental");
+    }
+    let req: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(req["model"], "gpt-upstream");
+    assert_eq!(req["instructions"], "compact carefully");
+    assert_eq!(req["previous_response_id"], "resp_previous");
+    assert_eq!(req["input"][0]["arguments"], "{\"q\":\"test\"}");
+    assert_eq!(req["input"][1]["encrypted_content"], "opaque-input");
+    assert!(req.get("stream").is_none());
+    assert!(req.get("messages").is_none() && req.get("stream_options").is_none());
+    let mut output = compact_output();
+    match headers
+        .get("x-fixture-compact")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some("404") => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(json!({"error": {"code": "compact_unavailable"}})),
+            )
+                .into_response();
+        }
+        Some("missing-usage") => {
+            output.as_object_mut().unwrap().remove("usage");
+        }
+        Some("empty-usage") => output["usage"] = json!({}),
+        Some("missing-ciphertext") => {
+            output["output"][1]
+                .as_object_mut()
+                .unwrap()
+                .remove("encrypted_content");
+        }
+        Some("wrong-object") => output["object"] = json!("response"),
+        None => {}
+        other => panic!("unknown fixture: {other:?}"),
+    }
+    axum::Json(output).into_response()
+}
+
+type MockCalls = Arc<Mutex<Vec<String>>>;
+
+async fn spawn_mock() -> (SocketAddr, MockCalls) {
+    let calls = MockCalls::default();
+    let recorded = Arc::clone(&calls);
     let router = Router::new()
         .route("/oai/v1/chat/completions", post(mock_chat))
         .route("/oai/v1/responses", post(mock_native_responses))
+        .route("/oai/v1/responses/compact", post(mock_compact))
+        .route("/codex/responses/compact", post(mock_compact))
         // 只实现了 chat 的"openai"上游：/responses 由 axum 回 404
         .route("/chatonly/v1/chat/completions", post(mock_chat))
-        .route("/ant/v1/messages", post(mock_anthropic));
+        .route("/ant/v1/messages", post(mock_anthropic))
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let calls = Arc::clone(&recorded);
+                async move {
+                    calls.lock().unwrap().push(request.uri().path().to_owned());
+                    next.run(request).await
+                }
+            },
+        ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
-    addr
+    (addr, calls)
 }
 
 // ---- 环境 ----
@@ -206,11 +282,23 @@ struct TestEnv {
     token: String,
     user_id: i64,
     model: String,
+    state: gateway::state::AppState,
+    calls: MockCalls,
+    channel_id: i64,
 }
 
 /// `settings`：渠道 settings 对象（None = 缺省）。直转用例给 openai 渠道配
 /// model_mapping → gpt-upstream，验证同方言 model 重写。
 async fn setup(provider: &str, path: &str, settings: Option<Value>) -> TestEnv {
+    setup_with_cache_write(provider, path, settings, "1").await
+}
+
+async fn setup_with_cache_write(
+    provider: &str,
+    path: &str,
+    settings: Option<Value>,
+    cache_write_ratio: &str,
+) -> TestEnv {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -224,24 +312,41 @@ async fn setup(provider: &str, path: &str, settings: Option<Value>) -> TestEnv {
         .await
         .unwrap();
     let token = format!("sk-okapi-test-{suffix}");
-    let key_hash = {
-        use sha2::{Digest, Sha256};
-        hex::encode(Sha256::digest(token.as_bytes()))
-    };
-    okapi_store::provision::create_api_key(&pg, user_id, &key_hash, "sk-okapi-test")
+    let key_hash = key_hash(&token);
+    let api_key_id =
+        okapi_store::provision::create_api_key(&pg, user_id, &key_hash, "sk-okapi-test")
+            .await
+            .unwrap();
+    let model_id = okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
         .await
         .unwrap();
-    okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
-        .await
-        .unwrap();
+    sqlx::query(
+        "UPDATE model_pricing SET cache_write_ratio = ($2::text)::numeric WHERE model_id = $1",
+    )
+    .bind(model_id)
+    .bind(cache_write_ratio)
+    .execute(&pg)
+    .await
+    .unwrap();
 
-    let mock = spawn_mock().await;
+    let (mock, calls) = spawn_mock().await;
+    let credential = if provider == "codex" {
+        okapi_store::credential::OAuthCredential {
+            access_token: "mock-credential".to_owned(),
+            refresh_token: "unused-fixture".to_owned(),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+            account_id: Some("acct-compact-fixture".to_owned()),
+        }
+        .to_plaintext()
+    } else {
+        "mock-credential".to_owned()
+    };
     let (channel_id, _) = okapi_store::provision::create_channel(
         &pg,
         &format!("ch-{suffix}"),
         provider,
         &format!("http://{mock}{path}"),
-        "mock-credential",
+        &credential,
         &[model.as_str()],
         false,
         None,
@@ -262,7 +367,7 @@ async fn setup(provider: &str, path: &str, settings: Option<Value>) -> TestEnv {
             .unwrap();
     }
     // 走直转的渠道配 model_mapping：mock 断言上游收到的 model 是映射名
-    if provider == "openai" || native_opt_in {
+    if matches!(provider, "openai" | "codex") || native_opt_in {
         sqlx::query("UPDATE channels SET model_mapping = $2 WHERE id = $1")
             .bind(channel_id)
             .bind(json!({ model.as_str(): "gpt-upstream" }))
@@ -280,7 +385,9 @@ async fn setup(provider: &str, path: &str, settings: Option<Value>) -> TestEnv {
         .await
         .unwrap();
 
-    let app = gateway::router(state);
+    seed_protocol_history(&state, &pg, &model, user_id, api_key_id, channel_id).await;
+
+    let app = gateway::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -293,6 +400,41 @@ async fn setup(provider: &str, path: &str, settings: Option<Value>) -> TestEnv {
         token,
         user_id,
         model,
+        state,
+        calls,
+        channel_id,
+    }
+}
+
+fn key_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+async fn seed_protocol_history(
+    state: &gateway::state::AppState,
+    pg: &PgPool,
+    model: &str,
+    user_id: i64,
+    api_key_id: i64,
+    channel_id: i64,
+) {
+    // 该套件验证既有历史字段的协议透传；真实首轮→续聊在 gateway_response_affinity 验证。
+    let candidates = okapi_store::channels::candidates_for_model(pg, model, &["default"], None)
+        .await
+        .unwrap();
+    let candidate = candidates
+        .iter()
+        .find(|c| c.channel_id == channel_id)
+        .unwrap();
+    let binding =
+        gateway::sched_redis::response_affinity::ResponseBinding::from_candidate(candidate);
+    for previous in ["resp_prev_1", "resp_previous"] {
+        state
+            .sched
+            .response_binding_set(user_id, api_key_id, previous, &binding)
+            .await
+            .unwrap();
     }
 }
 
@@ -353,6 +495,233 @@ async fn wait_record(pg: &PgPool, user_id: i64) -> (i16, i64) {
     panic!("等待记账超时");
 }
 
+fn compact_request(env: &TestEnv) -> Value {
+    json!({"model": env.model, "instructions": "compact carefully", "stream": false,
+    "previous_response_id": "resp_previous", "input": [
+        {"type": "function_call", "call_id": "call-fixture", "name": "search", "arguments": "{\"q\":\"test\"}"},
+        {"type": "reasoning", "encrypted_content": "opaque-input"}
+    ]})
+}
+
+async fn post_compact(env: &TestEnv, body: &Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/responses/compact", env.gateway))
+        .bearer_auth(&env.token)
+        .header("originator", "codex-fixture")
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn compact_preserves_context_and_bills_usage_for_native_compat_and_codex() {
+    for (provider, path, settings) in [
+        ("openai", "/oai/v1", None),
+        (
+            "openai_compat",
+            "/oai/v1",
+            Some(json!({"responses_native": true})),
+        ),
+        ("codex", "/codex", None),
+    ] {
+        let env = setup_with_cache_write(provider, path, settings, "2").await;
+        let resp = post_compact(&env, &compact_request(&env)).await;
+        assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+        let request_id = resp.headers()["x-okapi-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(resp.json::<Value>().await.unwrap(), compact_output());
+        assert_eq!(wait_record(&env.pg, env.user_id).await, (20, 280));
+        env.state
+            .settlements
+            .wait_idle(std::time::Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            env.state
+                .ledger
+                .balance(env.user_id)
+                .await
+                .unwrap()
+                .as_micros(),
+            10_000_000 - 280
+        );
+        let payload: Value = sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE payload->>'request_id' = $1 ORDER BY id DESC LIMIT 1")
+            .bind(request_id).fetch_one(&env.pg).await.unwrap();
+        assert_eq!(payload["endpoint"], "/v1/responses/compact");
+        assert_eq!(payload["upstream_endpoint"], "/v1/responses/compact");
+        assert_eq!(
+            env.calls.lock().unwrap().as_slice(),
+            &[format!("{path}/responses/compact")]
+        );
+    }
+}
+
+#[tokio::test]
+async fn compact_rejects_anonymous_and_streaming_requests_before_upstream_or_billing() {
+    let env = setup("openai", "/oai/v1", None).await;
+    let mut body = compact_request(&env);
+    let anonymous = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses/compact", env.gateway))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+    body["stream"] = json!(true);
+    let resp = post_compact(&env, &body).await;
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["error"]["param"],
+        "stream"
+    );
+    assert_eq!(
+        post_compact(&env, &json!({"input": "missing model"}))
+            .await
+            .status(),
+        400
+    );
+    assert!(env.calls.lock().unwrap().is_empty());
+    assert_eq!(
+        env.state
+            .ledger
+            .balance(env.user_id)
+            .await
+            .unwrap()
+            .as_micros(),
+        10_000_000
+    );
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM billing_records WHERE user_id = $1")
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn compact_never_downgrades_and_refunds_unusable_upstream_results() {
+    for (case, expected) in [
+        ("404", 404),
+        ("missing-usage", 502),
+        ("empty-usage", 502),
+        ("missing-ciphertext", 502),
+        ("wrong-object", 502),
+    ] {
+        let env = setup(
+            "openai",
+            "/oai/v1",
+            Some(json!({"extra_headers": {"x-fixture-compact": case}})),
+        )
+        .await;
+        let resp = post_compact(&env, &compact_request(&env)).await;
+        assert_eq!(
+            resp.status(),
+            expected,
+            "case {case}: {}",
+            resp.text().await.unwrap()
+        );
+        assert_eq!(
+            env.state
+                .ledger
+                .balance(env.user_id)
+                .await
+                .unwrap()
+                .as_micros(),
+            10_000_000
+        );
+        let rows: Vec<(i16, i64)> =
+            sqlx::query_as("SELECT status, amount_micro FROM billing_records WHERE user_id = $1")
+                .bind(env.user_id)
+                .fetch_all(&env.pg)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![(40, 0)],
+            "case {case}: failure must close the reservation"
+        );
+        let calls = env.calls.lock().unwrap();
+        assert!(!calls.is_empty());
+        assert!(
+            calls.iter().all(|p| p == "/oai/v1/responses/compact"),
+            "{calls:?}"
+        );
+        if case == "404" {
+            assert_eq!(
+                calls.len(),
+                1,
+                "unsupported compact must not become a chat request"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn compact_filters_incompatible_and_explicitly_disabled_channels() {
+    for disabled in [false, true] {
+        let env = setup(
+            if disabled { "openai" } else { "openai_compat" },
+            "/oai/v1",
+            None,
+        )
+        .await;
+        if disabled {
+            sqlx::query(
+                "UPDATE channels SET capabilities = '{\"compact\": false}'::jsonb WHERE id = $1",
+            )
+            .bind(env.channel_id)
+            .execute(&env.pg)
+            .await
+            .unwrap();
+            env.state.invalidate_routing_caches_local();
+        }
+        // Shared ingress rules distinguish a configured but incompatible endpoint
+        // from an unavailable channel. Keep the error actionable without retrying.
+        let response = post_compact(&env, &compact_request(&env)).await;
+        assert_eq!(response.status(), 400);
+        let error: Value = response.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "unsupported_endpoint");
+        assert_eq!(
+            error["error"]["param"],
+            "/v1/chat/completions,/v1/responses,/v1/messages,/v1beta/models/{model}:generateContent"
+        );
+        assert!(Uuid::parse_str(error["error"]["request_id"].as_str().unwrap()).is_ok());
+        assert!(env.calls.lock().unwrap().is_empty());
+
+        // Once the channel itself is disabled, switching endpoints cannot help.
+        sqlx::query("UPDATE channels SET status=2 WHERE id=$1")
+            .bind(env.channel_id)
+            .execute(&env.pg)
+            .await
+            .unwrap();
+        env.state.invalidate_routing_caches_local();
+        let unavailable = post_compact(&env, &compact_request(&env)).await;
+        assert_eq!(unavailable.status(), 503);
+        let error: Value = unavailable.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "no_available_channel");
+        assert!(env.calls.lock().unwrap().is_empty());
+        assert_eq!(
+            env.state
+                .ledger
+                .balance(env.user_id)
+                .await
+                .unwrap()
+                .as_micros(),
+            10_000_000
+        );
+        let paid: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_records WHERE user_id=$1 AND amount_micro<>0",
+        )
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+        assert_eq!(paid, 0, "neither rejection may charge the caller");
+    }
+}
+
 fn parse_named_events(text: &str) -> Vec<(String, Value)> {
     let mut out = Vec::new();
     let mut event: Option<String> = None;
@@ -409,7 +778,7 @@ async fn native_stream_passthrough_and_billing() {
 
     let (status, amount) = wait_record(&env.pg, env.user_id).await;
     assert_eq!(status, 20);
-    // ratio 1/1/1：cached 40 与非 cached 60 同价 → (100+20)×$2/1M = 240
+    // 普通输入 40、缓存读 40、缓存写 20 同价 → (100+20)×$2/1M = 240
     assert_eq!(
         amount, 240,
         "usage 必须来自 response.completed 而非字符估算"
@@ -434,6 +803,42 @@ async fn native_json_passthrough() {
     let (status, amount) = wait_record(&env.pg, env.user_id).await;
     assert_eq!(status, 20);
     assert_eq!(amount, 240);
+}
+
+#[tokio::test]
+async fn native_cache_write_tokens_are_billed_in_json_and_sse() {
+    for stream in [false, true] {
+        let env = setup_with_cache_write("openai", "/oai/v1", None, "2").await;
+        let response = post_codex_style(&env, stream).await;
+        assert_eq!(response.status(), 200);
+        let body = response.text().await.unwrap();
+        let usage = if stream {
+            parse_named_events(&body)
+                .into_iter()
+                .find(|(name, _)| name == "response.completed")
+                .expect("terminal event")
+                .1["response"]["usage"]
+                .clone()
+        } else {
+            serde_json::from_str::<Value>(&body).unwrap()["usage"].clone()
+        };
+        assert_eq!(usage["input_tokens_details"]["cache_write_tokens"], 20);
+        let (status, amount) = wait_record(&env.pg, env.user_id).await;
+        assert_eq!(status, 20);
+        // 输入总计 100 已含缓存段：普通 40 + 读 40 + 写 20×2 + 输出 20。
+        assert_eq!(
+            amount, 280,
+            "stream={stream}: 缓存写入不能被当成普通输入或重复相加"
+        );
+        let snapshot: Value = sqlx::query_scalar(
+            "SELECT pricing_snapshot FROM billing_records WHERE user_id = $1 AND log_type = 2",
+        )
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+        assert_eq!(snapshot["cache_write_ratio"], 2);
+    }
 }
 
 /// openai 渠道显式 `responses_native:false` → 回到降级链（上游只实现了 chat 的"openai"渠道）。

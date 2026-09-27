@@ -216,7 +216,7 @@ pub fn response_chat_to_responses(
 fn responses_usage_json(u: UsageProbe) -> Value {
     json!({
         "input_tokens": u.prompt_tokens,
-        "input_tokens_details": {"cached_tokens": u.prompt_tokens_details.cached_tokens},
+        "input_tokens_details": u.prompt_tokens_details.cache_json(),
         "output_tokens": u.completion_tokens,
         "output_tokens_details": {"reasoning_tokens": u.completion_tokens_details.reasoning_tokens},
         "total_tokens": u.prompt_tokens + u.completion_tokens,

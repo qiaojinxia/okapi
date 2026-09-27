@@ -11,11 +11,31 @@ use fred::types::Value;
 use okapi_domain::Money;
 use uuid::Uuid;
 
-const RESERVE_LUA: &str = include_str!("lua/reserve.lua");
-const COMMIT_LUA: &str = include_str!("lua/commit.lua");
-const REFUND_LUA: &str = include_str!("lua/refund.lua");
+const RESERVE_LUA: &str = concat!(
+    include_str!("lua/hold_concurrency.lua"),
+    "\n",
+    include_str!("lua/reserve.lua")
+);
+const COMMIT_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/close_reservation.lua"),
+    "\n",
+    include_str!("lua/commit.lua")
+);
+const REFUND_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/close_reservation.lua"),
+    "\n",
+    include_str!("lua/refund.lua")
+);
 const REPAIR_LUA: &str = include_str!("lua/repair.lua");
-const SUB_SET_LUA: &str = include_str!("lua/sub_set.lua");
+const SUB_SET_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/sub_set.lua")
+);
 
 /// 预扣悬置时限：超时未结算的预扣由对账任务懒清理（M2 reconciler）。
 const RESERVATION_TTL_MS: i64 = 600_000;
@@ -116,6 +136,7 @@ pub enum CommitOutcome {
 }
 
 /// refund 结果：释放金额（幂等重复调用为 0）、所在池余额、池。
+/// 无凭证时返回钱包池；零释放或错误的失败账单应使用请求保留的预扣池。
 #[derive(Debug, Clone, Copy)]
 pub struct RefundOutcome {
     pub released: Money,
@@ -145,6 +166,9 @@ pub struct BalanceLedger {
 }
 
 impl BalanceLedger {
+    pub(crate) fn client(&self) -> &Client {
+        &self.client
+    }
     #[must_use]
     pub fn new(client: Client) -> Self {
         Self { client }
@@ -161,6 +185,10 @@ impl BalanceLedger {
 
     /// 预扣 + 限速/并发准入（单 Lua 原子）。限额四件套均为 key 级
     /// （同一用户多把 key 各自独立计数，互不挤兑）。
+    /// 相同 request_id 的活跃记录一律拒绝，不能把重放当作新的上游调用许可。
+    /// 终结后调用方仍须保证 request_id 不复用；此处不是永久幂等键存储。
+    /// 预估金额、Token 必须非负且在 Lua 安全整数范围内。不限额的计数器也先验证，
+    /// 避免 Redis 脚本中途报错时留下部分资金或计数写入。
     pub async fn reserve(
         &self,
         req: ReserveRequest,
@@ -211,6 +239,10 @@ impl BalanceLedger {
             (Some(0), Some("RATE_LIMITED")) => Ok(ReserveOutcome::RateLimited {
                 which: str_at(items, 2)?.to_owned(),
             }),
+            (Some(0), Some("RESERVATION_EXISTS")) => Err(LedgerError::ReservationExists),
+            (Some(0), Some("INVALID_RESERVATION")) => Err(LedgerError::InvalidReservation),
+            (Some(0), Some("ADMISSION_STATE_INVALID")) => Err(LedgerError::AdmissionStateInvalid),
+            (Some(0), Some("HOLD_RECOVERY_REQUIRED")) => Err(LedgerError::HoldRecoveryRequired),
             _ => Err(LedgerError::UnexpectedReply("reserve")),
         }
     }
@@ -223,8 +255,40 @@ impl BalanceLedger {
         request_id: Uuid,
         actual: Money,
     ) -> Result<CommitOutcome, LedgerError> {
+        self.commit_expected(user_id, api_key_id, request_id, actual, None)
+            .await
+    }
+
+    /// Durable PG completion must not change a different pool from its receipt.
+    pub async fn commit_in_pool(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+        request_id: Uuid,
+        actual: Money,
+        pool: Pool,
+    ) -> Result<CommitOutcome, LedgerError> {
+        self.commit_expected(user_id, api_key_id, request_id, actual, Some(pool))
+            .await
+    }
+
+    async fn commit_expected(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+        request_id: Uuid,
+        actual: Money,
+        pool: Option<Pool>,
+    ) -> Result<CommitOutcome, LedgerError> {
         let keys = vec![Self::bal_key(user_id), Self::conc_key(user_id, api_key_id)];
-        let args = vec![request_id.to_string(), actual.as_micros().to_string()];
+        let mut args = vec![
+            request_id.to_string(),
+            actual.as_micros().to_string(),
+            api_key_id.to_string(),
+        ];
+        if let Some(pool) = pool {
+            args.push(pool.as_i16().to_string());
+        }
         let reply: Value = self.client.eval(COMMIT_LUA, keys, args).await?;
         let items = as_array(&reply)?;
         match (first_i64(items), second_str(items)) {
@@ -234,6 +298,9 @@ impl BalanceLedger {
                 pool: pool_at(items, 3),
             }),
             (Some(0), Some("NO_RESERVATION")) => Ok(CommitOutcome::NoReservation),
+            (Some(0), Some("INVALID_SETTLEMENT")) => Err(LedgerError::InvalidSettlement),
+            (Some(0), Some("RESERVATION_CONFLICT")) => Err(LedgerError::ReservationConflict),
+            (Some(0), Some("SETTLEMENT_STATE_INVALID")) => Err(LedgerError::SettlementStateInvalid),
             _ => Err(LedgerError::UnexpectedReply("commit")),
         }
     }
@@ -246,17 +313,18 @@ impl BalanceLedger {
         request_id: Uuid,
     ) -> Result<RefundOutcome, LedgerError> {
         let keys = vec![Self::bal_key(user_id), Self::conc_key(user_id, api_key_id)];
-        let args = vec![request_id.to_string()];
+        let args = vec![request_id.to_string(), api_key_id.to_string()];
         let reply: Value = self.client.eval(REFUND_LUA, keys, args).await?;
         let items = as_array(&reply)?;
-        if first_i64(items) == Some(1) {
-            Ok(RefundOutcome {
+        match (first_i64(items), second_str(items)) {
+            (Some(1), _) => Ok(RefundOutcome {
                 released: money_at(items, 1)?,
                 balance_after: money_at(items, 2)?,
                 pool: pool_at(items, 3),
-            })
-        } else {
-            Err(LedgerError::UnexpectedReply("refund"))
+            }),
+            (Some(0), Some("RESERVATION_CONFLICT")) => Err(LedgerError::ReservationConflict),
+            (Some(0), Some("SETTLEMENT_STATE_INVALID")) => Err(LedgerError::SettlementStateInvalid),
+            _ => Err(LedgerError::UnexpectedReply("refund")),
         }
     }
 
@@ -287,12 +355,27 @@ impl BalanceLedger {
         quota: Money,
         sub_until: i64,
     ) -> Result<SubSetOutcome, LedgerError> {
+        self.sub_set_window(user_id, quota, sub_until, "").await
+    }
+
+    /// Stable subscription id/window-start token; renewal keeps the same window token.
+    pub async fn sub_set_window(
+        &self,
+        user_id: i64,
+        quota: Money,
+        sub_until: i64,
+        epoch: &str,
+    ) -> Result<SubSetOutcome, LedgerError> {
         let reply: Value = self
             .client
             .eval(
                 SUB_SET_LUA,
                 vec![Self::bal_key(user_id)],
-                vec![quota.as_micros().to_string(), sub_until.to_string()],
+                vec![
+                    quota.as_micros().to_string(),
+                    sub_until.to_string(),
+                    epoch.to_owned(),
+                ],
             )
             .await?;
         let items = as_array(&reply)?;

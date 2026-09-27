@@ -22,8 +22,9 @@ export function EmptyState({
   const { t } = useTranslation()
   return (
     <div
+      data-slot="empty-state"
       className={cn(
-        'flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border bg-card/50 px-6 py-12 text-center animate-fade-in',
+        'flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-card/50 px-6 py-12 text-center animate-fade-in',
         className,
       )}
     >

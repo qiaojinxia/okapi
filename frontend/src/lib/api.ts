@@ -2,17 +2,28 @@
 // 文案渲染在 errors 命名空间完成。
 
 const KEY_STORAGE = 'okapi.key'
+const LOGIN_STORAGE = 'okapi.login-mode'
+export const USAGE_SCOPE_STORAGE = 'okapi.usage-scope'
+
+export function getLoginMode(): 'account' | 'key' | null {
+  const value = localStorage.getItem(LOGIN_STORAGE)
+  return value === 'account' || value === 'key' ? value : null
+}
 
 export function getKey(): string | null {
   return localStorage.getItem(KEY_STORAGE)
 }
 
-export function setKey(key: string): void {
+export function setKey(key: string, mode: 'account' | 'key' = 'key'): void {
   localStorage.setItem(KEY_STORAGE, key)
+  localStorage.setItem(LOGIN_STORAGE, mode)
+  localStorage.removeItem(USAGE_SCOPE_STORAGE)
 }
 
 export function clearKey(): void {
   localStorage.removeItem(KEY_STORAGE)
+  localStorage.removeItem(LOGIN_STORAGE)
+  localStorage.removeItem(USAGE_SCOPE_STORAGE)
 }
 
 export class ApiError extends Error {

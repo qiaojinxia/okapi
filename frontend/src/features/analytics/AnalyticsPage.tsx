@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
+import { ChartNoAxesCombined } from 'lucide-react'
 import type { AnalyticsView } from '@/routes/admin.stats'
 import { ANALYTICS_VIEWS } from '@/routes/admin.stats'
 import { PageHeader } from '@/components/ui/page'
@@ -51,10 +52,10 @@ export function AnalyticsPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-3">
       <PageHeader
+        icon={ChartNoAxesCombined}
         title={t('analytics:title')}
-        description={t('analytics:desc')}
         action={
           <DaysPicker
             days={search.start_date ? 0 : days}
@@ -64,10 +65,10 @@ export function AnalyticsPage() {
       />
       <FilterBar search={search} scope={trend.data?.scope} />
       <AnalysisControls value={search} today={trend.data?.window?.today} onApply={(next) => void navigate({ search: cleanSearch(next) })} />
-      <FreshnessNotice value={trend.data?.window?.freshness} />
+      <FreshnessNotice value={trend.isError ? undefined : trend.data?.window?.freshness} />
       <KpiStrip
-        total={trend.data?.total}
-        previous={trend.data?.previous}
+        total={trend.isError ? undefined : trend.data?.total}
+        previous={trend.isError ? undefined : trend.data?.previous}
         days={days}
         loading={trend.isLoading}
       />
@@ -84,6 +85,7 @@ export function AnalyticsPage() {
           resp={trend.data}
           isLoading={trend.isLoading}
           error={trend.error}
+          onRetry={() => void trend.refetch()}
         />
       )}
       {view === 'breakdown' && <BreakdownView search={search} />}

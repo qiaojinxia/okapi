@@ -15,7 +15,7 @@ pub mod notify;
 
 use crate::config::Config;
 use okapi_ledger::{BalanceLedger, Pool};
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use std::time::Duration;
 
 const SWEEP_INTERVAL: Duration = Duration::from_mins(1);
@@ -114,6 +114,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     };
 
     let js = connect_jetstream(cfg.nats_url.as_deref()).await;
+    let image_state =
+        crate::gateway::build_state(&cfg.database_url, &cfg.redis_url, &cfg.node, None, None)
+            .await?;
+    let (image_stop, image_stopped) = tokio::sync::watch::channel(false);
+    let native_batch_worker = tokio::spawn(crate::gateway::images::batches::run_worker(
+        image_state.clone(),
+        image_stopped.clone(),
+    ));
+    let image_worker = tokio::spawn(crate::gateway::images::tasks::run_worker(
+        image_state,
+        image_stopped,
+    ));
 
     tracing::info!(
         "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions/margin_breaker）"
@@ -136,8 +148,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             _ = chsink_tick.tick() => transport_tick(&pg, js.as_ref(), ch.as_ref()).await,
             _ = subscriptions.tick() => {
                 match subscriptions_tick(&pg, &ledger, &redis, chrono::Utc::now()).await {
-                    Ok(r) if r.rolled + r.expired > 0 => {
-                        tracing::info!(rolled = r.rolled, expired = r.expired, "订阅滚窗 / 到期处理");
+                    Ok(r) if r.rolled + r.expired + r.failed > 0 => {
+                        tracing::info!(rolled = r.rolled, expired = r.expired, failed = r.failed, "订阅滚窗 / 到期处理");
                     }
                     Ok(_) => {}
                     Err(err) => tracing::error!(error = %err, "订阅滚窗 / 到期处理失败"),
@@ -207,6 +219,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 }
             }
             () = &mut stop => {
+                let _ = image_stop.send(true);
+                if let Err(error) = native_batch_worker.await {
+                    tracing::error!(%error,"native batch worker shutdown failed");
+                }
+                if let Err(error) = image_worker.await {
+                    tracing::error!(%error, "image worker shutdown failed");
+                }
                 tracing::info!("worker 已下线");
                 return Ok(());
             }
@@ -239,6 +258,8 @@ pub async fn sweep_expired_reservations(
     ledger: &BalanceLedger,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<Vec<SweptReservation>> {
+    okapi_ledger::sync::recover_pending(pg, ledger, 100).await?;
+    okapi_ledger::transfers::recover_pending(pg, ledger, 100).await?;
     // 用户全集驱动（开发/中小规模足够；大规模换 Redis SCAN，见 docs/database.md §5）
     let user_ids = sqlx::query_scalar!(r#"SELECT id FROM users WHERE deleted_at IS NULL"#)
         .fetch_all(pg)
@@ -247,21 +268,35 @@ pub async fn sweep_expired_reservations(
     let now_ms = now.timestamp_millis();
     let mut swept = Vec::new();
     for user_id in user_ids {
-        for reservation in ledger.list_reservations(user_id).await? {
+        let reservations = ledger.list_reservations(user_id).await?;
+        if !reservations.iter().any(|r| r.deadline_ms < now_ms) {
+            continue;
+        }
+        let mut guard = okapi_ledger::holds::UserGuard::acquire(pg, user_id).await?;
+        if let Err(error) = guard.synchronize(ledger).await {
+            tracing::error!(user_id, %error, "skip expiry while durable settlement is pending");
+            continue;
+        }
+        for reservation in reservations {
             if reservation.deadline_ms >= now_ms {
                 continue;
             }
-            let terminal = sqlx::query!(
+            // Serialize an image result/ledger commit with expiry. Otherwise the result
+            // transaction could commit immediately after this sweep had refunded its hold.
+            let mut tx = guard.connection().begin().await?;
+            okapi_store::image_tasks::lock_for_balance_in_tx(&mut tx, reservation.request_id)
+                .await?;
+            okapi_store::history::read_lock(&mut tx).await?;
+            let terminal_query = sqlx::query!(
                 r#"
-                SELECT status, amount_micro FROM billing_records
+                SELECT status AS "status!", amount_micro AS "amount_micro!" FROM billing_financial_records
                 WHERE request_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
                 reservation.request_id
-            )
-            .fetch_optional(pg)
-            .await?;
+            );
+            let terminal = terminal_query.fetch_optional(&mut *tx).await?;
 
             if let Some(rec) = &terminal
                 && rec.status == 20
@@ -294,21 +329,23 @@ pub async fn sweep_expired_reservations(
             if released.is_zero() {
                 continue; // 竞争：已被正常终结
             }
-            sqlx::query!(
+            let event_payload = serde_json::json!({
+                "reason": "reservation_expired",
+                "released_micro": released.as_micros(),
+            });
+            let event_pool = refund.pool.as_i16();
+            let event_query = sqlx::query!(
                 r#"
                 INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, payload, actor, pool)
                 VALUES ($1, $2, 'refund', 0, $3, 'system:worker', $4)
                 "#,
                 user_id,
                 reservation.request_id,
-                serde_json::json!({
-                    "reason": "reservation_expired",
-                    "released_micro": released.as_micros(),
-                }),
-                refund.pool.as_i16()
-            )
-            .execute(pg)
-            .await?;
+                event_payload,
+                event_pool
+            );
+            event_query.execute(&mut *tx).await?;
+            tx.commit().await?;
             swept.push(SweptReservation {
                 user_id,
                 request_id: reservation.request_id,
@@ -324,13 +361,13 @@ pub async fn sweep_expired_reservations(
 #[derive(Debug)]
 pub struct BalanceDrift {
     pub user_id: i64,
-    /// 真理源：billing_events（pool=0）重放。
+    /// Wallet truth: current events plus carried financial history (pool=0).
     pub events_sum_micro: i64,
     /// Redis 钱包有效余额 = avail + 钱包在途（消除在途噪声后应等于事件和）。
     pub redis_effective_micro: i64,
     /// users.balance_micro 快照列。
     pub pg_snapshot_micro: i64,
-    /// 订阅池：billing_events（pool=1）重放。
+    /// Subscription truth: current events plus carried financial history (pool=1).
     pub sub_events_sum_micro: i64,
     /// 订阅池：Redis sub + 订阅在途。
     pub sub_redis_effective_micro: i64,
@@ -347,6 +384,9 @@ async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result
             Pool::Subscription => inflight.1 = inflight.1.saturating_add(r.amount.as_micros()),
         }
     }
+    let (held_wallet, held_sub) = okapi_ledger::holds::inflight(ledger, user_id).await?;
+    inflight.0 = inflight.0.saturating_add(held_wallet.as_micros());
+    inflight.1 = inflight.1.saturating_add(held_sub.as_micros());
     Ok((
         avail.saturating_add(inflight.0),
         sub.as_micros().saturating_add(inflight.1),
@@ -392,6 +432,7 @@ pub async fn reconcile_balances(
     ledger: &BalanceLedger,
     limit: i64,
 ) -> anyhow::Result<Vec<BalanceDrift>> {
+    let mut history = okapi_store::history::read(pg).await?;
     let rows = sqlx::query!(
         r#"
         SELECT u.id AS user_id,
@@ -403,7 +444,7 @@ pub async fn reconcile_balances(
             SELECT user_id,
                    SUM(delta_micro) FILTER (WHERE pool = 0) AS wallet_sum,
                    SUM(delta_micro) FILTER (WHERE pool = 1) AS sub_sum
-            FROM billing_events
+            FROM billing_balance_totals
             GROUP BY user_id
         ) e ON e.user_id = u.id
         WHERE u.deleted_at IS NULL
@@ -412,9 +453,10 @@ pub async fn reconcile_balances(
         "#,
         limit
     )
-    .fetch_all(pg)
+    .fetch_all(&mut *history)
     .await?;
 
+    history.commit().await?;
     let mut drifts = Vec::new();
     for row in rows {
         let (wallet, sub) = redis_effective(ledger, row.user_id).await?;
@@ -439,7 +481,7 @@ pub async fn reconcile_balances(
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct BalanceRepair {
     pub user_id: i64,
-    /// 钱包账本权威值（`billing_events` pool=0 求和）。
+    /// Wallet total from billing_balance_totals (pool=0).
     pub events_sum_micro: i64,
     pub redis_before_micro: i64,
     pub redis_after_micro: i64,
@@ -462,42 +504,42 @@ pub async fn repair_balance(
     ledger: &BalanceLedger,
     user_id: i64,
 ) -> anyhow::Result<Option<BalanceRepair>> {
-    let Some(row) = sqlx::query!(
+    let mut guard = okapi_ledger::holds::UserGuard::acquire(pg, user_id).await?;
+    guard.synchronize(ledger).await?;
+    let mut history = guard.connection().begin().await?;
+    okapi_store::history::read_lock(&mut history).await?;
+    let row = sqlx::query!(
         r#"
         SELECT u.balance_micro,
-               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id AND e.pool = 0), 0)::bigint
+               COALESCE((SELECT SUM(delta_micro) FROM billing_balance_totals e WHERE e.user_id = u.id AND e.pool = 0), 0)::bigint
                    AS "events_sum!",
-               COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = u.id AND e.pool = 1), 0)::bigint
+               COALESCE((SELECT SUM(delta_micro) FROM billing_balance_totals e WHERE e.user_id = u.id AND e.pool = 1), 0)::bigint
                    AS "sub_events_sum!"
         FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
         "#,
         user_id
     )
-    .fetch_optional(pg)
-    .await?
-    else {
+    .fetch_optional(&mut *history)
+    .await?;
+    history.commit().await?;
+    let Some(row) = row else {
         return Ok(None);
     };
-    let outcome = ledger
+    let repaired = guard
         .repair(
-            user_id,
+            ledger,
             okapi_domain::Money::from_micros(row.events_sum),
-            Pool::Wallet,
-        )
-        .await?;
-    let sub_outcome = ledger
-        .repair(
-            user_id,
             okapi_domain::Money::from_micros(row.sub_events_sum),
-            Pool::Subscription,
         )
         .await?;
+    let outcome = repaired.wallet;
+    let sub_outcome = repaired.subscription;
     sqlx::query!(
         r#"UPDATE users SET balance_micro = $2, updated_at = now() WHERE id = $1"#,
         user_id,
         row.events_sum
     )
-    .execute(pg)
+    .execute(guard.connection())
     .await?;
     Ok(Some(BalanceRepair {
         user_id,
@@ -526,18 +568,20 @@ pub async fn stable_drift(
     user_id: i64,
 ) -> anyhow::Result<Option<i64>> {
     let sample = |uid: i64| async move {
+        let mut history = okapi_store::history::read(pg).await?;
         let row = sqlx::query!(
             r#"
-            SELECT COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = $1 AND e.pool = 0), 0)::bigint
+            SELECT COALESCE((SELECT SUM(delta_micro) FROM billing_balance_totals e WHERE e.user_id = $1 AND e.pool = 0), 0)::bigint
                        AS "events_sum!",
-                   COALESCE((SELECT SUM(delta_micro) FROM billing_events e WHERE e.user_id = $1 AND e.pool = 1), 0)::bigint
+                   COALESCE((SELECT SUM(delta_micro) FROM billing_balance_totals e WHERE e.user_id = $1 AND e.pool = 1), 0)::bigint
                        AS "sub_events_sum!"
             FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
             "#,
             uid
         )
-        .fetch_optional(pg)
+        .fetch_optional(&mut *history)
         .await?;
+        history.commit().await?;
         let Some(row) = row else {
             return Ok::<Option<(i64, (i64, i64), i64)>, anyhow::Error>(None);
         };
@@ -653,29 +697,13 @@ pub async fn expire_balances(
 
     let mut expired = Vec::new();
     for user_id in user_ids {
-        let drained = ledger.drain(user_id).await?;
+        let drained = okapi_ledger::operations::expire(pg, ledger, user_id, now).await?;
         if !drained.is_zero() {
-            okapi_ledger::pg::record_credit(
-                pg,
-                user_id,
-                okapi_domain::Money::from_micros(drained.as_micros().saturating_neg()),
-                "expire",
-                "system:worker",
-                serde_json::json!({ "reason": "balance_expired" }),
-            )
-            .await?;
             expired.push(ExpiredBalance {
                 user_id,
                 drained_micro: drained.as_micros(),
             });
         }
-        // 无论清了多少都重置，防止每轮重扫（清零与重置间崩溃 → 下轮 drain=0 只走这步）
-        sqlx::query!(
-            r#"UPDATE users SET balance_expires_at = NULL, updated_at = now() WHERE id = $1"#,
-            user_id
-        )
-        .execute(pg)
-        .await?;
     }
     Ok(expired)
 }
@@ -701,51 +729,13 @@ pub async fn subscriptions_tick(
 
 /// 数据保留策略（#1790-1）：settings.retention_months（缺省 0=永久保留），
 /// DROP 超期的 PG 月分区（billing_records/billing_events/audit_logs 的 `_yYYYYmMM` 命名分区；
-/// DEFAULT 分区不动）。CH 侧 TTL（180d）独立，调整走管理员 ALTER（backlog）。
+/// Financial facts are carried in the same transaction before DROP.
+/// DEFAULT partitions remain; ClickHouse TTL is independent.
 pub async fn drop_expired_partitions(
     pg: &PgPool,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<Vec<String>> {
-    use chrono::Datelike;
-    let months = sqlx::query_scalar!(
-        r#"SELECT (value #>> '{}')::bigint AS "v!" FROM settings WHERE key = 'retention_months'"#
-    )
-    .fetch_optional(pg)
-    .await?
-    .unwrap_or(0);
-    if months <= 0 {
-        return Ok(Vec::new());
-    }
-    // 截止月（含当月往前推 months 个月之前的分区全删）
-    let total = i64::from(now.year()) * 12 + i64::from(now.month()) - 1 - months;
-    let (cut_y, cut_m) = (total.div_euclid(12), total.rem_euclid(12) + 1);
-
-    let rows = sqlx::query_scalar!(
-        r#"SELECT relname AS "name!" FROM pg_class
-           WHERE relname ~ '^(billing_records|billing_events|audit_logs)_y\d{4}m\d{2}$'"#
-    )
-    .fetch_all(pg)
-    .await?;
-    let mut dropped = Vec::new();
-    for name in rows {
-        let Some(pos) = name.rfind("_y") else {
-            continue;
-        };
-        let tail = &name[pos + 2..];
-        let Some((y, m)) = tail.split_once('m') else {
-            continue;
-        };
-        let (Ok(y), Ok(m)) = (y.parse::<i64>(), m.parse::<i64>()) else {
-            continue;
-        };
-        if y * 12 + m - 1 < cut_y * 12 + cut_m {
-            // 标识符为内部命名模式匹配产物（无注入面）
-            let ddl = format!("DROP TABLE IF EXISTS {name}");
-            sqlx::query(sqlx::AssertSqlSafe(ddl)).execute(pg).await?;
-            dropped.push(name);
-        }
-    }
-    Ok(dropped)
+    Ok(okapi_store::history::prune(pg, now).await?)
 }
 
 /// 冷却到期自动恢复 active（§3.4）：cooling(2)/rate_limited(3)/quota_exhausted(4)。

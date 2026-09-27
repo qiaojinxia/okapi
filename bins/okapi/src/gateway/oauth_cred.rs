@@ -117,7 +117,16 @@ pub async fn fresh_credential(
     state: &AppState,
     cand: &ChannelCandidate,
 ) -> Result<OAuthCredential, UpstreamError> {
-    fresh_credential_for(state, &OAuthKey::from(cand), &cand.credential).await
+    let fresh = fresh_credential_for(state, &OAuthKey::from(cand), &cand.credential).await?;
+    if cand.provider == "codex" {
+        let original = OAuthCredential::parse(&cand.credential)
+            .ok_or_else(|| UpstreamError::Build("oauth_credential_expected".to_owned()))?;
+        if original.account_id != fresh.account_id {
+            // 锁内重读/刷新可能遇到管理员重登另一个账号；当前请求不能被移交。
+            return Err(UpstreamError::Build("oauth_account_changed".to_owned()));
+        }
+    }
+    Ok(fresh)
 }
 
 /// 同上，输入为原始字段（管理面探测用）。

@@ -45,7 +45,7 @@ export function TeamListCard({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="list-page-section">
       <Table stickyHeader>
         <THead>
           <Tr>
@@ -62,7 +62,7 @@ export function TeamListCard({
           {teams.map((tm) => (
             <Tr key={tm.team_id} className="cursor-pointer" onClick={() => onPick(tm.team_id)}>
               <Td className="text-xs text-muted-foreground tabular-nums">{tm.team_id}</Td>
-              <Td className="font-medium">{tm.name}</Td>
+              <Td className="min-w-32 font-medium">{tm.name}</Td>
               <Td>
                 <Badge variant={tm.role === 'owner' ? 'success' : 'muted'}>
                   {teamRoleLabel(tm.role, t)}

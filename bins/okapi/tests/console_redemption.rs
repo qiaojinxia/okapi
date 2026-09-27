@@ -7,6 +7,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/redemption_recovery.rs"]
+mod recovery;
+
 struct TestEnv {
     pg: PgPool,
     ledger: okapi_ledger::BalanceLedger,
@@ -86,7 +89,7 @@ async fn setup() -> TestEnv {
 }
 
 #[tokio::test]
-async fn redemption_list_pages_fifty_by_default_and_bounds_requests() {
+async fn redemption_list_pages_twenty_by_default_and_bounds_requests() {
     let env = setup().await;
     let suffix = Uuid::new_v4();
     let codes: Vec<String> = (0..205)
@@ -129,8 +132,8 @@ async fn redemption_list_pages_fifty_by_default_and_bounds_requests() {
     assert_eq!(first["total"], 205);
     assert_eq!(
         first["data"].as_array().unwrap().len(),
-        50,
-        "大表不传 limit 缺省 50（IMPLEMENTATION §11.6），不回全量"
+        20,
+        "兑换码不传 limit 默认每页 20 条，不回全量"
     );
     let mut ids = Vec::new();
     for offset in (0..205).step_by(20) {

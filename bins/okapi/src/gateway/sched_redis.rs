@@ -1,7 +1,7 @@
-//! 调度用 Redis：L2 会话粘性 + 渠道 key 并发信号量（IMPLEMENTATION §3.2/§3.5）。
+//! 调度用 Redis：Responses L1 历史绑定、L2 会话亲和与渠道 key 并发信号量。
 //!
-//! L1 response_id 绑定随 Responses API 于 M3 接入；L3 打分器数据面（EMA）为 M3 项，
-//! 当前层内为权重随机。粘性键带哈希版本号 v1，算法升级走双写双读预案。
+//! L1 在 response_affinity 中按用户/API key 隔离且不可改绑；L2 只提升缓存命中。
+//! 粘性键带版本号，L1 的 v2 哈希原始响应 ID，L2 沿用 v1。
 
 use axum::http::HeaderMap;
 use fred::clients::Client;
@@ -12,6 +12,11 @@ use fred::types::{Expiration, SetOptions};
 use okapi_store::AuthedKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+mod batch_statistics;
+pub mod response_affinity;
+mod responses_ws;
+pub(crate) mod token_count;
 
 /// 会话亲和 TTL（滑动续期）。
 const SESSION_TTL_SECS: i64 = 3600;
@@ -31,6 +36,9 @@ pub struct SchedulerRedis {
 }
 
 impl SchedulerRedis {
+    pub(super) fn client(&self) -> &Client {
+        &self.client
+    }
     #[must_use]
     pub fn new(client: Client) -> Self {
         Self { client }

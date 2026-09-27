@@ -27,7 +27,7 @@ export function useOauthLanding(onError: (msg: string) => void) {
         method: 'POST',
         body: { name: 'oauth' },
       })
-      setKey(resp.api_key)
+      setKey(resp.api_key, 'account')
       await navigate({ to: '/portal' })
       return true
     },
@@ -178,7 +178,7 @@ export function LoginForm() {
         method: 'POST',
         body: { name: 'web' },
       })
-      setKey(keyResp.api_key)
+      setKey(keyResp.api_key, 'account')
       await navigate({ to: '/portal' })
     } catch (err) {
       setError(describeAuthError(err))
@@ -204,7 +204,7 @@ export function LoginForm() {
         method: 'POST',
         body: { name: 'web' },
       })
-      setKey(keyResp.api_key)
+      setKey(keyResp.api_key, 'account')
       await navigate({ to: '/portal' })
     } catch (err) {
       if (err instanceof ApiError && err.code === 'totp_required') {

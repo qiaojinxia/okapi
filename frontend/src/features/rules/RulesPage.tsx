@@ -124,7 +124,7 @@ export function RulesPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         icon={Percent}
         title={t('admin:rulesTitle')}

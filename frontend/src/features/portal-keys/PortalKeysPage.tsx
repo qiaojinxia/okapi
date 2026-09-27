@@ -170,7 +170,7 @@ export function PortalKeysPage() {
 
   const rows = keys.data?.data ?? []
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('portal:keys')}
         description={t('portal:keysDesc')}

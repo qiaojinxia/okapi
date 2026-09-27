@@ -54,7 +54,7 @@ export function PoolsPage() {
   const rows = pools.data?.data ?? []
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         icon={Boxes}
         title={t('admin:poolsTitle')}
@@ -131,7 +131,7 @@ export function PoolsPage() {
                       p.channel_count
                     )}
                   </Td>
-                  <Td className="text-xs text-muted-foreground">
+                  <Td className="whitespace-nowrap text-xs text-muted-foreground">
                     {refs === 0
                       ? '—'
                       : t('admin:poolRefsDetail', {

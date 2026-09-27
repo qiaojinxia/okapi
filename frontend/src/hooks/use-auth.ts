@@ -5,6 +5,9 @@ import { qk } from '@/lib/query-keys'
 export interface Me {
   user_id: number
   key_id: number
+  key_name?: string
+  key_prefix?: string
+  has_web_session?: boolean
   group: string
   balance_micro: number
   /// 余额有效期（#1790-6）；null = 不过期。RFC3339。

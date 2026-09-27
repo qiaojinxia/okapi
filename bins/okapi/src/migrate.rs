@@ -177,30 +177,17 @@ pub async fn run_newapi(
             .await?;
         }
 
-        // 余额：幂等锚 = 每用户一条 newapi_import 事件
+        // 每用户/来源一条事件；幂等检查与双侧写入共用用户锁。
         if balance_micro > 0 {
-            let already = sqlx::query_scalar!(
-                r#"SELECT COUNT(*)::bigint AS "c!" FROM billing_events
-                   WHERE user_id = $1 AND actor = 'system:migrate'"#,
-                user_id
+            okapi_ledger::operations::import_credit(
+                pg,
+                ledger,
+                user_id,
+                Money::from_micros(balance_micro),
+                "system:migrate",
+                serde_json::json!({"tags": ["newapi_import"], "src_quota": quota}),
             )
-            .fetch_one(pg)
             .await?;
-            if already == 0 {
-                let amount = Money::from_micros(balance_micro);
-                if let Some(ledger) = ledger {
-                    ledger.credit(user_id, amount).await?;
-                }
-                okapi_ledger::pg::record_credit(
-                    pg,
-                    user_id,
-                    amount,
-                    "adjust",
-                    "system:migrate",
-                    serde_json::json!({"tags": ["newapi_import"], "src_quota": quota}),
-                )
-                .await?;
-            }
         }
     }
 
@@ -692,29 +679,15 @@ pub async fn run_okapi_old(
         user_map.insert(src_id.to_owned(), user_id);
 
         if balance_micro > 0 {
-            let already = sqlx::query_scalar!(
-                r#"SELECT COUNT(*)::bigint AS "c!" FROM billing_events
-                   WHERE user_id = $1 AND actor = $2"#,
+            okapi_ledger::operations::import_credit(
+                pg,
+                ledger,
                 user_id,
-                OLD_ACTOR
+                Money::from_micros(balance_micro),
+                OLD_ACTOR,
+                serde_json::json!({"tags": ["okapi_old_import"], "src_user": src_id}),
             )
-            .fetch_one(pg)
             .await?;
-            if already == 0 {
-                let amount = Money::from_micros(balance_micro);
-                if let Some(ledger) = ledger {
-                    ledger.credit(user_id, amount).await?;
-                }
-                okapi_ledger::pg::record_credit(
-                    pg,
-                    user_id,
-                    amount,
-                    "adjust",
-                    OLD_ACTOR,
-                    serde_json::json!({"tags": ["okapi_old_import"], "src_user": src_id}),
-                )
-                .await?;
-            }
         }
     }
 

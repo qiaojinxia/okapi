@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT b.id, b.request_id, b.model_name, b.log_type, b.status, b.api_key_id,\n                  COALESCE(k.name, '') AS \"key_name!\",\n                  b.prompt_tokens, b.cached_tokens, b.completion_tokens, b.reasoning_tokens,\n                  b.amount_micro, b.original_amount_micro, b.discount_micro,\n                  b.pricing_snapshot, b.error_code, b.latency_ms, b.ttft_ms, b.is_stream, b.created_at\n           FROM billing_records b\n           LEFT JOIN api_keys k ON k.id = b.api_key_id\n           WHERE b.user_id = $1\n             AND ($2::bigint IS NULL OR b.id < $2)\n             AND ($3::bigint IS NULL OR b.api_key_id = $3)\n             AND ($4::text IS NULL OR b.model_name = $4)\n             AND (NOT $5::boolean OR b.status <> 20)\n           ORDER BY b.id DESC LIMIT $6",
+  "query": "SELECT b.id, b.request_id, b.model_name, b.log_type, b.status, b.api_key_id,\n                  COALESCE(k.name, '') AS \"key_name!\",\n                  b.prompt_tokens, b.cached_tokens, b.completion_tokens, b.reasoning_tokens,\n                  b.amount_micro, b.original_amount_micro, b.discount_micro,\n                  b.pricing_snapshot, b.error_code, b.latency_ms, b.ttft_ms, b.is_stream, b.created_at\n           FROM billing_records b\n           LEFT JOIN api_keys k ON k.id = b.api_key_id\n           WHERE b.user_id = $1\n             AND ($2::bigint IS NULL OR b.id < $2)\n             AND ($3::bigint IS NULL OR b.api_key_id = $3)\n             AND ($4::text IS NULL OR b.model_name = $4)\n             AND (NOT $5::boolean OR b.status <> 20)\n             AND ($7::date IS NULL OR b.created_at >= ($7::date::timestamp AT TIME ZONE $9))\n             AND ($8::date IS NULL OR b.created_at < (($8::date + 1)::timestamp AT TIME ZONE $9))\n           ORDER BY b.id DESC LIMIT $6",
   "describe": {
     "columns": [
       {
@@ -226,7 +226,10 @@
         "Int8",
         "Text",
         "Bool",
-        "Int8"
+        "Int8",
+        "Date",
+        "Date",
+        "Text"
       ]
     },
     "nullable": [
@@ -252,5 +255,5 @@
       false
     ]
   },
-  "hash": "ab041e7f9029ffcc0edba202ae5aa8f94e70d54efe168ea7c9971bc501fb6509"
+  "hash": "7c6125475994c57995ed17d4270cb51556adbb0589de474c02ace2fb41158346"
 }

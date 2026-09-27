@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM subscription_grants WHERE user_id=$1 AND applied_at IS NULL AND sequence <= (SELECT sequence FROM subscription_grants WHERE id=$2 AND user_id=$1) ORDER BY sequence LIMIT 32",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "subscription_grants",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6efc4dc28819d9423fa4574e2ece36ddad04bd6438583a6137530a2c91300bef"
+}

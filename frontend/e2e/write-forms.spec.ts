@@ -63,6 +63,13 @@ async function openedDialog(page: Page) {
   return dialog
 }
 
+async function dismissToasts(page: Page) {
+  const close = page.getByRole('status').getByRole('button', { name: '关闭', exact: true })
+  while ((await close.count()) > 0) {
+    await close.first().click()
+  }
+}
+
 function apiError(status: number, code: string, param?: string) {
   return { status, json: { error: { code, ...(param === undefined ? {} : { param }) } } }
 }
@@ -160,6 +167,14 @@ test('渠道抽屉：注入字段按 JSON 解析、代理与额外头可改可�
     user: 'forced',
     model: 'hijack',
   })
+
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/channels/42', (route) => {
+    if (route.request().method() !== 'PATCH') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
 test('安全页会话卡：列出会话并标出当前浏览器，单条吊销与全部吊销各打对应端点，空态文案随之出现', async ({ page }) => {
@@ -205,6 +220,23 @@ test('安全页会话卡：列出会话并标出当前浏览器，单条吊销�
   await expect(card.getByText(/没有有效的 web 会话/)).toBeVisible()
   await expect(card.getByRole('button', { name: '吊销全部会话' })).toHaveCount(0)
   expect(deletes).toEqual(['/api/me/sessions/sid-phone', '/api/me/sessions'])
+
+  await page.route(/\/api\/me\/sessions(\/[^/?]+)?$/, async (route) => {
+    if (route.request().method() === 'GET') {
+      await route.fulfill({
+        json: {
+          data: [
+            { sid: 'sid-current', ip: '203.0.113.7', ua: 'Mozilla/5.0 Chrome/128', created_at: 1_757_000_000, current: true },
+          ],
+        },
+      })
+      return
+    }
+    await route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.reload()
+  await page.getByRole('heading', { name: '有效登录会话' }).locator('xpath=../..').getByRole('button', { name: '吊销', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
 test('找回密码：登录页链接带上已填邮箱，提交体含邮箱与语言，成功态不暴露账号存在性，未配 SMTP 给站长向文案', async ({ page }) => {
@@ -241,12 +273,20 @@ test('找回密码：登录页链接带上已填邮箱，提交体含邮箱与�
   await page.getByRole('button', { name: '发送重置链接' }).click()
   await expect(page.getByRole('alert')).toContainText('尚未配置邮件服务')
   expect(posts).toHaveLength(2)
+
+  await page.route('**/auth/password/forgot', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.getByRole('button', { name: '发送重置链接' }).click()
+  await expect(page.getByRole('alert')).toContainText('服务内部错误')
 })
 
 test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符串提交并前置校验，分组全量按顺序定优先级，封禁经确认框', async ({ page }) => {
   await prepare(page)
   const posts: { path: string; body: Json }[] = []
   let status = 1
+  let creditFail = false
+  let manageFail = false
+  let multiplierFail = false
+  let groupsFail = false
   const overview = () => ({
     user: { id: 7, username: 'alice', role: 1, status, balance_micro: 5_000_000, price_multiplier: '1' },
     groups: [{ code: 'default', priority: 1 }],
@@ -267,12 +307,29 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   await page.route(/\/admin\/users\/7\/(credit|multiplier|groups|manage)$/, async (route) => {
     const path = new URL(route.request().url()).pathname
     const body = route.request().postDataJSON() as Json
+    if (path.endsWith('/credit') && creditFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
+    if (path.endsWith('/multiplier') && multiplierFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
+    if (path.endsWith('/groups') && groupsFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
+    if (path.endsWith('/manage') && manageFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
     posts.push({ path, body })
     if (path.endsWith('/credit')) {
       await route.fulfill({ json: { balance_after_micro: 5_000_000 + Number(body.amount_micro) } })
       return
     }
     if (path.endsWith('/manage') && body.action === 'ban') status = 2
+    if (path.endsWith('/manage') && body.action === 'unban') status = 1
     await route.fulfill({ json: { ok: true } })
   })
 
@@ -298,6 +355,13 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
     { amount_micro: 290_000, reason: 'refund ticket 42' },
   ])
 
+  creditFail = true
+  await drawer.locator('#amt').fill('1')
+  await credit.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  creditFail = false
+
   // 个人系数：十进制字符串原样提交（计费链路不吃浮点）；负数 / 未改动不放行
   const multiplier = drawer.locator('#multiplier')
   const saveMultiplier = drawer.getByRole('button', { name: '保存', exact: true })
@@ -308,6 +372,13 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   await saveMultiplier.click()
   await expect(page.getByRole('status').filter({ hasText: '操作成功' })).toBeVisible()
   expect(posts.find((p) => p.path.endsWith('/multiplier'))?.body).toEqual({ multiplier: '0.8' })
+
+  multiplierFail = true
+  await multiplier.fill('0.9')
+  await saveMultiplier.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  multiplierFail = false
 
   // 分组：全量覆盖，先出现的优先级高
   await drawer.getByRole('tab', { name: '分组', exact: true }).click()
@@ -324,6 +395,12 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
     ],
   })
 
+  groupsFail = true
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  groupsFail = false
+
   // 封禁：会吊销全部令牌，必须过确认框；成功后按钮翻成解封
   await drawer.getByRole('tab', { name: '用户动作', exact: true }).click()
   await drawer.getByRole('button', { name: '封禁', exact: true }).click()
@@ -333,6 +410,28 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   await confirm.getByRole('button', { name: '封禁', exact: true }).click()
   await expect(drawer.getByRole('button', { name: '解封', exact: true })).toBeVisible()
   expect(posts.filter((p) => p.path.endsWith('/manage')).map((p) => p.body)).toEqual([{ action: 'ban' }])
+
+  await drawer.getByRole('button', { name: '解封', exact: true }).click()
+  await expect(drawer.getByRole('button', { name: '封禁', exact: true })).toBeVisible()
+  await drawer.getByRole('button', { name: '提为管理员', exact: true }).click()
+  await drawer.getByRole('button', { name: '降为普通用户', exact: true }).click()
+
+  manageFail = true
+  await drawer.getByRole('button', { name: '封禁', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '封禁', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  manageFail = false
+
+  await drawer.getByRole('button', { name: '软删除', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
+  expect(posts.filter((p) => p.path.endsWith('/manage')).map((p) => p.body)).toEqual([
+    { action: 'ban' },
+    { action: 'unban' },
+    { action: 'promote' },
+    { action: 'demote' },
+    { action: 'delete' },
+  ])
 })
 
 test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行被过滤，阶梯表达式与降级链显式回传', async ({ page }) => {
@@ -394,6 +493,19 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
   await expect(create.getByText('当前：ratio 模式', { exact: false })).toBeVisible()
   await create.locator('#m-tier-expr').fill(' 0:2.5,128000:5 ')
   await expect(create.getByText('当前：tiered 模式', { exact: false })).toBeVisible()
+  await page.route('**/admin/models', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await create.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await dismissToasts(page)
+  await page.route('**/admin/models', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
   const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/models'))
   await create.getByRole('button', { name: '保存', exact: true }).click()
   await created
@@ -478,6 +590,18 @@ test('套餐抽屉：充值模板与订阅两种形态字段互斥，USD 换 mic
   await create.locator('#p-price').fill('9.99')
   await create.locator('#p-desc').fill('  best value  ')
   await expect(save).toBeEnabled()
+  await page.route('**/admin/plans', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await save.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/plans', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
   saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/plans'))
   await save.click()
   await saved
@@ -536,6 +660,18 @@ test('角色抽屉：权限点来自后端清单、整组切换、无权限不�
   await drawer.getByRole('checkbox', { name: 'billing.refund', exact: true }).uncheck()
   await expect(drawer.getByText('已选 2 个权限点')).toBeVisible()
   await expect(create).toBeEnabled()
+  await page.route('**/admin/roles', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await create.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/roles', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { role_id: 4 } })
+  })
   const posted = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/roles'))
   await create.click()
   await posted
@@ -557,9 +693,32 @@ test('角色抽屉：权限点来自后端清单、整组切换、无权限不�
   const confirm = page.getByRole('alertdialog')
   await expect(confirm).toContainText('删除 ops_readonly？')
   expect(deletes).toHaveLength(0)
+  await page.route('**/admin/roles/*', (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
   await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/roles/*', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    deletes.push(new URL(route.request().url()).pathname)
+    await route.fulfill(apiError(409, 'role_in_use'))
+  })
+  await page.getByRole('row').filter({ hasText: 'ops_readonly' }).getByRole('button', { name: '删除', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('仍有用户绑定')
   expect(deletes).toEqual(['/admin/roles/ops_readonly'])
+
+  await page.route('**/admin/permissions', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.reload()
+  await page.getByRole('button', { name: '新建角色' }).click()
+  const failed = await openedDialog(page)
+  await expect(failed.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await expect(failed.getByRole('button', { name: '重试' })).toHaveCount(0)
 })
 
 test('价格分组抽屉：倍率按字符串提交、池从后端清单选、自选开关落体；编辑态分组码只读；内置默认组不可删', async ({ page }) => {
@@ -568,6 +727,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   const groups = [
     { group_code: 'default', group_ratio: '1', description: null, is_default: true, user_count: 12, channel_count: 3, pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: null },
     { group_code: 'vip', group_ratio: '0.8', description: 'VIP', is_default: false, user_count: 2, channel_count: 1, pool_code: 'premium', self_select: true, rpm_limit: 60, rph_limit: null },
+    { group_code: 'empty', group_ratio: '1', description: null, is_default: false, user_count: 0, channel_count: 0, pool_code: 'spare', self_select: false, rpm_limit: null, rph_limit: null },
   ]
   await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { data: groups, total: groups.length } }))
   await page.route('**/admin/groups', async (route) => {
@@ -576,7 +736,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
     await route.fulfill({ json: { ok: true } })
   })
   await page.route('**/admin/pools', (route) =>
-    route.fulfill({ json: { data: [{ pool_code: 'default' }, { pool_code: 'premium' }] } }),
+    route.fulfill({ json: { data: [{ pool_code: 'default' }, { pool_code: 'premium' }, { pool_code: 'spare' }] } }),
   )
   // 抽屉里"选了池就地看可达"的详情：members / models / groups 三个数组必须在
   await page.route('**/admin/pools/*', (route) => {
@@ -598,8 +758,28 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
 
   // 列表"限流"列：两边都不限显示 —；只配了每分钟则另一边显示 ∞
   await expect(page.getByRole('row').filter({ hasText: 'vip' }).getByText('60 / 分 · ∞ / 时')).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'vip' }).getByText('可自选')).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'empty' }).getByText('空池')).toBeVisible()
   // default 行的描述列也是 —，限流列取该行第二个
   await expect(page.getByRole('row').filter({ hasText: 'default' }).first().getByText('—', { exact: true })).toHaveCount(2)
+
+  await page.getByRole('row').filter({ hasText: 'empty' }).getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('alertdialog')).toContainText('删除 empty？')
+  await page.route(/\/admin\/groups\/[^/?]+$/, (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route(/\/admin\/groups\/[^/?]+$/, (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    return route.fulfill({ json: { ok: true } })
+  })
+  await page.getByRole('row').filter({ hasText: 'empty' }).getByRole('button', { name: '删除', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('status').filter({ hasText: '需发布定价 epoch' })).toBeVisible()
+  await dismissToasts(page)
 
   await page.getByRole('row').filter({ hasText: 'vip' }).getByRole('button', { name: '编辑', exact: true }).click()
   const edit = await openedDialog(page)
@@ -623,6 +803,18 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await edit.locator('#g-rpm').fill('')
   await edit.locator('#g-rph').fill(' 1200 ')
   await expect(edit.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  await page.route('**/admin/groups', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await edit.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/groups', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
   const saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
   await edit.getByRole('button', { name: '保存', exact: true }).click()
   await saved
@@ -632,6 +824,29 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   expect(posts[0]).toMatchObject(
     { group_code: 'vip', group_ratio: '0.75', description: 'VIP tier', pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: 1200 },
   )
+
+  await page.getByRole('row').filter({ hasText: 'vip' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const reach = await openedDialog(page)
+  await expect(reach.getByText(/条启用渠道/)).toBeVisible()
+  await page.route('**/admin/pools/*', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await reach.locator('#g-pool').selectOption('spare')
+  await expect(reach.getByText(/条启用渠道/)).toHaveCount(0)
+  await page.keyboard.press('Escape')
+
+  await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { data: [], total: 0 } }))
+  await page.reload()
+  await expect(
+    page.locator('div.border-dashed').getByText('分组倍率整体作用于该组用户的所有调用，叠在模型倍率之上。'),
+  ).toBeVisible()
+  await page.locator('div.border-dashed').getByRole('button', { name: '新建分组' }).click()
+  await expect(page.getByRole('dialog').getByRole('heading', { name: '新建分组' })).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
+
+  await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { data: groups, total: groups.length } }))
+  await page.reload()
 
   // 新建：分组码为空不放行；缺省倍率 1、缺省池 default、不可自选
   await page.getByRole('button', { name: '新建分组' }).click()
@@ -645,6 +860,14 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await save.click()
   await created
   expect(posts[1]).toMatchObject({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: null })
+
+  await page.route('**/admin/groups?*', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.reload()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
 })
 
 test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro，空范围不发键，时段星期勾选排序；列表上下线与删除提示需发布', async ({ page }) => {
@@ -688,6 +911,18 @@ test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro
   // 再勾周六：提交时按升序
   await edit.getByRole('checkbox', { name: '六', exact: true }).check()
   await edit.locator('#r-end').fill('420')
+  await page.route('**/admin/pricing/rules', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await edit.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/pricing/rules', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
   let saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pricing/rules'))
   await edit.getByRole('button', { name: '保存', exact: true }).click()
   await saved
@@ -736,16 +971,284 @@ test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro
   // 前面两次保存也各弹过一次"需发布"，取最新的一条即可
   await expect(page.getByRole('status').filter({ hasText: '需发布定价 epoch' }).last()).toBeVisible()
   expect(toggles).toEqual([{ path: '/admin/pricing/rules/night-discount/toggle', body: { enabled: false } }])
+
+  await page.route(/\/admin\/pricing\/rules\/[^/?]+\/toggle$/, (route) =>
+    route.fulfill(apiError(500, 'internal_error')),
+  )
+  await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '停用', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+
   await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '删除', exact: true }).click()
   const confirm = page.getByRole('alertdialog')
   await expect(confirm).toContainText('删除 night-discount？')
-  const removed = page.waitForRequest((r) => r.method() === 'DELETE' && r.url().includes('/admin/pricing/rules/'))
+  await page.route(/\/admin\/pricing\/rules\/[^/?]+$/, (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
   await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route(/\/admin\/pricing\/rules\/[^/?]+(\/toggle)?$/, async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (request.method() === 'POST') toggles.push({ path, body: request.postDataJSON() as Json })
+    else if (request.method() === 'DELETE') deletes.push(path)
+    else return route.fallback()
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.getByRole('row').filter({ hasText: 'night-discount' }).getByRole('button', { name: '删除', exact: true }).click()
+  const removed = page.waitForRequest((r) => r.method() === 'DELETE' && r.url().includes('/admin/pricing/rules/'))
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
   await removed
   expect(deletes).toEqual(['/admin/pricing/rules/night-discount'])
 })
 
-test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、端口越界归零、未保存前测试按钮禁用、测试信按已保存配置发', async ({ page }) => {
+const SMTP_FIXTURE = {
+  host: 'smtp.example.com', port: 587, security: 'starttls', username: 'mailer', password: 'fixture-password',
+  from_address: 'no-reply@example.com', from_name: 'Okapi', reply_to: null, extension: { retained: true },
+}
+
+async function prepareSmtp(page: Page, initial: unknown = SMTP_FIXTURE) {
+  await prepare(page)
+  const writes: Json[] = []
+  const tests: Json[] = []
+  let stored = initial
+  let reads = 0
+  await page.route('**/admin/settings/smtp', (route) => {
+    reads++
+    return route.fulfill({ json: { value: stored } })
+  })
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
+    const body = route.request().postDataJSON() as Json
+    writes.push(body)
+    stored = body.value
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/settings/smtp/test', async (route) => {
+    tests.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  return {
+    writes, tests, reads: () => reads,
+    panel: page.getByRole('tabpanel', { name: '邮件（SMTP）', exact: true }),
+    open: async () => {
+      await page.goto('/admin/settings')
+      await page.getByRole('tab', { name: '邮件（SMTP）', exact: true }).click()
+    },
+  }
+}
+
+test('SMTP 表单：读取完成前不能覆盖配置，失败可重试，格式错误与未配置分别显示', async ({ page }) => {
+  const { open, panel, writes, tests } = await prepareSmtp(page)
+  let release: () => void = () => undefined
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/admin/settings/smtp', async (route) => {
+    await pending
+    await route.fulfill(apiError(500, 'internal_error'))
+  })
+  await open()
+  try {
+    await expect(panel.getByRole('status')).toBeVisible()
+    await expect(panel.getByRole('button', { name: '保存', exact: true })).toHaveCount(0)
+    await expect(panel.getByRole('textbox')).toHaveCount(0)
+  } finally { release() }
+  await expect(panel.getByRole('alert')).toContainText('服务内部错误')
+  await page.route('**/admin/settings/smtp', (route) => route.fulfill({ json: { value: { host: 42 } } }))
+  await panel.getByRole('button', { name: '重试', exact: true }).click()
+  await expect(panel.getByRole('alert')).toContainText('邮件配置格式无法识别')
+  await expect(panel.getByRole('button', { name: '发送测试邮件' })).toHaveCount(0)
+  await page.route('**/admin/settings/smtp', (route) => route.fulfill({ json: { value: null } }))
+  await panel.getByRole('button', { name: '重试', exact: true }).click()
+  await expect(panel.locator('#smtp-host')).toHaveValue('')
+  await expect(panel.getByRole('button', { name: '发送测试邮件' })).toBeDisabled()
+  expect(writes).toHaveLength(0)
+  expect(tests).toHaveLength(0)
+})
+
+test('SMTP 表单：端口原文与默认值分开，加密切换只更新默认提示，自定义端口不被改写', async ({ page }) => {
+  const { open, panel, writes } = await prepareSmtp(page)
+  await open()
+  const port = panel.getByLabel('端口', { exact: true })
+  const save = panel.getByRole('button', { name: '保存', exact: true })
+  for (const raw of ['70000', '-1', '25.5', '1e3', 'abc']) {
+    await port.fill(raw)
+    await expect(port).toHaveValue(raw)
+    await expect(port).toHaveAttribute('aria-invalid', 'true')
+    await expect(port).toHaveAccessibleDescription(/1–65535/)
+    await expect(save).toBeDisabled()
+    await port.press('Enter')
+  }
+  expect(writes).toHaveLength(0)
+  await port.fill('')
+  await expect(port).toHaveValue('')
+  await panel.getByRole('button', { name: '隐式 TLS', exact: true }).click()
+  await expect(port).toHaveAttribute('placeholder', '465')
+  await expect(port).toHaveAccessibleDescription('留空或填 0 使用默认 465')
+  await save.click()
+  await expect.poll(() => writes.length).toBe(1)
+  expect(writes[0]).toEqual({ key: 'smtp', value: { ...SMTP_FIXTURE, port: 0, security: 'tls' } })
+  await expect(save).toBeDisabled()
+  await port.fill('2525')
+  await panel.getByRole('button', { name: '不加密', exact: true }).click()
+  await expect(port).toHaveValue('2525')
+  await expect(port).toHaveAttribute('placeholder', '25')
+  await panel.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(port).toHaveValue('')
+  await expect(panel.getByRole('button', { name: '隐式 TLS', exact: true })).toHaveAttribute('aria-pressed', 'true')
+})
+
+test('SMTP 表单：发件地址就地校验，主机留空可按说明停用，密码与扩展配置保留', async ({ page }) => {
+  const { open, panel, writes, tests } = await prepareSmtp(page)
+  await open()
+  const save = panel.getByRole('button', { name: '保存', exact: true })
+  const from = panel.locator('#smtp-from')
+  await from.fill('bad-address')
+  await expect(from).toHaveAttribute('aria-invalid', 'true')
+  await expect(from).toHaveAccessibleDescription('请输入有效的邮箱地址。')
+  await expect(save).toBeDisabled()
+  await from.fill('sender@example.com')
+  const reply = panel.locator('#smtp-reply-to')
+  await reply.fill('bad@@reply')
+  await expect(reply).toHaveAttribute('aria-invalid', 'true')
+  await expect(save).toBeDisabled()
+  await panel.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(from).toHaveValue(SMTP_FIXTURE.from_address)
+  await panel.locator('#smtp-test-to').fill('ops@example.com')
+  await expect(panel.getByRole('button', { name: '发送测试邮件' })).toBeEnabled()
+  await panel.locator('#smtp-host').fill('')
+  await expect(save).toBeEnabled()
+  await expect(panel.getByRole('button', { name: '发送测试邮件' })).toBeDisabled()
+  await save.click()
+  await expect.poll(() => writes.length).toBe(1)
+  expect(writes[0]).toEqual({ key: 'smtp', value: { ...SMTP_FIXTURE, host: '' } })
+  await expect(panel.locator('#smtp-host')).toHaveValue('')
+  await expect(panel.locator('#smtp-pass')).toHaveValue(SMTP_FIXTURE.password)
+  await expect(panel.getByRole('button', { name: '发送测试邮件' })).toBeDisabled()
+  expect(tests).toHaveLength(0)
+})
+
+test('SMTP 表单：发件人预览跟随输入，已有具名回信地址可保留', async ({ page }) => {
+  const replyTo = 'Support Team <reply@example.com>'
+  const { open, panel, writes } = await prepareSmtp(page, { ...SMTP_FIXTURE, reply_to: replyTo })
+  await open()
+  const preview = panel.getByRole('note', { name: '收件人看到的发件人', exact: true })
+  await expect(preview).toContainText('Okapi')
+  await expect(preview).toContainText('no-reply@example.com')
+  await panel.locator('#smtp-from-name').fill('平台运营')
+  await expect(preview).toContainText('平台运营')
+  await panel.locator('#smtp-from').fill('sender@example.com')
+  await expect(preview).toContainText('sender@example.com')
+  await expect(panel.locator('#smtp-reply-to')).toHaveAttribute('aria-invalid', 'false')
+  await panel.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => writes.length).toBe(1)
+  expect(writes[0]).toEqual({ key: 'smtp', value: { ...SMTP_FIXTURE, from_name: '平台运营', from_address: 'sender@example.com', reply_to: replyTo } })
+  await panel.locator('#smtp-from-name').fill('')
+  await expect(preview).not.toContainText('平台运营')
+  await expect(preview).toContainText('sender@example.com')
+})
+
+test('SMTP 表单：保存中不可编辑或测试，失败保留草稿，成功回显快照且不被旧读取覆盖', async ({ page }) => {
+  const { open, panel, writes, reads, tests } = await prepareSmtp(page)
+  let release: () => void = () => undefined
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  let fail = true
+  let attempts = 0
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
+    attempts++
+    if (!fail) return route.fallback()
+    await pending
+    await route.fulfill(apiError(500, 'internal_error'))
+  })
+  await open()
+  const name = panel.locator('#smtp-from-name')
+  await name.fill('Updated sender')
+  await panel.getByRole('button', { name: '保存', exact: true }).click()
+  try {
+    await expect.poll(() => attempts).toBe(1)
+    await expect(panel.getByRole('button', { name: '保存', exact: true })).toHaveAttribute('aria-busy', 'true')
+    for (const control of await panel.locator('input, button').all()) await expect(control).toBeDisabled()
+    await page.getByRole('tab', { name: '通知多路', exact: true }).click()
+    await page.getByRole('tab', { name: '邮件（SMTP）', exact: true }).click()
+    await expect(name).toHaveValue('Updated sender')
+  } finally { release() }
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await expect(name).toBeEnabled()
+  await expect(name).toHaveValue('Updated sender')
+  fail = false
+  await panel.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => writes.length).toBe(1)
+  await expect(panel.getByRole('button', { name: '取消', exact: true })).toBeDisabled()
+  await expect(name).toHaveValue('Updated sender')
+  expect(reads()).toBe(1)
+  await name.fill('Later draft')
+  await panel.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(name).toHaveValue('Updated sender')
+  expect(tests).toHaveLength(0)
+})
+
+test('SMTP 表单：测试按明确点击时的收件人和语言提交，发送中锁定输入，失败可重试', async ({ page }) => {
+  const { open, panel, writes, tests } = await prepareSmtp(page)
+  let release: () => void = () => undefined
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  let fail = true
+  const attempted: Json[] = []
+  await page.route('**/admin/settings/smtp/test', async (route) => {
+    attempted.push(route.request().postDataJSON() as Json)
+    if (!fail) return route.fallback()
+    await pending
+    await route.fulfill(apiError(500, 'internal_error'))
+  })
+  await open()
+  const input = panel.locator('#smtp-test-to')
+  const send = panel.getByRole('button', { name: '发送测试邮件', exact: true })
+  for (const value of ['not-mail', 'a@', 'a@@example.com']) {
+    await input.fill(value)
+    await expect(send).toBeDisabled()
+  }
+  await input.fill(' ops@example.com ')
+  await send.click()
+  try {
+    await expect.poll(() => attempted.length).toBe(1)
+    expect(attempted[0]).toEqual({ to: 'ops@example.com', lang: 'zh-CN' })
+    await expect(send).toHaveAttribute('aria-busy', 'true')
+    for (const control of await panel.locator('input, button').all()) await expect(control).toBeDisabled()
+  } finally { release() }
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await expect(input).toBeEnabled()
+  await expect(input).toHaveValue('ops@example.com')
+  fail = false
+  await input.press('Enter')
+  await expect.poll(() => tests.length).toBe(1)
+  expect(attempted).toHaveLength(2)
+  await expect(page.getByRole('status').filter({ hasText: '测试邮件已发送至 ops@example.com' })).toBeVisible()
+  expect(writes).toHaveLength(0)
+})
+
+for (const width of [320, 390, 1280]) test(`SMTP 表单 ${width}px：连接、身份和测试分区，操作区与长内容不溢出`, async ({ page }) => {
+  const { open } = await prepareSmtp(page, { ...SMTP_FIXTURE, host: 'long-smtp-host.mail-relay.example.com', from_address: 'no-reply-platform-operations@example.com' })
+  await page.setViewportSize({ width, height: 900 })
+  await open()
+  if (width === 390) {
+    await page.getByRole('button', { name: '语言', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'English', exact: true }).click()
+    await page.evaluate(() => document.documentElement.classList.add('dark'))
+  }
+  const panel = page.getByRole('tabpanel')
+  await expect(panel.getByRole('region')).toHaveCount(3)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  expect(await panel.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+  if (width < 768) {
+    for (const input of await panel.locator('input').all()) expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    expect((await panel.getByRole('button', { name: width === 390 ? 'Send test email' : '发送测试邮件', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+  }
+  await page.locator('#main-content').getByRole('heading', { level: 1 }).scrollIntoViewIfNeeded()
+  await page.screenshot({ path: `test-results/smtp-${width}.png`, fullPage: true, animations: 'disabled' })
+})
+
+test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、非法端口保留并提示、测试信按已保存配置发', async ({ page }) => {
   await prepare(page)
   const writes: Json[] = []
   const tests: Json[] = []
@@ -774,7 +1277,9 @@ test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、端口越界
 
   await panel.locator('#smtp-host').fill('  smtp.example.com ')
   await panel.locator('#smtp-port').fill('70000')
-  await expect(panel.locator('#smtp-port')).toHaveValue('', { timeout: 2_000 })
+  await expect(panel.locator('#smtp-port')).toHaveValue('70000')
+  await expect(panel.locator('#smtp-port')).toHaveAttribute('aria-invalid', 'true')
+  await expect(save).toBeDisabled()
   await panel.locator('#smtp-port').fill('465')
   await panel.getByRole('button', { name: '隐式 TLS', exact: true }).click()
   await panel.locator('#smtp-user').fill(' mailer ')
@@ -794,7 +1299,7 @@ test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、端口越界
     },
   }])
 
-  // 保存后草稿清空、回显来自单键接口；测试信只能按已保存配置发，且收件人要像邮箱
+  // 保存后草稿清空并回填已提交配置；测试信只能按已保存配置发。
   await expect(save).toBeDisabled()
   await expect(panel.locator('#smtp-host')).toHaveValue('smtp.example.com')
   await expect(panel.getByText('用已保存的配置发一封测试信')).toBeVisible()
@@ -806,9 +1311,21 @@ test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、端口越界
   await tested
   await expect(page.getByRole('status').filter({ hasText: '测试邮件已发送至 me@example.com' })).toBeVisible()
   expect(tests).toEqual([{ to: 'me@example.com', lang: 'zh-CN' }])
+
+  await page.route('**/admin/settings/smtp/test', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await send.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+
   // 有未保存草稿时不许发测试信：测的是已保存配置，发了也是误导
   await panel.locator('#smtp-from-name').fill('Okapi Ops')
   await expect(send).toBeDisabled()
+
+  await page.route('**/admin/settings', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await save.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
 test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位不放行，错码显示错误并可重试，确认后进入已开启态；无会话时降级提示', async ({ page }) => {
@@ -827,6 +1344,11 @@ test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位�
   await page.goto('/portal/security')
   await page.getByRole('button', { name: '开始绑定' }).click()
   await expect(page.getByText('otpauth://totp/Okapi:alice?secret=JBSWY3DPEHPK3PXP&issuer=Okapi')).toBeVisible()
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await page.getByRole('button', { name: '复制 otpauth 链接' }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(
+    'otpauth://totp/Okapi:alice?secret=JBSWY3DPEHPK3PXP&issuer=Okapi',
+  )
   const code = page.locator('#code')
   const confirm = page.getByRole('button', { name: '确认开启' })
   await code.fill('12345')
@@ -834,6 +1356,15 @@ test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位�
   await code.fill('000000')
   await confirm.click()
   await expect(page.getByText('两步验证码错误')).toBeVisible()
+  await page.route('**/auth/totp/confirm', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await code.fill('111111')
+  await confirm.click()
+  await expect(page.getByText('服务内部错误')).toBeVisible()
+  await page.route('**/auth/totp/confirm', async (route) => {
+    const body = route.request().postDataJSON() as { pending: string; code: string }
+    confirms.push(body)
+    await route.fulfill({ json: { enabled: true } })
+  })
   await code.fill('654321')
   await confirm.click()
   // 成功态：卡片切成"已开启"提示（toast 也叫这个名，故按提示正文断言）
@@ -844,9 +1375,13 @@ test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位�
     { pending: 'pending-blob', code: '654321' },
   ])
 
+  await page.route('**/auth/totp/enroll', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.reload()
+  await page.getByRole('button', { name: '开始绑定' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+
   // API Key 单轨登录没有会话 cookie：后端 401 → 引导改用邮箱密码登录，而不是留一个哑按钮
   await page.route('**/auth/totp/enroll', (route) => route.fulfill(apiError(401, 'unauthorized')))
-  await page.reload()
   await page.getByRole('button', { name: '开始绑定' }).click()
   await expect(page.getByText(/两步验证需邮箱密码登录/)).toBeVisible()
   await expect(page.getByRole('button', { name: '开始绑定' })).toHaveCount(0)
@@ -883,11 +1418,26 @@ test('团队：建团提交去空格的名字，成员表单把月度上限 USD 
   })
 
   await page.goto('/portal/teams')
+  await expect(page.getByText('还没有团队。创建一个团队，用团钱包给同事统一付费并分账。')).toBeVisible()
   await page.getByRole('button', { name: '创建团队' }).first().click()
   const createDrawer = await openedDialog(page)
   const create = createDrawer.getByRole('button', { name: '创建团队', exact: true })
   await expect(create).toBeDisabled()
   await createDrawer.locator('#tname').fill('  Data Team ')
+  await page.route('**/api/teams', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await create.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/api/teams', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    const body = route.request().postDataJSON() as Json
+    posts.push({ path: '/api/teams', body })
+    teams = [{ team_id: 9, name: body.name, role: 'owner', member_count: 1, monthly_spend_limit_micro: null, balance_micro: 0 }]
+    await route.fulfill({ json: { team_id: 9 } })
+  })
   const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/api/teams'))
   await create.click()
   await created
@@ -904,6 +1454,24 @@ test('团队：建团提交去空格的名字，成员表单把月度上限 USD 
   await detail.locator('#muid').fill('42')
   await detail.locator('#mrole').selectOption('admin')
   await detail.locator('#mlimit').fill('19.99')
+  await page.route(/\/api\/teams\/9\/members$/, (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await add.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route(/\/api\/teams\/9\/(members|keys)$/, async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const body = route.request().postDataJSON() as Json
+    posts.push({ path, body })
+    if (path.endsWith('/members')) {
+      members.push({ member_user_id: body.user_id, username: `user-${body.user_id}`, role: body.role, monthly_spend_limit_micro: body.monthly_spend_limit_micro, total_spend_micro: 0, month_spend_micro: 0 })
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({ json: { api_key: 'sk-okapi-team-plaintext-once' } })
+    }
+  })
   const upserted = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/members'))
   await add.click()
   await upserted
@@ -916,10 +1484,36 @@ test('团队：建团提交去空格的名字，成员表单把月度上限 USD 
   await expect.poll(() => posts.length).toBe(3)
   expect(posts[2].body).toEqual({ user_id: 43, role: 'member', monthly_spend_limit_micro: null })
 
+  await page.route(/\/api\/teams\/9\/keys$/, (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await detail.getByRole('button', { name: '给自己发团 key' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route(/\/api\/teams\/9\/(members|keys)$/, async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const body = route.request().postDataJSON() as Json
+    posts.push({ path, body })
+    if (path.endsWith('/members')) {
+      members.push({ member_user_id: body.user_id, username: `user-${body.user_id}`, role: body.role, monthly_spend_limit_micro: body.monthly_spend_limit_micro, total_spend_micro: 0, month_spend_micro: 0 })
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({ json: { api_key: 'sk-okapi-team-plaintext-once' } })
+    }
+  })
   await detail.getByRole('button', { name: '给自己发团 key' }).click()
   await expect(detail.getByText('sk-okapi-team-plaintext-once')).toBeVisible()
   await expect(detail.getByText('明文仅此一次可见')).toBeVisible()
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await detail.getByRole('button', { name: '复制', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('sk-okapi-team-plaintext-once')
   expect(posts[3]).toEqual({ path: '/api/teams/9/keys', body: { name: 'team' } })
+
+  await page.route('**/api/teams?*', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.reload()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0)
 
   // API Key 单轨登录没有会话：列表 401 → 整页降级提示，不显示空态或哑按钮
   await page.route('**/api/teams?*', (route) => route.fulfill(apiError(401, 'unauthorized')))
@@ -968,6 +1562,19 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   await edit.locator('#pool-strategy').selectOption('priority_weighted')
   await edit.locator('#pool-fallback').selectOption('')
   await edit.locator('#pool-desc').fill('paid tier')
+  await page.route('**/admin/pools', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await edit.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/pools', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'GET') return route.fulfill({ json: { data: pools } })
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
   let saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pools'))
   await edit.getByRole('button', { name: '保存', exact: true }).click()
   await saved
@@ -987,8 +1594,21 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   await rowOf('spare').getByRole('button', { name: '删除', exact: true }).click()
   const confirm = page.getByRole('alertdialog')
   await expect(confirm).toContainText('删除 spare？')
-  const removed = page.waitForRequest((r) => r.method() === 'DELETE')
+  await page.route('**/admin/pools/*', (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
   await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/pools/*', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    deletes.push(new URL(route.request().url()).pathname)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await rowOf('spare').getByRole('button', { name: '删除', exact: true }).click()
+  const removed = page.waitForRequest((r) => r.method() === 'DELETE')
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
   await removed
   expect(deletes).toEqual(['/admin/pools/spare'])
 })
@@ -1024,7 +1644,8 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   })
   await page.route('**/admin/channels/42/pools', async (route) => {
     record(route)
-    await route.fulfill({ json: { ok: true, orphan: false } })
+    const body = (route.request().postDataJSON() ?? {}) as { pools?: unknown[] }
+    await route.fulfill({ json: { ok: true, orphan: !(body.pools && body.pools.length > 0) } })
   })
   await page.route('**/admin/channels/42', async (route) => {
     record(route)
@@ -1052,11 +1673,20 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await expect(drawer.locator('#d-cred')).toHaveValue('')
   expect(calls).toEqual([{ path: '/admin/channels/42/credential', method: 'POST', body: { credential: 'sk-new-secret' } }])
 
+  await drawer.locator('#d-cred').fill('sk-fail')
+  await page.route('**/admin/channels/42/credential', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await rotate.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+
   // 模型页签：拉上游模型直接覆盖清单，并提示发现数量
   await drawer.getByRole('tab', { name: '模型', exact: true }).click()
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('status').filter({ hasText: '发现 3 个模型' })).toBeVisible()
   expect(calls[1]).toMatchObject({ path: '/admin/channels/42/fetch-models', method: 'GET' })
+
+  await page.route('**/admin/channels/42/fetch-models', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await drawer.getByRole('button', { name: '拉取上游模型' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
   // 调度页签：成本倍数 → 千分比、留存声明随主"保存"提交；池成员单独保存，覆盖值按整数、留空 null
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
@@ -1080,10 +1710,27 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
     ] },
   })
 
+  await drawer.getByRole('checkbox', { name: 'default（内置默认池）' }).uncheck()
+  await drawer.getByRole('checkbox', { name: 'premium', exact: true }).uncheck()
+  await expect(drawer.getByText('未加入任何池：这条渠道对谁都不可达，直到把它加进至少一个池。')).toBeVisible()
+  const poolsOrphaned = page.waitForRequest((r) => r.url().endsWith('/pools'))
+  await drawer.getByRole('button', { name: '保存池成员关系' }).click()
+  await poolsOrphaned
+  await expect(page.getByRole('status').filter({ hasText: '该渠道现在不在任何池里' })).toBeVisible()
+  expect(calls[3]).toEqual({
+    path: '/admin/channels/42/pools',
+    method: 'POST',
+    body: { pools: [] },
+  })
+
+  await page.route('**/admin/channels/42/pools', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await drawer.getByRole('button', { name: '保存池成员关系' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+
   const saved = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith('/admin/channels/42'))
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await saved
-  expect(calls[3]).toEqual({
+  expect(calls[4]).toEqual({
     path: '/admin/channels/42',
     method: 'PATCH',
     body: {
@@ -1112,7 +1759,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   const createdReq = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/channels'))
   await submit.click()
   await createdReq
-  expect(calls[4]).toEqual({
+  expect(calls[5]).toEqual({
     path: '/admin/channels',
     method: 'POST',
     body: {
@@ -1122,12 +1769,48 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
       cost_milli: 1000, data_retention: '',
     },
   })
+
+  await page.route('**/admin/models', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()
+    if (new URL(route.request().url()).search !== '') return route.fallback()
+    return route.fulfill({ json: { data: [], total: 0 } })
+  })
+  await page.reload()
+  await page.getByRole('button', { name: '新建渠道' }).first().click()
+  const emptyPicker = await openedDialog(page)
+  await expect(emptyPicker.getByText('尚无模型，请先在定价页配置。')).toBeVisible()
+  await page.keyboard.press('Escape')
+
+  await page.route('**/admin/models', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'GET') return route.fallback()
+    if (new URL(route.request().url()).search !== '') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.reload()
+  await page.getByRole('button', { name: '新建渠道' }).first().click()
+  const picker = await openedDialog(page)
+  await expect(picker.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+
+  await picker.locator('#d-name').fill('fail-ch')
+  await picker.locator('#d-cred').fill('sk-fail')
+  await picker.locator('#d-models').fill('gpt-5')
+  await picker.locator('#d-models').press('Enter')
+  await page.route('**/admin/channels', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await picker.getByRole('button', { name: '新建', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
 test('用户抽屉其余页签：角色只发改动的那一项、订阅只列在售订阅套餐且发放 / 结束各打端点、余额有效期按日期换 UTC 零点且清空发 null', async ({ page }) => {
   await prepare(page)
   const calls: { path: string; method: string; body: Json }[] = []
   let subscription: Json | null = null
+  let subFail = false
+  let roleFail = false
+  let cancelFail = false
+  let expiryFail = false
   await page.route('**/admin/users?*', (route) =>
     route.fulfill({ json: { total: 1, data: [{ id: 7, username: 'alice', email: null, role: 1, status: 1, balance_micro: 0, admin_role_id: null, price_multiplier: '1' }] } }),
   )
@@ -1154,6 +1837,22 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
     const r = route.request()
     const path = new URL(r.url()).pathname
     if (r.method() === 'GET') return route.fulfill({ json: { subscription, history: [] } })
+    if (path.endsWith('/subscription') && r.method() === 'POST' && subFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
+    if (path.endsWith('/role') && roleFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
+    if (path.endsWith('/subscription') && r.method() === 'DELETE' && cancelFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
+    if (path.endsWith('/balance-expiry') && expiryFail) {
+      await route.fulfill(apiError(500, 'internal_error'))
+      return
+    }
     calls.push({ path, method: r.method(), body: (r.postDataJSON() ?? null) as Json })
     if (path.endsWith('/subscription') && r.method() === 'POST') {
       subscription = {
@@ -1170,12 +1869,20 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
   await page.goto('/admin/users')
   await page.getByRole('row').filter({ hasText: 'alice' }).getByRole('button', { name: '管理', exact: true }).click()
   const drawer = await openedDialog(page)
+  await expect(drawer.getByText('统计服务未启用（需配置 ClickHouse）')).toBeVisible()
+  await expect(drawer.getByText('最近余额变动')).toBeVisible()
+  await expect(drawer.getByText('暂无数据').first()).toBeVisible()
 
   // 角色：两个下拉都"不改动"时按钮禁用；只改内置角色 → 体里只有 role；只改自定义角色 → 只有 admin_role_id
   await drawer.getByRole('tab', { name: '角色', exact: true }).click()
   const apply = drawer.getByRole('button', { name: '应用角色' })
   await expect(apply).toBeDisabled()
   await drawer.locator('#role').selectOption('10')
+  roleFail = true
+  await apply.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  roleFail = false
   let done = page.waitForRequest((r) => r.url().endsWith('/role'))
   await apply.click()
   await done
@@ -1197,11 +1904,22 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
   const grantBtn = drawer.getByRole('button', { name: '发放 / 续期' })
   await expect(grantBtn).toBeDisabled()
   await planSelect.selectOption('pro-monthly')
+  subFail = true
+  await grantBtn.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  subFail = false
   done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/subscription'))
   await grantBtn.click()
   await done
   expect(calls[2]).toEqual({ path: '/admin/users/7/subscription', method: 'POST', body: { plan_code: 'pro-monthly' } })
   await expect(drawer.getByText('当前没有激活的订阅。')).toHaveCount(0)
+  cancelFail = true
+  await drawer.getByRole('button', { name: '立即结束', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '立即结束', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  cancelFail = false
   await drawer.getByRole('button', { name: '立即结束', exact: true }).click()
   const confirm = page.getByRole('alertdialog')
   done = page.waitForRequest((r) => r.method() === 'DELETE' && r.url().endsWith('/subscription'))
@@ -1213,6 +1931,11 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
   // 余额有效期：日期 → 当天 UTC 零点的 RFC3339；清空 → null（永不过期）
   await drawer.getByRole('tab', { name: '余额', exact: true }).click()
   await drawer.locator('#uexpiry').fill('2026-12-31')
+  expiryFail = true
+  await drawer.getByRole('button', { name: '保存', exact: true }).first().click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  expiryFail = false
   done = page.waitForRequest((r) => r.url().endsWith('/balance-expiry'))
   // 余额段在系数段之前：填了日期后它的按钮才叫"保存"，取第一个
   await drawer.getByRole('button', { name: '保存', exact: true }).first().click()
@@ -1223,6 +1946,16 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
   await drawer.getByRole('button', { name: '取消有效期' }).click()
   await done
   expect(calls[5].body).toEqual({ expires_at: null })
+
+  await page.route(/\/admin\/users\/7\/subscription$/, (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.reload()
+  await page.getByRole('row').filter({ hasText: 'alice' }).getByRole('button', { name: '管理', exact: true }).click()
+  const failed = await openedDialog(page)
+  await failed.getByRole('tab', { name: '订阅', exact: true }).click()
+  await expect(failed.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
 })
 
 test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = null），失效 key 可重新启用；套餐删除经确认框；模型页发布提示新 epoch', async ({ page }) => {
@@ -1270,10 +2003,23 @@ test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = nul
   await row502.getByRole('button', { name: '保存', exact: true }).click()
   await done
   expect(calls[1].body).toEqual({ weight: 50, max_concurrency: null })
+  await page.route(/\/admin\/channels\/42\/keys\/\d+$/, (route) => route.fulfill(apiError(500, 'internal_error')))
+  await row502.getByRole('button', { name: '重新启用' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route(/\/admin\/channels\/42\/keys\/\d+$/, async (route) => {
+    rec(route)
+    await route.fulfill({ json: { ok: true } })
+  })
   done = page.waitForRequest((r) => r.method() === 'PATCH' && r.url().endsWith('/keys/502'))
   await row502.getByRole('button', { name: '重新启用' }).click()
   await done
   expect(calls[2].body).toEqual({ status: 1 })
+
+  await page.route(/\/admin\/channels\/42\/keys\/\d+$/, (route) => route.fulfill(apiError(500, 'internal_error')))
+  await row501.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
   await page.keyboard.press('Escape')
 
   // 套餐删除：确认框 → DELETE /admin/plans/{code}
@@ -1295,8 +2041,21 @@ test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = nul
   await page.getByRole('row').filter({ hasText: 'starter' }).getByRole('button', { name: '删除', exact: true }).click()
   const confirm = page.getByRole('alertdialog')
   await expect(confirm).toContainText('删除 starter？')
-  done = page.waitForRequest((r) => r.method() === 'DELETE')
+  await page.route('**/admin/plans/*', (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
   await confirm.getByRole('button', { name: '删除', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/plans/*', async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback()
+    deletes.push(new URL(route.request().url()).pathname)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.getByRole('row').filter({ hasText: 'starter' }).getByRole('button', { name: '删除', exact: true }).click()
+  done = page.waitForRequest((r) => r.method() === 'DELETE')
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click()
   await done
   expect(deletes).toEqual(['/admin/plans/starter'])
 
@@ -1313,6 +2072,10 @@ test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = nul
   await done
   await expect(page.getByRole('status').filter({ hasText: '已发布 epoch 42' })).toBeVisible()
   expect(published).toBe(1)
+
+  await page.route('**/admin/pricing/publish', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.getByRole('button', { name: '发布定价', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
 test('重置密码：缺 token 直接提示无效；长度与一致性校验挡在提交前；成功回登录页；失效 token 提示重新申请', async ({ page }) => {
@@ -1352,6 +2115,10 @@ test('重置密码：缺 token 直接提示无效；长度与一致性校验挡�
   await page.getByRole('button', { name: '确认修改' }).click()
   await expect(page.getByRole('alert')).toContainText('重置链接无效或已过期')
   expect(posts).toHaveLength(2)
+
+  await page.route('**/auth/password/reset', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.getByRole('button', { name: '确认修改' }).click()
+  await expect(page.getByRole('alert')).toContainText('服务内部错误')
 })
 
 test('兑换码生成抽屉：面值 USD 换 micro 整数（0.29 边界）、绑定用户去空格转数字、空限额不发键、过期时间按本地换 UTC；面值 0 不放行；结果明文只此一次、可整批复制；400 以错误码文案提示', async ({ page, context }) => {
@@ -1413,6 +2180,19 @@ test('兑换码生成抽屉：面值 USD 换 micro 整数（0.29 边界）、绑
   await alert.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(alert).toHaveCount(0)
 
+  await page.route('**/admin/redemptions', (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await submit.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+
+  await page.route('**/admin/redemptions', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { batch_id: 'b-20260907', codes: ['OKAPI-AAAA-1111', 'OKAPI-BBBB-2222'] } })
+  })
   // 第二次成功：结果态展示批次与明文，生成按钮消失、取消变关闭，整批复制进剪贴板
   done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/redemptions'))
   await submit.click()
@@ -1493,16 +2273,82 @@ test('毛利熔断卡：配置以人看的单位回显并按整数口径提交�
   })
   await expect(page.getByRole('status').filter({ hasText: '已保存' })).toBeVisible()
 
+  await page.route('**/admin/settings', (route) => {
+    if (route.request().isNavigationRequest() || route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill(apiError(500, 'internal_error'))
+  })
+  await page.locator('#mb-window_hours').fill('18')
+  await save.click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    settingsPosts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+
   // 被暂停的分组 × 渠道：负毛利行可解除，解除体只带定位对
   const row = page.getByRole('row').filter({ hasText: 'openai-main' })
   await expect(row.getByText('已暂停')).toBeVisible()
   await expect(row.getByText('-25.0%')).toBeVisible()
   await expect(row.getByText('35 笔 · 收入 US$1.00 · 成本 US$1.25')).toBeVisible()
+  await page.route('**/admin/margin-breaker/lift', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await row.getByRole('button', { name: '解除', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/margin-breaker/lift', async (route) => {
+    lifts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { until: now + 86_400 } })
+  })
   const lifted = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/margin-breaker/lift'))
   await row.getByRole('button', { name: '解除', exact: true }).click()
   await lifted
   expect(lifts).toEqual([{ group_code: 'vip', channel_id: 42 }])
   await expect(page.getByRole('status').filter({ hasText: '已解除' })).toBeVisible()
+
+  await page.route('**/admin/margin-breaker', (route) =>
+    route.request().isNavigationRequest()
+      ? route.fallback()
+      : route.fulfill({
+          json: {
+            config: {
+              enabled: true, window_hours: 24, min_requests: 20, min_cost_micro: 100_000,
+              margin_bp: 0, cooldown_secs: 3600, lift_secs: 86_400,
+            },
+            data: [],
+          },
+        }),
+  )
+  await page.reload()
+  await page.getByRole('tab', { name: '毛利熔断', exact: true }).click()
+  await expect(page.getByText('当前没有被暂停的分组 × 渠道。')).toBeVisible()
+
+  await page.route('**/admin/margin-breaker', (route) =>
+    route.request().isNavigationRequest()
+      ? route.fallback()
+      : route.fulfill({
+          json: {
+            config: {
+              enabled: false, window_hours: 24, min_requests: 20, min_cost_micro: 100_000,
+              margin_bp: 0, cooldown_secs: 3600, lift_secs: 86_400,
+            },
+            data: [],
+          },
+        }),
+  )
+  await page.reload()
+  await page.getByRole('tab', { name: '毛利熔断', exact: true }).click()
+  await expect(page.getByText('熔断未启用：不评估、不暂停任何渠道。')).toBeVisible()
+
+  await page.route('**/admin/margin-breaker', (route) =>
+    route.request().isNavigationRequest() || route.request().method() !== 'GET'
+      ? route.fallback()
+      : route.fulfill(apiError(500, 'internal_error')),
+  )
+  await page.reload()
+  await page.getByRole('tab', { name: '毛利熔断', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0)
 })
 
 test('渠道列表查上游余额：只对支持的协议露出按钮，成功按币种格式化并回填"余额"徽章，不支持 / 形状不认以错误码文案提示', async ({ page }) => {
@@ -1540,6 +2386,19 @@ test('渠道列表查上游余额：只对支持的协议露出按钮，成功�
   await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('请求参数有误（balance_shape）')
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+
+  await page.route('**/admin/channels/42/balance', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/channels/42/balance', async (route) => {
+    balanceCalls += 1
+    lastBalance = {
+      channel_id: 42, probe: 'deepseek', currency: 'CNY', balance_micro: 110_500_000,
+      total_micro: null, used_micro: null, at: new Date().toISOString(),
+    }
+    await route.fulfill({ json: lastBalance })
+  })
 
   // 成功：人民币 110.5 → ¥110.50，probe 口径进提示；列表刷新后"余额"徽章回填
   await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
@@ -1617,4 +2476,8 @@ test('充值下单：快捷档与最低额挡在提交前，下单体是 micro �
   await expect(page.getByRole('alert')).toContainText('网关未返回支付地址')
   expect(pays).toHaveLength(2)
   expect(page.url()).toContain('/portal/topup')
+
+  await page.route('**/api/me/topup', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.getByRole('button', { name: /去支付/ }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })

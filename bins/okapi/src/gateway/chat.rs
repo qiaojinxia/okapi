@@ -6,6 +6,9 @@ use super::clients::detect_client_type;
 use super::error::AppError;
 use super::error::with_request_id;
 use super::estimate::{self, estimate_prompt_tokens};
+use super::sched_redis::response_affinity::{
+    self, ResponseBinding, ResponseParent, ResponseWriter,
+};
 use super::sched_redis::session_hash;
 use super::scheduler::{Strategy, order_candidates, order_candidates_by_latency};
 use super::state::AppState;
@@ -19,7 +22,7 @@ use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, UsageProbe, codes};
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp, calculate};
 use okapi_providers::convert::{
     anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o, openai_to_anthropic as convert,
@@ -36,6 +39,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+pub mod websocket;
+
 const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
 const DEFAULT_GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -48,19 +53,7 @@ const MAX_ATTEMPTS: usize = 3;
 const DEFAULT_COMPLETION_CAP: u32 = 2048;
 const MAX_COMPLETION_CAP: u32 = 32_768;
 
-/// 入口协议（客户端说的方言）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Ingress {
-    OpenAi,
-    Anthropic,
-    /// OpenAI Responses API（§4.4）：渠道 `responses_native` 时同方言直转
-    /// （请求原样、事件原样，Codex CLI 的 previous_response_id / reasoning items 全保住），
-    /// 否则降级 ChatCompletions 执行（#5209），出口再合成 Responses 事件骨架。
-    Responses,
-    /// Gemini 原生入口 `models/{model}:generateContent|streamGenerateContent`（§4.4）：
-    /// gemini 渠道透传，OpenAI(兼容)/Anthropic 渠道经 `convert/gemini_to_openai` 往返。
-    Gemini,
-}
+use super::ingress::Ingress;
 
 /// 入口探针归一化结果（两种协议解析为同一形状，主链路协议无关）。
 struct ProbeInfo {
@@ -93,6 +86,8 @@ struct RequestBilling {
     /// 团 key 归属成员（结算后累计月度消费）。
     member_user_id: Option<i64>,
     request_id: Uuid,
+    /// Keep the admitted funding pool even if the Redis refund is deferred.
+    reservation_pool: Pool,
     est_prompt: u32,
     /// 本次请求实测的 token/千字符 密度（补全侧只有字符数，用它折算）。
     density: u32,
@@ -109,6 +104,8 @@ struct RequestBilling {
     group: String,
     is_stream: bool,
     started: Instant,
+    /// 历史响应的账号硬绑定，不允许渠道或模型降级。
+    response_parent: Option<ResponseParent>,
     /// 会话标识（L2 粘性键）。
     session: Option<String>,
     /// UA 识别的客户端类型。
@@ -229,6 +226,7 @@ fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
         | UpstreamError::Connect(_)
         | UpstreamError::Timeout
         | UpstreamError::Stream(_)
+        | UpstreamError::Session { .. }
         | UpstreamError::Build(_) => KeyFailure::Transient,
     }
 }
@@ -313,13 +311,50 @@ pub async fn chat_completions(
 
 /// OpenAI /v1/responses 入口（§4.4：渠道说 Responses 方言则直转，否则降级 ChatCompletions #5209）。
 pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    responses_entry(state, headers, body, Ingress::Responses).await
+}
+
+pub async fn responses_compact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    responses_entry(state, headers, body, Ingress::ResponsesCompact).await
+}
+
+fn compact_request_body(body: &Bytes) -> Result<Bytes, serde_json::Error> {
+    let mut fields: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(body)?;
+    fields.remove("stream");
+    serde_json::to_vec(&fields).map(Bytes::from)
+}
+
+async fn responses_entry(
+    state: AppState,
+    headers: HeaderMap,
+    body: Bytes,
+    ingress: Ingress,
+) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
     let Ok(probe) = serde_json::from_slice::<ResponsesRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
+    let body = if ingress == Ingress::ResponsesCompact {
+        if probe.stream {
+            return AppError::bad_request()
+                .with_param("stream")
+                .into_response_with(Some(request_id));
+        }
+        // 通用字段剥除器会保护 stream；compact 协议须单独移除该字段。
+        let Ok(body) = compact_request_body(&body) else {
+            return AppError::bad_request().into_response_with(Some(request_id));
+        };
+        body
+    } else {
+        body
+    };
     let input_messages = probe.input_messages();
-    let (needs_tools, needs_vision) = request_features(Ingress::Responses, &body);
+    let (needs_tools, needs_vision) = request_features(ingress, &body);
     let info = ProbeInfo {
         requested_model: probe.model.clone(),
         stream: probe.stream,
@@ -335,17 +370,7 @@ pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: 
         needs_tools,
         needs_vision,
     };
-    match handle_chat(
-        &state,
-        &headers,
-        &body,
-        request_id,
-        started,
-        Ingress::Responses,
-        &info,
-    )
-    .await
-    {
+    match handle_chat(&state, &headers, &body, request_id, started, ingress, &info).await {
         Ok(resp) => resp,
         Err(err) => err.into_response_with(Some(request_id)),
     }
@@ -582,11 +607,11 @@ fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
     let image_types: &[&str] = match ingress {
         Ingress::OpenAi => &["image_url"],
         Ingress::Anthropic => &["image"],
-        Ingress::Responses => &["input_image"],
+        Ingress::Responses | Ingress::ResponsesCompact => &["input_image"],
         Ingress::Gemini => &[],
     };
     let containers = match ingress {
-        Ingress::Responses => v.get("input"),
+        Ingress::Responses | Ingress::ResponsesCompact => v.get("input"),
         _ => v.get("messages"),
     };
     let needs_vision = containers
@@ -706,8 +731,6 @@ pub(crate) async fn resolve_model_cached(
     Ok(resolved)
 }
 
-// 鉴权→解析→估价→预扣→转发的主链路，拆分损害时序可读性
-#[allow(clippy::too_many_lines)]
 async fn handle_chat(
     state: &AppState,
     headers: &HeaderMap,
@@ -717,6 +740,32 @@ async fn handle_chat(
     ingress: Ingress,
     info: &ProbeInfo,
 ) -> Result<Response, AppError> {
+    let bill = prepare_chat(state, headers, body, request_id, started, ingress, info).await?;
+    match forward(&bill, info, body).await {
+        Ok(resp) => Ok(resp),
+        Err(failure) => {
+            settle_failure(&bill, &failure).await;
+            match failure.reply {
+                FailureReply::App(err) => Err(err),
+                FailureReply::Upstream { status, body } => Ok(upstream_passthrough_response(
+                    ingress, status, body, request_id,
+                )),
+            }
+        }
+    }
+}
+
+// HTTP 与 Responses WS 每轮共用的鉴权、限额、报价与预扣链。
+#[allow(clippy::too_many_lines)]
+async fn prepare_chat(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &Bytes,
+    request_id: Uuid,
+    started: Instant,
+    ingress: Ingress,
+    info: &ProbeInfo,
+) -> Result<RequestBilling, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
 
     // 模型解析（#3001 + §5.1）：别名→canonical + max_output；60s 进程缓存消除热路径 PG 读；
@@ -733,6 +782,12 @@ async fn handle_chat(
             codes::MODEL_NOT_ALLOWED,
         ));
     }
+
+    let response_parent = if matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact) {
+        response_affinity::resolve_parent(&state.sched, key.user_id, key.key_id, body).await?
+    } else {
+        None
+    };
 
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
@@ -773,6 +828,8 @@ async fn handle_chat(
     let est_usage = TokenUsage {
         prompt_tokens: est_prompt,
         cached_tokens: 0,
+        cache_read_reported: false,
+        cache_write_reported: false,
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
@@ -829,7 +886,7 @@ async fn handle_chat(
         concurrency: cap(key.max_concurrency),
     };
     let est_tokens = u64::from(est_prompt).saturating_add(u64::from(completion_cap));
-    match state
+    let reservation_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -844,7 +901,7 @@ async fn handle_chat(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -856,7 +913,7 @@ async fn handle_chat(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     // —— 预扣已建立：此后一切失败路径必须退款（settle_failure）——
     // 降级链在此过 key 白名单：降级模型同样受令牌 allowlist 约束，
@@ -878,6 +935,7 @@ async fn handle_chat(
         key_id: key.key_id,
         member_user_id: key.member_user_id,
         request_id,
+        reservation_pool,
         est_prompt,
         density,
         completion_cap,
@@ -887,6 +945,7 @@ async fn handle_chat(
         group: key.group_code.clone(),
         is_stream: info.stream,
         started,
+        response_parent,
         session: info.session.clone(),
         client_type: detect_client_type(headers),
         client_ip: super::clients::detect_client_ip(headers),
@@ -899,23 +958,12 @@ async fn handle_chat(
         downgraded_from: None,
     };
 
-    match forward(&bill, info, body).await {
-        Ok(resp) => Ok(resp),
-        Err(failure) => {
-            settle_failure(&bill, &failure).await;
-            match failure.reply {
-                FailureReply::App(err) => Err(err),
-                FailureReply::Upstream { status, body } => Ok(upstream_passthrough_response(
-                    ingress, status, body, request_id,
-                )),
-            }
-        }
-    }
+    Ok(bill)
 }
 
 /// 模型级降级（DESIGN §3.4.1）：请求模型**零可用候选**（渠道停用/冷却/全被限住）
 /// 时按 `models.fallback_models` 顺序改投。三条铁律：
-/// - 只有 `no_available_channel` 触发——上游 4xx/5xx 是"打过了没打通"，
+/// - 只有零候选（含入口协议不匹配）触发——上游 4xx/5xx 是"打过了没打通"，
 ///   换模型只会藏住真实错误并让用户为两次调用付钱；
 /// - 单跳：只读请求模型自己的链，不递归降级模型的链；
 /// - 按实际服务模型计费（fallback_billing 重建计费上下文，快照记 requested_model）。
@@ -927,9 +975,9 @@ async fn forward(
     let first = try_model(bill, info, body).await;
     let zero_candidates = matches!(
         &first,
-        Err(f) if f.error_code == codes::NO_AVAILABLE_CHANNEL
+        Err(f) if matches!(f.error_code.as_str(), codes::NO_AVAILABLE_CHANNEL | codes::UNSUPPORTED_ENDPOINT)
     );
-    if !zero_candidates || bill.fallback_models.is_empty() {
+    if !zero_candidates || bill.fallback_models.is_empty() || bill.response_parent.is_some() {
         return first;
     }
     for fb in bill.fallback_models.iter() {
@@ -944,7 +992,11 @@ async fn forward(
         );
         match try_model(&fb_bill, info, body).await {
             // 降级模型同样零候选 → 链上下一个
-            Err(f) if f.error_code == codes::NO_AVAILABLE_CHANNEL => {}
+            Err(f)
+                if matches!(
+                    f.error_code.as_str(),
+                    codes::NO_AVAILABLE_CHANNEL | codes::UNSUPPORTED_ENDPOINT
+                ) => {}
             // 成功或真实上游失败：终止。降级只救"无人可打"，不救"打了没打通"
             other => return other,
         }
@@ -999,17 +1051,22 @@ async fn fallback_billing(
     })
 }
 
-// failover 主循环：候选过滤/粘性/信号量/状态机联动的完整语义在同一视野内更可读
+// Responses WS 逐轮从数据库读取候选，复用 HTTP 的权限/能力/历史绑定过滤。
 #[allow(clippy::too_many_lines)]
-async fn try_model(
+async fn eligible_candidates(
     bill: &RequestBilling,
     info: &ProbeInfo,
-    body: &Bytes,
-) -> Result<Response, ForwardFailure> {
+    fresh: bool,
+) -> Result<(Vec<ChannelCandidate>, Option<i64>), ForwardFailure> {
     // 候选 5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL 收敛）
     // 缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户
     let cache_key = format!("{}|{}", bill.model, bill.pool_chain.join(">"));
-    let raw = if let Some(hit) = bill.state.cand_cache.get(&cache_key).await {
+    let cached = if !fresh && bill.response_parent.is_none() {
+        bill.state.cand_cache.get(&cache_key).await
+    } else {
+        None
+    };
+    let raw = if let Some(hit) = cached {
         hit
     } else {
         let chain: Vec<&str> = bill.pool_chain.iter().map(String::as_str).collect();
@@ -1042,15 +1099,15 @@ async fn try_model(
             order_candidates_by_latency(raw.as_ref().clone(), &latency)
         }
     };
-    // Anthropic 入口暂不路由 gemini 方言渠道（不做 anthropic→openai→gemini 双跳；含 vertex 上的 Gemini）
-    if bill.ingress == Ingress::Anthropic {
-        candidates.retain(|c| {
-            super::dialect::upstream_dialect(&c.provider, c.upstream_model(&bill.model)) != "gemini"
-        });
-    }
-    // Codex 订阅后端只有 Responses 面（§11.38）：其它入口不路由，否则 chat 形状会打到 /responses 上 400
-    if bill.ingress != Ingress::Responses {
-        candidates.retain(|c| c.provider != "codex");
+    // 与诊断和接入示例共用入口规则；配置正常但入口错误时不要报服务不可用。
+    candidates.retain(|c| bill.ingress.accepts(c, &bill.model));
+    if !raw.is_empty() && candidates.is_empty() {
+        return Err(ForwardFailure::app(
+            AppError::new(StatusCode::BAD_REQUEST, codes::UNSUPPORTED_ENDPOINT)
+                .with_param(Ingress::available_endpoints(raw.as_ref(), &bill.model).join(",")),
+            0,
+            None,
+        ));
     }
     // 能力感知路由（§3.8）：渠道显式声明 false 才排除
     let denies = |c: &okapi_store::ChannelCandidate, cap: &str| {
@@ -1097,6 +1154,18 @@ async fn try_model(
         ));
     }
 
+    // 续聊只允许当前仍有权限、能力和可用性的原账号；不可借 L2 或 failover 改投。
+    if let Some(parent) = &bill.response_parent {
+        candidates.retain(|c| parent.binding.matches(c));
+        if candidates.is_empty() {
+            return Err(ForwardFailure::app(
+                response_affinity::unavailable(),
+                0,
+                None,
+            ));
+        }
+    }
+
     // L2 会话粘性命中：把映射的 channel_key 提到候选首位（§3.2）
     let mut sticky_key: Option<i64> = None;
     if let Some(session) = &bill.session {
@@ -1108,6 +1177,18 @@ async fn try_model(
             candidates.insert(0, hit);
         }
     }
+
+    Ok((candidates, sticky_key))
+}
+
+// failover 主循环：候选过滤/粘性/信号量/状态机联动的完整语义在同一视野内更可读
+#[allow(clippy::too_many_lines)]
+async fn try_model(
+    bill: &RequestBilling,
+    info: &ProbeInfo,
+    body: &Bytes,
+) -> Result<Response, ForwardFailure> {
+    let (candidates, sticky_key) = eligible_candidates(bill, info, false).await?;
 
     let mut failover: i16 = 0;
     let mut attempted = 0usize;
@@ -1186,7 +1267,9 @@ async fn try_model(
             upstream_model.clone(),
             upstream_endpoint(&cand, bill.is_stream, bill.ingress).to_owned(),
         ));
-        let sticky_layer: i16 = if sticky_key == Some(cand.channel_key_id) {
+        let sticky_layer: i16 = if bill.response_parent.is_some() {
+            1
+        } else if sticky_key == Some(cand.channel_key_id) {
             2
         } else {
             3
@@ -1223,6 +1306,7 @@ async fn try_model(
             // 只实现了 chat 的第三方地址是常态）。同一候选就地改走降级链再来一次：
             // 不计 failover、不计 retry、不标 key 失败——渠道没坏，是方言不对。
             if bill.ingress == Ingress::Responses
+                && bill.response_parent.is_none()
                 && cand.responses_native
                 && matches!(
                     &result,
@@ -1309,7 +1393,7 @@ async fn try_model(
                 // 改投时一次也没换，记成 1 会把分析面的 failover 指标虚高一截。
                 // key 状态机照常登记（上面的 mark_key_failure 已做）：这条渠道确实出过
                 // 问题，不能因为调用方不要 failover 就当没发生。
-                if !bill.prefs.allow_fallbacks {
+                if !bill.prefs.allow_fallbacks || bill.response_parent.is_some() {
                     tracing::debug!(
                         request_id = %bill.request_id,
                         "请求声明 allow_fallbacks=false，不再改投"
@@ -1364,7 +1448,8 @@ fn build_upstream_body(
     body: &Bytes,
     upstream_model: &str,
 ) -> Result<Bytes, UpstreamError> {
-    let native_responses = bill.ingress == Ingress::Responses && cand.responses_native;
+    let native_responses = matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact)
+        && cand.responses_native;
     // 按出向方言分派（bedrock = anthropic 方言、vertex 按模型），传输层差异在 dialect.rs
     let dialect = super::dialect::upstream_dialect(&cand.provider, upstream_model);
     let built = match (bill.ingress, dialect) {
@@ -1378,8 +1463,8 @@ fn build_upstream_body(
             convert::request_openai_to_anthropic(body, upstream_model, bill.completion_cap)
         }
         (Ingress::OpenAi, "gemini") => conv_gem::request_openai_to_gemini(body),
-        // Anthropic 同方言：透传（stream_options 是 OpenAI 概念，此路不注入）
-        (Ingress::Anthropic, "anthropic") => {
+        // Compact 与 Anthropic 同方言只重写 model，不注入 stream_options。
+        (Ingress::ResponsesCompact, _) | (Ingress::Anthropic, "anthropic") => {
             rewrite_model(body, &info.requested_model, upstream_model)
         }
         // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
@@ -1421,6 +1506,7 @@ fn build_upstream_body(
         }
     }?;
     match bill.directive {
+        _ if bill.ingress == Ingress::ResponsesCompact => Ok(built),
         Some(d) if native_responses => reasoning::apply_responses(&built, d),
         Some(d) => match dialect {
             "anthropic" => reasoning::apply_anthropic(&built, d),
@@ -1457,12 +1543,57 @@ fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> Att
             failover,
             Some(channel),
         )),
+        UpstreamError::Session { timed_out, .. } => AttemptError::Fatal(ForwardFailure::app(
+            AppError::new(
+                if timed_out {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                if timed_out {
+                    codes::UPSTREAM_TIMEOUT
+                } else {
+                    codes::UPSTREAM_ERROR
+                },
+            ),
+            failover,
+            Some(channel),
+        )),
         UpstreamError::Connect(_) | UpstreamError::Timeout | UpstreamError::Stream(_) => {
             AttemptError::Fatal(ForwardFailure::app(
                 AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
                 failover,
                 Some(channel),
             ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod session_failure_tests {
+    use super::*;
+
+    #[test]
+    fn uncertain_session_execution_is_fatal_even_before_first_output() {
+        for (timed_out, status, code) in [
+            (false, StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
+            (true, StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT),
+        ] {
+            let error = UpstreamError::Session {
+                reason: "responses_ws_closed",
+                timed_out,
+            };
+            assert!(!error.retriable_before_first_token());
+            let AttemptError::Fatal(failure) = classify_fatal(error, 2, (10, 20)) else {
+                panic!("an uncertain session turn must not be replayed");
+            };
+            assert_eq!(failure.channel, Some((10, 20)));
+            assert_eq!(failure.failover_count, 2);
+            assert_eq!(failure.error_code, code);
+            let FailureReply::App(reply) = failure.reply else {
+                panic!("stable error envelope required");
+            };
+            assert_eq!(reply.status, status);
         }
     }
 }
@@ -1504,7 +1635,13 @@ fn wrap_thinking_to_content(resp: ChatResponse) -> ChatResponse {
 /// 方言无关（对入口原文生效，转换路径自然继承）；`model`/`messages`/`stream`
 /// 受保护不可剥（防误配打断主链）。仅配置非空时解析（缺省零开销）。
 fn strip_request_fields(body: &Bytes, fields: &[String]) -> Option<Bytes> {
-    const PROTECTED: [&str; 3] = ["model", "messages", "stream"];
+    const PROTECTED: [&str; 5] = [
+        "model",
+        "messages",
+        "stream",
+        "previous_response_id",
+        "conversation",
+    ];
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = value.as_object_mut()?;
     let mut changed = false;
@@ -1524,7 +1661,14 @@ fn inject_request_fields(
     body: &Bytes,
     fields: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<Bytes> {
-    const PROTECTED: [&str; 4] = ["model", "messages", "stream", "provider"];
+    const PROTECTED: [&str; 6] = [
+        "model",
+        "messages",
+        "stream",
+        "provider",
+        "previous_response_id",
+        "conversation",
+    ];
     if fields.is_empty() {
         return None;
     }
@@ -1541,20 +1685,16 @@ fn inject_request_fields(
     changed.then(|| Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
 }
 
-// 入口方言 × 上游协议矩阵的收敛点，拆分损害路由全貌可读性
-#[allow(clippy::too_many_lines)]
-async fn dispatch_chat(
+fn shape_upstream_body(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
-    base: &str,
     body: Bytes,
-    stream: bool,
-) -> Result<ChatResponse, UpstreamError> {
-    use futures::StreamExt as _;
+) -> Result<Bytes, UpstreamError> {
     // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
     // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
     let body = super::routing_prefs::strip(&body).unwrap_or(body);
-    let native_responses = bill.ingress == Ingress::Responses && cand.responses_native;
+    let native_responses = matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact)
+        && cand.responses_native;
     // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）。
     // Responses 直转是唯一的例外——`reasoning.effort` 就是上游的原生键，只摘非原生键。
     let body = if native_responses {
@@ -1572,12 +1712,59 @@ async fn dispatch_chat(
     } else {
         inject_request_fields(&body, &cand.inject_request_fields).unwrap_or(body)
     };
+    if let Some(parent) = &bill.response_parent {
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&body).map_err(|e| UpstreamError::Build(e.to_string()))?;
+        if parsed
+            .get("previous_response_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(parent.id.as_str())
+        {
+            return Err(UpstreamError::Build(
+                "previous_response_id_changed".to_owned(),
+            ));
+        }
+    }
+    Ok(body)
+}
+
+// 入口方言 × 上游协议矩阵的收敛点，拆分损害路由全貌可读性
+#[allow(clippy::too_many_lines)]
+async fn dispatch_chat(
+    bill: &RequestBilling,
+    cand: &ChannelCandidate,
+    base: &str,
+    body: Bytes,
+    stream: bool,
+) -> Result<ChatResponse, UpstreamError> {
+    use futures::StreamExt as _;
+    let native_responses = matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact)
+        && cand.responses_native;
+    let body = shape_upstream_body(bill, cand, body)?;
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
     // 订阅 provider 额外带上客户端身份头（真实 Claude Code / Codex CLI 经网关出去时上游看到它自己）
     let outbound = super::oauth_cred::outbound_with_client(cand, &bill.client_headers);
     // 方言臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
     let dialect = super::dialect::upstream_dialect(&cand.provider, &upstream_model);
     let resp = match (bill.ingress, dialect) {
+        (Ingress::ResponsesCompact, _) if cand.provider == "codex" => {
+            let cred = super::oauth_cred::fresh_credential(&bill.state, cand).await?;
+            okapi_providers::oauth::codex::responses_compact(
+                bill.state.upstream.http(),
+                base,
+                &cred.access_token,
+                cred.account_id.as_deref(),
+                body,
+                &outbound,
+            )
+            .await
+        }
+        (Ingress::ResponsesCompact, _) => {
+            bill.state
+                .upstream
+                .responses_compact(base, &cand.credential, body, &outbound)
+                .await
+        }
         // Codex 订阅后端（§11.38）：只有 Responses 面，候选过滤已保证只有 Responses 入口到这里
         (Ingress::Responses, _) if cand.provider == "codex" => {
             let cred = super::oauth_cred::fresh_credential(&bill.state, cand).await?;
@@ -1782,6 +1969,24 @@ fn wrap_responses_egress(
     }
 }
 
+fn response_writer(bill: &RequestBilling, cand: &ChannelCandidate) -> Option<ResponseWriter> {
+    (bill.ingress == Ingress::Responses && cand.responses_native)
+        .then(|| ResponseWriter::new(ResponseBinding::from_candidate(cand)))
+}
+
+async fn capture_response_event(
+    writer: &mut Option<ResponseWriter>,
+    bill: &RequestBilling,
+    event: &ChatEvent,
+) -> Result<(), AppError> {
+    if let (Some(writer), ChatEvent::Data { raw, .. }) = (writer, event) {
+        writer
+            .capture(&bill.state.sched, bill.user_id, bill.key_id, raw.as_bytes())
+            .await?;
+    }
+    Ok(())
+}
+
 // ---- 流式 ----
 
 async fn attempt_stream(
@@ -1846,17 +2051,21 @@ async fn attempt_stream(
             upstream_status: None,
             failure_kind: KeyFailure::Transient,
         }),
-        Ok(Err(_)) => Err(AttemptError::Retriable {
-            code: codes::UPSTREAM_ERROR,
-            upstream_status: None,
-            failure_kind: KeyFailure::Transient,
-        }),
+        Ok(Err(err)) => Err(classify_fatal(err, failover, channel)),
         Ok(Ok(false)) => Err(AttemptError::Retriable {
             code: codes::EMPTY_COMPLETION,
             upstream_status: None,
             failure_kind: KeyFailure::Transient,
         }),
         Ok(Ok(true)) => {
+            let mut writer = response_writer(bill, cand);
+            for event in &buffered {
+                capture_response_event(&mut writer, bill, event)
+                    .await
+                    .map_err(|err| {
+                        AttemptError::Fatal(ForwardFailure::app(err, failover, Some(channel)))
+                    })?;
+            }
             let ttft_ms = elapsed_ms_i32(bill.started);
             Ok(spawn_stream_pump(
                 bill.clone(),
@@ -1870,6 +2079,7 @@ async fn attempt_stream(
                 ),
                 handle,
                 buffered,
+                writer,
                 ttft_ms,
                 failover,
             ))
@@ -1879,6 +2089,8 @@ async fn attempt_stream(
 
 #[derive(Clone)]
 struct CandInfo {
+    /// A generated WS turn can have billable usage and still end in an error.
+    outcome: Option<(i16, String)>,
     channel: i64,
     key: i64,
     /// key 级并发上限（结算路径释放信号量用）。
@@ -1913,6 +2125,7 @@ fn cand_info(
     retry: i16,
 ) -> CandInfo {
     CandInfo {
+        outcome: None,
         channel: cand.channel_id,
         key: cand.channel_key_id,
         cap: cand.max_concurrency,
@@ -1927,6 +2140,7 @@ fn cand_info(
 }
 fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) -> &'static str {
     match (ingress, cand.provider.as_str()) {
+        (Ingress::ResponsesCompact, _) => "/v1/responses/compact",
         (Ingress::Responses, _) if cand.responses_native => "/v1/responses",
         (_, "anthropic") => "/v1/messages",
         (_, "bedrock") if stream => "/model/{model}/invoke-with-response-stream",
@@ -1949,6 +2163,7 @@ fn spawn_stream_pump(
     mut info: CandInfo,
     mut handle: StreamHandle,
     buffered: Vec<ChatEvent>,
+    mut writer: Option<ResponseWriter>,
     ttft_ms: i32,
     failover: i16,
 ) -> Response {
@@ -1967,9 +2182,15 @@ fn spawn_stream_pump(
         let mut resp_meta = RespMeta::default();
         let want_meta = info.bill_resp_model || bill.has_tier_pricing;
 
+        let mut terminal = Vec::new();
         for event in buffered {
             if want_meta && (resp_meta.model.is_none() || resp_meta.service_tier.is_none()) {
                 capture_chunk_meta(&event, &mut resp_meta);
+            }
+            if defer_settlement_terminal(&event, bill.ingress) {
+                capture_terminal_usage(&event, &mut usage, &mut content_chars);
+                terminal.push(event);
+                continue;
             }
             if !push_event(
                 &mut tx,
@@ -1988,10 +2209,29 @@ fn spawn_stream_pump(
         while !client_gone && !saw_done {
             match handle.events.next().await {
                 Some(Ok(event)) => {
-                    saw_done = matches!(event, ChatEvent::Done);
-                    if want_meta && (resp_meta.model.is_none() || resp_meta.service_tier.is_none())
-                    {
+                    if want_meta && (resp_meta.model.is_none() || resp_meta.service_tier.is_none()) {
                         capture_chunk_meta(&event, &mut resp_meta);
+                    }
+                    if let Err(err) = capture_response_event(&mut writer, &bill, &event).await {
+                        // 首字已发送：终止而不改投，保留终态 usage 供实际产出结算。
+                        if let ChatEvent::Data { usage: Some(reported), .. } = &event { usage = Some(*reported); }
+                        let sequence = match &event {
+                            ChatEvent::Data { raw, .. } => serde_json::from_str::<serde_json::Value>(raw).ok()
+                                .and_then(|v| v.get("sequence_number").and_then(serde_json::Value::as_u64)),
+                            ChatEvent::Done => None,
+                        };
+                        let payload = serde_json::json!({"type":"error", "code":err.code,
+                            "message":err.code, "param":err.param, "request_id":request_id,
+                            "sequence_number":sequence.unwrap_or(0)}).to_string();
+                        let _ = tx.send(Ok(Event::default().event("error").data(payload))).await;
+                        break;
+                    }
+                    saw_done = matches!(event, ChatEvent::Done);
+                    if defer_settlement_terminal(&event, bill.ingress) {
+                        capture_terminal_usage(&event, &mut usage, &mut content_chars);
+                        if terminal.len() >= 16 { break; }
+                        terminal.push(event);
+                        continue;
                     }
                     if !push_event(
                         &mut tx,
@@ -2014,10 +2254,7 @@ fn spawn_stream_pump(
             }
         }
         drop(handle); // 取消上游（客户端断开路径）
-        // 立即关闭 SSE 发送端：流结束不等结算（结算耗时曾拖住客户端收尾，
-        // 压测定位见 docs/perf-report.md）
-        drop(tx);
-        settle_stream(
+        let result = settle_stream(
             &bill,
             &info,
             usage,
@@ -2028,6 +2265,7 @@ fn spawn_stream_pump(
             resp_meta,
         )
         .await;
+        finish_settled_stream(tx, result, terminal, bill.ingress, request_id).await;
         // 结算完成后释放渠道 key 并发信号量（§3.5）
         bill.state.sched.release_slot(info.key, info.cap).await;
     });
@@ -2038,6 +2276,78 @@ fn spawn_stream_pump(
             .text("ping"),
     );
     with_request_id(sse.into_response(), request_id)
+}
+
+fn capture_terminal_usage(event: &ChatEvent, usage: &mut Option<UsageProbe>, chars: &mut usize) {
+    if let ChatEvent::Data {
+        usage: reported,
+        content_chars,
+        ..
+    } = event
+    {
+        if let Some(reported) = reported {
+            *usage = Some(*reported);
+        }
+        *chars = chars.saturating_add(*content_chars);
+    }
+}
+
+async fn finish_settled_stream(
+    mut tx: mpsc::Sender<Result<Event, Infallible>>,
+    result: Result<(), AppError>,
+    terminal: Vec<ChatEvent>,
+    ingress: Ingress,
+    request_id: Uuid,
+) {
+    if let Err(error) = result {
+        tracing::error!(%request_id, ?error, "stream usage persistence failed");
+        let payload = serde_json::json!({"error":{"code":error.code},"request_id":request_id});
+        let _ = tx
+            .send(Ok(Event::default()
+                .event("error")
+                .data(payload.to_string())))
+            .await;
+    } else {
+        let mut usage = None;
+        let mut chars = 0;
+        for event in terminal {
+            if !push_event(&mut tx, &event, ingress, &mut usage, &mut chars).await {
+                break;
+            }
+        }
+    }
+}
+
+fn defer_settlement_terminal(event: &ChatEvent, ingress: Ingress) -> bool {
+    match event {
+        ChatEvent::Done => true,
+        ChatEvent::Data {
+            event: name, raw, ..
+        } => {
+            if matches!(
+                name.as_deref(),
+                Some(
+                    "message_stop"
+                        | "response.completed"
+                        | "response.failed"
+                        | "response.incomplete"
+                )
+            ) {
+                return true;
+            }
+            if ingress == Ingress::Gemini {
+                return serde_json::from_str::<serde_json::Value>(raw)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("candidates")
+                            .and_then(serde_json::Value::as_array)
+                            .cloned()
+                    })
+                    .is_some_and(|rows| rows.iter().any(|c| c.get("finishReason").is_some()));
+            }
+            false
+        }
+    }
 }
 
 /// 返回 false 表示客户端已断开。
@@ -2072,7 +2382,10 @@ async fn push_event(
             Ingress::OpenAi => Event::default().data("[DONE]"),
             // Anthropic 以 message_stop、Responses 以 response.completed、Gemini 以带
             // finishReason 的 chunk 收尾，均无终止帧
-            Ingress::Anthropic | Ingress::Responses | Ingress::Gemini => return true,
+            Ingress::Anthropic
+            | Ingress::Responses
+            | Ingress::ResponsesCompact
+            | Ingress::Gemini => return true,
         },
     };
     tx.send(Ok(sse_event)).await.is_ok()
@@ -2088,7 +2401,7 @@ async fn settle_stream(
     failover: i16,
     client_gone: bool,
     resp_meta: RespMeta,
-) {
+) -> Result<(), AppError> {
     // usage 缺失（客户端显式关了 include_usage / 提前断开 / 上游不认这个字段）
     // → 按本次实测密度兜底；渠道声明不信任上游 usage 时再做一次本地复核。
     let usage = usage.map_or_else(
@@ -2105,7 +2418,7 @@ async fn settle_stream(
     if client_gone {
         tracing::info!(request_id = %bill.request_id, "客户端提前断开，按已产出结算");
     }
-    settle_commit(bill, info, usage, Some(ttft_ms), failover, resp_meta).await;
+    settle_commit(bill, info, usage, Some(ttft_ms), failover, resp_meta).await
 }
 
 /// 上游响应元数据（按需采集：model 供响应模型计费、service_tier 供档位计费）。
@@ -2185,6 +2498,14 @@ async fn attempt_json(
             body,
             usage,
         }) => {
+            if let Some(mut writer) = response_writer(bill, cand) {
+                writer
+                    .capture(&bill.state.sched, bill.user_id, bill.key_id, &body)
+                    .await
+                    .map_err(|err| {
+                        AttemptError::Fatal(ForwardFailure::app(err, failover, Some(channel)))
+                    })?;
+            }
             let content_chars = non_stream_content_chars(bill.ingress, &body);
             let usage = usage.map_or_else(
                 || estimate::fallback_usage(bill.est_prompt, content_chars, bill.density),
@@ -2221,15 +2542,21 @@ async fn attempt_json(
             } else {
                 RespMeta::default()
             };
-            // 结算移出响应路径（与流式同语义：响应先行、结算后台；
-            // Redis commit 幂等 + 悬置由 sweep 兜底，压测驱动优化见 docs/perf-report.md）
+            // Preserve the independently tracked settlement if the client disconnects,
+            // and wait for it before returning a complete JSON response.
             let bill_bg = bill.clone();
-            // 结算生命周期独立于响应；所有失败路径内部自兜底。经 settlements 计数：
-            // 优雅下线等它落账再退出
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             bill.state.settlements.spawn(async move {
-                settle_commit(&bill_bg, &info, usage, None, failover, resp_meta).await;
+                let result = settle_commit(&bill_bg, &info, usage, None, failover, resp_meta).await;
                 bill_bg.state.sched.release_slot(info.key, info.cap).await;
+                let _ = done_tx.send(result);
             });
+            done_rx
+                .await
+                .unwrap_or_else(|_| Err(AppError::internal()))
+                .map_err(|error| {
+                    AttemptError::Fatal(ForwardFailure::app(error, failover, Some(channel)))
+                })?;
             let mut resp = Response::builder()
                 .status(status)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -2252,6 +2579,8 @@ fn non_stream_content_chars(ingress: Ingress, body: &Bytes) -> usize {
         return 0;
     };
     match ingress {
+        // output 中保留的用户消息不是新生成内容，密文也不能按字符数估算。
+        Ingress::ResponsesCompact => 0,
         Ingress::OpenAi => v
             .pointer("/choices/0/message/content")
             .and_then(|c| c.as_str())
@@ -2346,7 +2675,7 @@ async fn settle_commit(
     ttft_ms: Option<i32>,
     failover: i16,
     resp_meta: RespMeta,
-) {
+) -> Result<(), AppError> {
     let calc_override = resolve_billing_calc(bill, resp_meta.model.as_deref(), usage);
     // 记账的模型名必须与**实际计价所用的名字**一致，否则账单解释器拿 model_name 去查价
     // 会对不上。`bill.calc.model` 就是那个名字：修饰符变体配了价就是变体名
@@ -2379,7 +2708,13 @@ async fn settle_commit(
                 .ledger
                 .refund(bill.user_id, bill.key_id, bill.request_id)
                 .await
-                .map_or(Pool::Wallet, |r| r.pool);
+                .map_or(bill.reservation_pool, |r| {
+                    if r.released.is_zero() {
+                        bill.reservation_pool
+                    } else {
+                        r.pool
+                    }
+                });
             record_terminal(
                 bill,
                 info,
@@ -2396,91 +2731,75 @@ async fn settle_commit(
                 pool,
             )
             .await;
-            return;
+            return Err(err.into());
         }
     };
 
-    match bill
-        .state
-        .ledger
-        .commit(bill.user_id, bill.key_id, bill.request_id, quote.amount)
-        .await
+    let mut snapshot = serde_json::to_value(&quote.snapshot).ok();
+    // 模型级降级的账单可解释性（DESIGN §3.4）：仅降级时写 requested_model，
+    // 用户能核对"我要的是 A、实际用了 B、按 B 计价"
+    if let Some(from) = &bill.downgraded_from
+        && let Some(serde_json::Value::Object(map)) = snapshot.as_mut()
     {
-        Ok(CommitOutcome::Committed {
-            balance_after,
-            pool,
-            ..
-        }) => {
-            let mut snapshot = serde_json::to_value(&quote.snapshot).ok();
-            // 模型级降级的账单可解释性（DESIGN §3.4）：仅降级时写 requested_model，
-            // 用户能核对"我要的是 A、实际用了 B、按 B 计价"
-            if let Some(from) = &bill.downgraded_from
-                && let Some(serde_json::Value::Object(map)) = snapshot.as_mut()
-            {
-                map.insert("requested_model".into(), serde_json::json!(from));
-            }
-            let input = SettlementInput {
-                dimensions: usage_dimensions(bill, info),
-                request_id: bill.request_id,
-                log_type: 2,
-                user_id: bill.user_id,
-                api_key_id: bill.key_id,
-                group_code: &bill.group,
-                model_name: billed_model,
-                channel_id: Some(info.channel),
-                channel_key_id: Some(info.key),
-                state: BillingState::Committed,
-                usage,
-                amount: quote.amount,
-                original: quote.original,
-                discount: quote.discount,
-                list_price: quote.list_price,
-                upstream_cost: None,
-                pricing_epoch: Some(bill.book.epoch()),
-                pricing_snapshot: snapshot,
-                latency_ms: elapsed_ms_i32(bill.started),
-                ttft_ms,
-                is_stream: bill.is_stream,
-                retry_count: info.retry,
-                failover_count: failover,
-                upstream_status: Some(200),
-                error_code: None,
-                upstream_request_id: info.upstream_request_id.as_deref(),
-                node: bill.state.node.as_ref(),
-                sticky_layer: info.sticky_layer,
-                client_type: bill.client_type,
-                client_ip: bill.client_ip.as_deref(),
-                delta_micro: quote.amount.as_micros().saturating_neg(),
-                balance_after: Some(balance_after),
-                event_type: "commit",
-                pool,
-            };
-            bill.state.settle_write(input).await;
-            super::auth::record_settlement_counters(
-                &bill.state,
-                bill.user_id,
-                bill.member_user_id,
-                quote.amount.as_micros(),
-                usage.total_raw(),
-            )
-            .await;
-            // 选路反馈：时延 EWMA 供 least_latency 池排序，key 日消费供上限闸。
-            // 放在结算之后 = 不占热路径，且只有成功请求才计入时延样本。
-            super::auth::record_channel_key_feedback(
-                &bill.state,
-                info.key,
-                ttft_ms.unwrap_or_else(|| elapsed_ms_i32(bill.started)),
-                quote.amount.as_micros(),
-            )
-            .await;
-        }
-        Ok(CommitOutcome::NoReservation) => {
-            tracing::warn!(request_id = %bill.request_id, "重复结算竞争：预扣不存在，跳过");
-        }
-        Err(err) => {
-            tracing::error!(request_id = %bill.request_id, error = %err, "Redis 结算失败（预扣悬置，待对账清理）");
-        }
+        map.insert("requested_model".into(), serde_json::json!(from));
     }
+    let input = SettlementInput {
+        dimensions: usage_dimensions(bill, info),
+        request_id: bill.request_id,
+        log_type: 2,
+        user_id: bill.user_id,
+        api_key_id: bill.key_id,
+        group_code: &bill.group,
+        model_name: billed_model,
+        channel_id: Some(info.channel),
+        channel_key_id: Some(info.key),
+        state: BillingState::Committed,
+        usage,
+        amount: quote.amount,
+        original: quote.original,
+        discount: quote.discount,
+        list_price: quote.list_price,
+        upstream_cost: None,
+        pricing_epoch: Some(bill.book.epoch()),
+        pricing_snapshot: snapshot,
+        latency_ms: elapsed_ms_i32(bill.started),
+        ttft_ms,
+        is_stream: bill.is_stream,
+        retry_count: info.retry,
+        failover_count: failover,
+        upstream_status: Some(info.outcome.as_ref().map_or(200, |v| v.0)),
+        error_code: info.outcome.as_ref().map(|v| v.1.as_str()),
+        upstream_request_id: info.upstream_request_id.as_deref(),
+        node: bill.state.node.as_ref(),
+        sticky_layer: info.sticky_layer,
+        client_type: bill.client_type,
+        client_ip: bill.client_ip.as_deref(),
+        delta_micro: quote.amount.as_micros().saturating_neg(),
+        balance_after: None,
+        event_type: "commit",
+        pool: bill.reservation_pool,
+    };
+    if !bill.state.settle_success(input).await? {
+        return Ok(());
+    }
+    super::auth::record_settlement_counters(
+        &bill.state,
+        bill.user_id,
+        bill.member_user_id,
+        quote.amount.as_micros(),
+        usage.total_raw(),
+    )
+    .await;
+    // 选路反馈：时延 EWMA 供 least_latency 池排序，key 日消费供上限闸。
+    // 放在结算之后 = 不占热路径，且只有成功请求才计入时延样本。
+    super::auth::record_channel_key_feedback(
+        &bill.state,
+        info.key,
+        ttft_ms.unwrap_or_else(|| elapsed_ms_i32(bill.started)),
+        quote.amount.as_micros(),
+    )
+    .await;
+    Ok(())
 }
 
 async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
@@ -2490,16 +2809,18 @@ async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
         .refund(bill.user_id, bill.key_id, bill.request_id)
         .await
     {
-        Ok(r) => r.pool,
+        Ok(r) if !r.released.is_zero() => r.pool,
+        Ok(_) => bill.reservation_pool,
         Err(err) => {
             tracing::error!(request_id = %bill.request_id, error = %err, "退款失败（预扣悬置，待对账清理）");
-            Pool::Wallet
+            bill.reservation_pool
         }
     };
     let (channel, key) = failure.channel.unwrap_or((0, 0));
     record_terminal(
         bill,
         &CandInfo {
+            outcome: None,
             channel,
             key,
             cap: None,
@@ -2586,7 +2907,13 @@ async fn record_terminal(
         event_type,
         pool,
     };
-    bill.state.settle_write(input).await;
+    if state == BillingState::Committed {
+        if let Err(error) = bill.state.settle_success(input).await {
+            tracing::error!(request_id=%bill.request_id, ?error, "terminal usage persistence failed");
+        }
+    } else {
+        bill.state.settle_write(input).await;
+    }
 }
 
 fn usage_dimensions(bill: &RequestBilling, info: &CandInfo) -> okapi_ledger::pg::UsageDimensions {
@@ -2594,6 +2921,7 @@ fn usage_dimensions(bill: &RequestBilling, info: &CandInfo) -> okapi_ledger::pg:
         Ingress::OpenAi => "/v1/chat/completions",
         Ingress::Anthropic => "/v1/messages",
         Ingress::Responses => "/v1/responses",
+        Ingress::ResponsesCompact => "/v1/responses/compact",
         Ingress::Gemini if bill.is_stream => "/v1beta/models/{model}:streamGenerateContent",
         Ingress::Gemini => "/v1beta/models/{model}:generateContent",
     };
@@ -2639,7 +2967,11 @@ fn upstream_passthrough_response(
                 .to_string(),
             )
         }
-        Ingress::OpenAi | Ingress::Responses | Ingress::Anthropic | Ingress::Gemini => body,
+        Ingress::OpenAi
+        | Ingress::Responses
+        | Ingress::ResponsesCompact
+        | Ingress::Anthropic
+        | Ingress::Gemini => body,
     };
     let resp = Response::builder()
         .status(status)

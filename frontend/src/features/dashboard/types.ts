@@ -32,3 +32,5 @@ export interface MarginResp {
   days: number
   data: MarginDay[]
 }
+export type RankingMetric = 'amount' | 'requests' | 'tokens'
+export type DashboardTrend = 'combined' | RankingMetric

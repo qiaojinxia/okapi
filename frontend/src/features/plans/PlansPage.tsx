@@ -73,7 +73,7 @@ export function PlansPage() {
   const rows = plans.data?.data ?? []
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         icon={Package}
         title={t('admin:planListTitle')}

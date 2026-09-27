@@ -137,7 +137,7 @@ export function PlanDrawer({
         <div className="flex flex-col gap-1.5">
           <Label>{t('admin:planKind')}</Label>
           <Segmented
-            className="h-9 w-full [&>button]:flex-1"
+            className="w-full [&>button]:flex-1"
             ariaLabel={t('admin:planKind')}
             value={kind}
             onChange={setKind}
@@ -235,7 +235,6 @@ export function PlanDrawer({
               <div className="flex flex-col gap-1.5">
                 <Label>{t('admin:planPeriod')}</Label>
                 <Segmented
-                  className="h-9"
                   ariaLabel={t('admin:planPeriod')}
                   value={form.period}
                   onChange={(period) => setForm((f) => ({ ...f, period }))}

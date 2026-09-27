@@ -44,7 +44,8 @@ export const qk = {
   myActivity: (scope: string, year?: number) => ['me', 'stats', 'activity', scope, year] as const,
   myTeams: ['me', 'teams'] as const,
   teamUsage: (id: number) => ['team', 'usage', id] as const,
-  statsChannels: (days: number) => ['admin', 'stats', 'channels', days] as const,
+  // 首页摘要、质量页和渠道列表分别取 20/50/100 条，不能互相复用截断后的列表。
+  statsChannels: (days: number, limit = 20) => ['admin', 'stats', 'channels', days, limit] as const,
   statsModels: (days: number) => ['admin', 'stats', 'models', days] as const,
   statsMargin: (days: number) => ['admin', 'stats', 'margin', days] as const,
   statsRealtime: ['admin', 'stats', 'realtime'] as const,

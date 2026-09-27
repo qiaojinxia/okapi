@@ -114,6 +114,7 @@ export function ModelDrawer({
 
       <FieldGroup title={t('admin:axesText')} hint={t('admin:axesTextHint')}>
         <div className="grid grid-cols-2 gap-3">{TEXT_AXES.map(axisField)}</div>
+        <p className="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">{t('admin:cachePricingHint', { read: axes.cache_ratio, write: axes.cache_write_ratio })}</p>
       </FieldGroup>
 
       <FieldGroup title={t('admin:axesModal')} hint={t('admin:axesModalHint')}>

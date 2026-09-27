@@ -1,3 +1,4 @@
+mod settlement;
 use super::sched_redis::SchedulerRedis;
 use moka::future::Cache;
 use okapi_ledger::BalanceLedger;
@@ -66,11 +67,14 @@ pub struct AppState {
     /// 后台结算任务先过信号量再碰 PG，把 pool 竞争者钳制住——
     /// 高 RPS 下等待发生在信号量（无超时）而非 pool acquire（5s 超时丢账）。
     pub settle_gate: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Image download buffers stay bounded until each response body finishes or is dropped.
+    pub image_download_gate: Arc<tokio::sync::Semaphore>,
+    pub batch_submit_gate: Arc<tokio::sync::Semaphore>,
+    /// Private image object stores; credentials stay in process configuration.
+    pub image_storage: Arc<super::images::tasks::objects::Storage>,
     /// 本进程在途数据面请求数（surge 规则的负载输入，DESIGN §3.4）。
     /// 计数覆盖响应体流完为止；仅在价簿含 surge 规则时才挂计数中间件。
-    pub in_flight: Arc<std::sync::atomic::AtomicI64>,
-    /// 上次把在途数写进 Redis 量表的时刻（unix ms）——上报节流用，见 `rule_inputs`。
-    pub surge_reported_at: Arc<std::sync::atomic::AtomicI64>,
+    pub in_flight: super::inflight::InFlightGauge,
     /// 渠道相对成本系数缓存（channel_id → 千分比，60s；结算路径折算上游成本用）。
     pub channel_cost_cache: Cache<i64, i64>,
     /// 负毛利熔断表进程缓存（§11.34）：单键 → 此刻生效的 `<group>|<channel_id>` 集合，10s；
@@ -154,28 +158,7 @@ impl AppState {
     /// 三试仍败才 ERROR 留给对账兜底（把"对账修复"从常态变成极端态）。
     pub async fn settle_write(&self, mut input: okapi_ledger::SettlementInput<'_>) {
         let _backlog = BacklogGuard::enter(&self.settle_backlog);
-        // 来源 IP 记录开关（settings.record_ip_log，缺省 true）。收口在这里而非各端点：
-        // 七个计费端点全部经 settle_write，关一处即全站不落 IP（PG 列与 CH 列一起）。
-        // docs/database.md 早写着「记录与否走 settings.record_ip_log」，但此前全仓无人读它，
-        // 站长关不掉——属隐私合规缺口而非功能缺失。
-        if input.client_ip.is_some() && !self.record_ip_log().await {
-            input.client_ip = None;
-        }
-        // 上游成本（§11.18）统一在此折算而非各端点：官方价 × 渠道相对成本系数。
-        // 只有成功计费且选中了渠道的记录才有成本；失败 / 退款记 None（CH 侧 0）。
-        if input.upstream_cost.is_none()
-            && input.log_type == 2
-            && input.list_price.as_micros() >= 0
-            && let Some(channel_id) = input.channel_id
-            && let Some(cost_milli) = self.channel_cost_milli(channel_id).await
-        {
-            input.upstream_cost = Some(okapi_domain::Money::from_micros(
-                i64::try_from(
-                    i128::from(input.list_price.as_micros()) * i128::from(cost_milli) / 1000,
-                )
-                .unwrap_or(i64::MAX),
-            ));
-        }
+        self.prepare_settlement(&mut input).await;
         // 实时 KPI 挂在这里而非各计费端点：七个端点（chat/embeddings/images/
         // audio/videos/realtime/custom_pass）全部经此收口，加一处即全覆盖，
         // 且本函数已在结算后台任务内，不占客户端可见路径。

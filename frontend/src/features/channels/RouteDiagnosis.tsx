@@ -35,6 +35,8 @@ interface DiagChannelReport {
 }
 
 interface DiagReport {
+  endpoint: string
+  available_endpoints: string[]
   model: {
     requested: string
     canonical: string | null
@@ -66,6 +68,7 @@ const VERDICT_LABEL: Record<string, string> = {
   model_unpriced: 'admin:diagVerdictModelUnpriced',
   no_channel_serves_model: 'admin:diagVerdictNoChannelServes',
   no_available_channel: 'admin:diagVerdictNoAvailable',
+  unsupported_endpoint: 'admin:diagUnsupportedEndpoint',
 }
 
 const REASON_LABEL: Record<string, string> = {
@@ -81,6 +84,7 @@ const REASON_LABEL: Record<string, string> = {
   unpriced: 'admin:diagReasonUnpriced',
   no_available_channel: 'admin:diagVerdictNoAvailable',
   missing_or_disabled: 'admin:diagReasonMissingOrDisabled',
+  unsupported_endpoint: 'admin:diagUnsupportedEndpoint',
 }
 
 /// 路由诊断抽屉："为什么这个请求没有候选"。
@@ -93,6 +97,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
   const [model, setModel] = useState('')
   const [group, setGroup] = useState('')
   const [pool, setPool] = useState('')
+  const [ingress, setIngress] = useState('chat_completions')
   const [report, setReport] = useState<DiagReport | null>(null)
 
   const groups = useQuery({
@@ -106,7 +111,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
 
   const run = useMutation({
     mutationFn: () => {
-      const params = new URLSearchParams({ model: model.trim() })
+      const params = new URLSearchParams({ model: model.trim(), ingress })
       if (group !== '') params.set('group', group)
       if (pool !== '') params.set('pool', pool)
       return apiFetch<DiagReport>(`/admin/diagnose/route?${params.toString()}`)
@@ -142,13 +147,24 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
     >
       <FieldGroup title={t('admin:diagInputs')} hint={t('admin:diagInputsHint')}>
         <div className="flex flex-col gap-1.5">
+          <Label htmlFor="diag-ingress">{t('admin:diagIngress')}</Label>
+          <Select id="diag-ingress" disabled={run.isPending} value={ingress} onChange={(value) => { setIngress(value); setReport(null) }} options={[
+            { value: 'chat_completions', label: '/v1/chat/completions' },
+            { value: 'responses', label: '/v1/responses' },
+            { value: 'messages', label: '/v1/messages' },
+            { value: 'responses_compact', label: '/v1/responses/compact' },
+            { value: 'gemini', label: '/v1beta/models/{model}:generateContent' },
+          ]} />
+        </div>
+        <div className="flex flex-col gap-1.5">
           <Label htmlFor="diag-model">{t('admin:modelName')}</Label>
           <ModelInput
             id="diag-model"
-            className="font-mono text-sm"
+            disabled={run.isPending}
+            inputClassName="font-mono text-sm"
             value={model}
             placeholder="gpt-4o"
-            onChange={(e) => setModel(e.target.value)}
+            onChange={(value) => { setModel(value); setReport(null) }}
           />
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -156,8 +172,9 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
             <Label htmlFor="diag-group">{t('admin:diagGroup')}</Label>
             <Select
               id="diag-group"
+              disabled={run.isPending}
               value={group}
-              onChange={setGroup}
+              onChange={(value) => { setGroup(value); setReport(null) }}
               placeholder={t('admin:diagGroupNone')}
               options={(groups.data?.data ?? []).map((g) => ({
                 value: g.group_code,
@@ -169,8 +186,9 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
             <Label htmlFor="diag-pool">{t('admin:diagPool')}</Label>
             <Select
               id="diag-pool"
+              disabled={run.isPending}
               value={pool}
-              onChange={setPool}
+              onChange={(value) => { setPool(value); setReport(null) }}
               placeholder={t('admin:diagPoolFollow')}
               options={(pools.data?.data ?? []).map((p) => ({
                 value: p.pool_code,
@@ -184,6 +202,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
       {report !== null && (
         <>
           <FieldGroup title={t('admin:diagVerdict')}>
+            <code className="text-xs">{report.endpoint}</code>
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={report.verdict === 'ok' ? 'success' : 'destructive'}>
                 {t(VERDICT_LABEL[report.verdict] ?? 'admin:diagVerdictNoAvailable')}
@@ -192,6 +211,10 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
                 {t('admin:diagCandidates', { n: report.candidates })}
               </span>
             </div>
+            <p className="text-xs text-muted-foreground">{t('admin:diagStaticHint')}</p>
+            {report.verdict === 'unsupported_endpoint' && <p className="text-sm" role="alert">
+              {t('admin:diagAvailableEndpoints', { endpoints: report.available_endpoints.join(', ') })}
+            </p>}
           </FieldGroup>
 
           <FieldGroup title={t('admin:diagModelHop')}>

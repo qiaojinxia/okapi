@@ -12,6 +12,7 @@ export interface KeysSearch extends PageSearch {
 }
 
 export const Route = createFileRoute('/admin/keys')({
+  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): KeysSearch => ({
     ...pageSearch(search),
     q: text(search.q),

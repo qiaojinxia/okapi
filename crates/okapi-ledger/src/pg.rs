@@ -81,6 +81,9 @@ pub struct SettlementInput<'a> {
     pub pool: Pool,
 }
 
+/// `record_settlement` 的 advisory lock 命名空间（"SETL"）。
+const SETTLEMENT_LOCK_NS: i32 = 0x5345_544C;
+
 fn token_i32(v: u32) -> i32 {
     i32::try_from(v).unwrap_or(i32::MAX)
 }
@@ -90,7 +93,13 @@ fn token_i32(v: u32) -> i32 {
 /// 幂等：同一 request_id 已有记录即整笔跳过（docs/database.md §1.5）。分区表给不了
 /// request_id 唯一约束，而调用方 `settle_write` 会在失败后重试——COMMIT 已成功但回包
 /// 丢失的那一次重试若真写进去，事件流就多一笔 −amount，对账修复还会照着它把 Redis 也
-/// 改成双扣。同一 request_id 没有并发结算（Redis commit 闸只放行一次），EXISTS 足够。
+/// 改成双扣。
+///
+/// 光有 EXISTS 不够：READ COMMITTED 下两个并发事务会同时看到"不存在"、各写一遍。
+/// 所以先拿以 request_id 为键的事务级 advisory lock，同一笔的并发结算在 PG 内串行，
+/// 后到的一方必然看见前者已提交的记录。此前 PG 自己不设防，只靠"Redis commit 闸只放行
+/// 一次"——而超时重试可能与服务端仍在执行的上一次并发，溢出重放（`settle_write`）也会与
+/// 网关自己的重试并发。
 // 五条 SQL 的直线事务，拆分会破坏事务边界的可读性
 #[allow(clippy::too_many_lines)]
 pub async fn record_settlement(
@@ -98,21 +107,40 @@ pub async fn record_settlement(
     input: SettlementInput<'_>,
 ) -> Result<(), LedgerError> {
     let mut tx = pool.begin().await?;
+    record_settlement_in_tx(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Allows a durable task result and its ledger entry to share one commit.
+/// The caller must commit/rollback; false means the request was already recorded.
+#[allow(clippy::too_many_lines)]
+pub async fn record_settlement_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: SettlementInput<'_>,
+) -> Result<bool, LedgerError> {
+    // 两参形式与单参 bigint 形式的锁互不相撞（sqlx 迁移锁用的是单参）；
+    // 不同 request_id 撞上同一个 hashtext 只是短暂串行，不影响正确性
+    okapi_store::history::read_lock(tx).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
+        .bind(SETTLEMENT_LOCK_NS)
+        .bind(input.request_id.to_string())
+        .execute(&mut **tx)
+        .await?;
 
     let already_recorded = sqlx::query_scalar!(
-        r#"SELECT EXISTS(SELECT 1 FROM billing_records WHERE request_id = $1) AS "exists!""#,
+        r#"SELECT EXISTS(SELECT 1 FROM billing_financial_records WHERE request_id = $1) AS "exists!""#,
         input.request_id
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     if already_recorded {
         tracing::warn!(request_id = %input.request_id, "结算重放：request_id 已落账，跳过");
-        tx.rollback().await?;
-        return Ok(());
+        return Ok(false);
     }
 
-    sqlx::query!(
-        r#"
+    sqlx::query(
+        r"
         INSERT INTO billing_records (
             request_id, upstream_request_id, log_type, user_id, api_key_id,
             group_code, model_name, channel_id, channel_key_id, status,
@@ -121,7 +149,7 @@ pub async fn record_settlement(
             pricing_epoch, pricing_snapshot,
             latency_ms, ttft_ms, is_stream, retry_count, failover_count,
             upstream_status, error_code, node, sticky_layer, client_type,
-            upstream_cost_micro, client_ip, pool
+            upstream_cost_micro, client_ip, pool, usage_details
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9, $10,
@@ -133,43 +161,48 @@ pub async fn record_settlement(
             -- client_ip 是 INET。写成 $31::text::inet 而非 $31::inet：后者会让 PG 把入参
             -- 类型报成 inet，sqlx 就要求打开 ipnetwork feature——为一列拉一整套网络类型
             -- 不值当。先按 text 绑定再转，值只可能来自 `clients::client_ip`（已 parse 过）。
-            $30, $31::text::inet, $32
+            $30, $31::text::inet, $32, $33
         )
-        "#,
-        input.request_id,
-        input.upstream_request_id,
-        input.log_type,
-        input.user_id,
-        input.api_key_id,
-        input.group_code,
-        input.model_name,
-        input.channel_id,
-        input.channel_key_id,
-        input.state.as_i16(),
-        token_i32(input.usage.prompt_tokens),
-        token_i32(input.usage.cached_tokens),
-        token_i32(input.usage.completion_tokens),
-        token_i32(input.usage.reasoning_tokens),
-        input.amount.as_micros(),
-        input.original.as_micros(),
-        input.discount.as_micros(),
-        input.pricing_epoch,
-        input.pricing_snapshot,
-        input.latency_ms,
-        input.ttft_ms,
-        input.is_stream,
-        input.retry_count,
-        input.failover_count,
-        input.upstream_status,
-        input.error_code,
-        input.node,
-        input.sticky_layer,
-        input.client_type,
-        input.upstream_cost.map(Money::as_micros),
-        input.client_ip,
-        input.pool.as_i16()
+        ",
     )
-    .execute(&mut *tx)
+    .bind(input.request_id)
+    .bind(input.upstream_request_id)
+    .bind(input.log_type)
+    .bind(input.user_id)
+    .bind(input.api_key_id)
+    .bind(input.group_code)
+    .bind(input.model_name)
+    .bind(input.channel_id)
+    .bind(input.channel_key_id)
+    .bind(input.state.as_i16())
+    .bind(token_i32(input.usage.prompt_tokens))
+    .bind(token_i32(input.usage.cached_tokens))
+    .bind(token_i32(input.usage.completion_tokens))
+    .bind(token_i32(input.usage.reasoning_tokens))
+    .bind(input.amount.as_micros())
+    .bind(input.original.as_micros())
+    .bind(input.discount.as_micros())
+    .bind(input.pricing_epoch)
+    .bind(&input.pricing_snapshot)
+    .bind(input.latency_ms)
+    .bind(input.ttft_ms)
+    .bind(input.is_stream)
+    .bind(input.retry_count)
+    .bind(input.failover_count)
+    .bind(input.upstream_status)
+    .bind(input.error_code)
+    .bind(input.node)
+    .bind(input.sticky_layer)
+    .bind(input.client_type)
+    .bind(input.upstream_cost.map(Money::as_micros))
+    .bind(input.client_ip)
+    .bind(input.pool.as_i16())
+    .bind(serde_json::json!({
+        "tokens": input.usage,
+        "requested_model": input.dimensions.requested_model,
+        "endpoint": input.dimensions.endpoint,
+    }))
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query!(
@@ -195,7 +228,7 @@ pub async fn record_settlement(
         }),
         input.pool.as_i16()
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     // 钱包余额快照列（展示用；真理源 = 事件流，M2 reconciler 校准）。订阅池不落 PG 快照。
@@ -205,7 +238,7 @@ pub async fn record_settlement(
             input.user_id,
             input.delta_micro
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
 
@@ -214,7 +247,7 @@ pub async fn record_settlement(
         input.api_key_id,
         input.amount.as_micros()
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
     sqlx::query!(
@@ -238,6 +271,8 @@ pub async fn record_settlement(
             "prompt_tokens": input.usage.prompt_tokens,
             "cached_tokens": input.usage.cached_tokens,
             "cache_write_tokens": input.usage.cache_write_tokens,
+            "cache_read_reported": input.usage.cache_read_reported,
+            "cache_write_reported": input.usage.cache_write_reported,
             "completion_tokens": input.usage.completion_tokens,
             "reasoning_tokens": input.usage.reasoning_tokens,
             "amount_micro": input.amount.as_micros(),
@@ -261,152 +296,29 @@ pub async fn record_settlement(
             "pool": input.pool.as_i16(),
         })
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
 
-    tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
-/// 管理员按日志退款的结果。
-#[derive(Debug, Clone)]
-pub struct AdminRefund {
-    pub user_id: i64,
-    pub amount: Money,
-    /// 原请求由哪个池付：Redis 侧回补要回到同一池。
-    pub pool: Pool,
-}
-
-/// 管理员按日志退款（IMPLEMENTATION §5.3，#1790-10）。
-///
-/// PG 单事务完成：状态翻转（committed→refunded，幂等闸）、refund 事件、快照列回补、
-/// key 用量回冲、outbox 负额冲销行（chsink 消费后 CH/MV 口径自动一致）。
-/// Redis 热余额回补由调用方在事务成功后执行（崩溃窗口由对账检出修复）。
-pub async fn admin_refund(
-    pool: &PgPool,
-    request_id: Uuid,
-    reason: &str,
-    actor: &str,
-) -> Result<Option<AdminRefund>, LedgerError> {
-    let mut tx = pool.begin().await?;
-
-    let Some(rec) = sqlx::query!(
-        r#"
-        SELECT user_id, api_key_id, group_code, model_name, channel_id, channel_key_id,
-               amount_micro, original_amount_micro, discount_micro, upstream_cost_micro,
-               is_stream, node, pool
-        FROM billing_records
-        WHERE request_id = $1 AND status = 20
-        FOR UPDATE
-        "#,
-        request_id
-    )
-    .fetch_optional(&mut *tx)
-    .await?
-    else {
-        // 不存在或已退款/失败：幂等返回 None
-        tx.rollback().await?;
-        return Ok(None);
-    };
-    let pool = Pool::from_i16(rec.pool);
-
-    sqlx::query!(
-        r#"UPDATE billing_records SET status = 30 WHERE request_id = $1 AND status = 20"#,
-        request_id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query!(
-        r#"
-        INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, payload, actor, pool)
-        VALUES ($1, $2, 'refund', $3, $4, $5, $6)
-        "#,
-        rec.user_id,
-        request_id,
-        rec.amount_micro,
-        serde_json::json!({ "reason": reason, "tags": ["admin_refund"] }),
-        actor,
-        pool.as_i16()
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    if pool == Pool::Wallet {
-        sqlx::query!(
-            r#"UPDATE users SET balance_micro = balance_micro + $2, updated_at = now() WHERE id = $1"#,
-            rec.user_id,
-            rec.amount_micro
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    if let Some(key_id) = rec.api_key_id {
-        sqlx::query!(
-            r#"UPDATE api_keys SET used_micro = used_micro - $2 WHERE id = $1"#,
-            key_id,
-            rec.amount_micro
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    // CH 负额冲销行（log_type=6 退款，对齐 new-api；token 事实保留不冲）
-    sqlx::query!(
-        r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.refunded', $1)"#,
-        serde_json::json!({
-            "request_id": request_id,
-            "user_id": rec.user_id,
-            "api_key_id": rec.api_key_id,
-            "group": rec.group_code,
-            "model": rec.model_name,
-            "channel_id": rec.channel_id,
-            "channel_key_id": rec.channel_key_id,
-            "log_type": 6,
-            "status": 30,
-            "prompt_tokens": 0,
-            "cached_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-            "amount_micro": -rec.amount_micro,
-            "original_amount_micro": -rec.original_amount_micro,
-            "discount_micro": -rec.discount_micro,
-            "upstream_cost_micro": -rec.upstream_cost_micro.unwrap_or(0),
-            "is_stream": rec.is_stream,
-            "retry_count": 0,
-            "failover_count": 0,
-            "error_code": null,
-            "upstream_status": null,
-            "upstream_request_id": null,
-            "node": rec.node,
-            "sticky_layer": 0,
-            "client_type": "",
-            "pool": pool.as_i16(),
-        })
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
-    Ok(Some(AdminRefund {
-        user_id: rec.user_id,
-        amount: Money::from_micros(rec.amount_micro),
-        pool,
-    }))
-}
+mod refunds;
+pub use refunds::{AdminRefund, admin_refund, admin_refund_in_tx};
 
 /// 订阅池事件（`sub_grant` / `sub_reset` / `sub_expire`，pool=1）：只记事件，**不动**
 /// `users.balance_micro`（那是钱包快照）。`delta` = `sub_set` 前后差；Redis 侧由调用方先做。
-pub async fn record_sub_event(
-    pool: &PgPool,
+pub async fn record_sub_event<'e, E>(
+    executor: E,
     user_id: i64,
     delta: Money,
     balance_after: Money,
     event_type: &str,
     actor: &str,
     payload: serde_json::Value,
-) -> Result<(), LedgerError> {
+) -> Result<(), LedgerError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query!(
         r#"
         INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, balance_after_micro, payload, actor, pool)
@@ -419,7 +331,7 @@ pub async fn record_sub_event(
         payload,
         actor
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -434,6 +346,20 @@ pub async fn record_credit(
     payload: serde_json::Value,
 ) -> Result<(), LedgerError> {
     let mut tx = pool.begin().await?;
+    record_credit_in_tx(&mut tx, user_id, amount, event_type, actor, payload).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Event and snapshot participate in the caller's transaction on its locked connection.
+pub async fn record_credit_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: i64,
+    amount: Money,
+    event_type: &str,
+    actor: &str,
+    payload: serde_json::Value,
+) -> Result<(), LedgerError> {
     sqlx::query!(
         r#"
         INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, balance_after_micro, payload, actor)
@@ -445,15 +371,17 @@ pub async fn record_credit(
         payload,
         actor
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    sqlx::query!(
+    let updated = sqlx::query!(
         r#"UPDATE users SET balance_micro = balance_micro + $2, updated_at = now() WHERE id = $1"#,
         user_id,
         amount.as_micros()
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
+    if updated.rows_affected() != 1 {
+        return Err(LedgerError::UserNotFound);
+    }
     Ok(())
 }

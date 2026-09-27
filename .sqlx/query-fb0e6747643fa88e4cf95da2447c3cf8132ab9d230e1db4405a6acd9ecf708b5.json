@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_event_carry(user_id,pool,actor,event_type,delta_micro,event_count)\n        SELECT user_id,pool,actor,event_type,SUM(delta_micro),COUNT(*) FROM billing_events\n        WHERE tableoid=$1::bigint::oid AND created_at >= $2 AND created_at < $3 GROUP BY user_id,pool,actor,event_type\n        ON CONFLICT(user_id,pool,actor,event_type) DO UPDATE SET\n          delta_micro=billing_event_carry.delta_micro+EXCLUDED.delta_micro,\n          event_count=billing_event_carry.event_count+EXCLUDED.event_count",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fb0e6747643fa88e4cf95da2447c3cf8132ab9d230e1db4405a6acd9ecf708b5"
+}

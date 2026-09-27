@@ -13,6 +13,7 @@ use super::admin::{audit, ensure_channel_owner, guard, guard_scoped, guard_super
 use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
+use crate::gateway::ingress::Ingress;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
@@ -267,6 +268,9 @@ pub async fn pool_detail(
 #[derive(Deserialize)]
 pub struct DiagnoseQuery {
     pub model: String,
+    /// 默认诊断 Chat Completions；必须与真实请求入口一致。
+    #[serde(default)]
+    ingress: Ingress,
     /// 按分组诊断（分组的 pool_code 决定可见范围）；缺省 = default 分组的池（即 default 池）。
     #[serde(default)]
     pub group: Option<String>,
@@ -376,6 +380,7 @@ pub async fn diagnose_route(
             "scope": {"group_code": q.group, "group_ratio": group_row.map(|g| g.group_ratio),
                        "pool_code": pool_code, "pool_source": pool_source,
                        "pool_chain": pool_chain, "routing_strategy": routing_strategy},
+            "ingress": q.ingress, "endpoint": q.ingress.endpoint(), "available_endpoints": [],
             "channels": [], "candidates": 0,
             "verdict": "model_not_found", "fallbacks": []
         })));
@@ -387,15 +392,20 @@ pub async fn diagnose_route(
 
     // 环节 3：渠道与 key 全集（不过滤）+ 生产口径的幸存者集合
     let channels = okapi_store::channels::diagnose_channels(&state.pg, &canonical).await?;
-    let survivors: std::collections::HashSet<i64> = okapi_store::channels::candidates_for_model(
+    let raw = okapi_store::channels::candidates_for_model(
         &state.pg,
         &canonical,
         &chain_refs,
         state.master_key.as_deref(),
     )
     .await
-    .map(|v| v.iter().map(|c| c.channel_key_id).collect())
-    .unwrap_or_default();
+    .map_err(AppError::from)?;
+    let available_endpoints = Ingress::available_endpoints(&raw, &canonical);
+    let survivors: std::collections::HashSet<i64> = raw
+        .iter()
+        .filter(|c| q.ingress.accepts(c, &canonical))
+        .map(|c| c.channel_key_id)
+        .collect();
 
     let now = chrono::Utc::now();
     let channel_reports: Vec<Value> = channels
@@ -408,6 +418,12 @@ pub async fn diagnose_route(
                 Some("orphan_channel")
             } else if !ch.pools.iter().any(|c| pool_chain.contains(c)) {
                 Some("not_in_pool")
+            } else if raw.iter().any(|c| c.channel_id == ch.channel_id)
+                && !raw
+                    .iter()
+                    .any(|c| c.channel_id == ch.channel_id && q.ingress.accepts(c, &canonical))
+            {
+                Some(codes::UNSUPPORTED_ENDPOINT)
             } else {
                 None
             };
@@ -419,7 +435,7 @@ pub async fn diagnose_route(
                 .iter()
                 .map(|k| {
                     let cooling = k.cooldown_until.is_some_and(|t| t > now);
-                    let reason = key_reason(k.status, cooling, k.subset_ok);
+                    let reason = key_reason(k.status, cooling, k.subset_ok).or(excluded);
                     json!({
                         "key_id": k.key_id,
                         "status": k.status,
@@ -457,16 +473,22 @@ pub async fn diagnose_route(
             .fetch_one(&state.pg)
             .await
             .map_err(okapi_store::StoreError::from)?;
-            let fb_candidates = okapi_store::channels::candidates_for_model(
+            let fb_raw = okapi_store::channels::candidates_for_model(
                 &state.pg,
                 &m.canonical,
                 &chain_refs,
                 state.master_key.as_deref(),
             )
             .await
-            .map_or(0, |v| v.len());
+            .map_err(AppError::from)?;
+            let fb_candidates = fb_raw
+                .iter()
+                .filter(|c| q.ingress.accepts(c, &m.canonical))
+                .count();
             let reason = if !priced {
                 Some("unpriced")
+            } else if fb_candidates == 0 && !fb_raw.is_empty() {
+                Some(codes::UNSUPPORTED_ENDPOINT)
             } else if fb_candidates == 0 {
                 Some("no_available_channel")
             } else {
@@ -486,6 +508,8 @@ pub async fn diagnose_route(
         "model_unpriced"
     } else if channels.is_empty() {
         "no_channel_serves_model"
+    } else if candidates == 0 && !raw.is_empty() {
+        codes::UNSUPPORTED_ENDPOINT
     } else if candidates == 0 {
         "no_available_channel"
     } else {
@@ -500,6 +524,9 @@ pub async fn diagnose_route(
                    "pool_code": pool_code, "pool_source": pool_source,
                    "pool_chain": pool_chain, "routing_strategy": routing_strategy},
         "channels": channel_reports,
+        "ingress": q.ingress,
+        "endpoint": q.ingress.endpoint(),
+        "available_endpoints": available_endpoints,
         "candidates": candidates,
         "verdict": verdict,
         "fallbacks": fallbacks,

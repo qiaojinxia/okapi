@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE subscription_grants SET last_error=$2 WHERE id=$1 AND applied_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "81f3af34f1690493dfead4e53e1d03a5d498e62d03ee8396c17b898f6168ae64"
+}

@@ -1,6 +1,26 @@
 import { expect, test } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { buildRequestExample, defaultApiBase, normalizeApiBase, requestTemplates } from '../src/features/public-pricing/request-examples'
+import { buildRequestExample, chatEndpointsFor, defaultApiBase, normalizeApiBase, requestTemplates, templatesFor } from '../src/features/public-pricing/request-examples'
+import type { PricingModel } from '../src/features/public-pricing/types'
+import { buildSnippets, resolveConnectConfig } from '../src/features/portal-guide/connect-snippets'
+import { buildImportLinks } from '../src/features/portal-guide/import-links'
+
+test('仅 Responses 渠道按分组生成正确示例和客户端配置', () => {
+  const model = { model: 'custom-model', chat_endpoints_by_group: {
+    default: ['/v1/responses', '/v1/responses/compact'], vip: ['/v1/chat/completions', '/v1/responses', '/v1/messages'], empty: [],
+  } } as unknown as PricingModel
+  expect(templatesFor(model, 'default').map((t) => t.id)).toEqual(['responses'])
+  expect(templatesFor(model, 'vip').map((t) => t.id)).toContain('chat')
+  expect(templatesFor(model, 'empty')).toEqual([])
+  expect(templatesFor(model, 'missing')).toEqual([])
+  const cfg = resolveConnectConfig('http://localhost:8080', model.model, undefined, chatEndpointsFor(model, 'default'))!
+  expect(buildSnippets('curl', cfg, 'hello')[1].code).toContain('/v1/responses')
+  expect(buildSnippets('curl', cfg, 'hello')[1].code).toContain('"input": "hello"')
+  expect(buildSnippets('python', cfg, 'hello')[1].code).toContain('client.responses.create(')
+  expect(buildSnippets('node', cfg, 'hello')[1].code).toContain('client.responses.create(')
+  expect(buildSnippets('claude', cfg, 'hello')).toEqual([])
+  expect(buildImportLinks(cfg, 'Okapi').map((link) => link.target)).toEqual(['ccswitch-codex'])
+})
 
 const fakeEnv = { ...process.env, OKAPI_API_KEY: 'request-example-test' }
 const badText = `single' double" $HOME $(printf INJECTED) \u0060printf INJECTED\u0060 \\ newline\n你好\nEOF`

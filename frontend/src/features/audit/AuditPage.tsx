@@ -146,17 +146,19 @@ export function AuditPage() {
     h < 168 ? t('admin:auditHours', { n: h }) : t('admin:lastDays', { days: h / 24 })
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader title={t('admin:auditTitle')} description={t('admin:auditDesc')} icon={ScrollText} />
 
       <Toolbar
+        filtersClassName="items-end"
+        selectionClassName="min-h-9 self-end"
         filters={
           <>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex w-full min-w-0 flex-col gap-1.5 sm:w-56">
               <Label htmlFor="au-action">{t('admin:auditAction')}</Label>
               <Select
                 id="au-action"
-                className="w-56"
+                className="w-full"
                 value={draft.action}
                 onChange={(v) => setDraft((d) => ({ ...d, action: v }))}
                 placeholder={t('common:all')}
@@ -170,11 +172,11 @@ export function AuditPage() {
                 ]}
               />
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex w-full min-w-0 flex-col gap-1.5 sm:w-64">
               <Label htmlFor="au-target">{t('admin:auditTarget')}</Label>
               <Input
                 id="au-target"
-                className="w-48"
+                className="w-full"
                 value={draft.target}
                 placeholder={t('admin:auditTargetHint')}
                 onChange={(e) => setDraft((d) => ({ ...d, target: e.target.value }))}
@@ -183,11 +185,11 @@ export function AuditPage() {
                 }}
               />
             </div>
-            <div className="flex flex-col gap-1.5">
+            <div className="flex w-full min-w-0 flex-col gap-1.5 sm:w-40">
               <Label htmlFor="au-actor">{t('admin:auditActor')}</Label>
               <Input
                 id="au-actor"
-                className="w-36 font-mono"
+                className="w-full font-mono"
                 value={draft.actor}
                 placeholder="admin:42"
                 onChange={(e) => setDraft((d) => ({ ...d, actor: e.target.value }))}
@@ -196,25 +198,25 @@ export function AuditPage() {
                 }}
               />
             </div>
-            {/* self-end：工具栏是 items-center，不带标签的控件会被居中悬在
-                标签行和输入框行之间；压到输入框那一行才对齐 */}
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
             <Segmented
               options={HOURS.map((h) => ({ value: h, label: hoursLabel(h) }))}
               value={draft.hours}
               onChange={(h) => submit({ ...draft, hours: h })}
               size="sm"
               ariaLabel={t('admin:logsRange')}
-              className="self-end"
+              className="md:h-9"
             />
-            <Button size="sm" className="self-end" onClick={() => submit(draft)}>
+            <Button size="sm" variant="outline" onClick={() => submit(draft)}>
               {t('common:search')}
             </Button>
+            </div>
           </>
         }
         selection={
-          <span className="text-xs text-muted-foreground">
+          <Badge variant="muted" className="tabular-nums">
             {t('admin:auditLoaded', { n: rows.length })}
-          </span>
+          </Badge>
         }
       />
 

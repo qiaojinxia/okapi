@@ -1,3 +1,5 @@
+import type { PricingModel } from './types'
+
 // 端点与请求形状以 bins/okapi/src/gateway 的路由/探针为准。
 // 这是用户选择的接口模板，不把计价方式或厂商名称当成模型能力。
 export const requestTemplates = [
@@ -11,6 +13,22 @@ export const requestTemplates = [
   { id: 'videos', name: 'Videos', path: '/videos', stream: false },
 ] as const
 export type RequestTemplate = typeof requestTemplates[number]['id']
+
+export function chatEndpointsFor(model: PricingModel | undefined, group: string): string[] | undefined {
+  const byGroup = model?.chat_endpoints_by_group
+  if (!byGroup) return undefined
+  return group ? byGroup[group] ?? [] : [...new Set(Object.values(byGroup).flat())]
+}
+
+export function templatesFor(model: PricingModel, group: string) {
+  const endpoints = chatEndpointsFor(model, group)
+  if (!endpoints) return requestTemplates.slice()
+  if (endpoints.length === 0) return []
+  // Responses-only 渠道不能用聊天或媒体模板；其它渠道的媒体能力仍由用户选择。
+  const responsesOnly = !endpoints.includes('/v1/chat/completions') && endpoints.includes('/v1/responses')
+  return requestTemplates.filter((item) => responsesOnly ? item.id === 'responses'
+    : !['chat', 'responses', 'messages'].includes(item.id) || endpoints.includes(`/v1${item.path}`))
+}
 
 export function normalizeApiBase(raw: string): string | null {
   try {

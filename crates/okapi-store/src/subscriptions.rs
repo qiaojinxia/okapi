@@ -1,8 +1,8 @@
 //! 订阅实例（`plans.kind = 1` → `user_subscriptions`；IMPLEMENTATION §11.28）。
 //!
-//! PG 只管状态与窗口边界；池余额的热值在 Redis（`okapi_ledger::BalanceLedger::sub_set`），
-//! 权威值是 `billing_events WHERE pool = 1` 的和——两者都由调用方（console / worker）在
-//! 这里的状态翻转成功后处理。这里不碰 Redis，也不记事件。
+//! Store mutations use the caller's PG transaction. The ledger commits state,
+//! financial events and pending recovery together, then synchronizes Redis.
+//! This module owns immutable terms and window boundaries, not monetary effects.
 
 use crate::error::StoreError;
 use chrono::{DateTime, Duration, Months, Utc};
@@ -50,7 +50,7 @@ impl Period {
 }
 
 /// 订阅套餐（`plans.kind = 1`）。
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubPlan {
     pub id: i64,
     pub plan_code: String,
@@ -72,6 +72,16 @@ impl SubPlan {
         // 表级 CHECK 保证 kind=1 时 period ∈ {1,2,3}；防御性缺省按月
         Period::from_i16(self.period).unwrap_or(Period::Month)
     }
+}
+
+/// Reject unrepresentable durations before accepting money or consuming a code.
+pub fn expiry_after(base: DateTime<Utc>, days: i32) -> Result<DateTime<Utc>, StoreError> {
+    if days <= 0 {
+        return Err(StoreError::InvalidData("subscription_expiry"));
+    }
+    Duration::try_days(i64::from(days))
+        .and_then(|duration| base.checked_add_signed(duration))
+        .ok_or(StoreError::InvalidData("subscription_expiry"))
 }
 
 /// 启用中的订阅套餐（门户套餐页 / 购买校验）。
@@ -167,10 +177,10 @@ pub async fn active_for_user(
     let row = sqlx::query_as!(
         Subscription,
         r#"
-        SELECT s.id, s.user_id, s.plan_id, p.plan_code, p.display_name, p.period AS "period!", s.status,
-               s.quota_micro, p.group_code, s.granted_group, s.starts_at, s.expires_at,
+        SELECT s.id, s.user_id, s.plan_id, s.plan_code_snapshot AS plan_code, s.display_name_snapshot AS display_name, s.period_snapshot AS period, s.status,
+               s.quota_micro, s.group_code_snapshot AS group_code, s.granted_group, s.starts_at, s.expires_at,
                s.window_start, s.window_end, s.source
-        FROM user_subscriptions s JOIN plans p ON p.id = s.plan_id
+        FROM user_subscriptions s
         WHERE s.user_id = $1 AND s.status = 1
         "#,
         user_id
@@ -189,10 +199,10 @@ pub async fn history_for_user(
     let rows = sqlx::query_as!(
         Subscription,
         r#"
-        SELECT s.id, s.user_id, s.plan_id, p.plan_code, p.display_name, p.period AS "period!", s.status,
-               s.quota_micro, p.group_code, s.granted_group, s.starts_at, s.expires_at,
+        SELECT s.id, s.user_id, s.plan_id, s.plan_code_snapshot AS plan_code, s.display_name_snapshot AS display_name, s.period_snapshot AS period, s.status,
+               s.quota_micro, s.group_code_snapshot AS group_code, s.granted_group, s.starts_at, s.expires_at,
                s.window_start, s.window_end, s.source
-        FROM user_subscriptions s JOIN plans p ON p.id = s.plan_id
+        FROM user_subscriptions s
         WHERE s.user_id = $1
         ORDER BY s.id DESC
         LIMIT $2
@@ -205,10 +215,21 @@ pub async fn history_for_user(
     Ok(rows)
 }
 
+pub async fn by_id<'e, E>(executor: E, id: i64) -> Result<Option<Subscription>, StoreError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    Ok(sqlx::query_as!(Subscription,r#"SELECT s.id,s.user_id,s.plan_id,
+        s.plan_code_snapshot AS plan_code,s.display_name_snapshot AS display_name,s.period_snapshot AS period,
+        s.status,s.quota_micro,s.group_code_snapshot AS group_code,s.granted_group,s.starts_at,s.expires_at,
+        s.window_start,s.window_end,s.source FROM user_subscriptions s WHERE s.id=$1"#,id)
+        .fetch_optional(executor).await?)
+}
+
 /// 激活结果。
 #[derive(Debug)]
 pub enum ActivateOutcome {
-    /// 新订阅：调用方 `sub_set(quota, sub_until)` + 记 `sub_grant`。
+    /// 新订阅：调用方在同一事务记 `sub_grant` 与待同步效果，再恢复第二池。
     Activated(Subscription),
     /// 同套餐续期：只延 `expires_at`（窗口与池余额不动）；调用方刷新 `sub_until`。
     Renewed(Subscription),
@@ -220,45 +241,42 @@ pub enum ActivateOutcome {
 ///
 /// 单事务：锁当前激活行 → 同套餐续期 / 异套餐冲突 / 无则插入。分组只在用户**不在组里**时
 /// 才加并标 `granted_group = true`，到期只收回订阅新加的那份。
-pub async fn activate(
-    pool: &PgPool,
+pub async fn activate_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: i64,
     plan: &SubPlan,
     now: DateTime<Utc>,
     source: &str,
 ) -> Result<ActivateOutcome, StoreError> {
-    let mut tx = pool.begin().await?;
     let current = sqlx::query!(
-        r#"SELECT id, plan_id, expires_at FROM user_subscriptions
+        r#"SELECT id, plan_id, expires_at,quota_micro,period_snapshot,group_code_snapshot,plan_code_snapshot FROM user_subscriptions
            WHERE user_id = $1 AND status = 1 FOR UPDATE"#,
         user_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    let duration = Duration::days(i64::from(plan.duration_days));
 
     if let Some(cur) = current {
-        if cur.plan_id != plan.id {
-            let active_plan_code =
-                sqlx::query_scalar!(r#"SELECT plan_code FROM plans WHERE id = $1"#, cur.plan_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            tx.rollback().await?;
+        if cur.plan_id != plan.id
+            || cur.quota_micro != plan.quota_micro
+            || cur.period_snapshot != plan.period
+            || cur.group_code_snapshot != plan.group_code
+        {
+            let active_plan_code = cur.plan_code_snapshot;
             return Ok(ActivateOutcome::Conflict { active_plan_code });
         }
         // 续期：从"当前到期时刻"或"现在"中较晚者起算，worker 滞后不该吃掉用户的天数
         let base = cur.expires_at.max(now);
         sqlx::query!(
             r#"UPDATE user_subscriptions
-               SET expires_at = $2, source = $3, updated_at = now() WHERE id = $1"#,
+               SET expires_at = $2, source = $3, updated_at = now(), maintenance_retry_after=NULL WHERE id = $1"#,
             cur.id,
-            base + duration,
+            expiry_after(base, plan.duration_days)?,
             source
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
-        let renewed = active_for_user(pool, user_id)
+        let renewed = by_id(&mut **tx, cur.id)
             .await?
             .ok_or(StoreError::InvalidData("subscription_vanished"))?;
         return Ok(ActivateOutcome::Renewed(renewed));
@@ -272,32 +290,35 @@ pub async fn activate(
             user_id,
             group
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
         granted_group = inserted > 0;
     }
     let window_end = plan.period().next(now);
-    sqlx::query!(
+    let id = sqlx::query_scalar!(
         r#"
         INSERT INTO user_subscriptions
             (user_id, plan_id, status, starts_at, expires_at, window_start, window_end,
-             quota_micro, granted_group, source)
-        VALUES ($1, $2, 1, $3, $4, $3, $5, $6, $7, $8)
+             quota_micro, granted_group, source,plan_code_snapshot,display_name_snapshot,period_snapshot,group_code_snapshot)
+        VALUES ($1, $2, 1, $3, $4, $3, $5, $6, $7, $8,$9,$10,$11,$12) RETURNING id
         "#,
         user_id,
         plan.id,
         now,
-        now + duration,
+        expiry_after(now, plan.duration_days)?,
         window_end,
         plan.quota_micro,
         granted_group,
-        source
+        source,
+        plan.plan_code,
+        plan.display_name,
+        plan.period,
+        plan.group_code
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
-    tx.commit().await?;
-    let created = active_for_user(pool, user_id)
+    let created = by_id(&mut **tx, id)
         .await?
         .ok_or(StoreError::InvalidData("subscription_vanished"))?;
     Ok(ActivateOutcome::Activated(created))
@@ -305,23 +326,23 @@ pub async fn activate(
 
 /// 结束一条激活订阅（2 到期 / 3 取消）；返回被结束的那条供调用方清池、收组。
 /// 已非激活 → None（幂等）。
-pub async fn finish(
-    pool: &PgPool,
+pub async fn finish_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     subscription_id: i64,
     status: i16,
 ) -> Result<Option<Subscription>, StoreError> {
     let before = sqlx::query_as!(
         Subscription,
         r#"
-        SELECT s.id, s.user_id, s.plan_id, p.plan_code, p.display_name, p.period AS "period!", s.status,
-               s.quota_micro, p.group_code, s.granted_group, s.starts_at, s.expires_at,
+        SELECT s.id, s.user_id, s.plan_id, s.plan_code_snapshot AS plan_code, s.display_name_snapshot AS display_name, s.period_snapshot AS period, s.status,
+               s.quota_micro, s.group_code_snapshot AS group_code, s.granted_group, s.starts_at, s.expires_at,
                s.window_start, s.window_end, s.source
-        FROM user_subscriptions s JOIN plans p ON p.id = s.plan_id
-        WHERE s.id = $1 AND s.status = 1
+        FROM user_subscriptions s
+        WHERE s.id = $1 AND s.status = 1 FOR UPDATE
         "#,
         subscription_id
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(sub) = before else {
         return Ok(None);
@@ -332,7 +353,7 @@ pub async fn finish(
         subscription_id,
         status
     )
-    .execute(pool)
+    .execute(&mut **tx)
     .await?
     .rows_affected();
     if flipped == 0 {
@@ -346,7 +367,7 @@ pub async fn finish(
             sub.user_id,
             group
         )
-        .execute(pool)
+        .execute(&mut **tx)
         .await?;
     }
     Ok(Some(sub))
@@ -361,11 +382,12 @@ pub async fn due(
     let rows = sqlx::query_as!(
         Subscription,
         r#"
-        SELECT s.id, s.user_id, s.plan_id, p.plan_code, p.display_name, p.period AS "period!", s.status,
-               s.quota_micro, p.group_code, s.granted_group, s.starts_at, s.expires_at,
+        SELECT s.id, s.user_id, s.plan_id, s.plan_code_snapshot AS plan_code, s.display_name_snapshot AS display_name, s.period_snapshot AS period, s.status,
+               s.quota_micro, s.group_code_snapshot AS group_code, s.granted_group, s.starts_at, s.expires_at,
                s.window_start, s.window_end, s.source
-        FROM user_subscriptions s JOIN plans p ON p.id = s.plan_id
+        FROM user_subscriptions s
         WHERE s.status = 1 AND (s.window_end <= $1 OR s.expires_at <= $1)
+          AND (s.maintenance_retry_after IS NULL OR s.maintenance_retry_after <= $1)
         ORDER BY s.window_end
         LIMIT $2
         "#,
@@ -397,24 +419,6 @@ pub fn advance_window(
 }
 
 /// 写回新窗口。
-pub async fn roll_window(
-    pool: &PgPool,
-    subscription_id: i64,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-) -> Result<(), StoreError> {
-    sqlx::query!(
-        r#"UPDATE user_subscriptions SET window_start = $2, window_end = $3, updated_at = now()
-           WHERE id = $1 AND status = 1"#,
-        subscription_id,
-        window_start,
-        window_end
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

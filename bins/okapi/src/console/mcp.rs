@@ -860,9 +860,9 @@ async fn user_adjust_balance(
         }));
     }
     let amount = okapi_domain::Money::from_micros(amount_micro);
-    let balance_after = state.ledger.credit(user_id, amount).await?;
-    okapi_ledger::pg::record_credit(
+    let balance_after = okapi_ledger::operations::credit(
         &state.pg,
+        &state.ledger,
         user_id,
         amount,
         "adjust",
@@ -878,7 +878,9 @@ async fn user_adjust_balance(
         json!({"amount_micro": amount_micro, "reason": reason}),
     )
     .await;
-    Ok(json!({"dry_run": false, "balance_after_micro": balance_after.as_micros()}))
+    Ok(
+        json!({"dry_run": false, "balance_after_micro": balance_after.balance_after.map(okapi_domain::Money::as_micros), "operation_id": balance_after.operation_id, "pending": balance_after.balance_after.is_none()}),
+    )
 }
 
 async fn user_ban(state: &AppState, key: &AuthedKey, args: &Value) -> Result<Value, AppError> {

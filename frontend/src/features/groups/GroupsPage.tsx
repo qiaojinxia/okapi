@@ -54,7 +54,7 @@ export function GroupsPage() {
   const rows = groups.data?.data ?? []
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         className="shrink-0"
         icon={Layers}
@@ -89,7 +89,6 @@ export function GroupsPage() {
       ) : (
         <Table
           stickyHeader
-          wrapperClassName="min-h-40 max-h-none flex-1 overscroll-contain [scrollbar-gutter:stable]"
           scrollResetKey={`${pager.offset}:${pager.limit}`}
           aria-busy={groups.isFetching}
         >
@@ -108,7 +107,7 @@ export function GroupsPage() {
           <TBody>
             {rows.map((g) => (
               <Tr key={g.group_code}>
-                <Td className="font-mono text-xs">
+                <Td className="whitespace-nowrap font-mono text-xs">
                   {g.group_code}
                   {g.is_default && (
                     <Badge variant="muted" className="ml-2">
@@ -126,7 +125,7 @@ export function GroupsPage() {
                   {g.description ?? '—'}
                 </Td>
                 <Td numeric>{g.user_count}</Td>
-                <Td className="font-mono text-xs">{g.pool_code}</Td>
+                <Td className="whitespace-nowrap font-mono text-xs">{g.pool_code}</Td>
                 <Td>
                   {/* 池里零渠道 = 这个分组的用户什么都打不到，与"未定价"同类的配了一半 */}
                   {g.channel_count === 0 ? (
@@ -135,7 +134,7 @@ export function GroupsPage() {
                     g.channel_count
                   )}
                 </Td>
-                <Td className="text-xs text-muted-foreground tabular-nums">
+                <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
                   {g.rpm_limit === null && g.rph_limit === null
                     ? '—'
                     : t('admin:groupRateCell', {

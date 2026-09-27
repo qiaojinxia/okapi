@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 /// # 计费分段（DESIGN §3.2）
 ///
 /// prompt 侧五段互斥，合计 = `prompt_tokens`：
-/// - `cached_tokens`：缓存**读取**命中，按 cache_ratio 打折（Anthropic 官方 0.1×）；
-/// - `cache_write_tokens`：缓存**写入**，按 cache_write_ratio 加价（官方 1.25×@5m）；
+/// - `cached_tokens`：缓存**读取**，按模型的 cache_ratio 计价；
+/// - `cache_write_tokens`：缓存**写入**，按模型的 cache_write_ratio 计价；
 /// - `audio_prompt_tokens`：音频输入，按 audio_ratio 加价（gpt-4o-audio 官方 16×）；
 /// - `image_prompt_tokens`：图片输入，按 image_ratio；
 /// - 余下 `prompt_uncached()`：常规文本，1.0×。
@@ -24,16 +24,20 @@ use serde::{Deserialize, Serialize};
 /// # 维度交叉的近似
 ///
 /// OpenAI 语义中"缓存"与"模态"是**交叉**维度（一段音频 token 也可能被缓存命中），
-/// 而计费需要互斥分段。本实现按互斥处理：音频/图片段先从 prompt 扣除，剩余再分
-/// 常规/缓存读/缓存写。依据是当前各家缓存均只作用于文本前缀（Anthropic
-/// cache_control 仅接受文本块、OpenAI 隐式缓存按文本前缀命中），故交叉部分实测为 0；
-/// 若未来上游开放多模态缓存，需改为二维矩阵定价并同步 DESIGN §3.2。
+/// 而本实现按互斥分段近似处理：探针按缓存读 → 缓存写 → 音频 → 图片分配。
+/// 不保留缓存与模态的交叉矩阵，不能据此推断上游不支持多模态缓存。
 ///
 /// `reasoning_tokens` 计入 completion 总数（仅统计拆分，不重复计费）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub cached_tokens: u32,
+    /// 上游是否明确上报缓存读取；缺字段/估算不等于真实零命中。
+    #[serde(default)]
+    pub cache_read_reported: bool,
+    /// 上游是否明确上报缓存写入。只描述采集状态，不改变计费数值。
+    #[serde(default)]
+    pub cache_write_reported: bool,
     /// 缓存写入 token（Anthropic `cache_creation_input_tokens`）；含在 prompt_tokens 内。
     #[serde(default)]
     pub cache_write_tokens: u32,
@@ -173,6 +177,7 @@ mod tests {
             completion_tokens: 500,
             audio_completion_tokens: 200,
             reasoning_tokens: 50,
+            ..TokenUsage::default()
         };
         assert!(usage.validate().is_ok());
         assert_eq!(usage.prompt_uncached(), 250);

@@ -28,7 +28,10 @@ pub const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const SCOPE: &str = "openid profile email offline_access";
 pub const ORIGINATOR: &str = "codex_cli_rs";
 pub const DEFAULT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
+/// 模型目录接口的 `client_version`（Codex CLI 版本号，随 CLI 升级可调）。
+pub const CLIENT_VERSION: &str = "0.155.0";
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
+const MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// 授权 URL：`state` 独立随机值（与 Anthropic 不同，这里不复用 verifier）。
 #[must_use]
@@ -158,9 +161,9 @@ async fn read_tokens(resp: reqwest::Response) -> Result<Tokens, UpstreamError> {
     parse_tokens(&bytes)
 }
 
-/// 该后端不接受的官方 Responses 参数（带上会 400）。`store=false` 让 `previous_response_id` 无意义。
-const UNSUPPORTED_FIELDS: [&str; 15] = [
-    "previous_response_id",
+/// 该后端不接受的官方 Responses 参数。历史 ID 保留，不能静默丢失续聊上下文；
+/// 上游不支持时让其明确拒绝，由网关保持账号绑定并返回错误。
+const UNSUPPORTED_FIELDS: [&str; 14] = [
     "stream_options",
     "prompt_cache_retention",
     "safety_identifier",
@@ -178,7 +181,8 @@ const UNSUPPORTED_FIELDS: [&str; 15] = [
 ];
 
 /// Responses 请求体改成 Codex 后端接受的形状：`store=false`、`stream=true`（只有流式面）、
-/// `instructions` 键缺省补空串、`input[].role=system` 改 `developer`、剥掉不支持的参数。
+/// `instructions` 键缺省补空串、字符串 `input` 包成消息列表（该后端要求 `input` 必须是列表）、
+/// `input[].role=system` 改 `developer`、剥掉不支持的参数。
 pub fn prepare_body(body: &[u8]) -> Result<Vec<u8>, UpstreamError> {
     let mut value: Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;
@@ -192,6 +196,15 @@ pub fn prepare_body(body: &[u8]) -> Result<Vec<u8>, UpstreamError> {
     }
     for field in UNSUPPORTED_FIELDS {
         obj.remove(field);
+    }
+    // 官方 API 允许 input 是字符串，该后端只收列表（"Input must be a list"）：
+    // 按 Codex CLI 的消息项形状包一层
+    if let Some(text) = obj.get("input").and_then(Value::as_str).map(str::to_owned) {
+        obj.insert(
+            "input".to_owned(),
+            json!([{"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": text}]}]),
+        );
     }
     if let Some(items) = obj.get_mut("input").and_then(Value::as_array_mut) {
         for item in items.iter_mut() {
@@ -243,6 +256,97 @@ pub async fn responses(
         ChatResponse::Stream(handle) if !stream => collect_json(handle).await,
         other => Ok(other),
     }
+}
+
+/// 独立 compact 端点返回 JSON；不经过普通 Responses 的强制流式整形，保留完整上下文。
+pub async fn responses_compact(
+    http: &crate::http::HttpPool,
+    api_base: &str,
+    access_token: &str,
+    account_id: Option<&str>,
+    body: Bytes,
+    outbound: &crate::http::Outbound,
+) -> Result<ChatResponse, UpstreamError> {
+    let bearer = format!("Bearer {access_token}");
+    let mut headers = vec![("authorization", bearer.as_str())];
+    if !has_header(outbound, "originator") {
+        headers.push(("originator", ORIGINATOR));
+    }
+    if !has_header(outbound, "openai-beta") {
+        headers.push(("openai-beta", "responses=experimental"));
+    }
+    if let Some(id) = account_id {
+        headers.push(("chatgpt-account-id", id));
+    }
+    crate::responses::send_compact_at(
+        http,
+        format!("{}/responses/compact", api_base.trim_end_matches('/')),
+        &headers,
+        body,
+        outbound,
+    )
+    .await
+}
+
+/// 模型目录（拉取上游模型用）：`GET {base}/models?client_version=...`，回 `{"models":[...]}`，
+/// 条目 id 在 `id` 字段。与 `responses` 同一套身份头（Bearer / originator / account id）。
+pub async fn list_models(
+    http: &crate::http::HttpPool,
+    api_base: &str,
+    access_token: &str,
+    account_id: Option<&str>,
+    outbound: &crate::http::Outbound,
+) -> Result<Vec<String>, UpstreamError> {
+    let url = format!(
+        "{}/models?client_version={CLIENT_VERSION}",
+        api_base.trim_end_matches('/')
+    );
+    let bearer = format!("Bearer {access_token}");
+    let mut headers: Vec<(&str, &str)> = vec![
+        ("authorization", bearer.as_str()),
+        ("accept", "application/json"),
+    ];
+    if !has_header(outbound, "originator") {
+        headers.push(("originator", ORIGINATOR));
+    }
+    if let Some(id) = account_id {
+        headers.push(("chatgpt-account-id", id));
+    }
+    let mut req = http
+        .probe(outbound, reqwest::Method::GET, url)?
+        .timeout(MODELS_TIMEOUT);
+    for (name, value) in headers {
+        req = req.header(name, value);
+    }
+    let resp = req.send().await.map_err(|e| classify(&e))?;
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.map_err(|e| classify(&e))?;
+    if !(200..300).contains(&status) {
+        return Err(UpstreamError::Status {
+            status,
+            body: bytes,
+            retry_after_secs: None,
+        });
+    }
+    let parsed: Value =
+        serde_json::from_slice(&bytes).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let mut models: Vec<String> = parsed
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            item.get("id")
+                .or_else(|| item.get("slug"))
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        })
+        .collect();
+    models.sort();
+    models.dedup();
+    Ok(models)
 }
 
 /// 把 Responses SSE 聚合成一个非流式 Responses 对象：取终态事件（`response.completed` /
@@ -374,6 +478,7 @@ mod tests {
         assert_eq!(v["instructions"], "", "instructions 键必须存在");
         assert_eq!(v["input"][0]["role"], "developer", "system 角色不被接受");
         assert_eq!(v["input"][1]["role"], "user");
+        assert_eq!(v["previous_response_id"], "resp_0", "不能丢失历史引用");
         for field in UNSUPPORTED_FIELDS {
             assert!(v.get(field).is_none(), "{field} 应被剥掉");
         }
@@ -387,6 +492,11 @@ mod tests {
             v["instructions"], "you are x",
             "客户端给的 instructions 不动"
         );
+        // 字符串 input 包成 Codex CLI 形状的消息列表（后端只收列表）
+        assert_eq!(v["input"][0]["type"], "message");
+        assert_eq!(v["input"][0]["role"], "user");
+        assert_eq!(v["input"][0]["content"][0]["type"], "input_text");
+        assert_eq!(v["input"][0]["content"][0]["text"], "hi");
     }
 
     // 测试流的元素类型就是 Result，这里统一包一层 Ok

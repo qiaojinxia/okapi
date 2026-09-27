@@ -22,6 +22,7 @@ export interface LogSearch extends PageSearch {
 }
 
 export const Route = createFileRoute('/admin/logs')({
+  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): LogSearch => ({
     ...pageSearch(search),
     model: text(search.model),

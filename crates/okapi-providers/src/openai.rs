@@ -14,6 +14,37 @@ use std::time::Duration;
 /// 非流式请求总超时（流式不设总超时，首字窗口由 gateway 控制）。
 const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
 
+/// Bounded buffered image output, shared by JSON/multipart and OpenAI/Azure.
+pub(crate) const MAX_IMAGE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+pub(crate) fn image_response_limit(path: &str) -> Option<usize> {
+    matches!(path, "/images/generations" | "/images/edits").then_some(MAX_IMAGE_RESPONSE_BYTES)
+}
+
+async fn response_bytes(
+    mut response: reqwest::Response,
+    limit: Option<usize>,
+) -> Result<Bytes, UpstreamError> {
+    let Some(limit) = limit else {
+        return response.bytes().await.map_err(|error| classify(&error));
+    };
+    let oversized = || UpstreamError::Build("image_response_too_large".into());
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(oversized());
+    }
+    let mut bytes = bytes::BytesMut::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| classify(&error))? {
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            return Err(oversized());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes.freeze())
+}
+
 pub struct StreamHandle {
     pub upstream_request_id: Option<String>,
     pub events: Pin<Box<dyn Stream<Item = Result<ChatEvent, UpstreamError>> + Send>>,
@@ -212,11 +243,17 @@ impl OpenAiUpstream {
         outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
-        let req = self.http.post(outbound, url)?.header(
+        let limit = image_response_limit(path);
+        let req = if limit.is_some() {
+            self.http.probe(outbound, reqwest::Method::POST, url)?
+        } else {
+            self.http.post(outbound, url)?
+        }
+        .header(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {credential}"),
         );
-        self.send_json(req, body).await
+        self.send_json(req, body, limit).await
     }
 
     /// 非流式 JSON 请求的发送与响应解析（URL 与鉴权头由调用方装好）。
@@ -224,6 +261,7 @@ impl OpenAiUpstream {
         &self,
         req: reqwest::RequestBuilder,
         body: Bytes,
+        limit: Option<usize>,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let resp = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -244,14 +282,16 @@ impl OpenAiUpstream {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<i64>().ok());
-            let body = resp.bytes().await.unwrap_or_default();
+            let body = response_bytes(resp, limit.map(|_| 64 * 1024))
+                .await
+                .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
                 retry_after_secs,
             });
         }
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = response_bytes(resp, limit).await?;
         let usage = serde_json::from_slice::<UsageEnvelope>(&body)
             .ok()
             .and_then(|e| e.usage);
@@ -352,11 +392,17 @@ impl OpenAiUpstream {
         outbound: &Outbound,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
-        let req = self.http.post(outbound, url)?.header(
+        let limit = image_response_limit(path);
+        let req = if limit.is_some() {
+            self.http.probe(outbound, reqwest::Method::POST, url)?
+        } else {
+            self.http.post(outbound, url)?
+        }
+        .header(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {credential}"),
         );
-        self.send_multipart(req, parts).await
+        self.send_multipart(req, parts, limit).await
     }
 
     /// multipart 的组装、发送与 JSON 响应读取（URL 与鉴权头由调用方装好）。
@@ -364,6 +410,7 @@ impl OpenAiUpstream {
         &self,
         req: reqwest::RequestBuilder,
         parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
+        limit: Option<usize>,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let mut form = reqwest::multipart::Form::new();
         for (name, filename, content_type, data) in parts {
@@ -396,14 +443,16 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
-            let body = resp.bytes().await.unwrap_or_default();
+            let body = response_bytes(resp, limit.map(|_| 64 * 1024))
+                .await
+                .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
                 retry_after_secs: None,
             });
         }
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = response_bytes(resp, limit).await?;
         Ok(EmbeddingsResponse {
             status,
             upstream_request_id,

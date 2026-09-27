@@ -5,11 +5,11 @@
 
 ## 0. 全局约定
 
-- **金额一律 micro-USD `BIGINT`**（$1 = 1,000,000 micro）；quota 视图 = USD × 500,000 仅展示层换算；任何表禁止浮点金额列。
+- **交易金额与余额使用 micro-USD `BIGINT`**（$1 = 1,000,000 micro）；历史 actor 结转使用 `NUMERIC(38,0)` 保存可能超过 bigint 的相抵累计额，返回余额时仍须校验 bigint 与 Redis 安全整数范围。quota 视图 = USD × 500,000 仅展示层换算；禁止浮点金额列。
 - 倍率用 NUMERIC 定点（编译进 PriceBook 后为 micro-USD/token 定点数）。
 - 时间 TIMESTAMPTZ；软删 `deleted_at`；主键 BIGINT IDENTITY。
 - 迁移：sqlx migrate，只前滚；大表加列须可空或带默认，禁止长锁回填（分批脚本）。
-- 大表（billing_records / billing_events / audit_logs）按月 RANGE 分区；worker 自动预建下月分区并按保留策略滚动删除（#1790-1）。
+- 大表（billing_records / billing_events / audit_logs）按月 RANGE 分区；worker 自动预建下月分区并按保留策略滚动删除（#1790-1）；删除账本分区前必须同事务保留资金结转与财务凭证，见 [历史账本结转](billing-retention.md)。
 - 老仓库 `billing_events_v2` 在 Okapi 新 schema 统一命名为 `billing_events`。
 
 ## 1. PostgreSQL（唯一真理源）
@@ -21,7 +21,7 @@
 | 身份权限 | admin_roles, users, oauth_bindings, price_groups, user_groups, group_channel_bindings, api_keys | M1–M2 |
 | 渠道模型 | channels, channel_keys, models, model_aliases | M1–M2 |
 | 定价 | model_pricing, user_pricing, pricing_rules, pricing_epochs | M0–M2 |
-| 计费账本 | billing_records, billing_events, billing_outbox, billing_dlq | M1–M2 |
+| 计费账本 | billing_records, billing_events, billing_event_carry, billing_record_receipts, billing_outbox, billing_dlq | M1–M2 |
 | 营收运营 | recharge_orders, redemption_codes, redemption_records | M2–M4 |
 | 平台 | audit_logs, settings | M2 |
 | M4 预留 | teams, team_members, plans, user_subscriptions, notification_channels, notification_rules | M4 |
@@ -479,9 +479,12 @@ CREATE TABLE recharge_orders (
     user_id          BIGINT NOT NULL REFERENCES users(id),
     amount_micro     BIGINT NOT NULL,                 -- 入账额度
     currency         VARCHAR(8) NOT NULL DEFAULT 'USD',
-    pay_amount       NUMERIC(12,2),                   -- 支付金额（原币种，仅展示）
+    pay_amount       NUMERIC(12,2),                   -- 原币种报价，回调金额须精确匹配
     gateway          VARCHAR(32) NOT NULL,            -- stripe / epay / manual ...
     gateway_trade_no VARCHAR(128),
+    payment_contract_version SMALLINT NOT NULL DEFAULT 0, -- 0023：新订单显式写 1
+    merchant_id      VARCHAR(128),                   -- Epay 下单时商户快照
+    checkout_session_id VARCHAR(128),                -- Stripe 创建后持久绑定
     status           SMALLINT NOT NULL DEFAULT 0,     -- 0 created 1 paid 2 failed 3 refunded
     plan_id          BIGINT REFERENCES plans(id),     -- 非空 = 订阅购买单（0004）：amount_micro 为售价快照，
                                                       --   支付成功激活/续期订阅而**不入钱包**；NULL = 钱包充值
@@ -489,6 +492,22 @@ CREATE TABLE recharge_orders (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_recharge_user ON recharge_orders (user_id, created_at DESC);
+CREATE UNIQUE INDEX recharge_checkout_session_unique
+    ON recharge_orders(gateway,checkout_session_id) WHERE checkout_session_id IS NOT NULL;
+CREATE INDEX recharge_paid_transaction_lookup
+    ON recharge_orders(gateway,gateway_trade_no) WHERE status IN (1,3);
+
+-- 0023：永久交易认领，和订单核销、钱包 credit / 订阅 grant 在同一 PG 事务中提交。
+CREATE TABLE payment_receipts (
+    gateway VARCHAR(32) NOT NULL,
+    merchant_id VARCHAR(128) NOT NULL,                -- Stripe 使用空串命名空间
+    trade_no VARCHAR(128) NOT NULL,
+    order_id BIGINT NOT NULL UNIQUE REFERENCES recharge_orders(id),
+    currency VARCHAR(8) NOT NULL,
+    amount_minor BIGINT NOT NULL CHECK(amount_minor > 0),
+    accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY(gateway,merchant_id,trade_no)
+);
 
 -- 兑换码增强（#1790-5 / #2845，M4 已按下述形态实现，见 0006/0007/0011 迁移）：
 -- 单码一次性核销（多次使用 max_uses 列 backlog——按需再引入 redemption_records 计数表）；
@@ -531,6 +550,10 @@ CREATE TABLE user_subscriptions (                     -- 订阅实例（0004；�
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id        BIGINT NOT NULL REFERENCES users(id),
     plan_id        BIGINT NOT NULL REFERENCES plans(id),
+    plan_code_snapshot VARCHAR(64) NOT NULL,           -- 0020：实例权益不跟随目录修改
+    display_name_snapshot VARCHAR(128) NOT NULL,
+    period_snapshot SMALLINT NOT NULL CHECK (period_snapshot IN (1,2,3)),
+    group_code_snapshot VARCHAR(64),
     status         SMALLINT NOT NULL DEFAULT 1,       -- 1 active 2 expired 3 cancelled
     starts_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at     TIMESTAMPTZ NOT NULL,
@@ -544,7 +567,7 @@ CREATE TABLE user_subscriptions (                     -- 订阅实例（0004；�
 );
 CREATE UNIQUE INDEX uq_user_sub_active ON user_subscriptions (user_id) WHERE status = 1; -- 同一时刻最多一个激活订阅
 CREATE INDEX idx_user_sub_window ON user_subscriptions (window_end) WHERE status = 1;    -- worker 滚窗/到期扫描
--- 池余额不在 PG：热值在 Redis bal:{uid}.sub（§2.2），权威值 = Σ billing_events(pool=1)。
+-- 池余额不在 PG：热值在 Redis bal:{uid}.sub（§2.2），权威值 = billing_balance_totals 的 pool=1 总额（含历史结转）。
 
 -- 【蓝图残留清理】以下 records 表为设计期方案，未实现（留痕走 billing_events）：
 CREATE TABLE redemption_records (                     -- backlog：max_uses 多次核销时引入
@@ -583,15 +606,16 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 已注册键（M4 收口清单；读写走 `POST /admin/settings` + `GET /admin/settings/{key}`）：
 `strict_group_isolation`（组可见性两态）、`ssrf_policy`（渠道 api_base 校验策略）、
 `mcp_write_enabled`（MCP 写工具总闸）、`single_user_release_ack`（单用户模式生产确认）、
+`image_tasks_enabled`（异步图片创建开关，布尔值，缺省 false；关闭仍允许已有任务执行/查询/取消/下载，见 [图片契约](images-contract.md)）、
 `turnstile_secret`、`turnstile_verify_url`（siteverify 地址覆写，缺省 Cloudflare 官方端点；内网出口代理或自动化用例的 mock 用）、`oauth_providers`、`payment_epay` / `payment_stripe`、
-`model_rpm_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（WS 连接租约上限，缺省 4）、
+`model_rpm_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（Realtime 连接租约上限，缺省 4）、`responses_ws_max_conns_per_key`（Responses WS 独立连接租约上限，缺省 4）、`responses_ws_turn_timeout_secs`（单轮硬时限，缺省/最大 480 秒，可缩短；另留最多 30 秒收尾）、`responses_ws_transport`（native/http/auto，缺省 auto；channels.settings 同名项非 null 时优先）、`responses_ws_context_bytes`（HTTP 桥接连接内快照序列化字节预算，缺省/最大 128 MiB）、
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
 `notify_channels`（通知多路配置数组）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
 `critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key，0=关）、
 `site_url`（对外站点地址；OAuth 回调与找回密码链接的基址，缺省按请求 Host 推导）、
 `smtp`（邮件出口：host/port/security(starttls|tls|none)/username/password/from_address/from_name/reply_to；
 host 空=未配置；含密码故列表接口只回"已配置"，IMPLEMENTATION §11.27）、
-`surge_inflight_threshold`（surge 规则的负载判定阈值：单 gateway 进程在途计费请求数 ≥ 该值即
+`surge_inflight_threshold`（surge 规则的负载判定阈值：Redis 汇总的集群 HTTP 请求与 Responses WS 活动轮次数 ≥ 该值即
 `surge_active`，缺省 0=永不触发；仅当价簿含启用的 surge 规则时才读取该设置）、
 `margin_breaker`（负毛利自动熔断，IMPLEMENTATION §11.34：`{enabled, window_hours, min_requests,
 min_cost_micro, margin_bp, cooldown_secs, lift_secs}`，缺省关；worker 读取，状态在 Redis `mb:blocks`）、
@@ -601,12 +625,22 @@ min_cost_micro, margin_bp, cooldown_secs, lift_secs}`，缺省关；worker 读�
 最早的会话，刚建的这条永不被踢，IMPLEMENTATION §11.37）、
 `response_header_whitelist`（backlog 未启用）。
 
-### 1.8 M4 预留（概要，实施时出迁移）
+### 1.8 持久图片任务与 M4 预留
+
+`0006_image_tasks.sql` 已加入图片队列，具体接口、容量及恢复边界见 [图片契约](images-contract.md)：
+
+- `image_tasks`：用户/key 共同归属、请求 hash、幂等键 hash、有限大小的请求体、状态、执行租约、当前预扣 ID、结果元数据、错误、容量预算、到期时间和 `billing_pending` 恢复标记。轮询不读取输入或二进制图片；终态清除输入和来源 IP。
+- `image_task_attempts`：独立预扣 ID 到任务的映射，保留旧执行尝试，使过期预扣清扫可与结果事务锁定同一任务行。处理前中断的重新领取使用新 ID；已发送的未知结果不重发。
+- `image_task_artifacts`：任务下按图片索引保存的私有 `BYTEA` 和 MIME；删除任务级联清除图片与执行尝试。结果与 PG 账单/outbox 共用事务，Redis 结算单独幂等恢复；未完成恢复的记录不得被 TTL 清理。
+
+`0007_image_objects.sql` 增加可选的 S3 转存：`image_task_objects` 在任何远端写入前保存对象键、存储位置摘要、内容 SHA-256/字节数、版本、租约及重试状态，不保存存储凭证。确认上传后，在同一事务内把 artifact 改为对象引用并释放 `BYTEA`；失败期间仍可从 PG 下载。对象记录对任务采用非级联外键，远端删除成功后才清除引用，避免任务 TTL 提前丢失清理依据。幂等键释放与任务清理都跳过仍有对象记录的任务。S3 不改变已有逻辑容量预算，具体部署和故障边界见 [图片契约](images-contract.md)。
+
+以下仍为预留：
 
 - `teams(id, name, owner_id, balance_micro, settings)`；`team_members(team_id, user_id, role, limits)`——四件套同构。
 - ~~`plans(...)`；`user_subscriptions(...)`~~——已于 0004 兑现为 §1.6 的 `plans.kind=1` + `user_subscriptions`（remaining 不落 PG，热值在 Redis `bal.sub`，权威值为 pool=1 事件和）。
 - `notification_channels(kind: email|webhook|dingtalk|feishu|telegram, config)`；`notification_rules(event, channel_id, rate_limit)`——事件订阅矩阵（#1790-8）。
-- `tasks(id, request_id, user_id, api_key_id, kind: mj|suno|image_async|video, channel_id, upstream_task_id, status, payload, result_ref, billed_micro, created_at, updated_at)`——任务型异步中转（submit → worker 轮询/callback → 完成结算，复用 per_call/media 计费与 billing_events；IMPLEMENTATION §4.4）。
+- 通用 `tasks`：Midjourney / Suno / 供应商原生 Batch / callback 等任务适配。上述图片队列不等同于供应商任务状态轮询或原生批量处理。
 - 邀请返利：不加新表——充值返利记 `billing_events(event_type=adjust, payload.tags=["aff_rebate"], payload.source_order)`，邀请关系在 users.aff_code / inviter_id。
 
 ### 1.9 查询边界
@@ -619,13 +653,17 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 
 | 键 | 类型 | TTL | 说明 |
 | --- | --- | --- | --- |
-| `bal:{<uid>}` | HASH | 永久 | 余额热账本：`avail`（钱包）+ `sub` / `sub_until`（订阅池剩余 / 窗口截止 unix 秒，§11.28）+ 在途预扣字段 `r:<request_id>` |
+| `bal:{<uid>}` | HASH | 永久 | 余额热账本：`avail`（钱包）+ `sub` / `sub_until` / `sub_epoch`（订阅池剩余 / 截止秒 / 窗口身份）+ 同步预扣 `r:<request_id>` + 长期冻结 `h:<UUID>` |
+| `hold:{<uid>}:<UUID>` | STRING JSON | 永久 | 长期冻结/关闭凭证；不设 TTL，防止延迟重放再次扣款。PG 真理源为 `balance_holds`，尚未实现凭证 GC |
 | `rl:{<uid>}:k:<key_id>:rpm:<分钟桶>` / `:tpm:<分钟桶>` | STRING 计数 | 120s | key 级限速（限额四件套配置在 api_keys 行，键按 key 维度，多把 key 互不挤兑）。固定分钟窗计数，GCRA 滑窗为升级项；用户级汇总限速随 Team 层（M4）加第二层键 |
 | `rl:{<uid>}:k:<key_id>:rpd:<yyyymmdd>` | STRING | 48h | key 级每日请求数（RPD） |
+| `count:{<key_id>}:rpm:<分钟桶>` / `:rpd:<UTC日桶>` | STRING 计数 | 120s / 48h | Responses input_tokens 独立准入；RPM/RPD 取 key 正数配置，RPM 默认 60、RPD 默认不限；不写生成的余额/Token 计数。与 leases 使用相同 Cluster hash tag，Lua 原子校验后递增 |
+| `count:{<key_id>}:leases` | ZSET | 成员 90s / 键 120s | 计数在途租约，member 为请求 UUID；并发取 key 正数配置，否则 4。准入先删过期成员；正常返回或取得租约后的取消异步 ZREM。Redis 故障拒绝准入 |
 | `rl:{<uid>}:tokd:<key_id>:<yyyymmdd>` | STRING | 48h | key 日 token 上限计数 |
 | `rl:{<uid>}:m:<model>:rpm:<分钟桶>` | STRING 计数 | 120s | 用户×模型级 RPM（settings.model_rpm_limits；INCR 固定分钟窗，尽力语义，Redis 故障放行） |
 | `rl:{<uid>}:g:<group>:rpm:<分钟桶>` / `:rph:<小时桶>` | STRING 计数 | 120s / 7200s | 分组级限流（`price_groups.rpm_limit / rph_limit`，IMPLEMENTATION §11.32）：分组内**每用户**固定窗计数，全部计费端点在 reserve 前检查；超限 429 `rate_limited` param=group_rpm / group_rph；限额随鉴权缓存下发，未配置零往返 |
 | `ws:lease:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 6h 兜底 | Realtime WS per-key 连接租约：member=连接 id（request_id），score=到期毫秒；准入 Lua 先 ZREMRANGEBYSCORE 清过期再 ZCARD 比上限（settings.realtime_max_conns_per_key 缺省 4），崩溃连接不续期自然滚出（§14.4） |
+| `ws:responses:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 120s 兜底 | Responses WS 独立连接租约；member=连接 UUID，score=到期毫秒。准入/续期 Redis 故障拒绝连接，关闭后释放；默认每 key 4 个连接，与 Realtime 分开计数 |
 | `video:task:{<uid>}:<task_id>` | STRING | 48h | videos 异步任务 → channel_key_id 映射（轮询/下载回源锚点；键含 user_id 天然租户隔离，他人任务 404） |
 | `notify:mute:<idx>:<event>` | STRING | =min_interval_secs | 通知频率闸（SET NX；worker 事件 drift/channel_cooldown/balance_low/margin_breaker → settings.notify_channels webhook / email 分发，#1790-8） |
 | `mb:blocks` | HASH | 永久（字段按 `until` 由 worker 剪除） | 负毛利熔断状态（IMPLEMENTATION §11.34）：字段 `<group>\|<channel_id>` → JSON `{state: blocked\|lifted, since, until, requests, amount_micro, cost_micro, margin_bp}`。worker 每 5 分钟按 settings.margin_breaker 评估 CH mv_analysis_hour 写入；gateway 10s 进程缓存一次 HGETALL，`blocked` 且未到 `until` 的对从候选里摘掉（Redis 故障 = 不熔）；`lifted` 为管理员解除，期间评估器跳过该对；关闭功能时整键删除 |
@@ -635,11 +673,12 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |
 | `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
-| `conc:ck:<channel_key_id>` | STRING | 无（对账清理） | 渠道 key 在途并发信号量 |
+| `conc:ck:<channel_key_id>` | STRING | 1h 泄漏保护 | 渠道 key 在途并发信号量；生成和原生 Token 计数共用 |
+| `inflight:gauge` | HASH | 整键 1h；字段超过 10s 不计入、5min 清除 | 集群在途量（HTTP 请求与 Responses WS 活动轮次）：`node → <count>\|<unix_ms>`。HTTP 在启用 surge 规则时跟踪响应体；Responses WS 跟踪单轮准入至结算；活动期间每秒续报，零/非零切换及时上报，其余变化一秒采样。正常结束、报错、断开、取消均释放；每实例串行写入，节点名称须唯一。软实时计价输入，不用于严格并发限流 |
 | `rpm:ck:<channel_key_id>:<分钟桶>` | STRING 计数 | 120s | 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。固定分钟窗，与 `crl:*` 同机制；超限即把该 key 从候选里摘掉而非拒绝请求——同渠道其它 key 仍可承接 |
 | `spend:ck:<channel_key_id>:<yyyymmdd>` | STRING | 48h | 渠道 key 当日累计消费 micro（`channel_keys.daily_spend_cap_micro`）。结算后累加、选路前比较：软实时，宁可略超也不阻塞热路径 |
 | `lat:ck:<channel_key_id>` | STRING | 10min | 时延 EWMA（毫秒）。结算侧按 `new = old*0.7 + sample*0.3` 更新；`least_latency` 池按此升序。无数据的 key 视为中位数，避免新 key 因"无历史"被永久冷落或被优先灌流 |
-| `stick:resp:{<uid>}:v1:<response_id>` | STRING | 30min | 粘性 L1 → channel_key_id |
+| `stick:resp:{<uid>}:v2:<api_key_id>:<sha256(response_id)>` | STRING/JSON | 30 天固定 | Responses L1：渠道 ID、凭证 ID、上游账号摘要；按用户/API key 隔离，Lua 原子建立且不可改绑，读取不续期；读写故障均拒绝改投。详见 [历史路由](responses-history-routing.md) |
 | `stick:sess:{<uid>}:v1:<session_hash>` | STRING | 1h 滑动 | 粘性 L2 → channel_key_id |
 | `auth:key:<sha256>` | STRING(JSON) | 60s | 鉴权缓存（key 元数据+限额+可见组）。值内嵌写入时版本号 |
 | `auth:ver` | STRING | 永久 | 鉴权缓存全局版本：console 角色/分组变更 INCR 即 O(1) 跨进程失效；key 级精确失效走单键 DEL |
@@ -668,30 +707,39 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 
 **选池规则（IMPLEMENTATION §11.28）**：reserve 时 `sub > 0 且 now < sub_until` → 订阅池（不校验足额，允许单笔越界），否则钱包（`avail >= est` fail-closed）。同一请求只动一个池；commit/refund 按预扣字段的 pool 回到同一个池。订阅只改"谁付"，不改价——pricing_snapshot 与 DESIGN §3 公式对两池一致。
 
-精度约束：Lua number 为 double，余额比较的精度上限为 2^53 micro ≈ $90 亿；超出该量级的单账户余额视为配置错误（reserve.lua 内注释同此）。M1 实现细节：Lua 脚本经 EVAL 全量下发（EVALSHA/Script 缓存 M2）；KPI 计数已随 §11.12 实时看板落地（`kpi:*` 秒桶，写入在结算旁路 fire-and-forget）。
+精度约束：Lua number 为 double，普通预扣要求金额、Token、正限额、余额绝对值及计数递增后的结果不超过 2^53−1（金额约 $90 亿）。负数预扣、非规范整数、异常 Redis 类型和越界计数均在资金写入前拒绝；cap≤0 表示不限额，但仍须验证会递增的计数器。向 Redis 传递大金额与 Token 增量时保留十进制字符串。M1 实现细节：Lua 脚本经 EVAL 全量下发（EVALSHA/Script 缓存 M2）；KPI 计数已随 §11.12 实时看板落地（`kpi:*` 秒桶，写入在结算旁路 fire-and-forget）。
 
 ```text
 reserve ────────────────────────────────────────────────
-KEYS = bal:{uid}, rl:{uid}:rpm, rl:{uid}:tpm, rl:{uid}:rpd:<d>, conc:{uid}   （全部同槽）
+KEYS = bal:{uid}, rl:{uid}:k:<kid>:rpm:<minute>, rl:{uid}:k:<kid>:tpm:<minute>, rl:{uid}:k:<kid>:rpd:<YYYYMMDD>, conc:{uid}:k:<kid>   （全部同槽）
 ARGV = request_id, est_micro, deadline_ms, rpm_cap, tpm_cap, rpd_cap, conc_cap, est_tokens, api_key_id, now_unix_s
 返回 = {1, balance_after, pool}                    成功（已原子完成：限速+并发+预扣）；balance_after 为所选池的余额
        {0, "INSUFFICIENT", balance}                钱包余额不足（订阅池不可用或已耗尽时才到这一步）
        {0, "RATE_LIMITED", which}                  限速/并发超限（不产生任何写入）
-语义 = 检查全部通过后：选池（sub>0 且 now<sub_until → sub，否则 avail 且须 ≥ est）→ 池 -= est；
+       {0, "RESERVATION_EXISTS"}                  同 uid/request_id 的预扣记录已存在（零写入，Rust 返回 LedgerError::ReservationExists）
+       {0, "INVALID_RESERVATION"}                 预扣参数非法或越界，Rust 返回 LedgerError::InvalidReservation
+       {0, "ADMISSION_STATE_INVALID"}             计数/余额数据异常，Rust 返回 LedgerError::AdmissionStateInvalid
+语义 = 首先 HEXISTS 检查 r:<request_id>；存在即拒绝，不延长 deadline、不重新占槽或计限速，旧格式/异常记录同样保留；
+       其余检查全部通过后：选池（sub>0 且 now<sub_until → sub，否则 avail 且须 ≥ est）→ 池 -= est；
        HSET r:<request_id> = est|deadline|kid|pool；INCR 各计数器；INCR conc
 
 commit ────────────────────────────────────────────────
-KEYS = bal:{uid}, conc:{uid}
-ARGV = request_id, actual_micro
+KEYS = bal:{uid}, conc:{uid}:k:<kid>
+ARGV = request_id, actual_micro, api_key_id, expected_pool（可选；持久结算使用）
 返回 = {1, delta_micro, balance_after, pool}       delta = reserved − actual（正=退，负=补扣）；回到预扣所在池
        {0, "NO_RESERVATION"}                       调用方转对账路径（不直接改余额）
-语义 = 读 r:<request_id> → 池 += reserved − actual → HDEL → DECR conc；幂等：重复调用返回 NO_RESERVATION
+       {0, "INVALID_SETTLEMENT"}                  actual 非规范、负数或越界
+       {0, "RESERVATION_CONFLICT"}                api_key_id 或 expected_pool 与预扣凭证不同
+       {0, "SETTLEMENT_STATE_INVALID"}            凭证、余额、并发或计算结果非法
+语义 = 校验凭证、key、金额及全部将修改的状态 → 池 += reserved − actual → HDEL → conc>0 才 DECR；
+       幂等：重复调用返回 NO_RESERVATION；并发键已过期时不创建负计数
 
 refund ────────────────────────────────────────────────
-KEYS = bal:{uid}, conc:{uid}
-ARGV = request_id
+KEYS = bal:{uid}, conc:{uid}:k:<kid>
+ARGV = request_id, api_key_id
 返回 = {1, released_micro, balance_after, pool}    幂等：无预扣字段时返回 {1, 0, avail, 0}
-语义 = 全额释放回预扣所在池（上游失败/空回复不计费路径）
+       RESERVATION_CONFLICT / SETTLEMENT_STATE_INVALID 同 commit
+语义 = 与 commit 共用写入前校验，全额释放回预扣所在池（上游失败/空回复不计费路径）
 
 repair ────────────────────────────────────────────────
 KEYS = bal:{uid}
@@ -700,13 +748,51 @@ ARGV = target_micro, pool_field("avail"|"sub")
 
 sub_set ───────────────────────────────────────────────
 KEYS = bal:{uid}
-ARGV = quota_micro, sub_until_unix_s
-返回 = {prev_sub, new_sub}                         new_sub = quota + Σ在途(pool=1)：老窗口在途请求结算时不吃新窗额度；
-                                                   激活 / 滚窗 / 到期（quota=0, until=0）同一脚本；调用方据 new−prev 记 pool=1 事件
+ARGV = quota_micro, sub_until_unix_s, sub_epoch（旧调用默认空字符串）
+返回 = {prev_sub, new_sub}                         new_sub = quota + Σ同步 r:* 在途(pool=1)：长期 h:* 不加进新窗配额；
+                                                   旧低层直接调用契约；生产订阅变更已改用 PG 事件与持久恢复（见下文）
+语义 = quota/deadline 非负；全部 r:* 格式、累加及新余额先校验，失败不改订阅额度、截止时间或窗口标识；
+       金额写入和返回使用精确十进制字符串，不使用可能转成科学计数法的 tostring(number)
 ```
 
 - KPI 与 `ch:stat` 更新不在 Lua 内（跨槽），走同连接 pipeline fire-and-forget——**账本原子、统计尽力**，统计口径最终以 CH 对账为准。
+- `RESERVATION_EXISTS` 保护的是尚未终结的同步预扣，包括过期但尚待对账回收的记录；重复调用不会获得再次调用上游的许可。调用方需保留同一请求的执行状态，不能捕获该错误后改用新 UUID 重试生成。终态释放后同步脚本不保存 tombstone，request_id 仍必须全链路唯一；长期批任务使用下述独立冻结记录，仍须保存远端执行状态。
+- Redis Lua 运行时错误不会撤销先前写入。普通预扣先验证四个会修改的计数器，再检查限额与选池；类型、规范整数或范围异常不会留下扣款、预扣凭证、计数增量或新 TTL。异常数据不自动清零，账本错误仍返回既有 HTTP 500 `internal_error`，不会被当作正常 429。这里的保证针对已校验的数据异常，不替代 Redis 断连/执行确认丢失时的原有对账机制，也不将脚本外的模型/分组限流纳入资金原子事务。
+- 普通结算/退款在改钱、删除 r:* 之前验证所选余额、并发键及结果的 2^53−1 安全整数界限。凭证只接受完整的两段旧格式（key=0、pool=0）、三段旧格式（pool=0）或四段格式；空字段、未知 pool 和非法整数均拒绝，不猜测成钱包。key 作为规范十进制字符串比较，支持完整非负 PG bigint 身份，不受 Lua 浮点截断影响。
+- 无凭证退款的 pool=0 是既有幂等返回约定，不代表原请求由钱包支付。Chat、Embeddings/Rerank 和 Realtime 保留 reserve 返回的池，用于退款错误或零释放结果时的失败账单归属；重复退款不得额外入账。普通成功请求现先在 PG 保存账单与待同步记录，再关闭 Redis 预扣，详见下文；该保证从 PG 提交成功后生效。`repair` 的异常数据/大整数边界也未包含在本次关闭路径修复中。
 - `conc:ck:*` acquire/release 为独立单键操作（与用户槽无关）。
+
+普通持久结算由 `0016_billing_sync.sql` 新增 `billing_sync`：request_id 主键、用户/key、实际 micro 金额、预扣池与创建时间。成功账单、用量、事件、用户/key 累计、outbox 与待同步行同事务提交；PG 失败不关闭 Redis，Redis 失败保留待同步记录。worker 在过期清理之前恢复，且共用用户锁，防止订阅滚窗/余额修复与待同步实际费用交错。Redis 凭证已不存在时，根据 PG 事件重建两池，保留其他活跃预扣和长期冻结，不猜测再次扣款。管理员退款持有同一用户锁并先恢复待同步结算，恢复失败则拒绝继续。普通成功事件的 `balance_after_micro` 为 NULL，不能在 Redis 同步之前伪造同步后余额。见 [普通持久结算契约](synchronous-settlements.md)。
+
+钱包入账与管理员退款由 `0017_fund_transfers.sql` 新增 `fund_transfers`：操作 UUID、用户、金额、来源池、创建/应用/清理时间。钱包订单 paid / 兑换码使用状态、账本事件、用户快照与待入账意图同一 PG 事务；退款状态、事件/用量回冲和待入账意图同事务。Redis `fund_transfer.lua` 在 `bal:{uid}` 内原子写入金额和 `c:<operation_id>` 凭据（`avail|<delta>` 或 `sub|<delta>`），先验规范整数和 ±(2^53−1) 界限。重复同凭据只确认；冲突/异常金额拒绝且不写。PG 记录 applied_at 后才删除 Redis 凭据，PG cleaned_at 让中断清理可重试。0018 为操作增加 sequence；Redis fund_seq 与余额同一次 HSET 写入且不随凭据清理，旧序号的迟到 EVAL 不重复追加。序号按规范十进制字符串比较，支持完整 PG bigint。余额重建与全部已接受操作的最高序号一次写入，包含已清理操作；fund_seq 不得单独删除或过期。worker 在过期预扣前恢复未完成资金。待应用的 HTTP 受理结果包含 `pending:true`、操作 ID 与空 balance_after_micro；不把数据库快照冒充当前可用余额。正常返回保留原余额数值。见 [钱包入账与退款持久恢复](durable-fund-transfers.md) 的范围与剩余边界。
+
+管理充值、MCP 调整、兑换、支付/返利、注册赠送、单用户引导与迁移现通过 `ledger::operations` 入账，与普通结算恢复、订阅变更和对账修复共用用户锁。PG 事件和用户快照事务先校验再触碰 Redis；用户更新 0 行视为不存在，回滚事件并返回 `not_found`，不创建无归属余额。按日志退款的锁覆盖 PG 幂等翻转和原池 Redis 回补；余额到期在锁内重读有效期并锁住用户行。用户锁本身不是跨存储原子提交；钱包订单/核销、管理员退款及订阅发放已使用本节的 PG 持久意图补偿。邀请奖励/注册业务状态到入账意图的衔接、钱包到期清理与 PG 事件之间的间隙仍需专项验证，不能据这些锁或队列宣称全部业务原子化。
+
+长期冻结由 `0008_balance_holds.sql`、`0009_balance_hold_cancellation.sql` 的 `balance_holds` 表记录：UUID、用户/key、模型/请求摘要、最大金额/价格快照、pending/held/closing/closed、来源池/订阅窗口、实际金额/退款额/结算凭证、取消标记。未关闭记录每用户最多 128 条；价格与金额来源在确认后不可变。完整算法、取消与恢复边界见 [长期冻结契约](durable-balance-holds.md)。
+
+原生图片批任务由 `0010_image_batches.sql` 增加四表：`image_batches` 保存归属、固定渠道账号与价格、提交意图/远端身份、租约及状态；`image_batch_payloads` 独立保存私有输入/连接快照/上传会话；`image_batch_items` 保存调用方条目 ID；`image_batch_outputs` 预分配每张图片的唯一输出槽位。单任务最多 200 条目/200 输出、每条目 1–4 输出，输入 128 MiB、每图 16 MiB；原子容量准入为全部输出预留预算。元数据列表用服务端游标分页，大小 1–100；图片仅在同用户/key、结算关闭、终态且未过期时可读取。创建事务同时写入 pending balance_hold，独立 key 预算包含全部未关闭资金意图。公开路由默认每页 20 条，创建由 image_batches_enabled 控制且默认关闭。七天期限和逻辑删除立即限制读取，并触发后台回收，见 [批任务存储契约](native-image-batch-jobs.md)。
+
+`0011_image_batch_recovery.sql` 增加私有分页检查点表 `image_batch_recovery`，以 batch_id 为唯一归属保存候选、下一页、页数、游标摘要、完成/冲突标志。每次变更和恢复接管都核对当前执行租约和 uncertain 状态；完整扫描、唯一候选与详情身份核对才能记录远端任务。列表未找到或详情 404 不关闭资金冻结。重扫不删除已有候选或冲突，避免忘掉重复任务证据。
+
+`0012_image_batch_cleanup.sql` 增加 `image_batch_cleanup`，保存终态任务的远端删除检查点与独立重试错误。清理租约必须满足已删除/到期及匹配的 closed hold；远端 job 和文件清理完成后，事务删除私有 payload、条目/图片、恢复与清理检查点，将 cleanup_done 置真并把存储预算降为每任务 512 KiB。产物任务数限额排除已清理记录，字节预算继续计算保留元数据。账单、资金凭证、请求/幂等身份不删除，原幂等键不能被用来再次生成。
+
+| Lua | 同槽 keys | 参数与结果 | 资金语义 |
+| --- | --- | --- | --- |
+| `hold_reserve` | `bal:{uid}`、`hold:{uid}:UUID` | UUID、最大金额、key、摘要、时间、可选 PG 窗口；返回凭证或固定错误 JSON | 必须已有 PG pending；原子扣可用余额并保存两份 held 凭证；相同凭证重放不扣款 |
+| `hold_seal` | 同上 | UUID、最大金额、key、摘要；返回已有 held 或零退款 closed 凭证 | PG 先标记 pending 取消；未扣款则写永久拦截凭证，已扣款则交给结算退回，不直接退款 |
+| `hold_close` | 同上 | UUID、已提交 PG 的关闭凭证；返回同一凭证 | 退还固定 credit，删除活跃 h:*，保留关闭凭证；重复不动钱，来源窗口不符拒绝 |
+| `hold_repair` | 余额与该用户各 hold key | 两池事件总额、PG 清单、窗口、待资金操作、最高序号、预期余额 hash 指纹；返回 wallet/sub 的 before/after/inflight（整数字符串） | 指纹不一致返回 recovery_required 且不写；全部校验后重建两池与持久凭证，保留同步 r:*，拒绝未知/矛盾冻结 |
+
+worker 对账计算两池的 `可用 + r:* + h:*`，清扫 deadline 只处理 r:*。worker 修复在用户锁内读取事件总额并使用 `hold_repair`；旧的单池 `repair` 也会扣除本池活跃 h:*，但不能恢复已丢失的持久凭证，不应作为长期冻结的完整修复入口。hold 结算共用原有 PG 账单/四金额/outbox，reserve 审计 delta 为零；跨订阅窗口的未用冻结额使用已有 `sub_expire` 事件，不新增事件类型或改变消费统计公式。
+
+
+`0019_billing_retention.sql` 新增历史事件结转、历史财务凭证，以及 `billing_balance_totals` / `billing_actor_totals` / `billing_financial_records` 三个视图。财务真理源是当前记录与结转的合计；对账、余额修复、缺失凭据恢复、导入防重、历史退款及累计邀请奖励均读取合并历史。分区结转与 DROP 原子提交，财务读事务共享锁与清理排他锁互斥，财务凭证 ID 冲突或依赖对象导致该分区清理回滚。只清理真实归属和实际月边界均匹配的分区，不使用 CASCADE。保留期内明细接口与 CH TTL 保持独立。详细约束及无法恢复此前已删数据的边界见 [历史账本结转](billing-retention.md)。
+
+`0020_subscription_snapshots.sql` 固定购买订单、兑换码和实例的套餐条款，实例取消/滚窗不再读取当前目录的周期或分组。`0021_subscription_grants.sql` 保存唯一 `(user_id,source)` 的持久发放回执；paid/核销状态与发放意图同事务，兑现时订阅、分组、财务事件、回执与 `subscription_sync` 标记同事务。受理后余额不可用返回 pending，不伪造可用额度；worker 按用户顺序每次至多处理 32 条。管理员发放支持 Idempotency-Key，门户/管理接口的待发放列表固定每页 20 条、游标分页。迁移对旧条款仅能使用升级时的配置，旧已付/已核销遗留权益不自动重放，见 [订阅持久发放契约](durable-subscriptions.md)。
+
+生产订阅激活/滚窗/结束先在用户锁内完成未结算同步，再按 `新配额 + 活跃冻结额` 计算 PG 第二池目标，以与完整历史总额的差值记事件。Redis 从当前权威两池总额扣除活跃冻结重建可用额；PG 已确认的长期冻结即使 hash 丢失也保留。`hold_repair` 的 ARGV 第 8 项是读取清单前取得的完整余额 hash 指纹，Lua 写入前校验，避免迟到修复覆盖新的扣费/预扣/入账。新的订阅财务事件不提前猜测 `balance_after_micro`，使用 NULL；没有新增事件类型或变更消费四金额公式。
+
+`0022_subscription_retry.sql` 为订阅实例添加 `maintenance_retry_after`，为 `subscription_grants`、`subscription_sync` 添加 `retry_after`，均为 nullable timestamp，升级时不改变已有任务的可选状态。worker 在用户锁内重读到期/窗口，单用户故障延期 60 秒并继续本批其他用户。延期核对旧实例边界，已完成的续期或滚窗不会被旧扫描误取消/反复注资；结束订阅会解除待发放来源的退避。原币报价以 i128 中间值精确换算并在写入前检查 NUMERIC(12,2) 的上限，见 [订阅持久发放契约](durable-subscriptions.md)。
 
 ### 2.3 PriceBook 与鉴权缓存失效
 
@@ -969,3 +1055,9 @@ DECIMAL 列建议 `::text` 保精度）。
 - **幂等锚点**：request_id 全链路唯一；commit/refund Lua 幂等；CH 批次 dedup token；outbox 重投靠 `billing_records.status` 状态机去重。
 - **在途预扣泄漏**：reconciler 扫 `bal:{uid}` 中超过 deadline 的 `r:*` 字段 → 按 billing_records 终态决定 commit 或 refund 补偿。
 - 余额快照列 `users.balance_micro` 由 worker 周期从事件流重放校准（展示与导出用，不参与计费判定）。
+
+
+`0013_image_batch_downloads.sql` 增加 `image_batch_downloads(id UUID PK, batch_id UUID FK, expires_at TIMESTAMPTZ)`，并对 `(batch_id, expires_at)` 建索引。ZIP GET 在锁定批任务、复核归属/终态/到期及清理状态后签发 600 秒租约，每个任务最多 16 个有效租约；HEAD 不签发。逐张内容查询必须带有效租约，流不持有长期事务。清理领取排除有效下载租约，且拿到批任务行锁后再次检查；已获授权的传输可在用户删除/任务到期后完成，新的下载立即拒绝。响应体结束/取消释放租约，进程异常等待到期；下一次下载或最终产物清理删除陈旧记录。列表筛选在 SQL LIMIT 前执行，名称为字面子串，时间为左闭右开，downloaded 根据首次下载尝试判断；同归属已删除的游标仍能用于继续分页。
+
+
+`0014_image_batch_statistics.sql` 增加创建时成员归属与 results_ready_at，以及独立 image_batch_statistics 投递表。公开终态与统计意图同事务，金额/Token 取已关闭凭据、recorded_at 取首次账单时间；租约 120 秒，失败 30 秒后重试。Redis 成员/月用量/渠道消费/KPI 每项具有同槽去重凭据和原时间桶，统计失败不重复结算。清理图片保留此投递记录；成员快照不从当前 key 回填历史。详细边界见 [统计补记与软限额](native-image-batch-jobs.md#统计补记与软限额)。

@@ -1,405 +1,179 @@
-import { useInfiniteQuery } from '@tanstack/react-query'
-import dayjs from 'dayjs'
-import { ChevronRight, Download, FileText, RotateCw, Search } from 'lucide-react'
-import { Fragment, useState } from 'react'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import { getRouteApi } from '@tanstack/react-router'
+import { CircleHelp, Download, FileText, RotateCw, Search } from 'lucide-react'
+import { useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { CopyText } from '@/components/ui/copy-button'
-import { Label } from '@/components/ui/input'
+import { DateRangePicker } from '@/components/ui/date-range'
+import type { DateRange } from '@/components/ui/date-range'
+import { Input } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
-import { SearchInput } from '@/components/ui/search-input'
-import { Segmented } from '@/components/ui/segmented'
+import { RowExpander } from '@/components/ui/row-expander'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Switch } from '@/components/ui/switch'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { Tooltip } from '@/components/ui/tooltip'
+import { UsageScope } from '@/components/usage-scope'
+import { PublicModelSearchInput } from '@/features/models/model-input'
+import { useUsageScope } from '@/hooks/use-usage-scope'
 import { apiFetch } from '@/lib/api'
+import { todayInTimezone } from '@/lib/calendar-range'
 import { downloadCsv, microToUsd } from '@/lib/csv'
 import { describeError } from '@/lib/i18n'
-import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
-import { cn } from '@/lib/utils'
-
-interface AppliedRule {
-  code: string
-  kind: string
-  multiplier: string
-}
-
-interface Snapshot {
-  mode: string
-  model_ratio: string | null
-  completion_ratio: string | null
-  cache_ratio: string | null
-  group: string
-  group_ratio: string
-  user_multiplier: string
-  rules: AppliedRule[]
-}
-
-interface LogRow {
-  id: number
-  request_id: string
-  model: string
-  log_type: number
-  status: number
-  api_key_id: number | null
-  key_name: string
-  usage: {
-    prompt_tokens: number
-    cached_tokens: number
-    completion_tokens: number
-    reasoning_tokens: number
-  }
-  amount_micro: number
-  original_amount_micro: number
-  discount_micro: number
-  pricing_snapshot: Snapshot | null
-  error_code: string | null
-  latency_ms: number | null
-  ttft_ms: number | null
-  is_stream: boolean
-  created_at: string
-}
-
-interface LogsResp {
-  scope: string
-  data: LogRow[]
-  next_before: number | null
-}
-
-type Scope = 'key' | 'user'
+import { LogDetail, LogStatus } from './LogDetail'
+import { LogSummary } from './LogSummary'
+import { LogTokenUsage } from './LogTokenUsage'
+import { PortalKeyFilter } from './PortalKeyFilter'
+import { billingStatus, cacheRead, cacheWrite, duration, logMoney, netAmount } from './types'
+import type { LogRow, LogsResp, LogStats } from './types'
 
 interface Filter {
-  scope: Scope
+  scope: 'key' | 'user'
   model: string
   errorsOnly: boolean
+  keyId: string
+  requestId: string
+  range: DateRange | null
+  timezone: string
 }
-
 const PAGE = 50
+const routeApi = getRouteApi('/portal/logs')
+const validKey = (value: string) => value.trim() === '' || (/^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0)
+const validRequest = (value: string) => value.trim() === '' || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim())
 
 function params(f: Filter, before: number | null): string {
-  const p = new URLSearchParams()
-  p.set('limit', String(PAGE))
-  p.set('scope', f.scope)
+  const p = new URLSearchParams({ limit: String(PAGE), scope: f.scope })
   if (f.model.trim()) p.set('model', f.model.trim())
   if (f.errorsOnly) p.set('errors_only', 'true')
+  if (f.scope === 'user' && f.keyId) p.set('api_key_id', f.keyId)
+  if (f.requestId.trim()) p.set('request_id', f.requestId.trim())
+  if (f.range) {
+    p.set('start_date', f.range.start)
+    p.set('end_date', f.range.end)
+    p.set('timezone', f.timezone)
+  }
   if (before !== null) p.set('before', String(before))
   return p.toString()
 }
 
-/// 用户用量日志（对齐 new-api 用户日志页：按令牌/模型过滤、翻页、首字耗时）。
-///
-/// 与管理端日志页的分工：那边看渠道/重试/节点（排障），这边看**账**——
-/// 每行可展开账单解释器；数据源是 PG 账本（billing_records）而非 CH 明细，
-/// 因为用户对账要的是"扣了多少钱、为什么"，账本是唯一权威。
-/// 缺省 `scope=key`：合作商员工只见自己那把 key 的记录，与总览页同一开关。
 export function LogsPage() {
   const { t } = useTranslation()
-  const [draft, setDraft] = useState<Filter>({ scope: 'key', model: '', errorsOnly: false })
-  const [applied, setApplied] = useState<Filter>(draft)
-
-  const commit = (next: Filter) => {
-    setDraft(next)
-    setApplied(next)
+  const search = routeApi.useSearch(), navigate = routeApi.useNavigate()
+  const usageScope = useUsageScope(search.scope)
+  const applied: Filter = {
+    scope: usageScope.scope, model: search.model ?? '', errorsOnly: search.errors_only === true,
+    keyId: usageScope.scope === 'user' && search.api_key_id ? String(search.api_key_id) : '',
+    requestId: search.request_id ?? '',
+    range: search.start_date && search.end_date ? { start: search.start_date, end: search.end_date } : null,
+    timezone: search.timezone ?? 'UTC',
   }
-
-  return (
-    <div className="flex flex-col gap-4">
-      <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} icon={FileText} />
-      <Toolbar
-        filters={
-          <>
-            <div className="flex items-center gap-2">
-              <Label>{t('portal:logsScope')}</Label>
-              <Segmented
-                size="sm"
-                value={draft.scope}
-                onChange={(s) => commit({ ...draft, scope: s })}
-                options={[
-                  { value: 'key', label: t('portal:scopeKey') },
-                  { value: 'user', label: t('portal:scopeUser') },
-                ]}
-              />
-            </div>
-            <SearchInput
-              className="w-56"
-              value={draft.model}
-              placeholder={t('portal:logsModelHint')}
-              onChange={(v) => setDraft({ ...draft, model: v })}
-              onSubmit={() => setApplied(draft)}
-            />
-            <Switch
-              checked={draft.errorsOnly}
-              onChange={(v) => commit({ ...draft, errorsOnly: v })}
-              label={t('admin:logsErrorsOnly')}
-            />
-          </>
-        }
-        selection={
-          <Button size="sm" onClick={() => setApplied(draft)}>
-            <Search className="h-3.5 w-3.5" />
-            {t('common:search')}
-          </Button>
-        }
-      />
-      <LogList filter={applied} />
-    </div>
-  )
+  const [draft, setDraft] = useState<Filter>(applied)
+  const appliedKey = JSON.stringify(applied)
+  useEffect(() => { setDraft(JSON.parse(appliedKey) as Filter) }, [appliedKey])
+  const valid = validKey(draft.keyId) && validRequest(draft.requestId)
+  const commit = (next: Filter) => {
+    if (!validKey(next.keyId) || !validRequest(next.requestId)) return
+    usageScope.setScope(next.scope)
+    setDraft(next)
+    void navigate({ search: {
+      scope: next.scope, model: next.model.trim() || undefined, errors_only: next.errorsOnly ? true : undefined,
+      api_key_id: next.scope === 'user' && next.keyId ? Number(next.keyId) : undefined,
+      request_id: next.requestId.trim() || undefined,
+      start_date: next.range?.start, end_date: next.range?.end, timezone: next.range ? next.timezone : undefined,
+    } })
+  }
+  return <div className="list-page">
+    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} icon={FileText} />
+    <Toolbar className="max-sm:[&>div:first-child]:basis-full max-sm:[&>div:last-child]:w-full max-sm:[&>div:last-child]:justify-end" filters={<>
+      <UsageScope {...usageScope} scope={applied.scope} onChange={(scope) => commit({ ...applied, scope, keyId: '' })} />
+      <PublicModelSearchInput className="w-full sm:w-80" inputClassName="h-11 md:h-9" aria-label={t('pricing:model')}
+        value={draft.model} placeholder={t('portal:logsModelHint')} onChange={(model) => setDraft({ ...draft, model })}
+        onChoose={(model) => commit({ ...draft, model })} onSubmit={() => commit(draft)} />
+      <Switch checked={draft.errorsOnly} onChange={(errorsOnly) => commit({ ...applied, errorsOnly })} label={t('admin:logsErrorsOnly')} />
+    </>} selection={<Button size="sm" disabled={!valid} onClick={() => commit(draft)}><Search className="h-3.5 w-3.5" />{t('common:search')}</Button>} />
+    <section aria-label={t('charts:period')} className="flex min-w-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card px-3 py-2">
+      <DateRangePicker today={todayInTimezone(applied.timezone)} value={applied.range} onApply={(range) => commit({ ...applied, range })} />
+      {applied.range && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, range: null })}>{t('portal:logsClearDates')}</Button>}
+      {applied.scope === 'user' && <PortalKeyFilter value={draft.keyId} onChange={(keyId) => setDraft({ ...draft, keyId })} onChoose={(keyId) => commit({ ...draft, keyId })} onSubmit={() => commit(draft)} />}
+      <Input className="w-full font-mono sm:w-96" aria-label={t('admin:logsRequestId')} placeholder={t('logs:requestFilterHint')} value={draft.requestId}
+        maxLength={36} aria-invalid={!validRequest(draft.requestId)} onChange={(e) => setDraft({ ...draft, requestId: e.target.value })}
+        onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) commit(draft) }} />
+      {(applied.requestId || applied.keyId) && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, requestId: '', keyId: '' })}>{t('logs:clearLookup')}</Button>}
+      <p className="min-w-0 basis-full break-words text-xs text-muted-foreground">{!valid ? t('logs:invalidLookup') : <>{applied.range ? t('portal:logsDateTimezone', { timezone: applied.timezone }) : t('portal:logsAllDates')} · {t('logs:displayTimezone', { timezone: applied.timezone })}</>}</p>
+    </section>
+    {usageScope.ready ? <LogList filter={applied} /> : <TableSkeleton dense rows={8} cols={applied.scope === 'user' ? 8 : 7} />}
+  </div>
 }
 
 function LogList({ filter }: { filter: Filter }) {
-  const { t, i18n } = useTranslation()
-  const locale = i18n.language
-  const [expanded, setExpanded] = useState<number | null>(null)
-
-  // 游标翻页（id 倒序 + before）：账本按 id 单调，游标比 offset 稳——
-  // 翻页期间新进的记录不会让后一页和前一页重叠。
+  const { t, i18n } = useTranslation(), locale = i18n.language
+  const [selected, setSelected] = useState<number | null>(null)
+  const detailId = useId(), filterKey = params(filter, null)
+  useEffect(() => { setSelected(null) }, [filterKey])
   const q = useInfiniteQuery({
-    queryKey: qk.logs(params(filter, null)),
+    queryKey: qk.logs(filterKey),
     queryFn: ({ pageParam }) => apiFetch<LogsResp>(`/api/me/logs?${params(filter, pageParam)}`),
     initialPageParam: null as number | null,
-    getNextPageParam: (last) => (last.data.length < PAGE ? null : last.next_before),
+    getNextPageParam: (last) => last.next_before,
   })
-
-  if (q.isError) {
-    return <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
-  }
-  if (q.isPending) {
-    return <TableSkeleton rows={8} cols={6} />
-  }
-  const rows = q.data.pages.flatMap((p) => p.data)
+  const stats = useQuery({
+    queryKey: ['portal-logs-stat', filterKey],
+    queryFn: () => apiFetch<LogStats>(`/api/me/logs/stat?${filterKey}`),
+    retry: false,
+  })
+  const rows = q.data?.pages.flatMap((p) => p.data) ?? []
   const showKey = filter.scope === 'user'
-
-  return (
-    <div className="flex flex-col gap-3">
+  return <>
+    <LogSummary data={stats.data} loading={stats.isPending} error={stats.isError} onRetry={() => void stats.refetch()} />
+    <div className="list-page-section">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs text-muted-foreground">
-          {t('portal:logsLoaded', { n: rows.length })}
-        </span>
+        <span className="text-xs text-muted-foreground">{stats.data?.records != null ? t('logs:loadedOf', { n: rows.length, total: stats.data.records }) : t('portal:logsLoaded', { n: rows.length })}</span>
         <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={rows.length === 0}
-            onClick={() => exportCsv(rows, showKey)}
-          >
-            <Download className="h-3.5 w-3.5" />
-            {t('portal:logsExport')}
+          <Button size="sm" variant="outline" disabled={!rows.length} onClick={() => exportCsv(rows, showKey)} title={t('logs:exportHint', { n: rows.length })}>
+            <Download className="h-3.5 w-3.5" />{t('logs:exportLoaded')}
           </Button>
-          <Button size="sm" variant="outline" loading={q.isRefetching} onClick={() => void q.refetch()}>
-            {!q.isRefetching && <RotateCw className="h-3.5 w-3.5" />}
-            {t('common:refresh')}
+          <Button size="sm" variant="outline" loading={q.isRefetching || stats.isRefetching} onClick={() => { void q.refetch(); void stats.refetch() }}>
+            {!q.isRefetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
           </Button>
         </div>
       </div>
-      {rows.length === 0 ? (
-        <EmptyState hint={t('portal:emptyUsageHint')} />
-      ) : (
-        <Table dense stickyHeader>
-          <THead>
-            <Tr>
-              <Th className="w-6" />
-              <Th>{t('logs:time')}</Th>
-              <Th>{t('common:status')}</Th>
-              {showKey && <Th>{t('portal:keys')}</Th>}
-              <Th>{t('pricing:model')}</Th>
-              <Th numeric>{t('logs:tokens')}</Th>
-              <Th numeric>{t('common:amount')}</Th>
-              <Th numeric>{t('admin:logsLatencyTtft')}</Th>
-            </Tr>
-          </THead>
-          <TBody>
-            {rows.map((r) => {
-              const open = expanded === r.id
-              return (
-                <Fragment key={r.id}>
-                  <Tr
-                    className="cursor-pointer"
-                    selected={open}
-                    aria-expanded={open}
-                    onClick={() => setExpanded(open ? null : r.id)}
-                  >
-                    <Td className="pr-0 text-muted-foreground">
-                      <ChevronRight
-                        className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-90')}
-                      />
-                    </Td>
-                    <Td className="whitespace-nowrap text-xs tabular-nums text-muted-foreground">
-                      {dayjs(r.created_at).format('MM-DD HH:mm:ss')}
-                    </Td>
-                    <Td>
-                      <Badge dot variant={r.status === 20 ? 'success' : 'destructive'}>
-                        {r.status === 20 ? t('logs:ok') : (r.error_code ?? t('logs:failed'))}
-                      </Badge>
-                    </Td>
-                    {showKey && (
-                      <Td className="max-w-28 truncate text-xs">
-                        {r.key_name || (r.api_key_id !== null ? `#${r.api_key_id}` : '—')}
-                      </Td>
-                    )}
-                    <Td className="whitespace-nowrap font-mono text-xs">{r.model}</Td>
-                    <Td numeric className="whitespace-nowrap text-xs">
-                      {r.usage.prompt_tokens}
-                      {r.usage.cached_tokens > 0 && (
-                        <span className="text-muted-foreground">
-                          ({t('logs:cachedShort', { n: r.usage.cached_tokens })})
-                        </span>
-                      )}
-                      {' + '}
-                      {r.usage.completion_tokens}
-                    </Td>
-                    <Td numeric className="font-medium">
-                      {formatMoney(r.amount_micro, locale)}
-                    </Td>
-                    <Td numeric className="whitespace-nowrap font-mono text-xs">
-                      {r.latency_ms === null ? (
-                        '—'
-                      ) : (
-                        <>
-                          {r.latency_ms}
-                          {r.is_stream && r.ttft_ms !== null && (
-                            <span className="text-muted-foreground"> / {r.ttft_ms}</span>
-                          )}
-                          ms
-                        </>
-                      )}
-                    </Td>
-                  </Tr>
-                  {open && (
-                    <Tr className="hover:bg-transparent">
-                      <Td colSpan={showKey ? 8 : 7} className="bg-muted/30 p-0">
-                        <BillExplainer row={r} locale={locale} />
-                      </Td>
-                    </Tr>
-                  )}
-                </Fragment>
-              )
-            })}
-          </TBody>
-        </Table>
-      )}
-      {q.hasNextPage && (
-        <Button
-          variant="outline"
-          className="self-center"
-          disabled={q.isFetchingNextPage}
-          onClick={() => void q.fetchNextPage()}
-        >
-          {q.isFetchingNextPage ? t('common:loading') : t('portal:logsLoadMore')}
-        </Button>
-      )}
+      {q.isError ? <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /> : q.isPending ? <TableSkeleton dense rows={8} cols={showKey ? 8 : 7} /> : !rows.length ? <EmptyState hint={t('portal:emptyUsageHint')} /> :
+        <Table dense stickyHeader scrollResetKey={filterKey} aria-label={t('logs:title')}>
+          <THead><Tr><Th className="w-6" /><Th>{t('logs:time')}</Th><Th>{t('logs:billingState')}</Th>{showKey && <Th>{t('portal:keys')}</Th>}
+            <Th>{t('pricing:model')}</Th><Th numeric>
+              <Tooltip content={t('logs:tokenUsageHint')}>
+                <button type="button" aria-label={t('logs:tokenUsageHelp')} className="inline-flex h-6 items-center gap-1.5 rounded outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40">
+                  {t('logs:tokenUsage')}<CircleHelp aria-hidden className="h-3.5 w-3.5" />
+                </button>
+              </Tooltip>
+            </Th><Th numeric>{t('logs:netSpend')}</Th><Th numeric>{t('logs:performance')}</Th>
+          </Tr></THead>
+          <TBody>{rows.map((row) => <Tr key={row.id} className="cursor-pointer" selected={selected === row.id} onClick={() => setSelected(row.id)}>
+            <Td className="px-1"><RowExpander open={selected === row.id} name={row.request_id} controls={detailId} onToggle={() => setSelected(row.id)} /></Td>
+            <Td className="whitespace-nowrap tabular-nums text-muted-foreground" title={new Date(row.created_at).toLocaleString(locale, { timeZone: filter.timezone })}>{new Date(row.created_at).toLocaleString(locale, { timeZone: filter.timezone, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })}</Td>
+            <Td><LogStatus row={row} /></Td>
+            {showKey && <Td className="max-w-28 truncate" title={row.key_name || undefined}>{row.key_name || (row.api_key_id !== null ? `#${row.api_key_id}` : '—')}</Td>}
+            <Td className="max-w-52 truncate font-mono" title={row.model}>{row.model}</Td>
+            <Td numeric className="py-1"><LogTokenUsage row={row} /></Td>
+            <Td numeric className="font-medium">{logMoney(netAmount(row), locale)}</Td>
+            <Td numeric className="py-1"><div className="text-xs leading-4"><span className="mr-2 text-muted-foreground">{t('logs:ttft')}</span>{row.is_stream ? duration(row.ttft_ms, locale) : t('logs:nonStreaming')}</div><div className="text-xs leading-4"><span className="mr-2 text-muted-foreground">{t('logs:totalShort')}</span>{duration(row.latency_ms, locale)}</div></Td>
+          </Tr>)}</TBody>
+        </Table>}
+      {q.hasNextPage && <Button variant="outline" className="self-center" disabled={q.isFetchingNextPage} onClick={() => void q.fetchNextPage()}>{t(q.isFetchingNextPage ? 'common:loading' : 'portal:logsLoadMore')}</Button>}
     </div>
-  )
+    <LogDetail row={rows.find((row) => row.id === selected) ?? null} onClose={() => setSelected(null)} id={detailId} timezone={filter.timezone} />
+  </>
 }
 
-/// 导出已加载的行：合作商给员工分摊账单、财务对账，要的都是"拿到表格"。
 function exportCsv(rows: LogRow[], withKey: boolean) {
-  downloadCsv(
-    'okapi-usage',
-    [
-      'time',
-      'status',
-      ...(withKey ? ['key'] : []),
-      'model',
-      'prompt_tokens',
-      'cached_tokens',
-      'completion_tokens',
-      'reasoning_tokens',
-      'amount_usd',
-      'original_usd',
-      'discount_usd',
-      'latency_ms',
-      'ttft_ms',
-      'request_id',
-    ],
-    rows.map((r) => [
-      r.created_at,
-      r.status === 20 ? 'ok' : (r.error_code ?? 'failed'),
-      ...(withKey ? [r.key_name || r.api_key_id] : []),
-      r.model,
-      r.usage.prompt_tokens,
-      r.usage.cached_tokens,
-      r.usage.completion_tokens,
-      r.usage.reasoning_tokens,
-      microToUsd(r.amount_micro),
-      microToUsd(r.original_amount_micro),
-      microToUsd(r.discount_micro),
-      r.latency_ms,
-      r.ttft_ms,
-      r.request_id,
-    ]),
-  )
-}
-
-/// 账单解释器：吃 pricing_snapshot 逐层展开（DESIGN §3：snapshot 是计费唯一语义）。
-///
-/// 左列是"钱"（原价 → 优惠 → 实扣），右列是"为什么是这个数"（倍率与规则链）；
-/// 请求 ID 单独一行带复制——工单/退款都以它为锚，手动框选 UUID 极易漏字符。
-function BillExplainer({ row, locale }: { row: LogRow; locale: string }) {
-  const { t } = useTranslation()
-  const s = row.pricing_snapshot
-  const money = (label: string, value: string, cls?: string) => (
-    <div className="flex items-baseline justify-between gap-4">
-      <span className="text-muted-foreground">{label}</span>
-      <span className={cn('font-medium tabular-nums', cls)}>{value}</span>
-    </div>
-  )
-  return (
-    <div className="grid gap-4 px-4 py-3 text-xs md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] animate-fade-in">
-      <div className="flex flex-col gap-1.5 rounded-md border border-border bg-card p-3">
-        {money(t('logs:original'), formatMoney(row.original_amount_micro, locale))}
-        {row.discount_micro > 0 &&
-          money(t('logs:discount'), `-${formatMoney(row.discount_micro, locale)}`, 'text-success')}
-        <div className="my-0.5 h-px bg-border" />
-        {money(t('logs:final'), formatMoney(row.amount_micro, locale), 'text-sm')}
-        {row.usage.reasoning_tokens > 0 &&
-          money(t('admin:logsReasoning'), String(row.usage.reasoning_tokens), 'text-muted-foreground')}
-      </div>
-      <div className="flex min-w-0 flex-col gap-2.5">
-        {s ? (
-          <div className="flex flex-wrap gap-1.5">
-            <Badge variant="muted">
-              {t('logs:mode')} {s.mode}
-            </Badge>
-            {s.model_ratio !== null && (
-              <Badge variant="muted">
-                {t('admin:modelRatio')} ×{s.model_ratio}
-              </Badge>
-            )}
-            {s.completion_ratio !== null && (
-              <Badge variant="muted">
-                {t('admin:completionRatio')} ×{s.completion_ratio}
-              </Badge>
-            )}
-            {s.cache_ratio !== null && row.usage.cached_tokens > 0 && (
-              <Badge variant="muted">
-                {t('admin:cacheRatio')} ×{s.cache_ratio}
-              </Badge>
-            )}
-            <Badge variant="muted">
-              {t('logs:group')} {s.group} ×{s.group_ratio}
-            </Badge>
-            {s.user_multiplier !== '1' && (
-              <Badge variant="muted">
-                {t('logs:userMultiplier')} ×{s.user_multiplier}
-              </Badge>
-            )}
-            {s.rules.map((rule) => (
-              <Badge key={rule.code}>
-                {rule.code} ×{rule.multiplier}
-              </Badge>
-            ))}
-          </div>
-        ) : (
-          <p className="text-muted-foreground">{t('logs:noSnapshot')}</p>
-        )}
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <span>{t('admin:logsRequestId')}</span>
-          <CopyText value={row.request_id} className="min-w-0 text-foreground" />
-        </div>
-      </div>
-    </div>
-  )
+  downloadCsv('okapi-usage-loaded',
+    ['time', 'billing_status', ...(withKey ? ['key', 'key_id'] : []), 'model', 'requested_model', 'endpoint', 'stream',
+      'prompt_tokens', 'cached_tokens', 'cache_read_reported', 'cache_write_tokens', 'cache_write_reported', 'completion_tokens', 'reasoning_tokens',
+      'net_amount_usd', 'charged_amount_usd', 'original_usd', 'discount_usd', 'refunded_amount_usd', 'latency_ms', 'ttft_ms', 'error_code', 'request_id'],
+    rows.map((row) => [row.created_at, billingStatus(row.status), ...(withKey ? [row.key_name, row.api_key_id] : []), row.model, row.requested_model, row.endpoint, row.is_stream,
+      row.usage.prompt_tokens, cacheRead(row), row.usage.cache_read_reported, cacheWrite(row), row.usage.cache_write_reported, row.usage.completion_tokens, row.usage.reasoning_tokens,
+      microToUsd(netAmount(row)), microToUsd(row.amount_micro), microToUsd(row.original_amount_micro), microToUsd(row.discount_micro), microToUsd(row.status === 30 ? row.amount_micro : 0),
+      row.latency_ms, row.is_stream ? row.ttft_ms : null, row.error_code, row.request_id]))
 }

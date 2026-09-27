@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COALESCE(SUM(delta_micro), 0)::bigint AS \"s!\"\n           FROM billing_actor_totals WHERE user_id = $1 AND actor = 'system:aff'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "be1b4b7e556290fc73daa4e55f41bb109035ef737f7815d3966bf76f9ce041a6"
+}

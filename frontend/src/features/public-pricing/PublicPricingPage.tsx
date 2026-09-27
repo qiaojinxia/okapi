@@ -118,7 +118,7 @@ export function PublicPricingPage() {
           </nav>
         </aside>
         <div className="min-w-0 w-full flex-1">
-          <SearchInput value={search.q ?? ''} onChange={(q) => patch({ q: q || undefined })} aria-label={t('pricing:searchHint')} placeholder={t('catalog:searchPlaceholder')} inputClassName="h-12 rounded-xl pl-10 text-sm" />
+          <SearchInput className="w-full max-w-xl" value={search.q ?? ''} onChange={(q) => patch({ q: q || undefined })} aria-label={t('pricing:searchHint')} placeholder={t('catalog:searchPlaceholder')} inputClassName="h-12 rounded-xl pl-10 text-sm" />
           <button type="button" aria-expanded={filtersOpen} aria-controls="catalog-filters" onClick={() => setFiltersOpen((open) => !open)}
             className="mt-3 flex min-h-11 w-full items-center gap-2 rounded-lg border border-border bg-card px-3 text-xs outline-none focus-visible:ring-2 focus-visible:ring-primary/40 sm:hidden">
             <SlidersHorizontal className="h-4 w-4" /><span>{t('catalog:filtersAndPricing')}</span><span className="ml-auto truncate text-muted-foreground">{groupInfo ? groupName(groupInfo) : group || t('catalog:baseShort')} · USD / {unit}</span><ChevronDown className={cn('h-4 w-4 shrink-0', filtersOpen && 'rotate-180')} />

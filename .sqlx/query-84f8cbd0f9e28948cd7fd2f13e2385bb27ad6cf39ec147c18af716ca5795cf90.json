@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_subscriptions SET maintenance_retry_after=$2::timestamptz+interval '60 seconds' WHERE id=$1 AND status=1 AND window_start=$3 AND window_end=$4 AND expires_at=$5",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "84f8cbd0f9e28948cd7fd2f13e2385bb27ad6cf39ec147c18af716ca5795cf90"
+}

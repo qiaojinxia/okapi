@@ -17,8 +17,8 @@
 //!       三次的 total 相同
 //! ```
 //!
-//! 这样既不必把全表拉下来（`/admin/users` 在开发库里上千行），也对并发写入不敏感——
-//! 三次取的是同一个窗口的不同切法。
+//! 测试在数据静止时比较同一窗口的不同切法，避免读取全表；并发插入/删除会移动
+//! offset 边界，本用例不声称多次 HTTP 请求共享数据库快照。
 //!
 //! 第二个用例走另一条轴：**越界参数必须被夹取或拒绝，不能被静默当真**。
 //! 这是"参数组合约束"里唯一机械可判的那部分——不必知道每个端点的业务语义，
@@ -32,6 +32,9 @@ use serde_json::Value;
 use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
+
+#[path = "support/pagination_defaults.rs"]
+mod defaults;
 
 /// 每页行数。取 2 是为了让"第二页"一定落在有数据的区间里——
 /// 开发库里这几张表都远超 4 行，而新建的种子行也够。
@@ -52,6 +55,10 @@ async fn serve(router: axum::Router) -> SocketAddr {
 }
 
 struct Bed {
+    pg: PgPool,
+    suffix: String,
+    user_id: i64,
+    user_cookie: String,
     console: SocketAddr,
     admin_token: String,
     user_token: String,
@@ -77,7 +84,7 @@ async fn setup() -> Bed {
         .await
         .unwrap();
 
-    // 普通用户自带 5 把 key：够翻两页且第二页非空
+    // 普通用户自带 25 把 key：默认 20 条后仍必须存在第二页
     let user_id = okapi_store::provision::create_user(&pg, &format!("pg-u-{suffix}"))
         .await
         .unwrap();
@@ -85,14 +92,19 @@ async fn setup() -> Bed {
     okapi_store::provision::create_api_key(&pg, user_id, &hash(&user_token), "sk-pgu")
         .await
         .unwrap();
-    for i in 0..4 {
+    for i in 0..24 {
         let t = format!("sk-okapi-pg-u{i}-{suffix}");
         okapi_store::provision::create_api_key(&pg, user_id, &hash(&t), "sk-pgu")
             .await
             .unwrap();
     }
-    // 渠道池也种几个，保证 /admin/pools 有得翻
-    for i in 0..4 {
+    for i in 0..24 {
+        okapi_store::provision::create_user(&pg, &format!("pg-extra-{suffix}-{i}"))
+            .await
+            .unwrap();
+    }
+    // 渠道池也至少 24 个，保证默认页以外有数据
+    for i in 0..24 {
         let code = format!("pgpool{i}{}", &suffix[..6]);
         sqlx::query!(
             "INSERT INTO channel_pools (pool_code, description) VALUES ($1, 'pagination')
@@ -107,11 +119,31 @@ async fn setup() -> Bed {
     let state = gateway::build_state(&database_url, &redis_url, "page-node", None, None)
         .await
         .unwrap();
+    let sid = format!("pg-session-{suffix}");
+    state.sched.web_session_set(&sid, user_id, None, None).await;
+    let user_cookie = format!("okapi_session={sid}");
     let console = serve(console::router(state)).await;
     Bed {
+        pg,
+        suffix,
+        user_id,
+        user_cookie,
         console,
         admin_token,
         user_token,
+    }
+}
+
+fn authenticated(bed: &Bed, path: &str, token: &str, url: &str) -> reqwest::RequestBuilder {
+    let request = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .get(url);
+    if path.starts_with("/api/teams") {
+        request.header(reqwest::header::COOKIE, &bed.user_cookie)
+    } else {
+        request.bearer_auth(token)
     }
 }
 
@@ -127,15 +159,9 @@ async fn fetch(
         "http://{}{path}{sep}limit={limit}&offset={offset}",
         bed.console
     );
-    let body = reqwest::Client::new()
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .unwrap()
-        .json::<Value>()
-        .await
-        .unwrap();
+    let response = authenticated(bed, path, token, &url).send().await.unwrap();
+    assert_eq!(response.status(), 200, "{path}");
+    let body = response.json::<Value>().await.unwrap();
     // 行标识优先 id，退而求其次用整行的字符串形态（某些列表主键不叫 id）
     let ids = body["data"]
         .as_array()
@@ -256,14 +282,7 @@ async fn out_of_range_params_are_clamped_not_honoured() {
             if status >= 400 {
                 continue; // 明确拒绝也是合规答复
             }
-            // 行数上限只在**显式传了 limit** 时断言。
-            // 不传 limit 的语义是 `Slice::ALL`——配置类列表（渠道池、分组这些供
-            // 下拉用的）刻意回全量，只有大表走 `capped_limit`。把"没传 limit 也不许
-            // 超 MAX_PAGE"当判据是错的，会把设计当成缺陷（实测 /admin/pools 回 810 行，
-            // 查 listing.rs 的注释确认是刻意如此）。
-            if !q.starts_with("limit=") {
-                continue;
-            }
+            // 未显式传 limit 也有默认页宽，不能绕过上限检查。
             let body = resp.json::<Value>().await.unwrap_or(Value::Null);
             let n = body["data"].as_array().map_or(0, Vec::len);
             if n > MAX_PAGE {

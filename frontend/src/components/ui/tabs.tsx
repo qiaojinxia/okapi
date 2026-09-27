@@ -1,6 +1,7 @@
 import type { LucideIcon } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
+import { ChoiceRail, revealChoice } from './choice-rail'
 
 export interface TabItem {
   id: string
@@ -45,6 +46,7 @@ export function Tabs({
     ? focused
     : items.find((item) => item.id === active)?.id ?? items[0]?.id
   const underline = variant === 'underline'
+  const contentKey = JSON.stringify(items.map((item) => [item.id, item.label, item.count, !!item.icon]))
 
   useEffect(() => { setFocused(active) }, [active])
 
@@ -54,19 +56,21 @@ export function Tabs({
     const reveal = () => {
       const focusedTab = document.activeElement instanceof HTMLElement && document.activeElement.getAttribute('role') === 'tab' && list.contains(document.activeElement)
         ? document.activeElement : list.querySelector<HTMLElement>('[aria-selected=true]')
-      if (focusedTab) revealTab(list, focusedTab)
+      if (focusedTab) revealChoice(list, focusedTab)
     }
     reveal()
-    // 缩窗或横竖屏切换后，当前页签仍应留在可见范围内。
+    // 语言、计数或字体变化也会改变子项宽度，即使整条的宽度不变。
     const observer = new ResizeObserver(reveal)
     observer.observe(list)
+    for (const item of list.children) observer.observe(item)
     return () => observer.disconnect()
-  }, [active])
+  }, [active, contentKey])
 
   return (
+    <ChoiceRail container={root} label={ariaLabel} id={tabsId} className={cn(underline ? 'flex w-full' : 'self-start', className)}>
     <div
       ref={root}
-      id={tabsId}
+      id={`${tabsId}-list`}
       role="tablist"
       aria-label={ariaLabel}
       aria-orientation="horizontal"
@@ -74,11 +78,10 @@ export function Tabs({
         if (!e.currentTarget.contains(e.relatedTarget)) setFocused(active)
       }}
       className={cn(
-        'max-w-full items-center overflow-x-auto scrollbar-none',
+        'min-w-0 max-w-full items-center overflow-x-auto scrollbar-none',
         underline
-          ? 'flex gap-1 border-b border-border'
+          ? 'flex flex-1 gap-1 border-b border-border'
           : 'inline-flex gap-0.5 self-start rounded-lg border border-border bg-muted/60 p-0.5',
-        className,
       )}
     >
       {items.map((item, index) => {
@@ -97,7 +100,7 @@ export function Tabs({
               // 只滚动页签条，避免长表单或页面跟着跳动。
               const list = root.current
               if (!list) return
-              revealTab(list, e.currentTarget)
+              revealChoice(list, e.currentTarget)
             }}
             onKeyDown={(e) => {
               if (e.altKey || e.ctrlKey || e.metaKey) return
@@ -131,14 +134,8 @@ export function Tabs({
         )
       })}
     </div>
+    </ChoiceRail>
   )
-}
-
-function revealTab(list: HTMLElement, tab: HTMLElement) {
-  const rect = tab.getBoundingClientRect()
-  const bounds = list.getBoundingClientRect()
-  if (rect.left < bounds.left) list.scrollLeft += rect.left - bounds.left
-  else if (rect.right > bounds.right) list.scrollLeft += rect.right - bounds.right
 }
 
 /// 表单分区首次访问才挂载，之后切签只隐藏，保留尚未保存的输入。

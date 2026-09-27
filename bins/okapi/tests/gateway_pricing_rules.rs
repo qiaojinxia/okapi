@@ -15,6 +15,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/paged_lists.rs"]
+mod paged_lists;
+
 /// 固定 usage：100 prompt + 20 completion，倍率 1.0 下标价 240 micro。
 async fn mock_chat(_body: axum::body::Bytes) -> axum::response::Response {
     axum::Json(json!({
@@ -125,9 +128,15 @@ async fn setup(rules: &[RuleSeed]) -> Env {
         insert_rule(&pg, &format!("r{i}-{suffix}"), user_id, &model, seed).await;
     }
 
-    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
-        .await
-        .unwrap();
+    let state = gateway::build_state(
+        &database_url,
+        &redis_url,
+        &format!("rule-node-{suffix}"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     state
         .ledger
         .credit(user_id, Money::from_micros(50_000_000))
@@ -149,7 +158,7 @@ async fn setup(rules: &[RuleSeed]) -> Env {
     }
 }
 
-async fn chat(env: &Env) {
+async fn chat(env: &Env) -> Uuid {
     let resp = reqwest::Client::new()
         .post(format!("http://{}/v1/chat/completions", env.gateway))
         .bearer_auth(&env.token)
@@ -158,30 +167,39 @@ async fn chat(env: &Env) {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+    let request_id = resp.headers()["x-okapi-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     let _ = resp.bytes().await.unwrap();
+    request_id
 }
 
-/// 等到第 n 笔 committed 记录（按时间序），返回金额与快照。
-async fn wait_committed_nth(pg: &PgPool, user_id: i64, n: usize) -> (i64, Value) {
+/// 按响应里的请求 ID 对账，不能用可回拨的墙钟时间推断请求顺序。
+/// PG 可见时规则计数可能尚未更新，因此还需等完整后台结算。
+async fn wait_committed(env: &Env, request_id: Uuid) -> (i64, Value) {
     for _ in 0..80 {
-        let rows = sqlx::query!(
-            r#"SELECT amount_micro, pricing_snapshot FROM billing_records
-               WHERE user_id = $1 AND status = 20 ORDER BY created_at, id"#,
-            user_id
+        let row = sqlx::query_as::<_, (i64, Option<Value>)>(
+            "SELECT amount_micro, pricing_snapshot FROM billing_records
+               WHERE user_id = $1 AND request_id = $2 AND status = 20",
         )
-        .fetch_all(pg)
+        .bind(env.user_id)
+        .bind(request_id)
+        .fetch_optional(&env.pg)
         .await
         .unwrap();
-        if rows.len() >= n {
-            let row = &rows[n - 1];
-            return (
-                row.amount_micro,
-                row.pricing_snapshot.clone().unwrap_or(Value::Null),
-            );
+        if let Some((amount, snapshot)) = row {
+            env.state
+                .settlements
+                .wait_idle(Duration::from_secs(5))
+                .await;
+            assert_eq!(env.state.settlements.in_flight(), 0, "后台结算未完成");
+            return (amount, snapshot.unwrap_or(Value::Null));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!("未等到第 {n} 笔 committed 记录");
+    panic!("未等到请求 {request_id} 的 committed 记录");
 }
 
 /// 端到端：首笔不打折并把 token 记进本月计数，次笔越过阈值即按 0.5 计价。
@@ -194,17 +212,18 @@ async fn volume_rule_fires_once_monthly_tokens_cross_threshold() {
     )])
     .await;
 
-    chat(&env).await;
-    let (first, snap1) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    let request_id = chat(&env).await;
+    let (first, snap1) = wait_committed(&env, request_id).await;
     assert_eq!(first, 240, "首笔时本月计数为 0，规则不应命中");
     assert_eq!(
         snap1["rules"].as_array().map_or(0, Vec::len),
         0,
         "未命中的规则不得进快照：{snap1}"
     );
+    assert_eq!(env.state.sched.monthly_tokens_get(env.user_id).await, 120);
 
-    chat(&env).await;
-    let (second, snap2) = wait_committed_nth(&env.pg, env.user_id, 2).await;
+    let request_id = chat(&env).await;
+    let (second, snap2) = wait_committed(&env, request_id).await;
     assert_eq!(second, 120, "首笔已累计 120 token ≥ 阈值 100 → 0.5 倍率");
     let rules = snap2["rules"].as_array().expect("命中规则必须进快照");
     assert_eq!(rules.len(), 1, "应恰好命中一条 volume 规则：{snap2}");
@@ -242,17 +261,20 @@ async fn volume_rule_fires_on_monthly_spend_axis() {
     )])
     .await;
 
-    chat(&env).await;
-    let (first, _) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    let request_id = chat(&env).await;
+    let (first, _) = wait_committed(&env, request_id).await;
     assert_eq!(first, 240, "首笔消费计数为 0，不打折");
+    assert_eq!(env.state.sched.monthly_spend_get(env.user_id).await, 240);
 
-    chat(&env).await;
-    let (second, _) = wait_committed_nth(&env.pg, env.user_id, 2).await;
+    let request_id = chat(&env).await;
+    let (second, _) = wait_committed(&env, request_id).await;
     assert_eq!(second, 240, "累计 240 micro < 阈值 300，仍不打折");
+    assert_eq!(env.state.sched.monthly_spend_get(env.user_id).await, 480);
 
-    chat(&env).await;
-    let (third, snap) = wait_committed_nth(&env.pg, env.user_id, 3).await;
+    let request_id = chat(&env).await;
+    let (third, snap) = wait_committed(&env, request_id).await;
     assert_eq!(third, 120, "累计 480 micro ≥ 300 → 0.5 倍率");
+    assert_eq!(env.state.sched.monthly_spend_get(env.user_id).await, 600);
     assert_eq!(
         snap["rules"].as_array().map_or(0, Vec::len),
         1,
@@ -299,8 +321,8 @@ async fn surge_rule_reads_cluster_inflight_and_marks_up_the_bill() {
 
     // 没配阈值：规则在价簿里也不该加价（否则装了 surge 规则的站点会一直高价）
     set_threshold(None).await;
-    chat(&env).await;
-    let (base, snap) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    let request_id = chat(&env).await;
+    let (base, snap) = wait_committed(&env, request_id).await;
     assert_eq!(base, 240, "未配阈值时按标价");
     assert_eq!(
         snap["rules"].as_array().map_or(0, Vec::len),
@@ -310,14 +332,14 @@ async fn surge_rule_reads_cluster_inflight_and_marks_up_the_bill() {
 
     // 0 = 关闭（不是"零并发就算高峰"——那会让每一笔都加价）
     set_threshold(Some(0)).await;
-    chat(&env).await;
-    let (off, _) = wait_committed_nth(&env.pg, env.user_id, 2).await;
+    let request_id = chat(&env).await;
+    let (off, _) = wait_committed(&env, request_id).await;
     assert_eq!(off, 240, "阈值 0 视为关闭");
 
     // 阈值 5：邻居那 5 个在途请求刚好撞线（判定是 >=）→ 240 × 1.5
     set_threshold(Some(5)).await;
-    chat(&env).await;
-    let (surged, snap) = wait_committed_nth(&env.pg, env.user_id, 3).await;
+    let request_id = chat(&env).await;
+    let (surged, snap) = wait_committed(&env, request_id).await;
     assert_eq!(surged, 360, "别的实例扛着的负载也算数，应加价 1.5 倍");
     let rules = snap["rules"].as_array().expect("命中规则必须进快照");
     assert_eq!(rules.len(), 1, "{snap}");
@@ -327,8 +349,8 @@ async fn surge_rule_reads_cluster_inflight_and_marks_up_the_bill() {
     // 邻居空下来：同一份阈值配置立刻回标价——加价确实由在途量决定，
     // 不是"配了阈值就一直加"，也不是撞过一次就黏住
     env.state.sched.inflight_report(&peer, 0).await;
-    chat(&env).await;
-    let (back, _) = wait_committed_nth(&env.pg, env.user_id, 4).await;
+    let request_id = chat(&env).await;
+    let (back, _) = wait_committed(&env, request_id).await;
     assert_eq!(back, 240, "负载退下去就不该继续加价");
 
     set_threshold(None).await;
@@ -350,8 +372,8 @@ async fn best_for_user_applies_single_cheapest_rule() {
     ])
     .await;
 
-    chat(&env).await;
-    let (amount, snap) = wait_committed_nth(&env.pg, env.user_id, 1).await;
+    let request_id = chat(&env).await;
+    let (amount, snap) = wait_committed(&env, request_id).await;
     assert_eq!(amount, 192, "240 × 0.8；若错误连乘会是 172（0.72 floor）");
     let rules = snap["rules"].as_array().expect("胜者应进快照");
     assert_eq!(rules.len(), 1, "桶内只留一条：{snap}");
@@ -545,9 +567,9 @@ async fn rule_toggle_needs_publish_then_stops_and_resumes_discount() {
             .unwrap();
     };
 
-    chat(&env).await;
+    let request_id = chat(&env).await;
     assert_eq!(
-        wait_committed_nth(&env.pg, env.user_id, 1).await.0,
+        wait_committed(&env, request_id).await.0,
         192,
         "在线的 8 折应生效：240 × 0.8"
     );
@@ -561,17 +583,17 @@ async fn rule_toggle_needs_publish_then_stops_and_resumes_discount() {
     assert_eq!(body["requires_publish"], true, "下线要提示发布：{body}");
 
     // 只改库不发布：在跑的网关拿的还是老快照，照旧 8 折（定案语义）
-    chat(&env).await;
+    let request_id = chat(&env).await;
     assert_eq!(
-        wait_committed_nth(&env.pg, env.user_id, 2).await.0,
+        wait_committed(&env, request_id).await.0,
         192,
         "未发布前 PriceBook 仍是老快照，价格不该变"
     );
 
     // 发布 + 热更：回原价，且快照里不再有这条规则
     publish_and_reload().await;
-    chat(&env).await;
-    let (third, snap) = wait_committed_nth(&env.pg, env.user_id, 3).await;
+    let request_id = chat(&env).await;
+    let (third, snap) = wait_committed(&env, request_id).await;
     assert_eq!(third, 240, "下线并发布后应回标价");
     assert_eq!(
         snap["rules"].as_array().map_or(0, Vec::len),
@@ -580,15 +602,8 @@ async fn rule_toggle_needs_publish_then_stops_and_resumes_discount() {
     );
 
     // 列表回显 enabled=false，配置本身还在（不是删掉）
-    let listed: Value = client
-        .get(format!("http://{}/admin/pricing/rules", env.console))
-        .bearer_auth(&env.super_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, listed) =
+        paged_lists::get_all(env.console, "/admin/pricing/rules", &env.super_token).await;
     let mine = listed["data"]
         .as_array()
         .unwrap()
@@ -601,8 +616,8 @@ async fn rule_toggle_needs_publish_then_stops_and_resumes_discount() {
     // 重新上线：同一份配置直接生效，不用重配
     assert_eq!(toggle(true, &env.super_token).await.status(), 200);
     publish_and_reload().await;
-    chat(&env).await;
-    let (fourth, snap) = wait_committed_nth(&env.pg, env.user_id, 4).await;
+    let request_id = chat(&env).await;
+    let (fourth, snap) = wait_committed(&env, request_id).await;
     assert_eq!(fourth, 192, "重新上线应恢复 8 折");
     assert_eq!(snap["rules"][0]["code"], code.as_str(), "{snap}");
 
@@ -633,4 +648,296 @@ async fn rule_toggle_needs_publish_then_stops_and_resumes_discount() {
         .map(|r| r.detail.clone().unwrap_or(Value::Null)["enabled"].clone())
         .collect();
     assert_eq!(states, vec![json!(false), json!(true)], "上下线都要留痕");
+}
+
+/// 删除规则必须验证权限、真实计费、发布边界、重复删除和审计，不能只测 DELETE 路由存在。
+#[tokio::test]
+async fn rule_delete_is_authorized_audited_and_takes_effect_after_publish() {
+    let env = setup(&[("discount", json!({"multiplier": "0.8"}))]).await;
+    let client = reqwest::Client::new();
+    let code = format!("r0-{}", env.suffix);
+    let url = format!("http://{}/admin/pricing/rules/{code}", env.console);
+    for (token, expected) in [(None, 401), (Some(&env.token), 403)] {
+        let mut req = client.delete(&url);
+        if let Some(token) = token {
+            req = req.bearer_auth(token);
+        }
+        assert_eq!(req.send().await.unwrap().status(), expected);
+    }
+    let request_id = chat(&env).await;
+    assert_eq!(wait_committed(&env, request_id).await.0, 192);
+
+    let response = client
+        .delete(&url)
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        json!({"ok": true, "requires_publish": true})
+    );
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pricing_rules WHERE rule_code = $1")
+            .bind(&code)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(remaining, 0, "规则必须从配置中删除");
+    assert_eq!(
+        client
+            .delete(&url)
+            .bearer_auth(&env.super_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    // 删除配置不能悄悄改动尚未发布的运行期价簿。
+    let request_id = chat(&env).await;
+    assert_eq!(wait_committed(&env, request_id).await.0, 192);
+    let published = client
+        .post(format!("http://{}/admin/pricing/publish", env.console))
+        .bearer_auth(&env.super_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), 200);
+    gateway::refresh_pricebook_if_newer(&env.state)
+        .await
+        .unwrap();
+    let request_id = chat(&env).await;
+    let (amount, snapshot) = wait_committed(&env, request_id).await;
+    assert_eq!(amount, 240, "发布后恢复未打折金额");
+    assert!(snapshot["rules"].as_array().unwrap().is_empty());
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'pricing.delete_rule' AND target = $1",
+    )
+    .bind(&code)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1, "权限拒绝和重复删除不能留下成功审计");
+}
+
+// A controllable HTTP response exercises the same middleware used by gateway
+// streams. The other node performs real authenticated, billed chat requests.
+type LoadChunk = Result<axum::body::Bytes, std::io::Error>;
+type LoadSender = tokio::sync::mpsc::Sender<LoadChunk>;
+
+async fn held_load(
+    axum::extract::State(started): axum::extract::State<
+        tokio::sync::mpsc::UnboundedSender<LoadSender>,
+    >,
+) -> axum::response::Response {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tx.send(Ok(axum::body::Bytes::from_static(b"held\n")))
+        .await
+        .unwrap();
+    started.send(tx).unwrap();
+    let stream = futures::stream::unfold(rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    axum::body::Body::from_stream(stream).into_response()
+}
+
+struct LiveLoad {
+    response: reqwest::Response,
+    sender: LoadSender,
+    peer: gateway::state::AppState,
+    redis: fred::clients::Client,
+}
+
+async fn live_load(env: &Env) -> LiveLoad {
+    let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
+    let peer = gateway::build_state(
+        &std::env::var("DATABASE_URL").unwrap(),
+        &redis_url,
+        &format!("load-peer-{}", env.suffix),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // Scope the runtime setting to this gateway, avoiding a global settings
+    // mutation. The existing surge test separately verifies the PG setting.
+    env.state
+        .settings_cache
+        .insert(
+            "surge_inflight_threshold".into(),
+            std::sync::Arc::new(Some(json!(2))),
+        )
+        .await;
+    let (started, mut accepted) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new()
+        .route("/held", axum::routing::get(held_load))
+        .with_state(started)
+        .layer(axum::middleware::from_fn_with_state(
+            peer.clone(),
+            gateway::rule_inputs::track_in_flight,
+        ));
+    let addr = serve(app).await;
+    let mut response = reqwest::get(format!("http://{addr}/held")).await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "held\n");
+    let sender = accepted.recv().await.unwrap();
+    let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
+    let load = LiveLoad {
+        response,
+        sender,
+        peer,
+        redis,
+    };
+    wait_load(&load.redis, &load.peer.node, 1).await;
+    load
+}
+
+async fn node_load(redis: &fred::clients::Client, node: &str) -> (i64, i64) {
+    use fred::interfaces::HashesInterface;
+    let raw: String = redis.hget("inflight:gauge", node).await.unwrap();
+    let (count, timestamp) = raw.split_once('|').unwrap();
+    (count.parse().unwrap(), timestamp.parse().unwrap())
+}
+
+async fn wait_load(redis: &fred::clients::Client, node: &str, expected: i64) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if node_load(redis, node).await.0 == expected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("node {node} did not report {expected} before the stale window"));
+}
+
+async fn assert_chat_price(env: &Env, expected: i64) {
+    let request_id = chat(env).await;
+    let (amount, snapshot) = wait_committed(env, request_id).await;
+    assert_eq!(amount, expected, "request {request_id}: {snapshot}");
+    assert_eq!(
+        snapshot["rules"].as_array().unwrap().len(),
+        usize::from(expected == 360)
+    );
+    if expected == 360 {
+        assert_eq!(snapshot["rules"][0]["code"], format!("r0-{}", env.suffix));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surge_long_stream_stays_fresh_and_normal_eof_restores_price() {
+    let env = setup(&[("surge", json!({"multiplier":"1.5"}))]).await;
+    let load = live_load(&env).await;
+    let first_timestamp = node_load(&load.redis, &load.peer.node).await.1;
+    // Exercise the real ten-second expiry window with the HTTP body still open.
+    // This delay represents the behavior under test, not settlement polling.
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    let (count, timestamp) = node_load(&load.redis, &load.peer.node).await;
+    assert_eq!(count, 1);
+    assert!(
+        timestamp > first_timestamp + 8_000,
+        "long stream has no heartbeat"
+    );
+    assert_chat_price(&env, 360).await;
+    drop(load.sender);
+    assert!(load.response.bytes().await.unwrap().is_empty());
+    wait_load(&load.redis, &load.peer.node, 0).await;
+    assert_chat_price(&env, 240).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surge_client_disconnect_reports_zero_and_restores_price() {
+    let env = setup(&[("surge", json!({"multiplier":"1.5"}))]).await;
+    let load = live_load(&env).await;
+    assert_chat_price(&env, 360).await;
+    drop(load.response);
+    // Keep the producer open: only a downstream disconnect can drop its receiver.
+    tokio::time::timeout(Duration::from_secs(3), load.sender.closed())
+        .await
+        .unwrap();
+    wait_load(&load.redis, &load.peer.node, 0).await;
+    assert_chat_price(&env, 240).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surge_body_error_reports_zero_and_restores_price() {
+    let env = setup(&[("surge", json!({"multiplier":"1.5"}))]).await;
+    let load = live_load(&env).await;
+    assert_chat_price(&env, 360).await;
+    load.sender
+        .send(Err(std::io::Error::other("test body failure")))
+        .await
+        .unwrap();
+    assert!(load.response.bytes().await.is_err());
+    wait_load(&load.redis, &load.peer.node, 0).await;
+    assert_chat_price(&env, 240).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surge_cancel_before_headers_releases_reported_load() {
+    let env = setup(&[("surge", json!({"multiplier":"1.5"}))]).await;
+    let (entered, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = Router::new()
+        .route(
+            "/pending",
+            axum::routing::get(move || {
+                let entered = entered.clone();
+                async move {
+                    entered.send(()).unwrap();
+                    futures::future::pending::<String>().await
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            env.state.clone(),
+            gateway::rule_inputs::track_in_flight,
+        ));
+    let request = axum::http::Request::builder()
+        .uri("/pending")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let task = tokio::spawn(async move { tower::Service::call(&mut app, request).await });
+    tokio::time::timeout(Duration::from_secs(3), received.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    wait_load(&redis, &env.state.node, 1).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    wait_load(&redis, &env.state.node, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn surge_exhausted_body_releases_once_while_response_is_retained() {
+    use futures::StreamExt;
+    let env = setup(&[("surge", json!({"multiplier":"1.5"}))]).await;
+    let mut app = Router::new()
+        .route("/complete", axum::routing::get(|| async { "finished" }))
+        .layer(axum::middleware::from_fn_with_state(
+            env.state.clone(),
+            gateway::rule_inputs::track_in_flight,
+        ));
+    let request = axum::http::Request::builder()
+        .uri("/complete")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let response = tower::Service::call(&mut app, request).await.unwrap();
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    wait_load(&redis, &env.state.node, 1).await;
+    let mut body = response.into_body().into_data_stream();
+    assert_eq!(body.next().await.unwrap().unwrap(), "finished");
+    assert!(body.next().await.is_none());
+    wait_load(&redis, &env.state.node, 0).await;
+    assert!(body.next().await.is_none());
+    drop(body);
+    wait_load(&redis, &env.state.node, 0).await;
 }

@@ -5,6 +5,7 @@ import { pageSearch } from '@/hooks/use-pagination'
 import { oneOf, text } from '@/lib/search-params'
 
 export const Route = createFileRoute('/admin/channels')({
+  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): ChannelsSearch => ({
     ...pageSearch(search),
     q: text(search.q),

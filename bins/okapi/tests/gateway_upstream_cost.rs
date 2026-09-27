@@ -18,6 +18,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/paged_lists.rs"]
+mod paged_lists;
+
 async fn mock_ok(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
     if req["messages"][0]["content"] == "reject" {
@@ -256,15 +259,7 @@ async fn upstream_cost_is_list_price_times_channel_factor() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let list: Value = client
-        .get(format!("http://{}/admin/channels", bed.console))
-        .bearer_auth(&bed.admin_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, list) = paged_lists::get_all(bed.console, "/admin/channels", &bed.admin_token).await;
     let mine = list["data"]
         .as_array()
         .unwrap()

@@ -16,6 +16,8 @@ export interface PricingModel {
   per_call_price_micro: number | null
   /// 可用分组（按池可见性折算的静态视图）；空 = 当前没有渠道服务该模型。
   groups: string[]
+  /// 按分组池链计算的聊天接口配置；不代表上游实时健康。
+  chat_endpoints_by_group?: Record<string, string[]>
 }
 
 export interface PricingGroup {

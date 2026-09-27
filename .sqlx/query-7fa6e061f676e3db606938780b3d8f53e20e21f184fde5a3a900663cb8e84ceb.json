@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_subscriptions\n               SET expires_at = $2, source = $3, updated_at = now(), maintenance_retry_after=NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7fa6e061f676e3db606938780b3d8f53e20e21f184fde5a3a900663cb8e84ceb"
+}

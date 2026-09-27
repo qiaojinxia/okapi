@@ -18,7 +18,8 @@ export interface CubeMetrics {
   completion_tokens: number
   reasoning_tokens: number
   tokens: number
-  cache_hit_bp: number
+  cache_hit_bp: number | null
+  cache_read_known_requests?: number
   amount_micro: number
   discount_micro: number
   upstream_cost_micro: number
@@ -29,7 +30,7 @@ export interface CubeMetrics {
 /// 过滤条件的名字回填（实体已删时名字为 null，芯片退回显示 id）。
 export interface ScopeEcho {
   user?: { id: number; username: string | null }
-  api_key?: { id: number; name: string | null; key_prefix: string | null; user_id: number | null }
+  api_key?: { id: number; name: string | null; key_prefix: string | null; user_id: number | null; username?: string | null }
   channel?: { id: number; name: string | null; provider: string | null }
   model?: string
   group?: { code: string; group_ratio: string | null }
@@ -67,6 +68,7 @@ export interface BreakdownRow extends CubeMetrics {
   delta_bp: number | null
   share_bp: number
   request_share_bp: number
+  token_share_bp?: number
   user_id?: number | null
   username?: string | null
   api_key_id?: number
@@ -83,6 +85,7 @@ export interface BreakdownResp {
   scope: ScopeEcho
   total_amount_micro: number
   total_requests: number
+  total_tokens?: number
   data: BreakdownRow[]
 }
 

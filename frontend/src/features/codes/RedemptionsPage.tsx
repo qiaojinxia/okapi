@@ -91,7 +91,7 @@ export function RedemptionsPage() {
   const rows = codes.data?.data ?? []
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         className="shrink-0"
         icon={Ticket}
@@ -125,9 +125,9 @@ export function RedemptionsPage() {
           </div>
         }
         selection={
-          <span className="text-xs text-muted-foreground">
+          <Badge variant="muted" className="tabular-nums">
             {t('admin:keyTotal', { n: codes.data?.total ?? 0 })}
-          </span>
+          </Badge>
         }
       />
       {dialog}
@@ -149,7 +149,6 @@ export function RedemptionsPage() {
       ) : (
         <Table
           stickyHeader
-          wrapperClassName="min-h-40 max-h-none flex-1 overscroll-contain [scrollbar-gutter:stable]"
           scrollResetKey={`${status}:${pager.offset}:${pager.limit}`}
           aria-busy={codes.isFetching}
         >

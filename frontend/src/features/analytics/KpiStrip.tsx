@@ -82,7 +82,7 @@ export function KpiStrip({
   if (!total && !loading) return <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">{[
     { icon: Activity, label: t('common:requests') }, { icon: Coins, label: t('analytics:kpiSpend') }, { icon: Cpu, label: t('common:tokens') },
     { icon: AlertTriangle, label: t('admin:errorRate') }, { icon: Database, label: t('analytics:kpiCacheHit') }, { icon: Timer, label: t('analytics:kpiLatency') },
-  ].map((item) => <Stat key={item.label} {...item} layout="stacked" value="—" />)}</div>
+  ].map((item) => <Stat key={item.label} {...item} compact layout="stacked" value="—" />)}</div>
   const cur = total ?? {}
   const prev = previous ?? {}
   const vsPrev = <span>{t('analytics:vsPrevious', { days })}</span>
@@ -91,7 +91,7 @@ export function KpiStrip({
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
       <Stat
-        layout="stacked"
+        compact layout="stacked"
         icon={Activity}
         loading={loading}
         label={t('common:requests')}
@@ -104,7 +104,7 @@ export function KpiStrip({
         }
       />
       <Stat
-        layout="stacked"
+        compact layout="stacked"
         icon={Coins}
         loading={loading}
         label={t('analytics:kpiSpend')}
@@ -125,7 +125,7 @@ export function KpiStrip({
         }
       />
       <Stat
-        layout="stacked"
+        compact layout="stacked"
         icon={Cpu}
         loading={loading}
         label={t('common:tokens')}
@@ -143,7 +143,7 @@ export function KpiStrip({
         }
       />
       <Stat
-        layout="stacked"
+        compact layout="stacked"
         icon={AlertTriangle}
         loading={loading}
         label={t('admin:errorRate')}
@@ -157,20 +157,20 @@ export function KpiStrip({
         }
       />
       <Stat
-        layout="stacked"
+        compact layout="stacked"
         icon={Database}
         loading={loading}
         label={t('analytics:kpiCacheHit')}
-        value={(cur.prompt_tokens ?? 0) > 0 ? formatBp(cur.cache_hit_bp ?? 0, locale) : '—'}
+        value={(cur.prompt_tokens ?? 0) > 0 && cur.cache_hit_bp != null ? formatBp(cur.cache_hit_bp, locale) : '—'}
         sub={
           <>
-            {(cur.prompt_tokens ?? 0) > 0 && (prev.prompt_tokens ?? 0) > 0 && <Delta cur={cur.cache_hit_bp ?? 0} prev={prev.cache_hit_bp} kind="bp" locale={locale} />}
+            {cur.cache_hit_bp != null && prev.cache_hit_bp != null && <Delta cur={cur.cache_hit_bp} prev={prev.cache_hit_bp} kind="bp" locale={locale} />}
             <span>{t('analytics:kpiCached', { n: formatCount(cur.cached_tokens ?? 0, locale) })}</span>
           </>
         }
       />
       <Stat
-        layout="stacked"
+        compact layout="stacked"
         icon={Timer}
         loading={loading}
         label={t('analytics:kpiLatency')}

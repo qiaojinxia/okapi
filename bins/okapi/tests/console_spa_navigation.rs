@@ -22,10 +22,16 @@ async fn setup() -> SocketAddr {
     addr
 }
 
-/// 前端产物是否就位（CI 的 rust job 不构建前端，缺产物时导航断言无从进行）。
+/// 本地可不构建前端；CI 显式提供构建产物目录，缺失时必须失败。
 fn dist_ready() -> bool {
-    let dir = std::env::var("OKAPI_WEB_DIR").unwrap_or_else(|_| "frontend/dist".to_owned());
-    Path::new(&dir).join("index.html").exists()
+    if let Ok(dir) = std::env::var("OKAPI_WEB_DIR") {
+        assert!(
+            Path::new(&dir).join("index.html").is_file(),
+            "OKAPI_WEB_DIR 已配置但缺少 index.html"
+        );
+        return true;
+    }
+    Path::new("frontend/dist/index.html").is_file()
 }
 
 /// API 客户端不受影响：与 SPA 同名的路径仍按 API 语义响应（鉴权/方法校验照常）。

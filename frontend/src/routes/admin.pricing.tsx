@@ -11,6 +11,7 @@ export interface ModelsSearch extends PageSearch {
 }
 
 export const Route = createFileRoute('/admin/pricing')({
+  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): ModelsSearch => ({
     ...pageSearch(search),
     q: text(search.q),

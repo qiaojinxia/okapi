@@ -29,7 +29,7 @@ export function SearchInput({
   const { t } = useTranslation()
   const input = useRef<HTMLInputElement>(null)
   return (
-    <div className={cn('relative flex items-center', className)}>
+    <div className={cn('relative flex min-w-0 max-w-full items-center', className)}>
       <Search className="pointer-events-none absolute left-2.5 h-4 w-4 text-muted-foreground" />
       <input
         ref={input}

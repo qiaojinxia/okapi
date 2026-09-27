@@ -22,6 +22,14 @@ pub enum UpstreamError {
     #[error("upstream_stream")]
     Stream(String),
 
+    /// A persistent session may already have executed this turn. Never replay it,
+    /// even if no output reached the caller before the connection failed.
+    #[error("upstream_session")]
+    Session {
+        reason: &'static str,
+        timed_out: bool,
+    },
+
     /// 请求构造失败（body 非 JSON 等）。
     #[error("upstream_build")]
     Build(String),
@@ -36,7 +44,7 @@ impl UpstreamError {
             Self::Status { status, .. } => {
                 matches!(status, 401 | 402 | 403 | 408 | 429 | 500..=599)
             }
-            Self::Build(_) => false,
+            Self::Build(_) | Self::Session { .. } => false,
         }
     }
 
@@ -46,7 +54,7 @@ impl UpstreamError {
         match self {
             Self::Connect(_) | Self::Timeout | Self::Stream(_) => true,
             Self::Status { status, .. } => matches!(status, 500..=599),
-            Self::Build(_) => false,
+            Self::Build(_) | Self::Session { .. } => false,
         }
     }
 
@@ -54,8 +62,13 @@ impl UpstreamError {
     #[must_use]
     pub fn error_code(&self) -> &'static str {
         match self {
-            Self::Connect(_) | Self::Stream(_) | Self::Build(_) => "upstream_error",
-            Self::Timeout => "upstream_timeout",
+            Self::Timeout
+            | Self::Session {
+                timed_out: true, ..
+            } => "upstream_timeout",
+            Self::Connect(_) | Self::Stream(_) | Self::Build(_) | Self::Session { .. } => {
+                "upstream_error"
+            }
             Self::Status { .. } => "upstream_status",
         }
     }
@@ -65,7 +78,11 @@ impl UpstreamError {
     pub fn upstream_status(&self) -> Option<i16> {
         match self {
             Self::Status { status, .. } => i16::try_from(*status).ok(),
-            Self::Connect(_) | Self::Timeout | Self::Stream(_) | Self::Build(_) => None,
+            Self::Connect(_)
+            | Self::Timeout
+            | Self::Stream(_)
+            | Self::Build(_)
+            | Self::Session { .. } => None,
         }
     }
 
@@ -76,7 +93,11 @@ impl UpstreamError {
             Self::Status {
                 retry_after_secs, ..
             } => *retry_after_secs,
-            Self::Connect(_) | Self::Timeout | Self::Stream(_) | Self::Build(_) => None,
+            Self::Connect(_)
+            | Self::Timeout
+            | Self::Stream(_)
+            | Self::Build(_)
+            | Self::Session { .. } => None,
         }
     }
 }

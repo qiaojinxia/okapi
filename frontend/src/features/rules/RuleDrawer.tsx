@@ -16,6 +16,7 @@ import {
 } from '@/features/rules/types'
 import { Select } from '@/components/ui/select'
 import { TagInput } from '@/components/ui/tag-input'
+import { ModelTagsInput } from '@/features/models/model-input'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -280,7 +281,7 @@ export function RuleDrawer({
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="s-models">{t('admin:scopeModelsLabel')}</Label>
-          <TagInput
+          <ModelTagsInput
             id="s-models"
             value={models}
             onChange={setModels}

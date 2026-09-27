@@ -152,7 +152,7 @@ async fn mock_messages(
 }
 
 /// Codex 订阅上游：断言 chatgpt-account-id / accept / 请求体整形（store=false、stream=true、
-/// instructions 存在、system→developer、previous_response_id 被剥），只回 SSE（该后端只有流式面）。
+/// instructions 存在、system→developer、previous_response_id 保留），只回 SSE（该后端只有流式面）。
 async fn mock_codex_responses(
     State(st): State<Mock>,
     headers: axum::http::HeaderMap,
@@ -179,10 +179,9 @@ async fn mock_codex_responses(
     assert_eq!(req["store"], false, "Codex 后端不持久化：store 强制 false");
     assert_eq!(req["stream"], true, "Codex 后端只有流式面");
     assert!(req["instructions"].is_string(), "instructions 键必须存在");
-    assert!(
-        req.get("previous_response_id").is_none(),
-        "store=false 下无意义，剥掉"
-    );
+    if let Some(previous) = req.get("previous_response_id") {
+        assert_eq!(previous, "resp_prev", "续聊 ID 不能静默丢失");
+    }
     assert!(
         req["input"]
             .as_array()
@@ -528,6 +527,29 @@ async fn anthropic_max_login_request_refresh_and_invalidate() {
     assert!(amounts.iter().all(|a| *a == 200_000));
 }
 
+async fn seed_codex_previous_response(env: &Env) {
+    let api_key_id: i64 = sqlx::query_scalar("SELECT id FROM api_keys WHERE key_hash=$1")
+        .bind(hash(&env.user_token))
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let candidates = okapi_store::channels::candidates_for_model(
+        &env.pg,
+        &env.model,
+        &["default"],
+        env.state.master_key.as_deref(),
+    )
+    .await
+    .unwrap();
+    let binding =
+        gateway::sched_redis::response_affinity::ResponseBinding::from_candidate(&candidates[0]);
+    env.state
+        .sched
+        .response_binding_set(env.user_id, api_key_id, "resp_prev", &binding)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn codex_login_routes_only_responses_ingress() {
     let env = setup().await;
@@ -538,6 +560,8 @@ async fn codex_login_routes_only_responses_ingress() {
         Some("acct-okapi"),
         "account_id 取自 id_token claim"
     );
+
+    seed_codex_previous_response(&env).await;
 
     // /v1/responses 非流式入口 → Codex 后端（mock 断言请求体整形，只回 SSE）→ 网关聚合回 JSON
     let resp = reqwest::Client::new()
@@ -609,11 +633,19 @@ async fn codex_login_routes_only_responses_ingress() {
     }
     assert_eq!(settled, 2, "两笔都应按 usage 结算");
 
-    // chat 入口不路由 codex 渠道：该模型只有 codex 候选 → 503 无可用渠道
+    // chat 入口不路由 codex 渠道：明确告诉调用方改用 Responses，而非让它重试 503。
     let resp = chat(&env).await;
-    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.status(), 400);
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "no_available_channel");
+    assert_eq!(body["error"]["code"], "unsupported_endpoint");
+    assert!(
+        body["error"]["param"]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .any(|p| p == "/v1/responses")
+    );
+    assert!(body["error"]["request_id"].as_str().is_some());
 
     // embeddings 同样不路由
     let resp = reqwest::Client::new()

@@ -290,6 +290,107 @@ async fn realtime_zero_output_refunds_all() {
     );
 }
 
+#[tokio::test]
+async fn realtime_refund_failure_preserves_subscription_and_recovers_once()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use fred::interfaces::{HashesInterface, KeysInterface};
+    use std::collections::BTreeMap;
+    let initial = Money::from_micros(50_000_000);
+    let env = setup(initial).await;
+    env.ledger
+        .sub_set(env.user_id, initial, chrono::Utc::now().timestamp() + 3600)
+        .await?;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
+    let mut ws = connect(&env).await?;
+    assert_eq!(recv_text(&mut ws).await["type"], "session.created");
+    let held = env.ledger.list_reservations(env.user_id).await?;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].pool, okapi_ledger::Pool::Subscription);
+    let id = held[0].request_id;
+    let balance_key = format!("bal:{{{}}}", env.user_id);
+    let key = format!("conc:{{{}}}:k:{}", env.user_id, held[0].api_key_id);
+    let before: BTreeMap<String, String> = redis.hgetall(&balance_key).await?;
+    redis.del::<(), _>(&key).await?;
+    redis.hset::<(), _, _>(&key, ("invalid", "counter")).await?;
+    ws.close(None).await?;
+    drop(ws);
+    let (status, amount, _, _) = wait_record(&env.pg, env.user_id, &env.model)
+        .await
+        .ok_or("missing failure record")?;
+    assert_eq!((status, amount), (40, 0));
+    let pool: i16 = sqlx::query_scalar("SELECT pool FROM billing_records WHERE request_id=$1")
+        .bind(id)
+        .fetch_one(&env.pg)
+        .await?;
+    assert_eq!(pool, 1);
+    let after: BTreeMap<String, String> = redis.hgetall(&balance_key).await?;
+    assert_eq!(after, before);
+    redis.del::<(), _>(&key).await?;
+    redis.set::<(), _, _>(&key, "1", None, None, false).await?;
+    let future = chrono::Utc::now()
+        .checked_add_signed(chrono::TimeDelta::minutes(11))
+        .ok_or("test time overflow")?;
+    let recovered = okapi::worker::sweep_expired_reservations(&env.pg, &env.ledger, future).await?;
+    assert!(recovered.iter().any(|r| r.request_id == id
+        && r.action == "refund"
+        && r.released_micro == held[0].amount.as_micros()));
+    assert!(
+        !okapi::worker::sweep_expired_reservations(&env.pg, &env.ledger, future)
+            .await?
+            .iter()
+            .any(|r| r.request_id == id)
+    );
+    let sub: i64 = redis.hget(&balance_key, "sub").await?;
+    assert_eq!(sub, initial.as_micros());
+    assert_eq!(env.ledger.balance(env.user_id).await?, initial);
+    let concurrency: i64 = redis.get(&key).await?;
+    assert_eq!(concurrency, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn repeated_realtime_refund_preserves_the_original_subscription_pool()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use fred::interfaces::{HashesInterface, KeysInterface};
+    use std::collections::BTreeMap;
+    let initial = Money::from_micros(50_000_000);
+    let env = setup(initial).await;
+    env.ledger
+        .sub_set(env.user_id, initial, chrono::Utc::now().timestamp() + 3600)
+        .await?;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
+    let balance_key = format!("bal:{{{}}}", env.user_id);
+    let before: BTreeMap<String, String> = redis.hgetall(&balance_key).await?;
+    let mut ws = connect(&env).await?;
+    assert_eq!(recv_text(&mut ws).await["type"], "session.created");
+    let held = env.ledger.list_reservations(env.user_id).await?;
+    assert_eq!(held.len(), 1);
+    let id = held[0].request_id;
+    let refunded = env
+        .ledger
+        .refund(env.user_id, held[0].api_key_id, id)
+        .await?;
+    assert_eq!(refunded.pool, okapi_ledger::Pool::Subscription);
+    ws.close(None).await?;
+    drop(ws);
+    let (status, amount, _, _) = wait_record(&env.pg, env.user_id, &env.model)
+        .await
+        .ok_or("missing failure record")?;
+    assert_eq!((status, amount), (40, 0));
+    let pool: i16 = sqlx::query_scalar("SELECT pool FROM billing_records WHERE request_id=$1")
+        .bind(id)
+        .fetch_one(&env.pg)
+        .await?;
+    assert_eq!(pool, 1);
+    let after: BTreeMap<String, String> = redis.hgetall(&balance_key).await?;
+    assert_eq!(after, before, "repeated refund must not credit again");
+    let concurrency: i64 = redis
+        .get(format!("conc:{{{}}}:k:{}", env.user_id, held[0].api_key_id))
+        .await?;
+    assert_eq!(concurrency, 0);
+    Ok(())
+}
+
 /// per-key WS 并发上限（缺省 4）：第 5 条握手拒绝 429。
 #[tokio::test]
 async fn realtime_conn_limit_rejects_fifth() {

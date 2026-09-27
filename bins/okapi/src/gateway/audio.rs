@@ -14,7 +14,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, Quote, RatioFp, calculate};
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
@@ -131,6 +131,8 @@ async fn handle_speech(
     let usage = TokenUsage {
         prompt_tokens: chars,
         cached_tokens: 0,
+        cache_read_reported: false,
+        cache_write_reported: false,
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
@@ -145,7 +147,7 @@ async fn handle_speech(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    match state
+    let reservation_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -160,7 +162,7 @@ async fn handle_speech(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -172,7 +174,7 @@ async fn handle_speech(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     let cand = match first_candidate(state, &canonical, &key).await {
         Ok(c) => c,
@@ -207,8 +209,9 @@ async fn handle_speech(
                 Some(&cand),
                 None,
                 headers,
+                reservation_pool,
             )
-            .await;
+            .await?;
             let mut resp = Response::builder()
                 .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
                 .header(header::CONTENT_TYPE, content_type)
@@ -336,7 +339,7 @@ async fn handle_transcriptions(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    match state
+    let reservation_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -351,7 +354,7 @@ async fn handle_transcriptions(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -363,7 +366,7 @@ async fn handle_transcriptions(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     let cand = match first_candidate(state, &canonical, &key).await {
         Ok(c) => c,
@@ -410,8 +413,9 @@ async fn handle_transcriptions(
                 Some(&cand),
                 duration_secs,
                 headers,
+                reservation_pool,
             )
-            .await;
+            .await?;
             let mut out = Response::builder()
                 .status(resp.status)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -452,78 +456,64 @@ async fn settle(
     cand: Option<&okapi_store::ChannelCandidate>,
     media_units: Option<u32>,
     headers: &HeaderMap,
-) {
+    reservation_pool: okapi_ledger::Pool,
+) -> Result<(), AppError> {
     let book = state.pricebook.load();
-    match state
-        .ledger
-        .commit(key.user_id, key.key_id, request_id, quote.amount)
-        .await
-    {
-        Ok(CommitOutcome::Committed {
-            balance_after,
-            pool,
-            ..
-        }) => {
-            let mut snapshot = quote.snapshot.clone();
-            if media_units.is_some() {
-                snapshot.media_units = media_units;
-            }
-            let input = SettlementInput {
-                dimensions: okapi_ledger::pg::UsageDimensions::new(
-                    requested_model,
-                    cand.map_or("", |c| c.upstream_model(canonical)),
-                    endpoint,
-                    endpoint,
-                ),
-                request_id,
-                log_type: 2,
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                group_code: &key.group_code,
-                model_name: canonical,
-                channel_id: cand.map(|c| c.channel_id),
-                channel_key_id: cand.map(|c| c.channel_key_id),
-                state: BillingState::Committed,
-                usage,
-                amount: quote.amount,
-                original: quote.original,
-                discount: quote.discount,
-                list_price: quote.list_price,
-                upstream_cost: None,
-                pricing_epoch: Some(book.epoch()),
-                pricing_snapshot: serde_json::to_value(&snapshot).ok(),
-                latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-                ttft_ms: None,
-                is_stream: false,
-                retry_count: 0,
-                failover_count: 0,
-                upstream_status: Some(200),
-                error_code: None,
-                upstream_request_id: None,
-                node: state.node.as_ref(),
-                sticky_layer: 0,
-                client_type: detect_client_type(headers),
-                client_ip: None,
-                delta_micro: quote.amount.as_micros().saturating_neg(),
-                balance_after: Some(balance_after),
-                event_type: "commit",
-                pool,
-            };
-            state.settle_write(input).await;
-            super::auth::record_settlement_counters(
-                state,
-                key.user_id,
-                key.member_user_id,
-                quote.amount.as_micros(),
-                usage.total_raw(),
-            )
-            .await;
-        }
-        Ok(CommitOutcome::NoReservation) => {
-            tracing::warn!(request_id = %request_id, "audio 重复结算竞争，跳过");
-        }
-        Err(err) => {
-            tracing::error!(request_id = %request_id, error = %err, "audio Redis 结算失败（悬置待清理）");
-        }
+    let mut snapshot = quote.snapshot.clone();
+    if media_units.is_some() {
+        snapshot.media_units = media_units;
     }
+    let input = SettlementInput {
+        dimensions: okapi_ledger::pg::UsageDimensions::new(
+            requested_model,
+            cand.map_or("", |c| c.upstream_model(canonical)),
+            endpoint,
+            endpoint,
+        ),
+        request_id,
+        log_type: 2,
+        user_id: key.user_id,
+        api_key_id: key.key_id,
+        group_code: &key.group_code,
+        model_name: canonical,
+        channel_id: cand.map(|c| c.channel_id),
+        channel_key_id: cand.map(|c| c.channel_key_id),
+        state: BillingState::Committed,
+        usage,
+        amount: quote.amount,
+        original: quote.original,
+        discount: quote.discount,
+        list_price: quote.list_price,
+        upstream_cost: None,
+        pricing_epoch: Some(book.epoch()),
+        pricing_snapshot: serde_json::to_value(&snapshot).ok(),
+        latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
+        ttft_ms: None,
+        is_stream: false,
+        retry_count: 0,
+        failover_count: 0,
+        upstream_status: Some(200),
+        error_code: None,
+        upstream_request_id: None,
+        node: state.node.as_ref(),
+        sticky_layer: 0,
+        client_type: detect_client_type(headers),
+        client_ip: None,
+        delta_micro: quote.amount.as_micros().saturating_neg(),
+        balance_after: None,
+        event_type: "commit",
+        pool: reservation_pool,
+    };
+    if !state.settle_success(input).await? {
+        return Ok(());
+    }
+    super::auth::record_settlement_counters(
+        state,
+        key.user_id,
+        key.member_user_id,
+        quote.amount.as_micros(),
+        usage.total_raw(),
+    )
+    .await;
+    Ok(())
 }

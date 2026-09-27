@@ -7,6 +7,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/paged_lists.rs"]
+mod paged_lists;
+
 /// 本文件的用例串行执行。
 ///
 /// `auth_flush()` 是**全局**清空：并行用例里任何一次清空（改角色、改分组、改倍率……）都会
@@ -228,7 +231,7 @@ async fn custom_role_create_list_and_assign() {
         .as_i64()
         .expect("应返回 admin_role_id");
 
-    let (status, list) = req(&env, "GET", "/admin/roles", &env.super_token, None).await;
+    let (status, list) = paged_lists::get_all(env.addr, "/admin/roles", &env.super_token).await;
     assert_eq!(status, 200);
     let mine = list["data"]
         .as_array()
@@ -274,7 +277,7 @@ async fn custom_role_create_list_and_assign() {
         again["admin_role_id"], role_id,
         "编辑不换 id，绑定关系不受影响"
     );
-    let (_, list) = req(&env, "GET", "/admin/roles", &env.super_token, None).await;
+    let (_, list) = paged_lists::get_all(env.addr, "/admin/roles", &env.super_token).await;
     let mine = list["data"]
         .as_array()
         .unwrap()
@@ -357,7 +360,7 @@ async fn role_delete_guards_live_bindings_and_ignores_deleted_users() {
     .await
     .unwrap();
     assert_eq!(logged, 1, "删角色要落审计 role.delete");
-    let (_, list) = req(&env, "GET", "/admin/roles", &env.super_token, None).await;
+    let (_, list) = paged_lists::get_all(env.addr, "/admin/roles", &env.super_token).await;
     assert!(
         !list["data"]
             .as_array()

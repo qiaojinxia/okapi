@@ -35,7 +35,7 @@ impl CalendarWindow {
         })
     }
 
-    fn bounds(
+    pub(super) fn bounds(
         today: NaiveDate,
         days: u32,
         start: Option<&str>,
@@ -92,8 +92,8 @@ pub async fn enrich(
     data: &mut [Value],
 ) -> Result<Value, AppError> {
     let cache_sql = format!(
-        "SELECT day, model, sumMerge(write_tokens) AS writes, countIfMerge(known_requests) AS known \
-        FROM mv_cache_write_day WHERE {owner} AND {range} GROUP BY day, model"
+        "SELECT day, model, sumMerge(write_tokens) AS writes, countIfMerge(write_known) AS known, countIfMerge(read_known) AS read_known \
+        FROM mv_cache_reporting_day WHERE {owner} AND {range} GROUP BY day, model"
     );
     let perf_sql = format!(
         "SELECT toDate(hour) AS day, model, countMerge(requests) AS samples, \
@@ -104,13 +104,16 @@ pub async fn enrich(
     let perf = ch.query_json_each_row(&perf_sql).await?;
     let cache: HashMap<_, _> = cache.iter().map(|r| (row_key(r), r)).collect();
     let perf: HashMap<_, _> = perf.iter().map(|r| (row_key(r), r)).collect();
-    let mut counts = [0_i64; 8]; // requests, known cache, writes, perf samples, latency, ttft, ttft samples, output
+    let mut counts = [0_i64; 11]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached
     for row in data {
         let key = row_key(row);
         let cache = cache.get(&key);
         let perf = perf.get(&key);
         let requests = ch_i64(row, "requests");
         let known = cache.map_or(0, |r| ch_i64(r, "known"));
+        let read_known = cache.map_or(0, |r| ch_i64(r, "read_known"));
+        let prompt = ch_i64(row, "prompt_tokens");
+        let cached = ch_i64(row, "cached_tokens");
         let writes = cache.map_or(0, |r| ch_i64(r, "writes"));
         let samples = perf.map_or(0, |r| ch_i64(r, "samples"));
         let latency = perf.map_or(0, |r| ch_i64(r, "latency"));
@@ -123,8 +126,11 @@ pub async fn enrich(
             Value::Null
         };
         row["cache_write_known_requests"] = json!(known);
+        row["cache_read_known_requests"] = json!(read_known);
+        row["cache_hit_bp"] = cache_rate(cached, prompt, requests, read_known);
         row["avg_latency_ms"] = nullable_ratio(latency, samples, requests, samples, 1);
-        row["avg_ttft_ms"] = nullable_ratio(ttft, ttft_n, requests, samples, 1);
+        // TTFT 只对实际采集到首字的请求取平均；非流式/历史缺失不抹去有效样本。
+        row["avg_ttft_ms"] = nullable_ratio(ttft, ttft_n, ttft_n, ttft_n, 1);
         row["tokens_per_1k_sec"] = nullable_ratio(output, latency, requests, samples, 1_000_000);
         row["performance_requests"] = json!(samples);
         row["latency_sum_ms"] = json!(latency);
@@ -133,7 +139,8 @@ pub async fn enrich(
         row["original_micro"] =
             json!(ch_i64(row, "amount_micro").saturating_add(ch_i64(row, "discount_micro")));
         for (acc, value) in counts.iter_mut().zip([
-            requests, known, writes, samples, latency, ttft, ttft_n, output,
+            requests, known, writes, samples, latency, ttft, ttft_n, output, read_known, prompt,
+            cached,
         ]) {
             *acc = acc.saturating_add(value);
         }
@@ -141,11 +148,18 @@ pub async fn enrich(
     Ok(json!({
         "cache_write_tokens": if counts[0] == counts[1] { json!(counts[2]) } else { Value::Null },
         "cache_write_known_requests": counts[1],
+        "cache_read_known_requests": counts[8],
+        "cache_hit_bp": cache_rate(counts[10], counts[9], counts[0], counts[8]),
         "avg_latency_ms": nullable_ratio(counts[4], counts[3], counts[0], counts[3], 1),
-        "avg_ttft_ms": nullable_ratio(counts[5], counts[6], counts[0], counts[3], 1),
+        "avg_ttft_ms": nullable_ratio(counts[5], counts[6], counts[6], counts[6], 1),
+        "ttft_samples": counts[6],
         "tokens_per_1k_sec": nullable_ratio(counts[7], counts[4], counts[0], counts[3], 1_000_000),
         "performance_requests": counts[3]
     }))
+}
+
+pub(super) fn cache_rate(cached: i64, prompt: i64, requests: i64, known: i64) -> Value {
+    nullable_ratio(cached, prompt, requests, known, 10_000)
 }
 
 fn nullable_ratio(sum: i64, divisor: i64, expected: i64, samples: i64, scale: i64) -> Value {
@@ -159,6 +173,14 @@ fn nullable_ratio(sum: i64, divisor: i64, expected: i64, samples: i64, scale: i6
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cache_rate_distinguishes_missing_zero_and_weighted_hits() {
+        assert_eq!(cache_rate(0, 100, 1, 0), Value::Null);
+        assert_eq!(cache_rate(0, 100, 1, 1), json!(0));
+        assert_eq!(cache_rate(100, 1000, 2, 2), json!(1000));
+        assert_eq!(cache_rate(100, 1000, 2, 1), Value::Null);
+        assert_eq!(cache_rate(0, 0, 0, 0), Value::Null);
+    }
     #[test]
     fn calendar_window_is_inclusive_and_rejects_invalid_ranges() {
         let today = parse_date("2024-03-01").unwrap();

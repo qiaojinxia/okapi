@@ -388,9 +388,11 @@ async fn mcp_write_full_scenario() {
     );
 
     // 两个工具的写操作都以 mcp:{key_id} 留痕，cache.flush 的 target 是范围本身
+    // These calls are sequential; audit IDs preserve insertion order even if
+    // the wall clock steps backwards between requests.
     let flushed_scopes = sqlx::query_scalar!(
         r#"SELECT target FROM audit_logs WHERE actor = $1 AND action = 'cache.flush'
-           ORDER BY created_at, id"#,
+           ORDER BY id"#,
         format!("mcp:{}", env.admin_key_id)
     )
     .fetch_all(&env.pg)

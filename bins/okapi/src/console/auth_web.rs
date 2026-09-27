@@ -99,7 +99,10 @@ fn session_id(headers: &HeaderMap) -> Option<String> {
 }
 
 /// 会话鉴权：Cookie → Redis → user_id。
-async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<i64, AppError> {
+pub(super) async fn require_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<i64, AppError> {
     let sid = session_id(headers)
         .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
     state

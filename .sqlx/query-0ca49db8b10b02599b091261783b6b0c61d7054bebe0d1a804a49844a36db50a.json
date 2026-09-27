@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO user_subscriptions\n            (user_id, plan_id, status, starts_at, expires_at, window_start, window_end,\n             quota_micro, granted_group, source,plan_code_snapshot,display_name_snapshot,period_snapshot,group_code_snapshot)\n        VALUES ($1, $2, 1, $3, $4, $3, $5, $6, $7, $8,$9,$10,$11,$12)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8",
+        "Bool",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int2",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0ca49db8b10b02599b091261783b6b0c61d7054bebe0d1a804a49844a36db50a"
+}

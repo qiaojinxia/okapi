@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_record_receipts SET status=30 WHERE request_id=$1 AND status=20",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c98331968300f7f6648d49d02a1a0d6c758dfe4b9da1e7b32a8747d8d640a626"
+}

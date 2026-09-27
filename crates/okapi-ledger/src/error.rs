@@ -7,8 +7,39 @@ pub enum LedgerError {
     #[error("ledger_db_error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
+    #[error("ledger_user_not_found")]
+    UserNotFound,
+
     #[error("ledger_unexpected_reply: {0}")]
     UnexpectedReply(&'static str),
+
+    /// 活跃预扣已存在，不能重新准入或以新参数覆盖原记录。
+    #[error("ledger_reservation_exists")]
+    ReservationExists,
+
+    #[error("ledger_invalid_reservation")]
+    InvalidReservation,
+
+    #[error("ledger_admission_state_invalid")]
+    AdmissionStateInvalid,
+
+    #[error("ledger_invalid_settlement")]
+    InvalidSettlement,
+
+    #[error("ledger_reservation_conflict")]
+    ReservationConflict,
+
+    #[error("ledger_settlement_state_invalid")]
+    SettlementStateInvalid,
+
+    #[error("ledger_hold_invalid: {0}")]
+    InvalidHold(&'static str),
+    #[error("ledger_hold_conflict")]
+    HoldConflict,
+    #[error("ledger_hold_capacity")]
+    HoldCapacity,
+    #[error("ledger_hold_recovery_required")]
+    HoldRecoveryRequired,
 
     #[error("ledger_store_error: {0}")]
     Store(#[from] okapi_store::StoreError),

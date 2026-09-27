@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO payment_receipts (gateway,merchant_id,trade_no,order_id,currency,amount_minor)\n           VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING order_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "order_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "payment_receipts",
+            "name": "order_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int8",
+        "Varchar",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d254c520c283cc726eb67f122197e7e7b3bf31aaf5c67dad2b5cdd7a094a3ebe"
+}

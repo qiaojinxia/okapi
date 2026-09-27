@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT plan_id,plan_code_snapshot FROM user_subscriptions WHERE user_id=$1 AND status=1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "plan_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_code_snapshot",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_code_snapshot"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "dec42cb81a06a1974140a9776f2a74af27be7ec472b9efca554efdea82247447"
+}

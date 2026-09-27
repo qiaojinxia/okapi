@@ -181,7 +181,10 @@ async fn mock_max_messages(headers: axum::http::HeaderMap) -> axum::response::Re
     .into_response()
 }
 
-async fn mock_codex_responses(headers: axum::http::HeaderMap) -> axum::response::Response {
+async fn mock_codex_responses(
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
     assert_eq!(
         headers
             .get("chatgpt-account-id")
@@ -189,11 +192,46 @@ async fn mock_codex_responses(headers: axum::http::HeaderMap) -> axum::response:
         Some("acct-okapi"),
         "account id 随凭证下发"
     );
+    let req: Value = serde_json::from_slice(&body).unwrap();
+    // 关键回归点：{"input":"ping"} 必须以列表形态上线，上游只收列表（"Input must be a list"）
+    assert!(req["input"].as_array().is_some(), "input 必须是列表：{req}");
+    assert_eq!(req["input"][0]["content"][0]["type"], "input_text", "{req}");
+    assert_eq!(req["model"], "gpt-5", "{req}");
     let sse = concat!(
         "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_p\",\"status\":\"in_progress\"}}\n\n",
         "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_p\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5\",\"output\":[{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"pong\",\"annotations\":[]}]}],\"usage\":{\"input_tokens\":3,\"output_tokens\":1,\"total_tokens\":4}}}\n\n",
     );
     ([("content-type", "text/event-stream")], sse).into_response()
+}
+
+/// codex 的订阅模型目录：身份头与 `responses` 同一套，回 `{"models":[...]}`。
+async fn mock_codex_models(
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    assert!(
+        query.contains_key("client_version"),
+        "query 必须带 client_version：{query:?}"
+    );
+    assert!(
+        headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("Bearer access-")),
+        "订阅 token 走 Bearer"
+    );
+    assert_eq!(
+        headers.get("originator").and_then(|v| v.to_str().ok()),
+        Some("codex_cli_rs")
+    );
+    assert_eq!(
+        headers
+            .get("chatgpt-account-id")
+            .and_then(|v| v.to_str().ok()),
+        Some("acct-okapi")
+    );
+    axum::Json(json!({"models": [{"id": "gpt-5.6-sol"}, {"id": "gpt-5.1-codex-max"}]}))
+        .into_response()
 }
 
 async fn spawn_mock(mock: Mock) -> SocketAddr {
@@ -209,6 +247,7 @@ async fn spawn_mock(mock: Mock) -> SocketAddr {
         .route("/oauth/token", post(mock_oauth_token))
         .route("/v1/messages", post(mock_max_messages))
         .route("/codex/responses", post(mock_codex_responses))
+        .route("/codex/models", get(mock_codex_models))
         .with_state(mock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -550,12 +589,17 @@ async fn subscription_probe_refreshes_only_when_expired() {
     assert_eq!(codex_model["ok"], true, "{codex_model}");
     assert_eq!(codex_model["http_status"], 200);
 
-    // 订阅登录没有模型列表面
-    for id in [stale_id, codex_id] {
-        let (status, body) = fetch_models(&env, id).await;
-        assert_eq!(status, 400);
-        assert_eq!(body["error"]["param"], "fetch_models_unsupported", "{body}");
-    }
+    // codex 走订阅模型目录拉模型（已排序去重）；anthropic_max 仍没有模型列表面
+    let (status, body) = fetch_models(&env, codex_id).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["models"],
+        json!(["gpt-5.1-codex-max", "gpt-5.6-sol"]),
+        "{body}"
+    );
+    let (status, body) = fetch_models(&env, stale_id).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "fetch_models_unsupported", "{body}");
 }
 
 /// 共享开发库里渠道很多，按页翻到本用例的渠道为止。

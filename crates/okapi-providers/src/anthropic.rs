@@ -198,6 +198,8 @@ pub struct MetaScanner {
     input_tokens: u32,
     cache_read: u32,
     cache_creation: u32,
+    cache_read_reported: bool,
+    cache_write_reported: bool,
 }
 
 impl MetaScanner {
@@ -232,6 +234,12 @@ impl MetaScanner {
                 self.input_tokens = get("input_tokens");
                 self.cache_read = get("cache_read_input_tokens");
                 self.cache_creation = get("cache_creation_input_tokens");
+                let details = crate::convert::openai_to_anthropic::usage_from_anthropic(
+                    data.get("message").and_then(|m| m.get("usage")),
+                )
+                .prompt_tokens_details;
+                self.cache_read_reported = details.cache_read_reported;
+                self.cache_write_reported = details.cache_write_reported;
             }
             "content_block_start" => {
                 has_output = data
@@ -267,6 +275,8 @@ impl MetaScanner {
                         cached_tokens: self.cache_read,
                         // 缓存写入独立成段：官方 1.25×@5m TTL，混入常规输入段会漏计费
                         cache_write_tokens: self.cache_creation,
+                        cache_read_reported: self.cache_read_reported,
+                        cache_write_reported: self.cache_write_reported,
                         // Anthropic 无模态细分：图片计入 input_tokens，音频不支持
                         audio_tokens: 0,
                         image_tokens: 0,

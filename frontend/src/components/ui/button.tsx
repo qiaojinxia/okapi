@@ -54,6 +54,7 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
+      data-slot="button"
       type={type ?? 'button'}
       className={cn(buttonVariants({ variant, size }), className)}
       disabled={disabled || loading}

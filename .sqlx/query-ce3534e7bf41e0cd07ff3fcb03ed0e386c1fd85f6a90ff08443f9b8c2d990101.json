@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO subscription_sync(user_id) VALUES($1) ON CONFLICT(user_id) DO UPDATE SET retry_after=NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ce3534e7bf41e0cd07ff3fcb03ed0e386c1fd85f6a90ff08443f9b8c2d990101"
+}

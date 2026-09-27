@@ -18,10 +18,10 @@ async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
     let chunks = [
         json!({"choices":[{"index":0,"delta":{"role":"assistant"}}]}),
         json!({"choices":[{"index":0,"delta":{"content":"hi"}}]}),
-        // cached 40/100：让门户 Token 构成与缓存命中率有非零值可断言
+        // 明确上报 cached 40/100 和写入 0，区分真实零值与未上报。
         // （cache_ratio=1 时金额不受影响，既有 240/笔 断言照旧成立）
         json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,
-            "prompt_tokens_details":{"cached_tokens":40}}}),
+            "prompt_tokens_details":{"cached_tokens":40,"cache_write_tokens":0}}}),
     ];
     let mut body = String::new();
     for c in chunks {

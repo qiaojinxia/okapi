@@ -3,7 +3,7 @@ import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 
 // 新手引导：接口桩下验证进度推导、抽屉四步、客户端片段联动与关闭记忆；不发起任何写请求。
-async function prepare(page: Page, { called = false, language = 'zh-CN' }: { called?: boolean; language?: string } = {}) {
+async function prepare(page: Page, { called = false, language = 'zh-CN', responsesOnly = false }: { called?: boolean; language?: string; responsesOnly?: boolean } = {}) {
   await page.addInitScript((lang) => {
     localStorage.setItem('okapi.key', 'interaction-test-key')
     localStorage.setItem('okapi.lang', lang)
@@ -28,7 +28,7 @@ async function prepare(page: Page, { called = false, language = 'zh-CN' }: { cal
       } : path === '/api/pricing' ? {
         groups: [{ code: 'default', name: null, ratio: '1' }, { code: 'vip', name: 'VIP', ratio: '0.8' }],
         models: [
-          { model: 'gpt-5', display_name: 'GPT-5', vendor: 'OpenAI', mode: 'ratio', model_ratio: '1.25', completion_ratio: '8', cache_ratio: '0.1', cache_write_ratio: null, audio_ratio: null, audio_completion_ratio: null, image_ratio: null, per_call_price_micro: null, groups: ['default', 'vip'] },
+          { model: 'gpt-5', display_name: 'GPT-5', vendor: 'OpenAI', mode: 'ratio', model_ratio: '1.25', completion_ratio: '8', cache_ratio: '0.1', cache_write_ratio: null, audio_ratio: null, audio_completion_ratio: null, image_ratio: null, per_call_price_micro: null, groups: ['default', 'vip'], ...(responsesOnly ? { chat_endpoints_by_group: { vip: ['/v1/responses'], default: ['/v1/chat/completions', '/v1/responses'] } } : {}) },
           { model: 'claude-sonnet-4', display_name: 'Claude Sonnet 4', vendor: 'Anthropic', mode: 'ratio', model_ratio: '1.5', completion_ratio: '5', cache_ratio: '0.1', cache_write_ratio: '1.25', audio_ratio: null, audio_completion_ratio: null, image_ratio: null, per_call_price_micro: null, groups: ['default'] },
         ],
       } : path === '/api/notice' ? { notice: null } : { data: [], next_before: null }
@@ -38,6 +38,22 @@ async function prepare(page: Page, { called = false, language = 'zh-CN' }: { cal
     }
   })
 }
+
+test('接入指南为仅 Responses 的分组选择正确请求体，并阻止不兼容客户端示例', async ({ page }) => {
+  await prepare(page, { responsesOnly: true })
+  await page.goto('/portal/keys')
+  await page.getByRole('button', { name: '接入指南' }).click()
+  const dialog = page.getByRole('dialog', { name: '快速开始' })
+  await expect(dialog.locator('pre').nth(1)).toContainText('/v1/responses')
+  await expect(dialog.locator('pre').nth(1)).toContainText('"input":')
+  await expect(dialog.locator('pre').nth(1)).not.toContainText('"messages":')
+  const clients = dialog.getByRole('group', { name: '客户端' })
+  await clients.getByRole('button', { name: 'Claude Code' }).click()
+  await expect(dialog.getByRole('alert')).toContainText('不支持该客户端')
+  await expect(dialog.locator('pre')).toHaveCount(0)
+  await clients.getByRole('button', { name: 'Python' }).click()
+  await expect(dialog.locator('pre').nth(1)).toContainText('client.responses.create(')
+})
 
 test('新用户总览出现快速开始卡，抽屉四步与客户端片段联动，关闭后不再出现', async ({ page }) => {
   await prepare(page)

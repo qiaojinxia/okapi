@@ -24,6 +24,7 @@ struct Env {
     super_token: String,
     user_token: String,
     user_id: i64,
+    user_key_id: i64,
     username: String,
     model: String,
     channel_id: i64,
@@ -58,9 +59,10 @@ async fn setup() -> Env {
         .await
         .unwrap();
     let user_token = format!("sk-okapi-log-u-{suffix}");
-    okapi_store::provision::create_api_key(&pg, user_id, &hash(&user_token), "sk-log-u")
-        .await
-        .unwrap();
+    let user_key_id =
+        okapi_store::provision::create_api_key(&pg, user_id, &hash(&user_token), "sk-log-u")
+            .await
+            .unwrap();
 
     okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
         .await
@@ -102,6 +104,7 @@ async fn setup() -> Env {
         super_token,
         user_token,
         user_id,
+        user_key_id,
         username,
         model,
         channel_id,
@@ -114,7 +117,7 @@ fn payload(env: &Env, error_code: Option<&str>) -> Value {
     json!({
         "request_id": Uuid::new_v4(),
         "user_id": env.user_id,
-        "api_key_id": 7,
+        "api_key_id": env.user_key_id,
         "group": "default",
         "model": env.model,
         "channel_id": env.channel_id,
@@ -122,6 +125,7 @@ fn payload(env: &Env, error_code: Option<&str>) -> Value {
         "log_type": if error_code.is_some() { 5 } else { 2 },
         "prompt_tokens": 100,
         "cached_tokens": 40,
+        "cache_read_reported": true,
         "completion_tokens": 200,
         "reasoning_tokens": 0,
         "amount_micro": 1_000,
@@ -422,6 +426,10 @@ async fn log_search_resolves_names_and_columns() {
     .await;
 
     assert_eq!(row["username"], env.username, "user_id 应回填用户名");
+    assert_eq!(row["api_key_id"], env.user_key_id);
+    assert_eq!(row["key_name"], "seed", "密钥应回填名称");
+    assert_eq!(row["key_prefix"], "sk-log-u", "只返回非敏感前缀");
+    assert!(row.get("key_hash").is_none());
     assert_eq!(
         row["channel_name"], env.channel_name,
         "channel_id 应回填渠道名"
@@ -435,6 +443,66 @@ async fn log_search_resolves_names_and_columns() {
     assert_eq!(row["is_stream"], true);
     assert_eq!(row["client_type"], "test-cli");
     assert_eq!(row["is_error"], false);
+}
+
+#[tokio::test]
+async fn log_scope_names_survive_empty_results_and_soft_deleted_keys() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
+        return;
+    }
+    env.state
+        .ch
+        .as_ref()
+        .unwrap()
+        .ensure_schema()
+        .await
+        .unwrap();
+    // 唯一模型没有写入任何日志，名字回填不能依赖命中行。
+    let path = format!(
+        "/admin/logs?model={}&user_id={}&api_key_id={}&channel_id={}",
+        env.model, env.user_id, env.user_key_id, env.channel_id
+    );
+    let (status, body) = get(&env, &path, &env.super_token).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["data"], json!([]));
+    let scope = &body["scope"];
+    assert_eq!(scope["user"]["username"], env.username);
+    assert_eq!(scope["api_key"]["id"], env.user_key_id);
+    assert_eq!(scope["api_key"]["name"], "seed");
+    assert_eq!(scope["api_key"]["key_prefix"], "sk-log-u");
+    assert_eq!(scope["api_key"]["username"], env.username);
+    assert_eq!(scope["api_key"]["user_id"], env.user_id);
+    assert_eq!(scope["channel"]["name"], env.channel_name);
+    assert_eq!(scope["channel"]["provider"], "openai");
+    assert!(!body.to_string().contains(&env.user_token));
+    assert!(!body.to_string().contains("key_hash"));
+
+    sqlx::query("UPDATE api_keys SET deleted_at = now(), status = 0 WHERE id = $1")
+        .bind(env.user_key_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let (status, deleted) = get(&env, &path, &env.super_token).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        deleted["scope"]["api_key"], scope["api_key"],
+        "停用/软删不丢历史标识"
+    );
+
+    let (status, missing) = get(
+        &env,
+        "/admin/logs?user_id=9000000000000&api_key_id=9000000000000&channel_id=9000000000000",
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(missing["data"], json!([]));
+    assert_eq!(missing["scope"]["api_key"]["id"], 9_000_000_000_000_i64);
+    assert!(missing["scope"]["user"]["username"].is_null());
+    assert!(missing["scope"]["api_key"]["name"].is_null());
+    assert!(missing["scope"]["channel"]["name"].is_null());
 }
 
 /// 只看失败：errors_only 把成功行挡在外面，且错误码/上游状态原样带出。
@@ -544,6 +612,7 @@ async fn log_stat_switches_rate_source() {
             assert_eq!(body["tokens"], 1_500, "5 × (100+200)");
             assert_eq!(body["amount_micro"], 5_000);
             assert_eq!(body["cached_tokens"], 200);
+            assert_eq!(body["cache_read_known_requests"], 5);
             assert_eq!(body["cache_hit_bp"], 4_000, "40 缓存 / 100 输入 = 40%");
             assert_eq!(body["rate_source"], "clickhouse", "带过滤时退化为 CH 窗口");
             let (_, unfiltered) = get(&env, "/admin/logs/stat?hours=1", &env.super_token).await;

@@ -204,7 +204,8 @@ async fn own_scope_isolates_channel_admins() {
         .unwrap();
     assert_eq!(owner, Some(x_id), "创建人即属主");
 
-    // X 可见，Y 不可见，super 全见
+    // 在同一搜索范围核对 X/super 可见、Y 不可见，不把第一页当成全量。
+    let listing = format!("/admin/channels?q=own-{suffix}");
     let in_list = |body: &Value, id: i64| {
         body["data"]
             .as_array()
@@ -212,16 +213,10 @@ async fn own_scope_isolates_channel_admins() {
             .iter()
             .any(|c| c["id"].as_i64() == Some(id))
     };
+    assert!(in_list(&cget(&env, &x_token, &listing).await, channel_id));
+    assert!(!in_list(&cget(&env, &y_token, &listing).await, channel_id));
     assert!(in_list(
-        &cget(&env, &x_token, "/admin/channels").await,
-        channel_id
-    ));
-    assert!(!in_list(
-        &cget(&env, &y_token, "/admin/channels").await,
-        channel_id
-    ));
-    assert!(in_list(
-        &cget(&env, &super_token, "/admin/channels").await,
+        &cget(&env, &super_token, &listing).await,
         channel_id
     ));
 

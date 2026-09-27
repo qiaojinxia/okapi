@@ -51,3 +51,63 @@
 专项验证在 `catalog.spec.ts` 与 `request-examples.spec.ts`：分页跳转/刷新/返回/筛选复位；页签与输入保留；URL 编辑和复制；下载；特殊字符通过 sh、bash、zsh、Python、JavaScript 的本地替身执行验证；不产生真实模型请求。
 
 分页与调用示例补充验证：构建、oxlint 和 i18n/权限守卫通过；44 项交互/生成器回归及 2 项真实控制台只读冒烟全部通过。
+
+
+## 后端分页目录（2026-09-27）
+
+推荐新调用方使用 `GET /api/pricing/models`，匿名可读，默认每页 20 个模型，单页最多 100 个。分页和筛选发生在后端；只为当前页展开分组和调用入口信息。现有 `GET /api/pricing` 不带参数时仍保留全量导出，兼容倍率同步和既有选择器；添加下述任一筛选/分页参数或 `paged=true` 即使用有界分页。本轮没有修改前端调用方，因此旧页面仍通过全量接口读取，不能把新增 API 说成页面已迁移。
+
+| 参数 | 语义 |
+| --- | --- |
+| `limit` / `offset` | 默认 20 / 0；limit 大于 100 时收敛到 100，非正 limit、负 offset 或非整数返回 400 |
+| `q` | 最长 256 字符，按模型 ID、显示名或已配置厂商做不区分大小写的字面子串搜索；`%`、`_`、反斜线不作为通配符 |
+| `model` | 最长 256 字符，精确匹配模型 ID，区分大小写；可用于只取某个模型的规格及调用入口 |
+| `vendor` | 最长 128 字符，去首尾空白后精确匹配厂商，忽略大小写；省略表示全部，显式 `vendor=` 表示未归类 |
+| `capability` | 仅接受 vision/tools/json/reasoning/audio/video/embedding/realtime，且配置必须明确为 JSON 布尔 true；未知能力返回 400 |
+| `group` | 最长 32 字符，按该分组的主池和单跳降级池筛选配置可达模型；未知分组返回空页 |
+| `endpoint` | 接受 `/v1/chat/completions`、`/v1/responses`、`/v1/responses/compact`、`/v1/messages`、`/v1beta/models/{model}:generateContent`；与网关、诊断共用 Ingress 规则；指定分组时只使用其池链的能力 |
+
+返回保留 `models`、`groups` 和模型公开字段，另含 `total`、实际 `limit`、`offset`、`has_more`、`next_offset`、`vendors`。`total` 是所有筛选后的真实总数，即使 offset 越界仍返回总数和空 models。排序为配置的 sort_order、model_name，不对不同计价模式做隐式价格混排。`vendors` 是 `{vendor,count}` 数组：厂商统一小写且去首尾空白，未配置为 null；计数保留其他筛选条件但不应用当前 vendor，便于切换厂商。未定价或停用模型不进入模型、总数或厂商统计；停用/软删除渠道不贡献可达性。
+
+GET 与 HEAD 均返回 `x-total-count`、`x-page-limit`、`x-page-offset`。HEAD 验证同样的参数，返回相同分页信息但无正文，不伪造 `Content-Length: 0`。各次请求内的模型、总数、厂商统计及分组能力使用只读 Repeatable Read 事务，序列化/发送前释放数据库连接；不同页请求之间若配置变更仍可能影响 offset 顺序，不提供跨请求快照游标。分组清单仍全量返回，响应体大小除页容量外也受分组规模影响。
+
+数据仍是公开的配置视图，厂商不根据模型名猜测，可达性不代表实时健康、个人权限或有可用余额。分页不公开渠道地址、凭证、成本或任意能力扩展字段。
+
+`console_model_catalog` 新增 6 项后端业务测试；与旧公开目录、诊断和完整路由门面合跑的 21 项已通过，429 条权限/错误探针单独统计。原分页入口缺失的红测实际收到 SPA HTML，不能解析成目录 JSON。当前隔离库的一次观测：默认 20 条正文 2,282,543 字节，HTTP 接收用时 28 ms；旧全量正文 918,666,507 字节、1,939 ms。该观测不包括后续 JSON 解析，不代表生产性能承诺。后续严格检查和全量结果见核心验证记录。
+
+
+## 当前后端有界目录与倍率同步（2026-09-27）
+
+此节取代上节的默认全量导出和全量分组说明。`GET /api/pricing` 与 `GET /api/pricing/models` 现在使用同一分页契约，无参数也只返回默认 20 个模型，最多 100 个；`paged=false` 不再恢复全量。保留公开价格和模型字段，但列表的完整性必须结合分页元数据判断。
+
+模型、分组、厂商三个列表分别分页，避免当前模型页继续乘以全部分组或厂商：
+
+| 列表 | 查询参数 | 分页信息 |
+| --- | --- | --- |
+| 模型 | 原有 `limit`、`offset`、`q`、`model`、`vendor`、`capability`、`group`、`endpoint` | 顶层 `total/limit/offset/has_more/next_offset` |
+| 分组 | `group_limit`、`group_offset`、`group_q` | `groups_page` 内同名字段 |
+| 厂商 | `vendor_limit`、`vendor_offset`、`vendor_q` | `vendors_page` 内同名字段 |
+
+三个列表均默认 20、最多 100，非法非正 limit、负 offset、非整数及过长搜索词返回 400；超大正数 limit 收敛到 100。模型搜索仍是字面子串，分组搜索匹配代码或说明，厂商搜索匹配配置名称，均转义 `%`、`_`、反斜线。分组关键词最长 256 字符，厂商关键词最长 128 字符。越界页返回空列表、真实总数、has_more=false、next_offset=null。
+
+每个模型的 `groups` 与 `chat_endpoints_by_group` **只描述响应中当前分组页**。必须翻阅分组页才能枚举全部可用分组，不能把第一页以外的分组视为不可用。指定 `group=code` 时，模型可达性按该分组的主池及单跳降级池筛选，分组列表也精确限定该代码；单独翻分组/厂商页不改变模型筛选或模型总数。厂商统计保留模型的其余筛选条件，仍忽略当前选中的 vendor，以便切换厂商。
+
+模型可达性在数据库内用 EXISTS 过滤，不再全量展开全部模型/渠道后在进程内筛选；当前页的入口信息继续使用网关 Ingress。数据库判据与入口实现通过 OpenAI、兼容上游、Codex、Gemini、Anthropic、Vertex 的模型映射、Bedrock、Azure 等 12 个配置组合交叉验证，包括 native Responses 与 compact 关闭的情况。配置可达仍不代表实时健康或个人权限。
+
+新增匿名 `GET /api/pricing/groups`，返回 `{groups,total,limit,offset,has_more,next_offset}`。支持 `limit/offset`、字面关键词 `q`、精确 `code` 和精确 `model`；model 给定时仅列出能通过主池或单跳降级池服务该已启用、已定价模型的分组。停用/删除渠道不贡献可达性。此接口不公开池代码、上游地址或凭证。GET/HEAD 都验证参数并返回 x-total-count/x-page-limit/x-page-offset，HEAD 无正文。
+
+各请求内的模型、列表总数及分组能力仍使用只读 Repeatable Read，发出正文前释放连接。跨请求使用 offset，不提供跨页快照；配置变化可能改变后续页，应重新查询。
+
+### 倍率同步适配
+
+`POST /admin/pricing/sync/fetch` 对新的 Okapi 分页来源会连续读取数值 next_offset，保留来源的原地址和筛选条件，只替换 offset；不会请求来源提供的 next_url，也不跟随 HTTP 重定向。旧 ratio_config、New API 价格列表及不带分页信息的旧 Okapi JSON 继续按原形状解析。
+
+分页来源必须从 offset=0 开始，保持 total 一致、偏移连续、模型不重复、has_more/next_offset 与条目数一致；后续页失败、变化、空转或格式错误时，整份来源报错且不输出部分差异。多次请求之间没有服务端快照令牌，不能检测所有同总数的配置替换，因此同步不是跨页原子快照。
+
+读取正文时执行单页 2 MiB、整份来源累计 16 MiB、最多 512 页的限制；单个来源的完整分页链共用 timeout_secs（默认 10 秒、范围 1–60 秒）。达到限制返回固定来源错误，不把已读部分当成功。原来的只对完整 bytes() 结果做大小检查已改为逐块检查。这些限制约束来源抓取，不改变管理员逐项选择和应用价格的流程。
+
+### 调用方迁移状态
+
+本轮没有修改或构建前端，也没有重启开发服务。现有模型广场、模型输入、Playground、连接指南仍有一次性读取 `/api/pricing` 的前端调用，尚未改为消费三个分页元数据；将新后端与这些旧调用方配合部署会只展示首批数据。这是明确未完成的调用方接入，不能宣称整站目录体验已经完成。后端倍率同步调用方已完成跨页适配。需要全量数据的其他客户端也必须显式逐页读取，不再使用无参数请求作为全量导出。
+
+后端复现、测试和当前容量观察见 [核心验证记录](core-api-verification.md)。

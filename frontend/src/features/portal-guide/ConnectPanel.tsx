@@ -11,7 +11,7 @@ import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
 import { isAvailable } from '@/features/public-pricing/catalog-data'
-import { defaultApiBase } from '@/features/public-pricing/request-examples'
+import { chatEndpointsFor, defaultApiBase } from '@/features/public-pricing/request-examples'
 import type { PricingGroup, PricingModel } from '@/features/public-pricing/types'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
@@ -42,7 +42,10 @@ export function ConnectPanel({ apiKey, group }: { apiKey?: string; group: string
     .map((m) => m.model)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   const modelValue = model ?? available[0] ?? ''
-  const cfg = resolveConnectConfig(base, modelValue, apiKey)
+  const endpoints = chatEndpointsFor(pricing.data?.models.find((m) => m.model === modelValue), group)
+  const cfg = resolveConnectConfig(base, modelValue, apiKey, endpoints)
+  const snippets = cfg && client !== 'apps' ? buildSnippets(client, cfg, t('catalog:samplePrompt')) : []
+  const incompatible = endpoints !== undefined && (endpoints.length === 0 || (client !== 'apps' && snippets.length === 0))
   const hint = client === 'claude' ? t('portal:guideClaudeHint')
     : client === 'codex' ? t('portal:guideCodexHint')
     : client === 'apps' ? t('portal:guideAppsHint')
@@ -77,10 +80,12 @@ export function ConnectPanel({ apiKey, group }: { apiKey?: string; group: string
         options={CLIENTS.map((id) => ({ value: id, label: id === 'apps' ? t('portal:guideClientApps') : CLIENT_NAMES[id] }))}
       />
       <p className="text-xs leading-5 text-muted-foreground">{hint}</p>
+      {cfg?.template === 'responses' && <p role="note" className="rounded-lg border border-border p-3 text-sm">{t('catalog:responsesOnlyHint')}</p>}
+      {incompatible && <p role="alert" className="text-sm text-destructive">{t('portal:guideUnsupportedClient')}</p>}
 
-      {cfg && (client === 'apps'
+      {cfg && !incompatible && (client === 'apps'
         ? <AppFields cfg={cfg} />
-        : buildSnippets(client, cfg, t('catalog:samplePrompt')).map((snippet, i) => <SnippetBlock key={`${client}-${i}`} snippet={snippet} />))}
+        : snippets.map((snippet, i) => <SnippetBlock key={`${client}-${i}`} snippet={snippet} />))}
 
       {/* 一键导入只在明文在场时出现：链接里必然带 key，占位符没有意义（§11.31 同一规则） */}
       {cfg && apiKey !== undefined && <ImportLinks cfg={cfg} />}
@@ -148,7 +153,7 @@ function SnippetBlock({ snippet }: { snippet: Snippet }) {
 function AppFields({ cfg }: { cfg: ConnectConfig }) {
   const { t } = useTranslation()
   const rows: Array<[string, string, boolean]> = [
-    [t('portal:guideFieldType'), t('portal:guideFieldTypeValue'), false],
+    [t('portal:guideFieldType'), cfg.template === 'responses' ? 'OpenAI Responses' : t('portal:guideFieldTypeValue'), false],
     [t('portal:guideFieldBase'), cfg.base, true],
     ['API Key', cfg.key, true],
     [t('portal:guideFieldModel'), cfg.model, true],

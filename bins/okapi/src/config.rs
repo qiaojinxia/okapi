@@ -44,7 +44,7 @@ impl Config {
             .unwrap_or_else(|| "okapi-1".to_owned());
         let clickhouse_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
         let nats_url = std::env::var("OKAPI_NATS_URL").ok();
-        let master_key = std::env::var("OKAPI_MASTER_KEY").ok();
+        let master_key = master_key_from_env();
         let console_bind: std::net::SocketAddr = std::env::var("OKAPI_CONSOLE_BIND")
             .unwrap_or_else(|_| "127.0.0.1:8081".to_owned())
             .parse()?;
@@ -59,5 +59,47 @@ impl Config {
             nats_url,
             master_key,
         })
+    }
+}
+
+/// `.env.example` 的空值表示未配置，与没有该变量一致。
+/// 非空错误值必须保留，让加密层拒绝，不能静默改成明文存储。
+pub(crate) fn master_key_from_env() -> Option<String> {
+    normalize_master_key(std::env::var("OKAPI_MASTER_KEY").ok())
+}
+
+fn normalize_master_key(value: Option<String>) -> Option<String> {
+    value
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_master_key;
+
+    #[test]
+    fn blank_master_key_is_unconfigured() {
+        for value in [None, Some(String::new()), Some(" \n\t ".to_owned())] {
+            assert_eq!(normalize_master_key(value), None);
+        }
+    }
+
+    #[test]
+    fn configured_master_key_keeps_encryption_and_rejects_invalid_values() {
+        let key = hex::encode([7_u8; 32]);
+        let normalized = normalize_master_key(Some(format!("  {key}\n")));
+        assert_eq!(normalized.as_deref(), Some(key.as_str()));
+        let sealed =
+            okapi_store::credential::seal_or_plain(normalized.as_deref(), "fixture").unwrap();
+        assert!(okapi_store::credential::is_sealed(&sealed));
+        assert!(okapi_store::credential::open(None, &sealed).is_err());
+        for invalid in ["not-hex", "00"] {
+            let normalized = normalize_master_key(Some(invalid.to_owned()));
+            assert_eq!(normalized.as_deref(), Some(invalid));
+            assert!(
+                okapi_store::credential::seal_or_plain(normalized.as_deref(), "fixture").is_err()
+            );
+        }
     }
 }

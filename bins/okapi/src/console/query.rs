@@ -7,12 +7,11 @@ use okapi_store::listing::Slice;
 use serde::Deserialize;
 use uuid::Uuid;
 
-/// 大表（令牌 / 兑换码 / 用户）不传 `limit` 时的缺省页宽（IMPLEMENTATION §11.6）。
-pub const DEFAULT_LIMIT: i64 = 50;
+/// 管理列表和门户资源列表统一的缺省页宽（IMPLEMENTATION §11.6）。
+pub const DEFAULT_LIMIT: i64 = 20;
 
-/// 列表通用查询串。配置类列表（模型 / 分组 / 池 / 套餐 / 规则 / 角色 / 渠道 / 门户令牌 / 团队）
-/// 不传 `limit` 即回全量——下拉选项与全量校验这类调用方不分页；令牌 / 兑换码 / 用户天然
-/// 成千上万，不传也只回 `DEFAULT_LIMIT`，别把全表推给浏览器。响应一律附 `total`。
+/// 列表通用查询串。省略 `limit`（包括只传 offset）也只回 `DEFAULT_LIMIT` 条，
+/// 显式页宽由 store 层封顶。响应附过滤后的 `total`；需要完整选项的调用方逐页读取。
 #[derive(Deserialize)]
 pub struct PageQuery {
     #[serde(default)]
@@ -41,14 +40,14 @@ pub struct PageQuery {
 }
 
 impl PageQuery {
-    /// 配置类列表的切片：不传 limit 回全量。
+    /// 所有 HTTP 列表都有界；内部配置加载可直接使用 store 的 `Slice::ALL`。
     pub fn slice(&self) -> Slice {
-        Slice::new(self.limit, self.offset)
+        Slice::new(Some(self.limit.unwrap_or(DEFAULT_LIMIT)), self.offset)
     }
 
     /// 大表列表的切片：不传 limit 也只回一页（`DEFAULT_LIMIT`），store 层再封顶 `MAX_PAGE`。
     pub fn bounded(&self) -> Slice {
-        Slice::new(Some(self.limit.unwrap_or(DEFAULT_LIMIT)), self.offset)
+        self.slice()
     }
 
     /// 去空白后的关键词；空串视为不过滤。

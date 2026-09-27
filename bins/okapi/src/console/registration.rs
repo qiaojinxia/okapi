@@ -159,12 +159,9 @@ pub async fn grant_credits(
 
 async fn credit(state: &AppState, user_id: i64, micro: i64, payload: Value) {
     let amount = Money::from_micros(micro);
-    if let Err(err) = state.ledger.credit(user_id, amount).await {
-        tracing::error!(user_id, error = %err, "注册赠送入账失败（Redis）");
-        return;
-    }
-    if let Err(err) = okapi_ledger::pg::record_credit(
+    if let Err(err) = okapi_ledger::operations::credit(
         &state.pg,
+        &state.ledger,
         user_id,
         amount,
         "adjust",
@@ -173,7 +170,7 @@ async fn credit(state: &AppState, user_id: i64, micro: i64, payload: Value) {
     )
     .await
     {
-        tracing::error!(user_id, error = %err, "注册赠送事件落库失败（余额已入 Redis，对账可检出）");
+        tracing::error!(user_id, error = %err, "注册赠送入账失败（需核对账本）");
     }
 }
 

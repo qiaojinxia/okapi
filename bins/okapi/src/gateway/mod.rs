@@ -13,6 +13,8 @@ pub mod error;
 pub mod estimate;
 pub mod extract;
 pub mod images;
+pub mod inflight;
+pub(crate) mod ingress;
 pub mod models;
 pub mod oauth_cred;
 pub mod openai_dialect;
@@ -23,6 +25,7 @@ pub mod rule_inputs;
 pub mod sched_redis;
 pub mod scheduler;
 pub mod state;
+pub mod token_count;
 pub mod videos;
 
 use crate::config::Config;
@@ -55,6 +58,7 @@ pub async fn build_state(
     let redis = okapi_store::connect_redis(redis_url).await?;
     let ledger = BalanceLedger::new(redis.clone());
     let sched = sched_redis::SchedulerRedis::new(redis);
+    let in_flight = inflight::InFlightGauge::new(sched.clone(), node);
 
     let book = pricing_loader::load_pricebook(&pg).await?;
     tracing::info!(epoch = book.epoch(), "PriceBook 已装载");
@@ -107,7 +111,7 @@ pub async fn build_state(
         ch,
         nats,
         master_key: {
-            let key = std::env::var("OKAPI_MASTER_KEY").ok();
+            let key = crate::config::master_key_from_env();
             okapi_store::credential::warn_if_unprotected(key.as_deref());
             key.map(Arc::from)
         },
@@ -124,8 +128,10 @@ pub async fn build_state(
                 .unwrap_or(16)
                 .div_ceil(2),
         )),
-        in_flight: Arc::new(std::sync::atomic::AtomicI64::new(0)),
-        surge_reported_at: Arc::new(std::sync::atomic::AtomicI64::new(0)),
+        image_download_gate: Arc::new(tokio::sync::Semaphore::new(4)),
+        batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
+        image_storage: Arc::new(images::tasks::objects::Storage::from_env()?),
+        in_flight,
         channel_cost_cache: moka::future::Cache::builder()
             .max_capacity(4096)
             .time_to_live(std::time::Duration::from_mins(1))
@@ -283,6 +289,16 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 /// 共约 4s），30s 足够；超时留给对账修复而不是无限期拖住编排层的 terminationGracePeriod。
 const SETTLE_DRAIN_CAP: Duration = Duration::from_secs(30);
 
+fn log_response_failure(class: &ServerErrorsFailureClass, latency: Duration) {
+    // 503 有独立的过载/渠道信号，逐请求 ERROR 会在过载时放大日志压力。
+    if matches!(class, ServerErrorsFailureClass::StatusCode(s)
+        if *s == axum::http::StatusCode::SERVICE_UNAVAILABLE)
+    {
+        return;
+    }
+    tracing::error!(classification = %class, latency = ?latency, "response failed");
+}
+
 /// 组装路由（集成测试直接复用）。
 /// 请求体上限 32MB（网关不解压请求体，即为有效字节上限；防超大体/zip bomb，§3.7-8）。
 pub fn router(state: AppState) -> Router {
@@ -293,13 +309,68 @@ pub fn router(state: AppState) -> Router {
             post(chat::messages_count_tokens),
         )
         .route("/v1/messages", post(chat::messages))
-        .route("/v1/responses", post(chat::responses))
+        .route(
+            "/v1/responses",
+            post(chat::responses).get(chat::websocket::upgrade),
+        )
+        .route("/v1/responses/compact", post(chat::responses_compact))
+        .route(
+            "/v1/responses/input_tokens",
+            post(token_count::responses_input_tokens),
+        )
         // Gemini 原生入口：`{model_action}` = `gemini-2.5-pro:generateContent`（冒号在段内）
         .route("/v1beta/models/{model_action}", post(chat::gemini_generate))
         .route("/v1beta/models", get(models::list_models_gemini))
         .route("/v1/embeddings", post(embeddings::embeddings))
         .route("/v1/images/generations", post(images::images))
+        .route(
+            "/v1/images/batches",
+            get(images::batches::list)
+                .post(images::batches::create)
+                .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
+        .route("/v1/images/batches/models", get(images::batches::models))
+        .route(
+            "/v1/images/batches/{batch_id}",
+            get(images::batches::get).delete(images::batches::delete),
+        )
+        .route(
+            "/v1/images/batches/{batch_id}/cancel",
+            post(images::batches::cancel),
+        )
+        .route(
+            "/v1/images/batches/{batch_id}/items",
+            get(images::batches::items),
+        )
+        .route(
+            "/v1/images/batches/{batch_id}/download",
+            get(images::batches::download),
+        )
+        .route(
+            "/v1/images/batches/{batch_id}/content/{slot}",
+            get(images::batches::content),
+        )
         .route("/v1/images/edits", post(images::edits))
+        .route(
+            "/v1/images/generations/async",
+            post(images::tasks::generations),
+        )
+        .route("/v1/images/edits/async", post(images::tasks::edits))
+        .route("/v1/images/tasks/{task_id}", get(images::tasks::get))
+        .route(
+            "/v1/images/tasks/{task_id}/cancel",
+            post(images::tasks::cancel),
+        )
+        .route(
+            "/v1/images/tasks/{task_id}/content/{index}",
+            get(images::tasks::content),
+        )
+        .route(
+            "/images/generations/async",
+            post(images::tasks::generations),
+        )
+        .route("/images/edits/async", post(images::tasks::edits))
+        .route("/images/tasks/{task_id}", get(images::tasks::get))
         .route("/v1/rerank", post(embeddings::rerank))
         .route("/v1/realtime", get(realtime::realtime))
         .route("/v1/videos", post(videos::create))
@@ -327,15 +398,7 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(clients::stamp_peer_ip))
         .layer(TraceLayer::new_for_http().on_failure(
             |class: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span| {
-                // 503 是数据面的"此刻不可用"（结算积压泄压、无可用渠道），各有自己的信号
-                // （泄压翻转 WARN、错误落账进 CH 错误分布）；过载时每个 503 再刷一条 ERROR，
-                // 只会重演 perf-report 修正 #3 里"错误刷屏拖垮进程"的雪崩
-                if matches!(class, ServerErrorsFailureClass::StatusCode(s)
-                    if s == axum::http::StatusCode::SERVICE_UNAVAILABLE)
-                {
-                    return;
-                }
-                tracing::error!(classification = %class, latency = ?latency, "response failed");
+                log_response_failure(&class, latency);
             },
         ))
         .with_state(state)

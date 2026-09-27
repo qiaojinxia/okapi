@@ -3,7 +3,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { Crosshair, ScrollText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { AnalyticsSearch, BreakdownDim } from '@/routes/admin.stats'
-import { BREAKDOWN_DIMS } from '@/routes/admin.stats'
+import { BREAKDOWN_DIMS, FLOW_METRICS, type FlowMetric } from '@/routes/admin.stats'
 import type { LogSearch } from '@/routes/admin.logs'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -85,7 +85,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
   const locale = i18n.language
   const navigate = useNavigate({ from: '/admin/stats' })
   const by = effectiveBy(search)
-  const params = cubeParams(search, { by, limit: '50' })
+  const params = cubeParams(search, { by, limit: '50', metric: search.metric === 'amount' ? undefined : search.metric })
   const q = useQuery({
     queryKey: qk.statsBreakdown(params),
     queryFn: () => apiFetch<BreakdownResp>(`/admin/stats/breakdown?${params}`),
@@ -166,9 +166,11 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
     <Card>
       <CardContent className="flex flex-col gap-3 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-muted-foreground">{t('analytics:breakdownBy')}</span>
             <select aria-label={t('analytics:breakdownBy')} className={selectClass} value={by} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, by: e.target.value as BreakdownDim }) })}>{BREAKDOWN_DIMS.map((d) => <option key={d} value={d} disabled={dimFiltered(d, search)}>{dimLabel[d]}</option>)}</select>
+            <span className="ml-2 text-xs text-muted-foreground">{t('admin:dashboardSortBy')}</span>
+            <select aria-label={t('admin:dashboardSortBy')} className={selectClass} value={search.metric ?? 'amount'} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, metric: e.target.value as FlowMetric }) })}>{FLOW_METRICS.map((value) => <option key={value} value={value}>{t(`charts:metric_${value}`)}</option>)}</select>
           </div>
           {q.data && (
             <span className="text-xs text-muted-foreground">
@@ -263,7 +265,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                     <div className="flex flex-col leading-tight">
                       <span className="tabular-nums">{formatCount(row.tokens, locale)}</span>
                       <span className="text-xs text-muted-foreground tabular-nums">
-                        {t('analytics:cacheRate', { v: formatBp(row.cache_hit_bp, locale) })}
+                        {t('analytics:cacheRate', { v: row.cache_hit_bp == null ? '—' : formatBp(row.cache_hit_bp, locale) })}
                       </span>
                     </div>
                   </Td>

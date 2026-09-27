@@ -283,6 +283,9 @@ export function ChannelDrawer({
         </>
       }
     >
+      {form.provider === 'codex' && <p role="note" className="mb-4 rounded-lg border border-border bg-muted/40 p-3 text-sm leading-6">
+        {t('admin:codexEndpointHint')}
+      </p>}
       {isEdit && (
         <Tabs
           className="mb-4"

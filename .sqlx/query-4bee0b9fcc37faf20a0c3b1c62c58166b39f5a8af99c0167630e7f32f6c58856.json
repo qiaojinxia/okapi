@@ -1,0 +1,196 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.id,s.user_id,s.plan_id,\n        s.plan_code_snapshot AS plan_code,s.display_name_snapshot AS display_name,s.period_snapshot AS period,\n        s.status,s.quota_micro,s.group_code_snapshot AS group_code,s.granted_group,s.starts_at,s.expires_at,\n        s.window_start,s.window_end,s.source FROM user_subscriptions s WHERE s.id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "plan_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "plan_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "display_name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "display_name_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "period",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "period_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "quota_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "quota_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "group_code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "granted_group",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "granted_group"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "starts_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "starts_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "window_start",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_start"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "window_end",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_end"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "source",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "source"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4bee0b9fcc37faf20a0c3b1c62c58166b39f5a8af99c0167630e7f32f6c58856"
+}

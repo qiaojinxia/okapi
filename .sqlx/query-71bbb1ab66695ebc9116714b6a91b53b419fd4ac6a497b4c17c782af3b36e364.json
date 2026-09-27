@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH grants AS (UPDATE subscription_grants SET retry_after=now()+interval '60 seconds' WHERE user_id=$1 AND applied_at IS NULL RETURNING id) UPDATE subscription_sync SET retry_after=now()+interval '60 seconds' WHERE user_id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "71bbb1ab66695ebc9116714b6a91b53b419fd4ac6a497b4c17c782af3b36e364"
+}

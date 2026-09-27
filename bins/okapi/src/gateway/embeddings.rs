@@ -13,7 +13,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use okapi_providers::{UpstreamError, rewrite_model};
 use okapi_store::channels::KeyFailure;
@@ -151,6 +151,8 @@ async fn handle(
     let est_usage = TokenUsage {
         prompt_tokens: est_prompt,
         cached_tokens: 0,
+        cache_read_reported: false,
+        cache_write_reported: false,
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
@@ -169,7 +171,7 @@ async fn handle(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    match state
+    let reservation_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -184,7 +186,7 @@ async fn handle(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -196,7 +198,7 @@ async fn handle(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     // —— 预扣已建立：一切失败路径必须退款 ——
     match forward(
@@ -214,6 +216,8 @@ async fn handle(
             let usage = usage.unwrap_or(TokenUsage {
                 prompt_tokens: est_prompt,
                 cached_tokens: 0,
+                cache_read_reported: false,
+                cache_write_reported: false,
                 cache_write_tokens: 0,
                 audio_prompt_tokens: 0,
                 image_prompt_tokens: 0,
@@ -224,74 +228,57 @@ async fn handle(
             let quote = calculate(&book, &calc, usage).map_err(AppError::from);
             match quote {
                 Ok(quote) => {
-                    match state
-                        .ledger
-                        .commit(key.user_id, key.key_id, request_id, quote.amount)
-                        .await
-                    {
-                        Ok(CommitOutcome::Committed {
-                            balance_after,
-                            pool,
-                            ..
-                        }) => {
-                            let snapshot = serde_json::to_value(&quote.snapshot).ok();
-                            let input = SettlementInput {
-                                dimensions: okapi_ledger::pg::UsageDimensions::new(
-                                    requested_model,
-                                    &upstream_model,
-                                    &format!("/v1{upstream_path}"),
-                                    &format!("/v1{upstream_path}"),
-                                ),
-                                request_id,
-                                log_type: 2,
-                                user_id: key.user_id,
-                                api_key_id: key.key_id,
-                                group_code: &key.group_code,
-                                model_name: &canonical,
-                                channel_id: Some(channel.0),
-                                channel_key_id: Some(channel.1),
-                                state: BillingState::Committed,
-                                usage,
-                                amount: quote.amount,
-                                original: quote.original,
-                                discount: quote.discount,
-                                list_price: quote.list_price,
-                                upstream_cost: None,
-                                pricing_epoch: Some(book.epoch()),
-                                pricing_snapshot: snapshot,
-                                latency_ms: elapsed_ms(started),
-                                ttft_ms: None,
-                                is_stream: false,
-                                retry_count: 0,
-                                failover_count: failover,
-                                upstream_status: Some(200),
-                                error_code: None,
-                                upstream_request_id: upstream_request_id.as_deref(),
-                                node: state.node.as_ref(),
-                                sticky_layer: 3,
-                                client_type: detect_client_type(headers),
-                                client_ip: None,
-                                delta_micro: quote.amount.as_micros().saturating_neg(),
-                                balance_after: Some(balance_after),
-                                event_type: "commit",
-                                pool,
-                            };
-                            state.settle_write(input).await;
-                            super::auth::record_settlement_counters(
-                                state,
-                                key.user_id,
-                                key.member_user_id,
-                                quote.amount.as_micros(),
-                                usage.total_raw(),
-                            )
-                            .await;
-                        }
-                        Ok(CommitOutcome::NoReservation) => {
-                            tracing::warn!(request_id = %request_id, "embeddings 重复结算竞争，跳过");
-                        }
-                        Err(err) => {
-                            tracing::error!(request_id = %request_id, error = %err, "embeddings Redis 结算失败（悬置待清理）");
-                        }
+                    let snapshot = serde_json::to_value(&quote.snapshot).ok();
+                    let input = SettlementInput {
+                        dimensions: okapi_ledger::pg::UsageDimensions::new(
+                            requested_model,
+                            &upstream_model,
+                            &format!("/v1{upstream_path}"),
+                            &format!("/v1{upstream_path}"),
+                        ),
+                        request_id,
+                        log_type: 2,
+                        user_id: key.user_id,
+                        api_key_id: key.key_id,
+                        group_code: &key.group_code,
+                        model_name: &canonical,
+                        channel_id: Some(channel.0),
+                        channel_key_id: Some(channel.1),
+                        state: BillingState::Committed,
+                        usage,
+                        amount: quote.amount,
+                        original: quote.original,
+                        discount: quote.discount,
+                        list_price: quote.list_price,
+                        upstream_cost: None,
+                        pricing_epoch: Some(book.epoch()),
+                        pricing_snapshot: snapshot,
+                        latency_ms: elapsed_ms(started),
+                        ttft_ms: None,
+                        is_stream: false,
+                        retry_count: 0,
+                        failover_count: failover,
+                        upstream_status: Some(200),
+                        error_code: None,
+                        upstream_request_id: upstream_request_id.as_deref(),
+                        node: state.node.as_ref(),
+                        sticky_layer: 3,
+                        client_type: detect_client_type(headers),
+                        client_ip: None,
+                        delta_micro: quote.amount.as_micros().saturating_neg(),
+                        balance_after: None,
+                        event_type: "commit",
+                        pool: reservation_pool,
+                    };
+                    if state.settle_success(input).await? {
+                        super::auth::record_settlement_counters(
+                            state,
+                            key.user_id,
+                            key.member_user_id,
+                            quote.amount.as_micros(),
+                            usage.total_raw(),
+                        )
+                        .await;
                     }
                 }
                 Err(err) => {
@@ -315,10 +302,11 @@ async fn handle(
                 .refund(key.user_id, key.key_id, request_id)
                 .await
             {
-                Ok(r) => r.pool,
+                Ok(r) if !r.released.is_zero() => r.pool,
+                Ok(_) => reservation_pool,
                 Err(rerr) => {
                     tracing::error!(request_id = %request_id, error = %rerr, "embeddings 退款失败（悬置待清理）");
-                    Pool::Wallet
+                    reservation_pool
                 }
             };
             let input = SettlementInput {

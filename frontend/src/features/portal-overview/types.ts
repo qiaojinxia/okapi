@@ -7,6 +7,8 @@ export interface BreakdownRow {
   requests: number
   prompt_tokens: number
   cached_tokens: number
+  cache_read_known_requests?: number
+  cache_hit_bp?: number | null
   cache_write_tokens?: number | null
   cache_write_known_requests?: number
   completion_tokens: number
@@ -25,6 +27,8 @@ export interface BreakdownRow {
 }
 
 export interface BreakdownTotal {
+  cache_read_known_requests?: number
+  ttft_samples?: number
   cache_write_tokens?: number | null
   cache_write_known_requests?: number
   original_micro?: number
@@ -41,7 +45,7 @@ export interface BreakdownTotal {
   tokens: number
   amount_micro: number
   discount_micro: number
-  cache_hit_bp: number
+  cache_hit_bp: number | null
   avg_rpm_micro: number
   avg_tpm_micro: number
 }
@@ -87,6 +91,8 @@ export function sumByModel(rows: BreakdownRow[]): Map<string, BreakdownRow> {
     cur.requests += r.requests
     cur.prompt_tokens += r.prompt_tokens
     cur.cached_tokens += r.cached_tokens
+    cur.cache_read_known_requests = (cur.cache_read_known_requests ?? 0) + (r.cache_read_known_requests ?? 0)
+    cur.cache_write_known_requests = (cur.cache_write_known_requests ?? 0) + (r.cache_write_known_requests ?? 0)
     cur.cache_write_tokens = cur.cache_write_tokens == null || r.cache_write_tokens == null ? null : cur.cache_write_tokens + r.cache_write_tokens
     cur.completion_tokens += r.completion_tokens
     cur.reasoning_tokens += r.reasoning_tokens

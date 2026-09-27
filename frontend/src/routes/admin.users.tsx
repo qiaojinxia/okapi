@@ -9,6 +9,7 @@ export interface UsersSearch extends PageSearch {
 }
 
 export const Route = createFileRoute('/admin/users')({
+  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): UsersSearch => ({
     ...pageSearch(search),
     q: text(search.q),

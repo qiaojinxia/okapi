@@ -31,7 +31,7 @@ export function usageChart(rows: BreakdownRow[], days: string[], metric: UsageMe
       return { bucket, value: metric === 'cache' ? (prompt > 0 ? sum('cached_tokens') / prompt * 100 : null)
         : metric === 'success' ? (requests > 0 ? (requests - sum('errors')) / requests * 100 : null)
           : completePerformance ? sum('latency_sum_ms') / requests : null,
-        ttft: completePerformance && sum('ttft_samples') > 0 ? sum('ttft_sum_ms') / sum('ttft_samples') : null }
+        ttft: sum('ttft_samples') > 0 ? sum('ttft_sum_ms') / sum('ttft_samples') : null }
     })
     const series: ChartSeries[] = [{ key: 'value', label: metric === 'latency' ? labels.latency : labels.total, color: chartColor(0) }]
     if (metric === 'latency') series.push({ key: 'ttft', label: labels.ttft, color: chartColor(1) })

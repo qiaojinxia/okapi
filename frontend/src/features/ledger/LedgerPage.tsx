@@ -30,7 +30,7 @@ export function LedgerPage() {
   const { t } = useTranslation()
   const [tab, setTab] = useState<Tab>('ledger')
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader title={t('portal:ledgerNav')} description={t('portal:ledgerDesc')} icon={Receipt} />
       <Tabs
         items={TABS.map((id) => ({
@@ -101,8 +101,8 @@ function LedgerTable() {
   if (rows.length === 0) return <EmptyState hint={t('portal:ledgerEmptyHint')} />
 
   return (
-    <div className="flex flex-col gap-3">
-      <Table>
+    <div className="list-page-section">
+      <Table stickyHeader>
         <THead>
           <Tr>
             <Th>{t('logs:time')}</Th>
@@ -134,7 +134,7 @@ function LedgerTable() {
                   </Badge>
                 )}
               </Td>
-              <Td className="text-xs">
+              <Td className="min-w-48 text-xs">
                 {describe(r, t)}
                 {r.request_id && (
                   <>
@@ -208,8 +208,8 @@ function OrdersTable() {
   if (rows.length === 0) return <EmptyState hint={t('portal:ordersEmptyHint')} />
 
   return (
-    <div className="flex flex-col gap-3">
-      <Table>
+    <div className="list-page-section">
+      <Table stickyHeader>
         <THead>
           <Tr>
             <Th>{t('logs:time')}</Th>

@@ -10,6 +10,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/ratio_sync_pages.rs"]
+mod pages;
+
 struct Env {
     pg: PgPool,
     console: SocketAddr,

@@ -2,7 +2,7 @@ import { Check, Copy, Download, Terminal } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { PricingModel } from './types'
-import { buildRequestExample, defaultApiBase, requestTemplates } from './request-examples'
+import { buildRequestExample, defaultApiBase, requestTemplates, templatesFor } from './request-examples'
 import type { RequestTemplate } from './request-examples'
 import { Button } from '@/components/ui/button'
 import { CopyButton, useCopy } from '@/components/ui/copy-button'
@@ -10,10 +10,12 @@ import { Input, Label, Textarea } from '@/components/ui/input'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 
-export function RequestExamples({ model }: { model: PricingModel }) {
+export function RequestExamples({ model, group }: { model: PricingModel; group: string }) {
   const { t } = useTranslation()
   const [base, setBase] = useState(() => defaultApiBase(window.location.origin, import.meta.env.VITE_GATEWAY_BASE_URL))
-  const [template, setTemplate] = useState<RequestTemplate>(model.capabilities?.embedding === true ? 'embeddings' : 'chat')
+  const [selectedTemplate, setTemplate] = useState<RequestTemplate>(model.capabilities?.embedding === true ? 'embeddings' : 'chat')
+  const templates = templatesFor(model, group)
+  const template = templates.find((item) => item.id === selectedTemplate)?.id ?? templates[0]?.id ?? 'chat'
   const [prompt, setPrompt] = useState(t('catalog:samplePrompt'))
   const [stream, setStream] = useState(false)
   const [language, setLanguage] = useState<'curl' | 'python' | 'javascript' | 'body'>('curl')
@@ -29,8 +31,10 @@ export function RequestExamples({ model }: { model: PricingModel }) {
     link.click()
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
+  if (templates.length === 0) return <p role="status" className="text-sm text-muted-foreground">{t('catalog:noEndpointForGroup')}</p>
   return <section className="flex flex-col gap-4">
     <p className="text-xs leading-5 text-muted-foreground">{t('catalog:exampleHint')}</p>
+    {templates.length === 1 && template === 'responses' && <p role="note" className="rounded-lg border border-border p-3 text-sm">{t('catalog:responsesOnlyHint')}</p>}
     <div className="flex flex-col gap-2">
       <Label htmlFor="example-base">{t('catalog:apiBase')}</Label>
       <div className="flex items-center gap-2"><Input id="example-base" value={base} onChange={(e) => setBase(e.target.value)} placeholder="https://api.example.com/v1" aria-invalid={!example} aria-describedby="example-base-hint" spellCheck={false} />
@@ -39,7 +43,7 @@ export function RequestExamples({ model }: { model: PricingModel }) {
       {!example && <p role="alert" className="text-xs text-destructive">{t('catalog:invalidBase')}</p>}
     </div>
     <div className="grid grid-cols-1 items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-      <div className="flex flex-col gap-2"><Label htmlFor="example-template">{t('catalog:apiTemplate')}</Label><Select id="example-template" value={template} onChange={(value) => setTemplate(value as RequestTemplate)} options={requestTemplates.map((item) => ({ value: item.id, label: item.name }))} /></div>
+      <div className="flex flex-col gap-2"><Label htmlFor="example-template">{t('catalog:apiTemplate')}</Label><Select id="example-template" value={template} onChange={(value) => setTemplate(value as RequestTemplate)} options={templates.map((item) => ({ value: item.id, label: item.name }))} /></div>
       {supportsStream && <label className="flex min-h-9 cursor-pointer items-center gap-2 text-xs"><input type="checkbox" className="h-4 w-4 accent-primary" checked={stream} onChange={(e) => setStream(e.target.checked)} />{t('catalog:streamResponse')}</label>}
     </div>
     {example && <div className="flex min-w-0 items-start gap-2 rounded-lg border border-border bg-muted/30 p-3">

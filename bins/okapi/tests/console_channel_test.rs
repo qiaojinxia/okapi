@@ -12,6 +12,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 
+#[path = "support/paged_lists.rs"]
+mod paged_lists;
+
 async fn mock_models(headers: axum::http::HeaderMap) -> axum::response::Response {
     if headers
         .get("authorization")
@@ -173,15 +176,7 @@ async fn channel_test_probes_reachability() {
     assert!(r["at"].is_string(), "测活结果带时间戳供列表回填：{r}");
 
     // 测活结果留痕：列表页每行回填 last_test（new-api response_time/test_time 语义）
-    let list: Value = reqwest::Client::new()
-        .get(format!("http://{}/admin/channels", env.addr))
-        .bearer_auth(&env.admin_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, list) = paged_lists::get_all(env.addr, "/admin/channels", &env.admin_token).await;
     let row = |id: i64| {
         list["data"]
             .as_array()
@@ -197,15 +192,7 @@ async fn channel_test_probes_reachability() {
     assert_eq!(row(dead)["last_test"]["ok"], false);
     assert!(row(dead)["last_test"]["error_code"].is_string());
     let never = mk_channel(&env, "never-tested", &format!("http://{}/v1", env.mock)).await;
-    let list2: Value = reqwest::Client::new()
-        .get(format!("http://{}/admin/channels", env.addr))
-        .bearer_auth(&env.admin_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, list2) = paged_lists::get_all(env.addr, "/admin/channels", &env.admin_token).await;
     let never_row = list2["data"]
         .as_array()
         .unwrap()
@@ -295,15 +282,7 @@ async fn channel_balance_probe() {
     assert_eq!(body["error"]["param"], "balance_unsupported");
 
     // 列表回填 last_balance（与 last_test 同一留痕机制）
-    let list: Value = client
-        .get(format!("http://{}/admin/channels", env.addr))
-        .bearer_auth(&env.admin_token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let (_, list) = paged_lists::get_all(env.addr, "/admin/channels", &env.admin_token).await;
     let row = list["data"]
         .as_array()
         .unwrap()

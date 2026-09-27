@@ -3,12 +3,13 @@ import { Link, getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { KeyRound, Power, PowerOff, ScrollText, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { toast } from '@/components/ui/toast'
 import { Button } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { IconButton } from '@/components/ui/icon-button'
-import { Input, Label } from '@/components/ui/input'
+import { Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
 import { SearchInput } from '@/components/ui/search-input'
 import { TableSkeleton } from '@/components/ui/skeleton'
@@ -16,7 +17,9 @@ import { Pagination } from '@/components/ui/pagination'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { UsageCell, useEntityUsage } from '@/features/analytics/UsageCell'
+import { UserSearchInput, validUserFilter } from '@/features/users/UserSearchInput'
 import { useDraft } from '@/hooks/use-draft'
+import { usePermission } from '@/hooks/use-auth'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -56,6 +59,10 @@ interface AdminKeyRow {
 export function AdminKeysPage() {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
+  const can = usePermission()
+  const canManage = can('user.manage')
+  const canReadLogs = can('billing.read')
+  const showActions = canManage || canReadLogs
   const queryClient = useQueryClient()
   // 检索条件（关键词 / 用户 id）与页码都在地址里，用户页可以带 user_id 直达
   const search = routeApi.useSearch()
@@ -64,6 +71,8 @@ export function AdminKeysPage() {
   const uid = search.user_id ?? null
   const [draft, setDraft] = useDraft(query)
   const [userIdDraft, setUserIdDraft] = useDraft(uid === null ? '' : String(uid))
+  const [filterError, setFilterError] = useState(false)
+  const invalidUser = filterError && !validUserFilter(userIdDraft)
   const { confirm, dialog } = useConfirm()
 
   const pager = usePagination()
@@ -84,10 +93,19 @@ export function AdminKeysPage() {
 
   const invalidate = () => void queryClient.invalidateQueries({ queryKey: qk.adminKeysAll })
   // 两个条件一起提交，并在同一次导航里回第一页
-  const applySearch = () =>
+  const applySearch = () => {
+    if (!validUserFilter(userIdDraft)) { setFilterError(true); return }
+    setFilterError(false)
     void navigate({
       search: (prev) => ({ ...prev, q: text(draft), user_id: posInt(userIdDraft), page: undefined }),
     })
+  }
+  const clearFilters = () => {
+    setDraft('')
+    setUserIdDraft('')
+    setFilterError(false)
+    void navigate({ search: (prev) => ({ ...prev, q: undefined, user_id: undefined, page: undefined }) })
+  }
 
   const setStatus = useMutation({
     mutationFn: (arg: { id: number; status: number }) =>
@@ -123,7 +141,7 @@ export function AdminKeysPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('admin:keysNav')}
         description={t('admin:keysDesc')}
@@ -133,34 +151,39 @@ export function AdminKeysPage() {
         }
       />
       <Toolbar
+        selection={keys.isFetching ? <span role="status" className="text-xs text-muted-foreground">{t('common:loading')}</span> : undefined}
         filters={
-          <>
-            <SearchInput
-              id="kq"
-              className="w-64"
-              aria-label={t('admin:keySearch')}
-              value={draft}
-              placeholder={t('admin:keySearchHint')}
-              onChange={setDraft}
-              onSubmit={applySearch}
-            />
-            <div className="flex items-center gap-2">
-              <Label htmlFor="kuid">{t('admin:keyFilterUser')}</Label>
-              <Input
-                id="kuid"
-                className="w-28"
-                value={userIdDraft}
-                inputMode="numeric"
-                onChange={(e) => setUserIdDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') applySearch()
-                }}
+          <form className="grid w-full min-w-0 items-start gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,20rem)_minmax(0,20rem)_auto]" onSubmit={(event) => { event.preventDefault(); applySearch() }}>
+            <div className="flex min-w-0 flex-col gap-1">
+              <Label htmlFor="kq" className="leading-4">{t('admin:keySearch')}</Label>
+              <SearchInput
+                id="kq"
+                className="w-full"
+                aria-label={t('admin:keySearch')}
+                value={draft}
+                placeholder={t('admin:keySearchHint')}
+                onChange={setDraft}
+                onSubmit={applySearch}
               />
             </div>
-            <Button size="sm" onClick={applySearch}>
-              {t('common:search')}
-            </Button>
-          </>
+            <div className="flex min-w-0 flex-col gap-1">
+              <Label htmlFor="kuid" className="leading-4">{t('admin:userFilterLabel')}</Label>
+              <UserSearchInput
+                id="kuid"
+                value={userIdDraft}
+                knownUsers={rows.map((key) => ({ id: key.user_id, username: key.username }))}
+                onChange={(value) => { setUserIdDraft(value); setFilterError(false) }}
+                onSubmit={applySearch}
+                aria-invalid={invalidUser || undefined}
+                aria-describedby={invalidUser ? 'kuid-error' : undefined}
+              />
+              {invalidUser && <p id="kuid-error" role="alert" className="text-xs text-destructive">{t('admin:userFilterInvalid')}</p>}
+            </div>
+            <div className="flex flex-wrap gap-2 lg:pt-5">
+              <Button type="submit" size="sm" variant="outline">{t('common:search')}</Button>
+              {(query !== '' || uid !== null || draft !== '' || userIdDraft !== '') && <Button size="sm" variant="ghost" onClick={clearFilters}>{t('common:clearFilters')}</Button>}
+            </div>
+          </form>
         }
       />
 
@@ -170,9 +193,11 @@ export function AdminKeysPage() {
       ) : keys.isPending ? (
         <TableSkeleton rows={8} cols={9} />
       ) : rows.length === 0 ? (
-        <EmptyState />
+        <EmptyState title={query !== '' || uid !== null ? t('common:noResults') : undefined}
+          hint={query !== '' || uid !== null ? t('common:noResultsHint') : undefined}
+          action={query !== '' || uid !== null ? <Button variant="outline" onClick={clearFilters}>{t('common:clearFilters')}</Button> : undefined} />
       ) : (
-        <Table stickyHeader>
+        <Table stickyHeader aria-label={t('admin:keysNav')} aria-busy={keys.isFetching} scrollResetKey={`${query}:${uid}:${pager.offset}:${pager.limit}`}>
           <THead>
             <Tr>
               <Th>ID</Th>
@@ -185,7 +210,7 @@ export function AdminKeysPage() {
               <Th>{t('portal:keyRpm')}</Th>
               <Th>{t('admin:keyExpires')}</Th>
               <Th>{t('admin:keyLastUsed')}</Th>
-              <Th>{t('common:actions')}</Th>
+              {showActions && <Th>{t('common:actions')}</Th>}
             </Tr>
           </THead>
           <TBody>
@@ -239,9 +264,9 @@ export function AdminKeysPage() {
                 <Td className="whitespace-nowrap text-xs">
                   {k.last_used_at ? dayjs(k.last_used_at).format('MM-DD HH:mm') : '—'}
                 </Td>
-                <Td>
+                {showActions && <Td>
                   <div className="flex items-center gap-0.5">
-                    <Link
+                    {canReadLogs && <Link
                       to="/admin/logs"
                       search={{ api_key_id: k.id, hours: 168 }}
                       className="inline-flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
@@ -249,9 +274,11 @@ export function AdminKeysPage() {
                       aria-label={t('admin:keyViewLogs')}
                     >
                       <ScrollText className="h-4 w-4" />
-                    </Link>
+                    </Link>}
+                    {canManage && <>
                     <IconButton
                       icon={k.status === 1 ? PowerOff : Power}
+                      disabled={setStatus.isPending || remove.isPending || keys.isFetching}
                       label={k.status === 1 ? t('admin:keyDisable') : t('admin:keyEnable')}
                       onClick={() => setStatus.mutate({ id: k.id, status: k.status === 1 ? 2 : 1 })}
                     />
@@ -259,6 +286,7 @@ export function AdminKeysPage() {
                       icon={Trash2}
                       label={t('common:delete')}
                       variant="destructive"
+                      disabled={setStatus.isPending || remove.isPending || keys.isFetching}
                       onClick={() =>
                         confirm({
                           title: t('common:confirmDeleteTitle', { name: k.key_prefix }),
@@ -267,8 +295,9 @@ export function AdminKeysPage() {
                         })
                       }
                     />
+                    </>}
                   </div>
-                </Td>
+                </Td>}
               </Tr>
             ))}
           </TBody>

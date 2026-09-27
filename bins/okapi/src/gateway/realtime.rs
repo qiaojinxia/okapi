@@ -15,7 +15,7 @@ use axum::response::Response;
 use futures::{SinkExt, StreamExt};
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, Pool, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use serde::Deserialize;
 use serde_json::Value;
@@ -81,6 +81,7 @@ pub async fn realtime(
 struct Prep {
     key: std::sync::Arc<okapi_store::AuthedKey>,
     request_id: Uuid,
+    reservation_pool: Pool,
     canonical: String,
     dimensions: okapi_ledger::pg::UsageDimensions,
     upstream_url: String,
@@ -136,6 +137,8 @@ async fn prepare(
     let est_usage = TokenUsage {
         prompt_tokens: cap,
         cached_tokens: 0,
+        cache_read_reported: false,
+        cache_write_reported: false,
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
@@ -189,8 +192,8 @@ async fn prepare(
             now,
         )
         .await;
-    match reserve {
-        Ok(ReserveOutcome::Reserved { .. }) => {}
+    let reservation_pool = match reserve {
+        Ok(ReserveOutcome::Reserved { pool, .. }) => pool,
         Ok(ReserveOutcome::Insufficient { .. }) => {
             state.sched.ws_lease_release(key.key_id, &conn_id).await;
             return Err(AppError::new(
@@ -208,7 +211,7 @@ async fn prepare(
             state.sched.ws_lease_release(key.key_id, &conn_id).await;
             return Err(err.into());
         }
-    }
+    };
 
     // 候选：openai 协议渠道（anthropic/gemini 无 Realtime 面；能力显式 false 排除）
     let rows = okapi_store::channels::candidates_for_model(
@@ -231,7 +234,7 @@ async fn prepare(
             })
             .collect(),
         Err(err) => {
-            release_reservation_and_slot(state, key, request_id).await;
+            release_reservation_and_slot(state, key, request_id, reservation_pool).await;
             return Err(err.into());
         }
     };
@@ -239,7 +242,7 @@ async fn prepare(
         .retain_margin_ok(&key.group_code, &mut candidates)
         .await;
     let Some(cand) = candidates.into_iter().next() else {
-        release_reservation_and_slot(state, key, request_id).await;
+        release_reservation_and_slot(state, key, request_id, reservation_pool).await;
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             super::state::no_candidates_code(margin_removed),
@@ -261,6 +264,7 @@ async fn prepare(
     Ok(Prep {
         key: std::sync::Arc::clone(key),
         request_id,
+        reservation_pool,
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             requested_model,
             &upstream_model,
@@ -281,12 +285,14 @@ async fn release_reservation_and_slot(
     state: &AppState,
     key: &okapi_store::AuthedKey,
     id: Uuid,
+    reservation_pool: Pool,
 ) -> Pool {
     let pool = match state.ledger.refund(key.user_id, key.key_id, id).await {
-        Ok(r) => r.pool,
+        Ok(r) if !r.released.is_zero() => r.pool,
+        Ok(_) => reservation_pool,
         Err(err) => {
             tracing::error!(request_id = %id, error = %err, "realtime 退款失败（悬置待 sweep）");
-            Pool::Wallet
+            reservation_pool
         }
     };
     state
@@ -441,22 +447,25 @@ async fn fail_session(state: &AppState, prep: &Prep, mut client: WebSocket, code
     });
     let _ = client.send(AxumMsg::Text(event.to_string().into())).await;
     let _ = client.close().await;
-    let pool = release_reservation_and_slot(state, &prep.key, prep.request_id).await;
+    let pool =
+        release_reservation_and_slot(state, &prep.key, prep.request_id, prep.reservation_pool)
+            .await;
     record_failure(state, prep, TokenUsage::default(), Some(code), pool).await;
 }
 
 /// 断开结算：有产出按累计 usage commit；零产出全额退款留痕。
-/// 退款并返回预扣所在池（失败记账要写对 pool）；退款失败按钱包记，预扣留给 sweep。
+/// 退款并返回预扣所在池；退款失败仍保留原池，预扣留给 sweep。
 async fn refund_pool(state: &AppState, prep: &Prep) -> Pool {
     match state
         .ledger
         .refund(prep.key.user_id, prep.key.key_id, prep.request_id)
         .await
     {
-        Ok(r) => r.pool,
+        Ok(r) if !r.released.is_zero() => r.pool,
+        Ok(_) => prep.reservation_pool,
         Err(err) => {
             tracing::error!(request_id = %prep.request_id, error = %err, "realtime 退款失败（悬置待 sweep）");
-            Pool::Wallet
+            prep.reservation_pool
         }
     }
 }
@@ -477,74 +486,58 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
             return;
         }
     };
-    match state
-        .ledger
-        .commit(
-            prep.key.user_id,
-            prep.key.key_id,
-            prep.request_id,
-            quote.amount,
-        )
-        .await
-    {
-        Ok(CommitOutcome::Committed {
-            balance_after,
-            pool,
-            ..
-        }) => {
-            let input = SettlementInput {
-                dimensions: prep.dimensions.clone(),
-                request_id: prep.request_id,
-                log_type: 2,
-                user_id: prep.key.user_id,
-                api_key_id: prep.key.key_id,
-                group_code: &prep.key.group_code,
-                model_name: &prep.canonical,
-                channel_id: Some(prep.channel.0),
-                channel_key_id: Some(prep.channel.1),
-                state: BillingState::Committed,
-                usage,
-                amount: quote.amount,
-                original: quote.original,
-                discount: quote.discount,
-                list_price: quote.list_price,
-                upstream_cost: None,
-                pricing_epoch: Some(book.epoch()),
-                pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
-                latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),
-                ttft_ms: None,
-                is_stream: true,
-                retry_count: 0,
-                failover_count: 0,
-                upstream_status: Some(101),
-                error_code: None,
-                upstream_request_id: None,
-                node: state.node.as_ref(),
-                sticky_layer: 0,
-                client_type: "realtime",
-                client_ip: None,
-                delta_micro: quote.amount.as_micros().saturating_neg(),
-                balance_after: Some(balance_after),
-                event_type: "commit",
-                pool,
-            };
-            state.settle_write(input).await;
-            super::auth::record_settlement_counters(
-                state,
-                prep.key.user_id,
-                prep.key.member_user_id,
-                quote.amount.as_micros(),
-                usage.total_raw(),
-            )
-            .await;
-        }
-        Ok(CommitOutcome::NoReservation) => {
-            tracing::warn!(request_id = %prep.request_id, "realtime 预扣缺失（重复结算/sweep 竞争），跳过");
-        }
-        Err(err) => {
-            tracing::error!(request_id = %prep.request_id, error = %err, "realtime Redis 结算失败（悬置待 sweep）");
+    let input = SettlementInput {
+        dimensions: prep.dimensions.clone(),
+        request_id: prep.request_id,
+        log_type: 2,
+        user_id: prep.key.user_id,
+        api_key_id: prep.key.key_id,
+        group_code: &prep.key.group_code,
+        model_name: &prep.canonical,
+        channel_id: Some(prep.channel.0),
+        channel_key_id: Some(prep.channel.1),
+        state: BillingState::Committed,
+        usage,
+        amount: quote.amount,
+        original: quote.original,
+        discount: quote.discount,
+        list_price: quote.list_price,
+        upstream_cost: None,
+        pricing_epoch: Some(book.epoch()),
+        pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
+        latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),
+        ttft_ms: None,
+        is_stream: true,
+        retry_count: 0,
+        failover_count: 0,
+        upstream_status: Some(101),
+        error_code: None,
+        upstream_request_id: None,
+        node: state.node.as_ref(),
+        sticky_layer: 0,
+        client_type: "realtime",
+        client_ip: None,
+        delta_micro: quote.amount.as_micros().saturating_neg(),
+        balance_after: None,
+        event_type: "commit",
+        pool: prep.reservation_pool,
+    };
+    match state.settle_success(input).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::error!(request_id=%prep.request_id, ?error, "realtime usage persistence failed");
+            return;
         }
     }
+    super::auth::record_settlement_counters(
+        state,
+        prep.key.user_id,
+        prep.key.member_user_id,
+        quote.amount.as_micros(),
+        usage.total_raw(),
+    )
+    .await;
 }
 
 /// 失败/零产出留痕（log_type 5，delta 0；退款金额语义由 refund Lua 保证）。

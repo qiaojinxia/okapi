@@ -68,7 +68,7 @@ pub struct PricingSnapshot {
         serialize_with = "ser_ratio_opt"
     )]
     pub cache_ratio: Option<RatioFp>,
-    /// 缓存写入倍率（仅本次实际发生缓存写入时出现，Anthropic 系）。
+    /// 缓存写入倍率（仅本次实际发生缓存写入时出现）。
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "ser_ratio_opt"

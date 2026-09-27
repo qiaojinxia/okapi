@@ -3,6 +3,7 @@ import { TeamsPage } from '@/features/teams/TeamsPage'
 import { pageSearch } from '@/hooks/use-pagination'
 
 export const Route = createFileRoute('/portal/teams')({
+  staticData: { fitViewport: true },
   validateSearch: pageSearch,
   component: TeamsPage,
 })

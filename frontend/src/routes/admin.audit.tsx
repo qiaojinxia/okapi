@@ -12,6 +12,7 @@ export interface AuditSearch {
 }
 
 export const Route = createFileRoute('/admin/audit')({
+  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): AuditSearch => ({
     actor: text(search.actor),
     action: text(search.action),

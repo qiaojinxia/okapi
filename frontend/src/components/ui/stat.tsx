@@ -7,7 +7,7 @@ export type StatTone = 'default' | 'good' | 'warn' | 'bad' | 'info'
 
 interface StatProps {
   icon?: LucideIcon
-  label: string
+  label: React.ReactNode
   value: React.ReactNode
   /// 副行：对照锚点（昨日 / 窗口累计）或一句解释。
   sub?: React.ReactNode
@@ -19,6 +19,7 @@ interface StatProps {
   className?: string
   /// 窄卡片将图标放在标签行，给数值保留整行宽度。
   layout?: 'inline' | 'stacked'
+  compact?: boolean
   /// 可点击（跳转到明细）。
   onClick?: () => void
 }
@@ -54,9 +55,10 @@ export function Stat({
   aside,
   className,
   layout = 'inline',
+  compact = false,
   onClick,
 }: StatProps) {
-  if (loading) return <StatSkeleton />
+  if (loading) return <StatSkeleton layout={layout} compact={compact} className={className} icon={!!Icon} sub={sub !== undefined && sub !== ''} />
   const Comp = onClick ? 'button' : 'div'
   return (
     <Comp
@@ -64,6 +66,7 @@ export function Stat({
       onClick={onClick}
       className={cn(
         'relative flex items-start gap-3 rounded-lg border border-border bg-card p-4 text-left shadow-card',
+        compact && 'p-3',
         onClick && 'transition-colors hover:border-primary/40 hover:bg-accent/40',
         className,
       )}
@@ -74,7 +77,7 @@ export function Stat({
         </span>
       )}
       <div className="flex min-w-0 flex-1 flex-col">
-        <span className={cn('text-xs font-medium text-muted-foreground', layout === 'stacked' ? 'min-h-7 pr-8' : 'truncate')}>{label}</span>
+        <span className={cn('text-xs font-medium text-muted-foreground', layout === 'stacked' ? 'min-h-7 pr-8' : 'truncate', compact && layout === 'stacked' && 'min-h-5')}>{label}</span>
         <span title={typeof value === 'string' ? value : undefined} className={cn('text-xl font-semibold tracking-tight tabular-nums', layout === 'stacked' ? 'break-words' : 'truncate', TONE_VALUE[tone])}>
           {value}
         </span>

@@ -23,6 +23,81 @@ use std::time::Duration;
 /// 非流式请求总超时（与 chat 一致；流式由 gateway 首字窗口控制）。
 const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
 
+/// 只信任经过验证的计数；中转明确标注的估算标记也必须保留。
+pub struct InputTokenCount {
+    pub tokens: u32,
+    pub estimated: bool,
+}
+
+/// 独立计数协议：不生成、不解析生成 usage，也不将坏响应替换成 0。
+/// 禁止重定向，且限制响应体大小；调用方可在外层设置更短的渠道超时。
+pub async fn count_input_tokens_at(
+    http: &crate::http::HttpPool,
+    api_base: &str,
+    headers: &[(&str, &str)],
+    body: Bytes,
+    outbound: &crate::http::Outbound,
+) -> Result<InputTokenCount, UpstreamError> {
+    let url = format!("{}/responses/input_tokens", api_base.trim_end_matches('/'));
+    let mut request = http
+        .probe(outbound, reqwest::Method::POST, url)?
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .timeout(Duration::from_secs(20))
+        .body(body);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut response = request
+        .send()
+        .await
+        .map_err(|e| crate::openai::classify(&e))?;
+    let status = response.status().as_u16();
+    let source_estimated = response
+        .headers()
+        .get("x-okapi-token-count-source")
+        .is_some_and(|v| v == "local_estimate");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| crate::openai::classify(&e))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > 32 * 1024 {
+            return Err(UpstreamError::Stream(
+                "token_count_response_too_large".to_owned(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if !(200..300).contains(&status) {
+        return Err(UpstreamError::Status {
+            status,
+            body: bytes.into(),
+            retry_after_secs: None,
+        });
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| UpstreamError::Stream("invalid_token_count_response".to_owned()))?;
+    let invalid = || UpstreamError::Stream("invalid_token_count_response".to_owned());
+    let tokens = value["input_tokens"]
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(invalid)?;
+    if value["object"] != "response.input_tokens" {
+        return Err(invalid());
+    }
+    let estimated = match value.get("estimated") {
+        None => false,
+        Some(Value::Bool(value)) => *value,
+        _ => return Err(invalid()),
+    };
+    Ok(InputTokenCount {
+        tokens,
+        estimated: source_estimated || estimated,
+    })
+}
+
 /// Responses 响应对象里的 usage 形状（官方 `ResponseUsage`）。
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 struct ResponsesUsage {
@@ -39,7 +114,9 @@ struct ResponsesUsage {
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
 struct InputDetails {
     #[serde(default)]
-    cached_tokens: u32,
+    cached_tokens: Option<u32>,
+    #[serde(default)]
+    cache_write_tokens: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone, Copy, Deserialize)]
@@ -55,8 +132,10 @@ impl From<ResponsesUsage> for UsageProbe {
             prompt_tokens: u.input_tokens,
             completion_tokens: u.output_tokens,
             prompt_tokens_details: PromptTokensDetails {
-                cached_tokens: u.input_tokens_details.cached_tokens,
-                cache_write_tokens: 0,
+                cached_tokens: u.input_tokens_details.cached_tokens.unwrap_or(0),
+                cache_write_tokens: u.input_tokens_details.cache_write_tokens.unwrap_or(0),
+                cache_read_reported: u.input_tokens_details.cached_tokens.is_some(),
+                cache_write_reported: u.input_tokens_details.cache_write_tokens.is_some(),
                 audio_tokens: 0,
                 image_tokens: 0,
             },
@@ -138,6 +217,24 @@ pub fn parse_event(event_name: &str, data: &str) -> Vec<ChatEvent> {
 }
 
 impl OpenAiUpstream {
+    /// 上下文压缩必须访问原生 compact 端点；不能降级成普通文本摘要。
+    pub async fn responses_compact(
+        &self,
+        api_base: &str,
+        credential: &str,
+        body: Bytes,
+        outbound: &crate::http::Outbound,
+    ) -> Result<ChatResponse, UpstreamError> {
+        send_compact_at(
+            &self.http,
+            format!("{}/responses/compact", api_base.trim_end_matches('/')),
+            &[("authorization", &format!("Bearer {credential}"))],
+            body,
+            outbound,
+        )
+        .await
+    }
+
     /// 转发 /v1/responses（同方言直转）。`body` 已完成模型名映射与 reasoning 注入，
     /// 其余字段原样透传；usage 由 Responses 协议保证随 `response.completed` 返回，
     /// 无需像 chat 那样补 `stream_options`。
@@ -160,6 +257,49 @@ impl OpenAiUpstream {
         )
         .await
     }
+}
+
+/// compact 的密文输出不能本地分词。缺失 usage / 非 compact 对象时拒绝成功响应，
+/// 交现有重试与退款链处理，不能用保留的 user 文本冒充本次生成量。
+pub async fn send_compact_at(
+    http: &crate::http::HttpPool,
+    url: String,
+    headers: &[(&str, &str)],
+    body: Bytes,
+    outbound: &crate::http::Outbound,
+) -> Result<ChatResponse, UpstreamError> {
+    let mut headers = headers.to_vec();
+    headers.push(("accept", "application/json"));
+    let response = send_responses_at(http, url, &headers, body, false, outbound).await?;
+    if let ChatResponse::Json {
+        body,
+        usage: Some(_),
+        ..
+    } = &response
+        && compact_response_valid(body)
+    {
+        return Ok(response);
+    }
+    Err(UpstreamError::Stream(
+        "invalid_compaction_response".to_owned(),
+    ))
+}
+
+fn compact_response_valid(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    value["object"] == "response.compaction"
+        && value["output"].as_array().is_some_and(|items| {
+            items.iter().any(|item| {
+                item["type"] == "compaction"
+                    && item["encrypted_content"]
+                        .as_str()
+                        .is_some_and(|v| !v.is_empty())
+            })
+        })
+        && value["usage"]["input_tokens"].as_u64().is_some()
+        && value["usage"]["output_tokens"].as_u64().is_some()
 }
 
 /// 向任意 URL 发一次 Responses 请求（鉴权 / 附加头由调用方给）：官方走 Bearer，Codex 订阅后端
@@ -258,6 +398,33 @@ mod tests {
         assert_eq!(u.completion_tokens_details.reasoning_tokens, 30);
         assert!(usage_from_responses(None).is_none());
         assert!(usage_from_responses(Some(&Value::Null)).is_none());
+    }
+
+    #[test]
+    fn cache_write_usage_is_preserved_without_double_counting_input() {
+        let usage = usage_from_responses(Some(&serde_json::json!({
+            "input_tokens": 100, "output_tokens": 20,
+            "input_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 20}
+        })))
+        .unwrap()
+        .to_token_usage();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.cached_tokens, 40);
+        assert_eq!(usage.cache_write_tokens, 20);
+        assert_eq!(usage.prompt_uncached(), 40);
+        let missing = usage_from_responses(Some(&serde_json::json!({
+            "input_tokens": 100, "output_tokens": 20
+        })))
+        .unwrap();
+        assert_eq!(missing.prompt_tokens_details.cache_write_tokens, 0);
+        let oversized = usage_from_responses(Some(&serde_json::json!({
+            "input_tokens": 100, "output_tokens": 20,
+            "input_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 50}
+        })))
+        .unwrap()
+        .to_token_usage();
+        assert_eq!(oversized.cache_write_tokens, 20);
+        assert_eq!(oversized.prompt_uncached(), 0);
     }
 
     #[test]

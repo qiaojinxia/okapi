@@ -15,6 +15,11 @@ use std::fmt::Write as _;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/payment_recovery.rs"]
+mod recovery;
+#[path = "support/payment_validation.rs"]
+mod validation;
+
 struct TestEnv {
     pg: PgPool,
     ledger: okapi_ledger::BalanceLedger,
@@ -26,7 +31,7 @@ struct TestEnv {
 const EPAY_KEY: &str = "epay-merchant-secret";
 const STRIPE_WH: &str = "whsec_test_secret";
 
-/// mock Stripe API：POST /v1/checkout/sessions → 固定 session。
+/// mock Stripe API：POST /v1/checkout/sessions → 每单独立 session。
 /// 每次调用给一个独一无二的来源 IP。
 ///
 /// login / register / totp / redeem 都过 `critical_rate_guard`（每 IP 5～10 次/分，对齐
@@ -46,8 +51,13 @@ async fn mock_stripe(headers: axum::http::HeaderMap, body: String) -> axum::resp
             .is_some_and(|v| v.starts_with("Bearer sk_test_")),
         "必须带商户密钥"
     );
-    assert!(body.contains("unit_amount]=500"), "分为最小单位：{body}");
-    axum::Json(json!({"id": "cs_test_1", "url": "https://checkout.stripe.test/pay/cs_test_1"}))
+    let mut form = reqwest::Url::parse("https://stripe.test").unwrap();
+    form.set_query(Some(&body));
+    let fields: BTreeMap<_, _> = form.query_pairs().into_owned().collect();
+    assert_eq!(fields["line_items[0][price_data][unit_amount]"], "500");
+    assert_eq!(headers["idempotency-key"], fields["metadata[order_no]"]);
+    let id = format!("cs_{}", fields["metadata[order_no]"]);
+    axum::Json(json!({"id": id, "url": format!("https://checkout.stripe.test/pay/{id}")}))
         .into_response()
 }
 
@@ -179,7 +189,7 @@ async fn payment_full_cycle_epay_and_stripe() {
     // —— epay 回调：正确签名核销 ——
     let mut cb: BTreeMap<&str, String> = BTreeMap::new();
     cb.insert("pid", "1001".to_owned());
-    cb.insert("trade_no", "EP123".to_owned());
+    cb.insert("trade_no", format!("EP-{order_no}"));
     cb.insert("out_trade_no", order_no.clone());
     cb.insert("type", "alipay".to_owned());
     cb.insert("name", "okapi_topup".to_owned());
@@ -268,16 +278,21 @@ async fn payment_full_cycle_epay_and_stripe() {
     let stripe_order_no = order["order_no"].as_str().unwrap().to_owned();
     assert_eq!(
         order["pay_url"],
-        "https://checkout.stripe.test/pay/cs_test_1"
+        format!(
+            "https://checkout.stripe.test/pay/{}",
+            order["session_id"].as_str().unwrap()
+        )
     );
 
     // webhook：HMAC 验签核销
     let payload = json!({
         "type": "checkout.session.completed",
-        "data": {"object": {"id": "cs_test_1", "metadata": {"order_no": stripe_order_no}}}
+        "data": {"object": {"id": order["session_id"], "object": "checkout.session",
+            "status":"complete", "mode":"payment", "payment_status":"paid", "amount_total":500,
+            "currency":"usd", "metadata": {"order_no": stripe_order_no}}}
     })
     .to_string();
-    let ts = "1700000000";
+    let ts = chrono::Utc::now().timestamp().to_string();
     let mut mac = <Hmac<Sha256>>::new_from_slice(STRIPE_WH.as_bytes()).unwrap();
     mac.update(ts.as_bytes());
     mac.update(b".");

@@ -4,6 +4,8 @@
 
 用途：发布前 / 大改后按第 1 节分层跑完，把结果追加到第 4 节；第 3 节的缺口是下一轮补测试的待办。
 
+2026-09-26 核心对标核查见 [core-api-verification.md](core-api-verification.md)。下文历史轮次保留当时的结论；当前运行结果、软跳过与新增功能缺口以该记录为准，不把历史“已完成”当作本轮通过。
+
 ## 0. 维度定义
 
 | 代号 | 维度 | 判定依据 |
@@ -61,13 +63,14 @@
 | --- | --- | --- | --- | --- |
 | `auth.rs` | Bearer / x-api-key / x-goog-api-key 鉴权、无效 key 每 IP 限流、key 级 IP 白名单、分组级 `[rpm, rph]`（§11.32，随鉴权缓存下发、全部计费端点 reserve 前检查） | A C | `gateway_invalid_key_rate`、`gateway_ip_allowlist`、`gateway_group_rate`（09-06：同组每用户各自计数、别组不受影响、rph 小时窗、管理面改限额即失效缓存、负数 400、0 归一 null；09-08 第十九轮加 `non_billing_upstream_endpoints_are_rate_limited`：`count_tokens` 与视频任务轮询 / 下载这两个不计费但打上游的端点同样进窗，且限速在任务查找之前）、`smoke-all.sh`（无凭证 401 fail-closed）、e2e smoke（普通用户管理面 403）、`gateway_key_admission`（09-08 第十九轮，2 例，每段都先打一发成功请求把鉴权缓存焐热再改状态）：手动停用 → 401 `key_disabled` 且改回立刻复活、`expires_at` 设到过去 → 401 且库里 status 仍是 1、封禁属主 → 名下 key 全 401 且解封不连带复活令牌、白名单外模型 403 `model_not_allowed` 而不存在的模型仍 404 `model_not_found`、`[]` 归一成 null=不限 | 八个计费端点里 chat 与上述两个非计费端点有集成用例；其余共用同一 `check_group_rate`，靠编译期同构 |
 | `clients.rs` | 真实 IP 提取（信任代理 / edge key）、client_type 识别 | A C | 单元；`gateway_ip_allowlist::allowlist_enforced_with_cdn_header_and_peer_fallback`；`console_stats` 客户端分布 | — |
-| `scheduler.rs` + `sched_redis.rs` | 候选筛选、优先级 / 权重、三层粘性、双层并发、key 状态机、RPM、web 会话、关键接口限流 | A C D | `gateway_m2_sched`、`channel_key_lifecycle`、`channel_pools`、`gateway_capabilities`、`gateway_fallback`、`gateway_routing_prefs`、`gateway_retry_policy`、`gateway_multipod`、`gateway_compat::per_model_rpm_limit`、`console_diagnose`、`worker_m2::cooled_keys_recover_after_deadline`、`console_auth_web::sessions_list_and_revoke`；单元 `scheduler.rs` | 多副本只有 2 例（在途计数汇总、路由失效广播）。「双副本并发凭证刷新锁」按 IMPLEMENTATION §4.3 **主线只实现 static_key**、OAuth refresh 留扩展点——当前没有会刷新的凭证类型，该验收项不适用，OAuth 上游落地时再补 |
+| `scheduler.rs` + `sched_redis.rs` | 候选筛选、优先级 / 权重、三层粘性、双层并发、key 状态机、RPM、web 会话、关键接口限流 | A C D | `gateway_m2_sched`、`channel_key_lifecycle`、`channel_pools`、`gateway_capabilities`、`gateway_fallback`、`gateway_routing_prefs`、`gateway_retry_policy`、`gateway_multipod`、`gateway_compat::per_model_rpm_limit`、`console_diagnose`、`worker_m2::cooled_keys_recover_after_deadline`、`console_auth_web::sessions_list_and_revoke`；单元 `scheduler.rs` | `oauth_cred.rs` 已实现进程内单飞与 Redis 凭证刷新锁；`gateway_oauth_channels` 验证同一 AppState 的并发刷新。两个独立 AppState / 进程同时刷新仍需独立用例，不能再按 static_key 主线标为不适用 |
 | `chat.rs`（+ `openai_dialect` / `extract` / `estimate` / `rule_inputs`） | `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（+ `count_tokens`）、`/v1beta/models/*:generateContent`；SSE 转发器、failover、usage 复核、reasoning 注入、字段剥离 / 注入 | A B D E | `gateway_m1`（流式精确计费、空回复、首字前 failover、余额不足、缓存 ratio、非流式透传）、`gateway_stream_usage`、`gateway_untrusted_usage`、`gateway_reasoning`、`gateway_reasoning_param`、`gateway_model_modifiers`、`gateway_resp_model`、`gateway_tier`、`gateway_pricing_rules`、`gateway_strip_fields`、`gateway_responses`（原生 / 降级 / 404 回退 / 两跳）、`gateway_messages`、`gateway_gemini_ingress`、`gateway_anthropic`、`gateway_gemini`、`gateway_azure`、`gateway_bedrock`（§11.35：mock 用同一 secret 重算 SigV4、模型 ID `%3A`、InvokeModel 体去 model/stream 加版本、event-stream 帧流式 + JSON 两路计费、API key 走 Bearer、Anthropic 入口透传、embeddings 不路由）、`gateway_vertex`（服务账号 JWT-bearer 换 token 且两请求只换一次、Gemini generateContent / streamGenerateContent?alt=sse、Claude rawPredict / streamRawPredict 版本字段为 vertex 值、Anthropic 入口透传）、`gateway_oauth_channels`（§11.38：控制面两步登录建渠道且 credential_kind=1；anthropic_max 请求打 `?beta=true`、Bearer / 三个必备 beta / 系统首句且无 x-api-key、OpenAI 与 Anthropic 双入口、客户端 `user-agent` / `x-app` / `x-stainless-*` 原样透传且其 `anthropic-beta` 合并为单行、用户 token 的 `x-api-key` 不上游、到期后并发两请求只刷一次且 refresh 轮转回写、invalid_grant → key status 6；codex 从 id_token 取 account_id、Responses 带 chatgpt-account-id / `accept: text/event-stream`、`originator` 客户端带了透传否则缺省、上游体 store=false / stream=true / instructions 键 / previous_response_id 剥离 / system→developer、非流式客户端拿到 SSE 聚合出的 JSON 且按其 usage 结算、流式原样透出、chat 与 embeddings 入口不路由；state 一次性、非 OAuth 协议 400）、`gateway_outbound`（代理 + 额外头）、`gateway_upstream_cost`、`gateway_capabilities`、`gateway_midstream`（09-06 新增：首字后上游掐流 → 不同 key 重试、不 failover 到备用渠道、客户端不见 `[DONE]`、按本地估算结算且余额精确收口、无悬置预扣） | — |
 | `embeddings.rs` | `/v1/embeddings`、`/v1/rerank` | A B D | `gateway_embeddings`（prompt-only、failover）、`gateway_azure::azure_embeddings_dispatch` | — |
 | `images.rs` | generations / edits（multipart 重组），per_call × n | A B | `gateway_images` | variations 未实现 |
 | `audio.rs` | speech 字符计费 / transcriptions & translations per_call | A B | `gateway_audio` | — |
 | `videos.rs` | 提交 / 轮询 / 下载，per_call × seconds，任务隔离 | A B C D | `gateway_videos`（跨用户隔离、上游失败退款） | — |
 | `realtime.rs` | WS 桥接、连接租约、断开结算 | A B C D | `gateway_realtime`（断开计费、零输出全退、第五连接拒绝、子协议鉴权） | 不走渠道 `proxy_url`（backlog） |
+| `chat/websocket.rs`、`chat/websocket/*` | Responses 原生 WS / HTTP 桥接、逐轮准入、账号绑定、流队列、断开结算 | A B C D | `gateway_responses_ws` 14 项；`gateway_responses_ws_bridge` 15 项真实 WS + HTTP/SSE + PG/Redis 测试；运行记录见 `core-api-verification.md` | 中途干预、实际供应商缓存/恢复和性能未完成 |
 | `custom_pass.rs` | `/pass/{channel_id}/*` 白名单透传 | A B C | `gateway_custom_pass` | — |
 | `models.rs` | `/v1/models`、`/v1beta/models` | A | `gateway_models_list::lists_enabled_models_and_hides_disabled_ones`（09-24 第三十五轮）、`gateway_gemini_ingress::models_list_is_gemini_shaped`、`console_channel_test` | `/v1/models` 无鉴权、列出全部启用模型（目录与公开价格页同为公开信息，`public_pricing_no_auth`）；按 key / 分组过滤属特性待定，非缺口 |
 | `dashboard.rs` | new-api 兼容余额端点 | A | `gateway_compat::dashboard_billing_compat` | — |
@@ -171,7 +174,7 @@
 
 1. ~~PG 记账不幂等~~ **已修**（09-06 第五轮）：`docs/database.md` §1.5 定案「每 request_id 恰一行」，`record_settlement` 事务开头 `SELECT EXISTS` 幂等闸，重放整笔跳过并告警；`pg_settlement::replaying_a_settled_request_writes_nothing` 钉住。ledger 的 Lua 与 PG 契约至此都有直测。
 2. ~~前端写操作表单 e2e~~ **已收口**（09-06 八轮，`write-forms.spec` 共 17 例覆盖全部管理面与门户写表单，含各段零碎）。
-3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁按 §4.3 定案不适用于当前 static_key 主线。剩余：SSE 排水无 5min 上限（依赖编排层 grace period）。
+3. ~~SIGTERM 优雅下线无自动化用例~~ **已补且修了实现**（09-06 第三轮，`gateway_shutdown`；见第 4 节发现）。凭证刷新锁现已随 OAuth 上游落地；双独立 AppState / 进程并发仍待单独验证。另有 SSE 排水无 5min 上限（依赖编排层 grace period）。
 4. ~~mid-stream 断流语义无专项用例~~ **已补**（09-06 第三轮，`gateway_midstream`）。
 5. **集成测试共享一条 `billing_outbox` 队列**：任一用例的行都可能被别的测试进程 drain 进 CH，因此「drain 后直接读 CH 并断言」天然有竞态。现行约定是走 `poll_until` 且谓词覆盖全部待断言字段（09-06 修了两处漏网的）；新增 CH 用例须照此写，或改为按 user_id 隔离的 drain。
 6. ~~部署形态不在常规回归~~ **已补**（09-06 第六、七轮，`verify-deploy.sh` + `guard-deploy-manifests.py` + 可选镜像阶段）。性能维度 09-06 第九轮已按需跑过一次（无回归），仍不进默认路径。

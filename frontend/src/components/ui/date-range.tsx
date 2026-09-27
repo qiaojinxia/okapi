@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CalendarDays } from 'lucide-react'
 import { Button } from './button'
@@ -8,6 +8,9 @@ export interface DateRange { start: string; end: string }
 export function DateRangePicker({ today, value, onApply }: { today: string; value: DateRange | null; onApply: (range: DateRange) => void }) {
   const { t } = useTranslation()
   const [draft, setDraft] = useState<DateRange>(value ?? { start: today, end: today })
+  const start = value?.start ?? today, end = value?.end ?? today
+  // 地址前进/后退或切回预设日期时，输入框同步到当前已应用的范围。
+  useEffect(() => { setDraft({ start, end }) }, [start, end])
   const length = (new Date(`${draft.end}T00:00:00Z`).getTime() - new Date(`${draft.start}T00:00:00Z`).getTime()) / 86400_000 + 1
   const valid = !!draft.start && !!draft.end && draft.end <= today && draft.start >= '1970-01-01' && length > 0 && length <= 366
   return <details className="w-full self-start rounded-lg border border-border bg-card px-3 py-2 text-sm sm:w-auto open:w-full">

@@ -3,6 +3,7 @@ import { PlansPage } from '@/features/plans/PlansPage'
 import { pageSearch } from '@/hooks/use-pagination'
 
 export const Route = createFileRoute('/admin/plans')({
+  staticData: { fitViewport: true },
   validateSearch: pageSearch,
   component: PlansPage,
 })

@@ -62,7 +62,7 @@ export function RolesPage() {
   const permCount = (p: unknown) => (Array.isArray(p) ? p.length : 0)
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         icon={Shield}
         title={t('admin:rolesTitle')}
@@ -108,8 +108,8 @@ export function RolesPage() {
             {rows.map((r) => (
               <Tr key={r.id}>
                 <Td>{r.id}</Td>
-                <Td className="font-mono text-xs">{r.role_code}</Td>
-                <Td>{r.display_name}</Td>
+                <Td className="whitespace-nowrap font-mono text-xs">{r.role_code}</Td>
+                <Td className="min-w-32 max-w-64 break-words">{r.display_name}</Td>
                 <Td>
                   <div className="flex flex-wrap gap-1">
                     {Array.isArray(r.permissions) &&

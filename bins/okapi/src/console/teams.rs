@@ -107,7 +107,7 @@ fn display_name(username: &str) -> String {
 }
 
 /// GET /api/teams：我所属的团队列表（UI 入口——没有它前端无从知道自己在哪些团）；
-/// `limit/offset` 可选切片，不传回全量。
+/// `limit/offset` 分页，默认每页 20 条并返回当前成员可见的团队总数。
 pub async fn list_my_teams(
     State(state): State<AppState>,
     headers: HeaderMap,

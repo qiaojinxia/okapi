@@ -86,10 +86,11 @@ export function Pagination({
   const pages = total === undefined ? null : Math.max(1, Math.ceil(total / limit))
   return (
     <nav
+      data-slot="pagination"
       aria-label={t('common:pagination')}
-      className={cn('flex flex-wrap items-center justify-between gap-3', className)}
+      className={cn('flex min-h-14 min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-border bg-card px-3 py-2 shadow-card', className)}
     >
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
         <span className="text-xs text-muted-foreground tabular-nums">
           {total === undefined
             ? t('common:pageN', { page: current })
@@ -104,7 +105,7 @@ export function Pagination({
             <Label htmlFor={sizeId}>{t('common:pageSize')}</Label>
             <Select
               id={sizeId}
-              className="[&>select]:h-8 [&>select]:text-xs"
+              className="[&>select]:h-9 [&>select]:text-xs"
               value={String(limit)}
               onChange={(v) => onLimit?.(Number(v))}
               options={sizes.map((n) => ({ value: String(n), label: t('common:perPage', { n }) }))}
@@ -112,11 +113,11 @@ export function Pagination({
           </span>
         )}
       </div>
-      <div className="flex items-center gap-1">
+      <div className="flex max-w-full flex-wrap items-center gap-1">
         <Button
           variant="outline"
           size="icon"
-          className="h-8 w-8"
+          className="h-9 w-9"
           disabled={current === 1}
           aria-label={t('common:prevPage')}
           onClick={() => onOffset(Math.max(0, clamped - limit))}
@@ -134,7 +135,7 @@ export function Pagination({
                 key={p}
                 variant={p === current ? 'default' : 'ghost'}
                 size="icon"
-                className="h-8 min-w-8 px-2 text-xs tabular-nums"
+                className="h-9 min-w-9 px-2 text-xs tabular-nums"
                 aria-current={p === current ? 'page' : undefined}
                 onClick={() => onOffset((p - 1) * limit)}
               >
@@ -145,7 +146,7 @@ export function Pagination({
         <Button
           variant="outline"
           size="icon"
-          className="h-8 w-8"
+          className="h-9 w-9"
           disabled={pages !== null ? current >= pages : !hasMore}
           aria-label={t('common:nextPage')}
           onClick={() => onOffset(clamped + limit)}

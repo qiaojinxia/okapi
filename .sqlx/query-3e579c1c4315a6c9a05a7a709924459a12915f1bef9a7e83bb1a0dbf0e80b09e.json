@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE fund_transfers SET cleaned_at=now() WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e579c1c4315a6c9a05a7a709924459a12915f1bef9a7e83bb1a0dbf0e80b09e"
+}

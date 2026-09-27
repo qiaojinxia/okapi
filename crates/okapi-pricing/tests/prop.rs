@@ -91,27 +91,24 @@ fn ctx(user_fp: i64) -> CalcContext {
 
 fn usage_of(prompt: u32, cached: u32, completion: u32) -> TokenUsage {
     TokenUsage {
+        cache_read_reported: true,
+        cache_write_reported: true,
         prompt_tokens: prompt,
         cached_tokens: cached,
-        cache_write_tokens: 0,
-        audio_prompt_tokens: 0,
-        image_prompt_tokens: 0,
         completion_tokens: completion,
-        audio_completion_tokens: 0,
-        reasoning_tokens: 0,
+        ..TokenUsage::default()
     }
 }
 
 fn usage_split(prompt: u32, cached: u32, cache_write: u32, completion: u32) -> TokenUsage {
     TokenUsage {
+        cache_read_reported: true,
+        cache_write_reported: true,
         prompt_tokens: prompt,
         cached_tokens: cached,
         cache_write_tokens: cache_write,
-        audio_prompt_tokens: 0,
-        image_prompt_tokens: 0,
         completion_tokens: completion,
-        audio_completion_tokens: 0,
-        reasoning_tokens: 0,
+        ..TokenUsage::default()
     }
 }
 

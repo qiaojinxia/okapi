@@ -12,6 +12,12 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/balance_operation_locks.rs"]
+mod balance_operation_locks;
+
+#[path = "support/refund_recovery.rs"]
+mod recovery;
+
 async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
     use std::fmt::Write as _;
     let chunks = [

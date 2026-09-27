@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
-import { PageHeader, Toolbar } from '@/components/ui/page'
+import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
 import { TableSkeleton } from '@/components/ui/skeleton'
@@ -77,7 +77,7 @@ export function UsersPage() {
   )
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('admin:usersTitle')}
         description={t('admin:usersDesc')}
@@ -90,20 +90,23 @@ export function UsersPage() {
       />
 
       <Toolbar
+        selectionClassName="max-w-sm break-words"
         filters={
           <>
+            <ToolbarSearch>
             <SearchInput
               id="u-search"
-              className="w-72"
+              className="min-w-0 flex-1"
               aria-label={t('admin:usersSearch')}
               value={draft}
               placeholder={t('admin:usersSearchHint')}
               onChange={setDraft}
               onSubmit={() => applySearch(draft)}
             />
-            <Button size="sm" onClick={() => applySearch(draft)}>
+            <Button size="sm" variant="outline" onClick={() => applySearch(draft)}>
               {t('common:search')}
             </Button>
+            </ToolbarSearch>
             {query !== '' && (
               <Button size="sm" variant="ghost" onClick={() => applySearch('')}>
                 {t('common:clearFilters')}

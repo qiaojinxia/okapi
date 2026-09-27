@@ -17,6 +17,8 @@ export interface ConnectConfig {
   origin: string
   key: string
   model: string
+  chatEndpoints?: string[]
+  template?: 'chat' | 'responses'
 }
 
 export interface Snippet {
@@ -26,7 +28,7 @@ export interface Snippet {
   code: string
 }
 
-export function resolveConnectConfig(rawBase: string, model: string, apiKey?: string): ConnectConfig | null {
+export function resolveConnectConfig(rawBase: string, model: string, apiKey?: string, chatEndpoints?: string[]): ConnectConfig | null {
   const base = normalizeApiBase(rawBase)
   if (!base) return null
   return {
@@ -34,6 +36,8 @@ export function resolveConnectConfig(rawBase: string, model: string, apiKey?: st
     origin: base.slice(0, -'/v1'.length),
     key: apiKey ?? KEY_PLACEHOLDER,
     model: model.trim() || MODEL_PLACEHOLDER,
+    chatEndpoints,
+    template: chatEndpoints && !chatEndpoints.includes('/v1/chat/completions') && chatEndpoints.includes('/v1/responses') ? 'responses' : 'chat',
   }
 }
 
@@ -58,9 +62,12 @@ function claudeEnv(cfg: ConnectConfig): Record<string, string> {
 }
 
 export function buildSnippets(client: CodeClient, cfg: ConnectConfig, prompt: string): Snippet[] {
+  const endpoint = client === 'claude' ? '/v1/messages' : client === 'codex' || cfg.template === 'responses' ? '/v1/responses' : '/v1/chat/completions'
+  if (cfg.chatEndpoints && !cfg.chatEndpoints.includes(endpoint)) return []
+  const responses = cfg.template === 'responses'
   switch (client) {
     case 'curl': {
-      const example = buildRequestExample(cfg.base, 'chat', cfg.model, prompt, false)
+      const example = buildRequestExample(cfg.base, cfg.template ?? 'chat', cfg.model, prompt, false)
       return [keyExport(cfg), { target: 'terminal', code: example?.curl ?? '' }]
     }
     case 'python':
@@ -73,11 +80,11 @@ export function buildSnippets(client: CodeClient, cfg: ConnectConfig, prompt: st
           'from openai import OpenAI',
           '',
           `client = OpenAI(base_url=${q(cfg.base)}, api_key=os.environ[${q(ENV_KEY)}])`,
-          'response = client.chat.completions.create(',
+          responses ? 'response = client.responses.create(' : 'response = client.chat.completions.create(',
           `    model=${q(cfg.model)},`,
-          `    messages=[{"role": "user", "content": ${q(prompt)}}],`,
+          responses ? `    input=${q(prompt)},` : `    messages=[{"role": "user", "content": ${q(prompt)}}],`,
           ')',
-          'print(response.choices[0].message.content)',
+          responses ? 'print(response.output_text)' : 'print(response.choices[0].message.content)',
         ].join('\n'),
       }]
     case 'node':
@@ -89,11 +96,11 @@ export function buildSnippets(client: CodeClient, cfg: ConnectConfig, prompt: st
           "import OpenAI from 'openai'",
           '',
           `const client = new OpenAI({ baseURL: ${q(cfg.base)}, apiKey: process.env.${ENV_KEY} })`,
-          'const response = await client.chat.completions.create({',
+          responses ? 'const response = await client.responses.create({' : 'const response = await client.chat.completions.create({',
           `  model: ${q(cfg.model)},`,
-          `  messages: [{ role: 'user', content: ${q(prompt)} }],`,
+          responses ? `  input: ${q(prompt)},` : `  messages: [{ role: 'user', content: ${q(prompt)} }],`,
           '})',
-          'console.log(response.choices[0].message.content)',
+          responses ? 'console.log(response.output_text)' : 'console.log(response.choices[0].message.content)',
         ].join('\n'),
       }]
     case 'claude': {

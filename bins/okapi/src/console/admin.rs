@@ -321,7 +321,7 @@ pub async fn create_channel(
 }
 
 /// GET /admin/channels：`?q=`（名称 / 地址）、`provider`、`status` 过滤，`limit/offset` 切片；
-/// 不传 limit 回全量（模型页统计"每个模型几条渠道在服务"、测活全部等调用方要整表）。
+/// 默认每页 20 条；需要全部渠道的调用方按 total 逐页读取。
 pub async fn list_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1749,7 +1749,7 @@ pub async fn delete_pricing_rule(
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
     audit(&state, &actor, "pricing.delete_rule", &rule_code, json!({})).await;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "requires_publish": true })))
 }
 
 /// 发布定价 epoch：**发布前全量编译校验（fail-closed，DESIGN §3.3）**——
@@ -1848,9 +1848,9 @@ pub async fn credit_user(
         return Err(AppError::bad_request().with_param("amount_micro"));
     }
     let amount = Money::from_micros(req.amount_micro);
-    let balance_after = state.ledger.credit(user_id, amount).await?;
-    okapi_ledger::pg::record_credit(
+    let balance_after = okapi_ledger::operations::credit(
         &state.pg,
+        &state.ledger,
         user_id,
         amount,
         "adjust",
@@ -1867,7 +1867,7 @@ pub async fn credit_user(
     )
     .await;
     Ok(Json(
-        json!({ "balance_after_micro": balance_after.as_micros() }),
+        json!({ "balance_after_micro": balance_after.balance_after.map(okapi_domain::Money::as_micros), "operation_id": balance_after.operation_id, "pending": balance_after.balance_after.is_none() }),
     ))
 }
 
@@ -2053,23 +2053,29 @@ pub async fn refund_by_request(
     ExtractJson(req): ExtractJson<RefundReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::BILLING_REFUND).await?;
-    let outcome = okapi_ledger::pg::admin_refund(
+    let outcome = okapi_ledger::operations::refund(
         &state.pg,
+        &state.ledger,
         req.request_id,
         &req.reason,
         &format!("admin:{}", actor.user_id),
     )
     .await
     .map_err(AppError::from)?;
-    let Some(refund) = outcome else {
+    let Some((refund, balance_after)) = outcome else {
+        let mut history = okapi_store::history::read(&state.pg).await?;
         let status = sqlx::query_scalar!(
-            r#"SELECT status FROM billing_records WHERE request_id = $1
+            r#"SELECT status AS "status!" FROM billing_financial_records WHERE request_id = $1
                ORDER BY created_at DESC LIMIT 1"#,
             req.request_id
         )
-        .fetch_optional(&state.pg)
+        .fetch_optional(&mut *history)
         .await
         .map_err(okapi_store::StoreError::from)?;
+        history
+            .commit()
+            .await
+            .map_err(okapi_store::StoreError::from)?;
         return match status {
             Some(30) => Ok(Json(json!({ "outcome": "already_refunded" }))),
             Some(_) => Err(AppError::new(StatusCode::CONFLICT, "refund_not_committed")),
@@ -2078,11 +2084,6 @@ pub async fn refund_by_request(
             }
         };
     };
-    // Redis 热余额回补到**原池**（订阅池付的退回订阅池；PG 已提交，此处失败由对账检出并修复）
-    let balance_after = state
-        .ledger
-        .credit_pool(refund.user_id, refund.amount, refund.pool)
-        .await?;
     audit(
         &state,
         &actor,
@@ -2099,7 +2100,7 @@ pub async fn refund_by_request(
         "outcome": "refunded",
         "user_id": refund.user_id,
         "refunded_micro": refund.amount.as_micros(),
-        "balance_after_micro": balance_after.as_micros(),
+        "balance_after_micro": balance_after.balance_after.map(okapi_domain::Money::as_micros), "operation_id": balance_after.operation_id, "pending": balance_after.balance_after.is_none(),
     })))
 }
 
@@ -2169,7 +2170,7 @@ pub async fn list_users(
     Ok(Json(json!({ "total": total, "data": data })))
 }
 
-/// GET /admin/roles：自定义管理角色列表（供分配下拉使用；不传 limit 回全量）。
+/// GET /admin/roles：自定义管理角色列表，默认每页 20 条并返回总数。
 pub async fn list_roles(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2432,7 +2433,10 @@ pub async fn upsert_plan(
     if req.balance_valid_days.is_some_and(|d| d <= 0) {
         return Err(AppError::bad_request().with_param("balance_valid_days"));
     }
-    if req.price_micro < 0 {
+    if req.grant_micro > okapi_ledger::holds::MAXIMUM_MICROS {
+        return Err(AppError::bad_request().with_param("grant_micro"));
+    }
+    if !(0..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&req.price_micro) {
         return Err(AppError::bad_request().with_param("price_micro"));
     }
     let (period, duration_days, balance_valid_days) = match req.kind {
@@ -2444,6 +2448,8 @@ pub async fn upsert_plan(
             let Some(days) = req.duration_days.filter(|d| *d > 0) else {
                 return Err(AppError::bad_request().with_param("duration_days"));
             };
+            okapi_store::subscriptions::expiry_after(chrono::Utc::now(), days)
+                .map_err(|_| AppError::bad_request().with_param("duration_days"))?;
             (Some(period), Some(days), None)
         }
         _ => return Err(AppError::bad_request().with_param("kind")),
@@ -2957,7 +2963,8 @@ pub async fn fetch_channel_models(
     ensure_channel_owner(&state, channel_id, &actor, scope).await?;
     let row = sqlx::query!(
         r#"
-        SELECT c.provider, c.api_base, c.settings, ck.credential_ciphertext
+        SELECT c.provider, c.api_base, c.settings, ck.id AS channel_key_id,
+               ck.credential_ciphertext
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
@@ -2986,30 +2993,12 @@ pub async fn fetch_channel_models(
             base,
             &row.settings,
             &credential,
+            row.channel_key_id,
         )
         .await?;
         return Ok(Json(json!({ "channel_id": channel_id, "models": models })));
     }
-    let (url, auth_header, auth_value) = match row.provider.as_str() {
-        "anthropic" => (format!("{base}/models"), "x-api-key".to_owned(), credential),
-        "gemini" => (
-            format!("{base}/models"),
-            "x-goog-api-key".to_owned(),
-            credential,
-        ),
-        // azure：`/openai/models` 列的是资源可用的模型目录而非已建部署，对路由没用；
-        // 部署列表才是网关能打到的名字（返回 {data:[{id: 部署名, model: 底层模型}]}）
-        "azure" => (
-            azure_deployments_url(base),
-            "api-key".to_owned(),
-            credential,
-        ),
-        _ => (
-            format!("{base}/models"),
-            "authorization".to_owned(),
-            format!("Bearer {credential}"),
-        ),
-    };
+    let (url, auth_header, auth_value) = models_probe_target(&row.provider, base, credential);
 
     let outbound = okapi_providers::Outbound::from_settings(&row.settings);
     let outcome = state
@@ -3054,6 +3043,28 @@ pub async fn fetch_channel_models(
         .map_err(|_| AppError::bad_request().with_param("upstream_models_not_json"))?;
     let models = parse_upstream_model_ids(&parsed);
     Ok(Json(json!({ "channel_id": channel_id, "models": models })))
+}
+
+fn models_probe_target(provider: &str, base: &str, credential: String) -> (String, String, String) {
+    match provider {
+        "anthropic" => (format!("{base}/models"), "x-api-key".to_owned(), credential),
+        "gemini" => (
+            format!("{base}/models"),
+            "x-goog-api-key".to_owned(),
+            credential,
+        ),
+        // Azure 部署名才是可路由的模型名，不能换成资源模型目录。
+        "azure" => (
+            azure_deployments_url(base),
+            "api-key".to_owned(),
+            credential,
+        ),
+        _ => (
+            format!("{base}/models"),
+            "authorization".to_owned(),
+            format!("Bearer {credential}"),
+        ),
+    }
 }
 
 /// 上游模型列表 → 去重排序的 id 列表。

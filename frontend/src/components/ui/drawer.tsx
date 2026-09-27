@@ -80,26 +80,26 @@ export function Drawer({
         aria-modal="true"
         aria-label={title}
         className={cn(
-          'relative z-10 flex h-full w-full flex-col border-l border-border bg-card shadow-drawer animate-slide-in-right',
+          'relative z-10 flex h-dvh min-h-0 w-full flex-col border-l border-border bg-card shadow-drawer animate-slide-in-right',
           SIZE[size],
         )}
       >
-        <header className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-6">
           <div className="flex min-w-0 flex-col gap-1">
             <h2 className="truncate text-base font-semibold">{title}</h2>
             {description !== undefined && (
               <p className="text-xs leading-5 text-muted-foreground">{description}</p>
             )}
           </div>
-          <Button size="icon" variant="ghost" className="-mr-2 h-8 w-8 shrink-0" aria-label={t('common:close')} onClick={onClose}>
+          <Button size="icon" variant="ghost" className="-mt-1 -mr-2 h-10 w-10 shrink-0" aria-label={t('common:close')} onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-5 [scrollbar-gutter:stable] sm:px-6">{children}</div>
 
         {footer !== undefined && (
-          <footer className="flex items-center justify-end gap-2 border-t border-border bg-muted/30 px-5 py-3">
+          <footer className="flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-border bg-card px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] shadow-[0_-4px_16px_-12px_var(--muted-fg)] sm:px-6 [&>button]:min-h-11 [&>button]:flex-1 sm:[&>button]:min-h-9 sm:[&>button]:flex-none">
             {footer}
           </footer>
         )}

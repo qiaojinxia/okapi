@@ -63,6 +63,22 @@ GROUP BY user_id, day;
 
 -- 增量升级：历史缓存写入未采集时为 NULL；通过样本覆盖数区分未知与零。
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_read_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_reported Nullable(UInt8) DEFAULT NULL;
+
+-- 不回填历史：旧零值无法判断是未命中还是未上报。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_reporting_day
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (user_id, api_key_id, model, day)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    user_id, api_key_id, model, toDate(ts) AS day,
+    countIfState(ifNull(cache_read_reported, 0) = 1) AS read_known,
+    countIfState(ifNull(cache_write_reported, 0) = 1) AS write_known,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS write_tokens
+FROM request_log_raw
+GROUP BY user_id, api_key_id, model, day;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_write_day
 ENGINE = AggregatingMergeTree()
@@ -304,6 +320,21 @@ AS SELECT
     sumState(if(upstream_cost_known = 1, upstream_cost_micro, toInt64(0))) AS known_cost,
     maxState(ts) AS last_event,
     maxState(ingested_at) AS last_ingested
+FROM request_log_raw
+GROUP BY hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- 独立采集覆盖聚合，不覆盖既有分析视图或历史金额。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_reporting_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (hour, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfHour(ts) AS hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countIfState(ifNull(cache_read_reported, 0) = 1) AS read_known,
+    countIfState(ifNull(cache_write_reported, 0) = 1) AS write_known
 FROM request_log_raw
 GROUP BY hour, user_id, api_key_id, group_code, model, channel_id,
     requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;

@@ -6,9 +6,13 @@
 //!
 //! 红线（.cursor/rules/billing-safety.mdc）：禁浮点、禁 panic 类调用、宁停不错账。
 
+pub mod holds;
+pub mod operations;
 pub mod pg;
 pub mod redis;
 pub mod subscriptions;
+pub mod sync;
+pub mod transfers;
 
 mod error;
 

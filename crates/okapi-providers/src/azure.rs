@@ -12,7 +12,7 @@
 
 use crate::error::UpstreamError;
 use crate::http::Outbound;
-use crate::openai::{ChatResponse, EmbeddingsResponse, OpenAiUpstream};
+use crate::openai::{ChatResponse, EmbeddingsResponse, OpenAiUpstream, image_response_limit};
 use bytes::Bytes;
 
 /// 渠道未配置 `settings.api_version` 时的缺省：2024-10-21 是当前 GA 数据面版本
@@ -77,11 +77,14 @@ impl AzureUpstream {
         outbound: &Outbound,
     ) -> Result<reqwest::RequestBuilder, UpstreamError> {
         let url = deployment_url(endpoint, deployment, path, api_version);
-        Ok(self
-            .inner
-            .http
-            .post(outbound, url)?
-            .header("api-key", credential))
+        let request = if image_response_limit(path).is_some() {
+            self.inner
+                .http
+                .probe(outbound, reqwest::Method::POST, url)?
+        } else {
+            self.inner.http.post(outbound, url)?
+        };
+        Ok(request.header("api-key", credential))
     }
 
     /// chat completions：`body` 的 `model` 已被重写为部署名（Azure 忽略该字段，但保持一致）。
@@ -127,7 +130,9 @@ impl AzureUpstream {
             credential,
             outbound,
         )?;
-        self.inner.send_json(req, body).await
+        self.inner
+            .send_json(req, body, image_response_limit(path))
+            .await
     }
 
     /// audio/speech：JSON 入、二进制音频出。
@@ -171,7 +176,9 @@ impl AzureUpstream {
             credential,
             outbound,
         )?;
-        self.inner.send_multipart(req, parts).await
+        self.inner
+            .send_multipart(req, parts, image_response_limit(path))
+            .await
     }
 }
 

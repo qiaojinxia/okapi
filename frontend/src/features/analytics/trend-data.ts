@@ -11,7 +11,7 @@ function metricValue(r: CubeMetrics | undefined, metric: TrendMetric): number | 
   if (metric === 'requests' || metric === 'tokens') return r?.[metric] ?? 0
   if (!r || r.requests <= 0) return null
   if (metric === 'error_rate') return r.error_rate_bp / 100
-  if (metric === 'cache') return r.prompt_tokens > 0 ? r.cache_hit_bp / 100 : null
+  if (metric === 'cache') return r.prompt_tokens > 0 && r.cache_hit_bp != null ? r.cache_hit_bp / 100 : null
   if (metric === 'ttft') return (r.ttft_samples ?? r.avg_ttft_ms) > 0 ? r.avg_ttft_ms : null
   if (metric === 'throughput') return r.avg_output_tps_milli == null ? null : r.avg_output_tps_milli / 1000
   return r.avg_latency_ms

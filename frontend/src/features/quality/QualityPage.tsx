@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { getRouteApi, Link } from '@tanstack/react-router'
+import { HeartPulse } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { PageHeader } from '@/components/ui/page'
 import { Tabs } from '@/components/ui/tabs'
@@ -8,9 +9,11 @@ import { DaysPicker } from '@/features/stats/DaysPicker'
 import { ErrorBreakdownCard } from '@/features/stats/ErrorBreakdownCard'
 import { ModelLatencyCard } from '@/features/stats/ModelLatencyCard'
 import { QualityTrend } from './QualityTrend'
+import { QUALITY_TABS } from './search'
+import type { QualityTab } from './search'
+import { ADVANCED_KEYS } from '@/features/analytics/advanced-search'
 
-const TABS = ['trend', 'channels', 'models', 'errors', 'clients'] as const
-type Tab = (typeof TABS)[number]
+const routeApi = getRouteApi('/admin/quality')
 
 /// 服务质量：渠道健康 / 模型时延 / 错误分布 / 客户端分布。
 ///
@@ -19,10 +22,13 @@ type Tab = (typeof TABS)[number]
 /// 哪个模型慢（模型）→ 坏在什么错（错误码）→ 谁在打（客户端）。
 export function QualityPage() {
   const { t } = useTranslation()
-  const [days, setDays] = useState(7)
-  const [tab, setTab] = useState<Tab>('trend')
+  const search = routeApi.useSearch()
+  const { days = 7, tab = 'trend' } = search
+  const navigate = routeApi.useNavigate()
+  const customRange = !!search.start_date || !!search.end_date
+  const savedFilters = ADVANCED_KEYS.some((key) => search[key] !== undefined && !(Array.isArray(search[key]) && !search[key]?.length))
 
-  const labels: Record<Tab, string> = {
+  const labels: Record<QualityTab, string> = {
     trend: t('charts:qualityTrend'),
     channels: t('admin:statChannels'),
     models: t('admin:statModels'),
@@ -31,22 +37,31 @@ export function QualityPage() {
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-3">
       <PageHeader
+        icon={HeartPulse}
         title={t('analytics:qualityTitle')}
         description={t('analytics:qualityDesc')}
-        action={<DaysPicker days={days} onPick={setDays} />}
+        action={<DaysPicker days={tab === 'trend' && customRange ? 0 : days} onPick={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })} />}
       />
       <Tabs
-        items={TABS.map((id) => ({ id, label: labels[id] }))}
+        id="quality-tabs"
+        ariaLabel={t('analytics:qualityTitle')}
+        items={QUALITY_TABS.map((id) => ({ id, label: labels[id], panelId: 'quality-panel' }))}
         active={tab}
-        onChange={(id) => setTab(id as Tab)}
+        onChange={(id) => void navigate({ search: (prev) => ({ ...prev, tab: id as QualityTab }) })}
       />
-      {tab === 'trend' && <QualityTrend key={days} days={days} />}
-      {tab === 'channels' && <ChannelHealthCard days={days} />}
-      {tab === 'models' && <ModelLatencyCard days={days} />}
-      {tab === 'errors' && <ErrorBreakdownCard days={days} />}
-      {tab === 'clients' && <ClientsCard days={days} />}
+      {tab !== 'trend' && savedFilters && <div role="note" className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+        <p className="min-w-0 flex-1">{t('analytics:qualitySavedFilters', { days })}</p>
+        <Link to="/admin/quality" search={{ ...search, tab: 'trend' }} className="inline-flex min-h-9 items-center rounded px-2 text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40">{t('analytics:qualityReturnTrend')}</Link>
+      </div>}
+      <div id="quality-panel" role="tabpanel" aria-labelledby={`quality-tabs-${tab}`} className="min-w-0">
+        {tab === 'trend' && <QualityTrend search={search} onChange={(next) => void navigate({ search: next })} />}
+        {tab === 'channels' && <ChannelHealthCard days={days} />}
+        {tab === 'models' && <ModelLatencyCard days={days} />}
+        {tab === 'errors' && <ErrorBreakdownCard days={days} />}
+        {tab === 'clients' && <ClientsCard days={days} />}
+      </div>
     </div>
   )
 }

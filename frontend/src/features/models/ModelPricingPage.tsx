@@ -1,4 +1,4 @@
-import { AlertTriangle, Coins, Pencil, Plus, Rocket, Trash2, Upload } from 'lucide-react'
+import { AlertTriangle, Coins, Info, Pencil, Plus, Rocket, Trash2, Upload } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -11,7 +11,7 @@ import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { ImportDrawer } from '@/features/models/ImportDrawer'
 import { ModelDrawer } from '@/features/models/ModelDrawer'
-import { PageHeader, Toolbar } from '@/components/ui/page'
+import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { ModelSearchInput } from '@/features/models/model-input'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
@@ -122,13 +122,13 @@ export function ModelPricingPage() {
   const clearFilters = () => setFilters({ q: '', unpriced: false })
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('admin:modelListTitle')}
         description={t('admin:modelsDesc')}
         icon={Coins}
         action={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => setImporting(true)}>
               <Upload className="h-4 w-4" />
               {t('admin:importTitle')}
@@ -142,23 +142,28 @@ export function ModelPricingPage() {
       />
 
       <Toolbar
+        filtersClassName="basis-full lg:basis-[32rem]"
         filters={
-          <>
-            <ModelSearchInput
-              id="m-search"
-              className="w-64"
-              value={draft}
-              placeholder={t('admin:modelSearchHint')}
-              onChange={(value) => {
-                setDraft(value)
-                // 清空输入框即撤掉搜索词，不必再按一次回车
-                if (value.trim() === '' && query !== '') setFilters({ q: '' })
-              }}
-              onSubmit={applySearch}
-            />
-            <Button size="sm" onClick={applySearch}>
-              {t('common:search')}
-            </Button>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3">
+            <ToolbarSearch>
+              <ModelSearchInput
+                id="m-search"
+                className="min-w-0 flex-1"
+                aria-label={t('admin:modelSearchHint')}
+                value={draft}
+                placeholder={t('admin:modelSearchHint')}
+                onChange={(value) => {
+                  setDraft(value)
+                  // 清空输入框即撤掉搜索词，不必再按一次回车
+                  if (value.trim() === '' && query !== '') setFilters({ q: '' })
+                }}
+                onSubmit={applySearch}
+                onChoose={(value) => setFilters({ q: value })}
+              />
+              <Button size="sm" variant="outline" className="shrink-0" onClick={applySearch}>
+                {t('common:search')}
+              </Button>
+            </ToolbarSearch>
             {/* 开着时必须一直可见，否则搜索范围内一条未定价都没有就再关不掉 */}
             {(onlyUnpriced || unpricedCount > 0) && (
               <Button
@@ -171,19 +176,22 @@ export function ModelPricingPage() {
                 {t('admin:onlyUnpriced', { n: unpricedCount })}
               </Button>
             )}
-            <span className="text-xs text-muted-foreground tabular-nums">
+            <Badge variant="muted" role="status" className="shrink-0 tabular-nums">
               {t('common:resultCount', { n: total })}
-            </span>
-          </>
+            </Badge>
+          </div>
         }
         selection={
-          <>
-            <span className="text-xs text-muted-foreground">{t('admin:publishHint')}</span>
-            <Button size="sm" loading={publish.isPending} onClick={() => publish.mutate()}>
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <span className="flex items-center gap-1.5 text-xs leading-5 text-muted-foreground">
+              <Info aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              {t('admin:publishHint')}
+            </span>
+            <Button size="sm" className="shrink-0" loading={publish.isPending} onClick={() => publish.mutate()}>
               {!publish.isPending && <Rocket className="h-3.5 w-3.5" />}
               {t('admin:publish')}
             </Button>
-          </>
+          </div>
         }
       />
 
@@ -206,27 +214,27 @@ export function ModelPricingPage() {
           <EmptyState hint={t('admin:modelsEmptyHint')} />
         )
       ) : (
-        <Table stickyHeader>
+        <Table stickyHeader aria-label={t('admin:modelListTitle')}>
           <THead>
             <Tr>
               <Th>{t('admin:modelName')}</Th>
               <Th>{t('admin:vendor')}</Th>
               <Th>{t('admin:pricingMode')}</Th>
-              <Th>{t('admin:modelRatio')}</Th>
-              <Th>{t('admin:completionRatio')}</Th>
-              <Th>{t('admin:perMillionCol')}</Th>
-              <Th>{t('admin:cacheRatio')}</Th>
-              <Th>{t('admin:cacheWriteRatioShort')}</Th>
-              <Th>{t('admin:audioRatioShort')}</Th>
-              <Th>{t('admin:imageRatio')}</Th>
+              <Th numeric>{t('admin:modelRatio')}</Th>
+              <Th numeric>{t('admin:completionRatio')}</Th>
+              <Th numeric>{t('admin:perMillionCol')}</Th>
+              <Th numeric>{t('admin:cacheRatio')}</Th>
+              <Th numeric>{t('admin:cacheWriteRatioShort')}</Th>
+              <Th numeric>{t('admin:audioRatioShort')}</Th>
+              <Th numeric>{t('admin:imageRatio')}</Th>
               <Th>{t('admin:modelChannelsCol')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((m) => (
               <Tr key={m.model_name}>
-                <Td className="font-mono text-xs">{m.model_name}</Td>
+                <Td className="whitespace-nowrap font-mono text-xs font-medium">{m.model_name}</Td>
                 <Td className="text-xs text-muted-foreground">{m.vendor ?? '—'}</Td>
                 <Td>
                   {m.pricing_mode === null ? (
@@ -235,9 +243,9 @@ export function ModelPricingPage() {
                     <Badge variant="muted">{m.pricing_mode}</Badge>
                   )}
                 </Td>
-                <Td>{formatRatio(m.model_ratio)}</Td>
-                <Td>{formatRatio(m.completion_ratio)}</Td>
-                <Td className="whitespace-nowrap text-xs text-muted-foreground">
+                <Td numeric>{formatRatio(m.model_ratio)}</Td>
+                <Td numeric>{formatRatio(m.completion_ratio)}</Td>
+                <Td numeric className="text-xs text-muted-foreground">
                   {m.model_ratio === null
                     ? '—'
                     : `$${perMillion(m.model_ratio)?.toFixed(2)} / $${perMillion(
@@ -245,14 +253,14 @@ export function ModelPricingPage() {
                         Number(m.completion_ratio ?? '1'),
                       )?.toFixed(2)}`}
                 </Td>
-                <Td>{formatRatio(m.cache_ratio)}</Td>
-                <Td>{formatRatio(m.cache_write_ratio)}</Td>
-                <Td>
+                <Td numeric>{formatRatio(m.cache_ratio)}</Td>
+                <Td numeric>{formatRatio(m.cache_write_ratio)}</Td>
+                <Td numeric>
                   {m.audio_ratio === null || Number(m.audio_ratio) === 1
                     ? '—'
                     : `${formatRatio(m.audio_ratio)} ×${formatRatio(m.audio_completion_ratio ?? '1')}`}
                 </Td>
-                <Td>{formatRatio(m.image_ratio)}</Td>
+                <Td numeric>{formatRatio(m.image_ratio)}</Td>
                 <Td>
                   {(channelCount.get(m.model_name) ?? 0) === 0 ? (
                     <Badge variant={m.pricing_mode === null ? 'muted' : 'destructive'}>
@@ -261,14 +269,14 @@ export function ModelPricingPage() {
                   ) : (
                     <Link
                       to="/admin/channels"
-                      className="text-xs underline decoration-dotted hover:text-foreground"
+                      className="whitespace-nowrap text-xs underline decoration-dotted hover:text-foreground"
                     >
                       {t('admin:modelChannelCount', { n: channelCount.get(m.model_name) })}
                     </Link>
                   )}
                 </Td>
                 <Td>
-                  <div className="flex items-center gap-0.5">
+                  <div className="flex items-center justify-end gap-0.5">
                     <IconButton
                       icon={Pencil}
                       label={t('common:edit')}

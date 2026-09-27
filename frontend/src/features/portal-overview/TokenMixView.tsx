@@ -6,7 +6,7 @@ import type { BreakdownRow, BreakdownTotal } from '@/features/portal-overview/ty
 import { sumByModel } from '@/features/portal-overview/types'
 import { formatBp, formatCount } from '@/lib/money'
 
-interface Segment {
+export interface Segment {
   key: 'input' | 'cached' | 'write' | 'output' | 'reasoning'
   value: number
   className: string
@@ -14,7 +14,7 @@ interface Segment {
 
 /// 把 OpenAI 口径的四个 usage 字段拆成互斥四段：
 /// cached ⊂ prompt、reasoning ⊂ completion，直接画会把缓存和推理各算两遍。
-function segments(t: {
+export function segments(t: {
   prompt_tokens: number
   cached_tokens: number
   cache_write_tokens?: number | null
@@ -33,10 +33,7 @@ function segments(t: {
   ]
 }
 
-/// Token 构成（Sub2API 强项的吸收：input / cache read / output / reasoning 四段）。
-///
-/// 对编码智能体用户这是账单里最该看懂的一张图：缓存命中的那一段按 cache_ratio
-/// （常为 0.1×）计价，命中率掉下来账单立刻翻倍——比总量涨跌更能解释"为什么这周贵"。
+/// 按已记录的用量拆分；采集不完整时不把缺失值解释成零命中。
 export function TokenMixView({
   rows,
   total,
@@ -87,44 +84,47 @@ export function TokenMixView({
             <span key={s.key} className="inline-flex items-center gap-1.5">
               <span className={`inline-block h-2.5 w-2.5 rounded-sm ${s.className}`} />
               <span className="text-muted-foreground">{label[s.key]}</span>
-              <span className="font-medium">{s.key === 'write' && total.cache_write_tokens == null ? '—' : formatCount(s.value, locale)}</span>
+              <span className="font-medium">{(s.key === 'write' && total.cache_write_tokens == null) || (s.key === 'cached' && total.cache_hit_bp == null) ? '—' : formatCount(s.value, locale)}</span>
               <span className="text-muted-foreground">
-                {s.key === 'write' && total.cache_write_tokens == null ? '' : formatBp(sum > 0 ? Math.round((s.value * 10_000) / sum) : 0, locale)}
+                {(s.key === 'write' && total.cache_write_tokens == null) || (s.key === 'cached' && total.cache_hit_bp == null) ? '' : formatBp(sum > 0 ? Math.round((s.value * 10_000) / sum) : 0, locale)}
               </span>
             </span>
           ))}
         </div>
         <p className="text-xs text-muted-foreground">
-          {t('portal:tokMixHint', { hit: formatBp(total.cache_hit_bp, locale) })}
+          {t('portal:tokMixHint', { hit: total.prompt_tokens > 0 && total.cache_hit_bp != null ? formatBp(total.cache_hit_bp, locale) : '—' })}
         </p>
         {total.cache_write_tokens == null && <p className="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">{t('charts:missingCacheWrite')}</p>}
+        {(total.cache_hit_bp == null || total.cache_write_tokens == null) && <p className="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">{t('portal:cacheIncomplete')}</p>}
+        <p className="text-xs text-muted-foreground">{t('portal:cacheCoverage', { read: total.cache_read_known_requests ?? 0, write: total.cache_write_known_requests ?? 0, total: total.requests })}</p>
 
-        <Table>
+        <Table stickyHeader stickyFirstColumn aria-label={t('portal:viewTokens')} wrapperClassName="max-h-[max(12rem,calc(100dvh-30rem))]">
           <THead>
             <Tr>
               <Th>{t('pricing:model')}</Th>
-              <Th>{t('portal:tokInput')}</Th>
-              <Th>{t('portal:tokCached')}</Th>
-              <Th>{t('charts:cacheWrite')}</Th>
-              <Th>{t('portal:tokOutput')}</Th>
-              <Th>{t('portal:tokReasoning')}</Th>
-              <Th>{t('portal:cacheHitShort')}</Th>
+              <Th numeric>{t('portal:tokInput')}</Th>
+              <Th numeric>{t('portal:tokCached')}</Th>
+              <Th numeric>{t('charts:cacheWrite')}</Th>
+              <Th numeric>{t('portal:tokOutput')}</Th>
+              <Th numeric>{t('portal:tokReasoning')}</Th>
+              <Th numeric>{t('portal:cacheHitShort')}</Th>
             </Tr>
           </THead>
           <TBody>
             {models.map((m) => {
               const s = segments(m)
+              const readKnown = m.cache_read_known_requests === m.requests
               const hitBp =
                 m.prompt_tokens > 0 ? Math.round((m.cached_tokens * 10_000) / m.prompt_tokens) : 0
               return (
                 <Tr key={m.model}>
-                  <Td className="font-mono text-xs">{m.model}</Td>
+                  <Td className="w-px font-mono text-xs"><span className="block w-28 break-all sm:w-44">{m.model}</span></Td>
                   {s.map((x) => (
-                    <Td key={x.key} className="text-xs">
-                      {x.key === 'write' && m.cache_write_tokens == null ? '—' : formatCount(x.value, locale)}
+                    <Td key={x.key} numeric className="whitespace-nowrap text-xs">
+                      {(x.key === 'write' && m.cache_write_tokens == null) || (x.key === 'cached' && !readKnown) ? '—' : formatCount(x.value, locale)}
                     </Td>
                   ))}
-                  <Td className="text-xs">{formatBp(hitBp, locale)}</Td>
+                  <Td numeric className="whitespace-nowrap text-xs">{m.prompt_tokens > 0 && readKnown ? formatBp(hitBp, locale) : '—'}</Td>
                 </Tr>
               )
             })}

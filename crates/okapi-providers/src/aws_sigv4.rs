@@ -1,7 +1,8 @@
 //! AWS Signature Version 4（IMPLEMENTATION §11.35，Bedrock 上游用）。
 //!
-//! 只实现 Bedrock 需要的子集：单块载荷、路径段 RFC 3986 编码、签 host / x-amz-date 与调用方给的
-//! 若干头。不做 S3 的双重编码与分块签名。纯函数，时间戳由调用方传入以便测试。
+//! 单块载荷、路径段 RFC 3986 编码、签 host / x-amz-date 与调用方给的头。
+//! S3 使用已编码的原始路径；其它服务再次编码。不做流式分块签名。
+//! 纯函数，时间戳由调用方传入以便测试。
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
@@ -85,7 +86,11 @@ pub fn sign(creds: &AwsCredentials, p: &SignParams<'_>) -> Vec<(String, String)>
     let canonical_request = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         p.method.to_ascii_uppercase(),
-        canonical_uri(p.url),
+        if p.service == "s3" {
+            p.url.path().to_owned()
+        } else {
+            canonical_uri(p.url)
+        },
         canonical_query(p.url),
         canonical_headers,
         signed_headers,
@@ -201,6 +206,72 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+
+    /// Independent AWS S3 examples, including a key that must not be double encoded.
+    /// https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sig-v4-header-based-auth.html
+    #[test]
+    fn s3_signatures_match_official_get_and_encoded_put_vectors() {
+        let creds = AwsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+            session_token: None,
+        };
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2013-05-24T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let empty = payload_hash(b"");
+        let get = sign(
+            &creds,
+            &SignParams {
+                method: "GET",
+                url: &reqwest::Url::parse("https://examplebucket.s3.amazonaws.com/test.txt")
+                    .unwrap(),
+                region: "us-east-1",
+                service: "s3",
+                headers: &[("range", "bytes=0-9"), ("x-amz-content-sha256", &empty)],
+                payload_hash: &empty,
+                timestamp,
+            },
+        );
+        assert!(
+            get.iter()
+                .find(|(k, _)| k == "authorization")
+                .unwrap()
+                .1
+                .ends_with(
+                    "Signature=f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41"
+                )
+        );
+        let hash = "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072";
+        let put = sign(
+            &creds,
+            &SignParams {
+                method: "PUT",
+                url: &reqwest::Url::parse(
+                    "https://examplebucket.s3.amazonaws.com/test%24file.text",
+                )
+                .unwrap(),
+                region: "us-east-1",
+                service: "s3",
+                headers: &[
+                    ("date", "Fri, 24 May 2013 00:00:00 GMT"),
+                    ("x-amz-content-sha256", hash),
+                    ("x-amz-storage-class", "REDUCED_REDUNDANCY"),
+                ],
+                payload_hash: hash,
+                timestamp,
+            },
+        );
+        assert!(
+            put.iter()
+                .find(|(k, _)| k == "authorization")
+                .unwrap()
+                .1
+                .ends_with(
+                    "Signature=98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd"
+                )
+        );
+    }
 
     #[test]
     fn derived_signing_key_matches_aws_documentation_vector() {

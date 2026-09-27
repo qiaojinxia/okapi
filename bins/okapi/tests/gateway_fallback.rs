@@ -153,6 +153,33 @@ async fn chat(gw: SocketAddr, token: &str, model: &str) -> reqwest::Response {
         .unwrap()
 }
 
+#[tokio::test]
+async fn endpoint_mismatch_preserves_configured_model_fallback() {
+    let bed = setup_bed().await;
+    let primary = bed.priced_model("fb-codex", "1").await;
+    let fallback = bed.priced_model("fb-chat", "1").await;
+    okapi_store::provision::create_channel(
+        &bed.pg,
+        &bed.model("codex-channel"),
+        "codex",
+        "http://127.0.0.1:9",
+        "unused",
+        &[&primary],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let mock = serve(Router::new().route("/v1/chat/completions", post(mock_ok))).await;
+    bed.channel_for("compatible", mock, &[&fallback]).await;
+    bed.set_fallbacks(&primary, std::slice::from_ref(&fallback))
+        .await;
+    let gw = start_gateway(&bed).await;
+    let resp = chat(gw, &bed.token, &primary).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<Value>().await.unwrap()["model"], fallback);
+}
+
 /// 首条 committed 记录 (model_name, amount_micro, pricing_snapshot)。
 async fn wait_committed(pg: &PgPool, user_id: i64) -> (String, i64, Value) {
     for _ in 0..50 {

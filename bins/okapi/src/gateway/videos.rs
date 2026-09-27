@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, Quote, RatioFp, calculate};
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
@@ -123,7 +123,7 @@ async fn handle_create(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    match state
+    let reservation_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -138,7 +138,7 @@ async fn handle_create(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -150,7 +150,7 @@ async fn handle_create(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     // —— 预扣已建立 ——
     let rows = okapi_store::channels::candidates_for_model(
@@ -237,8 +237,9 @@ async fn handle_create(
                     &cand,
                     failover,
                     headers,
+                    reservation_pool,
                 )
-                .await;
+                .await?;
                 let out = Response::builder()
                     .status(resp.status)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -412,74 +413,60 @@ async fn commit_and_record(
     cand: &okapi_store::ChannelCandidate,
     failover: i16,
     headers: &HeaderMap,
-) {
+    reservation_pool: okapi_ledger::Pool,
+) -> Result<(), AppError> {
     let book = state.pricebook.load();
-    match state
-        .ledger
-        .commit(key.user_id, key.key_id, request_id, quote.amount)
-        .await
-    {
-        Ok(CommitOutcome::Committed {
-            balance_after,
-            pool,
-            ..
-        }) => {
-            let input = SettlementInput {
-                dimensions: okapi_ledger::pg::UsageDimensions::new(
-                    requested_model,
-                    cand.upstream_model(canonical),
-                    "/v1/videos",
-                    "/v1/videos",
-                ),
-                request_id,
-                log_type: 2,
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                group_code: &key.group_code,
-                model_name: canonical,
-                channel_id: Some(cand.channel_id),
-                channel_key_id: Some(cand.channel_key_id),
-                state: BillingState::Committed,
-                usage: TokenUsage::default(),
-                amount: quote.amount,
-                original: quote.original,
-                discount: quote.discount,
-                list_price: quote.list_price,
-                upstream_cost: None,
-                pricing_epoch: Some(book.epoch()),
-                pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
-                latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-                ttft_ms: None,
-                is_stream: false,
-                retry_count: 0,
-                failover_count: failover,
-                upstream_status: Some(200),
-                error_code: None,
-                upstream_request_id: None,
-                node: state.node.as_ref(),
-                sticky_layer: 0,
-                client_type: detect_client_type(headers),
-                client_ip: None,
-                delta_micro: quote.amount.as_micros().saturating_neg(),
-                balance_after: Some(balance_after),
-                event_type: "commit",
-                pool,
-            };
-            state.settle_write(input).await;
-            super::auth::record_settlement_counters(
-                state,
-                key.user_id,
-                key.member_user_id,
-                quote.amount.as_micros(),
-                0,
-            )
-            .await;
-        }
-        Ok(CommitOutcome::NoReservation) => {
-            tracing::warn!(request_id = %request_id, "videos 重复结算竞争，跳过");
-        }
-        Err(err) => {
-            tracing::error!(request_id = %request_id, error = %err, "videos Redis 结算失败（悬置待清理）");
-        }
+    let input = SettlementInput {
+        dimensions: okapi_ledger::pg::UsageDimensions::new(
+            requested_model,
+            cand.upstream_model(canonical),
+            "/v1/videos",
+            "/v1/videos",
+        ),
+        request_id,
+        log_type: 2,
+        user_id: key.user_id,
+        api_key_id: key.key_id,
+        group_code: &key.group_code,
+        model_name: canonical,
+        channel_id: Some(cand.channel_id),
+        channel_key_id: Some(cand.channel_key_id),
+        state: BillingState::Committed,
+        usage: TokenUsage::default(),
+        amount: quote.amount,
+        original: quote.original,
+        discount: quote.discount,
+        list_price: quote.list_price,
+        upstream_cost: None,
+        pricing_epoch: Some(book.epoch()),
+        pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
+        latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
+        ttft_ms: None,
+        is_stream: false,
+        retry_count: 0,
+        failover_count: failover,
+        upstream_status: Some(200),
+        error_code: None,
+        upstream_request_id: None,
+        node: state.node.as_ref(),
+        sticky_layer: 0,
+        client_type: detect_client_type(headers),
+        client_ip: None,
+        delta_micro: quote.amount.as_micros().saturating_neg(),
+        balance_after: None,
+        event_type: "commit",
+        pool: reservation_pool,
+    };
+    if !state.settle_success(input).await? {
+        return Ok(());
     }
+    super::auth::record_settlement_counters(
+        state,
+        key.user_id,
+        key.member_user_id,
+        quote.amount.as_micros(),
+        0,
+    )
+    .await;
+    Ok(())
 }

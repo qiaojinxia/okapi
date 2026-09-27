@@ -31,7 +31,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { IconButton } from '@/components/ui/icon-button'
 import { PROVIDERS, balanceSupported, providerConsoleUrl } from '@/features/channels/types'
-import { PageHeader, Toolbar } from '@/components/ui/page'
+import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
 import { Select } from '@/components/ui/select'
@@ -277,7 +277,7 @@ export function ChannelsPage() {
       : undefined
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="list-page">
       <PageHeader
         title={t('admin:channelsTitle')}
         description={t('admin:channelsDesc')}
@@ -316,17 +316,20 @@ export function ChannelsPage() {
       <Toolbar
         filters={
           <>
-            <SearchInput
-              id="ch-search"
-              className="w-64"
-              value={draft}
-              placeholder={t('admin:channelSearchHint')}
-              onChange={setDraft}
-              onSubmit={applySearch}
-            />
-            <Button size="sm" onClick={applySearch}>
-              {t('common:search')}
-            </Button>
+            <ToolbarSearch>
+              <SearchInput
+                id="ch-search"
+                className="min-w-0 flex-1"
+                aria-label={t('admin:channelSearchHint')}
+                value={draft}
+                placeholder={t('admin:channelSearchHint')}
+                onChange={setDraft}
+                onSubmit={applySearch}
+              />
+              <Button size="sm" variant="outline" onClick={applySearch}>
+                {t('common:search')}
+              </Button>
+            </ToolbarSearch>
             <Select
               id="ch-provider"
               className="w-40"
@@ -344,9 +347,9 @@ export function ChannelsPage() {
           </>
         }
         selection={
-          <span className="text-xs text-muted-foreground tabular-nums">
+          <Badge variant="muted" className="tabular-nums">
             {t('common:resultCount', { n: total })}
-          </span>
+          </Badge>
         }
       />
 

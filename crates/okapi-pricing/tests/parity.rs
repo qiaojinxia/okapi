@@ -201,13 +201,15 @@ fn newapi_parity_fixtures() {
         };
         let usage = TokenUsage {
             prompt_tokens: case.usage.prompt,
+            cache_read_reported: true,
+            cache_write_reported: true,
             cached_tokens: case.usage.cached,
             cache_write_tokens: case.usage.cache_write,
             audio_prompt_tokens: case.usage.audio_in,
             image_prompt_tokens: case.usage.image_in,
             completion_tokens: case.usage.completion,
             audio_completion_tokens: case.usage.audio_out,
-            reasoning_tokens: 0,
+            ..TokenUsage::default()
         };
 
         let quote = calculate(&book, &ctx, usage).unwrap();
@@ -308,13 +310,15 @@ fn snapshot_json_shape_matches_design() {
     };
     let usage = TokenUsage {
         prompt_tokens: 1000,
+        cache_read_reported: true,
+        cache_write_reported: true,
         cached_tokens: 0,
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
         completion_tokens: 500,
         audio_completion_tokens: 0,
-        reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     let quote = calculate(&book, &ctx, usage).unwrap();
     let json = serde_json::to_string(&quote.snapshot).unwrap();
@@ -398,13 +402,15 @@ fn openai_image_input_ratio_parity() {
     // prompt 4000 = 文本 3000 + 图片 1000；无音频、无补全，只让图片轴说话
     let usage = TokenUsage {
         prompt_tokens: 4_000,
+        cache_read_reported: true,
+        cache_write_reported: true,
         cached_tokens: 0,
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 1_000,
         completion_tokens: 0,
         audio_completion_tokens: 0,
-        reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     assert!(usage.validate().is_ok());
 
@@ -472,13 +478,13 @@ fn openai_audio_official_pricing_parity() {
     // prompt 10000 = 文本 5000 + 音频 3000 + 图片 2000；completion 1000 = 文本 600 + 音频 400
     let usage = TokenUsage {
         prompt_tokens: 10_000,
-        cached_tokens: 0,
-        cache_write_tokens: 0,
+        cache_read_reported: true,
+        cache_write_reported: true,
         audio_prompt_tokens: 3_000,
         image_prompt_tokens: 2_000,
         completion_tokens: 1_000,
         audio_completion_tokens: 400,
-        reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     assert!(usage.validate().is_ok());
 
@@ -600,12 +606,14 @@ fn anthropic_cache_write_is_billed_as_separate_segment() {
     let usage = TokenUsage {
         prompt_tokens: 10_000,
         cached_tokens: 6_000,
+        cache_read_reported: true,
+        cache_write_reported: true,
         cache_write_tokens: 3_000,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
         completion_tokens: 500,
         audio_completion_tokens: 0,
-        reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     assert!(usage.validate().is_ok());
 

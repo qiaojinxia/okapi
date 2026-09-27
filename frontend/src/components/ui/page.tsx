@@ -22,7 +22,7 @@ export function PageHeader({
   className?: string
 }) {
   return (
-    <header className={cn('flex flex-wrap items-start justify-between gap-3', className)}>
+    <header data-slot="page-header" className={cn('flex min-w-0 shrink-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between', className)}>
       <div className="flex min-w-0 items-start gap-3">
         {Icon && (
           <span className="mt-0.5 hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
@@ -31,15 +31,15 @@ export function PageHeader({
         )}
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+            <h1 className="text-xl font-semibold leading-7 tracking-tight">{title}</h1>
             {meta}
           </div>
           {description !== undefined && (
-            <p className="max-w-3xl text-sm leading-5 text-muted-foreground">{description}</p>
+            <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
           )}
         </div>
       </div>
-      {action !== undefined && <div className="flex flex-wrap items-center gap-2">{action}</div>}
+      {action !== undefined && <div className="flex shrink-0 flex-wrap items-center gap-2 [&_button]:min-h-10 lg:justify-end lg:[&_button]:min-h-9">{action}</div>}
     </header>
   )
 }
@@ -52,25 +52,35 @@ export function Toolbar({
   filters,
   selection,
   className,
+  filtersClassName,
+  selectionClassName,
 }: {
   filters?: React.ReactNode
   /// 右侧区（计数、发布按钮等）。
   selection?: React.ReactNode
   className?: string
+  filtersClassName?: string
+  selectionClassName?: string
 }) {
   return (
     <div
+      data-slot="toolbar"
       className={cn(
-        'flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2.5 shadow-card',
+        'flex min-h-15 min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-3 rounded-xl border border-border bg-card p-3 shadow-card',
         className,
       )}
     >
-      <div className="flex flex-wrap items-center gap-2">{filters}</div>
+      <div className={cn('flex min-w-0 max-w-full flex-1 basis-96 flex-wrap items-center gap-3 [&>*]:max-w-full', filtersClassName)}>{filters}</div>
       {selection !== undefined && (
-        <div className="flex flex-wrap items-center gap-2">{selection}</div>
+        <div className={cn('flex min-w-0 max-w-full flex-wrap items-center gap-2', selectionClassName)}>{selection}</div>
       )}
     </div>
   )
+}
+
+/// 搜索框与提交按钮保持一组；宽屏不无限拉长，窄屏按整组换行。
+export function ToolbarSearch({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
+  return <div data-slot="toolbar-search" className={cn('flex min-w-0 max-w-md flex-1 basis-72 items-center gap-2 [&>button]:shrink-0', className)} {...props} />
 }
 
 /// 页面内容的统一纵向节奏。

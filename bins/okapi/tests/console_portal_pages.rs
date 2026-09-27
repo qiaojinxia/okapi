@@ -60,14 +60,38 @@ async fn public_pricing_no_auth() {
         .bind(json!({"vision": true, "tools": false, "audio": "yes", "internal_note": "not public"}))
         .execute(&env.pg).await.unwrap();
 
-    let body: Value = reqwest::Client::new()
-        .get(format!("http://{}/api/pricing", env.addr))
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let mut url = reqwest::Url::parse(&format!("http://{}/api/pricing", env.addr)).unwrap();
+    url.query_pairs_mut().append_pair("model", &model);
+    let started = std::time::Instant::now();
+    let bytes = client
+        .get(url.clone())
         .send()
         .await
         .unwrap()
-        .json()
+        .bytes()
         .await
         .unwrap();
+    eprintln!(
+        "PRICING_DIRECTORY bytes={} elapsed_ms={}",
+        bytes.len(),
+        started.elapsed().as_millis()
+    );
+    let head = client.head(url).send().await.unwrap();
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-type"], "application/json");
+    if let Some(length) = head.headers().get("content-length") {
+        assert_eq!(
+            length.to_str().unwrap().parse::<usize>().unwrap(),
+            bytes.len()
+        );
+    }
+    assert!(head.bytes().await.unwrap().is_empty());
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    drop(bytes);
     let entry = body["models"]
         .as_array()
         .unwrap()
@@ -158,8 +182,12 @@ async fn public_pricing_reports_usable_groups() {
     .await
     .unwrap();
 
+    let mut pricing_url = reqwest::Url::parse(&format!("http://{}/api/pricing", env.addr)).unwrap();
+    pricing_url
+        .query_pairs_mut()
+        .extend_pairs([("q", &suffix[..10]), ("group_q", &suffix[..10])]);
     let body: Value = reqwest::Client::new()
-        .get(format!("http://{}/api/pricing", env.addr))
+        .get(pricing_url.clone())
         .send()
         .await
         .unwrap()
@@ -219,7 +247,7 @@ async fn public_pricing_reports_usable_groups() {
     .await
     .unwrap();
     let body: Value = reqwest::Client::new()
-        .get(format!("http://{}/api/pricing", env.addr))
+        .get(pricing_url.clone())
         .send()
         .await
         .unwrap()
@@ -540,4 +568,279 @@ async fn me_logs_with_snapshot_own_scope() {
         .unwrap();
     assert_eq!(unauthorized.status(), 401);
     let _ = json!({});
+}
+
+/// 日期下钻按账本时间过滤，DST 的 25 小时自然日、游标与 own/key 隔离同时成立。
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn me_logs_calendar_range_preserves_scope_and_cursor() {
+    let env = setup().await;
+    let (user_id, token) = mk_user(&env.pg).await;
+    let (other_id, _) = mk_user(&env.pg).await;
+    let key_id: i64 = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id = $1")
+        .bind(user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let second_key = okapi_store::provision::create_api_key(
+        &env.pg,
+        user_id,
+        &Uuid::new_v4().simple().to_string(),
+        "sk-range",
+    )
+    .await
+    .unwrap();
+    let mut ids = Vec::new();
+    for (owner, key, model, status, time) in [
+        (
+            user_id,
+            key_id,
+            "range-model",
+            20_i16,
+            "2024-11-03T06:59:59Z",
+        ),
+        (user_id, key_id, "range-model", 20, "2024-11-03T07:00:00Z"),
+        (
+            user_id,
+            key_id,
+            "range-model",
+            30,
+            "2024-11-04T07:59:59.999999Z",
+        ),
+        (user_id, key_id, "range-model", 20, "2024-11-04T08:00:00Z"),
+        (
+            user_id,
+            second_key,
+            "range-model",
+            20,
+            "2024-11-03T10:00:00Z",
+        ),
+        (user_id, key_id, "another-model", 20, "2024-11-03T10:00:00Z"),
+        (other_id, key_id, "range-model", 20, "2024-11-03T10:00:00Z"),
+    ] {
+        let id: i64 = sqlx::query_scalar(
+            "INSERT INTO billing_records (request_id, log_type, user_id, api_key_id, group_code, model_name, status, created_at) \
+             VALUES ($1, 2, $2, $3, 'default', $4, $5, $6) RETURNING id",
+        )
+        .bind(Uuid::new_v4()).bind(owner).bind(key).bind(model).bind(status)
+        .bind(chrono::DateTime::parse_from_rfc3339(time).unwrap())
+        .fetch_one(&env.pg).await.unwrap();
+        ids.push(id);
+    }
+    let client = reqwest::Client::new();
+    let get = |query: String| {
+        let req = client
+            .get(format!("http://{}/api/me/logs?{query}", env.addr))
+            .bearer_auth(&token);
+        async move {
+            let res = req.send().await.unwrap();
+            assert_eq!(res.status(), 200);
+            res.json::<Value>().await.unwrap()
+        }
+    };
+    let base = "model=range-model&start_date=2024-11-03&end_date=2024-11-03&timezone=America%2FLos_Angeles";
+    let body = get(base.to_owned()).await;
+    let row_ids = |v: &Value| {
+        v["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_i64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        row_ids(&body),
+        [ids[2], ids[1]],
+        "必须含首尾边界内的记录，排除第二把 key 和其他用户"
+    );
+    assert_eq!(body["window"]["timezone"], "America/Los_Angeles");
+    assert_eq!(body["window"]["end_date"], "2024-11-03");
+    let first = get(format!("{base}&limit=1")).await;
+    assert_eq!(row_ids(&first), [ids[2]]);
+    let next = get(format!("{base}&limit=1&before={}", first["next_before"])).await;
+    assert_eq!(row_ids(&next), [ids[1]]);
+    assert!(row_ids(&get(format!("{base}&before={}", ids[1])).await).is_empty());
+    assert!(
+        row_ids(&get(format!("{base}&errors_only=true")).await).is_empty(),
+        "refunded records are not failed requests"
+    );
+    assert_eq!(
+        row_ids(&get(format!("{base}&scope=user")).await),
+        [ids[4], ids[2], ids[1]]
+    );
+    let utc = get("model=range-model&start_date=2024-11-03&end_date=2024-11-03".to_owned()).await;
+    assert_eq!(
+        row_ids(&utc),
+        [ids[1], ids[0]],
+        "缺省 UTC，不能把次日当地记录混入"
+    );
+    assert_eq!(utc["window"]["timezone"], "UTC");
+    let all = get("model=range-model".to_owned()).await;
+    assert_eq!(
+        row_ids(&all),
+        [ids[3], ids[2], ids[1], ids[0]],
+        "清除日期恢复全部日期，隔离仍有效"
+    );
+    assert!(all["window"].is_null());
+}
+
+#[tokio::test]
+async fn me_logs_rejects_invalid_calendar_ranges() {
+    let env = setup().await;
+    let (_, token) = mk_user(&env.pg).await;
+    let client = reqwest::Client::new();
+    for query in [
+        "start_date=2024-01-01",
+        "end_date=2024-01-01",
+        "start_date=2024-02-30&end_date=2024-03-01",
+        "start_date=2024-01-02&end_date=2024-01-01",
+        "start_date=2023-01-01&end_date=2024-01-02",
+        "start_date=2148-01-01&end_date=2148-01-01",
+        "start_date=2024-01-01&end_date=2024-01-01&timezone=not-a-timezone",
+        "start_date=2024-01-01&end_date=2024-01-01&timezone=UTC%27%3BSELECT%201",
+    ] {
+        let res = client
+            .get(format!("http://{}/api/me/logs?{query}", env.addr))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 400, "{query}");
+    }
+}
+
+/// Summary and list use identical owner/model/key/request/date predicates, but summary
+/// ignores paging. Refunded billing states must never count as failed calls or net spend.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn me_logs_summary_and_usage_details_are_owned_and_page_independent() {
+    async fn get(env: &TestEnv, token: &str, path: &str) -> Value {
+        let response = reqwest::Client::new()
+            .get(format!("http://{}{path}", env.addr))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{path}");
+        response.json().await.unwrap()
+    }
+    let env = setup().await;
+    let (user_id, token) = mk_user(&env.pg).await;
+    let (other_id, _) = mk_user(&env.pg).await;
+    let key_id: i64 = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id=$1")
+        .bind(user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let request_id = Uuid::new_v4();
+    for i in 0..51 {
+        sqlx::query("INSERT INTO billing_records (request_id, user_id, api_key_id, model_name, status, prompt_tokens, cached_tokens, completion_tokens, amount_micro, latency_ms, ttft_ms, is_stream, usage_details) VALUES ($1,$2,$3,'summary-model',20,1000,$4,100,100,2000,100,true,$5)")
+            .bind(if i == 0 { request_id } else { Uuid::new_v4() }).bind(user_id).bind(key_id)
+            .bind(if i == 50 { 0 } else { 100_i32 })
+            .bind(if i == 50 { None } else { Some(json!({"tokens": {"cache_read_reported": true, "cache_write_reported": true, "cache_write_tokens": 0, "audio_prompt_tokens": 0, "image_prompt_tokens": 0, "audio_completion_tokens": 0}, "endpoint":"/v1/responses", "requested_model":"alias-model"})) })
+            .execute(&env.pg).await.unwrap();
+    }
+    for (owner, status, amount) in [
+        (user_id, 30_i16, 200_i64),
+        (user_id, 40, 0),
+        (other_id, 20, 999_999),
+    ] {
+        sqlx::query("INSERT INTO billing_records (request_id,user_id,api_key_id,model_name,status,amount_micro) VALUES ($1,$2,$3,'summary-model',$4,$5)")
+            .bind(Uuid::new_v4()).bind(owner).bind(key_id).bind(status).bind(amount)
+            .execute(&env.pg).await.unwrap();
+    }
+    let stat = get(
+        &env,
+        &token,
+        "/api/me/logs/stat?scope=user&model=summary-model&limit=1&before=1",
+    )
+    .await;
+    assert_eq!(stat["records"], 53);
+    assert_eq!(stat["settled"], 51);
+    assert_eq!(stat["failed"], 1);
+    assert_eq!(stat["refunded"], 1);
+    assert_eq!(stat["amount_micro"], 5100);
+    assert_eq!(stat["refunded_amount_micro"], 200);
+    assert_eq!(stat["prompt_tokens"], 51000);
+    assert_eq!(stat["completion_tokens"], 5100);
+    assert_eq!(stat["cache_read_samples"], 50);
+    assert_eq!(stat["avg_ttft_ms"], 100);
+    assert_eq!(stat["ttft_samples"], 51);
+    let one = get(
+        &env,
+        &token,
+        &format!("/api/me/logs?request_id={request_id}"),
+    )
+    .await;
+    assert_eq!(one["data"].as_array().unwrap().len(), 1);
+    assert!(one["next_before"].is_null());
+    let row = &one["data"][0];
+    assert_eq!(row["requested_model"], "alias-model");
+    assert_eq!(row["endpoint"], "/v1/responses");
+    assert_eq!(row["usage"]["cache_write_tokens"], 0);
+    assert_eq!(row["usage"]["cache_write_reported"], true);
+    assert_eq!(row["usage_details_recorded"], true);
+    for field in [
+        "channel_id",
+        "channel_key_id",
+        "upstream_cost_micro",
+        "client_ip",
+        "upstream_model",
+    ] {
+        assert!(row.get(field).is_none(), "must not expose {field}");
+    }
+    let first = get(&env, &token, "/api/me/logs?limit=3").await;
+    assert_eq!(first["data"].as_array().unwrap().len(), 3);
+    assert!(first["next_before"].is_number());
+    let old = &first["data"][2];
+    assert_eq!(old["usage_details_recorded"], false);
+    assert!(old["usage"]["cache_write_tokens"].is_null());
+    assert!(old["usage"]["cache_read_reported"].is_null());
+    assert_eq!(first["data"][1]["status"], 30);
+    assert_eq!(first["data"][1]["net_amount_micro"], 0);
+    let failed = get(&env, &token, "/api/me/logs?errors_only=true").await;
+    assert_eq!(failed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(failed["data"][0]["status"], 40);
+    let failed_stat = get(&env, &token, "/api/me/logs/stat?errors_only=true").await;
+    assert_eq!(failed_stat["records"], 1);
+    assert_eq!(failed_stat["amount_micro"], 0);
+    assert!(failed_stat["avg_ttft_ms"].is_null());
+    for query in [
+        "model=absent".to_owned(),
+        format!("api_key_id={}", key_id + 100_000),
+        "start_date=2020-01-01&end_date=2020-01-01".to_owned(),
+    ] {
+        let empty = get(
+            &env,
+            &token,
+            &format!("/api/me/logs/stat?scope=user&{query}"),
+        )
+        .await;
+        assert_eq!(empty["records"], 0);
+        assert!(empty["avg_latency_ms"].is_null());
+    }
+    let single_stat = get(
+        &env,
+        &token,
+        &format!("/api/me/logs/stat?request_id={request_id}"),
+    )
+    .await;
+    assert_eq!(single_stat["records"], 1);
+    for path in ["/api/me/logs", "/api/me/logs/stat"] {
+        let unauthorized = reqwest::Client::new()
+            .get(format!("http://{}{path}", env.addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), 401);
+        for invalid in ["api_key_id=-1", "request_id=not-a-uuid"] {
+            let response = reqwest::Client::new()
+                .get(format!("http://{}{path}?{invalid}", env.addr))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 400);
+        }
+    }
 }

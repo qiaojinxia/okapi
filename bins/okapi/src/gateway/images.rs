@@ -1,110 +1,98 @@
 //! /v1/images/generations 与 /v1/images/edits（IMPLEMENTATION §4.4 媒体计费）：
-//! per_call × n 张（n clamp 1..10），乘数落 pricing_snapshot.media_units
-//! 保账单可解释；仅路由 openai 系渠道。edits 走 multipart（与 transcriptions 同构）。
+//! per_call × n 张（n 必须在 1..10），乘数落 pricing_snapshot.media_units
+//! 保账单可解释；仅路由 openai 系渠道。edits 支持 JSON 与 multipart，共用验证、路由和结算。
 
 use super::clients::detect_client_type;
 use super::error::AppError;
 use super::error::with_request_id;
 use super::state::AppState;
-use crate::gateway::extract::Multipart;
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
-use okapi_ledger::{CommitOutcome, LimitCaps, ReserveOutcome, SettlementInput};
+use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, Quote, RatioFp, calculate};
-use okapi_providers::rewrite_model;
-use serde::Deserialize;
+use okapi_providers::UpstreamError;
 use std::time::Instant;
 use uuid::Uuid;
 
 const MAX_ATTEMPTS: usize = 3;
-const MAX_IMAGES: u32 = 10;
+pub mod batches;
+mod request;
+pub mod tasks;
 
-#[derive(Deserialize)]
-struct ImagesProbe {
-    model: String,
-    #[serde(default)]
-    n: Option<u32>,
+pub async fn edits(State(state): State<AppState>, req: Request) -> Response {
+    receive(state, req, "/v1/images/edits").await
 }
 
-pub async fn edits(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Multipart(multipart): Multipart,
-) -> Response {
+pub async fn images(State(state): State<AppState>, req: Request) -> Response {
+    receive(state, req, "/v1/images/generations").await
+}
+
+async fn receive(state: AppState, req: Request, endpoint: &str) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
-    match handle_edits(&state, &headers, multipart, request_id, started).await {
+    let headers = req.headers().clone();
+    let result = async {
+        let key = super::auth::authenticate_data_plane(&state, &headers).await?;
+        let input = request::read(req, &state, endpoint == "/v1/images/edits").await?;
+        handle(
+            &state, &key, &headers, input, request_id, started, endpoint, None,
+        )
+        .await
+    }
+    .await;
+    match result {
         Ok(resp) => with_request_id(resp, request_id),
-        Err(err) => err.into_response_with(Some(request_id)),
+        Err(error) => error.into_response_with(Some(request_id)),
     }
 }
 
-pub async fn images(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    let request_id = Uuid::new_v4();
-    let started = Instant::now();
-    match handle(&state, &headers, &body, request_id, started).await {
-        Ok(resp) => with_request_id(resp, request_id),
-        Err(err) => err.into_response_with(Some(request_id)),
-    }
-}
-
-/// per_call 报价 × 张数（整数饱和乘，乘数记入快照）。
-fn scale_quote(quote: &Quote, units: u32) -> Quote {
+/// per_call 报价 × 张数（整数检查乘，乘数记入快照）。
+fn scale_quote(quote: &Quote, units: u32) -> Result<Quote, AppError> {
     let n = i64::from(units);
     let mut snapshot = quote.snapshot.clone();
     snapshot.media_units = Some(units);
-    Quote {
-        amount: Money::from_micros(quote.amount.as_micros().saturating_mul(n)),
-        original: Money::from_micros(quote.original.as_micros().saturating_mul(n)),
-        discount: Money::from_micros(quote.discount.as_micros().saturating_mul(n)),
-        list_price: Money::from_micros(quote.list_price.as_micros().saturating_mul(n)),
+    let scale = |value: Money| {
+        value
+            .as_micros()
+            .checked_mul(n)
+            .map(Money::from_micros)
+            .ok_or_else(|| AppError::from(okapi_pricing::PricingError::Overflow))
+    };
+    Ok(Quote {
+        amount: scale(quote.amount)?,
+        original: scale(quote.original)?,
+        discount: scale(quote.discount)?,
+        list_price: scale(quote.list_price)?,
         snapshot,
-    }
+    })
 }
 
-#[allow(clippy::too_many_lines)]
-async fn handle_edits(
-    state: &AppState,
-    headers: &HeaderMap,
-    mut multipart: axum::extract::Multipart,
-    request_id: Uuid,
-    started: Instant,
-) -> Result<Response, AppError> {
-    let key = super::auth::authenticate_data_plane(state, headers).await?;
-    let mut parts: Vec<(String, Option<String>, Option<String>, Bytes)> = Vec::new();
-    let mut model = String::new();
-    let mut units = 1_u32;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|_| AppError::bad_request())?
-    {
-        let name = field.name().unwrap_or_default().to_owned();
-        let filename = field.file_name().map(str::to_owned);
-        let content_type = field.content_type().map(str::to_owned);
-        let data = field.bytes().await.map_err(|_| AppError::bad_request())?;
-        if name == "model" {
-            String::from_utf8_lossy(&data).trim().clone_into(&mut model);
-        } else if name == "n"
-            && let Ok(n) = String::from_utf8_lossy(&data).trim().parse::<u32>()
-        {
-            units = n.clamp(1, MAX_IMAGES);
-        }
-        parts.push((name, filename, content_type, data));
-    }
-    if model.is_empty() {
-        return Err(AppError::bad_request().with_param("model"));
-    }
-    if !parts.iter().any(|(n, ..)| n == "image") {
-        return Err(AppError::bad_request().with_param("image"));
-    }
+struct Prepared {
+    canonical: String,
+    unit_quote: Quote,
+    quote: Quote,
+    pricing_epoch: i64,
+}
 
-    let meta = super::chat::resolve_model_cached(state, &model).await?;
+async fn prepare(
+    state: &AppState,
+    key: &okapi_store::AuthedKey,
+    input: &request::Input,
+) -> Result<Prepared, AppError> {
+    prepare_model(state, key, &input.model, input.units).await
+}
+
+async fn prepare_model(
+    state: &AppState,
+    key: &okapi_store::AuthedKey,
+    model: &str,
+    units: u32,
+) -> Result<Prepared, AppError> {
+    let meta = super::chat::resolve_model_cached(state, model).await?;
     let Some(meta) = meta.as_ref() else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
     };
@@ -133,204 +121,61 @@ async fn handle_edits(
         surge_active: rules_in.surge_active,
         service_tier: None,
     };
-    let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
+    let unit_quote = calculate(&book, &calc, TokenUsage::default())?;
+    let quote = scale_quote(&unit_quote, units)?;
+    let pricing_epoch = book.epoch();
     // 图片请求没有 token，ratio 定价算出来恒为 0——预扣 0 必过，于是余额为空的
     // 调用方也能一路打到上游（白嫖运营方的上游额度）。audio 的 transcriptions
     // 早有同款闸（那里时长同样本地不可知），images 此前漏了。
     if quote.snapshot.mode != "per_call" {
         return Err(AppError::bad_request().with_param("images_requires_per_call_model"));
     }
-    super::auth::check_member_limit(state, &key).await?;
-    super::auth::check_group_rate(state, &key).await?;
+    Ok(Prepared {
+        canonical,
+        unit_quote,
+        quote,
+        pricing_epoch,
+    })
+}
 
-    let cap = |v: Option<i32>| v.map_or(0, i64::from);
-    let caps = LimitCaps {
-        rpm: cap(key.rpm_limit),
-        tpm: cap(key.tpm_limit),
-        rpd: cap(key.rpd_limit),
-        concurrency: cap(key.max_concurrency),
-    };
-    match state
-        .ledger
-        .reserve(
-            okapi_ledger::ReserveRequest {
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                request_id,
-                est: quote.amount,
-                caps,
-                est_tokens: 0,
-            },
-            now,
-        )
-        .await?
-    {
-        ReserveOutcome::Reserved { .. } => {}
-        ReserveOutcome::Insufficient { .. } => {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::INSUFFICIENT_QUOTA,
-            ));
-        }
-        ReserveOutcome::RateLimited { which } => {
-            return Err(
-                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
-            );
-        }
-    }
-
-    let rows = okapi_store::channels::candidates_for_model(
-        &state.pg,
-        &canonical,
-        &key.pool_chain(),
-        state.master_key.as_deref(),
-    )
-    .await
-    .map_err(AppError::from);
-    let mut candidates: Vec<_> = match rows {
-        Ok(rows) => super::scheduler::order_candidates(rows)
-            .into_iter()
-            .filter(|c| {
-                c.provider != "anthropic"
-                    && c.provider != "gemini"
-                    && !super::dialect::chat_only(&c.provider)
-            })
-            .collect(),
-        Err(err) => {
-            let _ = state
-                .ledger
-                .refund(key.user_id, key.key_id, request_id)
-                .await;
-            return Err(err);
-        }
-    };
-    let margin_removed = state
-        .retain_margin_ok(&key.group_code, &mut candidates)
-        .await;
-    if candidates.is_empty() {
-        let _ = state
+async fn refund(
+    state: &AppState,
+    key: &okapi_store::AuthedKey,
+    request_id: Uuid,
+    task: Option<tasks::Lease>,
+) -> Result<(), AppError> {
+    if task.is_none() {
+        state
             .ledger
             .refund(key.user_id, key.key_id, request_id)
-            .await;
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            super::state::no_candidates_code(margin_removed),
-        ));
+            .await?;
     }
-
-    let mut last_err: Option<AppError> = None;
-    for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
-        let upstream_model = cand.upstream_model(&canonical).to_owned();
-        let mut up_parts = parts.clone();
-        for (name, _, _, data) in &mut up_parts {
-            if name == "model" {
-                *data = Bytes::from(upstream_model.clone().into_bytes());
-            }
-        }
-        match state
-            .openai_audio_multipart(&cand, &upstream_model, "/images/edits", up_parts)
-            .await
-        {
-            Ok(resp) => {
-                commit_and_record(
-                    state,
-                    &key,
-                    &canonical,
-                    &model,
-                    &quote,
-                    units,
-                    request_id,
-                    started,
-                    &cand,
-                    0,
-                    headers,
-                    "/v1/images/edits",
-                )
-                .await;
-                let out = Response::builder()
-                    .status(resp.status)
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(resp.body))
-                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-                return Ok(out);
-            }
-            Err(err) if err.retriable_before_first_token() => {
-                last_err = Some(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
-            }
-            Err(_) => {
-                last_err = Some(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
-                break;
-            }
-        }
-    }
-
-    if let Err(err) = state
-        .ledger
-        .refund(key.user_id, key.key_id, request_id)
-        .await
-    {
-        tracing::error!(request_id = %request_id, error = %err, "images/edits 退款失败（悬置待清理）");
-    }
-    Err(last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)))
+    Ok(())
 }
 
 // 时序与 chat 主链一致
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn handle(
     state: &AppState,
+    key: &okapi_store::AuthedKey,
     headers: &HeaderMap,
-    body: &Bytes,
+    input: request::Input,
     request_id: Uuid,
     started: Instant,
+    endpoint: &str,
+    task: Option<tasks::Lease>,
 ) -> Result<Response, AppError> {
-    let key = super::auth::authenticate_data_plane(state, headers).await?;
-    let probe: ImagesProbe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
-    let units = probe.n.unwrap_or(1).clamp(1, MAX_IMAGES);
-
-    let meta = super::chat::resolve_model_cached(state, &probe.model).await?;
-    let Some(meta) = meta.as_ref() else {
-        return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
-    };
-    let canonical = meta.canonical.clone();
-    if !key.allows_model(&canonical) {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            codes::MODEL_NOT_ALLOWED,
-        ));
-    }
-
-    let book = state.pricebook.load();
-    let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
+    let model = &input.model;
+    let units = input.units;
+    let Prepared {
+        canonical,
+        unit_quote,
+        quote,
+        pricing_epoch,
+    } = prepare(state, key, &input).await?;
     let now = chrono::Utc::now();
-    let minute_of_day =
-        u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
-    let calc = CalcContext {
-        user: UserId::new(key.user_id),
-        model: ModelCode::from(canonical.as_str()),
-        group: GroupCode::from(key.group_code.as_str()),
-        user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
-        monthly_tokens: rules_in.monthly_tokens,
-        monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: minute_of_day,
-        now_unix: now.timestamp(),
-        surge_active: rules_in.surge_active,
-        service_tier: None,
-    };
-    let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
-    // 图片请求没有 token，ratio 定价算出来恒为 0——预扣 0 必过，于是余额为空的
-    // 调用方也能一路打到上游（白嫖运营方的上游额度）。audio 的 transcriptions
-    // 早有同款闸（那里时长同样本地不可知），images 此前漏了。
-    if quote.snapshot.mode != "per_call" {
-        return Err(AppError::bad_request().with_param("images_requires_per_call_model"));
-    }
-    super::auth::check_member_limit(state, &key).await?;
-    super::auth::check_group_rate(state, &key).await?;
+    super::auth::check_member_limit(state, key).await?;
+    super::auth::check_group_rate(state, key).await?;
 
     let cap = |v: Option<i32>| v.map_or(0, i64::from);
     let caps = LimitCaps {
@@ -339,7 +184,7 @@ async fn handle(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    match state
+    let reserved_pool = match state
         .ledger
         .reserve(
             okapi_ledger::ReserveRequest {
@@ -354,7 +199,7 @@ async fn handle(
         )
         .await?
     {
-        ReserveOutcome::Reserved { .. } => {}
+        ReserveOutcome::Reserved { pool, .. } => pool,
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -366,7 +211,7 @@ async fn handle(
                 AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(which),
             );
         }
-    }
+    };
 
     // —— 预扣已建立 ——
     let rows = okapi_store::channels::candidates_for_model(
@@ -387,10 +232,7 @@ async fn handle(
             })
             .collect(),
         Err(err) => {
-            let _ = state
-                .ledger
-                .refund(key.user_id, key.key_id, request_id)
-                .await;
+            let _ = refund(state, key, request_id, task).await;
             return Err(err);
         }
     };
@@ -398,10 +240,7 @@ async fn handle(
         .retain_margin_ok(&key.group_code, &mut candidates)
         .await;
     if candidates.is_empty() {
-        let _ = state
-            .ledger
-            .refund(key.user_id, key.key_id, request_id)
-            .await;
+        let _ = refund(state, key, request_id, task).await;
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             super::state::no_candidates_code(margin_removed),
@@ -412,33 +251,47 @@ async fn handle(
     let mut last_err: Option<AppError> = None;
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
         let upstream_model = cand.upstream_model(&canonical).to_owned();
-        let Ok(body_up) = rewrite_model(body, &probe.model, &upstream_model) else {
-            let _ = state
-                .ledger
-                .refund(key.user_id, key.key_id, request_id)
-                .await;
-            return Err(AppError::bad_request());
-        };
-        match state
-            .openai_json(&cand, &upstream_model, "/images/generations", body_up)
-            .await
+        if let Some(task) = task
+            && !okapi_store::image_tasks::dispatch(
+                &state.pg,
+                task.id,
+                task.token,
+                cand.channel_id,
+                cand.channel_key_id,
+            )
+            .await?
         {
+            return Err(AppError::new(StatusCode::CONFLICT, codes::BAD_REQUEST)
+                .with_param("image_task_not_dispatchable"));
+        }
+        match input.forward(state, &cand, &upstream_model, endpoint).await {
             Ok(resp) => {
+                let actual = match request::returned_images(&resp.body, units) {
+                    Ok(actual) => actual,
+                    Err(error) => {
+                        let _ = refund(state, key, request_id, task).await;
+                        return Err(error);
+                    }
+                };
+                let actual_quote = scale_quote(&unit_quote, actual)?;
                 commit_and_record(
                     state,
-                    &key,
+                    key,
                     &canonical,
-                    &probe.model,
-                    &quote,
-                    units,
+                    model,
+                    &actual_quote,
+                    pricing_epoch,
                     request_id,
                     started,
                     &cand,
                     failover,
                     headers,
-                    "/v1/images/generations",
+                    endpoint,
+                    &resp,
+                    task,
+                    reserved_pool,
                 )
-                .await;
+                .await?;
                 let out = Response::builder()
                     .status(resp.status)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -446,7 +299,15 @@ async fn handle(
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                 return Ok(out);
             }
-            Err(err) if err.retriable_before_first_token() => {
+            Err(err)
+                if matches!(
+                    err,
+                    UpstreamError::Status {
+                        status: 401 | 402 | 403 | 429,
+                        ..
+                    }
+                ) =>
+            {
                 let _ = okapi_store::channels::mark_key_failure(
                     &state.pg,
                     cand.channel_key_id,
@@ -470,12 +331,8 @@ async fn handle(
         }
     }
 
-    if let Err(err) = state
-        .ledger
-        .refund(key.user_id, key.key_id, request_id)
-        .await
-    {
-        tracing::error!(request_id = %request_id, error = %err, "images 退款失败（悬置待清理）");
+    if let Err(err) = refund(state, key, request_id, task).await {
+        tracing::error!(request_id = %request_id, error = ?err, "images 退款失败（悬置待清理）");
     }
     Err(last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)))
 }
@@ -487,81 +344,85 @@ async fn commit_and_record(
     canonical: &str,
     requested_model: &str,
     quote: &Quote,
-    _units: u32,
+    pricing_epoch: i64,
     request_id: Uuid,
     started: Instant,
     cand: &okapi_store::ChannelCandidate,
     failover: i16,
     headers: &HeaderMap,
     endpoint: &str,
-) {
-    let book = state.pricebook.load();
-    match state
-        .ledger
-        .commit(key.user_id, key.key_id, request_id, quote.amount)
-        .await
-    {
-        Ok(CommitOutcome::Committed {
-            balance_after,
-            pool,
-            ..
-        }) => {
-            let input = SettlementInput {
-                dimensions: okapi_ledger::pg::UsageDimensions::new(
-                    requested_model,
-                    cand.upstream_model(canonical),
-                    endpoint,
-                    endpoint,
-                ),
-                request_id,
-                log_type: 2,
-                user_id: key.user_id,
-                api_key_id: key.key_id,
-                group_code: &key.group_code,
-                model_name: canonical,
-                channel_id: Some(cand.channel_id),
-                channel_key_id: Some(cand.channel_key_id),
-                state: BillingState::Committed,
-                usage: TokenUsage::default(),
-                amount: quote.amount,
-                original: quote.original,
-                discount: quote.discount,
-                list_price: quote.list_price,
-                upstream_cost: None,
-                pricing_epoch: Some(book.epoch()),
-                pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
-                latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-                ttft_ms: None,
-                is_stream: false,
-                retry_count: 0,
-                failover_count: failover,
-                upstream_status: Some(200),
-                error_code: None,
-                upstream_request_id: None,
-                node: state.node.as_ref(),
-                sticky_layer: 0,
-                client_type: detect_client_type(headers),
-                client_ip: None,
-                delta_micro: quote.amount.as_micros().saturating_neg(),
-                balance_after: Some(balance_after),
-                event_type: "commit",
-                pool,
-            };
-            state.settle_write(input).await;
-            super::auth::record_settlement_counters(
-                state,
-                key.user_id,
-                key.member_user_id,
-                quote.amount.as_micros(),
-                0,
-            )
+    upstream: &okapi_providers::openai::EmbeddingsResponse,
+    task: Option<tasks::Lease>,
+    reserved_pool: okapi_ledger::Pool,
+) -> Result<(), AppError> {
+    let ingress = if task.is_some() {
+        format!("{endpoint}/async")
+    } else {
+        endpoint.into()
+    };
+    let mut input = SettlementInput {
+        dimensions: okapi_ledger::pg::UsageDimensions::new(
+            requested_model,
+            cand.upstream_model(canonical),
+            &ingress,
+            endpoint,
+        ),
+        request_id,
+        log_type: 2,
+        user_id: key.user_id,
+        api_key_id: key.key_id,
+        group_code: &key.group_code,
+        model_name: canonical,
+        channel_id: Some(cand.channel_id),
+        channel_key_id: Some(cand.channel_key_id),
+        state: BillingState::Committed,
+        usage: TokenUsage::default(),
+        amount: quote.amount,
+        original: quote.original,
+        discount: quote.discount,
+        list_price: quote.list_price,
+        upstream_cost: None,
+        pricing_epoch: Some(pricing_epoch),
+        pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
+        latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
+        ttft_ms: None,
+        is_stream: false,
+        retry_count: 0,
+        failover_count: failover,
+        upstream_status: i16::try_from(upstream.status).ok(),
+        error_code: None,
+        upstream_request_id: upstream.upstream_request_id.as_deref(),
+        node: state.node.as_ref(),
+        sticky_layer: 0,
+        client_type: detect_client_type(headers),
+        client_ip: None,
+        delta_micro: quote.amount.as_micros().saturating_neg(),
+        balance_after: None,
+        event_type: "commit",
+        pool: reserved_pool,
+    };
+    if let Some(task) = task {
+        if let Some(cost) = state.channel_cost_milli(cand.channel_id).await {
+            input.upstream_cost = Some(Money::from_micros(
+                i64::try_from(i128::from(quote.list_price.as_micros()) * i128::from(cost) / 1000)
+                    .map_err(|_| AppError::internal())?,
+            ));
+        }
+        tasks::complete(state, task, &upstream.body, input).await?;
+        state
+            .sched
+            .kpi_record(0, quote.amount.as_micros(), false)
             .await;
-        }
-        Ok(CommitOutcome::NoReservation) => {
-            tracing::warn!(request_id = %request_id, "images 重复结算竞争，跳过");
-        }
-        Err(err) => {
-            tracing::error!(request_id = %request_id, error = %err, "images Redis 结算失败（悬置待清理）");
-        }
+    } else if !state.settle_success(input).await? {
+        return Ok(());
     }
+    super::auth::record_settlement_counters(
+        state,
+        key.user_id,
+        key.member_user_id,
+        quote.amount.as_micros(),
+        0,
+    )
+    .await;
+    Ok(())
 }

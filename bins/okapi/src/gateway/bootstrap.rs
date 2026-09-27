@@ -24,9 +24,9 @@ pub async fn ensure_single_user(state: &AppState) -> anyhow::Result<()> {
 
     if created {
         let amount = Money::from_micros(BOOTSTRAP_CREDIT_MICRO);
-        state.ledger.credit(user_id, amount).await?;
-        okapi_ledger::pg::record_credit(
+        okapi_ledger::operations::credit(
             &state.pg,
+            &state.ledger,
             user_id,
             amount,
             "adjust",

@@ -21,7 +21,7 @@ export function healthVariant(bp: number): 'success' | 'muted' | 'destructive' {
 export function ChannelHealthCard({ days }: { days: number }) {
   const { t, i18n } = useTranslation()
   const q = useQuery({
-    queryKey: qk.statsChannels(days),
+    queryKey: qk.statsChannels(days, 50),
     queryFn: () => apiFetch<{ data: ChannelRow[] }>(`/admin/stats/channels?days=${days}&limit=50`),
   })
 

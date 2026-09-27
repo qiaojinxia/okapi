@@ -15,8 +15,6 @@ use bytes::Bytes;
 use futures::Stream;
 use okapi_pricing::PriceBook;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::task::{Context, Poll};
 
 /// 一次报价所需的规则触发输入。
@@ -89,54 +87,21 @@ pub async fn track_in_flight(State(state): State<AppState>, req: Request, next: 
     if !state.pricebook.load().has_surge_rules() {
         return next.run(req).await;
     }
-    let guard = InFlightGuard::enter(Arc::clone(&state.in_flight));
-    report_inflight(&state).await;
+    let guard = state.in_flight.enter().await;
     let resp = next.run(req).await;
     // 流式响应在 handler 返回后才真正占用资源，计数必须活到响应体读完
     let (parts, body) = resp.into_parts();
     let guarded = GuardedBody {
         inner: Box::pin(body.into_data_stream()),
-        _guard: guard,
-        state,
-        done: false,
+        guard: Some(guard),
     };
     Response::from_parts(parts, Body::from_stream(guarded))
-}
-
-/// 上报节流：每秒至多一次，但"降到 0"一定立即上报——否则实例空下来之后，
-/// 量表里还挂着它最后那个非零读数直到过期，surge 会凭空多加价好几秒。
-async fn report_inflight(state: &AppState) {
-    let count = state.in_flight.load(Ordering::Relaxed);
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let last = state.surge_reported_at.load(Ordering::Relaxed);
-    if count > 0 && now_ms.saturating_sub(last) < 1000 {
-        return;
-    }
-    state.surge_reported_at.store(now_ms, Ordering::Relaxed);
-    state.sched.inflight_report(&state.node, count).await;
-}
-
-struct InFlightGuard(Arc<AtomicI64>);
-
-impl InFlightGuard {
-    fn enter(counter: Arc<AtomicI64>) -> Self {
-        counter.fetch_add(1, Ordering::Relaxed);
-        Self(counter)
-    }
-}
-
-impl Drop for InFlightGuard {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
 }
 
 /// 持有计数守卫直到响应体流结束（含客户端中断——Drop 一样触发）。
 struct GuardedBody {
     inner: Pin<Box<axum::body::BodyDataStream>>,
-    _guard: InFlightGuard,
-    state: AppState,
-    done: bool,
+    guard: Option<super::inflight::InFlightGuard>,
 }
 
 impl Stream for GuardedBody {
@@ -144,12 +109,10 @@ impl Stream for GuardedBody {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let polled = self.inner.as_mut().poll_next(cx);
-        // 流结束（正常读完或客户端中断）时补一次上报：Drop 里 await 不了，
-        // 只能在这最后一次 poll 里把"我这边空下来了"告诉量表
-        if matches!(polled, Poll::Ready(None)) && !self.done {
-            self.done = true;
-            let state = self.state.clone();
-            tokio::spawn(async move { report_inflight(&state).await });
+        // Release before notifying the reporter, even when the caller retains
+        // an exhausted/error body. Dropping an unconsumed body also drops guard.
+        if matches!(polled, Poll::Ready(None | Some(Err(_)))) {
+            self.guard.take();
         }
         polled
     }

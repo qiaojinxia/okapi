@@ -14,15 +14,17 @@ use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
-use hmac::{Hmac, KeyInit as _, Mac};
 use md5::{Digest as Md5Digest, Md5};
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
+use okapi_store::payments::Acceptance;
 use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::Sha256;
+use sqlx::Connection;
 use std::collections::BTreeMap;
+
+mod validation;
 
 const MIN_TOPUP_MICRO: i64 = 1_000_000; // $1 起充
 
@@ -63,24 +65,32 @@ async fn load_cfg<T: serde::de::DeserializeOwned>(
 
 // ---- 金额换算（纯整数，禁浮点） ----
 
-/// micro-USD → 分粒度字符串（向上取整到分：网关不少收）。
-fn micro_to_decimal_string(micro: i64) -> String {
-    let cents = micro.saturating_add(9_999) / 10_000;
-    format!("{}.{:02}", cents / 100, cents % 100)
+/// Convert micro-USD and a milli exchange rate directly to cents. The wider
+/// integer intermediate avoids saturation; round once, upwards, at the cent.
+fn quote_cents(micro: i64, rate_milli: i64) -> Result<i128, AppError> {
+    if rate_milli <= 0 {
+        return Err(AppError::bad_request().with_param("usd_to_cny_milli"));
+    }
+    i128::from(micro)
+        .checked_mul(i128::from(rate_milli))
+        .and_then(|amount| amount.checked_add(9_999_999))
+        .map(|amount| amount / 10_000_000)
+        // recharge_orders.pay_amount is NUMERIC(12,2). Reject outside its
+        // range before creating an order; never truncate the amount to fit.
+        .filter(|cents| (1..=999_999_999_999).contains(cents))
+        .ok_or_else(|| AppError::bad_request().with_param("amount_micro"))
 }
-
-/// micro-USD → CNY 分字符串（rate_milli 千分比整数汇率）。
-fn micro_usd_to_cny_string(micro: i64, rate_milli: i64) -> String {
-    let cny_micro = micro.saturating_mul(rate_milli) / 1000;
-    micro_to_decimal_string(cny_micro)
+fn decimal_cents(cents: i128) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
 }
 
 // ---- epay 签名（协议既定 MD5：ASCII 升序拼 k=v& + key） ----
 
-fn epay_sign(params: &BTreeMap<&str, String>, key: &str) -> String {
+fn epay_sign<K: AsRef<str> + Ord>(params: &BTreeMap<K, String>, key: &str) -> String {
     let mut buf = String::new();
     for (k, v) in params {
-        if v.is_empty() || *k == "sign" || *k == "sign_type" {
+        let k = k.as_ref();
+        if v.is_empty() || k == "sign" || k == "sign_type" {
             continue;
         }
         if !buf.is_empty() {
@@ -127,7 +137,7 @@ pub async fn topup(
 
 /// 下单公共体（钱包充值与订阅购买共用，§11.28）：建 `recharge_orders` 行 + 网关跳转信息。
 /// `plan_id` 非空 = 订阅购买单（`amount_micro` 为售价快照，回调激活订阅而不入钱包）。
-/// `item_name` 是支付页上的商品名（ASCII，直接进表单/查询串）。
+/// `item_name` 是支付页上的商品名，按表单协议编码。
 // 双网关下单线性分支，拆分割裂订单时序
 #[allow(clippy::too_many_lines)]
 pub async fn place_order(
@@ -135,9 +145,12 @@ pub async fn place_order(
     user_id: i64,
     amount_micro: i64,
     gateway: &str,
-    plan_id: Option<i64>,
+    plan: Option<&okapi_store::subscriptions::SubPlan>,
     item_name: &str,
 ) -> Result<Value, AppError> {
+    if !(1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&amount_micro) {
+        return Err(AppError::bad_request().with_param("amount_micro"));
+    }
     let order_no = format!(
         "okp{}{}",
         chrono::Utc::now().format("%Y%m%d%H%M%S"),
@@ -151,7 +164,7 @@ pub async fn place_order(
     match gateway {
         "epay" => {
             let cfg: EpayCfg = load_cfg(state, "payment_epay").await?;
-            let money = micro_usd_to_cny_string(amount_micro, cfg.usd_to_cny_milli);
+            let money = decimal_cents(quote_cents(amount_micro, cfg.usd_to_cny_milli)?);
             okapi_store::admin::create_recharge_order(
                 &state.pg,
                 okapi_store::admin::NewOrder {
@@ -161,7 +174,12 @@ pub async fn place_order(
                     gateway: "epay",
                     pay_amount: &money,
                     currency: "CNY",
-                    plan_id,
+                    merchant_id: Some(&cfg.pid),
+                    plan_id: plan.map(|p| p.id),
+                    subscription_snapshot: plan
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(|_| AppError::internal())?,
                 },
             )
             .await?;
@@ -186,7 +204,8 @@ pub async fn place_order(
         }
         "stripe" => {
             let cfg: StripeCfg = load_cfg(state, "payment_stripe").await?;
-            let usd = micro_to_decimal_string(amount_micro);
+            let cents = quote_cents(amount_micro, 1000)?;
+            let usd = decimal_cents(cents);
             okapi_store::admin::create_recharge_order(
                 &state.pg,
                 okapi_store::admin::NewOrder {
@@ -196,20 +215,29 @@ pub async fn place_order(
                     gateway: "stripe",
                     pay_amount: &usd,
                     currency: "USD",
-                    plan_id,
+                    merchant_id: None,
+                    plan_id: plan.map(|p| p.id),
+                    subscription_snapshot: plan
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(|_| AppError::internal())?,
                 },
             )
             .await?;
             // 分整数（Stripe unit_amount 为最小货币单位）
-            let cents = amount_micro.saturating_add(9_999) / 10_000;
-            let body = format!(
-                "mode=payment&success_url={}&cancel_url={}&metadata[order_no]={}&line_items[0][quantity]=1&line_items[0][price_data][currency]=usd&line_items[0][price_data][unit_amount]={}&line_items[0][price_data][product_data][name]={}",
-                "https%3A%2F%2Fexample.invalid%2Fok",
-                "https%3A%2F%2Fexample.invalid%2Fcancel",
-                order_no,
-                cents,
-                item_name
-            );
+            let mut form = reqwest::Url::parse("https://checkout.invalid")
+                .map_err(|_| AppError::internal())?;
+            form.query_pairs_mut().extend_pairs([
+                ("mode", "payment"),
+                ("success_url", "https://example.invalid/ok"),
+                ("cancel_url", "https://example.invalid/cancel"),
+                ("metadata[order_no]", &order_no),
+                ("line_items[0][quantity]", "1"),
+                ("line_items[0][price_data][currency]", "usd"),
+                ("line_items[0][price_data][unit_amount]", &cents.to_string()),
+                ("line_items[0][price_data][product_data][name]", item_name),
+            ]);
+            let body = form.query().ok_or_else(AppError::internal)?.to_owned();
             let api = cfg
                 .api_base
                 .as_deref()
@@ -226,17 +254,22 @@ pub async fn place_order(
                     content_type: Some("application/x-www-form-urlencoded".to_owned()),
                     body: bytes::Bytes::from(body),
                     proxy_url: None,
-                    extra_headers: Vec::new(),
+                    extra_headers: vec![("idempotency-key".to_owned(), order_no.clone())],
                 })
                 .await;
             let session = match resp {
                 Ok(PassResponse::Ok { mut stream, .. }) => {
                     use futures::StreamExt as _;
                     let mut buf = Vec::new();
-                    while let Some(Ok(chunk)) = stream.next().await {
+                    while let Some(chunk) = stream.next().await {
+                        let chunk = chunk.map_err(|_| validation::gateway_error())?;
+                        if buf.len().saturating_add(chunk.len()) > 1_048_576 {
+                            return Err(validation::gateway_error());
+                        }
                         buf.extend_from_slice(&chunk);
                     }
-                    serde_json::from_slice::<Value>(&buf).map_err(|_| AppError::internal())?
+                    serde_json::from_slice::<Value>(&buf)
+                        .map_err(|_| validation::gateway_error())?
                 }
                 _ => {
                     return Err(AppError::new(
@@ -245,11 +278,15 @@ pub async fn place_order(
                     ));
                 }
             };
+            let (session_id, pay_url) = validation::checkout_response(&session)?;
+            if !okapi_store::payments::bind_checkout(&state.pg, &order_no, session_id).await? {
+                return Err(validation::gateway_error());
+            }
             Ok(json!({
                 "order_no": order_no,
                 "gateway": "stripe",
-                "pay_url": session.get("url").and_then(Value::as_str),
-                "session_id": session.get("id").and_then(Value::as_str),
+                "pay_url": pay_url,
+                "session_id": session_id,
             }))
         }
         _ => Err(AppError::bad_request().with_param("gateway")),
@@ -261,52 +298,67 @@ pub async fn place_order(
 async fn settle_paid_order(
     state: &AppState,
     order_no: &str,
-    trade_no: &str,
+    proof: &okapi_store::payments::PaymentProof<'_>,
 ) -> Result<bool, AppError> {
-    let Some(order) = okapi_store::admin::mark_recharge_paid(&state.pg, order_no, trade_no).await?
+    let Some(user_id) = sqlx::query_scalar!(
+        "SELECT user_id FROM recharge_orders WHERE order_no=$1",
+        order_no
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?
     else {
-        // 已核销/不存在：幂等吞掉（回调方期望成功应答停止重试）
-        return Ok(false);
+        return Err(AppError::new(StatusCode::NOT_FOUND, "not_found").with_param("order_no"));
     };
+    let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, user_id).await?;
+    let mut tx = guard
+        .connection()
+        .begin()
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    let order = match okapi_store::payments::accept_in_tx(&mut tx, order_no, proof).await? {
+        Acceptance::Applied(order) => order,
+        Acceptance::Duplicate => return Ok(false),
+        Acceptance::Missing => {
+            return Err(AppError::new(StatusCode::NOT_FOUND, "not_found").with_param("order_no"));
+        }
+        Acceptance::Mismatch(field) => return Err(AppError::bad_request().with_param(field)),
+        Acceptance::Conflict(field) => {
+            return Err(AppError::new(StatusCode::CONFLICT, "bad_request").with_param(field));
+        }
+        Acceptance::AwaitingSession => {
+            return Err(
+                AppError::new(StatusCode::SERVICE_UNAVAILABLE, "payment_gateway_error")
+                    .with_param("session_id"),
+            );
+        }
+    };
+    let trade_no = proof.trade_no;
     let user_id = order.user_id;
     let amount_micro = order.amount_micro;
-    if let Some(plan_id) = order.plan_id {
-        // 订阅购买单（§11.28）：激活 / 续期而**不入钱包**。套餐下架不影响已付款用户。
-        let plan = okapi_store::subscriptions::sub_plan_by_id(&state.pg, plan_id)
-            .await?
-            .ok_or_else(AppError::internal)?;
-        match super::subscriptions::grant(
-            state,
+    if order.plan_id.is_some() {
+        let plan: okapi_store::subscriptions::SubPlan =
+            serde_json::from_value(order.subscription_snapshot.ok_or_else(AppError::internal)?)
+                .map_err(|_| AppError::internal())?;
+        let id = okapi_ledger::subscriptions::enqueue(
+            &mut tx,
             user_id,
             &plan,
             &format!("purchase:{order_no}"),
             "system:payment",
+            true,
         )
-        .await
-        {
-            Ok(granted) => tracing::info!(
-                order_no,
-                user_id,
-                plan = %plan.plan_code,
-                outcome = granted.kind(),
-                "订阅购买核销"
-            ),
-            // 订单已翻转 paid，激活失败（如期间被发放了别的套餐）留日志人工跟进，不让回调重试
-            Err(err) => tracing::error!(
-                order_no,
-                user_id,
-                plan = %plan.plan_code,
-                error = ?err,
-                "订阅购买已付款但激活失败（人工跟进）"
-            ),
-        }
+        .await?;
+        tx.commit().await.map_err(okapi_store::StoreError::from)?;
+        okapi_ledger::subscriptions::finish(&mut guard, &state.ledger, user_id, id).await;
+        drop(guard);
+        state.sched.auth_flush().await;
         aff_reward(state, user_id, amount_micro, order_no).await;
         return Ok(true);
     }
     let amount = okapi_domain::Money::from_micros(amount_micro);
-    let balance_after = state.ledger.credit(user_id, amount).await?;
-    okapi_ledger::pg::record_credit(
-        &state.pg,
+    let operation_id = okapi_ledger::transfers::credit_in_tx(
+        &mut tx,
         user_id,
         amount,
         "recharge",
@@ -314,12 +366,23 @@ async fn settle_paid_order(
         json!({"tags": ["recharge"], "order_no": order_no, "trade_no": trade_no}),
     )
     .await?;
+    tx.commit().await.map_err(okapi_store::StoreError::from)?;
+    let receipt = okapi_ledger::transfers::finish(
+        &mut guard,
+        &state.ledger,
+        user_id,
+        operation_id,
+        okapi_ledger::Pool::Wallet,
+    )
+    .await;
+    drop(guard);
     aff_reward(state, user_id, amount_micro, order_no).await;
     tracing::info!(
         order_no,
         user_id,
         amount_micro,
-        balance_after = balance_after.as_micros(),
+        balance_after = ?receipt.balance_after.map(okapi_domain::Money::as_micros),
+        operation_id = %receipt.operation_id,
         "充值入账"
     );
     Ok(true)
@@ -332,83 +395,61 @@ pub async fn epay_callback(
     RawQuery(query): RawQuery,
 ) -> Result<String, AppError> {
     let cfg: EpayCfg = load_cfg(&state, "payment_epay").await?;
-    let query = query.unwrap_or_default();
-    let mut params: BTreeMap<&str, String> = BTreeMap::new();
-    for pair in query.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            params.insert(
-                match k {
-                    "pid" => "pid",
-                    "trade_no" => "trade_no",
-                    "out_trade_no" => "out_trade_no",
-                    "type" => "type",
-                    "name" => "name",
-                    "money" => "money",
-                    "trade_status" => "trade_status",
-                    "sign" => "sign",
-                    "sign_type" => "sign_type",
-                    _ => continue,
-                },
-                v.to_owned(),
-            );
-        }
-    }
-    let given_sign = params.get("sign").cloned().unwrap_or_default();
-    let expect = epay_sign(&params, &cfg.key);
-    if given_sign != expect {
-        return Err(AppError::bad_request().with_param("sign"));
-    }
+    let params = validation::epay_params(query.as_deref().unwrap_or_default())?;
+    validation::epay_signature(&params, &cfg.key)?;
     if params.get("trade_status").map(String::as_str) != Some("TRADE_SUCCESS") {
-        return Ok("success".to_owned()); // 非成功态：确认收到，不入账
+        return Ok("success".to_owned());
     }
-    let order_no = params
-        .get("out_trade_no")
-        .ok_or_else(|| AppError::bad_request().with_param("out_trade_no"))?;
-    let trade_no = params.get("trade_no").cloned().unwrap_or_default();
-    settle_paid_order(&state, order_no, &trade_no).await?;
+    let order_no = validation::required(&params, "out_trade_no", 64)?;
+    let trade_no = validation::required(&params, "trade_no", 128)?;
+    let merchant_id = validation::required(&params, "pid", 128)?;
+    if merchant_id != cfg.pid {
+        return Err(AppError::bad_request().with_param("pid"));
+    }
+    let amount_minor = validation::money_minor(validation::required(&params, "money", 32)?)?;
+    settle_paid_order(
+        &state,
+        order_no,
+        &okapi_store::payments::PaymentProof {
+            gateway: "epay",
+            merchant_id,
+            trade_no,
+            currency: "CNY",
+            amount_minor,
+        },
+    )
+    .await?;
     Ok("success".to_owned())
 }
 
-// ---- Stripe webhook（Stripe-Signature: t=..,v1=HMAC-SHA256(secret, "{t}.{payload}")） ----
-
+/// Stripe validates the raw body before decoding; delayed payment methods are
+/// fulfilled on async success, never merely because Checkout was completed.
 pub async fn stripe_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> Result<Json<Value>, AppError> {
     let cfg: StripeCfg = load_cfg(&state, "payment_stripe").await?;
-    let sig_header = headers
-        .get("stripe-signature")
+    let mut signature_headers = headers.get_all("stripe-signature").iter();
+    let signature = signature_headers
+        .next()
         .and_then(|v| v.to_str().ok())
+        .filter(|_| signature_headers.next().is_none())
         .ok_or_else(|| AppError::bad_request().with_param("stripe_signature"))?;
-    let mut ts = "";
-    let mut v1 = "";
-    for part in sig_header.split(',') {
-        if let Some(x) = part.trim().strip_prefix("t=") {
-            ts = x;
-        } else if let Some(x) = part.trim().strip_prefix("v1=") {
-            v1 = x;
-        }
-    }
-    let mut mac = <Hmac<Sha256>>::new_from_slice(cfg.webhook_secret.as_bytes())
-        .map_err(|_| AppError::internal())?;
-    mac.update(ts.as_bytes());
-    mac.update(b".");
-    mac.update(&body);
-    let expect = hex::encode(mac.finalize().into_bytes());
-    if expect != v1 {
-        return Err(AppError::bad_request().with_param("stripe_signature"));
-    }
-
-    let event: Value = serde_json::from_slice(&body).map_err(|_| AppError::bad_request())?;
-    if event.get("type").and_then(Value::as_str) == Some("checkout.session.completed") {
-        let session = event.pointer("/data/object").cloned().unwrap_or_default();
-        let order_no = session
-            .pointer("/metadata/order_no")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AppError::bad_request().with_param("order_no"))?;
-        let trade_no = session.get("id").and_then(Value::as_str).unwrap_or("");
-        settle_paid_order(&state, order_no, trade_no).await?;
+    validation::stripe_signature(signature, &body, &cfg.webhook_secret)?;
+    if let Some(session) = validation::paid_session(&body)? {
+        settle_paid_order(
+            &state,
+            &session.metadata.order_no,
+            &okapi_store::payments::PaymentProof {
+                gateway: "stripe",
+                merchant_id: "",
+                trade_no: &session.id,
+                currency: &session.currency,
+                amount_minor: session.amount_total,
+            },
+        )
+        .await?;
     }
     Ok(Json(json!({"received": true})))
 }
@@ -444,12 +485,9 @@ async fn aff_reward(state: &AppState, invitee: i64, amount_micro: i64, order_no:
         return;
     }
     let money = okapi_domain::Money::from_micros(reward);
-    if let Err(err) = state.ledger.credit(inviter_id, money).await {
-        tracing::error!(inviter_id, invitee, error = %err, "aff 返利入账失败");
-        return;
-    }
-    if let Err(err) = okapi_ledger::pg::record_credit(
+    if let Err(err) = okapi_ledger::operations::credit(
         &state.pg,
+        &state.ledger,
         inviter_id,
         money,
         "adjust",
@@ -458,6 +496,6 @@ async fn aff_reward(state: &AppState, invitee: i64, amount_micro: i64, order_no:
     )
     .await
     {
-        tracing::error!(inviter_id, error = %err, "aff 返利事件写入失败（对账修复）");
+        tracing::error!(inviter_id, error = %err, "aff 返利入账失败（需核对账本）");
     }
 }

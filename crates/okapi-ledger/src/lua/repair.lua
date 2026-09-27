@@ -25,6 +25,16 @@ for i = 1, #all, 2 do
         if pool == want_pool then
             inflight = inflight + (tonumber(parts[1]) or 0)
         end
+    elseif string.sub(all[i], 1, 2) == 'h:' then
+        local hold = cjson.decode(all[i + 1])
+        if hold.phase ~= 'held' or (hold.pool ~= 0 and hold.pool ~= 1) then
+            return redis.error_reply('invalid_durable_hold')
+        end
+        if tostring(hold.pool) == want_pool then
+            local amount = tonumber(hold.amount)
+            if not amount or amount < 0 then return redis.error_reply('invalid_durable_hold') end
+            inflight = inflight + amount
+        end
     end
 end
 

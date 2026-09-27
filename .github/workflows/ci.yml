@@ -12,9 +12,12 @@ env:
   DATABASE_URL: postgres://okapi:okapi_dev@localhost:5432/okapi
   OKAPI_REDIS_URL: redis://localhost:6379
   OKAPI_CLICKHOUSE_URL: http://okapi:okapi_dev@localhost:8123
+  OKAPI_NATS_URL: nats://127.0.0.1:4222
+  OKAPI_WEB_DIR: ${{ github.workspace }}/frontend/dist
 
 jobs:
   check:
+    needs: frontend
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -57,6 +60,19 @@ jobs:
           --health-retries 30
     steps:
       - uses: actions/checkout@v4
+      - name: 读取前端构建产物供 SPA 导航测试
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+      # services 不支持传入 -js；独立启动，确保消息链路在 CI 真正执行。
+      - name: 启动 NATS JetStream
+        run: |
+          docker run -d --name okapi-ci-nats \
+            -p 127.0.0.1:4222:4222 -p 127.0.0.1:8222:8222 \
+            public.ecr.aws/docker/library/nats:2-alpine -js -m 8222
+          curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:8222/healthz
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -65,10 +81,34 @@ jobs:
         run: cargo fmt --all --check
       - name: 计费红线守卫
         run: bash scripts/guard-no-float.sh
+      - name: API 路由清单与验证报告守卫
+        run: |
+          python3 scripts/test_api_surface.py
+          python3 scripts/test_core_test_summary.py
+          python3 scripts/api-surface.py --check docs/api-surface.json
       - name: clippy（-D warnings）
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: 测试（对拍 + proptest + M1 集成）
-        run: cargo test --workspace
+      - name: 测试并生成逐套件报告
+        shell: bash
+        run: |
+          # 全局配置用例顺序执行；用例内部的并发/竞态断言仍照常运行。
+          set +e
+          cargo test --workspace --locked --no-fail-fast -- --test-threads=1 --nocapture 2>&1 | tee core-tests.log
+          okapi_test_exit=${PIPESTATUS[0]}
+          set -e
+          python3 scripts/summarize-core-tests.py core-tests.log --out core-tests.json --exit-code "$okapi_test_exit"
+          if [ "$okapi_test_exit" -ne 0 ]; then exit "$okapi_test_exit"; fi
+          python3 -c 'import json; r = json.load(open("core-tests.json")); assert r["execution_status"] == "passed", r["execution_status"]'
+      - name: 保存完整测试输出与验证报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-api-verification
+          path: |
+            core-tests.log
+            core-tests.json
+          if-no-files-found: ignore
+          retention-days: 7
 
   deny:
     runs-on: ubuntu-latest
@@ -94,6 +134,13 @@ jobs:
       - name: 构建（vite + tsc）
         run: pnpm build
         working-directory: frontend
+      - name: 保存前端构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1
       - name: lint（oxlint）
         run: pnpm lint
         working-directory: frontend

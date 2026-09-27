@@ -164,8 +164,8 @@ test('API key 登录直达门户总览：六卡 KPI + 三页签零请求切换',
   // 三区布局：顶部栏常驻身份区（余额徽章）+ 内容区 KPI 卡，两者都应在
   await expect(page.getByText(/^(余额|Balance) \$/)).toBeVisible()
   const main = page.getByRole('main')
-  // 六张 KPI 的标签（new-api 数据看板对齐 + "已为你节省"是本站特有的让利呈现）
-  for (const label of [/^余额$|^Balance$/, /周期消费|Period spend/, /已为你节省|Saved for you/, /^请求数$|^Requests$/]) {
+  // 账户消费与计费优惠分开呈现，不把规则折扣解释成缓存节省。
+  for (const label of [/账户余额|Account balance/, /周期消费|Period spend/, /计费优惠|Billing discounts/, /^请求数$|^Requests$/]) {
     await expect(main.getByText(label).first()).toBeVisible()
   }
   // 侧栏分组标题：宽屏下可见（窄屏折叠为抽屉）。
@@ -174,7 +174,7 @@ test('API key 登录直达门户总览：六卡 KPI + 三页签零请求切换',
 
   // 三个页签是同一份数据的不同切法：新用户零调用，每签都应给出"还没有调用"的空态
   // 而非报错或白屏
-  for (const tab of [/模型分布|By model/, /Token 构成|Token mix/, /消费趋势|Spend trend/]) {
+  for (const tab of [/模型分布|By model/, /Token 构成|Token mix/, /用量趋势|Usage trend/]) {
     await page.getByRole('tab', { name: tab }).click()
     await expect(main.getByText(/还没有调用|No calls in this window/)).toBeVisible()
   }
@@ -241,7 +241,7 @@ test('管理端：总览实时条 + 健康芯片 + 日志页统计条/过滤 + �
   await page.getByRole('button', { name: /^登录$|^Sign in$/ }).click()
   await expect(page).toHaveURL(/\/portal/)
 
-  // 总览：实时条（Redis 秒桶，CH 无关）、五张 KPI、"需要注意"卡头四枚组件芯片
+  // 总览：实时条（Redis 秒桶，CH 无关）、五张 KPI、实时区四枚组件芯片
   await page.goto('/admin')
   const main = page.getByRole('main')
   await expect(main.getByText(/^实时$|^Live$/)).toBeVisible()
@@ -295,9 +295,9 @@ test('管理端：总览实时条 + 健康芯片 + 日志页统计条/过滤 + �
   // 收入签里"按分组"表与"资金流入"行至少有一个渲染（演示库有 default/vip/free 三组）
   await expect(main.getByText(/资金流入|Cash inflow/)).toBeVisible({ timeout: 10_000 })
 
-  // 总览站点规模条（PG-only）：四项存量都在
+  // 总览实时区站点速览（PG-only）：四项存量都在，不再重复显示独立卡片
   await page.goto('/admin')
-  await expect(main.getByText(/站点规模|Site inventory/)).toBeVisible({ timeout: 10_000 })
+  await expect(main.getByRole('region', { name: /站点速览|Site at a glance/ })).toBeVisible({ timeout: 10_000 })
   await expect(main.getByText(/^活跃密钥$|^Active keys$/)).toBeVisible()
 
   // 审计页：本用例开头的邮箱登录已落 user.login，按动作过滤深链落地即见；

@@ -315,46 +315,7 @@ pub fn build_differences(local: &PricingTable, sources: &[(String, PricingTable)
     Value::Object(out)
 }
 
-/// 拉一个源：SSRF 闸 → GET（无凭证）→ 2xx JSON ≤ 2MB → 识别形状。
-async fn fetch_one(
-    state: &AppState,
-    url: &str,
-    timeout: Duration,
-) -> Result<PricingTable, &'static str> {
-    if super::ssrf::validate_api_base(state, url).await.is_err() {
-        return Err("source_url_rejected");
-    }
-    // 不跟随重定向：SSRF 闸只看得到管理员填的这个 URL，跟着 30x 走就能被引到私网 / 元数据地址
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| "client_build")?;
-    let resp = client
-        .get(url)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                "timeout"
-            } else if e.is_connect() {
-                "connect"
-            } else {
-                "request"
-            }
-        })?;
-    if !resp.status().is_success() {
-        return Err("upstream_status");
-    }
-    let body = resp.bytes().await.map_err(|_| "body")?;
-    if body.len() > MAX_BODY_BYTES {
-        return Err("body_too_large");
-    }
-    let value: Value = serde_json::from_slice(&body).map_err(|_| "not_json")?;
-    parse_source(&value).ok_or("unrecognized_shape")
-}
+mod source;
 
 /// POST /admin/pricing/sync/fetch：并发拉取各源，返回差异表与各源状态。
 pub async fn fetch(
@@ -384,7 +345,7 @@ pub async fn fetch(
         let state = state.clone();
         async move {
             let name = s.name.trim().to_owned();
-            (name, fetch_one(&state, s.url.trim(), timeout).await)
+            (name, source::fetch(&state, s.url.trim(), timeout).await)
         }
     }))
     .await;

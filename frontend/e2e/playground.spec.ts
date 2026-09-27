@@ -106,6 +106,13 @@ test('模型下拉只列本分组可用，发送后流式内容与 usage 脚注�
   await expect(assistant).toContainText('gpt-4o-mock')
   // 收尾后回到可发送态
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+
+  await page.route('**/api/me/playground/chat', (route) =>
+    route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } }),
+  )
+  await input.fill('fail me')
+  await page.getByRole('button', { name: 'Send' }).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Internal error, please retry later' })).toBeVisible()
 })
 
 test('停止按钮中断在途流式', async ({ page }) => {

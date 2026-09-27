@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, plan_id, expires_at,quota_micro,period_snapshot,group_code_snapshot,plan_code_snapshot FROM user_subscriptions\n           WHERE user_id = $1 AND status = 1 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "quota_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "quota_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "period_snapshot",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "period_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "group_code_snapshot",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "group_code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "plan_code_snapshot",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "plan_code_snapshot"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "ccc238e459e7f15a2e999475c63645139ec24c8c5e28b8cd4d3a4f3e25311651"
+}

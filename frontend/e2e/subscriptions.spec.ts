@@ -58,6 +58,18 @@ test('无订阅：所有在售套餐可订阅，不售卖的只标兑换码；�
   expect(checkouts[0]).toEqual({ plan_code: 'pro-monthly', gateway: 'stripe' })
   // 桩没回 pay_url → 页面用错误条说明，而不是静默
   await expect(page.getByText('网关未返回支付地址', { exact: false })).toBeVisible()
+
+  await page.route('**/api/plans', (route) => route.fulfill({ json: { data: [] } }))
+  await page.reload()
+  await expect(page.getByText('暂无在售套餐。')).toBeVisible()
+
+  await page.route('**/api/plans', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    return route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+  })
+  await page.reload()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
 })
 
 test('有订阅：当前套餐高亮可续期，其它在售套餐停用并说明原因，总览余额卡挂订阅剩余', async ({ page }) => {
@@ -74,4 +86,12 @@ test('有订阅：当前套餐高亮可续期，其它在售套餐停用并说�
 
   await page.goto('/portal')
   await expect(page.getByRole('link', { name: '订阅剩余 US$12.50' })).toBeVisible()
+
+  await page.route('**/api/me/subscription', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    return route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+  })
+  await page.goto('/portal/plans')
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '重试' })).toHaveCount(0)
 })

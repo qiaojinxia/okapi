@@ -18,6 +18,7 @@ export interface ActivityDay {
   prompt_tokens: number
   completion_tokens: number
   cached_tokens: number
+  cache_read_known_requests: number
   cache_write_tokens: number | null
   reasoning_tokens: number
   errors: number
@@ -39,7 +40,7 @@ export function buildActivity(response: ActivityResponse) {
   const date = new Date(Date.UTC(response.year, 0, 1))
   while (date.getUTCFullYear() === response.year) {
     const day: ActivityDay = { day: dateKey(date), tokens: 0, requests: 0, amount_micro: 0,
-      prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, reasoning_tokens: 0, errors: 0, models: [] }
+      prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cache_read_known_requests: 0, cache_write_tokens: 0, reasoning_tokens: 0, errors: 0, models: [] }
     days.push(day)
     lookup.set(day.day, day)
     date.setUTCDate(date.getUTCDate() + 1)
@@ -48,6 +49,7 @@ export function buildActivity(response: ActivityResponse) {
     const day = lookup.get(row.day)
     if (!day || row.day > response.today) continue
     day.models.push(row)
+    day.cache_read_known_requests += row.cache_read_known_requests ?? 0
     // 缓存属于输入、推理属于输出；不可重复加入 Token 总量。
     day.tokens += row.prompt_tokens + row.completion_tokens
     day.cache_write_tokens = day.cache_write_tokens == null || row.cache_write_tokens == null ? null : day.cache_write_tokens + row.cache_write_tokens

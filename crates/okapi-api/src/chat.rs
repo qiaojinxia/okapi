@@ -318,19 +318,59 @@ pub struct UsageProbe {
 /// 字段名与 OpenAI 官方 `prompt_tokens_details` 一致（openai-python
 /// `completion_usage.py`），故 OpenAI 系响应可直接反序列化。
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(from = "RawPromptTokensDetails")]
 pub struct PromptTokensDetails {
-    #[serde(default)]
     pub cached_tokens: u32,
-    /// 缓存**写入** token。官方亦有此字段；Anthropic 方向由
-    /// `cache_creation_input_tokens` 映射填入。
-    #[serde(default)]
+    /// 兼容扩展：缓存写入；Anthropic 由 cache_creation_input_tokens 映射。
     pub cache_write_tokens: u32,
+    pub cache_read_reported: bool,
+    pub cache_write_reported: bool,
     /// 音频输入 token（gpt-4o-audio 系；官方单价约为文本 16×）。
     #[serde(default)]
     pub audio_tokens: u32,
     /// 图片输入 token。
     #[serde(default)]
     pub image_tokens: u32,
+}
+
+#[derive(Default, Deserialize)]
+struct RawPromptTokensDetails {
+    #[serde(rename = "cached_tokens")]
+    cached: Option<u32>,
+    #[serde(rename = "cache_write_tokens")]
+    cache_write: Option<u32>,
+    #[serde(default, rename = "audio_tokens")]
+    audio: u32,
+    #[serde(default, rename = "image_tokens")]
+    image: u32,
+}
+
+impl From<RawPromptTokensDetails> for PromptTokensDetails {
+    fn from(raw: RawPromptTokensDetails) -> Self {
+        Self {
+            cached_tokens: raw.cached.unwrap_or(0),
+            cache_write_tokens: raw.cache_write.unwrap_or(0),
+            cache_read_reported: raw.cached.is_some(),
+            cache_write_reported: raw.cache_write.is_some(),
+            audio_tokens: raw.audio,
+            image_tokens: raw.image,
+        }
+    }
+}
+
+impl PromptTokensDetails {
+    /// 协议转换时保留缺失状态，避免下游把补出的 0 当成明确上报。
+    #[must_use]
+    pub fn cache_json(self) -> serde_json::Value {
+        let mut value = serde_json::json!({});
+        if self.cache_read_reported || self.cached_tokens > 0 {
+            value["cached_tokens"] = serde_json::json!(self.cached_tokens);
+        }
+        if self.cache_write_reported || self.cache_write_tokens > 0 {
+            value["cache_write_tokens"] = serde_json::json!(self.cache_write_tokens);
+        }
+        value
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -367,6 +407,8 @@ impl UsageProbe {
         TokenUsage {
             prompt_tokens: self.prompt_tokens,
             cached_tokens: cached,
+            cache_read_reported: d.cache_read_reported,
+            cache_write_reported: d.cache_write_reported,
             cache_write_tokens: cache_write,
             audio_prompt_tokens: audio_in,
             image_prompt_tokens: image_in,

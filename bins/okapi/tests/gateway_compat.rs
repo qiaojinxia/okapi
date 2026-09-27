@@ -225,3 +225,60 @@ async fn client_ip_from_cdn_headers() {
         "XFF 取最右非信任跳；链首 203.0.113.9 是调用方自述，不作数"
     );
 }
+
+/// `GET /v1/models` 此前零 HTTP 直打。形状跟 OpenAI 列表一致；只出 `status=1`；
+/// 这条路由没有数据面鉴权（探测可用模型用），有无 Bearer 都 200。
+#[tokio::test]
+async fn list_models_is_openai_shaped_and_skips_disabled() {
+    let env = setup(None).await;
+    let url = format!("http://{}/v1/models", env.gateway);
+    let client = reqwest::Client::new();
+
+    let open: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(open["object"], "list");
+    let ids: Vec<&str> = open["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&env.model.as_str()),
+        "启用模型必须出现：{open}"
+    );
+    let mine = open["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == env.model.as_str())
+        .unwrap();
+    assert_eq!(mine["object"], "model");
+    assert_eq!(mine["owned_by"], "okapi");
+
+    let authed = client
+        .get(&url)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), 200);
+
+    sqlx::query!(
+        r#"UPDATE models SET status = 2 WHERE model_name = $1"#,
+        env.model
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    let after: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = after["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(
+        !ids.contains(&env.model.as_str()),
+        "停用后不得再出现在 /v1/models：{after}"
+    );
+}

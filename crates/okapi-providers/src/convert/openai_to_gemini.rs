@@ -355,6 +355,11 @@ pub fn usage_from_gemini(meta: Option<&Value>) -> UsageProbe {
         completion_tokens: get("candidatesTokenCount").saturating_add(thoughts),
         prompt_tokens_details: PromptTokensDetails {
             cached_tokens: get("cachedContentTokenCount"),
+            cache_read_reported: meta
+                .and_then(|m| m.get("cachedContentTokenCount"))
+                .and_then(Value::as_u64)
+                .is_some_and(|v| u32::try_from(v).is_ok()),
+            cache_write_reported: false,
             // Gemini 显式缓存的创建走独立的 cachedContents API 计费，不在生成响应的 usage 里
             cache_write_tokens: 0,
             // Gemini 的 promptTokensDetails 是带 modality 的数组，解析待接入
@@ -373,7 +378,7 @@ fn usage_json(u: UsageProbe) -> Value {
         "prompt_tokens": u.prompt_tokens,
         "completion_tokens": u.completion_tokens,
         "total_tokens": u.prompt_tokens + u.completion_tokens,
-        "prompt_tokens_details": {"cached_tokens": u.prompt_tokens_details.cached_tokens},
+        "prompt_tokens_details": u.prompt_tokens_details.cache_json(),
         "completion_tokens_details": {"reasoning_tokens": u.completion_tokens_details.reasoning_tokens},
     })
 }

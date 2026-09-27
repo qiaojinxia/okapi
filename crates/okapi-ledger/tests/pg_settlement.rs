@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+#[path = "support/durable_sync.rs"]
+mod durable_sync;
+
 struct Bed {
     pg: PgPool,
     user_id: i64,
@@ -210,6 +213,17 @@ async fn assert_committed_record(bed: &Bed, rid: Uuid) {
     );
     assert_eq!(rec.pool, 0);
     assert_eq!((rec.channel_id, rec.channel_key_id), (Some(1), Some(11)));
+    let details: serde_json::Value =
+        sqlx::query_scalar("SELECT usage_details FROM billing_records WHERE request_id=$1")
+            .bind(rid)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(details["tokens"]["prompt_tokens"], 100);
+    assert_eq!(details["tokens"]["cached_tokens"], 20);
+    assert_eq!(details["tokens"]["cache_write_tokens"], 10);
+    assert!(details["tokens"]["cache_read_reported"].is_boolean());
+    assert!(details.get("upstream_cost_micro").is_none());
 }
 
 /// 五处同事务落地，四金额列 / pool / 维度在 records、events、outbox 三处一致。
@@ -317,6 +331,48 @@ async fn replaying_a_settled_request_writes_nothing() {
     assert_committed_record(&bed, rid).await;
     assert_eq!(bed.events(rid).await.len(), 1, "重放不得再记事件");
     assert_eq!(bed.outbox(rid).await.len(), 1, "重放不得再进 outbox");
+    assert_eq!(bed.wallet_snapshot().await, 10_000 - 240, "快照只扣一次");
+    assert_eq!(bed.key_used().await.0, 240, "key 用量只加一次");
+}
+
+/// 同一笔的**并发**结算也只落一次。上一条测的是先后重放；并发时两个事务会同时看到
+/// "不存在"——幂等只靠 EXISTS 挡不住，要靠事务级 advisory lock 把它们串行化。
+/// 此前 PG 不设防，靠 Redis commit 闸只放行一次兜底。
+#[tokio::test]
+async fn concurrent_settlements_of_one_request_write_once() {
+    let bed = bed().await;
+    record_credit(
+        &bed.pg,
+        bed.user_id,
+        Money::from_micros(10_000),
+        "recharge",
+        "system:test",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let rid = Uuid::new_v4();
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let pg = bed.pg.clone();
+            let input = bed.committed(rid);
+            tokio::spawn(async move { record_settlement(&pg, input).await })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+
+    let records: i64 = sqlx::query_scalar!(
+        r#"SELECT count(*) AS "c!" FROM billing_records WHERE request_id = $1"#,
+        rid
+    )
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    assert_eq!(records, 1, "并发结算只能落一条记录");
+    assert_eq!(bed.events(rid).await.len(), 1, "只能记一个事件");
+    assert_eq!(bed.outbox(rid).await.len(), 1, "只能进一次 outbox");
     assert_eq!(bed.wallet_snapshot().await, 10_000 - 240, "快照只扣一次");
     assert_eq!(bed.key_used().await.0, 240, "key 用量只加一次");
 }

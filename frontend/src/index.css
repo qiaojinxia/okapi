@@ -130,6 +130,17 @@
 }
 
 :root {
+  /* 数据页共享尺寸：正文 / 表格 / 辅助文案，列表与加载态使用同一套节奏。 */
+  --control-height: 2.25rem;
+  --page-gap: 1rem;
+  --table-header-height: 2.5rem;
+  --table-row-height: 3.5rem;
+  --table-compact-row-height: 2.75rem;
+  --table-font-size: 0.8125rem;
+  --table-line-height: 1.25rem;
+  --table-cell-padding: 0.375rem;
+  --table-min-height: 10rem;
+  --table-radius: var(--radius-xl);
   color-scheme: light;
   --bg: oklch(0.975 0.004 250);
   --fg: oklch(0.2 0.02 260);
@@ -202,6 +213,8 @@
   }
 
   body {
+    font-size: 0.875rem;
+    line-height: 1.5;
     background-color: var(--bg);
     color: var(--fg);
     -webkit-font-smoothing: antialiased;
@@ -241,10 +254,10 @@
     background: transparent;
   }
 
-  /* 原生日期/时间控件在暗色下的图标跟随主题 */
+  /* color-scheme 已让原生日历图标变亮；再次反色会变回黑色。 */
   .dark input[type="datetime-local"]::-webkit-calendar-picker-indicator,
   .dark input[type="date"]::-webkit-calendar-picker-indicator {
-    filter: invert(1) opacity(0.7);
+    opacity: 0.7;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -255,6 +268,40 @@
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
     }
+  }
+}
+
+@layer utilities {
+  /* 叶子路由使用 fitViewport，列表页按实际页头/筛选器高度分配剩余空间。
+     表内滚动，分页常驻；小视口可正常纵向滚动，不裁切表单和展开详情。 */
+  .list-page,
+  .list-page-section {
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+    gap: var(--page-gap);
+  }
+  .list-page { height: 100%; }
+  .list-page > *,
+  .list-page-section > * { flex-shrink: 0; }
+  .list-page > :is([data-slot="table-frame"], [data-slot="table-skeleton"], [data-slot="empty-state"], .list-page-section),
+  .list-page-section > :is([data-slot="table-frame"], [data-slot="table-skeleton"], [data-slot="empty-state"]) {
+    flex: 1 1 0%;
+    min-height: var(--table-min-height);
+    max-height: none;
+  }
+  [data-slot="table-frame"],
+  [data-slot="table-skeleton"] { border-radius: var(--table-radius); }
+  [data-slot="table-viewport"] { scrollbar-gutter: stable; }
+  [data-density="compact"] { --table-row-height: var(--table-compact-row-height); }
+  [data-slot="table"] > tbody > tr:focus-within { background-color: var(--accent); }
+
+  /* 同一行里的搜索、下拉和动作控件对齐；不影响弹层中的按钮。 */
+  [data-slot="toolbar"] [data-slot="button"] { height: var(--control-height); }
+
+  @media (max-width: 47.999rem) {
+    [data-density="compact"] { --table-row-height: 3.5rem; }
   }
 }
 

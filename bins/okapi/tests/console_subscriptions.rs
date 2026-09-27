@@ -77,15 +77,19 @@ struct Bed {
     suffix: String,
 }
 
-// 套餐 / 分组 / 三角色装配放同一视野
-#[allow(clippy::too_many_lines)]
 async fn setup() -> Bed {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
-    let pg = okapi_store::connect_pg(&database_url).await.unwrap();
+    setup_at(&database_url, &redis_url).await
+}
+
+// 套餐 / 分组 / 三角色装配放同一视野
+#[allow(clippy::too_many_lines)]
+async fn setup_at(database_url: &str, redis_url: &str) -> Bed {
+    let pg = okapi_store::connect_pg(database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
-    let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
+    let redis = okapi_store::connect_redis(redis_url).await.unwrap();
     let suffix = Uuid::new_v4().simple().to_string()[..10].to_owned();
 
     let mock = serve(Router::new().route("/v1/chat/completions", post(mock_ok))).await;
@@ -151,7 +155,7 @@ async fn setup() -> Bed {
     .await
     .unwrap();
 
-    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
+    let state = gateway::build_state(database_url, redis_url, "test-node", None, None)
         .await
         .unwrap();
     let ledger = state.ledger.clone();
@@ -1214,3 +1218,9 @@ async fn admin_subscription_views_agree_with_portal_and_cancel_reports_what_ende
         .unwrap();
     assert_eq!(again.status(), 404, "没有活动订阅时再取消应 404");
 }
+
+#[path = "support/subscription_recovery.rs"]
+mod recovery;
+
+#[path = "support/subscription_lifecycle.rs"]
+mod lifecycle;

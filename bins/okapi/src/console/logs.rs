@@ -225,14 +225,16 @@ pub async fn search(
     );
     let rows = ch.query_with_params(&sql, &borrow(&filters.params)).await?;
 
-    // id → 名字回填（渠道名/用户名）：日志页上"channel 17"对排障毫无帮助。
+    // id → 名字回填（用户/密钥/渠道），筛选对象即使没有命中行也要能识别。
     // 与 stats::channels 同法——存 id、查询时 join，改名不脏历史。
-    let names = resolve_names(&state, &rows).await;
+    let names = resolve_names(&state, &rows, &q).await;
 
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
             let user_id = ch_i64(r, "user_id");
+            let api_key_id = ch_i64(r, "api_key_id");
+            let key = names.keys.get(&api_key_id);
             let channel_id = ch_i64(r, "channel_id");
             json!({
                 "ts": ch_str(r, "ts"),
@@ -241,7 +243,9 @@ pub async fn search(
                 "log_type": ch_i64(r, "log_type"),
                 "user_id": user_id,
                 "username": names.users.get(&user_id).cloned().unwrap_or_default(),
-                "api_key_id": ch_i64(r, "api_key_id"),
+                "api_key_id": api_key_id,
+                "key_name": key.map(|(name, _, _)| name.as_str()).unwrap_or_default(),
+                "key_prefix": key.map(|(_, prefix, _)| prefix.as_str()).unwrap_or_default(),
                 "group": ch_str(r, "group_code"),
                 "model": ch_str(r, "model"),
                 "channel_id": channel_id,
@@ -279,6 +283,7 @@ pub async fn search(
         .collect();
 
     Ok(Json(json!({
+        "scope": names.scope(&q),
         "hours": q.hours(),
         "from": q.from,
         "to": q.to,
@@ -291,10 +296,47 @@ pub async fn search(
 #[derive(Default)]
 struct Names {
     users: HashMap<i64, String>,
+    /// 仅返回名称、非敏感前缀与属主 ID；不读取 key_hash 或凭证。
+    keys: HashMap<i64, (String, String, i64)>,
     channels: HashMap<i64, (String, String)>,
 }
 
 impl Names {
+    fn scope(&self, q: &LogQuery) -> Value {
+        let mut scope = serde_json::Map::new();
+        if let Some(id) = q.user_id {
+            scope.insert(
+                "user".into(),
+                json!({ "id": id, "username": self.users.get(&id) }),
+            );
+        }
+        if let Some(id) = q.api_key_id {
+            let key = self.keys.get(&id);
+            scope.insert(
+                "api_key".into(),
+                json!({
+                    "id": id,
+                    "name": key.map(|(name, _, _)| name),
+                    "key_prefix": key.map(|(_, prefix, _)| prefix),
+                    "user_id": key.map(|(_, _, owner)| owner),
+                    "username": key.and_then(|(_, _, owner)| self.users.get(owner)),
+                }),
+            );
+        }
+        if let Some(id) = q.channel_id {
+            let channel = self.channels.get(&id);
+            scope.insert(
+                "channel".into(),
+                json!({
+                    "id": id,
+                    "name": channel.map(|(name, _)| name),
+                    "provider": channel.map(|(_, provider)| provider),
+                }),
+            );
+        }
+        Value::Object(scope)
+    }
+
     fn channel_name(&self, id: i64) -> String {
         self.channels
             .get(&id)
@@ -309,35 +351,65 @@ impl Names {
     }
 }
 
-/// 两次 PG 点查补齐展示名（每页 ≤200 行，id 去重后规模很小）。
-async fn resolve_names(state: &AppState, rows: &[Value]) -> Names {
-    let mut user_ids: Vec<i64> = rows.iter().map(|r| ch_i64(r, "user_id")).collect();
+/// 有界 PG 批量点查：当前页与已选 ID 一起解析，空结果也返回筛选名称。
+async fn resolve_names(state: &AppState, rows: &[Value], q: &LogQuery) -> Names {
+    let mut key_ids: Vec<i64> = rows
+        .iter()
+        .map(|r| ch_i64(r, "api_key_id"))
+        .chain(q.api_key_id)
+        .filter(|id| *id > 0)
+        .collect();
+    key_ids.sort_unstable();
+    key_ids.dedup();
+    let mut names = Names::default();
+    if !key_ids.is_empty()
+        && let Ok(rows) = sqlx::query!(
+            r#"SELECT id, name, key_prefix, user_id FROM api_keys WHERE id = ANY($1)"#,
+            &key_ids
+        )
+        .fetch_all(&state.pg)
+        .await
+    {
+        names.keys = rows
+            .into_iter()
+            .map(|r| (r.id, (r.name, r.key_prefix, r.user_id)))
+            .collect();
+    }
+    let mut user_ids: Vec<i64> = rows
+        .iter()
+        .map(|r| ch_i64(r, "user_id"))
+        .chain(q.user_id)
+        .chain(names.keys.values().map(|(_, _, owner)| *owner))
+        .filter(|id| *id > 0)
+        .collect();
     user_ids.sort_unstable();
     user_ids.dedup();
     let mut channel_ids: Vec<i64> = rows
         .iter()
         .map(|r| ch_i64(r, "channel_id"))
+        .chain(q.channel_id)
         .filter(|id| *id > 0)
         .collect();
     channel_ids.sort_unstable();
     channel_ids.dedup();
 
-    let mut names = Names::default();
-    if let Ok(rows) = sqlx::query!(
-        r#"SELECT id, username FROM users WHERE id = ANY($1)"#,
-        &user_ids
-    )
-    .fetch_all(&state.pg)
-    .await
+    if !user_ids.is_empty()
+        && let Ok(rows) = sqlx::query!(
+            r#"SELECT id, username FROM users WHERE id = ANY($1)"#,
+            &user_ids
+        )
+        .fetch_all(&state.pg)
+        .await
     {
         names.users = rows.into_iter().map(|r| (r.id, r.username)).collect();
     }
-    if let Ok(rows) = sqlx::query!(
-        r#"SELECT id, name, provider FROM channels WHERE id = ANY($1)"#,
-        &channel_ids
-    )
-    .fetch_all(&state.pg)
-    .await
+    if !channel_ids.is_empty()
+        && let Ok(rows) = sqlx::query!(
+            r#"SELECT id, name, provider FROM channels WHERE id = ANY($1)"#,
+            &channel_ids
+        )
+        .fetch_all(&state.pg)
+        .await
     {
         names.channels = rows
             .into_iter()
@@ -369,6 +441,7 @@ pub async fn stat(
         "SELECT count() AS requests, sum(is_error) AS errors, \
                 sum(prompt_tokens + completion_tokens) AS tokens, \
                 sum(cached_tokens) AS cached, sum(prompt_tokens) AS prompt, \
+                countIf(ifNull(cache_read_reported, 0) = 1) AS cache_read_known, \
                 sum(amount_micro) AS amount, sum(discount_micro) AS saved, \
                 uniqExact(user_id) AS users \
          FROM request_log_raw WHERE {}",
@@ -416,7 +489,8 @@ pub async fn stat(
         // 缓存命中口径 = 命中 token / 输入 token。按"请求是否命中"计会高估收益：
         // 一次只命中 5% 前缀的请求和一次全命中的请求，省下的钱差两个数量级。
         "cached_tokens": cached,
-        "cache_hit_bp": rate_bp(cached, prompt),
+        "cache_hit_bp": super::usage_details::cache_rate(cached, prompt, requests, ch_i64(&row, "cache_read_known")),
+        "cache_read_known_requests": ch_i64(&row, "cache_read_known"),
         "rpm": rpm,
         "tpm": tpm,
         "rate_source": source,

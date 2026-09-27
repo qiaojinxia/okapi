@@ -323,6 +323,14 @@ pub fn usage_from_anthropic(usage: Option<&Value>) -> UsageProbe {
         prompt_tokens_details: PromptTokensDetails {
             cached_tokens: cache_read,
             cache_write_tokens: cache_creation,
+            cache_read_reported: usage
+                .and_then(|u| u.get("cache_read_input_tokens"))
+                .and_then(Value::as_u64)
+                .is_some_and(|v| u32::try_from(v).is_ok()),
+            cache_write_reported: usage
+                .and_then(|u| u.get("cache_creation_input_tokens"))
+                .and_then(Value::as_u64)
+                .is_some_and(|v| u32::try_from(v).is_ok()),
             // Anthropic 无模态细分（图片并入 input_tokens）
             audio_tokens: 0,
             image_tokens: 0,
@@ -335,12 +343,7 @@ pub fn usage_from_anthropic(usage: Option<&Value>) -> UsageProbe {
 }
 
 fn usage_json(u: UsageProbe) -> Value {
-    let mut details = json!({"cached_tokens": u.prompt_tokens_details.cached_tokens});
-    // 缓存写入单独计价（cache_write 轴）。带出去，下游网关（串联部署）才能按它计费；
-    // 字段名与 UsageProbe 的反序列化一致。仅非零时出现，无缓存写入时响应形状不变。
-    if u.prompt_tokens_details.cache_write_tokens > 0 {
-        details["cache_write_tokens"] = json!(u.prompt_tokens_details.cache_write_tokens);
-    }
+    let details = u.prompt_tokens_details.cache_json();
     json!({
         "prompt_tokens": u.prompt_tokens,
         "completion_tokens": u.completion_tokens,
@@ -360,6 +363,8 @@ pub struct StreamState {
     input_tokens: u32,
     cache_read: u32,
     cache_creation: u32,
+    cache_read_reported: bool,
+    cache_write_reported: bool,
     /// OpenAI tool_calls 数组下标（Anthropic content block index 与其不同构）。
     tool_index: i64,
     /// 当前 Anthropic block index → 是否 tool_use（input_json_delta 归属判定）。
@@ -376,6 +381,8 @@ impl StreamState {
             input_tokens: 0,
             cache_read: 0,
             cache_creation: 0,
+            cache_read_reported: false,
+            cache_write_reported: false,
             tool_index: -1,
             current_block_is_tool: false,
         }
@@ -428,6 +435,9 @@ impl StreamState {
             self.input_tokens = get("input_tokens");
             self.cache_read = get("cache_read_input_tokens");
             self.cache_creation = get("cache_creation_input_tokens");
+            let details = usage_from_anthropic(m.get("usage")).prompt_tokens_details;
+            self.cache_read_reported = details.cache_read_reported;
+            self.cache_write_reported = details.cache_write_reported;
         }
         // 角色 chunk（content 为空串：不触发首字判定）
         vec![Ok(self.data_event(
@@ -523,6 +533,8 @@ impl StreamState {
             prompt_tokens_details: PromptTokensDetails {
                 cached_tokens: self.cache_read,
                 cache_write_tokens: self.cache_creation,
+                cache_read_reported: self.cache_read_reported,
+                cache_write_reported: self.cache_write_reported,
                 // Anthropic 无模态细分（图片并入 input_tokens）
                 audio_tokens: 0,
                 image_tokens: 0,

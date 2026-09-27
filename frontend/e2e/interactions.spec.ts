@@ -172,6 +172,9 @@ async function advancedSettings(page: Page, permissions = ['*']) {
     notify_channels: [{ type: 'webhook', url: 'https://example.test/hooks?token=test-notify-secret', events: ['drift'], min_interval_secs: 60 }],
     model_rpm_limits: { 'model-a': 2 },
     mcp_write_enabled: true,
+    web_session_limit: 5,
+    site_url: 'https://api.example.test',
+    playground_presets: [{ name: 'demo', model: 'gpt-demo' }],
     ssrf_policy: { allow_http: true, allow_private: true, custom: 'keep' },
     extension_custom: { retries: 3, nested: { password: 'test-extension-secret' } },
   }
@@ -193,10 +196,53 @@ async function advancedSettings(page: Page, permissions = ['*']) {
   return { writes, values }
 }
 
+async function stubAdminSettings(page: Page, values: Record<string, unknown>, post: 'ok' | '500') {
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      if (post === '500') {
+        await route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+        return
+      }
+      const body = route.request().postDataJSON()
+      values[body.key] = body.value
+      await route.fulfill({ json: { ok: true } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: Object.entries(values).map(([key, value]) => ({
+          key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+        })),
+      },
+    })
+  })
+}
+
+async function dismissStatusToasts(page: Page) {
+  const close = page.getByRole('status').getByRole('button', { name: '关闭', exact: true })
+  while ((await close.count()) > 0) {
+    await close.first().click()
+  }
+}
+
+async function saveSettingsRetry(page: Page, values: Record<string, unknown>, dialog: ReturnType<Page['getByRole']>) {
+  await dismissStatusToasts(page)
+  await stubAdminSettings(page, values, '500')
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await stubAdminSettings(page, values, 'ok')
+  await dismissStatusToasts(page)
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await dismissStatusToasts(page)
+}
+
 test('高级配置按用途分组，支持中文搜索，列表与悬浮信息不显示敏感值', async ({ page }) => {
-  await advancedSettings(page)
+  const { values } = await advancedSettings(page)
   const panel = page.getByRole('tabpanel')
-  await expect(panel.getByRole('article')).toHaveCount(10)
+  await expect(panel.getByRole('article')).toHaveCount(13)
   await expect(panel.getByRole('article', { name: '充值返利', exact: true })).toContainText('10%')
   for (const secret of ['test-epay-secret', 'test-stripe-secret', 'test-webhook-secret', 'test-oauth-secret', 'test-notify-secret', 'test-extension-secret']) {
     expect(await panel.innerHTML()).not.toContain(secret)
@@ -208,9 +254,10 @@ test('高级配置按用途分组，支持中文搜索，列表与悬浮信息�
   await expect(panel.getByRole('article')).toHaveCount(1)
   await search.fill('no-match')
   await expect(panel.getByRole('article')).toHaveCount(0)
+  await expect(panel.getByText('可切换分类或清除筛选查看其他配置。')).toBeVisible()
   await panel.getByRole('button', { name: '清除筛选' }).click()
   await panel.getByRole('group', { name: '配置分类' }).getByRole('button', { name: /访问与安全/ }).click()
-  await expect(panel.getByRole('article')).toHaveCount(2)
+  await expect(panel.getByRole('article')).toHaveCount(3)
   await panel.getByRole('button', { name: '清除筛选' }).click()
   await page.screenshot({ path: 'test-results/advanced-settings-desktop.png', fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 390, height: 844 })
@@ -221,6 +268,59 @@ test('高级配置按用途分组，支持中文搜索，列表与悬浮信息�
   }).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/advanced-settings-mobile.png', fullPage: true, animations: 'disabled' })
+  await page.setViewportSize({ width: 1280, height: 800 })
+
+  await page.getByRole('article', { name: '支付凭证' }).getByRole('button').click()
+  let dialog = page.getByRole('dialog', { name: '支付凭证' })
+  await expect(dialog.getByLabel('支付凭证')).toHaveAttribute('type', 'password')
+  await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await dialog.getByLabel('支付凭证').fill('rotated-epay-key')
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.epay_key_test).toBe('rotated-epay-key')
+  expect(await page.getByRole('tabpanel').innerHTML()).not.toContain('rotated-epay-key')
+
+  await page.getByRole('article', { name: 'Web 会话数上限' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: 'Web 会话数上限' })
+  await expect(dialog.getByLabel('Web 会话数上限')).toHaveValue('5')
+  await dialog.getByLabel('Web 会话数上限').fill('abc')
+  await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('alert')).toContainText('请输入有效数值')
+  await dialog.getByLabel('Web 会话数上限').fill('0')
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.web_session_limit).toBe(0)
+
+  await page.getByRole('article', { name: '站点地址' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '站点地址' })
+  await expect(dialog.getByLabel('站点地址')).toHaveValue('https://api.example.test')
+  await dialog.getByLabel('站点地址').fill('https://console.example.test')
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.site_url).toBe('https://console.example.test')
+
+  await page.getByRole('article', { name: '试用台预设' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '试用台预设' })
+  await dialog.locator('textarea').fill('{ broken')
+  await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('alert')).toContainText('JSON 格式错误')
+  await dialog.locator('textarea').fill(JSON.stringify([
+    { name: 'Writer', model: 'gpt-5', system: 'Write clearly.', temperature: 0.5, max_tokens: 256, top_p: 0.9 },
+    { name: 'Coder', model: 'gpt-demo' },
+  ], null, 2))
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.playground_presets).toEqual([
+    { name: 'Writer', model: 'gpt-5', system: 'Write clearly.', temperature: 0.5, max_tokens: 256, top_p: 0.9 },
+    { name: 'Coder', model: 'gpt-demo' },
+  ])
+
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({ json: { data: [] } })
+  })
+  await page.reload()
+  await page.getByRole('tab', { name: '高级设置' }).click()
+  const empty = page.getByRole('tabpanel')
+  await expect(empty.getByText('暂无数据')).toBeVisible()
+  await expect(empty.getByText('可切换分类或清除筛选查看其他配置。')).toBeVisible()
 })
 
 test('返利与汇率按易读单位编辑，非法数值不能提交，保留密钥和未知字段', async ({ page }) => {
@@ -236,6 +336,40 @@ test('返利与汇率按易读单位编辑，非法数值不能提交，保留�
   }
   expect(writes).toHaveLength(0)
   await percent.fill('12.35')
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      await route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: Object.entries(values).map(([key, value]) => ({
+          key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+        })),
+      },
+    })
+  })
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON()
+      writes.push(body)
+      values[body.key] = body.value
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({
+        json: {
+          data: Object.entries(values).map(([key, value]) => ({
+            key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+          })),
+        },
+      })
+    }
+  })
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(values.aff_percent_bp).toBe(1235)
@@ -262,12 +396,88 @@ test('模型规则防重复，零值不限流，访问开关保留扩展字段',
   await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
   await dialog.getByLabel('模型名称', { exact: true }).last().fill('model-b')
   await dialog.getByLabel('RPM', { exact: true }).last().fill('0')
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      await route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: Object.entries(values).map(([key, value]) => ({
+          key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+        })),
+      },
+    })
+  })
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON()
+      values[body.key] = body.value
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({
+        json: {
+          data: Object.entries(values).map(([key, value]) => ({
+            key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+          })),
+        },
+      })
+    }
+  })
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(values.model_rpm_limits).toEqual({ 'model-a': 2, 'model-b': 0 })
+  await page.getByRole('article', { name: '模型请求限流' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '模型请求限流' })
+  await dialog.getByRole('button', { name: '移除第 2 条限流规则' }).click()
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.model_rpm_limits).toEqual({ 'model-a': 2 })
+  await page.getByRole('article', { name: '模型请求限流' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '模型请求限流' })
+  await dialog.getByRole('button', { name: '移除第 1 条限流规则' }).click()
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.model_rpm_limits).toEqual({})
   await page.getByRole('article', { name: '上游访问策略' }).getByRole('button').click()
   dialog = page.getByRole('dialog', { name: '上游访问策略' })
   await dialog.getByRole('switch', { name: '允许 HTTP 上游', exact: true }).click()
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      await route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: Object.entries(values).map(([key, value]) => ({
+          key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+        })),
+      },
+    })
+  })
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON()
+      values[body.key] = body.value
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({
+        json: {
+          data: Object.entries(values).map(([key, value]) => ({
+            key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+          })),
+        },
+      })
+    }
+  })
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(values.ssrf_policy).toEqual({ allow_http: false, allow_private: true, custom: 'keep' })
@@ -279,9 +489,113 @@ test('登录服务商保留密钥，扩展 JSON 明确展开并校验，通知�
   let dialog = page.getByRole('dialog', { name: '第三方登录' })
   await expect(dialog.getByLabel('客户端密钥')).toHaveAttribute('type', 'password')
   await dialog.getByLabel('客户端 ID').fill('client-new')
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      await route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+      return
+    }
+    await route.fulfill({
+      json: {
+        data: Object.entries(values).map(([key, value]) => ({
+          key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+        })),
+      },
+    })
+  })
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    if (route.request().method() === 'POST') {
+      const body = route.request().postDataJSON()
+      values[body.key] = body.value
+      await route.fulfill({ json: { ok: true } })
+    } else {
+      await route.fulfill({
+        json: {
+          data: Object.entries(values).map(([key, value]) => ({
+            key, value, is_secret: key === 'epay_key_test', configured: true, updated_at: '2026-09-04T09:02:00Z',
+          })),
+        },
+      })
+    }
+  })
   await dialog.getByRole('button', { name: '保存', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   expect(values.oauth_providers).toEqual([{ code: 'github', client_id: 'client-new', client_secret: 'test-oauth-secret', custom: 'keep' }])
+  await page.getByRole('article', { name: '第三方登录' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '第三方登录' })
+  await dialog.getByRole('button', { name: '添加登录服务商' }).click()
+  await dialog.getByLabel('服务商标识').last().fill('github')
+  await dialog.getByLabel('客户端 ID').last().fill('dup')
+  await dialog.getByLabel('客户端密钥').last().fill('dup-secret')
+  await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('alert')).toContainText('不能重复')
+  await dialog.getByLabel('服务商标识').last().fill('custom-idp')
+  await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('alert')).toContainText('自定义服务商需填写授权、令牌和用户信息三个地址')
+  await dialog.getByLabel('授权地址').last().fill('https://idp.example.test/authorize')
+  await dialog.getByLabel('令牌地址').last().fill('https://idp.example.test/token')
+  await dialog.getByLabel('用户信息地址').last().fill('https://idp.example.test/userinfo')
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.oauth_providers).toEqual([
+    { code: 'github', client_id: 'client-new', client_secret: 'test-oauth-secret', custom: 'keep' },
+    {
+      code: 'custom-idp',
+      client_id: 'dup',
+      client_secret: 'dup-secret',
+      authorize_url: 'https://idp.example.test/authorize',
+      token_url: 'https://idp.example.test/token',
+      userinfo_url: 'https://idp.example.test/userinfo',
+    },
+  ])
+  await page.getByRole('article', { name: '第三方登录' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '第三方登录' })
+  await dialog.getByRole('button', { name: '移除登录服务商 2' }).click()
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.oauth_providers).toEqual([{ code: 'github', client_id: 'client-new', client_secret: 'test-oauth-secret', custom: 'keep' }])
+  await page.getByRole('article', { name: '第三方登录' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '第三方登录' })
+  await dialog.getByRole('button', { name: '添加登录服务商' }).click()
+  await dialog.getByLabel('服务商标识').last().fill('discord')
+  await dialog.getByLabel('客户端 ID').last().fill('discord-id')
+  await dialog.getByLabel('客户端密钥').last().fill('discord-secret')
+  await dialog.getByText('授权地址与可选字段').last().click()
+  await dialog.getByLabel('授权范围').last().fill('identify')
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.oauth_providers).toEqual([
+    { code: 'github', client_id: 'client-new', client_secret: 'test-oauth-secret', custom: 'keep' },
+    { code: 'discord', client_id: 'discord-id', client_secret: 'discord-secret', scopes: 'identify' },
+  ])
+  await page.getByRole('article', { name: '第三方登录' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: '第三方登录' })
+  await dialog.getByRole('button', { name: '移除登录服务商 2' }).click()
+  await dialog.getByRole('button', { name: '移除登录服务商 1' }).click()
+  await saveSettingsRetry(page, values, dialog)
+  expect(values.oauth_providers).toEqual([])
+  await page.getByRole('article', { name: 'Stripe 支付' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: 'Stripe 支付' })
+  await expect(dialog.getByLabel('Stripe 收款密钥')).toHaveAttribute('type', 'password')
+  await expect(dialog.getByLabel('回调签名密钥')).toHaveAttribute('type', 'password')
+  await expect(dialog.getByLabel('API 地址')).toHaveValue('https://api.stripe.com')
+  await dialog.getByLabel('API 地址').fill('not-a-url')
+  await expect(dialog.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+  await expect(dialog.getByRole('alert')).toContainText('需为有效的 HTTP(S) 地址')
+  await dialog.getByLabel('API 地址').fill('https://api.stripe.test')
+  await stubAdminSettings(page, values, '500')
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await stubAdminSettings(page, values, 'ok')
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(values.payment_stripe).toEqual({
+    secret_key: 'test-stripe-secret',
+    webhook_secret: 'test-webhook-secret',
+    api_base: 'https://api.stripe.test',
+  })
   await page.getByRole('article', { name: 'extension_custom' }).getByRole('button').click()
   dialog = page.getByRole('dialog', { name: 'extension_custom' })
   await expect(dialog.locator('textarea')).toHaveCount(0)
@@ -291,6 +605,18 @@ test('登录服务商保留密钥，扩展 JSON 明确展开并校验，通知�
   await expect(dialog.getByRole('alert')).toContainText('JSON 格式错误')
   await dialog.getByRole('button', { name: '取消', exact: true }).click()
   expect(values.extension_custom).toEqual({ retries: 3, nested: { password: 'test-extension-secret' } })
+  await page.getByRole('article', { name: 'extension_custom' }).getByRole('button').click()
+  dialog = page.getByRole('dialog', { name: 'extension_custom' })
+  await dialog.getByRole('button', { name: '显示并编辑敏感配置' }).click()
+  await dialog.locator('textarea').fill(JSON.stringify({ retries: 5, nested: { password: 'test-extension-secret' } }, null, 2))
+  await stubAdminSettings(page, values, '500')
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误，请稍后再试' })).toBeVisible()
+  await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
+  await stubAdminSettings(page, values, 'ok')
+  await dialog.getByRole('button', { name: '保存', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(values.extension_custom).toEqual({ retries: 5, nested: { password: 'test-extension-secret' } })
   await page.getByRole('article', { name: '通知多路' }).getByRole('button').click()
   await expect(page.getByRole('tab', { name: '通知多路' })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByRole('tab', { name: '通知多路' })).toBeFocused()
@@ -298,7 +624,7 @@ test('登录服务商保留密钥，扩展 JSON 明确展开并校验，通知�
 
 test('只读权限可以浏览高级配置但不会出现编辑入口', async ({ page }) => {
   const { writes } = await advancedSettings(page, ['settings.read'])
-  await expect(page.getByRole('tabpanel').getByRole('article')).toHaveCount(10)
+  await expect(page.getByRole('tabpanel').getByRole('article')).toHaveCount(13)
   await expect(page.getByRole('tabpanel').getByRole('article').getByRole('button')).toHaveCount(0)
   expect(writes).toHaveLength(0)
 })
@@ -533,10 +859,10 @@ test('已有模型可搜索、联想和勾选，筛选保留已选项，中文�
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '路由诊断', exact: true }).click()
   const model = page.locator('#diag-model')
+  await expect(page.locator('#diag-ingress')).toBeFocused()
   await model.fill('gpt')
-  const listId = await model.getAttribute('list')
-  await expect(page.locator(`datalist[id="${listId}"] option`)).toHaveCount(1)
-  await expect(page.locator(`datalist[id="${listId}"] option`)).toHaveAttribute('value', 'gpt-demo')
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1)
+  await expect(page.getByRole('listbox').getByRole('option')).toContainText('gpt-demo')
   await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).last().click()
   await page.getByRole('button', { name: '新建渠道', exact: true }).first().click()
   const search = page.getByRole('searchbox', { name: '从已配定价的模型中选择' })
@@ -566,8 +892,8 @@ test('已有模型可搜索、联想和勾选，筛选保留已选项，中文�
   await page.goto('/admin/pricing')
   const modelSearch = page.locator('#m-search')
   await modelSearch.fill('anthropic')
-  const searchList = await modelSearch.getAttribute('list')
-  await expect(page.locator(`datalist[id="${searchList}"] option`)).toHaveAttribute('value', 'claude-demo')
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1)
+  await expect(page.getByRole('listbox').getByRole('option')).toContainText('claude-demo')
   await modelSearch.fill('claude-demo')
   await modelSearch.press('Enter')
   await expect.poll(() => queries.at(-1)).toContain('q=claude-demo')
