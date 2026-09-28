@@ -392,22 +392,23 @@ pub fn response_openai_to_gemini(
         .and_then(Value::as_str);
     let usage: Option<UsageProbe> = src
         .get("usage")
+        .filter(|u| !u.is_null())
         .and_then(|u| serde_json::from_value(u.clone()).ok());
-    let probe = usage.unwrap_or_default();
+    let probe = usage;
     let out = json!({
         "candidates": [{
             "content": {"parts": parts, "role": "model"},
             "finishReason": map_finish(finish),
             "index": 0,
         }],
-        "usageMetadata": gemini_usage_json(probe),
+        "usageMetadata": probe.map(gemini_usage_json),
         "modelVersion": src.get("model").and_then(Value::as_str).unwrap_or(""),
         "responseId": src.get("id").and_then(Value::as_str).unwrap_or(""),
     });
     let bytes = serde_json::to_vec(&out)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
-    Ok((bytes, Some(probe)))
+    Ok((bytes, probe))
 }
 
 fn function_call_part(name: Option<&str>, arguments: Option<&str>) -> Value {
@@ -430,23 +431,60 @@ fn map_finish(finish: Option<&str>) -> &'static str {
 /// OpenAI 口径探针 → Gemini usageMetadata（candidates 不含 thoughts，total 三者相加）。
 #[must_use]
 pub fn gemini_usage_json(u: UsageProbe) -> Value {
-    let thoughts = u
-        .completion_tokens_details
-        .reasoning_tokens
-        .min(u.completion_tokens);
-    let candidates = u.completion_tokens - thoughts;
+    if u.with_estimates(0, 0).is_err() {
+        return Value::Null;
+    }
+    let thoughts = u.completion_tokens_details.reasoning_tokens;
+    let candidates = u.completion_tokens.saturating_sub(thoughts);
     let mut meta = json!({
         "promptTokenCount": u.prompt_tokens,
         "candidatesTokenCount": candidates,
-        "totalTokenCount": u.prompt_tokens.saturating_add(u.completion_tokens),
+        "totalTokenCount": u64::from(u.prompt_tokens) + u64::from(u.completion_tokens),
     });
-    if u.prompt_tokens_details.cached_tokens > 0 {
+    if let Some(fields) = meta.as_object_mut() {
+        if u.missing_prompt {
+            fields.remove("promptTokenCount");
+        }
+        if u.missing_completion {
+            fields.remove("candidatesTokenCount");
+        }
+        if u.missing_prompt || u.missing_completion {
+            fields.remove("totalTokenCount");
+        }
+    }
+    if u.prompt_tokens_details.cache_read_reported || u.prompt_tokens_details.cached_tokens > 0 {
         meta["cachedContentTokenCount"] = json!(u.prompt_tokens_details.cached_tokens);
     }
     if thoughts > 0 {
         meta["thoughtsTokenCount"] = json!(thoughts);
     }
+    let input = u.prompt_tokens_details;
+    let output = u.completion_tokens_details;
+    if input.audio_tokens > 0 || input.image_tokens > 0 {
+        meta["promptTokensDetails"] =
+            modal_counts(u.prompt_tokens, input.audio_tokens, input.image_tokens);
+    }
+    if let Some(cache) = input.cached_tokens_details {
+        meta["cacheTokensDetails"] = modal_counts(
+            input.cached_tokens,
+            cache.audio_tokens.unwrap_or(0),
+            cache.image_tokens.unwrap_or(0),
+        );
+    }
+    if output.audio_tokens > 0 || output.image_tokens > 0 {
+        meta["candidatesTokensDetails"] =
+            modal_counts(candidates, output.audio_tokens, output.image_tokens);
+    }
     meta
+}
+
+fn modal_counts(total: u32, audio: u32, image: u32) -> Value {
+    let Some(text) = total.checked_sub(audio).and_then(|v| v.checked_sub(image)) else {
+        return Value::Null;
+    };
+    json!([{"modality":"TEXT","tokenCount":text},
+           {"modality":"AUDIO","tokenCount":audio},
+           {"modality":"IMAGE","tokenCount":image}])
 }
 
 // ---- 事件流转换 ----
@@ -492,7 +530,7 @@ impl OaiStreamToGemini {
             Ok(ChatEvent::Done) => self.finish(),
             Ok(ChatEvent::Data { raw, usage, .. }) => {
                 if let Some(u) = usage {
-                    self.usage = Some(u);
+                    self.usage = Some(u.with_previous(self.usage));
                 }
                 let chunk: Value = serde_json::from_str(&raw).unwrap_or_default();
                 self.on_chunk(&chunk)
@@ -581,10 +619,10 @@ impl OaiStreamToGemini {
             .map(|c| function_call_part(Some(&c.name), Some(&c.arguments)))
             .collect();
         let has_calls = !parts.is_empty();
-        let probe = self.usage.unwrap_or_default();
+        let probe = self.usage;
         let finish = map_finish(self.finish_reason.as_deref());
         let chars: usize = calls.iter().map(|c| c.arguments.chars().count()).sum();
-        let mut last = self.chunk(&parts, Some(finish), Some(probe), chars);
+        let mut last = self.chunk(&parts, Some(finish), probe, chars);
         if !has_calls && let ChatEvent::Data { has_output, .. } = &mut last {
             *has_output = false;
         }
@@ -633,14 +671,14 @@ pub fn wrap_chat_as_gemini(
             status,
             upstream_request_id,
             body,
-            ..
+            usage,
         } => {
-            let (body, usage) = response_openai_to_gemini(&body)?;
+            let (body, parsed_usage) = response_openai_to_gemini(&body)?;
             Ok(ChatResponse::Json {
                 status,
                 upstream_request_id,
                 body,
-                usage,
+                usage: usage.or(parsed_usage),
             })
         }
         ChatResponse::Stream(h) => {

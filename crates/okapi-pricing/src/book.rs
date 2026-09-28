@@ -5,10 +5,12 @@ use crate::model::PricingMode;
 use crate::ratio::{RATIO_SCALE, RatioFp};
 use crate::rules::{PricingRule, RuleKind};
 use okapi_domain::{GroupCode, ModelCode, Money, UserId};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// 基准价 $2/1M input tokens 的 micro 表示（与 new-api 倍率基准对齐）。
-pub(crate) const BASE_PRICE_PER_1M_MICRO: i64 = 2_000_000;
+pub const BASE_PRICE_PER_1M_MICRO: i64 = 2_000_000;
+/// System setting uses integer micro-USD; cap at $1M / 1M tokens.
+pub const MAX_BASE_PRICE_PER_1M_MICRO: i64 = 1_000_000_000_000;
 
 /// 编译输入：模型定价条目（model_pricing 行）。
 #[derive(Debug, Clone)]
@@ -60,6 +62,8 @@ pub struct PriceBookSource {
 #[derive(Debug, Clone)]
 pub struct PriceBook {
     epoch: i64,
+    base_price_per_1m_micro: i64,
+    absolute_overrides: HashSet<(UserId, ModelCode)>,
     models: HashMap<ModelCode, PricingMode>,
     /// service_tier 档位倍率（仅存配置了的模型）。
     tiers: HashMap<ModelCode, HashMap<String, RatioFp>>,
@@ -79,10 +83,22 @@ pub struct PriceBook {
 pub(crate) struct ResolvedRate<'a> {
     pub pricing: &'a PricingMode,
     pub group_ratio: RatioFp,
+    pub base_price_per_1m_micro: i64,
 }
 
 /// 编译：校验 + 规则排序 + absolute 换算。任何配置错误 fail-closed 拒绝发布。
 pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
+    compile_with_base(source, BASE_PRICE_PER_1M_MICRO)
+}
+
+pub fn compile_with_base(
+    source: PriceBookSource,
+    base_price_per_1m_micro: i64,
+) -> Result<PriceBook, CompileError> {
+    if !(1..=MAX_BASE_PRICE_PER_1M_MICRO).contains(&base_price_per_1m_micro) {
+        return Err(CompileError::InvalidBasePrice);
+    }
+    let mut absolute_overrides = HashSet::new();
     let mut models = HashMap::with_capacity(source.models.len());
     let mut tiers: HashMap<ModelCode, HashMap<String, RatioFp>> = HashMap::new();
     for entry in source.models {
@@ -106,6 +122,9 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
 
     let mut overrides = HashMap::with_capacity(source.overrides.len());
     for entry in source.overrides {
+        if matches!(&entry.spec, OverrideSpec::Absolute { .. }) {
+            absolute_overrides.insert((entry.user, entry.model.clone()));
+        }
         let pricing = match entry.spec {
             OverrideSpec::Ratio(mode) => {
                 mode.validate(entry.model.as_str())?;
@@ -165,6 +184,8 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
 
     Ok(PriceBook {
         epoch: source.epoch,
+        base_price_per_1m_micro,
+        absolute_overrides,
         models,
         tiers,
         groups,
@@ -178,21 +199,33 @@ pub fn compile(source: PriceBookSource) -> Result<PriceBook, CompileError> {
 
 /// absolute 专属价 → 倍率三元组（DESIGN §3.2 换算，整数定点，floor）。
 /// 从已编译的模型定价里取出三条模态轴（per_call 模式无 token 轴 → 全 1.0）。
-fn modal_axes(mode: &PricingMode) -> (RatioFp, RatioFp, RatioFp) {
+fn modal_axes(mode: &PricingMode) -> (RatioFp, RatioFp, RatioFp, crate::ModalityRatios) {
     match mode {
         PricingMode::Ratio {
             audio_ratio,
             audio_completion_ratio,
             image_ratio,
+            modality_ratios,
             ..
         }
         | PricingMode::Tiered {
             audio_ratio,
             audio_completion_ratio,
             image_ratio,
+            modality_ratios,
             ..
-        } => (*audio_ratio, *audio_completion_ratio, *image_ratio),
-        PricingMode::PerCall { .. } => (RatioFp::ONE, RatioFp::ONE, RatioFp::ONE),
+        } => (
+            *audio_ratio,
+            *audio_completion_ratio,
+            *image_ratio,
+            *modality_ratios,
+        ),
+        PricingMode::PerCall { .. } => (
+            RatioFp::ONE,
+            RatioFp::ONE,
+            RatioFp::ONE,
+            crate::ModalityRatios::default(),
+        ),
     }
 }
 
@@ -205,7 +238,7 @@ fn absolute_to_ratio(
     cache_ratio: RatioFp,
     cache_write_ratio: RatioFp,
     // 模型级模态轴；None = 该模型无定价行（罕见，按 1.0 处理）
-    axes: Option<(RatioFp, RatioFp, RatioFp)>,
+    axes: Option<(RatioFp, RatioFp, RatioFp, crate::ModalityRatios)>,
 ) -> Result<PricingMode, CompileError> {
     let input = input_per_1m.as_micros();
     let output = output_per_1m.as_micros();
@@ -239,8 +272,12 @@ fn absolute_to_ratio(
         .and_then(RatioFp::from_scaled)
         .ok_or_else(|| invalid("completion ratio out of range"))?;
 
-    let (audio_ratio, audio_completion_ratio, image_ratio) =
-        axes.unwrap_or((RatioFp::ONE, RatioFp::ONE, RatioFp::ONE));
+    let (audio_ratio, audio_completion_ratio, image_ratio, modality_ratios) = axes.unwrap_or((
+        RatioFp::ONE,
+        RatioFp::ONE,
+        RatioFp::ONE,
+        crate::ModalityRatios::default(),
+    ));
     Ok(PricingMode::Ratio {
         model_ratio,
         completion_ratio,
@@ -249,10 +286,15 @@ fn absolute_to_ratio(
         audio_ratio,
         audio_completion_ratio,
         image_ratio,
+        modality_ratios,
     })
 }
 
 impl PriceBook {
+    #[must_use]
+    pub const fn base_price_per_1m_micro(&self) -> i64 {
+        self.base_price_per_1m_micro
+    }
     #[must_use]
     pub const fn epoch(&self) -> i64 {
         self.epoch
@@ -326,6 +368,12 @@ impl PriceBook {
         Ok(ResolvedRate {
             pricing,
             group_ratio,
+            // Absolute overrides retain their USD price, independent of the site base.
+            base_price_per_1m_micro: if self.absolute_overrides.contains(&(user, model.clone())) {
+                BASE_PRICE_PER_1M_MICRO
+            } else {
+                self.base_price_per_1m_micro
+            },
         })
     }
 
@@ -477,6 +525,7 @@ mod tests {
                 audio_ratio: RatioFp::ONE,
                 audio_completion_ratio: RatioFp::ONE,
                 image_ratio: RatioFp::ONE,
+                modality_ratios: crate::ModalityRatios::default(),
             },
             tier_ratios: Vec::new(),
         };

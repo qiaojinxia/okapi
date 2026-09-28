@@ -30,6 +30,15 @@ use uuid::Uuid;
 #[path = "support/image_tasks_cases.rs"]
 mod async_tasks;
 
+#[path = "support/image_token_billing.rs"]
+mod token_billing;
+
+#[path = "support/image_cache_billing.rs"]
+mod cache_billing;
+
+#[path = "support/image_streaming.rs"]
+mod streaming;
+
 const WAIT: Duration = Duration::from_secs(10);
 const BALANCE: i64 = 1_000_000;
 const PRICE: i64 = 40_000;
@@ -348,7 +357,7 @@ async fn finish(
 }
 
 #[tokio::test]
-async fn json_rejects_invalid_counts_duplicate_fields_and_streaming_before_reserve() {
+async fn json_rejects_invalid_counts_duplicate_fields_and_stream_types_before_reserve() {
     let env = setup().await;
     let mut cases: Vec<Value> = [
         json!(0),
@@ -375,7 +384,7 @@ async fn json_rejects_invalid_counts_duplicate_fields_and_streaming_before_reser
         body.as_object_mut().unwrap().remove(field);
         cases.push(body);
     }
-    for value in [json!(true), json!("false"), json!(1)] {
+    for value in [json!("false"), json!(1)] {
         let mut body = env.body(1);
         body["stream"] = value;
         cases.push(body);
@@ -552,7 +561,7 @@ async fn multipart_rejects_bad_counts_duplicates_empty_files_and_streaming() {
         ("n", "2"),
         ("model", "other"),
         ("prompt", "other"),
-        ("stream", "true"),
+        ("stream", "invalid"),
     ] {
         let form = env.form().text("n", "1").text(field, value);
         forms.push(form);
@@ -836,6 +845,10 @@ async fn base64_result_is_preserved_and_billed_once() {
     let output = json!({"data":[{"b64_json":"aGVsbG8=","revised_prompt":"revised"}],"usage":{"total_tokens":20}});
     env.peer().await.raw(200, output.to_string());
     let response = finish(task, 200).await;
+    assert_eq!(
+        env.record(&response).await["pricing_snapshot"]["image_usage_reported"],
+        false
+    );
     let returned: Value = response.json().await.unwrap();
     assert_eq!(returned, output);
     env.assert_money(PRICE, 1).await;

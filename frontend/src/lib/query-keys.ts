@@ -14,6 +14,7 @@ export const qk = {
   keys: ['keys'] as const,
   /// 新手引导用的密钥概览（有几把、是否调过）；与 `keys` 同前缀，建 / 删 key 后一起失效。
   keysSummary: ['keys', 'summary'] as const,
+  keyUsage: (id: number) => ['keys', 'usage', id] as const,
   /// 站点设置全表（键值卡片）；单个设置项走 `setting(key)`，两者分开失效。
   adminSettings: ['admin', 'settings'] as const,
   setting: (key: string) => ['setting', key] as const,
@@ -72,6 +73,7 @@ export const qk = {
   userOverview: (id: number) => ['admin', 'user-overview', id] as const,
   userUsage: (id: number) => ['admin', 'user-usage', id] as const,
   publicPricing: ['public-pricing'] as const,
+  catalog: (scope: string) => ['public-pricing', 'viewer', scope] as const,
   notice: ['public-notice'] as const,
   /// 站点聊天预设（公开，§11.39）。
   playgroundPresets: ['playground-presets'] as const,

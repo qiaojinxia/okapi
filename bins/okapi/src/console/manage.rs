@@ -39,8 +39,11 @@ pub async fn list_models(
     guard(&state, &headers, permissions::PRICING_READ).await?;
     let list =
         okapi_store::listing::list_models(&state.pg, q.keyword(), q.unpriced, q.slice()).await?;
+    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
+    let published = crate::gateway::pricing_loader::published_base_price(&state.pg, None).await?;
     Ok(Json(
-        json!({ "data": list.page.data, "total": list.page.total, "unpriced": list.unpriced }),
+        json!({ "data": list.page.data, "total": list.page.total, "unpriced": list.unpriced,
+            "base_price_per_1m_micro": base, "published_base_price_per_1m_micro": published }),
     ))
 }
 
@@ -117,7 +120,7 @@ pub async fn list_settings(
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::SETTINGS_READ).await?;
     let rows = okapi_store::listing::list_settings(&state.pg).await?;
-    let data: Vec<Value> = rows
+    let mut data: Vec<Value> = rows
         .into_iter()
         .map(|r| {
             let secret = is_secret_key(&r.key);
@@ -131,6 +134,14 @@ pub async fn list_settings(
             })
         })
         .collect();
+    let key = crate::gateway::pricing_loader::BASE_PRICE_SETTING;
+    let published = crate::gateway::pricing_loader::published_base_price(&state.pg, None).await?;
+    if let Some(row) = data.iter_mut().find(|r| r["key"] == key) {
+        row["published_value"] = json!(published);
+    } else {
+        data.push(json!({ "key": key, "value": okapi_pricing::book::BASE_PRICE_PER_1M_MICRO,
+            "published_value": published, "is_secret": false, "configured": false, "updated_at": null }));
+    }
     Ok(Json(json!({ "data": data })))
 }
 

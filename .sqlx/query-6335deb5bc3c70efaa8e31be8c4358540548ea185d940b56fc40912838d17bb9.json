@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT request_id,api_key_id,amount_micro,pool,source_window FROM billing_sync WHERE user_id=$1 ORDER BY created_at,request_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_sync",
+            "name": "request_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "api_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_sync",
+            "name": "api_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_sync",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "pool",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_sync",
+            "name": "pool"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "source_window",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_sync",
+            "name": "source_window"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "6335deb5bc3c70efaa8e31be8c4358540548ea185d940b56fc40912838d17bb9"
+}

@@ -22,6 +22,7 @@ pub mod codes {
     pub const STATS_DISABLED: &str = "stats_disabled";
     pub const PERMISSION_DENIED: &str = "permission_denied";
     pub const MEMBER_LIMIT_EXCEEDED: &str = "member_limit_exceeded";
+    pub const KEY_QUOTA_EXCEEDED: &str = "key_quota_exceeded";
     pub const NOT_FOUND: &str = "not_found";
     /// 用户给 key 选的分组不在其可选集合内（组可能存在，只是他没资格选）。
     pub const GROUP_NOT_SELECTABLE: &str = "group_not_selectable";

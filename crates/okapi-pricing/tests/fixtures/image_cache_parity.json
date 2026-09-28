@@ -1,0 +1,9 @@
+{
+  "source": "sub2api a3eb7ef302961cba716dc78b39b93b60c467db0e backend/internal/service/openai_images_direct_payload_test.go TestCodexDirectImagesPricingAndUsage",
+  "prices_usd_per_million": {"text": "5", "image": "8", "cached_text": "1.25", "cached_image": "2", "image_output": "30"},
+  "cases": [
+    {"input": 100, "image": 80, "cached": 50, "cached_image": 40, "output": 200, "micro": 6462},
+    {"input": 200, "image": 160, "cached": 100, "cached_image": 80, "output": 400, "micro": 12925}
+  ],
+  "rounding": "Okapi floors once to whole micro-USD after fixed-point modifiers; first case is 6462.5 micro before flooring."
+}

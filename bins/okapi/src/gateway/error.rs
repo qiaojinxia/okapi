@@ -152,6 +152,9 @@ impl From<StoreError> for AppError {
 impl From<LedgerError> for AppError {
     fn from(err: LedgerError) -> Self {
         match err {
+            LedgerError::KeyQuotaExceeded => {
+                Self::new(StatusCode::TOO_MANY_REQUESTS, codes::KEY_QUOTA_EXCEEDED)
+            }
             // 业务冲突（§11.28 激活期内换套餐）：409 + 当前套餐码
             LedgerError::SubscriptionActive(plan_code) => {
                 Self::new(StatusCode::CONFLICT, "subscription_active").with_param(plan_code)

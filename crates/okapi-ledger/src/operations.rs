@@ -51,7 +51,7 @@ pub async fn refund(
         tx.commit().await?;
         return Ok(None);
     };
-    let id = crate::transfers::enqueue(&mut tx, user_id, refund.amount, refund.pool).await?;
+    let id = crate::transfers::enqueue(&mut tx, user_id, refund.credit, refund.pool).await?;
     tx.commit().await?;
     let receipt = crate::transfers::finish(&mut guard, ledger, user_id, id, refund.pool).await;
     Ok(Some((refund, receipt)))

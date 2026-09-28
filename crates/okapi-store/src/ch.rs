@@ -150,7 +150,8 @@ impl ChClient {
     }
 
     /// 带绑定参数的查询：SQL 里写 `{name:String}` 占位，值经 `param_name=` 传递，
-    /// 由 ClickHouse 服务端完成类型解析与转义。
+    /// 标量值先按 HTTP 参数的 escaped 格式编码，再做 URL 编码；服务端解析类型。
+    /// 调用方传原始字符串，不预先转义（含字面量 `\N`）。
     ///
     /// 存在的理由是**日志检索要吃用户输入的字符串**（模型名/错误码/请求 ID）。
     /// 看板端点只拼 clamp 过的整数所以能用 `format!`，检索面不行——
@@ -163,7 +164,12 @@ impl ChClient {
         let mut url = format!("{}/?database={}&{}", self.base, self.database, QUERY_GUARD);
         for (name, value) in params {
             use std::fmt::Write as _;
-            let _ = write!(url, "&param_{}={}", urlencode(name), urlencode(value));
+            let _ = write!(
+                url,
+                "&param_{}={}",
+                urlencode(name),
+                urlencode(&escape_parameter(value))
+            );
         }
         let text = self.post(url, format!("{sql} FORMAT JSONEachRow")).await?;
         let mut rows = Vec::new();
@@ -178,6 +184,23 @@ impl ChClient {
         }
         Ok(rows)
     }
+}
+
+// ClickHouse HTTP parameters are parsed as escaped text *after* URL decoding.
+// Merely encoding a tab as %09 or a backslash as %5C changes/truncates the value.
+fn escape_parameter(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '\t' => escaped.push_str("\\t"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\0' => escaped.push_str("\\0"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 fn urlencode(input: &str) -> String {

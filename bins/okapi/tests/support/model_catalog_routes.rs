@@ -19,7 +19,7 @@ async fn routing(env: &Env) -> Groups {
             .execute(&env.pg)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO price_groups(group_code,group_ratio,pool_code) VALUES($1,1,$1)")
+        sqlx::query("INSERT INTO price_groups(group_code,group_ratio,pool_code,self_select) VALUES($1,1,$1,true)")
             .bind(code)
             .execute(&env.pg)
             .await

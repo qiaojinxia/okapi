@@ -67,12 +67,18 @@ pub async fn list(
             'usage', jsonb_build_object(
                 'prompt_tokens', b.prompt_tokens, 'cached_tokens', b.cached_tokens,
                 'completion_tokens', b.completion_tokens, 'reasoning_tokens', b.reasoning_tokens,
-                'cache_read_reported', COALESCE(b.cached_tokens > 0 OR (b.usage_details->'tokens'->>'cache_read_reported')::boolean, NULL),
+                'upstream_usage', b.usage_details->'tokens'->'upstream_usage',
+                'prompt_source', COALESCE(b.usage_details->>'prompt_source', 'unknown'),
+                'completion_source', COALESCE(b.usage_details->>'completion_source', 'unknown'),
+                'cache_read_reported', COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, NULLIF(b.cached_tokens > 0, false)),
                 'cache_write_reported', (b.usage_details->'tokens'->>'cache_write_reported')::boolean,
                 'cache_write_tokens', b.usage_details->'tokens'->'cache_write_tokens',
                 'audio_prompt_tokens', b.usage_details->'tokens'->'audio_prompt_tokens',
                 'image_prompt_tokens', b.usage_details->'tokens'->'image_prompt_tokens',
-                'audio_completion_tokens', b.usage_details->'tokens'->'audio_completion_tokens'
+                'audio_completion_tokens', b.usage_details->'tokens'->'audio_completion_tokens',
+                'image_completion_tokens', b.usage_details->'tokens'->'image_completion_tokens',
+                'cache_read_modalities', b.usage_details->'tokens'->'cache_read_modalities',
+                'cache_write_modalities', b.usage_details->'tokens'->'cache_write_modalities'
             ),
             'usage_details_recorded', b.usage_details IS NOT NULL,
             'requested_model', NULLIF(b.usage_details->>'requested_model', ''),
@@ -139,11 +145,11 @@ pub async fn stat(
             'prompt_tokens', COALESCE(SUM(b.prompt_tokens::bigint), 0),
             'completion_tokens', COALESCE(SUM(b.completion_tokens::bigint), 0),
             'cached_tokens', COALESCE(SUM(b.cached_tokens::bigint), 0),
-            'cache_read_samples', COUNT(*) FILTER (WHERE b.cached_tokens > 0 OR b.usage_details->'tokens'->>'cache_read_reported' = 'true'),
-            'avg_latency_ms', ROUND(AVG(b.latency_ms) FILTER (WHERE b.status IN (20,30) AND b.latency_ms >= 0)),
-            'latency_samples', COUNT(*) FILTER (WHERE b.status IN (20,30) AND b.latency_ms >= 0),
-            'avg_ttft_ms', ROUND(AVG(b.ttft_ms) FILTER (WHERE b.status IN (20,30) AND b.is_stream AND b.ttft_ms >= 0)),
-            'ttft_samples', COUNT(*) FILTER (WHERE b.status IN (20,30) AND b.is_stream AND b.ttft_ms >= 0)
+            'cache_read_samples', COUNT(*) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, b.cached_tokens > 0)),
+            'avg_latency_ms', FLOOR(AVG(b.latency_ms) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0)),
+            'latency_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0),
+            'avg_ttft_ms', FLOOR(AVG(b.ttft_ms) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)),
+            'ttft_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)
         )",
         &q,
         window.as_ref(),

@@ -57,19 +57,19 @@ for i, item in ipairs(manifest) do
         plans[#plans+1] = {field=field, key=KEYS[i+1], value=cjson.encode(wanted), phase=wanted.phase}
     end
 end
+local old_epoch = redis.call('HGET', KEYS[1], 'sub_epoch') or ''
+if (old_epoch ~= '' and not ledger_epoch(old_epoch)) or (ARGV[4] ~= '' and not ledger_epoch(ARGV[4])) then
+    return cjson.encode({error='invalid_reservation'})
+end
 local all = redis.call('HGETALL', KEYS[1])
 for i=1,#all,2 do
     local field = all[i]
     if string.sub(field,1,2) == 'r:' then
-        local parts = {}
-        for p in string.gmatch(all[i+1],'[^|]+') do parts[#parts+1]=p end
-        local amount = integer(parts[1])
-        local pool = parts[4] or '0'
-        if not amount or amount < 0 or (pool ~= '0' and pool ~= '1') then
-            return cjson.encode({error='invalid_reservation'})
+        local receipt = ledger_reservation(all[i+1])
+        if not receipt then return cjson.encode({error='invalid_reservation'}) end
+        if receipt.pool == 0 or not receipt.epoch or receipt.epoch == ARGV[4] then
+            frozen[receipt.pool] = frozen[receipt.pool] + receipt.amount
         end
-        local p = tonumber(pool)
-        frozen[p] = frozen[p] + amount
     elseif string.sub(field,1,2) == 'h:' and not known[field] then
         return cjson.encode({error='unknown_hold'})
     end

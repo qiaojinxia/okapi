@@ -19,11 +19,11 @@ local inflight = 0
 local all = redis.call('HGETALL', KEYS[1])
 for i = 1, #all, 2 do
     if string.sub(all[i], 1, 2) == 'r:' then
-        local parts = {}
-        for p in string.gmatch(all[i + 1], '[^|]+') do parts[#parts + 1] = p end
-        local pool = parts[4] or '0'
-        if pool == want_pool then
-            inflight = inflight + (tonumber(parts[1]) or 0)
+        local receipt = ledger_reservation(all[i+1])
+        if not receipt then return redis.error_reply('invalid_reservation') end
+        local epoch = redis.call('HGET', KEYS[1], 'sub_epoch') or ''
+        if tostring(receipt.pool) == want_pool and (not receipt.epoch or receipt.epoch == epoch) then
+            inflight = inflight + receipt.amount
         end
     elseif string.sub(all[i], 1, 2) == 'h:' then
         local hold = cjson.decode(all[i + 1])

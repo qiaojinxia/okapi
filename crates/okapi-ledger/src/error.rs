@@ -1,6 +1,8 @@
 /// 账本错误。任何账本错误都必须导致请求 fail-closed 拒绝（宁停不错账）。
 #[derive(Debug, thiserror::Error)]
 pub enum LedgerError {
+    #[error("key_quota_exceeded")]
+    KeyQuotaExceeded,
     #[error("ledger_redis_error: {0}")]
     Redis(#[from] fred::error::Error),
 

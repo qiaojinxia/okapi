@@ -25,6 +25,7 @@ pub(super) async fn settle(
         None
     };
     let input = SettlementInput {
+        source_window: None,
         dimensions: UsageDimensions::new(
             &row.model_name,
             &row.upstream_model,

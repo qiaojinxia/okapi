@@ -10,6 +10,43 @@ use okapi_pricing::{
 use okapi_store::pricing::{ModelPricingRow, PricingSourceRows, RuleRow, UserPricingRow};
 use sqlx::PgPool;
 
+pub const BASE_PRICE_SETTING: &str = "pricing_base_per_1m_micro";
+
+pub fn valid_base_price(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .filter(|v| (1..=book::MAX_BASE_PRICE_PER_1M_MICRO).contains(v))
+}
+
+fn parse_base_price(value: Option<serde_json::Value>) -> Result<i64, okapi_store::StoreError> {
+    match value {
+        None => Ok(book::BASE_PRICE_PER_1M_MICRO),
+        Some(value) => valid_base_price(&value).ok_or(okapi_store::StoreError::InvalidData(
+            "pricing_base_per_1m_micro",
+        )),
+    }
+}
+
+/// Settings are a draft; gateway startup/reloads must never activate an unpublished base.
+pub async fn draft_base_price(pool: &PgPool) -> Result<i64, okapi_store::StoreError> {
+    parse_base_price(
+        sqlx::query_scalar::<_, serde_json::Value>("SELECT value FROM settings WHERE key = $1")
+            .bind(BASE_PRICE_SETTING)
+            .fetch_optional(pool)
+            .await?,
+    )
+}
+
+pub async fn published_base_price(
+    pool: &PgPool,
+    epoch: Option<i64>,
+) -> Result<i64, okapi_store::StoreError> {
+    let value: Option<Option<serde_json::Value>> = sqlx::query_scalar(
+        "SELECT snapshot -> 'base_price_per_1m_micro' FROM pricing_epochs WHERE ($1::bigint IS NULL OR epoch = $1) ORDER BY epoch DESC LIMIT 1"
+    ).bind(epoch).fetch_optional(pool).await?;
+    parse_base_price(value.flatten())
+}
+
 fn fp(scaled: i64) -> Option<RatioFp> {
     RatioFp::from_scaled(scaled)
 }
@@ -24,6 +61,7 @@ fn row_to_mode(row: &ModelPricingRow) -> Option<PricingMode> {
             audio_ratio: fp(row.audio_ratio_scaled)?,
             audio_completion_ratio: fp(row.audio_completion_ratio_scaled)?,
             image_ratio: fp(row.image_ratio_scaled)?,
+            modality_ratios: okapi_pricing::ModalityRatios::parse(&row.modality_ratios).ok()?,
         }),
         "per_call" => Some(PricingMode::PerCall {
             price: Money::from_micros(row.per_call_price_micro?),
@@ -35,29 +73,39 @@ fn row_to_mode(row: &ModelPricingRow) -> Option<PricingMode> {
             audio_ratio: fp(row.audio_ratio_scaled)?,
             audio_completion_ratio: fp(row.audio_completion_ratio_scaled)?,
             image_ratio: fp(row.image_ratio_scaled)?,
+            modality_ratios: okapi_pricing::ModalityRatios::parse(&row.modality_ratios).ok()?,
             tiers: TierTable::parse(row.tier_expr.as_deref()?).ok()?,
         }),
         _ => None,
     }
 }
 
-fn row_to_override(row: &UserPricingRow) -> Option<OverrideSpec> {
+fn row_to_override(row: &UserPricingRow, model: Option<&ModelPricingRow>) -> Option<OverrideSpec> {
+    let cache_write = row
+        .custom_cache_write_ratio_scaled
+        .unwrap_or_else(|| model.map_or(1_000_000, |m| m.cache_write_ratio_scaled));
     match row.override_kind.as_str() {
         "ratio" => Some(OverrideSpec::Ratio(PricingMode::Ratio {
             model_ratio: fp(row.custom_model_ratio_scaled?)?,
             completion_ratio: fp(row.custom_completion_ratio_scaled.unwrap_or(1_000_000))?,
             cache_ratio: fp(row.custom_cache_ratio_scaled.unwrap_or(1_000_000))?,
-            cache_write_ratio: fp(row.custom_cache_write_ratio_scaled.unwrap_or(1_000_000))?,
+            cache_write_ratio: fp(cache_write)?,
             // 模态轴不做用户级覆盖：它表达"音频相对文本的倍数"，属模型固有属性
-            audio_ratio: RatioFp::ONE,
-            audio_completion_ratio: RatioFp::ONE,
-            image_ratio: RatioFp::ONE,
+            audio_ratio: fp(model.map_or(1_000_000, |m| m.audio_ratio_scaled))?,
+            audio_completion_ratio: fp(
+                model.map_or(1_000_000, |m| m.audio_completion_ratio_scaled)
+            )?,
+            image_ratio: fp(model.map_or(1_000_000, |m| m.image_ratio_scaled))?,
+            modality_ratios: match model {
+                Some(model) => okapi_pricing::ModalityRatios::parse(&model.modality_ratios).ok()?,
+                None => okapi_pricing::ModalityRatios::default(),
+            },
         })),
         "absolute" => Some(OverrideSpec::Absolute {
             input_per_1m: Money::from_micros(row.custom_input_per_1m_micro?),
             output_per_1m: Money::from_micros(row.custom_output_per_1m_micro?),
             cache_ratio: fp(row.custom_cache_ratio_scaled.unwrap_or(1_000_000))?,
-            cache_write_ratio: fp(row.custom_cache_write_ratio_scaled.unwrap_or(1_000_000))?,
+            cache_write_ratio: fp(cache_write)?,
         }),
         _ => None,
     }
@@ -205,9 +253,15 @@ pub fn build_source(rows: &PricingSourceRows) -> PriceBookSource {
         })
         .collect();
 
+    let model_rows: std::collections::HashMap<_, _> = rows
+        .models
+        .iter()
+        .map(|row| (row.model_name.as_str(), row))
+        .collect();
     let mut overrides = Vec::new();
     for row in &rows.overrides {
-        if let Some(spec) = row_to_override(row) {
+        let model = model_rows.get(row.model_name.as_str()).copied();
+        if let Some(spec) = row_to_override(row, model) {
             overrides.push(OverrideEntry {
                 user: UserId::new(row.user_id),
                 model: ModelCode::from(row.model_name.as_str()),
@@ -240,6 +294,62 @@ pub fn build_source(rows: &PricingSourceRows) -> PriceBookSource {
 pub async fn load_pricebook(pool: &PgPool) -> anyhow::Result<PriceBook> {
     let rows = okapi_store::pricing::load_pricing_source_rows(pool).await?;
     let source = build_source(&rows);
-    let compiled = book::compile(source).map_err(|e| anyhow::anyhow!("pricebook compile: {e}"))?;
+    let base = published_base_price(pool, Some(rows.epoch)).await?;
+    let compiled = book::compile_with_base(source, base)
+        .map_err(|e| anyhow::anyhow!("pricebook compile: {e}"))?;
     Ok(compiled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_only_prices_remain_available_without_a_base_model_price() {
+        for kind in ["ratio", "absolute"] {
+            let rows = PricingSourceRows {
+                epoch: 1,
+                models: vec![],
+                rules: vec![],
+                groups: vec![okapi_store::pricing::GroupRow {
+                    group_code: "default".into(),
+                    ratio_scaled: 1_000_000,
+                }],
+                overrides: vec![UserPricingRow {
+                    user_id: 1,
+                    model_name: "m".into(),
+                    override_kind: kind.into(),
+                    custom_model_ratio_scaled: Some(5_000_000),
+                    custom_completion_ratio_scaled: Some(4_000_000),
+                    custom_cache_ratio_scaled: Some(250_000),
+                    custom_cache_write_ratio_scaled: None,
+                    custom_input_per_1m_micro: Some(10_000_000),
+                    custom_output_per_1m_micro: Some(40_000_000),
+                }],
+            };
+            let book = book::compile(build_source(&rows)).unwrap();
+            let quote = okapi_pricing::calculate(
+                &book,
+                &okapi_pricing::CalcContext {
+                    user: UserId::new(1),
+                    model: "m".into(),
+                    group: "default".into(),
+                    user_multiplier: RatioFp::ONE,
+                    monthly_tokens: 0,
+                    monthly_spend_micro: 0,
+                    local_minute_of_day: 0,
+                    now_unix: 0,
+                    surge_active: false,
+                    service_tier: None,
+                },
+                okapi_domain::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    ..okapi_domain::TokenUsage::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(quote.amount.as_micros(), 50);
+        }
+    }
 }

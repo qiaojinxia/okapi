@@ -436,6 +436,52 @@ async fn outbound_settings_write_validation() {
 }
 
 #[tokio::test]
+async fn image_stream_usage_mode_is_validated_on_create_and_update() {
+    let env = setup().await;
+    for mode in [
+        json!("guess"),
+        json!(null),
+        json!(true),
+        json!(1),
+        json!({}),
+    ] {
+        let (status, error) = req(reqwest::Method::POST,env.console,"/admin/channels",&env.admin_token,Some(json!({
+            "name":format!("stream-{}",env.suffix),"provider":"openai","api_base":"https://api.openai.com/v1",
+            "credential":"fixture","models":[env.model],"settings":{"image_stream_usage":mode}
+        }))).await;
+        assert_eq!(status, 400);
+        assert_eq!(error["error"]["param"], "image_stream_usage");
+        let (status, error) = req(
+            reqwest::Method::PATCH,
+            env.console,
+            &format!("/admin/channels/{}", env.channel_id),
+            &env.admin_token,
+            Some(json!({"settings":{"image_stream_usage":mode}})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(error["error"]["param"], "image_stream_usage");
+    }
+    for mode in ["per_image", "cumulative"] {
+        let (status, result) = req(
+            reqwest::Method::PATCH,
+            env.console,
+            &format!("/admin/channels/{}", env.channel_id),
+            &env.admin_token,
+            Some(json!({"settings":{"image_stream_usage":mode}})),
+        )
+        .await;
+        assert_eq!(status, 200, "{result}");
+        let settings: Value = sqlx::query_scalar("SELECT settings FROM channels WHERE id=$1")
+            .bind(env.channel_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+        assert_eq!(settings["image_stream_usage"], mode);
+    }
+}
+
+#[tokio::test]
 // 接口清单逐资源验收，一体断言便于对照 §11.6
 #[allow(clippy::too_many_lines)]
 async fn admin_list_surface_covers_every_resource() {

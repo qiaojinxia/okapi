@@ -105,6 +105,7 @@ fn pricing_mode(spec: &ModelSpec) -> PricingMode {
             audio_ratio: ratio(spec.audio_ratio.as_deref().unwrap_or("1")),
             audio_completion_ratio: ratio(spec.audio_completion_ratio.as_deref().unwrap_or("1")),
             image_ratio: ratio(spec.image_ratio.as_deref().unwrap_or("1")),
+            modality_ratios: okapi_pricing::ModalityRatios::default(),
         },
         "per_call" => PricingMode::PerCall {
             price: Money::from_micros(
@@ -118,6 +119,7 @@ fn pricing_mode(spec: &ModelSpec) -> PricingMode {
             audio_ratio: ratio(spec.audio_ratio.as_deref().unwrap_or("1")),
             audio_completion_ratio: ratio(spec.audio_completion_ratio.as_deref().unwrap_or("1")),
             image_ratio: ratio(spec.image_ratio.as_deref().unwrap_or("1")),
+            modality_ratios: okapi_pricing::ModalityRatios::default(),
             tiers: TierTable::parse(spec.tiers.as_deref().unwrap()).unwrap(),
         },
         other => panic!("unknown pricing mode: {other}"),
@@ -272,6 +274,7 @@ fn snapshot_json_shape_matches_design() {
                 audio_ratio: RatioFp::ONE,
                 audio_completion_ratio: RatioFp::ONE,
                 image_ratio: RatioFp::ONE,
+                modality_ratios: okapi_pricing::ModalityRatios::default(),
             },
             tier_ratios: Vec::new(),
         }],
@@ -375,6 +378,7 @@ fn openai_image_input_ratio_parity() {
                     audio_ratio: ratio("1"),
                     audio_completion_ratio: ratio("1"),
                     image_ratio: ratio(image),
+                    modality_ratios: okapi_pricing::ModalityRatios::default(),
                 },
                 tier_ratios: Vec::new(),
             }],
@@ -435,6 +439,7 @@ fn openai_image_input_ratio_parity() {
 
 /// 而按官方价应收 178000 micro——音频场景漏收 80%。
 #[test]
+#[allow(clippy::too_many_lines)]
 fn openai_audio_official_pricing_parity() {
     let model_code = ModelCode::from("gpt-4o-audio-preview");
     let group_code = GroupCode::from("default");
@@ -451,6 +456,7 @@ fn openai_audio_official_pricing_parity() {
                     audio_ratio: ratio(audio),
                     audio_completion_ratio: ratio(audio_out),
                     image_ratio: ratio(image),
+                    modality_ratios: okapi_pricing::ModalityRatios::default(),
                 },
                 tier_ratios: Vec::new(),
             }],
@@ -578,6 +584,7 @@ fn anthropic_cache_write_is_billed_as_separate_segment() {
                     audio_ratio: RatioFp::ONE,
                     audio_completion_ratio: RatioFp::ONE,
                     image_ratio: RatioFp::ONE,
+                    modality_ratios: okapi_pricing::ModalityRatios::default(),
                 },
                 tier_ratios: Vec::new(),
             }],

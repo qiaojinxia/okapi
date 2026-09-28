@@ -70,7 +70,7 @@ export function Toolbar({
         className,
       )}
     >
-      <div className={cn('flex min-w-0 max-w-full flex-1 basis-96 flex-wrap items-center gap-3 [&>*]:max-w-full', filtersClassName)}>{filters}</div>
+      <div className={cn('flex min-w-0 max-w-full flex-1 basis-96 flex-wrap items-center gap-3', filtersClassName)}>{filters}</div>
       {selection !== undefined && (
         <div className={cn('flex min-w-0 max-w-full flex-wrap items-center gap-2', selectionClassName)}>{selection}</div>
       )}

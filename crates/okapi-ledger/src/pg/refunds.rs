@@ -5,6 +5,8 @@ use super::{LedgerError, Money, PgPool, Pool, SETTLEMENT_LOCK_NS, Uuid};
 pub struct AdminRefund {
     pub user_id: i64,
     pub amount: Money,
+    /// Spendable credit may be zero when the original subscription period ended.
+    pub credit: Money,
     /// 原请求由哪个池付：Redis 侧回补要回到同一池。
     pub pool: Pool,
 }
@@ -62,6 +64,13 @@ pub async fn admin_refund_in_tx(
         return Ok(None);
     };
     let pool = Pool::from_i16(rec.pool);
+    let expired =
+        crate::windows::expired_refund(tx, rec.user_id, pool, rec.source_window.as_deref()).await?;
+    let credit = if expired {
+        Money::ZERO
+    } else {
+        Money::from_micros(rec.amount_micro)
+    };
     if archived {
         sqlx::query!(
             "UPDATE billing_record_receipts SET status=30 WHERE request_id=$1 AND status=20",
@@ -93,6 +102,19 @@ pub async fn admin_refund_in_tx(
     .execute(&mut **tx)
     .await?;
 
+    if expired && rec.amount_micro != 0 {
+        crate::windows::revise_expiry(
+            tx,
+            rec.user_id,
+            request_id,
+            rec.amount_micro
+                .checked_neg()
+                .ok_or(LedgerError::InvalidSettlement)?,
+            rec.source_window.as_deref(),
+            "expired_window_admin_refund",
+        )
+        .await?;
+    }
     if pool == Pool::Wallet {
         sqlx::query!(
             r#"UPDATE users SET balance_micro = balance_micro + $2, updated_at = now() WHERE id = $1"#,
@@ -113,6 +135,22 @@ pub async fn admin_refund_in_tx(
         .await?;
     }
 
+    reverse_outbox(tx, request_id, &rec, pool).await?;
+
+    Ok(Some(AdminRefund {
+        user_id: rec.user_id,
+        amount: Money::from_micros(rec.amount_micro),
+        credit,
+        pool,
+    }))
+}
+
+async fn reverse_outbox(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request_id: Uuid,
+    rec: &RefundRecord,
+    pool: Pool,
+) -> Result<(), LedgerError> {
     // CH 负额冲销行（log_type=6 退款，对齐 new-api；token 事实保留不冲）
     sqlx::query!(
         r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.refunded', $1)"#,
@@ -148,12 +186,7 @@ pub async fn admin_refund_in_tx(
     )
     .execute(&mut **tx)
     .await?;
-
-    Ok(Some(AdminRefund {
-        user_id: rec.user_id,
-        amount: Money::from_micros(rec.amount_micro),
-        pool,
-    }))
+    Ok(())
 }
 
 struct RefundRecord {
@@ -170,6 +203,7 @@ struct RefundRecord {
     is_stream: bool,
     node: Option<String>,
     pool: i16,
+    source_window: Option<String>,
 }
 async fn refundable(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -178,7 +212,7 @@ async fn refundable(
     let live = sqlx::query_as!(
         RefundRecord,
         "SELECT user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,
-        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool
+        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,source_window
         FROM billing_records WHERE request_id=$1 AND status=20 FOR UPDATE",
         request_id
     )
@@ -190,7 +224,7 @@ async fn refundable(
     let archived = sqlx::query_as!(
         RefundRecord,
         "SELECT user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,
-        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool
+        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,source_window
         FROM billing_record_receipts WHERE request_id=$1 AND status=20 FOR UPDATE",
         request_id
     )

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT m.model_name,\n               p.pricing_mode,\n               (p.model_ratio * 1000000)::bigint AS model_ratio_scaled,\n               p.tier_ratios,\n               (p.completion_ratio * 1000000)::bigint AS \"completion_ratio_scaled!\",\n               (p.cache_ratio * 1000000)::bigint AS \"cache_ratio_scaled!\",\n               (p.cache_write_ratio * 1000000)::bigint AS \"cache_write_ratio_scaled!\",\n               (p.audio_ratio * 1000000)::bigint AS \"audio_ratio_scaled!\",\n               (p.audio_completion_ratio * 1000000)::bigint AS \"audio_completion_ratio_scaled!\",\n               (p.image_ratio * 1000000)::bigint AS \"image_ratio_scaled!\",\n               p.per_call_price_micro,\n               p.tier_expr\n        FROM model_pricing p\n        JOIN models m ON m.id = p.model_id\n        WHERE m.status = 1\n          AND (p.effective_from IS NULL OR p.effective_from <= now())\n        ",
+  "query": "\n        SELECT m.model_name,\n               p.pricing_mode,\n               (p.model_ratio * 1000000)::bigint AS model_ratio_scaled,\n               p.tier_ratios,\n               p.modality_ratios,\n               (p.completion_ratio * 1000000)::bigint AS \"completion_ratio_scaled!\",\n               (p.cache_ratio * 1000000)::bigint AS \"cache_ratio_scaled!\",\n               (p.cache_write_ratio * 1000000)::bigint AS \"cache_write_ratio_scaled!\",\n               (p.audio_ratio * 1000000)::bigint AS \"audio_ratio_scaled!\",\n               (p.audio_completion_ratio * 1000000)::bigint AS \"audio_completion_ratio_scaled!\",\n               (p.image_ratio * 1000000)::bigint AS \"image_ratio_scaled!\",\n               p.per_call_price_micro,\n               p.tier_expr\n        FROM model_pricing p\n        JOIN models m ON m.id = p.model_id\n        WHERE m.status = 1\n          AND (p.effective_from IS NULL OR p.effective_from <= now())\n        ",
   "describe": {
     "columns": [
       {
@@ -44,42 +44,53 @@
       },
       {
         "ordinal": 4,
+        "name": "modality_ratios",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "modality_ratios"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
         "name": "completion_ratio_scaled!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "cache_ratio_scaled!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "cache_write_ratio_scaled!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "audio_ratio_scaled!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "audio_completion_ratio_scaled!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "image_ratio_scaled!",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "per_call_price_micro",
         "type_info": "Int8",
         "origin": {
@@ -90,7 +101,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "tier_expr",
         "type_info": "Text",
         "origin": {
@@ -109,6 +120,7 @@
       false,
       null,
       true,
+      false,
       null,
       null,
       null,
@@ -119,5 +131,5 @@
       true
     ]
   },
-  "hash": "f6faf0b19cc8d2dcda7a62e65a94496c2501121d904ed30405bf93a30a34920f"
+  "hash": "25b404ff11f919a60aeb62506824d747d4ef058382b76dbd4b0ce31b527afb3d"
 }

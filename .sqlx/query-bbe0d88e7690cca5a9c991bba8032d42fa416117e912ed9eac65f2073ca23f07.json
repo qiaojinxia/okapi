@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO model_pricing\n            (model_id, pricing_mode, model_ratio, completion_ratio, cache_ratio,\n             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio, tier_expr, modality_ratios)\n        VALUES ($1, 'tiered', ($2::text)::numeric, ($3::text)::numeric, ($4::text)::numeric,\n                ($5::text)::numeric, ($6::text)::numeric, ($7::text)::numeric,\n                ($8::text)::numeric, $9, COALESCE($10, '{}'::jsonb))\n        ON CONFLICT (model_id) DO UPDATE SET\n            pricing_mode = 'tiered',\n            completion_ratio = EXCLUDED.completion_ratio,\n            cache_ratio = EXCLUDED.cache_ratio,\n            cache_write_ratio = EXCLUDED.cache_write_ratio,\n            audio_ratio = EXCLUDED.audio_ratio,\n            audio_completion_ratio = EXCLUDED.audio_completion_ratio,\n            image_ratio = EXCLUDED.image_ratio,\n            tier_expr = EXCLUDED.tier_expr,\n            modality_ratios = COALESCE($10, model_pricing.modality_ratios),\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bbe0d88e7690cca5a9c991bba8032d42fa416117e912ed9eac65f2073ca23f07"
+}

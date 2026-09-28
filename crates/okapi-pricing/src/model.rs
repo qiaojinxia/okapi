@@ -21,6 +21,7 @@ pub enum PricingMode {
         audio_completion_ratio: RatioFp,
         /// 图片输入倍率（缺省 1.0 = 按文本计）。
         image_ratio: RatioFp,
+        modality_ratios: crate::ModalityRatios,
     },
     /// 按次计费：`per_call_price × 分组 × 个人 × 规则`。
     PerCall { price: Money },
@@ -32,6 +33,7 @@ pub enum PricingMode {
         audio_ratio: RatioFp,
         audio_completion_ratio: RatioFp,
         image_ratio: RatioFp,
+        modality_ratios: crate::ModalityRatios,
         tiers: TierTable,
     },
 }

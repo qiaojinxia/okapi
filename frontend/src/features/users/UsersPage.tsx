@@ -90,22 +90,22 @@ export function UsersPage() {
       />
 
       <Toolbar
-        selectionClassName="max-w-sm break-words"
+        selectionClassName="break-words sm:max-w-sm"
         filters={
           <>
             <ToolbarSearch>
-            <SearchInput
-              id="u-search"
-              className="min-w-0 flex-1"
-              aria-label={t('admin:usersSearch')}
-              value={draft}
-              placeholder={t('admin:usersSearchHint')}
-              onChange={setDraft}
-              onSubmit={() => applySearch(draft)}
-            />
-            <Button size="sm" variant="outline" onClick={() => applySearch(draft)}>
-              {t('common:search')}
-            </Button>
+              <SearchInput
+                id="u-search"
+                className="min-w-0 flex-1"
+                aria-label={t('admin:usersSearch')}
+                value={draft}
+                placeholder={t('admin:usersSearchHint')}
+                onChange={setDraft}
+                onSubmit={() => applySearch(draft)}
+              />
+              <Button size="sm" variant="outline" onClick={() => applySearch(draft)}>
+                {t('common:search')}
+              </Button>
             </ToolbarSearch>
             {query !== '' && (
               <Button size="sm" variant="ghost" onClick={() => applySearch('')}>

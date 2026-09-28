@@ -113,15 +113,20 @@ new-api（及其上游 one-api、衍生的 one-hub/done-hub 等）已经把"倍�
 ### 3.2 统一计费公式
 
 ```
-基准价 base_unit = $2 / 1M tokens（与 new-api/one-api 对齐）
+基准价 base_unit = 已发布的 pricing_base_per_1m_micro / 1M tokens（micro-USD；默认 $2 / 1M，与 new-api/one-api 对齐）
 
 token 费用 = base_unit × model_ratio
            × ( prompt_uncached                              ← 常规文本输入（五段互斥）
-             + cached_tokens          × cache_ratio         ← 缓存读取（命中折扣）
-             + cache_write_tokens     × cache_write_ratio   ← 缓存写入（创建加价）
+             + cached_text()          × cache_ratio         ← 文本缓存读取
+             + cache_write_text()     × cache_write_ratio   ← 文本缓存写入
+             + cached_image           × image_cache_read    ← 图片缓存读取
+             + cached_audio           × audio_cache_read    ← 音频缓存读取
+             + written_image          × image_cache_write   ← 图片缓存写入
+             + written_audio          × audio_cache_write   ← 音频缓存写入
              + audio_prompt_tokens    × audio_ratio         ← 音频输入（官方 16×）
              + image_prompt_tokens    × image_ratio         ← 图片输入
-             + text_completion        × completion_ratio    ← 文本输出（两段互斥）
+             + text_completion        × completion_ratio    ← 文本输出
+             + image_completion_tokens× image_output        ← 图片输出
              + audio_completion_tokens× audio_out_ratio )   ← 音频输出（见下）
            × group_ratio
            × user_multiplier
@@ -158,11 +163,35 @@ gpt-4o-audio-preview 官方价为例（text in $2.5/1M、text out $10/1M、audio
 audio out $80/1M）：反解得 model_ratio=1.25、completion_ratio=4、audio_ratio=16、
 audio_completion_ratio=2。若不分轴而全按文本计，实测该场景漏收约 **80%**。
 
-**维度交叉的近似**：OpenAI 语义中"缓存"与"模态"是交叉维度（一段音频也可能被缓存命中），
-而计费需要互斥分段。本实现按互斥处理——音频/图片段先从 prompt 扣除，剩余再分
-常规/缓存读/缓存写。依据是当前各家缓存均只作用于文本（Anthropic cache_control 仅接受
-文本块、OpenAI 隐式缓存按文本前缀命中），交叉部分实测为 0；若未来上游开放多模态缓存，
-需改为二维矩阵定价并同步本节。
+**缓存与模态的交叉**：`cached_tokens` / `cache_write_tokens` 是包括模态子集的总量，
+`cache_read_modalities` / `cache_write_modalities` 保存其中的图片、音频计数，文本取余。
+`image_prompt_tokens` / `audio_prompt_tokens` 只计未缓存部分，不能再包含缓存子集。
+`modality_ratios` 的上述五项均相对文本输入价，以十进制字符串配置；显式配置优先，
+缺省缓存模态价为对应输入倍率 × 缓存读/写倍率（定点乘积 floor），图片输出缺省为
+`completion_ratio`，保留原有图片定价。仅计算实际发生的轴，未使用的轴不应因乘积溢出
+影响普通请求。实际使用的交叉价格和计数进入 `pricing_snapshot`，PG/outbox 同源。
+领域/引擎已支持矩阵；直接 Images 接口接入。Chat/Responses/Realtime 原探针仍有
+按缓存优先分配的旧路径，不能据此宣称全部协议的交叉用量已完整采集。
+
+**直接 Images API 的映射**：`input_tokens_details.text_tokens` 与 `image_tokens`
+之和必须等于 `input_tokens`，包括缓存部分。兼容上游的 `cached_tokens_details`
+明确拆分图文缓存；给总量和其中一个子集可唯一推导另一项，给两个子集可推导总量。
+混合图文只有非零缓存总量且不能唯一拆分时拒绝，不能默认为文本缓存；纯文本、纯图片、
+零缓存和全部输入已缓存时可唯一确定。缓存写入使用 `cache_write_tokens` 与
+`cache_write_tokens_details`，与读取分别校验，不得重叠或超过模态输入总量。
+若提供 `output_tokens_details`，按图文实际拆分；缺少该字段时沿用全部为图片输出的
+直接 Images 契约。`image_output` 独立配置图片输出，文本输出用 `completion_ratio`。
+按响应用量计算一次，不再乘 `n`，
+实际图片张数仅写入 `media_units`。`image_usage` 快照保存文本输入、图片输入和图片输出
+总计数，有文本输出时另存文本输出；`image_cache_usage` 保存图文读写缓存和采集状态。
+PG 用量、CH outbox 的总输入/输出同源。按张定价也采集上报用量，金额仍按
+成功张数计算。缺失用量与明确的零用量分别记录；Token 定价缺失/损坏用量返回 502 并退款。
+数值依据见 `tests/fixtures/image_cache_parity.json`：固定 Sub2API 图片样本在取整前
+为 6462.5 micro，Okapi 按既有整 micro 规则取 6462；双倍用量为整数 12925 micro。
+
+Token 预扣以 prompt UTF-8 字节数估计文本、每个输入图片/mask 引用 8192 Token、
+`models.max_output`（缺省 8192）乘请求张数估计输出；此估计用于余额/TPM 准入，
+不是实际用量或费用上限。实际结算使用请求开始时固定的价簿和规则上下文。
 
 **prompt 三段互斥（不可省的一段）**：`prompt_tokens` = 常规 + 缓存读 + 缓存写，
 `prompt_uncached = prompt − cached − cache_write`。缓存读打折（Anthropic 0.1×）与缓存写加价

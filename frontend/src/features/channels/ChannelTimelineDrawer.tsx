@@ -193,22 +193,44 @@ export function ChannelTimelineDrawer({
           <EmptyState hint={t('admin:timelineEmpty')} />
         ) : (
           <>
-            <div>
-              <p className="mb-1 text-xs font-medium text-muted-foreground">{t('admin:timelineRequests')}</p>
-              <div className="h-48">
+            <section aria-label={t('admin:timelineRequests')} className="rounded-xl border border-border bg-muted/10 p-3">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-medium">{t('admin:timelineRequests')}</p>
+                <dl className="flex flex-wrap items-center gap-2 text-xs tabular-nums">
+                  <div className="flex items-center gap-1.5 rounded-md bg-muted px-2 py-1">
+                    <dt className="text-muted-foreground">{t('admin:timelineTotal')}</dt>
+                    <dd className="font-semibold">{formatCount(total?.requests ?? 0, locale)}</dd>
+                  </div>
+                  <div className="flex items-center gap-1.5 rounded-md bg-primary/10 px-2 py-1 text-primary">
+                    <dt>{t('admin:timelineOk')}</dt>
+                    <dd className="font-semibold">{formatCount((total?.requests ?? 0) - (total?.errors ?? 0), locale)}</dd>
+                  </div>
+                  <div className={`flex items-center gap-1.5 rounded-md px-2 py-1 ${(total?.errors ?? 0) > 0 ? 'bg-destructive/10 text-destructive' : 'bg-muted text-muted-foreground'}`}>
+                    <dt>{t('logs:failed')}</dt>
+                    <dd className="font-semibold">{formatCount(total?.errors ?? 0, locale)}</dd>
+                  </div>
+                </dl>
+              </div>
+              <div className="h-48" data-slot="channel-requests-chart">
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={rows} barCategoryGap={1}>
+                  {/* 24h 有 289 个时间桶，固定两侧各 1px 的间距会吃掉几乎整根柱。
+                      保留时间粒度，取消桶间空隙并加同色描边，让低流量也清晰可见。 */}
+                  <BarChart data={rows} barCategoryGap={0} barGap={0} margin={{ top: 8, right: 4, left: -16, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
-                    <XAxis dataKey="bucket" fontSize={10} minTickGap={32} />
-                    <YAxis fontSize={10} allowDecimals={false} />
-                    <Tooltip contentStyle={{ fontSize: 12 }} />
+                    <XAxis dataKey="bucket" fontSize={10} minTickGap={32} tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={{ stroke: 'var(--color-border)' }} tickLine={false} />
+                    <YAxis fontSize={10} allowDecimals={false} domain={[0, (max: number) => Math.max(2, Math.ceil(max * 1.15))]} tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} />
+                    <Tooltip
+                      cursor={{ fill: 'var(--color-primary)', fillOpacity: 0.08 }}
+                      contentStyle={{ fontSize: 12, background: 'var(--color-card)', borderColor: 'var(--color-border)', borderRadius: 8 }}
+                      formatter={(v) => formatCount(Number(v), locale)}
+                    />
                     <Legend itemSorter={null} />
-                    <Bar dataKey="ok" name={t('admin:timelineOk')} stackId="r" fill="var(--color-primary)" isAnimationActive={false} />
-                    <Bar dataKey="errors" name={t('logs:failed')} stackId="r" fill="var(--color-destructive)" isAnimationActive={false} />
+                    <Bar dataKey="ok" name={t('admin:timelineOk')} stackId="r" fill="var(--color-primary)" stroke="var(--color-primary)" strokeWidth={0.75} isAnimationActive={false} />
+                    <Bar dataKey="errors" name={t('logs:failed')} stackId="r" fill="var(--color-destructive)" stroke="var(--color-destructive)" strokeWidth={0.75} isAnimationActive={false} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
-            </div>
+            </section>
             <div>
               <p className="mb-1 text-xs font-medium text-muted-foreground">{t('admin:timelineTtft')}</p>
               <div className="h-40">

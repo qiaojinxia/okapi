@@ -21,7 +21,7 @@ pub(crate) fn image_response_limit(path: &str) -> Option<usize> {
     matches!(path, "/images/generations" | "/images/edits").then_some(MAX_IMAGE_RESPONSE_BYTES)
 }
 
-async fn response_bytes(
+pub(crate) async fn response_bytes(
     mut response: reqwest::Response,
     limit: Option<usize>,
 ) -> Result<Bytes, UpstreamError> {

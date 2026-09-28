@@ -165,7 +165,8 @@ async fn largest_safe_integers_and_zero_cost_admit_exactly() -> TestResult {
         bed.ledger.reserve(bed.request, bed.now).await?,
         ReserveOutcome::Reserved {
             balance_after: Money::ZERO,
-            pool: Pool::Wallet
+            pool: Pool::Wallet,
+            source_window: None,
         }
     ));
     assert_eq!(

@@ -8,6 +8,7 @@ fn group(code: &str, pool: &str, fallback: Option<&str>) -> Group {
         ratio: "1.000000".into(),
         pool_code: pool.into(),
         self_select: false,
+        is_default: false,
         fallback_pool_code: fallback.map(str::to_owned),
     }
 }
@@ -83,6 +84,6 @@ fn orphan_visibility_and_public_group_serialization_keep_contract() {
     );
     assert_eq!(
         serde_json::to_value(&groups[0]).unwrap(),
-        json!({"code": "public", "name": null, "ratio": "1.000000", "self_select": false})
+        json!({"code": "public", "name": null, "ratio": "1.000000", "self_select": false, "is_default": false})
     );
 }

@@ -35,6 +35,7 @@ pub(super) struct Selection {
 
 #[derive(Default)]
 pub(super) struct Filter {
+    pub user_id: Option<i64>,
     pattern: Option<String>,
     vendor: Option<String>,
     capability: Option<String>,
@@ -93,6 +94,7 @@ impl CatalogQuery {
             )?,
             vendor_pattern: pattern(trimmed(self.vendor_q, 128, "vendor_q")?),
             filter: Filter {
+                user_id: None,
                 pattern: pattern(trimmed(self.q, 256, "q")?),
                 vendor: trimmed(self.vendor, 128, "vendor")?,
                 model: trimmed(self.model, 256, "model")?,
@@ -118,11 +120,11 @@ pub(super) async fn models(
         p.model_ratio::text AS model_ratio, p.completion_ratio::text AS completion_ratio,
         p.cache_ratio::text AS cache_ratio, p.cache_write_ratio::text AS cache_write_ratio,
         p.audio_ratio::text AS audio_ratio, p.audio_completion_ratio::text AS audio_completion_ratio,
-        p.image_ratio::text AS image_ratio, p.per_call_price_micro
+        p.image_ratio::text AS image_ratio, p.modality_ratios, p.per_call_price_micro
         ",
     );
     sql.push(FROM)
-        .push(" ORDER BY m.sort_order, m.model_name LIMIT $7 OFFSET $8");
+        .push(" ORDER BY m.sort_order, m.model_name LIMIT $8 OFFSET $9");
     Ok(sql
         .build_query_as()
         .bind(&filter.pattern)
@@ -131,6 +133,7 @@ pub(super) async fn models(
         .bind(&filter.model)
         .bind(&filter.group)
         .bind(filter.endpoint)
+        .bind(filter.user_id)
         .bind(slice.capped_limit())
         .bind(slice.offset)
         .fetch_all(conn)
@@ -168,6 +171,7 @@ pub(super) async fn metadata(
         .bind(&filter.model)
         .bind(&filter.group)
         .bind(filter.endpoint)
+        .bind(filter.user_id)
         .fetch_one(&mut *conn)
         .await
         .map_err(okapi_store::StoreError::from)?;
@@ -194,6 +198,7 @@ async fn vendors(
         .bind(&filter.model)
         .bind(&filter.group)
         .bind(filter.endpoint)
+        .bind(filter.user_id)
         .bind(&selection.vendor_pattern)
         .fetch_one(&mut *conn)
         .await
@@ -207,6 +212,7 @@ async fn vendors(
         .bind(&filter.model)
         .bind(&filter.group)
         .bind(filter.endpoint)
+        .bind(filter.user_id)
         .bind(&selection.vendor_pattern)
         .bind(selection.vendor_slice.capped_limit())
         .bind(selection.vendor_slice.offset)
@@ -221,11 +227,11 @@ fn vendor_sql(count: bool) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut sql = sqlx::QueryBuilder::new(if count { "SELECT COUNT(*) FROM (" } else { "" });
     sql.push("SELECT NULLIF(lower(btrim(m.vendor)), '') AS vendor, COUNT(*) AS count ")
         .push(FROM)
-        .push(r" AND ($7::text IS NULL OR m.vendor ILIKE $7 ESCAPE E'\\') GROUP BY 1");
+        .push(r" AND ($8::text IS NULL OR m.vendor ILIKE $8 ESCAPE E'\\') GROUP BY 1");
     sql.push(if count {
         ") facets"
     } else {
-        " ORDER BY 1 NULLS LAST LIMIT $8 OFFSET $9"
+        " ORDER BY 1 NULLS LAST LIMIT $9 OFFSET $10"
     });
     sql
 }

@@ -1,9 +1,9 @@
 import { getRouteApi, Link } from '@tanstack/react-router'
-import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Boxes, ChevronDown, LayoutGrid, List, Moon, SlidersHorizontal, Sun, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { CatalogSearch, PricingGroup, PricingModel, TokenUnit } from './types'
+import type { CatalogSearch, PricingGroup, TokenUnit } from './types'
+import { useCatalog } from './use-catalog'
 import { compareModels, isAvailable, modelCapabilities, modelVendor, nonnegative } from './catalog-data'
 import { VendorIcon } from './VendorIcon'
 import { ModelCard, ModelTableRow } from './ModelCatalogItem'
@@ -17,10 +17,9 @@ import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Th, Tr } from '@/components/ui/table'
-import { apiFetch, getKey } from '@/lib/api'
+import { getKey } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
-import { qk } from '@/lib/query-keys'
 import { useTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 
@@ -39,11 +38,16 @@ export function PublicPricingPage() {
     const resetPage = ['q', 'vendor', 'group', 'mode', 'capability', 'available', 'sort', 'pageSize'].some((key) => key in values)
     void navigate({ search: (old) => ({ ...old, ...(resetPage ? { page: undefined } : {}), ...values }), replace, resetScroll: false })
   }
-  const group = search.group ?? ''
   const unit: TokenUnit = search.unit ?? '1M'
-  const pricing = useQuery({ queryKey: qk.publicPricing, queryFn: () => apiFetch<{ models: PricingModel[]; groups: PricingGroup[] }>('/api/pricing') })
-  const groups = pricing.data?.groups ?? []
-  const allModels = pricing.data?.models ?? []
+  const pricing = useCatalog()
+  const groups = pricing.isSuccess ? pricing.data.groups : []
+  const allModels = pricing.isSuccess ? pricing.data.models : []
+  const group = groups.some((g) => g.code === search.group) ? search.group! : ''
+  useEffect(() => {
+    if (pricing.isSuccess && search.group && !pricing.data.groups.some((g) => g.code === search.group)) {
+      void navigate({ search: (old) => ({ ...old, group: undefined, page: undefined }), replace: true, resetScroll: false })
+    }
+  }, [pricing.isSuccess, pricing.data, search.group, navigate])
   const groupInfo = groups.find((g) => g.code === group)
   const factor = group ? nonnegative(groupInfo?.ratio) : 1
   const query = search.q?.trim().toLowerCase() ?? ''
@@ -134,9 +138,9 @@ export function PublicPricingPage() {
           <div className="flex flex-wrap items-end justify-between gap-3 rounded-xl border border-border bg-card p-3 sm:p-4">
             <div className="flex min-w-0 max-w-full flex-col gap-1.5"><Label htmlFor="catalog-group">{t('pricing:viewAsGroup')}</Label>
               <Select id="catalog-group" className="w-64 max-w-full" value={group} onChange={(group) => patch({ group: group || undefined })} placeholder={t('pricing:baseGroup')}
-                options={[...groups.map((g) => ({ value: g.code, label: `${groupName(g)} ×${formatRatio(g.ratio)}` })), ...(group && !groupInfo ? [{ value: group, label: `${group} · ${t('catalog:missingGroup')}` }] : [])]} /></div>
+                disabled={!pricing.isSuccess} options={groups.map((g) => ({ value: g.code, label: `${groupName(g)} ×${formatRatio(g.ratio)}` }))} /></div>
             <div className="flex flex-col gap-1.5"><Label>{t('catalog:currencyUnit')}</Label><Segmented ariaLabel={t('pricing:tokenUnit')} value={unit} onChange={(unit) => patch({ unit: unit === '1M' ? undefined : unit })} options={[{ value: '1M', label: '1M tokens' }, { value: '1K', label: '1K tokens' }]} /></div>
-            <p className="w-full text-xs leading-5 text-muted-foreground">{t('catalog:priceNote')}</p>
+            <p className="w-full text-xs leading-5 text-muted-foreground">{t(signedIn ? 'catalog:myGroupsHint' : 'catalog:publicGroupsHint')} {t('catalog:priceNote')}</p>
           </div>
           </div>
           {pricing.isError ? <div className="mt-5"><ErrorState message={describeError(pricing.error)} onRetry={() => void pricing.refetch()} /></div> : pricing.isPending ? <LoadingState /> : <>

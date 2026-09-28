@@ -15,12 +15,15 @@ pub mod channel_balance;
 pub mod channel_oauth;
 mod cloud_probe;
 pub mod dlq;
+mod key_copy;
+mod latency;
 pub mod logs;
 pub mod manage;
 pub mod margin;
 pub mod mcp;
 pub mod oauth;
 pub mod pay;
+mod performance_source;
 pub mod playground;
 pub mod portal;
 pub mod query;
@@ -31,6 +34,8 @@ pub mod ssrf;
 pub mod stats;
 pub mod subscriptions;
 pub mod teams;
+mod ttft;
+mod ttft_average;
 pub(crate) mod usage_details;
 
 use crate::config::Config;
@@ -415,6 +420,7 @@ fn auth_routes() -> ConsoleRouter {
         .route("/auth/totp/enroll", post(auth_web::totp_enroll))
         .route("/auth/totp/confirm", post(auth_web::totp_confirm))
         .route("/auth/keys", post(auth_web::create_key))
+        .route("/auth/keys/{id}/copy", post(key_copy::copy))
         .route("/auth/oauth-providers", get(oauth::list_providers))
         .route("/auth/oauth/{provider}", get(oauth::start))
         .route("/auth/oauth/{provider}/callback", get(oauth::callback))

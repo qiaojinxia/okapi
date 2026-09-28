@@ -9,7 +9,6 @@ use crate::types::ChatEvent;
 use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
-use okapi_api::UsageProbe;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -195,11 +194,7 @@ pub async fn send_messages_at(
 /// usage 口径与 convert::openai_to_anthropic 一致：prompt 含缓存读写，cached=cache_read。
 #[derive(Default)]
 pub struct MetaScanner {
-    input_tokens: u32,
-    cache_read: u32,
-    cache_creation: u32,
-    cache_read_reported: bool,
-    cache_write_reported: bool,
+    usage: crate::anthropic_usage::StreamUsage,
 }
 
 impl MetaScanner {
@@ -220,27 +215,8 @@ impl MetaScanner {
         let data: serde_json::Value = serde_json::from_str(&ev.data).unwrap_or_default();
         let mut has_output = false;
         let mut content_chars = 0usize;
-        let mut usage: Option<UsageProbe> = None;
+        let usage = self.usage.observe(&ev.event, &data);
         match ev.event.as_str() {
-            "message_start" => {
-                let get = |k: &str| {
-                    data.get("message")
-                        .and_then(|m| m.get("usage"))
-                        .and_then(|u| u.get(k))
-                        .and_then(serde_json::Value::as_u64)
-                        .and_then(|v| u32::try_from(v).ok())
-                        .unwrap_or(0)
-                };
-                self.input_tokens = get("input_tokens");
-                self.cache_read = get("cache_read_input_tokens");
-                self.cache_creation = get("cache_creation_input_tokens");
-                let details = crate::convert::openai_to_anthropic::usage_from_anthropic(
-                    data.get("message").and_then(|m| m.get("usage")),
-                )
-                .prompt_tokens_details;
-                self.cache_read_reported = details.cache_read_reported;
-                self.cache_write_reported = details.cache_write_reported;
-            }
             "content_block_start" => {
                 has_output = data
                     .get("content_block")
@@ -256,35 +232,6 @@ impl MetaScanner {
                         .filter_map(|k| d.get(k).and_then(serde_json::Value::as_str))
                         .map(|s| s.chars().count())
                         .sum()
-                });
-            }
-            "message_delta" => {
-                let output = data
-                    .get("usage")
-                    .and_then(|u| u.get("output_tokens"))
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|v| u32::try_from(v).ok())
-                    .unwrap_or(0);
-                usage = Some(UsageProbe {
-                    prompt_tokens: self
-                        .input_tokens
-                        .saturating_add(self.cache_read)
-                        .saturating_add(self.cache_creation),
-                    completion_tokens: output,
-                    prompt_tokens_details: okapi_api::PromptTokensDetails {
-                        cached_tokens: self.cache_read,
-                        // 缓存写入独立成段：官方 1.25×@5m TTL，混入常规输入段会漏计费
-                        cache_write_tokens: self.cache_creation,
-                        cache_read_reported: self.cache_read_reported,
-                        cache_write_reported: self.cache_write_reported,
-                        // Anthropic 无模态细分：图片计入 input_tokens，音频不支持
-                        audio_tokens: 0,
-                        image_tokens: 0,
-                    },
-                    completion_tokens_details: okapi_api::CompletionTokensDetails {
-                        reasoning_tokens: 0,
-                        audio_tokens: 0,
-                    },
                 });
             }
             "error" => {

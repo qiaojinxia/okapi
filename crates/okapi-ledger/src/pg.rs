@@ -79,13 +79,16 @@ pub struct SettlementInput<'a> {
     /// 这笔由哪个池付（IMPLEMENTATION §11.28）：records / events / outbox 三处同写；
     /// `users.balance_micro` 快照只随钱包池动。
     pub pool: Pool,
+    /// Immutable subscription window selected at admission; None for wallet/legacy.
+    pub source_window: Option<String>,
 }
 
 /// `record_settlement` 的 advisory lock 命名空间（"SETL"）。
 const SETTLEMENT_LOCK_NS: i32 = 0x5345_544C;
 
-fn token_i32(v: u32) -> i32 {
-    i32::try_from(v).unwrap_or(i32::MAX)
+fn token_i32(v: u32) -> Result<i32, LedgerError> {
+    // Never persist a clamped count while outbox and usage_details keep the original.
+    i32::try_from(v).map_err(|_| LedgerError::InvalidSettlement)
 }
 
 /// 单事务落账（IMPLEMENTATION §2.2 步骤 13：记录 + 事件 + 快照列 + outbox）。
@@ -149,7 +152,7 @@ pub async fn record_settlement_in_tx(
             pricing_epoch, pricing_snapshot,
             latency_ms, ttft_ms, is_stream, retry_count, failover_count,
             upstream_status, error_code, node, sticky_layer, client_type,
-            upstream_cost_micro, client_ip, pool, usage_details
+            upstream_cost_micro, client_ip, pool, usage_details, source_window
         ) VALUES (
             $1, $2, $3, $4, $5,
             $6, $7, $8, $9, $10,
@@ -161,7 +164,7 @@ pub async fn record_settlement_in_tx(
             -- client_ip 是 INET。写成 $31::text::inet 而非 $31::inet：后者会让 PG 把入参
             -- 类型报成 inet，sqlx 就要求打开 ipnetwork feature——为一列拉一整套网络类型
             -- 不值当。先按 text 绑定再转，值只可能来自 `clients::client_ip`（已 parse 过）。
-            $30, $31::text::inet, $32, $33
+            $30, $31::text::inet, $32, $33, $34
         )
         ",
     )
@@ -175,10 +178,10 @@ pub async fn record_settlement_in_tx(
     .bind(input.channel_id)
     .bind(input.channel_key_id)
     .bind(input.state.as_i16())
-    .bind(token_i32(input.usage.prompt_tokens))
-    .bind(token_i32(input.usage.cached_tokens))
-    .bind(token_i32(input.usage.completion_tokens))
-    .bind(token_i32(input.usage.reasoning_tokens))
+    .bind(token_i32(input.usage.prompt_tokens)?)
+    .bind(token_i32(input.usage.cached_tokens)?)
+    .bind(token_i32(input.usage.completion_tokens)?)
+    .bind(token_i32(input.usage.reasoning_tokens)?)
     .bind(input.amount.as_micros())
     .bind(input.original.as_micros())
     .bind(input.discount.as_micros())
@@ -199,9 +202,12 @@ pub async fn record_settlement_in_tx(
     .bind(input.pool.as_i16())
     .bind(serde_json::json!({
         "tokens": input.usage,
+        "prompt_source": input.usage.prompt_source(),
+        "completion_source": input.usage.completion_source(),
         "requested_model": input.dimensions.requested_model,
         "endpoint": input.dimensions.endpoint,
     }))
+    .bind(&input.source_window)
     .execute(&mut **tx)
     .await?;
 
@@ -224,6 +230,7 @@ pub async fn record_settlement_in_tx(
             "billing_type": input.pricing_snapshot.as_ref().and_then(|s| s.get("mode")).and_then(serde_json::Value::as_str),
             "upstream_cost_known": input.upstream_cost.is_some(),
             "amount_micro": input.amount.as_micros(),
+            "source_window": input.source_window,
             "error_code": input.error_code,
         }),
         input.pool.as_i16()
@@ -252,7 +259,7 @@ pub async fn record_settlement_in_tx(
 
     sqlx::query!(
         r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.completed', $1)"#,
-        serde_json::json!({
+        with_usage_source(serde_json::json!({
             "request_id": input.request_id,
             "user_id": input.user_id,
             "api_key_id": input.api_key_id,
@@ -294,7 +301,7 @@ pub async fn record_settlement_in_tx(
             "client_type": input.client_type,
             "client_ip": input.client_ip,
             "pool": input.pool.as_i16(),
-        })
+        }), input.usage)
     )
     .execute(&mut **tx)
     .await?;
@@ -384,4 +391,11 @@ pub async fn record_credit_in_tx(
         return Err(LedgerError::UserNotFound);
     }
     Ok(())
+}
+
+fn with_usage_source(mut payload: serde_json::Value, usage: TokenUsage) -> serde_json::Value {
+    payload["upstream_usage"] = serde_json::json!(usage.upstream_usage);
+    payload["prompt_source"] = usage.prompt_source().into();
+    payload["completion_source"] = usage.completion_source().into();
+    payload
 }

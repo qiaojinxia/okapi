@@ -199,17 +199,17 @@ export function AuditPage() {
               />
             </div>
             <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-            <Segmented
-              options={HOURS.map((h) => ({ value: h, label: hoursLabel(h) }))}
-              value={draft.hours}
-              onChange={(h) => submit({ ...draft, hours: h })}
-              size="sm"
-              ariaLabel={t('admin:logsRange')}
-              className="md:h-9"
-            />
-            <Button size="sm" variant="outline" onClick={() => submit(draft)}>
-              {t('common:search')}
-            </Button>
+              <Segmented
+                options={HOURS.map((h) => ({ value: h, label: hoursLabel(h) }))}
+                value={draft.hours}
+                onChange={(h) => submit({ ...draft, hours: h })}
+                size="sm"
+                ariaLabel={t('admin:logsRange')}
+                className="md:h-9"
+              />
+              <Button size="sm" variant="outline" onClick={() => submit(draft)}>
+                {t('common:search')}
+              </Button>
             </div>
           </>
         }

@@ -51,6 +51,12 @@ pub struct AppliedRule {
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingSnapshot {
     pub epoch: i64,
+    /// Effective normalization base for this bill; absent on historical/per-call records.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "ser_usd_opt"
+    )]
+    pub base_price_per_1m_usd: Option<Money>,
     /// ratio / per_call / tiered。
     pub mode: &'static str,
     #[serde(
@@ -92,6 +98,15 @@ pub struct PricingSnapshot {
         serialize_with = "ser_ratio_opt"
     )]
     pub image_ratio: Option<RatioFp>,
+    /// Effective independent prices used for cache/modal intersections and image output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modality_ratios: Option<crate::ModalityRatios>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_read_modalities: Option<okapi_domain::CacheModalities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_write_modalities: Option<okapi_domain::CacheModalities>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_completion_tokens: Option<u32>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "ser_usd_opt"
@@ -111,7 +126,7 @@ pub struct PricingSnapshot {
     #[serde(serialize_with = "ser_ratio")]
     pub user_multiplier: RatioFp,
     pub rules: Vec<AppliedRule>,
-    /// 媒体单位数（图像张数等；per_call × n 的乘数，M3 媒体计费）。
+    /// 媒体单位数。按张收费时作为乘数；Images Token 定价时仅记录成功张数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_units: Option<u32>,
     #[serde(

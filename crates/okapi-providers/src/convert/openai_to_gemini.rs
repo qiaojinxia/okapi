@@ -12,7 +12,7 @@ use crate::openai::{ChatResponse, StreamHandle};
 use crate::types::ChatEvent;
 use bytes::Bytes;
 use futures::StreamExt;
-use okapi_api::{CompletionTokensDetails, PromptTokensDetails, UsageProbe};
+use okapi_api::UsageProbe;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 
@@ -284,12 +284,12 @@ pub fn response_gemini_to_openai(
             "message": Value::Object(message),
             "finish_reason": map_finish(finish, !tool_calls.is_empty()),
         }],
-        "usage": usage_json(usage),
+        "usage": usage.map(usage_json),
     });
     let bytes = serde_json::to_vec(&out)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
-    Ok((bytes, Some(usage)))
+    Ok((bytes, usage))
 }
 
 /// candidates[0].content.parts → (可见文本, thought 文本, tool_calls)。
@@ -341,46 +341,12 @@ fn map_finish(finish: Option<&str>, has_tools: bool) -> &'static str {
 
 /// Gemini `usageMetadata` → OpenAI 口径探针（gemini 入口透传扫描器复用同一口径）。
 #[must_use]
-pub fn usage_from_gemini(meta: Option<&Value>) -> UsageProbe {
-    let get = |k: &str| {
-        meta.and_then(|m| m.get(k))
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(0)
-    };
-    let thoughts = get("thoughtsTokenCount");
-    UsageProbe {
-        // promptTokenCount 已含 cachedContentTokenCount
-        prompt_tokens: get("promptTokenCount"),
-        completion_tokens: get("candidatesTokenCount").saturating_add(thoughts),
-        prompt_tokens_details: PromptTokensDetails {
-            cached_tokens: get("cachedContentTokenCount"),
-            cache_read_reported: meta
-                .and_then(|m| m.get("cachedContentTokenCount"))
-                .and_then(Value::as_u64)
-                .is_some_and(|v| u32::try_from(v).is_ok()),
-            cache_write_reported: false,
-            // Gemini 显式缓存的创建走独立的 cachedContents API 计费，不在生成响应的 usage 里
-            cache_write_tokens: 0,
-            // Gemini 的 promptTokensDetails 是带 modality 的数组，解析待接入
-            audio_tokens: 0,
-            image_tokens: 0,
-        },
-        completion_tokens_details: CompletionTokensDetails {
-            reasoning_tokens: thoughts,
-            audio_tokens: 0,
-        },
-    }
+pub fn usage_from_gemini(meta: Option<&Value>) -> Option<UsageProbe> {
+    super::gemini_usage::parse(meta)
 }
 
 fn usage_json(u: UsageProbe) -> Value {
-    json!({
-        "prompt_tokens": u.prompt_tokens,
-        "completion_tokens": u.completion_tokens,
-        "total_tokens": u.prompt_tokens + u.completion_tokens,
-        "prompt_tokens_details": u.prompt_tokens_details.cache_json(),
-        "completion_tokens_details": {"reasoning_tokens": u.completion_tokens_details.reasoning_tokens},
-    })
+    u.chat_json()
 }
 
 // ---- 流式转换 ----
@@ -490,13 +456,13 @@ impl GeminiStreamState {
                     "created": self.created,
                     "model": self.model,
                     "choices": [],
-                    "usage": usage_json(usage),
+                    "usage": usage.map(usage_json),
                 })
                 .to_string(),
                 event: None,
                 has_output: false,
                 content_chars: 0,
-                usage: Some(usage),
+                usage,
             }));
             out.push(Ok(ChatEvent::Done));
         }

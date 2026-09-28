@@ -123,9 +123,11 @@ async fn handle_create(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    let reservation_pool = match state
+    let (reservation_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -138,7 +140,11 @@ async fn handle_create(
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -238,6 +244,7 @@ async fn handle_create(
                     failover,
                     headers,
                     reservation_pool,
+                    source_window.as_deref(),
                 )
                 .await?;
                 let out = Response::builder()
@@ -414,9 +421,11 @@ async fn commit_and_record(
     failover: i16,
     headers: &HeaderMap,
     reservation_pool: okapi_ledger::Pool,
+    source_window: Option<&str>,
 ) -> Result<(), AppError> {
     let book = state.pricebook.load();
     let input = SettlementInput {
+        source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             requested_model,
             cand.upstream_model(canonical),

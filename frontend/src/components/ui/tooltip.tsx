@@ -66,7 +66,11 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
   // 页面滚动、离开控件或 Escape 收起；提示本身可悬停阅读。
   useEffect(() => {
     if (!visible) return
-    const scroll = (e: Event) => { if (!popup.current?.contains(e.target as Node)) hide() }
+    const scroll = (e: Event) => {
+      // Keyboard focus can scroll a wide table into view. Keep that focused
+      // control's description open; the position loop follows its new location.
+      if (!popup.current?.contains(e.target as Node) && !anchor.current?.contains(document.activeElement)) hide()
+    }
     const outside = (e: PointerEvent) => { if (!anchor.current?.contains(e.target as Node) && !popup.current?.contains(e.target as Node)) hide() }
     const escape = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.isComposing || e.defaultPrevented) return

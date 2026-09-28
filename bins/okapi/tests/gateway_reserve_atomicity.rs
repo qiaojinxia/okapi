@@ -20,6 +20,8 @@ use uuid::Uuid;
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[path = "support/gateway_settlement_atomicity.rs"]
 mod settlement;
+#[path = "support/gateway_subscription_windows.rs"]
+mod windows;
 
 #[derive(Default)]
 struct SettlementGate {
@@ -71,6 +73,9 @@ async fn upstream(
         )
             .into_response();
     }
+    if mode == 4 {
+        return axum::Json(json!({"data":[{"b64_json":"iVBORw0KGgpmaXh0dXJl"}]})).into_response();
+    }
     axum::Json(json!({"id":"cmpl","object":"chat.completion",
         "choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}],
         "usage":{"prompt_tokens":10,"completion_tokens":2}}))
@@ -88,11 +93,15 @@ async fn serve(app: Router) -> TestResult<SocketAddr> {
 
 impl Bed {
     async fn new(subscription: bool) -> TestResult<Self> {
-        use sha2::{Digest, Sha256};
         dotenvy::dotenv().ok();
         let database = std::env::var("DATABASE_URL")?;
+        Self::new_at(subscription, &database).await
+    }
+
+    async fn new_at(subscription: bool, database: &str) -> TestResult<Self> {
+        use sha2::{Digest, Sha256};
         let redis_url = std::env::var("OKAPI_REDIS_URL")?;
-        let pg = okapi_store::connect_pg(&database).await?;
+        let pg = okapi_store::connect_pg(database).await?;
         okapi_store::run_migrations(&pg).await?;
         let tag = Uuid::new_v4().simple().to_string();
         let uid = okapi_store::provision::create_user(&pg, &format!("atomic-{tag}")).await?;
@@ -113,6 +122,7 @@ impl Bed {
                 .route("/v1/chat/completions", post(upstream))
                 .route("/v1/embeddings", post(upstream))
                 .route("/v1/rerank", post(upstream))
+                .route("/v1/images/generations", post(upstream))
                 .with_state((hits.clone(), gate.clone())),
         )
         .await?;
@@ -127,7 +137,7 @@ impl Bed {
             None,
         )
         .await?;
-        let state = gateway::build_state(&database, &redis_url, "atomic-test", None, None).await?;
+        let state = gateway::build_state(database, &redis_url, "atomic-test", None, None).await?;
         let ledger = state.ledger.clone();
         let pending = state.settlements.clone();
         ledger.credit(uid, Money::from_micros(10_000_000)).await?;

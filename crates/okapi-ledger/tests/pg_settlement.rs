@@ -47,6 +47,7 @@ impl Bed {
     /// 一笔标准消费：官方价 300、折后 240、让利 60、上游成本 150，钱包付。
     fn committed(&self, request_id: Uuid) -> SettlementInput<'static> {
         SettlementInput {
+            source_window: None,
             dimensions: UsageDimensions::new(
                 "gpt-5-alias",
                 "gpt-5-2026",
@@ -401,6 +402,65 @@ async fn failing_statement_rolls_back_every_table() {
     assert!(bed.outbox(rid).await.is_empty(), "outbox 不得残留");
     assert_eq!(bed.wallet_snapshot().await, before);
     assert_eq!(bed.key_used().await.0, 0, "key 用量不得被半途累加");
+}
+
+/// Reject unrepresentable counters atomically instead of silently clamping PG alone.
+#[tokio::test]
+async fn oversized_token_counters_never_diverge_between_pg_and_outbox() {
+    let bed = bed().await;
+    let before = bed.wallet_snapshot().await;
+    for axis in 0..4 {
+        let rid = Uuid::new_v4();
+        let mut input = bed.committed(rid);
+        match axis {
+            0 => input.usage.prompt_tokens = u32::MAX,
+            1 => input.usage.cached_tokens = u32::MAX,
+            2 => input.usage.completion_tokens = u32::MAX,
+            _ => input.usage.reasoning_tokens = u32::MAX,
+        }
+        assert!(matches!(
+            record_settlement(&bed.pg, input).await,
+            Err(okapi_ledger::LedgerError::InvalidSettlement)
+        ));
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE request_id=$1")
+                .bind(rid)
+                .fetch_one(&bed.pg)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        assert!(bed.events(rid).await.is_empty());
+        assert!(bed.outbox(rid).await.is_empty());
+        assert_eq!(bed.wallet_snapshot().await, before);
+        assert_eq!(bed.key_used().await.0, 0);
+    }
+    let rid = Uuid::new_v4();
+    let mut input = bed.committed(rid);
+    input.usage = TokenUsage {
+        prompt_tokens: i32::MAX as u32,
+        cached_tokens: i32::MAX as u32,
+        completion_tokens: i32::MAX as u32,
+        reasoning_tokens: i32::MAX as u32,
+        ..TokenUsage::default()
+    };
+    record_settlement(&bed.pg, input).await.unwrap();
+    let usage: Value = sqlx::query_scalar("SELECT jsonb_build_array(prompt_tokens,cached_tokens,completion_tokens,reasoning_tokens) FROM billing_records WHERE request_id=$1")
+        .bind(rid).fetch_one(&bed.pg).await.unwrap();
+    assert_eq!(usage, serde_json::to_value([i32::MAX; 4]).unwrap());
+    let payload: Value =
+        sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE payload->>'request_id'=$1")
+            .bind(rid.to_string())
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    for field in [
+        "prompt_tokens",
+        "cached_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+    ] {
+        assert_eq!(payload[field], i32::MAX);
+    }
 }
 
 /// 订阅池付的请求：records / events / outbox 都记 pool=1，钱包快照列不动，key 用量照记。

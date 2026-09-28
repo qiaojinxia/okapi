@@ -19,9 +19,10 @@ import { Link, getRouteApi } from '@tanstack/react-router'
 import type { ChannelRow } from '@/features/channels/types'
 import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
-import { apiFetch } from '@/lib/api'
+import { ApiError, apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatRatio } from '@/lib/money'
+import { formatRatio, formatUnitPrice } from '@/lib/money'
+import { usePermission } from '@/hooks/use-auth'
 import { qk } from '@/lib/query-keys'
 import { text } from '@/lib/search-params'
 import { useConfirm } from '@/components/ui/confirm'
@@ -33,6 +34,8 @@ interface ModelPage {
   data: ModelListRow[]
   total: number
   unpriced: number
+  base_price_per_1m_micro?: number
+  published_base_price_per_1m_micro?: number
 }
 
 /// 模型定价页。
@@ -40,7 +43,8 @@ interface ModelPage {
 /// 只管一件事：模型的倍率配置。价格分组与计费活动各有独立页面——
 /// 它们与模型定价是不同的决策，此前挤在同一屏让人分不清改的是哪一层。
 export function ModelPricingPage() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const can = usePermission()
   const queryClient = useQueryClient()
   // 搜索词 / 只看未定价 / 页码都在地址里。
   // 搜索：草稿 → 回车 / 点搜索才提交（服务端 ILIKE，与用户 / 令牌列表同一形态）
@@ -90,9 +94,11 @@ export function ModelPricingPage() {
     if (c.status !== 1) continue
     for (const m of c.models) channelCount.set(m, (channelCount.get(m) ?? 0) + 1)
   }
-  // 倍率 → $/1M（基准 $2/1M，DESIGN §3.2）：站长配倍率、对上游报价单时想的是美元
+  const basePrice = models.data?.base_price_per_1m_micro ?? 2_000_000
+  const publishedBase = models.data?.published_base_price_per_1m_micro ?? 2_000_000
+  // Admin previews the draft; the public catalog uses the published base.
   const perMillion = (ratio: string | null, factor = 1) =>
-    ratio === null ? null : Number(ratio) * factor * 2
+    ratio === null ? null : Number(ratio) * factor * basePrice
 
   const remove = useMutation({
     mutationFn: (name: string) =>
@@ -109,9 +115,16 @@ export function ModelPricingPage() {
 
   const publish = useMutation({
     mutationFn: () =>
-      apiFetch<{ epoch: number }>('/admin/pricing/publish', { method: 'POST', body: {} }),
-    onSuccess: (data) => toast.success(t('admin:publishedEpoch', { epoch: data.epoch })),
-    onError: (err) => toast.error(describeError(err)),
+      apiFetch<{ epoch: number }>(`/admin/pricing/publish?expected_base_per_1m_micro=${basePrice}`, { method: 'POST', body: {} }),
+    onSuccess: (data) => {
+      toast.success(t('admin:publishedEpoch', { epoch: data.epoch }))
+      invalidate()
+      void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+    },
+    onError: (err) => {
+      toast.error(err instanceof ApiError && err.param === 'pricing_base_changed' ? t('admin:pricingBaseChanged') : describeError(err))
+      invalidate()
+    },
   })
 
   const rows = models.data?.data ?? []
@@ -141,6 +154,11 @@ export function ModelPricingPage() {
         }
       />
 
+      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        <span>{t('admin:pricingBasePreview', { price: basePrice / 1_000_000 })}</span>
+        {basePrice !== publishedBase && <Badge variant="warning">{t('admin:pricingBasePublished', { price: publishedBase / 1_000_000 })} · {t('admin:requiresPublish')}</Badge>}
+        {can('settings.read') && <Link to="/admin/settings" className="text-primary hover:underline">{t('admin:pricingBaseSettings')}</Link>}
+      </div>
       <Toolbar
         filtersClassName="basis-full lg:basis-[32rem]"
         filters={
@@ -187,7 +205,7 @@ export function ModelPricingPage() {
               <Info aria-hidden className="h-3.5 w-3.5 shrink-0" />
               {t('admin:publishHint')}
             </span>
-            <Button size="sm" className="shrink-0" loading={publish.isPending} onClick={() => publish.mutate()}>
+            <Button size="sm" className="shrink-0" disabled={models.isPending || models.isError || !can('pricing.publish')} loading={publish.isPending} onClick={() => basePrice === publishedBase ? publish.mutate() : confirm({ title: t('admin:pricingBaseConfirm'), tone: 'default', confirmLabel: t('admin:publish'), description: t('admin:pricingBaseConfirmDesc', { from: publishedBase / 1_000_000, to: basePrice / 1_000_000 }), onConfirm: () => publish.mutate() })}>
               {!publish.isPending && <Rocket className="h-3.5 w-3.5" />}
               {t('admin:publish')}
             </Button>
@@ -246,12 +264,12 @@ export function ModelPricingPage() {
                 <Td numeric>{formatRatio(m.model_ratio)}</Td>
                 <Td numeric>{formatRatio(m.completion_ratio)}</Td>
                 <Td numeric className="text-xs text-muted-foreground">
-                  {m.model_ratio === null
+                  {m.pricing_mode !== 'ratio' || m.model_ratio === null
                     ? '—'
-                    : `$${perMillion(m.model_ratio)?.toFixed(2)} / $${perMillion(
+                    : `${formatUnitPrice(perMillion(m.model_ratio), i18n.language)} / ${formatUnitPrice(perMillion(
                         m.model_ratio,
                         Number(m.completion_ratio ?? '1'),
-                      )?.toFixed(2)}`}
+                      ), i18n.language)}`}
                 </Td>
                 <Td numeric>{formatRatio(m.cache_ratio)}</Td>
                 <Td numeric>{formatRatio(m.cache_write_ratio)}</Td>
@@ -308,6 +326,7 @@ export function ModelPricingPage() {
       {dialog}
       {drawer !== null && (
         <ModelDrawer
+          basePriceMicro={basePrice}
           model={drawer.model}
           onClose={() => setDrawer(null)}
           onDone={() => {

@@ -271,8 +271,18 @@ fn stream_sequence_maps_to_openai_chunks() {
         datas[7]["usage"]["prompt_tokens_details"]["cached_tokens"],
         90
     );
+    let initial_usage = all
+        .iter()
+        .find_map(|e| match e {
+            ChatEvent::Data { usage: Some(u), .. } => Some(*u),
+            _ => None,
+        })
+        .unwrap();
+    assert!(initial_usage.missing_completion);
+    assert_eq!(initial_usage.prompt_tokens, 100);
     let usage_event = all
         .iter()
+        .rev()
         .find_map(|e| match e {
             ChatEvent::Data { usage: Some(u), .. } => Some(*u),
             _ => None,

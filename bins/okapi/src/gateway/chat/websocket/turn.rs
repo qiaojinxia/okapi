@@ -283,7 +283,7 @@ impl Progress {
         if let Some(error) = self.error
             && self
                 .usage
-                .is_none_or(|u| u.to_token_usage().total_raw() == 0)
+                .is_none_or(|u| u.prompt_tokens == 0 && u.completion_tokens == 0)
             && !self.output_seen
         {
             let mut failure = ForwardFailure::app(

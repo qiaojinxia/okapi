@@ -5,7 +5,7 @@ use crate::gateway::ingress::Ingress;
 use axum::{
     Json,
     extract::State,
-    http::Method,
+    http::{HeaderMap, Method, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -42,6 +42,7 @@ struct PricingRow {
     audio_ratio: Option<String>,
     audio_completion_ratio: Option<String>,
     image_ratio: Option<String>,
+    modality_ratios: Option<Value>,
     per_call_price_micro: Option<i64>,
 }
 #[derive(sqlx::FromRow)]
@@ -61,6 +62,7 @@ struct Group {
     #[serde(skip)]
     pool_code: String,
     self_select: bool,
+    is_default: bool,
     #[serde(skip)]
     fallback_pool_code: Option<String>,
 }
@@ -70,6 +72,7 @@ struct Visibility {
 }
 #[derive(Serialize)]
 struct PublicModel<'a> {
+    base_price_per_1m_micro: i64,
     #[serde(flatten)]
     model: &'a PricingRow,
     groups: &'a RawValue,
@@ -169,18 +172,58 @@ async fn routes(
 pub async fn public_pricing(
     State(state): State<AppState>,
     Query(query): Query<CatalogQuery>,
+    headers: HeaderMap,
     method: Method,
 ) -> Result<Response, AppError> {
-    fetch(&state, query.validate()?, method).await
+    fetch(
+        &state,
+        query.validate()?,
+        viewer(&state, &headers).await?,
+        method,
+    )
+    .await
 }
 
 /// Public configured availability, with server-side filters and default 20/max 100 models.
 pub async fn public_models(
     State(state): State<AppState>,
     Query(query): Query<CatalogQuery>,
+    headers: HeaderMap,
     method: Method,
 ) -> Result<Response, AppError> {
-    fetch(&state, query.validate()?, method).await
+    fetch(
+        &state,
+        query.validate()?,
+        viewer(&state, &headers).await?,
+        method,
+    )
+    .await
+}
+
+// Match the portal's API-key identity. No credentials means public tiers only;
+// invalid credentials must never silently downgrade to an anonymous response.
+async fn viewer(state: &AppState, headers: &HeaderMap) -> Result<Option<i64>, AppError> {
+    if [
+        header::AUTHORIZATION.as_str(),
+        "x-api-key",
+        "x-goog-api-key",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name))
+    {
+        return Ok(Some(super::authenticate(state, headers).await?.user_id));
+    }
+    Ok(None)
+}
+
+fn private_response(response: &mut Response) {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
+    response.headers_mut().insert(
+        header::VARY,
+        "Authorization, x-api-key, x-goog-api-key".parse().unwrap(),
+    );
 }
 
 async fn snapshot(
@@ -209,11 +252,13 @@ fn empty_response() -> Response {
 
 async fn fetch(
     state: &AppState,
-    selection: Selection,
+    mut selection: Selection,
+    user_id: Option<i64>,
     method: Method,
 ) -> Result<Response, AppError> {
+    selection.filter.user_id = user_id;
     let mut tx = snapshot(state).await?;
-    let (groups, groups_page) = groups::read(&mut tx, &selection.groups).await?;
+    let (groups, groups_page) = groups::read(&mut tx, &selection.groups, user_id).await?;
     let mut models = query::models(&mut tx, &selection.filter, selection.slice).await?;
     let page = query::metadata(&mut tx, &selection, models.len()).await?;
     let names: Vec<_> = models.iter().map(|m| m.model_name.clone()).collect();
@@ -232,9 +277,11 @@ async fn fetch(
     let mut response = if method == Method::HEAD {
         empty_response()
     } else {
-        catalog(&mut models, &groups, &served, &page, &groups_page)?
+        let base = crate::gateway::pricing_loader::published_base_price(&state.pg, None).await?;
+        catalog(&mut models, &groups, &served, &page, &groups_page, base)?
     };
     page.page.headers(&mut response)?;
+    private_response(&mut response);
     Ok(response)
 }
 
@@ -244,6 +291,7 @@ fn catalog(
     served: &[Route],
     page: &PageMeta,
     groups_page: &paging::Meta,
+    base_price_per_1m_micro: i64,
 ) -> Result<Response, AppError> {
     let index = signatures(served);
     let mut cache = HashMap::<Signature, Visibility>::new();
@@ -293,6 +341,7 @@ fn catalog(
         .map(|(model, signature)| {
             let v = &cache[signature];
             PublicModel {
+                base_price_per_1m_micro,
                 model,
                 groups: &v.groups,
                 chat_endpoints_by_group: &v.endpoints,

@@ -86,6 +86,7 @@ export function formatTokensPerSec(per1kSec: number, locale: string): string {
 }
 
 export interface SimulatorInput {
+  basePricePer1mMicro?: number
   modelRatio: number
   completionRatio: number
   cacheRatio: number
@@ -109,5 +110,5 @@ export function simulateChargeMicro(input: SimulatorInput): number {
     cached * input.cacheRatio +
     cacheWrite * (input.cacheWriteRatio ?? 1) +
     input.completionTokens * input.completionRatio
-  return Math.round(weighted * input.modelRatio * input.groupRatio * 2)
+  return Math.round(weighted * input.modelRatio * input.groupRatio * (input.basePricePer1mMicro ?? 2_000_000) / 1_000_000)
 }

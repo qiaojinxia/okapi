@@ -1,5 +1,5 @@
 //! 日历窗口与门户附加指标；历史缺失的采集维度返回 null，不显示成零。
-use super::stats::ch_i64;
+use super::stats::{ch_i64, scaled_ratio};
 use crate::gateway::error::AppError;
 use chrono::{Days, NaiveDate};
 use okapi_store::ChClient;
@@ -95,16 +95,26 @@ pub async fn enrich(
         "SELECT day, model, sumMerge(write_tokens) AS writes, countIfMerge(write_known) AS known, countIfMerge(read_known) AS read_known \
         FROM mv_cache_reporting_day WHERE {owner} AND {range} GROUP BY day, model"
     );
-    let perf_sql = format!(
-        "SELECT toDate(hour) AS day, model, countMerge(requests) AS samples, \
-        sumMerge(latency_sum) AS latency, sumMerge(ttft_sum) AS ttft, countIfMerge(ttft_samples) AS ttft_n, \
-        sumMerge(completion_tokens) AS output FROM mv_cube_hour WHERE {owner} AND {range} GROUP BY day, model"
+    let perf_source = super::latency::source(
+        "day, model",
+        "mv_cube_hour",
+        &format!("{owner} AND {range}"),
     );
+    let perf_sql = format!("SELECT * FROM {perf_source}");
+    let ttft_sql = super::ttft_average::source(
+        "day, model",
+        "mv_cube_hour",
+        &format!("{owner} AND {range}"),
+    );
+    let ttft = ch
+        .query_json_each_row(&format!("SELECT * FROM {ttft_sql}"))
+        .await?;
+    let ttft: HashMap<_, _> = ttft.iter().map(|r| (row_key(r), r)).collect();
     let cache = ch.query_json_each_row(&cache_sql).await?;
     let perf = ch.query_json_each_row(&perf_sql).await?;
     let cache: HashMap<_, _> = cache.iter().map(|r| (row_key(r), r)).collect();
     let perf: HashMap<_, _> = perf.iter().map(|r| (row_key(r), r)).collect();
-    let mut counts = [0_i64; 11]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached
+    let mut counts = [0_i64; 13]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached, ttft observed, latency observed
     for row in data {
         let key = row_key(row);
         let cache = cache.get(&key);
@@ -115,11 +125,13 @@ pub async fn enrich(
         let prompt = ch_i64(row, "prompt_tokens");
         let cached = ch_i64(row, "cached_tokens");
         let writes = cache.map_or(0, |r| ch_i64(r, "writes"));
-        let samples = perf.map_or(0, |r| ch_i64(r, "samples"));
-        let latency = perf.map_or(0, |r| ch_i64(r, "latency"));
-        let ttft = perf.map_or(0, |r| ch_i64(r, "ttft"));
-        let ttft_n = perf.map_or(0, |r| ch_i64(r, "ttft_n"));
-        let output = perf.map_or(0, |r| ch_i64(r, "output"));
+        let samples = perf.map_or(0, |r| ch_i64(r, "latency_samples"));
+        let latency = perf.map_or(0, |r| ch_i64(r, "latency_sum"));
+        let measured = ttft.get(&key);
+        let ttft = measured.map_or(0, |r| ch_i64(r, "ttft_sum"));
+        let ttft_n = measured.map_or(0, |r| ch_i64(r, "ttft_samples"));
+        let observed = measured.map_or(0, |r| ch_i64(r, "ttft_observed"));
+        let output = perf.map_or(0, |r| ch_i64(r, "latency_output"));
         row["cache_write_tokens"] = if known == requests {
             json!(writes)
         } else {
@@ -128,34 +140,51 @@ pub async fn enrich(
         row["cache_write_known_requests"] = json!(known);
         row["cache_read_known_requests"] = json!(read_known);
         row["cache_hit_bp"] = cache_rate(cached, prompt, requests, read_known);
-        row["avg_latency_ms"] = nullable_ratio(latency, samples, requests, samples, 1);
-        // TTFT 只对实际采集到首字的请求取平均；非流式/历史缺失不抹去有效样本。
-        row["avg_ttft_ms"] = nullable_ratio(ttft, ttft_n, ttft_n, ttft_n, 1);
-        row["tokens_per_1k_sec"] = nullable_ratio(output, latency, requests, samples, 1_000_000);
-        row["performance_requests"] = json!(samples);
-        row["latency_sum_ms"] = json!(latency);
-        row["ttft_sum_ms"] = json!(ttft);
-        row["ttft_samples"] = json!(ttft_n);
+        let latency_observed = perf.map_or(0, |r| ch_i64(r, "latency_observed"));
+        for (name, value) in
+            super::latency::metrics(latency, samples, output, requests, latency_observed)
+        {
+            row[name] = value;
+        }
+        for (name, value) in super::ttft_average::metrics(ttft, ttft_n, requests, observed) {
+            row[name] = value;
+        }
         row["original_micro"] =
             json!(ch_i64(row, "amount_micro").saturating_add(ch_i64(row, "discount_micro")));
         for (acc, value) in counts.iter_mut().zip([
-            requests, known, writes, samples, latency, ttft, ttft_n, output, read_known, prompt,
+            requests,
+            known,
+            writes,
+            samples,
+            latency,
+            ttft,
+            ttft_n,
+            output,
+            read_known,
+            prompt,
             cached,
+            observed,
+            latency_observed,
         ]) {
             *acc = acc.saturating_add(value);
         }
     }
-    Ok(json!({
+    let mut total = json!({
         "cache_write_tokens": if counts[0] == counts[1] { json!(counts[2]) } else { Value::Null },
         "cache_write_known_requests": counts[1],
         "cache_read_known_requests": counts[8],
         "cache_hit_bp": cache_rate(counts[10], counts[9], counts[0], counts[8]),
-        "avg_latency_ms": nullable_ratio(counts[4], counts[3], counts[0], counts[3], 1),
-        "avg_ttft_ms": nullable_ratio(counts[5], counts[6], counts[6], counts[6], 1),
-        "ttft_samples": counts[6],
-        "tokens_per_1k_sec": nullable_ratio(counts[7], counts[4], counts[0], counts[3], 1_000_000),
-        "performance_requests": counts[3]
-    }))
+
+    });
+    for (name, value) in super::ttft_average::metrics(counts[5], counts[6], counts[0], counts[11]) {
+        total[name] = value;
+    }
+    for (name, value) in
+        super::latency::metrics(counts[4], counts[3], counts[7], counts[0], counts[12])
+    {
+        total[name] = value;
+    }
+    Ok(total)
 }
 
 pub(super) fn cache_rate(cached: i64, prompt: i64, requests: i64, known: i64) -> Value {
@@ -164,7 +193,7 @@ pub(super) fn cache_rate(cached: i64, prompt: i64, requests: i64, known: i64) ->
 
 fn nullable_ratio(sum: i64, divisor: i64, expected: i64, samples: i64, scale: i64) -> Value {
     if divisor > 0 && samples == expected {
-        json!(sum.saturating_mul(scale) / divisor)
+        json!(scaled_ratio(sum, divisor, scale))
     } else {
         Value::Null
     }
@@ -173,6 +202,28 @@ fn nullable_ratio(sum: i64, divisor: i64, expected: i64, samples: i64, scale: i6
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rates_keep_precision_when_scaled_totals_exceed_i64() {
+        assert_eq!(
+            scaled_ratio(20_000_000_000_000, 200_000_000_000, 1_000_000),
+            100_000_000
+        );
+        assert_eq!(
+            cache_rate(2_000_000_000_000_000, 4_000_000_000_000_000, 10, 10),
+            json!(5000)
+        );
+        assert_eq!(
+            nullable_ratio(20_000_000_000_000, 1440, 10, 10, 1_000_000),
+            json!(13_888_888_888_888_888_i64)
+        );
+        assert_eq!(
+            scaled_ratio(-2_000_000_000_000_000, 4_000_000_000_000_000, 10_000),
+            -5000
+        );
+        assert_eq!(scaled_ratio(i64::MAX, 1, 10_000), i64::MAX);
+        assert_eq!(scaled_ratio(i64::MIN, 1, 10_000), i64::MIN);
+        assert_eq!(scaled_ratio(1, 0, 1000), 0);
+    }
     #[test]
     fn cache_rate_distinguishes_missing_zero_and_weighted_hits() {
         assert_eq!(cache_rate(0, 100, 1, 0), Value::Null);

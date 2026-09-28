@@ -67,7 +67,7 @@ impl AzureUpstream {
         Self { inner }
     }
 
-    fn post(
+    pub(crate) fn post(
         &self,
         endpoint: &str,
         deployment: &str,

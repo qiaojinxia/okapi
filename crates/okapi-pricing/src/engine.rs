@@ -11,9 +11,6 @@ use crate::rules::{PricingRule, Stacking};
 use crate::snapshot::{AppliedRule, PricingSnapshot};
 use okapi_domain::{GroupCode, ModelCode, Money, TokenUsage, UserId};
 
-/// 每 token 基准价（micro）：$2/1M。
-const BASE_MICRO_PER_TOKEN: i128 = 2;
-
 /// 请求上下文：运行期动态因素全部由调用方注入，engine 不做任何 IO。
 #[derive(Debug, Clone)]
 pub struct CalcContext {
@@ -58,6 +55,7 @@ pub struct Quote {
 
 /// 一次计费用到的 token 侧倍率轴（DESIGN §3.2）。
 struct RatioSet {
+    base_price_per_1m_micro: i64,
     model: RatioFp,
     completion: RatioFp,
     /// 缓存读取（命中折扣）。
@@ -70,6 +68,7 @@ struct RatioSet {
     audio_completion: RatioFp,
     /// 图片输入（相对文本的倍数）。
     image: RatioFp,
+    modalities: crate::ModalityRatios,
 }
 
 /// 单步乘法：value × ratio / SCALE（floor）。
@@ -81,11 +80,14 @@ fn step(value: i128, ratio: RatioFp) -> Result<i128, PricingError> {
 }
 
 /// token·scale 空间 → micro-USD（× 每 token 基准价，floor）。
-fn micro_from_token_scaled(value: i128) -> Result<Money, PricingError> {
+fn micro_from_token_scaled(
+    value: i128,
+    base_price_per_1m_micro: i64,
+) -> Result<Money, PricingError> {
     let micros = value
-        .checked_mul(BASE_MICRO_PER_TOKEN)
+        .checked_mul(i128::from(base_price_per_1m_micro))
         .ok_or(PricingError::Overflow)?
-        .div_euclid(i128::from(RATIO_SCALE));
+        .div_euclid(i128::from(RATIO_SCALE) * 1_000_000);
     i64::try_from(micros)
         .map(Money::from_micros)
         .map_err(|_| PricingError::Overflow)
@@ -138,8 +140,10 @@ pub fn calculate(
             audio_ratio,
             audio_completion_ratio,
             image_ratio,
+            modality_ratios,
         } => {
             let set = RatioSet {
+                base_price_per_1m_micro: resolved.base_price_per_1m_micro,
                 model: mul_ratio(*model_ratio, tier_r)?,
                 completion: *completion_ratio,
                 cache: *cache_ratio,
@@ -147,6 +151,7 @@ pub fn calculate(
                 audio: *audio_ratio,
                 audio_completion: *audio_completion_ratio,
                 image: *image_ratio,
+                modalities: *modality_ratios,
             };
             calc_tokens(book, ctx, usage, &set, group_ratio, "ratio", tier.as_ref())
         }
@@ -157,12 +162,15 @@ pub fn calculate(
             audio_ratio,
             audio_completion_ratio,
             image_ratio,
+            modality_ratios,
             tiers,
         } => {
             let price = tiers
                 .resolve(usage.total_raw())
                 .ok_or(PricingError::Internal("empty tier table"))?;
             let set = RatioSet {
+                // Tier tables contain absolute USD prices, normalized against $2.
+                base_price_per_1m_micro: BASE_PRICE_PER_1M_MICRO,
                 model: mul_ratio(ratio_from_price_per_1m(price)?, tier_r)?,
                 completion: *completion_ratio,
                 cache: *cache_ratio,
@@ -170,6 +178,7 @@ pub fn calculate(
                 audio: *audio_ratio,
                 audio_completion: *audio_completion_ratio,
                 image: *image_ratio,
+                modalities: *modality_ratios,
             };
             calc_tokens(book, ctx, usage, &set, group_ratio, "tiered", tier.as_ref())
         }
@@ -295,14 +304,22 @@ fn calc_tokens(
             .map(|v| v.div_euclid(i128::from(RATIO_SCALE)))
             .ok_or(PricingError::Overflow)?
     };
+    let (modal_charge, effective_modalities) = set.modalities.charge(
+        usage,
+        set.cache,
+        set.cache_write,
+        set.audio,
+        set.image,
+        set.completion,
+    )?;
     let eff = i128::from(usage.prompt_uncached())
         .checked_mul(i128::from(RATIO_SCALE))
         .and_then(|acc| {
-            acc.checked_add(i128::from(usage.cached_tokens) * i128::from(set.cache.as_scaled()))
+            acc.checked_add(i128::from(usage.cached_text()) * i128::from(set.cache.as_scaled()))
         })
         .and_then(|acc| {
             acc.checked_add(
-                i128::from(usage.cache_write_tokens) * i128::from(set.cache_write.as_scaled()),
+                i128::from(usage.cache_write_text()) * i128::from(set.cache_write.as_scaled()),
             )
         })
         .and_then(|acc| {
@@ -323,19 +340,20 @@ fn calc_tokens(
         .and_then(|acc| {
             acc.checked_add(i128::from(usage.audio_completion_tokens) * audio_out_scaled)
         })
+        .and_then(|acc| acc.checked_add(modal_charge))
         .ok_or(PricingError::Overflow)?;
 
     let v = step(eff, set.model)?;
-    let list_price = micro_from_token_scaled(v)?;
+    let list_price = micro_from_token_scaled(v, set.base_price_per_1m_micro)?;
     let v = step(v, group_ratio)?;
-    let original = micro_from_token_scaled(v)?;
+    let original = micro_from_token_scaled(v, set.base_price_per_1m_micro)?;
 
     let (v, applied) = apply_modifiers(book, ctx, v)?;
-    let amount = micro_from_token_scaled(v)?;
+    let amount = micro_from_token_scaled(v, set.base_price_per_1m_micro)?;
     let discount = original.checked_sub(amount).ok_or(PricingError::Overflow)?;
 
     // 最终单价（$/1M input）：基准价走同一条乘链，账单解释器直接展示。
-    let mut unit = i128::from(BASE_PRICE_PER_1M_MICRO)
+    let mut unit = i128::from(set.base_price_per_1m_micro)
         .checked_mul(i128::from(RATIO_SCALE))
         .ok_or(PricingError::Overflow)?;
     unit = step(unit, set.model)?;
@@ -348,6 +366,7 @@ fn calc_tokens(
 
     let snapshot = PricingSnapshot {
         epoch: book.epoch(),
+        base_price_per_1m_usd: Some(Money::from_micros(set.base_price_per_1m_micro)),
         mode,
         model_ratio: Some(set.model),
         completion_ratio: Some(set.completion),
@@ -359,6 +378,12 @@ fn calc_tokens(
             .then_some(set.audio),
         audio_completion_ratio: (usage.audio_completion_tokens > 0).then_some(set.audio_completion),
         image_ratio: (usage.image_prompt_tokens > 0).then_some(set.image),
+        modality_ratios: (effective_modalities != crate::ModalityRatios::default())
+            .then_some(effective_modalities),
+        cache_read_modalities: usage.cache_read_modalities,
+        cache_write_modalities: usage.cache_write_modalities,
+        image_completion_tokens: (usage.image_completion_tokens > 0)
+            .then_some(usage.image_completion_tokens),
         per_call_price_usd: None,
         service_tier: tier.map(|(t, _)| t.clone()),
         tier_ratio: tier.map(|(_, r)| *r),
@@ -398,6 +423,7 @@ fn calc_per_call(
 
     let snapshot = PricingSnapshot {
         epoch: book.epoch(),
+        base_price_per_1m_usd: None,
         mode: "per_call",
         model_ratio: None,
         completion_ratio: None,
@@ -406,6 +432,10 @@ fn calc_per_call(
         audio_ratio: None,
         audio_completion_ratio: None,
         image_ratio: None,
+        modality_ratios: None,
+        cache_read_modalities: None,
+        cache_write_modalities: None,
+        image_completion_tokens: None,
         per_call_price_usd: Some(price),
         service_tier: tier.map(|(t, _)| t.clone()),
         tier_ratio: tier.map(|(_, r)| *r),
@@ -463,6 +493,7 @@ mod tests {
                     audio_ratio: RatioFp::ONE,
                     audio_completion_ratio: RatioFp::ONE,
                     image_ratio: RatioFp::ONE,
+                    modality_ratios: crate::ModalityRatios::default(),
                 },
                 tier_ratios: Vec::new(),
             }],

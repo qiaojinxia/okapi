@@ -19,6 +19,8 @@ pub struct AuthedKey {
     pub key_id: i64,
     pub user_id: i64,
     pub key_status: i16,
+    /// Deliberately required in cached JSON: pre-budget auth entries must be reloaded.
+    pub quota_limited: bool,
     pub user_status: i16,
     /// 1=user 10=admin 100=super_admin（对齐 new-api）。
     pub role: i16,
@@ -206,8 +208,17 @@ pub async fn find_key_by_hash(
     .fetch_optional(pool)
     .await?;
 
+    let quota_limited = if let Some(row) = &row {
+        sqlx::query_scalar::<_, bool>("SELECT quota_mode = 1 FROM api_keys WHERE id = $1")
+            .bind(row.key_id)
+            .fetch_one(pool)
+            .await?
+    } else {
+        false
+    };
     Ok(row.map(|r| AuthedKey {
         key_id: r.key_id,
+        quota_limited,
         user_id: r.user_id,
         key_status: r.key_status,
         user_status: r.user_status,

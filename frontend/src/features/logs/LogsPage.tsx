@@ -142,7 +142,7 @@ function LogList({ filter }: { filter: Filter }) {
       {q.isError ? <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /> : q.isPending ? <TableSkeleton dense rows={8} cols={showKey ? 8 : 7} /> : !rows.length ? <EmptyState hint={t('portal:emptyUsageHint')} /> :
         <Table dense stickyHeader scrollResetKey={filterKey} aria-label={t('logs:title')}>
           <THead><Tr><Th className="w-6" /><Th>{t('logs:time')}</Th><Th>{t('logs:billingState')}</Th>{showKey && <Th>{t('portal:keys')}</Th>}
-            <Th>{t('pricing:model')}</Th><Th numeric>
+            <Th>{t('pricing:model')}</Th><Th className="w-px">
               <Tooltip content={t('logs:tokenUsageHint')}>
                 <button type="button" aria-label={t('logs:tokenUsageHelp')} className="inline-flex h-6 items-center gap-1.5 rounded outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40">
                   {t('logs:tokenUsage')}<CircleHelp aria-hidden className="h-3.5 w-3.5" />
@@ -156,7 +156,7 @@ function LogList({ filter }: { filter: Filter }) {
             <Td><LogStatus row={row} /></Td>
             {showKey && <Td className="max-w-28 truncate" title={row.key_name || undefined}>{row.key_name || (row.api_key_id !== null ? `#${row.api_key_id}` : '—')}</Td>}
             <Td className="max-w-52 truncate font-mono" title={row.model}>{row.model}</Td>
-            <Td numeric className="py-1"><LogTokenUsage row={row} /></Td>
+            <Td className="py-1"><LogTokenUsage row={row} /></Td>
             <Td numeric className="font-medium">{logMoney(netAmount(row), locale)}</Td>
             <Td numeric className="py-1"><div className="text-xs leading-4"><span className="mr-2 text-muted-foreground">{t('logs:ttft')}</span>{row.is_stream ? duration(row.ttft_ms, locale) : t('logs:nonStreaming')}</div><div className="text-xs leading-4"><span className="mr-2 text-muted-foreground">{t('logs:totalShort')}</span>{duration(row.latency_ms, locale)}</div></Td>
           </Tr>)}</TBody>

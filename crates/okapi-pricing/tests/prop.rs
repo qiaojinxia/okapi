@@ -61,6 +61,7 @@ fn build_book_with_cache_write(
                 audio_ratio: RatioFp::ONE,
                 audio_completion_ratio: RatioFp::ONE,
                 image_ratio: RatioFp::ONE,
+                modality_ratios: okapi_pricing::ModalityRatios::default(),
             },
             tier_ratios: Vec::new(),
         }],

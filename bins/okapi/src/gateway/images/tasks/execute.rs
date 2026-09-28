@@ -60,6 +60,7 @@ async fn execute(state: &AppState, claimed: &store::Claimed, lease: Lease) -> Re
         return Err(AppError::internal().with_param("image_task_payload_corrupt"));
     }
     let input = Input::decode(&claimed.payload, claimed.task.kind == "edit")?;
+    input.require_nonstream()?;
     let key_hash: Option<String> = sqlx::query_scalar(
         "SELECT key_hash FROM api_keys WHERE id=$1 AND user_id=$2 AND deleted_at IS NULL",
     )

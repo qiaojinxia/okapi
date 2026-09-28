@@ -9,7 +9,7 @@ async fn database_endpoint_filter_agrees_with_routing_for_provider_and_mapping_v
         .execute(&env.pg)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO price_groups(group_code,pool_code,group_ratio) VALUES($1,$1,1)")
+    sqlx::query("INSERT INTO price_groups(group_code,pool_code,group_ratio,self_select) VALUES($1,$1,1,true)")
         .bind(&group)
         .execute(&env.pg)
         .await

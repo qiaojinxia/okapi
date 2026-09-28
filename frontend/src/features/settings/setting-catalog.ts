@@ -4,10 +4,11 @@ export interface SettingRow {
   is_secret: boolean
   configured: boolean
   updated_at: string | null
+  published_value?: number
 }
 
 export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp'
-export type SettingEditor = 'auto' | 'number' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth'
+export type SettingEditor = 'auto' | 'number' | 'price' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
 export const SETTING_GROUPS = [
@@ -27,6 +28,7 @@ export interface SettingMeta {
 }
 
 const CATALOG: Record<string, SettingMeta> = {
+  pricing_base_per_1m_micro: { label: 'admin:pricingBase', description: 'admin:pricingBaseDesc', group: 'payment', editor: 'price' },
   aff_percent_bp: { label: 'admin:settingReferral', description: 'admin:settingReferralDesc', group: 'payment', editor: 'percent' },
   payment_epay: { label: 'admin:settingEpay', description: 'admin:settingEpayDesc', group: 'payment', editor: 'epay' },
   payment_stripe: { label: 'admin:settingStripe', description: 'admin:settingStripeDesc', group: 'payment', editor: 'stripe' },

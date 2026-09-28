@@ -326,7 +326,7 @@ pub async fn sweep_expired_reservations(
                 .refund(user_id, reservation.api_key_id, reservation.request_id)
                 .await?;
             let released = refund.released;
-            if released.is_zero() {
+            if !refund.closed {
                 continue; // 竞争：已被正常终结
             }
             let event_payload = serde_json::json!({
@@ -377,11 +377,16 @@ pub struct BalanceDrift {
 async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result<(i64, i64)> {
     let avail = ledger.balance(user_id).await?.as_micros();
     let (sub, _) = ledger.sub_balance(user_id).await?;
+    let epoch = ledger.subscription_window(user_id).await?;
     let mut inflight = (0_i64, 0_i64);
     for r in ledger.list_reservations(user_id).await? {
         match r.pool {
             Pool::Wallet => inflight.0 = inflight.0.saturating_add(r.amount.as_micros()),
-            Pool::Subscription => inflight.1 = inflight.1.saturating_add(r.amount.as_micros()),
+            Pool::Subscription => {
+                if r.source_window.is_none() || r.source_window == epoch {
+                    inflight.1 = inflight.1.saturating_add(r.amount.as_micros());
+                }
+            }
         }
     }
     let (held_wallet, held_sub) = okapi_ledger::holds::inflight(ledger, user_id).await?;

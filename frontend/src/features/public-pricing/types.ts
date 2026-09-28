@@ -1,4 +1,5 @@
 export interface PricingModel {
+  base_price_per_1m_micro?: number
   model: string
   display_name: string | null
   vendor: string | null
@@ -24,6 +25,8 @@ export interface PricingGroup {
   code: string
   name: string | null
   ratio: string | null
+  self_select?: boolean
+  is_default?: boolean
 }
 
 export type TokenUnit = '1K' | '1M'

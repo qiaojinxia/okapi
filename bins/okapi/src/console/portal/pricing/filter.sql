@@ -8,10 +8,14 @@ AND ($4::text IS NULL OR m.model_name = $4)
 AND (($5::text IS NULL AND $6::text IS NULL) OR EXISTS (
     SELECT 1 FROM channels c JOIN pool_channels pc ON pc.channel_id = c.id
     WHERE c.status = 1 AND c.deleted_at IS NULL AND c.models ? m.model_name
-    AND ($5::text IS NULL OR EXISTS (
+    AND EXISTS (
         SELECT 1 FROM price_groups g LEFT JOIN channel_pools cp ON cp.pool_code = g.pool_code
-        WHERE g.group_code = $5 AND pc.pool_code IN (g.pool_code, cp.fallback_pool_code)
-    ))
+        WHERE ($5::text IS NULL OR g.group_code = $5)
+        AND (g.self_select OR g.is_default OR EXISTS (
+            SELECT 1 FROM user_groups ug WHERE ug.group_code = g.group_code AND ug.user_id = $7
+        ))
+        AND pc.pool_code IN (g.pool_code, cp.fallback_pool_code)
+    )
     AND ($6::text IS NULL OR CASE $6
         WHEN '/v1/responses' THEN TRUE
         WHEN '/v1/responses/compact' THEN

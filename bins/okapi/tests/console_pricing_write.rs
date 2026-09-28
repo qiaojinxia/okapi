@@ -28,6 +28,9 @@ use uuid::Uuid;
 static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+#[path = "support/console_modality_prices.rs"]
+mod modalities;
+
 /// 固定 usage，便于反算：1000 prompt + 200 completion。
 async fn mock_ok(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();

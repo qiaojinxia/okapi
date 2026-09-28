@@ -112,6 +112,7 @@ async fn submit(state: AppState, req: Request, edit: bool) -> Response {
             return Err(not_found());
         }
         let input = super::request::read(req, &state, edit).await?;
+        input.require_nonstream()?;
         // Validate access/pricing now; execution rechecks current permissions and prices.
         super::prepare(&state, &key, &input).await?;
         let payload = input.encode()?;
@@ -325,16 +326,18 @@ pub(super) async fn complete(
     body: &[u8],
     input: okapi_ledger::SettlementInput<'_>,
 ) -> Result<(), AppError> {
+    use sqlx::Connection as _;
     let (result, artifacts) = artifacts(state, lease.id, body).await?;
-    let mut tx = state
-        .pg
+    let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, input.user_id).await?;
+    let mut tx = guard
+        .connection()
         .begin()
         .await
         .map_err(okapi_store::StoreError::from)?;
     if !store::lock_live(&mut tx, lease.id, lease.token).await? {
         return Err(AppError::internal().with_param("image_task_lease_lost"));
     }
-    okapi_ledger::pg::record_settlement_in_tx(&mut tx, input.clone()).await?;
+    okapi_ledger::sync::record_in_tx(&mut tx, input.clone()).await?;
     store::complete(
         &mut tx,
         lease.id,
@@ -344,5 +347,8 @@ pub(super) async fn complete(
     )
     .await?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
+    if let Err(error) = guard.synchronize(&state.ledger).await {
+        tracing::error!(request_id=%input.request_id,%error,"image bill awaiting Redis recovery");
+    }
     Ok(())
 }

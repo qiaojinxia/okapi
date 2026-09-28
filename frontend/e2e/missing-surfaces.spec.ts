@@ -689,6 +689,68 @@ test('渠道健康时间线：点近 24h 打开抽屉、hours 进查询、空态
   await expect(drawer.getByRole('alert')).toContainText('服务内部错误')
 })
 
+for (const variant of [
+  { width: 1440, theme: 'light', requests: 2, errors: 0 },
+  { width: 1440, theme: 'dark', requests: 4, errors: 1 },
+  { width: 390, theme: 'light', requests: 2, errors: 0 },
+]) test(`渠道健康时间线可读性 ${variant.width} ${variant.theme}：稀疏请求柱不消失，汇总和堆叠数值准确`, async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: variant.width, height: 900 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.addInitScript((theme) => localStorage.setItem('okapi.theme', theme), variant.theme)
+  const now = Math.floor(Date.now() / 300000) * 300000
+  const bucket = (minutes: number) => new Date(now - minutes * 60000).toISOString().slice(0, 19).replace('T', ' ')
+  const health = { channel_id: 42, name: 'sparse-test', provider: 'openai', requests: variant.requests, errors: variant.errors,
+    error_rate_bp: Math.round(variant.errors / variant.requests * 10000), ttft_p50_ms: 120, ttft_p95_ms: 800, ttft_p99_ms: 900,
+    failovers: 0, sticky_rate_bp: 0, tokens_per_1k_sec: 0, amount_micro: 0 }
+  await page.route('**/admin/channels?*', (route) => route.fulfill({ json: { data: [{
+    id: 42, name: 'sparse-test', provider: 'openai', api_base: 'https://fixture.invalid/v1', status: 1, priority: 0,
+    models: ['fixture-model'], keys: [{ status: 1 }], settings: {}, pools: ['default'],
+    pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
+    cost_milli: 1000, data_retention: null, last_test: null, last_balance: null,
+  }], total: 1, enabled: 1 } }))
+  await page.route('**/admin/stats/channels?*', (route) => route.fulfill({ json: { data: [health] } }))
+  const windows: string[] = []
+  await page.route(/\/admin\/stats\/channels\/42\/timeline/, (route) => {
+    const hours = new URL(route.request().url()).searchParams.get('hours')!
+    windows.push(hours)
+    return route.fulfill({ json: { ...health, hours: Number(hours), data: [
+      { ...health, bucket: bucket(95), requests: variant.requests - 1, errors: variant.errors },
+      { ...health, bucket: bucket(15), requests: 1, errors: 0 },
+    ] } })
+  })
+  await page.goto('/admin/channels')
+  await page.getByTitle(/健康时间线|Last-24h error rate/).click()
+  const drawer = page.getByRole('dialog')
+  const section = drawer.getByRole('region', { name: '请求量（成功 / 失败）' })
+  await expect(section.locator('dl > div').nth(0)).toHaveText(`总计${variant.requests}`)
+  await expect(section.locator('dl > div').nth(1)).toHaveText(`成功${variant.requests - variant.errors}`)
+  await expect(section.locator('dl > div').nth(2)).toHaveText(`失败${variant.errors}`)
+  const bars = section.locator('.recharts-bar-rectangle path')
+  await expect(bars).toHaveCount(variant.errors > 0 ? 3 : 2)
+  for (const bar of await bars.all()) {
+    const box = (await bar.boundingBox())!
+    expect(box.width).toBeGreaterThan(variant.width > 500 ? 1.5 : 0.7)
+    expect(box.height).toBeGreaterThan(20)
+    await expect(bar).toHaveAttribute('stroke-width', '0.75')
+  }
+  expect(await drawer.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  if (variant.width > 500) {
+    await bars.first().hover()
+    await expect(section.locator('.recharts-tooltip-wrapper')).toContainText(`成功 : ${variant.requests - 1 - variant.errors}`)
+    await expect(section.locator('.recharts-tooltip-wrapper')).toContainText(`失败 : ${variant.errors}`)
+  }
+  await drawer.getByRole('heading').hover()
+  await page.screenshot({ path: `test-results/channel-timeline-${variant.width}-${variant.theme}.png`, animations: 'disabled' })
+  // Switching windows keeps totals intact; the 7-day view still uses the existing hourly aggregation.
+  for (const [name, hours] of [['近 6 小时', '6'], ['近 7 天', '168']]) {
+    await drawer.getByRole('button', { name }).click()
+    await expect.poll(() => windows.at(-1)).toBe(hours)
+    await expect(section.locator('dl > div').nth(0)).toHaveText(`总计${variant.requests}`)
+    await expect(bars).toHaveCount(variant.errors > 0 ? 3 : 2)
+  }
+})
+
 test('审计页：空态、条件进 URL、行展开多出的 detail、加载更多带 before 游标', async ({ page }) => {
   await prepare(page)
   const queries: URL[] = []

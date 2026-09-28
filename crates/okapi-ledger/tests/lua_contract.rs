@@ -100,6 +100,7 @@ fn reserved_balance(out: &ReserveOutcome) -> i64 {
         ReserveOutcome::Reserved {
             balance_after,
             pool: Pool::Wallet,
+            ..
         } => balance_after.as_micros(),
         other => panic!("应从钱包预扣成功：{other:?}"),
     }

@@ -24,6 +24,8 @@ pub enum PricingError {
 /// 配置编译（PriceBook）错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
+    #[error("invalid_base_price_per_1m_micro")]
+    InvalidBasePrice,
     #[error("duplicate_model: {0}")]
     DuplicateModel(String),
 

@@ -65,9 +65,12 @@ if not sub or not sub_until then return {0, 'ADMISSION_STATE_INVALID'} end
 
 local field = 'avail'
 local pool = 0
+local epoch = ''
 if sub > 0 and now < sub_until then
     field = 'sub'
     pool = 1
+    epoch = redis.call('HGET', KEYS[1], 'sub_epoch') or ''
+    if epoch ~= '' and not ledger_epoch(epoch) then return {0, 'ADMISSION_STATE_INVALID'} end
 else
     local bal = integer(redis.call('HGET', KEYS[1], 'avail') or '0', true)
     if not bal then return {0, 'ADMISSION_STATE_INVALID'} end
@@ -79,9 +82,11 @@ end
 -- Keep large safe integers as decimal strings when passing them to Redis.
 redis.call('HINCRBY', KEYS[1], field, est == 0 and '0' or '-' .. ARGV[2])
 if durable_slots then redis.call('HSET', KEYS[1], 'hc:' .. ARGV[9], tostring(durable_slots)) end
-redis.call('HSET', KEYS[1], 'r:' .. ARGV[1], ARGV[2] .. '|' .. ARGV[3] .. '|' .. ARGV[9] .. '|' .. pool)
+local receipt = ARGV[2] .. '|' .. ARGV[3] .. '|' .. ARGV[9] .. '|' .. pool
+if epoch ~= '' then receipt = receipt .. '|w:' .. epoch end
+redis.call('HSET', KEYS[1], 'r:' .. ARGV[1], receipt)
 redis.call('INCR', KEYS[2]); redis.call('EXPIRE', KEYS[2], 120)
 redis.call('INCRBY', KEYS[3], ARGV[8]); redis.call('EXPIRE', KEYS[3], 120)
 redis.call('INCR', KEYS[4]); redis.call('EXPIRE', KEYS[4], 172800)
 redis.call('INCR', KEYS[5]); redis.call('EXPIRE', KEYS[5], 3600)
-return {1, redis.call('HGET', KEYS[1], field), pool}
+return {1, redis.call('HGET', KEYS[1], field), pool, epoch}

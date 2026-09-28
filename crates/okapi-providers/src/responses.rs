@@ -15,8 +15,7 @@ use crate::types::ChatEvent;
 use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use okapi_api::{CompletionTokensDetails, PromptTokensDetails, UsageProbe};
-use serde::Deserialize;
+use okapi_api::UsageProbe;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -98,65 +97,23 @@ pub async fn count_input_tokens_at(
     })
 }
 
-/// Responses 响应对象里的 usage 形状（官方 `ResponseUsage`）。
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
-struct ResponsesUsage {
-    #[serde(default)]
-    input_tokens: u32,
-    #[serde(default)]
-    output_tokens: u32,
-    #[serde(default)]
-    input_tokens_details: InputDetails,
-    #[serde(default)]
-    output_tokens_details: OutputDetails,
-}
-
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
-struct InputDetails {
-    #[serde(default)]
-    cached_tokens: Option<u32>,
-    #[serde(default)]
-    cache_write_tokens: Option<u32>,
-}
-
-#[derive(Debug, Default, Clone, Copy, Deserialize)]
-struct OutputDetails {
-    #[serde(default)]
-    reasoning_tokens: u32,
-}
-
-impl From<ResponsesUsage> for UsageProbe {
-    fn from(u: ResponsesUsage) -> Self {
-        Self {
-            // 口径与降级链一致：input_tokens 含缓存命中；output_tokens 含 reasoning
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            prompt_tokens_details: PromptTokensDetails {
-                cached_tokens: u.input_tokens_details.cached_tokens.unwrap_or(0),
-                cache_write_tokens: u.input_tokens_details.cache_write_tokens.unwrap_or(0),
-                cache_read_reported: u.input_tokens_details.cached_tokens.is_some(),
-                cache_write_reported: u.input_tokens_details.cache_write_tokens.is_some(),
-                audio_tokens: 0,
-                image_tokens: 0,
-            },
-            completion_tokens_details: CompletionTokensDetails {
-                reasoning_tokens: u.output_tokens_details.reasoning_tokens,
-                audio_tokens: 0,
-            },
-        }
-    }
-}
-
 /// 从 Responses `usage` 对象解析计费用量（对象缺失或形状不符 → None，交结算兜底估算）。
 #[must_use]
 pub fn usage_from_responses(usage: Option<&Value>) -> Option<UsageProbe> {
     let raw = usage?;
-    if !raw.is_object() {
+    if raw.is_null() {
         return None;
     }
-    serde_json::from_value::<ResponsesUsage>(raw.clone())
-        .ok()
-        .map(UsageProbe::from)
+    Some(
+        serde_json::from_value::<UsageProbe>(serde_json::json!({
+            "prompt_tokens": raw.get("input_tokens"),
+            "completion_tokens": raw.get("output_tokens"),
+            "total_tokens": raw.get("total_tokens"),
+            "prompt_tokens_details": raw.get("input_tokens_details"),
+            "completion_tokens_details": raw.get("output_tokens_details"),
+        }))
+        .unwrap_or_else(|_| UsageProbe::invalid()),
+    )
 }
 
 /// 终态事件：`response.completed` / `.incomplete` / `.failed` 之后流即结束，
@@ -407,7 +364,8 @@ mod tests {
             "input_tokens_details": {"cached_tokens": 40, "cache_write_tokens": 20}
         })))
         .unwrap()
-        .to_token_usage();
+        .to_token_usage()
+        .unwrap();
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.cached_tokens, 40);
         assert_eq!(usage.cache_write_tokens, 20);
@@ -423,8 +381,10 @@ mod tests {
         })))
         .unwrap()
         .to_token_usage();
-        assert_eq!(oversized.cache_write_tokens, 20);
-        assert_eq!(oversized.prompt_uncached(), 0);
+        assert!(
+            oversized.is_err(),
+            "invalid segments must not be clipped into a bill"
+        );
     }
 
     #[test]

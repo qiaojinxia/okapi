@@ -13,9 +13,35 @@
 
 ## 当前核对结果
 
+**总耗时、配对输出速度及有效分位数阶段（2026-09-28）：** 新增耗时采集标记和独立条件聚合，未采集/坏元数据不再变成有效零。管理分析、个人用量/活动、模型/渠道及时间线的速度使用同批有效耗时请求的输出；PG 平均耗时统一失败样本及向下取整。新旧聚合择一恢复，历史不足返回 null 和覆盖信息，原金额、请求和 Token 总量保留。九组关联回归 `/tmp/okapi-latency-related-1.log` 实际退出 **0**：**87 passed、0 failed/ignored/filtered、0 软跳过**，9 个完整块，无解析错误或未结束块；包含统计 17 项和四入口 Token/扣费/PG/outbox/CH 交叉 7 项。1,197 个后端相关文件在本次运行前后指纹一致。收尾全工作区所有目标严格 Clippy、格式、金额浮点守卫、错误码守卫、API 清单及差异空白检查均通过，源文件指纹复核仍一致。没有重跑完整工作区测试，不把小规模查询观察当成生产性能验收。详见 [总耗时与速度核对](latency-statistics-audit.md)。
+
+**平均首字时间与加权统计阶段（2026-09-28）：** 新增独立条件聚合，管理趋势、拆分、堆叠及个人用量/活动按流式有效样本计算均值，明确 0ms 保留、非流式及未采集排除。升级时仅为缺口粒度恢复 raw，数据源择一，历史不足时返回 null 和覆盖信息；旧金额、请求、Token 聚合不变。PG 账单首字均值统一整数取整及失败前已采集样本，堆叠缓存采集计数也补齐。首次八套件 **76 passed、1 failed**：唯一失败为旧库夹具遗漏删除新增依赖 MV；修复夹具后整个统计套件 **14 passed**、实际退出 0。其余七个关联套件 63 项在首次运行通过，包括此前未执行的基础价格发布 HTTP。运行分别记录，不宣称新的全工作区回归。收尾源码快照 1,194 个文件一致；初次运行期间网关错误映射与两个准入测试曾并行变化，不能声称其全程冻结。最终 workspace/all-targets 严格 Clippy（`/tmp/okapi-ttft-average-clippy-3.log`）、格式、金额浮点守卫、错误码守卫及 API 清单检查均通过。详见 [平均首字核对](ttft-average-accounting.md)。
+
+**Anthropic Token 严格解析与转换核对（2026-09-28）：** JSON、原生 SSE 和转换 SSE 共用累计用量校验，后续输入/缓存更新生效，重复累计事件不重复计数，非法值持续阻止正常结算。实际 HTTP 发现并修复二次 JSON 转换丢弃内部非法标记的问题；Messages、Chat、Responses、Gemini 四入口的 PG 账单、余额、outbox 和 CH 统计验证一致。修复后 13 个关联网关套件 **109 passed**（`/tmp/okapi-anthropic-usage-http-2.log`），core 套件 **336 passed**、含金额 172 项（`/tmp/okapi-anthropic-usage-core-2.log`），基础价格实现更新后交叉 HTTP 套件 **23 passed**；各次实际退出 0，无失败、忽略、筛选、软跳过、解析错误或未结束块。后加的基础价格单元套件另有 4 项通过，不与前面相加。core 运行期间 1,188 个后端相关文件指纹一致；HTTP 期间本专项 11 个文件不变，但存在其他并行代码变化。本阶段没有重新执行全工作区测试。两种缓存写入 TTL 独立计价、估算来源标记、平均 TTFT 口径和真实账单仍待验证。详情及首轮失败见 [Anthropic 核对记录](anthropic-token-accounting.md)。
+
+**此前 Anthropic 阶段收尾的静态检查与变动边界：** workspace/all-targets 严格 Clippy `/tmp/okapi-anthropic-usage-clippy-11.log` 实际退出 0；随后并行密钥限额改动进入 gateway/ledger/store。额外基础价格 HTTP 套件在编译时因 `ApiKeyPatch` 新增 `quota_micro` 未同步到管理员构造处退出 101，尚未执行测试；最终格式检查未通过，错误码守卫发现新 `key_limits_session_required` 缺双语文案。不能把之前通过的检查扩大为当前工作区全绿。并行功能完成后需再验证新代码；本轮没有覆盖该实现、修改前端或部署。
+
+**Chat/Responses/Gemini 用量解析阶段（2026-09-28）：** 已移除按固定顺序截取模态计数的归一方式，保留缓存与音频/图片交集、图片输出以及缺失/明确零/非法 usage 的区别。实际 HTTP 专项及完整运行验证 JSON/SSE、协议转换、PG 账单、余额、outbox 与 CH Token 总量和命中率一致；非法用量退款且不重放上游。最终完整日志 `/tmp/okapi-protocol-usage-full-1.log` 实际退出 **0**：**1,142 passed、0 failed/ignored/filtered、0 软跳过**，138 个完整块，无解析错误或未结束块；domain 13、pricing 39（含 parity 5）、ledger 120，共 172 项金额测试包含在内。434 条权限/公开契约/协议探针单列，不等同于业务覆盖。1,184 个后端文件在完整运行前后指纹一致；随后仅做 `console/mod.rs` 的模块声明等价排序并同步 API 清单源指纹。最终 workspace/all-targets 离线严格 Clippy（`/tmp/okapi-protocol-usage-clippy-6.log`，实际退出 0）、格式、金额浮点守卫、错误码守卫及 API 清单检查通过。对并行密钥趋势测试只提取重复请求，对登录 SQL 只改等价字符串格式，保留其功能。以下 TTFT 阶段的 Clippy 阻断属于较早检查点，已在本阶段修复并复验。平均 TTFT 统一口径、Anthropic 原生严格解析、真实供应商联调等仍未完成。详情见 [协议用量核对](protocol-token-accounting.md)。
+
+**TTFT 分位数与查询参数后续核对（2026-09-28）：** 新增仅聚合流式有效首字样本的模型/渠道 MV，保留原金额、请求与 Token 聚合；升级前数据从完整 raw 重算，覆盖不足时分位数返回 `null` 和覆盖字段，明确测得 0ms 仍有效。实际旧表升级、明细删除、重放和跨接口一致性测试通过。特殊模型名暴露的 CH HTTP 参数 escaped 编码缺失一并修正，新增中文、控制字符、字面转义、SQL 片段及 URL 字符往返测试。`/tmp/okapi-ttft-related-1.log` 实际退出 **0**：7 个套件 **134 passed、0 failed/ignored/filtered、0 软跳过**，无解析错误或未结束块；与此前完整回归不相加。9 个本次实现/测试文件指纹全程一致，但个人密钥趋势代码和测试在并行更新，未声称全部工作区冻结。对应 workspace/lib/bins 加 7 个测试目标严格 Clippy 通过；最新 workspace/all-targets 检查被另一处新增 `key_trends.rs` 测试长度告警阻断（实际退出 101），未覆盖或回退并行工作。前端时间线分位数/TPS 合桶取最大值及缺失值显示、旧平均 TTFT 显式零值口径仍待修正。详情见 [专项核对](token-statistics-audit.md)。
+
+**缓存与模态交叉计费阶段（2026-09-28）：** `/tmp/okapi-cache-full-1.log` 实际退出 0，**1,115 passed、0 failed/ignored/filtered、0 软跳过**，无解析错误或未结束块。1,168 个后端源码、配置、SQL、Lua 和 SQLx 文件在测试前后指纹一致；隔离空库正式迁移到 0025。workspace/all-targets 离线严格 Clippy（`/tmp/okapi-cache-clippy-6.log`）、格式和静态守卫通过。此前 171 项金额和 85 项 HTTP 局部运行不另行相加。首次金额测试误将新 PG 与旧 Redis 搭配，换用配套隔离 Redis 后通过，原失败日志保留。此结果早于随后的 Token 统计修正，不能推广为所有供应商、全部业务场景正确。
+
+**Token 统计专项核对：** 按用户要求聚焦输入、输出、缓存读写、推理、总量、命中率、TPM、TPS。已修正 Realtime 模态遗漏和重复完成事件、多次产出的缓存采集完整性、PG 显式未知标记被正缓存数覆盖、大总量比率溢出、PG 计数截断与无样本 TTFT 显示。最终 `/tmp/okapi-token-stats-full-2.log` 实际退出 **0**：**1,125 passed、0 failed/ignored/filtered、0 软跳过**，135 个完整块，无解析错误或未结束块。1,171 个后端文件指纹全程一致；独立 PG 空库正式迁移至 0025，配套 Redis DB2 和独立 CH 服务避免旧数据与去重批次编号干扰。最终 workspace/all-targets 离线严格 Clippy（`/tmp/okapi-token-stats-clippy-6.log`）实际退出 0，格式、静态守卫和 API 清单检查通过。433 条权限/公开契约/协议探针单列，不等同于完整业务覆盖。口径、用例和未覆盖边界见 [专项核对](token-statistics-audit.md)。首轮 `/tmp/okapi-token-stats-full-1.log` 在编译阶段发现新测试合并两个路由器重复注册 healthz 后主动终止，实际退出 130、无测试结果；修正组装后才取得上述最终结果，不拼接不同运行计数。未修改前端、未部署或重启开发服务；新增改动未提交或推送。
+
+**此前直接 Images SSE 阶段：** 直接 Images SSE、Token 计费与用量采集通过最终关联回归 `/tmp/okapi-image-stream-related-2.log`（实际退出 0，182 passed）；金额与上游适配组合套件 `/tmp/okapi-image-stream-money-providers-1.log` 实际退出 0，314 passed，其中金额 164、上游适配 150。均无失败、忽略、筛选、软跳过、解析错误或未结束块，不合并计数为全工作区结果。最终 workspace/all-targets 离线严格 Clippy、格式及静态守卫通过，1,176 个后端验证文件在最终测试期间未变化。以下 1,056 项完整回归属于此前订阅周期版本，本阶段未重跑全工作区。缓存交叉明细、原生 Batch Token 计价及全部核心 API 对标仍未完成。
+
+**此前订阅周期完整回归：** `/tmp/okapi-sub-window-full.log` 实际退出 **0**，**1,056 passed、0 failed/ignored/filtered、0 软跳过**，133 个完整块，无解析错误或未结束块。1,151 个后端文件指纹在运行前后完全一致；空库正式迁移器成功执行 0021–0024。普通原子性/周期 33、图片契约 44、订阅 37、批任务 55、历史留存 14、domain 12、pricing 31、ledger 112 均包含在同一次运行；433 条权限/公开契约/协议探针单列。在线及离线严格 Clippy、SQLx 缓存和静态守卫通过。
+
+跨周期原始 6 个真实 HTTP 失败已修复，后续覆盖退款、归档、到期未滚窗、旧凭据、缓存丢失和异步图片。完整运行结束后只新增“普通预扣与长期冻结同时跨周期”的 7 项组合测试，每项验证两种结算顺序。金额套件实际退出 0：162 项通过（domain 12、pricing 31、ledger 119），无失败、忽略、筛选、软跳过或未结束块；新增测试后的 workspace/all-targets 严格离线 Clippy 也实际退出 0。没有修改生产代码，两次测试总数不相加。完整竞品对齐、全部 API 成功业务及真实供应商联调仍未完成，不能以测试总数代替整体目标验收。
+
+支付与归档并发修复后的完整回归 `/tmp/okapi-payment-full-r2.log` 已观察实际退出 **0**：**1,031 passed、0 failed、0 ignored、0 filtered、0 软跳过**，133 个完整套件/文档块，无解析错误或未结束块。支付 24、订阅 37、批任务 55、历史留存 14、domain 12、pricing 31、ledger 111 均包含在这一次运行；433 条权限/公开契约/错误探针另计。在线及离线严格 Clippy、静态守卫通过，1,139 个后端文件全程指纹一致。下一阶段是普通预扣跨订阅周期的资金归属；整体竞品对齐与全部 API 业务验收仍未完成。
+
+支付阶段首轮完整回归 `/tmp/okapi-payment-full.log` 已实际退出 **101**：**1,026 passed、5 failed、0 ignored、0 filtered、0 软跳过**，133 个完整块，无解析错误或未结束块。支付 24 项通过；失败分为 3 项磁盘不足、1 项批任务测试未等待普通请求结算，以及 1 项分区归档并发读取空值。1,139 个后端文件全程指纹一致，完整报告 `/tmp/okapi-payment-full-report.json`。修正与复测证据见文末；不能用此前成功记录替代当前版本的完整验收。
+
 原生 `GET /v1/responses`、HTTP/SSE 桥接和 native/http/auto 协议选择已接入，持久图片异步队列已增加 URL 转存与私有 S3 后端。长期冻结、确认前取消、幂等结算及 worker 恢复已具备；后续已接入默认关闭的原生 Batch API、逐项结果解析、按成功图片结算、未知提交查找和删除/到期回收。任务与 pending 资金意图原子创建，支持原 API key 归属、默认 20 条后端分页、组合筛选及结算后单图/整批 ZIP 私有下载。统计补记已接入成员消费、月 Token/金额、渠道日消费和实时 KPI，真实耗时取封存时间；创建和发送前复查现有软限额。批任务现已与普通调用共用密钥并发上限，满额保持排队且不冻结资金；取消、未知提交和重启期间保留占用，真正结算关闭才释放。
 
-最新完整离线工作区回归 `/tmp/okapi-sub-lifecycle-full.log` 已观察实际退出 **0**：**1,010 passed、0 failed、0 ignored、0 filtered、0 软跳过**，133 个完整套件/文档块，无解析错误或未结束块。订阅 HTTP 36、domain 12、pricing 31（含对拍/性质）、ledger 111 均包含在这一次运行；433 条权限/公开契约/错误探针另计。严格离线 workspace/all-targets Clippy、静态守卫通过，1,129 个后端文件全程未变。本阶段修复续期与过期竞态、失败用户阻塞恢复队列、套餐可兑现性与支付换算边界。支付回调金额/币种/状态校验和普通预扣跨窗语义仍未完成，不能据此宣称完整对标完成。未修改/构建前端、未部署。
+支付修复前的完整离线工作区回归 `/tmp/okapi-sub-lifecycle-full.log` 已观察实际退出 **0**：**1,010 passed、0 failed、0 ignored、0 filtered、0 软跳过**，133 个完整套件/文档块，无解析错误或未结束块。订阅 HTTP 36、domain 12、pricing 31（含对拍/性质）、ledger 111 均包含在这一次运行；433 条权限/公开契约/错误探针另计。严格离线 workspace/all-targets Clippy、静态守卫通过，1,129 个后端文件全程未变。本阶段修复续期与过期竞态、失败用户阻塞恢复队列、套餐可兑现性与支付换算边界。支付回调金额/币种/状态校验和普通预扣跨窗语义仍未完成，不能据此宣称完整对标完成。未修改/构建前端、未部署。
 
 此前完整离线工作区回归 `/tmp/okapi-subscription-full-r2.log` 已观察实际退出 **0**：**1,000 passed、0 failed、0 ignored、0 filtered、0 软跳过**，133 个完整套件/文档块，无解析错误或未结束块。包括订阅 HTTP 26 项、domain 12、pricing 31（5 对拍、6 性质）、ledger 111；433 条权限/公开契约/错误探针另计。严格 workspace/all-targets 离线 Clippy 与静态守卫通过，1,116 个后端文件全程未变。订阅权益快照、同源幂等、受理后补发和财务恢复已具备本地业务证据，迁移旧条款、普通预扣跨窗口语义等仍有边界，见 [订阅持久发放契约](durable-subscriptions.md)。这不是完整竞品对齐或生产性能验收；未修改/构建前端、未部署。
 
@@ -48,7 +74,7 @@
 | Responses WebSocket | `gateway_responses_ws`、`gateway_responses_ws_bridge`、`responses_ws_transport`、`http_tls_tests` | 多轮、增量输入、连接/请求并发、异常关闭、断线结算、HTTP 桥接与原生上游 | 原生 GET 入口 14 项测试已通过；HTTP/SSE 桥接及 native/http/auto 选择已接入，15 项桥接测试通过；中途干预和实际供应商联调仍未完成，不能计为完整协议对齐 |
 | Responses 子接口 | `chat::responses_compact`、providers `send_compact_at`、`gateway_responses`、`gateway_token_count` | compact 的原生响应、usage、定价、权限与失败退款；input_tokens 的独立准入、来源标记及无扣费 | compact 4 项集成测试随 13 项 Responses 套件通过；input_tokens 已实现，10 项定向集成测试通过，未做实际供应商联调 |
 | Embeddings / Rerank | `gateway_embeddings` | 数组/编码、模型能力匹配、两种 rerank 形状、usage 与结算 | 最新全量复测通过；证明范围以各套件实际断言为限 |
-| 图片、音频、视频、Realtime | `gateway_images`, `gateway_images_contract`, `gateway_audio`, `gateway_videos`, `gateway_realtime` | 多图/时长定价、上传校验、任务归属、轮询/内容、WS 连接租约、失败退款 | 图片原有 3 项与新增契约 16 项随最新全量通过；JSON 编辑、多图上传、实际张数结算与重定向/容量边界见 [图片契约](images-contract.md)。流式图片与图片 Token 定价仍有缺口；其他证明范围以实际断言为限 |
+| 图片、音频、视频、Realtime | `gateway_images`, `gateway_images_contract`, `gateway_audio`, `gateway_videos`, `gateway_realtime` | 多图/时长定价、上传校验、任务归属、轮询/内容、WS 连接租约、失败退款 | 最新图片关联回归包含原有 3 项与契约 75 项（含 11 项 Token、20 项 SSE 专项）；同步/持久异步 Token 计价、实时预览、累计/逐图用量、断线与部分成功结算、改价/规则栈、TPM、订阅来源与旧按张兼容通过。缓存交叉明细及原生 Batch Token 计价仍有缺口，见 [图片契约](images-contract.md)；其他媒体仅以已有用例实际断言为限 |
 | 异步图片与批量任务 | `gateway::images::tasks`、`image_tasks` / `image_batches` store、`worker`、`providers::batch`、`ledger::holds` | 创建、幂等、持久任务、重启恢复、轮询、取消、归属、下载、失败退款、产物回收 | 原生协议 31 项、长期冻结/批任务存储 52 项、Batch HTTP 业务 55 项及已有图片契约、worker 恢复随最新全量通过。未知提交查找、Vertex 结果收集、删除/到期回收、ZIP 和筛选已具备受控业务证据；完整准入、最大下载容量和独立 S3/真实云端联调仍未完成。见 [图片契约](images-contract.md)、[原生批处理边界](native-image-batches.md)、[批任务存储契约](native-image-batch-jobs.md) |
 | 路由、调度、凭证池 | `gateway_m2_sched`, `gateway_routing_prefs`, `gateway_capabilities`, `gateway_retry_policy`, `gateway_midstream`, `channel_key_lifecycle` | 权重/优先级、粘性、并发/限流、重试边界、冷却、流中断不重复收费 | 最新全量复测通过；证明范围以各套件实际断言为限 |
 | 价格与账本 | pricing/ledger crate tests、`billing_surface_parity`, `gateway_pricing_rules`, `gateway_tier`, `gateway_upstream_cost`, `gateway_untrusted_usage` | 微美元精度、缓存读写、tier、模型实际身份、幂等、并发、原额退款、未知 usage 不伪造零费用 | 最新全量复测通过；价格规则现为 12 项，包含新增 5 项负载生命周期回归，实际证明范围见下文 |
@@ -749,7 +775,7 @@ Gemini/Vertex/GCS 新协议层、固定版本依据、20 项协议测试以及�
 本阶段最终完整运行 `/tmp/okapi-sub-lifecycle-full.log` 实际退出 **0**，报告 `/tmp/okapi-sub-lifecycle-full-report.json`：**1,010 passed、0 failed、0 ignored、0 filtered、0 软跳过**，133 个完整套件/文档块，解析错误/未结束块均为空。订阅 36、domain 12、pricing 31、ledger 111 全部包含在同一次运行内；433 条权限/公开契约/错误探针仍单列。`/tmp/okapi-sub-lifecycle-full-source-manifest.json` 与 `-source-verification.json` 确认 1,129 文件全程无新增、删除或内容变化。金额专项 `/tmp/okapi-sub-lifecycle-money-report.json` 154 项通过，最终离线严格 Clippy `/tmp/okapi-sub-lifecycle-clippy-final.log` 退出 0，静态守卫通过。此后只补文档，未改源码或测试、未改前端、未部署；下一优先阶段为支付回调契约和有效签名负例，整体目标继续。
 
 
-## 支付回调契约与交易认领（专项通过，完整回归待运行）
+## 支付回调契约与交易认领（首轮失败修复后，完整复测通过）
 
 新增有效签名 HTTP 负例的首轮 `/tmp/okapi-payment-validation-red.log` 实际退出 101，12 项全部复现：金额/商户/网关不匹配仍核销、交易号跨用户复用、已付订单替换交易号、Epay URL 编码与额外签名字段解析错误、Stripe 未支付提前发放、异步成功漏发、会话/金额/币种/状态未核对、旧签名重放、多 v1 轮换签名误拒绝。不是仅凭源码推断。
 
@@ -767,3 +793,91 @@ Epay 先按表单协议 URL 解码全部字段，再排序验签；拒绝重复�
 - `/tmp/okapi-payment-money.log` 实际退出 0，domain 12、pricing 31（含 5 对拍与 6 性质）、ledger 111，共 154 passed，0 failed/ignored/filtered；报告 `/tmp/okapi-payment-money-report.json`。
 - 严格 Clippy workspace/all-targets 在线及离线检查均退出 0，格式、diff、计费红线、错误码和 API 路由清单守卫通过。新增 6 个 SQLx 查询快照。
 - 支付改动后的完整工作区回归尚未运行；上文 1,010 passed 属于支付修复前的订阅阶段，不冒充当前版本全量结果。新环境数据库 `okapi_payment_20260927`、Redis 36383、NATS 34227、CH 38128 已就绪；本轮没有修改或构建前端，没有部署、重启开发服务或调用真实支付账号。
+
+
+### 支付阶段完整回归的失败取证（复测前）
+
+首次完整运行 `/tmp/okapi-payment-full.log` 在新数据库 `okapi_payment_20260927` 上由正式 migrator 成功应用 0023。运行中发现 3 个订阅隔离数据库创建失败，PostgreSQL 返回 SQLSTATE 53100 / No space left on device；Docker 虚拟磁盘仅剩约 42 MB，宿主机仍有约 447 GiB。没有清空测试库或提高业务限额，检查镜像历史与容器引用后，仅删除无标签、无容器使用的旧 Okapi release 编译缓存 `697c2fc21a612b5fe025a7ea3110a5e5a8a3d633d679bb1fb160c8c786d7fa87`（`docker image rm --no-prune`，保留父镜像）；磁盘恢复约 2.5 GiB。
+
+还发现 `gateway_native_image_batches::concurrency::normal_http_inflight_keeps_batch_funding_pending_without_freezing_or_failing` 在只收到普通请求响应头后立即重试批任务，偶发观察到 funding。失败库 `okapi_batch_9b523b75dbcb4528853096fc1ae1393b` 中批任务仍 pending / funding、无 error_code；普通请求随后有一条 committed 40,000 micro 账单，billing_sync 已空，对应 Redis 并发计数为 0。用例需要消费完整响应并等待被跟踪的结算结束，再断言槽位可重新使用；不能删除保护并发额度的等待逻辑来迎合过早断言。完整进程尚未结束时不记录最终通过数。
+
+
+首轮完整运行现已结束，实际退出 101：1,026 passed、5 failed、0 ignored/filtered/软跳过，133 个完整块，无解析错误或未结束块；433 条权限/公开契约/错误探针另计。源指纹验证确认 1,139 个后端文件在整个执行期未变化。
+
+最后一项失败为 `worker_retention::concurrent_pruners_carry_each_partition_once`：`pg_get_expr` 读取被另一个清理者删除的分区 OID 时可以返回 NULL，而查询强制非空导致整次清理报错。修复将分区发现放在共享历史锁事务内，在逐分区归档取得排他锁前释放；定义允许为空，但不能通过边界校验，归档仍要求身份及时间边界重新匹配。原子结转、账单回执、DROP 无 CASCADE 和失败回滚约束保留。批任务测试改为消费 JSON 响应、等待被跟踪结算并断言在途与普通预扣均归零，再验证批任务占用槽位。修复后正在复测订阅、批任务和历史留存三个完整套件；尚未据此记录通过。
+
+
+修复定向 `/tmp/okapi-payment-recovery-targeted.log` 实际退出 **0**：订阅 37、原生批任务 55、历史留存 14，共 **106 passed、0 failed/ignored/filtered**，无软跳过或解析错误。此前五项失败全部在本次重新执行并通过，包括并发归档只结转一次和读锁与清理互斥。格式、diff、禁浮点、57 项错误码和 API 清单守卫通过；下一步严格 Clippy、更新 SQLx 离线元数据和独立新环境完整复测。
+
+
+归档修复后的严格 Clippy：`/tmp/okapi-payment-recovery-clippy-online.log` 与 `/tmp/okapi-payment-recovery-clippy-offline.log` 均观察实际退出 0，workspace/all-targets、`-D warnings`。在线编译生成并替换一份分区查询 SQLx 元数据，删除已不使用的强制非空版本。第二轮完整回归已启动，输出 `/tmp/okapi-payment-full-r2.log`：新空库 `okapi_payment_r2_20260927`（启动前 public 表数 0），独立 Redis 36384、NATS 34228、ClickHouse 38129；采用完整工作区 `--no-fail-fast --test-threads=1`，未筛选套件。启动前记录 1,139 个后端文件指纹 `/tmp/okapi-payment-full-r2-source-manifest.json`，待实际退出后再记录完整结果与指纹对比。本轮没有提交或推送新修复，没有修改或构建前端、没有部署或重启开发服务。
+
+
+第二轮最终 `/tmp/okapi-payment-full-r2.log` 实际退出 **0**，报告 `/tmp/okapi-payment-full-r2-report.json`：**1,031 passed、0 failed/ignored/filtered、0 软跳过**，133 个完整块，解析错误和未结束块均为空。支付 24、订阅 37、批任务 55、历史留存 14、domain 12、pricing 31（5 对拍、6 性质）、ledger 111 都在本次完整执行中通过；433 条权限/公开契约/错误探针单列。空库正式迁移器执行的 0021/0022/0023 均为 success，源指纹前后 1,139 文件无变化。首轮五项失败的日志仍保留；此次结果证明上述局部修复通过完整后端复测，不等于所有竞品能力或真实供应商联调完成。
+
+
+## 普通预扣跨订阅周期（已复现，修复中）
+
+在支付与归档修复完整回归成功后，新增 `gateway_reserve_atomicity::windows` 8 个真实网关 HTTP 用例。每个场景独立数据库、随机 Redis 用户 ID；上游闸门保证请求在旧周期进入，滚窗使用真实墙上时间到期，新的窗口起点不会落在未来。两个同周期控制验证实际扣费 24 micro、失败全退、钱包不变、PG 账本及修复一致。测试辅助 `Bed::new_at` 仅允许显式选择隔离库，不修改生产代码。
+
+首轮 `/tmp/okapi-sub-window-red.log` 实际退出 **101**：**2 passed、6 failed、0 ignored、9 filtered**，报告 `/tmp/okapi-sub-window-red-report.json`。六项均进入有效业务流程后在额度断言失败，不是环境或编译失败：
+
+- 旧请求失败/超时：新周期 2,000 变为 2,048 micro（把旧预扣 48 退入新周期）。
+- 旧请求成功：新周期 2,000 变为 2,024 micro（旧预扣 48 减实际 24 的差额进入新周期）。
+- 换套餐：新配额 5,000 变为 5,024 micro。
+- 取消订阅：余额已归零，迟到失败退款却恢复为 48 micro。
+- 超时后迟到成功场景在超时退款后已发现额度错误，因此尚未执行到后续成功结算断言；保留该后续验证，不能把它计为已覆盖通过。
+
+只读取证 `/tmp/okapi-sub-window-forensics.json` 显示错误已写入持久账本：`okapi_window_ba26ee72c21c45ecb475ff66da929a70` 的 `sub_reset` 多带入 48，`commit=-24` 后 PG 订阅合计 2,024；`okapi_window_40082a67194a4b92b52b6a6601496dbb` 取消时只过期 1,952，PG 仍保留旧预扣 48；换套餐样本合计 5,024。同周期对照合计分别 2,000 和 1,976，钱包全为 10,000,000。错误不是仅出现在页面或 Redis，单独禁止 Redis 回补会被后续余额修复重建回来。
+
+下一修复需要给普通预扣及成功账单保留原订阅周期，并统一滚窗/取消、普通退款、超时清理、迟到结算、历史退款与余额恢复的语义。长期图片冻结已经有独立 source_window 契约，不能为修复普通请求而破坏它；旧凭据和历史账单缺周期身份的兼容边界也要明确验证。当前只新增回归与取证，尚未实施资金修复；没有修改前端、部署、提交或推送本阶段改动。
+
+
+跨周期首版修复 `/tmp/okapi-sub-window-green-2.log` 实际退出 0：8 passed、0 failed/ignored、9 filtered，原六项失败与两个对照均通过。`green-1` 因未先创建 SQLx 输出目录而编译退出 101，没有执行用例；创建隔离输出目录后复测，不计为业务失败或通过。实现见 [周期资金契约](subscription-window-accounting.md)：预扣/账单/待结算/归档保留周期，旧请求按真实费用记录并修订旧额度的过期额，新周期不受影响。现代切窗暂缓无法证明归属的旧凭据，历史 NULL 不伪造周期。
+
+扩展 `/tmp/okapi-sub-window-http-1.log` 实际退出 0：**22 passed、0 failed/ignored/filtered**，包含原有 9 项原子性回归与 13 项周期/退款测试。新增真实 `POST /admin/billing/refund` 检查当前周期可用入账、滚窗/取消/换套餐零入账、重复退款、密钥用量回冲、四金额 outbox，以及实际分区归档后的 source_window 保留和退款。此后继续增加“时间已过但尚未滚窗”边界与旧凭据保护，因此这不是所有最新改动的最终验收。
+
+金额阶段新建空库 `okapi_window_suite_20260928`、Redis 36385、NATS 34229、ClickHouse 38130。SQLx 编译库 `okapi_sub_lifecycle_20260927` 原子应用 0024 并记录实际 SHA-384；8 个新增/变化在线查询元数据已复制，新的独立测试库由正式 migrator 执行全部迁移。`/tmp/okapi-sub-window-money-1.log` 因测试匹配未加 `source_window` 而编译退出 101，未执行业务测试；补上钱包 `None` 断言后 `/tmp/okapi-sub-window-money-2.log` 实际退出 **0**：**154 passed、0 failed/ignored/filtered**（domain 12、pricing 31，含 5 对拍与 6 性质；ledger 111），无软跳过、解析错误或未结束块。未部署、未修改或构建前端、未提交新改动；用户要求的 push 已执行，远端仍为既有 `02e5b15`。
+
+随后增加真实 HTTP 旧凭据关闭、时钟已到而未滚窗、Redis 整个余额 hash 丢失，以及活账单/归档账单退款事务故障注入。`/tmp/okapi-sub-window-http-2.log` 实际退出 101：28 passed、2 failed、0 ignored/filtered；两个失败都是测试快照查询把 `billing_events.event_id` 写成 `id`（SQLSTATE 42703），尚未执行到退款故障断言，不能算生产退款失败。修正字段后 `/tmp/okapi-sub-window-http-3.log` 实际退出 **0**：**30 passed、0 failed/ignored/filtered**，无软跳过或解析异常。两个故障用例均在账单状态和 refund 事件已写入后拒绝过期修订，核对完整 PG 财务快照、待入账任务及 Redis hash 不变，移除故障后真实 HTTP 重试仅冲销一次；四金额含 upstream_cost 均有断言。
+
+异步图片另增加真实创建、worker 执行、轮询及私有图片读取场景，覆盖换套餐、取消和换套餐后 Redis 丢失；旧预扣三张、实际上游只成功一张时仍须按原周期的实际费用结算。首次关联命令 `/tmp/okapi-sub-window-related-1.log` 因测试 `AppError` 不实现 `std::error::Error` 而编译退出 101，没有运行用例；改成显式测试断言后，`/tmp/okapi-sub-window-related-2.log` 实际退出 **0**：**186 passed、0 failed/ignored/filtered**，无软跳过、解析错误或未结束块。包含订阅 37、图片 3、图片契约 44、批任务 55、普通原子性/周期 33、历史留存 14；33 已包含上述 30 项，不累加为新的业务覆盖数。
+
+本轮测试磁盘剩余约 750 MB。只读核对镜像历史、标签与全部容器引用后，仅删除无标签且无任何容器使用的旧 Okapi release 编译缓存 `b82453097fd3f60c233f59659d2d79f62a25540055f489c16805726c742d0693`（`docker image rm --no-prune`，保留父镜像），恢复约 3.2 GiB 空间；开发容器、测试数据库和失败取证均保留。
+
+当前版本 `/tmp/okapi-sub-window-money-3.log` 实际退出 **0**：**155 passed、0 failed/ignored/filtered**（domain 12、pricing 31、ledger 112），包含新增周期冲突拒绝、同周期实际费用超过预扣、跨周期零资金变动关闭、退款 `closed` 标识、并发槽释放及重复关闭不动账。既有坏凭据用例扩展了错误 pool/空周期/非法字符/额外字段，失败前后比较 Redis 原始快照。
+
+严格 Clippy 前四次要求拆分过长函数、调整局部 import 和多余借用，第五次发现新测试辅助返回类型误用了私有路径；日志 `online-1` 至 `online-5` 均保留，实际退出均为 101。修正后 `/tmp/okapi-sub-window-clippy-online-6.log` 及 `/tmp/okapi-sub-window-clippy-offline.log` 均实际退出 **0**，workspace/all-targets、`-D warnings`；实际在线生成 650 份查询元数据与当前 `.sqlx` 一致，没有手工伪造。格式、diff、禁浮点、57 项错误码与 API 清单守卫通过。
+
+完整回归 `/tmp/okapi-sub-window-full.log` 已启动：新数据库 `okapi_window_full_20260928`（public 表数 0）、独立 Redis 16386、NATS 14230、ClickHouse 18131，服务就绪检查通过。最初选用的 Redis 36386 被占用，仅移除本轮刚创建且从未启动的空容器，改用上述端口，未停止原端口服务。完整命令采用 workspace、offline、no-fail-fast、test-threads=1，未筛选套件。启动前 `/tmp/okapi-sub-window-full-source-manifest.json` 记录 1,151 个后端源文件/Lua/迁移/SQLx/配置指纹，实际退出后再记录完整结果与指纹比对。未修改/构建前端、未部署，本阶段改动尚未提交。
+
+
+普通周期阶段完整回归 `/tmp/okapi-sub-window-full.log` 已观察实际退出 **0**，报告 `/tmp/okapi-sub-window-full-report.json`：**1,056 passed、0 failed/ignored/filtered、0 软跳过**，133 个完整套件/文档块，解析错误与未结束块为空，433 条权限/公开契约/协议探针单列。`/tmp/okapi-sub-window-full-source-manifest.json` 与 `-source-verification.json` 确认 1,151 个后端文件全程无新增、删除或内容变化；`okapi_window_full_20260928` 的迁移 0021/0022/0023/0024 均 success。此后才加入 `holds_window_coexistence` 7 项测试（每项分别验证两种结算顺序），`/tmp/okapi-sub-window-coexistence-money-1.log` 实际退出 **0**：**162 passed、0 failed/ignored/filtered、0 软跳过**，无解析错误或未结束块。7 项覆盖同周期、滚窗、取消、换套餐及 Redis 丢失恢复，合计 14 种顺序组合，反复退款不改变新周期额度。新增测试后 `/tmp/okapi-sub-window-coexistence-clippy.log` 实际退出 **0**。该次只增加测试，未改生产代码；162 不与 1,056 相加。
+
+## 直接图片 API Token 计费与统计（2026-09-28）
+
+核对官方 Images 协议及固定提交 New API / Sub2API 图片实现后，确认当前图片链路只允许按张价格，实际用量一律记零。此次将同步生成、JSON/multipart 编辑和持久异步任务接入 `ratio` / `tiered` 计价，按张定价继续支持且采集详细用量。三种图文轴按响应合计一次，不随多图重复相乘；固定准入时的价簿与规则上下文，输入/输出用量及模态快照落入账单和 outbox。余额与 TPM 使用非零估算准入，包括按张模型；估算不冒充实际用量。
+
+- `/tmp/okapi-image-token-targeted-1.log` 实际退出 0：5 项通过、44 项筛选。扩展后的 `targeted-2.log` 实际退出 101：9 通过、1 失败、44 筛选；失败是测试误把 `upstream_unit_cost.relative_cost_milli` 写成渠道独立列，发生在业务请求前，已修正测试。
+- `/tmp/okapi-image-token-related-1.log` 实际退出 101：151 通过、1 失败、0 ignored/filtered。失败暴露旧按张响应仅提供 `total_tokens` 时被新校验拒绝，已保留兼容并标记明细未采集完整；Token 模型仍要求完整可验证用量。该失败记录不删除，不把局部通过当作整轮通过。
+- `/tmp/okapi-image-token-clippy-1.log` 实际退出 101：测试大整数未分隔、JSON helper 不必要按值传参；修正后 `clippy-2.log` 实际退出 0，workspace/all-targets、locked/offline、`-D warnings`。本阶段没有新增 SQLx 查询宏或迁移。
+- `/tmp/okapi-image-token-money-1.log` 实际退出 **0**：**164 passed、0 failed/ignored/filtered、0 软跳过**，无解析错误或未结束块；domain 12、pricing 33（新增三轴精确对拍与性质测试 2 项）、ledger 119。`/tmp/okapi-image-token-related-2.log` 实际退出 **0**：**153 passed、0 failed/ignored/filtered、0 软跳过**，无解析错误或未结束块；账单 API 4、错误分类 1、图片 3、图片契约 55、原生 Batch 55、普通原子性/周期 33、上游成本 2。不同套件运行不相加为单次完整回归。
+- 最终验证快照 `/tmp/okapi-image-token-verification-source.json` 与 `-source-result.json` 确认 1,155 个后端源文件/Lua/SQLx/迁移/配置无新增、删除或内容变化。格式、diff、禁浮点、57 项错误码与 API 清单守卫通过。
+- 原生 Batch Token 计价、图片 SSE、缓存与模态交叉明细、文件引用归属及真实供应商联调继续保留为缺口。本阶段未重跑全工作区，不能沿用此前 1,056 项结果宣称最新全部能力验收通过。未修改或构建前端、未部署、未提交本阶段改动。
+
+## 直接图片 SSE 与断线结算（2026-09-28）
+
+JSON 生成/编辑和 multipart 编辑新增 Images SSE，复用 OpenAI/Azure 出站鉴权、映射与无重定向传输。预览立即交付，完成帧等账单落盘；后台读取受停机跟踪及绝对时限控制，客户端断开后仍结算已生成图片。渠道明确配置累计/逐图用量口径，按张与 Token 计费都保留价簿及订阅来源周期。
+
+- `/tmp/okapi-image-stream-targeted-1.log` 实际退出 **0**：首批 **10 passed、0 failed、55 filtered**。包含实时预览、落盘前阻塞完成帧、两种用量口径、断线、JSON 回退、编辑/Azure、部分成功后错误以及参数拒绝。
+- 扩展到 20 个用例后，`/tmp/okapi-image-stream-targeted-2.log` 在超大未终止帧测试暴露事件解析器重复扫描长行的 CPU 瓶颈：此前 12 项通过，测试进程持续约 97% 单核占用，75 秒仍未完成。确认具体 PID 后仅终止该测试进程，Cargo 实际退出 **101 / SIGTERM**；这一轮不是通过，也不是外部环境故障。日志及测试数据保留。
+- 修复在事件解析前按新到达的字节定位换行，将未结束行只缓冲一次；原始字节上限仍为 64 MiB，不扩大限制。`/tmp/okapi-image-stream-oversize-1.log` 实际退出 **0**：原超大未终止帧测试 **1 passed、74 filtered**，测试阶段 1.36 秒。不是供应商性能对比证据。
+- 首次严格 Clippy `...-clippy-1.log` 实际退出 **101**，发现两处转换/布尔表达式写法；修正后 `...-clippy-2.log` 全工作区/all-targets/离线/`-D warnings` 实际退出 **0**。格式、diff、计费禁浮点、57 个错误码及 API 清单守卫通过。
+- 关联回归开始前保存 `/tmp/okapi-image-stream-source-manifest.json`（1,176 个后端、查询缓存、依赖配置、fixture、脚本文件）。完整关联结果及金额套件待以下实际运行补记，尚未作为全部工作区或核心目标验收。
+- `/tmp/okapi-image-stream-related-1.log` 实际退出 **0**：**182 passed、0 failed/ignored/filtered**，无软跳过、未结束套件或解析错误；图片契约 75（含 20 项流式）、原有图片 3、Batch 55、预扣/周期 33、管理 9、金额跨界面 4、错误壳 1、上游成本 2。1,176 个文件在该次运行期间未变化。
+- 随后仅规范化 multipart `stream` / `partial_images` 的空白和数字文本，并扩展原有编辑测试检查真实上游收到 `true` / `1`。已保存最终源码指纹 `...-source-manifest-2.json`，按该版本重新运行关联回归；不把不同版本的局部通过拼接成最终全量。
+- 最终 `/tmp/okapi-image-stream-related-2.log` 实际退出 **0**：**182 passed、0 failed/ignored/filtered**；`...-related-2-report.json` 无软跳过、未结束套件或解析错误，套件构成与首轮一致。20 个流式用例覆盖实时预览、完成帧落盘顺序、客户端在响应头前/预览后断开、部分成功后错误、累计/逐图用量、计数回退/超出张数、跨块 CRLF/多行 SSE、64 MiB 超限、JSON 回退、编辑/Azure、冻结报价/口径、预览 TPM、参数与配置校验及更换订阅后的成功/退款。
+- `/tmp/okapi-image-stream-money-providers-1.log` 实际退出 **0**：**314 passed、0 failed/ignored/filtered**，无软跳过、未结束套件或解析错误。domain 12、pricing 33、ledger 119，共 164 项金额测试；providers 150 项。包含定价 fixtures/性质测试和新旧冻结共存资金验证，不与 182 项相加为全工作区通过数。
+- `/tmp/okapi-image-stream-clippy-final.log` 最终 workspace/all-targets/离线/`-D warnings` 实际退出 **0**。`...-source-manifest-2.json` 与 `...-source-final-result.json` 核对 1,176 个文件无新增、删除或变更；格式、diff、计费禁浮点、错误码与 API 清单检查通过。复用了已有 SQLx 查询缓存，没有手写缓存、新增迁移或修改价格公式。
+
+验证使用隔离 PG/Redis/ClickHouse/NATS 和受控上游，没有运行真实供应商计费、竞品性能对比或本阶段全工作区回归。420 秒整段超时、持续慢消费及进程被强制终止的流式恢复不以这些短时 HTTP 用例宣称完成实测；普通流不持久保存未交付图片，恢复结果应使用异步入口。缓存与模态交叉定价、原生 Batch Token 定价、文件归属生命周期及其他核心协议缺口继续保留。未修改/构建前端、未部署、未提交本阶段后端改动，核心目标仍进行中。

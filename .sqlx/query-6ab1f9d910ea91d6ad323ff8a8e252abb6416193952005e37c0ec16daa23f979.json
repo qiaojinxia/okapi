@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.oid::bigint AS \"oid!\",p.relname::text AS \"parent!\",c.relname::text AS \"name!\",\n        n.nspname::text AS \"schema!\",format('%I.%I',n.nspname,c.relname) AS \"qualified!\",\n        pg_get_expr(c.relpartbound,c.oid) AS \"definition!\"\n        FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid JOIN pg_class p ON p.oid=i.inhparent\n        JOIN pg_namespace n ON n.oid=c.relnamespace\n        WHERE p.oid IN ('billing_records'::regclass,'billing_events'::regclass,'audit_logs'::regclass)\n          AND c.relnamespace=p.relnamespace AND c.relkind='r' AND c.relispartition\n          AND ($1::text IS NULL OR c.relname=$1)\n        ORDER BY c.relname",
+  "query": "SELECT c.oid::bigint AS \"oid!\",p.relname::text AS \"parent!\",c.relname::text AS \"name!\",\n        n.nspname::text AS \"schema!\",format('%I.%I',n.nspname,c.relname) AS \"qualified!\",\n        pg_get_expr(c.relpartbound,c.oid) AS \"definition?\"\n        FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid JOIN pg_class p ON p.oid=i.inhparent\n        JOIN pg_namespace n ON n.oid=c.relnamespace\n        WHERE p.oid IN ('billing_records'::regclass,'billing_events'::regclass,'audit_logs'::regclass)\n          AND c.relnamespace=p.relnamespace AND c.relkind='r' AND c.relispartition\n          AND ($1::text IS NULL OR c.relname=$1)\n        ORDER BY c.relname",
   "describe": {
     "columns": [
       {
@@ -35,7 +35,7 @@
       },
       {
         "ordinal": 5,
-        "name": "definition!",
+        "name": "definition?",
         "type_info": "Text",
         "origin": "Expression"
       }
@@ -54,5 +54,5 @@
       null
     ]
   },
-  "hash": "4d505fa1f928dd8504114fa26b29e985b1a6b9c759d0c0a2057b10187f517b55"
+  "hash": "6ab1f9d910ea91d6ad323ff8a8e252abb6416193952005e37c0ec16daa23f979"
 }

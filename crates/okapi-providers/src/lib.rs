@@ -14,6 +14,7 @@
 //! 协议转换全部复用（IMPLEMENTATION §11.35）。
 
 pub mod anthropic;
+mod anthropic_usage;
 pub mod aws_eventstream;
 pub mod aws_sigv4;
 pub mod azure;
@@ -25,6 +26,7 @@ pub mod error;
 pub mod gemini;
 pub mod http;
 pub mod image_store;
+pub mod image_stream;
 pub mod modifiers;
 pub mod oauth;
 pub mod openai;

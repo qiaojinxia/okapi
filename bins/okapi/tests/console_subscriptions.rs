@@ -407,7 +407,7 @@ async fn lua_pool_contract() {
     let r1 = Uuid::new_v4();
     let out = reserve(r1, 1_000).await;
     assert!(
-        matches!(out, ReserveOutcome::Reserved { pool: Pool::Subscription, balance_after } if balance_after.as_micros() == -700),
+        matches!(out, ReserveOutcome::Reserved { pool: Pool::Subscription, balance_after, .. } if balance_after.as_micros() == -700),
         "订阅池不校验足额：{out:?}"
     );
     assert_eq!(

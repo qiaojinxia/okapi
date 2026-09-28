@@ -35,6 +35,7 @@ fn hash(token: &str) -> String {
 }
 
 struct Bed {
+    cookie: String,
     pg: PgPool,
     user_id: i64,
     /// 两个都挂在同一个渠道上：一个进 key 白名单，一个不进
@@ -112,6 +113,8 @@ async fn setup() -> Bed {
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
+    let sid = Uuid::new_v4().to_string();
+    state.sched.web_session_set(&sid, user_id, None, None).await;
     state
         .ledger
         .credit(user_id, Money::from_micros(50_000_000))
@@ -131,6 +134,7 @@ async fn setup() -> Bed {
     });
 
     Bed {
+        cookie: format!("okapi_session={sid}"),
         pg,
         user_id,
         model,
@@ -139,6 +143,142 @@ async fn setup() -> Bed {
         console: console_addr,
         super_token,
     }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One credential lifecycle verifies warm-cache invalidation end to end.
+async fn portal_key_limits_create_validate_clear_and_enforce_with_warm_auth_cache() {
+    let bed = setup().await;
+    let client = reqwest::Client::new();
+    let (owner, _) = new_key(&bed.pg, bed.user_id, "owner").await;
+    let create_url = format!("http://{}/auth/keys", bed.console);
+    let expires = (chrono::Utc::now() + chrono::Duration::days(2)).to_rfc3339();
+    let created = client.post(&create_url).header("cookie", &bed.cookie)
+        .json(&json!({"name":"restricted","quota_micro":1_000_000,"expires_at":expires,"model_allowlist":[bed.model]}))
+        .send().await.unwrap().error_for_status().unwrap().json::<Value>().await.unwrap();
+    let id = created["key_id"].as_i64().unwrap();
+    let token = created["api_key"].as_str().unwrap();
+    let url = format!("http://{}/api/me/keys/{id}", bed.console);
+    assert_eq!(chat(&bed, token, &bed.model).await.0, 200);
+    let (status, denied) = chat(&bed, token, &bed.other_model).await;
+    assert_eq!(status, 403);
+    assert_eq!(denied["error"]["code"], "model_not_allowed");
+    // A delegated credential cannot lift its own cap or allowlist.
+    let denied = client
+        .patch(&url)
+        .bearer_auth(token)
+        .json(&json!({"quota_micro":null,"model_allowlist":null}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["error"]["code"],
+        "key_limits_session_required"
+    );
+    for payload in [
+        json!({"quota_micro":0}),
+        json!({"quota_micro":-1}),
+        json!({"quota_micro":9_007_199_254_740_992_i64}),
+        json!({"expires_at":"2020-01-01T00:00:00Z"}),
+    ] {
+        assert_eq!(
+            client
+                .post(&create_url)
+                .header("cookie", &bed.cookie)
+                .json(&payload)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+        assert_eq!(
+            client
+                .patch(&url)
+                .bearer_auth(&owner)
+                .json(&payload)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+    }
+    // Lowering an already warm key below its settled spending blocks the next request.
+    assert_eq!(
+        client
+            .patch(&url)
+            .bearer_auth(&owner)
+            .json(&json!({"quota_micro":1}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let (status, denied) = chat(&bed, token, &bed.model).await;
+    assert_eq!(status, 429, "{denied}");
+    assert_eq!(denied["error"]["code"], "key_quota_exceeded");
+    let list: Value = client
+        .get(format!("http://{}/api/me/keys", bed.console))
+        .bearer_auth(&owner)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["key_limits_supported"], true);
+    let row = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == id)
+        .unwrap();
+    assert_eq!(row["quota_micro"], 1);
+    assert_eq!(row["quota_mode"], 1);
+    assert_eq!(row["model_allowlist"], json!([bed.model]));
+    assert!(row["expires_at"].is_string());
+    // The owning account session can clear restrictions even while using the restricted key.
+    assert_eq!(
+        client
+            .patch(&url)
+            .bearer_auth(token)
+            .header("cookie", &bed.cookie)
+            .json(&json!({"quota_micro":null,"expires_at":null,"model_allowlist":[]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(chat(&bed, token, &bed.other_model).await.0, 200);
+    let fields: (
+        i16,
+        Option<i64>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<Value>,
+    ) = sqlx::query_as(
+        "SELECT quota_mode,quota_micro,expires_at,model_allowlist FROM api_keys WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    assert_eq!(fields, (0, None, None, None));
+    // Updates stay owner-scoped.
+    assert_eq!(
+        client
+            .patch(&url)
+            .bearer_auth(&bed.super_token)
+            .json(&json!({"quota_micro":100}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
 }
 
 async fn chat(bed: &Bed, token: &str, model: &str) -> (u16, Value) {

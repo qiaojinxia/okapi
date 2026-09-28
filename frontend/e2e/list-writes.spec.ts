@@ -1053,7 +1053,7 @@ test('门户密钥：新建 POST /auth/keys 带分组与 IP；停用 PATCH statu
     name: 'laptop',
     key_prefix: 'sk-okapi-abcd',
     status: 1,
-    used_micro: 0,
+    used_micro: 1_230_000,
     rpm_limit: 60,
     created_at: '2026-09-01T12:00:00Z',
     amount_micro: 1_230_000,
@@ -1102,7 +1102,7 @@ test('门户密钥：新建 POST /auth/keys 带分组与 IP；停用 PATCH statu
 
   await page.goto('/portal/keys')
   const laptop = page.getByRole('row').filter({ hasText: 'laptop' })
-  await expect(laptop.getByText('档位：vip')).toBeVisible()
+  await expect(laptop.getByText('分组：vip')).toBeVisible()
   await expect(laptop.getByText('限 1 个来源')).toBeVisible()
   await expect(laptop.getByText(/\$1\.23/)).toBeVisible()
   await expect(laptop.getByText('60')).toBeVisible()
@@ -1117,7 +1117,7 @@ test('门户密钥：新建 POST /auth/keys 带分组与 IP；停用 PATCH statu
 
   await laptop.getByRole('button', { name: '编辑', exact: true }).click()
   const rename = await openedDialog(page)
-  await expect(rename.getByRole('heading', { name: '重命名密钥' })).toBeVisible()
+  await expect(rename.getByRole('heading', { name: '编辑密钥' })).toBeVisible()
   await expect(rename.locator('#key-name')).toHaveValue('laptop')
   await expect(rename.locator('#key-group')).toHaveValue('vip')
   await rename.locator('#key-name').fill('   ')

@@ -9,7 +9,7 @@
 //! 对 Anthropic / Gemini 只是同量级近似——它们的分词器未公开且不在本进程内。
 //! 用它做预扣与兜底都远好过按字符数猜，但不该被当成这两家的权威计数。
 
-use okapi_domain::TokenUsage;
+use okapi_domain::{TokenUsage, UpstreamTokenCounts};
 use std::sync::OnceLock;
 use tiktoken_rs::CoreBPE;
 
@@ -169,10 +169,29 @@ pub fn recount_untrusted(
 #[must_use]
 pub fn fallback_usage(est_prompt: u32, content_chars: usize, density: u32) -> TokenUsage {
     TokenUsage {
+        upstream_usage: Some(UpstreamTokenCounts::default()),
         prompt_tokens: est_prompt,
         completion_tokens: estimate_completion_tokens(content_chars, density),
         ..TokenUsage::default()
     }
+}
+
+pub fn resolve_usage(
+    probe: Option<okapi_api::UsageProbe>,
+    prompt: u32,
+    chars: usize,
+    density: u32,
+    trust: bool,
+) -> Result<TokenUsage, okapi_domain::DomainError> {
+    let Some(probe) = probe else {
+        return Ok(fallback_usage(prompt, chars, density));
+    };
+    let usage = probe.with_estimates(prompt, estimate_completion_tokens(chars, density))?;
+    Ok(if trust {
+        usage
+    } else {
+        recount_untrusted(usage, prompt, chars, density)
+    })
 }
 
 #[cfg(test)]

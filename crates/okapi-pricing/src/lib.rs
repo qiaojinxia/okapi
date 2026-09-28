@@ -12,6 +12,7 @@ pub mod book;
 pub mod engine;
 pub mod error;
 pub mod handle;
+pub mod modalities;
 pub mod model;
 pub mod ratio;
 pub mod rules;
@@ -21,6 +22,7 @@ pub use book::{GroupEntry, ModelEntry, OverrideEntry, OverrideSpec, PriceBook, P
 pub use engine::{CalcContext, Quote, calculate};
 pub use error::{CompileError, PricingError};
 pub use handle::PriceBookHandle;
+pub use modalities::ModalityRatios;
 pub use model::{PricingMode, Tier, TierTable};
 pub use ratio::RatioFp;
 pub use rules::{PricingRule, RuleKind, RuleScope, Stacking, WeekdayMask};

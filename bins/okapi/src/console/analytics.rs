@@ -269,9 +269,10 @@ const AGG: &str = "sum(requests) AS reqs, \
                    sum(discount) AS saved, \
                    sum(upstream_cost) AS cost, \
                    sum(errors) AS errs, \
-                   sum(latency_sum) AS lat_sum, \
+                   sum(latency_sum) AS lat_sum, sum(latency_samples) AS lat_n, \
+                   sum(latency_observed) AS lat_observed, sum(latency_output) AS lat_output, \
                    sum(ttft_sum) AS ttft_s, \
-                   sum(ttft_samples) AS ttft_n, \
+                   sum(ttft_samples) AS ttft_n, sum(ttft_observed) AS ttft_observed, \
                    sum(write_tokens) AS write_sum, sum(write_samples) AS write_n, \
                    sum(read_samples) AS read_n, \
                    sum(cost_samples) AS cost_n, sum(covered_amount) AS covered_spend, sum(covered_cost) AS covered_cost_sum";
@@ -327,8 +328,7 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
             Value::Null
         },
     );
-    m.insert("latency_sum_ms".into(), json!(ch_i64(r, "lat_sum")));
-    m.insert("ttft_sum_ms".into(), json!(ch_i64(r, "ttft_s")));
+
     m.insert("requests".into(), json!(reqs));
     m.insert("errors".into(), json!(errs));
     m.insert("error_rate_bp".into(), json!(rate_bp(errs, reqs)));
@@ -349,32 +349,19 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
     m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
     m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
-    let latency = ch_i64(r, "lat_sum");
-    m.insert("ttft_samples".into(), json!(ttft_n));
-    m.insert(
-        "avg_output_tps_milli".into(),
-        if latency > 0 {
-            json!(completion.saturating_mul(1_000_000) / latency)
-        } else {
-            Value::Null
-        },
-    );
-    m.insert(
-        "avg_latency_ms".into(),
-        json!(if reqs > 0 {
-            ch_i64(r, "lat_sum") / reqs
-        } else {
-            0
-        }),
-    );
-    m.insert(
-        "avg_ttft_ms".into(),
-        json!(if ttft_n > 0 {
-            ch_i64(r, "ttft_s") / ttft_n
-        } else {
-            0
-        }),
-    );
+    m.extend(super::latency::metrics(
+        ch_i64(r, "lat_sum"),
+        ch_i64(r, "lat_n"),
+        ch_i64(r, "lat_output"),
+        reqs,
+        ch_i64(r, "lat_observed"),
+    ));
+    m.extend(super::ttft_average::metrics(
+        ch_i64(r, "ttft_s"),
+        ttft_n,
+        reqs,
+        ch_i64(r, "ttft_observed"),
+    ));
     m
 }
 
@@ -662,8 +649,13 @@ fn fold_stacked(rows: &[Value], limit: usize, rank: &str) -> (Vec<String>, Vec<V
             "saved",
             "cost",
             "lat_sum",
+            "lat_n",
+            "lat_observed",
+            "lat_output",
             "ttft_s",
             "ttft_n",
+            "ttft_observed",
+            "read_n",
             "write_sum",
             "write_n",
             "cost_n",
@@ -803,38 +795,19 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) ->
                 "cache_hit_bp".into(),
                 super::usage_details::cache_rate(cached, prompt, reqs, read_known),
             );
-            let latency = m["latency_sum_ms"].as_i64().unwrap_or(0);
-            let ttft_n = m["ttft_samples"].as_i64().unwrap_or(0);
-            m.insert(
-                "avg_latency_ms".into(),
-                if reqs > 0 {
-                    json!(latency / reqs)
-                } else {
-                    Value::Null
-                },
-            );
-            m.insert(
-                "avg_ttft_ms".into(),
-                if ttft_n > 0 {
-                    json!(m["ttft_sum_ms"].as_i64().unwrap_or(0) / ttft_n)
-                } else {
-                    Value::Null
-                },
-            );
-            m.insert(
-                "avg_output_tps_milli".into(),
-                if latency > 0 {
-                    json!(
-                        m["completion_tokens"]
-                            .as_i64()
-                            .unwrap_or(0)
-                            .saturating_mul(1_000_000)
-                            / latency
-                    )
-                } else {
-                    Value::Null
-                },
-            );
+            m.extend(super::latency::metrics(
+                m["latency_sum_ms"].as_i64().unwrap_or(0),
+                m["latency_samples"].as_i64().unwrap_or(0),
+                m["performance_completion_tokens"].as_i64().unwrap_or(0),
+                reqs,
+                m["latency_observed_requests"].as_i64().unwrap_or(0),
+            ));
+            m.extend(super::ttft_average::metrics(
+                m["ttft_sum_ms"].as_i64().unwrap_or(0),
+                m["ttft_samples"].as_i64().unwrap_or(0),
+                reqs,
+                m["ttft_observed_requests"].as_i64().unwrap_or(0),
+            ));
             let known = m["cost_known_requests"].as_i64().unwrap_or(0);
             let margin = m["known_amount_micro"].as_i64().unwrap_or(0)
                 - m["known_cost_micro"].as_i64().unwrap_or(0);
@@ -1057,7 +1030,7 @@ fn ranked_metrics(
         json!(
             prev.map(|p| p.0)
                 .filter(|p| *p > 0)
-                .map(|p| spend.saturating_sub(p).saturating_mul(10_000) / p)
+                .map(|p| rate_bp(spend.saturating_sub(p), p))
         ),
     );
     m.insert("share_bp".into(), json!(rate_bp(spend, total_spend)));

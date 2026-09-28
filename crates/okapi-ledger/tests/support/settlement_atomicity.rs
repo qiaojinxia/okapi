@@ -143,6 +143,11 @@ async fn malformed_reservation_pool_or_fields_are_not_guessed() -> TestResult {
         "1000|123|7|",
         "1000|123||0",
         "1000|123|7|0|extra",
+        "1000|123|7|0|w:42:100",
+        "1000|123|7|1|w:",
+        "1000|123|7|1|w:42 100",
+        "1000|123|7|1|w:雪",
+        "1000|123|7|1|w:42:100|extra",
         "-1000|123|7|0",
         "1000|bad|7|0",
         "01|123|7|0",
@@ -156,6 +161,96 @@ async fn malformed_reservation_pool_or_fields_are_not_guessed() -> TestResult {
                 )
                 .await?;
             reject_unchanged(&bed, 7, actual).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn period_identity_conflicts_preserve_receipts_and_old_closures_release_slots_once()
+-> TestResult {
+    for same_window in [false, true] {
+        for actual in [Some(700), Some(2000), None] {
+            let bed = held(true, 1000).await?;
+            let field = format!("r:{}", bed.request.request_id);
+            let raw: String = bed.redis.hget(bed.balance_key(), &field).await?;
+            let epoch = if same_window { "42:100" } else { "43:200" };
+            let balance = if same_window { 9000 } else { 5000 };
+            bed.redis
+                .hset::<(), _, _>(
+                    bed.balance_key(),
+                    vec![
+                        (field, format!("{raw}|w:42:100")),
+                        ("sub_epoch".into(), epoch.into()),
+                        ("sub".into(), balance.to_string()),
+                    ],
+                )
+                .await?;
+            let before = snapshot(&bed).await?;
+            let wrong = bed
+                .ledger
+                .commit_in_source(
+                    bed.request.user_id,
+                    7,
+                    bed.request.request_id,
+                    Money::from_micros(actual.unwrap_or(0)),
+                    Pool::Subscription,
+                    Some("44:300"),
+                )
+                .await;
+            assert!(matches!(wrong, Err(LedgerError::ReservationConflict)));
+            assert_eq!(snapshot(&bed).await?, before);
+            let expected = if same_window {
+                1000 - actual.unwrap_or(0)
+            } else {
+                0
+            };
+            if let Some(actual) = actual {
+                let outcome = bed
+                    .ledger
+                    .commit_in_source(
+                        bed.request.user_id,
+                        7,
+                        bed.request.request_id,
+                        Money::from_micros(actual),
+                        Pool::Subscription,
+                        Some("42:100"),
+                    )
+                    .await?;
+                assert!(
+                    matches!(outcome, CommitOutcome::Committed { refund_delta, pool: Pool::Subscription, .. } if refund_delta.as_micros()==expected)
+                );
+            } else {
+                let outcome = bed
+                    .ledger
+                    .refund(bed.request.user_id, 7, bed.request.request_id)
+                    .await?;
+                assert!(outcome.closed);
+                assert_eq!(outcome.released.as_micros(), expected);
+                assert_eq!(outcome.pool, Pool::Subscription);
+            }
+            assert_eq!(
+                bed.ledger
+                    .sub_balance(bed.request.user_id)
+                    .await?
+                    .0
+                    .as_micros(),
+                balance + expected
+            );
+            assert_eq!(
+                bed.ledger.balance(bed.request.user_id).await?.as_micros(),
+                MAXIMUM
+            );
+            let count: i64 = bed.redis.get(conc(&bed, 7)).await?;
+            assert_eq!(count, 0);
+            let closed = snapshot(&bed).await?;
+            let again = bed
+                .ledger
+                .refund(bed.request.user_id, 7, bed.request.request_id)
+                .await?;
+            assert!(!again.closed);
+            assert_eq!(again.released, Money::ZERO);
+            assert_eq!(snapshot(&bed).await?, closed);
         }
     }
     Ok(())

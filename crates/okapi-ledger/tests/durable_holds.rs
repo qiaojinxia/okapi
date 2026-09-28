@@ -1,8 +1,12 @@
 //! Real PG/Redis contracts: durable freezes, accounting evidence, replay and window ownership.
 #[path = "support/native_batch_jobs.rs"]
 mod batches;
+#[path = "support/holds_window_coexistence.rs"]
+mod coexistence;
 #[path = "support/holds_concurrency.rs"]
 mod concurrency;
+#[path = "support/key_budget.rs"]
+mod key_budget;
 #[path = "support/holds_recovery.rs"]
 mod recovery;
 #[path = "support/holds.rs"]

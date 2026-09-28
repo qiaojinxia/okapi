@@ -12,6 +12,8 @@ use okapi_domain::Money;
 use uuid::Uuid;
 
 const RESERVE_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
     include_str!("lua/hold_concurrency.lua"),
     "\n",
     include_str!("lua/reserve.lua")
@@ -30,7 +32,11 @@ const REFUND_LUA: &str = concat!(
     "\n",
     include_str!("lua/refund.lua")
 );
-const REPAIR_LUA: &str = include_str!("lua/repair.lua");
+const REPAIR_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/repair.lua")
+);
 const SUB_SET_LUA: &str = concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
@@ -113,6 +119,7 @@ pub enum ReserveOutcome {
     Reserved {
         balance_after: Money,
         pool: Pool,
+        source_window: Option<String>,
     },
     /// 钱包余额不足（订阅池不可用或已耗尽时才到这一步）。
     Insufficient {
@@ -139,6 +146,8 @@ pub enum CommitOutcome {
 /// 无凭证时返回钱包池；零释放或错误的失败账单应使用请求保留的预扣池。
 #[derive(Debug, Clone, Copy)]
 pub struct RefundOutcome {
+    /// Distinguishes closing an expired/zero receipt from an idempotent no-op.
+    pub closed: bool,
     pub released: Money,
     pub balance_after: Money,
     pub pool: Pool,
@@ -232,6 +241,11 @@ impl BalanceLedger {
             (Some(1), _) => Ok(ReserveOutcome::Reserved {
                 balance_after: money_at(items, 1)?,
                 pool: pool_at(items, 2),
+                source_window: items
+                    .get(3)
+                    .and_then(value_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
             }),
             (Some(0), Some("INSUFFICIENT")) => Ok(ReserveOutcome::Insufficient {
                 balance: money_at(items, 2)?,
@@ -255,7 +269,7 @@ impl BalanceLedger {
         request_id: Uuid,
         actual: Money,
     ) -> Result<CommitOutcome, LedgerError> {
-        self.commit_expected(user_id, api_key_id, request_id, actual, None)
+        self.commit_expected(user_id, api_key_id, request_id, actual, None, None)
             .await
     }
 
@@ -268,8 +282,29 @@ impl BalanceLedger {
         actual: Money,
         pool: Pool,
     ) -> Result<CommitOutcome, LedgerError> {
-        self.commit_expected(user_id, api_key_id, request_id, actual, Some(pool))
+        self.commit_expected(user_id, api_key_id, request_id, actual, Some(pool), None)
             .await
+    }
+
+    /// Verify the immutable admitted period against the durable completion.
+    pub async fn commit_in_source(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+        request_id: Uuid,
+        actual: Money,
+        pool: Pool,
+        source_window: Option<&str>,
+    ) -> Result<CommitOutcome, LedgerError> {
+        self.commit_expected(
+            user_id,
+            api_key_id,
+            request_id,
+            actual,
+            Some(pool),
+            source_window,
+        )
+        .await
     }
 
     async fn commit_expected(
@@ -279,6 +314,7 @@ impl BalanceLedger {
         request_id: Uuid,
         actual: Money,
         pool: Option<Pool>,
+        source_window: Option<&str>,
     ) -> Result<CommitOutcome, LedgerError> {
         let keys = vec![Self::bal_key(user_id), Self::conc_key(user_id, api_key_id)];
         let mut args = vec![
@@ -288,6 +324,9 @@ impl BalanceLedger {
         ];
         if let Some(pool) = pool {
             args.push(pool.as_i16().to_string());
+        }
+        if let Some(source) = source_window {
+            args.push(source.to_owned());
         }
         let reply: Value = self.client.eval(COMMIT_LUA, keys, args).await?;
         let items = as_array(&reply)?;
@@ -318,6 +357,7 @@ impl BalanceLedger {
         let items = as_array(&reply)?;
         match (first_i64(items), second_str(items)) {
             (Some(1), _) => Ok(RefundOutcome {
+                closed: items.get(4).and_then(value_i64) == Some(1),
                 released: money_at(items, 1)?,
                 balance_after: money_at(items, 2)?,
                 pool: pool_at(items, 3),
@@ -482,6 +522,14 @@ impl BalanceLedger {
         Ok(Money::from_micros(micros))
     }
 
+    pub async fn subscription_window(&self, user_id: i64) -> Result<Option<String>, LedgerError> {
+        let epoch: Option<String> = self
+            .client
+            .hget(Self::bal_key(user_id), "sub_epoch")
+            .await?;
+        Ok(epoch.filter(|s| !s.is_empty()))
+    }
+
     /// 列出用户全部在途预扣（对账/悬置清理输入）。
     pub async fn list_reservations(&self, user_id: i64) -> Result<Vec<Reservation>, LedgerError> {
         let map: std::collections::HashMap<String, String> =
@@ -512,12 +560,25 @@ impl BalanceLedger {
                 .next()
                 .and_then(|s| s.parse::<i16>().ok())
                 .map_or(Pool::Wallet, Pool::from_i16);
+            let source_window = parts
+                .next()
+                .map(|raw| {
+                    raw.strip_prefix("w:")
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned)
+                        .ok_or(LedgerError::UnexpectedReply("reservation_window"))
+                })
+                .transpose()?;
+            if parts.next().is_some() {
+                return Err(LedgerError::UnexpectedReply("reservation_fields"));
+            }
             out.push(Reservation {
                 request_id,
                 amount: Money::from_micros(amount),
                 deadline_ms,
                 api_key_id,
                 pool,
+                source_window,
             });
         }
         Ok(out)
@@ -525,7 +586,7 @@ impl BalanceLedger {
 }
 
 /// 一笔在途预扣。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Reservation {
     pub request_id: Uuid,
     pub amount: Money,
@@ -533,6 +594,7 @@ pub struct Reservation {
     pub api_key_id: i64,
     /// 预扣所在池（对账按池累计在途）。
     pub pool: Pool,
+    pub source_window: Option<String>,
 }
 
 // ---- Lua 回复解析（Lua 数字回 RESP integer，tostring 回 bulk string）----

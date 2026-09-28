@@ -114,6 +114,54 @@ for (const theme of ['light', 'dark']) {
   })
 }
 
+for (const { width, language } of [
+  { width: 1024, language: 'zh-CN' }, { width: 1440, language: 'en' },
+  { width: 1920, language: 'zh-CN' }, { width: 2560, language: 'zh-CN' },
+]) {
+  test(`Token紧凑布局 ${width}px ${language}：宽屏不拉散，表头与内容对齐，缓存标签相邻`, async ({ page }) => {
+    await prepare(page)
+    await page.addInitScript((language) => {
+      localStorage.setItem('okapi.lang', language)
+      localStorage.setItem('okapi.theme', language === 'en' ? 'dark' : 'light')
+    }, language)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.setViewportSize({ width, height: 1000 })
+    const records = [
+      { ...detailedLog, usage: { ...detailedLog.usage, prompt_tokens: 14, completion_tokens: 105, cached_tokens: 0, cache_write_tokens: 0 } },
+      { ...detailedLog, usage: { ...detailedLog.usage, cached_tokens: 800 } },
+      { ...detailedLog, status: 40, usage: { ...log.usage, prompt_tokens: 0, completion_tokens: 0, cached_tokens: 0, cache_read_reported: false, cache_write_reported: false } },
+      { ...detailedLog, usage: { ...detailedLog.usage, prompt_tokens: 12_345_678, completion_tokens: 1_234_567, cached_tokens: 10_000_000, cache_write_tokens: 1_000_000 } },
+    ].map((row, i) => ({ ...row, id: 20 - i, request_id: `req-${20 - i}` }))
+    await page.route('**/api/me/logs?*', (route) => route.fulfill({ json: { data: records, next_before: null } }))
+    await page.goto('/portal/logs?scope=user')
+    const cells = page.locator('[data-slot="log-token-usage"]')
+    await expect(cells).toHaveCount(4)
+    const help = page.getByRole('button', { name: language === 'en' ? 'Token usage explained' : 'Token 用量说明', exact: true })
+    const header = (await help.boundingBox())!
+    const outputX: number[] = []
+    for (const cell of await cells.all()) {
+      const box = (await cell.boundingBox())!
+      expect(box.width).toBeGreaterThanOrEqual(288)
+      expect(box.width).toBeLessThanOrEqual(384)
+      expect(Math.abs(box.x - header.x)).toBeLessThanOrEqual(1)
+      const input = (await cell.locator('[data-slot="token-input"]').boundingBox())!
+      const output = (await cell.locator('[data-slot="token-output"]').boundingBox())!
+      expect(Math.abs(input.y - output.y)).toBeLessThanOrEqual(1)
+      expect(output.x - input.x).toBeLessThan(200)
+      outputX.push(output.x)
+      const tags = cell.locator('[data-slot="token-cache"] > span')
+      const read = (await tags.nth(0).boundingBox())!, write = (await tags.nth(1).boundingBox())!
+      expect(write.x - read.x - read.width).toBeGreaterThanOrEqual(4)
+      expect(write.x - read.x - read.width).toBeLessThanOrEqual(8)
+      expect(write.x + write.width).toBeLessThanOrEqual(box.x + box.width + 1)
+      expect(Math.abs((await cell.locator('xpath=ancestor::tr').boundingBox())!.height - 44)).toBeLessThanOrEqual(1)
+    }
+    expect(Math.max(...outputX) - Math.min(...outputX)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: `test-results/token-compact-${width}-${language}.png`, fullPage: true, animations: 'disabled' })
+  })
+}
+
 test('日志费用解释：使用历史单价，缓存缺失不补零，退款不算消费，推理不另收费', () => {
   const lines = billingLines(detailedLog)
   expect(lines.map((line) => [line.name, line.quantity, line.amountMicro])).toEqual([
@@ -369,6 +417,45 @@ for (const width of [320, 390]) {
       expect(await input.evaluate((node) => node.getBoundingClientRect().right <= innerWidth)).toBe(true)
     }
     await page.screenshot({ path: `test-results/portal-log-range-${width}.png`, fullPage: true, animations: 'disabled' })
+  })
+}
+
+for (const width of [390, 1024, 1440, 1920]) {
+  test(`日志筛选排版 ${width}px：实体字段限宽并对齐，UUID 保留长输入空间`, async ({ page }) => {
+    await prepare(page)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.setViewportSize({ width, height: 1000 })
+    await page.goto('/admin/logs')
+    await page.getByText('更多筛选', { exact: true }).click()
+    await page.getByText('自定义时间', { exact: true }).click()
+    const entityBoxes = await Promise.all(['user_id', 'api_key_id', 'channel_id'].map(async (name) => (await page.locator(`#lf-${name}`).boundingBox())!))
+    if (width >= 1024) {
+      for (const box of entityBoxes) { expect(box.width).toBeLessThanOrEqual(320); expect(box.height).toBe(36) }
+      expect(Math.max(...entityBoxes.map((b) => b.y)) - Math.min(...entityBoxes.map((b) => b.y))).toBeLessThanOrEqual(1)
+      expect((await page.locator('#lf-model').boundingBox())!.width).toBeLessThanOrEqual(384)
+      const error = (await page.locator('#lf-error_code').boundingBox())!, request = (await page.locator('#lf-request_id').boundingBox())!
+      expect(error.width).toBeLessThanOrEqual(320)
+      expect(request.width).toBeGreaterThanOrEqual(error.width)
+      expect(request.width).toBeLessThanOrEqual(512)
+      expect(Math.abs(error.y - request.y)).toBeLessThanOrEqual(1)
+      const from = (await page.locator('#logs-from').boundingBox())!, to = (await page.locator('#logs-to').boundingBox())!
+      expect(from.width).toBeLessThanOrEqual(320)
+      expect(to.width).toBeLessThanOrEqual(320)
+      expect(Math.abs(from.y - to.y)).toBeLessThanOrEqual(1)
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: `test-results/admin-log-filters-${width}.png`, fullPage: true, animations: 'disabled' })
+    await page.goto('/portal/logs?scope=user')
+    const model = page.getByRole('combobox', { name: '模型', exact: true })
+    const request = page.getByRole('textbox', { name: '请求 ID', exact: true })
+    await expect(model).toBeVisible()
+    await expect(request).toBeVisible()
+    if (width >= 1024) {
+      expect((await model.boundingBox())!.width).toBe(320)
+      expect((await request.boundingBox())!.width).toBe(384)
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: `test-results/portal-log-filters-${width}.png`, fullPage: true, animations: 'disabled' })
   })
 }
 

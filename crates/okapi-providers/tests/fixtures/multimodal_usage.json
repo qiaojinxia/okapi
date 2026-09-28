@@ -1,0 +1,91 @@
+{
+  "chat": {
+    "prompt_tokens": 1000,
+    "completion_tokens": 400,
+    "total_tokens": 1400,
+    "prompt_tokens_details": {
+      "cached_tokens": 300,
+      "audio_tokens": 500,
+      "image_tokens": 300,
+      "cached_tokens_details": {
+        "text_tokens": 50,
+        "audio_tokens": 150,
+        "image_tokens": 100
+      }
+    },
+    "completion_tokens_details": {
+      "reasoning_tokens": 20,
+      "audio_tokens": 100,
+      "image_tokens": 200
+    }
+  },
+  "responses": {
+    "input_tokens": 1000,
+    "output_tokens": 400,
+    "total_tokens": 1400,
+    "input_tokens_details": {
+      "cached_tokens": 300,
+      "audio_tokens": 500,
+      "image_tokens": 300,
+      "cached_tokens_details": {
+        "text_tokens": 50,
+        "audio_tokens": 150,
+        "image_tokens": 100
+      }
+    },
+    "output_tokens_details": {
+      "reasoning_tokens": 20,
+      "audio_tokens": 100,
+      "image_tokens": 200
+    }
+  },
+  "gemini": {
+    "promptTokenCount": 1000,
+    "candidatesTokenCount": 380,
+    "thoughtsTokenCount": 20,
+    "cachedContentTokenCount": 300,
+    "totalTokenCount": 1400,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 200
+      },
+      {
+        "modality": "AUDIO",
+        "tokenCount": 500
+      },
+      {
+        "modality": "IMAGE",
+        "tokenCount": 300
+      }
+    ],
+    "cacheTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 50
+      },
+      {
+        "modality": "AUDIO",
+        "tokenCount": 150
+      },
+      {
+        "modality": "IMAGE",
+        "tokenCount": 100
+      }
+    ],
+    "candidatesTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 80
+      },
+      {
+        "modality": "AUDIO",
+        "tokenCount": 100
+      },
+      {
+        "modality": "IMAGE",
+        "tokenCount": 200
+      }
+    ]
+  }
+}

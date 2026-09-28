@@ -168,6 +168,56 @@ test('价格分组宽表：滚动列不影响翻页，换页复位纵向而保�
   expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
 })
 
+for (const { width, language } of [
+  { width: 1024, language: 'zh-CN' }, { width: 1920, language: 'zh-CN' },
+  { width: 1440, language: 'en' }, { width: 390, language: 'zh-CN' },
+]) {
+  test(`价格分组列对齐 ${width}px ${language}：倍率、用户数、渠道数与限流沿表头右侧对齐`, async ({ page }) => {
+    await prepare(page)
+    await page.addInitScript((language) => {
+      localStorage.setItem('okapi.lang', language)
+      localStorage.setItem('okapi.theme', language === 'en' ? 'dark' : 'light')
+    }, language)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.setViewportSize({ width, height: 1000 })
+    const data = [
+      { group_code: 'default', group_ratio: '1', user_count: 0, channel_count: 1, rpm_limit: null, rph_limit: null },
+      { group_code: 'free', group_ratio: '1.2', user_count: 20, channel_count: 0, rpm_limit: 60, rph_limit: 1000 },
+      { group_code: 'vip', group_ratio: '0.85', user_count: 1, channel_count: 12, rpm_limit: null, rph_limit: 10000 },
+    ].map((row) => ({ ...row, description: row.group_code, pool_code: 'default', is_default: row.group_code === 'default', self_select: false }))
+    await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { total: data.length, data } }))
+    await page.goto('/admin/groups')
+    const table = page.getByRole('table', { name: language === 'en' ? 'Price groups' : '价格分组', exact: true })
+    await expect(table.locator('tbody tr')).toHaveCount(3)
+    const rightEdge = (cell: Locator) => cell.evaluate((element) => {
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      return range.getBoundingClientRect().right
+    })
+    for (const column of [1, 3, 5, 6]) {
+      const header = table.locator('th').nth(column)
+      await expect(header).toHaveCSS('text-align', 'right')
+      for (const row of await table.locator('tbody tr').all()) {
+        const cell = row.locator('td').nth(column)
+        await expect(cell).toHaveCSS('text-align', 'right')
+        // 检查实际文字边缘，而不仅是单元格边框；覆盖数字、空池徽标和无上限破折号。
+        expect(Math.abs(await rightEdge(header) - await rightEdge(cell))).toBeLessThanOrEqual(1)
+      }
+    }
+    const first = table.locator('tbody tr').first()
+    await expect(first.locator('td').nth(6)).toHaveText('—')
+    await expect(table.locator('tbody tr').nth(1).locator('td').nth(5)).toHaveText(language === 'en' ? 'Empty' : '空池')
+    const actions = table.locator('th').last()
+    for (const row of await table.locator('tbody tr').all()) {
+      const lastButton = (await row.getByRole('button').last().boundingBox())!
+      expect(Math.abs(await rightEdge(actions) - lastButton.x - lastButton.width)).toBeLessThanOrEqual(1)
+    }
+    if (width === 390) await table.locator('..').evaluate((element) => { element.scrollLeft = element.scrollWidth })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: `test-results/group-columns-${width}-${language}.png`, fullPage: true, animations: 'disabled' })
+  })
+}
+
 test('小表不产生多余滚动控件或焦点停靠，无输入 Token 时不显示虚假缓存命中率', async ({ page }) => {
   await prepare(page)
   await page.setViewportSize({ width: 1800, height: 1000 })

@@ -115,6 +115,7 @@ pub struct ModelListRow {
     pub audio_ratio: Option<String>,
     pub audio_completion_ratio: Option<String>,
     pub image_ratio: Option<String>,
+    pub modality_ratios: Option<serde_json::Value>,
     pub per_call_price_micro: Option<i64>,
     pub tier_expr: Option<String>,
     pub tier_ratios: Option<serde_json::Value>,
@@ -152,6 +153,7 @@ pub async fn list_models(
                p.audio_ratio::text            AS audio_ratio,
                p.audio_completion_ratio::text AS audio_completion_ratio,
                p.image_ratio::text            AS image_ratio,
+               p.modality_ratios AS "modality_ratios?",
                p.per_call_price_micro, p.tier_expr, p.tier_ratios
         FROM models m
         LEFT JOIN model_pricing p ON p.model_id = m.id
@@ -208,6 +210,7 @@ pub async fn list_models(
             audio_ratio: r.audio_ratio,
             audio_completion_ratio: r.audio_completion_ratio,
             image_ratio: r.image_ratio,
+            modality_ratios: r.modality_ratios,
             per_call_price_micro: r.per_call_price_micro,
             tier_expr: r.tier_expr,
             tier_ratios: r.tier_ratios,

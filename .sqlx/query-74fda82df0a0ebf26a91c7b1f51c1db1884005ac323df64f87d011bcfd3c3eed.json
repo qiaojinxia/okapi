@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,window_start,LEAST(window_end,expires_at) AS until_at FROM user_subscriptions WHERE user_id=$1 AND status=1 ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "window_start",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "user_subscriptions",
+            "name": "window_start"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "until_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "74fda82df0a0ebf26a91c7b1f51c1db1884005ac323df64f87d011bcfd3c3eed"
+}

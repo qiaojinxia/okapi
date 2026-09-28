@@ -1,7 +1,7 @@
 //! 运营看板查询（IMPLEMENTATION §10 指标字典）。
 //!
-//! 只读 ClickHouse 物化视图——重活在写入侧由 MV 增量完成，这里全是 `*Merge`
-//! 单表聚合，不碰热路径、不落 PG 写。CH 不可用时按既有约定 501 `stats_disabled`。
+//! 只读 ClickHouse 物化视图；升级前的 TTFT 在原始明细完整时重算。
+//! 不碰热路径、不落 PG 写。CH 不可用时按既有约定 501 `stats_disabled`。
 //!
 //! SQL 用 format! 拼装但**只插入 clamp 过的整数**（与 leaderboard 同一纪律），
 //! 请求里的字符串一律不进 SQL。
@@ -34,22 +34,6 @@ pub(super) fn ch_i64(row: &Value, key: &str) -> i64 {
     })
 }
 
-/// 分位数取整在 SQL 侧完成（`toUInt32(...[n])`），Rust 侧只见整数——
-/// 避免为展示指标在后端引入浮点与有损转换。
-fn quantile_cols(state_col: &str, prefix: &str) -> String {
-    ["p50", "p95", "p99"]
-        .iter()
-        .enumerate()
-        .map(|(idx, tag)| {
-            format!(
-                "toUInt32(quantilesMerge(0.5, 0.95, 0.99)({state_col})[{}]) AS {prefix}_{tag}_ms",
-                idx + 1
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[derive(Deserialize)]
 pub struct WindowQuery {
     /// 回看天数（1–90，缺省 7）。
@@ -80,20 +64,18 @@ pub async fn channels(
     let days = q.days();
     let limit = q.limit();
 
-    let ttft = quantile_cols("ttft_q", "ttft");
+    let since = chrono::Utc::now().timestamp() - i64::from(days) * 86_400;
     let sql = format!(
         "SELECT channel_id, \
                 countMerge(requests) AS requests, \
                 sumMerge(errors) AS errors, \
                 sumMerge(amount) AS amount_micro, \
                 sumMerge(upstream_cost) AS upstream_cost_micro, \
-                {ttft}, \
                 sumMerge(failovers) AS failovers, \
                 countIfMerge(sticky_resp_hits) AS sticky_resp_hits, \
                 countIfMerge(sticky_sess_hits) AS sticky_sess_hits, \
-                sumMerge(completion_tokens_sum) AS completion_tokens, \
-                sumMerge(latency_sum) AS latency_ms_sum \
-         FROM mv_channel_5min WHERE ts5 >= now() - INTERVAL {days} DAY \
+                sumMerge(completion_tokens_sum) AS completion_tokens \
+         FROM mv_channel_5min WHERE ts5 >= fromUnixTimestamp({since}) \
          GROUP BY channel_id ORDER BY requests DESC LIMIT {limit}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
@@ -112,7 +94,7 @@ pub async fn channels(
         .map(|r| (r.id, (r.name, r.provider)))
         .collect();
 
-    let data: Vec<Value> = rows
+    let mut data: Vec<Value> = rows
         .iter()
         .map(|r| {
             let id = ch_i64(r, "channel_id");
@@ -127,21 +109,18 @@ pub async fn channels(
                 "errors": errors,
                 // 错误率与生成速度以基点/整数表达，避免前端拿到浮点再二次换算
                 "error_rate_bp": rate_bp(errors, requests),
-                "ttft_p50_ms": ch_i64(r, "ttft_p50_ms"),
-                "ttft_p95_ms": ch_i64(r, "ttft_p95_ms"),
-                "ttft_p99_ms": ch_i64(r, "ttft_p99_ms"),
                 "failovers": ch_i64(r, "failovers"),
                 "sticky_hits": ch_i64(r, "sticky_resp_hits") + ch_i64(r, "sticky_sess_hits"),
                 "sticky_rate_bp": rate_bp(
                     ch_i64(r, "sticky_resp_hits") + ch_i64(r, "sticky_sess_hits"),
                     requests,
                 ),
-                "tokens_per_1k_sec": tokens_per_1k_sec(r),
                 "amount_micro": ch_i64(r, "amount_micro"),
                 "upstream_cost_micro": ch_i64(r, "upstream_cost_micro"),
             })
         })
         .collect();
+    super::ttft::enrich(ch, &mut data, super::ttft::Scope::Channel, since).await?;
     Ok(Json(json!({ "days": days, "data": data })))
 }
 
@@ -169,25 +148,23 @@ pub async fn channel_timeline(
     let hours = q.hours.unwrap_or(24).clamp(1, 168);
     let id = id.max(0);
 
-    let ttft = quantile_cols("ttft_q", "ttft");
     // 别名不与 MV 原始列同名（ts5 → bucket、errors → errs），GROUP/ORDER 用原始列
+    let since = chrono::Utc::now().timestamp() - i64::from(hours) * 3_600;
     let sql = format!(
         "SELECT toString(ts5) AS bucket, \
                 countMerge(requests) AS reqs, \
                 sumMerge(errors) AS errs, \
-                {ttft}, \
                 sumMerge(failovers) AS fo, \
-                sumMerge(completion_tokens_sum) AS completion_tokens, \
-                sumMerge(latency_sum) AS latency_ms_sum \
+                sumMerge(completion_tokens_sum) AS completion_tokens \
          FROM mv_channel_5min \
-         WHERE channel_id = {id} AND ts5 >= now() - INTERVAL {hours} HOUR \
+         WHERE channel_id = {id} AND ts5 >= fromUnixTimestamp({since}) \
          GROUP BY ts5 ORDER BY ts5"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
 
     let mut total_reqs = 0_i64;
     let mut total_errs = 0_i64;
-    let data: Vec<Value> = rows
+    let mut data: Vec<Value> = rows
         .iter()
         .map(|r| {
             let reqs = ch_i64(r, "reqs");
@@ -199,13 +176,11 @@ pub async fn channel_timeline(
                 "requests": reqs,
                 "errors": errs,
                 "error_rate_bp": rate_bp(errs, reqs),
-                "ttft_p50_ms": ch_i64(r, "ttft_p50_ms"),
-                "ttft_p95_ms": ch_i64(r, "ttft_p95_ms"),
                 "failovers": ch_i64(r, "fo"),
-                "tokens_per_1k_sec": tokens_per_1k_sec(r),
             })
         })
         .collect();
+    super::ttft::enrich(ch, &mut data, super::ttft::Scope::Timeline(id), since).await?;
 
     Ok(Json(json!({
         "channel_id": id,
@@ -219,22 +194,17 @@ pub async fn channel_timeline(
 
 /// 占比 → 基点（万分之一；整数运算，分母 0 返 0）。
 pub(super) fn rate_bp(part: i64, total: i64) -> i64 {
+    scaled_ratio(part, total, 10_000)
+}
+
+/// Scale after widening: saturating the numerator first silently understates large totals.
+/// Only the final result saturates, retaining signed changes and margin rates.
+pub(super) fn scaled_ratio(part: i64, total: i64, scale: i64) -> i64 {
     if total <= 0 {
         return 0;
     }
-    part.saturating_mul(10_000) / total
-}
-
-/// token 加权生成速度（IMPLEMENTATION §10 / new-api #5029 口径）：
-/// Σcompletion_tokens / Σlatency，放大 1000 倍后为「每千秒 token 数」的整数表达，
-/// 前端除以 1000 得 tok/s——全程整数，不在计费无关路径引入浮点漂移。
-fn tokens_per_1k_sec(row: &Value) -> i64 {
-    let tokens = ch_i64(row, "completion_tokens");
-    let ms = ch_i64(row, "latency_ms_sum");
-    if ms <= 0 {
-        return 0;
-    }
-    tokens.saturating_mul(1_000_000) / ms
+    let value = i128::from(part) * i128::from(scale) / i128::from(total);
+    i64::try_from(value.clamp(i128::from(i64::MIN), i128::from(i64::MAX))).unwrap_or_default()
 }
 
 /// GET /admin/stats/models：模型时延分位与生成速度（mv_model_hour，此前完全无出口）。
@@ -248,22 +218,19 @@ pub async fn models(
     let days = q.days();
     let limit = q.limit();
 
-    let ttft = quantile_cols("ttft_q", "ttft");
-    let latency = quantile_cols("latency_q", "latency");
+    let since = chrono::Utc::now().timestamp() - i64::from(days) * 86_400;
     let sql = format!(
         "SELECT model, \
                 countMerge(requests) AS requests, \
                 sumMerge(tokens) AS tokens, \
                 sumMerge(amount) AS amount_micro, \
-                {ttft}, {latency}, \
-                sumMerge(completion_tokens_sum) AS completion_tokens, \
-                sumMerge(latency_sum) AS latency_ms_sum \
-         FROM mv_model_hour WHERE hour >= now() - INTERVAL {days} DAY \
+                sumMerge(completion_tokens_sum) AS completion_tokens \
+         FROM mv_model_hour WHERE hour >= fromUnixTimestamp({since}) \
          GROUP BY model ORDER BY requests DESC LIMIT {limit}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
 
-    let data: Vec<Value> = rows
+    let mut data: Vec<Value> = rows
         .iter()
         .map(|r| {
             json!({
@@ -271,16 +238,10 @@ pub async fn models(
                 "requests": ch_i64(r, "requests"),
                 "tokens": ch_i64(r, "tokens"),
                 "amount_micro": ch_i64(r, "amount_micro"),
-                "ttft_p50_ms": ch_i64(r, "ttft_p50_ms"),
-                "ttft_p95_ms": ch_i64(r, "ttft_p95_ms"),
-                "ttft_p99_ms": ch_i64(r, "ttft_p99_ms"),
-                "latency_p50_ms": ch_i64(r, "latency_p50_ms"),
-                "latency_p95_ms": ch_i64(r, "latency_p95_ms"),
-                "latency_p99_ms": ch_i64(r, "latency_p99_ms"),
-                "tokens_per_1k_sec": tokens_per_1k_sec(r),
             })
         })
         .collect();
+    super::ttft::enrich(ch, &mut data, super::ttft::Scope::Model, since).await?;
     Ok(Json(json!({ "days": days, "data": data })))
 }
 
@@ -922,6 +883,8 @@ pub async fn my_breakdown(
             "rpm": rpm,
             "tpm": tpm,
             "rpd": rpd,
+            "rate_basis": "admission_estimate",
+            "rate_window": "calendar_minute",
             "rpm_limit": key.rpm_limit,
             "tpm_limit": key.tpm_limit,
             "rpd_limit": key.rpd_limit,
@@ -948,8 +911,10 @@ pub async fn my_breakdown(
             "errors": errors,
             "success_rate_bp": if total[0] > 0 { json!(rate_bp(total[0].saturating_sub(errors), total[0])) } else { Value::Null },
             "cache_hit_bp": rate_bp(total[2], total[1]),
-            "avg_rpm_micro": total[0].saturating_mul(1_000_000) / minutes,
-            "avg_tpm_micro": tokens.saturating_mul(1_000_000) / minutes,
+            "avg_rpm_micro": scaled_ratio(total[0], minutes, 1_000_000),
+            "avg_tpm_micro": scaled_ratio(tokens, minutes, 1_000_000),
+            "avg_rate_window_minutes": minutes,
+            "output_tps_basis": "total_request_latency",
         },
         // 钱包视角的窗口消费（不随 scope 变）：门户据此算"余额按近期日均可用约 N 天"
         "wallet_window_spend_micro": wallet_spend,

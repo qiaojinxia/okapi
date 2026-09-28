@@ -12,7 +12,7 @@ use crate::openai::{ChatResponse, StreamHandle};
 use crate::types::ChatEvent;
 use bytes::Bytes;
 use futures::StreamExt;
-use okapi_api::{CompletionTokensDetails, PromptTokensDetails, UsageProbe};
+use okapi_api::UsageProbe;
 use serde_json::{Value, json};
 
 // ---- 请求转换 ----
@@ -284,12 +284,12 @@ pub fn response_anthropic_to_openai(
             "message": Value::Object(message),
             "finish_reason": map_stop_reason(stop_reason),
         }],
-        "usage": usage_json(usage),
+        "usage": usage.map(usage_json),
     });
     let bytes = serde_json::to_vec(&out)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
-    Ok((bytes, Some(usage)))
+    Ok((bytes, usage))
 }
 
 fn map_stop_reason(stop: Option<&str>) -> &'static str {
@@ -304,52 +304,12 @@ fn map_stop_reason(stop: Option<&str>) -> &'static str {
 
 /// Anthropic usage 对象 → OpenAI 口径探针（prompt 含缓存读写；cached = cache_read）。
 #[must_use]
-pub fn usage_from_anthropic(usage: Option<&Value>) -> UsageProbe {
-    let get = |k: &str| {
-        usage
-            .and_then(|u| u.get(k))
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(0)
-    };
-    let input = get("input_tokens");
-    let cache_read = get("cache_read_input_tokens");
-    let cache_creation = get("cache_creation_input_tokens");
-    UsageProbe {
-        prompt_tokens: input
-            .saturating_add(cache_read)
-            .saturating_add(cache_creation),
-        completion_tokens: get("output_tokens"),
-        prompt_tokens_details: PromptTokensDetails {
-            cached_tokens: cache_read,
-            cache_write_tokens: cache_creation,
-            cache_read_reported: usage
-                .and_then(|u| u.get("cache_read_input_tokens"))
-                .and_then(Value::as_u64)
-                .is_some_and(|v| u32::try_from(v).is_ok()),
-            cache_write_reported: usage
-                .and_then(|u| u.get("cache_creation_input_tokens"))
-                .and_then(Value::as_u64)
-                .is_some_and(|v| u32::try_from(v).is_ok()),
-            // Anthropic 无模态细分（图片并入 input_tokens）
-            audio_tokens: 0,
-            image_tokens: 0,
-        },
-        completion_tokens_details: CompletionTokensDetails {
-            reasoning_tokens: 0,
-            audio_tokens: 0,
-        },
-    }
+pub fn usage_from_anthropic(usage: Option<&Value>) -> Option<UsageProbe> {
+    crate::anthropic_usage::parse(usage)
 }
 
 fn usage_json(u: UsageProbe) -> Value {
-    let details = u.prompt_tokens_details.cache_json();
-    json!({
-        "prompt_tokens": u.prompt_tokens,
-        "completion_tokens": u.completion_tokens,
-        "total_tokens": u.prompt_tokens + u.completion_tokens,
-        "prompt_tokens_details": details,
-    })
+    u.chat_json()
 }
 
 // ---- 事件流转换 ----
@@ -360,11 +320,7 @@ pub struct StreamState {
     id: String,
     model: String,
     created: i64,
-    input_tokens: u32,
-    cache_read: u32,
-    cache_creation: u32,
-    cache_read_reported: bool,
-    cache_write_reported: bool,
+    usage: crate::anthropic_usage::StreamUsage,
     /// OpenAI tool_calls 数组下标（Anthropic content block index 与其不同构）。
     tool_index: i64,
     /// 当前 Anthropic block index → 是否 tool_use（input_json_delta 归属判定）。
@@ -378,11 +334,7 @@ impl StreamState {
             id: "msg".to_owned(),
             model: fallback_model.to_owned(),
             created: chrono::Utc::now().timestamp(),
-            input_tokens: 0,
-            cache_read: 0,
-            cache_creation: 0,
-            cache_read_reported: false,
-            cache_write_reported: false,
+            usage: crate::anthropic_usage::StreamUsage::default(),
             tool_index: -1,
             current_block_is_tool: false,
         }
@@ -403,7 +355,14 @@ impl StreamState {
             "content_block_start" => self.on_block_start(&data),
             "content_block_delta" => self.on_block_delta(&data),
             "message_delta" => self.on_message_delta(&data),
-            "message_stop" => vec![Ok(ChatEvent::Done)],
+            "message_stop" => {
+                let mut events = Vec::new();
+                if let Some(usage) = self.usage.observe("message_stop", &data) {
+                    events.push(Ok(self.usage_event(Some(usage))));
+                }
+                events.push(Ok(ChatEvent::Done));
+                events
+            }
             "error" => {
                 let msg = data
                     .get("error")
@@ -425,27 +384,15 @@ impl StreamState {
             if let Some(model) = m.get("model").and_then(Value::as_str) {
                 model.clone_into(&mut self.model);
             }
-            let get = |k: &str| {
-                m.get("usage")
-                    .and_then(|u| u.get(k))
-                    .and_then(Value::as_u64)
-                    .and_then(|v| u32::try_from(v).ok())
-                    .unwrap_or(0)
-            };
-            self.input_tokens = get("input_tokens");
-            self.cache_read = get("cache_read_input_tokens");
-            self.cache_creation = get("cache_creation_input_tokens");
-            let details = usage_from_anthropic(m.get("usage")).prompt_tokens_details;
-            self.cache_read_reported = details.cache_read_reported;
-            self.cache_write_reported = details.cache_write_reported;
         }
+        let usage = self.usage.observe("message_start", data);
         // 角色 chunk（content 为空串：不触发首字判定）
         vec![Ok(self.data_event(
             &json!({"role": "assistant", "content": ""}),
             None,
             false,
             0,
-            None,
+            usage,
         ))]
     }
 
@@ -518,32 +465,7 @@ impl StreamState {
             .get("delta")
             .and_then(|d| d.get("stop_reason"))
             .and_then(Value::as_str);
-        let output = data
-            .get("usage")
-            .and_then(|u| u.get("output_tokens"))
-            .and_then(Value::as_u64)
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(0);
-        let usage = UsageProbe {
-            prompt_tokens: self
-                .input_tokens
-                .saturating_add(self.cache_read)
-                .saturating_add(self.cache_creation),
-            completion_tokens: output,
-            prompt_tokens_details: PromptTokensDetails {
-                cached_tokens: self.cache_read,
-                cache_write_tokens: self.cache_creation,
-                cache_read_reported: self.cache_read_reported,
-                cache_write_reported: self.cache_write_reported,
-                // Anthropic 无模态细分（图片并入 input_tokens）
-                audio_tokens: 0,
-                image_tokens: 0,
-            },
-            completion_tokens_details: CompletionTokensDetails {
-                reasoning_tokens: 0,
-                audio_tokens: 0,
-            },
-        };
+        let usage = self.usage.observe("message_delta", data);
         vec![
             Ok(self.data_event(
                 &json!({}),
@@ -586,21 +508,21 @@ impl StreamState {
     }
 
     /// 终端 usage chunk（choices 为空，OpenAI include_usage 形状）。
-    fn usage_event(&self, usage: UsageProbe) -> ChatEvent {
+    fn usage_event(&self, usage: Option<UsageProbe>) -> ChatEvent {
         let chunk = json!({
             "id": self.id,
             "object": "chat.completion.chunk",
             "created": self.created,
             "model": self.model,
             "choices": [],
-            "usage": usage_json(usage),
+            "usage": usage.map(usage_json),
         });
         ChatEvent::Data {
             raw: chunk.to_string(),
             event: None,
             has_output: false,
             content_chars: 0,
-            usage: Some(usage),
+            usage,
         }
     }
 }

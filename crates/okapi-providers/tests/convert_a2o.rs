@@ -138,8 +138,10 @@ fn usage_chunk(prompt: u32, cached: u32, completion: u32) -> ChatEvent {
                 cache_write_tokens: 0,
                 audio_tokens: 0,
                 image_tokens: 0,
+                ..Default::default()
             },
             completion_tokens_details: okapi_api::CompletionTokensDetails::default(),
+            ..Default::default()
         }),
     }
 }
@@ -384,10 +386,9 @@ fn response_finish_reason_table() {
     assert_eq!(stop(Value::Null), "end_turn");
 }
 
-/// 上游报的缓存计数超过 prompt 时要夹住。不夹的话 `prompt - cached` 是 u32 下溢：
-/// debug 下 panic，release 下回绕成四十亿级的 `input_tokens` 回给客户端。
+/// Inconsistent cache counts are rejected before subtraction, never clamped into a plausible bill.
 #[test]
-fn usage_clamps_cache_counts_that_exceed_prompt() {
+fn usage_rejects_cache_counts_that_exceed_prompt() {
     let usage_of = |usage: Value| {
         let body = json!({
             "id": "c", "model": "gpt-x",
@@ -395,20 +396,19 @@ fn usage_clamps_cache_counts_that_exceed_prompt() {
                          "message": {"role": "assistant", "content": "x"}}],
             "usage": usage
         });
-        let (out, _) =
+        let (out, probe) =
             response_openai_to_anthropic(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        assert!(probe.unwrap().with_estimates(0, 0).is_err());
         serde_json::from_slice::<Value>(&out).unwrap()["usage"].clone()
     };
     assert_eq!(
         usage_of(json!({"prompt_tokens": 10, "completion_tokens": 1,
                         "prompt_tokens_details": {"cached_tokens": 50}})),
-        json!({"input_tokens": 0, "cache_read_input_tokens": 10,
-               "cache_creation_input_tokens": 0, "output_tokens": 1})
+        Value::Null
     );
     assert_eq!(
         usage_of(json!({"prompt_tokens": 10, "completion_tokens": 1,
                         "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 20}})),
-        json!({"input_tokens": 0, "cache_read_input_tokens": 4,
-               "cache_creation_input_tokens": 6, "output_tokens": 1})
+        Value::Null
     );
 }

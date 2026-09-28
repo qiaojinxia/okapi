@@ -159,6 +159,7 @@ async fn handle(
         completion_tokens: 0,
         audio_completion_tokens: 0,
         reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     let est_quote = calculate(&book, &calc, est_usage)?;
     super::auth::check_member_limit(state, &key).await?;
@@ -171,9 +172,11 @@ async fn handle(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    let reservation_pool = match state
+    let (reservation_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -186,7 +189,11 @@ async fn handle(
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -209,11 +216,13 @@ async fn handle(
         upstream_path,
         body,
         request_id,
+        est_prompt,
     )
     .await
     {
         Ok((resp_body, status, usage, channel, upstream_request_id, failover, upstream_model)) => {
             let usage = usage.unwrap_or(TokenUsage {
+                upstream_usage: Some(okapi_domain::UpstreamTokenCounts::default()),
                 prompt_tokens: est_prompt,
                 cached_tokens: 0,
                 cache_read_reported: false,
@@ -224,12 +233,14 @@ async fn handle(
                 completion_tokens: 0,
                 audio_completion_tokens: 0,
                 reasoning_tokens: 0,
+                ..TokenUsage::default()
             });
             let quote = calculate(&book, &calc, usage).map_err(AppError::from);
             match quote {
                 Ok(quote) => {
                     let snapshot = serde_json::to_value(&quote.snapshot).ok();
                     let input = SettlementInput {
+                        source_window: source_window.clone(),
                         dimensions: okapi_ledger::pg::UsageDimensions::new(
                             requested_model,
                             &upstream_model,
@@ -310,6 +321,7 @@ async fn handle(
                 }
             };
             let input = SettlementInput {
+                source_window: source_window.clone(),
                 dimensions: okapi_ledger::pg::UsageDimensions::new(
                     requested_model,
                     channel.as_ref().map_or("", |c| c.2.as_str()),
@@ -370,6 +382,16 @@ type ForwardOk = (
     String,
 );
 
+fn validated_usage(
+    usage: Option<okapi_api::UsageProbe>,
+    est_prompt: u32,
+) -> Result<Option<TokenUsage>, AppError> {
+    usage
+        .map(|probe| probe.with_estimates(est_prompt, 0))
+        .transpose()
+        .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))
+}
+
 /// 候选循环：anthropic 渠道跳过（无 embeddings 端点）；瞬态失败 failover。
 #[allow(clippy::too_many_arguments)]
 async fn forward(
@@ -380,6 +402,7 @@ async fn forward(
     upstream_path: &str,
     body: &Bytes,
     request_id: Uuid,
+    est_prompt: u32,
 ) -> Result<ForwardOk, (AppError, Option<(i64, i64, String)>, i16)> {
     let rows = okapi_store::channels::candidates_for_model(
         &state.pg,
@@ -425,10 +448,12 @@ async fn forward(
             .await
         {
             Ok(resp) => {
+                let usage = validated_usage(resp.usage, est_prompt)
+                    .map_err(|error| (error, last.clone(), failover))?;
                 return Ok((
                     resp.body,
                     resp.status,
-                    resp.usage.map(okapi_api::UsageProbe::to_token_usage),
+                    usage,
                     (cand.channel_id, cand.channel_key_id),
                     resp.upstream_request_id,
                     failover,

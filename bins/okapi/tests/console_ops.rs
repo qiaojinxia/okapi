@@ -525,6 +525,7 @@ async fn settings_get_and_leaderboard() {
         });
     let amount = (top + 1_000_000).max(77_000_000);
     let big = okapi_ledger::SettlementInput {
+        source_window: None,
         dimensions: okapi_ledger::pg::UsageDimensions::default(),
         request_id: Uuid::new_v4(),
         log_type: 2,

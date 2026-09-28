@@ -95,6 +95,12 @@ async fn handle(
     let Some(billing_model) = settings.billing_model.as_deref() else {
         return Err(AppError::bad_request().with_param("billing_model_missing"));
     };
+    if !key.allows_model(billing_model) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            codes::MODEL_NOT_ALLOWED,
+        ));
+    }
 
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
@@ -125,9 +131,11 @@ async fn handle(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    let reservation_pool = match state
+    let (reservation_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -140,7 +148,11 @@ async fn handle(
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -199,6 +211,7 @@ async fn handle(
                 true,
                 None,
                 reservation_pool,
+                source_window.as_deref(),
             )
             .await?;
             let mut out = Response::builder()
@@ -222,6 +235,7 @@ async fn handle(
                 false,
                 Some(i16::try_from(status).unwrap_or(0)),
                 reservation_pool,
+                source_window.as_deref(),
             )
             .await?;
             let out = Response::builder()
@@ -243,6 +257,7 @@ async fn handle(
                 false,
                 None,
                 reservation_pool,
+                source_window.as_deref(),
             )
             .await?;
             Err(AppError::new(
@@ -265,6 +280,7 @@ async fn settle(
     success: bool,
     upstream_status: Option<i16>,
     reservation_pool: Pool,
+    source_window: Option<&str>,
 ) -> Result<(), AppError> {
     let book = state.pricebook.load();
     let (billing_state, log_type, event_type, delta, amount, pool) = if success {
@@ -292,6 +308,7 @@ async fn settle(
         (BillingState::Failed, 5_i16, "refund", 0, Money::ZERO, pool)
     };
     let input = SettlementInput {
+        source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             "",
             "",

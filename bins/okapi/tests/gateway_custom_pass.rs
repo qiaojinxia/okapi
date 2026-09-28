@@ -225,6 +225,42 @@ async fn path_outside_allowlist_rejected_free() {
     assert_eq!(balance.as_micros(), 1_000_000, "白名单拒绝不得计费");
 }
 
+#[tokio::test]
+async fn custom_pass_cannot_bypass_model_or_lifetime_key_limits() {
+    for (model_restricted, status, code) in [
+        (true, 403, "model_not_allowed"),
+        (false, 429, "key_quota_exceeded"),
+    ] {
+        let env = setup().await;
+        if model_restricted {
+            sqlx::query(
+                "UPDATE api_keys SET model_allowlist='[\"another-model\"]'::jsonb WHERE user_id=$1",
+            )
+            .bind(env.user_id)
+            .execute(&env.pg)
+            .await
+            .unwrap();
+        } else {
+            sqlx::query("UPDATE api_keys SET quota_mode=1,quota_micro=4999 WHERE user_id=$1")
+                .bind(env.user_id)
+                .execute(&env.pg)
+                .await
+                .unwrap();
+        }
+        let response = pass_get(&env, "ok/tool").await;
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            code
+        );
+        assert_eq!(
+            env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+            1_000_000
+        );
+        assert!(record_of(&env.pg, env.user_id, 2).await.is_none());
+    }
+}
+
 /// 上游 5xx：错误透传 + 全额退款 + 失败记账。
 #[tokio::test]
 async fn upstream_failure_refunds() {

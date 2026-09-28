@@ -136,7 +136,7 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
                 role: 'admin:usersRole',
                 balance: 'common:balance',
                 subscription: 'admin:userSubscriptionTab',
-                // 页签用短名；userGroups 是表单字段标签（带"逗号分隔，首个优先"说明），
+                // 页签用短名；userGroups 是表单字段标签（带优先级说明），
                 // 当页签名会把页签栏挤成两行
                 groups: 'admin:userGroupsTab',
               } as const
@@ -214,7 +214,9 @@ export function UserDrawer({ userId, onClose }: { userId: number; onClose: () =>
       {tab === 'subscription' && <SubscriptionSection userId={userId} onDone={invalidate} />}
       {tab === 'groups' && (
         <GroupsSection
+          key={userId}
           userId={userId}
+          ready={ov !== undefined && !overview.isError}
           current={(ov?.groups ?? []).map((g) => g.code)}
           onDone={invalidate}
         />

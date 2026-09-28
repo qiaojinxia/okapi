@@ -91,6 +91,7 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
           <div className="flex flex-wrap gap-1.5">
             <Badge variant="muted">{t('logs:mode')} {t(`logs:mode_${s.mode}`, { defaultValue: s.mode })}</Badge>
             {s.epoch != null && <Badge variant="muted">{t('logs:pricingVersion')} {s.epoch}</Badge>}
+            {s.mode !== 'per_call' && <Badge variant="muted">{t('admin:pricingBasePreview', { price: s.base_price_per_1m_usd ?? 2 })}</Badge>}
             <Badge variant="muted">{t('logs:group')} {s.group} ×{formatRatio(s.group_ratio)}</Badge>
             <Badge variant="muted">{t('logs:userMultiplier')} ×{formatRatio(s.user_multiplier)}</Badge>
             {s.model_ratio != null && <Badge variant="muted">{t('admin:modelRatio')} ×{formatRatio(s.model_ratio)}</Badge>}

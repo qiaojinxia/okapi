@@ -806,6 +806,132 @@ async fn cache_reporting_distinguishes_unknown_from_zero_across_admin_views() {
         assert_eq!(row["cache_read_known_requests"], 1, "{body}");
     }
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One fixture compared across independent aggregation endpoints.
+async fn token_totals_and_weighted_metrics_agree_across_statistics_endpoints() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        eprintln!("SKIP: Token statistics assertions require OKAPI_CLICKHOUSE_URL");
+        return;
+    }
+    let mut rows = Vec::new();
+    for (model, prompt, cached, writes, output, reasoning, latency, ttft) in [
+        (&env.model_a, 100, 90, 0, 50, 10, 1000, 100),
+        (&env.model_a, 900, 90, 100, 450, 90, 9000, 900),
+        (&env.model_b, 100, 0, 0, 0, 0, 500, 0),
+    ] {
+        let mut row = payload(&env, model, 1000, output == 0);
+        for (field, value) in [
+            ("prompt_tokens", prompt),
+            ("cached_tokens", cached),
+            ("cache_write_tokens", writes),
+            ("completion_tokens", output),
+            ("reasoning_tokens", reasoning),
+            ("latency_ms", latency),
+            ("ttft_ms", ttft),
+        ] {
+            row[field] = json!(value);
+        }
+        if output == 0 {
+            row["ttft_ms"] = Value::Null;
+        }
+        row["cache_write_reported"] = json!(true);
+        rows.push(row);
+    }
+    insert_values(&env, &rows, None).await;
+    let trend = poll_until(
+        &env,
+        &format!("/admin/stats/trend?user_id={}&days=1", env.user_id),
+        |b| b["total"]["requests"] == 3,
+    )
+    .await;
+    let total = &trend["total"];
+    for (field, value) in [
+        ("prompt_tokens", 1100),
+        ("cached_tokens", 180),
+        ("cache_write_tokens", 100),
+        ("completion_tokens", 500),
+        ("reasoning_tokens", 100),
+        ("tokens", 1600),
+        ("cache_hit_bp", 1636),
+        ("avg_latency_ms", 3500),
+        ("avg_ttft_ms", 500),
+        ("avg_output_tps_milli", 47619),
+    ] {
+        assert_eq!(total[field], value, "{field}: {trend}");
+    }
+    let (status, portal) = get(&env, "/api/me/stats/breakdown?days=1", &env.user_token).await;
+    assert_eq!(status, 200, "{portal}");
+    for field in [
+        "requests",
+        "tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cached_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "cache_hit_bp",
+        "avg_latency_ms",
+        "avg_ttft_ms",
+    ] {
+        assert_eq!(portal["total"][field], total[field], "{field}");
+    }
+    assert_eq!(portal["total"]["tokens_per_1k_sec"], 47619);
+    assert_eq!(portal["total"]["avg_tpm_micro"], 1_111_111);
+    assert_eq!(portal["live"]["rate_basis"], "admission_estimate");
+    assert_eq!(portal["total"]["avg_rate_window_minutes"], 1440);
+    let (status, models) = get(
+        &env,
+        &format!(
+            "/admin/stats/breakdown?by=model&user_id={}&days=1",
+            env.user_id
+        ),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let empty_ttft = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == env.model_b)
+        .unwrap();
+    assert!(empty_ttft["avg_ttft_ms"].is_null());
+    for by in ["provider", "channel", "user", "group"] {
+        let (status, body) = get(
+            &env,
+            &format!(
+                "/admin/stats/breakdown?by={by}&user_id={}&days=1",
+                env.user_id
+            ),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let data = body["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1);
+        for field in [
+            "tokens",
+            "cached_tokens",
+            "cache_write_tokens",
+            "cache_hit_bp",
+            "avg_output_tps_milli",
+        ] {
+            assert_eq!(data[0][field], total[field], "{by}: {field}");
+        }
+    }
+    let (status, logs) = get(
+        &env,
+        &format!("/admin/logs/stat?user_id={}", env.user_id),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(logs["tokens"], 1600);
+    assert_eq!(logs["cache_hit_bp"], 1636);
+    assert_eq!(logs["tpm"], 1600);
+}
 fn advanced_payload(
     env: &Env,
     upstream: &str,
@@ -977,7 +1103,11 @@ async fn legacy_aggregate_remainder_is_preserved_once_and_marked_unknown() {
     assert_eq!(trend["total"]["requests"], 3);
     assert_eq!(trend["total"]["amount_micro"], 3000);
     assert_eq!(trend["total"]["cost_known_requests"], 1);
-    assert_eq!(trend["total"]["avg_latency_ms"], 3666);
+    assert!(
+        trend["total"]["avg_latency_ms"].is_null(),
+        "legacy duration sampling is unknown without raw history"
+    );
+    assert_eq!(trend["total"]["latency_observed_requests"], 1);
     assert!(trend["total"]["cache_write_tokens"].is_null());
     let (_, by) = get(
         &env,

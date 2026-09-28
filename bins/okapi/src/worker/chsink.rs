@@ -157,8 +157,10 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "upstream_cost_micro": get_i64(payload, "upstream_cost_micro"),
         "pricing_epoch": get_i64(payload, "pricing_epoch"),
         "ratio_snapshot": get_str(payload, "ratio_snapshot"),
-        "latency_ms": get_i64(payload, "latency_ms"),
-        "ttft_ms": get_i64(payload, "ttft_ms"),
+        "latency_ms": duration_ms(payload, "latency_ms").unwrap_or_default(),
+        "latency_reported": u8::from(duration_ms(payload, "latency_ms").is_some()),
+        "ttft_ms": duration_ms(payload, "ttft_ms").unwrap_or_default(),
+        "ttft_reported": u8::from(duration_ms(payload, "ttft_ms").is_some()),
         "stream": i32::from(is_stream),
         "retry_count": get_i64(payload, "retry_count"),
         "failover_count": get_i64(payload, "failover_count"),
@@ -169,6 +171,10 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "is_error": i32::from(log_type == 5),
     });
     let extra = json!({
+        "prompt_source": usage_source(payload, "prompt_source"),
+        "completion_source": usage_source(payload, "completion_source"),
+        "upstream_prompt_tokens": payload.pointer("/upstream_usage/prompt_tokens"),
+        "upstream_completion_tokens": payload.pointer("/upstream_usage/completion_tokens"),
         "requested_model": get_str(payload, "requested_model"),
         "upstream_model": get_str(payload, "upstream_model"),
         "endpoint": get_str(payload, "endpoint"),
@@ -185,4 +191,19 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         row.extend(extra.clone());
     }
     row
+}
+
+// Invalid metadata is unknown, never a measured zero or an overflowing CH UInt32.
+fn duration_ms(payload: &Value, field: &str) -> Option<u32> {
+    payload
+        .get(field)?
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+}
+
+fn usage_source<'a>(payload: &'a Value, field: &str) -> &'a str {
+    match get_str(payload, field) {
+        value @ ("upstream" | "estimated" | "local_override") => value,
+        _ => "unknown",
+    }
 }

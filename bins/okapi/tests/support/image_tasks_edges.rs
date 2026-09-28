@@ -3,6 +3,7 @@ use axum::extract::{Path, State};
 
 fn settlement(env: &Env, request_id: Uuid) -> okapi_ledger::SettlementInput<'_> {
     okapi_ledger::SettlementInput {
+        source_window: None,
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             &env.model,
             "mapped-image",

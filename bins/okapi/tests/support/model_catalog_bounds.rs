@@ -4,7 +4,7 @@ async fn groups(env: &Env) -> Vec<String> {
     let mut codes = Vec::new();
     for i in 0..25 {
         let code = format!("{}-g{i:02}", env.prefix);
-        sqlx::query("INSERT INTO price_groups(group_code,description,group_ratio,pool_code) VALUES($1,$2,1,'default')")
+        sqlx::query("INSERT INTO price_groups(group_code,description,group_ratio,pool_code,self_select) VALUES($1,$2,1,'default',true)")
             .bind(&code).bind(format!("Group {} {i}", env.prefix)).execute(&env.pg).await.unwrap();
         codes.push(code);
     }

@@ -33,29 +33,29 @@ async function prepare(page: Page) {
   return requests
 }
 
-async function openUserGroups(page: Page) {
+// Free-form TagInput remains appropriate for rule scopes; user assignments now use a closed catalog.
+async function openRuleGroups(page: Page) {
   await prepare(page)
-  const user = { id: 7, username: 'alice', email: 'alice@ok.test', role: 1, status: 1, balance_micro: 0, admin_role_id: null, price_multiplier: '1' }
-  await page.route('**/admin/users?*', (route) => route.fulfill({ json: { total: 1, data: [user] } }))
-  await page.route('**/admin/users/7/overview', (route) => route.fulfill({ json: { user, groups: [{ code: 'default', priority: 1 }], keys: [] } }))
-  await page.route('**/admin/users/7/usage?*', (route) => route.fulfill({ json: { days: 7, stats_available: false, daily: [], by_model: [], ledger: [] } }))
-  const posts: { groups: { group_code: string; priority: number }[] }[] = []
-  await page.route('**/admin/users/7/groups', (route) => {
-    expect(route.request().method()).toBe('POST')
-    posts.push(route.request().postDataJSON())
+  const posts: string[][] = []
+  await page.route('**/admin/pricing/rules', (route) => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: { data: [] } })
+    posts.push(route.request().postDataJSON().scope.groups)
     return route.fulfill({ json: { ok: true } })
   })
-  await page.goto('/admin/users')
-  await page.getByRole('row').filter({ hasText: 'alice' }).getByRole('button', { name: '管理', exact: true }).click()
+  await page.goto('/admin/rules')
+  await page.getByRole('main').getByRole('button', { name: /新建/ }).first().click()
   const drawer = page.getByRole('dialog')
-  await drawer.getByRole('tab', { name: '分组', exact: true }).click()
-  return { input: drawer.getByPlaceholder('回车或逗号分隔，可粘贴多个'), save: drawer.getByRole('button', { name: '保存', exact: true }), posts }
+  await drawer.locator('#r-code').fill('tag-input-fixture')
+  const input = drawer.locator('#s-groups')
+  await input.fill('default')
+  await input.press('Enter')
+  return { input, save: drawer.getByRole('button', { name: '保存', exact: true }), posts }
 }
 
 for (const width of [320, 390, 1280]) {
   test(`标签输入${width}：粘贴多项后一次保存，失焦确认不移动按钮，提交顺序和去重正确`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
-    const { input, save, posts } = await openUserGroups(page)
+    const { input, save, posts } = await openRuleGroups(page)
     const codes = Array.from({ length: 8 }, (_, i) => `research-team-${i}`)
     await input.fill(`default,${codes.join('，')},${codes[0]}`)
     await save.hover()
@@ -67,13 +67,13 @@ for (const width of [320, 390, 1280]) {
       expect(Math.abs(after!.y - before!.y)).toBeLessThan(1)
     } finally { await page.mouse.up() }
     await expect.poll(() => posts.length).toBe(1)
-    expect(posts[0]).toEqual({ groups: ['default', ...codes].map((group_code, i) => ({ group_code, priority: codes.length + 1 - i })) })
-    expect(await page.getByRole('dialog').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+    expect(posts[0]).toEqual(['default', ...codes])
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   })
 }
 
 test('标签输入：删除一项不确认其他草稿，重复项删除后不会失焦复活，焦点仍在输入框', async ({ page }) => {
-  const { input, save, posts } = await openUserGroups(page)
+  const { input, save, posts } = await openRuleGroups(page)
   await input.fill('vip, research')
   await expect(page.getByRole('button', { name: '取消添加 vip', exact: true })).toBeVisible()
   await page.getByRole('button', { name: '移除 default', exact: true }).click()
@@ -90,11 +90,11 @@ test('标签输入：删除一项不确认其他草稿，重复项删除后不�
   await expect(input).toBeFocused()
   await save.click()
   await expect.poll(() => posts.length).toBe(1)
-  expect(posts[0]).toEqual({ groups: [{ group_code: 'next', priority: 1 }] })
+  expect(posts[0]).toEqual(['next'])
 })
 
 test('标签输入：多行粘贴保留分隔并替换选区，确认前可检查和撤销，输入光标位置正确', async ({ page }) => {
-  const { input, save, posts } = await openUserGroups(page)
+  const { input, save, posts } = await openRuleGroups(page)
   await input.fill('default, old, tail')
   await input.evaluate((node: HTMLInputElement) => {
     node.setSelectionRange(9, 12)
@@ -109,11 +109,11 @@ test('标签输入：多行粘贴保留分隔并替换选区，确认前可检�
   await page.getByRole('button', { name: '取消添加 research', exact: true }).click()
   await save.click()
   await expect.poll(() => posts.length).toBe(1)
-  expect(posts[0]).toEqual({ groups: [{ group_code: 'default', priority: 3 }, { group_code: 'vip', priority: 2 }, { group_code: 'tail', priority: 1 }] })
+  expect(posts[0]).toEqual(['default', 'vip', 'tail'])
 })
 
 test('标签输入：标签只占一个 Tab 停靠点，方向键定位、Delete 删除、Esc 回输入而不关闭抽屉', async ({ page }) => {
-  const { input, save } = await openUserGroups(page)
+  const { input } = await openRuleGroups(page)
   const codes = Array.from({ length: 10 }, (_, i) => `team-${i}`)
   await input.fill(codes.join(','))
   await input.press('Enter')
@@ -131,7 +131,7 @@ test('标签输入：标签只占一个 Tab 停靠点，方向键定位、Delete
   await input.press('Tab')
   await page.keyboard.press('Home')
   await page.keyboard.press('Tab')
-  await expect(save).toBeFocused()
+  await expect(page.locator('#s-models')).toBeFocused()
   await page.keyboard.press('Shift+Tab')
   await page.keyboard.press('Escape')
   await expect(input).toBeFocused()
@@ -143,7 +143,7 @@ test('标签输入：标签只占一个 Tab 停靠点，方向键定位、Delete
 for (const width of [320, 1280]) {
   test(`标签输入${width}：长标签和批量草稿可滚动检查，触控与页面宽度保持可用`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })
-    const { input } = await openUserGroups(page)
+    const { input } = await openRuleGroups(page)
     const long = 'research-team-with-a-long-name-that-must-wrap-without-widening-the-drawer'
     await input.fill(`${long},${Array.from({ length: 10 }, (_, i) => `group-${i}`).join(',')}`)
     const group = page.getByRole('group', { name: /^标签清单/ })

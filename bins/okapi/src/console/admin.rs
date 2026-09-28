@@ -505,6 +505,11 @@ fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     let Some(s) = settings else {
         return Ok(());
     };
+    if let Some(value) = s.get("image_stream_usage")
+        && !matches!(value.as_str(), Some("cumulative" | "per_image"))
+    {
+        return Err(AppError::bad_request().with_param("image_stream_usage"));
+    }
     if let Some(v) = s.get("proxy_url") {
         let raw = v
             .as_str()
@@ -871,6 +876,8 @@ pub async fn update_channel_key(
 
 #[derive(Deserialize)]
 pub struct AdminPatchKeyReq {
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub quota_micro: Option<Option<i64>>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
@@ -924,6 +931,7 @@ pub async fn patch_api_key(
     ensure_positive("tpm_limit", req.tpm_limit.map(|v| v.map(i64::from)))?;
     ensure_positive("rpd_limit", req.rpd_limit.map(|v| v.map(i64::from)))?;
     ensure_positive("daily_token_limit", req.daily_token_limit)?;
+    super::portal::validate_key_limits(req.quota_micro.flatten(), None)?;
     ensure_positive(
         "max_concurrency",
         req.max_concurrency.map(|v| v.map(i64::from)),
@@ -936,6 +944,7 @@ pub async fn patch_api_key(
     }
 
     let patch = okapi_store::admin::ApiKeyPatch {
+        quota_micro: req.quota_micro,
         name: req.name.clone().map(|n| n.trim().to_owned()),
         status: req.status,
         expires_at: req.expires_at,
@@ -1240,6 +1249,10 @@ pub async fn set_setting(
     ExtractJson(req): ExtractJson<SetSettingReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
+    let is_pricing_base = req.key == crate::gateway::pricing_loader::BASE_PRICE_SETTING;
+    if is_pricing_base && crate::gateway::pricing_loader::valid_base_price(&req.value).is_none() {
+        return Err(AppError::bad_request().with_param("pricing_base_per_1m_micro"));
+    }
     okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.user_id).await?;
     state.invalidate_routing_caches();
     // settings 热路径缓存按键失效：同进程立即生效（公告发布、限流阈值调整不必等 60s TTL），
@@ -1253,7 +1266,9 @@ pub async fn set_setting(
         json!({ "value": req.value }),
     )
     .await;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(
+        json!({ "ok": true, "requires_publish": is_pricing_base }),
+    ))
 }
 
 /// GET /admin/settings/{key}：单键读取（配置页回显；写权限同门槛防低权限窥探敏感配置）。
@@ -1406,6 +1421,9 @@ pub struct UpsertModelReq {
     /// 图片输入倍率（相对文本）。
     #[serde(default = "default_one")]
     pub image_ratio: String,
+    /// Independent cache/modal prices as decimal strings. Omit to preserve; {} clears.
+    #[serde(default)]
+    pub modality_ratios: Option<Value>,
     /// service_tier 档位倍率（如 {"flex":"0.5","priority":"2.0"}；
     /// None=不改动，空对象=清除，DESIGN §3-4.5）。
     #[serde(default)]
@@ -1489,6 +1507,19 @@ pub async fn upsert_model(
             return Err(AppError::bad_request().with_param("ratio"));
         }
     }
+    if let Some(value) = &req.modality_ratios {
+        okapi_pricing::ModalityRatios::parse(value)
+            .map_err(|param| AppError::bad_request().with_param(param))?;
+    }
+    // Validate all supplied price axes before changing the model row.
+    if let Some(tiers) = &req.tier_ratios
+        && tiers.values().any(|v| {
+            v.as_str()
+                .is_none_or(|s| s.parse::<okapi_pricing::RatioFp>().is_err())
+        })
+    {
+        return Err(AppError::bad_request().with_param("tier_ratios"));
+    }
     let axes = okapi_store::admin::RatioAxes {
         model: &req.model_ratio,
         completion: &req.completion_ratio,
@@ -1497,6 +1528,7 @@ pub async fn upsert_model(
         audio: &req.audio_ratio,
         audio_completion: &req.audio_completion_ratio,
         image: &req.image_ratio,
+        modality_ratios: req.modality_ratios.as_ref(),
     };
     // 阶梯表非空 → tiered；空串 → 切回 ratio；None → 保持既有模式的 ratio 写入路径。
     // 校验放在写库前：阶梯表配错只会在**编译价簿**时炸，那时改动已发布，整本价簿一起装载失败。
@@ -1515,14 +1547,6 @@ pub async fn upsert_model(
         None => okapi_store::admin::upsert_model_ratio(&state.pg, &req.model_name, axes).await?,
     };
     if let Some(tiers) = &req.tier_ratios {
-        for v in tiers.values() {
-            let ok = v
-                .as_str()
-                .is_some_and(|s| s.parse::<okapi_pricing::RatioFp>().is_ok());
-            if !ok {
-                return Err(AppError::bad_request().with_param("tier_ratios"));
-            }
-        }
         let value = if tiers.is_empty() {
             None
         } else {
@@ -1554,6 +1578,7 @@ pub async fn upsert_model(
             "audio_ratio": req.audio_ratio,
             "audio_completion_ratio": req.audio_completion_ratio,
             "image_ratio": req.image_ratio,
+            "modality_ratios": req.modality_ratios,
             "tier_expr": req.tier_expr,
             "fallback_models": req.fallback_models,
         }),
@@ -1754,19 +1779,33 @@ pub async fn delete_pricing_rule(
 
 /// 发布定价 epoch：**发布前全量编译校验（fail-closed，DESIGN §3.3）**——
 /// 配置编译不过即拒绝发布；snapshot 存发布时刻配置全量（历史/回滚/diff）。
+#[derive(Deserialize, Default)]
+pub struct PublishPricingQuery {
+    pub expected_base_per_1m_micro: Option<i64>,
+}
+
 pub async fn publish_pricing(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<PublishPricingQuery>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_PUBLISH).await?;
 
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
     let source = crate::gateway::pricing_loader::build_source(&rows);
-    if let Err(err) = okapi_pricing::book::compile(source) {
+    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
+    if query
+        .expected_base_per_1m_micro
+        .is_some_and(|expected| expected != base)
+    {
+        return Err(AppError::bad_request().with_param("pricing_base_changed"));
+    }
+    if let Err(err) = okapi_pricing::book::compile_with_base(source, base) {
         tracing::warn!(error = %err, "定价配置编译失败，拒绝发布");
         return Err(AppError::bad_request().with_param(format!("compile: {err}")));
     }
-    let snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
+    let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
+    snapshot["base_price_per_1m_micro"] = json!(base);
 
     let epoch = okapi_store::admin::publish_epoch(&state.pg, actor.user_id, &snapshot).await?;
     // 广播（best-effort；丢失由 gateway 30s 轮询兜底）
@@ -2100,6 +2139,7 @@ pub async fn refund_by_request(
         "outcome": "refunded",
         "user_id": refund.user_id,
         "refunded_micro": refund.amount.as_micros(),
+        "credited_micro": refund.credit.as_micros(),
         "balance_after_micro": balance_after.balance_after.map(okapi_domain::Money::as_micros), "operation_id": balance_after.operation_id, "pending": balance_after.balance_after.is_none(),
     })))
 }
@@ -2679,6 +2719,7 @@ pub async fn import_newapi_pricing(
                 audio: &audio,
                 audio_completion: &audio_completion,
                 image: &image,
+                modality_ratios: None,
             },
         )
         .await?;

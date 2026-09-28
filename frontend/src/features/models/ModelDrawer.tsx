@@ -17,10 +17,12 @@ import { describeError } from '@/lib/i18n'
 /// 每段给出该轴什么时候需要配，避免用户对着一排 1 不知道该改哪个。
 export function ModelDrawer({
   model,
+  basePriceMicro = 2_000_000,
   onClose,
   onDone,
 }: {
   model: ModelListRow | undefined
+  basePriceMicro?: number
   onClose: () => void
   onDone: () => void
 }) {
@@ -86,7 +88,7 @@ export function ModelDrawer({
       open
       onClose={onClose}
       title={model ? t('admin:editModel', { name: model.model_name }) : t('admin:createModel')}
-      description={t('admin:modelDrawerDesc')}
+      description={t('admin:modelDrawerDesc', { price: basePriceMicro / 1_000_000 })}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>

@@ -109,7 +109,13 @@ export function ActiveSessionsCard() {
   })
 
   return (
-    <Card>
+    <Card
+      data-slot="security-sessions"
+      role="region"
+      aria-label={t('security:sessionsTitle')}
+      tabIndex={0}
+      className="min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-40 lg:overflow-y-auto lg:overscroll-contain"
+    >
       <CardHeader>
         <CardTitle>{t('security:sessionsTitle')}</CardTitle>
         <CardDescription>
@@ -128,7 +134,7 @@ export function ActiveSessionsCard() {
                 <span className="tabular-nums text-muted-foreground">
                   {d.latest > 0 ? dayjs.unix(d.latest).format('MM-DD HH:mm') : '—'}
                 </span>
-                <span className="font-mono">{d.ip ?? '—'}</span>
+                <span className="min-w-0 font-mono break-all">{d.ip ?? '—'}</span>
                 <span className="min-w-0 flex-1 truncate text-muted-foreground" title={d.ua ?? ''}>
                   {d.ua ?? '—'}
                 </span>

@@ -50,8 +50,7 @@ export function ModelDetails({ model, groups, group, factor, unit, tab, onTab, o
     <FieldGroup title={t('catalog:prices')} hint={t('catalog:priceNote')}>
       <div className="flex flex-wrap items-center justify-between gap-2"><Label htmlFor="detail-group">{t('pricing:viewAsGroup')}</Label>
         <Select id="detail-group" className="max-w-full" value={group} onChange={onGroup} placeholder={t('pricing:baseGroup')}
-          options={[...groups.map((g) => ({ value: g.code, label: `${groupName(g)} ×${formatRatio(g.ratio)}` })),
-            ...(group && !groups.some((g) => g.code === group) ? [{ value: group, label: group }] : [])]} /></div>
+          options={groups.map((g) => ({ value: g.code, label: `${groupName(g)} ×${formatRatio(g.ratio)}` }))} /></div>
       <ModelPriceSummary model={model} factor={factor} unit={unit} />
       {model.mode === 'ratio' ? <dl className="divide-y divide-border">
         {rows.map(([field, label]) => <div key={field} className="flex items-center justify-between gap-3 py-2.5 text-sm"><dt className="text-muted-foreground">{label}</dt><dd className="text-right font-medium">{formatUnitPrice(modelPrice(model, field, factor, unit), i18n.language)}<span className="ml-2 text-xs font-normal text-muted-foreground">/ {unit} tokens</span></dd></div>)}

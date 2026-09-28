@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id AS \"user_id!\",api_key_id,amount_micro AS \"amount_micro!\",pool AS \"pool!\",status AS \"status!\",source_window FROM billing_financial_records WHERE request_id=$1 ORDER BY created_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_financial_records",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "api_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_financial_records",
+            "name": "api_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_micro!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_financial_records",
+            "name": "amount_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "pool!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_financial_records",
+            "name": "pool"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_financial_records",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "source_window",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_financial_records",
+            "name": "source_window"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2490505475d8e0fb597cf9411d296486aa9cbf43b633dddea671743d04bca765"
+}

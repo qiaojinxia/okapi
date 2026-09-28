@@ -27,7 +27,7 @@ const models = [
   model('image-studio', 'Custom Studio', 'Image Studio', { mode: 'per_call', per_call_price_micro: 40000, capabilities: {}, context_window: null, max_output: null }),
   model('private-model-with-a-very-long-canonical-identifier-v2.0', null, null, { model_ratio: null, completion_ratio: null, capabilities: {}, context_window: null, max_output: null, groups: [] }),
 ]
-const groups = [{ code: 'default', name: '标准分组', ratio: '1' }, { code: 'economy', name: '经济分组', ratio: '0.5' }, { code: 'free', name: '内部免费组', ratio: '0' }]
+const groups = [{ code: 'default', name: '标准分组', ratio: '1', is_default: true }, { code: 'economy', name: '经济分组', ratio: '0.5', self_select: true }, { code: 'free', name: '内部免费组', ratio: '0', self_select: true }]
 
 async function prepare(page: Page, data = models, language = 'zh-CN', dark = false) {
   const calls: string[] = []
@@ -43,7 +43,7 @@ async function prepare(page: Page, data = models, language = 'zh-CN', dark = fal
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
       expect(request.method()).toBe('GET')
       calls.push(url.pathname)
-      return route.fulfill({ json: url.pathname === '/api/pricing' ? { models: data, groups } : {} })
+      return route.fulfill({ json: url.pathname === '/api/pricing' ? { models: data, groups } : url.pathname === '/api/me/groups' ? { current: 'default', data: groups.map((g) => ({ code: g.code })) } : {} })
     }
     expect(url.hostname).toBe('127.0.0.1')
     return route.continue()
@@ -325,4 +325,74 @@ test('手机调用页签支持键盘与窄屏，已声明向量模型使用向�
   await expect(drawer.getByLabel('Generated API example')).toContainText('process.env.OKAPI_API_KEY')
   await page.screenshot({ path: 'test-results/catalog-api-mobile.png', animations: 'disabled' })
   expect(errors).toEqual([])
+})
+
+const privateGroups = [
+  ...groups,
+  { code: 'assigned', name: '本人专属组', ratio: '0.8', self_select: false },
+  { code: 'hidden', name: '他人内部组', ratio: '0.1', self_select: false },
+]
+const scopedModel = model('scoped-model', 'OpenAI', 'Scoped model', {
+  groups: privateGroups.map((g) => g.code),
+  chat_endpoints_by_group: Object.fromEntries(privateGroups.map((g) => [g.code, g.code === 'hidden' ? ['/v1/messages'] : ['/v1/responses']])),
+})
+async function visibilityFixture(page: Page, signedIn: boolean) {
+  await prepare(page, [scopedModel])
+  if (signedIn) await page.addInitScript(() => localStorage.setItem('okapi.key', 'catalog-user-a'))
+  await page.route('**/api/pricing', (route) => route.fulfill({ json: { models: [scopedModel], groups: privateGroups } }))
+  await page.route('**/api/me/groups', (route) => route.fulfill({ json: {
+    current: 'default', data: ['default', 'economy', ...(route.request().headers().authorization === 'Bearer catalog-user-a' ? ['assigned'] : [])].map((code) => ({ code })),
+  } }))
+}
+
+test('分组可见性：游客只看公开与默认，URL 不会重新加入私有组', async ({ page }) => {
+  await visibilityFixture(page, false)
+  await page.goto('/pricing?group=hidden&model=scoped-model')
+  await expect(page).not.toHaveURL(/group=hidden/)
+  expect(await page.locator('#catalog-group option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['', 'default', 'economy', 'free'])
+  const drawer = page.getByRole('dialog')
+  await expect(drawer).toBeVisible()
+  await expect(drawer.getByText('他人内部组', { exact: true })).toHaveCount(0)
+  await expect(drawer.getByText('本人专属组', { exact: true })).toHaveCount(0)
+  expect(await page.locator('#detail-group option').allTextContents()).not.toContain('他人内部组 ×0.1')
+  await drawer.getByRole('tab', { name: '调用示例' }).click()
+  expect(await drawer.getByLabel('接口模板').locator('option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['responses'])
+})
+
+test('分组可见性：用户含管理员分配组，详情与价格候选一致，切换账号无缓存串用', async ({ page }) => {
+  await visibilityFixture(page, true)
+  await page.goto('/pricing?group=assigned&model=scoped-model')
+  await expect(page.locator('#detail-group')).toHaveValue('assigned')
+  expect(await page.locator('#detail-group option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['', 'default', 'economy', 'assigned'])
+  await expect(page.getByRole('dialog').getByText('他人内部组', { exact: true })).toHaveCount(0)
+  // Change the fixture identity without a full reload: previous private query data must not survive.
+  await page.evaluate(() => localStorage.setItem('okapi.key', 'catalog-user-b'))
+  await page.locator('#detail-group').selectOption('default')
+  await expect(page.locator('#detail-group option[value="assigned"]')).toHaveCount(0)
+  expect(await page.locator('#catalog-group option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['', 'default', 'economy'])
+})
+
+test('分组可见性：权限加载期间不闪现全部组，失败不回退公开目录，重试恢复', async ({ page }) => {
+  await visibilityFixture(page, true)
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let failed = true
+  await page.route('**/api/me/groups', async (route) => {
+    await gate
+    return failed ? route.fulfill({ status: 503, json: { error: { code: 'internal_error' } } })
+      : route.fulfill({ json: { current: 'default', data: [{ code: 'default' }] } })
+  })
+  await page.goto('/pricing?group=assigned')
+  await expect(page.locator('#catalog-group')).toBeDisabled()
+  await expect(page.locator('#catalog-group option')).toHaveCount(1)
+  await expect(page.locator('article')).toHaveCount(0)
+  release()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.locator('#catalog-group')).toBeDisabled()
+  await expect(page.locator('article')).toHaveCount(0)
+  failed = false
+  await page.getByRole('button', { name: '重试' }).click()
+  await expect(page.locator('#catalog-group')).toBeEnabled()
+  await expect(page).not.toHaveURL(/group=assigned/)
+  expect(await page.locator('#catalog-group option').allTextContents()).toHaveLength(2)
 })

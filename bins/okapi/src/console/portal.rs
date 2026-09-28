@@ -5,6 +5,7 @@
 //! `scope=user` 为钱包主体汇总视图。完整 Team 层（独立登录/成员限额）在 M4。
 //! 统计查询走 ClickHouse MV；未启用 CH 时 fail-closed 返回 501 stats_disabled。
 
+mod key_trends;
 mod pricing;
 mod usage_logs;
 pub use pricing::{public_groups, public_models, public_pricing};
@@ -665,19 +666,23 @@ pub async fn keys(
     .map_err(okapi_store::StoreError::from)?;
     let total = total.unwrap_or_else(|| okapi_store::listing::len_as_total(rows.len()));
 
-    // CH 分账（可用时补充按 key 聚合；不可用时仅返回 PG used_micro 累计列）
-    let mut ch_usage: Vec<Value> = Vec::new();
-    if let Some(ch) = &state.ch {
-        let ids: Vec<String> = rows.iter().map(|r| r.id.to_string()).collect();
-        if !ids.is_empty() {
-            let sql = format!(
-                "SELECT api_key_id, sumMerge(amount) AS amount_micro, countMerge(requests) AS requests \
-                 FROM mv_apikey_day WHERE api_key_id IN ({}) GROUP BY api_key_id",
-                ids.join(",")
-            );
-            ch_usage = ch.query_json_each_row(&sql).await.unwrap_or_default();
-        }
-    }
+    let key_ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let quotas = key_quotas(&state.pg, key.user_id, &key_ids).await?;
+    let saved_ids = okapi_store::api_key_secret::saved_ids(&state.pg, key.user_id, &key_ids)
+        .await
+        .map_err(|err| tracing::warn!(error = %err, "key copy metadata unavailable"))
+        .ok();
+    let trends = key_trends::load(
+        &state.pg,
+        key.user_id,
+        &key_ids,
+        chrono::Utc::now().date_naive(),
+    )
+    .await
+    .map_err(|err| tracing::warn!(error = %err, "key Token trends unavailable"))
+    .ok();
+
+    let ch_usage = key_aggregate_usage(state.ch.as_ref(), &key_ids).await;
 
     let data: Vec<Value> = rows
         .into_iter()
@@ -687,8 +692,15 @@ pub async fn keys(
                 "id": r.id,
                 "name": r.name,
                 "key_prefix": r.key_prefix,
+                "copy_status": match &saved_ids {
+                    Some(ids) if !ids.contains(&r.id) => "not_saved",
+                    Some(_) if state.master_key.is_some() => "available",
+                    _ => "unavailable",
+                },
                 "status": r.status,
                 "used_micro": r.used_micro,
+                "quota_mode": quotas.get(&r.id).map_or(0, |q| q.0),
+                "quota_micro": quotas.get(&r.id).and_then(|q| q.1),
                 "rpm_limit": r.rpm_limit,
                 "tpm_limit": r.tpm_limit,
                 "rpd_limit": r.rpd_limit,
@@ -702,17 +714,57 @@ pub async fn keys(
                 "created_at": r.created_at,
                 "amount_micro": agg.map_or(0, |u| ch_i64(u, "amount_micro")),
                 "requests": agg.map_or(0, |u| ch_i64(u, "requests")),
+                "usage_trend": trends.as_ref().and_then(|trends| trends.get(&r.id)),
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data, "total": total })))
+    Ok(Json(
+        json!({ "data": data, "total": total, "key_limits_supported": true }),
+    ))
+}
+
+async fn key_quotas(
+    pg: &sqlx::PgPool,
+    user_id: i64,
+    ids: &[i64],
+) -> Result<std::collections::BTreeMap<i64, (i16, Option<i64>)>, AppError> {
+    let rows: Vec<(i64, i16, Option<i64>)> = sqlx::query_as(
+        "SELECT id, quota_mode, quota_micro FROM api_keys WHERE user_id=$1 AND id=ANY($2)",
+    )
+    .bind(user_id)
+    .bind(ids)
+    .fetch_all(pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, mode, quota)| (id, (mode, quota)))
+        .collect())
+}
+
+/// CH unavailable preserves the existing PG-only key listing behavior.
+async fn key_aggregate_usage(ch: Option<&okapi_store::ChClient>, ids: &[i64]) -> Vec<Value> {
+    let Some(ch) = ch.filter(|_| !ids.is_empty()) else {
+        return Vec::new();
+    };
+    let ids = ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT api_key_id, sumMerge(amount) AS amount_micro, countMerge(requests) AS requests FROM mv_apikey_day WHERE api_key_id IN ({ids}) GROUP BY api_key_id"
+    );
+    ch.query_json_each_row(&sql).await.unwrap_or_default()
 }
 
 /// 自助面可改字段：收窄自己这把 key（名字 / 状态 / 过期 / 白名单），外加**在可选集合内**
 /// 换分组——分组是计价锚点，但可选集合由管理员通过 `self_select` 与用户分组划定，
-/// 用户只能在划定的档位里挑，不构成自行改价。限额仍只有管理面可写。
+/// 用户只能在划定的分组里挑，不构成自行改价；密钥额度不改变账户余额。
 #[derive(Deserialize)]
 pub struct PatchKeyReq {
+    #[serde(default, deserialize_with = "super::double_option")]
+    pub quota_micro: Option<Option<i64>>,
     #[serde(default)]
     pub name: Option<String>,
     /// 1=启用 2=停用。
@@ -723,7 +775,7 @@ pub struct PatchKeyReq {
     /// 字符串数组；null = 解除模型限制。
     #[serde(default, deserialize_with = "super::double_option")]
     pub model_allowlist: Option<Option<Vec<String>>>,
-    /// 档位：字符串 = 选定分组（须在 /api/me/groups 可选集合内）；null = 跟随用户分组。
+    /// 分组：字符串 = 选定分组（须在 /api/me/groups 可选集合内）；null = 跟随用户分组。
     #[serde(default, deserialize_with = "super::double_option")]
     pub group_code: Option<Option<String>>,
     /// IP 白名单：地址或 CIDR 数组；null / 空数组 = 解除限制。每条须可解析，否则 400——
@@ -764,6 +816,19 @@ pub(super) fn normalize_allowlist(list: Option<Vec<String>>) -> Option<Value> {
     Some(json!(items))
 }
 
+pub(super) fn validate_key_limits(
+    quota: Option<i64>,
+    expires: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<(), AppError> {
+    if quota.is_some_and(|v| !(1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&v)) {
+        return Err(AppError::bad_request().with_param("quota_micro"));
+    }
+    if expires.is_some_and(|v| v <= chrono::Utc::now()) {
+        return Err(AppError::bad_request().with_param("expires_at"));
+    }
+    Ok(())
+}
+
 /// PATCH /api/me/keys/{id}：改自己 key 的名称/启停/过期/模型白名单。
 pub async fn patch_key(
     State(state): State<AppState>,
@@ -772,6 +837,28 @@ pub async fn patch_key(
     ExtractJson(req): ExtractJson<PatchKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
+    validate_key_limits(req.quota_micro.flatten(), req.expires_at.flatten())?;
+    // A delegated/restricted credential must not remove its own restrictions.
+    let changes_access = req.quota_micro.is_some()
+        || req.expires_at.is_some()
+        || req.model_allowlist.is_some()
+        || req.group_code.is_some()
+        || req.ip_allowlist.is_some();
+    if changes_access
+        && (key.quota_limited
+            || key.model_allowlist.is_some()
+            || key.expires_at.is_some()
+            || key.ip_allowlist.is_some())
+        && super::auth_web::require_session(&state, &headers)
+            .await
+            .ok()
+            != Some(key.user_id)
+    {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "key_limits_session_required",
+        ));
+    }
     if let Some(status) = req.status
         && !matches!(status, 1 | 2)
     {
@@ -791,6 +878,7 @@ pub async fn patch_key(
         None => None,
     };
     let patch = okapi_store::admin::ApiKeyPatch {
+        quota_micro: req.quota_micro,
         name: req.name.map(|n| n.trim().to_owned()),
         status: req.status,
         expires_at: req.expires_at,

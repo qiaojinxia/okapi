@@ -11,17 +11,18 @@ fn chat_usage_distinguishes_omitted_null_and_explicit_zero() {
         json!({}),
         json!({"cached_tokens": null, "cache_write_tokens": null}),
     ] {
-        let probe: UsageProbe =
-            serde_json::from_value(json!({"prompt_tokens": 100, "prompt_tokens_details": details}))
-                .unwrap();
-        let usage = probe.to_token_usage();
+        let probe: UsageProbe = serde_json::from_value(
+            json!({"prompt_tokens": 100, "completion_tokens": 0, "prompt_tokens_details": details}),
+        )
+        .unwrap();
+        let usage = probe.to_token_usage().unwrap();
         assert!(!usage.cache_read_reported && !usage.cache_write_reported);
         assert_eq!(usage.cached_tokens, 0);
         assert_eq!(probe.prompt_tokens_details.cache_json(), json!({}));
     }
-    let probe: UsageProbe = serde_json::from_value(json!({"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}})).unwrap();
-    assert!(probe.to_token_usage().cache_read_reported);
-    assert!(probe.to_token_usage().cache_write_reported);
+    let probe: UsageProbe = serde_json::from_value(json!({"prompt_tokens": 100, "completion_tokens": 0, "prompt_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}})).unwrap();
+    assert!(probe.to_token_usage().unwrap().cache_read_reported);
+    assert!(probe.to_token_usage().unwrap().cache_write_reported);
     assert_eq!(
         probe.prompt_tokens_details.cache_json(),
         json!({"cached_tokens": 0, "cache_write_tokens": 0})
@@ -30,11 +31,12 @@ fn chat_usage_distinguishes_omitted_null_and_explicit_zero() {
 
 #[test]
 fn responses_preserves_read_and_write_reporting_without_changing_usage() {
-    let missing = usage_from_responses(Some(&json!({"input_tokens": 100})))
+    let missing = usage_from_responses(Some(&json!({"input_tokens": 100, "output_tokens": 0})))
         .unwrap()
-        .to_token_usage();
+        .to_token_usage()
+        .unwrap();
     assert!(!missing.cache_read_reported && !missing.cache_write_reported);
-    let usage = usage_from_responses(Some(&json!({"input_tokens": 100, "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 20}}))).unwrap().to_token_usage();
+    let usage = usage_from_responses(Some(&json!({"input_tokens": 100, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 20}}))).unwrap().to_token_usage().unwrap();
     assert!(usage.cache_read_reported && usage.cache_write_reported);
     assert_eq!(
         (
@@ -48,23 +50,33 @@ fn responses_preserves_read_and_write_reporting_without_changing_usage() {
 
 #[test]
 fn native_usage_preserves_provider_specific_reporting() {
-    let anthropic = openai_to_anthropic::usage_from_anthropic(Some(&json!({"input_tokens": 20, "cache_read_input_tokens": 60, "cache_creation_input_tokens": 20}))).to_token_usage();
+    let anthropic = openai_to_anthropic::usage_from_anthropic(Some(&json!({"input_tokens": 20, "output_tokens": 0, "cache_read_input_tokens": 60, "cache_creation_input_tokens": 20}))).unwrap().to_token_usage().unwrap();
     assert!(anthropic.cache_read_reported && anthropic.cache_write_reported);
     assert_eq!(
         (anthropic.prompt_tokens, anthropic.prompt_uncached()),
         (100, 20)
     );
-    let missing = openai_to_anthropic::usage_from_anthropic(Some(&json!({"input_tokens": 20})))
-        .to_token_usage();
+    let missing = openai_to_anthropic::usage_from_anthropic(Some(
+        &json!({"input_tokens": 20, "output_tokens": 0}),
+    ))
+    .unwrap()
+    .to_token_usage()
+    .unwrap();
     assert!(!missing.cache_read_reported && !missing.cache_write_reported);
     let gemini = openai_to_gemini::usage_from_gemini(Some(
-        &json!({"promptTokenCount": 100, "cachedContentTokenCount": 0}),
+        &json!({"promptTokenCount": 100, "candidatesTokenCount": 0, "cachedContentTokenCount": 0}),
     ))
-    .to_token_usage();
+    .unwrap()
+    .to_token_usage()
+    .unwrap();
     assert!(gemini.cache_read_reported);
     assert!(!gemini.cache_write_reported);
-    let missing = openai_to_gemini::usage_from_gemini(Some(&json!({"promptTokenCount": 100})))
-        .to_token_usage();
+    let missing = openai_to_gemini::usage_from_gemini(Some(
+        &json!({"promptTokenCount": 100, "candidatesTokenCount": 0}),
+    ))
+    .unwrap()
+    .to_token_usage()
+    .unwrap();
     assert!(!missing.cache_read_reported);
 }
 
@@ -96,7 +108,8 @@ fn anthropic_streams_keep_reporting_flags_from_message_start() {
                     ChatEvent::Done => None,
                 })
                 .unwrap()
-                .to_token_usage();
+                .to_token_usage()
+                .unwrap();
             assert_eq!(usage.cache_read_reported, reported);
             assert_eq!(usage.cache_write_reported, reported);
             assert_eq!(usage.prompt_tokens, if reported { 100 } else { 20 });

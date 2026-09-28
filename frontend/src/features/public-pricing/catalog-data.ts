@@ -101,7 +101,9 @@ export function modelPrice(model: PricingModel, field: PriceField, factor: numbe
     cacheWrite: [model.cache_write_ratio], audioIn: [model.audio_ratio],
     audioOut: [model.audio_ratio, model.audio_completion_ratio], imageIn: [model.image_ratio],
   }
-  let price = base * factor * (unit === '1M' ? 2_000_000 : 2_000)
+  const priceBase = nonnegative(model.base_price_per_1m_micro ?? 2_000_000)
+  if (priceBase === null || priceBase === 0) return null
+  let price = base * factor * priceBase / (unit === '1M' ? 1 : 1000)
   for (const raw of ratios[field]) {
     const ratio = nonnegative(raw)
     if (ratio === null) return null

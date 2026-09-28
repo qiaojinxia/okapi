@@ -18,6 +18,9 @@ use tokio_tungstenite::tungstenite::Message as CliMsg;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use uuid::Uuid;
 
+#[path = "support/realtime_usage.rs"]
+mod usage_tests;
+
 // ---- mock 上游 WS ----
 
 /// 行为：连上先发 session.created；response.create → delta + response.done(usage)；
@@ -45,12 +48,12 @@ async fn mock_realtime(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
                     let v: Value = serde_json::from_str(&t).unwrap_or_default();
                     if v["type"] == "response.create" {
                         let delta = json!({"type": "response.output_text.delta", "delta": "hi"});
-                        let done = json!({"type": "response.done", "response": {"usage": {
+                        let done = json!({"type": "response.done", "response": {"id": v["mock_response_id"], "usage": v.get("mock_usage").cloned().unwrap_or_else(|| json!({
                             "input_tokens": 100,
                             "output_tokens": 50,
                             "input_token_details": {"cached_tokens": 20, "audio_tokens": 0},
                             "output_token_details": {"audio_tokens": 30}
-                        }}});
+                        }))}});
                         let _ = sock.send(SrvMsg::Text(delta.to_string().into())).await;
                         let _ = sock.send(SrvMsg::Text(done.to_string().into())).await;
                     }
@@ -67,6 +70,10 @@ async fn mock_realtime(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
 
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new().route("/v1/realtime", get(mock_realtime));
+    serve(router).await
+}
+
+async fn serve(router: Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -79,8 +86,10 @@ async fn spawn_mock() -> SocketAddr {
 
 struct TestEnv {
     pg: PgPool,
+    state: gateway::state::AppState,
     ledger: okapi_ledger::BalanceLedger,
     gateway: SocketAddr,
+    console: SocketAddr,
     token: String,
     user_id: i64,
     model: String,
@@ -131,25 +140,30 @@ async fn setup(balance: Money) -> TestEnv {
     .await
     .unwrap();
 
-    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
-        .await
-        .unwrap();
+    let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    let state = gateway::build_state(
+        &database_url,
+        &redis_url,
+        "test-node",
+        ch_url.as_deref(),
+        None,
+    )
+    .await
+    .unwrap();
     if !balance.is_zero() {
         state.ledger.credit(user_id, balance).await.unwrap();
     }
     let ledger = state.ledger.clone();
 
-    let app = gateway::router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    let addr = serve(gateway::router(state.clone())).await;
+    let console = serve(okapi::console::router(state.clone())).await;
 
     TestEnv {
         pg,
+        state,
         ledger,
         gateway: addr,
+        console,
         token,
         user_id,
         model,

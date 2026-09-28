@@ -195,8 +195,9 @@ pub fn response_chat_to_responses(
 
     let usage: Option<UsageProbe> = src
         .get("usage")
+        .filter(|u| !u.is_null())
         .and_then(|u| serde_json::from_value(u.clone()).ok());
-    let probe = usage.unwrap_or_default();
+    let probe = usage;
     let out = json!({
         "id": format!("resp_{}", src.get("id").and_then(Value::as_str).unwrap_or("0")),
         "object": "response",
@@ -205,22 +206,29 @@ pub fn response_chat_to_responses(
         "status": "completed",
         "model": src.get("model").and_then(Value::as_str).unwrap_or(""),
         "output": output,
-        "usage": responses_usage_json(probe),
+        "usage": probe.map(responses_usage_json),
     });
     let bytes = serde_json::to_vec(&out)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
-    Ok((bytes, Some(probe)))
+    Ok((bytes, probe))
 }
 
 fn responses_usage_json(u: UsageProbe) -> Value {
-    json!({
-        "input_tokens": u.prompt_tokens,
-        "input_tokens_details": u.prompt_tokens_details.cache_json(),
-        "output_tokens": u.completion_tokens,
-        "output_tokens_details": {"reasoning_tokens": u.completion_tokens_details.reasoning_tokens},
-        "total_tokens": u.prompt_tokens + u.completion_tokens,
-    })
+    let Some(mut fields) = u.chat_json().as_object().cloned() else {
+        return Value::Null;
+    };
+    for (from, to) in [
+        ("prompt_tokens", "input_tokens"),
+        ("completion_tokens", "output_tokens"),
+        ("prompt_tokens_details", "input_tokens_details"),
+        ("completion_tokens_details", "output_tokens_details"),
+    ] {
+        if let Some(value) = fields.remove(from) {
+            fields.insert(to.into(), value);
+        }
+    }
+    Value::Object(fields)
 }
 
 // ---- 事件流转换 ----
@@ -263,7 +271,7 @@ impl ChatStreamToResponses {
             Ok(ChatEvent::Done) => self.finish(),
             Ok(ChatEvent::Data { raw, usage, .. }) => {
                 if let Some(u) = usage {
-                    self.usage = Some(u);
+                    self.usage = Some(u.with_previous(self.usage));
                 }
                 let chunk: Value = serde_json::from_str(&raw).unwrap_or_default();
                 self.on_chunk(&chunk)
@@ -339,7 +347,7 @@ impl ChatStreamToResponses {
         }
         self.finished = true;
         let mut out = Vec::new();
-        let probe = self.usage.unwrap_or_default();
+        let probe = self.usage;
         if self.text_open {
             let done = json!({"type": "response.output_text.done", "item_id": "msg_0",
                 "output_index": 0, "content_index": 0, "text": self.text_buf});
@@ -359,14 +367,14 @@ impl ChatStreamToResponses {
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": self.text_buf, "annotations": []}]}])
             },
-            "usage": responses_usage_json(probe),
+            "usage": probe.map(responses_usage_json),
         }});
         out.push(Ok(self.named(
             "response.completed",
             &completed,
             false,
             0,
-            Some(probe),
+            probe,
         )));
         out.push(Ok(ChatEvent::Done));
         out

@@ -56,6 +56,39 @@ fn azure_target(cand: &ChannelCandidate) -> Result<(&str, &str), UpstreamError> 
 }
 
 impl AppState {
+    pub async fn openai_image_stream(
+        &self,
+        cand: &ChannelCandidate,
+        model: &str,
+        path: &str,
+        body: okapi_providers::image_stream::ImageBody,
+    ) -> Result<okapi_providers::image_stream::ImageResponse, UpstreamError> {
+        if is_azure(cand) {
+            let (endpoint, version) = azure_target(cand)?;
+            self.azure
+                .image_stream(
+                    endpoint,
+                    version,
+                    model,
+                    path,
+                    &cand.credential,
+                    body,
+                    &outbound(cand),
+                )
+                .await
+        } else {
+            self.upstream
+                .image_stream(
+                    &openai_base(cand),
+                    path,
+                    &cand.credential,
+                    body,
+                    &outbound(cand),
+                )
+                .await
+        }
+    }
+
     /// chat completions（流式 / 非流式）。`upstream_model` 是映射后的上游名——Azure 下
     /// 即部署名，进 URL；`body` 的 `model` 字段已由调用方重写为同一值。
     pub async fn openai_chat(

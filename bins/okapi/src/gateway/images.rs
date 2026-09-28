@@ -1,6 +1,6 @@
 //! /v1/images/generations 与 /v1/images/edits（IMPLEMENTATION §4.4 媒体计费）：
-//! per_call × n 张（n 必须在 1..10），乘数落 pricing_snapshot.media_units
-//! 保账单可解释；仅路由 openai 系渠道。edits 支持 JSON 与 multipart，共用验证、路由和结算。
+//! per_call 按成功张数，ratio/tiered 按响应总用量；价簿固定于准入时。
+//! 仅路由 openai 系渠道。edits 支持 JSON 与 multipart，共用验证、路由和结算。
 
 use super::clients::detect_client_type;
 use super::error::AppError;
@@ -13,15 +13,18 @@ use axum::response::{IntoResponse, Response};
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
 use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, Quote, RatioFp, calculate};
+use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp, calculate};
 use okapi_providers::UpstreamError;
+use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
 const MAX_ATTEMPTS: usize = 3;
 pub mod batches;
 mod request;
+mod stream;
 pub mod tasks;
+mod usage;
 
 pub async fn edits(State(state): State<AppState>, req: Request) -> Response {
     receive(state, req, "/v1/images/edits").await
@@ -76,6 +79,9 @@ struct Prepared {
     unit_quote: Quote,
     quote: Quote,
     pricing_epoch: i64,
+    book: Arc<PriceBook>,
+    calc: CalcContext,
+    estimated_tokens: u64,
 }
 
 async fn prepare(
@@ -83,7 +89,7 @@ async fn prepare(
     key: &okapi_store::AuthedKey,
     input: &request::Input,
 ) -> Result<Prepared, AppError> {
-    prepare_model(state, key, &input.model, input.units).await
+    prepare_pricing(state, key, &input.model, input.units, Some(input)).await
 }
 
 async fn prepare_model(
@@ -91,6 +97,17 @@ async fn prepare_model(
     key: &okapi_store::AuthedKey,
     model: &str,
     units: u32,
+) -> Result<Prepared, AppError> {
+    // Native batch receipts still represent per-image prices, not token prices.
+    prepare_pricing(state, key, model, units, None).await
+}
+
+async fn prepare_pricing(
+    state: &AppState,
+    key: &okapi_store::AuthedKey,
+    model: &str,
+    units: u32,
+    input: Option<&request::Input>,
 ) -> Result<Prepared, AppError> {
     let meta = super::chat::resolve_model_cached(state, model).await?;
     let Some(meta) = meta.as_ref() else {
@@ -122,19 +139,33 @@ async fn prepare_model(
         service_tier: None,
     };
     let unit_quote = calculate(&book, &calc, TokenUsage::default())?;
-    let quote = scale_quote(&unit_quote, units)?;
+    let estimated = if let Some(input) = input {
+        let output = meta
+            .max_output
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(8192);
+        input.estimate(output)?
+    } else {
+        TokenUsage::default()
+    };
+    let quote = if unit_quote.snapshot.mode == "per_call" {
+        scale_quote(&unit_quote, units)?
+    } else {
+        if input.is_none() {
+            return Err(AppError::bad_request().with_param("images_requires_per_call_model"));
+        }
+        calculate(&book, &calc, estimated)?
+    };
     let pricing_epoch = book.epoch();
-    // 图片请求没有 token，ratio 定价算出来恒为 0——预扣 0 必过，于是余额为空的
-    // 调用方也能一路打到上游（白嫖运营方的上游额度）。audio 的 transcriptions
-    // 早有同款闸（那里时长同样本地不可知），images 此前漏了。
-    if quote.snapshot.mode != "per_call" {
-        return Err(AppError::bad_request().with_param("images_requires_per_call_model"));
-    }
     Ok(Prepared {
         canonical,
         unit_quote,
         quote,
         pricing_epoch,
+        book,
+        calc,
+        estimated_tokens: estimated.total_raw(),
     })
 }
 
@@ -172,6 +203,9 @@ async fn handle(
         unit_quote,
         quote,
         pricing_epoch,
+        book,
+        calc,
+        estimated_tokens,
     } = prepare(state, key, &input).await?;
     let now = chrono::Utc::now();
     super::auth::check_member_limit(state, key).await?;
@@ -184,22 +218,28 @@ async fn handle(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    let reserved_pool = match state
+    let (reserved_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
                 request_id,
                 est: quote.amount,
                 caps,
-                est_tokens: 0,
+                est_tokens: estimated_tokens,
             },
             now,
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -247,6 +287,33 @@ async fn handle(
         ));
     }
 
+    if input.stream {
+        return stream::start(
+            stream::Context {
+                state: state.clone(),
+                key: key.clone(),
+                headers: headers.clone(),
+                input,
+                request_id,
+                started,
+                endpoint: endpoint.to_owned(),
+                reserved_pool,
+                source_window,
+                prepared: Prepared {
+                    canonical,
+                    unit_quote,
+                    quote,
+                    pricing_epoch,
+                    book,
+                    calc,
+                    estimated_tokens,
+                },
+            },
+            candidates,
+        )
+        .await;
+    }
+
     let mut failover: i16 = 0;
     let mut last_err: Option<AppError> = None;
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
@@ -273,13 +340,31 @@ async fn handle(
                         return Err(error);
                     }
                 };
-                let actual_quote = scale_quote(&unit_quote, actual)?;
+                let actual_billing = (|| {
+                    let per_image = unit_quote.snapshot.mode == "per_call";
+                    let usage = usage::parse(&resp.body, !per_image)?;
+                    let mut quote = if per_image {
+                        scale_quote(&unit_quote, actual)?
+                    } else {
+                        calculate(&book, &calc, usage.ok_or_else(usage::invalid)?)?
+                    };
+                    quote.snapshot.media_units = Some(actual);
+                    Ok::<_, AppError>((quote, usage))
+                })();
+                let (actual_quote, actual_usage) = match actual_billing {
+                    Ok(billing) => billing,
+                    Err(error) => {
+                        let _ = refund(state, key, request_id, task).await;
+                        return Err(error);
+                    }
+                };
                 commit_and_record(
                     state,
                     key,
                     &canonical,
                     model,
                     &actual_quote,
+                    actual_usage,
                     pricing_epoch,
                     request_id,
                     started,
@@ -290,6 +375,8 @@ async fn handle(
                     &resp,
                     task,
                     reserved_pool,
+                    source_window.as_deref(),
+                    None,
                 )
                 .await?;
                 let out = Response::builder()
@@ -344,6 +431,7 @@ async fn commit_and_record(
     canonical: &str,
     requested_model: &str,
     quote: &Quote,
+    usage: Option<TokenUsage>,
     pricing_epoch: i64,
     request_id: Uuid,
     started: Instant,
@@ -354,13 +442,24 @@ async fn commit_and_record(
     upstream: &okapi_providers::openai::EmbeddingsResponse,
     task: Option<tasks::Lease>,
     reserved_pool: okapi_ledger::Pool,
+    source_window: Option<&str>,
+    stream: Option<stream::Receipt>,
 ) -> Result<(), AppError> {
     let ingress = if task.is_some() {
         format!("{endpoint}/async")
     } else {
         endpoint.into()
     };
+    let mut snapshot = serde_json::to_value(&quote.snapshot).map_err(|_| AppError::internal())?;
+    usage::annotate(&mut snapshot, usage);
+    if let Some(stream) = &stream {
+        snapshot["image_stream_usage"] = serde_json::json!(stream.usage_mode);
+        snapshot["image_stream_usage_complete"] = serde_json::json!(stream.usage_complete);
+        snapshot["image_stream_incomplete"] = serde_json::json!(stream.incomplete);
+    }
+    let usage = usage.unwrap_or_default();
     let mut input = SettlementInput {
+        source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             requested_model,
             cand.upstream_model(canonical),
@@ -376,17 +475,17 @@ async fn commit_and_record(
         channel_id: Some(cand.channel_id),
         channel_key_id: Some(cand.channel_key_id),
         state: BillingState::Committed,
-        usage: TokenUsage::default(),
+        usage,
         amount: quote.amount,
         original: quote.original,
         discount: quote.discount,
         list_price: quote.list_price,
         upstream_cost: None,
         pricing_epoch: Some(pricing_epoch),
-        pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
+        pricing_snapshot: Some(snapshot),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
-        ttft_ms: None,
-        is_stream: false,
+        ttft_ms: stream.as_ref().and_then(|stream| stream.ttft_ms),
+        is_stream: stream.is_some(),
         retry_count: 0,
         failover_count: failover,
         upstream_status: i16::try_from(upstream.status).ok(),
@@ -411,7 +510,7 @@ async fn commit_and_record(
         tasks::complete(state, task, &upstream.body, input).await?;
         state
             .sched
-            .kpi_record(0, quote.amount.as_micros(), false)
+            .kpi_record(usage.total_raw(), quote.amount.as_micros(), false)
             .await;
     } else if !state.settle_success(input).await? {
         return Ok(());
@@ -421,7 +520,7 @@ async fn commit_and_record(
         key.user_id,
         key.member_user_id,
         quote.amount.as_micros(),
-        0,
+        usage.total_raw(),
     )
     .await;
     Ok(())

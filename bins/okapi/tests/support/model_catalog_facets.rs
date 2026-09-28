@@ -112,7 +112,7 @@ async fn group_lookup_is_literal_model_scoped_and_head_matches_get() {
     let env = setup().await;
     let code = format!("{}-%_\\", env.prefix);
     sqlx::query(
-        "INSERT INTO price_groups(group_code,description,group_ratio) VALUES($1,'Visible label',1)",
+        "INSERT INTO price_groups(group_code,description,group_ratio,self_select) VALUES($1,'Visible label',1,true)",
     )
     .bind(&code)
     .execute(&env.pg)

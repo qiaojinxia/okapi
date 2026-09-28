@@ -214,6 +214,7 @@ pub async fn search(
                 log_type, user_id, api_key_id, group_code, model, channel_id, channel_key_id, \
                 client_type, client_ip, node, \
                 prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, \
+                prompt_source, completion_source, upstream_prompt_tokens, upstream_completion_tokens, \
                 amount_micro, original_amount_micro, discount_micro, upstream_cost_micro, \
                 latency_ms, ttft_ms, stream, retry_count, failover_count, sticky_layer, \
                 upstream_status, error_code, is_error, ratio_snapshot \
@@ -262,6 +263,11 @@ pub async fn search(
                     "cached_tokens": ch_i64(r, "cached_tokens"),
                     "completion_tokens": ch_i64(r, "completion_tokens"),
                     "reasoning_tokens": ch_i64(r, "reasoning_tokens"),
+                    "prompt_source": ch_str(r, "prompt_source"),
+                    "completion_source": ch_str(r, "completion_source"),
+                    "upstream_usage": if ch_str(r, "prompt_source") == "unknown" && ch_str(r, "completion_source") == "unknown" {
+                        Value::Null
+                    } else { json!({"prompt_tokens":r["upstream_prompt_tokens"], "completion_tokens":r["upstream_completion_tokens"]}) },
                 },
                 "amount_micro": ch_i64(r, "amount_micro"),
                 "original_amount_micro": ch_i64(r, "original_amount_micro"),
@@ -499,8 +505,5 @@ pub async fn stat(
 
 /// 占比 → 基点（万分之一；整数运算，分母 0 返 0）。
 fn rate_bp(part: i64, total: i64) -> i64 {
-    if total <= 0 {
-        return 0;
-    }
-    part.saturating_mul(10_000) / total
+    super::stats::rate_bp(part, total)
 }

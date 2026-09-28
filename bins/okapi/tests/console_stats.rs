@@ -10,6 +10,15 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/latency_statistics.rs"]
+mod latency_statistics;
+
+#[path = "support/ttft_average.rs"]
+mod ttft_average;
+
+#[path = "support/ttft_statistics.rs"]
+mod ttft_statistics;
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))

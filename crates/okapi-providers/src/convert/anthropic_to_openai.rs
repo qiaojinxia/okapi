@@ -278,8 +278,9 @@ pub fn response_openai_to_anthropic(
         .and_then(Value::as_str);
     let usage: Option<UsageProbe> = src
         .get("usage")
+        .filter(|u| !u.is_null())
         .and_then(|u| serde_json::from_value(u.clone()).ok());
-    let probe = usage.unwrap_or_default();
+    let probe = usage;
     let out = json!({
         "id": src.get("id").and_then(Value::as_str).unwrap_or("msg"),
         "type": "message",
@@ -288,12 +289,12 @@ pub fn response_openai_to_anthropic(
         "content": content,
         "stop_reason": map_finish_reason(finish),
         "stop_sequence": Value::Null,
-        "usage": anthropic_usage_json(probe),
+        "usage": probe.map(anthropic_usage_json),
     });
     let bytes = serde_json::to_vec(&out)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
-    Ok((bytes, Some(probe)))
+    Ok((bytes, probe))
 }
 
 fn map_finish_reason(finish: Option<&str>) -> &'static str {
@@ -307,20 +308,28 @@ fn map_finish_reason(finish: Option<&str>) -> &'static str {
 
 /// OpenAI 口径探针 → Anthropic usage JSON（input 不含缓存）。
 fn anthropic_usage_json(u: UsageProbe) -> Value {
-    let cached = u.prompt_tokens_details.cached_tokens.min(u.prompt_tokens);
-    // 缓存读写都不计入 Anthropic 的 input_tokens——与 openai_to_anthropic::usage_from_anthropic 互逆。
-    // 此前 cache_creation 写死为 0，缓存写入被并进 input：客户端按分项单价估的成本偏低，
-    // 网关串联时下一跳也拿不到它。
-    let written = u
-        .prompt_tokens_details
-        .cache_write_tokens
-        .min(u.prompt_tokens - cached);
-    json!({
-        "input_tokens": u.prompt_tokens - cached - written,
-        "cache_read_input_tokens": cached,
-        "cache_creation_input_tokens": written,
-        "output_tokens": u.completion_tokens,
-    })
+    if u.with_estimates(0, 0).is_err() {
+        return Value::Null;
+    }
+    let d = u.prompt_tokens_details;
+    let mut usage = json!({});
+    if !u.missing_prompt {
+        usage["input_tokens"] = json!(u.prompt_tokens - d.cached_tokens - d.cache_write_tokens);
+    }
+    if !u.missing_completion {
+        usage["output_tokens"] = json!(u.completion_tokens);
+    }
+    if d.cache_read_reported || d.cached_tokens > 0 {
+        usage["cache_read_input_tokens"] = json!(d.cached_tokens);
+    }
+    if d.cache_write_reported || d.cache_write_tokens > 0 {
+        usage["cache_creation_input_tokens"] = json!(d.cache_write_tokens);
+    }
+    if u.completion_tokens_details.reasoning_tokens > 0 {
+        usage["output_tokens_details"] =
+            json!({"thinking_tokens":u.completion_tokens_details.reasoning_tokens});
+    }
+    usage
 }
 
 // ---- 事件流转换 ----
@@ -372,7 +381,7 @@ impl OaiStreamToAnthropic {
             Ok(ChatEvent::Done) => self.finish(),
             Ok(ChatEvent::Data { raw, usage, .. }) => {
                 if let Some(u) = usage {
-                    self.usage = Some(u);
+                    self.usage = Some(u.with_previous(self.usage));
                 }
                 let chunk: Value = serde_json::from_str(&raw).unwrap_or_default();
                 self.on_chunk(&chunk)
@@ -533,12 +542,12 @@ impl OaiStreamToAnthropic {
             self.started = true;
         }
         self.close_block(&mut out);
-        let probe = self.usage.unwrap_or_default();
+        let probe = self.usage;
         let stop = map_finish_reason(self.finish_reason.as_deref());
         let ev = json!({"type": "message_delta",
             "delta": {"stop_reason": stop, "stop_sequence": Value::Null},
-            "usage": anthropic_usage_json(probe)});
-        out.push(Ok(named("message_delta", &ev, false, 0, Some(probe))));
+            "usage": probe.map(anthropic_usage_json)});
+        out.push(Ok(named("message_delta", &ev, false, 0, probe)));
         out.push(Ok(named(
             "message_stop",
             &json!({"type": "message_stop"}),

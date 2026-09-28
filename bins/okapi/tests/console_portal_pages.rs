@@ -7,6 +7,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/key_trends.rs"]
+mod key_trends;
+
 struct TestEnv {
     pg: PgPool,
     addr: SocketAddr,
@@ -146,6 +149,12 @@ async fn public_pricing_reports_usable_groups() {
     .await
     .unwrap();
     // free 组不指定池 → 缺省 default 池；标为可自选，价格页要透出该标记
+    // This routing fixture is public; private assignments are covered by catalog_visibility.
+    sqlx::query("UPDATE price_groups SET self_select=true WHERE group_code=$1")
+        .bind(&vip)
+        .execute(&env.pg)
+        .await
+        .unwrap();
     sqlx::query!(
         r#"INSERT INTO price_groups (group_code, group_ratio, self_select) VALUES ($1, 1, true)"#,
         free

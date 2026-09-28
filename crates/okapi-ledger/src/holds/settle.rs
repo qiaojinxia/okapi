@@ -155,6 +155,7 @@ pub async fn settle(
         .checked_sub(credit)
         .ok_or(LedgerError::InvalidHold("settlement_amount"))?;
     input.pool = pool;
+    input.source_window.clone_from(&hold.source_window);
     input.delta_micro = input
         .amount
         .as_micros()

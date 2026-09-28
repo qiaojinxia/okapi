@@ -10,6 +10,22 @@ use sqlx::{Connection, PgPool};
 pub async fn record(
     pg: &PgPool,
     ledger: &BalanceLedger,
+    input: SettlementInput<'_>,
+) -> Result<bool, LedgerError> {
+    let mut guard = UserGuard::acquire(pg, input.user_id).await?;
+    let mut tx = guard.connection().begin().await?;
+    let inserted = record_in_tx(&mut tx, input.clone()).await?;
+    tx.commit().await?;
+    if let Err(error) = guard.synchronize(ledger).await {
+        tracing::error!(request_id=%input.request_id, %error, "durable bill awaiting Redis recovery");
+    }
+    Ok(inserted)
+}
+
+/// Caller holds the user guard. A durable task result can share this transaction
+/// with the exact ordinary charge, expiry revision and Redis recovery intent.
+pub async fn record_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     mut input: SettlementInput<'_>,
 ) -> Result<bool, LedgerError> {
     if input.state != BillingState::Committed
@@ -20,33 +36,46 @@ pub async fn record(
     {
         return Err(LedgerError::InvalidSettlement);
     }
-    let mut guard = UserGuard::acquire(pg, input.user_id).await?;
     // The post-Redis snapshot is not known yet. Do not invent it in the PG event.
     input.balance_after = None;
-    let mut tx = guard.connection().begin().await?;
-    let inserted = crate::pg::record_settlement_in_tx(&mut tx, input.clone()).await?;
+    let expired = crate::windows::replaced(
+        tx,
+        input.user_id,
+        input.pool,
+        input.source_window.as_deref(),
+    )
+    .await?;
+    let inserted = crate::pg::record_settlement_in_tx(tx, input.clone()).await?;
     if inserted {
+        if expired && !input.amount.is_zero() {
+            crate::windows::revise_expiry(
+                tx,
+                input.user_id,
+                input.request_id,
+                input.amount.as_micros(),
+                input.source_window.as_deref(),
+                "ordinary_window_settlement",
+            )
+            .await?;
+        }
         sqlx::query!(
-            "INSERT INTO billing_sync (request_id,user_id,api_key_id,amount_micro,pool) VALUES ($1,$2,$3,$4,$5)",
-            input.request_id, input.user_id, input.api_key_id, input.amount.as_micros(), input.pool.as_i16()
-        ).execute(&mut *tx).await?;
+            "INSERT INTO billing_sync (request_id,user_id,api_key_id,amount_micro,pool,source_window) VALUES ($1,$2,$3,$4,$5,$6)",
+            input.request_id, input.user_id, input.api_key_id, input.amount.as_micros(), input.pool.as_i16(), input.source_window
+        ).execute(&mut **tx).await?;
     } else {
         let existing = sqlx::query!(
-            r#"SELECT user_id AS "user_id!",api_key_id,amount_micro AS "amount_micro!",pool AS "pool!",status AS "status!" FROM billing_financial_records WHERE request_id=$1 ORDER BY created_at DESC LIMIT 1"#,
+            r#"SELECT user_id AS "user_id!",api_key_id,amount_micro AS "amount_micro!",pool AS "pool!",status AS "status!",source_window FROM billing_financial_records WHERE request_id=$1 ORDER BY created_at DESC LIMIT 1"#,
             input.request_id
-        ).fetch_one(&mut *tx).await?;
+        ).fetch_one(&mut **tx).await?;
         if existing.user_id != input.user_id
             || existing.api_key_id != Some(input.api_key_id)
             || existing.amount_micro != input.amount.as_micros()
+            || existing.source_window != input.source_window
             || existing.pool != input.pool.as_i16()
             || existing.status != BillingState::Committed.as_i16()
         {
             return Err(LedgerError::ReservationConflict);
         }
-    }
-    tx.commit().await?;
-    if let Err(error) = guard.synchronize(ledger).await {
-        tracing::error!(request_id=%input.request_id, %error, "durable bill awaiting Redis recovery");
     }
     Ok(inserted)
 }
@@ -59,7 +88,7 @@ pub(crate) async fn synchronize(
     user_id: i64,
 ) -> Result<(), LedgerError> {
     let pending = sqlx::query!(
-        "SELECT request_id,api_key_id,amount_micro,pool FROM billing_sync WHERE user_id=$1 ORDER BY created_at,request_id",
+        "SELECT request_id,api_key_id,amount_micro,pool,source_window FROM billing_sync WHERE user_id=$1 ORDER BY created_at,request_id",
         user_id
     ).fetch_all(guard.connection()).await?;
     if pending.is_empty() {
@@ -68,12 +97,13 @@ pub(crate) async fn synchronize(
     let mut missing = false;
     for row in &pending {
         match ledger
-            .commit_in_pool(
+            .commit_in_source(
                 user_id,
                 row.api_key_id,
                 row.request_id,
                 Money::from_micros(row.amount_micro),
                 crate::Pool::from_i16(row.pool),
+                row.source_window.as_deref(),
             )
             .await?
         {

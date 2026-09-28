@@ -142,6 +142,7 @@ impl Bed {
     }
     fn bill(&self) -> SettlementInput<'static> {
         SettlementInput {
+            source_window: None,
             dimensions: okapi_ledger::pg::UsageDimensions::new(
                 "test",
                 "test",

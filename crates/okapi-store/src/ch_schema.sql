@@ -65,6 +65,43 @@ GROUP BY user_id, day;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_tokens Nullable(UInt32) DEFAULT NULL;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_read_reported Nullable(UInt8) DEFAULT NULL;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_reported Nullable(UInt8) DEFAULT NULL;
+-- Unknown provenance is not upstream usage; NULL per-axis counts remain missing.
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS prompt_source LowCardinality(String) DEFAULT 'unknown';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS completion_source LowCardinality(String) DEFAULT 'unknown';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_prompt_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_completion_tokens Nullable(UInt32) DEFAULT NULL;
+-- NULL 是旧行：只有正 TTFT 可确认采集；新行显式区分测得 0 与未采集。
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS ttft_reported Nullable(UInt8) DEFAULT NULL;
+
+-- 新聚合保留所有请求的覆盖数，但分位数只收流式且已采集的样本。
+-- 不替换旧 MV、不 POPULATE：历史缺口由查询侧在 raw 完整时重算，避免重复计数。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_model_ttft_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (model, hour)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    model, toStartOfHour(ts) AS hour,
+    countState() AS requests,
+    countIfState(stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1) AS samples,
+    quantilesIfState(0.5, 0.95, 0.99)(ttft_ms,
+        stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1) AS ttft_q
+FROM request_log_raw
+GROUP BY model, hour;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_channel_ttft_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (channel_id, ts5)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    channel_id, toStartOfFiveMinutes(ts) AS ts5,
+    countState() AS requests,
+    countIfState(stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1) AS samples,
+    quantilesIfState(0.5, 0.95, 0.99)(ttft_ms,
+        stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1) AS ttft_q
+FROM request_log_raw
+GROUP BY channel_id, ts5;
 
 -- 不回填历史：旧零值无法判断是未命中还是未上报。
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_reporting_day
@@ -338,3 +375,65 @@ AS SELECT
 FROM request_log_raw
 GROUP BY hour, user_id, api_key_id, group_code, model, channel_id,
     requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- 平均首字时间的有效样本与分位数一致；独立新 MV 保留升级前的全部旧统计。
+-- 不 POPULATE：查询在旧请求覆盖不足时择一恢复 raw，禁止重叠相加。
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_ttft_reporting_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (hour, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfHour(ts) AS hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumIfState(toUInt64(ttft_ms), stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1) AS total_ms,
+    countIfState(stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1) AS samples
+FROM request_log_raw
+GROUP BY hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- NULL denotes a legacy row; positive legacy durations are known, old zero is ambiguous.
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS latency_reported Nullable(UInt8) DEFAULT NULL;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_latency_reporting_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (hour, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfHour(ts) AS hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumIfState(toUInt64(latency_ms), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS total_ms,
+    countIfState(ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS samples,
+    sumIfState(toUInt64(completion_tokens), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS output_tokens
+FROM request_log_raw
+GROUP BY hour, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_model_latency_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (model, hour)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    model, toStartOfHour(ts) AS hour, countState() AS requests,
+    sumIfState(toUInt64(latency_ms), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS total_ms,
+    countIfState(ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS samples,
+    sumIfState(toUInt64(completion_tokens), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS output_tokens,
+    quantilesIfState(0.5, 0.95, 0.99)(latency_ms, ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS latency_q
+FROM request_log_raw GROUP BY model, hour;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_channel_latency_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (channel_id, ts5)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    channel_id, toStartOfFiveMinutes(ts) AS ts5, countState() AS requests,
+    sumIfState(toUInt64(latency_ms), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS total_ms,
+    countIfState(ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS samples,
+    sumIfState(toUInt64(completion_tokens), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS output_tokens,
+    quantilesIfState(0.5, 0.95, 0.99)(latency_ms, ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS latency_q
+FROM request_log_raw GROUP BY channel_id, ts5;

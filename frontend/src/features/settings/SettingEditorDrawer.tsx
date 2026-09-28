@@ -31,7 +31,7 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
   const mode = unsupportedObject || unsupportedArray ? 'json' : requestedMode
   const fields = mode === 'epay' ? EPAY_FIELDS : mode === 'stripe' ? STRIPE_FIELDS : []
   const [draft, setDraft] = useState(() => initialFields(row.value, fields))
-  const [text, setText] = useState(mode === 'percent' ? decimalText(row.value, 100) : row.is_secret ? '' : String(row.value ?? ''))
+  const [text, setText] = useState(mode === 'price' ? decimalText(row.value, 1_000_000) : mode === 'percent' ? decimalText(row.value, 100) : row.is_secret ? '' : String(row.value ?? ''))
   const [bool, setBool] = useState(row.value === true)
   const [json, setJson] = useState(() => JSON.stringify(row.value, null, 2) ?? 'null')
   const [showJson, setShowJson] = useState(!containsSecret(row.value))
@@ -49,6 +49,10 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
     if (mode === 'percent') {
       const value = scaledInteger(text, 2)
       return { value, error: value === null || value > 10000 ? { key: 'admin:settingInvalidPercent' } : undefined }
+    }
+    if (mode === 'price') {
+      const value = scaledInteger(text, 6)
+      return { value, error: value === null || value < 1 || value > 1_000_000_000_000 ? { key: 'admin:pricingBaseInvalid' } : undefined }
     }
     if (mode === 'number') {
       const value = Number(text)
@@ -88,14 +92,19 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
     </>}>
       <form id={formId} onSubmit={(e) => { e.preventDefault(); if (dirty && !pending && !error) onSave(parsed.value) }} className="flex min-w-0 flex-col gap-5">
         <fieldset disabled={pending} className="flex min-w-0 flex-col gap-5">
+          {mode === 'price' && <div className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-sm leading-6">
+            <p className="font-medium">{t('admin:pricingBasePublished', { price: (row.published_value ?? 2_000_000) / 1_000_000 })}</p>
+            <p className="mt-1 text-muted-foreground">{t('admin:pricingBaseWarning')}</p>
+          </div>}
           {(mode === 'epay' || mode === 'stripe') && <ObjectFields fields={fields} draft={draft} onChange={patch} prefix={formId} />}
           {mode === 'ssrf' && <>
             <Switch label={t('admin:settingAllowHttp')} description={t('admin:settingAllowHttpHint')} checked={draft.allow_http === true} onChange={(v) => patch('allow_http', v)} />
             <Switch label={t('admin:settingAllowPrivate')} description={t('admin:settingAllowPrivateHint')} checked={draft.allow_private === true} onChange={(v) => patch('allow_private', v)} />
           </>}
-          {(mode === 'percent' || mode === 'number' || mode === 'string' || mode === 'secret') && <Field label={mode === 'percent' ? t('admin:settingRebatePercent') : label} htmlFor={`${formId}-value`} hint={mode === 'percent' ? t('admin:settingRebateHint') : mode === 'secret' ? t('admin:settingSecretHint') : undefined}>
+          {(mode === 'price' || mode === 'percent' || mode === 'number' || mode === 'string' || mode === 'secret') && <Field label={mode === 'percent' ? t('admin:settingRebatePercent') : label} htmlFor={`${formId}-value`} hint={mode === 'price' ? t('admin:pricingBaseExample', { price: !error ? Number(parsed.value) / 1_000_000 : '—' }) : mode === 'percent' ? t('admin:settingRebateHint') : mode === 'secret' ? t('admin:settingSecretHint') : undefined}>
             <div className="flex items-center gap-2">
-              <Input id={`${formId}-value`} className="h-11 md:h-9" inputMode={mode === 'percent' || mode === 'number' ? 'decimal' : undefined} type={mode === 'secret' ? 'password' : 'text'} autoComplete="off" value={text} onChange={(e) => { setText(e.target.value); setDirty(true) }} />
+              <Input id={`${formId}-value`} className="h-11 md:h-9" inputMode={mode === 'price' || mode === 'percent' || mode === 'number' ? 'decimal' : undefined} type={mode === 'secret' ? 'password' : 'text'} autoComplete="off" value={text} onChange={(e) => { setText(e.target.value); setDirty(true) }} />
+              {mode === 'price' && <span className="shrink-0 text-xs text-muted-foreground">USD / 1M tokens</span>}
               {mode === 'percent' && <span>%</span>}
             </div>
           </Field>}

@@ -2,7 +2,7 @@ use super::{AppError, AppState, Group, Query, empty_response, paging, snapshot};
 use axum::{
     Json,
     extract::State,
-    http::Method,
+    http::{HeaderMap, Method},
     response::{IntoResponse, Response},
 };
 use okapi_store::listing::Slice;
@@ -28,6 +28,9 @@ const FROM: &str = r"FROM price_groups g
     LEFT JOIN channel_pools p ON p.pool_code = g.pool_code
     WHERE ($1::text IS NULL OR g.group_code ILIKE $1 ESCAPE E'\\' OR g.description ILIKE $1 ESCAPE E'\\')
     AND ($2::text IS NULL OR g.group_code = $2)
+    AND (g.self_select OR g.is_default OR EXISTS (
+        SELECT 1 FROM user_groups ug WHERE ug.group_code = g.group_code AND ug.user_id = $4
+    ))
     AND ($3::text IS NULL OR EXISTS (
         SELECT 1 FROM models m JOIN model_pricing mp ON mp.model_id = m.id
         JOIN channels c ON c.models ? m.model_name
@@ -39,6 +42,7 @@ const FROM: &str = r"FROM price_groups g
 pub(super) async fn read(
     conn: &mut sqlx::PgConnection,
     selection: &Selection,
+    user_id: Option<i64>,
 ) -> Result<(Vec<Group>, paging::Meta), AppError> {
     let mut count_query = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT COUNT(*) ");
     count_query.push(FROM);
@@ -47,20 +51,22 @@ pub(super) async fn read(
         .bind(&selection.pattern)
         .bind(&selection.code)
         .bind(&selection.model)
+        .bind(user_id)
         .fetch_one(&mut *conn)
         .await
         .map_err(okapi_store::StoreError::from)?;
     let mut data_query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT g.group_code AS code, g.description AS name, g.group_ratio::text AS ratio, g.pool_code, g.self_select, p.fallback_pool_code ",
+        "SELECT g.group_code AS code, g.description AS name, g.group_ratio::text AS ratio, g.pool_code, g.self_select, g.is_default, p.fallback_pool_code ",
     );
     data_query
         .push(FROM)
-        .push(" ORDER BY g.sort_order, g.group_code LIMIT $4 OFFSET $5");
+        .push(" ORDER BY g.sort_order, g.group_code LIMIT $5 OFFSET $6");
     let groups: Vec<Group> = data_query
         .build_query_as()
         .bind(&selection.pattern)
         .bind(&selection.code)
         .bind(&selection.model)
+        .bind(user_id)
         .bind(selection.slice.capped_limit())
         .bind(selection.slice.offset)
         .fetch_all(conn)
@@ -81,6 +87,7 @@ struct Catalog {
 pub async fn public_groups(
     State(state): State<AppState>,
     Query(query): Query<GroupQuery>,
+    headers: HeaderMap,
     method: Method,
 ) -> Result<Response, AppError> {
     let selection = Selection {
@@ -89,8 +96,9 @@ pub async fn public_groups(
         code: paging::trimmed(query.code, 32, "code")?,
         model: paging::trimmed(query.model, 256, "model")?,
     };
+    let user_id = super::viewer(&state, &headers).await?;
     let mut tx = snapshot(&state).await?;
-    let (groups, page) = read(&mut tx, &selection).await?;
+    let (groups, page) = read(&mut tx, &selection, user_id).await?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
     let body = Catalog { groups, page };
     let mut response = if method == Method::HEAD {
@@ -99,5 +107,6 @@ pub async fn public_groups(
         Json(&body).into_response()
     };
     body.page.headers(&mut response)?;
+    super::private_response(&mut response);
     Ok(response)
 }

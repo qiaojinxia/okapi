@@ -130,13 +130,17 @@ impl UserGuard {
         ledger: &BalanceLedger,
     ) -> Result<Money, LedgerError> {
         let mut total = Money::ZERO;
-        for row in ledger.list_reservations(self.user_id).await? {
-            if row.pool == crate::Pool::Subscription {
-                total = total
-                    .checked_add(row.amount)
-                    .ok_or(LedgerError::InvalidHold("subscription_amount"))?;
+        for reservation in ledger.list_reservations(self.user_id).await? {
+            if reservation.pool == crate::Pool::Subscription && reservation.source_window.is_none()
+            {
+                // An old receipt cannot prove its period. Let it close before
+                // accepting a new period instead of inventing ownership.
+                return Err(LedgerError::HoldRecoveryRequired);
             }
         }
+        // Ordinary reservations belong to the period being closed. Their
+        // unspent quota expires now; a late actual charge revises that expiry
+        // in sync::record. Durable holds keep their separately persisted funds.
         let mut active = hot::active(ledger, self.user_id).await?;
         let rows: Vec<Hold> = sqlx::query_as(
             "SELECT * FROM balance_holds WHERE user_id=$1 AND state IN ('pending','held')",
@@ -236,6 +240,22 @@ pub async fn reserve_frozen(
 ) -> Result<Admission, LedgerError> {
     let mut guard = UserGuard::acquire(pg, request.user_id).await?;
     guard.synchronize(ledger).await?;
+    let existing: Option<String> =
+        sqlx::query_scalar("SELECT state FROM balance_holds WHERE id=$1")
+            .bind(request.id)
+            .fetch_optional(guard.connection())
+            .await?;
+    if existing.as_deref().is_none_or(|state| state == "pending") {
+        crate::key_budget::check(
+            &mut guard,
+            ledger,
+            request.user_id,
+            request.api_key_id,
+            request.maximum,
+            Some(request.id),
+        )
+        .await?;
+    }
     let (mut hold, created) = db::intent(&mut guard, &request).await?;
     if hold.cancel_requested && hold.status != Status::Closed {
         return Err(LedgerError::HoldRecoveryRequired);

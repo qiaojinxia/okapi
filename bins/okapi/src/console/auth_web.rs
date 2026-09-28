@@ -674,6 +674,9 @@ pub async fn totp_confirm(
 
 #[derive(Deserialize)]
 pub struct CreateKeyReq {
+    /// Lifetime USD budget in micro-USD; absent/null = unlimited.
+    #[serde(default)]
+    pub quota_micro: Option<i64>,
     #[serde(default)]
     pub name: Option<String>,
     /// 过期时间（RFC 3339）；缺省 = 永不过期。
@@ -682,7 +685,7 @@ pub struct CreateKeyReq {
     /// 模型白名单；缺省/空数组 = 不限。新建时填写只可能收窄本 key，无提权面。
     #[serde(default)]
     pub model_allowlist: Option<Vec<String>>,
-    /// 档位（须在 /api/me/groups 可选集合内）；缺省 = 跟随用户分组。
+    /// 分组（须在 /api/me/groups 可选集合内）；缺省 = 跟随用户分组。
     #[serde(default)]
     pub group_code: Option<String>,
     /// IP 白名单（地址 / CIDR；只约束数据面调用）；缺省 = 不限。
@@ -694,8 +697,9 @@ pub async fn create_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     ExtractJson(req): ExtractJson<CreateKeyReq>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<Response, AppError> {
     let user_id = require_session(&state, &headers).await?;
+    super::portal::validate_key_limits(req.quota_micro, req.expires_at)?;
     let token = format!("sk-okapi-{}", rand_token(43));
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
     let name = req.name.as_deref().map_or("web", str::trim);
@@ -709,26 +713,40 @@ pub async fn create_key(
         super::portal::ensure_selectable(&state, user_id, code).await?;
     }
     let ip_allowlist = super::portal::normalize_ip_allowlist(req.ip_allowlist)?;
-    let key_id = sqlx::query_scalar!(
-        r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override, ip_allowlist)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id"#,
-        user_id,
-        key_hash,
-        token.chars().take(16).collect::<String>(),
-        name,
-        req.expires_at,
-        allowlist,
-        group_code,
-        ip_allowlist
+    // Missing master key preserves hash-only issuance; never fall back to storing plaintext.
+    let ciphertext = state
+        .master_key
+        .as_deref()
+        .map(|master| okapi_store::api_key_secret::seal(master, user_id, &key_hash, &token))
+        .transpose()?;
+    let key_id = sqlx::query_scalar::<_, i64>(
+        r"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, expires_at, model_allowlist, group_override, ip_allowlist, key_ciphertext, quota_mode, quota_micro)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CASE WHEN $10::bigint IS NULL THEN 0 ELSE 1 END, $10) RETURNING id",
     )
+    .bind(user_id)
+    .bind(key_hash)
+    .bind(token.chars().take(16).collect::<String>())
+    .bind(name)
+    .bind(req.expires_at)
+    .bind(allowlist)
+    .bind(group_code)
+    .bind(ip_allowlist)
+    .bind(&ciphertext)
+    .bind(req.quota_micro)
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
-    Ok(Json(json!({
+    let mut response = Json(json!({
         "key_id": key_id,
-        // 明文仅本次返回
+        // Subsequent reads require an owner web session, not just an API key.
         "api_key": token,
-    })))
+        "copy_available": ciphertext.is_some(),
+    }))
+    .into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store, private".parse().unwrap());
+    Ok(response)
 }
 
 /// GET /api/me/sessions：当前用户仍有效的 web 会话（门户 API key 鉴权）。

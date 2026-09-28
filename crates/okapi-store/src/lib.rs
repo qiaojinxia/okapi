@@ -4,6 +4,7 @@
 //! 计费写路径在 okapi-ledger，定价编译在 okapi-pricing。
 
 pub mod admin;
+pub mod api_key_secret;
 pub mod auth;
 pub mod ch;
 pub mod channels;

@@ -212,6 +212,7 @@ async fn durable_holds_survive_expiry_sweeps_and_worker_repair()
     let id = Uuid::new_v4();
     let pricing = PricingSnapshot {
         epoch: 7,
+        base_price_per_1m_usd: None,
         mode: "per_call",
         model_ratio: None,
         completion_ratio: None,
@@ -220,6 +221,10 @@ async fn durable_holds_survive_expiry_sweeps_and_worker_repair()
         audio_ratio: None,
         audio_completion_ratio: None,
         image_ratio: None,
+        modality_ratios: None,
+        cache_read_modalities: None,
+        cache_write_modalities: None,
+        image_completion_tokens: None,
         per_call_price_usd: Some(Money::from_micros(500_000)),
         service_tier: None,
         tier_ratio: None,

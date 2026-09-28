@@ -14,6 +14,7 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
+import { Link } from '@tanstack/react-router'
 import { SettingEditorDrawer } from './SettingEditorDrawer'
 import { containsSecret, isRecord, SETTING_GROUPS, settingMeta } from './setting-catalog'
 import type { SettingGroup, SettingRow, SettingsSection } from './setting-catalog'
@@ -23,7 +24,8 @@ const GROUP_ICONS = { payment: Coins, identity: Users, traffic: Gauge, security:
 export function SettingsCard({ onOpenSection }: { onOpenSection: (section: SettingsSection) => void }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
-  const canWrite = usePermission()('settings.write')
+  const can = usePermission()
+  const canWrite = can('settings.write')
   const [editing, setEditing] = useState<SettingRow | null>(null)
   const [filter, setFilter] = useState('')
   const [category, setCategory] = useState<SettingGroup | 'all'>('all')
@@ -34,7 +36,10 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
   const save = useMutation({
     mutationFn: (arg: { key: string; value: unknown }) => apiFetch('/admin/settings', { method: 'POST', body: arg }),
     onSuccess: (_r, arg) => {
-      toast.success(t('common:saved'))
+      if (arg.key === 'pricing_base_per_1m_micro') {
+        toast.warning(t('admin:requiresPublish'))
+        void queryClient.invalidateQueries({ queryKey: qk.adminModels })
+      } else toast.success(t('common:saved'))
       setEditing(null)
       void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
       void queryClient.invalidateQueries({ queryKey: qk.setting(arg.key) })
@@ -108,6 +113,8 @@ export function SettingsCard({ onOpenSection }: { onOpenSection: (section: Setti
                         </div>
                         <div className="flex flex-wrap items-center gap-2 text-sm">
                           <SettingSummary row={row} />
+                          {row.key === 'pricing_base_per_1m_micro' && row.value !== row.published_value && <Badge variant="warning">{t('admin:requiresPublish')}</Badge>}
+                          {row.key === 'pricing_base_per_1m_micro' && can('pricing.read') && <Link to="/admin/pricing" className="text-xs text-primary hover:underline">{t('admin:publish')} <ArrowUpRight aria-hidden className="inline h-3 w-3" /></Link>}
                           {(row.is_secret || containsSecret(row.value)) && <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"><Lock aria-hidden className="h-3 w-3" />{t('admin:settingSecretsHidden')}</span>}
                         </div>
                         <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-muted-foreground/80">
@@ -131,6 +138,7 @@ function SettingSummary({ row }: { row: SettingRow }) {
   const { t, i18n } = useTranslation()
   if (row.is_secret) return <Badge variant={row.configured ? 'success' : 'muted'} dot>{t(row.configured ? 'admin:settingSet' : 'admin:settingUnset')}</Badge>
   const value = row.value
+  if (row.key === 'pricing_base_per_1m_micro' && typeof value === 'number') return <div className="space-y-1 tabular-nums"><p className="font-semibold">${value / 1_000_000} / 1M tokens</p><p className="text-xs text-muted-foreground">{t('admin:pricingBasePublished', { price: (row.published_value ?? 2_000_000) / 1_000_000 })}</p></div>
   if (row.key === 'aff_percent_bp' && typeof value === 'number') return <span className="font-semibold tabular-nums">{(value / 100).toLocaleString(i18n.language, { maximumFractionDigits: 2 })}% <span className="font-normal text-muted-foreground">{t('admin:settingRebateUnit')}</span></span>
   if (row.key === 'ssrf_policy' && isRecord(value)) return <>
     <Badge variant={value.allow_http ? 'warning' : 'muted'}>{t(value.allow_http ? 'admin:settingHttpAllowed' : 'admin:settingHttpsOnly')}</Badge>

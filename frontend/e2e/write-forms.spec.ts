@@ -381,10 +381,14 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   multiplierFail = false
 
   // 分组：全量覆盖，先出现的优先级高
+  await page.route('**/admin/groups', (route) => route.fulfill({ json: { data: [
+    { group_code: 'default', group_ratio: '1', description: '默认分组', self_select: false },
+    { group_code: 'vip', group_ratio: '0.85', description: 'VIP', self_select: false },
+  ] } }))
   await drawer.getByRole('tab', { name: '分组', exact: true }).click()
-  const tagInput = drawer.getByPlaceholder('回车或逗号分隔，可粘贴多个')
-  await tagInput.fill('vip')
-  await tagInput.press('Enter')
+  const groupSearch = drawer.getByRole('combobox', { name: '添加系统分组' })
+  await groupSearch.fill('vip')
+  await drawer.getByRole('option', { name: /vip/ }).click()
   const groupsSaved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/groups'))
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await groupsSaved

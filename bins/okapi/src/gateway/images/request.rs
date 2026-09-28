@@ -12,6 +12,8 @@ use std::collections::HashSet;
 pub(super) struct Input {
     pub model: String,
     pub units: u32,
+    pub stream: bool,
+    partial_images: u32,
     body: Payload,
 }
 
@@ -33,6 +35,57 @@ enum StoredPayload {
 }
 
 impl Input {
+    /// Admission estimate only: a byte bound for text and a per-reference image allowance.
+    /// Actual billing always uses upstream usage; URLs/base64 are never counted as text tokens.
+    pub fn estimate(&self, output_per_image: u32) -> Result<okapi_domain::TokenUsage, AppError> {
+        let (text_bytes, images) = match &self.body {
+            Payload::Json(bytes) => {
+                let probe: Probe =
+                    serde_json::from_slice(bytes).map_err(|_| AppError::bad_request())?;
+                (
+                    probe.prompt.len(),
+                    probe
+                        .images
+                        .as_ref()
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len)
+                        .saturating_add(usize::from(probe.mask.is_some())),
+                )
+            }
+            Payload::Multipart(parts) => (
+                parts
+                    .iter()
+                    .filter(|(name, _, _, _)| name == "prompt")
+                    .map(|(_, _, _, bytes)| bytes.len())
+                    .sum(),
+                parts
+                    .iter()
+                    .filter(|(name, _, _, _)| matches!(name.as_str(), "image" | "image[]" | "mask"))
+                    .count(),
+            ),
+        };
+        let invalid = || AppError::bad_request().with_param("image_token_estimate");
+        let image_tokens = u32::try_from(images)
+            .ok()
+            .and_then(|v| v.checked_mul(8192))
+            .ok_or_else(invalid)?;
+        let prompt_tokens = u32::try_from(text_bytes)
+            .ok()
+            .and_then(|v| v.checked_add(image_tokens))
+            .ok_or_else(invalid)?;
+        let completion_tokens = output_per_image
+            .checked_add(self.partial_images * 100)
+            .and_then(|value| value.checked_mul(self.units))
+            .ok_or_else(invalid)?;
+        Ok(okapi_domain::TokenUsage {
+            prompt_tokens,
+            image_prompt_tokens: image_tokens,
+            image_completion_tokens: completion_tokens,
+            completion_tokens,
+            ..okapi_domain::TokenUsage::default()
+        })
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, AppError> {
         let encode = |bytes: &Bytes| base64::prelude::BASE64_STANDARD.encode(bytes);
         let payload = match &self.body {
@@ -70,10 +123,12 @@ impl Input {
                 if bytes.len() > 32 * 1024 * 1024 {
                     return Err(AppError::internal());
                 }
-                let (model, units, body) = json(&bytes, edit)?;
+                let (model, units, stream, partial_images, body) = json(&bytes, edit)?;
                 Ok(Self {
                     model,
                     units,
+                    stream,
+                    partial_images,
                     body: Payload::Json(body),
                 })
             }
@@ -90,10 +145,12 @@ impl Input {
                 {
                     return Err(AppError::internal());
                 }
-                let (model, units, parts) = multipart(parts)?;
+                let (model, units, stream, partial_images, parts) = multipart(parts)?;
                 Ok(Self {
                     model,
                     units,
+                    stream,
+                    partial_images,
                     body: Payload::Multipart(parts),
                 })
             }
@@ -127,6 +184,45 @@ impl Input {
             }
         }
     }
+
+    pub fn require_nonstream(&self) -> Result<(), AppError> {
+        if self.stream {
+            return Err(AppError::bad_request().with_param("image_task_streaming_unsupported"));
+        }
+        Ok(())
+    }
+
+    pub async fn forward_stream(
+        &self,
+        state: &AppState,
+        candidate: &okapi_store::ChannelCandidate,
+        model: &str,
+        endpoint: &str,
+    ) -> Result<okapi_providers::image_stream::ImageResponse, okapi_providers::UpstreamError> {
+        use okapi_providers::image_stream::ImageBody;
+        let body = match &self.body {
+            Payload::Json(body) => {
+                ImageBody::Json(okapi_providers::rewrite_model(body, &self.model, model)?)
+            }
+            Payload::Multipart(parts) => {
+                let mut parts = parts.clone();
+                for (name, _, _, data) in &mut parts {
+                    if name == "model" {
+                        *data = Bytes::copy_from_slice(model.as_bytes());
+                    }
+                }
+                ImageBody::Multipart(parts)
+            }
+        };
+        state
+            .openai_image_stream(
+                candidate,
+                model,
+                endpoint.strip_prefix("/v1").unwrap_or(endpoint),
+                body,
+            )
+            .await
+    }
 }
 
 pub(super) async fn read(req: Request, state: &AppState, edit: bool) -> Result<Input, AppError> {
@@ -157,20 +253,24 @@ pub(super) async fn read(req: Request, state: &AppState, edit: bool) -> Result<I
                 .map_err(|error| multipart_error(&error))?;
             parts.push((name, filename, content_type, bytes));
         }
-        let (model, units, parts) = multipart(parts)?;
+        let (model, units, stream, partial_images, parts) = multipart(parts)?;
         Ok(Input {
             model,
             units,
+            stream,
+            partial_images,
             body: Payload::Multipart(parts),
         })
     } else {
         let bytes = Bytes::from_request(req, state).await.map_err(|error| {
             AppError::new(error.status(), okapi_api::codes::BAD_REQUEST).with_param("body")
         })?;
-        let (model, units, body) = json(&bytes, edit)?;
+        let (model, units, stream, partial_images, body) = json(&bytes, edit)?;
         Ok(Input {
             model,
             units,
+            stream,
+            partial_images,
             body: Payload::Json(body),
         })
     }
@@ -188,6 +288,7 @@ struct Probe {
     prompt: String,
     n: Option<u32>,
     stream: Option<bool>,
+    partial_images: Option<u32>,
     images: Option<Value>,
     mask: Option<Value>,
 }
@@ -213,11 +314,12 @@ fn require_text(value: &str, param: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn nonstream(stream: Option<bool>) -> Result<(), AppError> {
-    if stream == Some(true) {
-        return Err(AppError::bad_request().with_param("images_streaming_unsupported"));
+fn partials(stream: bool, value: Option<u32>) -> Result<u32, AppError> {
+    let value = value.unwrap_or(0);
+    if value > 3 || (!stream && value != 0) {
+        return Err(AppError::bad_request().with_param("partial_images"));
     }
-    Ok(())
+    Ok(value)
 }
 
 fn reference(value: &Value) -> Result<(), AppError> {
@@ -240,13 +342,14 @@ fn reference(value: &Value) -> Result<(), AppError> {
     Err(AppError::bad_request().with_param("image_url"))
 }
 
-pub(super) fn json(body: &Bytes, edit: bool) -> Result<(String, u32, Bytes), AppError> {
+pub(super) fn json(body: &Bytes, edit: bool) -> Result<(String, u32, bool, u32, Bytes), AppError> {
     // Deserialize directly first: duplicate billing/identity fields must not use last-value-wins.
     let probe: Probe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     require_text(&probe.model, "model")?;
     require_text(&probe.prompt, "prompt")?;
     let n = units(probe.n)?;
-    nonstream(probe.stream)?;
+    let stream = probe.stream.unwrap_or(false);
+    let partial_images = partials(stream, probe.partial_images)?;
     if edit {
         let images = probe
             .images
@@ -263,15 +366,25 @@ pub(super) fn json(body: &Bytes, edit: bool) -> Result<(String, u32, Bytes), App
     }
     let mut body: Value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     body["n"] = n.into();
-    Ok((probe.model, n, Bytes::from(body.to_string())))
+    Ok((
+        probe.model,
+        n,
+        stream,
+        partial_images,
+        Bytes::from(body.to_string()),
+    ))
 }
 
-pub(super) fn multipart(mut parts: Vec<Part>) -> Result<(String, u32, Vec<Part>), AppError> {
+pub(super) fn multipart(
+    mut parts: Vec<Part>,
+) -> Result<(String, u32, bool, u32, Vec<Part>), AppError> {
     let mut seen = HashSet::new();
     let mut model = None;
     let mut prompt = None;
     let mut count = None;
     let mut images = 0;
+    let mut stream = false;
+    let mut partial_images = None;
     for (name, _, _, data) in &mut parts {
         if matches!(name.as_str(), "image" | "image[]") {
             if data.is_empty() {
@@ -302,11 +415,25 @@ pub(super) fn multipart(mut parts: Vec<Part>) -> Result<(String, u32, Vec<Part>)
                 count = Some(n);
                 *data = Bytes::from(n.to_string());
             }
-            "stream" => match text(data, "stream")? {
-                "false" => {}
-                "true" => nonstream(Some(true))?,
-                _ => return Err(AppError::bad_request().with_param("stream")),
-            },
+            "stream" => {
+                stream = match text(data, "stream")? {
+                    "false" => false,
+                    "true" => true,
+                    _ => return Err(AppError::bad_request().with_param("stream")),
+                };
+                *data = Bytes::from_static(if stream { b"true" } else { b"false" });
+            }
+            "partial_images" => {
+                let value = text(data, "partial_images")?;
+                if value.is_empty() || !value.bytes().all(|c| c.is_ascii_digit()) {
+                    return Err(AppError::bad_request().with_param("partial_images"));
+                }
+                let count = value
+                    .parse::<u32>()
+                    .map_err(|_| AppError::bad_request().with_param("partial_images"))?;
+                partial_images = Some(count);
+                *data = Bytes::from(count.to_string());
+            }
             _ => {}
         }
     }
@@ -320,7 +447,7 @@ pub(super) fn multipart(mut parts: Vec<Part>) -> Result<(String, u32, Vec<Part>)
     if count.is_none() {
         parts.push(("n".into(), None, None, Bytes::from_static(b"1")));
     }
-    Ok((model, n, parts))
+    Ok((model, n, stream, partials(stream, partial_images)?, parts))
 }
 
 pub(super) fn returned_images(body: &Bytes, requested: u32) -> Result<u32, AppError> {

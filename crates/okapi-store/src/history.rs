@@ -53,7 +53,7 @@ struct Partition {
     name: String,
     schema: String,
     qualified: String,
-    definition: String,
+    definition: Option<String>,
 }
 async fn partitions(
     connection: &mut PgConnection,
@@ -61,7 +61,7 @@ async fn partitions(
 ) -> Result<Vec<Partition>, StoreError> {
     Ok(sqlx::query_as!(Partition,r#"SELECT c.oid::bigint AS "oid!",p.relname::text AS "parent!",c.relname::text AS "name!",
         n.nspname::text AS "schema!",format('%I.%I',n.nspname,c.relname) AS "qualified!",
-        pg_get_expr(c.relpartbound,c.oid) AS "definition!"
+        pg_get_expr(c.relpartbound,c.oid) AS "definition?"
         FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid JOIN pg_class p ON p.oid=i.inhparent
         JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE p.oid IN ('billing_records'::regclass,'billing_events'::regclass,'audit_logs'::regclass)
@@ -90,7 +90,8 @@ fn bounds(part: &Partition, keep_from: DateTime<Utc>) -> Option<(DateTime<Utc>, 
         start.format("%Y-%m-%d"),
         end.format("%Y-%m-%d")
     );
-    (end <= keep_from && part.definition == expected).then_some((start, end))
+    (end <= keep_from && part.definition.as_deref() == Some(expected.as_str()))
+        .then_some((start, end))
 }
 
 /// Keeps the current month and preceding months-1 whole calendar months.
@@ -114,8 +115,15 @@ pub async fn prune(pg: &PgPool, now: DateTime<Utc>) -> Result<Vec<String>, Store
         return Ok(Vec::new());
     };
     let candidates = {
-        let mut connection = pg.acquire().await?;
-        partitions(&mut connection, None).await?
+        // Deparsing partition bounds consults the live catalog even when the
+        // query's snapshot still contains a concurrently dropped partition.
+        // Fence other pruners during discovery, then release before taking the
+        // exclusive archive lock. External DDL can still make bounds absent;
+        // archive_one rechecks identity and bounds before carrying or dropping.
+        let mut tx = read(pg).await?;
+        let candidates = partitions(&mut tx, None).await?;
+        tx.commit().await?;
+        candidates
     };
     let mut dropped = Vec::new();
     for candidate in candidates {
@@ -217,9 +225,9 @@ async fn carry_records(
     // A conflicting request ID is corruption, not permission to silently forget
     // either financial fact. A unique violation rolls back both archive and DROP.
     sqlx::query!("INSERT INTO billing_record_receipts(request_id,user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,
-        status,amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,pricing_snapshot,usage_details,created_at)
+        status,amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,pricing_snapshot,usage_details,created_at,source_window)
         SELECT request_id,user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,status,amount_micro,original_amount_micro,
-          discount_micro,upstream_cost_micro,is_stream,node,pool,pricing_snapshot,usage_details,created_at FROM billing_records
+          discount_micro,upstream_cost_micro,is_stream,node,pool,pricing_snapshot,usage_details,created_at,source_window FROM billing_records
         WHERE tableoid=$1::bigint::oid AND created_at >= $2 AND created_at < $3",oid,start,end).execute(&mut **tx).await?;
     Ok(())
 }

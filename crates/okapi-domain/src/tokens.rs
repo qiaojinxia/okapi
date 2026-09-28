@@ -3,6 +3,40 @@
 use crate::error::DomainError;
 use serde::{Deserialize, Serialize};
 
+/// Original provider totals in normalized billing units. Missing axes are estimated;
+/// a missing outer object on TokenUsage means provenance was not recorded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamTokenCounts {
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+}
+
+fn source(recorded: bool, reported: Option<u32>, settled: u32) -> &'static str {
+    if recorded {
+        match reported {
+            None => "estimated",
+            Some(count) if count == settled => "upstream",
+            Some(_) => "local_override",
+        }
+    } else {
+        "unknown"
+    }
+}
+
+/// Modal subsets of a cache total; text is the remainder, never another charge.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheModalities {
+    pub audio_tokens: u32,
+    pub image_tokens: u32,
+}
+
+impl CacheModalities {
+    #[must_use]
+    pub fn total_modal(&self) -> u64 {
+        u64::from(self.audio_tokens) + u64::from(self.image_tokens)
+    }
+}
+
 /// 一次请求的 token 用量。
 ///
 /// 字段名对齐 OpenAI 官方 usage 细分（`prompt_tokens_details` /
@@ -21,17 +55,24 @@ use serde::{Deserialize, Serialize};
 /// completion 侧：`audio_completion_tokens` 按 audio_ratio × audio_completion_ratio
 /// （与 new-api 同语义：音频输出相对音频输入再乘一档），余下按 completion_ratio。
 ///
-/// # 维度交叉的近似
-///
-/// OpenAI 语义中"缓存"与"模态"是**交叉**维度（一段音频 token 也可能被缓存命中），
-/// 而本实现按互斥分段近似处理：探针按缓存读 → 缓存写 → 音频 → 图片分配。
-/// 不保留缓存与模态的交叉矩阵，不能据此推断上游不支持多模态缓存。
+/// Cache totals include their modal subsets. The input audio/image fields contain
+/// only uncached tokens. Adapters with detailed cache usage must subtract the
+/// intersections before constructing this value. None preserves legacy adapters'
+/// text-priced cache behavior; it does not assert that caches are text-only.
+/// Image output is independent of text and audio output.
 ///
 /// `reasoning_tokens` 计入 completion 总数（仅统计拆分，不重复计费）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_usage: Option<UpstreamTokenCounts>,
     pub prompt_tokens: u32,
     pub cached_tokens: u32,
+    /// Known cache intersections. None keeps the legacy text-priced cache behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_modalities: Option<CacheModalities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_modalities: Option<CacheModalities>,
     /// 上游是否明确上报缓存读取；缺字段/估算不等于真实零命中。
     #[serde(default)]
     pub cache_read_reported: bool,
@@ -51,10 +92,30 @@ pub struct TokenUsage {
     /// 音频输出 token（OpenAI `completion_tokens_details.audio_tokens`）；含在 completion 内。
     #[serde(default)]
     pub audio_completion_tokens: u32,
+    #[serde(default)]
+    pub image_completion_tokens: u32,
     pub reasoning_tokens: u32,
 }
 
 impl TokenUsage {
+    #[must_use]
+    pub fn prompt_source(&self) -> &'static str {
+        source(
+            self.upstream_usage.is_some(),
+            self.upstream_usage.and_then(|u| u.prompt_tokens),
+            self.prompt_tokens,
+        )
+    }
+
+    #[must_use]
+    pub fn completion_source(&self) -> &'static str {
+        source(
+            self.upstream_usage.is_some(),
+            self.upstream_usage.and_then(|u| u.completion_tokens),
+            self.completion_tokens,
+        )
+    }
+
     /// prompt 侧各计价段合计（不含常规文本段）。
     fn prompt_segments(&self) -> u64 {
         u64::from(self.cached_tokens)
@@ -65,6 +126,17 @@ impl TokenUsage {
 
     /// 校验不变量；计费入口必须先调用。
     pub fn validate(&self) -> Result<(), DomainError> {
+        if self
+            .cache_read_modalities
+            .is_some_and(|v| v.total_modal() > u64::from(self.cached_tokens))
+            || self
+                .cache_write_modalities
+                .is_some_and(|v| v.total_modal() > u64::from(self.cache_write_tokens))
+        {
+            return Err(DomainError::InvalidTokenUsage {
+                reason: "cache modalities exceed cache total",
+            });
+        }
         // 各段都含在 prompt 内且互斥，合计不得越界——否则 prompt_uncached 被截断为 0，
         // 常规文本段静默漏计费
         if self.prompt_segments() > u64::from(self.prompt_tokens) {
@@ -78,9 +150,11 @@ impl TokenUsage {
             });
         }
         // 音频输出与 reasoning 同为 completion 的子集，各自独立不得越界
-        if self.audio_completion_tokens > self.completion_tokens {
+        if u64::from(self.audio_completion_tokens) + u64::from(self.image_completion_tokens)
+            > u64::from(self.completion_tokens)
+        {
             return Err(DomainError::InvalidTokenUsage {
-                reason: "audio_completion_tokens > completion_tokens",
+                reason: "audio + image completion tokens > completion_tokens",
             });
         }
         Ok(())
@@ -99,6 +173,28 @@ impl TokenUsage {
     pub const fn text_completion(&self) -> u32 {
         self.completion_tokens
             .saturating_sub(self.audio_completion_tokens)
+            .saturating_sub(self.image_completion_tokens)
+    }
+
+    #[must_use]
+    pub fn cached_text(&self) -> u32 {
+        u32::try_from(
+            u64::from(self.cached_tokens)
+                .saturating_sub(self.cache_read_modalities.unwrap_or_default().total_modal()),
+        )
+        .unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn cache_write_text(&self) -> u32 {
+        u32::try_from(
+            u64::from(self.cache_write_tokens).saturating_sub(
+                self.cache_write_modalities
+                    .unwrap_or_default()
+                    .total_modal(),
+            ),
+        )
+        .unwrap_or(0)
     }
 
     /// 原始总 token 数（prompt + completion，不含倍率加权），用于阶梯档位判定。
@@ -111,6 +207,43 @@ impl TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_subsets_and_output_modalities_are_validated_without_double_counting() {
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            cached_tokens: 50,
+            image_prompt_tokens: 40,
+            cache_read_modalities: Some(CacheModalities {
+                image_tokens: 40,
+                audio_tokens: 0,
+            }),
+            completion_tokens: 100,
+            image_completion_tokens: 70,
+            audio_completion_tokens: 20,
+            ..TokenUsage::default()
+        };
+        assert!(usage.validate().is_ok());
+        assert_eq!(usage.prompt_uncached(), 10);
+        assert_eq!(usage.cached_text(), 10);
+        assert_eq!(usage.text_completion(), 10);
+        assert_eq!(usage.total_raw(), 200);
+        let mut invalid = usage;
+        invalid.cache_read_modalities = Some(CacheModalities {
+            image_tokens: 40,
+            audio_tokens: 11,
+        });
+        assert!(invalid.validate().is_err());
+        invalid = usage;
+        invalid.image_completion_tokens = 81;
+        assert!(invalid.validate().is_err());
+        invalid = usage;
+        invalid.cache_write_modalities = Some(CacheModalities {
+            image_tokens: 1,
+            audio_tokens: 0,
+        });
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn validate_rejects_cached_exceeding_prompt() {

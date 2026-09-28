@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 #[path = "support/model_catalog_bounds.rs"]
 mod bounds;
+#[path = "support/catalog_visibility.rs"]
+mod catalog_visibility;
 #[path = "support/model_catalog_facets.rs"]
 mod facets;
 #[path = "support/model_catalog_ingress.rs"]
@@ -233,7 +235,14 @@ async fn catalog_search_is_literal_and_model_lookup_is_exact() {
 #[tokio::test]
 async fn catalog_head_and_legacy_opt_in_keep_page_metadata_consistent() {
     let env = setup().await;
-    let args = [("q", env.prefix.as_str()), ("limit", "3"), ("offset", "20")];
+    // Scope group metadata too: other parallel fixtures may add public groups
+    // between the two independent snapshots being compared.
+    let args = [
+        ("q", env.prefix.as_str()),
+        ("group_q", env.prefix.as_str()),
+        ("limit", "3"),
+        ("offset", "20"),
+    ];
     let url = env.url("/api/pricing/models", &args);
     let response = env.client.get(url.clone()).send().await.unwrap();
     assert_eq!(response.headers()["x-total-count"], "25");

@@ -184,9 +184,7 @@ impl MetaScanner {
             .and_then(serde_json::Value::as_str)
             .is_some();
         let usage = if finished {
-            Some(crate::convert::openai_to_gemini::usage_from_gemini(
-                src.get("usageMetadata"),
-            ))
+            crate::convert::openai_to_gemini::usage_from_gemini(src.get("usageMetadata"))
         } else {
             None
         };

@@ -1,5 +1,6 @@
 export interface Snapshot {
   epoch?: number
+  base_price_per_1m_usd?: string | number | null
   mode: string
   model_ratio?: string | number | null
   completion_ratio?: string | number | null

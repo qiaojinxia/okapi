@@ -45,7 +45,13 @@ export function RecentLoginsCard() {
   const shortUa = (ua: string | null) => (ua ? (ua.split(' ')[0] ?? ua).slice(0, 40) : '—')
 
   return (
-    <Card>
+    <Card
+      data-slot="security-logins"
+      role="region"
+      aria-label={t('portal:loginsTitle')}
+      tabIndex={0}
+      className="min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain"
+    >
       <CardHeader>
         <CardTitle>{t('portal:loginsTitle')}</CardTitle>
         <CardDescription>{t('portal:loginsDesc')}</CardDescription>
@@ -78,12 +84,12 @@ export function RecentLoginsCard() {
                 <span className="tabular-nums text-muted-foreground">
                   {dayjs(r.at).format('MM-DD HH:mm')}
                 </span>
-                <span className="font-mono">{r.ip ?? '—'}</span>
+                <span className="min-w-0 font-mono break-all">{r.ip ?? '—'}</span>
                 <span className="truncate text-muted-foreground" title={r.ua ?? ''}>
                   {shortUa(r.ua)}
                 </span>
                 {!r.ok && r.reason && (
-                  <span className="font-mono text-muted-foreground">{r.reason}</span>
+                  <span className="min-w-0 font-mono break-all text-muted-foreground">{r.reason}</span>
                 )}
               </li>
             ))}

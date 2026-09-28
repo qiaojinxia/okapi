@@ -1,4 +1,4 @@
-import { Bell, Mail, Megaphone, Settings, ShieldCheck, SlidersHorizontal, UserPlus } from 'lucide-react'
+import { Bell, Bot, Mail, Megaphone, Settings, ShieldCheck, SlidersHorizontal, UserPlus } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NoticeCard } from '@/features/settings/NoticeCard'
@@ -8,10 +8,11 @@ import { PageHeader } from '@/components/ui/page'
 import { RegistrationCard } from '@/features/settings/RegistrationCard'
 import { SettingsCard } from '@/features/settings/SettingsKeyValues'
 import { SmtpCard } from '@/features/settings/SmtpCard'
+import { McpSettings } from '@/features/settings/McpSettings'
 import { TabPanel, Tabs } from '@/components/ui/tabs'
 import type { SettingsSection } from '@/features/settings/setting-catalog'
 
-const SETTINGS_TABS = ['registration', 'notice', 'notify', 'smtp', 'privacy', 'values'] as const
+const SETTINGS_TABS = ['registration', 'notice', 'notify', 'smtp', 'privacy', 'ai', 'values'] as const
 type SettingsTab = (typeof SETTINGS_TABS)[number]
 
 /// 系统设置页：只放配置，不放会改动既有数据的动作（退款、留存清理在 /admin/ops）。
@@ -37,6 +38,7 @@ export function SettingsPage() {
     { id: 'notify', label: t('admin:notify'), icon: Bell },
     { id: 'smtp', label: t('admin:smtpTitle'), icon: Mail },
     { id: 'privacy', label: t('admin:privacyTitle'), icon: ShieldCheck },
+    { id: 'ai', label: t('admin:mcpTitle'), icon: Bot },
     { id: 'values', label: t('admin:settingAdvanced'), icon: SlidersHorizontal },
   ]
   const panels = {
@@ -45,6 +47,7 @@ export function SettingsPage() {
     notify: <NotifyCard />,
     smtp: <SmtpCard />,
     privacy: <PrivacyCard />,
+    ai: <McpSettings />,
     values: <SettingsCard onOpenSection={openSection} />,
   }
 

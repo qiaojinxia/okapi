@@ -18,6 +18,7 @@ import { describeError } from '@/lib/i18n'
 import { cn } from '@/lib/utils'
 
 export const Route = createFileRoute('/portal/security')({
+  staticData: { fitViewport: true },
   component: SecurityPage,
 })
 
@@ -79,11 +80,17 @@ function SecurityPage() {
   const step = done ? 3 : enrolled ? 2 : 1
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex min-w-0 flex-col gap-4 lg:h-full lg:min-h-0">
       <PageHeader title={t('security:nav')} description={t('security:desc')} icon={ShieldCheck} />
 
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Card>
+      <div data-slot="security-grid" className="grid min-w-0 gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:grid-rows-[minmax(0,1fr)]">
+        <Card
+          data-slot="security-totp"
+          role="region"
+          aria-label={t('security:title')}
+          tabIndex={0}
+          className="min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-0 lg:overflow-y-auto lg:overscroll-contain"
+        >
           <CardHeader>
             <CardTitle>{t('security:title')}</CardTitle>
             <CardDescription>{t('security:hint')}</CardDescription>
@@ -155,7 +162,9 @@ function SecurityPage() {
           </CardContent>
         </Card>
 
-        <div className="flex flex-col gap-4">
+        {/* Keep the two columns within the available desktop height. Short windows
+            can scroll this column; long record lists scroll inside their own cards. */}
+        <div data-slot="security-sidebar" className="grid min-w-0 gap-4 lg:min-h-0 lg:grid-rows-[auto_fit-content(30%)_minmax(8rem,1fr)] lg:overflow-y-auto lg:overscroll-contain">
           <Card className="bg-muted/30">
             <CardHeader>
               <CardTitle>{t('security:whyTitle')}</CardTitle>

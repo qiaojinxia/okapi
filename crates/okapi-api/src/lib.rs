@@ -8,9 +8,11 @@
 pub mod chat;
 pub mod error;
 pub mod permissions;
+mod token_usage;
 
 pub use chat::{
     ChatRequestProbe, ChunkProbe, CompletionTokensDetails, GeminiRequestProbe, MessageProbe,
-    MessagesRequestProbe, PromptTokensDetails, ResponsesRequestProbe, UsageProbe,
+    MessagesRequestProbe, ModalTokensDetails, PromptTokensDetails, ResponsesRequestProbe,
+    UsageProbe,
 };
 pub use error::{ErrorBody, codes};

@@ -38,6 +38,25 @@ async fn denied(env: &Env) {
     assert_eq!(value["error"]["param"], "concurrency");
 }
 
+async fn settled_chat(env: &Env, response: reqwest::Response) {
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "ok");
+    env.state
+        .settlements
+        .wait_idle(Duration::from_secs(5))
+        .await;
+    assert_eq!(env.state.settlements.in_flight(), 0);
+    assert!(
+        env.state
+            .ledger
+            .list_reservations(env.uid)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn funded_batch_occupies_the_key_slot_until_cancellation_is_settled() {
     let env = Env::new().await;
@@ -54,7 +73,7 @@ async fn funded_batch_occupies_the_key_slot_until_cancellation_is_settled() {
     env.step(&job).await.unwrap();
     env.money(&job, 0).await;
     assert_eq!(env.creates(), 0);
-    assert_eq!(chat(&env).send().await.unwrap().status(), 200);
+    settled_chat(&env, chat(&env).send().await.unwrap()).await;
     assert_eq!(
         env.state.ledger.balance(env.uid).await.unwrap().as_micros(),
         BALANCE - PRICE
@@ -93,14 +112,14 @@ async fn normal_http_inflight_keeps_batch_funding_pending_without_freezing_or_fa
     }
     assert_eq!(env.creates(), 0);
     gate.add_permits(1);
-    assert_eq!(ordinary.await.unwrap().status(), 200);
+    settled_chat(&env, ordinary.await.unwrap()).await;
     env.peer.lock().unwrap().chat_gate = None;
     env.step(&job).await.unwrap();
     assert_eq!(env.poll(&job).await["status"], "preparing");
     denied(&env).await;
     archive::finish(&env, &job).await;
     assert_eq!(env.poll(&job).await["status"], "completed");
-    assert_eq!(chat(&env).send().await.unwrap().status(), 200);
+    settled_chat(&env, chat(&env).send().await.unwrap()).await;
     assert_eq!(
         env.state.ledger.balance(env.uid).await.unwrap().as_micros(),
         BALANCE - PRICE * 2 - PRICE / 2
@@ -137,7 +156,7 @@ async fn uncertain_submission_keeps_slot_across_worker_restart_until_actual_sett
     archive::finish(&env, &job).await;
     env.money(&job, PRICE / 2).await;
     assert_eq!(env.creates(), 1);
-    assert_eq!(chat(&env).send().await.unwrap().status(), 200);
+    settled_chat(&env, chat(&env).send().await.unwrap()).await;
     restarted.pg.close().await;
     env.close().await;
 }

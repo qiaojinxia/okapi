@@ -442,6 +442,7 @@ pub async fn apply(
                     audio: &get("audio_ratio"),
                     audio_completion: &get("audio_completion_ratio"),
                     image: &get("image_ratio"),
+                    modality_ratios: None,
                 },
             )
             .await?;

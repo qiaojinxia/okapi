@@ -26,13 +26,10 @@ fn req(body: &Value, model: &str, stream: bool) -> Value {
     serde_json::from_slice(&out).unwrap()
 }
 
-fn resp(body: &Value) -> (Value, UsageProbe) {
+fn resp(body: &Value) -> (Value, Option<UsageProbe>) {
     let raw = Bytes::from(serde_json::to_vec(body).unwrap());
     let (bytes, probe) = response_openai_to_gemini(&raw).unwrap();
-    (
-        serde_json::from_slice(&bytes).unwrap(),
-        probe.expect("非流式响应必须回计费探针"),
-    )
+    (serde_json::from_slice(&bytes).unwrap(), probe)
 }
 
 fn usage(prompt: u32, completion: u32, cached: u32, reasoning: u32) -> UsageProbe {
@@ -392,6 +389,7 @@ fn response_usage_metadata_and_probe_agree_with_upstream() {
         })
     );
     // 探针是计费的输入：必须与上游 usage 逐字段相同，不能被"客户端口径"改写
+    let probe = probe.expect("upstream supplied usage");
     assert_eq!(probe.prompt_tokens, 100);
     assert_eq!(probe.completion_tokens, 40);
     assert_eq!(probe.prompt_tokens_details.cached_tokens, 30);
@@ -399,32 +397,21 @@ fn response_usage_metadata_and_probe_agree_with_upstream() {
 }
 
 #[test]
-fn usage_json_omits_zero_optional_counts_and_clamps_reasoning() {
-    // 无缓存、无推理：两个可选字段都不出现
+fn usage_json_preserves_reported_zero_and_rejects_invalid_reasoning() {
     assert_eq!(
         gemini_usage_json(usage(10, 5, 0, 0)),
-        json!({"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15})
-    );
-    // 上游若报 reasoning 超过 completion：按 completion 夹，
-    // candidates 不得下溢（u32 减法下溢在 debug 下 panic、release 下回绕成巨大值）
-    assert_eq!(
-        gemini_usage_json(usage(10, 5, 0, 9)),
         json!({
-            "promptTokenCount": 10,
-            "candidatesTokenCount": 0,
-            "thoughtsTokenCount": 5,
-            "totalTokenCount": 15
+            "promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"cachedContentTokenCount":0
         })
     );
+    assert_eq!(gemini_usage_json(usage(10, 5, 0, 9)), Value::Null);
 }
 
 #[test]
-fn response_without_usage_still_returns_a_zero_probe() {
-    let (out, probe) = resp(&json!({"choices": [{"message": {"content": "x"}}]}));
-    assert_eq!(probe.prompt_tokens, 0);
-    assert_eq!(probe.completion_tokens, 0);
-    assert_eq!(
-        out["usageMetadata"],
-        json!({"promptTokenCount": 0, "candidatesTokenCount": 0, "totalTokenCount": 0})
-    );
+fn response_without_usage_preserves_absence_instead_of_creating_a_zero_bill() {
+    let body = Bytes::from(json!({"choices":[{"message":{"content":"x"}}]}).to_string());
+    let (bytes, probe) = response_openai_to_gemini(&body).unwrap();
+    assert!(probe.is_none());
+    let out: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(out["usageMetadata"].is_null());
 }

@@ -22,6 +22,31 @@ async fn setup() -> Option<(PgPool, ChClient)> {
     Some((pg, ch))
 }
 
+#[tokio::test]
+async fn scalar_query_parameters_round_trip_special_text_without_sql_interpretation() {
+    let Some((_, ch)) = setup().await else {
+        return;
+    };
+    for value in [
+        "",
+        "model'\\",
+        "literal\\t\\n\\N",
+        "模型\tname\nline\rreturn\0end",
+        "' OR 1 = 1 --",
+        "x&param_value=other%20value+",
+    ] {
+        let rows = ch
+            .query_with_params(
+                "SELECT {value:String} AS value, {number:UInt32} AS number",
+                &[("value", value), ("number", "42")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(rows[0]["value"], value);
+        assert_eq!(rows[0]["number"], 42);
+    }
+}
+
 fn outbox_payload(user_id: i64, request_id: Uuid, amount: i64) -> Value {
     json!({
         "request_id": request_id,

@@ -18,6 +18,8 @@ pub struct RatioAxes<'a> {
     pub audio: &'a str,
     pub audio_completion: &'a str,
     pub image: &'a str,
+    /// None preserves existing independent rates; {} clears them.
+    pub modality_ratios: Option<&'a serde_json::Value>,
 }
 
 impl<'a> RatioAxes<'a> {
@@ -32,6 +34,7 @@ impl<'a> RatioAxes<'a> {
             audio: "1",
             audio_completion: "1",
             image: "1",
+            modality_ratios: None,
         }
     }
 }
@@ -62,10 +65,10 @@ pub async fn upsert_model_ratio(
         r#"
         INSERT INTO model_pricing
             (model_id, pricing_mode, model_ratio, completion_ratio, cache_ratio,
-             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio)
+             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio, modality_ratios)
         VALUES ($1, 'ratio', ($2::text)::numeric, ($3::text)::numeric, ($4::text)::numeric,
                 ($5::text)::numeric, ($6::text)::numeric, ($7::text)::numeric,
-                ($8::text)::numeric)
+                ($8::text)::numeric, COALESCE($9, '{}'::jsonb))
         ON CONFLICT (model_id) DO UPDATE SET
             pricing_mode = 'ratio',
             model_ratio = EXCLUDED.model_ratio,
@@ -75,6 +78,7 @@ pub async fn upsert_model_ratio(
             audio_ratio = EXCLUDED.audio_ratio,
             audio_completion_ratio = EXCLUDED.audio_completion_ratio,
             image_ratio = EXCLUDED.image_ratio,
+            modality_ratios = COALESCE($9, model_pricing.modality_ratios),
             -- 改回 ratio 必须清掉阶梯表：留着它，下次误切 tiered 会拿到一张早已过期的旧表
             tier_expr = NULL,
             updated_at = now()
@@ -86,7 +90,8 @@ pub async fn upsert_model_ratio(
         axes.cache_write,
         axes.audio,
         axes.audio_completion,
-        axes.image
+        axes.image,
+        axes.modality_ratios
     )
     .execute(&mut *tx)
     .await?;
@@ -127,10 +132,10 @@ pub async fn upsert_model_tiered(
         r#"
         INSERT INTO model_pricing
             (model_id, pricing_mode, model_ratio, completion_ratio, cache_ratio,
-             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio, tier_expr)
+             cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio, tier_expr, modality_ratios)
         VALUES ($1, 'tiered', ($2::text)::numeric, ($3::text)::numeric, ($4::text)::numeric,
                 ($5::text)::numeric, ($6::text)::numeric, ($7::text)::numeric,
-                ($8::text)::numeric, $9)
+                ($8::text)::numeric, $9, COALESCE($10, '{}'::jsonb))
         ON CONFLICT (model_id) DO UPDATE SET
             pricing_mode = 'tiered',
             completion_ratio = EXCLUDED.completion_ratio,
@@ -140,6 +145,7 @@ pub async fn upsert_model_tiered(
             audio_completion_ratio = EXCLUDED.audio_completion_ratio,
             image_ratio = EXCLUDED.image_ratio,
             tier_expr = EXCLUDED.tier_expr,
+            modality_ratios = COALESCE($10, model_pricing.modality_ratios),
             updated_at = now()
         "#,
         model_id,
@@ -150,7 +156,8 @@ pub async fn upsert_model_tiered(
         axes.audio,
         axes.audio_completion,
         axes.image,
-        tier_expr
+        tier_expr,
+        axes.modality_ratios
     )
     .execute(&mut *tx)
     .await?;
@@ -1202,10 +1209,12 @@ pub async fn assign_user_role(
 /// api_keys 可写字段补丁。
 ///
 /// 三态语义：`None` = 不改；`Some(None)` = 置空（解除限制）；`Some(Some(v))` = 设为 v。
-/// 分层由调用方决定：自助面只填前四项（只能把自己的 key 收窄），
-/// 限额与 `group_override` 是管控项与计价锚点，仅管理面填写。
+/// 分层由调用方决定：自助面支持账号所有者管理额度和访问限制；
+/// 分组须在管理员划定的可选集合内，速率限制仍仅管理面填写。
 #[derive(Debug, Default, Clone)]
 pub struct ApiKeyPatch {
+    /// Lifetime spending cap. None = unchanged; Some(None) = unlimited.
+    pub quota_micro: Option<Option<i64>>,
     pub name: Option<String>,
     /// 1=启用 2=停用（3=expired 由过期时间派生，不接受直接写）。
     pub status: Option<i16>,
@@ -1223,7 +1232,7 @@ pub struct ApiKeyPatch {
 
 /// 被改动的 key 标识：`key_hash` 供调用方精确失效 `auth:key:*` 缓存，
 /// `user_id` 供审计记录归属主体。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TouchedApiKey {
     pub key_hash: String,
     pub user_id: i64,
@@ -1237,8 +1246,15 @@ pub async fn patch_api_key(
     owner: Option<i64>,
     patch: &ApiKeyPatch,
 ) -> Result<Option<TouchedApiKey>, StoreError> {
-    let row = sqlx::query!(
-        r#"
+    if patch
+        .quota_micro
+        .flatten()
+        .is_some_and(|v| !(1..=9_007_199_254_740_991).contains(&v))
+    {
+        return Err(StoreError::InvalidData("quota_micro"));
+    }
+    let row = sqlx::query_as::<_, TouchedApiKey>(
+        r"
         UPDATE api_keys SET
             name              = COALESCE($3, name),
             status            = COALESCE($4::smallint, status),
@@ -1250,34 +1266,25 @@ pub async fn patch_api_key(
             rpd_limit         = CASE WHEN $15::bool THEN $16::int ELSE rpd_limit END,
             daily_token_limit = CASE WHEN $17::bool THEN $18::bigint ELSE daily_token_limit END,
             max_concurrency   = CASE WHEN $19::bool THEN $20::int ELSE max_concurrency END,
-            ip_allowlist      = CASE WHEN $21::bool THEN $22::jsonb ELSE ip_allowlist END
+            ip_allowlist      = CASE WHEN $21::bool THEN $22::jsonb ELSE ip_allowlist END,
+            quota_mode        = CASE WHEN $23::bool THEN CASE WHEN $24::bigint IS NULL THEN 0 ELSE 1 END ELSE quota_mode END,
+            quota_micro       = CASE WHEN $23::bool THEN $24::bigint ELSE quota_micro END
         WHERE id = $1 AND deleted_at IS NULL
           AND ($2::bigint IS NULL OR user_id = $2)
         RETURNING key_hash, user_id
-        "#,
-        key_id,
-        owner,
-        patch.name.as_deref(),
-        patch.status,
-        patch.expires_at.is_some(),
-        patch.expires_at.flatten(),
-        patch.model_allowlist.is_some(),
-        patch.model_allowlist.as_ref().and_then(Option::as_ref),
-        patch.group_override.is_some(),
-        patch.group_override.as_ref().and_then(Option::as_deref),
-        patch.rpm_limit.is_some(),
-        patch.rpm_limit.flatten(),
-        patch.tpm_limit.is_some(),
-        patch.tpm_limit.flatten(),
-        patch.rpd_limit.is_some(),
-        patch.rpd_limit.flatten(),
-        patch.daily_token_limit.is_some(),
-        patch.daily_token_limit.flatten(),
-        patch.max_concurrency.is_some(),
-        patch.max_concurrency.flatten(),
-        patch.ip_allowlist.is_some(),
-        patch.ip_allowlist.as_ref().and_then(Option::as_ref),
+        "
     )
+    .bind(key_id).bind(owner).bind(patch.name.as_deref()).bind(patch.status)
+    .bind(patch.expires_at.is_some()).bind(patch.expires_at.flatten())
+    .bind(patch.model_allowlist.is_some()).bind(patch.model_allowlist.as_ref().and_then(Option::as_ref))
+    .bind(patch.group_override.is_some()).bind(patch.group_override.as_ref().and_then(Option::as_deref))
+    .bind(patch.rpm_limit.is_some()).bind(patch.rpm_limit.flatten())
+    .bind(patch.tpm_limit.is_some()).bind(patch.tpm_limit.flatten())
+    .bind(patch.rpd_limit.is_some()).bind(patch.rpd_limit.flatten())
+    .bind(patch.daily_token_limit.is_some()).bind(patch.daily_token_limit.flatten())
+    .bind(patch.max_concurrency.is_some()).bind(patch.max_concurrency.flatten())
+    .bind(patch.ip_allowlist.is_some()).bind(patch.ip_allowlist.as_ref().and_then(Option::as_ref))
+    .bind(patch.quota_micro.is_some()).bind(patch.quota_micro.flatten())
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|r| TouchedApiKey {

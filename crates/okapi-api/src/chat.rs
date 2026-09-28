@@ -302,17 +302,17 @@ impl GeminiRequestProbe {
     }
 }
 
-/// OpenAI usage 探针（含缓存/推理细分；上游缺字段时取 0）。
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+/// OpenAI usage 探针；缺失轴由标记保留，不能把占位零当作实报。
+#[derive(Debug, Clone, Copy, Default)]
 pub struct UsageProbe {
-    #[serde(default)]
+    pub missing_prompt: bool,
+    pub missing_completion: bool,
     pub prompt_tokens: u32,
-    #[serde(default)]
     pub completion_tokens: u32,
-    #[serde(default)]
     pub prompt_tokens_details: PromptTokensDetails,
-    #[serde(default)]
     pub completion_tokens_details: CompletionTokensDetails,
+    /// Internal parse failure. Kept distinct from absent usage so settlement cannot estimate it.
+    pub invalid: bool,
 }
 
 /// 字段名与 OpenAI 官方 `prompt_tokens_details` 一致（openai-python
@@ -325,12 +325,25 @@ pub struct PromptTokensDetails {
     pub cache_write_tokens: u32,
     pub cache_read_reported: bool,
     pub cache_write_reported: bool,
-    /// 音频输入 token（gpt-4o-audio 系；官方单价约为文本 16×）。
+    /// 音频输入总量，含其中的缓存部分；价格来自当前模型配置。
     #[serde(default)]
     pub audio_tokens: u32,
-    /// 图片输入 token。
+    /// 图片输入总量，含其中的缓存部分。
     #[serde(default)]
     pub image_tokens: u32,
+    /// Compatible extensions: modal subsets of the cache totals, not extra tokens.
+    pub cached_tokens_details: Option<ModalTokensDetails>,
+    pub cache_write_tokens_details: Option<ModalTokensDetails>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, serde::Serialize)]
+pub struct ModalTokensDetails {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_tokens: Option<u32>,
 }
 
 #[derive(Default, Deserialize)]
@@ -343,6 +356,8 @@ struct RawPromptTokensDetails {
     audio: u32,
     #[serde(default, rename = "image_tokens")]
     image: u32,
+    cached_tokens_details: Option<ModalTokensDetails>,
+    cache_write_tokens_details: Option<ModalTokensDetails>,
 }
 
 impl From<RawPromptTokensDetails> for PromptTokensDetails {
@@ -354,6 +369,8 @@ impl From<RawPromptTokensDetails> for PromptTokensDetails {
             cache_write_reported: raw.cache_write.is_some(),
             audio_tokens: raw.audio,
             image_tokens: raw.image,
+            cached_tokens_details: raw.cached_tokens_details,
+            cache_write_tokens_details: raw.cache_write_tokens_details,
         }
     }
 }
@@ -369,6 +386,18 @@ impl PromptTokensDetails {
         if self.cache_write_reported || self.cache_write_tokens > 0 {
             value["cache_write_tokens"] = serde_json::json!(self.cache_write_tokens);
         }
+        if self.audio_tokens > 0 {
+            value["audio_tokens"] = serde_json::json!(self.audio_tokens);
+        }
+        if self.image_tokens > 0 {
+            value["image_tokens"] = serde_json::json!(self.image_tokens);
+        }
+        if let Some(details) = self.cached_tokens_details {
+            value["cached_tokens_details"] = serde_json::json!(details);
+        }
+        if let Some(details) = self.cache_write_tokens_details {
+            value["cache_write_tokens_details"] = serde_json::json!(details);
+        }
         value
     }
 }
@@ -380,48 +409,112 @@ pub struct CompletionTokensDetails {
     /// 音频输出 token（官方字段同名）。
     #[serde(default)]
     pub audio_tokens: u32,
+    /// Compatible extension used by native image-producing adapters.
+    #[serde(default)]
+    pub image_tokens: u32,
 }
 
 impl UsageProbe {
-    /// 转领域用量。
-    ///
-    /// 脏数据收敛（fail-safe 而非 fail-closed：上游 usage 不可信，但不能因此拒绝
-    /// 已完成的请求）：prompt 侧各段按 cached → cache_write → audio → image 的顺序
-    /// 依次收敛到剩余额度，保证 `Σ段 ≤ prompt_tokens` 恒成立、常规文本段不被截断。
-    ///
-    /// 收敛顺序即优先级：先保住高倍率的缓存写入与音频段，宁可挤压常规文本段——
-    /// 反向挤压会让高倍率段被低估，造成少收。
+    /// Cumulative stream snapshots replace counts, never add them. A missing axis
+    /// retains the previous observation; explicit zero replaces it. Invalid data
+    /// poisons the sequence even if a later event looks valid.
     #[must_use]
-    pub fn to_token_usage(self) -> TokenUsage {
-        let d = self.prompt_tokens_details;
-        let mut left = self.prompt_tokens;
-        let mut take = |n: u32| {
-            let v = n.min(left);
-            left -= v;
-            v
+    pub fn with_previous(mut self, previous: Option<Self>) -> Self {
+        let Some(previous) = previous else {
+            return self;
         };
-        let cached = take(d.cached_tokens);
-        let cache_write = take(d.cache_write_tokens);
-        let audio_in = take(d.audio_tokens);
-        let image_in = take(d.image_tokens);
-        TokenUsage {
-            prompt_tokens: self.prompt_tokens,
-            cached_tokens: cached,
-            cache_read_reported: d.cache_read_reported,
-            cache_write_reported: d.cache_write_reported,
-            cache_write_tokens: cache_write,
-            audio_prompt_tokens: audio_in,
-            image_prompt_tokens: image_in,
-            completion_tokens: self.completion_tokens,
-            audio_completion_tokens: self
-                .completion_tokens_details
-                .audio_tokens
-                .min(self.completion_tokens),
-            reasoning_tokens: self
-                .completion_tokens_details
-                .reasoning_tokens
-                .min(self.completion_tokens),
+        if self.with_estimates(0, 0).is_err() || previous.with_estimates(0, 0).is_err() {
+            return Self::invalid();
         }
+        if self.missing_prompt && !previous.missing_prompt {
+            self.prompt_tokens = previous.prompt_tokens;
+            self.missing_prompt = false;
+            let d = &mut self.prompt_tokens_details;
+            let p = previous.prompt_tokens_details;
+            if !d.cache_read_reported {
+                d.cached_tokens = p.cached_tokens;
+                d.cache_read_reported = p.cache_read_reported;
+                d.cached_tokens_details = d.cached_tokens_details.or(p.cached_tokens_details);
+            }
+            if !d.cache_write_reported {
+                d.cache_write_tokens = p.cache_write_tokens;
+                d.cache_write_reported = p.cache_write_reported;
+                d.cache_write_tokens_details = d
+                    .cache_write_tokens_details
+                    .or(p.cache_write_tokens_details);
+            }
+            d.audio_tokens = d.audio_tokens.max(p.audio_tokens);
+            d.image_tokens = d.image_tokens.max(p.image_tokens);
+        }
+        if self.missing_completion && !previous.missing_completion {
+            self.completion_tokens = previous.completion_tokens;
+            self.missing_completion = false;
+            let d = &mut self.completion_tokens_details;
+            let p = previous.completion_tokens_details;
+            d.reasoning_tokens = d.reasoning_tokens.max(p.reasoning_tokens);
+            d.audio_tokens = d.audio_tokens.max(p.audio_tokens);
+            d.image_tokens = d.image_tokens.max(p.image_tokens);
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn invalid() -> Self {
+        Self {
+            invalid: true,
+            ..Self::default()
+        }
+    }
+    /// Normalize intersecting cache/modality counts without clipping or guessing.
+    /// Invalid or ambiguous counts must not become a valid-looking bill.
+    pub fn to_token_usage(self) -> Result<TokenUsage, okapi_domain::DomainError> {
+        super::token_usage::normalize(self)
+    }
+
+    /// Fill only absent axes, retaining original counts for audit and local overrides.
+    pub fn with_estimates(
+        self,
+        prompt: u32,
+        completion: u32,
+    ) -> Result<TokenUsage, okapi_domain::DomainError> {
+        super::token_usage::with_estimates(self, prompt, completion)
+    }
+
+    /// Conversion JSON must preserve absence, including across a second protocol hop.
+    #[must_use]
+    pub fn chat_json(self) -> serde_json::Value {
+        if self.with_estimates(0, 0).is_err() {
+            return serde_json::Value::Null;
+        }
+        let mut value = serde_json::json!({
+            "prompt_tokens_details": self.prompt_tokens_details.cache_json(),
+            "completion_tokens_details": self.completion_tokens_details.to_json(),
+        });
+        if !self.missing_prompt {
+            value["prompt_tokens"] = self.prompt_tokens.into();
+        }
+        if !self.missing_completion {
+            value["completion_tokens"] = self.completion_tokens.into();
+        }
+        if !self.missing_prompt && !self.missing_completion {
+            value["total_tokens"] =
+                (u64::from(self.prompt_tokens) + u64::from(self.completion_tokens)).into();
+        }
+        value
+    }
+}
+
+impl CompletionTokensDetails {
+    #[must_use]
+    pub fn to_json(self) -> serde_json::Value {
+        let mut value = serde_json::json!({"reasoning_tokens": self.reasoning_tokens});
+        if self.audio_tokens > 0 {
+            value["audio_tokens"] = serde_json::json!(self.audio_tokens);
+        }
+        if self.image_tokens > 0 {
+            value["image_tokens"] = serde_json::json!(self.image_tokens);
+        }
+        value
     }
 }
 

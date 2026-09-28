@@ -19,6 +19,8 @@ use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use serde::Deserialize;
 use serde_json::Value;
+
+mod usage;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as TungMsg;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
@@ -82,6 +84,7 @@ struct Prep {
     key: std::sync::Arc<okapi_store::AuthedKey>,
     request_id: Uuid,
     reservation_pool: Pool,
+    source_window: Option<String>,
     canonical: String,
     dimensions: okapi_ledger::pg::UsageDimensions,
     upstream_url: String,
@@ -145,6 +148,7 @@ async fn prepare(
         completion_tokens: cap,
         audio_completion_tokens: 0,
         reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     let est = calculate(&book, &calc, est_usage)?;
 
@@ -180,7 +184,9 @@ async fn prepare(
     };
     let reserve = state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -192,8 +198,12 @@ async fn prepare(
             now,
         )
         .await;
-    let reservation_pool = match reserve {
-        Ok(ReserveOutcome::Reserved { pool, .. }) => pool,
+    let (reservation_pool, source_window) = match reserve {
+        Ok(ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        }) => (pool, source_window),
         Ok(ReserveOutcome::Insufficient { .. }) => {
             state.sched.ws_lease_release(key.key_id, &conn_id).await;
             return Err(AppError::new(
@@ -265,6 +275,7 @@ async fn prepare(
         key: std::sync::Arc::clone(key),
         request_id,
         reservation_pool,
+        source_window,
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             requested_model,
             &upstream_model,
@@ -335,8 +346,7 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
 
     let (mut up_tx, mut up_rx) = upstream_ws.split();
     let (mut cl_tx, mut cl_rx) = client.split();
-    let mut usage = TokenUsage::default();
-    let mut responses: u32 = 0;
+    let mut meter = usage::Meter::default();
     let mut awaiting_first = true;
     let conn_id = request_id.to_string();
     let mut renew = tokio::time::interval(Duration::from_secs(20));
@@ -379,8 +389,12 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
             msg = up_rx.next() => {
                 match msg {
                     Some(Ok(m)) => {
-                        if let TungMsg::Text(text) = &m {
-                            accumulate_usage(text, &mut usage, &mut responses);
+                        if let TungMsg::Text(text) = &m
+                            && let Err(reason) = meter.observe(text) {
+                                tracing::warn!(%request_id, reason, "invalid realtime usage; settling verified prefix");
+                                let event = serde_json::json!({"type":"error", "error":{"type":"upstream", "code":codes::UPSTREAM_ERROR, "params":{"reason":reason}}});
+                                let _ = cl_tx.send(AxumMsg::Text(event.to_string().into())).await;
+                                break;
                         }
                         let forward = match m {
                             TungMsg::Text(t) => AxumMsg::Text(t.as_str().into()),
@@ -402,40 +416,11 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
     let _ = cl_tx.close().await;
     let _ = up_tx.close().await;
 
-    settle_session(&state, &prep, usage, responses).await;
+    settle_session(&state, &prep, meter.usage, meter.responses).await;
     state
         .sched
         .ws_lease_release(prep.key.key_id, &conn_id)
         .await;
-}
-
-/// `response.done` → usage 累计（input/output 已含 audio tokens，text+audio 合并计费；
-/// 缓存文本进 cached 打折口径）。
-fn accumulate_usage(text: &str, usage: &mut TokenUsage, responses: &mut u32) {
-    let Ok(v) = serde_json::from_str::<Value>(text) else {
-        return;
-    };
-    if v.get("type").and_then(Value::as_str) != Some("response.done") {
-        return;
-    }
-    let Some(u) = v.pointer("/response/usage") else {
-        return;
-    };
-    let get = |k: &str| {
-        u.get(k)
-            .and_then(Value::as_u64)
-            .and_then(|x| u32::try_from(x).ok())
-            .unwrap_or(0)
-    };
-    let cached = u
-        .pointer("/input_token_details/cached_tokens")
-        .and_then(Value::as_u64)
-        .and_then(|x| u32::try_from(x).ok())
-        .unwrap_or(0);
-    usage.prompt_tokens = usage.prompt_tokens.saturating_add(get("input_tokens"));
-    usage.cached_tokens = usage.cached_tokens.saturating_add(cached);
-    usage.completion_tokens = usage.completion_tokens.saturating_add(get("output_tokens"));
-    *responses = responses.saturating_add(1);
 }
 
 /// 升级后上游失败：客户端收一条 error 事件（error_code 语义，前端语言包渲染），
@@ -487,6 +472,7 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         }
     };
     let input = SettlementInput {
+        source_window: prep.source_window.clone(),
         dimensions: prep.dimensions.clone(),
         request_id: prep.request_id,
         log_type: 2,
@@ -550,6 +536,7 @@ async fn record_failure(
 ) {
     let book = state.pricebook.load();
     let input = SettlementInput {
+        source_window: prep.source_window.clone(),
         dimensions: prep.dimensions.clone(),
         request_id: prep.request_id,
         log_type: 5,

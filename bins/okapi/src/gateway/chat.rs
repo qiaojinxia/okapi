@@ -88,6 +88,7 @@ struct RequestBilling {
     request_id: Uuid,
     /// Keep the admitted funding pool even if the Redis refund is deferred.
     reservation_pool: Pool,
+    source_window: Option<String>,
     est_prompt: u32,
     /// 本次请求实测的 token/千字符 密度（补全侧只有字符数，用它折算）。
     density: u32,
@@ -836,6 +837,7 @@ async fn prepare_chat(
         completion_tokens: completion_cap,
         audio_completion_tokens: 0,
         reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     let est_quote = calculate(&book, &calc, est_usage)?;
 
@@ -886,9 +888,11 @@ async fn prepare_chat(
         concurrency: cap(key.max_concurrency),
     };
     let est_tokens = u64::from(est_prompt).saturating_add(u64::from(completion_cap));
-    let reservation_pool = match state
+    let (reservation_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -901,7 +905,11 @@ async fn prepare_chat(
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -936,6 +944,7 @@ async fn prepare_chat(
         member_user_id: key.member_user_id,
         request_id,
         reservation_pool,
+        source_window,
         est_prompt,
         density,
         completion_cap,
@@ -1800,7 +1809,7 @@ async fn dispatch_chat(
                 } => {
                     let usage = serde_json::from_slice::<serde_json::Value>(&body)
                         .ok()
-                        .map(|v| conv_gem::usage_from_gemini(v.get("usageMetadata")));
+                        .and_then(|v| conv_gem::usage_from_gemini(v.get("usageMetadata")));
                     Ok(ChatResponse::Json {
                         status,
                         upstream_request_id,
@@ -1865,7 +1874,7 @@ async fn dispatch_chat(
                 } => {
                     let usage = serde_json::from_slice::<serde_json::Value>(&body)
                         .ok()
-                        .map(|v| convert::usage_from_anthropic(v.get("usage")));
+                        .and_then(|v| convert::usage_from_anthropic(v.get("usage")));
                     Ok(ChatResponse::Json {
                         status,
                         upstream_request_id,
@@ -1896,14 +1905,14 @@ async fn dispatch_chat(
                     status,
                     upstream_request_id,
                     body,
-                    ..
+                    usage,
                 } => {
-                    let (body, usage) = conv_a2o::response_openai_to_anthropic(&body)?;
+                    let (body, parsed_usage) = conv_a2o::response_openai_to_anthropic(&body)?;
                     Ok(ChatResponse::Json {
                         status,
                         upstream_request_id,
                         body,
-                        usage,
+                        usage: usage.or(parsed_usage),
                     })
                 }
                 ChatResponse::Stream(h) => {
@@ -1946,14 +1955,16 @@ fn wrap_responses_egress(
             status,
             upstream_request_id,
             body,
-            ..
+            usage,
         } => {
-            let (body, usage) = conv_resp::response_chat_to_responses(&body)?;
+            let (body, parsed_usage) = conv_resp::response_chat_to_responses(&body)?;
             Ok(ChatResponse::Json {
                 status,
                 upstream_request_id,
                 body,
-                usage,
+                // Protocol JSON cannot carry the internal invalid-usage marker.
+                // Preserve the upstream probe across every conversion hop.
+                usage: usage.or(parsed_usage),
             })
         }
         ChatResponse::Stream(h) => {
@@ -2214,7 +2225,7 @@ fn spawn_stream_pump(
                     }
                     if let Err(err) = capture_response_event(&mut writer, &bill, &event).await {
                         // 首字已发送：终止而不改投，保留终态 usage 供实际产出结算。
-                        if let ChatEvent::Data { usage: Some(reported), .. } = &event { usage = Some(*reported); }
+                        if let ChatEvent::Data { usage: Some(reported), .. } = &event { usage = Some(reported.with_previous(usage)); }
                         let sequence = match &event {
                             ChatEvent::Data { raw, .. } => serde_json::from_str::<serde_json::Value>(raw).ok()
                                 .and_then(|v| v.get("sequence_number").and_then(serde_json::Value::as_u64)),
@@ -2286,7 +2297,7 @@ fn capture_terminal_usage(event: &ChatEvent, usage: &mut Option<UsageProbe>, cha
     } = event
     {
         if let Some(reported) = reported {
-            *usage = Some(*reported);
+            *usage = Some(reported.with_previous(*usage));
         }
         *chars = chars.saturating_add(*content_chars);
     }
@@ -2369,8 +2380,8 @@ async fn push_event(
             ..
         } => {
             *content_chars = content_chars.saturating_add(*chars);
-            if ev_usage.is_some() {
-                *usage = *ev_usage;
+            if let Some(reported) = ev_usage {
+                *usage = Some(reported.with_previous(*usage));
             }
             let mut ev = Event::default();
             if let Some(name) = name {
@@ -2402,19 +2413,25 @@ async fn settle_stream(
     client_gone: bool,
     resp_meta: RespMeta,
 ) -> Result<(), AppError> {
-    // usage 缺失（客户端显式关了 include_usage / 提前断开 / 上游不认这个字段）
-    // → 按本次实测密度兜底；渠道声明不信任上游 usage 时再做一次本地复核。
-    let usage = usage.map_or_else(
-        || estimate::fallback_usage(bill.est_prompt, content_chars, bill.density),
-        |u| {
-            let reported = u.to_token_usage();
-            if info.trust_usage {
-                reported
-            } else {
-                estimate::recount_untrusted(reported, bill.est_prompt, content_chars, bill.density)
-            }
-        },
-    );
+    let usage = match estimate::resolve_usage(
+        usage,
+        bill.est_prompt,
+        content_chars,
+        bill.density,
+        info.trust_usage,
+    ) {
+        Ok(usage) => usage,
+        Err(error) => {
+            tracing::warn!(request_id = %bill.request_id, %error, "invalid upstream usage");
+            let error = AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR);
+            let failure = ForwardFailure::app(error, failover, Some((info.channel, info.key)));
+            settle_failure(bill, &failure).await;
+            return Err(AppError::new(
+                StatusCode::BAD_GATEWAY,
+                codes::UPSTREAM_ERROR,
+            ));
+        }
+    };
     if client_gone {
         tracing::info!(request_id = %bill.request_id, "客户端提前断开，按已产出结算");
     }
@@ -2507,22 +2524,21 @@ async fn attempt_json(
                     })?;
             }
             let content_chars = non_stream_content_chars(bill.ingress, &body);
-            let usage = usage.map_or_else(
-                || estimate::fallback_usage(bill.est_prompt, content_chars, bill.density),
-                |u| {
-                    let reported = u.to_token_usage();
-                    if cand.trust_upstream_usage {
-                        reported
-                    } else {
-                        estimate::recount_untrusted(
-                            reported,
-                            bill.est_prompt,
-                            content_chars,
-                            bill.density,
-                        )
-                    }
-                },
-            );
+            let usage = estimate::resolve_usage(
+                usage,
+                bill.est_prompt,
+                content_chars,
+                bill.density,
+                cand.trust_upstream_usage,
+            )
+            .map_err(|error| {
+                tracing::warn!(request_id = %bill.request_id, %error, "invalid upstream usage");
+                AttemptError::Fatal(ForwardFailure::app(
+                    AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
+                    failover,
+                    Some(channel),
+                ))
+            })?;
             let mut info = cand_info(
                 cand,
                 &bill.model,
@@ -2744,6 +2760,7 @@ async fn settle_commit(
         map.insert("requested_model".into(), serde_json::json!(from));
     }
     let input = SettlementInput {
+        source_window: bill.source_window.clone(),
         dimensions: usage_dimensions(bill, info),
         request_id: bill.request_id,
         log_type: 2,
@@ -2871,6 +2888,7 @@ async fn record_terminal(
     pool: Pool,
 ) {
     let input = SettlementInput {
+        source_window: bill.source_window.clone(),
         dimensions: usage_dimensions(bill, info),
         request_id: bill.request_id,
         log_type,

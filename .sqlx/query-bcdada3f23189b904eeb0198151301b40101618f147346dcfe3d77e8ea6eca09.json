@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT m.model_name, m.display_name, m.vendor, m.status, m.sort_order,\n               m.capabilities, m.context_window, m.fallback_models,\n               p.pricing_mode            AS \"pricing_mode?\",\n               p.model_ratio::text       AS model_ratio,\n               p.completion_ratio::text  AS completion_ratio,\n               p.cache_ratio::text       AS cache_ratio,\n               p.cache_write_ratio::text AS cache_write_ratio,\n               p.audio_ratio::text            AS audio_ratio,\n               p.audio_completion_ratio::text AS audio_completion_ratio,\n               p.image_ratio::text            AS image_ratio,\n               p.per_call_price_micro, p.tier_expr, p.tier_ratios\n        FROM models m\n        LEFT JOIN model_pricing p ON p.model_id = m.id\n        WHERE ($1::text IS NULL OR m.model_name ILIKE $1 OR m.display_name ILIKE $1)\n          AND (NOT $2::boolean OR p.pricing_mode IS NULL)\n        ORDER BY m.sort_order, m.model_name\n        LIMIT $3 OFFSET $4\n        ",
+  "query": "\n        SELECT m.model_name, m.display_name, m.vendor, m.status, m.sort_order,\n               m.capabilities, m.context_window, m.fallback_models,\n               p.pricing_mode            AS \"pricing_mode?\",\n               p.model_ratio::text       AS model_ratio,\n               p.completion_ratio::text  AS completion_ratio,\n               p.cache_ratio::text       AS cache_ratio,\n               p.cache_write_ratio::text AS cache_write_ratio,\n               p.audio_ratio::text            AS audio_ratio,\n               p.audio_completion_ratio::text AS audio_completion_ratio,\n               p.image_ratio::text            AS image_ratio,\n               p.modality_ratios AS \"modality_ratios?\",\n               p.per_call_price_micro, p.tier_expr, p.tier_ratios\n        FROM models m\n        LEFT JOIN model_pricing p ON p.model_id = m.id\n        WHERE ($1::text IS NULL OR m.model_name ILIKE $1 OR m.display_name ILIKE $1)\n          AND (NOT $2::boolean OR p.pricing_mode IS NULL)\n        ORDER BY m.sort_order, m.model_name\n        LIMIT $3 OFFSET $4\n        ",
   "describe": {
     "columns": [
       {
@@ -146,6 +146,17 @@
       },
       {
         "ordinal": 16,
+        "name": "modality_ratios?",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "model_pricing",
+            "name": "modality_ratios"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
         "name": "per_call_price_micro",
         "type_info": "Int8",
         "origin": {
@@ -156,7 +167,7 @@
         }
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "tier_expr",
         "type_info": "Text",
         "origin": {
@@ -167,7 +178,7 @@
         }
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "tier_ratios",
         "type_info": "Jsonb",
         "origin": {
@@ -203,10 +214,11 @@
       null,
       null,
       null,
+      false,
       true,
       true,
       true
     ]
   },
-  "hash": "f99735451faedfa8b1d00d7ddd1c3abab14030e3c885f6d9d7e907f13c2cca30"
+  "hash": "bcdada3f23189b904eeb0198151301b40101618f147346dcfe3d77e8ea6eca09"
 }

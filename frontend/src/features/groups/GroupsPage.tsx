@@ -89,19 +89,20 @@ export function GroupsPage() {
       ) : (
         <Table
           stickyHeader
+          aria-label={t('admin:groupsTitle')}
           scrollResetKey={`${pager.offset}:${pager.limit}`}
           aria-busy={groups.isFetching}
         >
           <THead>
             <Tr>
               <Th>{t('admin:groupCode')}</Th>
-              <Th>{t('admin:groupRatio')}</Th>
+              <Th numeric>{t('admin:groupRatio')}</Th>
               <Th>{t('admin:groupDesc')}</Th>
               <Th numeric>{t('admin:groupUsers')}</Th>
               <Th>{t('admin:groupPool')}</Th>
               <Th numeric>{t('admin:groupChannels')}</Th>
-              <Th>{t('admin:groupRateLimit')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th numeric>{t('admin:groupRateLimit')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
@@ -120,13 +121,13 @@ export function GroupsPage() {
                     </Badge>
                   )}
                 </Td>
-                <Td>×{formatRatio(g.group_ratio ?? '1')}</Td>
+                <Td numeric>×{formatRatio(g.group_ratio ?? '1')}</Td>
                 <Td className="max-w-64 truncate text-xs text-muted-foreground">
                   {g.description ?? '—'}
                 </Td>
                 <Td numeric>{g.user_count}</Td>
                 <Td className="whitespace-nowrap font-mono text-xs">{g.pool_code}</Td>
-                <Td>
+                <Td numeric>
                   {/* 池里零渠道 = 这个分组的用户什么都打不到，与"未定价"同类的配了一半 */}
                   {g.channel_count === 0 ? (
                     <Badge variant="destructive">{t('admin:poolNoChannel')}</Badge>
@@ -134,7 +135,7 @@ export function GroupsPage() {
                     g.channel_count
                   )}
                 </Td>
-                <Td className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+                <Td numeric className="text-xs text-muted-foreground">
                   {g.rpm_limit === null && g.rph_limit === null
                     ? '—'
                     : t('admin:groupRateCell', {
@@ -143,7 +144,7 @@ export function GroupsPage() {
                       })}
                 </Td>
                 <Td>
-                  <div className="flex items-center gap-0.5">
+                  <div className="flex items-center justify-end gap-0.5">
                     <IconButton
                       icon={Pencil}
                       label={t('common:edit')}

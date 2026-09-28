@@ -139,6 +139,7 @@ async fn handle_speech(
         completion_tokens: 0,
         audio_completion_tokens: 0,
         reasoning_tokens: 0,
+        ..TokenUsage::default()
     };
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
@@ -147,9 +148,11 @@ async fn handle_speech(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    let reservation_pool = match state
+    let (reservation_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -162,7 +165,11 @@ async fn handle_speech(
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -210,6 +217,7 @@ async fn handle_speech(
                 None,
                 headers,
                 reservation_pool,
+                source_window.as_deref(),
             )
             .await?;
             let mut resp = Response::builder()
@@ -339,9 +347,11 @@ async fn handle_transcriptions(
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
-    let reservation_pool = match state
+    let (reservation_pool, source_window) = match state
         .ledger
-        .reserve(
+        .reserve_for_key(
+            &state.pg,
+            key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
@@ -354,7 +364,11 @@ async fn handle_transcriptions(
         )
         .await?
     {
-        ReserveOutcome::Reserved { pool, .. } => pool,
+        ReserveOutcome::Reserved {
+            pool,
+            source_window,
+            ..
+        } => (pool, source_window),
         ReserveOutcome::Insufficient { .. } => {
             return Err(AppError::new(
                 StatusCode::TOO_MANY_REQUESTS,
@@ -414,6 +428,7 @@ async fn handle_transcriptions(
                 duration_secs,
                 headers,
                 reservation_pool,
+                source_window.as_deref(),
             )
             .await?;
             let mut out = Response::builder()
@@ -457,6 +472,7 @@ async fn settle(
     media_units: Option<u32>,
     headers: &HeaderMap,
     reservation_pool: okapi_ledger::Pool,
+    source_window: Option<&str>,
 ) -> Result<(), AppError> {
     let book = state.pricebook.load();
     let mut snapshot = quote.snapshot.clone();
@@ -464,6 +480,7 @@ async fn settle(
         snapshot.media_units = media_units;
     }
     let input = SettlementInput {
+        source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
             requested_model,
             cand.map_or("", |c| c.upstream_model(canonical)),
