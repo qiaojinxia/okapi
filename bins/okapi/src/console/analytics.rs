@@ -172,8 +172,19 @@ impl CubeQuery {
         // A missing current-period aggregate must not expand historical recovery
         // for a complete previous period (including an empty previous period).
         let predicate = format!("{}{}", self.window(false), self.base_scope());
-        self.coverage =
-            super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
+        self.coverage = if self.core_candidate() {
+            // 精简查询只需要知道有没有历史字符口径；其余测量口径的覆盖探测只服务完整源。
+            let core =
+                super::measurement_coverage::Coverage::read_historical(state, &predicate).await?;
+            if core.historical_units {
+                // 有历史字符口径时 prompt_tokens 要校正，必须回退完整源，需要完整覆盖探测。
+                super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?
+            } else {
+                core
+            }
+        } else {
+            super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?
+        };
         if self.compares() {
             let predicate = format!("{}{}", self.window(true), self.base_scope());
             self.previous_coverage =
@@ -191,8 +202,20 @@ impl CubeQuery {
         }
     }
 
+    /// 精简查询（`fields=core`）从不查上一窗口：它既不带环比，也没有测量口径可对比。
     fn compares(&self) -> bool {
-        self.compare.unwrap_or(true)
+        self.compare.unwrap_or(true) && trimmed(self.fields.as_deref()) != Some("core")
+    }
+
+    /// 精简查询的静态条件：与 `core_source_ok` 的区别只在"窗口里有没有历史字符口径"——
+    /// 那要读一次探测才知道，所以 `prepare` 先按这里的条件决定读哪种覆盖探测。
+    fn core_candidate(&self) -> bool {
+        let by = self.by.as_deref().unwrap_or("model");
+        self.core_requested().unwrap_or(false)
+            && !self.has_detail_filter()
+            && self.model_column().is_ok_and(|column| column == "model")
+            && matches!(self.stack_column(), Ok(None))
+            && breakdown_key(by).is_ok_and(primary_key_column)
     }
 
     /// 精简源只含主键维度的核心列。没有明细过滤、拆分维度属于主键、没有历史字符口径
@@ -200,12 +223,7 @@ impl CubeQuery {
     fn core_source_ok(&self, key_col: Option<&str>, previous: bool) -> bool {
         !self.has_detail_filter()
             && self.model_column().is_ok_and(|column| column == "model")
-            && key_col.is_none_or(|column| {
-                matches!(
-                    column,
-                    "model" | "channel_id" | "user_id" | "api_key_id" | "group_code"
-                )
-            })
+            && key_col.is_none_or(primary_key_column)
             && !self.coverage_for(previous).historical_units
     }
 
@@ -974,6 +992,7 @@ pub async fn trend(
             "window": window,
             "scope": describe_scope(&state, &q).await?,
             "total": pack_one(&total),
+            "fields": "all",
             "previous": pack_one(&previous),
             "stack": q.stack,
             "series": series.iter().map(|k| json!({ "key": k, "label": labels.get(k) })).collect::<Vec<_>>(),
@@ -1003,6 +1022,7 @@ pub async fn trend(
         "window": window,
         "scope": describe_scope(&state, &q).await?,
         "total": pack_one(&total),
+        "fields": "all",
         "previous": pack_one(&previous),
         "data": data,
     })))
@@ -1162,6 +1182,14 @@ async fn stack_labels(
         .collect())
 }
 /// 拆分维度 → 立方体键列。
+/// 立方体主键里的维度列：精简源只含这些维度上的核心指标。
+fn primary_key_column(column: &str) -> bool {
+    matches!(
+        column,
+        "model" | "channel_id" | "user_id" | "api_key_id" | "group_code"
+    )
+}
+
 fn breakdown_key(by: &str) -> Result<&'static str, AppError> {
     Ok(match by {
         "model" => "model",
@@ -1393,15 +1421,15 @@ fn breakdown_sql(
     } else {
         format!(" LIMIT {limit}")
     };
-    let lean = |previous: bool, key: Option<&str>| q.core_source_ok(key, previous);
+    // 分母与上期排行只读 3 列：能走精简源就走（`core` 只决定当前排行是否也精简）。
     let source = |previous: bool, key: Option<&str>| {
-        if lean(previous, key) {
+        if q.core_source_ok(key, previous) {
             q.core_source(previous)
         } else {
             q.source(previous)
         }
     };
-    let (cur_agg, cur_source) = if core && lean(false, Some(key_col)) {
+    let (cur_agg, cur_source) = if core {
         (super::core_source::AGG.to_owned(), q.core_source(false))
     } else {
         (aggregate_metrics(), q.source(false))
@@ -1442,6 +1470,7 @@ fn ranked_metrics(
     total_spend: i64,
     total_reqs: i64,
     total_tokens: i64,
+    previous_known: bool,
 ) -> serde_json::Map<String, Value> {
     let mut m = b.metrics.clone();
     let spend = m["amount_micro"].as_i64().unwrap_or(0);
@@ -1449,9 +1478,14 @@ fn ranked_metrics(
     m.insert("key".into(), json!(b.key));
     m.insert("rank".into(), json!(rank));
     m.insert("previous_rank".into(), json!(prev.map(|p| p.1)));
+    // 没查上一窗口（compare=false / fields=core）时是"未知"，不是金额 0。
     m.insert(
         "previous_amount_micro".into(),
-        json!(prev.map_or(0, |p| p.0)),
+        if previous_known {
+            json!(prev.map_or(0, |p| p.0))
+        } else {
+            Value::Null
+        },
     );
     // 环比（基点）：上期为 0 时无意义给 null，前端显示"新"
     m.insert(
@@ -1563,22 +1597,16 @@ pub async fn breakdown(
     let total_spend = total.first().map_or(0, |r| ch_i64(r, "spend"));
     let total_reqs = total.first().map_or(0, |r| ch_i64(r, "reqs"));
     let total_tokens = total.first().map_or(0, |r| ch_i64(r, "tokens"));
-    let data: Vec<Value> = buckets
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            let mut m = ranked_metrics(
-                b,
-                i + 1,
-                prev_ranks.get(&b.key),
-                total_spend,
-                total_reqs,
-                total_tokens,
-            );
-            label_bucket(&mut m, by, b, &names, &owners);
-            Value::Object(m)
-        })
-        .collect();
+    let totals = (total_spend, total_reqs, total_tokens);
+    let data = ranked_rows(
+        &buckets,
+        totals,
+        &prev_ranks,
+        q.compares(),
+        by,
+        &names,
+        &owners,
+    );
 
     Ok(Json(json!({
         "days": q.days(),
@@ -1591,6 +1619,36 @@ pub async fn breakdown(
         "fields": if core { "core" } else { "all" },
         "data": data,
     })))
+}
+
+/// 排行桶 → 响应行：名次、占比（全量分母）、上期信息与维度专属标签。
+fn ranked_rows(
+    buckets: &[Bucket],
+    totals: (i64, i64, i64),
+    prev_ranks: &HashMap<String, (i64, usize)>,
+    previous_known: bool,
+    by: &str,
+    names: &Names,
+    owners: &HashMap<i64, String>,
+) -> Vec<Value> {
+    let (spend, reqs, tokens) = totals;
+    buckets
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let mut m = ranked_metrics(
+                b,
+                i + 1,
+                prev_ranks.get(&b.key),
+                spend,
+                reqs,
+                tokens,
+                previous_known,
+            );
+            label_bucket(&mut m, by, b, names, owners);
+            Value::Object(m)
+        })
+        .collect()
 }
 
 /// 流向阶段按调用路径排列；管理员可以隐藏中间阶段，链接从原始组合重新汇总。
@@ -2156,6 +2214,68 @@ mod tests {
         assert!(q.core_requested().is_err());
         q.compare = Some(false);
         assert!(!q.compares());
+    }
+
+    #[test]
+    fn core_queries_never_look_at_the_previous_window() {
+        let mut q = query();
+        q.fields = Some("core".to_owned());
+        assert!(!q.compares());
+        q.compare = Some(true);
+        assert!(!q.compares(), "fields=core implies compare=false");
+        let mut full = query();
+        full.compare = Some(true);
+        assert!(full.compares());
+    }
+
+    #[test]
+    fn core_candidate_follows_the_static_conditions_of_the_lean_source() {
+        let mut q = query();
+        assert!(!q.core_candidate(), "without fields=core nothing is lean");
+        q.fields = Some("core".to_owned());
+        assert!(q.core_candidate());
+        for by in ["model", "channel", "provider", "user", "api_key", "group"] {
+            q.by = Some(by.to_owned());
+            assert!(q.core_candidate(), "{by}");
+        }
+        for by in ["endpoint", "node", "model_group", "requested_model"] {
+            q.by = Some(by.to_owned());
+            assert!(!q.core_candidate(), "{by}");
+        }
+        q.by = None;
+        let mut detail = q_core();
+        detail.stream = Some(true);
+        assert!(!detail.core_candidate());
+        let mut stacked = q_core();
+        stacked.stack = Some("model".to_owned());
+        assert!(!stacked.core_candidate());
+        let mut requested = q_core();
+        requested.model_source = Some("requested".to_owned());
+        assert!(!requested.core_candidate());
+    }
+
+    fn q_core() -> CubeQuery {
+        let mut q = query();
+        q.fields = Some("core".to_owned());
+        q
+    }
+
+    #[test]
+    fn previous_amount_is_null_when_the_previous_window_was_not_queried() {
+        let bucket = Bucket {
+            key: "m".to_owned(),
+            metrics: pack_core_metrics(
+                &json!({"reqs": 2, "spend": 900, "prompt": 1, "completion": 1}),
+            ),
+            folded: 1,
+        };
+        let unknown = ranked_metrics(&bucket, 1, None, 900, 2, 2, false);
+        assert!(unknown["previous_amount_micro"].is_null());
+        assert!(unknown["previous_rank"].is_null() && unknown["delta_bp"].is_null());
+        // Queried but this key had no previous usage: a real zero, rank still unknown.
+        let none_before = ranked_metrics(&bucket, 1, None, 900, 2, 2, true);
+        assert_eq!(none_before["previous_amount_micro"], 0);
+        assert!(none_before["previous_rank"].is_null());
     }
 
     #[test]

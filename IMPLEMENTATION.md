@@ -1211,7 +1211,10 @@ clamp 到 168。`console_portal` 增：`wallet_window_spend_micro` 在员工 A /
    都是直接取自 MV 的 `*Merge`、不经任何测量子源 join，故与完整源逐值相同（`console_analytics::
    core_fields_match_the_full_source_including_legacy_remainder` 对 6 个维度 × 排序指标、趋势总计与逐桶、
    旧立方体剩余部分逐值核对，并做过变异检查）。接口参数：`fields=core`（精简响应，不含任何测量口径）、
-   `compare=false`（不查上一窗口，上期名次 / 环比为 null）。`breakdown` 的"全量分母"与"上期排行"只读 3 列，
+   `compare=false`（不查上一窗口，上期名次 / 环比 / 上期金额为 null——未知，不是 0）。**`fields=core` 隐含
+   `compare=false`**，并且 `prepare()` 只读"有没有历史字符口径"这一条探测，不跑完整源才需要的 16 分支覆盖探测
+   （有历史字符口径时才补读完整覆盖，因为要回退完整源）。完整趋势 / 排行响应带 `fields: "all"`。
+   `breakdown` 的"全量分母"与"上期排行"只读 3 列，
    能走精简源时恒走（所有调用方受益）。**自动回退完整源**：带明细过滤（stream / endpoint / node …）、
    `model_source≠billed`、拆分维度不在主键内、存在历史字符口径（`historical_units`，`prompt_tokens` 需校正）。
 2. **完整源的结构层改用 `view(...)` 表函数**（`analysis_source::as_view`）：`d` / `l` / `c` 与它们 join 的
@@ -1224,7 +1227,12 @@ clamp 到 168。`console_portal` 增：`wallet_window_spend_micro` 在员工 A /
 
 **还剩**：各测量子源内部（`e / a / r / missing` 这些 CTE 再 `LEFT JOIN … USING`，见 `token_details` /
 `usage_sources` / `performance_source` / `output_rate` / `cache_usage` / `input_units`）是同一种结构，
-`view()` 嵌套会让内部查询被分析两次（取 schema + 生成计划）、成倍放大，未动；规划里仍有 ~60% 在 `getTreeHash`。
+内部查询会被分析两次（取 schema + 生成计划），嵌套越深倍数越大，所以这些子源**内部**未同样处理；
+注意这不意味着 `view()` 嵌套是净亏损：给测量子源的 join 也套 `view()` 实测仍更快（规划 2.45s → 1.61s）。
+规划里仍有 ~60% 在 `getTreeHash`。
+**SQL 体积**：`view()` 让 `d` 在 UNION 第一支与 `c` 里各出现一次，SQL 比 CTE 版本大 35–50%（旧库 Recover +
+`historical_units` 约 140KB → 210KB，外层聚合再加约 10KB）。ClickHouse 默认 `max_query_size` 是 256KiB，
+故 `ch::QUERY_GUARD` 显式设 `max_query_size=1048576`；往 `d` / `l` 里再加测量子源前先看这个余量。
 **诊断办法**：`system.query_log` 看墙钟≈CPU 与 `ProfileEvents['SelectQueriesWithSubqueries']`；
 `EXPLAIN PLAN` 计时；`SET query_profiler_cpu_time_period_ns` 后按 `trace_log` 统计 `getTreeHash` 占比。
 注意 `query_log` 会把 >100k 字符的 SQL 截断，回放需手动补上末尾 WHERE / GROUP BY。

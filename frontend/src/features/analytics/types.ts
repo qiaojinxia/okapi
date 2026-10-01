@@ -79,8 +79,8 @@ export interface TrendResp {
   scope: ScopeEcho
   total: Partial<CubeMetrics>
   previous: Partial<CubeMetrics>
-  /// `core`：精简查询（只含请求 / Token / 金额 / 错误），不含任何测量口径，也没有上期。
-  fields?: 'core'
+  /// `core`：精简查询（只含请求 / Token / 金额 / 错误），不含任何测量口径，也没有上期；`all`：完整查询。
+  fields?: 'core' | 'all'
   /// 未堆叠：逐桶度量；堆叠：`series` + 逐桶按序列的值
   data: TrendBucket[] | StackedBucket[]
   stack?: string
@@ -92,7 +92,8 @@ export interface BreakdownRow extends CubeMetrics {
   label: string | null
   rank: number
   previous_rank: number | null
-  previous_amount_micro: number
+  /// 没查上一窗口（compare=false / fields=core）时为 null——未知，不是 0。
+  previous_amount_micro: number | null
   /// 环比（基点，可负）；上期为 0 时 null
   delta_bp: number | null
   share_bp: number
