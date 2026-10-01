@@ -18,7 +18,7 @@ env:
 jobs:
   check:
     needs: frontend
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -59,9 +59,9 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 读取前端构建产物供 SPA 导航测试
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: frontend-dist
           path: frontend/dist
@@ -101,7 +101,7 @@ jobs:
           python3 -c 'import json; r = json.load(open("core-tests.json")); assert r["execution_status"] == "passed", r["execution_status"]'
       - name: 保存完整测试输出与验证报告
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: core-api-verification
           path: |
@@ -111,19 +111,19 @@ jobs:
           retention-days: 7
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -135,7 +135,7 @@ jobs:
         run: pnpm build
         working-directory: frontend
       - name: 保存前端构建产物
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: frontend-dist
           path: frontend/dist

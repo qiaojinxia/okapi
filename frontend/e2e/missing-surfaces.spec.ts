@@ -1114,7 +1114,7 @@ test('注册：关闭不摆表单；邀请制必填 aff；URL aff 不手填；�
   await page.goto('/')
   await expect(page.getByRole('button', { name: '使用 github 登录' })).toBeVisible()
   await expect(page.getByRole('button', { name: '使用 linuxdo 登录' })).toBeVisible()
-  const oauthNav = page.waitForRequest((r) => r.isNavigationRequest() && /\/auth\/oauth\/github$/.test(new URL(r.url()).pathname))
+  const oauthNav = page.waitForRequest((r) => r.isNavigationRequest() && new URL(r.url()).pathname.endsWith('/auth/oauth/github'))
   await page.getByRole('button', { name: '使用 github 登录' }).click()
   const oauthReq = await oauthNav
   expect(new URL(oauthReq.url()).pathname).toBe('/auth/oauth/github')
