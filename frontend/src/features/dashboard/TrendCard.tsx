@@ -5,17 +5,18 @@ import { Segmented } from '@/components/ui/segmented'
 import { TimeChart } from '@/components/ui/time-chart'
 import type { DashboardTrend } from './types'
 import { describeError } from '@/lib/i18n'
-import { useDashboardUsage } from './data'
+import { useDashboardChart } from './data'
 import { trendChart } from '@/features/analytics/trend-data'
 
 export function TrendCard({ days, metric, onMetricChange }: { days: number; metric: DashboardTrend; onMetricChange: (value: DashboardTrend) => void }) {
   const { t, i18n } = useTranslation()
-  const q = useDashboardUsage(days)
+  // 图表只要逐桶的请求 / 金额 / Token，走精简查询，不必等质量与 Token 构成的完整汇总。
+  const q = useDashboardChart(days)
   const end = q.data?.window?.end_date ?? q.data?.window?.end_at?.slice(0, 10)
   const start = q.data?.window?.start_date ?? q.data?.window?.start_at?.slice(0, 10)
   const combined = metric === 'combined'
   const title = t(metric === 'tokens' ? 'admin:dashboardTokenTrend' : 'admin:trendTitle')
-  // 三个视图读取同一次汇总，空桶及小时粒度沿用统计页的日历处理。
+  // 三个视图读取同一次精简查询，空桶及小时粒度沿用统计页的日历处理。
   const values = (measure: 'amount' | 'requests' | 'tokens') => q.data?.data.length ? trendChart(q.data, measure, '', '', '', '').data : []
   const amount = values('amount')
   const tokens = values('tokens')

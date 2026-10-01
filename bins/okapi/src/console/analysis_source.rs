@@ -1,7 +1,7 @@
 //! 新维度聚合 + 旧立方体未覆盖部分。TTFT 仅在新聚合覆盖不足时恢复原始样本。
 const KEYS: &str = "hour, user_id, api_key_id, group_code, model, channel_id";
 const DIMS: &str = "requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type";
-const METRICS: [(&str, &str); 71] = [
+pub(super) const METRICS: [(&str, &str); 71] = [
     ("legacy_characters", ""),
     ("legacy_character_n", ""),
     ("output_rate_observed", ""),
@@ -75,6 +75,22 @@ const METRICS: [(&str, &str); 71] = [
     ("observed_reasoning_tokens_n", ""),
 ];
 
+/// 把括号子查询改成 `view(...)` 表函数，供外层 / join 引用。
+///
+/// ClickHouse 24.8 的分析器每解析一个引用了子查询列的表达式，都要对该列的来源 `QueryNode`
+/// 重新计算树哈希（`ColumnNode` 的哈希带着整棵来源子树），代价 = 表达式个数 × 子查询树大小。
+/// 这条源有近百个列表达式引用 `d / l / c` 与十几个测量子源，规划耗时（与数据量无关）可达
+/// 数秒，其中 ~90% 在 `getTreeHash`。`view(...)` 在外层分析里只是一张带 schema 的表，哈希
+/// 很小；子查询本身仍被完整分析，语义与结果与直接内联完全一致（对照用例逐值核对）。
+/// 不是括号子查询的片段原样返回。
+fn as_view(subquery: &str) -> String {
+    if subquery.starts_with('(') {
+        format!("view{subquery}")
+    } else {
+        subquery.to_owned()
+    }
+}
+
 /// `window` 和 `scope` 是已校验的 SQL，字符串过滤均由调用方绑定。
 pub fn source_with_coverage(
     window: &str,
@@ -123,21 +139,26 @@ pub fn source_with_coverage(
     let legacy_projection = projection(KEYS);
     let detail_group = qualified(&detail_keys);
     let legacy_group = qualified(KEYS);
-    format!(
-        "(WITH \
-        d AS (SELECT {detail_projection}, {detail_merged}, \
+    // 明细 d、旧立方体 l 与按键汇总的明细 c 都以 `view(...)` 引用，不用 CTE 名字：CTE 与内联
+    // 子查询一样会让每个引用它的列表达式重复哈希整棵子树（见 `as_view`）。d 在两处引用。
+    let d = as_view(&format!(
+        "(SELECT {detail_projection}, {detail_merged}, \
             toInt64(countIfMerge(m.cost_known)) AS cost_samples, sumMerge(m.known_amount) AS covered_amount, sumMerge(m.known_cost) AS covered_cost, \
             maxMerge(m.last_event) AS event_at, maxMerge(m.last_ingested) AS ingested_at \
-            FROM {detail_from} GROUP BY {detail_group}), \
-        l AS (SELECT {legacy_projection}, {merged} FROM {legacy_from} GROUP BY {legacy_group}), \
-        c AS (SELECT {KEYS}, {sums} FROM d GROUP BY {KEYS}) \
-        SELECT {KEYS}, {DIMS}, {detailed}, v_cache_writes AS write_tokens, v_cache_write_n AS write_samples, v_cache_read_n AS read_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM d \
+            FROM {detail_from} GROUP BY {detail_group})"
+    ));
+    let l = as_view(&format!(
+        "(SELECT {legacy_projection}, {merged} FROM {legacy_from} GROUP BY {legacy_group})"
+    ));
+    let c = as_view(&format!("(SELECT {KEYS}, {sums} FROM {d} GROUP BY {KEYS})"));
+    format!(
+        "(SELECT {KEYS}, {DIMS}, {detailed}, v_cache_writes AS write_tokens, v_cache_write_n AS write_samples, v_cache_read_n AS read_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM {d} \
         UNION ALL \
         SELECT {legacy_keys}, '' AS requested_model, '' AS upstream_model, '' AS endpoint, '' AS upstream_endpoint, '' AS node, \
             toUInt8(2) AS stream, '' AS request_type, '' AS billing_type, {remainder}, \
             cache_writes AS write_tokens, cache_write_n AS write_samples, cache_read_n AS read_samples, toInt64(0) AS cost_samples, toInt64(0) AS covered_amount, toInt64(0) AS covered_cost, \
             toDateTime64(0, 3) AS event_at, toDateTime64(0, 3) AS ingested_at \
-        FROM l LEFT JOIN c USING ({KEYS}) WHERE l.v_requests > ifNull(c.c_requests, 0))"
+        FROM {l} AS l LEFT JOIN {c} AS c USING ({KEYS}) WHERE l.v_requests > ifNull(c.c_requests, 0))"
     )
 }
 
@@ -233,7 +254,7 @@ fn join_measurement(from: &mut String, source: &str, alias: &str, keys: &str) {
         .map(|key| format!("m.{key}={alias}.{key}"))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let _ = write!(from, " LEFT JOIN {source} {alias} ON {on}");
+    let _ = write!(from, " LEFT JOIN {} {alias} ON {on}", as_view(source));
 }
 
 fn merged_metrics(modern: bool, historical: bool) -> String {
@@ -376,4 +397,88 @@ fn unit_remainder(name: &str, difference: &str, historical: bool) -> String {
     format!(
         "if(({complete}) AND l.v_{name}>=ifNull(c.c_{name},0),{difference},{fallback}) AS {name}"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::console::measurement_coverage::{Coverage, Mode, Modes};
+
+    fn balanced(sql: &str) -> bool {
+        let mut depth = 0_i64;
+        for ch in sql.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return false;
+            }
+        }
+        depth == 0
+    }
+
+    #[test]
+    fn as_view_only_wraps_parenthesised_subqueries() {
+        assert_eq!(as_view("(SELECT 1)"), "view(SELECT 1)");
+        assert_eq!(as_view("mv_cube_hour"), "mv_cube_hour");
+    }
+
+    #[test]
+    fn structural_sources_are_table_functions_not_cte_or_inline_subqueries() {
+        let aggregate = Modes {
+            ttft: Mode::Aggregate,
+            latency: Mode::Aggregate,
+            usage: Mode::Aggregate,
+            details: Mode::Aggregate,
+            cache: Mode::Aggregate,
+            units: Mode::Aggregate,
+            output_rate: Mode::Aggregate,
+        };
+        for coverage in [
+            Coverage::default(),
+            Coverage {
+                detail: aggregate,
+                legacy: aggregate,
+                historical_units: false,
+            },
+            Coverage {
+                historical_units: true,
+                ..Coverage::default()
+            },
+        ] {
+            let sql = source_with_coverage(
+                "hour >= toDateTime('2026-09-01')",
+                " AND user_id = 7",
+                coverage,
+            );
+            assert!(sql.starts_with("(SELECT "), "{}", &sql[..40]);
+            assert!(balanced(&sql));
+            // 近百个列表达式引用 d / l / c 与测量子源：任何一个退回 CTE 或括号子查询都会让规划耗时数倍。
+            assert!(
+                !sql.contains("WITH d AS") && !sql.contains("l AS ("),
+                "不得使用 CTE"
+            );
+            // 本层的 join：每个测量子源（`ON m.hour=…`）加上 `l LEFT JOIN c` 都必须是 view(...)。
+            // 子源内部（别的模块生成的 e / a / r 等）的普通 join 不在此列。
+            assert_eq!(
+                sql.matches(" LEFT JOIN view(").count(),
+                sql.matches(" ON m.hour=").count() + 1,
+                "测量子源必须以 view(...) 引用"
+            );
+            assert!(
+                sql.contains(" AS l LEFT JOIN view(SELECT "),
+                "l 与 c 必须以 view(...) 引用"
+            );
+            assert!(sql.contains(
+                ") AS c USING (hour, user_id, api_key_id, group_code, model, channel_id)"
+            ));
+            assert!(
+                sql.matches("FROM view(SELECT ").count() >= 2,
+                "d 在 UNION 第一支与 c 中各引用一次"
+            );
+            assert!(sql.contains("WHERE l.v_requests > ifNull(c.c_requests, 0))"));
+        }
+    }
 }
