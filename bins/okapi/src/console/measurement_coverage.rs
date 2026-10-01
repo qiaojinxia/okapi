@@ -78,14 +78,30 @@ fn counts(keys: &str, table: &str, predicate: &str, raw: bool) -> String {
 }
 
 impl Coverage {
-    pub async fn read(state: &AppState, predicate: &str, cached: bool) -> Result<Self, AppError> {
-        // Confirm absence in the full current/previous base scope. This sparse
-        // probe is deliberately fresh so an old cached absence cannot hide proof.
+    /// Whether the window holds historical character units. Confirm absence in the full
+    /// base scope; this sparse probe is deliberately fresh so an old cached absence
+    /// cannot hide proof.
+    async fn has_historical_units(state: &AppState, predicate: &str) -> Result<bool, AppError> {
         let history_sql = format!(
             "WITH toStartOfHour(ts) AS hour SELECT count() AS n FROM legacy_speech_units_v1 FINAL WHERE {predicate} AND basis='legacy_speech_contract_v1'"
         );
         let history = super::stats_cache::query(state, &history_sql, &[], false).await?;
-        let historical_units = history.first().is_some_and(|row| ch_i64(row, "n") > 0);
+        Ok(history.first().is_some_and(|row| ch_i64(row, "n") > 0))
+    }
+
+    /// Core-only queries read nothing but `prompt_tokens` and friends straight from the
+    /// materialized views; the single thing they need to know is whether `prompt_tokens`
+    /// needs the historical character correction. The other modes (left at the safe
+    /// `Recover` default) only matter to the full source, so skip its 16-branch probe.
+    pub async fn read_historical(state: &AppState, predicate: &str) -> Result<Self, AppError> {
+        Ok(Self {
+            historical_units: Self::has_historical_units(state, predicate).await?,
+            ..Self::default()
+        })
+    }
+
+    pub async fn read(state: &AppState, predicate: &str, cached: bool) -> Result<Self, AppError> {
+        let historical_units = Self::has_historical_units(state, predicate).await?;
         let mut branches = Vec::new();
         for (level, keys, expected) in [
             ("detail", format!("{KEYS}, {DIMS}"), "mv_analysis_hour"),

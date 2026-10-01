@@ -2,12 +2,14 @@
 //!
 //! 取舍：官方 clickhouse crate（RowBinary）留作 M3 性能优化项；HTTP + JSONEachRow
 //! 实现简单、可观察，且原生支持 `insert_deduplication_token`（docs/database.md §3.3
-//! 批次幂等）。查询统一带护栏：max_execution_time=15s、max_memory_usage=2GiB。
+//! 批次幂等）。查询统一带护栏：max_execution_time=15s、max_memory_usage=2GiB、
+//! max_query_size=1MiB（默认 256KiB：完整分析源的 SQL 在旧库上已逼近 200KB，再加一个测量子源就会超限）。
 
 use crate::error::StoreError;
 use std::time::Duration;
 
-const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000";
+const QUERY_GUARD: &str =
+    "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576";
 
 #[derive(Clone)]
 pub struct ChClient {

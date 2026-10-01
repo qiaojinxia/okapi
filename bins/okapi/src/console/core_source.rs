@@ -98,6 +98,29 @@ mod tests {
         }
     }
 
+    /// 精简源成立的前提：这九列在完整源里都是直接取自 MV 的 `*Merge`，不经任何测量子源 join。
+    /// 一旦哪列被加进某个测量子源的 FIELDS（或带 ttft_ / latency_ 前缀），完整源会改走 join，
+    /// 而这里仍是纯 `*Merge`——两条路径悄悄分叉，且 ClickHouse 对照用例在没配 CH 的机器上会跳过。
+    #[test]
+    fn no_core_column_goes_through_a_measurement_source_in_the_full_builder() {
+        use super::super::{cache_usage, input_units, output_rate, token_details, usage_sources};
+        for (name, _) in COLUMNS {
+            for (owner, fields) in [
+                ("token_details", token_details::FIELDS.as_slice()),
+                ("usage_sources", usage_sources::FIELDS.as_slice()),
+                ("cache_usage", cache_usage::FIELDS.as_slice()),
+                ("output_rate", output_rate::FIELDS.as_slice()),
+                ("input_units", input_units::FIELDS.as_slice()),
+            ] {
+                assert!(!fields.contains(&name), "{name} 出现在 {owner}::FIELDS");
+            }
+            assert!(
+                !name.starts_with("ttft_") && !name.starts_with("latency_"),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn aggregate_aliases_match_the_full_aggregate() {
         for (name, alias) in [

@@ -1488,35 +1488,7 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     })
     .await;
     assert_eq!(full["total"]["amount_micro"], 5_000);
-
-    // 冷查询耗时（no-cache 绕开 15s 缓存）：只打印不断言，绝对值随机器负载抖动。
-    let timed = |path: String| {
-        let (env, token) = (&env, env.super_token.clone());
-        async move {
-            let start = std::time::Instant::now();
-            let response = reqwest::Client::new()
-                .get(format!("http://{}{path}", env.addr))
-                .bearer_auth(token)
-                .header("Cache-Control", "no-cache")
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), 200);
-            start.elapsed()
-        }
-    };
-    let ranking = format!("/admin/stats/breakdown?{query}&by=model&limit=3");
-    eprintln!(
-        "cold breakdown: full={:?}, core={:?}",
-        timed(ranking.clone()).await,
-        timed(format!("{ranking}&fields=core&compare=false")).await
-    );
-    let chart = format!("/admin/stats/trend?{query}");
-    eprintln!(
-        "cold trend: full={:?}, core={:?}",
-        timed(chart.clone()).await,
-        timed(format!("{chart}&fields=core")).await
-    );
+    assert_eq!(full["fields"], "all");
 
     // 趋势：总计与逐桶一致；精简响应不带任何测量口径，也不带上期。
     let (status, core) = get(
@@ -1592,11 +1564,14 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
                 ] {
                     assert_eq!(a[field], b[field], "{context}: {field}");
                 }
-                // 不查上期：名次与环比为"未知"，而不是 0。
+                // 不查上期：名次、环比、上期金额都是"未知"（null），而不是 0；完整排行里上期金额是数。
                 assert!(
-                    a["previous_rank"].is_null() && a["delta_bp"].is_null(),
+                    a["previous_rank"].is_null()
+                        && a["delta_bp"].is_null()
+                        && a["previous_amount_micro"].is_null(),
                     "{context}"
                 );
+                assert!(b["previous_amount_micro"].is_number(), "{context}");
             }
         }
     }
@@ -1616,7 +1591,7 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     let filtered = format!("{query}&stream=true");
     let (_, expected) = get(
         &env,
-        &format!("/admin/stats/breakdown?{filtered}&by=model"),
+        &format!("/admin/stats/breakdown?{filtered}&by=model&compare=false"),
         &env.super_token,
     )
     .await;
@@ -1630,6 +1605,38 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     assert_eq!(fallback["fields"], "all");
     assert_eq!(fallback["data"], expected["data"]);
     assert!(fallback["data"][0].get("cost_coverage_bp").is_some());
+
+    // 拆分维度不在主键内（endpoint 是明细维度）同样回退完整源，结果与不带 fields 一致。
+    let by_endpoint = format!("/admin/stats/breakdown?{query}&by=endpoint&compare=false");
+    let (_, expected) = get(&env, &by_endpoint, &env.super_token).await;
+    let (status, fallback) = get(
+        &env,
+        &format!("{by_endpoint}&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{fallback}");
+    assert_eq!(fallback["fields"], "all");
+    assert_eq!(fallback["data"], expected["data"]);
+    assert!(!expected["data"].as_array().unwrap().is_empty());
+
+    // fields=core 隐含不查上期：即便显式 compare=true 也是 null，不会再付一条上期查询。
+    let (status, implied) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=model&fields=core&compare=true"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{implied}");
+    assert!(implied["data"][0]["previous_amount_micro"].is_null());
+    assert!(implied["data"][0]["previous_rank"].is_null());
+    let (_, trend) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&fields=core&compare=true"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(trend["previous"], json!({}));
 
     let (status, bad) = get(
         &env,
