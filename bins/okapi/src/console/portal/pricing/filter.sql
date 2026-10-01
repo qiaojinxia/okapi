@@ -1,4 +1,10 @@
-FROM models m JOIN model_pricing p ON p.model_id = m.id
+FROM jsonb_to_recordset($8::jsonb -> 'models') AS p(
+    model_name text, pricing_mode text, model_ratio_scaled bigint,
+    completion_ratio_scaled bigint, cache_ratio_scaled bigint, cache_write_ratio_scaled bigint,
+    audio_ratio_scaled bigint, audio_completion_ratio_scaled bigint, image_ratio_scaled bigint,
+    modality_ratios jsonb, per_call_price_micro bigint
+)
+JOIN models m ON m.model_name = p.model_name
 WHERE m.status = 1
 AND ($1::text IS NULL OR m.model_name ILIKE $1 ESCAPE E'\\'
     OR m.display_name ILIKE $1 ESCAPE E'\\' OR m.vendor ILIKE $1 ESCAPE E'\\')
@@ -10,6 +16,8 @@ AND (($5::text IS NULL AND $6::text IS NULL) OR EXISTS (
     WHERE c.status = 1 AND c.deleted_at IS NULL AND c.models ? m.model_name
     AND EXISTS (
         SELECT 1 FROM price_groups g LEFT JOIN channel_pools cp ON cp.pool_code = g.pool_code
+        JOIN jsonb_to_recordset($8::jsonb -> 'groups') AS pg(group_code text)
+            ON pg.group_code = g.group_code
         WHERE ($5::text IS NULL OR g.group_code = $5)
         AND (g.self_select OR g.is_default OR EXISTS (
             SELECT 1 FROM user_groups ug WHERE ug.group_code = g.group_code AND ug.user_id = $7

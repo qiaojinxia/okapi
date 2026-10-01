@@ -6,14 +6,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { BreakdownResp } from '@/features/analytics/types'
-import { segments } from '@/features/portal-overview/TokenMixView'
-import { apiFetch } from '@/lib/api'
 import { chartColor } from '@/lib/chart'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
-import { DASHBOARD_RANKING_LIMIT, dashboardBreakdownParams, useDashboardUsage } from './data'
+import { DASHBOARD_RANKING_LIMIT, DASHBOARD_STALE_TIME, dashboardBreakdownParams, dashboardFetch } from './data'
 import type { RankingMetric } from './types'
+import { TokenSummary } from './TokenSummary'
 
 const detailClass = 'inline-flex min-h-8 shrink-0 items-center gap-1 rounded text-xs text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-6'
 
@@ -21,7 +20,7 @@ function Ranking({ days, by, metric, onMetricChange }: { days: number; by: 'mode
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   const params = dashboardBreakdownParams(days, by, metric)
-  const query = useQuery({ queryKey: qk.statsBreakdown(params), queryFn: () => apiFetch<BreakdownResp>(`/admin/stats/breakdown?${params}`), retry: false })
+  const query = useQuery({ queryKey: qk.statsBreakdown(params), queryFn: () => dashboardFetch<BreakdownResp>(`/admin/stats/breakdown?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })
   const title = metric === 'amount' ? t(by === 'model' ? 'portal:modelSnapshot' : 'admin:dashboardChannelRanking') : t(`admin:dashboardRanking_${by}_${metric}`)
   const data = query.isError ? undefined : query.data
   const rows = data?.data ?? []
@@ -78,46 +77,6 @@ function Ranking({ days, by, metric, onMetricChange }: { days: number; by: 'mode
             <span tabIndex={0} className="text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{totalLabel}</span>
           </Tooltip>
         </div>
-      </>}
-    </CardContent>
-  </Card>
-}
-
-function TokenSummary({ days }: { days: number }) {
-  const { t, i18n } = useTranslation()
-  const query = useDashboardUsage(days)
-  const total = query.isError ? undefined : query.data?.total
-  const collected = total?.prompt_tokens != null && total.cached_tokens != null && total.completion_tokens != null && total.reasoning_tokens != null
-  const parts = collected ? segments({ prompt_tokens: total.prompt_tokens!, cached_tokens: total.cached_tokens!, completion_tokens: total.completion_tokens!, reasoning_tokens: total.reasoning_tokens!, cache_write_tokens: total.cache_write_tokens }) : []
-  const sum = parts.reduce((n, part) => n + part.value, 0)
-  const labels = { input: t('portal:tokInput'), cached: t('portal:tokCached'), write: t('charts:cacheWrite'), output: t('portal:tokOutput'), reasoning: t('portal:tokReasoning') }
-  return <Card role="region" aria-label={t('portal:tokenSnapshot')} className="min-w-0 rounded-xl sm:col-span-2">
-    <CardHeader className="gap-0 px-3 pt-2 pb-1 lg:pt-1">
-      <div className="flex flex-wrap items-center justify-between gap-x-2">
-        <CardTitle className="flex flex-wrap items-baseline gap-x-2">
-          <span>{t('portal:tokenSnapshot')}</span>
-          {query.isSuccess && collected && <span className="font-semibold tabular-nums" title={sum.toLocaleString(i18n.language)}>{formatCount(sum, i18n.language)} <span className="text-xs font-normal text-muted-foreground">{t('common:tokens')}</span></span>}
-          <span className="text-xs font-normal text-muted-foreground">{t('admin:lastDays', { days })}</span>
-        </CardTitle>
-        <Link to="/admin/stats" search={{ days, measure: 'tokens' }} className={detailClass}>{t('portal:expandTrend')}<ArrowUpRight aria-hidden size={13} /></Link>
-      </div>
-    </CardHeader>
-    <CardContent className="space-y-2 px-3 pt-0 pb-2 lg:space-y-1 lg:pb-1">
-      {query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.isPending ? <LoadingState /> : !collected ? <p className="py-6 text-xs text-muted-foreground">{t('analysis:notCollected')}</p> : <>
-        <div className="flex items-center gap-3">
-          <Tooltip className="min-w-0 flex-1" content={t('admin:dashboardTokenHint')}><div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} className="flex h-2.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{parts.filter((part) => part.value > 0).map((part) => <div aria-hidden key={part.key} className={part.className} style={{ width: `${part.value / sum * 100}%` }} />)}</div></Tooltip>
-        </div>
-        <dl className="grid grid-cols-1 gap-x-4 gap-y-1.5 min-[360px]:grid-cols-2 lg:grid-cols-5 lg:gap-x-2">
-          {parts.map((part) => {
-            const known = (part.key !== 'write' || total?.cache_write_tokens != null) && (part.key !== 'cached' || total?.cache_hit_bp != null)
-            return <div key={part.key} className="flex min-w-0 items-center justify-between gap-3 text-xs lg:flex-col lg:items-start lg:gap-1">
-              <dt className="flex min-w-0 items-center gap-1 text-muted-foreground"><span aria-hidden className={`h-2 w-2 shrink-0 rounded-sm ${part.className}`} />{labels[part.key]}</dt>
-              <dd className="shrink-0 tabular-nums" title={known ? part.value.toLocaleString(i18n.language) : undefined}>{known ? formatCount(part.value, i18n.language) : t('analysis:notCollected')}</dd>
-            </div>
-          })}
-        </dl>
-        {total?.cache_write_tokens == null && <p className="text-xs leading-5 text-muted-foreground">{t('charts:missingCacheWrite')}</p>}
-        {total?.cache_hit_bp == null && <p className="text-xs leading-5 text-muted-foreground">{t('portal:cacheIncomplete')}</p>}
       </>}
     </CardContent>
   </Card>

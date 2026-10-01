@@ -71,9 +71,11 @@ impl AppState {
                     )
                     .await
             }
-            // 订阅凭证：取可用 access token（必要时四步锁刷新），Bearer + oauth beta + 系统提示首句
+            // 订阅凭证：取可用 access token（必要时四步锁刷新），Bearer + oauth beta + 系统提示首句；
+            // settings.mimic_cc 开启时换全伪装身份（§11.38）
             "anthropic_max" => {
                 let cred = super::oauth_cred::fresh_credential(self, cand).await?;
+                let mimic = super::oauth_cred::mimic_identity(cand, cred.account_id.as_deref());
                 okapi_providers::oauth::anthropic_max::messages(
                     self.anthropic.http(),
                     base,
@@ -81,6 +83,7 @@ impl AppState {
                     body,
                     stream,
                     outbound,
+                    mimic.as_ref(),
                 )
                 .await
             }

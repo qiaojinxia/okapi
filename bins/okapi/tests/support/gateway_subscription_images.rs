@@ -134,15 +134,15 @@ async fn assert_image_bill_and_content(
 
 #[tokio::test]
 async fn async_image_actual_charge_stays_in_old_subscription() -> TestResult {
-    image_case(false, false).await
+    Box::pin(image_case(false, false)).await
 }
 
 #[tokio::test]
 async fn async_image_recovers_after_replacement_and_redis_loss() -> TestResult {
-    image_case(false, true).await
+    Box::pin(image_case(false, true)).await
 }
 
 #[tokio::test]
 async fn async_image_failure_does_not_reopen_cancelled_subscription() -> TestResult {
-    image_case(true, false).await
+    Box::pin(image_case(true, false)).await
 }

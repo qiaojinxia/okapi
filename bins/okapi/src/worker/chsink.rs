@@ -1,95 +1,75 @@
-//! chsink：billing_outbox → ClickHouse request_log_raw 批写。
-//!
-//! 单机直连形态（docs/database.md §4.2：无 NATS 时 worker 直接消费 outbox）；
-//! NATS JetStream 传输在 M2 后续批次接入后，本模块变为 JetStream 消费者。
-//!
-//! 幂等：批次 dedup_token = "outbox-<min_id>-<max_id>"。已知边界：CH 写成功但
-//! PG 标记失败的窗口内，若重试批次成员发生变化（新行混入），token 变化会导致
-//! 少量明细重复——账本不受影响，统计侧由 CH↔PG 对账检出；NATS 序号接入后消除。
+//! Direct outbox admission followed by delivery of persisted, immutable CH batches.
+//! Transport retries and mode changes share the same event identity receipts.
 
 use chrono::{DateTime, Utc};
 use okapi_store::ChClient;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-const BATCH_LIMIT: i64 = 500;
-const MAX_RETRY: i32 = 5;
+use super::delivery::{self, Event};
 
-/// 处理一批待投递 outbox。返回本批行数（0 = 无待处理）。
+/// Retry existing batches first, then atomically claim a fresh batch.
 pub async fn process_once(pg: &PgPool, ch: &ChClient) -> anyhow::Result<usize> {
+    let delivered = delivery::deliver_once(pg, ch).await?;
+    if delivered > 0 {
+        return Ok(delivered);
+    }
+    let admitted = admit_outbox(pg, false).await?;
+    if admitted == 0 {
+        return Ok(0);
+    }
+    let delivered = delivery::deliver_once(pg, ch).await?;
+    Ok(delivered.max(admitted))
+}
+
+/// Recover confirmed modern publications whose JS handoff has stalled.
+pub(super) async fn recover_published(pg: &PgPool) -> anyhow::Result<usize> {
+    admit_outbox(pg, true).await
+}
+
+async fn admit_outbox(pg: &PgPool, published_only: bool) -> anyhow::Result<usize> {
     let mut tx = pg.begin().await?;
     let rows = sqlx::query!(
-        r#"
-        SELECT id, created_at, payload
-        FROM billing_outbox
-        WHERE status = 0 AND (next_retry_at IS NULL OR next_retry_at <= now())
-        ORDER BY id
-        LIMIT $1
-        FOR UPDATE SKIP LOCKED
-        "#,
-        BATCH_LIMIT
+        r#"SELECT id,event_id,created_at,payload FROM billing_outbox
+           WHERE ch_batch_id IS NULL AND (
+             ($2::boolean AND status=1 AND stats_protocol=1 AND published_at<=now()-interval '5 minutes')
+             OR (NOT $2::boolean AND (
+               (status=0 AND (next_retry_at IS NULL OR next_retry_at<=now()))
+               OR (status=1 AND stats_protocol=1)
+             ))
+           )
+           ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED"#,
+        delivery::BATCH_LIMIT,
+        published_only
     )
     .fetch_all(&mut *tx)
     .await?;
-
     if rows.is_empty() {
         tx.commit().await?;
         return Ok(0);
     }
-
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
-    let first = ids.first().copied().unwrap_or(0);
-    let last = ids.last().copied().unwrap_or(0);
-    let dedup_token = format!("outbox-{first}-{last}");
-    let ch_rows: Vec<Value> = rows
+    let events = rows
         .iter()
-        .map(|r| to_ch_row(r.created_at, &r.payload))
+        .map(|r| Event {
+            key: delivery::outbox_key(r.event_id),
+            payload: r.payload.clone(),
+            row: to_ch_row(r.created_at, &r.payload),
+        })
         .collect();
-
-    match ch
-        .insert_json_each_row("request_log_raw", &ch_rows, &dedup_token)
-        .await
-    {
-        Ok(()) => {
-            sqlx::query!(
-                r#"UPDATE billing_outbox SET status = 1, published_at = now() WHERE id = ANY($1)"#,
-                &ids
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-        Err(err) => {
-            let err_text = err.to_string();
-            tracing::warn!(error = %err_text, batch = ids.len(), "chsink 批写失败，退避重试");
-            // 指数退避（5s 起，封顶 300s）；超过 MAX_RETRY 次转 DLQ 终态
-            sqlx::query!(
-                r#"
-                UPDATE billing_outbox
-                SET retry_count = retry_count + 1,
-                    next_retry_at = now() + make_interval(secs => least(300, 5 * power(2, retry_count))),
-                    status = CASE WHEN retry_count + 1 >= $2 THEN 2 ELSE 0 END
-                WHERE id = ANY($1)
-                "#,
-                &ids,
-                MAX_RETRY
-            )
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query!(
-                r#"
-                INSERT INTO billing_dlq (source, payload, error, retry_count)
-                SELECT 'chsink', payload, $2, retry_count
-                FROM billing_outbox
-                WHERE id = ANY($1) AND status = 2
-                "#,
-                &ids,
-                err_text
-            )
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
-
+    delivery::admit(&mut tx, events).await?;
+    // An existing receipt may already be complete (or in DLQ); never reset it here.
+    sqlx::query!(
+        r#"UPDATE billing_outbox o SET ch_batch_id=b.id,status=b.status,
+           retry_count=b.retry_count,next_retry_at=b.next_retry_at,
+           published_at=CASE WHEN b.status=1 THEN COALESCE(o.published_at,now()) ELSE o.published_at END
+           FROM billing_ch_events e JOIN billing_ch_batches b ON b.id=e.batch_id
+           WHERE o.id=ANY($1) AND e.event_key='outbox:'||o.event_id::text"#,
+        &ids
+    )
+    .execute(&mut *tx)
+    .await?;
+    // Crucial: this commit must precede CH I/O, so rollback cannot change the batch token.
     tx.commit().await?;
     Ok(ids.len())
 }
@@ -121,6 +101,9 @@ pub fn js_payload_to_ch_row(payload: &Value) -> Value {
 }
 
 fn build_ch_row(ts: &str, payload: &Value) -> Value {
+    let historical_characters = okapi_store::legacy_speech::characters(payload);
+    let (input_unit, input_characters) =
+        historical_characters.map_or_else(|| input_units(payload), |n| ("characters", Some(n)));
     let log_type = get_i64(payload, "log_type");
     let is_stream = payload
         .get("is_stream")
@@ -142,7 +125,7 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "provider": "",
         "client_ip": get_str(payload, "client_ip"),
         "node": get_str(payload, "node"),
-        "prompt_tokens": get_i64(payload, "prompt_tokens"),
+        "prompt_tokens": if historical_characters.is_some() {0} else {get_i64(payload, "prompt_tokens")},
         "cached_tokens": get_i64(payload, "cached_tokens"),
         // 旧 outbox 未记录缓存写入，保留 null，不能冒充已知的 0。
         "cache_write_tokens": payload.get("cache_write_tokens").cloned().unwrap_or(Value::Null),
@@ -170,7 +153,25 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "error_code": get_str(payload, "error_code"),
         "is_error": i32::from(log_type == 5),
     });
+    row["input_unit"] = json!(input_unit);
+    row["input_characters"] = json!(input_characters);
+    row["historical_prompt_units"] = json!(historical_characters);
+    row["input_unit_basis"] = json!(if historical_characters.is_some() {
+        okapi_store::legacy_speech::BASIS
+    } else {
+        ""
+    });
     let extra = json!({
+        "cache_write_5m_tokens": payload.get("cache_write_5m_tokens"),
+        "cache_write_1h_tokens": payload.get("cache_write_1h_tokens"),
+        "audio_prompt_tokens": payload.get("audio_prompt_tokens"),
+        "image_prompt_tokens": payload.get("image_prompt_tokens"),
+        "audio_completion_tokens": payload.get("audio_completion_tokens"),
+        "image_completion_tokens": payload.get("image_completion_tokens"),
+        "cache_read_audio_tokens": payload.pointer("/cache_read_modalities/audio_tokens"),
+        "cache_read_image_tokens": payload.pointer("/cache_read_modalities/image_tokens"),
+        "cache_write_audio_tokens": payload.pointer("/cache_write_modalities/audio_tokens"),
+        "cache_write_image_tokens": payload.pointer("/cache_write_modalities/image_tokens"),
         "prompt_source": usage_source(payload, "prompt_source"),
         "completion_source": usage_source(payload, "completion_source"),
         "upstream_prompt_tokens": payload.pointer("/upstream_usage/prompt_tokens"),
@@ -190,7 +191,80 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
     if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
         row.extend(extra.clone());
     }
+    add_detail_observations(&mut row, payload);
     row
+}
+
+// Explicit metadata must be coherent; historical interpretation is a separate strict contract.
+fn input_units(payload: &Value) -> (&'static str, Option<u32>) {
+    let characters = payload.get("input_characters");
+    match get_str(payload, "input_unit") {
+        "tokens" if characters.is_none_or(Value::is_null) => ("tokens", None),
+        "characters" => {
+            let count = characters
+                .and_then(Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok());
+            let no_tokens = [
+                "prompt_tokens",
+                "completion_tokens",
+                "cached_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "audio_prompt_tokens",
+                "audio_completion_tokens",
+                "image_prompt_tokens",
+                "image_completion_tokens",
+            ]
+            .iter()
+            .all(|field| {
+                payload
+                    .get(field)
+                    .is_none_or(|v| v.is_null() || v.as_u64() == Some(0))
+            });
+            if no_tokens && let Some(count) = count {
+                return ("characters", Some(count));
+            }
+            ("", None)
+        }
+        _ => ("", None),
+    }
+}
+
+fn add_detail_observations(row: &mut Value, payload: &Value) {
+    for (field, pointer) in [
+        ("audio_prompt_reported", "/reported_details/prompt/audio"),
+        ("image_prompt_reported", "/reported_details/prompt/image"),
+        (
+            "audio_completion_reported",
+            "/reported_details/completion/audio",
+        ),
+        (
+            "image_completion_reported",
+            "/reported_details/completion/image",
+        ),
+        (
+            "cache_read_audio_reported",
+            "/reported_details/cache_read/audio",
+        ),
+        (
+            "cache_read_image_reported",
+            "/reported_details/cache_read/image",
+        ),
+        (
+            "cache_write_audio_reported",
+            "/reported_details/cache_write/audio",
+        ),
+        (
+            "cache_write_image_reported",
+            "/reported_details/cache_write/image",
+        ),
+        ("reasoning_reported", "/reported_details/reasoning"),
+    ] {
+        row[field] = payload
+            .pointer(pointer)
+            .and_then(Value::as_bool)
+            .map_or(Value::Null, |value| json!(u8::from(value)));
+    }
 }
 
 // Invalid metadata is unknown, never a measured zero or an overflowing CH UInt32.
@@ -205,5 +279,43 @@ fn usage_source<'a>(payload: &'a Value, field: &str) -> &'a str {
     match get_str(payload, field) {
         value @ ("upstream" | "estimated" | "local_override") => value,
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::js_payload_to_ch_row;
+    use serde_json::json;
+
+    #[test]
+    fn input_units_preserve_explicit_zero_and_do_not_guess_old_characters() {
+        for count in [0, 11, u32::MAX] {
+            let row = js_payload_to_ch_row(
+                &json!({"input_unit":"characters","input_characters":count,"prompt_tokens":0,"completion_tokens":0}),
+            );
+            assert_eq!(row["input_unit"], "characters");
+            assert_eq!(row["input_characters"], count);
+        }
+        let row = js_payload_to_ch_row(&json!({"endpoint":"/v1/audio/speech","prompt_tokens":11}));
+        assert_eq!(row["input_unit"], "");
+        assert!(row["input_characters"].is_null());
+        assert_eq!(row["prompt_tokens"], 11, "raw history remains auditable");
+    }
+
+    #[test]
+    fn invalid_or_conflicting_input_units_stay_unknown() {
+        for payload in [
+            json!({"input_unit":"characters"}),
+            json!({"input_unit":"characters","input_characters":11,"prompt_tokens":11}),
+            json!({"input_unit":"characters","input_characters":11,"audio_completion_tokens":1}),
+            json!({"input_unit":"characters","input_characters":"11"}),
+            json!({"input_unit":"characters","input_characters":u64::from(u32::MAX)+1}),
+            json!({"input_unit":"tokens","input_characters":11}),
+            json!({"input_unit":"other","input_characters":11}),
+        ] {
+            let row = js_payload_to_ch_row(&payload);
+            assert_eq!(row["input_unit"], "", "{payload}");
+            assert!(row["input_characters"].is_null());
+        }
     }
 }

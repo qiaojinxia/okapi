@@ -81,18 +81,18 @@ async fn exchange(pool: HttpPool, outbound: Outbound, addr: SocketAddr, peer: Tl
         tls.get_ref().1.alpn_protocol(),
         Some(b"http/1.1".as_slice())
     );
-    let mut socket = timeout(
-        WAIT,
-        accept_hdr_async(tls, |req: &Request, res: Response| {
-            assert_eq!(req.version(), reqwest::Version::HTTP_11);
-            assert_eq!(req.uri().path(), "/v1/responses");
-            assert_eq!(req.headers()["authorization"], "Bearer tls-test-only");
-            Ok(res)
-        }),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    // Tungstenite fixes the callback error type to ErrorResponse; this fixture cannot box it.
+    #[allow(clippy::result_large_err)]
+    let check_headers = |req: &Request, res: Response| {
+        assert_eq!(req.version(), reqwest::Version::HTTP_11);
+        assert_eq!(req.uri().path(), "/v1/responses");
+        assert_eq!(req.headers()["authorization"], "Bearer tls-test-only");
+        Ok(res)
+    };
+    let mut socket = timeout(WAIT, accept_hdr_async(tls, check_headers))
+        .await
+        .unwrap()
+        .unwrap();
     let client = timeout(WAIT, connecting).await.unwrap().unwrap();
     let body = r#"{"type":"response.create","model":"fixture","input":"tls"}"#;
     let handle = client

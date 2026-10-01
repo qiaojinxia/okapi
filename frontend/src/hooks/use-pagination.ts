@@ -3,7 +3,8 @@ import { useCallback } from 'react'
 import { posInt } from '@/lib/search-params'
 
 /// 管理面表格的每页条数档位；首档即缺省页宽。
-export const PAGE_SIZES: readonly number[] = [20, 50, 100]
+export const DEFAULT_PAGE_SIZE = 10
+export const PAGE_SIZES: readonly number[] = [DEFAULT_PAGE_SIZE, 20, 50, 100]
 
 /// 每页条数硬上限，与后端 `MAX_PAGE` 一致（超了后端也会钳回来，这里先挡掉乱写的地址）。
 const MAX_PAGE_SIZE = 200
@@ -66,7 +67,7 @@ export function usePagination({
   const raw = useSearch({ strict: false }) as Record<string, unknown>
   const { page = 1, limit: urlLimit } = pageSearch(raw)
   const navigate = useNavigate()
-  const fallback = initialLimit ?? pageSizes[0] ?? 20
+  const fallback = initialLimit ?? pageSizes[0] ?? DEFAULT_PAGE_SIZE
   // 地址里的页宽不在本页档位内（手改的、或别的页面带过来的）就当没写
   const limit = urlLimit !== undefined && pageSizes.includes(urlLimit) ? urlLimit : fallback
   const offset = (page - 1) * limit

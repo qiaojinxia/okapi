@@ -69,7 +69,7 @@ async fn setup() -> Env {
         .execute(&pg)
         .await
         .unwrap();
-    Env {
+    let env = Env {
         pg,
         addr,
         prefix,
@@ -78,10 +78,27 @@ async fn setup() -> Env {
             .timeout(Duration::from_secs(10))
             .build()
             .unwrap(),
-    }
+    };
+    env.publish().await;
+    env
 }
 
 impl Env {
+    // Fixtures must publish explicitly, just like an administrator. GET never
+    // publishes: unpublished visibility is covered by pricing_publication.rs.
+    async fn publish(&self) {
+        let actor =
+            okapi_store::provision::create_user(&self.pg, &format!("pub-{}", Uuid::new_v4()))
+                .await
+                .unwrap();
+        let rows = okapi_store::pricing::load_pricing_source_rows(&self.pg)
+            .await
+            .unwrap();
+        let snapshot = serde_json::to_value(rows).unwrap();
+        okapi_store::admin::publish_epoch(&self.pg, actor, &snapshot)
+            .await
+            .unwrap();
+    }
     fn url(&self, path: &str, query: &[(&str, &str)]) -> reqwest::Url {
         let mut url = reqwest::Url::parse(&format!("http://{}{path}", self.addr)).unwrap();
         url.query_pairs_mut().extend_pairs(query.iter().copied());
@@ -215,6 +232,7 @@ async fn catalog_search_is_literal_and_model_lookup_is_exact() {
             .await
             .unwrap();
     }
+    env.publish().await;
     assert_eq!(
         names(&env.get(&[("q", &special)]).await),
         vec![special.clone()]

@@ -109,3 +109,34 @@ fn invalid_or_overflowing_usage_cannot_corrupt_verified_prefix() {
         assert!(!meter.seen.contains("bad"));
     }
 }
+
+#[test]
+fn details_and_original_totals_remain_observed_only_when_every_response_reports_them() {
+    let mut meter = Meter::default();
+    meter.observe(&event("known", &official_usage())).unwrap();
+    assert_eq!(
+        (meter.usage.prompt_source(), meter.usage.completion_source()),
+        ("upstream", "upstream")
+    );
+    let reported = meter.usage.reported_details.unwrap();
+    assert!(reported.prompt.audio && reported.prompt.image);
+    assert!(reported.completion.audio && reported.completion.image);
+    assert!(reported.cache_read.audio && reported.cache_read.image);
+    assert!(!reported.reasoning);
+    meter
+        .observe(&event(
+            "unknown",
+            &json!({"input_tokens":10,"output_tokens":20}),
+        ))
+        .unwrap();
+    let reported = meter.usage.reported_details.unwrap();
+    assert!(!reported.prompt.audio && !reported.completion.audio && !reported.cache_read.audio);
+    assert_eq!(
+        (meter.usage.prompt_source(), meter.usage.completion_source()),
+        ("upstream", "upstream")
+    );
+    assert_eq!(
+        (meter.usage.prompt_tokens, meter.usage.completion_tokens),
+        (142, 141)
+    );
+}

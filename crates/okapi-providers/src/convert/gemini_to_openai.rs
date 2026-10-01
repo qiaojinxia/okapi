@@ -455,36 +455,64 @@ pub fn gemini_usage_json(u: UsageProbe) -> Value {
     if u.prompt_tokens_details.cache_read_reported || u.prompt_tokens_details.cached_tokens > 0 {
         meta["cachedContentTokenCount"] = json!(u.prompt_tokens_details.cached_tokens);
     }
-    if thoughts > 0 {
+    if output_reasoning_reported(u) {
         meta["thoughtsTokenCount"] = json!(thoughts);
     }
     let input = u.prompt_tokens_details;
     let output = u.completion_tokens_details;
-    if input.audio_tokens > 0 || input.image_tokens > 0 {
-        meta["promptTokensDetails"] =
-            modal_counts(u.prompt_tokens, input.audio_tokens, input.image_tokens);
+    if let Some(details) = modal_counts(
+        (!u.missing_prompt).then_some(u.prompt_tokens),
+        (input.modalities_reported.audio || input.audio_tokens > 0).then_some(input.audio_tokens),
+        (input.modalities_reported.image || input.image_tokens > 0).then_some(input.image_tokens),
+    ) {
+        meta["promptTokensDetails"] = details;
     }
     if let Some(cache) = input.cached_tokens_details {
-        meta["cacheTokensDetails"] = modal_counts(
-            input.cached_tokens,
-            cache.audio_tokens.unwrap_or(0),
-            cache.image_tokens.unwrap_or(0),
-        );
+        let reported = cache.reported(input.cached_tokens);
+        // Gemini requires complete cache composition. Omit an incomplete split
+        // instead of inventing a measured zero for an unreported modality.
+        if reported.audio && reported.image {
+            meta["cacheTokensDetails"] = modal_counts(
+                Some(input.cached_tokens),
+                Some(cache.audio_tokens.unwrap_or(0)),
+                Some(cache.image_tokens.unwrap_or(0)),
+            )
+            .unwrap_or(Value::Null);
+        }
     }
-    if output.audio_tokens > 0 || output.image_tokens > 0 {
-        meta["candidatesTokensDetails"] =
-            modal_counts(candidates, output.audio_tokens, output.image_tokens);
+    if let Some(details) = modal_counts(
+        (!u.missing_completion).then_some(candidates),
+        (output.modalities_reported.audio || output.audio_tokens > 0)
+            .then_some(output.audio_tokens),
+        (output.modalities_reported.image || output.image_tokens > 0)
+            .then_some(output.image_tokens),
+    ) {
+        meta["candidatesTokensDetails"] = details;
     }
     meta
 }
 
-fn modal_counts(total: u32, audio: u32, image: u32) -> Value {
-    let Some(text) = total.checked_sub(audio).and_then(|v| v.checked_sub(image)) else {
-        return Value::Null;
-    };
-    json!([{"modality":"TEXT","tokenCount":text},
-           {"modality":"AUDIO","tokenCount":audio},
-           {"modality":"IMAGE","tokenCount":image}])
+fn output_reasoning_reported(u: UsageProbe) -> bool {
+    u.completion_tokens_details.reasoning_reported
+        || u.completion_tokens_details.reasoning_tokens > 0
+}
+
+fn modal_counts(total: Option<u32>, audio: Option<u32>, image: Option<u32>) -> Option<Value> {
+    if audio.is_none() && image.is_none() {
+        return None;
+    }
+    let mut rows = Vec::new();
+    if let (Some(total), Some(audio), Some(image)) = (total, audio, image) {
+        let text = total.checked_sub(audio)?.checked_sub(image)?;
+        rows.push(json!({"modality":"TEXT","tokenCount":text}));
+    }
+    if let Some(audio) = audio {
+        rows.push(json!({"modality":"AUDIO","tokenCount":audio}));
+    }
+    if let Some(image) = image {
+        rows.push(json!({"modality":"IMAGE","tokenCount":image}));
+    }
+    Some(Value::Array(rows))
 }
 
 // ---- 事件流转换 ----

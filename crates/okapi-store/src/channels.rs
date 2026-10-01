@@ -53,6 +53,14 @@ pub struct ChannelCandidate {
     /// OAuth token 端点覆写（channels.settings.oauth_token_url）：只对 `anthropic_max` / `codex`
     /// 有意义，测试 mock / 企业代理用；None = 各家官方地址（IMPLEMENTATION §11.38）。
     pub oauth_token_url: Option<String>,
+    /// Claude Code 全伪装开关（channels.settings.mimic_cc，IMPLEMENTATION §11.38）：只对
+    /// `anthropic_max` 有意义。true = 网关替客户端伪造 Claude Code 身份（全量 beta、CLI UA、
+    /// x-stainless 套件、system billing 块、metadata.user_id），且不再透传客户端身份头；
+    /// false（缺省）= 透传模式，前面应是真实官方客户端。
+    pub mimic_cc: bool,
+    /// 伪装 CLI 版本覆写（channels.settings.mimic_cc_version）：三段 semver；
+    /// None = 用 providers 侧内置基线（官方 CLI 升级后需跟随）。
+    pub mimic_cc_version: Option<String>,
     /// 出站代理（channels.settings.proxy_url）：http / https / socks5 / socks5h。
     /// None = 直连。代理绑在 reqwest Client 上，按 URL 缓存（IMPLEMENTATION §11.30）。
     pub proxy_url: Option<String>,
@@ -143,6 +151,8 @@ pub async fn candidates_for_model(
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
                NULLIF(c.settings ->> 'aws_region', '') AS aws_region,
                NULLIF(c.settings ->> 'oauth_token_url', '') AS oauth_token_url,
+               COALESCE((c.settings ->> 'mimic_cc')::boolean, false) AS "mimic_cc!",
+               NULLIF(c.settings ->> 'mimic_cc_version', '') AS mimic_cc_version,
                NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,
                c.settings -> 'extra_headers' AS extra_headers,
                c.capabilities,
@@ -187,6 +197,8 @@ pub async fn candidates_for_model(
                 api_version: r.api_version,
                 aws_region: r.aws_region,
                 oauth_token_url: r.oauth_token_url,
+                mimic_cc: r.mimic_cc,
+                mimic_cc_version: r.mimic_cc_version,
                 proxy_url: r.proxy_url,
                 extra_headers: extra_headers_from(r.extra_headers),
                 channel_id: r.channel_id,

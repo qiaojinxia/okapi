@@ -32,7 +32,7 @@ async function prepare(page: Page, language = 'zh-CN') {
         { bucket: '2026-09-20', requests: 2800, amount_micro: 56000000, tokens: 200000 },
         { bucket: '2026-09-23', requests: 1400, amount_micro: 28000000, tokens: 100000 },
         { bucket: '2026-09-26', requests: 4200, amount_micro: 84000000, tokens: 300000 },
-      ], total: { requests: 8400, errors: 84, avg_output_tps_milli: 42500, cost_known_requests: 4200, cost_coverage_bp: 5000, known_cost_micro: 4200000, known_margin_micro: 1800000, avg_latency_ms: 1300, avg_ttft_ms: 150, ttft_samples: 6000, prompt_tokens: 400000, cached_tokens: 140000, cache_write_tokens: 20000, completion_tokens: 200000, reasoning_tokens: 30000, cache_hit_bp: 3500 } },
+      ], total: { requests: 8400, errors: 84, avg_output_tps_milli: 42500, cost_known_requests: 4200, cost_coverage_bp: 5000, known_cost_micro: 4200000, known_margin_micro: 1800000, avg_latency_ms: 1300, avg_ttft_ms: 150, ttft_samples: 6000, prompt_tokens: 400000, cached_tokens: 140000, cache_read_known_requests: 8400, cache_write_known_requests: 8400, cache_write_tokens: 20000, completion_tokens: 200000, reasoning_tokens: 30000, cache_hit_bp: 3500 } },
       '/admin/stats/breakdown': { days, total_amount_micro: 10000000, total_requests: 10000, data: Array.from({ length: 5 }, (_, i) => ({
         rank: i + 1, key: url.searchParams.get('by') === 'channel' ? String(i + 1) : ['gpt-5.1', 'claude-sonnet-4.5', 'gemini-2.5-pro', 'deepseek-chat', 'qwen3-coder'][i],
         label: url.searchParams.get('by') === 'channel' ? ['OpenAI Primary', 'Anthropic Direct', 'Google Cloud', 'DeepSeek Official', 'Alibaba Cloud'][i] : null,
@@ -54,6 +54,25 @@ async function prepare(page: Page, language = 'zh-CN') {
   })
   return requests
 }
+
+test('首页共用趋势请求、短期复用查询，手动刷新绕过后端缓存', async ({ page }) => {
+  const requests = await prepare(page)
+  const fresh: string[] = []
+  page.on('request', (request) => {
+    if (request.headers()['cache-control'] === 'no-cache') fresh.push(new URL(request.url()).pathname)
+  })
+  await page.goto('/admin')
+  await expect(page.getByRole('region', { name: '经营概览' }).getByRole('link')).toHaveCount(5)
+  await expect.poll(() => requests.filter((url) => url.startsWith('/admin/stats/trend?')).length).toBe(1)
+  const trends = requests.filter((url) => url.startsWith('/admin/stats/trend?'))
+  expect(trends[0]).toContain('cached=true')
+  expect(requests.filter((url) => url.startsWith('/admin/stats/breakdown?')).every((url) => url.includes('cached=true'))).toBe(true)
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  for (const path of ['/admin/stats/overview', '/admin/stats/trend', '/admin/stats/breakdown']) {
+    await expect.poll(() => fresh.includes(path)).toBe(true)
+  }
+  await expect.poll(() => requests.filter((url) => url.startsWith('/admin/stats/trend?')).length).toBe(2)
+})
 
 test('Dashboard 指标可键盘进入对应分析，今日和所选时段各带正确范围，返回保留首页条件', async ({ page }) => {
   const requests = await prepare(page)
@@ -304,7 +323,7 @@ test('Dashboard：成本覆盖率与质量同窗，未知成本不推算利润�
   await expect(page.getByRole('tooltip')).toContainText('未采集部分不按零成本计算')
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '近 30 天', exact: true }).click()
-  await expect.poll(() => queries.filter((url) => url.startsWith('/admin/stats/trend')).at(-1)).toBe('/admin/stats/trend?days=30&metric=amount')
+  await expect.poll(() => queries.filter((url) => url.startsWith('/admin/stats/trend')).at(-1)).toBe('/admin/stats/trend?days=30&metric=amount&cached=true')
   await expect(summary.getByRole('link', { name: '查看质量趋势' })).toHaveAttribute('href', '/admin/stats?days=30&measure=latency')
   await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
@@ -465,6 +484,97 @@ test('首页侧栏随可用宽度自适应，手动展开与收起跨刷新和�
   await expect(page.getByRole('searchbox', { name: '搜索功能', exact: true })).toBeFocused()
 })
 
+test('Token 构成区分已记录总量、部分缓存、同批实报样本和疑似测试，来源展开不额外请求', async ({ page }) => {
+  await prepare(page)
+  const trendRequests: string[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.pathname === '/admin/stats/trend') trendRequests.push(url.pathname + url.search)
+  })
+  const source = (tokens: number | null, requests = 0) => ({ tokens, requests })
+  await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ json: { data: [], total: {
+    requests: 221, prompt_tokens: 32300, completion_tokens: 41500, cached_tokens: 11420, reasoning_tokens: 0,
+    cache_write_tokens: null, recorded_cache_write_tokens: 720, cache_read_known_requests: 208, cache_write_known_requests: 17,
+    cache_hit_bp: null, measured_cache_hit_bp: 6415, measured_cache_hit_requests: 17, measured_prompt_tokens: 5300, measured_cache_read_tokens: 3400,
+    suspected_test_requests: 210, suspected_test_tokens: 70000, test_detection_basis: 'fixture_model_name',
+    token_provenance: {
+      prompt: { upstream: source(5300, 17), estimated: source(1000, 4), local_override: source(0), unknown: source(26000, 200) },
+      completion: { upstream: source(3000, 17), estimated: source(2000, 4), local_override: source(0), unknown: source(36500, 200) },
+    },
+  } } }))
+  await page.goto('/admin')
+  const panel = page.getByRole('region', { name: 'Token 用量构成', exact: true })
+  await expect(panel.getByTitle('73,800', { exact: true })).toHaveText('73,800 Tokens')
+  await expect(panel).toContainText('已记录用量')
+  await expect(panel).toContainText('输入 32,300 + 输出 41,500')
+  await expect(panel.locator('[data-slot="token-segments"] dd')).toHaveText(['20,160', '11,420部分', '720部分', '41,500', '—'])
+  const coverage = panel.getByRole('group', { name: '缓存采集覆盖率', exact: true })
+  await expect(coverage).toContainText('208 / 221 · 94.11%')
+  await expect(coverage).toContainText('17 / 221 · 7.69%')
+  await expect(coverage).toContainText('64.15%')
+  await expect(coverage).toContainText('样本 17 / 221 次')
+  await expect(panel).toContainText('疑似测试 210 次 · 70,000 Token（仍计入）')
+  await expect(panel.locator('summary')).toContainText('上游实报 8,300 · 来源未知 62,500')
+  await panel.locator('summary').click()
+  const provenance = panel.getByRole('group', { name: '用量来源', exact: true })
+  await expect(provenance).toContainText('本地估算')
+  await expect(provenance).toContainText('3,000')
+  await expect(provenance).toContainText('本地覆盖')
+  await expect(provenance).toContainText('输入 26,000 / 输出 36,500')
+  await expect(panel).not.toContainText('NaN')
+  expect(trendRequests).toHaveLength(1)
+  await page.screenshot({ path: 'test-results/dashboard-token-quality.png', fullPage: true, animations: 'disabled' })
+  await panel.screenshot({ path: 'test-results/token-quality-panel.png', animations: 'disabled' })
+})
+
+test('Token 旧接口缺少缓存及来源字段时显示未知，不把零计数当作明确上报', async ({ page }) => {
+  await prepare(page)
+  await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ json: { data: [], total: {
+    requests: 2, prompt_tokens: 42, completion_tokens: 310, cached_tokens: 0, reasoning_tokens: 0,
+  } } }))
+  await page.goto('/admin')
+  const panel = page.getByRole('region', { name: 'Token 用量构成', exact: true })
+  await expect(panel.getByTitle('352', { exact: true })).toHaveText('352 Tokens')
+  await expect(panel.locator('[data-slot="token-segments"] dd')).toHaveText(['42', '—', '—', '310', '—'])
+  await expect(panel).not.toContainText('100.0%')
+  await expect(panel).not.toContainText('疑似测试')
+  await panel.locator('summary').click()
+  await expect(panel).toContainText('当前接口未提供完整用量来源')
+})
+
+test('Token 明确上报零缓存时展示 0，完整覆盖率与未知状态分开', async ({ page }) => {
+  await prepare(page)
+  await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ json: { data: [], total: {
+    requests: 2, prompt_tokens: 600, completion_tokens: 20, cached_tokens: 0, reasoning_tokens: 0,
+    cache_read_known_requests: 2, cache_write_known_requests: 2, cache_write_tokens: 0, recorded_cache_write_tokens: 0,
+    measured_cache_hit_bp: 0, measured_cache_hit_requests: 2, measured_prompt_tokens: 600, measured_cache_read_tokens: 0,
+    token_detail_observations: { reasoning_tokens: { observed_tokens: 0, observed_records: 2, complete: true } },
+  } } }))
+  await page.goto('/admin')
+  const panel = page.getByRole('region', { name: 'Token 用量构成', exact: true })
+  await expect(panel.locator('[data-slot="token-segments"] dd')).toHaveText(['600', '0', '0', '20', '0'])
+  await expect(panel.getByRole('group', { name: '缓存采集覆盖率', exact: true })).toContainText('2 / 2 · 100.0%')
+  await expect(panel).not.toContainText('缓存数据未完整上报')
+  await expect(panel).not.toContainText('部分')
+})
+
+test('Token 来源缺失数值不补零，英文说明和窄屏保持可读', async ({ page }) => {
+  await prepare(page, 'en')
+  const unknown = { requests: 2, tokens: null }, zero = { requests: 0, tokens: 0 }
+  await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ json: { data: [], total: {
+    requests: 2, prompt_tokens: 42, completion_tokens: 310,
+    token_provenance: { prompt: { upstream: unknown, estimated: zero, local_override: zero, unknown }, completion: { upstream: zero, estimated: zero, local_override: zero, unknown } },
+  } } }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/admin')
+  const panel = page.getByRole('region', { name: 'Token usage mix', exact: true })
+  await expect(panel).toContainText('Recorded usage')
+  await expect(panel.locator('summary')).toContainText('Upstream reported — · unknown source —')
+  await panel.locator('summary').click()
+  await expect(panel).not.toContainText('NaN')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
 test('Dashboard 首页直接展示模型、渠道与 Token 构成，占比包含榜外用量，明细保留时间窗', async ({ page }) => {
   const requests = await prepare(page)
   await page.goto('/admin?days=30')
@@ -481,10 +591,10 @@ test('Dashboard 首页直接展示模型、渠道与 Token 构成，占比包含
   await expect(channels.getByRole('link', { name: '查看全部', exact: true })).toHaveAttribute('href', '/admin/stats?days=30&view=breakdown&by=channel')
   await expect(tokens.getByTitle('600,000', { exact: true })).toHaveText('60万 Tokens')
   // 五段互斥，缓存与推理不能在输入/输出基础上再重复累计。
-  await expect(tokens.locator('dd')).toHaveText(['24万', '14万', '20,000', '17万', '30,000'])
+  await expect(tokens.locator('[data-slot="token-segments"] dd')).toHaveText(['24万', '14万', '20,000', '17万', '30,000'])
   expect(requests.filter((url) => url.startsWith('/admin/stats/trend'))).toHaveLength(1)
   expect(requests.filter((url) => url.startsWith('/admin/stats/breakdown'))).toEqual([
-    '/admin/stats/breakdown?days=30&by=model&limit=3', '/admin/stats/breakdown?days=30&by=channel&limit=3',
+    '/admin/stats/breakdown?days=30&by=model&limit=3&cached=true', '/admin/stats/breakdown?days=30&by=channel&limit=3&cached=true',
   ])
   await expect(models.getByRole('button', { name: /再看|收起/ })).toHaveCount(0)
   await expect(models.getByRole('listitem')).toHaveCount(3)
@@ -968,3 +1078,42 @@ for (const width of [1024, 1440]) {
     await checkAlignment()
   })
 }
+
+for (const width of [1024, 1280, 1920]) {
+  test(`首页趋势图 ${width}px：绘图区撑满趋势卡，右侧更高时图下方不留空白`, async ({ page }) => {
+    await prepare(page)
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/admin')
+    const trend = page.locator('[data-slot="dashboard-trend"]')
+    const plot = trend.getByLabel('趋势绘图区')
+    await expect(plot).toBeVisible()
+    const [card, area, tokens] = await Promise.all([trend.boundingBox(), plot.boundingBox(), page.getByRole('region', { name: 'Token 用量构成', exact: true }).boundingBox()])
+    // 右侧排行 + Token 构成比趋势卡内容更高，趋势卡随之拉高；绘图区应吃掉多出来的高度，只剩卡片内边距。
+    expect(card!.y + card!.height - (area!.y + area!.height)).toBeLessThanOrEqual(12)
+    expect(area!.height).toBeGreaterThanOrEqual(144)
+    expect(Math.abs(tokens!.y + tokens!.height - card!.y - card!.height)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
+test('首页 768px 平板：五张指标卡 3+2 铺满两行，实时指标五项同排', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 768, height: 1024 })
+  await page.goto('/admin')
+  const cards = page.getByRole('region', { name: '经营概览' }).getByRole('link')
+  await expect(cards).toHaveCount(5)
+  const [a, b, c, d, e] = await Promise.all((await cards.all()).map((card) => card.boundingBox()))
+  // 第一行三张等宽，第二行两张各占半行：右缘与第一行对齐，不留空位。
+  expect(Math.abs(a!.y - b!.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(b!.y - c!.y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(d!.y - e!.y)).toBeLessThanOrEqual(1)
+  expect(d!.y).toBeGreaterThan(a!.y + a!.height)
+  expect(Math.abs(d!.x - a!.x)).toBeLessThanOrEqual(1)
+  expect(Math.abs(e!.x + e!.width - c!.x - c!.width)).toBeLessThanOrEqual(1)
+  expect(Math.abs(d!.x + d!.width + 8 - e!.x)).toBeLessThanOrEqual(1)
+  // 实时区五项一行，不再 3+2 折行。
+  const live = page.getByRole('region', { name: '实时流量' })
+  const ys = await Promise.all(['QPS', '60 秒请求', '错误率', 'Token 数', '收入'].map(async (label) => (await live.getByText(label, { exact: true }).first().boundingBox())!.y))
+  expect(Math.max(...ys) - Math.min(...ys)).toBeLessThanOrEqual(1)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})

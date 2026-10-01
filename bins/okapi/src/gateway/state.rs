@@ -57,6 +57,8 @@ pub struct AppState {
     pub node: Arc<str>,
     /// 统计查询（console 门户/管理用）；None = 统计接口 fail-closed 501。
     pub ch: Option<ChClient>,
+    /// Opt-in console dashboard queries, 15s TTL with bounded memory and single-flight.
+    pub stats_query_cache: crate::console::stats_cache::QueryCache,
     /// NATS（epoch 广播等）；None = 单机形态走轮询/直连。
     pub nats: Option<async_nats::Client>,
     /// 信封加密主密钥（hex）；None = TOTP 注册不可用（fail-closed）。

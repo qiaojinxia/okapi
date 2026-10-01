@@ -1,5 +1,6 @@
 //! Gemini usageMetadata: totals include cached input and thinking output.
 use okapi_api::{CompletionTokensDetails, ModalTokensDetails, PromptTokensDetails, UsageProbe};
+use okapi_domain::ModalitiesReported;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -10,8 +11,7 @@ struct Metadata {
     prompt_token_count: Option<u32>,
     #[serde(default)]
     candidates_token_count: Option<u32>,
-    #[serde(default)]
-    thoughts_token_count: u32,
+    thoughts_token_count: Option<u32>,
     cached_content_token_count: Option<u32>,
     total_token_count: Option<u64>,
     prompt_tokens_details: Option<Vec<Modality>>,
@@ -26,7 +26,11 @@ struct Modality {
     token_count: u32,
 }
 
-fn modalities(rows: Option<&[Modality]>, total: u32, complete: bool) -> Option<(u32, u32)> {
+fn modalities(
+    rows: Option<&[Modality]>,
+    total: u32,
+    complete: bool,
+) -> Option<(u32, u32, ModalitiesReported)> {
     let mut audio = 0;
     let mut image = 0;
     let mut counted = 0_u64;
@@ -46,20 +50,29 @@ fn modalities(rows: Option<&[Modality]>, total: u32, complete: bool) -> Option<(
     if counted > u64::from(total) || (complete && counted != u64::from(total)) {
         return None;
     }
-    Some((audio, image))
+    let covered = rows.is_some() && counted == u64::from(total);
+    Some((
+        audio,
+        image,
+        ModalitiesReported {
+            audio: seen.contains("AUDIO") || covered,
+            image: seen.contains("IMAGE") || covered,
+        },
+    ))
 }
 
 fn normalize(meta: &Metadata) -> Option<UsageProbe> {
-    let completion = meta.candidates_token_count.map_or(Some(None), |n| {
-        n.checked_add(meta.thoughts_token_count).map(Some)
-    })?;
+    let thoughts = meta.thoughts_token_count.unwrap_or(0);
+    let completion = meta
+        .candidates_token_count
+        .map_or(Some(None), |n| n.checked_add(thoughts).map(Some))?;
     let mut probe: UsageProbe = serde_json::from_value(serde_json::json!({
         "prompt_tokens": meta.prompt_token_count,
         "completion_tokens": completion,
         "total_tokens": meta.total_token_count,
     }))
     .ok()?;
-    let (audio, image) = modalities(
+    let (audio, image, input_reported) = modalities(
         meta.prompt_tokens_details.as_deref(),
         if probe.missing_prompt {
             u32::MAX
@@ -68,20 +81,18 @@ fn normalize(meta: &Metadata) -> Option<UsageProbe> {
         },
         false,
     )?;
-    let (audio_out, image_out) = modalities(
+    let (audio_out, image_out, output_reported) = modalities(
         meta.candidates_tokens_details.as_deref(),
         if probe.missing_completion {
             u32::MAX
         } else {
-            probe
-                .completion_tokens
-                .checked_sub(meta.thoughts_token_count)?
+            probe.completion_tokens.checked_sub(thoughts)?
         },
         false,
     )?;
     let cached_details = if let Some(rows) = meta.cache_tokens_details.as_deref() {
         let total = meta.cached_content_token_count?;
-        let (audio, image) = modalities(Some(rows), total, true)?;
+        let (audio, image, _) = modalities(Some(rows), total, true)?;
         Some(ModalTokensDetails {
             text_tokens: Some(total.checked_sub(audio)?.checked_sub(image)?),
             audio_tokens: Some(audio),
@@ -96,10 +107,13 @@ fn normalize(meta: &Metadata) -> Option<UsageProbe> {
         audio_tokens: audio,
         image_tokens: image,
         cached_tokens_details: cached_details,
+        modalities_reported: input_reported,
         ..PromptTokensDetails::default()
     };
     probe.completion_tokens_details = CompletionTokensDetails {
-        reasoning_tokens: meta.thoughts_token_count,
+        reasoning_tokens: thoughts,
+        reasoning_reported: meta.thoughts_token_count.is_some(),
+        modalities_reported: output_reported,
         audio_tokens: audio_out,
         image_tokens: image_out,
     };

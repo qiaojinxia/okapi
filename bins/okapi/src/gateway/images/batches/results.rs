@@ -214,43 +214,17 @@ fn image(response: &Value) -> Result<Option<(Vec<u8>, String)>, AppError> {
     }
     Ok(found)
 }
-fn number(value: &Value, key: &str) -> Result<u32, AppError> {
-    match value.get(key) {
-        None => Ok(0),
-        Some(v) => v
-            .as_u64()
-            .and_then(|n| u32::try_from(n).ok())
-            .ok_or_else(|| invalid("batch_usage")),
-    }
-}
 fn usage(value: Option<&Value>) -> Result<TokenUsage, AppError> {
     let Some(value) = value else {
         return Ok(TokenUsage::default());
     };
-    if !value.is_object() {
-        return Err(invalid("batch_usage"));
-    }
-    let reasoning = number(value, "thoughtsTokenCount")?;
-    let completion = number(value, "candidatesTokenCount")?
-        .checked_add(reasoning)
-        .ok_or_else(|| invalid("batch_usage"))?;
-    let usage = TokenUsage {
-        prompt_tokens: number(value, "promptTokenCount")?,
-        cached_tokens: number(value, "cachedContentTokenCount")?,
-        completion_tokens: completion,
-        reasoning_tokens: reasoning,
-        ..TokenUsage::default()
-    };
-    usage.validate().map_err(|_| invalid("batch_usage"))?;
-    if value.get("totalTokenCount").is_some()
-        && u64::from(number(value, "totalTokenCount")?) != usage.total_raw()
-    {
-        return Err(invalid("batch_usage_total"));
-    }
-    Ok(usage)
+    okapi_providers::convert::openai_to_gemini::usage_from_gemini(Some(value))
+        .ok_or_else(|| invalid("batch_usage"))?
+        .to_token_usage()
+        .map_err(|_| invalid("batch_usage"))
 }
 pub(super) fn total_usage(values: Vec<Value>) -> Result<TokenUsage, AppError> {
-    let mut total = TokenUsage::default();
+    let mut total: Option<TokenUsage> = None;
     for value in values {
         let u: TokenUsage = if value == json!({}) {
             TokenUsage::default()
@@ -258,17 +232,138 @@ pub(super) fn total_usage(values: Vec<Value>) -> Result<TokenUsage, AppError> {
             serde_json::from_value(value).map_err(|_| invalid("batch_usage"))?
         };
         u.validate().map_err(|_| invalid("batch_usage"))?;
-        let add = |a: u32, b: u32| a.checked_add(b).ok_or_else(|| invalid("batch_usage_total"));
-        total.prompt_tokens = add(total.prompt_tokens, u.prompt_tokens)?;
-        total.cached_tokens = add(total.cached_tokens, u.cached_tokens)?;
-        total.completion_tokens = add(total.completion_tokens, u.completion_tokens)?;
-        total.reasoning_tokens = add(total.reasoning_tokens, u.reasoning_tokens)?;
-        total.cache_write_tokens = add(total.cache_write_tokens, u.cache_write_tokens)?;
-        total.image_prompt_tokens = add(total.image_prompt_tokens, u.image_prompt_tokens)?;
-        total.audio_prompt_tokens = add(total.audio_prompt_tokens, u.audio_prompt_tokens)?;
-        total.audio_completion_tokens =
-            add(total.audio_completion_tokens, u.audio_completion_tokens)?;
+        if i32::try_from(u.prompt_tokens).is_err() || i32::try_from(u.completion_tokens).is_err() {
+            return Err(invalid("batch_usage_total"));
+        }
+        total = Some(match total {
+            None => u,
+            Some(previous) => previous
+                .checked_add(u)
+                .map_err(|_| invalid("batch_usage_total"))?,
+        });
     }
-    total.validate().map_err(|_| invalid("batch_usage_total"))?;
-    Ok(total)
+    Ok(total.unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_totals_keep_image_output_cache_intersections_ttl_and_observation() {
+        let raw = json!({"promptTokenCount":1000,"candidatesTokenCount":380,"thoughtsTokenCount":20,
+            "cachedContentTokenCount":300,"totalTokenCount":1400,
+            "promptTokensDetails":[{"modality":"TEXT","tokenCount":200},{"modality":"AUDIO","tokenCount":500},{"modality":"IMAGE","tokenCount":300}],
+            "cacheTokensDetails":[{"modality":"TEXT","tokenCount":50},{"modality":"AUDIO","tokenCount":150},{"modality":"IMAGE","tokenCount":100}],
+            "candidatesTokensDetails":[{"modality":"TEXT","tokenCount":80},{"modality":"AUDIO","tokenCount":100},{"modality":"IMAGE","tokenCount":200}]});
+        let mut u = usage(Some(&raw)).unwrap();
+        u.cache_write_reported = true;
+        u.cache_write_tokens = 100;
+        u.cache_write_5m_tokens = Some(40);
+        u.cache_write_1h_tokens = Some(60);
+        u.cache_write_modalities = Some(okapi_domain::CacheModalities {
+            audio_tokens: 10,
+            image_tokens: 20,
+        });
+        u.audio_prompt_tokens -= 10;
+        u.image_prompt_tokens -= 20;
+        u.reported_details.as_mut().unwrap().cache_write = okapi_domain::ModalitiesReported {
+            audio: true,
+            image: true,
+        };
+        let one = serde_json::to_value(u).unwrap();
+        assert_eq!(total_usage(vec![one.clone()]).unwrap(), u);
+        let total = total_usage(vec![one.clone(), one]).unwrap();
+        assert_eq!(
+            (
+                total.prompt_tokens,
+                total.completion_tokens,
+                total.image_completion_tokens,
+                total.audio_completion_tokens,
+                total.reasoning_tokens
+            ),
+            (2000, 800, 400, 200, 40)
+        );
+        assert_eq!(
+            (
+                total.cached_tokens,
+                total.cache_write_tokens,
+                total.audio_prompt_tokens,
+                total.image_prompt_tokens
+            ),
+            (600, 200, 680, 360)
+        );
+        assert_eq!(
+            (total.cache_write_5m_tokens, total.cache_write_1h_tokens),
+            (Some(80), Some(120))
+        );
+        assert_eq!(
+            total.cache_read_modalities.unwrap(),
+            okapi_domain::CacheModalities {
+                audio_tokens: 300,
+                image_tokens: 200
+            }
+        );
+        assert_eq!(
+            total.cache_write_modalities.unwrap(),
+            okapi_domain::CacheModalities {
+                audio_tokens: 20,
+                image_tokens: 40
+            }
+        );
+        assert_eq!(total.reported_details, u.reported_details);
+        assert_eq!(
+            (total.prompt_source(), total.completion_source()),
+            ("upstream", "upstream")
+        );
+        assert_eq!(total.total_raw(), 2800);
+        assert_eq!(
+            total.prompt_uncached()
+                + total.cached_text()
+                + total.cache_write_text()
+                + total.audio_prompt_tokens
+                + total.image_prompt_tokens
+                + total.cache_read_modalities.unwrap().audio_tokens
+                + total.cache_read_modalities.unwrap().image_tokens
+                + total.cache_write_modalities.unwrap().audio_tokens
+                + total.cache_write_modalities.unwrap().image_tokens,
+            2000
+        );
+    }
+
+    #[test]
+    fn missing_batch_usage_is_unknown_and_invalid_counters_cannot_be_zero() {
+        let known = usage(Some(
+            &json!({"promptTokenCount":100,"candidatesTokenCount":50,"thoughtsTokenCount":0}),
+        ))
+        .unwrap();
+        for entries in [vec![json!({}), json!(known)], vec![json!(known), json!({})]] {
+            let total = total_usage(entries).unwrap();
+            assert_eq!(total.total_raw(), 150);
+            assert!(total.reported_details.is_none() && total.upstream_usage.is_none());
+        }
+        assert_eq!(total_usage(vec![]).unwrap(), TokenUsage::default());
+        for raw in [
+            json!({}),
+            json!({"promptTokenCount":1}),
+            json!({"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":3}),
+            json!({"promptTokenCount":-1,"candidatesTokenCount":1}),
+        ] {
+            assert!(usage(Some(&raw)).is_err(), "{raw}");
+        }
+        let huge = TokenUsage {
+            prompt_tokens: i32::MAX as u32,
+            ..TokenUsage::default()
+        };
+        assert!(
+            total_usage(vec![
+                json!(huge),
+                json!(TokenUsage {
+                    prompt_tokens: 1,
+                    ..TokenUsage::default()
+                })
+            ])
+            .is_err()
+        );
+    }
 }

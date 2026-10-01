@@ -118,6 +118,7 @@ async fn group_lookup_is_literal_model_scoped_and_head_matches_get() {
     .execute(&env.pg)
     .await
     .unwrap();
+    env.publish().await;
     let url = env.url("/api/pricing/groups", &[("q", &code)]);
     let response = env.client.get(url.clone()).send().await.unwrap();
     assert_eq!(response.headers()["x-total-count"], "1");

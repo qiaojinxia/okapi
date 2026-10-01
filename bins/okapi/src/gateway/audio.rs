@@ -1,5 +1,5 @@
 //! /v1/audio/*（IMPLEMENTATION §4.4 媒体计费）：
-//! - speech：输入字符数记为 prompt_tokens 走 ratio（或模型配 per_call）；二进制音频回传；
+//! - speech：字符独立计价和记录，不进入 Token/TPM；二进制音频回传；
 //! - transcriptions：per_call 模式必须（时长无法本地解码）；multipart 解析重组转发，
 //!   上游 verbose_json 的 duration 若在则记入快照 media_units（秒，审计用）。
 
@@ -15,7 +15,7 @@ use bytes::Bytes;
 use okapi_api::codes;
 use okapi_domain::{BillingState, GroupCode, ModelCode, TokenUsage, UserId};
 use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, Quote, RatioFp, calculate};
+use okapi_pricing::{CalcContext, Quote, RatioFp, calculate, calculate_characters};
 use okapi_providers::rewrite_model;
 use serde::Deserialize;
 use serde_json::Value;
@@ -126,25 +126,13 @@ async fn handle_speech(
         ));
     }
 
-    // 字符数即计费单位（prompt 侧）
+    // Physical character quantity is confined to quoting; Token counters stay empty.
     let chars = u32::try_from(probe.input.chars().count()).unwrap_or(u32::MAX);
-    let usage = TokenUsage {
-        prompt_tokens: chars,
-        cached_tokens: 0,
-        cache_read_reported: false,
-        cache_write_reported: false,
-        cache_write_tokens: 0,
-        audio_prompt_tokens: 0,
-        image_prompt_tokens: 0,
-        completion_tokens: 0,
-        audio_completion_tokens: 0,
-        reasoning_tokens: 0,
-        ..TokenUsage::default()
-    };
+    let usage = TokenUsage::default();
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let calc = calc_ctx(&key, &canonical, rules_in);
-    let quote = calculate(&book, &calc, usage)?;
+    let quote = calculate_characters(&book, &calc, chars)?;
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
@@ -159,7 +147,7 @@ async fn handle_speech(
                 request_id,
                 est: quote.amount,
                 caps: caps_of(&key),
-                est_tokens: u64::from(chars),
+                est_tokens: 0,
             },
             chrono::Utc::now(),
         )
@@ -474,7 +462,6 @@ async fn settle(
     reservation_pool: okapi_ledger::Pool,
     source_window: Option<&str>,
 ) -> Result<(), AppError> {
-    let book = state.pricebook.load();
     let mut snapshot = quote.snapshot.clone();
     if media_units.is_some() {
         snapshot.media_units = media_units;
@@ -502,7 +489,7 @@ async fn settle(
         discount: quote.discount,
         list_price: quote.list_price,
         upstream_cost: None,
-        pricing_epoch: Some(book.epoch()),
+        pricing_epoch: Some(snapshot.epoch),
         pricing_snapshot: serde_json::to_value(&snapshot).ok(),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: None,

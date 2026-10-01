@@ -33,6 +33,7 @@ struct PricingRow {
     capabilities: Value,
     context_window: Option<i32>,
     max_output: Option<i32>,
+    catalog_config: Value,
     #[serde(rename = "mode")]
     pricing_mode: String,
     model_ratio: Option<String>,
@@ -81,6 +82,7 @@ struct PublicModel<'a> {
 #[derive(Serialize)]
 struct Catalog<'a> {
     models: Vec<PublicModel<'a>>,
+    pricing_epoch: i64,
     groups: &'a [Group],
     #[serde(flatten)]
     page: &'a PageMeta,
@@ -258,9 +260,12 @@ async fn fetch(
 ) -> Result<Response, AppError> {
     selection.filter.user_id = user_id;
     let mut tx = snapshot(state).await?;
-    let (groups, groups_page) = groups::read(&mut tx, &selection.groups, user_id).await?;
-    let mut models = query::models(&mut tx, &selection.filter, selection.slice).await?;
-    let page = query::metadata(&mut tx, &selection, models.len()).await?;
+    let publication = okapi_store::pricing::published_pricing(&mut tx).await?;
+    let published = serde_json::to_value(&publication.source).map_err(|_| AppError::internal())?;
+    let (groups, groups_page) =
+        groups::read(&mut tx, &selection.groups, user_id, &published).await?;
+    let mut models = query::models(&mut tx, &selection.filter, selection.slice, &published).await?;
+    let page = query::metadata(&mut tx, &selection, models.len(), &published).await?;
     let names: Vec<_> = models.iter().map(|m| m.model_name.clone()).collect();
     let pools: Vec<_> = groups
         .iter()
@@ -277,8 +282,16 @@ async fn fetch(
     let mut response = if method == Method::HEAD {
         empty_response()
     } else {
-        let base = crate::gateway::pricing_loader::published_base_price(&state.pg, None).await?;
-        catalog(&mut models, &groups, &served, &page, &groups_page, base)?
+        let base = crate::gateway::pricing_loader::publication_base_price(&publication)?;
+        catalog(
+            &mut models,
+            &groups,
+            &served,
+            &page,
+            &groups_page,
+            base,
+            publication.source.epoch,
+        )?
     };
     page.page.headers(&mut response)?;
     private_response(&mut response);
@@ -292,6 +305,7 @@ fn catalog(
     page: &PageMeta,
     groups_page: &paging::Meta,
     base_price_per_1m_micro: i64,
+    pricing_epoch: i64,
 ) -> Result<Response, AppError> {
     let index = signatures(served);
     let mut cache = HashMap::<Signature, Visibility>::new();
@@ -312,25 +326,17 @@ fn catalog(
     }
     for model in models.iter_mut() {
         model.capabilities = Value::Object(
-            [
-                "vision",
-                "tools",
-                "json",
-                "reasoning",
-                "audio",
-                "video",
-                "embedding",
-                "realtime",
-            ]
-            .into_iter()
-            .filter_map(|key| {
-                model
-                    .capabilities
-                    .get(key)
-                    .and_then(Value::as_bool)
-                    .map(|v| (key.to_owned(), Value::Bool(v)))
-            })
-            .collect(),
+            okapi_store::model_config::CAPABILITIES
+                .iter()
+                .copied()
+                .filter_map(|key| {
+                    model
+                        .capabilities
+                        .get(key)
+                        .and_then(Value::as_bool)
+                        .map(|v| (key.to_owned(), Value::Bool(v)))
+                })
+                .collect(),
         );
         model.context_window = model.context_window.filter(|v| *v > 0);
         model.max_output = model.max_output.filter(|v| *v > 0);
@@ -350,6 +356,7 @@ fn catalog(
         .collect();
     Ok(Json(Catalog {
         models: data,
+        pricing_epoch,
         groups,
         page,
         groups_page,

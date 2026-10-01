@@ -24,6 +24,8 @@ export interface AutocompleteInputProps
   /// 已选实体显示名称；编辑和选择仍通过 value 回传准确标识。
   displayValue?: string
   optionLabelFirst?: boolean
+  /// Focus browses all supplied options; typing resumes text filtering.
+  browseOnFocus?: boolean
   emptyHint?: string
   moreHint?: string
 }
@@ -33,7 +35,7 @@ const normalize = (value: string) => value.normalize('NFKC').trim().toLowerCase(
 // 手输保持原值；只有显式选择才替换为目录中的准确 ID。
 export function AutocompleteInput({
   value, onChange, options, onChoose, onSubmit, loading, error, search = false,
-  displayValue, optionLabelFirst = false, emptyHint, moreHint,
+  displayValue, optionLabelFirst = false, browseOnFocus = false, emptyHint, moreHint,
   className, inputClassName, onKeyDown, onFocus, onBlur, disabled, readOnly, ...props
 }: AutocompleteInputProps) {
   const { t } = useTranslation()
@@ -45,9 +47,10 @@ export function AutocompleteInput({
   const list = useRef<HTMLUListElement>(null)
   const [open, setOpen] = useState(false)
   const [active, setActive] = useState<string | null>(null)
+  const [filterOnInput, setFilterOnInput] = useState(false)
   const expanded = open && !disabled && !readOnly
   const matches = useMemo(() => {
-    const query = normalize(value)
+    const query = browseOnFocus && !filterOnInput ? '' : normalize(value)
     const terms = query.split(/\s+/).filter(Boolean)
     const unique = [...new Map(options.map((option) => [option.value, option])).values()]
     const rank = (option: InputSuggestion) => {
@@ -58,7 +61,7 @@ export function AutocompleteInput({
       const text = normalize(`${option.value} ${option.label ?? ''} ${option.description ?? ''}`)
       return terms.every((term) => text.includes(term))
     }).sort((a, b) => rank(a) - rank(b))
-  }, [options, value])
+  }, [options, value, browseOnFocus, filterOnInput])
   const visible = matches.slice(0, 40)
   const activeIndex = visible.findIndex((option) => option.value === active)
 
@@ -118,6 +121,7 @@ export function AutocompleteInput({
   const choose = (option: InputSuggestion) => {
     setOpen(false)
     setActive(null)
+    setFilterOnInput(false)
     onChange(option.value)
     onChoose?.(option.value)
   }
@@ -141,10 +145,11 @@ export function AutocompleteInput({
         className={cn(inputClass, 'h-9 w-full px-3', search && 'pr-11 pl-8 md:pr-9', inputClassName)}
         onChange={(event) => {
           onChange(event.target.value)
+          setFilterOnInput(true)
           setActive(null)
           setOpen(true)
         }}
-        onFocus={(event) => { setOpen(true); onFocus?.(event) }}
+        onFocus={(event) => { setOpen(true); setFilterOnInput(false); onFocus?.(event) }}
         onBlur={(event) => { setOpen(false); setActive(null); onBlur?.(event) }}
         onKeyDown={(event) => {
           if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {

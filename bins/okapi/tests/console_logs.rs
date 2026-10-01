@@ -12,6 +12,12 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/token_detail_observations.rs"]
+mod token_detail_observations;
+
+#[path = "support/delivery_dlq.rs"]
+mod delivery_dlq;
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -123,6 +129,9 @@ fn payload(env: &Env, error_code: Option<&str>) -> Value {
         "channel_id": env.channel_id,
         "channel_key_id": 1,
         "log_type": if error_code.is_some() { 5 } else { 2 },
+        "prompt_source":"upstream",
+        "completion_source":"upstream",
+        "upstream_usage":{"prompt_tokens":100,"completion_tokens":200},
         "prompt_tokens": 100,
         "cached_tokens": 40,
         "cache_read_reported": true,
@@ -443,6 +452,77 @@ async fn log_search_resolves_names_and_columns() {
     assert_eq!(row["is_stream"], true);
     assert_eq!(row["client_type"], "test-cli");
     assert_eq!(row["is_error"], false);
+    assert!(row["usage"]["cache_write_5m_tokens"].is_null());
+    assert!(row["usage"]["image_completion_tokens"].is_null());
+    assert!(row["usage"]["cache_read_modalities"].is_null());
+}
+
+#[tokio::test]
+async fn log_extended_usage_and_stat_preserve_missing_observations() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        return;
+    }
+    seed(&env, 1, &[]).await;
+    let mut detail = payload(&env, None);
+    let request_id = detail["request_id"].as_str().unwrap().to_owned();
+    for (field, value) in [
+        ("cache_write_tokens", json!(20)),
+        ("cache_write_reported", json!(true)),
+        ("cache_write_5m_tokens", json!(12)),
+        ("cache_write_1h_tokens", json!(8)),
+        ("audio_prompt_tokens", json!(5)),
+        ("image_prompt_tokens", json!(3)),
+        ("audio_completion_tokens", json!(7)),
+        ("image_completion_tokens", json!(9)),
+        (
+            "cache_read_modalities",
+            json!({"audio_tokens":4,"image_tokens":6}),
+        ),
+        (
+            "cache_write_modalities",
+            json!({"audio_tokens":2,"image_tokens":3}),
+        ),
+        ("requested_model", json!("alias")),
+        ("upstream_model", json!("provider-model")),
+        ("endpoint", json!("/v1/responses")),
+        ("upstream_endpoint", json!("/v1/messages")),
+    ] {
+        detail[field] = value;
+    }
+    sqlx::query("INSERT INTO billing_outbox (topic,payload) VALUES ('request_log',$1)")
+        .bind(detail)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let path = format!(
+        "/admin/logs?model={}&request_id={request_id}&hours=1",
+        env.model
+    );
+    let row = poll_row(&env, &path, |_| true).await;
+    assert_eq!(row["requested_model"], "alias");
+    assert_eq!(row["upstream_model"], "provider-model");
+    assert_eq!(row["usage"]["cache_write_5m_tokens"], 12);
+    assert_eq!(row["usage"]["cache_write_1h_tokens"], 8);
+    assert_eq!(row["usage"]["image_completion_tokens"], 9);
+    assert_eq!(row["usage"]["cache_read_modalities"]["audio_tokens"], 4);
+    assert_eq!(row["usage"]["cache_write_modalities"]["image_tokens"], 3);
+    let (status, stat) = get(
+        &env,
+        &format!("/admin/logs/stat?model={}&hours=1&limit=1", env.model),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{stat}");
+    assert_eq!(stat["requests"], 2);
+    assert_eq!(stat["cache_write_tokens"], 20);
+    assert_eq!(stat["cache_write_samples"], 1);
+    assert_eq!(stat["cache_write_5m_tokens"], 12);
+    assert_eq!(stat["cache_write_ttl_samples"], 1);
+    assert_eq!(stat["image_completion_tokens"], 9);
+    assert_eq!(stat["image_completion_samples"], 1);
+    assert_eq!(stat["cache_read_audio_tokens"], 4);
+    assert_eq!(stat["cache_read_modal_samples"], 1);
 }
 
 #[tokio::test]

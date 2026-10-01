@@ -84,10 +84,18 @@ async fn verify_record(env: &TestEnv, input: i64, output: i64, amount: i64, know
             metrics["total"]["cache_read_known_requests"],
             i64::from(known)
         );
+        assert_eq!(
+            metrics["total"]["cache_hit_bp"],
+            if known { json!(4000) } else { Value::Null }
+        );
+        assert_eq!(
+            metrics["total"]["token_provenance"]["prompt"]["upstream"]["requests"],
+            1
+        );
         if known {
-            assert_eq!(metrics["total"]["cache_hit_bp"], 4000);
+            assert_eq!(metrics["total"]["settled_cache_hit_bp"], 4000);
         } else {
-            assert!(metrics["total"]["cache_hit_bp"].is_null());
+            assert!(metrics["total"]["settled_cache_hit_bp"].is_null());
         }
     } else {
         eprintln!("SKIP: Realtime usage ClickHouse assertions require OKAPI_CLICKHOUSE_URL");

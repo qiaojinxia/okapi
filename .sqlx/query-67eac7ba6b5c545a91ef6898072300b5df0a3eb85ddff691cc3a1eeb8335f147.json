@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox SET published_at=now()-interval '10 minutes' WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "67eac7ba6b5c545a91ef6898072300b5df0a3eb85ddff691cc3a1eeb8335f147"
+}

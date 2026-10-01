@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { useEffect, useId } from 'react'
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/input'
@@ -20,6 +21,9 @@ interface PaginationProps {
   pageSizes?: readonly number[]
   onLimit?: (limit: number) => void
   className?: string
+  /// 游标分页可提供本页实际区间，不用总数推算尚未获取的页。
+  summary?: ReactNode
+  disabled?: boolean
 }
 
 /// 页码序列：首尾 + 当前页邻域，其余折成省略号（null）。
@@ -48,7 +52,7 @@ function pageList(current: number, pages: number): (number | null)[] {
 ///
 /// 何时不渲染：骨架屏与空态各自已占位，故 total 未回来或为 0 时整条不画；一页装得下时
 /// **只有没带页宽切换器的调用方**（自带页宽 UI 的公开定价页）才整条隐藏。带切换器的一律常驻：
-/// 它是"每页看多少"的唯一入口，跟着列表长度忽隐忽现的话，切到 100/页后就再也换不回 20/页，
+/// 它是"每页看多少"的唯一入口，跟着列表长度忽隐忽现的话，切到 100/页后就再也换不回 10/页，
 /// 短列表页（分组 / 池 / 角色 / 套餐）更会看起来"分页没了"。
 export function Pagination({
   total,
@@ -59,6 +63,8 @@ export function Pagination({
   pageSizes,
   onLimit,
   className,
+  summary,
+  disabled = false,
 }: PaginationProps) {
   const { t } = useTranslation()
   const sizeId = useId()
@@ -88,17 +94,17 @@ export function Pagination({
     <nav
       data-slot="pagination"
       aria-label={t('common:pagination')}
-      className={cn('flex min-h-14 min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl border border-border bg-card px-3 py-2 shadow-card', className)}
+      className={cn('flex min-h-14 min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 rounded-xl border border-border bg-card px-3 py-1.5 shadow-card', className)}
     >
       <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
         <span className="text-xs text-muted-foreground tabular-nums">
-          {total === undefined
+          {summary ?? (total === undefined
             ? t('common:pageN', { page: current })
             : t('common:pageRange', {
                 from: clamped + 1,
                 to: Math.min(clamped + limit, total),
                 total,
-              })}
+              }))}
         </span>
         {showSizes && (
           <span className="flex items-center gap-1.5">
@@ -107,6 +113,7 @@ export function Pagination({
               id={sizeId}
               className="[&>select]:h-9 [&>select]:text-xs"
               value={String(limit)}
+              disabled={disabled}
               onChange={(v) => onLimit?.(Number(v))}
               options={sizes.map((n) => ({ value: String(n), label: t('common:perPage', { n }) }))}
             />
@@ -118,7 +125,7 @@ export function Pagination({
           variant="outline"
           size="icon"
           className="h-9 w-9"
-          disabled={current === 1}
+          disabled={disabled || current === 1}
           aria-label={t('common:prevPage')}
           onClick={() => onOffset(Math.max(0, clamped - limit))}
         >
@@ -137,6 +144,7 @@ export function Pagination({
                 size="icon"
                 className="h-9 min-w-9 px-2 text-xs tabular-nums"
                 aria-current={p === current ? 'page' : undefined}
+                disabled={disabled}
                 onClick={() => onOffset((p - 1) * limit)}
               >
                 {p}
@@ -147,7 +155,7 @@ export function Pagination({
           variant="outline"
           size="icon"
           className="h-9 w-9"
-          disabled={pages !== null ? current >= pages : !hasMore}
+          disabled={disabled || (pages !== null ? current >= pages : !hasMore)}
           aria-label={t('common:nextPage')}
           onClick={() => onOffset(clamped + limit)}
         >

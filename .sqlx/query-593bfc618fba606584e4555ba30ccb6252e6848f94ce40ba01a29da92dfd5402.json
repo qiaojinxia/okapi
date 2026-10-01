@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_ch_batches SET event_count=$2,rows=$3,payloads=$4 WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Jsonb",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "593bfc618fba606584e4555ba30ccb6252e6848f94ce40ba01a29da92dfd5402"
+}

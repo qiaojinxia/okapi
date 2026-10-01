@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_ch_batches SET status=1,completed_at=now(),next_retry_at=NULL,\n                   rows='[]',payloads='[]' WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b92517f493c3bb5b26f2782c57deeea60288e142dc86a4ae5f836ade00cb91a6"
+}

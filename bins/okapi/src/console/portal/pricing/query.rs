@@ -48,19 +48,10 @@ impl CatalogQuery {
     pub(super) fn validate(self) -> Result<Selection, AppError> {
         let slice = bounded(self.limit, self.offset, "limit", "offset")?;
         let capability = trimmed(self.capability, 32, "capability")?;
-        if capability.as_deref().is_some_and(|c| {
-            !matches!(
-                c,
-                "vision"
-                    | "tools"
-                    | "json"
-                    | "reasoning"
-                    | "audio"
-                    | "video"
-                    | "embedding"
-                    | "realtime"
-            )
-        }) {
+        if capability
+            .as_deref()
+            .is_some_and(|c| !okapi_store::model_config::CAPABILITIES.contains(&c))
+        {
             return Err(AppError::bad_request().with_param("capability"));
         }
         let endpoint = self
@@ -113,18 +104,23 @@ pub(super) async fn models(
     conn: &mut PgConnection,
     filter: &Filter,
     slice: Slice,
+    published: &serde_json::Value,
 ) -> Result<Vec<PricingRow>, AppError> {
     let mut sql = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         r"SELECT m.model_name, m.display_name, m.vendor, p.pricing_mode,
-        m.capabilities, m.context_window, m.max_output,
-        p.model_ratio::text AS model_ratio, p.completion_ratio::text AS completion_ratio,
-        p.cache_ratio::text AS cache_ratio, p.cache_write_ratio::text AS cache_write_ratio,
-        p.audio_ratio::text AS audio_ratio, p.audio_completion_ratio::text AS audio_completion_ratio,
-        p.image_ratio::text AS image_ratio, p.modality_ratios, p.per_call_price_micro
+        m.capabilities, m.context_window, m.max_output, m.catalog_config,
+        (p.model_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS model_ratio,
+        (p.completion_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS completion_ratio,
+        (p.cache_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS cache_ratio,
+        (p.cache_write_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS cache_write_ratio,
+        (p.audio_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS audio_ratio,
+        (p.audio_completion_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS audio_completion_ratio,
+        (p.image_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS image_ratio,
+        p.modality_ratios, p.per_call_price_micro
         ",
     );
     sql.push(FROM)
-        .push(" ORDER BY m.sort_order, m.model_name LIMIT $8 OFFSET $9");
+        .push(" ORDER BY m.sort_order, m.model_name LIMIT $9 OFFSET $10");
     Ok(sql
         .build_query_as()
         .bind(&filter.pattern)
@@ -134,6 +130,7 @@ pub(super) async fn models(
         .bind(&filter.group)
         .bind(filter.endpoint)
         .bind(filter.user_id)
+        .bind(published)
         .bind(slice.capped_limit())
         .bind(slice.offset)
         .fetch_all(conn)
@@ -159,6 +156,7 @@ pub(super) async fn metadata(
     conn: &mut PgConnection,
     selection: &Selection,
     count: usize,
+    published: &serde_json::Value,
 ) -> Result<PageMeta, AppError> {
     let filter = &selection.filter;
     let mut count_query = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT COUNT(*) ");
@@ -172,10 +170,11 @@ pub(super) async fn metadata(
         .bind(&filter.group)
         .bind(filter.endpoint)
         .bind(filter.user_id)
+        .bind(published)
         .fetch_one(&mut *conn)
         .await
         .map_err(okapi_store::StoreError::from)?;
-    let (vendors, vendors_page) = vendors(conn, selection).await?;
+    let (vendors, vendors_page) = vendors(conn, selection, published).await?;
     Ok(PageMeta {
         page: Meta::new(total, selection.slice, count),
         vendors,
@@ -186,6 +185,7 @@ pub(super) async fn metadata(
 async fn vendors(
     conn: &mut PgConnection,
     selection: &Selection,
+    published: &serde_json::Value,
 ) -> Result<(Vec<VendorCount>, Meta), AppError> {
     let filter = &selection.filter;
     // Keep all model filters except the selected vendor; facet search and paging are independent.
@@ -199,6 +199,7 @@ async fn vendors(
         .bind(&filter.group)
         .bind(filter.endpoint)
         .bind(filter.user_id)
+        .bind(published)
         .bind(&selection.vendor_pattern)
         .fetch_one(&mut *conn)
         .await
@@ -213,6 +214,7 @@ async fn vendors(
         .bind(&filter.group)
         .bind(filter.endpoint)
         .bind(filter.user_id)
+        .bind(published)
         .bind(&selection.vendor_pattern)
         .bind(selection.vendor_slice.capped_limit())
         .bind(selection.vendor_slice.offset)
@@ -227,11 +229,11 @@ fn vendor_sql(count: bool) -> sqlx::QueryBuilder<sqlx::Postgres> {
     let mut sql = sqlx::QueryBuilder::new(if count { "SELECT COUNT(*) FROM (" } else { "" });
     sql.push("SELECT NULLIF(lower(btrim(m.vendor)), '') AS vendor, COUNT(*) AS count ")
         .push(FROM)
-        .push(r" AND ($8::text IS NULL OR m.vendor ILIKE $8 ESCAPE E'\\') GROUP BY 1");
+        .push(r" AND ($9::text IS NULL OR m.vendor ILIKE $9 ESCAPE E'\\') GROUP BY 1");
     sql.push(if count {
         ") facets"
     } else {
-        " ORDER BY 1 NULLS LAST LIMIT $9 OFFSET $10"
+        " ORDER BY 1 NULLS LAST LIMIT $10 OFFSET $11"
     });
     sql
 }

@@ -224,7 +224,7 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "dlq_requeue",
-        description: "Requeue DLQ entries back into billing_outbox. Two-phase: confirm=true required.",
+        description: "Requeue DLQ entries. Selecting a persisted CH batch member restores its whole original batch; legacy entries return to outbox. Returns actual member count. Two-phase: confirm=true required.",
         schema: || {
             json!({"type": "object", "required": ["ids"], "properties": {
                 "ids": {"type": "array", "items": {"type": "integer"}},
@@ -709,6 +709,15 @@ pub(super) async fn diagnose(state: &AppState) -> Result<Value, AppError> {
     .unwrap_or(-1);
     // 只数未处理的：已丢弃的毒消息不该让健康面板永远红
     let dlq_depth = super::dlq::pending_depth(&state.pg).await.unwrap_or(-1);
+    let delivery = okapi_store::delivery::backlog(&state.pg)
+        .await
+        .ok()
+        .map(|b| {
+            json!({
+                "pending_events":b.pending_events,"failed_events":b.failed_events,
+                "ch_pending_events":b.ch_pending_events,"oldest_pending_at":b.oldest_pending_at
+            })
+        });
     let cooling_keys = sqlx::query_scalar!(
         r#"SELECT COUNT(*)::bigint AS "c!" FROM channel_keys
            WHERE status <> 1 AND cooldown_until > now()"#
@@ -722,6 +731,7 @@ pub(super) async fn diagnose(state: &AppState) -> Result<Value, AppError> {
         "clickhouse": ch_ok,
         "nats_connected": state.nats.is_some(),
         "outbox_pending": outbox_pending,
+        "delivery": delivery,
         "dlq_depth": dlq_depth,
         "cooling_keys": cooling_keys,
         "pricebook_epoch": state.pricebook.epoch(),
@@ -909,7 +919,8 @@ async fn simulate_pricing(state: &AppState) -> Result<Value, AppError> {
     let source = crate::gateway::pricing_loader::build_source(&rows);
     let models = source.models.len();
     let groups = source.groups.len();
-    match okapi_pricing::book::compile(source) {
+    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
+    match okapi_pricing::book::compile_with_base(source, base) {
         Ok(_) => Ok(json!({"ok": true, "models": models, "groups": groups})),
         Err(err) => Ok(json!({"ok": false, "compile_error": err.to_string()})),
     }
@@ -924,7 +935,14 @@ async fn apply_pricing(state: &AppState, key: &AuthedKey, args: &Value) -> Resul
         return Ok(json!({"dry_run": true, "validation": sim}));
     }
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
-    let snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
+    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
+    okapi_pricing::book::compile_with_base(
+        crate::gateway::pricing_loader::build_source(&rows),
+        base,
+    )
+    .map_err(|err| AppError::bad_request().with_param(format!("compile: {err}")))?;
+    let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
+    snapshot["base_price_per_1m_micro"] = json!(base);
     let epoch = okapi_store::admin::publish_epoch(&state.pg, key.user_id, &snapshot).await?;
     if let Some(nats) = &state.nats {
         let _ = nats
@@ -945,7 +963,8 @@ async fn dlq_requeue(state: &AppState, key: &AuthedKey, args: &Value) -> Result<
         return Err(AppError::bad_request().with_param("ids"));
     }
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
-        return Ok(json!({"dry_run": true, "ids": ids}));
+        let members = super::dlq::requeue_scope(&state.pg, &ids).await?;
+        return Ok(json!({"dry_run": true, "ids": ids,"requeue_members":members}));
     }
     // 与 HTTP /admin/dlq/requeue 同一函数：AI 与人执行的必须是同一个动作
     let requeued = super::dlq::requeue(&state.pg, &ids).await?;

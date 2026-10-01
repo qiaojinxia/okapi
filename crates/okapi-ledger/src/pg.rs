@@ -122,6 +122,7 @@ pub async fn record_settlement_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: SettlementInput<'_>,
 ) -> Result<bool, LedgerError> {
+    let (input_unit, input_characters) = input_units(input.usage, input.pricing_snapshot.as_ref())?;
     // 两参形式与单参 bigint 形式的锁互不相撞（sqlx 迁移锁用的是单参）；
     // 不同 request_id 撞上同一个 hashtext 只是短暂串行，不影响正确性
     okapi_store::history::read_lock(tx).await?;
@@ -202,6 +203,8 @@ pub async fn record_settlement_in_tx(
     .bind(input.pool.as_i16())
     .bind(serde_json::json!({
         "tokens": input.usage,
+        "input_unit": input_unit,
+        "input_characters": input_characters,
         "prompt_source": input.usage.prompt_source(),
         "completion_source": input.usage.completion_source(),
         "requested_model": input.dimensions.requested_model,
@@ -301,7 +304,7 @@ pub async fn record_settlement_in_tx(
             "client_type": input.client_type,
             "client_ip": input.client_ip,
             "pool": input.pool.as_i16(),
-        }), input.usage)
+        }), input.usage, input_unit, input_characters)
     )
     .execute(&mut **tx)
     .await?;
@@ -393,9 +396,159 @@ pub async fn record_credit_in_tx(
     Ok(())
 }
 
-fn with_usage_source(mut payload: serde_json::Value, usage: TokenUsage) -> serde_json::Value {
+fn input_units(
+    usage: TokenUsage,
+    snapshot: Option<&serde_json::Value>,
+) -> Result<(&'static str, Option<u32>), LedgerError> {
+    let unit = snapshot.and_then(|s| s.get("input_unit"));
+    let characters = snapshot.and_then(|s| s.get("input_characters"));
+    match unit.and_then(serde_json::Value::as_str) {
+        Some("characters") => {
+            let count = characters
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or(LedgerError::InvalidSettlement)?;
+            if usage != TokenUsage::default() {
+                return Err(LedgerError::InvalidSettlement);
+            }
+            Ok(("characters", Some(count)))
+        }
+        None | Some("tokens")
+            if unit.is_none_or(|v| v.is_null() || v.is_string())
+                && characters.is_none_or(serde_json::Value::is_null) =>
+        {
+            // Empty usage on a per-call or media response is not evidence of a Token unit.
+            // Explicit Token metadata or any observed Token axis retains the unit.
+            let known = unit.and_then(serde_json::Value::as_str) == Some("tokens")
+                || usage.upstream_usage.is_some_and(|u| {
+                    u.prompt_tokens.is_some()
+                        || u.completion_tokens.is_some()
+                        || usage.total_raw() > 0
+                })
+                || usage.cache_read_reported
+                || usage.cache_write_reported
+                || usage.cache_write_5m_tokens.is_some()
+                || usage.cache_write_1h_tokens.is_some()
+                || usage
+                    .reported_details
+                    .is_some_and(|d| d != okapi_domain::TokenDetailsReported::default());
+            Ok((if known { "tokens" } else { "" }, None))
+        }
+        _ => Err(LedgerError::InvalidSettlement),
+    }
+}
+
+fn with_usage_source(
+    mut payload: serde_json::Value,
+    usage: TokenUsage,
+    input_unit: &str,
+    input_characters: Option<u32>,
+) -> serde_json::Value {
+    payload["input_unit"] = input_unit.into();
+    payload["input_characters"] = serde_json::json!(input_characters);
+    payload["reported_details"] = serde_json::json!(usage.reported_details);
+    payload["cache_read_modalities"] = serde_json::json!(usage.cache_read_modalities);
+    payload["cache_write_modalities"] = serde_json::json!(usage.cache_write_modalities);
+    payload["audio_prompt_tokens"] = usage.audio_prompt_tokens.into();
+    payload["image_prompt_tokens"] = usage.image_prompt_tokens.into();
+    payload["audio_completion_tokens"] = usage.audio_completion_tokens.into();
+    payload["image_completion_tokens"] = usage.image_completion_tokens.into();
+    payload["cache_write_5m_tokens"] = serde_json::json!(usage.cache_write_5m_tokens);
+    payload["cache_write_1h_tokens"] = serde_json::json!(usage.cache_write_1h_tokens);
     payload["upstream_usage"] = serde_json::json!(usage.upstream_usage);
     payload["prompt_source"] = usage.prompt_source().into();
     payload["completion_source"] = usage.completion_source().into();
     payload
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::input_units;
+    use okapi_domain::{TokenUsage, UpstreamTokenCounts};
+    use serde_json::json;
+
+    #[test]
+    fn character_units_keep_known_zero_and_u32_boundary() {
+        for count in [0, 11, u32::MAX] {
+            let snapshot = json!({"input_unit":"characters", "input_characters":count});
+            assert_eq!(
+                input_units(TokenUsage::default(), Some(&snapshot)).unwrap(),
+                ("characters", Some(count))
+            );
+        }
+        assert_eq!(
+            input_units(TokenUsage::default(), None).unwrap(),
+            ("", None)
+        );
+        let zero = TokenUsage {
+            upstream_usage: Some(UpstreamTokenCounts {
+                prompt_tokens: Some(0),
+                completion_tokens: Some(0),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(input_units(zero, None).unwrap(), ("tokens", None));
+        let missing = TokenUsage {
+            upstream_usage: Some(UpstreamTokenCounts::default()),
+            ..Default::default()
+        };
+        assert_eq!(input_units(missing, None).unwrap(), ("", None));
+        let legacy = TokenUsage {
+            prompt_tokens: 11,
+            ..Default::default()
+        };
+        assert_eq!(
+            input_units(legacy, None).unwrap(),
+            ("", None),
+            "a legacy count may contain characters; quantity alone proves no unit"
+        );
+        let estimated = TokenUsage {
+            prompt_tokens: 11,
+            upstream_usage: Some(UpstreamTokenCounts::default()),
+            ..Default::default()
+        };
+        assert_eq!(input_units(estimated, None).unwrap(), ("tokens", None));
+        assert_eq!(
+            input_units(TokenUsage::default(), Some(&json!({"input_unit":"tokens"}))).unwrap(),
+            ("tokens", None)
+        );
+    }
+
+    #[test]
+    fn inconsistent_or_invalid_character_settlements_are_rejected() {
+        for snapshot in [
+            json!({"input_unit":"characters"}),
+            json!({"input_unit":"characters", "input_characters":null}),
+            json!({"input_unit":"characters", "input_characters":-1}),
+            json!({"input_unit":"characters", "input_characters":"11"}),
+            json!({"input_unit":"characters", "input_characters":true}),
+            json!({"input_unit":"characters", "input_characters":u64::from(u32::MAX)+1}),
+            json!({"input_unit":"tokens", "input_characters":11}),
+            json!({"input_characters":11}),
+            json!({"input_unit":"unknown"}),
+            json!({"input_unit":false}),
+        ] {
+            assert!(
+                input_units(TokenUsage::default(), Some(&snapshot)).is_err(),
+                "{snapshot}"
+            );
+        }
+        let snapshot = json!({"input_unit":"characters", "input_characters":11});
+        for usage in [
+            TokenUsage {
+                prompt_tokens: 11,
+                ..Default::default()
+            },
+            TokenUsage {
+                completion_tokens: 1,
+                ..Default::default()
+            },
+            TokenUsage {
+                audio_prompt_tokens: 1,
+                ..Default::default()
+            },
+        ] {
+            assert!(input_units(usage, Some(&snapshot)).is_err());
+        }
+    }
 }

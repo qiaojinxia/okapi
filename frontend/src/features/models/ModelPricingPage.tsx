@@ -120,6 +120,7 @@ export function ModelPricingPage() {
       toast.success(t('admin:publishedEpoch', { epoch: data.epoch }))
       invalidate()
       void queryClient.invalidateQueries({ queryKey: qk.adminSettings })
+      void queryClient.invalidateQueries({ queryKey: ['public-pricing'] })
     },
     onError: (err) => {
       toast.error(err instanceof ApiError && err.param === 'pricing_base_changed' ? t('admin:pricingBaseChanged') : describeError(err))
@@ -252,7 +253,13 @@ export function ModelPricingPage() {
           <TBody>
             {rows.map((m) => (
               <Tr key={m.model_name}>
-                <Td className="whitespace-nowrap font-mono text-xs font-medium">{m.model_name}</Td>
+                <Td className="whitespace-nowrap text-xs">
+                  <p className="font-mono font-medium">{m.model_name}</p>
+                  {(m.display_name || m.catalog_config?.kind) && <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
+                    {m.catalog_config?.kind && <Badge variant="muted">{t(`admin:modelKinds.${m.catalog_config.kind}`, { defaultValue: m.catalog_config.kind })}</Badge>}
+                    {m.display_name && m.display_name !== m.model_name && <span>{m.display_name}</span>}
+                  </div>}
+                </Td>
                 <Td className="text-xs text-muted-foreground">{m.vendor ?? '—'}</Td>
                 <Td>
                   {m.pricing_mode === null ? (
@@ -260,6 +267,7 @@ export function ModelPricingPage() {
                   ) : (
                     <Badge variant="muted">{m.pricing_mode}</Badge>
                   )}
+                  {m.pricing_mode === 'per_call' && <p className="mt-1 whitespace-nowrap text-xs text-muted-foreground">{formatUnitPrice(m.per_call_price_micro, i18n.language)} / {t('admin:modelMeta.callUnit')}</p>}
                 </Td>
                 <Td numeric>{formatRatio(m.model_ratio)}</Td>
                 <Td numeric>{formatRatio(m.completion_ratio)}</Td>

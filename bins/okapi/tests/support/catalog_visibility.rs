@@ -46,6 +46,7 @@ async fn catalogs_only_expose_selectable_groups_for_each_viewer() {
     .await
     .unwrap();
 
+    env.publish().await;
     for (token, allowed) in [
         (None, vec![&open]),
         (Some(&bob_key), vec![&open]),
@@ -202,6 +203,7 @@ async fn endpoint_facets_cannot_discover_routes_in_unassigned_private_pools() {
         .await
         .unwrap();
     let (id, token) = user(&env).await;
+    env.publish().await;
     let args = [
         ("q", env.prefix.as_str()),
         ("endpoint", "/v1/responses/compact"),

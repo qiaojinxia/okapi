@@ -278,7 +278,7 @@ JSON（access / refresh / expires_at），刷新按上面四步走：进程内�
 | Anthropic /v1/messages（双向：入口协议 + 上游方向）【已实现：`convert/{openai_to_anthropic,anthropic_to_openai}.rs` + 原生客户端 + x-api-key 鉴权；四象限用例全绿。**`POST /v1/messages/count_tokens`**：鉴权 + 模型可见性，**不计费**；有 anthropic 候选则代理上游 `/messages/count_tokens`（tokenizer 对齐 Claude Code），否则本地 `estimate_prompt_tokens`；错误壳 Anthropic】 | M3 |
 | Gemini generateContent（双向：入口协议 + 上游方向）【已实现。**上游方向**：`gemini.rs` + `convert/openai_to_gemini.rs`（thoughts 归 reasoning、promptTokenCount 含缓存口径）。**入口**（`gateway/chat.rs::gemini_generate`）：`POST /v1beta/models/{model}:generateContent|streamGenerateContent`，模型名与流式与否都在路径上；鉴权认 Bearer / `x-goog-api-key` / `?key=` 三态（Gemini SDK、gemini-cli 直连）；流式一律 SSE 形态（`alt=sse`，不提供 JSON 数组流），出口无 `[DONE]`；错误壳 google.rpc.Status（`error.{code,message,status}`）。gemini 渠道同方言直转（只重写 URL 模型名，`thinkingConfig` / 内置工具等私有字段全保住；`gemini.rs::MetaScanner` 从 usageMetadata 取 usage）；openai/anthropic 渠道走 `convert/gemini_to_openai.rs`（systemInstruction→system、parts 文本/inlineData/functionCall/functionResponse↔chat 形状、generationConfig→温度/上限/stop、tools functionDeclarations↔chat tools；响应侧 chat→GenerateContentResponse、chat SSE→gemini chunk 流，finishReason+usageMetadata 落最后一个 chunk），anthropic 为两跳 gemini→chat→anthropic。`GET /v1beta/models` 给 `models.list` 形状。backlog：`countTokens`、`embedContent`、`cachedContents` 子资源；`promptTokensDetails` 按 modality 拆分】 | M3 |
 | /v1/responses（原生直转 + 降级 ChatCompletions）【已实现。**直转**（`responses.rs`）：渠道 `settings.responses_native`（openai 缺省 true / openai_compat 缺省 false / 其它协议恒降级）时请求只重写 model 原样送上游 `/responses`——previous_response_id / store / include / 内置工具 / `reasoning.{effort,summary}` 全保住（Codex CLI 续聊与推理项依赖这些，降级链会静默丢），事件原文透出、usage 取 response.completed（含 cached / reasoning 细分）；reasoning 后缀注入为 `reasoning.effort`；上游 404/405 = 没有 /responses → 同候选就地改走降级链（不计 failover、不标 key 失败）。**降级**（`convert/responses_to_chat.rs`，#5209）：事件骨架合成 + 两跳（responses→chat→anthropic/gemini）。backlog：`GET/DELETE /v1/responses/{id}`、`/input_items`、`/cancel` 子资源（store:false 的 Codex 不需要）】 | M3 |
-| /v1/rerank（#1117）、图像/音频/视频（/v1/images、/v1/audio、/v1/videos/*，媒体计费） | M3【images/generations **与 images/edits** 已实现：per_call 按请求 n 预扣、按实际返回张数结算（n=1..10，非法值拒绝），乘数落 pricing_snapshot.media_units；edits 支持 JSON 的 images/mask 引用，以及 multipart 的 image / image[] / mask / prompt；图片 POST 不跟随重定向，超时/5xx 不自动重发，响应上限 64 MiB。流式、Token 定价和 file_id 生命周期仍有缺口，详见 [图片契约](docs/images-contract.md)；仅 openai / openai_compat / azure。rerank 已实现（Jina/Cohere 形状，prompt-only 计费，与 embeddings 共用泛化中继）；audio 已实现——**speech：输入字符数记为 prompt_tokens 走 ratio（对齐 OpenAI 按字符计价，站长把 model_ratio 配成字符价）或模型配 per_call；transcriptions：per_call 模式必须（时长无法本地解码），上游 verbose_json 的 duration 若在则记入快照供审计**；multipart 经解析重组转发（boundary 重生成，上游无感）；**videos 已实现（M4 补齐）**：POST /v1/videos 提交即 per_call × seconds 计费（缺省 4s、clamp 1..60，乘数落 pricing_snapshot.media_units；时长无法本地验证，与 transcriptions 立场一致），上游失败退款；GET /v1/videos/{id} 轮询与 /content 流式下载按创建时渠道映射回源（Redis video:task:* 48h，键含 user_id 隔离），不计费；JSON 提交，multipart input_reference 列 backlog】 |
+| /v1/rerank（#1117）、图像/音频/视频（/v1/images、/v1/audio、/v1/videos/*，媒体计费） | M3【images/generations **与 images/edits** 已实现：per_call 按请求 n 预扣、按实际返回张数结算（n=1..10，非法值拒绝），乘数落 pricing_snapshot.media_units；edits 支持 JSON 的 images/mask 引用，以及 multipart 的 image / image[] / mask / prompt；图片 POST 不跟随重定向，超时/5xx 不自动重发，响应上限 64 MiB。流式、Token 定价和 file_id 生命周期仍有缺口，详见 [图片契约](docs/images-contract.md)；仅 openai / openai_compat / azure。rerank 已实现（Jina/Cohere 形状，prompt-only 计费，与 embeddings 共用泛化中继）；audio 已实现——**speech：输入字符数独立存储，定价入口按字符走原 ratio/tiered（站长配置字符价）或 per_call，Token 计数不混入字符；transcriptions：per_call 模式必须（时长无法本地解码），上游 verbose_json 的 duration 若在则记入快照供审计**；multipart 经解析重组转发（boundary 重生成，上游无感）；**videos 已实现（M4 补齐）**：POST /v1/videos 提交即 per_call × seconds 计费（缺省 4s、clamp 1..60，乘数落 pricing_snapshot.media_units；时长无法本地验证，与 transcriptions 立场一致），上游失败退款；GET /v1/videos/{id} 轮询与 /content 流式下载按创建时渠道映射回源（Redis video:task:* 48h，键含 user_id 隔离），不计费；JSON 提交，multipart input_reference 列 backlog】 |
 | custom_pass 透传【已实现，语义定案：`/pass/{channel_id}/{*path}`（任意方法）；渠道 provider=custom_pass；settings 必填 `allowed_paths`（前缀白名单，空拒绝——SSRF 第二道闸，第一道是 api_base 固定）与 `billing_model`（models 表 per_call 模型，按次预扣/结算，禁零费裸透传）；可选 `auth_header`/`auth_scheme`（缺省 Authorization: Bearer）；请求体/查询串原样，响应流式回传仅透 content-type】 | M3 |
 | thinking-to-content 转换（客户端不支持 reasoning 输出时转正文）【已实现：渠道 settings.thinking_to_content，流式+非流式】 | M3 |
 | reasoning effort 模型名后缀（-high/-medium/-low、-thinking、-thinking-128 预算 → 请求参数改写，接在别名解析旁）【已实现：全名直命中优先；openai→reasoning_effort / anthropic→thinking 预算（自动抬 max_tokens）/ gemini→thinkingConfig；计费落基名】 | M3 |
@@ -2278,6 +2278,20 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   形状的消息列表（真实流量同样受益）。
 - **前端**：协议下拉加两家（标"实验性"）；新建渠道选到它们时凭证区变成"登录"按钮 + 贴 code 输入框；
   列表行显示凭证到期时间（`credential_expires_at`，从 JSON 取，列表接口回填）。
+- **【2026-09-29 追加】全伪装模式（可选开关，`settings.mimic_cc`）**：上面"不编造"的定案只约束
+  缺省的**透传形态**（真客户端在前）。站长的订阅要给**非官方客户端**（SDK / 网页应用）用时，上游会把
+  非_CLI 指纹的请求判成第三方、从订阅额度改扣 extra usage——`mimic_cc: true` 时网关改为替客户端伪造
+  Claude Code 身份（`okapi_providers::oauth::cc_mimic`，各项对照 Sub2API v0.2.2）：全量 `anthropic-beta`
+  集合（9 项对齐真实 CLI 抓包）、`claude-cli/X.Y.Z (external, cli)` UA + `x-stainless-*` 九件套 +
+  `x-app: cli` + 每请求新 UUID 的 `x-client-request-id`（且出向**不再透传**客户端身份头——两套指纹
+  混发是露馅点）、system 数组补 CLI 自述句（带 cache_control）+ `x-anthropic-billing-header` 计费归因块
+  （`cc_version=X.Y.Z.{fp}`，fp=SHA256(盐+首条 user 文本第 4/7/20 字符+版本) 前 3 位，盐/算法逐字节
+  对齐 CLI）、`metadata.user_id` 缺失时注入 JSON 格式伪装值（device_id 由 channel_key_id 派生——
+  同一把 key 恒同指纹、重启/多副本一致，无需存库；session_id 由首条 user 文本派生，会话内稳定；
+  账号 UUID 取换码响应 `account.uuid`，随凭证 JSON 记在 `account_id`）。版本可用
+  `settings.mimic_cc_version` 覆写（三段 semver），CLI 升级后需跟随——**这是对抗性维护承诺**：
+  上游收紧检测 / CLI 改指纹时本模块要跟着改，标实验性，收口即随 key 状态机进 invalid。
+  刻意未做：CLI 版本热跟随、temperature/max_tokens 缺省补齐、cache 断点重排、工具名混淆。
 
 **验收**：`gateway_oauth_channels.rs`——mock 授权服务器 + 上游：anthropic_max 换码后建渠道，请求打到
 `/v1/messages?beta=true`、带 Bearer / 三个必备 beta / 系统提示首句 / 客户端 `user-agent` 与 `x-app` 原样透传，
@@ -2286,7 +2300,11 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
 `originator`（客户端带了透传、没带缺省）/ `accept: text/event-stream`，`store=false`、`stream=true`、
 `instructions` 键存在、`previous_response_id` 被剥、system 角色改 developer；非流式客户端拿到由 SSE 聚合
 出的 JSON（含 usage 计费）；embeddings 不路由。providers 单测：PKCE 派生、授权 URL 参数、系统提示前置幂等、
-beta 头合并、id_token claim 解析、Codex 请求体整形、SSE 聚合。
+beta 头合并、id_token claim 解析、Codex 请求体整形、SSE 聚合。mimic 模式另有一案
+（`anthropic_max_mimic_forges_claude_code_identity`）：开 `mimic_cc` 后 OpenAI 入口请求在上游看到的
+是全套伪造指纹（UA / x-stainless / 全量 beta / billing 块 / metadata.user_id，账号 UUID 取自换码响应
+`account.uuid`），客户端缺省 UA 不透出；providers 单测另覆盖指纹算法（绑定版本与第 4/7/20 字符）、
+body 重写幂等、已有 user_id 不覆盖、已有 billing 块重写不新增。
 
 ### 11.39 Playground 试用台 + 聊天客户端一键导入（2026-09-06，对照 new-api 操练场 / 聊天应用集成）
 

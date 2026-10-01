@@ -9,6 +9,22 @@ fn fixture() -> Value {
 
 fn expected() -> TokenUsage {
     TokenUsage {
+        reported_details: Some(okapi_domain::TokenDetailsReported {
+            prompt: okapi_domain::ModalitiesReported {
+                audio: true,
+                image: true,
+            },
+            completion: okapi_domain::ModalitiesReported {
+                audio: true,
+                image: true,
+            },
+            cache_read: okapi_domain::ModalitiesReported {
+                audio: true,
+                image: true,
+            },
+            cache_write: okapi_domain::ModalitiesReported::default(),
+            reasoning: true,
+        }),
         upstream_usage: Some(UpstreamTokenCounts {
             prompt_tokens: Some(1_000),
             completion_tokens: Some(400),
@@ -190,4 +206,42 @@ fn gemini_native_and_converted_streams_preserve_modal_usage() {
     let wire: Value = serde_json::from_slice(&bytes).unwrap();
     let reparsed: UsageProbe = serde_json::from_value(wire["usage"].clone()).unwrap();
     assert_eq!(reparsed.to_token_usage().unwrap(), expected());
+}
+
+#[test]
+fn gemini_partial_arrays_preserve_unknown_axes_and_explicit_zero_in_both_directions() {
+    use okapi_providers::convert::gemini_to_openai::gemini_usage_json;
+    for (details, audio, image) in [
+        (json!([{"modality":"AUDIO","tokenCount":0}]), true, false),
+        (json!([{"modality":"TEXT","tokenCount":100}]), true, true),
+        (json!([{"modality":"TEXT","tokenCount":20}]), false, false),
+    ] {
+        let raw = json!({"promptTokenCount":100,"candidatesTokenCount":50,"thoughtsTokenCount":0,
+            "promptTokensDetails":details});
+        let probe = openai_to_gemini::usage_from_gemini(Some(&raw)).unwrap();
+        let usage = probe.to_token_usage().unwrap();
+        let observed = usage.reported_details.unwrap();
+        assert_eq!(
+            (observed.prompt.audio, observed.prompt.image),
+            (audio, image)
+        );
+        assert!(observed.reasoning);
+        assert!(!observed.completion.audio && !observed.completion.image);
+        let converted = gemini_usage_json(probe);
+        assert_eq!(converted["thoughtsTokenCount"], 0);
+        assert_eq!(
+            openai_to_gemini::usage_from_gemini(Some(&converted))
+                .unwrap()
+                .to_token_usage()
+                .unwrap(),
+            usage
+        );
+    }
+    let absent = openai_to_gemini::usage_from_gemini(Some(
+        &json!({"promptTokenCount":100,"candidatesTokenCount":50}),
+    ))
+    .unwrap();
+    let converted = gemini_usage_json(absent);
+    assert!(converted.get("thoughtsTokenCount").is_none());
+    assert!(converted.get("promptTokensDetails").is_none());
 }

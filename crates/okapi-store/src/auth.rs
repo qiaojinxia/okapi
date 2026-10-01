@@ -184,7 +184,7 @@ pub async fn find_key_by_hash(
                r.key_status AS "key_status!",
                r.user_status AS "user_status!",
                r.role AS "role!",
-               r.admin_permissions,
+               r.admin_permissions AS "admin_permissions?",
                r.multiplier_scaled AS "multiplier_scaled!",
                r.rpm_limit, r.tpm_limit, r.rpd_limit, r.max_concurrency,
                r.model_allowlist,

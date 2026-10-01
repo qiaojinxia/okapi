@@ -1,6 +1,25 @@
 /// 立方体端点共用的一组度量（比率全部基点，金额 micro-USD）。
 export interface Freshness { last_event_at: string | null; last_ingested_at: string | null; pending_events: number; failed_events: number; queue_age_seconds: number | null; event_gap_seconds: number | null; stale: boolean; checked_at: string }
 export interface CubeMetrics {
+  token_usage_basis?: 'settled'
+  token_provenance?: {
+    observed_requests: number
+    history_complete: boolean
+    history_coverage_bp: number | null
+    prompt: Record<TokenSource, TokenSourceCount>
+    completion: Record<TokenSource, TokenSourceCount>
+  }
+  suspected_test_requests?: number
+  suspected_test_tokens?: number
+  test_detection_basis?: 'fixture_model_name'
+  recorded_cache_write_tokens?: number | null
+  cache_write_known_requests?: number
+  measured_cache_hit_bp?: number | null
+  measured_cache_hit_requests?: number
+  measured_cache_hit_coverage_bp?: number | null
+  measured_prompt_tokens?: number | null
+  measured_cache_read_tokens?: number | null
+  token_detail_observations?: { reasoning_tokens?: { observed_tokens: number | null; observed_records: number; complete: boolean } }
   cost_known_requests?: number
   cost_coverage_bp?: number | null
   known_margin_micro?: number | null
@@ -25,6 +44,14 @@ export interface CubeMetrics {
   upstream_cost_micro: number
   avg_latency_ms: number
   avg_ttft_ms: number
+}
+
+export type TokenSource = 'upstream' | 'estimated' | 'local_override' | 'unknown'
+export interface TokenSourceCount {
+  requests: number
+  tokens: number | null
+  request_share_bp?: number | null
+  token_share_bp?: number | null
 }
 
 /// 过滤条件的名字回填（实体已删时名字为 null，芯片退回显示 id）。

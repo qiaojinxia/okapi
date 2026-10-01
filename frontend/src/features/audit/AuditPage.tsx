@@ -14,6 +14,7 @@ import { Select } from '@/components/ui/select'
 import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { DEFAULT_PAGE_SIZE } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -22,7 +23,7 @@ import { cn } from '@/lib/utils'
 const routeApi = getRouteApi('/admin/audit')
 const DEFAULT_HOURS = 168
 const HOURS = [24, 168, 720, 2160] as const
-const PAGE = 50
+const PAGE = DEFAULT_PAGE_SIZE
 
 interface AuditRow {
   id: number

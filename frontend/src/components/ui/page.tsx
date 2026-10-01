@@ -12,6 +12,7 @@ export function PageHeader({
   meta,
   action,
   className,
+  compact = false,
 }: {
   title: string
   description?: string
@@ -20,22 +21,24 @@ export function PageHeader({
   meta?: React.ReactNode
   action?: React.ReactNode
   className?: string
+  /// 数据密集页在桌面端将标题与说明并排，给表格保留更多高度。
+  compact?: boolean
 }) {
   return (
     <header data-slot="page-header" className={cn('flex min-w-0 shrink-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between', className)}>
-      <div className="flex min-w-0 items-start gap-3">
+      <div className={cn('flex min-w-0 items-start gap-3', compact && 'lg:items-center')}>
         {Icon && (
           <span className="mt-0.5 hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
             <Icon className="h-4.5 w-4.5" />
           </span>
         )}
-        <div className="flex min-w-0 flex-col gap-1">
+        <div className={cn('flex min-w-0 flex-col gap-1', compact && 'lg:flex-row lg:items-center lg:gap-3')}>
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="text-xl font-semibold leading-7 tracking-tight">{title}</h1>
             {meta}
           </div>
           {description !== undefined && (
-            <p className="max-w-3xl text-sm leading-6 text-muted-foreground">{description}</p>
+            <p className={cn('max-w-3xl text-sm leading-6 text-muted-foreground', compact && 'text-xs leading-5')}>{description}</p>
           )}
         </div>
       </div>

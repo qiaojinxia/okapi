@@ -42,6 +42,9 @@ fn trimmed(field: Option<&str>) -> Option<&str> {
 /// 立方体查询参数：时间窗 + 至多五个维度过滤（可组合）。
 #[derive(Deserialize, Default)]
 pub struct CubeQuery {
+    /// Dashboard-only short cache; detailed analytics default to fresh reads.
+    #[serde(default)]
+    pub cached: bool,
     /// 回看天数（1–90，缺省 7）。
     #[serde(default)]
     pub days: Option<u32>,
@@ -66,6 +69,10 @@ pub struct CubeQuery {
     previous_start: String,
     #[serde(skip)]
     window_meta: Value,
+    #[serde(skip)]
+    coverage: super::measurement_coverage::Coverage,
+    #[serde(skip)]
+    previous_coverage: super::measurement_coverage::Coverage,
     #[serde(default)]
     pub user_id: Option<i64>,
     #[serde(default)]
@@ -110,7 +117,8 @@ impl CubeQuery {
         self.days.unwrap_or(7).clamp(1, 366)
     }
 
-    async fn prepare(&mut self, ch: &ChClient) -> Result<(), AppError> {
+    async fn prepare(&mut self, state: &AppState) -> Result<(), AppError> {
+        let ch = ch_or_disabled(state)?;
         let w = super::usage_details::CalendarWindow::read(
             ch,
             self.days(),
@@ -152,6 +160,14 @@ impl CubeQuery {
         });
         self.window_meta["previous_start_date"] = json!(self.previous_start);
         self.window_meta["previous_end_date"] = json!((w.start - Days::new(1)).to_string());
+        // A missing current-period aggregate must not expand historical recovery
+        // for a complete previous period (including an empty previous period).
+        let predicate = format!("{}{}", self.window(false), self.base_scope());
+        self.coverage =
+            super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
+        let predicate = format!("{}{}", self.window(true), self.base_scope());
+        self.previous_coverage =
+            super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
         Ok(())
     }
 
@@ -164,7 +180,19 @@ impl CubeQuery {
         }
     }
 
-    fn source(&self, previous: bool) -> String {
+    fn stack_column(&self) -> Result<Option<String>, AppError> {
+        trimmed(self.stack.as_deref())
+            .map(|dimension| match dimension {
+                "model" => self.model_column().map(str::to_owned),
+                "model_group" => self
+                    .model_column()
+                    .map(|column| format!("toJSONString(tuple({column}, group_code))")),
+                _ => breakdown_key(dimension).map(str::to_owned),
+            })
+            .transpose()
+    }
+
+    fn base_scope(&self) -> String {
         use std::fmt::Write as _;
         // 在聚合展开前裁剪常用主键维度。高级维度在外层过滤，历史未采集部分仍保留。
         let mut base = String::new();
@@ -177,7 +205,23 @@ impl CubeQuery {
                 let _ = write!(base, " AND {col} = {v}");
             }
         }
-        super::analysis_source::source(&self.window(previous), &base)
+        base
+    }
+
+    fn source(&self, previous: bool) -> String {
+        super::analysis_source::source_with_coverage(
+            &self.window(previous),
+            &self.base_scope(),
+            self.coverage_for(previous),
+        )
+    }
+
+    fn coverage_for(&self, previous: bool) -> super::measurement_coverage::Coverage {
+        if previous {
+            self.previous_coverage
+        } else {
+            self.coverage
+        }
     }
 
     fn scope(&self) -> Scope {
@@ -247,6 +291,206 @@ impl CubeQuery {
         Scope { clause, params }
     }
 
+    /// Old day totals may be recoverable even when their hourly allocation is not.
+    async fn recover_cache(
+        &self,
+        state: &AppState,
+        previous: bool,
+        time: Option<&str>,
+        dimension: Option<&str>,
+        rows: &mut [Value],
+    ) -> Result<(), AppError> {
+        if rows.is_empty()
+            || self.coverage_for(previous).legacy.cache
+                != super::measurement_coverage::Mode::Recover
+        {
+            return Ok(());
+        }
+        let mut keys = Vec::new();
+        let mut projections = Vec::new();
+        let mut match_columns = Vec::new();
+        if let Some(time) = time {
+            keys.push(time);
+            projections.push(format!("toString({time}) AS bucket"));
+            match_columns.push("bucket");
+        }
+        if let Some(dimension) = dimension {
+            if let Some(tuple) = dimension
+                .strip_prefix("toJSONString(tuple(")
+                .and_then(|s| s.strip_suffix("))"))
+            {
+                keys.extend(tuple.split(", "));
+            } else {
+                keys.push(dimension);
+            }
+            projections.push(format!("{dimension} AS k"));
+            match_columns.push("k");
+        }
+        let keys = keys.join(", ");
+        let (sql, scope) =
+            self.cache_measurement_query(&keys, &projections.join(", "), previous, "");
+        let recovered =
+            super::stats_cache::query(state, &sql, &scope.borrow(), self.cached).await?;
+        let key = |row: &Value| {
+            match_columns
+                .iter()
+                .map(|column| {
+                    row[*column]
+                        .as_str()
+                        .map_or_else(|| row[*column].to_string(), str::to_owned)
+                })
+                .collect::<Vec<_>>()
+        };
+        let recovered: HashMap<_, _> = recovered.into_iter().map(|row| (key(&row), row)).collect();
+        for row in rows {
+            if let Some(cache) = recovered
+                .get(&key(row))
+                .filter(|cache| ch_i64(cache, "cache_expected") == ch_i64(row, "reqs"))
+            {
+                row["write_sum"] = cache["cache_writes"].clone();
+                row["write_n"] = cache["cache_write_n"].clone();
+                row["read_n"] = cache["cache_read_n"].clone();
+                for field in super::usage_sources::FIELDS {
+                    row[field] = cache[field].clone();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn cache_measurement_query(
+        &self,
+        keys: &str,
+        projections: &str,
+        previous: bool,
+        extra: &str,
+    ) -> (String, Scope) {
+        let scope = self.scope();
+        let predicate = format!("{}{}{extra}", self.window(previous), scope.clause);
+        let table = if self.has_detail_filter()
+            || keys.split(", ").any(|key| {
+                !matches!(
+                    key,
+                    "" | "hour"
+                        | "day"
+                        | "model"
+                        | "user_id"
+                        | "api_key_id"
+                        | "channel_id"
+                        | "group_code"
+                )
+            }) {
+            "mv_analysis_hour"
+        } else {
+            "mv_cube_hour"
+        };
+        let cache = super::cache_usage::source(keys, table, &predicate);
+        let usage = super::usage_sources::source(keys, table, &predicate);
+        let join_keys = if keys.is_empty() {
+            "source_scope"
+        } else {
+            keys
+        };
+        let projections = if projections.is_empty() {
+            String::new()
+        } else {
+            format!("{projections}, ")
+        };
+        let sql = format!(
+            "SELECT {projections}cs.cache_expected, cs.cache_writes, cs.cache_write_n, cs.cache_read_n, {} FROM {cache} cs LEFT JOIN {usage} us USING ({join_keys})",
+            super::usage_sources::FIELDS
+                .map(|field| format!("us.{field} AS {field}"))
+                .join(", ")
+        );
+        (sql, scope)
+    }
+
+    async fn recover_provider_cache(
+        &self,
+        state: &AppState,
+        buckets: &mut [Bucket],
+        rows: &[Value],
+        names: &Names,
+    ) -> Result<(), AppError> {
+        if self.coverage.legacy.cache != super::measurement_coverage::Mode::Recover {
+            return Ok(());
+        }
+        for bucket in buckets {
+            let ids = rows
+                .iter()
+                .filter_map(|row| row_key(row).parse::<i64>().ok())
+                .filter(|id| {
+                    *id >= 0
+                        && names.channels.get(id).map_or("unknown", |c| c.1.as_str()) == bucket.key
+                })
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>();
+            if ids.is_empty() {
+                continue;
+            }
+            let (sql, scope) = self.cache_measurement_query(
+                "",
+                "",
+                false,
+                &format!(" AND channel_id IN ({})", ids.join(",")),
+            );
+            let measured =
+                super::stats_cache::query(state, &sql, &scope.borrow(), self.cached).await?;
+            let requests = bucket.metrics["requests"].as_i64().unwrap_or(0);
+            if let Some(measured) = measured
+                .first()
+                .filter(|row| ch_i64(row, "cache_expected") == requests)
+            {
+                let counters = json!({"write_n":measured["cache_write_n"], "read_n":measured["cache_read_n"], "write_sum":measured["cache_writes"]});
+                bucket.metrics.extend(cache_metrics(&counters, requests));
+                bucket.metrics.extend(super::usage_sources::metrics(
+                    measured,
+                    requests,
+                    [
+                        bucket.metrics["prompt_tokens"].as_i64(),
+                        bucket.metrics["completion_tokens"].as_i64(),
+                    ],
+                    bucket.metrics["cached_tokens"].as_i64(),
+                    ch_i64(measured, "cache_read_n"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn trend_totals(
+        &self,
+        state: &AppState,
+        dimension: Option<&str>,
+        rows: &mut [Value],
+        previous: &mut [Value],
+    ) -> Result<Vec<Value>, AppError> {
+        self.recover_cache(state, false, self.granularity.as_deref(), dimension, rows)
+            .await?;
+        let mut total = vec![sum_metric_rows(rows)];
+        self.recover_cache(state, false, None, None, &mut total)
+            .await?;
+        self.recover_cache(state, true, None, None, previous)
+            .await?;
+        Ok(total)
+    }
+
+    fn has_detail_filter(&self) -> bool {
+        self.stream.is_some()
+            || [
+                &self.endpoint,
+                &self.upstream_endpoint,
+                &self.node,
+                &self.request_type,
+                &self.billing_type,
+            ]
+            .iter()
+            .any(|value| trimmed(value.as_deref()).is_some())
+            || (self.model_column().is_ok_and(|col| col != "model")
+                && (trimmed(self.model.as_deref()).is_some()
+                    || trimmed(self.models.as_deref()).is_some()))
+    }
+
     /// 当前窗口 / 等长的上一窗口。环比不是"昨日"那种整日锚点，而是同长度的
     /// 前一段：7 天看板对 7 天，30 天对 30 天，否则周末效应会把对比读歪。
     fn window(&self, previous: bool) -> String {
@@ -277,7 +521,60 @@ const AGG: &str = "sum(requests) AS reqs, \
                    sum(read_samples) AS read_n, \
                    sum(cost_samples) AS cost_n, sum(covered_amount) AS covered_spend, sum(covered_cost) AS covered_cost_sum";
 
+fn aggregate_metrics() -> String {
+    // This is a hint, not an authoritative test flag. Keep all matching records
+    // in every total and require the fixture's exact random-suffix format.
+    const FIXTURE_MODEL: &str = "^(cube-[ab]-[0-9a-f]{10}|log-[0-9a-f]{12}|modal-[0-9a-f]{32})$";
+    format!(
+        "{AGG}, sumIf(requests, match(model, '{FIXTURE_MODEL}')) AS fixture_reqs, \
+        sumIf(prompt_tokens + completion_tokens, match(model, '{FIXTURE_MODEL}')) AS fixture_tokens, {}, {}, {}",
+        super::usage_sources::sum_sql(),
+        super::token_details::sum_sql(),
+        super::output_rate::sum_sql()
+    )
+}
+
 /// 一行聚合 → 展示字段（比率全部基点/整数，避免前端拿浮点二次换算）。
+/// Bucket counters are additive; ratios and averages are packed only after summing.
+/// This avoids querying the entire current source again just for the trend total.
+fn sum_metric_rows(rows: &[Value]) -> Value {
+    let mut total = json!({});
+    for row in rows {
+        for key in [
+            "reqs",
+            "prompt",
+            "cached",
+            "completion",
+            "reasoning",
+            "spend",
+            "saved",
+            "cost",
+            "errs",
+            "lat_sum",
+            "lat_n",
+            "lat_observed",
+            "lat_output",
+            "ttft_s",
+            "ttft_n",
+            "ttft_observed",
+            "write_sum",
+            "write_n",
+            "read_n",
+            "cost_n",
+            "covered_spend",
+            "covered_cost_sum",
+            "fixture_reqs",
+            "fixture_tokens",
+        ] {
+            total[key] = json!(ch_i64(&total, key).saturating_add(ch_i64(row, key)));
+        }
+        super::usage_sources::accumulate(&mut total, row);
+        super::token_details::accumulate(&mut total, row);
+        super::output_rate::accumulate(&mut total, row);
+    }
+    total
+}
+
 fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     let reqs = ch_i64(r, "reqs");
     let prompt = ch_i64(r, "prompt");
@@ -316,18 +613,16 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
             Value::Null
         },
     );
+    m.extend(cache_metrics(r, reqs));
     m.insert(
-        "cache_write_known_requests".into(),
-        json!(ch_i64(r, "write_n")),
+        "suspected_test_requests".into(),
+        json!(ch_i64(r, "fixture_reqs")),
     );
     m.insert(
-        "cache_write_tokens".into(),
-        if ch_i64(r, "write_n") == reqs {
-            json!(ch_i64(r, "write_sum"))
-        } else {
-            Value::Null
-        },
+        "suspected_test_tokens".into(),
+        json!(ch_i64(r, "fixture_tokens")),
     );
+    m.insert("test_detection_basis".into(), json!("fixture_model_name"));
 
     m.insert("requests".into(), json!(reqs));
     m.insert("errors".into(), json!(errs));
@@ -338,14 +633,6 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m.insert("reasoning_tokens".into(), json!(ch_i64(r, "reasoning")));
     m.insert("tokens".into(), json!(prompt.saturating_add(completion)));
     // 口径与门户 breakdown 一致：命中 token / 输入 token
-    m.insert(
-        "cache_read_known_requests".into(),
-        json!(ch_i64(r, "read_n")),
-    );
-    m.insert(
-        "cache_hit_bp".into(),
-        super::usage_details::cache_rate(cached, prompt, reqs, ch_i64(r, "read_n")),
-    );
     m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
     m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
     m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
@@ -362,7 +649,27 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
         reqs,
         ch_i64(r, "ttft_observed"),
     ));
+    m.extend(super::usage_sources::metrics(
+        r,
+        reqs,
+        [Some(prompt), Some(completion)],
+        Some(cached),
+        ch_i64(r, "read_n"),
+    ));
+    m.extend(super::token_details::metrics(r, reqs));
+    m.extend(super::output_rate::metrics(r, reqs));
     m
+}
+
+fn cache_metrics(row: &Value, requests: i64) -> serde_json::Map<String, Value> {
+    let known = ch_i64(row, "write_n");
+    json!({
+        "cache_write_known_requests": known,
+        "cache_write_tokens": if known == requests { json!(ch_i64(row, "write_sum")) } else { Value::Null },
+        // A subtotal, never a claim that unreported requests wrote zero tokens.
+        "recorded_cache_write_tokens": if known > 0 || ch_i64(row, "write_sum") > 0 { json!(ch_i64(row, "write_sum")) } else { Value::Null },
+        "cache_read_known_requests": ch_i64(row, "read_n"),
+    }).as_object().cloned().unwrap_or_default()
 }
 
 // ---- 名字回填（PG 点查；结果集 ≤ 数百行） ----
@@ -497,9 +804,10 @@ pub async fn trend(
     Query(mut q): Query<CubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
-    let ch = ch_or_disabled(&state)?;
-    q.prepare(ch).await?;
+    q.cached &= super::stats_cache::allowed(&headers);
+    q.prepare(&state).await?;
     let days = q.days();
+    let agg = aggregate_metrics();
     let current_source = q.source(false);
     let previous_source = q.source(true);
     let scope = q.scope();
@@ -514,47 +822,37 @@ pub async fn trend(
         ("toString(toDate(hour))", "day")
     };
     let series_sql = format!(
-        "SELECT {bucket_expr} AS bucket, {AGG} FROM {current_source} \
+        "SELECT {bucket_expr} AS bucket, {agg} FROM {current_source} \
          WHERE {}{} GROUP BY bucket ORDER BY bucket",
         q.window(false),
         scope.clause
     );
-    let total_sql = format!(
-        "SELECT {AGG} FROM {current_source} WHERE {}{}",
-        q.window(false),
-        scope.clause
-    );
     let prev_sql = format!(
-        "SELECT {AGG} FROM {previous_source} WHERE {}{}",
+        "SELECT {agg} FROM {previous_source} WHERE {}{}",
         q.window(true),
         scope.clause
     );
-    let total = ch.query_with_params(&total_sql, &params).await?;
-    let previous = ch.query_with_params(&prev_sql, &params).await?;
     let pack_one = |rows: &[Value]| {
         rows.first()
             .map_or_else(|| json!({}), |r| Value::Object(pack_metrics(r)))
     };
 
     // 堆叠：按第二维度拆开每个桶（"钱花在哪个模型、占比怎么变"），Top N 之外折进 __other
-    if let Some(stack_col) = trimmed(q.stack.as_deref())
-        .map(|dim| match dim {
-            "model" => q.model_column().map(str::to_owned),
-            "model_group" => q
-                .model_column()
-                .map(|col| format!("toJSONString(tuple({col}, group_code))")),
-            _ => breakdown_key(dim).map(str::to_owned),
-        })
-        .transpose()?
-    {
+    if let Some(stack_col) = q.stack_column()? {
         let limit = q.limit.unwrap_or(8).clamp(1, 20) as usize;
         let stacked_sql = format!(
-            "SELECT {bucket_expr} AS bucket, {stack_col} AS k, {AGG} \
+            "SELECT {bucket_expr} AS bucket, {stack_col} AS k, {agg} \
              FROM {current_source} WHERE {}{} GROUP BY bucket, k ORDER BY bucket",
             q.window(false),
             scope.clause
         );
-        let rows = ch.query_with_params(&stacked_sql, &params).await?;
+        let (mut rows, mut previous) = tokio::try_join!(
+            super::stats_cache::query(&state, &stacked_sql, &params, q.cached),
+            super::stats_cache::query(&state, &prev_sql, &params, q.cached),
+        )?;
+        let total = q
+            .trend_totals(&state, Some(&stack_col), &mut rows, &mut previous)
+            .await?;
         let (series, data) = fold_stacked(
             &rows,
             limit,
@@ -580,7 +878,13 @@ pub async fn trend(
         })));
     }
 
-    let series = ch.query_with_params(&series_sql, &params).await?;
+    let (mut series, mut previous) = tokio::try_join!(
+        super::stats_cache::query(&state, &series_sql, &params, q.cached),
+        super::stats_cache::query(&state, &prev_sql, &params, q.cached),
+    )?;
+    let total = q
+        .trend_totals(&state, None, &mut series, &mut previous)
+        .await?;
     let data: Vec<Value> = series
         .iter()
         .map(|r| {
@@ -638,6 +942,9 @@ fn fold_stacked(rows: &[Value], limit: usize, rank: &str) -> (Vec<String>, Vec<V
         if !cell.is_object() {
             *cell = json!({});
         }
+        super::usage_sources::accumulate(cell, r);
+        super::token_details::accumulate(cell, r);
+        super::output_rate::accumulate(cell, r);
         for field in [
             "reqs",
             "spend",
@@ -751,96 +1058,55 @@ struct Bucket {
     folded: i64,
 }
 
-/// 把 CH 行按 `fold_key` 折叠累加。非折叠维度每键恰一行（恒等折叠）；
-/// provider 维度多条渠道折成一行——可加列直接相加，比率与均值列折后重算。
-#[allow(clippy::too_many_lines)]
-fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, refold: bool) -> Vec<Bucket> {
-    let mut acc: Vec<Bucket> = Vec::new();
+/// Fold additive raw counters first, then recompute all ratios and coverage once.
+fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String) -> Vec<Bucket> {
+    let mut raw: Vec<(String, Value, i64)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     for r in rows {
         let key = fold_key(&row_key(r));
-        let metrics = pack_metrics(r);
-        if let Some(&i) = index.get(&key) {
-            let slot = &mut acc[i];
-            for (field, v) in &metrics {
-                if let (Some(Value::Number(a)), Value::Number(b)) = (slot.metrics.get(field), v)
-                    && let (Some(a), Some(b)) = (a.as_i64(), b.as_i64())
-                    && !field.ends_with("_bp")
-                    && !field.starts_with("avg_")
-                {
-                    slot.metrics
-                        .insert(field.clone(), json!(a.saturating_add(b)));
-                }
-            }
-            slot.folded += 1;
-        } else {
-            index.insert(key.clone(), acc.len());
-            acc.push(Bucket {
-                key,
-                metrics,
-                folded: 1,
-            });
+        let pos = *index.entry(key.clone()).or_insert_with(|| {
+            raw.push((key, json!({}), 0));
+            raw.len() - 1
+        });
+        let (_, totals, folded) = &mut raw[pos];
+        super::usage_sources::accumulate(totals, r);
+        super::token_details::accumulate(totals, r);
+        super::output_rate::accumulate(totals, r);
+        for field in [
+            "reqs",
+            "prompt",
+            "completion",
+            "cached",
+            "reasoning",
+            "spend",
+            "saved",
+            "cost",
+            "errs",
+            "lat_sum",
+            "lat_n",
+            "lat_observed",
+            "lat_output",
+            "ttft_s",
+            "ttft_n",
+            "ttft_observed",
+            "write_sum",
+            "write_n",
+            "read_n",
+            "cost_n",
+            "covered_spend",
+            "covered_cost_sum",
+        ] {
+            totals[field] = json!(ch_i64(totals, field).saturating_add(ch_i64(r, field)));
         }
+        *folded += 1;
     }
-    if refold {
-        for b in &mut acc {
-            let m = &mut b.metrics;
-            let reqs = m["requests"].as_i64().unwrap_or(0);
-            let errs = m["errors"].as_i64().unwrap_or(0);
-            let prompt = m["prompt_tokens"].as_i64().unwrap_or(0);
-            let cached = m["cached_tokens"].as_i64().unwrap_or(0);
-            m.insert("error_rate_bp".into(), json!(rate_bp(errs, reqs)));
-            let read_known = m["cache_read_known_requests"].as_i64().unwrap_or(0);
-            m.insert(
-                "cache_hit_bp".into(),
-                super::usage_details::cache_rate(cached, prompt, reqs, read_known),
-            );
-            m.extend(super::latency::metrics(
-                m["latency_sum_ms"].as_i64().unwrap_or(0),
-                m["latency_samples"].as_i64().unwrap_or(0),
-                m["performance_completion_tokens"].as_i64().unwrap_or(0),
-                reqs,
-                m["latency_observed_requests"].as_i64().unwrap_or(0),
-            ));
-            m.extend(super::ttft_average::metrics(
-                m["ttft_sum_ms"].as_i64().unwrap_or(0),
-                m["ttft_samples"].as_i64().unwrap_or(0),
-                reqs,
-                m["ttft_observed_requests"].as_i64().unwrap_or(0),
-            ));
-            let known = m["cost_known_requests"].as_i64().unwrap_or(0);
-            let margin = m["known_amount_micro"].as_i64().unwrap_or(0)
-                - m["known_cost_micro"].as_i64().unwrap_or(0);
-            m.insert(
-                "cost_coverage_bp".into(),
-                if reqs > 0 {
-                    json!(rate_bp(known, reqs))
-                } else {
-                    Value::Null
-                },
-            );
-            m.insert(
-                "known_margin_micro".into(),
-                if known > 0 {
-                    json!(margin)
-                } else {
-                    Value::Null
-                },
-            );
-            m.insert(
-                "margin_micro".into(),
-                if known == reqs && reqs > 0 {
-                    json!(margin)
-                } else {
-                    Value::Null
-                },
-            );
-            if m["cache_write_known_requests"].as_i64().unwrap_or(0) != reqs {
-                m.insert("cache_write_tokens".into(), Value::Null);
-            }
-        }
-    }
-    acc
+    raw.into_iter()
+        .map(|(key, totals, folded)| Bucket {
+            key,
+            metrics: pack_metrics(&totals),
+            folded,
+        })
+        .collect()
 }
 
 /// 上期名次：折叠键 → (金额, 名次)。
@@ -947,10 +1213,10 @@ impl BreakdownMetric {
         self,
         rows: &[Value],
         fold_key: &dyn Fn(&str) -> String,
-        fold_provider: bool,
+        _fold_provider: bool,
         limit: usize,
     ) -> Vec<Bucket> {
-        let mut buckets = fold_rows(rows, fold_key, fold_provider);
+        let mut buckets = fold_rows(rows, fold_key);
         buckets.sort_by(|a, b| {
             b.metrics[self.field()]
                 .as_i64()
@@ -972,6 +1238,7 @@ fn breakdown_sql(
     limit: usize,
     metric: BreakdownMetric,
 ) -> [String; 3] {
+    let agg = aggregate_metrics();
     let current_source = q.source(false);
     let previous_source = q.source(true);
     let order = metric.sql_column();
@@ -982,7 +1249,7 @@ fn breakdown_sql(
     };
     [
         format!(
-            "SELECT {key_col} AS k, {AGG}, sum(prompt_tokens) + sum(completion_tokens) AS tokens \
+            "SELECT {key_col} AS k, {agg}, sum(prompt_tokens) + sum(completion_tokens) AS tokens \
              FROM {current_source} WHERE {}{} \
              GROUP BY k ORDER BY {order} DESC, k{sql_limit}",
             q.window(false),
@@ -1056,8 +1323,8 @@ pub async fn breakdown(
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let metric = BreakdownMetric::parse(q.metric.as_deref())?;
-    let ch = ch_or_disabled(&state)?;
-    q.prepare(ch).await?;
+    q.cached &= super::stats_cache::allowed(&headers);
+    q.prepare(&state).await?;
     let by = q.by.as_deref().unwrap_or("model");
     let key_col = if by == "model" {
         q.model_column()?
@@ -1071,9 +1338,14 @@ pub async fn breakdown(
 
     let [cur_sql, total_sql, prev_sql] =
         breakdown_sql(&q, &scope, key_col, fold_provider, limit, metric);
-    let cur = ch.query_with_params(&cur_sql, &params).await?;
-    let total = ch.query_with_params(&total_sql, &params).await?;
-    let prev = ch.query_with_params(&prev_sql, &params).await?;
+    let (mut cur, total, prev) = tokio::try_join!(
+        super::stats_cache::query(&state, &cur_sql, &params, q.cached),
+        super::stats_cache::query(&state, &total_sql, &params, q.cached),
+        super::stats_cache::query(&state, &prev_sql, &params, q.cached),
+    )?;
+
+    q.recover_cache(&state, false, None, Some(key_col), &mut cur)
+        .await?;
 
     // 名字回填：渠道维度还要 provider（折叠依据）
     let int_keys: Vec<i64> = cur
@@ -1111,7 +1383,11 @@ pub async fn breakdown(
         }
     };
     let prev_ranks = previous_ranks(&prev, &fold_key, metric);
-    let buckets = metric.top_buckets(&cur, &fold_key, fold_provider, limit);
+    let mut buckets = metric.top_buckets(&cur, &fold_key, fold_provider, limit);
+    if fold_provider {
+        q.recover_provider_cache(&state, &mut buckets, &cur, &names)
+            .await?;
+    }
 
     let total_spend = total.first().map_or(0, |r| ch_i64(r, "spend"));
     let total_reqs = total.first().map_or(0, |r| ch_i64(r, "reqs"));
@@ -1298,7 +1574,8 @@ pub async fn flow(
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
-    q.prepare(ch).await?;
+    q.cached &= super::stats_cache::allowed(&headers);
+    q.prepare(&state).await?;
     let per_stage = q.limit.unwrap_or(6).clamp(1, 20) as usize;
     let metric = match q.metric.as_deref().unwrap_or("amount") {
         "amount" => "amount",
@@ -1311,6 +1588,7 @@ pub async fn flow(
         "tokens" => "toks",
         _ => "spend",
     };
+    let agg = aggregate_metrics();
     let current_source = q.source(false);
     let scope = q.scope();
     let params = scope.borrow();
@@ -1340,14 +1618,15 @@ pub async fn flow(
         scope.clause
     );
     let total_sql = format!(
-        "SELECT sum(requests) AS reqs, sum(amount) AS spend, \
-                sum(prompt_tokens) + sum(completion_tokens) AS toks \
+        "SELECT {agg}, sum(prompt_tokens) + sum(completion_tokens) AS toks \
          FROM {current_source} WHERE {}{}",
         q.window(false),
         scope.clause
     );
     let combos = ch.query_with_params(&combo_sql, &params).await?;
-    let total = ch.query_with_params(&total_sql, &params).await?;
+    let mut total = ch.query_with_params(&total_sql, &params).await?;
+    q.recover_cache(&state, false, None, None, &mut total)
+        .await?;
     let total_metric = total.first().map_or(0, |r| ch_i64(r, order_col));
 
     let graph = FlowGraph::build(&combos, per_stage, order_col, &stages);
@@ -1388,6 +1667,7 @@ pub async fn flow(
         "scope": describe_scope(&state, &q).await?,
         "stages": stages,
         "total": total_metric,
+        "metrics": total.first().map(pack_metrics),
         "coverage_bp": rate_bp(graph.covered, total_metric),
         "truncated": combos.len() >= FLOW_ROWS,
         "nodes": nodes,
@@ -1568,11 +1848,15 @@ pub async fn entity_usage(
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(",");
+    let predicate = format!(
+        "{col} IN ({id_list}) AND day >= today() - {} AND day <= today()",
+        days - 1
+    );
     // 今日与窗口分两组聚合，Rust 侧合并——比 sumMergeIf 组合子的可移植性更稳
     let sql = format!(
         "SELECT {col} AS k, day = today() AS is_today, \
                 sumMerge(amount) AS spend, countMerge(requests) AS reqs, max(day) AS last_day \
-         FROM {table} WHERE {col} IN ({id_list}) AND day >= today() - {days} \
+         FROM {table} WHERE {predicate} \
          GROUP BY k, is_today"
     );
     let rows = ch.query_json_each_row(&sql).await?;
@@ -1604,7 +1888,35 @@ pub async fn entity_usage(
             obj.insert("last_day".into(), json!(last_day));
         }
     }
+    enrich_entities(ch, &mut data, col, table, &predicate).await?;
     Ok(Json(json!({ "days": days, "data": data })))
+}
+
+async fn enrich_entities(
+    ch: &ChClient,
+    data: &mut BTreeMap<String, Value>,
+    column: &str,
+    table: &str,
+    predicate: &str,
+) -> Result<(), AppError> {
+    let mut rows: Vec<Value> = data
+        .iter()
+        .map(|(id, value)| {
+            let mut row = value.clone();
+            row[column] = json!(id);
+            row
+        })
+        .collect();
+    super::usage_sources::enrich(ch, column, table, predicate, &mut rows).await?;
+    super::output_rate::enrich_entities(ch, &mut rows, column, table, predicate).await?;
+    for mut row in rows {
+        let id = row[column].as_str().unwrap_or_default().to_owned();
+        if let Some(fields) = row.as_object_mut() {
+            fields.remove(column);
+        }
+        data.insert(id, row);
+    }
+    Ok(())
 }
 
 fn parse_choices(name: &str, value: Option<&str>) -> Result<Vec<String>, AppError> {

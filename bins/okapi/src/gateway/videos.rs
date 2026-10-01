@@ -423,7 +423,6 @@ async fn commit_and_record(
     reservation_pool: okapi_ledger::Pool,
     source_window: Option<&str>,
 ) -> Result<(), AppError> {
-    let book = state.pricebook.load();
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -447,7 +446,7 @@ async fn commit_and_record(
         discount: quote.discount,
         list_price: quote.list_price,
         upstream_cost: None,
-        pricing_epoch: Some(book.epoch()),
+        pricing_epoch: Some(quote.snapshot.epoch),
         pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: None,

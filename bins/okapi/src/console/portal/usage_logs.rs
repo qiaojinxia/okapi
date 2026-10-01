@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
 
 fn filtered(
-    sql: &'static str,
+    sql: &str,
     q: &LogsQuery,
     window: Option<&LogWindow>,
     user_id: i64,
@@ -66,13 +66,17 @@ pub async fn list(
             'api_key_id', b.api_key_id, 'key_name', COALESCE(k.name, ''),
             'usage', jsonb_build_object(
                 'prompt_tokens', b.prompt_tokens, 'cached_tokens', b.cached_tokens,
+                'input_unit', b.usage_details->'input_unit', 'input_characters', b.usage_details->'input_characters',
                 'completion_tokens', b.completion_tokens, 'reasoning_tokens', b.reasoning_tokens,
                 'upstream_usage', b.usage_details->'tokens'->'upstream_usage',
+                'reported_details', b.usage_details->'tokens'->'reported_details',
                 'prompt_source', COALESCE(b.usage_details->>'prompt_source', 'unknown'),
                 'completion_source', COALESCE(b.usage_details->>'completion_source', 'unknown'),
                 'cache_read_reported', COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, NULLIF(b.cached_tokens > 0, false)),
                 'cache_write_reported', (b.usage_details->'tokens'->>'cache_write_reported')::boolean,
                 'cache_write_tokens', b.usage_details->'tokens'->'cache_write_tokens',
+                'cache_write_5m_tokens', b.usage_details->'tokens'->'cache_write_5m_tokens',
+                'cache_write_1h_tokens', b.usage_details->'tokens'->'cache_write_1h_tokens',
                 'audio_prompt_tokens', b.usage_details->'tokens'->'audio_prompt_tokens',
                 'image_prompt_tokens', b.usage_details->'tokens'->'image_prompt_tokens',
                 'audio_completion_tokens', b.usage_details->'tokens'->'audio_completion_tokens',
@@ -133,7 +137,11 @@ pub async fn stat(
     let window = q.window(&state.pg).await?;
     // Deliberately ignore cursor/limit: the summary describes ALL matching ledger rows.
     // Refunds change the original row to 30, retaining its original amount and usage.
-    let mut query = filtered(
+    let sources = crate::console::usage_sources::pg_sql();
+    let observations = crate::console::usage_observations::pg_sql();
+    let units = crate::console::input_units::pg_sql();
+    let output_rate = crate::console::output_rate::pg_sql();
+    let summary = format!(
         r"SELECT jsonb_build_object(
             'records', COUNT(*),
             'settled', COUNT(*) FILTER (WHERE b.status = 20),
@@ -146,20 +154,73 @@ pub async fn stat(
             'completion_tokens', COALESCE(SUM(b.completion_tokens::bigint), 0),
             'cached_tokens', COALESCE(SUM(b.cached_tokens::bigint), 0),
             'cache_read_samples', COUNT(*) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, b.cached_tokens > 0)),
+            'cache_write_tokens', SUM((b.usage_details->'tokens'->>'cache_write_tokens')::bigint) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_write_reported')::boolean, false) OR (b.usage_details->'tokens'->>'cache_write_tokens')::bigint > 0),
+            'cache_write_samples', COUNT(*) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_write_reported')::boolean, false) OR (b.usage_details->'tokens'->>'cache_write_tokens')::bigint > 0),
+            'cache_write_5m_tokens', SUM((b.usage_details->'tokens'->>'cache_write_5m_tokens')::bigint),
+            'cache_write_1h_tokens', SUM((b.usage_details->'tokens'->>'cache_write_1h_tokens')::bigint),
+            'cache_write_ttl_samples', COUNT(*) FILTER (WHERE b.usage_details->'tokens'->>'cache_write_5m_tokens' IS NOT NULL AND b.usage_details->'tokens'->>'cache_write_1h_tokens' IS NOT NULL),
+            'reasoning_tokens', COALESCE(SUM(b.reasoning_tokens::bigint), 0),
+            'audio_prompt_tokens', SUM((b.usage_details->'tokens'->>'audio_prompt_tokens')::bigint),
+            'image_prompt_tokens', SUM((b.usage_details->'tokens'->>'image_prompt_tokens')::bigint),
+            'audio_completion_tokens', SUM((b.usage_details->'tokens'->>'audio_completion_tokens')::bigint),
+            'image_completion_tokens', SUM((b.usage_details->'tokens'->>'image_completion_tokens')::bigint),
+            'audio_prompt_samples', COUNT(b.usage_details->'tokens'->>'audio_prompt_tokens'),
+            'image_prompt_samples', COUNT(b.usage_details->'tokens'->>'image_prompt_tokens'),
+            'audio_completion_samples', COUNT(b.usage_details->'tokens'->>'audio_completion_tokens'),
+            'image_completion_samples', COUNT(b.usage_details->'tokens'->>'image_completion_tokens'),
+            'cache_read_audio_tokens', SUM((b.usage_details->'tokens'->'cache_read_modalities'->>'audio_tokens')::bigint),
+            'cache_read_image_tokens', SUM((b.usage_details->'tokens'->'cache_read_modalities'->>'image_tokens')::bigint),
+            'cache_write_audio_tokens', SUM((b.usage_details->'tokens'->'cache_write_modalities'->>'audio_tokens')::bigint),
+            'cache_write_image_tokens', SUM((b.usage_details->'tokens'->'cache_write_modalities'->>'image_tokens')::bigint),
+            'cache_read_modal_samples', COUNT(b.usage_details->'tokens'->'cache_read_modalities'->>'audio_tokens'),
+            'cache_write_modal_samples', COUNT(b.usage_details->'tokens'->'cache_write_modalities'->>'audio_tokens'),
             'avg_latency_ms', FLOOR(AVG(b.latency_ms) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0)),
             'latency_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0),
             'avg_ttft_ms', FLOOR(AVG(b.ttft_ms) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)),
             'ttft_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)
-        )",
-        &q,
-        window.as_ref(),
-        key.user_id,
-        key.key_id,
-    )?;
-    let result: Value = query
+        ) || jsonb_build_object({sources}) || jsonb_build_object({observations}) || jsonb_build_object({units}) || jsonb_build_object({output_rate})"
+    );
+    let mut query = filtered(&summary, &q, window.as_ref(), key.user_id, key.key_id)?;
+    let mut result: Value = query
         .build_query_scalar()
         .fetch_one(&state.pg)
         .await
         .map_err(okapi_store::StoreError::from)?;
+    let observed_row = result.clone();
+    crate::console::usage_observations::enrich(
+        &observed_row,
+        &mut result,
+        crate::console::stats::ch_i64(&observed_row, "records"),
+    );
+    if let Some(object) = result.as_object_mut() {
+        object.extend(crate::console::input_units::metrics(
+            &observed_row,
+            crate::console::stats::ch_i64(&observed_row, "records"),
+        ));
+    }
+    let metrics = crate::console::usage_sources::metrics(
+        &result,
+        crate::console::stats::ch_i64(&result, "records"),
+        [
+            Some(crate::console::stats::ch_i64(&result, "prompt_tokens")),
+            Some(crate::console::stats::ch_i64(&result, "completion_tokens")),
+        ],
+        Some(crate::console::stats::ch_i64(&result, "cached_tokens")),
+        crate::console::stats::ch_i64(&result, "cache_read_samples"),
+    );
+    if let Some(object) = result.as_object_mut() {
+        for field in crate::console::usage_sources::FIELDS {
+            object.remove(field);
+        }
+        object.retain(|name, _| !name.starts_with("observed_"));
+        object.extend(metrics);
+        for field in crate::console::output_rate::FIELDS {
+            object.remove(field);
+        }
+        object.extend(crate::console::output_rate::metrics(
+            &observed_row,
+            crate::console::stats::ch_i64(&observed_row, "records"),
+        ));
+    }
     Ok(Json(result))
 }

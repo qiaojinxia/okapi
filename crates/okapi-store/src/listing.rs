@@ -97,7 +97,7 @@ pub struct Page<T> {
     pub total: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct ModelListRow {
     pub model_name: String,
     pub display_name: Option<String>,
@@ -106,6 +106,8 @@ pub struct ModelListRow {
     pub sort_order: i32,
     pub capabilities: serde_json::Value,
     pub context_window: Option<i32>,
+    pub max_output: Option<i32>,
+    pub catalog_config: serde_json::Value,
     /// 无定价行时为 None——模型已建但未定价属配置错误，管理端应高亮。
     pub pricing_mode: Option<String>,
     pub model_ratio: Option<String>,
@@ -120,6 +122,7 @@ pub struct ModelListRow {
     pub tier_expr: Option<String>,
     pub tier_ratios: Option<serde_json::Value>,
     /// 模型级降级链（零候选时按序改投，DESIGN §3.4.1）。
+    #[sqlx(json)]
     pub fallback_models: Vec<String>,
 }
 
@@ -139,13 +142,12 @@ pub async fn list_models(
     slice: Slice,
 ) -> Result<ModelList, StoreError> {
     let pattern = like_pattern(query);
-    // SQL 文本保持原缩进：sqlx 离线快照按字面哈希，动一个空格就要重新 prepare
     let (rows, counts) = tokio::try_join!(
-        sqlx::query!(
-            r#"
+        sqlx::query_as::<_, ModelListRow>(
+            r"
         SELECT m.model_name, m.display_name, m.vendor, m.status, m.sort_order,
-               m.capabilities, m.context_window, m.fallback_models,
-               p.pricing_mode            AS "pricing_mode?",
+               m.capabilities, m.context_window, m.max_output, m.catalog_config, m.fallback_models,
+               p.pricing_mode,
                p.model_ratio::text       AS model_ratio,
                p.completion_ratio::text  AS completion_ratio,
                p.cache_ratio::text       AS cache_ratio,
@@ -153,7 +155,7 @@ pub async fn list_models(
                p.audio_ratio::text            AS audio_ratio,
                p.audio_completion_ratio::text AS audio_completion_ratio,
                p.image_ratio::text            AS image_ratio,
-               p.modality_ratios AS "modality_ratios?",
+               p.modality_ratios,
                p.per_call_price_micro, p.tier_expr, p.tier_ratios
         FROM models m
         LEFT JOIN model_pricing p ON p.model_id = m.id
@@ -161,12 +163,12 @@ pub async fn list_models(
           AND (NOT $2::boolean OR p.pricing_mode IS NULL)
         ORDER BY m.sort_order, m.model_name
         LIMIT $3 OFFSET $4
-        "#,
-            pattern.as_deref(),
-            unpriced,
-            slice.limit,
-            slice.offset
+        "
         )
+        .bind(pattern.as_deref())
+        .bind(unpriced)
+        .bind(slice.limit)
+        .bind(slice.offset)
         .fetch_all(pool),
         count_unless_all(
             slice,
@@ -192,31 +194,7 @@ pub async fn list_models(
         },
         |c| (c.total, c.unpriced),
     );
-    let data = rows
-        .into_iter()
-        .map(|r| ModelListRow {
-            model_name: r.model_name,
-            display_name: r.display_name,
-            vendor: r.vendor,
-            status: r.status,
-            sort_order: r.sort_order,
-            capabilities: r.capabilities,
-            context_window: r.context_window,
-            pricing_mode: r.pricing_mode,
-            model_ratio: r.model_ratio,
-            completion_ratio: r.completion_ratio,
-            cache_ratio: r.cache_ratio,
-            cache_write_ratio: r.cache_write_ratio,
-            audio_ratio: r.audio_ratio,
-            audio_completion_ratio: r.audio_completion_ratio,
-            image_ratio: r.image_ratio,
-            modality_ratios: r.modality_ratios,
-            per_call_price_micro: r.per_call_price_micro,
-            tier_expr: r.tier_expr,
-            tier_ratios: r.tier_ratios,
-            fallback_models: serde_json::from_value(r.fallback_models).unwrap_or_default(),
-        })
-        .collect();
+    let data = rows;
     Ok(ModelList {
         page: Page { data, total },
         unpriced,

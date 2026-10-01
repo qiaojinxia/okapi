@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_ch_batches (id,event_count,rows,payloads) VALUES ($1,0,'[]','[]')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "06fc89001d4cc083696e496bd34ae8e2e0d76de18ec8c7b8ef0261e7beb5fc54"
+}

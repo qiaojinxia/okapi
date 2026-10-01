@@ -1,7 +1,9 @@
 //! Direct Images API usage is per response, never per returned image.
 use super::AppError;
 use axum::http::StatusCode;
-use okapi_domain::{CacheModalities, TokenUsage};
+use okapi_domain::{
+    CacheModalities, ModalitiesReported, TokenDetailsReported, TokenUsage, UpstreamTokenCounts,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -148,6 +150,30 @@ pub(super) fn parse(body: &[u8], required: bool) -> Result<Option<TokenUsage>, A
         .and_then(|v| v.checked_sub(written_image))
         .ok_or_else(invalid)?;
     let usage = TokenUsage {
+        upstream_usage: Some(UpstreamTokenCounts {
+            prompt_tokens: Some(input),
+            completion_tokens: Some(output),
+        }),
+        reported_details: Some(TokenDetailsReported {
+            prompt: ModalitiesReported {
+                audio: true,
+                image: true,
+            },
+            // Image API output defaults to image units under this route's contract.
+            completion: ModalitiesReported {
+                audio: true,
+                image: true,
+            },
+            cache_read: ModalitiesReported {
+                audio: cache_read_reported,
+                image: cache_read_reported,
+            },
+            cache_write: ModalitiesReported {
+                audio: cache_write_reported,
+                image: cache_write_reported,
+            },
+            reasoning: false,
+        }),
         prompt_tokens: input,
         image_prompt_tokens,
         cached_tokens,

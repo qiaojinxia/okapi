@@ -8,6 +8,7 @@ async fn groups(env: &Env) -> Vec<String> {
             .bind(&code).bind(format!("Group {} {i}", env.prefix)).execute(&env.pg).await.unwrap();
         codes.push(code);
     }
+    env.publish().await;
     codes
 }
 

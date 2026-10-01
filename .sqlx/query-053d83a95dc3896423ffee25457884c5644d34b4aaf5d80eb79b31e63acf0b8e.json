@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_ch_events (event_key,batch_id)\n           SELECT k,$2 FROM unnest($1::text[]) AS k ORDER BY k\n           ON CONFLICT (event_key) DO NOTHING RETURNING event_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_events",
+            "name": "event_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "053d83a95dc3896423ffee25457884c5644d34b4aaf5d80eb79b31e63acf0b8e"
+}

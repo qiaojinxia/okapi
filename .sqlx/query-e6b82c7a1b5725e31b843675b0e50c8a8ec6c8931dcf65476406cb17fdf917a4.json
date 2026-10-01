@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH population AS (\n            SELECT CASE WHEN o.status=1 THEN 0 ELSE o.status END AS status,\n                   o.created_at,1::bigint AS n,false AS ch\n            FROM billing_outbox o WHERE (o.status IN (0,2) OR (o.status=1 AND o.stats_protocol=1))\n              AND NOT EXISTS (SELECT 1 FROM billing_ch_events e\n                              WHERE e.event_key='outbox:'||o.event_id::text)\n            UNION ALL\n            SELECT b.status,COALESCE((\n                SELECT min(o.created_at) FROM billing_ch_events e JOIN billing_outbox o\n                ON o.event_id=CASE WHEN e.event_key LIKE 'outbox:%'\n                     THEN substring(e.event_key FROM 8)::uuid END\n                WHERE e.batch_id=b.id\n            ),b.created_at),b.event_count::bigint,true\n            FROM billing_ch_batches b WHERE b.status=0 OR (b.status=2 AND EXISTS (\n                SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id AND d.status=0\n            ))\n        ) SELECT COALESCE(sum(n) FILTER (WHERE status=0),0)::bigint AS \"pending!\",\n                 COALESCE(sum(n) FILTER (WHERE status=2),0)::bigint AS \"failed!\",\n                 COALESCE(sum(n) FILTER (WHERE status=0 AND ch),0)::bigint AS \"ch_pending!\",\n                 min(created_at) FILTER (WHERE status=0) AS \"oldest?\"\n          FROM population",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pending!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "failed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "ch_pending!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "oldest?",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e6b82c7a1b5725e31b843675b0e50c8a8ec6c8931dcf65476406cb17fdf917a4"
+}

@@ -74,7 +74,7 @@ pub async fn realtime(
         Ok(prep) => ws
             .protocols(["realtime"])
             .on_upgrade(move |socket| async move {
-                bridge_session(state, socket, prep).await;
+                Box::pin(bridge_session(state, socket, prep)).await;
             }),
         Err(err) => err.into_response_with(Some(request_id)),
     }

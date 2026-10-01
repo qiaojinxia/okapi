@@ -16,6 +16,18 @@ mod latency_statistics;
 #[path = "support/ttft_average.rs"]
 mod ttft_average;
 
+#[path = "support/usage_sources.rs"]
+mod usage_sources;
+
+#[path = "support/cache_statistics.rs"]
+mod cache_statistics;
+#[path = "support/historical_speech_units.rs"]
+mod historical_speech_units;
+#[path = "support/input_unit_statistics.rs"]
+mod input_unit_statistics;
+#[path = "support/token_detail_aggregates.rs"]
+mod token_detail_aggregates;
+
 #[path = "support/ttft_statistics.rs"]
 mod ttft_statistics;
 
@@ -23,6 +35,9 @@ fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
 }
+
+#[path = "support/output_rate_statistics.rs"]
+mod output_rate_statistics;
 
 struct Env {
     pg: PgPool,
@@ -136,6 +151,11 @@ fn payload(env: &Env, amount: i64, discount: i64, ttft: i64, is_error: bool) -> 
         "channel_id": env.channel_id,
         "channel_key_id": 1,
         "log_type": if is_error { 5 } else { 2 },
+        "prompt_source":"upstream",
+        "completion_source":"upstream",
+        "upstream_usage":{"prompt_tokens":100,"completion_tokens":200},
+        "input_unit":"tokens",
+        "input_characters":null,
         "prompt_tokens": 100,
         "cached_tokens": 0,
         "completion_tokens": 200,

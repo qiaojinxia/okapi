@@ -39,13 +39,15 @@ async fn first_publish_on_fresh_database_hot_reloads() {
     let admin = okapi_store::provision::create_user(&state.pg, "epoch-admin")
         .await
         .unwrap();
-    let published = okapi_store::admin::publish_epoch(
-        &state.pg,
-        admin,
-        &serde_json::json!({"reason": "first"}),
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&state.pg)
+            .await
+            .unwrap(),
     )
-    .await
     .unwrap();
+    let published = okapi_store::admin::publish_epoch(&state.pg, admin, &snapshot)
+        .await
+        .unwrap();
     assert_eq!(published, 1);
     assert!(
         gateway::refresh_pricebook_if_newer(&state).await.unwrap(),

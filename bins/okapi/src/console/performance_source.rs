@@ -27,8 +27,23 @@ impl Kind {
 }
 
 /// All arguments are internal identifiers and validated time/owner predicates.
-/// Recover only incomplete grains within the caller's time and owner filters.
 pub(super) fn source(kind: Kind, keys: &str, expected_table: &str, predicate: &str) -> String {
+    prepared(
+        kind,
+        keys,
+        expected_table,
+        predicate,
+        super::measurement_coverage::Mode::Recover,
+    )
+}
+
+pub(super) fn prepared(
+    kind: Kind,
+    keys: &str,
+    expected_table: &str,
+    predicate: &str,
+    mode: super::measurement_coverage::Mode,
+) -> String {
     let prefix = kind.prefix();
     let valid = kind.valid();
     let table = kind.table();
@@ -52,27 +67,41 @@ pub(super) fn source(kind: Kind, keys: &str, expected_table: &str, predicate: &s
             )
         }
     };
+    if mode != super::measurement_coverage::Mode::Recover {
+        let expected = format!(
+            "WITH toDate(hour) AS day SELECT {keys}, countMerge(requests) AS n FROM {expected_table} WHERE {predicate} GROUP BY {keys}"
+        );
+        let counts = format!(
+            "WITH toDate(hour) AS day SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}"
+        );
+        let aggregate = format!(
+            "WITH toDate(hour) AS day SELECT {keys}, countMerge(requests) AS observed, sumIfMerge(total_ms) AS total_ms, countIfMerge(samples) AS samples{output_aggregate} FROM {table} WHERE {predicate}"
+        );
+        let raw = format!(
+            "WITH toStartOfHour(ts) AS hour, toDate(ts) AS day SELECT {keys}, count() AS observed, sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} FROM request_log_raw WHERE {predicate}"
+        );
+        let source = super::measurement_coverage::fast_source(
+            mode, keys, &expected, &counts, &aggregate, &raw,
+        );
+        let selected = fields
+            .iter()
+            .map(|(field, alias)| format!("toInt64({field}) AS {prefix}_{alias}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("(SELECT {keys}, {selected} FROM {source})");
+    }
     let selected = fields.iter().map(|(field, alias)| {
         format!("toInt64(if(use_aggregate, ifNull(a.{field}, 0), if(ifNull(r.observed, 0) <= e.expected, ifNull(r.{field}, 0), 0))) AS {prefix}_{alias}")
     }).collect::<Vec<_>>().join(", ");
     format!(
         "(WITH \
-        e AS (SELECT {keys}, countMerge(requests) AS expected \
-            FROM (SELECT *, toDate(hour) AS day FROM {expected_table}) \
-            WHERE {predicate} GROUP BY {keys}), \
-        a AS (SELECT {keys}, countMerge(requests) AS observed, \
-            sumIfMerge(total_ms) AS total_ms, countIfMerge(samples) AS samples{output_aggregate} \
-            FROM (SELECT *, toDate(hour) AS day FROM {table}) \
-            WHERE {predicate} GROUP BY {keys}), \
-        missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) \
-            WHERE e.expected != ifNull(a.observed, 0)), \
-        r AS (SELECT {keys}, count() AS observed, \
-            sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} \
-            FROM (SELECT *, toStartOfHour(ts) AS hour, toDate(ts) AS day FROM request_log_raw) raw_rows \
-            INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
+        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, toDate(hour) AS day FROM {expected_table}) WHERE {predicate} GROUP BY {keys}), \
+        a AS (SELECT {keys}, countMerge(requests) AS observed, sumIfMerge(total_ms) AS total_ms, countIfMerge(samples) AS samples{output_aggregate} FROM (SELECT *, toDate(hour) AS day FROM {table}) WHERE {predicate} GROUP BY {keys}), \
+        missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.observed, 0)), \
+        r AS (SELECT {keys}, count() AS observed, sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} \
+            FROM (SELECT *, toStartOfHour(ts) AS hour, toDate(ts) AS day FROM request_log_raw) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
         SELECT {selected_keys}, {selected}, \
-            (ifNull(a.observed, 0) = e.expected OR \
-             (ifNull(a.observed, 0) < e.expected AND (ifNull(r.observed, 0) > e.expected OR ifNull(a.observed, 0) >= ifNull(r.observed, 0)))) AS use_aggregate \
+            (ifNull(a.observed, 0) = e.expected OR (ifNull(a.observed, 0) < e.expected AND (ifNull(r.observed, 0) > e.expected OR ifNull(a.observed, 0) >= ifNull(r.observed, 0)))) AS use_aggregate \
         FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"
     )
 }

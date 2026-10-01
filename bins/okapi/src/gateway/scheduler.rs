@@ -132,6 +132,8 @@ mod tests {
             api_version: None,
             aws_region: None,
             oauth_token_url: None,
+            mimic_cc: false,
+            mimic_cc_version: None,
             proxy_url: None,
             extra_headers: Vec::new(),
             capabilities: serde_json::json!({}),

@@ -45,12 +45,13 @@ interface ErrorEnvelope {
 
 export async function apiFetch<T>(
   path: string,
-  init?: { method?: string; body?: unknown; key?: string },
+  init?: { method?: string; body?: unknown; key?: string; fresh?: boolean },
 ): Promise<T> {
   const key = init?.key ?? getKey()
   const headers: Record<string, string> = {}
   if (key) headers.Authorization = `Bearer ${key}`
   if (init?.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (init?.fresh) headers['Cache-Control'] = 'no-cache'
 
   const resp = await fetch(path, {
     method: init?.method ?? 'GET',

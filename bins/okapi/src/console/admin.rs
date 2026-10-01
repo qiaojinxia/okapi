@@ -239,6 +239,7 @@ pub async fn create_channel(
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;
     ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
+    ensure_settings_mimic(req.settings.as_ref())?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
         &state.pg,
@@ -542,6 +543,33 @@ fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     Ok(())
 }
 
+/// `settings.mimic_cc` / `mimic_cc_version` 写入校验（IMPLEMENTATION §11.38）：
+/// 开关必须是布尔，版本必须是三段 semver——过松的值只会让伪装 UA 一眼可辨。
+fn ensure_settings_mimic(settings: Option<&Value>) -> Result<(), AppError> {
+    let Some(s) = settings else {
+        return Ok(());
+    };
+    if let Some(v) = s.get("mimic_cc")
+        && !v.is_boolean()
+    {
+        return Err(AppError::bad_request().with_param("mimic_cc"));
+    }
+    if let Some(v) = s.get("mimic_cc_version") {
+        let ok = v.is_null()
+            || v.as_str().is_some_and(|ver| {
+                let parts: Vec<&str> = ver.split('.').collect();
+                parts.len() == 3
+                    && parts.iter().all(|p| {
+                        !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit())
+                    })
+            });
+        if !ok {
+            return Err(AppError::bad_request().with_param("mimic_cc_version"));
+        }
+    }
+    Ok(())
+}
+
 /// `settings.oauth_token_url`（订阅 OAuth 的 token 端点覆写）与 api_base 过同一道 SSRF 闸：
 /// 网关刷新 token 时会把 refresh token POST 到这个地址，OAuth 登录端点写它时已校验，
 /// 但渠道设置的通用写入口此前没有——改一下 JSON 就能把刷新请求指向私网 / 元数据地址。
@@ -631,6 +659,7 @@ pub struct PatchChannelReq {
 
 /// PATCH /admin/channels/{id}：改渠道配置（缺省字段不动）。
 /// 启停仍走 `/status`，凭证走 `/credential`——三者审计语义不同，不合并。
+#[allow(clippy::too_many_lines)]
 pub async fn update_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -651,6 +680,7 @@ pub async fn update_channel(
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;
     ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
+    ensure_settings_mimic(req.settings.as_ref())?;
     // 空地址已被上面的 SSRF 校验拦下（scheme 不合法）。要地址的三家（azure / bedrock / vertex）：
     // 本次给了地址就按新协议校验形状；改协议但没给地址则回源看现有地址合不合新协议
     if let Some(provider) = req
@@ -1401,6 +1431,12 @@ pub async fn leaderboard(
 #[derive(Deserialize)]
 pub struct UpsertModelReq {
     pub model_name: String,
+    #[serde(default)]
+    pub metadata: Option<okapi_store::model_config::ModelMetadata>,
+    #[serde(default)]
+    pub pricing_mode: Option<String>,
+    #[serde(default)]
+    pub per_call_price_micro: Option<i64>,
     /// 倍率一律十进制字符串（精确入库，禁浮点）。
     pub model_ratio: String,
     #[serde(default = "default_one")]
@@ -1440,59 +1476,19 @@ pub struct UpsertModelReq {
     pub fallback_models: Option<Vec<String>>,
 }
 
-/// 降级链上限：链是兜底不是路由表，过长说明在拿降级当调度用。
-const MAX_FALLBACK_CHAIN: usize = 8;
-
-/// 校验并落库模型降级链：归一化（去空白/自引用/保序去重）→ 上限 →
-/// 条目须为已存在模型（不要求 active：临时停用的模型保留在链上，恢复即生效）。
-async fn apply_fallback_models(
-    state: &AppState,
-    model_id: i64,
-    model_name: &str,
-    raw_chain: &[String],
-) -> Result<(), AppError> {
-    let mut chain: Vec<String> = Vec::new();
-    for entry in raw_chain {
-        let name = entry.trim();
-        if name.is_empty() || name == model_name || chain.iter().any(|c| c == name) {
-            continue;
-        }
-        chain.push(name.to_owned());
-    }
-    if chain.len() > MAX_FALLBACK_CHAIN {
-        return Err(AppError::bad_request().with_param("fallback_models"));
-    }
-    let known = sqlx::query_scalar!(
-        r#"SELECT count(*) AS "n!" FROM models WHERE model_name = ANY($1)"#,
-        &chain
-    )
-    .fetch_one(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-    if usize::try_from(known).unwrap_or(0) != chain.len() {
-        return Err(AppError::bad_request().with_param("fallback_models"));
-    }
-    sqlx::query!(
-        r#"UPDATE models SET fallback_models = $2, updated_at = now() WHERE id = $1"#,
-        model_id,
-        serde_json::json!(chain)
-    )
-    .execute(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-    Ok(())
-}
-
 fn default_one() -> String {
     "1".to_owned()
 }
 
-pub async fn upsert_model(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    ExtractJson(req): ExtractJson<UpsertModelReq>,
-) -> Result<Json<Value>, AppError> {
-    let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+fn validate_model_draft(req: &UpsertModelReq) -> Result<(), AppError> {
+    let name = req.model_name.trim();
+    if name.is_empty() || name.chars().count() > 128 {
+        return Err(AppError::bad_request().with_param("model_name"));
+    }
+    if let Some(meta) = &req.metadata {
+        meta.validate()
+            .map_err(|param| AppError::bad_request().with_param(param))?;
+    }
     // 倍率字面量校验（复用定价域解析器，非法值 400）
     for literal in [
         &req.model_ratio,
@@ -1503,7 +1499,10 @@ pub async fn upsert_model(
         &req.audio_completion_ratio,
         &req.image_ratio,
     ] {
-        if literal.parse::<okapi_pricing::RatioFp>().is_err() {
+        if !literal
+            .parse::<okapi_pricing::RatioFp>()
+            .is_ok_and(|v| v.as_scaled() <= 999_999_999_999)
+        {
             return Err(AppError::bad_request().with_param("ratio"));
         }
     }
@@ -1513,13 +1512,127 @@ pub async fn upsert_model(
     }
     // Validate all supplied price axes before changing the model row.
     if let Some(tiers) = &req.tier_ratios
-        && tiers.values().any(|v| {
-            v.as_str()
-                .is_none_or(|s| s.parse::<okapi_pricing::RatioFp>().is_err())
-        })
+        && (tiers.len() > 32
+            || tiers.iter().any(|(key, v)| {
+                key.is_empty()
+                    || key.trim() != key
+                    || key.len() > 64
+                    || v.as_str()
+                        .is_none_or(|s| s.parse::<okapi_pricing::RatioFp>().is_err())
+            }))
     {
         return Err(AppError::bad_request().with_param("tier_ratios"));
     }
+    Ok(())
+}
+
+fn model_price_selection(req: &UpsertModelReq) -> Result<(Option<&str>, Option<&str>), AppError> {
+    // Legacy tier_expr selects a mode only when supplied; omission truly preserves it.
+    let mode = req.pricing_mode.as_deref().or_else(|| {
+        req.tier_expr.as_deref().map(|e| {
+            if e.trim().is_empty() {
+                "ratio"
+            } else {
+                "tiered"
+            }
+        })
+    });
+    let tier_expr = req
+        .tier_expr
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
+    match mode {
+        Some("tiered") => {
+            let expr = tier_expr.ok_or_else(|| AppError::bad_request().with_param("tier_expr"))?;
+            okapi_pricing::TierTable::check_expr(expr).map_err(|reason| {
+                AppError::bad_request().with_param(format!("tier_expr:{reason}"))
+            })?;
+        }
+        Some("per_call") if req.per_call_price_micro.is_none_or(|v| v < 0) => {
+            return Err(AppError::bad_request().with_param("per_call_price_micro"));
+        }
+        Some("ratio" | "per_call") | None => {}
+        _ => return Err(AppError::bad_request().with_param("pricing_mode")),
+    }
+    Ok((mode, tier_expr))
+}
+
+#[cfg(test)]
+mod model_draft_tests {
+    use super::*;
+
+    fn request(extra: Value) -> UpsertModelReq {
+        let mut body = json!({"model_name":"test-model", "model_ratio":"1"});
+        let Value::Object(extra) = extra else {
+            panic!("model draft fixture must be an object")
+        };
+        body.as_object_mut().unwrap().extend(extra);
+        serde_json::from_value(body).unwrap()
+    }
+
+    #[test]
+    fn omission_preserves_mode_and_explicit_modes_are_validated() {
+        assert_eq!(
+            model_price_selection(&request(json!({}))).unwrap(),
+            (None, None)
+        );
+        assert_eq!(
+            model_price_selection(&request(json!({"tier_expr":""}))).unwrap(),
+            (Some("ratio"), None)
+        );
+        assert!(model_price_selection(&request(json!({"pricing_mode":"per_call"}))).is_err());
+        assert!(
+            model_price_selection(&request(
+                json!({"pricing_mode":"per_call", "per_call_price_micro":-1})
+            ))
+            .is_err()
+        );
+        assert!(
+            model_price_selection(&request(
+                json!({"pricing_mode":"per_call", "per_call_price_micro":0})
+            ))
+            .is_ok()
+        );
+        assert!(
+            model_price_selection(&request(
+                json!({"pricing_mode":"tiered", "tier_expr":"0:2.5,128000:5"})
+            ))
+            .is_ok()
+        );
+        assert!(
+            model_price_selection(&request(
+                json!({"pricing_mode":"tiered", "tier_expr":"100:2.5"})
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_metadata_and_prices_are_rejected_before_writing() {
+        for invalid in [
+            json!({"metadata":{"kind":"unknown"}}),
+            json!({"metadata":{"capabilities":{"vision":"yes"}}}),
+            json!({"metadata":{"max_output":0}}),
+            json!({"tier_ratios":{"":"1"}}),
+            json!({"modality_ratios":{"cache_write_1h":2}}),
+            json!({"model_ratio":"1000000"}),
+        ] {
+            assert!(validate_model_draft(&request(invalid)).is_err());
+        }
+        assert!(validate_model_draft(&request(json!({"modality_ratios":{"cache_write_5m":"0","cache_write_1h":"2"}, "tier_ratios":{}}))).is_ok());
+    }
+}
+
+pub async fn upsert_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ExtractJson(req): ExtractJson<UpsertModelReq>,
+) -> Result<Json<Value>, AppError> {
+    let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    validate_model_draft(&req)?;
+    let (mode, tier_expr) = model_price_selection(&req)?;
+    let name = req.model_name.trim();
     let axes = okapi_store::admin::RatioAxes {
         model: &req.model_ratio,
         completion: &req.completion_ratio,
@@ -1530,40 +1643,25 @@ pub async fn upsert_model(
         image: &req.image_ratio,
         modality_ratios: req.modality_ratios.as_ref(),
     };
-    // 阶梯表非空 → tiered；空串 → 切回 ratio；None → 保持既有模式的 ratio 写入路径。
-    // 校验放在写库前：阶梯表配错只会在**编译价簿**时炸，那时改动已发布，整本价簿一起装载失败。
-    let tier_expr = req
-        .tier_expr
-        .as_deref()
-        .map(str::trim)
-        .filter(|e| !e.is_empty());
-    let model_id = match tier_expr {
-        Some(expr) => {
-            okapi_pricing::TierTable::check_expr(expr).map_err(|reason| {
-                AppError::bad_request().with_param(format!("tier_expr:{reason}"))
-            })?;
-            okapi_store::admin::upsert_model_tiered(&state.pg, &req.model_name, axes, expr).await?
-        }
-        None => okapi_store::admin::upsert_model_ratio(&state.pg, &req.model_name, axes).await?,
-    };
-    if let Some(tiers) = &req.tier_ratios {
-        let value = if tiers.is_empty() {
-            None
-        } else {
-            Some(Value::Object(tiers.clone()))
-        };
-        sqlx::query!(
-            r#"UPDATE model_pricing SET tier_ratios = $2 WHERE model_id = $1"#,
-            model_id,
-            value
-        )
-        .execute(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
-    }
-    if let Some(raw_chain) = &req.fallback_models {
-        apply_fallback_models(&state, model_id, &req.model_name, raw_chain).await?;
-    }
+    let tiers = req.tier_ratios.as_ref().map(|v| Value::Object(v.clone()));
+    let model_id = okapi_store::model_config::save(
+        &state.pg,
+        okapi_store::model_config::ModelDraft {
+            name,
+            axes,
+            mode,
+            tier_expr,
+            per_call_price_micro: req.per_call_price_micro,
+            tier_ratios: tiers.as_ref(),
+            fallbacks: req.fallback_models.as_deref(),
+            metadata: req.metadata.as_ref(),
+        },
+    )
+    .await
+    .map_err(|e| match e {
+        okapi_store::StoreError::InvalidData(param) => AppError::bad_request().with_param(param),
+        e => e.into(),
+    })?;
     state.invalidate_routing_caches();
     audit(
         &state,
@@ -1579,12 +1677,18 @@ pub async fn upsert_model(
             "audio_completion_ratio": req.audio_completion_ratio,
             "image_ratio": req.image_ratio,
             "modality_ratios": req.modality_ratios,
+            "metadata": req.metadata,
+            "pricing_mode": mode,
+            "per_call_price_micro": req.per_call_price_micro,
+            "tier_ratios": req.tier_ratios,
             "tier_expr": req.tier_expr,
             "fallback_models": req.fallback_models,
         }),
     )
     .await;
-    Ok(Json(json!({ "model_id": model_id })))
+    Ok(Json(
+        json!({ "model_id": model_id, "requires_publish": true }),
+    ))
 }
 
 // ---- 定价规则栈（DESIGN §3.4）----

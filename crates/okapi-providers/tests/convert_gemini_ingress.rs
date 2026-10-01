@@ -401,7 +401,7 @@ fn usage_json_preserves_reported_zero_and_rejects_invalid_reasoning() {
     assert_eq!(
         gemini_usage_json(usage(10, 5, 0, 0)),
         json!({
-            "promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"cachedContentTokenCount":0
+            "promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15,"cachedContentTokenCount":0,"thoughtsTokenCount":0
         })
     );
     assert_eq!(gemini_usage_json(usage(10, 5, 0, 9)), Value::Null);

@@ -233,5 +233,6 @@ pub(super) async fn enrich(
     for kind in [Kind::Ttft, Kind::Latency] {
         enrich_kind(ch, rows, scope, since, kind).await?;
     }
+    super::output_rate::enrich_quality(ch, rows, scope, since).await?;
     Ok(())
 }

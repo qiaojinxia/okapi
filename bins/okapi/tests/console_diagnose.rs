@@ -127,6 +127,14 @@ async fn endpoint_compatibility_matches_gateway_and_public_examples() {
         400
     );
 
+    reqwest::Client::new()
+        .post(format!("http://{}/admin/pricing/publish", env.console))
+        .bearer_auth(&env.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
     let mut pricing_url =
         reqwest::Url::parse(&format!("http://{}/api/pricing", env.console)).unwrap();
     pricing_url

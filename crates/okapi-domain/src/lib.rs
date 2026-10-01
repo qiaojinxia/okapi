@@ -13,4 +13,6 @@ pub use error::DomainError;
 pub use ids::{ApiKeyId, ChannelId, ChannelKeyId, GroupCode, ModelCode, UserId};
 pub use money::Money;
 pub use state::{BillingEvent, BillingState, InvalidTransition};
-pub use tokens::{CacheModalities, TokenUsage, UpstreamTokenCounts};
+pub use tokens::{
+    CacheModalities, ModalitiesReported, TokenDetailsReported, TokenUsage, UpstreamTokenCounts,
+};

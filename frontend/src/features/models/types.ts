@@ -1,5 +1,10 @@
 export interface ModelListRow {
   model_name: string
+  display_name?: string | null
+  capabilities?: Record<string, boolean>
+  context_window?: number | null
+  max_output?: number | null
+  catalog_config?: ModelCatalogConfig
   vendor: string | null
   status: number
   pricing_mode: string | null
@@ -13,9 +18,22 @@ export interface ModelListRow {
   audio_completion_ratio: string | null
   image_ratio: string | null
   per_call_price_micro: number | null
+  tier_ratios?: Record<string, string> | null
+  modality_ratios?: Record<string, string> | null
   /// 模型级降级链：零可用候选时按序改投（单跳），计费按实际服务模型。
   fallback_models: string[]
 }
+
+export interface ModelCatalogConfig {
+  kind?: string | null
+  description?: string | null
+  input_modalities?: string[]
+  output_modalities?: string[]
+}
+
+export const MODEL_KINDS = ['chat', 'completion', 'embedding', 'rerank', 'image_generation', 'speech_to_text', 'text_to_speech', 'realtime', 'video_generation', 'moderation', 'search'] as const
+export const CAPABILITY_KEYS = ['vision', 'tools', 'parallel_tools', 'json', 'structured_output', 'reasoning', 'audio', 'video', 'embedding', 'realtime', 'streaming', 'prompt_cache', 'system_prompt', 'temperature', 'web_search', 'computer_use'] as const
+export const INDEPENDENT_AXES = ['cache_write_5m', 'cache_write_1h', 'image_cache_read', 'audio_cache_read', 'image_cache_write', 'audio_cache_write', 'image_output'] as const
 
 
 

@@ -73,7 +73,7 @@ export function modelVendor(model: Pick<PricingModel, 'vendor'>): Vendor {
   return registry.get(normalize(raw)) ?? { id: `custom:${raw.toLowerCase()}`, name: raw }
 }
 
-export const capabilityKeys = ['vision', 'tools', 'json', 'reasoning', 'audio', 'video', 'embedding', 'realtime'] as const
+export const capabilityKeys = ['vision', 'tools', 'json', 'reasoning', 'audio', 'video', 'embedding', 'realtime', 'parallel_tools', 'structured_output', 'streaming', 'prompt_cache', 'system_prompt', 'temperature', 'web_search', 'computer_use'] as const
 export function modelCapabilities(model: PricingModel) {
   return capabilityKeys.filter((key) => model.capabilities?.[key] === true)
 }
@@ -84,7 +84,7 @@ export function nonnegative(raw: string | number | null | undefined): number | n
   return Number.isFinite(value) && value >= 0 ? value : null
 }
 
-export type PriceField = 'input' | 'output' | 'cache' | 'cacheWrite' | 'audioIn' | 'audioOut' | 'imageIn' | 'call'
+export type PriceField = 'input' | 'output' | 'cache' | 'cacheWrite' | 'audioIn' | 'audioOut' | 'imageIn' | 'call' | 'cache_write_5m' | 'cache_write_1h' | 'image_cache_read' | 'audio_cache_read' | 'image_cache_write' | 'audio_cache_write' | 'image_output'
 
 // 统一返回 micro-USD。阶梯公式不能伪装成固定单价；缺失值与真实零价严格区分。
 export function modelPrice(model: PricingModel, field: PriceField, factor: number | null, unit: TokenUnit = '1M'): number | null {
@@ -96,10 +96,17 @@ export function modelPrice(model: PricingModel, field: PriceField, factor: numbe
   if (model.mode !== 'ratio') return null
   const base = nonnegative(model.model_ratio)
   if (base === null) return null
-  const ratios: Record<Exclude<PriceField, 'call'>, Array<string | null>> = {
+  const ratios: Record<Exclude<PriceField, 'call'>, Array<string | number | null>> = {
     input: [], output: [model.completion_ratio], cache: [model.cache_ratio],
     cacheWrite: [model.cache_write_ratio], audioIn: [model.audio_ratio],
     audioOut: [model.audio_ratio, model.audio_completion_ratio], imageIn: [model.image_ratio],
+    cache_write_5m: [model.modality_ratios?.cache_write_5m ?? model.cache_write_ratio],
+    cache_write_1h: [model.modality_ratios?.cache_write_1h ?? model.cache_write_ratio],
+    image_cache_read: model.modality_ratios?.image_cache_read != null ? [model.modality_ratios.image_cache_read] : [model.image_ratio, model.cache_ratio],
+    audio_cache_read: model.modality_ratios?.audio_cache_read != null ? [model.modality_ratios.audio_cache_read] : [model.audio_ratio, model.cache_ratio],
+    image_cache_write: model.modality_ratios?.image_cache_write != null ? [model.modality_ratios.image_cache_write] : [model.image_ratio, model.cache_write_ratio],
+    audio_cache_write: model.modality_ratios?.audio_cache_write != null ? [model.modality_ratios.audio_cache_write] : [model.audio_ratio, model.cache_write_ratio],
+    image_output: [model.modality_ratios?.image_output ?? model.completion_ratio],
   }
   const priceBase = nonnegative(model.base_price_per_1m_micro ?? 2_000_000)
   if (priceBase === null || priceBase === 0) return null

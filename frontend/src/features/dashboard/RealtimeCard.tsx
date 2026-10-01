@@ -49,7 +49,7 @@ export function RealtimeCard({ days }: { days: number }) {
       </div>
       {q.isError ? <ErrorState message={t('admin:dashboardLiveUnavailable', { reason: describeError(q.error) })} onRetry={() => void q.refetch()} /> :
         <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_5rem]">
-          <div className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+          <div className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 md:grid-cols-5">
             <InlineStat label="QPS" value={qps} />
             <InlineStat label={t('admin:realtimeReqs60')} value={d ? formatCount(d.requests, locale) : '—'} />
             <InlineStat label={t('admin:kpiErrorRate')} value={d && hasRequests ? formatBp(d.error_rate_bp, locale) : '—'} tone={hasRequests && d && d.error_rate_bp >= 500 ? 'bad' : hasRequests && d && d.error_rate_bp >= 100 ? 'warn' : 'default'} />

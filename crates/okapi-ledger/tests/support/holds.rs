@@ -63,6 +63,8 @@ impl Bed {
             now: Utc::now(),
             pricing: PricingSnapshot {
                 epoch: 7,
+                input_unit: None,
+                input_characters: None,
                 base_price_per_1m_usd: None,
                 mode: "per_call",
                 model_ratio: None,

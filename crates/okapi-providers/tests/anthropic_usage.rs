@@ -63,10 +63,20 @@ fn json_preserves_cache_totals_reasoning_and_missing_state() {
         (800, 100, 100)
     );
     assert!(u.cache_read_reported && u.cache_write_reported);
+    assert_eq!(
+        (u.cache_write_5m_tokens, u.cache_write_1h_tokens),
+        (Some(60), Some(40))
+    );
     let source = json!({"id":"m","content":[],"usage":raw}).to_string();
     let (body, probe) = response_anthropic_to_openai(&Bytes::from(source)).unwrap();
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["usage"]["total_tokens"], 1050);
+    let reparsed: UsageProbe = serde_json::from_value(body["usage"].clone()).unwrap();
+    assert_eq!(
+        reparsed.to_token_usage().unwrap(),
+        u,
+        "TTL survives protocol conversion"
+    );
     assert_eq!(
         body["usage"]["completion_tokens_details"]["reasoning_tokens"],
         20
@@ -139,6 +149,37 @@ fn stream_merges_cumulative_updates_and_never_adds_replayed_deltas() {
                 .unwrap()
                 .to_token_usage()
                 .unwrap()
+        );
+    }
+}
+
+#[test]
+fn stream_retains_ttl_on_output_updates_but_clears_stale_splits() {
+    let start = json!({"input_tokens":100,"output_tokens":1,"cache_creation_input_tokens":100,
+        "cache_creation":{"ephemeral_5m_input_tokens":60,"ephemeral_1h_input_tokens":40}});
+    for result in stream(
+        &start,
+        vec![json!({"output_tokens":10}), json!({"output_tokens":20})],
+    ) {
+        let usage = result.unwrap().to_token_usage().unwrap();
+        assert_eq!(
+            (
+                usage.cache_write_tokens,
+                usage.cache_write_5m_tokens,
+                usage.cache_write_1h_tokens
+            ),
+            (100, Some(60), Some(40))
+        );
+    }
+    for result in stream(
+        &start,
+        vec![json!({"output_tokens":20,"cache_creation_input_tokens":120})],
+    ) {
+        let usage = result.unwrap().to_token_usage().unwrap();
+        assert_eq!(usage.cache_write_tokens, 120);
+        assert_eq!(
+            (usage.cache_write_5m_tokens, usage.cache_write_1h_tokens),
+            (None, None)
         );
     }
 }
@@ -253,5 +294,49 @@ fn malformed_stream_json_and_duplicate_start_cannot_reset_invalid_usage() {
                 }
             )));
         }
+    }
+}
+
+#[test]
+fn explicit_zero_thinking_survives_conversion_and_absence_stays_unknown() {
+    for reported in [false, true] {
+        let mut raw = json!({"input_tokens":100,"output_tokens":50});
+        if reported {
+            raw["output_tokens_details"] = json!({"thinking_tokens":0});
+        }
+        let probe = usage_from_anthropic(Some(&raw)).unwrap();
+        assert_eq!(
+            probe
+                .to_token_usage()
+                .unwrap()
+                .reported_details
+                .unwrap()
+                .reasoning,
+            reported
+        );
+        let chat = json!({"id":"fixture","model":"fixture","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":probe.chat_json()});
+        let (wire, _) =
+            okapi_providers::convert::anthropic_to_openai::response_openai_to_anthropic(
+                &Bytes::from(chat.to_string()),
+            )
+            .unwrap();
+        let converted: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            converted["usage"].get("output_tokens_details").is_some(),
+            reported
+        );
+        if reported {
+            assert_eq!(
+                converted["usage"]["output_tokens_details"]["thinking_tokens"],
+                0
+            );
+        }
+        assert_eq!(
+            usage_from_anthropic(Some(&converted["usage"]))
+                .unwrap()
+                .to_token_usage()
+                .unwrap(),
+            probe.to_token_usage().unwrap()
+        );
     }
 }

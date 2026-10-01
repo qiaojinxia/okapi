@@ -54,6 +54,7 @@ async fn database_endpoint_filter_agrees_with_routing_for_provider_and_mapping_v
             .await
             .unwrap();
     }
+    env.publish().await;
     let baseline = env
         .get(&[("q", &env.prefix), ("group", &group), ("limit", "100")])
         .await;

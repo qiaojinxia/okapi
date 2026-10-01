@@ -77,16 +77,40 @@ pub fn client_headers(headers: &axum::http::HeaderMap) -> Vec<(String, String)> 
 }
 
 /// 订阅渠道的出向修饰 = 渠道设置里的代理 / 额外头 + 客户端身份头；其它渠道原样。
+/// mimic 模式（`settings.mimic_cc`）不透传客户端身份头——伪造指纹要独占出向，
+/// 客户端自带的（Python SDK 的 x-stainless 等）混进来反而是露馅点。
 #[must_use]
 pub fn outbound_with_client(
     cand: &ChannelCandidate,
     client: &[(String, String)],
 ) -> okapi_providers::Outbound {
     let mut outbound = super::openai_dialect::outbound(cand);
-    if is_oauth_provider(&cand.provider) {
+    if is_oauth_provider(&cand.provider) && !cand.mimic_cc {
         outbound.extra_headers.extend(client.iter().cloned());
     }
     outbound
+}
+
+/// mimic 模式的稳定伪装身份（IMPLEMENTATION §11.38）：种子 = channel_key_id（同一把
+/// 订阅 key 恒同一套指纹，重启 / 多副本一致；重新登录换 key 则换指纹），账号 UUID 来自
+/// 换码时记进凭证的 `account_id`。非 mimic 或非 `anthropic_max` 返回 None。
+#[must_use]
+pub fn mimic_identity(
+    cand: &ChannelCandidate,
+    account_uuid: Option<&str>,
+) -> Option<okapi_providers::oauth::cc_mimic::MimicIdentity> {
+    if !cand.mimic_cc || cand.provider != "anthropic_max" {
+        return None;
+    }
+    let version = cand
+        .mimic_cc_version
+        .as_deref()
+        .unwrap_or(okapi_providers::oauth::cc_mimic::MIMIC_CLI_VERSION);
+    Some(okapi_providers::oauth::cc_mimic::MimicIdentity::from_seed(
+        &cand.channel_key_id.to_string(),
+        account_uuid,
+        version,
+    ))
 }
 
 /// 刷新所需的最小上下文：候选行或管理面探测都能凑出来。

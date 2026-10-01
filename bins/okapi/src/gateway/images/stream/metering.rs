@@ -64,58 +64,10 @@ impl Mode {
                 }
                 Ok(Some(next))
             }
-            Self::PerImage => {
-                let add = |a: u32, b: u32| {
-                    a.checked_add(b)
-                        .filter(|value| i32::try_from(*value).is_ok())
-                        .ok_or_else(usage::invalid)
-                };
-                let modalities =
-                    |a: Option<okapi_domain::CacheModalities>,
-                     b: Option<okapi_domain::CacheModalities>| {
-                        if a.is_none() && b.is_none() {
-                            return Ok::<_, AppError>(None);
-                        }
-                        Ok(Some(okapi_domain::CacheModalities {
-                            audio_tokens: add(
-                                a.unwrap_or_default().audio_tokens,
-                                b.unwrap_or_default().audio_tokens,
-                            )?,
-                            image_tokens: add(
-                                a.unwrap_or_default().image_tokens,
-                                b.unwrap_or_default().image_tokens,
-                            )?,
-                        }))
-                    };
-                let combined = TokenUsage {
-                    prompt_tokens: add(previous.prompt_tokens, next.prompt_tokens)?,
-                    image_prompt_tokens: add(
-                        previous.image_prompt_tokens,
-                        next.image_prompt_tokens,
-                    )?,
-                    completion_tokens: add(previous.completion_tokens, next.completion_tokens)?,
-                    image_completion_tokens: add(
-                        previous.image_completion_tokens,
-                        next.image_completion_tokens,
-                    )?,
-                    cached_tokens: add(previous.cached_tokens, next.cached_tokens)?,
-                    cache_write_tokens: add(previous.cache_write_tokens, next.cache_write_tokens)?,
-                    cache_read_modalities: modalities(
-                        previous.cache_read_modalities,
-                        next.cache_read_modalities,
-                    )?,
-                    cache_write_modalities: modalities(
-                        previous.cache_write_modalities,
-                        next.cache_write_modalities,
-                    )?,
-                    cache_read_reported: previous.cache_read_reported && next.cache_read_reported,
-                    cache_write_reported: previous.cache_write_reported
-                        && next.cache_write_reported,
-                    ..TokenUsage::default()
-                };
-                combined.validate().map_err(|_| usage::invalid())?;
-                Ok(Some(combined))
-            }
+            Self::PerImage => previous
+                .checked_add(next)
+                .map(Some)
+                .map_err(|_| usage::invalid()),
         }
     }
 }

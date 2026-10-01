@@ -23,6 +23,8 @@ struct Mock {
     reject_refresh: Arc<std::sync::atomic::AtomicBool>,
     /// 上游最近一次收到的请求头（断言客户端身份头透传）。
     last_headers: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Anthropic 上游最近一次收到的请求体（断言 mimic 的 system / metadata 重写）。
+    last_body: Arc<std::sync::Mutex<Option<Value>>>,
 }
 
 impl Mock {
@@ -45,6 +47,14 @@ impl Mock {
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
     }
+
+    fn remember_body(&self, body: &[u8]) {
+        *self.last_body.lock().unwrap() = serde_json::from_slice(body).ok();
+    }
+
+    fn last_body(&self) -> Option<Value> {
+        self.last_body.lock().unwrap().clone()
+    }
 }
 
 /// token 端点：换码回 access-1 / refresh-1；刷新回 access-N（N 为第几次调用）并轮转 refresh。
@@ -59,15 +69,22 @@ async fn mock_token(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_owned();
-    // Anthropic 与 Codex 刷新都是 JSON；Codex 换码是表单
-    let grant = if ct.starts_with("application/json") {
+    // Anthropic 与 Codex 刷新都是 JSON；Codex 换码是表单。client_id 分流两家：
+    // Codex（client_id app_*）回 id_token；Anthropic 回 account.uuid —— 各自的真实形状。
+    let (grant, client_id) = if ct.starts_with("application/json") {
         let v: Value = serde_json::from_str(&body).unwrap();
-        v["grant_type"].as_str().unwrap_or_default().to_owned()
+        (
+            v["grant_type"].as_str().unwrap_or_default().to_owned(),
+            v["client_id"].as_str().unwrap_or_default().to_owned(),
+        )
     } else {
-        body.split('&')
-            .find_map(|kv| kv.strip_prefix("grant_type="))
-            .unwrap_or_default()
-            .to_owned()
+        let field = |name: &str| {
+            body.split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+                .unwrap_or_default()
+                .to_owned()
+        };
+        (field("grant_type"), field("client_id"))
     };
     if grant == "refresh_token" && st.reject_refresh.load(Ordering::SeqCst) {
         return (
@@ -76,20 +93,23 @@ async fn mock_token(
         )
             .into_response();
     }
-    // id_token 只在换码时给（Codex 从中取 account_id）
-    let id_token = format!(
-        "{}.{}.sig",
-        base64url(br#"{"alg":"RS256"}"#),
-        base64url(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-okapi"}}"#)
-    );
-    axum::Json(json!({
+    let mut resp = json!({
         "access_token": format!("access-{n}"),
         "refresh_token": format!("refresh-{n}"),
         "expires_in": 28800,
         "token_type": "Bearer",
-        "id_token": id_token,
-    }))
-    .into_response()
+    });
+    if client_id.starts_with("app_") {
+        // Codex：id_token 只在换码时给（从中取 account_id）
+        resp["id_token"] = json!(format!(
+            "{}.{}.sig",
+            base64url(br#"{"alg":"RS256"}"#),
+            base64url(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-okapi"}}"#)
+        ));
+    } else {
+        resp["account"] = json!({"uuid": "11111111-2222-4333-8444-555555555555"});
+    }
+    axum::Json(resp).into_response()
 }
 
 fn base64url(input: &[u8]) -> String {
@@ -105,6 +125,7 @@ async fn mock_messages(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     st.record(&headers);
+    st.remember_body(&body);
     assert_eq!(
         query.as_deref(),
         Some("beta=true"),
@@ -269,6 +290,7 @@ async fn setup() -> Env {
         token_calls: Arc::new(AtomicUsize::new(0)),
         reject_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         last_headers: Arc::default(),
+        last_body: Arc::default(),
     };
     let mock = spawn_mock(mock_state.clone()).await;
 
@@ -967,4 +989,77 @@ async fn own_scope_cannot_attach_oauth_key_to_foreign_channel() {
     .await
     .unwrap();
     assert_eq!(keys_after, keys_before, "别人的渠道没有多出 key");
+}
+
+/// mimic 模式（`settings.mimic_cc`，IMPLEMENTATION §11.38）：网关替非官方客户端伪造
+/// Claude Code 身份——全量 beta、CLI UA / x-stainless 套件、system 自述句 + billing 归因块、
+/// `metadata.user_id`；客户端自带的身份头（reqwest 缺省 UA 等）不得混出去。
+#[tokio::test]
+async fn anthropic_max_mimic_forges_claude_code_identity() {
+    let env = setup().await;
+    let (channel_id, _key_id) = login_channel(&env, "anthropic_max").await;
+    sqlx::query!(
+        r#"UPDATE channels SET settings = settings || '{"mimic_cc": true}'::jsonb WHERE id = $1"#,
+        channel_id
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    env.state.invalidate_routing_caches();
+
+    let resp = chat(&env).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // 头：全套 CLI 指纹，且覆盖客户端自带的（reqwest 缺省 UA 不能透出去）
+    let ua = env.mock_state.seen("user-agent").unwrap();
+    assert!(
+        ua.starts_with("claude-cli/2.1.258 ") && ua.ends_with("(external, cli)"),
+        "UA 换成伪造的 CLI 指纹：{ua}"
+    );
+    assert_eq!(
+        env.mock_state.seen("x-stainless-lang").as_deref(),
+        Some("js")
+    );
+    assert_eq!(
+        env.mock_state.seen("x-stainless-runtime").as_deref(),
+        Some("node")
+    );
+    assert_eq!(env.mock_state.seen("x-app").as_deref(), Some("cli"));
+    assert_eq!(
+        env.mock_state.seen("accept").as_deref(),
+        Some("application/json")
+    );
+    assert_eq!(
+        env.mock_state.seen("x-client-request-id").map(|v| v.len()),
+        Some(36),
+        "每请求一个新 UUID"
+    );
+    let beta = env.mock_state.seen("anthropic-beta").unwrap();
+    assert!(
+        beta.contains("prompt-caching-scope-2026-01-05") && beta.contains("oauth-2025-04-20"),
+        "mimic 用全量 beta 集合：{beta}"
+    );
+
+    // body：自述句（带 cache_control）+ billing 归因块 + metadata.user_id（账号 UUID 来自换码响应）
+    let req = env.mock_state.last_body().unwrap();
+    let sys = req["system"].as_array().unwrap();
+    assert_eq!(
+        sys[0]["text"],
+        "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+    assert_eq!(sys[0]["cache_control"]["type"], "ephemeral");
+    let billing = sys[1]["text"].as_str().unwrap();
+    assert!(billing.starts_with("x-anthropic-billing-header: cc_version=2.1.258."));
+    assert!(billing.ends_with("; cc_entrypoint=cli;"));
+    let uid: Value = serde_json::from_str(req["metadata"]["user_id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        uid["account_uuid"], "11111111-2222-4333-8444-555555555555",
+        "账号 UUID 取自换码响应的 account.uuid"
+    );
+    assert_eq!(
+        uid["device_id"].as_str().unwrap().len(),
+        64,
+        "装机 id 64 hex"
+    );
+    assert_eq!(uid["session_id"].as_str().unwrap().len(), 36, "会话 UUID");
 }

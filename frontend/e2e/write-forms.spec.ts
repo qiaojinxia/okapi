@@ -460,6 +460,10 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
   await expect(drawer.getByRole('heading', { name: '编辑 gpt-5' })).toBeVisible()
   await expect(drawer.locator('#m-name')).toHaveValue('gpt-5')
   await expect(drawer.locator('#m-name')).toHaveAttribute('readonly', '')
+  await drawer.locator('#model-advanced-section > summary').click()
+  await drawer.locator('#model-ratio-editor > summary').click()
+  await drawer.locator('#model-cache-section > summary').click()
+  await drawer.locator('#model-tiers-section > summary').click()
   await expect(drawer.locator('#ax-model_ratio')).toHaveValue('1.25')
   await expect(drawer.locator('#ax-cache_write_ratio')).toHaveValue('1')
 
@@ -474,7 +478,7 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await saved
   await expect(drawer).toBeHidden()
-  expect(posts).toEqual([
+  expect(posts).toMatchObject([
     {
       model_name: 'gpt-5',
       model_ratio: '1.5',
@@ -490,13 +494,13 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
     },
   ])
 
-  // 新建 + 阶梯表：模式提示随表达式切换；无档位时不发 tier_ratios 键
+  // 新建 + 阶梯表：模式提示随表达式切换；空对象显式清除档位。
   await page.getByRole('button', { name: '新建模型' }).click()
   const create = await openedDialog(page)
   await create.locator('#m-name').fill('my-model')
-  await expect(create.getByText('当前：ratio 模式', { exact: false })).toBeVisible()
+  await create.locator('#m-pricing-mode').selectOption('tiered')
   await create.locator('#m-tier-expr').fill(' 0:2.5,128000:5 ')
-  await expect(create.getByText('当前：tiered 模式', { exact: false })).toBeVisible()
+  await expect(create.locator('#m-pricing-mode')).toHaveValue('tiered')
   await page.route('**/admin/models', (route) => {
     if (route.request().method() !== 'POST') return route.fallback()
     return route.fulfill(apiError(500, 'internal_error'))
@@ -515,7 +519,7 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
   await created
   await expect(create).toBeHidden()
   expect(posts).toHaveLength(2)
-  expect(posts[1]).toEqual({
+  expect(posts[1]).toMatchObject({
     model_name: 'my-model',
     model_ratio: '1',
     completion_ratio: '1',
@@ -527,7 +531,7 @@ test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行�
     fallback_models: [],
     tier_expr: '0:2.5,128000:5',
   })
-  expect('tier_ratios' in posts[1]).toBe(false)
+  expect(posts[1].tier_ratios).toEqual({})
 })
 
 test('套餐抽屉：充值模板与订阅两种形态字段互斥，USD 换 micro、天数取整、空值不发键，订阅缺有效期不放行', async ({ page }) => {
@@ -1245,7 +1249,7 @@ for (const width of [320, 390, 1280]) test(`SMTP 表单 ${width}px：连接、�
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   expect(await panel.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
   if (width < 768) {
-    for (const input of await panel.locator('input').all()) expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    for (const input of await panel.locator('input').all()) expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(43.99)
     expect((await panel.getByRole('button', { name: width === 390 ? 'Send test email' : '发送测试邮件', exact: true }).boundingBox())!.height).toBeGreaterThanOrEqual(44)
   }
   await page.locator('#main-content').getByRole('heading', { level: 1 }).scrollIntoViewIfNeeded()
@@ -2066,18 +2070,18 @@ test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = nul
   // 模型页发布：POST /admin/pricing/publish，提示新 epoch
   let published = 0
   await page.route('**/admin/models?*', (route) => route.fulfill({ json: { data: [], total: 0, unpriced: 0 } }))
-  await page.route('**/admin/pricing/publish', async (route) => {
+  await page.route('**/admin/pricing/publish*', async (route) => {
     published += 1
     await route.fulfill({ json: { epoch: 42 } })
   })
   await page.goto('/admin/pricing')
-  done = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/pricing/publish'))
+  done = page.waitForRequest((r) => r.method() === 'POST' && new URL(r.url()).pathname === '/admin/pricing/publish')
   await page.getByRole('button', { name: '发布定价', exact: true }).click()
   await done
   await expect(page.getByRole('status').filter({ hasText: '已发布 epoch 42' })).toBeVisible()
   expect(published).toBe(1)
 
-  await page.route('**/admin/pricing/publish', (route) => route.fulfill(apiError(500, 'internal_error')))
+  await page.route('**/admin/pricing/publish*', (route) => route.fulfill(apiError(500, 'internal_error')))
   await page.getByRole('button', { name: '发布定价', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })

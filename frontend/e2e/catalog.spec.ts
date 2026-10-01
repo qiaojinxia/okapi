@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
-import type { PricingModel } from '../src/features/public-pricing/types'
+import type { PricingGroup, PricingModel } from '../src/features/public-pricing/types'
 import { compareModels, modelCapabilities, modelPrice, modelVendor, nonnegative } from '../src/features/public-pricing/catalog-data'
 import { formatUnitPrice } from '../src/lib/money'
 
@@ -49,6 +49,138 @@ async function prepare(page: Page, data = models, language = 'zh-CN', dark = fal
     return route.continue()
   })
   return { calls, errors }
+}
+
+const pagedModels = [
+  ...Array.from({ length: 124 }, (_, i) => model(`demo-${i}`, 'OpenAI', `Demo ${i}`)),
+  model('kimi-k3', 'Moonshot', 'ZZ Kimi K3'),
+]
+type BrokenPage = 'empty' | 'repeated' | 'next' | 'total' | 'epoch' | 'http'
+async function preparePaged(page: Page, data = pagedModels, catalogGroups: PricingGroup[] = groups) {
+  const { errors } = await prepare(page, data)
+  const calls: URL[] = []
+  const state: { broken?: BrokenPage; wait?: Promise<void> } = {}
+  await page.route(/\/api\/pricing(?:\?|$)/, async (route) => {
+    expect(route.request().method()).toBe('GET')
+    const url = new URL(route.request().url())
+    calls.push(url)
+    // Deliberately clamp model pages below the requested 100: the client must
+    // follow returned offsets, not assume that every request is a full batch.
+    const limit = Math.min(Number(url.searchParams.get('limit') ?? 20), 30)
+    const offset = Number(url.searchParams.get('offset') ?? 0)
+    const groupLimit = Math.min(Number(url.searchParams.get('group_limit') ?? 20), 100)
+    const groupOffset = Number(url.searchParams.get('group_offset') ?? 0)
+    if (offset > 0) {
+      await state.wait
+      if (state.broken === 'http') return route.fulfill({ status: 503, json: { error: { code: 'internal_error' } } })
+    }
+    const groupBatch = catalogGroups.slice(groupOffset, groupOffset + groupLimit)
+    const codes = new Set(groupBatch.map((g) => g.code))
+    const batch = data.slice(offset, offset + limit).map((m) => ({ ...m,
+      groups: m.groups.filter((code) => codes.has(code)),
+      chat_endpoints_by_group: m.chat_endpoints_by_group && Object.fromEntries(Object.entries(m.chat_endpoints_by_group).filter(([code]) => codes.has(code))),
+    }))
+    const meta = (total: number, size: number, start: number, count: number) => ({ total, limit: size, offset: start, has_more: start + count < total, next_offset: start + count < total ? start + count : null })
+    const body = { pricing_epoch: 4, models: batch, groups: groupBatch, ...meta(data.length, limit, offset, batch.length),
+      groups_page: meta(catalogGroups.length, groupLimit, groupOffset, groupBatch.length) }
+    if (offset > 0) {
+      if (state.broken === 'empty') body.models = []
+      if (state.broken === 'repeated') body.models[0] = { ...body.models[0], model: data[0].model }
+      if (state.broken === 'next') body.next_offset = offset
+      if (state.broken === 'total') body.total++
+      if (state.broken === 'epoch') body.pricing_epoch++
+    }
+    return route.fulfill({ json: body })
+  })
+  return { calls, errors, state }
+}
+
+test('分页接口完整加载：厂商、搜索、页数和尾页均覆盖首 20 条以外的模型', async ({ page }) => {
+  const { calls, errors } = await preparePaged(page)
+  await page.goto('/pricing')
+  await expect(page.locator('article')).toHaveCount(24)
+  expect(calls.map((url) => Number(url.searchParams.get('offset') ?? 0))).toEqual([0, 20, 50, 80, 110])
+  const vendors = page.getByRole('navigation', { name: '模型厂商' })
+  await expect(vendors.getByRole('button', { name: /全部厂商/ })).toContainText('125')
+  await expect(vendors.getByRole('button', { name: /OpenAI/ })).toContainText('124')
+  await vendors.getByRole('button', { name: /Moonshot/ }).click()
+  await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+  await page.getByRole('button', { name: '清除筛选' }).first().click()
+  await page.getByRole('searchbox').fill('kimi')
+  await expect(page.locator('article')).toHaveCount(1)
+  await expect(page.locator('article')).toContainText('kimi-k3')
+  await page.getByRole('button', { name: '清除筛选' }).first().click()
+  await page.getByRole('button', { name: '6', exact: true }).click()
+  await expect(page.locator('article')).toHaveCount(5)
+  await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+  await expect(page.getByRole('button', { name: '下一页' })).toBeDisabled()
+  await page.reload()
+  await expect(page.getByRole('button', { name: '6', exact: true })).toHaveAttribute('aria-current', 'page')
+  await expect(page.locator('article')).toHaveCount(5)
+  expect(errors).toEqual([])
+})
+
+test('分页后模型深链接可直接打开，不受当前卡片页限制', async ({ page }) => {
+  await preparePaged(page)
+  await page.goto('/pricing?model=kimi-k3&tab=code&pageSize=12')
+  await expect(page.getByRole('dialog')).toContainText('kimi-k3')
+  await expect(page.getByRole('tab', { name: '调用示例' })).toHaveAttribute('aria-selected', 'true')
+  await page.keyboard.press('Escape')
+  await expect(page.locator('article')).toHaveCount(12)
+  await expect(page.locator('article[data-model="kimi-k3"]')).toHaveCount(0)
+})
+
+test('后续分页未完成时不展示半份目录，页码也不提前计算', async ({ page }) => {
+  const { state } = await preparePaged(page)
+  let release: () => void = () => undefined
+  state.wait = new Promise<void>((resolve) => { release = resolve })
+  await page.goto('/pricing')
+  await expect(page.getByRole('status')).toBeVisible()
+  await expect(page.locator('article')).toHaveCount(0)
+  await expect(page.locator('#catalog-group')).toBeDisabled()
+  release()
+  await expect(page.locator('article')).toHaveCount(24)
+  await expect(page.getByRole('button', { name: '6', exact: true })).toBeVisible()
+})
+
+test('分组也分页时合并每个模型的可用分组与接口，仍只显示本人可见分组', async ({ page }) => {
+  const manyGroups: PricingGroup[] = Array.from({ length: 125 }, (_, i) => ({
+    code: i === 0 ? 'default' : `group-${i}`, name: `分组 ${i}`, ratio: '1', is_default: i === 0, self_select: i < 124,
+  }))
+  const data = [...pagedModels.slice(0, 24), model('kimi-k3', 'Moonshot', 'ZZ Kimi K3', {
+    groups: ['group-123', 'group-124'], chat_endpoints_by_group: { 'group-123': ['/v1/responses'], 'group-124': ['/v1/messages'] },
+  })]
+  const { calls } = await preparePaged(page, data, manyGroups)
+  await page.addInitScript(() => localStorage.setItem('okapi.key', 'catalog-paged-user'))
+  await page.route('**/api/me/groups', (route) => route.fulfill({ json: { current: 'default', data: [{ code: 'default' }, { code: 'group-123' }] } }))
+  await page.goto('/pricing?vendor=moonshot&group=group-123&available=true&model=kimi-k3&tab=code')
+  const drawer = page.getByRole('dialog')
+  await expect(drawer).toBeVisible()
+  await expect(page.locator('#detail-group')).toHaveValue('group-123')
+  await expect(drawer.getByLabel('接口模板', { exact: true })).toHaveValue('responses')
+  await expect(drawer.locator('#example-template option')).toHaveCount(1)
+  expect(await page.locator('#catalog-group option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['', 'default', 'group-123'])
+  await expect(drawer.getByText('分组 124', { exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+  expect(calls.map((url) => [Number(url.searchParams.get('offset') ?? 0), Number(url.searchParams.get('group_offset') ?? 0)])).toEqual([[0, 0], [0, 20], [0, 120], [20, 0], [20, 100]])
+})
+
+for (const broken of ['empty', 'repeated', 'next', 'total', 'epoch', 'http'] as const) {
+  test(`后续分页异常不伪装完整目录且可重试：${broken}`, async ({ page }) => {
+    const { state, calls } = await preparePaged(page)
+    state.broken = broken
+    await page.goto('/pricing')
+    await expect(page.getByRole('alert')).toBeVisible()
+    await expect(page.locator('article')).toHaveCount(0)
+    await expect(page.locator('#catalog-group')).toBeDisabled()
+    expect(calls).toHaveLength(2)
+    state.broken = undefined
+    await page.getByRole('button', { name: '重试' }).click()
+    await expect(page.locator('article')).toHaveCount(24)
+    await page.getByRole('searchbox').fill('kimi')
+    await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+  })
 }
 
 test('目录按显式厂商归一，零价、未知价和不同计费单位分开处理', () => {
@@ -177,7 +309,8 @@ test('阶梯价不冒充固定价，未声明能力不推断；小额 1K 单价�
   await expect(drawer.getByText('定价模拟器')).toHaveCount(0)
   await page.keyboard.press('Escape')
   await page.goto('/pricing?model=private-model-with-a-very-long-canonical-identifier-v2.0')
-  await expect(drawer.getByText('未提供', { exact: true })).toHaveCount(2)
+  // Context, output limit, input and output modalities remain explicitly unknown.
+  await expect(drawer.getByText('未提供', { exact: true })).toHaveCount(4)
   await expect(drawer).toContainText('尚未提供模型能力信息')
   await expect(drawer).not.toContainText('图像理解')
   await page.keyboard.press('Escape')

@@ -290,11 +290,18 @@ pub fn build_source(rows: &PricingSourceRows) -> PriceBookSource {
     }
 }
 
-/// 全量装载并编译 PriceBook（启动与热更共用）。
+pub fn publication_base_price(
+    publication: &okapi_store::pricing::PublishedPricing,
+) -> Result<i64, okapi_store::StoreError> {
+    parse_base_price(publication.base_price_per_1m_micro.clone())
+}
+
+/// Only a published snapshot can activate prices, even after restart/cache clear.
 pub async fn load_pricebook(pool: &PgPool) -> anyhow::Result<PriceBook> {
-    let rows = okapi_store::pricing::load_pricing_source_rows(pool).await?;
-    let source = build_source(&rows);
-    let base = published_base_price(pool, Some(rows.epoch)).await?;
+    let mut conn = pool.acquire().await?;
+    let publication = okapi_store::pricing::published_pricing(&mut conn).await?;
+    let source = build_source(&publication.source);
+    let base = publication_base_price(&publication)?;
     let compiled = book::compile_with_base(source, base)
         .map_err(|e| anyhow::anyhow!("pricebook compile: {e}"))?;
     Ok(compiled)

@@ -36,6 +36,8 @@ pub(super) fn ch_i64(row: &Value, key: &str) -> i64 {
 
 #[derive(Deserialize)]
 pub struct WindowQuery {
+    #[serde(default)]
+    pub cached: bool,
     /// 回看天数（1–90，缺省 7）。
     #[serde(default)]
     pub days: Option<u32>,
@@ -121,6 +123,14 @@ pub async fn channels(
         })
         .collect();
     super::ttft::enrich(ch, &mut data, super::ttft::Scope::Channel, since).await?;
+    super::usage_sources::enrich(
+        ch,
+        "channel_id",
+        "mv_channel_5min",
+        &format!("ts5 >= fromUnixTimestamp({since})"),
+        &mut data,
+    )
+    .await?;
     Ok(Json(json!({ "days": days, "data": data })))
 }
 
@@ -181,6 +191,14 @@ pub async fn channel_timeline(
         })
         .collect();
     super::ttft::enrich(ch, &mut data, super::ttft::Scope::Timeline(id), since).await?;
+    super::usage_sources::enrich(
+        ch,
+        "ts5",
+        "mv_channel_5min",
+        &format!("channel_id = {id} AND ts5 >= fromUnixTimestamp({since})"),
+        &mut data,
+    )
+    .await?;
 
     Ok(Json(json!({
         "channel_id": id,
@@ -242,6 +260,14 @@ pub async fn models(
         })
         .collect();
     super::ttft::enrich(ch, &mut data, super::ttft::Scope::Model, since).await?;
+    super::usage_sources::enrich(
+        ch,
+        "model",
+        "mv_model_hour",
+        &format!("hour >= fromUnixTimestamp({since})"),
+        &mut data,
+    )
+    .await?;
     Ok(Json(json!({ "days": days, "data": data })))
 }
 
@@ -262,6 +288,82 @@ const OVERVIEW_COLS: &str = "countMerge(requests) AS requests, \
                              sumMerge(errors) AS errors, \
                              uniqExact(user_id) AS active_users";
 
+async fn overview_sources(
+    state: &AppState,
+    predicate: &str,
+    cached: bool,
+) -> Result<Vec<Value>, AppError> {
+    let totals_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE {predicate}");
+    let source = super::token_details::with_provenance("", "mv_user_day", predicate);
+    let sources_sql = format!("SELECT * FROM {source}");
+    let (mut rows, sources) = tokio::try_join!(
+        super::stats_cache::query(state, &totals_sql, &[], cached),
+        super::stats_cache::query(state, &sources_sql, &[], cached),
+    )?;
+    let empty = json!({});
+    if let Some(row) = rows.first_mut() {
+        let source = sources.first().unwrap_or(&empty);
+        super::input_units::correct_totals(row, source)?;
+        let requests = ch_i64(row, "requests");
+        let metrics = super::usage_sources::metrics(
+            source,
+            requests,
+            [None, None],
+            None,
+            ch_i64(source, "source_read_n"),
+        );
+        if let Some(object) = row.as_object_mut() {
+            object.extend(metrics);
+            object.extend(super::token_details::metrics(source, requests));
+        }
+    }
+    Ok(rows)
+}
+
+fn pack_overview(rows: &[Value], known: [i64; 3]) -> Value {
+    let Some(r) = rows.first() else {
+        return json!({});
+    };
+    let amount = ch_i64(r, "amount_micro");
+    let cost = ch_i64(r, "upstream_cost_micro");
+    let requests = ch_i64(r, "requests");
+    let errors = ch_i64(r, "errors");
+    let mut result = json!({
+        "requests": requests,
+        "errors": errors,
+        "error_rate_bp": rate_bp(errors, requests),
+        "tokens": ch_i64(r, "tokens"),
+        "amount_micro": amount,
+        "original_micro": ch_i64(r, "original_micro"),
+        "discount_micro": ch_i64(r, "discount_micro"),
+        "upstream_cost_micro": cost,
+        // 毛利 = 实付 − 上游成本；可为负（折扣过深/上游涨价的告警信号）
+        "margin_micro": amount.saturating_sub(cost),
+        "margin_rate_bp": rate_bp(amount.saturating_sub(cost), amount),
+        "active_users": ch_i64(r, "active_users"),
+    });
+    if let Some(object) = result.as_object_mut() {
+        for field in [
+            "token_usage_basis",
+            "token_provenance",
+            "cache_hit_bp",
+            "cache_hit_basis",
+            "measured_cache_hit_bp",
+            "measured_cache_hit_requests",
+            "measured_cache_hit_coverage_bp",
+            "settled_cache_hit_bp",
+            "token_detail_observations",
+            "token_detail_history",
+            "token_detail_basis",
+            "input_units",
+        ] {
+            object.insert(field.to_owned(), r[field].clone());
+        }
+    }
+    apply_cost_coverage(&mut result, requests, known);
+    result
+}
+
 /// GET /admin/stats/overview：站点即时 KPI（今日 / 窗口双档）。
 ///
 /// 与 `margin` 的分工：margin 是**按日明细 + 毛利率**（趋势图数据源），
@@ -278,17 +380,22 @@ pub async fn overview(
     let days = calendar.days();
     let range = calendar.day_filter();
 
-    let today_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day = today()");
     // 昨日同档：单看"今日 1485 次请求"无法判断好坏，环比才是运营真正读的那个数。
     // 取整日而非"昨日同一时刻"——同比对齐时刻要按小时聚合，mv_user_day 是日粒度；
     // 前端据此标注为「昨日全天」，不假装是等时长对比。
-    let yesterday_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE day = today() - 1");
-    let window_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE {range}");
-    let today = ch.query_json_each_row(&today_sql).await?;
-    let yesterday = ch.query_json_each_row(&yesterday_sql).await?;
-    let window = ch.query_json_each_row(&window_sql).await?;
-
-    let coverage = ch.query_json_each_row(&format!("SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} OR day = today() - 1 GROUP BY day")).await?;
+    let cached = q.cached && super::stats_cache::allowed(&headers);
+    let yesterday_date = (calendar.end - chrono::Days::new(1)).to_string();
+    let today_filter = format!("day = toDate('{}')", calendar.today);
+    let yesterday_filter = format!("day = toDate('{yesterday_date}')");
+    let coverage_sql = format!(
+        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} OR {yesterday_filter} GROUP BY day"
+    );
+    let (today, yesterday, window, coverage) = tokio::try_join!(
+        overview_sources(&state, &today_filter, cached),
+        overview_sources(&state, &yesterday_filter, cached),
+        overview_sources(&state, &range, cached),
+        super::stats_cache::query(&state, &coverage_sql, &[], cached),
+    )?;
     let known_for = |start: &str, end: &str| {
         let mut sums = [0_i64; 3];
         for row in coverage
@@ -301,38 +408,12 @@ pub async fn overview(
         }
         sums
     };
-    let pack = |rows: &[Value], known: [i64; 3]| {
-        let Some(r) = rows.first() else {
-            return json!({});
-        };
-        let amount = ch_i64(r, "amount_micro");
-        let cost = ch_i64(r, "upstream_cost_micro");
-        let requests = ch_i64(r, "requests");
-        let errors = ch_i64(r, "errors");
-        let mut result = json!({
-            "requests": requests,
-            "errors": errors,
-            "error_rate_bp": rate_bp(errors, requests),
-            "tokens": ch_i64(r, "tokens"),
-            "amount_micro": amount,
-            "original_micro": ch_i64(r, "original_micro"),
-            "discount_micro": ch_i64(r, "discount_micro"),
-            "upstream_cost_micro": cost,
-            // 毛利 = 实付 − 上游成本；可为负（折扣过深/上游涨价的告警信号）
-            "margin_micro": amount.saturating_sub(cost),
-            "margin_rate_bp": rate_bp(amount.saturating_sub(cost), amount),
-            "active_users": ch_i64(r, "active_users"),
-        });
-        apply_cost_coverage(&mut result, requests, known);
-        result
-    };
 
-    let yesterday_date = (calendar.end - chrono::Days::new(1)).to_string();
     Ok(Json(json!({
         "days": days,
-        "today": pack(&today, known_for(&calendar.today, &calendar.today)),
-        "yesterday": pack(&yesterday, known_for(&yesterday_date, &yesterday_date)),
-        "window": pack(&window, known_for(&calendar.start.to_string(), &calendar.today)),
+        "today": pack_overview(&today, known_for(&calendar.today, &calendar.today)),
+        "yesterday": pack_overview(&yesterday, known_for(&yesterday_date, &yesterday_date)),
+        "window": pack_overview(&window, known_for(&calendar.start.to_string(), &calendar.today)),
     })))
 }
 
@@ -480,18 +561,25 @@ pub async fn clients(
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
-    let days = q.days();
+    let calendar = super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;
+    let days = calendar.days();
+    let range = calendar.day_filter();
     let limit = q.limit();
 
+    let correction = super::input_units::correction_source("client_type", &range);
+    let tokens =
+        super::input_units::corrected_sql("sumMerge(tokens)", "max(ifNull(c.legacy_characters,0))");
     let sql = format!(
-        "SELECT client_type, countMerge(requests) AS reqs, sumMerge(tokens) AS toks, \
-                sumMerge(amount) AS spend, sumMerge(errors) AS errs, uniqMerge(users) AS uniq_users \
-         FROM mv_client_day WHERE day >= today() - {days} \
+        "SELECT client_type, countMerge(requests) AS reqs, {tokens} AS toks, \
+                sumMerge(amount) AS spend, sumMerge(errors) AS errs, uniqMerge(users) AS uniq_users, \
+                sum(countMerge(requests)) OVER () AS total_requests, count() OVER () AS total_clients \
+         FROM mv_client_day LEFT JOIN {correction} c USING (client_type) WHERE {range} \
          GROUP BY client_type ORDER BY reqs DESC LIMIT {limit}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
 
-    let total_requests: i64 = rows.iter().map(|r| ch_i64(r, "reqs")).sum();
+    let total_requests = rows.first().map_or(0, |r| ch_i64(r, "total_requests"));
+    let total_clients = rows.first().map_or(0, |r| ch_i64(r, "total_clients"));
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -511,7 +599,7 @@ pub async fn clients(
         })
         .collect();
     Ok(Json(
-        json!({ "days": days, "total_requests": total_requests, "data": data }),
+        json!({ "days": days, "window": calendar.json(), "limit": limit, "total_clients": total_clients, "total_requests": total_requests, "data": data }),
     ))
 }
 
@@ -546,17 +634,26 @@ pub async fn model_trend(
     } else {
         ("toString(toDate(hour))", "day")
     };
+    let predicate = format!("hour >= now() - INTERVAL {days} DAY");
     let sql = format!(
         "SELECT {bucket_expr} AS bucket, model, \
                 sumMerge(amount) AS spend, countMerge(requests) AS reqs \
-         FROM mv_model_hour WHERE hour >= now() - INTERVAL {days} DAY \
+         FROM mv_model_hour WHERE {predicate} \
          GROUP BY bucket, model ORDER BY bucket"
     );
-    let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
+    let mut rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
+    super::token_details::enrich_trend(ch, bucket_expr, &predicate, &mut rows).await?;
+    let (series, data) = fold_model_trend(&rows, limit);
 
+    Ok(Json(
+        json!({ "days": days, "granularity": granularity, "models": series, "data": data }),
+    ))
+}
+
+fn fold_model_trend(rows: &[Value], limit: usize) -> (Vec<String>, Vec<Value>) {
     // 窗口总消耗排序取 Top N（占比小的模型进"其他"）
     let mut totals: HashMap<String, i64> = HashMap::new();
-    for r in &rows {
+    for r in rows {
         let model = r.get("model").and_then(Value::as_str).unwrap_or_default();
         *totals.entry(model.to_owned()).or_default() += ch_i64(r, "spend");
     }
@@ -567,8 +664,8 @@ pub async fn model_trend(
 
     // bucket → (model → {spend, requests})，保持 SQL 的时间升序
     let mut order: Vec<String> = Vec::new();
-    let mut folded: HashMap<String, HashMap<String, (i64, i64)>> = HashMap::new();
-    for r in &rows {
+    let mut folded: HashMap<String, HashMap<String, Value>> = HashMap::new();
+    for r in rows {
         let bucket = r.get("bucket").and_then(Value::as_str).unwrap_or_default();
         let model = r.get("model").and_then(Value::as_str).unwrap_or_default();
         let slot = if top.iter().any(|m| m == model) {
@@ -584,8 +681,12 @@ pub async fn model_trend(
             .or_default()
             .entry(slot.to_owned())
             .or_default();
-        cell.0 += ch_i64(r, "spend");
-        cell.1 += ch_i64(r, "reqs");
+        if !cell.is_object() {
+            *cell = json!({});
+        }
+        cell["spend"] = json!(ch_i64(cell, "spend").saturating_add(ch_i64(r, "spend")));
+        cell["reqs"] = json!(ch_i64(cell, "reqs").saturating_add(ch_i64(r, "reqs")));
+        super::token_details::accumulate(cell, r);
     }
 
     let mut series: Vec<String> = top;
@@ -599,11 +700,12 @@ pub async fn model_trend(
             let values: serde_json::Map<String, Value> = series
                 .iter()
                 .filter_map(|m| {
-                    cells.get(m).map(|(spend, reqs)| {
-                        (
-                            m.clone(),
-                            json!({ "amount_micro": spend, "requests": reqs }),
-                        )
+                    cells.get(m).map(|cell| {
+                        let requests = ch_i64(cell, "reqs");
+                        let mut metrics = super::token_details::metrics(cell, requests);
+                        metrics.insert("amount_micro".into(), json!(ch_i64(cell, "spend")));
+                        metrics.insert("requests".into(), json!(requests));
+                        (m.clone(), Value::Object(metrics))
                     })
                 })
                 .collect();
@@ -611,12 +713,7 @@ pub async fn model_trend(
         })
         .collect();
 
-    Ok(Json(json!({
-        "days": days,
-        "granularity": granularity,
-        "models": series,
-        "data": data,
-    })))
+    (series, data)
 }
 
 /// GET /admin/diagnose：全链路健康——PG/Redis/CH/NATS 可达、outbox 积压、DLQ 深度、
@@ -641,12 +738,18 @@ pub async fn groups(
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
-    let days = q.days();
+    let calendar = super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;
+    let days = calendar.days();
+    let range = calendar.day_filter();
 
+    let correction = super::input_units::correction_source("group_code", &range);
+    let tokens =
+        super::input_units::corrected_sql("sumMerge(tokens)", "max(ifNull(c.legacy_characters,0))");
     let sql = format!(
-        "SELECT group_code, countMerge(requests) AS reqs, sumMerge(tokens) AS toks, \
-                sumMerge(amount) AS spend, sumMerge(discount) AS saved, sumMerge(errors) AS errs \
-         FROM mv_group_day WHERE day >= today() - {days} \
+        "SELECT group_code, countMerge(requests) AS reqs, {tokens} AS toks, \
+                sumMerge(amount) AS spend, sumMerge(discount) AS saved, sumMerge(errors) AS errs, \
+                sum(sumMerge(amount)) OVER () AS total_spend, count() OVER () AS total_groups \
+         FROM mv_group_day LEFT JOIN {correction} c USING (group_code) WHERE {range} \
          GROUP BY group_code ORDER BY spend DESC LIMIT 50"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
@@ -673,7 +776,8 @@ pub async fn groups(
     .map(|r| (r.group_code, r.ratio))
     .collect();
 
-    let total_spend: i64 = rows.iter().map(|r| ch_i64(r, "spend")).sum();
+    let total_spend = rows.first().map_or(0, |r| ch_i64(r, "total_spend"));
+    let total_groups = rows.first().map_or(0, |r| ch_i64(r, "total_groups"));
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -697,7 +801,7 @@ pub async fn groups(
         })
         .collect();
     Ok(Json(
-        json!({ "days": days, "total_amount_micro": total_spend, "data": data }),
+        json!({ "days": days, "window": calendar.json(), "limit": 50, "total_groups": total_groups, "total_amount_micro": total_spend, "data": data }),
     ))
 }
 
@@ -822,7 +926,6 @@ pub async fn my_breakdown(
     );
     let rows = ch.query_json_each_row(&sql).await?;
 
-    let mut total = [0_i64; 7]; // reqs, prompt, cached, completion, reasoning, spend, saved
     let mut data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -835,9 +938,6 @@ pub async fn my_breakdown(
                 ch_i64(r, "spend"),
                 ch_i64(r, "saved"),
             ];
-            for (acc, v) in total.iter_mut().zip(cells) {
-                *acc = acc.saturating_add(v);
-            }
             json!({
                 "day": r.get("day").and_then(Value::as_str).unwrap_or_default(),
                 "model": r.get("model").and_then(Value::as_str).unwrap_or_default(),
@@ -852,6 +952,23 @@ pub async fn my_breakdown(
             })
         })
         .collect();
+
+    let owner = format!("user_id = {}{key_filter}", key.user_id);
+    let extra = super::usage_details::enrich(ch, &owner, &range, &mut data).await?;
+    let mut total = [0_i64; 7]; // reqs, prompt, cached, completion, reasoning, spend, saved
+    for row in &data {
+        for (acc, field) in total.iter_mut().zip([
+            "requests",
+            "prompt_tokens",
+            "cached_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "amount_micro",
+            "discount_micro",
+        ]) {
+            *acc = acc.saturating_add(ch_i64(row, field));
+        }
+    }
 
     // 平均 RPM/TPM 对齐 new-api 数据看板口径：窗口总量 ÷ 窗口分钟数。
     // 用百万分位：个人用户一天 2 笔 = 0.0007/min，千分位仍截成 0。
@@ -891,8 +1008,6 @@ pub async fn my_breakdown(
         })
     };
 
-    let owner = format!("user_id = {}{key_filter}", key.user_id);
-    let extra = super::usage_details::enrich(ch, &owner, &range, &mut data).await?;
     let errors: i64 = data.iter().map(|row| ch_i64(row, "errors")).sum();
     let mut response = json!({
         "scope": if user_scope { "user" } else { "key" },
@@ -938,18 +1053,20 @@ pub async fn my_daily(
 ) -> Result<Json<Value>, AppError> {
     let key = crate::gateway::auth::authenticate(&state, &headers).await?;
     let ch = ch_or_disabled(&state)?;
-    let days = q.days();
+    let calendar = super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;
+    let days = calendar.days();
+    let range = calendar.day_filter();
     let sql = format!(
         "SELECT day, model, countMerge(requests) AS requests, \
                 sumMerge(tokens) AS tokens, sumMerge(amount) AS amount_micro, \
                 sumMerge(discount) AS discount_micro \
          FROM mv_user_model_day \
-         WHERE user_id = {} AND day >= today() - {days} \
+         WHERE user_id = {} AND {range} \
          GROUP BY day, model ORDER BY day, amount_micro DESC",
         key.user_id
     );
     let rows = ch.query_json_each_row(&sql).await?;
-    let data: Vec<Value> = rows
+    let mut data: Vec<Value> = rows
         .iter()
         .map(|r| {
             json!({
@@ -962,7 +1079,24 @@ pub async fn my_daily(
             })
         })
         .collect();
-    Ok(Json(json!({ "days": days, "data": data })))
+    super::usage_sources::enrich(
+        ch,
+        "day, model",
+        "mv_user_model_day",
+        &format!("user_id = {} AND {range}", key.user_id),
+        &mut data,
+    )
+    .await?;
+    super::output_rate::enrich_model_days(
+        ch,
+        &mut data,
+        "mv_user_model_day",
+        &format!("user_id = {} AND {range}", key.user_id),
+    )
+    .await?;
+    Ok(Json(
+        json!({ "days": days, "window": calendar.json(), "data": data }),
+    ))
 }
 
 pub async fn margin(

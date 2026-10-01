@@ -15,7 +15,7 @@ export function chartNumber(n: number, locale: string): string {
   return new Intl.NumberFormat(locale, { notation: Math.abs(n) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(n)
 }
 
-export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, controls = true, secondaryAxis }: {
+export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, controls = true, secondaryAxis }: {
   data: ChartPoint[]
   series: ChartSeries[]
   format: (value: number) => string
@@ -26,6 +26,8 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   percent?: boolean
   defaultType?: 'area' | 'bar'
   compact?: boolean
+  /// 桌面端让绘图区撑满父级剩余高度（父级需为 flex 列），避免同排卡片更高时图下方留白。
+  fill?: boolean
   controls?: boolean
   secondaryAxis?: { unit: string; format: (value: number) => string }
 }) {
@@ -46,7 +48,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
     </button>)}
   </div>
   return (
-    <div className={cn('min-w-0', compact ? 'space-y-2' : 'space-y-4')} role="group" aria-label={label}>
+    <div className={cn('min-w-0', compact ? 'space-y-2' : 'space-y-4', fill && 'flex flex-col lg:min-h-0 lg:flex-1')} role="group" aria-label={label}>
       <div className="flex flex-wrap items-center justify-between gap-3">
         {secondaryAxis ? <><span className="sr-only">{t('charts:dualAxis', { left: unit, right: secondaryAxis.unit })}</span>{legend}</> : <span className="text-xs text-muted-foreground">{t('charts:unit', { unit })}</span>}
         {controls && <div className="flex flex-wrap items-center gap-2">
@@ -61,8 +63,8 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
           <TBody>{data.map((point) => <Tr key={point.bucket}><Td className="whitespace-nowrap">{point.bucket}</Td>{series.map((s) => <Td key={s.key} numeric>{typeof point[s.key] === 'number' ? seriesFormat(s)(point[s.key] as number) : '—'}</Td>)}</Tr>)}</TBody>
         </Table>
       ) : (
-        <div className={cn('min-w-0', compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} aria-label={t('charts:plot')}>
-          <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+        <div className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:min-h-36 lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} aria-label={t('charts:plot')}>
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} className={fill ? 'lg:absolute lg:inset-0' : undefined}>
             <ComposedChart data={data} margin={{ top: 10, right: 10, bottom: 4, left: 0 }} accessibilityLayer>
               <defs>{series.map((s, i) => <linearGradient key={s.key} id={`${id}-${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={s.color} stopOpacity={0.28} /><stop offset="100%" stopColor={s.color} stopOpacity={0.025} /></linearGradient>)}</defs>
               <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 5" strokeOpacity={0.7} />

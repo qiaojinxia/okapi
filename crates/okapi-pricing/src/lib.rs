@@ -19,11 +19,11 @@ pub mod rules;
 pub mod snapshot;
 
 pub use book::{GroupEntry, ModelEntry, OverrideEntry, OverrideSpec, PriceBook, PriceBookSource};
-pub use engine::{CalcContext, Quote, calculate};
+pub use engine::{CalcContext, Quote, calculate, calculate_characters};
 pub use error::{CompileError, PricingError};
 pub use handle::PriceBookHandle;
 pub use modalities::ModalityRatios;
 pub use model::{PricingMode, Tier, TierTable};
 pub use ratio::RatioFp;
 pub use rules::{PricingRule, RuleKind, RuleScope, Stacking, WeekdayMask};
-pub use snapshot::{AppliedRule, PricingSnapshot};
+pub use snapshot::{AppliedRule, InputUnit, PricingSnapshot};

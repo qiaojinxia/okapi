@@ -16,11 +16,12 @@ async function prepare(page: Page, permissions = ['*']) {
     const peopleFound = people.filter((user) => `${user.username} ${user.email}`.toLowerCase().includes(term.toLowerCase()))
     const uid = Number(url.searchParams.get('user_id') ?? 7)
     const offset = Number(url.searchParams.get('offset') ?? 0)
+    const limit = Number(url.searchParams.get('limit') ?? 10)
     const total = term === 'no-results' ? 0 : 45
     const json = url.pathname === '/api/me' ? { user_id: 1, key_id: 1, role: 100, group: 'default', balance_micro: 50000000, permissions }
       : url.pathname === '/api/notice' ? { notice: null }
         : url.pathname === '/admin/users' ? { total: peopleFound.length, data: peopleFound }
-          : url.pathname === '/admin/keys' ? { total, data: Array.from({ length: Math.max(0, Math.min(20, total - offset)) }, (_, i) => ({
+          : url.pathname === '/admin/keys' ? { total, data: Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) => ({
             id: offset + i + 1, user_id: uid, username: people.find((user) => user.id === uid)?.username ?? `user-${uid}`,
             name: `key-${offset + i + 1}`, key_prefix: `sk-prefix-${offset + i + 1}`, status: 1, used_micro: 1200000,
             rpm_limit: 60, expires_at: null, last_used_at: null, model_allowlist: null, ip_allowlist: null, group_override: null,
@@ -32,7 +33,7 @@ async function prepare(page: Page, permissions = ['*']) {
 
 test('用户候选：邮箱检索、键盘选择名称，提交准确 ID 并复位页码，刷新和后退保留筛选', async ({ page }) => {
   const requests = await prepare(page)
-  await page.goto('/admin/keys?page=3')
+  await page.goto('/admin/keys?page=5')
   await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(5)
   const user = page.getByRole('combobox', { name: '所属用户', exact: true })
   await user.fill('bob@example.test')
@@ -47,7 +48,7 @@ test('用户候选：邮箱检索、键盘选择名称，提交准确 ID 并复�
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await expect(page).toHaveURL(/user_id=42/)
   await expect(page).not.toHaveURL(/page=/)
-  await expect.poll(() => requests.filter((url) => url.pathname === '/admin/keys').at(-1)?.search).toBe('?limit=20&offset=0&user_id=42')
+  await expect.poll(() => requests.filter((url) => url.pathname === '/admin/keys').at(-1)?.search).toBe('?limit=10&offset=0&user_id=42')
   await page.reload()
   await expect(user).toHaveValue('bob-production')
   await user.fill('alice')
@@ -130,7 +131,7 @@ test('用户候选：旧响应不覆盖新搜索，空结果和失败可理解�
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await expect(page.getByText('没有匹配的结果', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '清空筛选', exact: true }).last().click()
-  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(20)
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
 })
 
 for (const width of [320, 390, 1280]) {
@@ -157,7 +158,7 @@ for (const width of [320, 390, 1280]) {
 test('只有用户读取权限时，令牌列表不提供不可访问的日志入口或空操作列', async ({ page }) => {
   const requests = await prepare(page, ['user.read'])
   await page.goto('/admin/keys')
-  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(20)
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
   await expect(page.getByRole('columnheader', { name: '操作', exact: true })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '查看这把令牌近 7 天的调用' })).toHaveCount(0)
   expect(requests.filter((url) => url.pathname.startsWith('/admin/stats/'))).toHaveLength(0)
@@ -168,19 +169,19 @@ test('令牌翻页与筛选回到首行，加载下一页时旧行不能继续�
   let release: () => void = () => undefined
   const pending = new Promise<void>((resolve) => { release = resolve })
   await page.route('**/admin/keys?*', async (route) => {
-    if (new URL(route.request().url()).searchParams.get('offset') === '20') await pending
+    if (new URL(route.request().url()).searchParams.get('offset') === '10') await pending
     return route.fallback()
   })
   await page.goto('/admin/keys')
   const table = page.getByRole('table'), viewport = table.locator('..')
-  await expect(table.locator('tbody tr')).toHaveCount(20)
+  await expect(table.locator('tbody tr')).toHaveCount(10)
   await viewport.evaluate((element) => { element.scrollTop = 300 })
   await page.getByRole('navigation', { name: '分页' }).getByRole('button', { name: '下一页' }).click()
   await expect(table).toHaveAttribute('aria-busy', 'true')
   await expect(table.getByRole('button', { name: '停用', exact: true }).first()).toBeDisabled()
   await expect(table.getByRole('button', { name: '删除', exact: true }).first()).toBeDisabled()
   release()
-  await expect(table.locator('tbody tr').first()).toContainText('key-21')
+  await expect(table.locator('tbody tr').first()).toContainText('key-11')
   await expect(table).toHaveAttribute('aria-busy', 'false')
   expect(await viewport.evaluate((element) => element.scrollTop)).toBe(0)
   await viewport.evaluate((element) => { element.scrollTop = 300 })

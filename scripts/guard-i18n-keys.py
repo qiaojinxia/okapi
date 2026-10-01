@@ -10,8 +10,9 @@ import re
 import sys
 
 LOCALES = {
-    'zh-CN': 'frontend/src/locales/zh-CN.ts',
-    'en': 'frontend/src/locales/en.ts',
+    # Keep these in sync with the resource composition in frontend/src/lib/i18n.ts.
+    'zh-CN': ['frontend/src/locales/zh-CN.ts', 'frontend/src/locales/model-editor-zh.ts'],
+    'en': ['frontend/src/locales/en.ts'],
 }
 
 
@@ -50,7 +51,7 @@ def used_keys() -> dict[str, set[str]]:
 
 
 def main() -> int:
-    defined = {name: flatten(path) for name, path in LOCALES.items()}
+    defined = {name: set().union(*(flatten(path) for path in paths)) for name, paths in LOCALES.items()}
     used = used_keys()
     failed = False
 

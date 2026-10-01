@@ -6,6 +6,8 @@ export interface PricingModel {
   capabilities?: Record<string, boolean>
   context_window?: number | null
   max_output?: number | null
+  catalog_config?: import('@/features/models/types').ModelCatalogConfig
+  modality_ratios?: Record<string, string | number> | null
   mode: string
   model_ratio: string | null
   completion_ratio: string | null

@@ -144,7 +144,7 @@ struct ForwardFailure {
     upstream_status: Option<i16>,
     failover_count: i16,
     channel: Option<(i64, i64)>,
-    upstream: Option<(String, String)>,
+    upstream: Option<Box<(String, String)>>,
 }
 
 impl ForwardFailure {
@@ -555,12 +555,15 @@ async fn count_tokens_inner(
         let counted = if cand.provider == "anthropic_max" {
             match super::oauth_cred::fresh_credential(state, &cand).await {
                 Ok(cred) => {
+                    let mimic =
+                        super::oauth_cred::mimic_identity(&cand, cred.account_id.as_deref());
                     okapi_providers::oauth::anthropic_max::count_tokens(
                         state.anthropic.http(),
                         &base,
                         &cred.access_token,
                         body_up,
                         &outbound,
+                        mimic.as_ref(),
                     )
                     .await
                 }
@@ -1417,7 +1420,7 @@ async fn try_model(
                     .release_slot(cand.channel_key_id, cand.max_concurrency)
                     .await;
                 failure.failover_count = failover;
-                failure.upstream = last_upstream.clone();
+                failure.upstream = last_upstream.clone().map(Box::new);
                 return Err(failure);
             }
         }
@@ -1443,7 +1446,7 @@ async fn try_model(
         last_channel,
     );
     failure.upstream_status = last_status;
-    failure.upstream = last_upstream;
+    failure.upstream = last_upstream.map(Box::new);
     Err(failure)
 }
 

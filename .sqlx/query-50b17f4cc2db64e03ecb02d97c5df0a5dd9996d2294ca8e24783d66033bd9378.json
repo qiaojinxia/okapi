@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id,event_id,created_at,payload FROM billing_outbox\n           WHERE ch_batch_id IS NULL AND (\n             ($2::boolean AND status=1 AND stats_protocol=1 AND published_at<=now()-interval '5 minutes')\n             OR (NOT $2::boolean AND (\n               (status=0 AND (next_retry_at IS NULL OR next_retry_at<=now()))\n               OR (status=1 AND stats_protocol=1)\n             ))\n           )\n           ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "payload",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "payload"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "50b17f4cc2db64e03ecb02d97c5df0a5dd9996d2294ca8e24783d66033bd9378"
+}

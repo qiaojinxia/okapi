@@ -1,6 +1,6 @@
 //! /v1/chat/completions 的探针 DTO。
 
-use okapi_domain::TokenUsage;
+use okapi_domain::{ModalitiesReported, TokenUsage};
 use serde::Deserialize;
 
 /// 请求探针：解析失败即 400；未知字段全部保留在原始 body 中透传。
@@ -323,8 +323,11 @@ pub struct PromptTokensDetails {
     pub cached_tokens: u32,
     /// 兼容扩展：缓存写入；Anthropic 由 cache_creation_input_tokens 映射。
     pub cache_write_tokens: u32,
+    pub cache_write_5m_tokens: Option<u32>,
+    pub cache_write_1h_tokens: Option<u32>,
     pub cache_read_reported: bool,
     pub cache_write_reported: bool,
+    pub modalities_reported: ModalitiesReported,
     /// 音频输入总量，含其中的缓存部分；价格来自当前模型配置。
     #[serde(default)]
     pub audio_tokens: u32,
@@ -346,16 +349,33 @@ pub struct ModalTokensDetails {
     pub image_tokens: Option<u32>,
 }
 
+impl ModalTokensDetails {
+    /// Explicit fields or complete coverage establish missing subsets as zero.
+    #[must_use]
+    pub fn reported(self, total: u32) -> ModalitiesReported {
+        let covered = u64::from(self.text_tokens.unwrap_or(0))
+            + u64::from(self.audio_tokens.unwrap_or(0))
+            + u64::from(self.image_tokens.unwrap_or(0))
+            == u64::from(total);
+        ModalitiesReported {
+            audio: self.audio_tokens.is_some() || covered,
+            image: self.image_tokens.is_some() || covered,
+        }
+    }
+}
+
 #[derive(Default, Deserialize)]
 struct RawPromptTokensDetails {
     #[serde(rename = "cached_tokens")]
     cached: Option<u32>,
     #[serde(rename = "cache_write_tokens")]
     cache_write: Option<u32>,
-    #[serde(default, rename = "audio_tokens")]
-    audio: u32,
-    #[serde(default, rename = "image_tokens")]
-    image: u32,
+    cache_write_5m_tokens: Option<u32>,
+    cache_write_1h_tokens: Option<u32>,
+    #[serde(rename = "audio_tokens")]
+    audio: Option<u32>,
+    #[serde(rename = "image_tokens")]
+    image: Option<u32>,
     cached_tokens_details: Option<ModalTokensDetails>,
     cache_write_tokens_details: Option<ModalTokensDetails>,
 }
@@ -365,10 +385,16 @@ impl From<RawPromptTokensDetails> for PromptTokensDetails {
         Self {
             cached_tokens: raw.cached.unwrap_or(0),
             cache_write_tokens: raw.cache_write.unwrap_or(0),
+            cache_write_5m_tokens: raw.cache_write_5m_tokens,
+            cache_write_1h_tokens: raw.cache_write_1h_tokens,
             cache_read_reported: raw.cached.is_some(),
             cache_write_reported: raw.cache_write.is_some(),
-            audio_tokens: raw.audio,
-            image_tokens: raw.image,
+            audio_tokens: raw.audio.unwrap_or(0),
+            image_tokens: raw.image.unwrap_or(0),
+            modalities_reported: ModalitiesReported {
+                audio: raw.audio.is_some(),
+                image: raw.image.is_some(),
+            },
             cached_tokens_details: raw.cached_tokens_details,
             cache_write_tokens_details: raw.cache_write_tokens_details,
         }
@@ -376,6 +402,36 @@ impl From<RawPromptTokensDetails> for PromptTokensDetails {
 }
 
 impl PromptTokensDetails {
+    fn with_previous(mut self, previous: Self) -> Self {
+        if !self.cache_read_reported && self.cached_tokens == 0 {
+            self.cached_tokens = previous.cached_tokens;
+            self.cache_read_reported = previous.cache_read_reported;
+            self.cached_tokens_details = self
+                .cached_tokens_details
+                .or(previous.cached_tokens_details);
+        }
+        if !self.cache_write_reported && self.cache_write_tokens == 0 {
+            self.cache_write_tokens = previous.cache_write_tokens;
+            self.cache_write_reported = previous.cache_write_reported;
+            if self.cache_write_5m_tokens.is_none() && self.cache_write_1h_tokens.is_none() {
+                self.cache_write_5m_tokens = previous.cache_write_5m_tokens;
+                self.cache_write_1h_tokens = previous.cache_write_1h_tokens;
+            }
+            self.cache_write_tokens_details = self
+                .cache_write_tokens_details
+                .or(previous.cache_write_tokens_details);
+        }
+        if !self.modalities_reported.audio && self.audio_tokens == 0 {
+            self.audio_tokens = previous.audio_tokens;
+            self.modalities_reported.audio = previous.modalities_reported.audio;
+        }
+        if !self.modalities_reported.image && self.image_tokens == 0 {
+            self.image_tokens = previous.image_tokens;
+            self.modalities_reported.image = previous.modalities_reported.image;
+        }
+        self
+    }
+
     /// 协议转换时保留缺失状态，避免下游把补出的 0 当成明确上报。
     #[must_use]
     pub fn cache_json(self) -> serde_json::Value {
@@ -386,10 +442,15 @@ impl PromptTokensDetails {
         if self.cache_write_reported || self.cache_write_tokens > 0 {
             value["cache_write_tokens"] = serde_json::json!(self.cache_write_tokens);
         }
-        if self.audio_tokens > 0 {
+        if let (Some(short), Some(long)) = (self.cache_write_5m_tokens, self.cache_write_1h_tokens)
+        {
+            value["cache_write_5m_tokens"] = serde_json::json!(short);
+            value["cache_write_1h_tokens"] = serde_json::json!(long);
+        }
+        if self.modalities_reported.audio || self.audio_tokens > 0 {
             value["audio_tokens"] = serde_json::json!(self.audio_tokens);
         }
-        if self.image_tokens > 0 {
+        if self.modalities_reported.image || self.image_tokens > 0 {
             value["image_tokens"] = serde_json::json!(self.image_tokens);
         }
         if let Some(details) = self.cached_tokens_details {
@@ -403,6 +464,7 @@ impl PromptTokensDetails {
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(from = "RawCompletionTokensDetails")]
 pub struct CompletionTokensDetails {
     #[serde(default)]
     pub reasoning_tokens: u32,
@@ -412,6 +474,33 @@ pub struct CompletionTokensDetails {
     /// Compatible extension used by native image-producing adapters.
     #[serde(default)]
     pub image_tokens: u32,
+    pub modalities_reported: ModalitiesReported,
+    pub reasoning_reported: bool,
+}
+
+#[derive(Default, Deserialize)]
+struct RawCompletionTokensDetails {
+    #[serde(rename = "reasoning_tokens")]
+    reasoning: Option<u32>,
+    #[serde(rename = "audio_tokens")]
+    audio: Option<u32>,
+    #[serde(rename = "image_tokens")]
+    image: Option<u32>,
+}
+
+impl From<RawCompletionTokensDetails> for CompletionTokensDetails {
+    fn from(raw: RawCompletionTokensDetails) -> Self {
+        Self {
+            reasoning_tokens: raw.reasoning.unwrap_or(0),
+            audio_tokens: raw.audio.unwrap_or(0),
+            image_tokens: raw.image.unwrap_or(0),
+            modalities_reported: ModalitiesReported {
+                audio: raw.audio.is_some(),
+                image: raw.image.is_some(),
+            },
+            reasoning_reported: raw.reasoning.is_some(),
+        }
+    }
 }
 
 impl UsageProbe {
@@ -423,37 +512,25 @@ impl UsageProbe {
         let Some(previous) = previous else {
             return self;
         };
-        if self.with_estimates(0, 0).is_err() || previous.with_estimates(0, 0).is_err() {
+        if self.invalid || previous.with_estimates(0, 0).is_err() {
             return Self::invalid();
         }
         if self.missing_prompt && !previous.missing_prompt {
             self.prompt_tokens = previous.prompt_tokens;
             self.missing_prompt = false;
-            let d = &mut self.prompt_tokens_details;
-            let p = previous.prompt_tokens_details;
-            if !d.cache_read_reported {
-                d.cached_tokens = p.cached_tokens;
-                d.cache_read_reported = p.cache_read_reported;
-                d.cached_tokens_details = d.cached_tokens_details.or(p.cached_tokens_details);
-            }
-            if !d.cache_write_reported {
-                d.cache_write_tokens = p.cache_write_tokens;
-                d.cache_write_reported = p.cache_write_reported;
-                d.cache_write_tokens_details = d
-                    .cache_write_tokens_details
-                    .or(p.cache_write_tokens_details);
-            }
-            d.audio_tokens = d.audio_tokens.max(p.audio_tokens);
-            d.image_tokens = d.image_tokens.max(p.image_tokens);
         }
         if self.missing_completion && !previous.missing_completion {
             self.completion_tokens = previous.completion_tokens;
             self.missing_completion = false;
-            let d = &mut self.completion_tokens_details;
-            let p = previous.completion_tokens_details;
-            d.reasoning_tokens = d.reasoning_tokens.max(p.reasoning_tokens);
-            d.audio_tokens = d.audio_tokens.max(p.audio_tokens);
-            d.image_tokens = d.image_tokens.max(p.image_tokens);
+        }
+        self.prompt_tokens_details = self
+            .prompt_tokens_details
+            .with_previous(previous.prompt_tokens_details);
+        self.completion_tokens_details = self
+            .completion_tokens_details
+            .with_previous(previous.completion_tokens_details);
+        if self.with_estimates(0, 0).is_err() {
+            return Self::invalid();
         }
         self
     }
@@ -505,13 +582,32 @@ impl UsageProbe {
 }
 
 impl CompletionTokensDetails {
+    fn with_previous(mut self, previous: Self) -> Self {
+        if !self.reasoning_reported && self.reasoning_tokens == 0 {
+            self.reasoning_tokens = previous.reasoning_tokens;
+            self.reasoning_reported = previous.reasoning_reported;
+        }
+        if !self.modalities_reported.audio && self.audio_tokens == 0 {
+            self.audio_tokens = previous.audio_tokens;
+            self.modalities_reported.audio = previous.modalities_reported.audio;
+        }
+        if !self.modalities_reported.image && self.image_tokens == 0 {
+            self.image_tokens = previous.image_tokens;
+            self.modalities_reported.image = previous.modalities_reported.image;
+        }
+        self
+    }
+
     #[must_use]
     pub fn to_json(self) -> serde_json::Value {
-        let mut value = serde_json::json!({"reasoning_tokens": self.reasoning_tokens});
-        if self.audio_tokens > 0 {
+        let mut value = serde_json::json!({});
+        if self.reasoning_reported || self.reasoning_tokens > 0 {
+            value["reasoning_tokens"] = serde_json::json!(self.reasoning_tokens);
+        }
+        if self.modalities_reported.audio || self.audio_tokens > 0 {
             value["audio_tokens"] = serde_json::json!(self.audio_tokens);
         }
-        if self.image_tokens > 0 {
+        if self.modalities_reported.image || self.image_tokens > 0 {
             value["image_tokens"] = serde_json::json!(self.image_tokens);
         }
         value

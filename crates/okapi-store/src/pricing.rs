@@ -5,7 +5,7 @@ use crate::error::StoreError;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelPricingRow {
     pub model_name: String,
     pub pricing_mode: String,
@@ -20,6 +20,7 @@ pub struct ModelPricingRow {
     pub audio_completion_ratio_scaled: i64,
     /// 图片输入倍率（相对文本；缺省 1.0）。
     pub image_ratio_scaled: i64,
+    #[serde(default = "empty_modality_ratios")]
     pub modality_ratios: serde_json::Value,
     pub per_call_price_micro: Option<i64>,
     pub tier_expr: Option<String>,
@@ -27,13 +28,13 @@ pub struct ModelPricingRow {
     pub tier_ratios: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GroupRow {
     pub group_code: String,
     pub ratio_scaled: i64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UserPricingRow {
     pub user_id: i64,
     pub model_name: String,
@@ -46,7 +47,7 @@ pub struct UserPricingRow {
     pub custom_output_per_1m_micro: Option<i64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RuleRow {
     pub rule_code: String,
     pub rule_type: String,
@@ -57,13 +58,55 @@ pub struct RuleRow {
     pub valid_to: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PricingSourceRows {
     pub epoch: i64,
     pub models: Vec<ModelPricingRow>,
     pub groups: Vec<GroupRow>,
     pub overrides: Vec<UserPricingRow>,
     pub rules: Vec<RuleRow>,
+}
+
+fn empty_modality_ratios() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// Immutable publication, shared by runtime billing and the public catalog.
+/// Draft tables are deliberately only read by the admin preview/publish path.
+pub struct PublishedPricing {
+    pub source: PricingSourceRows,
+    pub base_price_per_1m_micro: Option<serde_json::Value>,
+}
+
+pub async fn published_pricing(
+    conn: &mut sqlx::PgConnection,
+) -> Result<PublishedPricing, StoreError> {
+    let row: Option<(i64, serde_json::Value)> =
+        sqlx::query_as("SELECT epoch, snapshot FROM pricing_epochs ORDER BY epoch DESC LIMIT 1")
+            .fetch_optional(conn)
+            .await?;
+    let Some((epoch, snapshot)) = row else {
+        return Ok(PublishedPricing {
+            source: PricingSourceRows {
+                epoch: 0,
+                models: vec![],
+                groups: vec![],
+                overrides: vec![],
+                rules: vec![],
+            },
+            base_price_per_1m_micro: None,
+        });
+    };
+    let base_price_per_1m_micro = snapshot.get("base_price_per_1m_micro").cloned();
+    let mut source: PricingSourceRows = serde_json::from_value(snapshot)
+        .map_err(|_| StoreError::InvalidData("pricing_snapshot"))?;
+    // Snapshots were serialized before the INSERT assigned the new epoch.
+    // The immutable row's epoch, not its embedded predecessor, is authoritative.
+    source.epoch = epoch;
+    Ok(PublishedPricing {
+        source,
+        base_price_per_1m_micro,
+    })
 }
 
 /// 启用中的模型名列表（/v1/models）。
@@ -76,7 +119,7 @@ pub async fn list_active_models(pool: &PgPool) -> Result<Vec<String>, StoreError
     Ok(names)
 }
 
-/// 全量装载定价配置（gateway 启动与 epoch 热更时调用）。
+/// 装载草稿配置，供管理员预览和显式发布；运行时使用 published_pricing。
 // 四段直线 SQL 装载，拆分反而降低可读性
 #[allow(clippy::too_many_lines)]
 pub async fn load_pricing_source_rows(pool: &PgPool) -> Result<PricingSourceRows, StoreError> {

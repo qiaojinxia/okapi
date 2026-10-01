@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { AutocompleteInput } from '@/components/ui/autocomplete-input'
 import { apiFetch } from '@/lib/api'
 
-export function PortalKeyFilter({ value, onChange, onChoose, onSubmit }: { value: string; onChange: (value: string) => void; onChoose: (value: string) => void; onSubmit: () => void }) {
+export function PortalKeyFilter({ value, onChange, onChoose, onSubmit, className = 'w-full sm:w-80' }: { value: string; onChange: (value: string) => void; onChoose: (value: string) => void; onSubmit: () => void; className?: string }) {
   const { t } = useTranslation()
   const [focused, setFocused] = useState(false)
   const keys = useQuery({
@@ -13,7 +13,7 @@ export function PortalKeyFilter({ value, onChange, onChoose, onSubmit }: { value
     enabled: focused, staleTime: 60_000, retry: false,
   })
   const chosen = keys.data?.data.find((key) => String(key.id) === value)
-  return <AutocompleteInput className="w-full sm:w-80" value={value} onChange={onChange} onChoose={onChoose} onSubmit={onSubmit}
+  return <AutocompleteInput className={className} value={value} onChange={onChange} onChoose={onChoose} onSubmit={onSubmit}
     aria-label={t('logs:keyFilter')} placeholder={t('logs:keyFilterHint')}
     displayValue={!focused ? chosen?.name : undefined} optionLabelFirst search
     options={(keys.data?.data ?? []).map((key) => ({ value: String(key.id), label: key.name || `#${key.id}`, description: `#${key.id} · ${key.key_prefix}…` }))}

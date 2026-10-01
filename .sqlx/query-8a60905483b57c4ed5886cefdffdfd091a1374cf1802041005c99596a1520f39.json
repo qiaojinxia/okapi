@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox o SET status=CASE WHEN b.status=2 THEN 2 ELSE o.status END,\n           retry_count=b.retry_count,next_retry_at=b.next_retry_at,ch_batch_id=b.id\n           FROM billing_ch_events e JOIN billing_ch_batches b ON b.id=e.batch_id\n           WHERE b.id=$1 AND o.event_id=CASE WHEN e.event_key LIKE 'outbox:%'\n               THEN substring(e.event_key FROM 8)::uuid END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8a60905483b57c4ed5886cefdffdfd091a1374cf1802041005c99596a1520f39"
+}

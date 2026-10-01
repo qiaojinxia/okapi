@@ -292,10 +292,10 @@ impl Progress {
                 Some((routed.info.channel, routed.info.key)),
             );
             failure.upstream_status = routed.info.outcome.as_ref().map(|v| v.0);
-            failure.upstream = Some((
+            failure.upstream = Some(Box::new((
                 routed.info.upstream_model.clone(),
                 routed.info.upstream_endpoint.clone(),
-            ));
+            )));
             settle_failure(bill, &failure).await;
         } else if routed
             .bridge

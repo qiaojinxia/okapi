@@ -7,6 +7,35 @@ fn parse(value: Value) -> UsageProbe {
 }
 
 #[test]
+fn cache_write_ttl_extensions_preserve_zero_and_reject_partial_or_invalid_splits() {
+    let body = json!({"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{
+        "cache_write_tokens":40,"cache_write_5m_tokens":40,"cache_write_1h_tokens":0}});
+    let probe = parse(body.clone());
+    let usage = probe.to_token_usage().unwrap();
+    assert_eq!(
+        (usage.cache_write_5m_tokens, usage.cache_write_1h_tokens),
+        (Some(40), Some(0))
+    );
+    assert_eq!(parse(probe.chat_json()).to_token_usage().unwrap(), usage);
+    for invalid in [
+        json!({"cache_write_tokens":40,"cache_write_5m_tokens":40}),
+        json!({"cache_write_tokens":40,"cache_write_5m_tokens":40,"cache_write_1h_tokens":1}),
+        json!({"cache_write_5m_tokens":0,"cache_write_1h_tokens":0}),
+    ] {
+        let mut value = body.clone();
+        value["prompt_tokens_details"] = invalid;
+        assert!(parse(value).to_token_usage().is_err());
+    }
+    let mut legacy = body;
+    legacy["prompt_tokens_details"] = json!({"cache_write_tokens":40});
+    let legacy = parse(legacy).to_token_usage().unwrap();
+    assert_eq!(
+        (legacy.cache_write_5m_tokens, legacy.cache_write_1h_tokens),
+        (None, None)
+    );
+}
+
+#[test]
 fn missing_axes_are_estimated_while_explicit_zero_and_original_counts_survive() {
     for (raw, expected, sources) in [
         (
@@ -127,4 +156,123 @@ fn cumulative_snapshots_merge_missing_axes_and_invalid_data_stays_invalid() {
         let merged = output.with_previous(Some(parse(invalid)));
         assert!(merged.with_estimates(0, 0).is_err());
     }
+}
+
+#[test]
+fn missing_detail_fields_and_explicit_zero_remain_distinct_after_json_round_trip() {
+    let absent = parse(json!({"prompt_tokens":100,"completion_tokens":50}));
+    let zero = parse(json!({"prompt_tokens":100,"completion_tokens":50,
+        "prompt_tokens_details":{"audio_tokens":0,"image_tokens":0,"cached_tokens":0,"cache_write_tokens":0},
+        "completion_tokens_details":{"audio_tokens":0,"image_tokens":0,"reasoning_tokens":0}}));
+    for probe in [absent, zero] {
+        let usage = probe.to_token_usage().unwrap();
+        let round_trip = parse(probe.chat_json()).to_token_usage().unwrap();
+        assert_eq!(round_trip, usage);
+        assert_eq!(usage.total_raw(), 150);
+    }
+    let unknown = absent.to_token_usage().unwrap().reported_details.unwrap();
+    assert_eq!(unknown, okapi_domain::TokenDetailsReported::default());
+    let known = zero.to_token_usage().unwrap().reported_details.unwrap();
+    assert!(known.prompt.audio && known.prompt.image);
+    assert!(known.completion.audio && known.completion.image && known.reasoning);
+    assert!(known.cache_read.audio && known.cache_read.image);
+    assert!(known.cache_write.audio && known.cache_write.image);
+    assert!(
+        absent.chat_json()["completion_tokens_details"]
+            .get("reasoning_tokens")
+            .is_none()
+    );
+    assert_eq!(
+        zero.chat_json()["completion_tokens_details"]["reasoning_tokens"],
+        0
+    );
+    let legacy: TokenUsage = serde_json::from_value(
+        json!({"prompt_tokens":100,"cached_tokens":0,"completion_tokens":50,"reasoning_tokens":0}),
+    )
+    .unwrap();
+    assert!(legacy.reported_details.is_none());
+}
+
+#[test]
+fn cumulative_totals_do_not_erase_details_but_explicit_zero_replaces_them() {
+    let previous = parse(json!({"prompt_tokens":100,"completion_tokens":50,
+        "prompt_tokens_details":{"audio_tokens":10,"image_tokens":5,"cached_tokens":20,
+            "cached_tokens_details":{"text_tokens":20,"audio_tokens":0,"image_tokens":0},
+            "cache_write_tokens":10,"cache_write_5m_tokens":10,"cache_write_1h_tokens":0,
+            "cache_write_tokens_details":{"text_tokens":10,"audio_tokens":0,"image_tokens":0}},
+        "completion_tokens_details":{"reasoning_tokens":8,"audio_tokens":9,"image_tokens":7}}));
+    let current =
+        parse(json!({"prompt_tokens":120,"completion_tokens":60})).with_previous(Some(previous));
+    let u = current.to_token_usage().unwrap();
+    assert_eq!(
+        (
+            u.prompt_tokens,
+            u.completion_tokens,
+            u.cached_tokens,
+            u.cache_write_tokens
+        ),
+        (120, 60, 20, 10)
+    );
+    assert_eq!(
+        (
+            u.audio_prompt_tokens,
+            u.image_prompt_tokens,
+            u.reasoning_tokens,
+            u.audio_completion_tokens,
+            u.image_completion_tokens
+        ),
+        (10, 5, 8, 9, 7)
+    );
+    assert_eq!(
+        (u.cache_write_5m_tokens, u.cache_write_1h_tokens),
+        (Some(10), Some(0))
+    );
+    let zero = parse(json!({"prompt_tokens":120,"completion_tokens":60,
+        "prompt_tokens_details":{"audio_tokens":0,"image_tokens":0,"cached_tokens":0,"cache_write_tokens":0},
+        "completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"image_tokens":0}})).with_previous(Some(current));
+    let u = zero.to_token_usage().unwrap();
+    assert_eq!(
+        (
+            u.cached_tokens,
+            u.cache_write_tokens,
+            u.audio_prompt_tokens,
+            u.image_prompt_tokens,
+            u.reasoning_tokens,
+            u.audio_completion_tokens,
+            u.image_completion_tokens
+        ),
+        (0, 0, 0, 0, 0, 0, 0)
+    );
+    assert!(u.cache_write_5m_tokens.is_none() && u.cache_write_1h_tokens.is_none());
+    assert!(u.reported_details.unwrap().reasoning);
+    // A new cache aggregate without its old split must not reuse stale metadata.
+    let newer = parse(json!({"prompt_tokens":120,"completion_tokens":60,
+        "prompt_tokens_details":{"cache_write_tokens":30,"cache_write_tokens_details":{"text_tokens":30,"audio_tokens":0,"image_tokens":0}}}))
+    .with_previous(Some(current));
+    assert!(
+        newer
+            .to_token_usage()
+            .unwrap()
+            .cache_write_5m_tokens
+            .is_none()
+    );
+}
+
+#[test]
+fn unknown_cache_intersections_do_not_claim_complete_normalized_modal_counts() {
+    let probe = parse(json!({"prompt_tokens":100,"completion_tokens":0,
+        "prompt_tokens_details":{"audio_tokens":60,"image_tokens":20,"cached_tokens":40,
+            "cached_tokens_details":{"audio_tokens":25}}}));
+    let usage = probe.to_token_usage().unwrap();
+    assert_eq!(usage.audio_prompt_tokens, 35);
+    let reported = usage.reported_details.unwrap();
+    assert!(reported.cache_read.audio && reported.prompt.audio);
+    assert!(!reported.cache_read.image && !reported.prompt.image);
+    assert_eq!(usage.total_raw(), 100);
+    let complete = parse(json!({"prompt_tokens":100,"completion_tokens":0,
+        "prompt_tokens_details":{"audio_tokens":60,"image_tokens":20,"cached_tokens":40,
+            "cached_tokens_details":{"text_tokens":15,"audio_tokens":25}}}))
+    .to_token_usage()
+    .unwrap();
+    assert!(complete.reported_details.unwrap().cache_read.image);
 }

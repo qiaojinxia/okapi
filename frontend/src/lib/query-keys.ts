@@ -35,6 +35,8 @@ export const qk = {
   adminGroups: ['admin', 'groups'] as const,
   adminPlans: ['admin', 'plans'] as const,
   adminModels: ['admin', 'models'] as const,
+  // Complete selector catalog; never reuse a single page from a list/dashboard.
+  adminModelOptions: ['admin', 'models', 'options'] as const,
   adminKeysAll: adminKeys,
   adminKeys: (userId: number | null, q: string) => [...adminKeys, userId, q] as const,
   adminRedemptionsAll: adminRedemptions,

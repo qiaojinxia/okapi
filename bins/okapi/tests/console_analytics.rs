@@ -129,6 +129,8 @@ async fn setup() -> Env {
 fn payload(env: &Env, model: &str, amount: i64, is_error: bool) -> Value {
     json!({
         "request_id": Uuid::new_v4(),
+        "input_unit":"tokens",
+        "input_characters":null,
         "user_id": env.user_id,
         "api_key_id": env.key_id,
         "group": "default",
@@ -136,6 +138,9 @@ fn payload(env: &Env, model: &str, amount: i64, is_error: bool) -> Value {
         "channel_id": env.channel_id,
         "channel_key_id": 1,
         "log_type": if is_error { 5 } else { 2 },
+        "prompt_source":"upstream",
+        "completion_source":"upstream",
+        "upstream_usage":{"prompt_tokens":100,"completion_tokens":200},
         "prompt_tokens": 100,
         "cached_tokens": 40,
         "cache_read_reported": true,
@@ -238,6 +243,148 @@ async fn analytics_require_billing_read() {
         let (status, _) = get(&env, path, &env.user_token).await;
         assert_eq!(status, 403, "{path} 应拒绝无权限用户");
     }
+}
+
+#[tokio::test]
+async fn cached_dashboard_queries_keep_scope_and_manual_refresh_fresh() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    seed(&env, &env.model_a, 2, 0).await;
+    drain(&env).await;
+    let path = format!(
+        "/admin/stats/trend?days=7&user_id={}&cached=true",
+        env.user_id
+    );
+    let start = std::time::Instant::now();
+    let first = poll_until(&env, &path, |v| v["total"]["requests"] == 2).await;
+    let cold = start.elapsed();
+    seed(&env, &env.model_a, 3, 0).await;
+    drain(&env).await;
+    let start = std::time::Instant::now();
+    let (status, cached) = get(&env, &path, &env.super_token).await;
+    let warm = start.elapsed();
+    assert_eq!(status, 200);
+    assert_eq!(cached["total"], first["total"]);
+    let different = format!("{path}&model={}", env.model_b);
+    let (status, empty) = get(&env, &different, &env.super_token).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        empty["total"]["requests"], 0,
+        "model filters cannot reuse another scope's cache"
+    );
+    let denied = get(&env, &path, &env.user_token).await;
+    assert_eq!(denied.0, 403, "cached data still requires billing.read");
+    let response = reqwest::Client::new()
+        .get(format!("http://{}{path}", env.addr))
+        .bearer_auth(&env.super_token)
+        .header("Cache-Control", "no-cache")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let fresh = response.json::<Value>().await.unwrap();
+    assert_eq!(fresh["total"]["requests"], 5);
+    let (_, after) = get(&env, &path, &env.super_token).await;
+    assert_eq!(
+        after["total"]["requests"], 5,
+        "refresh must not resurrect stale cached counters"
+    );
+    eprintln!("dashboard trend: cold={cold:?}, warm={warm:?}");
+}
+
+#[tokio::test]
+async fn token_quality_hints_keep_fixture_records_in_totals_and_filters() {
+    let env = setup().await;
+    assert!(has_ch(&env), "token quality regression requires ClickHouse");
+    seed(&env, &env.model_a, 2, 0).await;
+    for model in [
+        "log-0123456789ab",
+        "modal-0123456789abcdef0123456789abcdef",
+        "gpt-6-astra",
+        "log-custom",
+        "cube-a-model",
+    ] {
+        seed(&env, model, 1, 0).await;
+    }
+    let path = format!("/admin/stats/trend?days=7&user_id={}", env.user_id);
+    let trend = poll_until(&env, &path, |v| v["total"]["requests"] == 7).await;
+    let total = &trend["total"];
+    assert_eq!(total["tokens"], 2100, "test-like records remain included");
+    assert_eq!(total["suspected_test_requests"], 4);
+    assert_eq!(total["suspected_test_tokens"], 1200);
+    assert_eq!(total["test_detection_basis"], "fixture_model_name");
+    assert_eq!(total["measured_cache_read_tokens"], 280);
+    assert_eq!(total["measured_prompt_tokens"], 700);
+    assert!(
+        total["recorded_cache_write_tokens"].is_null(),
+        "missing writes are not zero"
+    );
+    let (_, filtered) = get(&env, &format!("{path}&model=log-custom"), &env.super_token).await;
+    assert_eq!(filtered["total"]["requests"], 1);
+    assert_eq!(
+        filtered["total"]["suspected_test_requests"], 0,
+        "a prefix alone is not a test flag"
+    );
+    let (_, stacked) = get(&env, &format!("{path}&stack=model"), &env.super_token).await;
+    assert_eq!(
+        stacked["total"]["suspected_test_requests"], 4,
+        "stack folding stays additive"
+    );
+    let (_, ranking) = get(
+        &env,
+        &format!(
+            "/admin/stats/breakdown?days=7&user_id={}&by=model&model=log-custom",
+            env.user_id
+        ),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(ranking["data"][0]["suspected_test_requests"], 0);
+}
+
+#[tokio::test]
+async fn token_quality_exposes_partial_write_subtotal_and_paired_measured_cache_counts() {
+    let env = setup().await;
+    assert!(has_ch(&env), "token quality regression requires ClickHouse");
+    let mut reported = payload(&env, &env.model_a, 1000, false);
+    reported["cache_write_tokens"] = json!(20);
+    reported["cache_write_reported"] = json!(true);
+    let mut estimated = payload(&env, &env.model_a, 1000, false);
+    estimated["prompt_source"] = json!("estimated");
+    estimated["upstream_usage"]["prompt_tokens"] = Value::Null;
+    estimated["cached_tokens"] = json!(0);
+    estimated
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_read_reported");
+    let rows = vec![reported, estimated];
+    sqlx::query("INSERT INTO billing_outbox(topic,payload) SELECT 'request_log',p FROM UNNEST($1::jsonb[]) AS p")
+        .bind(&rows).execute(&env.pg).await.unwrap();
+    let path = format!("/admin/stats/trend?days=7&user_id={}", env.user_id);
+    let trend = poll_until(&env, &path, |v| v["total"]["requests"] == 2).await;
+    let total = &trend["total"];
+    assert_eq!(total["tokens"], 600);
+    assert_eq!(total["cache_write_known_requests"], 1);
+    assert_eq!(total["recorded_cache_write_tokens"], 20);
+    assert!(
+        total["cache_write_tokens"].is_null(),
+        "subtotal must not imply full coverage"
+    );
+    assert_eq!(total["cache_read_known_requests"], 1);
+    assert_eq!(total["measured_cache_read_tokens"], 40);
+    assert_eq!(
+        total["measured_prompt_tokens"], 100,
+        "estimated input is not in the denominator"
+    );
+    assert_eq!(total["measured_cache_hit_requests"], 1);
+    assert_eq!(total["measured_cache_hit_bp"], 4000);
+    assert!(total["cache_hit_bp"].is_null());
+    assert_eq!(
+        total["token_provenance"]["prompt"]["estimated"]["tokens"],
+        100
+    );
 }
 
 /// 趋势：user_id 过滤只见本用户；model 过滤只见该模型；scope 回填名字；
@@ -455,6 +602,7 @@ async fn breakdown_metric_ranks_before_limit_and_preserves_totals() {
     let expensive = payload(&env, &env.model_a, 100_000, false);
     let mut heavy = payload(&env, &token_model, 1_000, false);
     heavy["prompt_tokens"] = json!(1_000);
+    heavy["upstream_usage"]["prompt_tokens"] = json!(1_000);
     let mut rows = vec![expensive, heavy];
     for _ in 0..3 {
         let mut free = payload(&env, &env.model_b, 0, false);
@@ -837,6 +985,7 @@ async fn token_totals_and_weighted_metrics_agree_across_statistics_endpoints() {
             row["ttft_ms"] = Value::Null;
         }
         row["cache_write_reported"] = json!(true);
+        row["upstream_usage"] = json!({"prompt_tokens":prompt,"completion_tokens":output});
         rows.push(row);
     }
     insert_values(&env, &rows, None).await;
@@ -930,7 +1079,37 @@ async fn token_totals_and_weighted_metrics_agree_across_statistics_endpoints() {
     assert_eq!(status, 200);
     assert_eq!(logs["tokens"], 1600);
     assert_eq!(logs["cache_hit_bp"], 1636);
-    assert_eq!(logs["tpm"], 1600);
+    // The cross-endpoint checks can exceed the rolling 60s rate window. Verify
+    // that window with a fresh, separately scoped sample, retaining exact totals.
+    verify_fresh_token_rate(&env).await;
+}
+
+async fn verify_fresh_token_rate(env: &Env) {
+    let model = format!("minute-{}", Uuid::new_v4().simple());
+    let mut recent = payload(env, &model, 1000, false);
+    recent["prompt_tokens"] = json!(1100);
+    recent["completion_tokens"] = json!(500);
+    recent["cached_tokens"] = json!(180);
+    recent["upstream_usage"] = json!({"prompt_tokens":1100,"completion_tokens":500});
+    insert_values(env, &[recent], None).await;
+    for _ in 0..50 {
+        drain(env).await;
+        let (status, logs) = get(
+            env,
+            &format!("/admin/logs/stat?user_id={}&model={model}", env.user_id),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 200, "{logs}");
+        if logs["requests"] == 1 {
+            assert_eq!(logs["tokens"], 1600);
+            assert_eq!(logs["cache_hit_bp"], 1636);
+            assert_eq!(logs["tpm"], 1600);
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("fresh Token rate sample was not ingested");
 }
 fn advanced_payload(
     env: &Env,

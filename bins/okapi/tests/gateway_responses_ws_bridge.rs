@@ -715,7 +715,13 @@ async fn local_warmup_does_not_charge_the_flat_model_fee() {
     okapi_store::admin::upsert_model_per_call(&env.state.pg, &env.model, 5000)
         .await
         .unwrap();
-    okapi_store::admin::publish_epoch(&env.state.pg, env.user, &json!({}))
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&env.state.pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(&env.state.pg, env.user, &snapshot)
         .await
         .unwrap();
     assert!(

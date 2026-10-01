@@ -3,7 +3,8 @@ import { Badge } from '@/components/ui/badge'
 import { CopyText } from '@/components/ui/copy-button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { formatRatio, formatUnitPrice } from '@/lib/money'
-import { billingLines, billingStatus, cacheRead, cacheWrite, duration, logMoney, netAmount } from './types'
+import { billingLines, billingStatus, duration, logMoney, netAmount } from './types'
+import { TokenBreakdown } from './TokenBreakdown'
 import type { LogRow } from './types'
 
 export function LogStatus({ row }: { row: LogRow }) {
@@ -57,19 +58,7 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
           {field(t('logs:speed'), speed === null ? '—' : `${speed.toLocaleString(locale, { maximumFractionDigits: 1 })} tok/s`)}
         </dl>
       </FieldGroup>
-      <FieldGroup title={t('logs:tokenDetails')} hint={t('logs:tokenHint')}>
-        <dl className="grid grid-cols-2 gap-x-5 gap-y-4">
-          {field(t('logs:input'), value(row.usage.prompt_tokens))}
-          {field(t('logs:output'), value(row.usage.completion_tokens))}
-          {field(t('logs:cacheRead'), value(cacheRead(row)))}
-          {field(t('logs:cacheWrite'), value(cacheWrite(row)))}
-          {field(t('logs:reasoning'), value(row.usage.reasoning_tokens))}
-          {field(t('logs:audioInput'), value(row.usage.audio_prompt_tokens))}
-          {field(t('logs:imageInput'), value(row.usage.image_prompt_tokens))}
-          {field(t('logs:audioOutput'), value(row.usage.audio_completion_tokens))}
-        </dl>
-        {!row.usage_details_recorded && <p className="text-xs text-muted-foreground">{t('logs:historicalHint')}</p>}
-      </FieldGroup>
+      <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
       <FieldGroup title={t('logs:billingDetails')}>
         {row.status === 30 && <p className="text-xs text-muted-foreground">{t('logs:refundedHint')}</p>}
         {lines.length > 0 && <>
@@ -91,6 +80,7 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
           <div className="flex flex-wrap gap-1.5">
             <Badge variant="muted">{t('logs:mode')} {t(`logs:mode_${s.mode}`, { defaultValue: s.mode })}</Badge>
             {s.epoch != null && <Badge variant="muted">{t('logs:pricingVersion')} {s.epoch}</Badge>}
+            {s.service_tier && <Badge variant="info">{t('logs:serviceTier')} {s.service_tier}{s.tier_ratio != null ? ` ×${formatRatio(s.tier_ratio)}` : ''}</Badge>}
             {s.mode !== 'per_call' && <Badge variant="muted">{t('admin:pricingBasePreview', { price: s.base_price_per_1m_usd ?? 2 })}</Badge>}
             <Badge variant="muted">{t('logs:group')} {s.group} ×{formatRatio(s.group_ratio)}</Badge>
             <Badge variant="muted">{t('logs:userMultiplier')} ×{formatRatio(s.user_multiplier)}</Badge>

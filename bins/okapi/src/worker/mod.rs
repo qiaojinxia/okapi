@@ -9,6 +9,8 @@
 //! chsink（outbox → ClickHouse）已接入（单机直连形态）；NATS 传输在后续批次拆分。
 
 pub mod chsink;
+mod delivery;
+pub mod legacy_speech;
 pub mod margin_breaker;
 pub mod nats_relay;
 pub mod notify;
@@ -132,6 +134,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
 
     let mut chsink_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut unit_calibration = tokio::time::interval(Duration::from_secs(10));
+    unit_calibration.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
     let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
     let mut partition = tokio::time::interval(PARTITION_INTERVAL);
@@ -146,6 +150,15 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     loop {
         tokio::select! {
             _ = chsink_tick.tick() => transport_tick(&pg, js.as_ref(), ch.as_ref()).await,
+            _ = unit_calibration.tick() => {
+                if let Some(ch)=ch.as_ref() {
+                    match legacy_speech::process_once(ch,500).await {
+                        Ok(0) => {}
+                        Ok(rows) => tracing::debug!(rows,"historical speech unit calibration batch"),
+                        Err(error) => tracing::error!(%error,"historical speech unit calibration deferred"),
+                    }
+                }
+            }
             _ = subscriptions.tick() => {
                 match subscriptions_tick(&pg, &ledger, &redis, chrono::Utc::now()).await {
                     Ok(r) if r.rolled + r.expired + r.failed > 0 => {

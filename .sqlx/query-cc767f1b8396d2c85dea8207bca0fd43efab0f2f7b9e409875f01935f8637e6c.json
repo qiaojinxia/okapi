@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_dlq (source,payload,error,retry_count,event_key)\n                       VALUES ('jetstream',$1,$2,0,$3)\n                       ON CONFLICT (event_key) WHERE event_key IS NOT NULL DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Jsonb",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc767f1b8396d2c85dea8207bca0fd43efab0f2f7b9e409875f01935f8637e6c"
+}

@@ -7,22 +7,16 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { ErrorState } from '@/components/ui/state'
 import { Label } from '@/components/ui/input'
 import { SearchInput } from '@/components/ui/search-input'
-import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { qk } from '@/lib/query-keys'
+import { configuredModelsOptions } from '@/features/models/configured-models'
+import type { ConfiguredModel } from '@/features/models/configured-models'
 import { VendorIcon } from '@/features/public-pricing/VendorIcon'
 import { modelVendor } from '@/features/public-pricing/catalog-data'
 import { cn } from '@/lib/utils'
 
-export interface PickerModel {
-  model_name: string
-  display_name?: string | null
-  vendor: string | null
-  pricing_mode: string | null
-}
+export type PickerModel = ConfiguredModel
 
-
-/// 模型选择器：从**已配定价**的模型里勾选，避免手输拼错——模型名拼错的后果是
+/// 模型选择器：从完整配置目录里勾选，避免手输拼错——模型名拼错的后果是
 /// 请求直接 404 且不易排查。
 ///
 /// 按供应商分组展示（vendor 由后端按模型名前缀自动归类）；未定价模型标红，
@@ -37,10 +31,7 @@ export function ModelPicker({
   const { t } = useTranslation()
   const [search, setSearch] = useState('')
   const [selectedOnly, setSelectedOnly] = useState(false)
-  const models = useQuery({
-    queryKey: qk.adminModels,
-    queryFn: () => apiFetch<{ data: PickerModel[] }>('/admin/models'),
-  })
+  const models = useQuery(configuredModelsOptions())
 
   const picked = new Set(value)
   const toggle = (name: string) => {
@@ -78,7 +69,7 @@ export function ModelPicker({
   })
 
   if (models.isError) {
-    return <ErrorState message={describeError(models.error)} />
+    return <ErrorState message={describeError(models.error)} onRetry={() => void models.refetch()} />
   }
   return (
     <div className="flex min-w-0 flex-col gap-3 rounded-xl border border-border bg-muted/20 p-3">

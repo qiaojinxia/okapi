@@ -1,5 +1,7 @@
 //! Per-response Realtime usage. Cache counts intersect the modality counts.
-use okapi_domain::{CacheModalities, TokenUsage};
+use okapi_domain::{
+    CacheModalities, ModalitiesReported, TokenDetailsReported, TokenUsage, UpstreamTokenCounts,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -76,6 +78,15 @@ struct ModalDetails {
 }
 
 impl ModalDetails {
+    fn reported(&self, total: u32) -> ModalitiesReported {
+        okapi_api::ModalTokensDetails {
+            text_tokens: self.text_tokens,
+            audio_tokens: self.audio_tokens,
+            image_tokens: self.image_tokens,
+        }
+        .reported(total)
+    }
+
     fn split(&self, total: u32) -> Option<(u32, CacheModalities)> {
         let modalities = CacheModalities {
             audio_tokens: self.audio_tokens.unwrap_or(0),
@@ -157,7 +168,46 @@ impl RawUsage {
         )?;
         let read = cache_read_modalities.unwrap_or_default();
         let write = cache_write_modalities.unwrap_or_default();
+        let input_reported = details.modalities.reported(self.input_tokens);
+        let cache_reported = |total: Option<u32>, split: Option<&ModalDetails>| {
+            total.map_or(ModalitiesReported::default(), |total| {
+                if total == 0 {
+                    ModalitiesReported {
+                        audio: true,
+                        image: true,
+                    }
+                } else {
+                    split.map_or(input_reported, |split| split.reported(total))
+                }
+            })
+        };
+        let read_reported = cache_reported(
+            details.cached_tokens,
+            details.cached_tokens_details.as_ref(),
+        );
+        let write_reported = cache_reported(
+            details.cache_write_tokens,
+            details.cache_write_tokens_details.as_ref(),
+        );
         let usage = TokenUsage {
+            upstream_usage: Some(UpstreamTokenCounts {
+                prompt_tokens: Some(self.input_tokens),
+                completion_tokens: Some(self.output_tokens),
+            }),
+            reported_details: Some(TokenDetailsReported {
+                prompt: ModalitiesReported {
+                    audio: input_reported.audio
+                        && (cached_tokens == 0 || read_reported.audio)
+                        && (cache_write_tokens == 0 || write_reported.audio),
+                    image: input_reported.image
+                        && (cached_tokens == 0 || read_reported.image)
+                        && (cache_write_tokens == 0 || write_reported.image),
+                },
+                completion: self.output_token_details.reported(self.output_tokens),
+                cache_read: read_reported,
+                cache_write: write_reported,
+                reasoning: false,
+            }),
             prompt_tokens: self.input_tokens,
             completion_tokens: self.output_tokens,
             cached_tokens,
@@ -184,41 +234,7 @@ impl RawUsage {
 }
 
 fn combine(a: TokenUsage, b: TokenUsage) -> Option<TokenUsage> {
-    let add = |a: u32, b: u32| a.checked_add(b).filter(|v| i32::try_from(*v).is_ok());
-    let modalities = |a: Option<CacheModalities>, b: Option<CacheModalities>| {
-        if a.is_none() && b.is_none() {
-            return Some(None);
-        }
-        Some(Some(CacheModalities {
-            audio_tokens: add(
-                a.unwrap_or_default().audio_tokens,
-                b.unwrap_or_default().audio_tokens,
-            )?,
-            image_tokens: add(
-                a.unwrap_or_default().image_tokens,
-                b.unwrap_or_default().image_tokens,
-            )?,
-        }))
-    };
-    let usage = TokenUsage {
-        // Realtime source coverage is tracked separately from this chat contract.
-        upstream_usage: None,
-        prompt_tokens: add(a.prompt_tokens, b.prompt_tokens)?,
-        completion_tokens: add(a.completion_tokens, b.completion_tokens)?,
-        cached_tokens: add(a.cached_tokens, b.cached_tokens)?,
-        cache_write_tokens: add(a.cache_write_tokens, b.cache_write_tokens)?,
-        cache_read_modalities: modalities(a.cache_read_modalities, b.cache_read_modalities)?,
-        cache_write_modalities: modalities(a.cache_write_modalities, b.cache_write_modalities)?,
-        cache_read_reported: a.cache_read_reported && b.cache_read_reported,
-        cache_write_reported: a.cache_write_reported && b.cache_write_reported,
-        audio_prompt_tokens: add(a.audio_prompt_tokens, b.audio_prompt_tokens)?,
-        image_prompt_tokens: add(a.image_prompt_tokens, b.image_prompt_tokens)?,
-        audio_completion_tokens: add(a.audio_completion_tokens, b.audio_completion_tokens)?,
-        image_completion_tokens: add(a.image_completion_tokens, b.image_completion_tokens)?,
-        reasoning_tokens: add(a.reasoning_tokens, b.reasoning_tokens)?,
-    };
-    usage.validate().ok()?;
-    Some(usage)
+    a.checked_add(b).ok()
 }
 
 #[cfg(test)]

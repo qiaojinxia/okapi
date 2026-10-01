@@ -1,5 +1,5 @@
-//! Elapsed duration and throughput use the same measured requests, including failures.
-use super::stats::{rate_bp, scaled_ratio};
+//! Elapsed duration includes all measured requests; Token throughput is independent.
+use super::stats::rate_bp;
 use serde_json::{Map, Value, json};
 
 pub(super) fn source(keys: &str, expected_table: &str, predicate: &str) -> String {
@@ -51,12 +51,5 @@ pub(super) fn metrics(
             Value::Null
         },
     );
-    let speed = if complete && samples > 0 && sum > 0 {
-        json!(scaled_ratio(output, sum, 1_000_000))
-    } else {
-        Value::Null
-    };
-    result.insert("avg_output_tps_milli".into(), speed.clone());
-    result.insert("tokens_per_1k_sec".into(), speed);
     result
 }

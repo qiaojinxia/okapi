@@ -63,6 +63,7 @@ async fn routing(env: &Env) -> Groups {
         }
         ids.push(id);
     }
+    env.publish().await;
     Groups {
         primary: groups[0].clone(),
         codex: groups[1].clone(),

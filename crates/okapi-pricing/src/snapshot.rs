@@ -9,6 +9,14 @@ use serde::ser::Error as _;
 use serde::{Serialize, Serializer};
 use std::str::FromStr;
 
+/// Physical input unit; a character-priced quote is not a Token measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputUnit {
+    Tokens,
+    Characters,
+}
+
 fn ser_decimal<S: Serializer>(literal: &str, serializer: S) -> Result<S::Ok, S::Error> {
     let number = serde_json::Number::from_str(literal).map_err(S::Error::custom)?;
     number.serialize(serializer)
@@ -51,6 +59,10 @@ pub struct AppliedRule {
 #[derive(Debug, Clone, Serialize)]
 pub struct PricingSnapshot {
     pub epoch: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_unit: Option<InputUnit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_characters: Option<u32>,
     /// Effective normalization base for this bill; absent on historical/per-call records.
     #[serde(
         skip_serializing_if = "Option::is_none",

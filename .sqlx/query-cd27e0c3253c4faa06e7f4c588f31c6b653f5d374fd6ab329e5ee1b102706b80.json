@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_dlq (source,payload,error,retry_count,ch_batch_id,event_key)\n           SELECT 'chsink',v->'payload',$2,b.retry_count,b.id,v->>'key'\n           FROM billing_ch_batches b CROSS JOIN LATERAL jsonb_array_elements(b.payloads) v\n           WHERE b.id=$1 AND b.status=2\n           ON CONFLICT (event_key) WHERE event_key IS NOT NULL DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd27e0c3253c4faa06e7f4c588f31c6b653f5d374fd6ab329e5ee1b102706b80"
+}

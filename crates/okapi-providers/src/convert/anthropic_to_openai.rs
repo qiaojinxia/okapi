@@ -325,7 +325,15 @@ fn anthropic_usage_json(u: UsageProbe) -> Value {
     if d.cache_write_reported || d.cache_write_tokens > 0 {
         usage["cache_creation_input_tokens"] = json!(d.cache_write_tokens);
     }
-    if u.completion_tokens_details.reasoning_tokens > 0 {
+    if let (Some(short), Some(long)) = (d.cache_write_5m_tokens, d.cache_write_1h_tokens) {
+        usage["cache_creation"] = json!({
+            "ephemeral_5m_input_tokens": short,
+            "ephemeral_1h_input_tokens": long,
+        });
+    }
+    if u.completion_tokens_details.reasoning_reported
+        || u.completion_tokens_details.reasoning_tokens > 0
+    {
         usage["output_tokens_details"] =
             json!({"thinking_tokens":u.completion_tokens_details.reasoning_tokens});
     }

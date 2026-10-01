@@ -25,15 +25,28 @@ SKIP = re.compile(r'跳过[：:]|\bskipp(?:ed|ing)\b', re.I)
 
 def log_lines(raw):
     """Keep physical line numbers when Cargo's stderr interrupts a stdout result."""
+    postponed = []
     for number, raw_line in enumerate(raw.splitlines(), 1):
         line = ANSI.sub('', raw_line).strip()
         result = RESULT.match(line)
         embedded = EMBEDDED_START.fullmatch(line[result.end():]) if result else None
         if embedded:
             yield number, line[:result.end()]
+            yield from postponed
+            postponed = []
             yield number, embedded[1]
+        elif TEST.match(line) and (embedded := EMBEDDED_START.search(line)):
+            # Cargo can print the next target before the previous harness flushes
+            # its last outcome/result. Keep that outcome with its original target.
+            yield number, line[:embedded.start()].rstrip()
+            postponed.append((number, embedded[1]))
         else:
             yield number, line
+            if result:
+                yield from postponed
+                postponed = []
+    # A truncated previous result must still expose the announced unfinished target.
+    yield from postponed
 
 
 def summarize(raw, exit_code=None):

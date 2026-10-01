@@ -289,6 +289,24 @@ async fn verify(env: &Env) {
     let row = record(env).await;
     assert_eq!(row["amount_micro"], 27_900, "{row}");
     let usage = &row["usage"];
+    assert_eq!(
+        usage["reported_details"]["prompt"],
+        json!({"audio":true,"image":true})
+    );
+    assert_eq!(
+        usage["reported_details"]["completion"],
+        json!({"audio":true,"image":true})
+    );
+    assert_eq!(usage["reported_details"]["reasoning"], true);
+    let observation = report(env, "/api/me/logs/stat").await;
+    assert_eq!(
+        observation["token_detail_observations"]["image_completion_tokens"]["tokens"],
+        200
+    );
+    assert_eq!(
+        observation["token_detail_observations"]["image_completion_tokens"]["coverage_bp"],
+        10000
+    );
     for (name, expected) in [
         ("prompt_tokens", 1000),
         ("completion_tokens", 400),
@@ -317,6 +335,7 @@ async fn verify(env: &Env) {
     let payload: Value = sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE topic='billing.completed' AND payload->>'request_id'=$1")
         .bind(row["request_id"].as_str().unwrap()).fetch_one(&env.state.pg).await.unwrap();
     for name in [
+        "reported_details",
         "prompt_tokens",
         "completion_tokens",
         "cached_tokens",

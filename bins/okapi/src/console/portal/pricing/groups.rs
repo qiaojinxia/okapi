@@ -26,13 +26,17 @@ pub(super) struct Selection {
 
 const FROM: &str = r"FROM price_groups g
     LEFT JOIN channel_pools p ON p.pool_code = g.pool_code
+    JOIN jsonb_to_recordset($5::jsonb -> 'groups') AS pg(group_code text, ratio_scaled bigint)
+        ON pg.group_code = g.group_code
     WHERE ($1::text IS NULL OR g.group_code ILIKE $1 ESCAPE E'\\' OR g.description ILIKE $1 ESCAPE E'\\')
     AND ($2::text IS NULL OR g.group_code = $2)
     AND (g.self_select OR g.is_default OR EXISTS (
         SELECT 1 FROM user_groups ug WHERE ug.group_code = g.group_code AND ug.user_id = $4
     ))
     AND ($3::text IS NULL OR EXISTS (
-        SELECT 1 FROM models m JOIN model_pricing mp ON mp.model_id = m.id
+        SELECT 1 FROM models m
+        JOIN jsonb_to_recordset($5::jsonb -> 'models') AS mp(model_name text)
+            ON mp.model_name = m.model_name
         JOIN channels c ON c.models ? m.model_name
         JOIN pool_channels pc ON pc.channel_id = c.id
         WHERE m.model_name = $3 AND m.status = 1 AND c.status = 1 AND c.deleted_at IS NULL
@@ -43,6 +47,7 @@ pub(super) async fn read(
     conn: &mut sqlx::PgConnection,
     selection: &Selection,
     user_id: Option<i64>,
+    published: &serde_json::Value,
 ) -> Result<(Vec<Group>, paging::Meta), AppError> {
     let mut count_query = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT COUNT(*) ");
     count_query.push(FROM);
@@ -52,21 +57,23 @@ pub(super) async fn read(
         .bind(&selection.code)
         .bind(&selection.model)
         .bind(user_id)
+        .bind(published)
         .fetch_one(&mut *conn)
         .await
         .map_err(okapi_store::StoreError::from)?;
     let mut data_query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT g.group_code AS code, g.description AS name, g.group_ratio::text AS ratio, g.pool_code, g.self_select, g.is_default, p.fallback_pool_code ",
+        "SELECT g.group_code AS code, g.description AS name, (pg.ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS ratio, g.pool_code, g.self_select, g.is_default, p.fallback_pool_code ",
     );
     data_query
         .push(FROM)
-        .push(" ORDER BY g.sort_order, g.group_code LIMIT $5 OFFSET $6");
+        .push(" ORDER BY g.sort_order, g.group_code LIMIT $6 OFFSET $7");
     let groups: Vec<Group> = data_query
         .build_query_as()
         .bind(&selection.pattern)
         .bind(&selection.code)
         .bind(&selection.model)
         .bind(user_id)
+        .bind(published)
         .bind(selection.slice.capped_limit())
         .bind(selection.slice.offset)
         .fetch_all(conn)
@@ -79,6 +86,7 @@ pub(super) async fn read(
 #[derive(Serialize)]
 struct Catalog {
     groups: Vec<Group>,
+    pricing_epoch: i64,
     #[serde(flatten)]
     page: paging::Meta,
 }
@@ -98,9 +106,15 @@ pub async fn public_groups(
     };
     let user_id = super::viewer(&state, &headers).await?;
     let mut tx = snapshot(&state).await?;
-    let (groups, page) = read(&mut tx, &selection, user_id).await?;
+    let publication = okapi_store::pricing::published_pricing(&mut tx).await?;
+    let published = serde_json::to_value(&publication.source).map_err(|_| AppError::internal())?;
+    let (groups, page) = read(&mut tx, &selection, user_id, &published).await?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
-    let body = Catalog { groups, page };
+    let body = Catalog {
+        groups,
+        page,
+        pricing_epoch: publication.source.epoch,
+    };
     let mut response = if method == Method::HEAD {
         empty_response()
     } else {

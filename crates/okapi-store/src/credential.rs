@@ -88,7 +88,8 @@ pub struct OAuthCredential {
     pub refresh_token: String,
     /// access token 到期 unix 秒。
     pub expires_at: i64,
-    /// ChatGPT 账号 id（codex 必带；anthropic_max 为 None）。
+    /// ChatGPT 账号 id（codex 必带）；anthropic_max：换码响应里的账号/组织 UUID
+    /// （全伪装 metadata.user_id 用，见 `okapi_providers::oauth::cc_mimic`，常为 None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
 }

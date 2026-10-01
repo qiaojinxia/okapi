@@ -34,12 +34,15 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Switch } from '@/components/ui/switch'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { usePermission } from '@/hooks/use-auth'
-import { type Pager, usePagination } from '@/hooks/use-pagination'
+import { DEFAULT_PAGE_SIZE, PAGE_SIZES, type Pager, usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { downloadCsv, microToUsd } from '@/lib/csv'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney, formatMoneyAggregate } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { TokenBreakdown } from '@/features/logs/TokenBreakdown'
+import { ExtraMetrics } from '@/features/logs/LogSummary'
+import type { LogStats, TokenDetails } from '@/features/logs/types'
 
 /// 检索条件（受控草稿 → 点查询才提交）。
 ///
@@ -61,7 +64,6 @@ interface Draft {
 }
 
 const DEFAULT_HOURS = 24
-const PAGE = 50
 const numericFilters = ['user_id', 'api_key_id', 'channel_id'] as const
 function invalidId(value: string): boolean {
   return !validEntityId(value)
@@ -129,6 +131,11 @@ function toSearch(d: Draft): LogSearch {
 const routeApi = getRouteApi('/admin/logs')
 
 interface LogRow {
+  requested_model?: string
+  upstream_model?: string
+  endpoint?: string
+  upstream_endpoint?: string
+  usage_details_recorded?: boolean
   ts: string
   request_id: string
   upstream_request_id: string
@@ -147,12 +154,7 @@ interface LogRow {
   client_type: string
   client_ip: string
   node: string
-  usage: {
-    prompt_tokens: number
-    cached_tokens: number
-    completion_tokens: number
-    reasoning_tokens: number
-  }
+  usage: TokenDetails
   amount_micro: number
   original_amount_micro: number
   discount_micro: number
@@ -170,7 +172,7 @@ interface LogRow {
   ratio_snapshot: string
 }
 
-interface StatResp {
+interface StatResp extends Partial<LogStats> {
   requests: number
   errors: number
   error_rate_bp: number
@@ -209,7 +211,7 @@ function toParams(f: Draft, offset: number, limit: number): string {
 
 /// 全站日志页（对齐 new-api 的日志页 + 统计条，数据源换成 CH raw）。
 ///
-/// 版面三段：统计条（先给"这批日志整体什么样"）→ 过滤器 → 明细表。
+/// 版面三段：紧凑检索工具栏 → 窗口统计条 → 铺满剩余高度的明细表。
 /// 明细行点开展开排障区——请求 ID / 上游请求 ID / 节点 / 重试与切换计数
 /// 是工单三件套，放主表列会把表撑到横向滚动，收进展开区各取所需。
 export function AdminLogsPage() {
@@ -227,7 +229,7 @@ export function AdminLogsPage() {
   }, [appliedKey])
   // 页宽档位到 200 为止（后端钳制上限）；CH 明细不 count，翻页靠"本页满 = 可能还有"。
   // 页码也在地址里；`commit` 整体替换 search 时不带 page，过滤一变自然回第一页
-  const pager = usePagination({ limit: PAGE, pageSizes: [50, 100, 200] })
+  const pager = usePagination({ pageSizes: [...PAGE_SIZES, 200] })
   const logs = useAdminLogs(applied, pager)
   const rows = logs.isError || logs.isPlaceholderData ? [] : logs.data?.data ?? []
   const scope = logs.isError || logs.isPlaceholderData ? undefined : logs.data?.scope
@@ -250,20 +252,34 @@ export function AdminLogsPage() {
   }
 
   return (
-    <div className="list-page">
+    <div className="list-page [--page-gap:0.5rem]">
       <PageHeader
         title={t('admin:logsNav')}
         description={t('admin:logsDesc')}
         icon={ScrollText}
+        compact
       />
-      <RangePicker
-        draft={draft}
-        onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
-        onRange={(from, to) => setDraft({ ...draft, from, to })}
-        onApplyRange={() => commit(draft)}
-      />
+      <Card data-slot="admin-log-filters" className="shrink-0 rounded-xl">
+        <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2 px-3 py-1.5">
+          <RangePicker
+            draft={draft}
+            onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
+            onRange={(from, to) => setDraft({ ...draft, from, to })}
+            onApplyRange={() => commit(draft)}
+          />
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            <Button size="sm" variant="outline" className="h-9" loading={logs.isFetching} onClick={() => void logs.refetch()}>
+              {!logs.isFetching && <RotateCw className="h-3.5 w-3.5" />}
+              {t('common:refresh')}
+            </Button>
+            <Button size="sm" variant="outline" className="h-9" disabled={rows.length === 0} onClick={() => exportCsv(rows)}>
+              <Download className="h-3.5 w-3.5" />{t('portal:logsExport')}
+            </Button>
+          </div>
+        </div>
+        <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} known={known} />
+      </Card>
       <StatBar applied={applied} />
-      <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} known={known} />
       <LogTable applied={applied} pager={pager} q={logs} />
     </div>
   )
@@ -298,7 +314,7 @@ function RangePicker({
     if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (valid) onApplyRange() }
   }
   return (
-    <section aria-label={t('admin:logsRange')} className="flex min-w-0 flex-wrap items-start justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2">
+    <section aria-label={t('admin:logsRange')} className="flex min-w-0 flex-1 basis-96 flex-wrap items-start gap-x-3 gap-y-2">
       <Segmented
         size="sm"
         ariaLabel={t('admin:logsRange')}
@@ -351,8 +367,9 @@ function RangePicker({
 function StatBar({ applied }: { applied: Draft }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
-  // 统计不分页：固定 PAGE 让 query key 不随明细表换页宽而变，避免无谓重算
-  const params = toParams(applied, 0, PAGE)
+  const [expanded, setExpanded] = useState(false)
+  // 统计不分页：使用固定参数，不随明细表换页宽而重新请求。
+  const params = toParams(applied, 0, DEFAULT_PAGE_SIZE)
   const q = useQuery({
     queryKey: qk.adminLogStat(params),
     queryFn: () => apiFetch<StatResp>(`/admin/logs/stat?${params}`),
@@ -366,30 +383,38 @@ function StatBar({ applied }: { applied: Draft }) {
   }
   const s = q.data
   const cell = (label: string, value: string, tone?: 'warn' | 'bad') => (
-    <InlineStat label={label} value={value} tone={tone ?? 'default'} />
+    <InlineStat label={label} value={value} tone={tone ?? 'default'} className="px-3 py-2" />
   )
   const errBp = s?.error_rate_bp ?? 0
   return (
-    <Card>
-      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-3 px-5 py-3">
-        {cell(t('admin:logsStatSpend'), s ? formatMoneyAggregate(s.amount_micro, locale) : '—')}
-        {cell(t('common:requests'), s ? formatCount(s.requests, locale) : '—')}
-        {cell(
-          t('admin:statErrorRate'),
-          s ? formatBp(errBp, locale) : '—',
-          errBp >= 500 ? 'bad' : errBp >= 100 ? 'warn' : undefined,
-        )}
-        {cell(t('admin:kpiTokens'), s ? formatCount(s.tokens, locale) : '—')}
-        {cell(t('admin:logsStatCacheHit'), s?.cache_hit_bp != null ? formatBp(s.cache_hit_bp, locale) : '—')}
-        {cell(t('admin:logsStatUsers'), s ? formatCount(s.users, locale) : '—')}
-        {cell('RPM', s ? formatCount(s.rpm, locale) : '—')}
-        {cell('TPM', s ? formatCount(s.tpm, locale) : '—')}
-        {s && (
-          <Badge variant="muted" title={t('admin:logsRateSourceHint')}>
-            {s.rate_source === 'redis' ? t('admin:logsRateLive') : t('admin:logsRateWindow')}
-          </Badge>
-        )}
-      </CardContent>
+    <Card role="region" aria-label={t('logs:summary')} data-slot="admin-log-summary" className="shrink-0 overflow-hidden rounded-xl">
+      <div className="flex min-w-0 flex-wrap items-center">
+        <div className="grid min-w-0 flex-1 basis-[40rem] grid-cols-4 md:grid-cols-8 [&>div:not(:first-child)]:border-l [&>div]:border-border/60">
+          {cell(t('admin:logsStatSpend'), s ? formatMoneyAggregate(s.amount_micro, locale) : '—')}
+          {cell(t('common:requests'), s ? formatCount(s.requests, locale) : '—')}
+          {cell(
+            t('admin:statErrorRate'),
+            s ? formatBp(errBp, locale) : '—',
+            errBp >= 500 ? 'bad' : errBp >= 100 ? 'warn' : undefined,
+          )}
+          {cell(t('admin:kpiTokens'), s ? formatCount(s.tokens, locale) : '—')}
+          {cell(t('admin:logsStatCacheHit'), s?.cache_hit_bp != null ? formatBp(s.cache_hit_bp, locale) : '—')}
+          {cell(t('admin:logsStatUsers'), s ? formatCount(s.users, locale) : '—')}
+          {cell('RPM', s ? formatCount(s.rpm, locale) : '—')}
+          {cell('TPM', s ? formatCount(s.tpm, locale) : '—')}
+        </div>
+        <div className="flex w-full shrink-0 items-center justify-end gap-3 border-t border-border/60 px-3 py-1.5 md:w-auto md:flex-col md:items-end md:gap-1 md:border-t-0 md:py-2">
+          {s && (
+            <Badge variant="muted" title={t('admin:logsRateSourceHint')}>
+              {s.rate_source === 'redis' ? t('admin:logsRateLive') : t('admin:logsRateWindow')}
+            </Badge>
+          )}
+          <button type="button" aria-expanded={expanded} onClick={() => setExpanded(!expanded)} className="flex items-center gap-1 rounded text-xs text-primary outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+            {t('logs:moreMetrics')}<ChevronDown aria-hidden className={`h-3.5 w-3.5 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+          </button>
+        </div>
+      </div>
+      <ExtraMetrics data={s} expanded={expanded} />
     </Card>
   )
 }
@@ -410,6 +435,7 @@ function FilterBar({
   const advancedKey = JSON.stringify(advancedValues)
   const advancedCount = advancedValues.filter((value) => value.trim()).length
   const [advancedOpen, setAdvancedOpen] = useState(advancedCount > 0)
+  const advancedId = useId()
   const [blurred, setBlurred] = useState<Partial<Record<(typeof numericFilters)[number], boolean>>>({})
   useEffect(() => { if ((JSON.parse(advancedKey) as string[]).some((value) => value.trim())) setAdvancedOpen(true) }, [advancedKey])
   const invalid = numericFilters.some((field) => invalidId(draft[field])) || Boolean((draft.from || draft.to) && !validRange(draft))
@@ -443,16 +469,16 @@ function FilterBar({
   const active = [draft.model, draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id]
     .filter((v) => v.trim() !== '').length + (draft.errors_only ? 1 : 0)
   return (
-    <Card>
       <form
+        className="border-t border-border/60"
         onSubmit={(e) => {
           e.preventDefault()
           if (!invalid) onApply()
         }}
         onKeyDown={(event) => { if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault() }}
       >
-        <CardContent className="flex flex-col gap-3 p-4">
-          <div className="flex min-w-0 flex-wrap items-center gap-3">
+        <CardContent className="flex flex-col gap-2 px-3 py-1.5">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 md:gap-3">
             <ModelSearchInput id="lf-model" className="w-full md:max-w-sm md:flex-1 md:basis-72" aria-label={t('pricing:model')}
               inputClassName="h-11 md:h-9" placeholder={t('portal:logsModelHint')}
               value={draft.model} onChange={(model) => onChange({ ...draft, model })} onSubmit={() => { if (!invalid) onApply() }} />
@@ -461,6 +487,11 @@ function FilterBar({
               onChange={(v) => onChange({ ...draft, errors_only: v })}
               label={t('admin:logsErrorsOnly')}
             />
+            <Button type="button" size="sm" variant="ghost" aria-expanded={advancedOpen} aria-controls={advancedId} onClick={() => setAdvancedOpen(!advancedOpen)} className="min-h-11 text-muted-foreground md:min-h-9">
+              <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />{t('admin:logsMoreFilters')}
+              {advancedCount > 0 && <Badge variant="muted">{advancedCount}</Badge>}
+              <ChevronDown aria-hidden className={`h-3.5 w-3.5 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
+            </Button>
             <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
               {active > 0 && (
                 <Button
@@ -489,24 +520,19 @@ function FilterBar({
               </Button>
             </div>
           </div>
-          <details open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)} className="group min-w-0 border-t border-border pt-2">
-            <summary className="flex min-h-9 cursor-pointer items-center gap-2 rounded text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40">
-              <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />{t('admin:logsMoreFilters')}{advancedCount > 0 && <Badge variant="muted">{advancedCount}</Badge>}
-              <ChevronDown aria-hidden className="ml-auto h-3.5 w-3.5 transition-transform group-open:rotate-180" />
-            </summary>
-            <div className="mt-2 grid items-start gap-3 md:grid-cols-[repeat(3,minmax(0,20rem))]">
+          <div id={advancedId} hidden={!advancedOpen} className="min-w-0 border-t border-border/60 pt-2">
+            <div className="grid items-start gap-2 md:grid-cols-[repeat(3,minmax(0,20rem))]">
               {entity('user_id', 'user', t('analytics:dimUser'))}
               {entity('api_key_id', 'api_key', t('analytics:dimApiKey'))}
               {entity('channel_id', 'channel', t('analytics:dimChannel'))}
             </div>
-            <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,32rem)]">
+            <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,20rem)_minmax(0,32rem)]">
               {text('error_code', t('admin:logsErrorCode'), 'upstream_error')}
               {text('request_id', t('admin:logsRequestId'), 'uuid')}
             </div>
-          </details>
+          </div>
         </CardContent>
       </form>
-    </Card>
   )
 }
 
@@ -538,29 +564,14 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
   const rows = q.data.data
   return (
     <div className="list-page-section">
-      {/* 工具栏两组按钮窄屏下允许整组换行；按钮自身永不折行（Button 基类） */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex gap-2">
-          <Button size="sm" variant="outline" loading={q.isFetching} onClick={() => void q.refetch()}>
-            {!q.isFetching && <RotateCw className="h-3.5 w-3.5" />}
-            {t('common:refresh')}
-          </Button>
-          {/* 导出当前页：审计/对账拿表格比截图快；全量导出属报表任务不在此 */}
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={rows.length === 0}
-            onClick={() => exportCsv(rows)}
-          >
-            <Download className="h-3.5 w-3.5" />
-            {t('portal:logsExport')}
-          </Button>
-        </div>
-      </div>
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />
       ) : (
-        <Table dense stickyHeader wrapperClassName="[container-type:inline-size]">
+        <Table dense stickyHeader scrollResetKey={params} className="min-w-[64rem] table-fixed" wrapperClassName="[container-type:inline-size]">
+          <colgroup>
+            <col className="w-8" /><col className="w-34" /><col className="w-22" /><col className="w-24" />
+            <col /><col className="w-28" /><col className="w-42" /><col className="w-23" /><col className="w-28" /><col className="w-19" />
+          </colgroup>
           <THead>
             <Tr>
               <Th className="w-6" />
@@ -592,28 +603,25 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
                   <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{r.ts.slice(5, 19)}</Td>
                   <Td>
                     {r.is_error ? (
-                      <Badge dot variant="destructive">{r.error_code || t('logs:failed')}</Badge>
+                      <Badge dot variant="destructive" className="max-w-full" title={r.error_code || undefined}><span className="truncate">{r.error_code || t('logs:failed')}</span></Badge>
                     ) : (
                       <Badge dot variant="success">{t('logs:ok')}</Badge>
                     )}
                   </Td>
-                  <Td className="max-w-28 truncate text-xs" title={r.username || undefined}>
+                  <Td className="truncate text-xs" title={r.username || undefined}>
                     {r.username || `ID ${r.user_id}`}
                   </Td>
-                  {/* 表格已可横向滚动，模型名不该在格内被从中间折断 */}
-                  <Td className="whitespace-nowrap font-mono text-xs">{r.model}</Td>
-                  <Td className="max-w-32 truncate text-xs" title={r.channel_name || undefined}>
+                  <Td className="truncate font-mono text-xs" title={r.model}>{r.model}</Td>
+                  <Td className="truncate text-xs" title={r.channel_name || undefined}>
                     {r.channel_name || (r.channel_id > 0 ? `ID ${r.channel_id}` : t('admin:dashboardUnassignedChannel'))}
                   </Td>
                   <Td numeric className="whitespace-nowrap text-xs">
-                    {formatCount(r.usage.prompt_tokens, locale)}
+                    <div className="leading-4">{formatCount(r.usage.prompt_tokens, locale)}{' + '}{formatCount(r.usage.completion_tokens, locale)}</div>
                     {r.usage.cached_tokens > 0 && (
-                      <span className="text-muted-foreground">
-                        ({t('logs:cachedShort', { n: r.usage.cached_tokens })})
+                      <span className="block text-xs leading-4 text-success">
+                        {t('logs:cachedShort', { n: r.usage.cached_tokens })}
                       </span>
                     )}
-                    {' + '}
-                    {formatCount(r.usage.completion_tokens, locale)}
                   </Td>
                   <Td numeric className="whitespace-nowrap font-medium">{formatMoney(r.amount_micro, locale)}</Td>
                   <Td numeric className="whitespace-nowrap font-mono text-xs">
@@ -623,7 +631,7 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
                     )}
                     ms
                   </Td>
-                  <Td className="text-xs text-muted-foreground">{r.client_type || '—'}</Td>
+                  <Td className="truncate text-xs text-muted-foreground" title={r.client_type || undefined}>{r.client_type || '—'}</Td>
                 </Tr>
                 {open && (
                   <Tr id={`${detailId}-${r.request_id}`} className="hover:bg-transparent">
@@ -678,6 +686,11 @@ function exportCsv(rows: LogRow[]) {
       'node',
       'key_name',
       'key_prefix',
+      'requested_model', 'upstream_model', 'endpoint', 'upstream_endpoint',
+      'cache_write_tokens', 'cache_read_reported', 'cache_write_reported', 'cache_write_5m_tokens', 'cache_write_1h_tokens',
+      'audio_prompt_tokens', 'image_prompt_tokens', 'audio_completion_tokens', 'image_completion_tokens',
+      'cache_read_audio_tokens', 'cache_read_image_tokens', 'cache_write_audio_tokens', 'cache_write_image_tokens',
+      'prompt_source', 'completion_source', 'upstream_prompt_tokens', 'upstream_completion_tokens',
     ],
     rows.map((r) => [
       r.ts,
@@ -710,6 +723,11 @@ function exportCsv(rows: LogRow[]) {
       r.node,
       r.key_name ?? '',
       r.key_prefix ?? '',
+      r.requested_model, r.upstream_model, r.endpoint, r.upstream_endpoint,
+      r.usage.cache_write_tokens, r.usage.cache_read_reported, r.usage.cache_write_reported, r.usage.cache_write_5m_tokens, r.usage.cache_write_1h_tokens,
+      r.usage.audio_prompt_tokens, r.usage.image_prompt_tokens, r.usage.audio_completion_tokens, r.usage.image_completion_tokens,
+      r.usage.cache_read_modalities?.audio_tokens, r.usage.cache_read_modalities?.image_tokens, r.usage.cache_write_modalities?.audio_tokens, r.usage.cache_write_modalities?.image_tokens,
+      r.usage.prompt_source, r.usage.completion_source, r.usage.upstream_usage?.prompt_tokens, r.usage.upstream_usage?.completion_tokens,
     ]),
   )
 }
@@ -857,6 +875,10 @@ function RowDetail({ row }: { row: LogRow }) {
           t('admin:logsDetailRouting'),
           <>
             {item(t('admin:provider'), row.provider || '—')}
+            {item(t('logs:requestedModel'), row.requested_model || t('logs:notRecorded'))}
+            {item(t('logs:upstreamModel'), row.upstream_model || t('logs:notRecorded'))}
+            {item(t('logs:endpoint'), row.endpoint || t('logs:notRecorded'))}
+            {item(t('logs:upstreamEndpoint'), row.upstream_endpoint || t('logs:notRecorded'))}
             {item(t('admin:logsChannelKey'), row.channel_key_id > 0 ? `ID ${row.channel_key_id}` : '—')}
             {item(t('admin:logsUpstreamStatus'), String(row.upstream_status || '—'))}
             {item(t('admin:logsRetries'), String(row.retry_count))}
@@ -894,6 +916,7 @@ function RowDetail({ row }: { row: LogRow }) {
           </>,
         )}
       </div>
+      <div className="rounded-lg border border-border bg-card px-4"><TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} /></div>
       <RefundInline row={row} />
     </div>
   )

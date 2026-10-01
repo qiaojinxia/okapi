@@ -213,8 +213,14 @@ pub async fn search(
         "SELECT ts, request_id, upstream_request_id, \
                 log_type, user_id, api_key_id, group_code, model, channel_id, channel_key_id, \
                 client_type, client_ip, node, \
-                prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, \
+                prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, input_unit, input_characters, \
                 prompt_source, completion_source, upstream_prompt_tokens, upstream_completion_tokens, \
+                requested_model, upstream_model, endpoint, upstream_endpoint, \
+                cache_write_tokens, cache_read_reported, cache_write_reported, cache_write_5m_tokens, cache_write_1h_tokens, \
+                audio_prompt_tokens, image_prompt_tokens, audio_completion_tokens, image_completion_tokens, \
+                cache_read_audio_tokens, cache_read_image_tokens, cache_write_audio_tokens, cache_write_image_tokens, \
+                audio_prompt_reported, image_prompt_reported, audio_completion_reported, image_completion_reported, \
+                cache_read_audio_reported, cache_read_image_reported, cache_write_audio_reported, cache_write_image_reported, reasoning_reported, \
                 amount_micro, original_amount_micro, discount_micro, upstream_cost_micro, \
                 latency_ms, ttft_ms, stream, retry_count, failover_count, sticky_layer, \
                 upstream_status, error_code, is_error, ratio_snapshot \
@@ -237,6 +243,7 @@ pub async fn search(
             let api_key_id = ch_i64(r, "api_key_id");
             let key = names.keys.get(&api_key_id);
             let channel_id = ch_i64(r, "channel_id");
+            let usage = log_usage(r);
             json!({
                 "ts": ch_str(r, "ts"),
                 "request_id": ch_str(r, "request_id"),
@@ -249,6 +256,11 @@ pub async fn search(
                 "key_prefix": key.map(|(_, prefix, _)| prefix.as_str()).unwrap_or_default(),
                 "group": ch_str(r, "group_code"),
                 "model": ch_str(r, "model"),
+                "requested_model": ch_str(r, "requested_model"),
+                "upstream_model": ch_str(r, "upstream_model"),
+                "endpoint": ch_str(r, "endpoint"),
+                "upstream_endpoint": ch_str(r, "upstream_endpoint"),
+                "usage_details_recorded": !r["cache_write_tokens"].is_null(),
                 "channel_id": channel_id,
                 "channel_name": names.channel_name(channel_id),
                 "channel_key_id": ch_i64(r, "channel_key_id"),
@@ -258,17 +270,7 @@ pub async fn search(
                 "client_type": ch_str(r, "client_type"),
                 "client_ip": ch_str(r, "client_ip"),
                 "node": ch_str(r, "node"),
-                "usage": {
-                    "prompt_tokens": ch_i64(r, "prompt_tokens"),
-                    "cached_tokens": ch_i64(r, "cached_tokens"),
-                    "completion_tokens": ch_i64(r, "completion_tokens"),
-                    "reasoning_tokens": ch_i64(r, "reasoning_tokens"),
-                    "prompt_source": ch_str(r, "prompt_source"),
-                    "completion_source": ch_str(r, "completion_source"),
-                    "upstream_usage": if ch_str(r, "prompt_source") == "unknown" && ch_str(r, "completion_source") == "unknown" {
-                        Value::Null
-                    } else { json!({"prompt_tokens":r["upstream_prompt_tokens"], "completion_tokens":r["upstream_completion_tokens"]}) },
-                },
+                "usage": usage,
                 "amount_micro": ch_i64(r, "amount_micro"),
                 "original_amount_micro": ch_i64(r, "original_amount_micro"),
                 "discount_micro": ch_i64(r, "discount_micro"),
@@ -297,6 +299,34 @@ pub async fn search(
         "offset": q.offset(),
         "data": data,
     })))
+}
+
+fn log_usage(r: &Value) -> Value {
+    json!({
+        "reported_details": super::usage_observations::from_ch(r),
+        "prompt_tokens": ch_i64(r, "prompt_tokens"),
+        "input_unit": r["input_unit"],
+        "input_characters": r["input_characters"],
+        "cached_tokens": ch_i64(r, "cached_tokens"),
+        "completion_tokens": ch_i64(r, "completion_tokens"),
+        "reasoning_tokens": ch_i64(r, "reasoning_tokens"),
+        "cache_write_tokens": r["cache_write_tokens"],
+        "cache_read_reported": r["cache_read_reported"].as_u64().map(|v| v == 1),
+        "cache_write_reported": r["cache_write_reported"].as_u64().map(|v| v == 1),
+        "cache_write_5m_tokens": r["cache_write_5m_tokens"],
+        "cache_write_1h_tokens": r["cache_write_1h_tokens"],
+        "audio_prompt_tokens": r["audio_prompt_tokens"],
+        "image_prompt_tokens": r["image_prompt_tokens"],
+        "audio_completion_tokens": r["audio_completion_tokens"],
+        "image_completion_tokens": r["image_completion_tokens"],
+        "cache_read_modalities": if r["cache_read_audio_tokens"].is_null() || r["cache_read_image_tokens"].is_null() { Value::Null } else { json!({"audio_tokens":r["cache_read_audio_tokens"],"image_tokens":r["cache_read_image_tokens"]}) },
+        "cache_write_modalities": if r["cache_write_audio_tokens"].is_null() || r["cache_write_image_tokens"].is_null() { Value::Null } else { json!({"audio_tokens":r["cache_write_audio_tokens"],"image_tokens":r["cache_write_image_tokens"]}) },
+        "prompt_source": ch_str(r, "prompt_source"),
+        "completion_source": ch_str(r, "completion_source"),
+        "upstream_usage": if ch_str(r, "prompt_source") == "unknown" && ch_str(r, "completion_source") == "unknown" {
+            Value::Null
+        } else { json!({"prompt_tokens":r["upstream_prompt_tokens"], "completion_tokens":r["upstream_completion_tokens"]}) },
+    })
 }
 
 #[derive(Default)]
@@ -443,11 +473,27 @@ pub async fn stat(
 
     // 聚合别名一律不与原始列同名（sum(prompt_tokens) AS prompt_tokens 会让
     // 同查询里其它聚合的 prompt_tokens 解析到别名上，报"聚合套聚合"）。
+    let provenance_sql = super::usage_sources::raw_sql();
+    let observations_sql = super::usage_observations::ch_sql();
+    let units_sql = super::input_units::raw_sql();
+    let rate_sql = super::output_rate::raw_sql();
     let sql = format!(
-        "SELECT count() AS requests, sum(is_error) AS errors, \
+        "SELECT {provenance_sql}, {observations_sql}, {units_sql}, {rate_sql}, count() AS requests, sum(is_error) AS errors, \
                 sum(prompt_tokens + completion_tokens) AS tokens, \
                 sum(cached_tokens) AS cached, sum(prompt_tokens) AS prompt, \
                 countIf(ifNull(cache_read_reported, 0) = 1) AS cache_read_known, \
+                sumOrNullIf(cache_write_tokens, ifNull(cache_write_reported, 0) = 1 OR cache_write_tokens > 0) AS cache_write_total, \
+                countIf(ifNull(cache_write_reported, 0) = 1 OR cache_write_tokens > 0) AS cache_write_samples, \
+                sumOrNull(cache_write_5m_tokens) AS cache_write_5m_total, sumOrNull(cache_write_1h_tokens) AS cache_write_1h_total, \
+                countIf(isNotNull(cache_write_5m_tokens) AND isNotNull(cache_write_1h_tokens)) AS cache_write_ttl_samples, \
+                sum(reasoning_tokens) AS reasoning_total, \
+                sumOrNull(audio_prompt_tokens) AS audio_prompt_total, count(audio_prompt_tokens) AS audio_prompt_samples, \
+                sumOrNull(image_prompt_tokens) AS image_prompt_total, count(image_prompt_tokens) AS image_prompt_samples, \
+                sumOrNull(audio_completion_tokens) AS audio_completion_total, count(audio_completion_tokens) AS audio_completion_samples, \
+                sumOrNull(image_completion_tokens) AS image_completion_total, count(image_completion_tokens) AS image_completion_samples, \
+                sumOrNull(cache_read_audio_tokens) AS cache_read_audio_total, sumOrNull(cache_read_image_tokens) AS cache_read_image_total, \
+                sumOrNull(cache_write_audio_tokens) AS cache_write_audio_total, sumOrNull(cache_write_image_tokens) AS cache_write_image_total, \
+                count(cache_read_audio_tokens) AS cache_read_modal_samples, count(cache_write_audio_tokens) AS cache_write_modal_samples, \
                 sum(amount_micro) AS amount, sum(discount_micro) AS saved, \
                 uniqExact(user_id) AS users \
          FROM request_log_raw WHERE {}",
@@ -483,7 +529,7 @@ pub async fn stat(
     let requests = ch_i64(&row, "requests");
     let prompt = ch_i64(&row, "prompt");
     let cached = ch_i64(&row, "cached");
-    Ok(Json(json!({
+    let mut result = json!({
         "hours": q.hours(),
         "requests": requests,
         "errors": ch_i64(&row, "errors"),
@@ -500,7 +546,62 @@ pub async fn stat(
         "rpm": rpm,
         "tpm": tpm,
         "rate_source": source,
-    })))
+    });
+    add_summary_details(&row, &mut result);
+    super::usage_observations::enrich(&row, &mut result, requests);
+    if let Some(object) = result.as_object_mut() {
+        object.extend(super::input_units::metrics(&row, requests));
+        object.extend(super::output_rate::metrics(&row, requests));
+    }
+    Ok(Json(result))
+}
+
+fn add_summary_details(row: &Value, result: &mut Value) {
+    let requests = ch_i64(row, "requests");
+    let prompt = ch_i64(row, "prompt");
+    let cached = ch_i64(row, "cached");
+    for (name, value) in super::usage_sources::metrics(
+        row,
+        requests,
+        [Some(prompt), Some(ch_i64(row, "source_completion_total"))],
+        Some(cached),
+        ch_i64(row, "cache_read_known"),
+    ) {
+        result[name] = value;
+    }
+    result["records"] = json!(requests);
+    for (name, column) in [
+        ("cache_write_tokens", "cache_write_total"),
+        ("cache_write_5m_tokens", "cache_write_5m_total"),
+        ("cache_write_1h_tokens", "cache_write_1h_total"),
+        ("reasoning_tokens", "reasoning_total"),
+        ("audio_prompt_tokens", "audio_prompt_total"),
+        ("image_prompt_tokens", "image_prompt_total"),
+        ("audio_completion_tokens", "audio_completion_total"),
+        ("image_completion_tokens", "image_completion_total"),
+        ("cache_read_audio_tokens", "cache_read_audio_total"),
+        ("cache_read_image_tokens", "cache_read_image_total"),
+        ("cache_write_audio_tokens", "cache_write_audio_total"),
+        ("cache_write_image_tokens", "cache_write_image_total"),
+    ] {
+        result[name] = if row[column].is_null() {
+            Value::Null
+        } else {
+            json!(ch_i64(row, column))
+        };
+    }
+    for name in [
+        "cache_write_samples",
+        "cache_write_ttl_samples",
+        "audio_prompt_samples",
+        "image_prompt_samples",
+        "audio_completion_samples",
+        "image_completion_samples",
+        "cache_read_modal_samples",
+        "cache_write_modal_samples",
+    ] {
+        result[name] = json!(ch_i64(row, name));
+    }
 }
 
 /// 占比 → 基点（万分之一；整数运算，分母 0 返 0）。

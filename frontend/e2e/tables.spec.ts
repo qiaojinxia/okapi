@@ -27,11 +27,12 @@ async function prepare(page: Page) {
     expect(request.method()).toBe('GET')
     requests.push(url)
     const offset = Number(url.searchParams.get('offset') ?? 0)
+    const limit = Number(url.searchParams.get('limit') ?? 10)
     const json = url.pathname === '/api/me' ? { user_id: 1, key_id: 1, role: 100, permissions: ['*'], balance_micro: 180000000, group: 'default' }
       : url.pathname === '/api/notice' ? { notice: null }
         : url.pathname === '/api/me/keys' ? { total: 1, data: [{ used_micro: 12300, requests: 20 }] }
           : url.pathname === '/api/me/stats/breakdown' ? report()
-            : url.pathname === '/admin/groups' ? { total: 40, data: Array.from({ length: 20 }, (_, i) => ({ group_code: `group-${String(offset + i + 1).padStart(2, '0')}`, group_ratio: '1.5', description: 'Production group', user_count: 12, channel_count: 20, pool_code: 'default', is_default: false, self_select: false })) }
+            : url.pathname === '/admin/groups' ? { total: 40, data: Array.from({ length: Math.max(0, Math.min(limit, 40 - offset)) }, (_, i) => ({ group_code: `group-${String(offset + i + 1).padStart(2, '0')}`, group_ratio: '1.5', description: 'Production group', user_count: 12, channel_count: 20, pool_code: 'default', is_default: false, self_select: false })) }
               : { data: [] }
     return route.fulfill({ json })
   })
@@ -154,16 +155,16 @@ test('价格分组宽表：滚动列不影响翻页，换页复位纵向而保�
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/admin/groups')
   const table = page.getByRole('table'), viewport = table.locator('..')
-  await expect(table.locator('tbody tr')).toHaveCount(20)
+  await expect(table.locator('tbody tr')).toHaveCount(10)
   await page.getByRole('group', { name: '表格横向浏览' }).getByRole('button', { name: '查看右侧列' }).click()
   await expect.poll(() => viewport.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
   await viewport.evaluate((element) => { element.scrollTop = 240 })
   const left = await viewport.evaluate((element) => element.scrollLeft)
   await page.getByRole('navigation', { name: '分页' }).getByRole('button', { name: '下一页' }).click()
-  await expect(table.locator('tbody tr').first()).toContainText('group-21')
+  await expect(table.locator('tbody tr').first()).toContainText('group-11')
   expect(await viewport.evaluate((element) => element.scrollTop)).toBe(0)
   expect(await viewport.evaluate((element) => element.scrollLeft)).toBe(left)
-  expect(requests.filter((url) => url.pathname === '/admin/groups').map((url) => url.search)).toEqual(['?limit=20&offset=0', '?limit=20&offset=20'])
+  expect(requests.filter((url) => url.pathname === '/admin/groups').map((url) => url.search)).toEqual(['?limit=10&offset=0', '?limit=10&offset=10'])
   await expect(page.getByRole('navigation', { name: '分页' })).toBeInViewport({ ratio: 1 })
   expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
 })
@@ -309,6 +310,7 @@ async function prepareListStyles(page: Page, count = 20) {
   await prepare(page)
   const rows = (factory: (id: number) => object) => ({ total: count, data: Array.from({ length: count }, (_, i) => factory(i + 1)) })
   const fixtures: Record<string, unknown> = {
+    '/admin/groups': rows((id) => ({ group_code: `group-${id}`, group_ratio: '1.5', description: 'Production group', user_count: 12, channel_count: 20, pool_code: 'default', is_default: false, self_select: false })),
     '/admin/roles': rows((id) => ({ id, role_code: `role-${id}`, display_name: `运营角色 ${id}`, permissions: ['channels.read'] })),
     '/admin/pools': rows((id) => ({ pool_code: `pool-${id}`, routing_strategy: 'priority_weighted', fallback_pool_code: null, description: '标准渠道池', channel_count: 2, group_count: 1, key_count: 0, fallback_ref_count: 0, builtin: false })),
     '/admin/users': rows((id) => ({ id, username: `user-${id}`, email: `user${id}@example.test`, role: 1, admin_role_id: null, status: 1, balance_micro: 12000000, price_multiplier: '1' })),

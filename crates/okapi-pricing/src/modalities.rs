@@ -12,6 +12,9 @@ pub struct ModalityRatios {
     pub image_cache_write: Option<RatioFp>,
     pub audio_cache_write: Option<RatioFp>,
     pub image_output: Option<RatioFp>,
+    /// Cache creation rates relative to text input, not multipliers of the generic write rate.
+    pub cache_write_5m: Option<RatioFp>,
+    pub cache_write_1h: Option<RatioFp>,
 }
 
 impl ModalityRatios {
@@ -31,6 +34,8 @@ impl ModalityRatios {
                 "image_cache_write" => &mut rates.image_cache_write,
                 "audio_cache_write" => &mut rates.audio_cache_write,
                 "image_output" => &mut rates.image_output,
+                "cache_write_5m" => &mut rates.cache_write_5m,
+                "cache_write_1h" => &mut rates.cache_write_1h,
                 _ => return Err("modality_ratios"),
             };
             *target = Some(rate);
@@ -53,6 +58,38 @@ impl ModalityRatios {
         let written = usage.cache_write_modalities.unwrap_or_default();
         let mut effective = Self::default();
         let mut total = 0_i128;
+        // The engine already charges generic text writes. Replace that charge only
+        // when the upstream provides a complete TTL split; missing is not zero.
+        if let (Some(short), Some(long)) =
+            (usage.cache_write_5m_tokens, usage.cache_write_1h_tokens)
+        {
+            if written.total_modal() > 0
+                && ((short > 0 && self.cache_write_5m.is_some_and(|r| r != write))
+                    || (long > 0 && self.cache_write_1h.is_some_and(|r| r != write)))
+            {
+                // TTL and modality totals are overlapping marginals. There is no
+                // joint allocation to price two independent axes without guessing.
+                return Err(PricingError::Internal(
+                    "cache TTL/modality allocation is unavailable",
+                ));
+            }
+            for (count, rate, target) in [
+                (short, self.cache_write_5m, &mut effective.cache_write_5m),
+                (long, self.cache_write_1h, &mut effective.cache_write_1h),
+            ] {
+                if count > 0
+                    && let Some(rate) = rate
+                {
+                    total = total
+                        .checked_add(
+                            i128::from(count)
+                                * (i128::from(rate.as_scaled()) - i128::from(write.as_scaled())),
+                        )
+                        .ok_or(PricingError::Overflow)?;
+                    *target = Some(rate);
+                }
+            }
+        }
         for (count, explicit, base, fallback, target) in [
             (
                 read.image_tokens,
@@ -122,6 +159,8 @@ impl Serialize for ModalityRatios {
             ("image_cache_write", self.image_cache_write),
             ("audio_cache_write", self.audio_cache_write),
             ("image_output", self.image_output),
+            ("cache_write_5m", self.cache_write_5m),
+            ("cache_write_1h", self.cache_write_1h),
         ] {
             if let Some(rate) = rate {
                 values.insert(

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status,retry_count,rows FROM billing_ch_batches WHERE id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "retry_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "retry_count"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "rows",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "rows"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a7e217e2b6b8fb901f1ef71597242b47502c57f2638a157d94c190955d5dcbec"
+}

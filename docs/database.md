@@ -285,6 +285,7 @@ CREATE TABLE models (
     vendor         VARCHAR(64),                       -- 图标/厂商墙（@lobehub/icons）
     capabilities   JSONB NOT NULL DEFAULT '{}',
     context_window INT, max_output INT,
+    catalog_config JSONB NOT NULL DEFAULT '{}',       -- 0027：kind / description / input_modalities / output_modalities
     status         SMALLINT NOT NULL DEFAULT 1,
     sort_order     INT NOT NULL DEFAULT 0,
     -- 模型级降级链（0016）：本模型**无任何可用候选**时按序改投这些模型。
@@ -316,8 +317,8 @@ CREATE TABLE model_pricing (                          -- 真理源：倍率制
     pricing_mode         VARCHAR(16) NOT NULL DEFAULT 'ratio',  -- ratio|per_call|tiered|media|time
     model_ratio          NUMERIC(12,6),               -- 1.0 = $2/1M input
     completion_ratio     NUMERIC(12,6) NOT NULL DEFAULT 1,
-    cache_ratio          NUMERIC(6,4)  NOT NULL DEFAULT 1,  -- 缓存读取（Anthropic 官方 0.1）
-    cache_write_ratio    NUMERIC(6,4)  NOT NULL DEFAULT 1,  -- 缓存写入（官方 1.25@5m / 2.0@1h，0013）
+    cache_ratio          NUMERIC(12,6) NOT NULL DEFAULT 1, -- 0027：缓存轴与其他倍率统一 6 位精度
+    cache_write_ratio    NUMERIC(12,6) NOT NULL DEFAULT 1, -- 未有时长明细时使用的通用缓存写入倍率
     audio_ratio          NUMERIC(12,6) NOT NULL DEFAULT 1,  -- 音频输入（gpt-4o-audio 官方 16，0014）
     audio_completion_ratio NUMERIC(12,6) NOT NULL DEFAULT 1,-- 音频输出（叠乘在 audio 之上，官方 2）
     image_ratio          NUMERIC(12,6) NOT NULL DEFAULT 1,  -- 图片输入（相对文本）
@@ -400,7 +401,7 @@ CREATE TABLE billing_records (                        -- 请求级明细（分�
     original_amount_micro BIGINT NOT NULL DEFAULT 0,  -- 标价（无规则/个人折扣）
     discount_micro        BIGINT NOT NULL DEFAULT 0,  -- 原价 − 实付（账单「已节省」/让利报表）
     upstream_cost_micro   BIGINT,                     -- 上游成本 = 官方价（乘分组倍率前）× 渠道 relative_cost_milli / 1000；结算时由 settle_write 折算；失败 / 退款 NULL（§11.18）
-    pricing_epoch    BIGINT,
+    pricing_epoch    BIGINT,                          -- 有报价快照时必须与 pricing_snapshot.epoch 相同，不能在上游返回后读取新版本标注旧金额
     pricing_snapshot JSONB,                           -- 形状见 DESIGN §3.4
     latency_ms       INT, ttft_ms INT,
     is_stream        BOOLEAN NOT NULL DEFAULT false,
@@ -448,8 +449,31 @@ CREATE INDEX idx_be_user_time ON billing_events (user_id, created_at DESC);
 --   订阅  Redis bal.sub   + Σ在途(pool=1) == Σ delta_micro WHERE pool=1（sub_reset/sub_expire 记的是池变动 delta，跨窗口累计成立）
 -- users.balance_micro 快照只随 pool=0 事件动；api_keys.used_micro 两池都累加（用量就是用量）。
 
+-- 0028：投递前提交冻结数据，完成时原子清除大载荷，身份回执保留。
+CREATE TABLE billing_ch_batches (
+    id UUID PRIMARY KEY,
+    status SMALLINT NOT NULL DEFAULT 0 CHECK (status IN (0,1,2)), -- 0 pending 1 complete 2 DLQ
+    event_count INTEGER NOT NULL CHECK (event_count BETWEEN 0 AND 500),
+    rows JSONB NOT NULL CHECK (jsonb_typeof(rows)='array'),
+    payloads JSONB NOT NULL CHECK (jsonb_typeof(payloads)='array'),
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    CHECK (status=1 OR (jsonb_array_length(rows)=event_count AND jsonb_array_length(payloads)=event_count))
+);
+CREATE INDEX idx_ch_batches_pending ON billing_ch_batches(next_retry_at,created_at) WHERE status=0;
+CREATE TABLE billing_ch_events (
+    event_key TEXT PRIMARY KEY,
+    batch_id UUID NOT NULL REFERENCES billing_ch_batches(id)
+);
+CREATE INDEX idx_ch_events_batch ON billing_ch_events(batch_id);
+
 CREATE TABLE billing_outbox (                         -- 与业务同事务写入，worker SKIP LOCKED 消费
     id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id     UUID NOT NULL DEFAULT gen_random_uuid(), -- 0028 服务端身份，不用 request_id 猜事件
+    ch_batch_id  UUID REFERENCES billing_ch_batches(id),
+    stats_protocol SMALLINT NOT NULL DEFAULT 0 CHECK (stats_protocol IN (0,1)), -- 0029：新 relay 确认发布=1
     topic        VARCHAR(64) NOT NULL,                -- billing.completed / billing.refunded ...
     payload      JSONB NOT NULL,
     status       SMALLINT NOT NULL DEFAULT 0,         -- 0 pending 1 published 2 failed
@@ -459,6 +483,9 @@ CREATE TABLE billing_outbox (                         -- 与业务同事务写�
     published_at TIMESTAMPTZ
 );
 CREATE INDEX idx_outbox_pending ON billing_outbox (next_retry_at) WHERE status <> 1;
+CREATE UNIQUE INDEX idx_outbox_event_id ON billing_outbox(event_id);
+CREATE INDEX idx_outbox_ch_batch ON billing_outbox(ch_batch_id) WHERE ch_batch_id IS NOT NULL;
+CREATE INDEX idx_outbox_published_unassigned ON billing_outbox(id) WHERE status=1 AND stats_protocol=1 AND ch_batch_id IS NULL;
 
 CREATE TABLE billing_dlq (                            -- 终态死信（console/MCP 可 requeue）
     id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -466,12 +493,17 @@ CREATE TABLE billing_dlq (                            -- 终态死信（console/
     payload     JSONB NOT NULL,
     error       TEXT,
     retry_count INT NOT NULL DEFAULT 0,
-    status      SMALLINT NOT NULL DEFAULT 0,          -- 0 pending 1 requeued 2 resolved 3 discarded
+    status      SMALLINT NOT NULL DEFAULT 0,          -- 0 pending 2 discarded；重投后删除 DLQ 行
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_at TIMESTAMPTZ,
-    resolved_by BIGINT
+    resolved_by BIGINT,
+    ch_batch_id UUID REFERENCES billing_ch_batches(id), -- 0028 批次整体处置
+    event_key TEXT
 );
+CREATE UNIQUE INDEX idx_dlq_delivery_event ON billing_dlq(event_key) WHERE event_key IS NOT NULL;
 ```
+
+携带报价的音频、视频与自定义透传记录，其 PG `pricing_epoch`、outbox/CH 同名字段必须与实际报价快照的 `epoch` 一致。等待上游时发布新价格不改变该请求已生成的报价；下一请求按新版本报价。自定义透传失败释放预扣后，PG/outbox/CH 的实付、原金额、优惠均为 0；上游成本保持 PG NULL、outbox/CH 0 与 unknown 状态。尝试报价快照保留，但不得计为消费或已节省金额。归档回执保留原快照，历史账单不重写。详见 [价格版本一致性核对](pricing-epoch-consistency-audit.md)。
 
 ### 1.6 营收运营
 
@@ -857,12 +889,26 @@ TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1
 
 ### 3.2 MV 矩阵（AggregatingMergeTree）
 
+历史 speech 校准新增 `legacy_speech_units_v1`（`ReplacingMergeTree(copies)`，无 TTL）：按原 ts/request_id/用户/密钥/分组/模型/渠道/高级维度、字符数量和报价版本保存已确认的旧字符证据。`copies` 为同一证据身份在原明细中实际出现的数量，以最大已确认数量作替换版本；查询必须 FINAL 后再求和，重跑不会叠加。保留旧快照和识别 basis，仅用于排除原主 Token 中的字符，不更新财务金额或旧主 MV。`legacy_speech_calibration_v1`（`ReplacingMergeTree(version)`，单槽、无 TTL）保存 `(cursor_ts,cursor_id)`、完成状态与单调版本。worker 每批最多 500 个请求身份，先确认并写证据，再写进度；失败不前进，重复执行幂等。迟到的旧 outbox 通过同一识别器在投递 CH 前归一化，不依赖已经完成的历史游标。归一化行使用 `input_unit=characters`、`input_characters=N`、`prompt_tokens=0`，raw 的 `historical_prompt_units=N` 和 `input_unit_basis=legacy_speech_contract_v1` 保留原载体及依据；原报价快照、版本与四金额保持不变。显式新单位、模态报告/上游 Token 或其他冲突不归一化。实施/验证状态见 [历史 speech 校准](historical-speech-unit-audit.md)。
+
 缓存/模态交叉计费（0025）继续沿用既有总量列：`cached_tokens` 包括图片/音频缓存，
 输入/输出总量不重复叠加子集。交叉明细及实际价轴落在 PG `pricing_snapshot` 和
 CH `ratio_snapshot` 同一 JSON 中；直接 Images 另有 `image_cache_usage` 图文读写拆分。
-本轮没有新增 CH 模态聚合列，现有缓存总量报表仍按总量汇总，不能将快照明细等同于
-已经提供完整的模态缓存分析面板。模型配置 `modality_ratios` 存十进制字符串，
+后续独立 `mv_token_details_5min` 已增加九轴观察聚合；快照明细本身仍不能等同于
+完整的模态缓存分析面板。完整范围与观察子集/覆盖率见下述长期细分契约。模型配置 `modality_ratios` 存十进制字符串，
 账单快照的有效价格存精确 JSON 数字，二者均不经过浮点。
+
+模型目录配置（0027）：`catalog_config` 必须为 JSON 对象，类型、说明和输入/输出模态分别存储；
+视觉、工具调用、并行工具、结构化输出、推理等能力仍在 `models.capabilities` 保存布尔值。
+缺键表示未声明，`false` 表示明确不支持，不由模型名推断。目录声明与实际渠道协议/接口可用性分离，
+不会注入上游参数或自动启用路由。管理端模型、价格、服务档位和降级链在同一事务保存；旧调用方省略
+`metadata` / `pricing_mode` / `tier_ratios` / `modality_ratios` 时保留已有配置，空对象显式清除独立价格或档位。
+
+缓存时长价格使用 `modality_ratios.cache_write_5m` / `cache_write_1h`（十进制字符串）：
+二者相对于普通文本输入单价，替换通用写入倍率，不再次叠乘。上游的 5m/1h 明细必须完整且和总写入量相等；
+没有明细时按通用写入倍率计费，明确的零倍率合法。有效时长价格随账单快照保存，并在账单参考分项中分开展示。
+若缓存模态和时长是重叠边际且缺少联合分配，独立时长价格与通用价格不同时拒绝不明确计算，不能猜测交叉数量。
+本配置是缓存创建价格，不会设置缓存 TTL；自定义时长和存储时间费仍需各协议的计量支持。
 
 | MV | 主键 | 服务场景 |
 | --- | --- | --- |
@@ -875,7 +921,12 @@ CH `ratio_snapshot` 同一 JSON 中；直接 Images 另有 `image_cache_usage` �
 | mv_channel_ttft_5min | (channel_id, ts5) | 渠道有效 TTFT 分位数及 5 分钟时间线、有效样本数和请求覆盖数 |
 | mv_ttft_reporting_hour | 与 mv_analysis_hour 相同的小时及完整维度 | 平均 TTFT 的有效毫秒总和、样本数与请求覆盖数；明确 0ms 有效，非流式排除 |
 | mv_latency_reporting_hour | 与 mv_analysis_hour 相同的小时及完整维度 | 已采集总耗时、同批请求的输出 Token、样本数和请求覆盖数 |
-| mv_model_latency_hour / mv_channel_latency_5min | (model, hour) / (channel_id, ts5) | 有效总耗时分位数、均值、配对输出速度与覆盖数；包括非流式及失败请求 |
+| mv_usage_sources_5min | 五分钟及 mv_analysis_hour 的完整维度 | 输入/输出的实报、估算、复核请求数与结算 Token；同批实报输入/缓存读取、来源覆盖。无 TTL，支持按小时/日及渠道时间线重组 |
+| mv_token_details_5min | 五分钟及 mv_analysis_hour 的完整维度 | 九个音频/图片/缓存交集/推理轴的已观察数值和、样本数及请求覆盖。无 TTL；同粒度完整聚合优先，升级缺口择一恢复 raw，不拼加重叠来源。见长期细分核对。 |
+| mv_cache_totals_5min | 五分钟及 mv_analysis_hour 的完整维度 | 缓存写入保存值、明确读写采集数及请求覆盖，无 TTL。与 raw/可唯一分配的旧日状态择一，数量和样本同范围，见 [缓存聚合核对](cache-write-aggregate-audit.md)。 |
+| mv_input_units_5min | 五分钟及 mv_analysis_hour 的完整维度 | 请求覆盖、有效字符数量/请求及明确 Token 单位请求，无 TTL；与 raw 按粒度覆盖择一，零/未知/子集分开，见 [字符单位核对](character-unit-audit.md)。 |
+| mv_output_rate_5min | 五分钟及 mv_analysis_hour 的完整维度 | 全部请求/单位覆盖、明确 Token 请求与配对测时输出/耗时/样本，无 TTL；速度排除字符并暴露未知单位。实施与回归进度见 [输出速度单位核对](output-rate-unit-audit.md)。 |
+| mv_model_latency_hour / mv_channel_latency_5min | (model, hour) / (channel_id, ts5) | 有效总耗时分位数、均值与覆盖数；包括字符、非流式及失败请求。Token 速度读取独立 mv_output_rate_5min |
 | mv_user_model_day | (user_id, model, day) | 用户下钻 |
 | mv_error_hour | (error_code, hour, channel_id, model) | 错误码分布（IMPLEMENTATION §11.12）。MV 内 `WHERE is_error = 1` 插入期过滤，行数 ∝ 错误码×小时×渠道×模型，与总请求量无关 |
 | mv_client_day | (client_type, day) | 客户端类型分布（#5277）。含 `uniqState(user_id)`——"多少用户在用 Claude Code"比请求数更能说明生态渗透 |
@@ -887,9 +938,27 @@ CH `ratio_snapshot` 同一 JSON 中；直接 Images 另有 `image_cache_usage` �
 
 三个质量接口（模型、渠道、渠道时间线）先读原有请求总量，再核对新 TTFT MV 的请求覆盖；数量一致才使用新聚合。存在升级缺口时，在相同时间窗内只为展示中的实体从 raw 重新计算整个范围，绝不把 raw 和 MV 相加。raw 请求数也不完整时，保留原请求、Token 和金额，分位数返回 `null`。`ttft_samples` 是所选数据源的有效样本数；`ttft_observed_requests` / `ttft_history_coverage_bp` / `ttft_history_complete` 表示历史请求覆盖，不表示每笔请求都测得了 TTFT；`ttft_source` 为 `aggregate`、`raw` 或 `incomplete`。查询期间持续入库导致覆盖数暂时不一致也按不完整处理。历史恢复是有超时/内存护栏的只读明细扫描，未做大规模性能验证。平均 TTFT 已另用 `mv_ttft_reporting_hour` 条件和/计数状态，不再读取旧立方体的无条件和及正值计数。管理趋势、拆分、堆叠与个人用量/活动按样本数加权，沿用同一覆盖字段；缺口仅在限定时间、用户及粒度内择一恢复 raw，覆盖不足返回 null。旧维度残差只有在整体和已拆分部分都完整时才可相减恢复首字统计。详见 [平均首字核对](ttft-average-accounting.md)。
 
+**字符单位分离（2026-09-30）：** PG `usage_details.input_unit/input_characters`、`pricing_snapshot` 和 outbox 同源保存；字符报价的使用详情不再将字符塞进 TokenUsage。CH 增量增加 `input_unit LowCardinality(String) DEFAULT ''`、`input_characters Nullable(UInt32) DEFAULT NULL`。独立 `mv_input_units_5min` 无 raw TTL，保留总请求、有效字符数量/请求和明确 Token 单位请求；非法字符与 Token 并存不算已知单位。raw 与 MV 按同粒度覆盖择一，不相加或 POPULATE。`input_units` 提供有效字符小计、单位覆盖和未知请求；完整覆盖时才返回全量字符，明确零仍保留。空单位表示历史未记录，字符 null 不等于零；历史归类不能猜模型名称。历史混合主 Token 校准仍待核对，见 [字符单位核对](character-unit-audit.md)；速度分母已按下述独立单位聚合接入，本段不证明整体历史统计已正确。
+
+**Token 速度独立单位聚合（2026-09-30）：** `mv_output_rate_5min` 按完整 15 维保存 `requests=countState()`、`known_units/countIfState`、`token_requests/countIfState`、`samples/countIfState`、`total_ms/sumIfState(UInt64)` 与 `output_tokens/sumIfState(UInt64)`。明确 Token 条件为 `input_unit='tokens' AND isNull(input_characters)`；配对再要求 `ifNull(latency_reported,toUInt8(latency_ms>0))=1`。合法字符请求计入已知单位而不计速度配对；字符与主要 Token 轴并存不算已知单位。无 TTL、无 POPULATE 或自动历史回填，先由 worker 应用幂等 schema，再切换控制台。
+
+速度 = 配对输出 / 配对毫秒 × 1,000,000，兼容两种 milli 字段；`performance_completion_tokens` 仅为这批 Token 配对输出，不能再用总耗时的 `latency_sum_ms` 重算速度。`output_tps_history_*` 是全部请求历史覆盖，`output_tps_unit_coverage_bp/unit_complete` 是单位覆盖，`output_tps_samples/sample_coverage_bp` 是测时采集覆盖（分母为明确 Token 请求数）。历史或单位覆盖不全，全范围速度为 null，子集速度 `observed_output_tps_milli` 单列；无 Token 样本或配对毫秒总和为零也返回 null，明确输出零且正耗时返回 0。均值/分位数仍使用全部有效测时请求，与速度分母独立。
+
+管理分析的七类观察聚合逐粒度探测覆盖；完整新 MV 优先，缺口与完整 raw 择一，不叠加重叠数据。旧维度残差仅在两侧请求覆盖完整且差值非负时计算。个人日/活动/图表、实体、质量与日志用相同语义；PG 配对仅纳入状态 20/30/40 且 `latency_ms>=0`，pending 排除。原财务金额和主 Token 总量不由此改写。最终验证记录及历史限制见 [输出速度单位核对](output-rate-unit-audit.md)。
+
 **Token 来源（2026-09-28）：** PG `usage_details.tokens.upstream_usage` 与 outbox 保存原始输入/输出计数，外层缺失表示旧数据或未记录来源，内层 null 表示估算轴。PG 明细与 outbox 同时保存 `prompt_source` / `completion_source`：`upstream`、`estimated`、`local_override`、`unknown`。CH 增量增加同名来源列（默认 unknown）及 nullable `upstream_prompt_tokens` / `upstream_completion_tokens`。来源对象纳入原有结算回执，未记录来源时省略该字段以保持旧回执形状；已记来源是幂等比对的一部分，不得在重放时篡改。详见 [来源与部分用量](token-usage-provenance.md)。
 
+**细分采集状态（2026-09-29）：** `usage_details.tokens.reported_details` 及 outbox 保留输入/输出/缓存 audio、image 与 reasoning 的采集状态，CH 对应 `audio_prompt_reported`、`image_prompt_reported`、`audio_completion_reported`、`image_completion_reported`、`cache_read_audio_reported`、`cache_read_image_reported`、`cache_write_audio_reported`、`cache_write_image_reported`、`reasoning_reported` 为 `Nullable(UInt8)`，NULL 表示历史未知，0 未采集、1 已采集。两种日志明细返回同一对象，日志汇总增加 `token_detail_observations`，全范围读数仅在覆盖完整时返回数字，子集总量与覆盖率单列；旧 `*_samples` 是数值保存记录数，不能作为供应商采集数。旧记录未知，明确零已采集，缺失占位零未采集；标记不改计费公式或金额。协议转换与累计合并必须保留该区别，详见 [细分采集核对](token-breakdown-observation-audit.md)。
+
+**长期细分：** 独立 `mv_token_details_5min` 保存每个观察轴的 `sumIfState(UInt64)`、`countIfState` 及所有请求的 `countState`，完整维度与 `mv_usage_sources_5min` 一致。无 TTL、无历史 POPULATE。管理/个人统计的 `token_detail_observations` 沿用日志语义，另附历史覆盖对象；已过期旧明细不能补成观察零，旧维度残差不得在覆盖不全时相减。设计与实际验证见 [长期 Token 细分核对](token-detail-aggregate-audit.md)；随后发现的缓存写入历史残差漏量已在 [缓存聚合核对](cache-write-aggregate-audit.md) 阶段修正。
+
+**缓存量与覆盖（2026-09-29）：** `mv_cache_totals_5min` 独立保存请求数、写入数量、写入样本（标记为 1 且数字非空）和读取样本；明确零仍是有效样本。覆盖探针逐粒度检查五种观察聚合，完整时走聚合，缺口择一恢复 raw。旧日写入数量来自 `mv_cache_write_day`，采集标记来自 `mv_cache_reporting_day`；父请求必须完整且只有唯一子粒度才可分配，禁止把整日量平分或贴到任意小时/渠道。无法分配的细项保持未知，完整总计和厂商按各自范围重新恢复；新旧残差的读写数量与计数分别满足可减条件后派生。高级维度只读实际已采集范围，字符串筛选仍绑定。详细失败、回归和未验收的性能边界见 [缓存聚合核对](cache-write-aggregate-audit.md)。
+
+**Token 来源聚合（2026-09-29）：** 新增独立五分钟 MV，不 POPULATE、不改旧金额/Token 视图。查询在同一粒度的 MV 与 raw 中择一使用，禁止叠加；历史不足的剩余请求及 Token 保持 unknown。`token_provenance` 的输入/输出分别返回四类请求数、结算 Token 数及各自基点占比，另列历史覆盖，空范围占比为 null。实报须有原始计数且等于结算计数；未知/错误来源字符串不算实报。主 `cache_hit_bp` 仅在全部请求都有实报输入和明确缓存读取时返回，使用同批计数加权；`measured_cache_hit_bp` 表示实报子集并附请求数/覆盖率。原结算分母的比率另列 `settled_cache_hit_bp`，不能解释为实测命中率。缺少输入/输出历史总量的接口在不能恢复时返回对应 unknown Token 为 null，不补造轴拆分。本地实际结果见 [聚合来源核对](token-source-aggregate-audit.md)，不能代替真实供应商账单与生产规模性能验收。
+
 **总耗时与速度升级（2026-09-28）：** `latency_reported` 区分已测量零与缺失，新条件聚合不改旧账单总量。均值按已采集样本向下取整；输出速度只使用同批样本的 `performance_completion_tokens` 和 `latency_sum_ms`，而非把所有输出与部分耗时混算。正耗时总和为零时速度返回 null。历史完整性和采集比例分别由 `latency_history_*`、`latency_samples` / `latency_sample_coverage_bp` 表示。不能恢复完整历史时均值、速度及分位数均返回 null；原请求、Token、费用仍保留。PG 个人日志均值纳入已测得耗时的失败记录，与 CH 使用同一向下取整口径，待结算记录排除。详见 [总耗时核对](latency-statistics-audit.md)。
+
+上述 2026-09-28 的速度分母已由 2026-09-30 的独立单位聚合替代；总耗时均值/分位数继续使用原耗时聚合。历史记录保留该阶段证据，当前速度契约以本节的 Token 速度独立单位聚合为准。
 
 
 **MV 只向前聚合**：`ensure_schema` 的 `CREATE ... IF NOT EXISTS` 对已存在的库只新建缺失的 MV，且 MV 只捕获创建之后写入 raw 的行。新增 MV 后若需历史数据，手动回填一次即可（AggregatingMergeTree 接受 `-State` 插入）：
@@ -957,13 +1026,13 @@ GROUP BY day ORDER BY day;
 ```
 
 - 明细页（用量日志）查 request_log_raw 走主键前缀 `(user_id, ts)` + 日分区裁剪，只读该用户自己的数据块，成本与全表几十亿行无关。
-- 聚合在**写入时增量完成**（MV 随 chsink 批写触发），无夜间批任务，花费 1–3s 内可见；「今日实时」秒级读 Redis KPI。
+- 聚合在**写入时增量完成**（MV 随 chsink 批写触发），无夜间批任务；积压或故障会延迟可见性。「今日实时」秒级读 Redis KPI。
 - **保留期分层**：raw 默认 180 天可配；MV 聚合表保留 ≥2 年（聚合体量小，成本可忽略）——明细过期后，用户的历史账单趋势与月度汇总仍可查。
 - 十亿+/日 走 CH 分片 + Distributed 表（IMPLEMENTATION §12.1 档位三），MV 定义不变。
 
 ### 3.3 写入与查询护栏
 
-- 写入：chsink 批写（batch 5000 / flush 1s），`insert_deduplication_token` = JetStream 序号区间 `js-<first_seq>-<last_seq>` → 重投批次幂等；ack-after-write；投递超限（max_deliver=5）→ billing_dlq 终态 + ack。【已实现，`worker/nats_relay.rs`，配置 `OKAPI_NATS_URL` 即启用】单机直连形态（无 NATS）：token = outbox id 区间 `outbox-<min>-<max>`；已知边界——重试批次成员变化时 token 变化可致少量明细重复（账本不受影响，CH↔PG 对账检出），NATS 形态无此边界。表侧已开 `non_replicated_deduplication_window=1000` 且插入带 `deduplicate_blocks_in_dependent_materialized_views=1`（MV 传导去重）。
+- 写入：worker 每秒调度，PG 冻结批次最多 500 行；先提交批次/事件回执，再以 `billing-batch-v1-<UUID>` token 投递原行，重试不混入新事件。直连和 NATS 共用回执，完成事件即使已清理 outbox 或重新发布也不再次写 CH。relay 发布 ID 及消息 `_billing_event_id` 来自 outbox 服务端 UUID；NATS 在 PG 已持久接管后 ack，CH 五次失败由 PG 批次入 DLQ。选中任一成员重投会恢复整个原批次，HTTP/MCP 返回实际成员数，MCP dry_run 提供 `requeue_members`；重投保留 token 和行。**丢弃必须选择全部待处理成员，部分选择返回 400/`delivery_batch_members` 且不修改任何行**。DLQ 列表返回 `delivery_batch_id`/`delivery_batch_size`，按 `batch_id` 筛选时可读取最多 500 行。旧 DLQ 无批次身份仍重入 outbox。表侧 `non_replicated_deduplication_window=1000`，插入带 `deduplicate_blocks_in_dependent_materialized_views=1`；**CH 成功、PG 未完成且原 token 已被驱逐时仍不能保证去重**。历史重复/旧模糊批次不会自动修复，详见 [投递核对](billing-delivery-idempotency-audit.md)。
 - 查询（console/MCP 统一继承）：`max_execution_time=15s`、`max_memory_usage=2GiB`、结果缓存 60s–10min + singleflight。
 - 退款冲销：chsink 同时消费 `billing.refunded`，写负额修正行（同 request_id，log_type=6 退款，对齐 new-api LogTypeRefund），聚合口径自动一致。
 
@@ -1076,16 +1145,16 @@ DECIMAL 列建议 `::text` 保精度）。
 
 | durable | stream | ack_wait | max_deliver | 说明 |
 | --- | --- | --- | --- | --- |
-| chsink | BILLING | 30s | 5 | 批写 CH；超限 → PG billing_dlq（source=chsink） |
+| chsink | BILLING | 30s | -1 | PG 持久接管后 ack；CH 重试五次由 PG 批次入 DLQ；无效消息直接持久入 DLQ |
 | audit | BILLING | 30s | 5 | 对账抽样比对 |
 | notifier | NOTIFY | 60s | 3 | 通知分发（M4 全量） |
 
-单机无 NATS 形态：worker 内嵌线程直接消费 billing_outbox（SKIP LOCKED），链路语义不变。
+单机无 NATS 形态：直接从 billing_outbox 持久组批；NATS 形态继续处理已分配的直连批次，形态切换共用事件回执。新消费者以 create-or-update 升级原 max_deliver=5 配置，PG 临时不可达不应提前耗尽消息投递。
 
 ## 5. 一致性与对账
 
 - **三方对账**：Redis `bal:{uid}.avail` ↔ PG billing_events 重放余额 ↔ CH 金额汇总；reconciler 每 5min 抽样 + 每日全量，差异 > 0 即告警并生成修正 adjust 事件（人工确认）。
-- **幂等锚点**：request_id 全链路唯一；commit/refund Lua 幂等；CH 批次 dedup token；outbox 重投靠 `billing_records.status` 状态机去重。
+- **幂等锚点**：commit/refund 的账本幂等与统计投递分开；服务端 outbox 事件 UUID、PG 事件回执、不可变 CH 批次 token 负责统计侧重试。同 request_id 的消费/退款是不同事件，不以 request_id 单列去重。
 - **在途预扣泄漏**：reconciler 扫 `bal:{uid}` 中超过 deadline 的 `r:*` 字段 → 按 billing_records 终态决定 commit 或 refund 补偿。
 - 余额快照列 `users.balance_micro` 由 worker 周期从事件流重放校准（展示与导出用，不参与计费判定）。
 

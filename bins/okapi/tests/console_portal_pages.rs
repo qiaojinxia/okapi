@@ -49,6 +49,19 @@ async fn mk_user(pg: &PgPool) -> (i64, String) {
     (user_id, token)
 }
 
+async fn publish_fixture(pg: &PgPool) {
+    let (actor, _) = mk_user(pg).await;
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(pg, actor, &snapshot)
+        .await
+        .unwrap();
+}
+
 /// 公开价格页：无鉴权可访问，含倍率与分组；不泄漏渠道信息。
 #[tokio::test]
 async fn public_pricing_no_auth() {
@@ -67,6 +80,7 @@ async fn public_pricing_no_auth() {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap();
+    publish_fixture(&env.pg).await;
     let mut url = reqwest::Url::parse(&format!("http://{}/api/pricing", env.addr)).unwrap();
     url.query_pairs_mut().append_pair("model", &model);
     let started = std::time::Instant::now();
@@ -100,7 +114,7 @@ async fn public_pricing_no_auth() {
         .unwrap()
         .iter()
         .find(|m| m["model"] == model.as_str())
-        .expect("新模型必须出现在公开价格页");
+        .expect("已发布模型必须出现在公开价格页");
     assert_eq!(entry["model_ratio"], "1.250000");
     assert_eq!(entry["completion_ratio"], "4.000000");
     assert_eq!(entry["display_name"], "Catalog model");
@@ -191,6 +205,7 @@ async fn public_pricing_reports_usable_groups() {
     .await
     .unwrap();
 
+    publish_fixture(&env.pg).await;
     let mut pricing_url = reqwest::Url::parse(&format!("http://{}/api/pricing", env.addr)).unwrap();
     pricing_url
         .query_pairs_mut()
@@ -746,7 +761,7 @@ async fn me_logs_summary_and_usage_details_are_owned_and_page_independent() {
         sqlx::query("INSERT INTO billing_records (request_id, user_id, api_key_id, model_name, status, prompt_tokens, cached_tokens, completion_tokens, amount_micro, latency_ms, ttft_ms, is_stream, usage_details) VALUES ($1,$2,$3,'summary-model',20,1000,$4,100,100,2000,100,true,$5)")
             .bind(if i == 0 { request_id } else { Uuid::new_v4() }).bind(user_id).bind(key_id)
             .bind(if i == 50 { 0 } else { 100_i32 })
-            .bind(if i == 50 { None } else { Some(json!({"tokens": {"cache_read_reported": true, "cache_write_reported": true, "cache_write_tokens": 0, "audio_prompt_tokens": 0, "image_prompt_tokens": 0, "audio_completion_tokens": 0}, "endpoint":"/v1/responses", "requested_model":"alias-model"})) })
+            .bind(if i == 50 { None } else { Some(json!({"tokens": {"cache_read_reported": true, "cache_write_reported": true, "cache_write_tokens": if i == 0 {20} else {0}, "cache_write_5m_tokens": if i == 0 {Some(12)} else {None}, "cache_write_1h_tokens": if i == 0 {Some(8)} else {None}, "audio_prompt_tokens": 0, "image_prompt_tokens": if i == 0 {25} else {0}, "audio_completion_tokens": 0, "image_completion_tokens": if i == 0 {Some(10)} else {None}}, "endpoint":"/v1/responses", "requested_model":"alias-model"})) })
             .execute(&env.pg).await.unwrap();
     }
     for (owner, status, amount) in [
@@ -773,6 +788,17 @@ async fn me_logs_summary_and_usage_details_are_owned_and_page_independent() {
     assert_eq!(stat["prompt_tokens"], 51000);
     assert_eq!(stat["completion_tokens"], 5100);
     assert_eq!(stat["cache_read_samples"], 50);
+    assert_eq!(stat["cache_write_tokens"], 20);
+    assert_eq!(stat["cache_write_samples"], 50);
+    assert_eq!(stat["cache_write_5m_tokens"], 12);
+    assert_eq!(stat["cache_write_1h_tokens"], 8);
+    assert_eq!(stat["cache_write_ttl_samples"], 1);
+    assert_eq!(stat["image_prompt_tokens"], 25);
+    assert_eq!(stat["image_prompt_samples"], 50);
+    assert_eq!(stat["image_completion_tokens"], 10);
+    assert_eq!(stat["image_completion_samples"], 1);
+    assert!(stat["cache_read_audio_tokens"].is_null());
+    assert_eq!(stat["cache_read_modal_samples"], 0);
     assert_eq!(stat["avg_ttft_ms"], 100);
     assert_eq!(stat["ttft_samples"], 51);
     let one = get(
@@ -786,7 +812,10 @@ async fn me_logs_summary_and_usage_details_are_owned_and_page_independent() {
     let row = &one["data"][0];
     assert_eq!(row["requested_model"], "alias-model");
     assert_eq!(row["endpoint"], "/v1/responses");
-    assert_eq!(row["usage"]["cache_write_tokens"], 0);
+    assert_eq!(row["usage"]["cache_write_tokens"], 20);
+    assert_eq!(row["usage"]["cache_write_5m_tokens"], 12);
+    assert_eq!(row["usage"]["cache_write_1h_tokens"], 8);
+    assert_eq!(row["usage"]["image_completion_tokens"], 10);
     assert_eq!(row["usage"]["cache_write_reported"], true);
     assert_eq!(row["usage_details_recorded"], true);
     for field in [

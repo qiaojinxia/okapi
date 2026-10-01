@@ -6,7 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { DeltaChip, Stat } from '@/components/ui/stat'
 import { ErrorState } from '@/components/ui/state'
 import type { OverviewResp } from '@/features/dashboard/types'
-import { apiFetch } from '@/lib/api'
+import { dashboardFetch, DASHBOARD_STALE_TIME } from './data'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoneyAggregate } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
@@ -37,7 +37,8 @@ function Kpi({
   const { t } = useTranslation()
   // 副行两个锚点各自成块、允许换行：五列布局下"昨日 $889.35 · 7天 $6,376"
   // 一行放不下，截断会把 7 天那个数吞掉一半，比换行糟得多（Stat 的 sub 自带 flex-wrap）
-  const className = 'min-w-0 rounded-xl last:col-span-2 md:last:col-span-1'
+  // 平板 6 栏：前三张各占 2 栏、后两张各占 3 栏，五张卡正好铺满两行，不留空位；桌面回到五栏一行
+  const className = 'min-w-0 rounded-xl last:col-span-2 md:col-span-2 md:nth-4:col-span-3 md:last:col-span-3 lg:col-span-1 lg:nth-4:col-span-1 lg:last:col-span-1'
   if (loading) return <Stat layout="stacked" compact className={className} icon={icon} label={label} value={today} sub={window} loading />
   return <Link to="/admin/stats" search={search} aria-label={t('admin:dashboardOpenMetric', { label, value: today })}
     className={`${className} group block outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background`}>
@@ -57,7 +58,8 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
   const locale = i18n.language
   const q = useQuery({
     queryKey: qk.statsOverview(days),
-    queryFn: () => apiFetch<OverviewResp>(`/admin/stats/overview?days=${days}`),
+    queryFn: () => dashboardFetch<OverviewResp>(`/admin/stats/overview?days=${days}&cached=true`),
+    staleTime: DASHBOARD_STALE_TIME,
     retry: false,
   })
 
@@ -97,7 +99,7 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
   const detailDays = scope === 'today' ? 1 : days
 
   return (
-    <div aria-busy={loading} className="grid min-w-0 grid-cols-2 gap-2 md:grid-cols-3 lg:grid-cols-5">
+    <div aria-busy={loading} className="grid min-w-0 grid-cols-2 gap-2 md:grid-cols-6 lg:grid-cols-5">
       <Kpi
         icon={Activity}
         loading={loading}

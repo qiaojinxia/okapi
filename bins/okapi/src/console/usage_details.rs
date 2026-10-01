@@ -84,6 +84,61 @@ fn row_key(row: &Value) -> (String, String) {
     )
 }
 
+async fn source_rows(
+    ch: &ChClient,
+    owner: &str,
+    range: &str,
+) -> Result<HashMap<(String, String), Value>, AppError> {
+    let source_sql = super::token_details::with_provenance(
+        "day, model",
+        "mv_key_model_day",
+        &format!("{owner} AND {range}"),
+    );
+    let sources = ch
+        .query_json_each_row(&format!("SELECT * FROM {source_sql}"))
+        .await?;
+    Ok(sources.into_iter().map(|r| (row_key(&r), r)).collect())
+}
+
+fn cache_query(owner: &str, range: &str) -> String {
+    let source = super::cache_usage::source(
+        "day, model",
+        "mv_key_model_day",
+        &format!("{owner} AND {range}"),
+    );
+    format!("SELECT * FROM {source}")
+}
+
+type ModelDayRows = HashMap<(String, String), Value>;
+
+async fn performance_rows(
+    ch: &ChClient,
+    owner: &str,
+    range: &str,
+) -> Result<(ModelDayRows, ModelDayRows), AppError> {
+    let predicate = format!("{owner} AND {range}");
+    let latency = super::latency::source("day, model", "mv_cube_hour", &predicate);
+    let rate = super::output_rate::prepared(
+        "day, model",
+        "mv_cube_hour",
+        &predicate,
+        super::measurement_coverage::Mode::Recover,
+    );
+    let latency = ch
+        .query_json_each_row(&format!("SELECT * FROM {latency}"))
+        .await?;
+    let rate = ch
+        .query_json_each_row(&format!("SELECT * FROM {rate}"))
+        .await?;
+    Ok((
+        latency
+            .into_iter()
+            .map(|row| (row_key(&row), row))
+            .collect(),
+        rate.into_iter().map(|row| (row_key(&row), row)).collect(),
+    ))
+}
+
 /// owner/range 只来自认证整数与校验后的日期，不接受用户 SQL。
 pub async fn enrich(
     ch: &ChClient,
@@ -91,16 +146,10 @@ pub async fn enrich(
     range: &str,
     data: &mut [Value],
 ) -> Result<Value, AppError> {
-    let cache_sql = format!(
-        "SELECT day, model, sumMerge(write_tokens) AS writes, countIfMerge(write_known) AS known, countIfMerge(read_known) AS read_known \
-        FROM mv_cache_reporting_day WHERE {owner} AND {range} GROUP BY day, model"
-    );
-    let perf_source = super::latency::source(
-        "day, model",
-        "mv_cube_hour",
-        &format!("{owner} AND {range}"),
-    );
-    let perf_sql = format!("SELECT * FROM {perf_source}");
+    let sources = source_rows(ch, owner, range).await?;
+    let mut source_totals = json!({});
+    let cache_sql = cache_query(owner, range);
+    let (perf, rates) = performance_rows(ch, owner, range).await?;
     let ttft_sql = super::ttft_average::source(
         "day, model",
         "mv_cube_hour",
@@ -111,20 +160,21 @@ pub async fn enrich(
         .await?;
     let ttft: HashMap<_, _> = ttft.iter().map(|r| (row_key(r), r)).collect();
     let cache = ch.query_json_each_row(&cache_sql).await?;
-    let perf = ch.query_json_each_row(&perf_sql).await?;
     let cache: HashMap<_, _> = cache.iter().map(|r| (row_key(r), r)).collect();
-    let perf: HashMap<_, _> = perf.iter().map(|r| (row_key(r), r)).collect();
-    let mut counts = [0_i64; 13]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached, ttft observed, latency observed
+    let mut counts = [0_i64; 14]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached, ttft observed, latency observed
     for row in data {
         let key = row_key(row);
+        let empty = json!({});
+        let provenance = sources.get(&key).unwrap_or(&empty);
+        super::input_units::correct_totals(row, provenance)?;
         let cache = cache.get(&key);
         let perf = perf.get(&key);
         let requests = ch_i64(row, "requests");
-        let known = cache.map_or(0, |r| ch_i64(r, "known"));
-        let read_known = cache.map_or(0, |r| ch_i64(r, "read_known"));
+        let known = cache.map_or(0, |r| ch_i64(r, "cache_write_n"));
+        let read_known = cache.map_or(0, |r| ch_i64(r, "cache_read_n"));
         let prompt = ch_i64(row, "prompt_tokens");
         let cached = ch_i64(row, "cached_tokens");
-        let writes = cache.map_or(0, |r| ch_i64(r, "writes"));
+        let writes = cache.map_or(0, |r| ch_i64(r, "cache_writes"));
         let samples = perf.map_or(0, |r| ch_i64(r, "latency_samples"));
         let latency = perf.map_or(0, |r| ch_i64(r, "latency_sum"));
         let measured = ttft.get(&key);
@@ -139,11 +189,29 @@ pub async fn enrich(
         };
         row["cache_write_known_requests"] = json!(known);
         row["cache_read_known_requests"] = json!(read_known);
-        row["cache_hit_bp"] = cache_rate(cached, prompt, requests, read_known);
+        let rate = rates.get(&key).unwrap_or(&empty);
+        super::output_rate::accumulate(&mut source_totals, rate);
+        super::usage_sources::accumulate(&mut source_totals, provenance);
+        super::token_details::accumulate(&mut source_totals, provenance);
+        for (name, value) in super::usage_sources::metrics(
+            provenance,
+            requests,
+            [Some(prompt), Some(ch_i64(row, "completion_tokens"))],
+            Some(cached),
+            read_known,
+        )
+        .into_iter()
+        .chain(super::token_details::metrics(provenance, requests))
+        {
+            row[name] = value;
+        }
         let latency_observed = perf.map_or(0, |r| ch_i64(r, "latency_observed"));
         for (name, value) in
             super::latency::metrics(latency, samples, output, requests, latency_observed)
         {
+            row[name] = value;
+        }
+        for (name, value) in super::output_rate::metrics(rate, requests) {
             row[name] = value;
         }
         for (name, value) in super::ttft_average::metrics(ttft, ttft_n, requests, observed) {
@@ -165,10 +233,15 @@ pub async fn enrich(
             cached,
             observed,
             latency_observed,
+            ch_i64(row, "completion_tokens"),
         ]) {
             *acc = acc.saturating_add(value);
         }
     }
+    Ok(total_metrics(counts, &source_totals))
+}
+
+fn total_metrics(counts: [i64; 14], source_totals: &Value) -> Value {
     let mut total = json!({
         "cache_write_tokens": if counts[0] == counts[1] { json!(counts[2]) } else { Value::Null },
         "cache_write_known_requests": counts[1],
@@ -184,7 +257,22 @@ pub async fn enrich(
     {
         total[name] = value;
     }
-    Ok(total)
+    for (name, value) in super::output_rate::metrics(source_totals, counts[0]) {
+        total[name] = value;
+    }
+    for (name, value) in super::usage_sources::metrics(
+        source_totals,
+        counts[0],
+        [Some(counts[9]), Some(counts[13])],
+        Some(counts[10]),
+        counts[8],
+    )
+    .into_iter()
+    .chain(super::token_details::metrics(source_totals, counts[0]))
+    {
+        total[name] = value;
+    }
+    total
 }
 
 pub(super) fn cache_rate(cached: i64, prompt: i64, requests: i64, known: i64) -> Value {

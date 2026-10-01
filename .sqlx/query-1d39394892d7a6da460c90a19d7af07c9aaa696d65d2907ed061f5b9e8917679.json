@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox o SET status=1,published_at=COALESCE(o.published_at,now()),\n                   ch_batch_id=$1,next_retry_at=NULL\n                   FROM billing_ch_events e\n                   WHERE e.batch_id=$1 AND o.event_id=CASE WHEN e.event_key LIKE 'outbox:%'\n                       THEN substring(e.event_key FROM 8)::uuid END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1d39394892d7a6da460c90a19d7af07c9aaa696d65d2907ed061f5b9e8917679"
+}

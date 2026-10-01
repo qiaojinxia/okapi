@@ -292,6 +292,7 @@ async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
         "mv_latency_reporting_hour",
         "mv_model_latency_hour",
         "mv_channel_latency_5min",
+        "mv_output_rate_5min",
     ] {
         ch.execute(&format!("DROP TABLE {view} SYNC"))
             .await

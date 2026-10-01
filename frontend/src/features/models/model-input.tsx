@@ -7,19 +7,13 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import type { PricingModel } from '@/features/public-pricing/types'
-
-interface ConfiguredModel {
-  model_name: string
-  display_name?: string | null
-  vendor?: string | null
-}
+import { configuredModelsOptions } from './configured-models'
+import type { ConfiguredModel } from './configured-models'
 
 export function useConfiguredModels() {
   const can = usePermission()
   return useQuery({
-    queryKey: qk.adminModels,
-    queryFn: () => apiFetch<{ data: ConfiguredModel[] }>('/admin/models'),
-    staleTime: 60_000,
+    ...configuredModelsOptions(),
     enabled: can('pricing.read'),
   })
 }

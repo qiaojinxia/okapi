@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox o SET ch_batch_id=b.id,status=b.status,\n           retry_count=b.retry_count,next_retry_at=b.next_retry_at,\n           published_at=CASE WHEN b.status=1 THEN COALESCE(o.published_at,now()) ELSE o.published_at END\n           FROM billing_ch_events e JOIN billing_ch_batches b ON b.id=e.batch_id\n           WHERE o.id=ANY($1) AND e.event_key='outbox:'||o.event_id::text",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "58da81bf77351c04f5f844befc7c720dbbb9729554c574f83781073e719f4ef5"
+}

@@ -46,7 +46,8 @@ async fn base_price_requires_publish_and_survives_reload() {
     assert_eq!(preview["base_price_per_1m_micro"], 3_000_000);
     assert_eq!(preview["published_base_price_per_1m_micro"], 2_000_000);
     let public = response_json(client.get(format!("{root}/api/pricing"))).await;
-    assert_eq!(public["models"][0]["base_price_per_1m_micro"], 2_000_000);
+    assert_eq!(public["models"], json!([]), "未发布模型不得进入广场");
+    assert_eq!(public["pricing_epoch"], 0);
     let outdated_publish = client
         .post(format!(
             "{root}/admin/pricing/publish?expected_base_per_1m_micro=2000000"

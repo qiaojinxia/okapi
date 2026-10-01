@@ -212,6 +212,8 @@ async fn durable_holds_survive_expiry_sweeps_and_worker_repair()
     let id = Uuid::new_v4();
     let pricing = PricingSnapshot {
         epoch: 7,
+        input_unit: None,
+        input_characters: None,
         base_price_per_1m_usd: None,
         mode: "per_call",
         model_ratio: None,

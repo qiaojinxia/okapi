@@ -267,7 +267,13 @@ async fn real_model_with_suffix_like_name_wins() {
     .await
     .unwrap();
     // 启动后新增的模型要经 epoch 发布 + PriceBook 热更（正规路径）
-    okapi_store::admin::publish_epoch(&env.pg, env.user_id, &json!({"reason": "test"}))
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&env.pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(&env.pg, env.user_id, &snapshot)
         .await
         .unwrap();
     assert!(

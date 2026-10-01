@@ -12,6 +12,7 @@ import { TableSkeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { Tabs } from '@/components/ui/tabs'
+import { DEFAULT_PAGE_SIZE } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
@@ -19,7 +20,7 @@ import { qk } from '@/lib/query-keys'
 
 const TABS = ['ledger', 'orders'] as const
 type Tab = (typeof TABS)[number]
-const PAGE = 50
+const PAGE = DEFAULT_PAGE_SIZE
 
 /// 账户流水：钱怎么来、怎么被动过（与日志页"钱怎么花"互补）。
 ///

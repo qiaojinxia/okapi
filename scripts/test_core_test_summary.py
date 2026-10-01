@@ -72,6 +72,28 @@ class CoreSummaryTest(unittest.TestCase):
         self.assertEqual(report['execution_status'], 'incomplete')
         self.assertTrue(report['parse_errors'])
 
+    def test_next_target_header_interrupting_last_outcome_is_deferred(self):
+        interrupted = GREEN.replace(
+            'test example ... ok\n',
+            'test example ...      Running tests/next.rs (target/debug/deps/next-123)\nok\n',
+        )
+        next_suite = GREEN.replace('example', 'next').split('\n', 1)[1]
+        report = summary.summarize(interrupted + next_suite, 0)
+        self.assertEqual(report['execution_status'], 'passed')
+        self.assertEqual(report['totals']['passed'], 2)
+        self.assertEqual(len(report['suites']), 2)
+        self.assertEqual(report['suites'][0]['tests'][0]['outcome'], 'ok')
+        self.assertEqual(report['suites'][1]['tests'][0]['name'], 'next')
+        self.assertFalse(report['parse_errors'])
+
+    def test_truncated_interleaved_target_does_not_become_a_pass(self):
+        log = GREEN.split('test example', 1)[0] + (
+            'test example ...      Running tests/next.rs (target/debug/deps/next-123)\nok\n'
+        )
+        report = summary.summarize(log, 0)
+        self.assertEqual(report['execution_status'], 'incomplete')
+        self.assertEqual(len(report['unfinished_suites']), 2)
+
     def test_missing_test_outcomes_or_inconsistent_counts_cannot_pass(self):
         for log in [
             GREEN.replace('test example ... ok\n', ''),

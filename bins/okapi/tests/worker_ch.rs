@@ -130,6 +130,129 @@ async fn ch_count(ch: &ChClient, user_id: i64) -> i64 {
         .unwrap_or(0)
 }
 
+fn old_speech_payload(user_id: i64) -> Value {
+    let mut payload = outbox_payload(user_id, Uuid::new_v4(), 22);
+    for (field, value) in [
+        ("endpoint", json!("/v1/audio/speech")),
+        ("upstream_endpoint", json!("/v1/audio/speech")),
+        ("is_stream", json!(false)),
+        ("prompt_tokens", json!(11)),
+        ("completion_tokens", json!(0)),
+        ("pricing_epoch", json!(41)),
+        ("original_amount_micro", json!(30)),
+        ("discount_micro", json!(8)),
+        ("upstream_cost_micro", json!(7)),
+        ("upstream_cost_known", json!(true)),
+    ] {
+        payload[field] = value;
+    }
+    let snapshot = json!({"epoch":41,"mode":"ratio","model_ratio":1,
+        "completion_ratio":1,"cache_ratio":1,"group":"default","group_ratio":1,
+        "user_multiplier":1,"rules":[],"final_unit_price_input_per_1m_usd":2});
+    payload["ratio_snapshot"] = json!(snapshot.to_string());
+    payload
+}
+
+fn assert_old_speech_projection(payload: &Value) -> Value {
+    let normalized = chsink::js_payload_to_ch_row(payload);
+    assert_eq!(normalized["prompt_tokens"], 0);
+    assert_eq!(normalized["input_unit"], "characters");
+    assert_eq!(normalized["input_characters"], 11);
+    assert_eq!(normalized["historical_prompt_units"], 11);
+    assert_eq!(
+        normalized["input_unit_basis"],
+        okapi_store::legacy_speech::BASIS
+    );
+    assert_eq!(normalized["ratio_snapshot"], payload["ratio_snapshot"]);
+    for (field, expected) in [
+        ("amount_micro", 22),
+        ("original_amount_micro", 30),
+        ("discount_micro", 8),
+        ("upstream_cost_micro", 7),
+        ("pricing_epoch", 41),
+    ] {
+        assert_eq!(normalized[field], expected, "{field}");
+    }
+    normalized
+}
+
+async fn assert_old_speech_materialized(ch: &ChClient, user_id: i64, normalized: &Value) {
+    let raw = ch.query_json_each_row(&format!(
+        "SELECT prompt_tokens,input_unit,input_characters,historical_prompt_units,input_unit_basis,ratio_snapshot,amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,pricing_epoch FROM request_log_raw WHERE user_id={user_id}"
+    )).await.unwrap();
+    for field in [
+        "prompt_tokens",
+        "input_unit",
+        "input_characters",
+        "historical_prompt_units",
+        "input_unit_basis",
+        "ratio_snapshot",
+    ] {
+        assert_eq!(raw[0][field], normalized[field], "{field}");
+    }
+    for field in [
+        "amount_micro",
+        "original_amount_micro",
+        "discount_micro",
+        "upstream_cost_micro",
+        "pricing_epoch",
+    ] {
+        assert_eq!(number(&raw[0], field), number(normalized, field), "{field}");
+    }
+    let totals = ch.query_json_each_row(&format!(
+        "SELECT sumMerge(tokens) AS tokens,countMerge(requests) AS requests,sumMerge(amount) AS amount FROM mv_user_day WHERE user_id={user_id}"
+    )).await.unwrap();
+    assert_eq!(number(&totals[0], "tokens"), 0);
+    assert_eq!(number(&totals[0], "requests"), 1);
+    assert_eq!(number(&totals[0], "amount"), 22);
+    let units = ch.query_json_each_row(&format!(
+        "SELECT sumIfMerge(unit_characters) AS characters,countIfMerge(unit_character_n) AS known FROM mv_input_units_5min WHERE user_id={user_id}"
+    )).await.unwrap();
+    assert_eq!(number(&units[0], "characters"), 11);
+    assert_eq!(number(&units[0], "known"), 1);
+    let rate = ch.query_json_each_row(&format!(
+        "SELECT countIfMerge(known_units) AS known,countIfMerge(token_requests) AS tokens,countIfMerge(samples) AS samples FROM mv_output_rate_5min WHERE user_id={user_id}"
+    )).await.unwrap();
+    assert_eq!(number(&rate[0], "known"), 1);
+    assert_eq!(number(&rate[0], "tokens"), 0);
+    assert_eq!(number(&rate[0], "samples"), 0);
+}
+
+fn number(row: &Value, field: &str) -> i64 {
+    row[field]
+        .as_i64()
+        .or_else(|| row[field].as_str().and_then(|v| v.parse().ok()))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn old_speech_outbox_replay_separates_characters_before_materialized_views() {
+    let Some((pg, ch)) = setup().await else {
+        return;
+    };
+    drain(&pg, &ch).await;
+    let user_id = 2_000_000_000 + i64::from(rand_suffix());
+    let mut payload = old_speech_payload(user_id);
+    let normalized = assert_old_speech_projection(&payload);
+    let id = insert_outbox(&pg, &payload).await;
+    assert_eq!(drain_until_visible(&pg, &ch, user_id).await, 1);
+    drain(&pg, &ch).await;
+    assert_eq!(ch_count(&ch, user_id).await, 1);
+    let delivered = sqlx::query!(
+        r#"SELECT status, retry_count FROM billing_outbox WHERE id = $1"#,
+        id
+    )
+    .fetch_one(&pg)
+    .await
+    .unwrap();
+    assert_eq!(delivered.status, 1);
+    assert_old_speech_materialized(&ch, user_id, &normalized).await;
+    payload["input_unit"] = json!("tokens");
+    let explicit = chsink::js_payload_to_ch_row(&payload);
+    assert_eq!(explicit["prompt_tokens"], 11);
+    assert!(explicit["historical_prompt_units"].is_null());
+}
+
 /// 管道端到端：outbox 行进入 CH 明细与 MV；写失败退避重试并最终入 DLQ。
 #[tokio::test]
 async fn chsink_pipeline_then_dlq() {
@@ -179,6 +302,10 @@ async fn chsink_pipeline_then_dlq() {
         .execute(&pg)
         .await
         .unwrap();
+        sqlx::query!(
+            "UPDATE billing_ch_batches SET next_retry_at=now()-interval '1 second' WHERE id=(SELECT ch_batch_id FROM billing_outbox WHERE id=$1) AND status=0",
+            dead_id
+        ).execute(&pg).await.unwrap();
     }
     let row = sqlx::query!(
         r#"SELECT status, retry_count FROM billing_outbox WHERE id = $1"#,

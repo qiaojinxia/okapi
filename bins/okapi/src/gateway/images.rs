@@ -27,11 +27,11 @@ pub mod tasks;
 mod usage;
 
 pub async fn edits(State(state): State<AppState>, req: Request) -> Response {
-    receive(state, req, "/v1/images/edits").await
+    Box::pin(receive(state, req, "/v1/images/edits")).await
 }
 
 pub async fn images(State(state): State<AppState>, req: Request) -> Response {
-    receive(state, req, "/v1/images/generations").await
+    Box::pin(receive(state, req, "/v1/images/generations")).await
 }
 
 async fn receive(state: AppState, req: Request, endpoint: &str) -> Response {

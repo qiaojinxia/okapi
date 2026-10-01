@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox SET status = 1, published_at = now(),stats_protocol=1 WHERE id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90ba1401d9352c1d85c64f60941aa621ee83e3d3b87fe14813df86c3f47068c6"
+}

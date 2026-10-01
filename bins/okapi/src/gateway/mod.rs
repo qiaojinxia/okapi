@@ -109,6 +109,7 @@ pub async fn build_state(
         pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,
         node: Arc::from(node),
         ch,
+        stats_query_cache: crate::console::stats_cache::build(),
         nats,
         master_key: {
             let key = crate::config::master_key_from_env();

@@ -2,8 +2,8 @@
   "schema": 1,
   "evidence": "static route inventory; runtime/business behavior unverified",
   "sources": {
-    "bins/okapi/src/console/mod.rs": "324b8c6e535fbf4bc18d9c0cf5c20f9bfcbf8fc0e56bc4037dd3052652344b4f",
-    "bins/okapi/src/gateway/mod.rs": "ed63bfe1452865f8691f6633a5a063ed660ddf5f9df80ccd3c1fc4020d47ade7"
+    "bins/okapi/src/console/mod.rs": "dbb5fac80b6d09b2a530befce03d091c0928f83b7b64253f0dd2ce7dc35e9c37",
+    "bins/okapi/src/gateway/mod.rs": "c9ed6b13efc8394ec1e4d7a5aad207e97e302db4a2d4e959f031042b279b14af"
   },
   "endpoints": [
     {
@@ -13,7 +13,7 @@
       "handler": "audit::list",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 350
+      "line": 359
     },
     {
       "surface": "console",
@@ -22,7 +22,7 @@
       "handler": "audit::list",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 350
+      "line": 359
     },
     {
       "surface": "console",
@@ -31,7 +31,7 @@
       "handler": "audit::actions",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 351
+      "line": 360
     },
     {
       "surface": "console",
@@ -40,7 +40,7 @@
       "handler": "audit::actions",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 351
+      "line": 360
     },
     {
       "surface": "console",
@@ -49,7 +49,7 @@
       "handler": "admin::billing_record_lookup",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 333
+      "line": 342
     },
     {
       "surface": "console",
@@ -58,7 +58,7 @@
       "handler": "admin::billing_record_lookup",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 333
+      "line": 342
     },
     {
       "surface": "console",
@@ -67,7 +67,7 @@
       "handler": "admin::refund_by_request",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 332
+      "line": 341
     },
     {
       "surface": "console",
@@ -76,7 +76,7 @@
       "handler": "admin::cache_flush",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 348
+      "line": 357
     },
     {
       "surface": "console",
@@ -85,7 +85,7 @@
       "handler": "admin::list_channels",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 162
+      "line": 171
     },
     {
       "surface": "console",
@@ -94,7 +94,7 @@
       "handler": "admin::list_channels",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 162
+      "line": 171
     },
     {
       "surface": "console",
@@ -103,7 +103,7 @@
       "handler": "admin::create_channel",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 162
+      "line": 171
     },
     {
       "surface": "console",
@@ -112,7 +112,7 @@
       "handler": "manage::batch_channels",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 191
+      "line": 200
     },
     {
       "surface": "console",
@@ -121,7 +121,7 @@
       "handler": "channel_oauth::exchange",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 207
+      "line": 216
     },
     {
       "surface": "console",
@@ -130,7 +130,7 @@
       "handler": "channel_oauth::start",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 206
+      "line": 215
     },
     {
       "surface": "console",
@@ -139,7 +139,7 @@
       "handler": "admin::delete_channel",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 166
+      "line": 175
     },
     {
       "surface": "console",
@@ -148,7 +148,7 @@
       "handler": "admin::update_channel",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 166
+      "line": 175
     },
     {
       "surface": "console",
@@ -157,7 +157,7 @@
       "handler": "channel_balance::fetch_channel_balance",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 201
+      "line": 210
     },
     {
       "surface": "console",
@@ -166,7 +166,7 @@
       "handler": "channel_balance::fetch_channel_balance",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 201
+      "line": 210
     },
     {
       "surface": "console",
@@ -175,7 +175,7 @@
       "handler": "admin::rotate_channel_credential",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 170
+      "line": 179
     },
     {
       "surface": "console",
@@ -184,7 +184,7 @@
       "handler": "manage::duplicate_channel",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 192
+      "line": 201
     },
     {
       "surface": "console",
@@ -193,7 +193,7 @@
       "handler": "admin::fetch_channel_models",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 197
+      "line": 206
     },
     {
       "surface": "console",
@@ -202,7 +202,7 @@
       "handler": "admin::fetch_channel_models",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 197
+      "line": 206
     },
     {
       "surface": "console",
@@ -211,7 +211,7 @@
       "handler": "admin::update_channel_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 174
+      "line": 183
     },
     {
       "surface": "console",
@@ -220,7 +220,7 @@
       "handler": "admin::set_channel_pools",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 182
+      "line": 191
     },
     {
       "surface": "console",
@@ -229,7 +229,7 @@
       "handler": "admin::set_channel_status",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 178
+      "line": 187
     },
     {
       "surface": "console",
@@ -238,7 +238,7 @@
       "handler": "admin::test_channel",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 196
+      "line": 205
     },
     {
       "surface": "console",
@@ -247,7 +247,7 @@
       "handler": "stats::diagnose",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 329
+      "line": 338
     },
     {
       "surface": "console",
@@ -256,7 +256,7 @@
       "handler": "stats::diagnose",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 329
+      "line": 338
     },
     {
       "surface": "console",
@@ -265,7 +265,7 @@
       "handler": "manage::diagnose_route",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 211
+      "line": 220
     },
     {
       "surface": "console",
@@ -274,7 +274,7 @@
       "handler": "manage::diagnose_route",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 211
+      "line": 220
     },
     {
       "surface": "console",
@@ -283,7 +283,7 @@
       "handler": "dlq::list",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 342
+      "line": 351
     },
     {
       "surface": "console",
@@ -292,7 +292,7 @@
       "handler": "dlq::list",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 342
+      "line": 351
     },
     {
       "surface": "console",
@@ -301,7 +301,7 @@
       "handler": "dlq::discard_handler",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 344
+      "line": 353
     },
     {
       "surface": "console",
@@ -310,7 +310,7 @@
       "handler": "dlq::requeue_handler",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 343
+      "line": 352
     },
     {
       "surface": "console",
@@ -319,7 +319,7 @@
       "handler": "manage::list_groups",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 222
+      "line": 231
     },
     {
       "surface": "console",
@@ -328,7 +328,7 @@
       "handler": "manage::list_groups",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 222
+      "line": 231
     },
     {
       "surface": "console",
@@ -337,7 +337,7 @@
       "handler": "admin::upsert_group",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 222
+      "line": 231
     },
     {
       "surface": "console",
@@ -346,7 +346,7 @@
       "handler": "manage::delete_group",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 226
+      "line": 235
     },
     {
       "surface": "console",
@@ -355,7 +355,7 @@
       "handler": "manage::list_keys",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 286
+      "line": 295
     },
     {
       "surface": "console",
@@ -364,7 +364,7 @@
       "handler": "manage::list_keys",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 286
+      "line": 295
     },
     {
       "surface": "console",
@@ -373,7 +373,7 @@
       "handler": "admin::delete_api_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 287
+      "line": 296
     },
     {
       "surface": "console",
@@ -382,7 +382,7 @@
       "handler": "admin::patch_api_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 287
+      "line": 296
     },
     {
       "surface": "console",
@@ -391,7 +391,7 @@
       "handler": "admin::leaderboard",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 308
+      "line": 317
     },
     {
       "surface": "console",
@@ -400,7 +400,7 @@
       "handler": "admin::leaderboard",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 308
+      "line": 317
     },
     {
       "surface": "console",
@@ -409,7 +409,7 @@
       "handler": "logs::search",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 330
+      "line": 339
     },
     {
       "surface": "console",
@@ -418,7 +418,7 @@
       "handler": "logs::search",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 330
+      "line": 339
     },
     {
       "surface": "console",
@@ -427,7 +427,7 @@
       "handler": "logs::stat",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 331
+      "line": 340
     },
     {
       "surface": "console",
@@ -436,7 +436,7 @@
       "handler": "logs::stat",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 331
+      "line": 340
     },
     {
       "surface": "console",
@@ -445,7 +445,7 @@
       "handler": "margin::list",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 346
+      "line": 355
     },
     {
       "surface": "console",
@@ -454,7 +454,7 @@
       "handler": "margin::list",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 346
+      "line": 355
     },
     {
       "surface": "console",
@@ -463,7 +463,7 @@
       "handler": "margin::lift",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 347
+      "line": 356
     },
     {
       "surface": "console",
@@ -472,7 +472,7 @@
       "handler": "manage::list_models",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 217
+      "line": 226
     },
     {
       "surface": "console",
@@ -481,7 +481,7 @@
       "handler": "manage::list_models",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 217
+      "line": 226
     },
     {
       "surface": "console",
@@ -490,7 +490,7 @@
       "handler": "admin::upsert_model",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 217
+      "line": 226
     },
     {
       "surface": "console",
@@ -499,7 +499,7 @@
       "handler": "manage::delete_model",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 221
+      "line": 230
     },
     {
       "surface": "console",
@@ -508,7 +508,7 @@
       "handler": "manage::list_permissions",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 296
+      "line": 305
     },
     {
       "surface": "console",
@@ -517,7 +517,7 @@
       "handler": "manage::list_permissions",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 296
+      "line": 305
     },
     {
       "surface": "console",
@@ -526,7 +526,7 @@
       "handler": "manage::list_plans",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 227
+      "line": 236
     },
     {
       "surface": "console",
@@ -535,7 +535,7 @@
       "handler": "manage::list_plans",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 227
+      "line": 236
     },
     {
       "surface": "console",
@@ -544,7 +544,7 @@
       "handler": "admin::upsert_plan",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 227
+      "line": 236
     },
     {
       "surface": "console",
@@ -553,7 +553,7 @@
       "handler": "manage::delete_plan",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 231
+      "line": 240
     },
     {
       "surface": "console",
@@ -562,7 +562,7 @@
       "handler": "manage::list_pools",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 183
+      "line": 192
     },
     {
       "surface": "console",
@@ -571,7 +571,7 @@
       "handler": "manage::list_pools",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 183
+      "line": 192
     },
     {
       "surface": "console",
@@ -580,7 +580,7 @@
       "handler": "admin::upsert_pool",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 183
+      "line": 192
     },
     {
       "surface": "console",
@@ -589,7 +589,7 @@
       "handler": "manage::delete_pool",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 187
+      "line": 196
     },
     {
       "surface": "console",
@@ -598,7 +598,7 @@
       "handler": "manage::pool_detail",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 187
+      "line": 196
     },
     {
       "surface": "console",
@@ -607,7 +607,7 @@
       "handler": "manage::pool_detail",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 187
+      "line": 196
     },
     {
       "surface": "console",
@@ -616,7 +616,7 @@
       "handler": "admin::import_newapi_pricing",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 253
+      "line": 262
     },
     {
       "surface": "console",
@@ -625,7 +625,7 @@
       "handler": "admin::publish_pricing",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 252
+      "line": 261
     },
     {
       "surface": "console",
@@ -634,7 +634,7 @@
       "handler": "admin::list_pricing_rules",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 240
+      "line": 249
     },
     {
       "surface": "console",
@@ -643,7 +643,7 @@
       "handler": "admin::list_pricing_rules",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 240
+      "line": 249
     },
     {
       "surface": "console",
@@ -652,7 +652,7 @@
       "handler": "admin::upsert_pricing_rule",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 240
+      "line": 249
     },
     {
       "surface": "console",
@@ -661,7 +661,7 @@
       "handler": "manage::toggle_rule",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 248
+      "line": 257
     },
     {
       "surface": "console",
@@ -670,7 +670,7 @@
       "handler": "admin::delete_pricing_rule",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 244
+      "line": 253
     },
     {
       "surface": "console",
@@ -679,7 +679,7 @@
       "handler": "ratio_sync::apply",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 259
+      "line": 268
     },
     {
       "surface": "console",
@@ -688,7 +688,7 @@
       "handler": "ratio_sync::fetch",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 258
+      "line": 267
     },
     {
       "surface": "console",
@@ -697,7 +697,7 @@
       "handler": "admin::reconciliation",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 337
+      "line": 346
     },
     {
       "surface": "console",
@@ -706,7 +706,7 @@
       "handler": "admin::reconciliation",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 337
+      "line": 346
     },
     {
       "surface": "console",
@@ -715,7 +715,7 @@
       "handler": "admin::repair_reconciliation",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 338
+      "line": 347
     },
     {
       "surface": "console",
@@ -724,7 +724,7 @@
       "handler": "manage::list_redemptions",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 232
+      "line": 241
     },
     {
       "surface": "console",
@@ -733,7 +733,7 @@
       "handler": "manage::list_redemptions",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 232
+      "line": 241
     },
     {
       "surface": "console",
@@ -742,7 +742,7 @@
       "handler": "admin::create_redemptions",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 232
+      "line": 241
     },
     {
       "surface": "console",
@@ -751,7 +751,7 @@
       "handler": "manage::disable_redemption_batch",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 236
+      "line": 245
     },
     {
       "surface": "console",
@@ -760,7 +760,7 @@
       "handler": "admin::list_roles",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 291
+      "line": 300
     },
     {
       "surface": "console",
@@ -769,7 +769,7 @@
       "handler": "admin::list_roles",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 291
+      "line": 300
     },
     {
       "surface": "console",
@@ -778,7 +778,7 @@
       "handler": "admin::create_role",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 291
+      "line": 300
     },
     {
       "surface": "console",
@@ -787,7 +787,7 @@
       "handler": "manage::delete_role",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 295
+      "line": 304
     },
     {
       "surface": "console",
@@ -796,7 +796,7 @@
       "handler": "manage::list_settings",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 302
+      "line": 311
     },
     {
       "surface": "console",
@@ -805,7 +805,7 @@
       "handler": "manage::list_settings",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 302
+      "line": 311
     },
     {
       "surface": "console",
@@ -814,7 +814,7 @@
       "handler": "admin::set_setting",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 302
+      "line": 311
     },
     {
       "surface": "console",
@@ -823,7 +823,7 @@
       "handler": "admin::smtp_test",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 307
+      "line": 316
     },
     {
       "surface": "console",
@@ -832,7 +832,7 @@
       "handler": "admin::get_setting",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 306
+      "line": 315
     },
     {
       "surface": "console",
@@ -841,7 +841,7 @@
       "handler": "admin::get_setting",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 306
+      "line": 315
     },
     {
       "surface": "console",
@@ -850,7 +850,7 @@
       "handler": "analytics::breakdown",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 325
+      "line": 334
     },
     {
       "surface": "console",
@@ -859,214 +859,214 @@
       "handler": "analytics::breakdown",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
+      "line": 334
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/cashflow",
+      "handler": "stats::cashflow",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 324
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/cashflow",
+      "handler": "stats::cashflow",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 324
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/channels",
+      "handler": "stats::channels",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 319
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/channels",
+      "handler": "stats::channels",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 319
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/channels/{id}/timeline",
+      "handler": "stats::channel_timeline",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 328
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/channels/{id}/timeline",
+      "handler": "stats::channel_timeline",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 328
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/clients",
+      "handler": "stats::clients",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 326
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/clients",
+      "handler": "stats::clients",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 326
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/entity-usage",
+      "handler": "analytics::entity_usage",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 337
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/entity-usage",
+      "handler": "analytics::entity_usage",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 337
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/errors",
+      "handler": "stats::errors",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 323
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/errors",
+      "handler": "stats::errors",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 323
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/flow",
+      "handler": "analytics::flow",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 335
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/flow",
+      "handler": "analytics::flow",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 335
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/groups",
+      "handler": "stats::groups",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 327
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/groups",
+      "handler": "stats::groups",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 327
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/inventory",
+      "handler": "analytics::inventory",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 336
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/inventory",
+      "handler": "analytics::inventory",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 336
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/margin",
+      "handler": "stats::margin",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 321
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/margin",
+      "handler": "stats::margin",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 321
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/admin/stats/model-trend",
+      "handler": "stats::model_trend",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 325
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/admin/stats/model-trend",
+      "handler": "stats::model_trend",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
       "line": 325
     },
     {
       "surface": "console",
       "method": "GET",
-      "path": "/admin/stats/cashflow",
-      "handler": "stats::cashflow",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 315
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/cashflow",
-      "handler": "stats::cashflow",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 315
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/channels",
-      "handler": "stats::channels",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 310
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/channels",
-      "handler": "stats::channels",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 310
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/channels/{id}/timeline",
-      "handler": "stats::channel_timeline",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 319
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/channels/{id}/timeline",
-      "handler": "stats::channel_timeline",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 319
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/clients",
-      "handler": "stats::clients",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 317
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/clients",
-      "handler": "stats::clients",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 317
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/entity-usage",
-      "handler": "analytics::entity_usage",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 328
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/entity-usage",
-      "handler": "analytics::entity_usage",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 328
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/errors",
-      "handler": "stats::errors",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 314
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/errors",
-      "handler": "stats::errors",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 314
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/flow",
-      "handler": "analytics::flow",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 326
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/flow",
-      "handler": "analytics::flow",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 326
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/groups",
-      "handler": "stats::groups",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 318
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/groups",
-      "handler": "stats::groups",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 318
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/inventory",
-      "handler": "analytics::inventory",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 327
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/inventory",
-      "handler": "analytics::inventory",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 327
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/margin",
-      "handler": "stats::margin",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 312
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/margin",
-      "handler": "stats::margin",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 312
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/admin/stats/model-trend",
-      "handler": "stats::model_trend",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 316
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/admin/stats/model-trend",
-      "handler": "stats::model_trend",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 316
-    },
-    {
-      "surface": "console",
-      "method": "GET",
       "path": "/admin/stats/models",
       "handler": "stats::models",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 311
+      "line": 320
     },
     {
       "surface": "console",
@@ -1075,7 +1075,7 @@
       "handler": "stats::models",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 311
+      "line": 320
     },
     {
       "surface": "console",
@@ -1084,7 +1084,7 @@
       "handler": "stats::overview",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 309
+      "line": 318
     },
     {
       "surface": "console",
@@ -1093,7 +1093,7 @@
       "handler": "stats::overview",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 309
+      "line": 318
     },
     {
       "surface": "console",
@@ -1102,7 +1102,7 @@
       "handler": "stats::realtime",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 313
+      "line": 322
     },
     {
       "surface": "console",
@@ -1111,7 +1111,7 @@
       "handler": "stats::realtime",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 313
+      "line": 322
     },
     {
       "surface": "console",
@@ -1120,7 +1120,7 @@
       "handler": "analytics::trend",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 324
+      "line": 333
     },
     {
       "surface": "console",
@@ -1129,7 +1129,7 @@
       "handler": "analytics::trend",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 324
+      "line": 333
     },
     {
       "surface": "console",
@@ -1138,7 +1138,7 @@
       "handler": "admin::list_users",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 265
+      "line": 274
     },
     {
       "surface": "console",
@@ -1147,7 +1147,7 @@
       "handler": "admin::list_users",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 265
+      "line": 274
     },
     {
       "surface": "console",
@@ -1156,7 +1156,7 @@
       "handler": "admin::set_balance_expiry",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 273
+      "line": 282
     },
     {
       "surface": "console",
@@ -1165,7 +1165,7 @@
       "handler": "admin::credit_user",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 268
+      "line": 277
     },
     {
       "surface": "console",
@@ -1174,7 +1174,7 @@
       "handler": "admin::set_user_groups",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 267
+      "line": 276
     },
     {
       "surface": "console",
@@ -1183,7 +1183,7 @@
       "handler": "manage::manage_user",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 266
+      "line": 275
     },
     {
       "surface": "console",
@@ -1192,7 +1192,7 @@
       "handler": "admin::set_user_multiplier",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 269
+      "line": 278
     },
     {
       "surface": "console",
@@ -1201,7 +1201,7 @@
       "handler": "admin::user_overview",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 284
+      "line": 293
     },
     {
       "surface": "console",
@@ -1210,7 +1210,7 @@
       "handler": "admin::user_overview",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 284
+      "line": 293
     },
     {
       "surface": "console",
@@ -1219,7 +1219,7 @@
       "handler": "admin::assign_role",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 283
+      "line": 292
     },
     {
       "surface": "console",
@@ -1228,7 +1228,7 @@
       "handler": "subscriptions::admin_cancel",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 277
+      "line": 286
     },
     {
       "surface": "console",
@@ -1237,7 +1237,7 @@
       "handler": "subscriptions::admin_get",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 277
+      "line": 286
     },
     {
       "surface": "console",
@@ -1246,7 +1246,7 @@
       "handler": "subscriptions::admin_get",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 277
+      "line": 286
     },
     {
       "surface": "console",
@@ -1255,7 +1255,7 @@
       "handler": "subscriptions::admin_grant",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 277
+      "line": 286
     },
     {
       "surface": "console",
@@ -1264,7 +1264,7 @@
       "handler": "admin::user_usage",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 285
+      "line": 294
     },
     {
       "surface": "console",
@@ -1273,7 +1273,7 @@
       "handler": "admin::user_usage",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 285
+      "line": 294
     },
     {
       "surface": "console",
@@ -1282,7 +1282,7 @@
       "handler": "portal::me",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 357
+      "line": 366
     },
     {
       "surface": "console",
@@ -1291,7 +1291,7 @@
       "handler": "portal::me",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 357
+      "line": 366
     },
     {
       "surface": "console",
@@ -1300,7 +1300,7 @@
       "handler": "portal::aff",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 382
+      "line": 391
     },
     {
       "surface": "console",
@@ -1309,7 +1309,7 @@
       "handler": "portal::aff",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 382
+      "line": 391
     },
     {
       "surface": "console",
@@ -1318,7 +1318,7 @@
       "handler": "portal::groups",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 363
+      "line": 372
     },
     {
       "surface": "console",
@@ -1327,7 +1327,7 @@
       "handler": "portal::groups",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 363
+      "line": 372
     },
     {
       "surface": "console",
@@ -1336,7 +1336,7 @@
       "handler": "portal::keys",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 362
+      "line": 371
     },
     {
       "surface": "console",
@@ -1345,7 +1345,7 @@
       "handler": "portal::keys",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 362
+      "line": 371
     },
     {
       "surface": "console",
@@ -1354,7 +1354,7 @@
       "handler": "portal::delete_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 373
+      "line": 382
     },
     {
       "surface": "console",
@@ -1363,52 +1363,52 @@
       "handler": "portal::patch_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
+      "line": 382
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/api/me/ledger",
+      "handler": "portal::ledger",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 388
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/api/me/ledger",
+      "handler": "portal::ledger",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 388
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/api/me/logins",
+      "handler": "audit::my_logins",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 373
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/api/me/logins",
+      "handler": "audit::my_logins",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
       "line": 373
     },
     {
       "surface": "console",
       "method": "GET",
-      "path": "/api/me/ledger",
-      "handler": "portal::ledger",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 379
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/api/me/ledger",
-      "handler": "portal::ledger",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 379
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/api/me/logins",
-      "handler": "audit::my_logins",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 364
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/api/me/logins",
-      "handler": "audit::my_logins",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 364
-    },
-    {
-      "surface": "console",
-      "method": "GET",
       "path": "/api/me/logs",
       "handler": "portal::logs",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 377
+      "line": 386
     },
     {
       "surface": "console",
@@ -1417,7 +1417,7 @@
       "handler": "portal::logs",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 377
+      "line": 386
     },
     {
       "surface": "console",
@@ -1426,7 +1426,7 @@
       "handler": "portal::logs_stat",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 378
+      "line": 387
     },
     {
       "surface": "console",
@@ -1435,7 +1435,7 @@
       "handler": "portal::logs_stat",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 378
+      "line": 387
     },
     {
       "surface": "console",
@@ -1444,7 +1444,7 @@
       "handler": "portal::orders",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 380
+      "line": 389
     },
     {
       "surface": "console",
@@ -1453,7 +1453,7 @@
       "handler": "portal::orders",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 380
+      "line": 389
     },
     {
       "surface": "console",
@@ -1462,7 +1462,7 @@
       "handler": "playground::chat",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 404
+      "line": 413
     },
     {
       "surface": "console",
@@ -1471,7 +1471,7 @@
       "handler": "portal::redeem",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 381
+      "line": 390
     },
     {
       "surface": "console",
@@ -1480,7 +1480,7 @@
       "handler": "auth_web::revoke_all_sessions",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 365
+      "line": 374
     },
     {
       "surface": "console",
@@ -1489,7 +1489,7 @@
       "handler": "auth_web::list_sessions",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 365
+      "line": 374
     },
     {
       "surface": "console",
@@ -1498,7 +1498,7 @@
       "handler": "auth_web::list_sessions",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 365
+      "line": 374
     },
     {
       "surface": "console",
@@ -1507,52 +1507,52 @@
       "handler": "auth_web::revoke_session",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
+      "line": 378
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/api/me/stats/activity",
+      "handler": "activity::my_activity",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 370
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/api/me/stats/activity",
+      "handler": "activity::my_activity",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 370
+    },
+    {
+      "surface": "console",
+      "method": "GET",
+      "path": "/api/me/stats/breakdown",
+      "handler": "stats::my_breakdown",
+      "registration": "explicit",
+      "source": "bins/okapi/src/console/mod.rs",
+      "line": 369
+    },
+    {
+      "surface": "console",
+      "method": "HEAD",
+      "path": "/api/me/stats/breakdown",
+      "handler": "stats::my_breakdown",
+      "registration": "implicit_head",
+      "source": "bins/okapi/src/console/mod.rs",
       "line": 369
     },
     {
       "surface": "console",
       "method": "GET",
-      "path": "/api/me/stats/activity",
-      "handler": "activity::my_activity",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 361
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/api/me/stats/activity",
-      "handler": "activity::my_activity",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 361
-    },
-    {
-      "surface": "console",
-      "method": "GET",
-      "path": "/api/me/stats/breakdown",
-      "handler": "stats::my_breakdown",
-      "registration": "explicit",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 360
-    },
-    {
-      "surface": "console",
-      "method": "HEAD",
-      "path": "/api/me/stats/breakdown",
-      "handler": "stats::my_breakdown",
-      "registration": "implicit_head",
-      "source": "bins/okapi/src/console/mod.rs",
-      "line": 360
-    },
-    {
-      "surface": "console",
-      "method": "GET",
       "path": "/api/me/stats/daily",
       "handler": "stats::my_daily",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 359
+      "line": 368
     },
     {
       "surface": "console",
@@ -1561,7 +1561,7 @@
       "handler": "stats::my_daily",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 359
+      "line": 368
     },
     {
       "surface": "console",
@@ -1570,7 +1570,7 @@
       "handler": "subscriptions::mine",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 385
+      "line": 394
     },
     {
       "surface": "console",
@@ -1579,7 +1579,7 @@
       "handler": "subscriptions::mine",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 385
+      "line": 394
     },
     {
       "surface": "console",
@@ -1588,7 +1588,7 @@
       "handler": "subscriptions::checkout",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 386
+      "line": 395
     },
     {
       "surface": "console",
@@ -1597,7 +1597,7 @@
       "handler": "pay::topup",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 383
+      "line": 392
     },
     {
       "surface": "console",
@@ -1606,7 +1606,7 @@
       "handler": "portal::usage",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 358
+      "line": 367
     },
     {
       "surface": "console",
@@ -1615,7 +1615,7 @@
       "handler": "portal::usage",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 358
+      "line": 367
     },
     {
       "surface": "console",
@@ -1624,7 +1624,7 @@
       "handler": "portal::notice",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 402
+      "line": 411
     },
     {
       "surface": "console",
@@ -1633,7 +1633,7 @@
       "handler": "portal::notice",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 402
+      "line": 411
     },
     {
       "surface": "console",
@@ -1642,7 +1642,7 @@
       "handler": "subscriptions::list_public",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 384
+      "line": 393
     },
     {
       "surface": "console",
@@ -1651,7 +1651,7 @@
       "handler": "subscriptions::list_public",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 384
+      "line": 393
     },
     {
       "surface": "console",
@@ -1660,7 +1660,7 @@
       "handler": "playground::presets",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 405
+      "line": 414
     },
     {
       "surface": "console",
@@ -1669,7 +1669,7 @@
       "handler": "playground::presets",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 405
+      "line": 414
     },
     {
       "surface": "console",
@@ -1678,7 +1678,7 @@
       "handler": "portal::public_pricing",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 399
+      "line": 408
     },
     {
       "surface": "console",
@@ -1687,7 +1687,7 @@
       "handler": "portal::public_pricing",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 399
+      "line": 408
     },
     {
       "surface": "console",
@@ -1696,7 +1696,7 @@
       "handler": "portal::public_groups",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 401
+      "line": 410
     },
     {
       "surface": "console",
@@ -1705,7 +1705,7 @@
       "handler": "portal::public_groups",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 401
+      "line": 410
     },
     {
       "surface": "console",
@@ -1714,7 +1714,7 @@
       "handler": "portal::public_models",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 400
+      "line": 409
     },
     {
       "surface": "console",
@@ -1723,7 +1723,7 @@
       "handler": "portal::public_models",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 400
+      "line": 409
     },
     {
       "surface": "console",
@@ -1732,7 +1732,7 @@
       "handler": "registration::public_policy",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 412
+      "line": 421
     },
     {
       "surface": "console",
@@ -1741,7 +1741,7 @@
       "handler": "registration::public_policy",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 412
+      "line": 421
     },
     {
       "surface": "console",
@@ -1750,7 +1750,7 @@
       "handler": "setup::run",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 413
+      "line": 422
     },
     {
       "surface": "console",
@@ -1759,7 +1759,7 @@
       "handler": "setup::status",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 411
+      "line": 420
     },
     {
       "surface": "console",
@@ -1768,7 +1768,7 @@
       "handler": "setup::status",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 411
+      "line": 420
     },
     {
       "surface": "console",
@@ -1777,7 +1777,7 @@
       "handler": "teams::list_my_teams",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 390
+      "line": 399
     },
     {
       "surface": "console",
@@ -1786,7 +1786,7 @@
       "handler": "teams::list_my_teams",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 390
+      "line": 399
     },
     {
       "surface": "console",
@@ -1795,7 +1795,7 @@
       "handler": "teams::create_team",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 390
+      "line": 399
     },
     {
       "surface": "console",
@@ -1804,7 +1804,7 @@
       "handler": "teams::create_team_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 395
+      "line": 404
     },
     {
       "surface": "console",
@@ -1813,7 +1813,7 @@
       "handler": "teams::upsert_member",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 394
+      "line": 403
     },
     {
       "surface": "console",
@@ -1822,7 +1822,7 @@
       "handler": "teams::team_usage",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 396
+      "line": 405
     },
     {
       "surface": "console",
@@ -1831,7 +1831,7 @@
       "handler": "teams::team_usage",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 396
+      "line": 405
     },
     {
       "surface": "console",
@@ -1840,7 +1840,7 @@
       "handler": "auth_web::email_code",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 415
+      "line": 424
     },
     {
       "surface": "console",
@@ -1849,7 +1849,7 @@
       "handler": "auth_web::create_key",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 422
+      "line": 431
     },
     {
       "surface": "console",
@@ -1858,7 +1858,7 @@
       "handler": "key_copy::copy",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 423
+      "line": 432
     },
     {
       "surface": "console",
@@ -1867,7 +1867,7 @@
       "handler": "auth_web::login",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 418
+      "line": 427
     },
     {
       "surface": "console",
@@ -1876,7 +1876,7 @@
       "handler": "auth_web::logout",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 419
+      "line": 428
     },
     {
       "surface": "console",
@@ -1885,7 +1885,7 @@
       "handler": "oauth::list_providers",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 424
+      "line": 433
     },
     {
       "surface": "console",
@@ -1894,7 +1894,7 @@
       "handler": "oauth::list_providers",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 424
+      "line": 433
     },
     {
       "surface": "console",
@@ -1903,7 +1903,7 @@
       "handler": "oauth::start",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 425
+      "line": 434
     },
     {
       "surface": "console",
@@ -1912,7 +1912,7 @@
       "handler": "oauth::start",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 425
+      "line": 434
     },
     {
       "surface": "console",
@@ -1921,7 +1921,7 @@
       "handler": "oauth::callback",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 426
+      "line": 435
     },
     {
       "surface": "console",
@@ -1930,7 +1930,7 @@
       "handler": "oauth::callback",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 426
+      "line": 435
     },
     {
       "surface": "console",
@@ -1939,7 +1939,7 @@
       "handler": "auth_web::password_forgot",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 416
+      "line": 425
     },
     {
       "surface": "console",
@@ -1948,7 +1948,7 @@
       "handler": "auth_web::password_reset",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 417
+      "line": 426
     },
     {
       "surface": "console",
@@ -1957,7 +1957,7 @@
       "handler": "auth_web::register",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 414
+      "line": 423
     },
     {
       "surface": "console",
@@ -1966,7 +1966,7 @@
       "handler": "auth_web::totp_confirm",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 421
+      "line": 430
     },
     {
       "surface": "console",
@@ -1975,7 +1975,7 @@
       "handler": "auth_web::totp_enroll",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 420
+      "line": 429
     },
     {
       "surface": "console",
@@ -1984,7 +1984,7 @@
       "handler": "|| async { \"ok\" }",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 104
+      "line": 113
     },
     {
       "surface": "console",
@@ -1993,7 +1993,7 @@
       "handler": "|| async { \"ok\" }",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 104
+      "line": 113
     },
     {
       "surface": "console",
@@ -2002,7 +2002,7 @@
       "handler": "mcp::endpoint",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 103
+      "line": 112
     },
     {
       "surface": "console",
@@ -2011,7 +2011,7 @@
       "handler": "pay::epay_callback",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 397
+      "line": 406
     },
     {
       "surface": "console",
@@ -2020,7 +2020,7 @@
       "handler": "pay::epay_callback",
       "registration": "implicit_head",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 397
+      "line": 406
     },
     {
       "surface": "console",
@@ -2029,7 +2029,7 @@
       "handler": "pay::stripe_webhook",
       "registration": "explicit",
       "source": "bins/okapi/src/console/mod.rs",
-      "line": 398
+      "line": 407
     },
     {
       "surface": "gateway",
@@ -2038,7 +2038,7 @@
       "handler": "|| async { \"ok\" }",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 392
+      "line": 393
     },
     {
       "surface": "gateway",
@@ -2047,7 +2047,7 @@
       "handler": "|| async { \"ok\" }",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 392
+      "line": 393
     },
     {
       "surface": "gateway",
@@ -2056,7 +2056,7 @@
       "handler": "images::tasks::edits",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 372
+      "line": 373
     },
     {
       "surface": "gateway",
@@ -2065,7 +2065,7 @@
       "handler": "images::tasks::generations",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 368
+      "line": 369
     },
     {
       "surface": "gateway",
@@ -2074,7 +2074,7 @@
       "handler": "images::tasks::get",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 373
+      "line": 374
     },
     {
       "surface": "gateway",
@@ -2083,7 +2083,7 @@
       "handler": "images::tasks::get",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 373
+      "line": 374
     },
     {
       "surface": "gateway",
@@ -2092,7 +2092,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2101,7 +2101,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2110,7 +2110,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2119,7 +2119,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2128,7 +2128,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2137,7 +2137,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2146,7 +2146,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2155,7 +2155,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2164,7 +2164,7 @@
       "handler": "custom_pass::custom_pass",
       "registration": "any",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 387
+      "line": 388
     },
     {
       "surface": "gateway",
@@ -2173,7 +2173,7 @@
       "handler": "audio::speech",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 379
+      "line": 380
     },
     {
       "surface": "gateway",
@@ -2182,7 +2182,7 @@
       "handler": "audio::transcriptions",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 380
+      "line": 381
     },
     {
       "surface": "gateway",
@@ -2191,7 +2191,7 @@
       "handler": "audio::translations",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 381
+      "line": 382
     },
     {
       "surface": "gateway",
@@ -2200,7 +2200,7 @@
       "handler": "chat::chat_completions",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 306
+      "line": 307
     },
     {
       "surface": "gateway",
@@ -2209,7 +2209,7 @@
       "handler": "dashboard::subscription",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 382
+      "line": 383
     },
     {
       "surface": "gateway",
@@ -2218,7 +2218,7 @@
       "handler": "dashboard::subscription",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 382
+      "line": 383
     },
     {
       "surface": "gateway",
@@ -2227,7 +2227,7 @@
       "handler": "dashboard::usage",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 386
+      "line": 387
     },
     {
       "surface": "gateway",
@@ -2236,7 +2236,7 @@
       "handler": "dashboard::usage",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 386
+      "line": 387
     },
     {
       "surface": "gateway",
@@ -2245,7 +2245,7 @@
       "handler": "embeddings::embeddings",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 324
+      "line": 325
     },
     {
       "surface": "gateway",
@@ -2254,7 +2254,7 @@
       "handler": "images::batches::list",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 326
+      "line": 327
     },
     {
       "surface": "gateway",
@@ -2263,7 +2263,7 @@
       "handler": "images::batches::list",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 326
+      "line": 327
     },
     {
       "surface": "gateway",
@@ -2272,7 +2272,7 @@
       "handler": "images::batches::create",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 326
+      "line": 327
     },
     {
       "surface": "gateway",
@@ -2281,7 +2281,7 @@
       "handler": "images::batches::models",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 332
+      "line": 333
     },
     {
       "surface": "gateway",
@@ -2290,7 +2290,7 @@
       "handler": "images::batches::models",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 332
+      "line": 333
     },
     {
       "surface": "gateway",
@@ -2299,7 +2299,7 @@
       "handler": "images::batches::delete",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 333
+      "line": 334
     },
     {
       "surface": "gateway",
@@ -2308,7 +2308,7 @@
       "handler": "images::batches::get",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 333
+      "line": 334
     },
     {
       "surface": "gateway",
@@ -2317,7 +2317,7 @@
       "handler": "images::batches::get",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 333
+      "line": 334
     },
     {
       "surface": "gateway",
@@ -2326,7 +2326,7 @@
       "handler": "images::batches::cancel",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 337
+      "line": 338
     },
     {
       "surface": "gateway",
@@ -2335,7 +2335,7 @@
       "handler": "images::batches::content",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 349
+      "line": 350
     },
     {
       "surface": "gateway",
@@ -2344,7 +2344,7 @@
       "handler": "images::batches::content",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 349
+      "line": 350
     },
     {
       "surface": "gateway",
@@ -2353,7 +2353,7 @@
       "handler": "images::batches::download",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 345
+      "line": 346
     },
     {
       "surface": "gateway",
@@ -2362,7 +2362,7 @@
       "handler": "images::batches::download",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 345
+      "line": 346
     },
     {
       "surface": "gateway",
@@ -2371,7 +2371,7 @@
       "handler": "images::batches::items",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 341
+      "line": 342
     },
     {
       "surface": "gateway",
@@ -2380,7 +2380,7 @@
       "handler": "images::batches::items",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 341
+      "line": 342
     },
     {
       "surface": "gateway",
@@ -2389,7 +2389,7 @@
       "handler": "images::edits",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 353
+      "line": 354
     },
     {
       "surface": "gateway",
@@ -2398,7 +2398,7 @@
       "handler": "images::tasks::edits",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 358
+      "line": 359
     },
     {
       "surface": "gateway",
@@ -2407,7 +2407,7 @@
       "handler": "images::images",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 325
+      "line": 326
     },
     {
       "surface": "gateway",
@@ -2416,7 +2416,7 @@
       "handler": "images::tasks::generations",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 354
+      "line": 355
     },
     {
       "surface": "gateway",
@@ -2425,7 +2425,7 @@
       "handler": "images::tasks::get",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 359
+      "line": 360
     },
     {
       "surface": "gateway",
@@ -2434,7 +2434,7 @@
       "handler": "images::tasks::get",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 359
+      "line": 360
     },
     {
       "surface": "gateway",
@@ -2443,7 +2443,7 @@
       "handler": "images::tasks::cancel",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 360
+      "line": 361
     },
     {
       "surface": "gateway",
@@ -2452,7 +2452,7 @@
       "handler": "images::tasks::content",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 364
+      "line": 365
     },
     {
       "surface": "gateway",
@@ -2461,7 +2461,7 @@
       "handler": "images::tasks::content",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 364
+      "line": 365
     },
     {
       "surface": "gateway",
@@ -2470,7 +2470,7 @@
       "handler": "chat::messages",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 311
+      "line": 312
     },
     {
       "surface": "gateway",
@@ -2479,7 +2479,7 @@
       "handler": "chat::messages_count_tokens",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 307
+      "line": 308
     },
     {
       "surface": "gateway",
@@ -2488,7 +2488,7 @@
       "handler": "models::list_models",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 391
+      "line": 392
     },
     {
       "surface": "gateway",
@@ -2497,7 +2497,7 @@
       "handler": "models::list_models",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 391
+      "line": 392
     },
     {
       "surface": "gateway",
@@ -2506,7 +2506,7 @@
       "handler": "realtime::realtime",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 375
+      "line": 376
     },
     {
       "surface": "gateway",
@@ -2515,7 +2515,7 @@
       "handler": "realtime::realtime",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 375
+      "line": 376
     },
     {
       "surface": "gateway",
@@ -2524,7 +2524,7 @@
       "handler": "embeddings::rerank",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 374
+      "line": 375
     },
     {
       "surface": "gateway",
@@ -2533,7 +2533,7 @@
       "handler": "chat::websocket::upgrade",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 312
+      "line": 313
     },
     {
       "surface": "gateway",
@@ -2542,7 +2542,7 @@
       "handler": "chat::websocket::upgrade",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 312
+      "line": 313
     },
     {
       "surface": "gateway",
@@ -2551,7 +2551,7 @@
       "handler": "chat::responses",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 312
+      "line": 313
     },
     {
       "surface": "gateway",
@@ -2560,7 +2560,7 @@
       "handler": "chat::responses_compact",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 316
+      "line": 317
     },
     {
       "surface": "gateway",
@@ -2569,7 +2569,7 @@
       "handler": "token_count::responses_input_tokens",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 317
+      "line": 318
     },
     {
       "surface": "gateway",
@@ -2578,7 +2578,7 @@
       "handler": "videos::create",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 376
+      "line": 377
     },
     {
       "surface": "gateway",
@@ -2587,7 +2587,7 @@
       "handler": "videos::get_task",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 377
+      "line": 378
     },
     {
       "surface": "gateway",
@@ -2596,7 +2596,7 @@
       "handler": "videos::get_task",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 377
+      "line": 378
     },
     {
       "surface": "gateway",
@@ -2605,7 +2605,7 @@
       "handler": "videos::get_content",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 378
+      "line": 379
     },
     {
       "surface": "gateway",
@@ -2614,7 +2614,7 @@
       "handler": "videos::get_content",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 378
+      "line": 379
     },
     {
       "surface": "gateway",
@@ -2623,7 +2623,7 @@
       "handler": "models::list_models_gemini",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 323
+      "line": 324
     },
     {
       "surface": "gateway",
@@ -2632,7 +2632,7 @@
       "handler": "models::list_models_gemini",
       "registration": "implicit_head",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 323
+      "line": 324
     },
     {
       "surface": "gateway",
@@ -2641,7 +2641,7 @@
       "handler": "chat::gemini_generate",
       "registration": "explicit",
       "source": "bins/okapi/src/gateway/mod.rs",
-      "line": 322
+      "line": 323
     }
   ]
 }

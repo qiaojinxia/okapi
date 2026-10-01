@@ -942,7 +942,7 @@ test('管理端日志：过滤进 URL 与查询串；7 天改 hours；展开 req
   expect(download.suggestedFilename()).toMatch(/^okapi-admin-logs-/)
   const csv = await csvFrom(download)
   expect(csv.split('\n')[0]).toBe(
-    'time,status,error_code,user_id,username,api_key_id,group,model,channel_id,channel_name,provider,client_type,prompt_tokens,cached_tokens,completion_tokens,reasoning_tokens,amount_usd,original_usd,discount_usd,latency_ms,ttft_ms,stream,retry_count,failover_count,upstream_status,request_id,upstream_request_id,node,key_name,key_prefix',
+    'time,status,error_code,user_id,username,api_key_id,group,model,channel_id,channel_name,provider,client_type,prompt_tokens,cached_tokens,completion_tokens,reasoning_tokens,amount_usd,original_usd,discount_usd,latency_ms,ttft_ms,stream,retry_count,failover_count,upstream_status,request_id,upstream_request_id,node,key_name,key_prefix,requested_model,upstream_model,endpoint,upstream_endpoint,cache_write_tokens,cache_read_reported,cache_write_reported,cache_write_5m_tokens,cache_write_1h_tokens,audio_prompt_tokens,image_prompt_tokens,audio_completion_tokens,image_completion_tokens,cache_read_audio_tokens,cache_read_image_tokens,cache_write_audio_tokens,cache_write_image_tokens,prompt_source,completion_source,upstream_prompt_tokens,upstream_completion_tokens',
   )
   expect(csv).toContain('ok,')
   expect(csv).toContain("'=1+1")
@@ -1216,18 +1216,18 @@ function portalLog(id: number, extra: Partial<{ model: string; status: number; e
   }
 }
 
-test('门户日志：范围/模型/失败进查询；展开账单快照；加载更多 before；空表禁导出', async ({ page }) => {
+test('门户日志：范围/模型/失败进查询；展开账单快照；分页 before；空表禁导出', async ({ page }) => {
   await prepare(page)
   const qs: URLSearchParams[] = []
   let page1 = {
     scope: 'key',
-    data: Array.from({ length: 50 }, (_, i) => portalLog(50 - i)),
-    next_before: 1,
+    data: Array.from({ length: 10 }, (_, i) => portalLog(50 - i)),
+    next_before: 41,
   }
   await page.route('**/api/me/logs?*', (route) => {
     const url = new URL(route.request().url())
     qs.push(url.searchParams)
-    if (url.searchParams.get('before') === '1') {
+    if (url.searchParams.get('before') === '41') {
       return route.fulfill({ json: { scope: 'user', data: [portalLog(1, { model: 'claude-4' })], next_before: null } })
     }
     return route.fulfill({ json: page1 })
@@ -1235,7 +1235,8 @@ test('门户日志：范围/模型/失败进查询；展开账单快照；加载
 
   await page.goto('/portal/logs')
   await expect(page.locator('#main-content').getByRole('heading', { name: '用量日志' })).toBeVisible()
-  await expect(page.getByText('已加载 50 条')).toBeVisible()
+  await expect(page.getByRole('navigation', { name: '分页' })).toContainText('本页 1–10 条')
+  await expect.poll(() => qs[0]?.get('limit')).toBe('10')
   await expect.poll(() => qs[0]?.get('scope')).toBe('key')
 
   await page.getByRole('row').filter({ hasText: 'gpt-5' }).first().click()
@@ -1259,18 +1260,19 @@ test('门户日志：范围/模型/失败进查询；展开账单快照；加载
 
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '导出已加载 CSV' }).click(),
+    page.getByRole('button', { name: '导出本页 CSV' }).click(),
   ])
   expect(download.suggestedFilename()).toMatch(/^okapi-usage-/)
 
-  await page.getByRole('button', { name: '加载更多' }).click()
-  await expect.poll(() => qs.some((p) => p.get('before') === '1')).toBe(true)
-  await expect(page.getByText('已加载 51 条')).toBeVisible()
+  await page.getByRole('button', { name: '下一页' }).click()
+  await expect.poll(() => qs.some((p) => p.get('before') === '41')).toBe(true)
+  await expect(page.getByRole('navigation', { name: '分页' })).toContainText('本页 11–11 条')
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(1)
 
   page1 = { scope: 'key', data: [], next_before: null }
   await page.getByRole('button', { name: '本密钥' }).click()
   await expect(page.getByText('当前范围和时段内还没有调用。发起请求后，等待用量入库即可查看。')).toBeVisible()
-  await expect(page.getByRole('button', { name: '导出已加载 CSV' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '导出本页 CSV' })).toBeDisabled()
 
   await page.route('**/api/me/logs?*', (route) => {
     if (route.request().isNavigationRequest()) return route.fallback()
@@ -1518,7 +1520,7 @@ test('账户流水：进账 micro→USD、标签与退款深链、加载更多 b
   const orderQs: string[] = []
   let ledgerPage1 = {
     data: [
-      ...Array.from({ length: 48 }, (_, i) => ledgerEvent(50 - i)),
+      ...Array.from({ length: 8 }, (_, i) => ledgerEvent(10 - i)),
       ledgerEvent(2, {
         event_type: 'refund',
         delta_micro: -1_000_000,
@@ -1557,9 +1559,9 @@ test('账户流水：进账 micro→USD、标签与退款深链、加载更多 b
     }
     return route.fulfill({
       json: {
-        data: Array.from({ length: 50 }, (_, i) => ({
-          id: 50 - i,
-          order_no: i === 0 ? 'ord-paid' : `ord-${50 - i}`,
+        data: Array.from({ length: 10 }, (_, i) => ({
+          id: 20 - i,
+          order_no: i === 0 ? 'ord-paid' : `ord-${20 - i}`,
           amount_micro: 12_340_000,
           currency: 'CNY',
           pay_amount: i === 0 ? '88.00' : null,
@@ -1575,7 +1577,8 @@ test('账户流水：进账 micro→USD、标签与退款深链、加载更多 b
 
   await page.goto('/portal/ledger')
   await expect(page.locator('#main-content').getByRole('heading', { name: '账户流水' })).toBeVisible()
-  await expect.poll(() => ledgerQs[0]).toContain('limit=50')
+  await expect.poll(() => ledgerQs[0]).toContain('limit=10')
+  await expect(page.locator('tbody tr')).toHaveCount(10)
   expect(ledgerQs[0]).not.toContain('before=')
   await expect(page.getByText(/\+.*\$1\.23/).first()).toBeVisible()
   await expect(page.getByText('充值到账').first()).toBeVisible()
@@ -1590,7 +1593,8 @@ test('账户流水：进账 micro→USD、标签与退款深链、加载更多 b
   await expect(page.getByText('兑换码').first()).toBeVisible()
 
   await page.getByRole('tab', { name: '充值订单' }).click()
-  await expect.poll(() => orderQs[0]).toContain('limit=50')
+  await expect.poll(() => orderQs[0]).toContain('limit=10')
+  await expect(page.locator('tbody tr')).toHaveCount(10)
   await expect(page.getByText('ord-paid')).toBeVisible()
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
   await page.getByRole('row').filter({ hasText: 'ord-paid' }).getByRole('button', { name: '复制', exact: true }).click()
@@ -2201,7 +2205,7 @@ test('模型定价：仅看未定价进 URL 与查询；搜索 q 一并带上', 
   await expect(o1.getByText('ratio')).toBeVisible()
   await expect(o1.getByText('1.25').first()).toBeVisible()
   await expect(o1.getByText('8')).toBeVisible()
-  await expect(o1.getByText('$2.50 / $20.00')).toBeVisible()
+  await expect(o1.getByText('US$2.50 / US$20.00')).toBeVisible()
   await expect(o1.getByText('0.1')).toBeVisible()
   await expect(o1.getByText('1.25').nth(1)).toBeVisible()
   await expect(o1.getByText('2 ×1.5')).toBeVisible()
@@ -3043,20 +3047,31 @@ test('门户日志 CSV：六位 USD、公式注入前缀、失败行 status；�
 
   const [keyCsv] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '导出已加载 CSV' }).click(),
+    page.getByRole('button', { name: '导出本页 CSV' }).click(),
   ])
   expect(keyCsv.suggestedFilename()).toMatch(/^okapi-usage-/)
   const withoutKey = await csvFrom(keyCsv)
   expect(withoutKey.split('\n')[0]).toBe(
-    'time,billing_status,model,requested_model,endpoint,stream,prompt_tokens,cached_tokens,cache_read_reported,cache_write_tokens,cache_write_reported,completion_tokens,reasoning_tokens,net_amount_usd,charged_amount_usd,original_usd,discount_usd,refunded_amount_usd,latency_ms,ttft_ms,error_code,request_id',
+    'time,billing_status,model,requested_model,endpoint,stream,prompt_tokens,cached_tokens,cache_read_reported,cache_write_tokens,cache_write_reported,completion_tokens,reasoning_tokens,cache_write_5m_tokens,cache_write_1h_tokens,audio_prompt_tokens,image_prompt_tokens,audio_completion_tokens,image_completion_tokens,cache_read_audio_tokens,cache_read_image_tokens,cache_write_audio_tokens,cache_write_image_tokens,prompt_source,completion_source,upstream_prompt_tokens,upstream_completion_tokens,service_tier,net_amount_usd,charged_amount_usd,original_usd,discount_usd,refunded_amount_usd,latency_ms,ttft_ms,error_code,request_id',
   )
-  expect(withoutKey).toContain(',settled,\'=1+2,,,true,100,20,,,,40,8,0.240000,0.240000,0.300000,0.060000,0.000000,800,120,,req-1')
+  const [header, settledLine] = withoutKey.split('\n')
+  const columns = header.split(',')
+  const settledValues = settledLine.split(',')
+  expect(settledValues).toHaveLength(columns.length)
+  expect(Object.fromEntries(columns.map((column, index) => [column, settledValues[index]]))).toMatchObject({
+    billing_status: 'settled', model: "'=1+2", stream: 'true',
+    prompt_tokens: '100', cached_tokens: '20', completion_tokens: '40', reasoning_tokens: '8',
+    cache_write_5m_tokens: '', cache_write_1h_tokens: '', service_tier: '',
+    net_amount_usd: '0.240000', charged_amount_usd: '0.240000', original_usd: '0.300000',
+    discount_usd: '0.060000', refunded_amount_usd: '0.000000', latency_ms: '800',
+    ttft_ms: '120', error_code: '', request_id: 'req-1',
+  })
   expect(withoutKey).toContain(',failed,gpt-5,')
 
   await page.getByRole('button', { name: '全账户' }).click()
   const [userCsv] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '导出已加载 CSV' }).click(),
+    page.getByRole('button', { name: '导出本页 CSV' }).click(),
   ])
   const withKey = await csvFrom(userCsv)
   expect(withKey.split('\n')[0]).toMatch(/^time,billing_status,key,key_id,model,/)

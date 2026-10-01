@@ -39,6 +39,14 @@ struct Bed {
     loopback_key: (String, i64),
     gateway: SocketAddr,
     console: SocketAddr,
+    owner_cookie: String,
+    other_cookie: String,
+}
+
+async fn session_cookie(state: &gateway::state::AppState, user_id: i64) -> String {
+    let sid = Uuid::new_v4().to_string();
+    state.sched.web_session_set(&sid, user_id, None, None).await;
+    format!("okapi_session={sid}")
 }
 
 async fn key_with_allowlist(
@@ -116,6 +124,11 @@ async fn setup() -> Bed {
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
+    let owner_cookie = session_cookie(&state, user_id).await;
+    let other_user = okapi_store::provision::create_user(&pg, &format!("ip-other-{suffix}"))
+        .await
+        .unwrap();
+    let other_cookie = session_cookie(&state, other_user).await;
     state
         .ledger
         .credit(user_id, Money::from_micros(50_000_000))
@@ -149,6 +162,8 @@ async fn setup() -> Bed {
         loopback_key,
         gateway: gateway_addr,
         console: console_addr,
+        owner_cookie,
+        other_cookie,
     }
 }
 
@@ -216,7 +231,7 @@ async fn allowlist_enforced_with_cdn_header_and_peer_fallback() {
     assert_eq!(status, 200);
 }
 
-/// 门户自助改白名单：非法条目 400 带 param；合法条目写入后鉴权缓存立即失效；null 解除。
+/// 门户自助改白名单：校验、热缓存失效、受限密钥不可自解限制；本人会话可解除。
 #[tokio::test]
 async fn portal_patch_validates_and_applies_immediately() {
     let bed = setup().await;
@@ -260,7 +275,7 @@ async fn portal_patch_validates_and_applies_immediately() {
     let (status, _) = chat(&bed, token, &[("x-real-ip", "203.0.113.77")]).await;
     assert_eq!(status, 200);
 
-    // 门户列表透出名单；名单外来源照常能用门户 API（白名单只管数据面）；置 null 解除
+    // 门户仍可读取；受限凭证解除限制需要同属主的账户会话。
     let list: Value = client
         .get(format!("http://{}/api/me/keys", bed.console))
         .bearer_auth(token)
@@ -277,8 +292,29 @@ async fn portal_patch_validates_and_applies_immediately() {
         .find(|k| k["id"] == *key_id)
         .unwrap();
     assert_eq!(mine["ip_allowlist"], json!(["203.0.113.0/24"]));
-    let (status, _) = patch(json!({"ip_allowlist": null})).await;
-    assert_eq!(status, 200);
+    let (status, body) = patch(json!({"ip_allowlist": null})).await;
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(body["error"]["code"], "key_limits_session_required");
+    for (cookie, expected) in [(&bed.other_cookie, 403), (&bed.owner_cookie, 200)] {
+        let resp = client
+            .patch(format!("http://{}/api/me/keys/{key_id}", bed.console))
+            .bearer_auth(token)
+            .header("cookie", cookie)
+            .json(&json!({"ip_allowlist": null}))
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status().as_u16();
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(status, expected, "{body}");
+        if expected == 403 {
+            assert_eq!(body["error"]["code"], "key_limits_session_required");
+            assert_eq!(
+                chat(&bed, token, &[("x-real-ip", "198.51.100.1")]).await.0,
+                403
+            );
+        }
+    }
     let (status, _) = chat(&bed, token, &[("x-real-ip", "198.51.100.1")]).await;
     assert_eq!(status, 200, "解除后任意来源可用");
     let _ = bed.user_id;

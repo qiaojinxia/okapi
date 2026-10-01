@@ -13,8 +13,7 @@ import { RealtimeCard } from '@/features/dashboard/RealtimeCard'
 import { TrendCard } from '@/features/dashboard/TrendCard'
 import { OperationsSummary } from '@/features/dashboard/OperationsSummary'
 import { DistributionSummary } from '@/features/dashboard/DistributionSummary'
-import { dashboardBreakdownParams } from '@/features/dashboard/data'
-import { cubeParams } from '@/features/analytics/search'
+import { dashboardBreakdownParams, dashboardTrendParams, withFreshDashboardQueries } from '@/features/dashboard/data'
 import { DaysPicker } from '@/features/stats/DaysPicker'
 import { qk } from '@/lib/query-keys'
 
@@ -33,13 +32,13 @@ export function DashboardPage() {
     setRefreshing(true)
     try {
       // 只刷新本页已挂载的查询，避免牵动其他页面的缓存。
-      await Promise.all([
+      await withFreshDashboardQueries(async () => { await Promise.all([
         qk.statsRealtime, qk.statsOverview(days), qk.statsInventory,
         qk.statsChannels(days), qk.adminModels, qk.adminPools, qk.reconciliation, qk.diagnose,
-        qk.statsTrend(cubeParams({ days }, { metric: 'amount' })),
+        qk.statsTrend(dashboardTrendParams(days)),
         qk.statsBreakdown(dashboardBreakdownParams(days, 'model', model_rank)),
         qk.statsBreakdown(dashboardBreakdownParams(days, 'channel', channel_rank)),
-      ].map((queryKey) => queryClient.refetchQueries({ queryKey, exact: true, type: 'active' })))
+      ].map((queryKey) => queryClient.refetchQueries({ queryKey, exact: true, type: 'active' }))) })
     } finally { setRefreshing(false) }
   }, [days, model_rank, channel_rank, queryClient])
 

@@ -26,6 +26,8 @@ pub struct DlqQuery {
     /// 缺省只看未处理；`all=true` 连已丢弃的一起列（审计回看）。
     #[serde(default)]
     pub all: Option<bool>,
+    #[serde(default)]
+    pub batch_id: Option<uuid::Uuid>,
 }
 
 /// GET /admin/dlq：死信列表，带 payload 摘要（这是哪笔账：请求 ID / 用户 / 模型 / 金额）。
@@ -36,19 +38,25 @@ pub async fn list(
     Query(q): Query<DlqQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let maximum = if q.batch_id.is_some() { 500 } else { 200 };
+    let limit = q
+        .limit
+        .unwrap_or(if q.batch_id.is_some() { 500 } else { 50 })
+        .clamp(1, maximum);
     let include_resolved = q.all == Some(true);
     let rows = sqlx::query!(
         r#"SELECT id, source, error, retry_count, status, created_at, resolved_at, resolved_by,
                   payload->>'request_id' AS "request_id?",
                   payload->>'user_id' AS "user_id?",
                   payload->>'model' AS "model?",
-                  payload->>'amount_micro' AS "amount_micro?"
+                  payload->>'amount_micro' AS "amount_micro?", ch_batch_id, event_key,
+                  (SELECT event_count FROM billing_ch_batches b WHERE b.id=billing_dlq.ch_batch_id) AS "batch_size?"
            FROM billing_dlq
-           WHERE ($1::boolean OR status = 0)
+           WHERE ($1::boolean OR status = 0) AND ($3::uuid IS NULL OR ch_batch_id=$3)
            ORDER BY id DESC LIMIT $2"#,
         include_resolved,
-        limit
+        limit,
+        q.batch_id
     )
     .fetch_all(&state.pg)
     .await
@@ -71,6 +79,9 @@ pub async fn list(
                 "user_id": r.user_id.and_then(|s| s.parse::<i64>().ok()),
                 "model": r.model,
                 "amount_micro": r.amount_micro.and_then(|s| s.parse::<i64>().ok()),
+                "delivery_batch_id": r.ch_batch_id,
+                "delivery_event_key": r.event_key,
+                "delivery_batch_size":r.batch_size,
             })
         })
         .collect();
@@ -104,7 +115,7 @@ pub async fn requeue_handler(
     Ok(Json(json!({ "requeued": requeued })))
 }
 
-/// POST /admin/dlq/discard：标记已处理（status=2），不重投、不删行。
+/// POST /admin/dlq/discard：标记已处理；冻结批次必须整体处理。
 pub async fn discard_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -114,17 +125,29 @@ pub async fn discard_handler(
     if req.ids.is_empty() {
         return Err(AppError::bad_request().with_param("ids"));
     }
-    let discarded = sqlx::query_scalar!(
-        r#"WITH upd AS (
+    let discarded = sqlx::query!(
+        r#"WITH locked_batches AS MATERIALIZED (
+               SELECT id FROM billing_ch_batches WHERE status=2 AND id IN (
+                   SELECT ch_batch_id FROM billing_dlq WHERE id=ANY($1) AND status=0
+               ) ORDER BY id FOR UPDATE
+           ), blocked AS (
+               SELECT EXISTS(SELECT 1 FROM billing_dlq WHERE status=0
+                   AND ch_batch_id IN (SELECT id FROM locked_batches) AND NOT(id=ANY($1))) AS partial
+           ), upd AS (
                UPDATE billing_dlq SET status = 2, resolved_at = now(), resolved_by = $2
-               WHERE id = ANY($1) AND status = 0 RETURNING 1
-           ) SELECT COUNT(*)::bigint AS "c!" FROM upd"#,
+               WHERE status=0 AND id=ANY($1) AND NOT(SELECT partial FROM blocked)
+               RETURNING 1
+           ) SELECT COUNT(*)::bigint AS "c!",(SELECT partial FROM blocked) AS "partial!" FROM upd"#,
         &req.ids,
         actor.user_id
     )
     .fetch_one(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    if discarded.partial {
+        return Err(AppError::bad_request().with_param("delivery_batch_members"));
+    }
+    let discarded = discarded.c;
     super::admin::audit(
         &state,
         &actor,
@@ -136,20 +159,48 @@ pub async fn discard_handler(
     Ok(Json(json!({ "discarded": discarded })))
 }
 
-/// 重投：DLQ 行 payload 重入 outbox（原 topic 缺省 billing.completed），随后删除 DLQ 行。
+/// 重投：冻结批次整体恢复原 token/行；旧 DLQ 仍重入 outbox。
+/// 返回实际恢复的所有成员数，可能大于选择的条数。
 /// MCP `dlq_requeue` 与 HTTP 共用——AI 与人执行的必须是同一个动作。
 pub(super) async fn requeue(pg: &PgPool, ids: &[i64]) -> Result<i64, AppError> {
     let n = sqlx::query_scalar!(
         r#"
-        WITH moved AS (
-            DELETE FROM billing_dlq WHERE id = ANY($1) AND status = 0 RETURNING payload
+        WITH locked_batches AS MATERIALIZED (
+            SELECT id FROM billing_ch_batches WHERE status=2 AND id IN (
+                SELECT ch_batch_id FROM billing_dlq WHERE id=ANY($1) AND status=0
+            ) ORDER BY id FOR UPDATE
+        ), moved AS (
+            DELETE FROM billing_dlq WHERE status=0
+                AND (id=ANY($1) OR ch_batch_id IN (SELECT id FROM locked_batches))
+            RETURNING payload,ch_batch_id
+        ), restored AS (
+            UPDATE billing_ch_batches SET status=0,retry_count=0,next_retry_at=NULL
+            WHERE id IN (SELECT ch_batch_id FROM moved) AND status=2 RETURNING id
+        ), reset_outbox AS (
+            UPDATE billing_outbox SET status=0,retry_count=0,next_retry_at=NULL
+            WHERE ch_batch_id IN (SELECT id FROM restored) RETURNING id
         ), ins AS (
             INSERT INTO billing_outbox (topic, payload)
-            SELECT 'billing.completed', payload FROM moved
+            SELECT 'billing.completed', payload FROM moved WHERE ch_batch_id IS NULL
             RETURNING 1
         )
-        SELECT COUNT(*)::bigint AS "c!" FROM ins
+        SELECT COUNT(*)::bigint AS "c!" FROM moved
         "#,
+        ids
+    )
+    .fetch_one(pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    Ok(n)
+}
+
+/// Preview the atomic batch scope before MCP confirmation.
+pub(super) async fn requeue_scope(pg: &PgPool, ids: &[i64]) -> Result<i64, AppError> {
+    let n = sqlx::query_scalar!(
+        r#"SELECT COUNT(*)::bigint AS "c!" FROM billing_dlq WHERE status=0 AND
+           (id=ANY($1) OR ch_batch_id IN (
+               SELECT ch_batch_id FROM billing_dlq WHERE id=ANY($1) AND status=0
+           ))"#,
         ids
     )
     .fetch_one(pg)

@@ -4,10 +4,17 @@
 //! `?beta=true`、`anthropic-beta` 必含三个 Claude Code 标记、system 首元素须是 Claude Code 自述句。
 //! 其余（SSE 事件、usage）完全一致，所以传输直接复用 `anthropic::send_messages_at`。
 //!
+//! 两种出向形态（`mimic` 参数选择）：
+//! - `None`（缺省，透传）：只发上游为这条路径**要求**的东西，客户端身份头由 `Outbound.extra_headers`
+//!   透传——前面站着真实 Claude Code / Codex CLI 时用这个；
+//! - `Some(identity)`（`channels.settings.mimic_cc` 开启）：网关替客户端伪造完整 CLI 身份
+//!   （全量 beta、`claude-cli` UA、x-stainless 套件、system billing 块、metadata.user_id），
+//!   供非官方客户端走订阅额度；对抗性工程，见 [`super::cc_mimic`]。
+//!
 //! 端点与 scope 跟随 Claude Code CLI（2026-09 对照 Sub2API 与实测：旧 `console.anthropic.com`
 //! 回调页已 301 到 `platform.claude.com`）。
 
-use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
+use super::{Pkce, Tokens, cc_mimic, form_encode, parse_tokens, token_outbound};
 use crate::anthropic::{ANTHROPIC_VERSION, MessagesResponse, classify, send_messages_at};
 use crate::error::UpstreamError;
 use bytes::Bytes;
@@ -163,7 +170,11 @@ pub fn prepare_body(body: &[u8]) -> Result<Vec<u8>, UpstreamError> {
 /// 合并 beta 头：必备三项在前、用户自带的保留、去重。
 #[must_use]
 pub fn merge_beta(existing: Option<&str>) -> String {
-    let mut parts: Vec<&str> = REQUIRED_BETAS.to_vec();
+    merge_with(&REQUIRED_BETAS, existing)
+}
+
+fn merge_with(required: &[&str], existing: Option<&str>) -> String {
+    let mut parts: Vec<&str> = required.to_vec();
     for p in existing
         .unwrap_or_default()
         .split(',')
@@ -191,6 +202,8 @@ fn take_beta(outbound: &crate::http::Outbound) -> (crate::http::Outbound, String
 }
 
 /// 用订阅 access token 发一次 Messages（`body` 已是 Anthropic 形状，`prepare_body` 在此内部完成）。
+/// `mimic` = `Some` 时走全伪装（body 换 [`cc_mimic::prepare_body`]、beta 换全量、身份头伪造并
+/// 摘掉透传头里的同键冲突），`None` 保持透传形态。
 pub async fn messages(
     http: &crate::http::HttpPool,
     api_base: &str,
@@ -198,24 +211,35 @@ pub async fn messages(
     body: Bytes,
     stream: bool,
     outbound: &crate::http::Outbound,
+    mimic: Option<&cc_mimic::MimicIdentity>,
 ) -> Result<MessagesResponse, UpstreamError> {
     let url = format!("{}/messages?beta=true", api_base.trim_end_matches('/'));
-    let body = Bytes::from(prepare_body(&body)?);
+    let body = match mimic {
+        Some(id) => Bytes::from(cc_mimic::prepare_body(&body, id)?),
+        None => Bytes::from(prepare_body(&body)?),
+    };
     let bearer = format!("Bearer {access_token}");
-    let (outbound, beta) = take_beta(outbound);
-    send_messages_at(
-        http,
-        url,
-        &[
-            ("authorization", bearer.as_str()),
-            ("anthropic-version", ANTHROPIC_VERSION),
-            ("anthropic-beta", beta.as_str()),
-        ],
-        body,
-        stream,
-        &outbound,
-    )
-    .await
+    let (mut outbound, client_beta) = take_beta(outbound);
+    let beta = match mimic {
+        Some(_) => cc_mimic::merge_full_betas(Some(client_beta.as_str())),
+        None => merge_beta(Some(client_beta.as_str())),
+    };
+    if mimic.is_some() {
+        outbound = cc_mimic::strip_forged_keys(outbound);
+    }
+    let mut headers: Vec<(String, String)> = vec![
+        ("authorization".to_owned(), bearer),
+        ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
+        ("anthropic-beta".to_owned(), beta),
+    ];
+    if let Some(id) = mimic {
+        headers.extend(cc_mimic::forge_headers(id, stream));
+    }
+    let header_refs: Vec<(&str, &str)> = headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    send_messages_at(http, url, &header_refs, body, stream, &outbound).await
 }
 
 /// `count_tokens`（同样要 Bearer + beta 头；系统提示不影响计数语义，照样前置以通过校验）。
@@ -225,24 +249,38 @@ pub async fn count_tokens(
     access_token: &str,
     body: Bytes,
     outbound: &crate::http::Outbound,
+    mimic: Option<&cc_mimic::MimicIdentity>,
 ) -> Result<Bytes, UpstreamError> {
     let url = format!(
         "{}/messages/count_tokens?beta=true",
         api_base.trim_end_matches('/')
     );
-    let body = prepare_body(&body)?;
-    let (outbound, beta) = take_beta(outbound);
-    let resp = http
+    let body = match mimic {
+        Some(id) => Bytes::from(cc_mimic::prepare_body(&body, id)?),
+        None => Bytes::from(prepare_body(&body)?),
+    };
+    let (mut outbound, client_beta) = take_beta(outbound);
+    let beta = match mimic {
+        Some(_) => cc_mimic::merge_count_betas(Some(client_beta.as_str())),
+        None => merge_beta(Some(client_beta.as_str())),
+    };
+    if mimic.is_some() {
+        outbound = cc_mimic::strip_forged_keys(outbound);
+    }
+    let mut req = http
         .post(&outbound, url)?
         .header("authorization", format!("Bearer {access_token}"))
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("anthropic-beta", beta)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .timeout(Duration::from_mins(2))
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| classify(&e))?;
+        .body(body);
+    if let Some(id) = mimic {
+        for (k, v) in cc_mimic::forge_headers(id, false) {
+            req = req.header(k.as_str(), v.as_str());
+        }
+    }
+    let resp = req.send().await.map_err(|e| classify(&e))?;
     let status = resp.status().as_u16();
     let bytes = resp.bytes().await.map_err(|e| classify(&e))?;
     if !(200..300).contains(&status) {

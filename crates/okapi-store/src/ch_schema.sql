@@ -437,3 +437,175 @@ AS SELECT
     sumIfState(toUInt64(completion_tokens), ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS output_tokens,
     quantilesIfState(0.5, 0.95, 0.99)(latency_ms, ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS latency_q
 FROM request_log_raw GROUP BY channel_id, ts5;
+
+-- Provider totals and settlement totals retain independent provenance after raw retention.
+-- Optional observations: old outbox payloads stay NULL, never synthetic zero.
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_5m_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_1h_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS audio_prompt_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS image_prompt_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS audio_completion_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS image_completion_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_read_audio_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_read_image_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_audio_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_image_tokens Nullable(UInt32) DEFAULT NULL;
+
+-- Fine-grained observation flags distinguish unreported counters from measured zero.
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS audio_prompt_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS image_prompt_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS audio_completion_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS image_completion_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_read_audio_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_read_image_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_audio_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_image_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS reasoning_reported Nullable(UInt8) DEFAULT NULL;
+
+-- No POPULATE: historical recovery chooses one complete source, never adds overlapping rows.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_usage_sources_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfFiveMinutes(ts) AS ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens)) AS source_prompt_total,
+    sumState(toUInt64(completion_tokens)) AS source_completion_total,
+    sumState(toUInt64(cached_tokens)) AS source_cached_total,
+    countIfState(ifNull(cache_read_reported, 0) = 1) AS source_read_n,
+    countIfState(prompt_source = 'upstream' AND ifNull(upstream_prompt_tokens = prompt_tokens, 0)) AS source_prompt_upstream_n,
+    sumIfState(toUInt64(prompt_tokens), prompt_source = 'upstream' AND ifNull(upstream_prompt_tokens = prompt_tokens, 0)) AS source_prompt_upstream_tokens,
+    countIfState(prompt_source = 'estimated' AND isNull(upstream_prompt_tokens)) AS source_prompt_estimated_n,
+    sumIfState(toUInt64(prompt_tokens), prompt_source = 'estimated' AND isNull(upstream_prompt_tokens)) AS source_prompt_estimated_tokens,
+    countIfState(prompt_source = 'local_override' AND ifNull(upstream_prompt_tokens != prompt_tokens, 0)) AS source_prompt_local_override_n,
+    sumIfState(toUInt64(prompt_tokens), prompt_source = 'local_override' AND ifNull(upstream_prompt_tokens != prompt_tokens, 0)) AS source_prompt_local_override_tokens,
+    countIfState(completion_source = 'upstream' AND ifNull(upstream_completion_tokens = completion_tokens, 0)) AS source_completion_upstream_n,
+    sumIfState(toUInt64(completion_tokens), completion_source = 'upstream' AND ifNull(upstream_completion_tokens = completion_tokens, 0)) AS source_completion_upstream_tokens,
+    countIfState(completion_source = 'estimated' AND isNull(upstream_completion_tokens)) AS source_completion_estimated_n,
+    sumIfState(toUInt64(completion_tokens), completion_source = 'estimated' AND isNull(upstream_completion_tokens)) AS source_completion_estimated_tokens,
+    countIfState(completion_source = 'local_override' AND ifNull(upstream_completion_tokens != completion_tokens, 0)) AS source_completion_local_override_n,
+    sumIfState(toUInt64(completion_tokens), completion_source = 'local_override' AND ifNull(upstream_completion_tokens != completion_tokens, 0)) AS source_completion_local_override_tokens,
+    countIfState(prompt_source = 'upstream' AND ifNull(upstream_prompt_tokens = prompt_tokens, 0) AND ifNull(cache_read_reported, 0) = 1 AND cached_tokens <= prompt_tokens) AS source_cache_n,
+    sumIfState(toUInt64(prompt_tokens), prompt_source = 'upstream' AND ifNull(upstream_prompt_tokens = prompt_tokens, 0) AND ifNull(cache_read_reported, 0) = 1 AND cached_tokens <= prompt_tokens) AS source_cache_prompt,
+    sumIfState(toUInt64(cached_tokens), prompt_source = 'upstream' AND ifNull(upstream_prompt_tokens = prompt_tokens, 0) AND ifNull(cache_read_reported, 0) = 1 AND cached_tokens <= prompt_tokens) AS source_cache_read
+FROM request_log_raw
+GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- Sparse historical character evidence. FINAL collapses retries; the greatest
+-- observed duplicate count survives partial raw expiry. No financial mutation.
+CREATE TABLE IF NOT EXISTS legacy_speech_units_v1 (
+    ts DateTime64(3), request_id UUID,
+    user_id UInt64, api_key_id UInt64, group_code LowCardinality(String),
+    model LowCardinality(String), channel_id UInt32, channel_key_id UInt32,
+    requested_model LowCardinality(String), upstream_model LowCardinality(String),
+    endpoint LowCardinality(String), upstream_endpoint LowCardinality(String),
+    node LowCardinality(String), stream UInt8, request_type LowCardinality(String),
+    billing_type LowCardinality(String), log_type UInt8, is_error UInt8,
+    client_type LowCardinality(String), provider LowCardinality(String),
+    characters UInt32, snapshot_epoch UInt64, ratio_snapshot String,
+    basis LowCardinality(String), copies UInt64
+) ENGINE = ReplacingMergeTree(copies)
+PARTITION BY toYYYYMM(ts)
+ORDER BY (ts, request_id, user_id, api_key_id, group_code, model, channel_id,
+    channel_key_id, requested_model, upstream_model, endpoint, upstream_endpoint,
+    node, stream, request_type, billing_type, log_type, is_error, client_type,
+    provider, characters, snapshot_epoch)
+SETTINGS non_replicated_deduplication_window = 1000;
+
+CREATE TABLE IF NOT EXISTS legacy_speech_calibration_v1 (
+    slot UInt8, cursor_ts DateTime64(3), cursor_id UUID, complete UInt8, version UInt64
+) ENGINE = ReplacingMergeTree(version)
+ORDER BY slot
+SETTINGS non_replicated_deduplication_window = 1000;
+
+-- Retain quantities and reporting counts from the same request population.
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS input_unit LowCardinality(String) DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS input_characters Nullable(UInt32) DEFAULT NULL;
+-- Old outbox rows are interpreted before all MVs consume them; keep their original
+-- character carrier and the interpretation basis for raw log audits.
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS historical_prompt_units Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS input_unit_basis LowCardinality(String) DEFAULT '';
+
+-- Independent physical units survive raw retention without rewriting old Token/money views.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_input_units_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfFiveMinutes(ts) AS ts5, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumIfState(toUInt64(ifNull(input_characters, 0)), input_unit = 'characters' AND isNotNull(input_characters) AND prompt_tokens = 0 AND completion_tokens = 0 AND cached_tokens = 0 AND ifNull(cache_write_tokens, 0) = 0 AND reasoning_tokens = 0 AND ifNull(audio_prompt_tokens, 0) = 0 AND ifNull(audio_completion_tokens, 0) = 0 AND ifNull(image_prompt_tokens, 0) = 0 AND ifNull(image_completion_tokens, 0) = 0) AS unit_characters,
+    countIfState(input_unit = 'characters' AND isNotNull(input_characters) AND prompt_tokens = 0 AND completion_tokens = 0 AND cached_tokens = 0 AND ifNull(cache_write_tokens, 0) = 0 AND reasoning_tokens = 0 AND ifNull(audio_prompt_tokens, 0) = 0 AND ifNull(audio_completion_tokens, 0) = 0 AND ifNull(image_prompt_tokens, 0) = 0 AND ifNull(image_completion_tokens, 0) = 0) AS unit_character_n,
+    countIfState(input_unit = 'tokens' AND isNull(input_characters)) AS unit_token_n
+FROM request_log_raw
+GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_totals_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfFiveMinutes(ts) AS ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS cache_writes,
+    countIfState(ifNull(cache_write_reported, 0) = 1 AND isNotNull(cache_write_tokens)) AS cache_write_n,
+    countIfState(ifNull(cache_read_reported, 0) = 1) AS cache_read_n
+FROM request_log_raw
+GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- Retained measured detail sums. Missing flags/values never become observed zeros.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_token_details_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfFiveMinutes(ts) AS ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumIfState(toUInt64(ifNull(audio_prompt_tokens, 0)), ifNull(audio_prompt_reported, 0) = 1 AND isNotNull(audio_prompt_tokens)) AS observed_audio_prompt_tokens,
+    countIfState(ifNull(audio_prompt_reported, 0) = 1 AND isNotNull(audio_prompt_tokens)) AS observed_audio_prompt_tokens_n,
+    sumIfState(toUInt64(ifNull(image_prompt_tokens, 0)), ifNull(image_prompt_reported, 0) = 1 AND isNotNull(image_prompt_tokens)) AS observed_image_prompt_tokens,
+    countIfState(ifNull(image_prompt_reported, 0) = 1 AND isNotNull(image_prompt_tokens)) AS observed_image_prompt_tokens_n,
+    sumIfState(toUInt64(ifNull(audio_completion_tokens, 0)), ifNull(audio_completion_reported, 0) = 1 AND isNotNull(audio_completion_tokens)) AS observed_audio_completion_tokens,
+    countIfState(ifNull(audio_completion_reported, 0) = 1 AND isNotNull(audio_completion_tokens)) AS observed_audio_completion_tokens_n,
+    sumIfState(toUInt64(ifNull(image_completion_tokens, 0)), ifNull(image_completion_reported, 0) = 1 AND isNotNull(image_completion_tokens)) AS observed_image_completion_tokens,
+    countIfState(ifNull(image_completion_reported, 0) = 1 AND isNotNull(image_completion_tokens)) AS observed_image_completion_tokens_n,
+    sumIfState(toUInt64(ifNull(cache_read_audio_tokens, 0)), ifNull(cache_read_audio_reported, 0) = 1 AND isNotNull(cache_read_audio_tokens)) AS observed_cache_read_audio_tokens,
+    countIfState(ifNull(cache_read_audio_reported, 0) = 1 AND isNotNull(cache_read_audio_tokens)) AS observed_cache_read_audio_tokens_n,
+    sumIfState(toUInt64(ifNull(cache_read_image_tokens, 0)), ifNull(cache_read_image_reported, 0) = 1 AND isNotNull(cache_read_image_tokens)) AS observed_cache_read_image_tokens,
+    countIfState(ifNull(cache_read_image_reported, 0) = 1 AND isNotNull(cache_read_image_tokens)) AS observed_cache_read_image_tokens_n,
+    sumIfState(toUInt64(ifNull(cache_write_audio_tokens, 0)), ifNull(cache_write_audio_reported, 0) = 1 AND isNotNull(cache_write_audio_tokens)) AS observed_cache_write_audio_tokens,
+    countIfState(ifNull(cache_write_audio_reported, 0) = 1 AND isNotNull(cache_write_audio_tokens)) AS observed_cache_write_audio_tokens_n,
+    sumIfState(toUInt64(ifNull(cache_write_image_tokens, 0)), ifNull(cache_write_image_reported, 0) = 1 AND isNotNull(cache_write_image_tokens)) AS observed_cache_write_image_tokens,
+    countIfState(ifNull(cache_write_image_reported, 0) = 1 AND isNotNull(cache_write_image_tokens)) AS observed_cache_write_image_tokens_n,
+    sumIfState(toUInt64(ifNull(reasoning_tokens, 0)), ifNull(reasoning_reported, 0) = 1 AND isNotNull(reasoning_tokens)) AS observed_reasoning_tokens,
+    countIfState(ifNull(reasoning_reported, 0) = 1 AND isNotNull(reasoning_tokens)) AS observed_reasoning_tokens_n
+FROM request_log_raw
+GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- Token output and duration share a unit-aware sample population. Character
+-- requests remain in general latency aggregates, never in this denominator.
+-- No POPULATE or raw TTL: historical gaps are recovered by bounded reads.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_output_rate_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfFiveMinutes(ts) AS ts5, user_id, api_key_id, group_code, model, channel_id,
+    requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    countIfState((input_unit = 'tokens' AND isNull(input_characters)) OR
+        (input_unit = 'characters' AND isNotNull(input_characters) AND prompt_tokens = 0 AND completion_tokens = 0 AND cached_tokens = 0 AND ifNull(cache_write_tokens, 0) = 0 AND reasoning_tokens = 0 AND ifNull(audio_prompt_tokens, 0) = 0 AND ifNull(audio_completion_tokens, 0) = 0 AND ifNull(image_prompt_tokens, 0) = 0 AND ifNull(image_completion_tokens, 0) = 0)) AS known_units,
+    countIfState(input_unit = 'tokens' AND isNull(input_characters)) AS token_requests,
+    countIfState(input_unit = 'tokens' AND isNull(input_characters) AND ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS samples,
+    sumIfState(toUInt64(latency_ms), input_unit = 'tokens' AND isNull(input_characters) AND ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS total_ms,
+    sumIfState(toUInt64(completion_tokens), input_unit = 'tokens' AND isNull(input_characters) AND ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS output_tokens
+FROM request_log_raw
+GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;

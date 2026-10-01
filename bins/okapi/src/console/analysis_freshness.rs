@@ -14,9 +14,12 @@ pub async fn read(state: &AppState) -> Result<Value, AppError> {
     let ingest_ms = rows
         .first()
         .map_or(0, |r| super::stats::ch_i64(r, "ingest_ms"));
-    let (pending, oldest, failed): (i64, Option<DateTime<Utc>>, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE status = 0), min(created_at) FILTER (WHERE status = 0), count(*) FILTER (WHERE status = 2) FROM billing_outbox WHERE status IN (0, 2)"
-    ).fetch_one(&state.pg).await.map_err(okapi_store::StoreError::from)?;
+    let backlog = okapi_store::delivery::backlog(&state.pg).await?;
+    let (pending, oldest, failed) = (
+        backlog.pending_events,
+        backlog.oldest_pending_at,
+        backlog.failed_events,
+    );
     let latest: Option<DateTime<Utc>> =
         sqlx::query_scalar("SELECT created_at FROM billing_outbox ORDER BY id DESC LIMIT 1")
             .fetch_optional(&state.pg)
@@ -35,6 +38,7 @@ pub async fn read(state: &AppState) -> Result<Value, AppError> {
         "last_event_at": (event_ms > 0).then(|| DateTime::<Utc>::from_timestamp_millis(event_ms)).flatten(),
         "last_ingested_at": (ingest_ms > 0).then(|| DateTime::<Utc>::from_timestamp_millis(ingest_ms)).flatten(),
         "pending_events": pending, "failed_events": failed,
+        "ch_pending_events": backlog.ch_pending_events,
         "oldest_pending_at": oldest, "queue_age_seconds": age, "event_gap_seconds": gap,
         "stale": is_stale(age, gap, failed),
         "checked_at": now

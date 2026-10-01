@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_ch_batches SET next_retry_at=now()-interval '1 second' WHERE id=(SELECT ch_batch_id FROM billing_outbox WHERE id=$1) AND status=0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01668ce1786fddae8d02b003b40e77107c8ffe3471bae4135a86c88441e670ae"
+}

@@ -27,6 +27,123 @@ const detailedLog = {
   pricing_snapshot: { mode: 'ratio', epoch: 5, model_ratio: '1', completion_ratio: '4', cache_ratio: '0.1', cache_write_ratio: '1.25', final_unit_price_input_per_1m_usd: '1.6', group: 'default', group_ratio: '1', user_multiplier: '1', rules: [{ code: 'night', multiplier: '0.8' }] },
 }
 
+const cacheSubsetLabels = ['其中 5 分钟写入', '其中 1 小时写入', '缓存读取 · 音频', '缓存读取 · 图片', '缓存写入 · 音频', '缓存写入 · 图片']
+
+for (const fixture of [
+  { name: '未上报', usage: {}, visible: {} },
+  { name: '空值', usage: { cache_write_5m_tokens: null, cache_write_1h_tokens: null, cache_read_modalities: null, cache_write_modalities: null }, visible: {} },
+  { name: '时长含真实零', usage: { cache_write_5m_tokens: 100, cache_write_1h_tokens: 0 }, visible: { '其中 5 分钟写入': '100', '其中 1 小时写入': '0' } },
+  { name: '读取含真实零', usage: { cache_read_modalities: { audio_tokens: 0, image_tokens: 40 } }, visible: { '缓存读取 · 音频': '0', '缓存读取 · 图片': '40' } },
+  { name: '写入含真实零', usage: { cache_write_modalities: { audio_tokens: 30, image_tokens: 0 } }, visible: { '缓存写入 · 音频': '30', '缓存写入 · 图片': '0' } },
+  { name: '时长拆分不完整', usage: { cache_write_5m_tokens: 100 }, visible: {} },
+]) {
+  for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
+    test(`缓存子项按实报展示 ${path} ${fixture.name}：保留总量与真实零，不生成缺失占位`, async ({ page }) => {
+      await prepare(page)
+      const row = { ...detailedLog, usage: { ...detailedLog.usage, ...fixture.usage } }
+      await page.route('**/api/me/logs?*', (route) => route.fulfill({ json: { data: [row], next_before: null } }))
+      await page.route('**/admin/logs?*', (route) => route.request().isNavigationRequest()
+        ? route.fallback() : route.fulfill({ json: { data: [row] } }))
+      await page.goto(path)
+      await page.getByRole('button', { name: '展开 req-20 的明细' }).click()
+      const breakdown = page.locator('section').filter({ has: page.getByRole('heading', { name: '用量拆分', exact: true }) })
+      await expect(breakdown).toHaveCount(1)
+      for (const label of ['缓存读取', '缓存写入']) {
+        await expect(breakdown.locator('dt').getByText(label, { exact: true }).locator('..').locator('dd')).toHaveText('100')
+      }
+      const subsets = breakdown.locator('[data-slot="cache-subsets"]')
+      const visible: Record<string, string> = fixture.visible
+      await expect(subsets).toHaveCount(Object.keys(visible).length ? 1 : 0)
+      for (const label of cacheSubsetLabels) {
+        const term = breakdown.locator('dt').getByText(label, { exact: true })
+        if (visible[label] === undefined) await expect(term).toHaveCount(0)
+        else await expect(term.locator('..').locator('dd')).toHaveText(visible[label])
+      }
+      if (Object.keys(visible).length) await expect(subsets).not.toContainText('未上报')
+      if (path.startsWith('/portal/') && fixture.name === '时长含真实零') {
+        await subsets.scrollIntoViewIfNeeded()
+        await page.screenshot({ path: 'test-results/cache-subsets-reported-only.png', animations: 'disabled' })
+      }
+    })
+  }
+}
+
+for (const fixture of [
+  { name: '缺失', values: {}, shown: false },
+  { name: '实报零', values: { cache_write_5m_tokens: 0, cache_write_1h_tokens: 0, cache_write_ttl_samples: 1,
+    cache_read_audio_tokens: 0, cache_read_image_tokens: 0, cache_read_modal_samples: 1,
+    cache_write_audio_tokens: 0, cache_write_image_tokens: 0, cache_write_modal_samples: 1 }, shown: true },
+  { name: '无实报样本的占位零', values: { cache_write_5m_tokens: 0, cache_write_1h_tokens: 0, cache_write_ttl_samples: 0,
+    cache_read_audio_tokens: 0, cache_read_image_tokens: 0, cache_read_modal_samples: 0,
+    cache_write_audio_tokens: 0, cache_write_image_tokens: 0, cache_write_modal_samples: 0 }, shown: false },
+]) {
+  test(`缓存子项按实报展示 汇总 ${fixture.name}：不把缺失样本当成零`, async ({ page }) => {
+    await prepare(page)
+    await page.route('**/api/me/logs/stat?*', (route) => route.fulfill({ json: {
+      records: 1, settled: 1, failed: 0, refunded: 0, amount_micro: 4696, prompt_tokens: 1000,
+      completion_tokens: 500, cached_tokens: 100, cache_read_samples: 1, cache_write_tokens: 100, cache_write_samples: 1,
+      ...fixture.values,
+    } }))
+    await page.goto('/portal/logs?scope=user')
+    const summary = page.getByRole('region', { name: '筛选范围汇总' })
+    await summary.getByText('更多用量指标', { exact: true }).click()
+    await expect(summary.getByText('缓存写入', { exact: true }).locator('..')).toContainText('100')
+    for (const label of cacheSubsetLabels) {
+      const term = summary.locator('dt').getByText(label, { exact: true })
+      if (fixture.shown) await expect(term.locator('..').locator('dd').first()).toHaveText('0')
+      else await expect(term).toHaveCount(0)
+    }
+  })
+}
+
+test('多模态快照：缓存交集和图片输出只收费一次，TTL不增加总量，缺单价不猜测', () => {
+  const row = { ...detailedLog, usage: { ...detailedLog.usage,
+    cached_tokens: 200, cache_write_tokens: 100, cache_write_5m_tokens: 60, cache_write_1h_tokens: 40,
+    cache_read_modalities: { audio_tokens: 30, image_tokens: 20 }, cache_write_modalities: { audio_tokens: 10, image_tokens: 15 },
+    audio_prompt_tokens: 40, image_prompt_tokens: 50, audio_completion_tokens: 80, image_completion_tokens: 120,
+  }, pricing_snapshot: { ...detailedLog.pricing_snapshot, audio_ratio: '16', audio_completion_ratio: '2', image_ratio: '2',
+    modality_ratios: { audio_cache_read: '8', image_cache_read: '0.5', audio_cache_write: '20', image_cache_write: '2.5', image_output: '3' }, service_tier: 'priority', tier_ratio: '2' } }
+  const lines = billingLines(row)
+  expect(lines.reduce((total, line) => total + (line.quantity ?? 0), 0)).toBe(1500)
+  expect(lines.find((line) => line.name === 'normalInput')?.quantity).toBe(610)
+  expect(lines.find((line) => line.name === 'textOutput')?.quantity).toBe(300)
+  expect(lines.find((line) => line.name === 'cacheReadText')?.quantity).toBe(150)
+  expect(lines.find((line) => line.name === 'cacheWriteText')?.quantity).toBe(75)
+  expect(lines.find((line) => line.name === 'imageOutput')).toMatchObject({ quantity: 120, unitMicro: 4_800_000, amountMicro: 576 })
+  expect(lines.find((line) => line.name === 'cacheReadAudio')).toMatchObject({ quantity: 30, unitMicro: 12_800_000, amountMicro: 384 })
+  expect(billingLines({ ...row, pricing_snapshot: { ...row.pricing_snapshot, modality_ratios: {} } }).find((line) => line.name === 'imageOutput')?.amountMicro).toBeNull()
+  expect(billingLines({ ...row, usage: { ...row.usage, image_completion_tokens: null } })).toEqual([])
+})
+
+test('新增用量指标：汇总保留覆盖率，详情显示TTL、图片输出、来源和服务层级', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  const row = { ...detailedLog, usage: { ...detailedLog.usage, image_completion_tokens: 20,
+    cache_write_5m_tokens: 60, cache_write_1h_tokens: 40, prompt_source: 'local_override', completion_source: 'upstream', upstream_usage: { prompt_tokens: 1200, completion_tokens: 500 },
+  }, pricing_snapshot: { ...detailedLog.pricing_snapshot, service_tier: 'priority', tier_ratio: '2', modality_ratios: { image_output: '3' } } }
+  await page.route('**/api/me/logs?*', (route) => route.fulfill({ json: { data: [row], next_before: null } }))
+  await page.route('**/api/me/logs/stat?*', (route) => route.fulfill({ json: { records: 10, settled: 10, failed: 0, refunded: 0, amount_micro: 4696, prompt_tokens: 1000, completion_tokens: 500, cache_read_samples: 1, cached_tokens: 100,
+    cache_write_tokens: 100, cache_write_samples: 1, cache_write_5m_tokens: 60, cache_write_1h_tokens: 40, cache_write_ttl_samples: 1, image_completion_tokens: 20, image_completion_samples: 1,
+  } }))
+  await page.goto('/portal/logs?scope=user')
+  const summary = page.getByRole('region', { name: '筛选范围汇总' })
+  await summary.getByText('更多用量指标', { exact: true }).click()
+  await expect(summary).toContainText('已上报 1 / 10 条；缺失不作零')
+  await expect(summary.getByText('其中 5 分钟写入', { exact: true }).locator('..')).toContainText('60')
+  await expect(summary.getByText('图片输出', { exact: true }).locator('..')).toContainText('20')
+  await summary.getByText('更多用量指标', { exact: true }).click()
+  await page.getByRole('button', { name: '展开 req-20 的明细' }).click()
+  const detail = page.getByRole('dialog', { name: '请求与账单详情' })
+  await expect(detail).toContainText('本地覆盖')
+  await expect(detail).toContainText('上游实报')
+  await expect(detail).toContainText('1,200')
+  await expect(detail).toContainText('其中 5 分钟写入')
+  await expect(detail).toContainText('服务层级 priority ×2')
+  await expect(detail).toContainText('二者口径不同')
+  await detail.getByText('缓存子项', { exact: true }).scrollIntoViewIfNeeded()
+  await page.screenshot({ path: 'test-results/extended-token-breakdown.png', animations: 'disabled' })
+})
+
 test('缓存输入占比：缺失和异常分母不推算，微小命中不舍入为零，部分命中不显示100%', () => {
   const share = (input: number, read: number) => cacheReadShare({ ...detailedLog, usage: { ...detailedLog.usage, prompt_tokens: input, cached_tokens: read } }, 'zh-CN')
   expect(share(1000, 800)).toBe('80%')
@@ -58,31 +175,45 @@ for (const theme of ['light', 'dark']) {
     await page.goto('/portal/logs?scope=user')
     const table = page.getByRole('table', { name: '用量日志', exact: true })
     const cells = table.locator('[data-slot="log-token-usage"]')
+    const reads = cells.locator('[data-slot="cache-read"]'), writes = cells.locator('[data-slot="cache-write"]')
     await expect(cells).toHaveCount(8)
     await expect(table.getByRole('columnheader')).toHaveCount(8)
     await expect(table.getByRole('columnheader', { name: '缓存读 / 写', exact: true })).toHaveCount(0)
     await expect(cells.nth(0)).toContainText('输入1,000')
     await expect(cells.nth(0)).toContainText('输出500')
-    await expect(cells.nth(0)).toContainText('命中 80080%')
+    await expect(reads.nth(0)).toHaveText('80080%')
+    await expect(reads.nth(0)).toHaveAttribute('data-state', 'hit')
     await expect(cells.nth(0).getByLabel('缓存读取占输入 80%')).toBeVisible()
-    await expect(cells.nth(0)).toContainText('写入 100')
-    await expect(cells.nth(1)).toContainText('未命中')
-    await expect(cells.nth(1)).toContainText('写入 1,000')
-    await expect(cells.nth(2)).toContainText('未命中')
-    await expect(cells.nth(2)).toContainText('写入 0')
-    await expect(cells.nth(3)).toContainText('读取 未上报')
-    await expect(cells.nth(3)).toContainText('写入 未上报')
-    await expect(cells.nth(4)).toContainText('读取 未记录')
-    await expect(cells.nth(4)).toContainText('写入 未记录')
-    await expect(cells.nth(5)).toContainText('读取 未上报')
-    await expect(cells.nth(5)).toContainText('写入 100')
-    for (const index of [1, 2, 3, 4, 5]) await expect(cells.nth(index).locator('.lucide-zap')).toHaveCount(0)
+    await expect(writes.nth(0)).toHaveText('100')
+    await expect(writes.nth(0)).toHaveAttribute('data-state', 'write')
+    await expect(reads.nth(1)).toHaveText('0')
+    await expect(writes.nth(1)).toHaveText('1,000')
+    await expect(reads.nth(2)).toHaveText('0')
+    await expect(writes.nth(2)).toHaveText('0')
+    for (const index of [1, 2]) {
+      await expect(reads.nth(index)).toHaveAttribute('data-state', 'empty')
+      await expect(reads.nth(index).locator('.lucide-zap-off')).toHaveCount(1)
+    }
+    for (const index of [3, 4, 5]) {
+      await expect(reads.nth(index)).toHaveText('—')
+      await expect(reads.nth(index)).toHaveAttribute('data-state', 'missing')
+      await expect(reads.nth(index)).toHaveClass(/border-dashed/)
+    }
+    for (const index of [3, 4]) {
+      await expect(writes.nth(index)).toHaveText('—')
+      await expect(writes.nth(index)).toHaveAttribute('data-state', 'missing')
+      await expect(writes.nth(index)).toHaveClass(/border-dashed/)
+    }
+    await expect(reads.nth(3)).toHaveAccessibleName('缓存读取 未上报')
+    await expect(reads.nth(4)).toHaveAccessibleName('缓存读取 未记录')
+    await expect(writes.nth(5)).toHaveText('100')
+    await expect(cells.locator('[data-slot="token-cache"]').filter({ hasText: /未上报|未记录|未命中|写入/ })).toHaveCount(0)
     await expect(cells.nth(6)).toContainText('输入12,345,678')
-    await expect(cells.nth(6)).toContainText('写入 1,000,000')
+    await expect(writes.nth(6)).toHaveText('1,000,000')
     await expect(cells.nth(7)).toContainText('<0.1%')
     for (const row of await table.locator('tbody tr').all()) expect(Math.abs(await row.evaluate((node) => node.offsetHeight) - 44)).toBeLessThanOrEqual(1)
     for (const cell of await cells.all()) expect((await cell.boundingBox())!.x).toBeCloseTo((await cells.first().boundingBox())!.x, 1)
-    for (const tag of await cells.first().locator('[title^="缓存读取 800"], [title^="缓存写入 100"]').all()) {
+    for (const tag of await cells.first().locator('[data-slot="cache-read"], [data-slot="cache-write"]').all()) {
       const contrast = await tag.evaluate((node) => {
         const canvas = document.createElement('canvas'), ctx = canvas.getContext('2d')!
         canvas.width = canvas.height = 1
@@ -111,6 +242,51 @@ for (const theme of ['light', 'dark']) {
     await page.getByRole('button', { name: '展开 req-20 的明细' }).focus()
     await page.keyboard.press('Enter')
     await expect(page.getByRole('dialog')).toContainText('缓存读取')
+  })
+}
+
+for (const language of ['zh-CN', 'en']) {
+  test(`缓存图标提示 ${language}：悬停与键盘可读，实报零和缺失可辨，保留明细入口`, async ({ page }) => {
+    await prepare(page)
+    await page.addInitScript((language) => localStorage.setItem('okapi.lang', language), language)
+    const records = [
+      { ...detailedLog, usage: { ...detailedLog.usage, cached_tokens: 800 } },
+      { ...detailedLog, usage: { ...detailedLog.usage, cached_tokens: 0, cache_write_tokens: 0 } },
+      { ...detailedLog, usage: { ...detailedLog.usage, cached_tokens: 0, cache_read_reported: false, cache_write_reported: false, cache_write_tokens: null } },
+      { ...log, usage: { ...log.usage, cached_tokens: 0 } },
+    ].map((row, i) => ({ ...row, id: 20 - i, request_id: `req-${20 - i}` }))
+    await page.route('**/api/me/logs?*', (route) => route.fulfill({ json: { data: records, next_before: null } }))
+    await page.goto('/portal/logs?scope=user')
+    const cells = page.locator('[data-slot="log-token-usage"]')
+    const reads = cells.locator('[data-slot="cache-read"]'), writes = cells.locator('[data-slot="cache-write"]')
+    const tip = page.getByRole('tooltip')
+    await reads.nth(0).hover()
+    await expect(tip).toContainText('800')
+    await expect(tip).toContainText('80%')
+    await expect(reads.nth(0)).toHaveAccessibleDescription(language === 'en' ? /billing snapshot/ : /账单快照/)
+    await page.mouse.move(0, 0)
+    await page.keyboard.press('Escape')
+    await expect(tip).toHaveCount(0)
+    await reads.nth(1).focus()
+    await expect(tip).toContainText(language === 'en' ? 'reported zero' : '已上报：本次缓存读取为 0')
+    await page.keyboard.press('Escape')
+    await writes.nth(1).focus()
+    await expect(tip).toContainText(language === 'en' ? '0 tokens written' : '缓存写入 0')
+    await page.keyboard.press('Escape')
+    for (const [index, state] of [[2, language === 'en' ? 'Not reported' : '未上报'], [3, language === 'en' ? 'Not recorded' : '未记录']] as const) {
+      await reads.nth(index).focus()
+      await expect(tip).toContainText(state)
+      await expect(reads.nth(index)).toHaveAccessibleDescription(language === 'en' ? /unknown/ : /不能判断是否命中/)
+      await page.keyboard.press('Escape')
+      await writes.nth(index).focus()
+      await expect(tip).toContainText(state)
+      await expect(writes.nth(index)).toHaveAccessibleDescription(language === 'en' ? /not treated as zero/ : /不按 0 展示/)
+      await page.keyboard.press('Escape')
+    }
+    const caches = cells.locator('[data-slot="token-cache"]')
+    for (const cache of await caches.all()) expect((await cache.boundingBox())!.width).toBeLessThanOrEqual(384)
+    await page.getByRole('button', { name: language === 'en' ? 'Expand details for req-20' : '展开 req-20 的明细' }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
   })
 }
 
@@ -185,10 +361,10 @@ test('日志汇总独立于已加载记录，退款/缺失/真实零明确，抽
   const summary = page.getByRole('region', { name: '筛选范围汇总' })
   await expect(summary).toContainText('77')
   await expect(summary).toContainText('120 ms')
-  await expect(page.getByText('已加载 3 / 共 77 条')).toBeVisible()
+  await expect(page.getByRole('navigation', { name: '分页' })).toContainText('1–3 / 共 77 条')
   await expect(page.getByRole('table').getByText('已退款')).toBeVisible()
   await expect(page.getByRole('table').getByText('非流式')).toBeVisible()
-  await expect(page.getByRole('button', { name: '导出已加载 CSV' })).toHaveAttribute('title', '仅导出已加载的 3 条，不是全部筛选结果。')
+  await expect(page.getByRole('button', { name: '导出本页 CSV' })).toHaveAttribute('title', '仅导出当前页的 3 条，不是全部筛选结果。')
   await page.screenshot({ path: 'test-results/usage-logs-summary-desktop.png', animations: 'disabled' })
   await page.getByRole('button', { name: '展开 req-20 的明细' }).click()
   const detail = page.getByRole('dialog', { name: '请求与账单详情' })
@@ -287,6 +463,264 @@ async function prepare(page: Page) {
   return queries
 }
 
+async function pagedLogs(page: Page) {
+  await prepare(page)
+  const queries: URL[] = []
+  const rows = Array.from({ length: 43 }, (_, index) => ({ ...detailedLog, id: 100 - index, request_id: `paged-${100 - index}` }))
+  await page.route('**/api/me/logs/stat?*', (route) => {
+    queries.push(new URL(route.request().url()))
+    return route.fulfill({ json: { records: 43, settled: 43, failed: 0, refunded: 0, pending: 0, amount_micro: 123456, refunded_amount_micro: 0, prompt_tokens: 43000, completion_tokens: 21500, cached_tokens: 4300, cache_read_samples: 43, avg_latency_ms: 800, latency_samples: 43, avg_ttft_ms: 100, ttft_samples: 43 } })
+  })
+  await page.route('**/api/me/logs?*', (route) => {
+    const url = new URL(route.request().url())
+    queries.push(url)
+    const limit = Number(url.searchParams.get('limit'))
+    const before = Number(url.searchParams.get('before') ?? 101)
+    const remaining = rows.filter((row) => row.id < before)
+    const data = remaining.slice(0, limit)
+    return route.fulfill({ json: { data, next_before: remaining.length > limit ? data.at(-1)!.id : null } })
+  })
+  return queries
+}
+
+test('门户分页：逐页替换、末页和缓存返回、每页条数切换，统计不跟随翻页，CSV 只导出本页', async ({ page }) => {
+  const queries = await pagedLogs(page)
+  await page.goto('/portal/logs?scope=user&model=gpt-alpha&api_key_id=1')
+  const rows = page.getByRole('table').locator('tbody tr')
+  const footer = page.getByRole('navigation', { name: '分页' })
+  const summary = page.getByRole('region', { name: '筛选范围汇总' })
+  const listQueries = () => queries.filter((url) => url.pathname === '/api/me/logs')
+  const statQueries = () => queries.filter((url) => url.pathname.endsWith('/stat'))
+  await expect(rows).toHaveCount(10)
+  await expect(footer).toContainText('1–10 / 共 43 条')
+  expect(listQueries()[0].searchParams.get('limit')).toBe('10')
+  await expect(footer.getByRole('button', { name: '上一页' })).toBeDisabled()
+  const statsText = await summary.innerText(), statsCount = statQueries().length
+  await page.locator('[data-slot="table-viewport"]').evaluate((el) => { el.scrollTop = 300 })
+  await footer.getByRole('button', { name: '下一页' }).click()
+  await expect(footer).toContainText('11–20 / 共 43 条')
+  await expect(rows).toHaveCount(10)
+  await expect(page.getByRole('button', { name: '展开 paged-100 的明细', exact: true })).toHaveCount(0)
+  expect(await page.locator('[data-slot="table-viewport"]').evaluate((el) => el.scrollTop)).toBe(0)
+  for (const number of [3, 4, 5]) {
+    await footer.getByRole('button', { name: '下一页' }).click()
+    await expect(footer).toContainText(`第 ${number} 页`)
+  }
+  await expect(footer).toContainText('41–43 / 共 43 条')
+  await expect(rows).toHaveCount(3)
+  await expect(footer.getByRole('button', { name: '下一页' })).toBeDisabled()
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '导出本页 CSV' }).click()])
+  const csv = await readFile((await download.path())!, 'utf8')
+  expect(csv.trim().split('\n')).toHaveLength(4)
+  expect(csv).toContain('paged-60')
+  expect(csv).not.toContain('paged-100')
+  const count = listQueries().length
+  await footer.getByRole('button', { name: '上一页' }).click()
+  await expect(footer).toContainText('第 4 页')
+  await expect(rows).toHaveCount(10)
+  expect(listQueries()).toHaveLength(count)
+  expect(await summary.innerText()).toBe(statsText)
+  expect(statQueries()).toHaveLength(statsCount)
+  for (const size of ['50', '100', '20', '10']) {
+    await footer.getByRole('combobox', { name: '每页条数' }).selectOption(size)
+    await expect(rows).toHaveCount(Math.min(Number(size), 43))
+    await expect(footer).toContainText('第 1 页')
+    await expect(footer.getByRole('button', { name: '上一页' })).toBeDisabled()
+  }
+  expect(statQueries()).toHaveLength(statsCount)
+  for (const url of listQueries()) {
+    expect(url.searchParams.get('model')).toBe('gpt-alpha')
+    expect(url.searchParams.get('api_key_id')).toBe('1')
+    expect(url.searchParams.get('scope')).toBe('user')
+  }
+  for (const url of statQueries()) {
+    expect(url.searchParams.has('before')).toBe(false)
+    expect(url.searchParams.has('limit')).toBe(false)
+  }
+})
+
+test('门户分页失败保留当前页且可重试；刷新重置游标，筛选及页宽不带旧页数据', async ({ page }) => {
+  const queries = await pagedLogs(page)
+  let fail = true
+  await page.route('**/api/me/logs?*', async (route) => {
+    if (new URL(route.request().url()).searchParams.has('before') && fail) {
+      return route.fulfill({ status: 503, json: { error: { code: 'internal_error' } } })
+    }
+    return route.fallback()
+  })
+  await page.goto('/portal/logs?scope=user')
+  const footer = page.getByRole('navigation', { name: '分页' })
+  const next = footer.getByRole('button', { name: '下一页' })
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
+  await next.click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(footer).toContainText('第 1 页')
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
+  await expect(next).toBeEnabled()
+  fail = false
+  await next.click()
+  await expect(footer).toContainText('第 2 页')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  const count = queries.length
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(footer).toContainText('第 1 页')
+  await expect(page.getByRole('button', { name: '展开 paged-100 的明细', exact: true })).toBeVisible()
+  await expect.poll(() => queries.slice(count).filter((url) => url.pathname === '/api/me/logs').length).toBe(1)
+  expect(queries.slice(count).filter((url) => url.pathname === '/api/me/logs').every((url) => !url.searchParams.has('before'))).toBe(true)
+  await next.click()
+  await expect(footer).toContainText('第 2 页')
+  await page.getByRole('switch', { name: '只看失败' }).click()
+  await expect(footer).toContainText('第 1 页')
+  await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.get('errors_only')).toBe('true')
+  expect(queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.has('before')).toBe(false)
+})
+
+test('门户分页边界：加载时锁定分页与导出，旧接口的多余末页游标不会跳进空页', async ({ page }) => {
+  await pagedLogs(page)
+  let release: () => void = () => {}
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let nextCalls = 0
+  await page.route('**/api/me/logs?*', async (route) => {
+    if (!new URL(route.request().url()).searchParams.has('before')) return route.fallback()
+    nextCalls += 1
+    await gate
+    return route.fulfill({ json: { data: [], next_before: null } })
+  })
+  await page.goto('/portal/logs?scope=user')
+  const footer = page.getByRole('navigation', { name: '分页' })
+  const next = footer.getByRole('button', { name: '下一页' })
+  const summary = page.getByRole('region', { name: '筛选范围汇总' })
+  await summary.getByRole('button', { name: '缓存读取' }).focus()
+  await expect(page.getByRole('tooltip')).toContainText('已上报 43 / 43 条')
+  await page.keyboard.press('Escape')
+  await next.click()
+  await expect(next).toBeDisabled()
+  await expect(footer.getByRole('combobox')).toBeDisabled()
+  await expect(page.getByRole('button', { name: '导出本页 CSV' })).toBeDisabled()
+  expect(nextCalls).toBe(1)
+  release()
+  await expect(footer.getByRole('combobox')).toBeEnabled()
+  await expect(next).toBeDisabled()
+  await expect(footer).toContainText('第 1 页')
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
+  await expect(page.getByRole('button', { name: '导出本页 CSV' })).toBeEnabled()
+})
+
+for (const { width, height, language } of [
+  { width: 1366, height: 768, language: 'zh-CN' }, { width: 1440, height: 900, language: 'zh-CN' },
+  { width: 1440, height: 900, language: 'en' }, { width: 1920, height: 1080, language: 'zh-CN' },
+]) {
+  test(`管理日志数据密度 ${width}x${height} ${language}：压缩工具区，长名称不撑宽，分页常驻`, async ({ page }) => {
+    await prepare(page)
+    await page.addInitScript((language) => {
+      localStorage.setItem('okapi.lang', language)
+      localStorage.setItem('okapi.theme', language === 'en' ? 'dark' : 'light')
+    }, language)
+    await page.setViewportSize({ width, height })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const rows = Array.from({ length: 50 }, (_, index) => ({
+      ...detailedLog, request_id: `density-${index}`,
+      username: `user-with-a-long-name-${index}`, channel_name: `channel-with-a-long-name-${index}`,
+      model: `modal-3c25fa6193c34e5ab24f49b5c95409dd-${index}`, client_type: 'long-client-identifier',
+    }))
+    await page.route('**/admin/logs?*', (route) => route.request().isNavigationRequest()
+      ? route.fallback()
+      : route.fulfill({ json: { data: rows } }))
+    await page.goto('/admin/logs?limit=50')
+    const table = page.getByRole('table'), frame = page.locator('[data-slot="table-frame"]')
+    await expect(table.locator('tbody tr')).toHaveCount(50)
+    const box = (await frame.boundingBox())!
+    expect(box.y).toBeLessThanOrEqual(300)
+    expect(box.height).toBeGreaterThanOrEqual(height - 390)
+    expect((await page.locator('[data-slot="admin-log-filters"]').boundingBox())!.height).toBeLessThanOrEqual(110)
+    expect((await page.locator('[data-slot="admin-log-summary"]').boundingBox())!.height).toBeLessThanOrEqual(70)
+    await expect(page.locator('[data-slot="pagination"]')).toBeInViewport({ ratio: 1 })
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    const viewport = page.locator('[data-slot="table-viewport"]')
+    expect(await viewport.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true)
+    const visible = await table.locator('tbody tr').evaluateAll((nodes) => {
+      const viewport = nodes[0].closest('[data-slot="table-viewport"]')!.getBoundingClientRect()
+      const header = nodes[0].closest('table')!.querySelector('thead')!.getBoundingClientRect()
+      return nodes.filter((node) => {
+        const row = node.getBoundingClientRect()
+        return row.top >= header.bottom - 1 && row.bottom <= viewport.bottom + 1
+      }).length
+    })
+    expect(visible).toBeGreaterThanOrEqual(Math.floor((height - 380) / 44) - 1)
+    expect(Math.abs((await table.locator('tbody tr').first().boundingBox())!.height - 44)).toBeLessThanOrEqual(1)
+    await expect(table.locator('tbody tr').first().locator('td').nth(4)).toHaveAttribute('title', rows[0].model)
+    const headerY = (await table.locator('thead').boundingBox())!.y
+    await viewport.evaluate((node) => { node.scrollTop = 250 })
+    expect(Math.abs((await table.locator('thead').boundingBox())!.y - headerY)).toBeLessThan(1)
+    await viewport.evaluate((node) => { node.scrollTop = 0 })
+    await page.screenshot({ path: `test-results/admin-log-density-${width}-${language}.png`, animations: 'disabled' })
+  })
+}
+
+test('管理日志紧凑工具栏：高级筛选和完整指标仍可展开，翻页后从首行开始', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.route('**/admin/logs?*', (route) => {
+    const params = new URL(route.request().url()).searchParams
+    const offset = Number(params.get('offset') ?? 0), limit = Number(params.get('limit'))
+    return route.fulfill({ json: { data: Array.from({ length: limit }, (_, index) => ({ ...detailedLog, request_id: `density-${offset + index}` })) } })
+  })
+  await page.goto('/admin/logs')
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
+  await expect(page.getByRole('combobox', { name: '每页条数' })).toHaveValue('10')
+  const filters = page.getByRole('button', { name: '更多筛选', exact: true })
+  await filters.click()
+  await expect(filters).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.locator('#lf-user_id')).toBeVisible()
+  await filters.click()
+  const summary = page.locator('[data-slot="admin-log-summary"]')
+  const metrics = summary.getByRole('button', { name: '更多用量指标', exact: true })
+  await metrics.click()
+  await expect(summary.getByText('图片输出', { exact: true })).toBeVisible()
+  await metrics.click()
+  const viewport = page.locator('[data-slot="table-viewport"]')
+  await viewport.evaluate((node) => { node.scrollTop = 250 })
+  await page.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(page.getByRole('button', { name: '展开 density-10 的明细', exact: true })).toBeVisible()
+  expect(await viewport.evaluate((node) => node.scrollTop)).toBe(0)
+})
+
+for (const { width, height, language } of [
+  { width: 1366, height: 768, language: 'zh-CN' }, { width: 1440, height: 900, language: 'zh-CN' },
+  { width: 1440, height: 900, language: 'en' }, { width: 1920, height: 1080, language: 'zh-CN' },
+]) {
+  test(`门户日志紧凑分页 ${width}x${height} ${language}：表格获得剩余高度，底部分页常驻`, async ({ page }) => {
+    await pagedLogs(page)
+    await page.addInitScript((language) => {
+      localStorage.setItem('okapi.lang', language)
+      localStorage.setItem('okapi.theme', language === 'en' ? 'dark' : 'light')
+    }, language)
+    await page.setViewportSize({ width, height })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/portal/logs?scope=user')
+    await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(10)
+    const frame = page.locator('[data-slot="table-frame"]')
+    const footer = page.locator('[data-slot="pagination"]')
+    const box = (await frame.boundingBox())!, bottom = (await footer.boundingBox())!
+    expect(box.y).toBeLessThanOrEqual(370)
+    expect(box.height).toBeGreaterThanOrEqual(height - 460)
+    expect(bottom.y).toBeGreaterThanOrEqual(box.y + box.height)
+    await expect(footer).toBeInViewport({ ratio: 1 })
+    expect((await page.locator('[data-slot="log-filters"]').boundingBox())!.height).toBeLessThanOrEqual(110)
+    const summary = page.getByRole('region', { name: language === 'en' ? 'Filtered summary' : '筛选范围汇总' })
+    expect((await summary.boundingBox())!.height).toBeLessThanOrEqual(92)
+    await expect(summary.locator('dl > div')).toHaveCount(6)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    const viewport = page.locator('[data-slot="table-viewport"]')
+    const headerY = (await page.getByRole('table').locator('thead').boundingBox())!.y
+    await viewport.evaluate((el) => { el.scrollTop = 250 })
+    expect(Math.abs((await page.getByRole('table').locator('thead').boundingBox())!.y - headerY)).toBeLessThan(1)
+    await viewport.evaluate((el) => { el.scrollTop = 0 })
+    await page.screenshot({ path: `test-results/logs-paged-${width}-${language}.png`, animations: 'disabled' })
+  })
+}
+
 test('门户日志：承接全账户范围，联想选择准确模型，刷新与后退恢复已应用条件', async ({ page }) => {
   const queries = await prepare(page)
   await page.goto('/portal?scope=user')
@@ -297,7 +731,7 @@ test('门户日志：承接全账户范围，联想选择准确模型，刷新�
   const model = page.getByRole('combobox', { name: '模型', exact: true })
   const count = queries.filter((url) => url.pathname === '/api/me/logs').length
   await model.fill('写作 anthropic')
-  await expect(page.getByRole('option')).toHaveCount(1)
+  await expect(page.getByRole('listbox').getByRole('option')).toHaveCount(1)
   expect(queries.filter((url) => url.pathname === '/api/me/logs')).toHaveLength(count)
   await model.press('ArrowDown')
   await model.press('Enter')
@@ -368,12 +802,14 @@ test('门户日志按日期翻页保留条件，重新选日期从第一页开�
     const url = new URL(route.request().url())
     queries.push(url)
     const first = !url.searchParams.has('before')
-    return route.fulfill({ json: { scope: 'user', data: first ? Array.from({ length: 50 }, (_, i) => ({ ...log, id: 100 - i, request_id: `req-${100 - i}` })) : [{ ...log, id: 50, request_id: 'req-50' }], next_before: first ? 51 : null } })
+    return route.fulfill({ json: { scope: 'user', data: first ? Array.from({ length: 10 }, (_, i) => ({ ...log, id: 100 - i, request_id: `req-${100 - i}` })) : [{ ...log, id: 90, request_id: 'req-90' }], next_before: first ? 91 : null } })
   })
   await page.goto('/portal/logs?scope=user&model=gpt-alpha&errors_only=true&start_date=2024-11-03&end_date=2024-11-03&timezone=America%2FLos_Angeles')
-  await page.getByRole('button', { name: '加载更多', exact: true }).click()
-  await expect(page.getByRole('button', { name: '展开 req-50 的明细', exact: true })).toBeAttached()
-  expect(Object.fromEntries(queries.filter((url) => url.pathname === '/api/me/logs').at(-1)!.searchParams)).toMatchObject({ before: '51', model: 'gpt-alpha', errors_only: 'true', scope: 'user', start_date: '2024-11-03', end_date: '2024-11-03', timezone: 'America/Los_Angeles' })
+  await page.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(page.getByRole('button', { name: '展开 req-90 的明细', exact: true })).toBeAttached()
+  expect(Object.fromEntries(queries.filter((url) => url.pathname === '/api/me/logs').at(-1)!.searchParams)).toMatchObject({ before: '91', limit: '10', model: 'gpt-alpha', errors_only: 'true', scope: 'user', start_date: '2024-11-03', end_date: '2024-11-03', timezone: 'America/Los_Angeles' })
+  await expect(page.getByRole('table').locator('tbody tr')).toHaveCount(1)
+  await page.getByRole('button', { name: '上一页', exact: true }).click()
   const first = page.getByRole('button', { name: '展开 req-100 的明细', exact: true })
   await first.click()
   await expect(page.getByRole('button', { name: '收起 req-100 的明细', exact: true })).toHaveAttribute('aria-expanded', 'true')
@@ -385,7 +821,7 @@ test('门户日志按日期翻页保留条件，重新选日期从第一页开�
   await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.get('start_date')).toBe('2024-11-02')
   expect(queries.filter((url) => url.pathname === '/api/me/logs').at(-1)!.searchParams.has('before')).toBe(false)
   await expect(first).toHaveAttribute('aria-expanded', 'false')
-  await expect(page.getByRole('button', { name: '展开 req-50 的明细', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '展开 req-90 的明细', exact: true })).toHaveCount(0)
 })
 
 test('门户日志日期地址只接受成对的真实日期和最多366天，保留模型与失败条件', () => {
@@ -451,8 +887,8 @@ for (const width of [390, 1024, 1440, 1920]) {
     await expect(model).toBeVisible()
     await expect(request).toBeVisible()
     if (width >= 1024) {
-      expect((await model.boundingBox())!.width).toBe(320)
-      expect((await request.boundingBox())!.width).toBe(384)
+      expect((await model.boundingBox())!.width).toBe(256)
+      expect((await request.boundingBox())!.width).toBe(320)
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: `test-results/portal-log-filters-${width}.png`, fullPage: true, animations: 'disabled' })
@@ -499,7 +935,8 @@ test('日志展开显示调用对象和密钥前缀，CSV 附带名称且保留�
   const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '导出 CSV', exact: true }).click()])
   const csv = await readFile((await download.path())!, 'utf8')
   const lines = csv.trim().split('\n')
-  expect(lines[0]).toMatch(/upstream_request_id,node,key_name,key_prefix$/)
+  expect(lines[0]).toContain('upstream_request_id,node,key_name,key_prefix,requested_model')
+  expect(lines[0]).toContain('cache_write_5m_tokens,cache_write_1h_tokens')
   expect(lines[1]).toContain(',edge-west,app-key,sk-prefix')
 })
 

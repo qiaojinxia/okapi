@@ -23,6 +23,46 @@ fn source(recorded: bool, reported: Option<u32>, settled: u32) -> &'static str {
     }
 }
 
+/// Whether each normalized modal counter was observed, including explicit zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModalitiesReported {
+    pub audio: bool,
+    pub image: bool,
+}
+
+impl ModalitiesReported {
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self {
+            audio: self.audio && other.audio,
+            image: self.image && other.image,
+        }
+    }
+}
+
+/// Observation state does not affect the settled counters or their configured price.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenDetailsReported {
+    pub prompt: ModalitiesReported,
+    pub completion: ModalitiesReported,
+    pub cache_read: ModalitiesReported,
+    pub cache_write: ModalitiesReported,
+    pub reasoning: bool,
+}
+
+impl TokenDetailsReported {
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self {
+            prompt: self.prompt.intersection(other.prompt),
+            completion: self.completion.intersection(other.completion),
+            cache_read: self.cache_read.intersection(other.cache_read),
+            cache_write: self.cache_write.intersection(other.cache_write),
+            reasoning: self.reasoning && other.reasoning,
+        }
+    }
+}
+
 /// Modal subsets of a cache total; text is the remainder, never another charge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheModalities {
@@ -66,6 +106,9 @@ impl CacheModalities {
 pub struct TokenUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_usage: Option<UpstreamTokenCounts>,
+    /// None preserves unknown legacy detail coverage; zero counters do not imply observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_details: Option<TokenDetailsReported>,
     pub prompt_tokens: u32,
     pub cached_tokens: u32,
     /// Known cache intersections. None keeps the legacy text-priced cache behavior.
@@ -82,6 +125,12 @@ pub struct TokenUsage {
     /// 缓存写入 token（Anthropic `cache_creation_input_tokens`）；含在 prompt_tokens 内。
     #[serde(default)]
     pub cache_write_tokens: u32,
+    /// Optional observed TTL split, contained in cache_write_tokens. Statistics only;
+    /// absence must not imply zero or change the configured cache-write price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_5m_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<u32>,
     /// 音频输入 token（OpenAI `prompt_tokens_details.audio_tokens`）；含在 prompt_tokens 内。
     #[serde(default)]
     pub audio_prompt_tokens: u32,
@@ -98,6 +147,88 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
+    /// Sum independent requests, preserving every billing axis. Observation of an
+    /// aggregate requires observation of every contributing request, never OR.
+    pub fn checked_add(self, other: Self) -> Result<Self, DomainError> {
+        self.validate()?;
+        other.validate()?;
+        let add = |a: u32, b: u32| {
+            a.checked_add(b)
+                .filter(|n| i32::try_from(*n).is_ok())
+                .ok_or(DomainError::InvalidTokenUsage {
+                    reason: "combined usage exceeds storage bounds",
+                })
+        };
+        let optional = |a: Option<u32>, b: Option<u32>| match (a, b) {
+            (Some(a), Some(b)) => add(a, b).map(Some),
+            _ => Ok(None),
+        };
+        let modalities = |a: Option<CacheModalities>, b: Option<CacheModalities>| {
+            if a.is_none() && b.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(CacheModalities {
+                audio_tokens: add(
+                    a.unwrap_or_default().audio_tokens,
+                    b.unwrap_or_default().audio_tokens,
+                )?,
+                image_tokens: add(
+                    a.unwrap_or_default().image_tokens,
+                    b.unwrap_or_default().image_tokens,
+                )?,
+            }))
+        };
+        let upstream_usage = match (self.upstream_usage, other.upstream_usage) {
+            (Some(a), Some(b)) => Some(UpstreamTokenCounts {
+                prompt_tokens: optional(a.prompt_tokens, b.prompt_tokens)?,
+                completion_tokens: optional(a.completion_tokens, b.completion_tokens)?,
+            }),
+            _ => None,
+        };
+        let total = Self {
+            upstream_usage,
+            reported_details: self
+                .reported_details
+                .zip(other.reported_details)
+                .map(|(a, b)| a.intersection(b)),
+            prompt_tokens: add(self.prompt_tokens, other.prompt_tokens)?,
+            completion_tokens: add(self.completion_tokens, other.completion_tokens)?,
+            cached_tokens: add(self.cached_tokens, other.cached_tokens)?,
+            cache_write_tokens: add(self.cache_write_tokens, other.cache_write_tokens)?,
+            cache_write_5m_tokens: optional(
+                self.cache_write_5m_tokens,
+                other.cache_write_5m_tokens,
+            )?,
+            cache_write_1h_tokens: optional(
+                self.cache_write_1h_tokens,
+                other.cache_write_1h_tokens,
+            )?,
+            cache_read_modalities: modalities(
+                self.cache_read_modalities,
+                other.cache_read_modalities,
+            )?,
+            cache_write_modalities: modalities(
+                self.cache_write_modalities,
+                other.cache_write_modalities,
+            )?,
+            cache_read_reported: self.cache_read_reported && other.cache_read_reported,
+            cache_write_reported: self.cache_write_reported && other.cache_write_reported,
+            audio_prompt_tokens: add(self.audio_prompt_tokens, other.audio_prompt_tokens)?,
+            image_prompt_tokens: add(self.image_prompt_tokens, other.image_prompt_tokens)?,
+            audio_completion_tokens: add(
+                self.audio_completion_tokens,
+                other.audio_completion_tokens,
+            )?,
+            image_completion_tokens: add(
+                self.image_completion_tokens,
+                other.image_completion_tokens,
+            )?,
+            reasoning_tokens: add(self.reasoning_tokens, other.reasoning_tokens)?,
+        };
+        total.validate()?;
+        Ok(total)
+    }
+
     #[must_use]
     pub fn prompt_source(&self) -> &'static str {
         source(
@@ -126,6 +257,18 @@ impl TokenUsage {
 
     /// 校验不变量；计费入口必须先调用。
     pub fn validate(&self) -> Result<(), DomainError> {
+        match (self.cache_write_5m_tokens, self.cache_write_1h_tokens) {
+            (None, None) => {}
+            (Some(short), Some(long))
+                if self.cache_write_reported
+                    && u64::from(short) + u64::from(long) == u64::from(self.cache_write_tokens) => {
+            }
+            _ => {
+                return Err(DomainError::InvalidTokenUsage {
+                    reason: "cache write TTL split must be complete and match the reported total",
+                });
+            }
+        }
         if self
             .cache_read_modalities
             .is_some_and(|v| v.total_modal() > u64::from(self.cached_tokens))
@@ -207,6 +350,27 @@ impl TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ttl_split_is_optional_complete_and_never_extra_usage() {
+        let mut usage = TokenUsage {
+            prompt_tokens: 100,
+            cache_write_tokens: 80,
+            cache_write_reported: true,
+            cache_write_5m_tokens: Some(30),
+            cache_write_1h_tokens: Some(50),
+            ..TokenUsage::default()
+        };
+        assert!(usage.validate().is_ok());
+        assert_eq!(usage.prompt_uncached(), 20);
+        assert_eq!(usage.total_raw(), 100);
+        usage.cache_write_1h_tokens = Some(51);
+        assert!(usage.validate().is_err());
+        usage.cache_write_1h_tokens = None;
+        assert!(usage.validate().is_err());
+        usage.cache_write_5m_tokens = None;
+        assert!(usage.validate().is_ok());
+    }
 
     #[test]
     fn cache_subsets_and_output_modalities_are_validated_without_double_counting() {

@@ -53,6 +53,8 @@ async fn verify_totals(env: &Env) {
         ("completion_tokens", 50),
         ("cached_tokens", 800),
         ("cache_write_tokens", 100),
+        ("cache_write_5m_tokens", 100),
+        ("cache_write_1h_tokens", 0),
         ("reasoning_tokens", 20),
     ] {
         assert_eq!(row["usage"][key], count, "{row}");
@@ -64,6 +66,8 @@ async fn verify_totals(env: &Env) {
         "completion_tokens",
         "cached_tokens",
         "cache_write_tokens",
+        "cache_write_5m_tokens",
+        "cache_write_1h_tokens",
         "reasoning_tokens",
     ] {
         assert_eq!(payload[key], row["usage"][key]);
@@ -96,7 +100,20 @@ async fn verify_totals(env: &Env) {
             break;
         }
     }
-    let stats = report(env, "/api/me/stats/breakdown?days=1").await;
+    // A running JetStream worker can claim the outbox before the direct drain.
+    // Published does not mean CH ingestion has completed; wait for this key's row.
+    let mut stats = report(env, "/api/me/stats/breakdown?days=1").await;
+    for _ in 0..50 {
+        if stats["total"]["requests"] == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        stats = report(env, "/api/me/stats/breakdown?days=1").await;
+    }
+    let usage_stat = report(env, "/api/me/logs/stat").await;
+    assert_eq!(usage_stat["cache_write_5m_tokens"], 100);
+    assert_eq!(usage_stat["cache_write_1h_tokens"], 0);
+    assert_eq!(usage_stat["cache_write_ttl_samples"], 1);
     assert_eq!(stats["total"]["requests"], 1, "{stats}");
     assert_eq!(stats["total"]["tokens"], 1050, "{stats}");
     assert_eq!(stats["total"]["amount_micro"], 1600, "{stats}");

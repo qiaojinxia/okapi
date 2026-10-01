@@ -73,11 +73,20 @@ impl Counters {
             prompt_tokens_details: PromptTokensDetails {
                 cached_tokens: self.cache_read_input_tokens.unwrap_or(0),
                 cache_write_tokens: self.cache_creation_input_tokens.unwrap_or(0),
+                cache_write_5m_tokens: self
+                    .cache_creation
+                    .as_ref()
+                    .map(|c| c.ephemeral_5m_input_tokens),
+                cache_write_1h_tokens: self
+                    .cache_creation
+                    .as_ref()
+                    .map(|c| c.ephemeral_1h_input_tokens),
                 cache_read_reported: self.cache_read_input_tokens.is_some(),
                 cache_write_reported: self.cache_creation_input_tokens.is_some(),
                 ..Default::default()
             },
             completion_tokens_details: CompletionTokensDetails {
+                reasoning_reported: self.output_tokens_details.is_some(),
                 reasoning_tokens: self
                     .output_tokens_details
                     .as_ref()

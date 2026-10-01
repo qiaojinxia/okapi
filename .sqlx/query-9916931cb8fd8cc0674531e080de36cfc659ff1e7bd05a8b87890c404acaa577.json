@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"c!\" FROM billing_dlq WHERE status=0 AND\n           (id=ANY($1) OR ch_batch_id IN (\n               SELECT ch_batch_id FROM billing_dlq WHERE id=ANY($1) AND status=0\n           ))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9916931cb8fd8cc0674531e080de36cfc659ff1e7bd05a8b87890c404acaa577"
+}

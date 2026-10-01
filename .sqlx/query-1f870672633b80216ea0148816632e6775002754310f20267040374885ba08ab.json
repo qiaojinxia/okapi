@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT b.id,b.status,b.event_count,b.rows,b.payloads\n           FROM billing_ch_batches b JOIN billing_outbox o ON o.ch_batch_id=b.id\n           WHERE o.payload->>'user_id'=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "event_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "event_count"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "rows",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "rows"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "payloads",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_ch_batches",
+            "name": "payloads"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "1f870672633b80216ea0148816632e6775002754310f20267040374885ba08ab"
+}

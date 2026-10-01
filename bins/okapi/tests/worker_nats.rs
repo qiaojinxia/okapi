@@ -178,10 +178,15 @@ async fn epoch_broadcast_hot_reload() {
     let admin_id = okapi_store::provision::create_user(&env.pg, &format!("nats-admin-{suffix}"))
         .await
         .unwrap();
-    let epoch =
-        okapi_store::admin::publish_epoch(&env.pg, admin_id, &json!({"reason": "nats-test"}))
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&env.pg)
             .await
-            .unwrap();
+            .unwrap(),
+    )
+    .unwrap();
+    let epoch = okapi_store::admin::publish_epoch(&env.pg, admin_id, &snapshot)
+        .await
+        .unwrap();
     assert!(epoch > state.pricebook.epoch(), "新 epoch 应大于当前");
 
     // 模拟 console 广播（与 console publish_pricing 的 best-effort 发布一致）

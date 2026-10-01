@@ -282,7 +282,6 @@ async fn settle(
     reservation_pool: Pool,
     source_window: Option<&str>,
 ) -> Result<(), AppError> {
-    let book = state.pricebook.load();
     let (billing_state, log_type, event_type, delta, amount, pool) = if success {
         (
             BillingState::Committed,
@@ -326,11 +325,15 @@ async fn settle(
         state: billing_state,
         usage: TokenUsage::default(),
         amount,
-        original: quote.original,
-        discount: quote.discount,
-        list_price: quote.list_price,
+        original: if success { quote.original } else { Money::ZERO },
+        discount: if success { quote.discount } else { Money::ZERO },
+        list_price: if success {
+            quote.list_price
+        } else {
+            Money::ZERO
+        },
         upstream_cost: None,
-        pricing_epoch: Some(book.epoch()),
+        pricing_epoch: Some(quote.snapshot.epoch),
         pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: None,

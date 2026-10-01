@@ -1,5 +1,8 @@
 use crate::{ModalTokensDetails, UsageProbe};
-use okapi_domain::{CacheModalities, DomainError, TokenUsage, UpstreamTokenCounts};
+use okapi_domain::{
+    CacheModalities, DomainError, ModalitiesReported, TokenDetailsReported, TokenUsage,
+    UpstreamTokenCounts,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -122,6 +125,65 @@ fn cache(
     Ok(Some(cached))
 }
 
+fn cache_reported(
+    total: u32,
+    reported: bool,
+    details: Option<ModalTokensDetails>,
+    input: ModalitiesReported,
+) -> ModalitiesReported {
+    if !reported && total == 0 {
+        return ModalitiesReported::default();
+    }
+    if total == 0 {
+        return ModalitiesReported {
+            audio: true,
+            image: true,
+        };
+    }
+    let Some(details) = details else {
+        return input;
+    };
+    details.reported(total)
+}
+
+fn reported(probe: UsageProbe) -> TokenDetailsReported {
+    let d = probe.prompt_tokens_details;
+    let c = probe.completion_tokens_details;
+    let input = ModalitiesReported {
+        audio: d.modalities_reported.audio || d.audio_tokens > 0,
+        image: d.modalities_reported.image || d.image_tokens > 0,
+    };
+    let read = cache_reported(
+        d.cached_tokens,
+        d.cache_read_reported,
+        d.cached_tokens_details,
+        input,
+    );
+    let write = cache_reported(
+        d.cache_write_tokens,
+        d.cache_write_reported,
+        d.cache_write_tokens_details,
+        input,
+    );
+    TokenDetailsReported {
+        prompt: ModalitiesReported {
+            audio: input.audio
+                && (d.cached_tokens == 0 || read.audio)
+                && (d.cache_write_tokens == 0 || write.audio),
+            image: input.image
+                && (d.cached_tokens == 0 || read.image)
+                && (d.cache_write_tokens == 0 || write.image),
+        },
+        completion: ModalitiesReported {
+            audio: c.modalities_reported.audio || c.audio_tokens > 0,
+            image: c.modalities_reported.image || c.image_tokens > 0,
+        },
+        cache_read: read,
+        cache_write: write,
+        reasoning: c.reasoning_reported || c.reasoning_tokens > 0,
+    }
+}
+
 pub(super) fn normalize(probe: UsageProbe) -> Result<TokenUsage, DomainError> {
     if probe.invalid
         || probe.missing_prompt
@@ -162,6 +224,7 @@ pub(super) fn normalize(probe: UsageProbe) -> Result<TokenUsage, DomainError> {
             .ok_or_else(invalid)
     };
     let usage = TokenUsage {
+        reported_details: Some(reported(probe)),
         upstream_usage: Some(UpstreamTokenCounts {
             prompt_tokens: Some(probe.prompt_tokens),
             completion_tokens: Some(probe.completion_tokens),
@@ -170,6 +233,8 @@ pub(super) fn normalize(probe: UsageProbe) -> Result<TokenUsage, DomainError> {
         completion_tokens: probe.completion_tokens,
         cached_tokens: d.cached_tokens,
         cache_write_tokens: d.cache_write_tokens,
+        cache_write_5m_tokens: d.cache_write_5m_tokens,
+        cache_write_1h_tokens: d.cache_write_1h_tokens,
         cache_read_reported: d.cache_read_reported,
         cache_write_reported: d.cache_write_reported,
         cache_read_modalities: read,

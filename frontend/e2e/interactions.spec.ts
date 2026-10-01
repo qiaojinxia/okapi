@@ -898,11 +898,11 @@ test('已有模型可搜索、联想和勾选，筛选保留已选项，中文�
   await modelSearch.press('Enter')
   await expect.poll(() => queries.at(-1)).toContain('q=claude-demo')
   await modelSearch.fill('')
-  await expect.poll(() => queries.at(-1)).toBe('?limit=20&offset=0')
+  await expect.poll(() => queries.at(-1)).toBe('?limit=10&offset=0')
 })
 
 for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 }]) {
-  test(`价格分组${viewport.width}：后端每页20条，真实总数与分页常驻，表格内部滚动`, async ({ page }) => {
+  test(`价格分组${viewport.width}：默认每页10条，真实总数与分页常驻，表格内部滚动`, async ({ page }) => {
     await prepare(page, ['*'], 'zh-CN')
     await page.setViewportSize(viewport)
     const hits: string[] = []
@@ -920,28 +920,28 @@ for (const viewport of [{ width: 1280, height: 720 }, { width: 390, height: 844 
     await page.goto('/admin/groups')
     const rows = page.locator('tbody tr')
     const pager = page.getByRole('navigation', { name: '分页' })
-    await expect(rows).toHaveCount(20)
+    await expect(rows).toHaveCount(10)
     await expect(page.getByRole('main').getByText('共 45 条', { exact: true })).toBeVisible()
-    await expect(pager).toContainText('1–20 / 共 45')
+    await expect(pager).toContainText('1–10 / 共 45')
     await expect(pager).toBeInViewport({ ratio: 1 })
-    expect(hits).toEqual(['?limit=20&offset=0'])
+    expect(hits).toEqual(['?limit=10&offset=0'])
     const table = page.getByRole('table')
     expect(await table.evaluate((el) => el.parentElement!.scrollHeight > el.parentElement!.clientHeight)).toBe(true)
     await table.evaluate((el) => { el.parentElement!.scrollTop = 300 })
     await expect(page.getByRole('columnheader', { name: '分组码' })).toBeInViewport({ ratio: 1 })
     await expect(pager).toBeInViewport({ ratio: 1 })
     await pager.getByRole('button', { name: '下一页' }).click()
-    await expect(rows.first()).toContainText('group-21')
-    expect(hits.at(-1)).toBe('?limit=20&offset=20')
+    await expect(rows.first()).toContainText('group-11')
+    expect(hits.at(-1)).toBe('?limit=10&offset=10')
     expect(await table.evaluate((el) => el.parentElement!.scrollTop)).toBe(0)
-    await pager.getByRole('button', { name: '下一页' }).click()
+    await pager.getByRole('button', { name: '5', exact: true }).click()
     await expect(rows).toHaveCount(5)
     await expect(pager).toContainText('41–45 / 共 45')
     await expect(pager.getByRole('button', { name: '下一页' })).toBeDisabled()
     await expect(pager).toBeInViewport({ ratio: 1 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight + 1)).toBe(true)
     await pager.getByRole('button', { name: '1', exact: true }).click()
-    await expect(rows).toHaveCount(20)
+    await expect(rows).toHaveCount(10)
     await page.screenshot({ path: `test-results/groups-pagination-${viewport.width}.png`, animations: 'disabled' })
   })
 }
@@ -969,15 +969,15 @@ test('列表分页：服务端按 limit/offset 与筛选取页，页宽切换保
   await page.goto('/admin/channels')
   const rows = page.locator('tbody tr')
   const pager = page.getByRole('navigation', { name: '分页' })
-  await expect(rows).toHaveCount(20)
-  await expect(pager).toContainText('1–20 / 共 45')
+  await expect(rows).toHaveCount(10)
+  await expect(pager).toContainText('1–10 / 共 45')
   await expect(page.getByRole('main')).toContainText('共 45 条 · 45 启用')
-  expect(channelHits.at(-1)).toBe('?limit=20&offset=0')
+  expect(channelHits.at(-1)).toBe('?limit=10&offset=0')
   await page.screenshot({ path: 'test-results/pagination-channels.png', fullPage: true, animations: 'disabled' })
   await pager.getByRole('button', { name: '下一页' }).click()
-  await expect(rows.first()).toContainText('ch-21')
-  expect(channelHits.at(-1)).toBe('?limit=20&offset=20')
-  await pager.getByRole('button', { name: '3', exact: true }).click()
+  await expect(rows.first()).toContainText('ch-11')
+  expect(channelHits.at(-1)).toBe('?limit=10&offset=10')
+  await pager.getByRole('button', { name: '5', exact: true }).click()
   await expect(rows).toHaveCount(5)
   await expect(pager.getByRole('button', { name: '下一页' })).toBeDisabled()
   // 表头全选只勾本页；换页宽后选择保留，正在看的行仍在视野内
@@ -1023,12 +1023,12 @@ test('列表分页：服务端按 limit/offset 与筛选取页，页宽切换保
     return route.fulfill({ json: { total, data } })
   })
   await page.goto('/admin/users')
-  await expect(rows).toHaveCount(20)
-  await expect(pager).toContainText('1–20 / 共 53')
-  await pager.getByRole('button', { name: '3', exact: true }).click()
-  await expect(rows).toHaveCount(13)
+  await expect(rows).toHaveCount(10)
+  await expect(pager).toContainText('1–10 / 共 53')
+  await pager.getByRole('button', { name: '5', exact: true }).click()
+  await expect(rows).toHaveCount(10)
   await expect(rows.first()).toContainText('user-41')
-  expect(hits.at(-1)).toBe('?limit=20&offset=40')
+  expect(hits.at(-1)).toBe('?limit=10&offset=40')
   // 换页宽对齐到新页宽：第 41 行仍在 1–50 里
   await pager.getByLabel('每页条数').selectOption('50')
   await expect(rows).toHaveCount(50)
@@ -1086,13 +1086,13 @@ test('分页与筛选在地址里：刷新、深链、后退都回到原来那�
 
   // 深链直达第三页：只发一次请求，且就是第三页的
   await page.goto('/admin/users?page=3')
-  await expect(rows.first()).toContainText('user-41')
-  expect(hits).toEqual(['?limit=20&offset=40'])
+  await expect(rows.first()).toContainText('user-21')
+  expect(hits).toEqual(['?limit=10&offset=20'])
   // 刷新仍在第三页
   await page.reload()
-  await expect(rows.first()).toContainText('user-41')
-  expect(hits.at(-1)).toBe('?limit=20&offset=40')
-  // 换页宽写进地址并对齐页码（第 41 行落在 1–50 里 → 第一页，page 不写）
+  await expect(rows.first()).toContainText('user-21')
+  expect(hits.at(-1)).toBe('?limit=10&offset=20')
+  // 换页宽写进地址并对齐页码（第 21 行落在 1–50 里 → 第一页，page 不写）
   await pager.getByLabel('每页条数').selectOption('50')
   await expect(rows).toHaveCount(50)
   await expect.poll(address).toEqual({ limit: '50' })
@@ -1112,8 +1112,43 @@ test('分页与筛选在地址里：刷新、深链、后退都回到原来那�
   await expect.poll(address).toEqual({ limit: '50', page: '2' })
   await expect(rows.first()).toContainText('user-51')
   await expect(input).toHaveValue('')
-  // 地址里乱写的页宽不在档位内 → 当没写，按缺省 20 请求
+  // 地址里乱写的页宽不在档位内 → 当没写，按缺省 10 请求
   await page.goto('/admin/users?limit=37&page=2')
+  await expect(rows.first()).toContainText('user-11')
+  expect(hits.at(-1)).toBe('?limit=10&offset=10')
+  // 原先显式选择的 20 条仍有效；切回默认 10 条会移除 limit，保留当前起始行。
+  await page.goto('/admin/users?limit=20&page=2')
+  await expect(rows).toHaveCount(20)
   await expect(rows.first()).toContainText('user-21')
-  expect(hits.at(-1)).toBe('?limit=20&offset=20')
+  await page.reload()
+  await expect(pager.getByLabel('每页条数')).toHaveValue('20')
+  await pager.getByLabel('每页条数').selectOption('10')
+  await expect(rows).toHaveCount(10)
+  await expect(rows.first()).toContainText('user-21')
+  await expect.poll(address).toEqual({ page: '3' })
 })
+
+for (const [path, endpoint] of [
+  ['/admin/users', '/admin/users'], ['/admin/keys', '/admin/keys'],
+  ['/admin/channels', '/admin/channels'], ['/admin/pricing', '/admin/models'],
+  ['/admin/groups', '/admin/groups'], ['/admin/pools', '/admin/pools'],
+  ['/admin/roles', '/admin/roles'], ['/admin/rules', '/admin/pricing/rules'],
+  ['/admin/plans', '/admin/plans'], ['/admin/codes', '/admin/redemptions'],
+  ['/portal/keys', '/api/me/keys'], ['/portal/teams', '/api/teams'],
+  ['/admin/logs', '/admin/logs'], ['/admin/audit', '/admin/audit'],
+  ['/portal/ledger', '/api/me/ledger'],
+] as const) {
+  test(`列表默认每页10条：${path}`, async ({ page }) => {
+    await prepare(page, ['*'], 'zh-CN')
+    const hits: URL[] = []
+    await page.route(`**${endpoint}?*`, (route) => {
+      hits.push(new URL(route.request().url()))
+      return route.fulfill({ json: { data: [], total: 0, enabled: 0, unpriced: 0, has_more: false, next_before: null } })
+    })
+    await page.goto(path)
+    await expect.poll(() => hits.length).toBeGreaterThan(0)
+    expect(hits[0].searchParams.get('limit')).toBe('10')
+    expect(Number(hits[0].searchParams.get('offset') ?? 0)).toBe(0)
+    await expect(page.getByRole('main').getByRole('alert')).toHaveCount(0)
+  })
+}

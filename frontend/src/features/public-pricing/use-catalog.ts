@@ -2,9 +2,9 @@ import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch, getKey } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
-import type { PricingGroup, PricingModel } from './types'
+import { loadCatalog } from './catalog-loader'
+import type { Catalog } from './catalog-loader'
 
-interface Catalog { models: PricingModel[]; groups: PricingGroup[] }
 interface MyGroups { current: string; data: Array<{ code: string }> }
 let nextCatalogScope = 0
 
@@ -39,7 +39,7 @@ export function useCatalog() {
     retry: false,
     queryFn: async () => {
       const [catalog, mine] = await Promise.all([
-        apiFetch<Catalog>('/api/pricing', { key: key ?? '' }),
+        loadCatalog(key ?? ''),
         key ? apiFetch<MyGroups>('/api/me/groups', { key }) : Promise.resolve(undefined),
       ])
       return visibleCatalog(catalog, mine ? new Set(mine.data.map((g) => g.code)) : undefined)

@@ -64,6 +64,8 @@ pub(super) async fn probe(
                                "messages": [{"role": "user", "content": "ping"}]})
                         .to_string(),
                     );
+                    // 测活走透传形态即可：这里只验证"这把订阅还能用吗"，
+                    // 伪装指纹的全量信号由数据面（settings.mimic_cc）负责
                     okapi_providers::oauth::anthropic_max::messages(
                         state.anthropic.http(),
                         base,
@@ -71,6 +73,7 @@ pub(super) async fn probe(
                         body,
                         false,
                         &outbound,
+                        None,
                     )
                     .await
                     .map(|r| messages_status(&r))

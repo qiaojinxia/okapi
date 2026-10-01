@@ -71,6 +71,19 @@ struct RatioSet {
     modalities: crate::ModalityRatios,
 }
 
+fn audio_output_scaled(set: &RatioSet) -> Result<i128, PricingError> {
+    if set.audio.as_scaled() == RatioFp::ONE.as_scaled()
+        && set.audio_completion.as_scaled() == RatioFp::ONE.as_scaled()
+    {
+        Ok(i128::from(set.completion.as_scaled()))
+    } else {
+        i128::from(set.audio.as_scaled())
+            .checked_mul(i128::from(set.audio_completion.as_scaled()))
+            .map(|v| v.div_euclid(i128::from(RATIO_SCALE)))
+            .ok_or(PricingError::Overflow)
+    }
+}
+
 /// 单步乘法：value × ratio / SCALE（floor）。
 fn step(value: i128, ratio: RatioFp) -> Result<i128, PricingError> {
     value
@@ -199,6 +212,26 @@ pub fn calculate(
     }
 }
 
+/// Character-priced input follows the existing price chain, including tiers and
+/// per-call pricing. The surrogate quantity never leaves this pricing function.
+pub fn calculate_characters(
+    book: &PriceBook,
+    ctx: &CalcContext,
+    characters: u32,
+) -> Result<Quote, PricingError> {
+    let mut quote = calculate(
+        book,
+        ctx,
+        TokenUsage {
+            prompt_tokens: characters,
+            ..TokenUsage::default()
+        },
+    )?;
+    quote.snapshot.input_unit = Some(crate::InputUnit::Characters);
+    quote.snapshot.input_characters = Some(characters);
+    Ok(quote)
+}
+
 /// 定点倍率相乘（floor；tier 修饰用）。
 fn mul_ratio(a: RatioFp, b: RatioFp) -> Result<RatioFp, PricingError> {
     if b.as_scaled() == RatioFp::ONE.as_scaled() {
@@ -294,16 +327,7 @@ fn calc_tokens(
     // 但两轴均未配置（都是 1.0）时必须**回落到 completion_ratio**：文本输出走
     // completion_ratio（如 4×），若音频输出按 1× 计就成了意外降价——模态轴的缺省值
     // 本应是"零影响"，而非把已有的音频输出打折。
-    let audio_out_scaled = if set.audio.as_scaled() == RatioFp::ONE.as_scaled()
-        && set.audio_completion.as_scaled() == RatioFp::ONE.as_scaled()
-    {
-        i128::from(set.completion.as_scaled())
-    } else {
-        i128::from(set.audio.as_scaled())
-            .checked_mul(i128::from(set.audio_completion.as_scaled()))
-            .map(|v| v.div_euclid(i128::from(RATIO_SCALE)))
-            .ok_or(PricingError::Overflow)?
-    };
+    let audio_out_scaled = audio_output_scaled(set)?;
     let (modal_charge, effective_modalities) = set.modalities.charge(
         usage,
         set.cache,
@@ -366,6 +390,8 @@ fn calc_tokens(
 
     let snapshot = PricingSnapshot {
         epoch: book.epoch(),
+        input_unit: None,
+        input_characters: None,
         base_price_per_1m_usd: Some(Money::from_micros(set.base_price_per_1m_micro)),
         mode,
         model_ratio: Some(set.model),
@@ -423,6 +449,8 @@ fn calc_per_call(
 
     let snapshot = PricingSnapshot {
         epoch: book.epoch(),
+        input_unit: None,
+        input_characters: None,
         base_price_per_1m_usd: None,
         mode: "per_call",
         model_ratio: None,

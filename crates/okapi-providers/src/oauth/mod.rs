@@ -1,13 +1,18 @@
 //! 自用订阅凭证的 OAuth 流程（IMPLEMENTATION §11.38，实验性）。
 //!
 //! 只有两家有足够公开资料可以做实：Anthropic（Claude Pro/Max，`anthropic_max`）与 OpenAI Codex
-//! （ChatGPT 订阅，`codex`）。两家的 client_id / 端点都是官方客户端私有的、随时会变——本模块
-//! 只发上游为这条路径要求的东西，不做设备指纹、不编造 User-Agent；真实客户端自带的身份头由
-//! gateway 透传进 `Outbound.extra_headers`（2026-09 对照 Sub2API / CLIProxyAPI 核对过要求项）。
+//! （ChatGPT 订阅，`codex`）。两家的 client_id / 端点都是官方客户端私有的、随时会变。
+//!
+//! 出向形态分两档：缺省**透传**——只发上游为这条路径要求的东西，不做设备指纹、不编造
+//! User-Agent，真实客户端自带的身份头由 gateway 透传进 `Outbound.extra_headers`（2026-09 对照
+//! Sub2API / CLIProxyAPI 核对过要求项）；`channels.settings.mimic_cc` 开启后走 [`cc_mimic`]
+//! **全伪装**——网关替非官方客户端伪造与真实 CLI 对齐的稳定身份。前者给自用；后者是对抗性
+//! 工程，需跟随上游检测与官方 CLI 版本持续维护。
 //!
 //! 共用件：PKCE（S256）、授权 URL 拼装、token 响应形状；两家的差异在各自子模块。
 
 pub mod anthropic_max;
+pub mod cc_mimic;
 pub mod codex;
 
 use crate::error::UpstreamError;
@@ -52,7 +57,8 @@ pub struct Tokens {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_in: i64,
-    /// codex：从 id_token 取到的 ChatGPT 账号 id。
+    /// codex：从 id_token 取到的 ChatGPT 账号 id；anthropic_max：换码响应里的
+    /// `account.uuid` / `organization.uuid`（全伪装的 metadata.user_id 用，常为 None）。
     pub account_id: Option<String>,
 }
 
@@ -77,7 +83,17 @@ pub(crate) fn parse_tokens(body: &[u8]) -> Result<Tokens, UpstreamError> {
         account_id: v
             .get("id_token")
             .and_then(Value::as_str)
-            .and_then(codex::account_id_from_id_token),
+            .and_then(codex::account_id_from_id_token)
+            .or_else(|| {
+                // Anthropic 换码响应的账号标识：account.uuid 优先，organization.uuid 兜底
+                ["account", "organization"].iter().find_map(|k| {
+                    v.get(*k)?
+                        .get("uuid")?
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+            }),
     })
 }
 
