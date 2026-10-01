@@ -7,10 +7,10 @@
 name: okapi
 
 x-okapi-env: &okapi-env
-  DATABASE_URL: postgres://okapi:${POSTGRES_PASSWORD:-okapi_dev}@postgres:5432/okapi
+  DATABASE_URL: postgres://okapi:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/okapi
   OKAPI_REDIS_URL: redis://redis:6379
   OKAPI_NATS_URL: nats://nats:4222
-  OKAPI_CLICKHOUSE_URL: http://okapi:${CLICKHOUSE_PASSWORD:-okapi_dev}@clickhouse:8123
+  OKAPI_CLICKHOUSE_URL: http://okapi:${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}@clickhouse:8123
   OKAPI_BIND: 0.0.0.0:8080
   OKAPI_CONSOLE_BIND: 0.0.0.0:8081
   OKAPI_MASTER_KEY: ${OKAPI_MASTER_KEY:?run `openssl rand -hex 32`}
@@ -19,6 +19,7 @@ x-okapi-env: &okapi-env
   # 每 IP 限流与 client_ip 列可被调用方一个请求头改写。默认给 compose 的私网段；
   # 前面还有一层公网 CDN 时改配 CDN 回源段，或改用 OKAPI_EDGE_KEY。
   OKAPI_TRUSTED_PROXIES: ${OKAPI_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8}
+  OKAPI_SETUP_TOKEN: ${OKAPI_SETUP_TOKEN:?set OKAPI_SETUP_TOKEN for first initialization}
   OKAPI_EDGE_KEY: ${OKAPI_EDGE_KEY:-}
   # 每个容器各开一套 PG 池，总连接 = Σ(副本数 × 本值)。本文件 multi profile 是
   # gateway 2 + console 1 + worker 1 = 4 个容器 × 12 = 48 条，PG 缺省 max_connections=100 够用；
@@ -43,7 +44,7 @@ services:
     image: public.ecr.aws/docker/library/postgres:16-alpine
     environment:
       POSTGRES_USER: okapi
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-okapi_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: okapi
     volumes:
       - pg-data:/var/lib/postgresql/data
@@ -76,7 +77,7 @@ services:
     environment:
       CLICKHOUSE_DB: okapi
       CLICKHOUSE_USER: okapi
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-okapi_dev}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
     volumes:
       - ch-data:/var/lib/clickhouse
     ulimits:
@@ -91,7 +92,7 @@ services:
     environment: *okapi-env
     ports:
       - "8080:8080"   # 数据面 /v1/*
-      - "8081:8081"   # 控制面 + 前端
+      - "127.0.0.1:8081:8081"   # 控制面 + 前端
 
   # ---- 多角色形态 ----
   gateway:
@@ -110,7 +111,7 @@ services:
     command: ["console"]
     environment: *okapi-env
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
 
   worker:
     <<: *okapi-image

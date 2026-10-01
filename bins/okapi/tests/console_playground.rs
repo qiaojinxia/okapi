@@ -5,6 +5,9 @@
 //! 无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口。
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::response::IntoResponse;
 use axum::routing::post;
 use okapi::{console, gateway};
@@ -93,6 +96,7 @@ async fn setup() -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

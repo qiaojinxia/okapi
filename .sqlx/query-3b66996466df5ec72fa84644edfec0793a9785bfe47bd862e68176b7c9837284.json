@@ -1,0 +1,55 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH page AS (\n            SELECT id, balance_micro FROM users\n            WHERE deleted_at IS NULL AND id > $2\n            ORDER BY id LIMIT $1\n        )\n        SELECT u.id AS user_id,\n               u.balance_micro,\n               COALESCE(e.wallet_sum, 0)::bigint AS \"events_sum!\",\n               COALESCE(e.sub_sum, 0)::bigint AS \"sub_events_sum!\"\n        FROM page u\n        LEFT JOIN LATERAL (\n            SELECT SUM(delta_micro) FILTER (WHERE pool = 0) AS wallet_sum,\n                   SUM(delta_micro) FILTER (WHERE pool = 1) AS sub_sum\n            FROM billing_balance_totals\n            WHERE user_id = u.id\n        ) e ON true\n        ORDER BY u.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "balance_micro",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "balance_micro"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "events_sum!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "sub_events_sum!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "3b66996466df5ec72fa84644edfec0793a9785bfe47bd862e68176b7c9837284"
+}

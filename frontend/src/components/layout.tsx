@@ -212,6 +212,7 @@ function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => 
   if (!me.data) return null
   const role = roleLabel(me.data.role, t)
   const initial = role.slice(0, 1).toUpperCase()
+  const identity = `${me.data.username ? `${me.data.username} ` : ''}#${me.data.user_id}`
   return (
     <div className="shrink-0 border-t border-sidebar-border p-2">
       <Tooltip content={rail ? t('profile:title') : ''} className="flex w-full">
@@ -228,8 +229,8 @@ function SidebarFooter({ rail, onNavigate }: { rail: boolean; onNavigate: () => 
           {!rail && (
             <div className="flex min-w-0 flex-col">
               <span className="truncate text-sm font-medium">{t('profile:title')}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                {t('common:userId', { id: me.data.user_id })} · {me.data.group}
+              <span className="truncate text-xs text-muted-foreground" title={`${identity} · ${me.data.group}`}>
+                {identity} · {me.data.group}
               </span>
             </div>
           )}

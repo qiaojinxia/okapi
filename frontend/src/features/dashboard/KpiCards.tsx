@@ -20,6 +20,7 @@ function Kpi({
   today,
   window,
   tone,
+  accent,
   loading,
   search,
   detail,
@@ -30,6 +31,8 @@ function Kpi({
   today: string
   window: React.ReactNode
   tone?: 'default' | 'warn' | 'bad'
+  /// 图标块的色相：五张卡各用一种，不再是一排同色；超阈值的错误率仍由 tone 染红。
+  accent?: string
   loading: boolean
   search: AnalyticsSearch
   detail?: string
@@ -45,7 +48,7 @@ function Kpi({
     <Stat layout="stacked" compact className="h-full min-w-0 rounded-xl transition-colors group-hover:border-primary/40 group-hover:bg-accent/30 group-focus-visible:border-primary/40 lg:max-xl:px-2" icon={icon}
       label={<><span className="md:hidden">{shortLabel}</span><span className="hidden md:inline">{label}</span></>}
       value={<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-lg sm:text-xl"><span className="min-w-0" title={today}>{today}</span>{detail && <span className="text-[11px] font-normal text-muted-foreground">{detail}</span>}<ArrowUpRight aria-hidden className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground group-hover:text-primary group-focus-visible:text-primary sm:block" /></span>}
-      sub={window} tone={tone} />
+      sub={window} tone={tone} iconClassName={accent} />
   </Link>
 }
 
@@ -102,6 +105,7 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
     <div aria-busy={loading} className="grid min-w-0 grid-cols-2 gap-2 md:grid-cols-6 lg:grid-cols-5">
       <Kpi
         icon={Activity}
+        accent="bg-chart-1/12 text-chart-1"
         loading={loading}
         label={scopedLabel(t('admin:kpiRequests'))}
         shortLabel={t('admin:kpiRequests')}
@@ -115,6 +119,7 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
       />
       <Kpi
         icon={Coins}
+        accent="bg-success/12 text-success"
         loading={loading}
         label={scopedLabel(t('admin:kpiRevenue'))}
         shortLabel={t('admin:kpiRevenue')}
@@ -128,6 +133,7 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
       />
       <Kpi
         icon={Cpu}
+        accent="bg-chart-4/12 text-chart-4"
         loading={loading}
         label={scopedLabel(t('admin:kpiTokens'))}
         shortLabel={t('admin:kpiTokens')}
@@ -141,6 +147,7 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
       />
       <Kpi
         icon={Users}
+        accent="bg-chart-2/12 text-chart-2"
         loading={loading}
         label={scopedLabel(t('admin:kpiActiveUsers'))}
         shortLabel={t('admin:kpiActiveUsers')}
@@ -154,6 +161,7 @@ export function KpiCards({ days, scope = 'today' }: { days: number; scope?: 'tod
       />
       <Kpi
         icon={AlertTriangle}
+        accent={errorBp < 100 ? 'bg-warning/14 text-warning' : undefined}
         loading={loading}
         label={scopedLabel(t('admin:kpiErrorRate'))}
         shortLabel={t('admin:kpiErrorRate')}

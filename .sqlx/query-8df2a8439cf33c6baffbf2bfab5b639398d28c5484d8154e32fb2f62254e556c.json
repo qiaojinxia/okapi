@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE video_tasks SET state='refunded',updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state='refund_pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8df2a8439cf33c6baffbf2bfab5b639398d28c5484d8154e32fb2f62254e556c"
+}

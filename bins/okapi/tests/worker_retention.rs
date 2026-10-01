@@ -864,3 +864,46 @@ async fn expiry_pg_failure_leaves_hot_funds_available_and_can_retry() {
         0
     );
 }
+
+#[tokio::test]
+async fn default_partition_rows_are_pruned_without_losing_financial_facts() {
+    let bed = setup().await;
+    let request = Uuid::new_v4();
+    sqlx::query("INSERT INTO billing_events(user_id,request_id,event_type,delta_micro,actor,created_at) VALUES($1,$2,'recharge',12345,'default-retention','2010-01-01')").bind(bed.uid).bind(request).execute(&bed.pg).await.unwrap();
+    sqlx::query("INSERT INTO billing_records(request_id,user_id,api_key_id,model_name,status,amount_micro,original_amount_micro,created_at) VALUES($1,$2,$3,'default-fixture',20,234,234,'2010-01-01')").bind(request).bind(bed.uid).bind(bed.kid).execute(&bed.pg).await.unwrap();
+    sqlx::query("INSERT INTO audit_logs(actor,action,created_at) VALUES('default-retention','fixture','2010-01-01')").execute(&bed.pg).await.unwrap();
+    worker::drop_expired_partitions(&bed.pg, Utc::now())
+        .await
+        .unwrap();
+    worker::drop_expired_partitions(&bed.pg, Utc::now())
+        .await
+        .unwrap();
+    let carry:i64=sqlx::query_scalar("SELECT delta_micro::bigint FROM billing_event_carry WHERE user_id=$1 AND actor='default-retention'").bind(bed.uid).fetch_one(&bed.pg).await.unwrap();
+    assert_eq!(carry, 12345, "repeat pruning must not carry twice");
+    let receipt: i64 =
+        sqlx::query_scalar("SELECT amount_micro FROM billing_record_receipts WHERE request_id=$1")
+            .bind(request)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(receipt, 234);
+    let details: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM billing_records WHERE request_id=$1")
+            .bind(request)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(details, 0);
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE actor='default-retention'")
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0);
+    let exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('billing_records_default') IS NOT NULL")
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert!(exists);
+}

@@ -99,7 +99,7 @@ impl AnthropicUpstream {
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Status {
                 status,
@@ -159,7 +159,7 @@ pub async fn send_messages_at(
 
     if !(200..300).contains(&status) {
         let retry_after_secs = retry_after_secs(resp.headers());
-        let body = resp.bytes().await.unwrap_or_default();
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
         return Err(UpstreamError::Status {
             status,
             body,
@@ -168,19 +168,21 @@ pub async fn send_messages_at(
     }
 
     if stream {
-        let events = resp.bytes_stream().eventsource().map(|item| match item {
-            Ok(event) => Ok(AnthropicEvent {
-                event: event.event,
-                data: event.data,
-            }),
-            Err(e) => Err(UpstreamError::Stream(e.to_string())),
-        });
+        let events = crate::limits::sse(resp)
+            .eventsource()
+            .map(|item| match item {
+                Ok(event) => Ok(AnthropicEvent {
+                    event: event.event,
+                    data: event.data,
+                }),
+                Err(e) => Err(UpstreamError::Stream(e.to_string())),
+            });
         Ok(MessagesResponse::Stream(MessagesStream {
             upstream_request_id,
             events: Box::pin(events),
         }))
     } else {
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         Ok(MessagesResponse::Json {
             status,
             upstream_request_id,

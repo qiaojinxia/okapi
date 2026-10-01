@@ -137,7 +137,7 @@ impl Coverage {
             .iter()
             .any(|kind| missing(level, kind))
             {
-                for (sign, source, raw) in [(1, table, false), (-1, "request_log_raw", true)] {
+                for (sign, source, raw) in [(1, table, false), (-1, "request_log_calls", true)] {
                     let query = counts(&keys, source, predicate, raw);
                     raw_branches.push(format!("SELECT '{level}' AS level, grain, {sign} * toInt64(n) AS delta FROM ({query})"));
                 }

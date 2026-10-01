@@ -26,7 +26,7 @@ async function prepare(page: Page, session = true) {
       return route.fulfill({ json: profile })
     }
     const responses: Record<string, unknown> = {
-      '/api/me': { user_id: 1, key_id: 1, role: 1, group: 'default', balance_micro: 1000000, permissions: [], has_web_session: session },
+      '/api/me': { user_id: 1, username: profile.username, key_id: 1, role: 1, group: 'default', balance_micro: 1000000, permissions: [], has_web_session: session },
       '/api/me/stats/activity': { year: 2026, scope: 'user', today: '2026-09-30', timezone: 'UTC', first_year: 2026, data: [] },
     }
     return route.fulfill({ json: responses[url.pathname] ?? { data: [] } })
@@ -42,6 +42,8 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('tab', { name: '基本信息' })).toHaveAttribute('aria-selected', 'true')
     const username = page.getByLabel('用户名', { exact: true })
     await expect(username).toHaveValue('Alice')
+    const identity = page.getByRole('complementary').getByRole('link', { name: '个人中心', exact: true })
+    if (width === 1440) await expect(identity).toContainText('Alice #1 · default')
     expect(requests).not.toContain('/api/me/stats/activity')
     expect(requests).not.toContain('/api/me/logins')
     expect(requests).not.toContain('/api/me/sessions')
@@ -56,8 +58,10 @@ for (const width of [390, 1440]) {
     await page.getByRole('button', { name: '保存', exact: true }).click()
     await expect.poll(() => writes).toEqual([{ username: '新名字', language: 'zh-CN' }])
     await expect(page.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
+    if (width === 1440) await expect(identity).toContainText('新名字 #1 · default')
     await page.reload()
     await expect(username).toHaveValue('新名字')
+    if (width === 1440) await expect(identity).toContainText('新名字 #1 · default')
     await expect(page.getByText('alice@example.test', { exact: true })).toBeVisible()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: `test-results/profile-info-${width}.png`, fullPage: true, animations: 'disabled' })
@@ -88,6 +92,7 @@ test('API Key 登录的基本信息提示账户登录，不展示可编辑表单
   const { writes } = await prepare(page, false)
   await page.goto('/portal/profile?tab=info')
   await expect(page.getByRole('status')).toContainText('请使用邮箱密码或第三方账户登录')
+  await expect(page.getByRole('complementary').getByRole('link', { name: '个人中心', exact: true })).toContainText('Alice #1 · default')
   await expect(page.getByLabel('用户名', { exact: true })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '邮箱登录', exact: true })).toHaveAttribute('href', '/')
   expect(writes).toHaveLength(0)

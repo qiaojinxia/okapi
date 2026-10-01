@@ -882,3 +882,76 @@ async fn me_logs_summary_and_usage_details_are_owned_and_page_independent() {
         }
     }
 }
+
+/// Request failure and billing state are independent; personal diagnostics stay owner-scoped.
+#[tokio::test]
+async fn failed_refunds_and_charged_stream_errors_are_visible_without_exposing_routing() {
+    let env = setup().await;
+    let (owner, token) = mk_user(&env.pg).await;
+    let (other, _) = mk_user(&env.pg).await;
+    let key: i64 = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id=$1")
+        .bind(owner)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let diagnostics = json!({"request_failed":true,"error_phase":"upstream","error_message":"quota exceeded","response_model":"actual-model","attempts":[{"channel_key_id":99}],"session_id":"private","user_agent":"sdk"});
+    for (user, status, log_type, details) in [
+        (
+            owner,
+            30_i16,
+            5_i16,
+            Some(json!({"diagnostics":diagnostics})),
+        ),
+        (owner, 30, 2, None),
+        (owner, 20, 2, Some(json!({"diagnostics":diagnostics}))),
+        (other, 30, 5, Some(json!({"diagnostics":diagnostics}))),
+    ] {
+        sqlx::query("INSERT INTO billing_records(request_id,user_id,api_key_id,model_name,status,log_type,amount_micro,usage_details) VALUES ($1,$2,$3,'failed-model',$4,$5,100,$6)")
+            .bind(Uuid::new_v4()).bind(user).bind(key).bind(status).bind(log_type).bind(details)
+            .execute(&env.pg).await.unwrap();
+    }
+    let client = reqwest::Client::new();
+    let rows: Value = client
+        .get(format!("http://{}/api/me/logs?errors_only=true", env.addr))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let rows = rows["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().any(|r| r["status"] == 30));
+    assert!(rows.iter().any(|r| r["status"] == 20));
+    for row in rows {
+        assert_eq!(row["is_error"], true);
+        assert_eq!(row["diagnostics"]["error_message"], "quota exceeded");
+        assert_eq!(row["diagnostics"]["response_model"], "actual-model");
+        for private in ["attempts", "session_id", "user_agent"] {
+            assert!(row["diagnostics"].get(private).is_none());
+        }
+    }
+    let stat: Value = client
+        .get(format!(
+            "http://{}/api/me/logs/stat?errors_only=true",
+            env.addr
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stat["records"], 2);
+    assert_eq!(stat["errors"], 2);
+    assert_eq!(stat["failed"], 0, "financial failures remain separate");
+    assert_eq!(stat["settled"], 1);
+    assert_eq!(stat["refunded"], 1);
+    assert_eq!(stat["amount_micro"], 100);
+}

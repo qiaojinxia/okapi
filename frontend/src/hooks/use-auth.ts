@@ -4,6 +4,7 @@ import { qk } from '@/lib/query-keys'
 
 export interface Me {
   user_id: number
+  username?: string | null
   key_id: number
   key_name?: string
   key_prefix?: string

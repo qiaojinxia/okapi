@@ -215,7 +215,18 @@ async fn handle(
         }
     };
 
-    // —— 预扣已建立：一切失败路径必须退款 ——
+    let mut failure = super::failure::Guard::new(
+        state,
+        &key,
+        request_id,
+        &canonical,
+        requested_model,
+        &format!("/v1{upstream_path}"),
+        started,
+        reservation_pool,
+        source_window.as_deref(),
+    );
+    // —— 预扣已建立：一切失败路径必须退款与落失败账单 ——
     match forward(
         state,
         &key,
@@ -229,6 +240,7 @@ async fn handle(
     .await
     {
         Ok((resp_body, status, usage, channel, upstream_request_id, failover, upstream_model)) => {
+            failure.upstream(&upstream_model, channel);
             let usage = usage.unwrap_or(TokenUsage {
                 upstream_usage: Some(okapi_domain::UpstreamTokenCounts::default()),
                 prompt_tokens: est_prompt,
@@ -289,7 +301,11 @@ async fn handle(
                         event_type: "commit",
                         pool: reservation_pool,
                     };
-                    if state.settle_success(input).await? {
+                    if state
+                        .settle_success(input)
+                        .await
+                        .inspect_err(|error| failure.error(error))?
+                    {
                         super::auth::record_settlement_counters(
                             state,
                             key.user_id,
@@ -301,6 +317,7 @@ async fn handle(
                     }
                 }
                 Err(err) => {
+                    failure.error(&err);
                     let _ = state
                         .ledger
                         .refund(key.user_id, key.key_id, request_id)
@@ -308,6 +325,7 @@ async fn handle(
                     return Err(err);
                 }
             }
+            failure.disarm();
             let resp = Response::builder()
                 .status(status)
                 .header(header::CONTENT_TYPE, "application/json")
@@ -316,6 +334,7 @@ async fn handle(
             Ok(with_request_id(resp, request_id))
         }
         Err((err, channel, failover)) => {
+            failure.error(&err);
             let pool = match state
                 .ledger
                 .refund(key.user_id, key.key_id, request_id)
@@ -375,6 +394,7 @@ async fn handle(
                 pool,
             };
             state.settle_write(input).await;
+            failure.disarm();
             Err(err)
         }
     }

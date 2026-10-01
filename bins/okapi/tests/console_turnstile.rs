@@ -80,6 +80,10 @@ async fn bed() -> Bed {
     });
 
     for (key, value) in [
+        (
+            "ssrf_policy",
+            json!({"allow_http": true, "allow_private": true}),
+        ),
         ("turnstile_secret", json!("sec-123")),
         (
             "turnstile_verify_url",

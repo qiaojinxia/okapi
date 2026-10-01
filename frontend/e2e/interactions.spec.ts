@@ -53,6 +53,7 @@ test('年度日历覆盖闰日，按输入加输出汇总，连续天数跨月�
 test('底部头像进入个人中心，热力图可点击、键盘切日并切换指标', async ({ page }) => {
   const queries = await prepareProfile(page)
   await page.goto('/portal/keys')
+  await expect(page.getByRole('complementary').getByRole('link', { name: '个人中心', exact: true })).toContainText('root #1 · default')
   await page.getByRole('complementary').getByRole('link', { name: '个人中心', exact: true }).click()
   await expect(page).toHaveURL(/\/portal\/profile$/)
   await expect(page.getByRole('main').getByRole('heading', { name: '个人中心', exact: true })).toBeVisible()
@@ -104,6 +105,7 @@ test('移动端头像入口关闭菜单，日历不撑宽页面，日期选择�
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/portal/keys')
   await page.getByRole('button', { name: '打开导航' }).click()
+  await expect(page.getByRole('dialog').getByRole('link', { name: '个人中心', exact: true })).toContainText('root #1 · default')
   await page.getByRole('dialog').getByRole('link', { name: '个人中心', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.getByLabel('选择日期').fill('2026-01-01')
@@ -148,7 +150,7 @@ async function prepare(page: Page, permissions = ['*'], language = 'en') {
       requests.push(path)
       expect(request.method(), '交互回归不应提交业务修改').toBe('GET')
       const json = path === '/api/me' ? {
-        user_id: 1, key_id: 1, group: 'default', balance_micro: 10000000,
+        user_id: 1, username: 'root', key_id: 1, group: 'default', balance_micro: 10000000,
         balance_expires_at: null, role: permissions.length ? 100 : 1, permissions,
       } : path === '/api/notice' ? { notice: null }
         : path.startsWith('/admin/settings/') ? { value: null }

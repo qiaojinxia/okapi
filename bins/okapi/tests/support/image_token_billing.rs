@@ -10,6 +10,7 @@ pub(super) async fn token_env() -> Env {
         .execute(&env.state.pg)
         .await
         .unwrap();
+    published_pricing::publish(&env.state.pg, env.user).await;
     let book = gateway::pricing_loader::load_pricebook(&env.state.pg)
         .await
         .unwrap();
@@ -207,6 +208,7 @@ async fn pricing_remains_frozen_while_provider_is_running() {
     let peer = env.peer().await;
     sqlx::query("UPDATE model_pricing SET model_ratio=25 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
         .bind(&env.model).execute(&env.state.pg).await.unwrap();
+    published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(
         gateway::pricing_loader::load_pricebook(&env.state.pg)
             .await
@@ -393,6 +395,7 @@ async fn tiered_images_use_actual_response_total_for_price_band() {
     let mut env = token_env().await;
     sqlx::query("UPDATE model_pricing SET pricing_mode='tiered',tier_expr='0:5,250:10' WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
         .bind(&env.model).execute(&env.state.pg).await.unwrap();
+    published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(
         gateway::pricing_loader::load_pricebook(&env.state.pg)
             .await

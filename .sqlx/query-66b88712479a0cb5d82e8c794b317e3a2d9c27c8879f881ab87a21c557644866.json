@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE video_tasks SET state='refund_pending',updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state IN ('pending','refund_pending') RETURNING request_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "request_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "request_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "66b88712479a0cb5d82e8c794b317e3a2d9c27c8879f881ab87a21c557644866"
+}

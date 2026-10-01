@@ -24,6 +24,6 @@ export function QualityTrend({ search, onChange }: { search: QualitySearch; onCh
     <AnalysisControls value={search} onApply={(next) => onChange({ ...search, ...advancedSearch({ ...next }) })} today={query.data?.window?.today} />
     <label className="flex min-w-0 max-w-sm items-center gap-2 text-sm"><span className="shrink-0">{t('analysis:compare')}</span><select className={selectClass} value={search.stack ?? ''} onChange={(e) => onChange({ ...search, stack: e.target.value as QualitySearch['stack'] || undefined })}>{['', ...QUALITY_COMPARISONS].map((value) => <option key={value} value={value}>{value ? dimensionLabel(t, value) : t('analytics:stackNone')}</option>)}</select></label>
     <FreshnessNotice value={query.isError ? undefined : query.data?.window?.freshness} />
-    {query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.data?.data.length ? <TrendPlot key={`${metric}-${query.data.stack ?? 'none'}`} resp={query.data} metric={metric} /> : <EmptyState hint={t('admin:trendEmptyHint')} />}
+    {query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.data?.data.length ? <TrendPlot key={params} resp={query.data} metric={metric} paginateTable /> : <EmptyState hint={t('admin:trendEmptyHint')} />}
   </CardContent></Card>
 }

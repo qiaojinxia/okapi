@@ -1,5 +1,7 @@
 //! Cache quantities and sample counts always describe one selected population.
 use super::measurement_coverage::Mode;
+use okapi_store::{ChClient, StoreError};
+use serde_json::Value;
 
 pub(super) const FIELDS: [&str; 4] = [
     "cache_observed",
@@ -14,6 +16,71 @@ pub(super) fn source(keys: &str, table: &str, predicate: &str) -> String {
     prepared(keys, table, predicate, Mode::Recover)
 }
 
+/// Avoid evaluating the legacy calendar bridge when a complete source exists.
+/// Coverage must agree at every requested grain, including empty populations.
+pub(super) async fn query(
+    ch: &ChClient,
+    keys: &str,
+    table: &str,
+    predicate: &str,
+) -> Result<Vec<Value>, StoreError> {
+    let keys = if keys.is_empty() {
+        "source_scope"
+    } else {
+        keys
+    };
+    let expected = format!(
+        "WITH {}, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}",
+        time_columns(table)
+    );
+    let aggregate = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM mv_cache_totals_5min WHERE {predicate} GROUP BY {keys}"
+    );
+    let mode = if complete(ch, keys, &expected, &aggregate).await? {
+        Mode::Aggregate
+    } else {
+        let raw = format!(
+            "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, count() AS n FROM request_log_calls WHERE {predicate} GROUP BY {keys}"
+        );
+        if complete(ch, keys, &expected, &raw).await? {
+            Mode::RawComplete
+        } else {
+            Mode::Recover
+        }
+    };
+    ch.query_json_each_row(&format!(
+        "SELECT * FROM {}",
+        prepared(keys, table, predicate, mode)
+    ))
+    .await
+}
+
+async fn complete(
+    ch: &ChClient,
+    keys: &str,
+    expected: &str,
+    observed: &str,
+) -> Result<bool, StoreError> {
+    let rows = ch.query_json_each_row(&format!(
+        "SELECT countIf(difference != 0) AS missing FROM (SELECT {keys}, sum(delta) AS difference FROM (\
+         SELECT {keys}, toInt64(n) AS delta FROM ({expected}) UNION ALL \
+         SELECT {keys}, -toInt64(n) AS delta FROM ({observed})) GROUP BY {keys})"
+    )).await?;
+    Ok(rows
+        .first()
+        .is_some_and(|row| super::stats::ch_i64(row, "missing") == 0))
+}
+
+fn time_columns(table: &str) -> &'static str {
+    match table {
+        "mv_channel_5min" => "toStartOfHour(ts5) AS hour, toDate(ts5) AS day",
+        "mv_key_model_day" | "mv_user_model_day" | "mv_user_day" | "mv_apikey_day" => {
+            "toStartOfDay(day) AS hour"
+        }
+        _ => "toDate(hour) AS day",
+    }
+}
+
 /// Validated/internal SQL only; strings in predicates remain server-bound.
 pub(super) fn prepared(keys: &str, table: &str, predicate: &str, mode: Mode) -> String {
     let keys = if keys.is_empty() {
@@ -21,13 +88,7 @@ pub(super) fn prepared(keys: &str, table: &str, predicate: &str, mode: Mode) -> 
     } else {
         keys
     };
-    let time = match table {
-        "mv_channel_5min" => "toStartOfHour(ts5) AS hour, toDate(ts5) AS day",
-        "mv_key_model_day" | "mv_user_model_day" | "mv_user_day" | "mv_apikey_day" => {
-            "toStartOfDay(day) AS hour"
-        }
-        _ => "toDate(hour) AS day",
-    };
+    let time = time_columns(table);
     let expected = format!(
         "WITH {time}, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS expected FROM {table} WHERE {predicate} GROUP BY {keys}"
     );
@@ -35,7 +96,7 @@ pub(super) fn prepared(keys: &str, table: &str, predicate: &str, mode: Mode) -> 
         "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {MERGED} FROM mv_cache_totals_5min WHERE {predicate}"
     );
     let raw = format!(
-        "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {RAW} FROM request_log_raw WHERE {predicate}"
+        "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {RAW} FROM request_log_calls WHERE {predicate}"
     );
     if mode != Mode::Recover {
         let counts = format!(

@@ -94,7 +94,7 @@ fn uncalibrated(keys: &str, table: &str, predicate: &str, mode: Mode) -> String 
         "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day SELECT {keys}, {MERGED} FROM mv_output_rate_5min WHERE {predicate}"
     );
     let raw = format!(
-        "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day SELECT {keys}, {raw_sql} FROM request_log_raw WHERE {predicate}"
+        "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day SELECT {keys}, {raw_sql} FROM request_log_calls WHERE {predicate}"
     );
     let expected = format!(
         "WITH {time} SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}"

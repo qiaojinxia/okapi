@@ -1,7 +1,7 @@
 use super::error::AppError;
 use super::state::AppState;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use serde_json::json;
 
@@ -29,8 +29,18 @@ pub async fn list_models(
 /// GET /v1beta/models（Gemini `models.list` 形状；Gemini SDK / CLI 探测可用模型用）。
 pub async fn list_models_gemini(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Query(query): Query<GeminiModelsQuery>,
+    mut headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    if !headers.contains_key("x-goog-api-key")
+        && !headers.contains_key(axum::http::header::AUTHORIZATION)
+        && let Some(token) = query.key
+    {
+        headers.insert(
+            "x-goog-api-key",
+            token.parse().map_err(|_| AppError::bad_request())?,
+        );
+    }
     let key = super::auth::authenticate_data_plane(&state, &headers).await?;
     let names = okapi_store::pricing::list_active_models(&state.pg).await?;
     let models: Vec<serde_json::Value> = names
@@ -45,4 +55,9 @@ pub async fn list_models_gemini(
         })
         .collect();
     Ok(Json(json!({ "models": models })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct GeminiModelsQuery {
+    pub key: Option<String>,
 }

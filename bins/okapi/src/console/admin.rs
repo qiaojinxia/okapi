@@ -1293,7 +1293,11 @@ pub async fn set_setting(
         &actor,
         "settings.set",
         &req.key,
-        json!({ "value": req.value }),
+        if super::manage::is_secret_key(&req.key) {
+            json!({ "redacted": true, "configured": !req.value.is_null() })
+        } else {
+            json!({ "value": req.value })
+        },
     )
     .await;
     Ok(Json(
@@ -1711,7 +1715,7 @@ pub struct UpsertRuleReq {
     pub start_minute: Option<u16>,
     #[serde(default)]
     pub end_minute: Option<u16>,
-    /// time_based 可选：星期列表 0=周日…6=周六（缺省每天；与分钟窗同为 UTC 钟源）。
+    /// time_based 可选：星期列表 0=周日…6=周六（缺省每天；与分钟窗同为机器本地钟源）。
     #[serde(default)]
     pub weekdays: Option<Vec<u8>>,
     /// 多命中叠加语义：stackable（缺省，连乘）/ exclusive（桶内 priority 最高独占）/
@@ -2067,6 +2071,13 @@ pub async fn create_role(
     ExtractJson(req): ExtractJson<CreateRoleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard_super_admin(&state, &headers).await?;
+    if req
+        .permissions
+        .iter()
+        .any(|permission| !valid_role_permission(permission))
+    {
+        return Err(AppError::bad_request().with_param("permissions"));
+    }
     let permissions = json!(req.permissions);
     let role_id = okapi_store::admin::create_admin_role(
         &state.pg,
@@ -2086,6 +2097,15 @@ pub async fn create_role(
     )
     .await;
     Ok(Json(json!({ "admin_role_id": role_id })))
+}
+
+fn valid_role_permission(permission: &str) -> bool {
+    let base = permission
+        .strip_suffix(".own")
+        .or_else(|| permission.strip_suffix(".all"));
+    permission == "*"
+        || permissions::ALL.contains(&permission)
+        || base.is_some_and(|base| permissions::ALL.contains(&base))
 }
 
 #[derive(Deserialize)]
@@ -3398,4 +3418,24 @@ pub async fn reconciliation(
         })
         .collect();
     Ok(Json(json!({ "drift_count": data.len(), "drifts": data })))
+}
+
+#[cfg(test)]
+mod role_permission_tests {
+    use super::*;
+    #[test]
+    fn role_permissions_reject_typos_and_unknown_resources() {
+        for valid in ["*", "billing.read.own", "channel.write.all", "mcp.write"] {
+            assert!(valid_role_permission(valid), "{valid}");
+        }
+        for invalid in [
+            "billing.reed",
+            "channel.unknown.own",
+            "*.own",
+            "billing.read.own.all",
+            "",
+        ] {
+            assert!(!valid_role_permission(invalid), "{invalid}");
+        }
+    }
 }

@@ -149,9 +149,21 @@ export function RedemptionsPage() {
       ) : (
         <Table
           stickyHeader
+          className="min-w-[68rem] table-fixed"
           scrollResetKey={`${status}:${pager.offset}:${pager.limit}`}
           aria-busy={codes.isFetching}
         >
+          <colgroup>
+            <col className="w-14" />
+            <col className="w-72" />
+            <col className="w-24" />
+            <col className="w-24" />
+            <col />
+            <col className="w-28" />
+            <col className="w-28" />
+            <col className="w-28" />
+            <col className="w-20" />
+          </colgroup>
           <THead>
             <Tr>
               <Th>ID</Th>
@@ -169,14 +181,18 @@ export function RedemptionsPage() {
             {rows.map((c) => (
               <Tr key={c.id}>
                 <Td>{c.id}</Td>
-                <Td className="font-mono text-xs">{c.batch_id.slice(0, 8)}…</Td>
+                <Td>
+                  <span className="block truncate font-mono text-xs" title={c.batch_id}>
+                    {c.batch_id}
+                  </span>
+                </Td>
                 <Td numeric>{formatMoney(c.amount_micro, i18n.language)}</Td>
                 <Td>
                   <Badge variant={c.status === CODE_STATUS.unused ? 'success' : 'muted'}>
                     {statusLabel(c.status)}
                   </Badge>
                 </Td>
-                <Td>{c.plan_code ?? '—'}</Td>
+                <Td className="truncate" title={c.plan_code ?? undefined}>{c.plan_code ?? '—'}</Td>
                 <Td className="whitespace-nowrap text-xs">{dayjs(c.created_at).format('MM-DD HH:mm')}</Td>
                 <Td>{c.redeemed_by ?? '—'}</Td>
                 <Td className="whitespace-nowrap text-xs">

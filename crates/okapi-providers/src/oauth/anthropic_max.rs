@@ -130,7 +130,7 @@ async fn post_token(
         .await
         .map_err(|e| classify(&e))?;
     let status = resp.status().as_u16();
-    let bytes = resp.bytes().await.map_err(|e| classify(&e))?;
+    let bytes = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
     if !(200..300).contains(&status) {
         return Err(UpstreamError::Status {
             status,
@@ -282,7 +282,7 @@ pub async fn count_tokens(
     }
     let resp = req.send().await.map_err(|e| classify(&e))?;
     let status = resp.status().as_u16();
-    let bytes = resp.bytes().await.map_err(|e| classify(&e))?;
+    let bytes = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
     if !(200..300).contains(&status) {
         return Err(UpstreamError::Status {
             status,

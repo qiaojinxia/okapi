@@ -174,7 +174,7 @@ where
             return Err(Error::ParentOwner);
         }
     }
-    let (total,user,key_active,user_active,bytes,user_bytes):(i64,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT COUNT(*) FILTER(WHERE NOT cleanup_done),COUNT(*) FILTER(WHERE user_id=$1 AND NOT cleanup_done),COUNT(*) FILTER(WHERE user_id=$1 AND api_key_id=$2 AND completed_at IS NULL),COUNT(*) FILTER(WHERE user_id=$1 AND completed_at IS NULL),COALESCE(SUM(storage_budget),0)::bigint,COALESCE(SUM(storage_budget) FILTER(WHERE user_id=$1),0)::bigint FROM image_batches")
+    let (total,user,key_active,user_active,bytes,user_bytes):(i64,i64,i64,i64,i64,i64)=sqlx::query_as("SELECT COUNT(*) FILTER(WHERE NOT cleanup_done),COUNT(*) FILTER(WHERE user_id=$1 AND NOT cleanup_done),COUNT(*) FILTER(WHERE user_id=$1 AND api_key_id=$2 AND completed_at IS NULL),COUNT(*) FILTER(WHERE user_id=$1 AND completed_at IS NULL),COALESCE(SUM(storage_budget),0)::bigint,COALESCE(SUM(storage_budget) FILTER(WHERE user_id=$1),0)::bigint FROM image_batches WHERE NOT cleanup_done")
         .bind(input.user_id).bind(input.api_key_id).fetch_one(&mut *tx).await?;
     if total >= limits.total_jobs
         || user >= limits.per_user_jobs

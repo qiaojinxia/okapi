@@ -2,13 +2,15 @@ import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
+import { Pagination } from '@/components/ui/pagination'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { healthVariant } from '@/features/stats/ChannelHealthCard'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { usePagination } from '@/hooks/use-pagination'
 
 interface ClientRow {
   client_type: string
@@ -28,11 +30,12 @@ interface ClientRow {
 export function ClientsCard({ days }: { days: number }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
+  const pager = usePagination()
   const q = useQuery({
-    queryKey: qk.statsClients(days),
+    queryKey: qk.statsClients(days, pager.limit, pager.offset),
     queryFn: () =>
-      apiFetch<{ total_requests: number; data: ClientRow[] }>(
-        `/admin/stats/clients?days=${days}&limit=30`,
+      apiFetch<{ total_requests: number; total_items: number; data: ClientRow[] }>(
+        `/admin/stats/clients?days=${days}&limit=${pager.limit}&offset=${pager.offset}`,
       ),
   })
   const rows = q.data?.data ?? []
@@ -46,7 +49,7 @@ export function ClientsCard({ days }: { days: number }) {
         <p className="text-xs text-muted-foreground">{t('admin:statClientsHint')}</p>
         {q.isError ? (
           <ErrorState message={describeError(q.error)} />
-        ) : rows.length === 0 ? (
+        ) : q.isPending ? <LoadingState /> : rows.length === 0 ? (
           <EmptyState hint={t('admin:trendEmptyHint')} />
         ) : (
           <Table>
@@ -98,6 +101,7 @@ export function ClientsCard({ days }: { days: number }) {
             </TBody>
           </Table>
         )}
+        <Pagination {...pager} total={q.isError ? undefined : q.data?.total_items} disabled={q.isFetching} className="rounded-lg shadow-none" />
       </CardContent>
     </Card>
   )

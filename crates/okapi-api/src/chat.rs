@@ -18,6 +18,8 @@ pub struct ChatRequestProbe {
     pub max_completion_tokens: Option<u32>,
     #[serde(default)]
     pub messages: Vec<MessageProbe>,
+    #[serde(default, deserialize_with = "tool_json")]
+    pub tools: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,9 +42,9 @@ impl ChatRequestProbe {
     /// prompt 可见文本总字符数（估算输入）。
     #[must_use]
     pub fn prompt_chars(&self) -> usize {
-        self.messages
+        self.prompt_segments()
             .iter()
-            .map(|m| content_chars(&m.content))
+            .map(|s| s.chars().count())
             .sum()
     }
 
@@ -53,29 +55,14 @@ impl ChatRequestProbe {
         for m in &self.messages {
             push_text(&m.content, &mut out);
         }
+        if !self.tools.is_empty() {
+            out.push(&self.tools);
+        }
         out
     }
 }
 
-fn content_chars(value: &serde_json::Value) -> usize {
-    match value {
-        serde_json::Value::String(s) => s.chars().count(),
-        serde_json::Value::Array(parts) => parts
-            .iter()
-            .map(|p| {
-                p.get("text")
-                    .and_then(|t| t.as_str())
-                    .map_or(0, |s| s.chars().count())
-            })
-            .sum(),
-        serde_json::Value::Null
-        | serde_json::Value::Bool(_)
-        | serde_json::Value::Number(_)
-        | serde_json::Value::Object(_) => 0,
-    }
-}
-
-/// 与 [`content_chars`] 同构的取文本版：把可见文本片段借出来交给分词器。
+/// 把可见文本片段借出来交给分词器。
 /// 返回借用而非拼接的 String——prompt 可以很大，热路径上不该多一次整段拷贝。
 fn push_text<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
     match value {
@@ -94,6 +81,17 @@ fn push_text<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
     }
 }
 
+fn tool_json<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+    let value = serde_json::Value::deserialize(de)?;
+    Ok(
+        if value.is_null() || value.as_array().is_some_and(Vec::is_empty) {
+            String::new()
+        } else {
+            value.to_string()
+        },
+    )
+}
+
 /// Anthropic /v1/messages 请求探针（入口协议解析用，字段最小集）。
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessagesRequestProbe {
@@ -106,6 +104,8 @@ pub struct MessagesRequestProbe {
     pub messages: Vec<MessageProbe>,
     #[serde(default)]
     pub system: serde_json::Value,
+    #[serde(default, deserialize_with = "tool_json")]
+    pub tools: String,
 }
 
 impl MessagesRequestProbe {
@@ -118,12 +118,10 @@ impl MessagesRequestProbe {
     /// prompt 可见文本总字符数（含顶层 system）。
     #[must_use]
     pub fn prompt_chars(&self) -> usize {
-        let msg_chars: usize = self
-            .messages
+        self.prompt_segments()
             .iter()
-            .map(|m| content_chars(&m.content))
-            .sum();
-        msg_chars + content_chars(&self.system)
+            .map(|s| s.chars().count())
+            .sum()
     }
 
     /// prompt 可见文本片段（含顶层 system）。
@@ -133,6 +131,9 @@ impl MessagesRequestProbe {
         push_text(&self.system, &mut out);
         for m in &self.messages {
             push_text(&m.content, &mut out);
+        }
+        if !self.tools.is_empty() {
+            out.push(&self.tools);
         }
         out
     }
@@ -153,6 +154,8 @@ pub struct ResponsesRequestProbe {
     /// Responses 与 chat 同样接受 service_tier（tier 计费轴输入；直转时随体透传）。
     #[serde(default)]
     pub service_tier: Option<String>,
+    #[serde(default, deserialize_with = "tool_json")]
+    pub tools: String,
 }
 
 impl ResponsesRequestProbe {
@@ -164,18 +167,10 @@ impl ResponsesRequestProbe {
     /// prompt 可见文本总字符数（instructions + input）。
     #[must_use]
     pub fn prompt_chars(&self) -> usize {
-        let base = self
-            .instructions
-            .as_deref()
-            .map_or(0, |s| s.chars().count());
-        base + content_chars(&self.input)
-            + match &self.input {
-                serde_json::Value::Array(items) => items
-                    .iter()
-                    .map(|i| content_chars(i.get("content").unwrap_or(&serde_json::Value::Null)))
-                    .sum(),
-                _ => 0,
-            }
+        self.prompt_segments()
+            .iter()
+            .map(|s| s.chars().count())
+            .sum()
     }
 
     /// prompt 可见文本片段（instructions + input，含 input 项内嵌 content）。
@@ -192,6 +187,9 @@ impl ResponsesRequestProbe {
                     push_text(c, &mut out);
                 }
             }
+        }
+        if !self.tools.is_empty() {
+            out.push(&self.tools);
         }
         out
     }
@@ -231,6 +229,8 @@ pub struct GeminiRequestProbe {
     pub system_instruction: Option<GeminiContentProbe>,
     #[serde(default, alias = "generation_config")]
     pub generation_config: Option<GeminiGenerationConfigProbe>,
+    #[serde(default, deserialize_with = "tool_json")]
+    pub tools: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -274,6 +274,9 @@ impl GeminiRequestProbe {
                     out.push(t);
                 }
             }
+        }
+        if !self.tools.is_empty() {
+            out.push(&self.tools);
         }
         out
     }
@@ -637,6 +640,8 @@ pub struct ChunkDelta {
     pub tool_calls: Option<serde_json::Value>,
     #[serde(default)]
     pub refusal: Option<String>,
+    #[serde(default, alias = "reasoning")]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChunkProbe {
@@ -646,6 +651,10 @@ impl ChunkProbe {
         self.choices.iter().any(|c| {
             c.delta.content.as_ref().is_some_and(|s| !s.is_empty())
                 || c.delta.tool_calls.is_some()
+                || c.delta
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|s| !s.is_empty())
                 || c.delta.refusal.as_ref().is_some_and(|s| !s.is_empty())
         })
     }
@@ -655,8 +664,42 @@ impl ChunkProbe {
     pub fn content_chars(&self) -> usize {
         self.choices
             .iter()
-            .filter_map(|c| c.delta.content.as_deref())
+            .flat_map(|c| {
+                [
+                    c.delta.content.as_deref(),
+                    c.delta.reasoning_content.as_deref(),
+                    c.delta.refusal.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+            })
             .map(|s| s.chars().count())
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod third_review_tests {
+    use super::*;
+    #[test]
+    fn tools_contribute_identical_json_to_all_dialect_probes() {
+        let tools = serde_json::json!([{"type":"function","function":{"name":"search","parameters":{"type":"object","properties":{"query":{"type":"string"}},"maxItems":100}}}]);
+        let body = serde_json::json!({"model":"fixture","tools":tools});
+        let chat: ChatRequestProbe = serde_json::from_value(body.clone()).unwrap();
+        let messages: MessagesRequestProbe = serde_json::from_value(body.clone()).unwrap();
+        let responses: ResponsesRequestProbe = serde_json::from_value(body.clone()).unwrap();
+        let gemini: GeminiRequestProbe = serde_json::from_value(body).unwrap();
+        assert_eq!(chat.prompt_segments(), vec![tools.to_string().as_str()]);
+        assert_eq!(messages.prompt_chars(), chat.prompt_chars());
+        assert_eq!(responses.prompt_chars(), chat.prompt_chars());
+        assert_eq!(gemini.prompt_chars(), chat.prompt_chars());
+    }
+    #[test]
+    fn reasoning_only_chunks_are_billable_output() {
+        let chunk: ChunkProbe =
+            serde_json::from_str(r#"{"choices":[{"delta":{"reasoning_content":"thinking"}}]}"#)
+                .unwrap();
+        assert!(chunk.has_output());
+        assert_eq!(chunk.content_chars(), 8);
     }
 }

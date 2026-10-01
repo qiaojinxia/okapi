@@ -43,6 +43,10 @@ export interface CatalogSearch {
   view?: 'cards' | 'table'
   sort?: 'name' | 'input' | 'output' | 'context'
   model?: string
+  /// 对比中的模型 ID，逗号分隔，最多 4 个；进 URL，可分享、刷新后恢复。
+  compare?: string
+  /// 对比抽屉是否打开（至少选了 2 个才会真正打开）。
+  comparing?: boolean
   tab?: 'code'
   page?: number
   pageSize?: 12 | 24 | 48

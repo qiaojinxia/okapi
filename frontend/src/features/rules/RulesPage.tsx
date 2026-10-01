@@ -11,7 +11,7 @@ import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { RuleDrawer } from '@/features/rules/RuleDrawer'
-import { STACKING_LABEL, WEEKDAY_LABEL } from '@/features/rules/types'
+import { STACKING_LABEL, TYPE_LABEL, WEEKDAY_LABEL } from '@/features/rules/types'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
@@ -113,7 +113,11 @@ export function RulesPage() {
     const raw = r.params.stacking_mode
     if (typeof raw !== 'string' || raw === 'stackable') return null
     const key = STACKING_LABEL[raw as keyof typeof STACKING_LABEL]
-    return key === undefined ? null : <Badge variant="warning">{t(key)}</Badge>
+    return key === undefined ? null : (
+      <Badge variant="warning" className="min-h-5 py-0" title={t(key)}>
+        <span className="truncate">{t(key)}</span>
+      </Badge>
+    )
   }
   const describeScope = (s: RuleRow['scope']) => {
     const parts: string[] = []
@@ -156,7 +160,22 @@ export function RulesPage() {
           }
         />
       ) : (
-        <Table stickyHeader>
+        <Table
+          stickyHeader
+          className="min-w-[68rem] table-fixed"
+          aria-label={t('admin:rulesTitle')}
+          scrollResetKey={`${pager.offset}:${pager.limit}`}
+          aria-busy={rules.isFetching}
+        >
+          <colgroup>
+            <col className="w-76" />
+            <col className="w-40" />
+            <col />
+            <col />
+            <col className="w-20" />
+            <col className="w-24" />
+            <col className="w-40 md:w-32" />
+          </colgroup>
           <THead>
             <Tr>
               <Th>{t('admin:ruleCode')}</Th>
@@ -164,55 +183,64 @@ export function RulesPage() {
               <Th>{t('admin:ruleParams')}</Th>
               <Th>{t('admin:ruleScope')}</Th>
               <Th numeric>{t('admin:priority')}</Th>
-              <Th>{t('common:status')}</Th>
-              <Th>{t('common:actions')}</Th>
+              <Th className="text-center">{t('common:status')}</Th>
+              <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
           <TBody>
-            {rows.map((r) => (
-              <Tr key={r.rule_code}>
-                <Td className="font-mono text-xs">{r.rule_code}</Td>
-                <Td>
-                  <div className="flex items-center gap-1">
-                    <Badge>{r.rule_type}</Badge>
-                    {stackingBadge(r)}
-                  </div>
-                </Td>
-                <Td className="max-w-64 truncate text-xs">{describeParams(r)}</Td>
-                <Td className="max-w-64 truncate text-xs text-muted-foreground">
-                  {describeScope(r.scope)}
-                </Td>
-                <Td numeric>{r.priority}</Td>
-                <Td>
-                  <Badge variant={r.enabled ? 'success' : 'muted'}>
-                    {r.enabled ? t('common:enabled') : t('common:disabled')}
-                  </Badge>
-                </Td>
-                <Td>
-                  <div className="flex items-center gap-0.5">
-                    <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer(r)} />
-                    <IconButton
-                      icon={r.enabled ? PowerOff : Power}
-                      label={r.enabled ? t('common:disabled') : t('common:enabled')}
-                      disabled={toggle.isPending}
-                      onClick={() => toggle.mutate({ code: r.rule_code, enabled: !r.enabled })}
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: r.rule_code }),
-                          description: t('admin:confirmRuleDelete'),
-                          onConfirm: () => remove.mutate(r.rule_code),
-                        })
-                      }
-                    />
-                  </div>
-                </Td>
-              </Tr>
-            ))}
+            {rows.map((r) => {
+              const params = describeParams(r)
+              const scope = describeScope(r.scope)
+              const typeKey = TYPE_LABEL[r.rule_type as keyof typeof TYPE_LABEL]
+              return (
+                <Tr key={r.rule_code}>
+                  <Td className="truncate font-mono text-xs" title={r.rule_code}>{r.rule_code}</Td>
+                  <Td>
+                    <div className="flex min-w-0 flex-col items-start gap-0.5">
+                      <Badge className="min-h-5 py-0">
+                        {typeKey === undefined ? r.rule_type : t(typeKey)}
+                      </Badge>
+                      {stackingBadge(r)}
+                    </div>
+                  </Td>
+                  <Td title={params}>
+                    <span className="line-clamp-2 [overflow-wrap:anywhere]">{params}</span>
+                  </Td>
+                  <Td className="text-xs text-muted-foreground" title={scope}>
+                    <span className="line-clamp-2 [overflow-wrap:anywhere]">{scope}</span>
+                  </Td>
+                  <Td numeric>{r.priority}</Td>
+                  <Td className="text-center">
+                    <Badge variant={r.enabled ? 'success' : 'muted'}>
+                      {r.enabled ? t('common:enabled') : t('common:disabled')}
+                    </Badge>
+                  </Td>
+                  <Td>
+                    <div className="flex items-center justify-end gap-0.5">
+                      <IconButton icon={Pencil} label={t('common:edit')} onClick={() => setDrawer(r)} />
+                      <IconButton
+                        icon={r.enabled ? PowerOff : Power}
+                        label={r.enabled ? t('common:disabled') : t('common:enabled')}
+                        disabled={toggle.isPending}
+                        onClick={() => toggle.mutate({ code: r.rule_code, enabled: !r.enabled })}
+                      />
+                      <IconButton
+                        icon={Trash2}
+                        label={t('common:delete')}
+                        variant="destructive"
+                        onClick={() =>
+                          confirm({
+                            title: t('common:confirmDeleteTitle', { name: r.rule_code }),
+                            description: t('admin:confirmRuleDelete'),
+                            onConfirm: () => remove.mutate(r.rule_code),
+                          })
+                        }
+                      />
+                    </div>
+                  </Td>
+                </Tr>
+              )
+            })}
           </TBody>
         </Table>
       )}

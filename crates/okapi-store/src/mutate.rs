@@ -320,7 +320,8 @@ pub async fn delete_plan(pool: &PgPool, plan_code: &str) -> Result<bool, StoreEr
     // 兑换码或订阅实例（含历史，账本事件引用 plan_code）引用即拒删
     let refs = sqlx::query_scalar!(
         r#"SELECT (SELECT COUNT(*) FROM redemption_codes WHERE plan_id = $1)
-                + (SELECT COUNT(*) FROM user_subscriptions WHERE plan_id = $1) AS "c!""#,
+                + (SELECT COUNT(*) FROM user_subscriptions WHERE plan_id = $1)
+                + (SELECT COUNT(*) FROM recharge_orders WHERE plan_id = $1) AS "c!""#,
         plan_id
     )
     .fetch_one(pool)
@@ -330,7 +331,17 @@ pub async fn delete_plan(pool: &PgPool, plan_code: &str) -> Result<bool, StoreEr
     }
     sqlx::query!(r#"DELETE FROM plans WHERE id = $1"#, plan_id)
         .execute(pool)
-        .await?;
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|error| error.code().as_deref() == Some("23503"))
+            {
+                StoreError::Conflict("plan_in_use")
+            } else {
+                error.into()
+            }
+        })?;
     Ok(true)
 }
 
@@ -425,7 +436,7 @@ pub async fn manage_user(
     let affected = match action {
         UserAction::Ban => sqlx::query!(
             r#"UPDATE users SET status = 2, updated_at = now()
-                   WHERE id = $1 AND deleted_at IS NULL"#,
+                   WHERE id = $1 AND deleted_at IS NULL AND role < 100"#,
             user_id
         )
         .execute(&mut *tx)
@@ -433,7 +444,7 @@ pub async fn manage_user(
         .rows_affected(),
         UserAction::Unban => sqlx::query!(
             r#"UPDATE users SET status = 1, updated_at = now()
-                   WHERE id = $1 AND deleted_at IS NULL"#,
+                   WHERE id = $1 AND deleted_at IS NULL AND role < 100"#,
             user_id
         )
         .execute(&mut *tx)
@@ -443,7 +454,7 @@ pub async fn manage_user(
             let role: i16 = if action == UserAction::Promote { 10 } else { 1 };
             // role < 100 守卫：super_admin 不可被降权，即便调用方越过上层校验
             sqlx::query!(
-                r#"UPDATE users SET role = $2, updated_at = now()
+                r#"UPDATE users SET role = $2, admin_role_id = NULL, updated_at = now()
                    WHERE id = $1 AND deleted_at IS NULL AND role < 100"#,
                 user_id,
                 role
@@ -454,7 +465,7 @@ pub async fn manage_user(
         }
         UserAction::Delete => sqlx::query!(
             r#"UPDATE users SET deleted_at = now(), status = 2, updated_at = now()
-                   WHERE id = $1 AND deleted_at IS NULL"#,
+                   WHERE id = $1 AND deleted_at IS NULL AND role < 100"#,
             user_id
         )
         .execute(&mut *tx)

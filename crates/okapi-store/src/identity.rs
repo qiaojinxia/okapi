@@ -216,14 +216,19 @@ pub fn generate_totp_secret(account: &str) -> (Vec<u8>, String) {
 /// 校验 6 位码（±1 窗容忍时钟偏移）。
 #[must_use]
 pub fn verify_totp(secret: &[u8], code: &str, now_unix: i64) -> bool {
-    let Ok(code_num) = code.trim().parse::<u32>() else {
-        return false;
-    };
+    matching_totp_counter(secret, code, now_unix).is_some()
+}
+
+pub fn matching_totp_counter(secret: &[u8], code: &str, now_unix: i64) -> Option<i64> {
+    if code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let code_num = code.parse::<u32>().ok()?;
     let counter = now_unix / TOTP_STEP_SECS;
-    [-1, 0, 1].iter().any(|offset| {
-        let c = counter + offset;
-        c >= 0 && totp_at(secret, u64::try_from(c).unwrap_or(0)) == code_num
-    })
+    [1, 0, -1]
+        .into_iter()
+        .filter_map(|offset| counter.checked_add(offset))
+        .find(|&c| u64::try_from(c).is_ok_and(|c| totp_at(secret, c) == code_num))
 }
 
 fn totp_at(secret: &[u8], counter: u64) -> u32 {
@@ -294,16 +299,55 @@ pub async fn set_password(pool: &PgPool, user_id: i64, password: &str) -> Result
     Ok(done.rows_affected() == 1)
 }
 
-/// 落库启用 2FA。
-pub async fn enable_totp(pool: &PgPool, user_id: i64, sealed: &[u8]) -> Result<(), StoreError> {
-    sqlx::query!(
-        r#"UPDATE users SET totp_secret_ciphertext = $2, updated_at = now() WHERE id = $1"#,
-        user_id,
-        sealed
-    )
-    .execute(pool)
-    .await?;
-    Ok(())
+/// Reverify the account password before altering authenticators.
+pub async fn reauthenticate(
+    pool: &PgPool,
+    user_id: i64,
+    password: &str,
+) -> Result<Option<LoginUser>, StoreError> {
+    let row = sqlx::query!("SELECT id,role,password_hash,totp_secret_ciphertext FROM users WHERE id=$1 AND status=1 AND deleted_at IS NULL",user_id).fetch_optional(pool).await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let Some(hash) = row.password_hash else {
+        return Ok(None);
+    };
+    if !verify_password_async(password, hash).await? {
+        return Ok(None);
+    }
+    Ok(Some(LoginUser {
+        user_id: row.id,
+        role: row.role,
+        totp_enabled: row.totp_secret_ciphertext.is_some(),
+        totp_secret_ciphertext: row.totp_secret_ciphertext,
+    }))
+}
+
+pub async fn enable_totp(
+    pool: &PgPool,
+    user_id: i64,
+    sealed: &[u8],
+    counter: i64,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query!("UPDATE users SET totp_secret_ciphertext=$2,totp_last_counter=$3,updated_at=now() WHERE id=$1 AND status=1 AND deleted_at IS NULL AND totp_secret_ciphertext IS NULL",user_id,sealed,counter).execute(pool).await?.rows_affected()==1)
+}
+
+pub async fn consume_totp(
+    pool: &PgPool,
+    user_id: i64,
+    sealed: &[u8],
+    counter: i64,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query!("UPDATE users SET totp_last_counter=$3 WHERE id=$1 AND status=1 AND deleted_at IS NULL AND totp_secret_ciphertext=$2 AND (totp_last_counter IS NULL OR totp_last_counter<$3)",user_id,sealed,counter).execute(pool).await?.rows_affected()==1)
+}
+
+pub async fn disable_totp(
+    pool: &PgPool,
+    user_id: i64,
+    sealed: &[u8],
+    counter: i64,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query!("UPDATE users SET totp_secret_ciphertext=NULL,totp_last_counter=NULL,updated_at=now() WHERE id=$1 AND status=1 AND deleted_at IS NULL AND totp_secret_ciphertext=$2 AND (totp_last_counter IS NULL OR totp_last_counter<$3)",user_id,sealed,counter).execute(pool).await?.rows_affected()==1)
 }
 
 #[cfg(test)]

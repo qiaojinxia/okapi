@@ -40,87 +40,82 @@ pub async fn ensure_topology(client: &async_nats::Client) -> anyhow::Result<jets
 /// relay 一批：outbox pending → JetStream 发布（确认后标记 published）。
 /// 返回本批行数。发布失败走 outbox 既有退避列。
 pub async fn relay_once(pg: &PgPool, js: &jetstream::Context) -> anyhow::Result<usize> {
-    let mut tx = pg.begin().await?;
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, event_id, topic, created_at, payload
-        FROM billing_outbox
-        WHERE status = 0 AND ch_batch_id IS NULL
-          AND (next_retry_at IS NULL OR next_retry_at <= now())
-          AND NOT EXISTS (SELECT 1 FROM billing_ch_events e
-                          WHERE e.event_key='outbox:'||billing_outbox.event_id::text)
-        ORDER BY id
-        LIMIT 500
-        FOR UPDATE SKIP LOCKED
-        "#
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    if rows.is_empty() {
-        tx.commit().await?;
-        return Ok(0);
-    }
-
-    let mut published: Vec<i64> = Vec::with_capacity(rows.len());
-    let mut failed: Vec<i64> = Vec::new();
-    for row in &rows {
-        // 消费侧需要事件时间：随消息附带 outbox 创建时刻
-        let mut payload = row.payload.clone();
-        if let Some(obj) = payload.as_object_mut() {
-            obj.insert(
-                "_billing_event_id".to_owned(),
-                serde_json::json!(row.event_id),
-            );
-            obj.insert(
-                "ts".to_owned(),
-                serde_json::Value::String(
-                    row.created_at.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-                ),
-            );
+    // Claim with a 10-minute lease, then release PG locks before network I/O.
+    let rows=sqlx::query!(r#"UPDATE billing_outbox o SET next_retry_at=now()+interval '10 minutes'
+        FROM (SELECT id FROM billing_outbox WHERE status=0 AND ch_batch_id IS NULL
+              AND (next_retry_at IS NULL OR next_retry_at<=now())
+              AND NOT EXISTS(SELECT 1 FROM billing_ch_events e WHERE e.event_key='outbox:'||billing_outbox.event_id::text)
+              ORDER BY id LIMIT 500 FOR UPDATE SKIP LOCKED) c
+        WHERE o.id=c.id RETURNING o.id,o.event_id,o.topic,o.created_at,o.payload,o.retry_count,o.next_retry_at"#).fetch_all(pg).await?;
+    let count = rows.len();
+    let outcomes = futures::stream::iter(rows)
+        .map(|row| async move {
+            let mut payload = row.payload.clone();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("_billing_event_id".into(), serde_json::json!(row.event_id));
+                obj.insert(
+                    "ts".into(),
+                    serde_json::json!(row.created_at.format("%Y-%m-%d %H:%M:%S%.3f").to_string()),
+                );
+            }
+            let valid = row.topic.starts_with("billing.")
+                && !row
+                    .topic
+                    .bytes()
+                    .any(|b| b.is_ascii_whitespace() || matches!(b, b'*' | b'>'))
+                && parse_event(
+                    payload.to_string().as_bytes(),
+                    &delivery::outbox_key(row.event_id),
+                )
+                .is_ok();
+            let ok = valid
+                && tokio::time::timeout(Duration::from_secs(5), async {
+                    match js
+                        .send_publish(
+                            row.topic.clone(),
+                            jetstream::message::PublishMessage::build()
+                                .message_id(delivery::outbox_key(row.event_id))
+                                .payload(payload.to_string().into()),
+                        )
+                        .await
+                    {
+                        Ok(ack) => ack.await.is_ok(),
+                        Err(_) => false,
+                    }
+                })
+                .await
+                .unwrap_or(false);
+            (row, ok, valid)
+        })
+        .buffer_unordered(32)
+        .collect::<Vec<_>>()
+        .await;
+    for (row, ok, valid) in outcomes {
+        let mut tx = pg.begin().await?;
+        // Recheck the lease: late acknowledgements cannot alter another worker's claim.
+        let owned=sqlx::query_scalar!("SELECT id FROM billing_outbox WHERE id=$1 AND status=0 AND ch_batch_id IS NULL AND next_retry_at=$2 FOR UPDATE",row.id,row.next_retry_at).fetch_optional(&mut *tx).await?;
+        if owned.is_none() {
+            tx.commit().await?;
+            continue;
         }
-        let ok = match js
-            .send_publish(
-                row.topic.clone(),
-                jetstream::message::PublishMessage::build()
-                    .message_id(delivery::outbox_key(row.event_id))
-                    .payload(payload.to_string().into()),
-            )
-            .await
-        {
-            Ok(ack) => ack.await.is_ok(),
-            Err(_) => false,
-        };
         if ok {
-            published.push(row.id);
+            sqlx::query!("UPDATE billing_outbox SET status=1,published_at=now(),stats_protocol=1,next_retry_at=NULL WHERE id=$1",row.id).execute(&mut *tx).await?;
+        } else if !valid || row.retry_count >= 4 {
+            let key = delivery::outbox_key(row.event_id);
+            let error = if valid {
+                "relay_publish_retries_exhausted"
+            } else {
+                "relay_invalid_event"
+            };
+            sqlx::query!(r#"INSERT INTO billing_dlq(source,payload,error,retry_count,event_key)
+                VALUES('relay',$1,$2,$3,$4) ON CONFLICT(event_key) WHERE event_key IS NOT NULL DO NOTHING"#,row.payload,error,row.retry_count.saturating_add(1),key).execute(&mut *tx).await?;
+            sqlx::query!("UPDATE billing_outbox SET status=2,retry_count=retry_count+1,next_retry_at=NULL WHERE id=$1",row.id).execute(&mut *tx).await?;
         } else {
-            failed.push(row.id);
+            sqlx::query!("UPDATE billing_outbox SET retry_count=retry_count+1,next_retry_at=now()+make_interval(secs=>least(300,5*power(2,least(retry_count,6)))) WHERE id=$1",row.id).execute(&mut *tx).await?;
         }
+        tx.commit().await?;
     }
-
-    if !published.is_empty() {
-        sqlx::query!(
-            r#"UPDATE billing_outbox SET status = 1, published_at = now(),stats_protocol=1 WHERE id = ANY($1)"#,
-            &published
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
-    if !failed.is_empty() {
-        tracing::warn!(count = failed.len(), "NATS 发布失败，退避重试");
-        sqlx::query!(
-            r#"
-            UPDATE billing_outbox
-            SET retry_count = retry_count + 1,
-                next_retry_at = now() + make_interval(secs => least(300, 5 * power(2, retry_count)))
-            WHERE id = ANY($1)
-            "#,
-            &failed
-        )
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(rows.len())
+    Ok(count)
 }
 
 /// PG takes durable responsibility before ack; saved batches survive empty JS fetches.

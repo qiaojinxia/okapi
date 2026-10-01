@@ -68,6 +68,29 @@ fn request_maps_contents_config_and_tools() {
 }
 
 #[test]
+fn request_preserves_remote_image_and_structured_output() {
+    let out = convert_req(&json!({
+        "messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":"https://example.com/image.png"}}
+        ]}],
+        "response_format":{"type":"json_schema","json_schema":{"name":"answer",
+            "schema":{"type":"object","properties":{"answer":{"type":"string"}}}}}
+    }));
+    assert_eq!(
+        out["contents"][0]["parts"][0]["fileData"]["fileUri"],
+        "https://example.com/image.png"
+    );
+    assert_eq!(
+        out["generationConfig"]["responseMimeType"],
+        "application/json"
+    );
+    assert_eq!(
+        out["generationConfig"]["responseJsonSchema"]["properties"]["answer"]["type"],
+        "string"
+    );
+}
+
+#[test]
 fn response_maps_thought_tools_and_usage() {
     let body = json!({
         "responseId": "r-1",
@@ -101,7 +124,7 @@ fn response_maps_thought_tools_and_usage() {
 }
 
 #[test]
-fn stream_chunks_map_and_finish_emits_usage_and_done() {
+fn stream_chunks_map_finish_and_accept_trailing_usage() {
     let mut st = GeminiStreamState::new("g-x");
     let mut all: Vec<ChatEvent> = Vec::new();
     let seq = vec![
@@ -118,9 +141,13 @@ fn stream_chunks_map_and_finish_emits_usage_and_done() {
         }
     }
     assert!(
-        matches!(all.last(), Some(ChatEvent::Done)),
-        "必须以 Done 收尾"
+        !all.iter().any(|event| matches!(event, ChatEvent::Done)),
+        "finishReason must not cut off trailing usage"
     );
+    let tail = st.step(Ok(
+        json!({"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":25}}).to_string(),
+    ));
+    assert!(tail.iter().any(|event|matches!(event,Ok(ChatEvent::Data { usage:Some(usage),.. }) if usage.completion_tokens==25)));
     let datas: Vec<Value> = all
         .iter()
         .filter_map(|e| match e {

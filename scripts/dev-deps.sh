@@ -26,13 +26,13 @@ case "${1:-}" in
     # （setup 一个 + build_state 一个），默认 100 会连接耗尽导致测试随机失败
     docker run -d --name "$PG_NAME" \
       -e POSTGRES_USER=okapi -e POSTGRES_PASSWORD=okapi_dev -e POSTGRES_DB=okapi \
-      -p "$PG_PORT:5432" "$PG_IMAGE" \
+      -p "127.0.0.1:$PG_PORT:5432" "$PG_IMAGE" \
       -c max_connections=300 >/dev/null
-    docker run -d --name "$REDIS_NAME" -p "$REDIS_PORT:6379" "$REDIS_IMAGE" >/dev/null
-    docker run -d --name "$NATS_NAME" -p "$NATS_PORT:4222" "$NATS_IMAGE" -js >/dev/null
+    docker run -d --name "$REDIS_NAME" -p "127.0.0.1:$REDIS_PORT:6379" "$REDIS_IMAGE" >/dev/null
+    docker run -d --name "$NATS_NAME" -p "127.0.0.1:$NATS_PORT:4222" "$NATS_IMAGE" -js >/dev/null
     docker run -d --name "$CH_NAME" \
       -e CLICKHOUSE_DB=okapi -e CLICKHOUSE_USER=okapi -e CLICKHOUSE_PASSWORD=okapi_dev \
-      -p "$CH_HTTP_PORT:8123" -p "$CH_NATIVE_PORT:9000" "$CH_IMAGE" >/dev/null
+      -p "127.0.0.1:$CH_HTTP_PORT:8123" -p "127.0.0.1:$CH_NATIVE_PORT:9000" "$CH_IMAGE" >/dev/null
     for _ in $(seq 1 30); do
       if docker exec "$PG_NAME" pg_isready -U okapi >/dev/null 2>&1; then break; fi
       sleep 1

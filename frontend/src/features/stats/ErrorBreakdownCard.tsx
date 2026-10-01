@@ -3,12 +3,14 @@ import { Link } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { EmptyState, ErrorState } from '@/components/ui/state'
+import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
+import { Pagination } from '@/components/ui/pagination'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { usePagination } from '@/hooks/use-pagination'
 
 interface ErrorRow {
   error_code: string
@@ -27,10 +29,11 @@ interface ErrorRow {
 export function ErrorBreakdownCard({ days }: { days: number }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
+  const pager = usePagination()
   const q = useQuery({
-    queryKey: qk.statsErrors(days),
+    queryKey: qk.statsErrors(days, pager.limit, pager.offset),
     queryFn: () =>
-      apiFetch<{ total: number; data: ErrorRow[] }>(`/admin/stats/errors?days=${days}&limit=20`),
+      apiFetch<{ total: number; total_items: number; data: ErrorRow[] }>(`/admin/stats/errors?days=${days}&limit=${pager.limit}&offset=${pager.offset}`),
   })
 
   return (
@@ -42,7 +45,7 @@ export function ErrorBreakdownCard({ days }: { days: number }) {
         <p className="text-xs text-muted-foreground">{t('admin:statErrorsHint')}</p>
         {q.isError ? (
           <ErrorState message={describeError(q.error)} />
-        ) : (q.data?.data ?? []).length === 0 ? (
+        ) : q.isPending ? <LoadingState /> : (q.data?.data ?? []).length === 0 ? (
           <EmptyState hint={t('admin:statErrorsEmpty')} />
         ) : (
           <Table>
@@ -103,6 +106,7 @@ export function ErrorBreakdownCard({ days }: { days: number }) {
             </TBody>
           </Table>
         )}
+        <Pagination {...pager} total={q.isError ? undefined : q.data?.total_items} disabled={q.isFetching} className="rounded-lg shadow-none" />
       </CardContent>
     </Card>
   )

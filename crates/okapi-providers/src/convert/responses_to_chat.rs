@@ -234,6 +234,13 @@ fn responses_usage_json(u: UsageProbe) -> Value {
 // ---- 事件流转换 ----
 
 /// Chat chunk 流 → Responses SSE 事件的有状态转换器。
+struct StreamTool {
+    output_index: usize,
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 pub struct ChatStreamToResponses {
     model: String,
     id: String,
@@ -241,6 +248,9 @@ pub struct ChatStreamToResponses {
     started: bool,
     text_open: bool,
     text_buf: String,
+    text_index: usize,
+    next_index: usize,
+    tools: std::collections::BTreeMap<usize, StreamTool>,
     usage: Option<UsageProbe>,
     finished: bool,
     seq: i64,
@@ -256,6 +266,9 @@ impl ChatStreamToResponses {
             started: false,
             text_open: false,
             text_buf: String::new(),
+            text_index: 0,
+            next_index: 0,
+            tools: std::collections::BTreeMap::new(),
             usage: None,
             finished: false,
             seq: 0,
@@ -306,7 +319,9 @@ impl ChatStreamToResponses {
         {
             if !self.text_open {
                 self.text_open = true;
-                let added = json!({"type": "response.output_item.added", "output_index": 0,
+                self.text_index = self.next_index;
+                self.next_index += 1;
+                let added = json!({"type": "response.output_item.added", "output_index": self.text_index,
                     "item": {"type": "message", "id": "msg_0", "status": "in_progress",
                              "role": "assistant", "content": []}});
                 out.push(Ok(self.named(
@@ -317,7 +332,7 @@ impl ChatStreamToResponses {
                     None,
                 )));
                 let part = json!({"type": "response.content_part.added", "item_id": "msg_0",
-                    "output_index": 0, "content_index": 0,
+                    "output_index": self.text_index, "content_index": 0,
                     "part": {"type": "output_text", "text": "", "annotations": []}});
                 out.push(Ok(self.named(
                     "response.content_part.added",
@@ -329,7 +344,7 @@ impl ChatStreamToResponses {
             }
             self.text_buf.push_str(text);
             let delta = json!({"type": "response.output_text.delta", "item_id": "msg_0",
-                "output_index": 0, "content_index": 0, "delta": text});
+                "output_index": self.text_index, "content_index": 0, "delta": text});
             out.push(Ok(self.named(
                 "response.output_text.delta",
                 &delta,
@@ -337,6 +352,74 @@ impl ChatStreamToResponses {
                 text.chars().count(),
                 None,
             )));
+        }
+        out.extend(self.on_tools(chunk));
+        out
+    }
+
+    fn on_tools(&mut self, chunk: &Value) -> Vec<Result<ChatEvent, UpstreamError>> {
+        let mut out = Vec::new();
+        for delta in chunk
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(index) = delta
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|i| usize::try_from(i).ok())
+            else {
+                continue;
+            };
+            if index >= 128 {
+                return vec![Err(UpstreamError::Stream("tool_count_limit".into()))];
+            }
+            if !self.tools.contains_key(&index) {
+                let tool = StreamTool {
+                    output_index: self.next_index,
+                    id: delta
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_owned(),
+                    name: String::new(),
+                    arguments: String::new(),
+                };
+                self.next_index += 1;
+                let added = json!({"type":"response.output_item.added","output_index":tool.output_index,"item":{"type":"function_call","id":format!("fc_{index}"),"call_id":tool.id,"name":delta.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),"arguments":"","status":"in_progress"}});
+                self.tools.insert(index, tool);
+                out.push(Ok(self.named(
+                    "response.output_item.added",
+                    &added,
+                    true,
+                    0,
+                    None,
+                )));
+            }
+            let tool = self.tools.get_mut(&index);
+            if let Some(tool) = tool {
+                if let Some(id) = delta.get("id").and_then(Value::as_str) {
+                    id.clone_into(&mut tool.id);
+                }
+                if let Some(name) = delta.pointer("/function/name").and_then(Value::as_str) {
+                    tool.name.push_str(name);
+                }
+                if let Some(args) = delta.pointer("/function/arguments").and_then(Value::as_str) {
+                    if tool.arguments.len().saturating_add(args.len()) > 16 * 1024 * 1024 {
+                        return vec![Err(UpstreamError::Stream("tool_arguments_limit".into()))];
+                    }
+                    tool.arguments.push_str(args);
+                    let payload = json!({"type":"response.function_call_arguments.delta","item_id":format!("fc_{index}"),"output_index":tool.output_index,"delta":args});
+                    out.push(Ok(self.named(
+                        "response.function_call_arguments.delta",
+                        &payload,
+                        true,
+                        args.chars().count(),
+                        None,
+                    )));
+                }
+            }
         }
         out
     }
@@ -350,7 +433,7 @@ impl ChatStreamToResponses {
         let probe = self.usage;
         if self.text_open {
             let done = json!({"type": "response.output_text.done", "item_id": "msg_0",
-                "output_index": 0, "content_index": 0, "text": self.text_buf});
+                "output_index": self.text_index, "content_index": 0, "text": self.text_buf});
             out.push(Ok(self.named(
                 "response.output_text.done",
                 &done,
@@ -359,14 +442,38 @@ impl ChatStreamToResponses {
                 None,
             )));
         }
+        let mut output = Vec::new();
+        if self.text_open {
+            output.push((self.text_index,json!({"type":"message","id":"msg_0","status":"completed","role":"assistant","content":[{"type":"output_text","text":self.text_buf,"annotations":[]}]})));
+        }
+        let tools = std::mem::take(&mut self.tools);
+        for (index, tool) in tools {
+            let item_id = format!("fc_{index}");
+            let args_done = json!({"type":"response.function_call_arguments.done","item_id":item_id,"output_index":tool.output_index,"arguments":tool.arguments});
+            out.push(Ok(self.named(
+                "response.function_call_arguments.done",
+                &args_done,
+                false,
+                0,
+                None,
+            )));
+            let item = json!({"type":"function_call","id":item_id,"call_id":tool.id,"name":tool.name,"arguments":tool.arguments,"status":"completed"});
+            let done = json!({"type":"response.output_item.done","output_index":tool.output_index,"item":item});
+            out.push(Ok(self.named(
+                "response.output_item.done",
+                &done,
+                false,
+                0,
+                None,
+            )));
+            output.push((tool.output_index, item));
+        }
+        output.sort_by_key(|(index, _)| *index);
+        let output: Vec<_> = output.into_iter().map(|(_, item)| item).collect();
         let completed = json!({"type": "response.completed", "response": {
             "id": self.id, "object": "response", "created_at": self.created,
             "status": "completed", "model": self.model,
-            "output": if self.text_buf.is_empty() { json!([]) } else {
-                json!([{"type": "message", "id": "msg_0", "status": "completed",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": self.text_buf, "annotations": []}]}])
-            },
+            "output": output,
             "usage": probe.map(responses_usage_json),
         }});
         out.push(Ok(self.named(
@@ -401,5 +508,44 @@ impl ChatStreamToResponses {
             content_chars,
             usage,
         }
+    }
+}
+
+#[cfg(test)]
+mod third_review_tests {
+    use super::*;
+    #[test]
+    fn streamed_tool_arguments_survive_fragmentation_and_completion() {
+        let mut state = ChatStreamToResponses::new("fixture");
+        let data = |value: Value| {
+            Ok(ChatEvent::Data {
+                raw: value.to_string(),
+                event: None,
+                has_output: true,
+                content_chars: 0,
+                usage: None,
+            })
+        };
+        state.step(data(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"{\"q\":"}}]}}]})));
+        let delta=state.step(data(json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"hi\"}"}}]}}]})));
+        assert!(delta.iter().any(|event|matches!(event,Ok(ChatEvent::Data{event:Some(name),..}) if name=="response.function_call_arguments.delta")));
+        let done = state.step(Ok(ChatEvent::Done));
+        let completed = done
+            .iter()
+            .find_map(|event| match event {
+                Ok(ChatEvent::Data {
+                    raw,
+                    event: Some(name),
+                    ..
+                }) if name == "response.completed" => serde_json::from_str::<Value>(raw).ok(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(completed["response"]["output"][0]["name"], "search");
+        assert_eq!(completed["response"]["output"][0]["call_id"], "call_1");
+        assert_eq!(
+            completed["response"]["output"][0]["arguments"],
+            r#"{"q":"hi"}"#
+        );
     }
 }

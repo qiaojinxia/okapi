@@ -47,7 +47,7 @@ impl Scope {
 
     fn table(self, raw: bool, kind: Kind) -> &'static str {
         match (self, raw, kind) {
-            (_, true, _) => "request_log_raw",
+            (_, true, _) => "request_log_calls",
             (Self::Model, false, Kind::Ttft) => "mv_model_ttft_hour",
             (_, false, Kind::Ttft) => "mv_channel_ttft_5min",
             (Self::Model, false, Kind::Latency) => "mv_model_latency_hour",

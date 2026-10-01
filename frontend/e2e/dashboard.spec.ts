@@ -152,7 +152,7 @@ test('首页异常进入同窗渠道健康，质量页日期和页签刷新、�
     const url = new URL(route.request().url())
     requests.push(url.pathname + url.search)
     const row = { channel_id: 42, name: 'Primary', provider: 'openai', requests: 100, errors: 7, error_rate_bp: 700, ttft_p50_ms: 100, ttft_p95_ms: 200, ttft_p99_ms: 300, failovers: 1, sticky_rate_bp: 9500, tokens_per_1k_sec: 10000, amount_micro: 100000 }
-    return route.fulfill({ json: { data: url.searchParams.get('limit') === '50' ? [row, { ...row, channel_id: 43, name: 'Additional' }] : [row] } })
+    return route.fulfill({ json: { total_items: 2, data: url.searchParams.get('limit') === '10' ? [row, { ...row, channel_id: 43, name: 'Additional' }] : [row] } })
   })
   await page.goto('/admin?days=30&scope=window')
   const attention = page.locator('#dashboard-attention')
@@ -162,7 +162,7 @@ test('首页异常进入同窗渠道健康，质量页日期和页签刷新、�
   await expect(page.getByRole('tab', { name: '渠道健康' })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByRole('tabpanel', { name: '渠道健康' })).toBeVisible()
   await expect(page.getByRole('button', { name: '近 30 天' })).toHaveAttribute('aria-pressed', 'true')
-  await expect.poll(() => requests.includes('/admin/stats/channels?days=30&limit=50')).toBe(true)
+  await expect.poll(() => requests.includes('/admin/stats/channels?days=30&limit=10&offset=0')).toBe(true)
   await expect(page.getByRole('link', { name: 'Additional', exact: true })).toBeVisible()
   await page.reload()
   await expect(page.getByRole('tab', { name: '渠道健康' })).toHaveAttribute('aria-selected', 'true')
@@ -170,7 +170,7 @@ test('首页异常进入同窗渠道健康，质量页日期和页签刷新、�
   await page.getByRole('tab', { name: '错误分布' }).click()
   await page.getByRole('button', { name: '近 1 天' }).click()
   await expect(page).toHaveURL('/admin/quality?days=1&tab=errors')
-  await expect.poll(() => requests.includes('/admin/stats/errors?days=1&limit=20')).toBe(true)
+  await expect.poll(() => requests.includes('/admin/stats/errors?days=1&limit=10&offset=0')).toBe(true)
   await page.goBack()
   await expect(page).toHaveURL('/admin/quality?days=30&tab=errors')
   await page.goBack()
@@ -365,6 +365,116 @@ test('Dashboard 质量摘要前移，各指标可键盘进入对应分析并保�
   await page.goBack()
   await expect(page).toHaveURL('/admin?days=30')
   await expect(operations.locator('dd')).toHaveText(['US$4.20', 'US$1.80', '50.0%', '99.0%', '1,300 ms', '150 ms', '42.5 Token/s', '35.0%'])
+})
+
+test('Dashboard 质量摘要展示已有吞吐量和缓存样本，完整指标优先，明确零值与缺失分开', async ({ page }) => {
+  await prepare(page)
+  let total: Record<string, number | null> = {
+    requests: 1172, prompt_tokens: 4300000000,
+    avg_output_tps_milli: null, observed_output_tps_milli: 205575, output_tps_samples: 752,
+    cache_hit_bp: null, measured_cache_hit_bp: 3473, measured_cache_hit_requests: 54,
+  }
+  await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ json: { data: [], total } }))
+  await page.goto('/admin?days=7')
+  const operations = page.getByRole('region', { name: '费用与调用质量', exact: true })
+  const throughput = operations.getByRole('link', { name: /^输出吞吐量 / })
+  const cache = operations.getByRole('link', { name: /^缓存命中 / })
+  await expect(throughput).toHaveText('205.6 Token/s')
+  await expect(cache).toHaveText('34.73%')
+  await expect(throughput.locator('..').locator('..').locator('..')).toContainText('样本 752 / 1,172 次')
+  await expect(cache.locator('..').locator('..').locator('..')).toContainText('样本 54 / 1,172 次')
+  await expect(cache).toHaveAttribute('href', '/admin/stats?days=7&measure=cache')
+  await throughput.focus()
+  await expect(page.getByRole('tooltip')).toContainText('数值只代表这些样本')
+  await page.keyboard.press('Escape')
+  await cache.focus()
+  await expect(page.getByRole('tooltip')).toContainText('缺失记录不按零命中计算')
+  await page.keyboard.press('Escape')
+
+  total = { ...total, observed_output_tps_milli: 0, measured_cache_hit_bp: 0 }
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(throughput).toHaveText('0 Token/s')
+  await expect(cache).toHaveText('0.0%')
+  await expect(operations).toContainText('样本 54 / 1,172 次')
+
+  total = { ...total, avg_output_tps_milli: 42500, cache_hit_bp: 3500 }
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(throughput).toHaveText('42.5 Token/s')
+  await expect(cache).toHaveText('35.0%')
+  await expect(operations).not.toContainText('样本 54 / 1,172 次')
+  await expect(operations).not.toContainText('样本 752 / 1,172 次')
+
+  total = { requests: 1172, prompt_tokens: 4300000000 }
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(throughput).toHaveText('—')
+  await expect(cache).toHaveText('—')
+  await expect(operations).not.toContainText('样本 54 / 1,172 次')
+})
+
+test('Dashboard 英文样本指标在窄屏保留样本范围，零请求不显示旧样本值', async ({ page }) => {
+  await prepare(page, 'en')
+  let requests = 100
+  await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ json: { data: [], total: {
+    requests, avg_output_tps_milli: null, observed_output_tps_milli: 125500, output_tps_samples: 12,
+    cache_hit_bp: null, measured_cache_hit_bp: 2000, measured_cache_hit_requests: 8,
+  } } }))
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/admin')
+  const operations = page.getByRole('region', { name: 'Cost & call quality', exact: true })
+  await expect(operations).toContainText('125.5 Token/s')
+  await expect(operations).toContainText('20.0%')
+  await expect(operations).toContainText('Samples 12 / 100 calls')
+  await expect(operations).toContainText('Samples 8 / 100 calls')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  requests = 0
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+  await expect(operations.getByRole('link', { name: /^Output throughput / })).toHaveText('—')
+  await expect(operations.getByRole('link', { name: /^Cache hit / })).toHaveText('—')
+  await expect(operations).not.toContainText('Samples')
+})
+
+for (const language of ['zh-CN', 'en']) test(`Dashboard 实时平均 QPS 与一分钟请求一致，低流量和微小收入保留精度 ${language}`, async ({ page }) => {
+  await prepare(page, language)
+  let calls = 10
+  let failed = true
+  await page.route('**/admin/stats/realtime?*', (route) => route.fulfill({ json: {
+    window_secs: 60, qps_milli: 0, requests: calls, errors: failed ? calls : 0, error_rate_bp: failed ? 10000 : 0,
+    tokens: failed ? 0 : 150, amount_micro: failed ? 0 : 25,
+    // Traffic occurred earlier in the minute; the last ten seconds are idle.
+    series: Array.from({ length: 60 }, (_, i) => ({ ts: i, requests: i < calls ? 1 : 0, errors: failed && i < calls ? 1 : 0, tokens: 0, amount_micro: 0 })),
+  } }))
+  await page.goto('/admin')
+  const realtime = page.getByRole('region', { name: language === 'en' ? 'Live traffic' : '实时流量', exact: true })
+  const qps = realtime.getByText(language === 'en' ? 'Avg QPS' : '平均 QPS', { exact: true }).locator('..')
+  const tokens = realtime.getByText(language === 'en' ? 'Tokens' : 'Token 数', { exact: true }).locator('..')
+  const income = realtime.getByText(language === 'en' ? 'Revenue' : '收入', { exact: true }).locator('..')
+  const errorRate = realtime.getByText(language === 'en' ? 'Error rate' : '错误率', { exact: true }).locator('..')
+  await expect(qps).toContainText('0.167')
+  await expect(errorRate).toContainText('100.0%')
+  await expect(tokens).toContainText('0')
+  await expect(income).toContainText('0.00')
+  await qps.locator('..').focus()
+  await expect(page.getByRole('tooltip')).toContainText(language === 'en' ? 'Last 10 seconds QPS: 0' : '最近 10 秒 QPS：0')
+  await expect(page.getByRole('tooltip')).toContainText(language === 'en' ? 'including failed requests' : '包含失败请求')
+  await page.keyboard.press('Escape')
+  const refresh = page.getByRole('button', { name: language === 'en' ? 'Refresh' : '刷新', exact: true })
+  calls = 1
+  await refresh.click()
+  await expect(qps).toContainText('0.017')
+  calls = 0
+  await refresh.click()
+  await expect(qps.locator('span').last()).toHaveText('0')
+  await expect(errorRate).toContainText('—')
+  calls = 3
+  failed = false
+  await refresh.click()
+  await expect(qps).toContainText('0.05')
+  await expect(tokens).toContainText('150')
+  await expect(income).toContainText('0.000025')
+  await expect(errorRate).toContainText('0%')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(qps).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test('Dashboard 最近一分钟无调用不显示 0% 错误率，更新频率与数据时间可查', async ({ page }) => {

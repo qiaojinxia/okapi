@@ -167,6 +167,15 @@ async fn setup() -> Env {
     )
     .await;
     let (channel, channel_key) = channel(&pg, &model, upstream).await;
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(&pg, user, &snapshot)
+        .await
+        .unwrap();
     let state = gateway::build_state(&database, &redis, &model, None, None)
         .await
         .unwrap();

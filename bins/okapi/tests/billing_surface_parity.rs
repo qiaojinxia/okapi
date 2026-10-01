@@ -37,6 +37,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 /// 上游报的 usage 固定，好让"应扣多少"只取决于价簿而非随机量。
 const UP_PROMPT: i64 = 1000;
 const UP_COMPLETION: i64 = 200;
@@ -321,6 +324,7 @@ async fn setup() -> Bed {
     // CH 必须带上：`/api/me/usage`、`/api/me/stats/daily`、`/admin/logs` 都由它支撑，
     // 传 None 会让这些出口回 501 stats_disabled，跨出口对账就只剩 PG 半边。
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    published_pricing::publish(&pg, admin_id).await;
     let state = gateway::build_state(
         &database_url,
         &redis_url,

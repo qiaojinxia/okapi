@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET role = $2, admin_role_id = NULL, updated_at = now()\n                   WHERE id = $1 AND deleted_at IS NULL AND role < 100",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e72acf7ae44e47eb4594a8f16e3b7df185b5ec4fa83752d242036b70780dbbaa"
+}

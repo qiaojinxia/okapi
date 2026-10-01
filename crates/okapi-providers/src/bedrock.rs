@@ -103,7 +103,7 @@ impl BedrockUpstream {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<i64>().ok());
-            let body = resp.bytes().await.unwrap_or_default();
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
             return Err(UpstreamError::Status {
                 status,
                 body,
@@ -111,7 +111,7 @@ impl BedrockUpstream {
             });
         }
         if !stream {
-            let body = resp.bytes().await.map_err(|e| classify(&e))?;
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
             return Ok(MessagesResponse::Json {
                 status,
                 upstream_request_id,
@@ -192,7 +192,7 @@ impl BedrockUpstream {
         }
         let resp = req.send().await.map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Status {
                 status,
@@ -237,7 +237,7 @@ impl BedrockUpstream {
         } else {
             Err(UpstreamError::Status {
                 status,
-                body: resp.bytes().await.unwrap_or_default(),
+                body: crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?,
                 retry_after_secs: None,
             })
         }
@@ -324,21 +324,50 @@ fn frame_to_event(
     if frame.header(":event-type") != Some("chunk") {
         return None;
     }
-    let envelope: Value = serde_json::from_slice(&frame.payload).ok()?;
-    let b64 = envelope.get("bytes").and_then(Value::as_str)?;
-    let raw = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
-    let data = String::from_utf8(raw).ok()?;
-    let event = serde_json::from_str::<Value>(&data)
-        .ok()
-        .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_owned))
-        .unwrap_or_default();
-    Some(Ok(AnthropicEvent { event, data }))
+    Some((|| {
+        let envelope: Value = serde_json::from_slice(&frame.payload)
+            .map_err(|_| UpstreamError::Stream("bedrock_chunk_envelope".into()))?;
+        let b64 = envelope
+            .get("bytes")
+            .and_then(Value::as_str)
+            .ok_or_else(|| UpstreamError::Stream("bedrock_chunk_bytes".into()))?;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|_| UpstreamError::Stream("bedrock_chunk_base64".into()))?;
+        let data = String::from_utf8(raw)
+            .map_err(|_| UpstreamError::Stream("bedrock_chunk_utf8".into()))?;
+        let parsed: Value = serde_json::from_str(&data)
+            .map_err(|_| UpstreamError::Stream("bedrock_chunk_json".into()))?;
+        let event = parsed
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| UpstreamError::Stream("bedrock_chunk_type".into()))?
+            .to_owned();
+        Ok(AnthropicEvent { event, data })
+    })())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::aws_eventstream::{Frame, encode_frame};
+
+    #[test]
+    fn corrupt_chunks_are_errors_not_dropped_frames() {
+        for payload in [
+            b"{".as_slice(),
+            b"{}",
+            br#"{"bytes":"invalid!"}"#,
+            br#"{"bytes":"/w=="}"#,
+            br#"{"bytes":"e30="}"#,
+        ] {
+            let frame = Frame {
+                headers: vec![(":event-type".into(), "chunk".into())],
+                payload: payload.to_vec(),
+            };
+            assert!(matches!(frame_to_event(&frame), Some(Err(_))));
+        }
+    }
 
     #[test]
     fn region_parsing() {

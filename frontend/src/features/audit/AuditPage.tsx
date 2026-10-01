@@ -1,14 +1,17 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { ChevronDown, ChevronRight, ScrollText } from 'lucide-react'
-import { Fragment, useEffect, useState } from 'react'
+import { ScrollText } from 'lucide-react'
+import { useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AuditSearch } from '@/routes/admin.audit'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CopyButton } from '@/components/ui/copy-button'
+import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { PageHeader, Toolbar } from '@/components/ui/page'
+import { RowExpander } from '@/components/ui/row-expander'
 import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { TableSkeleton } from '@/components/ui/skeleton'
@@ -18,7 +21,6 @@ import { DEFAULT_PAGE_SIZE } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
-import { cn } from '@/lib/utils'
 
 const routeApi = getRouteApi('/admin/audit')
 const DEFAULT_HOURS = 168
@@ -86,27 +88,28 @@ function actionTone(action: string): 'destructive' | 'warning' | 'muted' | 'defa
   return 'muted'
 }
 
-/// detail 一层展开为键值行；嵌套值压成紧凑 JSON——审计详情是给人核对的，
-/// 整块 JSON 文本框要用户自己在花括号里找字段。
-function detailEntries(detail: Record<string, unknown> | null): [string, string][] {
+/// detail 按键展示；列表使用紧凑摘要，抽屉缩进嵌套 JSON 便于核对。
+function detailEntries(detail: Record<string, unknown> | null, pretty = false): [string, string][] {
   if (!detail) return []
   return Object.entries(detail)
     .filter(([, v]) => v !== null && v !== undefined && v !== '')
-    .map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v) : String(v)])
+    .map(([k, v]) => [k, typeof v === 'object' ? JSON.stringify(v, null, pretty ? 2 : undefined) : String(v)])
 }
 
 /// 审计日志页：谁在何时改了什么（含登录记录）。
 ///
 /// 过滤走草稿 / 提交两态（与日志页同法），已提交态 = URL；detail 缺省只露前两个键，
-/// 点行展开全部——一屏先看得到"谁 / 做了什么 / 对谁"，细节按需。翻页用游标，
+/// 点行打开右侧详情抽屉，一屏先看得到"谁 / 做了什么 / 对谁"。翻页用游标，
 /// 审计表只增，翻页期间新写入不会让两页重叠。
 export function AuditPage() {
   const { t } = useTranslation()
   const search = routeApi.useSearch()
   const navigate = useNavigate({ from: '/admin/audit' })
   const [draft, setDraft] = useState<Draft>(() => fromSearch(search))
-  const [open, setOpen] = useState<Set<number>>(new Set())
+  const [selected, setSelected] = useState<number | null>(null)
+  const detailId = useId(), params = toParams(search)
   useEffect(() => setDraft(fromSearch(search)), [search])
+  useEffect(() => setSelected(null), [params])
 
   const submit = (d: Draft) => void navigate({ search: toSearch(d) })
 
@@ -116,13 +119,14 @@ export function AuditPage() {
     staleTime: 300_000,
   })
   const q = useInfiniteQuery({
-    queryKey: qk.audit(toParams(search)),
+    queryKey: qk.audit(params),
     queryFn: ({ pageParam }) =>
       apiFetch<AuditResp>(`/admin/audit?${toParams(search, pageParam as number | undefined)}`),
     initialPageParam: undefined as number | undefined,
     getNextPageParam: (last) => (last.has_more ? (last.next_before ?? undefined) : undefined),
   })
   const rows = q.data?.pages.flatMap((p) => p.data) ?? []
+  const selectedRow = q.isError ? null : rows.find((row) => row.id === selected) ?? null
 
   const actorLabel = (r: AuditRow) => {
     if (r.actor === 'anon') return t('admin:auditActorAnon')
@@ -224,11 +228,11 @@ export function AuditPage() {
       {q.isError ? (
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
       ) : q.isPending ? (
-        <TableSkeleton rows={8} cols={6} />
+        <TableSkeleton rows={8} cols={7} dense />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:auditEmptyHint')} />
       ) : (
-        <Table stickyHeader>
+        <Table dense stickyHeader aria-label={t('admin:auditTitle')}>
           <THead>
             <Tr>
               <Th className="w-6" />
@@ -243,28 +247,18 @@ export function AuditPage() {
           <TBody>
             {rows.map((r) => {
               const entries = detailEntries(r.detail)
-              const expanded = open.has(r.id)
+              const expanded = selected === r.id
               const ip = r.ip ?? (typeof r.detail?.ip === 'string' ? r.detail.ip : null)
               return (
-                <Fragment key={r.id}>
                   <Tr
-                    className={cn(entries.length > 0 && 'cursor-pointer')}
-                    onClick={() =>
-                      setOpen((prev) => {
-                        const next = new Set(prev)
-                        if (next.has(r.id)) next.delete(r.id)
-                        else next.add(r.id)
-                        return next
-                      })
-                    }
+                    key={r.id}
+                    className="cursor-pointer"
+                    selected={expanded}
+                    aria-expanded={expanded}
+                    onClick={() => setSelected(r.id)}
                   >
-                    <Td className="text-muted-foreground">
-                      {entries.length > 0 &&
-                        (expanded ? (
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        ) : (
-                          <ChevronRight className="h-3.5 w-3.5" />
-                        ))}
+                    <Td className="px-1 text-muted-foreground">
+                      <RowExpander open={expanded} name={String(r.id)} controls={detailId} onToggle={() => setSelected(r.id)} />
                     </Td>
                     <Td className="whitespace-nowrap text-xs text-muted-foreground">
                       {dayjs(r.created_at).format('MM-DD HH:mm:ss')}
@@ -285,7 +279,7 @@ export function AuditPage() {
                     <Td className="max-w-44 truncate font-mono text-xs" title={r.target ?? ''}>
                       {r.target ?? '—'}
                     </Td>
-                    {/* 摘要必须真截断：UA 之类的长值会把 IP 列挤出屏幕；完整值在展开区 */}
+                    {/* 长值只在抽屉中展示，摘要不把 IP 列挤出屏幕。 */}
                     <Td className="max-w-56 text-xs text-muted-foreground">
                       {entries.length === 0 ? (
                         '—'
@@ -301,22 +295,6 @@ export function AuditPage() {
                     </Td>
                     <Td className="font-mono text-xs whitespace-nowrap text-muted-foreground">{ip ?? '—'}</Td>
                   </Tr>
-                  {expanded && entries.length > 0 && (
-                    <Tr>
-                      <Td />
-                      <Td colSpan={6} className="bg-muted/30">
-                        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 py-1 text-xs">
-                          {entries.map(([k, v]) => (
-                            <Fragment key={k}>
-                              <dt className="font-mono text-muted-foreground">{k}</dt>
-                              <dd className="font-mono break-all">{v}</dd>
-                            </Fragment>
-                          ))}
-                        </dl>
-                      </Td>
-                    </Tr>
-                  )}
-                </Fragment>
               )
             })}
           </TBody>
@@ -334,6 +312,54 @@ export function AuditPage() {
           {t('common:loadMore')}
         </Button>
       )}
+      <AuditDetail
+        row={selectedRow} id={detailId} onClose={() => setSelected(null)}
+        actor={selectedRow ? actorLabel(selectedRow) : ''}
+        kind={selectedRow ? actorKind(selectedRow) : ''}
+      />
     </div>
   )
+}
+
+function AuditDetail({ row, id, onClose, actor, kind }: {
+  row: AuditRow | null; id: string; onClose: () => void; actor: string; kind: string
+}) {
+  const { t } = useTranslation()
+  if (!row) return null
+  const entries = detailEntries(row.detail, true)
+  const ip = row.ip ?? (typeof row.detail?.ip === 'string' ? row.detail.ip : null)
+  const field = (label: string, content: React.ReactNode) => <div className="min-w-0 space-y-1">
+    <dt className="text-xs text-muted-foreground">{label}</dt>
+    <dd className="break-words text-sm">{content}</dd>
+  </div>
+  return <Drawer open onClose={onClose} title={t('admin:auditDetailTitle')} description={t('admin:auditDetailHint')} size="lg">
+    <div id={id}>
+      <FieldGroup title={t('admin:auditRecordInfo')}>
+        <dl className="grid grid-cols-2 gap-x-5 gap-y-4">
+          {field(t('admin:auditRecordId'), <AuditValue value={String(row.id)} />)}
+          {field(t('admin:auditTime'), dayjs(row.created_at).format('YYYY-MM-DD HH:mm:ss'))}
+          {field(t('admin:auditActor'), <div className="space-y-1">
+            <p className="break-all">{actor}{kind && <Badge variant="muted" className="ml-2">{kind}</Badge>}</p>
+            {row.actor !== 'anon' && <AuditValue value={row.actor} />}
+          </div>)}
+          {field(t('admin:auditAction'), <Badge variant={actionTone(row.action)} className="max-w-full break-all whitespace-normal font-mono">{row.action}</Badge>)}
+          {field(t('admin:auditTarget'), row.target ? <AuditValue value={row.target} /> : '—')}
+          {field('IP', ip ? <AuditValue value={ip} /> : '—')}
+        </dl>
+      </FieldGroup>
+      <FieldGroup title={t('admin:auditDetail')}>
+        {entries.length ? <dl className="space-y-4">{entries.map(([key, value]) => <div key={key} className="min-w-0 space-y-1.5">
+          <dt className="break-all font-mono text-xs text-muted-foreground">{key}</dt>
+          <dd className="rounded-lg bg-muted/50 p-3"><AuditValue value={value} /></dd>
+        </div>)}</dl> : <p className="text-sm text-muted-foreground">—</p>}
+      </FieldGroup>
+    </div>
+  </Drawer>
+}
+
+function AuditValue({ value }: { value: string }) {
+  return <span className="flex min-w-0 items-start gap-2">
+    <span className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-xs leading-6">{value}</span>
+    <CopyButton value={value} size="xs" />
+  </span>
 }

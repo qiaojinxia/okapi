@@ -167,14 +167,19 @@ pub async fn start(
         form_escape(&provider.scopes),
     );
     let mut response = (StatusCode::FOUND, [(header::LOCATION, location)]).into_response();
-    let cookie = format!(
-        "okapi_oauth_{code}={token}; Secure; HttpOnly; SameSite=Lax; Path=/auth/oauth/{code}; Max-Age={STATE_TTL_SECS}"
-    );
+    let cookie = state_cookie(&code, &token, super::auth_web::secure_cookie());
     response.headers_mut().insert(
         header::SET_COOKIE,
         cookie.parse().map_err(|_| AppError::bad_request())?,
     );
     Ok(response)
+}
+
+fn state_cookie(code: &str, token: &str, secure: bool) -> String {
+    let flag = if secure { "; Secure" } else { "" };
+    format!(
+        "okapi_oauth_{code}={token}{flag}; HttpOnly; SameSite=Lax; Path=/auth/oauth/{code}; Max-Age={STATE_TTL_SECS}"
+    )
 }
 
 #[derive(Deserialize)]
@@ -313,4 +318,17 @@ pub async fn list_providers(State(state): State<AppState>) -> Result<axum::Json<
         .map(|list| list.into_iter().map(|p| p.code).collect())
         .unwrap_or_default();
     Ok(axum::Json(serde_json::json!({ "providers": codes })))
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::*;
+    #[test]
+    fn oauth_state_uses_the_same_http_escape_hatch() {
+        for secure in [true, false] {
+            let cookie = state_cookie("provider", "state", secure);
+            assert_eq!(cookie.contains("; Secure"), secure);
+            assert!(cookie.contains("HttpOnly; SameSite=Lax; Path=/auth/oauth/provider"));
+        }
+    }
 }

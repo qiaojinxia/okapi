@@ -25,8 +25,8 @@ export function ModelDetails({ model, groups, group, factor, unit, tab, onTab, o
   const vendor = modelVendor(model)
   const caps = modelCapabilities(model)
   const unsupported = capabilityKeys.filter((key) => model.capabilities?.[key] === false)
+  // 输入 / 输出已在上面的价格卡里，明细只列其余计价项，避免同一个价格出现两次。
   const rows: Array<[PriceField, string]> = [
-    ['input', t('pricing:promptPrice')], ['output', t('pricing:completionPrice')],
     ['cache', t('pricing:cachedPrice')], ['cacheWrite', t('pricing:cacheWritePrice')],
   ]
   const distinct = (value: string | null) => nonnegative(value) !== null && Number(value) !== 1

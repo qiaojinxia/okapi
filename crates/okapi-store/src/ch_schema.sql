@@ -72,6 +72,8 @@ ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_prompt_tokens Null
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_completion_tokens Nullable(UInt32) DEFAULT NULL;
 -- NULL 是旧行：只有正 TTFT 可确认采集；新行显式区分测得 0 与未采集。
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS ttft_reported Nullable(UInt8) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS diagnostics String DEFAULT '';
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS billing_status Nullable(UInt8) DEFAULT NULL;
 
 -- 新聚合保留所有请求的覆盖数，但分位数只收流式且已采集的样本。
 -- 不替换旧 MV、不 POPULATE：历史缺口由查询侧在 raw 完整时重算，避免重复计数。
@@ -648,6 +650,33 @@ AS SELECT
     countIfState(isNotNull(cache_write_tokens)) AS known_requests
 FROM request_log_raw
 GROUP BY user_id, api_key_id, model, hour;
+
+-- Minute calendar facts preserve fractional-hour local midnight boundaries.
+-- Independent upgrade: no POPULATE, no TTL, no changes to existing aggregates.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calendar_minute
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(minute)
+ORDER BY (minute, user_id, api_key_id, group_code, model, client_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfMinute(ts) AS minute, user_id, api_key_id, group_code, model, client_type,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens)) AS prompt_tokens,
+    sumState(toUInt64(cached_tokens)) AS cached_tokens,
+    sumState(toUInt64(completion_tokens)) AS completion_tokens,
+    sumState(toUInt64(reasoning_tokens)) AS reasoning_tokens,
+    sumState(toUInt64(r.prompt_tokens) + toUInt64(r.completion_tokens)) AS tokens,
+    sumState(amount_micro) AS amount,
+    sumState(original_amount_micro) AS original,
+    sumState(discount_micro) AS discount,
+    sumState(upstream_cost_micro) AS upstream_cost,
+    sumState(toUInt64(is_error)) AS errors,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS write_tokens,
+    countIfState(isNotNull(cache_write_tokens)) AS numeric_writes,
+    countIfState(ifNull(cache_read_reported, 0) = 1) AS read_known,
+    countIfState(ifNull(cache_write_reported, 0) = 1) AS write_known
+FROM request_log_raw AS r
+GROUP BY minute, user_id, api_key_id, group_code, model, client_type;
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calendar_cache_reporting_hour
 ENGINE = AggregatingMergeTree()

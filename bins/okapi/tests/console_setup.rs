@@ -11,7 +11,12 @@ async fn serve(state: gateway::state::AppState) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     addr
 }
@@ -46,15 +51,30 @@ async fn setup_wizard_on_fresh_database() {
     let addr = serve(state).await;
     let client = reqwest::Client::new();
 
-    let status: Value = client
+    let status = client
         .get(format!("http://{addr}/api/setup/status"))
         .send()
         .await
-        .unwrap()
-        .json()
+        .unwrap();
+    assert_eq!(status.headers()["x-frame-options"], "DENY");
+    assert_eq!(
+        status.headers()["content-security-policy"],
+        "frame-ancestors 'none'"
+    );
+    let status: Value = status.json().await.unwrap();
+    assert_eq!(status["needs_setup"], true, "空库必须提示初始化");
+
+    // 本机反代的 socket 不能给转发来的公网客户端授予无令牌初始化资格。
+    let remote = client
+        .post(format!("http://{addr}/api/setup"))
+        .header("x-forwarded-for", "203.0.113.91")
+        .json(&json!({"username":"intruder"}))
+        .send()
         .await
         .unwrap();
-    assert_eq!(status["needs_setup"], true, "空库必须提示初始化");
+    assert_eq!(remote.status(), 403);
+    let remote: Value = remote.json().await.unwrap();
+    assert_eq!(remote["error"]["param"], "setup_token_required");
 
     let created: Value = client
         .post(format!("http://{addr}/api/setup"))

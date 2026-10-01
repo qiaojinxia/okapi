@@ -232,7 +232,7 @@ async fn worker_alerts_carry_actionable_payloads() {
     assert_eq!(sent[0]["event"], "balance_low");
     assert_eq!(
         sent[0]["payload"]["users"],
-        json!([{ "user_id": drifted, "balance_micro": 100 }]),
+        json!([{ "user_id": drifted }]),
         "余额要跟着用户一起发：运维据此判断先给谁打电话"
     );
 
@@ -255,13 +255,8 @@ async fn worker_alerts_carry_actionable_payloads() {
 #[tokio::test]
 async fn notify_dispatch_and_mute() {
     dotenvy::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
-    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
-    let pg = okapi_store::connect_pg(&database_url).await.unwrap();
-    okapi_store::run_migrations(&pg).await.unwrap();
-    let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
-
     let (sink, hits, bodies) = spawn_sink().await;
+    let (notifier, _redis, tmp) = temp_db_notifier(&sink).await;
     // 每次用独立事件名，避免与并行跑的其他测试互踩频率闸
     let event = format!("drift_{}", &Uuid::new_v4().simple().to_string()[..8]);
 
@@ -275,11 +270,9 @@ async fn notify_dispatch_and_mute() {
             "min_interval_secs": 60
         }])
     )
-    .execute(&pg)
+    .execute(&tmp.pool)
     .await
     .unwrap();
-
-    let notifier = notify::Notifier::new(pg.clone(), redis);
 
     // 命中订阅 → 发送
     notifier.dispatch(&event, &json!({"count": 2})).await;
@@ -300,6 +293,74 @@ async fn notify_dispatch_and_mute() {
         .dispatch("some_other_event", &json!({"x": 1}))
         .await;
     assert_eq!(hits.load(Ordering::SeqCst), 1, "未订阅事件不得发送");
+    tmp.teardown().await;
+}
+
+/// 失败不能启动静默窗；签名必须覆盖实际收到的原始 body，余额默认脱敏。
+#[tokio::test]
+async fn webhook_failure_retries_and_signs_redacted_payload() {
+    use axum::body::Bytes;
+    use axum::http::{HeaderMap, StatusCode};
+    use hmac::{Hmac, KeyInit, Mac};
+
+    dotenvy::dotenv().ok();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (counter, capture) = (Arc::clone(&hits), Arc::clone(&seen));
+    let app = axum::Router::new().route(
+        "/hook",
+        post(move |headers: HeaderMap, body: Bytes| {
+            let attempt = counter.fetch_add(1, Ordering::SeqCst);
+            capture.lock().unwrap().push((headers, body));
+            async move {
+                if attempt == 0 {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sink = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let (notifier, _redis, tmp) = temp_db_notifier(&sink).await;
+    sqlx::query("UPDATE settings SET value=$1 WHERE key='notify_channels'")
+        .bind(
+            json!([{"type":"webhook","url":format!("http://{sink}/hook"),
+                     "events":["balance_low"],"min_interval_secs":300,"secret":"test-secret"}]),
+        )
+        .execute(&tmp.pool)
+        .await
+        .unwrap();
+    let payload = json!({"users":[{"user_id":42,"balance_micro":1234}]});
+    notifier.dispatch("balance_low", &payload).await;
+    notifier.dispatch("balance_low", &payload).await;
+    notifier.dispatch("balance_low", &payload).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "失败立即重试，成功后静默");
+    {
+        let records = seen.lock().unwrap();
+        for (headers, body) in records.iter() {
+            let value: Value = serde_json::from_slice(body).unwrap();
+            assert_eq!(value["payload"]["users"], json!([{"user_id":42}]));
+            let at = headers["x-okapi-timestamp"].to_str().unwrap();
+            assert_eq!(value["at"], at);
+            let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"test-secret").unwrap();
+            mac.update(at.as_bytes());
+            mac.update(b".");
+            mac.update(body);
+            let signature = headers["x-okapi-signature"]
+                .to_str()
+                .unwrap()
+                .strip_prefix("sha256=")
+                .unwrap();
+            mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
+        }
+    }
+    tmp.teardown().await;
+    server.abort();
 }
 
 /// 余额低扫描：阈值关闭返回空；开启后返回低于阈值的用户。
@@ -354,4 +415,33 @@ async fn balance_low_scan_respects_threshold() {
         .execute(&pg)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn rejected_private_webhook_is_visible_in_audit() {
+    dotenvy::dotenv().ok();
+    let (sink, hits, _) = spawn_sink().await;
+    let (notifier, redis, bed) = temp_db_notifier(&sink).await;
+    sqlx::query("UPDATE settings SET value='{}'::jsonb WHERE key='ssrf_policy'")
+        .execute(&bed.pool)
+        .await
+        .unwrap();
+    let _: i64 = fred::interfaces::KeysInterface::del(&redis, "notify:mute:0:ssrf_rejected_audit")
+        .await
+        .unwrap();
+    notifier.dispatch("drift", &json!({"count":1})).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    let detail: Value = sqlx::query_scalar(
+        "SELECT detail FROM audit_logs WHERE action='notification.url_rejected'",
+    )
+    .fetch_one(&bed.pool)
+    .await
+    .unwrap();
+    assert_eq!(detail["channel_index"], 0);
+    assert_eq!(detail["error_code"], "bad_request");
+    assert!(
+        detail.get("url").is_none(),
+        "do not retain tokens in webhook URLs"
+    );
+    bed.teardown().await;
 }

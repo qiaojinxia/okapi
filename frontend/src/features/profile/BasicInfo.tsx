@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
+import type { Me } from '@/hooks/use-auth'
 import { ApiError, apiFetch, clearKey } from '@/lib/api'
 import { describeError, switchLanguage } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
@@ -53,6 +54,7 @@ function ProfileForm({ profile }: { profile: AccountProfile }) {
     mutationFn: () => apiFetch<AccountProfile>('/api/me/profile', { method: 'PATCH', body: { username: trimmed, language } }),
     onSuccess: (saved) => {
       client.setQueryData(qk.myProfile, saved)
+      client.setQueryData<Me>(qk.me, (current) => current ? { ...current, username: saved.username } : current)
       setUsername(saved.username)
       setLanguage(saved.language)
       setError(null)
@@ -71,7 +73,7 @@ function ProfileForm({ profile }: { profile: AccountProfile }) {
           </Field>
           <Field label={t('profile:language')} htmlFor="profile-language" hint={t('profile:languageHint')}>
             <Select id="profile-language" className="w-full" value={language} disabled={save.isPending} onChange={(value) => { setLanguage(value as AccountProfile['language']); setError(null) }} options={[
-              { value: 'auto', label: t('profile:languageAuto') }, { value: 'zh-CN', label: '简体中文' }, { value: 'en', label: 'English' },
+              { value: 'auto', label: t('profile:languageAuto') }, { value: 'zh-CN', label: t('profile:languageChinese') }, { value: 'en', label: t('profile:languageEnglish') },
             ]} />
           </Field>
           {error && <Alert tone="destructive">{error}</Alert>}

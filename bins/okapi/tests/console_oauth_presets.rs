@@ -96,6 +96,11 @@ async fn bed() -> Bed {
     let fresh_url = format!("{base}/{db_name}");
     let pg = okapi_store::connect_pg(&fresh_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('ssrf_policy',$1)")
+        .bind(json!({"allow_http":true,"allow_private":true}))
+        .execute(&pg)
+        .await
+        .unwrap();
 
     let idp = Idp::default();
     let router = Router::new()
@@ -170,6 +175,16 @@ impl Bed {
             .await
             .unwrap();
         assert_eq!(start.status(), 302);
+        let state_cookie = start
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
         let location = start
             .headers()
             .get(reqwest::header::LOCATION)
@@ -190,6 +205,7 @@ impl Bed {
                 "http://{}/auth/oauth/{code}/callback?code=mock-code&state={state}",
                 self.console
             ))
+            .header(reqwest::header::COOKIE, state_cookie)
             .send()
             .await
             .unwrap();

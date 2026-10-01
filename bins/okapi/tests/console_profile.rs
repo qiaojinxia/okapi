@@ -77,6 +77,8 @@ async fn verify_profile(
     let endpoint = format!("http://{address}/api/me/profile");
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let (_, token, cookie) = &owners[0];
+    let identity_endpoint = format!("http://{address}/api/me");
+    assert_identity(&client, &identity_endpoint, token, owners[0].0, "alice").await;
     let body = json!({"username":" 新名字 ","language":"en"});
     let denied = client
         .patch(&endpoint)
@@ -145,6 +147,7 @@ async fn verify_profile(
         .unwrap();
     assert_eq!(read["username"], "新名字");
     assert_eq!(read["language"], "en");
+    assert_identity(&client, &identity_endpoint, token, owners[0].0, "新名字").await;
     let bob: (String, i16, i64) =
         sqlx::query_as("SELECT username,role,balance_micro FROM users WHERE id=$1")
             .bind(owners[1].0)
@@ -154,4 +157,23 @@ async fn verify_profile(
     assert_eq!(bob, ("bob".into(), 1, 0));
     server.abort();
     let _ = server.await;
+}
+
+async fn assert_identity(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    user_id: i64,
+    username: &str,
+) {
+    let response = client
+        .get(endpoint)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let identity = response.json::<Value>().await.unwrap();
+    assert_eq!(identity["username"], username);
+    assert_eq!(identity["user_id"], user_id);
 }

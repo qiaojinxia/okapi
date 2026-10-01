@@ -43,6 +43,8 @@ pub struct WindowQuery {
     pub days: Option<u32>,
     #[serde(default)]
     pub limit: Option<u32>,
+    #[serde(default)]
+    pub offset: i64,
 }
 
 impl WindowQuery {
@@ -52,6 +54,23 @@ impl WindowQuery {
     fn limit(&self) -> u32 {
         self.limit.unwrap_or(20).clamp(1, 100)
     }
+    fn offset(&self) -> i64 {
+        self.offset.max(0)
+    }
+}
+
+// Window totals are computed before LIMIT. An out-of-range page has no row to
+// carry them, so recover just the totals instead of reporting an empty dataset.
+async fn page_summary(ch: &ChClient, rows: &[Value], sql: &str) -> Result<Value, AppError> {
+    if let Some(row) = rows.first() {
+        return Ok(row.clone());
+    }
+    Ok(ch
+        .query_json_each_row(sql)
+        .await?
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| json!({})))
 }
 
 /// GET /admin/stats/channels：渠道健康（错误率 / TTFT 分位 / 切换 / 粘性命中）。
@@ -65,6 +84,7 @@ pub async fn channels(
     let ch = ch_or_disabled(&state)?;
     let days = q.days();
     let limit = q.limit();
+    let offset = q.offset();
 
     let since = chrono::Utc::now().timestamp() - i64::from(days) * 86_400;
     let sql = format!(
@@ -76,11 +96,14 @@ pub async fn channels(
                 sumMerge(failovers) AS failovers, \
                 countIfMerge(sticky_resp_hits) AS sticky_resp_hits, \
                 countIfMerge(sticky_sess_hits) AS sticky_sess_hits, \
-                sumMerge(completion_tokens_sum) AS completion_tokens \
+                sumMerge(completion_tokens_sum) AS completion_tokens, count() OVER () AS total_items \
          FROM mv_channel_5min WHERE ts5 >= fromUnixTimestamp({since}) \
-         GROUP BY channel_id ORDER BY requests DESC LIMIT {limit}"
+         GROUP BY channel_id ORDER BY requests DESC, channel_id ASC LIMIT {limit} OFFSET {offset}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
+    let summary = page_summary(ch, &rows, &format!(
+        "SELECT uniqExact(channel_id) AS total_items FROM mv_channel_5min WHERE ts5 >= fromUnixTimestamp({since})"
+    )).await?;
 
     // 渠道名补齐（PG 点查；榜单 ≤100 行，与 leaderboard 同法）
     let ids: Vec<i64> = rows.iter().map(|r| ch_i64(r, "channel_id")).collect();
@@ -131,7 +154,9 @@ pub async fn channels(
         &mut data,
     )
     .await?;
-    Ok(Json(json!({ "days": days, "data": data })))
+    Ok(Json(
+        json!({ "days": days, "limit": limit, "offset": offset, "total_items": ch_i64(&summary, "total_items"), "data": data }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -235,6 +260,7 @@ pub async fn models(
     let ch = ch_or_disabled(&state)?;
     let days = q.days();
     let limit = q.limit();
+    let offset = q.offset();
 
     let since = chrono::Utc::now().timestamp() - i64::from(days) * 86_400;
     let sql = format!(
@@ -242,11 +268,14 @@ pub async fn models(
                 countMerge(requests) AS requests, \
                 sumMerge(tokens) AS tokens, \
                 sumMerge(amount) AS amount_micro, \
-                sumMerge(completion_tokens_sum) AS completion_tokens \
+                sumMerge(completion_tokens_sum) AS completion_tokens, count() OVER () AS total_items \
          FROM mv_model_hour WHERE hour >= fromUnixTimestamp({since}) \
-         GROUP BY model ORDER BY requests DESC LIMIT {limit}"
+         GROUP BY model ORDER BY requests DESC, model ASC LIMIT {limit} OFFSET {offset}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
+    let summary = page_summary(ch, &rows, &format!(
+        "SELECT uniqExact(model) AS total_items FROM mv_model_hour WHERE hour >= fromUnixTimestamp({since})"
+    )).await?;
 
     let mut data: Vec<Value> = rows
         .iter()
@@ -268,7 +297,9 @@ pub async fn models(
         &mut data,
     )
     .await?;
-    Ok(Json(json!({ "days": days, "data": data })))
+    Ok(Json(
+        json!({ "days": days, "limit": limit, "offset": offset, "total_items": ch_i64(&summary, "total_items"), "data": data }),
+    ))
 }
 
 /// GET /admin/stats/margin：经营口径逐日聚合（实收 / 标价 / 让利 / 毛利）。
@@ -279,21 +310,21 @@ pub async fn models(
 /// 故 margin 字段先按公式返回（成本采集落地即生效），前端不据此出图。
 /// overview 今日档与窗口档共用的列集合。`uniqExact(user_id)` 只能在 MV 的原始维度列上
 /// 求值，故两档都直查 mv_user_day 而非在其上二次聚合。
-const OVERVIEW_COLS: &str = "countMerge(requests) AS requests, \
+const OVERVIEW_COLS: &str = "countMerge(financial_records) AS financial_records,countMerge(requests) AS requests, \
                              sumMerge(tokens) AS tokens, \
                              sumMerge(amount) AS amount_micro, \
                              sumMerge(original) AS original_micro, \
                              sumMerge(discount) AS discount_micro, \
                              sumMerge(upstream_cost) AS upstream_cost_micro, \
                              sumMerge(errors) AS errors, \
-                             uniqExact(user_id) AS active_users";
+                             uniqExactIf(user_id, finalizeAggregation(u.requests)>0) AS active_users";
 
 async fn overview_sources(
     state: &AppState,
     predicate: &str,
     cached: bool,
 ) -> Result<Vec<Value>, AppError> {
-    let totals_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day WHERE {predicate}");
+    let totals_sql = format!("SELECT {OVERVIEW_COLS} FROM mv_user_day u WHERE {predicate}");
     let source = super::token_details::with_provenance("", "mv_user_day", predicate);
     let sources_sql = format!("SELECT * FROM {source}");
     let (mut rows, sources) = tokio::try_join!(
@@ -360,7 +391,7 @@ fn pack_overview(rows: &[Value], known: [i64; 3]) -> Value {
             object.insert(field.to_owned(), r[field].clone());
         }
     }
-    apply_cost_coverage(&mut result, requests, known);
+    apply_cost_coverage(&mut result, ch_i64(r, "financial_records"), known);
     result
 }
 
@@ -499,6 +530,7 @@ pub async fn errors(
     let ch = ch_or_disabled(&state)?;
     let days = q.days();
     let limit = q.limit();
+    let offset = q.offset();
 
     // 子查询列名（errs/ustatus）刻意与外层别名错开：ClickHouse 会把
     // `argMax(channel_id, errors)` 里的 errors 解析成外层 `sum(...) AS errors`
@@ -507,16 +539,20 @@ pub async fn errors(
         "SELECT error_code, sum(errs) AS errors, \
                 argMax(channel_id, errs) AS top_channel_id, \
                 argMax(model, errs) AS top_model, \
-                max(ustatus) AS upstream_status \
+                max(ustatus) AS upstream_status, \
+                sum(sum(errs)) OVER () AS total_errors, count() OVER () AS total_items \
          FROM ( \
              SELECT error_code, channel_id, model, \
                     countMerge(errors) AS errs, \
                     maxMerge(upstream_status) AS ustatus \
              FROM mv_error_hour WHERE hour >= now() - INTERVAL {days} DAY \
              GROUP BY error_code, channel_id, model \
-         ) GROUP BY error_code ORDER BY errors DESC LIMIT {limit}"
+         ) GROUP BY error_code ORDER BY errors DESC, error_code ASC LIMIT {limit} OFFSET {offset}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
+    let summary = page_summary(ch, &rows, &format!(
+        "SELECT uniqExact(error_code) AS total_items, countMerge(errors) AS total_errors FROM mv_error_hour WHERE hour >= now() - INTERVAL {days} DAY"
+    )).await?;
 
     let ids: Vec<i64> = rows.iter().map(|r| ch_i64(r, "top_channel_id")).collect();
     let channel_names: HashMap<i64, String> =
@@ -528,7 +564,7 @@ pub async fn errors(
             .map(|r| (r.id, r.name))
             .collect();
 
-    let total: i64 = rows.iter().map(|r| ch_i64(r, "errors")).sum();
+    let total = ch_i64(&summary, "total_errors");
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -545,7 +581,9 @@ pub async fn errors(
             })
         })
         .collect();
-    Ok(Json(json!({ "days": days, "total": total, "data": data })))
+    Ok(Json(
+        json!({ "days": days, "limit": limit, "offset": offset, "total_items": ch_i64(&summary, "total_items"), "total": total, "data": data }),
+    ))
 }
 
 /// GET /admin/stats/clients：客户端类型分布（#5277，mv_client_day）。
@@ -565,6 +603,7 @@ pub async fn clients(
     let days = calendar.days();
     let range = calendar.day_filter();
     let limit = q.limit();
+    let offset = q.offset();
 
     let correction = super::input_units::correction_source("client_type", &range);
     let tokens =
@@ -572,14 +611,17 @@ pub async fn clients(
     let sql = format!(
         "SELECT client_type, countMerge(requests) AS reqs, {tokens} AS toks, \
                 sumMerge(amount) AS spend, sumMerge(errors) AS errs, uniqMerge(users) AS uniq_users, \
-                sum(countMerge(requests)) OVER () AS total_requests, count() OVER () AS total_clients \
+                sum(countMerge(requests)) OVER () AS total_requests, count() OVER () AS total_items \
          FROM mv_client_day LEFT JOIN {correction} c USING (client_type) WHERE {range} \
-         GROUP BY client_type ORDER BY reqs DESC LIMIT {limit}"
+         GROUP BY client_type ORDER BY reqs DESC, client_type ASC LIMIT {limit} OFFSET {offset}"
     );
     let rows = ch.query_json_each_row(&sql).await.map_err(AppError::from)?;
+    let summary = page_summary(ch, &rows, &format!(
+        "SELECT uniqExact(client_type) AS total_items, countMerge(requests) AS total_requests FROM mv_client_day WHERE {range}"
+    )).await?;
 
-    let total_requests = rows.first().map_or(0, |r| ch_i64(r, "total_requests"));
-    let total_clients = rows.first().map_or(0, |r| ch_i64(r, "total_clients"));
+    let total_requests = ch_i64(&summary, "total_requests");
+    let total_clients = ch_i64(&summary, "total_items");
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -599,7 +641,7 @@ pub async fn clients(
         })
         .collect();
     Ok(Json(
-        json!({ "days": days, "window": calendar.json(), "limit": limit, "total_clients": total_clients, "total_requests": total_requests, "data": data }),
+        json!({ "days": days, "window": calendar.json(), "limit": limit, "offset": offset, "total_items": total_clients, "total_clients": total_clients, "total_requests": total_requests, "data": data }),
     ))
 }
 
@@ -1112,7 +1154,7 @@ pub async fn margin(
 
     let sql = format!(
         "SELECT day, \
-                countMerge(requests) AS requests, \
+                countMerge(requests) AS requests, countMerge(financial_records) AS financial_records, \
                 sumMerge(amount) AS amount_micro, \
                 sumMerge(original) AS original_micro, \
                 sumMerge(discount) AS discount_micro, \
@@ -1131,6 +1173,7 @@ pub async fn margin(
     let mut total_cost = 0_i64;
     let mut total_discount = 0_i64;
     let mut total_requests = 0_i64;
+    let mut total_records = 0_i64;
     let mut total_errors = 0_i64;
     let data: Vec<Value> = rows
         .iter()
@@ -1142,6 +1185,7 @@ pub async fn margin(
             total_cost = total_cost.saturating_add(cost);
             total_discount = total_discount.saturating_add(discount);
             total_requests = total_requests.saturating_add(ch_i64(r, "requests"));
+            total_records = total_records.saturating_add(ch_i64(r, "financial_records"));
             total_errors = total_errors.saturating_add(ch_i64(r, "errors"));
             let day = r.get("day").and_then(Value::as_str).unwrap_or_default();
             let known = coverage.iter().find(|c| c["day"] == day);
@@ -1158,7 +1202,7 @@ pub async fn margin(
                 "discount_micro": discount,
                 "upstream_cost_micro": cost,
             });
-            apply_cost_coverage(&mut row, ch_i64(r, "requests"), values);
+            apply_cost_coverage(&mut row, ch_i64(r, "financial_records"), values);
             row
         })
         .collect();
@@ -1178,18 +1222,20 @@ pub async fn margin(
             "margin_rate_bp": rate_bp(total_amount.saturating_sub(total_cost), total_amount),
         },
     });
-    apply_cost_coverage(&mut result["total"], total_requests, known_totals);
+    apply_cost_coverage(&mut result["total"], total_records, known_totals);
     result["window"]["freshness"] = super::analysis_freshness::read(&state).await?;
     Ok(Json(result))
 }
 
 /// Known zero cost counts as covered; absent historical costs never become fictitious margin.
-fn apply_cost_coverage(row: &mut Value, requests: i64, values: [i64; 3]) {
+fn apply_cost_coverage(row: &mut Value, records: i64, values: [i64; 3]) {
     let [known, revenue, cost] = values;
     let margin = revenue.saturating_sub(cost);
+    row["financial_records"] = json!(records);
+    row["cost_known_records"] = json!(known);
     row["cost_known_requests"] = json!(known);
-    row["cost_coverage_bp"] = if requests > 0 {
-        json!(rate_bp(known, requests))
+    row["cost_coverage_bp"] = if records > 0 {
+        json!(rate_bp(known, records))
     } else {
         Value::Null
     };
@@ -1200,12 +1246,12 @@ fn apply_cost_coverage(row: &mut Value, requests: i64, values: [i64; 3]) {
     } else {
         Value::Null
     };
-    row["margin_micro"] = if known == requests && requests > 0 {
+    row["margin_micro"] = if known == records && records > 0 {
         json!(margin)
     } else {
         Value::Null
     };
-    row["margin_rate_bp"] = if known == requests && revenue > 0 {
+    row["margin_rate_bp"] = if known == records && revenue > 0 {
         json!(rate_bp(margin, revenue))
     } else {
         Value::Null

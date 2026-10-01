@@ -34,10 +34,12 @@ struct CachedToken {
     expires_at: i64,
 }
 
+type TokenEntry = Arc<tokio::sync::Mutex<Option<CachedToken>>>;
+
 #[derive(Clone)]
 pub struct VertexUpstream {
     http: crate::http::HttpPool,
-    tokens: Arc<tokio::sync::Mutex<HashMap<String, CachedToken>>>,
+    tokens: Arc<tokio::sync::Mutex<HashMap<String, TokenEntry>>>,
 }
 
 /// 该模型在 Vertex 上归 anthropic publisher（其余按 google / Gemini 形状）。
@@ -144,10 +146,17 @@ impl VertexUpstream {
         };
         let cache_key = hex::encode(Sha256::digest(credential.as_bytes()));
         let now = chrono::Utc::now().timestamp();
-        // 持锁跨过刷新请求：同一凭证的并发请求只换一次 token（刷新是小时级事件，串行无妨）
-        let mut cache = self.tokens.lock().await;
-        if let Some(hit) = cache.get(&cache_key)
-            && hit.expires_at - now > REFRESH_MARGIN_SECS
+        let entry = {
+            let mut cache = self.tokens.lock().await;
+            Arc::clone(
+                cache
+                    .entry(cache_key)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None))),
+            )
+        };
+        let mut cached = entry.lock().await;
+        if let Some(hit) = cached.as_ref()
+            && hit.expires_at.saturating_sub(now) > REFRESH_MARGIN_SECS
         {
             return Ok(hit.token.clone());
         }
@@ -170,7 +179,7 @@ impl VertexUpstream {
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Status {
                 status,
@@ -189,13 +198,10 @@ impl VertexUpstream {
             .get("expires_in")
             .and_then(Value::as_i64)
             .unwrap_or(JWT_TTL_SECS);
-        cache.insert(
-            cache_key,
-            CachedToken {
-                token: token.clone(),
-                expires_at: now + expires_in,
-            },
-        );
+        *cached = Some(CachedToken {
+            token: token.clone(),
+            expires_at: now.saturating_add(expires_in),
+        });
         Ok(token)
     }
 

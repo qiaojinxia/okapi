@@ -1,12 +1,13 @@
 import { ArrowRight, ChevronRight, Terminal } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { PricingGroup, PricingModel, TokenUnit } from './types'
-import { isAvailable, modelCapabilities, modelPrice, modelVendor } from './catalog-data'
+import { formatContextWindow, isAvailable, modelCapabilities, modelPrice, modelVendor } from './catalog-data'
+import { CompareToggle } from './CompareToggle'
 import { VendorIcon } from './VendorIcon'
 import { Badge } from '@/components/ui/badge'
 import { CopyButton } from '@/components/ui/copy-button'
 import { Td, Tr } from '@/components/ui/table'
-import { formatCount, formatUnitPrice } from '@/lib/money'
+import { formatUnitPrice } from '@/lib/money'
 
 export interface ModelItemProps {
   model: PricingModel
@@ -16,6 +17,10 @@ export interface ModelItemProps {
   unit: TokenUnit
   onOpen: () => void
   onExamples: () => void
+  /// 是否在对比中、对比是否已满员、切换对比。
+  compared: boolean
+  compareFull: boolean
+  onCompare: () => void
 }
 
 export function ModelIdentity({ model }: { model: PricingModel }) {
@@ -51,7 +56,7 @@ export function ModelTags({ model }: { model: PricingModel }) {
   const caps = modelCapabilities(model)
   return <div className="flex min-h-6 flex-wrap items-center gap-1.5">
     {model.context_window != null && model.context_window > 0 && <Badge variant="outline" title={t('catalog:contextExact', { n: model.context_window.toLocaleString(i18n.language) })}>
-      {formatCount(model.context_window, i18n.language)} {t('catalog:contextShort')}
+      {formatContextWindow(model.context_window)} {t('catalog:contextShort')}
     </Badge>}
     {caps.slice(0, 3).map((cap) => <Badge key={cap} variant="muted">{t(`catalog:cap_${cap}`)}</Badge>)}
     {caps.length > 3 && <Badge variant="muted" title={caps.slice(3).map((cap) => t(`catalog:cap_${cap}`)).join(' · ')}>+{caps.length - 3}</Badge>}
@@ -76,11 +81,12 @@ export function ModelPriceSummary({ model, factor, unit }: Pick<ModelItemProps, 
 }
 
 export function ModelCard(props: ModelItemProps) {
-  const { model, group, groups, onOpen, onExamples } = props
+  const { model, group, groups, onOpen, onExamples, compared, compareFull, onCompare } = props
   const { t } = useTranslation()
   const names = model.groups.map((code) => groups.find((g) => g.code === code)?.name || (code === 'default' ? t('flow:defaultGroup') : code))
-  return <article data-model={model.model} className="flex min-w-0 flex-col gap-3 rounded-xl border border-border bg-card p-5 shadow-card transition-[border-color,box-shadow] hover:border-primary/40 hover:shadow-popover">
-    <button type="button" className="min-w-0 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40" onClick={onOpen} aria-label={t('catalog:openModel', { model: model.display_name || model.model })}>
+  return <article data-model={model.model} data-compared={compared || undefined} className={`relative flex min-w-0 flex-col gap-3 rounded-xl border bg-card p-5 shadow-card transition-[border-color,box-shadow] hover:border-primary/40 hover:shadow-popover ${compared ? 'border-primary/50 ring-1 ring-primary/20' : 'border-border'}`}>
+    <CompareToggle model={model} compared={compared} full={compareFull} onToggle={onCompare} className="absolute right-4 top-4" />
+    <button type="button" className="min-w-0 rounded-md pr-10 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40" onClick={onOpen} aria-label={t('catalog:openModel', { model: model.display_name || model.model })}>
       <ModelIdentity model={model} />
     </button>
     <ModelId model={model} />
@@ -98,15 +104,15 @@ export function ModelCard(props: ModelItemProps) {
 }
 
 export function ModelTableRow(props: ModelItemProps) {
-  const { model, group, factor, unit, onOpen, onExamples } = props
+  const { model, group, factor, unit, onOpen, onExamples, compared, compareFull, onCompare } = props
   const { t, i18n } = useTranslation()
-  return <Tr data-model={model.model}>
+  return <Tr data-model={model.model} data-compared={compared || undefined}>
     <Td className="min-w-64 max-w-96"><button type="button" onClick={onOpen} className="w-full rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-primary/40" aria-label={t('catalog:openModel', { model: model.display_name || model.model })}><ModelIdentity model={model} /></button><div className="mt-2"><ModelId model={model} /></div></Td>
     <Td><ModelTags model={model} /></Td>
     <Td><span className="text-xs text-muted-foreground">{t(`analysis:${model.mode}`, { defaultValue: t('catalog:customPricing') })}</span></Td>
     {model.mode === 'ratio' ? <><Td numeric>{formatUnitPrice(modelPrice(model, 'input', factor, unit), i18n.language)}</Td><Td numeric>{formatUnitPrice(modelPrice(model, 'output', factor, unit), i18n.language)}</Td></>
       : <Td colSpan={2} className="text-center">{model.mode === 'per_call' ? `${formatUnitPrice(modelPrice(model, 'call', factor), i18n.language)} ${t('catalog:perRequest')}` : t('catalog:variablePrice')}</Td>}
     <Td><ModelAvailability model={model} group={group} /></Td>
-    <Td><div className="flex items-center gap-1"><button type="button" onClick={onExamples} aria-label={t('catalog:examples')} title={t('catalog:examples')} className="flex h-9 w-9 items-center justify-center rounded-lg outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40"><Terminal className="h-4 w-4" /></button><button type="button" onClick={onOpen} aria-label={t('catalog:openModel', { model: model.display_name || model.model })} className="flex h-9 w-9 items-center justify-center rounded-lg text-primary outline-none hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-primary/40"><ChevronRight className="h-4 w-4" /></button></div></Td>
+    <Td><div className="flex items-center gap-1"><CompareToggle model={model} compared={compared} full={compareFull} onToggle={onCompare} /><button type="button" onClick={onExamples} aria-label={t('catalog:examples')} title={t('catalog:examples')} className="flex h-9 w-9 items-center justify-center rounded-lg outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40"><Terminal className="h-4 w-4" /></button><button type="button" onClick={onOpen} aria-label={t('catalog:openModel', { model: model.display_name || model.model })} className="flex h-9 w-9 items-center justify-center rounded-lg text-primary outline-none hover:bg-primary/10 focus-visible:ring-2 focus-visible:ring-primary/40"><ChevronRight className="h-4 w-4" /></button></div></Td>
   </Tr>
 }

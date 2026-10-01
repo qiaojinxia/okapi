@@ -36,7 +36,13 @@ fn unavailable(param: &str) -> ForwardFailure {
     )
 }
 
-fn failure(error: UpstreamError, cand: &ChannelCandidate, failover: i16) -> ForwardFailure {
+fn failure(
+    error: UpstreamError,
+    bill: &RequestBilling,
+    cand: &ChannelCandidate,
+    failover: i16,
+) -> ForwardFailure {
+    bill.trace.failure(&error);
     let channel = (cand.channel_id, cand.channel_key_id);
     // This conversion does not authorize retry. Only the handshake loop below may retry.
     match classify_fatal(error, failover, channel) {
@@ -186,6 +192,8 @@ pub(super) async fn route(
         }
         let failover = attempted;
         attempted += 1;
+        bill.trace
+            .begin(&cand, cand.upstream_model(&bill.model), "/v1/responses");
         let body = match body(bill, probe, &cand, work) {
             Ok(body) => body,
             Err(error) => {
@@ -193,7 +201,7 @@ pub(super) async fn route(
                     .sched
                     .release_slot(cand.channel_key_id, cand.max_concurrency)
                     .await;
-                return Err(failure(error, &cand, failover));
+                return Err(failure(error, bill, &cand, failover));
             }
         };
         if pinned.is_none() {
@@ -214,7 +222,7 @@ pub(super) async fn route(
                 Err(error) => {
                     let retry = error.retriable_before_first_token();
                     let kind = super::super::failure_kind_of(&error);
-                    last = failure(error, &cand, failover);
+                    last = failure(error, bill, &cand, failover);
                     bill.state
                         .sched
                         .release_slot(cand.channel_key_id, cand.max_concurrency)
@@ -270,6 +278,7 @@ pub(super) async fn route(
                             ));
                         }
                     };
+                bill.trace.finish(None, None);
                 let mut info = cand_info(
                     &cand,
                     &bill.model,
@@ -306,6 +315,7 @@ async fn create_turn(
     // create may already have sent a frame when it fails. Never replay or switch accounts here.
     match socket.create(body).await {
         Ok(handle) => {
+            bill.trace.finish(None, None);
             let layer = if bill.response_parent.is_some() {
                 1
             } else if sticky == Some(cand.channel_key_id) {
@@ -330,7 +340,7 @@ async fn create_turn(
                 .sched
                 .release_slot(cand.channel_key_id, cand.max_concurrency)
                 .await;
-            Err(failure(error, cand, failover))
+            Err(failure(error, bill, cand, failover))
         }
     }
 }

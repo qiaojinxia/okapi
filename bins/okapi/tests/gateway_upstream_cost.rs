@@ -18,6 +18,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 #[path = "support/paged_lists.rs"]
 mod paged_lists;
 
@@ -145,6 +148,7 @@ async fn setup() -> Bed {
         .await
         .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

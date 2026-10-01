@@ -120,8 +120,31 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             crate::gateway::clients::stamp_peer_ip,
         ))
-        .layer(TraceLayer::new_for_http())
+        .layer(axum::middleware::from_fn(security_headers))
+        .layer(TraceLayer::new_for_http().make_span_with(crate::gateway::clients::request_span))
         .with_state(state)
+}
+
+async fn security_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let h = response.headers_mut();
+    h.insert(
+        "x-frame-options",
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        "content-security-policy",
+        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
+    );
+    h.insert(
+        "x-content-type-options",
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        "referrer-policy",
+        axum::http::HeaderValue::from_static("same-origin"),
+    );
+    response
 }
 
 /// SPA 与管理 API 同挂 `/admin/*`，路径同名时（如 `/admin/channels`）axum 的路由
@@ -431,6 +454,7 @@ fn auth_routes() -> ConsoleRouter {
         .route("/auth/logout", post(auth_web::logout))
         .route("/auth/totp/enroll", post(auth_web::totp_enroll))
         .route("/auth/totp/confirm", post(auth_web::totp_confirm))
+        .route("/auth/totp/disable", post(auth_web::totp_disable))
         .route("/auth/keys", post(auth_web::create_key))
         .route("/auth/keys/{id}/copy", post(key_copy::copy))
         .route("/auth/oauth-providers", get(oauth::list_providers))

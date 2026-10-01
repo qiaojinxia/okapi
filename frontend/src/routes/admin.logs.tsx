@@ -14,6 +14,10 @@ export interface LogSearch extends PageSearch {
   channel_id?: number
   error_code?: string
   request_id?: string
+  upstream_request_id?: string
+  group?: string
+  client_type?: string
+  log_type?: number
   errors_only?: boolean
   hours?: number
   /// 绝对区间（RFC3339，UTC）；给了 from 就忽略 hours。对账"某一天的账"用。
@@ -31,6 +35,10 @@ export const Route = createFileRoute('/admin/logs')({
     channel_id: posInt(search.channel_id),
     error_code: text(search.error_code),
     request_id: text(search.request_id),
+    upstream_request_id: text(search.upstream_request_id),
+    group: text(search.group),
+    client_type: text(search.client_type),
+    log_type: posInt(search.log_type),
     errors_only: search.errors_only === true || search.errors_only === 'true' ? true : undefined,
     hours: posInt(search.hours),
     from: text(search.from),

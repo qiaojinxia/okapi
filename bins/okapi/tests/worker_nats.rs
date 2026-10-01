@@ -178,12 +178,13 @@ async fn epoch_broadcast_hot_reload() {
     let admin_id = okapi_store::provision::create_user(&env.pg, &format!("nats-admin-{suffix}"))
         .await
         .unwrap();
-    let snapshot = serde_json::to_value(
+    let mut snapshot = serde_json::to_value(
         okapi_store::pricing::load_pricing_source_rows(&env.pg)
             .await
             .unwrap(),
     )
     .unwrap();
+    snapshot["base_price_per_1m_micro"] = json!(okapi_pricing::book::BASE_PRICE_PER_1M_MICRO);
     let epoch = okapi_store::admin::publish_epoch(&env.pg, admin_id, &snapshot)
         .await
         .unwrap();
@@ -210,4 +211,38 @@ async fn epoch_broadcast_hot_reload() {
 fn rand_suffix() -> u32 {
     let bytes = *Uuid::new_v4().as_bytes();
     u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % 1_000_000
+}
+
+#[tokio::test]
+async fn relay_poison_batch_cannot_starve_later_events() {
+    let Some(env) = setup().await else {
+        return;
+    };
+    sqlx::query("INSERT INTO billing_outbox(topic,payload) SELECT 'billing.*','{}'::jsonb FROM generate_series(1,500)").execute(&env.pg).await.unwrap();
+    let user = 3_000_000_000 + i64::from(rand_suffix());
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO billing_outbox(topic,payload) VALUES('billing.completed',$1) RETURNING id",
+    )
+    .bind(outbox_payload(user, Uuid::new_v4(), 123))
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    nats_relay::relay_once(&env.pg, &env.js).await.unwrap();
+    nats_relay::relay_once(&env.pg, &env.js).await.unwrap();
+    let status: i16 = sqlx::query_scalar("SELECT status FROM billing_outbox WHERE id=$1")
+        .bind(id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(
+        status, 1,
+        "500 corrupt messages must not block valid publications"
+    );
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM billing_dlq WHERE source='relay' AND error='relay_invalid_event'",
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(retained, 500, "poison payloads must be retained for repair");
 }

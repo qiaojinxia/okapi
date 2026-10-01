@@ -6,6 +6,11 @@
 
 use axum::http::HeaderMap;
 
+/// API keys and OAuth codes in query strings must not enter request spans.
+pub(crate) fn request_span(request: &axum::extract::Request) -> tracing::Span {
+    tracing::debug_span!("request", method = %request.method(), uri = request.uri().path(), version = ?request.version())
+}
+
 const RULES: &[(&str, &str)] = &[
     // 编码智能体 / CLI
     ("claude-code", "claude-code"),

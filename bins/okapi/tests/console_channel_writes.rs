@@ -9,6 +9,9 @@
 //! `console_auth_web`），不读 `OKAPI_MASTER_KEY`：CI 不设这个变量，读环境变量的写法本地能过、CI 必红。
 //! 查询一律用运行期检查的 `sqlx::query*`：CI 以 `SQLX_OFFLINE=true` 编译，测试专用的查询不值得进 `.sqlx` 缓存。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
@@ -142,6 +145,7 @@ async fn setup() -> Bed {
         .await
         .unwrap();
 
+    published_pricing::publish(&pg, admin_id).await;
     let mut state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

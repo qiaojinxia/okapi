@@ -27,6 +27,7 @@ pub mod gemini;
 pub mod http;
 pub mod image_store;
 pub mod image_stream;
+mod limits;
 pub mod modifiers;
 pub mod oauth;
 pub mod openai;

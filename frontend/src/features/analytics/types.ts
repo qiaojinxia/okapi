@@ -28,6 +28,8 @@ export interface CubeMetrics {
   known_cost_micro?: number
   cache_write_tokens?: number | null
   avg_output_tps_milli?: number | null
+  observed_output_tps_milli?: number | null
+  output_tps_samples?: number
   ttft_samples?: number
   requests: number
   errors: number

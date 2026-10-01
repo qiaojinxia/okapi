@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox SET status=1,published_at=now(),stats_protocol=1,next_retry_at=NULL WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cce544a37c301e6b3bf5834288a93f6f392dd8a174471c10cf5855f77252d292"
+}

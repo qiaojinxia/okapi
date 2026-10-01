@@ -27,7 +27,12 @@ pub async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes
     let Some(body) = force_stream(&body) else {
         return AppError::bad_request().into_response_with(None);
     };
-    crate::gateway::chat::chat_completions(State(state), headers, body).await
+    Box::pin(crate::gateway::chat::chat_completions(
+        State(state),
+        headers,
+        body,
+    ))
+    .await
 }
 
 /// 请求体必须是 JSON 对象；`stream` 置 true（非流式在同源长连接上没有意义，且流式才有首字体验）。

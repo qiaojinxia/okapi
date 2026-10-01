@@ -751,7 +751,7 @@ for (const variant of [
   }
 })
 
-test('审计页：空态、条件进 URL、行展开多出的 detail、加载更多带 before 游标', async ({ page }) => {
+test('审计页：空态、条件进 URL、详情抽屉、加载更多带 before 游标', async ({ page }) => {
   await prepare(page)
   const queries: URL[] = []
   const row = (id: number, extra: Record<string, unknown> = {}) => ({
@@ -787,7 +787,11 @@ test('审计页：空态、条件进 URL、行展开多出的 detail、加载更
   await expect(page.getByText('hidden-key')).toHaveCount(0)
 
   await page.getByRole('row').filter({ hasText: 'channel.delete' }).first().click()
-  await expect(page.getByText('hidden-key')).toBeVisible()
+  const detail = page.getByRole('dialog', { name: '审计详情' })
+  await expect(detail.getByText('hidden-key')).toBeVisible()
+  await expect(page.getByRole('table', { name: '审计日志', exact: true }).locator('tbody tr')).toHaveCount(2)
+  await detail.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(detail).toHaveCount(0)
 
   await page.locator('#au-action').selectOption('user.')
   await page.locator('#au-target').fill(' root@ok.test ')
@@ -817,11 +821,109 @@ test('审计页：空态、条件进 URL、行展开多出的 detail、加载更
   await page.getByRole('button', { name: '加载更多' }).click()
   await expect.poll(() => queries.some((u) => u.searchParams.get('before') === '19')).toBe(true)
   await expect(page.getByText('已加载 3 条')).toBeVisible()
+  await page.getByRole('button', { name: '展开 18 的明细', exact: true }).click()
+  await expect(detail).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(detail).toHaveCount(0)
 
   await page.route('**/admin/audit?*', (route) => route.fulfill(apiError(500, 'internal_error')))
   await page.reload()
   await expect(page.getByRole('alert')).toContainText('服务内部错误')
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
+})
+
+for (const width of [390, 1440]) test(`审计抽屉：${width}px 完整字段、复制、关闭和筛选切换`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 800 })
+  await prepare(page)
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  const target = `channel-${'long-target-'.repeat(24)}`
+  const payload = { enabled: false, attempts: 0, models: ['gpt-5', 'claude-sonnet'], context: { target } }
+  let requests = 0
+  await page.route('**/admin/audit/actions', (route) => route.fulfill({ json: { data: ['channel.upsert'] } }))
+  await page.route('**/admin/audit?*', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    requests += 1
+    return route.fulfill({ json: {
+      data: [{
+        id: 31, actor: 'admin:1', actor_info: { kind: 'admin', id: 1, label: 'root' },
+        action: 'channel.upsert', target,
+        detail: { ip: '203.0.113.7', payload, message: Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') },
+        ip: null, created_at: '2026-09-08T12:00:00Z',
+      }, {
+        id: 30, actor: 'anon', actor_info: null, action: 'user.login_failed', target: null,
+        detail: null, ip: null, created_at: '2026-09-08T11:00:00Z',
+      }], has_more: false, next_before: null,
+    } })
+  })
+  await page.goto('/admin/audit?actor=admin%3A1')
+  await expect(page.getByText('已加载 2 条')).toBeVisible()
+  await page.locator('#au-target').fill('channel')
+  await page.getByRole('button', { name: '搜索', exact: true }).click()
+  await expect(page).toHaveURL(/target=channel/)
+  await expect.poll(() => requests).toBe(2)
+  const trigger = page.getByRole('button', { name: /^(展开|收起) 31 的明细$/ })
+  await trigger.focus()
+  await page.keyboard.press('Enter')
+  const detail = page.getByRole('dialog', { name: '审计详情' })
+  await expect(detail).toBeVisible()
+  await expect(detail.locator(':focus')).toHaveCount(1)
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  await expect(detail.getByText('root', { exact: false })).toBeVisible()
+  await expect(detail.getByText('admin:1', { exact: true })).toBeVisible()
+  await expect(detail.getByText('203.0.113.7', { exact: true }).first()).toBeVisible()
+  const targetField = detail.locator('dl > div').filter({ has: page.locator('dt').getByText('对象', { exact: true }) })
+  await expect(targetField.locator('dd > span > span').first()).toHaveText(target)
+  const targetStyle = await targetField.locator('dd > span > span').first().evaluate((el) => ({
+    whiteSpace: getComputedStyle(el).whiteSpace, overflow: getComputedStyle(el).overflow,
+  }))
+  expect(targetStyle).toEqual({ whiteSpace: 'pre-wrap', overflow: 'visible' })
+  await targetField.getByRole('button', { name: '复制', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(target)
+  const payloadField = detail.locator('dl > div').filter({ has: page.locator('dt').getByText('payload', { exact: true }) })
+  await payloadField.scrollIntoViewIfNeeded()
+  await expect(payloadField.locator('dd > span > span').first()).toHaveText(JSON.stringify(payload, null, 2))
+  await payloadField.getByRole('button', { name: '复制', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(JSON.stringify(payload, null, 2))
+  await expect(page.getByRole('table', { name: '审计日志', exact: true }).locator('tbody tr')).toHaveCount(2)
+  expect(requests).toBe(2)
+  await expect.poll(async () => {
+    const bounds = await detail.boundingBox()
+    return bounds ? Math.abs(bounds.x + bounds.width - width) : 100
+  }).toBeLessThan(2)
+  expect(await detail.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  const scroller = detail.locator('header + div')
+  expect(await scroller.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true)
+  await scroller.evaluate((el) => { el.scrollTop = 0 })
+  await page.screenshot({ path: `test-results/audit-drawer-${width}.png`, animations: 'disabled' })
+  // 复制按钮的提示层先响应 Escape，下一次关闭抽屉。
+  await expect(page.getByRole('tooltip')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('tooltip')).toHaveCount(0)
+  await expect(detail).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(detail).toHaveCount(0)
+  await expect(trigger).toBeFocused()
+
+  // 没有附加字段的记录也能查看基本信息。
+  await page.getByRole('button', { name: '展开 30 的明细', exact: true }).click()
+  await expect(detail).toBeVisible()
+  await expect(detail.getByText('未登录 / 未知账号', { exact: true })).toBeVisible()
+  await expect(detail.getByText('—', { exact: true })).toHaveCount(3)
+  await detail.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(detail).toHaveCount(0)
+
+  if (width > 672) {
+    await trigger.click()
+    await expect(detail).toBeVisible()
+    await page.mouse.click(8, 100)
+    await expect(detail).toHaveCount(0)
+    await expect(trigger).toBeFocused()
+  }
+  await trigger.click()
+  await expect(detail).toBeVisible()
+  await page.goBack()
+  await expect(page).not.toHaveURL(/target=channel/)
+  await expect(detail).toHaveCount(0)
 })
 
 function adminLogRow() {
@@ -932,7 +1034,8 @@ test('管理端日志：过滤进 URL 与查询串；7 天改 hours；展开 req
   await expect(page.getByText('req-abc')).toBeVisible()
   await expect(page.getByText('up-1')).toBeVisible()
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
-  await page.getByRole('button', { name: '复制', exact: true }).first().click()
+  // 详情顶部的错误码也有复制按钮，不能再靠"第一个复制"取请求 ID：从"请求 ID"标签所在行取
+  await page.getByRole('dialog').getByText('请求 ID', { exact: true }).locator('..').getByRole('button', { name: '复制', exact: true }).click()
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('req-abc')
 
   await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
@@ -1727,7 +1830,7 @@ test('服务质量：渠道/模型/错误/客户端查询带 days+limit；深链
   await expect(page.locator('#main-content').getByRole('heading', { name: '服务质量' })).toBeVisible()
 
   await page.getByRole('tab', { name: '渠道健康' }).click()
-  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/channels' && q.search.includes('days=7') && q.search.includes('limit=50'))).toBe(true)
+  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/channels' && q.search.includes('days=7') && q.search.includes('limit=10') && q.search.includes('offset=0'))).toBe(true)
   const bad = page.getByRole('link', { name: 'openai-main' })
   await expect(bad).toHaveAttribute('href', /channel_id=42/)
   await expect(bad).toHaveAttribute('href', /hours=168/)
@@ -1739,13 +1842,13 @@ test('服务质量：渠道/模型/错误/客户端查询带 days+limit；深链
   await expect(page.getByText(/\$1\.23/)).toBeVisible()
 
   await page.getByRole('tab', { name: '模型时延与吞吐' }).click()
-  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/models' && q.search.includes('days=7') && q.search.includes('limit=50'))).toBe(true)
+  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/models' && q.search.includes('days=7') && q.search.includes('limit=10') && q.search.includes('offset=0'))).toBe(true)
   const model = page.getByRole('link', { name: 'gpt-5' })
   await expect(model).toHaveAttribute('href', /model=gpt-5/)
   await expect(model).toHaveAttribute('href', /hours=168/)
 
   await page.getByRole('tab', { name: '错误分布' }).click()
-  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/errors' && q.search.includes('days=7') && q.search.includes('limit=20'))).toBe(true)
+  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/errors' && q.search.includes('days=7') && q.search.includes('limit=10') && q.search.includes('offset=0'))).toBe(true)
   const err = page.getByRole('link', { name: 'upstream_error' })
   await expect(err).toHaveAttribute('href', /error_code=upstream_error/)
   await expect(err).toHaveAttribute('href', /hours=168/)
@@ -1769,7 +1872,7 @@ test('服务质量：渠道/模型/错误/客户端查询带 days+limit；深链
   await expect(page.getByText('窗口内没有失败请求。')).toBeVisible()
 
   await page.getByRole('tab', { name: '客户端分布' }).click()
-  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/clients' && q.search.includes('days=7') && q.search.includes('limit=30'))).toBe(true)
+  await expect.poll(() => qs.some((q) => q.path === '/admin/stats/clients' && q.search.includes('days=7') && q.search.includes('limit=10') && q.search.includes('offset=0'))).toBe(true)
   await expect(page.getByText('sdk')).toBeVisible()
   await expect(page.getByText('未识别')).toBeVisible()
 
@@ -1828,6 +1931,100 @@ test('服务质量：渠道/模型/错误/客户端查询带 days+limit；深链
   await expect(page.getByRole('link', { name: 'openai-main' })).toHaveCount(0)
   await page.getByRole('tab', { name: '模型时延与吞吐' }).click()
   await expect(page.getByRole('link', { name: 'gpt-5' })).toHaveCount(0)
+})
+
+for (const variant of [
+  { tab: 'channels', label: '渠道健康', field: 'name' },
+  { tab: 'models', label: '模型时延与吞吐', field: 'model' },
+  { tab: 'errors', label: '错误分布', field: 'error_code' },
+  { tab: 'clients', label: '客户端分布', field: 'client_type' },
+]) test(`服务质量分页 ${variant.tab}：翻页与页宽进查询，刷新保留，换时间和页签复位，越界恢复`, async ({ page }) => {
+  await prepare(page)
+  let count = 53
+  const queries: string[] = []
+  await page.route(`**/admin/stats/${variant.tab}?*`, (route) => {
+    const url = new URL(route.request().url())
+    queries.push(url.search)
+    const limit = Number(url.searchParams.get('limit') ?? 10), offset = Number(url.searchParams.get('offset') ?? 0)
+    const data = Array.from({ length: count }, (_, i) => ({
+      [variant.field]: `quality-row-${String(i + 1).padStart(3, '0')}`, channel_id: i + 1, provider: 'openai',
+      requests: 100, errors: 10, error_rate_bp: 1000, tokens: 1000, amount_micro: 100000,
+      ttft_p50_ms: 10, ttft_p95_ms: 20, ttft_p99_ms: 30,
+      latency_p50_ms: 100, latency_p95_ms: 200, latency_p99_ms: 300,
+      tokens_per_1k_sec: 10000, failovers: 0, sticky_rate_bp: 10000, share_bp: 188,
+      upstream_status: 502, top_channel_id: 0, top_channel_name: '', top_model: '', users: 1,
+    })).slice(offset, offset + limit)
+    return route.fulfill({ json: { total_items: count, total: count * 10, total_requests: count * 100, data } })
+  })
+  await page.goto(`/admin/quality?days=7&tab=${variant.tab}`)
+  const panel = page.getByRole('tabpanel', { name: variant.label })
+  const pager = panel.getByRole('navigation', { name: '分页' })
+  await expect(panel.locator('tbody tr')).toHaveCount(10)
+  await expect(pager).toContainText('共 53')
+  await pager.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(page).toHaveURL(new RegExp(`tab=${variant.tab}.*page=2`))
+  await expect(panel.getByText('quality-row-011', { exact: true })).toBeVisible()
+  await expect(panel.getByText('quality-row-001', { exact: true })).toHaveCount(0)
+  await expect.poll(() => queries.some((q) => q.includes('limit=10') && q.includes('offset=10'))).toBe(true)
+  await page.reload()
+  await expect(panel.getByText('quality-row-011', { exact: true })).toBeVisible()
+  await pager.getByRole('combobox', { name: '每页条数' }).selectOption('20')
+  await expect(panel.locator('tbody tr')).toHaveCount(20)
+  await expect.poll(() => queries.some((q) => q.includes('limit=20') && q.includes('offset=0'))).toBe(true)
+  await pager.getByRole('button', { name: '下一页', exact: true }).click()
+  await page.getByRole('button', { name: '近 30 天', exact: true }).click()
+  await expect(panel.getByText('quality-row-001', { exact: true })).toBeVisible()
+  await expect.poll(() => queries.at(-1)).toContain('days=30&limit=20&offset=0')
+  await pager.getByRole('button', { name: '下一页', exact: true }).click()
+  await page.getByRole('tab', { name: '质量趋势', exact: true }).click()
+  await page.getByRole('tab', { name: variant.label, exact: true }).click()
+  await expect(panel.getByText('quality-row-001', { exact: true })).toBeVisible()
+
+  // Hand-edited URLs and shrinking datasets retain the true total and recover to a populated page.
+  count = 3
+  await page.goto(`/admin/quality?days=7&tab=${variant.tab}&page=99`)
+  await expect(panel.getByText('quality-row-001', { exact: true })).toBeVisible()
+  await expect(panel.locator('tbody tr')).toHaveCount(3)
+  await expect(page).not.toHaveURL(/page=99/)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await pager.scrollIntoViewIfNeeded()
+  await expect(pager).toBeInViewport({ ratio: 1 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('服务质量趋势数据表分页，图表与导出保持完整，换范围回到第一页', async ({ page }) => {
+  await prepare(page)
+  const queries: string[] = []
+  await page.route('**/admin/stats/trend?*', (route) => {
+    const url = new URL(route.request().url())
+    queries.push(url.search)
+    const count = url.searchParams.get('days') === '30' ? 3 : 25
+    const data = Array.from({ length: count }, (_, i) => ({
+      bucket: new Date(Date.UTC(2026, 8, 29, i)).toISOString().slice(0, 19).replace('T', ' '),
+      requests: 100, errors: 10, error_rate_bp: 1000,
+    }))
+    return route.fulfill({ json: { days: 7, data, total: { requests: count * 100 }, granularity: 'hour', window: { start_at: data[0].bucket, end_at: data.at(-1)!.bucket, timezone: 'UTC' } } })
+  })
+  await page.goto('/admin/quality?days=7')
+  await page.getByRole('button', { name: '数据表', exact: true }).click()
+  const table = page.getByRole('table')
+  const pager = page.getByRole('navigation', { name: '分页' })
+  await expect(table.locator('tbody tr')).toHaveCount(10)
+  await expect(pager).toContainText('共 25')
+  await pager.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(table).toContainText('2026-09-29 10:00:00')
+  await expect(table).not.toContainText('2026-09-29 00:00:00')
+  const download = page.waitForEvent('download')
+  await page.getByRole('button', { name: '导出 CSV', exact: true }).click()
+  const csv = await csvFrom(await download)
+  expect(csv.trim().split(/\r?\n/)).toHaveLength(26)
+  expect(csv).toContain('2026-09-29 00:00:00')
+  expect(csv).toContain('2026-09-30 00:00:00')
+  expect(queries).toHaveLength(1)
+  await page.getByRole('button', { name: '近 30 天', exact: true }).click()
+  await page.getByRole('button', { name: '数据表', exact: true }).click()
+  await expect(table.locator('tbody tr')).toHaveCount(3)
+  await expect(pager.getByRole('button', { name: '上一页', exact: true })).toBeDisabled()
 })
 
 test('站点公告：warning 可按 updated_at 关掉；换版再出；critical 不能关', async ({ page }) => {
@@ -2325,7 +2522,7 @@ test('总览 KPI / 实时条：overview?days= 与 realtime?window=60；切窗重
   await expect.poll(() => trendDays[0]).toBe('7')
   await expect.poll(() => realtimeQ.some((s) => s.includes('window=60'))).toBe(true)
   await expect(page.getByText('实时')).toBeVisible()
-  await expect(page.getByText('1.5', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('平均 QPS', { exact: true }).locator('..')).toContainText('0.7')
   await expect(page.getByText('60 秒请求')).toBeVisible()
   await expect(page.getByText('42', { exact: true }).first()).toBeVisible()
   await expect(page.getByText(/\$1\.23/).first()).toBeVisible()

@@ -96,6 +96,15 @@ async fn ssrf_default_policy_blocks_private_targets() {
         );
     }
 
+    // Turnstile's custom verification endpoint must be guarded before sending its secret.
+    sqlx::query("INSERT INTO settings(key,value) VALUES('turnstile_secret',$1),('turnstile_verify_url',$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(json!("test-secret")).bind(json!("https://127.0.0.1:9/siteverify")).execute(&pg).await.unwrap();
+    let denied=reqwest::Client::new().post(format!("http://{addr}/auth/register"))
+        .json(&json!({"username":format!("blocked-{suffix}"),"email":format!("blocked-{suffix}@example.com"),"password":"pass-test-123456","turnstile_token":"token"})).send().await.unwrap();
+    assert_eq!(denied.status(), 400);
+    let denied: Value = denied.json().await.unwrap();
+    assert_eq!(denied["error"]["param"], "api_base_private_target");
+
     // 公网 https：放行
     let resp = create("https://api.example.com/v1").await;
     assert_eq!(resp.status(), 200, "{:?}", resp.text().await);

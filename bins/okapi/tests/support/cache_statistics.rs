@@ -7,6 +7,111 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[tokio::test]
+async fn portal_complete_cache_sources_survive_missing_calendar_upgrades() {
+    let database = format!("okapi_cache_upgrade_{}", Uuid::new_v4().simple());
+    let env = setup_with_ch_database(&database).await;
+    let ch = env.state.ch.as_ref().expect("requires isolated ClickHouse");
+    ch.ensure_schema().await.unwrap();
+    let result = std::panic::AssertUnwindSafe(check_calendar_upgrade(&env, ch))
+        .catch_unwind()
+        .await;
+    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        .await
+        .unwrap();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn check_calendar_upgrade(env: &Env, ch: &ChClient) {
+    let key = key_id(env).await;
+    let first = sample(env, key, Some(true), true);
+    let mut second = first.clone();
+    second["model"] = json!(format!("{}-second", env.model));
+    second["cache_write_tokens"] = json!(200);
+    insert(ch, &[first, second]).await;
+    for table in [
+        "mv_calendar_minute",
+        "mv_calendar_cache_write_hour",
+        "mv_calendar_cache_reporting_hour",
+    ] {
+        ch.execute(&format!("TRUNCATE TABLE {table}"))
+            .await
+            .unwrap();
+    }
+    if !matches!(
+        okapi_store::timezone::machine_timezone().unwrap(),
+        "UTC" | "Etc/UTC"
+    ) {
+        assert!(matches!(
+            ch.query_json_each_row("SELECT sumMerge(write_tokens) FROM mv_cache_write_day")
+                .await,
+            Err(okapi_store::StoreError::InvalidData(
+                "statistics_calendar_history_incomplete"
+            ))
+        ));
+    }
+    for phase in 0..3 {
+        if phase == 1 {
+            // Equal overall counts can still have invalid per-model coverage.
+            ch.execute(&format!(
+                "ALTER TABLE mv_cache_totals_5min DELETE WHERE model='{}-second' SETTINGS mutations_sync=2",
+                env.model
+            ))
+            .await
+            .unwrap();
+            ch.execute("INSERT INTO mv_cache_totals_5min SELECT * FROM mv_cache_totals_5min")
+                .await
+                .unwrap();
+        } else if phase == 2 {
+            ch.execute("TRUNCATE TABLE mv_cache_totals_5min")
+                .await
+                .unwrap();
+        }
+        for scope in ["key", "user"] {
+            let body = request(
+                env,
+                &format!("/api/me/stats/breakdown?days=2&scope={scope}"),
+                true,
+            )
+            .await;
+            assert_cache(&body["total"], 2, 2, Some(300));
+            assert_eq!(body["total"]["cache_read_known_requests"], 2);
+            assert_eq!(body["total"]["amount_micro"], 2000);
+            assert_eq!(body["total"]["tokens"], 3000);
+            for row in body["data"].as_array().unwrap() {
+                assert_cache(
+                    row,
+                    1,
+                    1,
+                    Some(if row["model"] == env.model { 100 } else { 200 }),
+                );
+            }
+        }
+    }
+    if !matches!(
+        okapi_store::timezone::machine_timezone().unwrap(),
+        "UTC" | "Etc/UTC"
+    ) {
+        ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+        let (status, body) = super::get(
+            env,
+            "/api/me/stats/breakdown?days=2&scope=user",
+            &env.user_token,
+        )
+        .await;
+        assert_eq!(
+            status, 500,
+            "Incomplete calendar history must not be guessed"
+        );
+        assert_eq!(
+            body["error"]["param"],
+            "statistics_calendar_history_incomplete"
+        );
+    }
+}
+
+#[tokio::test]
 async fn retained_day_cache_totals_do_not_leak_into_hours_or_channel_filters() {
     let database = format!("okapi_cache_days_{}", Uuid::new_v4().simple());
     let env = setup_with_ch_database(&database).await;

@@ -15,6 +15,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 #[path = "support/anthropic_usage.rs"]
 mod anthropic_usage;
 
@@ -196,6 +199,7 @@ async fn setup(protocol: Protocol, usage: Value) -> Env {
         .execute(&pg)
         .await
         .unwrap();
+    published_pricing::publish(&pg, user).await;
     let state = gateway::build_state(&pg_url, &redis_url, "modal-test", ch_url.as_deref(), None)
         .await
         .unwrap();

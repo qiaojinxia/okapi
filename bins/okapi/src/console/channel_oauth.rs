@@ -43,7 +43,8 @@ pub async fn start(
     if !is_oauth_provider(&req.provider) {
         return Err(AppError::bad_request().with_param("provider"));
     }
-    let pkce = Pkce::generate();
+    let pkce = Pkce::generate()
+        .map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, codes::INTERNAL_ERROR))?;
     // Anthropic 的流程把 verifier 当 state 原样带回；Codex 用独立随机 state
     let oauth_state: String = if req.provider == "anthropic_max" {
         pkce.verifier.clone()
@@ -64,7 +65,10 @@ pub async fn start(
         .oauth_cred_state_set(&oauth_state, &stored.to_string(), STATE_TTL_SECS)
         .await
     {
-        return Err(AppError::internal());
+        return Err(AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            codes::INTERNAL_ERROR,
+        ));
     }
     Ok(Json(json!({
         "provider": req.provider,
@@ -110,7 +114,8 @@ pub async fn exchange(
         .oauth_cred_state_take(&req.state)
         .await
         .ok_or_else(|| AppError::new(StatusCode::BAD_REQUEST, "oauth_state_invalid"))?;
-    let stored: Value = serde_json::from_str(&stored).map_err(|_| AppError::internal())?;
+    let stored: Value = serde_json::from_str(&stored)
+        .map_err(|_| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, codes::INTERNAL_ERROR))?;
     let provider = stored["provider"].as_str().unwrap_or_default().to_owned();
     let verifier = stored["verifier"].as_str().unwrap_or_default().to_owned();
     if !is_oauth_provider(&provider) {

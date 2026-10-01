@@ -40,12 +40,14 @@ function SecurityPage() {
   const { t } = useTranslation()
   const [enrolled, setEnrolled] = useState<EnrollResp | null>(null)
   const [code, setCode] = useState('')
+  const [password, setPassword] = useState('')
+  const [disableCode, setDisableCode] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
   const [needSession, setNeedSession] = useState(false)
 
   const fail = (err: unknown) => {
-    if (err instanceof ApiError && err.status === 401) {
+    if (err instanceof ApiError && err.status === 401 && err.code === 'invalid_api_key') {
       setNeedSession(true)
       return
     }
@@ -53,7 +55,7 @@ function SecurityPage() {
   }
 
   const enroll = useMutation({
-    mutationFn: () => apiFetch<EnrollResp>('/auth/totp/enroll', { method: 'POST', body: {} }),
+    mutationFn: () => apiFetch<EnrollResp>('/auth/totp/enroll', { method: 'POST', body: { password } }),
     onSuccess: (r) => {
       setEnrolled(r)
       setError(null)
@@ -77,6 +79,15 @@ function SecurityPage() {
     onError: fail,
   })
 
+  const disable = useMutation({
+    mutationFn: () => apiFetch<{ enabled: boolean }>('/auth/totp/disable', { method: 'POST', body: { password, code: disableCode.trim() } }),
+    onSuccess: () => {
+      toast.success(t('security:disabled'))
+      setDone(false); setEnrolled(null); setCode(''); setDisableCode(''); setPassword(''); setError(null)
+    },
+    onError: fail,
+  })
+
   const step = done ? 3 : enrolled ? 2 : 1
 
   return (
@@ -96,6 +107,9 @@ function SecurityPage() {
             <CardDescription>{t('security:hint')}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-5 pt-3">
+            <Field label={t('auth:password')} htmlFor="totp-password">
+              <Input id="totp-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </Field>
             {needSession ? (
               <Alert tone="warning">{t('security:sessionRequired')}</Alert>
             ) : done ? (
@@ -106,7 +120,7 @@ function SecurityPage() {
               <>
                 <Step n={1} active={step === 1} done={step > 1} title={t('security:step1Title')} hint={t('security:step1Hint')}>
                   {step === 1 && (
-                    <Button loading={enroll.isPending} onClick={() => enroll.mutate()}>
+                    <Button loading={enroll.isPending} disabled={!password} onClick={() => enroll.mutate()}>
                       <Smartphone className="h-4 w-4" />
                       {t('security:start')}
                     </Button>
@@ -155,6 +169,14 @@ function SecurityPage() {
                   )}
                 </Step>
               </>
+            )}
+            {!needSession && (
+              <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { e.preventDefault(); disable.mutate() }}>
+                <Field label={t('auth:totpCode')} htmlFor="totp-disable-code">
+                  <Input id="totp-disable-code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={disableCode} onChange={(e) => setDisableCode(e.target.value)} />
+                </Field>
+                <Button variant="outline" type="submit" loading={disable.isPending} disabled={!password || disableCode.trim().length !== 6}>{t('security:disable')}</Button>
+              </form>
             )}
             {error !== null && enrolled === null && !needSession && (
               <Alert tone="destructive">{error}</Alert>

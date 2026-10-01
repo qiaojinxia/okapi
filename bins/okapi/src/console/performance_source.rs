@@ -78,7 +78,7 @@ pub(super) fn prepared(
             "WITH toDate(hour) AS day SELECT {keys}, countMerge(requests) AS observed, sumIfMerge(total_ms) AS total_ms, countIfMerge(samples) AS samples{output_aggregate} FROM {table} WHERE {predicate}"
         );
         let raw = format!(
-            "WITH toStartOfHour(ts) AS hour, toDate(ts) AS day SELECT {keys}, count() AS observed, sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} FROM request_log_raw WHERE {predicate}"
+            "WITH toStartOfHour(ts) AS hour, toDate(ts) AS day SELECT {keys}, count() AS observed, sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} FROM request_log_calls WHERE {predicate}"
         );
         let source = super::measurement_coverage::fast_source(
             mode, keys, &expected, &counts, &aggregate, &raw,
@@ -99,7 +99,7 @@ pub(super) fn prepared(
         a AS (SELECT {keys}, countMerge(requests) AS observed, sumIfMerge(total_ms) AS total_ms, countIfMerge(samples) AS samples{output_aggregate} FROM (SELECT *, toDate(hour) AS day FROM {table}) WHERE {predicate} GROUP BY {keys}), \
         missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.observed, 0)), \
         r AS (SELECT {keys}, count() AS observed, sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} \
-            FROM (SELECT *, toStartOfHour(ts) AS hour, toDate(ts) AS day FROM request_log_raw) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
+            FROM (SELECT *, toStartOfHour(ts) AS hour, toDate(ts) AS day FROM request_log_calls) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
         SELECT {selected_keys}, {selected}, \
             (ifNull(a.observed, 0) = e.expected OR (ifNull(a.observed, 0) < e.expected AND (ifNull(r.observed, 0) > e.expected OR ifNull(a.observed, 0) >= ifNull(r.observed, 0)))) AS use_aggregate \
         FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"

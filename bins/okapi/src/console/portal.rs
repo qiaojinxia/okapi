@@ -54,8 +54,8 @@ pub async fn me(
     let has_web_session = super::auth_web::require_session(&state, &headers)
         .await
         .is_ok_and(|user_id| user_id == key.user_id);
-    let key_info: Option<(String, String)> =
-        sqlx::query_as("SELECT name, key_prefix FROM api_keys WHERE id = $1 AND user_id = $2")
+    let key_info: Option<(String, String, String)> =
+        sqlx::query_as("SELECT k.name, k.key_prefix, u.username FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.id = $1 AND k.user_id = $2")
             .bind(key.key_id)
             .bind(key.user_id)
             .fetch_optional(&state.pg)
@@ -86,6 +86,7 @@ pub async fn me(
     };
     Ok(Json(json!({
         "user_id": key.user_id,
+        "username": key_info.as_ref().map(|info| &info.2),
         "key_id": key.key_id,
         "key_name": key_info.as_ref().map(|info| &info.0),
         "key_prefix": key_info.as_ref().map(|info| &info.1),

@@ -17,6 +17,8 @@ interface StatProps {
   /// 右侧附加区（sparkline / 徽章）。
   aside?: React.ReactNode
   className?: string
+  /// 只覆盖图标块的底色与字色（不影响数值颜色）：同一排数字卡用不同色相区分指标，而不是一排同色。
+  iconClassName?: string
   /// 窄卡片将图标放在标签行，给数值保留整行宽度。
   layout?: 'inline' | 'stacked'
   compact?: boolean
@@ -54,6 +56,7 @@ export function Stat({
   loading = false,
   aside,
   className,
+  iconClassName,
   layout = 'inline',
   compact = false,
   onClick,
@@ -72,7 +75,7 @@ export function Stat({
       )}
     >
       {Icon && (
-        <span className={cn('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md', layout === 'stacked' && 'absolute right-4 top-3 h-7 w-7', TONE_ICON[tone])}>
+        <span className={cn('mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md', layout === 'stacked' && 'absolute right-4 top-3 h-7 w-7', iconClassName ?? TONE_ICON[tone])}>
           <Icon className="h-4 w-4" />
         </span>
       )}
@@ -135,7 +138,7 @@ export function DeltaChip({
   // ±0.5% 以内当持平：整点抖动不该被涂成红绿
   if (Math.abs(pct) < 0.5) {
     return (
-      <span className="inline-flex items-center gap-0.5 text-muted-foreground">
+      <span className="inline-flex items-center gap-0.5 rounded bg-muted/70 px-1 text-muted-foreground">
         <Minus className="h-3 w-3" />
         0%
       </span>
@@ -144,15 +147,19 @@ export function DeltaChip({
   const up = pct > 0
   const good = invert ? !up : up
   const Icon = up ? ArrowUpRight : ArrowDownRight
+  // 基数很小时涨幅会是 24,927,436.2% 这种没有信息量的数：千倍以上统一封顶成 999%+，完整数值留在悬停提示里。
+  const magnitude = Math.abs(pct)
+  const exact = `${magnitude.toLocaleString(locale, { maximumFractionDigits: 1 })}%`
   return (
     <span
+      title={magnitude >= 1000 ? exact : undefined}
       className={cn(
-        'inline-flex items-center gap-0.5 font-medium tabular-nums',
-        good ? 'text-success' : 'text-destructive',
+        'inline-flex items-center gap-0.5 rounded px-1 font-medium tabular-nums',
+        good ? 'bg-success/10 text-success' : 'bg-destructive/10 text-destructive',
       )}
     >
       <Icon className="h-3 w-3" />
-      {Math.abs(pct).toLocaleString(locale, { maximumFractionDigits: 1 })}%
+      {magnitude >= 1000 ? '999%+' : exact}
     </span>
   )
 }

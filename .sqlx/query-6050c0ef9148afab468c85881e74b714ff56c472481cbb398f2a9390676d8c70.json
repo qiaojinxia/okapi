@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE video_tasks SET next_poll_at=now()+interval '1 minute' WHERE (user_id,task_id) IN (SELECT user_id,task_id FROM video_tasks WHERE state IN ('pending','refund_pending') AND next_poll_at<=now() ORDER BY next_poll_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING user_id,task_id,channel_key_id,created_at,state",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "task_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "task_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "channel_key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "channel_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6050c0ef9148afab468c85881e74b714ff56c472481cbb398f2a9390676d8c70"
+}

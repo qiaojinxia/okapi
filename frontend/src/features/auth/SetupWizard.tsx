@@ -18,6 +18,7 @@ export function SetupWizard() {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [username, setUsername] = useState('')
+  const [setupToken, setSetupToken] = useState('')
   const [apiKey, setApiKey] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -28,7 +29,7 @@ export function SetupWizard() {
     try {
       const resp = await apiFetch<{ api_key: string }>('/api/setup', {
         method: 'POST',
-        body: { username: username.trim() },
+        body: { username: username.trim(), setup_token: setupToken || undefined },
       })
       setApiKey(resp.api_key)
       setKey(resp.api_key)
@@ -100,6 +101,9 @@ export function SetupWizard() {
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
               />
+            </Field>
+            <Field label={t('setup:token')} htmlFor="setup-token">
+              <Input id="setup-token" type="password" autoComplete="off" value={setupToken} onChange={(e) => setSetupToken(e.target.value)} />
             </Field>
             {error && <Alert tone="destructive">{error}</Alert>}
             <Button type="submit" size="lg" loading={busy} disabled={!username.trim()}>

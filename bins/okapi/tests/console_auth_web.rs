@@ -171,11 +171,25 @@ async fn register_login_key_totp_full_flow() {
         .unwrap();
     assert_eq!(me.status(), 200, "兑换的 key 必须直接可用");
 
+    let denied = client
+        .post(format!("http://{}/auth/totp/enroll", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"password":"wrong-password"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        denied.status(),
+        401,
+        "a stolen session alone cannot bind an authenticator"
+    );
     // TOTP 两段式
     let enroll: Value = client
         .post(format!("http://{}/auth/totp/enroll", env.addr))
         .header("x-real-ip", uniq_ip())
         .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"password":"hunter2-strong"}))
         .send()
         .await
         .unwrap()
@@ -194,6 +208,29 @@ async fn register_login_key_totp_full_flow() {
     let secret = base32::decode(base32::Alphabet::Rfc4648 { padding: false }, secret_b32).unwrap();
     let pending = enroll["pending"].as_str().unwrap();
 
+    let other_login = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email":email,"password":"hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_login.status(), 200);
+    let other_session = cookie_of(&other_login);
+    let cross_session = client
+        .post(format!("http://{}/auth/totp/confirm", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .header(reqwest::header::COOKIE, &other_session)
+        .json(&json!({"pending":pending,"code":totp_now(&secret)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        cross_session.status(),
+        400,
+        "绑定票据仅供发起绑定的会话使用"
+    );
+
     // 错码拒绝
     let bad_code = client
         .post(format!("http://{}/auth/totp/confirm", env.addr))
@@ -209,7 +246,7 @@ async fn register_login_key_totp_full_flow() {
         .post(format!("http://{}/auth/totp/confirm", env.addr))
         .header("x-real-ip", uniq_ip())
         .header(reqwest::header::COOKIE, &cookie)
-        .json(&json!({"pending": pending, "code": totp_now(&secret)}))
+        .json(&json!({"pending": pending, "code": totp_at(&secret,chrono::Utc::now().timestamp()-30)}))
         .send()
         .await
         .unwrap();
@@ -265,16 +302,56 @@ async fn register_login_key_totp_full_flow() {
     let body: Value = wrong_pw.json().await.unwrap();
     assert_eq!(body["error"]["code"], "invalid_credentials", "{body}");
 
+    let login_code = totp_now(&secret);
     let with_code = client
         .post(format!("http://{}/auth/login", env.addr))
         .header("x-real-ip", uniq_ip())
         .json(&json!({"email": email, "password": "hunter2-strong",
-            "totp_code": totp_now(&secret)}))
+            "totp_code": login_code}))
         .send()
         .await
         .unwrap();
     assert_eq!(with_code.status(), 200, "{:?}", with_code.text().await);
     let cookie2 = cookie_of(&with_code);
+    let replay = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email":email,"password":"hunter2-strong","totp_code":totp_now(&secret)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        replay.status(),
+        401,
+        "successful TOTP time slices cannot be replayed"
+    );
+    let overwrite = client
+        .post(format!("http://{}/auth/totp/enroll", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .header(reqwest::header::COOKIE, &cookie2)
+        .json(&json!({"password":"hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        overwrite.status(),
+        409,
+        "bound authenticators cannot be overwritten"
+    );
+    let disable=client.post(format!("http://{}/auth/totp/disable",env.addr)).header("x-real-ip",uniq_ip()).header(reqwest::header::COOKIE,&cookie2).json(&json!({"password":"hunter2-strong","code":totp_at(&secret,chrono::Utc::now().timestamp()+30)})).send().await.unwrap();
+    assert_eq!(disable.status(), 200);
+    let login_no_totp = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email":email,"password":"hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        login_no_totp.status(),
+        200,
+        "password and fresh code allow authenticator removal"
+    );
 
     // 登出后会话失效
     client

@@ -268,12 +268,21 @@ async fn pricebook_hot_reloads_on_new_epoch() {
         .unwrap();
     let before = state.pricebook.epoch();
 
-    let new_epoch = sqlx::query_scalar!(
-        r#"INSERT INTO pricing_epochs (snapshot) VALUES ('{}'::jsonb) RETURNING epoch"#
+    let publisher = okapi_store::provision::create_user(
+        &state.pg,
+        &format!("worker-publisher-{}", Uuid::new_v4()),
     )
-    .fetch_one(&state.pg)
     .await
     .unwrap();
+    let source = okapi_store::pricing::load_pricing_source_rows(&state.pg)
+        .await
+        .unwrap();
+    let mut snapshot = serde_json::to_value(source).unwrap();
+    snapshot["base_price_per_1m_micro"] =
+        serde_json::json!(okapi_pricing::book::BASE_PRICE_PER_1M_MICRO);
+    let new_epoch = okapi_store::admin::publish_epoch(&state.pg, publisher, &snapshot)
+        .await
+        .unwrap();
     assert!(new_epoch > before);
 
     // 并发安全断言：其他并行测试可能同时发布 epoch，只保证单调追平
@@ -371,7 +380,7 @@ async fn retention_drops_expired_partitions() {
     // 造一个远古分区（2020-01，与现网分区无重叠）
     sqlx::query(sqlx::AssertSqlSafe(
         "CREATE TABLE IF NOT EXISTS billing_records_y2020m01 PARTITION OF billing_records \
-         FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')"
+         FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-02-01 00:00:00+00')"
             .to_owned(),
     ))
     .execute(&pg)

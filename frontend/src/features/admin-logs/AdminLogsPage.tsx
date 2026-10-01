@@ -11,19 +11,30 @@ import {
   FileText,
   Search,
   Undo2,
+  Fingerprint,
+  KeyRound,
+  Route,
+  Server,
+  User,
+  Wallet,
 } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import type { LogSearch } from '@/routes/admin.logs'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { useConfirm } from '@/components/ui/confirm'
-import { CopyText } from '@/components/ui/copy-button'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { Drawer } from '@/components/ui/drawer'
 import { LogTokenUsage } from '@/features/logs/LogTokenUsage'
 import { LogPerformance, LogPerformanceDetails } from '@/features/logs/LogPerformance'
-import { logMoney } from '@/features/logs/types'
+import { LogErrorDetails } from '@/features/logs/LogErrorDetails'
+import { DetailSection, IdRow, InfoGrid, InfoItem } from '@/features/logs/detail-ui'
+import { LogRequestDetails } from '@/features/logs/LogRequestDetails'
+import { LogBillingDetails } from '@/features/logs/LogBillingDetails'
+import { billingStatus, logMoney } from '@/features/logs/types'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { Segmented } from '@/components/ui/segmented'
@@ -46,7 +57,7 @@ import { formatBp, formatCount, formatMoney, formatMoneyAggregate } from '@/lib/
 import { qk } from '@/lib/query-keys'
 import { TokenBreakdown } from '@/features/logs/TokenBreakdown'
 import { ExtraMetrics } from '@/features/logs/LogSummary'
-import type { LogStats, TokenDetails } from '@/features/logs/types'
+import type { LogStats, TokenDetails, LogDiagnostics, Snapshot } from '@/features/logs/types'
 
 /// 检索条件（受控草稿 → 点查询才提交）。
 ///
@@ -60,6 +71,10 @@ interface Draft {
   channel_id: string
   error_code: string
   request_id: string
+  upstream_request_id: string
+  group: string
+  client_type: string
+  log_type: string
   errors_only: boolean
   hours: number
   /// `datetime-local` 输入值（浏览器本地时区，形如 2026-08-30T00:00）；空串 = 用相对窗口
@@ -103,6 +118,10 @@ function fromSearch(s: LogSearch): Draft {
     channel_id: s.channel_id?.toString() ?? '',
     error_code: s.error_code ?? '',
     request_id: s.request_id ?? '',
+    upstream_request_id: s.upstream_request_id ?? '',
+    group: s.group ?? '',
+    client_type: s.client_type ?? '',
+    log_type: s.log_type?.toString() ?? '',
     errors_only: s.errors_only === true,
     hours: s.hours ?? DEFAULT_HOURS,
     from: toLocalInput(s.from),
@@ -124,6 +143,10 @@ function toSearch(d: Draft): LogSearch {
     channel_id: id(d.channel_id),
     error_code: d.error_code.trim() || undefined,
     request_id: d.request_id.trim() || undefined,
+    upstream_request_id: d.upstream_request_id.trim() || undefined,
+    group: d.group.trim() || undefined,
+    client_type: d.client_type.trim() || undefined,
+    log_type: d.log_type ? Number(d.log_type) : undefined,
     errors_only: d.errors_only || undefined,
     // 绝对区间生效时相对窗口无意义，不写进地址
     hours: from !== undefined || d.hours === DEFAULT_HOURS ? undefined : d.hours,
@@ -164,8 +187,12 @@ interface LogRow {
   discount_micro: number
   /// 上游成本（官方价 × 渠道相对成本系数）；成本采集上线前的历史行为 0。
   upstream_cost_micro: number
-  latency_ms: number
-  ttft_ms: number
+  status?: number | null
+  diagnostics?: LogDiagnostics | null
+  request_type?: string
+  upstream_cost_known?: boolean | null
+  latency_ms: number | null
+  ttft_ms: number | null
   is_stream: boolean
   retry_count: number
   failover_count: number
@@ -209,6 +236,9 @@ function toParams(f: Draft, offset: number, limit: number): string {
   if (f.channel_id.trim()) p.set('channel_id', f.channel_id.trim())
   if (f.error_code.trim()) p.set('error_code', f.error_code.trim())
   if (f.request_id.trim()) p.set('request_id', f.request_id.trim())
+  for (const key of ['group', 'client_type', 'upstream_request_id', 'log_type'] as const) {
+    if (f[key].trim()) p.set(key, f[key].trim())
+  }
   if (f.errors_only) p.set('errors_only', 'true')
   return p.toString()
 }
@@ -439,7 +469,7 @@ function FilterBar({
   known: Partial<Record<EntityKind, EntityOption[]>>
 }) {
   const { t } = useTranslation()
-  const advancedValues = [draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id]
+  const advancedValues = [draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id, draft.upstream_request_id, draft.group, draft.client_type, draft.log_type]
   const advancedKey = JSON.stringify(advancedValues)
   const advancedCount = advancedValues.filter((value) => value.trim()).length
   const [advancedOpen, setAdvancedOpen] = useState(advancedCount > 0)
@@ -448,7 +478,7 @@ function FilterBar({
   useEffect(() => { if ((JSON.parse(advancedKey) as string[]).some((value) => value.trim())) setAdvancedOpen(true) }, [advancedKey])
   const invalid = numericFilters.some((field) => invalidId(draft[field])) || Boolean((draft.from || draft.to) && !validRange(draft))
   const text = (
-    field: 'error_code' | 'request_id',
+    field: 'error_code' | 'request_id' | 'upstream_request_id' | 'group' | 'client_type',
     label: string,
     placeholder?: string,
   ) => (
@@ -474,7 +504,7 @@ function FilterBar({
       {error && <span id={`lf-${field}-error`} className="text-xs text-destructive">{t(malformedEntityId(draft[field]) ? 'analytics:invalidFilterId' : 'analytics:entitySelectionRequired')}</span>}
     </Field>
   }
-  const active = [draft.model, draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id]
+  const active = [draft.model, draft.user_id, draft.api_key_id, draft.channel_id, draft.error_code, draft.request_id, draft.upstream_request_id, draft.group, draft.client_type, draft.log_type]
     .filter((v) => v.trim() !== '').length + (draft.errors_only ? 1 : 0)
   return (
       <form
@@ -515,6 +545,7 @@ function FilterBar({
                       channel_id: '',
                       error_code: '',
                       request_id: '',
+                      upstream_request_id: '', group: '', client_type: '', log_type: '',
                       errors_only: false,
                     })
                   }
@@ -537,6 +568,13 @@ function FilterBar({
             <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,20rem)_minmax(0,32rem)]">
               {text('error_code', t('admin:logsErrorCode'), 'upstream_error')}
               {text('request_id', t('admin:logsRequestId'), 'uuid')}
+              {text('upstream_request_id', t('admin:logsUpstreamId'))}
+              {text('group', t('logs:group'))}
+              {text('client_type', t('admin:logsClientType'), 'codex / claude_code / curl')}
+              <Field label={t('logs:filterType')} htmlFor="lf-log_type">
+                <Select id="lf-log_type" className="w-full" value={draft.log_type} onChange={(log_type) => onChange({ ...draft, log_type })}
+                  placeholder={t('common:all')} options={[1, 2, 3, 4, 5, 6, 7].map(type => ({ value: String(type), label: t(`logs:logType_${type}`) }))} />
+              </Field>
             </div>
           </div>
         </CardContent>
@@ -575,10 +613,10 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />
       ) : (
-        <Table dense stickyHeader aria-label={t('admin:logsNav')} scrollResetKey={params} className="min-w-[64rem] table-fixed" wrapperClassName="[container-type:inline-size]">
+        <Table dense stickyHeader aria-label={t('admin:logsNav')} scrollResetKey={params} className="min-w-[84rem] table-fixed 2xl:min-w-[88rem]" wrapperClassName="[container-type:inline-size]">
           <colgroup>
-            <col className="w-6" /><col className="w-32" /><col className="w-18" /><col className="w-18" />
-            <col /><col className="w-24 2xl:w-36" /><col className="w-76" /><col className="w-28" /><col className="w-28" /><col className="w-16" />
+            <col className="w-6" /><col className="w-32" /><col className="w-36" /><col className="w-36" />
+            <col /><col className="w-32 2xl:w-44" /><col className="w-76" /><col className="w-28" /><col className="w-28" /><col className="w-16" />
           </colgroup>
           <THead>
             <Tr>
@@ -608,12 +646,13 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
                     <RowExpander open={open} name={r.request_id} controls={detailId} onToggle={() => setExpanded(open ? null : r.request_id)} />
                   </Td>
                   <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{new Date(r.ts).toLocaleString(locale, { timeZone: 'UTC', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })}</Td>
-                  <Td>
-                    {r.is_error ? (
-                      <Badge dot variant="destructive" className="max-w-full" title={r.error_code || undefined}><span className="truncate">{r.error_code || t('logs:failed')}</span></Badge>
-                    ) : (
-                      <Badge dot variant="success">{t('logs:ok')}</Badge>
-                    )}
+                  <Td className="py-1">
+                    <div className="flex min-w-0 flex-col items-start leading-tight">
+                      <Badge dot variant={r.is_error ? 'destructive' : 'success'} className={r.error_code ? 'min-h-5 py-0' : undefined}>
+                        {t(r.is_error ? 'logs:failed' : 'logs:ok')}
+                      </Badge>
+                      {r.error_code && <span className="max-w-full truncate font-mono text-[11px] leading-[14px] text-muted-foreground" title={r.error_code}>{r.error_code}</span>}
+                    </div>
                   </Td>
                   <Td className="truncate text-xs" title={r.username || undefined}>
                     {r.username || `ID ${r.user_id}`}
@@ -813,102 +852,95 @@ function RefundInline({ row }: { row: LogRow }) {
 
 /// 详情抽屉：排障字段全集。分区——标识（工单锚点）/ 调度（哪条链路怎么走的）/
 /// 金额构成。ratio_snapshot 原样给出，倍率争议时直接对着快照讲。
+function parseSnapshot(raw: string): Snapshot | null {
+  try { const value = JSON.parse(raw); return value && typeof value === 'object' && typeof value.mode === 'string' ? value as Snapshot : null }
+  catch { return null }
+}
+
 function RowDetail({ row }: { row: LogRow }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
-  const item = (label: string, value: React.ReactNode) => (
-    <div className="flex min-w-0 flex-col gap-0.5">
-      <span className="text-[11px] text-muted-foreground">{label}</span>
-      <span className="min-w-0 truncate font-mono text-xs">{value}</span>
-    </div>
-  )
-  const section = (title: string, children: React.ReactNode) => (
-    <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border bg-card p-3">
-      <span className="text-[11px] font-semibold tracking-wide text-muted-foreground uppercase">
-        {title}
-      </span>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">{children}</div>
-    </div>
+  const item = (label: string, value: React.ReactNode) => <InfoItem label={label}>{value}</InfoItem>
+  const section = (title: string, icon: LucideIcon, children: React.ReactNode) => (
+    <DetailSection icon={icon} title={title}><InfoGrid cols={3}>{children}</InfoGrid></DetailSection>
   )
   return (
-    <div className="flex min-w-0 flex-col gap-3 text-xs">
-      <dl aria-label={t('admin:logsObjects')} className="grid gap-3 rounded-lg border border-border bg-card p-3 sm:grid-cols-3">
+    <div className="flex min-w-0 flex-col gap-4 text-xs">
+      <LogErrorDetails failed={row.is_error} code={row.error_code} upstreamStatus={row.upstream_status} diagnostics={row.diagnostics} />
+      {/* 实扣：详情里最先要看的数。成本与毛利只在有成本数据时出现；负毛利标红——这一笔在亏钱 */}
+      <dl className="grid gap-4 overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-br from-primary/12 via-card to-card p-5 shadow-xs sm:grid-cols-[1fr_auto] sm:items-end">
+        <div className="min-w-0">
+          <dt className="text-xs font-medium text-muted-foreground">{t('logs:final')}</dt>
+          <dd className="mt-1.5 text-3xl leading-9 font-semibold tracking-tight tabular-nums">{formatMoney(row.amount_micro, locale)}</dd>
+        </div>
+        {(row.upstream_cost_known === true || row.upstream_cost_micro > 0) && <div className="min-w-36 rounded-lg bg-card/75 px-3 py-2 ring-1 ring-border/60">
+          <dt className="text-xs text-muted-foreground">{t('admin:statMargin')}</dt>
+          <dd className={`mt-0.5 text-base leading-6 font-semibold tabular-nums ${row.amount_micro < row.upstream_cost_micro ? 'text-destructive' : 'text-success'}`}>{formatMoney(row.amount_micro - row.upstream_cost_micro, locale)}</dd>
+        </div>}
+      </dl>
+      <dl aria-label={t('admin:logsObjects')} className="grid gap-3 sm:grid-cols-3">
         {[
-          { label: t('analytics:dimUser'), name: row.username, id: row.user_id },
-          { label: t('analytics:dimApiKey'), name: row.key_name || (row.key_prefix ? t('flow:unnamed_api_key') : undefined), id: row.api_key_id, prefix: row.key_prefix },
-          { label: t('analytics:dimChannel'), name: row.channel_name || (row.channel_id <= 0 ? t('admin:dashboardUnassignedChannel') : undefined), id: row.channel_id },
-        ].map((object) => <div key={object.label} className="min-w-0 space-y-1">
-          <dt className="text-xs text-muted-foreground">{object.label}</dt>
-          <dd className="break-words text-sm font-medium [overflow-wrap:anywhere]">{object.name || t('admin:logsNameUnavailable')}</dd>
-          <dd className="break-all text-xs text-muted-foreground">{object.id > 0 ? `ID ${object.id}` : '—'}{object.prefix ? ` · ${object.prefix}…` : ''}</dd>
+          { label: t('analytics:dimUser'), icon: User, name: row.username, id: row.user_id },
+          { label: t('analytics:dimApiKey'), icon: KeyRound, name: row.key_name || (row.key_prefix ? t('flow:unnamed_api_key') : undefined), id: row.api_key_id, prefix: row.key_prefix },
+          { label: t('analytics:dimChannel'), icon: Server, name: row.channel_name || (row.channel_id <= 0 ? t('admin:dashboardUnassignedChannel') : undefined), id: row.channel_id },
+        ].map((object) => <div key={object.label} className="min-w-0 space-y-1 rounded-xl border border-border bg-card p-3.5 shadow-xs">
+          <dt className="flex items-center gap-1.5 text-xs text-muted-foreground"><span aria-hidden className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary"><object.icon className="h-3 w-3" /></span>{object.label}</dt>
+          <dd className="break-words text-sm leading-6 font-semibold [overflow-wrap:anywhere]">{object.name || t('admin:logsNameUnavailable')}</dd>
+          <dd className="break-all text-xs text-muted-foreground tabular-nums">{object.id > 0 ? `ID ${object.id}` : '—'}{object.prefix ? ` · ${object.prefix}…` : ''}</dd>
         </div>)}
       </dl>
-      <div className="grid gap-3">
-        {section(
-          t('admin:logsDetailIdentity'),
-          <>
-            <div className="col-span-2 flex min-w-0 flex-col gap-0.5 sm:col-span-3">
-              <span className="text-[11px] text-muted-foreground">{t('admin:logsRequestId')}</span>
-              <CopyText value={row.request_id} />
-            </div>
-            {row.upstream_request_id && (
-              <div className="col-span-2 flex min-w-0 flex-col gap-0.5 sm:col-span-3">
-                <span className="text-[11px] text-muted-foreground">{t('admin:logsUpstreamId')}</span>
-                <CopyText value={row.upstream_request_id} />
-              </div>
-            )}
-            {item(t('admin:logsNode'), row.node || '—')}
-            {row.client_ip && item('IP', row.client_ip)}
-            {item(t('logs:group'), row.group)}
-          </>,
-        )}
-        {section(
-          t('admin:logsDetailRouting'),
-          <>
-            {item(t('admin:provider'), row.provider || '—')}
-            {item(t('logs:requestedModel'), row.requested_model || t('logs:notRecorded'))}
-            {item(t('logs:upstreamModel'), row.upstream_model || t('logs:notRecorded'))}
-            {item(t('logs:endpoint'), row.endpoint || t('logs:notRecorded'))}
-            {item(t('logs:upstreamEndpoint'), row.upstream_endpoint || t('logs:notRecorded'))}
-            {item(t('admin:logsChannelKey'), row.channel_key_id > 0 ? `ID ${row.channel_key_id}` : '—')}
-            {item(t('admin:logsUpstreamStatus'), String(row.upstream_status || '—'))}
-            {item(t('admin:logsRetries'), String(row.retry_count))}
-            {item(t('admin:statFailovers'), String(row.failover_count))}
-            {item(t('admin:logsSticky'), row.sticky_layer > 0 ? `L${row.sticky_layer}` : '—')}
-            {row.usage.reasoning_tokens > 0 &&
-              item(t('admin:logsReasoning'), formatCount(row.usage.reasoning_tokens, locale))}
-          </>,
-        )}
-        {section(
-          t('admin:logsDetailBilling'),
-          <>
-            {item(t('logs:original'), formatMoney(row.original_amount_micro, locale))}
-            {row.discount_micro > 0 &&
-              item(t('logs:discount'), `-${formatMoney(row.discount_micro, locale)}`)}
-            {item(t('logs:final'), <strong>{formatMoney(row.amount_micro, locale)}</strong>)}
-            {/* 成本与毛利只在有成本数据时出现；负毛利标红——这一笔在亏钱 */}
-            {row.upstream_cost_micro > 0 && (
-              <>
-                {item(t('admin:statUpstreamCost'), formatMoney(row.upstream_cost_micro, locale))}
-                {item(
-                  t('admin:statMargin'),
-                  <span className={row.amount_micro < row.upstream_cost_micro ? 'text-destructive' : 'text-success'}>
-                    {formatMoney(row.amount_micro - row.upstream_cost_micro, locale)}
-                  </span>,
-                )}
-              </>
-            )}
-            {row.ratio_snapshot && (
-              <div className="col-span-2 flex min-w-0 flex-col gap-0.5 sm:col-span-3">
-                <span className="text-[11px] text-muted-foreground">{t('admin:logsRatioSnapshot')}</span>
-                <code className="break-all font-mono text-xs">{row.ratio_snapshot}</code>
-              </div>
-            )}
-          </>,
-        )}
-      </div>
+      {section(
+        t('admin:logsDetailIdentity'),
+        Fingerprint,
+        <>
+          <div className="col-span-full grid gap-2">
+            <IdRow label={t('admin:logsRequestId')} value={row.request_id} />
+            {row.upstream_request_id && <IdRow label={t('admin:logsUpstreamId')} value={row.upstream_request_id} />}
+          </div>
+          {item(t('admin:logsNode'), row.node || '—')}
+          {row.client_ip && item('IP', row.client_ip)}
+          {item(t('logs:group'), row.group)}
+        </>,
+      )}
+      {section(
+        t('admin:logsDetailRouting'),
+        Route,
+        <>
+          {item(t('admin:provider'), row.provider || '—')}
+          {item(t('logs:requestedModel'), row.requested_model || t('logs:notRecorded'))}
+          {item(t('logs:upstreamModel'), row.upstream_model || t('logs:notRecorded'))}
+          {item(t('logs:endpoint'), row.endpoint || t('logs:notRecorded'))}
+          {item(t('logs:upstreamEndpoint'), row.upstream_endpoint || t('logs:notRecorded'))}
+          {item(t('admin:logsChannelKey'), row.channel_key_id > 0 ? `ID ${row.channel_key_id}` : '—')}
+          {item(t('admin:logsUpstreamStatus'), String(row.upstream_status || '—'))}
+          {item(t('admin:logsRetries'), String(row.retry_count))}
+          {item(t('admin:statFailovers'), String(row.failover_count))}
+          {item(t('admin:logsSticky'), row.sticky_layer > 0 ? `L${row.sticky_layer}` : '—')}
+          {row.usage.reasoning_tokens > 0 &&
+            item(t('admin:logsReasoning'), formatCount(row.usage.reasoning_tokens, locale))}
+        </>,
+      )}
+      {section(
+        t('admin:logsDetailBilling'),
+        Wallet,
+        <>
+          {row.status != null && item(t('logs:billingState'), t(`logs:${billingStatus(row.status)}`))}
+          {item(t('logs:original'), formatMoney(row.original_amount_micro, locale))}
+          {row.discount_micro > 0 &&
+            item(t('logs:discount'), `-${formatMoney(row.discount_micro, locale)}`)}
+          {(row.upstream_cost_known === true || row.upstream_cost_micro > 0) &&
+            item(t('admin:statUpstreamCost'), formatMoney(row.upstream_cost_micro, locale))}
+          {row.ratio_snapshot && (
+            <InfoItem wide label={t('admin:logsRatioSnapshot')}>
+              <code className="block break-all rounded-md bg-muted/50 px-2.5 py-2 font-mono text-xs font-normal">{row.ratio_snapshot}</code>
+            </InfoItem>
+          )}
+        </>,
+      )}
+      <LogRequestDetails row={row} />
       <LogPerformanceDetails row={row} />
-      <div className="rounded-lg border border-border bg-card px-4"><TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} /></div>
+      <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
+      <LogBillingDetails row={{ ...row, pricing_snapshot: parseSnapshot(row.ratio_snapshot) }} status={row.status} />
       <RefundInline row={row} />
     </div>
   )

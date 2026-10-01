@@ -197,6 +197,7 @@ async fn handle_speech(
                 .ledger
                 .refund(key.user_id, key.key_id, request_id)
                 .await;
+            failure.error(&err);
             return Err(err);
         }
     };
@@ -207,7 +208,9 @@ async fn handle_speech(
             .ledger
             .refund(key.user_id, key.key_id, request_id)
             .await;
-        return Err(AppError::bad_request());
+        let error = AppError::bad_request();
+        failure.error(&error);
+        return Err(error);
     };
     match state.openai_speech(&cand, &upstream_model, body_up).await {
         Ok((status, content_type, audio)) => {
@@ -227,7 +230,8 @@ async fn handle_speech(
                 reservation_pool,
                 source_window.as_deref(),
             )
-            .await?;
+            .await
+            .inspect_err(|error| failure.error(error))?;
             failure.disarm();
             let mut resp = Response::builder()
                 .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
@@ -245,10 +249,9 @@ async fn handle_speech(
                 .refund(key.user_id, key.key_id, request_id)
                 .await;
             tracing::warn!(request_id = %request_id, error = %err, "speech 上游失败");
-            Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                codes::UPSTREAM_ERROR,
-            ))
+            let error = AppError::new(StatusCode::BAD_GATEWAY, err.error_code());
+            failure.error(&error);
+            Err(error)
         }
     }
 }
@@ -414,6 +417,7 @@ async fn handle_transcriptions(
                 .ledger
                 .refund(key.user_id, key.key_id, request_id)
                 .await;
+            failure.error(&err);
             return Err(err);
         }
     };
@@ -456,7 +460,8 @@ async fn handle_transcriptions(
                 reservation_pool,
                 source_window.as_deref(),
             )
-            .await?;
+            .await
+            .inspect_err(|error| failure.error(error))?;
             failure.disarm();
             let mut out = Response::builder()
                 .status(resp.status)
@@ -474,10 +479,9 @@ async fn handle_transcriptions(
                 .refund(key.user_id, key.key_id, request_id)
                 .await;
             tracing::warn!(request_id = %request_id, error = %err, "transcriptions 上游失败");
-            Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                codes::UPSTREAM_ERROR,
-            ))
+            let error = AppError::new(StatusCode::BAD_GATEWAY, err.error_code());
+            failure.error(&error);
+            Err(error)
         }
     }
 }

@@ -59,7 +59,7 @@ pub(super) async fn start(
         let mut failure = super::super::failure::Guard::new(&ctx.state,&ctx.key,ctx.request_id,&ctx.prepared.canonical,&ctx.input.model,&ctx.endpoint,ctx.started,ctx.reserved_pool,ctx.source_window.as_deref());
         let mut sender = Some(tx);
         let opened = tokio::time::timeout_at(deadline(&ctx), open(&ctx, candidates)).await
-            .unwrap_or_else(|_| Err(AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)));
+            .unwrap_or_else(|_| Err(AppError::new(StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT)));
         match opened {
             Ok((response, candidate, failovers, mode)) => {
                 failure.channel(&candidate);
@@ -68,6 +68,7 @@ pub(super) async fn start(
                 if let Err(error) = settle(&ctx, &candidate, failovers, &collected).await {
                     tracing::error!(request_id=%ctx.request_id, error=?error, "image stream settlement failed");
                     // A settlement failure may follow a committed PG transaction. Never refund blindly.
+                    failure.error(&error);
                     collected.frames.clear();
                     collected.failed = true;
                 } else if !collected.frames.is_empty() {
@@ -83,6 +84,7 @@ pub(super) async fn start(
                 }
             }
             Err(error) => {
+                failure.error(&error);
                 if let Err(refund_error) = refund(&ctx.state, &ctx.key, ctx.request_id, None).await {
                     tracing::error!(request_id=%ctx.request_id, error=?refund_error, "image stream refund failed");
                 }
@@ -131,7 +133,7 @@ async fn open(
                 )
                 .await;
             }
-            Err(_) => break,
+            Err(error) => return Err(AppError::new(StatusCode::BAD_GATEWAY, error.error_code())),
         }
     }
     Err(AppError::new(

@@ -194,6 +194,23 @@ async fn explain_bill_own_scope() {
     let stranger = rpc(&env, &other_token, "tools/call", args.clone()).await;
     assert_eq!(stranger["result"]["isError"], true, "他人记录必须拒绝");
 
+    let (scoped_id, scoped_token) = mk_user(&env.pg, 10).await;
+    let role = okapi_store::admin::create_admin_role(
+        &env.pg,
+        &format!("bill-own-{request_id}"),
+        "Own bills",
+        &json!(["billing.read.own"]),
+    )
+    .await
+    .unwrap();
+    okapi_store::admin::assign_user_role(&env.pg, scoped_id, Some(10), Some(role))
+        .await
+        .unwrap();
+    let scoped = rpc(&env, &scoped_token, "tools/call", args.clone()).await;
+    assert_eq!(
+        scoped["result"]["isError"], true,
+        "Own billing grant must not read another user"
+    );
     let admin = rpc(&env, &admin_token, "tools/call", args).await;
     assert_eq!(admin["result"]["isError"], false, "管理员可解释任意账单");
 }
@@ -317,7 +334,7 @@ async fn readonly_tools_cover_keys_pricing_health_and_ch_backed_usage() {
     for (axis, want) in [
         ("model_ratio", "2.500000"),
         ("completion_ratio", "3.000000"),
-        ("cache_ratio", "0.2500"),
+        ("cache_ratio", "0.250000"),
     ] {
         assert_eq!(
             mine[axis].as_str(),

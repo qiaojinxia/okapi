@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox SET retry_count=retry_count+1,next_retry_at=now()+make_interval(secs=>least(300,5*power(2,least(retry_count,6)))) WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf4e5868bcec1325a2938b97c5ef1abcaec5b0af3d6de5ba8b8295deae8153a5"
+}

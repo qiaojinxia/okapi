@@ -79,16 +79,18 @@ export function CopyText({
   display,
   className,
   mono = true,
+  wrap = false,
 }: {
   value: string
   /// 展示文本（如截短的 ID）；缺省显示完整值。
   display?: React.ReactNode
   className?: string
   mono?: boolean
+  wrap?: boolean
 }) {
   return (
-    <span className={cn('inline-flex min-w-0 items-center gap-1', className)}>
-      <span className={cn('truncate', mono && 'font-mono text-xs')} title={value}>
+    <span className={cn('inline-flex min-w-0 gap-1', wrap ? 'max-w-full items-start' : 'items-center', className)}>
+      <span className={cn(wrap ? 'min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]' : 'truncate', mono && 'font-mono text-xs')} title={value}>
         {display ?? value}
       </span>
       <CopyButton value={value} size="xs" />

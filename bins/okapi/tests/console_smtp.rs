@@ -202,6 +202,13 @@ async fn setup(smtp: Option<Value>, policy: Option<Value>) -> TestEnv {
         .settings_cache
         .insert("site_name".to_owned(), Arc::new(Some(json!("Okapi QA"))))
         .await;
+    state
+        .settings_cache
+        .insert(
+            "site_url".to_owned(),
+            Arc::new(Some(json!("https://configured.okapi.test"))),
+        )
+        .await;
     let app = console::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -240,9 +247,10 @@ async fn error_code(resp: reqwest::Response) -> (u16, String, Option<String>) {
 
 // ---- 注册邮箱验证码 ----
 
-/// 全流程：取码（信到、AUTH PLAIN 带上凭证、发件人/收件人对）→ 错码 400 → 对码注册成功 →
+/// 全流程：取码（信到、AUTH PLAIN 带上凭证、发件人/收件人对）→ 错码耗尽 → 重新取码注册成功 →
 /// 同码复用 400（一次性）；公开策略透出 email_verification。
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn email_verification_full_flow() {
     let (smtp, inbox) = spawn_smtp().await;
     let env = setup(
@@ -309,13 +317,18 @@ async fn email_verification_full_flow() {
         error_code(post(&env, "/auth/email-code", json!({"email": email})).await).await;
     assert_eq!((status, ec.as_str()), (429, "email_code_cooldown"));
 
-    // 错码 400
+    // 错码 400；确保与随机产生的正确码不同。
+    let wrong_code = format!(
+        "{}{}",
+        if code.starts_with('0') { '1' } else { '0' },
+        &code[1..]
+    );
     let (status, _, param) = error_code(
         post(
             &env,
             "/auth/register",
             json!({"email": email, "username": format!("v-{suffix}"), "password": "hunter2-strong",
-                   "email_code": "000000"}),
+                   "email_code": wrong_code}),
         )
         .await,
     )
@@ -323,7 +336,32 @@ async fn email_verification_full_flow() {
     assert_eq!(status, 400);
     assert_eq!(param.as_deref(), Some("email_code_invalid"));
 
-    // 对码注册成功
+    // 错误尝试也会消耗原码，原先的正确码不能再用。
+    let (status, _, param) = error_code(post(
+        &env,
+        "/auth/register",
+        json!({"email": email, "username": format!("v-{suffix}"), "password": "hunter2-strong", "email_code": code}),
+    ).await).await;
+    assert_eq!(status, 400);
+    assert_eq!(param.as_deref(), Some("email_code_invalid"));
+
+    // 只清本用例的冷却键，模拟冷却结束后重新取码；验证键仍由实际接口产生。
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let _: i64 = fred::interfaces::KeysInterface::del(&redis, format!("verify:email:cd:{email}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        post(&env, "/auth/email-code", json!({"email": email}))
+            .await
+            .status(),
+        200
+    );
+    let mails = wait_inbox(&inbox, 2).await;
+    let code = extract_after(&mails[1].data, "Verification code: ").unwrap();
+
+    // 新码注册成功。
     let resp = post(
         &env,
         "/auth/register",
@@ -461,10 +499,10 @@ async fn password_reset_flow() {
         data.contains("Subject: [Okapi QA] Reset your password"),
         "{data}"
     );
-    let marker = format!("http://{}/reset-password?token=", env.addr);
+    let marker = "https://configured.okapi.test/reset-password?token=".to_owned();
     assert!(
         qp_decode(data).contains(&marker),
-        "链接基址缺省按请求 Host 推导：{data}"
+        "链接基址只使用配置的 site_url：{data}"
     );
     let token = extract_after(data, "reset-password?token=").expect("正文含 token");
     assert_eq!(token.len(), 32);
@@ -489,22 +527,26 @@ async fn password_reset_flow() {
         "配了 site_url 就该用它，且不留双斜杠：{}",
         mails[1].data
     );
-    // 空白串不算配置（管理员清空输入框时会发空串过来），回落 Host 推导
+    // Clearing canonical URL must fail uniformly, even for unregistered addresses.
     env.state
         .settings_cache
         .insert("site_url".to_owned(), Arc::new(Some(json!("   "))))
         .await;
-    let resp = post(&env, "/auth/password/forgot", json!({"email": email})).await;
-    assert_eq!(resp.status(), 200);
-    let mails = wait_inbox(&inbox, 3).await;
-    assert!(
-        qp_decode(&mails[2].data).contains(&marker),
-        "空白 site_url 应回落按 Host 推导：{}",
-        mails[2].data
+    for address in [&email, "unregistered@okapi.test"] {
+        let response = post(&env, "/auth/password/forgot", json!({"email":address})).await;
+        assert_eq!(response.status(), 500);
+    }
+    assert_eq!(
+        inbox.lock().unwrap().len(),
+        2,
+        "untrusted Host cannot become a reset destination"
     );
     env.state
         .settings_cache
-        .insert("site_url".to_owned(), Arc::new(None))
+        .insert(
+            "site_url".to_owned(),
+            Arc::new(Some(json!("https://configured.okapi.test"))),
+        )
         .await;
 
     // 错 token / 短密码：都是 400 + param

@@ -97,16 +97,16 @@ pub struct AppState {
 }
 
 /// `settle_backlog` 的进出计数：Drop 归还，覆盖提前 return 与任务被取消的路径。
-struct BacklogGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+struct BacklogGuard(Arc<std::sync::atomic::AtomicUsize>);
 
-impl<'a> BacklogGuard<'a> {
-    fn enter(counter: &'a std::sync::atomic::AtomicUsize) -> Self {
+impl BacklogGuard {
+    fn enter(counter: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self(counter)
+        Self(Arc::clone(counter))
     }
 }
 
-impl Drop for BacklogGuard<'_> {
+impl Drop for BacklogGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -158,8 +158,15 @@ impl AppState {
 
     /// 结算记账统一入口：信号量准入 + 瞬时失败退避重试（200ms/800ms/3.2s），
     /// PG 写失败保留 Redis 重试日志，worker 幂等补写；两个后端均故障时保留任务。
-    pub async fn settle_write(&self, mut input: okapi_ledger::SettlementInput<'_>) {
-        let _backlog = BacklogGuard::enter(&self.settle_backlog);
+    pub fn settle_write<'a>(
+        &'a self,
+        input: okapi_ledger::SettlementInput<'a>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.settle_write_inner(input))
+    }
+
+    async fn settle_write_inner(&self, mut input: okapi_ledger::SettlementInput<'_>) {
+        let backlog = BacklogGuard::enter(&self.settle_backlog);
         self.prepare_settlement(&mut input).await;
         // 实时 KPI 挂在这里而非各计费端点：七个端点（chat/embeddings/images/
         // audio/videos/realtime/custom_pass）全部经此收口，加一处即全覆盖，
@@ -176,8 +183,8 @@ impl AppState {
                 .await;
         }
         // 信号量关闭不可能（进程生命周期内不 close）；acquire 失败按直写降级
-        let _permit = self.settle_gate.acquire().await;
-        let mut journaled = super::settlement_retry::save(self, &input).await.is_ok();
+        let permit = self.settle_gate.acquire().await;
+        let journaled = super::settlement_retry::save(self, &input).await.is_ok();
         let mut delay = std::time::Duration::from_millis(200);
         for attempt in 0..3u8 {
             match okapi_ledger::record_settlement(&self.pg, input.clone()).await {
@@ -195,16 +202,29 @@ impl AppState {
                 }
             }
         }
-        // Keep the tracked task alive until either persistence backend accepts it.
-        while !journaled {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            if okapi_ledger::record_settlement(&self.pg, input.clone())
-                .await
-                .is_ok()
-            {
-                return;
-            }
-            journaled = super::settlement_retry::save(self, &input).await.is_ok();
+        drop(permit);
+        if !journaled {
+            let state = self.clone();
+            let owned = okapi_ledger::pg::OwnedSettlementInput::from(input);
+            self.settlements.spawn(async move {
+                let _backlog = backlog;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let persisted = {
+                        let _permit = state.settle_gate.acquire().await;
+                        okapi_ledger::record_settlement(&state.pg, owned.as_input())
+                            .await
+                            .is_ok()
+                    };
+                    if persisted
+                        || super::settlement_retry::save(&state, &owned.as_input())
+                            .await
+                            .is_ok()
+                    {
+                        return;
+                    }
+                }
+            });
         }
     }
 

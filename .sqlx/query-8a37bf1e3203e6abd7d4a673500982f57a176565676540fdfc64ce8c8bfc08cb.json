@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox o SET next_retry_at=now()+interval '10 minutes'\n        FROM (SELECT id FROM billing_outbox WHERE status=0 AND ch_batch_id IS NULL\n              AND (next_retry_at IS NULL OR next_retry_at<=now())\n              AND NOT EXISTS(SELECT 1 FROM billing_ch_events e WHERE e.event_key='outbox:'||billing_outbox.event_id::text)\n              ORDER BY id LIMIT 500 FOR UPDATE SKIP LOCKED) c\n        WHERE o.id=c.id RETURNING o.id,o.event_id,o.topic,o.created_at,o.payload,o.retry_count,o.next_retry_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "event_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "topic",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "topic"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "payload",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "payload"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "retry_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "retry_count"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "next_retry_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_outbox",
+            "name": "next_retry_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "8a37bf1e3203e6abd7d4a673500982f57a176565676540fdfc64ce8c8bfc08cb"
+}

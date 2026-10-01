@@ -565,7 +565,7 @@ impl CubeQuery {
 }
 
 /// 立方体全部度量的 Merge 列表；别名刻意与 MV 列名错开。
-const AGG: &str = "sum(requests) AS reqs, \
+const AGG: &str = "sum(financial_records) AS financial_records, sum(requests) AS reqs, \
                    sum(prompt_tokens) AS prompt, \
                    sum(cached_tokens) AS cached, \
                    sum(completion_tokens) AS completion, \
@@ -603,6 +603,7 @@ fn sum_metric_rows(rows: &[Value]) -> Value {
     for row in rows {
         for key in [
             "reqs",
+            "financial_records",
             "prompt",
             "cached",
             "completion",
@@ -647,11 +648,14 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     let known = ch_i64(r, "cost_n");
     let known_amount = ch_i64(r, "covered_spend");
     let known_cost = ch_i64(r, "covered_cost_sum");
+    let records = ch_i64(r, "financial_records");
+    m.insert("financial_records".into(), json!(records));
+    m.insert("cost_known_records".into(), json!(known));
     m.insert("cost_known_requests".into(), json!(known));
     m.insert(
         "cost_coverage_bp".into(),
-        if reqs > 0 {
-            json!(rate_bp(known, reqs))
+        if records > 0 {
+            json!(rate_bp(known, records))
         } else {
             Value::Null
         },
@@ -668,7 +672,7 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     );
     m.insert(
         "margin_micro".into(),
-        if known == reqs && reqs > 0 {
+        if known == records && records > 0 {
             json!(known_amount - known_cost)
         } else {
             Value::Null
@@ -749,6 +753,7 @@ fn sum_core_rows(rows: &[Value]) -> Value {
     for row in rows {
         for key in [
             "reqs",
+            "financial_records",
             "prompt",
             "cached",
             "completion",
@@ -1214,6 +1219,7 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, core: bool) -> V
         super::output_rate::accumulate(totals, r);
         for field in [
             "reqs",
+            "financial_records",
             "prompt",
             "completion",
             "cached",

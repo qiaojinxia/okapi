@@ -1,4 +1,6 @@
 export interface Snapshot {
+  input_unit?: string | null
+  input_characters?: number | null
   epoch?: number
   base_price_per_1m_usd?: string | number | null
   mode: string
@@ -23,6 +25,9 @@ export interface Snapshot {
 }
 
 export interface TokenDetails {
+  input_unit?: string | null
+  input_characters?: number | null
+  reported_details?: { reasoning?: boolean | null; prompt?: { audio?: boolean | null; image?: boolean | null }; completion?: { audio?: boolean | null; image?: boolean | null } } | null
   prompt_tokens: number
   cached_tokens: number
   completion_tokens: number
@@ -43,9 +48,26 @@ export interface TokenDetails {
   upstream_usage?: { prompt_tokens: number | null; completion_tokens: number | null } | null
 }
 
+export interface LogDiagnostics {
+  media?: { image_size?: string; image_quality?: string; requested_images?: number; video_size?: string; requested_video_seconds?: number }
+  error_phase?: string
+  error_message?: string
+  response_model?: string
+  reasoning_effort?: string
+  user_agent?: string
+  session_id?: string
+  request_failed?: boolean
+  stream_end_reason?: string
+  attempts_truncated?: boolean
+  attempts?: { channel_id: number; channel_key_id: number; provider?: string; upstream_model?: string; upstream_endpoint?: string; duration_ms?: number; status?: number; outcome?: string; error_code?: string; error_phase?: string; error_message?: string }[]
+}
+
 export interface LogRow {
   id: number
   request_id: string
+  upstream_request_id?: string | null
+  is_error?: boolean
+  diagnostics?: LogDiagnostics | null
   model: string
   requested_model?: string | null
   endpoint?: string | null
@@ -70,6 +92,7 @@ export interface LogRow {
 
 export interface LogsResp { scope: string; data: LogRow[]; next_before: number | null }
 export interface LogStats {
+  errors?: number
   records: number; settled: number; failed: number; refunded: number; pending: number
   amount_micro: number; refunded_amount_micro: number
   prompt_tokens: number; completion_tokens: number; cached_tokens: number; cache_read_samples: number
@@ -118,9 +141,14 @@ const scaled = (value: string | number | null | undefined): bigint | null => {
   const [whole, fraction = ''] = String(value).split('.')
   return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, '0'))
 }
-export function billingLines(row: LogRow) {
+export function billingLines(row: Pick<LogRow, 'pricing_snapshot' | 'usage' | 'usage_details_recorded'>) {
   const s = row.pricing_snapshot, u = row.usage
   const unit = scaled(s?.final_unit_price_input_per_1m_usd)
+  if (s && unit !== null && (u.input_unit ?? s.input_unit) === 'characters') {
+    const characters = u.input_characters ?? s.input_characters
+    return characters != null && Number.isSafeInteger(characters) && characters >= 0
+      ? [{ name: 'inputCharacters', quantity: characters, unitMicro: Number(unit), amountMicro: Number(BigInt(characters) * unit) / 1_000_000 }] : []
+  }
   if (!s || unit === null || !row.usage_details_recorded || !['ratio', 'tiered'].includes(s.mode)) return []
   if ([u.cache_write_tokens, u.audio_prompt_tokens, u.image_prompt_tokens, u.audio_completion_tokens].some((n) => n == null || !Number.isSafeInteger(n) || n < 0)) return []
   const normal = u.prompt_tokens - u.cached_tokens - (u.cache_write_tokens ?? 0) - (u.audio_prompt_tokens ?? 0) - (u.image_prompt_tokens ?? 0)

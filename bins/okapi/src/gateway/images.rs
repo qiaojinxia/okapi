@@ -292,6 +292,7 @@ async fn handle(
             .collect(),
         Err(err) => {
             let _ = refund(state, key, request_id, task).await;
+            failure.error(&err);
             return Err(err);
         }
     };
@@ -300,10 +301,12 @@ async fn handle(
         .await;
     if candidates.is_empty() {
         let _ = refund(state, key, request_id, task).await;
-        return Err(AppError::new(
+        let error = AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             super::state::no_candidates_code(margin_removed),
-        ));
+        );
+        failure.error(&error);
+        return Err(error);
     }
 
     if input.stream {
@@ -348,10 +351,14 @@ async fn handle(
                 cand.channel_id,
                 cand.channel_key_id,
             )
-            .await?
+            .await
+            .map_err(AppError::from)
+            .inspect_err(|error| failure.error(error))?
         {
-            return Err(AppError::new(StatusCode::CONFLICT, codes::BAD_REQUEST)
-                .with_param("image_task_not_dispatchable"));
+            let error = AppError::new(StatusCode::CONFLICT, codes::BAD_REQUEST)
+                .with_param("image_task_not_dispatchable");
+            failure.error(&error);
+            return Err(error);
         }
         match input.forward(state, &cand, &upstream_model, endpoint).await {
             Ok(resp) => {
@@ -359,6 +366,7 @@ async fn handle(
                     Ok(actual) => actual,
                     Err(error) => {
                         let _ = refund(state, key, request_id, task).await;
+                        failure.error(&error);
                         return Err(error);
                     }
                 };
@@ -377,6 +385,7 @@ async fn handle(
                     Ok(billing) => billing,
                     Err(error) => {
                         let _ = refund(state, key, request_id, task).await;
+                        failure.error(&error);
                         return Err(error);
                     }
                 };
@@ -400,7 +409,8 @@ async fn handle(
                     source_window.as_deref(),
                     None,
                 )
-                .await?;
+                .await
+                .inspect_err(|error| failure.error(error))?;
                 failure.disarm();
                 let out = Response::builder()
                     .status(resp.status)
@@ -426,16 +436,10 @@ async fn handle(
                 )
                 .await;
                 failover = failover.saturating_add(1);
-                last_err = Some(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
+                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
             }
-            Err(_) => {
-                last_err = Some(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
+            Err(err) => {
+                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
                 break;
             }
         }
@@ -444,7 +448,10 @@ async fn handle(
     if let Err(err) = refund(state, key, request_id, task).await {
         tracing::error!(request_id = %request_id, error = ?err, "images 退款失败（悬置待清理）");
     }
-    Err(last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)))
+    let error =
+        last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR));
+    failure.error(&error);
+    Err(error)
 }
 
 #[allow(clippy::too_many_arguments)]

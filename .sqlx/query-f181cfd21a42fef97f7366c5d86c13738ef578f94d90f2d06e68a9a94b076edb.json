@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM billing_ch_batches WHERE id IN (SELECT b.id FROM billing_ch_batches b WHERE b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_ch_events e WHERE e.batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id) ORDER BY b.id LIMIT 1000 FOR UPDATE OF b SKIP LOCKED)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f181cfd21a42fef97f7366c5d86c13738ef578f94d90f2d06e68a9a94b076edb"
+}

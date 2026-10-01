@@ -4,6 +4,31 @@ use sqlx::Connection as _;
 
 impl AppState {
     pub(super) async fn prepare_settlement(&self, input: &mut SettlementInput<'_>) {
+        if input.dimensions.diagnostics.is_none() {
+            input.dimensions.diagnostics = super::super::diagnostics::snapshot();
+        }
+        if let Some(code) = input.error_code {
+            let diagnostics = input
+                .dimensions
+                .diagnostics
+                .get_or_insert_with(|| serde_json::json!({}));
+            if diagnostics.get("error_phase").is_none() {
+                diagnostics["error_phase"] =
+                    serde_json::json!(super::super::diagnostics::phase(code));
+            }
+        } else if let Some(diagnostics) = input
+            .dimensions
+            .diagnostics
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+            && diagnostics
+                .get("request_failed")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            diagnostics.remove("error_phase");
+            diagnostics.remove("error_message");
+        }
         // 来源 IP 记录开关（settings.record_ip_log，缺省 true）。收口在这里而非各端点：
         // 七个计费端点全部经 settle_write，关一处即全站不落 IP（PG 列与 CH 列一起）。
         // docs/database.md 早写着「记录与否走 settings.record_ip_log」，但此前全仓无人读它，

@@ -206,32 +206,27 @@ async fn site_name(state: &AppState) -> String {
         .unwrap_or_else(|| "Okapi".to_owned())
 }
 
-/// 对外站点基址：settings.site_url 优先，缺省按请求 Host 推导（与 OAuth 回调同源）。
-async fn site_base_url(state: &AppState, headers: &HeaderMap) -> String {
-    let configured = state
-        .setting_cached("site_url")
-        .await
+/// Reset links must use a configured canonical URL, never request-controlled headers.
+async fn site_base_url(state: &AppState) -> Result<String, AppError> {
+    let setting = state.setting_cached("site_url").await;
+    let base = setting
         .as_ref()
         .as_ref()
-        .and_then(|v| {
-            v.as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-        });
-    let base = configured.unwrap_or_else(|| {
-        let host = headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("localhost");
-        let scheme = headers
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .filter(|p| *p == "https")
-            .unwrap_or("http");
-        format!("{scheme}://{host}")
-    });
-    base.trim_end_matches('/').to_owned()
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::internal().with_param("site_url_required"))?;
+    let url = reqwest::Url::parse(base).map_err(|_| AppError::internal().with_param("site_url"))?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(AppError::internal().with_param("site_url"));
+    }
+    Ok(base.trim_end_matches('/').to_owned())
 }
 
 fn map_mail_error(err: crate::mail::MailError) -> AppError {
@@ -321,6 +316,7 @@ pub async fn password_forgot(
     let mailer = crate::mail::Mailer::from_state(&state)
         .await
         .map_err(map_mail_error)?;
+    let base = site_base_url(&state).await?;
     let Some(user_id) = identity::find_password_account(&state.pg, &email).await? else {
         return Ok(Json(json!({ "ok": true })));
     };
@@ -333,10 +329,7 @@ pub async fn password_forgot(
     {
         return Err(AppError::internal());
     }
-    let link = format!(
-        "{}/reset-password?token={token}",
-        site_base_url(&state, &headers).await
-    );
+    let link = format!("{base}/reset-password?token={token}");
     let lang = mail_lang(&headers, req.lang.as_deref());
     let site = site_name(&state).await;
     let ttl_min = u32::try_from(PWRESET_TTL_SECS / 60).unwrap_or(30);
@@ -435,11 +428,13 @@ async fn verify_turnstile(state: &AppState, token: Option<&str>) -> Result<(), A
         urlencoding_escape(&secret),
         urlencoding_escape(token)
     );
+    let verify_url = verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned());
+    super::ssrf::validate_url(&state.pg, &verify_url).await?;
     let outcome = state
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
             method: axum::http::Method::POST,
-            url: verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned()),
+            url: verify_url,
             auth_header: "x-okapi-noop".to_owned(),
             auth_value: "1".to_owned(),
             content_type: Some("application/x-www-form-urlencoded".to_owned()),
@@ -573,7 +568,24 @@ pub(super) async fn web_session_limit(state: &AppState) -> i64 {
 
 /// 会话 cookie（HttpOnly，7 天，与 `sess:web` TTL 对齐）。
 pub(super) fn session_cookie(sid: &str) -> String {
-    format!("{SESSION_COOKIE}={sid}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800")
+    session_cookie_with_security(sid, secure_cookie())
+}
+
+pub(super) fn secure_cookie() -> bool {
+    static SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SECURE.get_or_init(|| {
+        let secure = std::env::var("OKAPI_COOKIE_SECURE")
+            .map_or(true, |value| !matches!(value.as_str(), "false" | "0"));
+        if !secure {
+            tracing::warn!("Secure cookies explicitly disabled for HTTP deployment");
+        }
+        secure
+    })
+}
+
+fn session_cookie_with_security(sid: &str, secure: bool) -> String {
+    let flag = if secure { "; Secure" } else { "" };
+    format!("{SESSION_COOKIE}={sid}{flag}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800")
 }
 
 /// 密码 + TOTP 校验；`Err((审计原因, 对外错误))`。
@@ -608,7 +620,16 @@ async fn verify_login(
             .ok_or_else(|| ("totp_secret_missing", AppError::internal()))?;
         let secret = identity::open_totp_secret(master, sealed)
             .map_err(|_| ("totp_secret_unreadable", AppError::internal()))?;
-        if !identity::verify_totp(&secret, code, chrono::Utc::now().timestamp()) {
+        let counter =
+            identity::matching_totp_counter(&secret, code, chrono::Utc::now().timestamp());
+        if let Some(counter) = counter {
+            if !identity::consume_totp(&state.pg, user.user_id, sealed, counter)
+                .await
+                .map_err(|_| ("totp_store", AppError::internal()))?
+            {
+                return Err(("totp_invalid", AppError::unauthorized("totp_invalid")));
+            }
+        } else {
             return Err(("totp_invalid", AppError::unauthorized("totp_invalid")));
         }
     }
@@ -624,22 +645,56 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<V
 
 // ---- TOTP 两段式注册 ----
 
+#[derive(Deserialize)]
+pub struct TotpPasswordReq {
+    pub password: String,
+}
+
+fn totp_binding(headers: &HeaderMap, user_id: i64, pending: &str) -> Result<String, AppError> {
+    let sid = session_id(headers)
+        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
+    if pending.len() != 32 || !pending.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(AppError::bad_request().with_param("pending"));
+    }
+    Ok(format!(
+        "{user_id}:{}:{pending}",
+        hex::encode(Sha256::digest(sid.as_bytes()))
+    ))
+}
+
 pub async fn totp_enroll(
     State(state): State<AppState>,
+    conn: MaybeConnectInfo,
     headers: HeaderMap,
+    ExtractJson(req): ExtractJson<TotpPasswordReq>,
 ) -> Result<Json<Value>, AppError> {
+    critical_rate_guard(&state, &headers, conn.0.as_ref(), "totp", 10).await?;
     let user_id = require_session(&state, &headers).await?;
+    let user = identity::reauthenticate(&state.pg, user_id, &req.password)
+        .await?
+        .ok_or_else(|| AppError::unauthorized("invalid_credentials"))?;
+    if user.totp_enabled {
+        return Err(
+            AppError::new(StatusCode::CONFLICT, okapi_api::codes::BAD_REQUEST)
+                .with_param("totp_already_enabled"),
+        );
+    }
     let master = state
         .master_key
         .as_deref()
         .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"))?;
     let (secret, otpauth_url) = identity::generate_totp_secret(&user_id.to_string());
     let sealed = identity::seal_totp_secret(master, &secret).map_err(|_| AppError::internal())?;
-    Ok(Json(json!({
-        "otpauth_url": otpauth_url,
-        // 服务端密文回执（客户端持有无妨，密钥在服务端；confirm 时带回）
-        "pending": hex::encode(sealed),
-    })))
+    let pending = rand_token(32);
+    let binding = totp_binding(&headers, user_id, &pending)?;
+    if !state
+        .sched
+        .totp_pending_set(&binding, &hex::encode(sealed))
+        .await
+    {
+        return Err(AppError::internal());
+    }
+    Ok(Json(json!({"otpauth_url":otpauth_url,"pending":pending})))
 }
 
 #[derive(Deserialize)]
@@ -656,18 +711,63 @@ pub async fn totp_confirm(
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "totp", 10).await?;
     let user_id = require_session(&state, &headers).await?;
+    let binding = totp_binding(&headers, user_id, &req.pending)?;
+    let sealed = state
+        .sched
+        .totp_pending_get(&binding)
+        .await
+        .ok_or_else(|| AppError::bad_request().with_param("pending"))?;
+    let sealed = hex::decode(sealed).map_err(|_| AppError::internal())?;
     let master = state
         .master_key
         .as_deref()
         .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"))?;
-    let sealed = hex::decode(&req.pending).map_err(|_| AppError::bad_request())?;
-    let secret =
-        identity::open_totp_secret(master, &sealed).map_err(|_| AppError::bad_request())?;
-    if !identity::verify_totp(&secret, &req.code, chrono::Utc::now().timestamp()) {
-        return Err(AppError::bad_request().with_param("totp_code"));
+    let secret = identity::open_totp_secret(master, &sealed).map_err(|_| AppError::internal())?;
+    let counter =
+        identity::matching_totp_counter(&secret, &req.code, chrono::Utc::now().timestamp())
+            .ok_or_else(|| AppError::bad_request().with_param("totp_code"))?;
+    if !identity::enable_totp(&state.pg, user_id, &sealed, counter).await? {
+        return Err(
+            AppError::new(StatusCode::CONFLICT, okapi_api::codes::BAD_REQUEST)
+                .with_param("totp_already_enabled"),
+        );
     }
-    identity::enable_totp(&state.pg, user_id, &sealed).await?;
-    Ok(Json(json!({ "enabled": true })))
+    state.sched.totp_pending_del(&binding).await;
+    Ok(Json(json!({"enabled":true})))
+}
+
+#[derive(Deserialize)]
+pub struct TotpDisableReq {
+    pub password: String,
+    pub code: String,
+}
+
+pub async fn totp_disable(
+    State(state): State<AppState>,
+    conn: MaybeConnectInfo,
+    headers: HeaderMap,
+    ExtractJson(req): ExtractJson<TotpDisableReq>,
+) -> Result<Json<Value>, AppError> {
+    critical_rate_guard(&state, &headers, conn.0.as_ref(), "totp", 10).await?;
+    let user_id = require_session(&state, &headers).await?;
+    let user = identity::reauthenticate(&state.pg, user_id, &req.password)
+        .await?
+        .ok_or_else(|| AppError::unauthorized("invalid_credentials"))?;
+    let sealed = user
+        .totp_secret_ciphertext
+        .ok_or_else(|| AppError::bad_request().with_param("totp_not_enabled"))?;
+    let master = state
+        .master_key
+        .as_deref()
+        .ok_or_else(|| AppError::new(StatusCode::NOT_IMPLEMENTED, "totp_disabled"))?;
+    let secret = identity::open_totp_secret(master, &sealed).map_err(|_| AppError::internal())?;
+    let counter =
+        identity::matching_totp_counter(&secret, &req.code, chrono::Utc::now().timestamp())
+            .ok_or_else(|| AppError::unauthorized("totp_invalid"))?;
+    if !identity::disable_totp(&state.pg, user_id, &sealed, counter).await? {
+        return Err(AppError::unauthorized("totp_invalid"));
+    }
+    Ok(Json(json!({"enabled":false})))
 }
 
 // ---- session 兑换 API key（key 单轨的正规入口）----
@@ -826,4 +926,17 @@ pub async fn revoke_all_sessions(
     let key = crate::gateway::auth::authenticate(&state, &headers).await?;
     state.sched.web_session_revoke_user(key.user_id).await;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::*;
+    #[test]
+    fn http_escape_hatch_keeps_other_cookie_protections() {
+        for secure in [true, false] {
+            let cookie = session_cookie_with_security("sid", secure);
+            assert_eq!(cookie.contains("; Secure"), secure);
+            assert!(cookie.contains("HttpOnly; SameSite=Lax; Path=/"));
+        }
+    }
 }

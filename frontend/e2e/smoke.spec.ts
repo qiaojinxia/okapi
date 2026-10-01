@@ -301,7 +301,7 @@ test('管理端：总览实时条 + 健康芯片 + 日志页统计条/过滤 + �
   await expect(main.getByText(/^活跃密钥$|^Active keys$/)).toBeVisible()
 
   // 审计页：本用例开头的邮箱登录已落 user.login，按动作过滤深链落地即见；
-  // 点行展开详情（IP / UA 键值行）
+  // 点行打开右侧详情抽屉（IP / UA 键值行）
   await page.goto('/admin/audit?action=user.login&target=root@okapi.local')
   await expect(main.getByRole('columnheader', { name: /^动作$|^Action$/ })).toBeVisible({
     timeout: 10_000,
@@ -309,7 +309,9 @@ test('管理端：总览实时条 + 健康芯片 + 日志页统计条/过滤 + �
   const auditRow = main.getByRole('row').filter({ hasText: 'user.login' }).first()
   await expect(auditRow).toBeVisible()
   await auditRow.click()
-  await expect(main.getByText(/^ip$/).first()).toBeVisible()
+  const auditDetail = page.getByRole('dialog', { name: /^审计详情$|^Audit details$/ })
+  await expect(auditDetail.getByText(/^ip$/).first()).toBeVisible()
+  await auditDetail.getByRole('button', { name: /^关闭$|^Close$/ }).click()
 
   // 渠道页：渠道级"启用"之外要看得见 key 状态机汇总与近 24h 健康两列
   await page.goto('/admin/channels')

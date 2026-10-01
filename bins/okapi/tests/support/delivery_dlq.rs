@@ -94,6 +94,23 @@ async fn selecting_one_dlq_member_retries_the_original_complete_batch() {
     let (batch, ids, frozen) = failing_batch(&env, true).await;
     let body = post(&env, "/admin/dlq/requeue", &ids[..1]).await;
     assert_eq!(body["requeued"], 2, "actual batch members must be reported");
+    assert_eq!(body["delivery_batch_ids"], json!([batch]));
+    let audit = sqlx::query_scalar!(
+        r#"SELECT detail FROM audit_logs WHERE action='billing.dlq_requeue'
+           AND detail->'delivery_batch_ids' @> $1::jsonb ORDER BY id DESC LIMIT 1"#,
+        json!([batch])
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap()
+    .expect("successful audit must retain its operation detail");
+    assert_eq!(audit["ids"], json!(ids[..1]));
+    let affected = audit["affected_ids"].as_array().unwrap();
+    assert_eq!(affected.len(), 2);
+    assert!(
+        ids.iter().all(|id| affected.contains(&json!(id))),
+        "audit must identify all removed DLQ members"
+    );
     let (status, diagnose) = super::get(&env, "/admin/diagnose", &env.super_token).await;
     assert_eq!(status, 200);
     assert_eq!(

@@ -134,3 +134,18 @@ export function compareModels(a: PricingModel, b: PricingModel, sort: string, fa
   }
   return (a.display_name || a.model).localeCompare(b.display_name || b.model, locale, { numeric: true })
 }
+
+/// 上下文窗口按行业惯例写成 K / M tokens：2 的幂（65,536 / 1,048,576）按 1024 折算成 64K / 1M，
+/// 其余（128,000 / 200,000）按 1000 折算成 128K / 200K，不够整的保留一位小数。
+/// 此前用"13万 / 105万 / 65,536"混着写，128K 被四舍五入成 13 万，既不准也和同页其他模型对不齐；精确值留在悬停与详情里。
+export function formatContextWindow(tokens: number): string {
+  const powerOfTwo = Number.isInteger(tokens) && tokens > 0 && (tokens & (tokens - 1)) === 0 && tokens < 2 ** 31
+  const base = powerOfTwo ? 1024 : 1000
+  const compact = (divisor: number, suffix: string) => {
+    const value = tokens / divisor
+    return `${Number.isInteger(value) ? value : Number(value.toFixed(1))}${suffix}`
+  }
+  if (tokens >= base * base) return compact(base * base, 'M')
+  if (tokens >= base) return compact(base, 'K')
+  return String(tokens)
+}

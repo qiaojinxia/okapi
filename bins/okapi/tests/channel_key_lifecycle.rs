@@ -9,6 +9,9 @@
 //!
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -130,6 +133,7 @@ async fn setup() -> Bed {
         .await
         .unwrap();
 
+    published_pricing::publish(&pg, admin_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

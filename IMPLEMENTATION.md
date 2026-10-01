@@ -624,7 +624,7 @@ code 字典序小者；三桶胜者按编译期固定序统一施加，快照顺
 9 折 = 0.72"的失控由站长把两条活动都标 best_for_user 解决。未知值装载期整行拒绝
 （fail-closed，静默当 stackable 会让排他活动错误叠加——老 ok-api 同一决策）；
 ② `weekdays`（time_based 星期掩码，0=周日…6=周六，缺省每天）——与分钟窗同为机器本地钟源
-（`weekday_utc` 从 now_unix 推导，将来引入站点时区两者一处同改）；空列表/非法值在
+（`weekday_local` 从 now_unix 与请求捕获的机器 UTC 偏移推导）；空列表/非法值在
 console 与装载器双双拒绝（空掩码=永不命中，与 start==end 空窗同理）；
 ③ `min_monthly_spend_micro`（volume 消费额轴）——与 token 轴 AND、至少一项；输入走
 Redis `usd:{uid}:<yyyymm>`（与 tok 同构，独立门控 `has_spend_rules`，只用 token 阈值的
@@ -1829,7 +1829,7 @@ temperature 在 gemini 侧要落到 `generationConfig`）——本轮只放能�
 - **找回密码**：`POST /auth/password/forgot {email}` → 每 IP `password_forgot` 3/min；无论邮箱是否存在
   都回 `{ok:true}`（防枚举），存在且有密码（非 OAuth-only）才发信：token 32 位随机，Redis
   `pwreset:<sha256(token)>` → user_id（30 min，明文 token 只出现在邮件里）；链接
-  `{site_url}/reset-password?token=…`，`site_url` 缺省与 OAuth 回调同源（请求 Host 推导）。
+  `{site_url}/reset-password?token=…`，必须配置合法 `site_url`；缺失或非法配置对所有邮箱一致返回 `site_url_required`，不使用 Host/X-Forwarded-Proto。
   `POST /auth/password/reset {token,password}` 校验后 argon2id 重设、删 token；老 bcrypt 用户由此
   升级为 argon2id。
 - **通知 email 通道**：`notify_channels[]` 新增 `{"type":"email","to":[...],"events":[...],"min_interval_secs"}`，
@@ -2497,7 +2497,7 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 
 ### 14.4 入口硬化
 
-- **上游 URL SSRF 校验**（Sub2API url_allowlist 吸收）：管理员配置 channels.api_base 时校验 scheme（默认仅 https）与目标（默认禁私网/环回/链路本地段），内网上游场景可按部署放开；配合出口侧 egress 白名单。**【2026-09-07】管理面外呼不跟随重定向**：闸只校验得到管理员填的那个 URL，跟着 30x 走就能被公网地址引到私网 / 云元数据地址；`HttpPool` 分两族 client，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付 / 倍率同步走 `probe`（`Policy::none()`），数据面透传保留缺省（下载类端点依赖上游 302 到 CDN）。同日续：订阅 OAuth 的换码 / 刷新、Vertex 服务账号换 token、Bedrock 列模型也换成 `probe`——凡是"拿一个 JSON 回来解析"的外呼都不跟随重定向；仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（和真实请求同一条路）。**闸覆盖的地址不止 `api_base`**：`settings.oauth_token_url`（订阅 OAuth 刷新地址覆写）与 Vertex 服务账号 JSON 里的 `token_uri` 都是网关会 POST 的地址，凭证密封存储、写入口是唯一能校验的地方，建渠道 / 轮换凭证 / MCP 建渠道三处按凭证形状（能解析成服务账号 JSON 即查）过同一道闸，违规回 `credential_token_uri`。DNS rebinding 仍在 backlog。
+- **上游 URL SSRF 校验**（Sub2API url_allowlist 吸收）：管理员配置 channels.api_base 时校验 scheme（默认仅 https）与目标（默认禁私网/环回/链路本地段），内网上游场景可按部署放开；配合出口侧 egress 白名单。**【2026-09-07】管理面外呼不跟随重定向**：闸只校验得到管理员填的那个 URL，跟着 30x 走就能被公网地址引到私网 / 云元数据地址；`HttpPool` 分两族 client，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付 / 倍率同步走 `probe`（`Policy::none()`），数据面同样禁用重定向（第三轮审查：避免非 Authorization 自定义鉴权头泄漏，下载类端点也不得携凭证跟随 CDN 跳转）。同日续：订阅 OAuth 的换码 / 刷新、Vertex 服务账号换 token、Bedrock 列模型也换成 `probe`——凡是"拿一个 JSON 回来解析"的外呼都不跟随重定向；仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（和真实请求同一条路）。**闸覆盖的地址不止 `api_base`**：`settings.oauth_token_url`（订阅 OAuth 刷新地址覆写）与 Vertex 服务账号 JSON 里的 `token_uri` 都是网关会 POST 的地址，凭证密封存储、写入口是唯一能校验的地方，建渠道 / 轮换凭证 / MCP 建渠道三处按凭证形状（能解析成服务账号 JSON 即查）过同一道闸，违规回 `credential_token_uri`。DNS rebinding 仍在 backlog。
 - WS 治理（Realtime / Responses WS 入口，M4）：per-key 客户端连接数上限（Redis 60s 租约 / 20s 续期）、首消息总超时、turn 间空闲超时。
 - 请求体/行缓冲上限见 §3.7；管理后台与门户接口独立限流。
 
@@ -2516,3 +2516,21 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 ### 审计加固补充
 
 管理面普通 guard 仅接受 All 范围，Own 必须经 guard_scoped 加属主过滤；MCP channel_toggle/channel_test 与 HTTP 同样校验 owner。`/v1/models` 与 `/v1beta/models` 需要数据面鉴权并按 key 模型白名单过滤。透传拒绝点段、反斜线、剩余百分号与 URL 分隔符，白名单按路径边界匹配；零用量端点拒绝非 per_call 报价。密码散列与校验走有并发上限的 spawn_blocking；邮箱验证码使用 GETDEL，每次尝试消费一次。Stripe、登录 OAuth 和通知 webhook 出站 URL 走渠道相同 SSRF 策略，webhook 禁止重定向。档位倍率直接解析十进制定点，任何非法档位禁用整条模型并告警；用户倍率用 RatioFp 校验。
+
+### 第三轮审查加固（2026-09）
+
+- 管理员升降级仅超级管理员可操作，角色变更同时清除旧自定义角色绑定；所有出站客户端均拒绝重定向，避免渠道自定义鉴权头泄露。
+- 主流 SSE 在解析前限制每事件 16 MiB、整流 64 MiB；缓冲响应也有上限，错误体最多 1 MiB。畸形 Bedrock chunk 显式报错。Gemini 流持续读取到 EOF，独立 usage 帧参与结算。
+- 预扣与兜底估算包含工具定义的字符串及属性名；reasoning_content/reasoning 纳入产出与字符估算。HTTP 请求（含 failover 与流）总寿命 8 分钟，短于 10 分钟预扣 TTL；首字后错误以 SSE error 通知客户端。
+- 维护任务各自运行并采用 Skip 时钟，互不阻塞；视频创建 24 小时仍无终态即标记超时，并通过现有幂等退款记录全额退款。
+- TOTP 绑定/解绑要求密码重验证，绑定凭据绑定用户及会话且 5 分钟过期；成功时间片单次消费，禁止覆盖已绑定设备。
+- 密码重置只使用配置的 site_url，控制台禁止嵌入框架。远程首次 setup 必须提供配置的初始化令牌；本机初始化仍可直接执行，并按关键接口限流。
+- 图片批次准入仅统计未清理批次的运行预算；已清理的幂等元数据保留，但不永久消耗运行容量。
+
+第三轮交付细节：通知以短租约互斥投递，失败释放租约，成功才开始静默窗。Webhook 可配置 `secret`，签名为 HMAC-SHA256(`at + "." + 原始 JSON body`)，随 `x-okapi-timestamp` / `x-okapi-signature: sha256=…` 发送；接收方应验证签名和时间窗。逐用户余额须通道显式 `include_balances:true`。NATS relay 先认领 10 分钟租约并提交，再以最多 32 并发、每笔 5 秒发布；5 次失败或畸形事件进 DLQ，重投沿用原 outbox event_id。DEFAULT 分区保留策略按每事务 1000 行、每轮每分区最多 10 批清理，财务回执/汇总与删除同事务，保留 DEFAULT 分区本身。
+
+部署与接口兼容说明：生产 compose 必须显式提供 `POSTGRES_PASSWORD`、`CLICKHOUSE_PASSWORD`、`OKAPI_MASTER_KEY` 和 `OKAPI_SETUP_TOKEN`，控制台端口默认仅发布到主机环回；远程初始化请求须带 `setup_token`。TOTP enroll body 新增必填 `password`，新增 `/auth/totp/disable {password,code}`；密码找回须先配置 `site_url`。上游 30x 不再自动跟随；视频超时固定为创建后 24 小时、自动全额退款。金额公式与已发布报价快照格式未变化。
+
+Gemini 外部图片以 fileData.fileUri 转交上游获取，结构化输出以 responseJsonSchema 传递（[官方文件输入说明](https://ai.google.dev/gemini-api/docs/generate-content/file-input-methods)、[结构化输出说明](https://ai.google.dev/gemini-api/docs/structured-output)）；模型对外部 URL 的支持取决于供应商。
+
+复核后保留的既有语义：支付公开入口仅支持 epay/CNY 与 Stripe/USD，因此 JPY/KWD 两位小数问题在当前接口不可触发；reconciliation 的 limit 表示分页大小，all=true 按页扫描全部用户。点击劫持防护已补齐，报告中“跨源 iframe 可读 localStorage”不是浏览器的实际同源策略。

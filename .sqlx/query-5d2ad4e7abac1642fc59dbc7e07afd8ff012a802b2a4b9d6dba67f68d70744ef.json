@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET totp_last_counter=$3 WHERE id=$1 AND status=1 AND deleted_at IS NULL AND totp_secret_ciphertext=$2 AND (totp_last_counter IS NULL OR totp_last_counter<$3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5d2ad4e7abac1642fc59dbc7e07afd8ff012a802b2a4b9d6dba67f68d70744ef"
+}

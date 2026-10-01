@@ -53,7 +53,7 @@ function Ranking({ days, by, metric, onMetricChange }: { days: number; by: 'mode
             const share = total != null && total > 0 && proportion != null ? Math.max(0, Math.min(10000, proportion)) : null
             const displayValue = value == null ? '—' : format(value)
             const content = <>
-              <span className="mt-0.5 w-3 shrink-0 text-xs tabular-nums text-muted-foreground">{row.rank}</span>
+              <span className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold tabular-nums ${row.rank === 1 ? 'bg-primary/12 text-primary' : 'bg-muted text-muted-foreground'}`}>{row.rank}</span>
               <span className="min-w-0 flex-1 space-y-1 lg:space-y-0.5">
                 <span className="flex min-w-0 items-baseline justify-between gap-2">
                   <span className="min-w-0 truncate text-xs font-medium" title={name}>{name}</span>
@@ -63,7 +63,7 @@ function Ranking({ days, by, metric, onMetricChange }: { days: number; by: 'mode
                   <span className="min-w-0 break-all font-medium tabular-nums text-foreground">{displayValue}</span>
                   <span className="tabular-nums">{share === null ? '—' : formatBp(share, locale)}</span>
                 </span>
-                <span className="block h-1 overflow-hidden rounded-full bg-muted lg:h-0.5" aria-hidden><span className="block h-full rounded-full" style={{ width: `${(share ?? 0) / 100}%`, background: chartColor(row.rank - 1) }} /></span>
+                <span className="block h-1.5 overflow-hidden rounded-full bg-muted lg:h-1" aria-hidden><span className="block h-full rounded-full" style={{ width: `${(share ?? 0) / 100}%`, background: chartColor(row.rank - 1) }} /></span>
               </span>
             </>
             const className = 'flex min-h-12 items-start gap-1.5 rounded-lg px-1 py-1.5 lg:py-1'

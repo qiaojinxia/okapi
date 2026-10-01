@@ -13,6 +13,16 @@ export function LogTokenUsage({ row }: { row: Pick<LogRow, 'usage' | 'usage_deta
   const share = cacheReadShare(row, locale)
   const missing = t(row.usage_details_recorded ? 'logs:unreported' : 'logs:notRecorded')
   const number = (value: number) => value.toLocaleString(locale)
+  // 按字符计费的行与按 Token 计费的行共用同一套外壳、图标块和字号，列表里上下两行读起来是同一种东西。
+  if (row.usage.input_unit === 'characters') return <div data-slot="log-character-usage" className="grid w-full min-w-72 gap-0.5 text-left text-xs leading-4 tabular-nums whitespace-nowrap">
+    <span className="inline-flex items-center gap-1.5">
+      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-info/10 text-info"><ArrowDown aria-hidden className="h-3 w-3" /></span>
+      <span className="text-muted-foreground">{t('logs:inputCharacters')}</span>
+      <span className="font-semibold text-foreground">{row.usage.input_characters == null ? '—' : number(row.usage.input_characters)}</span>
+    </span>
+    {/* 占位行：与 Token 行的缓存标签行等高，两种行的第一行落在同一个位置 */}
+    <span aria-hidden className="h-4" />
+  </div>
   const readHint = hit ? [t('logs:cacheHitHint', { n: number(read) }), share && t('logs:cacheInputShare', { percent: share })].filter(Boolean).join(' ')
     : read === 0 ? t('logs:cacheMissHint') : t('logs:cacheReadMissing', { state: missing })
   const writeHint = write === null ? t('logs:cacheWriteMissing', { state: missing }) : t('logs:cacheWriteHint', { n: number(write) })

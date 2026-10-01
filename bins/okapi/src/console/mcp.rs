@@ -505,10 +505,7 @@ async fn explain_bill(state: &AppState, key: &AuthedKey, args: &Value) -> Result
     .await
     .map_err(okapi_store::StoreError::from)?
     .ok_or_else(|| AppError::new(axum::http::StatusCode::NOT_FOUND, "record_not_found"))?;
-    let is_admin = !matches!(
-        key.permission_scope(permissions::BILLING_READ),
-        PermScope::Denied
-    );
+    let is_admin = key.permission_scope(permissions::BILLING_READ) == PermScope::All;
     if row.user_id != key.user_id && !is_admin {
         return Err(AppError::new(
             axum::http::StatusCode::FORBIDDEN,
@@ -986,16 +983,17 @@ async fn dlq_requeue(state: &AppState, key: &AuthedKey, args: &Value) -> Result<
         return Ok(json!({"dry_run": true, "ids": ids,"requeue_members":members}));
     }
     // 与 HTTP /admin/dlq/requeue 同一函数：AI 与人执行的必须是同一个动作
-    let requeued = super::dlq::requeue(&state.pg, &ids).await?;
+    let outcome = super::dlq::requeue(&state.pg, &ids).await?;
     mcp_audit(
         state,
         key,
         "billing.dlq_requeue",
         "batch",
-        json!({"ids": ids, "requeued": requeued}),
+        json!({"ids": ids, "requeued": outcome.count,
+            "affected_ids":outcome.dlq_ids,"delivery_batch_ids":outcome.batch_ids}),
     )
     .await;
-    Ok(json!({"dry_run": false, "requeued": requeued}))
+    Ok(json!({"dry_run": false, "requeued": outcome.count,"delivery_batch_ids":outcome.batch_ids}))
 }
 
 async fn redemption_create(

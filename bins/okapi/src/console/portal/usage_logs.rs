@@ -33,7 +33,9 @@ fn filtered(
         query.push(" AND b.model_name = ").push_bind(model);
     }
     if q.errors_only == Some(true) {
-        query.push(" AND b.status = 40");
+        // Request failure and financial disposition are independent: an all-failed
+        // batch releases its hold (status=30), while log_type=5 retains its outcome.
+        query.push(" AND (b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true')");
     }
     if let Some(window) = window {
         query
@@ -63,6 +65,8 @@ pub async fn list(
         r"SELECT jsonb_build_object(
             'id', b.id, 'request_id', b.request_id, 'model', b.model_name,
             'log_type', b.log_type, 'status', b.status,
+            'is_error', (b.log_type = 5 OR b.status = 40 OR COALESCE(b.usage_details->'diagnostics'->>'request_failed' = 'true', false)),
+            'upstream_request_id', b.upstream_request_id,
             'api_key_id', b.api_key_id, 'key_name', COALESCE(k.name, ''),
             'usage', jsonb_build_object(
                 'prompt_tokens', b.prompt_tokens, 'cached_tokens', b.cached_tokens,
@@ -91,6 +95,7 @@ pub async fn list(
             'net_amount_micro', CASE WHEN b.status = 20 THEN b.amount_micro ELSE 0 END,
             'original_amount_micro', b.original_amount_micro, 'discount_micro', b.discount_micro,
             'pricing_snapshot', b.pricing_snapshot, 'error_code', b.error_code,
+            'diagnostics', b.usage_details->'diagnostics',
             'latency_ms', b.latency_ms, 'ttft_ms', b.ttft_ms,
             'is_stream', b.is_stream, 'created_at', b.created_at
         )",
@@ -115,6 +120,11 @@ pub async fn list(
     let has_more = data.len() > usize::try_from(limit).unwrap_or(200);
     if has_more {
         data.pop();
+    }
+    for row in &mut data {
+        if let Some(diagnostics) = row.get_mut("diagnostics").filter(|d| !d.is_null()) {
+            *diagnostics = crate::gateway::diagnostics::public(diagnostics);
+        }
     }
     let next_before = if has_more {
         data.last().and_then(|r| r["id"].as_i64())
@@ -146,6 +156,7 @@ pub async fn stat(
             'records', COUNT(*),
             'settled', COUNT(*) FILTER (WHERE b.status = 20),
             'failed', COUNT(*) FILTER (WHERE b.status = 40),
+            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true'),
             'refunded', COUNT(*) FILTER (WHERE b.status = 30),
             'pending', COUNT(*) FILTER (WHERE b.status = 10),
             'amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 20), 0),

@@ -24,10 +24,13 @@ export function LogSummary({ data, loading, error, onRetry, layout = 'page', onO
   const [expanded, setExpanded] = useState(false)
   const count = (n: number | undefined) => n === undefined ? '—' : formatCount(n, locale)
   const valid = data && typeof data.records === 'number' ? data : undefined
+  const statusHint = valid ? t(valid.errors == null ? 'logs:statusCounts' : 'logs:requestAndBillingCounts', {
+    errors: valid.errors, settled: valid.settled, failed: valid.failed, refunded: valid.refunded,
+  }) : '—'
   if (layout === 'strip') {
     const metrics = [
       { label: t('logs:netSpend'), value: valid ? logMoney(valid.amount_micro, locale) : '—', hint: valid?.refunded ? t('logs:refundExcluded', { amount: logMoney(valid.refunded_amount_micro, locale) }) : t('logs:netSpendHint') },
-      { label: t('logs:records'), value: count(valid?.records), hint: valid ? t('logs:statusCounts', { settled: valid.settled, failed: valid.failed, refunded: valid.refunded }) : '—' },
+      { label: t('logs:records'), value: count(valid?.records), hint: statusHint },
       { label: t('logs:input'), value: count(valid?.prompt_tokens), hint: t('logs:inputHint') },
       { label: t('logs:output'), value: count(valid?.completion_tokens), hint: t('logs:outputHint') },
       { label: t('logs:cacheRead'), value: valid && valid.cache_read_samples > 0 ? count(valid.cached_tokens) : '—', hint: valid ? t('logs:cacheCoverage', { n: valid.cache_read_samples, total: valid.records }) : t('logs:unreported') },
@@ -63,7 +66,7 @@ export function LogSummary({ data, loading, error, onRetry, layout = 'page', onO
     </div>
     <div className={layout === 'panel' ? 'grid grid-cols-1 gap-2 min-[360px]:grid-cols-2' : 'grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6'}>
       <Stat {...interaction} compact label={t('logs:netSpend')} value={valid ? logMoney(valid.amount_micro, locale) : '—'} loading={loading} sub={valid?.refunded ? t('logs:refundExcluded', { amount: logMoney(valid.refunded_amount_micro, locale) }) : t('logs:netSpendHint')} />
-      <Stat {...interaction} compact label={t('logs:records')} value={count(valid?.records)} loading={loading} sub={valid ? t('logs:statusCounts', { settled: valid.settled, failed: valid.failed, refunded: valid.refunded }) : '—'} />
+      <Stat {...interaction} compact label={t('logs:records')} value={count(valid?.records)} loading={loading} sub={statusHint} />
       <Stat {...interaction} compact label={t('logs:input')} value={count(valid?.prompt_tokens)} loading={loading} sub={t('logs:inputHint')} />
       <Stat {...interaction} compact label={t('logs:output')} value={count(valid?.completion_tokens)} loading={loading} sub={t('logs:outputHint')} />
       <Stat {...interaction} compact label={t('logs:cacheRead')} value={valid && valid.cache_read_samples > 0 ? count(valid.cached_tokens) : '—'} loading={loading} sub={valid ? t('logs:cacheCoverage', { n: valid.cache_read_samples, total: valid.records }) : t('logs:unreported')} />

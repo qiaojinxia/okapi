@@ -153,12 +153,14 @@ async fn cleanup_releases_artifact_capacity_but_keeps_idempotency_and_metadata_b
         per_user_bytes: row.storage_budget,
         ..limits()
     };
+    // Retained metadata must not permanently consume live storage capacity.
+    sqlx::query("UPDATE image_batches SET storage_budget=$2 WHERE id=$1")
+        .bind(row.id)
+        .bind(i64::MAX / 2)
+        .execute(&f.bed.pg)
+        .await?;
     assert!(matches!(
-        jobs::create(&f.bed.pg, f.request(Uuid::new_v4()), tight).await,
-        Err(jobs::Error::Capacity)
-    ));
-    assert!(matches!(
-        jobs::create(&f.bed.pg, f.request(Uuid::new_v4()), limits()).await?,
+        jobs::create(&f.bed.pg, f.request(Uuid::new_v4()), tight).await?,
         Created::New(_)
     ));
     Ok(())

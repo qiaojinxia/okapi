@@ -877,6 +877,30 @@ impl SchedulerRedis {
         value?.parse().ok()
     }
 
+    pub async fn totp_pending_set(&self, binding: &str, sealed: &str) -> bool {
+        let r: Result<(), _> = self
+            .client
+            .set(
+                format!("totp:pending:{binding}"),
+                sealed,
+                Some(Expiration::EX(300)),
+                None,
+                false,
+            )
+            .await;
+        r.is_ok()
+    }
+    pub async fn totp_pending_get(&self, binding: &str) -> Option<String> {
+        self.client
+            .get(format!("totp:pending:{binding}"))
+            .await
+            .ok()
+            .flatten()
+    }
+    pub async fn totp_pending_del(&self, binding: &str) {
+        let _: Result<i64, _> = self.client.del(format!("totp:pending:{binding}")).await;
+    }
+
     /// 平台实时 KPI 秒桶累加（docs/database.md §2.1 `kpi:*`）。
     ///
     /// 四个序列各自一个「每秒一键」的计数器，而非设计初稿的 ZSET 滑窗——

@@ -8,6 +8,8 @@ import { compareModels, isAvailable, modelCapabilities, modelVendor, nonnegative
 import { VendorIcon } from './VendorIcon'
 import { ModelCard, ModelTableRow } from './ModelCatalogItem'
 import { ModelDetails } from './ModelDetails'
+import { MAX_COMPARE } from './CompareToggle'
+import { CompareDrawer, CompareTray } from './ModelCompare'
 import { Pagination } from '@/components/ui/pagination'
 import { BrandLockup } from '@/components/brand'
 import { Button, buttonVariants } from '@/components/ui/button'
@@ -77,6 +79,12 @@ export function PublicPricingPage() {
     resultsHeading.current?.scrollIntoView({ block: 'start' })
   }
   const selected = allModels.find((m) => m.model === search.model)
+  // 对比列表以 URL 为准；目录里已不存在的 ID（分享链接过期、模型下架）直接忽略，不占名额。
+  const compared = (search.compare?.split(',') ?? []).flatMap((id) => allModels.filter((m) => m.model === id)).slice(0, MAX_COMPARE)
+  const comparedIds = compared.map((m) => m.model)
+  const setCompare = (ids: string[], extra: Partial<CatalogSearch> = {}) => patch({ compare: ids.length ? ids.join(',') : undefined, ...(ids.length < 2 ? { comparing: undefined } : {}), ...extra })
+  const toggleCompare = (id: string) => comparedIds.includes(id) ? setCompare(comparedIds.filter((x) => x !== id)) : comparedIds.length < MAX_COMPARE ? setCompare([...comparedIds, id]) : undefined
+  const compareProps = (model: { model: string }) => ({ compared: comparedIds.includes(model.model), compareFull: comparedIds.length >= MAX_COMPARE, onCompare: () => toggleCompare(model.model) })
   const active = !!(query || search.vendor || search.mode || search.capability || search.available)
   const clear = () => patch({ q: undefined, vendor: undefined, mode: undefined, capability: undefined, available: undefined })
   const groupName = (g: PricingGroup) => g.name || (g.code === 'default' ? t('flow:defaultGroup') : g.code)
@@ -100,7 +108,7 @@ export function PublicPricingPage() {
         </div>
       </div>
     </header>
-    <main className="mx-auto w-full max-w-[1480px] px-4 pb-12 sm:px-8">
+    <main className={cn('mx-auto w-full max-w-[1480px] px-4 pb-12 sm:px-8', compared.length > 0 && 'pb-32')}>
       <div className="flex flex-wrap items-end justify-between gap-3 py-6 sm:gap-5 sm:py-10">
         <div><div className="mb-3 hidden items-center gap-2 text-xs font-semibold tracking-[0.14em] text-primary sm:flex"><Boxes className="h-4 w-4" />{t('catalog:eyebrow')}</div>
           <h1 className="text-2xl font-semibold tracking-tight sm:text-4xl">{t('pricing:title')}</h1>
@@ -153,9 +161,9 @@ export function PublicPricingPage() {
             {models.length === 0 ? <EmptyState title={t('common:noResults')} hint={allModels.length ? t('catalog:emptyHint') : t('catalog:emptyCatalog')}
               action={active ? <Button variant="outline" size="sm" onClick={clear}>{t('catalog:clearFilters')}</Button> : undefined} />
               : search.view === 'table' ? <Table><THead><Tr><Th>{t('pricing:model')}</Th><Th>{t('catalog:specifications')}</Th><Th>{t('catalog:billingMode')}</Th><Th numeric>{t('pricing:promptPrice')} / {unit}</Th><Th numeric>{t('pricing:completionPrice')} / {unit}</Th><Th>{t('catalog:availability')}</Th><Th><span className="sr-only">{t('catalog:details')}</span></Th></Tr></THead><TBody>
-                {shown.map((model) => <ModelTableRow key={model.model} model={model} groups={groups} group={group} factor={factor} unit={unit} onOpen={() => patch({ model: model.model, tab: undefined }, false)} onExamples={() => patch({ model: model.model, tab: 'code' }, false)} />)}
+                {shown.map((model) => <ModelTableRow key={model.model} model={model} groups={groups} group={group} factor={factor} unit={unit} onOpen={() => patch({ model: model.model, tab: undefined }, false)} onExamples={() => patch({ model: model.model, tab: 'code' }, false)} {...compareProps(model)} />)}
               </TBody></Table> : <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {shown.map((model) => <ModelCard key={model.model} model={model} groups={groups} group={group} factor={factor} unit={unit} onOpen={() => patch({ model: model.model, tab: undefined }, false)} onExamples={() => patch({ model: model.model, tab: 'code' }, false)} />)}
+                {shown.map((model) => <ModelCard key={model.model} model={model} groups={groups} group={group} factor={factor} unit={unit} onOpen={() => patch({ model: model.model, tab: undefined }, false)} onExamples={() => patch({ model: model.model, tab: 'code' }, false)} {...compareProps(model)} />)}
               </div>}
             {models.length > 0 && <div className="mt-6 flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
               <div className="flex items-center justify-between gap-2"><Label htmlFor="catalog-page-size">{t('catalog:pageSize')}</Label><Select id="catalog-page-size" value={String(pageSize)} onChange={(size) => patch({ pageSize: size === '24' ? undefined : Number(size) as 12 | 48 })} options={[12, 24, 48].map((n) => ({ value: String(n), label: t('catalog:perPage', { n }) }))} /></div>
@@ -168,6 +176,8 @@ export function PublicPricingPage() {
       </div>
     </main>
     {selected && <ModelDetails key={selected.model} model={selected} groups={groups} group={group} factor={factor} unit={unit} tab={search.tab ?? 'details'} onTab={(tab) => patch({ tab: tab === 'code' ? 'code' : undefined })} onGroup={(group) => patch({ group: group || undefined })} onClose={() => patch({ model: undefined, tab: undefined })} />}
+    {compared.length > 0 && <CompareTray models={compared} onRemove={toggleCompare} onClear={() => setCompare([])} onStart={() => patch({ comparing: true }, false)} />}
+    {search.comparing && compared.length >= 2 && <CompareDrawer models={compared} group={group} factor={factor} unit={unit} onRemove={toggleCompare} onClose={() => patch({ comparing: undefined })} />}
     <footer className="border-t border-border"><div className="mx-auto flex max-w-[1480px] items-center justify-between px-4 py-6 text-xs text-muted-foreground sm:px-8"><span>{t('common:appName')}</span><span>{t('catalog:footer')}</span></div></footer>
   </div>
 }

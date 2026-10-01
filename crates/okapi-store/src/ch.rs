@@ -4,7 +4,11 @@
 //! 实现简单、可观察，且原生支持 `insert_deduplication_token`（docs/database.md §3.3
 //! 批次幂等）。查询统一带护栏：max_execution_time=15s、max_memory_usage=2GiB。
 
+mod calendar;
+mod population;
+
 use crate::error::StoreError;
+use calendar::calendar_sql;
 use std::time::Duration;
 
 const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000";
@@ -78,6 +82,16 @@ impl ChClient {
         let status = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
         if !(200..300).contains(&status) {
+            if text.contains("statistics_calendar_history_incomplete") {
+                return Err(StoreError::InvalidData(
+                    "statistics_calendar_history_incomplete",
+                ));
+            }
+            if text.contains("statistics_request_history_incomplete") {
+                return Err(StoreError::InvalidData(
+                    "statistics_request_history_incomplete",
+                ));
+            }
             return Err(StoreError::ChStatus { status, body: text });
         }
         Ok(text)
@@ -112,6 +126,9 @@ impl ChClient {
                 continue;
             }
             self.execute(sql).await?;
+        }
+        for statement in population::schema()? {
+            self.execute(&statement).await?;
         }
         Ok(())
     }
@@ -166,6 +183,34 @@ impl ChClient {
     ) -> Result<Vec<serde_json::Value>, StoreError> {
         let zone = crate::timezone::machine_timezone()?;
         let sql = calendar_sql(sql, zone);
+        let referenced = population::referenced(&sql)?;
+        // Keep complete modern sources small. Expanding dozens of history views
+        // solely to discover empty fallbacks can exhaust memory before scanning.
+        // No cached proof: every read checks record coverage at each full grain.
+        let complete = if referenced.is_empty() {
+            Vec::new()
+        } else {
+            let url = format!(
+                "{}/?database={}&{}&session_timezone=UTC",
+                self.base, self.database, QUERY_GUARD
+            );
+            let rows = self
+                .post(
+                    url,
+                    format!("{} FORMAT JSONEachRow", population::coverage(&referenced)),
+                )
+                .await?;
+            rows.lines()
+                .map(serde_json::from_str::<serde_json::Value>)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| StoreError::InvalidData("clickhouse row not json"))?
+                .into_iter()
+                .filter(|row| row["missing"] == "0" || row["missing"] == 0)
+                .filter_map(|row| row["name"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        let names = complete.iter().map(String::as_str).collect::<Vec<_>>();
+        let sql = population::sql(&sql, &names)?;
         let mut url = format!(
             "{}/?database={}&{}&session_timezone={}",
             self.base,
@@ -228,120 +273,4 @@ fn urlencode(input: &str) -> String {
         }
     }
     out
-}
-
-/// Daily UTC aggregates cannot be relabeled as local days. Rebucket the retained
-/// hourly facts for financial/token totals and independent retained calendar
-/// dimensions. Existing UTC MVs and their history remain untouched.
-fn calendar_sql(sql: &str, zone: &str) -> String {
-    let mut sql = sql.to_owned();
-    if zone != "UTC" && zone != "Etc/UTC" {
-        for statement in include_str!("ch_schema.sql").split(";\n") {
-            let Some(start) = statement.find("CREATE MATERIALIZED VIEW IF NOT EXISTS ") else {
-                continue;
-            };
-            let name = statement[start + "CREATE MATERIALIZED VIEW IF NOT EXISTS ".len()..]
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            if !name.ends_with("_day") || !sql.contains(name) {
-                continue;
-            }
-            let Some((_, select)) = statement.split_once("AS SELECT") else {
-                continue;
-            };
-            let mut select = format!("SELECT{select}");
-            if matches!(
-                name,
-                "mv_user_day"
-                    | "mv_apikey_day"
-                    | "mv_user_model_day"
-                    | "mv_key_model_day"
-                    | "mv_group_day"
-            ) {
-                select = select.replace("countState() AS requests", "countMergeState(requests) AS requests")
-                    .replace("FROM request_log_raw", "FROM (SELECT hour AS ts,user_id,api_key_id,group_code,model,countMergeState(requests) AS requests,sumMerge(prompt_tokens) AS prompt_tokens,sumMerge(cached_tokens) AS cached_tokens,sumMerge(completion_tokens) AS completion_tokens,sumMerge(reasoning_tokens) AS reasoning_tokens,sumMerge(amount) AS amount_micro,sumMerge(discount) AS discount_micro,sumMerge(amount)+sumMerge(discount) AS original_amount_micro,sumMerge(upstream_cost) AS upstream_cost_micro,sumMerge(errors) AS is_error FROM mv_cube_hour GROUP BY hour,user_id,api_key_id,group_code,model)");
-            } else {
-                select = match name {
-                    "mv_client_day" => "SELECT client_type,toDate(hour) AS day,countMergeState(requests) AS requests,sumMergeState(tokens) AS tokens,sumMergeState(amount) AS amount,sumMergeState(errors) AS errors,uniqMergeState(users) AS users FROM mv_calendar_client_hour GROUP BY client_type,day".into(),
-                    "mv_cache_write_day" => "SELECT user_id,api_key_id,model,toDate(hour) AS day,sumMergeState(write_tokens) AS write_tokens,countIfMergeState(known_requests) AS known_requests FROM mv_calendar_cache_write_hour GROUP BY user_id,api_key_id,model,day".into(),
-                    "mv_cache_reporting_day" => "SELECT user_id,api_key_id,model,toDate(hour) AS day,countIfMergeState(read_known) AS read_known,countIfMergeState(write_known) AS write_known,sumMergeState(write_tokens) AS write_tokens FROM mv_calendar_cache_reporting_hour GROUP BY user_id,api_key_id,model,day".into(),
-                    _ => select,
-                };
-            }
-            // Keep qualified references valid by retaining the original table alias.
-            for keyword in ["FROM", "JOIN"] {
-                sql = replace_identifier(
-                    &sql,
-                    &format!("{keyword} {name}"),
-                    &format!("{keyword} ({select}) AS {name}"),
-                );
-            }
-        }
-    }
-    for column in ["ts", "hour", "ts5"] {
-        sql = sql.replace(
-            &format!("toDate({column})"),
-            &format!("toDate({column}, '{zone}')"),
-        );
-    }
-    for column in ["hour", "ts5"] {
-        sql = sql.replace(
-            &format!("toString({column})"),
-            &format!("toString(toTimeZone({column}, '{zone}'))"),
-        );
-    }
-    sql = sql.replace(
-        "toString(toStartOfHour(hour))",
-        &format!("toString(toTimeZone(toStartOfHour(hour), '{zone}'))"),
-    );
-    sql = sql.replace("timezone()", &format!("'{zone}'"));
-    sql = sql.replace("today()", &format!("toDate(now(), '{zone}')"));
-    sql = sql.replace(
-        "toStartOfDay(day)",
-        &format!("toStartOfDay(toDateTime(day, '{zone}'))"),
-    );
-    sql
-}
-
-fn replace_identifier(sql: &str, name: &str, replacement: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    for (start, _) in sql.match_indices(name) {
-        let end = start + name.len();
-        let identifier = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        if start > 0 && identifier(sql.as_bytes()[start - 1])
-            || end < sql.len() && identifier(sql.as_bytes()[end])
-        {
-            continue;
-        }
-        out.push_str(&sql[cursor..start]);
-        out.push_str(replacement);
-        cursor = end;
-    }
-    out.push_str(&sql[cursor..]);
-    out
-}
-
-#[cfg(test)]
-mod calendar_tests {
-    use super::*;
-    #[test]
-    fn rebuckets_from_hourly_states_instead_of_relabeling_utc_days() {
-        let sql = calendar_sql(
-            "SELECT sumMerge(amount) FROM mv_user_day WHERE day=today()",
-            "Asia/Shanghai",
-        );
-        assert!(sql.contains("FROM mv_cube_hour"));
-        assert!(sql.contains("toDate(ts, 'Asia/Shanghai')"));
-        assert!(!sql.contains("FROM mv_user_day"));
-        assert_eq!(
-            replace_identifier(
-                "mv_user_day_extra mv_user_day",
-                "mv_user_day",
-                "replacement"
-            ),
-            "mv_user_day_extra replacement"
-        );
-    }
 }

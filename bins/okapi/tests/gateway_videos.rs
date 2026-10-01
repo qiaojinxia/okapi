@@ -74,6 +74,7 @@ struct TestEnv {
     token: String,
     user_id: i64,
     model: String,
+    state: gateway::state::AppState,
 }
 
 /// per_call 定价 0.01 USD/秒（micro=10000）。base_path: "/ok/v1" 或 "/fail/v1"。
@@ -127,7 +128,7 @@ async fn setup(balance: Money, base_path: &str) -> TestEnv {
     }
     let ledger = state.ledger.clone();
 
-    let app = gateway::router(state);
+    let app = gateway::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -141,6 +142,7 @@ async fn setup(balance: Money, base_path: &str) -> TestEnv {
         token,
         user_id,
         model,
+        state,
     }
 }
 
@@ -334,4 +336,41 @@ async fn generation_failure_after_creation_refunds_exactly_once() {
     .await
     .unwrap();
     assert_eq!(events, 1);
+}
+
+#[tokio::test]
+async fn expired_video_and_interrupted_refund_close_once() {
+    for claimed in [false, true] {
+        let initial = Money::from_micros(10_000_000);
+        let env = setup(initial, "/ok/v1").await;
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/v1/videos", env.gateway))
+            .bearer_auth(&env.token)
+            .json(&json!({"model":env.model,"prompt":"cat","seconds":"8"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        wait_committed(&env.pg, env.user_id, &env.model)
+            .await
+            .unwrap();
+        if claimed {
+            sqlx::query("UPDATE video_tasks SET state='refund_pending',channel_key_id=-1,next_poll_at=now() WHERE user_id=$1").bind(env.user_id).execute(&env.pg).await.unwrap();
+        } else {
+            sqlx::query("UPDATE video_tasks SET created_at=now()-interval '25 hours',next_poll_at=now() WHERE user_id=$1").bind(env.user_id).execute(&env.pg).await.unwrap();
+        }
+        gateway::videos::poll_pending(&env.state).await.unwrap();
+        gateway::videos::poll_pending(&env.state).await.unwrap();
+        assert_eq!(
+            env.ledger.balance(env.user_id).await.unwrap(),
+            initial,
+            "timeout and interrupted refunds must return the original charge exactly once"
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM video_tasks WHERE user_id=$1")
+            .bind(env.user_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+        assert_eq!(state, "refunded");
+    }
 }

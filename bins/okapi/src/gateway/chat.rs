@@ -77,6 +77,7 @@ struct ProbeInfo {
 /// 每请求计费上下文（转发与异步结算共享）。
 #[derive(Clone)]
 struct RequestBilling {
+    trace: super::diagnostics::Trace,
     state: AppState,
     ingress: Ingress,
     book: Arc<PriceBook>,
@@ -294,7 +295,7 @@ pub async fn chat_completions(
         needs_tools,
         needs_vision,
     };
-    match handle_chat(
+    match Box::pin(handle_chat(
         &state,
         &headers,
         &body,
@@ -302,7 +303,7 @@ pub async fn chat_completions(
         started,
         Ingress::OpenAi,
         &info,
-    )
+    ))
     .await
     {
         Ok(resp) => resp,
@@ -312,7 +313,7 @@ pub async fn chat_completions(
 
 /// OpenAI /v1/responses 入口（§4.4：渠道说 Responses 方言则直转，否则降级 ChatCompletions #5209）。
 pub async fn responses(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    responses_entry(state, headers, body, Ingress::Responses).await
+    Box::pin(responses_entry(state, headers, body, Ingress::Responses)).await
 }
 
 pub async fn responses_compact(
@@ -320,7 +321,13 @@ pub async fn responses_compact(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    responses_entry(state, headers, body, Ingress::ResponsesCompact).await
+    Box::pin(responses_entry(
+        state,
+        headers,
+        body,
+        Ingress::ResponsesCompact,
+    ))
+    .await
 }
 
 fn compact_request_body(body: &Bytes) -> Result<Bytes, serde_json::Error> {
@@ -371,7 +378,11 @@ async fn responses_entry(
         needs_tools,
         needs_vision,
     };
-    match handle_chat(&state, &headers, &body, request_id, started, ingress, &info).await {
+    match Box::pin(handle_chat(
+        &state, &headers, &body, request_id, started, ingress, &info,
+    ))
+    .await
+    {
         Ok(resp) => resp,
         Err(err) => err.into_response_with(Some(request_id)),
     }
@@ -438,7 +449,7 @@ pub async fn gemini_generate(
         needs_tools,
         needs_vision,
     };
-    match handle_chat(
+    match Box::pin(handle_chat(
         &state,
         &headers,
         &body,
@@ -446,7 +457,7 @@ pub async fn gemini_generate(
         started,
         Ingress::Gemini,
         &info,
-    )
+    ))
     .await
     {
         Ok(resp) => resp,
@@ -477,7 +488,7 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
         needs_tools,
         needs_vision,
     };
-    match handle_chat(
+    match Box::pin(handle_chat(
         &state,
         &headers,
         &body,
@@ -485,7 +496,7 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
         started,
         Ingress::Anthropic,
         &info,
-    )
+    ))
     .await
     {
         Ok(resp) => resp,
@@ -501,7 +512,17 @@ pub async fn messages_count_tokens(
     body: Bytes,
 ) -> Response {
     let request_id = Uuid::new_v4();
-    match count_tokens_inner(&state, &headers, body).await {
+    match tokio::time::timeout(
+        Duration::from_mins(1),
+        count_tokens_inner(&state, &headers, body),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(AppError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            codes::UPSTREAM_TIMEOUT,
+        ))
+    }) {
         Ok(resp) => resp,
         Err(err) => err.into_anthropic_response_with(Some(request_id)),
     }
@@ -513,6 +534,7 @@ async fn count_tokens_inner(
     body: Bytes,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
+    let _permit = super::sched_redis::token_count::CountPermit::acquire(&state.sched, &key).await?;
     // 不计费，但有 anthropic 候选时会拿渠道凭证打上游 tokenizer：按分组窗限速（§11.32）。
     // 不过 check_member_limit——那是月度消费上限，不该挡住不花钱的调用
     super::auth::check_group_rate(state, &key).await?;
@@ -541,6 +563,20 @@ async fn count_tokens_inner(
         .into_iter()
         .find(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"));
     if let Some(cand) = cand {
+        if let Some(limit) = cand.rpm_limit
+            && !state
+                .sched
+                .channel_key_rate_ok(cand.channel_key_id, i64::from(limit))
+                .await
+        {
+            return Err(AppError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                codes::RATE_LIMITED,
+            ));
+        }
+        let _slot = super::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
+            .await
+            .ok_or_else(|| AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED))?;
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         let body_up = rewrite_model(&body, &probe.model, &upstream_model)
             .map_err(|_| AppError::bad_request())?;
@@ -745,7 +781,7 @@ async fn handle_chat(
     info: &ProbeInfo,
 ) -> Result<Response, AppError> {
     let bill = prepare_chat(state, headers, body, request_id, started, ingress, info).await?;
-    match forward(&bill, info, body).await {
+    match Box::pin(forward(&bill, info, body)).await {
         Ok(resp) => Ok(resp),
         Err(failure) => {
             settle_failure(&bill, &failure).await;
@@ -944,7 +980,16 @@ async fn prepare_chat(
         .cloned()
         .collect();
     let bill_model_for_tier = canonical.clone();
+    let trace = super::diagnostics::Trace::current()
+        .unwrap_or_else(|| super::diagnostics::Trace::new(headers));
+    if let Some(directive) = directive {
+        trace.set(
+            "reasoning_effort",
+            serde_json::json!(directive.effective_effort().as_str()),
+        );
+    }
     let bill = RequestBilling {
+        trace,
         state: state.clone(),
         ingress,
         book: Arc::clone(&book),
@@ -1299,29 +1344,48 @@ async fn try_model(
         let same_key_retries = cand.same_key_retries;
         let mut retry: i16 = 0;
         let attempt = loop {
-            let result = if info.stream {
-                attempt_stream(
-                    bill,
-                    &cand,
-                    &base,
-                    body_up.clone(),
-                    failover,
-                    sticky_layer,
-                    retry,
-                )
-                .await
-            } else {
-                attempt_json(
-                    bill,
-                    &cand,
-                    &base,
-                    body_up.clone(),
-                    failover,
-                    sticky_layer,
-                    retry,
-                )
-                .await
+            bill.trace.begin(
+                &cand,
+                &upstream_model,
+                upstream_endpoint(&cand, bill.is_stream, bill.ingress),
+            );
+            let attempt = async {
+                if info.stream {
+                    attempt_stream(
+                        bill,
+                        &cand,
+                        &base,
+                        body_up.clone(),
+                        failover,
+                        sticky_layer,
+                        retry,
+                    )
+                    .await
+                } else {
+                    attempt_json(
+                        bill,
+                        &cand,
+                        &base,
+                        body_up.clone(),
+                        failover,
+                        sticky_layer,
+                        retry,
+                    )
+                    .await
+                }
             };
+            let result = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
+                attempt,
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(AttemptError::Retriable {
+                    code: codes::UPSTREAM_TIMEOUT,
+                    upstream_status: None,
+                    failure_kind: KeyFailure::Transient,
+                })
+            });
             // Responses 直转撞上 404/405 = 这个上游根本没有 /responses（"openai" 渠道指着
             // 只实现了 chat 的第三方地址是常态）。同一候选就地改走降级链再来一次：
             // 不计 failover、不计 retry、不标 key 失败——渠道没坏，是方言不对。
@@ -1538,6 +1602,9 @@ fn build_upstream_body(
 }
 
 fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> AttemptError {
+    if let Some(trace) = super::diagnostics::Trace::current() {
+        trace.failure(&err);
+    }
     if err.retriable_before_first_token() {
         return AttemptError::Retriable {
             code: err.error_code(),
@@ -1941,6 +2008,7 @@ async fn dispatch_chat(
     };
     let mut resp = resp?;
     if native_responses {
+        bill.trace.finish(None, None);
         // 直转：上游已是 Responses 形状，reasoning 以原生 reasoning item 呈现，
         // 既无需合成事件骨架，也不做 thinking_to_content（那是 chat 形状的补丁）
         return Ok(resp);
@@ -2011,6 +2079,18 @@ async fn capture_response_event(
 
 // ---- 流式 ----
 
+fn first_output_buffer_full(buffered: &[ChatEvent]) -> bool {
+    buffered.len() >= 256
+        || buffered
+            .iter()
+            .filter_map(|e| match e {
+                ChatEvent::Data { raw, .. } => Some(raw.len()),
+                ChatEvent::Done => None,
+            })
+            .sum::<usize>()
+            > 16 * 1024 * 1024
+}
+
 async fn attempt_stream(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
@@ -2025,6 +2105,7 @@ async fn attempt_stream(
     let first_output_window = first_output_window(cand);
     let resp = match tokio::time::timeout(first_output_window, connect).await {
         Err(_) => {
+            bill.trace.failure(&UpstreamError::Timeout);
             return Err(AttemptError::Retriable {
                 code: codes::UPSTREAM_TIMEOUT,
                 upstream_status: None,
@@ -2055,6 +2136,9 @@ async fn attempt_stream(
                             ..
                         }
                     );
+                    if first_output_buffer_full(&buffered) {
+                        return Err(UpstreamError::Stream("first_output_buffer_limit".into()));
+                    }
                     buffered.push(event);
                     if has_output {
                         return Ok(true);
@@ -2068,17 +2152,24 @@ async fn attempt_stream(
     .await;
 
     match first {
-        Err(_) => Err(AttemptError::Retriable {
-            code: codes::UPSTREAM_TIMEOUT,
-            upstream_status: None,
-            failure_kind: KeyFailure::Transient,
-        }),
+        Err(_) => {
+            bill.trace.failure(&UpstreamError::Timeout);
+            Err(AttemptError::Retriable {
+                code: codes::UPSTREAM_TIMEOUT,
+                upstream_status: None,
+                failure_kind: KeyFailure::Transient,
+            })
+        }
         Ok(Err(err)) => Err(classify_fatal(err, failover, channel)),
-        Ok(Ok(false)) => Err(AttemptError::Retriable {
-            code: codes::EMPTY_COMPLETION,
-            upstream_status: None,
-            failure_kind: KeyFailure::Transient,
-        }),
+        Ok(Ok(false)) => {
+            bill.trace
+                .failure(&UpstreamError::Stream(codes::EMPTY_COMPLETION.into()));
+            Err(AttemptError::Retriable {
+                code: codes::EMPTY_COMPLETION,
+                upstream_status: None,
+                failure_kind: KeyFailure::Transient,
+            })
+        }
         Ok(Ok(true)) => {
             let mut writer = response_writer(bill, cand);
             for event in &buffered {
@@ -2180,6 +2271,7 @@ fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) ->
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_stream_pump(
     bill: RequestBilling,
     mut info: CandInfo,
@@ -2200,13 +2292,13 @@ fn spawn_stream_pump(
         let mut usage: Option<UsageProbe> = None;
         let mut content_chars: usize = 0;
         let mut client_gone = false;
-        // 响应元数据采集：model（渠道 opt-in）/ service_tier（模型配了档位倍率）
+        // Observe the returned model independently of the opt-in billing policy.
         let mut resp_meta = RespMeta::default();
-        let want_meta = info.bill_resp_model || bill.has_tier_pricing;
 
         let mut terminal = Vec::new();
         for event in buffered {
-            if want_meta && (resp_meta.model.is_none() || resp_meta.service_tier.is_none()) {
+            if let ChatEvent::Data { raw, .. } = &event { bill.trace.stream_event(raw); }
+            if resp_meta.model.is_none() || (bill.has_tier_pricing && resp_meta.service_tier.is_none()) {
                 capture_chunk_meta(&event, &mut resp_meta);
             }
             if defer_settlement_terminal(&event, bill.ingress) {
@@ -2229,9 +2321,12 @@ fn spawn_stream_pump(
         }
         let mut saw_done = false;
         while !client_gone && !saw_done {
-            match handle.events.next().await {
+            let next = tokio::time::timeout_at(tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)), handle.events.next()).await
+                .unwrap_or(Some(Err(UpstreamError::Timeout)));
+            match next {
                 Some(Ok(event)) => {
-                    if want_meta && (resp_meta.model.is_none() || resp_meta.service_tier.is_none()) {
+                    if let ChatEvent::Data { raw, .. } = &event { bill.trace.stream_event(raw); }
+                    if resp_meta.model.is_none() || (bill.has_tier_pricing && resp_meta.service_tier.is_none()) {
                         capture_chunk_meta(&event, &mut resp_meta);
                     }
                     if let Err(err) = capture_response_event(&mut writer, &bill, &event).await {
@@ -2269,13 +2364,27 @@ fn spawn_stream_pump(
                 }
                 // 首字后断流：不可回退，按已产出结算（§3.6）
                 Some(Err(err)) => {
+                    bill.trace.failure(&err);
+                    bill.trace.set("request_failed", serde_json::json!(true));
+                    bill.trace.set("stream_end_reason", serde_json::json!("upstream_error"));
+                    info.outcome = Some((err.upstream_status().unwrap_or(502), err.error_code().into()));
                     tracing::warn!(request_id = %request_id, error = %err, "首字后断流，按已产出结算");
+                    let payload=serde_json::json!({"error":{"code":err.error_code(),"message":err.error_code(),"request_id":request_id}}).to_string();
+                    let _ = tokio::time::timeout(Duration::from_secs(5),tx.send(Ok(Event::default().event("error").data(payload)))).await;
                     break;
                 }
                 None => break,
             }
         }
         drop(handle); // 取消上游（客户端断开路径）
+        bill.trace.response_model(resp_meta.model.as_deref());
+        if info.outcome.is_none() && bill.trace.snapshot()["request_failed"] == true {
+            info.outcome = Some((502, codes::UPSTREAM_ERROR.into()));
+        }
+        if bill.trace.snapshot().get("stream_end_reason").is_none() {
+            bill.trace.set("stream_end_reason", serde_json::json!(if client_gone { "client_closed" } else if saw_done { "completed" } else { "upstream_closed" }));
+        }
+        if !info.bill_resp_model { resp_meta.model = None; }
         let result = settle_stream(
             &bill,
             &info,
@@ -2410,7 +2519,9 @@ async fn push_event(
             | Ingress::Gemini => return true,
         },
     };
-    tx.send(Ok(sse_event)).await.is_ok()
+    tokio::time::timeout(Duration::from_secs(10), tx.send(Ok(sse_event)))
+        .await
+        .is_ok_and(|result| result.is_ok())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2559,6 +2670,8 @@ async fn attempt_json(
                 retry,
             );
             info.upstream_request_id = upstream_request_id;
+            bill.trace
+                .response_model(extract_body_meta(&body).model.as_deref());
             // 响应元数据（model 渠道 opt-in / service_tier 模型配档位倍率）
             let resp_meta = if info.bill_resp_model || bill.has_tier_pricing {
                 let mut m = extract_body_meta(&body);
@@ -2960,6 +3073,7 @@ fn usage_dimensions(bill: &RequestBilling, info: &CandInfo) -> okapi_ledger::pg:
         endpoint,
         &info.upstream_endpoint,
     )
+    .with_diagnostics(Some(bill.trace.snapshot()))
 }
 
 // ---- 响应工具 ----

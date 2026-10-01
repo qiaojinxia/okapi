@@ -128,11 +128,85 @@ pub async fn prune(pg: &PgPool, now: DateTime<Utc>) -> Result<Vec<String>, Store
     };
     let mut dropped = Vec::new();
     for candidate in candidates {
+        if candidate.definition.as_deref() == Some("DEFAULT") {
+            if prune_default(pg, &candidate, keep_from).await? > 0 {
+                dropped.push(format!("{}:rows", candidate.name));
+            }
+            continue;
+        }
         if archive_one(pg, &candidate, keep_from).await? {
             dropped.push(candidate.name);
         }
     }
     Ok(dropped)
+}
+
+/// Retain the catch-all partition, but archive/delete its expired rows in bounded batches.
+async fn prune_default(
+    pg: &PgPool,
+    candidate: &Partition,
+    keep_from: DateTime<Utc>,
+) -> Result<u64, StoreError> {
+    let mut total = 0u64;
+    for _ in 0..10 {
+        let mut tx = pg.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout='5s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout='10s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!("SELECT pg_advisory_xact_lock($1)", RETENTION_LOCK)
+            .execute(&mut *tx)
+            .await?;
+        let Some(found) = partitions(&mut tx, Some(&candidate.name))
+            .await?
+            .into_iter()
+            .find(|p| p.oid == candidate.oid && p.definition.as_deref() == Some("DEFAULT"))
+        else {
+            return Ok(total);
+        };
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE",
+            found.qualified
+        )))
+        .execute(&mut *tx)
+        .await?;
+        if !partitions(&mut tx, Some(&found.name))
+            .await?
+            .iter()
+            .any(|p| p.oid == found.oid && p.definition.as_deref() == Some("DEFAULT"))
+        {
+            return Ok(total);
+        }
+        let table = found.qualified;
+        let query = match found.parent.as_str() {
+            "billing_events" => format!(
+                "WITH removed AS (DELETE FROM {table} WHERE (event_id,created_at) IN (SELECT event_id,created_at FROM {table} WHERE created_at<$1 ORDER BY created_at,event_id LIMIT 1000) RETURNING *) INSERT INTO billing_event_carry(user_id,pool,actor,event_type,delta_micro,event_count) SELECT user_id,pool,actor,event_type,SUM(delta_micro),COUNT(*) FROM removed GROUP BY user_id,pool,actor,event_type ON CONFLICT(user_id,pool,actor,event_type) DO UPDATE SET delta_micro=billing_event_carry.delta_micro+EXCLUDED.delta_micro,event_count=billing_event_carry.event_count+EXCLUDED.event_count"
+            ),
+            "billing_records" => {
+                let fields = "request_id,user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,status,amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,pricing_snapshot,usage_details,created_at,source_window";
+                format!(
+                    "WITH removed AS (DELETE FROM {table} WHERE (id,created_at) IN (SELECT id,created_at FROM {table} WHERE created_at<$1 ORDER BY created_at,id LIMIT 1000) RETURNING *) INSERT INTO billing_record_receipts({fields}) SELECT {fields} FROM removed"
+                )
+            }
+            "audit_logs" => format!(
+                "DELETE FROM {table} WHERE (id,created_at) IN (SELECT id,created_at FROM {table} WHERE created_at<$1 ORDER BY created_at,id LIMIT 1000)"
+            ),
+            _ => return Err(StoreError::InvalidData("retention_parent")),
+        };
+        let changed = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(keep_from)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        total = total.saturating_add(changed);
+        if changed == 0 {
+            break;
+        }
+    }
+    Ok(total)
 }
 
 async fn archive_one(
@@ -237,10 +311,23 @@ async fn carry_records(
 /// deliveries or any batch still referenced by a DLQ entry.
 pub async fn prune_delivery(pg: &PgPool, now: DateTime<Utc>) -> Result<(), StoreError> {
     let cutoff = now - chrono::Duration::days(7);
-    let mut tx = pg.begin().await?;
-    sqlx::query!("DELETE FROM billing_outbox o USING billing_ch_batches b WHERE o.ch_batch_id=b.id AND o.status=1 AND b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id)",cutoff).execute(&mut *tx).await?;
-    sqlx::query!("DELETE FROM billing_ch_events e USING billing_ch_batches b WHERE e.batch_id=b.id AND b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id)",cutoff).execute(&mut *tx).await?;
-    sqlx::query!("DELETE FROM billing_ch_batches b WHERE b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_ch_events e WHERE e.batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id)",cutoff).execute(&mut *tx).await?;
-    tx.commit().await?;
+    // Bound lock duration and memory per pass. Remaining history is handled next sweep.
+    for _ in 0..10 {
+        let mut tx = pg.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout='2s'")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SET LOCAL statement_timeout='10s'")
+            .execute(&mut *tx)
+            .await?;
+        let outbox=sqlx::query!("DELETE FROM billing_outbox WHERE id IN (SELECT o.id FROM billing_outbox o JOIN billing_ch_batches b ON o.ch_batch_id=b.id WHERE o.status=1 AND b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id) ORDER BY o.id LIMIT 1000 FOR UPDATE OF o SKIP LOCKED)",cutoff).execute(&mut *tx).await?.rows_affected();
+        let events=sqlx::query!("DELETE FROM billing_ch_events WHERE event_key IN (SELECT e.event_key FROM billing_ch_events e JOIN billing_ch_batches b ON e.batch_id=b.id WHERE b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id) ORDER BY e.event_key LIMIT 1000 FOR UPDATE OF e SKIP LOCKED)",cutoff).execute(&mut *tx).await?.rows_affected();
+        let batches=sqlx::query!("DELETE FROM billing_ch_batches WHERE id IN (SELECT b.id FROM billing_ch_batches b WHERE b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_ch_events e WHERE e.batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id) ORDER BY b.id LIMIT 1000 FOR UPDATE OF b SKIP LOCKED)",cutoff).execute(&mut *tx).await?.rows_affected();
+        tx.commit().await?;
+        if outbox + events + batches == 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     Ok(())
 }

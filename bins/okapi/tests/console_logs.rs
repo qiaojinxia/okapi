@@ -901,3 +901,62 @@ async fn error_breakdown_groups_by_code() {
         "占比应按整数基点给出"
     );
 }
+
+#[tokio::test]
+async fn admin_logs_keep_missing_timing_null_and_include_charged_stream_failures() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        return;
+    }
+    let mut missing = payload(&env, None);
+    missing["latency_ms"] = Value::Null;
+    missing["ttft_ms"] = Value::Null;
+    let mut reported = payload(&env, None);
+    reported["latency_ms"] = json!(0);
+    reported["ttft_ms"] = json!(0);
+    reported["status"] = json!(20);
+    reported["upstream_request_id"] = json!(format!("up-{}", Uuid::new_v4()));
+    reported["diagnostics"] = json!({"request_failed":true,"error_phase":"stream","error_message":"broken stream","response_model":"actual-model","attempts":[{"status":502,"outcome":"failure"}]});
+    for p in [&missing, &reported] {
+        sqlx::query("INSERT INTO billing_outbox(topic,payload) VALUES ('request_log',$1)")
+            .bind(p)
+            .execute(&env.pg)
+            .await
+            .unwrap();
+    }
+    let old = poll_row(
+        &env,
+        &format!(
+            "/admin/logs?user_id={}&request_id={}",
+            env.user_id,
+            missing["request_id"].as_str().unwrap()
+        ),
+        |_| true,
+    )
+    .await;
+    assert!(old["latency_ms"].is_null());
+    assert!(old["ttft_ms"].is_null());
+    assert!(old["status"].is_null());
+    let row = poll_row(&env, &format!("/admin/logs?user_id={}&errors_only=true&log_type=2&group=default&client_type=test-cli&upstream_request_id={}",env.user_id,reported["upstream_request_id"].as_str().unwrap()), |_| true).await;
+    assert_eq!(row["latency_ms"], 0);
+    assert_eq!(row["ttft_ms"], 0);
+    assert_eq!(row["is_error"], true);
+    assert_eq!(row["status"], 20);
+    assert_eq!(row["amount_micro"], 1000);
+    assert_eq!(row["diagnostics"]["response_model"], "actual-model");
+    assert_eq!(row["diagnostics"]["attempts"][0]["status"], 502);
+    let request: Uuid = reported["request_id"].as_str().unwrap().parse().unwrap();
+    sqlx::query("INSERT INTO billing_records(request_id,user_id,api_key_id,model_name,status,amount_micro) VALUES ($1,$2,$3,$4,30,1000)")
+        .bind(request).bind(env.user_id).bind(env.user_key_id).bind(&env.model).execute(&env.pg).await.unwrap();
+    let (status, refreshed) = get(
+        &env,
+        &format!("/admin/logs?request_id={request}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        refreshed["data"][0]["status"], 30,
+        "current ledger refunds override the immutable delivered status"
+    );
+}

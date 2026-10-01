@@ -2,6 +2,9 @@
 //! 一个钱包主体（合作商）+ 两把员工 key → 各自请求 → key 视角只见自己、
 //! user 视角见汇总、/api/me/keys 分账正确。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -102,6 +105,7 @@ async fn partner_employee_keys_see_own_usage() {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, partner).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", Some(&ch_url), None)
         .await
         .unwrap();

@@ -13,6 +13,9 @@ pub struct UsageDimensions {
     pub upstream_model: String,
     pub endpoint: String,
     pub upstream_endpoint: String,
+    /// Bounded request diagnostics; absent on historical/replayed legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<serde_json::Value>,
 }
 
 impl UsageDimensions {
@@ -22,7 +25,14 @@ impl UsageDimensions {
             upstream_model: upstream.into(),
             endpoint: endpoint.into(),
             upstream_endpoint: upstream_endpoint.into(),
+            diagnostics: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_diagnostics(mut self, diagnostics: Option<serde_json::Value>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 }
 
@@ -141,6 +151,48 @@ pub struct OwnedSettlementInput {
     pub pool: Pool,
     /// Immutable subscription window selected at admission; None for wallet/legacy.
     pub source_window: Option<String>,
+}
+
+impl From<SettlementInput<'_>> for OwnedSettlementInput {
+    fn from(input: SettlementInput<'_>) -> Self {
+        Self {
+            dimensions: input.dimensions,
+            request_id: input.request_id,
+            log_type: input.log_type,
+            user_id: input.user_id,
+            api_key_id: input.api_key_id,
+            group_code: input.group_code.to_owned(),
+            model_name: input.model_name.to_owned(),
+            channel_id: input.channel_id,
+            channel_key_id: input.channel_key_id,
+            state: input.state,
+            usage: input.usage,
+            amount: input.amount,
+            original: input.original,
+            discount: input.discount,
+            list_price: input.list_price,
+            upstream_cost: input.upstream_cost,
+            pricing_epoch: input.pricing_epoch,
+            pricing_snapshot: input.pricing_snapshot,
+            latency_ms: input.latency_ms,
+            ttft_ms: input.ttft_ms,
+            is_stream: input.is_stream,
+            retry_count: input.retry_count,
+            failover_count: input.failover_count,
+            upstream_status: input.upstream_status,
+            error_code: input.error_code.map(str::to_owned),
+            upstream_request_id: input.upstream_request_id.map(str::to_owned),
+            node: input.node.to_owned(),
+            sticky_layer: input.sticky_layer,
+            client_type: input.client_type.to_owned(),
+            client_ip: input.client_ip.map(str::to_owned),
+            delta_micro: input.delta_micro,
+            balance_after: input.balance_after,
+            event_type: input.event_type.to_owned(),
+            pool: input.pool,
+            source_window: input.source_window,
+        }
+    }
 }
 
 impl OwnedSettlementInput {
@@ -311,6 +363,7 @@ pub async fn record_settlement_in_tx(
         "completion_source": input.usage.completion_source(),
         "requested_model": input.dimensions.requested_model,
         "endpoint": input.dimensions.endpoint,
+        "diagnostics": input.dimensions.diagnostics,
     }))
     .bind(&input.source_window)
     .execute(&mut **tx)
@@ -364,7 +417,7 @@ pub async fn record_settlement_in_tx(
 
     sqlx::query!(
         r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.completed', $1)"#,
-        with_usage_source(serde_json::json!({
+        with_request_diagnostics(with_usage_source(serde_json::json!({
             "request_id": input.request_id,
             "user_id": input.user_id,
             "api_key_id": input.api_key_id,
@@ -406,7 +459,7 @@ pub async fn record_settlement_in_tx(
             "client_type": input.client_type,
             "client_ip": input.client_ip,
             "pool": input.pool.as_i16(),
-        }), input.usage, input_unit, input_characters)
+        }), input.usage, input_unit, input_characters), input.dimensions.diagnostics.as_ref())
     )
     .execute(&mut **tx)
     .await?;
@@ -540,6 +593,16 @@ fn input_units(
     }
 }
 
+fn with_request_diagnostics(
+    mut payload: serde_json::Value,
+    diagnostics: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    if let Some(diagnostics) = diagnostics {
+        payload["diagnostics"] = diagnostics.clone();
+    }
+    payload
+}
+
 fn with_usage_source(
     mut payload: serde_json::Value,
     usage: TokenUsage,
@@ -568,6 +631,20 @@ mod unit_tests {
     use super::input_units;
     use okapi_domain::{TokenUsage, UpstreamTokenCounts};
     use serde_json::json;
+
+    #[test]
+    fn legacy_dimensions_replay_without_diagnostics_and_new_metadata_roundtrips() {
+        let legacy = json!({"requested_model":"alias","upstream_model":"provider-model","endpoint":"/v1/chat/completions","upstream_endpoint":"/v1/chat/completions"});
+        let dimensions: super::UsageDimensions = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(dimensions.diagnostics.is_none());
+        assert_eq!(serde_json::to_value(&dimensions).unwrap(), legacy);
+        let metadata = json!({"error_message":"quoted \"value\"","request_failed":true});
+        let dimensions = dimensions.with_diagnostics(Some(metadata.clone()));
+        let replayed: super::UsageDimensions =
+            serde_json::from_value(serde_json::to_value(dimensions).unwrap()).unwrap();
+        assert_eq!(replayed.diagnostics, Some(metadata));
+        assert_eq!(replayed.requested_model, "alias");
+    }
 
     #[test]
     fn character_units_keep_known_zero_and_u32_boundary() {

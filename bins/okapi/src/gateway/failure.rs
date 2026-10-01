@@ -15,7 +15,9 @@ pub(crate) struct Guard {
     pool: Pool,
     window: Option<String>,
     channel: Option<(i64, i64)>,
+    error_code: String,
     armed: bool,
+    trace: Option<super::diagnostics::Trace>,
 }
 impl Guard {
     #[allow(clippy::too_many_arguments)]
@@ -40,15 +42,31 @@ impl Guard {
             pool,
             window: window.map(str::to_owned),
             channel: None,
+            error_code: okapi_api::codes::UPSTREAM_ERROR.to_owned(),
             armed: true,
+            trace: super::diagnostics::Trace::current(),
         }
     }
     pub fn channel(&mut self, candidate: &okapi_store::ChannelCandidate) {
+        if let Some(trace) = &self.trace {
+            trace.begin(
+                candidate,
+                candidate.upstream_model(&self.model),
+                &self.dimensions.upstream_endpoint,
+            );
+        }
         self.channel = Some((candidate.channel_id, candidate.channel_key_id));
         self.dimensions.upstream_model = candidate.upstream_model(&self.model).to_owned();
     }
     pub fn disarm(&mut self) {
         self.armed = false;
+    }
+    pub fn error(&mut self, error: &super::error::AppError) {
+        self.error_code.clone_from(&error.code);
+    }
+    pub fn upstream(&mut self, model: &str, channel: (i64, i64)) {
+        self.channel = Some(channel);
+        model.clone_into(&mut self.dimensions.upstream_model);
     }
 }
 impl Drop for Guard {
@@ -60,11 +78,15 @@ impl Drop for Guard {
         let key = self.key.clone();
         let id = self.id;
         let model = self.model.clone();
-        let dimensions = self.dimensions.clone();
+        let dimensions = self
+            .dimensions
+            .clone()
+            .with_diagnostics(self.trace.as_ref().map(super::diagnostics::Trace::snapshot));
         let pool = self.pool;
         let window = self.window.clone();
         let channel = self.channel;
         let started = self.started;
+        let error_code = self.error_code.clone();
         // Shutdown tracks this detached cleanup, including cancellation of the handler.
         self.state.settlements.spawn(async move {
             let _ = state.ledger.refund(key.user_id, key.key_id, id).await;
@@ -94,7 +116,7 @@ impl Drop for Guard {
                     retry_count: 0,
                     failover_count: 0,
                     upstream_status: None,
-                    error_code: Some(okapi_api::codes::UPSTREAM_ERROR),
+                    error_code: Some(&error_code),
                     upstream_request_id: None,
                     node: &state.node,
                     sticky_layer: 0,

@@ -39,6 +39,9 @@ mod cache_billing;
 #[path = "support/image_streaming.rs"]
 mod streaming;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 const WAIT: Duration = Duration::from_secs(10);
 const BALANCE: i64 = 1_000_000;
 const PRICE: i64 = 40_000;
@@ -226,6 +229,7 @@ async fn setup_at(
             .await
             .unwrap();
     }
+    published_pricing::publish(&pg, user).await;
     let mut state = gateway::build_state(database, &redis, &model, None, None)
         .await
         .unwrap();
@@ -315,13 +319,17 @@ impl Env {
             .await
             .unwrap();
         assert_eq!(used, amount);
-        let actual: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM billing_records WHERE user_id=$1")
-                .bind(self.user)
-                .fetch_one(&self.state.pg)
-                .await
-                .unwrap();
+        let actual: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_records WHERE user_id=$1 AND log_type=2",
+        )
+        .bind(self.user)
+        .fetch_one(&self.state.pg)
+        .await
+        .unwrap();
         assert_eq!(actual, records);
+        let invalid_failures: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM billing_records WHERE user_id=$1 AND log_type=5 AND (status<>40 OR amount_micro<>0)")
+            .bind(self.user).fetch_one(&self.state.pg).await.unwrap();
+        assert_eq!(invalid_failures, 0);
     }
     async fn record(&self, response: &reqwest::Response) -> Value {
         self.state.settlements.wait_idle(WAIT).await;

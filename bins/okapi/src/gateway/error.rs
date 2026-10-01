@@ -144,6 +144,13 @@ impl From<StoreError> for AppError {
         if let StoreError::Conflict(code) = err {
             return Self::new(StatusCode::CONFLICT, code);
         }
+        if let StoreError::InvalidData(
+            code @ ("statistics_calendar_history_incomplete"
+            | "statistics_request_history_incomplete"),
+        ) = err
+        {
+            return Self::internal().with_param(code);
+        }
         tracing::error!(error = %err, "store error");
         Self::internal()
     }

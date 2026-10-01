@@ -54,6 +54,18 @@ struct Env {
     channel: i64,
     channel_key: i64,
 }
+async fn publish_pricing(pg: &sqlx::PgPool, user: i64) {
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(pg, user, &snapshot)
+        .await
+        .unwrap();
+}
+
 async fn setup() -> Env {
     dotenvy::dotenv().ok();
     let database = std::env::var("DATABASE_URL").unwrap();
@@ -72,6 +84,7 @@ async fn setup() -> Env {
     okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
         .await
         .unwrap();
+    publish_pricing(&pg, user).await;
     let (send, accepted) = mpsc::channel(8);
     let handshake_failure = Arc::new(AtomicU16::new(0));
     let failure = handshake_failure.clone();
@@ -239,7 +252,7 @@ async fn emit(peer: &mut WebSocket, mut value: Value, lane: Option<&str>) {
 }
 async fn completed(peer: &mut WebSocket, lane: Option<&str>, output: u32) -> String {
     let id = format!("resp_{}", Uuid::new_v4().simple());
-    emit(peer, json!({"type":"response.completed","response":{"id":id,"object":"response","status":"completed","usage":{"input_tokens":100,"output_tokens":output}}}), lane).await;
+    emit(peer, json!({"type":"response.completed","response":{"id":id,"object":"response","model":"observed-ws-model","status":"completed","usage":{"input_tokens":100,"output_tokens":output}}}), lane).await;
     id
 }
 
@@ -301,6 +314,18 @@ async fn warmup_history_and_per_turn_authorization_and_billing() {
     let second = read(&mut client).await;
     assert_ne!(first["okapi_request_id"], second["okapi_request_id"]);
     assert_eq!(env.amount(&second).await.0, 240);
+    let record: (String, Value) =
+        sqlx::query_as("SELECT model_name,usage_details FROM billing_records WHERE request_id=$1")
+            .bind(Uuid::parse_str(second["okapi_request_id"].as_str().unwrap()).unwrap())
+            .fetch_one(&env.state.pg)
+            .await
+            .unwrap();
+    assert_eq!(record.0, env.model);
+    assert_eq!(
+        record.1["diagnostics"]["response_model"],
+        "observed-ws-model"
+    );
+    assert_eq!(record.1["diagnostics"]["attempts"][0]["outcome"], "success");
     assert_eq!(env.balance().await, 10_000_000 - 440);
     sqlx::query("UPDATE api_keys SET model_allowlist=$2 WHERE id=$1")
         .bind(env.key)

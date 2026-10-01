@@ -111,6 +111,15 @@ async fn setup() -> TestEnv {
     okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
         .await
         .unwrap();
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(&pg, user_id, &snapshot)
+        .await
+        .unwrap();
 
     let calls = Calls::default();
     let router = Router::new()
@@ -248,7 +257,18 @@ async fn upstream_cut_after_first_token_settles_partial_output_without_retry() {
     let rec = wait_committed(&env.pg, request_id).await;
     assert_eq!(rec.status, 20, "按已产出结算为 committed");
     assert_eq!(rec.failover_count, 0);
-    assert!(rec.error_code.is_none(), "{:?}", rec.error_code);
+    assert_eq!(rec.error_code.as_deref(), Some("upstream_error"));
+    let details: serde_json::Value =
+        sqlx::query_scalar("SELECT usage_details FROM billing_records WHERE request_id=$1")
+            .bind(request_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(details["diagnostics"]["request_failed"], true);
+    assert_eq!(
+        details["diagnostics"]["stream_end_reason"],
+        "upstream_error"
+    );
     assert!(rec.prompt_tokens > 0, "prompt 用本地估算");
     assert!(
         rec.completion_tokens > 0,

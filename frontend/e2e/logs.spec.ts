@@ -647,7 +647,10 @@ for (const { width, height, language } of [
     await expect(page.locator('[data-slot="pagination"]')).toBeInViewport({ ratio: 1 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     const viewport = page.locator('[data-slot="table-viewport"]')
-    expect(await viewport.evaluate((node) => node.scrollWidth <= node.clientWidth + 1)).toBe(true)
+    const horizontal = await viewport.evaluate((node) => node.scrollWidth > node.clientWidth + 1)
+    await expect(frame.getByRole('group')).toHaveCount(horizontal ? 1 : 0)
+    const columnControlsHeight = horizontal ? (await frame.getByRole('group').boundingBox())!.height : 0
+    const scrollbarHeight = await viewport.evaluate((node) => node.offsetHeight - node.clientHeight)
     const visible = await table.locator('tbody tr').evaluateAll((nodes) => {
       const viewport = nodes[0].closest('[data-slot="table-viewport"]')!.getBoundingClientRect()
       const header = nodes[0].closest('table')!.querySelector('thead')!.getBoundingClientRect()
@@ -656,7 +659,7 @@ for (const { width, height, language } of [
         return row.top >= header.bottom - 1 && row.bottom <= viewport.bottom + 1
       }).length
     })
-    expect(visible).toBeGreaterThanOrEqual(Math.floor((height - 380) / 44) - 1)
+    expect(visible).toBeGreaterThanOrEqual(Math.floor((height - 380) / 44) - 1 - Math.ceil((columnControlsHeight + scrollbarHeight) / 44))
     expect(Math.abs((await table.locator('tbody tr').first().boundingBox())!.height - 44)).toBeLessThanOrEqual(1)
     await expect(table.locator('tbody tr').first().locator('td').nth(4)).toHaveAttribute('title', rows[0].model)
     const headerY = (await table.locator('thead').boundingBox())!.y
@@ -666,6 +669,97 @@ for (const { width, height, language } of [
     await page.screenshot({ path: `test-results/admin-log-density-${width}-${language}.png`, animations: 'disabled' })
   })
 }
+
+for (const width of [390, 1366, 1920]) test(`管理日志失败信息 ${width}px：状态和用户可读，错误记录与完整详情可见`, async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width, height: 900 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  const longCode = `provider_error_${'specific-detail-'.repeat(18)}`
+  const records = [
+    { ...log, request_id: 'failed-batch', username: 'hold-fixture-01', model: 'batch-image', log_type: 5, status: 40,
+      error_code: 'batch_failed', is_error: true, upstream_status: 200, amount_micro: 0 },
+    { ...log, request_id: 'failed-provider', error_code: longCode, log_type: 5, status: 40, is_error: true, upstream_status: 502 },
+    { ...log, request_id: 'failed-no-code', error_code: '', log_type: 5, status: 40, is_error: true, upstream_status: 0 },
+    { ...log, request_id: 'successful' },
+  ]
+  const queries: URL[] = []
+  await page.route('**/admin/logs?*', (route) => {
+    if (route.request().isNavigationRequest()) return route.fallback()
+    const url = new URL(route.request().url())
+    queries.push(url)
+    return route.fulfill({ json: { data: url.searchParams.get('errors_only') === 'true' ? records.filter((row) => row.is_error) : records } })
+  })
+  await page.goto('/admin/logs')
+  const table = page.getByRole('table', { name: '日志', exact: true }), rows = table.locator('tbody tr')
+  await expect(rows).toHaveCount(4)
+  await expect(page.getByRole('switch', { name: '只看失败' })).not.toBeChecked()
+  expect(queries[0].searchParams.has('errors_only')).toBe(false)
+  const cells = rows.first().locator('td')
+  await expect(cells.nth(2).getByText('失败', { exact: true })).toBeVisible()
+  await expect(cells.nth(2).getByText('batch_failed', { exact: true })).toBeVisible()
+  await expect(cells.nth(3)).toHaveText('hold-fixture-01')
+  for (const index of [2, 3]) expect((await cells.nth(index).boundingBox())!.width).toBeGreaterThanOrEqual(140)
+  for (const locator of [cells.nth(2).getByText('batch_failed', { exact: true }), cells.nth(3)]) {
+    expect(await locator.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
+  }
+  expect((await cells.nth(4).boundingBox())!.width).toBeGreaterThanOrEqual(160)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  expect(Math.abs((await rows.first().boundingBox())!.height - (width < 768 ? 56 : 44))).toBeLessThanOrEqual(1)
+  await page.screenshot({ path: `test-results/admin-log-failures-${width}.png`, animations: 'disabled' })
+
+  await page.getByRole('button', { name: '展开 failed-batch 的明细', exact: true }).click()
+  const drawer = page.getByRole('dialog'), error = drawer.getByRole('region', { name: '错误信息', exact: true })
+  await expect(error).toContainText('批量任务未成功生成结果。')
+  await expect(error.locator('dt').getByText('错误码', { exact: true }).locator('..').locator('dd')).toHaveText('batch_failed')
+  await expect(error.locator('dt').getByText('上游状态码', { exact: true }).locator('..').locator('dd')).toHaveText('200')
+  await expect(error).toBeInViewport({ ratio: 1 })
+  await drawer.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '展开 failed-provider 的明细', exact: true }).click()
+  await expect(error.locator('dd').first()).toHaveText(longCode)
+  expect(await error.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  await error.getByRole('button', { name: '复制', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(longCode)
+  await drawer.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '展开 failed-no-code 的明细', exact: true }).click()
+  await expect(error).toContainText('这条失败记录未记录错误码。')
+  await expect(error.locator('dd')).toHaveText('—')
+  await drawer.getByRole('button', { name: '关闭', exact: true }).click()
+  await page.getByRole('button', { name: '展开 successful 的明细', exact: true }).click()
+  await expect(error).toHaveCount(0)
+  await drawer.getByRole('button', { name: '关闭', exact: true }).click()
+
+  await page.getByRole('switch', { name: '只看失败' }).click()
+  await page.getByRole('button', { name: '搜索', exact: true }).click()
+  await expect(rows).toHaveCount(3)
+  expect(queries.at(-1)?.searchParams.get('errors_only')).toBe('true')
+  await expect(rows.getByText('成功', { exact: true })).toHaveCount(0)
+})
+
+for (const language of ['zh-CN', 'en']) test(`门户错误信息 ${language}：完整错误码置顶，缺失错误码不隐藏失败详情`, async ({ page }) => {
+  await prepare(page)
+  await page.addInitScript((lang) => localStorage.setItem('okapi.lang', lang), language)
+  await page.setViewportSize({ width: 390, height: 800 })
+  await page.route('**/api/me/logs?*', (route) => route.fulfill({ json: { data: [
+    { ...log, status: 40, error_code: 'upstream_error' },
+    { ...log, id: 19, request_id: 'req-19', status: 40, error_code: null },
+    { ...log, id: 18, request_id: 'req-18', status: 30, error_code: 'batch_failed' },
+  ], next_before: null } }))
+  await page.goto('/portal/logs')
+  await page.getByRole('button', { name: language === 'en' ? 'Expand details for req-20' : '展开 req-20 的明细' }).click()
+  const drawer = page.getByRole('dialog'), error = drawer.getByRole('region', { name: language === 'en' ? 'Error information' : '错误信息', exact: true })
+  await expect(error).toBeInViewport({ ratio: 1 })
+  await expect(error).toContainText(language === 'en' ? 'Upstream error' : '上游服务错误')
+  await expect(error.locator('dd')).toHaveText('upstream_error')
+  await drawer.getByRole('button', { name: language === 'en' ? 'Close' : '关闭', exact: true }).click()
+  await page.getByRole('button', { name: language === 'en' ? 'Expand details for req-19' : '展开 req-19 的明细' }).click()
+  await expect(error).toContainText(language === 'en' ? 'No error code was recorded' : '未记录错误码')
+  await expect(error.locator('dd')).toHaveText('—')
+  await drawer.getByRole('button', { name: language === 'en' ? 'Close' : '关闭', exact: true }).click()
+  await page.getByRole('button', { name: language === 'en' ? 'Expand details for req-18' : '展开 req-18 的明细' }).click()
+  await expect(error).toContainText(language === 'en' ? 'did not produce successful results' : '批量任务未成功生成结果')
+  await expect(drawer.getByText(language === 'en' ? 'Refunded' : '已退款', { exact: true })).toBeVisible()
+})
 
 test('管理日志紧凑工具栏：高级筛选和完整指标仍可展开，翻页后从首行开始', async ({ page }) => {
   await prepare(page)
@@ -1062,3 +1156,87 @@ for (const path of ['/portal/logs', '/admin/logs']) {
     })
   }
 }
+
+for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
+  test(`诊断抽屉 ${path}：失败与退款并存，错误原因和长ID完整可见`, async ({ page }) => {
+    await prepare(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const upstreamId = `upstream-${'very-long-correlation-id-'.repeat(12)}`
+    const diagnostics = { error_phase: 'upstream', error_message: 'upstream quota exceeded', request_failed: true,
+      response_model: 'actual-provider-model', reasoning_effort: 'high',
+      ...(path.startsWith('/admin') ? { user_agent: 'sdk/2', session_id: 'client-session', attempts: [
+        { channel_id: 1, channel_key_id: 2, provider: 'openai', upstream_model: 'provider-model', upstream_endpoint: '/v1/responses', status: 429, outcome: 'failure', error_message: 'quota exceeded', duration_ms: 100 },
+        { channel_id: 3, channel_key_id: 4, provider: 'openai', upstream_model: 'provider-model', upstream_endpoint: '/v1/responses', status: 503, outcome: 'failure', error_message: 'temporarily unavailable', duration_ms: 200 },
+      ] } : {}),
+    }
+    const row = { ...detailedLog, status: 30, log_type: 5, is_error: true, error_code: 'upstream_status', upstream_request_id: upstreamId, diagnostics }
+    await page.route('**/api/me/logs?*', route => route.fulfill({ json: { data: [row], next_before: null } }))
+    await page.route('**/admin/logs?*', route => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [row] } }))
+    await page.goto(path)
+    if (path.startsWith('/portal')) {
+      const table = page.getByRole('table')
+      await expect(table).toContainText('失败')
+      await expect(table).toContainText('已退款')
+    }
+    await page.getByRole('button', { name: '展开 req-20 的明细' }).click()
+    const drawer = page.getByRole('dialog')
+    await expect(drawer).toContainText('upstream quota exceeded')
+    await expect(drawer).toContainText('actual-provider-model')
+    await expect(drawer).toContainText('model-alias → gpt-alpha → actual-provider-model')
+    const id = drawer.getByText(upstreamId, { exact: true })
+    await expect(id).toHaveText(upstreamId)
+    expect(await id.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    if (path.startsWith('/admin')) {
+      await expect(drawer.locator('ol li')).toHaveCount(2)
+      await expect(drawer).toContainText('temporarily unavailable')
+      await expect(drawer).toContainText('client-session')
+    } else await expect(drawer.locator('ol li')).toHaveCount(0)
+    expect(await drawer.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
+    await drawer.getByText('请求诊断', { exact: true }).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: `test-results/log-diagnostics-${path.startsWith('/admin') ? 'admin' : 'personal'}-mobile.png`, animations: 'disabled' })
+  })
+}
+
+for (const timing of [null, 0]) {
+  test(`管理员耗时 ${timing === null ? '缺失' : '真实零'}：不推算缺失首字`, async ({ page }) => {
+    await prepare(page)
+    await page.route('**/admin/logs?*', route => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [{ ...log, ttft_ms: timing }] } }))
+    await page.goto('/admin/logs')
+    await page.getByRole('button', { name: '展开 req-20 的明细' }).click()
+    const performance = page.getByRole('dialog').locator('section').filter({ has: page.getByRole('heading', { name: '响应速度', exact: true }) })
+    await expect(performance.locator('dt').getByText('首字', { exact: true }).locator('..').locator('dd')).toHaveText(timing === null ? '—' : '0 ms')
+    await expect(performance.locator('dt').getByText('生成速度（估算）', { exact: true }).locator('..').locator('dd')).toHaveText(timing === null ? '—' : '625 tok/s')
+  })
+}
+
+for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
+  test(`字符计价 ${path}：展示字符数量和快照计费，隐藏Token速度`, async ({ page }) => {
+    await prepare(page)
+    const snapshot = { ...detailedLog.pricing_snapshot, input_unit: 'characters', input_characters: 1000, final_unit_price_input_per_1m_usd: '15' }
+    const row = { ...detailedLog, endpoint: '/v1/audio/speech', ratio_snapshot: JSON.stringify(snapshot), pricing_snapshot: snapshot,
+      usage: { prompt_tokens: 0, cached_tokens: 0, completion_tokens: 0, reasoning_tokens: 0, input_unit: 'characters', input_characters: 1000 } }
+    expect(billingLines(row)).toEqual([{ name: 'inputCharacters', quantity: 1000, unitMicro: 15000000, amountMicro: 15000 }])
+    await page.route('**/api/me/logs?*', route => route.fulfill({ json: { data: [row], next_before: null } }))
+    await page.route('**/admin/logs?*', route => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [row] } }))
+    await page.goto(path)
+    await expect(page.locator('[data-slot="log-character-usage"]')).toContainText('1,000')
+    await page.getByRole('button', { name: '展开 req-20 的明细' }).click()
+    const drawer = page.getByRole('dialog')
+    await expect(drawer.getByRole('table', { name: '快照计费分项' })).toContainText('输入字符')
+    await expect(drawer.getByRole('table', { name: '快照计费分项' })).toContainText('单价 / 百万字符')
+    await expect(drawer).not.toContainText('0 tok/s')
+  })
+}
+
+test('新增高级筛选：URL和后端查询保留分组、客户端、日志类型及上游ID', async ({ page }) => {
+  const queries = await prepare(page)
+  await page.goto('/admin/logs?group=vip&client_type=codex&log_type=5&upstream_request_id=upstream-123')
+  await expect(page.getByLabel('分组', { exact: true })).toHaveValue('vip')
+  await expect(page.getByLabel('客户端类型', { exact: true })).toHaveValue('codex')
+  await expect(page.getByLabel('上游请求 ID', { exact: true })).toHaveValue('upstream-123')
+  await expect.poll(() => queries.some(url => url.pathname === '/admin/logs'
+    && url.searchParams.get('group') === 'vip' && url.searchParams.get('client_type') === 'codex'
+    && url.searchParams.get('log_type') === '5' && url.searchParams.get('upstream_request_id') === 'upstream-123')).toBe(true)
+  await page.reload()
+  await expect(page.getByLabel('分组', { exact: true })).toHaveValue('vip')
+})

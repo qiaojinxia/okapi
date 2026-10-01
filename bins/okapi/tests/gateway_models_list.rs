@@ -81,4 +81,26 @@ async fn lists_enabled_models_and_hides_disabled_ones() {
         !data.iter().any(|m| m["id"] == disabled.as_str()),
         "停用的模型不得出现在 /v1/models"
     );
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{addr}/v1beta/models?key={token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"] == format!("models/{enabled}"))
+    );
+    let response = client
+        .get(format!("http://{addr}/v1beta/models?key={token}"))
+        .bearer_auth("invalid-header-must-win")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 401);
 }

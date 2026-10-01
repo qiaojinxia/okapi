@@ -7,6 +7,7 @@ pub mod chat;
 pub mod clients;
 pub mod custom_pass;
 pub mod dashboard;
+pub(crate) mod diagnostics;
 pub mod dialect;
 pub mod embeddings;
 pub mod error;
@@ -304,6 +305,8 @@ fn log_response_failure(class: &ServerErrorsFailureClass, latency: Duration) {
 
 /// 组装路由（集成测试直接复用）。
 /// 请求体上限 32MB（网关不解压请求体，即为有效字节上限；防超大体/zip bomb，§3.7-8）。
+// Keep the route table and middleware ordering together for review.
+#[allow(clippy::too_many_lines)]
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat::chat_completions))
@@ -394,15 +397,20 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(models::list_models))
         .route("/healthz", get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
+        .layer(axum::middleware::from_fn(diagnostics::scope))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rule_inputs::track_in_flight,
         ))
         .layer(axum::middleware::from_fn(clients::stamp_peer_ip))
-        .layer(TraceLayer::new_for_http().on_failure(
-            |class: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span| {
-                log_response_failure(&class, latency);
-            },
-        ))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(clients::request_span)
+                .on_failure(
+                    |class: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span| {
+                        log_response_failure(&class, latency);
+                    },
+                ),
+        )
         .with_state(state)
 }

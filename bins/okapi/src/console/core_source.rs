@@ -16,8 +16,9 @@
 const KEYS: &str = "hour, user_id, api_key_id, group_code, model, channel_id";
 
 /// (列名, 合并函数)。与 `analysis_source::METRICS` 中同名项完全一致，单测守住。
-const COLUMNS: [(&str, &str); 9] = [
+const COLUMNS: [(&str, &str); 10] = [
     ("requests", "countMerge"),
+    ("financial_records", "countMerge"),
     ("prompt_tokens", "sumMerge"),
     ("cached_tokens", "sumMerge"),
     ("completion_tokens", "sumMerge"),
@@ -80,7 +81,7 @@ pub(super) fn source(window: &str, scope: &str) -> String {
         c AS (SELECT {KEYS}, {sums} FROM d GROUP BY {KEYS}) \
         SELECT {KEYS}, {detailed} FROM d \
         UNION ALL \
-        SELECT {legacy_keys}, {remainder} FROM l LEFT JOIN c USING ({KEYS}) WHERE l.v_requests > ifNull(c.c_requests, 0))"
+        SELECT {legacy_keys}, {remainder} FROM l LEFT JOIN c USING ({KEYS}) WHERE l.v_financial_records > ifNull(c.c_financial_records, 0))"
     )
 }
 
@@ -121,7 +122,7 @@ mod tests {
         assert!(sql.len() < 6_000, "精简源应保持在几 KB：{}", sql.len());
         assert_eq!(sql.matches(" LEFT JOIN ").count(), 1);
         assert!(sql.contains("FROM l LEFT JOIN c USING"));
-        assert!(sql.contains("WHERE l.v_requests > ifNull(c.c_requests, 0)"));
+        assert!(sql.contains("WHERE l.v_financial_records > ifNull(c.c_financial_records, 0)"));
         assert!(
             sql.contains("mv_analysis_hour WHERE hour >= toDateTime('2026-09-01') AND user_id = 7")
         );

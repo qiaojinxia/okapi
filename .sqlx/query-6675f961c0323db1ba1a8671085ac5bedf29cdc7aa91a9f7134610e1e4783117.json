@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_outbox SET status=2,retry_count=retry_count+1,next_retry_at=NULL WHERE id=$1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6675f961c0323db1ba1a8671085ac5bedf29cdc7aa91a9f7134610e1e4783117"
+}

@@ -301,7 +301,7 @@ async fn success_and_refund_after_replacement_cannot_change_new_subscription() {
             BALANCE
         );
         let bill: Option<(i64, i16, Option<String>)> = sqlx::query_as(
-            "SELECT amount_micro,pool,source_window FROM billing_records WHERE request_id=$1",
+            "SELECT amount_micro,pool,source_window FROM billing_records WHERE request_id=$1 AND log_type=2",
         )
         .bind(id)
         .fetch_optional(&env.state.pg)

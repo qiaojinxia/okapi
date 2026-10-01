@@ -146,6 +146,20 @@ fn generation_config(src: &serde_json::Map<String, Value>) -> Option<Value> {
     if let Some(v) = src.get("top_p") {
         cfg.insert("topP".into(), v.clone());
     }
+    if let Some(format) = src.get("response_format") {
+        match format.get("type").and_then(Value::as_str) {
+            Some("json_object") => {
+                cfg.insert("responseMimeType".into(), json!("application/json"));
+            }
+            Some("json_schema") => {
+                cfg.insert("responseMimeType".into(), json!("application/json"));
+                if let Some(schema) = format.pointer("/json_schema/schema") {
+                    cfg.insert("responseJsonSchema".into(), schema.clone());
+                }
+            }
+            _ => {}
+        }
+    }
     match src.get("stop") {
         Some(Value::String(s)) => {
             cfg.insert("stopSequences".into(), json!([s]));
@@ -182,9 +196,14 @@ fn content_to_parts(content: &Value) -> Vec<Value> {
                     .map(|t| json!({"text": t})),
                 Some("image_url") => {
                     let url = p.get("image_url")?.get("url").and_then(Value::as_str)?;
-                    let rest = url.strip_prefix("data:")?;
-                    let (mime, data) = rest.split_once(";base64,")?;
-                    Some(json!({"inlineData": {"mimeType": mime, "data": data}}))
+                    if let Some(rest) = url.strip_prefix("data:") {
+                        let (mime, data) = rest.split_once(";base64,")?;
+                        Some(json!({"inlineData": {"mimeType": mime, "data": data}}))
+                    } else if url.starts_with("https://") {
+                        Some(json!({"fileData": {"fileUri": url}}))
+                    } else {
+                        None
+                    }
                 }
                 _ => None,
             })
@@ -352,7 +371,7 @@ fn usage_json(u: UsageProbe) -> Value {
 // ---- 流式转换 ----
 
 /// Gemini chunk 流 → OpenAI chunk 的有状态转换器。
-/// Gemini 无 [DONE] 标记：finishReason chunk 即终局（finish + usage + Done）。
+/// Gemini 无 [DONE] 标记：finishReason 只关闭候选，EOF 才结束流，尾部 usage 仍可更新。
 pub struct GeminiStreamState {
     model: String,
     created: i64,
@@ -382,7 +401,7 @@ impl GeminiStreamState {
         };
         let src: Value = match serde_json::from_str(&data) {
             Ok(v) => v,
-            Err(_) => return Vec::new(),
+            Err(_) => return vec![Err(UpstreamError::Stream("gemini_chunk_json".into()))],
         };
         if let Some(err) = src.get("error") {
             let msg = err
@@ -441,7 +460,7 @@ impl GeminiStreamState {
             && !self.finished
         {
             self.finished = true;
-            let usage = usage_from_gemini(src.get("usageMetadata"));
+
             out.push(Ok(self.chunk(
                 &json!({}),
                 Some(map_finish(Some(finish), self.tool_index >= 0)),
@@ -449,22 +468,18 @@ impl GeminiStreamState {
                 0,
                 None,
             )));
+        }
+        if let Some(usage) = usage_from_gemini(src.get("usageMetadata")) {
             out.push(Ok(ChatEvent::Data {
-                raw: json!({
-                    "id": "gemini",
-                    "object": "chat.completion.chunk",
-                    "created": self.created,
-                    "model": self.model,
-                    "choices": [],
-                    "usage": usage.map(usage_json),
-                })
+                raw: json!({"id": "gemini", "object": "chat.completion.chunk",
+                    "created": self.created, "model": self.model, "choices": [],
+                    "usage": usage_json(usage)})
                 .to_string(),
                 event: None,
                 has_output: false,
                 content_chars: 0,
-                usage,
+                usage: Some(usage),
             }));
-            out.push(Ok(ChatEvent::Done));
         }
         out
     }
@@ -542,7 +557,8 @@ pub fn wrap_generate(
             let mut st = GeminiStreamState::new(upstream_model);
             let events = h
                 .events
-                .flat_map(move |item| futures::stream::iter(st.step(item)));
+                .flat_map(move |item| futures::stream::iter(st.step(item)))
+                .chain(futures::stream::once(async { Ok(ChatEvent::Done) }));
             Ok(ChatResponse::Stream(StreamHandle {
                 upstream_request_id: h.upstream_request_id,
                 events: Box::pin(events),

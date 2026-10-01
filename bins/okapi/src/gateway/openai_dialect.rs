@@ -63,30 +63,33 @@ impl AppState {
         path: &str,
         body: okapi_providers::image_stream::ImageBody,
     ) -> Result<okapi_providers::image_stream::ImageResponse, UpstreamError> {
-        if is_azure(cand) {
-            let (endpoint, version) = azure_target(cand)?;
-            self.azure
-                .image_stream(
-                    endpoint,
-                    version,
-                    model,
-                    path,
-                    &cand.credential,
-                    body,
-                    &outbound(cand),
-                )
-                .await
-        } else {
-            self.upstream
-                .image_stream(
-                    &openai_base(cand),
-                    path,
-                    &cand.credential,
-                    body,
-                    &outbound(cand),
-                )
-                .await
-        }
+        super::diagnostics::upstream(cand, model, path, async {
+            if is_azure(cand) {
+                let (endpoint, version) = azure_target(cand)?;
+                self.azure
+                    .image_stream(
+                        endpoint,
+                        version,
+                        model,
+                        path,
+                        &cand.credential,
+                        body,
+                        &outbound(cand),
+                    )
+                    .await
+            } else {
+                self.upstream
+                    .image_stream(
+                        &openai_base(cand),
+                        path,
+                        &cand.credential,
+                        body,
+                        &outbound(cand),
+                    )
+                    .await
+            }
+        })
+        .await
     }
 
     /// chat completions（流式 / 非流式）。`upstream_model` 是映射后的上游名——Azure 下
@@ -98,30 +101,33 @@ impl AppState {
         body: Bytes,
         stream: bool,
     ) -> Result<ChatResponse, UpstreamError> {
-        if is_azure(cand) {
-            let (endpoint, api_version) = azure_target(cand)?;
-            self.azure
-                .chat(
-                    endpoint,
-                    api_version,
-                    upstream_model,
-                    &cand.credential,
-                    body,
-                    stream,
-                    &outbound(cand),
-                )
-                .await
-        } else {
-            self.upstream
-                .chat(
-                    &openai_base(cand),
-                    &cand.credential,
-                    body,
-                    stream,
-                    &outbound(cand),
-                )
-                .await
-        }
+        super::diagnostics::upstream(cand, upstream_model, "/v1/chat/completions", async {
+            if is_azure(cand) {
+                let (endpoint, api_version) = azure_target(cand)?;
+                self.azure
+                    .chat(
+                        endpoint,
+                        api_version,
+                        upstream_model,
+                        &cand.credential,
+                        body,
+                        stream,
+                        &outbound(cand),
+                    )
+                    .await
+            } else {
+                self.upstream
+                    .chat(
+                        &openai_base(cand),
+                        &cand.credential,
+                        body,
+                        stream,
+                        &outbound(cand),
+                    )
+                    .await
+            }
+        })
+        .await
     }
 
     /// 非流式 JSON 端点（`path` 形如 `/embeddings`、`/images/generations`、`/rerank`）。
@@ -132,30 +138,38 @@ impl AppState {
         path: &str,
         body: Bytes,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        if is_azure(cand) {
-            let (endpoint, api_version) = azure_target(cand)?;
-            self.azure
-                .json_relay(
-                    endpoint,
-                    api_version,
-                    upstream_model,
-                    path,
-                    &cand.credential,
-                    body,
-                    &outbound(cand),
-                )
-                .await
-        } else {
-            self.upstream
-                .json_relay(
-                    &openai_base(cand),
-                    path,
-                    &cand.credential,
-                    body,
-                    &outbound(cand),
-                )
-                .await
+        if path.contains("images")
+            && let Some(trace) = super::diagnostics::Trace::current()
+        {
+            trace.media(&body, false);
         }
+        super::diagnostics::upstream(cand, upstream_model, path, async {
+            if is_azure(cand) {
+                let (endpoint, api_version) = azure_target(cand)?;
+                self.azure
+                    .json_relay(
+                        endpoint,
+                        api_version,
+                        upstream_model,
+                        path,
+                        &cand.credential,
+                        body,
+                        &outbound(cand),
+                    )
+                    .await
+            } else {
+                self.upstream
+                    .json_relay(
+                        &openai_base(cand),
+                        path,
+                        &cand.credential,
+                        body,
+                        &outbound(cand),
+                    )
+                    .await
+            }
+        })
+        .await
     }
 
     /// audio/speech：二进制音频出。
@@ -165,23 +179,26 @@ impl AppState {
         upstream_model: &str,
         body: Bytes,
     ) -> Result<(u16, String, Bytes), UpstreamError> {
-        if is_azure(cand) {
-            let (endpoint, api_version) = azure_target(cand)?;
-            self.azure
-                .speech(
-                    endpoint,
-                    api_version,
-                    upstream_model,
-                    &cand.credential,
-                    body,
-                    &outbound(cand),
-                )
-                .await
-        } else {
-            self.upstream
-                .speech(&openai_base(cand), &cand.credential, body, &outbound(cand))
-                .await
-        }
+        super::diagnostics::upstream(cand, upstream_model, "/v1/audio/speech", async {
+            if is_azure(cand) {
+                let (endpoint, api_version) = azure_target(cand)?;
+                self.azure
+                    .speech(
+                        endpoint,
+                        api_version,
+                        upstream_model,
+                        &cand.credential,
+                        body,
+                        &outbound(cand),
+                    )
+                    .await
+            } else {
+                self.upstream
+                    .speech(&openai_base(cand), &cand.credential, body, &outbound(cand))
+                    .await
+            }
+        })
+        .await
     }
 
     /// audio/transcriptions | translations：multipart 入。
@@ -192,29 +209,32 @@ impl AppState {
         path: &str,
         parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        if is_azure(cand) {
-            let (endpoint, api_version) = azure_target(cand)?;
-            self.azure
-                .audio_multipart(
-                    endpoint,
-                    api_version,
-                    upstream_model,
-                    path,
-                    &cand.credential,
-                    parts,
-                    &outbound(cand),
-                )
-                .await
-        } else {
-            self.upstream
-                .audio_multipart(
-                    &openai_base(cand),
-                    path,
-                    &cand.credential,
-                    parts,
-                    &outbound(cand),
-                )
-                .await
-        }
+        super::diagnostics::upstream(cand, upstream_model, path, async {
+            if is_azure(cand) {
+                let (endpoint, api_version) = azure_target(cand)?;
+                self.azure
+                    .audio_multipart(
+                        endpoint,
+                        api_version,
+                        upstream_model,
+                        path,
+                        &cand.credential,
+                        parts,
+                        &outbound(cand),
+                    )
+                    .await
+            } else {
+                self.upstream
+                    .audio_multipart(
+                        &openai_base(cand),
+                        path,
+                        &cand.credential,
+                        parts,
+                        &outbound(cand),
+                    )
+                    .await
+            }
+        })
+        .await
     }
 }

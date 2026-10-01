@@ -167,6 +167,33 @@ async fn get(addr: SocketAddr, path: &str, token: &str) -> (u16, Value) {
 }
 
 #[tokio::test]
+async fn payment_order_reference_blocks_plan_deletion_with_conflict() {
+    let env = setup().await;
+    let code = format!("order-plan-{}", env.suffix);
+    let plan: i64 = sqlx::query_scalar("INSERT INTO plans(plan_code,display_name,grant_micro) VALUES($1,'order plan',1000) RETURNING id")
+        .bind(&code).fetch_one(&env.pg).await.unwrap();
+    sqlx::query("INSERT INTO recharge_orders(order_no,user_id,amount_micro,gateway,plan_id) VALUES($1,$2,1000,'manual',$3)")
+        .bind(format!("order-{}", env.suffix)).bind(env.victim_id).bind(plan)
+        .execute(&env.pg).await.unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/plans/{code}"),
+        &env.admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "plan_in_use");
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM plans WHERE id=$1)")
+        .bind(plan)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert!(exists, "拒删必须保留历史订单引用的套餐");
+}
+
+#[tokio::test]
 async fn price_group_pagination_matches_database_pages() {
     let env = setup().await;
     let all = okapi_store::listing::list_groups(&env.pg, okapi_store::listing::Slice::ALL)
@@ -290,7 +317,7 @@ async fn azure_channel_write_validation() {
         status, 400,
         "azure 渠道不能失去端点（SSRF 校验先拦下空地址）"
     );
-    assert_eq!(body["error"]["param"], "api_base_scheme");
+    assert_eq!(body["error"]["param"], "api_base_host");
     let (status, body) = patch(json!({"settings": {"api_version": "2024-10"}})).await;
     assert_eq!(status, 400);
     assert_eq!(body["error"]["param"], "api_version");
@@ -500,9 +527,9 @@ async fn admin_list_surface_covers_every_resource() {
     assert_eq!(mine["pricing_mode"], "ratio");
     assert_eq!(mine["model_ratio"], "1.500000");
     assert_eq!(mine["completion_ratio"], "2.000000");
-    assert_eq!(mine["cache_ratio"], "0.1000");
+    assert_eq!(mine["cache_ratio"], "0.100000");
     assert_eq!(
-        mine["cache_write_ratio"], "1.0000",
+        mine["cache_write_ratio"], "1.000000",
         "缓存写入轴缺省 1.0 必须可见"
     );
 
@@ -666,15 +693,18 @@ async fn admin_list_surface_covers_every_resource() {
     // payment_epay 对象，不存在 epay_key_* 这种键。用完必须删——settings 是站点级表，
     // 每跑一轮就多一条，系统设置页会被几十条一模一样的"支付凭证"塞满。
     let secret_key = format!("epay_key_{}", env.suffix);
-    sqlx::query!(
-        r#"INSERT INTO settings (key, value) VALUES ($1, $2)
-           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
-        secret_key,
-        json!("super-secret-value")
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":secret_key,"value":"super-secret-value"})),
     )
-    .execute(&env.pg)
-    .await
-    .unwrap();
+    .await;
+    assert_eq!(status, 200);
+    let audit: Value = sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action='settings.set' AND target=$1 ORDER BY created_at DESC LIMIT 1")
+        .bind(&secret_key).fetch_one(&env.pg).await.unwrap();
+    assert_eq!(audit, json!({"redacted":true,"configured":true}));
     let (status, body) = get(env.console, "/admin/settings", t).await;
     assert_eq!(status, 200);
     let s = body["data"]
@@ -1136,4 +1166,53 @@ async fn stats_surface_exposes_clickhouse_views() {
     } else {
         assert_eq!(status, 501);
     }
+}
+
+#[tokio::test]
+async fn unrestricted_admin_cannot_promote_or_demote_users() {
+    let env = setup().await;
+    let operator =
+        okapi_store::provision::create_user(&env.pg, &format!("role-gate-{}", env.suffix))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE users SET role=10 WHERE id=$1")
+        .bind(operator)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let token = format!("sk-role-gate-{}", env.suffix);
+    okapi_store::provision::create_api_key(&env.pg, operator, &hash(&token), "sk-role-gate")
+        .await
+        .unwrap();
+    for action in ["promote", "demote"] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            &format!("/admin/users/{}/manage", env.victim_id),
+            &token,
+            Some(json!({"action":action})),
+        )
+        .await;
+        assert_eq!(
+            status, 403,
+            "user.manage cannot mint unrestricted administrators"
+        );
+    }
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{}/manage", env.victim_id),
+        &env.admin_token,
+        Some(json!({"action":"promote"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (role, binding): (i16, Option<i64>) =
+        sqlx::query_as("SELECT role,admin_role_id FROM users WHERE id=$1")
+            .bind(env.victim_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(role, 10);
+    assert_eq!(binding, None);
 }

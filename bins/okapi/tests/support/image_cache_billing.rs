@@ -7,6 +7,7 @@ pub(super) async fn cache_env() -> Env {
     sqlx::query("UPDATE model_pricing SET completion_ratio=4,cache_ratio=0.25,cache_write_ratio=1.25,modality_ratios=$2 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
         .bind(&env.model).bind(json!({"image_cache_read":"0.4","image_cache_write":"2","image_output":"6"}))
         .execute(&env.state.pg).await.unwrap();
+    published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(
         gateway::pricing_loader::load_pricebook(&env.state.pg)
             .await

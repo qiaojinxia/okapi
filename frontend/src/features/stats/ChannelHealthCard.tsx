@@ -5,11 +5,14 @@ import type { ChannelRow } from '@/features/stats/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Pagination } from '@/components/ui/pagination'
+import { EmptyState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney, formatTokensPerSec } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { usePagination } from '@/hooks/use-pagination'
 
 export function healthVariant(bp: number): 'success' | 'muted' | 'destructive' {
   if (bp >= BAD_BP) return 'destructive'
@@ -20,9 +23,10 @@ export function healthVariant(bp: number): 'success' | 'muted' | 'destructive' {
 
 export function ChannelHealthCard({ days }: { days: number }) {
   const { t, i18n } = useTranslation()
+  const pager = usePagination()
   const q = useQuery({
-    queryKey: qk.statsChannels(days, 50),
-    queryFn: () => apiFetch<{ data: ChannelRow[] }>(`/admin/stats/channels?days=${days}&limit=50`),
+    queryKey: qk.statsChannels(days, pager.limit, pager.offset),
+    queryFn: () => apiFetch<{ total_items: number; data: ChannelRow[] }>(`/admin/stats/channels?days=${days}&limit=${pager.limit}&offset=${pager.offset}`),
   })
 
   return (
@@ -34,7 +38,7 @@ export function ChannelHealthCard({ days }: { days: number }) {
         <p className="text-xs text-muted-foreground">{t('admin:statChannelsHint')}</p>
         {q.isError ? (
           <p className="text-sm text-destructive">{describeError(q.error)}</p>
-        ) : (
+        ) : q.isPending ? <LoadingState /> : q.data.data.length === 0 ? <EmptyState hint={t('admin:trendEmptyHint')} /> : (
           <Table>
             <THead>
               <Tr>
@@ -87,6 +91,7 @@ export function ChannelHealthCard({ days }: { days: number }) {
             </TBody>
           </Table>
         )}
+        <Pagination {...pager} total={q.isError ? undefined : q.data?.total_items} disabled={q.isFetching} className="rounded-lg shadow-none" />
       </CardContent>
     </Card>
   )

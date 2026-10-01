@@ -57,54 +57,57 @@ impl AppState {
         stream: bool,
         outbound: &Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
-        match cand.provider.as_str() {
-            "bedrock" => {
-                self.bedrock
-                    .messages(
-                        required_base(cand)?,
-                        cand.aws_region.as_deref(),
-                        &cand.credential,
-                        upstream_model,
+        super::diagnostics::upstream(cand, upstream_model, "/v1/messages", async {
+            match cand.provider.as_str() {
+                "bedrock" => {
+                    self.bedrock
+                        .messages(
+                            required_base(cand)?,
+                            cand.aws_region.as_deref(),
+                            &cand.credential,
+                            upstream_model,
+                            body,
+                            stream,
+                            outbound,
+                        )
+                        .await
+                }
+                // 订阅凭证：取可用 access token（必要时四步锁刷新），Bearer + oauth beta + 系统提示首句；
+                // settings.mimic_cc 开启时换全伪装身份（§11.38）
+                "anthropic_max" => {
+                    let cred = super::oauth_cred::fresh_credential(self, cand).await?;
+                    let mimic = super::oauth_cred::mimic_identity(cand, cred.account_id.as_deref());
+                    okapi_providers::oauth::anthropic_max::messages(
+                        self.anthropic.http(),
+                        base,
+                        &cred.access_token,
                         body,
                         stream,
                         outbound,
+                        mimic.as_ref(),
                     )
                     .await
+                }
+                "vertex" => {
+                    self.vertex
+                        .messages(
+                            required_base(cand)?,
+                            &cand.credential,
+                            upstream_model,
+                            body,
+                            stream,
+                            outbound,
+                        )
+                        .await
+                }
+                _ => {
+                    self.anthropic
+                        .messages(base, &cand.credential, body, stream, outbound)
+                        .await
+                }
             }
-            // 订阅凭证：取可用 access token（必要时四步锁刷新），Bearer + oauth beta + 系统提示首句；
-            // settings.mimic_cc 开启时换全伪装身份（§11.38）
-            "anthropic_max" => {
-                let cred = super::oauth_cred::fresh_credential(self, cand).await?;
-                let mimic = super::oauth_cred::mimic_identity(cand, cred.account_id.as_deref());
-                okapi_providers::oauth::anthropic_max::messages(
-                    self.anthropic.http(),
-                    base,
-                    &cred.access_token,
-                    body,
-                    stream,
-                    outbound,
-                    mimic.as_ref(),
-                )
-                .await
-            }
-            "vertex" => {
-                self.vertex
-                    .messages(
-                        required_base(cand)?,
-                        &cand.credential,
-                        upstream_model,
-                        body,
-                        stream,
-                        outbound,
-                    )
-                    .await
-            }
-            _ => {
-                self.anthropic
-                    .messages(base, &cand.credential, body, stream, outbound)
-                    .await
-            }
-        }
+        })
+        .await
     }
 
     /// Gemini 方言一跳：直连 / Vertex generateContent 按 provider 选。
@@ -116,30 +119,33 @@ impl AppState {
         body: Bytes,
         stream: bool,
     ) -> Result<GeminiResponse, UpstreamError> {
-        let outbound = outbound(cand);
-        if cand.provider == "vertex" {
-            self.vertex
-                .generate(
-                    required_base(cand)?,
-                    &cand.credential,
-                    upstream_model,
-                    body,
-                    stream,
-                    &outbound,
-                )
-                .await
-        } else {
-            self.gemini
-                .generate(
-                    base,
-                    &cand.credential,
-                    upstream_model,
-                    body,
-                    stream,
-                    &outbound,
-                )
-                .await
-        }
+        super::diagnostics::upstream(cand, upstream_model, "generateContent", async {
+            let outbound = outbound(cand);
+            if cand.provider == "vertex" {
+                self.vertex
+                    .generate(
+                        required_base(cand)?,
+                        &cand.credential,
+                        upstream_model,
+                        body,
+                        stream,
+                        &outbound,
+                    )
+                    .await
+            } else {
+                self.gemini
+                    .generate(
+                        base,
+                        &cand.credential,
+                        upstream_model,
+                        body,
+                        stream,
+                        &outbound,
+                    )
+                    .await
+            }
+        })
+        .await
     }
 }
 

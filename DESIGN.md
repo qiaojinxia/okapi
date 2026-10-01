@@ -420,23 +420,25 @@ Client → api-gateway（内嵌 billing engine）
 - 定价解析从"每请求查规则表"变为"查 L1 编译价格表"，规则引擎脱离热路径；
 - 余额 key 采用 `{user_id}` hash-tag，为 Redis Cluster 分片预留（单机模式无感）。
 
-### 5.3 异步路径（1–3 秒新鲜度，承载千万级统计）
+### 5.3 异步路径（固定批次投递与可观测新鲜度）
 
 ```mermaid
 flowchart LR
     G[api-gateway<br/>billing engine] -->|"同事务 outbox"| PGDB[(PostgreSQL<br/>billing_events = 真理源)]
-    PGDB -->|"SKIP LOCKED worker 重投"| N
-    G -->|"billing.completed<br/>批量 publish 100ms 窗"| N[(NATS JetStream R=3)]
-    N --> CHS[chsink 批写<br/>失败落盘 spill]
+    PGDB -->|"relay 发布事件 UUID"| N[(NATS JetStream)]
+    PGDB -->|"直连组批"| B[(PG 事件回执<br/>与不可变 CH 批次)]
+    N -->|"PG 持久接管后 ack"| B
+    B -->|"原批次 token / 至多 500 行"| CHS[chsink 批写]
     N --> AUD[settle-audit 对账]
     N --> NOTI[notification 余额告警]
-    CHS --> CH[(ClickHouse<br/>request_log_raw<br/>+ 6 张 AggregatingMergeTree MV)]
+    CHS --> CH[(ClickHouse<br/>request_log_raw<br/>+ AggregatingMergeTree MV)]
+    CHS -->|"完成 / 重试 / DLQ"| B
     ADM[admin dashboard] -->|"60s~10min 查询缓存<br/>singleflight"| CH
     ADM --> RK[(Redis KPI<br/>秒级实时计数)]
 ```
 
-- 事件量 = 请求量（千万级/天 ≈ 峰值 ~1k msg/s），JetStream 与 CH async_insert 轻松承载；亿级时靠 chsink 批量参数（batch 5000 / flush 1s）与 CH 分片；
-- 统计三档新鲜度（沿用 ADR）：Redis KPI 秒级 → CH MV 1-3s → CH 明细 ad-hoc（15s 超时护栏）；
+- 统计事件包含消费、错误和退款，不能直接等同于 API 请求数。当前冻结批次上限 500 行；容量与大流量下的延迟需独立压测，不能以设计估算作为承载能力验收；
+- 统计新鲜度分别观察 Redis KPI、待投递事件/CH 批次和 CH 查询。NATS 已 ack 只证明 PG 已接管，不证明 CH 已完成；CH MV 的 1–3 秒为正常运行目标，故障期间由积压及原事件排队年龄如实反映；
 - 对账三方不变：Redis 余额 ↔ PG 事件流 ↔ CH 汇总，reconciler 周期巡检。
 
 ### 5.4 微服务拓扑（沿用 7 服务，职责微调）
@@ -668,8 +670,9 @@ okapi/
 
 ### 审计修复约定
 
+- 调用统计与财务事件分开：`requests` 面向进入预扣后的终态调用（成功/失败），退款是独立财务调整，不增加调用、RPM 或测量缺失样本。财务四金额仍保留消费与退款冲销，Token 保留实际发生的用量。历史覆盖分别使用记录数与调用样本数，不能混用；旧聚合缺分类且 raw 到期时不得猜测调用数。当前旧 `countState()` 包含退款，真实 HTTP 已复现请求数 1→2 及覆盖率污染；已实现独立分类聚合、财务覆盖轴及完整 raw 择一恢复，真实接口组合查询仍在验收，见 [样本范围审计](docs/request-population-audit.md)。该约定不改变价格公式或钱包事件。
 - 时段折扣的分钟窗与星期均使用运行机器的本地时区；有效期仍比较真实 UTC Unix 秒。请求准入时固定价簿、时钟偏移和规则输入，Realtime 最长 480 秒。
 - 用户变体专属价优先于基座专属价；变体未设专属价时继承基座协议价，最后使用公开变体价。绝对协议价继承时仍独立于站点基准价。
 - `/pass` 与视频只能使用 `per_call`；视频创建成功先收费，上游最终失败或取消全额退款。任务映射与原始账单同一 PG 事务，worker 不依赖用户主动轮询。
 - PG 结算写入前保存 Redis 重试日志，PG 恢复后按 request_id 幂等补写；Redis 需按账本要求持久化。到期扣除通过 PG 事件与 fund_transfers 原子接受后应用 Redis。
-- 统计日界跟随机器时区，PG 连接显式设置同一时区；ClickHouse 事实时间始终声明 UTC，查询用小时事实重建本地日期，不直接把历史 UTC 日桶改名为本地日桶。
+- 统计日界跟随机器时区，PG 连接显式设置同一时区；ClickHouse 事实时间始终声明 UTC。日历汇总新增独立 UTC 分钟聚合，保留财务四金额、Token 四轴、客户端与缓存采集状态，无 TTL，不修改既有小时/日聚合。分钟请求覆盖与旧小时请求数完全相等时选择分钟来源，否则选择旧小时整桶，禁止叠加新旧来源。只有整个旧小时属于同一本地日期时才能使用整桶；跨日且缺少分钟证据时拒绝查询，不能将小时流量猜分到午夜两侧。分钟本身跨日的历史秒级时区偏移同样拒绝。升级不自动回填；保留 raw 的历史可经独立校验后回填，已到期的明细不能补造精度。UTC 日视图继续读取原表。

@@ -40,6 +40,17 @@ fn ch_str<'a>(row: &'a Value, key: &str) -> &'a str {
     row.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
+// A reported zero is valid; a legacy zero cannot prove measurement took place.
+fn observed_ms(row: &Value, value: &str, reported: &str) -> Option<i64> {
+    let ms = ch_i64(row, value);
+    let measured = if row[reported].is_null() {
+        ms > 0
+    } else {
+        ch_i64(row, reported) == 1
+    };
+    (measured && ms >= 0).then_some(ms)
+}
+
 /// 检索条件。全部可选，叠加为 AND。
 #[derive(Deserialize, Default)]
 pub struct LogQuery {
@@ -129,10 +140,10 @@ impl LogQuery {
         let mut clause = match self.absolute_range()? {
             Some((from, to)) => {
                 params.push(("p_from".to_owned(), from));
-                let mut c = "ts >= {p_from:DateTime64(3)}".to_owned();
+                let mut c = "ts >= {p_from:DateTime64(3, 'UTC')}".to_owned();
                 if let Some(to) = to {
                     params.push(("p_to".to_owned(), to));
-                    c.push_str(" AND ts < {p_to:DateTime64(3)}");
+                    c.push_str(" AND ts < {p_to:DateTime64(3, 'UTC')}");
                 }
                 c
             }
@@ -192,6 +203,42 @@ fn borrow(params: &[(String, String)]) -> Vec<(&str, &str)> {
         .collect()
 }
 
+async fn billing_states(
+    state: &AppState,
+    rows: &[Value],
+) -> Result<HashMap<uuid::Uuid, (i64, i16)>, AppError> {
+    let ids: Vec<uuid::Uuid> = rows
+        .iter()
+        .filter_map(|row| ch_str(row, "request_id").parse().ok())
+        .collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let states = sqlx::query_as::<_, (uuid::Uuid, i64, i16)>(
+        "SELECT request_id,user_id,status FROM billing_financial_records WHERE request_id=ANY($1)",
+    )
+    .bind(&ids)
+    .fetch_all(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    Ok(states
+        .into_iter()
+        .map(|(request, user, status)| (request, (user, status)))
+        .collect())
+}
+
+fn billing_status(row: &Value, states: &HashMap<uuid::Uuid, (i64, i16)>) -> Value {
+    ch_str(row, "request_id")
+        .parse()
+        .ok()
+        .and_then(|id| states.get(&id))
+        .filter(|(owner, _)| *owner == ch_i64(row, "user_id"))
+        .map_or_else(
+            || row["billing_status"].clone(),
+            |(_, status)| json!(status),
+        )
+}
+
 /// GET /admin/logs：全站逐笔明细检索。
 ///
 /// 权限沿用 `billing.read`：每一行都带金额与倍率快照，单独立一个 `logs.read`
@@ -222,8 +269,8 @@ pub async fn search(
                 audio_prompt_reported, image_prompt_reported, audio_completion_reported, image_completion_reported, \
                 cache_read_audio_reported, cache_read_image_reported, cache_write_audio_reported, cache_write_image_reported, reasoning_reported, \
                 amount_micro, original_amount_micro, discount_micro, upstream_cost_micro, \
-                latency_ms, ttft_ms, stream, retry_count, failover_count, sticky_layer, \
-                upstream_status, error_code, is_error, ratio_snapshot \
+                latency_ms, latency_reported, ttft_ms, ttft_reported, stream, request_type, retry_count, failover_count, sticky_layer, \
+                upstream_status, error_code, is_error, ratio_snapshot, diagnostics, upstream_cost_known, billing_status \
          FROM request_log_raw WHERE {} \
          ORDER BY ts DESC LIMIT {} OFFSET {}",
         filters.clause,
@@ -236,6 +283,8 @@ pub async fn search(
     // 与 stats::channels 同法——存 id、查询时 join，改名不脏历史。
     let names = resolve_names(&state, &rows, &q).await;
 
+    // Refunds can change the ledger state after the immutable CH row was delivered.
+    let financial_states = billing_states(&state, &rows).await?;
     let data: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -244,7 +293,7 @@ pub async fn search(
             let key = names.keys.get(&api_key_id);
             let channel_id = ch_i64(r, "channel_id");
             let usage = log_usage(r);
-            json!({
+            let mut item = json!({
                 "ts": ch_str(r, "ts"),
                 "request_id": ch_str(r, "request_id"),
                 "upstream_request_id": ch_str(r, "upstream_request_id"),
@@ -276,8 +325,8 @@ pub async fn search(
                 "discount_micro": ch_i64(r, "discount_micro"),
                 // 上游成本（§11.18）：管理面账单解释器展示毛利；门户接口不透出此字段
                 "upstream_cost_micro": ch_i64(r, "upstream_cost_micro"),
-                "latency_ms": ch_i64(r, "latency_ms"),
-                "ttft_ms": ch_i64(r, "ttft_ms"),
+                "latency_ms": observed_ms(r, "latency_ms", "latency_reported"),
+                "ttft_ms": observed_ms(r, "ttft_ms", "ttft_reported"),
                 "is_stream": ch_i64(r, "stream") == 1,
                 "retry_count": ch_i64(r, "retry_count"),
                 "failover_count": ch_i64(r, "failover_count"),
@@ -286,7 +335,13 @@ pub async fn search(
                 "error_code": ch_str(r, "error_code"),
                 "is_error": ch_i64(r, "is_error") == 1,
                 "ratio_snapshot": ch_str(r, "ratio_snapshot"),
-            })
+            });
+            item["request_type"] = json!(ch_str(r, "request_type"));
+            item["status"] = billing_status(r, &financial_states);
+            item["upstream_cost_known"] = json!(r["upstream_cost_known"].as_u64().map(|v| v == 1));
+            item["diagnostics"] =
+                serde_json::from_str::<Value>(ch_str(r, "diagnostics")).unwrap_or(Value::Null);
+            item
         })
         .collect();
 
@@ -496,10 +551,22 @@ pub async fn stat(
                 count(cache_read_audio_tokens) AS cache_read_modal_samples, count(cache_write_audio_tokens) AS cache_write_modal_samples, \
                 sum(amount_micro) AS amount, sum(discount_micro) AS saved, \
                 uniqExact(user_id) AS users \
-         FROM request_log_raw WHERE {}",
+         FROM request_log_calls WHERE {}",
         filters.clause
     );
-    let rows = ch.query_with_params(&sql, &params).await?;
+    let finance_sql = format!(
+        "SELECT count() AS financial_records,sum(amount_micro) AS amount,sum(discount_micro) AS saved FROM request_log_raw WHERE {}",
+        filters.clause
+    );
+    let (mut rows, financial) = tokio::try_join!(
+        ch.query_with_params(&sql, &params),
+        ch.query_with_params(&finance_sql, &params)
+    )?;
+    if let (Some(row), Some(finance)) = (rows.first_mut(), financial.first()) {
+        for field in ["financial_records", "amount", "saved"] {
+            row[field] = finance[field].clone();
+        }
+    }
     let row = rows.first().cloned().unwrap_or(Value::Null);
 
     let filtered = !filters.params.is_empty()
@@ -511,7 +578,7 @@ pub async fn stat(
     let (rpm, tpm, source) = if filtered {
         let sql = format!(
             "SELECT count() AS rpm, sum(prompt_tokens + completion_tokens) AS tpm \
-             FROM request_log_raw WHERE {} AND ts >= now() - INTERVAL 60 SECOND",
+             FROM request_log_calls WHERE {} AND ts >= now() - INTERVAL 60 SECOND",
             filters.clause
         );
         let recent = ch.query_with_params(&sql, &params).await?;
@@ -531,6 +598,7 @@ pub async fn stat(
     let cached = ch_i64(&row, "cached");
     let mut result = json!({
         "hours": q.hours(),
+        "financial_records": ch_i64(&row, "financial_records"),
         "requests": requests,
         "errors": ch_i64(&row, "errors"),
         "error_rate_bp": rate_bp(ch_i64(&row, "errors"), requests),
@@ -607,4 +675,24 @@ fn add_summary_details(row: &Value, result: &mut Value) {
 /// 占比 → 基点（万分之一；整数运算，分母 0 返 0）。
 fn rate_bp(part: i64, total: i64) -> i64 {
     super::stats::rate_bp(part, total)
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::observed_ms;
+    use serde_json::json;
+
+    #[test]
+    fn missing_legacy_timing_is_not_a_reported_zero() {
+        for (row, expected) in [
+            (json!({"ms":0,"reported":1}), Some(0)),
+            (json!({"ms":"15","reported":"1"}), Some(15)),
+            (json!({"ms":100,"reported":0}), None),
+            (json!({"ms":-1,"reported":1}), None),
+            (json!({"ms":0}), None),
+            (json!({"ms":15}), Some(15)),
+        ] {
+            assert_eq!(observed_ms(&row, "ms", "reported"), expected, "{row}");
+        }
+    }
 }

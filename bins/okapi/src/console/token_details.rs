@@ -109,7 +109,7 @@ fn details_prepared(keys: &str, table: &str, predicate: &str, mode: Mode) -> Str
             "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {aggregate} FROM mv_token_details_5min WHERE {predicate}"
         );
         let raw = format!(
-            "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {raw} FROM request_log_raw WHERE {predicate}"
+            "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {raw} FROM request_log_calls WHERE {predicate}"
         );
         return super::measurement_coverage::fast_source(
             mode, keys, &expected, &counts, &aggregate, &raw,
@@ -128,7 +128,7 @@ fn details_prepared(keys: &str, table: &str, predicate: &str, mode: Mode) -> Str
         e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, {time}, toUInt8(1) AS source_scope FROM {table}) WHERE {predicate} GROUP BY {keys}), \
         a AS (SELECT {keys}, {aggregate} FROM (SELECT *, toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope FROM mv_token_details_5min) WHERE {predicate} GROUP BY {keys}), \
         missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.detail_observed, 0)), \
-        r AS (SELECT {keys}, {raw} FROM (SELECT *, toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope FROM request_log_raw) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
+        r AS (SELECT {keys}, {raw} FROM (SELECT *, toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope FROM request_log_calls) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
         SELECT {selected_keys}, {selected}, \
         (ifNull(a.detail_observed, 0) <= e.expected AND ifNull(a.detail_observed, 0) >= if(ifNull(r.detail_observed, 0) <= e.expected, ifNull(r.detail_observed, 0), 0)) AS use_aggregate \
         FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"

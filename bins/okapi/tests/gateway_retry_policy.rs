@@ -33,7 +33,7 @@ async fn spawn_flaky_mock(hits: Hits, fail_first: usize) -> SocketAddr {
                     .into_response();
             }
             axum::Json(json!({
-                "id": "cmpl", "object": "chat.completion",
+                "id": "cmpl", "object": "chat.completion", "model": "observed-provider-model",
                 "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}
             }))
@@ -50,6 +50,8 @@ async fn spawn_flaky_mock(hits: Hits, fail_first: usize) -> SocketAddr {
 }
 
 struct Env {
+    pg: PgPool,
+    user_id: i64,
     gateway: SocketAddr,
     token: String,
     model: String,
@@ -78,6 +80,15 @@ async fn setup(policy: Option<Value>, fail_first: usize) -> Env {
         .await
         .unwrap();
     okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
+        .await
+        .unwrap();
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(&pg, user_id, &snapshot)
         .await
         .unwrap();
 
@@ -122,6 +133,8 @@ async fn setup(policy: Option<Value>, fail_first: usize) -> Env {
     });
 
     Env {
+        pg,
+        user_id,
         gateway: addr,
         token,
         model,
@@ -153,6 +166,42 @@ async fn default_policy_retries_same_key_once() {
         env.hits.load(Ordering::SeqCst),
         2,
         "缺省应为 1 次重试（首发 + 1 重试）"
+    );
+    let mut record = None;
+    for _ in 0..50 {
+        record = sqlx::query_as::<_, (String, Option<Value>)>("SELECT model_name, usage_details FROM billing_records WHERE user_id=$1 AND status=20 ORDER BY id DESC LIMIT 1")
+            .bind(env.user_id).fetch_optional(&env.pg).await.unwrap();
+        if record.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let (billed_model, details) = record.expect("request settled");
+    assert_eq!(
+        billed_model, env.model,
+        "observing the response model must not opt into response-model billing"
+    );
+    let diagnostics = &details.unwrap()["diagnostics"];
+    assert_eq!(diagnostics["response_model"], "observed-provider-model");
+    assert_eq!(diagnostics["attempts"].as_array().unwrap().len(), 2);
+    assert_eq!(diagnostics["attempts"][0]["status"], 500);
+    assert_eq!(diagnostics["attempts"][0]["error_message"], "boom");
+    assert_eq!(diagnostics["attempts"][1]["outcome"], "success");
+    assert!(
+        diagnostics["error_message"].is_null(),
+        "recovered requests must not retain a top-level failure"
+    );
+    assert!(!diagnostics.to_string().contains("mock-credential"));
+    let outbox: Value = sqlx::query_scalar(
+        "SELECT payload FROM billing_outbox WHERE payload->>'user_id'=$1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(env.user_id.to_string())
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        outbox["diagnostics"], *diagnostics,
+        "the CH delivery payload must carry the same diagnostics as personal logs"
     );
 }
 
@@ -244,6 +293,15 @@ async fn first_output_window_is_per_channel() {
     .await
     .unwrap();
 
+    let snapshot = serde_json::to_value(
+        okapi_store::pricing::load_pricing_source_rows(&pg)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    okapi_store::admin::publish_epoch(&pg, user_id, &snapshot)
+        .await
+        .unwrap();
     let state = gateway::build_state(&database_url, &redis_url, "rpw-node", None, None)
         .await
         .unwrap();

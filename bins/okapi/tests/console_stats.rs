@@ -39,6 +39,9 @@ fn hash(token: &str) -> String {
 #[path = "support/output_rate_statistics.rs"]
 mod output_rate_statistics;
 
+#[path = "support/quality_pagination.rs"]
+mod quality_pagination;
+
 struct Env {
     pg: PgPool,
     state: gateway::state::AppState,

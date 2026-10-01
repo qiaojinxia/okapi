@@ -99,7 +99,7 @@ pub async fn list_permissions(
 }
 
 /// 敏感设置键判定：列表接口只回"是否已配置"，明文永不出列表。
-fn is_secret_key(key: &str) -> bool {
+pub(super) fn is_secret_key(key: &str) -> bool {
     const NEEDLES: [&str; 7] = [
         "secret",
         "key",
@@ -111,7 +111,7 @@ fn is_secret_key(key: &str) -> bool {
         "smtp",
     ];
     let lower = key.to_ascii_lowercase();
-    NEEDLES.iter().any(|n| lower.contains(n))
+    lower == "notify_channels" || NEEDLES.iter().any(|n| lower.contains(n))
 }
 
 pub async fn list_settings(
@@ -666,6 +666,9 @@ pub async fn manage_user(
     let Some(action) = UserAction::parse(&req.action) else {
         return Err(AppError::bad_request().with_param("action"));
     };
+    if matches!(action, UserAction::Promote | UserAction::Demote) {
+        guard_super_admin(&state, &headers).await?;
+    }
     if id == actor.user_id {
         return Err(AppError::bad_request().with_param("self_target"));
     }
@@ -718,6 +721,7 @@ mod tests {
             "turnstile_secret_key",
             "channel_credential",
             "smtp",
+            "notify_channels",
         ] {
             assert!(is_secret_key(key), "{key} 必须被识别为敏感键");
         }

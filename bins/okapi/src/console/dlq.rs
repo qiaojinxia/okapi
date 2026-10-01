@@ -103,16 +103,19 @@ pub async fn requeue_handler(
     if req.ids.is_empty() {
         return Err(AppError::bad_request().with_param("ids"));
     }
-    let requeued = requeue(&state.pg, &req.ids).await?;
+    let outcome = requeue(&state.pg, &req.ids).await?;
     super::admin::audit(
         &state,
         &actor,
         "billing.dlq_requeue",
         "batch",
-        json!({ "ids": req.ids, "requeued": requeued }),
+        json!({ "ids": req.ids, "requeued": outcome.count,
+            "affected_ids":outcome.dlq_ids,"delivery_batch_ids":outcome.batch_ids }),
     )
     .await;
-    Ok(Json(json!({ "requeued": requeued })))
+    Ok(Json(
+        json!({ "requeued": outcome.count,"delivery_batch_ids":outcome.batch_ids }),
+    ))
 }
 
 /// POST /admin/dlq/discard：标记已处理；冻结批次必须整体处理。
@@ -162,8 +165,14 @@ pub async fn discard_handler(
 /// 重投：冻结批次整体恢复原 token/行；旧 DLQ 仍重入 outbox。
 /// 返回实际恢复的所有成员数，可能大于选择的条数。
 /// MCP `dlq_requeue` 与 HTTP 共用——AI 与人执行的必须是同一个动作。
-pub(super) async fn requeue(pg: &PgPool, ids: &[i64]) -> Result<i64, AppError> {
-    let n = sqlx::query_scalar!(
+pub(super) struct Requeued {
+    pub count: i64,
+    pub dlq_ids: Vec<i64>,
+    pub batch_ids: Vec<uuid::Uuid>,
+}
+
+pub(super) async fn requeue(pg: &PgPool, ids: &[i64]) -> Result<Requeued, AppError> {
+    let n = sqlx::query!(
         r#"
         WITH locked_batches AS MATERIALIZED (
             SELECT id FROM billing_ch_batches WHERE status=2 AND id IN (
@@ -172,26 +181,38 @@ pub(super) async fn requeue(pg: &PgPool, ids: &[i64]) -> Result<i64, AppError> {
         ), moved AS (
             DELETE FROM billing_dlq WHERE status=0
                 AND (id=ANY($1) OR ch_batch_id IN (SELECT id FROM locked_batches))
-            RETURNING payload,ch_batch_id
+            RETURNING id,payload,ch_batch_id,event_key
         ), restored AS (
             UPDATE billing_ch_batches SET status=0,retry_count=0,next_retry_at=NULL
             WHERE id IN (SELECT ch_batch_id FROM moved) AND status=2 RETURNING id
         ), reset_outbox AS (
             UPDATE billing_outbox SET status=0,retry_count=0,next_retry_at=NULL
             WHERE ch_batch_id IN (SELECT id FROM restored) RETURNING id
+        ), restored_relay AS (
+            UPDATE billing_outbox o SET status=0,retry_count=0,next_retry_at=NULL,topic='billing.completed',payload=m.payload
+            FROM moved m WHERE m.ch_batch_id IS NULL AND m.event_key='outbox:'||o.event_id::text
+            RETURNING o.event_id
         ), ins AS (
             INSERT INTO billing_outbox (topic, payload)
-            SELECT 'billing.completed', payload FROM moved WHERE ch_batch_id IS NULL
+            SELECT 'billing.completed', payload FROM moved m WHERE ch_batch_id IS NULL
+                AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE m.event_key='outbox:'||o.event_id::text)
             RETURNING 1
         )
-        SELECT COUNT(*)::bigint AS "c!" FROM moved
+        SELECT COUNT(*)::bigint AS "c!",
+            COALESCE(array_agg(id),'{}'::bigint[]) AS "dlq_ids!",
+            COALESCE(array_agg(DISTINCT ch_batch_id) FILTER (WHERE ch_batch_id IS NOT NULL),
+                     '{}'::uuid[]) AS "batch_ids!" FROM moved
         "#,
         ids
     )
     .fetch_one(pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
-    Ok(n)
+    Ok(Requeued {
+        count: n.c,
+        dlq_ids: n.dlq_ids,
+        batch_ids: n.batch_ids,
+    })
 }
 
 /// Preview the atomic batch scope before MCP confirmation.

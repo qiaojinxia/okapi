@@ -1,5 +1,8 @@
 //! M2 运维批验收：按日志退款（事件溯源冲销 + CH 口径一致）/ 代客查看 / 缓存清理。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -111,6 +114,7 @@ async fn setup() -> Env {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, super_id).await;
     let state = gateway::build_state(
         &database_url,
         &redis_url,
@@ -411,14 +415,14 @@ async fn assist_overview_scoped_and_audited() {
     assert_eq!(audits, 1, "代客查看必须留痕");
 }
 
-/// 缓存清理：直改 DB 倍率（不发 epoch）→ flush pricebook → 新价立即生效。
+/// 草稿改动不生效；发布后 flush pricebook 才加载新价。
 #[tokio::test]
 async fn cache_flush_pricebook_hotfix() {
     let env = setup().await;
     let (_, amount) = chat_settled(&env).await;
     assert_eq!(amount, 240);
 
-    // 直接改库（模拟热修复场景，不走 publish）
+    // 直接改草稿。
     sqlx::query!(
         r#"UPDATE model_pricing SET model_ratio = 3
            WHERE model_id = (SELECT id FROM models WHERE model_name = $1)"#,
@@ -428,9 +432,11 @@ async fn cache_flush_pricebook_hotfix() {
     .await
     .unwrap();
 
-    // flush 前旧价仍生效
+    // 发布前旧价仍生效。
     let (_, amount) = chat_settled(&env).await;
     assert_eq!(amount, 240, "未 flush 前应仍是旧价");
+
+    published_pricing::publish(&env.pg, env.user_id).await;
 
     let r = reqwest::Client::new()
         .post(format!("http://{}/admin/cache/flush", env.console))

@@ -280,10 +280,10 @@ fn client_builder(
     proxy_url: Option<&str>,
     policy: ClientPolicy,
 ) -> Result<reqwest::ClientBuilder, UpstreamError> {
-    let mut builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
-    if !matches!(policy, ClientPolicy::Forward) {
-        builder = builder.redirect(reqwest::redirect::Policy::none());
-    }
+    // Custom auth headers are not stripped by reqwest on cross-host redirects.
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none());
     if matches!(policy, ClientPolicy::WebSocket) {
         builder = builder.http1_only();
     }
@@ -325,6 +325,40 @@ pub fn apply_extra_headers(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn forward_never_follows_custom_credential_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = target.local_addr().unwrap();
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = origin.local_addr().unwrap();
+        let serve = tokio::spawn(async move {
+            let (mut socket, _) = origin.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let used = socket.read(&mut request).await.unwrap();
+            assert!(used > 0);
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{address}/steal\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let response = HttpPool::new()
+            .unwrap()
+            .post(&Outbound::default(), format!("http://{source}/api"))
+            .unwrap()
+            .header("x-api-key", "secret")
+            .header("api-key", "secret")
+            .header("x-goog-api-key", "secret")
+            .header("x-amz-security-token", "secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 302);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), target.accept())
+                .await
+                .is_err()
+        );
+        serve.await.unwrap();
+    }
 
     #[test]
     fn proxy_url_accepts_http_and_socks() {

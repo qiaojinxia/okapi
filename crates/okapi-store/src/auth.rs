@@ -216,40 +216,60 @@ pub async fn find_key_by_hash(
     } else {
         false
     };
-    Ok(row.map(|r| AuthedKey {
-        key_id: r.key_id,
-        quota_limited,
-        user_id: r.user_id,
-        key_status: r.key_status,
-        user_status: r.user_status,
-        role: r.role,
-        permissions: r
-            .admin_permissions
-            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
-        pool_code: Some(r.pool_code),
-        pool_strategy: r.pool_strategy,
-        pool_fallback: r.pool_fallback,
-        group_code: r.group_code,
-        group_rpm_limit: r.group_rpm_limit,
-        group_rph_limit: r.group_rph_limit,
-        multiplier_scaled: r.multiplier_scaled,
-        rpm_limit: r.rpm_limit,
-        tpm_limit: r.tpm_limit,
-        rpd_limit: r.rpd_limit,
-        max_concurrency: r.max_concurrency,
-        model_allowlist: r.model_allowlist,
-        ip_allowlist: r
-            .ip_allowlist
-            .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok()),
-        expires_at: r.expires_at,
-        member_user_id: r.member_user_id,
-        member_monthly_limit_micro: r.member_monthly_limit_micro,
-    }))
+    row.map(|r| {
+        Ok(AuthedKey {
+            key_id: r.key_id,
+            quota_limited,
+            user_id: r.user_id,
+            key_status: r.key_status,
+            user_status: r.user_status,
+            role: r.role,
+            permissions: parse_policy(r.admin_permissions)?,
+            pool_code: Some(r.pool_code),
+            pool_strategy: r.pool_strategy,
+            pool_fallback: r.pool_fallback,
+            group_code: r.group_code,
+            group_rpm_limit: r.group_rpm_limit,
+            group_rph_limit: r.group_rph_limit,
+            multiplier_scaled: r.multiplier_scaled,
+            rpm_limit: r.rpm_limit,
+            tpm_limit: r.tpm_limit,
+            rpd_limit: r.rpd_limit,
+            max_concurrency: r.max_concurrency,
+            model_allowlist: r.model_allowlist,
+            ip_allowlist: parse_policy(r.ip_allowlist)?,
+            expires_at: r.expires_at,
+            member_user_id: r.member_user_id,
+            member_monthly_limit_micro: r.member_monthly_limit_micro,
+        })
+    })
+    .transpose()
+}
+
+fn parse_policy(value: Option<serde_json::Value>) -> Result<Option<Vec<String>>, StoreError> {
+    value
+        .map(serde_json::from_value::<Vec<String>>)
+        .transpose()
+        .map_err(|_| StoreError::InvalidData("auth_policy_invalid"))
 }
 
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+    #[test]
+    fn corrupt_ip_and_permission_policies_fail_closed() {
+        for policy in [
+            serde_json::json!("broken"),
+            serde_json::json!(["valid", 7]),
+            serde_json::json!({}),
+        ] {
+            assert!(parse_policy(Some(policy)).is_err());
+        }
+        assert_eq!(
+            parse_policy(Some(serde_json::json!([]))).unwrap(),
+            Some(vec![])
+        );
+    }
     #[test]
     fn own_scope_does_not_authorize_global_operations() {
         let key:AuthedKey=serde_json::from_value(serde_json::json!({"key_id":1,"user_id":1,"key_status":1,"quota_limited":false,"user_status":1,"role":10,"permissions":["channel.write.own"],"group_code":"default","multiplier_scaled":1_000_000})).unwrap();

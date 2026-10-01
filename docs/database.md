@@ -54,6 +54,7 @@ CREATE TABLE users (
     balance_expires_at TIMESTAMPTZ,                   -- M4 余额有效期（#1790-6），充值刷新
     language           VARCHAR(8) NOT NULL DEFAULT 'auto',
     totp_secret_ciphertext BYTEA,                 -- 2FA 密钥（AES-GCM 加密，M3）
+    totp_last_counter BIGINT,                    -- 最近成功的时间片，条件 UPDATE 防重放（0031）
     aff_code           VARCHAR(16) UNIQUE,        -- 邀请码（M4 返利）
     inviter_id         BIGINT REFERENCES users(id),   -- 邀请人（M4）
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -646,9 +647,9 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 `turnstile_secret`、`turnstile_verify_url`（siteverify 地址覆写，缺省 Cloudflare 官方端点；内网出口代理或自动化用例的 mock 用）、`oauth_providers`、`payment_epay` / `payment_stripe`、
 `model_rpm_limits`（用户×模型 RPM）、`realtime_max_conns_per_key`（Realtime 连接租约上限，缺省 4）、`responses_ws_max_conns_per_key`（Responses WS 独立连接租约上限，缺省 4）、`responses_ws_turn_timeout_secs`（单轮硬时限，缺省/最大 480 秒，可缩短；另留最多 30 秒收尾）、`responses_ws_transport`（native/http/auto，缺省 auto；channels.settings 同名项非 null 时优先）、`responses_ws_context_bytes`（HTTP 桥接连接内快照序列化字节预算，缺省/最大 128 MiB）、
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
-`notify_channels`（通知多路配置数组）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
-`critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key，0=关）、
-`site_url`（对外站点地址；OAuth 回调与找回密码链接的基址，缺省按请求 Host 推导）、
+`notify_channels`（通知多路配置数组，可含 webhook `secret`；列表与审计脱敏）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
+`critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key，0=关）、
+`site_url`（对外站点地址；找回密码必须配置合法 HTTP(S) 基址，绝不按请求 Host 推导；OAuth 的独立回调逻辑见相应接口）、
 `smtp`（邮件出口：host/port/security(starttls|tls|none)/username/password/from_address/from_name/reply_to；
 host 空=未配置；含密码故列表接口只回"已配置"，IMPLEMENTATION §11.27）、
 `surge_inflight_threshold`（surge 规则的负载判定阈值：Redis 汇总的集群 HTTP 请求与 Responses WS 活动轮次数 ≥ 该值即
@@ -701,13 +702,14 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `ws:lease:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 6h 兜底 | Realtime WS per-key 连接租约：member=连接 id（request_id），score=到期毫秒；准入 Lua 先 ZREMRANGEBYSCORE 清过期再 ZCARD 比上限（settings.realtime_max_conns_per_key 缺省 4），崩溃连接不续期自然滚出（§14.4） |
 | `ws:responses:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 120s 兜底 | Responses WS 独立连接租约；member=连接 UUID，score=到期毫秒。准入/续期 Redis 故障拒绝连接，关闭后释放；默认每 key 4 个连接，与 Realtime 分开计数 |
 | `video:task:{<uid>}:<task_id>` | STRING | 48h | videos 异步任务 → channel_key_id 映射（轮询/下载回源锚点；键含 user_id 天然租户隔离，他人任务 404） |
-| `notify:mute:<idx>:<event>` | STRING | =min_interval_secs | 通知频率闸（SET NX；worker 事件 drift/channel_cooldown/balance_low/margin_breaker → settings.notify_channels webhook / email 分发，#1790-8） |
+| `notify:mute:<idx>:<event>` | STRING | 投递租约 120s / 成功后 min_interval_secs | SET NX 认领 owner UUID，单键 Lua 核对 owner 后：成功置 sent 并启动静默窗，失败 DEL；告警审计使用独立事件键 |
+| `totp:pending:<uid>:<sha256(sid)>:<ticket>` | STRING | 5min | 服务端密封 TOTP 秘钥；仅用户和发起会话可确认，成功后删除。时间片防重放真理源为 users.totp_last_counter |
 | `mb:blocks` | HASH | 永久（字段按 `until` 由 worker 剪除） | 负毛利熔断状态（IMPLEMENTATION §11.34）：字段 `<group>\|<channel_id>` → JSON `{state: blocked\|lifted, since, until, requests, amount_micro, cost_micro, margin_bp}`。worker 每 5 分钟按 settings.margin_breaker 评估 CH mv_analysis_hour 写入；gateway 10s 进程缓存一次 HGETALL，`blocked` 且未到 `until` 的对从候选里摘掉（Redis 故障 = 不熔）；`lifted` 为管理员解除，期间评估器跳过该对；关闭功能时整键删除 |
 | `verify:email:<email>` | STRING | 10min | 注册邮箱验证码（6 位数字；重发覆盖旧码；注册对上即 DEL，一次性。IMPLEMENTATION §11.27） |
 | `verify:email:cd:<email>` | STRING | 60s | 同一邮箱验证码重发冷却（SET NX） |
 | `pwreset:<sha256(token)>` | STRING | 30min | 找回密码 token → user_id（明文 token 只出现在邮件链接里；重设成功即 DEL） |
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |
-| `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
+| `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
 | `conc:ck:<channel_key_id>` | STRING | 1h 泄漏保护 | 渠道 key 在途并发信号量；生成和原生 Token 计数共用 |
 | `inflight:gauge` | HASH | 整键 1h；字段超过 10s 不计入、5min 清除 | 集群在途量（HTTP 请求与 Responses WS 活动轮次）：`node → <count>\|<unix_ms>`。HTTP 在启用 surge 规则时跟踪响应体；Responses WS 跟踪单轮准入至结算；活动期间每秒续报，零/非零切换及时上报，其余变化一秒采样。正常结束、报错、断开、取消均释放；每实例串行写入，节点名称须唯一。软实时计价输入，不用于严格并发限流 |
@@ -812,7 +814,7 @@ ARGV = quota_micro, sub_until_unix_s, sub_epoch（旧调用默认空字符串）
 
 `0011_image_batch_recovery.sql` 增加私有分页检查点表 `image_batch_recovery`，以 batch_id 为唯一归属保存候选、下一页、页数、游标摘要、完成/冲突标志。每次变更和恢复接管都核对当前执行租约和 uncertain 状态；完整扫描、唯一候选与详情身份核对才能记录远端任务。列表未找到或详情 404 不关闭资金冻结。重扫不删除已有候选或冲突，避免忘掉重复任务证据。
 
-`0012_image_batch_cleanup.sql` 增加 `image_batch_cleanup`，保存终态任务的远端删除检查点与独立重试错误。清理租约必须满足已删除/到期及匹配的 closed hold；远端 job 和文件清理完成后，事务删除私有 payload、条目/图片、恢复与清理检查点，将 cleanup_done 置真并把存储预算降为每任务 512 KiB。产物任务数限额排除已清理记录，字节预算继续计算保留元数据。账单、资金凭证、请求/幂等身份不删除，原幂等键不能被用来再次生成。
+`0012_image_batch_cleanup.sql` 增加 `image_batch_cleanup`，保存终态任务的远端删除检查点与独立重试错误。清理租约必须满足已删除/到期及匹配的 closed hold；远端 job 和文件清理完成后，事务删除私有 payload、条目/图片、恢复与清理检查点，将 cleanup_done 置真并把存储预算降为每任务 512 KiB。产物任务数与运行字节预算均排除已清理记录（0031 的 live capacity 部分索引）；保留元数据不占运行准入预算。账单、资金凭证、请求/幂等身份不删除，原幂等键不能被用来再次生成。
 
 | Lua | 同槽 keys | 参数与结果 | 资金语义 |
 | --- | --- | --- | --- |
@@ -877,6 +879,8 @@ CREATE TABLE request_log_raw (
     latency_ms UInt32, ttft_ms UInt32, stream UInt8,
     ttft_reported Nullable(UInt8) DEFAULT NULL, -- 新行 1=已测量（含 0ms）/0=未测量；NULL=旧行
     latency_reported Nullable(UInt8) DEFAULT NULL, -- 总耗时采用同样的采集语义
+    diagnostics String DEFAULT '',           -- 有界错误摘要、模型观察及渠道尝试 JSON；空串为历史未采集
+    billing_status Nullable(UInt8) DEFAULT NULL, -- 20结算/30退款/40失败；与请求 is_error 独立
     -- 调度（Sub2API 启发）
     retry_count UInt8, failover_count UInt8, sticky_layer UInt8,
     upstream_status UInt16, error_code LowCardinality(String), is_error UInt8,
@@ -1042,6 +1046,10 @@ GROUP BY day ORDER BY day;
 
 ### 3.5 与 new-api 统计字段对照（迁移完备性基线）
 
+**日志诊断补齐（2026-09-30）：** 新请求的 `usage_details.diagnostics` 与 outbox、CH 同源保存错误摘要、失败阶段、渠道尝试、实际返回模型、推理强度和显式客户端会话/UA。只保留有界字段，不存请求正文；摘要脱敏凭证。个人 API 仅投影错误、模型、强度、流结束原因及媒体参数，不返回渠道/key 尝试、会话和 UA。实际返回模型的观察独立于 `bill_by_response_model`，不会自动改变计费模型。尝试耗时表示响应准备阶段，不等于整段生成耗时。历史记录不补造诊断。
+
+请求失败与账务状态分别展示：个人 `errors_only` 包含 `log_type=5`、账务失败以及诊断标记的流中断，保留退款/已结算状态；正常退款不算请求失败。管理员明细批量读取 PG 当前账务状态，退款后不沿用 CH 投递时的结算状态；无 PG 记录时回退投递状态。首字和总耗时使用采集标记，未采集返回 null，真实 0 ms 保留。绝对时间参数显式采用 UTC，不随查询的本机日历时区偏移。仍仅覆盖已持久化账单请求，鉴权等入口拒绝不会因此新增账单日志。
+
 > 基准：new-api main 分支 `model/log.go`（logs 表 + Stat 统计条）与 `model/usedata.go`（quota_data 看板表），2026-08 逐字段核对。
 
 **logs 表：**
@@ -1168,7 +1176,7 @@ DECIMAL 列建议 `::text` 保精度）。
 
 `video_tasks`（迁移 0030）以 `(user_id,task_id)` 隔离任务，request_id 唯一绑定原始账单；保存 channel_key_id、pending/completed/refunded 状态、next_poll_at。创建账单与任务映射同事务；每分钟 worker 领取最多 100 个到点任务，失败/取消走原账单幂等退款。轮询回源映射不再仅依赖 Redis 的 48 小时 TTL。
 
-Redis `settlement:{retry}:payloads`（HASH，request_id → 完整结算输入）与 `settlement:{retry}:order`（ZSET，入队/最近失败毫秒）同槽原子写入、不设置 TTL。PG 接受账单后删除；worker 每分钟补写最多 100 笔，重放仍由 PG request_id 幂等闸和 UserGuard 串行化。进程宕机后可继续恢复，前提是 Redis 按热账本要求启用持久化与禁止淘汰。无效载荷保留供排障，失败条目移到队尾，避免阻塞后续账单。
+Redis `settlement:{retry}:payloads`（HASH，request_id → 完整结算输入）与 `settlement:{retry}:order`（ZSET，下次恢复的毫秒时间）同槽原子写入、不设置 TTL。PG 接受账单后删除；worker 每秒补写最多 500 笔（可配置，最多 8 笔并发），重放仍由 PG request_id 幂等闸和 UserGuard 串行化。进程宕机后可继续恢复，前提是 Redis 按热账本要求启用持久化与禁止淘汰。暂时失败指数退避，无效或冲突载荷保留在 quarantine 中供修复。
 
 余额到期只移除正可用余额，不移除在途预扣。expire 事件、PG 快照、清除到期标记与 fund_transfers 在同一事务提交，再按 transfer 回执更新 Redis；应用失败保留恢复意图。repair.lua 在途累加与 target 减法均检查 Lua 安全整数范围，超过范围拒绝写入。
 
@@ -1176,8 +1184,42 @@ Redis `settlement:{retry}:payloads`（HASH，request_id → 完整结算输入�
 
 已成功投递且超过 7 天的 outbox、CH 事件回执与冻结批次按依赖顺序清理；有 DLQ 引用或未完成批次一律保留。7 天覆盖 JetStream 48 小时消息保留窗口，超过窗口的外部人工旧消息重放不在投递幂等保证内。
 
-时间口径来自机器 `TZ`、`/etc/localtime` 或 `/etc/timezone` 的 IANA 名称；多副本应配置一致。PG 每条连接设置此时区，CH 查询指定 session_timezone。CH `ts`、ingested_at、历史校准时间显式 UTC，写入 UTC 墙钟字符串不会随容器时区改变。日统计由保留的小时财务/Token 状态重建；新增机器日历用客户端与缓存小时聚合，原始日志到期后仍保留这些统计。升级前只剩 UTC 日聚合而没有小时证据的客户端/旧缓存历史无法可靠重建本地日界，保留原表供历史核查。
+时间口径来自机器 `TZ`、`/etc/localtime` 或 `/etc/timezone` 的 IANA 名称；多副本应配置一致。PG 每条连接设置此时区，CH 查询指定 session_timezone。CH `ts`、ingested_at、历史校准时间显式 UTC，写入 UTC 墙钟字符串不会随容器时区改变。新增 `mv_calendar_minute`（minute,user_id,api_key_id,group_code,model,client_type）：countState 已投递记录数（物理列仍名为 requests，含退款，不能直接作为 API 调用数）；Token 四轴与合计、四金额、错误的 sumState；缓存写入 sumState、数字存在与读写上报的 countIfState。无 TTL，保持原始日志到期后的本地日历统计。该 MV 独立新增，不 POPULATE、不覆盖旧表。
+
+非 UTC 日查询在每个旧小时与所需维度比较新分钟聚合的请求覆盖；完全相等时选择分钟，否则整桶选择旧小时，不能相加。旧小时的起止时刻必须属于同一本地日期；否则返回 `statistics_calendar_history_incomplete` 存储错误，禁止把半小时/四分之三小时时区的午夜两侧混算。分钟起止日期也需相同，避免历史秒级偏移误分。四金额在分钟来源独立保留；旧 cube 来源的 original 仍按 amount+discount 恢复。客户端保留原 uniq 聚合状态；缓存数值/采集计数保持相同来源。仅有旧 UTC 日桶而没有小时/分钟证据的客户端与缓存历史仍无法重建，原表保留供核查。历史 raw 回填必须单独检查覆盖与幂等，当前升级不自动回填。查询性能仍须在生产规模另行验收。
+
+旧 UTC 日状态也参与覆盖检查：按原视图维度比较日请求（缓存视图比较相应已观察计数）与 UTC 小时合计。旧日更多时，两个可能受影响的本地日期保留带错误闸的原聚合状态；读取这些日期的度量会明确拒绝，不能把保留的旧消耗显示成零。其他用户/维度和无关日期不受此错误闸影响。该路径只暴露证据不足，不把 UTC 日数额伪装成本地日数额。
 
 会话列表的 sid 字段是 SHA-256 前 128 位指纹，仅用于展示与吊销，不是 cookie 凭证。吊销在已鉴权用户的会话内匹配指纹。会话与 OAuth state cookie 使用 Secure/HttpOnly/SameSite=Lax；OAuth 回调须带发起浏览器的 provider 专属 state cookie。
 
 请求统计仅计进入预扣后的终态（成功与失败）；无效 key、预扣前限流或余额不足不进入账单统计，应通过入口访问日志观察。API key 模式的前端仍把密钥保存在 localStorage，浏览器脚本可读取；使用者应按共享设备与浏览器扩展风险选择该模式。开启注册赠送/邀请奖励时应启用邮箱验证与反自动化验证，否则不同邮箱自邀属于配置滥用风险。
+
+调用计数排除 `log_type=6` 退款调整。原日/小时与日历分钟聚合的 countState 仍是财务记录数，保留作覆盖证据。新增独立 `population_v1_mv_*`：由嵌入式 MV 定义确定相同粒度和状态类型，调用与测量使用 StateIf 外层的 `log_type IN (2,5)`；四金额/成本已知数/财务时间保持全部事件；额外 countState `financial_records` 及 countStateIf `population_classified` 保存总记录与 2/5/6 分类覆盖。不覆盖既有表、不 POPULATE，无 raw TTL，原 materialized-view 幂等设置保留。
+
+`population_source_v1_mv_*` 是只读选择视图：每个完整粒度先比较原记录数与新总记录数，完整且可解释的新源优先；新源不足时仅用记录数足够且类型明确的 raw 重算。不能叠加两种来源。旧聚合缺分类且 raw 不全，调用/测量状态以 `statistics_request_history_incomplete` 拒绝猜值，财务专用读取保留旧金额。缓存无总计数的旧 MV 使用对应 key/day 或 cube/hour、analysis/hour 记录母表核对。原始日志筛选不改写为调用源；另有 `request_log_calls` 只读视图供采集与性能重算。分析补充范围按总财务记录而非调用数决定，退款只发生窗口仍保留负金额。成本覆盖以财务记录数为分母，新增 `financial_records`/`cost_known_records` 字段，兼容旧 `cost_known_requests` 的记录计数，不视作纯调用计数。
+
+以上实现正在联测，不能宣称所有端点或生产历史已验收；证据和未完成边界见 [退款与调用统计样本范围](request-population-audit.md)。
+
+### 复扫加固约定
+
+会话与 OAuth state cookie 缺省 Secure；纯 HTTP 内网部署可显式配置 `OKAPI_COOKIE_SECURE=false`，HttpOnly 与 SameSite 保留。模型列表接受 Gemini `?key=`，头凭证优先。MCP `billing.read.own` 只能解释本人账单；角色权限仅接受已登记权限及 own/all 范围。Turnstile 自定义验证地址同样受 SSRF 策略约束。
+
+对账每页最多读取 1000 个用户，只汇总该页账本并立即提交，Redis IO 不持保留清理锁。双后端失败的错误记账改由受下线计数及积压准入跟踪的后台任务继续恢复，不持结算许可睡眠、不阻塞 HTTP 返回。
+
+Redis journal 保留先写后结算的持久接受顺序，正常账单的保存/删除两次写是恢复契约的成本；`OKAPI_SETTLEMENT_JOURNAL_MAX` 缺省 100000 条，满时保留旧账并拒绝新增日志。worker 每秒并发恢复，`OKAPI_SETTLEMENT_RECOVERY_BATCH` 缺省 500 条；失败指数退避，无效载荷从活动队列移入同槽 quarantine HASH，保留载荷供人工修复而不永久循环。投递清理每次只删除有限行，逐批提交。
+
+quarantine 同样计入容量上限。无效结算、预扣冲突以及 SQL 数据/约束错误进入隔离；连接故障、死锁、锁超时继续退避重试。修复前必须核对 PG 幂等回执；复投时用同槽 Lua 原子将修正载荷移回 payloads、设置 order 的到点时间并清除 attempts。保留原 request_id，不以新 UUID 重记同一笔账。
+
+行为变化：错误邮箱验证码一次尝试即消费；透传及视频的非 per_call 模型会显式拒单。私网 webhook 需显式配置 ssrf_policy，拒绝的通知配置会记录持久审计告警。
+
+HTTP 请求 span 仅记录 URL 路径，查询字符串中的 Gemini key、OAuth code/state 不进入访问日志。失败账单保留实际错误码，包括上游超时、路由无候选和定价计算失败。
+
+直接从小时或五分钟桶按机器日期取数时也检查桶是否跨越本地午夜。缺少更细证据时返回 `statistics_calendar_history_incomplete`，不能把整个跨日桶归给起点日期；已保留的分钟日聚合使用细粒度来源重建。复制的 UTC tzfile 可通过 Etc/UTC 等候选识别，绝对 TZ 路径统一成 IANA 名称，启动记录生效时区。
+
+### 第三轮加固（迁移 0031）
+
+`users.totp_last_counter` 记录最近成功的 TOTP 时间片；登录/绑定/解绑通过条件 UPDATE 单次消费，新时间片必须严格更大。绑定要求原密钥为空，禁止覆盖。`image_batches_live_capacity_idx` 仅覆盖未清理批次；历史幂等元数据保留但不占运行准入预算。视频创建超过 24 小时通过既有退款 request_id 幂等路径终结；0032 增加 refund_pending 持久化退款意图，见下文。
+
+NATS relay 使用 `billing_outbox.next_retry_at` 作为 10 分钟认领租约；最终状态更新必须重新匹配原租约并取行锁。网络 I/O 不持 PG 事务。毒消息 DLQ 用 `outbox:<event_id>` 唯一键保留原始载荷，重投恢复原 outbox 身份，避免重建 event_id 导致重复统计。DEFAULT 分区旧行每批最多 1000，在保留策略排他锁下先移入 `billing_event_carry` / `billing_record_receipts` 再删除，同一事务失败则整体回滚。
+
+迁移 0032 增加 `video_tasks.refund_pending`：失败/超时与成功完成通过条件 UPDATE 原子争抢 pending 终态；先持久化退款意图、释放 PG 事务后执行幂等退款。进程中断或退款后状态更新失败，worker 继续扫描 refund_pending 并重复同一 request_id 退款，完成后标记 refunded。已完成的任务不会被超时分支退款。

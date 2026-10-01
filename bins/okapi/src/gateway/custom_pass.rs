@@ -243,6 +243,13 @@ async fn handle(
             Ok(out)
         }
         Ok(PassResponse::ErrStatus { status, body }) => {
+            if let Some(trace) = super::diagnostics::Trace::current() {
+                trace.failure(&okapi_providers::UpstreamError::Status {
+                    status,
+                    body: body.clone(),
+                    retry_after_secs: None,
+                });
+            }
             settle(
                 state,
                 &key,
@@ -265,6 +272,9 @@ async fn handle(
         }
         Err(err) => {
             tracing::warn!(request_id = %request_id, error = %err, "custom_pass 上游失败");
+            if let Some(trace) = super::diagnostics::Trace::current() {
+                trace.failure(&err);
+            }
             settle(
                 state,
                 &key,

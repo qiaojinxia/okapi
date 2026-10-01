@@ -28,12 +28,12 @@ export function TrendView({ search, resp, isLoading, error, onRetry }: { search:
   </CardContent></Card>
 }
 
-export function TrendPlot({ resp, metric, compact = false }: { resp: TrendResp; metric: TrendMetric; compact?: boolean }) {
+export function TrendPlot({ resp, metric, compact = false, paginateTable = false }: { resp: TrendResp; metric: TrendMetric; compact?: boolean; paginateTable?: boolean }) {
   const { t, i18n } = useTranslation()
   const chart = trendChart(resp, metric, t(`charts:metric_${metric}`), t('analytics:ttft'), t('analytics:other'), t('analysis:notCollected'))
   const ratio = metric === 'cache' || metric === 'error_rate'
   const unit = metric === 'amount' ? 'USD' : ratio ? '%' : (metric === 'latency' || metric === 'ttft') ? 'ms' : metric === 'throughput' ? 'Token/s' : t(`charts:metric_${metric}`)
   const format = (n: number) => metric === 'amount' ? new Intl.NumberFormat(i18n.language, { style: 'currency', currency: 'USD', maximumFractionDigits: 4 }).format(n)
     : `${n.toLocaleString(i18n.language, { maximumFractionDigits: ratio || metric === 'throughput' ? 2 : 0 })}${ratio ? '%' : (metric === 'latency' || metric === 'ttft') ? ' ms' : metric === 'throughput' ? ' Token/s' : ''}`
-  return <div className="space-y-3"><TimeChart compact={compact} {...chart} percent={ratio} format={format} unit={unit} label={t('charts:usageTrend')} />{resp.window && <p className="text-xs text-muted-foreground">{resp.window.start_date ?? resp.window.start_at} — {resp.window.end_date ?? resp.window.end_at} · {resp.window.timezone}</p>}{ratio && <p className="text-xs text-muted-foreground">{t('charts:ratioGaps')}</p>}{metric === 'throughput' && <p className="text-xs text-muted-foreground">{t('charts:throughputHint')}</p>}</div>
+  return <div className="space-y-3"><TimeChart compact={compact} paginateTable={paginateTable} {...chart} percent={ratio} format={format} unit={unit} label={t('charts:usageTrend')} />{resp.window && <p className="text-xs text-muted-foreground">{resp.window.start_date ?? resp.window.start_at} — {resp.window.end_date ?? resp.window.end_at} · {resp.window.timezone}</p>}{ratio && <p className="text-xs text-muted-foreground">{t('charts:ratioGaps')}</p>}{metric === 'throughput' && <p className="text-xs text-muted-foreground">{t('charts:throughputHint')}</p>}</div>
 }

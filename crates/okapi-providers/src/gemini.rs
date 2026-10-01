@@ -101,7 +101,7 @@ pub async fn send_generate_at(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
-        let body = resp.bytes().await.unwrap_or_default();
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
         return Err(UpstreamError::Status {
             status,
             body,
@@ -110,16 +110,18 @@ pub async fn send_generate_at(
     }
 
     if stream {
-        let events = resp.bytes_stream().eventsource().map(|item| match item {
-            Ok(event) => Ok(event.data),
-            Err(e) => Err(UpstreamError::Stream(e.to_string())),
-        });
+        let events = crate::limits::sse(resp)
+            .eventsource()
+            .map(|item| match item {
+                Ok(event) => Ok(event.data),
+                Err(e) => Err(UpstreamError::Stream(e.to_string())),
+            });
         Ok(GeminiResponse::Stream(GeminiStream {
             upstream_request_id,
             events: Box::pin(events),
         }))
     } else {
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         Ok(GeminiResponse::Json {
             status,
             upstream_request_id,
@@ -131,16 +133,14 @@ pub async fn send_generate_at(
 /// 透传形态（Gemini 入口 + Gemini 上游）的计费元数据扫描器：
 /// chunk 原样透出（Gemini SSE 无 event 名），仅提取首字判定 / 字符数 / usage。
 /// usage 口径与 `convert::openai_to_gemini::usage_from_gemini` 一致（promptTokenCount 含缓存，
-/// completion = candidates + thoughts）；`finishReason` 出现即终局，其后追加流终止标记。
+/// completion = candidates + thoughts）；读取到 EOF，允许独立的尾部 usage 帧。
 #[derive(Default)]
-pub struct MetaScanner {
-    finished: bool,
-}
+pub struct MetaScanner;
 
 impl MetaScanner {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// 处理一条原生 chunk（data 行 JSON 原文）。
@@ -152,7 +152,10 @@ impl MetaScanner {
             Ok(raw) => raw,
             Err(err) => return vec![Err(err)],
         };
-        let src: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        let src: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => return vec![Err(UpstreamError::Stream("gemini_chunk_json".into()))],
+        };
         if let Some(err) = src.get("error") {
             let msg = err
                 .get("message")
@@ -178,16 +181,7 @@ impl MetaScanner {
                 has_output = true;
             }
         }
-        // usageMetadata 逐 chunk 累计给出；只在终局 chunk 上交给结算，避免中途值覆盖
-        let finished = src
-            .pointer("/candidates/0/finishReason")
-            .and_then(serde_json::Value::as_str)
-            .is_some();
-        let usage = if finished {
-            crate::convert::openai_to_gemini::usage_from_gemini(src.get("usageMetadata"))
-        } else {
-            None
-        };
+        let usage = crate::convert::openai_to_gemini::usage_from_gemini(src.get("usageMetadata"));
         let passthrough = crate::types::ChatEvent::Data {
             raw,
             event: None,
@@ -195,12 +189,7 @@ impl MetaScanner {
             content_chars,
             usage,
         };
-        if finished && !self.finished {
-            self.finished = true;
-            vec![Ok(passthrough), Ok(crate::types::ChatEvent::Done)]
-        } else {
-            vec![Ok(passthrough)]
-        }
+        vec![Ok(passthrough)]
     }
 }
 

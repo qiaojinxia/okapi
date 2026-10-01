@@ -202,6 +202,7 @@ async fn handle_create(
             .collect(),
         Err(err) => {
             refund(state, &key, request_id, "videos").await;
+            failure.error(&err);
             return Err(err);
         }
     };
@@ -210,10 +211,12 @@ async fn handle_create(
         .await;
     if candidates.is_empty() {
         refund(state, &key, request_id, "videos").await;
-        return Err(AppError::new(
+        let error = AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             super::state::no_candidates_code(margin_removed),
-        ));
+        );
+        failure.error(&error);
+        return Err(error);
     }
 
     let mut failover: i16 = 0;
@@ -223,21 +226,29 @@ async fn handle_create(
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         let Ok(body_up) = rewrite_model(body, &probe.model, &upstream_model) else {
             refund(state, &key, request_id, "videos").await;
-            return Err(AppError::bad_request());
+            let error = AppError::bad_request();
+            failure.error(&error);
+            return Err(error);
         };
         let base = cand
             .api_base
             .clone()
             .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
-        match state
-            .upstream
-            .videos_create(
+        if let Some(trace) = super::diagnostics::Trace::current() {
+            trace.media(&body_up, true);
+        }
+        match super::diagnostics::upstream(
+            &cand,
+            &upstream_model,
+            "/v1/videos",
+            state.upstream.videos_create(
                 &base,
                 &cand.credential,
                 body_up,
                 &super::openai_dialect::outbound(&cand),
-            )
-            .await
+            ),
+        )
+        .await
         {
             Ok(resp) => {
                 let task_id = serde_json::from_slice::<Value>(&resp.body)
@@ -276,7 +287,8 @@ async fn handle_create(
                     reservation_pool,
                     source_window.as_deref(),
                 )
-                .await?;
+                .await
+                .inspect_err(|error| failure.error(error))?;
                 failure.disarm();
                 let out = Response::builder()
                     .status(resp.status)
@@ -294,23 +306,20 @@ async fn handle_create(
                 )
                 .await;
                 failover = failover.saturating_add(1);
-                last_err = Some(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
+                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
             }
-            Err(_) => {
-                last_err = Some(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
+            Err(err) => {
+                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
                 break;
             }
         }
     }
 
     refund(state, &key, request_id, "videos").await;
-    Err(last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)))
+    let error =
+        last_err.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR));
+    failure.error(&error);
+    Err(error)
 }
 
 /// 任务轮询：映射回源，JSON 透传（不计费）。
@@ -537,42 +546,40 @@ async fn observe_task(
     if !matches!(status, "failed" | "cancelled" | "canceled" | "completed") {
         return Ok(());
     }
-    let request_id = sqlx::query_scalar!(
-        "SELECT request_id FROM video_tasks WHERE user_id=$1 AND task_id=$2 AND state='pending'",
-        user_id,
-        task_id
-    )
-    .fetch_optional(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
+    if status == "completed" {
+        sqlx::query!("UPDATE video_tasks SET state='completed',updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state='pending'",user_id,task_id).execute(&state.pg).await.map_err(okapi_store::StoreError::from)?;
+        return Ok(());
+    }
+    let request_id=sqlx::query_scalar!("UPDATE video_tasks SET state='refund_pending',updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state IN ('pending','refund_pending') RETURNING request_id",user_id,task_id).fetch_optional(&state.pg).await.map_err(okapi_store::StoreError::from)?;
     let Some(request_id) = request_id else {
         return Ok(());
     };
-    let terminal = if status == "completed" {
-        "completed"
-    } else {
-        okapi_ledger::operations::refund(
-            &state.pg,
-            &state.ledger,
-            request_id,
-            "video_generation_failed",
-            "system:worker",
-        )
-        .await?;
-        "refunded"
-    };
-    sqlx::query!("UPDATE video_tasks SET state=$3,updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state='pending'",user_id,task_id,terminal).execute(&state.pg).await.map_err(okapi_store::StoreError::from)?;
+    okapi_ledger::operations::refund(
+        &state.pg,
+        &state.ledger,
+        request_id,
+        "video_generation_failed",
+        "system:worker",
+    )
+    .await?;
+    sqlx::query!("UPDATE video_tasks SET state='refunded',updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state='refund_pending'",user_id,task_id).execute(&state.pg).await.map_err(okapi_store::StoreError::from)?;
     Ok(())
 }
 
-pub(crate) async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
+pub async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
     use futures::StreamExt as _;
-    let tasks = sqlx::query!("UPDATE video_tasks SET next_poll_at=now()+interval '1 minute' WHERE (user_id,task_id) IN (SELECT user_id,task_id FROM video_tasks WHERE state='pending' AND next_poll_at<=now() ORDER BY next_poll_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING user_id,task_id,channel_key_id").fetch_all(&state.pg).await?;
+    let tasks = sqlx::query!("UPDATE video_tasks SET next_poll_at=now()+interval '1 minute' WHERE (user_id,task_id) IN (SELECT user_id,task_id FROM video_tasks WHERE state IN ('pending','refund_pending') AND next_poll_at<=now() ORDER BY next_poll_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING user_id,task_id,channel_key_id,created_at,state").fetch_all(&state.pg).await?;
     futures::stream::iter(tasks)
         .map(|task| async move {
             let (user_id, task_id, channel_key_id) =
                 (task.user_id, task.task_id, task.channel_key_id);
             let result = async {
+                if task.state == "refund_pending"
+                    || chrono::Utc::now().signed_duration_since(task.created_at)
+                        >= chrono::Duration::hours(24)
+                {
+                    return observe_task(state, user_id, &task_id, br#"{"status":"failed"}"#).await;
+                }
                 let ch = okapi_store::channels::channel_key_ref(
                     &state.pg,
                     channel_key_id,

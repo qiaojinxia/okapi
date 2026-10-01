@@ -294,7 +294,7 @@ pub async fn send_responses_at(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<i64>().ok());
-        let body = resp.bytes().await.unwrap_or_default();
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
         return Err(UpstreamError::Status {
             status,
             body,
@@ -303,8 +303,7 @@ pub async fn send_responses_at(
     }
 
     if stream {
-        let events = resp
-            .bytes_stream()
+        let events = crate::limits::sse(resp)
             .eventsource()
             .flat_map(|item| match item {
                 Ok(event) => futures::stream::iter(
@@ -320,10 +319,7 @@ pub async fn send_responses_at(
             events: Box::pin(events),
         }))
     } else {
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| crate::openai::classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         let usage = serde_json::from_slice::<Value>(&body)
             .ok()
             .and_then(|v| usage_from_responses(v.get("usage")));

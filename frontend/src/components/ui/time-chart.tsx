@@ -5,6 +5,8 @@ import { Download, Table2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Segmented } from '@/components/ui/segmented'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/table'
+import { Pagination } from '@/components/ui/pagination'
+import { clampOffset, DEFAULT_PAGE_SIZE, PAGE_SIZES } from '@/hooks/use-pagination'
 import { downloadCsv } from '@/lib/csv'
 import { cn } from '@/lib/utils'
 
@@ -15,7 +17,7 @@ export function chartNumber(n: number, locale: string): string {
   return new Intl.NumberFormat(locale, { notation: Math.abs(n) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(n)
 }
 
-export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, controls = true, secondaryAxis }: {
+export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, controls = true, paginateTable = false, secondaryAxis }: {
   data: ChartPoint[]
   series: ChartSeries[]
   format: (value: number) => string
@@ -29,12 +31,17 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   /// 桌面端让绘图区撑满父级剩余高度（父级需为 flex 列），避免同排卡片更高时图下方留白。
   fill?: boolean
   controls?: boolean
+  paginateTable?: boolean
   secondaryAxis?: { unit: string; format: (value: number) => string }
 }) {
   const { t, i18n } = useTranslation()
   const id = useId().replaceAll(':', '')
   const [type, setType] = useState<'area' | 'bar'>(defaultType)
   const [table, setTable] = useState(false)
+  const [tableOffset, setTableOffset] = useState(0)
+  const [tableLimit, setTableLimit] = useState(DEFAULT_PAGE_SIZE)
+  const offset = clampOffset(tableOffset, tableLimit, data.length)
+  const tableRows = paginateTable ? data.slice(offset, offset + tableLimit) : data
   const [hidden, setHidden] = useState<string[]>([])
   const visible = series.filter((s) => !hidden.includes(s.key))
   const seriesUnit = (s: ChartSeries) => s.axis === 'right' && secondaryAxis ? secondaryAxis.unit : unit
@@ -58,10 +65,13 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
         </div>}
       </div>
       {table ? (
+        <div className="space-y-3">
         <Table dense stickyHeader wrapperClassName="max-h-80" className="tabular-nums" aria-label={label}>
           <THead><Tr><Th>{t('charts:date')}</Th>{series.map((s) => <Th key={s.key} numeric>{seriesLabel(s)}</Th>)}</Tr></THead>
-          <TBody>{data.map((point) => <Tr key={point.bucket}><Td className="whitespace-nowrap">{point.bucket}</Td>{series.map((s) => <Td key={s.key} numeric>{typeof point[s.key] === 'number' ? seriesFormat(s)(point[s.key] as number) : '—'}</Td>)}</Tr>)}</TBody>
+          <TBody>{tableRows.map((point) => <Tr key={point.bucket}><Td className="whitespace-nowrap">{point.bucket}</Td>{series.map((s) => <Td key={s.key} numeric>{typeof point[s.key] === 'number' ? seriesFormat(s)(point[s.key] as number) : '—'}</Td>)}</Tr>)}</TBody>
         </Table>
+        {paginateTable && <Pagination total={data.length} limit={tableLimit} offset={tableOffset} onOffset={setTableOffset} pageSizes={PAGE_SIZES} onLimit={(limit) => { setTableLimit(limit); setTableOffset(0) }} className="rounded-lg shadow-none" />}
+        </div>
       ) : (
         <div className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:min-h-36 lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} aria-label={t('charts:plot')}>
           <ResponsiveContainer width="100%" height="100%" minWidth={0} className={fill ? 'lg:absolute lg:inset-0' : undefined}>

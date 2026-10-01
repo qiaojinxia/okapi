@@ -25,9 +25,7 @@ pub(crate) async fn response_bytes(
     mut response: reqwest::Response,
     limit: Option<usize>,
 ) -> Result<Bytes, UpstreamError> {
-    let Some(limit) = limit else {
-        return response.bytes().await.map_err(|error| classify(&error));
-    };
+    let limit = limit.unwrap_or(crate::limits::MAX_BODY);
     let oversized = || UpstreamError::Build("image_response_too_large".into());
     if response
         .content_length()
@@ -181,7 +179,7 @@ impl OpenAiUpstream {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<i64>().ok());
-            let body = resp.bytes().await.unwrap_or_default();
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
             return Err(UpstreamError::Status {
                 status,
                 body,
@@ -190,16 +188,18 @@ impl OpenAiUpstream {
         }
 
         if stream {
-            let events = resp.bytes_stream().eventsource().map(|item| match item {
-                Ok(event) => Ok(parse_event(&event.data)),
-                Err(e) => Err(UpstreamError::Stream(e.to_string())),
-            });
+            let events = crate::limits::sse(resp)
+                .eventsource()
+                .map(|item| match item {
+                    Ok(event) => Ok(parse_event(&event.data)),
+                    Err(e) => Err(UpstreamError::Stream(e.to_string())),
+                });
             Ok(ChatResponse::Stream(StreamHandle {
                 upstream_request_id,
                 events: Box::pin(events),
             }))
         } else {
-            let body = resp.bytes().await.map_err(|e| classify(&e))?;
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
             let usage = serde_json::from_slice::<UsageEnvelope>(&body)
                 .ok()
                 .and_then(|e| e.usage);
@@ -282,7 +282,7 @@ impl OpenAiUpstream {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<i64>().ok());
-            let body = response_bytes(resp, limit.map(|_| 64 * 1024))
+            let body = response_bytes(resp, Some(crate::limits::MAX_ERROR))
                 .await
                 .unwrap_or_default();
             return Err(UpstreamError::Status {
@@ -346,7 +346,7 @@ impl OpenAiUpstream {
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = resp.bytes().await.unwrap_or_default();
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
             return Err(UpstreamError::Status {
                 status,
                 body,
@@ -359,7 +359,7 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("audio/mpeg")
             .to_owned();
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         Ok((status, content_type, body))
     }
 
@@ -443,7 +443,7 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
-            let body = response_bytes(resp, limit.map(|_| 64 * 1024))
+            let body = response_bytes(resp, Some(crate::limits::MAX_ERROR))
                 .await
                 .unwrap_or_default();
             return Err(UpstreamError::Status {
@@ -512,7 +512,7 @@ impl OpenAiUpstream {
             .get("x-request-id")
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let body = resp.bytes().await.map_err(|e| classify(&e))?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         Ok(EmbeddingsResponse {
             status,
             upstream_request_id,

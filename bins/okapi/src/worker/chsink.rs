@@ -151,8 +151,16 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "client_type": get_str(payload, "client_type"),
         "upstream_status": get_i64(payload, "upstream_status"),
         "error_code": get_str(payload, "error_code"),
-        "is_error": i32::from(log_type == 5),
+        "is_error": i32::from(log_type == 5 || payload.pointer("/diagnostics/request_failed").and_then(Value::as_bool) == Some(true)),
     });
+    row["diagnostics"] = json!(
+        payload
+            .get("diagnostics")
+            .filter(|v| !v.is_null())
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default()
+    );
+    row["billing_status"] = payload.get("status").cloned().unwrap_or(Value::Null);
     row["input_unit"] = json!(input_unit);
     row["input_characters"] = json!(input_characters);
     row["historical_prompt_units"] = json!(historical_characters);
@@ -286,6 +294,28 @@ fn usage_source<'a>(payload: &'a Value, field: &str) -> &'a str {
 mod unit_tests {
     use super::js_payload_to_ch_row;
     use serde_json::json;
+
+    #[test]
+    fn diagnostics_preserve_charged_stream_failures_and_timing_observation() {
+        let diagnostics = json!({"request_failed":true,"error_message":"broken stream","attempts":[{"status":200}]});
+        let row = js_payload_to_ch_row(&json!({
+            "status":20,"log_type":2,"amount_micro":1234,"latency_ms":0,"ttft_ms":null,"diagnostics":diagnostics,
+        }));
+        assert_eq!(row["is_error"], 1);
+        assert_eq!(row["billing_status"], 20);
+        assert_eq!(row["amount_micro"], 1234);
+        assert_eq!(row["latency_reported"], 1);
+        assert_eq!(row["ttft_reported"], 0);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(row["diagnostics"].as_str().unwrap())
+                .unwrap(),
+            diagnostics
+        );
+        let legacy = js_payload_to_ch_row(&json!({"log_type":2,"amount_micro":1234}));
+        assert_eq!(legacy["is_error"], 0);
+        assert_eq!(legacy["diagnostics"], "");
+        assert!(legacy["billing_status"].is_null());
+    }
 
     #[test]
     fn input_units_preserve_explicit_zero_and_do_not_guess_old_characters() {

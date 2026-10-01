@@ -11,6 +11,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 async fn mock_ok(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert!(req["model"].as_str().unwrap().starts_with("m-"));
@@ -18,7 +21,7 @@ async fn mock_ok(body: axum::body::Bytes) -> axum::response::Response {
         "object": "list",
         "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
         "model": req["model"],
-        "usage": {"prompt_tokens": 120, "total_tokens": 120}
+        "usage": {"prompt_tokens": if req["input"] == "overflow-settlement" { 2_000_000_000_u32 } else { 120 }, "total_tokens": if req["input"] == "overflow-settlement" { 2_000_000_000_u32 } else { 120 }}
     }))
     .into_response()
 }
@@ -55,6 +58,7 @@ async fn spawn_mock() -> SocketAddr {
 }
 
 struct TestEnv {
+    state: gateway::state::AppState,
     pg: PgPool,
     gateway: SocketAddr,
     token: String,
@@ -111,6 +115,7 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
         .unwrap();
     }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -120,7 +125,7 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
         .await
         .unwrap();
 
-    let app = gateway::router(state);
+    let app = gateway::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -128,12 +133,63 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
     });
 
     TestEnv {
+        state,
         pg,
         gateway: addr,
         token,
         user_id,
         model,
     }
+}
+
+/// A price overflow after a successful upstream response refunds and logs the failure.
+#[tokio::test]
+async fn pricing_failure_refunds_and_records_failed_terminal() {
+    let env = setup(&[("/ok/v1", 0)]).await;
+    sqlx::query("UPDATE model_pricing SET model_ratio=999999 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
+        .bind(&env.model).execute(&env.pg).await.unwrap();
+    assert!(
+        okapi_store::admin::set_user_multiplier(&env.pg, env.user_id, "9999")
+            .await
+            .unwrap()
+    );
+    published_pricing::publish(&env.pg, env.user_id).await;
+    env.state.pricebook.replace(
+        gateway::pricing_loader::load_pricebook(&env.pg)
+            .await
+            .unwrap(),
+    );
+    env.state
+        .ledger
+        .credit(env.user_id, Money::from_micros(10_000_000_000_000))
+        .await
+        .unwrap();
+    let before = env.state.ledger.balance(env.user_id).await.unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/embeddings", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"input":"overflow-settlement"}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(status, 500, "{body}");
+    assert_eq!(body["error"]["code"], okapi_api::codes::INTERNAL_ERROR);
+    let mut failed = None;
+    for _ in 0..50 {
+        failed = sqlx::query_as::<_,(i16,i64,String)>("SELECT status,amount_micro,error_code FROM billing_records WHERE user_id=$1 AND log_type=5")
+            .bind(env.user_id).fetch_optional(&env.pg).await.unwrap();
+        if failed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        failed,
+        Some((40, 0, okapi_api::codes::INTERNAL_ERROR.to_owned()))
+    );
+    assert_eq!(env.state.ledger.balance(env.user_id).await.unwrap(), before);
 }
 
 async fn post_embeddings(env: &TestEnv) -> reqwest::Response {

@@ -94,7 +94,7 @@ impl PassUpstream {
                 stream: Box::pin(stream),
             })
         } else {
-            let body = resp.bytes().await.unwrap_or_default();
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
             Ok(PassResponse::ErrStatus { status, body })
         }
     }

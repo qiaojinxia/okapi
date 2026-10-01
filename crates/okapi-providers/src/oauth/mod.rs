@@ -39,11 +39,11 @@ impl Pkce {
         }
     }
 
-    #[must_use]
-    pub fn generate() -> Self {
+    pub fn generate() -> Result<Self, UpstreamError> {
         let mut bytes = [0u8; 32];
-        aws_lc_rs::rand::fill(&mut bytes).unwrap_or_default();
-        Self::from_bytes(&bytes)
+        aws_lc_rs::rand::fill(&mut bytes)
+            .map_err(|_| UpstreamError::Build("pkce_random".into()))?;
+        Ok(Self::from_bytes(&bytes))
     }
 }
 
@@ -168,7 +168,10 @@ mod tests {
             base64url(&Sha256::digest(pkce.verifier.as_bytes()))
         );
         assert!(!pkce.verifier.contains('=') && !pkce.verifier.contains('+'));
-        assert_ne!(Pkce::generate().verifier, Pkce::generate().verifier);
+        assert_ne!(
+            Pkce::generate().unwrap().verifier,
+            Pkce::generate().unwrap().verifier
+        );
     }
 
     #[test]

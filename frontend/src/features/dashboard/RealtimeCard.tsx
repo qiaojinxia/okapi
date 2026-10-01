@@ -32,7 +32,9 @@ export function RealtimeCard({ days }: { days: number }) {
     retry: false,
   })
   const d = q.isError ? undefined : q.data
-  const qps = d ? (d.qps_milli / 1_000).toLocaleString(locale, { maximumFractionDigits: 1 }) : '—'
+  const windowSecs = d && d.window_secs > 0 ? d.window_secs : 60
+  const qps = d ? (d.requests / windowSecs).toLocaleString(locale, { maximumFractionDigits: 3 }) : '—'
+  const recentQps = d ? (d.qps_milli / 1_000).toLocaleString(locale, { maximumFractionDigits: 3 }) : '—'
   const hasRequests = (d?.requests ?? 0) > 0
   const liveHint = [t('admin:dashboardLiveHint'), q.dataUpdatedAt > 0 && !q.isError ? t('common:updatedAt', { time: new Date(q.dataUpdatedAt).toLocaleTimeString(locale) }) : ''].filter(Boolean).join(' · ')
   return <Card className="min-w-0 rounded-xl" role="region" aria-label={t('admin:dashboardLive')}>
@@ -40,7 +42,10 @@ export function RealtimeCard({ days }: { days: number }) {
       <div className="flex flex-wrap items-center justify-between gap-2 lg:gap-0.5">
         <HelpTooltip content={liveHint}>
           <div tabIndex={0} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-            <span aria-hidden className={cn('h-2 w-2 rounded-full', d ? 'bg-success' : 'bg-muted-foreground/40')} />
+            <span aria-hidden className="relative flex h-2 w-2">
+              {d && <span className="absolute inline-flex h-full w-full rounded-full bg-success/60 motion-safe:animate-ping" />}
+              <span className={cn('relative inline-flex h-2 w-2 rounded-full', d ? 'bg-success' : 'bg-muted-foreground/40')} />
+            </span>
             <span className="text-sm font-semibold">{t('admin:realtimeTitle')}</span>
             <span className="text-xs text-muted-foreground">{t('admin:dashboardLiveWindow')}</span>
           </div>
@@ -50,11 +55,15 @@ export function RealtimeCard({ days }: { days: number }) {
       {q.isError ? <ErrorState message={t('admin:dashboardLiveUnavailable', { reason: describeError(q.error) })} onRetry={() => void q.refetch()} /> :
         <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(0,1fr)_5rem]">
           <div className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 md:grid-cols-5">
-            <InlineStat label="QPS" value={qps} />
+            <HelpTooltip content={t('admin:realtimeQpsHint', { seconds: windowSecs, recentSeconds: Math.min(windowSecs, 10), recentQps })}>
+              <div tabIndex={0} className="min-w-0 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+                <InlineStat label={t('admin:realtimeAvgQps')} value={qps} />
+              </div>
+            </HelpTooltip>
             <InlineStat label={t('admin:realtimeReqs60')} value={d ? formatCount(d.requests, locale) : '—'} />
             <InlineStat label={t('admin:kpiErrorRate')} value={d && hasRequests ? formatBp(d.error_rate_bp, locale) : '—'} tone={hasRequests && d && d.error_rate_bp >= 500 ? 'bad' : hasRequests && d && d.error_rate_bp >= 100 ? 'warn' : 'default'} />
             <InlineStat label={t('admin:kpiTokens')} value={d ? formatCount(d.tokens, locale) : '—'} />
-            <InlineStat label={t('admin:kpiRevenue')} value={d ? formatMoneyAggregate(d.amount_micro, locale) : '—'} />
+            <InlineStat label={t('admin:kpiRevenue')} value={d ? formatMoneyAggregate(d.amount_micro, locale, true) : '—'} />
           </div>
           <div className="hidden h-10 min-w-0 rounded-lg bg-muted/30 px-2 md:block" role="img" aria-label={t('admin:dashboardLiveChart')}>
             {d && d.series.some((p) => p.requests > 0) ? <ResponsiveContainer width="100%" height="100%" minWidth={0}>

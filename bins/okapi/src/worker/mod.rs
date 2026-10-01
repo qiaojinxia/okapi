@@ -143,117 +143,201 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions/margin_breaker）"
     );
 
-    let mut chsink_tick = tokio::time::interval(Duration::from_secs(1));
-    let mut unit_calibration = tokio::time::interval(Duration::from_secs(10));
-    unit_calibration.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
-    let mut reconcile = tokio::time::interval(RECONCILE_INTERVAL);
-    let mut partition = tokio::time::interval(PARTITION_INTERVAL);
-    let mut cooldown = tokio::time::interval(COOLDOWN_INTERVAL);
-    let mut balance_expiry = tokio::time::interval(BALANCE_EXPIRY_INTERVAL);
-    let mut subscriptions = tokio::time::interval(SUBSCRIPTION_INTERVAL);
-    let mut margin = tokio::time::interval(MARGIN_BREAKER_INTERVAL);
-    // 信号监听建一次挂在循环外：SIGTERM 处理器要在整个生命周期内常驻
-    let stop = crate::shutdown::signal();
-    tokio::pin!(stop);
+    let maintenance = std::sync::Arc::new(MaintenanceContext {
+        pg,
+        ledger,
+        redis,
+        notifier,
+        js,
+        ch,
+    });
+    let mut workers = recovery_workers;
+    workers.extend([native_batch_worker, image_worker]);
+    for (job, interval) in [
+        (MaintenanceJob::chsink_tick, Duration::from_secs(1)),
+        (MaintenanceJob::unit_calibration, Duration::from_secs(10)),
+        (MaintenanceJob::subscriptions, SUBSCRIPTION_INTERVAL),
+        (MaintenanceJob::sweep, SWEEP_INTERVAL),
+        (MaintenanceJob::reconcile, RECONCILE_INTERVAL),
+        (MaintenanceJob::partition, PARTITION_INTERVAL),
+        (MaintenanceJob::cooldown, COOLDOWN_INTERVAL),
+        (MaintenanceJob::margin, MARGIN_BREAKER_INTERVAL),
+        (MaintenanceJob::balance_expiry, BALANCE_EXPIRY_INTERVAL),
+    ] {
+        workers.push(tokio::spawn(run_maintenance(
+            maintenance.clone(),
+            image_stop.subscribe(),
+            job,
+            interval,
+        )));
+    }
+    crate::shutdown::signal().await;
+    let _ = image_stop.send(true);
+    // Cancel-safe maintenance transactions roll back on stop. Other workers get a bounded drain.
+    if tokio::time::timeout(
+        Duration::from_secs(30),
+        futures::future::join_all(workers.iter_mut()),
+    )
+    .await
+    .is_err()
+    {
+        for worker in &workers {
+            worker.abort();
+        }
+        futures::future::join_all(workers).await;
+    }
+    tracing::info!("worker 已下线");
+    Ok(())
+}
 
+struct MaintenanceContext {
+    pg: PgPool,
+    ledger: BalanceLedger,
+    redis: fred::clients::Client,
+    notifier: notify::Notifier,
+    js: Option<async_nats::jetstream::Context>,
+    ch: Option<okapi_store::ChClient>,
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy)]
+enum MaintenanceJob {
+    chsink_tick,
+    unit_calibration,
+    subscriptions,
+    sweep,
+    reconcile,
+    partition,
+    cooldown,
+    margin,
+    balance_expiry,
+}
+
+async fn run_maintenance(
+    ctx: std::sync::Arc<MaintenanceContext>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    job: MaintenanceJob,
+    interval: Duration,
+) {
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if *stop.borrow() {
+            return;
+        }
         tokio::select! {
-            _ = chsink_tick.tick() => transport_tick(&pg, js.as_ref(), ch.as_ref()).await,
-            _ = unit_calibration.tick() => {
-                if let Some(ch)=ch.as_ref() {
-                    match legacy_speech::process_once(ch,500).await {
-                        Ok(0) => {}
-                        Ok(rows) => tracing::debug!(rows,"historical speech unit calibration batch"),
-                        Err(error) => tracing::error!(%error,"historical speech unit calibration deferred"),
-                    }
-                }
-            }
-            _ = subscriptions.tick() => {
-                match subscriptions_tick(&pg, &ledger, &redis, chrono::Utc::now()).await {
-                    Ok(r) if r.rolled + r.expired + r.failed > 0 => {
-                        tracing::info!(rolled = r.rolled, expired = r.expired, failed = r.failed, "订阅滚窗 / 到期处理");
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!(error = %err, "订阅滚窗 / 到期处理失败"),
-                }
-            }
-            _ = sweep.tick() => {
-                match sweep_expired_reservations(&pg, &ledger, chrono::Utc::now()).await {
-                    Ok(swept) if !swept.is_empty() => {
-                        tracing::warn!(count = swept.len(), "悬置预扣已清理");
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!(error = %err, "悬置预扣清理失败"),
-                }
-            }
-            _ = reconcile.tick() => {
-                if let Err(err) =
-                    reconcile_and_notify(&pg, &ledger, RECONCILE_BATCH, &notifier).await
-                {
-                    tracing::error!(error = %err, "对账失败");
-                }
-            }
-            _ = partition.tick() => {
-                match ensure_next_month_partitions(&pg, chrono::Utc::now()).await {
-                    Ok(created) if !created.is_empty() => {
-                        tracing::info!(?created, "已创建下月分区");
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!(error = %err, "分区维护失败"),
-                }
-                match drop_expired_partitions(&pg, chrono::Utc::now()).await {
-                    Ok(dropped) if !dropped.is_empty() => {
-                        tracing::warn!(?dropped, "保留策略已裁剪超期分区");
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!(error = %err, "保留策略裁剪失败"),
-                }
-            }
-            _ = cooldown.tick() => {
-                match recover_cooled_keys(&pg).await {
+            _ = stop.changed() => return,
+            _ = tick.tick() => {}
+        }
+        tokio::select! {
+            _ = stop.changed() => return,
+            () = maintenance_once(&ctx, job) => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
+    let MaintenanceContext {
+        pg,
+        ledger,
+        redis,
+        notifier,
+        js,
+        ch,
+    } = ctx;
+    match job {
+        MaintenanceJob::chsink_tick => {
+            transport_tick(pg, js.as_ref(), ch.as_ref()).await;
+        }
+        MaintenanceJob::unit_calibration => {
+            if let Some(ch) = ch.as_ref() {
+                match legacy_speech::process_once(ch, 500).await {
                     Ok(0) => {}
-                    Ok(n) => tracing::info!(recovered = n, "渠道 key 冷却到期恢复"),
-                    Err(err) => tracing::error!(error = %err, "冷却恢复失败"),
-                }
-                if let Err(err) = notify::channel_cooldown_and_notify(&pg, &notifier).await {
-                    tracing::error!(error = %err, "冷却告警失败");
-                }
-            }
-            _ = margin.tick() => {
-                if let Err(err) = margin_breaker::evaluate_and_notify(
-                    &pg, ch.as_ref(), &redis, chrono::Utc::now(), &notifier,
-                )
-                .await
-                {
-                    tracing::error!(error = %err, "负毛利熔断评估失败");
-                }
-            }
-            _ = balance_expiry.tick() => {
-                match expire_balances(&pg, &ledger, chrono::Utc::now()).await {
-                    Ok(expired) if !expired.is_empty() => {
-                        tracing::warn!(count = expired.len(), "余额有效期到期已清零");
+                    Ok(rows) => tracing::debug!(rows, "historical speech unit calibration batch"),
+                    Err(error) => {
+                        tracing::error!(%error,"historical speech unit calibration deferred");
                     }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!(error = %err, "余额有效期清零失败"),
-                }
-                if let Err(err) = notify::balance_low_and_notify(&pg, &notifier).await {
-                    tracing::error!(error = %err, "余额低扫描失败");
                 }
             }
-            () = &mut stop => {
-                let _ = image_stop.send(true);
-                if let Err(error) = native_batch_worker.await {
-                    tracing::error!(%error,"native batch worker shutdown failed");
+        }
+        MaintenanceJob::subscriptions => {
+            match subscriptions_tick(pg, ledger, redis, chrono::Utc::now()).await {
+                Ok(r) if r.rolled + r.expired + r.failed > 0 => {
+                    tracing::info!(
+                        rolled = r.rolled,
+                        expired = r.expired,
+                        failed = r.failed,
+                        "订阅滚窗 / 到期处理"
+                    );
                 }
-                if let Err(error) = image_worker.await {
-                    tracing::error!(%error, "image worker shutdown failed");
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "订阅滚窗 / 到期处理失败"),
+            }
+        }
+        MaintenanceJob::sweep => {
+            match sweep_expired_reservations(pg, ledger, chrono::Utc::now()).await {
+                Ok(swept) if !swept.is_empty() => {
+                    tracing::warn!(count = swept.len(), "悬置预扣已清理");
                 }
-                for worker in recovery_workers {
-                    if let Err(error)=worker.await {tracing::error!(%error,"recovery worker shutdown failed");}
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "悬置预扣清理失败"),
+            }
+        }
+        MaintenanceJob::reconcile => {
+            if let Err(err) = reconcile_and_notify(pg, ledger, RECONCILE_BATCH, notifier).await {
+                tracing::error!(error = %err, "对账失败");
+            }
+        }
+        MaintenanceJob::partition => {
+            match ensure_next_month_partitions(pg, chrono::Utc::now()).await {
+                Ok(created) if !created.is_empty() => {
+                    tracing::info!(?created, "已创建下月分区");
                 }
-                tracing::info!("worker 已下线");
-                return Ok(());
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "分区维护失败"),
+            }
+            match drop_expired_partitions(pg, chrono::Utc::now()).await {
+                Ok(dropped) if !dropped.is_empty() => {
+                    tracing::warn!(?dropped, "保留策略已裁剪超期分区");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "保留策略裁剪失败"),
+            }
+        }
+        MaintenanceJob::cooldown => {
+            match recover_cooled_keys(pg).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(recovered = n, "渠道 key 冷却到期恢复"),
+                Err(err) => tracing::error!(error = %err, "冷却恢复失败"),
+            }
+            if let Err(err) = notify::channel_cooldown_and_notify(pg, notifier).await {
+                tracing::error!(error = %err, "冷却告警失败");
+            }
+        }
+        MaintenanceJob::margin => {
+            if let Err(err) = margin_breaker::evaluate_and_notify(
+                pg,
+                ch.as_ref(),
+                redis,
+                chrono::Utc::now(),
+                notifier,
+            )
+            .await
+            {
+                tracing::error!(error = %err, "负毛利熔断评估失败");
+            }
+        }
+        MaintenanceJob::balance_expiry => {
+            match expire_balances(pg, ledger, chrono::Utc::now()).await {
+                Ok(expired) if !expired.is_empty() => {
+                    tracing::warn!(count = expired.len(), "余额有效期到期已清零");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "余额有效期清零失败"),
+            }
+            if let Err(err) = notify::balance_low_and_notify(pg, notifier).await {
+                tracing::error!(error = %err, "余额低扫描失败");
             }
         }
     }
@@ -265,7 +349,11 @@ async fn run_recovery(
     mut stop: tokio::sync::watch::Receiver<bool>,
     video: bool,
 ) {
-    let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+    let mut tick = tokio::time::interval(if video {
+        SWEEP_INTERVAL
+    } else {
+        Duration::from_secs(1)
+    });
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -311,98 +399,107 @@ pub async fn sweep_expired_reservations(
 ) -> anyhow::Result<Vec<SweptReservation>> {
     okapi_ledger::sync::recover_pending(pg, ledger, 100).await?;
     okapi_ledger::transfers::recover_pending(pg, ledger, 100).await?;
-    // 用户全集驱动（开发/中小规模足够；大规模换 Redis SCAN，见 docs/database.md §5）
-    let user_ids = sqlx::query_scalar!(r#"SELECT id FROM users WHERE deleted_at IS NULL"#)
-        .fetch_all(pg)
-        .await?;
-
     let now_ms = now.timestamp_millis();
     let mut swept = Vec::new();
-    for user_id in user_ids {
-        let reservations = ledger.list_reservations(user_id).await?;
-        if !reservations.iter().any(|r| r.deadline_ms < now_ms) {
-            continue;
+    let mut cursor = 0i64;
+    loop {
+        let user_ids = sqlx::query_scalar!(
+            "SELECT id FROM users WHERE deleted_at IS NULL AND id>$1 ORDER BY id LIMIT 1000",
+            cursor
+        )
+        .fetch_all(pg)
+        .await?;
+        if user_ids.is_empty() {
+            break;
         }
-        let mut guard = okapi_ledger::holds::UserGuard::acquire(pg, user_id).await?;
-        if let Err(error) = guard.synchronize(ledger).await {
-            tracing::error!(user_id, %error, "skip expiry while durable settlement is pending");
-            continue;
-        }
-        for reservation in reservations {
-            if reservation.deadline_ms >= now_ms {
+        for user_id in user_ids {
+            cursor = user_id;
+
+            let reservations = ledger.list_reservations(user_id).await?;
+            if !reservations.iter().any(|r| r.deadline_ms < now_ms) {
                 continue;
             }
-            // Serialize an image result/ledger commit with expiry. Otherwise the result
-            // transaction could commit immediately after this sweep had refunded its hold.
-            let mut tx = guard.connection().begin().await?;
-            okapi_store::image_tasks::lock_for_balance_in_tx(&mut tx, reservation.request_id)
-                .await?;
-            okapi_store::history::read_lock(&mut tx).await?;
-            let terminal_query = sqlx::query!(
-                r#"
+            let mut guard = okapi_ledger::holds::UserGuard::acquire(pg, user_id).await?;
+            if let Err(error) = guard.synchronize(ledger).await {
+                tracing::error!(user_id, %error, "skip expiry while durable settlement is pending");
+                continue;
+            }
+            for reservation in reservations {
+                if reservation.deadline_ms >= now_ms {
+                    continue;
+                }
+                // Serialize an image result/ledger commit with expiry. Otherwise the result
+                // transaction could commit immediately after this sweep had refunded its hold.
+                let mut tx = guard.connection().begin().await?;
+                okapi_store::image_tasks::lock_for_balance_in_tx(&mut tx, reservation.request_id)
+                    .await?;
+                okapi_store::history::read_lock(&mut tx).await?;
+                let terminal_query = sqlx::query!(
+                    r#"
                 SELECT status AS "status!", amount_micro AS "amount_micro!" FROM billing_financial_records
                 WHERE request_id = $1
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
-                reservation.request_id
-            );
-            let terminal = terminal_query.fetch_optional(&mut *tx).await?;
+                    reservation.request_id
+                );
+                let terminal = terminal_query.fetch_optional(&mut *tx).await?;
 
-            if let Some(rec) = &terminal
-                && rec.status == 20
-            {
-                // PG 已结算：重放 Redis commit（补扣 actual，多退少补）；
-                // commit 事件已在结算事务中写过，此处不重复记账。
-                let outcome = ledger
-                    .commit(
-                        user_id,
-                        reservation.api_key_id,
-                        reservation.request_id,
-                        okapi_domain::Money::from_micros(rec.amount_micro),
-                    )
-                    .await?;
-                if let okapi_ledger::CommitOutcome::Committed { refund_delta, .. } = outcome {
-                    swept.push(SweptReservation {
-                        user_id,
-                        request_id: reservation.request_id,
-                        released_micro: refund_delta.as_micros(),
-                        action: "commit_replayed",
-                    });
+                if let Some(rec) = &terminal
+                    && rec.status == 20
+                {
+                    // PG 已结算：重放 Redis commit（补扣 actual，多退少补）；
+                    // commit 事件已在结算事务中写过，此处不重复记账。
+                    let outcome = ledger
+                        .commit(
+                            user_id,
+                            reservation.api_key_id,
+                            reservation.request_id,
+                            okapi_domain::Money::from_micros(rec.amount_micro),
+                        )
+                        .await?;
+                    if let okapi_ledger::CommitOutcome::Committed { refund_delta, .. } = outcome {
+                        swept.push(SweptReservation {
+                            user_id,
+                            request_id: reservation.request_id,
+                            released_micro: refund_delta.as_micros(),
+                            action: "commit_replayed",
+                        });
+                    }
+                    continue;
                 }
-                continue;
-            }
 
-            let refund = ledger
-                .refund(user_id, reservation.api_key_id, reservation.request_id)
-                .await?;
-            let released = refund.released;
-            if !refund.closed {
-                continue; // 竞争：已被正常终结
-            }
-            let event_payload = serde_json::json!({
-                "reason": "reservation_expired",
-                "released_micro": released.as_micros(),
-            });
-            let event_pool = refund.pool.as_i16();
-            let event_query = sqlx::query!(
-                r#"
+                let refund = ledger
+                    .refund(user_id, reservation.api_key_id, reservation.request_id)
+                    .await?;
+                let released = refund.released;
+                if !refund.closed {
+                    continue; // 竞争：已被正常终结
+                }
+                let event_payload = serde_json::json!({
+                    "reason": "reservation_expired",
+                    "released_micro": released.as_micros(),
+                });
+                let event_pool = refund.pool.as_i16();
+                let event_query = sqlx::query!(
+                    r#"
                 INSERT INTO billing_events (user_id, request_id, event_type, delta_micro, payload, actor, pool)
                 VALUES ($1, $2, 'refund', 0, $3, 'system:worker', $4)
                 "#,
-                user_id,
-                reservation.request_id,
-                event_payload,
-                event_pool
-            );
-            event_query.execute(&mut *tx).await?;
-            tx.commit().await?;
-            swept.push(SweptReservation {
-                user_id,
-                request_id: reservation.request_id,
-                released_micro: released.as_micros(),
-                action: "refund",
-            });
+                    user_id,
+                    reservation.request_id,
+                    event_payload,
+                    event_pool
+                );
+                event_query.execute(&mut *tx).await?;
+                tx.commit().await?;
+                swept.push(SweptReservation {
+                    user_id,
+                    request_id: reservation.request_id,
+                    released_micro: released.as_micros(),
+                    action: "refund",
+                });
+            }
         }
     }
     Ok(swept)
@@ -488,33 +585,37 @@ pub async fn reconcile_balances(
     ledger: &BalanceLedger,
     limit: i64,
 ) -> anyhow::Result<Vec<BalanceDrift>> {
-    let mut history = okapi_store::history::read(pg).await?;
     let mut drifts = Vec::new();
     let mut cursor = 0_i64;
     loop {
+        let mut history = okapi_store::history::read(pg).await?;
         let rows = sqlx::query!(
             r#"
+        WITH page AS (
+            SELECT id, balance_micro FROM users
+            WHERE deleted_at IS NULL AND id > $2
+            ORDER BY id LIMIT $1
+        )
         SELECT u.id AS user_id,
                u.balance_micro,
                COALESCE(e.wallet_sum, 0)::bigint AS "events_sum!",
                COALESCE(e.sub_sum, 0)::bigint AS "sub_events_sum!"
-        FROM users u
-        LEFT JOIN (
-            SELECT user_id,
-                   SUM(delta_micro) FILTER (WHERE pool = 0) AS wallet_sum,
+        FROM page u
+        LEFT JOIN LATERAL (
+            SELECT SUM(delta_micro) FILTER (WHERE pool = 0) AS wallet_sum,
                    SUM(delta_micro) FILTER (WHERE pool = 1) AS sub_sum
             FROM billing_balance_totals
-            GROUP BY user_id
-        ) e ON e.user_id = u.id
-        WHERE u.deleted_at IS NULL AND u.id > $2
+            WHERE user_id = u.id
+        ) e ON true
         ORDER BY u.id
-        LIMIT $1
         "#,
-            limit.max(1),
+            limit.clamp(1, 1000),
             cursor
         )
         .fetch_all(&mut *history)
         .await?;
+        // Release the retention lock and PG connection before any Redis IO.
+        history.commit().await?;
 
         if rows.is_empty() {
             break;
@@ -537,7 +638,6 @@ pub async fn reconcile_balances(
             }
         }
     }
-    history.commit().await?;
     Ok(drifts)
 }
 
@@ -749,24 +849,22 @@ pub async fn expire_balances(
     ledger: &BalanceLedger,
     now: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<Vec<ExpiredBalance>> {
-    let user_ids = sqlx::query_scalar!(
-        r#"
-        SELECT id FROM users
-        WHERE balance_expires_at IS NOT NULL AND balance_expires_at < $1 AND deleted_at IS NULL
-        "#,
-        now
-    )
-    .fetch_all(pg)
-    .await?;
-
     let mut expired = Vec::new();
-    for user_id in user_ids {
-        let drained = okapi_ledger::operations::expire(pg, ledger, user_id, now).await?;
-        if !drained.is_zero() {
-            expired.push(ExpiredBalance {
-                user_id,
-                drained_micro: drained.as_micros(),
-            });
+    let mut cursor = 0i64;
+    loop {
+        let user_ids = sqlx::query_scalar!("SELECT id FROM users WHERE balance_expires_at IS NOT NULL AND balance_expires_at < $1 AND deleted_at IS NULL AND id>$2 ORDER BY id LIMIT 1000",now,cursor).fetch_all(pg).await?;
+        if user_ids.is_empty() {
+            break;
+        }
+        for user_id in user_ids {
+            cursor = user_id;
+            let drained = okapi_ledger::operations::expire(pg, ledger, user_id, now).await?;
+            if !drained.is_zero() {
+                expired.push(ExpiredBalance {
+                    user_id,
+                    drained_micro: drained.as_micros(),
+                });
+            }
         }
     }
     Ok(expired)
@@ -794,7 +892,7 @@ pub async fn subscriptions_tick(
 /// 数据保留策略（#1790-1）：settings.retention_months（缺省 0=永久保留），
 /// DROP 超期的 PG 月分区（billing_records/billing_events/audit_logs 的 `_yYYYYmMM` 命名分区；
 /// Financial facts are carried in the same transaction before DROP.
-/// DEFAULT partitions remain; ClickHouse TTL is independent.
+/// DEFAULT partitions remain, with expired rows archived/pruned in bounded batches; ClickHouse TTL is independent.
 pub async fn drop_expired_partitions(
     pg: &PgPool,
     now: chrono::DateTime<chrono::Utc>,

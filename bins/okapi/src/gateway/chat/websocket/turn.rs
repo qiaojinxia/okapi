@@ -211,6 +211,7 @@ impl Progress {
             self.ttft = Some(elapsed_ms_i32(bill.started));
         }
         capture_chunk_meta(event, &mut self.meta);
+        bill.trace.stream_event(raw);
         let value = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
         let kind = value
             .get("type")
@@ -275,10 +276,17 @@ impl Progress {
             );
         }
         if let Some(error) = &self.error {
+            bill.trace.set("request_failed", serde_json::json!(true));
+            bill.trace
+                .set("stream_end_reason", serde_json::json!("upstream_error"));
             routed.info.outcome = Some((
                 i16::try_from(error.status.as_u16()).unwrap_or(502),
                 error.code.clone(),
             ));
+        }
+        bill.trace.response_model(self.meta.model.as_deref());
+        if !routed.info.bill_resp_model {
+            self.meta.model = None;
         }
         if let Some(error) = self.error
             && self

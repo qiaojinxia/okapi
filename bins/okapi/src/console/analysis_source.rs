@@ -1,7 +1,7 @@
 //! 新维度聚合 + 旧立方体未覆盖部分。TTFT 仅在新聚合覆盖不足时恢复原始样本。
 const KEYS: &str = "hour, user_id, api_key_id, group_code, model, channel_id";
 const DIMS: &str = "requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type";
-pub(super) const METRICS: [(&str, &str); 71] = [
+pub(super) const METRICS: [(&str, &str); 72] = [
     ("legacy_characters", ""),
     ("legacy_character_n", ""),
     ("output_rate_observed", ""),
@@ -15,6 +15,7 @@ pub(super) const METRICS: [(&str, &str); 71] = [
     ("unit_character_n", ""),
     ("unit_token_n", ""),
     ("requests", "countMerge"),
+    ("financial_records", "countMerge"),
     ("prompt_tokens", "sumMerge"),
     ("cached_tokens", "sumMerge"),
     ("completion_tokens", "sumMerge"),
@@ -158,7 +159,7 @@ pub fn source_with_coverage(
             toUInt8(2) AS stream, '' AS request_type, '' AS billing_type, {remainder}, \
             cache_writes AS write_tokens, cache_write_n AS write_samples, cache_read_n AS read_samples, toInt64(0) AS cost_samples, toInt64(0) AS covered_amount, toInt64(0) AS covered_cost, \
             toDateTime64(0, 3) AS event_at, toDateTime64(0, 3) AS ingested_at \
-        FROM {l} AS l LEFT JOIN {c} AS c USING ({KEYS}) WHERE l.v_requests > ifNull(c.c_requests, 0))"
+        FROM {l} AS l LEFT JOIN {c} AS c USING ({KEYS}) WHERE l.v_financial_records > ifNull(c.c_financial_records, 0))"
     )
 }
 
@@ -478,7 +479,9 @@ mod tests {
                 sql.matches("FROM view(SELECT ").count() >= 2,
                 "d 在 UNION 第一支与 c 中各引用一次"
             );
-            assert!(sql.contains("WHERE l.v_requests > ifNull(c.c_requests, 0))"));
+            assert!(
+                sql.contains("WHERE l.v_financial_records > ifNull(c.c_financial_records, 0))")
+            );
         }
     }
 }
