@@ -107,14 +107,16 @@ interface ErrorEnvelope {
 
 /// 发起一次流式对话。`key` 是登录 key（页内直用，不落任何文件）。返回中断函数。
 /// 中继地址是同源 `/api/me/playground/chat`：数据面不开 CORS，控制面在本进程内转交处理器。
-export function streamChat(params: ChatParams, key: string, cb: StreamCallbacks): () => void {
+/// `selectedKeyId` 非空时，请求改以该令牌（须与登录 key 同属一个用户）的身份调用。
+export function streamChat(params: ChatParams, key: string, cb: StreamCallbacks, selectedKeyId: number | null = null): () => void {
   const controller = new AbortController()
   void (async () => {
     let resp: Response
     try {
       resp = await fetch('/api/me/playground/chat', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        // 选用的令牌只带 id：明文由服务端解出并以它的身份调用，不经过浏览器
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...(selectedKeyId !== null ? { 'X-Okapi-Playground-Key': String(selectedKeyId) } : {}) },
         body: JSON.stringify({ ...params, stream: true }),
         signal: controller.signal,
       })

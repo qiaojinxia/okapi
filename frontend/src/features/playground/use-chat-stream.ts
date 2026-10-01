@@ -11,6 +11,10 @@ export interface Turn {
   reasoning?: string
   /// 请求时填的模型（别名）；`model` 才是上游实际应答的那个，估价按请求的别名查价目。
   requested?: string
+  /// 这次请求生效的价目分组（选了密钥时是该密钥的分组），估价按它取倍率。
+  group?: string
+  /// 选用的密钥名（登录会话为空）：对话里看得出这条是用哪把令牌调的。
+  via?: string
   /// 上游实际服务的模型（可能与请求的别名不同）。
   model?: string | null
   usage?: ChatUsage | null
@@ -28,6 +32,10 @@ export interface SendOptions {
   temperature: number
   top_p: number
   max_tokens: number | null
+  /// 选用的密钥：`keyId` 为空 = 登录会话；`group` 是该次请求生效的价目分组。
+  keyId: number | null
+  keyName: string | null
+  group: string
 }
 
 // 对话按用户存在 sessionStorage：离开试用台去模型广场看价、再回来，不该丢掉聊了一半的内容；
@@ -109,7 +117,7 @@ export function useChatStream(userId?: number) {
         ...(opts.max_tokens !== null ? { max_tokens: opts.max_tokens } : {}),
       }
       const userTurn: Turn = { id: nextId.current++, role: 'user', content: text }
-      const assistantTurn: Turn = { id: nextId.current++, role: 'assistant', content: '', requested: params.model, streaming: true }
+      const assistantTurn: Turn = { id: nextId.current++, role: 'assistant', content: '', requested: params.model, group: opts.group, via: opts.keyName ?? undefined, streaming: true }
       setTurns([...base, userTurn, assistantTurn])
       setBusy(true)
       const startedAt = performance.now()
@@ -133,7 +141,7 @@ export function useChatStream(userId?: number) {
           abortRef.current = null
           setBusy(false)
         },
-      })
+      }, opts.keyId)
     },
     [busy, patchLast],
   )

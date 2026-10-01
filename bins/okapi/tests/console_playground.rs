@@ -2,7 +2,9 @@
 //!
 //! 中继在 console 进程内直接调用数据面处理器：鉴权 / 限流 / 计费与真实 SDK 调用一致。
 //! 覆盖：强制流式（body 里 stream:false 也回 SSE）、SSE 逐块透出、记账落在同一把 key、
-//! 无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口。
+//! 无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口；
+//! 请求头 `x-okapi-playground-key` 选用同一用户的另一把令牌（计费 / 白名单按被选令牌走，
+//! 别人的令牌 404、没存加密副本 409、缺主密钥 503、头不合法 400）。
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
 #[path = "support/published_pricing.rs"]
@@ -17,6 +19,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// 测试用主密钥（32 字节十六进制）。
+const MASTER: &str = "0909090909090909090909090909090909090909090909090909090909090909";
 
 /// mock OpenAI 上游：只认流式（中继会强制 stream:true），逐块回内容 + usage + [DONE]。
 async fn mock_stream(body: axum::body::Bytes) -> axum::response::Response {
@@ -97,9 +102,11 @@ async fn setup() -> TestEnv {
     .unwrap();
 
     published_pricing::publish(&pg, user_id).await;
-    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
+    let mut state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
+    // 选用令牌需要主密钥解开加密副本；固定值只在本测试进程里用
+    state.master_key = Some(Arc::from(MASTER));
     state
         .ledger
         .credit(user_id, Money::from_micros(10_000_000))
@@ -253,4 +260,180 @@ async fn presets_endpoint_whitelists() {
     assert_eq!(data[1]["max_tokens"], 512);
     // state 已被 setup 用掉一次；这里只是防止未使用告警
     let _ = &env.state;
+}
+
+fn sha256_hex(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+/// 给 `user_id` 再建一把令牌；`saved` 决定是否写入可恢复的加密副本（旧令牌没有），
+/// `allowlist` 写入模型白名单。返回 (id, 明文)。
+async fn extra_key(
+    pg: &PgPool,
+    user_id: i64,
+    saved: bool,
+    allowlist: Option<Value>,
+) -> (i64, String) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let token = format!("sk-okapi-sel-{suffix}");
+    let hash = sha256_hex(&token);
+    let id = okapi_store::provision::create_api_key(pg, user_id, &hash, "sk-okapi-sel")
+        .await
+        .unwrap();
+    if saved {
+        let sealed = okapi_store::api_key_secret::seal(MASTER, user_id, &hash, &token).unwrap();
+        sqlx::query("UPDATE api_keys SET key_ciphertext = $2 WHERE id = $1")
+            .bind(id)
+            .bind(sealed)
+            .execute(pg)
+            .await
+            .unwrap();
+    }
+    if let Some(list) = allowlist {
+        sqlx::query("UPDATE api_keys SET model_allowlist = $2 WHERE id = $1")
+            .bind(id)
+            .bind(list)
+            .execute(pg)
+            .await
+            .unwrap();
+    }
+    (id, token)
+}
+
+fn relay(env: &TestEnv, selected: &str) -> reqwest::RequestBuilder {
+    reqwest::Client::new()
+        .post(format!("http://{}/api/me/playground/chat", env.addr))
+        .bearer_auth(&env.token)
+        .header("x-okapi-playground-key", selected)
+        .json(&json!({"model": env.model, "messages": [{"role": "user", "content": "hi"}]}))
+}
+
+async fn error_code(resp: reqwest::Response) -> (u16, String) {
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap();
+    (
+        status,
+        body["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
+/// 选用令牌：请求按被选令牌计费（api_key_id 落在它身上，而不是登录 key），内容照常流式透出。
+#[tokio::test]
+async fn relay_bills_the_selected_key() {
+    let env = setup().await;
+    let (id, _) = extra_key(&env.pg, env.user_id, true, None).await;
+    let resp = relay(&env, &id.to_string()).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("Hello"), "{text}");
+    wait_committed(&env.pg, env.user_id).await;
+    let billed: i64 = sqlx::query_scalar(
+        "SELECT api_key_id FROM billing_records WHERE user_id = $1 AND log_type = 2",
+    )
+    .bind(env.user_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(billed, id, "计费必须落在选用的令牌上");
+}
+
+/// 被选令牌自己的模型白名单照常生效：不含该模型就被数据面拒绝（与 SDK 直调一致）。
+#[tokio::test]
+async fn relay_applies_the_selected_keys_allowlist() {
+    let env = setup().await;
+    let (id, _) = extra_key(
+        &env.pg,
+        env.user_id,
+        true,
+        Some(json!(["some-other-model"])),
+    )
+    .await;
+    let (status, code) = error_code(relay(&env, &id.to_string()).send().await.unwrap()).await;
+    assert_eq!((status, code.as_str()), (403, "model_not_allowed"));
+    // 不选令牌（登录 key 无白名单）仍可调
+    let ok = reqwest::Client::new()
+        .post(format!("http://{}/api/me/playground/chat", env.addr))
+        .bearer_auth(&env.token)
+        .json(&json!({"model": env.model, "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+}
+
+/// 别人的令牌 id：一律 404（不泄露存在性），也不会用对方的明文发请求。
+#[tokio::test]
+async fn relay_rejects_another_users_key() {
+    let env = setup().await;
+    let other =
+        okapi_store::provision::create_user(&env.pg, &format!("other-{}", Uuid::new_v4().simple()))
+            .await
+            .unwrap();
+    let (foreign, _) = extra_key(&env.pg, other, true, None).await;
+    let (status, code) = error_code(relay(&env, &foreign.to_string()).send().await.unwrap()).await;
+    assert_eq!((status, code.as_str()), (404, "not_found"));
+    let (status, code) = error_code(relay(&env, "999999999").send().await.unwrap()).await;
+    assert_eq!(
+        (status, code.as_str()),
+        (404, "not_found"),
+        "不存在的 id 同样 404"
+    );
+}
+
+/// 没存加密副本的旧令牌解不出明文：409 key_copy_not_saved（与"复制完整 Token"同口径）。
+#[tokio::test]
+async fn relay_selected_key_without_ciphertext_is_conflict() {
+    let env = setup().await;
+    let (id, _) = extra_key(&env.pg, env.user_id, false, None).await;
+    let (status, code) = error_code(relay(&env, &id.to_string()).send().await.unwrap()).await;
+    assert_eq!((status, code.as_str()), (409, "key_copy_not_saved"));
+}
+
+/// 缺主密钥时 503（不回退成用登录 key，免得用户以为在测被选令牌）。
+#[tokio::test]
+async fn relay_selected_key_needs_master_key() {
+    let env = setup().await;
+    let (id, _) = extra_key(&env.pg, env.user_id, true, None).await;
+    let mut state = env.state.clone();
+    state.master_key = None;
+    let app = console::router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/api/me/playground/chat"))
+        .bearer_auth(&env.token)
+        .header("x-okapi-playground-key", id.to_string())
+        .json(&json!({"model": env.model, "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        error_code(resp).await,
+        (503, "key_copy_unavailable".to_owned())
+    );
+}
+
+/// 令牌 id 头不合法（非数字 / 非正数）：400，不去查库。登录 key 缺失时仍是 401。
+#[tokio::test]
+async fn relay_selected_key_header_is_validated() {
+    let env = setup().await;
+    for bad in ["abc", "0", "-3", ""] {
+        let resp = relay(&env, bad).send().await.unwrap();
+        assert_eq!(resp.status(), 400, "头值 {bad:?}");
+    }
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/api/me/playground/chat", env.addr))
+        .header("x-okapi-playground-key", "1")
+        .json(&json!({"model": env.model, "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "没有登录 key 不能借头选令牌");
 }

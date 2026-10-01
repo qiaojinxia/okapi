@@ -42,11 +42,23 @@ interface Options {
   hang?: boolean
   /// 助手回复正文（缺省 "Hello playground"）。
   reply?: string
+  /// `/api/me/keys` 的数据（缺省空列表）；`keysDelayMs` 让它延迟返回。
+  keys?: unknown[]
+  keysDelayMs?: number
 }
+
+/// 试用台"使用的密钥"候选：账号分组是 vip（只放行 gpt-5），ci-bot 钉在 default 分组并只许 claude-sonnet-4。
+const KEYS = [
+  { id: 11, name: 'ci-bot', key_prefix: 'sk-okapi-ci', copy_status: 'available', status: 1, model_allowlist: ['claude-sonnet-4'], group_override: 'default', expires_at: null, quota_mode: 1, quota_micro: 5_000_000, used_micro: 1_250_000 },
+  { id: 12, name: 'open-key', key_prefix: 'sk-okapi-op', copy_status: 'available', status: 1, model_allowlist: null, group_override: null, expires_at: null, quota_mode: 0, quota_micro: null, used_micro: 0 },
+  { id: 13, name: 'legacy', key_prefix: 'sk-okapi-lg', copy_status: 'not_saved', status: 1, model_allowlist: null, group_override: null, expires_at: null, quota_mode: 0, quota_micro: null, used_micro: 0 },
+  { id: 14, name: 'paused', key_prefix: 'sk-okapi-pa', copy_status: 'available', status: 2, model_allowlist: null, group_override: null, expires_at: null, quota_mode: 0, quota_micro: null, used_micro: 0 },
+  { id: 15, name: 'old', key_prefix: 'sk-okapi-ol', copy_status: 'available', status: 1, model_allowlist: null, group_override: null, expires_at: '2020-01-01T00:00:00Z', quota_mode: 0, quota_micro: null, used_micro: 0 },
+]
 
 /// 返回中继收到的请求体列表（按到达顺序），供断言历史 / 参数。
 async function prepare(page: Page, opts: Options = {}) {
-  const bodies: Array<{ messages: Array<{ role: string; content: string }>; model: string; temperature: number }> = []
+  const bodies: Array<{ messages: Array<{ role: string; content: string }>; model: string; temperature: number; keyHeader: string | null }> = []
   await page.addInitScript(() => {
     localStorage.setItem('okapi.key', 'interaction-test-key')
     localStorage.setItem('okapi.lang', 'en')
@@ -62,7 +74,7 @@ async function prepare(page: Page, opts: Options = {}) {
       expect(request.method()).toBe('POST')
       // 中继必然被强制为流式
       expect(JSON.parse(request.postData() ?? '{}').stream).toBe(true)
-      bodies.push(JSON.parse(request.postData() ?? '{}'))
+      bodies.push({ ...JSON.parse(request.postData() ?? '{}'), keyHeader: request.headers()['x-okapi-playground-key'] ?? null })
       if (opts.hang) {
         // 挂住到测试点停止：abort 会让前端 fetch 直接失败，这里久等后回错误体兜底
         await new Promise((r) => setTimeout(r, 5_000))
@@ -81,11 +93,12 @@ async function prepare(page: Page, opts: Options = {}) {
       await route.continue()
       return
     }
+    if (path === '/api/me/keys' && opts.keysDelayMs) await new Promise((r) => setTimeout(r, opts.keysDelayMs))
     const json =
       path === '/api/me' ? ME
       : path === '/api/pricing' ? PRICING
       : path === '/api/playground/presets' ? SITE_PRESETS
-      : path === '/api/me/keys' ? { total: 0, data: [] }
+      : path === '/api/me/keys' ? { total: opts.keys?.length ?? 0, data: opts.keys ?? [] }
       : path === '/api/me/groups' ? { current: 'vip', selectable: [] }
       : path === '/api/notice' ? { notice: null }
       : { data: [], next_before: null }
@@ -391,4 +404,120 @@ test('窄屏：配置栏默认收起、可展开；对话与输入框不超出�
   expect(overflow).toBeLessThanOrEqual(0)
   const box = await page.getByRole('button', { name: 'Send' }).boundingBox()
   expect(box!.x + box!.width).toBeLessThanOrEqual(390)
+})
+
+const keySelect = (page: Page) => page.getByLabel('API key to use')
+
+test('选用密钥：登录会话为默认，停用 / 过期 / 未保存明文的密钥列出但不可选，并说明原因', async ({ page }) => {
+  await prepare(page, { keys: KEYS })
+  await page.goto('/portal/playground')
+  const select = keySelect(page)
+  await expect(select).toHaveValue('')
+  await expect(select.locator('option')).toHaveText([
+    'Login session (default)',
+    'ci-bot · sk-okapi-ci…',
+    'open-key · sk-okapi-op…',
+    'legacy · sk-okapi-lg… — secret not saved',
+    'paused · sk-okapi-pa… — disabled',
+    'old · sk-okapi-ol… — expired',
+  ])
+  for (const name of [/^legacy/, /^paused/, /^old/]) await expect(select.getByRole('option', { name })).toBeDisabled()
+  await expect(select.getByRole('option', { name: /^ci-bot/ })).toBeEnabled()
+  await expect(page.getByText('cannot be used here')).toBeVisible()
+  // 没选密钥时不显示密钥摘要
+  await expect(page.locator('[data-slot="playground-key-info"]')).toHaveCount(0)
+})
+
+test('选用密钥：模型候选按该密钥的分组与白名单收窄，请求带上密钥 id，脚注标明用的哪把并按它的分组估价', async ({ page }) => {
+  const bodies = await prepare(page, { keys: KEYS })
+  await page.goto('/portal/playground')
+  const model = page.getByLabel('Model ID', { exact: true })
+  const candidates = () => page.locator('datalist option').evaluateAll((els) => els.map((e) => (e as HTMLOptionElement).value))
+  // 账号分组 vip：只有 gpt-5
+  await expect(model).toHaveValue('gpt-5')
+  expect(await candidates()).toEqual(['gpt-5'])
+
+  await keySelect(page).selectOption('11')
+  // ci-bot 钉 default 分组 + 白名单只含 claude-sonnet-4：候选收窄，当前模型自动换成它
+  expect(await candidates()).toEqual(['claude-sonnet-4'])
+  await expect(model).toHaveValue('claude-sonnet-4')
+  const info = page.locator('[data-slot="playground-key-info"]')
+  await expect(info).toContainText('Group default')
+  await expect(info).toContainText('1 allowed models')
+  await expect(info).toContainText('$3.75 left')
+  await expect(page.locator('[data-slot="playground-model-info"]')).toContainText('Claude Sonnet 4')
+
+  await send(page, 'via key')
+  const assistant = page.locator('[data-role="assistant"]')
+  await expect(assistant).toContainText('Hello playground')
+  expect(bodies[0].keyHeader).toBe('11')
+  expect(bodies[0].model).toBe('claude-sonnet-4')
+  await expect(assistant).toContainText('Key ci-bot')
+  // default 分组倍率 1：claude-sonnet-4 输入 1.5×$2 = $3/1M、输出 ×5 = $15/1M；100 入 + 20 出 = $0.0006（vip 倍率 0.8 时会是 $0.00048）
+  await expect(assistant.getByText(/^≈ \$0\.0006$/)).toBeVisible()
+
+  // 换回登录会话：claude 在 vip 下不可用，模型回到 gpt-5；请求不再带密钥头
+  await keySelect(page).selectOption('')
+  await expect(model).toHaveValue('gpt-5')
+  expect(await candidates()).toEqual(['gpt-5'])
+  await send(page, 'via login')
+  await expect.poll(() => bodies.length).toBe(2)
+  expect(bodies[1].keyHeader).toBeNull()
+})
+
+test('选用密钥：未钉分组且无白名单的密钥跟随账号分组；手输的目录外模型换密钥时保留；目录里有但此密钥用不了时给出警告', async ({ page }) => {
+  await prepare(page, { keys: KEYS })
+  await page.goto('/portal/playground')
+  const model = page.getByLabel('Model ID', { exact: true })
+  await keySelect(page).selectOption('12')
+  await expect(page.locator('[data-slot="playground-key-info"]')).toContainText('Group vip')
+  await expect(page.locator('[data-slot="playground-key-info"]')).toContainText('All models')
+  expect(await page.locator('datalist option').evaluateAll((els) => els.map((e) => (e as HTMLOptionElement).value))).toEqual(['gpt-5'])
+
+  await model.fill('claude-sonnet-4')
+  await expect(page.getByRole('status').filter({ hasText: 'cannot call this model' })).toBeVisible()
+  await model.fill('gpt-5')
+  await expect(page.getByRole('status').filter({ hasText: 'cannot call this model' })).toHaveCount(0)
+
+  await model.fill('my-custom-model')
+  await keySelect(page).selectOption('11')
+  await expect(model).toHaveValue('my-custom-model')
+})
+
+test('选用密钥：选择刷新后保留；已被删除 / 停用的密钥回到登录会话并提示；密钥列表失败时只剩登录会话', async ({ page }) => {
+  await prepare(page, { keys: KEYS })
+  await page.goto('/portal/playground')
+  await keySelect(page).selectOption('11')
+  await page.reload()
+  await expect(keySelect(page)).toHaveValue('11')
+  await expect(page.getByLabel('Model ID', { exact: true })).toHaveValue('claude-sonnet-4')
+
+  // 上次选的 ci-bot 现在被停用了
+  await page.route('**/api/me/keys?*', (route) => route.fulfill({ json: { total: 1, data: [{ ...KEYS[0], status: 2 }] } }))
+  await page.reload()
+  await expect(keySelect(page)).toHaveValue('')
+  await expect(page.getByText('no longer available')).toBeVisible()
+  // 模型本是"跟随该密钥的第一个可用模型"，回到登录会话（vip 分组）后跟随 gpt-5
+  await expect(page.getByLabel('Model ID', { exact: true })).toHaveValue('gpt-5')
+
+  // 列表接口失败：降级为只用登录会话，页面照常可用
+  await page.route('**/api/me/keys?*', (route) => route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } }))
+  await page.reload()
+  await expect(keySelect(page).locator('option')).toHaveText(['Login session (default)'])
+  await expect(page.getByPlaceholder(/Enter to send/)).toBeVisible()
+})
+
+test('选用密钥：密钥列表还没回来时不能发送，避免把本该用选定密钥的请求悄悄走成登录会话', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('okapi.playground.settings.7', JSON.stringify({ model: 'claude-sonnet-4', system: '', temperature: '1', topP: '1', maxTokens: '', keyId: '11' }))
+  })
+  const bodies = await prepare(page, { keys: KEYS, keysDelayMs: 1200 })
+  await page.goto('/portal/playground')
+  await page.getByPlaceholder(/Enter to send/).fill('too early')
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled({ timeout: 10_000 })
+  await page.getByRole('button', { name: 'Send' }).click()
+  await expect(page.locator('[data-role="assistant"]')).toContainText('Hello playground')
+  expect(bodies).toHaveLength(1)
+  expect(bodies[0].keyHeader).toBe('11')
 })

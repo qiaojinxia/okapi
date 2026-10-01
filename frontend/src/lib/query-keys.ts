@@ -15,6 +15,8 @@ export const qk = {
   keys: ['keys'] as const,
   /// 新手引导用的密钥概览（有几把、是否调过）；与 `keys` 同前缀，建 / 删 key 后一起失效。
   keysSummary: ['keys', 'summary'] as const,
+  /// 试用台选择密钥用的完整列表（含分组 / 白名单 / 状态）；同样挂在 `keys` 前缀下，建 / 删 / 改 key 后一起失效。
+  keysPlayground: ['keys', 'playground'] as const,
   keyUsage: (id: number) => ['keys', 'usage', id] as const,
   /// 站点设置全表（键值卡片）；单个设置项走 `setting(key)`，两者分开失效。
   adminSettings: ['admin', 'settings'] as const,

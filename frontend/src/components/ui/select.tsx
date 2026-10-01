@@ -5,6 +5,8 @@ import { cn } from '@/lib/utils'
 export interface SelectOption {
   value: string
   label: string
+  /// 仍列出但不可选（label 里自带原因，比悄悄隐藏更能让用户明白为什么）。
+  disabled?: boolean
 }
 
 interface SelectProps {
@@ -45,7 +47,7 @@ export function Select({
       >
         {placeholder !== undefined && <option value="">{placeholder}</option>}
         {options.map((o) => (
-          <option key={o.value} value={o.value}>
+          <option key={o.value} value={o.value} disabled={o.disabled}>
             {o.label}
           </option>
         ))}

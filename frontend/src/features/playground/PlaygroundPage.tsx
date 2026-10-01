@@ -4,6 +4,8 @@ import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { estimateCost, outputSpeed } from './cost'
 import { conversationMarkdown, downloadText } from './export'
+import { modelsForKey, usePlaygroundKeys } from './keys'
+import type { KeyBlock, KeyChoice } from './keys'
 import { Markdown } from './markdown'
 import { ModelInfo } from './ModelInfo'
 import type { SendOptions, Turn } from './use-chat-stream'
@@ -26,9 +28,10 @@ import { Field } from '@/components/ui/field'
 import { IconButton } from '@/components/ui/icon-button'
 import { Input } from '@/components/ui/input'
 import { PageHeader } from '@/components/ui/page'
+import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
-import { isAvailable, nonnegative } from '@/features/public-pricing/catalog-data'
+import { nonnegative } from '@/features/public-pricing/catalog-data'
 import type { PricingGroup, PricingModel } from '@/features/public-pricing/types'
 import { useMe } from '@/hooks/use-auth'
 import { ApiError, apiFetch } from '@/lib/api'
@@ -55,7 +58,7 @@ function formatDuration(ms: number): string {
 function Workspace({ userId, group }: { userId: number | undefined; group: string }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
-  const ids = { model: useId(), list: useId(), system: useId(), temp: useId(), topP: useId(), max: useId(), preset: useId(), input: useId(), config: useId() }
+  const ids = { key: useId(), model: useId(), list: useId(), system: useId(), temp: useId(), topP: useId(), max: useId(), preset: useId(), input: useId(), config: useId() }
   const chat = useChatStream(userId)
 
   const [saved] = useState(() => readSettings(userId))
@@ -64,6 +67,8 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   const [temperature, setTemperature] = useState(saved?.temperature ?? String(DEFAULT_TEMPERATURE))
   const [topP, setTopP] = useState(saved?.topP ?? String(DEFAULT_TOP_P))
   const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? '')
+  // 选用的密钥（'' = 登录会话本身）；存的是用户的选择，能不能用由下面按当前密钥列表推导
+  const [keyId, setKeyId] = useState(saved?.keyId ?? '')
   const [presetName, setPresetName] = useState('')
   const [draft, setDraft] = useState('')
   // 窄屏：配置栏默认收起，对话在前（否则要先翻过整张表单才看得到聊天）
@@ -76,13 +81,21 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
     staleTime: 60_000,
   })
   const catalog = pricing.data?.models ?? []
-  const available = catalog
-    .filter((m) => isAvailable(m, group))
+  const keys = usePlaygroundKeys()
+  // 选用的密钥必须此刻可用；列表还没回来 / 已被删或停用时按"登录会话"处理（后两种会提示，见 keyGone）
+  const selectedKey = keys.choices.find((k) => String(k.id) === keyId && k.blocked === null) ?? null
+  const keyPending = keyId !== '' && keys.isPending
+  const keyGone = keyId !== '' && keys.isFetched && selectedKey === null
+  // 生效分组：密钥自己钉的分组优先，否则跟账号。模型候选 = 该分组可见 ∩ 该密钥的模型白名单，与网关判定一致
+  const effectiveGroup = selectedKey?.group ?? group
+  const available = modelsForKey(catalog, effectiveGroup, selectedKey?.allowlist ?? null)
     .map((m) => m.model)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
   const modelValue = model !== '' ? model : (available[0] ?? '')
-  const factor = group ? nonnegative(pricing.data?.groups.find((g) => g.code === group)?.ratio) : 1
+  const factorOf = (code: string) => (code ? nonnegative(pricing.data?.groups.find((g) => g.code === code)?.ratio) : 1)
+  const factor = factorOf(effectiveGroup)
   const modelEntry = catalog.find((m) => m.model === modelValue.trim())
+  const modelDenied = modelEntry !== undefined && !available.includes(modelEntry.model)
 
   const sitePresets = useSitePresets()
   const userPresets = useUserPresets(userId)
@@ -93,12 +106,12 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   const tempOk = temperature.trim() !== '' && Number.isFinite(tempNum) && tempNum >= 0 && tempNum <= 2
   const topPOk = topP.trim() !== '' && Number.isFinite(topPNum) && topPNum >= 0 && topPNum <= 1
   const maxOk = maxNum === null || (Number.isInteger(maxNum) && maxNum > 0)
-  const paramsOk = tempOk && topPOk && maxOk && modelValue.trim() !== ''
+  const paramsOk = tempOk && topPOk && maxOk && modelValue.trim() !== '' && !keyPending
 
   // 记住当前这套参数：只存用户改过的值（model 为空 = 仍跟随目录首项，不把自动选中的值固化下来）
   useEffect(() => {
-    if (userId !== undefined) writeSettings(userId, { model, system, temperature, topP, maxTokens })
-  }, [userId, model, system, temperature, topP, maxTokens])
+    if (userId !== undefined) writeSettings(userId, { model, system, temperature, topP, maxTokens, keyId })
+  }, [userId, model, system, temperature, topP, maxTokens, keyId])
 
   const applyPreset = (p: Preset) => {
     setModel(p.model)
@@ -113,7 +126,18 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
       ? { name: presetName.trim(), model: modelValue.trim(), system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum }
       : null
 
-  const options = (): SendOptions => ({ model: modelValue, system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum })
+  const options = (): SendOptions => ({
+    model: modelValue, system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum,
+    keyId: selectedKey?.id ?? null, keyName: selectedKey ? keyLabel(selectedKey) : null, group: effectiveGroup,
+  })
+
+  // 换密钥：当前选的目录模型若新密钥用不了，就回到"跟随新密钥的第一个可用模型"；手输的目录外模型原样保留
+  const changeKey = (value: string) => {
+    const next = keys.choices.find((k) => String(k.id) === value && k.blocked === null) ?? null
+    const nextAvailable = modelsForKey(catalog, next?.group ?? group, next?.allowlist ?? null).map((m) => m.model)
+    if (model !== '' && catalog.some((m) => m.model === model) && !nextAvailable.includes(model)) setModel('')
+    setKeyId(value)
+  }
 
   // 滚动：只在用户本来就贴着底部时跟随新内容；往上翻着读旧消息时不抢滚动条，改给"回到最新"按钮
   const logRef = useRef<HTMLDivElement>(null)
@@ -150,6 +174,21 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
     )
   }
 
+  const blockedLabel: Record<KeyBlock, string> = {
+    disabled: t('portal:playgroundKeyDisabled'),
+    expired: t('portal:playgroundKeyExpired'),
+    not_saved: t('portal:playgroundKeyNotSaved'),
+    unavailable: t('portal:playgroundKeyUnavailable'),
+  }
+  const keyLabel = (k: KeyChoice) => k.name || t('flow:unnamed_api_key')
+  const keyOptions = [
+    { value: '', label: t('portal:playgroundKeyLogin') },
+    ...keys.choices.map((k) => ({
+      value: String(k.id),
+      label: `${keyLabel(k)} · ${k.prefix}…${k.blocked ? ` — ${blockedLabel[k.blocked]}` : ''}`,
+      disabled: k.blocked !== null,
+    })),
+  ]
   const starters = [t('portal:playgroundStarter1'), t('portal:playgroundStarter2'), t('portal:playgroundStarter3')]
   const lastAssistant = chat.turns.map((turn) => turn.role).lastIndexOf('assistant')
 
@@ -193,7 +232,21 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
           id={ids.config}
           className={cn('min-h-0 flex-col gap-4 overflow-y-auto rounded-lg border border-border bg-card p-4 lg:flex', configOpen ? 'flex' : 'hidden')}
         >
-          <Field label={t('portal:guideModel')} htmlFor={ids.model} hint={t('portal:playgroundModelHint')}>
+          <Field label={t('portal:playgroundKey')} htmlFor={ids.key} hint={t('portal:playgroundKeyHint')}>
+            <Select id={ids.key} className="w-full" value={selectedKey ? String(selectedKey.id) : ''} options={keyOptions} onChange={changeKey} />
+          </Field>
+          {selectedKey && (
+            <div className="-mt-2 flex flex-wrap gap-1" data-slot="playground-key-info">
+              <Badge variant="muted">{t('portal:playgroundKeyGroup', { group: effectiveGroup || '—' })}</Badge>
+              <Badge variant="muted">
+                {selectedKey.allowlist === null ? t('portal:playgroundKeyNoAllowlist') : t('portal:playgroundKeyAllowlist', { n: selectedKey.allowlist.length })}
+              </Badge>
+              {selectedKey.quotaLeftMicro !== null && <Badge variant="muted">{t('portal:playgroundKeyQuotaLeft', { amount: formatMoney(selectedKey.quotaLeftMicro, locale) })}</Badge>}
+            </div>
+          )}
+          {keyGone && <p className="-mt-2 text-xs text-warning">{t('portal:playgroundKeyGone')}</p>}
+          {keys.choices.some((k) => k.blocked === 'not_saved') && <p className="-mt-2 text-xs text-muted-foreground">{t('portal:playgroundKeyNotSavedHint')}</p>}
+          <Field label={t('portal:guideModel')} htmlFor={ids.model} hint={pricing.isSuccess && available.length === 0 ? t('portal:playgroundNoModels') : t('portal:playgroundModelHint')}>
             <Input
               id={ids.model}
               list={ids.list}
@@ -209,6 +262,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
           {modelEntry
             ? <ModelInfo model={modelEntry} factor={factor} />
             : pricing.isSuccess && modelValue.trim() !== '' && <p className="-mt-2 text-xs text-warning">{t('portal:playgroundModelUnlisted')}</p>}
+          {modelDenied && <p className="-mt-2 text-xs text-warning" role="status">{t('portal:playgroundModelDenied')}</p>}
           <Field label={t('portal:playgroundSystem')} htmlFor={ids.system}>
             <Textarea
               id={ids.system}
@@ -341,7 +395,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
                   key={turn.id}
                   turn={turn}
                   locale={locale}
-                  cost={turn.role === 'assistant' ? estimateCost(catalog.find((m) => m.model === turn.requested), factor, turn.usage) : null}
+                  cost={turn.role === 'assistant' ? estimateCost(catalog.find((m) => m.model === turn.requested), factorOf(turn.group ?? group), turn.usage) : null}
                   onRegenerate={index === lastAssistant && !chat.busy && paramsOk ? regenerate : undefined}
                 />
               ))
@@ -431,6 +485,7 @@ function TurnBubble({ turn, locale, cost, onRegenerate }: { turn: Turn; locale: 
         </div>
         {(done || turn.error !== undefined) && (
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-[11px] text-muted-foreground">
+            {turn.via && <Badge variant="outline">{t('portal:playgroundVia', { name: turn.via })}</Badge>}
             {done && turn.model && <Badge variant="outline" className="font-mono">{turn.model}</Badge>}
             {done && turn.usage && (
               <span>
