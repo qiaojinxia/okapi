@@ -16,6 +16,7 @@ mod cache_usage_legacy;
 pub mod channel_balance;
 pub mod channel_oauth;
 mod cloud_probe;
+mod core_source;
 pub mod dlq;
 mod input_units;
 mod key_copy;

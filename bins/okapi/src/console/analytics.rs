@@ -95,6 +95,14 @@ pub struct CubeQuery {
     #[serde(default)]
     pub stack: Option<String>,
     pub stages: Option<String>,
+    /// `core`：只返回请求、Token、金额、错误等核心指标，走精简数据源（毫秒级）；
+    /// 缺省 / `all` 返回全部指标。过滤或口径不允许走精简源时自动回退为全部指标。
+    #[serde(default)]
+    pub fields: Option<String>,
+    /// 是否同时查上一窗口（环比、上期名次）。缺省 true；不展示环比的调用方传 false，
+    /// 省掉整条上期查询。
+    #[serde(default)]
+    pub compare: Option<bool>,
 }
 
 /// 编译后的过滤：整数已进 SQL，字符串留在绑定参数里。
@@ -119,6 +127,7 @@ impl CubeQuery {
 
     async fn prepare(&mut self, state: &AppState) -> Result<(), AppError> {
         let ch = ch_or_disabled(state)?;
+        self.core_requested()?;
         let w = super::usage_details::CalendarWindow::read(
             ch,
             self.days(),
@@ -165,10 +174,62 @@ impl CubeQuery {
         let predicate = format!("{}{}", self.window(false), self.base_scope());
         self.coverage =
             super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
-        let predicate = format!("{}{}", self.window(true), self.base_scope());
-        self.previous_coverage =
-            super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
+        if self.compares() {
+            let predicate = format!("{}{}", self.window(true), self.base_scope());
+            self.previous_coverage =
+                super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
+        }
         Ok(())
+    }
+
+    /// `fields` 取值校验；非法值在发出任何查询之前 400。
+    fn core_requested(&self) -> Result<bool, AppError> {
+        match trimmed(self.fields.as_deref()) {
+            None | Some("all") => Ok(false),
+            Some("core") => Ok(true),
+            Some(_) => Err(AppError::bad_request().with_param("fields")),
+        }
+    }
+
+    fn compares(&self) -> bool {
+        self.compare.unwrap_or(true)
+    }
+
+    /// 精简源只含主键维度的核心列。没有明细过滤、拆分维度属于主键、没有历史字符口径
+    /// （`prompt_tokens` 需要校正）时，它在这些列上与完整源逐值相同；否则必须回退完整源。
+    fn core_source_ok(&self, key_col: Option<&str>, previous: bool) -> bool {
+        !self.has_detail_filter()
+            && self.model_column().is_ok_and(|column| column == "model")
+            && key_col.is_none_or(|column| {
+                matches!(
+                    column,
+                    "model" | "channel_id" | "user_id" | "api_key_id" | "group_code"
+                )
+            })
+            && !self.coverage_for(previous).historical_units
+    }
+
+    /// 上一窗口的汇总，只服务环比；调用方不展示环比（compare=false）时整条不查。
+    async fn previous_totals(
+        &self,
+        state: &AppState,
+        agg: &str,
+        scope: &Scope,
+    ) -> Result<Vec<Value>, AppError> {
+        if !self.compares() {
+            return Ok(Vec::new());
+        }
+        let sql = format!(
+            "SELECT {agg} FROM {} WHERE {}{}",
+            self.source(true),
+            self.window(true),
+            scope.clause
+        );
+        super::stats_cache::query(state, &sql, &scope.borrow(), self.cached).await
+    }
+
+    fn core_source(&self, previous: bool) -> String {
+        super::core_source::source(&self.window(previous), &self.base_scope())
     }
 
     fn model_column(&self) -> Result<&'static str, AppError> {
@@ -661,6 +722,48 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m
 }
 
+/// 精简源的行 → 展示字段：与 `pack_metrics` 同名同口径的核心部分，不含任何测量口径
+/// （成本覆盖、缓存、延迟、TTFT、用量来源……），避免把"没查"伪装成 0。
+fn pack_core_metrics(r: &Value) -> serde_json::Map<String, Value> {
+    let reqs = ch_i64(r, "reqs");
+    let prompt = ch_i64(r, "prompt");
+    let completion = ch_i64(r, "completion");
+    let errs = ch_i64(r, "errs");
+    let mut m = serde_json::Map::new();
+    m.insert("requests".into(), json!(reqs));
+    m.insert("errors".into(), json!(errs));
+    m.insert("error_rate_bp".into(), json!(rate_bp(errs, reqs)));
+    m.insert("prompt_tokens".into(), json!(prompt));
+    m.insert("cached_tokens".into(), json!(ch_i64(r, "cached")));
+    m.insert("completion_tokens".into(), json!(completion));
+    m.insert("reasoning_tokens".into(), json!(ch_i64(r, "reasoning")));
+    m.insert("tokens".into(), json!(prompt.saturating_add(completion)));
+    m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
+    m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
+    m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
+    m
+}
+
+fn sum_core_rows(rows: &[Value]) -> Value {
+    let mut total = json!({});
+    for row in rows {
+        for key in [
+            "reqs",
+            "prompt",
+            "cached",
+            "completion",
+            "reasoning",
+            "spend",
+            "saved",
+            "cost",
+            "errs",
+        ] {
+            total[key] = json!(ch_i64(&total, key).saturating_add(ch_i64(row, key)));
+        }
+    }
+    total
+}
+
 fn cache_metrics(row: &Value, requests: i64) -> serde_json::Map<String, Value> {
     let known = ch_i64(row, "write_n");
     json!({
@@ -807,9 +910,6 @@ pub async fn trend(
     q.cached &= super::stats_cache::allowed(&headers);
     q.prepare(&state).await?;
     let days = q.days();
-    let agg = aggregate_metrics();
-    let current_source = q.source(false);
-    let previous_source = q.source(true);
     let scope = q.scope();
     let params = scope.borrow();
 
@@ -821,15 +921,18 @@ pub async fn trend(
     } else {
         ("toString(toDate(hour))", "day")
     };
+    // 核心指标走精简源：只读 amount / requests / tokens 的调用方（首页趋势图）毫秒级返回，
+    // 不必为 ~300 个测量子查询付 ~5s 的规划时间。堆叠与带明细过滤时回退完整源。
+    if q.core_requested()? && q.stack_column()?.is_none() && q.core_source_ok(None, false) {
+        return core_trend(&state, &q, &scope, bucket_expr, granularity, window).await;
+    }
+
+    let agg = aggregate_metrics();
+    let current_source = q.source(false);
     let series_sql = format!(
         "SELECT {bucket_expr} AS bucket, {agg} FROM {current_source} \
          WHERE {}{} GROUP BY bucket ORDER BY bucket",
         q.window(false),
-        scope.clause
-    );
-    let prev_sql = format!(
-        "SELECT {agg} FROM {previous_source} WHERE {}{}",
-        q.window(true),
         scope.clause
     );
     let pack_one = |rows: &[Value]| {
@@ -848,7 +951,7 @@ pub async fn trend(
         );
         let (mut rows, mut previous) = tokio::try_join!(
             super::stats_cache::query(&state, &stacked_sql, &params, q.cached),
-            super::stats_cache::query(&state, &prev_sql, &params, q.cached),
+            q.previous_totals(&state, &agg, &scope),
         )?;
         let total = q
             .trend_totals(&state, Some(&stack_col), &mut rows, &mut previous)
@@ -880,7 +983,7 @@ pub async fn trend(
 
     let (mut series, mut previous) = tokio::try_join!(
         super::stats_cache::query(&state, &series_sql, &params, q.cached),
-        super::stats_cache::query(&state, &prev_sql, &params, q.cached),
+        q.previous_totals(&state, &agg, &scope),
     )?;
     let total = q
         .trend_totals(&state, None, &mut series, &mut previous)
@@ -901,6 +1004,43 @@ pub async fn trend(
         "scope": describe_scope(&state, &q).await?,
         "total": pack_one(&total),
         "previous": pack_one(&previous),
+        "data": data,
+    })))
+}
+
+/// `fields=core` 的趋势：逐桶与总计只含核心指标，不查测量口径，也不查上一窗口。
+async fn core_trend(
+    state: &AppState,
+    q: &CubeQuery,
+    scope: &Scope,
+    bucket_expr: &str,
+    granularity: &str,
+    window: Value,
+) -> Result<Json<Value>, AppError> {
+    let sql = format!(
+        "SELECT {bucket_expr} AS bucket, {} FROM {} WHERE {}{} GROUP BY bucket ORDER BY bucket",
+        super::core_source::AGG,
+        q.core_source(false),
+        q.window(false),
+        scope.clause
+    );
+    let series = super::stats_cache::query(state, &sql, &scope.borrow(), q.cached).await?;
+    let data: Vec<Value> = series
+        .iter()
+        .map(|r| {
+            let mut m = pack_core_metrics(r);
+            m.insert("bucket".into(), json!(ch_str(r, "bucket")));
+            Value::Object(m)
+        })
+        .collect();
+    Ok(Json(json!({
+        "days": q.days(),
+        "granularity": granularity,
+        "window": window,
+        "scope": describe_scope(state, q).await?,
+        "fields": "core",
+        "total": pack_core_metrics(&sum_core_rows(&series)),
+        "previous": {},
         "data": data,
     })))
 }
@@ -1059,7 +1199,7 @@ struct Bucket {
 }
 
 /// Fold additive raw counters first, then recompute all ratios and coverage once.
-fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String) -> Vec<Bucket> {
+fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, core: bool) -> Vec<Bucket> {
     let mut raw: Vec<(String, Value, i64)> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     for r in rows {
@@ -1103,7 +1243,11 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String) -> Vec<Bucket> {
     raw.into_iter()
         .map(|(key, totals, folded)| Bucket {
             key,
-            metrics: pack_metrics(&totals),
+            metrics: if core {
+                pack_core_metrics(&totals)
+            } else {
+                pack_metrics(&totals)
+            },
             folded,
         })
         .collect()
@@ -1213,10 +1357,10 @@ impl BreakdownMetric {
         self,
         rows: &[Value],
         fold_key: &dyn Fn(&str) -> String,
-        _fold_provider: bool,
+        core: bool,
         limit: usize,
     ) -> Vec<Bucket> {
-        let mut buckets = fold_rows(rows, fold_key);
+        let mut buckets = fold_rows(rows, fold_key, core);
         buckets.sort_by(|a, b| {
             b.metrics[self.field()]
                 .as_i64()
@@ -1230,6 +1374,10 @@ impl BreakdownMetric {
 
 /// 当前排行在 SQL 侧排序后截断，provider 则取全渠道折叠再取 Top N。
 /// 分母查询和上期排行不截断，分别用于全量占比、上期名次及金额环比。
+///
+/// 分母与上期排行只读金额 / 请求 / Token，只要精简源能给出同样的值就用它——这两条
+/// 在完整源上各要 ~5s 的规划时间。`core` 表示当前排行也只要核心指标。
+/// 上期排行在调用方不要环比（`compare=false`）时为 `None`。
 fn breakdown_sql(
     q: &CubeQuery,
     scope: &Scope,
@@ -1237,39 +1385,53 @@ fn breakdown_sql(
     fold_provider: bool,
     limit: usize,
     metric: BreakdownMetric,
-) -> [String; 3] {
-    let agg = aggregate_metrics();
-    let current_source = q.source(false);
-    let previous_source = q.source(true);
+    core: bool,
+) -> (String, String, Option<String>) {
     let order = metric.sql_column();
     let sql_limit = if fold_provider {
         String::new()
     } else {
         format!(" LIMIT {limit}")
     };
-    [
-        format!(
-            "SELECT {key_col} AS k, {agg}, sum(prompt_tokens) + sum(completion_tokens) AS tokens \
-             FROM {current_source} WHERE {}{} \
-             GROUP BY k ORDER BY {order} DESC, k{sql_limit}",
-            q.window(false),
-            scope.clause
-        ),
-        format!(
-            "SELECT sum(amount) AS spend, sum(requests) AS reqs, \
-             sum(prompt_tokens) + sum(completion_tokens) AS tokens \
-             FROM {current_source} WHERE {}{}",
-            q.window(false),
-            scope.clause
-        ),
+    let lean = |previous: bool, key: Option<&str>| q.core_source_ok(key, previous);
+    let source = |previous: bool, key: Option<&str>| {
+        if lean(previous, key) {
+            q.core_source(previous)
+        } else {
+            q.source(previous)
+        }
+    };
+    let (cur_agg, cur_source) = if core && lean(false, Some(key_col)) {
+        (super::core_source::AGG.to_owned(), q.core_source(false))
+    } else {
+        (aggregate_metrics(), q.source(false))
+    };
+    let cur = format!(
+        "SELECT {key_col} AS k, {cur_agg}, sum(prompt_tokens) + sum(completion_tokens) AS tokens \
+         FROM {cur_source} WHERE {}{} \
+         GROUP BY k ORDER BY {order} DESC, k{sql_limit}",
+        q.window(false),
+        scope.clause
+    );
+    let total = format!(
+        "SELECT sum(amount) AS spend, sum(requests) AS reqs, \
+         sum(prompt_tokens) + sum(completion_tokens) AS tokens \
+         FROM {} WHERE {}{}",
+        source(false, None),
+        q.window(false),
+        scope.clause
+    );
+    let prev = q.compares().then(|| {
         format!(
             "SELECT {key_col} AS k, sum(amount) AS spend, sum(requests) AS reqs, \
              sum(prompt_tokens) + sum(completion_tokens) AS tokens \
-             FROM {previous_source} WHERE {}{} GROUP BY k ORDER BY {order} DESC, k",
+             FROM {} WHERE {}{} GROUP BY k ORDER BY {order} DESC, k",
+            source(true, Some(key_col)),
             q.window(true),
             scope.clause
-        ),
-    ]
+        )
+    });
+    (cur, total, prev)
 }
 
 /// 排名按所选指标变化；各类占比与金额环比仍保留各自的单位和全量分母。
@@ -1336,16 +1498,25 @@ pub async fn breakdown(
     let scope = q.scope();
     let params = scope.borrow();
 
-    let [cur_sql, total_sql, prev_sql] =
-        breakdown_sql(&q, &scope, key_col, fold_provider, limit, metric);
+    // 当前排行只要核心指标且精简源能给出同样的值时，不恢复缓存口径（核心指标不含缓存）。
+    let core = q.core_requested()? && q.core_source_ok(Some(key_col), false);
+    let (cur_sql, total_sql, prev_sql) =
+        breakdown_sql(&q, &scope, key_col, fold_provider, limit, metric, core);
     let (mut cur, total, prev) = tokio::try_join!(
         super::stats_cache::query(&state, &cur_sql, &params, q.cached),
         super::stats_cache::query(&state, &total_sql, &params, q.cached),
-        super::stats_cache::query(&state, &prev_sql, &params, q.cached),
+        async {
+            match &prev_sql {
+                Some(sql) => super::stats_cache::query(&state, sql, &params, q.cached).await,
+                None => Ok(Vec::new()),
+            }
+        },
     )?;
 
-    q.recover_cache(&state, false, None, Some(key_col), &mut cur)
-        .await?;
+    if !core {
+        q.recover_cache(&state, false, None, Some(key_col), &mut cur)
+            .await?;
+    }
 
     // 名字回填：渠道维度还要 provider（折叠依据）
     let int_keys: Vec<i64> = cur
@@ -1383,8 +1554,8 @@ pub async fn breakdown(
         }
     };
     let prev_ranks = previous_ranks(&prev, &fold_key, metric);
-    let mut buckets = metric.top_buckets(&cur, &fold_key, fold_provider, limit);
-    if fold_provider {
+    let mut buckets = metric.top_buckets(&cur, &fold_key, core, limit);
+    if fold_provider && !core {
         q.recover_provider_cache(&state, &mut buckets, &cur, &names)
             .await?;
     }
@@ -1417,6 +1588,7 @@ pub async fn breakdown(
         "total_amount_micro": total_spend,
         "total_requests": total_reqs,
         "total_tokens": total_tokens,
+        "fields": if core { "core" } else { "all" },
         "data": data,
     })))
 }
@@ -1929,4 +2101,84 @@ fn parse_choices(name: &str, value: Option<&str>) -> Result<Vec<String>, AppErro
         return Err(AppError::bad_request().with_param(name));
     }
     Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::console::measurement_coverage::Coverage;
+
+    fn query() -> CubeQuery {
+        CubeQuery::default()
+    }
+
+    #[test]
+    fn core_source_is_only_used_when_it_matches_the_full_source() {
+        let q = query();
+        for column in [None, Some("model"), Some("channel_id"), Some("user_id")] {
+            assert!(q.core_source_ok(column, false), "{column:?}");
+        }
+        for column in ["endpoint", "node", "toJSONString(tuple(model, group_code))"] {
+            assert!(!q.core_source_ok(Some(column), false), "{column}");
+        }
+        let mut detail = query();
+        detail.stream = Some(true);
+        assert!(!detail.core_source_ok(None, false));
+        let mut requested = query();
+        requested.model_source = Some("requested".to_owned());
+        assert!(!requested.core_source_ok(None, false));
+        assert!(!requested.core_source_ok(Some("model"), false));
+    }
+
+    #[test]
+    fn historical_character_units_force_the_full_source_per_window() {
+        let mut q = query();
+        q.coverage = Coverage {
+            historical_units: true,
+            ..Coverage::default()
+        };
+        assert!(!q.core_source_ok(None, false));
+        // The previous window is judged on its own coverage.
+        assert!(q.core_source_ok(None, true));
+    }
+
+    #[test]
+    fn fields_and_compare_parameters_are_validated_and_default_to_everything() {
+        assert!(!query().core_requested().unwrap());
+        assert!(query().compares());
+        for (value, core) in [("core", true), ("all", false), (" core ", true)] {
+            let mut q = query();
+            q.fields = Some(value.to_owned());
+            assert_eq!(q.core_requested().unwrap(), core, "{value}");
+        }
+        let mut q = query();
+        q.fields = Some("everything".to_owned());
+        assert!(q.core_requested().is_err());
+        q.compare = Some(false);
+        assert!(!q.compares());
+    }
+
+    #[test]
+    fn core_rows_pack_and_sum_without_inventing_measurement_fields() {
+        let rows = [
+            json!({"reqs": "2", "prompt": "30", "cached": "5", "completion": "70", "reasoning": "1", "spend": "900", "saved": "10", "cost": "400", "errs": "1"}),
+            json!({"reqs": 3, "prompt": 20, "cached": 0, "completion": 30, "reasoning": 0, "spend": 100, "saved": 0, "cost": 50, "errs": 0}),
+        ];
+        let total = pack_core_metrics(&sum_core_rows(&rows));
+        assert_eq!(total["requests"], 5);
+        assert_eq!(total["errors"], 1);
+        assert_eq!(total["error_rate_bp"], 2_000);
+        assert_eq!(total["tokens"], 150);
+        assert_eq!(total["amount_micro"], 1_000);
+        assert_eq!(total["upstream_cost_micro"], 450);
+        for unmeasured in [
+            "avg_latency_ms",
+            "avg_ttft_ms",
+            "cost_coverage_bp",
+            "cache_hit_bp",
+            "token_provenance",
+        ] {
+            assert!(!total.contains_key(unmeasured), "{unmeasured}");
+        }
+    }
 }

@@ -1404,3 +1404,239 @@ async fn flow_names_include_safe_context_deleted_and_missing_identities() {
         assert_eq!(node(stage, missing)["entity_status"], "missing");
     }
 }
+
+const CORE_FIELDS: [&str; 11] = [
+    "requests",
+    "errors",
+    "error_rate_bp",
+    "prompt_tokens",
+    "cached_tokens",
+    "completion_tokens",
+    "reasoning_tokens",
+    "tokens",
+    "amount_micro",
+    "discount_micro",
+    "upstream_cost_micro",
+];
+
+fn assert_core_equal(core: &Value, full: &Value, context: &str) {
+    for field in CORE_FIELDS {
+        assert!(!core[field].is_null(), "{context}: core 缺少 {field}");
+        assert_eq!(core[field], full[field], "{context}: {field}");
+    }
+}
+
+/// `fields=core` 走精简数据源，只为跳过 ~300 个测量子查询的规划耗时；它必须与完整数据源
+/// 在核心字段上逐值相同——包括旧立方体多出来的剩余部分、明细维度、多渠道与多分组——
+/// 并且在不能保证相同时（明细过滤）回退完整源，不能静默给出另一个数。
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One fixture compared across every endpoint and dimension.
+async fn core_fields_match_the_full_source_including_legacy_remainder() {
+    let env = setup().await;
+    if !has_ch(&env) {
+        return;
+    }
+    let (other_channel, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("{}-other", env.channel_name),
+        "anthropic",
+        "http://127.0.0.1:1/v1",
+        "mock",
+        &[env.model_b.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let ok = |model: &str, group: &str, channel: i64, amount: i64| {
+        let mut row = advanced_payload(&env, "up.a", group, 1_000, true, 0);
+        row["model"] = json!(model);
+        row["channel_id"] = json!(channel);
+        row["amount_micro"] = json!(amount);
+        row
+    };
+    let mut failed = ok(&env.model_b, "vip", other_channel, 0);
+    failed["log_type"] = json!(5);
+    failed["error_code"] = json!("upstream_error");
+    insert_values(
+        &env,
+        &[
+            ok(&env.model_a, "default", env.channel_id, 1_000),
+            ok(&env.model_a, "default", env.channel_id, 1_000),
+            failed,
+        ],
+        Some("2026-08-20 12:00:00+00"),
+    )
+    .await;
+    insert_values(
+        &env,
+        &[ok(&env.model_a, "default", env.channel_id, 1_000)],
+        Some("2026-08-21 12:00:00+00"),
+    )
+    .await;
+    drain(&env).await;
+    // 旧立方体已有 2 条与第二天那条明细同键的聚合历史：剩余部分 = 3 − 1 = 2。
+    let ch = env.state.ch.as_ref().unwrap();
+    ch.execute(&format!("INSERT INTO mv_cube_hour SELECT toDateTime('2026-08-21 12:00:00') AS hour, toInt64({}) AS user_id, toInt64({}) AS api_key_id, 'default' AS group_code, '{}' AS model, toInt64({}) AS channel_id, countState() AS requests, sumState(toUInt64(100)) AS prompt_tokens, sumState(toUInt64(40)) AS cached_tokens, sumState(toUInt64(200)) AS completion_tokens, sumState(toUInt64(10)) AS reasoning_tokens, sumState(toInt64(1000)) AS amount, sumState(toInt64(250)) AS discount, sumState(toInt64(0)) AS upstream_cost, sumState(toUInt64(0)) AS errors, sumState(toUInt64(5000)) AS latency_sum, sumState(toUInt64(500)) AS ttft_sum, countIfState(toUInt32(500)>0) AS ttft_samples FROM numbers(2) GROUP BY hour, user_id, api_key_id, group_code, model, channel_id", env.user_id, env.key_id, env.model_a, env.channel_id)).await.unwrap();
+    let query = format!(
+        "start_date=2026-08-20&end_date=2026-08-21&user_id={}",
+        env.user_id
+    );
+    let full = poll_until(&env, &format!("/admin/stats/trend?{query}"), |b| {
+        b["total"]["requests"].as_i64() == Some(6)
+            && b["total"]["cost_known_requests"].as_i64() == Some(4)
+    })
+    .await;
+    assert_eq!(full["total"]["amount_micro"], 5_000);
+
+    // 冷查询耗时（no-cache 绕开 15s 缓存）：只打印不断言，绝对值随机器负载抖动。
+    let timed = |path: String| {
+        let (env, token) = (&env, env.super_token.clone());
+        async move {
+            let start = std::time::Instant::now();
+            let response = reqwest::Client::new()
+                .get(format!("http://{}{path}", env.addr))
+                .bearer_auth(token)
+                .header("Cache-Control", "no-cache")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            start.elapsed()
+        }
+    };
+    let ranking = format!("/admin/stats/breakdown?{query}&by=model&limit=3");
+    eprintln!(
+        "cold breakdown: full={:?}, core={:?}",
+        timed(ranking.clone()).await,
+        timed(format!("{ranking}&fields=core&compare=false")).await
+    );
+    let chart = format!("/admin/stats/trend?{query}");
+    eprintln!(
+        "cold trend: full={:?}, core={:?}",
+        timed(chart.clone()).await,
+        timed(format!("{chart}&fields=core")).await
+    );
+
+    // 趋势：总计与逐桶一致；精简响应不带任何测量口径，也不带上期。
+    let (status, core) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{core}");
+    assert_eq!(core["fields"], "core");
+    assert_core_equal(&core["total"], &full["total"], "trend total");
+    let (core_buckets, full_buckets) = (
+        core["data"].as_array().unwrap(),
+        full["data"].as_array().unwrap(),
+    );
+    assert_eq!(core_buckets.len(), full_buckets.len());
+    for (a, b) in core_buckets.iter().zip(full_buckets) {
+        assert_eq!(a["bucket"], b["bucket"]);
+        assert_core_equal(a, b, &format!("trend bucket {}", a["bucket"]));
+    }
+    assert_eq!(core["previous"], json!({}));
+    for unmeasured in ["avg_latency_ms", "cost_coverage_bp", "cache_hit_bp"] {
+        assert!(core["total"].get(unmeasured).is_none(), "{unmeasured}");
+    }
+    // compare=false 只是不查上期，当前窗口的完整指标不变。
+    let (_, uncompared) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&compare=false"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(uncompared["total"], full["total"]);
+    assert_eq!(uncompared["data"], full["data"]);
+    assert_eq!(uncompared["previous"], json!({}));
+
+    // 拆分：每个维度 × 每个排序指标，名次、取值、占比与全量分母都一致。
+    // 排序指标只影响 ORDER BY 与取榜（两条路径共用），逐个指标只在 model 上全跑。
+    for by in ["model", "channel", "user", "api_key", "group", "provider"] {
+        for metric in ["amount", "requests", "tokens"] {
+            if by != "model" && metric != "amount" {
+                continue;
+            }
+            let path = format!("/admin/stats/breakdown?{query}&by={by}&metric={metric}");
+            let (status, full) = get(&env, &path, &env.super_token).await;
+            assert_eq!(status, 200, "{path}: {full}");
+            let (status, core) = get(
+                &env,
+                &format!("{path}&fields=core&compare=false"),
+                &env.super_token,
+            )
+            .await;
+            assert_eq!(status, 200, "{path}: {core}");
+            assert_eq!(core["fields"], "core", "{by}/{metric}");
+            for total in ["total_amount_micro", "total_requests", "total_tokens"] {
+                assert_eq!(core[total], full[total], "{by}/{metric}: {total}");
+            }
+            let (core_rows, full_rows) = (
+                core["data"].as_array().unwrap(),
+                full["data"].as_array().unwrap(),
+            );
+            assert!(!full_rows.is_empty(), "{by}/{metric}");
+            assert_eq!(core_rows.len(), full_rows.len(), "{by}/{metric}");
+            for (a, b) in core_rows.iter().zip(full_rows) {
+                let context = format!("{by}/{metric}/{}", a["key"]);
+                assert_core_equal(a, b, &context);
+                for field in [
+                    "key",
+                    "rank",
+                    "label",
+                    "share_bp",
+                    "request_share_bp",
+                    "token_share_bp",
+                ] {
+                    assert_eq!(a[field], b[field], "{context}: {field}");
+                }
+                // 不查上期：名次与环比为"未知"，而不是 0。
+                assert!(
+                    a["previous_rank"].is_null() && a["delta_bp"].is_null(),
+                    "{context}"
+                );
+            }
+        }
+    }
+    let (_, by_model) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{query}&by=model&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(by_model["data"][0]["key"], env.model_a);
+    assert_eq!(
+        by_model["data"][0]["requests"], 5,
+        "2 + 1 条明细 + 2 条旧聚合剩余"
+    );
+
+    // 带明细过滤时不能走精简源：回退完整源，指标与不带 fields 时完全相同。
+    let filtered = format!("{query}&stream=true");
+    let (_, expected) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{filtered}&by=model"),
+        &env.super_token,
+    )
+    .await;
+    let (status, fallback) = get(
+        &env,
+        &format!("/admin/stats/breakdown?{filtered}&by=model&fields=core"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{fallback}");
+    assert_eq!(fallback["fields"], "all");
+    assert_eq!(fallback["data"], expected["data"]);
+    assert!(fallback["data"][0].get("cost_coverage_bp").is_some());
+
+    let (status, bad) = get(
+        &env,
+        &format!("/admin/stats/trend?{query}&fields=everything"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(bad["error"]["param"], "fields");
+}

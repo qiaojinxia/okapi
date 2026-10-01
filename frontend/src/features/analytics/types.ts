@@ -79,6 +79,8 @@ export interface TrendResp {
   scope: ScopeEcho
   total: Partial<CubeMetrics>
   previous: Partial<CubeMetrics>
+  /// `core`：精简查询（只含请求 / Token / 金额 / 错误），不含任何测量口径，也没有上期。
+  fields?: 'core'
   /// 未堆叠：逐桶度量；堆叠：`series` + 逐桶按序列的值
   data: TrendBucket[] | StackedBucket[]
   stack?: string
@@ -113,6 +115,8 @@ export interface BreakdownResp {
   total_amount_micro: number
   total_requests: number
   total_tokens?: number
+  /// `core`：精简查询；行内没有延迟、缓存等测量口径，上期名次与环比恒为 null。
+  fields?: 'core' | 'all'
   data: BreakdownRow[]
 }
 

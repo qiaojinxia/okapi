@@ -1189,6 +1189,47 @@ clamp 到 168。`console_portal` 增：`wallet_window_spend_micro` 在员工 A /
 `ChannelsPage.tsx` 被对方整文件重写一次、本轮两处改动重新套用。两个会话同时改同一棵工作树是有
 风险的操作：任一方用整文件覆盖写都会静默吞掉对方的改动，建议后续串行或分目录。
 
+### 11.13.1 分析查询的规划成本与精简源（2026-09-30，首页"数据量很小却很慢"）
+
+**现象**：首页一次加载打出 ~14 条 CH 查询，其中 4 条各要 4–5s（最慢 11s），而它们只读 ~7k 行 / ~400KB。
+
+**定位**（`system.query_log` + 采样 profiler，全部在开发库复现）：
+- 墙钟 ≈ CPU 微秒、`cores_busy`≈1.0（14 核里只有 1 核在干活），IO ≈ 1ms，`FunctionExecute` 仅 ~7k 次；
+  0 行的"上期窗口"同样要 ~1s——**耗时与数据量无关，是单线程的分析/规划**。`EXPLAIN PLAN`（不执行）
+  单独就要 4.5–4.9s。耗时随子查询数增长（24 个≈0.26s，81≈0.7–3s，302≈6–9s）。
+- 完整源（`analysis_source::source_with_coverage`）拼出 ~100KB、~300 个子查询、71 个指标的 SQL。
+  `allow_experimental_analyzer=0` 跑不了这条 SQL；`query_plan_*` / `optimize_*` 各开关都无效（5–6s 噪声内）。
+- profiler：**89.5% 的样本在 `IQueryTreeNode::getTreeHash`**，由 `resolveFunction` / `resolveExpressionNode` 调用。
+  24.8 分析器每解析一个引用了子查询列的表达式，都对该列的来源 `QueryNode` 重算树哈希（`ColumnNode` 的
+  哈希带着整棵来源子树）：代价 = 表达式个数 × 子查询树大小。对照：把 `d` / `l` 换成同列空壳，分支 2
+  从 3.85s 掉到 0.10s；每个 `if(...)` 剩余列约 30–55ms。CTE 与内联子查询一样会触发，换内联无改善。
+  生产 compose / CI 固定 `clickhouse-server:24.8-alpine`，该行为就是线上会遇到的。
+
+**两处修复**：
+1. **精简源**（`console/core_source.rs`）：只投影 9 个核心列（requests / prompt / cached / completion /
+   reasoning / amount / discount / upstream_cost / errors），SQL ~3KB、冷查询 ~100ms。这 9 列在完整源里
+   都是直接取自 MV 的 `*Merge`、不经任何测量子源 join，故与完整源逐值相同（`console_analytics::
+   core_fields_match_the_full_source_including_legacy_remainder` 对 6 个维度 × 排序指标、趋势总计与逐桶、
+   旧立方体剩余部分逐值核对，并做过变异检查）。接口参数：`fields=core`（精简响应，不含任何测量口径）、
+   `compare=false`（不查上一窗口，上期名次 / 环比为 null）。`breakdown` 的"全量分母"与"上期排行"只读 3 列，
+   能走精简源时恒走（所有调用方受益）。**自动回退完整源**：带明细过滤（stream / endpoint / node …）、
+   `model_source≠billed`、拆分维度不在主键内、存在历史字符口径（`historical_units`，`prompt_tokens` 需校正）。
+2. **完整源的结构层改用 `view(...)` 表函数**（`analysis_source::as_view`）：`d` / `l` / `c` 与它们 join 的
+   测量子源不再用 CTE，而以 `view(SELECT …)` 引用——外层分析里它只是一张带 schema 的表，哈希很小。
+   开发库实测：规划 5.3s → 1.6s，执行 5.3–5.7s → 1.75–1.87s，282 个聚合列 × 64 个分组逐字节一致；
+   隔离栈上 `console_analytics` 全量 85s → 34s、`console_stats` 180s → 70s。
+
+**首页**：趋势图与两个排行走精简查询（~100ms）；"费用与调用质量""Token 构成"仍需完整趋势（`compare=false`），
+冷查询约 1.6–2.3s。图表与质量面板因此分两个趋势请求：`fields=core` 一个、完整一个，互不等待。
+
+**还剩**：各测量子源内部（`e / a / r / missing` 这些 CTE 再 `LEFT JOIN … USING`，见 `token_details` /
+`usage_sources` / `performance_source` / `output_rate` / `cache_usage` / `input_units`）是同一种结构，
+`view()` 嵌套会让内部查询被分析两次（取 schema + 生成计划）、成倍放大，未动；规划里仍有 ~60% 在 `getTreeHash`。
+**诊断办法**：`system.query_log` 看墙钟≈CPU 与 `ProfileEvents['SelectQueriesWithSubqueries']`；
+`EXPLAIN PLAN` 计时；`SET query_profiler_cpu_time_period_ns` 后按 `trace_log` 统计 `getTreeHash` 占比。
+注意 `query_log` 会把 >100k 字符的 SQL 截断，回放需手动补上末尾 WHERE / GROUP BY。
+**往后加指标**：往 `METRICS` / 测量子源加列都会放大这个成本；只要核心指标的新接口应走精简源。
+
 ### 11.14 渠道池 / 渠道 / 分组关系模型复核与修正（2026-09-02）
 
 **起因**：对照 new-api 现行分组体系（`service/group.go`：用户分组 × 令牌分组的二维倍率
