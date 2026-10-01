@@ -2376,7 +2376,8 @@ body 重写幂等、已有 user_id 不覆盖、已有 billing 块重写不新增
   指南同口径，可手输）+ 系统提示词 + temperature / max_tokens / top_p；右栏对话（用户 / 助手气泡、流式打字、
   停止按钮 = `AbortController`、失败显示 `error_code` 文案）；每条助手回复脚注 usage 与该请求的模型名。
   流式解析封装 `useChatStream`（`fetch` + `ReadableStream` 手切 SSE，不用 `EventSource`——它不支持 POST 与自定义头）。
-  助手正文按纯文本 + 保留换行渲染，不引入 markdown 库（§1 冻结清单外的依赖）。
+  助手正文不引入 markdown 库（§1 冻结清单外的依赖），由 `features/playground/markdown.tsx` 自带的轻量渲染器
+  处理（见下"2026-10-01 完善"）。
 - **预设**：`{name, model, system, temperature, max_tokens, top_p}`。用户预设存 `localStorage['okapi.playground.<user_id>']`
   （与引导状态同一存法；试用台配置不值得一张表）。**站点预设**存 `settings.playground_presets`（数组），公开只读
   端点 `GET /api/playground/presets` 白名单字段 + 类型收口（同 `site_notice` 模式），页面一键导入为本地预设。
@@ -2386,10 +2387,31 @@ body 重写幂等、已有 user_id 不覆盖、已有 billing 块重写不新增
   （`/#/?settings={"key","url"}` URL 导入）、Cherry Studio（`cherrystudio://providers/api-keys?v=1&data=<base64 JSON>`）。
   **只在明文回执处出现**（此刻明文本就在屏幕上，§11.31 同一规则）；指南其它入口用 `YOUR_API_KEY` 占位时按钮不显示。
 
+- **2026-10-01 完善（纯前端，中继与预设协议不变）**：
+  - **回复按 markdown 渲染**：围栏代码块（语言标签 + 一键复制）、行内代码、加粗 / 斜体、有序 / 无序列表、
+    引用、表格、链接。全部输出 React 元素（文本由 React 转义，不用 `dangerouslySetInnerHTML`）；链接只放行
+    `http(s)` / `mailto`（`javascript:` 不成链接，原样显示），新窗口并带 `noopener`。流式期间正文残缺：未闭合的
+    围栏按"代码延续到末尾"渲染，下一块到达再续上。
+  - **回复脚注**：除模型名与 usage 外加首字耗时（发出 → 第一个正文 / 推理增量）、输出速度（完成 token ÷ 首字之后耗时，
+    < 50ms 不显示）、**估算费用**（`cost.ts`：与模型广场同一份价目 `modelPrice`，未缓存输入 × 输入价 + 缓存命中 × 缓存价
+    + 输出 × 输出价；按次计费取单价；阶梯 / 自定义计价不显示）。界面写"约"，悬停说明个人系数 / 折扣 / 动态规则以用量日志
+    实扣为准——估算是帮用户建立量级，不是账单。
+  - **重新生成 / 重试**：丢掉最后一条用户消息之后的内容，用同一句话 + 当前参数再请求（失败的回复同入口）；失败的回复
+    本就不进后续请求的历史。
+  - **持久化**：对话按用户存 `sessionStorage`（离开去模型广场看价再回来不丢；关标签页即清，对话可能含敏感内容故不进
+    `localStorage`；上限 60 条 / 40 万字符，流式途中离开的残缺回复恢复为"已结束"）；模型 / 系统提示词 / 采样参数按用户存
+    `localStorage['okapi.playground.settings.<user_id>']`（存输入框原文，校验仍在页面做）。
+  - **模型信息卡**：模型输入框下显示厂商、本分组价目、上下文与能力，并链到模型广场详情；目录里没有的模型（手输 / 缓存落后）
+    提示"仍会按原样请求"。
+  - **其他**：空态三条示例问题（点击只填入输入框，不自动发送——发送要花钱）；导出对话为 Markdown；仅在用户贴着底部时
+    跟随新内容，往上翻时出现"回到最新"；路由声明 `fitViewport`，对话区占满视口；窄屏配置栏默认收起、对话在前。
+
 **验收**：`console_playground.rs`——中继：流式回 `text/event-stream` 且 SSE 逐块与直打 gateway 一致、记账落在同一把
 key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口（多余字段不出、
 温度越界夹取、缺 name 的条目丢弃）。前端 `playground.spec.ts`（接口桩，SSE 桩逐块推送）：模型下拉只列本分组可用、
-发送 → 流式逐字出现 → usage 脚注、停止按钮中断、预设保存 / 载入 / 站点预设导入、密钥回执上的三个导入链接形状。
+发送 → 流式逐字出现 → usage 脚注、停止按钮中断、预设保存 / 载入 / 站点预设导入、密钥回执上的三个导入链接形状；
+完善部分另有 markdown 渲染与链接安全（`javascript:` 不成链接、HTML 当文本）、代码 / 回复复制、首字耗时与估价、
+重新生成与重试的请求历史、刷新恢复与清空、模型信息卡、示例问题不自动发送、导出内容、窄屏折叠与不横向溢出。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
