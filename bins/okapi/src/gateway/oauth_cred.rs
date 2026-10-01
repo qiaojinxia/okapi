@@ -165,7 +165,31 @@ pub async fn fresh_credential_for(
     if !current.needs_refresh(now, REFRESH_MARGIN_SECS) {
         return Ok(current);
     }
-    refresh_with_lock(state, key, current, now).await
+    refresh_with_lock(state, key, current, now, None).await
+}
+
+/// A 401 before output proves this access token was rejected. Refresh it once,
+/// accepting a concurrently rotated token instead of refreshing it again.
+pub async fn refresh_rejected_credential(
+    state: &AppState,
+    cand: &ChannelCandidate,
+) -> Result<OAuthCredential, UpstreamError> {
+    let current = OAuthCredential::parse(&cand.credential)
+        .ok_or_else(|| UpstreamError::Build("oauth_credential_expected".to_owned()))?;
+    let rejected = current.access_token.clone();
+    let account = current.account_id.clone();
+    let fresh = refresh_with_lock(
+        state,
+        &OAuthKey::from(cand),
+        current,
+        chrono::Utc::now().timestamp(),
+        Some(&rejected),
+    )
+    .await?;
+    if cand.provider == "codex" && fresh.account_id != account {
+        return Err(UpstreamError::Build("oauth_account_changed".to_owned()));
+    }
+    Ok(fresh)
 }
 
 async fn refresh_with_lock(
@@ -173,6 +197,7 @@ async fn refresh_with_lock(
     key: &OAuthKey<'_>,
     expired: OAuthCredential,
     now: i64,
+    rejected_token: Option<&str>,
 ) -> Result<OAuthCredential, UpstreamError> {
     // 1. 进程内单飞
     let gate = state.refresh_gate.key_mutex(key.channel_key_id).await;
@@ -184,10 +209,10 @@ async fn refresh_with_lock(
     }
     // 3. 加锁后重读 DB：别的 pod / 刚才拿锁的副本可能已经刷好
     let current_db = reread(state, key.channel_key_id).await;
-    if let Some(fresh) = current_db
-        .as_ref()
-        .filter(|c| !c.needs_refresh(now, REFRESH_MARGIN_SECS))
-    {
+    if let Some(fresh) = current_db.as_ref().filter(|c| {
+        !c.needs_refresh(now, REFRESH_MARGIN_SECS)
+            && rejected_token.is_none_or(|rejected| c.access_token != rejected)
+    }) {
         if locked {
             state.sched.cred_lock_release(key.channel_key_id).await;
         }
@@ -195,9 +220,22 @@ async fn refresh_with_lock(
     }
     if !locked {
         // 等了一轮仍没刷好：没锁不该自己动手，旧 token 未过期就先用，否则报瞬态错让重试矩阵处理
-        return stale_or_err(expired, now);
+        return if rejected_token.is_some() {
+            Err(UpstreamError::Timeout)
+        } else {
+            stale_or_err(expired, now)
+        };
     }
     let basis = current_db.unwrap_or_else(|| expired.clone());
+    if basis.refresh_token.trim().is_empty() {
+        invalidate_key(state, key.channel_key_id, "oauth_refresh_token_missing").await;
+        state.sched.cred_lock_release(key.channel_key_id).await;
+        return Err(UpstreamError::Status {
+            status: 401,
+            body: bytes::Bytes::new(),
+            retry_after_secs: None,
+        });
+    }
     // 4. 刷新 + 回写
     let outcome = do_refresh(state, key, &basis).await;
     let result = match outcome {
@@ -207,7 +245,7 @@ async fn refresh_with_lock(
                 refresh_token: tokens
                     .refresh_token
                     .unwrap_or_else(|| basis.refresh_token.clone()),
-                expires_at: now + tokens.expires_in,
+                expires_at: now.saturating_add(tokens.expires_in),
                 account_id: tokens.account_id.or_else(|| basis.account_id.clone()),
             };
             match okapi_store::admin::write_key_credential(
@@ -235,14 +273,7 @@ async fn refresh_with_lock(
                         status,
                         "OAuth refresh token 已失效，key 置 invalid"
                     );
-                    let _ = okapi_store::channels::mark_key_failure(
-                        &state.pg,
-                        key.channel_key_id,
-                        "oauth_invalid_grant",
-                        KeyFailure::Invalid,
-                    )
-                    .await;
-                    state.invalidate_routing_caches();
+                    invalidate_key(state, key.channel_key_id, "oauth_invalid_grant").await;
                     Err(UpstreamError::Status {
                         status: 401,
                         body,
@@ -253,11 +284,21 @@ async fn refresh_with_lock(
         }
         Err(err) => {
             tracing::warn!(error = %err, key = key.channel_key_id, "OAuth 刷新瞬态失败");
-            stale_or_err(expired, now).map_err(|_| err)
+            if rejected_token.is_some() {
+                Err(err)
+            } else {
+                stale_or_err(expired, now).map_err(|_| err)
+            }
         }
     };
     state.sched.cred_lock_release(key.channel_key_id).await;
     result
+}
+
+async fn invalidate_key(state: &AppState, id: i64, error: &str) {
+    let _ =
+        okapi_store::channels::mark_key_failure(&state.pg, id, error, KeyFailure::Invalid).await;
+    state.invalidate_routing_caches();
 }
 
 fn stale_or_err(stale: OAuthCredential, now: i64) -> Result<OAuthCredential, UpstreamError> {

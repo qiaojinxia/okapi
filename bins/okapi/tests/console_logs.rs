@@ -87,7 +87,7 @@ async fn setup() -> Env {
     .await
     .unwrap();
 
-    let state = gateway::build_state(
+    let mut state = gateway::build_state(
         &database_url,
         &redis_url,
         "test-node",
@@ -96,6 +96,12 @@ async fn setup() -> Env {
     )
     .await
     .unwrap();
+    if let (Some(url), Ok(database)) = (ch_url.as_deref(), std::env::var("OKAPI_TEST_CH_DATABASE"))
+    {
+        let ch = okapi_store::ChClient::new(url, &database).unwrap();
+        ch.ensure_schema().await.unwrap();
+        state.ch = Some(ch);
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = console::router(state.clone());
@@ -241,16 +247,19 @@ async fn log_endpoints_require_billing_read() {
 async fn dlq_list_requeue_and_discard() {
     let env = setup().await;
     let req_id = Uuid::new_v4();
+    let mut event = payload(&env, None);
+    event["request_id"] = json!(req_id);
     let mut ids = Vec::new();
     for (amount, err) in [
         (1_234_i64, "clickhouse: connection refused"),
         (1_235_i64, "invalid payload shape"),
     ] {
+        event["amount_micro"] = json!(amount);
+        event["original_amount_micro"] = json!(amount);
         let id = sqlx::query_scalar!(
             r#"INSERT INTO billing_dlq (source, payload, error, retry_count)
                VALUES ('chsink', $1, $2, 5) RETURNING id"#,
-            json!({ "request_id": req_id, "user_id": env.user_id, "model": env.model,
-                    "amount_micro": amount }),
+            event.clone(),
             err
         )
         .fetch_one(&env.pg)
@@ -695,7 +704,9 @@ async fn log_stat_switches_rate_source() {
             assert_eq!(body["cache_read_known_requests"], 5);
             assert_eq!(body["cache_hit_bp"], 4_000, "40 缓存 / 100 输入 = 40%");
             assert_eq!(body["rate_source"], "clickhouse", "带过滤时退化为 CH 窗口");
-            let (_, unfiltered) = get(&env, "/admin/logs/stat?hours=1", &env.super_token).await;
+            let (status, unfiltered) =
+                get(&env, "/admin/logs/stat?hours=1", &env.super_token).await;
+            assert_eq!(status, 200, "{unfiltered}");
             assert_eq!(
                 unfiltered["rate_source"], "redis",
                 "无过滤时 RPM/TPM 应取 Redis 秒桶"
@@ -705,6 +716,53 @@ async fn log_stat_switches_rate_source() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     panic!("统计条轮询超时");
+}
+
+#[tokio::test]
+async fn unknown_raw_events_remain_visible_but_cannot_be_guessed_as_calls() {
+    let mut env = setup().await;
+    let Some(url) = std::env::var("OKAPI_CLICKHOUSE_URL").ok() else {
+        panic!("needs isolated ClickHouse to validate classification");
+    };
+    let database = format!("okapi_log_population_{}", Uuid::new_v4().simple());
+    let ch = okapi_store::ChClient::new(&url, &database).unwrap();
+    ch.ensure_schema().await.unwrap();
+    let request = Uuid::new_v4();
+    ch.execute(&format!(
+        "INSERT INTO request_log_raw (ts,request_id,user_id,log_type,amount_micro) VALUES (now64(3),'{request}',{},0,100)",
+        env.user_id
+    ))
+    .await
+    .unwrap();
+    env.state.ch = Some(ch.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    env.addr = listener.local_addr().unwrap();
+    let app = console::router(env.state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let (status, rows) = get(
+        &env,
+        &format!("/admin/logs?request_id={request}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{rows}");
+    assert_eq!(rows["data"].as_array().unwrap().len(), 1);
+    assert_eq!(rows["data"][0]["log_type"], 0);
+    let (status, body) = get(
+        &env,
+        &format!("/admin/logs/stat?request_id={request}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(
+        status, 500,
+        "unknown classification must not become zero: {body}"
+    );
+    assert_eq!(body["error"]["code"], "internal_error");
+    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        .await
+        .unwrap();
+    server.abort();
 }
 
 /// 实时档：结算经 `settle_write` 收口，故一笔消费 + 一笔错误即应出现在秒桶里。

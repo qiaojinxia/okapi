@@ -404,15 +404,22 @@ async fn consume_and_refund_with_same_request_id_remain_distinct_events() {
         assert_eq!(number(&raw[0], key), 0);
     }
     let mv=ch.query_json_each_row(&format!(
-        "SELECT countMerge(requests) AS n,sumMerge(tokens) AS tokens,sumMerge(amount) AS amount FROM mv_user_day WHERE user_id={user}"
+        "SELECT countMerge(requests) AS calls,countMerge(financial_records) AS records,sumMerge(tokens) AS tokens,sumMerge(amount) AS amount,sumMerge(original) AS original,sumMerge(discount) AS discount,sumMerge(upstream_cost) AS cost FROM mv_user_day WHERE user_id={user}"
     )).await.unwrap();
     assert_eq!(
-        number(&mv[0], "n"),
+        number(&mv[0], "calls"),
+        1,
+        "refund is a financial adjustment, not a second call"
+    );
+    assert_eq!(
+        number(&mv[0], "records"),
         2,
-        "event count includes both financial events"
+        "both financial events remain in the coverage denominator"
     );
     assert_eq!(number(&mv[0], "tokens"), 120);
-    assert_eq!(number(&mv[0], "amount"), 0);
+    for key in ["amount", "original", "discount", "cost"] {
+        assert_eq!(number(&mv[0], key), 0);
+    }
 }
 
 #[tokio::test]

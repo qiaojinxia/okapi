@@ -9,7 +9,7 @@ use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::Response;
 use serde_json::{Value, json};
@@ -34,12 +34,51 @@ pub async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         Ok(headers) => headers,
         Err(err) => return err.into_response_with(None),
     };
-    Box::pin(crate::gateway::chat::chat_completions(
-        State(state),
-        headers,
-        body,
-    ))
-    .await
+    // Check user-supplied controls against the actual mapped upstream contract,
+    // including failover candidates and channel strip/inject rules, before billing.
+    let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    if let Some(model) = value.get("model").and_then(Value::as_str) {
+        match crate::gateway::chat::playground_parameters(&state, &headers, model).await {
+            Ok(profile) => {
+                if let Err(param) = profile.validate(&value) {
+                    return AppError::new(StatusCode::BAD_REQUEST, "invalid_request_error")
+                        .with_param(param)
+                        .into_response_with(None);
+                }
+            }
+            Err(err) => return err.into_response_with(None),
+        }
+    }
+    // This direct call bypasses the gateway router's diagnostic middleware.
+    // Initialize after selecting the key so credential redaction uses the actual key.
+    let trace = crate::gateway::diagnostics::Trace::new(&headers);
+    trace
+        .scope(Box::pin(crate::gateway::chat::chat_completions(
+            State(state),
+            headers,
+            body,
+        )))
+        .await
+}
+
+#[derive(serde::Deserialize)]
+pub struct ParameterQuery {
+    model: String,
+}
+
+/// GET /api/me/playground/parameters?model=...; only safe parameter metadata.
+pub async fn parameters(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ParameterQuery>,
+) -> Result<Json<Value>, AppError> {
+    if query.model.trim().is_empty() || query.model.len() > 256 {
+        return Err(AppError::bad_request());
+    }
+    let headers = with_selected_key(&state, headers).await?;
+    let profile =
+        crate::gateway::chat::playground_parameters(&state, &headers, query.model.trim()).await?;
+    Ok(Json(json!(profile)))
 }
 
 /// 把凭证换成用户在试用台里选的那把令牌，让数据面按它的分组 / 模型白名单 / 限额 / 过期与计费走。
@@ -103,6 +142,8 @@ pub struct Preset {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub top_p: Option<f64>,
+    pub reasoning_effort: Option<String>,
+    pub thinking_budget: Option<u32>,
 }
 
 /// `settings.playground_presets` → 白名单收口：缺 name / model 的条目丢弃、文本截断、数值夹到合法区间。
@@ -147,6 +188,21 @@ pub fn sanitize_presets(raw: Option<&Value>) -> Vec<Preset> {
                     .get("top_p")
                     .and_then(Value::as_f64)
                     .map(|p| p.clamp(0.0, 1.0)),
+                reasoning_effort: item
+                    .get("reasoning_effort")
+                    .and_then(Value::as_str)
+                    .filter(|e| {
+                        matches!(
+                            *e,
+                            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                        )
+                    })
+                    .map(str::to_owned),
+                thinking_budget: item
+                    .get("thinking_budget")
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n > 0 && *n <= 1_048_576)
+                    .and_then(|n| u32::try_from(n).ok()),
             })
         })
         .collect()

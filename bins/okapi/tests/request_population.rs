@@ -226,6 +226,65 @@ fn cell(row: &Value, key: &str) -> i64 {
         .unwrap()
 }
 
+async fn assert_refunded_analytics(env: &Env, trend_path: &str, trend_before: &Value) {
+    let trend_after = chart(env, trend_path, &env.super_token).await;
+    for field in [
+        "requests",
+        "errors",
+        "tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "error_rate_bp",
+        "cache_hit_bp",
+        "avg_latency_ms",
+        "avg_ttft_ms",
+        "avg_output_tps_milli",
+    ] {
+        assert_eq!(
+            trend_after["total"][field], trend_before["total"][field],
+            "analytics refund changed {field}"
+        );
+    }
+    assert_eq!(trend_after["total"]["requests"], 1);
+    assert_eq!(trend_after["total"]["tokens"], 120);
+    assert_eq!(trend_after["total"]["amount_micro"], 0);
+    let breakdown = chart(
+        env,
+        &format!(
+            "/admin/stats/breakdown?days=1&user_id={}&by=model&cached=false",
+            env.user_id
+        ),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(breakdown["total_requests"], 1);
+    assert_eq!(breakdown["total_tokens"], 120);
+    assert_eq!(breakdown["total_amount_micro"], 0);
+    assert_eq!(breakdown["data"][0]["requests"], 1);
+    for (metric, expected) in [("requests", 1), ("tokens", 120), ("amount", 0)] {
+        let flow = chart(
+            env,
+            &format!(
+                "/admin/stats/flow?days=1&user_id={}&metric={metric}&cached=false",
+                env.user_id
+            ),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(flow["total"], expected, "flow {metric}");
+        for stage in flow["stages"].as_array().unwrap() {
+            let total: i64 = flow["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|node| &node["stage"] == stage)
+                .map(|node| node["value"].as_i64().unwrap())
+                .sum();
+            assert_eq!(total, expected, "flow {metric} stage {stage}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn refunded_call_remains_one_api_request_on_charts() {
     let env = setup().await;
@@ -236,6 +295,13 @@ async fn refunded_call_remains_one_api_request_on_charts() {
     assert_eq!(before["total"]["requests"], 1);
     assert_eq!(before["total"]["tokens"], 120);
     assert_eq!(before["total"]["amount_micro"], 240);
+    let trend_path = format!(
+        "/admin/stats/trend?days=1&user_id={}&compare=false&cached=false",
+        env.user_id
+    );
+    let trend_before = chart(&env, &trend_path, &env.super_token).await;
+    assert_eq!(trend_before["total"]["requests"], 1);
+    assert_eq!(trend_before["total"]["amount_micro"], 240);
     let refund = reqwest::Client::new()
         .post(format!("http://{}/admin/billing/refund", env.console))
         .bearer_auth(&env.super_token)
@@ -291,6 +357,7 @@ async fn refunded_call_remains_one_api_request_on_charts() {
         after["total"]["token_provenance"]["prompt"]["upstream"]["request_share_bp"],
         10_000
     );
+    assert_refunded_analytics(&env, &trend_path, &trend_before).await;
     let report = json!({"scope":"One real gateway request, actual admin HTTP refund, PG outbox delivery and isolated CH chart APIs; not synthetic refund payload",
         "request_id":request_id,"user_id":env.user_id,"before":before,"after":after,
         "overview":overview,"activity":activity,"logs_stat":logs,"raw":raw});

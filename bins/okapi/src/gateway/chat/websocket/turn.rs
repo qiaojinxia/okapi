@@ -334,6 +334,8 @@ impl Progress {
     }
 }
 
+// Keep first-event, inactivity and usage-drain exits with their single settlement owner.
+#[allow(clippy::too_many_lines)]
 async fn consume(
     session: &Session,
     work: &Work,
@@ -358,6 +360,10 @@ async fn consume(
         .unwrap_or(480)
         .min(480);
     let turn_deadline = Deadline::from_std(bill.started) + Duration::from_secs(seconds);
+    let setting = session.state.setting_cached("streaming_policy").await;
+    let stream_policy =
+        crate::gateway::stream_policy::StreamPolicy::from_setting(setting.as_ref().as_ref());
+    let mut idle_deadline = Deadline::now() + stream_policy.idle;
     let mut received = false;
     loop {
         // Use one observation for both decisions: a close between the check and
@@ -368,7 +374,7 @@ async fn consume(
         }
         let deadline = draining.unwrap_or_else(|| {
             let idle = if received {
-                Deadline::now() + Duration::from_mins(5)
+                idle_deadline
             } else {
                 first_deadline
             };
@@ -395,6 +401,7 @@ async fn consume(
         match next {
             Some(Ok(event @ ChatEvent::Data { .. })) => {
                 received = true;
+                idle_deadline = Deadline::now() + stream_policy.idle;
                 progress.event(session, work, bill, routed, &event).await;
                 if progress.terminal {
                     break;

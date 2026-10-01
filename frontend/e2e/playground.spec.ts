@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import type { ParameterProfile } from '../src/features/playground/parameters'
 
 // Playground 试用台（IMPLEMENTATION §11.39）：接口桩 + SSE 桩。
 // 覆盖：模型下拉只列本分组可用、发送 → 流式内容 + usage 脚注、停止按钮中断、
@@ -45,6 +46,7 @@ interface Options {
   /// `/api/me/keys` 的数据（缺省空列表）；`keysDelayMs` 让它延迟返回。
   keys?: unknown[]
   keysDelayMs?: number
+  profiles?: Record<string, ParameterProfile>
 }
 
 /// 试用台"使用的密钥"候选：账号分组是 vip（只放行 gpt-5），ci-bot 钉在 default 分组并只许 claude-sonnet-4。
@@ -58,7 +60,7 @@ const KEYS = [
 
 /// 返回中继收到的请求体列表（按到达顺序），供断言历史 / 参数。
 async function prepare(page: Page, opts: Options = {}) {
-  const bodies: Array<{ messages: Array<{ role: string; content: string }>; model: string; temperature: number; keyHeader: string | null }> = []
+  const bodies: Array<{ messages: Array<{ role: string; content: string; reasoning_content?: string }>; model: string; temperature?: number; top_p?: number; max_tokens?: number; reasoning_effort?: string; reasoning?: { max_tokens: number }; keyHeader: string | null }> = []
   await page.addInitScript(() => {
     localStorage.setItem('okapi.key', 'interaction-test-key')
     localStorage.setItem('okapi.lang', 'en')
@@ -97,6 +99,10 @@ async function prepare(page: Page, opts: Options = {}) {
     const json =
       path === '/api/me' ? ME
       : path === '/api/pricing' ? PRICING
+      : path === '/api/me/playground/parameters' ? opts.profiles?.[new URL(request.url()).searchParams.get('model') ?? ''] ?? {
+        known: false, temperature_max: 2, top_p: true, sampling_requires_none: false, sampling_requires_no_budget: false,
+        efforts: [], default_effort: null, budget_min: null, budget_max: null, preserve_reasoning: false,
+      }
       : path === '/api/playground/presets' ? SITE_PRESETS
       : path === '/api/me/keys' ? { total: opts.keys?.length ?? 0, data: opts.keys ?? [] }
       : path === '/api/me/groups' ? { current: 'vip', selectable: [] }
@@ -520,4 +526,158 @@ test('选用密钥：密钥列表还没回来时不能发送，避免把本该�
   await expect(page.locator('[data-role="assistant"]')).toContainText('Hello playground')
   expect(bodies).toHaveLength(1)
   expect(bodies[0].keyHeader).toBe('11')
+})
+
+test('采样参数默认使用模型缺省，显式参数按原值发送', async ({ page }) => {
+  const bodies = await prepare(page)
+  await page.goto('/portal/playground')
+  await expect(page.getByLabel('temperature')).toHaveValue('')
+  await expect(page.getByLabel('top_p')).toHaveValue('')
+  await send(page, 'model defaults')
+  await expect(page.locator('[data-role="assistant"]')).toContainText('Hello playground')
+  expect(bodies[0]).not.toHaveProperty('temperature')
+  expect(bodies[0]).not.toHaveProperty('top_p')
+  expect(bodies[0]).not.toHaveProperty('max_tokens')
+
+  await page.getByLabel('temperature').fill('0')
+  await page.getByLabel('top_p').fill('0.95')
+  await page.getByLabel('Output token cap').fill('128')
+  await send(page, 'explicit sampling')
+  await expect(page.locator('[data-role="assistant"]').last()).toContainText('Hello playground')
+  expect(bodies[1]).toMatchObject({ temperature: 0, top_p: 0.95, max_tokens: 128 })
+})
+
+test('上游参数错误显示具体说明，流内错误结束生成并保留说明', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/portal/playground')
+  const message = 'invalid top_p: only 0.95 is allowed for this model'
+  await page.route('**/api/me/playground/chat', (route) => route.fulfill({
+    status: 400,
+    json: { error: { type: 'invalid_request_error', message } },
+  }))
+  await send(page, 'invalid sampling')
+  await expect(page.getByRole('alert')).toContainText(message)
+
+  await page.route('**/api/me/playground/chat', (route) => route.fulfill({
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+    body: `data: ${JSON.stringify({ error: { code: 'upstream_error', message: 'Upstream stream interrupted' } })}\n\ndata: [DONE]\n\n`,
+  }))
+  await send(page, 'stream failure')
+  await expect(page.locator('[data-role="assistant"]').last().getByRole('alert')).toContainText('Upstream stream interrupted')
+  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Stop' })).toHaveCount(0)
+})
+
+const KIMI_PROFILE: ParameterProfile = {
+  known: true, temperature_max: null, top_p: false, sampling_requires_none: false, sampling_requires_no_budget: false,
+  efforts: ['low', 'high', 'max'], default_effort: 'max', budget_min: null, budget_max: null, preserve_reasoning: true,
+}
+const GPT_PROFILE: ParameterProfile = {
+  known: true, temperature_max: 2, top_p: true, sampling_requires_none: true, sampling_requires_no_budget: false,
+  efforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium',
+  budget_min: null, budget_max: null, preserve_reasoning: false,
+}
+
+test('Kimi 参数自动适配：固定参数禁用、努力程度只列支持值、同模型保留多轮推理', async ({ page }) => {
+  const bodies = await prepare(page, { profiles: { 'kimi-k3': KIMI_PROFILE } })
+  await page.route('**/api/me/playground/chat', async (route) => {
+    bodies.push({ ...JSON.parse(route.request().postData()!), keyHeader: null })
+    const reasoning = 'data: ' + JSON.stringify({ model: 'k3', choices: [{ delta: { reasoning_content: 'plan first' } }] }) + '\n\n'
+    await route.fulfill({ contentType: 'text/event-stream', body: reasoning + sseBody('Kimi reply') })
+  })
+  await page.goto('/portal/playground')
+  await page.getByLabel('Model ID').fill('kimi-k3')
+  await expect(page.getByLabel('Reasoning effort')).toBeVisible()
+  await expect(page.getByLabel('temperature')).toBeDisabled()
+  await expect(page.getByLabel('top_p')).toBeDisabled()
+  await expect(page.getByLabel('Thinking budget')).toHaveCount(0)
+  await send(page, 'first')
+  await expect(page.locator('[data-role="assistant"]')).toContainText('Kimi reply')
+  expect(bodies[0]).not.toHaveProperty('reasoning_effort')
+  expect(bodies[0]).not.toHaveProperty('temperature')
+  expect(bodies[0]).not.toHaveProperty('top_p')
+  await expect(page.getByRole('option', { name: 'Medium · medium', exact: true })).toHaveCount(0)
+  await page.getByLabel('Reasoning effort').selectOption('max')
+  await send(page, 'next')
+  await expect.poll(() => bodies.length).toBe(2)
+  expect(bodies[1].reasoning_effort).toBe('max')
+  expect(bodies[1].messages[1]).toMatchObject({ role: 'assistant', reasoning_content: 'plan first' })
+})
+
+test('推理模型仅 none 可采样，模型切换清空旧参数和努力程度', async ({ page }) => {
+  const bodies = await prepare(page, { profiles: { 'gpt-6-sol': GPT_PROFILE, 'kimi-k3': KIMI_PROFILE } })
+  await page.goto('/portal/playground')
+  await page.getByLabel('Model ID').fill('gpt-6-sol')
+  await expect(page.getByLabel('Reasoning effort')).toBeVisible()
+  await expect(page.getByLabel('temperature')).toBeDisabled()
+  await page.getByLabel('Reasoning effort').selectOption('none')
+  await expect(page.getByLabel('temperature')).toBeEnabled()
+  await page.getByLabel('temperature').fill('0.7')
+  await send(page, 'none sampling')
+  await expect.poll(() => bodies.length).toBe(1)
+  expect(bodies[0]).toMatchObject({ temperature: 0.7, reasoning_effort: 'none' })
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible()
+  await page.getByLabel('Model ID').fill('kimi-k3')
+  await expect(page.getByLabel('Reasoning effort')).toContainText('default max')
+  await expect(page.getByLabel('temperature')).toHaveValue('')
+  await send(page, 'model defaults')
+  await expect.poll(() => bodies.length).toBe(2)
+  expect(bodies[1]).not.toHaveProperty('temperature')
+  expect(bodies[1]).not.toHaveProperty('reasoning_effort')
+})
+
+test('预算型模型显示预算而非努力程度，验证输出上限且请求传统一预算', async ({ page }) => {
+  const bodies = await prepare(page, { profiles: { 'budget-model': { ...GPT_PROFILE, sampling_requires_none: false, sampling_requires_no_budget: true, efforts: [], default_effort: null, budget_min: 1024, budget_max: 32000 } } })
+  await page.goto('/portal/playground')
+  await page.getByLabel('Model ID').fill('budget-model')
+  await expect(page.getByLabel('Thinking budget')).toBeVisible()
+  await expect(page.getByLabel('Reasoning effort')).toHaveCount(0)
+  await page.getByLabel('temperature').fill('0.7')
+  await page.getByLabel('Thinking budget').fill('2048')
+  await expect(page.getByLabel('temperature')).toBeDisabled()
+  await page.getByLabel('Output token cap').fill('1024')
+  await page.locator('textarea').last().fill('budget')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+  await page.getByLabel('Output token cap').fill('4096')
+  await send(page, 'budget')
+  await expect.poll(() => bodies.length).toBe(1)
+  expect(bodies[0]).toMatchObject({ reasoning: { max_tokens: 2048 }, max_tokens: 4096 })
+  expect(bodies[0]).not.toHaveProperty('temperature')
+})
+
+test('模型目录同时读取后续模型页和分组页，不把第一页当完整目录', async ({ page }) => {
+  await prepare(page)
+  const requests: string[] = []
+  await page.route('**/api/pricing**', async (route) => {
+    const url = new URL(route.request().url())
+    requests.push(url.search)
+    const offset = Number(url.searchParams.get('offset') ?? 0), groupOffset = Number(url.searchParams.get('group_offset') ?? 0)
+    const first = { ...PRICING.models[0], groups: groupOffset === 0 ? ['default'] : ['vip'] }
+    const second = { ...PRICING.models[0], model: 'kimi-k3', groups: groupOffset === 0 ? ['default'] : ['vip'] }
+    await route.fulfill({ json: {
+      models: [offset === 0 ? first : second], groups: [PRICING.groups[groupOffset]], pricing_epoch: 4,
+      total: 2, limit: 100, offset, has_more: offset === 0, next_offset: offset === 0 ? 1 : null,
+      groups_page: { total: 2, limit: 100, offset: groupOffset, has_more: groupOffset === 0, next_offset: groupOffset === 0 ? 1 : null },
+    } })
+  })
+  await page.goto('/portal/playground')
+  await expect(page.locator('datalist option')).toHaveCount(2)
+  expect(await page.locator('datalist option').evaluateAll((options) => options.map((o) => o.getAttribute('value')))).toContain('kimi-k3')
+  expect(requests.some((r) => r.includes('group_offset=1'))).toBe(true)
+  expect(requests.some((r) => r.includes('offset=1'))).toBe(true)
+})
+
+test('旧后端缺少规则时禁用采样，不发送存储中的旧参数', async ({ page }) => {
+  const bodies = await prepare(page)
+  await page.addInitScript(() => localStorage.setItem('okapi.playground.settings.7', JSON.stringify({ model: 'kimi-k3', system: '', temperature: '1', topP: '1', maxTokens: '', keyId: '', reasoningEffort: 'medium' })))
+  await page.route('**/api/me/playground/parameters**', (route) => route.fulfill({ status: 404, json: { error: { code: 'not_found' } } }))
+  await page.goto('/portal/playground')
+  await expect(page.getByText('Parameter rules unavailable.', { exact: false })).toBeVisible()
+  await expect(page.getByLabel('temperature')).toBeDisabled()
+  await send(page, 'safe defaults')
+  await expect.poll(() => bodies.length).toBe(1)
+  expect(bodies[0]).not.toHaveProperty('temperature')
+  expect(bodies[0]).not.toHaveProperty('top_p')
+  expect(bodies[0]).not.toHaveProperty('reasoning_effort')
 })

@@ -15,7 +15,7 @@ async fn portal_complete_cache_sources_survive_missing_calendar_upgrades() {
     let result = std::panic::AssertUnwindSafe(check_calendar_upgrade(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -35,7 +35,7 @@ async fn check_calendar_upgrade(env: &Env, ch: &ChClient) {
         "mv_calendar_cache_write_hour",
         "mv_calendar_cache_reporting_hour",
     ] {
-        ch.execute(&format!("TRUNCATE TABLE {table}"))
+        super::population_storage::execute(ch, &format!("TRUNCATE TABLE {table}"))
             .await
             .unwrap();
     }
@@ -54,17 +54,20 @@ async fn check_calendar_upgrade(env: &Env, ch: &ChClient) {
     for phase in 0..3 {
         if phase == 1 {
             // Equal overall counts can still have invalid per-model coverage.
-            ch.execute(&format!(
+            super::population_storage::execute(ch,&format!(
                 "ALTER TABLE mv_cache_totals_5min DELETE WHERE model='{}-second' SETTINGS mutations_sync=2",
                 env.model
             ))
             .await
             .unwrap();
-            ch.execute("INSERT INTO mv_cache_totals_5min SELECT * FROM mv_cache_totals_5min")
-                .await
-                .unwrap();
+            super::population_storage::execute(
+                ch,
+                "INSERT INTO mv_cache_totals_5min SELECT * FROM mv_cache_totals_5min",
+            )
+            .await
+            .unwrap();
         } else if phase == 2 {
-            ch.execute("TRUNCATE TABLE mv_cache_totals_5min")
+            super::population_storage::execute(ch, "TRUNCATE TABLE mv_cache_totals_5min")
                 .await
                 .unwrap();
         }
@@ -93,7 +96,9 @@ async fn check_calendar_upgrade(env: &Env, ch: &ChClient) {
         okapi_store::timezone::machine_timezone().unwrap(),
         "UTC" | "Etc/UTC"
     ) {
-        ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+        super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+            .await
+            .unwrap();
         let (status, body) = super::get(
             env,
             "/api/me/stats/breakdown?days=2&scope=user",
@@ -120,7 +125,7 @@ async fn retained_day_cache_totals_do_not_leak_into_hours_or_channel_filters() {
     let result = std::panic::AssertUnwindSafe(check_days(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -136,7 +141,9 @@ async fn check_days(env: &Env, ch: &ChClient) {
     );
     let raw = request(env, &path, false).await;
     assert_cache(&raw["total"], 3, 3, Some(200));
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     let expired = request(env, &path, false).await;
     assert_cache(&expired["total"], 3, 3, Some(200));
     assert_eq!(expired["total"]["tokens"], 4500);
@@ -239,10 +246,10 @@ async fn check_day_filters(env: &Env, path: &str, day: &str, key: i64) {
 
 async fn insert_day_history(env: &Env, ch: &ChClient) -> (i64, String) {
     let key = key_id(env).await;
-    ch.execute("DROP TABLE mv_analysis_hour SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
         .await
         .unwrap();
-    ch.execute("DROP TABLE mv_cache_totals_5min SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_cache_totals_5min SYNC")
         .await
         .unwrap();
     let mut old = sample(env, key, Some(true), false);
@@ -294,7 +301,7 @@ async fn cache_samples_require_numbers_and_retained_counts_stay_in_scope() {
     let result = std::panic::AssertUnwindSafe(check_samples(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -321,7 +328,9 @@ async fn check_samples(env: &Env, ch: &ChClient) {
     let path = format!("/admin/stats/trend?user_id={}&days=2", env.user_id);
     for expired in [false, true] {
         if expired {
-            ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+            super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+                .await
+                .unwrap();
         }
         let admin = request(env, &path, false).await;
         let portal = request(env, "/api/me/stats/breakdown?days=2&scope=user", true).await;
@@ -330,9 +339,12 @@ async fn check_samples(env: &Env, ch: &ChClient) {
             assert_eq!(body["total"]["cache_read_known_requests"], 2);
         }
     }
-    ch.execute("INSERT INTO mv_cache_totals_5min SELECT * FROM mv_cache_totals_5min")
-        .await
-        .unwrap();
+    super::population_storage::execute(
+        ch,
+        "INSERT INTO mv_cache_totals_5min SELECT * FROM mv_cache_totals_5min",
+    )
+    .await
+    .unwrap();
     // Invalid new counts must use an eligible old population, never double quantities.
     let corrupted = request(env, &path, false).await;
     assert_cache(&corrupted["total"], 3, 0, None);

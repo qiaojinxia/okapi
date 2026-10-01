@@ -84,6 +84,7 @@ export function parseSseChunk(carry: string, chunk: string): { events: string[];
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
+  reasoning_content?: string
 }
 
 export interface ChatParams {
@@ -92,17 +93,25 @@ export interface ChatParams {
   temperature?: number
   top_p?: number
   max_tokens?: number
+  reasoning_effort?: string
+  reasoning?: { max_tokens: number }
 }
 
 export interface StreamCallbacks {
   onDelta: (delta: StreamDelta) => void
   onDone: () => void
   /// `status` 为 HTTP 状态（网络 / 流中断为 0），供 `errors:http_<status>` 兜底文案。
-  onError: (code: string, status: number, param?: string) => void
+  onError: (code: string, status: number, param?: string, message?: string) => void
 }
 
 interface ErrorEnvelope {
-  error?: { code?: string; type?: string; param?: string }
+  error?: { code?: string; type?: string; param?: string; message?: string }
+}
+
+function errorMessage(error: ErrorEnvelope['error']): string | undefined {
+  if (typeof error?.message !== 'string') return undefined
+  const message = error.message.trim()
+  return message && message !== error.code && message !== error.type ? message.slice(0, 2000) : undefined
 }
 
 /// 发起一次流式对话。`key` 是登录 key（页内直用，不落任何文件）。返回中断函数。
@@ -127,14 +136,16 @@ export function streamChat(params: ChatParams, key: string, cb: StreamCallbacks,
     if (!resp.ok) {
       let code = `http_${resp.status}`
       let param: string | undefined
+      let message: string | undefined
       try {
         const body = (await resp.json()) as ErrorEnvelope
         code = body.error?.code ?? body.error?.type ?? code
         param = body.error?.param
+        message = errorMessage(body.error)
       } catch {
         // 非 JSON 错误体：保留 http_<status>
       }
-      cb.onError(code, resp.status, param)
+      cb.onError(code, resp.status, param, message)
       return
     }
     const reader = resp.body?.getReader()
@@ -153,6 +164,17 @@ export function streamChat(params: ChatParams, key: string, cb: StreamCallbacks,
         for (const data of parsed.events) {
           if (data === '[DONE]') {
             cb.onDone()
+            return
+          }
+          let error: ErrorEnvelope['error']
+          try {
+            error = (JSON.parse(data) as ErrorEnvelope)?.error
+          } catch {
+            // Keep unknown or malformed SSE chunks compatible with applyChunk.
+          }
+          if (error && typeof error === 'object') {
+            cb.onError(error.code ?? error.type ?? 'stream_error', 0, error.param, errorMessage(error))
+            await reader.cancel().catch(() => {})
             return
           }
           cb.onDelta(applyChunk(data))

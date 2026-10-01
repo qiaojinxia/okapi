@@ -115,7 +115,7 @@ async fn sources_cache_pairs_filters_and_weighted_folding_survive_retention() {
     let result = std::panic::AssertUnwindSafe(check_endpoints(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -261,7 +261,9 @@ async fn check_retention(env: &Env, ch: &ChClient) {
             check_mixed(first);
         }
     }
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     let retained = totals(env).await;
     for value in &retained[..2] {
         check_mixed(value);
@@ -294,7 +296,7 @@ async fn source_upgrade_recovers_raw_without_fabricating_legacy_measurement() {
     let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -304,10 +306,10 @@ async fn source_upgrade_recovers_raw_without_fabricating_legacy_measurement() {
 
 async fn check_upgrade(env: &Env, ch: &ChClient) {
     check_empty_overview(env).await;
-    ch.execute("DROP TABLE mv_usage_sources_5min SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_usage_sources_5min SYNC")
         .await
         .unwrap();
-    ch.execute("DROP TABLE mv_analysis_hour SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
         .await
         .unwrap();
     let old = vec![
@@ -339,7 +341,9 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
         assert!(value["cache_hit_bp"].is_null());
         assert_eq!(value["measured_cache_hit_bp"], 8000);
     }
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     let after = totals(env).await;
     for value in &after[..2] {
         assert_eq!(
@@ -363,9 +367,12 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
         "old summary cannot allocate unknown axes: {overview}"
     );
     // Inflate the new states: after raw expiry they cannot be advertised as complete.
-    ch.execute("INSERT INTO mv_usage_sources_5min SELECT * FROM mv_usage_sources_5min")
-        .await
-        .unwrap();
+    super::population_storage::execute(
+        ch,
+        "INSERT INTO mv_usage_sources_5min SELECT * FROM mv_usage_sources_5min",
+    )
+    .await
+    .unwrap();
     let value = request(
         env,
         &format!(
@@ -402,7 +409,7 @@ async fn calendar_rank_uses_full_scope_and_exact_days() {
     let result = std::panic::AssertUnwindSafe(check_calendar_rank(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {

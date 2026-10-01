@@ -168,13 +168,18 @@ score = w_err  × EMA(错误率)
 
 | 触发 | 转移 | 恢复 |
 | --- | --- | --- |
-| 连续 N 次网络失败/5xx（N 可配，默认 3） | active → cooling（指数退避：60s×2ⁿ，封顶 2h） | 到期自动回 active（探测式恢复为 M3 项） |
-| 429 | active → rate_limited（读 Retry-After，无则默认 60s） | 到期自动回 active |
+| 连续 3 次上游 5xx/空回复 | active → cooling（指数退避：60s×2ⁿ，封顶 2h） | 到期自动回 active |
+| 请求级连接失败/超时、资源级 403 | 不改变 key 健康状态 | 按重试矩阵回退，避免出口故障禁掉整批凭证 |
+| 429 | active → rate_limited（读 Retry-After 秒数或 HTTP 日期、Anthropic/Codex 耗尽窗口重置头；无头 API key 默认 60s，OAuth 默认 5s；显式期限上限 7 天） | 到期自动回 active |
+| 529 overloaded | active → rate_limited（显式 Retry-After 优先，无则 600s） | 到期自动回 active |
+| OAuth API 401 | 同一账号锁内强制刷新被拒的 token，首字前仅重试一次；仍失败暂时冷却 30s | invalid_grant/缺 refresh_token 仍 invalid；不得覆盖人工封禁或已 invalid 状态 |
 | 上游配额/余额耗尽（402 或 429+insufficient_quota body） | active → quota_exhausted | 冷却到次日 0 点（UTC）自动恢复，或人工 |
 | 401/403 且凭证刷新失败 | active → invalid | 仅人工（告警通知） |
 | 人工封禁/上游封号标志 | → banned | 仅人工 |
 
 状态与 `cooldown_until` 持久化在 PG `channel_keys`，运行态镜像在 Redis `ch:cool:*`；每次状态转移写 audit_logs。
+
+首字后逐个上游事件重置空闲计时，超时终止流并按已产出结算，不重放；客户端心跳不刷新上游计时。全局 `settings.streaming_policy` 可设 `idle_timeout_secs`（1–480，默认 120）及 `heartbeat_secs`（1–60，默认 15），总预算仍为 8 分钟，设置非法时管理写入拒绝，存量非法值回退默认。失败登记不得把人工 banned 或 invalid key 改回临时冷却。
 
 ### 3.5 双层并发控制
 
@@ -187,8 +192,10 @@ score = w_err  × EMA(错误率)
 
 | 错误类别 | 同 key 重试 | failover 换渠道 | 状态机动作 | 计费 |
 | --- | --- | --- | --- | --- |
-| 连接失败/首字前超时 | 1 次 | 是 | 计入错误率 | 不计费 |
-| 401/403 | 否 | 是 | 触发凭证刷新，失败→invalid | 不计费 |
+| 连接失败/首字前超时 | 1 次 | 是 | 不计 key 失败次数 | 不计费 |
+| 401 / 凭证级 403 | OAuth 401 首字前锁内刷新重试 1 次；其它否 | 是 | API key invalid；OAuth 暂时冷却，invalid_grant/缺刷新凭证 invalid | 不计费 |
+| 资源级 403 | 否 | 是 | 不改变 key 状态 | 不计费 |
+| 529 | 否 | 是 | 冷却 600s（显式重置时间优先） | 不计费 |
 | 429 | 否 | 是 | → rate_limited | 不计费 |
 | 上游配额耗尽 | 否 | 是 | → quota_exhausted | 不计费 |
 | 5xx | 1 次 | 是 | 计入错误率/冷却计数 | 不计费 |
@@ -196,11 +203,21 @@ score = w_err  × EMA(错误率)
 | 内容策略拒绝 | 否 | 可配（默认否） | — | 不计费 |
 | 首字后断流 | 不可回退 | 否 | 记切换率指标 | 按已产出计费（全局开关可改为不计费） |
 
+#### 3.6.1 请求可靠性对标取舍（2026-10-01）
+
+对照 [sub2api 错误策略](https://github.com/Wei-Shaw/sub2api/blob/main/backend/internal/service/ratelimit_service.go) 与 [new-api 重试策略](https://github.com/QuantumNous/new-api/blob/main/service/relay_error.go)，先落实上述空闲超时、请求级健康归因、OAuth 401 单次恢复、精确冷却与固定窗 Retry-After。现有 worker 已有 `channel_cooldown` 通知，本次扩为 status=2/3/4/6，载荷附最多 20 个 `channel_key_ids`，继续沿用订阅和去重频率闸，人工 banned 不告警。
+
+取舍：
+- usage 每帧累积并合并先前快照，末帧缺 usage 无须另加“倒数第二帧”兜底。首字前可重试错误已转网关稳定错误码；400 等不可重试状态保留现有协议转译契约。
+- 不添加 429→200 状态映射（SDK 会把失败视为成功），不默认加按 IP 的数据面限流（代理/NAT 会合并合法用户）。
+- 文件/文本 batches、通用异步任务、旧 completions/moderations 与 Gemini countTokens 后置，须以实际客户端需求确定鉴权、模型授权以及必要的计费或异步退款契约，不能靠端点直通绕开这些边界。
+- 成功响应的订阅窗口采样/调度避让、粘性目标排队、可配置重试矩阵及测试成功自动恢复值得后续独立迭代。恢复必须针对实际模型成功探测，并防止旧探测结果覆盖更新的禁用状态；只测 /models 不足以自动复活 key。
+
 ### 3.7 SSE 转发器行为规范（Sub2API 吸收项 2，M1 核心）
 
 1. **首字前只缓冲**：收到上游首个内容事件前，不向客户端写状态码/响应头；此窗口内失败可无痕 failover。
 2. **空回复不计费**：流结束但零内容 token → 走 refund 路径并记错误日志。
-3. 心跳：透传期间每 15s 注入 `: ping` 注释帧，防中间层空闲断连。
+3. 心跳：透传期间按 `settings.streaming_policy.heartbeat_secs` 注入 `: ping` 注释帧（默认 15s），防中间层空闲断连；首字后上游事件空闲期限独立计算（默认 120s），超时走部分产出结算。固定窗 429 在三种协议错误壳中带 `Retry-After`（该窗剩余秒数）；并发与永久额度失败不伪造重置时间。
 4. 增量 token 计数（tiktoken-rs），`trust_upstream_usage=true` 的渠道跳过本地复核直接采用上游 usage（#1790-19）。
 5. prompt cache 相关请求/响应头与 usage 字段（`cached_tokens` 等）**原样透传**，parity 套件含专项用例（#3389：Codex CLI 经中转 cache 失效导致费用暴涨）。
 6. 客户端提前断开：取消上游请求，按已产出 usage 结算。

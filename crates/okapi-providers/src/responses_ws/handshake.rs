@@ -45,12 +45,7 @@ pub(super) async fn connect(
         .map_err(|_| UpstreamError::Connect("responses_ws_handshake".into()))?;
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
         let status = response.status().as_u16();
-        let retry_after_secs = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<i64>().ok())
-            .filter(|n| *n >= 0);
+        let retry_after_secs = crate::retry_after::seconds(response.headers());
         let mut body = Vec::new();
         while let Some(chunk) = response
             .chunk()

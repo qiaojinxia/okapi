@@ -384,9 +384,11 @@ pub async fn custom_pass_channel(
 /// 渠道 key 失败类别（状态机分支，IMPLEMENTATION §3.4/§3.6）。
 #[derive(Debug, Clone, Copy)]
 pub enum KeyFailure {
-    /// 网络/超时/5xx：连续 3 次进入 cooling，指数退避（60s 起，封顶 2h）。
+    /// 请求/传输级故障：不改变凭证的失败计数或状态。
+    Request,
+    /// 上游 5xx/空回复：连续 3 次进入 cooling，指数退避（60s 起，封顶 2h）。
     Transient,
-    /// 429：rate_limited，按 Retry-After 冷却（缺省 60s），到期自动恢复。
+    /// 429：rate_limited，按 Retry-After 冷却（缺省 60s，显式期限最多 7 天），到期自动恢复。
     RateLimited { retry_after_secs: Option<i64> },
     /// 上游配额/余额耗尽：quota_exhausted，冷却到次日 0 点（UTC），到期自动恢复。
     QuotaExhausted,
@@ -402,6 +404,7 @@ pub async fn mark_key_failure(
     failure: KeyFailure,
 ) -> Result<(), StoreError> {
     match failure {
+        KeyFailure::Request => return Ok(()),
         KeyFailure::Transient => {
             // 连续 3 次转 cooling；退避 = 60 * 2^(超出阈值次数)，封顶 7200s
             sqlx::query!(
@@ -414,7 +417,7 @@ pub async fn mark_key_failure(
                         THEN now() + make_interval(secs => least(7200, 60 * power(2, failed_count + 1 - 3)))
                         ELSE cooldown_until END,
                     updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND status IN (1, 2)
                 "#,
                 channel_key_id,
                 error
@@ -423,16 +426,16 @@ pub async fn mark_key_failure(
             .await?;
         }
         KeyFailure::RateLimited { retry_after_secs } => {
-            let secs = retry_after_secs.unwrap_or(60).clamp(1, 3600);
+            let secs = retry_after_secs.unwrap_or(60).clamp(1, 7 * 24 * 3600);
             sqlx::query!(
                 r#"
                 UPDATE channel_keys
                 SET failed_count = failed_count + 1,
                     last_error = $2,
                     status = 3,
-                    cooldown_until = now() + make_interval(secs => $3::bigint::double precision),
+                    cooldown_until = greatest(cooldown_until, now() + make_interval(secs => $3::bigint::double precision)),
                     updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND status IN (1, 2, 3, 4)
                 "#,
                 channel_key_id,
                 error,
@@ -448,9 +451,9 @@ pub async fn mark_key_failure(
                 SET failed_count = failed_count + 1,
                     last_error = $2,
                     status = 4,
-                    cooldown_until = date_trunc('day', now() + interval '1 day'),
+                    cooldown_until = greatest(cooldown_until, date_trunc('day', now() + interval '1 day')),
                     updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND status IN (1, 2, 3, 4)
                 "#,
                 channel_key_id,
                 error
@@ -467,7 +470,7 @@ pub async fn mark_key_failure(
                     status = 6,
                     cooldown_until = NULL,
                     updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND status IN (1, 2, 3, 4)
                 "#,
                 channel_key_id,
                 error

@@ -174,11 +174,7 @@ impl OpenAiUpstream {
             .map(str::to_owned);
 
         if !(200..300).contains(&status) {
-            let retry_after_secs = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<i64>().ok());
+            let retry_after_secs = crate::retry_after::seconds(resp.headers());
             let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
             return Err(UpstreamError::Status {
                 status,
@@ -277,11 +273,7 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
-            let retry_after_secs = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<i64>().ok());
+            let retry_after_secs = crate::retry_after::seconds(resp.headers());
             let body = response_bytes(resp, Some(crate::limits::MAX_ERROR))
                 .await
                 .unwrap_or_default();

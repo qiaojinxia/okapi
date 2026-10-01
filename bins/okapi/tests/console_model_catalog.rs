@@ -13,6 +13,8 @@ mod catalog_visibility;
 mod facets;
 #[path = "support/model_catalog_ingress.rs"]
 mod ingress_parity;
+#[path = "support/model_catalog_pagination.rs"]
+mod pagination;
 #[path = "support/model_catalog_routes.rs"]
 mod route_filters;
 

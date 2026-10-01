@@ -28,6 +28,7 @@ pub mod sched_redis;
 pub mod scheduler;
 pub(crate) mod settlement_retry;
 pub mod state;
+pub(crate) mod stream_policy;
 pub mod token_count;
 pub mod videos;
 

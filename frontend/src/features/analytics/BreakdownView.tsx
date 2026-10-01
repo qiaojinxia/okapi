@@ -257,7 +257,7 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                               : 'text-muted-foreground',
                         )}
                       >
-                        {t('analytics:errRate', { v: formatBp(row.error_rate_bp, locale) })}
+                        {t('analytics:errRate', { v: row.requests > 0 ? formatBp(row.error_rate_bp, locale) : '—' })}
                       </span>
                     </div>
                   </Td>
@@ -270,10 +270,10 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                     </div>
                   </Td>
                   <Td>
-                    {row.avg_latency_ms > 0 ? (
+                    {row.requests > 0 && row.avg_latency_ms != null ? (
                       <div className="flex flex-col leading-tight">
                         <span className="tabular-nums">{formatCount(row.avg_latency_ms, locale)} ms</span>
-                        {row.avg_ttft_ms > 0 && (
+                        {row.avg_ttft_ms != null && (row.ttft_samples ?? row.avg_ttft_ms) > 0 && (
                           <span className="text-xs text-muted-foreground tabular-nums">
                             {t('analytics:ttftShort', { v: formatCount(row.avg_ttft_ms, locale) })}
                           </span>

@@ -65,7 +65,7 @@ async fn average_ttft_filters_samples_and_recombines_weighted_groups_after_reten
     let result = std::panic::AssertUnwindSafe(check_samples(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -111,12 +111,17 @@ async fn check_samples(env: &Env, ch: &ChClient) {
     ch.ensure_schema().await.unwrap();
     check_sample_endpoints(env).await;
     // Correct sums and zero-valued samples survive raw retention and repeated schema setup.
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
-    check_sample_endpoints(env).await;
-    // A source ahead of the authoritative request total must not be presented as complete.
-    ch.execute("INSERT INTO mv_ttft_reporting_hour SELECT * FROM mv_ttft_reporting_hour")
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
         .await
         .unwrap();
+    check_sample_endpoints(env).await;
+    // A source ahead of the authoritative request total must not be presented as complete.
+    super::population_storage::execute(
+        ch,
+        "INSERT INTO mv_ttft_reporting_hour SELECT * FROM mv_ttft_reporting_hour",
+    )
+    .await
+    .unwrap();
     for total in totals(env).await {
         assert_average(&total, 7, 0, 0, 0);
     }
@@ -176,7 +181,7 @@ async fn average_ttft_upgrade_recovers_raw_and_exposes_incomplete_history() {
         let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch, legacy_dimensions))
             .catch_unwind()
             .await;
-        ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
             .await
             .unwrap();
         if let Err(panic) = result {
@@ -187,11 +192,11 @@ async fn average_ttft_upgrade_recovers_raw_and_exposes_incomplete_history() {
 
 async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
     if legacy_dimensions {
-        ch.execute("DROP TABLE mv_analysis_hour SYNC")
+        super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
             .await
             .unwrap();
     }
-    ch.execute("DROP TABLE mv_ttft_reporting_hour SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_ttft_reporting_hour SYNC")
         .await
         .unwrap();
     let mut legacy = vec![
@@ -209,7 +214,7 @@ async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
     for total in totals(env).await {
         assert_average(&total, 4, 2, 1000, 4);
     }
-    ch.execute("ALTER TABLE request_log_raw DELETE WHERE ttft_reported IS NULL SETTINGS mutations_sync = 1").await.unwrap();
+    super::population_storage::execute(ch, "ALTER TABLE request_log_raw DELETE WHERE ttft_reported IS NULL SETTINGS mutations_sync = 1").await.unwrap();
     for total in totals(env).await {
         assert_average(&total, 4, 1, 0, 1);
         assert_eq!(total["ttft_history_coverage_bp"], 2500);

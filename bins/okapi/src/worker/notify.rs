@@ -314,21 +314,29 @@ pub async fn balance_low_and_notify(pg: &PgPool, notifier: &Notifier) -> anyhow:
     Ok(low.len())
 }
 
-/// 数一轮冷却中的渠道 key 并派发 `channel_cooldown`；零冷却不吵。
+/// 冷却和凭证失效共用 `channel_cooldown` 订阅与频率闸；人工 banned 不告警。
 pub async fn channel_cooldown_and_notify(pg: &PgPool, notifier: &Notifier) -> anyhow::Result<i64> {
     let cooling = count_cooling_keys(pg).await?;
     if cooling > 0 {
+        let keys = sqlx::query_scalar!(
+            "SELECT id FROM channel_keys WHERE status IN (2, 3, 4, 6) ORDER BY id LIMIT 20"
+        )
+        .fetch_all(pg)
+        .await?;
         notifier
-            .dispatch("channel_cooldown", &serde_json::json!({ "count": cooling }))
+            .dispatch(
+                "channel_cooldown",
+                &serde_json::json!({ "count": cooling, "channel_key_ids": keys }),
+            )
             .await;
     }
     Ok(cooling)
 }
 
-/// 当前处于冷却/受限状态的渠道 key 数（channel_cooldown 事件源）。
+/// 当前处于冷却/受限/凭证失效状态的 key 数（channel_cooldown 事件源）。
 pub async fn count_cooling_keys(pg: &PgPool) -> anyhow::Result<i64> {
     let n = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) AS "n!" FROM channel_keys WHERE status IN (2, 3, 4)"#
+        r#"SELECT COUNT(*) AS "n!" FROM channel_keys WHERE status IN (2, 3, 4, 6)"#
     )
     .fetch_one(pg)
     .await?;

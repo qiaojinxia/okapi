@@ -208,28 +208,34 @@ fn price_above_max(
 /// 上游错误 → key 状态机类别（§3.6 重试矩阵）。
 /// 注意顺序：insufficient_quota 判定先于 429——OpenAI 风格的
 /// `429 + insufficient_quota` 语义是配额耗尽（冷却到次日），不是限速（60s）。
-fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
+pub(super) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
     match err {
         UpstreamError::Status { status, body, .. }
-            if *status == 402 || body_says_insufficient_quota(body) =>
+            if *status == 402 || (*status == 429 && body_says_insufficient_quota(body)) =>
         {
             KeyFailure::QuotaExhausted
         }
+        UpstreamError::Status { status: 529, .. } => KeyFailure::RateLimited {
+            retry_after_secs: Some(err.retry_after_secs().unwrap_or(600)),
+        },
         UpstreamError::Status { status: 429, .. } => KeyFailure::RateLimited {
             retry_after_secs: err.retry_after_secs(),
         },
         UpstreamError::Status { status: 401, .. } => KeyFailure::Invalid,
-        // 403 只在 body 明说凭证问题时才算凭证失效，否则按瞬时失败走冷却（详见
+        // 403 只在 body 明说凭证问题时才算凭证失效，否则按资源级失败回退，不改变 key 健康（详见
         // `body_says_credential_rejected`）
         UpstreamError::Status {
             status: 403, body, ..
         } if body_says_credential_rejected(body) => KeyFailure::Invalid,
+        UpstreamError::Status {
+            status: 500..=599, ..
+        } => KeyFailure::Transient,
         UpstreamError::Status { .. }
         | UpstreamError::Connect(_)
         | UpstreamError::Timeout
         | UpstreamError::Stream(_)
         | UpstreamError::Session { .. }
-        | UpstreamError::Build(_) => KeyFailure::Transient,
+        | UpstreamError::Build(_) => KeyFailure::Request,
     }
 }
 
@@ -240,7 +246,7 @@ fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
 /// `access_denied / Deposit required to unlock premium models`），而 key 本身完全有效。
 /// 此前 401 与 403 一并判 `Invalid`（`status=6`，无冷却、不自愈，控制面也没有复活入口），
 /// 于是调一次未开通的模型就把该渠道**所有**模型打死，只能靠重置凭证救回来。
-/// 故 403 改为：body 明说凭证问题才算失效，否则按瞬时失败冷却重试。
+/// 故 403 改为：body 明说凭证问题才算失效，否则不改变 key 健康状态。
 fn body_says_credential_rejected(body: &Bytes) -> bool {
     let text = String::from_utf8_lossy(body).to_ascii_lowercase();
     [
@@ -1246,6 +1252,84 @@ async fn eligible_candidates(
     Ok((candidates, sticky_key))
 }
 
+/// Read-only playground contract: same identity, canonical model, group and
+/// routing pool as a real request; no reservation, rate counter or upstream call.
+pub(crate) async fn playground_parameters(
+    state: &AppState,
+    headers: &HeaderMap,
+    model: &str,
+) -> Result<okapi_providers::model_parameters::ParameterProfile, AppError> {
+    use okapi_providers::model_parameters::{self, ParameterProfile};
+    let key = super::auth::authenticate(state, headers).await?;
+    let Some((meta, _, _)) = resolve_with_directive(state, model).await? else {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
+    };
+    if !key.allows_model(&meta.canonical) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            codes::MODEL_NOT_ALLOWED,
+        ));
+    }
+    let book = state.pricebook.load();
+    if !book.has_model(&ModelCode::from(meta.canonical.as_str()))
+        || !book.has_group(&GroupCode::from(key.group_code.as_str()))
+    {
+        return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
+    }
+    let mut candidates = okapi_store::channels::candidates_for_model(
+        &state.pg,
+        &meta.canonical,
+        &key.pool_chain(),
+        state.master_key.as_deref(),
+    )
+    .await?;
+    candidates.retain(|c| Ingress::OpenAi.accepts(c, &meta.canonical));
+    state
+        .retain_margin_ok(&key.group_code, &mut candidates)
+        .await;
+    let mut common: Option<ParameterProfile> = None;
+    for c in &candidates {
+        let upstream = c.upstream_model(&meta.canonical);
+        let dialect = super::dialect::upstream_dialect(&c.provider, upstream);
+        let mut p = model_parameters::profile(dialect, upstream, c.api_base.as_deref());
+        let controlled = |field: &str| {
+            c.strip_request_fields.iter().any(|f| f == field)
+                || c.inject_request_fields.contains_key(field)
+        };
+        if controlled("temperature")
+            || c.capabilities
+                .get("temperature")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        {
+            p.temperature_max = None;
+        }
+        if controlled("top_p") {
+            p.top_p = false;
+        }
+        if controlled("reasoning_effort")
+            || controlled("reasoning")
+            || controlled("thinking")
+            || controlled("output_config")
+            || controlled("generationConfig")
+            || c.capabilities
+                .get("reasoning")
+                .and_then(serde_json::Value::as_bool)
+                == Some(false)
+        {
+            p.efforts.clear();
+            p.budget_min = None;
+            p.budget_max = None;
+        }
+        match &mut common {
+            Some(profile) => profile.intersect(&p),
+            None => common = Some(p),
+        }
+    }
+    common
+        .ok_or_else(|| AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL))
+}
+
 // failover 主循环：候选过滤/粘性/信号量/状态机联动的完整语义在同一视野内更可读
 #[allow(clippy::too_many_lines)]
 async fn try_model(
@@ -1343,7 +1427,30 @@ async fn try_model(
         // §3.6：连接/超时/5xx 允许同 key 先重试；次数按渠道配（缺省 1，空回复直接换渠道）
         let same_key_retries = cand.same_key_retries;
         let mut retry: i16 = 0;
+        let oauth = super::oauth_cred::is_oauth_provider(&cand.provider);
+        let mut refreshed_401 = false;
         let attempt = loop {
+            // Keep the candidate equal to the token actually sent; a forced refresh can
+            // then distinguish a rejected token from one another request just rotated.
+            if oauth {
+                match tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
+                    super::oauth_cred::fresh_credential(&bill.state, &cand),
+                )
+                .await
+                .unwrap_or(Err(UpstreamError::Timeout))
+                {
+                    Ok(credential) => cand.credential = credential.to_plaintext(),
+                    Err(err) => {
+                        break Err(classify_fatal(
+                            err,
+                            failover,
+                            (cand.channel_id, cand.channel_key_id),
+                        ));
+                    }
+                }
+            }
+
             bill.trace.begin(
                 &cand,
                 &upstream_model,
@@ -1374,7 +1481,7 @@ async fn try_model(
                     .await
                 }
             };
-            let result = tokio::time::timeout_at(
+            let mut result = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
                 attempt,
             )
@@ -1383,9 +1490,52 @@ async fn try_model(
                 Err(AttemptError::Retriable {
                     code: codes::UPSTREAM_TIMEOUT,
                     upstream_status: None,
-                    failure_kind: KeyFailure::Transient,
+                    failure_kind: KeyFailure::Request,
                 })
             });
+            if oauth
+                && matches!(
+                    &result,
+                    Err(AttemptError::Retriable {
+                        upstream_status: Some(401),
+                        ..
+                    })
+                )
+            {
+                if !refreshed_401 {
+                    refreshed_401 = true;
+                    let refreshed = tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)),
+                        super::oauth_cred::refresh_rejected_credential(&bill.state, &cand),
+                    )
+                    .await
+                    .unwrap_or(Err(UpstreamError::Timeout));
+                    match refreshed {
+                        Ok(credential) => {
+                            cand.credential = credential.to_plaintext();
+                            retry = retry.saturating_add(1);
+                            continue;
+                        }
+                        Err(err) => bill.trace.failure(&err),
+                    }
+                }
+                if let Err(AttemptError::Retriable { failure_kind, .. }) = &mut result {
+                    // invalid_grant already persisted status=6; store-side status guards
+                    // preserve it. A recoverable OAuth 401 only needs a short cooldown.
+                    *failure_kind = KeyFailure::RateLimited {
+                        retry_after_secs: Some(30),
+                    };
+                }
+            }
+            if oauth
+                && let Err(AttemptError::Retriable {
+                    failure_kind: KeyFailure::RateLimited { retry_after_secs },
+                    upstream_status: Some(429),
+                    ..
+                }) = &mut result
+            {
+                *retry_after_secs = Some(retry_after_secs.unwrap_or(5));
+            }
             // Responses 直转撞上 404/405 = 这个上游根本没有 /responses（"openai" 渠道指着
             // 只实现了 chat 的第三方地址是常态）。同一候选就地改走降级链再来一次：
             // 不计 failover、不计 retry、不标 key 失败——渠道没坏，是方言不对。
@@ -1418,10 +1568,10 @@ async fn try_model(
             let transient = matches!(
                 &result,
                 Err(AttemptError::Retriable {
-                    failure_kind: KeyFailure::Transient,
+                    failure_kind: KeyFailure::Transient | KeyFailure::Request,
                     code,
-                    ..
-                }) if *code != codes::EMPTY_COMPLETION
+                    upstream_status,
+                }) if *code != codes::EMPTY_COMPLETION && matches!(upstream_status, None | Some(408 | 500..=528 | 530..=599))
             );
             if retry < same_key_retries && transient {
                 retry += 1;
@@ -1589,6 +1739,29 @@ fn build_upstream_body(
             conv_g2o::request_gemini_to_openai(body, upstream_model, info.stream)
         }
     }?;
+    let profile = okapi_providers::model_parameters::profile(
+        dialect,
+        upstream_model,
+        cand.api_base.as_deref(),
+    );
+    let built = okapi_providers::model_parameters::completion_cap(
+        &profile,
+        dialect,
+        built,
+        native_responses,
+    )?;
+    if bill.ingress != Ingress::ResponsesCompact
+        && let Some(result) = okapi_providers::model_parameters::apply_effort(
+            &profile,
+            dialect,
+            &built,
+            body,
+            bill.directive,
+            native_responses,
+        )
+    {
+        return result;
+    }
     match bill.directive {
         _ if bill.ingress == Ingress::ResponsesCompact => Ok(built),
         Some(d) if native_responses => reasoning::apply_responses(&built, d),
@@ -2109,7 +2282,7 @@ async fn attempt_stream(
             return Err(AttemptError::Retriable {
                 code: codes::UPSTREAM_TIMEOUT,
                 upstream_status: None,
-                failure_kind: KeyFailure::Transient,
+                failure_kind: KeyFailure::Request,
             });
         }
         Ok(Err(err)) => return Err(classify_fatal(err, failover, channel)),
@@ -2157,7 +2330,7 @@ async fn attempt_stream(
             Err(AttemptError::Retriable {
                 code: codes::UPSTREAM_TIMEOUT,
                 upstream_status: None,
-                failure_kind: KeyFailure::Transient,
+                failure_kind: KeyFailure::Request,
             })
         }
         Ok(Err(err)) => Err(classify_fatal(err, failover, channel)),
@@ -2195,7 +2368,8 @@ async fn attempt_stream(
                 writer,
                 ttft_ms,
                 failover,
-            ))
+            )
+            .await)
         }
     }
 }
@@ -2272,7 +2446,7 @@ fn upstream_endpoint(cand: &ChannelCandidate, stream: bool, ingress: Ingress) ->
 }
 
 #[allow(clippy::too_many_lines)]
-fn spawn_stream_pump(
+async fn spawn_stream_pump(
     bill: RequestBilling,
     mut info: CandInfo,
     mut handle: StreamHandle,
@@ -2281,6 +2455,8 @@ fn spawn_stream_pump(
     ttft_ms: i32,
     failover: i16,
 ) -> Response {
+    let setting = bill.state.setting_cached("streaming_policy").await;
+    let policy = super::stream_policy::StreamPolicy::from_setting(setting.as_ref().as_ref());
     info.upstream_request_id = handle.upstream_request_id.take();
     let request_id = bill.request_id;
     let (mut tx, rx) = mpsc::channel::<Result<Event, Infallible>>(64);
@@ -2321,7 +2497,7 @@ fn spawn_stream_pump(
         }
         let mut saw_done = false;
         while !client_gone && !saw_done {
-            let next = tokio::time::timeout_at(tokio::time::Instant::from_std(bill.started + Duration::from_mins(8)), handle.events.next()).await
+            let next = tokio::time::timeout_at(policy.deadline(tokio::time::Instant::from_std(bill.started + Duration::from_mins(8))), handle.events.next()).await
                 .unwrap_or(Some(Err(UpstreamError::Timeout)));
             match next {
                 Some(Ok(event)) => {
@@ -2401,11 +2577,7 @@ fn spawn_stream_pump(
         bill.state.sched.release_slot(info.key, info.cap).await;
     });
 
-    let sse = Sse::new(rx).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("ping"),
-    );
+    let sse = Sse::new(rx).keep_alive(KeepAlive::new().interval(policy.heartbeat).text("ping"));
     with_request_id(sse.into_response(), request_id)
 }
 
@@ -3141,4 +3313,50 @@ fn body_is_gemini_error(body: &Bytes) -> bool {
 
 fn elapsed_ms_i32(started: Instant) -> i32 {
     i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod failure_scope_tests {
+    use super::*;
+    fn status(status: u16, body: &str) -> UpstreamError {
+        UpstreamError::Status {
+            status,
+            body: Bytes::copy_from_slice(body.as_bytes()),
+            retry_after_secs: None,
+        }
+    }
+    #[test]
+    fn request_errors_and_resource_permissions_do_not_change_account_health() {
+        for error in [
+            UpstreamError::Connect("dns".into()),
+            UpstreamError::Timeout,
+            UpstreamError::Stream("transport".into()),
+            status(403, r#"{"error":{"code":"access_denied"}}"#),
+            status(408, ""),
+        ] {
+            assert!(matches!(failure_kind_of(&error), KeyFailure::Request));
+        }
+        assert!(matches!(
+            failure_kind_of(&status(401, "")),
+            KeyFailure::Invalid
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(403, r#"{"error":{"code":"invalid_api_key"}}"#)),
+            KeyFailure::Invalid
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(429, r#"{"error":{"code":"insufficient_quota"}}"#)),
+            KeyFailure::QuotaExhausted
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(529, "")),
+            KeyFailure::RateLimited {
+                retry_after_secs: Some(600)
+            }
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(503, "")),
+            KeyFailure::Transient
+        ));
+    }
 }

@@ -107,9 +107,11 @@ function SecurityPage() {
             <CardDescription>{t('security:hint')}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-5 pt-3">
-            <Field label={t('auth:password')} htmlFor="totp-password">
-              <Input id="totp-password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-            </Field>
+            <form onSubmit={(event) => event.preventDefault()}>
+              <Field label={t('auth:password')} htmlFor="totp-password">
+                <Input id="totp-password" name="password" type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+              </Field>
+            </form>
             {needSession ? (
               <Alert tone="warning">{t('security:sessionRequired')}</Alert>
             ) : done ? (

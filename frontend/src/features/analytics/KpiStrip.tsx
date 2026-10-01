@@ -17,13 +17,13 @@ function Delta({
   locale,
 }: {
   cur: number
-  prev: number | undefined
+  prev: number | null | undefined
   kind: 'count' | 'bp'
   invert?: boolean
   locale: string
 }) {
   const { t } = useTranslation()
-  if (prev === undefined) return null
+  if (prev == null) return null
   let text: string
   let up: boolean
   if (kind === 'bp') {
@@ -32,10 +32,10 @@ function Delta({
     up = pp > 0
     text = `${up ? '+' : ''}${pp.toLocaleString(locale, { maximumFractionDigits: 1 })}pp`
   } else {
-    if (prev <= 0) {
+    if (prev === 0) {
       return cur > 0 ? <span>{t('analytics:deltaNew')}</span> : null
     }
-    const pct = ((cur - prev) / prev) * 100
+    const pct = ((cur - prev) / Math.abs(prev)) * 100
     if (Math.abs(pct) < 0.5) return <span>{t('analytics:deltaFlat')}</span>
     up = pct > 0
     text = `${up ? '+' : ''}${pct.toLocaleString(locale, { maximumFractionDigits: 0 })}%`
@@ -60,7 +60,7 @@ function kpiMoney(micro: number, locale: string): string {
       maximumFractionDigits: 1,
     }).format(usd)
   }
-  return formatMoneyAggregate(micro, locale)
+  return formatMoneyAggregate(micro, locale, true)
 }
 
 /// 过滤后的六项 KPI（请求 / 消费 / Tokens / 错误率 / 缓存命中 / 平均时延），
@@ -114,10 +114,10 @@ export function KpiStrip({
             <Delta cur={cur.amount_micro ?? 0} prev={prev.amount_micro} kind="count" locale={locale} />
             {cur.known_margin_micro != null ? (
               <span title={t('analysis:costHint')} className={cn(cur.known_margin_micro < 0 && 'text-destructive')}>
-                {t('analysis:coveredMargin')} {formatMoneyAggregate(cur.known_margin_micro, locale)} · {t('analysis:coverage', { v: formatBp(cur.cost_coverage_bp ?? 0, locale) })}
+                {t('analysis:coveredMargin')} {formatMoneyAggregate(cur.known_margin_micro, locale, true)} · {t('analysis:coverage', { v: cur.cost_coverage_bp == null ? '—' : formatBp(cur.cost_coverage_bp, locale) })}
               </span>
             ) : (cur.discount_micro ?? 0) > 0 ? (
-              <span>{t('analytics:kpiSaved', { v: formatMoneyAggregate(cur.discount_micro ?? 0, locale) })}</span>
+              <span>{t('analytics:kpiSaved', { v: formatMoneyAggregate(cur.discount_micro ?? 0, locale, true) })}</span>
             ) : (
               vsPrev
             )}
@@ -177,15 +177,15 @@ export function KpiStrip({
         value={(cur.requests ?? 0) > 0 && cur.avg_latency_ms != null ? `${formatCount(cur.avg_latency_ms, locale)} ms` : '—'}
         sub={
           <>
-            {(cur.requests ?? 0) > 0 && (prev.requests ?? 0) > 0 && <Delta
-              cur={cur.avg_latency_ms ?? 0}
+            {(cur.requests ?? 0) > 0 && (prev.requests ?? 0) > 0 && cur.avg_latency_ms != null && <Delta
+              cur={cur.avg_latency_ms}
               prev={prev.avg_latency_ms}
               kind="count"
               invert
               locale={locale}
             />}
-            {(cur.avg_ttft_ms ?? 0) > 0 ? (
-              <span>{t('analytics:kpiTtft', { v: formatCount(cur.avg_ttft_ms ?? 0, locale) })}</span>
+            {cur.avg_ttft_ms != null && (cur.ttft_samples ?? cur.avg_ttft_ms) > 0 ? (
+              <span>{t('analytics:kpiTtft', { v: formatCount(cur.avg_ttft_ms, locale) })}</span>
             ) : (
               vsPrev
             )}

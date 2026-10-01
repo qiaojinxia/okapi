@@ -21,6 +21,9 @@ mod published_pricing;
 #[path = "support/anthropic_usage.rs"]
 mod anthropic_usage;
 
+#[path = "support/cache_ttl_billing.rs"]
+mod cache_ttl_billing;
+
 #[path = "support/usage_provenance.rs"]
 mod usage_provenance;
 
@@ -135,6 +138,14 @@ struct Env {
 }
 
 async fn setup(protocol: Protocol, usage: Value) -> Env {
+    setup_with_pricing(protocol, usage, None).await
+}
+
+async fn setup_with_pricing(
+    protocol: Protocol,
+    usage: Value,
+    cache_rates: Option<(&str, Value)>,
+) -> Env {
     dotenvy::dotenv().ok();
     let pg_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
@@ -168,6 +179,10 @@ async fn setup(protocol: Protocol, usage: Value) -> Env {
     if matches!(protocol, Protocol::Anthropic) {
         sqlx::query("UPDATE model_pricing SET cache_write_ratio=2 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
             .bind(&model).execute(&pg).await.unwrap();
+    }
+    if let Some((write_ratio, rates)) = cache_rates {
+        sqlx::query("UPDATE model_pricing SET cache_write_ratio=$2::text::numeric,modality_ratios=$3 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
+            .bind(&model).bind(write_ratio).bind(rates).execute(&pg).await.unwrap();
     }
     let calls = Arc::new(AtomicUsize::new(0));
     let mock = serve(Router::new().fallback(post(upstream)).with_state(Mock {

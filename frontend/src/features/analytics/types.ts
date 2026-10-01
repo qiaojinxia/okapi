@@ -44,8 +44,8 @@ export interface CubeMetrics {
   amount_micro: number
   discount_micro: number
   upstream_cost_micro: number
-  avg_latency_ms: number
-  avg_ttft_ms: number
+  avg_latency_ms: number | null
+  avg_ttft_ms: number | null
 }
 
 export type TokenSource = 'upstream' | 'estimated' | 'local_override' | 'unknown'

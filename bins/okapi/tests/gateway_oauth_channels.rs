@@ -2,6 +2,9 @@
 //! → 到期惰性刷新（四步锁、refresh 轮转回写、并发单飞）→ invalid_grant 进 invalid。
 //! mock 同时扮演授权服务器（token 端点）与两家上游。依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::extract::State;
 use axum::response::IntoResponse;
@@ -19,6 +22,8 @@ use uuid::Uuid;
 #[derive(Clone)]
 struct Mock {
     token_calls: Arc<AtomicUsize>,
+    api_rejection: Arc<AtomicUsize>,
+    refresh_unavailable: Arc<std::sync::atomic::AtomicBool>,
     /// 下一次刷新是否回 invalid_grant。
     reject_refresh: Arc<std::sync::atomic::AtomicBool>,
     /// 上游最近一次收到的请求头（断言客户端身份头透传）。
@@ -86,6 +91,13 @@ async fn mock_token(
         };
         (field("grant_type"), field("client_id"))
     };
+    if grant == "refresh_token" && st.refresh_unavailable.load(Ordering::SeqCst) {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(json!({"error":"unavailable"})),
+        )
+            .into_response();
+    }
     if grant == "refresh_token" && st.reject_refresh.load(Ordering::SeqCst) {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -135,6 +147,15 @@ async fn mock_messages(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
+    if st.api_rejection.load(Ordering::SeqCst) == 2
+        || (st.api_rejection.load(Ordering::SeqCst) == 1 && auth == "Bearer access-1")
+    {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error":{"type":"authentication_error"}})),
+        )
+            .into_response();
+    }
     assert!(
         auth.starts_with("Bearer access-"),
         "订阅 token 走 Bearer：{auth}"
@@ -218,11 +239,39 @@ async fn mock_codex_responses(
     ([("content-type", "text/event-stream")], sse).into_response()
 }
 
+async fn mock_codex_socket(
+    State(st): State<Mock>,
+    headers: axum::http::HeaderMap,
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    st.record(&headers);
+    let auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if st.api_rejection.load(Ordering::SeqCst) == 2
+        || (st.api_rejection.load(Ordering::SeqCst) == 1 && auth == "Bearer access-1")
+    {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    upgrade.on_upgrade(|mut socket| async move {
+        while let Some(Ok(axum::extract::ws::Message::Text(_))) = socket.recv().await {
+            let value = json!({"type":"response.completed","response":{"id":format!("resp_{}",Uuid::new_v4().simple()),
+                "status":"completed", "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+                "usage":{"input_tokens":100,"output_tokens":50}}});
+            if socket.send(axum::extract::ws::Message::Text(value.to_string().into())).await.is_err() { break; }
+        }
+    }).into_response()
+}
+
 async fn spawn_mock(mock: Mock) -> SocketAddr {
     let router = Router::new()
         .route("/token", post(mock_token))
         .route("/v1/messages", post(mock_messages))
-        .route("/codex/responses", post(mock_codex_responses))
+        .route(
+            "/codex/responses",
+            post(mock_codex_responses).get(mock_codex_socket),
+        )
         .with_state(mock);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -288,12 +337,15 @@ async fn setup() -> Env {
 
     let mock_state = Mock {
         token_calls: Arc::new(AtomicUsize::new(0)),
+        api_rejection: Arc::new(AtomicUsize::new(0)),
+        refresh_unavailable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reject_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         last_headers: Arc::default(),
         last_body: Arc::default(),
     };
     let mock = spawn_mock(mock_state.clone()).await;
 
+    published_pricing::publish(&pg, admin_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -1062,4 +1114,170 @@ async fn anthropic_max_mimic_forges_claude_code_identity() {
         "装机 id 64 hex"
     );
     assert_eq!(uid["session_id"].as_str().unwrap().len(), 36, "会话 UUID");
+}
+
+#[tokio::test]
+async fn unexpired_but_rejected_oauth_token_is_refreshed_once_under_concurrency() {
+    let env = setup().await;
+    let (_, id) = login_channel(&env, "anthropic_max").await;
+    env.mock_state.api_rejection.store(1, Ordering::SeqCst);
+    let (a, b) = tokio::join!(chat(&env), chat(&env));
+    assert_eq!(a.status(), 200, "{}", a.text().await.unwrap());
+    assert_eq!(b.status(), 200, "{}", b.text().await.unwrap());
+    assert_eq!(
+        env.mock_state.token_calls.load(Ordering::SeqCst),
+        2,
+        "one exchange, one shared forced refresh"
+    );
+    assert_eq!(read_cred(&env, id).await.access_token, "access-2");
+    let status: i16 = sqlx::query_scalar("SELECT status FROM channel_keys WHERE id=$1")
+        .bind(id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(status, 1);
+}
+
+#[tokio::test]
+async fn oauth_401_recovery_is_bounded_and_preserves_permanent_failures() {
+    for failure in [
+        "still_401",
+        "refresh_unavailable",
+        "invalid_grant",
+        "missing_refresh",
+    ] {
+        let env = setup().await;
+        let (_, id) = login_channel(&env, "anthropic_max").await;
+        env.mock_state.api_rejection.store(2, Ordering::SeqCst);
+        env.mock_state
+            .refresh_unavailable
+            .store(failure == "refresh_unavailable", Ordering::SeqCst);
+        env.mock_state
+            .reject_refresh
+            .store(failure == "invalid_grant", Ordering::SeqCst);
+        if failure == "missing_refresh" {
+            let mut cred = read_cred(&env, id).await;
+            cred.refresh_token.clear();
+            okapi_store::admin::write_key_credential(
+                &env.pg,
+                id,
+                &cred.to_plaintext(),
+                env.state.master_key.as_deref(),
+            )
+            .await
+            .unwrap();
+            env.state.invalidate_routing_caches();
+        }
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), chat(&env))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 502, "{failure}");
+        assert_eq!(
+            env.mock_state.token_calls.load(Ordering::SeqCst),
+            if failure == "missing_refresh" { 1 } else { 2 },
+            "{failure}: never loop refresh"
+        );
+        let (status, cooldown): (i16, bool) = sqlx::query_as(
+            "SELECT status, cooldown_until IS NOT NULL FROM channel_keys WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+        let permanent = matches!(failure, "invalid_grant" | "missing_refresh");
+        assert_eq!(status, if permanent { 6 } else { 3 }, "{failure}");
+        assert_eq!(cooldown, !permanent, "{failure}");
+        assert_eq!(
+            env.state
+                .ledger
+                .balance(env.user_id)
+                .await
+                .unwrap()
+                .as_micros(),
+            10_000_000,
+            "failed requests fully refund"
+        );
+        assert!(
+            env.state
+                .ledger
+                .list_reservations(env.user_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn codex_401_at_websocket_upgrade_refreshes_without_replaying_a_turn() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let env = setup().await;
+    let (_, id) = login_channel(&env, "codex").await;
+    env.mock_state.api_rejection.store(1, Ordering::SeqCst);
+    let mut request = format!("ws://{}/v1/responses", env.gateway)
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", env.user_token).parse().unwrap(),
+    );
+    let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    client
+        .send(Message::Text(
+            json!({"type":"response.create","model":env.model,"max_output_tokens":64,
+        "input":[{"role":"user","content":"hi"}]})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let value = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Message::Text(raw) = client.next().await.unwrap().unwrap() {
+                let value: Value = serde_json::from_str(&raw).unwrap();
+                if value["type"] == "response.completed" || value["type"] == "error" {
+                    break value;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(value["type"], "response.completed", "{value}");
+    assert_eq!(env.mock_state.token_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(read_cred(&env, id).await.access_token, "access-2");
+    assert_eq!(
+        env.mock_state.seen("authorization").as_deref(),
+        Some("Bearer access-2")
+    );
+    for _ in 0..50 {
+        if env
+            .state
+            .ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        env.state
+            .ledger
+            .balance(env.user_id)
+            .await
+            .unwrap()
+            .as_micros(),
+        9_800_000
+    );
+    let charges: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE user_id=$1 AND status=20")
+            .bind(env.user_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(charges, 1);
 }

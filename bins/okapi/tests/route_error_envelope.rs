@@ -86,6 +86,7 @@ fn public_endpoint(endpoint: &Endpoint) -> bool {
                 "/api/pricing"
                     | "/api/pricing/models"
                     | "/api/pricing/groups"
+                    | "/api/pricing/stats"
                     | "/api/notice"
                     | "/api/registration"
                     | "/api/setup/status"
@@ -170,11 +171,14 @@ fn console_probe_body(path: &str) -> Value {
             json!({"model": "audit-model", "messages": [{"role": "user", "content": "audit"}]})
         }
         "/api/me/redeem" => json!({"code": "audit-fixture"}),
+        "/api/me/profile" => json!({"username": "audit", "language": "auto"}),
         "/api/me/subscriptions/checkout" => json!({"plan_code": "audit", "gateway": "stripe"}),
         "/api/me/topup" => json!({"amount_micro": 1_000_000, "gateway": "stripe"}),
         "/api/teams" => json!({"name": "audit"}),
         "/api/teams/{id}/members" | "/admin/reconciliation/repair" => json!({"user_id": 1}),
         "/auth/totp/confirm" => json!({"pending": "00", "code": "000000"}),
+        "/auth/totp/enroll" => json!({"password": "audit-fixture"}),
+        "/auth/totp/disable" => json!({"password": "audit-fixture", "code": "000000"}),
         "/admin/billing/refund" => json!({"request_id": "00000000-0000-0000-0000-000000000000"}),
         "/admin/cache/flush" => json!({"scope": "auth"}),
         "/admin/channels" => {

@@ -34,6 +34,7 @@ export function SearchInput({
       <input
         ref={input}
         type="search"
+        autoComplete="off"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => {

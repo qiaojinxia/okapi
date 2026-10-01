@@ -196,3 +196,61 @@ async fn partial_classified_history_never_adds_overlapping_records() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn unclassified_history_only_blocks_the_selected_scope_and_window() {
+    let (ch, database) = fixture().await;
+    events(&ch).await;
+    ch.execute("INSERT INTO request_log_raw (ts,request_id,log_type,user_id,amount_micro) VALUES ('2026-09-30 12:00:00',generateUUIDv4(),0,9,100),('2026-09-29 12:00:00',generateUUIDv4(),0,7,100)")
+        .await
+        .unwrap();
+    let sql = "SELECT countMerge(requests) AS calls,countMerge(financial_records) AS records,sumMerge(tokens) AS tokens,sumMerge(amount) AS amount FROM mv_user_day WHERE user_id={user:Int64} AND day={day:Date}";
+    let rows = ch
+        .query_with_params(sql, &[("user", "7"), ("day", "2026-09-30")])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        json!({"calls":"1","records":"2","tokens":"120","amount":"0"})
+    );
+    for (user, day) in [("9", "2026-09-30"), ("7", "2026-09-29")] {
+        let error = ch
+            .query_with_params(sql, &[("user", user), ("day", day)])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                StoreError::InvalidData("statistics_request_history_incomplete")
+            ),
+            "{error}"
+        );
+    }
+    // A complex financial parent must keep its recovery path without blocking
+    // an independently proven call scope, or granting that parent call proof.
+    let mixed = ch.query_with_params(
+        "SELECT 'calls' AS kind,toInt128(sumMerge(tokens)) AS n FROM mv_user_day WHERE user_id={user:Int64} AND day={day:Date} UNION ALL SELECT 'finance' AS kind,toInt128(sumMerge(amount)) AS n FROM mv_user_day older WHERE older.user_id=9 AND older.day={day:Date} ORDER BY kind",
+        &[("user", "7"), ("day", "2026-09-30")],
+    ).await.unwrap();
+    assert_eq!(
+        mixed,
+        vec![
+            json!({"kind":"calls","n":"120"}),
+            json!({"kind":"finance","n":"100"})
+        ]
+    );
+    let error = ch.query_with_params(
+        "SELECT countMerge(requests) AS n FROM mv_user_day WHERE user_id={user:Int64} AND day={day:Date} UNION ALL SELECT countMerge(requests) AS n FROM mv_user_day older WHERE older.user_id=9 AND older.day={day:Date}",
+        &[("user", "7"), ("day", "2026-09-30")],
+    ).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StoreError::InvalidData("statistics_request_history_incomplete")
+        ),
+        "{error}"
+    );
+    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        .await
+        .unwrap();
+}

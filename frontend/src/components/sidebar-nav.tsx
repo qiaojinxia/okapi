@@ -89,27 +89,30 @@ export function SidebarNav({ nav, rail, pathname, onExpand, onNavigate }: {
             </Button>
           </Tooltip>
         ) : (
-          <SearchInput
-            value={query}
-            onChange={setQuery}
-            aria-label={t('common:searchNav')}
-            placeholder={t('common:searchNavPlaceholder')}
-            aria-describedby={terms.length > 0 ? hintId : undefined}
-            inputClassName="h-11 md:h-9"
-            onSubmit={() => {
-              const first = filtered[0]?.items[0]
-              if (terms.length === 0 || !first) return
-              void navigate({ to: first.to })
-              finish()
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Escape' && query !== '') {
-                e.preventDefault()
-                e.stopPropagation()
-                setQuery('')
-              }
-            }}
-          />
+          <form role="search" autoComplete="off" onSubmit={(event) => event.preventDefault()}>
+            <SearchInput
+              name="navigation-query"
+              value={query}
+              onChange={setQuery}
+              aria-label={t('common:searchNav')}
+              placeholder={t('common:searchNavPlaceholder')}
+              aria-describedby={terms.length > 0 ? hintId : undefined}
+              inputClassName="h-11 md:h-9"
+              onSubmit={() => {
+                const first = filtered[0]?.items[0]
+                if (terms.length === 0 || !first) return
+                void navigate({ to: first.to })
+                finish()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && query !== '') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  setQuery('')
+                }
+              }}
+            />
+          </form>
         )}
         {terms.length > 0 && (
           <p id={hintId} className="pt-2 text-[11px] text-muted-foreground">{t('common:searchNavHint')}</p>

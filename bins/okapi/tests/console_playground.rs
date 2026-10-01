@@ -27,6 +27,26 @@ const MASTER: &str = "0909090909090909090909090909090909090909090909090909090909
 async fn mock_stream(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(req["stream"], true, "中继必须把请求改成流式");
+    if req["model"] == "kimi-k3" {
+        assert!(req.get("temperature").is_none());
+        assert!(req.get("top_p").is_none());
+        assert_eq!(req["reasoning_effort"], "max");
+        assert_eq!(req["max_completion_tokens"], 256);
+        assert!(req.get("max_tokens").is_none());
+    }
+    if req["top_p"] == 1 {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "invalid top_p: only 0.95 is allowed for this model; credential mock-credential"
+                },
+                "request": req,
+            })),
+        )
+            .into_response();
+    }
     let chunks = [
         json!({"id":"c1","object":"chat.completion.chunk","model":"gpt-4o-mock",
                "choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}),
@@ -162,6 +182,82 @@ async fn wait_committed(pg: &PgPool, user_id: i64) -> (i16, i64, i32) {
     panic!("等待记账超时");
 }
 
+#[tokio::test]
+async fn relay_persists_upstream_error_details_and_redacts_credentials() {
+    let env = setup().await;
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/api/me/playground/chat", env.addr))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "model": env.model, "top_p": 1,
+            "messages": [{"role": "user", "content": "private prompt"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let request_id: Uuid = resp.headers()["x-okapi-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let response: Value = resp.json().await.unwrap();
+    assert_eq!(response["error"]["type"], "invalid_request_error");
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("only 0.95")
+    );
+
+    let record: Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('status', status, 'amount', amount_micro, 'upstream_status', upstream_status, 'error_code', error_code, 'diagnostics', usage_details->'diagnostics') FROM billing_records WHERE request_id=$1",
+    )
+    .bind(request_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(record["status"], 40);
+    assert_eq!(record["amount"], 0);
+    assert_eq!(record["upstream_status"], 400);
+    assert_eq!(record["error_code"], "upstream_status_400");
+    let diagnostics = &record["diagnostics"];
+    let message = "invalid top_p: only 0.95 is allowed for this model; credential [redacted]";
+    assert_eq!(diagnostics["error_message"], message);
+    assert_eq!(diagnostics["error_phase"], "upstream");
+    let attempts = diagnostics["attempts"].as_array().unwrap();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0]["status"], 400);
+    assert_eq!(attempts[0]["outcome"], "failure");
+    assert_eq!(attempts[0]["error_message"], message);
+    assert!(attempts[0]["duration_ms"].is_u64());
+    assert!(!diagnostics.to_string().contains("mock-credential"));
+    assert!(!diagnostics.to_string().contains("private prompt"));
+
+    let outbox: Value =
+        sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE payload->>'request_id'=$1")
+            .bind(request_id.to_string())
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(outbox["diagnostics"], *diagnostics);
+
+    let logs: Value = reqwest::Client::new()
+        .get(format!(
+            "http://{}/api/me/logs?request_id={request_id}",
+            env.addr
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(logs["data"][0]["diagnostics"]["error_message"], message);
+    assert!(logs["data"][0]["diagnostics"]["attempts"].is_null());
+}
+
 /// 中继：body 里 stream:false 也回 SSE，逐块透出内容与 [DONE]，记账落在同一把 key。
 #[tokio::test]
 async fn relay_forces_stream_and_bills() {
@@ -265,6 +361,118 @@ async fn presets_endpoint_whitelists() {
 fn sha256_hex(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+async fn parameter_rules(env: &TestEnv, selected: Option<i64>) -> reqwest::Response {
+    let mut req = reqwest::Client::new()
+        .get(format!(
+            "http://{}/api/me/playground/parameters?model={}",
+            env.addr, env.model
+        ))
+        .bearer_auth(&env.token);
+    if let Some(id) = selected {
+        req = req.header("X-Okapi-Playground-Key", id);
+    }
+    req.send().await.unwrap()
+}
+
+#[tokio::test]
+async fn parameter_rules_use_mapped_upstream_and_reject_before_billing() {
+    let env = setup().await;
+    sqlx::query("UPDATE channels SET model_mapping=jsonb_build_object($1::text,'kimi-k3') WHERE models @> jsonb_build_array($1::text)")
+        .bind(&env.model).execute(&env.pg).await.unwrap();
+    let rules: Value = parameter_rules(&env, None).await.json().await.unwrap();
+    assert_eq!(rules["efforts"], json!(["low", "high", "max"]));
+    assert_eq!(rules["temperature_max"], Value::Null);
+    assert_eq!(rules["top_p"], false);
+    assert_eq!(rules["preserve_reasoning"], true);
+    assert!(!rules.to_string().contains("mock-credential"));
+    for (field, value) in [
+        ("top_p", json!(1)),
+        ("temperature", json!(1)),
+        ("reasoning_effort", json!("medium")),
+    ] {
+        let mut body = json!({"model":env.model, "messages":[{"role":"user","content":"hi"}]});
+        body[field] = value;
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/api/me/playground/chat", env.addr))
+            .bearer_auth(&env.token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["param"],
+            field
+        );
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE user_id=$1")
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "invalid parameters and metadata must not be billed"
+    );
+    let response = reqwest::Client::new().post(format!("http://{}/api/me/playground/chat", env.addr))
+        .bearer_auth(&env.token).json(&json!({"model":env.model,"reasoning_effort":"max","max_tokens":256,"messages":[{"role":"user","content":"hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response.text().await.unwrap().contains("Hello"));
+}
+
+#[tokio::test]
+async fn parameter_rules_enforce_selected_key_ownership_and_allowlist() {
+    let env = setup().await;
+    let (blocked, _) = extra_key(&env.pg, env.user_id, true, Some(json!(["another-model"]))).await;
+    assert_eq!(parameter_rules(&env, Some(blocked)).await.status(), 403);
+    let other_user = okapi_store::provision::create_user(
+        &env.pg,
+        &format!("parameter-other-{}", Uuid::new_v4()),
+    )
+    .await
+    .unwrap();
+    let (foreign, _) = extra_key(&env.pg, other_user, true, None).await;
+    assert_eq!(parameter_rules(&env, Some(foreign)).await.status(), 404);
+    let (own, _) = extra_key(&env.pg, env.user_id, true, None).await;
+    assert_eq!(parameter_rules(&env, Some(own)).await.status(), 200);
+}
+
+#[tokio::test]
+async fn parameter_rules_intersect_failover_models_and_channel_controls() {
+    let env = setup().await;
+    sqlx::query("UPDATE channels SET model_mapping=jsonb_build_object($1::text,'kimi-k3') WHERE models @> jsonb_build_array($1::text)")
+        .bind(&env.model).execute(&env.pg).await.unwrap();
+    let (channel, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("parameter-fallback-{}", Uuid::new_v4()),
+        "openai",
+        "http://127.0.0.1:1/v1",
+        "mock-fallback",
+        &[env.model.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE channels SET model_mapping=jsonb_build_object($2::text,'gpt-6-sol') WHERE id=$1",
+    )
+    .bind(channel)
+    .bind(&env.model)
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    let common: Value = parameter_rules(&env, None).await.json().await.unwrap();
+    assert_eq!(common["efforts"], json!(["low", "high", "max"]));
+    assert_eq!(common["top_p"], false);
+    assert!(common["default_effort"].is_null());
+    sqlx::query("UPDATE channels SET settings=jsonb_build_object('strip_request_fields',jsonb_build_array('reasoning_effort')) WHERE id=$1")
+        .bind(channel).execute(&env.pg).await.unwrap();
+    let controlled: Value = parameter_rules(&env, None).await.json().await.unwrap();
+    assert_eq!(controlled["efforts"], json!([]));
 }
 
 /// 给 `user_id` 再建一把令牌；`saved` 决定是否写入可恢复的加密副本（旧令牌没有），

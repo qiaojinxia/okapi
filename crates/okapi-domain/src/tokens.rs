@@ -125,8 +125,8 @@ pub struct TokenUsage {
     /// 缓存写入 token（Anthropic `cache_creation_input_tokens`）；含在 prompt_tokens 内。
     #[serde(default)]
     pub cache_write_tokens: u32,
-    /// Optional observed TTL split, contained in cache_write_tokens. Statistics only;
-    /// absence must not imply zero or change the configured cache-write price.
+    /// Observed TTL split, contained in cache_write_tokens. A complete split allows
+    /// configured lifetime prices; absence retains the generic write price, not zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_5m_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

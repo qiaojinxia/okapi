@@ -2,12 +2,12 @@ import { apiFetch, ApiError } from '@/lib/api'
 import type { PricingGroup, PricingModel } from './types'
 
 export interface Catalog { models: PricingModel[]; groups: PricingGroup[] }
-interface PageMeta { total: number; limit: number; offset: number; has_more: boolean; next_offset: number | null }
-interface CatalogPage extends Catalog, Partial<PageMeta> { groups_page?: PageMeta; pricing_epoch?: number }
+export interface PageMeta { total: number; limit: number; offset: number; has_more: boolean; next_offset: number | null }
+export interface CatalogPage extends Catalog, Partial<PageMeta> { groups_page?: PageMeta; pricing_epoch?: number }
 const batchSize = 100 // Public catalog endpoints cap each independent page at 100.
 const invalidPage = () => new ApiError(502, 'internal_error')
 
-function pagination(meta: Partial<PageMeta>, count: number, offset: number, total?: number): PageMeta | undefined {
+export function pagination(meta: Partial<PageMeta>, count: number, offset: number, total?: number): PageMeta | undefined {
   // Compatibility with older servers that returned a complete, unpaged catalog.
   if (meta.total === undefined) {
     if (total !== undefined || ['limit', 'offset', 'has_more', 'next_offset'].some((key) => key in meta)) throw invalidPage()
@@ -16,7 +16,7 @@ function pagination(meta: Partial<PageMeta>, count: number, offset: number, tota
   if (!Number.isSafeInteger(meta.total) || meta.total < 0
     || !Number.isSafeInteger(meta.limit) || meta.limit! < 1 || count > meta.limit!
     || meta.offset !== offset || (total !== undefined && meta.total !== total)
-    || offset + count > meta.total) throw invalidPage()
+    || (offset + count > meta.total && !(count === 0 && offset >= meta.total))) throw invalidPage()
   const more = offset + count < meta.total
   if (meta.has_more !== more || (more && count === 0)
     || meta.next_offset !== (more ? offset + count : null)) throw invalidPage()
@@ -27,10 +27,9 @@ function path(modelOffset: number, modelLimit: number, groupOffset = 0): string 
   return `/api/pricing?limit=${modelLimit}&offset=${modelOffset}&group_limit=${batchSize}&group_offset=${groupOffset}`
 }
 
-// The UI filters and sorts a complete directory before paginating its cards.
-// Collect bounded API pages first, rather than treating the default 20 as the
-// whole catalog. Group pages also affect each model's availability/endpoints,
-// so collect those for every model page, not just the group dropdown.
+// Complete directory for API-key model allowlist selectors. The marketplace
+// uses loadModelPage instead; it never drains the model pagination chain.
+// Group pages affect each model's availability/endpoints, so merge those too.
 export async function loadCatalog(key: string): Promise<Catalog> {
   const models: PricingModel[] = []
   const names = new Set<string>()

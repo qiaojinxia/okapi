@@ -28,6 +28,7 @@ pub mod http;
 pub mod image_store;
 pub mod image_stream;
 mod limits;
+pub mod model_parameters;
 pub mod modifiers;
 pub mod oauth;
 pub mod openai;
@@ -35,6 +36,7 @@ pub mod reasoning;
 pub mod responses;
 pub mod responses_bridge;
 pub mod responses_ws;
+mod retry_after;
 pub mod types;
 pub mod vertex;
 

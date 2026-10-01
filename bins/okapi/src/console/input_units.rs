@@ -156,7 +156,7 @@ fn uncalibrated(keys: &str, table: &str, predicate: &str, mode: Mode) -> String 
     let selected=CORE_FIELDS.map(|field|format!("toInt64(if(use_aggregate, ifNull(a.{field}, 0), if(ifNull(r.unit_observed, 0) <= e.expected, ifNull(r.{field}, 0), 0))) AS {field}")).join(", ");
     format!(
         "(WITH \
-        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, {time}, toUInt8(1) AS source_scope FROM {table}) WHERE {predicate} GROUP BY {keys}), \
+        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, {time}, toUInt8(1) AS source_scope FROM {table} WHERE {predicate}) WHERE {predicate} GROUP BY {keys}), \
         a AS (SELECT {keys}, {merged} FROM (SELECT *, toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope FROM mv_input_units_5min) WHERE {predicate} GROUP BY {keys}), \
         missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.unit_observed, 0)), \
         r AS (SELECT {keys}, {raw} FROM (SELECT *, toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope FROM request_log_calls) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \

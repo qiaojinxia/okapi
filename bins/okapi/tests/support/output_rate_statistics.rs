@@ -15,7 +15,7 @@ async fn character_duration_does_not_dilute_token_output_speed() {
     let result = std::panic::AssertUnwindSafe(check_mixed(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -33,7 +33,7 @@ async fn output_rate_upgrade_recovers_raw_once_and_preserves_partial_history_aft
         let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch, legacy_dimensions))
             .catch_unwind()
             .await;
-        ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
             .await
             .unwrap();
         if let Err(panic) = result {
@@ -44,11 +44,11 @@ async fn output_rate_upgrade_recovers_raw_once_and_preserves_partial_history_aft
 
 async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
     let key = key_id(env).await;
-    ch.execute("DROP TABLE mv_output_rate_5min SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_output_rate_5min SYNC")
         .await
         .unwrap();
     if legacy_dimensions {
-        ch.execute("DROP TABLE mv_analysis_hour SYNC")
+        super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
             .await
             .unwrap();
     }
@@ -62,13 +62,16 @@ async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
     new["node"] = json!("rate-modern");
     insert(ch, &[new]).await;
     check_upgrade_views(env, key, false).await;
-    ch.execute(
+    super::population_storage::execute(
+        ch,
         "ALTER TABLE request_log_raw DELETE WHERE node='rate-legacy' SETTINGS mutations_sync=1",
     )
     .await
     .unwrap();
     check_upgrade_views(env, key, true).await;
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     check_upgrade_views(env, key, true).await;
 }
 
@@ -212,7 +215,9 @@ async fn check_mixed(env: &Env, ch: &ChClient) {
     check_views(env, key, true).await;
     check_logs(env, true).await;
     ch.ensure_schema().await.unwrap();
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     check_views(env, key, true).await;
     check_quality(env, true).await;
     check_filters(env).await;

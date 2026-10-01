@@ -155,7 +155,7 @@ pub(super) async fn route(
     }
     let mut last = unavailable("responses_websocket");
     let mut attempted: i16 = 0;
-    for cand in candidates {
+    for mut cand in candidates {
         if usize::try_from(attempted).unwrap_or(MAX_ATTEMPTS) >= MAX_ATTEMPTS {
             break;
         }
@@ -208,7 +208,7 @@ pub(super) async fn route(
             let selected = if policy.prefer_http(&cand) {
                 Ok(Transport::Http)
             } else {
-                transport::connect(bill, &cand).await
+                transport::connect(bill, &mut cand).await
             };
             let selected = match selected {
                 Ok(selected) => selected,
@@ -221,7 +221,31 @@ pub(super) async fn route(
                 }
                 Err(error) => {
                     let retry = error.retriable_before_first_token();
-                    let kind = super::super::failure_kind_of(&error);
+                    let mut kind = super::super::failure_kind_of(&error);
+                    if cand.provider == "codex" {
+                        match &error {
+                            UpstreamError::Status { status: 401, .. } => {
+                                kind = okapi_store::channels::KeyFailure::RateLimited {
+                                    retry_after_secs: Some(30),
+                                };
+                            }
+                            UpstreamError::Status {
+                                status: 429,
+                                retry_after_secs,
+                                ..
+                            } => {
+                                if matches!(
+                                    kind,
+                                    okapi_store::channels::KeyFailure::RateLimited { .. }
+                                ) {
+                                    kind = okapi_store::channels::KeyFailure::RateLimited {
+                                        retry_after_secs: Some(retry_after_secs.unwrap_or(5)),
+                                    };
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     last = failure(error, bill, &cand, failover);
                     bill.state
                         .sched

@@ -45,7 +45,7 @@ interface ErrorEnvelope {
 
 export async function apiFetch<T>(
   path: string,
-  init?: { method?: string; body?: unknown; key?: string; fresh?: boolean },
+  init?: { method?: string; body?: unknown; key?: string; fresh?: boolean; signal?: AbortSignal },
 ): Promise<T> {
   const key = init?.key ?? getKey()
   const headers: Record<string, string> = {}
@@ -57,6 +57,7 @@ export async function apiFetch<T>(
     method: init?.method ?? 'GET',
     headers,
     body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+    signal: init?.signal,
   })
   if (!resp.ok) {
     let code = `http_${resp.status}`

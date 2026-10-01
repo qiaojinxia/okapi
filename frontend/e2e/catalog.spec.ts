@@ -2,8 +2,9 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 import type { PricingGroup, PricingModel } from '../src/features/public-pricing/types'
-import { compareModels, modelCapabilities, modelPrice, modelVendor, nonnegative } from '../src/features/public-pricing/catalog-data'
+import { compareModels, isAvailable, modelCapabilities, modelPrice, modelVendor, nonnegative } from '../src/features/public-pricing/catalog-data'
 import { formatUnitPrice } from '../src/lib/money'
+import { defaultApiBase } from '../src/features/public-pricing/request-examples'
 
 // 仅用于界面回归的展示数据，不是线上报价或能力清单。
 const model = (id: string, vendor: string | null, name: string | null, overrides: Partial<PricingModel> = {}): PricingModel => ({
@@ -29,6 +30,32 @@ const models = [
 ]
 const groups = [{ code: 'default', name: '标准分组', ratio: '1', is_default: true }, { code: 'economy', name: '经济分组', ratio: '0.5', self_select: true }, { code: 'free', name: '内部免费组', ratio: '0', self_select: true }]
 
+const meta = (total: number, limit: number, offset: number, count: number) => ({ total, limit, offset, has_more: offset + count < total, next_offset: offset + count < total ? offset + count : null })
+function catalogReply(url: URL, data: PricingModel[], catalogGroups: PricingGroup[] = groups) {
+  const params = url.searchParams
+  const q = params.get('q')?.toLowerCase() ?? ''
+  const group = params.get('availability_group') ?? params.get('group') ?? ''
+  const filtered = data.filter((m) => (!params.has('model') || m.model === params.get('model'))
+    && (!q || [m.model, m.display_name, m.vendor].some((v) => v?.toLowerCase().includes(q)))
+    && (!params.has('vendor') || (m.vendor?.trim().toLowerCase() ?? '') === params.get('vendor')?.toLowerCase())
+    && (!params.has('vendors') || JSON.parse(params.get('vendors')!).includes(m.vendor?.trim().toLowerCase().replace(/[\s._-]+/g, '')))
+    && (!params.has('capability') || modelCapabilities(m).includes(params.get('capability') as ReturnType<typeof modelCapabilities>[number]))
+    && (!params.has('mode') || m.mode === params.get('mode'))
+    && (params.get('available') !== 'true' || isAvailable(m, group)))
+    .sort((a, b) => compareModels(a, b, params.get('sort') ?? 'name', group ? nonnegative(catalogGroups.find((g) => g.code === group)?.ratio) : 1, 'zh-CN'))
+  const raw = new Map<string | null, number>()
+  for (const m of data) { const vendor = m.vendor?.trim().toLowerCase() || null; raw.set(vendor, (raw.get(vendor) ?? 0) + 1) }
+  const vendorLimit = Number(params.get('vendor_limit') ?? 20), vendorOffset = Number(params.get('vendor_offset') ?? 0)
+  const vendorBatch = [...raw].sort(([a], [b]) => a === null ? 1 : b === null ? -1 : a.localeCompare(b)).slice(vendorOffset, vendorOffset + vendorLimit).map(([vendor, count]) => ({ vendor, count }))
+  if (url.pathname === '/api/pricing/stats') return { total: data.length, capabilities: [...new Set(data.flatMap(modelCapabilities))], has_context: data.some((m) => !!m.context_window), vendors: vendorBatch, vendors_page: meta(raw.size, vendorLimit, vendorOffset, vendorBatch.length), pricing_epoch: 4 }
+  const limit = Number(params.get('limit') ?? 20), offset = Number(params.get('offset') ?? 0)
+  const groupLimit = Number(params.get('group_limit') ?? 20), groupOffset = Number(params.get('group_offset') ?? 0)
+  const groupBatch = catalogGroups.slice(groupOffset, groupOffset + groupLimit), codes = new Set(groupBatch.map((g) => g.code))
+  const batch = filtered.slice(offset, offset + limit).map((m) => ({ ...m, groups: m.groups.filter((code) => codes.has(code)),
+    chat_endpoints_by_group: m.chat_endpoints_by_group && Object.fromEntries(Object.entries(m.chat_endpoints_by_group).filter(([code]) => codes.has(code))) }))
+  return { models: batch, groups: groupBatch, ...meta(filtered.length, limit, offset, batch.length), groups_page: meta(catalogGroups.length, groupLimit, groupOffset, groupBatch.length), pricing_epoch: 4 }
+}
+
 async function prepare(page: Page, data = models, language = 'zh-CN', dark = false) {
   const calls: string[] = []
   const errors: string[] = []
@@ -43,7 +70,7 @@ async function prepare(page: Page, data = models, language = 'zh-CN', dark = fal
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/auth/')) {
       expect(request.method()).toBe('GET')
       calls.push(url.pathname)
-      return route.fulfill({ json: url.pathname === '/api/pricing' ? { models: data, groups } : url.pathname === '/api/me/groups' ? { current: 'default', data: groups.map((g) => ({ code: g.code })) } : {} })
+      return route.fulfill({ json: url.pathname.startsWith('/api/pricing') ? catalogReply(url, data) : url.pathname === '/api/me/groups' ? { current: 'default', data: groups.map((g) => ({ code: g.code })) } : {} })
     }
     expect(url.hostname).toBe('127.0.0.1')
     return route.continue()
@@ -55,64 +82,52 @@ const pagedModels = [
   ...Array.from({ length: 124 }, (_, i) => model(`demo-${i}`, 'OpenAI', `Demo ${i}`)),
   model('kimi-k3', 'Moonshot', 'ZZ Kimi K3'),
 ]
-type BrokenPage = 'empty' | 'repeated' | 'next' | 'total' | 'epoch' | 'http'
+type BrokenPage = 'empty' | 'repeated' | 'next' | 'epoch' | 'http'
 async function preparePaged(page: Page, data = pagedModels, catalogGroups: PricingGroup[] = groups) {
   const { errors } = await prepare(page, data)
   const calls: URL[] = []
   const state: { broken?: BrokenPage; wait?: Promise<void> } = {}
   await page.route(/\/api\/pricing(?:\?|$)/, async (route) => {
-    expect(route.request().method()).toBe('GET')
     const url = new URL(route.request().url())
     calls.push(url)
-    // Deliberately clamp model pages below the requested 100: the client must
-    // follow returned offsets, not assume that every request is a full batch.
-    const limit = Math.min(Number(url.searchParams.get('limit') ?? 20), 30)
     const offset = Number(url.searchParams.get('offset') ?? 0)
-    const groupLimit = Math.min(Number(url.searchParams.get('group_limit') ?? 20), 100)
-    const groupOffset = Number(url.searchParams.get('group_offset') ?? 0)
     if (offset > 0) {
       await state.wait
       if (state.broken === 'http') return route.fulfill({ status: 503, json: { error: { code: 'internal_error' } } })
     }
-    const groupBatch = catalogGroups.slice(groupOffset, groupOffset + groupLimit)
-    const codes = new Set(groupBatch.map((g) => g.code))
-    const batch = data.slice(offset, offset + limit).map((m) => ({ ...m,
-      groups: m.groups.filter((code) => codes.has(code)),
-      chat_endpoints_by_group: m.chat_endpoints_by_group && Object.fromEntries(Object.entries(m.chat_endpoints_by_group).filter(([code]) => codes.has(code))),
-    }))
-    const meta = (total: number, size: number, start: number, count: number) => ({ total, limit: size, offset: start, has_more: start + count < total, next_offset: start + count < total ? start + count : null })
-    const body = { pricing_epoch: 4, models: batch, groups: groupBatch, ...meta(data.length, limit, offset, batch.length),
-      groups_page: meta(catalogGroups.length, groupLimit, groupOffset, groupBatch.length) }
+    const body = catalogReply(url, data, catalogGroups) as ReturnType<typeof catalogReply> & { models: PricingModel[]; next_offset: number | null; pricing_epoch: number }
     if (offset > 0) {
       if (state.broken === 'empty') body.models = []
-      if (state.broken === 'repeated') body.models[0] = { ...body.models[0], model: data[0].model }
+      if (state.broken === 'repeated') body.models[1] = body.models[0]
       if (state.broken === 'next') body.next_offset = offset
-      if (state.broken === 'total') body.total++
-      if (state.broken === 'epoch') body.pricing_epoch++
     }
+    if (state.broken === 'epoch' && Number(url.searchParams.get('group_offset') ?? 0) > 0) body.pricing_epoch++
     return route.fulfill({ json: body })
   })
   return { calls, errors, state }
 }
 
-test('分页接口完整加载：厂商、搜索、页数和尾页均覆盖首 20 条以外的模型', async ({ page }) => {
+test('模型广场只取当前页，厂商与总数来自独立统计；筛选和末页通过服务端加载', async ({ page }) => {
   const { calls, errors } = await preparePaged(page)
   await page.goto('/pricing')
   await expect(page.locator('article')).toHaveCount(24)
-  expect(calls.map((url) => Number(url.searchParams.get('offset') ?? 0))).toEqual([0, 20, 50, 80, 110])
+  expect(calls.map((url) => Number(url.searchParams.get('offset')))).toEqual([0])
+  expect(calls[0].searchParams.get('limit')).toBe('24')
   const vendors = page.getByRole('navigation', { name: '模型厂商' })
   await expect(vendors.getByRole('button', { name: /全部厂商/ })).toContainText('125')
   await expect(vendors.getByRole('button', { name: /OpenAI/ })).toContainText('124')
   await vendors.getByRole('button', { name: /Moonshot/ }).click()
   await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+  expect(JSON.parse(calls.at(-1)!.searchParams.get('vendors')!)).toContain('moonshot')
   await page.getByRole('button', { name: '清除筛选' }).first().click()
   await page.getByRole('searchbox').fill('kimi')
   await expect(page.locator('article')).toHaveCount(1)
-  await expect(page.locator('article')).toContainText('kimi-k3')
+  expect(calls.at(-1)!.searchParams.get('q')).toBe('kimi')
   await page.getByRole('button', { name: '清除筛选' }).first().click()
   await page.getByRole('button', { name: '6', exact: true }).click()
   await expect(page.locator('article')).toHaveCount(5)
   await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+  expect(calls.at(-1)!.searchParams.get('offset')).toBe('120')
   await expect(page.getByRole('button', { name: '下一页' })).toBeDisabled()
   await page.reload()
   await expect(page.getByRole('button', { name: '6', exact: true })).toHaveAttribute('aria-current', 'page')
@@ -120,68 +135,87 @@ test('分页接口完整加载：厂商、搜索、页数和尾页均覆盖首 2
   expect(errors).toEqual([])
 })
 
-test('分页后模型深链接可直接打开，不受当前卡片页限制', async ({ page }) => {
-  await preparePaged(page)
-  await page.goto('/pricing?model=kimi-k3&tab=code&pageSize=12')
+test('跨页详情和对比只按选中模型 ID 查询，不下载其他页', async ({ page }) => {
+  const { calls } = await preparePaged(page)
+  await page.goto('/pricing?model=kimi-k3&tab=code&pageSize=12&compare=demo-0,kimi-k3')
   await expect(page.getByRole('dialog')).toContainText('kimi-k3')
   await expect(page.getByRole('tab', { name: '调用示例' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('region', { name: '模型对比托盘' })).toContainText('已选 2 / 4 个模型')
+  expect(calls).toHaveLength(3)
+  expect(calls.every((url) => url.searchParams.get('offset') === '0')).toBe(true)
+  expect(calls.filter((url) => url.searchParams.has('model')).map((url) => [url.searchParams.get('model'), url.searchParams.get('limit')])).toEqual([['demo-0', '1'], ['kimi-k3', '1']])
   await page.keyboard.press('Escape')
   await expect(page.locator('article')).toHaveCount(12)
   await expect(page.locator('article[data-model="kimi-k3"]')).toHaveCount(0)
+  await page.getByRole('button', { name: '开始对比' }).click()
+  await expect(page.getByRole('dialog', { name: '模型对比' })).toContainText('kimi-k3')
+  expect(calls).toHaveLength(3)
 })
 
-test('后续分页未完成时不展示半份目录，页码也不提前计算', async ({ page }) => {
-  const { state } = await preparePaged(page)
+test('翻页加载期间不展示上一页，统计保持全目录数量', async ({ page }) => {
+  const { state, calls } = await preparePaged(page)
+  await page.goto('/pricing')
+  await expect(page.locator('article')).toHaveCount(24)
   let release: () => void = () => undefined
   state.wait = new Promise<void>((resolve) => { release = resolve })
-  await page.goto('/pricing')
+  await page.getByRole('button', { name: '下一页' }).click()
   await expect(page.getByRole('status')).toBeVisible()
   await expect(page.locator('article')).toHaveCount(0)
-  await expect(page.locator('#catalog-group')).toBeDisabled()
+  await expect(page.getByRole('navigation', { name: '模型厂商' }).getByRole('button', { name: /OpenAI/ })).toContainText('124')
   release()
   await expect(page.locator('article')).toHaveCount(24)
-  await expect(page.getByRole('button', { name: '6', exact: true })).toBeVisible()
+  expect(calls.map((url) => url.searchParams.get('offset'))).toEqual(['0', '24'])
 })
 
-test('分组也分页时合并每个模型的可用分组与接口，仍只显示本人可见分组', async ({ page }) => {
-  const manyGroups: PricingGroup[] = Array.from({ length: 125 }, (_, i) => ({
-    code: i === 0 ? 'default' : `group-${i}`, name: `分组 ${i}`, ratio: '1', is_default: i === 0, self_select: i < 124,
-  }))
-  const data = [...pagedModels.slice(0, 24), model('kimi-k3', 'Moonshot', 'ZZ Kimi K3', {
-    groups: ['group-123', 'group-124'], chat_endpoints_by_group: { 'group-123': ['/v1/responses'], 'group-124': ['/v1/messages'] },
-  })]
+test('分组分页只补充当前页和选中详情的分组，并保留本人可见范围', async ({ page }) => {
+  const manyGroups: PricingGroup[] = Array.from({ length: 125 }, (_, i) => ({ code: i === 0 ? 'default' : `group-${i}`, name: `分组 ${i}`, ratio: '1', is_default: i === 0, self_select: i < 124 }))
+  const data = [...pagedModels.slice(0, 24), model('kimi-k3', 'Moonshot', 'ZZ Kimi K3', { groups: ['group-123', 'group-124'], chat_endpoints_by_group: { 'group-123': ['/v1/responses'], 'group-124': ['/v1/messages'] } })]
   const { calls } = await preparePaged(page, data, manyGroups)
   await page.addInitScript(() => localStorage.setItem('okapi.key', 'catalog-paged-user'))
   await page.route('**/api/me/groups', (route) => route.fulfill({ json: { current: 'default', data: [{ code: 'default' }, { code: 'group-123' }] } }))
   await page.goto('/pricing?vendor=moonshot&group=group-123&available=true&model=kimi-k3&tab=code')
   const drawer = page.getByRole('dialog')
-  await expect(drawer).toBeVisible()
-  await expect(page.locator('#detail-group')).toHaveValue('group-123')
+  await expect(drawer.locator('#detail-group')).toHaveValue('group-123')
   await expect(drawer.getByLabel('接口模板', { exact: true })).toHaveValue('responses')
   await expect(drawer.locator('#example-template option')).toHaveCount(1)
   expect(await page.locator('#catalog-group option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['', 'default', 'group-123'])
   await expect(drawer.getByText('分组 124', { exact: true })).toHaveCount(0)
   await page.keyboard.press('Escape')
   await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
-  expect(calls.map((url) => [Number(url.searchParams.get('offset') ?? 0), Number(url.searchParams.get('group_offset') ?? 0)])).toEqual([[0, 0], [0, 20], [0, 120], [20, 0], [20, 100]])
+  expect(calls).toHaveLength(4)
+  expect(calls.every((url) => url.searchParams.get('offset') === '0')).toBe(true)
+  expect(calls.filter((url) => url.searchParams.get('group_offset') === '100')).toHaveLength(2)
 })
 
-for (const broken of ['empty', 'repeated', 'next', 'total', 'epoch', 'http'] as const) {
-  test(`后续分页异常不伪装完整目录且可重试：${broken}`, async ({ page }) => {
+for (const broken of ['empty', 'repeated', 'next', 'http'] as const) {
+  test(`当前页异常显示错误，可原页重试：${broken}`, async ({ page }) => {
     const { state, calls } = await preparePaged(page)
-    state.broken = broken
     await page.goto('/pricing')
+    await expect(page.locator('article')).toHaveCount(24)
+    state.broken = broken
+    await page.getByRole('button', { name: '下一页' }).click()
     await expect(page.getByRole('alert')).toBeVisible()
     await expect(page.locator('article')).toHaveCount(0)
-    await expect(page.locator('#catalog-group')).toBeDisabled()
     expect(calls).toHaveLength(2)
     state.broken = undefined
     await page.getByRole('button', { name: '重试' }).click()
     await expect(page.locator('article')).toHaveCount(24)
-    await page.getByRole('searchbox').fill('kimi')
-    await expect(page.locator('article[data-model="kimi-k3"]')).toBeVisible()
+    expect(calls.at(-1)!.searchParams.get('offset')).toBe('24')
   })
 }
+
+test('目录厂商超过 100 个时仅翻统计页，不追加模型页', async ({ page }) => {
+  const data = Array.from({ length: 125 }, (_, i) => model(`vendor-${i}`, `Studio ${i}`, `Model ${i}`))
+  const { calls } = await preparePaged(page, data)
+  const stats: string[] = []
+  page.on('request', (request) => { if (request.url().includes('/api/pricing/stats')) stats.push(request.url()) })
+  await page.goto('/pricing')
+  await expect(page.locator('article')).toHaveCount(24)
+  await expect(page.getByRole('navigation', { name: '模型厂商' }).getByRole('button')).toHaveCount(126)
+  expect(calls).toHaveLength(1)
+  expect(stats).toHaveLength(2)
+  expect(new URL(stats[1]).searchParams.get('vendor_offset')).toBe('100')
+})
 
 test('目录按显式厂商归一，零价、未知价和不同计费单位分开处理', () => {
   expect(modelVendor(model('gpt-private', 'My lab', null))).toEqual({ id: 'custom:my lab', name: 'My lab' })
@@ -225,7 +259,7 @@ test('调用示例按分组过滤协议，仅 Responses 时不再提供 Chat 模
   await expect(drawer.getByLabel('生成的调用示例')).toContainText('/v1/chat/completions')
 })
 
-test('桌面厂商图标、搜索和能力筛选清晰可用，无额外请求', async ({ page }) => {
+test('桌面厂商图标、搜索和能力筛选清晰可用，条件变化重新请求', async ({ page }) => {
   const { calls, errors } = await prepare(page)
   await page.setViewportSize({ width: 1440, height: 1100 })
   await page.goto('/pricing')
@@ -246,7 +280,7 @@ test('桌面厂商图标、搜索和能力筛选清晰可用，无额外请求',
   await expect(page.locator('article[data-model]')).toHaveCount(3)
   await page.getByLabel('仅看已接入').check()
   await expect(page.locator('article[data-model]')).toHaveCount(3)
-  expect(calls.filter((c) => c === '/api/pricing')).toHaveLength(1)
+  expect(calls.filter((c) => c === '/api/pricing').length).toBeGreaterThan(1)
   expect(errors).toEqual([])
 })
 
@@ -380,13 +414,13 @@ test('加载、失败与空目录各有明确状态', async ({ page }) => {
   await prepare(page, [])
   let release: () => void = () => undefined
   const gate = new Promise<void>((resolve) => { release = resolve })
-  await page.route('**/api/pricing', async (route) => { await gate; await route.fulfill({ status: 403, json: { error: { code: 'permission_denied' } } }) })
+  await page.route('**/api/pricing?*', async (route) => { await gate; await route.fulfill({ status: 403, json: { error: { code: 'permission_denied' } } }) })
   await page.goto('/pricing')
   await expect(page.getByRole('status')).toBeVisible()
   await expect(page.getByText('本站暂未发布模型价格。')).toHaveCount(0)
   release()
   await expect(page.getByRole('alert')).toBeVisible()
-  await page.unroute('**/api/pricing')
+  await page.unroute('**/api/pricing?*')
   await page.getByRole('button', { name: '重试' }).click()
   await expect(page.getByText('本站暂未发布模型价格。')).toBeVisible()
 })
@@ -400,9 +434,9 @@ test('调用示例可编辑与复制，地址指向网关，密钥不进入代�
   const drawer = page.getByRole('dialog')
   await expect(drawer.getByRole('tab', { name: '调用示例' })).toHaveAttribute('aria-selected', 'true')
   await expect(page).toHaveURL(/tab=code/)
-  await expect(drawer.getByLabel('接口基础地址（Base URL）')).toHaveValue('http://127.0.0.1:8080/v1')
+  await expect(drawer.getByLabel('接口基础地址（Base URL）')).toHaveValue(defaultApiBase(new URL(page.url()).origin))
   await drawer.getByRole('button', { name: '复制请求 URL' }).click()
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe('http://127.0.0.1:8080/v1/chat/completions')
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(`${defaultApiBase(new URL(page.url()).origin)}/chat/completions`)
   await drawer.getByLabel('接口基础地址（Base URL）').fill('https://gateway.example.com/api/v1/')
   await drawer.getByText('编辑请求输入', { exact: true }).click()
   await drawer.getByLabel('请求输入', { exact: true }).fill('Tell me about "quoted" text and $HOME.\n你好')
@@ -435,7 +469,7 @@ test('调用示例可编辑与复制，地址指向网关，密钥不进入代�
   await expect(drawer.getByRole('button', { name: '下载 .sh 脚本' })).toBeDisabled()
   await page.reload()
   await expect(drawer.getByRole('tab', { name: '调用示例' })).toHaveAttribute('aria-selected', 'true')
-  expect(calls.filter((path) => path === '/api/pricing')).toHaveLength(2)
+  expect(calls.filter((path) => path === '/api/pricing')).toHaveLength(4)
   expect(errors).toEqual([])
   await page.screenshot({ path: 'test-results/catalog-api-examples.png', animations: 'disabled' })
 })
@@ -472,7 +506,7 @@ const scopedModel = model('scoped-model', 'OpenAI', 'Scoped model', {
 async function visibilityFixture(page: Page, signedIn: boolean) {
   await prepare(page, [scopedModel])
   if (signedIn) await page.addInitScript(() => localStorage.setItem('okapi.key', 'catalog-user-a'))
-  await page.route('**/api/pricing', (route) => route.fulfill({ json: { models: [scopedModel], groups: privateGroups } }))
+  await page.route('**/api/pricing?*', (route) => route.fulfill({ json: catalogReply(new URL(route.request().url()), [scopedModel], privateGroups) }))
   await page.route('**/api/me/groups', (route) => route.fulfill({ json: {
     current: 'default', data: ['default', 'economy', ...(route.request().headers().authorization === 'Bearer catalog-user-a' ? ['assigned'] : [])].map((code) => ({ code })),
   } }))
@@ -502,6 +536,7 @@ test('分组可见性：用户含管理员分配组，详情与价格候选一�
   await page.evaluate(() => localStorage.setItem('okapi.key', 'catalog-user-b'))
   await page.locator('#detail-group').selectOption('default')
   await expect(page.locator('#detail-group option[value="assigned"]')).toHaveCount(0)
+  await expect(page.locator('#catalog-group')).toBeEnabled()
   expect(await page.locator('#catalog-group option').evaluateAll((options) => options.map((o) => (o as HTMLOptionElement).value))).toEqual(['', 'default', 'economy'])
 })
 

@@ -112,3 +112,50 @@ test('空记录仍填满右栏，手机单列正常滚动而不裁掉内容', as
   await expect(recent).toBeInViewport({ ratio: 1 })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
+
+test('进入安全页后密码与导航搜索属于独立表单，密码输入不触发搜索，手动搜索仍可跳转', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/portal/ledger')
+  const sidebar = page.locator('#app-navigation')
+  const search = sidebar.getByRole('searchbox', { name: '搜索功能', exact: true })
+  await sidebar.getByRole('link', { name: '安全', exact: true }).click()
+  await expect(page).toHaveURL(/\/portal\/security$/)
+  await expect(search).toHaveValue('')
+
+  const password = page.locator('#totp-password')
+  // 密码管理器按原生表单归属识别账号字段；不能再把侧栏搜索与密码配成一组。
+  expect(await password.evaluate((input: HTMLInputElement) => {
+    const search = document.querySelector<HTMLInputElement>('#app-navigation input[type="search"]')!
+    return {
+      isolated: input.form !== null && search.form !== null && input.form !== search.form,
+      credentials: input.form ? Array.from(new FormData(input.form).keys()) : [],
+      searchFields: search.form ? Array.from(new FormData(search.form).keys()) : [],
+    }
+  })).toEqual({ isolated: true, credentials: ['password'], searchFields: ['navigation-query'] })
+  await expect(search).toHaveAttribute('autocomplete', 'off')
+  await expect(password).toHaveAttribute('autocomplete', 'current-password')
+  await password.fill('fixture-security-password')
+  await password.press('Enter')
+  await expect(page).toHaveURL(/\/portal\/security$/)
+  await expect(page.getByRole('button', { name: '开始绑定', exact: true })).toBeEnabled()
+  await expect(search).toHaveValue('')
+  await expect(sidebar.getByRole('link', { name: '安全', exact: true })).toBeVisible()
+
+  await search.fill('安全')
+  await expect(sidebar.getByRole('navigation').getByRole('link')).toHaveCount(1)
+  await search.press('Enter')
+  await expect(page).toHaveURL(/\/portal\/security$/)
+  await expect(search).toHaveValue('')
+  await expect(sidebar.getByRole('link', { name: '个人中心', exact: true })).toBeVisible()
+
+  const enrollments: unknown[] = []
+  await page.route('**/auth/totp/enroll', (route) => {
+    expect(route.request().method()).toBe('POST')
+    enrollments.push(route.request().postDataJSON())
+    return route.fulfill({ json: { otpauth_url: 'otpauth://totp/Okapi:fixture?secret=JBSWY3DPEHPK3PXP', pending: 'fixture-pending' } })
+  })
+  await page.getByRole('button', { name: '开始绑定', exact: true }).click()
+  await expect(page.locator('#code')).toBeVisible()
+  expect(enrollments).toEqual([{ password: 'fixture-security-password' }])
+  await expect(search).toHaveValue('')
+})

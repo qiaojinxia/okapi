@@ -198,6 +198,7 @@ CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对
 -- provider=anthropic_max / codex（IMPLEMENTATION §11.38，实验性）：站长自己的订阅经 OAuth 登录；channel_keys.credential_ciphertext 里是
 -- JSON `{"kind":"oauth","access_token","refresh_token","expires_at"(unix 秒),"account_id"?}`（仍经 AES-GCM 信封，非 JSON 凭证照旧当静态 key）。
 -- 刷新按 §4.3 四步锁惰性发生（Redis `lock:cred:<key_id>`），refresh token 轮转即回写；invalid_grant → key status=6。
+-- 首字前 OAuth API 401 对被拒 access_token 锁内强制刷新一次；仍失败冷却 30s，invalid_grant/缺 refresh_token 保持 invalid。
 -- anthropic_max：api_base 缺省 `https://api.anthropic.com/v1`，Bearer + `anthropic-beta: oauth-2025-04-20` + system 首句前置；
 -- codex：api_base 缺省 `https://chatgpt.com/backend-api/codex`，只走 Responses，头 `chatgpt-account-id` / `originator: codex_cli_rs`，store 恒 false。
 
@@ -631,6 +632,8 @@ CREATE TABLE audit_logs (                             -- 管理操作审计（�
     PRIMARY KEY (id, created_at)
 ) PARTITION BY RANGE (created_at);
 
+-- settings.streaming_policy = {idle_timeout_secs: 1..480 (默认 120), heartbeat_secs: 1..60 (默认 15)}；
+-- 上游事件空闲与客户端心跳独立，总请求预算 8min，超时部分产出走现有结算。
 CREATE TABLE settings (                               -- 全局 KV（site_notice / registration_policy / model_rpm_limits / 内容审计三态 ...）
     key        VARCHAR(128) PRIMARY KEY,
     value      JSONB NOT NULL,
@@ -914,6 +917,23 @@ CH `ratio_snapshot` 同一 JSON 中；直接 Images 另有 `image_cache_usage` �
 若缓存模态和时长是重叠边际且缺少联合分配，独立时长价格与通用价格不同时拒绝不明确计算，不能猜测交叉数量。
 本配置是缓存创建价格，不会设置缓存 TTL；自定义时长和存储时间费仍需各协议的计量支持。
 
+**两档 TTL 长期观察契约（2026-10-01，实施验证中）：** 新增独立无 TTL 的
+`mv_cache_ttl_5min`，维度与 `mv_token_details_5min` 相同。记录全部调用的
+`countState`，以及 5 分钟、1 小时各自的数值和与样本数。只有写入已采集、
+两档均非空且两档之和等于总写入量时才算有效样本；明确的零为有效值，
+缺失/矛盾/单档值不补零。退款是财务事件，不增加调用或 TTL 样本。
+该聚合接入既有可信请求分类和完整维度覆盖探针，与九轴细分聚合独立选源，
+不能因新增 TTL 聚合不完整而丢弃已保留的九轴历史。
+
+管理/个人统计及两类日志的 `token_detail_observations` 增加
+`cache_write_5m_tokens` / `cache_write_1h_tokens`：完整范围才返回 `tokens`，
+另提供 `observed_tokens` / `observed_records` / `coverage_bp` / `complete`。
+看板另提供 `cache_write_ttl_history`，区分已保留的请求历史覆盖和 TTL 采集覆盖。
+按每个实际查询粒度选择完整聚合或 raw，缺口只选一个可证明的子集，不相加
+重叠来源、不将整日 TTL 数量分配给未知小时/渠道。无 POPULATE，不恢复已删除的
+旧 TTL 细分；若 raw 仍完整可以恢复旧查询。新增的是观察能力，价格公式、四金额
+和账单的 TTL 字段不变。验收记录见 [TTL 长期统计核对](cache-ttl-retention-audit.md)。
+
 | MV | 主键 | 服务场景 |
 | --- | --- | --- |
 | mv_user_day | (user_id, day) | 用户概览、消耗趋势、本月节省、排行榜 |
@@ -1186,7 +1206,7 @@ Redis `settlement:{retry}:payloads`（HASH，request_id → 完整结算输入�
 
 时间口径来自机器 `TZ`、`/etc/localtime` 或 `/etc/timezone` 的 IANA 名称；多副本应配置一致。PG 每条连接设置此时区，CH 查询指定 session_timezone。CH `ts`、ingested_at、历史校准时间显式 UTC，写入 UTC 墙钟字符串不会随容器时区改变。新增 `mv_calendar_minute`（minute,user_id,api_key_id,group_code,model,client_type）：countState 已投递记录数（物理列仍名为 requests，含退款，不能直接作为 API 调用数）；Token 四轴与合计、四金额、错误的 sumState；缓存写入 sumState、数字存在与读写上报的 countIfState。无 TTL，保持原始日志到期后的本地日历统计。该 MV 独立新增，不 POPULATE、不覆盖旧表。
 
-非 UTC 日查询在每个旧小时与所需维度比较新分钟聚合的请求覆盖；完全相等时选择分钟，否则整桶选择旧小时，不能相加。旧小时的起止时刻必须属于同一本地日期；否则返回 `statistics_calendar_history_incomplete` 存储错误，禁止把半小时/四分之三小时时区的午夜两侧混算。分钟起止日期也需相同，避免历史秒级偏移误分。四金额在分钟来源独立保留；旧 cube 来源的 original 仍按 amount+discount 恢复。客户端保留原 uniq 聚合状态；缓存数值/采集计数保持相同来源。仅有旧 UTC 日桶而没有小时/分钟证据的客户端与缓存历史仍无法重建，原表保留供核查。历史 raw 回填必须单独检查覆盖与幂等，当前升级不自动回填。查询性能仍须在生产规模另行验收。
+非 UTC 日查询在每个旧小时与所需维度比较新分钟聚合的财务记录覆盖；完全相等时选择分钟，否则整桶选择旧小时，不能相加。旧小时的起止时刻必须属于同一本地日期；否则返回 `statistics_calendar_history_incomplete` 存储错误，禁止把半小时/四分之三小时时区的午夜两侧混算。分钟起止日期也需相同，避免历史秒级偏移误分。四金额在分钟来源独立保留；旧 cube 来源的 original 仍按 amount+discount 恢复。客户端保留原 uniq 聚合状态；缓存数值/采集计数保持相同来源。仅有旧 UTC 日桶而没有小时/分钟证据的客户端与缓存历史仍无法重建，原表保留供核查。历史 raw 回填必须单独检查覆盖与幂等，当前升级不自动回填。查询性能仍须在生产规模另行验收。
 
 旧 UTC 日状态也参与覆盖检查：按原视图维度比较日请求（缓存视图比较相应已观察计数）与 UTC 小时合计。旧日更多时，两个可能受影响的本地日期保留带错误闸的原聚合状态；读取这些日期的度量会明确拒绝，不能把保留的旧消耗显示成零。其他用户/维度和无关日期不受此错误闸影响。该路径只暴露证据不足，不把 UTC 日数额伪装成本地日数额。
 
@@ -1196,7 +1216,9 @@ Redis `settlement:{retry}:payloads`（HASH，request_id → 完整结算输入�
 
 调用计数排除 `log_type=6` 退款调整。原日/小时与日历分钟聚合的 countState 仍是财务记录数，保留作覆盖证据。新增独立 `population_v1_mv_*`：由嵌入式 MV 定义确定相同粒度和状态类型，调用与测量使用 StateIf 外层的 `log_type IN (2,5)`；四金额/成本已知数/财务时间保持全部事件；额外 countState `financial_records` 及 countStateIf `population_classified` 保存总记录与 2/5/6 分类覆盖。不覆盖既有表、不 POPULATE，无 raw TTL，原 materialized-view 幂等设置保留。
 
-`population_source_v1_mv_*` 是只读选择视图：每个完整粒度先比较原记录数与新总记录数，完整且可解释的新源优先；新源不足时仅用记录数足够且类型明确的 raw 重算。不能叠加两种来源。旧聚合缺分类且 raw 不全，调用/测量状态以 `statistics_request_history_incomplete` 拒绝猜值，财务专用读取保留旧金额。缓存无总计数的旧 MV 使用对应 key/day 或 cube/hour、analysis/hour 记录母表核对。原始日志筛选不改写为调用源；另有 `request_log_calls` 只读视图供采集与性能重算。分析补充范围按总财务记录而非调用数决定，退款只发生窗口仍保留负金额。成本覆盖以财务记录数为分母，新增 `financial_records`/`cost_known_records` 字段，兼容旧 `cost_known_requests` 的记录计数，不视作纯调用计数。
+`population_source_v2_mv_*` 是只读选择视图（v1 旧读取定义保留，v1 分类物理状态沿用）：每个完整粒度先比较原记录数与新总记录数，完整且可解释的新源优先；新源不足时仅用记录数足够且类型明确的 raw 重算。不能叠加两种来源。旧聚合缺分类且 raw 不全，主调用/Token/错误状态以 `statistics_request_history_incomplete` 拒绝猜值，财务专用读取保留旧金额。独立测量读取分类调用子集，与主调用数核对覆盖，不能使用旧测量记录数扩大财务事实。原始日志筛选不改写为调用源；另有 `request_log_calls` 只读视图供采集与性能重算。分析补充范围按总财务记录而非调用数决定，退款只发生窗口仍保留负金额。成本覆盖以财务记录数为分母，新增 `financial_records`/`cost_known_records` 字段，兼容旧 `cost_known_requests` 的记录计数，不视作纯调用计数。
+
+读写限制聚合哈希表预分配到 8192 个元素，不截断真实分组；查询执行时间 15 秒、内存 2,000,000,000 字节不变。每次读取先以原记录和分类记录状态核对被引用主事实表（金额/错误）的完整粒度，完整表直接读取分类聚合；未证明完整的主事实表走恢复视图。独立测量表读已分类的测量子集，覆盖不足由调用方与主调用数比较并择一恢复完整 raw，否则输出部分覆盖/null；旧测量计数不作为主财务记录数。证明不缓存，但与最终统计是两次读取，只承诺既有异步新鲜度。简单存储键 WHERE 引用按实际范围并集单独证明，重复条件只保留一次；复杂/别名引用另保守核对全表。两份证明不混用：某个复杂引用未完整不能迫使已证明的简单范围恢复，也不能由简单范围证明授权该复杂引用。两种路径的历史大基数成本仍须性能验收；恢复 CTE 的 view() 隔离减少外层列引用对子树重复哈希。
 
 以上实现正在联测，不能宣称所有端点或生产历史已验收；证据和未完成边界见 [退款与调用统计样本范围](request-population-audit.md)。
 
@@ -1223,3 +1245,10 @@ HTTP 请求 span 仅记录 URL 路径，查询字符串中的 Gemini key、OAuth
 NATS relay 使用 `billing_outbox.next_retry_at` 作为 10 分钟认领租约；最终状态更新必须重新匹配原租约并取行锁。网络 I/O 不持 PG 事务。毒消息 DLQ 用 `outbox:<event_id>` 唯一键保留原始载荷，重投恢复原 outbox 身份，避免重建 event_id 导致重复统计。DEFAULT 分区旧行每批最多 1000，在保留策略排他锁下先移入 `billing_event_carry` / `billing_record_receipts` 再删除，同一事务失败则整体回滚。
 
 迁移 0032 增加 `video_tasks.refund_pending`：失败/超时与成功完成通过条件 UPDATE 原子争抢 pending 终态；先持久化退款意图、释放 PG 事务后执行幂等退款。进程中断或退款后状态更新失败，worker 继续扫描 refund_pending 并重复同一 request_id 退款，完成后标记 refunded。已完成的任务不会被超时分支退款。
+
+
+统计覆盖探测与来源构建在展开前应用全部可用主维度（user/key/channel、已计费模型、分组及模型/分组数组）；字符串通过同一组 CH 绑定参数传递，不拼接输入。详细维度不在旧主聚合伪造。非法指标与流向阶段先于覆盖查询校验。JSONEachRow 查询及其覆盖探测的 HTTP200 部分响应如含 exception，整次读取失败；缺分类 raw 汇总不得填零，原始明细可照常检索。 历史缺失错误只接受 CH `throwIf` 的 Code 395 且主异常消息以完整契约错误码开头（兼容纯文本及 JSON `exception` 封装）；SQL 回显、堆栈或其他 CH 错误码提及同名字符串不构成历史缺失证据。普通查询错误保留存储错误类型，不能误提示历史不可恢复。后续固定源码验收记录在样本范围审计中。
+
+CH 查询限定聚合与 Join 哈希预分配 8192（不截断实际分组），读块 8192；写入限定聚合预分配、块 8192、MV 目标块 8192 行/4MiB、JSON 串行解析。15 秒/2GB 查询执行护栏未扩大。该设置改变写入块形成，本轮八项实际投递幂等回归已通过，仍不代表生产容量验收。
+
+统计分类快路径证明可按实际 SELECT 范围裁剪：可确认仅使用持久粒度键 WHERE 的同名引用，在范围并集核对旧记录、新记录与分类覆盖，并使用数据查询的绑定参数和机器时区；复杂引用另核对全表。仅给各自证明覆盖的引用选择分类快路径，复杂引用未证明完整时继续恢复。该证明仍为每次读取生成，不改变恢复择一/缺分类拒绝的语义，也不扩大计划优化数或执行资源上限。

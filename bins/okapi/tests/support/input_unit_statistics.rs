@@ -15,7 +15,7 @@ async fn input_units_keep_characters_zero_unknown_filters_and_totals_after_raw_e
     let result = std::panic::AssertUnwindSafe(check_retained(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -70,7 +70,9 @@ async fn check_retained(env: &Env, ch: &ChClient) {
     check_views(env, key).await;
     // Re-running installation and batch replay leave aggregate populations unchanged.
     ch.ensure_schema().await.unwrap();
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     check_views(env, key).await;
 }
 
@@ -178,7 +180,7 @@ async fn upgraded_character_aggregate_recovers_raw_once_then_marks_missing_histo
     let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -188,7 +190,7 @@ async fn upgraded_character_aggregate_recovers_raw_once_then_marks_missing_histo
 
 async fn check_upgrade(env: &Env, ch: &ChClient) {
     let key = key_id(env).await;
-    ch.execute("DROP TABLE mv_input_units_5min SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_input_units_5min SYNC")
         .await
         .unwrap();
     insert(ch, &[sample(env, key, "characters", json!(11), 0, 0)]).await;
@@ -197,7 +199,9 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
     let path = format!("/admin/stats/trend?days=2&user_id={}", env.user_id);
     let body = request(env, &path, false).await;
     assert_units(&body["total"], 2, 11, 2, 0, 0);
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     let body = request(env, &path, false).await;
     assert_units(&body["total"], 2, 0, 1, 0, 1);
     assert_eq!(body["total"]["tokens"], 0);

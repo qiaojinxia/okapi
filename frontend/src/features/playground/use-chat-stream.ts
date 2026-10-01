@@ -22,16 +22,19 @@ export interface Turn {
   ttftMs?: number
   durationMs?: number
   /// 后端 error_code（i18n 在 errors 命名空间渲染）；有值 = 这条回复失败。
-  error?: { code: string; status: number; param?: string }
+  error?: { code: string; status: number; param?: string; message?: string }
   streaming?: boolean
 }
 
 export interface SendOptions {
   model: string
   system: string
-  temperature: number
-  top_p: number
+  temperature: number | null
+  top_p: number | null
   max_tokens: number | null
+  reasoning_effort?: string | null
+  thinking_budget?: number | null
+  preserve_reasoning?: boolean
   /// 选用的密钥：`keyId` 为空 = 登录会话；`group` 是该次请求生效的价目分组。
   keyId: number | null
   keyName: string | null
@@ -103,7 +106,9 @@ export function useChatStream(userId?: number) {
       if (key === null || busy || text.trim() === '' || opts.model.trim() === '') return
       const history: ChatMessage[] = base
         .filter((t) => t.error === undefined && (t.role === 'user' || t.content !== ''))
-        .map((t) => ({ role: t.role, content: t.content }))
+        .map((t) => ({ role: t.role, content: t.content,
+          ...(opts.preserve_reasoning && t.role === 'assistant' && t.requested === opts.model.trim() && typeof t.reasoning === 'string' ? { reasoning_content: t.reasoning } : {}),
+        }))
       const messages: ChatMessage[] = [
         ...(opts.system.trim() !== '' ? [{ role: 'system' as const, content: opts.system.trim() }] : []),
         ...history,
@@ -112,9 +117,11 @@ export function useChatStream(userId?: number) {
       const params: ChatParams = {
         model: opts.model.trim(),
         messages,
-        temperature: opts.temperature,
-        top_p: opts.top_p,
+        ...(opts.temperature !== null ? { temperature: opts.temperature } : {}),
+        ...(opts.top_p !== null ? { top_p: opts.top_p } : {}),
         ...(opts.max_tokens !== null ? { max_tokens: opts.max_tokens } : {}),
+        ...(opts.reasoning_effort ? { reasoning_effort: opts.reasoning_effort } : {}),
+        ...(opts.thinking_budget != null ? { reasoning: { max_tokens: opts.thinking_budget } } : {}),
       }
       const userTurn: Turn = { id: nextId.current++, role: 'user', content: text }
       const assistantTurn: Turn = { id: nextId.current++, role: 'assistant', content: '', requested: params.model, group: opts.group, via: opts.keyName ?? undefined, streaming: true }
@@ -136,8 +143,8 @@ export function useChatStream(userId?: number) {
           abortRef.current = null
           setBusy(false)
         },
-        onError: (code, status, param) => {
-          patchLast((t) => ({ ...t, streaming: false, error: { code, status, param } }))
+        onError: (code, status, param, message) => {
+          patchLast((t) => ({ ...t, streaming: false, error: { code, status, param, message } }))
           abortRef.current = null
           setBusy(false)
         },

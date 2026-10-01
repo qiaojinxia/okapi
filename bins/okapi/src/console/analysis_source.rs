@@ -1,7 +1,7 @@
 //! 新维度聚合 + 旧立方体未覆盖部分。TTFT 仅在新聚合覆盖不足时恢复原始样本。
 const KEYS: &str = "hour, user_id, api_key_id, group_code, model, channel_id";
 const DIMS: &str = "requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type";
-pub(super) const METRICS: [(&str, &str); 72] = [
+pub(super) const METRICS: [(&str, &str); 77] = [
     ("legacy_characters", ""),
     ("legacy_character_n", ""),
     ("output_rate_observed", ""),
@@ -55,6 +55,11 @@ pub(super) const METRICS: [(&str, &str); 72] = [
     ("cache_writes", ""),
     ("cache_write_n", ""),
     ("cache_read_n", ""),
+    ("ttl_observed", ""),
+    ("observed_cache_write_5m_tokens", ""),
+    ("observed_cache_write_5m_tokens_n", ""),
+    ("observed_cache_write_1h_tokens", ""),
+    ("observed_cache_write_1h_tokens_n", ""),
     ("detail_observed", ""),
     ("observed_audio_prompt_tokens", ""),
     ("observed_audio_prompt_tokens_n", ""),
@@ -194,6 +199,7 @@ fn joined_measurements(
                 predicate,
                 modes.details,
                 modes.units,
+                modes.ttl,
                 historical,
             ),
         ),
@@ -357,6 +363,8 @@ fn remainder_metrics(historical: bool) -> String {
             cache_remainder(name, &difference)
         } else if super::input_units::FIELDS.contains(name) {
             unit_remainder(name, &difference,historical)
+        } else if super::token_details::TTL_FIELDS.contains(name) {
+            format!("if(l.v_ttl_observed = l.v_requests AND ifNull(c.c_ttl_observed, 0) = ifNull(c.c_requests, 0) AND l.v_{name} >= ifNull(c.c_{name},0), {difference}, toInt64(0)) AS {name}")
         } else if super::token_details::FIELDS.contains(name) {
             format!("if(l.v_detail_observed = l.v_requests AND ifNull(c.c_detail_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}")
         } else if super::usage_sources::FIELDS.contains(name) {
@@ -433,6 +441,7 @@ mod tests {
             latency: Mode::Aggregate,
             usage: Mode::Aggregate,
             details: Mode::Aggregate,
+            ttl: Mode::Aggregate,
             cache: Mode::Aggregate,
             units: Mode::Aggregate,
             output_rate: Mode::Aggregate,

@@ -73,6 +73,14 @@ export function modelVendor(model: Pick<PricingModel, 'vendor'>): Vendor {
   return registry.get(normalize(raw)) ?? { id: `custom:${raw.toLowerCase()}`, name: raw }
 }
 
+// Send normalized aliases as bound server filters; custom vendors retain exact names.
+export function vendorFilter(id: string): Record<string, string> {
+  if (id === 'other') return { vendor: '' }
+  if (id.startsWith('custom:')) return { vendor: id.slice(7) }
+  const aliases = [...registry.entries()].filter(([, vendor]) => vendor.id === id).map(([alias]) => alias)
+  return aliases.length ? { vendors: JSON.stringify(aliases) } : { vendor: id }
+}
+
 export const capabilityKeys = ['vision', 'tools', 'json', 'reasoning', 'audio', 'video', 'embedding', 'realtime', 'parallel_tools', 'structured_output', 'streaming', 'prompt_cache', 'system_prompt', 'temperature', 'web_search', 'computer_use'] as const
 export function modelCapabilities(model: PricingModel) {
   return capabilityKeys.filter((key) => model.capabilities?.[key] === true)

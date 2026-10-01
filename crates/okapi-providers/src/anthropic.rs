@@ -114,17 +114,7 @@ impl AnthropicUpstream {
 /// 429 的冷却时长：`Retry-After` 优先；订阅路径的 429 只带 `anthropic-ratelimit-unified-reset`
 /// （unix 秒，5h/7d 窗口的重置点），据它推出剩余秒数（§11.38；API key 响应没有这个头）。
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<i64> {
-    let parse = |name: &str| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<i64>().ok())
-    };
-    parse("retry-after").or_else(|| {
-        let reset_at = parse("anthropic-ratelimit-unified-reset")?;
-        let remaining = reset_at - chrono::Utc::now().timestamp();
-        (remaining > 0).then_some(remaining)
-    })
+    crate::retry_after::seconds(headers)
 }
 
 /// 向任意 URL 发一次 Anthropic Messages 形状的请求（鉴权头由调用方给）：直连官方走

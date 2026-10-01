@@ -12,8 +12,9 @@ use crate::error::StoreError;
 use calendar::calendar_sql;
 use std::time::Duration;
 
-const QUERY_GUARD: &str =
-    "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576";
+const AGGREGATION_GUARD: &str = "max_size_to_preallocate_for_aggregation=8192&max_block_size=8192&max_insert_block_size=8192&min_insert_block_size_rows_for_materialized_views=8192&min_insert_block_size_bytes_for_materialized_views=4194304&input_format_parallel_parsing=0";
+
+const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192";
 
 #[derive(Clone)]
 pub struct ChClient {
@@ -67,6 +68,26 @@ impl ChClient {
         }
     }
 
+    fn query_url(&self, zone: &str, params: &[(&str, &str)]) -> String {
+        let mut url = format!(
+            "{}/?database={}&{}&session_timezone={}",
+            self.base,
+            self.database,
+            QUERY_GUARD,
+            urlencode(zone)
+        );
+        for (name, value) in params {
+            use std::fmt::Write as _;
+            let _ = write!(
+                url,
+                "&param_{}={}",
+                urlencode(name),
+                urlencode(&escape_parameter(value))
+            );
+        }
+        url
+    }
+
     pub async fn ping(&self) -> bool {
         self.http
             .get(format!("{}/ping", self.base))
@@ -82,17 +103,10 @@ impl ChClient {
             .send()
             .await?;
         let status = resp.status().as_u16();
-        let text = resp.text().await.unwrap_or_default();
+        let text = resp.text().await?;
         if !(200..300).contains(&status) {
-            if text.contains("statistics_calendar_history_incomplete") {
-                return Err(StoreError::InvalidData(
-                    "statistics_calendar_history_incomplete",
-                ));
-            }
-            if text.contains("statistics_request_history_incomplete") {
-                return Err(StoreError::InvalidData(
-                    "statistics_request_history_incomplete",
-                ));
+            if let Some(code) = history_error(&text) {
+                return Err(StoreError::InvalidData(code));
             }
             return Err(StoreError::ChStatus { status, body: text });
         }
@@ -102,8 +116,8 @@ impl ChClient {
     /// 执行单条 DDL/DML（database 已限定）。
     pub async fn execute(&self, sql: &str) -> Result<(), StoreError> {
         let url = format!(
-            "{}/?database={}&session_timezone=UTC",
-            self.base, self.database
+            "{}/?database={}&session_timezone=UTC&{}",
+            self.base, self.database, AGGREGATION_GUARD
         );
         self.post(url, sql.to_owned()).await?;
         Ok(())
@@ -148,11 +162,12 @@ impl ChClient {
         }
         let query = format!("INSERT INTO {table} FORMAT JSONEachRow");
         let url = format!(
-            "{}/?database={}&query={}&insert_deduplication_token={}&deduplicate_blocks_in_dependent_materialized_views=1&session_timezone=UTC",
+            "{}/?database={}&query={}&insert_deduplication_token={}&deduplicate_blocks_in_dependent_materialized_views=1&session_timezone=UTC&{}",
             self.base,
             self.database,
             urlencode(&query),
             urlencode(dedup_token),
+            AGGREGATION_GUARD,
         );
         let mut body = String::new();
         for row in rows {
@@ -192,20 +207,17 @@ impl ChClient {
         let complete = if referenced.is_empty() {
             Vec::new()
         } else {
-            let url = format!(
-                "{}/?database={}&{}&session_timezone=UTC",
-                self.base, self.database, QUERY_GUARD
-            );
+            let url = self.query_url(zone, params);
             let rows = self
                 .post(
                     url,
-                    format!("{} FORMAT JSONEachRow", population::coverage(&referenced)),
+                    format!(
+                        "{} FORMAT JSONEachRow",
+                        population::coverage(&sql, &referenced)
+                    ),
                 )
                 .await?;
-            rows.lines()
-                .map(serde_json::from_str::<serde_json::Value>)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| StoreError::InvalidData("clickhouse row not json"))?
+            parse_rows(&rows)?
                 .into_iter()
                 .filter(|row| row["missing"] == "0" || row["missing"] == 0)
                 .filter_map(|row| row["name"].as_str().map(str::to_owned))
@@ -213,35 +225,59 @@ impl ChClient {
         };
         let names = complete.iter().map(String::as_str).collect::<Vec<_>>();
         let sql = population::sql(&sql, &names)?;
-        let mut url = format!(
-            "{}/?database={}&{}&session_timezone={}",
-            self.base,
-            self.database,
-            QUERY_GUARD,
-            urlencode(zone)
-        );
-        for (name, value) in params {
-            use std::fmt::Write as _;
-            let _ = write!(
-                url,
-                "&param_{}={}",
-                urlencode(name),
-                urlencode(&escape_parameter(value))
-            );
-        }
+        let url = self.query_url(zone, params);
         let text = self.post(url, format!("{sql} FORMAT JSONEachRow")).await?;
-        let mut rows = Vec::new();
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            rows.push(
-                serde_json::from_str(line)
-                    .map_err(|_| StoreError::InvalidData("clickhouse row not json"))?,
-            );
-        }
-        Ok(rows)
+        parse_rows(&text)
     }
+}
+
+/// A query can fail after HTTP headers and some rows have already been sent.
+/// Reject the entire response, including coverage probes, on a streamed error.
+fn parse_rows(text: &str) -> Result<Vec<serde_json::Value>, StoreError> {
+    let mut rows = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let row: serde_json::Value = serde_json::from_str(line)
+            .map_err(|_| StoreError::InvalidData("clickhouse row not json"))?;
+        if let Some(exception) = row.get("exception").and_then(serde_json::Value::as_str) {
+            if let Some(code) = history_error(exception) {
+                return Err(StoreError::InvalidData(code));
+            }
+            return Err(StoreError::ChStatus {
+                status: 200,
+                body: exception.to_owned(),
+            });
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// A query echo can contain guard literals without having triggered the guard.
+/// Only the throwIf exception code and its primary message prove missing history.
+fn history_error(text: &str) -> Option<&'static str> {
+    let envelope = serde_json::from_str::<serde_json::Value>(text).ok();
+    let text = envelope
+        .as_ref()
+        .and_then(|row| row.get("exception"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(text);
+    let message = text.trim_start().strip_prefix("Code: 395.")?.trim_start();
+    let message = message
+        .strip_prefix("DB::Exception:")
+        .unwrap_or(message)
+        .trim_start();
+    [
+        "statistics_request_history_incomplete",
+        "statistics_calendar_history_incomplete",
+    ]
+    .into_iter()
+    .find(|code| {
+        message.strip_prefix(code).is_some_and(|suffix| {
+            suffix.is_empty()
+                || suffix.starts_with([':', '.'])
+                || suffix.starts_with(char::is_whitespace)
+        })
+    })
 }
 
 // ClickHouse HTTP parameters are parsed as escaped text *after* URL decoding.

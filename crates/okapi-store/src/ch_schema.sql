@@ -591,6 +591,22 @@ AS SELECT
 FROM request_log_raw
 GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
 
+-- Cache lifetime observations are independent of previously retained modality details.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_cache_ttl_5min
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(ts5)
+ORDER BY (ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    toStartOfFiveMinutes(ts) AS ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type,
+    countState() AS requests,
+    sumIfState(toUInt64(ifNull(cache_write_5m_tokens, 0)), ifNull(cache_write_reported, 0) = 1 AND isNotNull(cache_write_tokens) AND isNotNull(cache_write_5m_tokens) AND isNotNull(cache_write_1h_tokens) AND toUInt64(ifNull(cache_write_5m_tokens, 0)) + toUInt64(ifNull(cache_write_1h_tokens, 0)) = toUInt64(ifNull(cache_write_tokens, 0))) AS observed_cache_write_5m_tokens,
+    countIfState(ifNull(cache_write_reported, 0) = 1 AND isNotNull(cache_write_tokens) AND isNotNull(cache_write_5m_tokens) AND isNotNull(cache_write_1h_tokens) AND toUInt64(ifNull(cache_write_5m_tokens, 0)) + toUInt64(ifNull(cache_write_1h_tokens, 0)) = toUInt64(ifNull(cache_write_tokens, 0))) AS observed_cache_write_5m_tokens_n,
+    sumIfState(toUInt64(ifNull(cache_write_1h_tokens, 0)), ifNull(cache_write_reported, 0) = 1 AND isNotNull(cache_write_tokens) AND isNotNull(cache_write_5m_tokens) AND isNotNull(cache_write_1h_tokens) AND toUInt64(ifNull(cache_write_5m_tokens, 0)) + toUInt64(ifNull(cache_write_1h_tokens, 0)) = toUInt64(ifNull(cache_write_tokens, 0))) AS observed_cache_write_1h_tokens,
+    countIfState(ifNull(cache_write_reported, 0) = 1 AND isNotNull(cache_write_tokens) AND isNotNull(cache_write_5m_tokens) AND isNotNull(cache_write_1h_tokens) AND toUInt64(ifNull(cache_write_5m_tokens, 0)) + toUInt64(ifNull(cache_write_1h_tokens, 0)) = toUInt64(ifNull(cache_write_tokens, 0))) AS observed_cache_write_1h_tokens_n
+FROM request_log_raw
+GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
 -- Token output and duration share a unit-aware sample population. Character
 -- requests remain in general latency aggregates, never in this denominator.
 -- No POPULATE or raw TTL: historical gaps are recovered by bounded reads.

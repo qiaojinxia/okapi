@@ -62,29 +62,34 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
     channel: t('analytics:dimChannel'),
   }
   const fmt = (v: number) =>
-    metric === 'amount' ? formatMoneyAggregate(v, locale) : formatCount(v, locale)
+    metric === 'amount' ? formatMoneyAggregate(v, locale, true) : formatCount(v, locale)
+
+  const detailNodes = q.isError ? [] : q.data?.nodes ?? []
+  const hasNegativeFlows = !q.isError && !!q.data && (q.data.nodes.some((n) => n.value < 0) || q.data.links.some((l) => l.value < 0))
 
   // Recharts 的 Sankey 按数组下标引用节点：把 id → 下标映射一次
   const graph = useMemo(() => {
     const resp = q.data
-    if (!resp) return null
+    // Signed refunds must remain in the details. A positive-only Sankey would
+    // overstate net spending and break conservation at the connecting stages.
+    if (!resp || q.isError || hasNegativeFlows) return null
     const nodes = resp.nodes.filter((n) => n.value > 0)
     const index = new Map(nodes.map((n, i) => [n.id, i]))
     const links = resp.links
       .filter((l) => index.has(l.source) && index.has(l.target) && l.value > 0)
       .map((l) => ({ source: index.get(l.source) ?? 0, target: index.get(l.target) ?? 0, value: l.value }))
     return { nodes, links }
-  }, [q.data])
+  }, [q.data, q.isError, hasNegativeFlows])
 
   const nodeName = (n: FlowNode) => flowIdentity(n, t).primary
   const nodeDetail = (n: FlowNode) => {
     const identity = flowIdentity(n, t)
     return [stageLabel[n.stage], identity.primary, identity.detail, fmt(n.value), q.data?.total ? formatBp(Math.round(n.value / q.data.total * 10_000), locale) : ''].filter(Boolean).join(' · ')
   }
-  const actualStages = STAGE_ORDER.filter((stage) => graph?.nodes.some((n) => n.stage === stage))
+  const actualStages = STAGE_ORDER.filter((stage) => detailNodes.some((n) => n.stage === stage))
   const maxStageNodes = Math.max(1, ...actualStages.map((s) => graph?.nodes.filter((n) => n.stage === s).length ?? 0))
   const graphHeight = Math.max(420, maxStageNodes * 42 + 48)
-  const missingNames = graph?.nodes.some((n) => flowIdentity(n, t).missing)
+  const missingNames = detailNodes.some((n) => flowIdentity(n, t).missing)
 
   const focus = (n: FlowNode) => {
     if (n.other || !n.key || (['user', 'api_key', 'channel'].includes(n.stage) && n.key === '0')) return
@@ -125,7 +130,7 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
               size="sm"
             />
           </div>
-          {q.data && q.data.coverage_bp < 9_950 && (
+          {q.data && !hasNegativeFlows && q.data.total > 0 && q.data.coverage_bp < 9_950 && (
             <span className="text-xs text-warning">
               {t('analytics:flowCoverage', { v: formatBp(q.data.coverage_bp, locale) })}
             </span>
@@ -208,8 +213,9 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
             </ResponsiveContainer>
           </div></div>
         )}
+        {hasNegativeFlows && <p role="note" className="rounded-lg bg-warning/10 p-3 text-sm text-warning">{t('flow:netRefundHint')}</p>}
         {missingNames && <p className="text-xs text-muted-foreground">{t('flow:missingHint')}</p>}
-        {graph && graph.nodes.length > 0 && <details className="rounded-lg border border-border"><summary className="cursor-pointer px-3 py-2 text-sm font-medium">{t('flow:details')} · {graph.nodes.length}</summary><Table><THead><Tr><Th>{t('analysis:stages')}</Th><Th>{t('flow:name')}</Th><Th>{t('flow:identity')}</Th><Th>{metricLabel[metric]}</Th><Th>{t('flow:share')}</Th></Tr></THead><TBody>{actualStages.flatMap((stage) => graph.nodes.filter((n) => n.stage === stage).sort((a, b) => b.value - a.value)).map((n) => <Tr key={n.id}><Td>{stageLabel[n.stage]}</Td><Td><button type="button" className="text-left font-medium hover:text-primary disabled:cursor-default disabled:text-muted-foreground" disabled={n.other || !n.key || n.key === '0'} onClick={() => focus(n)}>{nodeName(n)}</button></Td><Td className="text-xs text-muted-foreground">{flowIdentity(n, t).detail || '—'}</Td><Td>{fmt(n.value)}</Td><Td>{q.data?.total ? formatBp(Math.round(n.value / q.data.total * 10_000), locale) : '—'}</Td></Tr>)}</TBody></Table></details>}
+        {detailNodes.length > 0 && <details open={hasNegativeFlows || undefined} className="rounded-lg border border-border"><summary className="cursor-pointer px-3 py-2 text-sm font-medium">{t('flow:details')} · {detailNodes.length}</summary><Table><THead><Tr><Th>{t('analysis:stages')}</Th><Th>{t('flow:name')}</Th><Th>{t('flow:identity')}</Th><Th>{metricLabel[metric]}</Th><Th>{t('flow:share')}</Th></Tr></THead><TBody>{actualStages.flatMap((stage) => detailNodes.filter((n) => n.stage === stage).sort((a, b) => b.value - a.value)).map((n) => <Tr key={n.id}><Td>{stageLabel[n.stage]}</Td><Td><button type="button" className="text-left font-medium hover:text-primary disabled:cursor-default disabled:text-muted-foreground" disabled={n.other || !n.key || n.key === '0'} onClick={() => focus(n)}>{nodeName(n)}</button></Td><Td className="text-xs text-muted-foreground">{flowIdentity(n, t).detail || '—'}</Td><Td>{fmt(n.value)}</Td><Td>{q.data?.total ? formatBp(Math.round(n.value / q.data.total * 10_000), locale) : '—'}</Td></Tr>)}</TBody></Table></details>}
         <p className="text-xs text-muted-foreground">{t('analytics:flowHint', { n: search.limit ?? 6 })} {t('analysis:stageHint')}</p>
       </CardContent>
     </Card>

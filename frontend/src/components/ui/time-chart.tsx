@@ -14,7 +14,11 @@ export interface ChartSeries { key: string; label: string; color: string; axis?:
 export interface ChartPoint { bucket: string; [key: string]: string | number | null }
 
 export function chartNumber(n: number, locale: string): string {
-  return new Intl.NumberFormat(locale, { notation: Math.abs(n) >= 10_000 ? 'compact' : 'standard', maximumFractionDigits: 2 }).format(n)
+  const magnitude = Math.abs(n)
+  return new Intl.NumberFormat(locale, {
+    notation: magnitude >= 10_000 ? 'compact' : magnitude > 0 && magnitude < 0.0001 ? 'scientific' : 'standard',
+    ...(magnitude > 0 && magnitude < 0.01 ? { maximumSignificantDigits: 2 } : { maximumFractionDigits: 2 }),
+  }).format(n)
 }
 
 export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, controls = true, paginateTable = false, secondaryAxis }: {
@@ -44,6 +48,13 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const tableRows = paginateTable ? data.slice(offset, offset + tableLimit) : data
   const [hidden, setHidden] = useState<string[]>([])
   const visible = series.filter((s) => !hidden.includes(s.key))
+  const axisMinimum = (right = false) => {
+    const onAxis = visible.filter((s) => !!(secondaryAxis && s.axis === 'right') === right)
+    return data.reduce((minimum, point) => {
+      const negative = onAxis.map((s) => point[s.key]).filter((value): value is number => typeof value === 'number' && value < 0)
+      return Math.min(minimum, stacked && !right ? negative.reduce((sum, value) => sum + value, 0) : Math.min(0, ...negative))
+    }, 0)
+  }
   const seriesUnit = (s: ChartSeries) => s.axis === 'right' && secondaryAxis ? secondaryAxis.unit : unit
   const seriesFormat = (s: ChartSeries | undefined) => s?.axis === 'right' && secondaryAxis ? secondaryAxis.format : format
   const seriesLabel = (s: ChartSeries) => secondaryAxis && seriesUnit(s) !== s.label ? `${s.label} (${seriesUnit(s)})` : s.label
@@ -79,8 +90,8 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
               <defs>{series.map((s, i) => <linearGradient key={s.key} id={`${id}-${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={s.color} stopOpacity={0.28} /><stop offset="100%" stopColor={s.color} stopOpacity={0.025} /></linearGradient>)}</defs>
               <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 5" strokeOpacity={0.7} />
               <XAxis dataKey="bucket" tickFormatter={(value: string) => value.length > 10 ? `${value.slice(5, 10)} ${value.slice(11, 16)}` : value.slice(5)} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} minTickGap={32} tickMargin={10} />
-              <YAxis width={54} domain={percent ? [0, 100] : [0, 'auto']} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} tickFormatter={(n) => `${chartNumber(Number(n), i18n.language)}${percent ? '%' : ''}`} axisLine={false} tickLine={false} tickMargin={8} />
-              {secondaryAxis && <YAxis yAxisId="right" orientation="right" width={46} domain={[0, 'auto']} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} tickFormatter={(n) => chartNumber(Number(n), i18n.language)} axisLine={false} tickLine={false} tickMargin={8} />}
+              <YAxis width={64} domain={percent ? [0, 100] : [axisMinimum(), 'auto']} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} tickFormatter={(n) => `${chartNumber(Number(n), i18n.language)}${percent ? '%' : ''}`} axisLine={false} tickLine={false} tickMargin={8} />
+              {secondaryAxis && <YAxis yAxisId="right" orientation="right" width={56} domain={[axisMinimum(true), 'auto']} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} tickFormatter={(n) => chartNumber(Number(n), i18n.language)} axisLine={false} tickLine={false} tickMargin={8} />}
               <Tooltip cursor={{ stroke: 'var(--color-muted-foreground)', strokeDasharray: '4 4', fill: 'var(--color-muted)', fillOpacity: 0.25 }} content={({ active, payload, label: date }) => {
                 if (!active || !payload?.length) return null
                 const points = payload.filter((p) => typeof p.value === 'number')

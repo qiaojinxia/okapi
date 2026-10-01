@@ -555,13 +555,14 @@ pub async fn stat(
         filters.clause
     );
     let finance_sql = format!(
-        "SELECT count() AS financial_records,sum(amount_micro) AS amount,sum(discount_micro) AS saved FROM request_log_raw WHERE {}",
+        "SELECT count() AS financial_records,countIf(log_type NOT IN (2,5,6)) AS unclassified_records,sum(amount_micro) AS amount,sum(discount_micro) AS saved FROM request_log_raw WHERE {}",
         filters.clause
     );
     let (mut rows, financial) = tokio::try_join!(
         ch.query_with_params(&sql, &params),
         ch.query_with_params(&finance_sql, &params)
     )?;
+    ensure_classified_summary(&financial)?;
     if let (Some(row), Some(finance)) = (rows.first_mut(), financial.first()) {
         for field in ["financial_records", "amount", "saved"] {
             row[field] = finance[field].clone();
@@ -622,6 +623,18 @@ pub async fn stat(
         object.extend(super::output_rate::metrics(&row, requests));
     }
     Ok(Json(result))
+}
+
+fn ensure_classified_summary(financial: &[Value]) -> Result<(), AppError> {
+    if financial
+        .first()
+        .is_some_and(|row| ch_i64(row, "unclassified_records") > 0)
+    {
+        return Err(
+            okapi_store::StoreError::InvalidData("statistics_request_history_incomplete").into(),
+        );
+    }
+    Ok(())
 }
 
 fn add_summary_details(row: &Value, result: &mut Value) {

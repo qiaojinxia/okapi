@@ -53,7 +53,7 @@ impl UpstreamError {
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Connect(_) | Self::Timeout | Self::Stream(_) => true,
-            Self::Status { status, .. } => matches!(status, 500..=599),
+            Self::Status { status, .. } => matches!(status, 500..=528 | 530..=599),
             Self::Build(_) | Self::Session { .. } => false,
         }
     }

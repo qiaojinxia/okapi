@@ -12,7 +12,7 @@ function metricValue(r: CubeMetrics | undefined, metric: TrendMetric): number | 
   if (!r || r.requests <= 0) return null
   if (metric === 'error_rate') return r.error_rate_bp / 100
   if (metric === 'cache') return r.prompt_tokens > 0 && r.cache_hit_bp != null ? r.cache_hit_bp / 100 : null
-  if (metric === 'ttft') return (r.ttft_samples ?? r.avg_ttft_ms) > 0 ? r.avg_ttft_ms : null
+  if (metric === 'ttft') return (r.ttft_samples ?? r.avg_ttft_ms ?? 0) > 0 ? r.avg_ttft_ms : null
   if (metric === 'throughput') return r.avg_output_tps_milli == null ? null : r.avg_output_tps_milli / 1000
   return r.avg_latency_ms
 }
@@ -60,7 +60,7 @@ export function trendChart(resp: TrendResp, metric: TrendMetric, label: string, 
     const r = index.get(bucket)
     const hasRequests = !!r && r.requests > 0
     const value = metricValue(r, metric)
-    return { bucket, value, ttft: hasRequests && (r.ttft_samples ?? r.avg_ttft_ms) > 0 ? r.avg_ttft_ms : null }
+    return { bucket, value, ttft: hasRequests && (r.ttft_samples ?? r.avg_ttft_ms ?? 0) > 0 ? r.avg_ttft_ms : null }
   })
   const series: ChartSeries[] = [{ key: 'value', label, color: metric === 'error_rate' ? 'var(--color-destructive)' : chartColor(0) }]
   if (metric === 'latency') series.push({ key: 'ttft', label: ttft, color: chartColor(1) })

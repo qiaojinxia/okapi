@@ -8,10 +8,12 @@ export interface Preset {
   name: string
   model: string
   system: string
-  temperature: number
-  top_p: number
+  temperature: number | null
+  top_p: number | null
   /// null = 不传，让模型用自己的缺省。
   max_tokens: number | null
+  reasoning_effort?: string | null
+  thinking_budget?: number | null
 }
 
 /// 站点预设（`settings.playground_presets` 经公开端点白名单收口后的形状）。
@@ -22,10 +24,13 @@ export interface SitePreset {
   temperature: number | null
   max_tokens: number | null
   top_p: number | null
+  reasoning_effort?: string | null
+  thinking_budget?: number | null
 }
 
-export const DEFAULT_TEMPERATURE = 1
-export const DEFAULT_TOP_P = 1
+// Leave sampling to the model unless the user explicitly supplies a value.
+export const DEFAULT_TEMPERATURE = null
+export const DEFAULT_TOP_P = null
 
 /// 站点预设缺省的采样参数补齐为本地形状。
 export function fromSitePreset(p: SitePreset): Preset {
@@ -36,6 +41,8 @@ export function fromSitePreset(p: SitePreset): Preset {
     temperature: p.temperature ?? DEFAULT_TEMPERATURE,
     top_p: p.top_p ?? DEFAULT_TOP_P,
     max_tokens: p.max_tokens,
+    reasoning_effort: p.reasoning_effort ?? null,
+    thinking_budget: p.thinking_budget ?? null,
   }
 }
 
@@ -59,9 +66,11 @@ function isPreset(v: unknown): v is Preset {
     typeof p.name === 'string' &&
     typeof p.model === 'string' &&
     typeof p.system === 'string' &&
-    typeof p.temperature === 'number' &&
-    typeof p.top_p === 'number' &&
-    (p.max_tokens === null || typeof p.max_tokens === 'number')
+    (p.temperature === null || typeof p.temperature === 'number') &&
+    (p.top_p === null || typeof p.top_p === 'number') &&
+    (p.max_tokens === null || typeof p.max_tokens === 'number') &&
+    (p.reasoning_effort == null || typeof p.reasoning_effort === 'string') &&
+    (p.thinking_budget == null || (typeof p.thinking_budget === 'number' && Number.isInteger(p.thinking_budget) && p.thinking_budget > 0))
   )
 }
 

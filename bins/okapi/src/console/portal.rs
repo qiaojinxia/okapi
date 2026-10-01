@@ -8,7 +8,7 @@
 mod key_trends;
 mod pricing;
 mod usage_logs;
-pub use pricing::{public_groups, public_models, public_pricing};
+pub use pricing::{public_groups, public_models, public_pricing, public_statistics};
 pub use usage_logs::{list as logs, stat as logs_stat};
 
 use super::query::{PageQuery, Query};

@@ -60,7 +60,7 @@ export function UsageOverview({ data, logSearch, metric, onView }: { data: Break
         <dl className="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
           {parts.map((part) => <div key={part.key} className="flex min-w-0 items-center justify-between gap-2">
             <dt className="flex min-w-0 items-center gap-1.5 text-muted-foreground"><span aria-hidden className={`h-2 w-2 shrink-0 rounded-sm ${part.className}`} />{labels[part.key]}</dt>
-            <dd className="shrink-0 tabular-nums">{(part.key === 'write' && data.total.cache_write_tokens == null) || (part.key === 'cached' && data.total.cache_hit_bp == null) ? t('analysis:notCollected') : formatCount(part.value, locale)}</dd>
+            <dd className="shrink-0 tabular-nums">{(part.key === 'write' && data.total.cache_write_tokens == null) || (part.key === 'cached' && data.total.cache_hit_bp == null) ? '-' : formatCount(part.value, locale)}</dd>
           </div>)}
         </dl>
         {(data.total.cache_hit_bp == null || data.total.cache_write_tokens == null) && <p className="text-xs text-muted-foreground">{t('portal:cacheIncomplete')}</p>}

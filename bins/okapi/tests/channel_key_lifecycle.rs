@@ -186,15 +186,15 @@ async fn key_state(pg: &PgPool, key_id: i64) -> (i16, i32) {
 async fn model_denied_403_does_not_kill_the_key() {
     let bed = setup().await;
 
-    // ① 「模型没开通」：key 不该被打成 6（此前就是这么死的），仅计一次瞬时失败
+    // ① 「模型没开通」：key 不该被打成 6（此前就是这么死的），不计 key 失败
     assert_eq!(chat(&bed, &bed.model).await, 502);
     let (status, failed) = key_state(&bed.pg, bed.denied.1).await;
     assert_ne!(
         status, 6,
         "模型级 403 不得判凭证失效（此前 status=6 且不自愈）"
     );
-    assert_eq!(status, 1, "首次瞬时失败保持可用，连续 3 次才转冷却");
-    assert_eq!(failed, 1);
+    assert_eq!(status, 1, "资源权限失败保持 key 可用");
+    assert_eq!(failed, 0);
 
     // ② 「凭证不认」：仍然要立刻判失效
     let model2 = sqlx::query_scalar!(
@@ -306,4 +306,79 @@ async fn channel_test_can_probe_a_specific_model() {
             .contains("access_denied"),
         "失败要带上游原文：{probe}"
     );
+}
+
+#[tokio::test]
+async fn request_failures_do_not_poison_keys_and_cooldowns_do_not_revive_disabled_keys() {
+    use okapi_store::channels::{KeyFailure, mark_key_failure};
+    let bed = setup().await;
+    let id = bed.denied.1;
+    for _ in 0..4 {
+        mark_key_failure(&bed.pg, id, "upstream_timeout", KeyFailure::Request)
+            .await
+            .unwrap();
+    }
+    assert_eq!(key_state(&bed.pg, id).await, (1, 0));
+    mark_key_failure(
+        &bed.pg,
+        id,
+        "upstream_status",
+        KeyFailure::RateLimited {
+            retry_after_secs: Some(604_800),
+        },
+    )
+    .await
+    .unwrap();
+    mark_key_failure(
+        &bed.pg,
+        id,
+        "upstream_status",
+        KeyFailure::RateLimited {
+            retry_after_secs: Some(30),
+        },
+    )
+    .await
+    .unwrap();
+    mark_key_failure(&bed.pg, id, "late_503", KeyFailure::Transient)
+        .await
+        .unwrap();
+    mark_key_failure(&bed.pg, id, "late_quota", KeyFailure::QuotaExhausted)
+        .await
+        .unwrap();
+    let delay: i64 = sqlx::query_scalar(
+        "SELECT extract(epoch FROM cooldown_until-now())::bigint FROM channel_keys WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&bed.pg)
+    .await
+    .unwrap();
+    assert!(
+        delay > 600_000,
+        "do not shorten exhausted weekly windows: {delay}"
+    );
+    for status in [5_i16, 6] {
+        sqlx::query("UPDATE channel_keys SET status=$2 WHERE id=$1")
+            .bind(id)
+            .bind(status)
+            .execute(&bed.pg)
+            .await
+            .unwrap();
+        for failure in [
+            KeyFailure::Transient,
+            KeyFailure::RateLimited {
+                retry_after_secs: Some(30),
+            },
+            KeyFailure::QuotaExhausted,
+            KeyFailure::Invalid,
+        ] {
+            mark_key_failure(&bed.pg, id, "late_failure", failure)
+                .await
+                .unwrap();
+            assert_eq!(
+                key_state(&bed.pg, id).await.0,
+                status,
+                "in-flight failures must preserve manual/permanent stops"
+            );
+        }
+    }
 }

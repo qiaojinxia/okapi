@@ -95,7 +95,7 @@ pub(super) fn prepared(
     }).collect::<Vec<_>>().join(", ");
     format!(
         "(WITH \
-        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, toDate(hour) AS day FROM {expected_table}) WHERE {predicate} GROUP BY {keys}), \
+        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, toDate(hour) AS day FROM {expected_table} WHERE {predicate}) WHERE {predicate} GROUP BY {keys}), \
         a AS (SELECT {keys}, countMerge(requests) AS observed, sumIfMerge(total_ms) AS total_ms, countIfMerge(samples) AS samples{output_aggregate} FROM (SELECT *, toDate(hour) AS day FROM {table}) WHERE {predicate} GROUP BY {keys}), \
         missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.observed, 0)), \
         r AS (SELECT {keys}, count() AS observed, sumIf(toUInt64({prefix}_ms), {valid}) AS total_ms, countIf({valid}) AS samples{output_raw} \

@@ -169,8 +169,8 @@ async fn worker_alerts_carry_actionable_payloads() {
         "得带上是谁——不然运维拿到 count=1 还是不知道去查哪个用户"
     );
 
-    // —— channel_cooldown：status 2/3/4 都算冷却中 ——
-    let (channel_id, _) = okapi_store::provision::create_channel(
+    // —— channel_cooldown：invalid 必须告警并带可定位的 key id ——
+    let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
         &tmp.pool,
         &format!("ch-{suffix}"),
         "openai",
@@ -183,7 +183,7 @@ async fn worker_alerts_carry_actionable_payloads() {
     .await
     .unwrap();
     sqlx::query!(
-        r#"UPDATE channel_keys SET status = 3 WHERE channel_id = $1"#,
+        r#"UPDATE channel_keys SET status = 6 WHERE channel_id = $1"#,
         channel_id
     )
     .execute(&tmp.pool)
@@ -197,6 +197,23 @@ async fn worker_alerts_carry_actionable_payloads() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["event"], "channel_cooldown");
     assert_eq!(sent[0]["payload"]["count"], 1);
+
+    assert_eq!(
+        sent[0]["payload"]["channel_key_ids"],
+        json!([channel_key_id])
+    );
+    sqlx::query("UPDATE channel_keys SET status=5 WHERE channel_id=$1")
+        .bind(channel_id)
+        .execute(&tmp.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        notify::channel_cooldown_and_notify(&tmp.pool, &notifier)
+            .await
+            .unwrap(),
+        0,
+        "manual bans are intentional, no alert"
+    );
 
     // —— balance_low：阈值关着时连扫都不扫 ——
     sqlx::query!(

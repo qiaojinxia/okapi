@@ -19,6 +19,7 @@ mod groups;
 mod paging;
 mod query;
 pub use groups::public_groups;
+pub use query::public_statistics;
 use query::{CatalogQuery, PageMeta, Selection};
 
 #[cfg(test)]
@@ -264,7 +265,14 @@ async fn fetch(
     let published = serde_json::to_value(&publication.source).map_err(|_| AppError::internal())?;
     let (groups, groups_page) =
         groups::read(&mut tx, &selection.groups, user_id, &published).await?;
-    let mut models = query::models(&mut tx, &selection.filter, selection.slice, &published).await?;
+    let mut models = query::models(
+        &mut tx,
+        &selection.filter,
+        selection.slice,
+        &selection.sort,
+        &published,
+    )
+    .await?;
     let page = query::metadata(&mut tx, &selection, models.len(), &published).await?;
     let names: Vec<_> = models.iter().map(|m| m.model_name.clone()).collect();
     let pools: Vec<_> = groups

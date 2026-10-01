@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE channel_keys\n                SET failed_count = failed_count + 1,\n                    last_error = $2,\n                    status = 6,\n                    cooldown_until = NULL,\n                    updated_at = now()\n                WHERE id = $1 AND status IN (1, 2, 3, 4)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "50386a5f4f8b7f8787647c7154973a3f004886979253841daa7a4f521fe757f3"
+}

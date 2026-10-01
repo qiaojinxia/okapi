@@ -171,24 +171,34 @@ impl CubeQuery {
         self.window_meta["previous_end_date"] = json!((w.start - Days::new(1)).to_string());
         // A missing current-period aggregate must not expand historical recovery
         // for a complete previous period (including an empty previous period).
-        let predicate = format!("{}{}", self.window(false), self.base_scope());
+        let primary = self.primary_scope();
+        let params = primary.borrow();
+        let predicate = format!("{}{}", self.window(false), primary.clause);
         self.coverage = if self.core_candidate() {
             // 精简查询只需要知道有没有历史字符口径；其余测量口径的覆盖探测只服务完整源。
             let core =
-                super::measurement_coverage::Coverage::read_historical(state, &predicate).await?;
+                super::measurement_coverage::Coverage::read_historical(state, &predicate, &params)
+                    .await?;
             if core.historical_units {
                 // 有历史字符口径时 prompt_tokens 要校正，必须回退完整源，需要完整覆盖探测。
-                super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?
+                super::measurement_coverage::Coverage::read(state, &predicate, &params, self.cached)
+                    .await?
             } else {
                 core
             }
         } else {
-            super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?
+            super::measurement_coverage::Coverage::read(state, &predicate, &params, self.cached)
+                .await?
         };
         if self.compares() {
-            let predicate = format!("{}{}", self.window(true), self.base_scope());
-            self.previous_coverage =
-                super::measurement_coverage::Coverage::read(state, &predicate, self.cached).await?;
+            let predicate = format!("{}{}", self.window(true), primary.clause);
+            self.previous_coverage = super::measurement_coverage::Coverage::read(
+                state,
+                &predicate,
+                &params,
+                self.cached,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -272,19 +282,24 @@ impl CubeQuery {
     }
 
     fn base_scope(&self) -> String {
-        use std::fmt::Write as _;
-        // 在聚合展开前裁剪常用主键维度。高级维度在外层过滤，历史未采集部分仍保留。
-        let mut base = String::new();
-        for (col, val) in [
-            ("user_id", self.user_id),
-            ("api_key_id", self.api_key_id),
-            ("channel_id", self.channel_id),
-        ] {
-            if let Some(v) = val.filter(|v| *v >= 0) {
-                let _ = write!(base, " AND {col} = {v}");
-            }
+        self.primary_scope().clause
+    }
+
+    fn primary_scope(&self) -> Scope {
+        // Trim all primary dimensions before coverage/recovery. String values
+        // remain bound; missing detailed dimensions still belong to the remainder.
+        let billed = self.model_column().is_ok_and(|col| col == "model");
+        Self {
+            user_id: self.user_id,
+            api_key_id: self.api_key_id,
+            channel_id: self.channel_id,
+            model: billed.then(|| self.model.clone()).flatten(),
+            models: billed.then(|| self.models.clone()).flatten(),
+            group: self.group.clone(),
+            groups: self.groups.clone(),
+            ..Self::default()
         }
-        base
+        .scope()
     }
 
     fn source(&self, previous: bool) -> String {
@@ -930,6 +945,7 @@ pub async fn trend(
     Query(mut q): Query<CubeQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
+    q.stack_column()?;
     q.cached &= super::stats_cache::allowed(&headers);
     q.prepare(&state).await?;
     let days = q.days();
@@ -1526,13 +1542,14 @@ pub async fn breakdown(
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let metric = BreakdownMetric::parse(q.metric.as_deref())?;
     q.cached &= super::stats_cache::allowed(&headers);
-    q.prepare(&state).await?;
     let by = q.by.as_deref().unwrap_or("model");
     let key_col = if by == "model" {
         q.model_column()?
     } else {
         breakdown_key(by)?
     };
+    q.prepare(&state).await?;
+    let by = q.by.as_deref().unwrap_or("model");
     let fold_provider = by == "provider";
     let limit = q.limit.unwrap_or(20).clamp(1, 100) as usize;
     let scope = q.scope();
@@ -1811,7 +1828,6 @@ pub async fn flow(
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
     q.cached &= super::stats_cache::allowed(&headers);
-    q.prepare(&state).await?;
     let per_stage = q.limit.unwrap_or(6).clamp(1, 20) as usize;
     let metric = match q.metric.as_deref().unwrap_or("amount") {
         "amount" => "amount",
@@ -1824,11 +1840,6 @@ pub async fn flow(
         "tokens" => "toks",
         _ => "spend",
     };
-    let agg = aggregate_metrics();
-    let current_source = q.source(false);
-    let scope = q.scope();
-    let params = scope.borrow();
-
     let model_col = q.model_column()?;
     let selected = parse_choices("stages", q.stages.as_deref())?;
     if q.stages.is_some()
@@ -1838,6 +1849,11 @@ pub async fn flow(
     {
         return Err(AppError::bad_request().with_param("stages"));
     }
+    q.prepare(&state).await?;
+    let agg = aggregate_metrics();
+    let current_source = q.source(false);
+    let scope = q.scope();
+    let params = scope.borrow();
     let stages: Vec<&str> = FLOW_STAGES
         .iter()
         .copied()

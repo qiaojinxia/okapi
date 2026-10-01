@@ -2,6 +2,9 @@
 //! 网关不得换渠道重放（客户端已收到半截回答，重放会得到拼接的两段）、不得同 key 重试，
 //! 只按已产出结算并把余额精确收口。依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -78,6 +81,50 @@ async fn mock_ok(State(calls): State<Calls>) -> axum::response::Response {
         .into_response()
 }
 
+/// Emits a usage-only frame, then stalls. Its usage must survive the timeout.
+async fn mock_idle(State(calls): State<Calls>) -> axum::response::Response {
+    calls.cut.fetch_add(1, Ordering::SeqCst);
+    let steps = futures::stream::unfold(0_u8, |step| async move {
+        match step {
+            0 => Some((Ok::<_, std::io::Error>(Bytes::from(chunk("Hello"))), 1)),
+            1 => {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                let usage = json!({"id":"c", "choices":[], "usage":{"prompt_tokens":100,"completion_tokens":20}});
+                Some((Ok(Bytes::from(format!("data: {usage}\n\n"))), 2))
+            }
+            _ => std::future::pending().await,
+        }
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        Body::from_stream(steps),
+    )
+        .into_response()
+}
+
+async fn mock_periodic(State(calls): State<Calls>) -> axum::response::Response {
+    calls.cut.fetch_add(1, Ordering::SeqCst);
+    let steps = futures::stream::unfold(0_u8, |step| async move {
+        if step > 3 {
+            return None;
+        }
+        if step > 0 {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+        let frame = if step == 3 {
+            "data: [DONE]\n\n".to_owned()
+        } else {
+            chunk("Hello")
+        };
+        Some((Ok::<_, std::io::Error>(Bytes::from(frame)), step + 1))
+    });
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        Body::from_stream(steps),
+    )
+        .into_response()
+}
+
 struct TestEnv {
     pg: PgPool,
     ledger: okapi_ledger::BalanceLedger,
@@ -88,7 +135,7 @@ struct TestEnv {
     calls: Calls,
 }
 
-async fn setup() -> TestEnv {
+async fn setup(mode: &str) -> TestEnv {
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -111,19 +158,18 @@ async fn setup() -> TestEnv {
     okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
         .await
         .unwrap();
-    let snapshot = serde_json::to_value(
-        okapi_store::pricing::load_pricing_source_rows(&pg)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    okapi_store::admin::publish_epoch(&pg, user_id, &snapshot)
-        .await
-        .unwrap();
+    published_pricing::publish(&pg, user_id).await;
 
     let calls = Calls::default();
     let router = Router::new()
-        .route("/cut/v1/chat/completions", post(mock_cut))
+        .route(
+            "/cut/v1/chat/completions",
+            match mode {
+                "idle" => post(mock_idle),
+                "periodic" => post(mock_periodic),
+                _ => post(mock_cut),
+            },
+        )
         .route("/ok/v1/chat/completions", post(mock_ok))
         .with_state(calls.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -164,6 +210,13 @@ async fn setup() -> TestEnv {
         .credit(user_id, Money::from_micros(10_000_000))
         .await
         .unwrap();
+    state
+        .settings_cache
+        .insert(
+            "streaming_policy".to_owned(),
+            Arc::new(Some(json!({"idle_timeout_secs":1, "heartbeat_secs":1}))),
+        )
+        .await;
     let ledger = state.ledger.clone();
     let app = gateway::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -218,7 +271,7 @@ async fn wait_committed(pg: &PgPool, request_id: Uuid) -> Record {
 
 #[tokio::test]
 async fn upstream_cut_after_first_token_settles_partial_output_without_retry() {
-    let env = setup().await;
+    let env = setup("cut").await;
     let resp = reqwest::Client::new()
         .post(format!("http://{}/v1/chat/completions", env.gateway))
         .bearer_auth(&env.token)
@@ -294,4 +347,82 @@ async fn upstream_cut_after_first_token_settles_partial_output_without_retry() {
         0,
         "不得 failover 到备用渠道"
     );
+}
+
+#[tokio::test]
+async fn idle_timeout_keeps_last_usage_settles_once_and_releases_reservation() {
+    let env = setup("idle").await;
+    let started = std::time::Instant::now();
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"stream":true,"max_tokens":64,
+        "messages":[{"role":"user","content":"hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let id: Uuid = resp.headers()["x-okapi-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(5), resp.text())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("Hello") && text.contains("upstream_timeout"),
+        "{text}"
+    );
+    assert!(!text.contains("[DONE]"));
+    assert!(
+        started.elapsed() >= Duration::from_millis(1500),
+        "usage event must reset inactivity deadline"
+    );
+    let rec = wait_committed(&env.pg, id).await;
+    assert_eq!(
+        (rec.prompt_tokens, rec.completion_tokens),
+        (100, 20),
+        "last usage wins even without terminal frame"
+    );
+    assert_eq!(rec.amount_micro, 240);
+    assert_eq!(rec.error_code.as_deref(), Some("upstream_timeout"));
+    assert_eq!(rec.failover_count, 0);
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        10_000_000 - 240
+    );
+    assert!(
+        env.ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(env.calls.cut.load(Ordering::SeqCst), 1);
+    assert_eq!(env.calls.ok.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn each_event_resets_idle_timeout_so_an_active_stream_can_run_longer() {
+    let env = setup("periodic").await;
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"stream":true,"max_tokens":64,
+        "messages":[{"role":"user","content":"hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(5), resp.text())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        text.contains("[DONE]") && !text.contains("upstream_timeout"),
+        "{text}"
+    );
+    assert_eq!(env.calls.cut.load(Ordering::SeqCst), 1);
+    assert_eq!(env.calls.ok.load(Ordering::SeqCst), 0);
 }

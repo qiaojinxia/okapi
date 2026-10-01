@@ -19,7 +19,7 @@ export function OperationsSummary({ days }: { days: number }) {
   const known = (total?.cost_known_requests ?? 0) > 0
   const hasRequests = (total?.requests ?? 0) > 0
   const money = (value: number | null | undefined) => value == null ? '—' : formatMoneyAggregate(value, locale)
-  const latency = (value: number | undefined, available: boolean) => available && value != null ? `${formatCount(value, locale)} ms` : '—'
+  const latency = (value: number | null | undefined, available: boolean) => available && value != null ? `${formatCount(value, locale)} ms` : '—'
   const throughputSamples = total?.output_tps_samples ?? 0
   const partialThroughput = hasRequests && total?.avg_output_tps_milli == null && throughputSamples > 0 && total?.observed_output_tps_milli != null
   const throughput = partialThroughput ? total?.observed_output_tps_milli : total?.avg_output_tps_milli

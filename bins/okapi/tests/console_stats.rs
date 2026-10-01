@@ -21,10 +21,14 @@ mod usage_sources;
 
 #[path = "support/cache_statistics.rs"]
 mod cache_statistics;
+#[path = "support/cache_ttl_statistics.rs"]
+mod cache_ttl_statistics;
 #[path = "support/historical_speech_units.rs"]
 mod historical_speech_units;
 #[path = "support/input_unit_statistics.rs"]
 mod input_unit_statistics;
+#[path = "support/statistics_sql_capture.rs"]
+mod statistics_sql_capture;
 #[path = "support/token_detail_aggregates.rs"]
 mod token_detail_aggregates;
 
@@ -38,6 +42,9 @@ fn hash(token: &str) -> String {
 
 #[path = "support/output_rate_statistics.rs"]
 mod output_rate_statistics;
+
+#[path = "support/population_storage.rs"]
+mod population_storage;
 
 #[path = "support/quality_pagination.rs"]
 mod quality_pagination;
@@ -120,6 +127,11 @@ async fn setup_with_ch_database(ch_database: &str) -> Env {
     .unwrap();
     if let Some(url) = ch_url.as_deref() {
         state.ch = Some(okapi_store::ChClient::new(url, ch_database).unwrap());
+    }
+    if let Some(client) =
+        statistics_sql_capture::configured(ch_url.as_deref(), Some(ch_database)).await
+    {
+        state.ch = Some(client);
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -263,25 +275,7 @@ async fn personal_activity_covers_calendar_year_and_isolates_owners() {
     ch.ensure_schema().await.unwrap();
     let (_, me) = get(&env, "/api/me", &env.user_token).await;
     let key_id = me["key_id"].as_i64().unwrap();
-    // 直接播长期 MV：验证的是历史聚合，不依赖 raw TTL 或 outbox 到达时机。
-    for (user, key, day) in [
-        (env.user_id, key_id, "2024-02-28"),
-        (env.user_id, key_id, "2024-02-29"),
-        (env.user_id, key_id, "2024-12-31"),
-        (env.user_id, key_id, "2025-01-01"),
-        (env.user_id, 0, "2024-02-29"),
-        (0, key_id, "2024-02-29"),
-    ] {
-        ch.execute(&format!(
-            "INSERT INTO mv_key_model_day \
-             (user_id, api_key_id, model, day, requests, prompt_tokens, cached_tokens, \
-              completion_tokens, reasoning_tokens, amount, discount, errors) \
-             SELECT toUInt64({user}), toUInt64({key}), '{}', toDate('{day}'), countState(), \
-              sumState(toUInt64(1000)), sumState(toUInt64(400)), sumState(toUInt64(500)), \
-              sumState(toUInt64(200)), sumState(toInt64(12500)), sumState(toInt64(0)), sumState(toUInt64(0)) \
-             FROM numbers(1)", env.model
-        )).await.unwrap();
-    }
+    seed_activity_history(&env, ch, key_id).await;
     let (status, activity) = get(&env, path, &env.user_token).await;
     assert_eq!(status, 200, "{activity}");
     assert_eq!(activity["year"], 2024);
@@ -326,6 +320,47 @@ async fn personal_activity_covers_calendar_year_and_isolates_owners() {
     let (status, empty) = get(&env, "/api/me/stats/activity?year=2023", &env.user_token).await;
     assert_eq!(status, 200);
     assert!(empty["data"].as_array().unwrap().is_empty());
+    // Classification loss after raw expires must not invent old call counts.
+    ch.execute(&format!("ALTER TABLE population_v1_mv_key_model_day DELETE WHERE user_id={} SETTINGS mutations_sync=2", env.user_id)).await.unwrap();
+    let (status, missing) = get(&env, path, &env.user_token).await;
+    assert_eq!(status, 500, "{missing}");
+    assert_eq!(
+        missing["error"]["param"],
+        "statistics_request_history_incomplete"
+    );
+}
+
+/// Typed calls produce the retained aggregates; raw is removed before the read.
+async fn seed_activity_history(env: &Env, ch: &okapi_store::ChClient, key_id: i64) {
+    let mut rows = Vec::new();
+    for (user, key, day) in [
+        (env.user_id, key_id, "2024-02-28"),
+        (env.user_id, key_id, "2024-02-29"),
+        (env.user_id, key_id, "2024-12-31"),
+        (env.user_id, key_id, "2025-01-01"),
+        (env.user_id, 0, "2024-02-29"),
+        (0, key_id, "2024-02-29"),
+    ] {
+        let mut row = payload(env, 12500, 0, 100, false);
+        row["user_id"] = json!(user);
+        row["api_key_id"] = json!(key);
+        row["ts"] = json!(format!("{day} 12:00:00.000"));
+        row["prompt_tokens"] = json!(1000);
+        row["cached_tokens"] = json!(400);
+        row["completion_tokens"] = json!(500);
+        row["reasoning_tokens"] = json!(200);
+        row["upstream_usage"] = json!({"prompt_tokens":1000,"completion_tokens":500});
+        rows.push(chsink::js_payload_to_ch_row(&row));
+    }
+    ch.insert_json_each_row("request_log_raw", &rows, &Uuid::new_v4().to_string())
+        .await
+        .unwrap();
+    ch.execute(&format!(
+        "ALTER TABLE request_log_raw DELETE WHERE model='{}' SETTINGS mutations_sync=2",
+        env.model
+    ))
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

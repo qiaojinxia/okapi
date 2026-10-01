@@ -2,7 +2,7 @@
 
 模型广场与 `/api/me/groups` 使用相同的分组可选规则：管理员已分配给当前用户的分组、开放 `self_select` 的分组，以及系统默认分组。关闭自选不影响管理员分配；未登录访客只能看到开放自选和默认分组。管理员访问用户侧广场也不自动获得全部私有组的可见权，后台分组管理不受影响。
 
-`GET/HEAD /api/pricing`、`/api/pricing/models`、`/api/pricing/groups`：
+`GET/HEAD /api/pricing`、`/api/pricing/models`、`/api/pricing/groups`、`/api/pricing/stats`：
 
 - 有 API 凭证时使用现有门户鉴权解析用户；无凭证时按访客处理，无效凭证返回鉴权错误。
 - 分组权限在数据库分页和计数前应用，搜索、精确分组查询以及模型分组/接口映射遵循同一限制。

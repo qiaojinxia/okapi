@@ -23,7 +23,7 @@ async fn setup() -> TestEnv {
     okapi_store::run_migrations(&pg).await.unwrap();
     // 接上 CH：query_usage / platform_kpi 没有它一律 stats_disabled，接不上就等于没测
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
-    let state = gateway::build_state(
+    let mut state = gateway::build_state(
         &database_url,
         &redis_url,
         "test-node",
@@ -32,6 +32,12 @@ async fn setup() -> TestEnv {
     )
     .await
     .unwrap();
+    if let (Some(url), Ok(database)) = (ch_url.as_deref(), std::env::var("OKAPI_TEST_CH_DATABASE"))
+    {
+        let ch = okapi_store::ChClient::new(url, &database).unwrap();
+        ch.ensure_schema().await.unwrap();
+        state.ch = Some(ch);
+    }
     let app = console::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

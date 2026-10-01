@@ -81,7 +81,7 @@ async fn ttft_filters_missing_and_non_stream_samples_preserving_measured_zero() 
     let result = std::panic::AssertUnwindSafe(check_samples(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -126,7 +126,9 @@ async fn check_samples(env: &Env, ch: &ChClient) {
         assert_eq!(row["ttft_history_coverage_bp"], 10_000);
     }
     // Long-lived aggregates must work after raw retention removes every detail.
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     assert_quality(&quality_rows(env).await, 32, 1, &json!(1_000), "aggregate");
 }
 
@@ -142,7 +144,7 @@ async fn ttft_upgrade_recovers_legacy_or_marks_incomplete_without_losing_totals(
     let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -157,11 +159,11 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
         "mv_channel_ttft_5min",
         "mv_ttft_reporting_hour",
     ] {
-        ch.execute(&format!("DROP TABLE {view} SYNC"))
+        super::population_storage::execute(ch, &format!("DROP TABLE {view} SYNC"))
             .await
             .unwrap();
     }
-    ch.execute("ALTER TABLE request_log_raw DROP COLUMN ttft_reported")
+    super::population_storage::execute(ch, "ALTER TABLE request_log_raw DROP COLUMN ttft_reported")
         .await
         .unwrap();
     let mut legacy: Vec<Value> = (0..12).map(|_| row(env, Value::Null, true)).collect();
@@ -181,7 +183,8 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
         assert_eq!(row["ttft_history_coverage_bp"], 10_000);
     }
     // Deletion is confined to this test's unique DB. Old monetary/token MVs stay.
-    ch.execute(
+    super::population_storage::execute(
+        ch,
         "ALTER TABLE request_log_raw DELETE WHERE ttft_reported IS NULL \
          SETTINGS mutations_sync = 1",
     )

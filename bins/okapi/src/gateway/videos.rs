@@ -302,7 +302,7 @@ async fn handle_create(
                     &state.pg,
                     cand.channel_key_id,
                     err.error_code(),
-                    okapi_store::channels::KeyFailure::Transient,
+                    super::chat::failure_kind_of(&err),
                 )
                 .await;
                 failover = failover.saturating_add(1);

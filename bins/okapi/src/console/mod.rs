@@ -432,11 +432,13 @@ fn portal_routes() -> ConsoleRouter {
         .route("/pay/callback/epay", get(pay::epay_callback))
         .route("/pay/callback/stripe", post(pay::stripe_webhook))
         .route("/api/pricing", get(portal::public_pricing))
+        .route("/api/pricing/stats", get(portal::public_statistics))
         .route("/api/pricing/models", get(portal::public_models))
         .route("/api/pricing/groups", get(portal::public_groups))
         .route("/api/notice", get(portal::notice))
         // Playground（§11.39）：同源流式中继到数据面处理器 + 站点预设公开读
         .route("/api/me/playground/chat", post(playground::chat))
+        .route("/api/me/playground/parameters", get(playground::parameters))
         .route("/api/playground/presets", get(playground::presets))
 }
 

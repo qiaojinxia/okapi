@@ -9,6 +9,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/statistics_sql_capture.rs"]
+mod statistics_sql_capture;
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -30,6 +33,10 @@ struct Env {
 }
 
 async fn setup() -> Env {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_env_filter("okapi=error")
+        .try_init();
     dotenvy::dotenv().ok();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -102,6 +109,9 @@ async fn setup() -> Env {
     if let (Some(url), Ok(database)) = (ch_url.as_deref(), std::env::var("OKAPI_TEST_CH_DATABASE"))
     {
         state.ch = Some(okapi_store::ChClient::new(url, &database).unwrap());
+    }
+    if let Some(client) = statistics_sql_capture::configured(ch_url.as_deref(), None).await {
+        state.ch = Some(client);
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -915,6 +925,44 @@ async fn insert_values(env: &Env, rows: &[Value], day: Option<&str>) {
     }
 }
 
+/// Genuine classified calls survive after detailed dimensions/measurements and
+/// raw history expire. Keep both coarse generations, erase both detail sources.
+async fn classified_legacy_calls(env: &Env, day: &str) {
+    let rows = [
+        payload(env, &env.model_a, 1000, false),
+        payload(env, &env.model_a, 1000, false),
+    ];
+    insert_values(env, &rows, Some(day)).await;
+    drain(env).await;
+    let ch = env.state.ch.as_ref().unwrap();
+    for table in [
+        "mv_analysis_hour",
+        "mv_latency_reporting_hour",
+        "mv_ttft_reporting_hour",
+        "mv_cache_reporting_hour",
+        "mv_usage_sources_5min",
+        "mv_token_details_5min",
+        "mv_cache_totals_5min",
+        "mv_input_units_5min",
+        "mv_output_rate_5min",
+    ] {
+        for name in [table.to_owned(), format!("population_v1_{table}")] {
+            ch.execute(&format!(
+                "ALTER TABLE {name} DELETE WHERE user_id={} SETTINGS mutations_sync=2",
+                env.user_id
+            ))
+            .await
+            .unwrap();
+        }
+    }
+    ch.execute(&format!(
+        "ALTER TABLE request_log_raw DELETE WHERE user_id={} SETTINGS mutations_sync=2",
+        env.user_id
+    ))
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn cache_reporting_distinguishes_unknown_from_zero_across_admin_views() {
     let env = setup().await;
@@ -1253,11 +1301,12 @@ async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
 }
 
 #[tokio::test]
-async fn legacy_aggregate_remainder_is_preserved_once_and_marked_unknown() {
+async fn classified_aggregate_remainder_is_preserved_once_and_marked_unknown() {
     let env = setup().await;
     if !has_ch(&env) {
         return;
     }
+    classified_legacy_calls(&env, "2026-08-26 12:00:00+00").await;
     insert_values(
         &env,
         &[advanced_payload(&env, "up.a", "default", 1000, true, 0)],
@@ -1265,9 +1314,6 @@ async fn legacy_aggregate_remainder_is_preserved_once_and_marked_unknown() {
     )
     .await;
     drain(&env).await;
-    let ch = env.state.ch.as_ref().unwrap();
-    // Simulate pre-upgrade aggregate history sharing the exact old cube key with one new record.
-    ch.execute(&format!("INSERT INTO mv_cube_hour SELECT toDateTime('2026-08-26 12:00:00') AS hour, toInt64({}) AS user_id, toInt64({}) AS api_key_id, 'default' AS group_code, '{}' AS model, toInt64({}) AS channel_id, countState() AS requests, sumState(toUInt64(100)) AS prompt_tokens, sumState(toUInt64(40)) AS cached_tokens, sumState(toUInt64(200)) AS completion_tokens, sumState(toUInt64(10)) AS reasoning_tokens, sumState(toInt64(1000)) AS amount, sumState(toInt64(250)) AS discount, sumState(toInt64(0)) AS upstream_cost, sumState(toUInt64(0)) AS errors, sumState(toUInt64(5000)) AS latency_sum, sumState(toUInt64(500)) AS ttft_sum, countIfState(toUInt32(500)>0) AS ttft_samples FROM numbers(2) GROUP BY hour, user_id, api_key_id, group_code, model, channel_id", env.user_id, env.key_id, env.model_a, env.channel_id)).await.unwrap();
     let query = format!(
         "start_date=2026-08-26&end_date=2026-08-26&user_id={}",
         env.user_id
@@ -1300,6 +1346,58 @@ async fn legacy_aggregate_remainder_is_preserved_once_and_marked_unknown() {
         rows.iter().find(|r| r["key"] == "/v1/responses").unwrap()["requests"],
         1
     );
+}
+
+#[tokio::test]
+async fn unclassified_legacy_calls_fail_closed_without_losing_money() {
+    let env = setup().await;
+    assert!(has_ch(&env), "requires real ClickHouse history recovery");
+    insert_values(
+        &env,
+        &[advanced_payload(&env, "up.a", "default", 1000, true, 0)],
+        Some("2026-08-26 12:00:00+00"),
+    )
+    .await;
+    drain(&env).await;
+    let ch = env.state.ch.as_ref().unwrap();
+    ch.execute(&format!("INSERT INTO mv_cube_hour SELECT toDateTime('2026-08-26 12:00:00') AS hour, toInt64({}) AS user_id, toInt64({}) AS api_key_id, 'default' AS group_code, '{}' AS model, toInt64({}) AS channel_id, countState() AS requests, sumState(toUInt64(100)) AS prompt_tokens, sumState(toUInt64(40)) AS cached_tokens, sumState(toUInt64(200)) AS completion_tokens, sumState(toUInt64(10)) AS reasoning_tokens, sumState(toInt64(1000)) AS amount, sumState(toInt64(250)) AS discount, sumState(toInt64(0)) AS upstream_cost, sumState(toUInt64(0)) AS errors, sumState(toUInt64(5000)) AS latency_sum, sumState(toUInt64(500)) AS ttft_sum, countIfState(toUInt32(500)>0) AS ttft_samples FROM numbers(2) GROUP BY hour, user_id, api_key_id, group_code, model, channel_id", env.user_id, env.key_id, env.model_a, env.channel_id)).await.unwrap();
+    let finance = ch.query_json_each_row(&format!(
+        "SELECT sumMerge(amount) AS amount,countMerge(financial_records) AS records FROM mv_cube_hour WHERE user_id={}", env.user_id
+    )).await.unwrap();
+    assert_eq!(finance[0], json!({"amount":"3000","records":"3"}));
+    let error = ch
+        .query_json_each_row(&format!(
+            "SELECT countMerge(requests) FROM mv_cube_hour WHERE user_id={}",
+            env.user_id
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            okapi_store::StoreError::InvalidData("statistics_request_history_incomplete")
+        ),
+        "{error}"
+    );
+    for endpoint in ["trend", "breakdown", "flow"] {
+        let (status, body) = get(
+            &env,
+            &format!(
+                "/admin/stats/{endpoint}?start_date=2026-08-26&end_date=2026-08-26&user_id={}",
+                env.user_id
+            ),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 500, "{endpoint}: {body}");
+        assert_eq!(body["error"]["code"], "internal_error");
+    }
+    ch.execute(&format!(
+        "ALTER TABLE mv_cube_hour DELETE WHERE user_id={} SETTINGS mutations_sync=2",
+        env.user_id
+    ))
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1448,6 +1546,7 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     )
     .await
     .unwrap();
+    classified_legacy_calls(&env, "2026-08-21 12:00:00+00").await;
     let ok = |model: &str, group: &str, channel: i64, amount: i64| {
         let mut row = advanced_payload(&env, "up.a", group, 1_000, true, 0);
         row["model"] = json!(model);
@@ -1475,9 +1574,7 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     )
     .await;
     drain(&env).await;
-    // 旧立方体已有 2 条与第二天那条明细同键的聚合历史：剩余部分 = 3 − 1 = 2。
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.execute(&format!("INSERT INTO mv_cube_hour SELECT toDateTime('2026-08-21 12:00:00') AS hour, toInt64({}) AS user_id, toInt64({}) AS api_key_id, 'default' AS group_code, '{}' AS model, toInt64({}) AS channel_id, countState() AS requests, sumState(toUInt64(100)) AS prompt_tokens, sumState(toUInt64(40)) AS cached_tokens, sumState(toUInt64(200)) AS completion_tokens, sumState(toUInt64(10)) AS reasoning_tokens, sumState(toInt64(1000)) AS amount, sumState(toInt64(250)) AS discount, sumState(toInt64(0)) AS upstream_cost, sumState(toUInt64(0)) AS errors, sumState(toUInt64(5000)) AS latency_sum, sumState(toUInt64(500)) AS ttft_sum, countIfState(toUInt32(500)>0) AS ttft_samples FROM numbers(2) GROUP BY hour, user_id, api_key_id, group_code, model, channel_id", env.user_id, env.key_id, env.model_a, env.channel_id)).await.unwrap();
+    // Two genuinely classified coarse calls precede the new detailed record.
     let query = format!(
         "start_date=2026-08-20&end_date=2026-08-21&user_id={}",
         env.user_id

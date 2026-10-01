@@ -299,7 +299,7 @@ test('综合构成按全量计算前三名占比，缺失缓存写入不显示�
   await expect(models.getByRole('listitem').first()).toContainText('model-5')
   await expect(models.getByRole('listitem').first()).toContainText('33.33%')
   await expect(models.getByRole('button', { name: '全部 5 个模型' })).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Token 用量构成' }).getByText('未采集', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Token 用量构成' }).getByText('-', { exact: true })).toBeVisible()
 })
 
 test('门户筛选与视图刷新保留，前进后退同步日期草稿，预设日期清除自定义范围', async ({ page }) => {

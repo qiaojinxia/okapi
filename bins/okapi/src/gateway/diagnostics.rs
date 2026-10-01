@@ -27,7 +27,7 @@ tokio::task_local! { static CURRENT: Trace; }
 
 pub(crate) async fn scope(request: Request, next: Next) -> Response {
     let trace = Trace::new(request.headers());
-    CURRENT.scope(trace, next.run(request)).await
+    trace.scope(next.run(request)).await
 }
 
 impl Trace {
@@ -62,6 +62,11 @@ impl Trace {
         CURRENT.try_with(Clone::clone).ok()
     }
 
+    /// Direct handler calls must share the same trace as upstream observations.
+    pub(crate) async fn scope<T>(&self, future: impl Future<Output = T>) -> T {
+        CURRENT.scope(self.clone(), future).await
+    }
+
     pub(crate) fn snapshot(&self) -> Value {
         self.0
             .lock()
@@ -90,7 +95,9 @@ impl Trace {
         if matches!(
             value["type"].as_str(),
             Some("error" | "response.failed" | "response.incomplete")
-        ) {
+        ) || value["error"].is_object()
+            || value["error"].is_string()
+        {
             let error = value.get("response").unwrap_or(&value);
             self.failure(&UpstreamError::Status {
                 status: 502,
@@ -398,5 +405,21 @@ mod tests {
         assert_eq!(snapshot["error_message"], "quota exceeded");
         assert_eq!(snapshot["attempts"][0]["status"], 200);
         assert_eq!(snapshot["attempts"][0]["outcome"], "success");
+    }
+
+    #[test]
+    fn openai_stream_error_without_type_retains_upstream_message() {
+        let trace = Trace::new(&HeaderMap::new());
+        trace.stream_event(r#"{"error":null,"choices":[]}"#);
+        assert!(trace.snapshot()["request_failed"].is_null());
+        trace.stream_event(
+            r#"{"error":{"type":"invalid_request_error","message":"stream quota exceeded"},"request":{"messages":["private prompt"]}}"#,
+        );
+        let snapshot = trace.snapshot();
+        assert_eq!(snapshot["request_failed"], true);
+        assert_eq!(snapshot["error_message"], "stream quota exceeded");
+        assert_eq!(snapshot["error_phase"], "upstream");
+        assert_eq!(snapshot["stream_end_reason"], "upstream_error");
+        assert!(!snapshot.to_string().contains("private prompt"));
     }
 }

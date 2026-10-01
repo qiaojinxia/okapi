@@ -9,7 +9,7 @@ async fn entity_detail_windows_include_exact_calendar_days_for_users_and_keys() 
     let result = std::panic::AssertUnwindSafe(check_entity_days(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -151,7 +151,7 @@ async fn measured_details_keep_zeros_filters_and_folding_after_raw_retention() {
     let result = std::panic::AssertUnwindSafe(check_retained_details(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -193,7 +193,9 @@ async fn check_retained_details(env: &Env, ch: &ChClient) {
     assert_details(&log, 3, 2, false);
     assert_eq!(log["tokens"], 4500);
     assert_eq!(log["amount_micro"], 3000);
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     check_views(env, key).await;
     let empty = request(
         env,
@@ -343,7 +345,7 @@ async fn legacy_detail_gaps_recover_raw_and_remain_partial_after_expiry() {
     let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -353,13 +355,13 @@ async fn legacy_detail_gaps_recover_raw_and_remain_partial_after_expiry() {
 
 async fn check_upgrade(env: &Env, ch: &ChClient) {
     let key = key_id(env).await;
-    ch.execute("DROP TABLE mv_token_details_5min SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_token_details_5min SYNC")
         .await
         .unwrap();
-    ch.execute("DROP TABLE mv_analysis_hour SYNC")
+    super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
         .await
         .unwrap();
-    ch.execute("DROP TABLE IF EXISTS mv_cache_totals_5min SYNC")
+    super::population_storage::execute(ch, "DROP TABLE IF EXISTS mv_cache_totals_5min SYNC")
         .await
         .unwrap();
     insert(
@@ -384,7 +386,9 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
     assert_eq!(before["total"]["cache_write_tokens"], 300);
     assert_eq!(before["total"]["cache_write_known_requests"], 3);
     assert_eq!(before["total"]["cache_read_known_requests"], 3);
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     for body in [
         request(env, &path, false).await,
         request(env, "/api/me/stats/breakdown?days=2&scope=user", true).await,
@@ -402,9 +406,12 @@ async fn check_upgrade(env: &Env, ch: &ChClient) {
     }
     // Invalid aggregate counts may not become valid detail observations.
     for _ in 0..2 {
-        ch.execute("INSERT INTO mv_token_details_5min SELECT * FROM mv_token_details_5min")
-            .await
-            .unwrap();
+        super::population_storage::execute(
+            ch,
+            "INSERT INTO mv_token_details_5min SELECT * FROM mv_token_details_5min",
+        )
+        .await
+        .unwrap();
     }
     let polluted = request(env, &path, false).await;
     assert_unknown(&polluted["total"], 3);
@@ -421,7 +428,7 @@ async fn detail_coverage_checks_each_grain_even_when_total_counts_match() {
     let result = std::panic::AssertUnwindSafe(check_grains(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -433,8 +440,8 @@ async fn check_grains(env: &Env, ch: &ChClient) {
     let key = key_id(env).await;
     insert(ch, &[sample(env, key, Some(true), false)]).await;
     // Shift the detail grain while keeping its overall count exactly equal.
-    ch.execute("INSERT INTO mv_token_details_5min SELECT * REPLACE ('wrong-model' AS model) FROM mv_token_details_5min").await.unwrap();
-    ch.execute("ALTER TABLE mv_token_details_5min DELETE WHERE model != 'wrong-model' SETTINGS mutations_sync=2").await.unwrap();
+    super::population_storage::execute(ch, "INSERT INTO mv_token_details_5min SELECT * REPLACE ('wrong-model' AS model) FROM mv_token_details_5min").await.unwrap();
+    super::population_storage::execute(ch, "ALTER TABLE mv_token_details_5min DELETE WHERE model != 'wrong-model' SETTINGS mutations_sync=2").await.unwrap();
     let path = format!("/admin/stats/trend?user_id={}&days=2", env.user_id);
     let body = request(env, &path, false).await;
     assert_details(&body["total"], 1, 1, false);

@@ -1280,6 +1280,11 @@ pub async fn set_setting(
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
     let is_pricing_base = req.key == crate::gateway::pricing_loader::BASE_PRICE_SETTING;
+    if req.key == "streaming_policy"
+        && !crate::gateway::stream_policy::StreamPolicy::valid(&req.value)
+    {
+        return Err(AppError::bad_request().with_param("streaming_policy"));
+    }
     if is_pricing_base && crate::gateway::pricing_loader::valid_base_price(&req.value).is_none() {
         return Err(AppError::bad_request().with_param("pricing_base_per_1m_micro"));
     }

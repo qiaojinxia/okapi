@@ -133,7 +133,7 @@ async fn measured_duration_and_paired_output_agree_across_statistics_and_retenti
     let result = std::panic::AssertUnwindSafe(check_samples(&env, ch))
         .catch_unwind()
         .await;
-    ch.execute(&format!("DROP DATABASE {database} SYNC"))
+    super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
         .await
         .unwrap();
     if let Err(panic) = result {
@@ -185,7 +185,9 @@ async fn check_samples(env: &Env, ch: &ChClient) {
     insert(ch, &rows).await;
     ch.ensure_schema().await.unwrap();
     check_endpoints(env).await;
-    ch.execute("TRUNCATE TABLE request_log_raw").await.unwrap();
+    super::population_storage::execute(ch, "TRUNCATE TABLE request_log_raw")
+        .await
+        .unwrap();
     check_endpoints(env).await;
 }
 
@@ -278,7 +280,7 @@ async fn latency_upgrade_recovers_complete_raw_and_marks_unrecoverable_history()
         let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch, legacy_dimensions))
             .catch_unwind()
             .await;
-        ch.execute(&format!("DROP DATABASE {database} SYNC"))
+        super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
             .await
             .unwrap();
         if let Err(panic) = result {
@@ -294,18 +296,21 @@ async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
         "mv_channel_latency_5min",
         "mv_output_rate_5min",
     ] {
-        ch.execute(&format!("DROP TABLE {view} SYNC"))
+        super::population_storage::execute(ch, &format!("DROP TABLE {view} SYNC"))
             .await
             .unwrap();
     }
     if legacy_dimensions {
-        ch.execute("DROP TABLE mv_analysis_hour SYNC")
+        super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
             .await
             .unwrap();
     }
-    ch.execute("ALTER TABLE request_log_raw DROP COLUMN latency_reported")
-        .await
-        .unwrap();
+    super::population_storage::execute(
+        ch,
+        "ALTER TABLE request_log_raw DROP COLUMN latency_reported",
+    )
+    .await
+    .unwrap();
     let mut legacy: Vec<_> = [(1000, 100), (3000, 300), (0, 9000)]
         .into_iter()
         .map(|(ms, output)| chsink::js_payload_to_ch_row(&event(env, json!(ms), output, false)))
@@ -330,7 +335,7 @@ async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
     for value in values {
         check(&value, 4, 3, 4000, 420, 4);
     }
-    ch.execute("ALTER TABLE request_log_raw DELETE WHERE latency_reported IS NULL SETTINGS mutations_sync=1").await.unwrap();
+    super::population_storage::execute(ch,"ALTER TABLE request_log_raw DELETE WHERE latency_reported IS NULL SETTINGS mutations_sync=1").await.unwrap();
     let mut values = totals(env).await;
     values.extend(quality(env).await);
     for value in values {

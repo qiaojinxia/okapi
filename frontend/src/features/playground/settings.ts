@@ -8,6 +8,8 @@ export interface Settings {
   maxTokens: string
   /// 选用的密钥 id（字符串）；'' = 用登录会话本身。
   keyId: string
+  reasoningEffort: string
+  thinkingBudget: string
 }
 
 const key = (userId: number) => `okapi.playground.settings.${userId}`
@@ -19,7 +21,9 @@ export function readSettings(userId: number | undefined): Settings | null {
   try {
     const raw = JSON.parse(localStorage.getItem(key(userId)) ?? 'null') as Record<string, unknown> | null
     if (raw === null || typeof raw !== 'object' || FIELDS.some((f) => typeof raw[f] !== 'string')) return null
-    return { ...(raw as unknown as Settings), keyId: typeof raw.keyId === 'string' ? raw.keyId : '' }
+    return { ...(raw as unknown as Settings), keyId: typeof raw.keyId === 'string' ? raw.keyId : '',
+      reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort : '',
+      thinkingBudget: typeof raw.thinkingBudget === 'string' ? raw.thinkingBudget : '', }
   } catch {
     return null
   }

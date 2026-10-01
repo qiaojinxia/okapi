@@ -6,6 +6,9 @@
 //! 强制注入，本用例守住最常用的同方言路。
 //! 依赖 .env 的 DATABASE_URL 与 OKAPI_REDIS_URL（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -126,6 +129,7 @@ async fn setup() -> Env {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "su-node", None, None)
         .await
         .unwrap();

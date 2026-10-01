@@ -8,6 +8,7 @@ import { modelsForKey, usePlaygroundKeys } from './keys'
 import type { KeyBlock, KeyChoice } from './keys'
 import { Markdown } from './markdown'
 import { ModelInfo } from './ModelInfo'
+import { DEFAULT_PARAMETERS, loadParameters, samplingAllowed } from './parameters'
 import type { SendOptions, Turn } from './use-chat-stream'
 import { useChatStream } from './use-chat-stream'
 import {
@@ -32,12 +33,11 @@ import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
 import { nonnegative } from '@/features/public-pricing/catalog-data'
-import type { PricingGroup, PricingModel } from '@/features/public-pricing/types'
+import { loadCatalog } from '@/features/public-pricing/catalog-loader'
 import { useMe } from '@/hooks/use-auth'
-import { ApiError, apiFetch } from '@/lib/api'
+import { ApiError, getKey } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatCount, formatMoney } from '@/lib/money'
-import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 /// 试用台（IMPLEMENTATION §11.39）：左栏模型 + 系统提示词 + 采样参数，右栏流式对话。
@@ -58,15 +58,17 @@ function formatDuration(ms: number): string {
 function Workspace({ userId, group }: { userId: number | undefined; group: string }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
-  const ids = { key: useId(), model: useId(), list: useId(), system: useId(), temp: useId(), topP: useId(), max: useId(), preset: useId(), input: useId(), config: useId() }
+  const ids = { key: useId(), model: useId(), list: useId(), system: useId(), temp: useId(), topP: useId(), max: useId(), effort: useId(), budget: useId(), preset: useId(), input: useId(), config: useId() }
   const chat = useChatStream(userId)
 
   const [saved] = useState(() => readSettings(userId))
   const [model, setModel] = useState(saved?.model ?? '')
   const [system, setSystem] = useState(saved?.system ?? '')
-  const [temperature, setTemperature] = useState(saved?.temperature ?? String(DEFAULT_TEMPERATURE))
-  const [topP, setTopP] = useState(saved?.topP ?? String(DEFAULT_TOP_P))
+  const [temperature, setTemperature] = useState(saved?.temperature ?? (DEFAULT_TEMPERATURE === null ? '' : String(DEFAULT_TEMPERATURE)))
+  const [topP, setTopP] = useState(saved?.topP ?? (DEFAULT_TOP_P === null ? '' : String(DEFAULT_TOP_P)))
   const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? '')
+  const [reasoningEffort, setReasoningEffort] = useState(saved?.reasoningEffort ?? '')
+  const [thinkingBudget, setThinkingBudget] = useState(saved?.thinkingBudget ?? '')
   // 选用的密钥（'' = 登录会话本身）；存的是用户的选择，能不能用由下面按当前密钥列表推导
   const [keyId, setKeyId] = useState(saved?.keyId ?? '')
   const [presetName, setPresetName] = useState('')
@@ -76,8 +78,9 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
 
   // 模型候选：本分组可用（模型广场与接入指南同口径），允许手输——目录缓存可能落后于站长刚加的模型
   const pricing = useQuery({
-    queryKey: qk.publicPricing,
-    queryFn: () => apiFetch<{ models: PricingModel[]; groups: PricingGroup[] }>('/api/pricing'),
+    queryKey: ['playground-catalog', userId],
+    queryFn: () => loadCatalog(getKey() ?? ''),
+    enabled: userId !== undefined,
     staleTime: 60_000,
   })
   const catalog = pricing.data?.models ?? []
@@ -97,42 +100,72 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   const modelEntry = catalog.find((m) => m.model === modelValue.trim())
   const modelDenied = modelEntry !== undefined && !available.includes(modelEntry.model)
 
+  const parameters = useQuery({
+    queryKey: ['playground-parameters', userId, selectedKey?.id ?? null, modelValue.trim()],
+    queryFn: ({ signal }) => loadParameters(modelValue.trim(), selectedKey?.id ?? null, signal),
+    enabled: userId !== undefined && !keyPending && modelValue.trim() !== '',
+    staleTime: 30_000, retry: false,
+  })
+  const profile = parameters.data ?? DEFAULT_PARAMETERS
+  const effortValue = profile.efforts.includes(reasoningEffort) ? reasoningEffort : ''
+  const sampling = samplingAllowed(profile, effortValue) && (!profile.sampling_requires_no_budget || thinkingBudget.trim() === '')
+  const tempEnabled = sampling && profile.temperature_max !== null
+  const topPEnabled = sampling && profile.top_p
+
   const sitePresets = useSitePresets()
   const userPresets = useUserPresets(userId)
 
-  const tempNum = Number(temperature)
-  const topPNum = Number(topP)
+  const tempNum = !tempEnabled || temperature.trim() === '' ? null : Number(temperature)
+  const topPNum = !topPEnabled || topP.trim() === '' ? null : Number(topP)
   const maxNum = maxTokens.trim() === '' ? null : Number(maxTokens)
-  const tempOk = temperature.trim() !== '' && Number.isFinite(tempNum) && tempNum >= 0 && tempNum <= 2
-  const topPOk = topP.trim() !== '' && Number.isFinite(topPNum) && topPNum >= 0 && topPNum <= 1
+  const budgetNum = profile.budget_min === null || thinkingBudget.trim() === '' ? null : Number(thinkingBudget)
+  const budgetOk = budgetNum === null || (Number.isInteger(budgetNum) && budgetNum >= profile.budget_min! && budgetNum <= profile.budget_max! && (maxNum === null || maxNum > budgetNum))
+  const tempOk = tempNum === null || (Number.isFinite(tempNum) && tempNum >= 0 && tempNum <= profile.temperature_max!)
+  const topPOk = topPNum === null || (Number.isFinite(topPNum) && topPNum >= 0 && topPNum <= 1)
   const maxOk = maxNum === null || (Number.isInteger(maxNum) && maxNum > 0)
-  const paramsOk = tempOk && topPOk && maxOk && modelValue.trim() !== '' && !keyPending
+  const paramsOk = tempOk && topPOk && maxOk && budgetOk && modelValue.trim() !== '' && !keyPending && !parameters.isFetching
 
   // 记住当前这套参数：只存用户改过的值（model 为空 = 仍跟随目录首项，不把自动选中的值固化下来）
   useEffect(() => {
-    if (userId !== undefined) writeSettings(userId, { model, system, temperature, topP, maxTokens, keyId })
-  }, [userId, model, system, temperature, topP, maxTokens, keyId])
+    if (userId !== undefined) writeSettings(userId, { model, system, temperature, topP, maxTokens, keyId, reasoningEffort, thinkingBudget })
+  }, [userId, model, system, temperature, topP, maxTokens, keyId, reasoningEffort, thinkingBudget])
+
+  // Rules can change after a channel edit or preset import. Drop incompatible
+  // remembered values so they cannot reappear on a later model switch.
+  useEffect(() => {
+    if (!parameters.data) return
+    if (!tempEnabled) setTemperature('')
+    if (!topPEnabled) setTopP('')
+    if (!profile.efforts.includes(reasoningEffort)) setReasoningEffort('')
+    if (profile.budget_min === null) setThinkingBudget('')
+  }, [parameters.data, tempEnabled, topPEnabled, profile.efforts, profile.budget_min, reasoningEffort])
+
+  const resetParameters = () => { setTemperature(''); setTopP(''); setMaxTokens(''); setReasoningEffort(''); setThinkingBudget('') }
 
   const applyPreset = (p: Preset) => {
     setModel(p.model)
     setSystem(p.system)
-    setTemperature(String(p.temperature))
-    setTopP(String(p.top_p))
+    setTemperature(p.temperature === null ? '' : String(p.temperature))
+    setTopP(p.top_p === null ? '' : String(p.top_p))
     setMaxTokens(p.max_tokens === null ? '' : String(p.max_tokens))
+    setReasoningEffort(p.reasoning_effort ?? '')
+    setThinkingBudget(p.thinking_budget == null ? '' : String(p.thinking_budget))
     setPresetName(p.name)
   }
   const currentPreset = (): Preset | null =>
     paramsOk && presetName.trim() !== ''
-      ? { name: presetName.trim(), model: modelValue.trim(), system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum }
+      ? { name: presetName.trim(), model: modelValue.trim(), system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum, reasoning_effort: effortValue || null, thinking_budget: budgetNum }
       : null
 
   const options = (): SendOptions => ({
     model: modelValue, system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum,
+    reasoning_effort: effortValue || null, thinking_budget: budgetNum, preserve_reasoning: profile.preserve_reasoning,
     keyId: selectedKey?.id ?? null, keyName: selectedKey ? keyLabel(selectedKey) : null, group: effectiveGroup,
   })
 
   // 换密钥：当前选的目录模型若新密钥用不了，就回到"跟随新密钥的第一个可用模型"；手输的目录外模型原样保留
   const changeKey = (value: string) => {
+    resetParameters()
     const next = keys.choices.find((k) => String(k.id) === value && k.blocked === null) ?? null
     const nextAvailable = modelsForKey(catalog, next?.group ?? group, next?.allowlist ?? null).map((m) => m.model)
     if (model !== '' && catalog.some((m) => m.model === model) && !nextAvailable.includes(model)) setModel('')
@@ -253,7 +286,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
               value={modelValue}
               spellCheck={false}
               placeholder={t('portal:guideModelPlaceholder')}
-              onChange={(e) => setModel(e.target.value)}
+              onChange={(e) => { resetParameters(); setModel(e.target.value) }}
             />
             <datalist id={ids.list}>
               {available.map((m) => <option key={m} value={m} />)}
@@ -273,14 +306,27 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
               onChange={(e) => setSystem(e.target.value)}
             />
           </Field>
-          <div className="grid grid-cols-3 gap-2">
-            <Field label="temperature" htmlFor={ids.temp} error={tempOk ? null : t('portal:playgroundRange', { min: 0, max: 2 })}>
-              <Input id={ids.temp} inputMode="decimal" value={temperature} aria-invalid={!tempOk} onChange={(e) => setTemperature(e.target.value)} />
+          <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground" role="status">
+            {parameters.isFetching ? t('portal:playgroundParametersLoading') : parameters.isError ? t('portal:playgroundParametersUnavailable') : profile.known ? t('portal:playgroundParametersAuto') : t('portal:playgroundParametersUnknown')}
+          </div>
+          {profile.efforts.length > 0 && <Field label={t('portal:playgroundEffort')} htmlFor={ids.effort} hint={t('portal:playgroundEffortHint')}>
+            <Select id={ids.effort} className="w-full" value={effortValue} onChange={setReasoningEffort} options={[
+              { value: '', label: t('portal:playgroundFollowModel', { level: profile.default_effort ?? '—' }) },
+              ...profile.efforts.map((e) => ({ value: e, label: t(`portal:playgroundEffort_${e}`, { defaultValue: e }) })),
+            ]} />
+          </Field>}
+          {profile.budget_min !== null && <Field label={t('portal:playgroundThinkingBudget')} htmlFor={ids.budget}
+            hint={t('portal:playgroundBudgetHint')} error={budgetOk ? null : t('portal:playgroundBudgetRange', { min: profile.budget_min, max: profile.budget_max })}>
+            <Input id={ids.budget} inputMode="numeric" value={thinkingBudget} placeholder={t('portal:playgroundAuto')} aria-invalid={!budgetOk} onChange={(e) => setThinkingBudget(e.target.value)} />
+          </Field>}
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="temperature" htmlFor={ids.temp} error={tempOk ? null : t('portal:playgroundRange', { min: 0, max: profile.temperature_max })}>
+              <Input id={ids.temp} inputMode="decimal" disabled={!tempEnabled} value={tempEnabled ? temperature : ''} placeholder={tempEnabled ? t('portal:playgroundAuto') : t('portal:playgroundParameterManaged')} aria-invalid={!tempOk} onChange={(e) => setTemperature(e.target.value)} />
             </Field>
             <Field label="top_p" htmlFor={ids.topP} error={topPOk ? null : t('portal:playgroundRange', { min: 0, max: 1 })}>
-              <Input id={ids.topP} inputMode="decimal" value={topP} aria-invalid={!topPOk} onChange={(e) => setTopP(e.target.value)} />
+              <Input id={ids.topP} inputMode="decimal" disabled={!topPEnabled} value={topPEnabled ? topP : ''} placeholder={topPEnabled ? t('portal:playgroundAuto') : t('portal:playgroundParameterManaged')} aria-invalid={!topPOk} onChange={(e) => setTopP(e.target.value)} />
             </Field>
-            <Field label="max_tokens" htmlFor={ids.max} error={maxOk ? null : t('portal:playgroundPositiveInt')}>
+            <Field className="col-span-2" label={t('portal:playgroundOutputCap')} htmlFor={ids.max} error={maxOk ? null : t('portal:playgroundPositiveInt')}>
               <Input id={ids.max} inputMode="numeric" value={maxTokens} placeholder={t('portal:playgroundAuto')} aria-invalid={!maxOk} onChange={(e) => setMaxTokens(e.target.value)} />
             </Field>
           </div>
@@ -480,6 +526,7 @@ function TurnBubble({ turn, locale, cost, onRegenerate }: { turn: Turn; locale: 
           {turn.error !== undefined && (
             <p className="mt-1 text-xs text-destructive" role="alert">
               {describeError(new ApiError(turn.error.status, turn.error.code, turn.error.param))}
+              {turn.error.message && <span className="mt-1 block whitespace-pre-wrap">{turn.error.message}</span>}
             </p>
           )}
         </div>

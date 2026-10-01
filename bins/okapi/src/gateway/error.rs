@@ -54,12 +54,35 @@ impl AppError {
             request_id.map(|id| id.to_string()),
         );
         let mut resp = (self.status, axum::Json(body)).into_response();
+        self.attach_retry_after(&mut resp);
         if let Some(id) = request_id
             && let Ok(value) = axum::http::HeaderValue::from_str(&id.to_string())
         {
             resp.headers_mut().insert("x-okapi-request-id", value);
         }
         resp
+    }
+
+    fn attach_retry_after(&self, response: &mut Response) {
+        if self.status != StatusCode::TOO_MANY_REQUESTS || self.code != codes::RATE_LIMITED {
+            return;
+        }
+        // Only fixed-window limits have a known reset. Quota and concurrency
+        // failures cannot promise that they will clear after an arbitrary delay.
+        let period = match self.param.as_deref() {
+            Some(
+                "rpm" | "tpm" | "group_rpm" | "model_rpm" | "token_count_rpm" | "invalid_api_key",
+            ) => 60,
+            Some("group_rph") => 3600,
+            Some("rpd" | "token_count_rpd") => 86_400,
+            _ => return,
+        };
+        let remaining = period - chrono::Utc::now().timestamp().rem_euclid(period);
+        if let Ok(value) = axum::http::HeaderValue::from_str(&remaining.to_string()) {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
     }
 }
 
@@ -78,6 +101,7 @@ impl AppError {
             "request_id": request_id.map(|id| id.to_string()),
         });
         let mut resp = (self.status, axum::Json(body)).into_response();
+        self.attach_retry_after(&mut resp);
         if let Some(id) = request_id
             && let Ok(value) = axum::http::HeaderValue::from_str(&id.to_string())
         {
@@ -105,6 +129,7 @@ impl AppError {
             "request_id": request_id.map(|id| id.to_string()),
         });
         let mut resp = (self.status, axum::Json(body)).into_response();
+        self.attach_retry_after(&mut resp);
         if let Some(id) = request_id
             && let Ok(value) = axum::http::HeaderValue::from_str(&id.to_string())
         {
@@ -208,4 +233,47 @@ pub fn with_request_id(mut resp: Response, request_id: uuid::Uuid) -> Response {
         resp.headers_mut().insert("x-okapi-request-id", value);
     }
     resp
+}
+
+#[cfg(test)]
+mod retry_after_tests {
+    use super::*;
+
+    #[test]
+    fn all_protocols_report_the_fixed_window_reset_and_do_not_guess_quota_resets() {
+        for axis in [
+            "rpm",
+            "tpm",
+            "model_rpm",
+            "group_rpm",
+            "group_rph",
+            "rpd",
+            "token_count_rpd",
+        ] {
+            let error = || {
+                AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(axis)
+            };
+            for response in [
+                error().into_response_with(None),
+                error().into_anthropic_response_with(None),
+                error().into_gemini_response_with(None),
+            ] {
+                let seconds: i64 = response.headers()["retry-after"]
+                    .to_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!((1..=86_400).contains(&seconds));
+            }
+        }
+        for (code, axis) in [
+            (codes::RATE_LIMITED, "concurrency"),
+            (codes::KEY_QUOTA_EXCEEDED, "rpm"),
+        ] {
+            let response = AppError::new(StatusCode::TOO_MANY_REQUESTS, code)
+                .with_param(axis)
+                .into_response_with(None);
+            assert!(!response.headers().contains_key("retry-after"));
+        }
+    }
 }

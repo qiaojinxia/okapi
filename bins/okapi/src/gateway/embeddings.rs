@@ -16,7 +16,6 @@ use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId
 use okapi_ledger::{LimitCaps, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, RatioFp, calculate};
 use okapi_providers::{UpstreamError, rewrite_model};
-use okapi_store::channels::KeyFailure;
 use serde::Deserialize;
 use std::time::Instant;
 use uuid::Uuid;
@@ -489,15 +488,7 @@ async fn forward(
                 ));
             }
             Err(err) if err.retriable_before_first_token() => {
-                let kind = match &err {
-                    UpstreamError::Status { status: 429, .. } => KeyFailure::RateLimited {
-                        retry_after_secs: err.retry_after_secs(),
-                    },
-                    UpstreamError::Status {
-                        status: 401 | 403, ..
-                    } => KeyFailure::Invalid,
-                    _ => KeyFailure::Transient,
-                };
+                let kind = super::chat::failure_kind_of(&err);
                 let _ = okapi_store::channels::mark_key_failure(
                     &state.pg,
                     cand.channel_key_id,

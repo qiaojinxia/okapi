@@ -129,7 +129,7 @@ async fn open(
                     &ctx.state.pg,
                     candidate.channel_key_id,
                     error.error_code(),
-                    okapi_store::channels::KeyFailure::Transient,
+                    super::super::chat::failure_kind_of(&error),
                 )
                 .await;
             }

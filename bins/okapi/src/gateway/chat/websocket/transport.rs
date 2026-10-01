@@ -129,6 +129,30 @@ async fn credentials(
 
 pub(super) async fn connect(
     bill: &RequestBilling,
+    cand: &mut ChannelCandidate,
+) -> Result<Transport, UpstreamError> {
+    if cand.provider == "codex" {
+        cand.credential = oauth_cred::fresh_credential(&bill.state, cand)
+            .await?
+            .to_plaintext();
+    }
+    let first = connect_once(bill, cand).await;
+    if cand.provider == "codex" && matches!(&first, Err(UpstreamError::Status { status: 401, .. }))
+    {
+        match oauth_cred::refresh_rejected_credential(&bill.state, cand).await {
+            Ok(credential) => {
+                cand.credential = credential.to_plaintext();
+                // The upgrade rejected authentication before any create frame was sent.
+                return connect_once(bill, cand).await;
+            }
+            Err(error) => bill.trace.failure(&error),
+        }
+    }
+    first
+}
+
+async fn connect_once(
+    bill: &RequestBilling,
     cand: &ChannelCandidate,
 ) -> Result<Transport, UpstreamError> {
     let credentials = credentials(bill, cand).await?;
