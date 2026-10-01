@@ -7,7 +7,7 @@ use futures::{Stream, StreamExt};
 use std::{pin::Pin, time::Duration};
 
 /// Shorter than the ordinary ledger reservation lease (10 minutes).
-pub const IMAGE_STREAM_TIMEOUT: Duration = Duration::from_secs(420);
+pub const IMAGE_STREAM_TIMEOUT: Duration = Duration::from_mins(7);
 
 pub enum ImageBody {
     Json(Bytes),

@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// 统计维度独立于计费模型；空值表示未采集，禁止用计费名冒充请求或上游名。
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct UsageDimensions {
     pub requested_model: String,
     pub upstream_model: String,
@@ -27,7 +27,7 @@ impl UsageDimensions {
 }
 
 /// 一笔请求的结算输入（终态写入）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SettlementInput<'a> {
     pub dimensions: UsageDimensions,
     pub request_id: Uuid,
@@ -58,7 +58,9 @@ pub struct SettlementInput<'a> {
     pub retry_count: i16,
     pub failover_count: i16,
     pub upstream_status: Option<i16>,
+    #[serde(borrow)]
     pub error_code: Option<&'a str>,
+    #[serde(borrow)]
     pub upstream_request_id: Option<&'a str>,
     /// 处理节点（gateway 实例名）。
     pub node: &'a str,
@@ -70,6 +72,7 @@ pub struct SettlementInput<'a> {
     /// 来源 IP（§14.2 信任闸判定后的值）。**PG 与 CH 两处都要落**：此前只进了 outbox
     /// 载荷（→ CH），`billing_records.client_ip` 这一列建了却从没写过，永远是 NULL——
     /// 没接 ClickHouse 的部署因此完全查不到来源 IP，而 docs/database.md 写的是「PG + CH」。
+    #[serde(borrow)]
     pub client_ip: Option<&'a str>,
     /// 余额净变动（消费 = −amount；退款/失败 = 0），billing_events 锚点。
     pub delta_micro: i64,
@@ -81,6 +84,105 @@ pub struct SettlementInput<'a> {
     pub pool: Pool,
     /// Immutable subscription window selected at admission; None for wallet/legacy.
     pub source_window: Option<String>,
+}
+
+/// Owned journal payload; quoted/escaped metadata must survive JSON replay.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OwnedSettlementInput {
+    pub dimensions: UsageDimensions,
+    pub request_id: Uuid,
+    /// 1充值 2消费 3管理 4系统 5错误 6退款 7登录。
+    pub log_type: i16,
+    pub user_id: i64,
+    pub api_key_id: i64,
+    pub group_code: String,
+    pub model_name: String,
+    pub channel_id: Option<i64>,
+    pub channel_key_id: Option<i64>,
+    pub state: BillingState,
+    pub usage: TokenUsage,
+    pub amount: Money,
+    pub original: Money,
+    pub discount: Money,
+    /// 官方价（乘分组倍率前；`Quote::list_price`）——上游成本 = 官方价 × 渠道相对成本系数。
+    /// 失败 / 退款记录为零。
+    pub list_price: Money,
+    /// 上游成本（§11.18）：由 `settle_write` 按渠道 `relative_cost_milli` 折算后填入；
+    /// None = 无渠道（未选路即失败）或无法折算，CH 侧记 0 且不计入毛利分母。
+    pub upstream_cost: Option<Money>,
+    pub pricing_epoch: Option<i64>,
+    pub pricing_snapshot: Option<serde_json::Value>,
+    pub latency_ms: i32,
+    pub ttft_ms: Option<i32>,
+    pub is_stream: bool,
+    pub retry_count: i16,
+    pub failover_count: i16,
+    pub upstream_status: Option<i16>,
+    pub error_code: Option<String>,
+    pub upstream_request_id: Option<String>,
+    /// 处理节点（gateway 实例名）。
+    pub node: String,
+    /// 粘性命中层：0 无 / 1 response_id / 2 session / 3 打分（docs/database.md §1.5）。
+    pub sticky_layer: i16,
+    /// UA 识别的客户端类型（#5277）。
+    pub client_type: String,
+    /// 客户端 IP（CDN 头按序解析，§14.2；统计列）。
+    /// 来源 IP（§14.2 信任闸判定后的值）。**PG 与 CH 两处都要落**：此前只进了 outbox
+    /// 载荷（→ CH），`billing_records.client_ip` 这一列建了却从没写过，永远是 NULL——
+    /// 没接 ClickHouse 的部署因此完全查不到来源 IP，而 docs/database.md 写的是「PG + CH」。
+    pub client_ip: Option<String>,
+    /// 余额净变动（消费 = −amount；退款/失败 = 0），billing_events 锚点。
+    pub delta_micro: i64,
+    pub balance_after: Option<Money>,
+    /// commit | refund。
+    pub event_type: String,
+    /// 这笔由哪个池付（IMPLEMENTATION §11.28）：records / events / outbox 三处同写；
+    /// `users.balance_micro` 快照只随钱包池动。
+    pub pool: Pool,
+    /// Immutable subscription window selected at admission; None for wallet/legacy.
+    pub source_window: Option<String>,
+}
+
+impl OwnedSettlementInput {
+    pub fn as_input(&self) -> SettlementInput<'_> {
+        SettlementInput {
+            dimensions: self.dimensions.clone(),
+            request_id: self.request_id,
+            log_type: self.log_type,
+            user_id: self.user_id,
+            api_key_id: self.api_key_id,
+            group_code: self.group_code.as_str(),
+            model_name: self.model_name.as_str(),
+            channel_id: self.channel_id,
+            channel_key_id: self.channel_key_id,
+            state: self.state,
+            usage: self.usage,
+            amount: self.amount,
+            original: self.original,
+            discount: self.discount,
+            list_price: self.list_price,
+            upstream_cost: self.upstream_cost,
+            pricing_epoch: self.pricing_epoch,
+            pricing_snapshot: self.pricing_snapshot.clone(),
+            latency_ms: self.latency_ms,
+            ttft_ms: self.ttft_ms,
+            is_stream: self.is_stream,
+            retry_count: self.retry_count,
+            failover_count: self.failover_count,
+            upstream_status: self.upstream_status,
+            error_code: self.error_code.as_deref(),
+            upstream_request_id: self.upstream_request_id.as_deref(),
+            node: self.node.as_str(),
+            sticky_layer: self.sticky_layer,
+            client_type: self.client_type.as_str(),
+            client_ip: self.client_ip.as_deref(),
+            delta_micro: self.delta_micro,
+            balance_after: self.balance_after,
+            event_type: self.event_type.as_str(),
+            pool: self.pool,
+            source_window: self.source_window.clone(),
+        }
+    }
 }
 
 /// `record_settlement` 的 advisory lock 命名空间（"SETL"）。

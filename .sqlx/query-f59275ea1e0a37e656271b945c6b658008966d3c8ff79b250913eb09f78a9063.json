@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT member_user_id FROM api_keys WHERE id=$1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "member_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "api_keys",
+            "name": "member_user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f59275ea1e0a37e656271b945c6b658008966d3c8ff79b250913eb09f78a9063"
+}

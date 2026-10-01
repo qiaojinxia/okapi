@@ -48,7 +48,7 @@ const RESERVATION_TTL_MS: i64 = 600_000;
 
 /// 结算来源池（IMPLEMENTATION §11.28）：一笔请求的预扣 / 结算 / 退款只动一个池。
 /// `billing_events.pool` / `billing_records.pool` 存 `as_i16()`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum Pool {
     /// 钱包 `bal.avail`（fail-closed：余额 ≥ 预估才放行）。
     #[default]

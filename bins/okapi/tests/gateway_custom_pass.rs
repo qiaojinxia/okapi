@@ -11,6 +11,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 async fn mock_tool(headers: axum::http::HeaderMap) -> axum::response::Response {
     assert_eq!(
         headers.get("x-api-key").and_then(|v| v.to_str().ok()),
@@ -139,6 +142,7 @@ async fn setup() -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -329,4 +333,40 @@ async fn post_forwards_method_query_and_body_verbatim() {
     let (status, amount) = record_of(&env.pg, env.user_id, 2).await.expect("必须记账");
     assert_eq!(status, 20);
     assert_eq!(amount, 5000, "per_call $0.005");
+}
+
+#[tokio::test]
+async fn rejects_ratio_billing_and_ambiguous_paths_without_reserving() {
+    let env = setup().await;
+    sqlx::query("UPDATE model_pricing SET pricing_mode='ratio',per_call_price_micro=NULL,model_ratio=1,completion_ratio=1,cache_ratio=1 WHERE model_id=(SELECT id FROM models WHERE model_name=(SELECT settings->>'billing_model' FROM channels WHERE id=$1))").bind(env.channel_id).execute(&env.pg).await.unwrap();
+    published_pricing::publish(&env.pg, env.user_id).await;
+    let state = gateway::build_state(
+        &std::env::var("DATABASE_URL").unwrap(),
+        &std::env::var("OKAPI_REDIS_URL").unwrap(),
+        "reject-test",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, gateway::router(state)).await.unwrap();
+    });
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/pass/{}/ok/tool", env.channel_id))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    for path in ["ok/%252e%252e/admin", "okay/tool"] {
+        let response = pass_get(&env, path).await;
+        assert!(matches!(response.status().as_u16(), 400 | 403));
+    }
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        1_000_000
+    );
 }

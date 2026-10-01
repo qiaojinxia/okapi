@@ -26,6 +26,7 @@ pub mod pricing;
 pub mod provision;
 pub mod redis;
 pub mod subscriptions;
+pub mod timezone;
 pub mod vendor;
 
 pub use auth::AuthedKey;

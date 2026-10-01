@@ -5,10 +5,11 @@
 //! 却没有任何用例核对过返回内容。并行会话在 `gateway_compat.rs` 里有一条同目的的用例尚未提交；
 //! 此处先补上，二者合入后保留其一即可。
 //!
-//! 该路由不做数据面鉴权（供探测可用模型），有无 Bearer 都回 200。依赖 .env（scripts/dev-deps.sh up）。
+//! 该路由要求数据面鉴权，并按 key 的模型白名单过滤。依赖 .env（scripts/dev-deps.sh up）。
 
 use okapi::gateway;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -33,6 +34,18 @@ async fn lists_enabled_models_and_hides_disabled_ones() {
         .await
         .unwrap();
 
+    let uid = okapi_store::provision::create_user(&pg, &format!("models-{suffix}"))
+        .await
+        .unwrap();
+    let token = format!("sk-okapi-models-{suffix}");
+    okapi_store::provision::create_api_key(
+        &pg,
+        uid,
+        &hex::encode(Sha256::digest(token.as_bytes())),
+        "sk-okapi-models",
+    )
+    .await
+    .unwrap();
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -42,8 +55,15 @@ async fn lists_enabled_models_and_hides_disabled_ones() {
         axum::serve(listener, gateway::router(state)).await.unwrap();
     });
 
+    let unauth = reqwest::Client::new()
+        .get(format!("http://{addr}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth.status(), 401);
     let resp = reqwest::Client::new()
         .get(format!("http://{addr}/v1/models"))
+        .bearer_auth(&token)
         .send()
         .await
         .unwrap();

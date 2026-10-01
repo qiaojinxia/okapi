@@ -96,6 +96,7 @@ fn bounds(part: &Partition, keep_from: DateTime<Utc>) -> Option<(DateTime<Utc>, 
 
 /// Keeps the current month and preceding months-1 whole calendar months.
 pub async fn prune(pg: &PgPool, now: DateTime<Utc>) -> Result<Vec<String>, StoreError> {
+    prune_delivery(pg, now).await?;
     let months = sqlx::query_scalar!(
         r#"SELECT (value #>> '{}')::bigint AS "v!" FROM settings WHERE key='retention_months'"#
     )
@@ -229,5 +230,17 @@ async fn carry_records(
         SELECT request_id,user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,status,amount_micro,original_amount_micro,
           discount_micro,upstream_cost_micro,is_stream,node,pool,pricing_snapshot,usage_details,created_at,source_window FROM billing_records
         WHERE tableoid=$1::bigint::oid AND created_at >= $2 AND created_at < $3",oid,start,end).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// Seven days exceeds the 48-hour JetStream replay horizon. Never remove pending
+/// deliveries or any batch still referenced by a DLQ entry.
+pub async fn prune_delivery(pg: &PgPool, now: DateTime<Utc>) -> Result<(), StoreError> {
+    let cutoff = now - chrono::Duration::days(7);
+    let mut tx = pg.begin().await?;
+    sqlx::query!("DELETE FROM billing_outbox o USING billing_ch_batches b WHERE o.ch_batch_id=b.id AND o.status=1 AND b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id)",cutoff).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM billing_ch_events e USING billing_ch_batches b WHERE e.batch_id=b.id AND b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id)",cutoff).execute(&mut *tx).await?;
+    sqlx::query!("DELETE FROM billing_ch_batches b WHERE b.status=1 AND b.completed_at<$1 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE o.ch_batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_ch_events e WHERE e.batch_id=b.id) AND NOT EXISTS(SELECT 1 FROM billing_dlq d WHERE d.ch_batch_id=b.id)",cutoff).execute(&mut *tx).await?;
+    tx.commit().await?;
     Ok(())
 }

@@ -1,5 +1,6 @@
 use super::AppState;
 use okapi_ledger::SettlementInput;
+use sqlx::Connection as _;
 
 impl AppState {
     pub(super) async fn prepare_settlement(&self, input: &mut SettlementInput<'_>) {
@@ -27,6 +28,28 @@ impl AppState {
         }
     }
 
+    pub(crate) async fn persist_success(
+        &self,
+        input: SettlementInput<'_>,
+    ) -> Result<bool, okapi_ledger::LedgerError> {
+        if input.dimensions.endpoint != "/v1/videos" {
+            return okapi_ledger::sync::record(&self.pg, &self.ledger, input).await;
+        }
+        let mut guard = okapi_ledger::holds::UserGuard::acquire(&self.pg, input.user_id).await?;
+        let mut tx = guard.connection().begin().await?;
+        let inserted = okapi_ledger::sync::record_in_tx(&mut tx, input.clone()).await?;
+        if let (Some(task_id), Some(channel_key_id)) =
+            (input.upstream_request_id, input.channel_key_id)
+        {
+            sqlx::query!("INSERT INTO video_tasks(user_id,task_id,request_id,channel_key_id) VALUES ($1,$2,$3,$4) ON CONFLICT (request_id) DO NOTHING",input.user_id,task_id,input.request_id,channel_key_id).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        if let Err(error) = guard.synchronize(&self.ledger).await {
+            tracing::error!(request_id=%input.request_id,%error,"video charge awaiting hot ledger recovery");
+        }
+        Ok(inserted)
+    }
+
     /// Persist the actual usage before closing Redis. Pending completions survive
     /// process loss and are retried by the worker; stats run once per inserted bill.
     pub async fn settle_success(
@@ -36,15 +59,19 @@ impl AppState {
         let _backlog = super::BacklogGuard::enter(&self.settle_backlog);
         self.prepare_settlement(&mut input).await;
         let _permit = self.settle_gate.acquire().await;
+        let journaled = super::super::settlement_retry::save(self, &input)
+            .await
+            .is_ok();
         let mut delay = std::time::Duration::from_millis(200);
         for attempt in 0..3u8 {
-            match okapi_ledger::sync::record(&self.pg, &self.ledger, input.clone()).await {
+            match Box::pin(self.persist_success(input.clone())).await {
                 Ok(inserted) => {
                     if inserted {
                         self.sched
                             .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
                             .await;
                     }
+                    let _ = super::super::settlement_retry::remove(self, input.request_id).await;
                     return Ok(inserted);
                 }
                 Err(error) => {
@@ -53,6 +80,14 @@ impl AppState {
                         tokio::time::sleep(delay).await;
                         delay *= 4;
                     } else {
+                        if journaled {
+                            tracing::warn!(request_id=%input.request_id, "settlement retained in retry journal");
+                            return Ok(false);
+                        }
+                        let _ = self
+                            .ledger
+                            .refund(input.user_id, input.api_key_id, input.request_id)
+                            .await;
                         return Err(error.into());
                     }
                 }

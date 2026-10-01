@@ -115,7 +115,7 @@ async fn client(url: &Url, policy: &FetchPolicy) -> Result<Client, StorageError>
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60));
+        .timeout(Duration::from_mins(1));
     if url.domain().is_some() {
         builder = builder.resolve_to_addrs(host, &addresses);
     }

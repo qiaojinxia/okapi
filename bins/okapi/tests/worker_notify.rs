@@ -92,6 +92,7 @@ async fn temp_db_notifier(sink: &SocketAddr) -> (notify::Notifier, fred::clients
                 .await
                 .unwrap();
     }
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").bind(json!({"allow_http":true,"allow_private":true})).execute(&pool).await.unwrap();
     let notifier = notify::Notifier::new(pool.clone(), redis.clone());
     (notifier, redis, TempDb { pool, admin, name })
 }

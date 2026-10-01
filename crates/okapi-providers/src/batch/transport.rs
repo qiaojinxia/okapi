@@ -25,7 +25,7 @@ impl Transport {
         let mut builder = Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_mins(1))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never());
         if let Some(proxy) = &outbound.proxy_url {

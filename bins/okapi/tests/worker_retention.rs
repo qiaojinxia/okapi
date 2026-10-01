@@ -10,6 +10,8 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 struct Bed {
+    cleanup_url: String,
+    database_name: String,
     pg: PgPool,
     ledger: BalanceLedger,
     redis: fred::clients::Client,
@@ -24,7 +26,9 @@ fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 async fn setup() -> Bed {
+    dotenvy::dotenv().ok();
     let database = std::env::var("DATABASE_URL").unwrap();
+    let cleanup_url = database.clone();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
     let suffix = Uuid::new_v4();
     let name = format!("okapi_retention_case_{}", suffix.simple());
@@ -83,10 +87,12 @@ async fn setup() -> Bed {
         .unwrap();
     });
     for table in ["billing_records", "billing_events", "audit_logs"] {
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TABLE {table}_y2020m01 PARTITION OF {table} FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')"))).execute(&pg).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE TABLE {table}_y2020m01 PARTITION OF {table} FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-02-01 00:00:00+00')"))).execute(&pg).await.unwrap();
     }
     sqlx::query("INSERT INTO settings(key,value) VALUES ('retention_months','12') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").execute(&pg).await.unwrap();
     Bed {
+        cleanup_url,
+        database_name: name,
         pg,
         ledger,
         redis,
@@ -97,6 +103,40 @@ async fn setup() -> Bed {
         addr,
     }
 }
+// Each case owns its UUID database. Release it even when the assertion panics;
+// scoped HTTP test tasks may still hold idle connections until runtime shutdown.
+impl Drop for Bed {
+    fn drop(&mut self) {
+        let url = self.cleanup_url.clone();
+        let database = self.database_name.clone();
+        let result = std::thread::spawn(move || -> Result<(), String> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime.block_on(async {
+                let pg = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&url)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DROP DATABASE {database} WITH (FORCE)"
+                )))
+                .execute(&pg)
+                .await
+                .map_err(|error| error.to_string())?;
+                pg.close().await;
+                Ok(())
+            })
+        })
+        .join();
+        if !matches!(result, Ok(Ok(()))) {
+            tracing::warn!(?result, "isolated retention test database cleanup failed");
+        }
+    }
+}
+
 impl Bed {
     async fn credit(&self, amount: i64, actor: &str) {
         let receipt = okapi_ledger::operations::credit(
@@ -113,16 +153,20 @@ impl Bed {
         assert!(receipt.balance_after.is_some());
     }
     async fn age(&self) {
-        sqlx::query("UPDATE billing_events SET created_at='2020-01-15' WHERE user_id=$1")
-            .bind(self.uid)
-            .execute(&self.pg)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE billing_records SET created_at='2020-01-15' WHERE user_id=$1")
-            .bind(self.uid)
-            .execute(&self.pg)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE billing_events SET created_at='2020-01-15 00:00:00+00' WHERE user_id=$1",
+        )
+        .bind(self.uid)
+        .execute(&self.pg)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE billing_records SET created_at='2020-01-15 00:00:00+00' WHERE user_id=$1",
+        )
+        .bind(self.uid)
+        .execute(&self.pg)
+        .await
+        .unwrap();
     }
     async fn prune(&self) -> Vec<String> {
         worker::drop_expired_partitions(&self.pg, Utc::now())
@@ -295,7 +339,7 @@ async fn retention_only_drops_owned_partitions_with_matching_time_bounds() {
         .execute(&b.pg)
         .await
         .unwrap();
-    sqlx::query("CREATE TABLE audit_logs_y2019m02 PARTITION OF audit_logs FOR VALUES FROM ('2100-02-01') TO ('2100-03-01')").execute(&b.pg).await.unwrap();
+    sqlx::query("CREATE TABLE audit_logs_y2019m02 PARTITION OF audit_logs FOR VALUES FROM ('2100-02-01 00:00:00+00') TO ('2100-03-01 00:00:00+00')").execute(&b.pg).await.unwrap();
     b.prune().await;
     let standalone: bool =
         sqlx::query_scalar("SELECT to_regclass('billing_events_y2019m01') IS NOT NULL")
@@ -737,4 +781,86 @@ async fn opposing_lifetime_totals_do_not_overflow_before_net_balance_is_calculat
         .bind(b.uid).fetch_one(&b.pg).await.unwrap();
     assert!(large);
     assert_eq!(b.repair().await["data"][0]["redis_after_micro"], 500);
+}
+
+#[tokio::test]
+async fn delivery_cleanup_preserves_pending_recent_and_dlq_batches() {
+    dotenvy::dotenv().ok();
+    let bed = setup().await;
+    let mut ids = Vec::new();
+    for (status, age, dlq) in [
+        (1_i16, 14, false),
+        (0, 14, false),
+        (1, 0, false),
+        (1, 14, true),
+    ] {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO billing_ch_batches(id,status,event_count,rows,payloads,completed_at) VALUES($1,$2,1,'[{}]','[{}]',$3)").bind(id).bind(status).bind(Utc::now()-chrono::Duration::days(age)).execute(&bed.pg).await.unwrap();
+        sqlx::query("INSERT INTO billing_ch_events(event_key,batch_id) VALUES($1,$2)")
+            .bind(id.to_string())
+            .bind(id)
+            .execute(&bed.pg)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO billing_outbox(topic,payload,status,ch_batch_id) VALUES('billing.completed','{}',$1,$2)").bind(status).bind(id).execute(&bed.pg).await.unwrap();
+        if dlq {
+            sqlx::query("INSERT INTO billing_dlq(source,payload,error,retry_count,ch_batch_id) VALUES('chsink','{}','test',1,$1)").bind(id).execute(&bed.pg).await.unwrap();
+        }
+        ids.push(id);
+    }
+    okapi_store::history::prune_delivery(&bed.pg, Utc::now())
+        .await
+        .unwrap();
+    for (index, id) in ids.iter().enumerate() {
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_ch_batches WHERE id=$1")
+            .bind(id)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(index != 0));
+    }
+}
+
+#[tokio::test]
+async fn expiry_pg_failure_leaves_hot_funds_available_and_can_retry() {
+    dotenvy::dotenv().ok();
+    let bed = setup().await;
+    bed.credit(10_000, "test").await;
+    let now = Utc::now();
+    sqlx::query("UPDATE users SET balance_expires_at=$2 WHERE id=$1")
+        .bind(bed.uid)
+        .bind(now - chrono::Duration::days(1))
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+    sqlx::query("CREATE FUNCTION reject_expire() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_type='expire' THEN RAISE EXCEPTION 'simulated expiry PG write failure'; END IF; RETURN NEW; END $$").execute(&bed.pg).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_expire BEFORE INSERT ON billing_events FOR EACH ROW EXECUTE FUNCTION reject_expire()").execute(&bed.pg).await.unwrap();
+    assert!(
+        okapi_ledger::operations::expire(&bed.pg, &bed.ledger, bed.uid, now)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        bed.ledger.balance(bed.uid).await.unwrap().as_micros(),
+        10_000
+    );
+    sqlx::query("DROP TRIGGER reject_expire ON billing_events")
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+    assert_eq!(
+        okapi_ledger::operations::expire(&bed.pg, &bed.ledger, bed.uid, now)
+            .await
+            .unwrap()
+            .as_micros(),
+        10_000
+    );
+    assert_eq!(bed.ledger.balance(bed.uid).await.unwrap().as_micros(), 0);
+    assert_eq!(
+        okapi_ledger::operations::expire(&bed.pg, &bed.ledger, bed.uid, now)
+            .await
+            .unwrap()
+            .as_micros(),
+        0
+    );
 }

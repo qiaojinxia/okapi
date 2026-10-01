@@ -356,9 +356,20 @@ impl PriceBook {
         model: &ModelCode,
         group: &GroupCode,
     ) -> Result<ResolvedRate<'_>, PricingError> {
-        let pricing = self
-            .overrides
-            .get(&(user, model.clone()))
+        let exact = (user, model.clone());
+        // Variant-specific agreements win; otherwise inherit the base agreement.
+        let base = model
+            .as_str()
+            .split_once('@')
+            .map(|(base, _)| (user, ModelCode::from(base)));
+        let override_key = if self.overrides.contains_key(&exact) {
+            Some(&exact)
+        } else {
+            base.as_ref()
+                .filter(|key| self.overrides.contains_key(*key))
+        };
+        let pricing = override_key
+            .and_then(|key| self.overrides.get(key))
             .or_else(|| self.models.get(model))
             .ok_or_else(|| PricingError::UnknownModel(model.to_string()))?;
         let group_ratio = *self
@@ -369,7 +380,9 @@ impl PriceBook {
             pricing,
             group_ratio,
             // Absolute overrides retain their USD price, independent of the site base.
-            base_price_per_1m_micro: if self.absolute_overrides.contains(&(user, model.clone())) {
+            base_price_per_1m_micro: if override_key
+                .is_some_and(|key| self.absolute_overrides.contains(key))
+            {
                 BASE_PRICE_PER_1M_MICRO
             } else {
                 self.base_price_per_1m_micro
@@ -540,5 +553,52 @@ mod tests {
             compile(source),
             Err(CompileError::DuplicateModel(_))
         ));
+    }
+    #[test]
+    fn variant_inherits_base_override_and_exact_override_wins() {
+        let user = UserId::new(1);
+        let base = ModelCode::from("model");
+        let variant = ModelCode::from("model@effort:high");
+        let group = GroupCode::from("default");
+        let per_call = |micros| PricingMode::PerCall {
+            price: Money::from_micros(micros),
+        };
+        let source = PriceBookSource {
+            epoch: 1,
+            models: vec![ModelEntry {
+                model: variant.clone(),
+                pricing: per_call(1000),
+                tier_ratios: Vec::new(),
+            }],
+            groups: vec![GroupEntry {
+                group: group.clone(),
+                ratio: RatioFp::ONE,
+            }],
+            overrides: vec![OverrideEntry {
+                user,
+                model: base,
+                spec: OverrideSpec::Ratio(per_call(400)),
+            }],
+            rules: Vec::new(),
+        };
+        let book = compile(source.clone()).unwrap();
+        assert_eq!(
+            *book.resolve(user, &variant, &group).unwrap().pricing,
+            per_call(400)
+        );
+        let mut exact = source;
+        exact.overrides.push(OverrideEntry {
+            user,
+            model: variant.clone(),
+            spec: OverrideSpec::Ratio(per_call(250)),
+        });
+        assert_eq!(
+            *compile(exact)
+                .unwrap()
+                .resolve(user, &variant, &group)
+                .unwrap()
+                .pricing,
+            per_call(250)
+        );
     }
 }

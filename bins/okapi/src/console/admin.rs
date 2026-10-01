@@ -1959,10 +1959,10 @@ pub async fn set_user_multiplier(
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     let raw = req.multiplier.trim();
-    let value: f64 = raw
+    let value: okapi_pricing::RatioFp = raw
         .parse()
         .map_err(|_| AppError::bad_request().with_param("multiplier"))?;
-    if !(0.0..=1000.0).contains(&value) || !value.is_finite() {
+    if value.as_scaled() > 1_000_000_000 {
         return Err(AppError::bad_request().with_param("multiplier"));
     }
     if !okapi_store::admin::set_user_multiplier(&state.pg, user_id, raw).await? {

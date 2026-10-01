@@ -15,6 +15,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 #[path = "support/paged_lists.rs"]
 mod paged_lists;
 
@@ -55,7 +58,7 @@ struct Env {
     suffix: String,
 }
 
-/// 待插入规则：(rule_type, params)。规则在 build_state 之前入库才会进价簿。
+/// 待插入规则：(rule_type, params)。草稿在 build_state 之前显式发布才会进价簿。
 type RuleSeed = (&'static str, Value);
 
 async fn insert_rule(pg: &PgPool, code: &str, user_id: i64, model: &str, seed: &RuleSeed) {
@@ -128,6 +131,7 @@ async fn setup(rules: &[RuleSeed]) -> Env {
         insert_rule(&pg, &format!("r{i}-{suffix}"), user_id, &model, seed).await;
     }
 
+    published_pricing::publish(&pg, super_id).await;
     let state = gateway::build_state(
         &database_url,
         &redis_url,

@@ -82,6 +82,9 @@ async fn serve(router: Router) -> SocketAddr {
     addr
 }
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 // ---- 测试环境 ----
 
 struct TestEnv {
@@ -140,6 +143,7 @@ async fn setup(balance: Money) -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
     let state = gateway::build_state(
         &database_url,
@@ -231,6 +235,7 @@ async fn realtime_bridge_bills_on_disconnect() {
     let initial = Money::from_micros(50_000_000);
     let env = setup(initial).await;
 
+    let admitted_epoch = env.state.pricebook.load().epoch();
     let mut ws = connect(&env).await.expect("握手应成功");
     // 上游 session.created 应转发到客户端
     let created = recv_text(&mut ws).await;
@@ -259,6 +264,25 @@ async fn realtime_bridge_bills_on_disconnect() {
     let done = recv_text(&mut ws).await;
     assert_eq!(done["type"], "response.done");
 
+    // Publishing another mode/rate during an open session must not reprice it.
+    let replacement = okapi_pricing::book::compile(okapi_pricing::book::PriceBookSource {
+        epoch: admitted_epoch + 1000,
+        models: vec![okapi_pricing::book::ModelEntry {
+            model: okapi_domain::ModelCode::from(env.model.as_str()),
+            pricing: okapi_pricing::PricingMode::PerCall {
+                price: Money::from_micros(999_000_000),
+            },
+            tier_ratios: vec![],
+        }],
+        groups: vec![okapi_pricing::book::GroupEntry {
+            group: okapi_domain::GroupCode::from("default"),
+            ratio: okapi_pricing::RatioFp::ONE,
+        }],
+        overrides: vec![],
+        rules: vec![],
+    })
+    .unwrap();
+    env.state.pricebook.replace(replacement);
     ws.close(None).await.unwrap();
     drop(ws);
 
@@ -268,6 +292,9 @@ async fn realtime_bridge_bills_on_disconnect() {
     assert_eq!(status, 20, "应为 committed");
     assert_eq!((pt, ct), (100, 50), "usage 应按 response.done 累计");
     assert!(amount > 0, "有产出必须计费");
+    let recorded_epoch: i64=sqlx::query_scalar("SELECT pricing_epoch FROM billing_records WHERE user_id=$1 AND log_type=2 ORDER BY created_at DESC LIMIT 1").bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+    assert_eq!(recorded_epoch, admitted_epoch);
+    assert_ne!(amount, 999_000_000);
 
     // 余额一致性：初始 − 记录金额 = 最终（预扣差额已退）
     let final_balance = env.ledger.balance(env.user_id).await.unwrap();

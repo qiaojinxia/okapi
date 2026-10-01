@@ -56,11 +56,13 @@ pub(super) async fn start(
     let pending = ctx.state.settlements.clone();
     // Track the entire dispatch: cancellation while awaiting upstream headers must not orphan a bill.
     pending.spawn(async move {
+        let mut failure = super::super::failure::Guard::new(&ctx.state,&ctx.key,ctx.request_id,&ctx.prepared.canonical,&ctx.input.model,&ctx.endpoint,ctx.started,ctx.reserved_pool,ctx.source_window.as_deref());
         let mut sender = Some(tx);
         let opened = tokio::time::timeout_at(deadline(&ctx), open(&ctx, candidates)).await
             .unwrap_or_else(|_| Err(AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)));
         match opened {
             Ok((response, candidate, failovers, mode)) => {
+                failure.channel(&candidate);
                 let _ = ready.send(Ok(()));
                 let mut collected = Collected::read(&ctx, response, mode, &mut sender).await;
                 if let Err(error) = settle(&ctx, &candidate, failovers, &collected).await {
@@ -68,6 +70,8 @@ pub(super) async fn start(
                     // A settlement failure may follow a committed PG transaction. Never refund blindly.
                     collected.frames.clear();
                     collected.failed = true;
+                } else if !collected.frames.is_empty() {
+                    failure.disarm();
                 }
                 for frame in collected.frames {
                     deliver(&mut sender, frame).await;

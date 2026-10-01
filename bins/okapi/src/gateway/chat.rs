@@ -796,8 +796,15 @@ async fn prepare_chat(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day =
-        u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
+    let minute_of_day = u16::try_from(
+        (now.timestamp()
+            .saturating_add(i64::from(
+                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+            ))
+            .div_euclid(60))
+        .rem_euclid(1440),
+    )
+    .unwrap_or(0);
     // 计价名（§11.25）：变体在价簿里配了价就按变体收，否则回退基座——修饰符改的是
     // 上游行为，站长愿不愿意为它单独定价是另一回事，没配价不该让请求失败。
     // 路由仍用 `canonical`：渠道声明的是基座模型名。
@@ -813,6 +820,7 @@ async fn prepare_chat(
         monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         // 预扣按请求声明档估（贵档多预扣；结算档只降不升另选）
         service_tier: info.service_tier.clone(),

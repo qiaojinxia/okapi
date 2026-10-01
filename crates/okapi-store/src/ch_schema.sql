@@ -2,7 +2,7 @@
 -- 幂等：全部 IF NOT EXISTS；批次幂等依赖 non_replicated_deduplication_window + insert_deduplication_token
 
 CREATE TABLE IF NOT EXISTS request_log_raw (
-    ts              DateTime64(3),
+    ts              DateTime64(3, 'UTC'),
     request_id      UUID,
     upstream_request_id String,
     log_type        UInt8,
@@ -328,7 +328,7 @@ ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS billing_type LowCardinality
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS request_type LowCardinality(String) DEFAULT '';
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS upstream_cost_known UInt8 DEFAULT 0;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS pool UInt8 DEFAULT 0;
-ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3) DEFAULT toDateTime64(0, 3);
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS ingested_at DateTime64(3, 'UTC') DEFAULT toDateTime64(0, 3);
 
 CREATE MATERIALIZED VIEW IF NOT EXISTS mv_analysis_hour
 ENGINE = AggregatingMergeTree()
@@ -496,7 +496,7 @@ GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_mode
 -- Sparse historical character evidence. FINAL collapses retries; the greatest
 -- observed duplicate count survives partial raw expiry. No financial mutation.
 CREATE TABLE IF NOT EXISTS legacy_speech_units_v1 (
-    ts DateTime64(3), request_id UUID,
+    ts DateTime64(3, 'UTC'), request_id UUID,
     user_id UInt64, api_key_id UInt64, group_code LowCardinality(String),
     model LowCardinality(String), channel_id UInt32, channel_key_id UInt32,
     requested_model LowCardinality(String), upstream_model LowCardinality(String),
@@ -515,7 +515,7 @@ ORDER BY (ts, request_id, user_id, api_key_id, group_code, model, channel_id,
 SETTINGS non_replicated_deduplication_window = 1000;
 
 CREATE TABLE IF NOT EXISTS legacy_speech_calibration_v1 (
-    slot UInt8, cursor_ts DateTime64(3), cursor_id UUID, complete UInt8, version UInt64
+    slot UInt8, cursor_ts DateTime64(3, 'UTC'), cursor_id UUID, complete UInt8, version UInt64
 ) ENGINE = ReplacingMergeTree(version)
 ORDER BY slot
 SETTINGS non_replicated_deduplication_window = 1000;
@@ -609,3 +609,55 @@ AS SELECT
     sumIfState(toUInt64(completion_tokens), input_unit = 'tokens' AND isNull(input_characters) AND ifNull(latency_reported, toUInt8(latency_ms > 0)) = 1) AS output_tokens
 FROM request_log_raw
 GROUP BY ts5, user_id, api_key_id, group_code, model, channel_id, requested_model, upstream_model, endpoint, upstream_endpoint, node, stream, request_type, billing_type;
+
+-- Fix timezone metadata without changing stored Unix timestamps.
+ALTER TABLE request_log_raw MODIFY COLUMN ts DateTime64(3, 'UTC');
+ALTER TABLE request_log_raw MODIFY COLUMN ingested_at DateTime64(3, 'UTC');
+ALTER TABLE legacy_speech_units_v1 MODIFY COLUMN ts DateTime64(3, 'UTC');
+ALTER TABLE legacy_speech_calibration_v1 MODIFY COLUMN cursor_ts DateTime64(3, 'UTC');
+
+
+-- Retain calendar dimensions at hourly grain so machine timezone changes do not relabel UTC days.
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calendar_client_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (client_type, hour)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    client_type,
+    toStartOfHour(ts) AS hour,
+    countState() AS requests,
+    sumState(toUInt64(prompt_tokens) + toUInt64(completion_tokens)) AS tokens,
+    sumState(amount_micro) AS amount,
+    sumState(toUInt64(is_error)) AS errors,
+    uniqState(user_id) AS users
+FROM request_log_raw
+GROUP BY client_type, hour;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calendar_cache_write_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (user_id, api_key_id, model, hour)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    user_id,
+    api_key_id,
+    model,
+    toStartOfHour(ts) AS hour,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS write_tokens,
+    countIfState(isNotNull(cache_write_tokens)) AS known_requests
+FROM request_log_raw
+GROUP BY user_id, api_key_id, model, hour;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_calendar_cache_reporting_hour
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (user_id, api_key_id, model, hour)
+SETTINGS non_replicated_deduplication_window = 1000
+AS SELECT
+    user_id, api_key_id, model, toStartOfHour(ts) AS hour,
+    countIfState(ifNull(cache_read_reported, 0) = 1) AS read_known,
+    countIfState(ifNull(cache_write_reported, 0) = 1) AS write_known,
+    sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS write_tokens
+FROM request_log_raw
+GROUP BY user_id, api_key_id, model, hour;

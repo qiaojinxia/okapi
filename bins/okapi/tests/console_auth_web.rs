@@ -3,6 +3,7 @@
 
 use okapi::{console, gateway};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -696,6 +697,7 @@ async fn registration_policy_gates_signup() {
 
 /// 两次登录各一条会话；门户列举后吊销一条，被吊销的 cookie 不能再兑 key。
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn sessions_list_and_revoke() {
     let env = setup().await;
     let client = reqwest::Client::new();
@@ -754,7 +756,24 @@ async fn sessions_list_and_revoke() {
     let rows = listed["data"].as_array().expect("data");
     assert_eq!(rows.len(), 2, "{listed}");
 
-    let sid_a = cookie_a.split('=').nth(1).unwrap();
+    let raw_sid_a = cookie_a.split('=').nth(1).unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row["sid"].as_str().unwrap().len() == 32 && row["sid"] != raw_sid_a)
+    );
+    let stolen = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(
+            reqwest::header::COOKIE,
+            format!("okapi_session={}", rows[0]["sid"].as_str().unwrap()),
+        )
+        .json(&json!({"name":"stolen"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stolen.status(), 401, "public handles must not authenticate");
+    let fingerprint = hex::encode(Sha256::digest(raw_sid_a.as_bytes()));
+    let sid_a = &fingerprint[..32];
     let rev = client
         .delete(format!("http://{}/api/me/sessions/{sid_a}", env.addr))
         .bearer_auth(api_key)

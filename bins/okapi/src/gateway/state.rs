@@ -157,7 +157,7 @@ impl AppState {
     }
 
     /// 结算记账统一入口：信号量准入 + 瞬时失败退避重试（200ms/800ms/3.2s），
-    /// 三试仍败才 ERROR 留给对账兜底（把"对账修复"从常态变成极端态）。
+    /// PG 写失败保留 Redis 重试日志，worker 幂等补写；两个后端均故障时保留任务。
     pub async fn settle_write(&self, mut input: okapi_ledger::SettlementInput<'_>) {
         let _backlog = BacklogGuard::enter(&self.settle_backlog);
         self.prepare_settlement(&mut input).await;
@@ -177,19 +177,34 @@ impl AppState {
         }
         // 信号量关闭不可能（进程生命周期内不 close）；acquire 失败按直写降级
         let _permit = self.settle_gate.acquire().await;
+        let mut journaled = super::settlement_retry::save(self, &input).await.is_ok();
         let mut delay = std::time::Duration::from_millis(200);
         for attempt in 0..3u8 {
             match okapi_ledger::record_settlement(&self.pg, input.clone()).await {
-                Ok(()) => return,
+                Ok(()) => {
+                    let _ = super::settlement_retry::remove(self, input.request_id).await;
+                    return;
+                }
                 Err(err) if attempt < 2 => {
                     tracing::warn!(request_id = %input.request_id, error = %err, attempt, "记账失败，退避重试");
                     tokio::time::sleep(delay).await;
                     delay *= 4;
                 }
                 Err(err) => {
-                    tracing::error!(request_id = %input.request_id, error = %err, "记账三试失败（对账修复）");
+                    tracing::error!(request_id = %input.request_id, error = %err, "settlement deferred to retry journal");
                 }
             }
+        }
+        // Keep the tracked task alive until either persistence backend accepts it.
+        while !journaled {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if okapi_ledger::record_settlement(&self.pg, input.clone())
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            journaled = super::settlement_retry::save(self, &input).await.is_ok();
         }
     }
 

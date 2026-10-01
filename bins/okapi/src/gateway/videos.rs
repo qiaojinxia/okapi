@@ -1,7 +1,7 @@
 //! /v1/videos 异步任务面（IMPLEMENTATION §4.4 媒体计费，M3 顺延项）：
 //! - `POST /v1/videos`：提交即 per_call × seconds 计费（乘数落 pricing_snapshot.media_units；
-//!   时长无法本地验证，与 transcriptions 的 per_call 立场一致），上游失败退款；
-//! - `GET /v1/videos/{id}`：任务轮询，按创建时的渠道映射回源（Redis 48h，键含 user_id 隔离）；
+//!   时长无法本地验证，与 transcriptions 的 per_call 立场一致），上游提交失败或后续生成失败/取消退款；
+//! - `GET /v1/videos/{id}`：任务轮询，按创建时的持久渠道映射回源（PG + Redis 缓存，user_id 隔离）；
 //! - `GET /v1/videos/{id}/content`：成片流式透传（不整段缓冲）。
 //!
 //! 轮询/下载不计费；JSON 提交（multipart input_reference 列 backlog）。
@@ -98,8 +98,15 @@ async fn handle_create(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day =
-        u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
+    let minute_of_day = u16::try_from(
+        (now.timestamp()
+            .saturating_add(i64::from(
+                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+            ))
+            .div_euclid(60))
+        .rem_euclid(1440),
+    )
+    .unwrap_or(0);
     let calc = CalcContext {
         user: UserId::new(key.user_id),
         model: ModelCode::from(canonical.as_str()),
@@ -109,10 +116,14 @@ async fn handle_create(
         monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         service_tier: None,
     };
     let quote = scale_quote(&calculate(&book, &calc, TokenUsage::default())?, units);
+    if quote.snapshot.mode != "per_call" {
+        return Err(AppError::bad_request().with_param("per_call_required"));
+    }
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
@@ -158,6 +169,17 @@ async fn handle_create(
         }
     };
 
+    let mut failure = super::failure::Guard::new(
+        state,
+        &key,
+        request_id,
+        &canonical,
+        &probe.model,
+        "/v1/videos",
+        started,
+        reservation_pool,
+        source_window.as_deref(),
+    );
     // —— 预扣已建立 ——
     let rows = okapi_store::channels::candidates_for_model(
         &state.pg,
@@ -197,6 +219,7 @@ async fn handle_create(
     let mut failover: i16 = 0;
     let mut last_err: Option<AppError> = None;
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
+        failure.channel(&cand);
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         let Ok(body_up) = rewrite_model(body, &probe.model, &upstream_model) else {
             refund(state, &key, request_id, "videos").await;
@@ -217,26 +240,33 @@ async fn handle_create(
             .await
         {
             Ok(resp) => {
-                // 任务→渠道映射：轮询/下载回源锚点（缺 id 只降级为不可轮询，不阻塞返回）
-                if let Some(task_id) = serde_json::from_slice::<Value>(&resp.body)
+                let task_id = serde_json::from_slice::<Value>(&resp.body)
                     .ok()
-                    .as_ref()
-                    .and_then(|v| v.get("id"))
-                    .and_then(Value::as_str)
-                {
-                    state
-                        .sched
-                        .video_task_set(key.user_id, task_id, cand.channel_key_id)
-                        .await;
-                } else {
-                    tracing::warn!(request_id = %request_id, "videos 上游响应缺 id，任务不可轮询");
-                }
+                    .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_owned))
+                    .filter(|id| {
+                        !id.is_empty()
+                            && id
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+                    });
+                let Some(task_id) = task_id else {
+                    refund(state, &key, request_id, "videos").await;
+                    return Err(
+                        AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+                            .with_param("task_id_missing"),
+                    );
+                };
+                state
+                    .sched
+                    .video_task_set(key.user_id, &task_id, cand.channel_key_id)
+                    .await;
                 commit_and_record(
                     state,
                     &key,
                     &canonical,
                     &probe.model,
                     &quote,
+                    &task_id,
                     units,
                     request_id,
                     started,
@@ -247,6 +277,7 @@ async fn handle_create(
                     source_window.as_deref(),
                 )
                 .await?;
+                failure.disarm();
                 let out = Response::builder()
                     .status(resp.status)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -319,7 +350,19 @@ async fn relay_task(
     // 不过 check_member_limit——花超的成员仍得取回已经付过费的视频
     super::auth::check_group_rate(state, &key).await?;
     // 键含 user_id：他人任务/过期/未知一律 404（不泄露存在性）
-    let Some(channel_key_id) = state.sched.video_task_get(key.user_id, task_id).await else {
+    let channel_key_id = sqlx::query_scalar!(
+        "SELECT channel_key_id FROM video_tasks WHERE user_id=$1 AND task_id=$2",
+        key.user_id,
+        task_id
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let channel_key_id = match channel_key_id {
+        Some(id) => Some(id),
+        None => state.sched.video_task_get(key.user_id, task_id).await,
+    };
+    let Some(channel_key_id) = channel_key_id else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND).with_param("task"));
     };
     let Some(ch) = okapi_store::channels::channel_key_ref(
@@ -389,6 +432,7 @@ async fn relay_task(
             )
             .await
             .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
+        observe_task(state, key.user_id, task_id, &resp.body).await?;
         Ok(Response::builder()
             .status(resp.status)
             .header(header::CONTENT_TYPE, "application/json")
@@ -414,6 +458,7 @@ async fn commit_and_record(
     canonical: &str,
     requested_model: &str,
     quote: &Quote,
+    task_id: &str,
     _units: u32,
     request_id: Uuid,
     started: Instant,
@@ -455,7 +500,7 @@ async fn commit_and_record(
         failover_count: failover,
         upstream_status: Some(200),
         error_code: None,
-        upstream_request_id: None,
+        upstream_request_id: Some(task_id),
         node: state.node.as_ref(),
         sticky_layer: 0,
         client_type: detect_client_type(headers),
@@ -476,5 +521,87 @@ async fn commit_and_record(
         0,
     )
     .await;
+    Ok(())
+}
+
+/// Both portal polling and worker polling converge on the same idempotent refund.
+async fn observe_task(
+    state: &AppState,
+    user_id: i64,
+    task_id: &str,
+    body: &[u8],
+) -> Result<(), AppError> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
+    let status = value.get("status").and_then(Value::as_str).unwrap_or("");
+    if !matches!(status, "failed" | "cancelled" | "canceled" | "completed") {
+        return Ok(());
+    }
+    let request_id = sqlx::query_scalar!(
+        "SELECT request_id FROM video_tasks WHERE user_id=$1 AND task_id=$2 AND state='pending'",
+        user_id,
+        task_id
+    )
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let Some(request_id) = request_id else {
+        return Ok(());
+    };
+    let terminal = if status == "completed" {
+        "completed"
+    } else {
+        okapi_ledger::operations::refund(
+            &state.pg,
+            &state.ledger,
+            request_id,
+            "video_generation_failed",
+            "system:worker",
+        )
+        .await?;
+        "refunded"
+    };
+    sqlx::query!("UPDATE video_tasks SET state=$3,updated_at=now() WHERE user_id=$1 AND task_id=$2 AND state='pending'",user_id,task_id,terminal).execute(&state.pg).await.map_err(okapi_store::StoreError::from)?;
+    Ok(())
+}
+
+pub(crate) async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
+    use futures::StreamExt as _;
+    let tasks = sqlx::query!("UPDATE video_tasks SET next_poll_at=now()+interval '1 minute' WHERE (user_id,task_id) IN (SELECT user_id,task_id FROM video_tasks WHERE state='pending' AND next_poll_at<=now() ORDER BY next_poll_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING user_id,task_id,channel_key_id").fetch_all(&state.pg).await?;
+    futures::stream::iter(tasks)
+        .map(|task| async move {
+            let (user_id, task_id, channel_key_id) =
+                (task.user_id, task.task_id, task.channel_key_id);
+            let result = async {
+                let ch = okapi_store::channels::channel_key_ref(
+                    &state.pg,
+                    channel_key_id,
+                    state.master_key.as_deref(),
+                )
+                .await?
+                .ok_or_else(AppError::internal)?;
+                let response = state
+                    .upstream
+                    .get_json(
+                        ch.api_base.as_deref().unwrap_or(DEFAULT_OPENAI_BASE),
+                        &format!("/videos/{task_id}"),
+                        &ch.credential,
+                        &okapi_providers::Outbound {
+                            proxy_url: ch.proxy_url,
+                            extra_headers: ch.extra_headers,
+                        },
+                    )
+                    .await
+                    .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
+                observe_task(state, user_id, &task_id, &response.body).await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(user_id,%task_id,code=%error.code,"video task polling deferred");
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
     Ok(())
 }

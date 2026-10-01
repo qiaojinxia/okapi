@@ -124,8 +124,15 @@ async fn prepare_pricing(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day =
-        u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
+    let minute_of_day = u16::try_from(
+        (now.timestamp()
+            .saturating_add(i64::from(
+                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+            ))
+            .div_euclid(60))
+        .rem_euclid(1440),
+    )
+    .unwrap_or(0);
     let calc = CalcContext {
         user: UserId::new(key.user_id),
         model: ModelCode::from(canonical.as_str()),
@@ -135,6 +142,7 @@ async fn prepare_pricing(
         monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         service_tier: None,
     };
@@ -253,6 +261,17 @@ async fn handle(
         }
     };
 
+    let mut failure = super::failure::Guard::new(
+        state,
+        key,
+        request_id,
+        &canonical,
+        model,
+        endpoint,
+        started,
+        reserved_pool,
+        source_window.as_deref(),
+    );
     // —— 预扣已建立 ——
     let rows = okapi_store::channels::candidates_for_model(
         &state.pg,
@@ -288,6 +307,8 @@ async fn handle(
     }
 
     if input.stream {
+        // The tracked stream pump owns terminal cleanup from this point.
+        failure.disarm();
         return stream::start(
             stream::Context {
                 state: state.clone(),
@@ -317,6 +338,7 @@ async fn handle(
     let mut failover: i16 = 0;
     let mut last_err: Option<AppError> = None;
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
+        failure.channel(&cand);
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         if let Some(task) = task
             && !okapi_store::image_tasks::dispatch(
@@ -379,6 +401,7 @@ async fn handle(
                     None,
                 )
                 .await?;
+                failure.disarm();
                 let out = Response::builder()
                     .status(resp.status)
                     .header(header::CONTENT_TYPE, "application/json")

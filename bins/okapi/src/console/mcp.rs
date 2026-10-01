@@ -273,17 +273,22 @@ async fn mcp_write_enabled(state: &AppState) -> bool {
 fn allowed(key: &AuthedKey, spec: &ToolSpec) -> bool {
     let resource_ok = match spec.permission {
         None => true,
-        Some(perm) => !matches!(key.permission_scope(perm), PermScope::Denied),
+        Some(perm)
+            if matches!(
+                spec.name,
+                "channel_create" | "channel_toggle" | "channel_test" | "explain_bill"
+            ) =>
+        {
+            key.permission_scope(perm) != PermScope::Denied
+        }
+        Some(perm) => key.has_permission(perm),
     };
     if !resource_ok {
         return false;
     }
     if spec.write {
         // 第二道闸：mcp.write 权限点（第三道 = 资源权限，上面已验）
-        return !matches!(
-            key.permission_scope(permissions::MCP_WRITE),
-            PermScope::Denied
-        );
+        return key.has_permission(permissions::MCP_WRITE);
     }
     true
 }
@@ -803,6 +808,13 @@ async fn channel_toggle(
         .and_then(Value::as_i64)
         .ok_or_else(|| AppError::bad_request().with_param("channel_id"))?;
     let enable = args.get("enable").and_then(Value::as_bool).unwrap_or(true);
+    super::admin::ensure_channel_owner(
+        state,
+        channel_id,
+        key,
+        key.permission_scope(permissions::CHANNEL_WRITE),
+    )
+    .await?;
     let status: i16 = if enable { 1 } else { 2 };
     okapi_store::admin::set_channel_status(&state.pg, channel_id, status).await?;
     state.invalidate_routing_caches();
@@ -827,6 +839,13 @@ async fn mcp_channel_test(
         .and_then(Value::as_i64)
         .ok_or_else(|| AppError::bad_request().with_param("channel_id"))?;
     // 可选 model：给了就真验这个模型调不调得通，不给只验凭证与连通性
+    super::admin::ensure_channel_owner(
+        state,
+        channel_id,
+        key,
+        key.permission_scope(permissions::CHANNEL_WRITE),
+    )
+    .await?;
     let model = args
         .get("model")
         .and_then(Value::as_str)

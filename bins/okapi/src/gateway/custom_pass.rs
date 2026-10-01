@@ -81,11 +81,18 @@ async fn handle(
         serde_json::from_value(channel.settings.clone()).unwrap_or_default();
     // 白名单：前缀匹配，空配置一律拒绝
     let normalized = format!("/{}", path.trim_start_matches('/'));
-    if !settings
-        .allowed_paths
-        .iter()
-        .any(|p| normalized.starts_with(p.as_str()))
-    {
+    if !safe_pass_path(&normalized) {
+        return Err(AppError::bad_request().with_param("path_not_allowed"));
+    }
+    if !settings.allowed_paths.iter().any(|p| {
+        !p.is_empty()
+            && p.starts_with('/')
+            && safe_pass_path(p)
+            && (normalized == *p
+                || normalized
+                    .strip_prefix(p.as_str())
+                    .is_some_and(|suffix| p.ends_with('/') || suffix.starts_with('/')))
+    }) {
         return Err(
             AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
                 .with_param("path_not_allowed"),
@@ -105,8 +112,15 @@ async fn handle(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day =
-        u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
+    let minute_of_day = u16::try_from(
+        (now.timestamp()
+            .saturating_add(i64::from(
+                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+            ))
+            .div_euclid(60))
+        .rem_euclid(1440),
+    )
+    .unwrap_or(0);
     let calc = CalcContext {
         user: UserId::new(key.user_id),
         model: ModelCode::from(billing_model),
@@ -116,11 +130,15 @@ async fn handle(
         monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         service_tier: None,
     };
     // per_call：金额与 usage 无关，预扣即终额
     let quote = calculate(&book, &calc, TokenUsage::default())?;
+    if quote.snapshot.mode != "per_call" {
+        return Err(AppError::bad_request().with_param("per_call_required"));
+    }
     super::auth::check_member_limit(state, &key).await?;
     super::auth::check_group_rate(state, &key).await?;
 
@@ -365,4 +383,32 @@ async fn settle(
         .await;
     }
     Ok(())
+}
+
+// Axum already percent-decodes the capture. Reject remaining escapes, URL
+// delimiters and backslashes so a second URL parser cannot change the route.
+fn safe_pass_path(path: &str) -> bool {
+    !path
+        .bytes()
+        .any(|b| b.is_ascii_control() || matches!(b, b'%' | b'\\' | b'?' | b'#'))
+        && !path.split('/').any(|segment| matches!(segment, "." | ".."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_pass_path;
+    #[test]
+    fn rejects_url_normalization_bypasses() {
+        for path in [
+            "/v1/chat/../../../admin",
+            "/v1/./admin",
+            "/v1/%2e%2e/admin",
+            "/v1/chat?x",
+            "/v1/chat#x",
+            "/v1/\\../admin",
+        ] {
+            assert!(!safe_pass_path(path), "{path}");
+        }
+        assert!(safe_pass_path("/v1/chat/completions"));
+    }
 }

@@ -131,8 +131,15 @@ async fn handle(
     let book = state.pricebook.load();
     let rules_in = super::rule_inputs::collect(state, &book, key.user_id).await;
     let now = chrono::Utc::now();
-    let minute_of_day =
-        u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440)).unwrap_or(0);
+    let minute_of_day = u16::try_from(
+        (now.timestamp()
+            .saturating_add(i64::from(
+                now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+            ))
+            .div_euclid(60))
+        .rem_euclid(1440),
+    )
+    .unwrap_or(0);
     let calc = CalcContext {
         user: UserId::new(key.user_id),
         model: ModelCode::from(canonical.as_str()),
@@ -142,6 +149,7 @@ async fn handle(
         monthly_spend_micro: rules_in.monthly_spend_micro,
         local_minute_of_day: minute_of_day,
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         service_tier: None,
     };

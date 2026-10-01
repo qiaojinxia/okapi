@@ -98,7 +98,7 @@ impl S3Store {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_mins(1))
             .build()
             .map_err(|_| StorageError("image_store_client"))?;
         let location_hash = aws_sigv4::payload_hash(

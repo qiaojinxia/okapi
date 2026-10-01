@@ -623,7 +623,7 @@ new-api 的倍率是**配置态**（改价后历史账单口径随之漂移）�
 code 字典序小者；三桶胜者按编译期固定序统一施加，快照顺序可审计。"双十一 8 折 × 新人
 9 折 = 0.72"的失控由站长把两条活动都标 best_for_user 解决。未知值装载期整行拒绝
 （fail-closed，静默当 stackable 会让排他活动错误叠加——老 ok-api 同一决策）；
-② `weekdays`（time_based 星期掩码，0=周日…6=周六，缺省每天）——与分钟窗同为 UTC 钟源
+② `weekdays`（time_based 星期掩码，0=周日…6=周六，缺省每天）——与分钟窗同为机器本地钟源
 （`weekday_utc` 从 now_unix 推导，将来引入站点时区两者一处同改）；空列表/非法值在
 console 与装载器双双拒绝（空掩码=永不命中，与 start==end 空窗同理）；
 ③ `min_monthly_spend_micro`（volume 消费额轴）——与 token 轴 AND、至少一项；输入走
@@ -2471,3 +2471,7 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 | PG-only 取舍 | 已定案（§1.3）；若未来必须兼容 SQLite 需重估 sqlx 方案，成本高，尽量不回头 |
 | rmcp 协议跟进 | MCP 规范迭代快，锁定 2026-07-28 稳定版，升级走独立 PR |
 | tiktoken CPU / 微批组提交 | M1/M2 压测数据驱动，不提前优化 |
+
+### 审计加固补充
+
+管理面普通 guard 仅接受 All 范围，Own 必须经 guard_scoped 加属主过滤；MCP channel_toggle/channel_test 与 HTTP 同样校验 owner。`/v1/models` 与 `/v1beta/models` 需要数据面鉴权并按 key 模型白名单过滤。透传拒绝点段、反斜线、剩余百分号与 URL 分隔符，白名单按路径边界匹配；零用量端点拒绝非 per_call 报价。密码散列与校验走有并发上限的 spawn_blocking；邮箱验证码使用 GETDEL，每次尝试消费一次。Stripe、登录 OAuth 和通知 webhook 出站 URL 走渠道相同 SSRF 策略，webhook 禁止重定向。档位倍率直接解析十进制定点，任何非法档位禁用整条模型并告警；用户倍率用 RatioFp 校验。

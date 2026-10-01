@@ -38,8 +38,7 @@ pub async fn responses_input_tokens(
     body: Bytes,
 ) -> Response {
     let request = Uuid::new_v4();
-    let outcome =
-        tokio::time::timeout(Duration::from_secs(60), count(&state, &headers, body)).await;
+    let outcome = tokio::time::timeout(Duration::from_mins(1), count(&state, &headers, body)).await;
     match outcome {
         Ok(Ok(response)) => with_request_id(response, request),
         Ok(Err(error)) => error.into_response_with(Some(request)),

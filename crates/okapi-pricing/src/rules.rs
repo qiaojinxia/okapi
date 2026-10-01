@@ -7,7 +7,7 @@ use crate::engine::CalcContext;
 use crate::ratio::RatioFp;
 use okapi_domain::{GroupCode, ModelCode, UserId};
 
-/// 星期掩码：bit N = 星期 N（0=周日 … 6=周六，UTC，与分钟窗同钟源）。
+/// 星期掩码：bit N = 星期 N（0=周日 … 6=周六，机器本地时区，与分钟窗同钟源）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeekdayMask(u8);
 
@@ -45,8 +45,7 @@ impl WeekdayMask {
 }
 
 /// unix 秒 → UTC 星期（0=周日）。epoch 1970-01-01 是周四（=4）。
-/// 与 `local_minute_of_day` 同为 UTC 钟源——若将来引入站点时区偏移，
-/// 两者必须一起加偏移（engine 单点改）。
+/// 机器本地星期由调用方先加该时刻的 UTC 偏移，与分钟窗共享钟源。
 #[must_use]
 pub fn weekday_utc(now_unix: i64) -> u8 {
     u8::try_from((now_unix.div_euclid(86_400) + 4).rem_euclid(7)).unwrap_or(0)
@@ -62,7 +61,7 @@ pub enum RuleKind {
         min_monthly_spend_micro: u64,
     },
     /// 时段折扣：分钟窗口（支持跨零点回绕，如 1320..360 = 22:00–06:00）
-    /// × 星期掩码（缺省每天）。两者同为 UTC 钟源。
+    /// × 星期掩码（缺省每天）。两者同为机器本地钟源。
     TimeBased {
         start_minute: u16,
         end_minute: u16,
@@ -205,8 +204,10 @@ impl PricingRule {
                 end_minute,
                 weekdays,
             } => {
-                weekdays.contains(weekday_utc(ctx.now_unix))
-                    && minute_in_window(ctx.local_minute_of_day, start_minute, end_minute)
+                weekdays.contains(weekday_utc(
+                    ctx.now_unix
+                        .saturating_add(i64::from(ctx.utc_offset_seconds)),
+                )) && minute_in_window(ctx.local_minute_of_day, start_minute, end_minute)
             }
             RuleKind::Discount => true,
             RuleKind::Surge => ctx.surge_active,

@@ -38,6 +38,38 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     })
 }
 
+/// Bound CPU and memory consumption across concurrent password operations.
+static PASSWORD_WORK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+async fn hash_password_async(password: &str) -> Result<String, StoreError> {
+    let permit = PASSWORD_WORK
+        .acquire()
+        .await
+        .map_err(|_| StoreError::InvalidData("password_worker_closed"))?;
+    let password = password.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_password(&password)
+    })
+    .await
+    .map_err(|_| StoreError::InvalidData("password_worker_failed"))?
+}
+
+async fn verify_password_async(password: &str, hash: String) -> Result<bool, StoreError> {
+    let permit = PASSWORD_WORK
+        .acquire()
+        .await
+        .map_err(|_| StoreError::InvalidData("password_worker_closed"))?;
+    let password = password.to_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_password(&password, &hash)
+    })
+    .await
+    .map_err(|_| StoreError::InvalidData("password_worker_failed"))?;
+    Ok(result)
+}
+
 /// 注册（email 唯一冲突返回 None）。
 pub async fn register_user(
     pool: &PgPool,
@@ -45,7 +77,7 @@ pub async fn register_user(
     username: &str,
     password: &str,
 ) -> Result<Option<i64>, StoreError> {
-    let hash = hash_password(password)?;
+    let hash = hash_password_async(password).await?;
     let row = sqlx::query_scalar!(
         r#"
         INSERT INTO users (email, username, password_hash)
@@ -87,7 +119,7 @@ pub async fn find_login_user(
     let Some(hash) = row.password_hash else {
         return Ok(None); // OAuth-only 账户无密码
     };
-    if !verify_password(password, &hash) {
+    if !verify_password_async(password, hash).await? {
         return Ok(None);
     }
     Ok(Some(LoginUser {
@@ -250,7 +282,7 @@ pub async fn find_password_account(pool: &PgPool, email: &str) -> Result<Option<
 
 /// 重设密码（argon2id；老 bcrypt 用户由此升级）。返回 false = 用户不存在 / 已删。
 pub async fn set_password(pool: &PgPool, user_id: i64, password: &str) -> Result<bool, StoreError> {
-    let hash = hash_password(password)?;
+    let hash = hash_password_async(password).await?;
     let done = sqlx::query!(
         r#"UPDATE users SET password_hash = $2, updated_at = now()
            WHERE id = $1 AND deleted_at IS NULL"#,

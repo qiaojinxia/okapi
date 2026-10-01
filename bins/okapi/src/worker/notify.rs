@@ -32,7 +32,10 @@ impl Notifier {
         Self {
             pg,
             redis,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -75,6 +78,10 @@ impl Notifier {
             let Some(url) = ch.get("url").and_then(Value::as_str) else {
                 continue;
             };
+            if let Err(error) = crate::console::ssrf::validate_url(&self.pg, url).await {
+                tracing::warn!(event, code = %error.code, "notification URL rejected");
+                continue;
+            }
             let body = serde_json::json!({
                 "event": event,
                 "at": at,

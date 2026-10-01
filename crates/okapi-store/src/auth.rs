@@ -77,7 +77,7 @@ impl AuthedKey {
     /// 绑定自定义角色 = 集合内命中（支持 `*` 通配全权点）。普通用户一律拒绝。
     #[must_use]
     pub fn has_permission(&self, permission: &str) -> bool {
-        !matches!(self.permission_scope(permission), PermScope::Denied)
+        self.permission_scope(permission) == PermScope::All
     }
 
     /// 带资源范围的权限判定（#6267）：`{base}` = 全部资源，`{base}.own` = 仅属主资源。
@@ -245,4 +245,15 @@ pub async fn find_key_by_hash(
         member_user_id: r.member_user_id,
         member_monthly_limit_micro: r.member_monthly_limit_micro,
     }))
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    #[test]
+    fn own_scope_does_not_authorize_global_operations() {
+        let key:AuthedKey=serde_json::from_value(serde_json::json!({"key_id":1,"user_id":1,"key_status":1,"quota_limited":false,"user_status":1,"role":10,"permissions":["channel.write.own"],"group_code":"default","multiplier_scaled":1_000_000})).unwrap();
+        assert_eq!(key.permission_scope("channel.write"), PermScope::Own);
+        assert!(!key.has_permission("channel.write"));
+    }
 }

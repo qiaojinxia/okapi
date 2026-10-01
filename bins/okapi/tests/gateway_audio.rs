@@ -13,12 +13,18 @@ use sqlx::{PgPool, Row as _};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 async fn mock_speech(
     State(expected): State<String>,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(req["input"], expected, "JSON 原样透传");
+    if expected == "test-upstream-failure" {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
     (
         [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
         vec![0xFFu8, 0xFB, 0x90, 0x00], // 假 mp3 头
@@ -118,6 +124,7 @@ async fn setup_input(expected_input: &str) -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -590,4 +597,34 @@ async fn translations_bills_per_call() {
     assert_eq!(amount, 6000, "与 transcriptions 同构：per_call $0.006");
     let snapshot = snapshot.expect("计费快照必须存在");
     assert_eq!(snapshot["media_units"], 4, "duration 3.4s 向上取整入快照");
+}
+
+#[tokio::test]
+async fn speech_failure_refunds_and_records_a_failed_terminal() {
+    let env = setup_input("test-upstream-failure").await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/audio/speech", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.tts_model,"input":"test-upstream-failure","voice":"alloy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+    for _ in 0..50 {
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE user_id=$1 AND log_type=5 AND amount_micro=0 AND status=40").bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+        if count == 1 {
+            assert_eq!(
+                env.state
+                    .ledger
+                    .balance(env.user_id)
+                    .await
+                    .unwrap()
+                    .as_micros(),
+                1_000_000
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("missing failed speech audit");
 }

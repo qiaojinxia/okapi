@@ -10,7 +10,7 @@ pub async fn run_statistics(state: &AppState, only: Option<Uuid>) -> Result<bool
         return Ok(false);
     };
     let result = tokio::time::timeout(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         state.sched.record_batch_statistics(&delivery),
     )
     .await;

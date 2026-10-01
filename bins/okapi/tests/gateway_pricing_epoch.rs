@@ -107,9 +107,10 @@ async fn upstream(State(gate): State<Gate>) -> axum::response::Response {
         Case::Transcription | Case::Translation => {
             axum::Json(json!({"text":"hello","duration":3})).into_response()
         }
-        Case::Video => {
-            axum::Json(json!({"id":"video_epoch_test","status":"queued"})).into_response()
-        }
+        Case::Video => axum::Json(
+            json!({"id":format!("video_epoch_{}",Uuid::new_v4().simple()),"status":"queued"}),
+        )
+        .into_response(),
         Case::Pass => axum::Json(json!({"ok":true})).into_response(),
         Case::PassFailure => (
             axum::http::StatusCode::BAD_REQUEST,

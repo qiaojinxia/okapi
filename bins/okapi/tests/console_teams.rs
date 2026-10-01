@@ -30,6 +30,9 @@ async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
     .into_response()
 }
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 struct TestEnv {
     ledger: okapi_ledger::BalanceLedger,
     console: SocketAddr,
@@ -69,6 +72,10 @@ async fn setup() -> TestEnv {
     .await
     .unwrap();
 
+    let publisher = okapi_store::provision::create_user(&pg, &format!("publisher-{suffix}"))
+        .await
+        .unwrap();
+    published_pricing::publish(&pg, publisher).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -159,7 +166,7 @@ async fn team_wallet_member_limit_full_cycle() {
     let client = reqwest::Client::new();
 
     // owner 建团；bob 加入（月限 $0.0006 = 600 micro，恰好一次请求 500 micro 内）
-    let (_owner_id, owner_cookie) = register_login(&env, &client).await;
+    let (owner_id, owner_cookie) = register_login(&env, &client).await;
     let (bob_id, bob_cookie) = register_login(&env, &client).await;
 
     let team: Value = client
@@ -190,6 +197,18 @@ async fn team_wallet_member_limit_full_cycle() {
         .await
         .unwrap();
     assert_eq!(denied.status(), 403);
+
+    let demote = client
+        .post(format!(
+            "http://{}/api/teams/{team_id}/members",
+            env.console
+        ))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .json(&json!({"user_id": owner_id, "role": "member"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(demote.status(), 403, "owner cannot demote the team owner");
 
     // owner 加 bob（限额 600 micro）
     let added = client

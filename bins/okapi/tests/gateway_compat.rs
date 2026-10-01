@@ -19,6 +19,9 @@ async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
     .into_response()
 }
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 struct TestEnv {
     pg: PgPool,
     gateway: SocketAddr,
@@ -82,6 +85,7 @@ async fn setup(model_rpm: Option<i64>) -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -234,7 +238,15 @@ async fn list_models_is_openai_shaped_and_skips_disabled() {
     let url = format!("http://{}/v1/models", env.gateway);
     let client = reqwest::Client::new();
 
-    let open: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let open: Value = client
+        .get(&url)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(open["object"], "list");
     let ids: Vec<&str> = open["data"]
         .as_array()
@@ -270,7 +282,15 @@ async fn list_models_is_openai_shaped_and_skips_disabled() {
     .execute(&env.pg)
     .await
     .unwrap();
-    let after: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
+    let after: Value = client
+        .get(&url)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let ids: Vec<&str> = after["data"]
         .as_array()
         .unwrap()

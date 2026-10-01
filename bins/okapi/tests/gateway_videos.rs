@@ -13,6 +13,9 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 // ---- mock 上游 ----
 
 async fn mock_create(body: axum::body::Bytes) -> axum::response::Response {
@@ -48,7 +51,12 @@ async fn spawn_mock() -> SocketAddr {
         .route("/ok/v1/videos", post(mock_create))
         .route("/ok/v1/videos/video_mock123", get(mock_poll))
         .route("/ok/v1/videos/video_mock123/content", get(mock_content))
-        .route("/fail/v1/videos", post(mock_fail));
+        .route("/fail/v1/videos", post(mock_fail))
+        .route("/laterfail/v1/videos", post(mock_create))
+        .route(
+            "/laterfail/v1/videos/video_mock123",
+            get(|| async { axum::Json(json!({"id":"video_mock123","status":"failed"})) }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -110,6 +118,7 @@ async fn setup(balance: Money, base_path: &str) -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -281,10 +290,48 @@ async fn videos_upstream_failure_refunds() {
     // 退款后余额原样
     for _ in 0..50 {
         let balance = env.ledger.balance(env.user_id).await.unwrap();
-        if balance.as_micros() == initial.as_micros() {
+        let failed:i64=sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE user_id=$1 AND log_type=5 AND amount_micro=0 AND status=40").bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+        if balance.as_micros() == initial.as_micros() && failed == 1 {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("上游失败后余额应全额退回");
+}
+
+#[tokio::test]
+async fn generation_failure_after_creation_refunds_exactly_once() {
+    let initial = Money::from_micros(10_000_000);
+    let env = setup(initial, "/laterfail/v1").await;
+    let http = reqwest::Client::new();
+    let created = http
+        .post(format!("http://{}/v1/videos", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"seconds":"4"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200);
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        9_960_000
+    );
+    for _ in 0..2 {
+        let result = http
+            .get(format!("http://{}/v1/videos/video_mock123", env.gateway))
+            .bearer_auth(&env.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(result.status(), 200);
+    }
+    assert_eq!(env.ledger.balance(env.user_id).await.unwrap(), initial);
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM billing_events WHERE user_id=$1 AND event_type='refund'",
+    )
+    .bind(env.user_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
 }

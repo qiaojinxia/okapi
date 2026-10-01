@@ -399,3 +399,20 @@ async fn repair_endpoint_guards_and_repairs() {
     .unwrap();
     assert!(audited >= 2, "单修与批量修都要落审计");
 }
+
+#[tokio::test]
+async fn reconciliation_reaches_users_beyond_the_first_page() {
+    let bed = setup().await;
+    lose_hot_balance(&bed).await;
+    let drift = worker::reconcile_balances(&bed.pg, &bed.ledger, 25)
+        .await
+        .unwrap();
+    assert!(
+        drift
+            .iter()
+            .any(|row| row.user_id == bed.user_id && row.events_sum_micro == 9_000_000)
+    );
+    worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+        .await
+        .unwrap();
+}

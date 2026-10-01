@@ -24,7 +24,7 @@ RUN cargo build --release --bin okapi --features embed-web
 
 # ---- 运行时 ----
 FROM public.ecr.aws/docker/library/debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/okapi /usr/local/bin/okapi
 USER 65534:65534
 # gateway :8080 / console :8081

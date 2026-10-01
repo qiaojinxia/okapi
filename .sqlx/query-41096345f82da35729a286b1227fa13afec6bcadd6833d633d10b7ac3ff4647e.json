@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO team_members (team_user_id, member_user_id, role, monthly_spend_limit_micro)\n        VALUES ($1, $2, $3, $4)\n        ON CONFLICT (team_user_id, member_user_id) DO UPDATE SET\n            role = EXCLUDED.role,\n            monthly_spend_limit_micro = EXCLUDED.monthly_spend_limit_micro\n        WHERE team_members.role <> 'owner'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Varchar",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41096345f82da35729a286b1227fa13afec6bcadd6833d633d10b7ac3ff4647e"
+}

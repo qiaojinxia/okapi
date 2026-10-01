@@ -244,6 +244,7 @@ pub async fn place_order(
                 .unwrap_or("https://api.stripe.com")
                 .trim_end_matches('/')
                 .to_owned();
+            super::ssrf::validate_api_base(state, &api).await?;
             let resp = state
                 .pass
                 .probe(PassRequest {

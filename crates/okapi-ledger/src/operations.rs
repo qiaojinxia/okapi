@@ -118,7 +118,8 @@ pub async fn expire(
     if due.is_none() {
         return Ok(Money::ZERO);
     }
-    let drained = ledger.drain(user_id).await?;
+    // Available funds only: in-flight charges/holds remain backed by the ledger.
+    let drained = Money::from_micros(ledger.balance(user_id).await?.as_micros().max(0));
     if !drained.is_zero() {
         pg::record_credit_in_tx(
             &mut tx,
@@ -136,6 +137,22 @@ pub async fn expire(
     )
     .execute(&mut *tx)
     .await?;
+    let transfer = if drained.is_zero() {
+        None
+    } else {
+        Some(
+            crate::transfers::enqueue(
+                &mut tx,
+                user_id,
+                Money::from_micros(-drained.as_micros()),
+                crate::Pool::Wallet,
+            )
+            .await?,
+        )
+    };
     tx.commit().await?;
+    if let Some(id) = transfer {
+        crate::transfers::finish(&mut guard, ledger, user_id, id, crate::Pool::Wallet).await;
+    }
     Ok(drained)
 }

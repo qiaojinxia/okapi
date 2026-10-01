@@ -29,7 +29,7 @@ const BALANCE_EXPIRY_INTERVAL: Duration = Duration::from_mins(5);
 const SUBSCRIPTION_INTERVAL: Duration = Duration::from_mins(1);
 /// 负毛利熔断评估周期（IMPLEMENTATION §11.34；立方体按小时聚合，更密没有意义）。
 const MARGIN_BREAKER_INTERVAL: Duration = Duration::from_mins(5);
-/// 对账每轮抽样的用户数上限。
+/// 对账分页大小；每轮遍历全部用户。
 const RECONCILE_BATCH: i64 = 1000;
 /// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
 const SUBSCRIPTION_BATCH: i64 = 500;
@@ -124,6 +124,16 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         image_state.clone(),
         image_stopped.clone(),
     ));
+    let recovery_workers: Vec<_> = [false, true]
+        .into_iter()
+        .map(|video| {
+            tokio::spawn(run_recovery(
+                image_state.clone(),
+                image_stopped.clone(),
+                video,
+            ))
+        })
+        .collect();
     let image_worker = tokio::spawn(crate::gateway::images::tasks::run_worker(
         image_state,
         image_stopped,
@@ -239,8 +249,36 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 if let Err(error) = image_worker.await {
                     tracing::error!(%error, "image worker shutdown failed");
                 }
+                for worker in recovery_workers {
+                    if let Err(error)=worker.await {tracing::error!(%error,"recovery worker shutdown failed");}
+                }
                 tracing::info!("worker 已下线");
                 return Ok(());
+            }
+        }
+    }
+}
+
+// Provider latency and a PG outage must not block the other maintenance clocks.
+async fn run_recovery(
+    state: crate::gateway::state::AppState,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    video: bool,
+) {
+    let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _=stop.changed()=>return,
+            _=tick.tick()=>{
+                let work=async {
+                    if video {crate::gateway::videos::poll_pending(&state).await}
+                    else {crate::gateway::settlement_retry::recover(&state).await.map(|_|())}
+                };
+                tokio::select! {
+                    _=stop.changed()=>return,
+                    result=work=>{if let Err(error)=result {tracing::error!(%error,video,"background recovery deferred");}}
+                }
             }
         }
     }
@@ -451,8 +489,11 @@ pub async fn reconcile_balances(
     limit: i64,
 ) -> anyhow::Result<Vec<BalanceDrift>> {
     let mut history = okapi_store::history::read(pg).await?;
-    let rows = sqlx::query!(
-        r#"
+    let mut drifts = Vec::new();
+    let mut cursor = 0_i64;
+    loop {
+        let rows = sqlx::query!(
+            r#"
         SELECT u.id AS user_id,
                u.balance_micro,
                COALESCE(e.wallet_sum, 0)::bigint AS "events_sum!",
@@ -465,33 +506,38 @@ pub async fn reconcile_balances(
             FROM billing_balance_totals
             GROUP BY user_id
         ) e ON e.user_id = u.id
-        WHERE u.deleted_at IS NULL
+        WHERE u.deleted_at IS NULL AND u.id > $2
         ORDER BY u.id
         LIMIT $1
         "#,
-        limit
-    )
-    .fetch_all(&mut *history)
-    .await?;
+            limit.max(1),
+            cursor
+        )
+        .fetch_all(&mut *history)
+        .await?;
 
-    history.commit().await?;
-    let mut drifts = Vec::new();
-    for row in rows {
-        let (wallet, sub) = redis_effective(ledger, row.user_id).await?;
-        if wallet != row.events_sum
-            || row.balance_micro != row.events_sum
-            || sub != row.sub_events_sum
-        {
-            drifts.push(BalanceDrift {
-                user_id: row.user_id,
-                events_sum_micro: row.events_sum,
-                redis_effective_micro: wallet,
-                pg_snapshot_micro: row.balance_micro,
-                sub_events_sum_micro: row.sub_events_sum,
-                sub_redis_effective_micro: sub,
-            });
+        if rows.is_empty() {
+            break;
+        }
+        cursor = rows.last().map_or(cursor, |row| row.user_id);
+        for row in rows {
+            let (wallet, sub) = redis_effective(ledger, row.user_id).await?;
+            if wallet != row.events_sum
+                || row.balance_micro != row.events_sum
+                || sub != row.sub_events_sum
+            {
+                drifts.push(BalanceDrift {
+                    user_id: row.user_id,
+                    events_sum_micro: row.events_sum,
+                    redis_effective_micro: wallet,
+                    pg_snapshot_micro: row.balance_micro,
+                    sub_events_sum_micro: row.sub_events_sum,
+                    sub_redis_effective_micro: sub,
+                });
+            }
         }
     }
+    history.commit().await?;
     Ok(drifts)
 }
 
@@ -680,7 +726,7 @@ pub async fn ensure_next_month_partitions(
         // DDL 无法参数化；标识符与日期均为内部生成（无注入面），显式声明 SqlSafe
         let ddl = format!(
             "CREATE TABLE IF NOT EXISTS {name} PARTITION OF {table} \
-             FOR VALUES FROM ('{ny}-{nm:02}-01') TO ('{ey}-{em:02}-01')"
+             FOR VALUES FROM ('{ny}-{nm:02}-01 00:00:00+00') TO ('{ey}-{em:02}-01 00:00:00+00')"
         );
         sqlx::query(sqlx::AssertSqlSafe(ddl)).execute(pg).await?;
         created.push(name);

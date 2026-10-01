@@ -42,9 +42,17 @@ fn calc_ctx(
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
         monthly_tokens: rules_in.monthly_tokens,
         monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440))
-            .unwrap_or(0),
+        local_minute_of_day: u16::try_from(
+            (now.timestamp()
+                .saturating_add(i64::from(
+                    now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+                ))
+                .div_euclid(60))
+            .rem_euclid(1440),
+        )
+        .unwrap_or(0),
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         service_tier: None,
     }
@@ -171,6 +179,17 @@ async fn handle_speech(
         }
     };
 
+    let mut failure = super::failure::Guard::new(
+        state,
+        &key,
+        request_id,
+        &canonical,
+        &probe.model,
+        "/v1/audio/speech",
+        started,
+        reservation_pool,
+        source_window.as_deref(),
+    );
     let cand = match first_candidate(state, &canonical, &key).await {
         Ok(c) => c,
         Err(err) => {
@@ -181,6 +200,7 @@ async fn handle_speech(
             return Err(err);
         }
     };
+    failure.channel(&cand);
     let upstream_model = cand.upstream_model(&canonical).to_owned();
     let Ok(body_up) = rewrite_model(body, &probe.model, &upstream_model) else {
         let _ = state
@@ -208,6 +228,7 @@ async fn handle_speech(
                 source_window.as_deref(),
             )
             .await?;
+            failure.disarm();
             let mut resp = Response::builder()
                 .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
                 .header(header::CONTENT_TYPE, content_type)
@@ -370,6 +391,22 @@ async fn handle_transcriptions(
         }
     };
 
+    let endpoint = if path == "/audio/translations" {
+        "/v1/audio/translations"
+    } else {
+        "/v1/audio/transcriptions"
+    };
+    let mut failure = super::failure::Guard::new(
+        state,
+        &key,
+        request_id,
+        &canonical,
+        &model,
+        endpoint,
+        started,
+        reservation_pool,
+        source_window.as_deref(),
+    );
     let cand = match first_candidate(state, &canonical, &key).await {
         Ok(c) => c,
         Err(err) => {
@@ -380,6 +417,7 @@ async fn handle_transcriptions(
             return Err(err);
         }
     };
+    failure.channel(&cand);
     let upstream_model = cand.upstream_model(&canonical).to_owned();
     // model part 重写为上游名
     for (name, _, _, data) in &mut parts {
@@ -407,7 +445,7 @@ async fn handle_transcriptions(
                 &key,
                 &canonical,
                 &model,
-                "/v1/audio/transcriptions",
+                endpoint,
                 &quote,
                 TokenUsage::default(),
                 request_id,
@@ -419,6 +457,7 @@ async fn handle_transcriptions(
                 source_window.as_deref(),
             )
             .await?;
+            failure.disarm();
             let mut out = Response::builder()
                 .status(resp.status)
                 .header(header::CONTENT_TYPE, "application/json")

@@ -108,6 +108,7 @@ async fn realtime_modal_usage_replays_and_partial_reports_match_ledger_and_stati
         let env = setup(Money::from_micros(50_000_000)).await;
         sqlx::query("UPDATE model_pricing SET audio_ratio=8,audio_completion_ratio=2,image_ratio=3,modality_ratios=$2 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
             .bind(&env.model).bind(json!({"audio_cache_read":"2","image_cache_read":"1"})).execute(&env.pg).await.unwrap();
+        published_pricing::publish(&env.pg, env.user_id).await;
         env.state.pricebook.replace(
             gateway::pricing_loader::load_pricebook(&env.pg)
                 .await

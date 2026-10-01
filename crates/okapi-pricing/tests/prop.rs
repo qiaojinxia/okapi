@@ -85,6 +85,7 @@ fn ctx(user_fp: i64) -> CalcContext {
         monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
+        utc_offset_seconds: 0,
         surge_active: false,
         service_tier: None,
     }

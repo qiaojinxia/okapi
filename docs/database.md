@@ -797,14 +797,14 @@ ARGV = quota_micro, sub_until_unix_s, sub_epoch（旧调用默认空字符串）
 - `RESERVATION_EXISTS` 保护的是尚未终结的同步预扣，包括过期但尚待对账回收的记录；重复调用不会获得再次调用上游的许可。调用方需保留同一请求的执行状态，不能捕获该错误后改用新 UUID 重试生成。终态释放后同步脚本不保存 tombstone，request_id 仍必须全链路唯一；长期批任务使用下述独立冻结记录，仍须保存远端执行状态。
 - Redis Lua 运行时错误不会撤销先前写入。普通预扣先验证四个会修改的计数器，再检查限额与选池；类型、规范整数或范围异常不会留下扣款、预扣凭证、计数增量或新 TTL。异常数据不自动清零，账本错误仍返回既有 HTTP 500 `internal_error`，不会被当作正常 429。这里的保证针对已校验的数据异常，不替代 Redis 断连/执行确认丢失时的原有对账机制，也不将脚本外的模型/分组限流纳入资金原子事务。
 - 普通结算/退款在改钱、删除 r:* 之前验证所选余额、并发键及结果的 2^53−1 安全整数界限。凭证接受完整的两段旧格式（key=0、pool=0）、三段旧格式（pool=0）、四段格式，以及第五段为 `w:epoch` 的订阅格式。epoch 必须非空、至多 128 字节，仅含 ASCII 字母、数字及 `-:._`；空字段、未知 pool、非法整数及多余字段均拒绝，不猜测成钱包。key 作为规范十进制字符串比较，支持完整非负 PG bigint 身份，不受 Lua 浮点截断影响。
-- 无凭证退款的 pool=0 是既有幂等返回约定，不代表原请求由钱包支付。Chat、Embeddings/Rerank 和 Realtime 保留 reserve 返回的池，用于退款错误或零释放结果时的失败账单归属；重复退款不得额外入账。普通成功请求现先在 PG 保存账单与待同步记录，再关闭 Redis 预扣，详见下文；该保证从 PG 提交成功后生效。`repair` 的异常数据/大整数边界也未包含在本次关闭路径修复中。
+- 无凭证退款的 pool=0 是既有幂等返回约定，不代表原请求由钱包支付。Chat、Embeddings/Rerank 和 Realtime 保留 reserve 返回的池，用于退款错误或零释放结果时的失败账单归属；重复退款不得额外入账。普通成功请求现先在 PG 保存账单与待同步记录，再关闭 Redis 预扣，详见下文；该保证从 PG 提交成功后生效。`repair` 另对在途累加与最终减法检查 Lua 安全整数界限，超限拒绝写入。
 - `conc:ck:*` acquire/release 为独立单键操作（与用户槽无关）。
 
 普通持久结算由 `0016_billing_sync.sql` 新增 `billing_sync`：request_id 主键、用户/key、实际 micro 金额、预扣池与创建时间。成功账单、用量、事件、用户/key 累计、outbox 与待同步行同事务提交；PG 失败不关闭 Redis，Redis 失败保留待同步记录。worker 在过期清理之前恢复，且共用用户锁，防止订阅滚窗/余额修复与待同步实际费用交错。Redis 凭证已不存在时，根据 PG 事件重建两池，保留其他活跃预扣和长期冻结，不猜测再次扣款。管理员退款持有同一用户锁并先恢复待同步结算，恢复失败则拒绝继续。普通成功事件的 `balance_after_micro` 为 NULL，不能在 Redis 同步之前伪造同步后余额。见 [普通持久结算契约](synchronous-settlements.md)。
 
 钱包入账与管理员退款由 `0017_fund_transfers.sql` 新增 `fund_transfers`：操作 UUID、用户、金额、来源池、创建/应用/清理时间。钱包订单 paid / 兑换码使用状态、账本事件、用户快照与待入账意图同一 PG 事务；退款状态、事件/用量回冲和待入账意图同事务。Redis `fund_transfer.lua` 在 `bal:{uid}` 内原子写入金额和 `c:<operation_id>` 凭据（`avail|<delta>` 或 `sub|<delta>`），先验规范整数和 ±(2^53−1) 界限。重复同凭据只确认；冲突/异常金额拒绝且不写。PG 记录 applied_at 后才删除 Redis 凭据，PG cleaned_at 让中断清理可重试。0018 为操作增加 sequence；Redis fund_seq 与余额同一次 HSET 写入且不随凭据清理，旧序号的迟到 EVAL 不重复追加。序号按规范十进制字符串比较，支持完整 PG bigint。余额重建与全部已接受操作的最高序号一次写入，包含已清理操作；fund_seq 不得单独删除或过期。worker 在过期预扣前恢复未完成资金。待应用的 HTTP 受理结果包含 `pending:true`、操作 ID 与空 balance_after_micro；不把数据库快照冒充当前可用余额。正常返回保留原余额数值。见 [钱包入账与退款持久恢复](durable-fund-transfers.md) 的范围与剩余边界。
 
-管理充值、MCP 调整、兑换、支付/返利、注册赠送、单用户引导与迁移现通过 `ledger::operations` 入账，与普通结算恢复、订阅变更和对账修复共用用户锁。PG 事件和用户快照事务先校验再触碰 Redis；用户更新 0 行视为不存在，回滚事件并返回 `not_found`，不创建无归属余额。按日志退款的锁覆盖 PG 幂等翻转和原池 Redis 回补；余额到期在锁内重读有效期并锁住用户行。用户锁本身不是跨存储原子提交；钱包订单/核销、管理员退款及订阅发放已使用本节的 PG 持久意图补偿。邀请奖励/注册业务状态到入账意图的衔接、钱包到期清理与 PG 事件之间的间隙仍需专项验证，不能据这些锁或队列宣称全部业务原子化。
+管理充值、MCP 调整、兑换、支付/返利、注册赠送、单用户引导与迁移现通过 `ledger::operations` 入账，与普通结算恢复、订阅变更和对账修复共用用户锁。PG 事件和用户快照事务先校验再触碰 Redis；用户更新 0 行视为不存在，回滚事件并返回 `not_found`，不创建无归属余额。按日志退款的锁覆盖 PG 幂等翻转和原池 Redis 回补；余额到期在锁内重读有效期并锁住用户行。用户锁本身不是跨存储原子提交；钱包订单/核销、管理员退款及订阅发放已使用本节的 PG 持久意图补偿。邀请奖励/注册业务状态到入账意图的衔接仍需专项验证；钱包到期已使用 PG 事件与 fund_transfers 同事务接受后再更新热余额，不能据这些锁或队列宣称全部业务原子化。
 
 长期冻结由 `0008_balance_holds.sql`、`0009_balance_hold_cancellation.sql` 的 `balance_holds` 表记录：UUID、用户/key、模型/请求摘要、最大金额/价格快照、pending/held/closing/closed、来源池/订阅窗口、实际金额/退款额/结算凭证、取消标记。未关闭记录每用户最多 128 条；价格与金额来源在确认后不可变。完整算法、取消与恢复边界见 [长期冻结契约](durable-balance-holds.md)。
 
@@ -1153,7 +1153,7 @@ DECIMAL 列建议 `::text` 保精度）。
 
 ## 5. 一致性与对账
 
-- **三方对账**：Redis `bal:{uid}.avail` ↔ PG billing_events 重放余额 ↔ CH 金额汇总；reconciler 每 5min 抽样 + 每日全量，差异 > 0 即告警并生成修正 adjust 事件（人工确认）。
+- **三方对账**：Redis `bal:{uid}.avail` ↔ PG billing_events 重放余额 ↔ CH 金额汇总；reconciler 每 5min 分页全量，差异 > 0 即告警并生成修正 adjust 事件（人工确认）。
 - **幂等锚点**：commit/refund 的账本幂等与统计投递分开；服务端 outbox 事件 UUID、PG 事件回执、不可变 CH 批次 token 负责统计侧重试。同 request_id 的消费/退款是不同事件，不以 request_id 单列去重。
 - **在途预扣泄漏**：reconciler 扫 `bal:{uid}` 中超过 deadline 的 `r:*` 字段 → 按 billing_records 终态决定 commit 或 refund 补偿。
 - 余额快照列 `users.balance_micro` 由 worker 周期从事件流重放校准（展示与导出用，不参与计费判定）。
@@ -1163,3 +1163,21 @@ DECIMAL 列建议 `::text` 保精度）。
 
 
 `0014_image_batch_statistics.sql` 增加创建时成员归属与 results_ready_at，以及独立 image_batch_statistics 投递表。公开终态与统计意图同事务，金额/Token 取已关闭凭据、recorded_at 取首次账单时间；租约 120 秒，失败 30 秒后重试。Redis 成员/月用量/渠道消费/KPI 每项具有同槽去重凭据和原时间桶，统计失败不重复结算。清理图片保留此投递记录；成员快照不从当前 key 回填历史。详细边界见 [统计补记与软限额](native-image-batch-jobs.md#统计补记与软限额)。
+
+## 审计修复后的恢复与时间契约
+
+`video_tasks`（迁移 0030）以 `(user_id,task_id)` 隔离任务，request_id 唯一绑定原始账单；保存 channel_key_id、pending/completed/refunded 状态、next_poll_at。创建账单与任务映射同事务；每分钟 worker 领取最多 100 个到点任务，失败/取消走原账单幂等退款。轮询回源映射不再仅依赖 Redis 的 48 小时 TTL。
+
+Redis `settlement:{retry}:payloads`（HASH，request_id → 完整结算输入）与 `settlement:{retry}:order`（ZSET，入队/最近失败毫秒）同槽原子写入、不设置 TTL。PG 接受账单后删除；worker 每分钟补写最多 100 笔，重放仍由 PG request_id 幂等闸和 UserGuard 串行化。进程宕机后可继续恢复，前提是 Redis 按热账本要求启用持久化与禁止淘汰。无效载荷保留供排障，失败条目移到队尾，避免阻塞后续账单。
+
+余额到期只移除正可用余额，不移除在途预扣。expire 事件、PG 快照、清除到期标记与 fund_transfers 在同一事务提交，再按 transfer 回执更新 Redis；应用失败保留恢复意图。repair.lua 在途累加与 target 减法均检查 Lua 安全整数范围，超过范围拒绝写入。
+
+对账的 limit 表示每页大小；按 user_id 游标遍历所有未删除用户，不再永久只检查前 1000 人。
+
+已成功投递且超过 7 天的 outbox、CH 事件回执与冻结批次按依赖顺序清理；有 DLQ 引用或未完成批次一律保留。7 天覆盖 JetStream 48 小时消息保留窗口，超过窗口的外部人工旧消息重放不在投递幂等保证内。
+
+时间口径来自机器 `TZ`、`/etc/localtime` 或 `/etc/timezone` 的 IANA 名称；多副本应配置一致。PG 每条连接设置此时区，CH 查询指定 session_timezone。CH `ts`、ingested_at、历史校准时间显式 UTC，写入 UTC 墙钟字符串不会随容器时区改变。日统计由保留的小时财务/Token 状态重建；新增机器日历用客户端与缓存小时聚合，原始日志到期后仍保留这些统计。升级前只剩 UTC 日聚合而没有小时证据的客户端/旧缓存历史无法可靠重建本地日界，保留原表供历史核查。
+
+会话列表的 sid 字段是 SHA-256 前 128 位指纹，仅用于展示与吊销，不是 cookie 凭证。吊销在已鉴权用户的会话内匹配指纹。会话与 OAuth state cookie 使用 Secure/HttpOnly/SameSite=Lax；OAuth 回调须带发起浏览器的 provider 专属 state cookie。
+
+请求统计仅计进入预扣后的终态（成功与失败）；无效 key、预扣前限流或余额不足不进入账单统计，应通过入口访问日志观察。API key 模式的前端仍把密钥保存在 localStorage，浏览器脚本可读取；使用者应按共享设备与浏览器扩展风险选择该模式。开启注册赠送/邀请奖励时应启用邮箱验证与反自动化验证，否则不同邮箱自邀属于配置滥用风险。

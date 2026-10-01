@@ -174,7 +174,7 @@ async fn own_scope_isolates_channel_admins() {
         &super_token,
         "/admin/roles",
         json!({"role_code": code, "display_name": "渠道管理员",
-               "permissions": ["channel.read.own", "channel.write.own"]}),
+               "permissions": ["channel.read.own", "channel.write.own", "mcp.write", "billing.read.own"]}),
     )
     .await;
     let role_id = r.json::<Value>().await.unwrap()["admin_role_id"]
@@ -239,6 +239,21 @@ async fn own_scope_isolates_channel_admins() {
     )
     .await;
     assert_eq!(r.status(), 200);
+
+    sqlx::query("INSERT INTO settings(key,value) VALUES('mcp_write_enabled','true') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").execute(&env.pg).await.unwrap();
+    for tool in ["channel_toggle", "channel_test"] {
+        let response: Value = cpost(&env, &y_token, "/mcp", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{"channel_id":channel_id,"enabled":true,"confirm":true}}})).await.json().await.unwrap();
+        assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+        assert_eq!(
+            response["result"]["content"][0]["text"], "permission_denied",
+            "{response}"
+        );
+    }
+    let response: Value = cpost(&env, &y_token, "/mcp", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"platform_kpi","arguments":{}}})).await.json().await.unwrap();
+    assert_eq!(
+        response["error"]["message"], "permission_denied",
+        "own billing grant cannot read global rank: {response}"
+    );
 }
 
 /// 池可见性 + 分组定价：池内渠道仅该池的分组可用、并按组倍率计价；

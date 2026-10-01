@@ -18,9 +18,9 @@ pub struct SsrfPolicy {
     pub allow_private: bool,
 }
 
-async fn load_policy(state: &AppState) -> SsrfPolicy {
+async fn load_policy(pg: &sqlx::PgPool) -> SsrfPolicy {
     sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = 'ssrf_policy'"#)
-        .fetch_optional(&state.pg)
+        .fetch_optional(pg)
         .await
         .ok()
         .flatten()
@@ -28,6 +28,7 @@ async fn load_policy(state: &AppState) -> SsrfPolicy {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn host_of(url: &str) -> Option<&str> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
@@ -49,7 +50,8 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || v4.is_broadcast()
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback()
+            v6.to_ipv4_mapped().is_some_and(|ip| is_private_ip(IpAddr::V4(ip)))
+                || v6.is_loopback()
                 || v6.is_unspecified()
                 // fc00::/7 ULA 与 fe80::/10 链路本地
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
@@ -60,7 +62,19 @@ fn is_private_ip(ip: IpAddr) -> bool {
 
 /// 校验 api_base；violation 返回 400（error_code 带原因参数）。
 pub async fn validate_api_base(state: &AppState, api_base: &str) -> Result<(), AppError> {
-    let policy = load_policy(state).await;
+    validate_url(&state.pg, api_base).await
+}
+
+pub(crate) async fn validate_url(pg: &sqlx::PgPool, api_base: &str) -> Result<(), AppError> {
+    let policy = load_policy(pg).await;
+    let parsed = reqwest::Url::parse(api_base)
+        .map_err(|_| AppError::bad_request().with_param("api_base_host"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::bad_request().with_param("api_base_host"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppError::bad_request().with_param("api_base_credentials"));
+    }
     let lower = api_base.trim().to_lowercase();
     if lower.starts_with("https://") {
         // scheme ok
@@ -71,12 +85,7 @@ pub async fn validate_api_base(state: &AppState, api_base: &str) -> Result<(), A
     } else {
         return Err(AppError::bad_request().with_param("api_base_scheme"));
     }
-    let Some(host) = host_of(&lower) else {
-        return Err(AppError::bad_request().with_param("api_base_host"));
-    };
-    if host.is_empty() {
-        return Err(AppError::bad_request().with_param("api_base_host"));
-    }
+    let host = host.trim_matches(['[', ']']);
     if !policy.allow_private
         && let Ok(ip) = host.parse::<IpAddr>()
         && is_private_ip(ip)

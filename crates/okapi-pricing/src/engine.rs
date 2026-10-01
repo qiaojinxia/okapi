@@ -29,6 +29,8 @@ pub struct CalcContext {
     pub local_minute_of_day: u16,
     /// unix 秒（规则生效窗口判定）。
     pub now_unix: i64,
+    /// Machine timezone offset at admission, including daylight saving time.
+    pub utc_offset_seconds: i32,
     /// 网关本地负载判定（surge 规则输入）。
     pub surge_active: bool,
     /// service_tier 结算档位（None = default/未启用；只降不升选择在 gateway 侧完成，
@@ -545,6 +547,7 @@ mod tests {
             monthly_spend_micro: 0,
             local_minute_of_day: 600,
             now_unix: 1_788_220_800, // 2026-09-01（周二）
+            utc_offset_seconds: 0,
             surge_active: false,
             service_tier: None,
         }
@@ -655,5 +658,35 @@ mod tests {
         sunday.now_unix = 1_788_220_800 + 5 * 86_400; // 2026-09-06 周日
         let quote = calculate(&book, &sunday, usage()).unwrap();
         assert_eq!(quote.amount.as_micros(), 800_000, "周日命中");
+    }
+    #[test]
+    fn time_rule_uses_local_weekday_at_midnight() {
+        let rule = PricingRule {
+            kind: RuleKind::TimeBased {
+                start_minute: 0,
+                end_minute: 60,
+                weekdays: WeekdayMask::from_days(&[0]).unwrap(),
+            },
+            ..rule("night", 800_000, 0, Stacking::Stackable)
+        };
+        let book = book_with(vec![rule]);
+        let mut context = ctx();
+        context.now_unix = 1_788_220_800 + 4 * 86_400 + 16 * 3600; // Saturday UTC, Sunday at UTC+8.
+        context.local_minute_of_day = 0;
+        assert_eq!(
+            calculate(&book, &context, usage())
+                .unwrap()
+                .amount
+                .as_micros(),
+            1_000_000
+        );
+        context.utc_offset_seconds = 8 * 3600;
+        assert_eq!(
+            calculate(&book, &context, usage())
+                .unwrap()
+                .amount
+                .as_micros(),
+            800_000
+        );
     }
 }

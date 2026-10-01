@@ -198,6 +198,7 @@ fn newapi_parity_fixtures() {
             monthly_spend_micro: 0,
             local_minute_of_day: case.ctx.local_minute,
             now_unix: 1_756_500_000,
+            utc_offset_seconds: 0,
             surge_active: case.ctx.surge,
             service_tier: None,
         };
@@ -308,6 +309,7 @@ fn snapshot_json_shape_matches_design() {
         monthly_spend_micro: 0,
         local_minute_of_day: 1380,
         now_unix: 0,
+        utc_offset_seconds: 0,
         surge_active: false,
         service_tier: None,
     };
@@ -400,6 +402,7 @@ fn openai_image_input_ratio_parity() {
         monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
+        utc_offset_seconds: 0,
         surge_active: false,
         service_tier: None,
     };
@@ -478,6 +481,7 @@ fn openai_audio_official_pricing_parity() {
         monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
+        utc_offset_seconds: 0,
         surge_active: false,
         service_tier: None,
     };
@@ -606,6 +610,7 @@ fn anthropic_cache_write_is_billed_as_separate_segment() {
         monthly_spend_micro: 0,
         local_minute_of_day: 0,
         now_unix: 0,
+        utc_offset_seconds: 0,
         surge_active: false,
         service_tier: None,
     };

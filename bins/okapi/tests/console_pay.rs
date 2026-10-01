@@ -67,6 +67,7 @@ async fn setup() -> TestEnv {
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").bind(json!({"allow_http":true,"allow_private":true})).execute(&pg).await.unwrap();
 
     let stripe_app = axum::Router::new().route("/v1/checkout/sessions", post(mock_stripe));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

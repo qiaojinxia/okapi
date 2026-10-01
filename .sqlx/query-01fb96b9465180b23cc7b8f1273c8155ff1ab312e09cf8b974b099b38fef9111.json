@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO video_tasks(user_id,task_id,request_id,channel_key_id) VALUES ($1,$2,$3,$4) ON CONFLICT (request_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01fb96b9465180b23cc7b8f1273c8155ff1ab312e09cf8b974b099b38fef9111"
+}

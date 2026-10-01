@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::{sync::watch, task::JoinSet};
 use uuid::Uuid;
 
-const DEADLINE: Duration = Duration::from_secs(600);
+const DEADLINE: Duration = Duration::from_mins(10);
 enum Step {
     Complete,
     Retry(u32),

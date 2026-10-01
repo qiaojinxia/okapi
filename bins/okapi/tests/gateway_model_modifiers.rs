@@ -36,6 +36,9 @@ fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 struct Bed {
     pg: PgPool,
     user_id: i64,
@@ -100,6 +103,7 @@ async fn setup() -> Bed {
         .await
         .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -192,6 +196,7 @@ async fn priced_variant_bills_at_its_own_rate() {
     // 价簿是进程内快照，重建 state 让它读到新价
     let database_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
+    published_pricing::publish(&bed.pg, bed.user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -218,6 +223,7 @@ async fn different_spellings_collapse_to_one_billing_name() {
         .unwrap();
     let database_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
+    published_pricing::publish(&bed.pg, bed.user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -239,6 +245,7 @@ async fn different_spellings_collapse_to_one_billing_name() {
     okapi_store::provision::create_model_ratio(&bed.pg, &legacy_variant, "5.0", "1.0", "1.0")
         .await
         .unwrap();
+    published_pricing::publish(&bed.pg, bed.user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

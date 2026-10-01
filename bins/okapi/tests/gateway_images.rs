@@ -14,6 +14,9 @@ use uuid::Uuid;
 async fn mock_images(body: axum::body::Bytes) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert!(req["model"].as_str().unwrap().starts_with("img-"));
+    if req["prompt"] == "test-upstream-failure" {
+        return axum::http::StatusCode::BAD_REQUEST.into_response();
+    }
     let n = usize::try_from(req["n"].as_u64().unwrap_or(1)).unwrap_or(1);
     axum::Json(json!({
         "created": 1_700_000_000,
@@ -55,6 +58,9 @@ async fn spawn_mock() -> SocketAddr {
     });
     addr
 }
+
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
 
 struct TestEnv {
     pg: PgPool,
@@ -117,6 +123,7 @@ async fn setup(balance_micro: i64) -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -246,4 +253,29 @@ async fn images_edits_multipart_bills_n() {
     }
     let rec = rec.expect("必须记账");
     assert_eq!(rec.amount_micro, 80_000);
+}
+
+#[tokio::test]
+async fn image_failure_refunds_and_records_a_failed_terminal() {
+    let env = setup(1_000_000).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/images/generations", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"prompt":"test-upstream-failure"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 502);
+    for _ in 0..50 {
+        let count:i64=sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE user_id=$1 AND log_type=5 AND amount_micro=0 AND status=40").bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+        if count == 1 {
+            assert_eq!(
+                env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+                1_000_000
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("missing failed image audit");
 }

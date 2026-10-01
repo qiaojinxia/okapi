@@ -209,28 +209,34 @@ fn weekdays_from_json(value: Option<&serde_json::Value>) -> Option<okapi_pricing
     okapi_pricing::WeekdayMask::from_days(&days)
 }
 
+fn parse_tier_ratios(value: Option<&serde_json::Value>) -> Option<Vec<(String, RatioFp)>> {
+    let Some(value) = value else {
+        return Some(Vec::new());
+    };
+    value
+        .as_object()?
+        .iter()
+        .map(|(key, value)| {
+            let literal = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => return None,
+            };
+            Some((key.clone(), literal.parse::<RatioFp>().ok()?))
+        })
+        .collect()
+}
+
 /// 行集 → 编译源（脏条目跳过并告警）。
 #[must_use]
 pub fn build_source(rows: &PricingSourceRows) -> PriceBookSource {
     let mut models = Vec::with_capacity(rows.models.len());
     for row in &rows.models {
         if let Some(pricing) = row_to_mode(row) {
-            let tier_ratios = row
-                .tier_ratios
-                .as_ref()
-                .and_then(serde_json::Value::as_object)
-                .map(|m| {
-                    m.iter()
-                        .filter_map(|(k, v)| {
-                            let s = v
-                                .as_str()
-                                .map(str::to_owned)
-                                .or_else(|| v.as_f64().map(|f| f.to_string()))?;
-                            s.parse::<RatioFp>().ok().map(|r| (k.clone(), r))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let Some(tier_ratios) = parse_tier_ratios(row.tier_ratios.as_ref()) else {
+                tracing::error!(model = %row.model_name, "invalid tier ratios; model disabled in pricebook");
+                continue;
+            };
             models.push(ModelEntry {
                 model: ModelCode::from(row.model_name.as_str()),
                 pricing,
@@ -346,6 +352,7 @@ mod tests {
                     monthly_spend_micro: 0,
                     local_minute_of_day: 0,
                     now_unix: 0,
+                    utc_offset_seconds: 0,
                     surge_active: false,
                     service_tier: None,
                 },
@@ -358,5 +365,17 @@ mod tests {
             .unwrap();
             assert_eq!(quote.amount.as_micros(), 50);
         }
+    }
+    #[test]
+    fn tier_ratios_parse_decimal_without_float_or_silent_drop() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"priority":0.123456,"flex":"0.5"}"#).unwrap();
+        let parsed = super::parse_tier_ratios(Some(&value)).unwrap();
+        assert!(
+            parsed
+                .iter()
+                .any(|(key, ratio)| key == "priority" && ratio.as_scaled() == 123_456)
+        );
+        assert!(super::parse_tier_ratios(Some(&serde_json::json!({"bad":"invalid"}))).is_none());
     }
 }

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::{sync::watch, task::JoinSet};
 use uuid::Uuid;
 
-const EXECUTION_TIMEOUT: Duration = Duration::from_secs(420);
+const EXECUTION_TIMEOUT: Duration = Duration::from_mins(7);
 
 /// Runs one persisted request; also advances recovery/settlement when no generation is needed.
 pub async fn run_one(state: &AppState) -> Result<bool, AppError> {
@@ -205,7 +205,7 @@ async fn settle_one(state: &AppState, id: Option<Uuid>) -> Result<bool, AppError
 pub async fn run_worker(state: AppState, mut stop: watch::Receiver<bool>) {
     let mut work = JoinSet::new();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
-    let mut cleanup = tokio::time::interval(Duration::from_secs(60));
+    let mut cleanup = tokio::time::interval(Duration::from_mins(1));
     loop {
         if *stop.borrow() {
             break;

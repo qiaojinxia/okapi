@@ -22,6 +22,16 @@ pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
     let pool = PgPoolOptions::new()
         .max_connections(max)
         .acquire_timeout(Duration::from_secs(5))
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                let zone = crate::timezone::machine_timezone()
+                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))?;
+                sqlx::query!("SELECT set_config('TimeZone',$1,false)", zone)
+                    .fetch_one(connection)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(database_url)
         .await?;
     tracing::info!(
@@ -33,6 +43,16 @@ pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
 
 /// 运行嵌入式迁移（migrations/ 目录随二进制打包，部署零外部工具）。
 pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
-    sqlx::migrate!("./migrations").run(pool).await?;
+    // Partition DDL and storage defaults remain UTC, independently of calendar reporting.
+    let mut connection = pool.acquire().await?;
+    sqlx::query!("SELECT set_config('TimeZone',$1,false)", "UTC")
+        .fetch_one(&mut *connection)
+        .await?;
+    let migrated = sqlx::migrate!("./migrations").run(&mut *connection).await;
+    let zone = crate::timezone::machine_timezone()?;
+    sqlx::query!("SELECT set_config('TimeZone',$1,false)", zone)
+        .fetch_one(&mut *connection)
+        .await?;
+    migrated?;
     Ok(())
 }

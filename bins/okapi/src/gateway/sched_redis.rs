@@ -830,22 +830,22 @@ impl SchedulerRedis {
 
     /// 校验并销毁：对上即 DEL（一次性）；不对 / 不存在 / Redis 故障 → false。
     pub async fn email_code_take(&self, email: &str, code: &str) -> bool {
-        let key = format!("verify:email:{email}");
-        let stored: Option<String> = self.client.get(&key).await.ok().flatten();
-        let Some(stored) = stored else {
-            return false;
-        };
-        if stored.len() != code.len()
-            || stored
-                .bytes()
-                .zip(code.bytes())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                != 0
-        {
-            return false;
-        }
-        let _: Result<i64, _> = self.client.del(&key).await;
-        true
+        // Every attempt consumes the challenge; GETDEL makes success single-use
+        // even when two requests present the right code concurrently.
+        let stored: Option<String> = self
+            .client
+            .getdel(format!("verify:email:{email}"))
+            .await
+            .ok()
+            .flatten();
+        stored.is_some_and(|stored| {
+            stored.len() == code.len()
+                && stored
+                    .bytes()
+                    .zip(code.bytes())
+                    .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                    == 0
+        })
     }
 
     /// 找回密码 token → user_id（键存 token 的 sha256，明文只出现在邮件里）。
@@ -1114,4 +1114,30 @@ fn append_content_text(out: &mut String, content: &serde_json::Value) {
 fn short_hash(input: &[u8]) -> String {
     let digest = Sha256::digest(input);
     hex::encode(&digest[..8])
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+    #[tokio::test]
+    async fn email_code_is_consumed_atomically_including_failed_guesses() {
+        dotenvy::dotenv().ok();
+        let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+            .await
+            .unwrap();
+        let sched = SchedulerRedis::new(redis);
+        let email = format!("atomic-{}@example.test", uuid::Uuid::new_v4());
+        assert!(sched.email_code_set(&email, "123456", 60).await);
+        let (a, b) = tokio::join!(
+            sched.email_code_take(&email, "123456"),
+            sched.email_code_take(&email, "123456")
+        );
+        assert_ne!(a, b, "one winner per code");
+        assert!(sched.email_code_set(&email, "123456", 60).await);
+        assert!(!sched.email_code_take(&email, "000000").await);
+        assert!(
+            !sched.email_code_take(&email, "123456").await,
+            "wrong guesses consume the challenge"
+        );
+    }
 }

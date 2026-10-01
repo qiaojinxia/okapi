@@ -77,6 +77,7 @@ async fn setup(subject: &str) -> TestEnv {
     .await
     .unwrap();
 
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").bind(json!({"allow_http":true,"allow_private":true})).execute(&pg).await.unwrap();
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -125,12 +126,33 @@ async fn oauth_authorization_code_flow() {
         .unwrap()
         .to_owned();
 
+    let oauth_cookie = start.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let forged = client
+        .get(format!(
+            "http://{}/auth/oauth/mockhub/callback?code=mock-code&state={state_token}",
+            env.addr
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        forged.status(),
+        401,
+        "state must be bound to initiating browser"
+    );
     // callback：换 token → userinfo → 注册 + session
     let cb = client
         .get(format!(
             "http://{}/auth/oauth/mockhub/callback?code=mock-code&state={state_token}",
             env.addr
         ))
+        .header(reqwest::header::COOKIE, &oauth_cookie)
         .send()
         .await
         .unwrap();
@@ -180,6 +202,7 @@ async fn oauth_authorization_code_flow() {
             "http://{}/auth/oauth/mockhub/callback?code=mock-code&state={state_token}",
             env.addr
         ))
+        .header(reqwest::header::COOKIE, &oauth_cookie)
         .send()
         .await
         .unwrap();
@@ -204,11 +227,19 @@ async fn oauth_authorization_code_flow() {
         .split('&')
         .next()
         .unwrap();
+    let oauth_cookie2 = start2.headers()[reqwest::header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
     let cb2 = client
         .get(format!(
             "http://{}/auth/oauth/mockhub/callback?code=mock-code&state={state2}",
             env.addr
         ))
+        .header(reqwest::header::COOKIE, &oauth_cookie2)
         .send()
         .await
         .unwrap();

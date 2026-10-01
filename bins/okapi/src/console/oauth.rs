@@ -166,7 +166,15 @@ pub async fn start(
         form_escape(&redirect),
         form_escape(&provider.scopes),
     );
-    Ok((StatusCode::FOUND, [(header::LOCATION, location)]).into_response())
+    let mut response = (StatusCode::FOUND, [(header::LOCATION, location)]).into_response();
+    let cookie = format!(
+        "okapi_oauth_{code}={token}; Secure; HttpOnly; SameSite=Lax; Path=/auth/oauth/{code}; Max-Age={STATE_TTL_SECS}"
+    );
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        cookie.parse().map_err(|_| AppError::bad_request())?,
+    );
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -183,7 +191,16 @@ pub async fn callback(
     headers: HeaderMap,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, AppError> {
-    if !state.sched.oauth_state_take(&q.state).await {
+    let cookie_name = format!("okapi_oauth_{code}=");
+    let bound = headers
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.split(';')
+                .map(str::trim)
+                .find_map(|v| v.strip_prefix(&cookie_name))
+        });
+    if bound != Some(q.state.as_str()) || !state.sched.oauth_state_take(&q.state).await {
         return Err(AppError::unauthorized("oauth_state_invalid"));
     }
     let provider = load_provider(&state, &code).await?;
@@ -266,6 +283,7 @@ pub async fn callback(
 
 /// 经 PassUpstream 请求并解析 JSON（token/userinfo 共用）。
 async fn fetch_json(state: &AppState, req: PassRequest) -> Result<Value, AppError> {
+    super::ssrf::validate_api_base(state, &req.url).await?;
     match state.pass.probe(req).await {
         Ok(PassResponse::Ok { mut stream, .. }) => {
             use futures::StreamExt as _;

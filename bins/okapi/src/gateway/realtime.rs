@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_TIMEOUT: Duration = Duration::from_mins(5);
+const SESSION_MAX: Duration = Duration::from_mins(8);
 const DEFAULT_COMPLETION_CAP: u32 = 4096;
 
 #[derive(Deserialize)]
@@ -91,6 +92,7 @@ struct Prep {
     credential: String,
     channel: (i64, i64),
     calc: CalcContext,
+    book: std::sync::Arc<okapi_pricing::PriceBook>,
     started: Instant,
 }
 
@@ -127,9 +129,17 @@ async fn prepare(
         user_multiplier: RatioFp::from_scaled(key.multiplier_scaled).unwrap_or(RatioFp::ONE),
         monthly_tokens: rules_in.monthly_tokens,
         monthly_spend_micro: rules_in.monthly_spend_micro,
-        local_minute_of_day: u16::try_from((now.timestamp().div_euclid(60)).rem_euclid(1440))
-            .unwrap_or(0),
+        local_minute_of_day: u16::try_from(
+            (now.timestamp()
+                .saturating_add(i64::from(
+                    now.with_timezone(&chrono::Local).offset().local_minus_utc(),
+                ))
+                .div_euclid(60))
+            .rem_euclid(1440),
+        )
+        .unwrap_or(0),
         now_unix: now.timestamp(),
+        utc_offset_seconds: now.with_timezone(&chrono::Local).offset().local_minus_utc(),
         surge_active: rules_in.surge_active,
         service_tier: None,
     };
@@ -287,6 +297,7 @@ async fn prepare(
         credential: cand.credential.clone(),
         channel: (cand.channel_id, cand.channel_key_id),
         calc,
+        book,
         started: Instant::now(),
     })
 }
@@ -348,6 +359,8 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
     let (mut cl_tx, mut cl_rx) = client.split();
     let mut meter = usage::Meter::default();
     let mut awaiting_first = true;
+    let expires = tokio::time::Instant::now() + SESSION_MAX;
+    let mut idle_deadline = tokio::time::Instant::now() + FIRST_MESSAGE_TIMEOUT;
     let conn_id = request_id.to_string();
     let mut renew = tokio::time::interval(Duration::from_secs(20));
     renew.tick().await; // 首个 tick 立即完成，跳过
@@ -355,13 +368,8 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
     // 双向泵：任一侧关闭/出错即收尾；超时窗口 = 首消息 30s，其后任意方向静默 5min；
     // 每 20s 续租连接租约（§14.4）
     loop {
-        let window = if awaiting_first {
-            FIRST_MESSAGE_TIMEOUT
-        } else {
-            IDLE_TIMEOUT
-        };
         tokio::select! {
-            () = tokio::time::sleep(window) => {
+            () = tokio::time::sleep_until(expires.min(idle_deadline)) => {
                 tracing::info!(request_id = %request_id, awaiting_first, "realtime 超时，关闭会话");
                 break;
             }
@@ -372,6 +380,7 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
                 match msg {
                     Some(Ok(m)) => {
                         awaiting_first = false;
+                        idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
                         let forward = match m {
                             AxumMsg::Text(t) => TungMsg::text(t.to_string()),
                             AxumMsg::Binary(b) => TungMsg::binary(b),
@@ -379,7 +388,7 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
                             AxumMsg::Pong(p) => TungMsg::Pong(p),
                             AxumMsg::Close(_) => break,
                         };
-                        if up_tx.send(forward).await.is_err() {
+                        if !tokio::time::timeout_at(expires.min(idle_deadline), up_tx.send(forward)).await.is_ok_and(|r| r.is_ok()) {
                             break;
                         }
                     }
@@ -389,6 +398,8 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
             msg = up_rx.next() => {
                 match msg {
                     Some(Ok(m)) => {
+                        awaiting_first = false;
+                        idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
                         if let TungMsg::Text(text) = &m
                             && let Err(reason) = meter.observe(text) {
                                 tracing::warn!(%request_id, reason, "invalid realtime usage; settling verified prefix");
@@ -404,7 +415,7 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
                             TungMsg::Close(_) => break,
                             TungMsg::Frame(_) => continue,
                         };
-                        if cl_tx.send(forward).await.is_err() {
+                        if !tokio::time::timeout_at(expires.min(idle_deadline), cl_tx.send(forward)).await.is_ok_and(|r| r.is_ok()) {
                             break;
                         }
                     }
@@ -413,8 +424,8 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
             }
         }
     }
-    let _ = cl_tx.close().await;
-    let _ = up_tx.close().await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), cl_tx.close()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), up_tx.close()).await;
 
     settle_session(&state, &prep, meter.usage, meter.responses).await;
     state
@@ -461,8 +472,8 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         record_failure(state, prep, usage, Some(codes::EMPTY_COMPLETION), pool).await;
         return;
     }
-    let book = state.pricebook.load();
-    let quote = match calculate(&book, &prep.calc, usage) {
+    let book = &prep.book;
+    let quote = match calculate(book, &prep.calc, usage) {
         Ok(q) => q,
         Err(err) => {
             tracing::error!(request_id = %prep.request_id, error = %err, "realtime 结算算价失败，退款");

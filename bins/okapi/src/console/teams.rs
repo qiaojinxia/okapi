@@ -194,13 +194,14 @@ pub async fn upsert_member(
     if !matches!(req.role.as_str(), "admin" | "member") {
         return Err(AppError::bad_request().with_param("role"));
     }
-    sqlx::query!(
+    let changed = sqlx::query!(
         r#"
         INSERT INTO team_members (team_user_id, member_user_id, role, monthly_spend_limit_micro)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (team_user_id, member_user_id) DO UPDATE SET
             role = EXCLUDED.role,
             monthly_spend_limit_micro = EXCLUDED.monthly_spend_limit_micro
+        WHERE team_members.role <> 'owner'
         "#,
         team_id,
         req.user_id,
@@ -210,6 +211,12 @@ pub async fn upsert_member(
     .execute(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
+    if changed.rows_affected() == 0 {
+        return Err(
+            AppError::new(StatusCode::FORBIDDEN, okapi_api::codes::PERMISSION_DENIED)
+                .with_param("team_owner"),
+        );
+    }
     // 团 key 的鉴权缓存（含限额快照）失效
     state.sched.auth_flush().await;
     Ok(Json(json!({ "ok": true })))

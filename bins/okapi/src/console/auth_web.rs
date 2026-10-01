@@ -573,7 +573,7 @@ pub(super) async fn web_session_limit(state: &AppState) -> i64 {
 
 /// 会话 cookie（HttpOnly，7 天，与 `sess:web` TTL 对齐）。
 pub(super) fn session_cookie(sid: &str) -> String {
-    format!("{SESSION_COOKIE}={sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800")
+    format!("{SESSION_COOKIE}={sid}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800")
 }
 
 /// 密码 + TOTP 校验；`Err((审计原因, 对外错误))`。
@@ -763,7 +763,7 @@ pub async fn list_sessions(
         .into_iter()
         .map(|s| {
             json!({
-                "sid": s.sid,
+                "sid": session_fingerprint(&s.sid),
                 "ip": s.ip,
                 "ua": s.ua,
                 "created_at": s.created_at,
@@ -785,15 +785,37 @@ pub async fn revoke_session(
     Path(sid): Path<String>,
 ) -> Result<Json<Value>, AppError> {
     let key = crate::gateway::auth::authenticate(&state, &headers).await?;
-    if sid.is_empty() || sid.len() > 128 {
+    if sid.len() != 32 || !sid.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(AppError::bad_request().with_param("session"));
     }
-    if !state.sched.web_session_revoke(key.user_id, &sid).await {
+    let session = state
+        .sched
+        .web_session_list(key.user_id)
+        .await
+        .into_iter()
+        .find(|s| session_fingerprint(&s.sid) == sid);
+    if let Some(session) = session {
+        if !state
+            .sched
+            .web_session_revoke(key.user_id, &session.sid)
+            .await
+        {
+            return Err(AppError::new(
+                StatusCode::NOT_FOUND,
+                okapi_api::codes::NOT_FOUND,
+            ));
+        }
+    } else {
         return Err(
             AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND).with_param("session"),
         );
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Public revocation handle; never usable as a login cookie.
+fn session_fingerprint(sid: &str) -> String {
+    hex::encode(Sha256::digest(sid.as_bytes()))[..32].to_owned()
 }
 
 /// DELETE /api/me/sessions：吊销该用户全部 web 会话。
