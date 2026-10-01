@@ -71,7 +71,7 @@ function ProfileForm({ profile }: { profile: AccountProfile }) {
           </Field>
           <Field label={t('profile:language')} htmlFor="profile-language" hint={t('profile:languageHint')}>
             <Select id="profile-language" className="w-full" value={language} disabled={save.isPending} onChange={(value) => { setLanguage(value as AccountProfile['language']); setError(null) }} options={[
-              { value: 'auto', label: t('profile:languageAuto') }, { value: 'zh-CN', label: '简体中文' }, { value: 'en', label: 'English' },
+              { value: 'auto', label: t('profile:languageAuto') }, { value: 'zh-CN', label: t('common:langZh') }, { value: 'en', label: t('common:langEn') },
             ]} />
           </Field>
           {error && <Alert tone="destructive">{error}</Alert>}
