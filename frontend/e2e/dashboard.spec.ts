@@ -4,6 +4,9 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 
 const health = { postgres: true, redis: true, clickhouse: true, nats_connected: true, outbox_pending: 0, dlq_depth: 0, cooling_keys: 0, pricebook_epoch: 4 }
+// 首页趋势分两路：图表走精简查询（fields=core，毫秒级），质量与 Token 构成共用一次完整查询（不查上期）。
+const isChart = (url: string) => url.startsWith('/admin/stats/trend') && url.includes('fields=core')
+const isUsage = (url: string) => url.startsWith('/admin/stats/trend') && !url.includes('fields=core')
 const bucket = (requests: number) => ({ requests, tokens: requests * 1000, amount_micro: requests * 20000, errors: 42, error_rate_bp: 100, active_users: 28 })
 
 async function prepare(page: Page, language = 'zh-CN') {
@@ -55,7 +58,7 @@ async function prepare(page: Page, language = 'zh-CN') {
   return requests
 }
 
-test('首页共用趋势请求、短期复用查询，手动刷新绕过后端缓存', async ({ page }) => {
+test('首页完整趋势查询只发一次由质量与 Token 共用，图表与排行走精简查询，短期复用，手动刷新绕过后端缓存', async ({ page }) => {
   const requests = await prepare(page)
   const fresh: string[] = []
   page.on('request', (request) => {
@@ -63,15 +66,20 @@ test('首页共用趋势请求、短期复用查询，手动刷新绕过后端�
   })
   await page.goto('/admin')
   await expect(page.getByRole('region', { name: '经营概览' }).getByRole('link')).toHaveCount(5)
-  await expect.poll(() => requests.filter((url) => url.startsWith('/admin/stats/trend?')).length).toBe(1)
-  const trends = requests.filter((url) => url.startsWith('/admin/stats/trend?'))
-  expect(trends[0]).toContain('cached=true')
-  expect(requests.filter((url) => url.startsWith('/admin/stats/breakdown?')).every((url) => url.includes('cached=true'))).toBe(true)
+  await expect.poll(() => requests.filter(isUsage).length).toBe(1)
+  expect(requests.filter(isChart)).toHaveLength(1)
+  expect(requests.filter(isUsage)[0]).toContain('compare=false')
+  for (const url of requests.filter((url) => url.startsWith('/admin/stats/trend?'))) expect(url).toContain('cached=true')
+  // 排行只读金额 / 请求 / Token 与占比：精简查询，不查上期。
+  const rankings = requests.filter((url) => url.startsWith('/admin/stats/breakdown?'))
+  expect(rankings).toHaveLength(2)
+  for (const url of rankings) for (const part of ['cached=true', 'fields=core', 'compare=false']) expect(url).toContain(part)
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   for (const path of ['/admin/stats/overview', '/admin/stats/trend', '/admin/stats/breakdown']) {
     await expect.poll(() => fresh.includes(path)).toBe(true)
   }
-  await expect.poll(() => requests.filter((url) => url.startsWith('/admin/stats/trend?')).length).toBe(2)
+  await expect.poll(() => requests.filter(isUsage).length).toBe(2)
+  await expect.poll(() => requests.filter(isChart).length).toBe(2)
 })
 
 test('Dashboard 指标可键盘进入对应分析，今日和所选时段各带正确范围，返回保留首页条件', async ({ page }) => {
@@ -216,7 +224,8 @@ test('Dashboard：刷新覆盖当前卡片，图表补零且日均按完整时�
   const healthCount = requests.filter((r) => r === '/admin/diagnose').length
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await expect.poll(() => requests.filter((r) => r === '/admin/diagnose').length).toBe(healthCount + 1)
-  await expect.poll(() => requests.filter((r) => r.startsWith('/admin/stats/trend')).length).toBe(before + 1)
+  // 刷新同时覆盖精简图表与完整汇总两路。
+  await expect.poll(() => requests.filter((r) => r.startsWith('/admin/stats/trend')).length).toBe(before + 2)
 })
 
 test('Dashboard 综合趋势默认同屏展示数量与收入，单位独立且导出保留两项原始值', async ({ page }) => {
@@ -254,7 +263,8 @@ test('Dashboard 综合趋势默认同屏展示数量与收入，单位独立且�
   const csv = await readFile((await (await download).path())!, 'utf8')
   expect(csv).toContain('日期,请求数 (请求数),收入 (USD)')
   expect(csv).toContain('2026-09-20,2800,56')
-  expect(requests.filter((url) => url.startsWith('/admin/stats/trend'))).toHaveLength(1)
+  expect(requests.filter(isChart)).toHaveLength(1)
+  expect(requests.filter(isUsage)).toHaveLength(1)
   await page.getByRole('button', { name: '所选时段', exact: true }).click()
   await expect(summary).toContainText('近 7 天 · 请求数')
 })
@@ -323,7 +333,8 @@ test('Dashboard：成本覆盖率与质量同窗，未知成本不推算利润�
   await expect(page.getByRole('tooltip')).toContainText('未采集部分不按零成本计算')
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '近 30 天', exact: true }).click()
-  await expect.poll(() => queries.filter((url) => url.startsWith('/admin/stats/trend')).at(-1)).toBe('/admin/stats/trend?days=30&metric=amount&cached=true')
+  await expect.poll(() => queries.filter(isUsage).at(-1)).toBe('/admin/stats/trend?days=30&metric=amount&cached=true&compare=false')
+  await expect.poll(() => queries.filter(isChart).at(-1)).toBe('/admin/stats/trend?days=30&metric=amount&cached=true&fields=core')
   await expect(summary.getByRole('link', { name: '查看质量趋势' })).toHaveAttribute('href', '/admin/stats?days=30&measure=latency')
   await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
@@ -417,7 +428,8 @@ test('Dashboard 汇总每分钟更新当前时段，后台和离开页面停止�
   await page.clock.fastForward(60_000)
   await expect.poll(() => count('/admin/stats/overview?days=7')).toBe(2)
   expect(count('/admin/stats/margin')).toBe(0)
-  await expect.poll(() => count('/admin/stats/trend?days=7')).toBe(2)
+  await expect.poll(() => requests.filter(isUsage).length).toBe(2)
+  await expect.poll(() => requests.filter(isChart).length).toBe(2)
   await expect.poll(() => count('/admin/stats/breakdown?days=7')).toBe(4)
   await page.getByRole('button', { name: '近 30 天', exact: true }).click()
   await expect(page.getByRole('region', { name: '费用与调用质量' })).toContainText('近 30 天')
@@ -448,7 +460,8 @@ for (const width of [1024, 1366]) {
     await expect(page.getByRole('group', { name: '请求量与收入趋势', exact: true })).toBeInViewport()
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     // 摘要布局共享原有汇总数据，不为每个小指标单独请求。
-    expect(requests.filter((url) => url.startsWith('/admin/stats/trend'))).toHaveLength(1)
+    expect(requests.filter(isChart)).toHaveLength(1)
+    expect(requests.filter(isUsage)).toHaveLength(1)
     await page.screenshot({ path: `test-results/dashboard-firstscreen-${width}.png`, animations: 'disabled' })
     // 完整待办前移后，短屏允许趋势和分布向下延伸，但不能裁掉内容或入口。
     for (const name of ['模型消费排行', '渠道消费排行', 'Token 用量构成']) {
@@ -522,7 +535,8 @@ test('Token 构成区分已记录总量、部分缓存、同批实报样本和�
   await expect(provenance).toContainText('本地覆盖')
   await expect(provenance).toContainText('输入 26,000 / 输出 36,500')
   await expect(panel).not.toContainText('NaN')
-  expect(trendRequests).toHaveLength(1)
+  expect(trendRequests.filter((url) => !url.includes('fields=core'))).toHaveLength(1)
+  expect(trendRequests).toHaveLength(2)
   await page.screenshot({ path: 'test-results/dashboard-token-quality.png', fullPage: true, animations: 'disabled' })
   await panel.screenshot({ path: 'test-results/token-quality-panel.png', animations: 'disabled' })
 })
@@ -592,9 +606,10 @@ test('Dashboard 首页直接展示模型、渠道与 Token 构成，占比包含
   await expect(tokens.getByTitle('600,000', { exact: true })).toHaveText('60万 Tokens')
   // 五段互斥，缓存与推理不能在输入/输出基础上再重复累计。
   await expect(tokens.locator('[data-slot="token-segments"] dd')).toHaveText(['24万', '14万', '20,000', '17万', '30,000'])
-  expect(requests.filter((url) => url.startsWith('/admin/stats/trend'))).toHaveLength(1)
+  expect(requests.filter(isUsage)).toHaveLength(1)
+  expect(requests.filter(isChart)).toHaveLength(1)
   expect(requests.filter((url) => url.startsWith('/admin/stats/breakdown'))).toEqual([
-    '/admin/stats/breakdown?days=30&by=model&limit=3&cached=true', '/admin/stats/breakdown?days=30&by=channel&limit=3&cached=true',
+    '/admin/stats/breakdown?days=30&by=model&limit=3&cached=true&fields=core&compare=false', '/admin/stats/breakdown?days=30&by=channel&limit=3&cached=true&fields=core&compare=false',
   ])
   await expect(models.getByRole('button', { name: /再看|收起/ })).toHaveCount(0)
   await expect(models.getByRole('listitem')).toHaveCount(3)
@@ -603,7 +618,8 @@ test('Dashboard 首页直接展示模型、渠道与 Token 构成，占比包含
   expect(requests.filter((url) => url.startsWith('/admin/stats/breakdown'))).toHaveLength(2)
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await expect.poll(() => requests.filter((url) => url.startsWith('/admin/stats/breakdown')).length).toBe(4)
-  expect(requests.filter((url) => url.startsWith('/admin/stats/trend'))).toHaveLength(2)
+  expect(requests.filter(isUsage)).toHaveLength(2)
+  expect(requests.filter(isChart)).toHaveLength(2)
   await page.getByRole('button', { name: '近 7 天', exact: true }).click()
   await expect(models).toContainText('近 7 天')
   await expect(models.getByRole('link', { name: /gpt-5.1/ })).toHaveAttribute('href', '/admin/stats?days=7&model=gpt-5.1')
@@ -917,7 +933,8 @@ test('Token 趋势共用汇总数据，支持小时口径、补零、导出与�
   const download = page.waitForEvent('download')
   await trend.getByRole('button', { name: '导出 CSV' }).click()
   expect(await readFile((await (await download).path())!, 'utf8')).toContain('2026-09-26 00:00:00,4000')
-  expect(requests.filter((url) => url.startsWith('/admin/stats/trend'))).toHaveLength(1)
+  expect(requests.filter(isChart)).toHaveLength(1)
+  expect(requests.filter(isUsage)).toHaveLength(1)
   await page.reload()
   await expect(page.getByRole('group', { name: '图表指标' }).getByRole('button', { name: 'Token', exact: true })).toHaveAttribute('aria-pressed', 'true')
 })

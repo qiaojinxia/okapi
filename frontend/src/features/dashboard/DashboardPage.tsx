@@ -13,7 +13,7 @@ import { RealtimeCard } from '@/features/dashboard/RealtimeCard'
 import { TrendCard } from '@/features/dashboard/TrendCard'
 import { OperationsSummary } from '@/features/dashboard/OperationsSummary'
 import { DistributionSummary } from '@/features/dashboard/DistributionSummary'
-import { dashboardBreakdownParams, dashboardTrendParams, withFreshDashboardQueries } from '@/features/dashboard/data'
+import { dashboardBreakdownParams, dashboardChartParams, dashboardTrendParams, withFreshDashboardQueries } from '@/features/dashboard/data'
 import { DaysPicker } from '@/features/stats/DaysPicker'
 import { qk } from '@/lib/query-keys'
 
@@ -35,7 +35,7 @@ export function DashboardPage() {
       await withFreshDashboardQueries(async () => { await Promise.all([
         qk.statsRealtime, qk.statsOverview(days), qk.statsInventory,
         qk.statsChannels(days), qk.adminModels, qk.adminPools, qk.reconciliation, qk.diagnose,
-        qk.statsTrend(dashboardTrendParams(days)),
+        qk.statsTrend(dashboardTrendParams(days)), qk.statsTrend(dashboardChartParams(days)),
         qk.statsBreakdown(dashboardBreakdownParams(days, 'model', model_rank)),
         qk.statsBreakdown(dashboardBreakdownParams(days, 'channel', channel_rank)),
       ].map((queryKey) => queryClient.refetchQueries({ queryKey, exact: true, type: 'active' }))) })
