@@ -1,29 +1,39 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link } from '@tanstack/react-router'
-import { Activity, ArrowUpRight, CalendarDays, Coins, Cpu, KeyRound, ShieldCheck, UserRound } from 'lucide-react'
+import { Link, getRouteApi } from '@tanstack/react-router'
+import { Activity, ArrowUpRight, CalendarDays, Coins, Cpu, KeyRound, Monitor, ShieldCheck, UserRound } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { PageBody, PageHeader } from '@/components/ui/page'
 import { UsageScope } from '@/components/usage-scope'
+import { Tabs, TabPanel } from '@/components/ui/tabs'
 import { Segmented } from '@/components/ui/segmented'
 import { useUsageScope } from '@/hooks/use-usage-scope'
 import { Stat } from '@/components/ui/stat'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/table'
 import { roleLabel } from '@/features/users/types'
+import { ActiveSessionsCard } from '@/features/security/ActiveSessionsCard'
+import { RecentLoginsCard } from '@/features/security/RecentLoginsCard'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatCount, formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { BasicInfo } from './BasicInfo'
+import type { AccountProfile } from './BasicInfo'
 import { buildActivity, calendarDate } from './activity'
 import type { ActivityDay, ActivityResponse, Metric } from './activity'
 import { UsageHeatmap } from './UsageHeatmap'
 
+const routeApi = getRouteApi('/portal/profile')
+
 export function ProfilePage() {
   const { t, i18n } = useTranslation()
   const me = useMe()
+  const search = routeApi.useSearch(), navigate = routeApi.useNavigate()
+  const tab = search.tab ?? 'activity'
+  const profile = useQuery({ queryKey: qk.myProfile, enabled: me.data?.has_web_session === true, retry: false, staleTime: 60_000, queryFn: () => apiFetch<AccountProfile>('/api/me/profile') })
   const usageScope = useUsageScope()
   const { scope } = usageScope
   const [year, setYear] = useState<number>()
@@ -31,7 +41,7 @@ export function ProfilePage() {
     queryKey: qk.myActivity(scope, year),
     queryFn: () => apiFetch<ActivityResponse>(`/api/me/stats/activity?scope=${scope}${year === undefined ? '' : `&year=${year}`}`),
     retry: false,
-    enabled: usageScope.ready,
+    enabled: usageScope.ready && tab === 'activity',
     refetchInterval: 60_000,
   })
   const currentYear = Number(query.data?.today.slice(0, 4) ?? new Date().getUTCFullYear())
@@ -46,7 +56,7 @@ export function ProfilePage() {
           <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary"><UserRound className="h-7 w-7" /></span>
           <div className="min-w-0 space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-lg font-semibold">{me.data ? t('common:userId', { id: me.data.user_id }) : '—'}</h2>
+              <h2 className="min-w-0 break-all text-lg font-semibold">{profile.data?.username || (me.data ? t('common:userId', { id: me.data.user_id }) : '—')}</h2>
               {me.data && <Badge>{roleLabel(me.data.role, t)}</Badge>}
             </div>
             <p className="break-all text-sm text-muted-foreground">{me.data?.group} · {t('profile:balance')}: {me.data ? formatMoney(me.data.balance_micro, i18n.language) : '—'}</p>
@@ -57,23 +67,40 @@ export function ProfilePage() {
           <Link to="/portal/security" className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 hover:bg-accent focus-visible:outline-2 focus-visible:outline-primary"><ShieldCheck className="h-4 w-4" />{t('security:nav')}</Link>
         </div>
       </section>
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
-        <div>
-          <h2 className="font-semibold">{t('profile:usageHistory')}</h2>
-          <p className="mt-1 text-xs text-muted-foreground">{scope === 'key' ? t('profile:keyScopeHint', { id: me.data?.key_id ?? '—' }) : t('profile:userScopeHint')}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <UsageScope {...usageScope} ariaLabel={t('profile:scope')} onChange={usageScope.setScope} />
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <label htmlFor="profile-year">{t('profile:year')}</label>
-            <select id="profile-year" value={selectedYear} onChange={(e) => setYear(Number(e.target.value))} className="h-11 rounded-lg border border-border bg-card px-3 font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
-              {Array.from({ length: currentYear - firstYear + 1 }, (_, i) => currentYear - i).map((y) => <option key={y} value={y}>{y}</option>)}
-            </select>
+      <Tabs id="profile-tabs" variant="underline" ariaLabel={t('profile:sections')} active={tab}
+        onChange={(next) => { void navigate({ search: next === 'info' || next === 'signins' ? { tab: next } : {}, hash: '' }) }} items={[
+          { id: 'activity', label: t('profile:usageHistory'), icon: Activity, panelId: 'profile-activity' },
+          { id: 'info', label: t('profile:basicInfo'), icon: UserRound, panelId: 'profile-info' },
+          { id: 'signins', label: t('profile:signins'), icon: Monitor, panelId: 'profile-signins' },
+        ]} />
+      <TabPanel id="profile-activity" labelledBy="profile-tabs-activity" active={tab === 'activity'}>
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+            <div>
+              <h2 className="font-semibold">{t('profile:usageHistory')}</h2>
+              <p className="mt-1 text-xs text-muted-foreground">{scope === 'key' ? t('profile:keyScopeHint', { id: me.data?.key_id ?? '—' }) : t('profile:userScopeHint')}</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <UsageScope {...usageScope} ariaLabel={t('profile:scope')} onChange={usageScope.setScope} />
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <label htmlFor="profile-year">{t('profile:year')}</label>
+                <select id="profile-year" value={selectedYear} onChange={(e) => setYear(Number(e.target.value))} className="h-11 rounded-lg border border-border bg-card px-3 font-medium text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+                  {Array.from({ length: currentYear - firstYear + 1 }, (_, i) => currentYear - i).map((y) => <option key={y} value={y}>{y}</option>)}
+                </select>
+              </div>
+            </div>
           </div>
+          {query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} />
+            : <ActivityContent key={`${query.data.scope}-${query.data.year}`} data={query.data} />}
         </div>
-      </div>
-      {query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} />
-        : <ActivityContent key={`${query.data.scope}-${query.data.year}`} data={query.data} />}
+      </TabPanel>
+      <TabPanel id="profile-info" labelledBy="profile-tabs-info" active={tab === 'info'}><BasicInfo active={tab === 'info'} /></TabPanel>
+      <TabPanel id="profile-signins" labelledBy="profile-tabs-signins" active={tab === 'signins'}>
+        <div className="grid min-w-0 items-start gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <RecentLoginsCard active={tab === 'signins'} />
+          <ActiveSessionsCard active={tab === 'signins'} />
+        </div>
+      </TabPanel>
     </PageBody>
   )
 }

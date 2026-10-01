@@ -76,7 +76,7 @@ export function LogSummary({ data, loading, error, onRetry, layout = 'page', onO
 export function ExtraMetrics({ data, expanded }: { data?: Partial<LogStats>; expanded?: boolean }) {
   const { t, i18n } = useTranslation(), locale = i18n.language
   if (expanded === false) return null
-  const value = (n: number | null | undefined) => n == null ? t('logs:unreported') : n.toLocaleString(locale)
+  const value = (n: number | null | undefined) => n == null ? '—' : n.toLocaleString(locale)
   const metrics: [string, number | null | undefined, number | undefined][] = [
     ['cacheWrite', data?.cache_write_tokens, data?.cache_write_samples],
     ['cacheWrite5m', data?.cache_write_5m_tokens, data?.cache_write_ttl_samples],

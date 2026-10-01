@@ -530,7 +530,7 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
-test('最近登录：预览 8 行、失败原因、仅失败筛选、展开其余；500 走空态文案不伪装成零', async ({ page }) => {
+test('最近登录：安全页预览三条，个人中心分页并可筛选失败，500 显示错误', async ({ page }) => {
   await prepare(page, { permissions: [] })
   const rows = Array.from({ length: 10 }, (_, i) => ({
     ok: i % 3 !== 0,
@@ -543,27 +543,27 @@ test('最近登录：预览 8 行、失败原因、仅失败筛选、展开其�
 
   await page.goto('/portal/security')
   const card = page.getByRole('heading', { name: '最近登录' }).locator('xpath=../..')
-  await expect(card.getByRole('listitem')).toHaveCount(8)
+  await expect(card.getByRole('listitem')).toHaveCount(3)
   await expect(card.getByText('invalid_credentials').first()).toBeVisible()
   await expect(card.getByText('198.51.100.9').first()).toBeVisible()
-  await expect(card.getByRole('button', { name: '展开其余 2 条' })).toBeVisible()
+  await card.getByRole('link', { name: '查看全部登录记录' }).click()
+  await expect(page).toHaveURL(/\/portal\/profile\?tab=signins#profile-logins$/)
+  const history = page.locator('#profile-logins')
+  await expect(history.getByRole('listitem')).toHaveCount(5)
 
-  await card.getByRole('button', { name: /仅看失败（4）/ }).click()
-  await expect(card.getByRole('listitem')).toHaveCount(4)
-  await expect(card.getByText('成功', { exact: true })).toHaveCount(0)
-  await expect(card.getByText('203.0.113.7')).toHaveCount(0)
-  await expect(card.getByRole('button', { name: /展开其余/ })).toHaveCount(0)
+  await history.getByRole('button', { name: /仅看失败（4）/ }).click()
+  await expect(history.getByRole('listitem')).toHaveCount(4)
+  await expect(history.getByText('成功', { exact: true })).toHaveCount(0)
+  await expect(history.getByText('203.0.113.7')).toHaveCount(0)
 
-  await card.getByRole('button', { name: /仅看失败/ }).click()
-  await card.getByRole('button', { name: '展开其余 2 条' }).click()
-  await expect(card.getByRole('listitem')).toHaveCount(10)
-  await card.getByRole('button', { name: '收起' }).click()
-  await expect(card.getByRole('listitem')).toHaveCount(8)
+  await history.getByRole('button', { name: /仅看失败/ }).click()
+  await expect(history.getByRole('listitem')).toHaveCount(5)
 
   await page.route('**/api/me/logins', (route) => route.fulfill(apiError(500, 'internal_error')))
   await page.reload()
   const empty = page.getByRole('heading', { name: '最近登录' }).locator('xpath=../..')
-  await expect(empty.getByText('还没有登录记录（API Key 登录不计入）。')).toBeVisible()
+  await expect(empty.getByRole('alert')).toContainText('服务内部错误')
+  await expect(empty.getByText('还没有登录记录（API Key 登录不计入）。')).toHaveCount(0)
   await expect(empty.getByRole('listitem')).toHaveCount(0)
   await expect(empty.getByText('0', { exact: true })).toHaveCount(0)
 })
@@ -935,9 +935,10 @@ test('管理端日志：过滤进 URL 与查询串；7 天改 hours；展开 req
   await page.getByRole('button', { name: '复制', exact: true }).first().click()
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('req-abc')
 
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
   const [download] = await Promise.all([
     page.waitForEvent('download'),
-    page.getByRole('button', { name: '导出 CSV' }).click(),
+    page.getByRole('button', { name: '导出本页 CSV' }).click(),
   ])
   expect(download.suggestedFilename()).toMatch(/^okapi-admin-logs-/)
   const csv = await csvFrom(download)
@@ -974,7 +975,7 @@ test('管理端日志：过滤进 URL 与查询串；7 天改 hours；展开 req
   await page.getByRole('button', { name: '清空筛选' }).click()
   await page.getByRole('button', { name: '搜索', exact: true }).click()
   await expect(page.getByText('当前窗口与过滤条件下没有日志。放宽时间窗或清空过滤再试。')).toBeVisible()
-  await expect(page.getByRole('button', { name: '导出 CSV' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '导出本页 CSV' })).toBeDisabled()
 
   await page.route(/\/admin\/logs(\/stat)?\?/, (route) => {
     if (route.request().isNavigationRequest()) return route.fallback()
@@ -1258,6 +1259,7 @@ test('门户日志：范围/模型/失败进查询；展开账单快照；分页
     qs.some((p) => p.get('model') === 'gpt-5' && p.get('errors_only') === 'true' && p.get('scope') === 'user'),
   ).toBe(true)
 
+  await page.keyboard.press('Escape')
   const [download] = await Promise.all([
     page.waitForEvent('download'),
     page.getByRole('button', { name: '导出本页 CSV' }).click(),
@@ -1450,6 +1452,7 @@ test('日志行内退款：仅成功扣费行、原因 trim、确认后 POST', a
   await page.goto('/admin/logs')
   await page.getByRole('row').filter({ hasText: 'upstream_error' }).click()
   await expect(page.getByRole('button', { name: '退款', exact: true })).toHaveCount(0)
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
   await page.getByRole('row').filter({ hasText: '成功' }).click()
   await expect(page.getByRole('button', { name: '退款', exact: true })).toBeVisible()
   await page.getByRole('button', { name: '退款', exact: true }).click()

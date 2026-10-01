@@ -3,7 +3,8 @@ import { Badge } from '@/components/ui/badge'
 import { CopyText } from '@/components/ui/copy-button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { formatRatio, formatUnitPrice } from '@/lib/money'
-import { billingLines, billingStatus, duration, logMoney, netAmount } from './types'
+import { billingLines, billingStatus, logMoney, netAmount } from './types'
+import { LogPerformanceDetails } from './LogPerformance'
 import { TokenBreakdown } from './TokenBreakdown'
 import type { LogRow } from './types'
 
@@ -18,9 +19,6 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
   const s = row.pricing_snapshot, lines = billingLines(row)
   const value = (n: number | null | undefined) => n == null ? t(row.usage_details_recorded ? 'logs:unreported' : 'logs:notRecorded') : n.toLocaleString(locale)
   const field = (label: string, content: React.ReactNode) => <div className="min-w-0 space-y-1"><dt className="text-xs text-muted-foreground">{label}</dt><dd className="break-words text-sm tabular-nums">{content}</dd></div>
-  const measuredTtft = row.is_stream ? row.ttft_ms : null
-  const speed = row.is_stream && row.ttft_ms != null && row.ttft_ms >= 0 && row.latency_ms != null && row.latency_ms > row.ttft_ms && row.usage.completion_tokens > 0
-    ? row.usage.completion_tokens * 1000 / (row.latency_ms - row.ttft_ms) : null
   const errorKey = `errors:${row.error_code}`
   const errorHints: Record<string, string> = { no_available_channel: 'logs:errorNoChannel', unsupported_endpoint: 'logs:errorEndpoint', insufficient_quota: 'logs:errorQuota', rate_limited: 'logs:errorRateLimit' }
   return <Drawer open onClose={onClose} title={t('logs:detailTitle')} description={t('logs:detailHint')} size="lg">
@@ -51,13 +49,7 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
           <p className="text-xs text-muted-foreground">{t('logs:supportHint')}</p>
         </div>}
       </FieldGroup>
-      <FieldGroup title={t('logs:performance')} hint={t('logs:speedHint')}>
-        <dl className="grid grid-cols-3 gap-3">
-          {field(t('logs:ttft'), row.is_stream ? duration(measuredTtft, locale) : t('logs:notApplicable'))}
-          {field(t('logs:totalLatency'), duration(row.latency_ms, locale))}
-          {field(t('logs:speed'), speed === null ? '—' : `${speed.toLocaleString(locale, { maximumFractionDigits: 1 })} tok/s`)}
-        </dl>
-      </FieldGroup>
+      <LogPerformanceDetails row={row} />
       <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
       <FieldGroup title={t('logs:billingDetails')}>
         {row.status === 30 && <p className="text-xs text-muted-foreground">{t('logs:refundedHint')}</p>}

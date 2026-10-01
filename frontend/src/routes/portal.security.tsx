@@ -162,9 +162,8 @@ function SecurityPage() {
           </CardContent>
         </Card>
 
-        {/* Keep the two columns within the available desktop height. Short windows
-            can scroll this column; long record lists scroll inside their own cards. */}
-        <div data-slot="security-sidebar" className="grid min-w-0 gap-4 lg:min-h-0 lg:grid-rows-[auto_fit-content(30%)_minmax(8rem,1fr)] lg:overflow-y-auto lg:overscroll-contain">
+        {/* Short windows can scroll the previews while the full lists live in the profile. */}
+        <div data-slot="security-sidebar" className="grid min-w-0 gap-4 lg:min-h-0 lg:grid-rows-[auto_auto_minmax(8rem,1fr)] lg:overflow-y-auto lg:overscroll-contain">
           <Card className="bg-muted/30">
             <CardHeader>
               <CardTitle>{t('security:whyTitle')}</CardTitle>
@@ -174,9 +173,8 @@ function SecurityPage() {
               <p>{t('security:why2')}</p>
             </CardContent>
           </Card>
-          {/* 最近登录紧挨两步验证：看到不是自己的记录，动作就在左边那张卡里 */}
-          <ActiveSessionsCard />
-          <RecentLoginsCard />
+          <ActiveSessionsCard preview />
+          <RecentLoginsCard preview />
         </div>
       </div>
     </div>

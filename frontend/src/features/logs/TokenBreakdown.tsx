@@ -7,7 +7,7 @@ import type { TokenDetails } from './types'
 /** Shared portal/admin display. Missing observations remain distinct from zero. */
 export function TokenBreakdown({ usage: u, recorded }: { usage: TokenDetails; recorded?: boolean }) {
   const { t, i18n } = useTranslation()
-  const value = (n: number | null | undefined) => n == null ? t(recorded ? 'logs:unreported' : 'logs:notRecorded') : n.toLocaleString(i18n.language)
+  const value = (n: number | null | undefined) => n == null ? '—' : n.toLocaleString(i18n.language)
   const source = (name: string | null | undefined) => ['upstream', 'estimated', 'local_override'].includes(name ?? '') ? name! : 'unknown'
   const field = (key: string, n: number | null | undefined, origin?: string | null) => <div key={key} className="min-w-0 space-y-1">
     <dt className="text-xs text-muted-foreground">{t(`logs:${key}`)}</dt>

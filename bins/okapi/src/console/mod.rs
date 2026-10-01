@@ -31,6 +31,7 @@ pub mod pay;
 mod performance_source;
 pub mod playground;
 pub mod portal;
+mod profile;
 pub mod query;
 pub mod ratio_sync;
 pub mod registration;
@@ -364,6 +365,7 @@ fn ops_routes() -> ConsoleRouter {
 fn portal_routes() -> ConsoleRouter {
     Router::new()
         .route("/api/me", get(portal::me))
+        .route("/api/me/profile", get(profile::get).patch(profile::update))
         .route("/api/me/usage", get(portal::usage))
         .route("/api/me/stats/daily", get(stats::my_daily))
         .route("/api/me/stats/breakdown", get(stats::my_breakdown))

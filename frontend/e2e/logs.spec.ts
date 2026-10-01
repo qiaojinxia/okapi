@@ -139,7 +139,8 @@ test('新增用量指标：汇总保留覆盖率，详情显示TTL、图片输�
   await expect(detail).toContainText('1,200')
   await expect(detail).toContainText('其中 5 分钟写入')
   await expect(detail).toContainText('服务层级 priority ×2')
-  await expect(detail).toContainText('二者口径不同')
+  await expect(detail.getByText('平均输出速度', { exact: true }).locator('..')).toContainText('625 tok/s')
+  await expect(detail.getByText('生成速度（估算）', { exact: true }).locator('..')).toContainText('714.3 tok/s')
   await detail.getByText('缓存子项', { exact: true }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: 'test-results/extended-token-breakdown.png', animations: 'disabled' })
 })
@@ -378,7 +379,8 @@ test('日志汇总独立于已加载记录，退款/缺失/真实零明确，抽
   await page.screenshot({ path: 'test-results/usage-logs-billing-desktop.png', animations: 'disabled' })
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '展开 req-18 的明细' }).click()
-  await expect(detail).toContainText('未记录')
+  const audioInput = detail.locator('dt').filter({ hasText: /^音频输入（非缓存）$/ }).locator('..').locator('dd')
+  await expect(audioInput).toHaveText('—')
   await expect(detail).toContainText('不适用')
   await expect(detail.getByRole('table')).toHaveCount(0)
 })
@@ -439,6 +441,14 @@ for (const width of [390, 1440]) {
         await expect(footer).toBeInViewport({ ratio: 1 })
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+      await expect(table.locator('[data-slot="log-token-usage"]')).toHaveCount(1)
+      await expect(table.getByRole('columnheader', { name: '响应速度', exact: true })).toBeVisible()
+      await table.locator('tbody tr').click()
+      const dialog = page.getByRole('dialog')
+      await expect(dialog).toBeVisible()
+      await expect(table.locator('tbody tr')).toHaveCount(1)
+      await page.keyboard.press('Escape')
+      await expect(dialog).toHaveCount(0)
     }
   })
 }
@@ -932,7 +942,8 @@ test('日志展开显示调用对象和密钥前缀，CSV 附带名称且保留�
   await expect(identities).toContainText('sk-prefix…')
   await expect(identities).toContainText('OpenAI Primary')
   await expect(identities).not.toContainText('#1')
-  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '导出 CSV', exact: true }).click()])
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).click()
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: '导出本页 CSV', exact: true }).click()])
   const csv = await readFile((await download.path())!, 'utf8')
   const lines = csv.trim().split('\n')
   expect(lines[0]).toContain('upstream_request_id,node,key_name,key_prefix,requested_model')
@@ -953,7 +964,7 @@ test('旧日志未返回密钥名称时明确降级，不把未知对象显示�
 })
 
 for (const width of [320, 390, 1280]) {
-  test(`日志调用对象 ${width}px：展开信息跟随可见表宽，横向看列不会把明细移走`, async ({ page }) => {
+  test(`日志调用对象 ${width}px：详情抽屉内对象不溢出，横向看列不会把明细移走`, async ({ page }) => {
     await prepare(page)
     await page.setViewportSize({ width, height: 800 })
     await page.goto('/admin/logs')
@@ -961,7 +972,7 @@ for (const width of [320, 390, 1280]) {
     const identities = page.getByLabel('调用对象', { exact: true })
     const wrapper = page.getByRole('table').locator('..')
     await identities.scrollIntoViewIfNeeded()
-    const viewport = await wrapper.boundingBox()
+    const viewport = await page.getByRole('dialog').boundingBox()
     const objects = await identities.boundingBox()
     expect(objects!.width).toBeLessThanOrEqual(viewport!.width)
     expect(objects!.x).toBeGreaterThanOrEqual(viewport!.x)
@@ -983,15 +994,12 @@ for (const path of ['/portal/logs', '/admin/logs']) {
     await expand.focus()
     await expand.press('Enter')
     const collapse = page.getByRole('button', { name: '收起 req-20 的明细', exact: true })
-    if (path === '/admin/logs') await expect(collapse).toBeFocused()
     const controls = await collapse.getAttribute('aria-controls')
     await expect(page.locator(`[id="${controls}"]`)).toBeVisible()
     await expect(page.getByText('req-20', { exact: true })).toBeVisible()
-    if (path === '/portal/logs') {
-      await expect(page.getByRole('dialog', { name: '请求与账单详情' })).toBeVisible()
-      await page.keyboard.press('Escape')
-      await expect(expand).toBeFocused()
-    } else await collapse.press('Space')
+    await expect(page.getByRole('dialog', { name: '请求与账单详情' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(expand).toBeFocused()
     await expect(expand).toHaveAttribute('aria-expanded', 'false')
     await expect(page.getByText('req-20', { exact: true })).toHaveCount(0)
   })
@@ -1030,4 +1038,27 @@ for (const width of [320, 390, 1280]) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: `test-results/portal-logs-${width}.png`, fullPage: true, animations: 'disabled' })
   })
+}
+
+for (const path of ['/portal/logs', '/admin/logs']) {
+  for (const sample of [
+    { name: '非流式', is_stream: false, latency_ms: 14700, ttft_ms: null, average: '34 tok/s', generation: '—' },
+    { name: '流式', is_stream: true, latency_ms: 14700, ttft_ms: 700, average: '34 tok/s', generation: '35.7 tok/s' },
+    { name: '缺少首字', is_stream: true, latency_ms: 14700, ttft_ms: null, average: '34 tok/s', generation: '—' },
+    { name: '无有效耗时', is_stream: false, latency_ms: 0, ttft_ms: null, average: '—', generation: '—' },
+  ]) {
+    test(`日志速度 ${path} ${sample.name}：平均输出速度与流式生成速度分别显示`, async ({ page }) => {
+      await prepare(page)
+      const row = { ...detailedLog, is_stream: sample.is_stream, latency_ms: sample.latency_ms, ttft_ms: sample.ttft_ms }
+      const endpoint = path === '/admin/logs' ? '**/admin/logs?*' : '**/api/me/logs?*'
+      await page.route(endpoint, (route) => route.fulfill({ json: { data: [row], next_before: null } }))
+      await page.goto(path)
+      await page.getByRole('button', { name: '展开 req-20 的明细', exact: true }).click()
+      const dialog = page.getByRole('dialog')
+      const metric = (label: string) => dialog.locator('dt').filter({ hasText: new RegExp(`^${label}$`) }).locator('..').locator('dd')
+      await expect(metric('平均输出速度')).toHaveText(sample.average)
+      await expect(metric('生成速度（估算）')).toHaveText(sample.generation)
+      if (!sample.is_stream) await expect(metric('首字')).toHaveText('不适用')
+    })
+  }
 }

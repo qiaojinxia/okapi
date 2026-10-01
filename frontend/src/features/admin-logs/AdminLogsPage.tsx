@@ -1,6 +1,6 @@
-import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { Fragment, useEffect, useId, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   CalendarDays,
@@ -8,7 +8,7 @@ import {
   SlidersHorizontal,
   Download,
   RotateCw,
-  ScrollText,
+  FileText,
   Search,
   Undo2,
 } from 'lucide-react'
@@ -20,6 +20,10 @@ import { useConfirm } from '@/components/ui/confirm'
 import { CopyText } from '@/components/ui/copy-button'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { Drawer } from '@/components/ui/drawer'
+import { LogTokenUsage } from '@/features/logs/LogTokenUsage'
+import { LogPerformance, LogPerformanceDetails } from '@/features/logs/LogPerformance'
+import { logMoney } from '@/features/logs/types'
 import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { Segmented } from '@/components/ui/segmented'
@@ -212,10 +216,11 @@ function toParams(f: Draft, offset: number, limit: number): string {
 /// 全站日志页（对齐 new-api 的日志页 + 统计条，数据源换成 CH raw）。
 ///
 /// 版面三段：紧凑检索工具栏 → 窗口统计条 → 铺满剩余高度的明细表。
-/// 明细行点开展开排障区——请求 ID / 上游请求 ID / 节点 / 重试与切换计数
+/// 明细行点开详情抽屉——请求 ID / 上游请求 ID / 节点 / 重试与切换计数
 /// 是工单三件套，放主表列会把表撑到横向滚动，收进展开区各取所需。
 export function AdminLogsPage() {
   const { t } = useTranslation()
+  const client = useQueryClient()
   const search = routeApi.useSearch()
   const navigate = routeApi.useNavigate()
   const applied = fromSearch(search)
@@ -252,32 +257,35 @@ export function AdminLogsPage() {
   }
 
   return (
-    <div className="list-page [--page-gap:0.5rem]">
+    <div className="list-page [--page-gap:8px]">
       <PageHeader
         title={t('admin:logsNav')}
         description={t('admin:logsDesc')}
-        icon={ScrollText}
+        icon={FileText}
         compact
+        className="[&_p]:text-xs [&_p]:leading-5"
+        action={<>
+          <Button size="sm" variant="outline" disabled={rows.length === 0 || logs.isFetching} title={t('logs:exportPageHint', { n: rows.length })} onClick={() => exportCsv(rows)}>
+            <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
+          </Button>
+          <Button size="sm" variant="outline" loading={logs.isFetching} onClick={() => {
+            void logs.refetch()
+            void client.invalidateQueries({ queryKey: qk.adminLogStat(toParams(applied, 0, DEFAULT_PAGE_SIZE)) })
+          }}>
+            {!logs.isFetching && <RotateCw className="h-3.5 w-3.5" />}{t('common:refresh')}
+          </Button>
+        </>}
       />
-      <Card data-slot="admin-log-filters" className="shrink-0 rounded-xl">
-        <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2 px-3 py-1.5">
+      <Card aria-label={t('logs:filters')} data-slot="admin-log-filters" className="shrink-0 rounded-xl px-2 py-1">
+        <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} known={known} />
+        <div className="flex min-w-0 flex-wrap items-start gap-2 border-t border-border/60 pt-2">
           <RangePicker
             draft={draft}
             onPreset={(h) => commit({ ...draft, hours: h, from: '', to: '' })}
             onRange={(from, to) => setDraft({ ...draft, from, to })}
             onApplyRange={() => commit(draft)}
           />
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            <Button size="sm" variant="outline" className="h-9" loading={logs.isFetching} onClick={() => void logs.refetch()}>
-              {!logs.isFetching && <RotateCw className="h-3.5 w-3.5" />}
-              {t('common:refresh')}
-            </Button>
-            <Button size="sm" variant="outline" className="h-9" disabled={rows.length === 0} onClick={() => exportCsv(rows)}>
-              <Download className="h-3.5 w-3.5" />{t('portal:logsExport')}
-            </Button>
-          </div>
         </div>
-        <FilterBar draft={draft} onChange={setDraft} onApply={() => commit(draft)} known={known} />
       </Card>
       <StatBar applied={applied} />
       <LogTable applied={applied} pager={pager} q={logs} />
@@ -470,16 +478,16 @@ function FilterBar({
     .filter((v) => v.trim() !== '').length + (draft.errors_only ? 1 : 0)
   return (
       <form
-        className="border-t border-border/60"
+        className="min-w-0"
         onSubmit={(e) => {
           e.preventDefault()
           if (!invalid) onApply()
         }}
         onKeyDown={(event) => { if (event.key === 'Enter' && event.nativeEvent.isComposing) event.preventDefault() }}
       >
-        <CardContent className="flex flex-col gap-2 px-3 py-1.5">
+        <CardContent className="flex flex-col gap-2 p-0 pb-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2 md:gap-3">
-            <ModelSearchInput id="lf-model" className="w-full md:max-w-sm md:flex-1 md:basis-72" aria-label={t('pricing:model')}
+            <ModelSearchInput id="lf-model" className="w-full sm:w-64" aria-label={t('pricing:model')}
               inputClassName="h-11 md:h-9" placeholder={t('portal:logsModelHint')}
               value={draft.model} onChange={(model) => onChange({ ...draft, model })} onSubmit={() => { if (!invalid) onApply() }} />
             <Switch
@@ -567,10 +575,10 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />
       ) : (
-        <Table dense stickyHeader scrollResetKey={params} className="min-w-[64rem] table-fixed" wrapperClassName="[container-type:inline-size]">
+        <Table dense stickyHeader aria-label={t('admin:logsNav')} scrollResetKey={params} className="min-w-[64rem] table-fixed" wrapperClassName="[container-type:inline-size]">
           <colgroup>
-            <col className="w-8" /><col className="w-34" /><col className="w-22" /><col className="w-24" />
-            <col /><col className="w-28" /><col className="w-42" /><col className="w-23" /><col className="w-28" /><col className="w-19" />
+            <col className="w-6" /><col className="w-32" /><col className="w-18" /><col className="w-18" />
+            <col /><col className="w-24 2xl:w-36" /><col className="w-76" /><col className="w-28" /><col className="w-28" /><col className="w-16" />
           </colgroup>
           <THead>
             <Tr>
@@ -580,9 +588,9 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
               <Th>{t('admin:logsUser')}</Th>
               <Th>{t('pricing:model')}</Th>
               <Th>{t('admin:logsChannel')}</Th>
-              <Th numeric>{t('logs:tokens')}</Th>
+              <Th>{t('logs:tokenUsage')}</Th>
               <Th numeric>{t('common:amount')}</Th>
-              <Th numeric>{t('admin:logsLatencyTtft')}</Th>
+              <Th numeric>{t('logs:performance')}</Th>
               <Th>{t('admin:logsClient')}</Th>
             </Tr>
           </THead>
@@ -590,17 +598,16 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
             {rows.map((r) => {
               const open = expanded === r.request_id
               return (
-              <Fragment key={r.request_id}>
-                <Tr
+                <Tr key={r.request_id}
                   className="cursor-pointer"
                   selected={open}
                   aria-expanded={open}
                   onClick={() => setExpanded(open ? null : r.request_id)}
                 >
                   <Td className="px-1 text-muted-foreground">
-                    <RowExpander open={open} name={r.request_id} controls={`${detailId}-${r.request_id}`} onToggle={() => setExpanded(open ? null : r.request_id)} />
+                    <RowExpander open={open} name={r.request_id} controls={detailId} onToggle={() => setExpanded(open ? null : r.request_id)} />
                   </Td>
-                  <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{r.ts.slice(5, 19)}</Td>
+                  <Td className="whitespace-nowrap font-mono text-xs text-muted-foreground">{new Date(r.ts).toLocaleString(locale, { timeZone: 'UTC', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })}</Td>
                   <Td>
                     {r.is_error ? (
                       <Badge dot variant="destructive" className="max-w-full" title={r.error_code || undefined}><span className="truncate">{r.error_code || t('logs:failed')}</span></Badge>
@@ -615,39 +622,23 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
                   <Td className="truncate text-xs" title={r.channel_name || undefined}>
                     {r.channel_name || (r.channel_id > 0 ? `ID ${r.channel_id}` : t('admin:dashboardUnassignedChannel'))}
                   </Td>
-                  <Td numeric className="whitespace-nowrap text-xs">
-                    <div className="leading-4">{formatCount(r.usage.prompt_tokens, locale)}{' + '}{formatCount(r.usage.completion_tokens, locale)}</div>
-                    {r.usage.cached_tokens > 0 && (
-                      <span className="block text-xs leading-4 text-success">
-                        {t('logs:cachedShort', { n: r.usage.cached_tokens })}
-                      </span>
-                    )}
-                  </Td>
-                  <Td numeric className="whitespace-nowrap font-medium">{formatMoney(r.amount_micro, locale)}</Td>
-                  <Td numeric className="whitespace-nowrap font-mono text-xs">
-                    {r.latency_ms}
-                    {r.is_stream && r.ttft_ms > 0 && (
-                      <span className="text-muted-foreground"> / {r.ttft_ms}</span>
-                    )}
-                    ms
-                  </Td>
+                  <Td className="py-1"><LogTokenUsage row={r} /></Td>
+                  <Td numeric className="whitespace-nowrap font-medium">{logMoney(r.amount_micro, locale)}</Td>
+                  <Td numeric className="py-1"><LogPerformance row={r} /></Td>
                   <Td className="truncate text-xs text-muted-foreground" title={r.client_type || undefined}>{r.client_type || '—'}</Td>
                 </Tr>
-                {open && (
-                  <Tr id={`${detailId}-${r.request_id}`} className="hover:bg-transparent">
-                    <Td colSpan={10} className="bg-muted/30 p-0">
-                      <RowDetail row={r} />
-                    </Td>
-                  </Tr>
-                )}
-              </Fragment>
+
               )
             })}
           </TBody>
         </Table>
       )}
       {/* CH 明细无 total 计数，按“整页 = 可能有下一页”翻。 */}
-      <Pagination {...pager} hasMore={rows.length >= pager.limit} />
+      <Pagination {...pager} hasMore={rows.length >= pager.limit} disabled={q.isFetching}
+        summary={<span className="inline-flex flex-wrap items-center gap-x-3 gap-y-1"><span>{t('common:pageN', { page: Math.floor(pager.offset / pager.limit) + 1 })}</span><span>{t('logs:pageRange', { from: rows.length ? pager.offset + 1 : 0, to: rows.length ? pager.offset + rows.length : 0 })}</span></span>} />
+      <Drawer open={rows.some((row) => row.request_id === expanded)} onClose={() => setExpanded(null)} title={t('logs:detailTitle')} description={t('logs:detailHint')} size="lg">
+        <div id={detailId}>{rows.filter((row) => row.request_id === expanded).map((row) => <RowDetail key={row.request_id} row={row} />)}</div>
+      </Drawer>
     </div>
   )
 }
@@ -820,7 +811,7 @@ function RefundInline({ row }: { row: LogRow }) {
   )
 }
 
-/// 展开区：排障字段全集。分三行——标识（工单锚点）/ 调度（哪条链路怎么走的）/
+/// 详情抽屉：排障字段全集。分区——标识（工单锚点）/ 调度（哪条链路怎么走的）/
 /// 金额构成。ratio_snapshot 原样给出，倍率争议时直接对着快照讲。
 function RowDetail({ row }: { row: LogRow }) {
   const { t, i18n } = useTranslation()
@@ -840,7 +831,7 @@ function RowDetail({ row }: { row: LogRow }) {
     </div>
   )
   return (
-    <div className="sticky left-0 flex w-[100cqw] max-w-full flex-col gap-3 px-4 py-3 text-xs animate-fade-in">
+    <div className="flex min-w-0 flex-col gap-3 text-xs">
       <dl aria-label={t('admin:logsObjects')} className="grid gap-3 rounded-lg border border-border bg-card p-3 sm:grid-cols-3">
         {[
           { label: t('analytics:dimUser'), name: row.username, id: row.user_id },
@@ -852,7 +843,7 @@ function RowDetail({ row }: { row: LogRow }) {
           <dd className="break-all text-xs text-muted-foreground">{object.id > 0 ? `ID ${object.id}` : '—'}{object.prefix ? ` · ${object.prefix}…` : ''}</dd>
         </div>)}
       </dl>
-      <div className="grid gap-3 lg:grid-cols-3">
+      <div className="grid gap-3">
         {section(
           t('admin:logsDetailIdentity'),
           <>
@@ -916,6 +907,7 @@ function RowDetail({ row }: { row: LogRow }) {
           </>,
         )}
       </div>
+      <LogPerformanceDetails row={row} />
       <div className="rounded-lg border border-border bg-card px-4"><TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} /></div>
       <RefundInline row={row} />
     </div>

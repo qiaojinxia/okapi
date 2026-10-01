@@ -29,9 +29,10 @@ import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { LogDetail, LogStatus } from './LogDetail'
 import { LogSummary } from './LogSummary'
+import { LogPerformance } from './LogPerformance'
 import { LogTokenUsage } from './LogTokenUsage'
 import { PortalKeyFilter } from './PortalKeyFilter'
-import { billingStatus, cacheRead, cacheWrite, duration, logMoney, netAmount } from './types'
+import { billingStatus, cacheRead, cacheWrite, logMoney, netAmount } from './types'
 import type { LogRow, LogsResp, LogStats } from './types'
 
 interface Filter {
@@ -91,7 +92,7 @@ export function LogsPage() {
     } })
   }
   return <LogList key={`${appliedKey}:${limit}`} filter={applied} ready={usageScope.ready} limit={limit} onLimit={setLimit} filters={
-    <section aria-label={t('logs:filters')} data-slot="log-filters" className="min-w-0 space-y-2 rounded-xl border border-border bg-card p-2 shadow-card">
+    <section aria-label={t('logs:filters')} data-slot="log-filters" className="min-w-0 space-y-2 rounded-xl border border-border bg-card px-2 py-1 shadow-card">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
       <UsageScope {...usageScope} scope={applied.scope} onChange={(scope) => commit({ ...applied, scope, keyId: '' })} />
       <PublicModelSearchInput className="w-full sm:w-64" inputClassName="h-11 md:h-9" aria-label={t('pricing:model')}
@@ -158,8 +159,8 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
     void stats.refetch()
   }
   const showKey = filter.scope === 'user'
-  return <div className="list-page [--page-gap:12px]">
-    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} icon={FileText} className="[&_p]:text-xs [&_p]:leading-5" action={<>
+  return <div className="list-page [--page-gap:8px]">
+    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} icon={FileText} compact className="[&_p]:text-xs [&_p]:leading-5" action={<>
           <Button size="sm" variant="outline" disabled={!rows.length || q.isFetching} onClick={() => exportCsv(rows, showKey)} title={t('logs:exportPageHint', { n: rows.length })}>
             <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
           </Button>
@@ -189,7 +190,7 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
             <Td className="max-w-52 truncate font-mono" title={row.model}>{row.model}</Td>
             <Td className="py-1"><LogTokenUsage row={row} /></Td>
             <Td numeric className="font-medium">{logMoney(netAmount(row), locale)}</Td>
-            <Td numeric className="py-1"><div className="text-xs leading-4"><span className="mr-2 text-muted-foreground">{t('logs:ttft')}</span>{row.is_stream ? duration(row.ttft_ms, locale) : t('logs:nonStreaming')}</div><div className="text-xs leading-4"><span className="mr-2 text-muted-foreground">{t('logs:totalShort')}</span>{duration(row.latency_ms, locale)}</div></Td>
+            <Td numeric className="py-1"><LogPerformance row={row} /></Td>
           </Tr>)}</TBody>
         </Table>}
     <Pagination limit={limit} offset={page * limit} hasMore={hasMore} pageSizes={PAGE_SIZES} onLimit={onLimit}

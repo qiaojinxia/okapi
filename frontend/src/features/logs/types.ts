@@ -98,7 +98,7 @@ export const cacheRead = (row: Pick<LogRow, 'usage'>) => row.usage.cache_read_re
 export const cacheWrite = (row: Pick<LogRow, 'usage'>) => row.usage.cache_write_reported === true || (row.usage.cache_write_tokens ?? 0) > 0 ? row.usage.cache_write_tokens ?? null : null
 
 // Only a known read with a valid input denominator can express cache coverage.
-export function cacheReadShare(row: LogRow, locale: string): string | null {
+export function cacheReadShare(row: Pick<LogRow, 'usage'>, locale: string): string | null {
   const read = cacheRead(row), input = row.usage.prompt_tokens
   if (read === null || !Number.isSafeInteger(read) || !Number.isSafeInteger(input) || read <= 0 || input <= 0 || read > input) return null
   const format = (ratio: number) => ratio.toLocaleString(locale, { style: 'percent', maximumFractionDigits: 1 })

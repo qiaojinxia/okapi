@@ -10,6 +10,7 @@ const adminRedemptions = ['admin', 'redemptions'] as const
 
 export const qk = {
   me: ['me'] as const,
+  myProfile: ['me', 'profile'] as const,
   meAff: ['me', 'aff'] as const,
   keys: ['keys'] as const,
   /// 新手引导用的密钥概览（有几把、是否调过）；与 `keys` 同前缀，建 / 删 key 后一起失效。

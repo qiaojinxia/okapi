@@ -6,7 +6,7 @@ import { cacheRead, cacheReadShare, cacheWrite } from './types'
 import type { LogRow } from './types'
 
 /** Cache quantities are input subsets, not additional tokens or guaranteed savings. */
-export function LogTokenUsage({ row }: { row: LogRow }) {
+export function LogTokenUsage({ row }: { row: Pick<LogRow, 'usage' | 'usage_details_recorded'> }) {
   const { t, i18n } = useTranslation(), locale = i18n.language
   const read = cacheRead(row), write = cacheWrite(row)
   const hit = read !== null && read > 0, writing = write !== null && write > 0

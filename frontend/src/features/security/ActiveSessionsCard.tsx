@@ -1,13 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
+import { ArrowUpRight } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Pagination } from '@/components/ui/pagination'
+import { ErrorState, LoadingState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
+import { clampOffset } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
+import { cn } from '@/lib/utils'
 
 interface SessionRow {
   sid: string
@@ -35,14 +42,12 @@ const shortUa = (ua: string | null) => (ua ? (ua.split(' ')[0] ?? ua).slice(0, 4
 
 /// 按「设备」归并会话。
 ///
-/// 一次登录一条 cookie，而用户清一次 cookie、换个标签、跑个脚本就多一条——
-/// 逐条列出来，同一台机器会占掉七八行，用户根本认不出哪条是自己的，也就不会去
-/// 吊销可疑的那条。按 UA 产品段 + IP 归并才对得上心智里的"设备"；吊销整组走。
+/// 同一完整 UA + IP 归并；完整 UA 区分同一 IP 下不同浏览器，吊销按整组走。
 function groupByDevice(rows: SessionRow[]): DeviceGroup[] {
   const map = new Map<string, DeviceGroup>()
   for (const r of rows) {
-    const ua = shortUa(r.ua)
-    const key = `${ua ?? '?'}|${r.ip ?? '?'}`
+    const ua = r.ua
+    const key = JSON.stringify([ua, r.ip])
     const hit = map.get(key)
     if (hit) {
       hit.sids.push(r.sid)
@@ -67,20 +72,28 @@ function groupByDevice(rows: SessionRow[]): DeviceGroup[] {
 }
 
 /// 有效 web 会话（与「最近登录」审计卡分开：审计是尝试记录，这里是还能兑 key 的 cookie）。
-export function ActiveSessionsCard() {
+export function ActiveSessionsCard({ preview = false, active = true }: { preview?: boolean; active?: boolean }) {
   const { t } = useTranslation()
+  const [offset, setOffset] = useState(0)
+  const [pageSize, setPageSize] = useState(5)
   const queryClient = useQueryClient()
   const q = useQuery({
     queryKey: qk.mySessions,
     queryFn: () => apiFetch<{ data: SessionRow[]; limit: number | null }>('/api/me/sessions'),
     staleTime: 15_000,
+    enabled: active,
+    retry: false,
   })
   const rows = q.data?.data ?? []
   const limit = q.data?.limit ?? null
   const devices = groupByDevice(rows)
+  const start = clampOffset(offset, pageSize, devices.length)
+  const shown = preview ? devices.slice(0, 3) : devices.slice(start, start + pageSize)
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: qk.mySessions })
+    void queryClient.invalidateQueries({ queryKey: qk.me, exact: true })
+    void queryClient.invalidateQueries({ queryKey: qk.myProfile })
   }
 
   const revokeDevice = useMutation({
@@ -94,27 +107,28 @@ export function ActiveSessionsCard() {
     },
     onSuccess: () => {
       toast.success(t('security:sessionsRevoked'))
-      invalidate()
     },
     onError: (err) => toast.error(describeError(err)),
+    onSettled: invalidate,
   })
 
   const revokeAll = useMutation({
     mutationFn: () => apiFetch<{ ok: boolean }>('/api/me/sessions', { method: 'DELETE' }),
     onSuccess: () => {
       toast.success(t('security:sessionsRevokedAll'))
-      invalidate()
     },
     onError: (err) => toast.error(describeError(err)),
+    onSettled: invalidate,
   })
 
   return (
     <Card
       data-slot="security-sessions"
+      id={preview ? undefined : 'profile-sessions'}
       role="region"
       aria-label={t('security:sessionsTitle')}
       tabIndex={0}
-      className="min-w-0 outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-40 lg:overflow-y-auto lg:overscroll-contain"
+      className={cn('min-w-0 scroll-mt-24 outline-none focus-visible:ring-2 focus-visible:ring-primary/40', preview && 'lg:min-h-40 lg:overflow-y-auto lg:overscroll-contain')}
     >
       <CardHeader>
         <CardTitle>{t('security:sessionsTitle')}</CardTitle>
@@ -124,49 +138,56 @@ export function ActiveSessionsCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 pt-2">
-        {q.isError || devices.length === 0 ? (
+        {q.isPending ? <LoadingState className="py-4" /> : q.isError ? <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /> : devices.length === 0 ? (
           <p className="text-xs text-muted-foreground">{t('security:sessionsEmpty')}</p>
         ) : (
           <ul className="flex flex-col divide-y divide-border text-xs">
-            {devices.map((d) => (
-              <li key={d.key} className="flex flex-wrap items-center gap-2 py-1.5">
+            {shown.map((d) => (
+              <li key={d.key} className={cn('flex flex-wrap items-center gap-2', preview ? 'py-1.5' : 'py-3')}>
                 {d.current && <Badge variant="success">{t('security:sessionsCurrent')}</Badge>}
                 <span className="tabular-nums text-muted-foreground">
-                  {d.latest > 0 ? dayjs.unix(d.latest).format('MM-DD HH:mm') : '—'}
+                  {d.latest > 0 ? dayjs.unix(d.latest).format(preview ? 'MM-DD HH:mm' : 'YYYY-MM-DD HH:mm:ss') : '—'}
                 </span>
                 <span className="min-w-0 font-mono break-all">{d.ip ?? '—'}</span>
-                <span className="min-w-0 flex-1 truncate text-muted-foreground" title={d.ua ?? ''}>
-                  {d.ua ?? '—'}
-                </span>
                 {d.sids.length > 1 && (
                   <span className="tabular-nums text-muted-foreground">
                     {t('security:sessionsGrouped', { n: d.sids.length })}
                   </span>
                 )}
-                <Button
+                {!preview && <Button
                   type="button"
                   variant="ghost"
                   className="h-7 px-2 text-xs"
                   loading={revokeDevice.isPending && revokeDevice.variables?.key === d.key}
+                  disabled={q.isFetching || revokeAll.isPending || revokeDevice.isPending}
                   onClick={() => revokeDevice.mutate(d)}
                 >
                   {t('security:sessionsRevoke')}
-                </Button>
+                </Button>}
+                <span className={cn('min-w-0 text-muted-foreground', preview ? 'flex-1 truncate' : 'w-full break-all')} title={d.ua ?? ''}>
+                  {(preview ? shortUa(d.ua) : d.ua) ?? '—'}
+                </span>
               </li>
             ))}
           </ul>
         )}
-        {devices.length > 0 && (
+        {!preview && q.isSuccess && <Pagination total={devices.length} limit={pageSize} offset={offset} onOffset={setOffset}
+          pageSizes={[5, 10]} onLimit={(next) => { setPageSize(next); setOffset(0) }} disabled={q.isFetching || revokeDevice.isPending || revokeAll.isPending} className="rounded-lg shadow-none" />}
+        {!preview && devices.length > 0 && (
           <Button
             type="button"
             variant="outline"
             className="self-start"
             loading={revokeAll.isPending}
+            disabled={q.isFetching || revokeDevice.isPending}
             onClick={() => revokeAll.mutate()}
           >
             {t('security:sessionsRevokeAll')}
           </Button>
         )}
+        {preview && <Link to="/portal/profile" search={{ tab: 'signins' }} hash="profile-sessions" className="inline-flex min-h-9 items-center gap-1 self-start text-xs font-medium text-primary hover:underline">
+          {t('security:viewAllSessions')}<ArrowUpRight className="h-3.5 w-3.5" />
+        </Link>}
       </CardContent>
     </Card>
   )
