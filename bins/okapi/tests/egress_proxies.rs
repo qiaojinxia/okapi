@@ -101,6 +101,76 @@ async fn spawn_proxy(hits: Arc<AtomicUsize>) -> SocketAddr {
     .await
 }
 
+/// 原始 TCP 代理：CONNECT 建隧道、绝对 URI 原样转发。目标连不上时直接断开——不少代理软件就是
+/// 这样报「目标不可达」的，客户端看到的和「代理自己坏了」一模一样。
+async fn spawn_tunnel_proxy() -> SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut chunk = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match client.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&chunk[..n]),
+                    }
+                }
+                let line = String::from_utf8_lossy(&head)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                let mut parts = line.split(' ');
+                let (method, target) = (
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                );
+                let authority = if method == "CONNECT" {
+                    target.to_owned()
+                } else {
+                    target
+                        .trim_start_matches("http://")
+                        .split('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&authority).await else {
+                    return;
+                };
+                let ready = if method == "CONNECT" {
+                    client
+                        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                        .await
+                } else {
+                    upstream.write_all(&head).await
+                };
+                if ready.is_ok() {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// 坏掉的代理：TCP 接得上，读到请求就断开。
+async fn spawn_broken_proxy() -> SocketAddr {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+        }
+    });
+    addr
+}
+
 /// 一个此刻没人监听的地址（占住再放掉）。
 async fn dead_addr() -> SocketAddr {
     tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -117,6 +187,8 @@ struct Bed {
     admin_token: String,
     token: String,
     model: String,
+    /// 第二个模型：只挂在个别渠道上，看一个模型的故障会不会波及别的模型。
+    model_b: String,
     suffix: String,
     upstream: SocketAddr,
     upstream_hits: Arc<AtomicUsize>,
@@ -132,9 +204,12 @@ async fn setup() -> Bed {
     let upstream_hits = Arc::new(AtomicUsize::new(0));
     let upstream = spawn_upstream(Arc::clone(&upstream_hits)).await;
     let model = format!("eg-m-{suffix}");
-    okapi_store::provision::create_model_ratio(&pg, &model, "1.0", "1.0", "1.0")
-        .await
-        .unwrap();
+    let model_b = format!("eg-mb-{suffix}");
+    for name in [&model, &model_b] {
+        okapi_store::provision::create_model_ratio(&pg, name, "1.0", "1.0", "1.0")
+            .await
+            .unwrap();
+    }
     let user_id = okapi_store::provision::create_user(&pg, &format!("eg-u-{suffix}"))
         .await
         .unwrap();
@@ -173,6 +248,7 @@ async fn setup() -> Bed {
         admin_token,
         token,
         model,
+        model_b,
         suffix,
         upstream,
         upstream_hits,
@@ -214,13 +290,30 @@ impl Bed {
 
     /// 指向给定上游的渠道。
     async fn channel_at(&self, name: &str, priority: i32, upstream: SocketAddr) -> (i64, i64) {
+        self.channel_with(
+            name,
+            priority,
+            &format!("http://{upstream}/v1"),
+            &self.model,
+        )
+        .await
+    }
+
+    /// 任意 api_base、服务指定模型的渠道。
+    async fn channel_with(
+        &self,
+        name: &str,
+        priority: i32,
+        api_base: &str,
+        model: &str,
+    ) -> (i64, i64) {
         let (channel_id, key_id) = okapi_store::provision::create_channel(
             &self.pg,
             &format!("eg-{name}-{}", self.suffix),
             "openai",
-            &format!("http://{upstream}/v1"),
+            api_base,
             "sk-upstream",
-            &[self.model.as_str()],
+            &[model],
             true,
             None,
         )
@@ -263,11 +356,15 @@ impl Bed {
     /// 每次内容都不同：会话粘性按前两条消息取键，同一句话会粘在上一次成功的 key 上，
     /// 本文件要看的是调度本身的选择。
     async fn chat(&self) -> u16 {
+        self.chat_model(&self.model).await
+    }
+
+    async fn chat_model(&self, model: &str) -> u16 {
         let content = format!("hi {}", Uuid::new_v4().simple());
         let resp = reqwest::Client::new()
             .post(format!("http://{}/v1/chat/completions", self.gateway))
             .bearer_auth(&self.token)
-            .json(&json!({"model": self.model, "messages": [{"role": "user", "content": content}]}))
+            .json(&json!({"model": model, "messages": [{"role": "user", "content": content}]}))
             .send()
             .await
             .unwrap();
@@ -1315,4 +1412,99 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
     )))
     .execute(&admin)
     .await;
+}
+
+/// 分不清是代理还是目标的连接失败（隧道建立中断），先由网关后台经同一代理探一次探测地址再定：
+/// 探得通，代理不背锅——一个上游挂了，不能把同一代理上的其他渠道一起熔断（全局默认出口是代理时就是整站）；
+/// 代理本身坏了，探测同样失败，确认后直接熔断，候选缓存当场失效，后续请求立刻绕开它。
+#[tokio::test]
+async fn tunnel_failures_are_verified_before_tripping_a_shared_proxy() {
+    let _serial = SERIAL.lock().await;
+    let bed = setup().await;
+    let trace = serve(Router::new().route(
+        "/cdn-cgi/trace",
+        axum::routing::get(|| async { "ip=203.0.113.9\nloc=JP\n" }),
+    ))
+    .await;
+    // 探测地址指向本地（不出公网）；用例结束删掉，别影响同库后面的用例
+    sqlx::query(
+        "INSERT INTO settings (key, value) VALUES ('egress_probe_policy', $1)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+    )
+    .bind(json!({"enabled": true, "interval_secs": 600,
+                 "target": format!("http://{trace}/cdn-cgi/trace"), "concurrency": 4}))
+    .execute(&bed.pg)
+    .await
+    .unwrap();
+    let proxy_state = |id: i64| {
+        let pg = bed.pg.clone();
+        async move {
+            sqlx::query_as::<_, (i32, bool)>(
+                "SELECT failed_count, COALESCE(cooldown_until > now(), false) FROM proxies WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pg)
+            .await
+            .unwrap()
+        }
+    };
+
+    // 健康代理上：模型 B 只在一个上游已挂（https，经隧道）的渠道上，模型 A 在健康渠道上
+    let shared = bed.proxy("shared", spawn_tunnel_proxy().await, None).await;
+    let dead_upstream = format!("https://{}/v1", dead_addr().await);
+    let (dead, dead_key) = bed
+        .channel_with("deadup", 0, &dead_upstream, &bed.model_b)
+        .await;
+    let (good, _) = bed.channel("good", 0).await;
+    for channel in [dead, good] {
+        bed.bind(channel, json!({"mode": "proxy", "proxy_id": shared}))
+            .await;
+    }
+    for _ in 0..4 {
+        assert_eq!(bed.chat_model(&bed.model_b).await, 502);
+    }
+    // 核实在后台跑：给它时间，期间代理一直不该熔断
+    for _ in 0..15 {
+        assert_eq!(
+            proxy_state(shared).await,
+            (0, false),
+            "目标连不上不是代理的错"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(bed.chat().await, 200, "同一代理上的健康渠道不受牵连");
+    let dead_key_state: (i16, i32) =
+        sqlx::query_as("SELECT status, failed_count FROM channel_keys WHERE id = $1")
+            .bind(dead_key)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(dead_key_state, (1, 0), "连接阶段失败不动 key");
+
+    // 代理本身坏了（读到请求就断）：隧道同样中断，核实探测也失败 → 直接熔断
+    let broken = bed.proxy("broken", spawn_broken_proxy().await, None).await;
+    let (bad, bad_key) = bed
+        .channel_with("broken", 10, &dead_upstream, &bed.model)
+        .await;
+    bed.bind(bad, json!({"mode": "proxy", "proxy_id": broken}))
+        .await;
+    assert_eq!(bed.chat().await, 200, "高优先级渠道连不上，改投健康渠道");
+    let mut tripped = false;
+    for _ in 0..50 {
+        let (failed, cooling) = proxy_state(broken).await;
+        if cooling {
+            assert!(failed >= 3, "确认坏了直接熔断，不等凑满连续次数");
+            tripped = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(tripped, "代理自己坏了要熔断");
+    assert_eq!(bed.key_reason(bad_key).await, "egress_cooling");
+    assert_eq!(proxy_state(shared).await, (0, false));
+
+    sqlx::query("DELETE FROM settings WHERE key = 'egress_probe_policy'")
+        .execute(&bed.pg)
+        .await
+        .unwrap();
 }

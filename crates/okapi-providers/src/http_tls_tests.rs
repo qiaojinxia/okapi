@@ -266,7 +266,7 @@ async fn wss_rejects_untrusted_ca_and_wrong_hostname() {
         // TLS 校验失败发生在连接阶段：归为 Unreachable（对外仍是 upstream_error）
         assert!(matches!(
             result,
-            Err(UpstreamError::Unreachable { timed_out: false, detail })
+            Err(UpstreamError::Unreachable { timed_out: false, detail, .. })
                 if detail == "responses_ws_handshake"
         ));
         // Joining the accept task also verifies the failed handshake closes the TCP peer.

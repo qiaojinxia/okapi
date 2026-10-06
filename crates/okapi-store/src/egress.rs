@@ -666,17 +666,26 @@ pub async fn probe_targets(pool: &PgPool) -> Result<Vec<ProbeTarget>, StoreError
 
 // ---- 被动熔断 ----
 
-/// 登记一次经该代理的连接阶段失败（TCP / TLS / 代理隧道 / 连接超时）。
+/// 登记一次经该代理的连接阶段失败：确定坏在代理这一跳（连不上 / 拒绝认证），或分不清时
+/// 网关后台核实也失败了（`confirmed`：直接熔断，不再等凑满连续次数）。
 /// 只有出口健康的代理计数：冷却中迟到的失败不续冷却，一次故障不会被在途请求放大成长冷却。
-pub async fn mark_failure(pool: &PgPool, proxy_id: i64, error: &str) -> Result<(), StoreError> {
+/// 返回这一次是否让代理进入（或再次进入）熔断——调用方据此立刻失效路由缓存。
+pub async fn mark_failure(
+    pool: &PgPool,
+    proxy_id: i64,
+    error: &str,
+    confirmed: bool,
+) -> Result<bool, StoreError> {
     let error: String = error.chars().take(255).collect();
-    sqlx::query!(
+    let tripped = sqlx::query_scalar!(
         r#"
         WITH next AS (
-            SELECT id, CASE
-                WHEN failed_count >= $3::bigint AND (cooldown_until IS NULL
-                     OR cooldown_until < now() - make_interval(secs => $6::bigint::double precision))
-                THEN 1 ELSE failed_count + 1 END AS failed
+            SELECT id, GREATEST(
+                CASE
+                    WHEN failed_count >= $3::bigint AND (cooldown_until IS NULL
+                         OR cooldown_until < now() - make_interval(secs => $6::bigint::double precision))
+                    THEN 1 ELSE failed_count + 1 END,
+                CASE WHEN $7::boolean THEN $3::bigint ELSE 0 END) AS failed
             FROM proxies
             WHERE id = $1 AND (cooldown_until IS NULL OR cooldown_until <= now())
             FOR UPDATE)
@@ -688,6 +697,7 @@ pub async fn mark_failure(pool: &PgPool, proxy_id: i64, error: &str) -> Result<(
                 ELSE p.cooldown_until END,
             updated_at = now()
         FROM next WHERE p.id = next.id
+        RETURNING next.failed >= $3::bigint AS "tripped!"
         "#,
         proxy_id,
         error,
@@ -695,10 +705,11 @@ pub async fn mark_failure(pool: &PgPool, proxy_id: i64, error: &str) -> Result<(
         COOLDOWN_BASE_SECS,
         COOLDOWN_MAX_SECS,
         HALF_OPEN_WINDOW_SECS,
+        confirmed,
     )
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(())
+    Ok(tripped.unwrap_or(false))
 }
 
 /// 经该代理成功拿到上游响应：清零连续失败计数（含半开），只在确有计数时写。

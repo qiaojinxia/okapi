@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 
-// 出口代理（IMPLEMENTATION §11.41）：代理页、全局默认出口、渠道抽屉与批量设置出口。接口全部打桩。
+// 出口代理（IMPLEMENTATION §11.41）：代理页、系统设置里的全局默认出口与后台探测、渠道抽屉与批量设置出口。接口全部打桩。
 
 type Json = Record<string, unknown>
 
@@ -90,6 +90,9 @@ test('出口代理页：列表只显示掩码地址与出口事实，熔断中�
   await expect(page.getByRole('row').filter({ hasText: 'jp-1' })).toContainText('熔断中')
   // 被渠道直接绑定的代理删不掉：按钮直接禁用，而不是等后端 409
   await expect(hk.getByRole('button', { name: '删除', exact: true })).toBeDisabled()
+  // 全局默认出口与后台探测是站点级配置，在系统设置里；本页只留直达按钮
+  await expect(page.getByRole('button', { name: '保存默认出口' })).toHaveCount(0)
+  await expect(page.getByRole('switch', { name: '开启后台探测' })).toHaveCount(0)
 
   let created: Json | undefined
   await page.route('**/admin/proxies', async (route) => {
@@ -107,8 +110,11 @@ test('出口代理页：列表只显示掩码地址与出口事实，熔断中�
   await expect.poll(() => created).toEqual({ url: 'http://10.0.0.3:3128', max_keys: 3, status: 1 })
 })
 
-test('全局默认出口：选代理组后整体 PUT；代理组页签列出成员与分配方式', async ({ page }) => {
+test('全局默认出口在系统设置：代理页页头直达「出口代理」页签，选代理组后整体 PUT；再回代理组页签看成员', async ({ page }) => {
   await prepare(page, '/admin/proxies')
+  await page.getByRole('link', { name: '默认出口与探测' }).click()
+  await expect(page).toHaveURL(/\/admin\/settings\?tab=egress$/)
+  await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toHaveAttribute('aria-selected', 'true')
   let saved: Json | undefined
   await page.route('**/admin/egress/default', async (route) => {
     if (route.request().method() !== 'PUT') return route.fallback()
@@ -122,6 +128,8 @@ test('全局默认出口：选代理组后整体 PUT；代理组页签列出成�
   // 有 key 分不到代理时要提示，别让人以为都分好了
   await expect(page.getByRole('status').filter({ hasText: '2 把 key' })).toBeVisible()
 
+  await page.getByRole('link', { name: '管理代理与代理组' }).click()
+  await expect(page).toHaveURL(/\/admin\/proxies$/)
   await page.getByRole('tab', { name: '代理组' }).click()
   const row = page.getByRole('row').filter({ hasText: '香港固定' })
   await expect(row).toContainText('固定分配')
@@ -196,8 +204,8 @@ test('批量导入：按行提交、带上缺省协议与统一设置，逐行�
   await expect(drawer).toContainText('第 3 行：格式认不出')
 })
 
-test('后台探测：缺省值回显；改间隔与探测地址后整体保存，关掉开关立即生效', async ({ page }) => {
-  await prepare(page, '/admin/proxies')
+test('后台探测（系统设置「出口代理」页签）：缺省值回显；改间隔与探测地址后整体保存，关掉开关立即生效', async ({ page }) => {
+  await prepare(page, '/admin/settings?tab=egress')
   const posts: Json[] = []
   await page.route('**/admin/settings', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback()
@@ -217,4 +225,26 @@ test('后台探测：缺省值回显；改间隔与探测地址后整体保存�
   await page.getByRole('switch', { name: '开启后台探测' }).click()
   await expect.poll(() => posts.length).toBe(2)
   expect((posts[1].value as Json).enabled).toBe(false)
+})
+
+test('高级设置里的出口配置键给「前往设置」，跳到「出口代理」页签而不是通用编辑器', async ({ page }) => {
+  await prepare(page, '/admin/settings?tab=values')
+  await page.route('**/admin/settings', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    return route.fulfill({ json: { data: [
+      { key: 'egress_default', value: { mode: 'group', group_code: 'hk' }, is_secret: false, configured: true, updated_at: null },
+      { key: 'egress_probe_policy', value: { enabled: true, interval_secs: 600, target: null, concurrency: 4 },
+        is_secret: false, configured: true, updated_at: null },
+    ] } })
+  })
+  await page.reload()
+  const traffic = page.getByRole('region', { name: '流量控制' })
+  await expect(traffic.getByRole('article', { name: '全局默认出口' })).toBeVisible()
+  const probe = traffic.getByRole('article', { name: '后台探测' })
+  await expect(probe.getByRole('button')).toHaveText('前往设置')
+  await probe.getByRole('button').click()
+  await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toBeFocused()
+  await expect(page.getByRole('switch', { name: '开启后台探测' })).toBeVisible()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
 })

@@ -7,7 +7,11 @@ export interface SettingRow {
   published_value?: number
 }
 
-export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp'
+/// 系统设置页的页签，顺序即显示顺序（高级设置固定在最后）；也是 `/admin/settings?tab=` 的合法值。
+export const SETTINGS_TABS = ['registration', 'notice', 'notify', 'smtp', 'privacy', 'ai', 'egress', 'values'] as const
+export type SettingsTab = (typeof SETTINGS_TABS)[number]
+/// 有专用表单的页签：高级设置里对应的键给「前往设置」而不是通用编辑器。
+export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp' | 'egress'
 export type SettingEditor = 'auto' | 'number' | 'price' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth' | 'oauth_refresh'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
@@ -42,6 +46,9 @@ const CATALOG: Record<string, SettingMeta> = {
   playground_presets: { label: 'admin:settingPlaygroundPresets', description: 'admin:settingPlaygroundPresetsDesc', group: 'identity', editor: 'auto' },
   model_rpm_limits: { label: 'admin:settingModelLimits', description: 'admin:settingModelLimitsDesc', group: 'traffic', editor: 'limits' },
   margin_breaker: { label: 'admin:marginBreakerTitle', description: 'admin:settingMarginBreakerDesc', group: 'traffic', editor: 'auto' },
+  // 全局默认出口只能经 PUT /admin/egress/default 写（要同事务重排固定分配），通用设置端点拒绝它
+  egress_default: { label: 'admin:egressDefaultTitle', description: 'admin:settingEgressDefaultDesc', group: 'traffic', editor: 'auto', section: 'egress' },
+  egress_probe_policy: { label: 'admin:egressProbeTitle', description: 'admin:settingEgressProbeDesc', group: 'traffic', editor: 'auto', section: 'egress' },
   mcp_write_enabled: { label: 'admin:settingMcpWrite', description: 'admin:settingMcpWriteDesc', group: 'security', editor: 'auto' },
   web_session_limit: { label: 'admin:settingSessionLimit', description: 'admin:settingSessionLimitDesc', group: 'security', editor: 'number' },
   ssrf_policy: { label: 'admin:settingAccess', description: 'admin:settingAccessDesc', group: 'security', editor: 'ssrf' },

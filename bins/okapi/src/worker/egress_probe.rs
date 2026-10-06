@@ -53,14 +53,14 @@ impl ProbePolicy {
             .then_some(policy)
     }
 
-    fn target(&self) -> &str {
+    pub fn target(&self) -> &str {
         self.target
             .as_deref()
             .unwrap_or(okapi_providers::egress_probe::DEFAULT_TARGET)
     }
 }
 
-const SETTING: &str = "egress_probe_policy";
+pub const SETTING: &str = "egress_probe_policy";
 
 pub async fn run(
     state: AppState,

@@ -2536,9 +2536,19 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
   靠本机解析并钉住 IP（`resolve_to_addrs`）防 SSRF，经代理会由代理去解析域名，这层防护就没了。
 - **失败归因**：新增 `UpstreamError::Unreachable { timed_out }`——reqwest 的连接阶段错误（TCP / TLS / 代理隧道 / 连接超时，
   `is_connect()`）。对外与 `Connect`（超时则与 `Timeout`）同码同状态；单独成类是因为 `Connect` 还承载凭证解析等合成原因。
-  它映射成 `KeyFailure::Unreachable`：**不动 key**（请求没送到上游，凭证无从判断），走了代理就记到代理的被动熔断上：
-  连续 3 次进冷却，30s 起按轮翻倍、封顶 10 分钟；冷却中迟到的失败不续冷却；到期即半开放行（不依赖 worker 复位），
-  成功清零（同 `key_health` 的本地标记，健康请求零额外 IO）。控制台「测试」成功即视为人工确认恢复。
+  它映射成 `KeyFailure::Unreachable`：**不动 key**（请求没送到上游，凭证无从判断）。走了代理时再分两种
+  （2026-10-06 真实代理复核后改，见下）：错误链能确定坏在**代理这一跳**的（`proxy_hop`：连不上代理——TCP / DNS，
+  隧道与 SOCKS 包成 "failed to create underlying connection"、http 上游不建隧道时直接是 "tcp connect error"；
+  代理拒绝认证——407、SOCKS5 凭证不被接受）记到代理的被动熔断上：连续 3 次进冷却，30s 起按轮翻倍、封顶 10 分钟；
+  冷却中迟到的失败不续冷却；到期即半开放行（不依赖 worker 复位），成功清零（同 `key_health` 的本地标记，健康请求零
+  额外 IO）。**分不清是代理还是目标的**（隧道 / SOCKS 握手中途断开、代理报目标不可达、目标 TLS 握手失败、连接超时）
+  不直接计数，由网关后台经同一代理请求后台探测用的地址核实一次（同一代理 60s 内一次）：探不通即确认是代理坏了，
+  直接熔断（`mark_failure` 的 `confirmed`）；探得通说明是这条渠道的目标连不上，代理不背锅。后台探测关掉时也不核实。
+  熔断那一刻失效路由缓存，后续请求立刻绕开它（不等 5s 候选缓存过期）。控制台「测试」成功即视为人工确认恢复。
+  hyper-util 的隧道 / SOCKS 错误类型不对外公开，只能按错误文本识别，`error_tests.rs` 用真连接把这些文本钉住。
+  **为什么要分**：很多代理软件把「目标连不上」报成直接断开，和「代理坏了」看起来一样；全部记到代理上时，
+  一个上游挂掉（或 api_base 写错）连续 3 次就会熔断共用的代理，同一代理上的健康渠道一起 503——全局默认出口是
+  代理时就是整站（pproxy 真实复现过）。
 - **管理面**：`/admin/proxies`（CRUD、`/{id}/test`、保存前 `/test`）、`/admin/proxy-groups`（CRUD、`/{code}/assignments`
   一览与手动改分，目标满了 409 `proxy_full`）、`/admin/egress/default`、`/admin/channels/{id}/egress`。权限沿用
   `channel.read / channel.write` 并继承 own/all 属主范围：own 范围只看得见、绑得上自己的代理与组（否则能借别人的出口、
@@ -2549,15 +2559,16 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
   「单个代理」绑定，属主随渠道（用它的渠道属主一致时）；空值清掉；解析不了的非空旧值此前每个请求都失败，迁移后没人再读它会变成直连，
   所以停用该渠道、保留原值待人工处理。
 - **HttpPool**：代理 client 按 URL 缓存，改为闲置 15 分钟淘汰（新建 client 时顺手清），改密码 / 删代理不再留下永不释放的连接池。
-- **前端**：「出口代理」页（全局默认出口卡片、代理 / 代理组两个页签、测试、分配明细与手动改分）；渠道抽屉「接入」页签的出口选择器
+- **前端**：「出口代理」页（代理 / 代理组两个页签、测试、分配明细与手动改分）；全局默认出口与后台探测是站点级配置，放在系统设置的
+  「出口代理」页签（`/admin/settings?tab=egress`，出口代理页页头直达；设置页页签随之进 URL，高级设置里这两个键给「前往设置」）；渠道抽屉「接入」页签的出口选择器
   （新建随建渠道提交、OAuth 登录换码前生效；编辑单独保存并显示每把 key 的固定分配）；渠道列表的显式出口徽章与批量「设置出口」；
   路由诊断新增 `egress_cooling / egress_unassigned / egress_unavailable` 三个淘汰原因。
 
 - **二期（同日，迁移 0038）**：
   - **后台探测**：worker `egress_probe` 按 `settings.egress_probe_policy`（缺省开启、10 分钟、Cloudflare trace，
     写入时校验取值域并过 SSRF 闸）定时经每个启用中的代理请求探测地址，刷新出口 IP / 国家 / 延迟；多实例时每轮由
-    Redis 租约 `egress:probe:round` 选一个执行。**只记事实、不碰熔断**——探测地址不是上游，「能到 Cloudflare」证明不了
-    「能到上游」。出口 IP 与上次不同时记 `previous_exit_ip / exit_ip_changed_at` 并发通知事件 `egress_ip_changed`
+    Redis 租约 `egress:probe:round` 选一个执行。**定时探测只记事实、不碰熔断**——探测地址不是上游，「能到 Cloudflare」
+    证明不了「能到上游」（同一地址另被网关用来核实可疑代理，见上「失败归因」）。出口 IP 与上次不同时记 `previous_exit_ip / exit_ip_changed_at` 并发通知事件 `egress_ip_changed`
     （静态代理悄悄换 IP = 固定分配在它上面的账号全换了 IP）；有渠道在用（直接绑定、固定分配、经组或全局默认可达）的代理
     探测失败发 `egress_down`，没人用的不吵。两个事件走既有通知多路（webhook / 邮件、订阅过滤、频率闸）。控制台手动测试
     同样识别 IP 变化（成功仍清熔断，属人工确认）。
@@ -2581,6 +2592,10 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
 闲置淘汰、探测解析）；前端 `egress.spec.ts`。二期：`egress_proxies.rs` 的并发上限跨渠道共享、批量导入（代理商格式 / 查重 /
 入组）、诊断记录出口、后台探测（IP 变化与在用代理不可达告警、只记事实不进熔断）；`channel_permit` 单测（代理上限跨 key
 共享、满了退回 key 租约）；导入行解析与探测策略单测；前端导入 / 探测设置 / IP 变化标记用例。
+复核（2026-10-06）：用第三方代理软件 pproxy 实测 http / socks5 / socks5h（含带 `@ : /` 的密码）的「测试」、
+代理商格式导入后认证、网关经代理出站、代理挂了不改走直连与恢复；据此修正失败归因并补
+`tunnel_failures_are_verified_before_tripping_a_shared_proxy`（上游挂了不连累共用代理、代理坏了核实后直接熔断）
+与 providers `proxy_hop_markers`（钉住错误文本）。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

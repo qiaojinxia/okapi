@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH next AS (\n            SELECT id, GREATEST(\n                CASE\n                    WHEN failed_count >= $3::bigint AND (cooldown_until IS NULL\n                         OR cooldown_until < now() - make_interval(secs => $6::bigint::double precision))\n                    THEN 1 ELSE failed_count + 1 END,\n                CASE WHEN $7::boolean THEN $3::bigint ELSE 0 END) AS failed\n            FROM proxies\n            WHERE id = $1 AND (cooldown_until IS NULL OR cooldown_until <= now())\n            FOR UPDATE)\n        UPDATE proxies p SET failed_count = next.failed, last_error = $2,\n            cooldown_until = CASE WHEN next.failed >= $3::bigint\n                THEN now() + make_interval(secs => least($5::bigint::double precision,\n                     $4::bigint::double precision\n                     * power(2, least(20, greatest(0, next.failed - $3::bigint)))))\n                ELSE p.cooldown_until END,\n            updated_at = now()\n        FROM next WHERE p.id = next.id\n        RETURNING next.failed >= $3::bigint AS \"tripped!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tripped!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2163b8427f2d0a4990aedd005a95662b8294e83786860a3df3c9977ac749aa2d"
+}

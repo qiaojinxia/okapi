@@ -28,7 +28,8 @@ export function SpendTrendView({ rows, days, window, metric, onMetricChange, onE
         {onExpand ? <Button variant="ghost" size="sm" onClick={onExpand}>{t('portal:expandTrend')}</Button> : onMetricChange && <Segmented ariaLabel={t('charts:metric')} size="sm" value={metric} onChange={onMetricChange} options={USAGE_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))} />}
       </div>
       {rows.length === 0 ? <EmptyState hint={t('portal:emptyUsageHint')} /> : <TimeChart compact controls={!onExpand} key={metric} {...chart} percent={ratio} format={format} unit={money ? 'USD' : ratio ? '%' : metric === 'latency' ? 'ms' : t(`charts:metric_${metric}`)} label={t('charts:usageTrend')} />}
-      <p className="text-xs leading-5 text-muted-foreground">{metric === 'latency' ? t('charts:missingPerformance') : metric === 'cache' && aggregateCacheHit(rows).partial ? t('charts:partialCacheSamples') : ratio ? t('charts:ratioGaps') : t('charts:zeroDays')}</p>
+      {/* 综合视图里只留数据时间：口径说明在「用量趋势」页签里看 */}
+      {!onExpand && <p className="text-xs leading-5 text-muted-foreground">{metric === 'latency' ? t('charts:missingPerformance') : metric === 'cache' && aggregateCacheHit(rows).partial ? t('charts:partialCacheSamples') : ratio ? t('charts:ratioGaps') : t('charts:zeroDays')}</p>}
       {window && <p className="text-xs text-muted-foreground">{t('charts:freshness', { time: window.generated_at })} · {window.timezone}</p>}
     </CardContent></Card>
   )

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, PiggyBank, RefreshCw, Timer, Wallet, Zap } from 'lucide-react'
+import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, PiggyBank, RefreshCw, ShieldCheck, Timer, Wallet, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ErrorState, LoadingState } from '@/components/ui/state'
@@ -14,6 +14,7 @@ import { useUsageScope } from '@/hooks/use-usage-scope'
 import { Stat } from '@/components/ui/stat'
 import { Tabs } from '@/components/ui/tabs'
 import { ModelShareView } from '@/features/portal-overview/ModelShareView'
+import { QualityStrip } from '@/features/portal-overview/QualityStrip'
 import { SpendTrendView } from '@/features/portal-overview/SpendTrendView'
 import { TokenMixView } from '@/features/portal-overview/TokenMixView'
 import { UsageOverview } from '@/features/portal-overview/UsageOverview'
@@ -122,6 +123,8 @@ export function PortalOverviewPage() {
           compact
           layout="stacked"
           icon={Wallet}
+          className="border-primary/25 bg-linear-to-br from-primary/10 via-card to-card"
+          iconClassName="bg-primary text-primary-foreground shadow-xs"
           label={t('portal:accountBalance')}
           loading={me.isPending}
           value={me.data ? formatMoney(me.data.balance_micro, locale) : '—'}
@@ -148,6 +151,7 @@ export function PortalOverviewPage() {
           compact
           layout="stacked"
           icon={Coins}
+          iconClassName="bg-chart-3/12 text-chart-3"
           label={t('portal:totalSpend')}
           loading={loading}
           value={total ? formatMoney(total.amount_micro, locale) : '—'}
@@ -167,6 +171,7 @@ export function PortalOverviewPage() {
           compact
           layout="stacked"
           icon={Activity}
+          iconClassName="bg-chart-1/12 text-chart-1"
           label={t('common:requests')}
           loading={loading}
           value={total ? formatCount(total.requests, locale) : '—'}
@@ -180,6 +185,7 @@ export function PortalOverviewPage() {
           compact
           layout="stacked"
           icon={Cpu}
+          iconClassName="bg-chart-4/12 text-chart-4"
           label={t('common:tokens')}
           loading={loading}
           value={total ? formatCount(total.tokens, locale) : '—'}
@@ -197,17 +203,35 @@ export function PortalOverviewPage() {
         />
       </section>
 
-      <section className="grid min-w-0 grid-cols-2 gap-3 xl:grid-cols-4" aria-label={t('charts:performance')}>
-        <Stat compact layout="stacked" icon={Zap} label={t('analytics:ttft')} loading={loading}
-          value={total?.avg_ttft_ms == null ? '—' : `${formatCount(total.avg_ttft_ms, locale)} ms`}
-          sub={q.isError ? t('charts:statisticsUnavailable') : total?.avg_ttft_ms == null ? t('charts:ttftUnavailable') : t('charts:ttftHint', { count: total.ttft_samples ?? 0 })} />
-        <Stat compact layout="stacked" icon={Timer} label={t('charts:metric_latency')} loading={loading}
-          value={total?.avg_latency_ms == null ? '—' : `${formatCount(total.avg_latency_ms, locale)} ms`} />
-        <Stat compact layout="stacked" icon={Activity} label={t('charts:metric_success')} loading={loading}
-          value={total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale)} />
-        <Stat compact layout="stacked" icon={Gauge} label={t('charts:throughput')} loading={loading}
-          value={total?.tokens_per_1k_sec == null ? '—' : `${formatTokensPerSec(total.tokens_per_1k_sec, locale)} Token/s`} />
-      </section>
+      <QualityStrip label={t('charts:performance')} loading={loading} items={[
+        {
+          icon: Zap, accent: 'bg-chart-3/12 text-chart-3', label: t('analytics:ttft'),
+          value: total?.avg_ttft_ms == null ? '—' : `${formatCount(total.avg_ttft_ms, locale)} ms`,
+          // 指标带里只放一句短的，完整口径说明悬停看
+          ...(q.isError
+            ? { sub: t('charts:statisticsUnavailable') }
+            : total?.avg_ttft_ms == null
+              ? { sub: t('charts:ttftNoSamples'), subTitle: t('charts:ttftUnavailable') }
+              : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
+        },
+        {
+          icon: Timer, accent: 'bg-chart-1/12 text-chart-1', label: t('charts:metric_latency'),
+          value: total?.avg_latency_ms == null ? '—' : `${formatCount(total.avg_latency_ms, locale)} ms`,
+        },
+        {
+          icon: ShieldCheck, accent: 'bg-success/12 text-success', label: t('charts:metric_success'),
+          value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
+          // 阈值同管理端错误率：失败 1% 起提醒、5% 起告警
+          meter: total?.success_rate_bp == null ? undefined : {
+            ratio: total.success_rate_bp / 10_000,
+            tone: total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
+          },
+        },
+        {
+          icon: Gauge, accent: 'bg-chart-4/12 text-chart-4', label: t('charts:throughput'),
+          value: total?.tokens_per_1k_sec == null ? '—' : `${formatTokensPerSec(total.tokens_per_1k_sec, locale)} Token/s`,
+        },
+      ]} />
 
       <Tabs
         id="portal-views"
@@ -306,6 +330,7 @@ function LiveRateKpi({
         compact
         layout="stacked"
         icon={Gauge}
+        iconClassName="bg-chart-2/12 text-chart-2"
         label={t('portal:avgTpm')}
         loading={loading}
         value={avgTpmMicro === undefined ? '—' : fmtMicroRate(avgTpmMicro, locale)}
@@ -319,6 +344,8 @@ function LiveRateKpi({
       compact
       layout="stacked"
       icon={Gauge}
+      // 接近 / 触顶时图标随 tone 变黄变红，平时与平均 TPM 同色
+      iconClassName={ratio >= 0.8 ? undefined : 'bg-chart-2/12 text-chart-2'}
       label={t('portal:liveRpm')}
       loading={loading}
       value={
@@ -326,14 +353,24 @@ function LiveRateKpi({
           ? `${formatCount(live.rpm, locale)} / ${formatCount(live.rpm_limit, locale)}`
           : formatCount(live.rpm, locale)
       }
-      sub={
-        live.tpm_limit
-          ? t('portal:liveTpmCapped', {
-              v: formatCount(live.tpm, locale),
-              cap: formatCount(live.tpm_limit, locale),
-            })
-          : t('portal:liveTpm', { v: formatCount(live.tpm, locale) })
-      }
+      sub={<>
+        <span>
+          {live.tpm_limit
+            ? t('portal:liveTpmCapped', {
+                v: formatCount(live.tpm, locale),
+                cap: formatCount(live.tpm_limit, locale),
+              })
+            : t('portal:liveTpm', { v: formatCount(live.tpm, locale) })}
+        </span>
+        {live.rpm_limit ? (
+          <span aria-hidden className="mt-1 block h-1 w-full basis-full overflow-hidden rounded-full bg-muted">
+            <span
+              className={`block h-full rounded-full ${ratio >= 1 ? 'bg-destructive' : ratio >= 0.8 ? 'bg-warning' : 'bg-chart-2'}`}
+              style={{ width: `${Math.min(100, ratio * 100)}%` }}
+            />
+          </span>
+        ) : null}
+      </>}
       tone={ratio >= 1 ? 'bad' : ratio >= 0.8 ? 'warn' : 'default'}
     />
   )

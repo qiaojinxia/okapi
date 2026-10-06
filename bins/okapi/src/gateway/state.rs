@@ -90,6 +90,8 @@ pub struct AppState {
     pub key_failures: Cache<i64, ()>,
     /// 本进程登记过连接失败的出口代理（24h，§11.41）：同上，下一次经它成功才回 PG 清零。
     pub egress_failures: Cache<i64, ()>,
+    /// 一分钟内后台核实过的出口代理（§11.41）：分不清是代理还是目标的连接失败，同一代理只核实一次。
+    pub egress_verifying: Cache<i64, ()>,
     /// 同一用户的预扣先在进程内排队，再拿 PG 连接与用户锁（`user_turns`）。
     pub admission_turns: super::user_turns::UserTurns,
     /// 同一用户的结算另排一队：等全局结算闸的结算不能挡住该用户新请求的准入。

@@ -28,7 +28,8 @@ async fn run_one_inner(state: &AppState) -> Result<bool, AppError> {
         id: claimed.task.id,
         token: claimed.task.lease_id.ok_or_else(AppError::internal)?,
     };
-    let result = tokio::time::timeout(EXECUTION_TIMEOUT, execute(state, &claimed, lease))
+    // 执行链很深、贴着 large_futures 阈值：装箱，别让认领循环的 future 跟着变大
+    let result = tokio::time::timeout(EXECUTION_TIMEOUT, Box::pin(execute(state, &claimed, lease)))
         .await
         .unwrap_or_else(|_| {
             Err(

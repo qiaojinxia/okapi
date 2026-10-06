@@ -1,10 +1,10 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, Globe, ListTree, Pencil, Plus, Trash2, Upload } from 'lucide-react'
+import { Link } from '@tanstack/react-router'
+import { Activity, Globe, ListTree, Pencil, Plus, Settings, Trash2, Upload } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button, buttonVariants } from '@/components/ui/button'
 import { useConfirm } from '@/components/ui/confirm'
 import { IconButton } from '@/components/ui/icon-button'
 import { PageHeader } from '@/components/ui/page'
@@ -20,15 +20,11 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { AssignmentsDrawer } from './AssignmentsDrawer'
-import { EgressPicker, draftOf, sameBinding, toBinding } from './EgressPicker'
-import type { EgressDraft } from './EgressPicker'
 import { GroupDrawer } from './GroupDrawer'
 import { ImportDrawer } from './ImportDrawer'
-import { ProbePolicyCard } from './ProbePolicyCard'
 import { ProxyDrawer } from './ProxyDrawer'
-import { egressDefaultOptions } from './options'
 import { useReportToast } from './report'
-import type { ProbeResult, ProxyGroupRow, ProxyRow, ReconcileReport } from './types'
+import type { ProbeResult, ProxyGroupRow, ProxyRow } from './types'
 import { GROUP_MODE_LABEL, exitIpRecentlyChanged } from './types'
 
 type Tab = 'proxies' | 'groups'
@@ -37,83 +33,44 @@ type Tab = 'proxies' | 'groups'
 ///
 /// 代理是一等资源：渠道按「继承全局默认 / 直连 / 单个代理 / 代理组」绑定出口（在渠道抽屉里选），
 /// 不挂在渠道池上——一个渠道可以同时在多个池里，按池绑出口会让同一个账号从多个 IP 出去。
-/// 本页管代理本身、代理组和全局默认出口。
+/// 本页管代理本身与代理组；全局默认出口和后台探测是站点级配置，在系统设置的「出口代理」页签。
 export function ProxiesPage() {
   const { t } = useTranslation()
   const can = usePermission()
   const [tab, setTab] = useState<Tab>('proxies')
+  const tabs = (
+    <Tabs
+      ariaLabel={t('admin:proxiesTitle')}
+      items={[
+        { id: 'proxies', label: t('admin:proxiesTab') },
+        { id: 'groups', label: t('admin:proxyGroupsTab') },
+      ]}
+      active={tab}
+      onChange={(id) => setTab(id as Tab)}
+    />
+  )
   return (
     <div className="list-page">
-      <PageHeader icon={Globe} title={t('admin:proxiesTitle')} description={t('admin:proxiesDesc')} />
-      <DefaultEgressCard />
-      {/* 探测策略存在站点设置里，读写都要 settings.write */}
-      {can('settings.write') && <ProbePolicyCard />}
-      <Tabs
-        className="mb-3"
-        ariaLabel={t('admin:proxiesTitle')}
-        items={[
-          { id: 'proxies', label: t('admin:proxiesTab') },
-          { id: 'groups', label: t('admin:proxyGroupsTab') },
-        ]}
-        active={tab}
-        onChange={(id) => setTab(id as Tab)}
+      <PageHeader
+        icon={Globe}
+        title={t('admin:proxiesTitle')}
+        description={t('admin:proxiesDesc')}
+        action={can('settings.read') ? (
+          <Link to="/admin/settings" search={{ tab: 'egress' }} className={buttonVariants({ variant: 'outline' })}>
+            <Settings aria-hidden className="h-4 w-4" />
+            {t('admin:egressSettingsLink')}
+          </Link>
+        ) : undefined}
       />
-      {tab === 'proxies' ? <ProxyList /> : <GroupList />}
+      {tab === 'proxies' ? <ProxyList tabs={tabs} /> : <GroupList tabs={tabs} />}
     </div>
   )
 }
 
-/// 全局默认出口：所有「继承」的渠道走这里。服务器在受限网络、所有上游都要走代理时设一次即可。
-function DefaultEgressCard() {
-  const { t } = useTranslation()
-  const queryClient = useQueryClient()
-  const can = usePermission()
-  const current = useQuery(egressDefaultOptions())
-  const [draft, setDraft] = useState<EgressDraft | null>(null)
-  const report = useReportToast()
-  const value = draft ?? draftOf(current.data?.egress)
-  const binding = toBinding(value)
-  const dirty = draft !== null && !sameBinding(binding, current.data?.egress ?? null)
-  const save = useMutation({
-    mutationFn: () =>
-      apiFetch<{ assignment?: ReconcileReport }>('/admin/egress/default', {
-        method: 'PUT',
-        body: binding,
-      }),
-    onSuccess: (r) => {
-      report(r.assignment)
-      setDraft(null)
-      void queryClient.invalidateQueries({ queryKey: qk.egressDefault })
-      void queryClient.invalidateQueries({ queryKey: qk.adminProxies })
-      void queryClient.invalidateQueries({ queryKey: qk.adminProxyGroups })
-    },
-    onError: (err) => toast.error(describeError(err)),
-  })
-  return (
-    <Card className="mb-4">
-      <CardHeader>
-        <CardTitle>{t('admin:egressDefaultTitle')}</CardTitle>
-        <CardDescription>{t('admin:egressDefaultDesc')}</CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-wrap items-start gap-3">
-        {current.isError ? (
-          <ErrorState message={describeError(current.error)} onRetry={() => void current.refetch()} />
-        ) : (
-          <>
-            <div className="min-w-0 flex-1">
-              <EgressPicker value={value} onChange={setDraft} allowInherit={false} idPrefix="egress-default" />
-            </div>
-            <Button
-              disabled={!dirty || binding === null || !can('channel.write') || save.isPending}
-              onClick={() => save.mutate()}
-            >
-              {t('admin:egressDefaultSave')}
-            </Button>
-          </>
-        )}
-      </CardContent>
-    </Card>
-  )
+/// 最近一次失败的原因：网关记的连接失败码、核实 / 测试用的探测码翻成人话，其余（测试失败的原文）照原样。
+function failureText(t: (key: string, options?: Record<string, unknown>) => string, raw: string | null) {
+  if (raw === null) return undefined
+  return t(`admin:proxyFailure_${raw}`, { defaultValue: t(`admin:proxyProbe_${raw}`, { defaultValue: raw }) })
 }
 
 function ProxyStatus({ proxy }: { proxy: ProxyRow }) {
@@ -121,7 +78,7 @@ function ProxyStatus({ proxy }: { proxy: ProxyRow }) {
   if (proxy.status !== 1) return <Badge variant="muted">{t('common:disabled')}</Badge>
   if (proxy.cooling) {
     return (
-      <Badge variant="warning" title={proxy.last_error ?? undefined}>
+      <Badge variant="warning" title={failureText(t, proxy.last_error)}>
         {t('admin:proxyCooling')}
       </Badge>
     )
@@ -129,7 +86,21 @@ function ProxyStatus({ proxy }: { proxy: ProxyRow }) {
   return <Badge variant="success" dot>{t('common:enabled')}</Badge>
 }
 
-function ProxyList() {
+/// 页签、条数与操作按钮同一行，表格紧跟其后（页头下不再单独占两行）。
+function ListToolbar({ tabs, total, children }: { tabs: React.ReactNode; total: number; children: React.ReactNode }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <span className="flex items-center gap-3">
+        {tabs}
+        <Badge variant="muted">{t('admin:keyTotal', { n: total })}</Badge>
+      </span>
+      <span className="flex items-center gap-2">{children}</span>
+    </div>
+  )
+}
+
+function ProxyList({ tabs }: { tabs: React.ReactNode }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const pager = usePagination()
@@ -190,16 +161,13 @@ function ProxyList() {
   return (
     <>
       {dialog}
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <Badge variant="muted">{t('admin:keyTotal', { n: list.data?.total ?? 0 })}</Badge>
-        <span className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setImporting(true)}>
-            <Upload className="h-4 w-4" />
-            {t('admin:proxyImport')}
-          </Button>
-          {create}
-        </span>
-      </div>
+      <ListToolbar tabs={tabs} total={list.data?.total ?? 0}>
+        <Button variant="outline" onClick={() => setImporting(true)}>
+          <Upload className="h-4 w-4" />
+          {t('admin:proxyImport')}
+        </Button>
+        {create}
+      </ListToolbar>
       {list.isError ? (
         <ErrorState message={describeError(list.error)} onRetry={() => void list.refetch()} />
       ) : list.isPending ? (
@@ -266,7 +234,7 @@ function ProxyList() {
                           )}
                         </span>
                         {p.last_error && !p.cooling && (
-                          <span className="truncate text-destructive" title={p.last_error}>
+                          <span className="truncate text-destructive" title={failureText(t, p.last_error)}>
                             {t('admin:proxyLastProbeFailed')}
                           </span>
                         )}
@@ -345,7 +313,7 @@ function ProxyList() {
   )
 }
 
-function GroupList() {
+function GroupList({ tabs }: { tabs: React.ReactNode }) {
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const pager = usePagination()
@@ -385,10 +353,9 @@ function GroupList() {
   return (
     <>
       {dialog}
-      <div className="mb-3 flex items-center justify-between gap-2">
-        <Badge variant="muted">{t('admin:keyTotal', { n: list.data?.total ?? 0 })}</Badge>
+      <ListToolbar tabs={tabs} total={list.data?.total ?? 0}>
         {create}
-      </div>
+      </ListToolbar>
       {list.isError ? (
         <ErrorState message={describeError(list.error)} onRetry={() => void list.refetch()} />
       ) : list.isPending ? (

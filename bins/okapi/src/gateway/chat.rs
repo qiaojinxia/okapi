@@ -366,7 +366,9 @@ pub(super) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
             status: 500..=599, ..
         } => KeyFailure::Transient,
         // 连接阶段失败：凭证无从判断；走了代理时归给代理的被动熔断（§11.41）
-        UpstreamError::Unreachable { .. } => KeyFailure::Unreachable,
+        UpstreamError::Unreachable { proxy_hop, .. } => KeyFailure::Unreachable {
+            proxy_hop: *proxy_hop,
+        },
         UpstreamError::Status { .. }
         | UpstreamError::Connect(_)
         | UpstreamError::Timeout
@@ -1970,7 +1972,7 @@ async fn try_model(
             let transient = matches!(
                 &result,
                 Err(AttemptError::Retriable {
-                    failure_kind: KeyFailure::Transient | KeyFailure::Request | KeyFailure::Unreachable,
+                    failure_kind: KeyFailure::Transient | KeyFailure::Request | KeyFailure::Unreachable { .. },
                     code,
                     upstream_status,
                 }) if *code != codes::EMPTY_COMPLETION && *code != codes::NO_AVAILABLE_CHANNEL && matches!(upstream_status, None | Some(408 | 500..=528 | 530..=599))

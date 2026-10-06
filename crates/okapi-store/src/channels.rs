@@ -551,8 +551,9 @@ pub enum KeyFailure {
     /// 请求/传输级故障：不改变凭证的失败计数或状态。
     Request,
     /// 连接阶段失败（TCP / TLS / 代理隧道 / 连接超时）：请求没送到上游，凭证无从判断，
-    /// 同样不动 key；走了代理时归给代理的被动熔断（`egress::mark_failure`）。
-    Unreachable,
+    /// 同样不动 key。走了代理时：`proxy_hop`（确定坏在代理这一跳）直接记到代理的被动熔断上
+    /// （`egress::mark_failure`）；分不清是代理还是目标的，由网关后台核实代理后再定。
+    Unreachable { proxy_hop: bool },
     /// 上游 5xx/空回复：连续 `failure_threshold` 次（成功即清零，见 `clear_key_failures`）
     /// 进入 cooling。冷却到期恢复后若很快再失败，按轮次指数退避（60s 起，封顶 2h）；
     /// 冷却中迟到的失败（缓存 / 在途请求）不计数，不能把一次短暂故障放大成长冷却。
@@ -587,7 +588,7 @@ pub async fn mark_key_failure(
     failure: KeyFailure,
 ) -> Result<(), StoreError> {
     match failure {
-        KeyFailure::Request | KeyFailure::Unreachable => return Ok(()),
+        KeyFailure::Request | KeyFailure::Unreachable { .. } => return Ok(()),
         KeyFailure::Transient => {
             let settings: serde_json::Value = sqlx::query_scalar("SELECT c.settings FROM channels c JOIN channel_keys k ON k.channel_id=c.id WHERE k.id=$1").bind(channel_key_id).fetch_one(pool).await?;
             let control = settings.get("account_control");

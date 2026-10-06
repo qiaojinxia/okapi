@@ -51,7 +51,7 @@ export function ProbePolicyCard() {
   })
 
   return (
-    <Card className="mb-4">
+    <Card>
       <CardHeader>
         <CardTitle>{t('admin:egressProbeTitle')}</CardTitle>
         <CardDescription>{t('admin:egressProbeDesc')}</CardDescription>

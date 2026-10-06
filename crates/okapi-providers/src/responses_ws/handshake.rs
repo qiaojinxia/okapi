@@ -44,6 +44,7 @@ pub(super) async fn connect(
         if e.is_connect() {
             UpstreamError::Unreachable {
                 timed_out: e.is_timeout(),
+                proxy_hop: UpstreamError::proxy_hop_failed(&e),
                 detail: "responses_ws_handshake".into(),
             }
         } else {

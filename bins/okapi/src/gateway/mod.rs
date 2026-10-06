@@ -175,6 +175,10 @@ pub(crate) async fn build_state_with_resources(
             .max_capacity(10_000)
             .time_to_live(Duration::from_hours(24))
             .build(),
+        egress_verifying: moka::future::Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_mins(1))
+            .build(),
         admission_turns: user_turns::UserTurns::default(),
         settlement_turns: user_turns::UserTurns::default(),
         channel_cost_cache: moka::future::Cache::builder()

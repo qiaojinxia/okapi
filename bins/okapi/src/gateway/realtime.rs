@@ -430,11 +430,22 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
         Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {
             tracing::warn!(request_id = %request_id, error = %err, "realtime 上游连接失败");
-            // 连接阶段失败且走了代理：记到代理的被动熔断上（与 HTTP 路径同一口径）
-            if matches!(err, okapi_providers::UpstreamError::Unreachable { .. })
+            // 连接阶段失败且走了代理：与 HTTP 路径同一口径归因（坏在代理这一跳才直接记熔断）
+            if let okapi_providers::UpstreamError::Unreachable {
+                timed_out,
+                proxy_hop,
+                ..
+            } = &err
                 && let Some(proxy) = prep.egress_proxy_id
             {
-                let _ = okapi_store::egress::mark_failure(&state.pg, proxy, "connect_failed").await;
+                crate::gateway::key_health::proxy_unreachable(
+                    &state,
+                    proxy,
+                    prep.proxy_url.as_deref(),
+                    *proxy_hop,
+                    *timed_out,
+                )
+                .await;
             }
             fail_session(&state, &prep, client, codes::UPSTREAM_ERROR).await;
             return;

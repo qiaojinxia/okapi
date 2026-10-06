@@ -10,8 +10,13 @@ pub enum UpstreamError {
     /// 连接阶段失败（TCP / TLS / 代理隧道 / 连接超时）：请求还没送到上游。
     /// 对外与 `Connect`（超时则与 `Timeout`）同码同语义；单独成类只为把失败归给出口代理
     /// （IMPLEMENTATION §11.41）——`Connect` 还承载凭证解析等非网络的合成原因，不能一并归因。
+    /// `proxy_hop`：经代理时错误链能确定坏在代理这一跳（见 [`Self::proxy_hop_failed`]）。
     #[error("upstream_connect")]
-    Unreachable { timed_out: bool, detail: String },
+    Unreachable {
+        timed_out: bool,
+        proxy_hop: bool,
+        detail: String,
+    },
 
     #[error("upstream_timeout")]
     Timeout,
@@ -48,8 +53,41 @@ impl UpstreamError {
     pub fn connect_phase(e: &reqwest::Error) -> Option<Self> {
         e.is_connect().then(|| Self::Unreachable {
             timed_out: e.is_timeout(),
+            proxy_hop: Self::proxy_hop_failed(e),
             detail: e.to_string(),
         })
+    }
+
+    /// 经代理的连接失败能否确定是代理这一跳的问题。按 hyper-util 的错误文本识别——它的隧道 /
+    /// SOCKS 错误类型不对外公开，没法按类型判断；文本由 `proxy_hop_markers` 单测钉住。
+    /// - 连不上代理：TCP / DNS 失败。隧道与 SOCKS 包成 "failed to create underlying connection"；
+    ///   http 上游经 HTTP 代理不建隧道，直接是 "tcp connect error" / "dns error"。配了代理时客户端
+    ///   只会连代理，这类错误不可能来自目标。
+    /// - 代理拒绝认证：HTTP 407、SOCKS5 用户名密码不被接受 / 不支持。
+    ///
+    /// 其余（隧道或 SOCKS 握手中途断开、代理报目标不可达、目标 TLS 握手失败、超时）分不清是代理
+    /// 还是目标：一个上游挂了不能把同一代理上的其他渠道一起熔断，由网关另行核实。
+    #[must_use]
+    pub fn proxy_hop_failed(e: &reqwest::Error) -> bool {
+        const MARKERS: [&str; 8] = [
+            "failed to create underlying connection",
+            "tcp connect error",
+            "tcp open error",
+            "dns error",
+            "proxy authorization required",
+            "credentials not accepted",
+            "server does not support user/pass authentication",
+            "server implements authentication incorrectly",
+        ];
+        let mut source = std::error::Error::source(e);
+        while let Some(err) = source {
+            let text = err.to_string();
+            if MARKERS.iter().any(|marker| text.contains(marker)) {
+                return true;
+            }
+            source = err.source();
+        }
+        false
     }
 
     /// 首字前是否允许 failover 换渠道（§3.6）。402（上游配额/余额耗尽）同样换渠道。
@@ -126,3 +164,7 @@ impl UpstreamError {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod tests;
