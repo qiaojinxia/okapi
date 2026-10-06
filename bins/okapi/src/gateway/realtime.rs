@@ -1,8 +1,8 @@
 //! OpenAI Realtime API 桥接（IMPLEMENTATION §4.4 M4）：
 //! `GET /v1/realtime?model=` WS 升级 ↔ 上游 wss 双向泵。
 //! 计费：连接时按模型 max_output 预扣，会话内逐 `response.done` 累计 usage
-//! （text+audio 合并按模型倍率；audio 独立倍率列 backlog），断开按累计 commit，
-//! 无产出全额退款。治理（§14.4）：per-key WS 并发上限（Redis 计数 + 兜底 TTL）、
+//! （text+audio 合并按模型倍率；audio 独立倍率列 backlog），累计超出已预扣额度时追加预扣、
+//! 余额不足即断开（`topup`），断开按累计 commit，无产出全额退款。治理（§14.4）：per-key WS 并发上限（Redis 计数 + 兜底 TTL）、
 //! 首消息 30s、空闲 5min。
 
 use super::error::AppError;
@@ -20,10 +20,10 @@ use okapi_pricing::{CalcContext, RatioFp, calculate};
 use serde::Deserialize;
 use serde_json::Value;
 
+mod topup;
 mod usage;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as TungMsg;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use uuid::Uuid;
 
 const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -75,22 +75,58 @@ pub async fn realtime(
         Ok(prep) => ws
             .protocols(["realtime"])
             .on_upgrade(move |socket| async move {
-                Box::pin(bridge_session(state, socket, prep)).await;
+                // 受下线跟踪：进程退出前等会话收尾落账，不留给 10 分钟后的过期退款
+                let pending = state.settlements.clone();
+                pending.spawn(Box::pin(bridge_session(state, socket, prep)));
             }),
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }
 
+/// 预扣已建立、会话还没接手：建连 handler 被取消（客户端在选路时断开）或 WS 升级失败时
+/// `Prep` 随之丢弃，由它退款、留 `client_closed_request` 失败痕并释放连接租约。
+/// 此前这两种情形都要等约 10 分钟的过期清理，也没有任何记录。
+struct Admission {
+    failure: super::failure::Guard,
+    lease: Option<(AppState, i64, String)>,
+}
+
+impl Admission {
+    fn disarm(&mut self) {
+        self.failure.disarm();
+        self.lease = None;
+    }
+}
+
+impl Drop for Admission {
+    fn drop(&mut self) {
+        if let Some((state, key_id, conn_id)) = self.lease.take() {
+            let pending = state.settlements.clone();
+            pending.spawn(async move {
+                state.sched.ws_lease_release(key_id, &conn_id).await;
+            });
+        }
+    }
+}
+
 struct Prep {
+    admission: Admission,
     key: std::sync::Arc<okapi_store::AuthedKey>,
     request_id: Uuid,
+    reserved: Money,
     reservation_pool: Pool,
     source_window: Option<String>,
     canonical: String,
     dimensions: okapi_ledger::pg::UsageDimensions,
     upstream_url: String,
     credential: String,
+    /// 出口代理（§11.41）：与 HTTP 请求同一套绑定，None = 直连。
+    proxy_url: Option<String>,
+    egress_proxy_id: Option<i64>,
+    egress_max_concurrency: Option<i32>,
     channel: (i64, i64),
+    channel_concurrency: Option<i32>,
+    cost_milli: i64,
     calc: CalcContext,
     book: std::sync::Arc<okapi_pricing::PriceBook>,
     started: Instant,
@@ -193,9 +229,7 @@ async fn prepare(
         }
     };
     let reserve = state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -232,6 +266,24 @@ async fn prepare(
             return Err(err.into());
         }
     };
+    let mut admission = Admission {
+        failure: super::failure::Guard::new(
+            state,
+            key,
+            request_id,
+            &canonical,
+            requested_model,
+            "/v1/realtime",
+            Instant::now(),
+            reservation_pool,
+            source_window.as_deref(),
+        ),
+        lease: Some((state.clone(), key.key_id, conn_id.clone())),
+    };
+    admission.failure.error(&AppError::new(
+        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+        codes::CLIENT_CLOSED_REQUEST,
+    ));
 
     // 候选：openai 协议渠道（anthropic/gemini 无 Realtime 面；能力显式 false 排除）
     let rows = okapi_store::channels::candidates_for_model(
@@ -254,6 +306,7 @@ async fn prepare(
             })
             .collect(),
         Err(err) => {
+            admission.disarm();
             release_reservation_and_slot(state, key, request_id, reservation_pool).await;
             return Err(err.into());
         }
@@ -262,6 +315,7 @@ async fn prepare(
         .retain_margin_ok(&key.group_code, &mut candidates)
         .await;
     let Some(cand) = candidates.into_iter().next() else {
+        admission.disarm();
         release_reservation_and_slot(state, key, request_id, reservation_pool).await;
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -282,8 +336,10 @@ async fn prepare(
     );
 
     Ok(Prep {
+        admission,
         key: std::sync::Arc::clone(key),
         request_id,
+        reserved: est.amount,
         reservation_pool,
         source_window,
         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -295,7 +351,12 @@ async fn prepare(
         canonical,
         upstream_url,
         credential: cand.credential.clone(),
+        proxy_url: cand.proxy_url.clone(),
+        egress_proxy_id: cand.egress_proxy_id,
+        egress_max_concurrency: cand.egress_max_concurrency,
         channel: (cand.channel_id, cand.channel_key_id),
+        channel_concurrency: cand.max_concurrency,
+        cost_milli: cand.cost_milli,
         calc,
         book,
         started: Instant::now(),
@@ -327,25 +388,54 @@ async fn release_reservation_and_slot(
 /// 会话主体：连上游 → 双向泵 → 断开结算（治理超时内置于泵循环）。
 // 双向泵与结算的线性会话时序
 #[allow(clippy::too_many_lines)]
-async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
+async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
+    // 会话接手收尾：此后每条路径都显式结算或 fail_session
+    prep.admission.disarm();
     let request_id = prep.request_id;
-    let mut req = match prep.upstream_url.clone().into_client_request() {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(request_id = %request_id, error = %err, "realtime 上游 URL 非法");
-            fail_session(&state, &prep, client, codes::UPSTREAM_ERROR).await;
-            return;
-        }
+    let permit = super::sched_redis::channel_permit::ChannelPermit::acquire_parts(
+        &state.sched,
+        prep.channel.1,
+        prep.channel_concurrency,
+        prep.egress_proxy_id.zip(prep.egress_max_concurrency),
+    )
+    .await;
+    let Ok(Some(mut permit)) = permit else {
+        fail_session(&state, &prep, client, codes::NO_AVAILABLE_CHANNEL).await;
+        return;
     };
-    if let Ok(v) = format!("Bearer {}", prep.credential).parse() {
-        req.headers_mut().insert("authorization", v);
+    if super::account_control::admit(&state, prep.channel.0, Some(prep.channel.1))
+        .await
+        .is_err()
+    {
+        fail_session(&state, &prep, client, codes::NO_AVAILABLE_CHANNEL).await;
+        return;
     }
-    let upstream =
-        tokio::time::timeout(FIRST_MESSAGE_TIMEOUT, tokio_tungstenite::connect_async(req)).await;
-    let (upstream_ws, _) = match upstream {
-        Ok(Ok(pair)) => pair,
+    // 经出口绑定的代理握手（§11.41）：与 HTTP 请求同一 HttpPool，不再另起直连的 tungstenite 连接
+    let authorization = format!("Bearer {}", prep.credential);
+    let outbound = okapi_providers::Outbound {
+        proxy_url: prep.proxy_url.clone(),
+        ..Default::default()
+    };
+    let upstream = tokio::time::timeout(
+        FIRST_MESSAGE_TIMEOUT,
+        okapi_providers::responses_ws::connect_raw(
+            state.upstream.http(),
+            &prep.upstream_url,
+            &[("authorization", authorization.as_str())],
+            &outbound,
+        ),
+    )
+    .await;
+    let upstream_ws = match upstream {
+        Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {
             tracing::warn!(request_id = %request_id, error = %err, "realtime 上游连接失败");
+            // 连接阶段失败且走了代理：记到代理的被动熔断上（与 HTTP 路径同一口径）
+            if matches!(err, okapi_providers::UpstreamError::Unreachable { .. })
+                && let Some(proxy) = prep.egress_proxy_id
+            {
+                let _ = okapi_store::egress::mark_failure(&state.pg, proxy, "connect_failed").await;
+            }
             fail_session(&state, &prep, client, codes::UPSTREAM_ERROR).await;
             return;
         }
@@ -358,6 +448,7 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
     let (mut up_tx, mut up_rx) = upstream_ws.split();
     let (mut cl_tx, mut cl_rx) = client.split();
     let mut meter = usage::Meter::default();
+    let mut topups = topup::TopUps::new(prep.reserved);
     let mut awaiting_first = true;
     let expires = tokio::time::Instant::now() + SESSION_MAX;
     let mut idle_deadline = tokio::time::Instant::now() + FIRST_MESSAGE_TIMEOUT;
@@ -369,6 +460,8 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
     // 每 20s 续租连接租约（§14.4）
     loop {
         tokio::select! {
+            () = permit.expired() => { tracing::warn!(%request_id,"realtime channel lease lost"); break; }
+            () = state.settlements.draining() => { tracing::info!(%request_id, "网关下线，realtime 会话收尾结算"); break; }
             () = tokio::time::sleep_until(expires.min(idle_deadline)) => {
                 tracing::info!(request_id = %request_id, awaiting_first, "realtime 超时，关闭会话");
                 break;
@@ -400,11 +493,12 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
                     Some(Ok(m)) => {
                         awaiting_first = false;
                         idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                        let responses = meter.responses;
                         if let TungMsg::Text(text) = &m
                             && let Err(reason) = meter.observe(text) {
                                 tracing::warn!(%request_id, reason, "invalid realtime usage; settling verified prefix");
                                 let event = serde_json::json!({"type":"error", "error":{"type":"upstream", "code":codes::UPSTREAM_ERROR, "params":{"reason":reason}}});
-                                let _ = cl_tx.send(AxumMsg::Text(event.to_string().into())).await;
+                                let _ = tokio::time::timeout_at(expires.min(idle_deadline), cl_tx.send(AxumMsg::Text(event.to_string().into()))).await;
                                 break;
                         }
                         let forward = match m {
@@ -418,6 +512,13 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
                         if !tokio::time::timeout_at(expires.min(idle_deadline), cl_tx.send(forward)).await.is_ok_and(|r| r.is_ok()) {
                             break;
                         }
+                        if meter.responses != responses
+                            && let Err(code) = topups.cover(&state, &prep, meter.usage).await {
+                                tracing::info!(%request_id, code, "realtime 余额不足以继续会话，断开");
+                                let event = serde_json::json!({"type":"error", "error":{"type":"billing", "code":code}});
+                                let _ = tokio::time::timeout_at(expires.min(idle_deadline), cl_tx.send(AxumMsg::Text(event.to_string().into()))).await;
+                                break;
+                        }
                     }
                     _ => break,
                 }
@@ -427,6 +528,8 @@ async fn bridge_session(state: AppState, client: WebSocket, prep: Prep) {
     let _ = tokio::time::timeout(Duration::from_secs(2), cl_tx.close()).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), up_tx.close()).await;
 
+    // 先退追加预扣，commit 的「少补」才能从这部分额度里扣
+    topups.release(&state, &prep).await;
     settle_session(&state, &prep, meter.usage, meter.responses).await;
     state
         .sched
@@ -441,8 +544,12 @@ async fn fail_session(state: &AppState, prep: &Prep, mut client: WebSocket, code
         "type": "error",
         "error": {"type": "upstream", "code": code},
     });
-    let _ = client.send(AxumMsg::Text(event.to_string().into())).await;
-    let _ = client.close().await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.send(AxumMsg::Text(event.to_string().into())),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), client.close()).await;
     let pool =
         release_reservation_and_slot(state, &prep.key, prep.request_id, prep.reservation_pool)
             .await;
@@ -501,7 +608,12 @@ async fn settle_session(state: &AppState, prep: &Prep, usage: TokenUsage, respon
         list_price: quote.list_price,
         upstream_cost: None,
         pricing_epoch: Some(book.epoch()),
-        pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
+        pricing_snapshot: super::upstream_cost::snapshot(
+            serde_json::to_value(&quote.snapshot).ok(),
+            prep.channel.0,
+            prep.cost_milli,
+            quote.list_price,
+        ),
         latency_ms: i32::try_from(prep.started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: None,
         is_stream: true,

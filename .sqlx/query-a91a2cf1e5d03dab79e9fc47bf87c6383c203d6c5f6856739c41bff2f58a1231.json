@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT g.mode, p.id, p.url_ciphertext\n                FROM proxy_groups g\n                JOIN proxy_group_members m ON m.group_code = g.code\n                JOIN proxies p ON p.id = m.proxy_id AND p.status = 1\n                WHERE g.code = $1\n                  AND (g.mode = 'rotate' OR p.max_keys IS NULL OR p.max_keys > (\n                       SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id\n                       WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL))\n                ORDER BY COALESCE(p.cooldown_until > now(), false),\n                         CASE WHEN g.mode = 'pinned' THEN (\n                             SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id\n                             WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL) ELSE 0 END,\n                         m.priority DESC,\n                         CASE WHEN g.mode = 'rotate'\n                              THEN -ln(1 - random()) / GREATEST(m.weight, 1) ELSE 0 END,\n                         p.id\n                LIMIT 1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mode",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "url_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "url_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a91a2cf1e5d03dab79e9fc47bf87c6383c203d6c5f6856739c41bff2f58a1231"
+}

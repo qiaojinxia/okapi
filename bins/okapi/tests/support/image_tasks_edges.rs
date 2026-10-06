@@ -236,14 +236,48 @@ async fn result_storage_failure_rolls_back_billing_and_refunds_the_reservation()
     let saved = poll(&env, &task).await;
     assert_eq!(saved["status"], "failed");
     assert!(saved.get("result").is_none());
-    let events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM billing_events WHERE request_id=$1")
-        .bind(Uuid::parse_str(saved["request_id"].as_str().unwrap()).unwrap())
+    env.assert_money(0, 0).await;
+    let request_id = Uuid::parse_str(saved["request_id"].as_str().unwrap()).unwrap();
+    // The successful charge/result transaction rolls back. The failure guard
+    // independently records a zero-value refund audit; it must finish before checking.
+    let events: Vec<(String, i64)> =
+        sqlx::query_as("SELECT event_type,delta_micro FROM billing_events WHERE request_id=$1")
+            .bind(request_id)
+            .fetch_all(&env.state.pg)
+            .await
+            .unwrap();
+    assert_eq!(events, vec![("refund".into(), 0)]);
+    let records: Vec<(i16,i16,i64,i64,i64,Option<i64>)> = sqlx::query_as("SELECT log_type,status,amount_micro,original_amount_micro,discount_micro,upstream_cost_micro FROM billing_records WHERE request_id=$1")
+        .bind(request_id)
+        .fetch_all(&env.state.pg)
+        .await
+        .unwrap();
+    assert_eq!(records, vec![(5, 40, 0, 0, 0, None)]);
+    let payloads: Vec<Value> =
+        sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE payload->>'request_id'=$1")
+            .bind(request_id.to_string())
+            .fetch_all(&env.state.pg)
+            .await
+            .unwrap();
+    assert_eq!(payloads.len(), 1);
+    for (field, expected) in [
+        ("log_type", 5),
+        ("status", 40),
+        ("amount_micro", 0),
+        ("original_amount_micro", 0),
+        ("discount_micro", 0),
+        ("upstream_cost_micro", 0),
+    ] {
+        assert_eq!(payloads[0][field], expected);
+    }
+    assert_eq!(payloads[0]["upstream_cost_known"], false);
+    let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM billing_sync WHERE request_id=$1")
+        .bind(request_id)
         .fetch_one(&env.state.pg)
         .await
         .unwrap();
-    assert_eq!(events, 0);
+    assert_eq!(pending, 0);
     assert_eq!(env.hits.load(Ordering::SeqCst), 1);
-    env.assert_money(0, 0).await;
 }
 
 #[tokio::test]

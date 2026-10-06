@@ -1,0 +1,2681 @@
+{
+  "source": "architecture audit A01–A55",
+  "items": [
+    {
+      "id": "A01",
+      "severity": "P2",
+      "title": "shutdown counter not decremented after task panic",
+      "evidence": [
+        "bins/okapi/src/shutdown.rs:56-64"
+      ],
+      "validation": "isolated task panic repro: in_flight=1, 50ms wait consumed 51ms",
+      "title_zh": "任务退出计数",
+      "fix": "PendingTask 在 Drop 中退计数，panic/取消也可停机",
+      "implementation": "bins/okapi/src/shutdown.rs",
+      "regression": "shutdown 单测：panic_does_not_block_shutdown / cancelling_an_unpolled_task_drains_its_counter",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A02",
+      "severity": "P2",
+      "title": "quadratic candidate ordering plus deep clone per request",
+      "evidence": [
+        "bins/okapi/src/gateway/scheduler.rs:47-77",
+        "bins/okapi/src/gateway/chat.rs:1205-1220"
+      ],
+      "validation": "release CPU microbenchmark median of 7: n=2048 order 2763us; n=8192 order45323us, clone892us; synthetic same layer, no network; see repro-scheduler-layout.log",
+      "title_zh": "候选排序与复制",
+      "fix": "共享 Arc 候选快照、只排列索引；加权无放回排序改为 O(n log n)，时延批量读取",
+      "implementation": "bins/okapi/src/gateway/scheduler.rs",
+      "regression": "scheduler 排序/权重/借用单测；release CPU 基准",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A03",
+      "severity": "P2",
+      "title": "managed OAuth performs two PG lookups even when token not due",
+      "evidence": [
+        "bins/okapi/src/gateway/credentials/oauth.rs:93-133"
+      ],
+      "validation": "source-confirmed; DB load not measured",
+      "title_zh": "未到期 OAuth 热路径",
+      "fix": "使用缓存渠道策略，未到期凭证直接返回，避免每请求重读 PG",
+      "implementation": "bins/okapi/src/gateway/credentials/oauth.rs",
+      "regression": "channel_controls::fresh_managed_oauth_uses_the_cached_policy_without_reading_postgres",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A04",
+      "severity": "P3",
+      "title": "negative per-call price accepted by pricing compile",
+      "evidence": [
+        "crates/okapi-pricing/src/model.rs",
+        "crates/okapi-pricing/src/engine.rs"
+      ],
+      "validation": "reproduced compile negative per-call; admin rejects negative; old-import dec_str_to_micro(..., false) rejects negative. Public ordinary configuration route not established; missing defense at pricing/schema boundary.",
+      "title_zh": "负数按次价格",
+      "fix": "价簿编译边界拒绝负数按次价格",
+      "implementation": "crates/okapi-pricing/src/model.rs",
+      "regression": "okapi-pricing/tests/audit_regressions::negative_fixed_price_is_rejected_by_library_compilation",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A05",
+      "severity": "P3",
+      "title": "unchecked audio multiplication panics at extreme legal RatioFp values",
+      "evidence": [
+        "crates/okapi-pricing/src/engine.rs:387"
+      ],
+      "validation": "debug repro; normal admin ratio bound makes unreachable through ordinary configuration",
+      "title_zh": "音频价格乘法溢出",
+      "fix": "使用 checked 乘法，将溢出转为定价错误",
+      "implementation": "crates/okapi-pricing/src/engine.rs",
+      "regression": "okapi-pricing/tests/audit_regressions::extreme_audio_ratio_returns_error_without_panicking",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A06",
+      "severity": "P2",
+      "title": "inference adapter extension requires central dispatch and store policy edits",
+      "evidence": [
+        "crates/okapi-providers/src/registry.rs",
+        "bins/okapi/src/gateway/dialect.rs",
+        "crates/okapi-store/src/channels.rs:309"
+      ],
+      "validation": "architecture finding; account hooks already plugin based",
+      "title_zh": "推理适配器扩展",
+      "fix": "Transport/Factory 注册表封装传输；网关固定执行链，协议默认值由共享目录持有",
+      "implementation": "crates/okapi-providers/src/inference.rs",
+      "regression": "okapi-providers/tests/audit_regressions::new_inference_transport_requires_only_a_registration；registry 协议合同单测；各网关协议套件",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A07",
+      "severity": "P3",
+      "title": "analytics runtime imports form route-feature cycle",
+      "evidence": [
+        "frontend/src/routes/admin.stats.tsx",
+        "frontend/src/features/analytics/AnalyticsPage.tsx",
+        "frontend/src/features/analytics/TrendView.tsx",
+        "frontend/src/features/analytics/FlowView.tsx",
+        "frontend/src/features/analytics/BreakdownView.tsx"
+      ],
+      "validation": "cycle verified; no startup crash established",
+      "title_zh": "分析页循环依赖",
+      "fix": "将路由状态与解析迁出路由文件，视图只依赖功能层模块",
+      "implementation": "frontend/src/features/analytics/route-state.ts",
+      "regression": "前端构建、类型检查和 charts / analytics 交互",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A08",
+      "severity": "P2",
+      "title": "negative flow graph shows loading forever after success",
+      "evidence": [
+        "frontend/src/features/analytics/FlowView.tsx:68-143"
+      ],
+      "validation": "source-confirmed; no browser reproduction performed",
+      "title_zh": "负值流向无限加载",
+      "fix": "退款负值保留明细并显示说明，成功但为空的图显示空态",
+      "implementation": "frontend/src/features/analytics/FlowView.tsx",
+      "regression": "frontend/e2e/audit-regressions.spec.ts A08",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A09",
+      "severity": "P1",
+      "title": "expiry snapshot races unlimited-key admission, causing durable excess debit",
+      "evidence": [
+        "crates/okapi-ledger/src/operations.rs:127",
+        "crates/okapi-ledger/src/key_budget.rs:56",
+        "crates/okapi-ledger/src/redis.rs:197"
+      ],
+      "validation": "isolated real PG+Redis repro, BEFORE INSERT sleep allows reserve after balance read: initial10000 reserve1000 expire10000 final PG/Redis=-1000; repro-expiry-race.log",
+      "title_zh": "余额到期与无限额 Key 竞争",
+      "fix": "无限额预扣也经过同一用户锁及持久同步栅栏",
+      "implementation": "crates/okapi-ledger/src/key_budget.rs",
+      "regression": "audit_regressions::unlimited_key_admission_waits_for_balance_expiry_fence",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A10",
+      "severity": "P2",
+      "title": "every UserGuard closes its PG session even on successful operations",
+      "evidence": [
+        "crates/okapi-ledger/src/holds.rs:111"
+      ],
+      "validation": "sqlx pool Drop verified; all guarded settle/admit/recovery calls incur connection churn; performance not benchmarked",
+      "title_zh": "用户锁连接反复关闭",
+      "fix": "先武装 close_on_drop，正常释放验证解锁/重置再归还；取消仍关闭锁连接",
+      "implementation": "crates/okapi-ledger/src/holds.rs",
+      "regression": "audit_regressions::user_guard_reuses_unlocked_connection_and_cancellation_releases_lock",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A11",
+      "severity": "P2",
+      "title": "one contended user lock aborts ordinary settlement recovery and later sweep steps",
+      "evidence": [
+        "crates/okapi-ledger/src/sync.rs:153",
+        "bins/okapi/src/worker/mod.rs:443"
+      ],
+      "validation": "isolated real PG+Redis: held first user lock; recovery returns55P03 in5013ms and healthy second user stays pending; dropping lock recovers2",
+      "title_zh": "恢复被单个用户锁阻塞",
+      "fix": "逐用户隔离恢复错误，遇到竞争继续处理其它用户",
+      "implementation": "crates/okapi-ledger/src/sync.rs",
+      "regression": "audit_regressions::locked_user_does_not_starve_other_pending_settlements",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A12",
+      "severity": "P2",
+      "title": "ledger test uses shared channel1 lifetime counters across parallel cases",
+      "evidence": [
+        "crates/okapi-ledger/tests/pg_settlement.rs:309",
+        "crates/okapi-ledger/tests/pg_settlement.rs:345"
+      ],
+      "validation": "isolated full parallel test had single failure with +260 other usage; pg_settlement serial31/31; no active worker needed",
+      "title_zh": "账本测试共享渠道计数",
+      "fix": "每个测试使用独立渠道标识，避免并行污染生命周期累计",
+      "implementation": "crates/okapi-ledger/tests/pg_settlement.rs",
+      "regression": "pg_settlement 31 项及隔离全量回归",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A13",
+      "severity": "P2",
+      "title": "provider bodies copy Bytes into Vec for every request and twice for typed multipart",
+      "evidence": [
+        "crates/okapi-providers/src/openai.rs:159",
+        "crates/okapi-providers/src/openai.rs:477",
+        "crates/okapi-providers/src/anthropic.rs:157",
+        "crates/okapi-providers/src/responses.rs:345",
+        "crates/okapi-providers/src/gemini.rs:98"
+      ],
+      "validation": "source-confirmed; reqwest Bytes Body supported already used count_tokens; recommend Bytes into body and Part::stream with cheap clone",
+      "title_zh": "请求体重复深复制",
+      "fix": "JSON 直接传 Bytes，multipart 使用流与长度，共享底层字节",
+      "implementation": "crates/okapi-providers/src/openai.rs",
+      "regression": "源码检查；gateway_audio / gateway_images / gateway_responses / gateway_usage_modalities",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A14",
+      "severity": "P2",
+      "title": "transport error metadata differs by endpoint; audio/multipart loses Retry-After",
+      "evidence": [
+        "crates/okapi-providers/src/openai.rs:381",
+        "crates/okapi-providers/src/openai.rs:515",
+        "crates/okapi-providers/src/responses.rs:93"
+      ],
+      "validation": "actual OpenAIUpstream mock429 Retry-After3600 returnsNone; body-read status loss source-confirmed",
+      "title_zh": "上游错误元数据不一致",
+      "fix": "错误体有界读取；读取失败仍保留 HTTP 状态与 Retry-After，包含 API Key/订阅计数接口",
+      "implementation": "crates/okapi-providers/src/anthropic.rs",
+      "regression": "okapi-providers/tests/audit_regressions：truncated error / count_tokens；gateway_audio / multipart",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A15",
+      "severity": "P2",
+      "title": "Bedrock clean HTTP EOF discards incomplete final event frame without error",
+      "evidence": [
+        "crates/okapi-providers/src/aws_eventstream.rs",
+        "crates/okapi-providers/src/bedrock.rs"
+      ],
+      "validation": "real HTTP mock valid content delta then half message_stop frame:1output0errors; provider_edges.log",
+      "title_zh": "Bedrock 截断帧静默结束",
+      "fix": "EOF 校验解码缓存，残帧明确报错",
+      "implementation": "crates/okapi-providers/src/aws_eventstream.rs",
+      "regression": "okapi-providers/tests/audit_regressions::bedrock_partial_frame_at_eof_is_an_error",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A16",
+      "severity": "P2",
+      "title": "channel concurrency control applies to chat/count but is omitted from media endpoint execution",
+      "evidence": [
+        "bins/okapi/src/gateway/account_control/mod.rs:144",
+        "bins/okapi/src/gateway/audio.rs:216",
+        "bins/okapi/src/gateway/openai_dialect.rs:224"
+      ],
+      "validation": "repository-wide acquire_slot search; shared execute only gates quota/token policy, no channel permit Realtime also only calls account_control::admit, without scheduler channel slot acquisition (realtime.rs:334).",
+      "title_zh": "媒体遗漏渠道并发控制",
+      "fix": "共享 execute 获取 ChannelPermit；流响应持有许可到 EOF/drop，Realtime/WS 也接入",
+      "implementation": "bins/okapi/src/gateway/account_control/mod.rs",
+      "regression": "audit_regressions::media_routers_share_the_channel_concurrency_fence_and_refund_denied_admission；channel_controls shared-wire test；Realtime / WS 套件",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A17",
+      "severity": "P2",
+      "title": "revocation race caches old authorization with new global version",
+      "evidence": [
+        "bins/okapi/src/gateway/auth.rs:36",
+        "bins/okapi/src/gateway/sched_redis.rs:182"
+      ],
+      "validation": "actual SchedulerRedis+isolatedPG/Redis: DBsnapshot before revoke; disable+auth_del+auth_flush; auth_set(old) afterward:DBunusable,cacheusable under current version",
+      "title_zh": "撤销后旧鉴权快照复活",
+      "fix": "PG 读取前捕获版本，写缓存必须仍是该版本；旧缓存格式失效",
+      "implementation": "bins/okapi/src/gateway/auth.rs",
+      "regression": "audit_regressions::late_auth_snapshot_cannot_restore_revoked_key",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A18",
+      "severity": "P2",
+      "title": "channel concurrency counter fixed TTL resets live permits and stale releases undercount new requests",
+      "evidence": [
+        "bins/okapi/src/gateway/sched_redis.rs:150",
+        "bins/okapi/src/gateway/sched_redis.rs:226",
+        "bins/okapi/src/gateway/chat.rs:1415"
+      ],
+      "validation": "actual SchedulerRedis, simulate key1h expiry using DEL:cap1 admitssecond whilefirstactive; releasefirst permits thirdwhilesecondactive. Chat cleanup notRAII; recommend member leases with permit IDs",
+      "title_zh": "并发 TTL 与旧许可误释放",
+      "fix": "唯一成员租约、Redis 时钟、定时续租；只释放自己的成员；租约丢失终止流",
+      "implementation": "bins/okapi/src/gateway/sched_redis/channel_permit.rs",
+      "regression": "channel_permit 单测：renew / stale release / EOF/drop；共享入口回归",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A19",
+      "severity": "P2",
+      "title": "unauthenticated chat tokenizes all text segments inline; CPU budget is per segment rather than per request",
+      "evidence": [
+        "bins/okapi/src/gateway/chat.rs",
+        "bins/okapi/src/gateway/estimate.rs",
+        "bins/okapi/src/gateway/mod.rs:415"
+      ],
+      "validation": "actual estimate source included in release external repro:32 normal135KB segments(4.32MB)93ms inline CPU; route body limit32MB; no public-load test. Auth runs only after probe construction. See repro-tokenize.log.",
+      "title_zh": "匿名请求先分词且预算按片段",
+      "fix": "四种聊天入口先鉴权；128 KiB 精确分词预算按整请求分配",
+      "implementation": "bins/okapi/src/gateway/estimate.rs",
+      "regression": "audit_regressions::all_chat_ingresses_authenticate_before_parsing_or_estimating_body；estimate 单测；源码预算检查",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A20",
+      "severity": "P2",
+      "title": "Chat-to-Anthropic stream ignores tool_call index and corrupts interleaved parallel arguments",
+      "evidence": [
+        "crates/okapi-providers/src/convert/anthropic_to_openai.rs:467"
+      ],
+      "validation": "actual converter repro:call_a receives only opening brace;call_b receives both continuation fragments; both invalid JSON; repro-convert-faults.log",
+      "title_zh": "并行工具调用串扰",
+      "fix": "按 tool index 保存独立 Anthropic 内容块及参数增量",
+      "implementation": "crates/okapi-providers/src/convert/anthropic_to_openai.rs",
+      "regression": "okapi-providers/tests/audit_regressions::parallel_tool_arguments_keep_distinct_anthropic_blocks",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A21",
+      "severity": "P2",
+      "title": "Chat-to-Responses loses length termination and skips text item completion events",
+      "evidence": [
+        "crates/okapi-providers/src/convert/responses_to_chat.rs:211",
+        "crates/okapi-providers/src/convert/responses_to_chat.rs:496"
+      ],
+      "validation": "actual converter:finish_reason length becomes status completed in JSON and SSE; terminal SSE text output only output_text.done and response.completed. repro-convert-faults.log",
+      "title_zh": "Responses 终态与完成事件",
+      "fix": "length/content_filter 保留 incomplete；补齐文本、内容块和输出项完成事件",
+      "implementation": "crates/okapi-providers/src/convert/responses_to_chat.rs",
+      "regression": "okapi-providers/tests/audit_regressions::responses_preserve_length_and_filter_termination_in_json_and_sse；gateway_responses",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A22",
+      "severity": "P2",
+      "title": "Chat-to-Gemini stream expands vector to unbounded upstream tool_call index",
+      "evidence": [
+        "crates/okapi-providers/src/convert/gemini_to_openai.rs:607"
+      ],
+      "validation": "actual converter accepts index262143 in104 bytes, allocates262144 PendingCall slots (12MiB minimum on64-bit) with0errors; index65535 similarly3MiB. No extreme OOM executed. repro-gemini-index.log",
+      "title_zh": "工具索引无界扩容",
+      "fix": "校验工具调用索引小于 128，恶意值在分配前拒绝",
+      "implementation": "crates/okapi-providers/src/convert/gemini_to_openai.rs",
+      "regression": "okapi-providers/tests/audit_regressions::hostile_tool_indices_fail_before_unbounded_growth",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A23",
+      "severity": "P2",
+      "title": "JetStream consumer serial double-acks delay statistics delivery for up to batch size times timeout",
+      "evidence": [
+        "bins/okapi/src/worker/nats_relay.rs:208",
+        "bins/okapi/src/worker/mod.rs:68"
+      ],
+      "validation": "source upper bound:BATCH_LIMIT500 times5s serial ack=2500s, then new CH batch delivery; no per-tick timeout except shutdown. PG handoff is already committed, so bounded concurrent acks are safe with receipt idempotency. No outage fault injection.",
+      "title_zh": "JetStream 串行双确认",
+      "fix": "PG 持久化后最多 32 并行确认，单笔 5 秒、整批 10 秒截止；回放靠收据幂等",
+      "implementation": "bins/okapi/src/worker/nats_relay.rs",
+      "regression": "acknowledgement_tests::stalled_acknowledgements_have_a_batch_deadline；nats_relay 套件",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A24",
+      "severity": "P2",
+      "title": "frontend logout and subsequent login preserve previous user private query cache",
+      "evidence": [
+        "frontend/src/components/layout.tsx:266",
+        "frontend/src/features/auth/LoginForm.tsx:131",
+        "frontend/src/hooks/use-auth.ts:28",
+        "frontend/src/lib/query-keys.ts"
+      ],
+      "validation": "actual QueryClient + actual setKey/clearKey + qk.me repro:afterA logout/B login activeKeyB but rendered userA admin100, backendFetches0 during15s staleTime; profileA remainscached. Repro-auth-cache.log. Backend authorization not proven bypassed.",
+      "title_zh": "切换账号残留前账号缓存",
+      "fix": "统一 auth reset，清查询缓存/取消任务，旧 epoch 响应拒绝入新上下文",
+      "implementation": "frontend/src/lib/api.ts",
+      "regression": "frontend/e2e/audit-regressions.spec.ts A24；auth-routing / profile 交互",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A25",
+      "severity": "P3",
+      "title": "concurrent OAuth first login commits orphan users when identity insert loses conflict",
+      "evidence": [
+        "crates/okapi-store/src/identity.rs:188"
+      ],
+      "validation": "isolated separate PG database, actual link_oauth_user:8 concurrentcalls return same winner but create8 users and1identity (7orphans). No credit or privilege effect established. repro-oauth-race.log",
+      "title_zh": "OAuth 首次登录孤儿用户",
+      "fix": "identity 竞争失败回滚整笔临时用户事务，再读取赢家",
+      "implementation": "crates/okapi-store/src/identity.rs",
+      "regression": "audit_regressions::concurrent_oauth_first_login_creates_no_orphan_users",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A26",
+      "severity": "P2",
+      "title": "sealing legacy credentials overwrites concurrent rotated credentials with stale snapshot",
+      "evidence": [
+        "crates/okapi-store/src/credential.rs:199"
+      ],
+      "validation": "actual seal_existing in isolated separatePGdatabase1000syntheticrows; rotate last credential afterfirstsealed; finalcredential synthetic_old instead of synthetic_rotated. UPDATEidonly lacksCAS. repro-seal-race.log",
+      "title_zh": "密封覆盖新轮换凭证",
+      "fix": "按 id 与原字节 CAS 更新；仅成功更新计数",
+      "implementation": "crates/okapi-store/src/credential.rs",
+      "regression": "audit_regressions::credential_sealing_preserves_a_concurrent_rotation",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A27",
+      "severity": "P2",
+      "title": "development reset omits durable NATS stream, permitting old events to repopulate fresh statistics",
+      "evidence": [
+        "scripts/dev-reset.sh:23",
+        "bins/okapi/src/worker/nats_relay.rs:203",
+        "bins/okapi/src/worker/delivery.rs:26"
+      ],
+      "validation": "source-confirmed:resetPG/Redis/CH withoutpurgingBILLING; newPGreceipts absent; consumer admits historical validJS payloads thenwritesCH. No live reset executed; scopedtoNATS-enableddevelopmentreset.",
+      "title_zh": "开发重置遗留 NATS 历史",
+      "fix": "重置 BILLING 流及消费状态，保留其它流；活进程下拒绝重置",
+      "implementation": "scripts/nats-reset-stream.py",
+      "regression": "audit_regressions::development_reset_removes_billing_history_and_preserves_unrelated_streams",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A28",
+      "severity": "P2",
+      "title": "worker assembles a second complete gateway resource graph, violating deployment connection budget",
+      "evidence": [
+        "bins/okapi/src/worker/mod.rs:95-123",
+        "bins/okapi/src/gateway/mod.rs:69-70",
+        "bins/okapi/src/gateway/mod.rs:121-124",
+        "deploy/k8s/okapi.yaml:11-17",
+        "scripts/guard-deploy-manifests.py:103"
+      ],
+      "validation": "Source-confirmed independent connect_pg/connect_redis in worker and build_state. Worker reserves two pools of 16, so declared template maximum is 168 rather than 152. Still within current 200 budget; no outage measured. Shared app state also couples gateway assembly to console stats cache.",
+      "title_zh": "worker 重复数据库资源图",
+      "fix": "注入已经创建的 PG/Redis 资源；不再构造第二套连接池",
+      "implementation": "bins/okapi/src/worker/mod.rs",
+      "regression": "源码资源路径检查；guard-deploy-manifests.py；worker / nats / reconcile 套件",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A29",
+      "severity": "P2",
+      "title": "Realtime error delivery can wait outside the session deadline and delay refund/settlement",
+      "evidence": [
+        "bins/okapi/src/gateway/realtime.rs:426-428",
+        "bins/okapi/src/gateway/realtime.rs:463-464"
+      ],
+      "validation": "Source-confirmed unbounded client send/close awaits on invalid-usage and failure paths; regular forwarding and shutdown use deadlines, these branches bypass them. No slow-client fault injection performed.",
+      "title_zh": "Realtime 错误发送绕过截止",
+      "fix": "所有错误发送和 close 使用有界 deadline，避免结算无限等待客户端",
+      "implementation": "bins/okapi/src/gateway/realtime.rs",
+      "regression": "gateway_realtime / gateway_responses_ws 截止与退款套件；错误路径源码检查",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A30",
+      "severity": "P1",
+      "title": "Video duration is silently clamped for billing while the original quantity is forwarded upstream",
+      "evidence": [
+        "bins/okapi/src/gateway/videos.rs:43-50",
+        "bins/okapi/src/gateway/videos.rs:260-267"
+      ],
+      "validation": "Actual isolated gateway + PostgreSQL + Redis + HTTP mock: request seconds=120 and upstream received 120, while amount_micro=60000 at 1000 microUSD/second and pricing_snapshot.media_units=60. Applies to compatible upstreams accepting durations over 60 seconds; official upstreams may reject these inputs. Evidence: repro-video-duration.log.",
+      "title_zh": "视频数量与计费不一致",
+      "fix": "统一校验/规范化 seconds：缺省 4，显式整数 1..60，非法输入在预扣前拒绝",
+      "implementation": "bins/okapi/src/gateway/videos.rs",
+      "regression": "视频 seconds 边界单测；gateway_videos 计费及失败退款",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A31",
+      "severity": "P1",
+      "title": "Deployment recommendation of PgBouncer transaction pooling conflicts with session advisory locks protecting the ledger",
+      "evidence": [
+        "deploy/k8s/okapi.yaml:16",
+        "crates/okapi-ledger/src/holds.rs:104-125",
+        "deploy/docker-compose.yml:30"
+      ],
+      "validation": "Source verified; official PgBouncer features table explicitly marks session-level advisory locks incompatible with transaction pooling. Conditional on deploying the recommended pool mode; direct PostgreSQL is unaffected. No PgBouncer fault injection performed. https://www.pgbouncer.org/features.html",
+      "title_zh": "PgBouncer 锁语义不兼容",
+      "fix": "部署模板与文档统一要求 session pooling 或直连，移除 transaction pooling 推荐",
+      "implementation": "deploy/docker-compose.yml",
+      "regression": "部署模板静态检查；实际 PG 用户锁竞争/取消测试；未部署 PgBouncer 实例",
+      "status": "fixed_verified",
+      "verification_scope": "deployment contract and static template checks; PostgreSQL advisory-lock regression; no PgBouncer instance"
+    },
+    {
+      "id": "A32",
+      "severity": "P3",
+      "title": "Generic ClickHouse client performs lexical-blind calendar rewrites and corrupts SQL string literals",
+      "evidence": [
+        "crates/okapi-store/src/ch/calendar.rs:286-349"
+      ],
+      "validation": "Actual ChClient against ClickHouse 24.8 in machine timezone America/Los_Angeles: SELECT 'today()', 'timezone()', or 'toDate(hour)' each fails with a syntax error, while bound String parameters remain correct. This is an internal query-composition defect, not demonstrated SQL injection. Evidence: repro-calendar-literals.log.",
+      "title_zh": "SQL 日历重写损坏字面量",
+      "fix": "词法保护单引号/双引号/反引号/注释等非代码段，只重写 SQL 代码",
+      "implementation": "crates/okapi-store/src/ch/calendar/lexical.rs",
+      "regression": "audit_regressions::calendar_rewrites_leave_literals_and_identifiers_unchanged（实际 CH）；lexical 单测",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A33",
+      "severity": "P2",
+      "title": "Control-plane JSON collectors bypass shared response limits and silently drop stream errors",
+      "evidence": [
+        "bins/okapi/src/console/oauth.rs:275-285",
+        "bins/okapi/src/console/auth_web.rs:449-458",
+        "bins/okapi/src/console/admin.rs:3268-3276",
+        "bins/okapi/src/console/channel_balance.rs:271-279"
+      ],
+      "validation": "Full source review: OAuth and Turnstile collect unbounded Vec responses; model and balance collection impose different size limits but all four use while let Some(Ok(chunk)), hiding stream failures. PassUpstream has a five-minute timeout and bounded non-2xx bodies but no size cap on successful streams. No memory-exhaustion load test.",
+      "title_zh": "管理面响应无限读取/吞错",
+      "fix": "共享有界 collector，传输错误传播；OAuth/Turnstile/模型/余额明确设置容量",
+      "implementation": "crates/okapi-providers/src/limits.rs",
+      "regression": "okapi-providers/tests/audit_regressions::bounded_collector_propagates_middle_stream_errors；console OAuth / balance / manage",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A34",
+      "severity": "P3",
+      "title": "Raw Axum Path extraction bypasses the JSON error contract for malformed numeric route parameters",
+      "evidence": [
+        "bins/okapi/src/console/channel_oauth.rs:387",
+        "bins/okapi/tests/route_error_envelope.rs:348"
+      ],
+      "validation": "Both route_error_envelope probes fail identically against ClickHouse 24.8: key=probe is rejected with a plain-text 400 before the guard executes. This is not a demonstrated permission bypass; authorization probes must use valid typed IDs.",
+      "title_zh": "Path 参数错误返回纯文本",
+      "fix": "统一 JSON Path 提取器，类型错误遵循 AppError 合同",
+      "implementation": "bins/okapi/src/gateway/extract.rs",
+      "regression": "route_error_envelope：匿名和普通用户逐路由检查",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A35",
+      "severity": "P2",
+      "title": "Transient settings reads are cached as missing and reopen closed registration for the cache TTL",
+      "evidence": [
+        "bins/okapi/src/gateway/state.rs:298-312",
+        "bins/okapi/src/console/registration.rs:59-68"
+      ],
+      "validation": "Actual isolated PostgreSQL/Redis/console: stored registration_policy.mode=closed; forced pool read failure caches None, replacing only the pool with a healthy connection leaves the cached policy Open, and POST /auth/register returns 200 creating a user. Evidence: repro-settings-fail-open.log.",
+      "title_zh": "配置读取失败开放注册",
+      "fix": "读取失败不写缺失缓存；注册策略读取/解析失败明确拒绝",
+      "implementation": "bins/okapi/src/console/registration.rs",
+      "regression": "audit_regressions::database_failure_does_not_cache_an_open_registration_policy",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A36",
+      "severity": "P2",
+      "title": "Non-atomic session/index writes can create a valid session omitted by revoke-all",
+      "evidence": [
+        "bins/okapi/src/gateway/sched_redis.rs:274-299",
+        "bins/okapi/src/gateway/sched_redis.rs:398-407"
+      ],
+      "validation": "Actual isolated Redis ACL fault injection permits SET but rejects SADD. web_session_set leaves a valid session with no index, and web_session_revoke_user returns normally while web_session_get still returns its user ID. Synthetic keys and ACL user removed. Evidence: repro-session-index.log.",
+      "title_zh": "会话索引与撤销非原子",
+      "fix": "Lua 原子维护映射、索引、元数据；索引错误不能产生有效孤儿会话；三者 TTL 同步滑动",
+      "implementation": "bins/okapi/src/gateway/sched_redis.rs",
+      "regression": "audit_regressions::sessions_reject_orphans_slide_all_ttls_and_revoke_atomically",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A37",
+      "severity": "P3",
+      "title": "Byte slicing of unvalidated UTF-8 panics in API version validation and upstream balance parsing",
+      "evidence": [
+        "bins/okapi/src/console/admin.rs:432",
+        "bins/okapi/src/console/channel_balance.rs:120"
+      ],
+      "validation": "Exact function bodies extracted from current source and executed under catch_unwind: api_version=aaaaaaaaaé and balance string=1.aaaaaé each panic on non-character-boundary slicing. Scope: privileged channel configuration or malformed upstream balance responses; not a demonstrated entire-process crash. Evidence: repro-unicode-boundaries.log.",
+      "title_zh": "未校验 UTF-8 字节切片",
+      "fix": "API 版本先校验 ASCII，金额小数先校验数字再截取",
+      "implementation": "bins/okapi/src/console/channel_balance.rs",
+      "regression": "API version / decimal parser 非 ASCII 边界单测",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A38",
+      "severity": "P2",
+      "title": "Concurrent replacement of pool/group memberships can produce a union instead of either requested replacement",
+      "evidence": [
+        "crates/okapi-store/src/admin.rs:782",
+        "crates/okapi-store/src/admin.rs:1031"
+      ],
+      "validation": "Isolated PostgreSQL fault injection using the actual public store functions: pause the first replacement before insert, commit a second replacement, then resume the first. Both channel pools and user groups end with [audit-a, audit-b] rather than either single requested set. Transactions alone do not serialize aggregate replacement; parent row locking or version CAS is needed. Only synthetic records were used; pause triggers were removed. Evidence: repro-replace-members.log.",
+      "title_zh": "成员替换并发产生并集",
+      "fix": "替换前锁渠道/用户父行，空成员集也可串行化",
+      "implementation": "crates/okapi-store/src/admin.rs",
+      "regression": "audit_regressions::replacing_empty_membership_is_serialized_on_the_parent",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A39",
+      "severity": "P2",
+      "title": "Channel duplication loses subscription credential kind and pool priority/weight overrides",
+      "evidence": [
+        "crates/okapi-store/src/mutate.rs:144",
+        "crates/okapi-store/src/oauth_credentials.rs:50",
+        "bins/okapi/src/console/admin.rs:303"
+      ],
+      "validation": "Actual duplicate_channel in isolated PostgreSQL: source credential_kind=1 becomes 0 in the copied key; source pool overrides (7,11) become (None,None). OAuth target lookup requires kind 1 and console metadata selection filters kind 1, so the copy loses OAuth management identity. The copied channel is intentionally disabled; routing changes occur if it is subsequently enabled. No real credentials were used. Evidence: repro-duplicate-metadata.log.",
+      "title_zh": "复制渠道丢失账号与池元数据",
+      "fix": "保留 credential_kind 与池 priority/weight 覆盖",
+      "implementation": "crates/okapi-store/src/mutate.rs",
+      "regression": "audit_regressions::duplicate_preserves_oauth_kind_and_pool_overrides",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A40",
+      "severity": "P1",
+      "title": "MCP user_ban bypasses the super-admin and self-target protections enforced by HTTP user management",
+      "evidence": [
+        "bins/okapi/src/console/mcp.rs:912",
+        "bins/okapi/src/console/mcp.rs:920",
+        "bins/okapi/src/console/manage.rs:677",
+        "crates/okapi-store/src/mutate.rs:437"
+      ],
+      "validation": "Real isolated HTTP/MCP calls with a role-10 custom operator granted only user.manage and mcp.write. HTTP POST /admin/users/{super_admin}/manage returns 403 super_admin_protected. MCP user_ban confirm=true returns success; target remains role=100 but status becomes 2. Requires MCP writes enabled and a privileged operator; no ordinary-user exploit claimed. Share actor-aware domain service and store-level conditional mutation across HTTP/MCP. Evidence: repro-mcp-protected-user.log.",
+      "title_zh": "MCP 封禁绕过超管保护",
+      "fix": "HTTP/MCP 复用 actor-aware 管理策略，并保留存储层条件保护",
+      "implementation": "bins/okapi/src/console/user_management.rs",
+      "regression": "audit_regressions::http_and_mcp_share_protected_user_policy",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A41",
+      "severity": "P2",
+      "title": "Malformed routing hints silently discard valid zero-retention and no-fallback requirements",
+      "evidence": [
+        "bins/okapi/src/gateway/routing_prefs.rs:92",
+        "bins/okapi/src/gateway/routing_prefs.rs:97",
+        "bins/okapi/src/gateway/routing_prefs.rs:115"
+      ],
+      "validation": "Actual parse/strip functions: a valid provider.zdr=true and allow_fallbacks=false combined with a string max_price.prompt produces defaults zero_retention=false and allow_fallbacks=true. A valid JSON escaped provider key (\\u0070rovider) also bypasses both parsing and stripping. This is a policy downgrade rather than a SQL or authorization bypass. Reject malformed directives or parse independent fields without weakening explicit privacy constraints; do not treat confidentiality requirements as optional hints. Evidence: repro-routing-policy.log.",
+      "title_zh": "路由隐私约束悄然降级",
+      "fix": "路由指令解析失败返回 400；JSON 转义键按同一解析结果识别/移除",
+      "implementation": "bins/okapi/src/gateway/routing_prefs.rs",
+      "regression": "routing_prefs 单测；gateway_routing_prefs",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A42",
+      "severity": "P2",
+      "title": "Team API-key identity is collapsed into the wallet owner, permitting cross-member key revocation and continued use after a member ban",
+      "evidence": [
+        "crates/okapi-store/src/auth.rs:175",
+        "bins/okapi/src/console/portal.rs:902",
+        "crates/okapi-store/src/mutate.rs:437",
+        "bins/okapi/src/console/teams.rs:257"
+      ],
+      "validation": "Actual isolated team members and keys: member A uses their bearer key to DELETE /api/me/keys/{member-B-key}, receiving 200 and setting B key deleted_at. After banning A through the actual store management operation and flushing auth/revoking sessions, authenticate_data_plane still accepts A team key because only the team wallet owner status is loaded. Distinguish acting member, wallet owner, and resource authorization; revalidate membership/member status and require owner/admin authority for other-member management. Evidence: repro-team-member-ban.log.",
+      "title_zh": "团队身份与钱包所有人混淆",
+      "fix": "分离 actor/wallet 身份；验证成员存在/状态；个人 Key 操作仅授权属主",
+      "implementation": "crates/okapi-store/src/auth.rs",
+      "regression": "audit_regressions::team_members_cannot_delete_peer_keys_and_banned_members_cannot_authenticate；console_teams",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A43",
+      "severity": "P2",
+      "title": "Analytics repeats string-based grain, table and measurement dispatch across independently maintained query builders",
+      "evidence": [
+        "bins/okapi/src/console/cache_usage.rs:74",
+        "bins/okapi/src/console/input_units.rs:38",
+        "bins/okapi/src/console/token_details.rs:170",
+        "bins/okapi/src/console/output_rate.rs:80",
+        "bins/okapi/src/console/usage_sources.rs:118",
+        "bins/okapi/src/console/analysis_source.rs:267",
+        "bins/okapi/src/console/measurement_coverage.rs:125"
+      ],
+      "validation": "Architecture finding, not a demonstrated wrong statistic: five builders repeat the same table-to-time-column match; coverage maintains a separate observation-table registry, and analysis_source chooses measurement ownership by field-name lists/prefixes. Adding a grain or measurement requires coordinated edits across builders, coverage probes, totals and schema. Existing isolated CH 24.8 analytics tests pass. Introduce typed Grain/CalendarPlan and ObservationSourceSpec with shared query scaffolding/field ownership, while retaining separate cache/provenance recovery strategies; do not hide distinct population semantics inside one untyped generic SQL template.",
+      "title_zh": "分析查询重复维护观测字段",
+      "fix": "共享 Source/Kind/Grain 目录与字段归属，保留各来源独立恢复语义",
+      "implementation": "bins/okapi/src/console/observation_sources.rs",
+      "regression": "目录唯一性/完整性单测；console_analytics / console_stats / 观测来源套件",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A44",
+      "severity": "P2",
+      "title": "Stacked analytics drops financial_records while retaining known costs, so complete-cost buckets lose coverage and margin",
+      "evidence": [
+        "bins/okapi/src/console/analytics.rs:1163",
+        "bins/okapi/src/console/analytics.rs:685",
+        "bins/okapi/src/console/analytics.rs:1203"
+      ],
+      "validation": "Actual HTTP query against separate isolated ClickHouse 24.8 database okapi_audit_stack, with two known-cost synthetic events. Plain trend returns requests=2, financial_records=2, cost_coverage_bp=10000, margin_micro=1000. Same query with stack=model returns the displayed bucket requests=2, financial_records=0, cost_known_records=2, cost_coverage_bp=null, margin_micro=null; window total remains correct. fold_stacked manually lists additive fields but omits financial_records. Share a typed additive metric record/registry across sum_metric_rows, fold_rows and fold_stacked and verify bucket/totals conservation. Evidence: repro-stacked-cost.log.",
+      "title_zh": "堆叠趋势丢失成本覆盖分母",
+      "fix": "统一加法指标目录，financial_records 在分桶/折叠/合计中守恒",
+      "implementation": "bins/okapi/src/console/analytics.rs",
+      "regression": "audit_regressions::stacked_cost_buckets_preserve_financial_records_coverage_and_margin (real HTTP + ClickHouse)",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A45",
+      "severity": "P2",
+      "title": "Margin breaker evaluation overwrites a concurrent administrator lift using a stale Redis snapshot",
+      "evidence": [
+        "bins/okapi/src/worker/margin_breaker.rs:135",
+        "bins/okapi/src/worker/margin_breaker.rs:163",
+        "bins/okapi/src/worker/margin_breaker.rs:197",
+        "bins/okapi/src/margin.rs:151"
+      ],
+      "validation": "Actual public evaluate function with isolated PostgreSQL/Redis and a local ClickHouse fault-injection server. Pause the sample query after existing blocks have been read; administrator writes Lifted for 24h; resume a qualifying negative-margin sample. State changes Lifted -> Blocked with a 3600s deadline, defeating the documented manual override. Atomic compare/update (Lua or versioned CAS) must honor the live Lifted state and expire/delete must use the same fencing. Evidence: repro-margin-lift-race.log.",
+      "title_zh": "毛利熔断覆盖人工解除",
+      "fix": "评估与清理使用 Redis CAS，过期判断以当前条目为准",
+      "implementation": "bins/okapi/src/margin.rs",
+      "regression": "audit_regressions::old_margin_evaluation_cannot_overwrite_manual_lift",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A46",
+      "severity": "P2",
+      "title": "Pricing sync returns a whole-batch error after persisting earlier model updates and does not audit those partial writes",
+      "evidence": [
+        "bins/okapi/src/console/ratio_sync.rs:407",
+        "bins/okapi/src/console/ratio_sync.rs:425",
+        "bins/okapi/src/console/ratio_sync.rs:446",
+        "bins/okapi/src/console/ratio_sync.rs:477"
+      ],
+      "validation": "Actual authenticated HTTP apply request against isolated PG/Redis: first existing model changes completion_ratio 1->3; second missing model supplies only cache_ratio and fails missing model_ratio. Endpoint returns 400 but first model retains completion_ratio=3; audit call occurs after the loop, so this partial mutation is not recorded by that call. Changes remain drafts (published:false), so no immediate runtime price change is claimed. Prevalidate the complete plan, patch affected axes transactionally under row/version fencing, and commit one audited outcome. Evidence: repro-ratio-apply-partial.log.",
+      "title_zh": "定价批量写入部分成功",
+      "fix": "先校验完整批次，排序锁模型，价格与审计在同一事务提交",
+      "implementation": "bins/okapi/src/console/ratio_sync.rs",
+      "regression": "audit_regressions::failed_pricing_batch_rolls_back_every_model",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A47",
+      "severity": "P2",
+      "title": "Global modal keyboard handlers can confirm a destructive action when Enter is pressed on Cancel and close a background drawer on Escape",
+      "evidence": [
+        "frontend/src/components/ui/confirm.tsx:59",
+        "frontend/src/components/ui/confirm.tsx:67",
+        "frontend/src/components/ui/drawer.tsx:55",
+        "frontend/src/hooks/use-modal-focus.ts:60"
+      ],
+      "validation": "Real shared Drawer/useConfirm components bundled outside the repository and exercised in headless Chromium (isolated UI, no API writes). After matching requireText=audit, focus Cancel and press Enter: onConfirm counter becomes 1 instead of 0. Opening confirmation over a drawer and pressing Escape yields parent dialog count 0, confirmation count 1, even after rendering has settled: the background drawer closes. Only focus trap is stack aware; global action/escape handlers are not. Scope Enter handling to the text input/form and let native Cancel/Confirm button semantics apply; centralize top-layer Escape, IME handling, focus restoration and scroll lock in a modal lifecycle component. Evidence: repro-modal-keyboard.log.",
+      "title_zh": "模态键盘误确认/关错层",
+      "fix": "共享栈管理顶层 Escape、滚动锁与焦点；取消按钮遵循原生 Enter，排除 IME",
+      "implementation": "frontend/src/hooks/use-modal-focus.ts",
+      "regression": "write-forms 嵌套确认 Cancel Enter/Escape；security-layout 移动端弹层",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A48",
+      "severity": "P3",
+      "title": "Invalid concurrency text in the existing-key editor silently serializes as null and removes the configured cap",
+      "evidence": [
+        "frontend/src/features/channels/KeyParamRow.tsx:57",
+        "frontend/src/features/channels/account-controls/policy.ts:15",
+        "bins/okapi/src/console/admin.rs:916",
+        "bins/okapi/src/console/admin.rs:949"
+      ],
+      "validation": "Actual KeyParamRow bundled outside the repo and exercised in isolated headless Chromium, with all API traffic intercepted. Existing capped key edited to concurrency text invalid and saved: outgoing JSON is {weight:1,max_concurrency:null}. JavaScript NaN serializes as null; backend double-option null deliberately means clear the cap, so this is not a rejected bad input. No actual server key was changed in this UI repro. Use the same checked limit parser and distinguish unchanged / unlimited / invalid. Evidence: repro-channel-form.log.",
+      "title_zh": "非法并发输入清空上限",
+      "fix": "共享正整数解析器，区分无修改、无限制和非法值，非法状态禁保存",
+      "implementation": "frontend/src/features/channels/KeyParamRow.tsx",
+      "regression": "channel-controls / write-forms 并发参数交互",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A49",
+      "severity": "P3",
+      "title": "Mutable field names used as React row keys remount channel header and injected-field inputs after each character",
+      "evidence": [
+        "frontend/src/features/channels/ChannelDrawer.tsx:78",
+        "frontend/src/features/channels/ChannelDrawer.tsx:149"
+      ],
+      "validation": "Actual ChannelDrawer built outside the repository and exercised in isolated headless Chromium. Typing seed into an injected-field name yields only s and focus is lost; typing test into a custom-header name yields only t and focus is lost. These row keys include the edited name, so the row remounts every keystroke. No real API writes. Use stable row identities and a shared key-value editor whose draft survives key edits. Evidence: repro-channel-form.log.",
+      "title_zh": "可编辑名称作 React Key",
+      "fix": "自定义 Header 与注入字段编辑使用稳定行标识，键入不重挂载",
+      "implementation": "frontend/src/features/channels/ChannelDrawer.tsx",
+      "regression": "write-forms 连续输入并验证焦点保留",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A50",
+      "severity": "P2",
+      "title": "Editing a disabled or date-scoped pricing rule silently enables it and erases its validity window",
+      "evidence": [
+        "frontend/src/features/rules/RuleDrawer.tsx:79",
+        "frontend/src/features/rules/types.ts:59",
+        "bins/okapi/src/console/admin.rs:1817",
+        "crates/okapi-store/src/admin.rs:951"
+      ],
+      "validation": "Actual RuleDrawer in isolated headless Chromium: initial enabled=false and validity 2099-01-01..2099-02-01, Save payload omits enabled/valid_from/valid_to. Replayed that exact payload (only rule_code changed to synthetic unique code) through the real console router against isolated PG/Redis: HTTP 200, stored enabled=true and both validity bounds NULL. Draft pricing only; publication remains required, so this is not immediate live-price mutation. Full-replacement vs partial-update contract must be explicit; preserve unedited lifecycle fields or use a typed patch. Evidence: repro-rule-ui.log and repro-rule-lifecycle.log.",
+      "title_zh": "编辑规则丢失状态/有效期",
+      "fix": "完整替换表单保留 enabled/valid_from/valid_to",
+      "implementation": "frontend/src/features/rules/RuleDrawer.tsx",
+      "regression": "frontend/e2e/audit-regressions.spec.ts A50",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A51",
+      "severity": "P2",
+      "title": "A late refund lookup can show bill A in confirmation while submitting mutable input bill B",
+      "evidence": [
+        "frontend/src/features/ops/RefundCard.tsx:47",
+        "frontend/src/features/ops/RefundCard.tsx:52",
+        "frontend/src/features/ops/RefundCard.tsx:64",
+        "frontend/src/features/ops/RefundCard.tsx:148"
+      ],
+      "validation": "Actual RefundCard in isolated Chromium, all requests intercepted. Start lookup for valid UUID A, edit input to valid UUID B before response, then release A response. Preview/confirmation shows User A and USD1.00, but outgoing refund POST contains request_id B. No real refund/financial changes. Use lookup variables/operation identity, ignore responses for stale drafts, and submit the immutable preview request_id captured at confirmation. Evidence: repro-refund-preview.log.",
+      "title_zh": "退款预览与提交目标错配",
+      "fix": "只接受当前查询身份的回包；确认操作捕获不可变 request_id 与 reason",
+      "implementation": "frontend/src/features/ops/RefundCard.tsx",
+      "regression": "frontend/e2e/audit-regressions.spec.ts A51",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A52",
+      "severity": "P2",
+      "title": "Portal cache trend ignores observation coverage and turns unknown cache rates into zero or diluted percentages",
+      "evidence": [
+        "frontend/src/features/portal-overview/usage-chart-data.ts:24",
+        "frontend/src/features/portal-overview/usage-chart-data.ts:33",
+        "frontend/src/features/portal-overview/cache-metrics.ts:8",
+        "frontend/src/features/portal-overview/SpendTrendView.tsx:22"
+      ],
+      "validation": "Ran the actual TypeScript usageChart/cacheHit functions via the installed TypeScript transpiler outside the repo. Identical unobserved cache data: KPI {bp:null,samples:0}, trend value 0. Partial sample: measured 50 cache / 100 observed prompt with 200 total prompt gives KPI 50% (partial 1/2 requests), trend 25% without coverage distinction. Centralize coverage-aware rate aggregation; render unknown gaps and label paired partial samples. No API writes. Evidence: repro-cache-chart.log.",
+      "title_zh": "缓存趋势把未知稀释成零",
+      "fix": "使用配对已观测请求口径聚合；未知显示空隙，部分覆盖明确说明",
+      "implementation": "frontend/src/features/portal-overview/cache-metrics.ts",
+      "regression": "frontend/e2e/audit-regressions.spec.ts A52；charts 缓存图",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A53",
+      "severity": "P3",
+      "title": "Admin log deep-link time ranges truncate seconds before the query is sent",
+      "evidence": [
+        "frontend/src/features/admin-logs/AdminLogsPage.tsx:102",
+        "frontend/src/features/admin-logs/AdminLogsPage.tsx:116",
+        "frontend/src/features/admin-logs/AdminLogsPage.tsx:213",
+        "frontend/src/features/admin-logs/AdminLogsPage.tsx:256"
+      ],
+      "validation": "Extracted and transpiled the actual four pure functions through the TypeScript AST. URL range 12:34:56.789Z to 12:36:59.999Z becomes HTTP query 12:34:00Z to 12:36:00Z even without editing. The ending 59.999 seconds are excluded. Keep canonical query instants separate from minute-resolution form drafts. Evidence repro-log-range.log; no writes.",
+      "title_zh": "日志时间范围丢秒/毫秒",
+      "fix": "输入保留秒和毫秒，深链接到查询保持原始时刻",
+      "implementation": "frontend/src/routes/admin.logs.tsx",
+      "regression": "frontend/e2e/audit-regressions.spec.ts A53",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A54",
+      "severity": "P2",
+      "title": "Default E2E server reuse can mutate the running demo database and overwrite its site notice",
+      "evidence": [
+        "frontend/playwright.config.ts:11",
+        "frontend/playwright.config.ts:15",
+        "frontend/e2e/smoke.spec.ts:215",
+        "frontend/e2e/smoke.spec.ts:351",
+        "frontend/e2e/smoke.spec.ts:359",
+        "frontend/e2e/smoke.spec.ts:380",
+        "frontend/e2e/screenshots.spec.ts:150"
+      ],
+      "validation": "Source-confirmed conditional test-environment defect; not executed against any business server. The default config uses console port 8081 and reuseExistingServer=true. Non-mocked smoke tests log in with the demo admin, POST a site_notice, then overwrite it with a disabled empty notice instead of restoring the prior value. They also register users/create keys; screenshots opt-in additionally mutate settings/health. If the running server contains the demo admin, a normal E2E run can change its shared data. Use a mandatory disposable environment and separate fully mocked from real-API suites; original state restoration alone does not make shared integration tests isolated.",
+      "title_zh": "E2E 复用业务服务",
+      "fix": "默认仅使用独立前端预览与接口桩，集成配置必须显式隔离且禁止复用服务器",
+      "implementation": "frontend/playwright.config.ts",
+      "regression": "完整前端交互回归；integration 配置检查",
+      "status": "fixed_verified"
+    },
+    {
+      "id": "A55",
+      "severity": "P2",
+      "title": "Rust integration fixtures load the developer database and overwrite global security/payment/mail settings without restoring them",
+      "evidence": [
+        "bins/okapi/tests/gateway_oauth_channels.rs:351",
+        "bins/okapi/tests/gateway_oauth_channels.rs:358",
+        "bins/okapi/tests/console_subscriptions.rs:154",
+        "bins/okapi/tests/console_smtp.rs:186",
+        "bins/okapi/tests/console_smtp.rs:597",
+        "bins/okapi/tests/console_smtp.rs:664",
+        "bins/okapi/tests/console_smtp.rs:698",
+        "bins/okapi/tests/console_portal_pages.rs:324",
+        "bins/okapi/tests/request_population.rs:196",
+        "bins/okapi/tests/request_population.rs:379"
+      ],
+      "validation": "Source-confirmed conditional test-environment risk, not run against any business database. Default dotenv DATABASE_URL/OKAPI_REDIS_URL are accepted without a disposable-environment check. OAuth fixtures set shared ssrf_policy allow_http=true/allow_private=true; subscription fixtures replace payment_epay; SMTP fixtures replace smtp/notify_channels then delete smtp without restoring its prior value and leave notify_channels. UUID users/models do not isolate global settings or worker queue scans. Retention/image-batch fixtures already use their own temporary databases and are positive examples, not affected by the global retention-drop allegation. Enforce per-suite disposable PG and Redis namespace and unique CH/NATS resources; restore injections on failure via scoped lifecycle. CH 24.8 serial full run additionally failed request_population only at the unscoped site total (13 != 1): preceding own-user populations, refund, token and raw-event assertions passed. Its mirror helper drains the shared PG outbox into its private CH database; not evidence of double charging. The same test passed in a newly created PostgreSQL database and Redis DB 4 on ClickHouse 24.8 (1 passed, exit 0), supporting shared fixture-state contamination rather than refund double-counting. See request-population-fresh.log.",
+      "title_zh": "集成测试污染开发全局配置",
+      "fix": "禁止 dotenv 默认回落；每套件独立 PG、清理自有 Redis/CH/NATS；CI 使用同一隔离 runner",
+      "implementation": "scripts/test-isolated.py",
+      "regression": "test_support::fixtures_reject_developer_stores_and_missing_opt_in；隔离完整后端回归",
+      "status": "fixed_verified"
+    }
+  ],
+  "validation": {
+    "date": "2026-10-03",
+    "backend": {
+      "executable_count": 162,
+      "executable_coverage": "every target exactly once across four shards",
+      "totals": {
+        "passed": 1700,
+        "failed": 0,
+        "ignored": 3,
+        "filtered_out": 0
+      },
+      "shards": [
+        {
+          "index": 0,
+          "exit_code": 0,
+          "totals": {
+            "passed": 483,
+            "failed": 0,
+            "ignored": 3,
+            "filtered_out": 0
+          },
+          "execution_status": "passed_with_skips_or_skip_signals",
+          "log": "/tmp/okapi-remediation-20261003/final-shard-0.log",
+          "log_sha256": "a94b2b7c41a59db076c4eb60e41ce5cbe5613672fe5bc2d8ac0cf34b1706d23b"
+        },
+        {
+          "index": 1,
+          "exit_code": 0,
+          "totals": {
+            "passed": 221,
+            "failed": 0,
+            "ignored": 0,
+            "filtered_out": 0
+          },
+          "execution_status": "passed",
+          "log": "/tmp/okapi-remediation-20261003/final-shard-1.log",
+          "log_sha256": "6abbd6445bf0dc2c94aec06b1b60682be3a67cbb5cef64e0f9c3f158a7b17e44"
+        },
+        {
+          "index": 2,
+          "exit_code": 0,
+          "totals": {
+            "passed": 482,
+            "failed": 0,
+            "ignored": 0,
+            "filtered_out": 0
+          },
+          "execution_status": "passed",
+          "log": "/tmp/okapi-remediation-20261003/final-shard-2.log",
+          "log_sha256": "eb6567f87e3d95469604ed0b1670c80755c956a5fc470011299520f074afd554"
+        },
+        {
+          "index": 3,
+          "exit_code": 0,
+          "totals": {
+            "passed": 514,
+            "failed": 0,
+            "ignored": 0,
+            "filtered_out": 0
+          },
+          "execution_status": "passed",
+          "log": "/tmp/okapi-remediation-20261003/final-shard-3.log",
+          "log_sha256": "541ac65ead67510b97edf8890fcf1e8b1ffb86a5b15081525da3ff2dbcbb6e19"
+        }
+      ],
+      "suites": [
+        {
+          "target": "Running anthropic_usage (/Users/a1234/Okapi/target/debug/deps/anthropic_usage-13c68ede61b9cdba)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running base_price (/Users/a1234/Okapi/target/debug/deps/base_price-5952933fb58eca29)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_read_compat (/Users/a1234/Okapi/target/debug/deps/cache_read_compat-c9be5f1eca497cc5)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_wire_compat (/Users/a1234/Okapi/target/debug/deps/cache_wire_compat-3fba7c5df60afdeb)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running channel_credential (/Users/a1234/Okapi/target/debug/deps/channel_credential-96c2dafadabc304c)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running claude_code_live (/Users/a1234/Okapi/target/debug/deps/claude_code_live-aafc36570b524c4b)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 2,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_auth_web (/Users/a1234/Okapi/target/debug/deps/console_auth_web-928c714c798d48ed)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_diagnose (/Users/a1234/Okapi/target/debug/deps/console_diagnose-8dd56b31948a8e27)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_m2 (/Users/a1234/Okapi/target/debug/deps/console_m2-c9dd72c28614847f)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_model_catalog (/Users/a1234/Okapi/target/debug/deps/console_model_catalog-9c7bd95862a5bedd)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 20,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_pay (/Users/a1234/Okapi/target/debug/deps/console_pay-0ae221e1790db0c2)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_pricing_write (/Users/a1234/Okapi/target/debug/deps/console_pricing_write-21e29a9affb587ea)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_setup (/Users/a1234/Okapi/target/debug/deps/console_setup-e26e8b1241f73796)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_stats (/Users/a1234/Okapi/target/debug/deps/console_stats-84f641eb9c4811b5)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 40,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_users (/Users/a1234/Okapi/target/debug/deps/console_users-253f3c5907f69113)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running convert_anthropic (/Users/a1234/Okapi/target/debug/deps/convert_anthropic-f4809f3c00a64c9b)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running error_taxonomy_parity (/Users/a1234/Okapi/target/debug/deps/error_taxonomy_parity-0c70ccf9c1171571)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_backlog (/Users/a1234/Okapi/target/debug/deps/gateway_backlog-3e65ae2cb836c4ec)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_custom_pass (/Users/a1234/Okapi/target/debug/deps/gateway_custom_pass-dd5813a87fdaf70c)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_gemini (/Users/a1234/Okapi/target/debug/deps/gateway_gemini-12744b56ba1a3530)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_images_contract (/Users/a1234/Okapi/target/debug/deps/gateway_images_contract-d01fe631d977b27f)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 83,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_m1 (/Users/a1234/Okapi/target/debug/deps/gateway_m1-843d875ab761faf9)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_model_modifiers (/Users/a1234/Okapi/target/debug/deps/gateway_model_modifiers-b891d154e2fdde13)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_oauth_channels (/Users/a1234/Okapi/target/debug/deps/gateway_oauth_channels-59e27b8e3e5a4d0f)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 35,
+          "failed": 0,
+          "ignored": 1,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_realtime (/Users/a1234/Okapi/target/debug/deps/gateway_realtime-152bccbed3b1e806)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_resp_model (/Users/a1234/Okapi/target/debug/deps/gateway_resp_model-318ab2d250060046)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_responses_ws_bridge (/Users/a1234/Okapi/target/debug/deps/gateway_responses_ws_bridge-45f1c44704cfc9a8)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 15,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_stream_usage (/Users/a1234/Okapi/target/debug/deps/gateway_stream_usage-64810793940ff3c3)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_untrusted_usage (/Users/a1234/Okapi/target/debug/deps/gateway_untrusted_usage-bb0eae9a98856b9b)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_videos (/Users/a1234/Okapi/target/debug/deps/gateway_videos-ba094b94f837a347)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running migrate_newapi (/Users/a1234/Okapi/target/debug/deps/migrate_newapi-b2544208c0aed5a8)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running native_batches (/Users/a1234/Okapi/target/debug/deps/native_batches-60359b62ebc921dc)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 31,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi_domain (/Users/a1234/Okapi/target/debug/deps/okapi_domain-4c63f525d9baafec)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 19,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi_store (/Users/a1234/Okapi/target/debug/deps/okapi_store-d439a1310f0a2c25)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 56,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running pricing_base (/Users/a1234/Okapi/target/debug/deps/pricing_base-856b4139d995cddc)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running refund_measurements (/Users/a1234/Okapi/target/debug/deps/refund_measurements-dede3c7dc9310e7f)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running responses_ws_transport (/Users/a1234/Okapi/target/debug/deps/responses_ws_transport-0836331cfad31b44)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 16,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running server_tool_usage (/Users/a1234/Okapi/target/debug/deps/server_tool_usage-67434334da048b99)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running usage_modalities (/Users/a1234/Okapi/target/debug/deps/usage_modalities-9858cbcad9a2b1b1)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_m2 (/Users/a1234/Okapi/target/debug/deps/worker_m2-c578525d1738df80)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_reconcile_repair (/Users/a1234/Okapi/target/debug/deps/worker_reconcile_repair-be884d1113eecd8a)",
+          "shard": 0,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi_api",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi_domain",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi_ledger",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi_pricing",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi_providers",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Doc-tests okapi_store",
+          "shard": 0,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running audit_regressions (/Users/a1234/Okapi/target/debug/deps/audit_regressions-87c97a053cc5dba9)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running billing_surface_parity (/Users/a1234/Okapi/target/debug/deps/billing_surface_parity-50a6c7fbe7b5bb28)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_read_compat (/Users/a1234/Okapi/target/debug/deps/cache_read_compat-e3de37eb7e48c310)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_write_compat (/Users/a1234/Okapi/target/debug/deps/cache_write_compat-1594a1b23cbd3232)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running channel_key_lifecycle (/Users/a1234/Okapi/target/debug/deps/channel_key_lifecycle-c2cd008ad5ea17ec)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running clickhouse_streaming_error (/Users/a1234/Okapi/target/debug/deps/clickhouse_streaming_error-d89e2bf6be587c21)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_channel_test (/Users/a1234/Okapi/target/debug/deps/console_channel_test-ce0d0688055de46f)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_import (/Users/a1234/Okapi/target/debug/deps/console_import-5c0a2ef9152ecb10)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_manage (/Users/a1234/Okapi/target/debug/deps/console_manage-a17fe9bb1f8582f5)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_oauth (/Users/a1234/Okapi/target/debug/deps/console_oauth-ca91eed4c71d4658)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_playground (/Users/a1234/Okapi/target/debug/deps/console_playground-2fb12575cbf9cb89)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 14,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_profile (/Users/a1234/Okapi/target/debug/deps/console_profile-9284d58466147251)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_smtp (/Users/a1234/Okapi/target/debug/deps/console_smtp-98f419f9cb731704)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_subscriptions (/Users/a1234/Okapi/target/debug/deps/console_subscriptions-449a149983f08124)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 37,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_visibility (/Users/a1234/Okapi/target/debug/deps/console_visibility-3d652d813820dc72)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running convert_gemini (/Users/a1234/Okapi/target/debug/deps/convert_gemini-3d850d124eeff479)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_anthropic (/Users/a1234/Okapi/target/debug/deps/gateway_anthropic-ca74897513362585)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_bedrock (/Users/a1234/Okapi/target/debug/deps/gateway_bedrock-17fd056a64991165)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_embeddings (/Users/a1234/Okapi/target/debug/deps/gateway_embeddings-4e91d1018795de55)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_gemini_ingress (/Users/a1234/Okapi/target/debug/deps/gateway_gemini_ingress-b9722080dcf94bb4)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_invalid_key_rate (/Users/a1234/Okapi/target/debug/deps/gateway_invalid_key_rate-0f88b1efc97095f4)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_m2_sched (/Users/a1234/Okapi/target/debug/deps/gateway_m2_sched-df810a32115a31b7)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_models_list (/Users/a1234/Okapi/target/debug/deps/gateway_models_list-134648d4d8df05a2)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_outbound (/Users/a1234/Okapi/target/debug/deps/gateway_outbound-dab71c494b7f3d25)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_reasoning (/Users/a1234/Okapi/target/debug/deps/gateway_reasoning-348a4a960c26ccbb)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_response_affinity (/Users/a1234/Okapi/target/debug/deps/gateway_response_affinity-1cc71b42bad296fa)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_retry_policy (/Users/a1234/Okapi/target/debug/deps/gateway_retry_policy-a0f6a72b3a1ef55c)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_strip_fields (/Users/a1234/Okapi/target/debug/deps/gateway_strip_fields-584b67be51b9ddf9)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_upstream_cost (/Users/a1234/Okapi/target/debug/deps/gateway_upstream_cost-aa31d728fbc12906)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running images (/Users/a1234/Okapi/target/debug/deps/images-a92cc5c0183f0ab9)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running migrate_okapi_old (/Users/a1234/Okapi/target/debug/deps/migrate_okapi_old-0c25f5df24c90a98)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi (/Users/a1234/Okapi/target/debug/deps/okapi-08becfb658d4b09c)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi_ledger (/Users/a1234/Okapi/target/debug/deps/okapi_ledger-162a4a4946481fcf)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running parity (/Users/a1234/Okapi/target/debug/deps/parity-713020650941a288)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running pricing_publication (/Users/a1234/Okapi/target/debug/deps/pricing_publication-94dd996d77804e5d)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running request_population (/Users/a1234/Okapi/target/debug/deps/request_population-38adcc84ce073835)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running route_error_envelope (/Users/a1234/Okapi/target/debug/deps/route_error_envelope-51abf80072b94460)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running server_tools (/Users/a1234/Okapi/target/debug/deps/server_tools-06affb4e5e3d735b)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running usage_provenance (/Users/a1234/Okapi/target/debug/deps/usage_provenance-5d57ae30950924e2)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_margin_breaker (/Users/a1234/Okapi/target/debug/deps/worker_margin_breaker-71233d76c6f65698)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_retention (/Users/a1234/Okapi/target/debug/deps/worker_retention-f1f7522c9d4042fe)",
+          "shard": 1,
+          "status": "ok",
+          "passed": 17,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running audit_regressions (/Users/a1234/Okapi/target/debug/deps/audit_regressions-d8827e43361eba65)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_aliases (/Users/a1234/Okapi/target/debug/deps/cache_aliases-3d8aefd67d87af1c)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_reporting (/Users/a1234/Okapi/target/debug/deps/cache_reporting-41bd8a2ab8119fa4)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_write_compat (/Users/a1234/Okapi/target/debug/deps/cache_write_compat-64b5baaaad521981)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running channel_pools (/Users/a1234/Okapi/target/debug/deps/channel_pools-ff4e48fdc22724af)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_analytics (/Users/a1234/Okapi/target/debug/deps/console_analytics-8b691d4b14ca256f)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 22,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_channel_writes (/Users/a1234/Okapi/target/debug/deps/console_channel_writes-4603e364d696697b)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_key_copy (/Users/a1234/Okapi/target/debug/deps/console_key_copy-c795404f3a5b6bb3)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_mcp (/Users/a1234/Okapi/target/debug/deps/console_mcp-98e244830f809aaf)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_oauth_presets (/Users/a1234/Okapi/target/debug/deps/console_oauth_presets-3ec71932714bbe5e)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_portal (/Users/a1234/Okapi/target/debug/deps/console_portal-505a4a61445005e0)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_ratio_sync (/Users/a1234/Okapi/target/debug/deps/console_ratio_sync-8b37965cda0c6130)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_spa_navigation (/Users/a1234/Okapi/target/debug/deps/console_spa_navigation-04c787b94d3a4b45)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_teams (/Users/a1234/Okapi/target/debug/deps/console_teams-a0ccf7d806973203)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_write_receipts (/Users/a1234/Okapi/target/debug/deps/console_write_receipts-1c7b358d8185bd55)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running convert_gemini_ingress (/Users/a1234/Okapi/target/debug/deps/convert_gemini_ingress-c6807164686f2895)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 13,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_audio (/Users/a1234/Okapi/target/debug/deps/gateway_audio-26e3912513d3a2d3)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_capabilities (/Users/a1234/Okapi/target/debug/deps/gateway_capabilities-9fa3dd969750b0bd)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_fallback (/Users/a1234/Okapi/target/debug/deps/gateway_fallback-594d300d881e2a97)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_group_rate (/Users/a1234/Okapi/target/debug/deps/gateway_group_rate-5110c3eb38930fb0)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_ip_allowlist (/Users/a1234/Okapi/target/debug/deps/gateway_ip_allowlist-02ba79d1220fb11e)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_messages (/Users/a1234/Okapi/target/debug/deps/gateway_messages-16122af6f8f30b5b)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_multipod (/Users/a1234/Okapi/target/debug/deps/gateway_multipod-b9d601cb8a623bfc)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_pricing_epoch (/Users/a1234/Okapi/target/debug/deps/gateway_pricing_epoch-df73eae27d10e209)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_reasoning_param (/Users/a1234/Okapi/target/debug/deps/gateway_reasoning_param-3111e0c4a1a78b7a)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_responses (/Users/a1234/Okapi/target/debug/deps/gateway_responses-954f9e09ce31972b)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 14,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_routing_prefs (/Users/a1234/Okapi/target/debug/deps/gateway_routing_prefs-089386c8a5d66136)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_tier (/Users/a1234/Okapi/target/debug/deps/gateway_tier-d92ef5ede6454cad)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_usage_modalities (/Users/a1234/Okapi/target/debug/deps/gateway_usage_modalities-826780d35c86f9da)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 72,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running list_pagination (/Users/a1234/Okapi/target/debug/deps/list_pagination-d7b21649a1e3bea4)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running modalities (/Users/a1234/Okapi/target/debug/deps/modalities-c520ece3960b1533)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi (/Users/a1234/Okapi/target/debug/deps/okapi-fd64d8336e62e066)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 184,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi_pricing (/Users/a1234/Okapi/target/debug/deps/okapi_pricing-9f9e4f88226a7e97)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 22,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running pg_settlement (/Users/a1234/Okapi/target/debug/deps/pg_settlement-205eaa23e31ff178)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 31,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running prop (/Users/a1234/Okapi/target/debug/deps/prop-ed46bb83e2fb69e3)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running request_population (/Users/a1234/Okapi/target/debug/deps/request_population-7d512a12baefd2b5)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running schema_shape (/Users/a1234/Okapi/target/debug/deps/schema_shape-76143652a869b5ef)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running statistics_timezone (/Users/a1234/Okapi/target/debug/deps/statistics_timezone-6f39e4795e1933ac)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_ch (/Users/a1234/Okapi/target/debug/deps/worker_ch-6e468f2d8428c386)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_nats (/Users/a1234/Okapi/target/debug/deps/worker_nats-6fa56410a7b1ca90)",
+          "shard": 2,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running audit_regressions (/Users/a1234/Okapi/target/debug/deps/audit_regressions-e9e3237081df978c)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 18,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_aliases (/Users/a1234/Okapi/target/debug/deps/cache_aliases-8ae5731f1a0ee7af)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running cache_ttl (/Users/a1234/Okapi/target/debug/deps/cache_ttl-b9f94cfc39c9e086)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running channel_controls (/Users/a1234/Okapi/target/debug/deps/channel_controls-4259a7f84a6acb12)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 15,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running characters (/Users/a1234/Okapi/target/debug/deps/characters-d8f8ada6fb946383)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_audit (/Users/a1234/Okapi/target/debug/deps/console_audit-94a8df6da9413625)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_cloud_probe (/Users/a1234/Okapi/target/debug/deps/console_cloud_probe-5bd5355dacb6a911)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_logs (/Users/a1234/Okapi/target/debug/deps/console_logs-0fdda4ffa093b261)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 19,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_mcp_write (/Users/a1234/Okapi/target/debug/deps/console_mcp_write-3e19532e0025f5fc)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_ops (/Users/a1234/Okapi/target/debug/deps/console_ops-20831e1f949c6560)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_portal_pages (/Users/a1234/Okapi/target/debug/deps/console_portal_pages-a02f26a28f9733d0)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 11,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_redemption (/Users/a1234/Okapi/target/debug/deps/console_redemption-7f63ff6d301b7e73)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_ssrf (/Users/a1234/Okapi/target/debug/deps/console_ssrf-e035b4391405ca85)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running console_turnstile (/Users/a1234/Okapi/target/debug/deps/console_turnstile-8e386107dcb1f0b9)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running convert_a2o (/Users/a1234/Okapi/target/debug/deps/convert_a2o-7bcf5b155557c923)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 9,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running durable_holds (/Users/a1234/Okapi/target/debug/deps/durable_holds-c61ad0c5cc2321e3)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 63,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_azure (/Users/a1234/Okapi/target/debug/deps/gateway_azure-e0712de4a9925c23)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_compat (/Users/a1234/Okapi/target/debug/deps/gateway_compat-ca2773c8dd1c18ae)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_first_epoch (/Users/a1234/Okapi/target/debug/deps/gateway_first_epoch-9117c32adef92cf7)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_images (/Users/a1234/Okapi/target/debug/deps/gateway_images-02e58cbf772d6a7a)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_key_admission (/Users/a1234/Okapi/target/debug/deps/gateway_key_admission-6af656cb28c2cd60)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_midstream (/Users/a1234/Okapi/target/debug/deps/gateway_midstream-940e6cbaf90a2284)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_native_image_batches (/Users/a1234/Okapi/target/debug/deps/gateway_native_image_batches-de55413f3bf0136c)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 56,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_pricing_rules (/Users/a1234/Okapi/target/debug/deps/gateway_pricing_rules-fa5afaf18f51df2d)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_reserve_atomicity (/Users/a1234/Okapi/target/debug/deps/gateway_reserve_atomicity-f871a51162c7efd9)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 33,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_responses_ws (/Users/a1234/Okapi/target/debug/deps/gateway_responses_ws-baa768418247c22d)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 14,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_shutdown (/Users/a1234/Okapi/target/debug/deps/gateway_shutdown-ca04914dc8a5d1f1)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_token_count (/Users/a1234/Okapi/target/debug/deps/gateway_token_count-c51ee803643a620d)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running gateway_vertex (/Users/a1234/Okapi/target/debug/deps/gateway_vertex-92bd7e5cebe24771)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running lua_contract (/Users/a1234/Okapi/target/debug/deps/lua_contract-01e29d70248d1003)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running model_config (/Users/a1234/Okapi/target/debug/deps/model_config-090c47f1644b5bb3)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi_api (/Users/a1234/Okapi/target/debug/deps/okapi_api-b2ba792d634ca58b)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running okapi_providers (/Users/a1234/Okapi/target/debug/deps/okapi_providers-234c0031c13f45f1)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 123,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running portal_ownership (/Users/a1234/Okapi/target/debug/deps/portal_ownership-b77992551114e992)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running reasoning_t2c (/Users/a1234/Okapi/target/debug/deps/reasoning_t2c-6e1ee35fd5194bd1)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running reservation_replay (/Users/a1234/Okapi/target/debug/deps/reservation_replay-1e351faca41bc51c)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 24,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running server_tool_history (/Users/a1234/Okapi/target/debug/deps/server_tool_history-50f41e7c002d3b19)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running stream_usage (/Users/a1234/Okapi/target/debug/deps/stream_usage-5b93a5d2a3e00fdb)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_delivery (/Users/a1234/Okapi/target/debug/deps/worker_delivery-24c761d54e9115f2)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        {
+          "target": "Running worker_notify (/Users/a1234/Okapi/target/debug/deps/worker_notify-15cb7ba3688bc9a0)",
+          "shard": 3,
+          "status": "ok",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        }
+      ],
+      "ignored_opt_in_tests": [
+        "cli_286_real_tool_result_round_trip_preserves_upstream_thinking_blocks",
+        "programming_clients::installed_claude_code_and_codex_complete_through_subscription_adapters",
+        "sdk_286_real_text_stream_completes"
+      ]
+    },
+    "targeted_audit_regressions": {
+      "totals": {
+        "passed": 29,
+        "failed": 0,
+        "ignored": 0,
+        "filtered_out": 0
+      },
+      "note": "latest 19-test bin suite includes A44 added after the full-run build; other targeted tests overlap the full run"
+    },
+    "frontend": {
+      "passed": 673,
+      "failed": 0,
+      "log_sha256": "cdd1a993dfd6c14b13ca28e4226cd30420df1e620a3796611c7f7eadbf061907"
+    },
+    "checks": [
+      "cargo fmt --all --check",
+      "cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "cargo sqlx prepare --check --workspace -- --all-targets",
+      "frontend build / TypeScript / oxlint",
+      "guard-no-float",
+      "guard-i18n",
+      "guard-i18n-keys",
+      "guard-frontend-permissions",
+      "guard-error-codes",
+      "guard-deploy-manifests",
+      "API inventory",
+      "API inventory / test summary Python tests",
+      "git diff --check"
+    ],
+    "boundaries": [
+      "no real account or installed Claude/Codex CLI opt-in calls",
+      "no PgBouncer instance",
+      "CPU benchmark is scheduler-only, not end-to-end throughput"
+    ]
+  }
+}

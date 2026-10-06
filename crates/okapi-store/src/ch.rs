@@ -7,6 +7,7 @@
 
 mod calendar;
 mod population;
+pub mod server_tools;
 
 use crate::error::StoreError;
 use calendar::calendar_sql;
@@ -46,9 +47,13 @@ fn split_credentials(url: &str) -> (String, Option<(String, String)>) {
 
 impl ChClient {
     pub fn new(base_url: &str, database: &str) -> Result<Self, StoreError> {
+        // ClickHouse closes idle keep-alive connections after `keep_alive_timeout`
+        // (10s by default, 3s on older servers). Reusing one the server is closing
+        // fails as "error sending request"; evict idle connections before that.
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
+            .pool_idle_timeout(Duration::from_secs(2))
             .build()?;
         let (base, credentials) = split_credentials(base_url.trim_end_matches('/'));
         Ok(Self {
@@ -146,6 +151,7 @@ impl ChClient {
         for statement in population::schema()? {
             self.execute(&statement).await?;
         }
+        server_tools::schema::ensure(self).await?;
         Ok(())
     }
 

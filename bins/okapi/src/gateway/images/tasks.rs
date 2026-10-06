@@ -330,7 +330,7 @@ pub(super) async fn complete(
     let (result, artifacts) = artifacts(state, lease.id, body).await?;
     let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, input.user_id).await?;
     let mut tx = guard
-        .connection()
+        .connection()?
         .begin()
         .await
         .map_err(okapi_store::StoreError::from)?;

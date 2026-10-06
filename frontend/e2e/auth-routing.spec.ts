@@ -5,12 +5,13 @@ import { fileURLToPath } from 'node:url'
 const fixtureKey = 'auth-routing-fixture-not-a-real-secret'
 const me = { user_id: 7, key_id: 1, role: 1, permissions: [], group: 'default', balance_micro: 0 }
 
-async function prepare(page: Page, { key = null, mode = 'account' }: {
-  key?: string | null; mode?: 'account' | 'key'
+async function prepare(page: Page, { key = null, mode = 'account', lang = 'zh-CN', theme = 'light' }: {
+  key?: string | null; mode?: 'account' | 'key'; lang?: 'zh-CN' | 'en'; theme?: 'light' | 'dark'
 } = {}) {
   const calls: string[] = []
-  await page.addInitScript(({ key, mode }) => {
-    localStorage.setItem('okapi.lang', 'zh-CN')
+  await page.addInitScript(({ key, mode, lang, theme }) => {
+    localStorage.setItem('okapi.lang', lang)
+    localStorage.setItem('okapi.theme', theme)
     // Initialize once so reloads exercise the actual persisted sign-in/sign-out state.
     if (!sessionStorage.getItem('auth-routing-initialized')) {
       sessionStorage.setItem('auth-routing-initialized', 'true')
@@ -20,7 +21,7 @@ async function prepare(page: Page, { key = null, mode = 'account' }: {
         localStorage.setItem('okapi.usage-scope', 'user')
       }
     }
-  }, { key, mode })
+  }, { key, mode, lang, theme })
   await page.route('**/*', (route) => {
     const request = route.request(), path = new URL(request.url()).pathname
     if (request.isNavigationRequest()) return route.fulfill({
@@ -31,7 +32,10 @@ async function prepare(page: Page, { key = null, mode = 'account' }: {
     const responses: Record<string, unknown> = {
       '/api/me': me,
       '/api/setup/status': { needs_setup: false },
-      '/api/registration': { mode: 'open', email_verification: false },
+      '/api/registration': {
+        mode: 'open', email_verification: false, allowed_domains: [],
+        new_user_credit_micro: 0, invitee_credit_micro: 0,
+      },
       '/auth/oauth-providers': { providers: [] },
       '/api/notice': { notice: null },
       '/api/pricing': { models: [], groups: [] },
@@ -41,6 +45,69 @@ async function prepare(page: Page, { key = null, mode = 'account' }: {
   })
   return calls
 }
+
+for (const { width, lang, theme } of [
+  { width: 360, lang: 'zh-CN', theme: 'light' },
+  { width: 360, lang: 'en', theme: 'dark' },
+  { width: 1366, lang: 'zh-CN', theme: 'light' },
+  { width: 1366, lang: 'en', theme: 'dark' },
+] as const) {
+  test(`登录辅助操作 ${width}px ${lang} ${theme}：同排垂直居中，左右与表单对齐`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 })
+    await prepare(page, { lang, theme })
+    await page.goto('/')
+    const help = page.locator('[data-slot="auth-help"]')
+    await expect(help.getByRole('button')).toBeVisible()
+    await expect(help.getByRole('link')).toBeVisible()
+    await page.evaluate(() => document.fonts.ready)
+    // Wait for the entry animation before comparing rectangles across different elements.
+    await page.locator('main').evaluate(async (el) => {
+      await Promise.all(el.getAnimations({ subtree: true }).map((animation) => animation.finished))
+    })
+    const input = await page.locator('#email').boundingBox()
+    const submit = await page.locator('form button[type="submit"]').boundingBox()
+    const register = await help.getByRole('button').boundingBox()
+    const forgot = await help.getByRole('link').boundingBox()
+    if (!input || !submit || !register || !forgot) throw new Error('Missing login controls')
+    expect(Math.abs(register.x - input.x)).toBeLessThanOrEqual(1)
+    expect(Math.abs(forgot.x + forgot.width - input.x - input.width)).toBeLessThanOrEqual(1)
+    expect(Math.abs(register.y + register.height / 2 - forgot.y - forgot.height / 2)).toBeLessThanOrEqual(1)
+    expect(forgot.x - register.x - register.width).toBeGreaterThanOrEqual(15)
+    expect(Math.min(register.y, forgot.y) - submit.y - submit.height).toBeGreaterThanOrEqual(19)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+    if (width < 1024) {
+      const footer = page.locator('main').getByRole('link', { name: lang === 'en' ? 'Model catalog' : '模型广场' })
+      await expect(footer).toBeVisible()
+      const box = await footer.boundingBox()
+      if (!box) throw new Error('Missing model catalog footer')
+      expect(Math.abs(box.x + box.width / 2 - input.x - input.width / 2)).toBeLessThanOrEqual(1)
+      expect(box.y - Math.max(register.y + register.height, forgot.y + forgot.height)).toBeGreaterThanOrEqual(39)
+    }
+    await page.screenshot({ path: testInfo.outputPath('login-alignment.png'), fullPage: true })
+    await help.getByRole('button').click()
+    await expect(page.locator('#reg-email')).toBeVisible()
+    await expect(help.getByRole('link')).toHaveCount(0)
+    await help.getByRole('button').click()
+    await expect(page.locator('#email')).toBeVisible()
+    await expect(help.getByRole('link')).toBeVisible()
+    await page.getByRole('button', { name: 'API Key', exact: true }).click()
+    await expect(page.locator('#key')).toBeVisible()
+    await expect(help.getByRole('link')).toHaveCount(0)
+  })
+}
+
+test('第三方登录下辅助操作仍在同一行，找回密码保留已填邮箱', async ({ page }) => {
+  await prepare(page)
+  await page.route('**/auth/oauth-providers', (route) => route.fulfill({ json: { providers: ['github'] } }))
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: '使用 github 登录' })).toBeVisible()
+  const help = page.locator('[data-slot="auth-help"]')
+  await expect(help.getByRole('button', { name: '还没有账号？立即注册' })).toBeVisible()
+  await page.locator('#email').fill('who@ok.test')
+  await help.getByRole('link', { name: '忘记密码？' }).click()
+  await expect(page).toHaveURL(/\/forgot-password\?email=who(%40|@)ok\.test$/)
+  await expect(page.locator('#forgot-email')).toHaveValue('who@ok.test')
+})
 
 test('未登录访问入口保留登录表单，不发身份检查', async ({ page }) => {
   const calls = await prepare(page)

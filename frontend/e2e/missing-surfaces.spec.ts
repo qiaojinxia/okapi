@@ -18,6 +18,19 @@ import { fileURLToPath } from 'node:url'
 // 断言请求体 / 查询串形状。
 
 type Json = Record<string, unknown>
+const providerMetadata = { data: [
+  { id: 'openai', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'openai_compat', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'anthropic', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'azure', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'gemini', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'bedrock', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'vertex', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'custom_pass', account: { quota: false, refresh: false, subscription: null } },
+  { id: 'anthropic_max', account: { authorization: { code_format: 'code_state', access_token_prefix: 'sk-ant-oat', account_id_required: false, import_profile: { name: 'claude-code', mode: 'mimic', revision: '2.1.290' } }, quota: true, refresh: true, subscription: { quota_scope: 'session', window_secs: 18000, quota_windows: [18000, 604800] } } },
+  { id: 'codex', account: { authorization: { code_format: 'callback_url', access_token_prefix: null, account_id_required: true }, quota: true, refresh: true, subscription: { quota_scope: 'total', window_secs: null, quota_windows: [18000, 604800] } } },
+] }
+
 
 async function prepare(page: Page, { permissions = ['*'], signedIn = true } = {}) {
   await page.addInitScript(
@@ -49,6 +62,8 @@ async function prepare(page: Page, { permissions = ['*'], signedIn = true } = {}
               role: permissions.length ? 100 : 1,
               permissions,
             }
+          : path === '/admin/channels/providers'
+            ? providerMetadata
           : path === '/api/notice'
             ? { notice: null }
             : path.startsWith('/admin/settings/')
@@ -389,7 +404,7 @@ test('导入定价：粘贴 JSON 整段 POST；在线同步默认不选、点源
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 })
 
-test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；新建发 name+models，追加发 channel_id', async ({
+test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；新建发配置，更新绑定既有 key', async ({
   page,
 }) => {
   await prepare(page)
@@ -406,7 +421,7 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
             status: 1,
             priority: 0,
             models: ['claude-opus-4'],
-            keys: [],
+            keys: [{ id: 8, status: 1, weight: 1, max_concurrency: null, credential_kind: 1 }],
             settings: {},
             pools: ['default'],
             pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
@@ -472,7 +487,7 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
   await page.getByRole('button', { name: '新建渠道' }).first().click()
   const create = await openedDialog(page)
   await create.locator('#d-provider').selectOption('anthropic_max')
-  await expect(create.getByText('实验性')).toBeVisible()
+  await expect(create.getByText(/^实验性：/)).toBeVisible()
   await create.getByRole('button', { name: '打开登录页' }).click()
   await expect.poll(() => calls[0]).toEqual({
     path: '/admin/channels/oauth/start',
@@ -493,26 +508,26 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
   expect(calls[1]).toEqual({
     path: '/admin/channels/oauth/exchange',
     method: 'POST',
-    body: { state: 'st-1', code: 'code#st-1', name: 'max-new', models: ['claude-opus-4'] },
+    body: expect.objectContaining({ state: 'st-1', code: 'code#st-1', name: 'max-new', models: ['claude-opus-4'], api_base: '', priority: 0 }),
   })
 
   await page.keyboard.press('Escape')
   await page.getByRole('row').filter({ hasText: 'max-home' }).getByRole('button', { name: '编辑', exact: true }).click()
   const edit = await openedDialog(page)
-  await expect(edit.locator('#d-provider')).toHaveValue('anthropic_max')
+  await expect(edit.locator('#d-provider')).toHaveValue('Claude Code（订阅）')
   await edit.getByRole('button', { name: '打开登录页' }).click()
   await expect.poll(() => calls[2]).toMatchObject({
     path: '/admin/channels/oauth/start',
-    body: { provider: 'anthropic_max' },
+    body: { provider: 'anthropic_max', channel_id: 42, channel_key_id: 8 },
   })
-  await edit.locator('#oauth-code').fill('second-code')
+  await edit.getByLabel('把浏览器里的 code 贴回来').fill('second-code')
   const attached = page.waitForRequest((r) => r.url().includes('/oauth/exchange'))
-  await edit.getByRole('button', { name: '换取凭证并追加为一把 key' }).click()
+  await edit.getByRole('button', { name: '换取凭证并更新此 key' }).click()
   await attached
   expect(calls[3]).toEqual({
     path: '/admin/channels/oauth/exchange',
     method: 'POST',
-    body: { state: 'st-1', code: 'second-code', channel_id: 42 },
+    body: { state: 'st-1', code: 'second-code', channel_id: 42, channel_key_id: 8 },
   })
 
   await edit.getByRole('button', { name: '打开登录页' }).click()
@@ -521,8 +536,8 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
     body: { provider: 'anthropic_max' },
   })
   await page.route('**/admin/channels/oauth/exchange', (route) => route.fulfill(apiError(500, 'internal_error')))
-  await edit.locator('#oauth-code').fill('third-code')
-  await edit.getByRole('button', { name: '换取凭证并追加为一把 key' }).click()
+  await edit.getByLabel('把浏览器里的 code 贴回来').fill('third-code')
+  await edit.getByRole('button', { name: '换取凭证并更新此 key' }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
   await page.route('**/admin/channels/oauth/start', (route) => route.fulfill(apiError(500, 'internal_error')))
@@ -1202,6 +1217,7 @@ test('路由诊断按入口区分协议错误，Codex 配置显示限制', async
   await page.keyboard.press('Escape')
   await page.getByRole('button', { name: '新建渠道' }).first().click()
   await drawer.locator('#d-provider').selectOption('codex')
+  await drawer.locator('#channel-connection-options > summary').click()
   await expect(drawer.getByRole('note')).toContainText('/v1/responses')
 })
 
@@ -2526,7 +2542,9 @@ test('总览 KPI / 实时条：overview?days= 与 realtime?window=60；切窗重
   await expect(page.getByText('60 秒请求')).toBeVisible()
   await expect(page.getByText('42', { exact: true }).first()).toBeVisible()
   await expect(page.getByText(/\$1\.23/).first()).toBeVisible()
-  await expect(page.getByText('昨日').first()).toBeVisible()
+  const summary = page.getByRole('region', { name: '经营概览' })
+  await expect(summary.getByRole('link', { name: /近 7 天 · 请求数/ })).toContainText('100')
+  await expect(summary).not.toContainText('昨日')
   await expect(page.getByText(/近 7 天/).first()).toBeVisible()
   await expect(page.getByRole('heading', { name: '请求量与收入趋势' })).toBeVisible()
   const trend = page.getByRole('group', { name: '请求量与收入趋势' })

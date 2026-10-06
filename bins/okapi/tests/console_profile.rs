@@ -11,7 +11,7 @@ fn hash(value: &str) -> String {
 
 #[tokio::test]
 async fn profile_editing_is_owned_validated_and_persisted() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let source = std::env::var("DATABASE_URL").unwrap();
     let admin = okapi_store::connect_pg(&source).await.unwrap();
     let database = format!("profile_test_{}", Uuid::new_v4().simple());

@@ -276,10 +276,7 @@ pub fn response_openai_to_anthropic(
     let finish = src
         .pointer("/choices/0/finish_reason")
         .and_then(Value::as_str);
-    let usage: Option<UsageProbe> = src
-        .get("usage")
-        .filter(|u| !u.is_null())
-        .and_then(|u| serde_json::from_value(u.clone()).ok());
+    let usage = okapi_api::usage_from_chat(&src);
     let probe = usage;
     let out = json!({
         "id": src.get("id").and_then(Value::as_str).unwrap_or("msg"),
@@ -313,6 +310,9 @@ fn anthropic_usage_json(u: UsageProbe) -> Value {
     }
     let d = u.prompt_tokens_details;
     let mut usage = json!({});
+    if let Some(okapi_domain::ServerToolUsage::Anthropic(tools)) = u.server_tool_usage {
+        usage["server_tool_use"] = json!(tools);
+    }
     if !u.missing_prompt {
         usage["input_tokens"] = json!(u.prompt_tokens - d.cached_tokens - d.cache_write_tokens);
     }
@@ -347,7 +347,6 @@ enum Block {
     None,
     Text,
     Thinking,
-    Tool,
 }
 
 /// OpenAI chunk 流 → Anthropic 原生事件流的有状态转换器。
@@ -359,6 +358,7 @@ pub struct OaiStreamToAnthropic {
     started: bool,
     block: Block,
     block_index: i64,
+    tool_blocks: std::collections::BTreeMap<usize, i64>,
     finish_reason: Option<String>,
     usage: Option<UsageProbe>,
     finished: bool,
@@ -373,6 +373,7 @@ impl OaiStreamToAnthropic {
             started: false,
             block: Block::None,
             block_index: -1,
+            tool_blocks: std::collections::BTreeMap::new(),
             finish_reason: None,
             usage: None,
             finished: false,
@@ -462,31 +463,33 @@ impl OaiStreamToAnthropic {
             .into_iter()
             .flatten()
         {
-            // 携带 name/id 视为新工具块；纯 arguments 分片续写当前块
-            if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
-                self.close_block(&mut out);
-                self.block = Block::Tool;
+            let Some(index) = call
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|i| usize::try_from(i).ok())
+                .filter(|i| *i < 128)
+            else {
+                return vec![Err(UpstreamError::Stream("tool_index_invalid".into()))];
+            };
+            self.close_block(&mut out);
+            let block_index = if let Some(&existing) = self.tool_blocks.get(&index) {
+                existing
+            } else {
                 self.block_index += 1;
-                let ev = json!({"type": "content_block_start", "index": self.block_index,
-                    "content_block": {"type": "tool_use",
-                        "id": call.get("id").and_then(Value::as_str).unwrap_or(""),
-                        "name": name, "input": {}}});
+                self.tool_blocks.insert(index, self.block_index);
+                let ev = json!({"type":"content_block_start", "index":self.block_index,
+                    "content_block":{"type":"tool_use","id":call.get("id").and_then(Value::as_str).unwrap_or(""),
+                        "name":call.pointer("/function/name").and_then(Value::as_str).unwrap_or(""),"input":{}}});
                 out.push(Ok(named("content_block_start", &ev, true, 0, None)));
-            }
-            if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
-                && !args.is_empty()
+                self.block_index
+            };
+            if let Some(args) = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
             {
-                if self.block != Block::Tool {
-                    // 上游未按协议先发 name：兜底开块
-                    self.close_block(&mut out);
-                    self.block = Block::Tool;
-                    self.block_index += 1;
-                    let ev = json!({"type": "content_block_start", "index": self.block_index,
-                        "content_block": {"type": "tool_use", "id": "", "name": "", "input": {}}});
-                    out.push(Ok(named("content_block_start", &ev, true, 0, None)));
-                }
-                let ev = json!({"type": "content_block_delta", "index": self.block_index,
-                    "delta": {"type": "input_json_delta", "partial_json": args}});
+                let ev = json!({"type":"content_block_delta","index":block_index,
+                    "delta":{"type":"input_json_delta","partial_json":args}});
                 out.push(Ok(named(
                     "content_block_delta",
                     &ev,
@@ -550,6 +553,15 @@ impl OaiStreamToAnthropic {
             self.started = true;
         }
         self.close_block(&mut out);
+        for (_, index) in std::mem::take(&mut self.tool_blocks) {
+            out.push(Ok(named(
+                "content_block_stop",
+                &json!({"type":"content_block_stop","index":index}),
+                false,
+                0,
+                None,
+            )));
+        }
         let probe = self.usage;
         let stop = map_finish_reason(self.finish_reason.as_deref());
         let ev = json!({"type": "message_delta",

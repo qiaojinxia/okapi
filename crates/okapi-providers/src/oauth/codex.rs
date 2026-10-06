@@ -8,6 +8,8 @@
 //! `store` 必须 false、`instructions` 键必须存在、不接受 `role: system` 与一批官方 API 参数。
 //! `prepare_body` 负责整形；客户端要非流式时由 `collect_json` 把 SSE 聚合回一个 Responses 对象。
 
+pub mod account;
+
 use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
 use crate::error::UpstreamError;
 use crate::openai::{ChatResponse, StreamHandle, classify};
@@ -78,18 +80,32 @@ pub fn split_pasted_code(pasted: &str) -> (String, Option<String>) {
 /// 只解码不验签——它来自我们自己刚向 token 端点换来的响应。
 #[must_use]
 pub fn account_id_from_id_token(id_token: &str) -> Option<String> {
-    let payload = id_token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
-        .ok()?;
-    let claims: Value = serde_json::from_slice(&bytes).ok()?;
-    claims
+    id_token_claims(id_token)?
         .get("https://api.openai.com/auth")?
         .get("chatgpt_account_id")?
         .as_str()
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// `id_token` 的标准 `email` claim，仅用于控制台标出是哪个账号。
+#[must_use]
+pub fn email_from_id_token(id_token: &str) -> Option<String> {
+    id_token_claims(id_token)?
+        .get("email")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+/// 只解码载荷，不验签：值只用于展示与 header，不作为信任依据。
+fn id_token_claims(id_token: &str) -> Option<Value> {
+    let payload = id_token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// 换码（表单体，与 Codex CLI 一致）。token 端点走不跟随重定向的探针 client：

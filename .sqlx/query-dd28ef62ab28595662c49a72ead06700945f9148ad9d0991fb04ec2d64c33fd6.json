@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT e.mode AS \"mode!\", g.mode AS \"group_mode?\",\n               EXISTS (SELECT 1 FROM proxy_group_members m\n                        WHERE m.group_code = e.group_code AND m.proxy_id = $2) AS \"member!\",\n               (SELECT p.max_keys FROM proxies p WHERE p.id = $2) AS max_keys,\n               (SELECT COUNT(*) FROM channel_keys o JOIN channels oc ON oc.id = o.channel_id\n                 WHERE o.egress_proxy_id = $2 AND o.id <> $1 AND oc.deleted_at IS NULL) AS \"load!\"\n        FROM channel_keys k\n        JOIN channels c ON c.id = k.channel_id AND c.deleted_at IS NULL\n        JOIN channel_egress e ON e.channel_id = c.id\n        LEFT JOIN proxy_groups g ON e.mode = 'group' AND g.code = e.group_code\n        WHERE k.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mode!",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_egress",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "group_mode?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "member!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_keys",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "load!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "dd28ef62ab28595662c49a72ead06700945f9148ad9d0991fb04ec2d64c33fd6"
+}

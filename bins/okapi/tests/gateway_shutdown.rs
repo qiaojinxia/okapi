@@ -16,6 +16,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 /// 子进程守卫：用例无论在哪一步 panic，都把 gateway 子进程杀掉并回收。
 ///
 /// `std::process::Child` 在 drop 时**不会**杀子进程。此前只要 SIGTERM 之前任一断言
@@ -102,7 +105,7 @@ struct Env {
 }
 
 async fn seed() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -144,6 +147,7 @@ async fn seed() -> Env {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
     let ledger = okapi_ledger::BalanceLedger::new(redis);
     ledger

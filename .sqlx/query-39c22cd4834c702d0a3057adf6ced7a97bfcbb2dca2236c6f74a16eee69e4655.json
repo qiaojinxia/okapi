@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT COUNT(*) FROM channels\n              WHERE egress_group_code = $1 AND deleted_at IS NULL) AS \"channels!\",\n            EXISTS (SELECT 1 FROM settings\n                     WHERE key = 'egress_default' AND value ->> 'mode' = 'group'\n                       AND value ->> 'group_code' = $1) AS \"is_default!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channels!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "is_default!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "39c22cd4834c702d0a3057adf6ced7a97bfcbb2dca2236c6f74a16eee69e4655"
+}

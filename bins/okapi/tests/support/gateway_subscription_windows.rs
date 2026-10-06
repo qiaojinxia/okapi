@@ -30,7 +30,7 @@ async fn database() -> TestResult<String> {
 
 async fn repair(b: &Bed) -> TestResult<okapi_store::history::Totals> {
     let mut guard = okapi_ledger::holds::UserGuard::acquire(&b.pg, b.uid).await?;
-    let totals = okapi_store::history::totals(guard.connection(), b.uid).await?;
+    let totals = okapi_store::history::totals(guard.connection()?, b.uid).await?;
     guard
         .repair(
             &b.ledger,
@@ -373,8 +373,8 @@ async fn refund_request(
 }
 
 async fn archive_bill(bed: &Bed, request_id: Uuid) -> TestResult {
-    sqlx::query("CREATE TABLE billing_records_y2020m01 PARTITION OF billing_records FOR VALUES FROM ('2020-01-01') TO ('2020-02-01')").execute(&bed.pg).await?;
-    sqlx::query("UPDATE billing_records SET created_at='2020-01-15' WHERE request_id=$1")
+    sqlx::query("CREATE TABLE billing_records_y2020m01 PARTITION OF billing_records FOR VALUES FROM ('2020-01-01T00:00:00Z') TO ('2020-02-01T00:00:00Z')").execute(&bed.pg).await?;
+    sqlx::query("UPDATE billing_records SET created_at='2020-01-15T00:00:00Z' WHERE request_id=$1")
         .bind(request_id)
         .execute(&bed.pg)
         .await?;

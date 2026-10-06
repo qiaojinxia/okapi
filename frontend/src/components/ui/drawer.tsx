@@ -1,5 +1,5 @@
 import { X } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
@@ -47,22 +47,7 @@ export function Drawer({
 }: DrawerProps) {
   const { t } = useTranslation()
   const panel = useRef<HTMLElement>(null)
-  useModalFocus(open, panel, firstField)
-
-  // Esc 关闭：抽屉是模态层，键盘用户需要一个不用找关闭按钮的退出方式
-  useEffect(() => {
-    if (!open) return undefined
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    const prevOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      document.body.style.overflow = prevOverflow
-    }
-  }, [open, onClose])
+  useModalFocus(open, panel, firstField, onClose)
 
   if (!open) return null
 

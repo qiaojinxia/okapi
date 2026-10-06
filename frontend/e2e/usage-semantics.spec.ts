@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url'
 import { overviewSearch } from '../src/features/portal-overview/search'
 import { portalLogSearch } from '../src/features/logs/search'
 import { sumByModel } from '../src/features/portal-overview/types'
+import { cacheAmount, cacheHit } from '../src/features/portal-overview/cache-metrics'
+import { segments } from '../src/features/portal-overview/TokenMixView'
 
 const usageRow = { day: '2026-09-27', model: 'model-a', requests: 2, prompt_tokens: 1000, cached_tokens: 0,
   cache_read_known_requests: 2, cache_write_known_requests: 2, cache_write_tokens: 0, completion_tokens: 100,
@@ -115,6 +117,11 @@ test('缓存零命中与缺失分开，文案不假定模型价格也不把折�
   await expect(panel).toContainText('1× 表示与普通输入同价')
   await expect(panel).toContainText('读取上报 2 / 2 次')
   await expect(page.getByText('计费优惠', { exact: true })).toBeVisible()
+  const missingWrite = { ...report(), total: { ...report().total, cache_write_tokens: null } }
+  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: missingWrite }))
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(panel).toContainText('缓存命中率 0.0%')
+  await expect(panel).not.toContainText('缓存数据未完整上报')
   const partial = { ...report(), data: [{ ...usageRow, cache_read_known_requests: 1, cache_write_tokens: null }], total: { ...report().total, cache_read_known_requests: 1, cache_hit_bp: null, cache_write_tokens: null } }
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
@@ -122,4 +129,79 @@ test('缓存零命中与缺失分开，文案不假定模型价格也不把折�
   await expect(panel).toContainText('缓存数据未完整上报')
   await expect(panel).not.toContainText('缓存命中率 0.0%')
   await expect(panel).not.toContainText('通常 0.1')
+})
+
+test('缓存样本率按输入 Token 加权，未知请求不会变成零命中', () => {
+  const model = sumByModel([
+    { ...usageRow, requests: 2, cached_tokens: 800, cache_hit_bp: null, measured_cache_hit_bp: 8000,
+      measured_cache_hit_requests: 1, measured_prompt_tokens: 1000, measured_cache_read_tokens: 800 },
+    { ...usageRow, day: '2026-09-28', prompt_tokens: 9000, cached_tokens: 8100, cache_hit_bp: null,
+      measured_cache_hit_bp: 9000, measured_cache_hit_requests: 1, measured_prompt_tokens: 9000, measured_cache_read_tokens: 8100 },
+  ]).get('model-a')!
+  expect(cacheHit(model)).toEqual({ bp: 8900, partial: true, samples: 2 })
+  expect(cacheHit({ requests: 2, cache_hit_bp: null, measured_cache_hit_requests: 1, measured_cache_hit_bp: 0 })).toEqual({ bp: 0, partial: true, samples: 1 })
+  expect(cacheHit({ requests: 2, cache_hit_bp: null })).toEqual({ bp: null, partial: false, samples: 0 })
+})
+
+test('有缓存读取时首页、构成和模型页显示样本率及已记录数量', async ({ page }) => {
+  await prepare(page)
+  const row = { ...usageRow, requests: 3, cached_tokens: 800, errors: 1, cache_read_known_requests: 2,
+    cache_hit_bp: null, cache_write_tokens: null, measured_cache_hit_bp: 8000,
+    measured_cache_hit_requests: 2, measured_prompt_tokens: 1000, measured_cache_read_tokens: 800 }
+  const partial = { ...report(), data: [row], total: { ...report().total, ...row } }
+  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
+  await page.goto('/portal')
+  await expect(page.getByText('已采集缓存命中 80.0%（2 / 3 次）').first()).toBeVisible()
+  const snapshot = page.getByRole('region', { name: 'Token 用量构成', exact: true })
+  await expect(snapshot).toContainText('800')
+  await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
+  const tokens = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
+  await expect(tokens).toContainText('样本缓存命中率 80.0%')
+  await expect(tokens).toContainText('800')
+  await expect(tokens).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
+  await page.getByRole('tab', { name: '模型分布', exact: true }).click()
+  await expect(page.getByRole('tabpanel', { name: '模型分布', exact: true })).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.screenshot({ path: 'test-results/cache-measured-mobile.png', fullPage: true, animations: 'disabled' })
+})
+
+test('跨日期折叠保留部分写入量，图表不重复累加缓存', () => {
+  const unknown = { ...usageRow, cache_read_known_requests: 0, cache_write_known_requests: 0, cache_write_tokens: null }
+  const observed = { ...usageRow, day: '2026-09-28', cached_tokens: 90, cache_read_known_requests: 1,
+    cache_write_known_requests: 1, cache_write_tokens: null, recorded_cache_write_tokens: 20 }
+  for (const rows of [[unknown, observed], [observed, unknown]]) {
+    const model = sumByModel(rows).get('model-a')!
+    expect(cacheAmount(model, 'read')).toEqual({ tokens: 90, partial: true })
+    expect(cacheAmount(model, 'write')).toEqual({ tokens: 20, partial: true })
+    expect(model.cache_write_tokens).toBeNull()
+    const parts = segments(model)
+    expect(parts.find((part) => part.key === 'write')?.value).toBe(20)
+    expect(parts.reduce((sum, part) => sum + part.value, 0)).toBe(model.prompt_tokens + model.completion_tokens)
+  }
+})
+
+test('缓存数量在首页和构成区分部分、明确零、完全缺失和完整采集', async ({ page }) => {
+  await prepare(page)
+  for (const fixture of [
+    { read: 90, write: 20, known: 1, expectedRead: '90部分', expectedWrite: '20部分' },
+    { read: 0, write: 0, known: 1, expectedRead: '0部分', expectedWrite: '0部分' },
+    { read: 0, write: null, known: 0, expectedRead: '-', expectedWrite: '-' },
+    { read: 0, write: 0, known: 2, expectedRead: '0', expectedWrite: '0' },
+  ]) {
+    const row = { ...usageRow, cached_tokens: fixture.read, cache_read_known_requests: fixture.known,
+      cache_write_known_requests: fixture.known, cache_write_tokens: fixture.known === 2 ? fixture.write : null,
+      recorded_cache_write_tokens: fixture.write }
+    const data = { ...report(), data: [row], total: { ...report().total, ...row, cache_hit_bp: fixture.known === 2 ? 0 : null } }
+    await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: data }))
+    await page.goto('/portal?view=overview')
+    const snapshot = page.getByRole('region', { name: 'Token 用量构成', exact: true })
+    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存读取', { exact: true }) }).locator('dd')).toHaveText(fixture.expectedRead)
+    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存写入', { exact: true }) }).locator('dd')).toHaveText(fixture.expectedWrite)
+    await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
+    const panel = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
+    const cells = panel.getByRole('row').filter({ hasText: 'model-a' }).getByRole('cell')
+    await expect(cells.nth(2)).toHaveText(fixture.expectedRead)
+    await expect(cells.nth(3)).toHaveText(fixture.expectedWrite)
+    if (fixture.known !== 2) await expect(panel).not.toContainText('缓存命中率 0.0%')
+  }
 })

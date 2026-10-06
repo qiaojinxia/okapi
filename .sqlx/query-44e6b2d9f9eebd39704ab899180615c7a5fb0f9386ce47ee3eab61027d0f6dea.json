@@ -1,0 +1,311 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT p.id, p.name, p.owner_id, p.scheme, p.host, p.port, p.username, p.status,\n                   p.max_keys, p.max_concurrency, p.failed_count, p.cooldown_until, p.last_error,\n                   p.exit_ip, p.exit_country, p.latency_ms, p.checked_at, p.previous_exit_ip,\n                   p.exit_ip_changed_at, p.note, p.created_at, p.updated_at,\n                   (SELECT COUNT(*) FROM channels c\n                     WHERE c.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"channel_count!\",\n                   (SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id\n                     WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"assigned_keys!\",\n                   COALESCE((SELECT array_agg(m.group_code ORDER BY m.group_code)\n                               FROM proxy_group_members m WHERE m.proxy_id = p.id),\n                            ARRAY[]::varchar[]) AS \"groups!\",\n                   EXISTS (SELECT 1 FROM settings\n                            WHERE key = 'egress_default' AND value ->> 'mode' = 'proxy'\n                              AND value ->> 'proxy_id' = p.id::text) AS \"is_default!\"\n            FROM proxies p\n            WHERE ($1::bigint IS NULL OR p.owner_id = $1)\n              AND ($2::text IS NULL OR p.name ILIKE $2 OR p.host ILIKE $2)\n            ORDER BY p.id\n            LIMIT $3 OFFSET $4\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "owner_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "owner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "scheme",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "scheme"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "host",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "port",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "port"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "username",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "max_keys",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "max_keys"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "max_concurrency"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "failed_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "failed_count"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "cooldown_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "cooldown_until"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "last_error",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "exit_ip",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "exit_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "exit_country",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "exit_country"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "latency_ms",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "latency_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "checked_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "checked_at"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "previous_exit_ip",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "previous_exit_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "exit_ip_changed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "exit_ip_changed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "note",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "note"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 23,
+        "name": "assigned_keys!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 24,
+        "name": "groups!",
+        "type_info": "VarcharArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 25,
+        "name": "is_default!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "44e6b2d9f9eebd39704ab899180615c7a5fb0f9386ce47ee3eab61027d0f6dea"
+}

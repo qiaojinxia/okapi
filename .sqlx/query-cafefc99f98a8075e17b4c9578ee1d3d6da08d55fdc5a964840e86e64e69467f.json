@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE proxies SET url_ciphertext = $2, updated_at = now()\n               WHERE id = $1 AND url_ciphertext = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cafefc99f98a8075e17b4c9578ee1d3d6da08d55fdc5a964840e86e64e69467f"
+}

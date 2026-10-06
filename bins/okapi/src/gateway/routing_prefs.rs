@@ -88,19 +88,25 @@ struct Envelope {
 /// 解析不了、或压根没有 `provider` 键 → 缺省偏好（行为与此前完全一致）。
 /// **不因为偏好写错就拒请求**：这是路由提示不是计费输入，宁可按缺省走通，
 /// 也不要让一个拼错的字段打断主链（与 §3.7 的 fail-safe 取向一致）。
-#[must_use]
-pub fn parse(body: &Bytes) -> RoutingPrefs {
+pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     // 绝大多数请求没有这个键，先做一次子串预检省掉整体反序列化
     if !contains_provider_key(body) {
-        return RoutingPrefs::default();
+        return Ok(RoutingPrefs::default());
     }
-    let Ok(env) = serde_json::from_slice::<Envelope>(body) else {
-        return RoutingPrefs::default();
-    };
+    let env: Envelope = serde_json::from_slice(body)
+        .map_err(|_| super::error::AppError::bad_request().with_param("provider"))?;
     let Some(p) = env.provider else {
-        return RoutingPrefs::default();
+        return Ok(RoutingPrefs::default());
     };
-    RoutingPrefs {
+    if p.max_price.as_ref().is_some_and(|m| {
+        [m.prompt, m.completion]
+            .into_iter()
+            .flatten()
+            .any(|v| !v.is_finite() || v < 0.0)
+    }) {
+        return Err(super::error::AppError::bad_request().with_param("provider.max_price"));
+    }
+    Ok(RoutingPrefs {
         allow_fallbacks: p.allow_fallbacks.unwrap_or(true),
         max_price: p.max_price.map_or_else(MaxPrice::default, |m| MaxPrice {
             // 负数/NaN 视为没写：上限只有正有限值才有意义
@@ -108,12 +114,12 @@ pub fn parse(body: &Bytes) -> RoutingPrefs {
             completion: m.completion.filter(|v| v.is_finite() && *v >= 0.0),
         }),
         zero_retention: p.zdr.unwrap_or(false) || p.data_collection.as_deref() == Some("deny"),
-    }
+    })
 }
 
 /// 粗筛：请求体里是否出现过 `"provider"` 键名。
 fn contains_provider_key(body: &Bytes) -> bool {
-    memchr_find(body, b"\"provider\"")
+    memchr_find(body, b"\"provider\"") || body.contains(&b'\\')
 }
 
 fn memchr_find(haystack: &[u8], needle: &[u8]) -> bool {
@@ -147,15 +153,15 @@ mod tests {
     use super::*;
 
     fn prefs(json: &str) -> RoutingPrefs {
-        parse(&Bytes::from(json.to_owned()))
+        parse(&Bytes::from(json.to_owned())).unwrap()
     }
 
     #[test]
     fn absent_or_broken_falls_back_to_defaults() {
         let base = RoutingPrefs::default();
         assert_eq!(prefs(r#"{"model":"m"}"#), base, "没有 provider 键 = 缺省");
-        assert_eq!(prefs(r#"{"provider":"openai"}"#), base, "类型不对不该炸");
-        assert_eq!(prefs("not json at all"), base);
+        assert!(parse(&Bytes::from_static(br#"{"provider":"openai"}"#)).is_err());
+
         assert!(base.is_default());
         assert!(
             base.allow_fallbacks,
@@ -183,11 +189,16 @@ mod tests {
     }
 
     #[test]
-    fn nonsense_price_ceilings_are_ignored_not_enforced() {
-        // 负数/NaN 当没写：把它当成"上限 0"会把所有请求拒光
-        let p = prefs(r#"{"provider":{"max_price":{"prompt":-1.0}}}"#);
-        assert_eq!(p.max_price.prompt, None);
-        assert!(p.is_default());
+    fn invalid_price_preserves_privacy_by_rejecting_the_request() {
+        assert!(
+            parse(&Bytes::from_static(
+                br#"{"provider":{"zdr":true,"max_price":{"prompt":-1}}}"#
+            ))
+            .is_err()
+        );
+        let p = prefs(r#"{"provi\u0064er":{"zdr":true,"allow_fallbacks":false}}"#);
+        assert!(p.zero_retention);
+        assert!(!p.allow_fallbacks);
     }
 
     #[test]

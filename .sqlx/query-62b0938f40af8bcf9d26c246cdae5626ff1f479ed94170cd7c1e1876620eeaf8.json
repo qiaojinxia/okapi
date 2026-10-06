@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT scheme, host, port, username FROM proxies\n           WHERE ($1::bigint IS NULL OR owner_id = $1)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "scheme",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "scheme"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "host",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "host"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "port",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "port"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "username",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "username"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "62b0938f40af8bcf9d26c246cdae5626ff1f479ed94170cd7c1e1876620eeaf8"
+}

@@ -1,10 +1,12 @@
 //! gateway 角色：数据面（鉴权、限流、预扣/结算、SSE 透传）。
 
+pub mod account_control;
 pub mod audio;
 pub mod auth;
 pub mod bootstrap;
 pub mod chat;
 pub mod clients;
+pub mod credentials;
 pub mod custom_pass;
 pub mod dashboard;
 pub(crate) mod diagnostics;
@@ -12,24 +14,31 @@ pub mod dialect;
 pub mod embeddings;
 pub mod error;
 pub mod estimate;
+pub(crate) mod execution_plan;
+pub(crate) mod extensions;
 pub mod extract;
 pub(crate) mod failure;
 pub mod images;
 pub mod inflight;
 pub(crate) mod ingress;
+pub(crate) mod key_health;
 pub mod models;
 pub mod oauth_cred;
 pub mod openai_dialect;
 pub mod pricing_loader;
 pub mod realtime;
+pub(crate) mod reservation;
 pub mod routing_prefs;
 pub mod rule_inputs;
 pub mod sched_redis;
 pub mod scheduler;
+pub(crate) mod server_tools;
 pub(crate) mod settlement_retry;
 pub mod state;
 pub(crate) mod stream_policy;
 pub mod token_count;
+pub(crate) mod upstream_cost;
+pub mod user_turns;
 pub mod videos;
 
 use crate::config::Config;
@@ -37,10 +46,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use okapi_ledger::BalanceLedger;
 use okapi_pricing::PriceBookHandle;
-use okapi_providers::{
-    AnthropicUpstream, BedrockUpstream, GeminiUpstream, OpenAiUpstream, PassUpstream,
-    VertexUpstream,
-};
+use okapi_providers::PassUpstream;
 use state::AppState;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,6 +54,8 @@ use tower_http::classify::ServerErrorsFailureClass;
 use tower_http::trace::TraceLayer;
 
 /// 装配 gateway 共享状态（bin 启动与集成测试共用）。
+// Keep state initialization together so its resource limits are reviewable.
+#[allow(clippy::too_many_lines)]
 pub async fn build_state(
     database_url: &str,
     redis_url: &str,
@@ -55,11 +63,23 @@ pub async fn build_state(
     clickhouse_url: Option<&str>,
     nats_url: Option<&str>,
 ) -> anyhow::Result<AppState> {
-    // 分词表建表 ~2.5ms，放在启动而非线上第一个请求上
-    super::gateway::estimate::warm_up();
     let pg = okapi_store::connect_pg(database_url).await?;
     okapi_store::run_migrations(&pg).await?;
     let redis = okapi_store::connect_redis(redis_url).await?;
+    build_state_with_resources(pg, redis, node, clickhouse_url, nats_url).await
+}
+
+/// Assemble services around shared connections, including worker endpoint execution.
+/// The caller has already applied migrations; this never opens another storage pool.
+#[allow(clippy::too_many_lines)] // Service graph construction lists resource/cache fields together.
+pub(crate) async fn build_state_with_resources(
+    pg: sqlx::PgPool,
+    redis: fred::clients::Client,
+    node: &str,
+    clickhouse_url: Option<&str>,
+    nats_url: Option<&str>,
+) -> anyhow::Result<AppState> {
+    estimate::warm_up();
     let ledger = BalanceLedger::new(redis.clone());
     let sched = sched_redis::SchedulerRedis::new(redis);
     let in_flight = inflight::InFlightGauge::new(sched.clone(), node);
@@ -89,8 +109,14 @@ pub async fn build_state(
         None => None,
     };
 
-    let upstream = OpenAiUpstream::new().map_err(|e| anyhow::anyhow!("upstream client: {e}"))?;
+    let resources = okapi_providers::inference::Resources::new()
+        .map_err(|e| anyhow::anyhow!("provider resources: {e}"))?;
+    let inference = okapi_providers::inference::Registry::builtin(&resources)
+        .map_err(|e| anyhow::anyhow!("provider registration: {e}"))?;
+    let upstream = resources.openai.clone();
     Ok(AppState {
+        #[cfg(test)]
+        settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
         pg,
         ledger,
         sched,
@@ -105,11 +131,11 @@ pub async fn build_state(
             .build(),
         azure: okapi_providers::AzureUpstream::new(upstream.clone()),
         upstream,
-        anthropic: AnthropicUpstream::new()
-            .map_err(|e| anyhow::anyhow!("anthropic client: {e}"))?,
-        gemini: GeminiUpstream::new().map_err(|e| anyhow::anyhow!("gemini client: {e}"))?,
-        bedrock: BedrockUpstream::new().map_err(|e| anyhow::anyhow!("bedrock client: {e}"))?,
-        vertex: VertexUpstream::new().map_err(|e| anyhow::anyhow!("vertex client: {e}"))?,
+        inference,
+        anthropic: resources.anthropic,
+        gemini: resources.gemini,
+        bedrock: resources.bedrock,
+        vertex: resources.vertex,
         pass: PassUpstream::new().map_err(|e| anyhow::anyhow!("pass client: {e}"))?,
         node: Arc::from(node),
         ch,
@@ -137,6 +163,20 @@ pub async fn build_state(
         batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
         image_storage: Arc::new(images::tasks::objects::Storage::from_env()?),
         in_flight,
+        channel_control_cache: moka::future::Cache::builder()
+            .max_capacity(4096)
+            .time_to_live(Duration::from_secs(5))
+            .build(),
+        key_failures: moka::future::Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(Duration::from_hours(24))
+            .build(),
+        egress_failures: moka::future::Cache::builder()
+            .max_capacity(10_000)
+            .time_to_live(Duration::from_hours(24))
+            .build(),
+        admission_turns: user_turns::UserTurns::default(),
+        settlement_turns: user_turns::UserTurns::default(),
         channel_cost_cache: moka::future::Cache::builder()
             .max_capacity(4096)
             .time_to_live(std::time::Duration::from_mins(1))
@@ -285,6 +325,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     .await?;
     // 连接排完 ≠ 账已落：流式/非流式 chat 的结算在响应之后的后台任务里，
     // 这里等它们归零再退出，否则最后一批请求只剩 Redis 预扣、要靠对账才能收口
+    // Realtime 会话在升级后脱离了 HTTP 排水：通知它们收尾，结算同样计入下面的等待
+    settlements.drain();
     settlements.wait_idle(SETTLE_DRAIN_CAP).await;
     tracing::info!("okapi gateway 已下线");
     Ok(())
@@ -399,6 +441,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(axum::middleware::from_fn(diagnostics::scope))
+        .layer(axum::middleware::from_fn(crate::security_headers::apply))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rule_inputs::track_in_flight,

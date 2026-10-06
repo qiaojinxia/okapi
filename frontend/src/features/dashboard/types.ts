@@ -14,8 +14,9 @@ export interface OverviewBucket {
 
 export interface OverviewResp {
   days: number
+  calendar?: { start_date: string; end_date: string; today: string; timezone: string; generated_at: string }
   today: OverviewBucket
-  /// 昨日全天（环比锚点；后端按 mv_user_day 整日聚合，非"昨日同一时刻"）。
+  /// 昨日全天参考；非昨日同一时刻，不用于今日涨跌计算。
   yesterday: OverviewBucket
   window: OverviewBucket
 }
@@ -34,3 +35,4 @@ export interface MarginResp {
 }
 export type RankingMetric = 'amount' | 'requests' | 'tokens'
 export type DashboardTrend = 'combined' | RankingMetric
+export type DistributionView = 'model' | 'channel' | 'tokens'

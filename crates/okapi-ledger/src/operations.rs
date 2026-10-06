@@ -17,7 +17,7 @@ pub async fn credit(
     payload: Value,
 ) -> Result<crate::transfers::Receipt, LedgerError> {
     let mut guard = UserGuard::acquire(db, user_id).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let id = crate::transfers::credit_in_tx(&mut tx, user_id, amount, event_type, actor, payload)
         .await?;
     tx.commit().await?;
@@ -45,7 +45,7 @@ pub async fn refund(
     };
     let mut guard = UserGuard::acquire(db, user_id).await?;
     guard.synchronize(ledger).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let result = pg::admin_refund_in_tx(&mut tx, request_id, reason, actor).await?;
     let Some(refund) = result else {
         tx.commit().await?;
@@ -71,7 +71,7 @@ pub async fn import_credit(
     if let Some(ledger) = ledger {
         guard.synchronize(ledger).await?;
     }
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     okapi_store::history::read_lock(&mut tx).await?;
     let already = sqlx::query_scalar!(
         r#"SELECT EXISTS(SELECT 1 FROM billing_actor_totals WHERE user_id=$1 AND actor=$2) AS "exists!""#,
@@ -107,7 +107,7 @@ pub async fn expire(
 ) -> Result<Money, LedgerError> {
     let mut guard = UserGuard::acquire(db, user_id).await?;
     guard.synchronize(ledger).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let due = sqlx::query_scalar!(
         "SELECT id FROM users WHERE id=$1 AND balance_expires_at < $2 AND deleted_at IS NULL FOR UPDATE",
         user_id,

@@ -26,6 +26,27 @@ const keys = [42, 43].map((id) => ({
     timezone: 'UTC',
   },
 }))
+/// 密钥用量折线（`/api/me/logs/series`）夹具：#42 最近七天与列表迷你折线同一组 Token（合计 2,390），#43 全零。
+/// 金额特意取 ≥ US$0.01：既有用例在汇总加载中断言"页面里没有 US$0.00"，折线读数不能抢这个前缀。
+const seriesTokens = [0, 150, 20, 500, 320, 1000, 400]
+const seriesRequests = [0, 2, 1, 4, 3, 8, 5]
+const seriesAmount = [0, 2_000_000, 500_000, 3_000_000, 1_500_000, 6_000_000, 2_500_000]
+function seriesFor(url: URL) {
+  const id = Number(url.searchParams.get('api_key_id')), n = Number(url.searchParams.get('days') ?? 7)
+  const end = Date.UTC(2026, 8, 28)
+  const data = Array.from({ length: n }, (_, i) => {
+    const day = new Date(end - (n - 1 - i) * 86_400_000).toISOString().slice(0, 10)
+    const k = i - (n - 7)  // 与最近七天对齐；更早的日子（30 天窗口）只有一个小尖峰
+    const live = id === 42
+    return {
+      day, errors: 0,
+      requests: live ? (k >= 0 ? seriesRequests[k] : i === 3 ? 6 : 0) : 0,
+      tokens: live ? (k >= 0 ? seriesTokens[k] : i === 3 ? 4000 : 0) : 0,
+      amount_micro: live ? (k >= 0 ? seriesAmount[k] : i === 3 ? 4_000_000 : 0) : 0,
+    }
+  })
+  return { scope: 'user', api_key_id: id, days: n, window: { start_date: data[0].day, end_date: data[n - 1].day, timezone: 'UTC' }, data }
+}
 const log = {
   id: 99, request_id: 'aaaaaaaa-0000-4000-8000-000000000042', api_key_id: 42, key_name: 'production',
   model: 'fixture-model', log_type: 2, status: 20, is_stream: true,
@@ -56,6 +77,7 @@ async function prepare(page: Page, mode: 'account' | 'key' | 'legacy' = 'account
       '/api/notice': { notice: null }, '/api/pricing': { models: [], groups: [] },
       '/api/me/keys': { data: keys, total: keys.length }, '/api/me/groups': { data: [] },
       '/api/me/logs/stat': url.searchParams.get('api_key_id') === '42' ? stats : emptyStats,
+      '/api/me/logs/series': seriesFor(url),
       '/api/me/logs': { data: [log], scope: 'user', next_before: null },
     }
     return route.fulfill({ json: responses[url.pathname] ?? { data: [] } })
@@ -394,5 +416,112 @@ for (const { width, language } of [{ width: 1920, language: 'zh-CN' }, { width: 
     await page.keyboard.press('Tab')
     await expect(dialog.locator('header').getByRole('button')).toBeFocused()
     await page.screenshot({ path: `test-results/key-usage-${width}-${language}.png`, animations: 'disabled' })
+  })
+}
+
+test('密钥用量折线：打开即按需请求近 7 天序列，三个指标读数可切换，近 30 天换窗口重取', async ({ page }) => {
+  const queries = await prepare(page)
+  await page.goto('/portal/keys')
+  expect(queries.filter((url) => url.pathname === '/api/me/logs/series'), '列表本身不请求折线序列').toHaveLength(0)
+  await page.getByRole('button', { name: '查看 production（#42）用量统计' }).click()
+  const dialog = page.getByRole('dialog', { name: '密钥用量概览' })
+  const trend = dialog.getByRole('region', { name: '用量趋势' })
+  const totals = trend.locator('[data-slot="key-series-total"]')
+  // 合计与列表迷你折线同一组数：2,390 Token；23 次请求；US$15.50
+  await expect(totals).toHaveText(['2,390', '23', 'US$15.50'])
+  await expect(trend.getByRole('button', { name: /^Token/ })).toHaveAttribute('aria-pressed', 'true')
+  await expect(trend.getByRole('group', { name: 'production 的用量折线图' })).toBeVisible()
+  await expect(trend).toContainText('单位：Token')
+  await expect(trend).toContainText(/日均\s*341/)
+  await expect(trend).toContainText(/峰值日\s*1,000 · 09-27/)
+  await expect(trend).toContainText('按 UTC 自然日统计')
+  let requests = queries.filter((url) => url.pathname === '/api/me/logs/series')
+  expect(requests).toHaveLength(1)
+  expect(Object.fromEntries(requests[0].searchParams)).toEqual({ scope: 'user', api_key_id: '42', days: '7' })
+
+  await trend.getByRole('button', { name: /^消费金额/ }).click()
+  await expect(trend.getByRole('button', { name: /^消费金额/ })).toHaveAttribute('aria-pressed', 'true')
+  await expect(trend).toContainText('单位：USD')
+  await expect(trend).toContainText(/峰值日\s*US\$6\.00 · 09-27/)
+  await trend.getByRole('button', { name: /^请求数/ }).click()
+  await expect(trend).toContainText('单位：次')
+  await expect(trend).toContainText(/峰值日\s*8 · 09-27/)
+  // 切指标不重新请求，同一份序列
+  expect(queries.filter((url) => url.pathname === '/api/me/logs/series')).toHaveLength(1)
+
+  await trend.getByRole('button', { name: '近 30 天' }).click()
+  await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs/series').length).toBe(2)
+  requests = queries.filter((url) => url.pathname === '/api/me/logs/series')
+  expect(requests[1].searchParams.get('days')).toBe('30')
+  // 30 天窗口多出一个小尖峰：Token 2,390 + 4,000，请求 23 + 6
+  await expect(totals).toHaveText(['6,390', '29', 'US$19.50'])
+  await expect(trend.getByRole('button', { name: '近 30 天' })).toHaveAttribute('aria-pressed', 'true')
+  // 汇总仍只请求一次（折线不拖累既有汇总的按需加载）
+  expect(queries.filter((url) => url.pathname === '/api/me/logs/stat')).toHaveLength(1)
+})
+
+test('密钥用量折线：没有调用时明说，不把"零"画成有数据；折线失败可重试且不影响汇总', async ({ page }) => {
+  await prepare(page)
+  let fail = true
+  await page.route('**/api/me/logs/series?*', (route) => {
+    if (new URL(route.request().url()).searchParams.get('api_key_id') === '42' && fail) {
+      return route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } })
+    }
+    return route.fallback()
+  })
+  await page.goto('/portal/keys')
+  await page.getByRole('button', { name: '查看 production（#42）用量统计' }).click()
+  const dialog = page.getByRole('dialog', { name: '密钥用量概览' })
+  const trend = dialog.getByRole('region', { name: '用量趋势' })
+  await expect(trend.getByRole('alert')).toContainText('用量趋势暂不可用')
+  await expect(trend.locator('[data-slot="key-series-total"]')).toHaveText(['—', '—', '—'])
+  // 汇总不受影响
+  await expect(dialog).toContainText('US$0.000869')
+  fail = false
+  await trend.getByRole('button', { name: '重试' }).click()
+  await expect(trend.locator('[data-slot="key-series-total"]')).toHaveText(['2,390', '23', 'US$15.50'])
+  await expect(trend.getByRole('alert')).toHaveCount(0)
+
+  // 全零的密钥：明说没有调用
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '查看 production（#43）用量统计' }).click()
+  await expect(trend.locator('[data-slot="key-series-total"]')).toHaveText(['0', '0', 'US$0.00'])
+  await expect(trend.getByRole('status')).toHaveText('近 7 天没有调用记录。')
+})
+
+test('密钥用量折线：旧后端 / 异常响应视为不可用，而不是画一条全零的平线', async ({ page }) => {
+  await prepare(page)
+  await page.route('**/api/me/logs/series?*', (route) => route.fulfill({ json: { data: [] } }))
+  await page.goto('/portal/keys')
+  await page.getByRole('button', { name: '查看 production（#42）用量统计' }).click()
+  const trend = page.getByRole('dialog', { name: '密钥用量概览' }).getByRole('region', { name: '用量趋势' })
+  await expect(trend.getByRole('alert')).toContainText('用量趋势暂不可用')
+  await expect(trend.locator('svg.recharts-surface')).toHaveCount(0)
+  await expect(trend.getByRole('status')).toHaveCount(0)
+})
+
+for (const { width, language } of [{ width: 390, language: 'zh-CN' }, { width: 1440, language: 'en' }]) {
+  test(`密钥用量折线 ${width}px ${language}：折线与读数不撑宽抽屉，英文文案完整`, async ({ page }) => {
+    await prepare(page, 'account', language)
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/portal/keys')
+    const english = language === 'en'
+    await page.getByRole('button', { name: english ? 'View usage for production (#42)' : '查看 production（#42）用量统计', exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: english ? 'Key usage overview' : '密钥用量概览' })
+    const trend = dialog.getByRole('region', { name: english ? 'Usage trend' : '用量趋势' })
+    await expect(trend.locator('[data-slot="key-series-total"]')).toHaveText(['2,390', '23', english ? '$15.50' : 'US$15.50'])
+    await expect(trend.locator('svg.recharts-surface').first()).toBeVisible()
+    if (english) {
+      await expect(trend).toContainText('Unit: Tokens')
+      await expect(trend).toContainText('Daily avg')
+      await expect(trend).toContainText('Peak day')
+      await expect(trend.getByRole('button', { name: 'Last 30 days' })).toBeVisible()
+    }
+    expect(await dialog.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    const box = (await trend.boundingBox())!
+    const dialogBox = (await dialog.boundingBox())!
+    expect(box.x + box.width).toBeLessThanOrEqual(dialogBox.x + dialogBox.width)
+    await page.screenshot({ path: `test-results/key-usage-trend-${width}-${language}.png`, animations: 'disabled' })
   })
 }

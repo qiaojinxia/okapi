@@ -1,0 +1,53 @@
+[
+  {
+    "name": "deepseek_top_level",
+    "chat": {"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40},
+    "responses": {"input_tokens":100,"output_tokens":10,"total_tokens":110,"prompt_cache_hit_tokens":60,"prompt_cache_miss_tokens":40},
+    "expected": {"prompt_tokens":100,"completion_tokens":10,"cached_tokens":60,"cache_read_reported":true,"cache_write_tokens":0,"cache_write_reported":false,"audio_prompt_tokens":0,"reasoning_tokens":0},
+    "amount_micro":440
+  },
+  {
+    "name": "deepseek_reported_zero",
+    "chat": {"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100},
+    "responses": {"input_tokens":100,"output_tokens":10,"total_tokens":110,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100},
+    "expected": {"prompt_tokens":100,"completion_tokens":10,"cached_tokens":0,"cache_read_reported":true,"cache_write_tokens":0,"cache_write_reported":false,"audio_prompt_tokens":0,"reasoning_tokens":0},
+    "amount_micro":560
+  },
+  {
+    "name": "ark_audio_cache",
+    "chat": {"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"prompt_tokens_details":{"cached_tokens":60,"audio_tokens":40,"audio_cached_tokens":20}},
+    "responses": {"input_tokens":100,"output_tokens":10,"total_tokens":110,"input_tokens_details":{"cached_tokens":60,"audio_tokens":40,"audio_cached_tokens":20}},
+    "expected": {"prompt_tokens":100,"completion_tokens":10,"cached_tokens":60,"cache_read_reported":true,"cache_write_tokens":0,"cache_write_reported":false,"audio_prompt_tokens":20,"cache_read_modalities":{"audio_tokens":20,"image_tokens":0},"reasoning_tokens":0},
+    "amount_micro":1120
+  },
+  {
+    "name": "bedrock_native_usage",
+    "bridged": true,
+    "chat": {"inputTokens":20,"outputTokens":10,"totalTokens":30,"cacheReadInputTokens":60,"cacheWriteInputTokens":20,"cacheDetails":[{"ttl":"1h","inputTokens":8},{"ttl":"5m","inputTokens":12}]},
+    "responses": {"inputTokens":20,"outputTokens":10,"totalTokens":30,"cacheReadInputTokens":60,"cacheWriteInputTokens":20,"cacheDetails":[{"ttl":"1h","inputTokens":8},{"ttl":"5m","inputTokens":12}]},
+    "expected": {"prompt_tokens":100,"completion_tokens":10,"cached_tokens":60,"cache_read_reported":true,"cache_write_tokens":20,"cache_write_reported":true,"cache_write_5m_tokens":12,"cache_write_1h_tokens":8,"audio_prompt_tokens":0,"reasoning_tokens":0},
+    "amount_micro":552
+  },
+  {
+    "name": "interactions_native_usage",
+    "bridged": true,
+    "chat": {"total_input_tokens":100,"total_output_tokens":10,"total_thought_tokens":5,"total_tokens":115,"total_cached_tokens":60,"input_tokens_by_modality":[{"modality":"text","tokens":60},{"modality":"audio","tokens":40}],"output_tokens_by_modality":[{"modality":"text","tokens":10}],"cached_tokens_by_modality":[{"modality":"text","tokens":40},{"modality":"audio","tokens":20}]},
+    "responses": {"total_input_tokens":100,"total_output_tokens":10,"total_thought_tokens":5,"total_tokens":115,"total_cached_tokens":60,"input_tokens_by_modality":[{"modality":"text","tokens":60},{"modality":"audio","tokens":40}],"output_tokens_by_modality":[{"modality":"text","tokens":10}],"cached_tokens_by_modality":[{"modality":"text","tokens":40},{"modality":"audio","tokens":20}]},
+    "expected": {"prompt_tokens":100,"completion_tokens":15,"cached_tokens":60,"cache_read_reported":true,"cache_write_tokens":0,"cache_write_reported":false,"audio_prompt_tokens":20,"cache_read_modalities":{"audio_tokens":20,"image_tokens":0},"reasoning_tokens":5},
+    "amount_micro":1200
+  },
+  {
+    "name": "bedrock_cache_extensions",
+    "chat": {"prompt_tokens":100,"completion_tokens":10,"total_tokens":110,"cacheReadInputTokens":60,"cacheWriteInputTokens":20,"cacheDetails":[{"ttl":"5m","inputTokens":12},{"ttl":"1h","inputTokens":8}]},
+    "responses": {"input_tokens":100,"output_tokens":10,"total_tokens":110,"cacheReadInputTokens":60,"cacheWriteInputTokens":20,"cacheDetails":[{"ttl":"5m","inputTokens":12},{"ttl":"1h","inputTokens":8}]},
+    "expected": {"prompt_tokens":100,"completion_tokens":10,"cached_tokens":60,"cache_read_reported":true,"cache_write_tokens":20,"cache_write_reported":true,"cache_write_5m_tokens":12,"cache_write_1h_tokens":8,"audio_prompt_tokens":0,"reasoning_tokens":0},
+    "amount_micro":552
+  },
+  {
+    "name": "interactions_cache_extensions",
+    "chat": {"prompt_tokens":100,"completion_tokens":15,"total_tokens":115,"prompt_tokens_details":{"audio_tokens":40},"completion_tokens_details":{"reasoning_tokens":5},"total_cached_tokens":60,"cached_tokens_by_modality":[{"modality":"text","tokens":40},{"modality":"audio","tokens":20}]},
+    "responses": {"input_tokens":100,"output_tokens":15,"total_tokens":115,"input_tokens_details":{"audio_tokens":40},"output_tokens_details":{"reasoning_tokens":5},"total_cached_tokens":60,"cached_tokens_by_modality":[{"modality":"text","tokens":40},{"modality":"audio","tokens":20}]},
+    "expected": {"prompt_tokens":100,"completion_tokens":15,"cached_tokens":60,"cache_read_reported":true,"cache_write_tokens":0,"cache_write_reported":false,"audio_prompt_tokens":20,"cache_read_modalities":{"audio_tokens":20,"image_tokens":0},"reasoning_tokens":5},
+    "amount_micro":1200
+  }
+]

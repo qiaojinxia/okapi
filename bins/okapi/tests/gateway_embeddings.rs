@@ -67,7 +67,7 @@ struct TestEnv {
 }
 
 async fn setup(channels: &[(&str, i32)]) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
 
@@ -276,4 +276,47 @@ async fn embeddings_failover_on_transient() {
     assert_eq!(status, 20);
     assert_eq!(amount, 240);
     assert_eq!(failover, 1);
+}
+
+#[tokio::test]
+async fn embeddings_failover_uses_the_successful_channel_cost() {
+    for (ratio, cost) in [(2250, 540), (0, 0)] {
+        let env = setup(&[("/fail/v1", 10), ("/ok/v1", 0)]).await;
+        sqlx::query("UPDATE channels SET upstream_unit_cost=$2 WHERE models @> $1")
+            .bind(json!([env.model]))
+            .bind(json!({"relative_cost_milli":9000}))
+            .execute(&env.pg)
+            .await
+            .unwrap();
+        let channel:i64=sqlx::query_scalar("UPDATE channels SET upstream_unit_cost=$2 WHERE models @> $1 AND api_base LIKE '%/ok/v1' RETURNING id")
+            .bind(json!([env.model])).bind(json!({"relative_cost_milli":ratio})).fetch_one(&env.pg).await.unwrap();
+        let response = post_embeddings(&env).await;
+        assert_eq!(response.status(), 200);
+        let (_, amount, _, failover) = wait_record(&env.pg, env.user_id).await;
+        assert_eq!((amount, failover), (240, 1));
+        let row:(i64,i64,i64,Option<i64>,Value,Uuid)=sqlx::query_as("SELECT amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,pricing_snapshot,request_id FROM billing_records WHERE user_id=$1 AND log_type=2")
+            .bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+        assert_eq!((row.0, row.1, row.2, row.3), (240, 240, 0, Some(cost)));
+        assert_eq!(
+            row.4["upstream_cost_basis"],
+            json!({"version":1,"source":"selected_channel","channel_id":channel,"relative_cost_milli":ratio,"list_price_micro":240})
+        );
+        let event:Value=sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE topic='billing.completed' AND payload->>'request_id'=$1")
+            .bind(row.5.to_string()).fetch_one(&env.pg).await.unwrap();
+        assert_eq!(event["upstream_cost_known"], true);
+        assert_eq!(event["upstream_cost_micro"], cost);
+        assert_eq!(
+            serde_json::from_str::<Value>(event["ratio_snapshot"].as_str().unwrap()).unwrap(),
+            row.4
+        );
+        assert_eq!(
+            env.state
+                .ledger
+                .balance(env.user_id)
+                .await
+                .unwrap()
+                .as_micros(),
+            10_000_000 - 240
+        );
+    }
 }

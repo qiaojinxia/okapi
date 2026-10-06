@@ -167,13 +167,7 @@ fn observation_source(
     } else {
         keys
     };
-    let time = match table {
-        "mv_channel_5min" => "toStartOfHour(ts5) AS hour, toDate(ts5) AS day",
-        "mv_key_model_day" | "mv_user_model_day" | "mv_user_day" | "mv_apikey_day" => {
-            "toStartOfDay(day) AS hour"
-        }
-        _ => "toDate(hour) AS day",
-    };
+    let time = super::observation_sources::Grain::for_table(table).time_sql();
     let aggregate = merged_sql(observation.fields);
     let raw = format!("count() AS {observed_count}, {}", observation.raw);
     if mode != Mode::Recover {

@@ -5,22 +5,68 @@ use okapi_domain::{
 };
 use serde::Deserialize;
 
+mod aliases;
+mod envelope;
+mod wire;
+pub use aliases::compatible_cache_details;
+pub use envelope::usage_from_chat;
+pub use wire::has_bridged_usage_fields;
+
 #[derive(Deserialize)]
 struct RawUsage {
+    server_tool_usage: Option<okapi_domain::ServerToolUsage>,
     prompt_tokens: Option<u32>,
     completion_tokens: Option<u32>,
     total_tokens: Option<u64>,
     prompt_tokens_details: Option<crate::PromptTokensDetails>,
     completion_tokens_details: Option<crate::CompletionTokensDetails>,
+    prompt_cache_hit_tokens: Option<u32>,
+    prompt_cache_miss_tokens: Option<u32>,
+}
+
+impl RawUsage {
+    fn input_from_cache(&mut self) -> Result<(), ()> {
+        let details = self.prompt_tokens_details.unwrap_or_default();
+        let read = crate::chat::cache_counter(&[
+            details.cache_read_reported.then_some(details.cached_tokens),
+            self.prompt_cache_hit_tokens,
+        ])
+        .map_err(|_| ())?;
+        if let (Some(read), Some(miss)) = (read, self.prompt_cache_miss_tokens) {
+            // DeepSeek defines total input as hit + miss. Retain this observed
+            // total even when a streaming snapshot omits prompt_tokens.
+            let total = read.checked_add(miss).ok_or(())?;
+            if self.prompt_tokens.is_some_and(|prompt| prompt != total) {
+                return Err(());
+            }
+            self.prompt_tokens = Some(total);
+        }
+        Ok(())
+    }
 }
 
 impl<'de> Deserialize<'de> for UsageProbe {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
+        let Ok(value) = wire::canonicalize(value) else {
+            return Ok(Self::invalid());
+        };
+        let Ok(details) = compatible_cache_details(&value) else {
+            return Ok(Self::invalid());
+        };
         let Ok(mut raw) = serde_json::from_value::<RawUsage>(value) else {
             return Ok(Self::invalid());
         };
-        if raw.prompt_tokens.is_none() && raw.completion_tokens.is_none() {
+        raw.prompt_tokens_details = Some(details);
+        if raw.input_from_cache().is_err() {
+            return Ok(Self::invalid());
+        }
+        if raw.prompt_tokens.is_none()
+            && raw.completion_tokens.is_none()
+            && raw.server_tool_usage.is_none()
+            && !details.cache_read_reported
+            && !details.cache_write_reported
+        {
             return Ok(Self::invalid());
         }
         if let Some(total) = raw.total_tokens {
@@ -40,12 +86,38 @@ impl<'de> Deserialize<'de> for UsageProbe {
                 }
             }
         }
+        let mut details = raw.prompt_tokens_details.unwrap_or_default();
+        // DeepSeek's top-level hit counter mirrors the OpenAI detail field.
+        // Misses are regular input, not cache creation. Never invent write usage.
+        let read = crate::chat::cache_counter(&[
+            details.cache_read_reported.then_some(details.cached_tokens),
+            raw.prompt_cache_hit_tokens,
+        ]);
+        let Ok(read) = read else {
+            return Ok(Self::invalid());
+        };
+        if let Some(read) = read {
+            details.cached_tokens = read;
+            details.cache_read_reported = true;
+            if let (Some(miss), Some(prompt)) = (raw.prompt_cache_miss_tokens, raw.prompt_tokens)
+                && read.checked_add(miss) != Some(prompt)
+            {
+                return Ok(Self::invalid());
+            }
+        } else if raw
+            .prompt_cache_miss_tokens
+            .zip(raw.prompt_tokens)
+            .is_some_and(|(miss, prompt)| miss > prompt)
+        {
+            return Ok(Self::invalid());
+        }
         let probe = Self {
+            server_tool_usage: raw.server_tool_usage,
             missing_prompt: raw.prompt_tokens.is_none(),
             missing_completion: raw.completion_tokens.is_none(),
             prompt_tokens: raw.prompt_tokens.unwrap_or(0),
             completion_tokens: raw.completion_tokens.unwrap_or(0),
-            prompt_tokens_details: raw.prompt_tokens_details.unwrap_or_default(),
+            prompt_tokens_details: details,
             completion_tokens_details: raw.completion_tokens_details.unwrap_or_default(),
             invalid: raw.total_tokens.is_some_and(|total| {
                 total
@@ -224,6 +296,7 @@ pub(super) fn normalize(probe: UsageProbe) -> Result<TokenUsage, DomainError> {
             .ok_or_else(invalid)
     };
     let usage = TokenUsage {
+        server_tool_usage: probe.server_tool_usage,
         reported_details: Some(reported(probe)),
         upstream_usage: Some(UpstreamTokenCounts {
             prompt_tokens: Some(probe.prompt_tokens),

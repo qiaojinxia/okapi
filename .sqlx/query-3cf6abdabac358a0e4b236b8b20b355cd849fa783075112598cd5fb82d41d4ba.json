@@ -1,0 +1,37 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT ep.mode AS \"mode!\", ep.proxy_id, ep.url_ciphertext\n        FROM channel_keys k\n        CROSS JOIN LATERAL egress_pick(k.channel_id, k.id, false) ep\n        WHERE k.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mode!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "proxy_id",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "url_ciphertext",
+        "type_info": "Bytea",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "3cf6abdabac358a0e4b236b8b20b355cd849fa783075112598cd5fb82d41d4ba"
+}

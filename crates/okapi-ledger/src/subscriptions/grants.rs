@@ -72,7 +72,7 @@ pub async fn request(
     actor: &str,
 ) -> Result<Receipt, LedgerError> {
     let mut guard = UserGuard::acquire(pg, uid).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let id = enqueue(&mut tx, uid, plan, source, actor, false).await?;
     tx.commit().await?;
     Ok(finish(&mut guard, ledger, uid, id).await)
@@ -95,14 +95,14 @@ pub async fn finish(guard: &mut UserGuard, ledger: &BalanceLedger, uid: i64, id:
             } else {
                 "delivery_pending"
             };
-            if let Err(save_error) = sqlx::query!(
-                "UPDATE subscription_grants SET last_error=$2 WHERE id=$1 AND applied_at IS NULL",
-                id,
-                code
-            )
-            .execute(guard.connection())
-            .await
-            {
+            let saved = async {
+                sqlx::query!(
+                    "UPDATE subscription_grants SET last_error=$2 WHERE id=$1 AND applied_at IS NULL",
+                    id, code
+                ).execute(guard.connection()?).await?;
+                Ok::<_, LedgerError>(())
+            }.await;
+            if let Err(save_error) = saved {
                 tracing::warn!(%id,%save_error,"subscription delivery status pending");
             }
             tracing::error!(user_id=uid,operation_id=%id,%error,"subscription grant awaiting recovery");
@@ -124,7 +124,7 @@ async fn process(
     guard.synchronize(ledger).await?;
     // Preserve acceptance order for this user, including older paid deliveries.
     let rows=sqlx::query!("SELECT id FROM subscription_grants WHERE user_id=$1 AND applied_at IS NULL AND sequence <= (SELECT sequence FROM subscription_grants WHERE id=$2 AND user_id=$1) ORDER BY sequence LIMIT 32",uid,id)
-        .fetch_all(guard.connection()).await?;
+        .fetch_all(guard.connection()?).await?;
     for row in rows {
         apply(guard, ledger, uid, row.id).await?;
     }
@@ -133,10 +133,10 @@ async fn process(
         id,
         uid
     )
-    .fetch_one(guard.connection())
+    .fetch_one(guard.connection()?)
     .await?;
     let sub = store::by_id(
-        guard.connection(),
+        guard.connection()?,
         row.subscription_id
             .ok_or(LedgerError::HoldRecoveryRequired)?,
     )
@@ -157,7 +157,7 @@ async fn apply(
 ) -> Result<(), LedgerError> {
     guard.synchronize(ledger).await?;
     let frozen = guard.subscription_frozen(ledger).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let row=sqlx::query!("SELECT source,plan_snapshot,actor FROM subscription_grants WHERE id=$1 AND user_id=$2 AND applied_at IS NULL FOR UPDATE",id,uid)
         .fetch_optional(&mut *tx).await?;
     let Some(row) = row else {
@@ -201,11 +201,11 @@ pub async fn recover(pg: &PgPool, ledger: &BalanceLedger, limit: i64) -> Result<
                 "SELECT id FROM subscription_grants WHERE sequence=$1",
                 row.sequence
             )
-            .fetch_one(guard.connection())
+            .fetch_one(guard.connection()?)
             .await?;
             let receipt = finish(&mut guard, ledger, row.user_id, id).await;
             if receipt.pending {
-                defer(guard.connection(), row.user_id).await?;
+                defer(guard.connection()?, row.user_id).await?;
             }
             Ok::<_, LedgerError>(())
         }

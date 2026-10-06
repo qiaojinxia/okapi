@@ -13,6 +13,7 @@
 //! 服务账号 OAuth + rawPredict / generateContent）：Anthropic / Gemini 方言换传输，
 //! 协议转换全部复用（IMPLEMENTATION §11.35）。
 
+pub mod account;
 pub mod anthropic;
 mod anthropic_usage;
 pub mod aws_eventstream;
@@ -22,17 +23,22 @@ pub mod batch;
 pub mod bedrock;
 pub mod convert;
 pub mod custom_pass;
+pub mod egress_probe;
 pub mod error;
 pub mod gemini;
 pub mod http;
 pub mod image_store;
 pub mod image_stream;
-mod limits;
+pub mod inference;
+pub mod limits;
 pub mod model_parameters;
 pub mod modifiers;
 pub mod oauth;
 pub mod openai;
+pub mod profiles;
 pub mod reasoning;
+pub mod registry;
+pub mod response_lifetime;
 pub mod responses;
 pub mod responses_bridge;
 pub mod responses_ws;

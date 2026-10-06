@@ -1,5 +1,8 @@
+use crate::egress::Resolved;
 use crate::error::StoreError;
+use rand::RngExt;
 use sqlx::PgPool;
+use std::sync::Arc;
 
 /// 渠道候选（channel × channel_key 展开行，按 priority 降序返回）。
 #[derive(Debug, Clone)]
@@ -53,23 +56,24 @@ pub struct ChannelCandidate {
     /// OAuth token 端点覆写（channels.settings.oauth_token_url）：只对 `anthropic_max` / `codex`
     /// 有意义，测试 mock / 企业代理用；None = 各家官方地址（IMPLEMENTATION §11.38）。
     pub oauth_token_url: Option<String>,
-    /// Claude Code 全伪装开关（channels.settings.mimic_cc，IMPLEMENTATION §11.38）：只对
-    /// `anthropic_max` 有意义。true = 网关替客户端伪造 Claude Code 身份（全量 beta、CLI UA、
-    /// x-stainless 套件、system billing 块、metadata.user_id），且不再透传客户端身份头；
-    /// false（缺省）= 透传模式，前面应是真实官方客户端。
-    pub mimic_cc: bool,
-    /// 伪装 CLI 版本覆写（channels.settings.mimic_cc_version）：三段 semver；
-    /// None = 用 providers 侧内置基线（官方 CLI 升级后需跟随）。
-    pub mimic_cc_version: Option<String>,
-    /// 出站代理（channels.settings.proxy_url）：http / https / socks5 / socks5h。
-    /// None = 直连。代理绑在 reqwest Client 上，按 URL 缓存（IMPLEMENTATION §11.30）。
+    /// Provider-owned request extensions. Store and scheduler do not interpret their payload.
+    pub extensions: serde_json::Value,
+    /// 出站代理 URL（已解密）：出口绑定解析的结果（IMPLEMENTATION §11.41），None = 直连。
+    /// 解析不出代理的候选（停用 / 未分配 / 全组熔断）根本不会出现在候选里——不会退回直连。
+    /// 轮换组每次尝试前由 [`ChannelCandidate::reroll_egress`] 重抽。
     pub proxy_url: Option<String>,
+    /// 本次尝试走的代理（连接失败归因、会话固定用）；None = 直连。
+    pub egress_proxy_id: Option<i64>,
+    /// 该代理的在途并发上限（`proxies.max_concurrency`，准入时与 key 租约一起占）；None = 不限。
+    pub egress_max_concurrency: Option<i32>,
+    /// 轮换组的健康成员（priority 降序）；None = 直连 / 单个代理 / 固定分配。
+    pub egress_rotation: Option<Arc<[EgressMember]>>,
     /// 额外请求头（channels.settings.extra_headers）：鉴权 / 逐跳 / Host 等受保护键
     /// 在写入时已拒，热路径再跳过一次。
     pub extra_headers: Vec<(String, String)>,
     /// 能力声明（显式 false 才排除，IMPLEMENTATION §3.8）。
     pub capabilities: serde_json::Value,
-    /// 相对成本千分比（层内权重除数，缺省 1000 = 中性）。
+    /// 相对成本千分比（缺省 1000；明确零保留，调度除数另取至少 1）。
     pub cost_milli: i64,
     /// 瞬态失败时同一把 key 的重试次数（channels.retry_policy，缺省 1）。
     pub same_key_retries: i16,
@@ -87,6 +91,64 @@ pub struct ChannelCandidate {
 /// 内置默认池：新渠道缺省加入、未指定池的分组走这里。
 pub const DEFAULT_POOL: &str = "default";
 
+/// 轮换组的一个可选出口（已解密）。
+#[derive(Debug, Clone)]
+pub struct EgressMember {
+    pub proxy_id: i64,
+    pub url: String,
+    pub priority: i32,
+    pub weight: i32,
+    pub max_concurrency: Option<i32>,
+}
+
+/// 最高 priority 层内按 weight 加权随机抽一个（指数时钟，与渠道调度同一抽样法）。
+/// `members` 已按 priority 降序。
+#[allow(clippy::cast_precision_loss)] // weight 是 i32，f64 精确表示
+fn pick_member(members: &[EgressMember]) -> Option<&EgressMember> {
+    let top = members.first()?.priority;
+    let mut rng = rand::rng();
+    members
+        .iter()
+        .take_while(|m| m.priority == top)
+        .map(|m| {
+            let uniform = 1.0 - rng.random::<f64>(); // (0,1]，ln 恒有限
+            (-uniform.ln() / f64::from(m.weight.max(1)), m)
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, m)| m)
+}
+
+/// 候选查询带回的轮换成员 JSON → 解密后的成员表。
+fn rotation_members(
+    master_key: Option<&str>,
+    value: serde_json::Value,
+) -> Result<Vec<EgressMember>, StoreError> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        id: i64,
+        url: String,
+        priority: i32,
+        weight: i32,
+        #[serde(default)]
+        max_concurrency: Option<i32>,
+    }
+    let raw: Vec<Raw> = serde_json::from_value(value)
+        .map_err(|_| StoreError::InvalidData("egress_rotation_members"))?;
+    raw.into_iter()
+        .map(|m| {
+            let stored =
+                hex::decode(&m.url).map_err(|_| StoreError::InvalidData("egress_rotation_url"))?;
+            Ok(EgressMember {
+                proxy_id: m.id,
+                url: crate::credential::open(master_key, &stored)?,
+                priority: m.priority,
+                weight: m.weight,
+                max_concurrency: m.max_concurrency,
+            })
+        })
+        .collect()
+}
+
 fn extra_headers_from(value: Option<serde_json::Value>) -> Vec<(String, String)> {
     value
         .and_then(|v| v.as_object().cloned())
@@ -99,6 +161,40 @@ fn extra_headers_from(value: Option<serde_json::Value>) -> Vec<(String, String)>
 }
 
 impl ChannelCandidate {
+    /// 轮换组：每次尝试前重抽一个成员（缓存的候选也逐次重抽，不会一个 TTL 内钉死一个出口）。
+    /// 其他绑定不变。
+    pub fn reroll_egress(&mut self) {
+        if let Some(member) = self.egress_rotation.as_deref().and_then(pick_member) {
+            self.proxy_url = Some(member.url.clone());
+            self.egress_proxy_id = Some(member.proxy_id);
+            self.egress_max_concurrency = member.max_concurrency;
+        }
+    }
+
+    /// 该候选此刻能不能走 `proxy_id` 这个出口（None = 直连）。会话型连接据此沿用首轮出口：
+    /// 轮换组只要它还是健康成员就行，其他绑定必须正好是它。
+    #[must_use]
+    pub fn egress_admits(&self, proxy_id: Option<i64>) -> bool {
+        match &self.egress_rotation {
+            Some(members) => proxy_id.is_some_and(|id| members.iter().any(|m| m.proxy_id == id)),
+            None => self.egress_proxy_id == proxy_id,
+        }
+    }
+
+    /// 把出口钉成给定代理（调用方先用 [`Self::egress_admits`] 判过）。并发上限取候选里
+    /// 该代理的现值（轮换成员表或本身的出口），钉住的代理已不在其中时沿用候选原值。
+    pub fn pin_egress(&mut self, proxy_id: Option<i64>, proxy_url: Option<String>) {
+        if let Some(member) = self
+            .egress_rotation
+            .as_deref()
+            .and_then(|members| members.iter().find(|m| Some(m.proxy_id) == proxy_id))
+        {
+            self.egress_max_concurrency = member.max_concurrency;
+        }
+        self.egress_proxy_id = proxy_id;
+        self.proxy_url = proxy_url;
+    }
+
     /// 解析上游实际模型名。
     #[must_use]
     pub fn upstream_model<'a>(&'a self, model: &'a str) -> &'a str {
@@ -151,12 +247,15 @@ pub async fn candidates_for_model(
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
                NULLIF(c.settings ->> 'aws_region', '') AS aws_region,
                NULLIF(c.settings ->> 'oauth_token_url', '') AS oauth_token_url,
-               COALESCE((c.settings ->> 'mimic_cc')::boolean, false) AS "mimic_cc!",
-               NULLIF(c.settings ->> 'mimic_cc_version', '') AS mimic_cc_version,
-               NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,
+               c.settings -> 'extensions' AS extensions,
+               ep.mode AS "egress_mode!",
+               ep.proxy_id AS "egress_proxy_id?",
+               ep.url_ciphertext AS "egress_url?",
+               ep.max_concurrency AS "egress_max_concurrency?",
+               rot.members AS "egress_members?",
                c.settings -> 'extra_headers' AS extra_headers,
                c.capabilities,
-               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 1) AS "cost_milli!",
+               GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!",
                c.retry_policy,
                ck.id AS channel_key_id,
                COALESCE(pc.weight_override, ck.weight) AS "weight!",
@@ -168,12 +267,29 @@ pub async fn candidates_for_model(
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         JOIN pool_channels pc ON pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])
+        -- 出口（§11.41）：初抽一个；轮换组另带健康成员表供每次尝试重抽
+        CROSS JOIN LATERAL egress_pick(c.id, ck.id, true) ep
+        LEFT JOIN LATERAL (
+            SELECT json_agg(json_build_object(
+                       'id', p.id, 'url', encode(p.url_ciphertext, 'hex'),
+                       'priority', m.priority, 'weight', m.weight,
+                       'max_concurrency', p.max_concurrency)
+                   ORDER BY m.priority DESC, p.id) AS members
+            FROM channel_egress e
+            JOIN proxy_groups g ON g.code = e.group_code AND g.mode = 'rotate'
+            JOIN proxy_group_members m ON m.group_code = g.code
+            JOIN proxies p ON p.id = m.proxy_id
+            WHERE e.channel_id = c.id AND e.mode = 'group' AND p.status = 1
+              AND (p.cooldown_until IS NULL OR p.cooldown_until <= now())
+        ) rot ON true
         WHERE c.status = 1
           AND c.deleted_at IS NULL
           AND c.models @> $1
           AND ck.status = 1
           AND (ck.cooldown_until IS NULL OR ck.cooldown_until < now())
           AND (ck.model_subset IS NULL OR ck.model_subset @> $1)
+          -- 绑了出口却解析不出代理：不可调度（绝不退回直连）
+          AND (ep.mode = 'direct' OR ep.proxy_id IS NOT NULL)
         ORDER BY array_position($2::varchar[], pc.pool_code::varchar),
                  COALESCE(pc.priority_override, c.priority) DESC,
                  ck.id
@@ -193,13 +309,30 @@ pub async fn candidates_for_model(
             let responses_native = responses_native_for(&r.provider, r.responses_native);
             let (same_key_retries, first_output_timeout_secs) =
                 retry_knobs(r.retry_policy.as_ref());
+            let (proxy_url, egress_proxy_id) = match crate::egress::resolved(
+                master_key,
+                &r.egress_mode,
+                r.egress_proxy_id,
+                r.egress_url.as_deref(),
+            )? {
+                Resolved::Proxy { id, url } => (Some(url), Some(id)),
+                Resolved::Direct | Resolved::Unavailable => (None, None),
+            };
+            let egress_rotation = r
+                .egress_members
+                .map(|members| rotation_members(master_key, members))
+                .transpose()?
+                .filter(|members| !members.is_empty())
+                .map(Arc::from);
             Ok(ChannelCandidate {
                 api_version: r.api_version,
                 aws_region: r.aws_region,
                 oauth_token_url: r.oauth_token_url,
-                mimic_cc: r.mimic_cc,
-                mimic_cc_version: r.mimic_cc_version,
-                proxy_url: r.proxy_url,
+                extensions: r.extensions.unwrap_or_default(),
+                proxy_url,
+                egress_proxy_id,
+                egress_max_concurrency: egress_proxy_id.and(r.egress_max_concurrency),
+                egress_rotation,
                 extra_headers: extra_headers_from(r.extra_headers),
                 channel_id: r.channel_id,
                 channel_key_id: r.channel_key_id,
@@ -256,13 +389,7 @@ fn retry_knobs(policy: Option<&serde_json::Value>) -> (i16, u64) {
 /// anthropic / gemini / custom_pass 渠道无论写什么都走降级链（它们根本没有 /responses）。
 #[must_use]
 pub fn responses_native_for(provider: &str, configured: Option<bool>) -> bool {
-    match provider {
-        "openai" => configured.unwrap_or(true),
-        "openai_compat" => configured.unwrap_or(false),
-        // Codex 订阅后端只有 Responses 面，没有可降级的 chat（§11.38）
-        "codex" => true,
-        _ => false,
-    }
+    okapi_api::provider_contract::native_responses_for(provider).enabled(configured)
 }
 
 /// 从 `channels.retry_policy` 取一个整数项，并夹在 [min, max]。
@@ -286,9 +413,15 @@ fn retry_policy_i64(
 
 /// custom_pass 渠道点查结果。
 pub struct PassChannel {
+    pub key_id: i64,
+    pub max_concurrency: Option<i32>,
     pub api_base: String,
     pub credential: String,
     pub settings: serde_json::Value,
+    /// 出口代理（已解密，§11.41）；None = 直连。
+    pub proxy_url: Option<String>,
+    pub egress_proxy_id: Option<i64>,
+    pub egress_max_concurrency: Option<i32>,
 }
 
 /// custom_pass 渠道点查（可见性矩阵与候选查询同语义）。
@@ -312,10 +445,12 @@ pub async fn channel_key_ref(
     let row = sqlx::query!(
         r#"
         SELECT c.id AS channel_id, c.api_base, ck.credential_ciphertext,
-               NULLIF(c.settings ->> 'proxy_url', '') AS proxy_url,
+               ep.mode AS "egress_mode!", ep.proxy_id AS "egress_proxy_id?",
+               ep.url_ciphertext AS "egress_url?",
                c.settings -> 'extra_headers' AS extra_headers
         FROM channel_keys ck
         JOIN channels c ON c.id = ck.channel_id
+        CROSS JOIN LATERAL egress_pick(c.id, ck.id, false) ep
         WHERE ck.id = $1 AND ck.status = 1 AND c.status = 1 AND c.deleted_at IS NULL
         "#,
         channel_key_id
@@ -324,16 +459,27 @@ pub async fn channel_key_ref(
     .await?;
     // 曾经是 from_utf8_lossy：解不出就悄悄发一串替换字符给上游，只会换来一个
     // 难查的 401。信封化后一律走 open，失败即 Err。
-    row.map(|r| {
-        Ok(ChannelKeyRef {
-            channel_id: r.channel_id,
-            api_base: r.api_base,
-            credential: crate::credential::open(master_key, &r.credential_ciphertext)?,
-            proxy_url: r.proxy_url,
-            extra_headers: extra_headers_from(r.extra_headers),
-        })
-    })
-    .transpose()
+    // 回源与创建任务同一出口；出口不可用即视同渠道不可用（返回 None），绝不改走直连
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    let proxy_url = match crate::egress::resolved(
+        master_key,
+        &r.egress_mode,
+        r.egress_proxy_id,
+        r.egress_url.as_deref(),
+    )? {
+        Resolved::Direct => None,
+        Resolved::Proxy { url, .. } => Some(url),
+        Resolved::Unavailable => return Ok(None),
+    };
+    Ok(Some(ChannelKeyRef {
+        channel_id: r.channel_id,
+        api_base: r.api_base,
+        credential: crate::credential::open(master_key, &r.credential_ciphertext)?,
+        proxy_url,
+        extra_headers: extra_headers_from(r.extra_headers),
+    }))
 }
 
 pub async fn custom_pass_channel(
@@ -349,14 +495,18 @@ pub async fn custom_pass_channel(
     };
     let row = sqlx::query!(
         r#"
-        SELECT c.api_base, c.settings, ck.credential_ciphertext
+        SELECT c.api_base, c.settings, ck.credential_ciphertext, ck.id AS key_id, ck.max_concurrency,
+               ep.mode AS "egress_mode!", ep.proxy_id AS "egress_proxy_id?",
+               ep.url_ciphertext AS "egress_url?", ep.max_concurrency AS "egress_max_concurrency?"
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
+        CROSS JOIN LATERAL egress_pick(c.id, ck.id, true) ep
         WHERE c.id = $1
           AND c.provider = 'custom_pass'
           AND c.status = 1
           AND c.deleted_at IS NULL
           AND ck.status = 1
+          AND (ep.mode = 'direct' OR ep.proxy_id IS NOT NULL)
           -- 可见性与候选查询同一条规则：渠道只服务它所在的池（链内任一池即可）
           AND EXISTS (
                 SELECT 1 FROM pool_channels pc
@@ -372,10 +522,24 @@ pub async fn custom_pass_channel(
     .await?;
     row.map(|r| {
         let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
+        let (proxy_url, egress_proxy_id) = match crate::egress::resolved(
+            master_key,
+            &r.egress_mode,
+            r.egress_proxy_id,
+            r.egress_url.as_deref(),
+        )? {
+            Resolved::Proxy { id, url } => (Some(url), Some(id)),
+            Resolved::Direct | Resolved::Unavailable => (None, None),
+        };
         Ok(PassChannel {
+            key_id: r.key_id,
+            max_concurrency: r.max_concurrency,
             api_base: r.api_base.unwrap_or_default(),
             credential,
             settings: r.settings,
+            proxy_url,
+            egress_proxy_id,
+            egress_max_concurrency: egress_proxy_id.and(r.egress_max_concurrency),
         })
     })
     .transpose()
@@ -386,7 +550,12 @@ pub async fn custom_pass_channel(
 pub enum KeyFailure {
     /// 请求/传输级故障：不改变凭证的失败计数或状态。
     Request,
-    /// 上游 5xx/空回复：连续 3 次进入 cooling，指数退避（60s 起，封顶 2h）。
+    /// 连接阶段失败（TCP / TLS / 代理隧道 / 连接超时）：请求没送到上游，凭证无从判断，
+    /// 同样不动 key；走了代理时归给代理的被动熔断（`egress::mark_failure`）。
+    Unreachable,
+    /// 上游 5xx/空回复：连续 `failure_threshold` 次（成功即清零，见 `clear_key_failures`）
+    /// 进入 cooling。冷却到期恢复后若很快再失败，按轮次指数退避（60s 起，封顶 2h）；
+    /// 冷却中迟到的失败（缓存 / 在途请求）不计数，不能把一次短暂故障放大成长冷却。
     Transient,
     /// 429：rate_limited，按 Retry-After 冷却（缺省 60s，显式期限最多 7 天），到期自动恢复。
     RateLimited { retry_after_secs: Option<i64> },
@@ -394,6 +563,20 @@ pub enum KeyFailure {
     QuotaExhausted,
     /// 401/403 凭证无效：invalid，仅人工恢复。
     Invalid,
+}
+
+/// 从 cooling 恢复后的「半开」窗口：冷却结束后这么久之内再失败才按轮次升级退避。
+const HALF_OPEN_WINDOW_SECS: i64 = 600;
+
+/// 一次成功的上游调用清零连续失败计数（含半开态），只动 active key、且仅在确有计数时写。
+pub async fn clear_key_failures(pool: &PgPool, channel_key_id: i64) -> Result<bool, StoreError> {
+    let cleared = sqlx::query(
+        "UPDATE channel_keys SET failed_count = 0 WHERE id = $1 AND status = 1 AND failed_count > 0",
+    )
+    .bind(channel_key_id)
+    .execute(pool)
+    .await?;
+    Ok(cleared.rows_affected() > 0)
 }
 
 /// key 级失败登记：按类别驱动状态机转移（cooling/rate_limited/quota_exhausted/invalid）。
@@ -404,45 +587,57 @@ pub async fn mark_key_failure(
     failure: KeyFailure,
 ) -> Result<(), StoreError> {
     match failure {
-        KeyFailure::Request => return Ok(()),
+        KeyFailure::Request | KeyFailure::Unreachable => return Ok(()),
         KeyFailure::Transient => {
-            // 连续 3 次转 cooling；退避 = 60 * 2^(超出阈值次数)，封顶 7200s
-            sqlx::query!(
-                r#"
-                UPDATE channel_keys
-                SET failed_count = failed_count + 1,
-                    last_error = $2,
-                    status = CASE WHEN failed_count + 1 >= 3 THEN 2 ELSE status END,
-                    cooldown_until = CASE WHEN failed_count + 1 >= 3
-                        THEN now() + make_interval(secs => least(7200, 60 * power(2, failed_count + 1 - 3)))
-                        ELSE cooldown_until END,
+            let settings: serde_json::Value = sqlx::query_scalar("SELECT c.settings FROM channels c JOIN channel_keys k ON k.channel_id=c.id WHERE k.id=$1").bind(channel_key_id).fetch_one(pool).await?;
+            let control = settings.get("account_control");
+            let threshold = control
+                .and_then(|p| p.get("failure_threshold"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(3)
+                .clamp(1, 20);
+            let base = control
+                .and_then(|p| p.get("failure_cooldown_secs"))
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(60)
+                .clamp(1, 7200);
+            // 只有 active(1) 计数：冷却中的 key 已出轮转，迟到失败不能续长冷却。
+            // 从冷却恢复的 key 保留计数（半开）：恢复后很快再失败 → 下一轮冷却翻倍；
+            // 距上次冷却结束已久的旧计数从 1 重新开始，避免陈旧计数一击即冷却。
+            sqlx::query(
+                r"WITH next AS (
+                    SELECT id, CASE
+                        WHEN failed_count >= $3::bigint AND (cooldown_until IS NULL
+                             OR cooldown_until < now() - make_interval(secs => $5::bigint::double precision))
+                        THEN 1 ELSE failed_count + 1 END AS failed
+                    FROM channel_keys WHERE id = $1 AND status = 1 FOR UPDATE)
+                UPDATE channel_keys k SET failed_count = next.failed, last_error = $2,
+                    status = CASE WHEN next.failed >= $3::bigint THEN 2 ELSE k.status END,
+                    cooldown_until = CASE WHEN next.failed >= $3::bigint
+                        THEN now() + make_interval(secs => least(7200, $4::bigint::double precision
+                             * power(2, least(20, greatest(0, next.failed - $3::bigint)))))
+                        ELSE k.cooldown_until END,
                     updated_at = now()
-                WHERE id = $1 AND status IN (1, 2)
-                "#,
-                channel_key_id,
-                error
+                FROM next WHERE k.id = next.id",
             )
+            .bind(channel_key_id)
+            .bind(error)
+            .bind(threshold)
+            .bind(base)
+            .bind(HALF_OPEN_WINDOW_SECS)
             .execute(pool)
             .await?;
         }
         KeyFailure::RateLimited { retry_after_secs } => {
-            let secs = retry_after_secs.unwrap_or(60).clamp(1, 7 * 24 * 3600);
-            sqlx::query!(
-                r#"
-                UPDATE channel_keys
-                SET failed_count = failed_count + 1,
-                    last_error = $2,
-                    status = 3,
-                    cooldown_until = greatest(cooldown_until, now() + make_interval(secs => $3::bigint::double precision)),
-                    updated_at = now()
-                WHERE id = $1 AND status IN (1, 2, 3, 4)
-                "#,
-                channel_key_id,
-                error,
-                secs
-            )
-            .execute(pool)
-            .await?;
+            let settings: serde_json::Value = sqlx::query_scalar("SELECT c.settings FROM channels c JOIN channel_keys k ON k.channel_id=c.id WHERE k.id=$1").bind(channel_key_id).fetch_one(pool).await?;
+            let fallback = settings
+                .pointer("/account_control/rate_limit_cooldown_secs")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(60);
+            let secs = retry_after_secs.unwrap_or(fallback).clamp(1, 7 * 24 * 3600);
+            sqlx::query(r"UPDATE channel_keys SET failed_count=failed_count+1,last_error=$2,status=3,
+                cooldown_until=greatest(cooldown_until,now()+make_interval(secs=>$3::bigint::double precision)),updated_at=now()
+                WHERE id=$1 AND status IN (1,2,3,4)").bind(channel_key_id).bind(error).bind(secs).execute(pool).await?;
         }
         KeyFailure::QuotaExhausted => {
             sqlx::query!(
@@ -494,6 +689,9 @@ pub struct DiagKey {
     pub rpm_limit: Option<i32>,
     pub daily_spend_cap_micro: Option<i64>,
     pub max_concurrency: Option<i32>,
+    /// 出口不可用的原因（§11.41）：`egress_cooling` 代理熔断中 / `egress_unassigned` 固定分配
+    /// 没分到代理（容量满）/ `egress_unavailable` 代理停用、缺失或组里无可用成员；None = 出口可用。
+    pub egress_block: Option<String>,
 }
 
 /// 路由诊断的渠道视图（服务目标模型的全集，含被淘汰者）。
@@ -533,9 +731,19 @@ pub async fn diagnose_channels(pool: &PgPool, model: &str) -> Result<Vec<DiagCha
                (ck.model_subset IS NULL OR ck.model_subset @> $1) AS "subset_ok?",
                ck.rpm_limit,
                ck.daily_spend_cap_micro,
-               ck.max_concurrency
+               ck.max_concurrency,
+               CASE
+                   WHEN ck.id IS NULL OR ep.mode = 'direct' OR ep.proxy_id IS NOT NULL THEN NULL
+                   WHEN ea.proxy_id IS NOT NULL THEN 'egress_cooling'
+                   WHEN g.mode = 'pinned' AND ck.egress_proxy_id IS NULL THEN 'egress_unassigned'
+                   ELSE 'egress_unavailable'
+               END AS egress_block
         FROM channels c
         LEFT JOIN channel_keys ck ON ck.channel_id = c.id
+        LEFT JOIN channel_egress e ON e.channel_id = c.id
+        LEFT JOIN proxy_groups g ON e.mode = 'group' AND g.code = e.group_code
+        LEFT JOIN LATERAL egress_pick(c.id, ck.id, true) ep ON ck.id IS NOT NULL
+        LEFT JOIN LATERAL egress_pick(c.id, ck.id, false) ea ON ck.id IS NOT NULL
         WHERE c.deleted_at IS NULL AND c.models @> $1
         ORDER BY c.priority DESC, c.id, ck.id
         "#,
@@ -570,6 +778,7 @@ pub async fn diagnose_channels(pool: &PgPool, model: &str) -> Result<Vec<DiagCha
                 rpm_limit: r.rpm_limit,
                 daily_spend_cap_micro: r.daily_spend_cap_micro,
                 max_concurrency: r.max_concurrency,
+                egress_block: r.egress_block,
             });
         }
     }

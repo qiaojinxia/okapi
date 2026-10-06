@@ -1,4 +1,5 @@
 import type { PoolMember } from '@/features/pools/types'
+import type { EgressBinding } from '@/features/proxies/types'
 
 /// 渠道协议：决定请求如何被转换后送往上游（见 §4.4 四象限）。
 /// `openai` = 官方 OpenAI（/v1/responses 缺省直转）；`openai_compat` = 一切 OpenAI 兼容上游
@@ -25,13 +26,6 @@ export function isCloudManaged(provider: string): boolean {
   return provider === 'bedrock' || provider === 'vertex'
 }
 
-/// 站长自己的订阅经 OAuth 登录（IMPLEMENTATION §11.38，实验性）：凭证不是手填的 key，
-/// 而是登录换来的 token；新建走登录卡而非凭证输入框。
-export type OAuthProvider = 'anthropic_max' | 'codex'
-export function isOAuthProvider(provider: string): provider is OAuthProvider {
-  return provider === 'anthropic_max' || provider === 'codex'
-}
-
 /// 说 OpenAI 方言、因而有 Responses 直转/降级之选的协议。
 /// azure 虽同方言，但其 Responses 走另一套 `/openai/v1` 路径，本期不给直转选项。
 export function speaksOpenAi(provider: string): boolean {
@@ -44,7 +38,7 @@ export function apiBasePlaceholder(provider: string): string {
     case 'azure':
       return 'https://{resource}.openai.azure.com'
     case 'anthropic':
-      return 'https://api.anthropic.com'
+      return 'https://api.anthropic.com/v1'
     case 'gemini':
       return 'https://generativelanguage.googleapis.com/v1beta'
     case 'bedrock':
@@ -55,9 +49,17 @@ export function apiBasePlaceholder(provider: string): string {
       return 'https://api.anthropic.com/v1'
     case 'codex':
       return 'https://chatgpt.com/backend-api/codex'
+    case 'custom_pass':
+      return 'https://upstream.example.com'
     default:
       return 'https://api.openai.com/v1'
   }
+}
+
+/// UI defaults mirror the provider registry; unknown/cloud endpoints must stay visible.
+export function defaultApiBase(provider: string): string | undefined {
+  return ['openai', 'openai_compat', 'anthropic', 'gemini', 'anthropic_max', 'codex'].includes(provider)
+    ? apiBasePlaceholder(provider) : undefined
 }
 
 /// `responses_native` 未显式配置时的生效缺省（与后端 `responses_native_for` 一致）。
@@ -85,8 +87,21 @@ export interface ChannelKeyRow {
   max_concurrency: number | null
   /// 0 = 静态 key，1 = OAuth 订阅凭证（§11.38）。
   credential_kind: number
+  /// 固定分配组分给这把 key（账号）的代理；null = 未分配 / 不是固定分配。
+  egress_proxy_id?: number | null
   /// OAuth 凭证的 access token 到期（unix 秒）；静态 key 无此字段。
   credential_expires_at?: number
+  /// False means access-token-only: no automatic or manual refresh authority.
+  oauth_refreshable?: boolean
+  /// 订阅账号邮箱（换码时记录），仅展示
+  account_label?: string
+  oauth_refresh?: {
+    last_attempt_at: number | null
+    last_success_at: number | null
+    consecutive_failures: number
+    next_retry_at: number | null
+    error_code: string | null
+  }
 }
 
 
@@ -94,6 +109,7 @@ export interface ChannelKeyRow {
 /// 渠道行为开关。后端只认这几个键，故前端用具名字段而非任意 JSON——
 /// 用户不该去猜有哪些键可填、值是什么类型。
 export interface ChannelSettings {
+  account_control?: AccountControl
   thinking_to_content: boolean
   bill_by_response_model: boolean
   strip_request_fields: string[]
@@ -104,12 +120,41 @@ export interface ChannelSettings {
   api_version?: string
   /// Bedrock SigV4 区域覆写；undefined = 从 api_base 主机名解析。只对 bedrock 有意义。
   aws_region?: string
-  /// 出站代理（http / https / socks5 / socks5h）。undefined = 直连。
-  proxy_url?: string
   /// 额外请求头（对象）。鉴权 / Host / 逐跳头后端会拒。
   extra_headers?: Record<string, string>
   /// 强制写入请求顶层的字段。model / messages / stream / provider 后端会拒。
   inject_request_fields?: Record<string, unknown>
+  extensions?: {
+    client_profile?: { name: 'native' } | {
+      name: 'claude-code'
+      mode: 'auto' | 'passthrough' | 'mimic'
+      /** Server-normalized; omitted means the latest client the server implements. */
+      revision?: string
+      entrypoint?: 'cli' | 'sdk-cli'
+      request_class?: 'main' | 'auxiliary'
+    }
+  }
+}
+
+export interface AccountControl {
+  /** Historical local caps are read for the retirement notice and removed on save. */
+  usage?: { period?: 'hour' | 'day' | 'week' | 'month'; requests?: number | null; tokens?: number | null; cost_micro?: number | null }
+  quota_aware: boolean
+  quota_threshold_pct: number
+  /** Upstream window seconds mapped to independently configured percentages. */
+  quota_limits?: Record<string, number>
+  local_tokens?: { cap: number; period?: 'total' | 'day' | 'week' } | null
+  rate_limit_cooldown_secs: number
+  failure_threshold: number
+  failure_cooldown_secs: number
+  refresh_mode: 'managed' | 'external'
+  refresh_margin_secs: number
+}
+
+export function channelSettingsForSave(settings: ChannelSettings): ChannelSettings {
+  if (!settings.account_control) return settings
+  const { usage: _retired, ...account_control } = settings.account_control
+  return { ...settings, account_control }
 }
 
 
@@ -158,6 +203,8 @@ export interface ChannelRow {
   cost_milli: number
   /// 上游数据留存声明：none / transient / trains；null = 未声明。
   data_retention: string | null
+  /// 出口绑定（§11.41）：继承全局默认 / 直连 / 单个代理 / 代理组。
+  egress?: EgressBinding
   last_test: ChannelProbe | null
   last_balance: ChannelBalance | null
 }
@@ -165,7 +212,11 @@ export interface ChannelRow {
 
 
 export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSettings {
+  // settings.proxy_url 已退役（§11.41 出口绑定）：残留值不能被抽屉整体回写（后端会 400）
+  const { proxy_url: _retired, ...opaque } = (raw ?? {}) as Partial<ChannelSettings> & { proxy_url?: unknown }
   return {
+    // Preserve opaque provider/extension settings when editing unrelated form fields.
+    ...opaque,
     thinking_to_content: raw?.thinking_to_content ?? false,
     bill_by_response_model: raw?.bill_by_response_model ?? false,
     strip_request_fields: raw?.strip_request_fields ?? [],
@@ -177,9 +228,6 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
       : {}),
     ...(typeof raw?.aws_region === 'string' && raw.aws_region !== ''
       ? { aws_region: raw.aws_region }
-      : {}),
-    ...(typeof raw?.proxy_url === 'string' && raw.proxy_url.trim() !== ''
-      ? { proxy_url: raw.proxy_url }
       : {}),
     ...(raw?.extra_headers && typeof raw.extra_headers === 'object' && !Array.isArray(raw.extra_headers)
       ? { extra_headers: raw.extra_headers }

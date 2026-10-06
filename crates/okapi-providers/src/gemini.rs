@@ -82,7 +82,7 @@ pub async fn send_generate_at(
         .post(outbound, url)?
         .header(auth_header.0, auth_header.1)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec());
+        .body(body.clone());
     if !stream {
         req = req.timeout(NON_STREAM_TIMEOUT);
     }
@@ -97,7 +97,9 @@ pub async fn send_generate_at(
 
     if !(200..300).contains(&status) {
         let retry_after_secs = crate::retry_after::seconds(resp.headers());
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+            .await
+            .unwrap_or_default();
         return Err(UpstreamError::Status {
             status,
             body,
@@ -173,8 +175,14 @@ impl MetaScanner {
                 }
                 content_chars = content_chars.saturating_add(t.chars().count());
             }
-            if part.get("functionCall").is_some() {
+            if let Some(call) = part.get("functionCall") {
                 has_output = true;
+                // 工具参数也是产出：缺 usage 时按它估补全，与其它方言的流一致
+                let args = call.get("args").map_or(0, |args| match args {
+                    serde_json::Value::String(s) => s.chars().count(),
+                    other => other.to_string().chars().count(),
+                });
+                content_chars = content_chars.saturating_add(args);
             }
         }
         let usage = crate::convert::openai_to_gemini::usage_from_gemini(src.get("usageMetadata"));
@@ -190,11 +198,35 @@ impl MetaScanner {
 }
 
 fn classify(e: &reqwest::Error) -> UpstreamError {
-    if e.is_timeout() {
+    if let Some(unreachable) = UpstreamError::connect_phase(e) {
+        unreachable
+    } else if e.is_timeout() {
         UpstreamError::Timeout
-    } else if e.is_connect() {
-        UpstreamError::Connect(e.to_string())
     } else {
         UpstreamError::Stream(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod meta_scanner_tests {
+    use super::*;
+
+    #[test]
+    fn function_call_arguments_count_as_generated_output() {
+        let chunk = serde_json::json!({"candidates": [{"content": {"parts": [
+            {"text": "ab"},
+            {"functionCall": {"name": "read", "args": {"x": 1}}}
+        ]}}]});
+        let events = MetaScanner::new().scan(Ok(chunk.to_string()));
+        let Some(Ok(crate::types::ChatEvent::Data {
+            has_output,
+            content_chars,
+            ..
+        })) = events.first()
+        else {
+            panic!("one passthrough event");
+        };
+        assert!(*has_output);
+        assert_eq!(*content_chars, 2 + 7);
     }
 }

@@ -7,6 +7,7 @@ use crate::gateway::{auth::authenticate, error::AppError, state::AppState};
 use axum::{Json, extract::State, http::HeaderMap};
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};
+use std::collections::HashMap;
 
 fn filtered(
     sql: &str,
@@ -74,6 +75,7 @@ pub async fn list(
                 'completion_tokens', b.completion_tokens, 'reasoning_tokens', b.reasoning_tokens,
                 'upstream_usage', b.usage_details->'tokens'->'upstream_usage',
                 'reported_details', b.usage_details->'tokens'->'reported_details',
+                'server_tool_usage', b.usage_details->'tokens'->'server_tool_usage',
                 'prompt_source', COALESCE(b.usage_details->>'prompt_source', 'unknown'),
                 'completion_source', COALESCE(b.usage_details->>'completion_source', 'unknown'),
                 'cache_read_reported', COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, NULLIF(b.cached_tokens > 0, false)),
@@ -234,4 +236,123 @@ pub async fn stat(
         ));
     }
     Ok(Json(result))
+}
+
+/// `GET /api/me/logs/series` 的参数：与 `stat` 同一套归属过滤（`scope` / `api_key_id`），外加回看窗口。
+#[derive(serde::Deserialize)]
+pub struct SeriesQuery {
+    /// 回看天数（含今天），1–90，缺省 7。
+    #[serde(default)]
+    pub days: Option<u32>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    pub api_key_id: Option<i64>,
+    /// IANA 时区；缺省 UTC，与列表里"近 7 天 Token"迷你折线同一口径。
+    #[serde(default)]
+    pub timezone: Option<String>,
+}
+
+/// 按日用量序列（密钥用量折线图）。
+///
+/// 数据源与 `list` / `stat` 完全相同——PG 账本 + 同一条 `filtered` 谓词，金额不经 CH、不受
+/// 当前页影响；窗口内每个自然日都有一行（没有调用的日子补零，由服务端补，前端不必猜时区）。
+/// 口径：`requests` 是账本行数，`tokens` 是输入 + 输出，`amount_micro` 只计已结算（status=20，
+/// 退款行不计，同 `stat.amount_micro`），`errors` 与 `stat.errors` 同一判定。
+pub async fn series(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<SeriesQuery>,
+) -> Result<Json<Value>, AppError> {
+    let key = authenticate(&state, &headers).await?;
+    let timezone = q.timezone.as_deref().unwrap_or("UTC");
+    if timezone.len() > 128 {
+        return Err(AppError::bad_request().with_param("timezone"));
+    }
+    // PG 校验 IANA 时区并给出当地"今天"：不用浏览器时钟，也不依赖 ClickHouse。
+    let today = sqlx::query_scalar::<_, chrono::NaiveDate>(
+        "SELECT (CURRENT_TIMESTAMP AT TIME ZONE name)::date FROM pg_timezone_names WHERE name = $1",
+    )
+    .bind(timezone)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?
+    .ok_or_else(|| AppError::bad_request().with_param("timezone"))?;
+    let days = q.days.unwrap_or(7).clamp(1, 90);
+    let (start, end) =
+        crate::console::usage_details::CalendarWindow::bounds(today, days, None, None)?;
+    let window = LogWindow {
+        start,
+        end,
+        timezone: timezone.to_owned(),
+    };
+    let filter = LogsQuery {
+        limit: 0,
+        before: None,
+        scope: q.scope.clone(),
+        model: None,
+        errors_only: None,
+        api_key_id: q.api_key_id,
+        request_id: None,
+        start_date: None,
+        end_date: None,
+        timezone: None,
+    };
+    // 时区名已在 pg_timezone_names 里逐字匹配过（只含字母数字与 `_+-/`），内联进分组表达式是安全的；
+    // 仍转义单引号作兜底。绑定参数在 SELECT 前缀里不可用（`filtered` 只接受静态前缀）。
+    let tz = timezone.replace('\'', "''");
+    let day = format!("((b.created_at AT TIME ZONE '{tz}')::date)");
+    let select = format!(
+        r"SELECT jsonb_build_object(
+            'day', {day}::text,
+            'requests', COUNT(*),
+            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true'),
+            'tokens', COALESCE(SUM(b.prompt_tokens::bigint + b.completion_tokens::bigint), 0),
+            'amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 20), 0)
+        )"
+    );
+    let mut query = filtered(&select, &filter, Some(&window), key.user_id, key.key_id)?;
+    query.push(format!(" GROUP BY {day}"));
+    let rows: Vec<Value> = query
+        .build_query_scalar()
+        .fetch_all(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    let by_day: HashMap<String, &Value> = rows
+        .iter()
+        .filter_map(|row| Some((row["day"].as_str()?.to_owned(), row)))
+        .collect();
+    let mut total = [0_i64; 4];
+    let data: Vec<Value> = start
+        .iter_days()
+        .take_while(|date| *date <= end)
+        .map(|date| {
+            let name = date.to_string();
+            let cell = |field: &str| {
+                by_day
+                    .get(&name)
+                    .map_or(0, |row| crate::console::stats::ch_i64(row, field))
+            };
+            let values = [
+                cell("requests"),
+                cell("errors"),
+                cell("tokens"),
+                cell("amount_micro"),
+            ];
+            for (sum, value) in total.iter_mut().zip(values) {
+                *sum = sum.saturating_add(value);
+            }
+            json!({
+                "day": name, "requests": values[0], "errors": values[1],
+                "tokens": values[2], "amount_micro": values[3],
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "scope": if q.scope.as_deref() == Some("user") { "user" } else { "key" },
+        "api_key_id": q.api_key_id,
+        "days": days,
+        "window": { "start_date": start.to_string(), "end_date": end.to_string(), "timezone": timezone },
+        "total": { "requests": total[0], "errors": total[1], "tokens": total[2], "amount_micro": total[3] },
+        "data": data,
+    })))
 }

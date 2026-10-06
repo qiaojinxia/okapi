@@ -171,7 +171,7 @@ async fn count_authorized(
     parent: Option<&ResponseParent>,
 ) -> Result<Response, AppError> {
     let body = Bytes::from(serde_json::to_vec(&value).map_err(|_| AppError::bad_request())?);
-    let prefs = super::routing_prefs::parse(&body);
+    let prefs = super::routing_prefs::parse(&body)?;
     let mut candidates = super::scheduler::order_candidates(
         okapi_store::channels::candidates_for_model(
             &state.pg,
@@ -225,7 +225,10 @@ async fn count_authorized(
                 .with_param("channel_rpm");
             continue;
         }
-        let Some(slot) = ChannelPermit::acquire(&state.sched, candidate).await else {
+        let Some(slot) = ChannelPermit::acquire(&state.sched, candidate)
+            .await
+            .map_err(|error| super::account_control::attempt_error(&error))?
+        else {
             unsupported = false;
             last_error = AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
                 .with_param("channel_concurrency");
@@ -324,8 +327,16 @@ fn count_error(error: &UpstreamError, unsupported: bool) -> AppError {
         return AppError::new(StatusCode::NOT_IMPLEMENTED, codes::UPSTREAM_ERROR)
             .with_param("input_tokens_unsupported");
     }
+    let timed_out = matches!(
+        error,
+        UpstreamError::Timeout
+            | UpstreamError::Unreachable {
+                timed_out: true,
+                ..
+            }
+    );
     let status = match error {
-        UpstreamError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        _ if timed_out => StatusCode::GATEWAY_TIMEOUT,
         UpstreamError::Status {
             status: 400 | 413 | 422,
             ..
@@ -333,7 +344,7 @@ fn count_error(error: &UpstreamError, unsupported: bool) -> AppError {
         UpstreamError::Status { status: 429, .. } => StatusCode::TOO_MANY_REQUESTS,
         _ => StatusCode::BAD_GATEWAY,
     };
-    let code = if matches!(error, UpstreamError::Timeout) {
+    let code = if timed_out {
         codes::UPSTREAM_TIMEOUT
     } else {
         codes::UPSTREAM_ERROR

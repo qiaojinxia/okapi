@@ -95,6 +95,7 @@ async fn image_case(failed: bool, lose_hot: bool) -> TestResult {
 async fn image_state(bed: &Bed, database: &str) -> TestResult<gateway::state::AppState> {
     sqlx::query("UPDATE model_pricing SET pricing_mode='per_call',per_call_price_micro=24 WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
         .bind(&bed.model).execute(&bed.pg).await?;
+    crate::published_pricing::publish(&bed.pg, bed.uid).await;
     let state = gateway::build_state(
         database,
         &std::env::var("OKAPI_REDIS_URL")?,

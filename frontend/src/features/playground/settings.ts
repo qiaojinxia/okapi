@@ -10,6 +10,8 @@ export interface Settings {
   keyId: string
   reasoningEffort: string
   thinkingBudget: string
+  /// 工具定义原文（JSON 文本，可空）。
+  tools: string
 }
 
 const key = (userId: number) => `okapi.playground.settings.${userId}`
@@ -23,7 +25,8 @@ export function readSettings(userId: number | undefined): Settings | null {
     if (raw === null || typeof raw !== 'object' || FIELDS.some((f) => typeof raw[f] !== 'string')) return null
     return { ...(raw as unknown as Settings), keyId: typeof raw.keyId === 'string' ? raw.keyId : '',
       reasoningEffort: typeof raw.reasoningEffort === 'string' ? raw.reasoningEffort : '',
-      thinkingBudget: typeof raw.thinkingBudget === 'string' ? raw.thinkingBudget : '', }
+      thinkingBudget: typeof raw.thinkingBudget === 'string' ? raw.thinkingBudget : '',
+      tools: typeof raw.tools === 'string' ? raw.tools : '', }
   } catch {
     return null
   }

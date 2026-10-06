@@ -5,15 +5,15 @@
 //!
 //! 出向形态分两档：缺省**透传**——只发上游为这条路径要求的东西，不做设备指纹、不编造
 //! User-Agent，真实客户端自带的身份头由 gateway 透传进 `Outbound.extra_headers`（2026-09 对照
-//! Sub2API / CLIProxyAPI 核对过要求项）；`channels.settings.mimic_cc` 开启后走 [`cc_mimic`]
-//! **全伪装**——网关替非官方客户端伪造与真实 CLI 对齐的稳定身份。前者给自用；后者是对抗性
-//! 工程，需跟随上游检测与官方 CLI 版本持续维护。
+//! Sub2API / CLIProxyAPI 核对过要求项）；渠道配置 `extensions.client_profile` 后由
+//! [`crate::profiles`] 按最新抓包的官方 CLI 整形，[`crate::profiles::identity`] 提供跨请求稳定的身份。前者给自用；
+//! 后者是对抗性工程，需跟随上游检测与官方 CLI 版本持续维护。
 //!
 //! 共用件：PKCE（S256）、授权 URL 拼装、token 响应形状；两家的差异在各自子模块。
 
 pub mod anthropic_max;
-pub mod cc_mimic;
 pub mod codex;
+pub mod quota;
 
 use crate::error::UpstreamError;
 use base64::Engine as _;
@@ -60,6 +60,9 @@ pub struct Tokens {
     /// codex：从 id_token 取到的 ChatGPT 账号 id；anthropic_max：换码响应里的
     /// `account.uuid` / `organization.uuid`（全伪装的 metadata.user_id 用，常为 None）。
     pub account_id: Option<String>,
+    /// 账号邮箱，仅供控制台展示：codex 取 id_token 的 `email`，anthropic_max 取
+    /// 换码响应的 `account.email_address`。刷新响应通常不带，沿用旧值。
+    pub account_label: Option<String>,
 }
 
 /// 通用 token 响应解析：`access_token` 必有，`expires_in` 缺省 1h。
@@ -93,6 +96,17 @@ pub(crate) fn parse_tokens(body: &[u8]) -> Result<Tokens, UpstreamError> {
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned)
                 })
+            }),
+        account_label: v
+            .get("id_token")
+            .and_then(Value::as_str)
+            .and_then(codex::email_from_id_token)
+            .or_else(|| {
+                v.get("account")?
+                    .get("email_address")?
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
             }),
     })
 }
@@ -133,6 +147,7 @@ pub(crate) fn token_outbound(proxy_url: Option<&str>) -> crate::http::Outbound {
     crate::http::Outbound {
         proxy_url: proxy_url.map(str::to_owned),
         extra_headers: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -175,6 +190,31 @@ mod tests {
     }
 
     #[test]
+    fn account_label_comes_from_exchange_response() {
+        let t = parse_tokens(
+            br#"{"access_token":"a","account":{"uuid":"u-1","email_address":"me@example.com"},"organization":{"uuid":"o-1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(t.account_id.as_deref(), Some("u-1"));
+        assert_eq!(t.account_label.as_deref(), Some("me@example.com"));
+        // id_token payload {"email":"dev@example.com"}; signature is irrelevant for display.
+        let id_token = format!(
+            "x.{}.y",
+            base64url(br#"{"email":"dev@example.com","https://api.openai.com/auth":{"chatgpt_account_id":"acct"}}"#)
+        );
+        let body = serde_json::json!({"access_token": "a", "id_token": id_token}).to_string();
+        let t = parse_tokens(body.as_bytes()).unwrap();
+        assert_eq!(t.account_id.as_deref(), Some("acct"));
+        assert_eq!(t.account_label.as_deref(), Some("dev@example.com"));
+        assert!(
+            parse_tokens(br#"{"access_token":"a"}"#)
+                .unwrap()
+                .account_label
+                .is_none()
+        );
+    }
+
+    #[test]
     fn token_shape_and_defaults() {
         let t = parse_tokens(br#"{"access_token":"a","refresh_token":"r","expires_in":28800}"#)
             .unwrap();
@@ -184,7 +224,8 @@ mod tests {
                 access_token: "a".into(),
                 refresh_token: Some("r".into()),
                 expires_in: 28800,
-                account_id: None
+                account_id: None,
+                account_label: None,
             }
         );
         let t = parse_tokens(br#"{"access_token":"a"}"#).unwrap();

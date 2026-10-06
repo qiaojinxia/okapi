@@ -1565,14 +1565,14 @@ test('设置通知多路：Webhook 与邮件分行提交，事件从清单勾选
       {
         type: 'webhook',
         url: 'https://hooks.example.com/okapi',
-        events: ['drift', 'channel_cooldown', 'balance_low'],
+        events: ['drift', 'channel_cooldown', 'balance_low', 'egress_ip_changed', 'egress_down'],
         min_interval_secs: 120,
       },
       {
         type: 'email',
         to: ['ops@example.com'],
         lang: 'zh-CN',
-        events: ['drift', 'channel_cooldown', 'balance_low', 'margin_breaker'],
+        events: ['drift', 'channel_cooldown', 'balance_low', 'margin_breaker', 'egress_ip_changed', 'egress_down'],
         min_interval_secs: 300,
       },
     ],
@@ -1596,6 +1596,8 @@ test('设置通知多路：Webhook 与邮件分行提交，事件从清单勾选
     posts.push(body)
     await route.fulfill({ json: { ok: true } })
   })
+  // 事件清单变长后「保存」落在提示浮层下方；悬停会让提示不消失，先关掉
+  await dismissToasts(page)
   await page.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => posts.length).toBe(2)
   expect(posts[1]).toEqual({
@@ -1604,7 +1606,7 @@ test('设置通知多路：Webhook 与邮件分行提交，事件从清单勾选
       {
         type: 'webhook',
         url: 'https://hooks.example.com/okapi',
-        events: ['drift', 'channel_cooldown', 'balance_low'],
+        events: ['drift', 'channel_cooldown', 'balance_low', 'egress_ip_changed', 'egress_down'],
         min_interval_secs: 120,
       },
     ],

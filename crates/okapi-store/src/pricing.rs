@@ -22,6 +22,8 @@ pub struct ModelPricingRow {
     pub image_ratio_scaled: i64,
     #[serde(default = "empty_modality_ratios")]
     pub modality_ratios: serde_json::Value,
+    #[serde(default)]
+    pub server_tool_prices: Option<serde_json::Value>,
     pub per_call_price_micro: Option<i64>,
     pub tier_expr: Option<String>,
     /// service_tier 档位倍率（JSONB，如 {"flex":"0.5"}；NULL=全档 1.0）。
@@ -130,6 +132,7 @@ pub async fn load_pricing_source_rows(pool: &PgPool) -> Result<PricingSourceRows
                (p.model_ratio * 1000000)::bigint AS model_ratio_scaled,
                p.tier_ratios,
                p.modality_ratios,
+               p.server_tool_prices,
                (p.completion_ratio * 1000000)::bigint AS "completion_ratio_scaled!",
                (p.cache_ratio * 1000000)::bigint AS "cache_ratio_scaled!",
                (p.cache_write_ratio * 1000000)::bigint AS "cache_write_ratio_scaled!",
@@ -158,6 +161,7 @@ pub async fn load_pricing_source_rows(pool: &PgPool) -> Result<PricingSourceRows
         audio_completion_ratio_scaled: r.audio_completion_ratio_scaled,
         image_ratio_scaled: r.image_ratio_scaled,
         modality_ratios: r.modality_ratios,
+        server_tool_prices: r.server_tool_prices,
         per_call_price_micro: r.per_call_price_micro,
         tier_expr: r.tier_expr,
         tier_ratios: r.tier_ratios,

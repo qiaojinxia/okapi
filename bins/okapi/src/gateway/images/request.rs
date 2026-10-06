@@ -37,8 +37,11 @@ enum StoredPayload {
 impl Input {
     /// Admission estimate only: a byte bound for text and a per-reference image allowance.
     /// Actual billing always uses upstream usage; URLs/base64 are never counted as text tokens.
-    pub fn estimate(&self, output_per_image: u32) -> Result<okapi_domain::TokenUsage, AppError> {
-        let (text_bytes, images) = match &self.body {
+    pub fn estimate(
+        &self,
+        output_per_image: Option<u32>,
+    ) -> Result<okapi_domain::TokenUsage, AppError> {
+        let (text_bytes, images, size) = match &self.body {
             Payload::Json(bytes) => {
                 let probe: Probe =
                     serde_json::from_slice(bytes).map_err(|_| AppError::bad_request())?;
@@ -50,6 +53,7 @@ impl Input {
                         .and_then(Value::as_array)
                         .map_or(0, Vec::len)
                         .saturating_add(usize::from(probe.mask.is_some())),
+                    probe.size,
                 )
             }
             Payload::Multipart(parts) => (
@@ -62,8 +66,14 @@ impl Input {
                     .iter()
                     .filter(|(name, _, _, _)| matches!(name.as_str(), "image" | "image[]" | "mask"))
                     .count(),
+                parts
+                    .iter()
+                    .find(|(name, _, _, _)| name == "size")
+                    .map(|(_, _, _, bytes)| String::from_utf8_lossy(bytes).into_owned()),
             ),
         };
+        let output_per_image =
+            output_per_image.unwrap_or_else(|| output_allowance(size.as_deref()));
         let invalid = || AppError::bad_request().with_param("image_token_estimate");
         let image_tokens = u32::try_from(images)
             .ok()
@@ -291,6 +301,25 @@ struct Probe {
     partial_images: Option<u32>,
     images: Option<Value>,
     mask: Option<Value>,
+    size: Option<String>,
+}
+
+/// 尺寸认不出（`auto`、缺省、非 `WxH`）时的单张输出 token 兜底。
+const OUTPUT_FLOOR: u32 = 8192;
+
+/// 模型没配 max_output 时单张输出 token 的预扣上界。OpenAI 图像输出 token 与像素面积
+/// 成正比（high 档 1024×1024 = 4160、1024×1536 = 6240），大尺寸会远超固定的 8192；
+/// 按面积算并以 8192 托底。配了 max_output 以管理员声明为准。
+fn output_allowance(size: Option<&str>) -> u32 {
+    let tokens = size
+        .and_then(|size| size.split_once('x'))
+        .and_then(|(w, h)| Some((w.trim().parse::<u64>().ok()?, h.trim().parse::<u64>().ok()?)))
+        .map_or(0, |(w, h)| {
+            w.saturating_mul(h)
+                .saturating_mul(4160)
+                .div_ceil(1024 * 1024)
+        });
+    u32::try_from(tokens).unwrap_or(u32::MAX).max(OUTPUT_FLOOR)
 }
 
 fn units(value: Option<u32>) -> Result<u32, AppError> {
@@ -477,4 +506,42 @@ pub(super) fn returned_images(body: &Bytes, requested: u32) -> Result<u32, AppEr
         return Err(invalid());
     }
     Ok(actual)
+}
+
+#[cfg(test)]
+mod output_allowance_tests {
+    use super::{OUTPUT_FLOOR, output_allowance};
+
+    #[test]
+    fn large_sizes_raise_the_per_image_output_bound() {
+        assert_eq!(output_allowance(None), OUTPUT_FLOOR);
+        assert_eq!(output_allowance(Some("auto")), OUTPUT_FLOOR);
+        assert_eq!(
+            output_allowance(Some("1024x1536")),
+            OUTPUT_FLOOR,
+            "6240 < floor"
+        );
+        assert_eq!(output_allowance(Some("2048x2048")), 16_640);
+        assert_eq!(output_allowance(Some("4096x4096")), 66_560);
+        assert_eq!(output_allowance(Some("99999999x99999999")), u32::MAX);
+    }
+
+    /// 没配 max_output 时按尺寸估上界；配了以它为准。
+    #[test]
+    fn estimate_uses_the_size_bound_per_image() {
+        let input = super::Input {
+            model: "m".into(),
+            units: 2,
+            stream: false,
+            partial_images: 0,
+            body: super::Payload::Json(bytes::Bytes::from_static(
+                br#"{"model":"m","prompt":"cat","n":2,"size":"2048x2048"}"#,
+            )),
+        };
+        assert_eq!(input.estimate(None).unwrap().completion_tokens, 2 * 16_640);
+        assert_eq!(
+            input.estimate(Some(1000)).unwrap().completion_tokens,
+            2 * 1000
+        );
+    }
 }

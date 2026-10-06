@@ -54,7 +54,7 @@ async fn new_channel(pg: &PgPool, name: &str, model: &str) -> i64 {
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();

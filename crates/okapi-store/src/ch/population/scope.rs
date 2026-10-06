@@ -86,7 +86,7 @@ fn boundary(sql: &str) -> Option<usize> {
     (depth == 0).then_some(bytes.len())
 }
 
-fn key_predicate(sql: &str, keys: &[String]) -> bool {
+pub(super) fn key_predicate(sql: &str, keys: &[String]) -> bool {
     const WORDS: &[&str] = &[
         "AND",
         "OR",
@@ -106,6 +106,7 @@ fn key_predicate(sql: &str, keys: &[String]) -> bool {
         "toDate",
         "toDateTime",
         "toDateTime64",
+        "toStartOfDay",
         "now",
         "today",
         "now64",

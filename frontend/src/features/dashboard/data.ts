@@ -4,13 +4,16 @@ import type { InventoryResp, TrendResp } from '@/features/analytics/types'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
 import type { RankingMetric } from './types'
+import type { OverviewResp } from './types'
+import type { DateRange } from '@/components/ui/date-range'
+import { dashboardOverviewKey, dashboardSearch } from './period'
 
-export const DASHBOARD_RANKING_LIMIT = 3
+export const DASHBOARD_RANKING_LIMIT = 5
 export const DASHBOARD_STALE_TIME = 15_000
 // 首页只读排行的金额 / 请求 / Token 与占比，不展示延迟、缓存等测量口径，也不展示环比：
 // fields=core 走精简数据源，compare=false 省掉整条上期查询。完整源每条查询要 ~5s 的规划时间。
-export function dashboardBreakdownParams(days: number, by: 'model' | 'channel', metric: RankingMetric = 'amount') {
-  const params = new URLSearchParams(cubeParams({ days }, { by, limit: String(DASHBOARD_RANKING_LIMIT), metric: metric === 'amount' ? undefined : metric }))
+export function dashboardBreakdownParams(days: number, by: 'model' | 'channel', metric: RankingMetric = 'amount', range?: DateRange | null) {
+  const params = new URLSearchParams(cubeParams(dashboardSearch(days, range), { by, limit: String(DASHBOARD_RANKING_LIMIT), metric: metric === 'amount' ? undefined : metric }))
   params.set('cached', 'true')
   params.set('fields', 'core')
   params.set('compare', 'false')
@@ -18,16 +21,16 @@ export function dashboardBreakdownParams(days: number, by: 'model' | 'channel', 
 }
 
 // 趋势图只读每个桶的请求 / 金额 / Token：精简查询，毫秒级返回，不等质量与 Token 构成。
-export function dashboardChartParams(days: number) {
-  const params = new URLSearchParams(cubeParams({ days }, { metric: 'amount' }))
+export function dashboardChartParams(days: number, range?: DateRange | null) {
+  const params = new URLSearchParams(cubeParams(dashboardSearch(days, range), { metric: 'amount' }))
   params.set('cached', 'true')
   params.set('fields', 'core')
   return params.toString()
 }
 
 // 费用、质量与 Token 构成需要全部测量口径（用量来源、缓存、延迟……）；首页不展示环比，不查上期。
-export function dashboardTrendParams(days: number) {
-  const params = new URLSearchParams(cubeParams({ days }, { metric: 'amount' }))
+export function dashboardTrendParams(days: number, range?: DateRange | null) {
+  const params = new URLSearchParams(cubeParams(dashboardSearch(days, range), { metric: 'amount' }))
   params.set('cached', 'true')
   params.set('compare', 'false')
   return params.toString()
@@ -52,13 +55,18 @@ export function useDashboardInventory() {
   })
 }
 
-export function useDashboardChart(days: number) {
-  const params = dashboardChartParams(days)
+export function useDashboardOverview(days: number, range?: DateRange | null) {
+  const params = cubeParams(dashboardSearch(days, range), { cached: 'true' })
+  return useQuery({ queryKey: dashboardOverviewKey(days, range), queryFn: () => dashboardFetch<OverviewResp>(`/admin/stats/overview?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })
+}
+
+export function useDashboardChart(days: number, range?: DateRange | null) {
+  const params = dashboardChartParams(days, range)
   return useQuery({ queryKey: qk.statsTrend(params), queryFn: () => dashboardFetch<TrendResp>(`/admin/stats/trend?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })
 }
 
 // 费用、质量与 Token 构成共用一次完整汇总查询，保持相同时间窗与数据口径。
-export function useDashboardUsage(days: number) {
-  const params = dashboardTrendParams(days)
+export function useDashboardUsage(days: number, range?: DateRange | null) {
+  const params = dashboardTrendParams(days, range)
   return useQuery({ queryKey: qk.statsTrend(params), queryFn: () => dashboardFetch<TrendResp>(`/admin/stats/trend?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })
 }

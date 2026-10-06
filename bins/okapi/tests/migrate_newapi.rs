@@ -15,7 +15,7 @@ struct Env {
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();

@@ -4,6 +4,7 @@
 //!
 //! settings.smtp 经进程内缓存注入（auth 用例）；只有 `notify_email_channel_and_admin_test_send`
 //! 写共享库的 smtp 行（worker Notifier 与管理端测试发送直读 PG），用完即删。
+//! 找回密码的 canonical site_url 按认证入口的真实 PG 配置读取，不由缓存替代。
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
 use okapi::{console, gateway};
@@ -182,7 +183,7 @@ fn uniq_ip() -> String {
 
 /// `smtp` / `registration_policy` 均经进程内 settings 缓存注入，不碰共享库。
 async fn setup(smtp: Option<Value>, policy: Option<Value>) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -201,13 +202,6 @@ async fn setup(smtp: Option<Value>, policy: Option<Value>) -> TestEnv {
     state
         .settings_cache
         .insert("site_name".to_owned(), Arc::new(Some(json!("Okapi QA"))))
-        .await;
-    state
-        .settings_cache
-        .insert(
-            "site_url".to_owned(),
-            Arc::new(Some(json!("https://configured.okapi.test"))),
-        )
         .await;
     let app = console::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -232,6 +226,11 @@ async fn post(env: &TestEnv, path: &str, body: Value) -> reqwest::Response {
         .send()
         .await
         .unwrap()
+}
+
+async fn set_site_url(env: &TestEnv, value: &str) {
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('site_url',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(json!(value)).execute(&env.pg).await.unwrap();
 }
 
 /// `{"error":{"code","param",...}}` → (status, code, param)。
@@ -459,7 +458,7 @@ async fn reset_expect_400(env: &TestEnv, token: &str, password: &str, want_param
     assert_eq!((status, param.as_deref()), (400, Some(want_param)));
 }
 
-/// 不存在的邮箱也回 ok 且不发信；存在的邮箱收到含 token 链接（基址按 Host 推导）；
+/// 不存在的邮箱也回 ok 且不发信；存在的邮箱收到使用配置站点地址的 token 链接；
 /// 错 token 400；对 token 重设成功后旧密码失效、新密码可登录；token 一次性。
 // 发信→改基址→再发→重设→token 一次性→新旧密码，是一条时序，拆开就丢了 token 的因果
 #[allow(clippy::too_many_lines)]
@@ -467,6 +466,7 @@ async fn reset_expect_400(env: &TestEnv, token: &str, password: &str, want_param
 async fn password_reset_flow() {
     let (smtp, inbox) = spawn_smtp().await;
     let env = setup(Some(smtp_setting(smtp)), Some(json!({"mode": "open"}))).await;
+    set_site_url(&env, "https://configured.okapi.test").await;
     let suffix = Uuid::new_v4().simple().to_string();
     let email = format!("r-{suffix}@ok.test");
 
@@ -511,14 +511,8 @@ async fn password_reset_flow() {
     // 站点挂在反代后面时 Host 常常是内网名字，重设链接照它拼出来用户根本打不开，
     // site_url 就是唯一的补救口；它不生效等于找回密码整条链路作废。尾斜杠要吃掉，
     // 否则拼出 `https://ok.example.com//reset-password`。
-    // settings 走进程缓存，且本套件的配置一律注进缓存而不写共享库（写了会污染并行用例）
-    env.state
-        .settings_cache
-        .insert(
-            "site_url".to_owned(),
-            Arc::new(Some(json!("https://ok.example.com/"))),
-        )
-        .await;
+    // 安全链接配置每次直读 PG，变更下一次请求立即生效。
+    set_site_url(&env, "https://ok.example.com/").await;
     let resp = post(&env, "/auth/password/forgot", json!({"email": email})).await;
     assert_eq!(resp.status(), 200);
     let mails = wait_inbox(&inbox, 2).await;
@@ -528,10 +522,7 @@ async fn password_reset_flow() {
         mails[1].data
     );
     // Clearing canonical URL must fail uniformly, even for unregistered addresses.
-    env.state
-        .settings_cache
-        .insert("site_url".to_owned(), Arc::new(Some(json!("   "))))
-        .await;
+    set_site_url(&env, "   ").await;
     for address in [&email, "unregistered@okapi.test"] {
         let response = post(&env, "/auth/password/forgot", json!({"email":address})).await;
         assert_eq!(response.status(), 500);
@@ -541,13 +532,7 @@ async fn password_reset_flow() {
         2,
         "untrusted Host cannot become a reset destination"
     );
-    env.state
-        .settings_cache
-        .insert(
-            "site_url".to_owned(),
-            Arc::new(Some(json!("https://configured.okapi.test"))),
-        )
-        .await;
+    set_site_url(&env, "https://configured.okapi.test").await;
 
     // 错 token / 短密码：都是 400 + param
     reset_expect_400(&env, "nope-nope", "new-password-22", "reset_token_invalid").await;

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createRouter } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { registerAuthReset } from '@/lib/api'
 import { initI18n } from '@/lib/i18n'
 import { routeTree } from './routeTree.gen'
 import './index.css'
@@ -13,6 +14,8 @@ const queryClient = new QueryClient({
     queries: { retry: 1, refetchOnWindowFocus: false },
   },
 })
+
+registerAuthReset(() => { void queryClient.cancelQueries(); queryClient.clear() })
 
 const router = createRouter({ routeTree })
 

@@ -38,7 +38,8 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
   const active = keys.filter((k) => k.status === 1).length
   if (active === keys.length) {
     return (
-      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+      // 窄屏允许 token 到期换到下一行，状态列不撑宽表格
+      <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 whitespace-nowrap">
         <Badge variant="success">{t('common:enabled')}</Badge>
         <span className="text-xs text-muted-foreground">
           {t('admin:keyStateAllActive', { n: keys.length })}

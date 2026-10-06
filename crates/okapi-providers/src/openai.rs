@@ -7,7 +7,6 @@ use bytes::Bytes;
 use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use okapi_api::{ChunkProbe, UsageProbe};
-use serde::Deserialize;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -26,7 +25,7 @@ pub(crate) async fn response_bytes(
     limit: Option<usize>,
 ) -> Result<Bytes, UpstreamError> {
     let limit = limit.unwrap_or(crate::limits::MAX_BODY);
-    let oversized = || UpstreamError::Build("image_response_too_large".into());
+    let oversized = || UpstreamError::Build("upstream_response_too_large".into());
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -56,12 +55,6 @@ pub enum ChatResponse {
         body: Bytes,
         usage: Option<UsageProbe>,
     },
-}
-
-#[derive(Deserialize)]
-struct UsageEnvelope {
-    #[serde(default)]
-    usage: Option<UsageProbe>,
 }
 
 /// 模型名映射重写：映射名一致时原样返回（透传零改动）。
@@ -160,7 +153,7 @@ impl OpenAiUpstream {
     ) -> Result<ChatResponse, UpstreamError> {
         let mut req = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec());
+            .body(body.clone());
         if !stream {
             req = req.timeout(NON_STREAM_TIMEOUT);
         }
@@ -175,7 +168,9 @@ impl OpenAiUpstream {
 
         if !(200..300).contains(&status) {
             let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+                .await
+                .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
@@ -196,9 +191,9 @@ impl OpenAiUpstream {
             }))
         } else {
             let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
-            let usage = serde_json::from_slice::<UsageEnvelope>(&body)
+            let usage = serde_json::from_slice::<serde_json::Value>(&body)
                 .ok()
-                .and_then(|e| e.usage);
+                .and_then(|value| okapi_api::usage_from_chat(&value));
             Ok(ChatResponse::Json {
                 status,
                 upstream_request_id,
@@ -261,7 +256,7 @@ impl OpenAiUpstream {
     ) -> Result<EmbeddingsResponse, UpstreamError> {
         let resp = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec())
+            .body(body.clone())
             .timeout(NON_STREAM_TIMEOUT)
             .send()
             .await
@@ -284,9 +279,9 @@ impl OpenAiUpstream {
             });
         }
         let body = response_bytes(resp, limit).await?;
-        let usage = serde_json::from_slice::<UsageEnvelope>(&body)
+        let usage = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
-            .and_then(|e| e.usage);
+            .and_then(|value| okapi_api::usage_from_chat(&value));
         Ok(EmbeddingsResponse {
             status,
             upstream_request_id,
@@ -331,18 +326,21 @@ impl OpenAiUpstream {
     ) -> Result<(u16, String, Bytes), UpstreamError> {
         let resp = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec())
+            .body(body.clone())
             .timeout(NON_STREAM_TIMEOUT)
             .send()
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+            let retry_after_secs = crate::retry_after::seconds(resp.headers());
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+                .await
+                .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
-                retry_after_secs: None,
+                retry_after_secs,
             });
         }
         let content_type = resp
@@ -407,7 +405,10 @@ impl OpenAiUpstream {
         let mut form = reqwest::multipart::Form::new();
         for (name, filename, content_type, data) in parts {
             let base = |data: &Bytes, filename: &Option<String>| {
-                let mut part = reqwest::multipart::Part::bytes(data.to_vec());
+                let mut part = reqwest::multipart::Part::stream_with_length(
+                    reqwest::Body::from(data.clone()),
+                    data.len() as u64,
+                );
                 if let Some(f) = filename {
                     part = part.file_name(f.clone());
                 }
@@ -435,13 +436,14 @@ impl OpenAiUpstream {
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
         if !(200..300).contains(&status) {
+            let retry_after_secs = crate::retry_after::seconds(resp.headers());
             let body = response_bytes(resp, Some(crate::limits::MAX_ERROR))
                 .await
                 .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
-                retry_after_secs: None,
+                retry_after_secs,
             });
         }
         let body = response_bytes(resp, limit).await?;
@@ -523,15 +525,24 @@ impl OpenAiUpstream {
         outbound: &Outbound,
     ) -> Result<reqwest::Response, UpstreamError> {
         let url = format!("{}{path}", api_base.trim_end_matches('/'));
-        self.http
-            .get(outbound, url)?
-            .header(
+        self.get_stream_url(&url, Some(credential), outbound).await
+    }
+
+    /// A validated download hop; the caller decides whether this origin receives credentials.
+    pub async fn get_stream_url(
+        &self,
+        url: &str,
+        credential: Option<&str>,
+        outbound: &Outbound,
+    ) -> Result<reqwest::Response, UpstreamError> {
+        let mut request = self.http.get(outbound, url)?;
+        if let Some(credential) = credential {
+            request = request.header(
                 reqwest::header::AUTHORIZATION,
                 format!("Bearer {credential}"),
-            )
-            .send()
-            .await
-            .map_err(|e| classify(&e))
+            );
+        }
+        request.send().await.map_err(|error| classify(&error))
     }
 }
 
@@ -547,22 +558,25 @@ fn parse_event(data: &str) -> ChatEvent {
             usage: probe.usage,
             raw: data.to_owned(),
         },
-        // 未知负载：透传但不参与首字/计数判定
+        // Unknown output shape remains pass-through; reported usage must still
+        // be validated rather than silently replaced by local estimates.
         Err(_) => ChatEvent::Data {
             event: None,
             has_output: false,
             content_chars: 0,
-            usage: None,
+            usage: serde_json::from_str::<serde_json::Value>(data)
+                .ok()
+                .and_then(|value| okapi_api::usage_from_chat(&value)),
             raw: data.to_owned(),
         },
     }
 }
 
 pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
-    if e.is_timeout() {
+    if let Some(unreachable) = UpstreamError::connect_phase(e) {
+        unreachable
+    } else if e.is_timeout() {
         UpstreamError::Timeout
-    } else if e.is_connect() {
-        UpstreamError::Connect(e.to_string())
     } else {
         UpstreamError::Stream(e.to_string())
     }

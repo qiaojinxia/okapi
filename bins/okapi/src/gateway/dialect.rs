@@ -1,151 +1,129 @@
-//! 出向方言与传输解耦（IMPLEMENTATION §11.35）。
-//!
-//! chat 族的 `(入口, 方言)` 分派矩阵只认三种出向方言：`openai` / `anthropic` / `gemini`。
-//! `bedrock` 说 Anthropic 方言、`vertex` 按模型说 Anthropic 或 Gemini 方言——它们只是换了
-//! URL 与鉴权的传输层，所以协议转换一行不加，这里把"取上游响应"按 provider 分派一次即可。
-
-use super::openai_dialect::outbound;
+//! Fixed inference flow: credential resolution, common admission, registered transport.
+//! Adapter objects own URL/auth/wire behavior; converters depend only on the dialect.
+use super::credentials::{CredentialManager, CredentialProvider};
 use super::state::AppState;
 use bytes::Bytes;
-use okapi_providers::anthropic::MessagesResponse;
-use okapi_providers::gemini::GeminiResponse;
+use okapi_providers::inference::{Request, Response, Surface};
+use okapi_providers::registry;
 use okapi_providers::{Outbound, UpstreamError};
-use okapi_store::channels::ChannelCandidate;
+use okapi_store::ChannelCandidate;
 
-/// 渠道对某上游模型的出向方言。`codex` 是 OpenAI 方言但**只有 Responses 面**，
-/// 由 `responses_native` 恒 true 保证走直转路径（见 `okapi_store::channels::responses_native_for`）。
-#[must_use]
-pub fn upstream_dialect<'a>(provider: &'a str, upstream_model: &str) -> &'a str {
-    match provider {
-        "anthropic" | "bedrock" | "anthropic_max" => "anthropic",
-        "gemini" => "gemini",
-        "vertex" => {
-            if okapi_providers::vertex::is_anthropic_model(upstream_model) {
-                "anthropic"
-            } else {
-                "gemini"
-            }
-        }
-        _ => "openai",
-    }
+pub fn upstream_dialect(provider: &str, model: &str) -> &'static str {
+    registry::lookup(provider).map_or("opaque", |adapter| adapter.dialect(model).as_str())
 }
-
-/// 只承诺 chat 族入口的 provider：embeddings / images / audio / videos / realtime 不路由。
-#[must_use]
 pub fn chat_only(provider: &str) -> bool {
-    matches!(provider, "bedrock" | "vertex" | "anthropic_max" | "codex")
+    registry::lookup(provider).is_some_and(registry::ProviderDescriptor::chat_only)
 }
-
-/// bedrock / vertex 没有可猜的缺省地址：缺 api_base 是构造错误，不回退到公网官方地址。
-fn required_base(cand: &ChannelCandidate) -> Result<&str, UpstreamError> {
-    cand.api_base
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| UpstreamError::Build(format!("{}_api_base_missing", cand.provider)))
-}
-
 impl AppState {
-    /// Anthropic 方言一跳：直连 / Bedrock InvokeModel / Vertex rawPredict 按 provider 选。
-    /// `outbound` 由调用方给：订阅 provider 的那份还带着客户端身份头（`oauth_cred::outbound_with_client`）。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn infer_via(
+        &self,
+        cand: &ChannelCandidate,
+        surface: Surface,
+        base: &str,
+        model: &str,
+        body: Bytes,
+        stream: bool,
+        outbound: &Outbound,
+    ) -> Result<Response, UpstreamError> {
+        let endpoint = match surface {
+            Surface::Chat => "/v1/chat/completions",
+            Surface::Messages => "/v1/messages",
+            Surface::Generate => "generateContent",
+            Surface::Responses { compact: true } => "/v1/responses/compact",
+            Surface::Responses { compact: false } => "/v1/responses",
+        };
+        super::account_control::execute(self, cand, model, endpoint, async {
+            let credential = CredentialManager.resolve(self, cand).await?;
+            let account_id = credential
+                .oauth()
+                .and_then(|credential| credential.account_id.as_deref());
+            self.inference
+                .infer(
+                    &cand.provider,
+                    Request {
+                        surface,
+                        base,
+                        model,
+                        credential: credential.material(),
+                        account_id,
+                        region: cand.aws_region.as_deref(),
+                        api_version: cand.api_version.as_deref(),
+                        body,
+                        stream,
+                        outbound,
+                    },
+                )
+                .await
+        })
+        .await
+    }
+    pub async fn responses_via(
+        &self,
+        cand: &ChannelCandidate,
+        base: &str,
+        body: Bytes,
+        stream: bool,
+        compact: bool,
+        outbound: &Outbound,
+    ) -> Result<okapi_providers::ChatResponse, UpstreamError> {
+        match self
+            .infer_via(
+                cand,
+                Surface::Responses { compact },
+                base,
+                "",
+                body,
+                stream,
+                outbound,
+            )
+            .await?
+        {
+            Response::OpenAi(response) => Ok(response),
+            _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
     pub async fn messages_via(
         &self,
         cand: &ChannelCandidate,
         base: &str,
-        upstream_model: &str,
+        model: &str,
         body: Bytes,
         stream: bool,
         outbound: &Outbound,
-    ) -> Result<MessagesResponse, UpstreamError> {
-        super::diagnostics::upstream(cand, upstream_model, "/v1/messages", async {
-            match cand.provider.as_str() {
-                "bedrock" => {
-                    self.bedrock
-                        .messages(
-                            required_base(cand)?,
-                            cand.aws_region.as_deref(),
-                            &cand.credential,
-                            upstream_model,
-                            body,
-                            stream,
-                            outbound,
-                        )
-                        .await
-                }
-                // 订阅凭证：取可用 access token（必要时四步锁刷新），Bearer + oauth beta + 系统提示首句；
-                // settings.mimic_cc 开启时换全伪装身份（§11.38）
-                "anthropic_max" => {
-                    let cred = super::oauth_cred::fresh_credential(self, cand).await?;
-                    let mimic = super::oauth_cred::mimic_identity(cand, cred.account_id.as_deref());
-                    okapi_providers::oauth::anthropic_max::messages(
-                        self.anthropic.http(),
-                        base,
-                        &cred.access_token,
-                        body,
-                        stream,
-                        outbound,
-                        mimic.as_ref(),
-                    )
-                    .await
-                }
-                "vertex" => {
-                    self.vertex
-                        .messages(
-                            required_base(cand)?,
-                            &cand.credential,
-                            upstream_model,
-                            body,
-                            stream,
-                            outbound,
-                        )
-                        .await
-                }
-                _ => {
-                    self.anthropic
-                        .messages(base, &cand.credential, body, stream, outbound)
-                        .await
-                }
-            }
-        })
-        .await
+    ) -> Result<okapi_providers::anthropic::MessagesResponse, UpstreamError> {
+        match self
+            .infer_via(cand, Surface::Messages, base, model, body, stream, outbound)
+            .await?
+        {
+            Response::Messages(response) => Ok(response),
+            _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
+        }
     }
-
-    /// Gemini 方言一跳：直连 / Vertex generateContent 按 provider 选。
     pub async fn generate_via(
         &self,
         cand: &ChannelCandidate,
         base: &str,
-        upstream_model: &str,
+        model: &str,
         body: Bytes,
         stream: bool,
-    ) -> Result<GeminiResponse, UpstreamError> {
-        super::diagnostics::upstream(cand, upstream_model, "generateContent", async {
-            let outbound = outbound(cand);
-            if cand.provider == "vertex" {
-                self.vertex
-                    .generate(
-                        required_base(cand)?,
-                        &cand.credential,
-                        upstream_model,
-                        body,
-                        stream,
-                        &outbound,
-                    )
-                    .await
-            } else {
-                self.gemini
-                    .generate(
-                        base,
-                        &cand.credential,
-                        upstream_model,
-                        body,
-                        stream,
-                        &outbound,
-                    )
-                    .await
-            }
-        })
-        .await
+    ) -> Result<okapi_providers::gemini::GeminiResponse, UpstreamError> {
+        match self
+            .infer_via(
+                cand,
+                Surface::Generate,
+                base,
+                model,
+                body,
+                stream,
+                &super::openai_dialect::outbound(cand),
+            )
+            .await?
+        {
+            Response::Gemini(response) => Ok(response),
+            _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
+        }
     }
 }
 

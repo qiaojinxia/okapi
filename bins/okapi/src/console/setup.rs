@@ -52,9 +52,7 @@ pub async fn run(
                     == 0
         })
     } else {
-        // Only the actual socket peer is trusted for bootstrap; forwarding headers cannot grant it.
-        conn.0.is_some_and(|peer| peer.ip().is_loopback())
-            && crate::gateway::clients::client_ip(&headers).is_some_and(|ip| ip.is_loopback())
+        direct_loopback(conn.0, &headers)
     };
     if !authorized {
         return Err(
@@ -89,4 +87,43 @@ pub async fn run(
         // 唯一一次明文返回（前端提示立即保存）
         "api_key": token,
     })))
+}
+
+fn direct_loopback(peer: Option<std::net::SocketAddr>, headers: &HeaderMap) -> bool {
+    peer.is_some_and(|peer| peer.ip().is_loopback())
+        && !headers.keys().any(|name| {
+            name.as_str().starts_with("x-forwarded-")
+                || matches!(
+                    name.as_str(),
+                    "forwarded" | "x-real-ip" | "true-client-ip" | "cf-connecting-ip"
+                )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwarded_loopback_never_grants_bootstrap_access() {
+        let local = Some("127.0.0.1:1234".parse().unwrap());
+        assert!(direct_loopback(local, &HeaderMap::new()));
+        assert!(!direct_loopback(None, &HeaderMap::new()));
+        assert!(!direct_loopback(
+            Some("203.0.113.1:1234".parse().unwrap()),
+            &HeaderMap::new()
+        ));
+        for name in [
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-real-ip",
+            "cf-connecting-ip",
+            "true-client-ip",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, "127.0.0.1".parse().unwrap());
+            assert!(!direct_loopback(local, &headers), "{name}");
+        }
+    }
 }

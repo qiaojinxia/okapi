@@ -19,11 +19,19 @@ pub enum PricingError {
 
     #[error(transparent)]
     InvalidUsage(#[from] DomainError),
+    #[error("missing_priced_server_tool_usage")]
+    MissingServerToolUsage,
+    #[error("invalid_server_tool_admission: {0}")]
+    InvalidServerToolAdmission(&'static str),
 }
 
 /// 配置编译（PriceBook）错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompileError {
+    #[error("negative_per_call_price: {0}")]
+    NegativePerCallPrice(String),
+    #[error("invalid_server_tool_prices: {model}: {reason}")]
+    InvalidServerToolPrices { model: String, reason: &'static str },
     #[error("invalid_base_price_per_1m_micro")]
     InvalidBasePrice,
     #[error("duplicate_model: {0}")]

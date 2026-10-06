@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { useModalFocus } from '@/hooks/use-modal-focus'
+import { isTopModal, useModalFocus } from '@/hooks/use-modal-focus'
 
 interface ConfirmRequest {
   /// 标题（已本地化的文案）。
@@ -42,7 +42,6 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
   const [typed, setTyped] = useState('')
   const panel = useRef<HTMLDivElement>(null)
   // 确认框常开在抽屉之上：焦点必须关在这一层里，否则 Tab 会走回底下那张表单
-  useModalFocus(req !== null, panel, firstControl)
 
   const needText = req !== null && req.requireText !== undefined && req.requireText !== ''
   const ready = req !== null && (!needText || typed.trim() === req.requireText)
@@ -52,13 +51,15 @@ function ConfirmDialog({ req, onClose }: { req: ConfirmRequest | null; onClose: 
     onClose()
   }, [onClose])
 
+  useModalFocus(req !== null, panel, firstControl, close)
+
   // Esc 取消；需手输名称时在输入框里回车即确认（无需手输时确认按钮自带焦点，
   // 原生回车触发点击，这里不再重复处理以免执行两次）
   useEffect(() => {
     if (req === null) return undefined
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close()
-      if (e.key === 'Enter' && needText && ready) {
+      if (!isTopModal(panel) || e.isComposing) return
+      if (e.key === 'Enter' && needText && ready && e.target instanceof HTMLInputElement && panel.current?.contains(e.target)) {
         e.preventDefault()
         req.onConfirm()
         close()

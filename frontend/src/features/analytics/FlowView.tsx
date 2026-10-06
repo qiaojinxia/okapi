@@ -3,8 +3,8 @@ import { useNavigate } from '@tanstack/react-router'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Layer, Rectangle, ResponsiveContainer, Sankey, Tooltip } from 'recharts'
-import type { AnalyticsSearch, FlowMetric } from '@/routes/admin.stats'
-import { FLOW_METRICS } from '@/routes/admin.stats'
+import type { AnalyticsSearch, FlowMetric } from '@/features/analytics/route-state'
+import { FLOW_METRICS } from '@/features/analytics/route-state'
 import { Card, CardContent } from '@/components/ui/card'
 import { Segmented } from '@/components/ui/segmented'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
@@ -140,9 +140,11 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
         <div className="flex flex-wrap items-center gap-3 rounded-lg bg-muted/30 p-3 text-xs"><span className="text-muted-foreground">{t('analysis:stages')}</span>{STAGE_ORDER.map((stage) => <label key={stage} className="flex min-h-8 cursor-pointer items-center gap-1.5"><input type="checkbox" checked={stages.includes(stage)} disabled={stages.includes(stage) && stages.length <= 2} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, stages: e.target.checked ? STAGE_ORDER.filter((s) => stages.includes(s) || s === stage) : stages.filter((s) => s !== stage) }) })} />{stageLabel[stage]}</label>)}<label className="flex items-center gap-2">{t('analysis:top')}<select className={selectClass} value={search.limit ?? 6} onChange={(e) => void navigate({ search: (prev) => cleanSearch({ ...prev, limit: Number(e.target.value) }) })}>{[3, 6, 10, 20].map((n) => <option key={n}>{n}</option>)}</select></label></div>
         {q.isError ? (
           <ErrorState message={describeError(q.error)} />
-        ) : q.isLoading || graph === null ? (
+        ) : q.isLoading ? (
           <LoadingState />
-        ) : graph.nodes.length === 0 || graph.links.length === 0 ? (
+        ) : hasNegativeFlows ? (
+          <p className="text-sm text-muted-foreground">{t('analytics:flowSignedHint')}</p>
+        ) : graph === null || graph.nodes.length === 0 || graph.links.length === 0 ? (
           <EmptyState hint={t('admin:trendEmptyHint')} />
         ) : (
           <div className="max-w-full overflow-x-auto"><div style={{ height: graphHeight, minWidth: Math.max(620, actualStages.length * 145 + 40) }}>

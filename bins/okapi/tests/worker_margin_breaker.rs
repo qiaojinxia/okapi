@@ -12,6 +12,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -44,7 +47,7 @@ struct Env {
 // 用户 / 分组 / 渠道 / 三个服务的装配放同一视野
 #[allow(clippy::too_many_lines)]
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
@@ -115,6 +118,7 @@ async fn setup() -> Env {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(
         &database_url,
         &redis_url,
@@ -317,6 +321,9 @@ async fn notify_via_temp_db(sink: &SocketAddr) -> (okapi::worker::notify::Notifi
         .await
         .unwrap();
     okapi_store::run_migrations(&pool).await.unwrap();
+    // This test's webhook is intentionally served on loopback over HTTP.
+    sqlx::query("INSERT INTO settings(key,value) VALUES('ssrf_policy','{\"allow_http\":true,\"allow_private\":true}')")
+        .execute(&pool).await.unwrap();
     sqlx::query!(
         r#"INSERT INTO settings (key, value) VALUES ('notify_channels', $1)"#,
         json!([{ "type": "webhook", "url": format!("http://{sink}/hook"),

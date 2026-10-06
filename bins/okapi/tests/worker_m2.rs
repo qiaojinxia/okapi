@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn setup() -> (PgPool, BalanceLedger) {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -260,7 +260,7 @@ async fn cooled_keys_recover_after_deadline() {
 /// epoch 热更：发布新 epoch 后 30s 轮询通道能感知并原子替换。
 #[tokio::test]
 async fn pricebook_hot_reloads_on_new_epoch() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)

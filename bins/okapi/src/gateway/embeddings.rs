@@ -180,9 +180,7 @@ async fn handle(
         concurrency: cap(key.max_concurrency),
     };
     let (reservation_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -239,7 +237,7 @@ async fn handle(
     .await
     {
         Ok((resp_body, status, usage, channel, upstream_request_id, failover, upstream_model)) => {
-            failure.upstream(&upstream_model, channel);
+            failure.upstream(&upstream_model, (channel.0, channel.1));
             let usage = usage.unwrap_or(TokenUsage {
                 upstream_usage: Some(okapi_domain::UpstreamTokenCounts::default()),
                 prompt_tokens: est_prompt,
@@ -257,7 +255,12 @@ async fn handle(
             let quote = calculate(&book, &calc, usage).map_err(AppError::from);
             match quote {
                 Ok(quote) => {
-                    let snapshot = serde_json::to_value(&quote.snapshot).ok();
+                    let snapshot = super::upstream_cost::snapshot(
+                        serde_json::to_value(&quote.snapshot).ok(),
+                        channel.0,
+                        channel.2,
+                        quote.list_price,
+                    );
                     let input = SettlementInput {
                         source_window: source_window.clone(),
                         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -300,10 +303,11 @@ async fn handle(
                         event_type: "commit",
                         pool: reservation_pool,
                     };
+                    failure.disarm();
                     if state
                         .settle_success(input)
                         .await
-                        .inspect_err(|error| failure.error(error))?
+                        .inspect_err(|error| failure.settlement_failed(error))?
                     {
                         super::auth::record_settlement_counters(
                             state,
@@ -403,7 +407,7 @@ type ForwardOk = (
     Bytes,
     u16,
     Option<TokenUsage>,
-    (i64, i64),
+    (i64, i64, i64),
     Option<String>,
     i16,
     String,
@@ -459,6 +463,7 @@ async fn forward(
 
     let mut failover: i16 = 0;
     let mut last: Option<(i64, i64, String)> = None;
+    let mut last_error = AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR);
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
         let upstream_model = cand.upstream_model(canonical).to_owned();
         let Ok(body_up) = rewrite_model(body, requested_model, &upstream_model) else {
@@ -475,27 +480,27 @@ async fn forward(
             .await
         {
             Ok(resp) => {
+                super::key_health::success(state, &cand).await;
                 let usage = validated_usage(resp.usage, est_prompt)
                     .map_err(|error| (error, last.clone(), failover))?;
                 return Ok((
                     resp.body,
                     resp.status,
                     usage,
-                    (cand.channel_id, cand.channel_key_id),
+                    (cand.channel_id, cand.channel_key_id, cand.cost_milli),
                     resp.upstream_request_id,
                     failover,
                     upstream_model,
                 ));
             }
             Err(err) if err.retriable_before_first_token() => {
+                last_error = if err.error_code() == codes::NO_AVAILABLE_CHANNEL {
+                    super::account_control::attempt_error(&err)
+                } else {
+                    AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+                };
                 let kind = super::chat::failure_kind_of(&err);
-                let _ = okapi_store::channels::mark_key_failure(
-                    &state.pg,
-                    cand.channel_key_id,
-                    err.error_code(),
-                    kind,
-                )
-                .await;
+                super::key_health::failure(state, &cand, err.error_code(), kind).await;
                 tracing::warn!(request_id = %request_id, channel_key = cand.channel_key_id,
                     code = err.error_code(), "embeddings 失败，failover 下一候选");
                 failover = failover.saturating_add(1);
@@ -517,11 +522,7 @@ async fn forward(
             }
         }
     }
-    Err((
-        AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
-        last,
-        failover,
-    ))
+    Err((last_error, last, failover))
 }
 
 fn elapsed_ms(started: Instant) -> i32 {

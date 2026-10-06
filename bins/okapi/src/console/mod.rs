@@ -14,10 +14,13 @@ pub mod auth_web;
 mod cache_usage;
 mod cache_usage_legacy;
 pub mod channel_balance;
+mod channel_creation;
+mod channel_credentials;
 pub mod channel_oauth;
 mod cloud_probe;
 mod core_source;
 pub mod dlq;
+pub mod egress;
 mod input_units;
 mod key_copy;
 mod latency;
@@ -27,6 +30,8 @@ pub mod margin;
 pub mod mcp;
 mod measurement_coverage;
 pub mod oauth;
+mod observation_sources;
+mod outbound_body;
 mod output_rate;
 pub mod pay;
 mod performance_source;
@@ -36,6 +41,7 @@ mod profile;
 pub mod query;
 pub mod ratio_sync;
 pub mod registration;
+mod server_tools;
 pub mod setup;
 pub mod ssrf;
 pub mod stats;
@@ -48,6 +54,7 @@ mod ttft_average;
 pub(crate) mod usage_details;
 mod usage_observations;
 mod usage_sources;
+mod user_management;
 
 use crate::config::Config;
 use crate::gateway::{self, state::AppState};
@@ -120,31 +127,9 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             crate::gateway::clients::stamp_peer_ip,
         ))
-        .layer(axum::middleware::from_fn(security_headers))
+        .layer(axum::middleware::from_fn(crate::security_headers::apply))
         .layer(TraceLayer::new_for_http().make_span_with(crate::gateway::clients::request_span))
         .with_state(state)
-}
-
-async fn security_headers(req: Request, next: Next) -> Response {
-    let mut response = next.run(req).await;
-    let h = response.headers_mut();
-    h.insert(
-        "x-frame-options",
-        axum::http::HeaderValue::from_static("DENY"),
-    );
-    h.insert(
-        "content-security-policy",
-        axum::http::HeaderValue::from_static("frame-ancestors 'none'"),
-    );
-    h.insert(
-        "x-content-type-options",
-        axum::http::HeaderValue::from_static("nosniff"),
-    );
-    h.insert(
-        "referrer-policy",
-        axum::http::HeaderValue::from_static("same-origin"),
-    );
-    response
 }
 
 /// SPA 与管理 API 同挂 `/admin/*`，路径同名时（如 `/admin/channels`）axum 的路由
@@ -197,6 +182,8 @@ fn channel_routes() -> ConsoleRouter {
             "/admin/channels",
             post(admin::create_channel).get(admin::list_channels),
         )
+        .route("/admin/channels/providers", get(admin::channel_providers))
+        .route("/admin/channels/{id}/usage", get(admin::channel_usage))
         .route(
             "/admin/channels/{id}",
             axum::routing::patch(admin::update_channel).delete(admin::delete_channel),
@@ -239,10 +226,43 @@ fn channel_routes() -> ConsoleRouter {
         // 订阅 OAuth 登录（§11.38）：start 拿授权链接，exchange 贴回 code 建渠道
         .route("/admin/channels/oauth/start", post(channel_oauth::start))
         .route(
+            "/admin/channels/{id}/keys/{key}/oauth/refresh",
+            post(channel_oauth::refresh),
+        )
+        .route(
             "/admin/channels/oauth/exchange",
             post(channel_oauth::exchange),
         )
         .route("/admin/diagnose/route", get(manage::diagnose_route))
+        // 出口代理（§11.41）：代理 / 代理组 / 全局默认出口 / 渠道出口绑定
+        .route(
+            "/admin/proxies",
+            get(egress::list_proxies).post(egress::create_proxy),
+        )
+        .route("/admin/proxies/test", post(egress::test_proxy_url))
+        .route("/admin/proxies/import", post(egress::import_proxies))
+        .route(
+            "/admin/proxies/{id}",
+            axum::routing::patch(egress::update_proxy).delete(egress::delete_proxy),
+        )
+        .route("/admin/proxies/{id}/test", post(egress::test_proxy))
+        .route(
+            "/admin/proxy-groups",
+            get(egress::list_groups).post(egress::upsert_group),
+        )
+        .route("/admin/proxy-groups/{code}", delete(egress::delete_group))
+        .route(
+            "/admin/proxy-groups/{code}/assignments",
+            get(egress::group_assignments).post(egress::assign_key),
+        )
+        .route(
+            "/admin/egress/default",
+            get(egress::get_default).put(egress::set_default),
+        )
+        .route(
+            "/admin/channels/{id}/egress",
+            post(egress::set_channel_egress),
+        )
 }
 
 /// 模型配置与定价面：模型 / 分组 / 套餐 / 兑换码 / 活动规则 / 发布与导入。
@@ -356,6 +376,7 @@ fn ops_routes() -> ConsoleRouter {
         )
         // 用量分析（mv_cube_hour）：任意维度过滤下的趋势 / 拆分 / 流向
         .route("/admin/stats/trend", get(analytics::trend))
+        .route("/admin/stats/tools", get(server_tools::admin))
         .route("/admin/stats/breakdown", get(analytics::breakdown))
         .route("/admin/stats/flow", get(analytics::flow))
         .route("/admin/stats/inventory", get(analytics::inventory))
@@ -392,6 +413,7 @@ fn portal_routes() -> ConsoleRouter {
         .route("/api/me/profile", get(profile::get).patch(profile::update))
         .route("/api/me/usage", get(portal::usage))
         .route("/api/me/stats/daily", get(stats::my_daily))
+        .route("/api/me/stats/tools", get(server_tools::mine))
         .route("/api/me/stats/breakdown", get(stats::my_breakdown))
         .route("/api/me/stats/activity", get(activity::my_activity))
         .route("/api/me/keys", get(portal::keys))
@@ -411,6 +433,7 @@ fn portal_routes() -> ConsoleRouter {
         )
         .route("/api/me/logs", get(portal::logs))
         .route("/api/me/logs/stat", get(portal::logs_stat))
+        .route("/api/me/logs/series", get(portal::logs_series))
         .route("/api/me/ledger", get(portal::ledger))
         .route("/api/me/orders", get(portal::orders))
         .route("/api/me/redeem", post(portal::redeem))

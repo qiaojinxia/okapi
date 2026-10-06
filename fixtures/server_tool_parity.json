@@ -1,0 +1,122 @@
+[
+  {
+    "name": "native_search_default",
+    "search": 3,
+    "fetch": 2,
+    "price": 10000,
+    "group": 1000000,
+    "user": 1000000,
+    "rule": 1000000,
+    "list": 30000,
+    "original": 30000,
+    "amount": 30000
+  },
+  {
+    "name": "search_group_discount",
+    "search": 3,
+    "fetch": 0,
+    "price": 10000,
+    "group": 1500000,
+    "user": 800000,
+    "rule": 900000,
+    "list": 30000,
+    "original": 45000,
+    "amount": 32400
+  },
+  {
+    "name": "explicit_free",
+    "search": 9,
+    "fetch": 3,
+    "price": 0,
+    "group": 2000000,
+    "user": 3000000,
+    "rule": 1000000,
+    "list": 0,
+    "original": 0,
+    "amount": 0
+  },
+  {
+    "name": "independent_fractional_rounding",
+    "search": 3,
+    "fetch": 0,
+    "price": 1,
+    "group": 333333,
+    "user": 1500000,
+    "rule": 800000,
+    "list": 3,
+    "original": 0,
+    "amount": 1
+  },
+  {
+    "name": "surcharge",
+    "search": 2,
+    "fetch": 0,
+    "price": 10000,
+    "group": 1000000,
+    "user": 1500000,
+    "rule": 1100000,
+    "list": 20000,
+    "original": 20000,
+    "amount": 33000
+  },
+  {
+    "name": "observed_zero",
+    "search": 0,
+    "fetch": 0,
+    "price": 10000,
+    "group": 1000000,
+    "user": 1000000,
+    "rule": 1000000,
+    "list": 0,
+    "original": 0,
+    "amount": 0
+  },
+  {
+    "name": "fetch_only_omitted_search",
+    "search": null,
+    "fetch": 3,
+    "price": 10000,
+    "group": 1000000,
+    "user": 1000000,
+    "rule": 1000000,
+    "list": 0,
+    "original": 0,
+    "amount": 0,
+    "scope": {
+      "web_search": false,
+      "web_fetch": true
+    }
+  },
+  {
+    "name": "search_only_omitted_included_fetch",
+    "search": 2,
+    "fetch": null,
+    "price": 10000,
+    "group": 1500000,
+    "user": 800000,
+    "rule": 900000,
+    "list": 20000,
+    "original": 30000,
+    "amount": 21600,
+    "scope": {
+      "web_search": true,
+      "web_fetch": false
+    }
+  },
+  {
+    "name": "unrequested_huge_price_does_not_overflow",
+    "search": null,
+    "fetch": 0,
+    "price": 9223372036854775807,
+    "group": 3000000,
+    "user": 3000000,
+    "rule": 3000000,
+    "list": 0,
+    "original": 0,
+    "amount": 0,
+    "scope": {
+      "web_search": false,
+      "web_fetch": true
+    }
+  }
+]

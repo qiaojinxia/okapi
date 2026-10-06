@@ -12,6 +12,7 @@ import { containsSecret, decimalText, isRecord, scaledInteger, settingMeta } fro
 import type { SettingRow } from './setting-catalog'
 import { EPAY_FIELDS, initialFields, OAUTH_FIELDS, OAUTH_OPTIONAL_FIELDS, parseFields, STRIPE_FIELDS } from './setting-fields'
 import type { FormError, SettingField } from './setting-fields'
+import { initialRefreshPolicy, parseRefreshPolicy, REFRESH_FIELDS } from './oauth-refresh-policy'
 
 export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
   row: SettingRow
@@ -26,11 +27,11 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
     : typeof row.value === 'boolean' ? 'bool' : typeof row.value === 'number' ? 'number'
     : typeof row.value === 'string' ? 'string' : 'json'
   // 旧值结构不匹配时保留原始编辑能力，不能把无法识别的数据初始化成空对象后覆盖。
-  const unsupportedObject = ['epay', 'stripe', 'ssrf', 'limits'].includes(requestedMode) && row.value !== null && !isRecord(row.value)
+  const unsupportedObject = ['epay', 'stripe', 'ssrf', 'limits', 'oauth_refresh'].includes(requestedMode) && row.value !== null && !isRecord(row.value)
   const unsupportedArray = requestedMode === 'oauth' && row.value !== null && (!Array.isArray(row.value) || !row.value.every(isRecord))
   const mode = unsupportedObject || unsupportedArray ? 'json' : requestedMode
   const fields = mode === 'epay' ? EPAY_FIELDS : mode === 'stripe' ? STRIPE_FIELDS : []
-  const [draft, setDraft] = useState(() => initialFields(row.value, fields))
+  const [draft, setDraft] = useState(() => mode === 'oauth_refresh' ? initialRefreshPolicy(row.value) : initialFields(row.value, fields))
   const [text, setText] = useState(mode === 'price' ? decimalText(row.value, 1_000_000) : mode === 'percent' ? decimalText(row.value, 100) : row.is_secret ? '' : String(row.value ?? ''))
   const [bool, setBool] = useState(row.value === true)
   const [json, setJson] = useState(() => JSON.stringify(row.value, null, 2) ?? 'null')
@@ -45,6 +46,7 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
   // 所有转换在提交前验证；对象的未识别字段随原值保留，避免表单覆盖扩展配置。
   const parsed = (() : { value: unknown; error?: FormError } => {
     if (mode === 'epay' || mode === 'stripe') return parseFields(draft, fields)
+    if (mode === 'oauth_refresh') return parseRefreshPolicy(draft)
     if (mode === 'ssrf') return { value: { ...draft, allow_http: draft.allow_http === true, allow_private: draft.allow_private === true } }
     if (mode === 'percent') {
       const value = scaledInteger(text, 2)
@@ -109,6 +111,12 @@ export function SettingEditorDrawer({ row, pending, onCancel, onSave }: {
             </div>
           </Field>}
           {mode === 'bool' && <Switch label={label} checked={bool} onChange={(v) => { setBool(v); setDirty(true) }} />}
+          {mode === 'oauth_refresh' && <FieldGroup title={t('admin:oauthPolicyTitle')} hint={t('admin:oauthPolicyDescription')}>
+            <Switch label={t('admin:oauthPolicyEnabled')} checked={draft.enabled === true} onChange={(v) => patch('enabled', v)} />
+            {REFRESH_FIELDS.map((field) => <Field key={field.key} label={t(field.label)} htmlFor={`${formId}-${field.key}`} hint={`${field.min}–${field.max}`}>
+              <Input id={`${formId}-${field.key}`} inputMode="numeric" value={String(draft[field.key])} onChange={(e) => patch(field.key, e.target.value)} />
+            </Field>)}
+          </FieldGroup>}
           {mode === 'limits' && <FieldGroup title={t('admin:settingModelLimits')} hint={t('admin:settingRpmHint')}>
             {limits.map((item) => <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_5.5rem_auto] items-end gap-2">
               <Field label={t('admin:settingModelName')} htmlFor={`${formId}-model-${item.id}`}><ModelInput id={`${formId}-model-${item.id}`} value={item.model} onChange={(model) => { setDirty(true); setLimits(limits.map((row) => row.id === item.id ? { ...row, model } : row)) }} /></Field>

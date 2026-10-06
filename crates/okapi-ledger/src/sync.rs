@@ -13,7 +13,7 @@ pub async fn record(
     input: SettlementInput<'_>,
 ) -> Result<bool, LedgerError> {
     let mut guard = UserGuard::acquire(pg, input.user_id).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let inserted = record_in_tx(&mut tx, input.clone()).await?;
     tx.commit().await?;
     if let Err(error) = guard.synchronize(ledger).await {
@@ -90,7 +90,7 @@ pub(crate) async fn synchronize(
     let pending = sqlx::query!(
         "SELECT request_id,api_key_id,amount_micro,pool,source_window FROM billing_sync WHERE user_id=$1 ORDER BY created_at,request_id",
         user_id
-    ).fetch_all(guard.connection()).await?;
+    ).fetch_all(guard.connection()?).await?;
     if pending.is_empty() {
         return Ok(());
     }
@@ -117,7 +117,7 @@ pub(crate) async fn synchronize(
         // earlier expiry refund, or lost Redis data. Never guess and debit again.
         // All pending closes have now finished under the same user lock; rebuild
         // from live events plus carried history, retaining other reservations and holds.
-        let totals = okapi_store::history::totals(guard.connection(), user_id).await?;
+        let totals = okapi_store::history::totals(guard.connection()?, user_id).await?;
         guard
             .repair(
                 ledger,
@@ -132,7 +132,7 @@ pub(crate) async fn synchronize(
         user_id,
         &ids
     )
-    .execute(guard.connection())
+    .execute(guard.connection()?)
     .await?;
     Ok(())
 }
@@ -150,7 +150,13 @@ pub async fn recover_pending(
     ).fetch_all(pg).await?;
     let mut recovered = 0;
     for user_id in users {
-        let mut guard = UserGuard::acquire(pg, user_id).await?;
+        let mut guard = match UserGuard::acquire(pg, user_id).await {
+            Ok(guard) => guard,
+            Err(error) => {
+                tracing::warn!(user_id, %error, "settlement recovery lock deferred");
+                continue;
+            }
+        };
         match guard.synchronize(ledger).await {
             Ok(()) => recovered += 1,
             Err(error) => tracing::error!(user_id, %error, "ordinary settlement recovery deferred"),

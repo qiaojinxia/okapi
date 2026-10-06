@@ -98,13 +98,57 @@ pub enum Admission {
 /// A dedicated session lock survives PG commits between a durable intent and Redis IO.
 /// close_on_drop prevents a cancelled task from returning a locked connection to the pool.
 pub struct UserGuard {
-    connection: PoolConnection<Postgres>,
+    connection: Option<PoolConnection<Postgres>>,
     user_id: i64,
 }
+impl Drop for UserGuard {
+    fn drop(&mut self) {
+        let Some(mut connection) = self.connection.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let user_id = self.user_id.to_string();
+        runtime.spawn(async move {
+            // close_on_drop remains armed on every error, cancellation or shutdown.
+            // Reuse is explicit and only follows a verified unlock and session reset.
+            let cleanup = async {
+                let unlocked: bool =
+                    sqlx::query_scalar("SELECT pg_advisory_unlock($1, hashtext($2))")
+                        .bind(LOCK_NAMESPACE)
+                        .bind(user_id)
+                        .fetch_one(&mut *connection)
+                        .await?;
+                if !unlocked {
+                    return Err(sqlx::Error::Protocol("user lock not held".into()));
+                }
+                sqlx::query("RESET lock_timeout")
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query("RESET statement_timeout")
+                    .execute(&mut *connection)
+                    .await?;
+                Ok::<(), sqlx::Error>(())
+            };
+            if matches!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), cleanup).await,
+                Ok(Ok(()))
+            ) {
+                // sqlx 0.9's explicit return transfers the live connection even with
+                // close_on_drop armed; the now-empty wrapper cannot close it twice.
+                connection.return_to_pool().await;
+            }
+        });
+    }
+}
+
 impl UserGuard {
     /// Use the locked connection for PG work, including when the pool has only one slot.
-    pub fn connection(&mut self) -> &mut sqlx::PgConnection {
-        &mut self.connection
+    pub fn connection(&mut self) -> Result<&mut sqlx::PgConnection, LedgerError> {
+        self.connection
+            .as_deref_mut()
+            .ok_or(LedgerError::HoldRecoveryRequired)
     }
     pub async fn acquire(pg: &PgPool, user_id: i64) -> Result<Self, LedgerError> {
         let mut connection = pg.acquire().await?;
@@ -121,7 +165,7 @@ impl UserGuard {
             .execute(&mut *connection)
             .await?;
         Ok(Self {
-            connection,
+            connection: Some(connection),
             user_id,
         })
     }
@@ -146,7 +190,7 @@ impl UserGuard {
             "SELECT * FROM balance_holds WHERE user_id=$1 AND state IN ('pending','held')",
         )
         .bind(self.user_id)
-        .fetch_all(self.connection())
+        .fetch_all(self.connection()?)
         .await?;
         for row in rows {
             let hot = active.remove(&row.id);
@@ -177,6 +221,20 @@ impl UserGuard {
     }
     /// Before changing a subscription window, finish every already-committed settlement.
     pub async fn synchronize(&mut self, ledger: &BalanceLedger) -> Result<(), LedgerError> {
+        // Every admission and settlement runs this inside the user's lock. One probe
+        // covers the four recovery queues, so an idle fence costs a single round trip.
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM billing_sync WHERE user_id = $1)
+                 OR EXISTS(SELECT 1 FROM balance_holds WHERE user_id = $1 AND state = 'closing')
+                 OR EXISTS(SELECT 1 FROM fund_transfers WHERE user_id = $1 AND cleaned_at IS NULL)
+                 OR EXISTS(SELECT 1 FROM subscription_sync WHERE user_id = $1)",
+        )
+        .bind(self.user_id)
+        .fetch_one(self.connection()?)
+        .await?;
+        if !pending {
+            return Ok(());
+        }
         crate::sync::synchronize(self, ledger, self.user_id).await?;
         let rows = db::closing(self).await?;
         for row in rows {
@@ -243,7 +301,7 @@ pub async fn reserve_frozen(
     let existing: Option<String> =
         sqlx::query_scalar("SELECT state FROM balance_holds WHERE id=$1")
             .bind(request.id)
-            .fetch_optional(guard.connection())
+            .fetch_optional(guard.connection()?)
             .await?;
     if existing.as_deref().is_none_or(|state| state == "pending") {
         crate::key_budget::check(

@@ -229,14 +229,14 @@ export function LoginForm() {
       title={heading[0]}
       subtitle={heading[1]}
       footer={
-        <Link to="/pricing" className="underline decoration-dotted underline-offset-4 hover:text-foreground">
+        <Link to="/pricing" className="inline-flex min-h-8 items-center rounded-sm underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
           {t('pricing:title')}
         </Link>
       }
     >
       <div className="flex flex-col gap-5 rounded-xl border border-border bg-card p-6 shadow-card">
         <Segmented
-          className="w-full [&>button]:flex-1"
+          className="w-full [&>button]:flex-1 [&>button]:gap-1 [&>button]:px-2 [&>button]:text-xs sm:[&>button]:gap-1.5 sm:[&>button]:px-3 sm:[&>button]:text-sm"
           ariaLabel={t('common:login')}
           value={tab}
           onChange={switchTab}
@@ -428,13 +428,6 @@ export function LoginForm() {
               {t('common:login')}
               <ArrowRight className="h-4 w-4" />
             </Button>
-            <Link
-              to="/forgot-password"
-              search={{ email: form.email.trim() || undefined }}
-              className="self-end text-xs text-muted-foreground underline decoration-dotted underline-offset-4 hover:text-foreground"
-            >
-              {t('auth:forgotPassword')}
-            </Link>
           </form>
         )}
 
@@ -461,17 +454,24 @@ export function LoginForm() {
           </div>
         )}
 
-        <p className="text-center text-xs text-muted-foreground">
-          {tab === 'register' ? (
-            <button type="button" className="underline decoration-dotted underline-offset-4 hover:text-foreground" onClick={() => switchTab('password')}>
-              {t('auth:switchToLogin')}
-            </button>
-          ) : (
-            <button type="button" className="underline decoration-dotted underline-offset-4 hover:text-foreground" onClick={() => switchTab('register')}>
-              {t('auth:switchToRegister')}
-            </button>
+        <div data-slot="auth-help" className="flex items-center justify-between gap-4 text-xs text-muted-foreground">
+          <button
+            type="button"
+            className="min-h-8 min-w-0 rounded-sm text-left leading-5 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            onClick={() => switchTab(tab === 'register' ? 'password' : 'register')}
+          >
+            {t(tab === 'register' ? 'auth:switchToLogin' : 'auth:switchToRegister')}
+          </button>
+          {tab === 'password' && (
+            <Link
+              to="/forgot-password"
+              search={{ email: form.email.trim() || undefined }}
+              className="inline-flex min-h-8 shrink-0 items-center rounded-sm leading-5 underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              {t('auth:forgotPassword')}
+            </Link>
           )}
-        </p>
+        </div>
       </div>
     </AuthLayout>
   )

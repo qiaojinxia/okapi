@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.provider, c.api_base, c.settings, ck.id AS key_id, ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1 AND c.deleted_at IS NULL\n        ORDER BY ck.id\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "provider",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "provider"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "api_base",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "api_base"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "settings",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channels",
+            "name": "settings"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "key_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "4529c28d5f3c432d4bdd964861cd7a6f63157e7220b8ff7887308050fe8d38ba"
+}

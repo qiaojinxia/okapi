@@ -8,6 +8,9 @@
 //!
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -58,7 +61,7 @@ struct Bed {
 }
 
 async fn setup() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -138,6 +141,7 @@ async fn setup() -> Bed {
         .await
         .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

@@ -2,7 +2,7 @@ FROM jsonb_to_recordset($8::jsonb -> 'models') AS p(
     model_name text, pricing_mode text, model_ratio_scaled bigint,
     completion_ratio_scaled bigint, cache_ratio_scaled bigint, cache_write_ratio_scaled bigint,
     audio_ratio_scaled bigint, audio_completion_ratio_scaled bigint, image_ratio_scaled bigint,
-    modality_ratios jsonb, per_call_price_micro bigint
+    modality_ratios jsonb, server_tool_prices jsonb, per_call_price_micro bigint
 )
 JOIN models m ON m.model_name = p.model_name
 WHERE m.status = 1

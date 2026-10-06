@@ -1,5 +1,8 @@
 //! M2 调度批次验收：模型别名解析 / L2 会话粘性 / key 级并发信号量 / 状态机分支。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -94,7 +97,7 @@ struct TestEnv {
 }
 
 async fn setup(channels: &[(&str, i32)]) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
 
@@ -146,6 +149,7 @@ async fn setup(channels: &[(&str, i32)]) -> TestEnv {
         channel_keys.push(key_id);
     }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

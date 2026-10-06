@@ -19,7 +19,7 @@ struct NatsEnv {
 }
 
 async fn setup() -> Option<NatsEnv> {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let Ok(nats_url) = std::env::var("OKAPI_NATS_URL") else {
         eprintln!("跳过：未配置 OKAPI_NATS_URL");
         return None;

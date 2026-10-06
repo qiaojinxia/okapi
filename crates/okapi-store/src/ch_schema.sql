@@ -443,6 +443,7 @@ FROM request_log_raw GROUP BY channel_id, ts5;
 -- Provider totals and settlement totals retain independent provenance after raw retention.
 -- Optional observations: old outbox payloads stay NULL, never synthetic zero.
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_5m_tokens Nullable(UInt32) DEFAULT NULL;
+ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS server_tool_usage String DEFAULT '';
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS cache_write_1h_tokens Nullable(UInt32) DEFAULT NULL;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS audio_prompt_tokens Nullable(UInt32) DEFAULT NULL;
 ALTER TABLE request_log_raw ADD COLUMN IF NOT EXISTS image_prompt_tokens Nullable(UInt32) DEFAULT NULL;

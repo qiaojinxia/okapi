@@ -105,7 +105,7 @@ pub(crate) async fn pending(
     user_id: i64,
 ) -> Result<Vec<Transfer>, LedgerError> {
     Ok(sqlx::query_as!(Transfer,"SELECT id,sequence,amount_micro,pool,applied_at FROM fund_transfers WHERE user_id=$1 AND cleaned_at IS NULL ORDER BY sequence",user_id)
-        .fetch_all(guard.connection()).await?)
+        .fetch_all(guard.connection()?).await?)
 }
 
 /// Includes completed operations: repair must also reject their delayed commands.
@@ -114,7 +114,7 @@ pub(crate) async fn high_water(guard: &mut UserGuard, user_id: i64) -> Result<i6
         r#"SELECT COALESCE(MAX(sequence),0) AS "sequence!" FROM fund_transfers WHERE user_id=$1"#,
         user_id
     )
-    .fetch_one(guard.connection())
+    .fetch_one(guard.connection()?)
     .await?)
 }
 
@@ -146,10 +146,10 @@ pub(crate) async fn synchronize(
                 "missing" => {
                     // Whole-key loss also loses its receipts. Rebuild from PG and
                     // advance the durable sequence atomically with the balances.
-                    let totals = okapi_store::history::totals(guard.connection(), user_id).await?;
+                    let totals = okapi_store::history::totals(guard.connection()?, user_id).await?;
                     let wallet =
                         sqlx::query_scalar!("SELECT balance_micro FROM users WHERE id=$1", user_id)
-                            .fetch_one(guard.connection())
+                            .fetch_one(guard.connection()?)
                             .await?;
                     guard
                         .repair(
@@ -165,7 +165,7 @@ pub(crate) async fn synchronize(
                 "UPDATE fund_transfers SET applied_at=now() WHERE id=$1 AND applied_at IS NULL",
                 row.id
             )
-            .execute(guard.connection())
+            .execute(guard.connection()?)
             .await?;
         }
         // PG first. If cleanup or its ACK fails, retry HDEL without adding money.
@@ -181,7 +181,7 @@ pub(crate) async fn synchronize(
             "UPDATE fund_transfers SET cleaned_at=now() WHERE id=$1",
             row.id
         )
-        .execute(guard.connection())
+        .execute(guard.connection()?)
         .await?;
     }
     Ok(())

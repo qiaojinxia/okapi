@@ -26,6 +26,7 @@ import { Route as AdminOpsRouteImport } from './routes/admin.ops'
 import { Route as AdminPlansRouteImport } from './routes/admin.plans'
 import { Route as AdminPoolsRouteImport } from './routes/admin.pools'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
+import { Route as AdminProxiesRouteImport } from './routes/admin.proxies'
 import { Route as AdminQualityRouteImport } from './routes/admin.quality'
 import { Route as AdminRevenueRouteImport } from './routes/admin.revenue'
 import { Route as AdminRolesRouteImport } from './routes/admin.roles'
@@ -128,6 +129,11 @@ const AdminPoolsRoute = AdminPoolsRouteImport.update({
 const AdminPricingRoute = AdminPricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminProxiesRoute = AdminProxiesRouteImport.update({
+  id: '/proxies',
+  path: '/proxies',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminQualityRoute = AdminQualityRouteImport.update({
@@ -238,6 +244,7 @@ export interface FileRoutesByFullPath {
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/proxies': typeof AdminProxiesRoute
   '/admin/quality': typeof AdminQualityRoute
   '/admin/revenue': typeof AdminRevenueRoute
   '/admin/roles': typeof AdminRolesRoute
@@ -273,6 +280,7 @@ export interface FileRoutesByTo {
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/proxies': typeof AdminProxiesRoute
   '/admin/quality': typeof AdminQualityRoute
   '/admin/revenue': typeof AdminRevenueRoute
   '/admin/roles': typeof AdminRolesRoute
@@ -311,6 +319,7 @@ export interface FileRoutesById {
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
   '/admin/pricing': typeof AdminPricingRoute
+  '/admin/proxies': typeof AdminProxiesRoute
   '/admin/quality': typeof AdminQualityRoute
   '/admin/revenue': typeof AdminRevenueRoute
   '/admin/roles': typeof AdminRolesRoute
@@ -350,6 +359,7 @@ export interface FileRouteTypes {
     | '/admin/plans'
     | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/proxies'
     | '/admin/quality'
     | '/admin/revenue'
     | '/admin/roles'
@@ -385,6 +395,7 @@ export interface FileRouteTypes {
     | '/admin/plans'
     | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/proxies'
     | '/admin/quality'
     | '/admin/revenue'
     | '/admin/roles'
@@ -422,6 +433,7 @@ export interface FileRouteTypes {
     | '/admin/plans'
     | '/admin/pools'
     | '/admin/pricing'
+    | '/admin/proxies'
     | '/admin/quality'
     | '/admin/revenue'
     | '/admin/roles'
@@ -573,6 +585,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminPricingRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/proxies': {
+      id: '/admin/proxies'
+      path: '/proxies'
+      fullPath: '/admin/proxies'
+      preLoaderRoute: typeof AdminProxiesRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/quality': {
       id: '/admin/quality'
       path: '/quality'
@@ -713,6 +732,7 @@ interface AdminRouteChildren {
   AdminPlansRoute: typeof AdminPlansRoute
   AdminPoolsRoute: typeof AdminPoolsRoute
   AdminPricingRoute: typeof AdminPricingRoute
+  AdminProxiesRoute: typeof AdminProxiesRoute
   AdminQualityRoute: typeof AdminQualityRoute
   AdminRevenueRoute: typeof AdminRevenueRoute
   AdminRolesRoute: typeof AdminRolesRoute
@@ -734,6 +754,7 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminPlansRoute: AdminPlansRoute,
   AdminPoolsRoute: AdminPoolsRoute,
   AdminPricingRoute: AdminPricingRoute,
+  AdminProxiesRoute: AdminProxiesRoute,
   AdminQualityRoute: AdminQualityRoute,
   AdminRevenueRoute: AdminRevenueRoute,
   AdminRolesRoute: AdminRolesRoute,

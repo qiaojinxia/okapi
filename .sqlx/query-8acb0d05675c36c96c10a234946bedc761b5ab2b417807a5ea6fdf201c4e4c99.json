@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO proxy_groups (code, name, mode, owner_id, description)\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (code) DO UPDATE SET\n            name = EXCLUDED.name, mode = EXCLUDED.mode,\n            description = EXCLUDED.description, updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8acb0d05675c36c96c10a234946bedc761b5ab2b417807a5ea6fdf201c4e4c99"
+}

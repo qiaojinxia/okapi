@@ -8,6 +8,26 @@ const MAX_STREAM: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_BODY: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_ERROR: usize = 1024 * 1024;
 
+/// Shared bounded collector for control-plane and inference response streams.
+pub async fn collect(
+    mut stream: impl Stream<Item = Result<Bytes, UpstreamError>> + Unpin,
+    maximum: usize,
+) -> Result<Bytes, UpstreamError> {
+    tokio::time::timeout(std::time::Duration::from_mins(2), async {
+        let mut bytes = bytes::BytesMut::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            if chunk.len() > maximum.saturating_sub(bytes.len()) {
+                return Err(UpstreamError::Build("upstream_response_too_large".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes.freeze())
+    })
+    .await
+    .map_err(|_| UpstreamError::Timeout)?
+}
+
 pub(crate) fn sse(
     response: reqwest::Response,
 ) -> impl Stream<Item = Result<Bytes, UpstreamError>> + Send {

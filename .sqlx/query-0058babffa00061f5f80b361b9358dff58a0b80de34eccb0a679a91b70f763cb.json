@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channel_keys k SET egress_proxy_id = NULL\n        FROM channels c\n        JOIN channel_egress e ON e.channel_id = c.id\n        LEFT JOIN proxy_groups g ON e.mode = 'group' AND g.code = e.group_code\n        WHERE k.channel_id = c.id AND k.egress_proxy_id IS NOT NULL\n          AND (c.deleted_at IS NOT NULL\n               OR g.mode IS DISTINCT FROM 'pinned'\n               OR NOT EXISTS (SELECT 1 FROM proxy_group_members m\n                               WHERE m.group_code = g.code AND m.proxy_id = k.egress_proxy_id))\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "0058babffa00061f5f80b361b9358dff58a0b80de34eccb0a679a91b70f763cb"
+}

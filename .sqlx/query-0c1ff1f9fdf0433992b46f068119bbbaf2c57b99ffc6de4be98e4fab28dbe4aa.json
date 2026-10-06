@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE proxies SET\n            name           = COALESCE($2, name),\n            url_ciphertext = COALESCE($3, url_ciphertext),\n            scheme         = COALESCE($4, scheme),\n            host           = COALESCE($5, host),\n            port           = COALESCE($6, port),\n            username       = CASE WHEN $3::bytea IS NULL THEN username ELSE $7 END,\n            max_keys       = CASE WHEN $8 THEN $9 ELSE max_keys END,\n            note           = CASE WHEN $10 THEN $11 ELSE note END,\n            status         = COALESCE($12, status),\n            max_concurrency = CASE WHEN $13 THEN $14 ELSE max_concurrency END,\n            failed_count   = CASE WHEN $3::bytea IS NOT NULL OR ($12 = 1 AND status <> 1)\n                                  THEN 0 ELSE failed_count END,\n            cooldown_until = CASE WHEN $3::bytea IS NOT NULL OR ($12 = 1 AND status <> 1)\n                                  THEN NULL ELSE cooldown_until END,\n            last_error     = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE last_error END,\n            exit_ip        = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE exit_ip END,\n            exit_country   = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE exit_country END,\n            latency_ms     = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE latency_ms END,\n            checked_at     = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE checked_at END,\n            previous_exit_ip   = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE previous_exit_ip END,\n            exit_ip_changed_at = CASE WHEN $3::bytea IS NOT NULL THEN NULL ELSE exit_ip_changed_at END,\n            updated_at     = now()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Bytea",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Bool",
+        "Int4",
+        "Bool",
+        "Varchar",
+        "Int2",
+        "Bool",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0c1ff1f9fdf0433992b46f068119bbbaf2c57b99ffc6de4be98e4fab28dbe4aa"
+}

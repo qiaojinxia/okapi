@@ -19,7 +19,7 @@ export function LogBillingDetails({ row, status }: {
         {status === 30 && <p className="text-xs text-muted-foreground">{t('logs:refundedHint')}</p>}
         {lines.length > 0 && <>
           <div className="overflow-x-auto rounded-lg border border-border/70">
-            <table className="w-full text-xs tabular-nums" aria-label={t('logs:billingLines')}>
+            <table className="w-full text-[13px] leading-5 tabular-nums" aria-label={t('logs:billingLines')}>
               <thead className="bg-muted/60 text-xs text-muted-foreground"><tr>{['segment', 'quantity', characters ? 'characterPriceUnit' : 'snapshotUnit', 'referenceAmount'].map((key, i) => <th key={key} className={`px-3 py-2 font-medium ${i ? 'text-right' : 'text-left'}`}>{t(`logs:${key}`)}</th>)}</tr></thead>
               <tbody className="divide-y divide-border/60">{lines.map((line) => <tr key={line.name}>
                 <td className="whitespace-nowrap px-3 py-2.5">{t(`logs:${line.name}`)}</td>
@@ -32,8 +32,8 @@ export function LogBillingDetails({ row, status }: {
           <p className="text-xs leading-5 text-muted-foreground">{t('logs:referenceHint')}</p>
         </>}
         {s ? <>
-          {s.mode === 'per_call' && <p className="text-sm">{t('logs:perCallHint', { price: s.per_call_price_usd ?? '—', n: audioDuration ? 1 : s.media_units ?? 1 })}</p>}
-          {s.media_units != null && <p className="text-sm">{t(audioDuration ? 'logs:audioDuration' : row.endpoint === '/v1/videos' ? 'logs:billedVideoSeconds' : 'logs:mediaQuantity')} · {s.media_units.toLocaleString(locale)}{audioDuration || row.endpoint === '/v1/videos' ? ' s' : ''}</p>}
+          {s.mode === 'per_call' && <p>{t('logs:perCallHint', { price: s.per_call_price_usd ?? '—', n: audioDuration ? 1 : s.media_units ?? 1 })}</p>}
+          {s.media_units != null && <p>{t(audioDuration ? 'logs:audioDuration' : row.endpoint === '/v1/videos' ? 'logs:billedVideoSeconds' : 'logs:mediaQuantity')} · {s.media_units.toLocaleString(locale)}{audioDuration || row.endpoint === '/v1/videos' ? ' s' : ''}</p>}
           <div className="flex flex-wrap gap-1.5 rounded-lg border border-border/70 bg-muted/25 p-3">
             <Badge variant="muted">{t('logs:mode')} {t(`logs:mode_${s.mode}`, { defaultValue: s.mode })}</Badge>
             {s.epoch != null && <Badge variant="muted">{t('logs:pricingVersion')} {s.epoch}</Badge>}

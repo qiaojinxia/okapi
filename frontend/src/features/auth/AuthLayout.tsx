@@ -27,7 +27,7 @@ export function AuthLayout({
   const points = [t('auth:heroPoint1'), t('auth:heroPoint2'), t('auth:heroPoint3')]
 
   return (
-    <div className="grid min-h-screen bg-background lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
+    <div className="grid min-h-screen grid-cols-1 bg-background lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]">
       <aside className="relative hidden overflow-hidden border-r border-border bg-sidebar lg:flex lg:flex-col lg:justify-between lg:p-12">
         <div className="pointer-events-none absolute inset-0 bg-grid opacity-60 [mask-image:radial-gradient(ellipse_at_top_left,black,transparent_75%)]" />
         <div className="pointer-events-none absolute -top-32 -left-32 h-96 w-96 rounded-full bg-primary/20 blur-3xl" />
@@ -57,7 +57,7 @@ export function AuthLayout({
         </p>
       </aside>
 
-      <div className="flex flex-col">
+      <div className="flex min-w-0 flex-col">
         <header className="flex h-14 items-center justify-between px-5 lg:justify-end">
           <span className="lg:hidden">
             <BrandLockup />

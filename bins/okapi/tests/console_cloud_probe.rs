@@ -269,7 +269,7 @@ struct Env {
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -383,6 +383,7 @@ fn oauth_credential(expires_at: i64, account_id: Option<&str>) -> String {
         refresh_token: "refresh-0".to_owned(),
         expires_at,
         account_id: account_id.map(str::to_owned),
+        account_label: None,
     }
     .to_plaintext()
 }
@@ -573,6 +574,23 @@ async fn subscription_probe_refreshes_only_when_expired() {
     let max_model = probe(&env, stale_id, Some("claude-sonnet-4-5")).await;
     assert_eq!(max_model["ok"], true, "{max_model}");
     assert_eq!(max_model["scope"], "model");
+
+    // 配了请求风格（模拟 / 自动）的订阅渠道：测活与数据面同路整形，此前缺身份种子在本地就失败
+    for mode in ["auto", "mimic"] {
+        let mut settings = token_url.clone();
+        settings["extensions"] = json!({"client_profile": {"name": "claude-code", "mode": mode}});
+        let (profiled, _) = mk_channel(
+            &env,
+            "anthropic_max",
+            &format!("http://{}/v1", env.mock),
+            &oauth_credential(now + 3600, None),
+            settings,
+        )
+        .await;
+        let result = probe(&env, profiled, Some("claude-sonnet-4-5")).await;
+        assert_eq!(result["ok"], true, "{mode}: {result}");
+        assert_eq!(result["scope"], "model");
+    }
 
     // codex：account_id 随凭证下发，非流式探测由 SSE 聚合成 JSON
     let (codex_id, _) = mk_channel(

@@ -15,6 +15,7 @@ fn draft<'a>(name: &'a str, metadata: Option<&'a ModelMetadata>) -> ModelDraft<'
         tier_expr: None,
         per_call_price_micro: None,
         tier_ratios: None,
+        server_tool_prices: None,
         fallbacks: None,
         metadata,
     }
@@ -28,8 +29,10 @@ async fn metadata_prices_and_clear_operations_roundtrip(pool: PgPool) {
     assert!(meta.validate().is_ok());
     let tiers = json!({"flex":"0.5","priority":"2"});
     let modal = json!({"cache_write_5m":"1.25","cache_write_1h":"2","audio_cache_read":"0.3"});
+    let tools = json!({"usage_contract":"anthropic_server_tool_use_v1","web_search":{"billing":"additional","price_per_request_micro":10000},"web_fetch":{"billing":"included"}});
     let mut d = draft("test-vision", Some(&meta));
     d.tier_ratios = Some(&tiers);
+    d.server_tool_prices = Some(&tools);
     d.axes.modality_ratios = Some(&modal);
     model_config::save(&pool, d).await.unwrap();
     let page = listing::list_models(&pool, None, false, Slice::ALL)
@@ -46,6 +49,7 @@ async fn metadata_prices_and_clear_operations_roundtrip(pool: PgPool) {
     );
     assert_eq!(row.cache_ratio.as_deref(), Some("0.123456"));
     assert_eq!(row.modality_ratios, Some(modal.clone()));
+    assert_eq!(row.server_tool_prices, Some(tools.clone()));
     assert_eq!(row.tier_ratios, Some(tiers));
 
     // Missing fields preserve metadata, mode, tiers and independent prices.
@@ -65,12 +69,14 @@ async fn metadata_prices_and_clear_operations_roundtrip(pool: PgPool) {
     assert_eq!(row.pricing_mode.as_deref(), Some("per_call"));
     assert_eq!(row.per_call_price_micro, Some(12345));
     assert_eq!(row.modality_ratios, Some(modal));
+    assert_eq!(row.server_tool_prices, Some(tools));
     assert_eq!(row.catalog_config["kind"], "chat");
 
     let empty = json!({});
     let clear_meta = ModelMetadata::default();
     let mut clear = draft("test-vision", Some(&clear_meta));
     clear.tier_ratios = Some(&empty);
+    clear.server_tool_prices = Some(&empty);
     clear.axes.modality_ratios = Some(&empty);
     model_config::save(&pool, clear).await.unwrap();
     let row = listing::list_models(&pool, None, false, Slice::ALL)
@@ -80,6 +86,7 @@ async fn metadata_prices_and_clear_operations_roundtrip(pool: PgPool) {
         .data
         .remove(0);
     assert!(row.tier_ratios.is_none());
+    assert!(row.server_tool_prices.is_none());
     assert_eq!(row.modality_ratios, Some(empty));
     assert!(row.max_output.is_none());
     assert_eq!(row.capabilities, json!({}));

@@ -302,13 +302,37 @@ pub fn publication_base_price(
     parse_base_price(publication.base_price_per_1m_micro.clone())
 }
 
+/// Draft preview, publication and gateway reload use the same validated fee profiles.
+pub fn compile_rows(
+    rows: &PricingSourceRows,
+    base: i64,
+) -> Result<PriceBook, okapi_pricing::CompileError> {
+    let book = book::compile_with_base(build_source(rows), base)?;
+    let entries = rows
+        .models
+        .iter()
+        .filter_map(|row| {
+            row.server_tool_prices.as_ref().map(|value| {
+                okapi_pricing::ServerToolPrices::parse(value)
+                    .map(|prices| prices.map(|p| (ModelCode::from(row.model_name.as_str()), p)))
+                    .map_err(
+                        |reason| okapi_pricing::CompileError::InvalidServerToolPrices {
+                            model: row.model_name.clone(),
+                            reason,
+                        },
+                    )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    book.with_server_tool_prices(entries.into_iter().flatten())
+}
+
 /// Only a published snapshot can activate prices, even after restart/cache clear.
 pub async fn load_pricebook(pool: &PgPool) -> anyhow::Result<PriceBook> {
     let mut conn = pool.acquire().await?;
     let publication = okapi_store::pricing::published_pricing(&mut conn).await?;
-    let source = build_source(&publication.source);
     let base = publication_base_price(&publication)?;
-    let compiled = book::compile_with_base(source, base)
+    let compiled = compile_rows(&publication.source, base)
         .map_err(|e| anyhow::anyhow!("pricebook compile: {e}"))?;
     Ok(compiled)
 }

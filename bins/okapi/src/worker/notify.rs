@@ -41,12 +41,18 @@ impl Notifier {
 
     /// 事件分发：读通道配置 → 订阅过滤 → 频率闸 → webhook POST。
     pub async fn dispatch(&self, event: &str, payload: &Value) {
-        let channels =
-            sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = 'notify_channels'"#)
-                .fetch_optional(&self.pg)
-                .await
-                .ok()
-                .flatten();
+        let channels = match sqlx::query_scalar!(
+            r#"SELECT value FROM settings WHERE key = 'notify_channels'"#
+        )
+        .fetch_optional(&self.pg)
+        .await
+        {
+            Ok(channels) => channels,
+            Err(error) => {
+                tracing::error!(event, %error, "notification configuration could not be read");
+                return;
+            }
+        };
         let Some(Value::Array(channels)) = channels else {
             return;
         };
@@ -150,13 +156,18 @@ impl Notifier {
         };
         let lang =
             crate::mail::templates::Lang::resolve(ch.get("lang").and_then(Value::as_str), None);
-        let site = sqlx::query_scalar!(
+        let site = match sqlx::query_scalar!(
             r#"SELECT value #>> '{}' AS "v!" FROM settings WHERE key = 'site_name'"#
         )
         .fetch_optional(&self.pg)
         .await
-        .ok()
-        .flatten()
+        {
+            Ok(site) => site,
+            Err(error) => {
+                tracing::error!(event, %error, "notification site name could not be read");
+                return false;
+            }
+        }
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "Okapi".to_owned());
         let mut success = true;

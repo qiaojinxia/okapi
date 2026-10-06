@@ -112,6 +112,7 @@ async fn open(
             .await
         {
             Ok(response) => {
+                super::super::key_health::success(&ctx.state, &candidate).await;
                 return Ok((
                     response,
                     candidate,
@@ -125,9 +126,9 @@ async fn open(
                     ..
                 },
             ) => {
-                let _ = okapi_store::channels::mark_key_failure(
-                    &ctx.state.pg,
-                    candidate.channel_key_id,
+                super::super::key_health::failure(
+                    &ctx.state,
+                    &candidate,
                     error.error_code(),
                     super::super::chat::failure_kind_of(&error),
                 )
@@ -198,6 +199,7 @@ async fn settle(
             incomplete: result.failed,
             ttft_ms: result.ttft_ms,
         }),
+        None,
     )
     .await
 }

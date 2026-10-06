@@ -2,6 +2,9 @@
 //! 数据面在鉴权前 503 `overloaded`——不预扣、不碰上游；积压回落即恢复，账一笔不丢。
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -35,7 +38,7 @@ struct TestEnv {
 }
 
 async fn setup() -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -80,6 +83,7 @@ async fn setup() -> TestEnv {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let mut state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

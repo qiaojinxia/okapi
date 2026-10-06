@@ -1,6 +1,10 @@
 //! Calendar sources must have enough retained precision for the local boundary.
 //! Select one complete source per hour; never add overlapping minute/hour facts.
 
+mod lexical;
+mod scope;
+use std::fmt::Write as _;
+
 /// Hours with complete minute coverage at exactly the requested dimensions.
 fn complete_hours(dimensions: &str, coarse: &str) -> String {
     format!(
@@ -275,6 +279,10 @@ fn retained_select(name: &str, select: &str, zone: &str) -> String {
 }
 
 pub(super) fn calendar_sql(sql: &str, zone: &str) -> String {
+    lexical::rewrite(sql, |sql| calendar_code(sql, zone))
+}
+
+fn calendar_code(sql: &str, zone: &str) -> String {
     let mut sql = sql.to_owned();
     if zone != "UTC" && zone != "Etc/UTC" {
         let schema = include_str!("../ch_schema.sql").replace('\r', "");
@@ -293,15 +301,16 @@ pub(super) fn calendar_sql(sql: &str, zone: &str) -> String {
                 continue;
             };
             let select = daily_select(name, select, zone);
-            for keyword in ["FROM", "JOIN"] {
-                sql = replace_identifier(
-                    &sql,
-                    &format!("{keyword} {name}"),
-                    &format!("{keyword} ({select}) AS {name}"),
-                );
-            }
+            sql = expand_daily_references(&sql, name, &select, zone);
         }
     }
+    // Expansion introduces trusted SQL literals too. Protect them before the
+    // function rewrite; original literals/comments stay protected by the outer pass.
+    lexical::rewrite(&sql, |sql| calendar_functions(sql, zone))
+}
+
+fn calendar_functions(sql: &str, zone: &str) -> String {
+    let mut sql = sql.to_owned();
     for column in ["ts", "hour", "ts5"] {
         let bucket = match column {
             "hour" => exact_bucket(column, 3599, zone),
@@ -323,6 +332,10 @@ pub(super) fn calendar_sql(sql: &str, zone: &str) -> String {
         "toString(toStartOfHour(hour))",
         &format!("toString(toTimeZone(toStartOfHour(hour), '{zone}'))"),
     );
+    sql = sql.replace(
+        "toString(toStartOfFiveMinutes(ts))",
+        &format!("toString(toTimeZone(toStartOfFiveMinutes(ts), '{zone}'))"),
+    );
     sql = sql.replace("timezone()", &format!("'{zone}'"));
     sql = sql.replace("today()", &format!("toDate(now(), '{zone}')"));
     sql.replace(
@@ -331,28 +344,67 @@ pub(super) fn calendar_sql(sql: &str, zone: &str) -> String {
     )
 }
 
-fn replace_identifier(sql: &str, name: &str, replacement: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut cursor = 0;
-    for (start, _) in sql.match_indices(name) {
-        let end = start + name.len();
-        let identifier = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-        if start > 0 && identifier(sql.as_bytes()[start - 1])
-            || end < sql.len() && identifier(sql.as_bytes()[end])
-        {
-            continue;
+fn expand_daily_references(sql: &str, name: &str, select: &str, zone: &str) -> String {
+    let mut sql = sql.to_owned();
+    for keyword in ["FROM", "JOIN"] {
+        let marker = format!("{keyword} {name}");
+        let mut replaced = String::with_capacity(sql.len());
+        let mut cursor = 0;
+        for (start, _) in sql.match_indices(&marker) {
+            let end = start + marker.len();
+            if sql
+                .as_bytes()
+                .get(end)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+            {
+                continue;
+            }
+            let scoped = super::population::reference_scope(name, &sql[end..]).map_or_else(
+                || select.to_owned(),
+                |predicate| scope::apply(select, predicate, zone),
+            );
+            replaced.push_str(&sql[cursor..start]);
+            let _ = write!(replaced, "{keyword} ({scoped})");
+            if !has_alias(&sql[end..]) {
+                let _ = write!(replaced, " AS {name}");
+            }
+            cursor = end;
         }
-        out.push_str(&sql[cursor..start]);
-        out.push_str(replacement);
-        cursor = end;
+        replaced.push_str(&sql[cursor..]);
+        sql = replaced;
     }
-    out.push_str(&sql[cursor..]);
-    out
+    sql
+}
+
+fn has_alias(suffix: &str) -> bool {
+    let word = suffix.split_whitespace().next().unwrap_or_default();
+    word == "AS"
+        || word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && ![
+                "WHERE", "GROUP", "ORDER", "LIMIT", "UNION", "FORMAT", "HAVING", "JOIN", "LEFT",
+                "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "ON", "USING",
+            ]
+            .contains(&word)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_recovery_and_aggregate_buckets_use_the_same_display_timezone() {
+        for zone in ["America/Los_Angeles", "Asia/Kolkata"] {
+            let sql = calendar_sql(
+                "SELECT toString(ts5),toString(toStartOfFiveMinutes(ts)) FROM facts",
+                zone,
+            );
+            assert!(sql.contains(&format!("toString(toTimeZone(ts5, '{zone}'))")));
+            assert!(sql.contains(&format!(
+                "toString(toTimeZone(toStartOfFiveMinutes(ts), '{zone}'))"
+            )));
+        }
+    }
+
     #[test]
     fn hourly_and_five_minute_dates_require_an_exact_local_bucket() {
         let sql = calendar_sql(
@@ -368,12 +420,24 @@ mod tests {
     #[test]
     fn identifiers_do_not_match_longer_table_names() {
         assert_eq!(
-            replace_identifier(
-                "mv_user_day_extra mv_user_day",
+            expand_daily_references(
+                "FROM mv_user_day_extra UNION ALL SELECT * FROM mv_user_day",
                 "mv_user_day",
-                "replacement"
+                "replacement",
+                "UTC"
             ),
-            "mv_user_day_extra replacement"
+            "FROM mv_user_day_extra UNION ALL SELECT * FROM (replacement) AS mv_user_day"
         );
+    }
+
+    #[test]
+    fn preserves_explicit_aliases_on_unproven_references() {
+        for alias in ["older", "AS older"] {
+            let sql = format!("FROM mv_user_day {alias} WHERE older.user_id=7");
+            assert_eq!(
+                expand_daily_references(&sql, "mv_user_day", "replacement", "UTC"),
+                format!("FROM (replacement) {alias} WHERE older.user_id=7")
+            );
+        }
     }
 }

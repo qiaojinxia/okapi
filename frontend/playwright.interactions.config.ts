@@ -3,7 +3,7 @@ import { defineConfig } from '@playwright/test'
 // 独立交互回归：使用构建产物与接口桩，无需数据库，也不修改演示账号或站点配置。
 export default defineConfig({
   testDir: './e2e',
-  testMatch: ['profile-signins.spec.ts', 'profile.spec.ts', 'auth-routing.spec.ts', 'model-config.spec.ts', 'interactions.spec.ts', 'charts.spec.ts', 'catalog.spec.ts', 'request-examples.spec.ts', 'redemptions.spec.ts', 'subscriptions.spec.ts', 'guide.spec.ts', 'write-forms.spec.ts', 'playground.spec.ts', 'missing-surfaces.spec.ts', 'list-writes.spec.ts', 'autocomplete.spec.ts', 'dashboard.spec.ts', 'logs.spec.ts', 'tables.spec.ts', 'toolbars.spec.ts', 'user-search.spec.ts', 'user-groups.spec.ts', 'entity-search.spec.ts', 'usage-semantics.spec.ts', 'key-usage.spec.ts', 'key-copy.spec.ts', 'key-limits.spec.ts', 'security-layout.spec.ts', 'pricing-base.spec.ts', 'mcp-settings.spec.ts'],
+  testMatch: ['audit-regressions.spec.ts', 'profile-signins.spec.ts', 'profile.spec.ts', 'auth-routing.spec.ts', 'model-config.spec.ts', 'interactions.spec.ts', 'charts.spec.ts', 'catalog.spec.ts', 'request-examples.spec.ts', 'redemptions.spec.ts', 'subscriptions.spec.ts', 'guide.spec.ts', 'write-forms.spec.ts', 'playground.spec.ts', 'missing-surfaces.spec.ts', 'oauth-maintenance.spec.ts', 'channel-controls.spec.ts', 'list-writes.spec.ts', 'autocomplete.spec.ts', 'dashboard.spec.ts', 'logs.spec.ts', 'tables.spec.ts', 'toolbars.spec.ts', 'user-search.spec.ts', 'user-groups.spec.ts', 'entity-search.spec.ts', 'usage-semantics.spec.ts', 'key-usage.spec.ts', 'key-copy.spec.ts', 'key-limits.spec.ts', 'security-layout.spec.ts', 'pricing-base.spec.ts', 'mcp-settings.spec.ts', 'egress.spec.ts'],
   timeout: 20_000,
   use: {
     baseURL: 'http://127.0.0.1:4175',

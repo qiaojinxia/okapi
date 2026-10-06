@@ -19,7 +19,7 @@ async fn maintain(
 ) -> Result<Changed, LedgerError> {
     let mut guard = UserGuard::acquire(pg, uid).await?;
     guard.synchronize(ledger).await?;
-    let Some(current) = store::by_id(guard.connection(), id).await? else {
+    let Some(current) = store::by_id(guard.connection()?, id).await? else {
         return Ok(Changed::None);
     };
     if current.status != 1 {

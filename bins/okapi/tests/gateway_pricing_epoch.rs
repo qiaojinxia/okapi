@@ -168,7 +168,7 @@ fn book(case: Case, model: &str, epoch: i64, factor: i64) -> okapi_pricing::Pric
 }
 
 async fn setup(case: Case) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("isolated PG required");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("isolated Redis required");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();

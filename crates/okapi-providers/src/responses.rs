@@ -52,6 +52,7 @@ pub async fn count_input_tokens_at(
         .await
         .map_err(|e| crate::openai::classify(&e))?;
     let status = response.status().as_u16();
+    let retry_after_secs = crate::retry_after::seconds(response.headers());
     let source_estimated = response
         .headers()
         .get("x-okapi-token-count-source")
@@ -73,7 +74,7 @@ pub async fn count_input_tokens_at(
         return Err(UpstreamError::Status {
             status,
             body: bytes.into(),
-            retry_after_secs: None,
+            retry_after_secs,
         });
     }
     let value: Value = serde_json::from_slice(&bytes)
@@ -104,15 +105,31 @@ pub fn usage_from_responses(usage: Option<&Value>) -> Option<UsageProbe> {
     if raw.is_null() {
         return None;
     }
+    let Some(mut mapped) = raw.as_object().cloned() else {
+        return Some(UsageProbe::invalid());
+    };
+    for (source, destination) in [
+        ("input_tokens", "prompt_tokens"),
+        ("output_tokens", "completion_tokens"),
+        ("input_tokens_details", "prompt_tokens_details"),
+        ("output_tokens_details", "completion_tokens_details"),
+    ] {
+        if let Some(value) = raw.get(source).filter(|v| !v.is_null()) {
+            if !source.ends_with("_details")
+                && mapped
+                    .get(destination)
+                    .is_some_and(|old| !old.is_null() && old != value)
+            {
+                return Some(UsageProbe::invalid());
+            }
+            if mapped.get(destination).is_none_or(Value::is_null) {
+                mapped.insert(destination.to_owned(), value.clone());
+            }
+        }
+    }
     Some(
-        serde_json::from_value::<UsageProbe>(serde_json::json!({
-            "prompt_tokens": raw.get("input_tokens"),
-            "completion_tokens": raw.get("output_tokens"),
-            "total_tokens": raw.get("total_tokens"),
-            "prompt_tokens_details": raw.get("input_tokens_details"),
-            "completion_tokens_details": raw.get("output_tokens_details"),
-        }))
-        .unwrap_or_else(|_| UsageProbe::invalid()),
+        serde_json::from_value::<UsageProbe>(Value::Object(mapped))
+            .unwrap_or_else(|_| UsageProbe::invalid()),
     )
 }
 
@@ -272,7 +289,7 @@ pub async fn send_responses_at(
     let mut req = http
         .post(outbound, url)?
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec());
+        .body(body.clone());
     for (name, value) in headers {
         req = req.header(*name, *value);
     }
@@ -290,7 +307,9 @@ pub async fn send_responses_at(
 
     if !(200..300).contains(&status) {
         let retry_after_secs = crate::retry_after::seconds(resp.headers());
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+            .await
+            .unwrap_or_default();
         return Err(UpstreamError::Status {
             status,
             body,

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn local_midnight_and_retained_calendar_dimensions_agree() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = format!("okapi_timezone_{}", Uuid::new_v4().simple());
     let ch = ChClient::new(&std::env::var("OKAPI_CLICKHOUSE_URL").unwrap(), &database).unwrap();
     ch.ensure_schema().await.unwrap();
@@ -131,7 +131,7 @@ async fn check(ch: &ChClient) {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn partial_minute_coverage_chooses_one_hour_source() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = format!("okapi_timezone_{}", Uuid::new_v4().simple());
     let ch = ChClient::new(&std::env::var("OKAPI_CLICKHOUSE_URL").unwrap(), &database).unwrap();
     ch.ensure_schema().await.unwrap();
@@ -161,7 +161,7 @@ async fn partial_minute_coverage_chooses_one_hour_source() {
 
 #[tokio::test]
 async fn retained_day_only_history_is_not_reported_as_zero() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = format!("okapi_timezone_{}", Uuid::new_v4().simple());
     let ch = ChClient::new(&std::env::var("OKAPI_CLICKHOUSE_URL").unwrap(), &database).unwrap();
     ch.ensure_schema().await.unwrap();

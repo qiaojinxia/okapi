@@ -42,6 +42,9 @@ pub enum LedgerError {
     HoldCapacity,
     #[error("ledger_hold_recovery_required")]
     HoldRecoveryRequired,
+    /// 同一用户的账本操作排队超时（进程内排队，未占连接、未改账）；稍后重试即可。
+    #[error("ledger_user_busy")]
+    UserBusy,
 
     #[error("ledger_store_error: {0}")]
     Store(#[from] okapi_store::StoreError),

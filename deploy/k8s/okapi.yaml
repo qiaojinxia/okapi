@@ -13,7 +13,7 @@
 #   console   2            ×  8 =  16
 #   worker    1            × 16 =  16
 #                              合计 152，另需给迁移/运维/监控留出余量
-# 故 PostgreSQL 的 max_connections 至少要 200。上不去就走 PgBouncer（transaction 模式），
+# 故 PostgreSQL 的 max_connections 至少要 200。PgBouncer 仅支持 session 模式，
 # 或按实际副本上限把这几个值调小——改 HPA maxReplicas 时记得回来一起改。
 apiVersion: apps/v1
 kind: Deployment

@@ -33,12 +33,28 @@ pub async fn authenticate(
     let authed = if let Some(hit) = state.sched.auth_get(&key_hash).await {
         Arc::new(hit)
     } else {
-        let found = okapi_store::auth::find_key_by_hash(&state.pg, &key_hash).await?;
-        let Some(found) = found else {
-            return Err(reject_invalid_key(state, headers).await);
-        };
-        state.sched.auth_set(&key_hash, &found).await;
-        Arc::new(found)
+        let mut resolved = None;
+        for _ in 0..3 {
+            let version = state.sched.auth_version().await;
+            let found = okapi_store::auth::find_key_by_hash(&state.pg, &key_hash).await?;
+            let Some(found) = found else {
+                return Err(reject_invalid_key(state, headers).await);
+            };
+            if let Some(version) = version {
+                if state.sched.auth_version().await != Some(version) {
+                    continue;
+                }
+                state.sched.auth_set(&key_hash, &found, version).await;
+            }
+            resolved = Some(Arc::new(found));
+            break;
+        }
+        resolved.ok_or_else(|| {
+            AppError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                codes::OVERLOADED,
+            )
+        })?
     };
 
     if !authed.is_usable(chrono::Utc::now()) {

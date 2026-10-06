@@ -38,6 +38,24 @@ function sseBody(reply?: string): string {
   )
 }
 
+/// 工具调用的 SSE：首块带 id + 函数名，参数 JSON 切成几片分块到达（与真实上游一致），收尾 finish_reason=tool_calls + usage。
+function toolSse(calls: Array<{ id: string; name: string; args: string }>): string {
+  const chunk = (delta: object, finish: string | null = null) =>
+    `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: 'gpt-4o-mock', choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`
+  const pieces = calls.map((call) => call.args.match(/[\s\S]{1,9}/g) ?? [])
+  let body = chunk({ role: 'assistant', content: null, tool_calls: calls.map((call, index) => ({ index, id: call.id, type: 'function', function: { name: call.name, arguments: '' } })) })
+  for (let round = 0; pieces.some((p) => round < p.length); round++) {
+    body += chunk({ tool_calls: pieces.flatMap((p, index) => (round < p.length ? [{ index, function: { arguments: p[round] } }] : [])) })
+  }
+  return body + chunk({}, 'tool_calls')
+    + `data: ${JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: 'gpt-4o-mock', choices: [], usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } })}\n\n`
+    + 'data: [DONE]\n\n'
+}
+
+const WEATHER = { id: 'call_w1', name: 'get_weather', args: '{"city":"Paris","unit":"celsius"}' }
+const CLOCK = { id: 'call_t1', name: 'get_time', args: '{"tz":"Europe/Paris"}' }
+const TOOLS_JSON = '[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{}}}}]'
+
 interface Options {
   /// 中继端点是否挂起不回（测停止按钮）。
   hang?: boolean
@@ -47,6 +65,8 @@ interface Options {
   keys?: unknown[]
   keysDelayMs?: number
   profiles?: Record<string, ParameterProfile>
+  /// 按请求序号（从 1 起）自定义这次的 SSE 主体；返回 undefined 走默认回复。
+  respond?: (n: number) => string | undefined
 }
 
 /// 试用台"使用的密钥"候选：账号分组是 vip（只放行 gpt-5），ci-bot 钉在 default 分组并只许 claude-sonnet-4。
@@ -60,7 +80,7 @@ const KEYS = [
 
 /// 返回中继收到的请求体列表（按到达顺序），供断言历史 / 参数。
 async function prepare(page: Page, opts: Options = {}) {
-  const bodies: Array<{ messages: Array<{ role: string; content: string; reasoning_content?: string }>; model: string; temperature?: number; top_p?: number; max_tokens?: number; reasoning_effort?: string; reasoning?: { max_tokens: number }; keyHeader: string | null }> = []
+  const bodies: Array<{ messages: Array<{ role: string; content: string | null; reasoning_content?: string; tool_calls?: Array<{ id: string; type: string; function: { name: string; arguments: string } }>; tool_call_id?: string }>; tools?: Array<{ type: string; function: { name: string } }>; model: string; temperature?: number; top_p?: number; max_tokens?: number; reasoning_effort?: string; reasoning?: { max_tokens: number }; keyHeader: string | null }> = []
   await page.addInitScript(() => {
     localStorage.setItem('okapi.key', 'interaction-test-key')
     localStorage.setItem('okapi.lang', 'en')
@@ -83,7 +103,7 @@ async function prepare(page: Page, opts: Options = {}) {
         await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'upstream_error' } }) })
         return
       }
-      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: sseBody(opts.reply) })
+      await route.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream' }, body: opts.respond?.(bodies.length) ?? sseBody(opts.reply) })
       return
     }
     if (path === '/auth/keys' && request.method() === 'POST') {
@@ -680,4 +700,144 @@ test('旧后端缺少规则时禁用采样，不发送存储中的旧参数', as
   expect(bodies[0]).not.toHaveProperty('temperature')
   expect(bodies[0]).not.toHaveProperty('top_p')
   expect(bodies[0]).not.toHaveProperty('reasoning_effort')
+})
+
+test('工具调用：以折叠卡片显示函数名与参数预览，展开是缩进后的参数，可复制与再折叠', async ({ page }) => {
+  await prepare(page, { respond: () => toolSse([WEATHER, CLOCK]) })
+  await page.goto('/portal/playground')
+  await send(page, 'weather in Paris and the time?')
+  const cards = page.locator('[data-slot="tool-call"]')
+  await expect(cards).toHaveCount(2)
+  // 分片到达的参数被拼完整；折叠态的摘要只露函数名 + 单行预览 + 状态
+  await expect(cards.nth(0).locator('summary')).toContainText('get_weather')
+  await expect(cards.nth(0).locator('summary')).toContainText('{"city":"Paris","unit":"celsius"}')
+  await expect(cards.nth(1).locator('summary')).toContainText('get_time')
+  await expect(cards.nth(0).locator('summary')).toContainText('awaiting result')
+  // 没有正文时气泡里只有卡片，不留空的 Markdown 块
+  await expect(page.locator('[data-role="assistant"] [data-slot="tool-calls"]')).toBeVisible()
+  // 等结果的调用在生成完后自动展开；用户可以手动折叠，再点开
+  const first = cards.nth(0)
+  await expect(first).toHaveAttribute('open', '')
+  await expect(first.locator('[data-slot="tool-call-args"]')).toHaveText('{\n  "city": "Paris",\n  "unit": "celsius"\n}')
+  await first.locator('summary').click()
+  await expect(first).not.toHaveAttribute('open', '')
+  await expect(first.locator('[data-slot="tool-call-args"]')).toBeHidden()
+  await first.locator('summary').click()
+  await expect(first.locator('[data-slot="tool-call-args"]')).toBeVisible()
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+  await first.getByRole('button', { name: 'Copy arguments' }).click()
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('{\n  "city": "Paris",\n  "unit": "celsius"\n}')
+})
+
+test('工具定义：折叠区里填 JSON，非法时报错并禁发，合法时随请求发出；清空则不带 tools', async ({ page }) => {
+  const bodies = await prepare(page)
+  await page.goto('/portal/playground')
+  const section = page.locator('[data-slot="playground-tools"]')
+  await expect(section).not.toHaveAttribute('open', '')
+  await section.locator('summary').click()
+  const box = page.getByLabel('Tools (JSON array)')
+  await page.getByPlaceholder(/Enter to send/).fill('hello')
+
+  await box.fill('{not json')
+  await expect(page.getByText('Not valid JSON.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled()
+  await box.fill('[{"type":"function"}]')
+  await expect(page.getByText(/Must be a non-empty array/)).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled()
+
+  await section.getByRole('button', { name: 'Insert example' }).click()
+  await expect(section.locator('summary')).toContainText('1 tools')
+  await expect(page.getByRole('button', { name: 'Send' })).toBeEnabled()
+  await page.getByRole('button', { name: 'Send' }).click()
+  await expect(page.locator('[data-role="assistant"]')).toContainText('Hello playground')
+  expect(bodies[0].tools).toHaveLength(1)
+  expect(bodies[0].tools![0].function.name).toBe('get_weather')
+
+  // 清空后不再带 tools；刷新后工具定义仍在（折叠区有内容时默认展开）
+  await section.getByRole('button', { name: 'Clear', exact: true }).click()
+  await send(page, 'again')
+  await expect.poll(() => bodies.length).toBe(2)
+  expect(bodies[1]).not.toHaveProperty('tools')
+  await box.fill(TOOLS_JSON)
+  await page.reload()
+  await expect(page.locator('[data-slot="playground-tools"]')).toHaveAttribute('open', '')
+  await expect(page.getByLabel('Tools (JSON array)')).toHaveValue(TOOLS_JSON)
+})
+
+test('回填工具结果并继续：全部填完才能提交，请求带成对的 tool_calls / tool 消息，结果在折叠卡片里可见', async ({ page }) => {
+  const bodies = await prepare(page, { respond: (n) => (n === 1 ? toolSse([WEATHER, CLOCK]) : sseBody('It is sunny and 14:05.')) })
+  await page.goto('/portal/playground')
+  await send(page, 'weather and time in Paris?')
+  const cards = page.locator('[data-slot="tool-call"]')
+  await expect(cards).toHaveCount(2)
+  const submit = page.getByRole('button', { name: 'Submit results and continue' })
+  await expect(submit).toBeDisabled()
+  await expect(page.getByText('2 call(s) still need a result')).toBeVisible()
+  await page.getByLabel('Result of get_weather').fill('{"temp_c":14,"sky":"sunny"}')
+  await expect(submit).toBeDisabled()
+  await expect(page.getByText('1 call(s) still need a result')).toBeVisible()
+  await page.getByLabel('Result of get_time').fill('14:05')
+  await expect(submit).toBeEnabled()
+  await submit.click()
+
+  await expect(page.locator('[data-role="assistant"]').last()).toContainText('It is sunny and 14:05.')
+  expect(bodies).toHaveLength(2)
+  // 续写请求：用户消息 → assistant(tool_calls, content=null) → 每个调用一条 tool 消息（id 配对）
+  expect(bodies[1].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'tool'])
+  expect(bodies[1].messages[1].content).toBeNull()
+  expect(bodies[1].messages[1].tool_calls).toEqual([
+    { id: 'call_w1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Paris","unit":"celsius"}' } },
+    { id: 'call_t1', type: 'function', function: { name: 'get_time', arguments: '{"tz":"Europe/Paris"}' } },
+  ])
+  expect(bodies[1].messages[2]).toEqual({ role: 'tool', tool_call_id: 'call_w1', content: '{"temp_c":14,"sky":"sunny"}' })
+  expect(bodies[1].messages[3]).toEqual({ role: 'tool', tool_call_id: 'call_t1', content: '14:05' })
+  // 不新增用户消息；已回填的卡片折叠，展开可见结果
+  await expect(page.locator('[data-role="user"]')).toHaveCount(1)
+  const first = cards.nth(0)
+  await expect(first).toHaveAttribute('data-state', 'done')
+  await expect(first).not.toHaveAttribute('open', '')
+  await expect(first.locator('summary')).toContainText('answered')
+  await first.locator('summary').click()
+  await expect(first.locator('[data-slot="tool-call-result"]')).toHaveText('{"temp_c":14,"sky":"sunny"}')
+
+  // 对续写重新生成：只重做续写（同样的 tool 消息），不丢工具调用
+  await page.getByRole('button', { name: 'Regenerate' }).click()
+  await expect.poll(() => bodies.length).toBe(3)
+  expect(bodies[2].messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'tool'])
+  await expect(cards).toHaveCount(2)
+  // 刷新后工具调用与结果仍在
+  await page.reload()
+  await expect(page.locator('[data-slot="tool-call"]')).toHaveCount(2)
+  await page.locator('[data-slot="tool-call"]').nth(1).locator('summary').click()
+  await expect(page.locator('[data-slot="tool-call"]').nth(1).locator('[data-slot="tool-call-result"]')).toHaveText('14:05')
+})
+
+test('没回填就继续聊天：历史里不带孤立的 tool_calls，请求始终合法', async ({ page }) => {
+  const bodies = await prepare(page, { respond: (n) => (n === 1 ? toolSse([WEATHER]) : undefined) })
+  await page.goto('/portal/playground')
+  await send(page, 'weather?')
+  await expect(page.locator('[data-slot="tool-call"]')).toHaveCount(1)
+  await send(page, 'never mind, say hi')
+  await expect(page.locator('[data-role="assistant"]').last()).toContainText('Hello playground')
+  // 第二次请求：没有结果的工具调用被略去（它也没有正文），只剩两条用户消息
+  expect(bodies[1].messages.map((m) => [m.role, m.content])).toEqual([['user', 'weather?'], ['user', 'never mind, say hi']])
+  expect(JSON.stringify(bodies[1])).not.toContain('tool_calls')
+  // 旧回合的卡片不再提供填写入口，标明"未回填"
+  const old = page.locator('[data-slot="tool-call"]').first()
+  await expect(old.locator('summary')).toContainText('no result')
+  await old.locator('summary').click()
+  await expect(old.getByRole('textbox')).toHaveCount(0)
+})
+
+test('导出对话含工具调用的名称、参数与返回结果', async ({ page }) => {
+  await prepare(page, { respond: (n) => (n === 1 ? toolSse([WEATHER]) : sseBody('Sunny.')) })
+  await page.goto('/portal/playground')
+  await send(page, 'weather?')
+  await page.getByLabel('Result of get_weather').fill('sunny, 14C')
+  await page.getByRole('button', { name: 'Submit results and continue' }).click()
+  await expect(page.locator('[data-role="assistant"]').last()).toContainText('Sunny.')
+  const [download] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Export conversation' }).click()])
+  const text = readFileSync((await download.path())!, 'utf8')
+  expect(text).toContain('## Assistant\n\n### Tool call: get_weather\n\n```json\n{\n  "city": "Paris",\n  "unit": "celsius"\n}\n```\n\n**Result**\n\n```\nsunny, 14C\n```')
+  expect(text).toContain('Sunny.')
 })

@@ -32,7 +32,9 @@ async function prepare(page: Page, { permissions = ['*'], signedIn = true } = {}
       requests.push(`${request.method()} ${path}`)
       expect(request.method(), `未被桩接住的写请求：${path}`).toBe('GET')
       const json: Json =
-        path === '/api/me'
+        path.match(/^\/admin\/channels\/\d+\/usage$/)
+          ? { timezone: 'UTC', usage: { window_start: '2026-10-01T00:00:00Z', window_end: '2026-10-02T00:00:00Z', requests: 0, tokens: 0, cost_micro: 0, unknown_cost_requests: 0 }, quotas: [] }
+          : path === '/api/me'
           ? {
               user_id: 1,
               key_id: 1,
@@ -96,7 +98,7 @@ const CHANNEL = {
   last_balance: null,
 }
 
-test('渠道抽屉：注入字段按 JSON 解析、代理与额外头可改可清，保存体只含有值的键；受保护键的 400 以错误码文案提示', async ({ page }) => {
+test('渠道抽屉：注入字段按 JSON 解析、额外头可改可清、退役的 proxy_url 不回写，保存体只含有值的键；受保护键的 400 以错误码文案提示', async ({ page }) => {
   await prepare(page)
   const patches: Json[] = []
   await page.route('**/admin/channels?*', (route) =>
@@ -121,24 +123,26 @@ test('渠道抽屉：注入字段按 JSON 解析、代理与额外头可改可�
     .click()
   const drawer = await openedDialog(page)
   await expect(drawer.getByRole('heading', { name: /编辑渠道/ })).toBeVisible()
+  // 行为是该页签的主体内容，默认展开
   await drawer.getByRole('tab', { name: '请求与计费行为' }).click()
+  await expect(drawer.locator('#channel-behavior-options')).toHaveAttribute('open', '')
 
-  // 已有配置原样回显
-  const proxy = drawer.locator('#d-proxy')
-  await expect(proxy).toHaveValue('socks5://127.0.0.1:1080')
+  // 已有配置原样回显；出站代理已改由「接入」页签的出口绑定表达，行为页签不再有代理输入框
+  await expect(drawer.locator('#d-proxy')).toHaveCount(0)
   const headerName = drawer.getByPlaceholder('OpenAI-Organization')
   await expect(headerName).toHaveValue('OpenAI-Organization')
   await expect(drawer.getByPlaceholder('org-…')).toHaveValue('org-1')
 
   // 注入两行：数字按 JSON 解析成 number，带引号的字面量解析成 string
   await drawer.getByRole('button', { name: '添加字段' }).click()
-  await drawer.getByPlaceholder('temperature').nth(0).fill('temperature')
+  await drawer.getByPlaceholder('temperature').nth(0).pressSequentially('temperature')
+  await expect(drawer.getByPlaceholder('temperature').nth(0)).toBeFocused()
+  await expect(drawer.getByPlaceholder('temperature').nth(0)).toHaveValue('temperature')
   await drawer.getByPlaceholder('0.2 or "forced"').nth(0).fill('0.2')
   await drawer.getByRole('button', { name: '添加字段' }).click()
   await drawer.getByPlaceholder('temperature').nth(1).fill('user')
   await drawer.getByPlaceholder('0.2 or "forced"').nth(1).fill('"forced"')
 
-  await proxy.fill('http://proxy.internal:3128')
   // 删掉唯一一条额外头：对象为空时键应从 settings 里消失，而不是送一个 {}
   await headerName.locator('..').getByRole('button', { name: '×' }).click()
 
@@ -150,7 +154,6 @@ test('渠道抽屉：注入字段按 JSON 解析、代理与额外头可改可�
     bill_by_response_model: false,
     strip_request_fields: ['logit_bias'],
     inject_request_fields: { temperature: 0.2, user: 'forced' },
-    proxy_url: 'http://proxy.internal:3128',
   })
   expect(patches[0]).toMatchObject({ name: 'openai-main', models: ['gpt-5'], priority: 0 })
 
@@ -210,6 +213,8 @@ test('安全页会话卡：列出会话并标出当前浏览器，单条吊销�
   await expect(current.getByText('当前浏览器')).toBeVisible()
   await expect(card.getByRole('listitem').filter({ hasText: '198.51.100.9' }).getByText('当前浏览器')).toHaveCount(0)
 
+  await card.getByRole('link', { name: '查看全部会话' }).click()
+  await expect(page).toHaveURL(/profile\?tab=signins#profile-sessions$/)
   await card.getByRole('listitem').filter({ hasText: '198.51.100.9' }).getByRole('button', { name: '吊销', exact: true }).click()
   await expect(page.getByRole('status').filter({ hasText: '已吊销该会话' })).toBeVisible()
   await expect(card.getByRole('listitem')).toHaveCount(1)
@@ -411,6 +416,16 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   expect(posts.some((p) => p.path.endsWith('/manage'))).toBe(false)
   const confirm = page.getByRole('alertdialog')
   await expect(confirm).toBeVisible()
+  await confirm.getByRole('button', { name: '取消', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await expect(confirm).toBeHidden()
+  await expect(drawer).toBeVisible()
+  expect(posts.some((p) => p.path.endsWith('/manage'))).toBe(false)
+  await drawer.getByRole('button', { name: '封禁', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(confirm).toBeHidden()
+  await expect(drawer).toBeVisible()
+  await drawer.getByRole('button', { name: '封禁', exact: true }).click()
   await confirm.getByRole('button', { name: '封禁', exact: true }).click()
   await expect(drawer.getByRole('button', { name: '解封', exact: true })).toBeVisible()
   expect(posts.filter((p) => p.path.endsWith('/manage')).map((p) => p.body)).toEqual([{ action: 'ban' }])
@@ -938,6 +953,7 @@ test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro
   expect(posts[0]).toEqual({
     rule_code: 'night-discount',
     rule_type: 'time_based',
+    enabled: true, valid_from: null, valid_to: null,
     multiplier: '0.5',
     priority: 5,
     stacking_mode: 'exclusive',
@@ -964,6 +980,7 @@ test('计费规则抽屉：按类型只发该类型字段，阈值 USD 换 micro
   expect(posts[1]).toEqual({
     rule_code: 'heavy-users',
     rule_type: 'volume',
+    enabled: true, valid_from: null, valid_to: null,
     multiplier: '0.85',
     priority: 0,
     stacking_mode: 'best_for_user',
@@ -1350,6 +1367,7 @@ test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位�
   })
 
   await page.goto('/portal/security')
+  await page.locator('#totp-password').fill('fixture-password')
   await page.getByRole('button', { name: '开始绑定' }).click()
   await expect(page.getByText('otpauth://totp/Okapi:alice?secret=JBSWY3DPEHPK3PXP&issuer=Okapi')).toBeVisible()
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
@@ -1385,11 +1403,13 @@ test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位�
 
   await page.route('**/auth/totp/enroll', (route) => route.fulfill(apiError(500, 'internal_error')))
   await page.reload()
+  await page.locator('#totp-password').fill('fixture-password')
   await page.getByRole('button', { name: '开始绑定' }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
   // API Key 单轨登录没有会话 cookie：后端 401 → 引导改用邮箱密码登录，而不是留一个哑按钮
-  await page.route('**/auth/totp/enroll', (route) => route.fulfill(apiError(401, 'unauthorized')))
+  await page.route('**/auth/totp/enroll', (route) => route.fulfill(apiError(401, 'invalid_api_key')))
+  await page.locator('#totp-password').fill('fixture-password')
   await page.getByRole('button', { name: '开始绑定' }).click()
   await expect(page.getByText(/两步验证需邮箱密码登录/)).toBeVisible()
   await expect(page.getByRole('button', { name: '开始绑定' })).toHaveCount(0)
@@ -1622,6 +1642,8 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
 })
 
 test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉上游模型覆盖清单；调度页签的成本 / 留存随保存走，池成员单独保存并按覆盖值落体；新建同时带池成员', async ({ page }) => {
+  // 一条用例走完编辑四个页签再新建两次，含查询失败重试的退避，超出默认 20s
+  test.setTimeout(45_000)
   await prepare(page)
   const calls: { path: string; method: string; body: Json }[] = []
   const record = (route: import('@playwright/test').Route) => {
@@ -1687,7 +1709,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
   // 模型页签：拉上游模型直接覆盖清单，并提示发现数量
-  await drawer.getByRole('tab', { name: '模型', exact: true }).click()
+  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('status').filter({ hasText: '发现 3 个模型' })).toBeVisible()
   expect(calls[1]).toMatchObject({ path: '/admin/channels/42/fetch-models', method: 'GET' })
@@ -1698,9 +1720,13 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
 
   // 调度页签：成本倍数 → 千分比、留存声明随主"保存"提交；池成员单独保存，覆盖值按整数、留空 null
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
+  await drawer.locator('#channel-schedule-options > summary').click()
   await drawer.locator('#d-priority').fill('7')
   await drawer.locator('#d-cost').fill('0.5')
   await drawer.locator('#d-retention').selectOption('transient')
+  // 池成员与模型同页签；切页签不丢上面未保存的调度草稿
+  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
+  await drawer.locator('#channel-pools > summary').click()
   await drawer.getByRole('checkbox', { name: 'premium', exact: true }).check()
   const premiumRow = drawer.getByRole('checkbox', { name: 'premium', exact: true }).locator('xpath=ancestor::div[contains(@class,"rounded-md")][1]')
   await premiumRow.getByLabel('优先级').fill('3')
@@ -1992,6 +2018,8 @@ test('渠道 key 级参数：权重与并发上限各自 PATCH（空并发 = nul
   await page.getByRole('row').filter({ hasText: 'openai-main' }).getByRole('button', { name: '编辑', exact: true }).click()
   const drawer = await openedDialog(page)
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
+  await drawer.locator('#channel-key-options-501 > summary').click()
+  await drawer.locator('#channel-key-options-502 > summary').click()
   await expect(drawer.locator('#kw-501')).toHaveValue('100')
   await expect(drawer.locator('#kc-501')).toHaveValue('')
   await expect(drawer.locator('#kc-502')).toHaveValue('8')

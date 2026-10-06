@@ -19,6 +19,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 // ---- mock 上游 ----
 
 async fn mock_chat(body: axum::body::Bytes) -> axum::response::Response {
@@ -76,6 +79,41 @@ async fn mock_anthropic(body: axum::body::Bytes) -> axum::response::Response {
         "usage":{"input_tokens":100,"output_tokens":20}
     }))
     .into_response()
+}
+
+async fn mock_reasoning(uri: axum::http::Uri, body: axum::body::Bytes) -> axum::response::Response {
+    let request: Value = serde_json::from_slice(&body).unwrap();
+    let reported = uri.path().contains("reported");
+    let reasoning = "thinking ".repeat(32);
+    let usage = json!({"prompt_tokens":100,"completion_tokens":20,
+        "completion_tokens_details":{"reasoning_tokens":8}});
+    if request["stream"] == true {
+        let mut chunks = vec![
+            json!({"id":"r1","model":"fixture","choices":[{"delta":{"reasoning_content":"thinking ".repeat(16)}}]}),
+            json!({"id":"r1","model":"fixture","choices":[{"delta":{"reasoning":"thinking ".repeat(16)}}]}),
+            json!({"id":"r1","model":"fixture","choices":[{"delta":{"content":"OK"}}]}),
+        ];
+        if reported {
+            chunks.push(json!({"id":"r1","choices":[],"usage":usage}));
+        }
+        let mut events = String::new();
+        for chunk in chunks {
+            let _ = write!(events, "data: {chunk}\n\n");
+        }
+        events.push_str("data: [DONE]\n\n");
+        (
+            [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+            events,
+        )
+            .into_response()
+    } else {
+        let mut response = json!({"id":"r1","model":"fixture",
+            "choices":[{"message":{"role":"assistant","content":"OK","reasoning_content":reasoning}}]});
+        if reported {
+            response["usage"] = usage;
+        }
+        axum::Json(response).into_response()
+    }
 }
 
 /// 原生 Responses 上游：断言请求**原样**（降级链会丢的字段一个都不能少），
@@ -256,6 +294,11 @@ async fn spawn_mock() -> (SocketAddr, MockCalls) {
         .route("/codex/responses/compact", post(mock_compact))
         // 只实现了 chat 的"openai"上游：/responses 由 axum 回 404
         .route("/chatonly/v1/chat/completions", post(mock_chat))
+        .route("/reasoning/v1/chat/completions", post(mock_reasoning))
+        .route(
+            "/reasoning-reported/v1/chat/completions",
+            post(mock_reasoning),
+        )
         .route("/ant/v1/messages", post(mock_anthropic))
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -293,13 +336,15 @@ async fn setup(provider: &str, path: &str, settings: Option<Value>) -> TestEnv {
     setup_with_cache_write(provider, path, settings, "1").await
 }
 
+// 建库 → 种模型与定价 → 建渠道与 key → 起网关是一条线性夹具，拆开只会把同一组局部变量来回传
+#[allow(clippy::too_many_lines)]
 async fn setup_with_cache_write(
     provider: &str,
     path: &str,
     settings: Option<Value>,
     cache_write_ratio: &str,
 ) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
 
@@ -336,6 +381,7 @@ async fn setup_with_cache_write(
             refresh_token: "unused-fixture".to_owned(),
             expires_at: chrono::Utc::now().timestamp() + 3600,
             account_id: Some("acct-compact-fixture".to_owned()),
+            account_label: None,
         }
         .to_plaintext()
     } else {
@@ -376,6 +422,7 @@ async fn setup_with_cache_write(
             .unwrap();
     }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -934,6 +981,8 @@ async fn responses_stream_skeleton_and_billing() {
             "response.output_text.delta",
             "response.output_text.delta",
             "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
             "response.completed",
         ],
         "必须合成完整 Responses 事件骨架：{text}"
@@ -995,4 +1044,78 @@ async fn responses_over_anthropic_two_hops() {
     let (status, amount) = wait_record(&env.pg, env.user_id).await;
     assert_eq!(status, 20);
     assert_eq!(amount, 240);
+}
+
+#[tokio::test]
+async fn reasoning_downgrade_preserves_output_and_usage_in_json_and_sse() {
+    for reported in [false, true] {
+        let mut receipts = Vec::new();
+        for stream in [false, true] {
+            let path = if reported {
+                "/reasoning-reported/v1"
+            } else {
+                "/reasoning/v1"
+            };
+            let env = setup("openai_compat", path, None).await;
+            // Authoritative usage wins on trusted channels; untrusted recount has its own suite.
+            sqlx::query("UPDATE channels SET trust_upstream_usage=true WHERE id=$1")
+                .bind(env.channel_id)
+                .execute(&env.pg)
+                .await
+                .unwrap();
+            env.state.invalidate_routing_caches_local();
+            let response = post_responses(&env, stream).await;
+            assert_eq!(response.status(), 200);
+            let body = response.text().await.unwrap();
+            let output = if stream {
+                let events = parse_named_events(&body);
+                let deltas: String = events
+                    .iter()
+                    .filter(|(name, _)| name == "response.reasoning_summary_text.delta")
+                    .filter_map(|(_, event)| event["delta"].as_str())
+                    .collect();
+                assert_eq!(deltas, "thinking ".repeat(32));
+                events
+                    .into_iter()
+                    .find(|(name, _)| name == "response.completed")
+                    .unwrap()
+                    .1["response"]
+                    .clone()
+            } else {
+                serde_json::from_str::<Value>(&body).unwrap()
+            };
+            assert_eq!(
+                output["output"][0]["summary"][0]["text"],
+                "thinking ".repeat(32)
+            );
+            assert_eq!(output["output"][1]["content"][0]["text"], "OK");
+            assert_eq!(wait_record(&env.pg, env.user_id).await.0, 20);
+            let receipt: (i32, i32, i64) = sqlx::query_as(
+                "SELECT prompt_tokens,completion_tokens,amount_micro FROM billing_records WHERE user_id=$1 AND log_type=2"
+            ).bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+            if reported {
+                assert_eq!(
+                    receipt,
+                    (100, 20, 240),
+                    "real usage must win over summary estimation"
+                );
+            } else {
+                assert!(
+                    receipt.1 >= 43,
+                    "288 reasoning characters cannot be billed as two body characters: {receipt:?}"
+                );
+                assert_eq!(receipt.2, i64::from(receipt.0 + receipt.1) * 2);
+                assert!(output["usage"].is_null());
+            }
+            assert_eq!(
+                env.calls.lock().unwrap().as_slice(),
+                &[format!("{path}/chat/completions")]
+            );
+            receipts.push(receipt);
+        }
+        assert_eq!(
+            receipts[0], receipts[1],
+            "JSON and SSE must count the same reasoning exactly once"
+        );
+    }
 }

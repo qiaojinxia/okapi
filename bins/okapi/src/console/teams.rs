@@ -5,9 +5,10 @@
 use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
+use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use rand::RngExt;
 use rand::distr::Alphanumeric;

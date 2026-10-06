@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT p.id, p.name, p.url_ciphertext,\n               (SELECT COUNT(*) FROM channels c\n                 WHERE c.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"channel_count!\",\n               (SELECT COUNT(*) FROM channel_keys k JOIN channels c ON c.id = k.channel_id\n                 WHERE k.egress_proxy_id = p.id AND c.deleted_at IS NULL) AS \"assigned_keys!\",\n               (EXISTS (SELECT 1 FROM channel_egress e JOIN channels c ON c.id = e.channel_id\n                         WHERE c.deleted_at IS NULL\n                           AND ((e.mode = 'proxy' AND e.proxy_id = p.id)\n                             OR (e.mode = 'group' AND EXISTS (\n                                     SELECT 1 FROM proxy_group_members m\n                                     WHERE m.group_code = e.group_code AND m.proxy_id = p.id)))))\n                   AS \"in_use!\"\n        FROM proxies p\n        WHERE p.status = 1\n        ORDER BY p.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "url_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "url_ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "assigned_keys!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "in_use!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "897e4e4a2f9be921e68a4f044360bd60f963ccda31225ef18573a2893841dc17"
+}

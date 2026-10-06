@@ -1,0 +1,130 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT g.code, g.name, g.mode, g.owner_id, g.description, g.created_at, g.updated_at,\n                   COALESCE((\n                       SELECT jsonb_agg(jsonb_build_object(\n                                  'proxy_id', p.id, 'name', p.name, 'status', p.status,\n                                  'cooling', COALESCE(p.cooldown_until > now(), false),\n                                  'priority', m.priority, 'weight', m.weight,\n                                  'max_keys', p.max_keys,\n                                  'assigned_keys', (\n                                      SELECT COUNT(*) FROM channel_keys k\n                                      JOIN channel_egress e ON e.channel_id = k.channel_id\n                                      JOIN channels c ON c.id = k.channel_id\n                                      WHERE k.egress_proxy_id = p.id AND e.mode = 'group'\n                                        AND e.group_code = g.code AND c.deleted_at IS NULL))\n                              ORDER BY m.priority DESC, p.id)\n                       FROM proxy_group_members m JOIN proxies p ON p.id = m.proxy_id\n                       WHERE m.group_code = g.code),\n                       '[]'::jsonb) AS \"members!\",\n                   (SELECT COUNT(*) FROM channels c\n                     WHERE c.egress_group_code = g.code AND c.deleted_at IS NULL) AS \"channel_count!\",\n                   (SELECT COUNT(*) FROM channel_keys k\n                      JOIN channel_egress e ON e.channel_id = k.channel_id\n                      JOIN channels c ON c.id = k.channel_id\n                     WHERE g.mode = 'pinned' AND e.mode = 'group' AND e.group_code = g.code\n                       AND c.deleted_at IS NULL AND k.egress_proxy_id IS NULL) AS \"unassigned_keys!\",\n                   EXISTS (SELECT 1 FROM settings\n                            WHERE key = 'egress_default' AND value ->> 'mode' = 'group'\n                              AND value ->> 'group_code' = g.code) AS \"is_default!\"\n            FROM proxy_groups g\n            WHERE ($1::bigint IS NULL OR g.owner_id = $1)\n            ORDER BY g.code\n            LIMIT $2 OFFSET $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "mode",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "mode"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "owner_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "owner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "description",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "proxy_groups",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "members!",
+        "type_info": "Jsonb",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "channel_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "unassigned_keys!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_default!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "8f5b06dc79aed3c5ae3c25da1a2efa404e2d8389716f33cc329ee17f1c64bc96"
+}

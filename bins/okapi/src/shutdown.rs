@@ -38,10 +38,32 @@ pub async fn signal() {
 #[derive(Clone, Default)]
 pub struct Pending(Arc<Inner>);
 
-#[derive(Default)]
 struct Inner {
     count: AtomicUsize,
     idle: Notify,
+    /// 进入下线：长连接（Realtime 会话）据此收尾结算，而不是被进程退出掐断。
+    draining: tokio::sync::watch::Sender<bool>,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            count: AtomicUsize::default(),
+            idle: Notify::default(),
+            draining: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+// Created before spawning so panic and cancellation also drain the counter.
+struct PendingTask(Arc<Inner>);
+
+impl Drop for PendingTask {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.idle.notify_one();
+        }
+    }
 }
 
 impl Pending {
@@ -52,14 +74,23 @@ impl Pending {
     {
         let inner = Arc::clone(&self.0);
         inner.count.fetch_add(1, Ordering::SeqCst);
+        let task = PendingTask(inner);
         // detach 说明：任务由本计数器跟踪，退出路径经 wait_idle 等待，不需持有 JoinHandle
         tokio::spawn(async move {
+            let _task = task;
             fut.await;
-            if inner.count.fetch_sub(1, Ordering::SeqCst) == 1 {
-                // notify_one 在无等待者时存一张许可，先归零后等待也不会漏醒
-                inner.idle.notify_one();
-            }
         });
+    }
+
+    /// 通知长连接收尾。HTTP 连接由 `with_graceful_shutdown` 排水，升级后的 WS 不在其中。
+    pub fn drain(&self) {
+        self.0.draining.send_replace(true);
+    }
+
+    /// 下线开始时完成；之前一直挂起。
+    pub async fn draining(&self) {
+        let mut draining = self.0.draining.subscribe();
+        let _ = draining.wait_for(|draining| *draining).await;
     }
 
     /// 等全部后台结算结束，最多等 `cap`；超时只告警不阻塞退出（对账兜底）。
@@ -80,5 +111,62 @@ impl Pending {
     #[must_use]
     pub fn in_flight(&self) -> usize {
         self.0.count.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn panic_does_not_block_shutdown() {
+        let pending = Pending::default();
+        pending.spawn(async { panic!("synthetic settlement panic") });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pending.wait_idle(Duration::from_secs(5)),
+        )
+        .await
+        .expect("a panicked task must drain its counter");
+        assert_eq!(pending.in_flight(), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_wakes_long_lived_sessions_before_the_idle_wait() {
+        let pending = Pending::default();
+        let session = pending.clone();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        pending.spawn(async move {
+            let _ = started.send(());
+            session.draining().await;
+        });
+        ready.await.unwrap();
+        assert_eq!(pending.in_flight(), 1);
+        pending.drain();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pending.wait_idle(Duration::from_secs(5)),
+        )
+        .await
+        .expect("a drained session finishes");
+        assert_eq!(pending.in_flight(), 0);
+        // 已在下线中：之后才开始等的也立即返回
+        tokio::time::timeout(Duration::from_secs(1), pending.draining())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_unpolled_task_drains_its_counter() {
+        let pending = Pending::default();
+        pending.0.count.fetch_add(1, Ordering::SeqCst);
+        let task = PendingTask(Arc::clone(&pending.0));
+        let handle = tokio::spawn(async move {
+            let _task = task;
+            std::future::pending::<()>().await;
+        });
+        handle.abort();
+        let _ = handle.await;
+        assert_eq!(pending.in_flight(), 0);
     }
 }

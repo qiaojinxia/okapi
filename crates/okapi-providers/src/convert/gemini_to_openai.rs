@@ -390,10 +390,7 @@ pub fn response_openai_to_gemini(
     let finish = src
         .pointer("/choices/0/finish_reason")
         .and_then(Value::as_str);
-    let usage: Option<UsageProbe> = src
-        .get("usage")
-        .filter(|u| !u.is_null())
-        .and_then(|u| serde_json::from_value(u.clone()).ok());
+    let usage = okapi_api::usage_from_chat(&src);
     let probe = usage;
     let out = json!({
         "candidates": [{
@@ -609,11 +606,14 @@ impl OaiStreamToGemini {
             .into_iter()
             .flatten()
         {
-            let index = call
+            let Some(index) = call
                 .get("index")
                 .and_then(Value::as_u64)
                 .and_then(|i| usize::try_from(i).ok())
-                .unwrap_or(self.calls.len().saturating_sub(1));
+                .filter(|i| *i < 128)
+            else {
+                return vec![Err(UpstreamError::Stream("tool_index_invalid".into()))];
+            };
             while self.calls.len() <= index {
                 self.calls.push(PendingCall::default());
             }

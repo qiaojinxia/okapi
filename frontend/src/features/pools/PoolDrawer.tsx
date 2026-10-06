@@ -10,7 +10,7 @@ import type { PoolRow } from '@/features/pools/types'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { qk } from '@/lib/query-keys'
+import { poolOptions } from './pool-options'
 
 type Strategy = (typeof ROUTING_STRATEGIES)[number]
 
@@ -32,10 +32,8 @@ export function PoolDrawer({
   const [fallback, setFallback] = useState(pool?.fallback_pool_code ?? '')
 
   // 降级目标候选：其它池（不能选自己）
-  const pools = useQuery({
-    queryKey: qk.adminPools,
-    queryFn: () => apiFetch<{ data: PoolRow[] }>('/admin/pools'),
-  })
+  const pools = useQuery(poolOptions())
+  const codeExists = pool === undefined && (pools.data?.data ?? []).some((p) => p.pool_code === code.trim())
   const fallbackOptions = (pools.data?.data ?? [])
     .filter((p) => p.pool_code !== code.trim())
     .map((p) => ({ value: p.pool_code, label: p.pool_code }))
@@ -69,7 +67,7 @@ export function PoolDrawer({
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>
-          <Button disabled={code.trim() === '' || save.isPending} onClick={() => save.mutate()}>
+          <Button disabled={code.trim() === '' || codeExists || save.isPending} onClick={() => save.mutate()}>
             {t('common:save')}
           </Button>
         </>
@@ -84,8 +82,11 @@ export function PoolDrawer({
             value={code}
             readOnly={pool !== undefined}
             placeholder="stable"
+            maxLength={32}
+            aria-invalid={codeExists}
             onChange={(e) => setCode(e.target.value)}
           />
+          {codeExists && <p role="alert" className="text-xs text-destructive">{t('admin:poolCodeExists')}</p>}
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="pool-desc">{t('common:description')}</Label>

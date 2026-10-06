@@ -9,6 +9,9 @@
 //!
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::extract::Path;
 use axum::response::IntoResponse;
@@ -171,7 +174,7 @@ struct TestEnv {
 
 /// ratio 1/1/1：$2/M 一价，便于口算。gemini 渠道配 model_mapping → gemini-upstream。
 async fn setup(provider: &str, path: &str) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
 
@@ -217,6 +220,7 @@ async fn setup(provider: &str, path: &str) -> TestEnv {
             .unwrap();
     }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

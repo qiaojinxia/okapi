@@ -36,6 +36,8 @@ mod token_billing;
 #[path = "support/image_cache_billing.rs"]
 mod cache_billing;
 
+#[path = "support/image_cost_source.rs"]
+mod cost_source;
 #[path = "support/image_streaming.rs"]
 mod streaming;
 
@@ -166,7 +168,7 @@ async fn spawn_upstream() -> Mock {
     }
 }
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = std::env::var("DATABASE_URL").unwrap();
     setup_at(&database, None).await
 }

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 async fn setup(limit: i64) -> (SocketAddr, String) {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)

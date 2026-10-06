@@ -4,7 +4,7 @@
 # 为什么需要：改动 migrations/0001_init.sql 后，已应用的库会因校验和不符报
 # Migrate(VersionMismatch)；而只重建 PG 又会让 Redis 与 ClickHouse 里旧 user_id
 # 的存量数据串味（PG 的 id 从 1 重新开始，旧聚合会被算进新用户的账），
-# 表现为对账测试莫名失败。三处必须一起清。
+# 表现为对账测试莫名失败。PG、Redis、CH、NATS 必须一起清。
 #
 # 用法：bash scripts/dev-reset.sh [--no-seed]
 set -euo pipefail
@@ -19,6 +19,16 @@ DB_NAME="${DATABASE_URL##*/}"
 PG_CONTAINER="${PG_CONTAINER:-okapi-dev-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-okapi-dev-redis}"
 CH_URL="${OKAPI_CLICKHOUSE_URL:-}"
+
+# Refuse to reset under a producer/consumer that could repopulate the stores.
+if pgrep -f '[/]okapi (gateway|console|worker)' >/dev/null; then
+  echo "请先停止 Okapi gateway/console/worker，再重置开发依赖" >&2
+  exit 1
+fi
+if [[ -n "${OKAPI_NATS_URL:-}" ]]; then
+  echo "▶ 清空 NATS BILLING 流与消费进度"
+  python3 scripts/nats-reset-stream.py
+fi
 
 echo "▶ 重建 PostgreSQL 库 ${DB_NAME}"
 docker exec "$PG_CONTAINER" psql -U okapi -d postgres -q \

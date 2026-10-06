@@ -8,6 +8,7 @@
 pub mod chat;
 pub mod error;
 pub mod permissions;
+pub mod provider_contract;
 mod token_usage;
 
 pub use chat::{
@@ -16,3 +17,4 @@ pub use chat::{
     UsageProbe,
 };
 pub use error::{ErrorBody, codes};
+pub use token_usage::{compatible_cache_details, has_bridged_usage_fields, usage_from_chat};

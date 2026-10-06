@@ -45,6 +45,16 @@ pub async fn upsert_model_ratio(
     axes: RatioAxes<'_>,
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
+    let id = upsert_model_ratio_in(&mut tx, model_name, axes).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn upsert_model_ratio_in(
+    connection: &mut sqlx::PgConnection,
+    model_name: &str,
+    axes: RatioAxes<'_>,
+) -> Result<i64, StoreError> {
     // vendor 按模型名前缀自动归类（仅在为空时填，管理员显式值永不被覆盖）——
     // 省掉建模型时的一次手填，列表页也就能按供应商分组筛选
     let vendor = crate::vendor::classify(model_name);
@@ -59,7 +69,7 @@ pub async fn upsert_model_ratio(
         model_name,
         vendor
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *connection)
     .await?;
     sqlx::query!(
         r#"
@@ -93,9 +103,8 @@ pub async fn upsert_model_ratio(
         axes.image,
         axes.modality_ratios
     )
-    .execute(&mut *tx)
+    .execute(&mut *connection)
     .await?;
-    tx.commit().await?;
     Ok(model_id)
 }
 
@@ -501,6 +510,16 @@ pub async fn upsert_model_per_call(
     per_call_price_micro: i64,
 ) -> Result<i64, StoreError> {
     let mut tx = pool.begin().await?;
+    let id = upsert_model_per_call_in(&mut tx, model_name, per_call_price_micro).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
+pub async fn upsert_model_per_call_in(
+    connection: &mut sqlx::PgConnection,
+    model_name: &str,
+    per_call_price_micro: i64,
+) -> Result<i64, StoreError> {
     // vendor 按模型名前缀自动归类（仅在为空时填，管理员显式值永不被覆盖）——
     // 省掉建模型时的一次手填，列表页也就能按供应商分组筛选
     let vendor = crate::vendor::classify(model_name);
@@ -515,7 +534,7 @@ pub async fn upsert_model_per_call(
         model_name,
         vendor
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *connection)
     .await?;
     sqlx::query!(
         r#"
@@ -529,9 +548,8 @@ pub async fn upsert_model_per_call(
         model_id,
         per_call_price_micro
     )
-    .execute(&mut *tx)
+    .execute(&mut *connection)
     .await?;
-    tx.commit().await?;
     Ok(model_id)
 }
 
@@ -558,6 +576,10 @@ pub struct ChannelRow {
     pub cost_milli: i64,
     /// 上游数据留存声明（none / transient / trains；None = 未声明）。
     pub data_retention: Option<String>,
+    /// 出口绑定三列（§11.41；`egress::Binding::from_columns` 还原）。
+    pub egress_mode: Option<String>,
+    pub egress_proxy_id: Option<i64>,
+    pub egress_group_code: Option<String>,
 }
 
 /// 渠道在某个池里的成员关系：覆盖为 None 时继承渠道 / key 自身的调度参数。
@@ -583,6 +605,8 @@ pub struct ChannelKeyRow {
     pub max_concurrency: Option<i32>,
     /// 0 = static_key，1 = oauth_refresh（§11.38；列表据此决定是否解出到期时间）。
     pub credential_kind: i16,
+    /// 固定分配组分给这把 key 的代理（§11.41）；None = 未分配 / 非固定分配。
+    pub egress_proxy_id: Option<i64>,
 }
 
 /// 渠道列表切片 + 过滤集内的启用数（列表页头"共 N 条 · M 启用"不必再拉全量数）。
@@ -628,6 +652,7 @@ pub async fn list_channels(
                COALESCE(c.settings, '{}'::jsonb) AS "settings!",
                GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!",
                c.settings ->> 'data_retention' AS data_retention,
+               c.egress_mode, c.egress_proxy_id, c.egress_group_code,
                COALESCE(
                    (SELECT array_agg(pc.pool_code ORDER BY pc.pool_code)
                       FROM pool_channels pc WHERE pc.channel_id = c.id),
@@ -701,6 +726,9 @@ pub async fn list_channels(
             pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
             cost_milli: r.cost_milli,
             data_retention: r.data_retention,
+            egress_mode: r.egress_mode,
+            egress_proxy_id: r.egress_proxy_id,
+            egress_group_code: r.egress_group_code,
         })
         .collect();
     Ok(ChannelList {
@@ -785,6 +813,11 @@ pub async fn set_channel_pools(
     members: &[PoolMember],
 ) -> Result<(), StoreError> {
     let mut tx = pool.begin().await?;
+    // Serialize replacement even when the old membership set is empty.
+    sqlx::query("SELECT id FROM channels WHERE id=$1 FOR UPDATE")
+        .bind(channel_id)
+        .fetch_one(&mut *tx)
+        .await?;
     sqlx::query!(
         r#"DELETE FROM pool_channels WHERE channel_id = $1"#,
         channel_id
@@ -1036,6 +1069,11 @@ pub async fn set_user_groups(
     let codes: Vec<String> = groups.iter().map(|(c, _)| c.clone()).collect();
     let priorities: Vec<i32> = groups.iter().map(|(_, p)| *p).collect();
     let mut tx = pool.begin().await?;
+    // Serialize replacement even when the old membership set is empty.
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
     sqlx::query!(r#"DELETE FROM user_groups WHERE user_id = $1"#, user_id)
         .execute(&mut *tx)
         .await?;
@@ -1085,7 +1123,7 @@ pub async fn list_channel_keys(pool: &PgPool) -> Result<Vec<ChannelKeyRow>, Stor
         ChannelKeyRow,
         r#"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
-               weight, max_concurrency, credential_kind
+               weight, max_concurrency, credential_kind, egress_proxy_id
         FROM channel_keys ORDER BY channel_id, id
         "#
     )
@@ -1106,7 +1144,7 @@ pub async fn list_channel_keys_for(
         ChannelKeyRow,
         r#"
         SELECT id, channel_id, status, failed_count, cooldown_until, last_error,
-               weight, max_concurrency, credential_kind
+               weight, max_concurrency, credential_kind, egress_proxy_id
         FROM channel_keys WHERE channel_id = ANY($1) ORDER BY channel_id, id
         "#,
         channel_ids
@@ -1494,19 +1532,22 @@ pub async fn rotate_channel_credential(
             _ => return Ok(RotateOutcome::Ambiguous),
         }
     };
-    let hit = sqlx::query_scalar!(
-        r#"
+    let hit = sqlx::query_scalar::<_, i64>(
+        r"
         UPDATE channel_keys SET
-            credential_ciphertext = $3,
+            credential_ciphertext = $3, credential_kind = $4,
             status = 1, cooldown_until = NULL, failed_count = 0, last_error = NULL,
             updated_at = now()
         WHERE id = $2 AND channel_id = $1
         RETURNING id
-        "#,
-        channel_id,
-        target,
-        crate::credential::seal_or_plain(master_key, credential)?
+        ",
     )
+    .bind(channel_id)
+    .bind(target)
+    .bind(crate::credential::seal_or_plain(master_key, credential)?)
+    .bind(i16::from(
+        crate::credential::OAuthCredential::parse(credential).is_some(),
+    ))
     .fetch_optional(pool)
     .await?;
     Ok(hit.map_or(RotateOutcome::NotFound, RotateOutcome::Rotated))
@@ -1547,32 +1588,22 @@ pub async fn write_key_credential(
     Ok(())
 }
 
-/// `channel_keys.credential_kind`：1 = oauth_refresh（docs/database.md §1.3）。
+/// `channel_keys.credential_kind`：1 = OAuth, including manually imported access tokens.
 pub const CREDENTIAL_KIND_OAUTH: i16 = 1;
-
-/// 给既有渠道追加一把 key（OAuth 登录把第二个账号挂到同一条渠道上）。
-pub async fn add_channel_key(
-    pool: &PgPool,
-    channel_id: i64,
-    credential: &str,
-    credential_kind: i16,
-    master_key: Option<&str>,
-) -> Result<i64, StoreError> {
-    let id = sqlx::query_scalar!(
-        r#"INSERT INTO channel_keys (channel_id, credential_ciphertext, credential_kind)
-           VALUES ($1, $2, $3) RETURNING id"#,
-        channel_id,
-        crate::credential::seal_or_plain(master_key, credential)?,
-        credential_kind
-    )
-    .fetch_one(pool)
-    .await?;
-    Ok(id)
-}
 
 /// 管理操作审计留痕。
 pub async fn record_audit(
     pool: &PgPool,
+    actor: &str,
+    action: &str,
+    target: &str,
+    detail: serde_json::Value,
+) -> Result<(), StoreError> {
+    record_audit_in(&mut *pool.acquire().await?, actor, action, target, detail).await
+}
+
+pub async fn record_audit_in(
+    connection: &mut sqlx::PgConnection,
     actor: &str,
     action: &str,
     target: &str,
@@ -1585,7 +1616,7 @@ pub async fn record_audit(
         target,
         detail
     )
-    .execute(pool)
+    .execute(connection)
     .await?;
     Ok(())
 }

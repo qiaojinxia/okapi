@@ -29,6 +29,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tracing = { workspace = true }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 tokio-rustls = { workspace = true }

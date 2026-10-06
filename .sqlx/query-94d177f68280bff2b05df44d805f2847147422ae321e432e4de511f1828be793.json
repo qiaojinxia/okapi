@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels SET egress_mode = $2, egress_proxy_id = $3, egress_group_code = $4\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "94d177f68280bff2b05df44d805f2847147422ae321e432e4de511f1828be793"
+}

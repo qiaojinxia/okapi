@@ -93,7 +93,7 @@ async fn serve(app: Router) -> SocketAddr {
 }
 
 async fn setup(provider: &str) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = std::env::var("DATABASE_URL").unwrap();
     let redis = std::env::var("OKAPI_REDIS_URL").unwrap();
     let pg = okapi_store::connect_pg(&database).await.unwrap();
@@ -131,6 +131,7 @@ async fn setup(provider: &str) -> Env {
             refresh_token: "unused-refresh".to_owned(),
             expires_at: chrono::Utc::now().timestamp() + 3600,
             account_id: Some("count-account".to_owned()),
+            account_label: None,
         }
         .to_plaintext()
     } else {
@@ -668,14 +669,21 @@ async fn count_concurrency_releases_on_success_failure_and_timeout() {
         &json!({"object":"response.input_tokens","input_tokens":9}),
     );
     assert_eq!(env.post(&env.body()).await.status(), 200);
-    assert!(env.state.sched.acquire_slot(env.channel_key, Some(1)).await);
+    let occupied = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+        &env.state.sched,
+        env.channel_key,
+        Some(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let channel_blocked = env.post(&env.body()).await;
     assert_eq!(channel_blocked.status(), 429);
     assert_eq!(
         channel_blocked.json::<Value>().await.unwrap()["error"]["param"],
         "channel_concurrency"
     );
-    env.state.sched.release_slot(env.channel_key, Some(1)).await;
+    occupied.release().await;
     sqlx::query("UPDATE channels SET retry_policy='{\"first_output_timeout_secs\":5}' WHERE id=$1")
         .bind(env.channel_id)
         .execute(&env.pg)
@@ -800,12 +808,26 @@ async fn cancelling_count_handler_releases_both_leases() {
         "cancelled handler leaked request/channel concurrency"
     );
     assert_eq!(env.mock.count(), 2);
-    assert!(env.state.sched.acquire_slot(env.channel_key, Some(1)).await);
+    let occupied = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+        &env.state.sched,
+        env.channel_key,
+        Some(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
-        !env.state.sched.acquire_slot(env.channel_key, Some(1)).await,
+        okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+            &env.state.sched,
+            env.channel_key,
+            Some(1)
+        )
+        .await
+        .unwrap()
+        .is_none(),
         "double release must not create a second free slot"
     );
-    env.state.sched.release_slot(env.channel_key, Some(1)).await;
+    occupied.release().await;
     env.assert_no_billing().await;
 }
 

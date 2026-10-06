@@ -145,9 +145,7 @@ async fn handle_speech(
     super::auth::check_group_rate(state, &key).await?;
 
     let (reservation_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -214,6 +212,7 @@ async fn handle_speech(
     };
     match state.openai_speech(&cand, &upstream_model, body_up).await {
         Ok((status, content_type, audio)) => {
+            super::key_health::success(state, &cand).await;
             settle(
                 state,
                 &key,
@@ -229,6 +228,7 @@ async fn handle_speech(
                 headers,
                 reservation_pool,
                 source_window.as_deref(),
+                &mut failure,
             )
             .await
             .inspect_err(|error| failure.error(error))?;
@@ -249,7 +249,16 @@ async fn handle_speech(
                 .refund(key.user_id, key.key_id, request_id)
                 .await;
             tracing::warn!(request_id = %request_id, error = %err, "speech 上游失败");
-            let error = AppError::new(StatusCode::BAD_GATEWAY, err.error_code());
+            if err.error_code() != codes::NO_AVAILABLE_CHANNEL {
+                super::key_health::failure(
+                    state,
+                    &cand,
+                    err.error_code(),
+                    super::chat::failure_kind_of(&err),
+                )
+                .await;
+            }
+            let error = super::account_control::attempt_error(&err);
             failure.error(&error);
             Err(error)
         }
@@ -360,9 +369,7 @@ async fn handle_transcriptions(
     super::auth::check_group_rate(state, &key).await?;
 
     let (reservation_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -434,6 +441,7 @@ async fn handle_transcriptions(
         .await
     {
         Ok(resp) => {
+            super::key_health::success(state, &cand).await;
             // verbose_json 的 duration（秒）记快照 media_units 供审计
             let duration_secs = serde_json::from_slice::<Value>(&resp.body)
                 .ok()
@@ -459,6 +467,7 @@ async fn handle_transcriptions(
                 headers,
                 reservation_pool,
                 source_window.as_deref(),
+                &mut failure,
             )
             .await
             .inspect_err(|error| failure.error(error))?;
@@ -479,7 +488,16 @@ async fn handle_transcriptions(
                 .refund(key.user_id, key.key_id, request_id)
                 .await;
             tracing::warn!(request_id = %request_id, error = %err, "transcriptions 上游失败");
-            let error = AppError::new(StatusCode::BAD_GATEWAY, err.error_code());
+            if err.error_code() != codes::NO_AVAILABLE_CHANNEL {
+                super::key_health::failure(
+                    state,
+                    &cand,
+                    err.error_code(),
+                    super::chat::failure_kind_of(&err),
+                )
+                .await;
+            }
+            let error = super::account_control::attempt_error(&err);
             failure.error(&error);
             Err(error)
         }
@@ -504,10 +522,21 @@ async fn settle(
     headers: &HeaderMap,
     reservation_pool: okapi_ledger::Pool,
     source_window: Option<&str>,
+    failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
     let mut snapshot = quote.snapshot.clone();
     if media_units.is_some() {
         snapshot.media_units = media_units;
+    }
+    let pricing_epoch = snapshot.epoch;
+    let mut snapshot = serde_json::to_value(&snapshot).ok();
+    if let Some(cand) = cand {
+        snapshot = super::upstream_cost::snapshot(
+            snapshot,
+            cand.channel_id,
+            cand.cost_milli,
+            quote.list_price,
+        );
     }
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
@@ -532,8 +561,8 @@ async fn settle(
         discount: quote.discount,
         list_price: quote.list_price,
         upstream_cost: None,
-        pricing_epoch: Some(snapshot.epoch),
-        pricing_snapshot: serde_json::to_value(&snapshot).ok(),
+        pricing_epoch: Some(pricing_epoch),
+        pricing_snapshot: snapshot,
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: None,
         is_stream: false,
@@ -551,7 +580,12 @@ async fn settle(
         event_type: "commit",
         pool: reservation_pool,
     };
-    if !state.settle_success(input).await? {
+    failure.disarm();
+    if !state
+        .settle_success(input)
+        .await
+        .inspect_err(|error| failure.settlement_failed(error))?
+    {
         return Ok(());
     }
     super::auth::record_settlement_counters(

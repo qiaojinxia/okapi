@@ -138,6 +138,8 @@ pub struct PricingSnapshot {
     #[serde(serialize_with = "ser_ratio")]
     pub user_multiplier: RatioFp,
     pub rules: Vec<AppliedRule>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub server_tool_fees: Vec<crate::ServerToolFee>,
     /// 媒体单位数。按张收费时作为乘数；Images Token 定价时仅记录成功张数。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_units: Option<u32>,

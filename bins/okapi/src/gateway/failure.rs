@@ -61,6 +61,14 @@ impl Guard {
     pub fn disarm(&mut self) {
         self.armed = false;
     }
+    /// 交给 `settle_success` 前解除；它返回错误时什么账都没落，重新挂上留失败痕。
+    pub fn arm(&mut self) {
+        self.armed = true;
+    }
+    pub fn settlement_failed(&mut self, error: &super::error::AppError) {
+        self.arm();
+        self.error(error);
+    }
     pub fn error(&mut self, error: &super::error::AppError) {
         self.error_code.clone_from(&error.code);
     }

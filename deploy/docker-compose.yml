@@ -23,7 +23,7 @@ x-okapi-env: &okapi-env
   OKAPI_EDGE_KEY: ${OKAPI_EDGE_KEY:-}
   # 每个容器各开一套 PG 池，总连接 = Σ(副本数 × 本值)。本文件 multi profile 是
   # gateway 2 + console 1 + worker 1 = 4 个容器 × 12 = 48 条，PG 缺省 max_connections=100 够用；
-  # 往上扩 gateway 副本数前先把这笔账重算一遍（或上 PgBouncer transaction 模式）。
+  # 扩 gateway 副本前重算连接预算。PgBouncer 仅支持 session 模式：账本使用会话级 advisory lock。
   OKAPI_PG_POOL: ${OKAPI_PG_POOL:-12}
 
 x-okapi-image: &okapi-image

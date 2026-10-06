@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO proxy_group_members (group_code, proxy_id)\n        SELECT $1, id FROM unnest($2::bigint[]) AS m(id)\n        ON CONFLICT (group_code, proxy_id) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cda4a129edb6426612b1d1c27b104c5427966b4fe45cefd29e23e2118aa0aee7"
+}

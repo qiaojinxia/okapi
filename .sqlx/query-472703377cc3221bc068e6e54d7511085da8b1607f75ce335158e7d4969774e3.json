@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE channels\n        SET egress_mode = $2, egress_proxy_id = $3, egress_group_code = $4, updated_at = now()\n        WHERE id = ANY($1) AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Varchar",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "472703377cc3221bc068e6e54d7511085da8b1607f75ce335158e7d4969774e3"
+}

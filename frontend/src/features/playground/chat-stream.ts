@@ -11,11 +11,22 @@ export interface ChatUsage {
   reasoning_tokens: number
 }
 
+/// 流式里一个工具调用的增量：同一个 `index` 的片段按到达顺序拼成完整调用——
+/// `id` / `name` 通常只在首块出现，`arguments` 是分片的 JSON 文本。
+export interface ToolCallDelta {
+  index: number
+  id?: string
+  name?: string
+  arguments: string
+}
+
 export interface StreamDelta {
   /// 正文增量（可能为空串）。
   content: string
   /// 推理增量（reasoning_content / reasoning）；客户端可选择折叠显示。
   reasoning: string
+  /// 本块里的工具调用增量（没有则为空数组）。
+  toolCalls: ToolCallDelta[]
   /// 上游实际服务的模型名（首个带 model 的块）。
   model: string | null
   usage: ChatUsage | null
@@ -25,7 +36,12 @@ export interface StreamDelta {
 interface RawChunk {
   model?: string
   choices?: Array<{
-    delta?: { content?: string | null; reasoning_content?: string | null; reasoning?: string | null }
+    delta?: {
+      content?: string | null
+      reasoning_content?: string | null
+      reasoning?: string | null
+      tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string | null } }> | null
+    }
     finish_reason?: string | null
   }>
   usage?: {
@@ -39,7 +55,7 @@ interface RawChunk {
 /// 一个 SSE 事件的 data 行 JSON → 增量。认不出的块返回空增量而不是抛错：
 /// 上游偶发的心跳 / 未知事件不该打断一段正在显示的回复。
 export function applyChunk(data: string): StreamDelta {
-  const empty: StreamDelta = { content: '', reasoning: '', model: null, usage: null, finish: null }
+  const empty: StreamDelta = { content: '', reasoning: '', toolCalls: [], model: null, usage: null, finish: null }
   let raw: RawChunk
   try {
     raw = JSON.parse(data) as RawChunk
@@ -58,6 +74,12 @@ export function applyChunk(data: string): StreamDelta {
   return {
     content: choice?.delta?.content ?? '',
     reasoning: choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? '',
+    toolCalls: (choice?.delta?.tool_calls ?? []).map((call, position) => ({
+      index: typeof call.index === 'number' && call.index >= 0 ? call.index : position,
+      ...(typeof call.id === 'string' && call.id !== '' ? { id: call.id } : {}),
+      ...(typeof call.function?.name === 'string' && call.function.name !== '' ? { name: call.function.name } : {}),
+      arguments: typeof call.function?.arguments === 'string' ? call.function.arguments : '',
+    })),
     model: typeof raw.model === 'string' && raw.model !== '' ? raw.model : null,
     usage,
     finish: choice?.finish_reason ?? null,
@@ -81,11 +103,17 @@ export function parseSseChunk(carry: string, chunk: string): { events: string[];
   return { events, carry: rest }
 }
 
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant'
-  content: string
-  reasoning_content?: string
+/// 发给上游的工具调用（assistant 消息里的 `tool_calls`）。
+export interface WireToolCall {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
 }
+
+export type ChatMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; reasoning_content?: string; tool_calls?: WireToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
 
 export interface ChatParams {
   model: string
@@ -95,6 +123,8 @@ export interface ChatParams {
   max_tokens?: number
   reasoning_effort?: string
   reasoning?: { max_tokens: number }
+  /// 工具定义（OpenAI `tools` 形状）；缺省 = 不声明任何工具。
+  tools?: unknown[]
 }
 
 export interface StreamCallbacks {

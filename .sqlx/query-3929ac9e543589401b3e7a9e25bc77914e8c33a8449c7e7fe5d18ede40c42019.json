@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE proxies SET failed_count = 0, updated_at = now()\n           WHERE id = $1 AND failed_count > 0\n             AND (cooldown_until IS NULL OR cooldown_until <= now())",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3929ac9e543589401b3e7a9e25bc77914e8c33a8449c7e7fe5d18ede40c42019"
+}

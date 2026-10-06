@@ -21,6 +21,9 @@ async fn mock_speech(
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     let req: Value = serde_json::from_slice(&body).unwrap();
+    if req["input"] == "upstream-unavailable" {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     assert_eq!(req["input"], expected, "JSON 原样透传");
     if expected == "test-upstream-failure" {
         return axum::http::StatusCode::BAD_REQUEST.into_response();
@@ -78,6 +81,7 @@ struct TestEnv {
     state: gateway::state::AppState,
     tts_model: String,
     stt_model: String,
+    channel_key: i64,
 }
 
 async fn setup() -> TestEnv {
@@ -85,7 +89,7 @@ async fn setup() -> TestEnv {
 }
 
 async fn setup_input(expected_input: &str) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -111,7 +115,7 @@ async fn setup_input(expected_input: &str) -> TestEnv {
         .unwrap();
 
     let mock = spawn_mock(expected_input).await;
-    okapi_store::provision::create_channel(
+    let (_, channel_key) = okapi_store::provision::create_channel(
         &pg,
         &format!("au-{suffix}"),
         "openai",
@@ -148,6 +152,7 @@ async fn setup_input(expected_input: &str) -> TestEnv {
         state,
         tts_model,
         stt_model,
+        channel_key,
     }
 }
 
@@ -627,4 +632,33 @@ async fn speech_failure_refunds_and_records_a_failed_terminal() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     panic!("missing failed speech audit");
+}
+
+/// 语音端点也参与渠道 key 健康反馈：上游 503 记一次连续失败，下一次成功清零。
+/// 此前 audio 两个端点对 key 健康完全不做反馈。
+#[tokio::test]
+async fn speech_reports_key_health_both_ways() {
+    let env = setup().await;
+    let speak = |input: &'static str| {
+        reqwest::Client::new()
+            .post(format!("http://{}/v1/audio/speech", env.gateway))
+            .bearer_auth(&env.token)
+            .json(&json!({"model": env.tts_model, "input": input, "voice": "alloy"}))
+            .send()
+    };
+    let failed_count = || async {
+        sqlx::query_scalar::<_, i32>("SELECT failed_count FROM channel_keys WHERE id = $1")
+            .bind(env.channel_key)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap()
+    };
+    assert_ne!(speak("upstream-unavailable").await.unwrap().status(), 200);
+    assert_eq!(
+        failed_count().await,
+        1,
+        "a 503 counts as a transient failure"
+    );
+    assert_eq!(speak("hello world").await.unwrap().status(), 200);
+    assert_eq!(failed_count().await, 0, "the next success clears it");
 }

@@ -136,13 +136,13 @@ pub async fn evaluate(
         .filter(|(_, e)| e.until <= now_s)
         .map(|(k, _)| k.clone())
         .collect();
-    margin::remove_blocks(redis, &expired).await?;
+    let pruned = margin::prune_expired(redis, now_s).await?;
     for k in &expired {
         existing.remove(k);
     }
 
     let mut report = Report {
-        pruned: expired.len(),
+        pruned,
         ..Report::default()
     };
     let Some(ch) = ch else {
@@ -169,27 +169,29 @@ pub async fn evaluate(
                 margin_bp: bp,
                 state: BlockState::Blocked,
             },
-            None => {
-                report.tripped.push(Tripped {
-                    group_code: s.group_code.clone(),
-                    channel_id: s.channel_id,
-                    requests: s.requests,
-                    amount_micro: s.amount_micro,
-                    cost_micro: s.cost_micro,
-                    margin_bp: bp,
-                });
-                BlockEntry {
-                    state: BlockState::Blocked,
-                    since: now_s,
-                    until: now_s + cfg.cooldown_secs,
-                    requests: s.requests,
-                    amount_micro: s.amount_micro,
-                    cost_micro: s.cost_micro,
-                    margin_bp: bp,
-                }
-            }
+            None => BlockEntry {
+                state: BlockState::Blocked,
+                since: now_s,
+                until: now_s + cfg.cooldown_secs,
+                requests: s.requests,
+                amount_micro: s.amount_micro,
+                cost_micro: s.cost_micro,
+                margin_bp: bp,
+            },
         };
-        margin::set_block(redis, &field, &entry).await?;
+        if !margin::compare_set_block(redis, &field, existing.get(&field), &entry).await? {
+            continue;
+        }
+        if !existing.contains_key(&field) {
+            report.tripped.push(Tripped {
+                group_code: s.group_code.clone(),
+                channel_id: s.channel_id,
+                requests: s.requests,
+                amount_micro: s.amount_micro,
+                cost_micro: s.cost_micro,
+                margin_bp: bp,
+            });
+        }
         existing.insert(field, entry);
     }
     report.blocked_total = count_blocked(&existing, now_s);

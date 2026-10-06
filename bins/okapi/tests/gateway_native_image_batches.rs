@@ -20,6 +20,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 const BALANCE: i64 = 1_000_000;
 const PRICE: i64 = 40_000;
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nnative-private-image";
@@ -31,6 +34,8 @@ mod archive;
 mod cleanup;
 #[path = "support/native_batch_concurrency.rs"]
 mod concurrency;
+#[path = "support/native_batch_cost_source.rs"]
+mod cost_source;
 #[path = "support/native_batch_filters.rs"]
 mod filters;
 #[path = "support/native_batch_recovery.rs"]
@@ -365,6 +370,7 @@ impl Env {
         )
         .await
         .unwrap();
+        published_pricing::publish(&pg, uid).await;
         pg.close().await;
         let state = gateway::build_state(
             &database,
@@ -427,12 +433,19 @@ impl Env {
         response.json().await.unwrap()
     }
     async fn step(&self, job: &Value) -> Result<bool, gateway::error::AppError> {
+        self.step_with(&self.state, job).await
+    }
+    async fn step_with(
+        &self,
+        state: &gateway::state::AppState,
+        job: &Value,
+    ) -> Result<bool, gateway::error::AppError> {
         sqlx::query("UPDATE image_batches SET next_run_at=now() WHERE id=$1")
             .bind(id(job))
             .execute(&self.state.pg)
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), run_one(&self.state, Some(id(job))))
+        tokio::time::timeout(Duration::from_secs(15), run_one(state, Some(id(job))))
             .await
             .unwrap()
     }
@@ -546,7 +559,7 @@ async fn native_lifecycle_preserves_price_and_bills_only_delivered_images() {
     )
     .await
     .unwrap();
-    assert!(run_one(&restarted, Some(id(&job))).await.unwrap());
+    assert!(env.step_with(&restarted, &job).await.unwrap());
     restarted.pg.close().await;
     assert_eq!(env.poll(&job).await["status"], "partial");
     let pricing = env.money(&job, PRICE / 2).await;

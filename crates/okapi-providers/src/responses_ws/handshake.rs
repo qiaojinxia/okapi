@@ -39,10 +39,17 @@ pub(super) async fn connect(
         request.map_err(|_| UpstreamError::Build("responses_ws_invalid_headers".into()))?;
     let key = generate_key();
     prepare_headers(request.headers_mut(), headers, &key)?;
-    let mut response = client
-        .execute(request)
-        .await
-        .map_err(|_| UpstreamError::Connect("responses_ws_handshake".into()))?;
+    // 连接阶段失败（含代理隧道 / TLS）单独成类，供出口代理熔断归因（§11.41）
+    let mut response = client.execute(request).await.map_err(|e| {
+        if e.is_connect() {
+            UpstreamError::Unreachable {
+                timed_out: e.is_timeout(),
+                detail: "responses_ws_handshake".into(),
+            }
+        } else {
+            UpstreamError::Connect("responses_ws_handshake".into())
+        }
+    })?;
     if response.status() != reqwest::StatusCode::SWITCHING_PROTOCOLS {
         let status = response.status().as_u16();
         let retry_after_secs = crate::retry_after::seconds(response.headers());

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO proxy_group_members (group_code, proxy_id, priority, weight)\n        SELECT $1, m.proxy_id, m.priority, m.weight\n        FROM unnest($2::bigint[], $3::int[], $4::int[]) AS m(proxy_id, priority, weight)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Varchar",
+        "Int8Array",
+        "Int4Array",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0fa132f914f7d6a1d13bae810c115032aeb2feb643126de4848a548594cf1a83"
+}

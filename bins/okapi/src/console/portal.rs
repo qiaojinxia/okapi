@@ -9,15 +9,16 @@ mod key_trends;
 mod pricing;
 mod usage_logs;
 pub use pricing::{public_groups, public_models, public_pricing, public_statistics};
-pub use usage_logs::{list as logs, stat as logs_stat};
+pub use usage_logs::{list as logs, series as logs_series, stat as logs_stat};
 
 use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
+use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::codes;
 use okapi_store::ChClient;
@@ -53,9 +54,9 @@ pub async fn me(
     let balance = state.ledger.balance(key.user_id).await?;
     let has_web_session = super::auth_web::require_session(&state, &headers)
         .await
-        .is_ok_and(|user_id| user_id == key.user_id);
+        .is_ok_and(|user_id| user_id == key.actor_user_id());
     let key_info: Option<(String, String, String)> =
-        sqlx::query_as("SELECT k.name, k.key_prefix, u.username FROM api_keys k JOIN users u ON u.id = k.user_id WHERE k.id = $1 AND k.user_id = $2")
+        sqlx::query_as("SELECT k.name, k.key_prefix, u.username FROM api_keys k JOIN users u ON u.id = COALESCE(k.member_user_id,k.user_id) WHERE k.id = $1 AND k.user_id = $2")
             .bind(key.key_id)
             .bind(key.user_id)
             .fetch_optional(&state.pg)
@@ -85,7 +86,8 @@ pub async fn me(
         Vec::new()
     };
     Ok(Json(json!({
-        "user_id": key.user_id,
+        "user_id": key.actor_user_id(),
+        "wallet_user_id": key.user_id,
         "username": key_info.as_ref().map(|info| &info.2),
         "key_id": key.key_id,
         "key_name": key_info.as_ref().map(|info| &info.0),
@@ -441,7 +443,7 @@ pub async fn redeem(
 
     let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, key.user_id).await?;
     let mut tx = guard
-        .connection()
+        .connection()?
         .begin()
         .await
         .map_err(okapi_store::StoreError::from)?;
@@ -640,26 +642,29 @@ pub async fn keys(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let slice = q.slice();
+    let delegated_key = key.member_user_id.map(|_| key.key_id);
     let (rows, total) = tokio::try_join!(
         sqlx::query!(
             r#"
         SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,
                daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,
                expires_at, last_used_at, created_at
-        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY id
+        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL AND ($4::bigint IS NULL OR id=$4) ORDER BY id
         LIMIT $2 OFFSET $3
         "#,
             key.user_id,
             slice.limit,
-            slice.offset
+            slice.offset,
+            delegated_key
         )
         .fetch_all(&state.pg),
         okapi_store::listing::count_unless_all(
             slice,
             sqlx::query_scalar!(
                 r#"SELECT COUNT(*)::bigint AS "c!" FROM api_keys
-           WHERE user_id = $1 AND deleted_at IS NULL"#,
-                key.user_id
+           WHERE user_id = $1 AND deleted_at IS NULL AND ($2::bigint IS NULL OR id=$2)"#,
+                key.user_id,
+                delegated_key
             )
             .fetch_one(&state.pg)
         ),
@@ -838,6 +843,14 @@ pub async fn patch_key(
     ExtractJson(req): ExtractJson<PatchKeyReq>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
+    // A delegated team credential manages itself. Owner/admin management of
+    // other members uses the session-authenticated /api/teams endpoints.
+    if key.member_user_id.is_some() && id != key.key_id {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            codes::PERMISSION_DENIED,
+        ));
+    }
     validate_key_limits(req.quota_micro.flatten(), req.expires_at.flatten())?;
     // A delegated/restricted credential must not remove its own restrictions.
     let changes_access = req.quota_micro.is_some()
@@ -905,6 +918,14 @@ pub async fn delete_key(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
+    // A delegated team credential manages itself. Owner/admin management of
+    // other members uses the session-authenticated /api/teams endpoints.
+    if key.member_user_id.is_some() && id != key.key_id {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            codes::PERMISSION_DENIED,
+        ));
+    }
     let touched = okapi_store::admin::soft_delete_api_key(&state.pg, id, Some(key.user_id)).await?;
     let Some(touched) = touched else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));

@@ -31,7 +31,7 @@ import { Drawer } from '@/components/ui/drawer'
 import { LogTokenUsage } from '@/features/logs/LogTokenUsage'
 import { LogPerformance, LogPerformanceDetails } from '@/features/logs/LogPerformance'
 import { LogErrorDetails } from '@/features/logs/LogErrorDetails'
-import { DetailSection, IdRow, InfoGrid, InfoItem } from '@/features/logs/detail-ui'
+import { DetailAmount, DetailBody, DetailSection, IdRow, InfoGrid, InfoItem } from '@/features/logs/detail-ui'
 import { LogRequestDetails } from '@/features/logs/LogRequestDetails'
 import { LogBillingDetails } from '@/features/logs/LogBillingDetails'
 import { billingStatus, logMoney } from '@/features/logs/types'
@@ -93,13 +93,13 @@ function validRange(draft: Pick<Draft, 'from' | 'to'>): boolean {
   return from !== undefined && (draft.to === '' || (to !== undefined && Date.parse(to) >= Date.parse(from)))
 }
 
-/// RFC3339（UTC）→ datetime-local 输入值（本地时区，分钟精度）。
+/// RFC3339（UTC）→ datetime-local 输入值（本地时区，毫秒精度）。
 function toLocalInput(iso: string | undefined): string {
   if (!iso) return ''
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
 }
 
 /// datetime-local → RFC3339（UTC）。地址栏与后端只认 UTC，避免时区随浏览器漂移。
@@ -370,7 +370,7 @@ function RangePicker({
           <Field label={t('admin:logsFrom')} htmlFor="logs-from">
             <Input
               id="logs-from"
-              type="datetime-local"
+              type="datetime-local" step="0.001"
               className="h-11 min-w-0 w-full md:h-9"
               aria-label={t('admin:logsFrom')}
               value={draft.from}
@@ -381,7 +381,7 @@ function RangePicker({
           <Field label={t('admin:logsTo')} htmlFor="logs-to">
             <Input
               id="logs-to"
-              type="datetime-local"
+              type="datetime-local" step="0.001"
               className="h-11 min-w-0 w-full md:h-9"
               aria-label={t('admin:logsTo')}
               value={draft.to}
@@ -613,10 +613,11 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
       {rows.length === 0 ? (
         <EmptyState hint={t('admin:logsEmptyHint')} />
       ) : (
-        <Table dense stickyHeader aria-label={t('admin:logsNav')} scrollResetKey={params} className="min-w-[84rem] table-fixed 2xl:min-w-[88rem]" wrapperClassName="[container-type:inline-size]">
+        <Table dense stickyHeader aria-label={t('admin:logsNav')} scrollResetKey={params} className="min-w-[84rem] table-fixed" wrapperClassName="[container-type:inline-size]">
           <colgroup>
-            <col className="w-6" /><col className="w-32" /><col className="w-36" /><col className="w-36" />
-            <col /><col className="w-32 2xl:w-44" /><col className="w-76" /><col className="w-28" /><col className="w-28" /><col className="w-16" />
+            <col className="w-6" /><col className="w-32" /><col className="w-26" /><col className="w-30" />
+            {/* Model and channel share the space left by the fixed metric columns. */}
+            <col /><col /><col className="w-78" /><col className="w-28" /><col className="w-64" /><col className="w-16" />
           </colgroup>
           <THead>
             <Tr>
@@ -865,28 +866,24 @@ function RowDetail({ row }: { row: LogRow }) {
     <DetailSection icon={icon} title={title}><InfoGrid cols={3}>{children}</InfoGrid></DetailSection>
   )
   return (
-    <div className="flex min-w-0 flex-col gap-4 text-xs">
+    <DetailBody>
       <LogErrorDetails failed={row.is_error} code={row.error_code} upstreamStatus={row.upstream_status} diagnostics={row.diagnostics} />
       {/* 实扣：详情里最先要看的数。成本与毛利只在有成本数据时出现；负毛利标红——这一笔在亏钱 */}
-      <dl className="grid gap-4 overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-br from-primary/12 via-card to-card p-5 shadow-xs sm:grid-cols-[1fr_auto] sm:items-end">
-        <div className="min-w-0">
-          <dt className="text-xs font-medium text-muted-foreground">{t('logs:final')}</dt>
-          <dd className="mt-1.5 text-3xl leading-9 font-semibold tracking-tight tabular-nums">{formatMoney(row.amount_micro, locale)}</dd>
-        </div>
-        {(row.upstream_cost_known === true || row.upstream_cost_micro > 0) && <div className="min-w-36 rounded-lg bg-card/75 px-3 py-2 ring-1 ring-border/60">
-          <dt className="text-xs text-muted-foreground">{t('admin:statMargin')}</dt>
-          <dd className={`mt-0.5 text-base leading-6 font-semibold tabular-nums ${row.amount_micro < row.upstream_cost_micro ? 'text-destructive' : 'text-success'}`}>{formatMoney(row.amount_micro - row.upstream_cost_micro, locale)}</dd>
-        </div>}
-      </dl>
-      <dl aria-label={t('admin:logsObjects')} className="grid gap-3 sm:grid-cols-3">
+      <DetailAmount label={t('logs:final')} value={formatMoney(row.amount_micro, locale)}>
+        {(row.upstream_cost_known === true || row.upstream_cost_micro > 0) && <dl className="min-w-32 rounded-lg border border-border/60 bg-card/75 px-3 py-2">
+          <dt className="text-xs leading-5 text-muted-foreground">{t('admin:statMargin')}</dt>
+          <dd className={`mt-0.5 text-[13px] leading-5 font-medium tabular-nums ${row.amount_micro < row.upstream_cost_micro ? 'text-destructive' : 'text-success'}`}>{formatMoney(row.amount_micro - row.upstream_cost_micro, locale)}</dd>
+        </dl>}
+      </DetailAmount>
+      <dl aria-label={t('admin:logsObjects')} className="grid gap-2.5 sm:grid-cols-3">
         {[
           { label: t('analytics:dimUser'), icon: User, name: row.username, id: row.user_id },
           { label: t('analytics:dimApiKey'), icon: KeyRound, name: row.key_name || (row.key_prefix ? t('flow:unnamed_api_key') : undefined), id: row.api_key_id, prefix: row.key_prefix },
           { label: t('analytics:dimChannel'), icon: Server, name: row.channel_name || (row.channel_id <= 0 ? t('admin:dashboardUnassignedChannel') : undefined), id: row.channel_id },
-        ].map((object) => <div key={object.label} className="min-w-0 space-y-1 rounded-xl border border-border bg-card p-3.5 shadow-xs">
-          <dt className="flex items-center gap-1.5 text-xs text-muted-foreground"><span aria-hidden className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary"><object.icon className="h-3 w-3" /></span>{object.label}</dt>
-          <dd className="break-words text-sm leading-6 font-semibold [overflow-wrap:anywhere]">{object.name || t('admin:logsNameUnavailable')}</dd>
-          <dd className="break-all text-xs text-muted-foreground tabular-nums">{object.id > 0 ? `ID ${object.id}` : '—'}{object.prefix ? ` · ${object.prefix}…` : ''}</dd>
+        ].map((object) => <div data-slot="detail-object" key={object.label} className="min-w-0 space-y-1 rounded-xl border border-border bg-card p-3">
+          <dt className="flex items-center gap-1.5 text-xs leading-5 text-muted-foreground"><span aria-hidden className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/8 text-primary"><object.icon className="h-3 w-3" /></span>{object.label}</dt>
+          <dd className="break-words text-[13px] leading-5 font-medium [overflow-wrap:anywhere]">{object.name || t('admin:logsNameUnavailable')}</dd>
+          <dd className="break-all text-xs leading-5 text-muted-foreground tabular-nums">{object.id > 0 ? `ID ${object.id}` : '—'}{object.prefix ? ` · ${object.prefix}…` : ''}</dd>
         </div>)}
       </dl>
       {section(
@@ -942,6 +939,6 @@ function RowDetail({ row }: { row: LogRow }) {
       <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
       <LogBillingDetails row={{ ...row, pricing_snapshot: parseSnapshot(row.ratio_snapshot) }} status={row.status} />
       <RefundInline row={row} />
-    </div>
+    </DetailBody>
   )
 }

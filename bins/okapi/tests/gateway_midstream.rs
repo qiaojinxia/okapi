@@ -135,8 +135,9 @@ struct TestEnv {
     calls: Calls,
 }
 
+#[allow(clippy::too_many_lines)] // One fixture keeps channel order and fallback mode together.
 async fn setup(mode: &str) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -200,6 +201,14 @@ async fn setup(mode: &str) -> TestEnv {
         .execute(&pg)
         .await
         .unwrap();
+        if mode == "responses-cut" {
+            sqlx::query("UPDATE channels SET settings = $2 WHERE id = $1")
+                .bind(channel_id)
+                .bind(json!({"responses_native":false}))
+                .execute(&pg)
+                .await
+                .unwrap();
+        }
     }
 
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
@@ -347,6 +356,66 @@ async fn upstream_cut_after_first_token_settles_partial_output_without_retry() {
         0,
         "不得 failover 到备用渠道"
     );
+}
+
+#[tokio::test]
+async fn responses_midstream_error_uses_protocol_shape_and_increasing_sequence() {
+    let env = setup("responses-cut").await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"stream":true,"max_output_tokens":64,"input":"hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let request_id: Uuid = response.headers()["x-okapi-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let text = tokio::time::timeout(Duration::from_secs(5), response.text())
+        .await
+        .unwrap()
+        .unwrap();
+    let events: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == "response.output_text.delta")
+    );
+    let error = events.last().unwrap();
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["code"], "upstream_error");
+    assert_eq!(error["request_id"], request_id.to_string());
+    assert!(
+        error.get("error").is_none(),
+        "Responses uses a top-level error event"
+    );
+    for pair in events.windows(2) {
+        assert!(
+            pair[0]["sequence_number"].as_u64().unwrap()
+                < pair[1]["sequence_number"].as_u64().unwrap()
+        );
+    }
+    assert!(!text.contains("response.completed"));
+    let record = wait_committed(&env.pg, request_id).await;
+    assert_eq!(record.status, 20);
+    assert_eq!(record.failover_count, 0);
+    assert_eq!(record.error_code.as_deref(), Some("upstream_error"));
+    assert!(
+        env.ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(env.calls.cut.load(Ordering::SeqCst), 1);
+    assert_eq!(env.calls.ok.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

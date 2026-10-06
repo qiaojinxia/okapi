@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT COUNT(*) FROM channels\n              WHERE egress_proxy_id = $1 AND deleted_at IS NULL) AS \"channels!\",\n            EXISTS (SELECT 1 FROM settings\n                     WHERE key = 'egress_default' AND value ->> 'mode' = 'proxy'\n                       AND value ->> 'proxy_id' = $1::bigint::text) AS \"is_default!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channels!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "is_default!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "8fc9de6e7f08a2147938efe662bd3fa4b6f29a69ad3700c83d0098ac167ff71a"
+}

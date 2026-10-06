@@ -1,0 +1,134 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, channel_id, status, failed_count, cooldown_until, last_error,\n               weight, max_concurrency, credential_kind, egress_proxy_id\n        FROM channel_keys ORDER BY channel_id, id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "failed_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "failed_count"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "cooldown_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "cooldown_until"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_error",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "weight",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "max_concurrency",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "max_concurrency"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "credential_kind",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "egress_proxy_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "egress_proxy_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "26301051d05bff9ca24a781ed6cf1f8aaf2da0c4b56735e78122111bbc938745"
+}

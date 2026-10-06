@@ -10,8 +10,9 @@ use super::clients::detect_client_type;
 use super::error::AppError;
 use super::error::with_request_id;
 use super::state::AppState;
+use crate::gateway::extract::Path;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -38,13 +39,17 @@ struct VideosProbe {
     seconds: Option<Value>,
 }
 
-fn parse_seconds(v: Option<&Value>) -> u32 {
+fn parse_seconds(v: Option<&Value>) -> Result<u32, AppError> {
+    let Some(v) = v else {
+        return Ok(DEFAULT_SECONDS);
+    };
     let n = match v {
-        Some(Value::String(s)) => s.parse::<u32>().ok(),
-        Some(Value::Number(n)) => n.as_u64().and_then(|x| u32::try_from(x).ok()),
+        Value::String(s) => s.parse::<u32>().ok(),
+        Value::Number(n) => n.as_u64().and_then(|x| u32::try_from(x).ok()),
         _ => None,
     };
-    n.unwrap_or(DEFAULT_SECONDS).clamp(1, MAX_SECONDS)
+    n.filter(|seconds| (1..=MAX_SECONDS).contains(seconds))
+        .ok_or_else(|| AppError::bad_request().with_param("seconds"))
 }
 
 /// per_call 报价 × 秒数（整数饱和乘，乘数记入快照供账单解释）。
@@ -81,7 +86,12 @@ async fn handle_create(
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
     let probe: VideosProbe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
-    let units = parse_seconds(probe.seconds.as_ref());
+    let units = parse_seconds(probe.seconds.as_ref())?;
+    // Forward the same quantity that was priced, including the default.
+    let mut normalized: Value =
+        serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    normalized["seconds"] = Value::String(units.to_string());
+    let body = Bytes::from(serde_json::to_vec(&normalized).map_err(|_| AppError::bad_request())?);
 
     let meta = super::chat::resolve_model_cached(state, &probe.model).await?;
     let Some(meta) = meta.as_ref() else {
@@ -135,9 +145,7 @@ async fn handle_create(
         concurrency: cap(key.max_concurrency),
     };
     let (reservation_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -224,7 +232,7 @@ async fn handle_create(
     for cand in candidates.into_iter().take(MAX_ATTEMPTS) {
         failure.channel(&cand);
         let upstream_model = cand.upstream_model(&canonical).to_owned();
-        let Ok(body_up) = rewrite_model(body, &probe.model, &upstream_model) else {
+        let Ok(body_up) = rewrite_model(&body, &probe.model, &upstream_model) else {
             refund(state, &key, request_id, "videos").await;
             let error = AppError::bad_request();
             failure.error(&error);
@@ -237,7 +245,8 @@ async fn handle_create(
         if let Some(trace) = super::diagnostics::Trace::current() {
             trace.media(&body_up, true);
         }
-        match super::diagnostics::upstream(
+        match super::account_control::execute(
+            state,
             &cand,
             &upstream_model,
             "/v1/videos",
@@ -267,6 +276,7 @@ async fn handle_create(
                             .with_param("task_id_missing"),
                     );
                 };
+                super::key_health::success(state, &cand).await;
                 state
                     .sched
                     .video_task_set(key.user_id, &task_id, cand.channel_key_id)
@@ -286,6 +296,7 @@ async fn handle_create(
                     headers,
                     reservation_pool,
                     source_window.as_deref(),
+                    &mut failure,
                 )
                 .await
                 .inspect_err(|error| failure.error(error))?;
@@ -298,18 +309,18 @@ async fn handle_create(
                 return Ok(out);
             }
             Err(err) if err.retriable_before_first_token() => {
-                let _ = okapi_store::channels::mark_key_failure(
-                    &state.pg,
-                    cand.channel_key_id,
+                super::key_health::failure(
+                    state,
+                    &cand,
                     err.error_code(),
                     super::chat::failure_kind_of(&err),
                 )
                 .await;
                 failover = failover.saturating_add(1);
-                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
+                last_err = Some(super::account_control::attempt_error(&err));
             }
             Err(err) => {
-                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
+                last_err = Some(super::account_control::attempt_error(&err));
                 break;
             }
         }
@@ -399,19 +410,17 @@ async fn relay_task(
 
     if content {
         let path = format!("/videos/{task_id}/content");
-        let resp = state
-            .upstream
-            .get_stream(
-                &base,
-                &path,
-                &ch.credential,
-                &okapi_providers::Outbound {
-                    proxy_url: ch.proxy_url.clone(),
-                    extra_headers: ch.extra_headers.clone(),
-                },
-            )
-            .await
-            .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
+        let outbound = okapi_providers::Outbound {
+            proxy_url: ch.proxy_url.clone(),
+            extra_headers: ch.extra_headers.clone(),
+            ..Default::default()
+        };
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_mins(2),
+            download_response(state, &base, &path, &ch.credential, &outbound),
+        )
+        .await
+        .map_err(|_| AppError::new(StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT))??;
         let status =
             StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let content_type = resp
@@ -437,6 +446,7 @@ async fn relay_task(
                 &okapi_providers::Outbound {
                     proxy_url: ch.proxy_url.clone(),
                     extra_headers: ch.extra_headers.clone(),
+                    ..Default::default()
                 },
             )
             .await
@@ -448,6 +458,64 @@ async fn relay_task(
             .body(Body::from(resp.body))
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
     }
+}
+
+async fn download_response(
+    state: &AppState,
+    base: &str,
+    path: &str,
+    credential: &str,
+    outbound: &okapi_providers::Outbound,
+) -> Result<reqwest::Response, AppError> {
+    let invalid =
+        |reason| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR).with_param(reason);
+    let mut url = reqwest::Url::parse(&format!("{}{path}", base.trim_end_matches('/')))
+        .map_err(|_| invalid("video_download_url"))?;
+    let upstream_origin = url.origin();
+    let public_outbound = okapi_providers::Outbound {
+        proxy_url: outbound.proxy_url.clone(),
+        extra_headers: Vec::new(),
+        ..Default::default()
+    };
+    for hop in 0..=5 {
+        let same_origin = url.origin() == upstream_origin;
+        let response = state
+            .upstream
+            .get_stream_url(
+                url.as_str(),
+                same_origin.then_some(credential),
+                if same_origin {
+                    outbound
+                } else {
+                    &public_outbound
+                },
+            )
+            .await
+            .map_err(|_| invalid("video_download_request"))?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        if hop == 5 {
+            return Err(invalid("video_download_redirect_limit"));
+        }
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| invalid("video_download_redirect_location"))?;
+        let next = url
+            .join(location)
+            .map_err(|_| invalid("video_download_redirect_location"))?;
+        if url.scheme() == "https" && next.scheme() != "https" {
+            return Err(invalid("video_download_redirect_scheme"));
+        }
+        crate::console::ssrf::validate_url(&state.pg, next.as_str())
+            .await
+            .map_err(|_| invalid("video_download_redirect_target"))?;
+        url = next;
+    }
+    Err(invalid("video_download_redirect_limit"))
 }
 
 async fn refund(state: &AppState, key: &okapi_store::AuthedKey, request_id: Uuid, tag: &str) {
@@ -476,6 +544,7 @@ async fn commit_and_record(
     headers: &HeaderMap,
     reservation_pool: okapi_ledger::Pool,
     source_window: Option<&str>,
+    failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
@@ -501,7 +570,12 @@ async fn commit_and_record(
         list_price: quote.list_price,
         upstream_cost: None,
         pricing_epoch: Some(quote.snapshot.epoch),
-        pricing_snapshot: serde_json::to_value(&quote.snapshot).ok(),
+        pricing_snapshot: super::upstream_cost::snapshot(
+            serde_json::to_value(&quote.snapshot).ok(),
+            cand.channel_id,
+            cand.cost_milli,
+            quote.list_price,
+        ),
         latency_ms: i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX),
         ttft_ms: None,
         is_stream: false,
@@ -519,7 +593,12 @@ async fn commit_and_record(
         event_type: "commit",
         pool: reservation_pool,
     };
-    if !state.settle_success(input).await? {
+    failure.disarm();
+    if !state
+        .settle_success(input)
+        .await
+        .inspect_err(|error| failure.settlement_failed(error))?
+    {
         return Ok(());
     }
     super::auth::record_settlement_counters(
@@ -566,6 +645,28 @@ async fn observe_task(
     Ok(())
 }
 
+/// 生成期限：过了仍未完成的任务按失败退款。
+const TASK_EXPIRY: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+/// 一直查不到上游状态时的放弃期限。
+const POLL_GIVE_UP: chrono::TimeDelta = chrono::TimeDelta::hours(72);
+
+fn is_terminal(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|status| {
+            matches!(
+                status.as_str(),
+                "failed" | "cancelled" | "canceled" | "completed"
+            )
+        })
+}
+
 pub async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
     use futures::StreamExt as _;
     let tasks = sqlx::query!("UPDATE video_tasks SET next_poll_at=now()+interval '1 minute' WHERE (user_id,task_id) IN (SELECT user_id,task_id FROM video_tasks WHERE state IN ('pending','refund_pending') AND next_poll_at<=now() ORDER BY next_poll_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING user_id,task_id,channel_key_id,created_at,state").fetch_all(&state.pg).await?;
@@ -574,33 +675,47 @@ pub async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
             let (user_id, task_id, channel_key_id) =
                 (task.user_id, task.task_id, task.channel_key_id);
             let result = async {
-                if task.state == "refund_pending"
-                    || chrono::Utc::now().signed_duration_since(task.created_at)
-                        >= chrono::Duration::hours(24)
-                {
-                    return observe_task(state, user_id, &task_id, br#"{"status":"failed"}"#).await;
+                const FAILED: &[u8] = br#"{"status":"failed"}"#;
+                if task.state == "refund_pending" {
+                    return observe_task(state, user_id, &task_id, FAILED).await;
                 }
-                let ch = okapi_store::channels::channel_key_ref(
-                    &state.pg,
-                    channel_key_id,
-                    state.master_key.as_deref(),
-                )
-                .await?
-                .ok_or_else(AppError::internal)?;
-                let response = state
-                    .upstream
-                    .get_json(
-                        ch.api_base.as_deref().unwrap_or(DEFAULT_OPENAI_BASE),
-                        &format!("/videos/{task_id}"),
-                        &ch.credential,
-                        &okapi_providers::Outbound {
-                            proxy_url: ch.proxy_url,
-                            extra_headers: ch.extra_headers,
-                        },
+                let age = chrono::Utc::now().signed_duration_since(task.created_at);
+                let polled = async {
+                    let ch = okapi_store::channels::channel_key_ref(
+                        &state.pg,
+                        channel_key_id,
+                        state.master_key.as_deref(),
                     )
-                    .await
-                    .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))?;
-                observe_task(state, user_id, &task_id, &response.body).await
+                    .await?
+                    .ok_or_else(AppError::internal)?;
+                    state
+                        .upstream
+                        .get_json(
+                            ch.api_base.as_deref().unwrap_or(DEFAULT_OPENAI_BASE),
+                            &format!("/videos/{task_id}"),
+                            &ch.credential,
+                            &okapi_providers::Outbound {
+                                proxy_url: ch.proxy_url,
+                                extra_headers: ch.extra_headers,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(|_| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR))
+                }
+                .await;
+                match polled {
+                    // 过了生成期限仍未出结果的按失败退款；上游已完成的照常收费
+                    Ok(response) if age >= TASK_EXPIRY && !is_terminal(&response.body) => {
+                        observe_task(state, user_id, &task_id, FAILED).await
+                    }
+                    Ok(response) => observe_task(state, user_id, &task_id, &response.body).await,
+                    // 查不到状态不等于失败：用户可能已取回成片。宽限到放弃期限才退款
+                    Err(_) if age >= POLL_GIVE_UP => {
+                        observe_task(state, user_id, &task_id, FAILED).await
+                    }
+                    Err(error) => Err(error),
+                }
             }
             .await;
             if let Err(error) = result {
@@ -611,4 +726,26 @@ pub async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
         .collect::<Vec<_>>()
         .await;
     Ok(())
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+    #[test]
+    fn duration_is_exact_or_rejected() {
+        assert_eq!(parse_seconds(None).unwrap(), 4);
+        for value in [serde_json::json!("12"), serde_json::json!(12)] {
+            assert_eq!(parse_seconds(Some(&value)).unwrap(), 12);
+        }
+        for value in [
+            serde_json::json!(120),
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("invalid"),
+            Value::Null,
+        ] {
+            assert!(parse_seconds(Some(&value)).is_err());
+        }
+    }
 }

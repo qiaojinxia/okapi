@@ -1,4 +1,5 @@
 //! Shared chat endpoint compatibility for routing, diagnostics and connection examples.
+use super::execution_plan::{ExecutionPlan, Requirements};
 use okapi_store::ChannelCandidate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,18 +45,15 @@ impl Ingress {
         native: bool,
         caps: &Value,
     ) -> bool {
-        if provider == "codex" && !matches!(self, Self::Responses | Self::ResponsesCompact) {
-            return false;
-        }
-        match self {
-            Self::Anthropic => {
-                super::dialect::upstream_dialect(provider, upstream_model) != "gemini"
-            }
-            Self::ResponsesCompact => {
-                native && caps.get("compact").and_then(Value::as_bool) != Some(false)
-            }
-            _ => true,
-        }
+        ExecutionPlan::compile_target(
+            self,
+            provider,
+            upstream_model,
+            native,
+            caps,
+            Requirements::default(),
+        )
+        .is_ok()
     }
 
     pub fn accepts(self, channel: &ChannelCandidate, model: &str) -> bool {

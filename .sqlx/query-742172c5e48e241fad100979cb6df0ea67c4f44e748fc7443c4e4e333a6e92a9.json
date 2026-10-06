@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE channel_keys k SET egress_proxy_id = v.proxy_id\n            FROM unnest($1::bigint[], $2::bigint[]) AS v(key_id, proxy_id)\n            WHERE k.id = v.key_id\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "742172c5e48e241fad100979cb6df0ea67c4f44e748fc7443c4e4e333a6e92a9"
+}

@@ -55,8 +55,14 @@ async fn mock_boom() -> axum::response::Response {
         .into_response()
 }
 
+/// 永不回答：客户端只能自己放弃。
+async fn mock_hang() -> axum::response::Response {
+    std::future::pending().await
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
+        .route("/ok/hang", get(mock_hang))
         .route("/ok/tool", post(mock_tool).get(mock_tool))
         .route("/ok/echo", post(mock_echo))
         .route("/ok/boom", get(mock_boom));
@@ -78,7 +84,7 @@ struct TestEnv {
 }
 
 async fn setup() -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
 
@@ -285,6 +291,52 @@ async fn upstream_failure_refunds() {
     assert_eq!(amount, 0);
     let balance = env.ledger.balance(env.user_id).await.unwrap();
     assert_eq!(balance.as_micros(), 1_000_000, "失败必须全额退款");
+}
+
+/// 客户端在上游回答前断开：handler 被丢弃，预扣当场退回并留 `client_closed_request` 失败账。
+/// 此前透传没有失败守卫，预扣要等约 10 分钟的过期清理，也没有任何记录。
+#[tokio::test]
+async fn client_disconnect_refunds_at_once() {
+    let env = setup().await;
+    let gave_up = reqwest::Client::new()
+        .get(format!(
+            "http://{}/pass/{}/ok/hang",
+            env.gateway, env.channel_id
+        ))
+        .bearer_auth(&env.token)
+        .timeout(std::time::Duration::from_millis(500))
+        .send()
+        .await;
+    assert!(gave_up.is_err_and(|e| e.is_timeout()));
+
+    let mut failed = None;
+    for _ in 0..50 {
+        failed = sqlx::query_as::<_, (i16, i64, Option<String>)>(
+            "SELECT status, amount_micro, error_code FROM billing_records
+             WHERE user_id = $1 AND log_type = 5",
+        )
+        .bind(env.user_id)
+        .fetch_optional(&env.pg)
+        .await
+        .unwrap();
+        if failed.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        failed.expect("断开必须留痕"),
+        (40, 0, Some("client_closed_request".to_owned()))
+    );
+    assert!(
+        env.ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let balance = env.ledger.balance(env.user_id).await.unwrap();
+    assert_eq!(balance.as_micros(), 1_000_000, "预扣当场退回");
 }
 
 /// POST 透传：方法、查询串、Content-Type、请求体原样到上游，上游响应原样回客户端，照常按次计费；

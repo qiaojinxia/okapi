@@ -194,15 +194,37 @@ pub async fn chsink_js_once(
     }
     delivery::admit(&mut tx, events).await?;
     tx.commit().await?;
-    for msg in &messages {
-        match tokio::time::timeout(Duration::from_secs(5), msg.double_ack()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => tracing::warn!(error=%err, "JS ack failed; PG receipt handles replay"),
-            Err(_) => tracing::warn!("JS ack timed out; PG receipt handles replay"),
-        }
-    }
+    acknowledge_with_budget(
+        messages
+            .iter()
+            .cloned()
+            .map(|message| async move { message.double_ack().await }),
+        Duration::from_secs(10),
+    )
+    .await;
     delivery::deliver_once(pg, ch).await?;
     Ok(messages.len())
+}
+
+async fn acknowledge_with_budget<I, F, E>(acknowledgements: I, budget: Duration)
+where
+    I: IntoIterator<Item = F> + Send,
+    I::IntoIter: Send,
+    F: std::future::Future<Output = Result<(), E>> + Send,
+    E: std::fmt::Display + Send,
+{
+    // PG owns durable replay responsibility before this phase. Canceling a
+    // slow acknowledgement is safe and must not stall CH delivery for minutes.
+    let work = futures::stream::iter(acknowledgements).for_each_concurrent(32, |ack| async move {
+        match tokio::time::timeout(Duration::from_secs(5), ack).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "JS ack failed; PG receipt handles replay"),
+            Err(_) => tracing::warn!("JS ack timed out; PG receipt handles replay"),
+        }
+    });
+    if tokio::time::timeout(budget, work).await.is_err() {
+        tracing::warn!("JS acknowledgement batch deadline reached; PG receipt handles replay");
+    }
 }
 
 fn parse_event(data: &[u8], legacy_key: &str) -> anyhow::Result<Event> {
@@ -237,4 +259,18 @@ fn parse_event(data: &[u8], legacy_key: &str) -> anyhow::Result<Event> {
     };
     let row = super::chsink::js_payload_to_ch_row(&payload);
     Ok(Event { key, payload, row })
+}
+
+#[cfg(test)]
+mod acknowledgement_tests {
+    #[tokio::test]
+    async fn stalled_acknowledgements_have_a_batch_deadline() {
+        let started = std::time::Instant::now();
+        super::acknowledge_with_budget(
+            (0..500).map(|_| std::future::pending::<Result<(), std::io::Error>>()),
+            std::time::Duration::from_millis(30),
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
 }

@@ -18,10 +18,14 @@ export const qk = {
   /// 试用台选择密钥用的完整列表（含分组 / 白名单 / 状态）；同样挂在 `keys` 前缀下，建 / 删 / 改 key 后一起失效。
   keysPlayground: ['keys', 'playground'] as const,
   keyUsage: (id: number) => ['keys', 'usage', id] as const,
+  /// 密钥用量折线图（按天序列）；挂在 `keys` 前缀下，与列表同源失效。
+  keyUsageSeries: (id: number, days: number) => ['keys', 'usage-series', id, days] as const,
   /// 站点设置全表（键值卡片）；单个设置项走 `setting(key)`，两者分开失效。
   adminSettings: ['admin', 'settings'] as const,
   setting: (key: string) => ['setting', key] as const,
   adminLeaderboard: (days: number) => ['admin', 'leaderboard', days] as const,
+  channelProviders: ['channel-provider-capabilities'] as const,
+  channelControlUsage: (id: number | undefined, period: string) => ['channel-control-usage', id, period] as const,
   adminChannels: ['admin', 'channels'] as const,
   adminPricingRules: ['admin', 'pricing-rules'] as const,
   adminUsersAll: adminUsers,
@@ -29,6 +33,14 @@ export const qk = {
   adminRoles: ['admin', 'roles'] as const,
   adminPermissions: ['admin', 'permissions'] as const,
   adminPools: ['admin', 'pools'] as const,
+  adminPoolOptions: ['admin', 'pools', 'options'] as const,
+  /// 出口代理（§11.41）：列表分页变体与选择器全量目录同挂前缀，写操作按前缀一起失效。
+  adminProxies: ['admin', 'proxies'] as const,
+  adminProxyOptions: ['admin', 'proxies', 'options'] as const,
+  adminProxyGroups: ['admin', 'proxy-groups'] as const,
+  adminProxyGroupOptions: ['admin', 'proxy-groups', 'options'] as const,
+  proxyGroupAssignments: (code: string) => ['admin', 'proxy-groups', 'assignments', code] as const,
+  egressDefault: ['admin', 'egress', 'default'] as const,
   poolDetail: (code: string) => ['admin', 'pools', 'detail', code] as const,
   audit: (params: string) => ['admin', 'audit', params] as const,
   auditActions: ['admin', 'audit', 'actions'] as const,

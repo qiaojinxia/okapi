@@ -102,6 +102,28 @@ async fn source_rows(
 
 type ModelDayRows = HashMap<(String, String), Value>;
 
+fn cache_write_metrics(writes: i64, requests: i64, known: i64) -> [(&'static str, Value); 3] {
+    [
+        (
+            "cache_write_tokens",
+            if known == requests {
+                json!(writes)
+            } else {
+                Value::Null
+            },
+        ),
+        (
+            "recorded_cache_write_tokens",
+            if known > 0 || writes > 0 {
+                json!(writes)
+            } else {
+                Value::Null
+            },
+        ),
+        ("cache_write_known_requests", json!(known)),
+    ]
+}
+
 async fn performance_rows(
     ch: &ChClient,
     owner: &str,
@@ -178,12 +200,9 @@ pub async fn enrich(
         let ttft_n = measured.map_or(0, |r| ch_i64(r, "ttft_samples"));
         let observed = measured.map_or(0, |r| ch_i64(r, "ttft_observed"));
         let output = perf.map_or(0, |r| ch_i64(r, "latency_output"));
-        row["cache_write_tokens"] = if known == requests {
-            json!(writes)
-        } else {
-            Value::Null
-        };
-        row["cache_write_known_requests"] = json!(known);
+        for (name, value) in cache_write_metrics(writes, requests, known) {
+            row[name] = value;
+        }
         row["cache_read_known_requests"] = json!(read_known);
         let rate = rates.get(&key).unwrap_or(&empty);
         super::output_rate::accumulate(&mut source_totals, rate);
@@ -239,12 +258,18 @@ pub async fn enrich(
 
 fn total_metrics(counts: [i64; 14], source_totals: &Value) -> Value {
     let mut total = json!({
-        "cache_write_tokens": if counts[0] == counts[1] { json!(counts[2]) } else { Value::Null },
-        "cache_write_known_requests": counts[1],
         "cache_read_known_requests": counts[8],
-        "cache_hit_bp": cache_rate(counts[10], counts[9], counts[0], counts[8]),
+        "cache_hit_bp": cache_rate(
+            counts[10],
+            counts[9],
+            super::usage_sources::cache_eligible_requests(source_totals, counts[0], Some(counts[9])),
+            counts[8],
+        ),
 
     });
+    for (name, value) in cache_write_metrics(counts[2], counts[0], counts[1]) {
+        total[name] = value;
+    }
     for (name, value) in super::ttft_average::metrics(counts[5], counts[6], counts[0], counts[11]) {
         total[name] = value;
     }
@@ -315,6 +340,31 @@ mod tests {
         assert_eq!(cache_rate(100, 1000, 2, 2), json!(1000));
         assert_eq!(cache_rate(100, 1000, 2, 1), Value::Null);
         assert_eq!(cache_rate(0, 0, 0, 0), Value::Null);
+    }
+    #[test]
+    fn partial_cache_quantities_do_not_require_a_complete_hit_rate() {
+        let mut counts = [0; 14];
+        counts[0] = 8;
+        counts[1] = 1;
+        counts[2] = 20;
+        counts[8] = 1;
+        counts[9] = 673;
+        counts[10] = 90;
+        let total = total_metrics(counts, &json!({}));
+        assert_eq!(total["cache_write_tokens"], Value::Null);
+        assert_eq!(total["recorded_cache_write_tokens"], 20);
+        assert_eq!(total["cache_hit_bp"], Value::Null);
+        assert_eq!(total["cache_read_known_requests"], 1);
+        counts[2] = 0;
+        assert_eq!(
+            total_metrics(counts, &json!({}))["recorded_cache_write_tokens"],
+            0
+        );
+        counts[1] = 0;
+        assert_eq!(
+            total_metrics(counts, &json!({}))["recorded_cache_write_tokens"],
+            Value::Null
+        );
     }
     #[test]
     fn calendar_window_is_inclusive_and_rejects_invalid_ranges() {

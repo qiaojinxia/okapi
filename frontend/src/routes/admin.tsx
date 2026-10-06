@@ -4,6 +4,7 @@ import {
   Boxes,
   Coins,
   Gift,
+  Globe,
   HeartPulse,
   History,
   KeyRound,
@@ -48,6 +49,7 @@ function AdminLayout() {
       items: [
         { to: '/admin/channels', label: t('admin:channels'), icon: Server, permission: 'channel.read' },
         { to: '/admin/pools', label: t('admin:poolsTitle'), icon: Layers, permission: 'channel.read' },
+        { to: '/admin/proxies', label: t('admin:proxiesTitle'), icon: Globe, permission: 'channel.read' },
       ],
     },
     {

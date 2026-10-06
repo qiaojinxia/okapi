@@ -914,18 +914,13 @@ async fn user_ban(state: &AppState, key: &AuthedKey, args: &Value) -> Result<Val
         .get("user_id")
         .and_then(Value::as_i64)
         .ok_or_else(|| AppError::bad_request().with_param("user_id"))?;
+    super::user_management::validate(state, key, user_id, okapi_store::mutate::UserAction::Ban)
+        .await?;
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Ok(json!({"dry_run": true, "user_id": user_id, "action": "ban"}));
     }
-    sqlx::query!(
-        r#"UPDATE users SET status = 2, updated_at = now() WHERE id = $1"#,
-        user_id
-    )
-    .execute(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
-    state.sched.web_session_revoke_user(user_id).await;
-    state.sched.auth_flush().await;
+    super::user_management::apply(state, key, user_id, okapi_store::mutate::UserAction::Ban)
+        .await?;
     mcp_audit(state, key, "user.ban", &user_id.to_string(), json!({})).await;
     Ok(json!({"dry_run": false, "banned": true}))
 }
@@ -936,7 +931,7 @@ async fn simulate_pricing(state: &AppState) -> Result<Value, AppError> {
     let models = source.models.len();
     let groups = source.groups.len();
     let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
-    match okapi_pricing::book::compile_with_base(source, base) {
+    match crate::gateway::pricing_loader::compile_rows(&rows, base) {
         Ok(_) => Ok(json!({"ok": true, "models": models, "groups": groups})),
         Err(err) => Ok(json!({"ok": false, "compile_error": err.to_string()})),
     }
@@ -952,11 +947,8 @@ async fn apply_pricing(state: &AppState, key: &AuthedKey, args: &Value) -> Resul
     }
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
     let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
-    okapi_pricing::book::compile_with_base(
-        crate::gateway::pricing_loader::build_source(&rows),
-        base,
-    )
-    .map_err(|err| AppError::bad_request().with_param(format!("compile: {err}")))?;
+    crate::gateway::pricing_loader::compile_rows(&rows, base)
+        .map_err(|err| AppError::bad_request().with_param(format!("compile: {err}")))?;
     let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
     snapshot["base_price_per_1m_micro"] = json!(base);
     let epoch = okapi_store::admin::publish_epoch(&state.pg, key.user_id, &snapshot).await?;

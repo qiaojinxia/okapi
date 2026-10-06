@@ -24,7 +24,7 @@ async fn serve(state: gateway::state::AppState) -> SocketAddr {
 /// 空库全流程：status → 创建 → key 可登录 → 二次 409。
 #[tokio::test]
 async fn setup_wizard_on_fresh_database() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
 
@@ -75,6 +75,16 @@ async fn setup_wizard_on_fresh_database() {
     assert_eq!(remote.status(), 403);
     let remote: Value = remote.json().await.unwrap();
     assert_eq!(remote["error"]["param"], "setup_token_required");
+
+    // An attacker can supply loopback forwarding headers through a local reverse proxy.
+    let forged = client
+        .post(format!("http://{addr}/api/setup"))
+        .header("x-forwarded-for", "127.0.0.1")
+        .json(&json!({"username":"intruder"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), 403);
 
     let created: Value = client
         .post(format!("http://{addr}/api/setup"))
@@ -129,7 +139,7 @@ async fn setup_wizard_on_fresh_database() {
 /// 已初始化的共享测试库：status false + POST 409（负路径守卫）。
 #[tokio::test]
 async fn setup_rejected_on_initialized_database() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();

@@ -21,8 +21,53 @@ mod published_pricing;
 #[path = "support/anthropic_usage.rs"]
 mod anthropic_usage;
 
+#[path = "support/server_tools.rs"]
+mod server_tools;
+
+#[path = "support/server_tool_fees.rs"]
+mod server_tool_fees;
+
+#[path = "support/server_tool_admission.rs"]
+mod server_tool_admission;
+
+#[path = "support/server_tool_scope.rs"]
+mod server_tool_scope;
+
+#[path = "support/server_tool_routing.rs"]
+mod server_tool_routing;
+
+#[path = "support/native_gemini_tools.rs"]
+mod native_gemini_tools;
+
+#[path = "support/server_tool_followups.rs"]
+mod server_tool_followups;
+
+#[path = "support/native_cost_coverage.rs"]
+mod native_cost_coverage;
+
+#[path = "support/server_tool_gateway_statistics.rs"]
+mod server_tool_gateway_statistics;
+
+#[path = "support/cost_source.rs"]
+mod cost_source;
+
+#[path = "support/refund_cost_source.rs"]
+mod refund_cost_source;
+
+#[path = "support/reservation_provenance.rs"]
+mod reservation_provenance;
+
 #[path = "support/cache_ttl_billing.rs"]
 mod cache_ttl_billing;
+
+#[path = "support/cache_write_compat.rs"]
+mod cache_write_compat;
+
+#[path = "support/cache_read_compat.rs"]
+mod cache_read_compat;
+
+#[path = "support/cache_aliases.rs"]
+mod cache_aliases;
 
 #[path = "support/usage_provenance.rs"]
 mod usage_provenance;
@@ -51,11 +96,21 @@ impl Protocol {
     }
 }
 
+#[derive(Default)]
+struct CostGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
 #[derive(Clone)]
 struct Mock {
+    cost_gate: Option<Arc<CostGate>>,
     protocol: Protocol,
     usage: Value,
     calls: Arc<AtomicUsize>,
+    captured: Arc<tokio::sync::Mutex<Vec<(Value, i64)>>>,
+    ledger: okapi_ledger::BalanceLedger,
+    user: i64,
 }
 
 async fn upstream(
@@ -64,12 +119,27 @@ async fn upstream(
     Json(body): Json<Value>,
 ) -> axum::response::Response {
     mock.calls.fetch_add(1, Ordering::SeqCst);
+    mock.captured.lock().await.push((
+        body.clone(),
+        mock.ledger.balance(mock.user).await.unwrap().as_micros(),
+    ));
+    if let Some(gate) = &mock.cost_gate {
+        gate.entered.notify_one();
+        tokio::time::timeout(Duration::from_secs(15), gate.release.notified())
+            .await
+            .unwrap();
+    }
     let stream = body["stream"] == true || uri.path().ends_with(":streamGenerateContent");
     let (json, events) = match mock.protocol {
         Protocol::Chat => {
             assert_eq!(uri.path(), "/up/v1/chat/completions");
             let usage = mock.usage.get("final").unwrap_or(&mock.usage);
-            let body = json!({"id":"c","object":"chat.completion","model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":usage});
+            let mut body = json!({"id":"c","object":"chat.completion","model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":usage});
+            if let Some(envelope) = mock.usage.get("envelope").and_then(Value::as_object) {
+                for (key, value) in envelope {
+                    body[key] = value.clone();
+                }
+            }
             let mut events = format!(
                 "data: {}\n\n",
                 json!({"choices":[{"index":0,"delta":{"content":"ok"}}]})
@@ -80,8 +150,14 @@ async fn upstream(
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_else(|| vec![usage.clone()]);
-            for usage in updates {
-                writeln!(events, "data: {}\n", json!({"choices":[],"usage":usage})).unwrap();
+            if let Some(envelopes) = mock.usage.get("envelope_updates").and_then(Value::as_array) {
+                for envelope in envelopes {
+                    writeln!(events, "data: {envelope}\n").unwrap();
+                }
+            } else {
+                for usage in updates {
+                    writeln!(events, "data: {}\n", json!({"choices":[],"usage":usage})).unwrap();
+                }
             }
             events.push_str("data: [DONE]\n\n");
             (body, events)
@@ -135,6 +211,7 @@ struct Env {
     token: String,
     model: String,
     calls: Arc<AtomicUsize>,
+    captured: Arc<tokio::sync::Mutex<Vec<(Value, i64)>>>,
 }
 
 async fn setup(protocol: Protocol, usage: Value) -> Env {
@@ -146,7 +223,45 @@ async fn setup_with_pricing(
     usage: Value,
     cache_rates: Option<(&str, Value)>,
 ) -> Env {
-    dotenvy::dotenv().ok();
+    setup_with_pricing_and_cost_gate(protocol, usage, cache_rates, None).await
+}
+
+async fn setup_with_pricing_and_cost_gate(
+    protocol: Protocol,
+    usage: Value,
+    cache_rates: Option<(&str, Value)>,
+    cost_gate: Option<Arc<CostGate>>,
+) -> Env {
+    setup_inner(protocol, usage, cache_rates, cost_gate, None).await
+}
+
+async fn setup_with_ch_database(usage: Value, database: &str) -> Env {
+    setup_inner(Protocol::Anthropic, usage, None, None, Some(database)).await
+}
+
+async fn fixture_state(
+    pg_url: &str,
+    redis_url: &str,
+    ch_url: Option<&str>,
+    database: Option<&str>,
+) -> gateway::state::AppState {
+    let mut state = gateway::build_state(pg_url, redis_url, "modal-test", ch_url, None)
+        .await
+        .unwrap();
+    if let Some(database) = database {
+        state.ch = Some(okapi_store::ChClient::new(ch_url.unwrap(), database).unwrap());
+    }
+    state
+}
+
+async fn setup_inner(
+    protocol: Protocol,
+    usage: Value,
+    cache_rates: Option<(&str, Value)>,
+    cost_gate: Option<Arc<CostGate>>,
+    database: Option<&str>,
+) -> Env {
+    okapi_store::test_support::assert_isolated();
     let pg_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
@@ -185,10 +300,17 @@ async fn setup_with_pricing(
             .bind(&model).bind(write_ratio).bind(rates).execute(&pg).await.unwrap();
     }
     let calls = Arc::new(AtomicUsize::new(0));
+    let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mock = serve(Router::new().fallback(post(upstream)).with_state(Mock {
+        cost_gate,
         protocol,
         usage,
         calls: calls.clone(),
+        captured: captured.clone(),
+        ledger: okapi_ledger::BalanceLedger::new(
+            okapi_store::connect_redis(&redis_url).await.unwrap(),
+        ),
+        user,
     }))
     .await;
     let (provider, base) = match protocol {
@@ -215,9 +337,7 @@ async fn setup_with_pricing(
         .await
         .unwrap();
     published_pricing::publish(&pg, user).await;
-    let state = gateway::build_state(&pg_url, &redis_url, "modal-test", ch_url.as_deref(), None)
-        .await
-        .unwrap();
+    let state = fixture_state(&pg_url, &redis_url, ch_url.as_deref(), database).await;
     state
         .ledger
         .credit(user, Money::from_micros(50_000_000))
@@ -233,6 +353,7 @@ async fn setup_with_pricing(
         token,
         model,
         calls,
+        captured,
     }
 }
 
@@ -242,7 +363,17 @@ async fn request(
     stream: bool,
     native_gemini: bool,
 ) -> reqwest::Response {
-    let (path, body) = if native_gemini {
+    request_with_tools(env, protocol, stream, native_gemini, None).await
+}
+
+async fn request_with_tools(
+    env: &Env,
+    protocol: Protocol,
+    stream: bool,
+    native_gemini: bool,
+    tools: Option<Value>,
+) -> reqwest::Response {
+    let (path, mut body) = if native_gemini {
         (
             format!(
                 "/v1beta/models/{}:{}",
@@ -271,6 +402,9 @@ async fn request(
             ),
         }
     };
+    if let Some(tools) = tools {
+        body["tools"] = tools;
+    }
     reqwest::Client::new()
         .post(format!("http://{}{path}", env.gateway))
         .bearer_auth(&env.token)
@@ -289,7 +423,7 @@ async fn report(env: &Env, path: &str) -> Value {
         .unwrap();
     let status = resp.status();
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(status, 200, "{body}");
+    assert_eq!(status, 200, "{path}: {body}");
     body
 }
 

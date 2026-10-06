@@ -15,6 +15,8 @@ pub mod codes {
     /// 模型在当前池有可用渠道，但不支持该入口；param 给出可用接口路径。
     pub const UNSUPPORTED_ENDPOINT: &str = "unsupported_endpoint";
     pub const EMPTY_COMPLETION: &str = "empty_completion";
+    /// 客户端在拿到响应前断开：预扣已全额退回、不计费（失败日志里的 error_code，nginx 499 语义）。
+    pub const CLIENT_CLOSED_REQUEST: &str = "client_closed_request";
     pub const UPSTREAM_ERROR: &str = "upstream_error";
     pub const UPSTREAM_TIMEOUT: &str = "upstream_timeout";
     pub const BAD_REQUEST: &str = "bad_request";

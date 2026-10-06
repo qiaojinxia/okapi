@@ -6,11 +6,12 @@ use super::clients::detect_client_type;
 use super::error::AppError;
 use super::error::with_request_id;
 use super::estimate::{self, estimate_prompt_tokens};
+use super::execution_plan::{ExecutionPlan, Requirements};
 use super::sched_redis::response_affinity::{
     self, ResponseBinding, ResponseParent, ResponseWriter,
 };
 use super::sched_redis::session_hash;
-use super::scheduler::{Strategy, order_candidates, order_candidates_by_latency};
+use super::scheduler::{Strategy, order_candidates};
 use super::state::AppState;
 use axum::body::Body;
 use axum::extract::State;
@@ -23,7 +24,7 @@ use futures::{SinkExt, StreamExt};
 use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, UsageProbe, codes};
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
 use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
-use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp, calculate};
+use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp};
 use okapi_providers::convert::{
     anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o, openai_to_anthropic as convert,
     openai_to_gemini as conv_gem, responses_to_chat as conv_resp,
@@ -41,9 +42,7 @@ use uuid::Uuid;
 
 pub mod websocket;
 
-const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
-const DEFAULT_GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 /// 首字窗口（连接 + 首个产出事件）；窗口内失败可无痕 failover。
 /// 缺省值——渠道可用 `retry_policy.first_output_timeout_secs` 覆盖（5..=300）。
 const FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,11 +56,14 @@ use super::ingress::Ingress;
 
 /// 入口探针归一化结果（两种协议解析为同一形状，主链路协议无关）。
 struct ProbeInfo {
+    authenticated: Option<Arc<okapi_store::AuthedKey>>,
     /// 客户端请求的模型名（别名解析前；透传重写比对用）。
     requested_model: String,
     stream: bool,
     /// 显式请求的补全上限（openai: max_completion_tokens>max_tokens；anthropic: max_tokens）。
     completion_cap_req: Option<u32>,
+    /// 一次生成的候选条数（OpenAI `n` / Gemini `candidateCount`，其余入口恒 1）。
+    choices: u32,
     /// prompt 精确分词结果（tiktoken；预扣与密度的共同输入）。
     prompt_tokens: u32,
     prompt_chars: usize,
@@ -93,8 +95,12 @@ struct RequestBilling {
     est_prompt: u32,
     /// 本次请求实测的 token/千字符 密度（补全侧只有字符数，用它折算）。
     density: u32,
-    /// 预扣补全上限（anthropic 转换的 max_tokens 兜底也用它）。
+    /// 预扣补全上限（单条；anthropic 转换的 max_tokens 兜底也用它）。
     completion_cap: u32,
+    /// 候选条数：预扣与结算复核按 `completion_cap × choices` 估补全。
+    choices: u32,
+    /// 请求没声明输出上限、模型 max_output 又超过预扣封顶时，转发前写进请求的上限。
+    default_output_cap: Option<u32>,
     /// 归一后的 reasoning 指令（模型名后缀 ∪ 请求体参数，参数优先；§11.26）。
     /// 注入上游时按渠道方言三向展开。
     directive: Option<ReasoningDirective>,
@@ -125,9 +131,74 @@ struct RequestBilling {
     /// 模型是否配置了档位倍率（据此决定是否采集响应档位）。
     has_tier_pricing: bool,
     /// 模型级降级链（DESIGN §3.4.1；已过 key 白名单，仅零候选时消费）。
-    fallback_models: Arc<Vec<String>>,
+    fallback_models: Arc<Vec<AdmittedFallback>>,
+    server_tools: super::server_tools::ToolAdmission,
+    reserved_amount: Money,
+    /// Every quote that could determine this hold, captured before reserve.
+    reservation_snapshot: Arc<serde_json::Value>,
     /// 发生模型级降级时 = 客户端请求的 canonical 模型（写入 pricing_snapshot）。
     downgraded_from: Option<String>,
+    /// 预扣由谁收口：HTTP handler 持有，直到后台结算 / 流泵接手（克隆间共享）。
+    settlement: SettlementHandoff,
+}
+
+/// 预扣的收口责任。handler 在等上游时可能被丢弃（客户端断开），此时必须有人退款；
+/// 一旦后台结算任务或流泵接手，由它按实际产出结算，取消兜底不得再退。
+#[derive(Clone, Default)]
+struct SettlementHandoff(Arc<std::sync::atomic::AtomicBool>);
+
+impl SettlementHandoff {
+    /// 在 spawn 接手任务前调用：两者之间不能有 await，否则取消会落在空档里。
+    fn hand_off(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn handed_off(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// 客户端在响应前断开 → handler future 被 hyper 丢弃，`settle_failure` 不会执行。
+/// 预扣与 key 并发槽否则要等过期清理（约 10 分钟）才放，也不留失败日志；
+/// 这里在 Drop 时补做同一套退款 + 失败记账（与媒体端点的 `failure::Guard` 同义）。
+struct CancelRefund(Option<RequestBilling>);
+
+impl CancelRefund {
+    fn arm(bill: &RequestBilling) -> Self {
+        Self(Some(bill.clone()))
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for CancelRefund {
+    fn drop(&mut self) {
+        let Some(bill) = self.0.take() else {
+            return;
+        };
+        if bill.settlement.handed_off() || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let settlements = bill.state.settlements.clone();
+        // 退款幂等、失败日志按 request_id 去重：与被取消到一半的 settle_failure 重入也安全
+        settlements.spawn(async move {
+            let status = StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST);
+            let failure =
+                ForwardFailure::app(AppError::new(status, codes::CLIENT_CLOSED_REQUEST), 0, None);
+            settle_failure(&bill, &failure).await;
+        });
+    }
+}
+
+#[derive(Clone)]
+struct AdmittedFallback {
+    model: String,
+    calc: CalcContext,
+    completion_cap: u32,
+    default_output_cap: Option<u32>,
+    has_tier_pricing: bool,
 }
 
 enum FailureReply {
@@ -205,6 +276,70 @@ fn price_above_max(
     None
 }
 
+/// 预扣用的单条补全上界。显式上限照单全收（不超过模型 max_output）：上游按它生成、
+/// 按实际计费，把它截到 `MAX_COMPLETION_CAP` 只会让预扣不再是扣费上界、余额可被透支。
+/// 未声明时才取模型缺省并封顶，免得为没要求长输出的请求冻结大额余额。
+fn admitted_completion_cap(requested: Option<u32>, max_output: Option<u32>) -> u32 {
+    match requested {
+        Some(requested) => max_output.map_or(requested, |max| requested.min(max)),
+        None => max_output
+            .unwrap_or(DEFAULT_COMPLETION_CAP)
+            .min(MAX_COMPLETION_CAP),
+    }
+}
+
+/// 未声明输出上限时，预扣只按封顶后的上限估；模型能输出得更多，就得把这个上限
+/// 写进请求，否则上游照 max_output 生成、结算多退少补，余额被透支（2026-10-05 定案：
+/// 补上限而不是全额预扣，宁可极少数超长输出截断，也不为普通请求冻结大额余额）。
+/// max_output 不超过封顶的模型本身生成不到更多，不改请求。
+fn default_output_cap(requested: Option<u32>, max_output: Option<u32>) -> Option<u32> {
+    (requested.is_none() && max_output.is_some_and(|max| max > MAX_COMPLETION_CAP))
+        .then_some(MAX_COMPLETION_CAP)
+}
+
+/// 按入口方言写入缺省输出上限（转换路径各自翻译成上游字段）。已有上限的不动；
+/// compact 端点不接受输出上限参数，跳过。
+fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Bytes {
+    let Some(cap) = cap else {
+        return body;
+    };
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return body;
+    };
+    let inserted = match ingress {
+        Ingress::OpenAi => {
+            // max_tokens 兼容面最广；推理模型由 model_parameters 改写成 max_completion_tokens
+            if obj.contains_key("max_tokens") || obj.contains_key("max_completion_tokens") {
+                return body;
+            }
+            obj.insert("max_tokens".into(), cap.into());
+            true
+        }
+        Ingress::Anthropic => obj.insert("max_tokens".into(), cap.into()).is_none(),
+        Ingress::Responses => obj.insert("max_output_tokens".into(), cap.into()).is_none(),
+        Ingress::Gemini => {
+            let Some(config) = obj
+                .entry("generationConfig")
+                .or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+            else {
+                return body;
+            };
+            config
+                .insert("maxOutputTokens".into(), cap.into())
+                .is_none()
+        }
+        Ingress::ResponsesCompact => false,
+    };
+    if !inserted {
+        return body;
+    }
+    serde_json::to_vec(&value).map_or(body, Bytes::from)
+}
+
 /// 上游错误 → key 状态机类别（§3.6 重试矩阵）。
 /// 注意顺序：insufficient_quota 判定先于 429——OpenAI 风格的
 /// `429 + insufficient_quota` 语义是配额耗尽（冷却到次日），不是限速（60s）。
@@ -230,6 +365,8 @@ pub(super) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
         UpstreamError::Status {
             status: 500..=599, ..
         } => KeyFailure::Transient,
+        // 连接阶段失败：凭证无从判断；走了代理时归给代理的被动熔断（§11.41）
+        UpstreamError::Unreachable { .. } => KeyFailure::Unreachable,
         UpstreamError::Status { .. }
         | UpstreamError::Connect(_)
         | UpstreamError::Timeout
@@ -282,14 +419,20 @@ pub async fn chat_completions(
 ) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
+    let authenticated = match super::auth::authenticate_data_plane(&state, &headers).await {
+        Ok(key) => key,
+        Err(error) => return error.into_response_with(Some(request_id)),
+    };
     let Ok(probe) = serde_json::from_slice::<ChatRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
     let (needs_tools, needs_vision) = request_features(Ingress::OpenAi, &body);
     let info = ProbeInfo {
+        authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
         stream: probe.stream,
         completion_cap_req: probe.max_completion_tokens.or(probe.max_tokens),
+        choices: probe.choices(),
         prompt_tokens: estimate_prompt_tokens(
             &probe.model,
             &probe.prompt_segments(),
@@ -350,9 +493,20 @@ async fn responses_entry(
 ) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
+    let authenticated = match super::auth::authenticate_data_plane(&state, &headers).await {
+        Ok(key) => key,
+        Err(error) => return error.into_response_with(Some(request_id)),
+    };
     let Ok(probe) = serde_json::from_slice::<ResponsesRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
+    // 后台模式先回「排队中」、不带用量，生成在本次结算之后继续——网关只能按估算收一点，
+    // 推理费用全由站方承担，且没有取回结果的接口。WS 入口同样拒绝。
+    if probe.background == Some(true) {
+        return AppError::bad_request()
+            .with_param("background")
+            .into_response_with(Some(request_id));
+    }
     let body = if ingress == Ingress::ResponsesCompact {
         if probe.stream {
             return AppError::bad_request()
@@ -370,9 +524,11 @@ async fn responses_entry(
     let input_messages = probe.input_messages();
     let (needs_tools, needs_vision) = request_features(ingress, &body);
     let info = ProbeInfo {
+        authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
         stream: probe.stream,
         completion_cap_req: probe.completion_cap_req(),
+        choices: 1,
         prompt_tokens: estimate_prompt_tokens(
             &probe.model,
             &probe.prompt_segments(),
@@ -435,15 +591,21 @@ pub async fn gemini_generate(
     {
         headers.insert("x-goog-api-key", value);
     }
+    let authenticated = match super::auth::authenticate_data_plane(&state, &headers).await {
+        Ok(key) => key,
+        Err(error) => return error.into_gemini_response_with(Some(request_id)),
+    };
     let Ok(probe) = serde_json::from_slice::<okapi_api::GeminiRequestProbe>(&body) else {
         return AppError::bad_request().into_gemini_response_with(Some(request_id));
     };
     let input_messages = probe.input_messages();
     let (needs_tools, needs_vision) = request_features(Ingress::Gemini, &body);
     let info = ProbeInfo {
+        authenticated: Some(authenticated),
         requested_model: model.to_owned(),
         stream,
         completion_cap_req: probe.completion_cap_req(),
+        choices: probe.choices(),
         prompt_tokens: estimate_prompt_tokens(
             model,
             &probe.prompt_segments(),
@@ -475,14 +637,20 @@ pub async fn gemini_generate(
 pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
+    let authenticated = match super::auth::authenticate_data_plane(&state, &headers).await {
+        Ok(key) => key,
+        Err(error) => return error.into_anthropic_response_with(Some(request_id)),
+    };
     let Ok(probe) = serde_json::from_slice::<MessagesRequestProbe>(&body) else {
         return AppError::bad_request().into_anthropic_response_with(Some(request_id));
     };
     let (needs_tools, needs_vision) = request_features(Ingress::Anthropic, &body);
     let info = ProbeInfo {
+        authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
         stream: probe.stream,
         completion_cap_req: probe.max_tokens,
+        choices: 1,
         prompt_tokens: estimate_prompt_tokens(
             &probe.model,
             &probe.prompt_segments(),
@@ -582,6 +750,7 @@ async fn count_tokens_inner(
         }
         let _slot = super::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
             .await
+            .map_err(|error| super::account_control::attempt_error(&error))?
             .ok_or_else(|| AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED))?;
         let upstream_model = cand.upstream_model(&canonical).to_owned();
         let body_up = rewrite_model(&body, &probe.model, &upstream_model)
@@ -597,15 +766,13 @@ async fn count_tokens_inner(
         let counted = if cand.provider == "anthropic_max" {
             match super::oauth_cred::fresh_credential(state, &cand).await {
                 Ok(cred) => {
-                    let mimic =
-                        super::oauth_cred::mimic_identity(&cand, cred.account_id.as_deref());
                     okapi_providers::oauth::anthropic_max::count_tokens(
                         state.anthropic.http(),
                         &base,
                         &cred.access_token,
                         body_up,
                         &outbound,
-                        mimic.as_ref(),
+                        cred.account_id.as_deref(),
                     )
                     .await
                 }
@@ -678,20 +845,173 @@ fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
     (needs_tools, needs_vision)
 }
 
-/// Gemini 形状的请求特征：tools 里有 functionDeclarations 即需要工具；
+/// 预扣按张估图片输入：各家按尺寸计 token，本地不解码图片，取主流单张上界
+/// （Claude 封顶约 1600、GPT-4o high 约 1100、按 patch 计的 GPT-4.1/5 系约 2500）。
+/// 只用于预扣与缺用量时的兜底，实际仍按上游用量结算。
+const IMAGE_INPUT_TOKENS: u32 = 2_560;
+
+/// 请求里的图片输入张数，含工具结果里嵌套的图片。
+fn image_inputs(ingress: Ingress, body: &Bytes) -> u32 {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return 0;
+    };
+    input_roots(ingress, &v)
+        .into_iter()
+        .flatten()
+        .map(count_images)
+        .fold(0, u32::saturating_add)
+}
+
+/// 携带输入内容的顶层字段（消息 / input / contents 与系统指令）。
+fn input_roots(ingress: Ingress, v: &serde_json::Value) -> [Option<&serde_json::Value>; 2] {
+    match ingress {
+        Ingress::OpenAi => [v.get("messages"), None],
+        Ingress::Anthropic => [v.get("messages"), v.get("system")],
+        Ingress::Responses | Ingress::ResponsesCompact => [v.get("input"), None],
+        Ingress::Gemini => [
+            v.get("contents"),
+            v.get("systemInstruction")
+                .or_else(|| v.get("system_instruction")),
+        ],
+    }
+}
+
+/// PDF 每页上界：Anthropic 文档按页计文本 + 页面图像，约 1500–3000 token。
+const PDF_PAGE_TOKENS: u32 = 3_000;
+/// 音频每 token 至少对应的字节数：码率不低于 32 kbps（4000 B/s），各家最高约 32 token/s（Gemini）。
+const AUDIO_BYTES_PER_TOKEN: usize = 125;
+
+/// 内联文件与音频输入的 token 上界（只看请求里带着的数据；URL / file_id 本地取不到，不计）。
+/// 只用于预扣与缺用量时的兜底，实际仍按上游用量结算。
+fn attachment_tokens(ingress: Ingress, body: &Bytes) -> u32 {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return 0;
+    };
+    input_roots(ingress, &v)
+        .into_iter()
+        .flatten()
+        .map(count_attachments)
+        .fold(0, u32::saturating_add)
+}
+
+fn count_attachments(value: &serde_json::Value) -> u32 {
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(count_attachments)
+            .fold(0, u32::saturating_add),
+        serde_json::Value::Object(obj) => {
+            let own = match obj.get("type").and_then(serde_json::Value::as_str) {
+                // Anthropic document：base64 PDF 或纯文本
+                Some("document") => match str_at(value, "/source/type") {
+                    Some("base64") => str_at(value, "/source/data").map_or(0, |data| {
+                        media_tokens(str_at(value, "/source/media_type"), data)
+                    }),
+                    Some("text") => str_at(value, "/source/data")
+                        .map_or(0, |text| saturating_u32(text.len() / 2)),
+                    _ => 0,
+                },
+                // OpenAI chat file / Responses input_file：data URL
+                Some("file") => str_at(value, "/file/file_data").map_or(0, data_url_tokens),
+                Some("input_file") => str_at(value, "/file_data").map_or(0, data_url_tokens),
+                Some("input_audio") => str_at(value, "/input_audio/data")
+                    .map_or(0, |data| media_tokens(Some("audio/"), data)),
+                _ => ["inlineData", "inline_data"]
+                    .iter()
+                    .filter_map(|key| obj.get(*key))
+                    .map(|media| {
+                        let mime =
+                            str_at(media, "/mimeType").or_else(|| str_at(media, "/mime_type"));
+                        str_at(media, "/data").map_or(0, |data| media_tokens(mime, data))
+                    })
+                    .fold(0, u32::saturating_add),
+            };
+            obj.values()
+                .map(count_attachments)
+                .fold(own, u32::saturating_add)
+        }
+        _ => 0,
+    }
+}
+
+fn str_at<'a>(value: &'a serde_json::Value, pointer: &str) -> Option<&'a str> {
+    value.pointer(pointer).and_then(serde_json::Value::as_str)
+}
+
+fn data_url_tokens(url: &str) -> u32 {
+    url.strip_prefix("data:")
+        .and_then(|rest| rest.split_once(";base64,"))
+        .map_or(0, |(mime, data)| media_tokens(Some(mime), data))
+}
+
+/// 按媒体类型估 base64 数据的 token 上界；图片另按张计，其它类型无从估计。
+fn media_tokens(mime: Option<&str>, base64_data: &str) -> u32 {
+    use base64::Engine as _;
+    let mime = mime.unwrap_or_default();
+    if mime.starts_with("audio/") {
+        return saturating_u32(base64_data.len() / 4 * 3 / AUDIO_BYTES_PER_TOKEN);
+    }
+    if mime != "application/pdf" {
+        return 0;
+    }
+    let pages = base64::prelude::BASE64_STANDARD
+        .decode(base64_data.trim())
+        .map_or(1, |pdf| pdf_pages(&pdf));
+    pages.max(1).saturating_mul(PDF_PAGE_TOKENS)
+}
+
+/// 页对象数：`/Type /Page`（不含 `/Pages` 目录节点），空格可有可无。
+fn pdf_pages(pdf: &[u8]) -> u32 {
+    let mut pages = 0_u32;
+    for (index, _) in pdf.windows(5).enumerate().filter(|(_, w)| *w == b"/Type") {
+        let rest = &pdf[index + 5..];
+        let rest = &rest[rest.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+        if rest.starts_with(b"/Page") && !rest.starts_with(b"/Pages") {
+            pages = pages.saturating_add(1);
+        }
+    }
+    pages
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn count_images(value: &serde_json::Value) -> u32 {
+    match value {
+        serde_json::Value::Array(items) => {
+            items.iter().map(count_images).fold(0, u32::saturating_add)
+        }
+        serde_json::Value::Object(obj) => {
+            let typed = matches!(
+                obj.get("type").and_then(serde_json::Value::as_str),
+                Some("image_url" | "image" | "input_image")
+            );
+            let gemini = ["inlineData", "inline_data", "fileData", "file_data"]
+                .iter()
+                .filter_map(|key| obj.get(*key))
+                .any(|media| {
+                    media
+                        .get("mimeType")
+                        .or_else(|| media.get("mime_type"))
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|mime| mime.starts_with("image/"))
+                });
+            obj.values()
+                .map(count_images)
+                .fold(u32::from(typed || gemini), u32::saturating_add)
+        }
+        _ => 0,
+    }
+}
+
+/// Gemini 支持函数和原生工具；tools 数组非空即需要工具能力。
 /// contents 部件带 inlineData / fileData（图像 mime）即需要视觉。
 fn gemini_request_features(v: &serde_json::Value) -> (bool, bool) {
     let needs_tools = v
         .get("tools")
-        .and_then(|t| t.as_array())
-        .is_some_and(|tools| {
-            tools.iter().any(|t| {
-                t.get("functionDeclarations")
-                    .or_else(|| t.get("function_declarations"))
-                    .and_then(|d| d.as_array())
-                    .is_some_and(|d| !d.is_empty())
-            })
-        });
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
     let is_image = |media: &serde_json::Value| {
         media
             .get("mimeType")
@@ -787,7 +1107,9 @@ async fn handle_chat(
     info: &ProbeInfo,
 ) -> Result<Response, AppError> {
     let bill = prepare_chat(state, headers, body, request_id, started, ingress, info).await?;
-    match Box::pin(forward(&bill, info, body)).await {
+    // 预扣已建立且两行之间没有 await：此后 handler 被丢弃也会退款
+    let cancel = CancelRefund::arm(&bill);
+    let outcome = match Box::pin(forward(&bill, info, body)).await {
         Ok(resp) => Ok(resp),
         Err(failure) => {
             settle_failure(&bill, &failure).await;
@@ -798,7 +1120,9 @@ async fn handle_chat(
                 )),
             }
         }
-    }
+    };
+    cancel.disarm();
+    outcome
 }
 
 // HTTP 与 Responses WS 每轮共用的鉴权、限额、报价与预扣链。
@@ -812,7 +1136,10 @@ async fn prepare_chat(
     ingress: Ingress,
     info: &ProbeInfo,
 ) -> Result<RequestBilling, AppError> {
-    let key = super::auth::authenticate_data_plane(state, headers).await?;
+    let key = match &info.authenticated {
+        Some(key) => Arc::clone(key),
+        None => super::auth::authenticate_data_plane(state, headers).await?,
+    };
 
     // 模型解析（#3001 + §5.1）：别名→canonical + max_output；60s 进程缓存消除热路径 PG 读；
     // 未命中剥 reasoning 后缀重试（§4.4）
@@ -871,15 +1198,18 @@ async fn prepare_chat(
     // 估价（预扣补全缺省 = models.max_output，无则 2048，§5.1）
     let est_prompt = info.prompt_tokens;
     let density = estimate::prompt_density(est_prompt, info.prompt_chars);
-    let model_default_cap = meta
-        .max_output
-        .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or(DEFAULT_COMPLETION_CAP);
-    let completion_cap = info
-        .completion_cap_req
-        .unwrap_or(model_default_cap)
-        .min(MAX_COMPLETION_CAP);
-    let est_usage = TokenUsage {
+    // 图片输入另计（密度只描述文本，先算完再加）
+    let est_prompt = est_prompt
+        .saturating_add(image_inputs(ingress, body).saturating_mul(IMAGE_INPUT_TOKENS))
+        .saturating_add(attachment_tokens(ingress, body));
+    let completion_cap = admitted_completion_cap(
+        info.completion_cap_req,
+        meta.max_output.and_then(|v| u32::try_from(v).ok()),
+    );
+    let server_tools = super::server_tools::ToolAdmission::parse(body)
+        .map_err(|param| AppError::bad_request().with_param(param))?;
+    let base_usage = TokenUsage {
+        server_tool_usage: server_tools.estimated_usage(),
         prompt_tokens: est_prompt,
         cached_tokens: 0,
         cache_read_reported: false,
@@ -887,12 +1217,17 @@ async fn prepare_chat(
         cache_write_tokens: 0,
         audio_prompt_tokens: 0,
         image_prompt_tokens: 0,
-        completion_tokens: completion_cap,
+        completion_tokens: completion_cap.saturating_mul(info.choices),
         audio_completion_tokens: 0,
         reasoning_tokens: 0,
         ..TokenUsage::default()
     };
-    let est_quote = calculate(&book, &calc, est_usage)?;
+    let pool_chain = key.pool_chain();
+    let est_usage = with_admission_hints(
+        base_usage,
+        admission_hints(state, &canonical, &pool_chain).await,
+    );
+    let est_quote = server_tools.quote(&book, &calc, est_usage)?;
 
     // reasoning 意图归一（§11.26）：模型名后缀是一条路，请求体参数是另一条，
     // 合并到同一个 directive 后交给三向注入。**参数优先**——它是本次请求的显式意图。
@@ -902,12 +1237,83 @@ async fn prepare_chat(
 
     // 请求级单价上限（§11.24）：拿快照里的**最终**单价判——它已经过模型/分组/个人系数与
     // 修饰器全链，正是这次真会按之的价。判在预扣之前：超限直接拒，别扣了钱再让用户发现贵。
-    let prefs = super::routing_prefs::parse(body);
+    let prefs = super::routing_prefs::parse(body)?;
     if let Some(over) = price_above_max(&est_quote, &prefs) {
         return Err(
             AppError::new(StatusCode::PAYMENT_REQUIRED, codes::PRICE_ABOVE_MAX).with_param(over),
         );
     }
+
+    // Freeze every usable one-hop fallback before reserve. Never discover a dearer
+    // fallback after the hold has already been established.
+    let mut reserved_amount = est_quote.amount;
+    let mut reserved_completion = est_usage.completion_tokens;
+    let mut fallback_models = Vec::new();
+    let mut reservation_candidates = vec![super::reservation::Candidate::new(
+        "primary",
+        &canonical,
+        calc.model.as_str(),
+        est_usage,
+        &est_quote,
+    )?];
+    if prefs.allow_fallbacks && response_parent.is_none() {
+        for fb in meta
+            .fallback_models
+            .iter()
+            .filter(|fb| *fb != &canonical && key.allows_model(fb))
+        {
+            let Some(fallback) = resolve_model_cached(state, fb).await?.as_ref().clone() else {
+                continue;
+            };
+            if fallback.canonical == canonical {
+                continue;
+            }
+            let mut fallback_calc = calc.clone();
+            fallback_calc.model = ModelCode::from(fallback.canonical.as_str());
+            let fallback_cap = admitted_completion_cap(
+                info.completion_cap_req,
+                fallback.max_output.and_then(|n| u32::try_from(n).ok()),
+            );
+            let fallback_usage = with_admission_hints(
+                TokenUsage {
+                    completion_tokens: fallback_cap.saturating_mul(info.choices),
+                    ..base_usage
+                },
+                admission_hints(state, &fallback.canonical, &pool_chain).await,
+            );
+            let Ok(quote) = server_tools.quote(&book, &fallback_calc, fallback_usage) else {
+                continue;
+            };
+            if price_above_max(&quote, &prefs).is_some() {
+                continue;
+            }
+            reservation_candidates.push(super::reservation::Candidate::new(
+                "fallback",
+                &fallback.canonical,
+                fallback_calc.model.as_str(),
+                fallback_usage,
+                &quote,
+            )?);
+            reserved_amount = reserved_amount.max(quote.amount);
+            reserved_completion = reserved_completion.max(fallback_usage.completion_tokens);
+            let has_tier_pricing = book.has_tiers(&fallback_calc.model);
+            fallback_models.push(AdmittedFallback {
+                model: fallback.canonical.clone(),
+                calc: fallback_calc,
+                completion_cap: fallback_cap,
+                default_output_cap: default_output_cap(
+                    info.completion_cap_req,
+                    fallback.max_output.and_then(|n| u32::try_from(n).ok()),
+                ),
+                has_tier_pricing,
+            });
+        }
+    }
+    let reservation_snapshot = Arc::new(super::reservation::freeze(
+        &info.requested_model,
+        reserved_amount,
+        reservation_candidates,
+    )?);
 
     // 团成员月度限额（§6.1 软实时）
     super::auth::check_member_limit(state, &key).await?;
@@ -940,17 +1346,15 @@ async fn prepare_chat(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    let est_tokens = u64::from(est_prompt).saturating_add(u64::from(completion_cap));
+    let est_tokens = u64::from(est_prompt).saturating_add(u64::from(reserved_completion));
     let (reservation_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
                 api_key_id: key.key_id,
                 request_id,
-                est: est_quote.amount,
+                est: reserved_amount,
                 caps,
                 est_tokens,
             },
@@ -977,14 +1381,6 @@ async fn prepare_chat(
     };
 
     // —— 预扣已建立：此后一切失败路径必须退款（settle_failure）——
-    // 降级链在此过 key 白名单：降级模型同样受令牌 allowlist 约束，
-    // 否则降级会成为绕过模型白名单的后门。
-    let fallback_models: Vec<String> = meta
-        .fallback_models
-        .iter()
-        .filter(|fb| *fb != &canonical && key.allows_model(fb))
-        .cloned()
-        .collect();
     let bill_model_for_tier = canonical.clone();
     let trace = super::diagnostics::Trace::current()
         .unwrap_or_else(|| super::diagnostics::Trace::new(headers));
@@ -1010,6 +1406,11 @@ async fn prepare_chat(
         est_prompt,
         density,
         completion_cap,
+        choices: info.choices,
+        default_output_cap: default_output_cap(
+            info.completion_cap_req,
+            meta.max_output.and_then(|v| u32::try_from(v).ok()),
+        ),
         directive,
         model: canonical,
         requested_model: info.requested_model.clone(),
@@ -1026,7 +1427,11 @@ async fn prepare_chat(
         service_tier: info.service_tier.clone(),
         has_tier_pricing: book.has_tiers(&ModelCode::from(bill_model_for_tier.as_str())),
         fallback_models: Arc::new(fallback_models),
+        server_tools,
+        reserved_amount,
+        reservation_snapshot,
         downgraded_from: None,
+        settlement: SettlementHandoff::default(),
     };
 
     Ok(bill)
@@ -1052,9 +1457,7 @@ async fn forward(
         return first;
     }
     for fb in bill.fallback_models.iter() {
-        let Some(fb_bill) = fallback_billing(bill, info, fb).await else {
-            continue; // 不存在/停用/无定价/自引用：跳过该环，试链上下一个
-        };
+        let fb_bill = fallback_billing(bill, fb);
         tracing::info!(
             request_id = %bill.request_id,
             requested = %bill.model,
@@ -1075,51 +1478,88 @@ async fn forward(
     first
 }
 
-/// 为降级模型重建计费上下文。返回 None = 该环不可投：
-/// 模型不存在/停用、解析后与请求模型相同（自引用）、或价簿无其定价
-/// （无价强行投出会在结算时 fail-closed 退款，用户白等一场还打了上游）。
-async fn fallback_billing(
-    bill: &RequestBilling,
-    info: &ProbeInfo,
-    fb: &str,
-) -> Option<RequestBilling> {
-    let meta = resolve_model_cached(&bill.state, fb).await.ok()?;
-    let meta = meta.as_ref().as_ref()?.clone();
-    if meta.canonical == bill.model {
-        return None;
-    }
-    let mut calc = bill.calc.clone();
-    calc.model = ModelCode::from(meta.canonical.as_str());
-    // 预扣补全上限按降级模型口径重算（显式请求值仍优先）
-    let model_default_cap = meta
-        .max_output
-        .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or(DEFAULT_COMPLETION_CAP);
-    let completion_cap = info
-        .completion_cap_req
-        .unwrap_or(model_default_cap)
-        .min(MAX_COMPLETION_CAP);
-    let est_usage = TokenUsage {
-        prompt_tokens: bill.est_prompt,
-        completion_tokens: completion_cap,
-        ..TokenUsage::default()
-    };
-    if calculate(&bill.book, &calc, est_usage).is_err() {
-        return None;
-    }
-    let has_tier_pricing = bill.book.has_tiers(&calc.model);
-    Some(RequestBilling {
-        calc,
-        completion_cap,
-        // 降级模型沿用同一次请求的偏好：用户的意图没变
-        prefs: bill.prefs,
-        model: meta.canonical.clone(),
-        has_tier_pricing,
-        // 单跳：降级请求不再携带链，杜绝递归
+/// Consume the context priced before admission; do not reload fallback caps here.
+fn fallback_billing(bill: &RequestBilling, fb: &AdmittedFallback) -> RequestBilling {
+    RequestBilling {
+        calc: fb.calc.clone(),
+        completion_cap: fb.completion_cap,
+        default_output_cap: fb.default_output_cap,
+        model: fb.model.clone(),
+        has_tier_pricing: fb.has_tier_pricing,
         fallback_models: Arc::new(Vec::new()),
         downgraded_from: Some(bill.model.clone()),
         ..bill.clone()
-    })
+    }
+}
+
+/// 模型在池链上的候选渠道。5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL
+/// 收敛）；缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户。
+async fn cached_candidates(
+    state: &AppState,
+    model: &str,
+    pool_chain: &[&str],
+    fresh: bool,
+) -> Result<Arc<Vec<ChannelCandidate>>, okapi_store::StoreError> {
+    let cache_key = format!("{model}|{}", pool_chain.join(">"));
+    if !fresh && let Some(hit) = state.cand_cache.get(&cache_key).await {
+        return Ok(hit);
+    }
+    let rows = Arc::new(
+        okapi_store::channels::candidates_for_model(
+            &state.pg,
+            model,
+            pool_chain,
+            state.master_key.as_deref(),
+        )
+        .await?,
+    );
+    state.cand_cache.insert(cache_key, Arc::clone(&rows)).await;
+    Ok(rows)
+}
+
+/// 预扣前看这个模型的候选渠道会怎样改写请求（客户端模拟会加 system 文本、1h 缓存断点，
+/// 上游分词器也与本地不同），按其中最贵的一个预扣。查不到候选就按原样估算：
+/// 路由阶段会照常报无可用渠道，不在这里提前失败。
+async fn admission_hints(
+    state: &AppState,
+    model: &str,
+    pool_chain: &[&str],
+) -> okapi_providers::profiles::AdmissionHints {
+    cached_candidates(state, model, pool_chain, false)
+        .await
+        .map(|candidates| {
+            candidates
+                .iter()
+                .map(|candidate| okapi_providers::profiles::admission_hints(&candidate.extensions))
+                .fold(
+                    okapi_providers::profiles::AdmissionHints::default(),
+                    okapi_providers::profiles::AdmissionHints::max,
+                )
+        })
+        .unwrap_or_default()
+}
+
+/// 把客户端配置带来的成本放进预扣估算：放大 prompt、按 1h 缓存写入计价（首个请求的上界）。
+fn with_admission_hints(
+    usage: TokenUsage,
+    hints: okapi_providers::profiles::AdmissionHints,
+) -> TokenUsage {
+    let prompt = hints.prompt_tokens(usage.prompt_tokens);
+    if hints.prompt_cache_write_1h {
+        TokenUsage {
+            prompt_tokens: prompt,
+            cache_write_tokens: prompt,
+            cache_write_reported: true,
+            cache_write_5m_tokens: Some(0),
+            cache_write_1h_tokens: Some(prompt),
+            ..usage
+        }
+    } else {
+        TokenUsage {
+            prompt_tokens: prompt,
+            ..usage
+        }
+    }
 }
 
 // Responses WS 逐轮从数据库读取候选，复用 HTTP 的权限/能力/历史绑定过滤。
@@ -1128,46 +1568,28 @@ async fn eligible_candidates(
     bill: &RequestBilling,
     info: &ProbeInfo,
     fresh: bool,
-) -> Result<(Vec<ChannelCandidate>, Option<i64>), ForwardFailure> {
+) -> Result<(super::scheduler::CandidateQueue, Option<i64>), ForwardFailure> {
     // 候选 5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL 收敛）
     // 缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户
-    let cache_key = format!("{}|{}", bill.model, bill.pool_chain.join(">"));
-    let cached = if !fresh && bill.response_parent.is_none() {
-        bill.state.cand_cache.get(&cache_key).await
-    } else {
-        None
-    };
-    let raw = if let Some(hit) = cached {
-        hit
-    } else {
-        let chain: Vec<&str> = bill.pool_chain.iter().map(String::as_str).collect();
-        let rows = okapi_store::channels::candidates_for_model(
-            &bill.state.pg,
-            &bill.model,
-            &chain,
-            bill.state.master_key.as_deref(),
-        )
-        .await
-        .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
-        let rows = Arc::new(rows);
-        bill.state
-            .cand_cache
-            .insert(cache_key, Arc::clone(&rows))
-            .await;
-        rows
-    };
+    use super::scheduler::{CandidateQueue, CandidateSet};
+    let chain: Vec<&str> = bill.pool_chain.iter().map(String::as_str).collect();
+    let raw = cached_candidates(
+        &bill.state,
+        &bill.model,
+        &chain,
+        fresh || bill.response_parent.is_some(),
+    )
+    .await
+    .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
     let mut candidates = match Strategy::parse(bill.pool_strategy.as_deref()) {
-        Strategy::PriorityWeighted => order_candidates(raw.as_ref().clone()),
+        Strategy::PriorityWeighted => CandidateQueue::weighted(Arc::clone(&raw)),
         Strategy::LeastLatency => {
-            // 只对候选集内的 key 取时延，逐个 GET；候选规模是个位数到几十，
-            // 且仅 least_latency 池付这个成本，默认池零额外往返。
-            let mut latency = std::collections::HashMap::new();
-            for c in raw.as_ref() {
-                if let Some(ms) = bill.state.sched.channel_key_latency(c.channel_key_id).await {
-                    latency.insert(c.channel_key_id, ms);
-                }
-            }
-            order_candidates_by_latency(raw.as_ref().clone(), &latency)
+            let latency = bill
+                .state
+                .sched
+                .channel_key_latencies(raw.iter().map(|c| c.channel_key_id))
+                .await;
+            CandidateQueue::by_latency(Arc::clone(&raw), &latency)
         }
     };
     // 与诊断和接入示例共用入口规则；配置正常但入口错误时不要报服务不可用。
@@ -1180,16 +1602,13 @@ async fn eligible_candidates(
             None,
         ));
     }
-    // 能力感知路由（§3.8）：渠道显式声明 false 才排除
-    let denies = |c: &okapi_store::ChannelCandidate, cap: &str| {
-        c.capabilities.get(cap).and_then(serde_json::Value::as_bool) == Some(false)
+    let requirements = Requirements {
+        tools: info.needs_tools,
+        vision: info.needs_vision,
+        server_tools: bill.server_tools.has_tools(),
     };
-    if info.needs_tools {
-        candidates.retain(|c| !denies(c, "tools"));
-    }
-    if info.needs_vision {
-        candidates.retain(|c| !denies(c, "vision"));
-    }
+    candidates
+        .retain(|c| ExecutionPlan::compile(bill.ingress, c, &bill.model, requirements).is_ok());
     // 零留存要求（§11.24）：只留声明 data_retention='none' 的渠道。
     // 未声明按不满足处理——"不知道对方留不留"不能当成"不留"。
     // 单独给错误码：候选被这一条筛空时，回 no_available_channel 会让人以为渠道全挂了。
@@ -1241,10 +1660,10 @@ async fn eligible_candidates(
     let mut sticky_key: Option<i64> = None;
     if let Some(session) = &bill.session {
         sticky_key = bill.state.sched.sticky_get(bill.user_id, session).await;
-        if let Some(kid) = sticky_key
-            && let Some(pos) = candidates.iter().position(|c| c.channel_key_id == kid)
-        {
-            let hit = candidates.remove(pos);
+        let position =
+            sticky_key.and_then(|kid| candidates.iter().position(|c| c.channel_key_id == kid));
+        if let Some(position) = position {
+            let hit = candidates.remove(position);
             candidates.insert(0, hit);
         }
     }
@@ -1376,24 +1795,10 @@ async fn try_model(
             );
             continue;
         }
-        // 渠道 key 级并发信号量（§3.5 第二层）：满则跳过该候选（不计 failover）
-        if !bill
-            .state
-            .sched
-            .acquire_slot(cand.channel_key_id, cand.max_concurrency)
-            .await
-        {
-            tracing::debug!(channel_key = cand.channel_key_id, "并发已满，跳过候选");
-            continue;
-        }
         attempted += 1;
 
         let upstream_model = cand.upstream_model(&bill.model).to_owned();
         let Ok(mut body_up) = build_upstream_body(bill, info, &cand, body, &upstream_model) else {
-            bill.state
-                .sched
-                .release_slot(cand.channel_key_id, cand.max_concurrency)
-                .await;
             return Err(ForwardFailure::app(
                 AppError::bad_request(),
                 failover,
@@ -1401,15 +1806,10 @@ async fn try_model(
             ));
         };
         let base = cand.api_base.clone().unwrap_or_else(|| {
-            match cand.provider.as_str() {
-                "anthropic" | "anthropic_max" => DEFAULT_ANTHROPIC_BASE,
-                "gemini" => DEFAULT_GEMINI_BASE,
-                "codex" => okapi_providers::oauth::codex::DEFAULT_API_BASE,
-                // bedrock / vertex 没有可猜的缺省：留空，传输层按构造错误拒绝（与 azure 同理）
-                "bedrock" | "vertex" => "",
-                _ => DEFAULT_OPENAI_BASE,
-            }
-            .to_owned()
+            okapi_providers::registry::lookup(&cand.provider)
+                .and_then(|adapter| adapter.default_base)
+                .unwrap_or_default()
+                .to_owned()
         });
         last_channel = Some((cand.channel_id, cand.channel_key_id));
         last_upstream = Some((
@@ -1443,7 +1843,7 @@ async fn try_model(
                     Ok(credential) => cand.credential = credential.to_plaintext(),
                     Err(err) => {
                         break Err(classify_fatal(
-                            err,
+                            super::oauth_cred::unavailable(err),
                             failover,
                             (cand.channel_id, cand.channel_key_id),
                         ));
@@ -1542,6 +1942,8 @@ async fn try_model(
             if bill.ingress == Ingress::Responses
                 && bill.response_parent.is_none()
                 && cand.responses_native
+                && ExecutionPlan::compile(bill.ingress, &cand, &bill.model, Requirements::default())
+                    .is_ok_and(ExecutionPlan::can_fallback_to_chat)
                 && matches!(
                     &result,
                     Err(AttemptError::Fatal(f)) if matches!(f.upstream_status, Some(404 | 405))
@@ -1568,10 +1970,10 @@ async fn try_model(
             let transient = matches!(
                 &result,
                 Err(AttemptError::Retriable {
-                    failure_kind: KeyFailure::Transient | KeyFailure::Request,
+                    failure_kind: KeyFailure::Transient | KeyFailure::Request | KeyFailure::Unreachable,
                     code,
                     upstream_status,
-                }) if *code != codes::EMPTY_COMPLETION && matches!(upstream_status, None | Some(408 | 500..=528 | 530..=599))
+                }) if *code != codes::EMPTY_COMPLETION && *code != codes::NO_AVAILABLE_CHANNEL && matches!(upstream_status, None | Some(408 | 500..=528 | 530..=599))
             );
             if retry < same_key_retries && transient {
                 retry += 1;
@@ -1588,13 +1990,14 @@ async fn try_model(
 
         match attempt {
             Ok(resp) => {
-                // 成功建立输出：刷新会话粘性映射（信号量由结算路径释放）
+                // 成功建立输出：刷新会话粘性映射；响应持有并发许可直到 EOF/drop。
                 if let Some(session) = &bill.session {
                     bill.state
                         .sched
                         .sticky_set(bill.user_id, session, cand.channel_key_id)
                         .await;
                 }
+                super::key_health::success(&bill.state, &cand).await;
                 return Ok(resp);
             }
             Err(AttemptError::Retriable {
@@ -1602,23 +2005,20 @@ async fn try_model(
                 upstream_status,
                 failure_kind,
             }) => {
-                bill.state
-                    .sched
-                    .release_slot(cand.channel_key_id, cand.max_concurrency)
-                    .await;
+                if code == codes::NO_AVAILABLE_CHANNEL {
+                    // Admission denied before the wire attempt. Busy candidates
+                    // neither consume retry budget nor change credential health.
+                    attempted = attempted.saturating_sub(1);
+                    last_code = code;
+                    continue;
+                }
                 tracing::warn!(
                     request_id = %bill.request_id,
                     channel_key = cand.channel_key_id,
                     code,
                     "首字前失败，failover 下一候选"
                 );
-                let _ = okapi_store::channels::mark_key_failure(
-                    &bill.state.pg,
-                    cand.channel_key_id,
-                    code,
-                    failure_kind,
-                )
-                .await;
+                super::key_health::failure(&bill.state, &cand, code, failure_kind).await;
                 last_code = code;
                 last_status = upstream_status;
                 // allow_fallbacks:false（§11.24）——失败即返回，不改投其它渠道。
@@ -1637,10 +2037,6 @@ async fn try_model(
                 failover = failover.saturating_add(1);
             }
             Err(AttemptError::Fatal(mut failure)) => {
-                bill.state
-                    .sched
-                    .release_slot(cand.channel_key_id, cand.max_concurrency)
-                    .await;
                 failure.failover_count = failover;
                 failure.upstream = last_upstream.clone().map(Box::new);
                 return Err(failure);
@@ -1663,7 +2059,14 @@ async fn try_model(
         last_code
     };
     let mut failure = ForwardFailure::app(
-        AppError::new(StatusCode::BAD_GATEWAY, err_code),
+        AppError::new(
+            if err_code == codes::NO_AVAILABLE_CHANNEL {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_GATEWAY
+            },
+            err_code,
+        ),
         failover,
         last_channel,
     );
@@ -1682,10 +2085,18 @@ fn build_upstream_body(
     body: &Bytes,
     upstream_model: &str,
 ) -> Result<Bytes, UpstreamError> {
-    let native_responses = matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact)
-        && cand.responses_native;
-    // 按出向方言分派（bedrock = anthropic 方言、vertex 按模型），传输层差异在 dialect.rs
-    let dialect = super::dialect::upstream_dialect(&cand.provider, upstream_model);
+    let plan = ExecutionPlan::compile(
+        bill.ingress,
+        cand,
+        &bill.model,
+        Requirements {
+            tools: info.needs_tools,
+            vision: info.needs_vision,
+            server_tools: bill.server_tools.has_tools(),
+        },
+    )?;
+    let native_responses = plan.native_responses();
+    let dialect = plan.dialect.as_str();
     let built = match (bill.ingress, dialect) {
         // Responses 同方言：只改 model，其余字段（previous_response_id/store/include/
         // 内置工具/reasoning）一律原样——这正是直转相对降级链的全部价值。
@@ -1697,9 +2108,13 @@ fn build_upstream_body(
             convert::request_openai_to_anthropic(body, upstream_model, bill.completion_cap)
         }
         (Ingress::OpenAi, "gemini") => conv_gem::request_openai_to_gemini(body),
-        // Compact 与 Anthropic 同方言只重写 model，不注入 stream_options。
-        (Ingress::ResponsesCompact, _) | (Ingress::Anthropic, "anthropic") => {
+        // Compact 同方言只重写 model，不注入 stream_options。
+        (Ingress::ResponsesCompact, _) => {
             rewrite_model(body, &info.requested_model, upstream_model)
+        }
+        (Ingress::Anthropic, "anthropic") => {
+            rewrite_model(body, &info.requested_model, upstream_model)
+                .and_then(|body| with_anthropic_default_cap(body, bill.completion_cap))
         }
         // OpenAI 同方言：透传 + 流式补 include_usage。跨方言的三条路各自的
         // 转换器早已强制注入，唯独这条最常用的路曾漏掉——客户端不主动开
@@ -1739,6 +2154,7 @@ fn build_upstream_body(
             conv_g2o::request_gemini_to_openai(body, upstream_model, info.stream)
         }
     }?;
+    let built = bill.server_tools.restore(built, dialect)?;
     let profile = okapi_providers::model_parameters::profile(
         dialect,
         upstream_model,
@@ -1774,6 +2190,22 @@ fn build_upstream_body(
     }
 }
 
+/// Native Messages requires the same admitted default cap as converted requests.
+fn with_anthropic_default_cap(body: Bytes, cap: u32) -> Result<Bytes, UpstreamError> {
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| UpstreamError::Build("request_body".into()))?;
+    if value.get("max_tokens").is_some_and(|v| !v.is_null()) {
+        return Ok(body);
+    }
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| UpstreamError::Build("request_body".into()))?;
+    object.insert("max_tokens".into(), serde_json::json!(cap));
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|_| UpstreamError::Build("request_body".into()))
+}
+
 fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> AttemptError {
     if let Some(trace) = super::diagnostics::Trace::current() {
         trace.failure(&err);
@@ -1798,6 +2230,13 @@ fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> Att
             failure.error_code = format!("upstream_status_{status}");
             AttemptError::Fatal(failure)
         }
+        UpstreamError::Build(reason) if reason.starts_with("tools.") => {
+            AttemptError::Fatal(ForwardFailure::app(
+                AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
+                failover,
+                Some(channel),
+            ))
+        }
         UpstreamError::Build(_) => AttemptError::Fatal(ForwardFailure::app(
             AppError::bad_request(),
             failover,
@@ -1819,13 +2258,14 @@ fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> Att
             failover,
             Some(channel),
         )),
-        UpstreamError::Connect(_) | UpstreamError::Timeout | UpstreamError::Stream(_) => {
-            AttemptError::Fatal(ForwardFailure::app(
-                AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
-                failover,
-                Some(channel),
-            ))
-        }
+        UpstreamError::Connect(_)
+        | UpstreamError::Unreachable { .. }
+        | UpstreamError::Timeout
+        | UpstreamError::Stream(_) => AttemptError::Fatal(ForwardFailure::app(
+            AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR),
+            failover,
+            Some(channel),
+        )),
     }
 }
 
@@ -1953,8 +2393,9 @@ fn shape_upstream_body(
     // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
     // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
     let body = super::routing_prefs::strip(&body).unwrap_or(body);
-    let native_responses = matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact)
-        && cand.responses_native;
+    let native_responses =
+        ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?
+            .native_responses();
     // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）。
     // Responses 直转是唯一的例外——`reasoning.effort` 就是上游的原生键，只摘非原生键。
     let body = if native_responses {
@@ -1998,52 +2439,26 @@ async fn dispatch_chat(
     stream: bool,
 ) -> Result<ChatResponse, UpstreamError> {
     use futures::StreamExt as _;
-    let native_responses = matches!(bill.ingress, Ingress::Responses | Ingress::ResponsesCompact)
-        && cand.responses_native;
+    let plan = ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?;
+    let native_responses = plan.native_responses();
+    let body = bound_default_output(bill.ingress, bill.default_output_cap, body);
     let body = shape_upstream_body(bill, cand, body)?;
+    bill.server_tools.verify_outbound(&body)?;
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
     // 订阅 provider 额外带上客户端身份头（真实 Claude Code / Codex CLI 经网关出去时上游看到它自己）
     let outbound = super::oauth_cred::outbound_with_client(cand, &bill.client_headers);
     // 方言臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
-    let dialect = super::dialect::upstream_dialect(&cand.provider, &upstream_model);
+    let dialect = plan.dialect.as_str();
     let resp = match (bill.ingress, dialect) {
-        (Ingress::ResponsesCompact, _) if cand.provider == "codex" => {
-            let cred = super::oauth_cred::fresh_credential(&bill.state, cand).await?;
-            okapi_providers::oauth::codex::responses_compact(
-                bill.state.upstream.http(),
-                base,
-                &cred.access_token,
-                cred.account_id.as_deref(),
-                body,
-                &outbound,
-            )
-            .await
-        }
         (Ingress::ResponsesCompact, _) => {
             bill.state
-                .upstream
-                .responses_compact(base, &cand.credential, body, &outbound)
+                .responses_via(cand, base, body, false, true, &outbound)
                 .await
-        }
-        // Codex 订阅后端（§11.38）：只有 Responses 面，候选过滤已保证只有 Responses 入口到这里
-        (Ingress::Responses, _) if cand.provider == "codex" => {
-            let cred = super::oauth_cred::fresh_credential(&bill.state, cand).await?;
-            okapi_providers::oauth::codex::responses(
-                bill.state.upstream.http(),
-                base,
-                &cred.access_token,
-                cred.account_id.as_deref(),
-                body,
-                stream,
-                &outbound,
-            )
-            .await
         }
         // Responses 客户端 + 说 Responses 方言的上游：直转，事件原样透出
         (Ingress::Responses, _) if native_responses => {
             bill.state
-                .upstream
-                .responses(base, &cand.credential, body, stream, &outbound)
+                .responses_via(cand, base, body, stream, false, &outbound)
                 .await
         }
         // Gemini 客户端 + gemini 方言上游：透传 + 计费元数据扫描
@@ -2337,11 +2752,7 @@ async fn attempt_stream(
         Ok(Ok(false)) => {
             bill.trace
                 .failure(&UpstreamError::Stream(codes::EMPTY_COMPLETION.into()));
-            Err(AttemptError::Retriable {
-                code: codes::EMPTY_COMPLETION,
-                upstream_status: None,
-                failure_kind: KeyFailure::Transient,
-            })
+            Err(empty_completion(bill.ingress, &buffered))
         }
         Ok(Ok(true)) => {
             let mut writer = response_writer(bill, cand);
@@ -2374,14 +2785,160 @@ async fn attempt_stream(
     }
 }
 
+/// 空流照旧换渠道、不计费；只有说不出原因的空流才记成这把 key 的瞬态失败。
+fn empty_completion(ingress: Ingress, buffered: &[ChatEvent]) -> AttemptError {
+    AttemptError::Retriable {
+        code: codes::EMPTY_COMPLETION,
+        upstream_status: None,
+        failure_kind: if request_caused_stop(ingress, buffered) {
+            KeyFailure::Request
+        } else {
+            KeyFailure::Transient
+        },
+    }
+}
+
+/// 空流是不是请求自己收的尾：输出预算耗尽（推理模型把 max_tokens 全花在思考上）或
+/// 内容策略拦截。这说明不了凭证好坏——若记成 key 的瞬态失败，调用方用几次极小的
+/// max_completion_tokens 就能把整组 key 打进冷却。事件已是客户端方言（转换器已对齐各家原因）。
+fn request_caused_stop(ingress: Ingress, events: &[ChatEvent]) -> bool {
+    use serde_json::Value;
+    events.iter().any(|event| {
+        let ChatEvent::Data { raw, .. } = event else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(raw) else {
+            return false;
+        };
+        let reason = |pointer: &str| value.pointer(pointer).and_then(Value::as_str);
+        let any_reason = |list: &str, field: &str, stops: &[&str]| {
+            value
+                .get(list)
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get(field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|stop| stops.contains(&stop))
+                    })
+                })
+        };
+        match ingress {
+            Ingress::OpenAi => {
+                any_reason("choices", "finish_reason", &["length", "content_filter"])
+            }
+            Ingress::Anthropic => matches!(
+                reason("/delta/stop_reason"),
+                Some("max_tokens" | "refusal" | "model_context_window_exceeded")
+            ),
+            Ingress::Responses | Ingress::ResponsesCompact => matches!(
+                reason("/response/incomplete_details/reason"),
+                Some("max_output_tokens" | "content_filter")
+            ),
+            Ingress::Gemini => {
+                reason("/promptFeedback/blockReason").is_some_and(|block| !block.is_empty())
+                    || any_reason(
+                        "candidates",
+                        "finishReason",
+                        &[
+                            "MAX_TOKENS",
+                            "SAFETY",
+                            "RECITATION",
+                            "BLOCKLIST",
+                            "PROHIBITED_CONTENT",
+                            "SPII",
+                            "IMAGE_SAFETY",
+                        ],
+                    )
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod empty_stop_tests {
+    use super::*;
+
+    fn data(raw: &serde_json::Value) -> ChatEvent {
+        ChatEvent::Data {
+            event: None,
+            raw: raw.to_string(),
+            content_chars: 0,
+            usage: None,
+            has_output: false,
+        }
+    }
+
+    #[test]
+    fn budget_and_policy_stops_are_not_credential_failures() {
+        for (ingress, raw) in [
+            (
+                Ingress::OpenAi,
+                serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}),
+            ),
+            (
+                Ingress::OpenAi,
+                serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}),
+            ),
+            (
+                Ingress::Anthropic,
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"max_tokens"}}),
+            ),
+            (
+                Ingress::Responses,
+                serde_json::json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}),
+            ),
+            (
+                Ingress::Gemini,
+                serde_json::json!({"candidates":[{"finishReason":"MAX_TOKENS","content":{"parts":[]}}]}),
+            ),
+            (
+                Ingress::Gemini,
+                serde_json::json!({"promptFeedback":{"blockReason":"SAFETY"}}),
+            ),
+        ] {
+            assert!(request_caused_stop(ingress, &[data(&raw)]), "{raw}");
+        }
+    }
+
+    #[test]
+    fn unexplained_empty_streams_still_count_against_the_key() {
+        for (ingress, raw) in [
+            (
+                Ingress::OpenAi,
+                serde_json::json!({"choices":[{"index":0,"delta":{"role":"assistant"}}]}),
+            ),
+            (
+                Ingress::OpenAi,
+                serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+            ),
+            (
+                Ingress::Anthropic,
+                serde_json::json!({"type":"message_delta","delta":{"stop_reason":"end_turn"}}),
+            ),
+            (
+                Ingress::Gemini,
+                serde_json::json!({"candidates":[{"finishReason":"STOP"}]}),
+            ),
+            // 方言不对的原因字段不能被误认
+            (
+                Ingress::Anthropic,
+                serde_json::json!({"choices":[{"finish_reason":"length"}]}),
+            ),
+        ] {
+            assert!(!request_caused_stop(ingress, &[data(&raw)]), "{raw}");
+        }
+        assert!(!request_caused_stop(Ingress::OpenAi, &[ChatEvent::Done]));
+    }
+}
+
 #[derive(Clone)]
 struct CandInfo {
     /// A generated WS turn can have billable usage and still end in an error.
     outcome: Option<(i16, String)>,
     channel: i64,
+    cost_milli: i64,
     key: i64,
-    /// key 级并发上限（结算路径释放信号量用）。
-    cap: Option<i32>,
     sticky_layer: i16,
     /// 同 key 重试次数（§3.6，记账列 retry_count）。
     retry: i16,
@@ -2414,8 +2971,8 @@ fn cand_info(
     CandInfo {
         outcome: None,
         channel: cand.channel_id,
+        cost_milli: cand.cost_milli,
         key: cand.channel_key_id,
-        cap: cand.max_concurrency,
         sticky_layer,
         retry,
         upstream_request_id: None,
@@ -2464,12 +3021,14 @@ async fn spawn_stream_pump(
     // pump 生命周期与上游流绑定；客户端断开经 send 失败感知并取消上游，
     // 结算在任何退出路径都执行（settle_stream）。经 settlements 计数：优雅下线要等它落账。
     let settlements = bill.state.settlements.clone();
+    bill.settlement.hand_off();
     settlements.spawn(async move {
         let mut usage: Option<UsageProbe> = None;
         let mut content_chars: usize = 0;
         let mut client_gone = false;
         // Observe the returned model independently of the opt-in billing policy.
         let mut resp_meta = RespMeta::default();
+        let mut next_sequence = 0;
 
         let mut terminal = Vec::new();
         for event in buffered {
@@ -2482,6 +3041,7 @@ async fn spawn_stream_pump(
                 terminal.push(event);
                 continue;
             }
+            advance_stream_sequence(&event, bill.ingress, &mut next_sequence);
             if !push_event(
                 &mut tx,
                 &event,
@@ -2508,15 +3068,8 @@ async fn spawn_stream_pump(
                     if let Err(err) = capture_response_event(&mut writer, &bill, &event).await {
                         // 首字已发送：终止而不改投，保留终态 usage 供实际产出结算。
                         if let ChatEvent::Data { usage: Some(reported), .. } = &event { usage = Some(reported.with_previous(usage)); }
-                        let sequence = match &event {
-                            ChatEvent::Data { raw, .. } => serde_json::from_str::<serde_json::Value>(raw).ok()
-                                .and_then(|v| v.get("sequence_number").and_then(serde_json::Value::as_u64)),
-                            ChatEvent::Done => None,
-                        };
-                        let payload = serde_json::json!({"type":"error", "code":err.code,
-                            "message":err.code, "param":err.param, "request_id":request_id,
-                            "sequence_number":sequence.unwrap_or(0)}).to_string();
-                        let _ = tx.send(Ok(Event::default().event("error").data(payload))).await;
+                        let event = super::error::stream_error_event(bill.ingress, &err, request_id, Some(next_sequence));
+                        let _ = tokio::time::timeout(Duration::from_secs(5), tx.send(Ok(event))).await;
                         break;
                     }
                     saw_done = matches!(event, ChatEvent::Done);
@@ -2526,6 +3079,7 @@ async fn spawn_stream_pump(
                         terminal.push(event);
                         continue;
                     }
+                    advance_stream_sequence(&event, bill.ingress, &mut next_sequence);
                     if !push_event(
                         &mut tx,
                         &event,
@@ -2545,8 +3099,9 @@ async fn spawn_stream_pump(
                     bill.trace.set("stream_end_reason", serde_json::json!("upstream_error"));
                     info.outcome = Some((err.upstream_status().unwrap_or(502), err.error_code().into()));
                     tracing::warn!(request_id = %request_id, error = %err, "首字后断流，按已产出结算");
-                    let payload=serde_json::json!({"error":{"code":err.error_code(),"message":err.error_code(),"request_id":request_id}}).to_string();
-                    let _ = tokio::time::timeout(Duration::from_secs(5),tx.send(Ok(Event::default().event("error").data(payload)))).await;
+                    let error = AppError::new(if matches!(err, UpstreamError::Timeout | UpstreamError::Unreachable { timed_out: true, .. }) { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY }, err.error_code());
+                    let event = super::error::stream_error_event(bill.ingress, &error, request_id, Some(next_sequence));
+                    let _ = tokio::time::timeout(Duration::from_secs(5),tx.send(Ok(event))).await;
                     break;
                 }
                 None => break,
@@ -2572,9 +3127,8 @@ async fn spawn_stream_pump(
             resp_meta,
         )
         .await;
-        finish_settled_stream(tx, result, terminal, bill.ingress, request_id).await;
+        finish_settled_stream(tx, result, terminal, bill.ingress, request_id, next_sequence).await;
         // 结算完成后释放渠道 key 并发信号量（§3.5）
-        bill.state.sched.release_slot(info.key, info.cap).await;
     });
 
     let sse = Sse::new(rx).keep_alive(KeepAlive::new().interval(policy.heartbeat).text("ping"));
@@ -2595,21 +3149,31 @@ fn capture_terminal_usage(event: &ChatEvent, usage: &mut Option<UsageProbe>, cha
     }
 }
 
+fn advance_stream_sequence(event: &ChatEvent, ingress: Ingress, next: &mut u64) {
+    if matches!(ingress, Ingress::Responses | Ingress::ResponsesCompact)
+        && let ChatEvent::Data { raw, .. } = event
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Some(sequence) = value
+            .get("sequence_number")
+            .and_then(serde_json::Value::as_u64)
+    {
+        *next = (*next).max(sequence.saturating_add(1));
+    }
+}
+
 async fn finish_settled_stream(
     mut tx: mpsc::Sender<Result<Event, Infallible>>,
     result: Result<(), AppError>,
     terminal: Vec<ChatEvent>,
     ingress: Ingress,
     request_id: Uuid,
+    next_sequence: u64,
 ) {
     if let Err(error) = result {
         tracing::error!(%request_id, ?error, "stream usage persistence failed");
-        let payload = serde_json::json!({"error":{"code":error.code},"request_id":request_id});
-        let _ = tx
-            .send(Ok(Event::default()
-                .event("error")
-                .data(payload.to_string())))
-            .await;
+        let event =
+            super::error::stream_error_event(ingress, &error, request_id, Some(next_sequence));
+        let _ = tokio::time::timeout(Duration::from_secs(5), tx.send(Ok(event))).await;
     } else {
         let mut usage = None;
         let mut chars = 0;
@@ -2749,6 +3313,7 @@ fn capture_chunk_meta(event: &ChatEvent, meta: &mut RespMeta) {
         #[serde(alias = "modelVersion")]
         model: Option<String>,
         service_tier: Option<String>,
+        #[serde(alias = "message")]
         response: Option<Box<MetaOnly>>,
     }
     fn absorb(meta: &mut RespMeta, probe: MetaOnly) {
@@ -2770,6 +3335,35 @@ fn capture_chunk_meta(event: &ChatEvent, meta: &mut RespMeta) {
         && let Ok(probe) = serde_json::from_str::<MetaOnly>(raw)
     {
         absorb(meta, probe);
+    }
+}
+
+#[cfg(test)]
+mod native_response_meta_tests {
+    use super::*;
+
+    #[test]
+    fn message_start_model_is_preserved_for_opted_in_response_pricing() {
+        let mut meta = RespMeta::default();
+        let event = ChatEvent::Data {
+            event: Some("message_start".into()),
+            raw: serde_json::json!({"type":"message_start","message":{"model":"native-actual"}})
+                .to_string(),
+            content_chars: 0,
+            usage: None,
+            has_output: false,
+        };
+        capture_chunk_meta(&event, &mut meta);
+        assert_eq!(meta.model.as_deref(), Some("native-actual"));
+        let later = ChatEvent::Data {
+            event: None,
+            raw: serde_json::json!({"model":"later"}).to_string(),
+            content_chars: 0,
+            usage: None,
+            has_output: false,
+        };
+        capture_chunk_meta(&later, &mut meta);
+        assert_eq!(meta.model.as_deref(), Some("native-actual"));
     }
 }
 
@@ -2858,9 +3452,9 @@ async fn attempt_json(
             // and wait for it before returning a complete JSON response.
             let bill_bg = bill.clone();
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            bill.settlement.hand_off();
             bill.state.settlements.spawn(async move {
                 let result = settle_commit(&bill_bg, &info, usage, None, failover, resp_meta).await;
-                bill_bg.state.sched.release_slot(info.key, info.cap).await;
                 let _ = done_tx.send(result);
             });
             done_rx
@@ -2887,52 +3481,78 @@ async fn attempt_json(
 }
 
 fn non_stream_content_chars(ingress: Ingress, body: &Bytes) -> usize {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+    use serde_json::Value;
+    let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return 0;
     };
+    let text = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map_or(0, |t| t.chars().count())
+    };
+    // 无 usage 时的补全估算输入：全部候选、正文与可见推理，以及工具调用参数——
+    // 只数首个候选的正文，n>1 与纯工具调用的回答都会被低估成个位数 token。
     match ingress {
         // output 中保留的用户消息不是新生成内容，密文也不能按字符数估算。
         Ingress::ResponsesCompact => 0,
-        Ingress::OpenAi => v
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .map_or(0, |s| s.chars().count()),
-        Ingress::Anthropic => v
-            .get("content")
-            .and_then(|c| c.as_array())
-            .map_or(0, |blocks| {
-                blocks
-                    .iter()
-                    .filter_map(|b| {
-                        b.get("text")
-                            .or_else(|| b.get("thinking"))
-                            .and_then(|t| t.as_str())
-                    })
-                    .map(|s| s.chars().count())
-                    .sum()
-            }),
-        Ingress::Responses => v
-            .get("output")
-            .and_then(|o| o.as_array())
-            .map_or(0, |items| {
-                items
-                    .iter()
-                    .filter_map(|i| i.get("content").and_then(|c| c.as_array()))
-                    .flatten()
-                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                    .map(|s| s.chars().count())
-                    .sum()
-            }),
-        Ingress::Gemini => v
-            .pointer("/candidates/0/content/parts")
-            .and_then(|p| p.as_array())
-            .map_or(0, |parts| {
-                parts
-                    .iter()
-                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                    .map(|s| s.chars().count())
-                    .sum()
-            }),
+        Ingress::OpenAi => json_items(v.get("choices"))
+            .filter_map(|choice| choice.get("message"))
+            .map(|message| {
+                let reasoning = message
+                    .get("reasoning_content")
+                    .or_else(|| message.get("reasoning"));
+                text(message.get("content"))
+                    + text(reasoning)
+                    + text(message.get("refusal"))
+                    + json_items(message.get("tool_calls"))
+                        .map(|call| text(call.pointer("/function/arguments")))
+                        .sum::<usize>()
+            })
+            .sum(),
+        Ingress::Anthropic => json_items(v.get("content"))
+            .map(|block| {
+                text(block.get("text").or_else(|| block.get("thinking")))
+                    + tool_argument_chars(block.get("input"))
+            })
+            .sum(),
+        Ingress::Responses => json_items(v.get("output"))
+            .map(|item| match item.get("type").and_then(Value::as_str) {
+                Some("reasoning") => json_items(item.get("summary"))
+                    .map(|part| text(part.get("text")))
+                    .sum(),
+                Some("function_call") => tool_argument_chars(item.get("arguments")),
+                Some("custom_tool_call") => tool_argument_chars(item.get("input")),
+                _ => json_items(item.get("content"))
+                    .map(|part| text(part.get("text")))
+                    .sum(),
+            })
+            .sum(),
+        Ingress::Gemini => json_items(v.get("candidates"))
+            .flat_map(|candidate| json_items(candidate.pointer("/content/parts")))
+            .map(|part| {
+                text(part.get("text"))
+                    + tool_argument_chars(
+                        part.pointer("/functionCall/args")
+                            .or_else(|| part.pointer("/function_call/args")),
+                    )
+            })
+            .sum(),
+    }
+}
+
+fn json_items(value: Option<&serde_json::Value>) -> impl Iterator<Item = &serde_json::Value> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+/// 工具参数的字符数：字符串原样计，结构化值按其 JSON 文本计。
+fn tool_argument_chars(value: Option<&serde_json::Value>) -> usize {
+    match value {
+        Some(serde_json::Value::String(s)) => s.chars().count(),
+        Some(serde_json::Value::Null) | None => 0,
+        Some(value) => value.to_string().chars().count(),
     }
 }
 
@@ -2950,7 +3570,11 @@ fn resolve_billing_calc(
     let rm = resp_model.filter(|m| *m != bill.model && !m.is_empty())?;
     let mut candidate = bill.calc.clone();
     candidate.model = ModelCode::from(rm);
-    if calculate(&bill.book, &candidate, usage).is_ok() {
+    if bill
+        .server_tools
+        .quote(&bill.book, &candidate, usage)
+        .is_ok()
+    {
         tracing::debug!(request_id = %bill.request_id, requested = %bill.model, billed = rm, "按上游响应模型计费");
         Some(candidate)
     } else {
@@ -3010,7 +3634,42 @@ async fn settle_commit(
     );
     let calc = &calc;
     let billed_model: &str = &billed_model;
-    let quote: Quote = match calculate(&bill.book, calc, usage) {
+    let (quote, snapshot): (Quote, serde_json::Value) = match bill
+        .server_tools
+        .validate_usage(
+            bill.book.server_tool_prices(&calc.model),
+            usage.server_tool_usage,
+        )
+        .and_then(|()| {
+            if bill.server_tools.has_tools() && calc.model != bill.calc.model {
+                if bill.book.server_tool_prices(&bill.calc.model).is_some()
+                    && bill.book.server_tool_prices(&calc.model).is_none()
+                {
+                    return Err(okapi_pricing::PricingError::InvalidServerToolAdmission(
+                        "response_tool_price_missing",
+                    ));
+                }
+                let estimate = TokenUsage {
+                    prompt_tokens: bill.est_prompt,
+                    completion_tokens: bill.completion_cap.saturating_mul(bill.choices),
+                    server_tool_usage: bill.server_tools.estimated_usage(),
+                    ..TokenUsage::default()
+                };
+                if bill.server_tools.quote(&bill.book, calc, estimate)?.amount
+                    > bill.reserved_amount
+                {
+                    return Err(okapi_pricing::PricingError::InvalidServerToolAdmission(
+                        "response_price_above_reservation",
+                    ));
+                }
+            }
+            bill.server_tools.quote(&bill.book, calc, usage)
+        })
+        .and_then(|quote| {
+            let snapshot =
+                super::reservation::settled_snapshot(&quote.snapshot, &bill.reservation_snapshot)?;
+            Ok((quote, snapshot))
+        }) {
         Ok(q) => q,
         Err(err) => {
             // 结算算价失败：退款 + 失败记账（fail-closed，不猜测金额）
@@ -3047,7 +3706,25 @@ async fn settle_commit(
         }
     };
 
-    let mut snapshot = serde_json::to_value(&quote.snapshot).ok();
+    let mut snapshot = super::upstream_cost::snapshot(
+        Some(snapshot),
+        info.channel,
+        info.cost_milli,
+        quote.list_price,
+    );
+    if bill.server_tools.has_tools()
+        && let Some(serde_json::Value::Object(map)) = snapshot.as_mut()
+    {
+        map.insert(
+            "server_tool_admission".into(),
+            bill.server_tools.snapshot(bill.reserved_amount),
+        );
+    }
+    if let Some(coverage) = bill.server_tools.cost_coverage(usage.server_tool_usage)
+        && let Some(serde_json::Value::Object(map)) = snapshot.as_mut()
+    {
+        map.insert("server_tool_cost_coverage".into(), coverage);
+    }
     // 模型级降级的账单可解释性（DESIGN §3.4）：仅降级时写 requested_model，
     // 用户能核对"我要的是 A、实际用了 B、按 B 计价"
     if let Some(from) = &bill.downgraded_from
@@ -3135,8 +3812,8 @@ async fn settle_failure(bill: &RequestBilling, failure: &ForwardFailure) {
         &CandInfo {
             outcome: None,
             channel,
+            cost_milli: 0,
             key,
-            cap: None,
             sticky_layer: 0,
             retry: 0,
             upstream_request_id: None,
@@ -3203,7 +3880,10 @@ async fn record_terminal(
         list_price: Money::ZERO,
         upstream_cost: None,
         pricing_epoch: Some(bill.book.epoch()),
-        pricing_snapshot: None,
+        pricing_snapshot: Some(serde_json::json!({
+            "epoch": bill.book.epoch(),
+            "reservation": bill.reservation_snapshot.as_ref(),
+        })),
         latency_ms: elapsed_ms_i32(bill.started),
         ttft_ms,
         is_stream: bill.is_stream,
@@ -3318,6 +3998,276 @@ fn elapsed_ms_i32(started: Instant) -> i32 {
 #[cfg(test)]
 mod failure_scope_tests {
     use super::*;
+
+    #[test]
+    fn visible_reasoning_is_counted_once_and_opaque_context_is_not() {
+        let chat = Bytes::from(
+            serde_json::json!({"choices":[{"message":{
+                "content":"OK", "reasoning_content":"思考", "reasoning":"ignored alias"
+            }}]})
+            .to_string(),
+        );
+        assert_eq!(non_stream_content_chars(Ingress::OpenAi, &chat), 4);
+        let responses = Bytes::from(serde_json::json!({"output":[
+            {"type":"reasoning","summary":[{"type":"summary_text","text":"思考"}],"encrypted_content":"opaque"},
+            {"type":"message","content":[{"type":"output_text","text":"OK"}]}
+        ]}).to_string());
+        assert_eq!(non_stream_content_chars(Ingress::Responses, &responses), 4);
+        assert_eq!(
+            non_stream_content_chars(Ingress::ResponsesCompact, &responses),
+            0
+        );
+    }
+
+    #[test]
+    fn tool_arguments_and_every_choice_feed_the_fallback_estimate() {
+        let body = |value: serde_json::Value| Bytes::from(value.to_string());
+        let chat = body(serde_json::json!({"choices":[
+            {"message":{"content":"ab","tool_calls":[{"function":{"name":"f","arguments":"{\"x\":1}"}}]}},
+            {"message":{"content":"cd"}}
+        ]}));
+        assert_eq!(non_stream_content_chars(Ingress::OpenAi, &chat), 2 + 7 + 2);
+        let anthropic = body(serde_json::json!({"content":[
+            {"type":"text","text":"ab"},
+            {"type":"tool_use","name":"f","input":{"x":1}}
+        ]}));
+        assert_eq!(
+            non_stream_content_chars(Ingress::Anthropic, &anthropic),
+            2 + 7
+        );
+        let responses = body(serde_json::json!({"output":[
+            {"type":"function_call","name":"f","arguments":"{\"x\":1}"},
+            {"type":"custom_tool_call","name":"g","input":"patch"}
+        ]}));
+        assert_eq!(
+            non_stream_content_chars(Ingress::Responses, &responses),
+            7 + 5
+        );
+        let gemini = body(serde_json::json!({"candidates":[
+            {"content":{"parts":[{"text":"ab"},{"functionCall":{"name":"f","args":{"x":1}}}]}},
+            {"content":{"parts":[{"text":"cd"}]}}
+        ]}));
+        assert_eq!(
+            non_stream_content_chars(Ingress::Gemini, &gemini),
+            2 + 7 + 2
+        );
+    }
+
+    #[test]
+    fn explicit_caps_are_reserved_in_full_and_defaults_stay_bounded() {
+        assert_eq!(admitted_completion_cap(Some(100_000), None), 100_000);
+        assert_eq!(admitted_completion_cap(Some(100_000), Some(40_000)), 40_000);
+        assert_eq!(admitted_completion_cap(Some(512), Some(40_000)), 512);
+        assert_eq!(
+            admitted_completion_cap(None, Some(128_000)),
+            MAX_COMPLETION_CAP
+        );
+        assert_eq!(admitted_completion_cap(None, Some(8_192)), 8_192);
+        assert_eq!(admitted_completion_cap(None, None), DEFAULT_COMPLETION_CAP);
+    }
+
+    /// 四种入口的图片都计张，工具结果里嵌套的也算；非图片的内联文件不算。
+    #[test]
+    fn image_inputs_are_counted_across_ingresses() {
+        let count =
+            |ingress, v: serde_json::Value| image_inputs(ingress, &Bytes::from(v.to_string()));
+        assert_eq!(
+            count(
+                Ingress::OpenAi,
+                serde_json::json!({"messages":[{"role":"user","content":[
+                    {"type":"text","text":"hi"},
+                    {"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}},
+                    {"type":"image_url","image_url":{"url":"https://x/y.png"}}
+                ]}]})
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                Ingress::Anthropic,
+                serde_json::json!({"messages":[{"role":"user","content":[
+                    {"type":"image","source":{"type":"base64","data":"AA"}},
+                    {"type":"tool_result","tool_use_id":"t","content":[
+                        {"type":"image","source":{"type":"url","url":"https://x"}}
+                    ]}
+                ]}]})
+            ),
+            2
+        );
+        assert_eq!(
+            count(
+                Ingress::Responses,
+                serde_json::json!({"input":[{"role":"user","content":[
+                    {"type":"input_text","text":"hi"},
+                    {"type":"input_image","image_url":"https://x"}
+                ]}]})
+            ),
+            1
+        );
+        assert_eq!(
+            count(
+                Ingress::Gemini,
+                serde_json::json!({"contents":[{"parts":[
+                    {"inlineData":{"mimeType":"image/png","data":"AA"}},
+                    {"inlineData":{"mimeType":"application/pdf","data":"AA"}},
+                    {"text":"hi"}
+                ]}]})
+            ),
+            1
+        );
+        assert_eq!(
+            count(Ingress::OpenAi, serde_json::json!({"messages":[]})),
+            0
+        );
+    }
+
+    /// PDF 按页、音频按字节、纯文本文档按长度计入；URL 引用与未知类型不计。
+    #[test]
+    fn attachments_are_bounded_from_inline_data() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::prelude::BASE64_STANDARD.encode(bytes);
+        let pdf = b64(
+            b"%PDF-1.4 1 0 obj <</Type /Pages /Count 2>> 2 0 obj <</Type /Page>> 3 0 obj <</Type/Page>>",
+        );
+        let count =
+            |ingress, v: serde_json::Value| attachment_tokens(ingress, &Bytes::from(v.to_string()));
+        assert_eq!(
+            count(
+                Ingress::Anthropic,
+                serde_json::json!({"messages":[{"role":"user","content":[
+                    {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":pdf}},
+                    {"type":"document","source":{"type":"text","media_type":"text/plain","data":"abcdef"}},
+                    {"type":"document","source":{"type":"url","url":"https://x/a.pdf"}}
+                ]}]})
+            ),
+            2 * PDF_PAGE_TOKENS + 3
+        );
+        assert_eq!(
+            count(
+                Ingress::OpenAi,
+                serde_json::json!({"messages":[{"role":"user","content":[
+                    {"type":"file","file":{"filename":"a.pdf","file_data":format!("data:application/pdf;base64,{pdf}")}},
+                    {"type":"input_audio","input_audio":{"format":"wav","data":b64(&[0_u8; 12_500])}}
+                ]}]})
+            ),
+            2 * PDF_PAGE_TOKENS + 100
+        );
+        assert_eq!(
+            count(
+                Ingress::Responses,
+                serde_json::json!({"input":[{"role":"user","content":[
+                    {"type":"input_file","file_data":format!("data:application/pdf;base64,{pdf}")},
+                    {"type":"input_file","file_id":"file_1"}
+                ]}]})
+            ),
+            2 * PDF_PAGE_TOKENS
+        );
+        assert_eq!(
+            count(
+                Ingress::Gemini,
+                serde_json::json!({"contents":[{"parts":[
+                    {"inlineData":{"mimeType":"audio/mp3","data":b64(&[0_u8; 1_250])}},
+                    {"inlineData":{"mimeType":"image/png","data":"AA"}}
+                ]}]})
+            ),
+            10
+        );
+    }
+
+    /// 放大后的估算必须仍是合法用量：计价入口先校验，不合法会让整个请求失败。
+    #[test]
+    fn admission_hints_keep_the_estimate_valid_for_pricing() {
+        let base = TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 64,
+            ..TokenUsage::default()
+        };
+        let hinted = with_admission_hints(
+            base,
+            okapi_providers::profiles::admission_hints(
+                &serde_json::json!({"client_profile":{"name":"claude-code","mode":"mimic"}}),
+            ),
+        );
+        hinted.validate().unwrap();
+        assert_eq!(hinted.prompt_tokens, 1728);
+        assert_eq!(hinted.cache_write_1h_tokens, Some(1728));
+        let plain =
+            with_admission_hints(base, okapi_providers::profiles::AdmissionHints::default());
+        plain.validate().unwrap();
+        assert_eq!(plain, base);
+    }
+
+    /// 缺省上限只在模型能输出得比预扣封顶更多时写入；显式上限、未知 max_output 不动。
+    #[test]
+    fn omitted_cap_is_bounded_only_when_the_model_could_exceed_the_hold() {
+        assert_eq!(
+            default_output_cap(None, Some(128_000)),
+            Some(MAX_COMPLETION_CAP)
+        );
+        assert_eq!(default_output_cap(None, Some(8_192)), None);
+        assert_eq!(default_output_cap(None, None), None);
+        assert_eq!(default_output_cap(Some(100), Some(128_000)), None);
+
+        let cap = Some(MAX_COMPLETION_CAP);
+        let json = |ingress, v: serde_json::Value| -> serde_json::Value {
+            let out = bound_default_output(ingress, cap, Bytes::from(v.to_string()));
+            serde_json::from_slice(&out).unwrap()
+        };
+        let chat = json(
+            Ingress::OpenAi,
+            serde_json::json!({"model":"m","messages":[]}),
+        );
+        assert_eq!(chat["max_tokens"], MAX_COMPLETION_CAP);
+        let explicit = json(
+            Ingress::OpenAi,
+            serde_json::json!({"model":"m","max_completion_tokens":7}),
+        );
+        assert_eq!(explicit["max_completion_tokens"], 7);
+        assert!(explicit.get("max_tokens").is_none());
+        let responses = json(Ingress::Responses, serde_json::json!({"model":"m"}));
+        assert_eq!(responses["max_output_tokens"], MAX_COMPLETION_CAP);
+        let gemini = json(
+            Ingress::Gemini,
+            serde_json::json!({"contents":[],"generationConfig":{"temperature":0.2}}),
+        );
+        assert_eq!(
+            gemini["generationConfig"]["maxOutputTokens"],
+            MAX_COMPLETION_CAP
+        );
+        assert_eq!(gemini["generationConfig"]["temperature"], 0.2);
+        let anthropic = json(Ingress::Anthropic, serde_json::json!({"model":"m"}));
+        assert_eq!(anthropic["max_tokens"], MAX_COMPLETION_CAP);
+        let compact = json(Ingress::ResponsesCompact, serde_json::json!({"model":"m"}));
+        assert!(compact.get("max_output_tokens").is_none());
+        let untouched = Bytes::from_static(b"{\"model\":\"m\"}");
+        assert_eq!(
+            bound_default_output(Ingress::OpenAi, None, untouched.clone()),
+            untouched
+        );
+    }
+
+    #[test]
+    fn responses_error_sequence_follows_forwarded_events() {
+        let event = |sequence| ChatEvent::Data {
+            raw:
+                serde_json::json!({"type":"response.output_text.delta","sequence_number":sequence})
+                    .to_string(),
+            event: Some("response.output_text.delta".into()),
+            has_output: true,
+            content_chars: 1,
+            usage: None,
+        };
+        let mut next = 0;
+        advance_stream_sequence(&event(7), Ingress::Responses, &mut next);
+        assert_eq!(next, 8);
+        advance_stream_sequence(&event(4), Ingress::Responses, &mut next);
+        assert_eq!(next, 8);
+        advance_stream_sequence(&event(9), Ingress::OpenAi, &mut next);
+        assert_eq!(next, 8);
+        advance_stream_sequence(&ChatEvent::Done, Ingress::Responses, &mut next);
+        assert_eq!(next, 8);
+    }
+
     fn status(status: u16, body: &str) -> UpstreamError {
         UpstreamError::Status {
             status,

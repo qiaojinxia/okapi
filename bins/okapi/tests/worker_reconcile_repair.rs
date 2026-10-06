@@ -32,7 +32,7 @@ struct Bed {
 
 /// 建用户 + 走正规入账（PG 事件 + Redis 同步），让账本与热余额起手一致。
 async fn setup() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -234,6 +234,7 @@ async fn durable_holds_survive_expiry_sweeps_and_worker_repair()
         group_ratio: RatioFp::ONE,
         user_multiplier: RatioFp::ONE,
         rules: vec![],
+        server_tool_fees: vec![],
         media_units: Some(3),
         final_unit_price_input_per_1m_usd: None,
     };

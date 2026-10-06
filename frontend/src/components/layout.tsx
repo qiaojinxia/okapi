@@ -68,14 +68,8 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
   const can = usePermission()
   const panel = useRef<HTMLElement>(null)
   const mobileOpen = open && !desktop
-  useModalFocus(mobileOpen, panel)
+  useModalFocus(mobileOpen, panel, undefined, () => setOpen(false))
 
-  useEffect(() => {
-    if (!mobileOpen) return
-    const previous = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = previous }
-  }, [mobileOpen])
 
   const toggleCollapsed = () => {
     const next = !rail
@@ -191,7 +185,7 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
           onToggleNav={toggleCollapsed}
           onHelp={onHelp}
         />
-        <main id="main-content" tabIndex={-1} className={cn('flex-1 scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8', fitViewport && 'flex min-h-0 flex-col')}>
+        <main id="main-content" tabIndex={-1} className={cn('flex-1 scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8 lg:[&:has([data-slot=dashboard-workspace])]:py-3', fitViewport && 'flex min-h-0 flex-col')}>
           <div className={cn('mx-auto flex w-full max-w-[1600px] flex-col gap-4', fitViewport && 'min-h-0 flex-1 [&>*]:shrink-0')}>
             {/* 站点公告置于所有页面内容之上：换页不丢，关掉即记住 */}
             <NoticeBanner />

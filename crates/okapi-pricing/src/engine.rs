@@ -87,7 +87,7 @@ fn audio_output_scaled(set: &RatioSet) -> Result<i128, PricingError> {
 }
 
 /// 单步乘法：value × ratio / SCALE（floor）。
-fn step(value: i128, ratio: RatioFp) -> Result<i128, PricingError> {
+pub(crate) fn step(value: i128, ratio: RatioFp) -> Result<i128, PricingError> {
     value
         .checked_mul(i128::from(ratio.as_scaled()))
         .map(|v| v.div_euclid(i128::from(RATIO_SCALE)))
@@ -109,7 +109,7 @@ fn micro_from_token_scaled(
 }
 
 /// micro·scale 空间 → micro-USD（floor）。
-fn micro_from_money_scaled(value: i128) -> Result<Money, PricingError> {
+pub(crate) fn micro_from_money_scaled(value: i128) -> Result<Money, PricingError> {
     let micros = value.div_euclid(i128::from(RATIO_SCALE));
     i64::try_from(micros)
         .map(Money::from_micros)
@@ -134,6 +134,25 @@ pub fn calculate(
     ctx: &CalcContext,
     usage: TokenUsage,
 ) -> Result<Quote, PricingError> {
+    calculate_inner(book, ctx, usage, None)
+}
+
+/// Quote under explicit native-tool request authority, without changing observed quantities.
+pub fn calculate_with_server_tool_scope(
+    book: &PriceBook,
+    ctx: &CalcContext,
+    usage: TokenUsage,
+    scope: crate::AnthropicToolScope,
+) -> Result<Quote, PricingError> {
+    calculate_inner(book, ctx, usage, Some(scope))
+}
+
+fn calculate_inner(
+    book: &PriceBook,
+    ctx: &CalcContext,
+    usage: TokenUsage,
+    scope: Option<crate::AnthropicToolScope>,
+) -> Result<Quote, PricingError> {
     usage.validate()?;
     let resolved = book.resolve(ctx.user, &ctx.model, &ctx.group)?;
     let group_ratio = resolved.group_ratio;
@@ -146,7 +165,7 @@ pub fn calculate(
         .and_then(|t| book.tier_ratio(&ctx.model, t).map(|r| (t.to_owned(), r)));
     let tier_r = tier.as_ref().map_or(RatioFp::ONE, |(_, r)| *r);
 
-    match resolved.pricing {
+    let quote = match resolved.pricing {
         PricingMode::Ratio {
             model_ratio,
             completion_ratio,
@@ -180,8 +199,10 @@ pub fn calculate(
             modality_ratios,
             tiers,
         } => {
+            // 按请求输入（含缓存读写）落档：官方长上下文阶梯（Gemini / Claude 1M / Qwen）都按
+            // 输入长度定档，输出再长也不把请求推进高档；按总量落档会在阈值附近比官方贵。
             let price = tiers
-                .resolve(usage.total_raw())
+                .resolve(u64::from(usage.prompt_tokens))
                 .ok_or(PricingError::Internal("empty tier table"))?;
             let set = RatioSet {
                 // Tier tables contain absolute USD prices, normalized against $2.
@@ -211,7 +232,8 @@ pub fn calculate(
             };
             calc_per_call(book, ctx, effective, group_ratio, tier.as_ref())
         }
-    }
+    }?;
+    crate::server_tools::add_to_quote(quote, book, &ctx.model, usage.server_tool_usage, scope)
 }
 
 /// Character-priced input follows the existing price chain, including tiers and
@@ -322,8 +344,8 @@ fn calc_tokens(
     //   uncached×1 + cached×cache + cache_write×cache_write
     // + audio_in×audio + image_in×image
     // + text_out×completion + audio_out×audio×audio_completion
-    // 每项 ≤ u32::MAX × 1e6 ≈ 4.3e15（音频输出为两轴叠乘，≤ 4.3e15×1e6 仍远小于
-    // i128 上限 1.7e38），checked 仅作防御。
+    // RatioFp also accepts large imported ratios. Check multi-axis products before
+    // adding them; legal individual ratios need not have a representable product.
     // 音频输出倍率 = audio × audio_completion（new-api 同语义）。
     //
     // 但两轴均未配置（都是 1.0）时必须**回落到 completion_ratio**：文本输出走
@@ -364,7 +386,9 @@ fn calc_tokens(
             )
         })
         .and_then(|acc| {
-            acc.checked_add(i128::from(usage.audio_completion_tokens) * audio_out_scaled)
+            i128::from(usage.audio_completion_tokens)
+                .checked_mul(audio_out_scaled)
+                .and_then(|audio| acc.checked_add(audio))
         })
         .and_then(|acc| acc.checked_add(modal_charge))
         .ok_or(PricingError::Overflow)?;
@@ -419,6 +443,7 @@ fn calc_tokens(
         group_ratio,
         user_multiplier: ctx.user_multiplier,
         rules: applied,
+        server_tool_fees: Vec::new(),
         media_units: None,
         final_unit_price_input_per_1m_usd: Some(final_unit),
     };
@@ -473,6 +498,7 @@ fn calc_per_call(
         group_ratio,
         user_multiplier: ctx.user_multiplier,
         rules: applied,
+        server_tool_fees: Vec::new(),
         media_units: None,
         final_unit_price_input_per_1m_usd: None,
     };
@@ -559,6 +585,45 @@ mod tests {
             prompt_tokens: 500_000,
             ..TokenUsage::default()
         }
+    }
+
+    /// 阶梯按请求输入落档：输入 19 万 + 输出 2 万仍是低档（全部 token 按低档价），
+    /// 输入到 20 万才整体进入高档。
+    #[test]
+    fn tiers_are_selected_by_input_tokens_not_output() {
+        let book = compile(PriceBookSource {
+            epoch: 1,
+            models: vec![ModelEntry {
+                model: ModelCode::from("m"),
+                pricing: PricingMode::Tiered {
+                    completion_ratio: RatioFp::ONE,
+                    cache_ratio: RatioFp::ONE,
+                    cache_write_ratio: RatioFp::ONE,
+                    audio_ratio: RatioFp::ONE,
+                    audio_completion_ratio: RatioFp::ONE,
+                    image_ratio: RatioFp::ONE,
+                    modality_ratios: crate::ModalityRatios::default(),
+                    tiers: crate::TierTable::parse("0:2,200000:4").unwrap(),
+                },
+                tier_ratios: Vec::new(),
+            }],
+            groups: vec![GroupEntry {
+                group: GroupCode::from("g"),
+                ratio: RatioFp::ONE,
+            }],
+            overrides: Vec::new(),
+            rules: Vec::new(),
+        })
+        .unwrap();
+        let usage = |prompt_tokens, completion_tokens| TokenUsage {
+            prompt_tokens,
+            completion_tokens,
+            ..TokenUsage::default()
+        };
+        let low = calculate(&book, &ctx(), usage(190_000, 20_000)).unwrap();
+        assert_eq!(low.amount.as_micros(), 420_000, "210k tokens at $2/1M");
+        let high = calculate(&book, &ctx(), usage(200_000, 20_000)).unwrap();
+        assert_eq!(high.amount.as_micros(), 880_000, "220k tokens at $4/1M");
     }
 
     /// best_for_user 桶：双十一 8 折与新人 9 折同时在线，用户只享受 8 折——

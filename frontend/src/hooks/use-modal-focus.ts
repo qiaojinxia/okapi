@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 
 const FOCUSABLE = [
   'a[href]',
@@ -11,6 +11,10 @@ const FOCUSABLE = [
 
 /// 当前活跃的模态层栈（后进先出）；只有栈顶拦截 Tab。
 const stack: React.RefObject<HTMLElement | null>[] = []
+let originalOverflow = ''
+export function isTopModal(panel: React.RefObject<HTMLElement | null>) {
+  return stack[stack.length - 1] === panel
+}
 
 function focusable(root: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
@@ -35,11 +39,15 @@ export function useModalFocus(
   panel: React.RefObject<HTMLElement | null>,
   /// 进场首选焦点：抽屉给第一个输入框，确认框给"确认"按钮。缺省取第一个可聚焦元素。
   initial?: (root: HTMLElement) => HTMLElement | null | undefined,
+  onDismiss?: () => void,
 ) {
+  const dismiss = useRef(onDismiss)
+  dismiss.current = onDismiss
   useEffect(() => {
     if (!open) return undefined
     // 记住开启者：可能是列表里的某个按钮，关闭后要还回去
     const opener = document.activeElement as HTMLElement | null
+    if (stack.length === 0) { originalOverflow = document.body.style.overflow; document.body.style.overflow = 'hidden' }
     stack.push(panel)
 
     // 首帧内容可能还没挂完（抽屉里的表单是同帧渲染的），下一个宏任务再取焦点
@@ -51,8 +59,11 @@ export function useModalFocus(
     }, 30)
 
     const onKey = (e: KeyboardEvent) => {
+      if (!isTopModal(panel) || e.isComposing) return
+      if (e.key === 'Escape') {
+        e.preventDefault(); e.stopImmediatePropagation(); dismiss.current?.(); return
+      }
       if (e.key !== 'Tab') return
-      if (stack[stack.length - 1] !== panel) return
       const root = panel.current
       if (!root) return
       const items = focusable(root)
@@ -82,7 +93,8 @@ export function useModalFocus(
       const at = stack.lastIndexOf(panel)
       if (at >= 0) stack.splice(at, 1)
       // 还焦点：元素可能已随列表刷新被卸载，isConnected 兜一下
-      if (opener?.isConnected === true) opener.focus({ preventScroll: true })
+      if (stack.length === 0) document.body.style.overflow = originalOverflow
+      if (opener?.isConnected === true && (!stack.length || stack[stack.length - 1]?.current?.contains(opener))) opener.focus({ preventScroll: true })
     }
   }, [open, panel, initial])
 }

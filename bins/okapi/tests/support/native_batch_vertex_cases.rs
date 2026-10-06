@@ -139,7 +139,7 @@ async fn vertex_lost_submit_ack_resumes_paginated_lookup_after_restart() {
     )
     .await
     .unwrap();
-    assert!(run_one(&restarted, Some(id(&job))).await.unwrap());
+    assert!(v.env.step_with(&restarted, &job).await.unwrap());
     restarted.pg.close().await;
     assert_eq!(v.env.poll(&job).await["status"], "collecting");
     v.env.step(&job).await.unwrap();

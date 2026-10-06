@@ -54,14 +54,17 @@ fn encoding_for(model: &str) -> Option<&'static CoreBPE> {
 }
 
 /// 一段文本的 token 数：预算内精确分词，超出部分按已测比例外推。
-fn count_segment(bpe: &CoreBPE, text: &str) -> usize {
-    if text.len() <= EXACT_TOKENIZE_BUDGET {
+fn count_segment(bpe: &CoreBPE, text: &str, budget: usize) -> usize {
+    if text.len() <= budget {
         return bpe.encode_ordinary(text).len();
     }
     // 截到字符边界，避免把多字节字符劈开喂给分词器
-    let mut cut = EXACT_TOKENIZE_BUDGET;
+    let mut cut = budget.min(text.len());
     while cut > 0 && !text.is_char_boundary(cut) {
         cut -= 1;
+    }
+    if cut == 0 {
+        return text.chars().count().div_ceil(FALLBACK_CHARS_PER_TOKEN);
     }
     let head = &text[..cut];
     let measured = bpe.encode_ordinary(head).len();
@@ -74,12 +77,28 @@ fn count_segment(bpe: &CoreBPE, text: &str) -> usize {
 }
 
 /// 文本片段集合的 token 数（无分词器时退字符启发式）。
-fn count_texts(model: &str, segments: &[&str]) -> usize {
+fn count_texts<S: AsRef<str>>(model: &str, segments: &[S]) -> usize {
     match encoding_for(model) {
-        Some(bpe) => segments.iter().map(|s| count_segment(bpe, s)).sum(),
+        Some(bpe) => {
+            let total = segments
+                .iter()
+                .fold(0usize, |sum, s| sum.saturating_add(s.as_ref().len()));
+            segments
+                .iter()
+                .map(|s| {
+                    let s = s.as_ref();
+                    let budget = if total <= EXACT_TOKENIZE_BUDGET {
+                        s.len()
+                    } else {
+                        ((EXACT_TOKENIZE_BUDGET as u128 * s.len() as u128) / total as u128) as usize
+                    };
+                    count_segment(bpe, s, budget)
+                })
+                .fold(0usize, usize::saturating_add)
+        }
         None => segments
             .iter()
-            .map(|s| s.chars().count() / FALLBACK_CHARS_PER_TOKEN)
+            .map(|s| s.as_ref().chars().count() / FALLBACK_CHARS_PER_TOKEN)
             .sum(),
     }
 }
@@ -93,7 +112,11 @@ pub fn warm_up() {
 
 /// 预扣用的 prompt token 估算：正文精确分词 + 每消息协议开销。
 #[must_use]
-pub fn estimate_prompt_tokens(model: &str, segments: &[&str], message_count: usize) -> u32 {
+pub fn estimate_prompt_tokens<S: AsRef<str>>(
+    model: &str,
+    segments: &[S],
+    message_count: usize,
+) -> u32 {
     let body = count_texts(model, segments);
     let overhead = message_count
         .saturating_mul(PER_MESSAGE_OVERHEAD)
@@ -221,7 +244,7 @@ mod tests {
     #[test]
     fn empty_prompt_only_costs_protocol_overhead() {
         assert_eq!(
-            estimate_prompt_tokens("gpt-4o", &[], 0),
+            estimate_prompt_tokens::<&str>("gpt-4o", &[], 0),
             u32::try_from(REQUEST_OVERHEAD).unwrap()
         );
     }

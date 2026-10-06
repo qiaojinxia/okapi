@@ -23,6 +23,11 @@ pub fn outbound(cand: &ChannelCandidate) -> Outbound {
     Outbound {
         proxy_url: cand.proxy_url.clone(),
         extra_headers: cand.extra_headers.clone(),
+        context: okapi_providers::profiles::RequestContext {
+            extensions: cand.extensions.clone(),
+            identity_seed: Some(cand.channel_key_id.to_string()),
+            ..Default::default()
+        },
     }
 }
 
@@ -31,7 +36,8 @@ pub const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 
 /// 渠道是否走 Azure 分派。
 pub fn is_azure(cand: &ChannelCandidate) -> bool {
-    cand.provider == "azure"
+    okapi_providers::registry::lookup(&cand.provider)
+        .is_some_and(|adapter| adapter.kind == okapi_providers::registry::AdapterKind::Azure)
 }
 
 /// 非 Azure 渠道的 api_base（缺省官方地址）。
@@ -63,7 +69,7 @@ impl AppState {
         path: &str,
         body: okapi_providers::image_stream::ImageBody,
     ) -> Result<okapi_providers::image_stream::ImageResponse, UpstreamError> {
-        super::diagnostics::upstream(cand, model, path, async {
+        super::account_control::execute(self, cand, model, path, async {
             if is_azure(cand) {
                 let (endpoint, version) = azure_target(cand)?;
                 self.azure
@@ -101,33 +107,21 @@ impl AppState {
         body: Bytes,
         stream: bool,
     ) -> Result<ChatResponse, UpstreamError> {
-        super::diagnostics::upstream(cand, upstream_model, "/v1/chat/completions", async {
-            if is_azure(cand) {
-                let (endpoint, api_version) = azure_target(cand)?;
-                self.azure
-                    .chat(
-                        endpoint,
-                        api_version,
-                        upstream_model,
-                        &cand.credential,
-                        body,
-                        stream,
-                        &outbound(cand),
-                    )
-                    .await
-            } else {
-                self.upstream
-                    .chat(
-                        &openai_base(cand),
-                        &cand.credential,
-                        body,
-                        stream,
-                        &outbound(cand),
-                    )
-                    .await
-            }
-        })
-        .await
+        match self
+            .infer_via(
+                cand,
+                okapi_providers::inference::Surface::Chat,
+                &openai_base(cand),
+                upstream_model,
+                body,
+                stream,
+                &outbound(cand),
+            )
+            .await?
+        {
+            okapi_providers::inference::Response::OpenAi(response) => Ok(response),
+            _ => Err(UpstreamError::Build("adapter_response_mismatch".into())),
+        }
     }
 
     /// 非流式 JSON 端点（`path` 形如 `/embeddings`、`/images/generations`、`/rerank`）。
@@ -143,7 +137,7 @@ impl AppState {
         {
             trace.media(&body, false);
         }
-        super::diagnostics::upstream(cand, upstream_model, path, async {
+        super::account_control::execute(self, cand, upstream_model, path, async {
             if is_azure(cand) {
                 let (endpoint, api_version) = azure_target(cand)?;
                 self.azure
@@ -179,7 +173,7 @@ impl AppState {
         upstream_model: &str,
         body: Bytes,
     ) -> Result<(u16, String, Bytes), UpstreamError> {
-        super::diagnostics::upstream(cand, upstream_model, "/v1/audio/speech", async {
+        super::account_control::execute(self, cand, upstream_model, "/v1/audio/speech", async {
             if is_azure(cand) {
                 let (endpoint, api_version) = azure_target(cand)?;
                 self.azure
@@ -209,7 +203,7 @@ impl AppState {
         path: &str,
         parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
-        super::diagnostics::upstream(cand, upstream_model, path, async {
+        super::account_control::execute(self, cand, upstream_model, path, async {
             if is_azure(cand) {
                 let (endpoint, api_version) = azure_target(cand)?;
                 self.azure

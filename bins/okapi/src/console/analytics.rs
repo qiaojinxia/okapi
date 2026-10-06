@@ -631,38 +631,44 @@ fn aggregate_metrics() -> String {
 /// 一行聚合 → 展示字段（比率全部基点/整数，避免前端拿浮点二次换算）。
 /// Bucket counters are additive; ratios and averages are packed only after summing.
 /// This avoids querying the entire current source again just for the trend total.
+const CORE_ADDITIVE_FIELDS: &[&str] = &[
+    "reqs",
+    "financial_records",
+    "prompt",
+    "cached",
+    "completion",
+    "reasoning",
+    "spend",
+    "saved",
+    "cost",
+    "errs",
+    "lat_sum",
+    "lat_n",
+    "lat_observed",
+    "lat_output",
+    "ttft_s",
+    "ttft_n",
+    "ttft_observed",
+    "write_sum",
+    "write_n",
+    "read_n",
+    "cost_n",
+    "covered_spend",
+    "covered_cost_sum",
+    "fixture_reqs",
+    "fixture_tokens",
+];
+fn accumulate_core_metrics(target: &mut Value, row: &Value) {
+    for &field in CORE_ADDITIVE_FIELDS {
+        target[field] = json!(ch_i64(target, field).saturating_add(ch_i64(row, field)));
+    }
+}
+
 fn sum_metric_rows(rows: &[Value]) -> Value {
     let mut total = json!({});
     for row in rows {
-        for key in [
-            "reqs",
-            "financial_records",
-            "prompt",
-            "cached",
-            "completion",
-            "reasoning",
-            "spend",
-            "saved",
-            "cost",
-            "errs",
-            "lat_sum",
-            "lat_n",
-            "lat_observed",
-            "lat_output",
-            "ttft_s",
-            "ttft_n",
-            "ttft_observed",
-            "write_sum",
-            "write_n",
-            "read_n",
-            "cost_n",
-            "covered_spend",
-            "covered_cost_sum",
-            "fixture_reqs",
-            "fixture_tokens",
-        ] {
-            total[key] = json!(ch_i64(&total, key).saturating_add(ch_i64(row, key)));
-        }
+        accumulate_original(&mut total, row);
+        accumulate_core_metrics(&mut total, row);
         super::usage_sources::accumulate(&mut total, row);
         super::token_details::accumulate(&mut total, row);
         super::output_rate::accumulate(&mut total, row);
@@ -732,6 +738,7 @@ fn pack_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m.insert("tokens".into(), json!(prompt.saturating_add(completion)));
     // 口径与门户 breakdown 一致：命中 token / 输入 token
     m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
+    m.insert("original_amount_micro".into(), original_amount(r));
     m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
     m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
     m.extend(super::latency::metrics(
@@ -776,14 +783,45 @@ fn pack_core_metrics(r: &Value) -> serde_json::Map<String, Value> {
     m.insert("reasoning_tokens".into(), json!(ch_i64(r, "reasoning")));
     m.insert("tokens".into(), json!(prompt.saturating_add(completion)));
     m.insert("amount_micro".into(), json!(ch_i64(r, "spend")));
+    m.insert("original_amount_micro".into(), original_amount(r));
     m.insert("discount_micro".into(), json!(ch_i64(r, "saved")));
     m.insert("upstream_cost_micro".into(), json!(ch_i64(r, "cost")));
     m
 }
 
+fn original_amount(row: &Value) -> Value {
+    use okapi_domain::Money;
+    if let Some(checked) = row.get("checked_original_micro") {
+        return money_value(checked).map_or(Value::Null, |amount| json!(amount.as_micros()));
+    }
+    let component = |field| row.get(field).map_or(Some(Money::ZERO), money_value);
+    component("spend")
+        .zip(component("saved"))
+        .and_then(|(amount, discount)| amount.checked_add(discount))
+        .map_or(Value::Null, |amount| json!(amount.as_micros()))
+}
+
+fn money_value(value: &Value) -> Option<okapi_domain::Money> {
+    value
+        .as_str()
+        .map_or_else(|| value.as_i64(), |text| text.parse::<i64>().ok())
+        .map(okapi_domain::Money::from_micros)
+}
+
+fn accumulate_original(total: &mut Value, row: &Value) {
+    let previous = total
+        .get("checked_original_micro")
+        .map_or(Some(okapi_domain::Money::ZERO), money_value);
+    total["checked_original_micro"] = previous
+        .zip(money_value(&original_amount(row)))
+        .and_then(|(sum, amount)| sum.checked_add(amount))
+        .map_or(Value::Null, |amount| json!(amount.as_micros()));
+}
+
 fn sum_core_rows(rows: &[Value]) -> Value {
     let mut total = json!({});
     for row in rows {
+        accumulate_original(&mut total, row);
         for key in [
             "reqs",
             "financial_records",
@@ -1123,35 +1161,11 @@ fn fold_stacked(rows: &[Value], limit: usize, rank: &str) -> (Vec<String>, Vec<V
         if !cell.is_object() {
             *cell = json!({});
         }
+        accumulate_original(cell, r);
         super::usage_sources::accumulate(cell, r);
         super::token_details::accumulate(cell, r);
         super::output_rate::accumulate(cell, r);
-        for field in [
-            "reqs",
-            "spend",
-            "errs",
-            "prompt",
-            "completion",
-            "cached",
-            "reasoning",
-            "saved",
-            "cost",
-            "lat_sum",
-            "lat_n",
-            "lat_observed",
-            "lat_output",
-            "ttft_s",
-            "ttft_n",
-            "ttft_observed",
-            "read_n",
-            "write_sum",
-            "write_n",
-            "cost_n",
-            "covered_spend",
-            "covered_cost_sum",
-        ] {
-            cell[field] = json!(ch_i64(cell, field).saturating_add(ch_i64(r, field)));
-        }
+        accumulate_core_metrics(cell, r);
     }
     let mut series = top;
     if has_other {
@@ -1258,6 +1272,7 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, core: bool) -> V
             raw.len() - 1
         });
         let (_, totals, folded) = &mut raw[pos];
+        accumulate_original(totals, r);
         super::usage_sources::accumulate(totals, r);
         super::token_details::accumulate(totals, r);
         super::output_rate::accumulate(totals, r);
@@ -2190,6 +2205,110 @@ mod tests {
 
     fn query() -> CubeQuery {
         CubeQuery::default()
+    }
+
+    #[test]
+    fn signed_original_amount_is_exact_in_full_and_core_metrics() {
+        for (amount, discount, original) in [
+            (43200, -21600, Some(21600)),
+            (10800, 10800, Some(21600)),
+            (-43200, 21600, Some(-21600)),
+            (0, 0, Some(0)),
+            (i64::MAX, 1, None),
+            (i64::MIN, -1, None),
+        ] {
+            let row = json!({"spend":amount,"saved":discount});
+            for packed in [pack_metrics(&row), pack_core_metrics(&row)] {
+                assert_eq!(packed["amount_micro"], amount);
+                assert_eq!(packed["discount_micro"], discount);
+                assert_eq!(packed["original_amount_micro"], json!(original));
+            }
+        }
+    }
+
+    #[test]
+    fn original_amount_keeps_unknown_integer_inputs_distinct_from_zero() {
+        for (row, original) in [
+            (json!({}), json!(0)),
+            (json!({"spend":"43200","saved":"-21600"}), json!(21600)),
+            (json!({"spend":0,"saved":0}), json!(0)),
+            (json!({"spend":null,"saved":0}), Value::Null),
+            (json!({"spend":false,"saved":0}), Value::Null),
+            (json!({"spend":"invalid","saved":0}), Value::Null),
+            (
+                json!({"spend":"9223372036854775808","saved":0}),
+                Value::Null,
+            ),
+            (
+                json!({"spend":0,"saved":"-9223372036854775809"}),
+                Value::Null,
+            ),
+            (
+                json!({"spend":9_223_372_036_854_775_808_u64,"saved":0}),
+                Value::Null,
+            ),
+            (
+                serde_json::from_str(r#"{"spend":1.5,"saved":0}"#).unwrap(),
+                Value::Null,
+            ),
+        ] {
+            for packed in [pack_metrics(&row), pack_core_metrics(&row)] {
+                assert_eq!(packed["original_amount_micro"], original, "{row}");
+            }
+        }
+    }
+
+    #[test]
+    fn original_amount_stays_unknown_through_totals_and_other_folding() {
+        for (rows, original) in [
+            (
+                vec![
+                    json!({"spend":43200,"saved":-21600}),
+                    json!({"spend":-43200,"saved":21600}),
+                ],
+                json!(0),
+            ),
+            (
+                vec![
+                    json!({"spend":100,"saved":20}),
+                    json!({"spend":null,"saved":0}),
+                ],
+                Value::Null,
+            ),
+            (
+                vec![
+                    json!({"spend":i64::MAX,"saved":0}),
+                    json!({"spend":1,"saved":0}),
+                ],
+                Value::Null,
+            ),
+        ] {
+            for packed in [
+                pack_metrics(&sum_metric_rows(&rows)),
+                pack_core_metrics(&sum_core_rows(&rows)),
+            ] {
+                assert_eq!(packed["original_amount_micro"], original);
+                assert!(!packed.contains_key("checked_original_micro"));
+            }
+            for core in [false, true] {
+                let folded = fold_rows(&rows, &|_| FLOW_OTHER.to_owned(), core);
+                assert_eq!(folded.len(), 1);
+                assert_eq!(folded[0].metrics["original_amount_micro"], original);
+            }
+            let stacked: Vec<_> = rows
+                .into_iter()
+                .map(|mut row| {
+                    row["bucket"] = json!("2026-10-01");
+                    row["k"] = json!("same-model");
+                    row
+                })
+                .collect();
+            let (_, data) = fold_stacked(&stacked, 1, "reqs");
+            assert_eq!(
+                data[0]["values"]["same-model"]["original_amount_micro"],
+                original
+            );
+        }
     }
 
     #[test]

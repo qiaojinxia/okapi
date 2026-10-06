@@ -10,6 +10,9 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
     axum::Json(json!({
         "id":"cmpl","object":"chat.completion",
@@ -29,7 +32,7 @@ struct TestEnv {
 }
 
 async fn setup(rpm: Option<i32>, rph: Option<i32>) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -75,6 +78,10 @@ async fn setup(rpm: Option<i32>, rph: Option<i32>) -> TestEnv {
     .await
     .unwrap();
 
+    let publisher = okapi_store::provision::create_user(&pg, &format!("gr-publisher-{suffix}"))
+        .await
+        .unwrap();
+    published_pricing::publish(&pg, publisher).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

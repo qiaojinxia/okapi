@@ -334,6 +334,10 @@ async fn check_samples(env: &Env, ch: &ChClient) {
         }
         let admin = request(env, &path, false).await;
         let portal = request(env, "/api/me/stats/breakdown?days=2&scope=user", true).await;
+        assert_eq!(portal["total"]["recorded_cache_write_tokens"], 999);
+        for row in portal["data"].as_array().unwrap() {
+            assert_eq!(row["recorded_cache_write_tokens"], 999);
+        }
         for body in [admin, portal] {
             assert_cache(&body["total"], 3, 1, None);
             assert_eq!(body["total"]["cache_read_known_requests"], 2);

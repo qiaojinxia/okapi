@@ -21,7 +21,7 @@ struct Bed {
 
 impl Bed {
     async fn new() -> Self {
-        dotenvy::dotenv().ok();
+        okapi_store::test_support::assert_isolated();
         let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
         let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
         // 账本键只认 uid：取随机负数，避开真实用户与并行用例

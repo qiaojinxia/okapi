@@ -73,6 +73,20 @@ const REQUIRED: &[(&str, &[&str])] = &[
     ("oauth_identities", &["provider", "subject"]),
     ("model_aliases", &["pattern", "target_model"]),
     ("audit_logs", &["actor", "action"]),
+    // 出口代理（0037，§11.41）：地址只存信封、绑定三列、固定分配挂在 key 上
+    (
+        "proxies",
+        &["url_ciphertext", "status", "max_keys", "cooldown_until"],
+    ),
+    ("proxy_groups", &["code", "mode"]),
+    (
+        "proxy_group_members",
+        &["group_code", "proxy_id", "priority", "weight"],
+    ),
+    (
+        "channels",
+        &["egress_mode", "egress_proxy_id", "egress_group_code"],
+    ),
 ];
 
 /// 必须**不**存在：已被池取代的中间态。搬回来会让可见性同时有两处实现。
@@ -83,6 +97,9 @@ const FORBIDDEN_COLUMNS: &[(&str, &str)] = &[
     ("redemption_codes", "code"),
     ("api_keys", "key"),
     ("users", "password"),
+    // 代理地址含认证信息：只存 url_ciphertext
+    ("proxies", "url"),
+    ("proxies", "password"),
 ];
 
 /// 0003 删掉的死列：建了从没接线，零引用零数据。与 FORBIDDEN_COLUMNS 分开列，
@@ -97,7 +114,7 @@ const DROPPED_COLUMNS: &[(&str, &str)] = &[
 // 形状核对是一份逐项清单：拆成多个函数会让"必须在 / 必须不在 / 约束生效"三类断言散开
 #[allow(clippy::too_many_lines)]
 async fn migrations_produce_expected_schema_shape() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
 
     let admin_pool = okapi_store::connect_pg(&database_url).await.unwrap();

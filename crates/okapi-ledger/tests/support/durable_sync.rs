@@ -430,7 +430,7 @@ async fn expiry_rechecks_extension_after_waiting_for_recovery() -> TestResult {
     }).await?;
     sqlx::query("UPDATE users SET balance_expires_at=now()+interval '1 day' WHERE id=$1")
         .bind(uid)
-        .execute(guard.connection())
+        .execute(guard.connection()?)
         .await?;
     drop(guard);
     assert!(task.await??.is_zero());
@@ -514,7 +514,7 @@ async fn wrong_pool_is_rejected_before_closing_the_redis_receipt() -> TestResult
 async fn queue_credit(b: &SyncBed, amount: i64) -> TestResultWithId {
     use sqlx::Connection as _;
     let mut guard = UserGuard::acquire(&b.base.pg, b.base.user_id).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let id = okapi_ledger::transfers::credit_in_tx(
         &mut tx,
         b.base.user_id,
@@ -681,7 +681,7 @@ async fn subscription_refund_lost_ack_recovers_only_original_pool() -> TestResul
     let b = SyncBed::new(Pool::Subscription).await;
     sync::record(&b.base.pg, &b.ledger, b.input.clone()).await?;
     let mut guard = UserGuard::acquire(&b.base.pg, b.base.user_id).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let refund =
         okapi_ledger::pg::admin_refund_in_tx(&mut tx, b.input.request_id, "failure", "test")
             .await?

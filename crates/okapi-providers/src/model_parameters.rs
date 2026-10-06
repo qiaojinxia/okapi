@@ -135,6 +135,20 @@ impl ParameterProfile {
     }
 }
 
+/// Models before the 4.6 generation are addressed by dated snapshot IDs on the
+/// Claude API (the dateless name is only an alias). Map the official snapshots
+/// to their alias so both spellings get the same contract; still an exact list.
+fn claude_alias(model: &str) -> &str {
+    match model {
+        "claude-haiku-4-5-20251001" => "claude-haiku-4-5",
+        "claude-sonnet-4-5-20250929" => "claude-sonnet-4-5",
+        "claude-opus-4-5-20251101" => "claude-opus-4-5",
+        "claude-sonnet-4-20250514" => "claude-sonnet-4",
+        "claude-opus-4-20250514" => "claude-opus-4",
+        other => other,
+    }
+}
+
 fn effort(mode: Mode, levels: &[&'static str], default: &'static str) -> ParameterProfile {
     ParameterProfile {
         known: true,
@@ -205,6 +219,7 @@ pub fn profile(dialect: &str, model: &str, api_base: Option<&str>) -> ParameterP
         return p;
     }
     if dialect == "anthropic" {
+        let model = claude_alias(model);
         let levels: &[&'static str] = match model {
             "claude-fable-5-1" | "claude-fable-5" | "claude-mythos-5-1" | "claude-mythos-5"
             | "claude-opus-5-5" | "claude-opus-5" | "claude-opus-4-8" | "claude-opus-4-7"
@@ -329,7 +344,7 @@ pub fn apply_effort(
                     && obj
                         .get("model")
                         .and_then(Value::as_str)
-                        .is_none_or(|m| m != "claude-opus-4-5")
+                        .is_none_or(|m| claude_alias(m) != "claude-opus-4-5")
                 {
                     obj.insert("thinking".into(), json!({"type":"adaptive"}));
                 }
@@ -433,6 +448,21 @@ pub fn completion_cap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dated_claude_snapshots_share_their_alias_contract() {
+        for (dated, alias) in [
+            ("claude-haiku-4-5-20251001", "claude-haiku-4-5"),
+            ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5"),
+            ("claude-opus-4-5-20251101", "claude-opus-4-5"),
+        ] {
+            let p = profile("anthropic", dated, None);
+            assert!(p.known, "{dated}");
+            assert_eq!(p, profile("anthropic", alias, None), "{dated}");
+        }
+        // Not a prefix rule: an unknown snapshot stays passthrough.
+        assert!(!profile("anthropic", "claude-haiku-4-5-20990101", None).known);
+    }
+
     #[test]
     fn kimi_fixed_sampling_and_exact_alias() {
         let p = profile("openai", "k3", Some("https://api.kimi.com/coding/v1"));

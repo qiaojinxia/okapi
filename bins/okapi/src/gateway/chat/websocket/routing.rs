@@ -8,6 +8,7 @@ use super::{
     Session, Work, bridge, history,
     transport::{self, Policy, Transport},
 };
+use crate::gateway::scheduler::CandidateSet;
 use okapi_providers::{oauth::codex, responses_ws::ResponsesSocket};
 use serde_json::Value;
 use std::time::Duration;
@@ -15,6 +16,9 @@ use std::time::Duration;
 pub(super) struct Pinned {
     pub transport: Transport,
     binding: ResponseBinding,
+    /// 首轮选定的出口（代理 id + URL；None = 直连）。会话内后续轮次沿用，轮换组也不重抽：
+    /// 同一个会话中途换出口，上游看到的就是同一账号的连接在两个 IP 之间跳。
+    proxy_id: Option<i64>,
     proxy: Option<String>,
 }
 
@@ -53,7 +57,14 @@ fn failure(
             ..
         } => {
             let mut failure = ForwardFailure::app(
-                AppError::new(StatusCode::BAD_GATEWAY, code),
+                AppError::new(
+                    if code == codes::NO_AVAILABLE_CHANNEL {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    code,
+                ),
                 failover,
                 Some(channel),
             );
@@ -83,10 +94,7 @@ async fn slot(bill: &RequestBilling, cand: &ChannelCandidate) -> bool {
     {
         return false;
     }
-    bill.state
-        .sched
-        .acquire_slot(cand.channel_key_id, cand.max_concurrency)
-        .await
+    true
 }
 
 fn body(
@@ -95,11 +103,17 @@ fn body(
     cand: &ChannelCandidate,
     work: &Work,
 ) -> Result<Bytes, UpstreamError> {
+    // 与 HTTP 同一规则：没写输出上限时按预扣封顶补上（Responses 原文，转换前）
+    let bounded = super::super::bound_default_output(
+        crate::gateway::ingress::Ingress::Responses,
+        bill.default_output_cap,
+        work.body.clone(),
+    );
     let built = build_upstream_body(
         bill,
         probe,
         cand,
-        &work.body,
+        &bounded,
         cand.upstream_model(&bill.model),
     )?;
     let shaped = shape_upstream_body(bill, cand, built)?;
@@ -146,12 +160,20 @@ pub(super) async fn route(
 ) -> Result<Routed, ForwardFailure> {
     let mut pinned = session.upstream.lock().await;
     let (mut candidates, sticky) = eligible_candidates(bill, probe, true).await?;
-    candidates.retain(|c| c.responses_native && matches!(c.provider.as_str(), "openai" | "codex"));
+    candidates.retain(|c| {
+        crate::gateway::execution_plan::ExecutionPlan::compile(
+            crate::gateway::ingress::Ingress::Responses,
+            c,
+            &bill.model,
+            crate::gateway::execution_plan::Requirements::default(),
+        )
+        .is_ok_and(crate::gateway::execution_plan::ExecutionPlan::websocket_ingress)
+    });
     if let Some(pin) = pinned.as_ref() {
         if pin.transport.closed() {
             return Err(unavailable("responses_ws_closed"));
         }
-        candidates.retain(|c| pin.binding.matches(c) && pin.proxy == c.proxy_url);
+        candidates.retain(|c| pin.binding.matches(c) && c.egress_admits(pin.proxy_id));
     }
     let mut last = unavailable("responses_websocket");
     let mut attempted: i16 = 0;
@@ -172,6 +194,7 @@ pub(super) async fn route(
                 )
             })?;
         if let Some(pin) = pinned.as_ref() {
+            cand.pin_egress(pin.proxy_id, pin.proxy.clone());
             if !policy.allows(&pin.transport, &cand) {
                 continue;
             }
@@ -190,6 +213,15 @@ pub(super) async fn route(
         if !slot(bill, &cand).await {
             continue;
         }
+        let permit = crate::gateway::sched_redis::channel_permit::ChannelPermit::acquire(
+            &bill.state.sched,
+            &cand,
+        )
+        .await
+        .map_err(|error| failure(error, bill, &cand, attempted))?;
+        let Some(permit) = permit else {
+            continue;
+        };
         let failover = attempted;
         attempted += 1;
         bill.trace
@@ -197,10 +229,6 @@ pub(super) async fn route(
         let body = match body(bill, probe, &cand, work) {
             Ok(body) => body,
             Err(error) => {
-                bill.state
-                    .sched
-                    .release_slot(cand.channel_key_id, cand.max_concurrency)
-                    .await;
                 return Err(failure(error, bill, &cand, failover));
             }
         };
@@ -247,14 +275,10 @@ pub(super) async fn route(
                         }
                     }
                     last = failure(error, bill, &cand, failover);
-                    bill.state
-                        .sched
-                        .release_slot(cand.channel_key_id, cand.max_concurrency)
-                        .await;
                     if retry {
-                        let _ = okapi_store::channels::mark_key_failure(
-                            &bill.state.pg,
-                            cand.channel_key_id,
+                        crate::gateway::key_health::failure(
+                            &bill.state,
+                            &cand,
                             &last.error_code,
                             kind,
                         )
@@ -266,9 +290,14 @@ pub(super) async fn route(
                     continue;
                 }
             };
+            if matches!(selected, Transport::Native(_)) {
+                // 上游接受了这把凭证的 WS 握手：key 是好的
+                crate::gateway::key_health::success(&bill.state, &cand).await;
+            }
             *pinned = Some(Pinned {
                 transport: selected,
                 binding: ResponseBinding::from_candidate(&cand),
+                proxy_id: cand.egress_proxy_id,
                 proxy: cand.proxy_url.clone(),
             });
         }
@@ -276,25 +305,18 @@ pub(super) async fn route(
         // Once selected, hold the account but release admission before any HTTP POST.
         drop(pinned);
         if session.output.is_closed() {
-            bill.state
-                .sched
-                .release_slot(cand.channel_key_id, cand.max_concurrency)
-                .await;
             return Err(unavailable("client_disconnected"));
         }
         match selected {
             Transport::Native(socket) => {
-                return create_turn(&socket, body, bill, &cand, sticky, failover).await;
+                return create_turn(&socket, body, bill, &cand, sticky, failover, permit).await;
             }
             Transport::Http => {
+                permit.release().await;
                 let (handle, bridge) =
                     match bridge::start(session, bill, &cand, &body, context, work).await {
                         Ok(result) => result,
                         Err(error) => {
-                            bill.state
-                                .sched
-                                .release_slot(cand.channel_key_id, cand.max_concurrency)
-                                .await;
                             return Err(ForwardFailure::app(
                                 error,
                                 failover,
@@ -335,10 +357,22 @@ async fn create_turn(
     cand: &ChannelCandidate,
     sticky: Option<i64>,
     failover: i16,
+    permit: crate::gateway::sched_redis::channel_permit::ChannelPermit,
 ) -> Result<Routed, ForwardFailure> {
     // create may already have sent a frame when it fails. Never replay or switch accounts here.
-    match socket.create(body).await {
-        Ok(handle) => {
+    let result = match crate::gateway::account_control::admit(
+        &bill.state,
+        cand.channel_id,
+        Some(cand.channel_key_id),
+    )
+    .await
+    {
+        Ok(()) => socket.create(body).await,
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(mut handle) => {
+            handle.events = okapi_providers::response_lifetime::guard_stream(handle.events, permit);
             bill.trace.finish(None, None);
             let layer = if bill.response_parent.is_some() {
                 1
@@ -359,12 +393,6 @@ async fn create_turn(
                 bridge: None,
             })
         }
-        Err(error) => {
-            bill.state
-                .sched
-                .release_slot(cand.channel_key_id, cand.max_concurrency)
-                .await;
-            Err(failure(error, bill, cand, failover))
-        }
+        Err(error) => Err(failure(error, bill, cand, failover)),
     }
 }

@@ -64,6 +64,7 @@ pub async fn admin_refund_in_tx(
         return Ok(None);
     };
     let pool = Pool::from_i16(rec.pool);
+    let reversal = refund_payload(request_id, &rec, pool, archived)?;
     let expired =
         crate::windows::expired_refund(tx, rec.user_id, pool, rec.source_window.as_deref()).await?;
     let credit = if expired {
@@ -135,7 +136,7 @@ pub async fn admin_refund_in_tx(
         .await?;
     }
 
-    reverse_outbox(tx, request_id, &rec, pool).await?;
+    reverse_outbox(tx, reversal).await?;
 
     Ok(Some(AdminRefund {
         user_id: rec.user_id,
@@ -147,46 +148,69 @@ pub async fn admin_refund_in_tx(
 
 async fn reverse_outbox(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    request_id: Uuid,
-    rec: &RefundRecord,
-    pool: Pool,
+    payload: serde_json::Value,
 ) -> Result<(), LedgerError> {
-    // CH 负额冲销行（log_type=6 退款，对齐 new-api；token 事实保留不冲）
     sqlx::query!(
         r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.refunded', $1)"#,
-        serde_json::json!({
-            "request_id": request_id,
-            "user_id": rec.user_id,
-            "api_key_id": rec.api_key_id,
-            "group": rec.group_code,
-            "model": rec.model_name,
-            "channel_id": rec.channel_id,
-            "channel_key_id": rec.channel_key_id,
-            "log_type": 6,
-            "status": 30,
-            "prompt_tokens": 0,
-            "cached_tokens": 0,
-            "completion_tokens": 0,
-            "reasoning_tokens": 0,
-            "amount_micro": -rec.amount_micro,
-            "original_amount_micro": -rec.original_amount_micro,
-            "discount_micro": -rec.discount_micro,
-            "upstream_cost_micro": -rec.upstream_cost_micro.unwrap_or(0),
-            "is_stream": rec.is_stream,
-            "retry_count": 0,
-            "failover_count": 0,
-            "error_code": null,
-            "upstream_status": null,
-            "upstream_request_id": null,
-            "node": rec.node,
-            "sticky_layer": 0,
-            "client_type": "",
-            "pool": pool.as_i16(),
-        })
+        payload
     )
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn refund_payload(
+    request_id: Uuid,
+    rec: &RefundRecord,
+    pool: Pool,
+    archived: bool,
+) -> Result<serde_json::Value, LedgerError> {
+    // Receipts retain the original snapshot but have no separate epoch column.
+    let pricing_epoch = if archived {
+        rec.pricing_snapshot
+            .as_ref()
+            .and_then(|s| s.get("epoch"))
+            .and_then(serde_json::Value::as_i64)
+    } else {
+        rec.pricing_epoch
+    };
+    // CH 负额冲销行（log_type=6 退款，对齐 new-api；token 事实保留不冲）
+    Ok(serde_json::json!({
+        "request_id": request_id,
+        "user_id": rec.user_id,
+        "api_key_id": rec.api_key_id,
+        "group": rec.group_code,
+        "model": rec.model_name,
+        "channel_id": rec.channel_id,
+        "channel_key_id": rec.channel_key_id,
+        "log_type": 6,
+        "status": 30,
+        "prompt_tokens": 0,
+        "cached_tokens": 0,
+        "completion_tokens": 0,
+        "reasoning_tokens": 0,
+        "amount_micro": reverse_amount(rec.amount_micro)?,
+        "original_amount_micro": reverse_amount(rec.original_amount_micro)?,
+        "discount_micro": reverse_amount(rec.discount_micro)?,
+        "upstream_cost_micro": reverse_amount(rec.upstream_cost_micro.unwrap_or(0))?,
+        "upstream_cost_known": rec.upstream_cost_micro.is_some(),
+        "pricing_epoch": pricing_epoch,
+        "ratio_snapshot": rec.pricing_snapshot.as_ref().map(std::string::ToString::to_string).unwrap_or_default(),
+        "is_stream": rec.is_stream,
+        "retry_count": 0,
+        "failover_count": 0,
+        "error_code": null,
+        "upstream_status": null,
+        "upstream_request_id": null,
+        "node": rec.node,
+        "sticky_layer": 0,
+        "client_type": "",
+        "pool": pool.as_i16(),
+    }))
+}
+
+fn reverse_amount(value: i64) -> Result<i64, LedgerError> {
+    value.checked_neg().ok_or(LedgerError::InvalidSettlement)
 }
 
 struct RefundRecord {
@@ -200,6 +224,8 @@ struct RefundRecord {
     original_amount_micro: i64,
     discount_micro: i64,
     upstream_cost_micro: Option<i64>,
+    pricing_epoch: Option<i64>,
+    pricing_snapshot: Option<serde_json::Value>,
     is_stream: bool,
     node: Option<String>,
     pool: i16,
@@ -212,7 +238,7 @@ async fn refundable(
     let live = sqlx::query_as!(
         RefundRecord,
         "SELECT user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,
-        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,source_window
+        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,pricing_epoch,pricing_snapshot,is_stream,node,pool,source_window
         FROM billing_records WHERE request_id=$1 AND status=20 FOR UPDATE",
         request_id
     )
@@ -224,7 +250,7 @@ async fn refundable(
     let archived = sqlx::query_as!(
         RefundRecord,
         "SELECT user_id,api_key_id,group_code,model_name,channel_id,channel_key_id,
-        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,is_stream,node,pool,source_window
+        amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,NULL::BIGINT AS pricing_epoch,pricing_snapshot,is_stream,node,pool,source_window
         FROM billing_record_receipts WHERE request_id=$1 AND status=20 FOR UPDATE",
         request_id
     )

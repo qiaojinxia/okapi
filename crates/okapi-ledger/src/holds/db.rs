@@ -14,7 +14,7 @@ pub(super) async fn window(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<(String, i64)>, LedgerError> {
     let row: Option<WindowRow> = sqlx::query_as("SELECT id,window_start,LEAST(window_end,expires_at) AS until_at FROM user_subscriptions WHERE user_id=$1 AND status=1 AND window_start<=$2 AND window_end>$2 AND expires_at>$2 ORDER BY id DESC LIMIT 1")
-        .bind(guard.user_id).bind(now).fetch_optional(guard.connection()).await?;
+        .bind(guard.user_id).bind(now).fetch_optional(guard.connection()?).await?;
     Ok(row.map(|r| {
         (
             format!("{}:{}", r.id, r.window_start.timestamp_micros()),
@@ -27,7 +27,7 @@ pub(super) async fn get(guard: &mut UserGuard, id: Uuid) -> Result<Hold, LedgerE
     sqlx::query_as("SELECT * FROM balance_holds WHERE id=$1 AND user_id=$2")
         .bind(id)
         .bind(guard.user_id)
-        .fetch_optional(&mut *guard.connection)
+        .fetch_optional(guard.connection()?)
         .await?
         .ok_or(LedgerError::HoldConflict)
 }
@@ -37,7 +37,7 @@ pub(super) async fn concurrency(guard: &mut UserGuard, key_id: i64) -> Result<i3
         sqlx::query_scalar("SELECT max_concurrency FROM api_keys WHERE id=$1 AND user_id=$2")
             .bind(key_id)
             .bind(guard.user_id)
-            .fetch_one(guard.connection())
+            .fetch_one(guard.connection()?)
             .await?;
     Ok(cap.unwrap_or(0))
 }
@@ -79,7 +79,7 @@ pub(super) async fn intent(
     if pricing.to_string().len() > 65_536 {
         return Err(LedgerError::InvalidHold("pricing_size"));
     }
-    let mut tx = guard.connection.begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let existing: Option<Hold> = sqlx::query_as("SELECT * FROM balance_holds WHERE id=$1")
         .bind(request.id)
         .fetch_optional(&mut *tx)
@@ -126,13 +126,14 @@ pub(super) async fn held(
     id: Uuid,
     receipt: &HotHold,
 ) -> Result<Hold, LedgerError> {
-    let mut tx = guard.connection.begin().await?;
+    let user_id = guard.user_id;
+    let mut tx = guard.connection()?.begin().await?;
     let hold: Hold = sqlx::query_as("UPDATE balance_holds SET state='held',pool=$3,source_window=$4,updated_at=now() WHERE id=$1 AND user_id=$2 AND state='pending' RETURNING *")
-        .bind(id).bind(guard.user_id).bind(receipt.pool)
+        .bind(id).bind(user_id).bind(receipt.pool)
         .bind((receipt.pool == 1).then_some(receipt.epoch.as_str()))
         .fetch_one(&mut *tx).await?;
     sqlx::query("INSERT INTO billing_events(user_id,request_id,event_type,delta_micro,payload,actor,pool) VALUES($1,$2,'reserve',0,$3,'system:batch',$4)")
-        .bind(guard.user_id).bind(id).bind(serde_json::json!({"hold_micro":hold.maximum_micro,"model":hold.model_name,"source_window":hold.source_window}))
+        .bind(user_id).bind(id).bind(serde_json::json!({"hold_micro":hold.maximum_micro,"model":hold.model_name,"source_window":hold.source_window}))
         .bind(receipt.pool).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(hold)
@@ -143,11 +144,11 @@ pub(super) async fn closing(guard: &mut UserGuard) -> Result<Vec<Hold>, LedgerEr
         "SELECT * FROM balance_holds WHERE user_id=$1 AND state='closing' ORDER BY created_at,id",
     )
     .bind(guard.user_id)
-    .fetch_all(&mut *guard.connection)
+    .fetch_all(guard.connection()?)
     .await?)
 }
 pub(super) async fn closed(guard: &mut UserGuard, id: Uuid) -> Result<(), LedgerError> {
     sqlx::query("UPDATE balance_holds SET state='closed',updated_at=now() WHERE id=$1 AND user_id=$2 AND state='closing'")
-        .bind(id).bind(guard.user_id).execute(&mut *guard.connection).await?;
+        .bind(id).bind(guard.user_id).execute(guard.connection()?).await?;
     Ok(())
 }

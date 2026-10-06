@@ -1,46 +1,117 @@
-//! 上游 HTTP 连接池：缺省 client + 按 `proxy_url` 缓存的出站代理 client。
+//! 上游 HTTP 连接池：缺省 client + 按代理 URL 缓存的出站代理 client。
 //!
 //! reqwest 的代理绑在 Client 上、不能按请求切换，所以每个不同的代理 URL 各自
-//! 一个 Client（连接池独立）。渠道数通常个位数，缓存用 `RwLock<HashMap>` 足够，
-//! 不引新依赖。`extra_headers` 是请求级的，在鉴权头之前写入——鉴权头后写覆盖，
-//! 站长填了 `Authorization` 也换不掉渠道凭证。
+//! 一个 Client（连接池独立）。代理成为一等资源后（IMPLEMENTATION §11.41）数量可到
+//! 上百个，且改密码 / 删代理会留下不再使用的 URL：缓存按闲置时间淘汰（新建 client 时顺手清），
+//! 仍用 `RwLock<HashMap>`，不引新依赖。`extra_headers` 是请求级的，在鉴权头之前写入——
+//! 鉴权头后写覆盖，站长填了 `Authorization` 也换不掉渠道凭证。
 
 use crate::error::UpstreamError;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::RwLock;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 代理 client 闲置这么久就淘汰（连接池随之关闭）。
+const PROXIED_IDLE: Duration = Duration::from_mins(15);
 
 /// 一条渠道的出站修饰：代理 + 额外请求头。缺省 = 直连、不加头。
 #[derive(Debug, Clone, Default)]
 pub struct Outbound {
     pub proxy_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
+    /// Opaque request extension context. HTTP transport never interprets it.
+    pub context: crate::profiles::RequestContext,
 }
 
 impl Outbound {
-    /// 从 `channels.settings` 抽出两键；形状不对当缺省（写入路径已经拦过）。
+    /// 从 `channels.settings` 抽额外头与扩展；形状不对当缺省（写入路径已经拦过）。
+    /// 出口代理不在 settings 里（§11.41 出口绑定），由调用方按 key 解析后传入 `proxy_url`——
+    /// 刻意不提供「从 settings 读代理」的捷径，免得某条路径漏解析而悄悄直连。
     #[must_use]
-    pub fn from_settings(settings: &Value) -> Self {
+    pub fn from_settings(settings: &Value, proxy_url: Option<String>) -> Self {
         Self {
-            proxy_url: proxy_url_from_settings(settings),
+            proxy_url,
             extra_headers: extra_headers_from_settings(settings),
+            context: crate::profiles::RequestContext {
+                extensions: settings.get("extensions").cloned().unwrap_or_default(),
+                ..Default::default()
+            },
         }
     }
 }
 
-/// 从 settings 取 `proxy_url`（空串 = 未配）。
-#[must_use]
-pub fn proxy_url_from_settings(settings: &Value) -> Option<String> {
-    settings
-        .get("proxy_url")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+/// 代理 URL 的非密部分（展示 / 筛选用）。认证信息只留「有没有」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyEndpoint {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub has_password: bool,
+}
+
+impl ProxyEndpoint {
+    /// 解析并校验代理 URL：http / https / socks5 / socks5h + host；端口缺省按 scheme
+    /// （http 80 / https 443 / socks 1080，与 reqwest 实际连接的端口一致）。不接受路径、查询串。
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let url = parse_proxy_url(raw.trim())?;
+        if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+            return None;
+        }
+        let scheme = url.scheme().to_owned();
+        let port = url.port().unwrap_or(match scheme.as_str() {
+            "http" => 80,
+            "https" => 443,
+            _ => 1080,
+        });
+        let username = Some(url.username())
+            .filter(|u| !u.is_empty())
+            .map(percent_decode);
+        Some(Self {
+            host: url.host_str()?.to_owned(),
+            scheme,
+            port,
+            username,
+            has_password: url.password().is_some(),
+        })
+    }
+
+    /// 掩码后的展示形态：`socks5h://user:***@host:1080`。
+    #[must_use]
+    pub fn masked(&self) -> String {
+        let auth = match (&self.username, self.has_password) {
+            (Some(user), true) => format!("{user}:***@"),
+            (Some(user), false) => format!("{user}@"),
+            (None, true) => ":***@".to_owned(),
+            (None, false) => String::new(),
+        };
+        format!("{}://{auth}{}:{}", self.scheme, self.host, self.port)
+    }
+}
+
+/// userinfo 的百分号解码（展示用，非法序列原样保留）。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = raw.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// 从 settings 取 `extra_headers`（对象 string→string；其它类型忽略）。
@@ -123,12 +194,12 @@ pub fn is_forbidden_header(name: &str) -> bool {
 
 /// 缺省 client + 按代理 URL 缓存的 client。`Clone` 共享同一份缓存。
 ///
-/// 数据面 client 跟随重定向，管理面探针与 WebSocket 握手不跟随。
+/// 数据面、管理面探针与 WebSocket 握手均不自动跟随重定向。
 /// WS 单独限制为 HTTP/1：仅给请求设置 version 不会限制 TLS 的 ALPN 协商。
 /// SSRF 闸（`console::ssrf`）只校验管理员填进来的那个 URL，跟着 30x 走就能被一个公网地址
 /// 引到私网 / 云元数据地址；测活、拉模型、余额、Turnstile、支付回调、订阅 OAuth 换码 / 刷新、
-/// Vertex 服务账号换 token、Bedrock 列模型这些外呼都没有跟随重定向的正当理由。数据面保留
-/// 缺省：`/videos/{id}/content` 这类下载透传可能就靠上游 302 到 CDN。
+/// Vertex 服务账号换 token、Bedrock 列模型这些外呼都不跟随重定向。
+/// 视频下载的有限跳转由 gateway 逐跳校验目标并按 origin 移除凭证。
 #[derive(Clone)]
 pub struct HttpPool {
     clients: std::sync::Arc<Clients>,
@@ -136,11 +207,22 @@ pub struct HttpPool {
 
 struct Clients {
     default: reqwest::Client,
-    proxied: RwLock<HashMap<String, reqwest::Client>>,
+    proxied: RwLock<HashMap<String, Cached>>,
     probe_default: reqwest::Client,
-    probe_proxied: RwLock<HashMap<String, reqwest::Client>>,
+    probe_proxied: RwLock<HashMap<String, Cached>>,
     websocket_default: reqwest::Client,
-    websocket_proxied: RwLock<HashMap<String, reqwest::Client>>,
+    websocket_proxied: RwLock<HashMap<String, Cached>>,
+}
+
+/// 代理 client + 最近一次取用时刻（相对进程内基准的秒数，读锁下也能更新）。
+struct Cached {
+    client: reqwest::Client,
+    last_used: AtomicU64,
+}
+
+fn now_secs() -> u64 {
+    static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_secs()
 }
 
 #[derive(Clone, Copy)]
@@ -248,7 +330,7 @@ impl HttpPool {
 
 fn cached_client(
     default: &reqwest::Client,
-    cache: &RwLock<HashMap<String, reqwest::Client>>,
+    cache: &RwLock<HashMap<String, Cached>>,
     proxy_url: Option<&str>,
     policy: ClientPolicy,
 ) -> Result<reqwest::Client, UpstreamError> {
@@ -258,13 +340,29 @@ fn cached_client(
     if let Ok(guard) = cache.read()
         && let Some(hit) = guard.get(url)
     {
-        return Ok(hit.clone());
+        hit.last_used.store(now_secs(), Ordering::Relaxed);
+        return Ok(hit.client.clone());
     }
     let built = build_client(Some(url), policy)?;
     if let Ok(mut guard) = cache.write() {
-        guard.insert(url.to_owned(), built.clone());
+        // 新建时顺手淘汰闲置的：改过密码 / 删掉的代理不会再被取用，留着只占连接池
+        let now = now_secs();
+        evict_idle(&mut guard, now);
+        guard.insert(
+            url.to_owned(),
+            Cached {
+                client: built.clone(),
+                last_used: AtomicU64::new(now),
+            },
+        );
     }
     Ok(built)
+}
+
+fn evict_idle(cache: &mut HashMap<String, Cached>, now: u64) {
+    cache.retain(|_, entry| {
+        now.saturating_sub(entry.last_used.load(Ordering::Relaxed)) < PROXIED_IDLE.as_secs()
+    });
 }
 
 fn build_client(
@@ -398,13 +496,69 @@ mod tests {
     }
 
     #[test]
-    fn from_settings_reads_both_keys() {
-        let o = Outbound::from_settings(&json!({
-            "proxy_url": " http://127.0.0.1:9 ",
-            "extra_headers": {"X-A": "1", "skip": 2}
-        }));
-        assert_eq!(o.proxy_url.as_deref(), Some("http://127.0.0.1:9"));
+    fn from_settings_never_reads_a_proxy_from_settings() {
+        // 退役的 settings.proxy_url 残留也不能被当成出口：出口只认调用方解析好的绑定
+        let o = Outbound::from_settings(
+            &json!({
+                "proxy_url": "http://127.0.0.1:9",
+                "extra_headers": {"X-A": "1", "skip": 2}
+            }),
+            None,
+        );
+        assert!(o.proxy_url.is_none());
         assert_eq!(o.extra_headers, vec![("X-A".to_owned(), "1".to_owned())]);
-        assert!(Outbound::from_settings(&json!({})).proxy_url.is_none());
+        let o = Outbound::from_settings(&json!({}), Some("socks5h://p:1080".into()));
+        assert_eq!(o.proxy_url.as_deref(), Some("socks5h://p:1080"));
+    }
+
+    #[test]
+    fn proxy_endpoint_parses_defaults_and_masks_credentials() {
+        let e = ProxyEndpoint::parse(" socks5h://us%40er:p%40ss@10.0.0.1 ").unwrap();
+        assert_eq!(
+            (e.scheme.as_str(), e.host.as_str(), e.port),
+            ("socks5h", "10.0.0.1", 1080)
+        );
+        assert_eq!(e.username.as_deref(), Some("us@er"));
+        assert!(e.has_password);
+        assert_eq!(e.masked(), "socks5h://us@er:***@10.0.0.1:1080");
+        assert_eq!(ProxyEndpoint::parse("http://h").unwrap().port, 80);
+        assert_eq!(ProxyEndpoint::parse("https://h").unwrap().port, 443);
+        let v6 = ProxyEndpoint::parse("http://[::1]:7890/").unwrap();
+        assert_eq!((v6.host.as_str(), v6.port), ("[::1]", 7890));
+        assert_eq!(v6.masked(), "http://[::1]:7890");
+        for bad in [
+            "",
+            "ftp://h:21",
+            "http://",
+            "h:8080",
+            "http://h:8080/path",
+            "http://h:8080/?q=1",
+        ] {
+            assert!(ProxyEndpoint::parse(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn idle_proxied_clients_are_evicted() {
+        let client = build_client(None, ClientPolicy::Forward).unwrap();
+        let idle = PROXIED_IDLE.as_secs();
+        let mut cache = HashMap::from([
+            (
+                "http://old:1".to_owned(),
+                Cached {
+                    client: client.clone(),
+                    last_used: AtomicU64::new(0),
+                },
+            ),
+            (
+                "http://fresh:2".to_owned(),
+                Cached {
+                    client,
+                    last_used: AtomicU64::new(idle),
+                },
+            ),
+        ]);
+        evict_idle(&mut cache, idle + 1);
+        assert_eq!(cache.keys().collect::<Vec<_>>(), ["http://fresh:2"]);
     }
 }

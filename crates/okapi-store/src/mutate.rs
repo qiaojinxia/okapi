@@ -152,10 +152,10 @@ pub async fn duplicate_channel(
         INSERT INTO channels
             (name, provider, api_base, status, priority, weight, models, model_mapping,
              capabilities, settings, retry_policy, upstream_unit_cost,
-             trust_upstream_usage, owner_id)
+             trust_upstream_usage, owner_id, egress_mode, egress_proxy_id, egress_group_code)
         SELECT $2, provider, api_base, 2, priority, weight, models, model_mapping,
                capabilities, settings, retry_policy, upstream_unit_cost,
-               trust_upstream_usage, owner_id
+               trust_upstream_usage, owner_id, egress_mode, egress_proxy_id, egress_group_code
         FROM channels WHERE id = $1 AND deleted_at IS NULL
         RETURNING id
         "#,
@@ -168,27 +168,15 @@ pub async fn duplicate_channel(
         tx.rollback().await?;
         return Ok(None);
     };
-    sqlx::query!(
-        r#"
-        INSERT INTO channel_keys (channel_id, credential_ciphertext, weight, max_concurrency)
-        SELECT $2, credential_ciphertext, weight, max_concurrency
-        FROM channel_keys WHERE channel_id = $1
-        "#,
-        channel_id,
-        new_id
-    )
-    .execute(&mut *tx)
-    .await?;
-    sqlx::query!(
-        r#"
-        INSERT INTO pool_channels (pool_code, channel_id)
-        SELECT pool_code, $2 FROM pool_channels WHERE channel_id = $1
-        "#,
-        channel_id,
-        new_id
-    )
-    .execute(&mut *tx)
-    .await?;
+    // 复制体与源用的是同一份凭证 = 同一个上游账号：固定分配的出口一并带过去（§11.41），
+    // 同一账号不能因为复制就多出一个出口 IP
+    sqlx::query(
+        "INSERT INTO channel_keys (channel_id,credential_ciphertext,credential_kind,weight,max_concurrency,egress_proxy_id) SELECT $2,credential_ciphertext,credential_kind,weight,max_concurrency,egress_proxy_id FROM channel_keys WHERE channel_id=$1"
+    ).bind(channel_id).bind(new_id).execute(&mut *tx).await?;
+    sqlx::query(
+        "INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override) SELECT pool_code,$2,priority_override,weight_override FROM pool_channels WHERE channel_id=$1"
+    ).bind(channel_id).bind(new_id).execute(&mut *tx).await?;
+    crate::egress::reconcile(&mut tx).await?;
     tx.commit().await?;
     Ok(Some(new_id))
 }

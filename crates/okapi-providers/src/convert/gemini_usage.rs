@@ -122,11 +122,56 @@ fn normalize(meta: &Metadata) -> Option<UsageProbe> {
 
 pub(super) fn parse(meta: Option<&Value>) -> Option<UsageProbe> {
     let meta = meta.filter(|v| !v.is_null())?;
-    Some(
-        serde_json::from_value::<Metadata>(meta.clone())
-            .ok()
-            .as_ref()
-            .and_then(normalize)
-            .unwrap_or_else(UsageProbe::invalid),
-    )
+    let gemini_axes = [
+        "promptTokenCount",
+        "candidatesTokenCount",
+        "totalTokenCount",
+    ]
+    .iter()
+    .any(|key| meta.get(key).is_some_and(|v| !v.is_null()));
+    if okapi_api::has_bridged_usage_fields(meta) && !gemini_axes {
+        return Some(
+            serde_json::from_value(meta.clone()).unwrap_or_else(|_| UsageProbe::invalid()),
+        );
+    }
+    let probe = serde_json::from_value::<Metadata>(meta.clone())
+        .ok()
+        .as_ref()
+        .and_then(normalize)
+        .unwrap_or_else(UsageProbe::invalid);
+    if !okapi_api::has_bridged_usage_fields(meta) {
+        return Some(probe);
+    }
+    if [
+        "inputTokens",
+        "outputTokens",
+        "totalTokens",
+        "total_input_tokens",
+        "total_output_tokens",
+        "total_thought_tokens",
+        "input_tokens_by_modality",
+        "output_tokens_by_modality",
+        "total_tool_use_tokens",
+    ]
+    .iter()
+    .any(|key| meta.get(key).is_some_and(|v| !v.is_null()))
+    {
+        return Some(UsageProbe::invalid());
+    }
+    let mut canonical = probe.chat_json();
+    if !canonical.is_object() {
+        return Some(UsageProbe::invalid());
+    }
+    for key in [
+        "cacheReadInputTokens",
+        "cacheWriteInputTokens",
+        "cacheDetails",
+        "total_cached_tokens",
+        "cached_tokens_by_modality",
+    ] {
+        if let Some(value) = meta.get(key) {
+            canonical[key] = value.clone();
+        }
+    }
+    Some(serde_json::from_value(canonical).unwrap_or_else(|_| UsageProbe::invalid()))
 }

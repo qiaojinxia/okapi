@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import type { BreakdownRow } from '@/features/portal-overview/types'
 import { sumByModel } from '@/features/portal-overview/types'
+import { cacheHit } from './cache-metrics'
 import { formatBp, formatCount, formatMoney } from '@/lib/money'
 import { MODEL_METRICS } from './search'
 import type { ModelMetric } from './search'
@@ -61,8 +62,7 @@ export function ModelShareView({ rows, logSearch, metric, onMetricChange, query,
           <TBody>
             {visible.map((m) => {
               const shareBp = total > 0 ? Math.round((usageValue(m, metric) * 10_000) / total) : 0
-              const hitBp =
-                m.prompt_tokens > 0 ? Math.round((m.cached_tokens * 10_000) / m.prompt_tokens) : 0
+              const hit = cacheHit(m)
               return (
                 <Tr key={m.model}>
                   <Td className="w-px text-xs"><span className="flex w-28 items-start gap-2 sm:w-44"><span className="shrink-0 text-muted-foreground">{m.rank}</span><Link to="/portal/logs" search={{ ...logSearch, model: m.model }} title={m.model} aria-label={t('portal:modelLogs', { model: m.model })} className="flex min-w-0 items-start gap-1 rounded font-medium text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40"><span className="line-clamp-2 break-all">{m.model}</span><ArrowUpRight aria-hidden className="mt-0.5 h-3 w-3 shrink-0" /></Link></span></Td>
@@ -85,7 +85,9 @@ export function ModelShareView({ rows, logSearch, metric, onMetricChange, query,
                   <Td numeric className="whitespace-nowrap text-xs">
                     {m.requests > 0 ? formatMoney(Math.round(m.amount_micro / m.requests), locale) : '—'}
                   </Td>
-                  <Td numeric className="whitespace-nowrap text-xs">{m.prompt_tokens > 0 ? formatBp(hitBp, locale) : '—'}</Td>
+                  <Td numeric className="text-xs">{hit.bp == null ? '—' : hit.partial
+                    ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: m.requests })
+                    : formatBp(hit.bp, locale)}</Td>
                 </Tr>
               )
             })}

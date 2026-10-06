@@ -6,6 +6,9 @@
 //! 注意时序：PriceBook 在 build_state 时全量编译，模型/定价必须建在网关启动之前
 //! （测试内不等 30s epoch 轮询）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -98,7 +101,7 @@ async fn serve(router: Router) -> SocketAddr {
 }
 
 async fn setup_bed() -> TestBed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let suffix = Uuid::new_v4().simple().to_string()[..12].to_owned();
 
@@ -129,6 +132,7 @@ async fn setup_bed() -> TestBed {
 async fn start_gateway(bed: &TestBed) -> SocketAddr {
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    published_pricing::publish(&bed.pg, bed.user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

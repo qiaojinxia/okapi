@@ -42,6 +42,15 @@ impl Decoder {
         Self::default()
     }
 
+    /// A transport EOF is only clean at a complete frame boundary.
+    pub fn finish(&self) -> Result<(), UpstreamError> {
+        if self.buf.is_empty() {
+            Ok(())
+        } else {
+            Err(UpstreamError::Stream("eventstream_truncated_frame".into()))
+        }
+    }
+
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<Frame>, UpstreamError> {
         self.buf.extend_from_slice(chunk);
         let mut frames = Vec::new();

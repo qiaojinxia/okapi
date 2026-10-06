@@ -151,8 +151,7 @@ async fn prepare_pricing(
         let output = meta
             .max_output
             .and_then(|v| u32::try_from(v).ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(8192);
+            .filter(|v| *v > 0);
         input.estimate(output)?
     } else {
         TokenUsage::default()
@@ -227,9 +226,7 @@ async fn handle(
         concurrency: cap(key.max_concurrency),
     };
     let (reserved_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -363,7 +360,10 @@ async fn handle(
         match input.forward(state, &cand, &upstream_model, endpoint).await {
             Ok(resp) => {
                 let actual = match request::returned_images(&resp.body, units) {
-                    Ok(actual) => actual,
+                    Ok(actual) => {
+                        super::key_health::success(state, &cand).await;
+                        actual
+                    }
                     Err(error) => {
                         let _ = refund(state, key, request_id, task).await;
                         failure.error(&error);
@@ -408,6 +408,7 @@ async fn handle(
                     reserved_pool,
                     source_window.as_deref(),
                     None,
+                    Some(&mut failure),
                 )
                 .await
                 .inspect_err(|error| failure.error(error))?;
@@ -419,6 +420,11 @@ async fn handle(
                     .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                 return Ok(out);
             }
+            Err(err) if err.error_code() == codes::NO_AVAILABLE_CHANNEL => {
+                // Admission denied before send; safe to try the next channel.
+                failover = failover.saturating_add(1);
+                last_err = Some(super::account_control::attempt_error(&err));
+            }
             Err(err)
                 if matches!(
                     err,
@@ -428,18 +434,18 @@ async fn handle(
                     }
                 ) =>
             {
-                let _ = okapi_store::channels::mark_key_failure(
-                    &state.pg,
-                    cand.channel_key_id,
+                super::key_health::failure(
+                    state,
+                    &cand,
                     err.error_code(),
                     super::chat::failure_kind_of(&err),
                 )
                 .await;
                 failover = failover.saturating_add(1);
-                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
+                last_err = Some(super::account_control::attempt_error(&err));
             }
             Err(err) => {
-                last_err = Some(AppError::new(StatusCode::BAD_GATEWAY, err.error_code()));
+                last_err = Some(super::account_control::attempt_error(&err));
                 break;
             }
         }
@@ -474,6 +480,7 @@ async fn commit_and_record(
     reserved_pool: okapi_ledger::Pool,
     source_window: Option<&str>,
     stream: Option<stream::Receipt>,
+    failure: Option<&mut super::failure::Guard>,
 ) -> Result<(), AppError> {
     let ingress = if task.is_some() {
         format!("{endpoint}/async")
@@ -481,6 +488,12 @@ async fn commit_and_record(
         endpoint.into()
     };
     let mut snapshot = serde_json::to_value(&quote.snapshot).map_err(|_| AppError::internal())?;
+    super::upstream_cost::pin(
+        &mut snapshot,
+        cand.channel_id,
+        cand.cost_milli,
+        quote.list_price,
+    );
     usage::annotate(&mut snapshot, usage);
     if let Some(stream) = &stream {
         snapshot["image_stream_usage"] = serde_json::json!(stream.usage_mode);
@@ -531,19 +544,25 @@ async fn commit_and_record(
         pool: reserved_pool,
     };
     if let Some(task) = task {
-        if let Some(cost) = state.channel_cost_milli(cand.channel_id).await {
-            input.upstream_cost = Some(Money::from_micros(
-                i64::try_from(i128::from(quote.list_price.as_micros()) * i128::from(cost) / 1000)
-                    .map_err(|_| AppError::internal())?,
-            ));
-        }
+        state.prepare_settlement(&mut input).await;
         tasks::complete(state, task, &upstream.body, input).await?;
         state
             .sched
             .kpi_record(usage.total_raw(), quote.amount.as_micros(), false)
             .await;
-    } else if !state.settle_success(input).await? {
-        return Ok(());
+    } else {
+        let mut failure = failure;
+        if let Some(failure) = failure.as_deref_mut() {
+            failure.disarm();
+        }
+        let settled = state.settle_success(input).await.inspect_err(|error| {
+            if let Some(failure) = failure {
+                failure.settlement_failed(error);
+            }
+        })?;
+        if !settled {
+            return Ok(());
+        }
     }
     super::auth::record_settlement_counters(
         state,

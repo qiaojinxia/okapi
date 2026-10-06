@@ -11,6 +11,7 @@ import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
+import { poolOptions } from '@/features/pools/pool-options'
 
 interface DiagKeyReport {
   key_id: number
@@ -81,6 +82,9 @@ const REASON_LABEL: Record<string, string> = {
   key_banned: 'admin:diagReasonKeyBanned',
   key_invalid: 'admin:diagReasonKeyInvalid',
   model_subset_mismatch: 'admin:diagReasonSubset',
+  egress_cooling: 'admin:diagReasonEgressCooling',
+  egress_unassigned: 'admin:diagReasonEgressUnassigned',
+  egress_unavailable: 'admin:diagReasonEgressUnavailable',
   unpriced: 'admin:diagReasonUnpriced',
   no_available_channel: 'admin:diagVerdictNoAvailable',
   missing_or_disabled: 'admin:diagReasonMissingOrDisabled',
@@ -104,10 +108,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
     queryKey: qk.adminGroups,
     queryFn: () => apiFetch<{ data: { group_code: string }[] }>('/admin/groups'),
   })
-  const pools = useQuery({
-    queryKey: qk.adminPools,
-    queryFn: () => apiFetch<{ data: { pool_code: string }[] }>('/admin/pools'),
-  })
+  const pools = useQuery(poolOptions())
 
   const run = useMutation({
     mutationFn: () => {

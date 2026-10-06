@@ -101,7 +101,7 @@ async fn mock(provider: &str) -> (SocketAddr, Seen) {
 /// 建一条 `provider` 方言的渠道 + 一个基座模型（倍率 1.0）+ 一个 `@effort:low`
 /// 定价变体（倍率 3.0，用来验证"参数改注入、不改计费名"）。
 async fn setup(provider: &str) -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();

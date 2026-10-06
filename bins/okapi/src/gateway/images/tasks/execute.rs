@@ -11,6 +11,10 @@ const EXECUTION_TIMEOUT: Duration = Duration::from_mins(7);
 
 /// Runs one persisted request; also advances recovery/settlement when no generation is needed.
 pub async fn run_one(state: &AppState) -> Result<bool, AppError> {
+    Box::pin(run_one_inner(state)).await
+}
+
+async fn run_one_inner(state: &AppState) -> Result<bool, AppError> {
     if recover_one(state).await? || settle_one(state, None).await? {
         return Ok(true);
     }

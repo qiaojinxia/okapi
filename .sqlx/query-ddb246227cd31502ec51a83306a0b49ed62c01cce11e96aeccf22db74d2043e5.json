@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT m.group_code, p.id, p.status, m.priority, p.max_keys,\n               COALESCE(p.cooldown_until > now(), false) AS \"cooling!\"\n        FROM proxy_group_members m JOIN proxies p ON p.id = m.proxy_id\n        WHERE m.group_code = ANY($1)\n        ORDER BY m.group_code, p.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_code",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxy_group_members",
+            "name": "group_code"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "priority",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxy_group_members",
+            "name": "priority"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "max_keys",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "max_keys"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "cooling!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "ddb246227cd31502ec51a83306a0b49ed62c01cce11e96aeccf22db74d2043e5"
+}

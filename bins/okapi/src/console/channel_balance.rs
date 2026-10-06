@@ -8,9 +8,10 @@
 
 use super::admin::{ensure_channel_owner, guard_scoped};
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::permissions;
 use serde_json::{Value, json};
@@ -116,6 +117,9 @@ pub(crate) fn decimal_micro(value: &Value) -> Option<i64> {
         Some(rest) => (true, rest),
         None => (false, text.as_str()),
     };
+    if !digits.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return None;
+    }
     let digits = match digits.split_once('.') {
         Some((int, frac)) if frac.len() > 6 => format!("{int}.{}", &frac[..6]),
         _ => digits.to_owned(),
@@ -196,7 +200,7 @@ pub async fn fetch_channel_balance(
     ensure_channel_owner(&state, channel_id, &actor, scope).await?;
     let row = sqlx::query!(
         r#"
-        SELECT c.provider, c.api_base, c.settings, ck.credential_ciphertext
+        SELECT c.provider, c.api_base, c.settings, ck.id AS key_id, ck.credential_ciphertext
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
@@ -221,7 +225,10 @@ pub async fn fetch_channel_balance(
     };
     let credential =
         okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
-    let outbound = okapi_providers::Outbound::from_settings(&row.settings);
+    let outbound = okapi_providers::Outbound::from_settings(
+        &row.settings,
+        super::egress::key_proxy(&state, row.key_id).await?,
+    );
 
     let mut bodies = Vec::new();
     for url in probe.urls(base, chrono::Utc::now().date_naive()) {
@@ -268,16 +275,8 @@ async fn get_json(
         })
         .await;
     let body = match outcome {
-        Ok(okapi_providers::custom_pass::PassResponse::Ok { mut stream, .. }) => {
-            use futures::StreamExt as _;
-            let mut buf: Vec<u8> = Vec::new();
-            while let Some(Ok(chunk)) = stream.next().await {
-                if buf.len() + chunk.len() > BALANCE_MAX_BYTES {
-                    return Err(AppError::bad_request().with_param("balance_shape"));
-                }
-                buf.extend_from_slice(&chunk);
-            }
-            buf
+        Ok(okapi_providers::custom_pass::PassResponse::Ok { stream, .. }) => {
+            super::outbound_body::collect(stream, BALANCE_MAX_BYTES).await?
         }
         Ok(okapi_providers::custom_pass::PassResponse::ErrStatus { status, .. }) => {
             return Err(
@@ -392,5 +391,17 @@ mod tests {
         assert_eq!((b.currency, b.remaining_micro), ("CNY", 49_580_000));
 
         assert!(Probe::DeepSeek.parse(&[json!({"unexpected": 1})]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod unicode_decimal_tests {
+    #[test]
+    fn non_ascii_fraction_is_rejected_before_truncation() {
+        assert_eq!(super::decimal_micro(&serde_json::json!("1.aaaaaé")), None);
+        assert_eq!(
+            super::decimal_micro(&serde_json::json!("1.1234567")),
+            Some(1_123_456)
+        );
     }
 }

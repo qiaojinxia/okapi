@@ -612,6 +612,7 @@ fn with_usage_source(
     payload["input_unit"] = input_unit.into();
     payload["input_characters"] = serde_json::json!(input_characters);
     payload["reported_details"] = serde_json::json!(usage.reported_details);
+    payload["server_tool_usage"] = serde_json::json!(usage.server_tool_usage);
     payload["cache_read_modalities"] = serde_json::json!(usage.cache_read_modalities);
     payload["cache_write_modalities"] = serde_json::json!(usage.cache_write_modalities);
     payload["audio_prompt_tokens"] = usage.audio_prompt_tokens.into();

@@ -1,4 +1,7 @@
 //! Admission failures must not call providers, charge funds or leak reservations.
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::response::IntoResponse;
 use axum::{Router, extract::State, routing::post};
 use fred::{
@@ -31,6 +34,7 @@ struct SettlementGate {
 }
 
 struct Bed {
+    state: gateway::state::AppState,
     pg: sqlx::PgPool,
     redis: Client,
     ledger: okapi_ledger::BalanceLedger,
@@ -93,7 +97,7 @@ async fn serve(app: Router) -> TestResult<SocketAddr> {
 
 impl Bed {
     async fn new(subscription: bool) -> TestResult<Self> {
-        dotenvy::dotenv().ok();
+        okapi_store::test_support::assert_isolated();
         let database = std::env::var("DATABASE_URL")?;
         Self::new_at(subscription, &database).await
     }
@@ -137,6 +141,7 @@ impl Bed {
             None,
         )
         .await?;
+        published_pricing::publish(&pg, uid).await;
         let state = gateway::build_state(database, &redis_url, "atomic-test", None, None).await?;
         let ledger = state.ledger.clone();
         let pending = state.settlements.clone();
@@ -158,10 +163,11 @@ impl Bed {
             kid,
             model,
             token,
-            address: serve(gateway::router(state)).await?,
+            address: serve(gateway::router(state.clone())).await?,
             hits,
             gate,
             pending,
+            state,
         })
     }
 

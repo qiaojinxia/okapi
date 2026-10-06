@@ -25,6 +25,11 @@ allow = [
 crate = "option-ext"
 allow = ["MPL-2.0"]
 
+# Versioned Claude Code wire checksums use this pure Rust XXH64 implementation.
+[[licenses.exceptions]]
+crate = "xxhash-rust"
+allow = ["BSL-1.0"]
+
 [bans]
 multiple-versions = "warn"
 

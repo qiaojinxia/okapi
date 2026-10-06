@@ -44,6 +44,7 @@ fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInf
     let messages = probe.input_messages();
     let (needs_tools, needs_vision) = request_features(Ingress::Responses, body);
     Ok(ProbeInfo {
+        authenticated: None,
         requested_model: probe.model.clone(),
         stream: true,
         completion_cap_req: if work.warmup {
@@ -51,6 +52,7 @@ fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInf
         } else {
             probe.completion_cap_req()
         },
+        choices: 1,
         prompt_tokens: estimate_prompt_tokens(
             &probe.model,
             &probe.prompt_segments(),
@@ -152,10 +154,6 @@ async fn execute(session: &Session, work: &Work) -> bool {
     }
     let failed = progress.error.is_some() || !progress.terminal;
     progress.settle(session, work, &bill, &mut routed).await;
-    bill.state
-        .sched
-        .release_slot(routed.info.key, routed.info.cap)
-        .await;
     failed
 }
 

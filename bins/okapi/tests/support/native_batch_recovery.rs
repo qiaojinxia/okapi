@@ -82,7 +82,7 @@ async fn lost_ack_recovers_only_after_all_pages_and_survives_worker_restart() {
     )
     .await
     .unwrap();
-    assert!(run_one(&restarted, Some(id(&job))).await.unwrap());
+    assert!(env.step_with(&restarted, &job).await.unwrap());
     restarted.pg.close().await;
     assert_eq!(
         env.peer.lock().unwrap().list_queries,

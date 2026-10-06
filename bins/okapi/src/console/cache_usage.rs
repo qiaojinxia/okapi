@@ -72,13 +72,7 @@ async fn complete(
 }
 
 fn time_columns(table: &str) -> &'static str {
-    match table {
-        "mv_channel_5min" => "toStartOfHour(ts5) AS hour, toDate(ts5) AS day",
-        "mv_key_model_day" | "mv_user_model_day" | "mv_user_day" | "mv_apikey_day" => {
-            "toStartOfDay(day) AS hour"
-        }
-        _ => "toDate(hour) AS day",
-    }
+    super::observation_sources::Grain::for_table(table).time_sql()
 }
 
 /// Validated/internal SQL only; strings in predicates remain server-bound.

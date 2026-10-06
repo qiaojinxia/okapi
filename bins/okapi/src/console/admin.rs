@@ -5,9 +5,10 @@ use super::query::{PageQuery, Query};
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
+use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_domain::Money;
@@ -63,7 +64,7 @@ pub(super) async fn ensure_channel_owner(
     let owner = okapi_store::admin::channel_owner(&state.pg, channel_id)
         .await?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
-    if owner != Some(actor.user_id) {
+    if owner != Some(actor.actor_user_id()) {
         return Err(
             AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED).with_param("owner"),
         );
@@ -95,7 +96,7 @@ pub(super) async fn audit(
 ) {
     if let Err(err) = okapi_store::admin::record_audit(
         &state.pg,
-        &format!("admin:{}", actor.user_id),
+        &format!("admin:{}", actor.actor_user_id()),
         action,
         target,
         detail,
@@ -113,30 +114,15 @@ pub struct CreateChannelReq {
     pub name: String,
     #[serde(default = "default_provider")]
     pub provider: String,
+    #[serde(default)]
     pub api_base: String,
     pub credential: String,
     pub models: Vec<String>,
     #[serde(default)]
-    pub priority: i32,
-    #[serde(default)]
     pub trust_upstream_usage: bool,
-    #[serde(default)]
-    pub max_concurrency: Option<i32>,
-    /// 所属渠道池。缺省（不传）= 进内置 default 池；显式传空数组 = 孤儿（对谁都不可达，
-    /// 只在"先建好、稍后再放进专属池"时有意义）。元素可为池码字符串或带覆盖的对象。
-    #[serde(default)]
-    pub pools: Option<Vec<PoolMemberReq>>,
-    /// 渠道高级设置（channels.settings 对象整体；已注册键见 docs/database.md：
-    /// thinking_to_content / bill_by_response_model / strip_request_fields / inject_request_fields /
-    /// responses_native / pass_paths / api_version（azure）/ proxy_url / extra_headers）。
-    #[serde(default)]
-    pub settings: Option<Value>,
-    /// 相对成本系数（千分比；缺省 1000 = 按官方标价采购）。0 = 自建 / 免费上游。
-    #[serde(default)]
-    pub cost_milli: Option<i64>,
-    /// 上游数据留存声明：none / transient / trains（缺省 = 未声明）。
-    #[serde(default)]
-    pub data_retention: Option<String>,
+    /// The same optional settings are accepted by subscription authorization.
+    #[serde(flatten)]
+    pub options: super::channel_creation::Options,
 }
 
 /// 数据留存声明的取值域。
@@ -144,7 +130,7 @@ pub struct CreateChannelReq {
 /// 三档：`none` 上游不留存（可满足零留存要求）/ `transient` 短期留存但不用于训练 /
 /// `trains` 可能用于训练。**未声明 ≠ none**——请求要求零留存时，未声明的渠道会被排除，
 /// 因为"不知道对方留不留"不能当成"不留"。
-fn ensure_data_retention(value: Option<&str>) -> Result<(), AppError> {
+pub(super) fn ensure_data_retention(value: Option<&str>) -> Result<(), AppError> {
     match value {
         Some(v) if !matches!(v, "" | "none" | "transient" | "trains") => {
             Err(AppError::bad_request().with_param("data_retention"))
@@ -154,13 +140,20 @@ fn ensure_data_retention(value: Option<&str>) -> Result<(), AppError> {
 }
 
 /// 相对成本系数取值域：0（免费）～ 100×官方价，负数与离谱值都是手滑。
-fn ensure_cost_milli(value: Option<i64>) -> Result<(), AppError> {
+pub(super) fn ensure_cost_milli(value: Option<i64>) -> Result<(), AppError> {
     match value {
         Some(v) if !(0..=100_000).contains(&v) => {
             Err(AppError::bad_request().with_param("cost_milli"))
         }
         _ => Ok(()),
     }
+}
+
+pub(super) fn ensure_max_concurrency(value: Option<i32>) -> Result<(), AppError> {
+    if value.is_some_and(|cap| cap <= 0) {
+        return Err(AppError::bad_request().with_param("max_concurrency"));
+    }
+    Ok(())
 }
 
 fn default_provider() -> String {
@@ -190,7 +183,7 @@ impl PoolMemberReq {
 }
 
 /// 池成员列表归一化：去空白、去重、校验池存在（不存在回 404 而非让 FK 报 500）。
-async fn normalize_members(
+pub(super) async fn normalize_members(
     state: &AppState,
     reqs: Vec<PoolMemberReq>,
 ) -> Result<Vec<okapi_store::admin::PoolMember>, AppError> {
@@ -227,93 +220,52 @@ pub async fn create_channel(
     headers: HeaderMap,
     ExtractJson(req): ExtractJson<CreateChannelReq>,
 ) -> Result<Json<Value>, AppError> {
-    let (actor, _) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
-    if !PROVIDERS.contains(&req.provider.as_str()) {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    if okapi_providers::registry::lookup(&req.provider).is_none() {
         return Err(AppError::bad_request().with_param("provider"));
     }
-    ensure_azure_api_base(&req.provider, Some(&req.api_base))?;
-    super::ssrf::validate_api_base(&state, &req.api_base).await?;
+    let api_base =
+        super::channel_creation::endpoint(&state, &req.provider, Some(&req.api_base)).await?;
+    ensure_azure_api_base(&req.provider, Some(api_base))?;
     super::ssrf::validate_credential(&state, &req.credential).await?;
-    ensure_cost_milli(req.cost_milli)?;
-    ensure_data_retention(req.data_retention.as_deref())?;
-    ensure_settings_api_version(req.settings.as_ref())?;
-    ensure_settings_outbound(req.settings.as_ref())?;
-    ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
-    ensure_settings_mimic(req.settings.as_ref())?;
+    let prepared = super::channel_creation::prepare(&state, &req.provider, req.options).await?;
+    super::egress::validate_binding(&state, &prepared.egress, &actor, scope).await?;
+    let credential = super::channel_credentials::normalize(&req.provider, &req.credential)?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
-    let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
+    let (channel_id, channel_key_id) = okapi_store::provision::create_channel_configured(
         &state.pg,
-        &req.name,
-        &req.provider,
-        &req.api_base,
-        &req.credential,
-        &models,
-        req.trust_upstream_usage,
+        okapi_store::provision::ChannelCreate {
+            name: &req.name,
+            provider: &req.provider,
+            api_base,
+            credential: &credential,
+            models: &models,
+            trust_upstream_usage: req.trust_upstream_usage,
+            owner_id: Some(actor.actor_user_id()),
+            settings: Some(&prepared.settings),
+            priority: prepared.priority,
+            max_concurrency: prepared.max_concurrency,
+            cost_milli: prepared.cost_milli,
+            pools: Some(&prepared.pools),
+            egress: Some(&prepared.egress),
+            egress_preassigned: None,
+        },
         state.master_key.as_deref(),
     )
     .await?;
-    if let Some(settings) = &req.settings {
-        if !settings.is_object() {
-            return Err(AppError::bad_request().with_param("settings"));
-        }
-        sqlx::query!(
-            "UPDATE channels SET settings = $2 WHERE id = $1",
-            channel_id,
-            settings
-        )
-        .execute(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
-    }
-    if req.priority != 0 {
-        sqlx::query!(
-            "UPDATE channels SET priority = $2 WHERE id = $1",
-            channel_id,
-            req.priority
-        )
-        .execute(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
-    }
-    if let Some(cap) = req.max_concurrency {
-        sqlx::query!(
-            "UPDATE channel_keys SET max_concurrency = $2 WHERE id = $1",
-            channel_key_id,
-            cap
-        )
-        .execute(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
-    }
-    if req.cost_milli.is_some() || req.data_retention.is_some() {
-        okapi_store::admin::patch_channel(
-            &state.pg,
-            channel_id,
-            okapi_store::admin::ChannelPatch {
-                cost_milli: req.cost_milli,
-                data_retention: req.data_retention.as_deref(),
-                ..Default::default()
-            },
-        )
-        .await?;
-    }
-    // 属主传播（#6267）：创建人即属主，own 范围据此过滤
-    okapi_store::admin::set_channel_owner(&state.pg, channel_id, actor.user_id).await?;
-    // provision 已把新渠道放进 default 池；显式给了 pools 才覆盖（空数组 = 孤儿）
-    let pool_codes: Vec<String> = if let Some(reqs) = req.pools {
-        let members = normalize_members(&state, reqs).await?;
-        okapi_store::admin::set_channel_pools(&state.pg, channel_id, &members).await?;
-        members.into_iter().map(|m| m.pool_code).collect()
-    } else {
-        vec![okapi_store::channels::DEFAULT_POOL.to_owned()]
-    };
+    let pool_codes: Vec<&str> = prepared
+        .pools
+        .iter()
+        .map(|member| member.pool_code.as_str())
+        .collect();
     state.invalidate_routing_caches();
     audit(
         &state,
         &actor,
         "channel.create",
         &channel_id.to_string(),
-        json!({ "name": req.name, "provider": req.provider, "models": req.models, "pools": pool_codes }),
+        json!({ "name": req.name, "provider": req.provider, "models": req.models, "pools": pool_codes,
+                "egress": prepared.egress }),
     )
     .await;
     Ok(Json(
@@ -330,7 +282,7 @@ pub async fn list_channels(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
     let owner_filter = match scope {
-        PermScope::Own => Some(actor.user_id),
+        PermScope::Own => Some(actor.actor_user_id()),
         PermScope::All | PermScope::Denied => None,
     };
     let list = okapi_store::admin::list_channels(
@@ -349,16 +301,28 @@ pub async fn list_channels(
     let keys = okapi_store::admin::list_channel_keys_for(&state.pg, &ids).await?;
     // 订阅 OAuth key（§11.38）：把 access token 到期时间解出来给列表看——只对 credential_kind=1 解密
     let mut oauth_expiry: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut oauth_health = std::collections::HashMap::new();
+    let mut oauth_refreshable = std::collections::HashMap::new();
+    let mut oauth_account = std::collections::HashMap::new();
     for k in keys
         .iter()
         .filter(|k| k.credential_kind == okapi_store::admin::CREDENTIAL_KIND_OAUTH)
     {
+        if let Some(health) = crate::gateway::credentials::health::read(&state, k.id).await {
+            oauth_health.insert(k.id, health);
+        }
         if let Ok(Some(plain)) =
             okapi_store::admin::read_key_credential(&state.pg, k.id, state.master_key.as_deref())
                 .await
             && let Some(cred) = okapi_store::credential::OAuthCredential::parse(&plain)
         {
-            oauth_expiry.insert(k.id, cred.expires_at);
+            if cred.expires_at > 0 {
+                oauth_expiry.insert(k.id, cred.expires_at);
+            }
+            oauth_refreshable.insert(k.id, cred.can_refresh());
+            if let Some(label) = cred.account_label {
+                oauth_account.insert(k.id, label);
+            }
         }
     }
     // 最近测活 / 余额查询结果各一次 MGET 回填（Redis 30 天 TTL；没测过 / 已过期 = null）
@@ -377,6 +341,15 @@ pub async fn list_channels(
                     if let Some(exp) = oauth_expiry.get(&k.id) {
                         v["credential_expires_at"] = json!(exp);
                     }
+                    if let Some(health) = oauth_health.get(&k.id) {
+                        v["oauth_refresh"] = serde_json::to_value(health).unwrap_or_default();
+                    }
+                    if let Some(refreshable) = oauth_refreshable.get(&k.id) {
+                        v["oauth_refreshable"] = json!(refreshable);
+                    }
+                    if let Some(label) = oauth_account.get(&k.id) {
+                        v["account_label"] = json!(label);
+                    }
                     v
                 })
                 .collect();
@@ -389,6 +362,15 @@ pub async fn list_channels(
                 "pool_members": c.pool_members,
                 "cost_milli": c.cost_milli,
                 "data_retention": c.data_retention,
+                // 编辑抽屉以列表行为初始值，保存时整体回写 settings；缺了它，改任意字段
+                // 都会把请求风格、账号控制、代理等高级设置一并清空。
+                "settings": c.settings,
+                // 出口绑定（§11.41）；keys[].egress_proxy_id 是固定分配的结果
+                "egress": okapi_store::egress::Binding::from_columns(
+                    c.egress_mode.as_deref(),
+                    c.egress_proxy_id,
+                    c.egress_group_code.clone(),
+                ),
                 "keys": keys,
                 "last_test": last_tests.remove(&c.id),
                 "last_balance": last_balances.remove(&c.id),
@@ -461,20 +443,6 @@ pub async fn set_channel_pools(
     Ok(Json(json!({ "ok": true, "orphan": members.is_empty() })))
 }
 
-/// 已支持的上游协议（docs/database.md channels.provider）。
-const PROVIDERS: [&str; 10] = [
-    "openai",
-    "openai_compat",
-    "azure",
-    "anthropic",
-    "gemini",
-    "bedrock",
-    "vertex",
-    "anthropic_max",
-    "codex",
-    "custom_pass",
-];
-
 /// `settings.api_version`（azure 数据面版本）形状校验：`YYYY-MM-DD` 或 `YYYY-MM-DD-preview`。
 /// 它会原样进每个请求的查询串，错一个字符整条渠道 404，所以在写入时就拦。
 fn ensure_settings_api_version(settings: Option<&Value>) -> Result<(), AppError> {
@@ -482,7 +450,10 @@ fn ensure_settings_api_version(settings: Option<&Value>) -> Result<(), AppError>
         return Ok(());
     };
     let ok = v.as_str().is_some_and(|s| {
-        let (date, suffix) = s.split_at(s.len().min(10));
+        if !s.is_ascii() || s.len() < 10 {
+            return false;
+        }
+        let (date, suffix) = s.split_at(10);
         date.len() == 10
             && date.bytes().enumerate().all(|(i, b)| {
                 if i == 4 || i == 7 {
@@ -500,8 +471,8 @@ fn ensure_settings_api_version(settings: Option<&Value>) -> Result<(), AppError>
     }
 }
 
-/// `settings.proxy_url` / `extra_headers` 写入校验（IMPLEMENTATION §11.30）。
-/// 代理不走 api_base 的 SSRF 闸：企业代理常在 RFC1918 / 本机端口，拦了就没法用。
+/// `settings.extra_headers` 等出站修饰的写入校验（IMPLEMENTATION §11.30）；出口代理改由
+/// 出口绑定表达（§11.41），settings 里不再接受 `proxy_url`。
 fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     let Some(s) = settings else {
         return Ok(());
@@ -511,13 +482,10 @@ fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     {
         return Err(AppError::bad_request().with_param("image_stream_usage"));
     }
-    if let Some(v) = s.get("proxy_url") {
-        let raw = v
-            .as_str()
-            .ok_or_else(|| AppError::bad_request().with_param("proxy_url"))?;
-        if !okapi_providers::http::proxy_url_ok(raw) {
-            return Err(AppError::bad_request().with_param("proxy_url"));
-        }
+    // 已退役（§11.41 出口绑定取代 §11.30 的 settings.proxy_url）：旧客户端写进来只会被静默
+    // 忽略、请求悄悄直连，所以直接拒绝
+    if s.get("proxy_url").is_some() {
+        return Err(AppError::bad_request().with_param("proxy_url"));
     }
     if let Some(v) = s.get("extra_headers")
         && !okapi_providers::http::extra_headers_ok(v)
@@ -543,31 +511,114 @@ fn ensure_settings_outbound(settings: Option<&Value>) -> Result<(), AppError> {
     Ok(())
 }
 
-/// `settings.mimic_cc` / `mimic_cc_version` 写入校验（IMPLEMENTATION §11.38）：
-/// 开关必须是布尔，版本必须是三段 semver——过松的值只会让伪装 UA 一眼可辨。
+/// 已退役的 Claude Code 伪装开关（2026-10-05 起由 `extensions.client_profile` 取代）：
+/// 旧前端写进来只会被静默忽略，所以直接拒绝。
 fn ensure_settings_mimic(settings: Option<&Value>) -> Result<(), AppError> {
     let Some(s) = settings else {
         return Ok(());
     };
-    if let Some(v) = s.get("mimic_cc")
-        && !v.is_boolean()
-    {
-        return Err(AppError::bad_request().with_param("mimic_cc"));
-    }
-    if let Some(v) = s.get("mimic_cc_version") {
-        let ok = v.is_null()
-            || v.as_str().is_some_and(|ver| {
-                let parts: Vec<&str> = ver.split('.').collect();
-                parts.len() == 3
-                    && parts.iter().all(|p| {
-                        !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit())
-                    })
-            });
-        if !ok {
-            return Err(AppError::bad_request().with_param("mimic_cc_version"));
+    for key in ["mimic_cc", "mimic_cc_version"] {
+        if s.get(key).is_some() {
+            return Err(AppError::bad_request().with_param(key));
         }
     }
     Ok(())
+}
+
+fn ensure_request_extensions(provider: &str, settings: Option<&Value>) -> Result<(), AppError> {
+    let extensions = settings
+        .and_then(|settings| settings.get("extensions"))
+        .unwrap_or(&Value::Null);
+    okapi_providers::profiles::validate_extensions(provider, extensions)
+        .map_err(|_| AppError::bad_request().with_param("extensions"))
+}
+
+pub(super) fn ensure_account_control(settings: Option<&Value>) -> Result<(), AppError> {
+    if let Some(settings) = settings {
+        crate::gateway::account_control::policy::Policy::parse(settings)
+            .map_err(|param| AppError::bad_request().with_param(param))?;
+    }
+    Ok(())
+}
+
+pub(super) async fn validate_channel_settings(
+    state: &AppState,
+    provider: &str,
+    settings: Option<&Value>,
+) -> Result<(), AppError> {
+    if settings.is_some_and(|s| !s.is_object()) {
+        return Err(AppError::bad_request().with_param("settings"));
+    }
+    ensure_settings_api_version(settings)?;
+    ensure_settings_outbound(settings)?;
+    ensure_settings_oauth_token_url(state, settings).await?;
+    ensure_settings_mimic(settings)?;
+    ensure_request_extensions(provider, settings)?;
+    ensure_account_control(settings)
+}
+
+/// Public shape of compiled account hooks; no credentials or channel data.
+pub async fn channel_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
+    let data: Vec<Value> = okapi_providers::registry::BUILT_INS
+        .iter()
+        .map(|adapter| json!({"id": adapter.id, "default_base": adapter.default_base, "account": adapter.account_capabilities()}))
+        .collect();
+    Ok(Json(json!({"data": data})))
+}
+
+#[derive(Deserialize)]
+pub struct ChannelUsageQuery {
+    token_period: Option<crate::gateway::account_control::policy::TokenPeriod>,
+}
+
+pub async fn channel_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(channel): Path<i64>,
+    Query(query): Query<ChannelUsageQuery>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
+    ensure_channel_owner(&state, channel, &actor, scope).await?;
+    let settings: Value =
+        sqlx::query_scalar("SELECT settings FROM channels WHERE id=$1 AND deleted_at IS NULL")
+            .bind(channel)
+            .fetch_optional(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?
+            .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
+    let policy = crate::gateway::account_control::policy::Policy::parse(&settings)
+        .map_err(|param| AppError::bad_request().with_param(param))?;
+    let token_usage = okapi_store::channel_usage::token_snapshot(
+        &state.pg,
+        channel,
+        query.token_period.map_or_else(
+            || {
+                policy
+                    .local_tokens
+                    .as_ref()
+                    .map_or("total", |limit| limit.period.name())
+            },
+            |period| period.name(),
+        ),
+    )
+    .await?;
+    let keys: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id=$1 ORDER BY id")
+            .bind(channel)
+            .fetch_all(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?;
+    let mut quotas = Vec::new();
+    for key in keys {
+        quotas.push(json!({"key_id":key,"quota":crate::gateway::account_control::quota::read(&state,key).await}));
+    }
+    Ok(Json(
+        json!({"policy":policy,"quotas":quotas,"token_usage":token_usage,"timezone":okapi_store::timezone::machine_timezone()?}),
+    ))
 }
 
 /// `settings.oauth_token_url`（订阅 OAuth 的 token 端点覆写）与 api_base 过同一道 SSRF 闸：
@@ -670,7 +721,7 @@ pub async fn update_channel(
     ensure_channel_owner(&state, id, &actor, scope).await?;
 
     if let Some(provider) = &req.provider
-        && !PROVIDERS.contains(&provider.as_str())
+        && okapi_providers::registry::lookup(provider).is_none()
     {
         return Err(AppError::bad_request().with_param("provider"));
     }
@@ -681,6 +732,22 @@ pub async fn update_channel(
     ensure_settings_outbound(req.settings.as_ref())?;
     ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
     ensure_settings_mimic(req.settings.as_ref())?;
+    ensure_account_control(req.settings.as_ref())?;
+    if req.provider.is_some() || req.settings.is_some() {
+        let (current_provider, current_settings): (String, Value) = sqlx::query_as(
+            "SELECT provider, settings FROM channels WHERE id=$1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
+        ensure_request_extensions(
+            req.provider.as_deref().unwrap_or(&current_provider),
+            Some(req.settings.as_ref().unwrap_or(&current_settings)),
+        )?;
+    }
+
     // 空地址已被上面的 SSRF 校验拦下（scheme 不合法）。要地址的三家（azure / bedrock / vertex）：
     // 本次给了地址就按新协议校验形状；改协议但没给地址则回源看现有地址合不合新协议
     if let Some(provider) = req
@@ -810,11 +877,19 @@ pub async fn rotate_channel_credential(
         return Err(AppError::bad_request().with_param("credential"));
     }
     super::ssrf::validate_credential(&state, &req.credential).await?;
+    let provider: String =
+        sqlx::query_scalar("SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&state.pg)
+            .await
+            .map_err(okapi_store::StoreError::from)?
+            .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND))?;
+    let credential = super::channel_credentials::normalize(&provider, req.credential.trim())?;
     let outcome = okapi_store::admin::rotate_channel_credential(
         &state.pg,
         id,
         req.channel_key_id,
-        req.credential.trim(),
+        &credential,
         state.master_key.as_deref(),
     )
     .await?;
@@ -1279,16 +1354,34 @@ pub async fn set_setting(
     ExtractJson(req): ExtractJson<SetSettingReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::SETTINGS_WRITE).await?;
+    // 全局默认出口有引用校验与固定分配对账，只能经 PUT /admin/egress/default 写
+    if req.key == okapi_store::egress::DEFAULT_SETTING {
+        return Err(AppError::bad_request().with_param("egress_default"));
+    }
     let is_pricing_base = req.key == crate::gateway::pricing_loader::BASE_PRICE_SETTING;
     if req.key == "streaming_policy"
         && !crate::gateway::stream_policy::StreamPolicy::valid(&req.value)
     {
         return Err(AppError::bad_request().with_param("streaming_policy"));
     }
+    if req.key == "oauth_refresh_policy"
+        && crate::worker::oauth_refresh::RefreshPolicy::parse(&req.value).is_none()
+    {
+        return Err(AppError::bad_request().with_param("oauth_refresh_policy"));
+    }
+    if req.key == "egress_probe_policy" {
+        let Some(policy) = crate::worker::egress_probe::ProbePolicy::parse(&req.value) else {
+            return Err(AppError::bad_request().with_param("egress_probe_policy"));
+        };
+        // 探测地址由后台按时请求：与上游地址同一道 SSRF 闸
+        if let Some(target) = policy.target.as_deref() {
+            super::ssrf::validate_api_base(&state, target).await?;
+        }
+    }
     if is_pricing_base && crate::gateway::pricing_loader::valid_base_price(&req.value).is_none() {
         return Err(AppError::bad_request().with_param("pricing_base_per_1m_micro"));
     }
-    okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.user_id).await?;
+    okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.actor_user_id()).await?;
     state.invalidate_routing_caches();
     // settings 热路径缓存按键失效：同进程立即生效（公告发布、限流阈值调整不必等 60s TTL），
     // 多副本靠 TTL 收敛——与鉴权缓存"本机即时、跨副本 TTL"同一取舍
@@ -1469,6 +1562,9 @@ pub struct UpsertModelReq {
     /// Independent cache/modal prices as decimal strings. Omit to preserve; {} clears.
     #[serde(default)]
     pub modality_ratios: Option<Value>,
+    /// Independent native tool prices. Omit to preserve; {} clears the draft.
+    #[serde(default)]
+    pub server_tool_prices: Option<Value>,
     /// service_tier 档位倍率（如 {"flex":"0.5","priority":"2.0"}；
     /// None=不改动，空对象=清除，DESIGN §3-4.5）。
     #[serde(default)]
@@ -1517,6 +1613,10 @@ fn validate_model_draft(req: &UpsertModelReq) -> Result<(), AppError> {
     }
     if let Some(value) = &req.modality_ratios {
         okapi_pricing::ModalityRatios::parse(value)
+            .map_err(|param| AppError::bad_request().with_param(param))?;
+    }
+    if let Some(value) = &req.server_tool_prices {
+        okapi_pricing::ServerToolPrices::parse(value)
             .map_err(|param| AppError::bad_request().with_param(param))?;
     }
     // Validate all supplied price axes before changing the model row.
@@ -1662,6 +1762,7 @@ pub async fn upsert_model(
             tier_expr,
             per_call_price_micro: req.per_call_price_micro,
             tier_ratios: tiers.as_ref(),
+            server_tool_prices: req.server_tool_prices.as_ref(),
             fallbacks: req.fallback_models.as_deref(),
             metadata: req.metadata.as_ref(),
         },
@@ -1686,6 +1787,7 @@ pub async fn upsert_model(
             "audio_completion_ratio": req.audio_completion_ratio,
             "image_ratio": req.image_ratio,
             "modality_ratios": req.modality_ratios,
+            "server_tool_prices": req.server_tool_prices,
             "metadata": req.metadata,
             "pricing_mode": mode,
             "per_call_price_micro": req.per_call_price_micro,
@@ -1905,7 +2007,6 @@ pub async fn publish_pricing(
     let actor = guard(&state, &headers, permissions::PRICING_PUBLISH).await?;
 
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
-    let source = crate::gateway::pricing_loader::build_source(&rows);
     let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
     if query
         .expected_base_per_1m_micro
@@ -1913,14 +2014,15 @@ pub async fn publish_pricing(
     {
         return Err(AppError::bad_request().with_param("pricing_base_changed"));
     }
-    if let Err(err) = okapi_pricing::book::compile_with_base(source, base) {
+    if let Err(err) = crate::gateway::pricing_loader::compile_rows(&rows, base) {
         tracing::warn!(error = %err, "定价配置编译失败，拒绝发布");
         return Err(AppError::bad_request().with_param(format!("compile: {err}")));
     }
     let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
     snapshot["base_price_per_1m_micro"] = json!(base);
 
-    let epoch = okapi_store::admin::publish_epoch(&state.pg, actor.user_id, &snapshot).await?;
+    let epoch =
+        okapi_store::admin::publish_epoch(&state.pg, actor.actor_user_id(), &snapshot).await?;
     // 广播（best-effort；丢失由 gateway 30s 轮询兜底）
     if let Some(nats) = &state.nats {
         let _ = nats
@@ -2006,7 +2108,7 @@ pub async fn credit_user(
         user_id,
         amount,
         "adjust",
-        &format!("admin:{}", actor.user_id),
+        &format!("admin:{}", actor.actor_user_id()),
         json!({ "tags": ["manual_credit"], "reason": req.reason }),
     )
     .await?;
@@ -2226,7 +2328,7 @@ pub async fn refund_by_request(
         &state.ledger,
         req.request_id,
         &req.reason,
-        &format!("admin:{}", actor.user_id),
+        &format!("admin:{}", actor.actor_user_id()),
     )
     .await
     .map_err(AppError::from)?;
@@ -2716,7 +2818,7 @@ pub async fn create_redemptions(
         .collect();
     let batch_id = okapi_store::admin::create_redemption_codes(
         &state.pg,
-        actor.user_id,
+        actor.actor_user_id(),
         req.amount_micro,
         &codes,
         req.expires_at,
@@ -3045,6 +3147,7 @@ pub(crate) async fn probe_channel(
 
     // bedrock / vertex 要签名 / 换 token，走各自客户端（§11.35）
     if super::cloud_probe::is_cloud(&row.provider) {
+        let proxy_url = super::egress::key_proxy(state, row.channel_key_id).await?;
         let result = super::cloud_probe::probe(
             state,
             &row.provider,
@@ -3053,6 +3156,7 @@ pub(crate) async fn probe_channel(
             &credential,
             row.channel_key_id,
             upstream_model.as_deref(),
+            proxy_url,
         )
         .await;
         state.sched.channel_test_record(channel_id, &result).await;
@@ -3073,7 +3177,10 @@ pub(crate) async fn probe_channel(
         row.api_version.as_deref(),
     )?;
     let content_type = (!body.is_empty()).then(|| "application/json".to_owned());
-    let outbound = okapi_providers::Outbound::from_settings(&row.settings);
+    let outbound = okapi_providers::Outbound::from_settings(
+        &row.settings,
+        super::egress::key_proxy(state, row.channel_key_id).await?,
+    );
 
     let started = std::time::Instant::now();
     let outcome = state
@@ -3164,13 +3271,17 @@ pub async fn fetch_channel_models(
             &row.settings,
             &credential,
             row.channel_key_id,
+            super::egress::key_proxy(&state, row.channel_key_id).await?,
         )
         .await?;
         return Ok(Json(json!({ "channel_id": channel_id, "models": models })));
     }
     let (url, auth_header, auth_value) = models_probe_target(&row.provider, base, credential);
 
-    let outbound = okapi_providers::Outbound::from_settings(&row.settings);
+    let outbound = okapi_providers::Outbound::from_settings(
+        &row.settings,
+        super::egress::key_proxy(&state, row.channel_key_id).await?,
+    );
     let outcome = state
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
@@ -3185,16 +3296,8 @@ pub async fn fetch_channel_models(
         })
         .await;
     let body = match outcome {
-        Ok(okapi_providers::custom_pass::PassResponse::Ok { mut stream, .. }) => {
-            use futures::StreamExt as _;
-            let mut buf: Vec<u8> = Vec::new();
-            while let Some(Ok(chunk)) = stream.next().await {
-                if buf.len() + chunk.len() > FETCH_MODELS_MAX_BYTES {
-                    return Err(AppError::bad_request().with_param("upstream_models_too_large"));
-                }
-                buf.extend_from_slice(&chunk);
-            }
-            buf
+        Ok(okapi_providers::custom_pass::PassResponse::Ok { stream, .. }) => {
+            super::outbound_body::collect(stream, FETCH_MODELS_MAX_BYTES).await?
         }
         Ok(okapi_providers::custom_pass::PassResponse::ErrStatus { status, .. }) => {
             return Err(
@@ -3289,6 +3392,7 @@ pub async fn cache_flush(
 
 #[derive(Deserialize)]
 pub struct ReconQuery {
+    /// Users per page, not a cap on the complete reconciliation scan.
     #[serde(default = "default_limit")]
     pub limit: i64,
 }
@@ -3305,7 +3409,7 @@ pub struct RepairReq {
     /// 修当前扫出的全部漂移用户。
     #[serde(default)]
     pub all: bool,
-    /// `all` 时的扫描上限（与对账视图同一口径）。
+    /// `all` 时的每页用户数；与对账视图同样完整扫描。
     #[serde(default = "default_recon_limit")]
     pub limit: i64,
 }
@@ -3441,6 +3545,34 @@ mod role_permission_tests {
             "",
         ] {
             assert!(!valid_role_permission(invalid), "{invalid}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod request_extension_tests {
+    use super::*;
+    #[test]
+    fn channel_configuration_checks_registered_extension_support() {
+        let settings =
+            json!({"extensions":{"client_profile":{"name":"claude-code","mode":"auto"}}});
+        assert!(ensure_request_extensions("anthropic", Some(&settings)).is_ok());
+        assert!(ensure_request_extensions("anthropic_max", Some(&settings)).is_ok());
+        assert!(ensure_request_extensions("codex", Some(&settings)).is_err());
+        assert!(ensure_request_extensions("openai", Some(&settings)).is_err());
+        assert!(ensure_request_extensions("openai", None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod unicode_settings_tests {
+    #[test]
+    fn malformed_unicode_api_version_is_rejected_without_panicking() {
+        for value in ["aaaaaaaaaé", "2026-10-03é", "界界界界"] {
+            assert!(
+                super::ensure_settings_api_version(Some(&serde_json::json!({"api_version":value})))
+                    .is_err()
+            );
         }
     }
 }

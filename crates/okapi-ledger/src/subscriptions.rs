@@ -92,7 +92,7 @@ async fn end_locked(
     actor: &str,
 ) -> Result<Option<Subscription>, LedgerError> {
     let frozen = guard.subscription_frozen(ledger).await?;
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     let Some(mut sub) = store::finish_in_tx(&mut tx, id, status).await? else {
         return Ok(None);
     };
@@ -133,7 +133,7 @@ pub async fn roll(
 ) -> Result<Subscription, LedgerError> {
     let mut guard = UserGuard::acquire(pg, sub.user_id).await?;
     guard.synchronize(ledger).await?;
-    let current = store::by_id(guard.connection(), sub.id)
+    let current = store::by_id(guard.connection()?, sub.id)
         .await?
         .ok_or(LedgerError::UserNotFound)?;
     if current.status != 1
@@ -158,7 +158,7 @@ async fn roll_locked(
     }
     let frozen = guard.subscription_frozen(ledger).await?;
     let (ws, we) = store::advance_window(current.window_end, current.period(), now);
-    let mut tx = guard.connection().begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     sqlx::query!("UPDATE user_subscriptions SET window_start=$2,window_end=$3,updated_at=now(),maintenance_retry_after=NULL WHERE id=$1 AND status=1",current.id,ws,we).execute(&mut *tx).await?;
     effects::reset(&mut tx,current.user_id,Money::from_micros(current.quota_micro),frozen,"sub_reset",actor,
         serde_json::json!({"plan_code":current.plan_code,"subscription_id":current.id,"window_start":ws,"window_end":we})).await?;

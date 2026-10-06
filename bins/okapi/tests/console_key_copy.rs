@@ -24,7 +24,7 @@ async fn serve(state: gateway::state::AppState) -> String {
 }
 
 async fn setup(master: bool) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let mut state = gateway::build_state(
         &std::env::var("DATABASE_URL").unwrap(),
         &std::env::var("OKAPI_REDIS_URL").unwrap(),

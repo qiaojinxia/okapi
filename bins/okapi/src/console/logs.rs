@@ -260,7 +260,7 @@ pub async fn search(
         "SELECT ts, request_id, upstream_request_id, \
                 log_type, user_id, api_key_id, group_code, model, channel_id, channel_key_id, \
                 client_type, client_ip, node, \
-                prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, input_unit, input_characters, \
+                prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens, input_unit, input_characters, server_tool_usage, \
                 prompt_source, completion_source, upstream_prompt_tokens, upstream_completion_tokens, \
                 requested_model, upstream_model, endpoint, upstream_endpoint, \
                 cache_write_tokens, cache_read_reported, cache_write_reported, cache_write_5m_tokens, cache_write_1h_tokens, \
@@ -359,6 +359,7 @@ pub async fn search(
 fn log_usage(r: &Value) -> Value {
     json!({
         "reported_details": super::usage_observations::from_ch(r),
+        "server_tool_usage": serde_json::from_str::<okapi_domain::ServerToolUsage>(ch_str(r, "server_tool_usage")).ok().filter(|tools| tools.validate().is_ok()),
         "prompt_tokens": ch_i64(r, "prompt_tokens"),
         "input_unit": r["input_unit"],
         "input_characters": r["input_characters"],
@@ -516,6 +517,16 @@ async fn resolve_names(state: &AppState, rows: &[Value], q: &LogQuery) -> Names 
 /// 且完全不碰 CH）；**带过滤时退化为 CH 最近 60s 窗口**——过滤维度组合无穷，
 /// 不可能为每种组合维护 Redis 计数器。窗口累计（消耗/请求/错误）恒走 CH，
 /// 因为它要跨小时甚至跨天，本就不是秒桶能表达的。
+/// 缓存命中口径 = 命中 token / 输入 token；没有输入的失败请求不计入覆盖。
+fn cache_hit(row: &Value, requests: i64, prompt: i64, cached: i64) -> Value {
+    super::usage_details::cache_rate(
+        cached,
+        prompt,
+        super::usage_sources::cache_eligible_requests(row, requests, Some(prompt)),
+        ch_i64(row, "cache_read_known"),
+    )
+}
+
 pub async fn stat(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -610,7 +621,7 @@ pub async fn stat(
         // 缓存命中口径 = 命中 token / 输入 token。按"请求是否命中"计会高估收益：
         // 一次只命中 5% 前缀的请求和一次全命中的请求，省下的钱差两个数量级。
         "cached_tokens": cached,
-        "cache_hit_bp": super::usage_details::cache_rate(cached, prompt, requests, ch_i64(&row, "cache_read_known")),
+        "cache_hit_bp": cache_hit(&row, requests, prompt, cached),
         "cache_read_known_requests": ch_i64(&row, "cache_read_known"),
         "rpm": rpm,
         "tpm": tpm,

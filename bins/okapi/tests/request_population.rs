@@ -65,7 +65,7 @@ async fn setup() -> Env {
         .with_test_writer()
         .with_env_filter("okapi=error")
         .try_init();
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();

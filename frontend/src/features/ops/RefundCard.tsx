@@ -1,6 +1,6 @@
 import dayjs from 'dayjs'
 import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { ErrorState } from '@/components/ui/state'
@@ -39,31 +39,34 @@ interface RefundResp {
 export function RefundCard() {
   const { t, i18n } = useTranslation()
   const [requestId, setRequestId] = useState('')
+  const latestId = useRef('')
   const [reason, setReason] = useState('')
   const [preview, setPreview] = useState<RecordPreview | null>(null)
   const [lookupError, setLookupError] = useState<string | null>(null)
   const { confirm, dialog } = useConfirm()
 
   const lookup = useMutation({
-    mutationFn: () =>
-      apiFetch<RecordPreview>(`/admin/billing/record/${requestId.trim()}`),
-    onSuccess: (r) => {
+    mutationFn: (id: string) =>
+      apiFetch<RecordPreview>(`/admin/billing/record/${id}`),
+    onSuccess: (r, id) => {
+      if (id !== latestId.current || r.request_id.toLowerCase() !== id.toLowerCase()) return
       setLookupError(null)
       setPreview(r)
     },
-    onError: (err) => {
+    onError: (err, id) => {
+      if (id !== latestId.current) return
       setPreview(null)
       setLookupError(describeError(err))
     },
   })
 
   const refund = useMutation({
-    mutationFn: () =>
+    mutationFn: (operation: { request_id: string; reason: string }) =>
       apiFetch<RefundResp>('/admin/billing/refund', {
         method: 'POST',
-        body: { request_id: requestId.trim(), reason: reason.trim() },
+        body: operation,
       }),
-    onSuccess: (r) => {
+    onSuccess: (r, operation) => {
       if (r.outcome === 'refunded') {
         toast.success(
           t('admin:refundDone', {
@@ -75,7 +78,7 @@ export function RefundCard() {
         toast.info(t('admin:refundAlready'))
       }
       // 本地同步预览状态，免得管理员以为"没退成"再点一次
-      setPreview((p) => (p === null ? null : { ...p, status: 30, refundable: false }))
+      setPreview((p) => (p === null || p.request_id !== operation.request_id ? p : { ...p, status: 30, refundable: false }))
     },
     onError: (err) => toast.error(describeError(err)),
   })
@@ -103,6 +106,7 @@ export function RefundCard() {
               value={requestId}
               placeholder="00000000-0000-0000-0000-000000000000"
               onChange={(e) => {
+                latestId.current = e.target.value.trim()
                 setRequestId(e.target.value)
                 setPreview(null)
               }}
@@ -111,7 +115,7 @@ export function RefundCard() {
           <Button
             variant="outline"
             disabled={lookup.isPending || requestId.trim() === ''}
-            onClick={() => lookup.mutate()}
+            onClick={() => lookup.mutate(requestId.trim())}
           >
             {t('admin:refundLookup')}
           </Button>
@@ -156,7 +160,7 @@ export function RefundCard() {
                       amount: formatMoney(preview.amount_micro, i18n.language),
                     }),
                     confirmLabel: t('admin:refund'),
-                    onConfirm: () => refund.mutate(),
+                    onConfirm: () => refund.mutate({ request_id: preview.request_id, reason: reason.trim() }),
                   })
                 }
               >

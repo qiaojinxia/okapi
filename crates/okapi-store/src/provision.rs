@@ -168,44 +168,95 @@ pub async fn create_channel(
     trust_upstream_usage: bool,
     master_key: Option<&str>,
 ) -> Result<(i64, i64), StoreError> {
-    let models_json = serde_json::json!(models);
-    let channel_id = sqlx::query_scalar!(
-        r#"
-        INSERT INTO channels (name, provider, api_base, models, trust_upstream_usage)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING id
-        "#,
-        name,
-        provider,
-        api_base,
-        models_json,
-        trust_upstream_usage
+    create_channel_configured(
+        pool,
+        ChannelCreate {
+            name,
+            provider,
+            api_base,
+            credential,
+            models,
+            trust_upstream_usage,
+            owner_id: None,
+            settings: None,
+            priority: 0,
+            max_concurrency: None,
+            cost_milli: None,
+            pools: None,
+            egress: None,
+            egress_preassigned: None,
+        },
+        master_key,
     )
-    .fetch_one(pool)
-    .await?;
+    .await
+}
 
-    let key_id = sqlx::query_scalar!(
-        r#"
-        INSERT INTO channel_keys (channel_id, credential_ciphertext)
-        VALUES ($1, $2)
-        RETURNING id
-        "#,
+/// One transaction persists a channel, its sole initial credential and all routing options.
+/// The record deliberately has no Debug implementation because it contains a credential.
+pub struct ChannelCreate<'a> {
+    pub name: &'a str,
+    pub provider: &'a str,
+    pub api_base: &'a str,
+    pub credential: &'a str,
+    pub models: &'a [&'a str],
+    pub trust_upstream_usage: bool,
+    pub owner_id: Option<i64>,
+    pub settings: Option<&'a serde_json::Value>,
+    pub priority: i32,
+    pub max_concurrency: Option<i32>,
+    pub cost_milli: Option<i64>,
+    /// None joins default; an explicit empty slice creates an unreachable channel.
+    pub pools: Option<&'a [crate::admin::PoolMember]>,
+    /// 出口绑定（§11.41）；None = 继承全局默认。
+    pub egress: Option<&'a crate::egress::Binding>,
+    /// 固定分配组下换码前已选定的代理（OAuth 登录）：新 key 直接落这个分配，不再另分。
+    pub egress_preassigned: Option<i64>,
+}
+
+pub async fn create_channel_configured(
+    pool: &PgPool,
+    input: ChannelCreate<'_>,
+    master_key: Option<&str>,
+) -> Result<(i64, i64), StoreError> {
+    let sealed = crate::credential::seal_or_plain(master_key, input.credential)?;
+    let models = serde_json::json!(input.models);
+    let settings = input
+        .settings
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let costs = input
+        .cost_milli
+        .map(|cost| serde_json::json!({"relative_cost_milli":cost}));
+    let mut tx = pool.begin().await?;
+    let channel_id: i64 = sqlx::query_scalar(
+        "INSERT INTO channels (name,provider,api_base,models,trust_upstream_usage,owner_id,settings,priority,upstream_unit_cost) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+    ).bind(input.name).bind(input.provider).bind(input.api_base).bind(models)
+        .bind(input.trust_upstream_usage).bind(input.owner_id).bind(settings)
+        .bind(input.priority).bind(costs).fetch_one(&mut *tx).await?;
+    let key_id: i64 = sqlx::query_scalar(
+        "INSERT INTO channel_keys (channel_id,credential_ciphertext,credential_kind,max_concurrency) VALUES ($1,$2,$3,$4) RETURNING id",
+    ).bind(channel_id).bind(sealed)
+        .bind(i16::from(crate::credential::OAuthCredential::parse(input.credential).is_some()))
+        .bind(input.max_concurrency).fetch_one(&mut *tx).await?;
+    let defaults = [crate::admin::PoolMember {
+        pool_code: crate::channels::DEFAULT_POOL.into(),
+        priority_override: None,
+        weight_override: None,
+    }];
+    for member in input.pools.unwrap_or(&defaults) {
+        sqlx::query("INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override) VALUES ($1,$2,$3,$4)")
+            .bind(&member.pool_code).bind(channel_id).bind(member.priority_override).bind(member.weight_override)
+            .execute(&mut *tx).await?;
+    }
+    // 继承也要对账：全局默认若是固定分配组，新 key 当场分到代理
+    crate::egress::bind_new_channel(
+        &mut tx,
         channel_id,
-        crate::credential::seal_or_plain(master_key, credential)?
+        key_id,
+        input.egress.unwrap_or(&crate::egress::Binding::Inherit),
+        input.egress_preassigned,
     )
-    .fetch_one(pool)
     .await?;
-
-    // 新渠道缺省进内置 default 池：渠道只服务它所在的池，不入池即对谁都不可达。
-    // 调用方要专属可见性时再用 set_channel_pools 覆盖成员关系。
-    sqlx::query!(
-        r#"INSERT INTO pool_channels (pool_code, channel_id) VALUES ($1, $2)
-           ON CONFLICT DO NOTHING"#,
-        crate::channels::DEFAULT_POOL,
-        channel_id
-    )
-    .execute(pool)
-    .await?;
-
+    tx.commit().await?;
     Ok((channel_id, key_id))
 }

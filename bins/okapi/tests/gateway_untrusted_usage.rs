@@ -4,6 +4,9 @@
 //! 这个开关此前是死的——DB/API/UI 全通，gateway 从不读它，勾不勾行为一样。
 //! 依赖 .env 的 DATABASE_URL 与 OKAPI_REDIS_URL（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -51,7 +54,7 @@ struct Env {
 }
 
 async fn setup(trust_upstream_usage: bool) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -88,6 +91,7 @@ async fn setup(trust_upstream_usage: bool) -> Env {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "tu-node", None, None)
         .await
         .unwrap();

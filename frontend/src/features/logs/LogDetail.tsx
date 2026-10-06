@@ -2,7 +2,7 @@ import { FileText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Drawer } from '@/components/ui/drawer'
-import { DetailSection, IdRow, InfoGrid, InfoItem } from './detail-ui'
+import { DetailAmount, DetailBody, DetailSection, IdRow, InfoGrid, InfoItem } from './detail-ui'
 import { billingStatus, logMoney, netAmount } from './types'
 import { LogPerformanceDetails } from './LogPerformance'
 import { LogErrorDetails } from './LogErrorDetails'
@@ -21,16 +21,15 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
   if (!row) return null
   const field = (label: string, content: React.ReactNode) => <InfoItem label={label}>{content}</InfoItem>
   return <Drawer open onClose={onClose} title={t('logs:detailTitle')} description={t('logs:detailHint')} size="lg">
-    <div id={id} className="flex flex-col gap-4">
+    <DetailBody id={id}>
       <div className="empty:hidden"><LogErrorDetails failed={row.is_error || row.status === 40} code={row.error_code} diagnostics={row.diagnostics} /></div>
-      <div className="grid gap-4 overflow-hidden rounded-xl border border-border bg-gradient-to-br from-primary/10 via-card to-card p-5 shadow-xs sm:grid-cols-[1fr_auto] sm:items-end">
-        <div className="min-w-0"><p className="text-xs font-medium text-muted-foreground">{t('logs:netSpend')}</p><p className="mt-1.5 text-3xl leading-9 font-semibold tracking-tight tabular-nums">{logMoney(netAmount(row), locale)}</p></div>
-        <dl className="grid min-w-48 gap-1.5 rounded-lg bg-card/75 p-3 text-xs ring-1 ring-border/60">
-          <div className="flex justify-between gap-6"><dt className="text-muted-foreground">{t('logs:beforeDiscount')}</dt><dd className="font-medium tabular-nums">{logMoney(row.original_amount_micro, locale)}</dd></div>
-          <div className="flex justify-between gap-6"><dt className="text-muted-foreground">{t('logs:pricingDiscount')}</dt><dd className="font-medium tabular-nums">{logMoney(row.discount_micro, locale)}</dd></div>
-          {row.status === 30 && <div className="flex justify-between gap-6 text-info"><dt>{t('logs:refundAmount')}</dt><dd className="font-medium tabular-nums">{logMoney(row.amount_micro, locale)}</dd></div>}
+      <DetailAmount label={t('logs:netSpend')} value={logMoney(netAmount(row), locale)}>
+        <dl className="grid min-w-48 gap-1.5 rounded-lg border border-border/60 bg-card/75 px-3 py-2">
+          <div className="flex justify-between gap-6"><dt className="text-xs leading-5 text-muted-foreground">{t('logs:beforeDiscount')}</dt><dd className="font-medium tabular-nums">{logMoney(row.original_amount_micro, locale)}</dd></div>
+          <div className="flex justify-between gap-6"><dt className="text-xs leading-5 text-muted-foreground">{t('logs:pricingDiscount')}</dt><dd className="font-medium tabular-nums">{logMoney(row.discount_micro, locale)}</dd></div>
+          {row.status === 30 && <div className="flex justify-between gap-6 text-info"><dt className="text-xs leading-5">{t('logs:refundAmount')}</dt><dd className="font-medium tabular-nums">{logMoney(row.amount_micro, locale)}</dd></div>}
         </dl>
-      </div>
+      </DetailAmount>
       <DetailSection icon={FileText} title={t('logs:requestInfo')}>
         <InfoGrid cols={2}>
           {field(t('logs:billingState'), <LogStatus row={row} />)}
@@ -51,6 +50,6 @@ export function LogDetail({ row, onClose, id, timezone }: { row: LogRow | null; 
       <LogPerformanceDetails row={row} />
       <TokenBreakdown usage={row.usage} recorded={row.usage_details_recorded} />
       <LogBillingDetails row={row} status={row.status} />
-    </div>
+    </DetailBody>
   </Drawer>
 }

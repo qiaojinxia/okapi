@@ -11,7 +11,8 @@
 
 use okapi_store::ChannelCandidate;
 use rand::RngExt;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 /// 池的选路策略。字符串来自库（CHECK 约束保证取值），未知值按默认处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,64 +43,178 @@ fn layer_key(c: &ChannelCandidate) -> LayerKey {
     (c.pool_rank, std::cmp::Reverse(c.priority))
 }
 
-/// 按 (pool_rank 升序, priority 降序) 分层。
-fn layer(candidates: Vec<ChannelCandidate>) -> Vec<(LayerKey, Vec<ChannelCandidate>)> {
-    let mut groups: Vec<(LayerKey, Vec<ChannelCandidate>)> = Vec::new();
-    for cand in candidates {
-        let key = layer_key(&cand);
-        match groups.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, bucket)) => bucket.push(cand),
-            None => groups.push((key, vec![cand])),
+/// Shared candidate snapshots remain borrowed until a wire attempt needs ownership.
+/// Only indices are filtered/reordered, so cached credentials/settings are not copied.
+pub struct CandidateQueue {
+    source: Arc<Vec<ChannelCandidate>>,
+    indices: Vec<usize>,
+}
+
+pub trait CandidateSet: Send + Sync {
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    fn iter(&self) -> impl Iterator<Item = &ChannelCandidate> + Send;
+    fn retain(&mut self, predicate: impl FnMut(&ChannelCandidate) -> bool);
+    fn sort_by_key<K: Ord>(&mut self, key: impl FnMut(&ChannelCandidate) -> K);
+}
+
+impl CandidateSet for Vec<ChannelCandidate> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn iter(&self) -> impl Iterator<Item = &ChannelCandidate> + Send {
+        self.as_slice().iter()
+    }
+    fn retain(&mut self, predicate: impl FnMut(&ChannelCandidate) -> bool) {
+        Vec::retain(self, predicate);
+    }
+    fn sort_by_key<K: Ord>(&mut self, key: impl FnMut(&ChannelCandidate) -> K) {
+        self.as_mut_slice().sort_by_key(key);
+    }
+}
+
+impl CandidateSet for CandidateQueue {
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+    fn iter(&self) -> impl Iterator<Item = &ChannelCandidate> + Send {
+        self.indices.iter().map(|&i| &self.source[i])
+    }
+    fn retain(&mut self, mut predicate: impl FnMut(&ChannelCandidate) -> bool) {
+        self.indices.retain(|&i| predicate(&self.source[i]));
+    }
+    fn sort_by_key<K: Ord>(&mut self, mut key: impl FnMut(&ChannelCandidate) -> K) {
+        self.indices.sort_by_key(|&i| key(&self.source[i]));
+    }
+}
+
+impl CandidateQueue {
+    pub fn weighted(source: Arc<Vec<ChannelCandidate>>) -> Self {
+        let indices = weighted_indices(&source);
+        Self { source, indices }
+    }
+    pub fn by_latency<S: std::hash::BuildHasher>(
+        source: Arc<Vec<ChannelCandidate>>,
+        latency: &HashMap<i64, u32, S>,
+    ) -> Self {
+        let indices = latency_indices(&source, latency);
+        Self { source, indices }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+    pub fn remove(&mut self, position: usize) -> usize {
+        self.indices.remove(position)
+    }
+    pub fn insert(&mut self, position: usize, index: usize) {
+        self.indices.insert(position, index);
+    }
+}
+
+impl IntoIterator for CandidateQueue {
+    type Item = ChannelCandidate;
+    type IntoIter = CandidateIter;
+    fn into_iter(self) -> Self::IntoIter {
+        CandidateIter {
+            source: self.source,
+            indices: self.indices.into_iter(),
         }
     }
-    groups.sort_by_key(|(key, _)| *key);
+}
+
+pub struct CandidateIter {
+    source: Arc<Vec<ChannelCandidate>>,
+    indices: std::vec::IntoIter<usize>,
+}
+impl Iterator for CandidateIter {
+    type Item = ChannelCandidate;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().map(|i| {
+            let mut candidate = self.source[i].clone();
+            // 候选快照会缓存几秒：轮换组在每次真正发出前重抽，而不是一个 TTL 内钉死一个出口
+            candidate.reroll_egress();
+            candidate
+        })
+    }
+}
+
+fn layers(candidates: &[ChannelCandidate]) -> BTreeMap<LayerKey, Vec<usize>> {
+    let mut groups: BTreeMap<LayerKey, Vec<usize>> = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        groups.entry(layer_key(candidate)).or_default().push(index);
+    }
     groups
 }
 
-pub fn order_candidates(candidates: Vec<ChannelCandidate>) -> Vec<ChannelCandidate> {
+#[allow(clippy::cast_precision_loss)] // i32 weight × 1000 is below 2^42, exactly representable.
+fn weighted_indices(candidates: &[ChannelCandidate]) -> Vec<usize> {
     let mut rng = rand::rng();
-    let mut ordered = Vec::new();
-    for (_, mut bucket) in layer(candidates) {
-        // 层内按权重不放回抽样
-        while !bucket.is_empty() {
-            let total: i64 = bucket.iter().map(effective_weight).sum();
-            let mut pick = rng.random_range(0..total);
-            let mut idx = 0;
-            for (i, cand) in bucket.iter().enumerate() {
-                pick -= effective_weight(cand);
-                if pick < 0 {
-                    idx = i;
-                    break;
-                }
-            }
-            ordered.push(bucket.swap_remove(idx));
-        }
+    // Independent exponential clocks give the same weighted sampling without
+    // replacement distribution as repeated draws, in O(n log n), not O(n²).
+    let mut scores: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| {
+            let uniform = 1.0 - rng.random::<f64>(); // (0,1], so ln is always finite.
+            (
+                layer_key(candidate),
+                -uniform.ln() / effective_weight(candidate) as f64,
+                i,
+            )
+        })
+        .collect();
+    scores.sort_unstable_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.total_cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    scores.into_iter().map(|(_, _, index)| index).collect()
+}
+
+fn latency_indices<S: std::hash::BuildHasher>(
+    candidates: &[ChannelCandidate],
+    latency: &HashMap<i64, u32, S>,
+) -> Vec<usize> {
+    let mut ordered = Vec::with_capacity(candidates.len());
+    for (_, mut bucket) in layers(candidates) {
+        let mut samples: Vec<_> = bucket
+            .iter()
+            .filter_map(|&i| latency.get(&candidates[i].channel_key_id).copied())
+            .collect();
+        samples.sort_unstable();
+        let fallback = samples.get(samples.len() / 2).copied().unwrap_or(0);
+        bucket.sort_by_key(|&i| {
+            latency
+                .get(&candidates[i].channel_key_id)
+                .copied()
+                .unwrap_or(fallback)
+        });
+        ordered.append(&mut bucket);
     }
     ordered
 }
 
-/// 层内按时延 EWMA 升序。`latency` 缺项的 key 用本层中位数参与排序：
-/// 给 0 会让新 key 抢下所有流量，给极大值会让它永远排不上——两者都不合理。
+fn move_ordered(candidates: Vec<ChannelCandidate>, indices: Vec<usize>) -> Vec<ChannelCandidate> {
+    let mut candidates: Vec<_> = candidates.into_iter().map(Some).collect();
+    indices
+        .into_iter()
+        .filter_map(|i| candidates[i].take())
+        .collect()
+}
+
+pub fn order_candidates(candidates: Vec<ChannelCandidate>) -> Vec<ChannelCandidate> {
+    let indices = weighted_indices(&candidates);
+    move_ordered(candidates, indices)
+}
+
 pub fn order_candidates_by_latency<S: std::hash::BuildHasher>(
     candidates: Vec<ChannelCandidate>,
     latency: &HashMap<i64, u32, S>,
 ) -> Vec<ChannelCandidate> {
-    let mut ordered = Vec::new();
-    for (_, mut bucket) in layer(candidates) {
-        let mut samples: Vec<u32> = bucket
-            .iter()
-            .filter_map(|c| latency.get(&c.channel_key_id).copied())
-            .collect();
-        samples.sort_unstable();
-        let fallback = if samples.is_empty() {
-            0
-        } else {
-            samples[samples.len() / 2]
-        };
-        bucket.sort_by_key(|c| latency.get(&c.channel_key_id).copied().unwrap_or(fallback));
-        ordered.append(&mut bucket);
-    }
-    ordered
+    let indices = latency_indices(&candidates, latency);
+    move_ordered(candidates, indices)
 }
 
 #[cfg(test)]
@@ -132,9 +247,11 @@ mod tests {
             api_version: None,
             aws_region: None,
             oauth_token_url: None,
-            mimic_cc: false,
-            mimic_cc_version: None,
+            extensions: serde_json::Value::Null,
             proxy_url: None,
+            egress_proxy_id: None,
+            egress_max_concurrency: None,
+            egress_rotation: None,
             extra_headers: Vec::new(),
             capabilities: serde_json::json!({}),
             cost_milli,
@@ -261,6 +378,35 @@ mod tests {
         assert!(
             pos_in(&b, 7) < pos_in(&b, 1000),
             "无样本 key 不得排到本层最慢 key 之后（取最大会这样，等于永远排不上）"
+        );
+    }
+
+    #[test]
+    fn cached_candidates_are_borrowed_until_attempted() {
+        let source = Arc::new(vec![cand(10, 1, 1000), cand(0, 1, 1000)]);
+        let mut queue = CandidateQueue::weighted(source.clone());
+        queue.retain(|candidate| candidate.priority == 10);
+        let reference = queue.iter().next().unwrap();
+        assert!(std::ptr::eq(reference, &raw const source[0]));
+        assert_eq!(Arc::strong_count(&source), 2);
+        let mut attempted = queue.into_iter().next().unwrap();
+        attempted.credential.push_str("-owned");
+        assert_ne!(source[0].credential, attempted.credential);
+    }
+    #[test]
+    fn weighted_race_preserves_weight_proportions_and_without_replacement() {
+        let source = Arc::new(vec![cand(0, 1, 1000), cand(0, 3, 1000)]);
+        let mut first_heavy = 0;
+        for _ in 0..5000 {
+            let queue = CandidateQueue::weighted(source.clone());
+            let weights: Vec<_> = queue.iter().map(|candidate| candidate.weight).collect();
+            assert_eq!(weights.len(), 2);
+            assert_eq!(weights.iter().sum::<i32>(), 4);
+            first_heavy += usize::from(weights[0] == 3);
+        }
+        assert!(
+            (3300..4200).contains(&first_heavy),
+            "heavy first {first_heavy}/5000"
         );
     }
 

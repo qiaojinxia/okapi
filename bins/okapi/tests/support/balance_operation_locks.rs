@@ -61,7 +61,7 @@ async fn check_operation_waits(refund: bool) {
     );
     let snapshot: i64 = sqlx::query_scalar("SELECT balance_micro FROM users WHERE id=$1")
         .bind(env.user_id)
-        .fetch_one(guard.connection())
+        .fetch_one(guard.connection().unwrap())
         .await
         .unwrap();
     assert_eq!(

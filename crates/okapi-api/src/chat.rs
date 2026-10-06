@@ -2,6 +2,7 @@
 
 use okapi_domain::{ModalitiesReported, TokenUsage};
 use serde::Deserialize;
+use std::borrow::Cow;
 
 /// 请求探针：解析失败即 400；未知字段全部保留在原始 body 中透传。
 #[derive(Debug, Clone, Deserialize)]
@@ -16,6 +17,9 @@ pub struct ChatRequestProbe {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub max_completion_tokens: Option<u32>,
+    /// 一次生成的候选条数：补全按条计费，预扣也要乘它。
+    #[serde(default)]
+    pub n: Option<u32>,
     #[serde(default)]
     pub messages: Vec<MessageProbe>,
     #[serde(default, deserialize_with = "tool_json")]
@@ -28,6 +32,9 @@ pub struct MessageProbe {
     pub role: String,
     #[serde(default)]
     pub content: serde_json::Value,
+    /// OpenAI assistant 消息里此前的工具调用（参数是下一轮的输入）。
+    #[serde(default)]
+    pub tool_calls: serde_json::Value,
 }
 
 impl ChatRequestProbe {
@@ -48,36 +55,70 @@ impl ChatRequestProbe {
             .sum()
     }
 
+    /// 预扣按条数估补全：缺省 1，显式 0 也按 1（上游会拒绝，不该因此少扣）。
+    #[must_use]
+    pub fn choices(&self) -> u32 {
+        self.n.unwrap_or(1).max(1)
+    }
+
     /// prompt 可见文本片段（分词估算输入）。
     #[must_use]
-    pub fn prompt_segments(&self) -> Vec<&str> {
+    pub fn prompt_segments(&self) -> Vec<Cow<'_, str>> {
         let mut out = Vec::with_capacity(self.messages.len());
         for m in &self.messages {
             push_text(&m.content, &mut out);
+            for call in m.tool_calls.as_array().into_iter().flatten() {
+                push_json(call.pointer("/function/arguments"), &mut out);
+            }
         }
         if !self.tools.is_empty() {
-            out.push(&self.tools);
+            out.push(Cow::Borrowed(&self.tools));
         }
         out
     }
 }
 
-/// 把可见文本片段借出来交给分词器。
-/// 返回借用而非拼接的 String——prompt 可以很大，热路径上不该多一次整段拷贝。
-fn push_text<'a>(value: &'a serde_json::Value, out: &mut Vec<&'a str>) {
+/// 把可见文本片段交给分词器：文本借用，只有结构化的工具参数才序列化成新串。
+/// prompt 可以很大，热路径上不该为纯文本多一次整段拷贝。
+fn push_text<'a>(value: &'a serde_json::Value, out: &mut Vec<Cow<'a, str>>) {
     match value {
-        serde_json::Value::String(s) => out.push(s),
+        serde_json::Value::String(s) => out.push(Cow::Borrowed(s)),
         serde_json::Value::Array(parts) => {
             for part in parts {
-                if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                    out.push(t);
-                }
+                push_part(part, out);
             }
         }
         serde_json::Value::Null
         | serde_json::Value::Bool(_)
         | serde_json::Value::Number(_)
         | serde_json::Value::Object(_) => {}
+    }
+}
+
+/// 一个内容块。工具往返也是输入：智能体的上下文大半是工具结果（文件内容、命令输出）
+/// 和此前的调用参数，只数文本块会把这类请求的预扣与兜底计费低估一个数量级。
+fn push_part<'a>(part: &'a serde_json::Value, out: &mut Vec<Cow<'a, str>>) {
+    if let Some(text) = part.get("text").and_then(serde_json::Value::as_str) {
+        out.push(Cow::Borrowed(text));
+        return;
+    }
+    match part.get("type").and_then(serde_json::Value::as_str) {
+        Some("tool_result") => {
+            if let Some(content) = part.get("content") {
+                push_text(content, out);
+            }
+        }
+        Some("tool_use" | "server_tool_use") => push_json(part.get("input"), out),
+        _ => {}
+    }
+}
+
+/// 工具参数：字符串原样借用，结构化值按 JSON 文本计。
+fn push_json<'a>(value: Option<&'a serde_json::Value>, out: &mut Vec<Cow<'a, str>>) {
+    match value {
+        Some(serde_json::Value::String(s)) => out.push(Cow::Borrowed(s)),
+        Some(serde_json::Value::Null) | None => {}
+        Some(value) => out.push(Cow::Owned(value.to_string())),
     }
 }
 
@@ -124,16 +165,16 @@ impl MessagesRequestProbe {
             .sum()
     }
 
-    /// prompt 可见文本片段（含顶层 system）。
+    /// prompt 可见文本片段（含顶层 system；tool_use / tool_result 块由 `push_part` 计入）。
     #[must_use]
-    pub fn prompt_segments(&self) -> Vec<&str> {
+    pub fn prompt_segments(&self) -> Vec<Cow<'_, str>> {
         let mut out = Vec::with_capacity(self.messages.len() + 1);
         push_text(&self.system, &mut out);
         for m in &self.messages {
             push_text(&m.content, &mut out);
         }
         if !self.tools.is_empty() {
-            out.push(&self.tools);
+            out.push(Cow::Borrowed(&self.tools));
         }
         out
     }
@@ -154,6 +195,9 @@ pub struct ResponsesRequestProbe {
     /// Responses 与 chat 同样接受 service_tier（tier 计费轴输入；直转时随体透传）。
     #[serde(default)]
     pub service_tier: Option<String>,
+    /// 后台模式：上游先回「排队中」、不带用量，生成在请求结束后继续。
+    #[serde(default)]
+    pub background: Option<bool>,
     #[serde(default, deserialize_with = "tool_json")]
     pub tools: String,
 }
@@ -173,12 +217,12 @@ impl ResponsesRequestProbe {
             .sum()
     }
 
-    /// prompt 可见文本片段（instructions + input，含 input 项内嵌 content）。
+    /// prompt 可见文本片段（instructions + input，含 input 项内嵌 content 与工具往返）。
     #[must_use]
-    pub fn prompt_segments(&self) -> Vec<&str> {
+    pub fn prompt_segments(&self) -> Vec<Cow<'_, str>> {
         let mut out = Vec::new();
         if let Some(s) = self.instructions.as_deref() {
-            out.push(s);
+            out.push(Cow::Borrowed(s));
         }
         push_text(&self.input, &mut out);
         if let serde_json::Value::Array(items) = &self.input {
@@ -186,10 +230,20 @@ impl ResponsesRequestProbe {
                 if let Some(c) = item.get("content") {
                     push_text(c, &mut out);
                 }
+                match item.get("type").and_then(serde_json::Value::as_str) {
+                    Some("function_call") => push_json(item.get("arguments"), &mut out),
+                    Some("custom_tool_call") => push_json(item.get("input"), &mut out),
+                    Some("function_call_output" | "custom_tool_call_output") => {
+                        if let Some(output) = item.get("output") {
+                            push_text(output, &mut out);
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         if !self.tools.is_empty() {
-            out.push(&self.tools);
+            out.push(Cow::Borrowed(&self.tools));
         }
         out
     }
@@ -201,6 +255,7 @@ impl ResponsesRequestProbe {
             serde_json::Value::String(s) => vec![MessageProbe {
                 role: "user".to_owned(),
                 content: serde_json::Value::String(s.clone()),
+                tool_calls: serde_json::Value::Null,
             }],
             serde_json::Value::Array(items) => items
                 .iter()
@@ -211,6 +266,7 @@ impl ResponsesRequestProbe {
                         .unwrap_or("user")
                         .to_owned(),
                     content: i.get("content").cloned().unwrap_or(serde_json::Value::Null),
+                    tool_calls: serde_json::Value::Null,
                 })
                 .collect(),
             _ => Vec::new(),
@@ -225,9 +281,9 @@ pub struct GeminiRequestProbe {
     #[serde(default)]
     pub contents: Vec<GeminiContentProbe>,
     /// `systemInstruction`（camelCase）与 `system_instruction`（snake_case）官方都收。
-    #[serde(default, alias = "system_instruction")]
+    #[serde(default, rename = "systemInstruction", alias = "system_instruction")]
     pub system_instruction: Option<GeminiContentProbe>,
-    #[serde(default, alias = "generation_config")]
+    #[serde(default, rename = "generationConfig", alias = "generation_config")]
     pub generation_config: Option<GeminiGenerationConfigProbe>,
     #[serde(default, deserialize_with = "tool_json")]
     pub tools: String,
@@ -243,8 +299,11 @@ pub struct GeminiContentProbe {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GeminiGenerationConfigProbe {
-    #[serde(default, alias = "max_output_tokens")]
+    #[serde(default, rename = "maxOutputTokens", alias = "max_output_tokens")]
     pub max_output_tokens: Option<u32>,
+    /// 候选条数：每条都按补全计费。
+    #[serde(default, rename = "candidateCount", alias = "candidate_count")]
+    pub candidate_count: Option<u32>,
 }
 
 impl GeminiRequestProbe {
@@ -264,19 +323,40 @@ impl GeminiRequestProbe {
             .sum()
     }
 
-    /// prompt 可见文本片段（systemInstruction 在前）。
+    /// 预扣按候选条数估补全（缺省 1）。
     #[must_use]
-    pub fn prompt_segments(&self) -> Vec<&str> {
+    pub fn choices(&self) -> u32 {
+        self.generation_config
+            .as_ref()
+            .and_then(|c| c.candidate_count)
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    /// prompt 可见文本片段（systemInstruction 在前；functionCall / functionResponse 计入）。
+    #[must_use]
+    pub fn prompt_segments(&self) -> Vec<Cow<'_, str>> {
         let mut out = Vec::new();
         for c in self.system_instruction.iter().chain(self.contents.iter()) {
             for part in &c.parts {
                 if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                    out.push(t);
+                    out.push(Cow::Borrowed(t));
                 }
+                // REST 的 camelCase 与 proto 的 snake_case 官方都收
+                push_json(
+                    part.pointer("/functionCall/args")
+                        .or_else(|| part.pointer("/function_call/args")),
+                    &mut out,
+                );
+                push_json(
+                    part.pointer("/functionResponse/response")
+                        .or_else(|| part.pointer("/function_response/response")),
+                    &mut out,
+                );
             }
         }
         if !self.tools.is_empty() {
-            out.push(&self.tools);
+            out.push(Cow::Borrowed(&self.tools));
         }
         out
     }
@@ -300,6 +380,7 @@ impl GeminiRequestProbe {
                         .map(|t| serde_json::json!({"type": "text", "text": t}))
                         .collect(),
                 ),
+                tool_calls: serde_json::Value::Null,
             })
             .collect()
     }
@@ -308,6 +389,7 @@ impl GeminiRequestProbe {
 /// OpenAI usage 探针；缺失轴由标记保留，不能把占位零当作实报。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct UsageProbe {
+    pub server_tool_usage: Option<okapi_domain::ServerToolUsage>,
     pub missing_prompt: bool,
     pub missing_completion: bool,
     pub prompt_tokens: u32,
@@ -321,7 +403,7 @@ pub struct UsageProbe {
 /// 字段名与 OpenAI 官方 `prompt_tokens_details` 一致（openai-python
 /// `completion_usage.py`），故 OpenAI 系响应可直接反序列化。
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
-#[serde(from = "RawPromptTokensDetails")]
+#[serde(try_from = "RawPromptTokensDetails")]
 pub struct PromptTokensDetails {
     pub cached_tokens: u32,
     /// 兼容扩展：缓存写入；Anthropic 由 cache_creation_input_tokens 映射。
@@ -371,36 +453,124 @@ impl ModalTokensDetails {
 struct RawPromptTokensDetails {
     #[serde(rename = "cached_tokens")]
     cached: Option<u32>,
+    cache_read_input_tokens: Option<u32>,
+    cache_read_tokens: Option<u32>,
+    prompt_cache_hit_tokens: Option<u32>,
     #[serde(rename = "cache_write_tokens")]
     cache_write: Option<u32>,
+    cache_creation_input_tokens: Option<u32>,
+    created_cache_tokens: Option<u32>,
+    cached_creation_tokens: Option<u32>,
+    cache_creation_tokens: Option<u32>,
+    cache_write_input_tokens: Option<u32>,
+    cache_creation: Option<serde_json::Map<String, serde_json::Value>>,
     cache_write_5m_tokens: Option<u32>,
     cache_write_1h_tokens: Option<u32>,
+    claude_cache_creation_5_m_tokens: Option<u32>,
+    claude_cache_creation_1_h_tokens: Option<u32>,
     #[serde(rename = "audio_tokens")]
     audio: Option<u32>,
     #[serde(rename = "image_tokens")]
     image: Option<u32>,
     cached_tokens_details: Option<ModalTokensDetails>,
+    audio_cached_tokens: Option<u32>,
     cache_write_tokens_details: Option<ModalTokensDetails>,
 }
 
-impl From<RawPromptTokensDetails> for PromptTokensDetails {
-    fn from(raw: RawPromptTokensDetails) -> Self {
-        Self {
-            cached_tokens: raw.cached.unwrap_or(0),
-            cache_write_tokens: raw.cache_write.unwrap_or(0),
-            cache_write_5m_tokens: raw.cache_write_5m_tokens,
-            cache_write_1h_tokens: raw.cache_write_1h_tokens,
-            cache_read_reported: raw.cached.is_some(),
-            cache_write_reported: raw.cache_write.is_some(),
+#[derive(Deserialize)]
+struct CacheCreationDetails {
+    ephemeral_5m_input_tokens: Option<u32>,
+    ephemeral_1h_input_tokens: Option<u32>,
+}
+
+pub(super) fn cache_counter(values: &[Option<u32>]) -> Result<Option<u32>, &'static str> {
+    let mut observed = None;
+    for value in values.iter().copied().flatten() {
+        if observed.is_some_and(|previous| previous != value) {
+            return Err("conflicting_cache_counters");
+        }
+        observed = Some(value);
+    }
+    Ok(observed)
+}
+
+impl TryFrom<RawPromptTokensDetails> for PromptTokensDetails {
+    type Error = &'static str;
+
+    fn try_from(raw: RawPromptTokensDetails) -> Result<Self, Self::Error> {
+        let cached = cache_counter(&[
+            raw.cached,
+            raw.cache_read_input_tokens,
+            raw.cache_read_tokens,
+            raw.prompt_cache_hit_tokens,
+        ])?;
+        // Qwen and vLLM report the same input subset under different names.
+        // Matching mirrors are one observation; conflicting mirrors are invalid.
+        let cache_write = cache_counter(&[
+            raw.cache_write,
+            raw.cache_creation_input_tokens,
+            raw.created_cache_tokens,
+            raw.cached_creation_tokens,
+            raw.cache_creation_tokens,
+            raw.cache_write_input_tokens,
+        ])?;
+        let creation = raw
+            .cache_creation
+            .map(|value| {
+                serde_json::from_value::<CacheCreationDetails>(serde_json::Value::Object(value))
+                    .map_err(|_| "invalid_cache_creation_details")
+            })
+            .transpose()?
+            .filter(|d| {
+                d.ephemeral_5m_input_tokens.is_some() || d.ephemeral_1h_input_tokens.is_some()
+            });
+        // A supplied native TTL breakdown must cover the aggregate; validate()
+        // rejects partial/contradictory totals. An omitted breakdown stays unknown.
+        let short = cache_counter(&[
+            raw.cache_write_5m_tokens,
+            raw.claude_cache_creation_5_m_tokens
+                .filter(|n| *n > 0 || cache_write.is_some()),
+            creation
+                .as_ref()
+                .map(|d| d.ephemeral_5m_input_tokens.unwrap_or(0)),
+        ])?;
+        let long = cache_counter(&[
+            raw.cache_write_1h_tokens,
+            raw.claude_cache_creation_1_h_tokens
+                .filter(|n| *n > 0 || cache_write.is_some()),
+            creation
+                .as_ref()
+                .map(|d| d.ephemeral_1h_input_tokens.unwrap_or(0)),
+        ])?;
+        // Ark reports cached audio as a subset of cached_tokens, never an
+        // additional cache hit. Preserve explicit zero and reject conflicting mirrors.
+        let mut cached_details = raw.cached_tokens_details;
+        if let Some(audio) = raw.audio_cached_tokens {
+            if raw.image.unwrap_or(0) > 0
+                && cached_details.is_none_or(|d| d.image_tokens.is_none())
+                && cached != Some(audio)
+            {
+                return Err("ambiguous_cache_image_intersection");
+            }
+            let details = cached_details.get_or_insert_with(ModalTokensDetails::default);
+            details.audio_tokens = cache_counter(&[details.audio_tokens, Some(audio)])?;
+        }
+        Ok(Self {
+            cached_tokens: cached.unwrap_or(0),
+            cache_write_tokens: cache_write.unwrap_or(0),
+            cache_write_5m_tokens: short,
+            cache_write_1h_tokens: long,
+            cache_read_reported: cached.is_some(),
+            cache_write_reported: cache_write.is_some(),
             audio_tokens: raw.audio.unwrap_or(0),
             image_tokens: raw.image.unwrap_or(0),
             modalities_reported: ModalitiesReported {
                 audio: raw.audio.is_some(),
                 image: raw.image.is_some(),
             },
-            cached_tokens_details: raw.cached_tokens_details,
+            cached_tokens_details: cached_details,
             cache_write_tokens_details: raw.cache_write_tokens_details,
-        }
+        })
     }
 }
 
@@ -518,6 +688,13 @@ impl UsageProbe {
         if self.invalid || previous.with_estimates(0, 0).is_err() {
             return Self::invalid();
         }
+        self.server_tool_usage = match (self.server_tool_usage, previous.server_tool_usage) {
+            (Some(next), Some(before)) => match next.with_previous(before) {
+                Ok(tools) => Some(tools),
+                Err(_) => return Self::invalid(),
+            },
+            (next, before) => next.or(before),
+        };
         if self.missing_prompt && !previous.missing_prompt {
             self.prompt_tokens = previous.prompt_tokens;
             self.missing_prompt = false;
@@ -570,6 +747,9 @@ impl UsageProbe {
             "prompt_tokens_details": self.prompt_tokens_details.cache_json(),
             "completion_tokens_details": self.completion_tokens_details.to_json(),
         });
+        if let Some(tools) = self.server_tool_usage {
+            value["server_tool_usage"] = serde_json::json!(tools);
+        }
         if !self.missing_prompt {
             value["prompt_tokens"] = self.prompt_tokens.into();
         }
@@ -618,12 +798,24 @@ impl CompletionTokensDetails {
 }
 
 /// 流式 chunk 探针：识别首个内容事件与随流 usage。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ChunkProbe {
-    #[serde(default)]
     pub choices: Vec<ChunkChoice>,
-    #[serde(default)]
     pub usage: Option<UsageProbe>,
+}
+
+impl<'de> Deserialize<'de> for ChunkProbe {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let choices = value
+            .get("choices")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        Ok(Self {
+            choices: serde_json::from_value(choices).map_err(serde::de::Error::custom)?,
+            usage: crate::usage_from_chat(&value),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -659,10 +851,12 @@ impl ChunkProbe {
         })
     }
 
-    /// 本 chunk 的可见内容字符数（无 usage 时的补全估算输入）。
+    /// 本 chunk 的产出字符数（无 usage 时的补全估算输入）：正文、推理、拒答，以及
+    /// 工具调用参数——纯工具调用的流若在 usage 帧前中断，不数参数就只记 1 个补全 token。
     #[must_use]
     pub fn content_chars(&self) -> usize {
-        self.choices
+        let text: usize = self
+            .choices
             .iter()
             .flat_map(|c| {
                 [
@@ -674,7 +868,67 @@ impl ChunkProbe {
                 .flatten()
             })
             .map(|s| s.chars().count())
-            .sum()
+            .sum();
+        let arguments: usize = self
+            .choices
+            .iter()
+            .filter_map(|c| c.delta.tool_calls.as_ref()?.as_array())
+            .flatten()
+            .filter_map(|call| call.pointer("/function/arguments")?.as_str())
+            .map(|s| s.chars().count())
+            .sum();
+        text.saturating_add(arguments)
+    }
+}
+
+#[cfg(test)]
+mod gemini_admission_fields_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_camel_case_and_snake_case_preserve_caps_and_system_input() {
+        for (config, cap, system) in [
+            ("generationConfig", "maxOutputTokens", "systemInstruction"),
+            (
+                "generation_config",
+                "max_output_tokens",
+                "system_instruction",
+            ),
+            (
+                "generationConfig",
+                "max_output_tokens",
+                "system_instruction",
+            ),
+            ("generation_config", "maxOutputTokens", "systemInstruction"),
+        ] {
+            let mut body = json!({"contents":[{"role":"user","parts":[{"text":"hi"}]}]});
+            body[config] = json!({cap:512});
+            body[system] = json!({"parts":[{"text":"System admission input"}]});
+            let probe: GeminiRequestProbe = serde_json::from_value(body).unwrap();
+            assert_eq!(probe.completion_cap_req(), Some(512), "{config}.{cap}");
+            assert_eq!(
+                probe.prompt_segments(),
+                vec!["System admission input", "hi"]
+            );
+            assert_eq!(probe.prompt_chars(), 24);
+        }
+    }
+
+    #[test]
+    fn malformed_caps_are_rejected_for_both_field_styles() {
+        for (config, cap) in [
+            ("generationConfig", "maxOutputTokens"),
+            ("generation_config", "max_output_tokens"),
+        ] {
+            for invalid in [json!(-1), json!(4_294_967_296_u64), json!("512"), json!([])] {
+                let body = json!({config:{cap:invalid}});
+                assert!(
+                    serde_json::from_value::<GeminiRequestProbe>(body).is_err(),
+                    "{config}.{cap}"
+                );
+            }
+        }
     }
 }
 
@@ -701,5 +955,95 @@ mod third_review_tests {
                 .unwrap();
         assert!(chunk.has_output());
         assert_eq!(chunk.content_chars(), 8);
+    }
+}
+
+#[cfg(test)]
+mod tool_traffic_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn joined(segments: &[Cow<'_, str>]) -> String {
+        segments.concat()
+    }
+
+    #[test]
+    fn tool_results_and_arguments_are_prompt_input() {
+        let chat: ChatRequestProbe = serde_json::from_value(json!({
+            "model": "m", "n": 3,
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "c", "type": "function",
+                    "function": {"name": "read", "arguments": "{\"path\":\"a.rs\"}"}}]},
+                {"role": "tool", "tool_call_id": "c", "content": "fn main() {}"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(chat.choices(), 3);
+        let text = joined(&chat.prompt_segments());
+        assert!(text.contains("a.rs") && text.contains("fn main"), "{text}");
+
+        let messages: MessagesRequestProbe = serde_json::from_value(json!({
+            "model": "m", "max_tokens": 10,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t", "name": "read", "input": {"path": "b.rs"}}]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t",
+                        "content": [{"type": "text", "text": "struct B;"}]},
+                    {"type": "tool_result", "tool_use_id": "u", "content": "plain result"}]}
+            ]
+        }))
+        .unwrap();
+        let text = joined(&messages.prompt_segments());
+        for needle in ["b.rs", "struct B;", "plain result"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+
+        let responses: ResponsesRequestProbe = serde_json::from_value(json!({
+            "model": "m",
+            "input": [
+                {"type": "function_call", "call_id": "c", "name": "read",
+                    "arguments": "{\"path\":\"c.rs\"}"},
+                {"type": "function_call_output", "call_id": "c", "output": "enum C {}"},
+                {"type": "custom_tool_call", "call_id": "d", "name": "apply_patch",
+                    "input": "*** patch"},
+                {"type": "custom_tool_call_output", "call_id": "d", "output": "applied"}
+            ]
+        }))
+        .unwrap();
+        let text = joined(&responses.prompt_segments());
+        for needle in ["c.rs", "enum C", "*** patch", "applied"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+
+        let gemini: GeminiRequestProbe = serde_json::from_value(json!({
+            "generationConfig": {"candidateCount": 2},
+            "contents": [
+                {"role": "model", "parts": [{"functionCall": {"name": "read", "args": {"path": "d.rs"}}}]},
+                {"role": "user", "parts": [{"function_response": {"name": "read",
+                    "response": {"text": "mod d;"}}}]}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(gemini.choices(), 2);
+        let text = joined(&gemini.prompt_segments());
+        assert!(text.contains("d.rs") && text.contains("mod d;"), "{text}");
+    }
+
+    #[test]
+    fn streamed_tool_arguments_count_as_generated_output() {
+        let probe: ChunkProbe = serde_json::from_value(json!({"choices": [{"index": 0, "delta": {
+            "tool_calls": [{"index": 0, "function": {"arguments": "{\"x\":1}"}}]}}]}))
+        .unwrap();
+        assert!(probe.has_output());
+        assert_eq!(probe.content_chars(), 7);
+    }
+
+    #[test]
+    fn choice_counts_default_to_one() {
+        let chat: ChatRequestProbe = serde_json::from_value(json!({"model": "m", "n": 0})).unwrap();
+        assert_eq!(chat.choices(), 1);
+        let gemini: GeminiRequestProbe = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(gemini.choices(), 1);
     }
 }

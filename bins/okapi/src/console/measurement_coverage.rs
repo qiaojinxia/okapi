@@ -61,18 +61,11 @@ pub(super) fn fast_source(
 fn counts(keys: &str, table: &str, predicate: &str, raw: bool) -> String {
     let (time, count) = if raw {
         ("toStartOfHour(ts) AS hour", "count()")
-    } else if matches!(
-        table,
-        "mv_usage_sources_5min"
-            | "mv_token_details_5min"
-            | "mv_cache_ttl_5min"
-            | "mv_cache_totals_5min"
-            | "mv_input_units_5min"
-            | "mv_output_rate_5min"
-    ) {
-        ("toStartOfHour(ts5) AS hour", "countMerge(requests)")
     } else {
-        ("toDate(hour) AS day", "countMerge(requests)")
+        (
+            super::observation_sources::Grain::for_table(table).time_sql(),
+            "countMerge(requests)",
+        )
     };
     format!(
         "WITH {time} SELECT toJSONString(tuple({keys})) AS grain, {count} AS n FROM {table} WHERE {predicate} GROUP BY {keys}"
@@ -122,17 +115,11 @@ impl Coverage {
             ("detail", format!("{KEYS}, {DIMS}"), "mv_analysis_hour"),
             ("legacy", KEYS.to_owned(), "mv_cube_hour"),
         ] {
-            for (kind, table) in [
-                ("expected", expected),
-                ("ttft", "mv_ttft_reporting_hour"),
-                ("latency", "mv_latency_reporting_hour"),
-                ("usage", "mv_usage_sources_5min"),
-                ("details", "mv_token_details_5min"),
-                ("ttl", "mv_cache_ttl_5min"),
-                ("cache", "mv_cache_totals_5min"),
-                ("units", "mv_input_units_5min"),
-                ("output_rate", "mv_output_rate_5min"),
-            ] {
+            for (kind, table) in std::iter::once(("expected", expected)).chain(
+                super::observation_sources::SOURCES
+                    .iter()
+                    .map(|source| (source.name, source.table)),
+            ) {
                 let query = counts(&keys, table, predicate, false);
                 branches.push(format!(
                     "SELECT '{level}' AS level, '{kind}' AS kind, grain, n FROM ({query})"

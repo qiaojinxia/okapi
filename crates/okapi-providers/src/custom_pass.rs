@@ -60,6 +60,7 @@ impl PassUpstream {
         let outbound = Outbound {
             proxy_url: req.proxy_url,
             extra_headers: req.extra_headers,
+            ..Default::default()
         };
         let builder = if probe {
             self.http.probe(&outbound, req.method, req.url)?
@@ -94,17 +95,19 @@ impl PassUpstream {
                 stream: Box::pin(stream),
             })
         } else {
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+                .await
+                .unwrap_or_default();
             Ok(PassResponse::ErrStatus { status, body })
         }
     }
 }
 
 fn classify(e: &reqwest::Error) -> UpstreamError {
-    if e.is_timeout() {
+    if let Some(unreachable) = UpstreamError::connect_phase(e) {
+        unreachable
+    } else if e.is_timeout() {
         UpstreamError::Timeout
-    } else if e.is_connect() {
-        UpstreamError::Connect(e.to_string())
     } else {
         UpstreamError::Stream(e.to_string())
     }

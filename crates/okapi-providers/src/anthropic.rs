@@ -64,16 +64,24 @@ impl AnthropicUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
         let url = format!("{}/messages", api_base.trim_end_matches('/'));
+        let prepared = crate::profiles::prepare_anthropic(body, stream, false, outbound, None)?;
+        let mut headers = vec![
+            ("x-api-key", credential),
+            ("anthropic-version", ANTHROPIC_VERSION),
+        ];
+        headers.extend(
+            prepared
+                .headers
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str())),
+        );
         send_messages_at(
             &self.http,
             url,
-            &[
-                ("x-api-key", credential),
-                ("anthropic-version", ANTHROPIC_VERSION),
-            ],
-            body,
+            &headers,
+            prepared.body,
             stream,
-            outbound,
+            &prepared.outbound,
         )
         .await
     }
@@ -87,27 +95,32 @@ impl AnthropicUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<Bytes, UpstreamError> {
         let url = format!("{}/messages/count_tokens", api_base.trim_end_matches('/'));
-        let resp = self
+        let prepared = crate::profiles::prepare_anthropic(body, false, true, outbound, None)?;
+        let mut req = self
             .http
-            .post(outbound, url)?
+            .post(&prepared.outbound, url)?
             .header("x-api-key", credential)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .timeout(NON_STREAM_TIMEOUT)
-            .body(body.to_vec())
-            .send()
-            .await
-            .map_err(|e| classify(&e))?;
+            .body(prepared.body);
+        for (name, value) in prepared.headers {
+            req = req.header(name.as_str(), value.as_str());
+        }
+        let resp = req.send().await.map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         if !(200..300).contains(&status) {
+            let retry_after_secs = crate::retry_after::seconds(resp.headers());
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+                .await
+                .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
-                retry_after_secs: None,
+                retry_after_secs,
             });
         }
-        Ok(body)
+        crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
     }
 }
 
@@ -131,7 +144,7 @@ pub async fn send_messages_at(
     let mut req = http
         .post(outbound, url)?
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_vec());
+        .body(body.clone());
     for (name, value) in auth_headers {
         req = req.header(*name, *value);
     }
@@ -149,7 +162,9 @@ pub async fn send_messages_at(
 
     if !(200..300).contains(&status) {
         let retry_after_secs = retry_after_secs(resp.headers());
-        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+            .await
+            .unwrap_or_default();
         return Err(UpstreamError::Status {
             status,
             body,
@@ -252,10 +267,10 @@ impl MetaScanner {
 }
 
 pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
-    if e.is_timeout() {
+    if let Some(unreachable) = UpstreamError::connect_phase(e) {
+        unreachable
+    } else if e.is_timeout() {
         UpstreamError::Timeout
-    } else if e.is_connect() {
-        UpstreamError::Connect(e.to_string())
     } else {
         UpstreamError::Stream(e.to_string())
     }

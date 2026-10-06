@@ -44,7 +44,7 @@ struct TestEnv {
 }
 
 async fn setup(subject: &str) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -87,7 +87,60 @@ async fn setup(subject: &str) -> TestEnv {
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('site_url',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(json!(format!("http://{addr}"))).execute(&pg).await.unwrap();
     TestEnv { pg, addr }
+}
+
+#[tokio::test]
+async fn oauth_requires_configured_site_url_and_ignores_host_headers() {
+    let env = setup(&format!("canonical-{}", Uuid::new_v4())).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let url = format!("http://{}/auth/oauth/mockhub", env.addr);
+    let response = client
+        .get(&url)
+        .header("host", "evil.example")
+        .header("x-forwarded-host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 302);
+    let location = response.headers()["location"].to_str().unwrap();
+    assert!(location.contains(&format!(
+        "redirect_uri=http://{}/auth/oauth/mockhub/callback",
+        env.addr
+    )));
+    assert!(!location.contains("evil.example"));
+    sqlx::query("DELETE FROM settings WHERE key='site_url'")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let response = client
+        .get(&url)
+        .header("host", "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 500);
+    assert!(response.headers().get("location").is_none());
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["param"], "site_url_required");
+    for value in [
+        "https://evil@example.com",
+        "javascript:alert(1)",
+        "https://example.com/?q=1",
+        "https://example.com/#fragment",
+    ] {
+        sqlx::query("INSERT INTO settings(key,value) VALUES ('site_url',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").bind(json!(value)).execute(&env.pg).await.unwrap();
+        assert_eq!(
+            client.get(&url).send().await.unwrap().status(),
+            500,
+            "{value}"
+        );
+    }
 }
 
 /// 完整授权码流：start 302 → callback → cookie → 兑 key；幂等绑定；state 一次性。

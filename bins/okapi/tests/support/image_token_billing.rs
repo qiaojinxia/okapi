@@ -391,9 +391,11 @@ async fn token_pricing_preserves_group_user_rules_cost_and_monthly_usage() {
 }
 
 #[tokio::test]
-async fn tiered_images_use_actual_response_total_for_price_band() {
+async fn tiered_images_use_actual_response_input_for_price_band() {
     let mut env = token_env().await;
-    sqlx::query("UPDATE model_pricing SET pricing_mode='tiered',tier_expr='0:5,250:10' WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
+    // 阶梯按请求输入落档（与官方长上下文计价一致）：实际响应的输入 100（文本 20 + 图片 80）
+    // 达到高档起点，输出 200 不参与选档。
+    sqlx::query("UPDATE model_pricing SET pricing_mode='tiered',tier_expr='0:5,100:10' WHERE model_id=(SELECT id FROM models WHERE model_name=$1)")
         .bind(&env.model).execute(&env.state.pg).await.unwrap();
     published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(

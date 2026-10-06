@@ -6,6 +6,87 @@ use okapi_pricing::PricingError;
 use okapi_store::StoreError;
 use uuid::Uuid;
 
+pub(crate) fn stream_error_event(
+    ingress: super::ingress::Ingress,
+    error: &AppError,
+    request_id: Uuid,
+    sequence: Option<u64>,
+) -> axum::response::sse::Event {
+    axum::response::sse::Event::default()
+        .event("error")
+        .data(stream_error_payload(ingress, error, request_id, sequence).to_string())
+}
+
+fn stream_error_payload(
+    ingress: super::ingress::Ingress,
+    error: &AppError,
+    request_id: Uuid,
+    sequence: Option<u64>,
+) -> serde_json::Value {
+    use super::ingress::Ingress;
+    use serde_json::json;
+    match ingress {
+        Ingress::Responses | Ingress::ResponsesCompact => json!({
+            "type":"error", "code":error.code, "message":error.code, "param":error.param,
+            "request_id":request_id, "sequence_number":sequence.unwrap_or(0),
+        }),
+        Ingress::Anthropic => json!({
+            "type":"error", "error":{"type":error.code,"message":error.code,"param":error.param},
+            "request_id":request_id,
+        }),
+        Ingress::Gemini => json!({
+            "error":{"code":error.status.as_u16(),"message":error.code,
+                "status":gemini_status_name(error.status),"param":error.param},
+            "request_id":request_id,
+        }),
+        Ingress::OpenAi => {
+            let body = ErrorBody::new(
+                &error.code,
+                error.param.clone(),
+                Some(request_id.to_string()),
+            );
+            json!({"error":body.error,"request_id":request_id})
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    use super::*;
+    use crate::gateway::ingress::Ingress;
+
+    #[test]
+    fn stream_errors_follow_each_ingress_protocol() {
+        let id = Uuid::new_v4();
+        let error =
+            AppError::new(StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT).with_param("idle");
+        for ingress in Ingress::ALL {
+            let payload = stream_error_payload(ingress, &error, id, Some(17));
+            assert_eq!(payload["request_id"], id.to_string());
+            match ingress {
+                Ingress::Responses | Ingress::ResponsesCompact => {
+                    assert_eq!(payload["type"], "error");
+                    assert_eq!(payload["code"], codes::UPSTREAM_TIMEOUT);
+                    assert_eq!(payload["sequence_number"], 17);
+                }
+                Ingress::Anthropic => {
+                    assert_eq!(payload["type"], "error");
+                    assert_eq!(payload["error"]["type"], codes::UPSTREAM_TIMEOUT);
+                }
+                Ingress::Gemini => {
+                    assert_eq!(payload["error"]["code"], 504);
+                    assert_eq!(payload["error"]["status"], "DEADLINE_EXCEEDED");
+                }
+                Ingress::OpenAi => {
+                    assert_eq!(payload["error"]["code"], codes::UPSTREAM_TIMEOUT);
+                    assert_eq!(payload["error"]["type"], "okapi_error");
+                    assert_eq!(payload["error"]["request_id"], id.to_string());
+                }
+            }
+        }
+    }
+}
+
 /// gateway 统一错误：只携带 error_code（i18n 红线），状态码映射集中于此。
 #[derive(Debug)]
 pub struct AppError {
@@ -187,6 +268,9 @@ impl From<LedgerError> for AppError {
             LedgerError::KeyQuotaExceeded => {
                 Self::new(StatusCode::TOO_MANY_REQUESTS, codes::KEY_QUOTA_EXCEEDED)
             }
+            // 同一账户的账本操作排队过长：未预扣、未改账，客户端退避重试即可
+            LedgerError::UserBusy => Self::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
+                .with_param("account_busy"),
             // 业务冲突（§11.28 激活期内换套餐）：409 + 当前套餐码
             LedgerError::SubscriptionActive(plan_code) => {
                 Self::new(StatusCode::CONFLICT, "subscription_active").with_param(plan_code)
@@ -209,6 +293,9 @@ impl From<PricingError> for AppError {
         match err {
             PricingError::UnknownModel(_) => {
                 Self::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND)
+            }
+            PricingError::MissingServerToolUsage | PricingError::InvalidServerToolAdmission(_) => {
+                Self::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
             }
             PricingError::UnknownGroup(_) => {
                 tracing::error!(error = %err, "pricing group missing");

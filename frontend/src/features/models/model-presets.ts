@@ -8,6 +8,8 @@ export type PresetNotice = 'gpt6' | 'gpt61Tools' | 'gpt6Tools' | 'gemini' | 'gem
 
 export interface ModelPreset {
   id: string
+  /** Other official IDs of the same snapshot (e.g. the dated Claude API ID behind an alias). */
+  aliases?: readonly string[]
   displayName: string
   vendor: string
   kind: (typeof MODEL_KINDS)[number]
@@ -37,8 +39,8 @@ const openai = (id: string, displayName: string, contextWindow: number, maxOutpu
   referencePrice: { input, output }, cache: { read },
 })
 const claude = (id: string, displayName: string, contextWindow: number, maxOutput: number,
-  input: string, output: string, read: string, source: string): ModelPreset => ({
-  id, displayName, vendor: 'Anthropic', kind: 'chat', inputs: ['text', 'image'], outputs: ['text'],
+  input: string, output: string, read: string, source: string, aliases?: readonly string[]): ModelPreset => ({
+  id, aliases, displayName, vendor: 'Anthropic', kind: 'chat', inputs: ['text', 'image'], outputs: ['text'],
   capabilities: { vision: true, tools: true, reasoning: true, prompt_cache: true },
   contextWindow, maxOutput, source, checkedAt, referencePrice: { input, output },
   pricingSource: 'https://platform.claude.com/docs/en/build-with-claude/prompt-caching',
@@ -72,12 +74,21 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
   openai('gpt-4.1-mini', 'GPT-4.1 mini', 1_047_576, 32_768, '0.4', '1.6', '0.25'),
   openai('gpt-4o', 'GPT-4o', 128_000, 16_384, '2.5', '10', '0.5'),
   openai('gpt-4o-mini', 'GPT-4o mini', 128_000, 16_384, '0.15', '0.6', '0.5'),
-  claude('claude-fable-5-1', 'Claude Fable 5.1', 1_000_000, 128_000, '10', '50', '0.025', 'https://platform.claude.com/docs/en/models/overview'),
-  claude('claude-opus-5-5', 'Claude Opus 5.5', 1_000_000, 128_000, '4', '20', '0.05', 'https://platform.claude.com/docs/en/models/overview'),
+  // Rechecked 2026-10-06 against platform.claude.com pricing and per-model pages:
+  // cache read 0.1x except Fable 5.1 (0.025x) and Opus 5.5 (0.05x); writes 1.25x (5m) / 2x (1h).
+  claude('claude-fable-5-1', 'Claude Fable 5.1', 1_000_000, 128_000, '10', '50', '0.025', 'https://platform.claude.com/docs/en/models/fable-5-1/overview'),
+  claude('claude-opus-5-5', 'Claude Opus 5.5', 1_000_000, 128_000, '4', '20', '0.05', 'https://platform.claude.com/docs/en/models/opus-5-5/overview'),
   claude('claude-sonnet-5-5', 'Claude Sonnet 5.5', 1_000_000, 128_000, '2', '10', '0.1', 'https://platform.claude.com/docs/en/models/sonnet-5-5/overview'),
-  claude('claude-haiku-4-5', 'Claude Haiku 4.5', 200_000, 64_000, '1', '5', '0.1', 'https://platform.claude.com/docs/en/models/overview'),
+  claude('claude-haiku-4-5', 'Claude Haiku 4.5', 200_000, 64_000, '1', '5', '0.1', 'https://platform.claude.com/docs/en/models/haiku-4-5/overview', ['claude-haiku-4-5-20251001']),
+  claude('claude-fable-5', 'Claude Fable 5', 1_000_000, 128_000, '10', '50', '0.1', 'https://platform.claude.com/docs/en/models/fable-5/overview'),
+  claude('claude-opus-5', 'Claude Opus 5', 1_000_000, 128_000, '5', '25', '0.1', 'https://platform.claude.com/docs/en/models/opus-5/overview'),
+  claude('claude-sonnet-5', 'Claude Sonnet 5', 1_000_000, 128_000, '2', '10', '0.1', 'https://platform.claude.com/docs/en/models/sonnet-5/overview'),
+  claude('claude-opus-4-8', 'Claude Opus 4.8', 1_000_000, 128_000, '5', '25', '0.1', 'https://platform.claude.com/docs/en/models/opus-4-8/overview'),
+  claude('claude-opus-4-7', 'Claude Opus 4.7', 1_000_000, 128_000, '5', '25', '0.1', 'https://platform.claude.com/docs/en/models/opus-4-7/overview'),
   claude('claude-opus-4-6', 'Claude Opus 4.6', 1_000_000, 128_000, '5', '25', '0.1', 'https://platform.claude.com/docs/en/models/opus-4-6/overview'),
-  claude('claude-sonnet-4-5', 'Claude Sonnet 4.5', 200_000, 64_000, '3', '15', '0.1', 'https://platform.claude.com/docs/en/models/sonnet-4-5/overview'),
+  claude('claude-sonnet-4-6', 'Claude Sonnet 4.6', 1_000_000, 128_000, '3', '15', '0.1', 'https://platform.claude.com/docs/en/models/sonnet-4-6/overview'),
+  claude('claude-opus-4-5', 'Claude Opus 4.5', 200_000, 64_000, '5', '25', '0.1', 'https://platform.claude.com/docs/en/models/opus-4-5/overview', ['claude-opus-4-5-20251101']),
+  claude('claude-sonnet-4-5', 'Claude Sonnet 4.5', 200_000, 64_000, '3', '15', '0.1', 'https://platform.claude.com/docs/en/models/sonnet-4-5/overview', ['claude-sonnet-4-5-20250929']),
   { ...gemini('gemini-3.8-flash', 'Gemini 3.8 Flash'), referencePrice: { input: '0.75', output: '3.75', validUntil: '2026-12-31' },
     notices: ['gemini', 'geminiPromotion'] },
   { ...gemini('gemini-3.1-flash-lite', 'Gemini 3.1 Flash-Lite'), referencePrice: { input: '0.25', output: '1.5' } },
@@ -114,7 +125,8 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
 
 /** Exact ID only. Unknown aliases must stay custom; never guess from vendor prefixes. */
 export function findModelPreset(id: string): ModelPreset | undefined {
-  return MODEL_PRESETS.find((preset) => preset.id === id.trim())
+  const name = id.trim()
+  return MODEL_PRESETS.find((preset) => preset.id === name || preset.aliases?.includes(name))
 }
 
 export function presetMetadata(preset: ModelPreset): MetadataDraft {

@@ -104,6 +104,9 @@ impl CacheModalities {
 /// `reasoning_tokens` 计入 completion 总数（仅统计拆分，不重复计费）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
+    /// Independent physical units; excluded from Token totals, TPM and Token tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tool_usage: Option<crate::ServerToolUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_usage: Option<UpstreamTokenCounts>,
     /// None preserves unknown legacy detail coverage; zero counters do not imply observation.
@@ -186,6 +189,10 @@ impl TokenUsage {
             _ => None,
         };
         let total = Self {
+            server_tool_usage: match (self.server_tool_usage, other.server_tool_usage) {
+                (Some(a), Some(b)) => Some(a.checked_add(b)?),
+                _ => None,
+            },
             upstream_usage,
             reported_details: self
                 .reported_details
@@ -257,6 +264,9 @@ impl TokenUsage {
 
     /// 校验不变量；计费入口必须先调用。
     pub fn validate(&self) -> Result<(), DomainError> {
+        if let Some(tools) = self.server_tool_usage {
+            tools.validate()?;
+        }
         match (self.cache_write_5m_tokens, self.cache_write_1h_tokens) {
             (None, None) => {}
             (Some(short), Some(long))

@@ -115,13 +115,7 @@ pub(super) fn prepared(
     } else {
         keys
     };
-    let time = match table {
-        "mv_channel_5min" => "toStartOfHour(ts5) AS hour, toDate(ts5) AS day",
-        "mv_key_model_day" | "mv_user_model_day" | "mv_user_day" | "mv_apikey_day" => {
-            "toStartOfDay(day) AS hour"
-        }
-        _ => "toDate(hour) AS day",
-    };
+    let time = super::observation_sources::Grain::for_table(table).time_sql();
     let aggregate = merged_sql();
     let raw = raw_sql();
     if mode != super::measurement_coverage::Mode::Recover {
@@ -184,6 +178,25 @@ fn axis(row: &Value, name: &str, requests: i64, total: Option<i64>) -> Value {
     result
 }
 
+/// Requests that can carry cache reads. A request whose prompt provenance is unknown and
+/// that recorded no prompt tokens at all (rejected before reaching upstream, failed with
+/// nothing billed) cannot change a cache hit rate, so it does not make the rate incomplete.
+/// Unknown requests that do carry prompt tokens still leave the rate unknown.
+pub(super) fn cache_eligible_requests(row: &Value, requests: i64, prompt: Option<i64>) -> i64 {
+    let (mut known_requests, mut known_tokens) = (0_i64, 0_i64);
+    for state in STATES {
+        known_requests =
+            known_requests.saturating_add(ch_i64(row, &format!("source_prompt_{state}_n")));
+        known_tokens =
+            known_tokens.saturating_add(ch_i64(row, &format!("source_prompt_{state}_tokens")));
+    }
+    let unknown = requests.saturating_sub(known_requests).max(0);
+    match prompt {
+        Some(prompt) if unknown > 0 && prompt == known_tokens => requests - unknown,
+        _ => requests,
+    }
+}
+
 /// Axis totals can be unknown on old summary-only rows; do not invent their split.
 pub(super) fn metrics(
     row: &Value,
@@ -205,9 +218,10 @@ pub(super) fn metrics(
     } else {
         Value::Null
     };
+    let eligible = cache_eligible_requests(row, requests, prompt);
     let settled = match (cached, prompt) {
         (Some(cached), Some(prompt)) => {
-            super::usage_details::cache_rate(cached, prompt, requests, read_known)
+            super::usage_details::cache_rate(cached, prompt, eligible, read_known)
         }
         _ => Value::Null,
     };
@@ -218,8 +232,8 @@ pub(super) fn metrics(
     result.insert(
         "cache_hit_bp".into(),
         if complete
-            && paired == requests
-            && requests > 0
+            && paired == eligible
+            && eligible > 0
             && prompt == Some(denominator)
             && cached == Some(cache_read)
         {
@@ -318,8 +332,14 @@ pub(super) async fn enrich(
         .iter()
         .map(|(name, value)| (name.as_str(), value.as_str()))
         .collect();
+    // Match displayed buckets after the shared calendar SQL applies the machine timezone.
+    let projection = if columns.split(", ").any(|column| column == "ts5") {
+        "* EXCEPT(ts5), toString(ts5) AS ts5"
+    } else {
+        "*"
+    };
     let sources: HashMap<_, _> = ch
-        .query_with_params(&format!("SELECT * FROM {sql}"), &params)
+        .query_with_params(&format!("SELECT {projection} FROM {sql}"), &params)
         .await?
         .into_iter()
         .map(|row| (key(&row, columns), row))
@@ -394,4 +414,22 @@ pub(super) fn pg_sql() -> String {
         ));
     }
     fields.join(", ")
+}
+
+#[cfg(test)]
+mod cache_eligibility_tests {
+    use super::cache_eligible_requests;
+    use serde_json::json;
+
+    #[test]
+    fn requests_without_a_prompt_do_not_make_cache_coverage_incomplete() {
+        // 10 upstream-measured requests plus one failure with no prompt at all.
+        let row = json!({"source_prompt_upstream_n": 10, "source_prompt_upstream_tokens": 146_000});
+        assert_eq!(cache_eligible_requests(&row, 11, Some(146_000)), 10);
+        // The unknown request carried tokens: the rate stays unknown.
+        assert_eq!(cache_eligible_requests(&row, 11, Some(146_500)), 11);
+        // Old rows without provenance counters are not reinterpreted.
+        assert_eq!(cache_eligible_requests(&json!({}), 11, Some(146_000)), 11);
+        assert_eq!(cache_eligible_requests(&row, 10, Some(146_000)), 10);
+    }
 }

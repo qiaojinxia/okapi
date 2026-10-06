@@ -49,6 +49,9 @@ mod population_storage;
 #[path = "support/quality_pagination.rs"]
 mod quality_pagination;
 
+#[path = "support/dashboard_calendar.rs"]
+mod dashboard_calendar;
+
 struct Env {
     pg: PgPool,
     state: gateway::state::AppState,
@@ -62,14 +65,14 @@ struct Env {
 }
 
 async fn setup() -> Env {
-    setup_with_ch_database(
-        &std::env::var("OKAPI_TEST_CH_DATABASE").unwrap_or_else(|_| "okapi".to_owned()),
-    )
-    .await
+    // Deliberately incomplete legacy fixtures in other suites must not become this view's history.
+    let database = std::env::var("OKAPI_TEST_CH_DATABASE")
+        .unwrap_or_else(|_| format!("okapi_stats_{}", Uuid::new_v4().simple()));
+    setup_with_ch_database(&database).await
 }
 
 async fn setup_with_ch_database(ch_database: &str) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();

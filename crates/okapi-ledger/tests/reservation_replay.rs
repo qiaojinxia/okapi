@@ -23,7 +23,7 @@ struct Bed {
 }
 impl Bed {
     async fn new() -> TestResult<Self> {
-        dotenvy::dotenv().ok();
+        okapi_store::test_support::assert_isolated();
         let url = std::env::var("OKAPI_REDIS_URL")?;
         let redis = okapi_store::connect_redis(&url).await?;
         let mut bytes = [0; 4];

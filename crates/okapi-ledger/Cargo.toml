@@ -22,6 +22,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+okapi-store = { workspace = true, features = ["test-support"] }
 dotenvy = { workspace = true }
 
 [lints]

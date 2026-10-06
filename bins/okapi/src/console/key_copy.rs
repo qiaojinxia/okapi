@@ -36,7 +36,7 @@ async fn read(
     let user_id = require_session(state, headers).await?;
     // A lingering cookie for a different account must not silently switch owners.
     let key = crate::gateway::auth::authenticate(state, headers).await?;
-    if key.user_id != user_id {
+    if key.actor_user_id() != user_id {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
             "key_copy_session_mismatch",

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn base_price_requires_publish_and_survives_reload() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let url = std::env::var("DATABASE_URL").unwrap();
     let redis = std::env::var("OKAPI_REDIS_URL").unwrap();
     let admin_pool = okapi_store::connect_pg(&url).await.unwrap();

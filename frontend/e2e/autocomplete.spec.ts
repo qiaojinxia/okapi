@@ -181,6 +181,7 @@ test('模型联想：方向键选择，中文确认不选择，Esc先收起候�
   await prepare(page)
   await page.goto('/admin/channels')
   await page.getByRole('button', { name: '路由诊断', exact: true }).click()
+  await expect(page.getByRole('dialog').locator(':focus')).toHaveCount(1)
   const input = page.locator('#diag-model')
   await input.fill('gpt')
   await input.press('ArrowDown')
@@ -231,6 +232,8 @@ for (const width of [1280, 390]) {
     await prepare(page)
     await page.goto('/admin/rules')
     await page.getByRole('main').getByRole('button', { name: /新建/ }).first().click()
+    // 抽屉打开后焦点会移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+    await expect(page.getByRole('dialog').locator(':focus')).toHaveCount(1)
     const input = page.locator('#s-models')
     await input.fill('通用')
     const option = page.getByRole('option', { name: /gpt-alpha/ })

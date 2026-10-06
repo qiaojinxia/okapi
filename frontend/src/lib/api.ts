@@ -5,6 +5,20 @@ const KEY_STORAGE = 'okapi.key'
 const LOGIN_STORAGE = 'okapi.login-mode'
 export const USAGE_SCOPE_STORAGE = 'okapi.usage-scope'
 
+const authResets = new Set<() => void>()
+let authEpoch = 0
+export function registerAuthReset(reset: () => void): () => void {
+  authResets.add(reset)
+  return () => authResets.delete(reset)
+}
+function resetAuthContext() {
+  authEpoch += 1
+  for (const reset of authResets) reset()
+}
+if (typeof window !== 'undefined') window.addEventListener('storage', (event) => {
+  if (event.key === KEY_STORAGE) resetAuthContext()
+})
+
 export function getLoginMode(): 'account' | 'key' | null {
   const value = localStorage.getItem(LOGIN_STORAGE)
   return value === 'account' || value === 'key' ? value : null
@@ -15,12 +29,14 @@ export function getKey(): string | null {
 }
 
 export function setKey(key: string, mode: 'account' | 'key' = 'key'): void {
+  resetAuthContext()
   localStorage.setItem(KEY_STORAGE, key)
   localStorage.setItem(LOGIN_STORAGE, mode)
   localStorage.removeItem(USAGE_SCOPE_STORAGE)
 }
 
 export function clearKey(): void {
+  resetAuthContext()
   localStorage.removeItem(KEY_STORAGE)
   localStorage.removeItem(LOGIN_STORAGE)
   localStorage.removeItem(USAGE_SCOPE_STORAGE)
@@ -47,6 +63,7 @@ export async function apiFetch<T>(
   path: string,
   init?: { method?: string; body?: unknown; key?: string; fresh?: boolean; signal?: AbortSignal },
 ): Promise<T> {
+  const epoch = authEpoch
   const key = init?.key ?? getKey()
   const headers: Record<string, string> = {}
   if (key) headers.Authorization = `Bearer ${key}`
@@ -71,5 +88,7 @@ export async function apiFetch<T>(
     }
     throw new ApiError(resp.status, code, param)
   }
-  return (await resp.json()) as T
+  const result = (await resp.json()) as T
+  if (epoch !== authEpoch) throw new ApiError(401, 'auth_context_changed')
+  return result
 }

@@ -5,8 +5,9 @@
 
 use super::error::AppError;
 use super::state::AppState;
+use crate::gateway::extract::Path;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -150,9 +151,7 @@ async fn handle(
         concurrency: cap(key.max_concurrency),
     };
     let (reservation_pool, source_window) = match state
-        .ledger
         .reserve_for_key(
-            &state.pg,
             key.quota_limited,
             okapi_ledger::ReserveRequest {
                 user_id: key.user_id,
@@ -185,6 +184,22 @@ async fn handle(
     };
 
     // —— 预扣已建立：失败路径必须退款 ——
+    // 下面各分支都显式结算；守卫只兜客户端断开时 handler 被丢弃的情形
+    let mut failure = super::failure::Guard::new(
+        state,
+        &key,
+        request_id,
+        billing_model,
+        "",
+        "/pass/{path}",
+        started,
+        reservation_pool,
+        source_window.as_deref(),
+    );
+    failure.error(&AppError::new(
+        StatusCode::from_u16(499).unwrap_or(StatusCode::BAD_REQUEST),
+        codes::CLIENT_CLOSED_REQUEST,
+    ));
     let url = format!(
         "{}{}{}",
         channel.api_base.trim_end_matches('/'),
@@ -209,11 +224,29 @@ async fn handle(
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned),
         body,
-        proxy_url: okapi_providers::http::proxy_url_from_settings(&channel.settings),
+        proxy_url: channel.proxy_url.clone(),
         extra_headers: okapi_providers::http::extra_headers_from_settings(&channel.settings),
     };
 
-    match state.pass.forward(pass_req).await {
+    let result = async {
+        use okapi_providers::response_lifetime::ResponseLifetime;
+        super::account_control::admit(state, channel_id, Some(channel.key_id)).await?;
+        let mut permit = super::sched_redis::channel_permit::ChannelPermit::acquire_parts(
+            &state.sched,
+            channel.key_id,
+            channel.max_concurrency,
+            channel.egress_proxy_id.zip(channel.egress_max_concurrency),
+        )
+        .await?
+        .ok_or_else(|| super::account_control::blocked("concurrency"))?;
+        let response = tokio::select! {
+            result = state.pass.forward(pass_req) => result,
+            () = permit.expired() => Err(super::account_control::blocked("concurrency_lease_lost")),
+        }?;
+        Ok(response.with_guard(permit))
+    }
+    .await;
+    match result {
         Ok(PassResponse::Ok {
             status,
             content_type,
@@ -230,6 +263,7 @@ async fn handle(
                 None,
                 reservation_pool,
                 source_window.as_deref(),
+                &mut failure,
             )
             .await?;
             let mut out = Response::builder()
@@ -261,6 +295,7 @@ async fn handle(
                 Some(i16::try_from(status).unwrap_or(0)),
                 reservation_pool,
                 source_window.as_deref(),
+                &mut failure,
             )
             .await?;
             let out = Response::builder()
@@ -286,12 +321,17 @@ async fn handle(
                 None,
                 reservation_pool,
                 source_window.as_deref(),
+                &mut failure,
             )
             .await?;
-            Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                codes::UPSTREAM_ERROR,
-            ))
+            if err.error_code() == codes::NO_AVAILABLE_CHANNEL {
+                Err(super::account_control::attempt_error(&err))
+            } else {
+                Err(AppError::new(
+                    StatusCode::BAD_GATEWAY,
+                    codes::UPSTREAM_ERROR,
+                ))
+            }
         }
     }
 }
@@ -309,7 +349,10 @@ async fn settle(
     upstream_status: Option<i16>,
     reservation_pool: Pool,
     source_window: Option<&str>,
+    failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
+    // 本函数接手终态：成功走 settle_success，失败自行退款留痕
+    failure.disarm();
     let (billing_state, log_type, event_type, delta, amount, pool) = if success {
         (
             BillingState::Committed,
@@ -382,7 +425,11 @@ async fn settle(
     };
     if !success {
         state.settle_write(input).await;
-    } else if state.settle_success(input).await? {
+    } else if state
+        .settle_success(input)
+        .await
+        .inspect_err(|error| failure.settlement_failed(error))?
+    {
         super::auth::record_settlement_counters(
             state,
             key.user_id,

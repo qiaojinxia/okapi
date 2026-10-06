@@ -32,8 +32,12 @@ pub(super) async fn probe(
     credential: &str,
     channel_key_id: i64,
     upstream_model: Option<&str>,
+    proxy_url: Option<String>,
 ) -> Value {
-    let outbound = okapi_providers::Outbound::from_settings(settings);
+    let mut outbound = okapi_providers::Outbound::from_settings(settings, proxy_url);
+    // Same identity input as the gateway (`openai_dialect::outbound`): a channel whose
+    // client profile simulates a client needs a stable per-key seed to build the request.
+    outbound.context.identity_seed = Some(channel_key_id.to_string());
     let region = settings
         .get("aws_region")
         .and_then(Value::as_str)
@@ -64,8 +68,8 @@ pub(super) async fn probe(
                                "messages": [{"role": "user", "content": "ping"}]})
                         .to_string(),
                     );
-                    // 测活走透传形态即可：这里只验证"这把订阅还能用吗"，
-                    // 伪装指纹的全量信号由数据面（settings.mimic_cc）负责
+                    // 与数据面同一条出站路径：渠道配置了请求风格就按它整形，
+                    // 测活结果才代表真实请求能否打通
                     okapi_providers::oauth::anthropic_max::messages(
                         state.anthropic.http(),
                         base,
@@ -73,7 +77,7 @@ pub(super) async fn probe(
                         body,
                         false,
                         &outbound,
-                        None,
+                        cred.account_id.as_deref(),
                     )
                     .await
                     .map(|r| messages_status(&r))
@@ -197,8 +201,9 @@ pub(super) async fn fetch_models(
     settings: &Value,
     credential: &str,
     channel_key_id: i64,
+    proxy_url: Option<String>,
 ) -> Result<Vec<String>, AppError> {
-    let outbound = okapi_providers::Outbound::from_settings(settings);
+    let outbound = okapi_providers::Outbound::from_settings(settings, proxy_url);
     let mut models = match provider {
         "bedrock" => {
             if okapi_providers::aws_sigv4::AwsCredentials::parse(credential).is_none() {

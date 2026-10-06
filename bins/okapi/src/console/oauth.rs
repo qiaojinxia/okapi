@@ -7,8 +7,9 @@
 
 use super::query::Query;
 use crate::gateway::error::AppError;
+use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use okapi_providers::custom_pass::{PassRequest, PassResponse};
@@ -120,23 +121,9 @@ async fn load_provider(state: &AppState, code: &str) -> Result<ResolvedProvider,
     })
 }
 
-/// 回调地址：settings.site_url 优先，缺省从请求 Host 推导。
-async fn redirect_uri(state: &AppState, headers: &HeaderMap, code: &str) -> String {
-    let base = sqlx::query_scalar!(
-        r#"SELECT value #>> '{}' AS "v!" FROM settings WHERE key = 'site_url'"#
-    )
-    .fetch_optional(&state.pg)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| {
-        let host = headers
-            .get(header::HOST)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("localhost");
-        format!("http://{host}")
-    });
-    format!("{}/auth/oauth/{code}/callback", base.trim_end_matches('/'))
+async fn redirect_uri(state: &AppState, code: &str) -> Result<String, AppError> {
+    let base = super::auth_web::site_base_url(state).await?;
+    Ok(format!("{base}/auth/oauth/{code}/callback"))
 }
 
 fn form_escape(s: &str) -> String {
@@ -149,16 +136,15 @@ fn form_escape(s: &str) -> String {
 pub async fn start(
     State(state): State<AppState>,
     Path(code): Path<String>,
-    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let provider = load_provider(&state, &code).await?;
+    let redirect = redirect_uri(&state, &provider.code).await?;
     let token: String = rand::rng()
         .sample_iter(&Alphanumeric)
         .take(32)
         .map(char::from)
         .collect();
     state.sched.oauth_state_set(&token, STATE_TTL_SECS).await;
-    let redirect = redirect_uri(&state, &headers, &provider.code).await;
     let location = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={token}",
         provider.authorize_url,
@@ -209,7 +195,7 @@ pub async fn callback(
         return Err(AppError::unauthorized("oauth_state_invalid"));
     }
     let provider = load_provider(&state, &code).await?;
-    let redirect = redirect_uri(&state, &headers, &provider.code).await;
+    let redirect = redirect_uri(&state, &provider.code).await?;
 
     // authorization code → access_token
     let body = format!(
@@ -290,12 +276,8 @@ pub async fn callback(
 async fn fetch_json(state: &AppState, req: PassRequest) -> Result<Value, AppError> {
     super::ssrf::validate_api_base(state, &req.url).await?;
     match state.pass.probe(req).await {
-        Ok(PassResponse::Ok { mut stream, .. }) => {
-            use futures::StreamExt as _;
-            let mut buf = Vec::new();
-            while let Some(Ok(chunk)) = stream.next().await {
-                buf.extend_from_slice(&chunk);
-            }
+        Ok(PassResponse::Ok { stream, .. }) => {
+            let buf = super::outbound_body::collect(stream, 1024 * 1024).await?;
             serde_json::from_slice(&buf)
                 .map_err(|_| AppError::unauthorized("oauth_upstream_not_json"))
         }

@@ -233,10 +233,7 @@ async fn batch_statistics_activate_volume_pricing_and_channel_daily_cap() {
         params:&json!({"multiplier":"0.5","min_monthly_tokens":22,"min_monthly_spend_micro":20000}),
         priority:0,enabled:true,valid_from:None,valid_to:None,
     }).await.unwrap();
-    sqlx::query("INSERT INTO pricing_epochs(snapshot) VALUES('{}')")
-        .execute(&env.state.pg)
-        .await
-        .unwrap();
+    crate::published_pricing::publish(&env.state.pg, env.uid).await;
     gateway::refresh_pricebook_if_newer(&env.state)
         .await
         .unwrap();

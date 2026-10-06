@@ -62,7 +62,7 @@ async fn make_actor(pg: &PgPool, tag: &str) -> Actor {
 /// A 拿 B 的资源 id 去打门户端点，一条都不许过。
 #[tokio::test]
 async fn portal_id_routes_reject_another_users_resources() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();

@@ -2,6 +2,9 @@
 //! 配置字段被剥、未配置字段照传、受保护键（model/messages/stream）不可剥、
 //! 未配置渠道原样透传。依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -53,7 +56,7 @@ async fn setup(strip: Option<Value>) -> TestEnv {
 }
 
 async fn setup_with(strip: Option<Value>, inject: Option<Value>) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -118,6 +121,7 @@ async fn setup_with(strip: Option<Value>, inject: Option<Value>) -> TestEnv {
         .unwrap();
     }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

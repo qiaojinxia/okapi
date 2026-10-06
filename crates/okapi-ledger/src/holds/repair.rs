@@ -33,9 +33,9 @@ impl UserGuard {
         let active = hot::active(ledger, self.user_id).await?;
         let ids: Vec<_> = active.keys().copied().collect();
         let holds: Vec<Hold> = sqlx::query_as("SELECT * FROM balance_holds WHERE user_id=$1 AND (state<>'closed' OR id=ANY($2)) ORDER BY id")
-            .bind(self.user_id).bind(ids).fetch_all(&mut *self.connection).await?;
+            .bind(self.user_id).bind(ids).fetch_all(self.connection()?).await?;
         let user_id = self.user_id;
-        let (epoch, until) = crate::windows::current(self.connection(), user_id)
+        let (epoch, until) = crate::windows::current(self.connection()?, user_id)
             .await?
             .map_or_else(Default::default, |window| (window.token, window.until));
         let mut keys = vec![format!("bal:{{{}}}", self.user_id)];
@@ -88,7 +88,7 @@ impl UserGuard {
             subscription: parse(&result["sub"])?,
         };
         sqlx::query("UPDATE balance_holds SET state='closed',updated_at=now() WHERE user_id=$1 AND state='closing'")
-            .bind(self.user_id).execute(&mut *self.connection).await?;
+            .bind(self.user_id).execute(self.connection()?).await?;
         Ok(repaired)
     }
 }

@@ -64,7 +64,7 @@ struct Env {
 /// `seal_at_rest`：建渠道时是否用主密钥封装。
 /// `gateway_has_key`：网关侧是否持有主密钥（模拟丢密钥/未配置）。
 async fn setup(seal_at_rest: bool, gateway_has_key: bool) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
     let suffix = Uuid::new_v4().simple().to_string();

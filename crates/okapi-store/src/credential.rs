@@ -85,13 +85,19 @@ pub fn open(master_key_hex: Option<&str>, stored: &[u8]) -> Result<String, Store
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OAuthCredential {
     pub access_token: String,
+    /// Empty for manually imported access tokens that cannot be refreshed.
+    #[serde(default)]
     pub refresh_token: String,
-    /// access token 到期 unix 秒。
+    /// access token 到期 unix 秒；0 means unknown for access-token-only imports.
+    #[serde(default)]
     pub expires_at: i64,
     /// ChatGPT 账号 id（codex 必带）；anthropic_max：换码响应里的账号/组织 UUID
-    /// （全伪装 metadata.user_id 用，见 `okapi_providers::oauth::cc_mimic`，常为 None）。
+    /// （全伪装 metadata.user_id 用，见 `okapi_providers::profiles::identity`，常为 None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// 账号的可读标识（邮箱），只用于控制台展示，不参与鉴权或身份模拟。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
 }
 
 impl OAuthCredential {
@@ -125,7 +131,17 @@ impl OAuthCredential {
     /// 到期前 `margin_secs` 内即视为需要刷新。
     #[must_use]
     pub fn needs_refresh(&self, now: i64, margin_secs: i64) -> bool {
-        self.expires_at - now <= margin_secs
+        if !self.can_refresh() {
+            // An unknown expiry must not be fabricated. Known expiry only triggers invalidation
+            // when actually expired, never early refresh of a token without refresh authority.
+            return self.expires_at > 0 && self.expires_at <= now;
+        }
+        self.expires_at <= now.saturating_add(margin_secs)
+    }
+
+    #[must_use]
+    pub fn can_refresh(&self) -> bool {
+        !self.refresh_token.trim().is_empty()
     }
 }
 
@@ -169,14 +185,11 @@ pub async fn seal_existing(
             continue;
         };
         let sealed = seal(master_key_hex, plain)?;
-        sqlx::query!(
-            r#"UPDATE channel_keys SET credential_ciphertext = $2, updated_at = now() WHERE id = $1"#,
-            row.id,
-            sealed
-        )
-        .execute(pool)
-        .await?;
-        stats.sealed += 1;
+        let affected = sqlx::query(
+            "UPDATE channel_keys SET credential_ciphertext=$2,updated_at=now() WHERE id=$1 AND credential_ciphertext=$3"
+        ).bind(row.id).bind(sealed).bind(&row.credential_ciphertext)
+            .execute(pool).await?.rows_affected();
+        stats.sealed += affected;
     }
     Ok(stats)
 }
@@ -274,6 +287,7 @@ mod tests {
             refresh_token: "sk-ant-ort01-y".to_owned(),
             expires_at: 1_700_000_000,
             account_id: None,
+            account_label: None,
         };
         let text = cred.to_plaintext();
         assert!(text.contains(r#""kind":"oauth""#));
@@ -286,5 +300,27 @@ mod tests {
         // 到期判定含边界
         assert!(cred.needs_refresh(1_700_000_000 - 120, 120));
         assert!(!cred.needs_refresh(1_700_000_000 - 121, 120));
+        let extreme = OAuthCredential {
+            expires_at: i64::MIN,
+            ..cred
+        };
+        assert!(extreme.needs_refresh(i64::MAX, 300));
+    }
+
+    #[test]
+    fn imported_access_token_has_unknown_expiry_and_no_refresh_authority() {
+        let mut token =
+            OAuthCredential::parse(r#"{"kind":"oauth","access_token":"sk-ant-oat01-imported"}"#)
+                .unwrap();
+        assert!(!token.can_refresh());
+        assert_eq!(token.expires_at, 0);
+        assert!(!token.needs_refresh(i64::MAX, 300));
+        assert_eq!(
+            OAuthCredential::parse(&token.to_plaintext()).unwrap(),
+            token
+        );
+        token.expires_at = 1000;
+        assert!(!token.needs_refresh(999, 300));
+        assert!(token.needs_refresh(1000, 300));
     }
 }

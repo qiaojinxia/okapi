@@ -35,7 +35,17 @@ async function setup(page: Page, models: ModelListRow[] = [], base = 2_000_000) 
     let json: unknown = { data: [] }
     if (path === '/api/me') json = { user_id: 1, key_id: 1, role: 100, permissions: ['*'], group: 'default', balance_micro: 0 }
     if (path === '/api/me/groups') json = { current: 'default', data: [{ code: 'default' }] }
-    if (path === '/api/pricing') json = { models: models.map((m) => ({ ...m, model: m.model_name, mode: m.pricing_mode, groups: ['default'] })), groups: [{ code: 'default', name: null, ratio: '1', is_default: true }] }
+    if (path === '/api/pricing') {
+      const query = new URL(request.url()).searchParams
+      const filtered = models.filter((m) => !query.has('model') || query.get('model') === m.model_name)
+      const limit = Number(query.get('limit') ?? 100), offset = Number(query.get('offset') ?? 0)
+      const count = Math.min(limit, Math.max(0, filtered.length - offset)), more = offset + count < filtered.length
+      json = { models: filtered.slice(offset, offset + limit).map((m) => ({ ...m, model: m.model_name, mode: m.pricing_mode, base_price_per_1m_micro: base, groups: ['default'] })), groups: [{ code: 'default', name: null, ratio: '1', is_default: true }], total: filtered.length, limit, offset, has_more: more, next_offset: more ? offset + count : null, groups_page: { total: 1, limit: 100, offset: 0, has_more: false, next_offset: null }, pricing_epoch: 1 }
+    }
+    if (path === '/api/pricing/stats') {
+      const vendors = [...new Set(models.map((m) => m.vendor))].map((vendor) => ({ vendor, count: models.filter((m) => m.vendor === vendor).length }))
+      json = { total: models.length, capabilities: [...new Set(models.flatMap((m) => Object.entries(m.capabilities).filter(([, value]) => value === true).map(([key]) => key)))], has_context: models.some((m) => m.context_window !== null), vendors, vendors_page: { total: vendors.length, limit: 100, offset: 0, has_more: false, next_offset: null }, pricing_epoch: 1 }
+    }
     if (path === '/admin/models') {
       if (request.method() === 'POST') { posts.push(request.postDataJSON()); json = { model_id: 1, requires_publish: true } }
       else json = { data: models, total: models.length, unpriced: 0, base_price_per_1m_micro: base }
@@ -102,6 +112,8 @@ test('选择不同模型实时禁用不适用价格，图像生成不禁用输�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('gpt-6-astra')
   await d.getByRole('option').filter({ hasText: 'gpt-6-astra' }).click()
   await d.locator('#model-advanced-section > summary').click()
@@ -148,6 +160,8 @@ test('未声明自定义模型可以填写，修改模态和视觉标签立即�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('unknown-custom')
   await d.locator('#model-advanced-section > summary').click()
   await d.locator('#model-modal-section > summary').click()
@@ -207,7 +221,7 @@ test('历史不适用倍率灰显保留，编辑并保存不会清空缓存倍�
 })
 
 test('官方预设数据白名单、来源、独立副本和促销期限；不按名称前缀猜测', () => {
-  expect(MODEL_PRESETS).toHaveLength(25)
+  expect(MODEL_PRESETS).toHaveLength(32)
   expect(new Set(MODEL_PRESETS.map((p) => p.id)).size).toBe(MODEL_PRESETS.length)
   expect(new Set(MODEL_PRESETS.map((p) => p.vendor)).size).toBe(6)
   const sourceHosts = ['developers.openai.com', 'platform.claude.com', 'ai.google.dev', 'api-docs.deepseek.com', 'www.alibabacloud.com', 'platform.kimi.ai']
@@ -254,6 +268,8 @@ test('选择官方模型带入规格但不改价格；参考价需点击，不�
   const posts = await setup(page, [], 3_000_000)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#price-input').fill('4.5'); await d.locator('#price-output').fill('18')
   await d.locator('#m-name').fill('gpt-6-astra')
   await expect(d.getByTestId('model-preset-summary')).toHaveCount(0)
@@ -284,14 +300,16 @@ test('预设按供应商筛选，数量来自目录；搜索仅限当前供应�
   const d = page.getByRole('dialog'), vendor = d.locator('#m-preset-vendor')
   await expect(vendor).toHaveValue('')
   await expect(vendor.locator('option')).toHaveCount(7)
-  await expect(d.getByText(/当前范围 25 个预设/)).toBeVisible()
+  await expect(d.getByText(/当前范围 32 个预设/)).toBeVisible()
   const list = d.getByRole('listbox').getByRole('option')
   for (const supplier of new Set(MODEL_PRESETS.map((preset) => preset.vendor))) {
     await vendor.selectOption(supplier)
     await d.locator('#m-name').click()
     const presets = MODEL_PRESETS.filter((preset) => preset.vendor === supplier)
-    await expect(list).toHaveCount(presets.length)
-    await expect(list.locator('> span:first-child')).toHaveText(presets.map((preset) => preset.id))
+    // 官方快照 ID（如带日期的 Claude ID）紧跟在其别名后面，也可直接选
+    const ids = presets.flatMap((preset) => [preset.id, ...(preset.aliases ?? [])])
+    await expect(list).toHaveCount(ids.length)
+    await expect(list.locator('> span:first-child')).toHaveText(ids)
     await expect(d.getByText(new RegExp(`当前范围 ${presets.length} 个预设`))).toBeVisible()
   }
   await vendor.selectOption('OpenAI')
@@ -338,7 +356,8 @@ test('切换供应商只浏览候选，保留已选模型规格及价格；可�
   await expect(d.locator('#m-name')).toHaveValue('kimi-k3')
   await vendor.selectOption('')
   await d.locator('#m-name').click()
-  await expect(d.getByRole('listbox').getByRole('option')).toHaveCount(25)
+  await expect(d.getByRole('listbox').getByRole('option')).toHaveCount(
+    MODEL_PRESETS.reduce((n, preset) => n + 1 + (preset.aliases?.length ?? 0), 0))
   await d.locator('#m-name').press('Escape')
   await expect(d).toBeVisible()
   await d.getByRole('button', { name: '保存', exact: true }).click()
@@ -351,6 +370,8 @@ test('切换模型清理上一预设缓存时长和不兼容能力；自定义�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('claude-sonnet-5-5')
   await d.getByRole('option').filter({ hasText: 'claude-sonnet-5-5' }).click()
   await expect(d.getByTestId('model-preset-summary')).toContainText('5m / 1h')
@@ -401,6 +422,8 @@ test('图像与未核实计价预设不能填通用参考价，未知输出上�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('gemini-3.1-flash-image')
   await d.getByRole('option').filter({ hasText: 'gemini-3.1-flash-image' }).click()
   await expect(d.getByRole('button', { name: '填入参考价' })).toHaveCount(0)
@@ -443,6 +466,8 @@ test('新建模型：类型、独立输入输出、常用能力标签、限制�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('new-multimodal')
   await d.locator('#model-metadata-section > summary').click()
   await d.getByLabel('显示名称', { exact: true }).fill('多模态助手')
@@ -484,6 +509,8 @@ test('能力配置由 16 个开关精简为 5 个常用标签；默认折叠，�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('label-only-model')
   await d.locator('#model-metadata-section > summary').click()
   await expect(d.getByTestId('model-capability-summary')).toContainText('未声明常用能力')
@@ -565,6 +592,8 @@ test('默认精简表单：基础单价直接填写，高级折叠，按非默�
   const posts = await setup(page, [], 3_000_000)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await expect(d.locator('#price-input')).toHaveValue('3')
   await expect(d.locator('#price-output')).toHaveValue('3')
   await expect(d.locator('#meta-kind')).not.toBeVisible()
@@ -588,6 +617,8 @@ test('文本模型首屏仅五个常用控件，不适用多模态不展开，�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('deepseek-v4-pro')
   await d.getByRole('option').filter({ hasText: 'deepseek-v4-pro' }).click()
   await expect(d.locator('input:visible, select:visible')).toHaveCount(5)
@@ -622,6 +653,8 @@ test('图像模型只展示适用图像价格，不出现音频或缓存输入�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('gemini-3.1-flash-image')
   await d.getByRole('option').filter({ hasText: 'gemini-3.1-flash-image' }).click()
   await d.locator('#model-advanced-section > summary').click()
@@ -650,6 +683,8 @@ test('单价不合法禁止保存；舍入提示实际价格，切回倍率不�
   const posts = await setup(page)
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('rounding-model')
   await d.locator('#price-input').fill('0')
   await d.locator('#price-output').fill('1')
@@ -689,6 +724,8 @@ test('已有模型模板：手输和选择都不自动应用，明确确认后�
   const posts = await setup(page, [existing])
   await page.getByRole('button', { name: '新建模型', exact: true }).click()
   const d = page.getByRole('dialog')
+  // 抽屉打开后会把焦点移到首个控件；等它落定再输入，否则焦点跳走会收起候选
+  await expect(d.locator(':focus')).toHaveCount(1)
   await d.locator('#m-name').fill('my-model')
   await d.locator('#model-metadata-section > summary').click()
   await d.locator('#model-template-section > summary').click()

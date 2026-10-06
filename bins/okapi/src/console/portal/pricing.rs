@@ -45,6 +45,7 @@ struct PricingRow {
     audio_completion_ratio: Option<String>,
     image_ratio: Option<String>,
     modality_ratios: Option<Value>,
+    server_tool_prices: Option<Value>,
     per_call_price_micro: Option<i64>,
 }
 #[derive(sqlx::FromRow)]

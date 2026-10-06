@@ -7,11 +7,13 @@ import type { DashboardTrend } from './types'
 import { describeError } from '@/lib/i18n'
 import { useDashboardChart } from './data'
 import { trendChart } from '@/features/analytics/trend-data'
+import type { DateRange } from '@/components/ui/date-range'
+import { dashboardPeriodLabel } from './period'
 
-export function TrendCard({ days, metric, onMetricChange }: { days: number; metric: DashboardTrend; onMetricChange: (value: DashboardTrend) => void }) {
+export function TrendCard({ days, range, metric, onMetricChange }: { days: number; range?: DateRange | null; metric: DashboardTrend; onMetricChange: (value: DashboardTrend) => void }) {
   const { t, i18n } = useTranslation()
   // 图表只要逐桶的请求 / 金额 / Token，走精简查询，不必等质量与 Token 构成的完整汇总。
-  const q = useDashboardChart(days)
+  const q = useDashboardChart(days, range)
   const end = q.data?.window?.end_date ?? q.data?.window?.end_at?.slice(0, 10)
   const start = q.data?.window?.start_date ?? q.data?.window?.start_at?.slice(0, 10)
   const combined = metric === 'combined'
@@ -39,20 +41,20 @@ export function TrendCard({ days, metric, onMetricChange }: { days: number; metr
     [t(q.data?.granularity === 'hour' ? 'admin:dashboardHourlyAverage' : 'admin:dashboardTrendAverage'), format(total / Math.max(data.length, 1))],
     [t(q.data?.granularity === 'hour' ? 'admin:dashboardHourlyPeak' : 'admin:dashboardTrendPeak'), peak && peak[selected] > 0 ? `${format(peak[selected])} · ${peak.bucket.slice(5)}` : '—'],
   ]
-  return <Card data-slot="dashboard-trend" className="flex min-w-0 flex-col rounded-xl">
-    <CardHeader className="gap-1 px-4 pt-3 pb-2 lg:pt-2">
+  return <Card data-slot="dashboard-trend" className="flex min-w-0 flex-col rounded-xl lg:min-h-0">
+    <CardHeader className="shrink-0 gap-1 px-4 pt-3 pb-2 lg:pt-2">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <CardTitle>{title}</CardTitle>
         <Segmented size="sm" ariaLabel={t('charts:metric')} value={metric} onChange={onMetricChange} options={(['combined', 'requests', 'amount', 'tokens'] as const).map((value) => ({ value, label: value === 'combined' ? t('admin:dashboardCompareTrend') : t(`charts:metric_${value}`) }))} />
       </div>
-      <p className="text-xs leading-5 text-muted-foreground">{q.isSuccess && start && end ? `${start} — ${end}${q.data.window?.timezone ? ` · ${q.data.window.timezone}` : ''}` : t('admin:lastDays', { days })}</p>
+      <p className="text-xs leading-5 text-muted-foreground">{q.isSuccess && start && end ? `${start} — ${end}${q.data.window?.timezone ? ` · ${q.data.window.timezone}` : ''}` : dashboardPeriodLabel(days, range, t)}</p>
     </CardHeader>
-    <CardContent className="flex flex-1 flex-col px-4 pt-0 pb-3 lg:pb-2">
+    <CardContent className="flex flex-1 flex-col px-4 pt-0 pb-3 lg:min-h-0 lg:overflow-y-auto lg:pb-2">
       {q.isPending ? <LoadingState /> : q.isError ? <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /> : !q.data?.data.length ? <EmptyState hint={t('admin:trendEmptyHint')} /> : <>
         <div className="mb-2 grid grid-cols-2 gap-2 rounded-lg bg-muted/40 px-3 py-2 sm:grid-cols-3 lg:mb-1 lg:flex lg:flex-wrap lg:justify-between lg:py-1.5">
           {summary.map(([name, value]) => <div key={name} className="min-w-0 last:col-span-2 sm:last:col-span-1 lg:flex lg:flex-wrap lg:items-baseline lg:gap-x-1.5"><p className="text-xs text-muted-foreground">{name}</p><p className="mt-1 break-words text-sm font-semibold tabular-nums lg:mt-0">{value}</p></div>)}
         </div>
-        <TimeChart compact fill key={metric} data={data} label={title} unit={metric === 'amount' ? 'USD' : label} format={format}
+        <TimeChart compact fill minPlotHeight={112} key={metric} data={data} label={title} unit={metric === 'amount' ? 'USD' : label} format={format}
           secondaryAxis={combined ? { unit: 'USD', format: money } : undefined}
           series={combined ? [
             { key: 'requests', label: t('admin:kpiRequests'), color: 'var(--color-primary)' },

@@ -1,7 +1,11 @@
 use super::super::{AppError, ChannelCandidate, RequestBilling, StreamHandle, UpstreamError};
 use super::{Bytes, Session, Value, output::Output};
+use crate::gateway::credentials::{CredentialManager, CredentialProvider};
+use crate::gateway::execution_plan::{ExecutionPlan, Requirements};
+use crate::gateway::ingress::Ingress;
 use crate::gateway::oauth_cred;
 use futures::{StreamExt, TryStreamExt};
+use okapi_providers::registry::WireTransport;
 use okapi_providers::{
     Outbound,
     oauth::codex,
@@ -59,10 +63,24 @@ impl Policy {
         }
     }
     pub fn allows(self, transport: &Transport, cand: &ChannelCandidate) -> bool {
-        let enabled = |name| cand.capabilities.get(name).and_then(Value::as_bool) != Some(false);
+        let Ok(plan) =
+            ExecutionPlan::compile(Ingress::Responses, cand, "", Requirements::default())
+        else {
+            return false;
+        };
+        if !plan.websocket_ingress() {
+            return false;
+        }
         match transport {
-            Transport::Native(_) => self != Self::Http && enabled("responses_websocket"),
-            Transport::Http => self != Self::Native && enabled("responses_http"),
+            Transport::Native(_) => {
+                self != Self::Http
+                    && plan
+                        .supports_transport(WireTransport::ResponsesWebSocket, &cand.capabilities)
+            }
+            Transport::Http => {
+                self != Self::Native
+                    && plan.supports_transport(WireTransport::Http, &cand.capabilities)
+            }
         }
     }
     pub fn prefer_http(self, cand: &ChannelCandidate) -> bool {
@@ -86,16 +104,10 @@ async fn credentials(
     cand: &ChannelCandidate,
 ) -> Result<Credentials, UpstreamError> {
     let outbound = oauth_cred::outbound_with_client(cand, &bill.client_headers);
-    let credential = if cand.provider == "codex" {
-        Some(oauth_cred::fresh_credential(&bill.state, cand).await?)
-    } else {
-        None
-    };
-    let token = credential
-        .as_ref()
-        .map_or(cand.credential.as_str(), |c| c.access_token.as_str());
+    let credential = CredentialManager.resolve(&bill.state, cand).await?;
+    let token = credential.material();
     let mut headers = vec![("authorization".into(), format!("Bearer {token}"))];
-    if let Some(credential) = credential {
+    if let Some(credential) = credential.oauth() {
         let has = |name: &str| {
             outbound
                 .extra_headers
@@ -108,18 +120,18 @@ async fn credentials(
         if !has("openai-beta") {
             headers.push(("openai-beta".into(), "responses=experimental".into()));
         }
-        if let Some(account) = credential.account_id {
-            headers.push(("chatgpt-account-id".into(), account));
+        if let Some(account) = &credential.account_id {
+            headers.push(("chatgpt-account-id".into(), account.clone()));
         }
     }
     let base = cand
         .api_base
         .as_deref()
-        .unwrap_or(if cand.provider == "codex" {
-            codex::DEFAULT_API_BASE
-        } else {
-            super::super::DEFAULT_OPENAI_BASE
-        });
+        .or_else(|| {
+            okapi_providers::registry::lookup(&cand.provider)
+                .and_then(|adapter| adapter.default_base)
+        })
+        .ok_or_else(|| UpstreamError::Build("upstream_api_base_missing".to_owned()))?;
     Ok(Credentials {
         headers,
         outbound,
@@ -133,7 +145,8 @@ pub(super) async fn connect(
 ) -> Result<Transport, UpstreamError> {
     if cand.provider == "codex" {
         cand.credential = oauth_cred::fresh_credential(&bill.state, cand)
-            .await?
+            .await
+            .map_err(oauth_cred::unavailable)?
             .to_plaintext();
     }
     let first = connect_once(bill, cand).await;

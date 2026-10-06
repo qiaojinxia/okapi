@@ -61,6 +61,11 @@ pub struct AuthedKey {
 }
 
 impl AuthedKey {
+    /// Acting identity is independent of the shared billing wallet.
+    #[must_use]
+    pub fn actor_user_id(&self) -> i64 {
+        self.member_user_id.unwrap_or(self.user_id)
+    }
     #[must_use]
     pub fn is_usable(&self, now: DateTime<Utc>) -> bool {
         self.key_status == 1 && self.user_status == 1 && self.expires_at.is_none_or(|at| at > now)
@@ -142,6 +147,7 @@ impl AuthedKey {
 }
 
 /// 按 key 哈希查找（SHA-256 hex；明文不落库）。
+#[allow(clippy::too_many_lines)] // One joined identity snapshot, including delegated team ownership.
 pub async fn find_key_by_hash(
     pool: &PgPool,
     key_hash: &str,
@@ -216,15 +222,33 @@ pub async fn find_key_by_hash(
     } else {
         false
     };
+    // Team keys authenticate the member as well as the wallet. Removing a
+    // membership or banning its user must disable their delegated credentials.
+    let member = if let Some(r) = &row
+        && let Some(id) = r.member_user_id
+    {
+        let found: Option<(i16, i16, Option<serde_json::Value>)> = sqlx::query_as(
+            "SELECT u.status,u.role,ar.permissions FROM users u JOIN team_members tm ON tm.member_user_id=u.id AND tm.team_user_id=$1 LEFT JOIN admin_roles ar ON ar.id=u.admin_role_id WHERE u.id=$2 AND u.deleted_at IS NULL"
+        ).bind(r.user_id).bind(id).fetch_optional(pool).await?;
+        let Some(found) = found else { return Ok(None) };
+        Some(found)
+    } else {
+        None
+    };
     row.map(|r| {
+        let (member_status, role, policy) = member.unwrap_or((1, r.role, r.admin_permissions));
         Ok(AuthedKey {
             key_id: r.key_id,
             quota_limited,
             user_id: r.user_id,
             key_status: r.key_status,
-            user_status: r.user_status,
-            role: r.role,
-            permissions: parse_policy(r.admin_permissions)?,
+            user_status: if member_status == 1 {
+                r.user_status
+            } else {
+                member_status
+            },
+            role,
+            permissions: parse_policy(policy)?,
             pool_code: Some(r.pool_code),
             pool_strategy: r.pool_strategy,
             pool_fallback: r.pool_fallback,

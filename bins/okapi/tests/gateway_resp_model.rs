@@ -2,6 +2,9 @@
 //! 响应模型有价 → 按其倍率计费并记账；无价 → 回退请求 canonical；
 //! 未开开关 → 不受响应模型影响。依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -57,7 +60,7 @@ struct TestEnv {
 
 /// 请求模型倍率 1.0/1.0；`up-<model>` 若 seed_upstream_price 则 3.0/1.0（金额差 3 倍）。
 async fn setup(bill_by_response_model: bool, seed_upstream_price: bool) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -124,6 +127,7 @@ async fn setup(bill_by_response_model: bool, seed_upstream_price: bool) -> TestE
         .unwrap();
     }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

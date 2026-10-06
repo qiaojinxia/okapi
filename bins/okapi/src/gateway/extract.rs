@@ -26,6 +26,26 @@ use serde::de::DeserializeOwned;
 /// `axum::extract::Query` 的替身：`Query(q): Query<T>` 用法不变，拒绝回 `AppError`。
 pub struct Query<T>(pub T);
 
+/// Route parameter rejection uses the same JSON contract as query/body rejection.
+pub struct Path<T>(pub T);
+
+impl<T, S> FromRequestParts<S> for Path<T>
+where
+    T: DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        axum::extract::Path::<T>::from_request_parts(parts, state)
+            .await
+            .map(|axum::extract::Path(inner)| Self(inner))
+            .map_err(|error| {
+                tracing::debug!(%error, "bad route parameters");
+                AppError::bad_request().with_param("path")
+            })
+    }
+}
+
 impl<T, S> FromRequestParts<S> for Query<T>
 where
     T: DeserializeOwned + Send,

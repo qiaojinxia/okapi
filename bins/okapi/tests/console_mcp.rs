@@ -16,7 +16,7 @@ struct TestEnv {
 }
 
 async fn setup() -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -37,6 +37,9 @@ async fn setup() -> TestEnv {
         let ch = okapi_store::ChClient::new(url, &database).unwrap();
         ch.ensure_schema().await.unwrap();
         state.ch = Some(ch);
+    } else if let Some(ch) = &state.ch {
+        // Do not rely on another suite or a live worker having bootstrapped CH.
+        ch.ensure_schema().await.unwrap();
     }
     let app = console::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

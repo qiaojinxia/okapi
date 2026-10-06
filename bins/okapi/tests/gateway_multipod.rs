@@ -16,7 +16,7 @@ use okapi_store::channels::ResolvedModel;
 use uuid::Uuid;
 
 async fn build() -> gateway::state::AppState {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let nats = std::env::var("OKAPI_NATS_URL").ok();

@@ -4,19 +4,21 @@
 //! `?beta=true`、`anthropic-beta` 必含三个 Claude Code 标记、system 首元素须是 Claude Code 自述句。
 //! 其余（SSE 事件、usage）完全一致，所以传输直接复用 `anthropic::send_messages_at`。
 //!
-//! 两种出向形态（`mimic` 参数选择）：
-//! - `None`（缺省，透传）：只发上游为这条路径**要求**的东西，客户端身份头由 `Outbound.extra_headers`
-//!   透传——前面站着真实 Claude Code / Codex CLI 时用这个；
-//! - `Some(identity)`（`channels.settings.mimic_cc` 开启）：网关替客户端伪造完整 CLI 身份
-//!   （全量 beta、`claude-cli` UA、x-stainless 套件、system billing 块、metadata.user_id），
-//!   供非官方客户端走订阅额度；对抗性工程，见 [`super::cc_mimic`]。
+//! 两种出向形态：
+//! - 未配置客户端扩展（缺省，透传）：只发上游为这条路径**要求**的东西，客户端身份头由
+//!   `Outbound.extra_headers` 透传——前面站着真实 Claude Code / Codex CLI 时用这个；
+//! - 配置了 `extensions.client_profile`：由 [`crate::profiles`] 按最新抓包的 Claude Code
+//!   客户端整形（UA、beta、system billing 块、metadata.user_id、cch），供非官方客户端走订阅额度。
 //!
 //! 端点与 scope 跟随 Claude Code CLI（2026-09 对照 Sub2API 与实测：旧 `console.anthropic.com`
 //! 回调页已 301 到 `platform.claude.com`）。
 
-use super::{Pkce, Tokens, cc_mimic, form_encode, parse_tokens, token_outbound};
+pub mod account;
+
+use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
 use crate::anthropic::{ANTHROPIC_VERSION, MessagesResponse, classify, send_messages_at};
 use crate::error::UpstreamError;
+use crate::profiles::identity::BETA_TOKEN_COUNTING;
 use bytes::Bytes;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -190,20 +192,41 @@ fn merge_with(required: &[&str], existing: Option<&str>) -> String {
 
 /// 客户端（经透传进 `extra_headers`）自带的 `anthropic-beta` 并进必备集合，并从透传头里摘掉——
 /// reqwest 的 `header()` 是追加不是覆盖，留着会发出两行同名头。
-fn take_beta(outbound: &crate::http::Outbound) -> (crate::http::Outbound, String) {
+fn take_beta(
+    outbound: &crate::http::Outbound,
+    client_betas_complete: bool,
+) -> (crate::http::Outbound, String) {
     let mut outbound = outbound.clone();
     let client_beta = outbound
         .extra_headers
         .iter()
         .position(|(k, _)| k.eq_ignore_ascii_case("anthropic-beta"))
         .map(|i| outbound.extra_headers.remove(i).1);
-    let merged = merge_beta(client_beta.as_deref());
+    let merged = if client_betas_complete && client_beta.is_some() {
+        // Preserve observed main/auxiliary sets; authentication adds OAuth, not client features.
+        let mut parts: Vec<&str> = client_beta
+            .as_deref()
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !parts.contains(&"oauth-2025-04-20") {
+            parts.insert(
+                usize::from(parts.first() == Some(&"claude-code-20250219")),
+                "oauth-2025-04-20",
+            );
+        }
+        parts.join(",")
+    } else {
+        merge_beta(client_beta.as_deref())
+    };
     (outbound, merged)
 }
 
 /// 用订阅 access token 发一次 Messages（`body` 已是 Anthropic 形状，`prepare_body` 在此内部完成）。
-/// `mimic` = `Some` 时走全伪装（body 换 [`cc_mimic::prepare_body`]、beta 换全量、身份头伪造并
-/// 摘掉透传头里的同键冲突），`None` 保持透传形态。
+/// 渠道配置了客户端扩展（`extensions.client_profile`）时由 [`crate::profiles`] 整形请求，
+/// `account_id`（凭证里的账号 UUID）进入模拟身份；未配置时保持透传形态。
 pub async fn messages(
     http: &crate::http::HttpPool,
     api_base: &str,
@@ -211,30 +234,29 @@ pub async fn messages(
     body: Bytes,
     stream: bool,
     outbound: &crate::http::Outbound,
-    mimic: Option<&cc_mimic::MimicIdentity>,
+    account_id: Option<&str>,
 ) -> Result<MessagesResponse, UpstreamError> {
     let url = format!("{}/messages?beta=true", api_base.trim_end_matches('/'));
-    let body = match mimic {
-        Some(id) => Bytes::from(cc_mimic::prepare_body(&body, id)?),
-        None => Bytes::from(prepare_body(&body)?),
+    let prepared = crate::profiles::prepare_anthropic(body, stream, false, outbound, account_id)?;
+    let shaped = prepared.shaped;
+    let body = if shaped {
+        prepared.body
+    } else {
+        Bytes::from(prepare_body(&prepared.body)?)
     };
     let bearer = format!("Bearer {access_token}");
-    let (mut outbound, client_beta) = take_beta(outbound);
-    let beta = match mimic {
-        Some(_) => cc_mimic::merge_full_betas(Some(client_beta.as_str())),
-        None => merge_beta(Some(client_beta.as_str())),
+    let (outbound, client_beta) = take_beta(&prepared.outbound, prepared.client_betas_complete);
+    let beta = if shaped {
+        client_beta
+    } else {
+        merge_beta(Some(client_beta.as_str()))
     };
-    if mimic.is_some() {
-        outbound = cc_mimic::strip_forged_keys(outbound);
-    }
     let mut headers: Vec<(String, String)> = vec![
         ("authorization".to_owned(), bearer),
         ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
         ("anthropic-beta".to_owned(), beta),
     ];
-    if let Some(id) = mimic {
-        headers.extend(cc_mimic::forge_headers(id, stream));
-    }
+    headers.extend(prepared.headers);
     let header_refs: Vec<(&str, &str)> = headers
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -249,24 +271,27 @@ pub async fn count_tokens(
     access_token: &str,
     body: Bytes,
     outbound: &crate::http::Outbound,
-    mimic: Option<&cc_mimic::MimicIdentity>,
+    account_id: Option<&str>,
 ) -> Result<Bytes, UpstreamError> {
     let url = format!(
         "{}/messages/count_tokens?beta=true",
         api_base.trim_end_matches('/')
     );
-    let body = match mimic {
-        Some(id) => Bytes::from(cc_mimic::prepare_body(&body, id)?),
-        None => Bytes::from(prepare_body(&body)?),
+    let prepared = crate::profiles::prepare_anthropic(body, false, true, outbound, account_id)?;
+    let shaped = prepared.shaped;
+    let body = if shaped {
+        prepared.body
+    } else {
+        Bytes::from(prepare_body(&prepared.body)?)
     };
-    let (mut outbound, client_beta) = take_beta(outbound);
-    let beta = match mimic {
-        Some(_) => cc_mimic::merge_count_betas(Some(client_beta.as_str())),
-        None => merge_beta(Some(client_beta.as_str())),
+    let (outbound, client_beta) = take_beta(&prepared.outbound, prepared.client_betas_complete);
+    let beta = if shaped && prepared.client_betas_complete {
+        merge_with(&[], Some(&format!("{client_beta},{BETA_TOKEN_COUNTING}")))
+    } else if shaped {
+        merge_beta(Some(&format!("{client_beta},{BETA_TOKEN_COUNTING}")))
+    } else {
+        merge_beta(Some(client_beta.as_str()))
     };
-    if mimic.is_some() {
-        outbound = cc_mimic::strip_forged_keys(outbound);
-    }
     let mut req = http
         .post(&outbound, url)?
         .header("authorization", format!("Bearer {access_token}"))
@@ -275,22 +300,23 @@ pub async fn count_tokens(
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .timeout(Duration::from_mins(2))
         .body(body);
-    if let Some(id) = mimic {
-        for (k, v) in cc_mimic::forge_headers(id, false) {
-            req = req.header(k.as_str(), v.as_str());
-        }
+    for (k, v) in prepared.headers {
+        req = req.header(k.as_str(), v.as_str());
     }
     let resp = req.send().await.map_err(|e| classify(&e))?;
     let status = resp.status().as_u16();
-    let bytes = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
     if !(200..300).contains(&status) {
+        let retry_after_secs = crate::retry_after::seconds(resp.headers());
+        let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+            .await
+            .unwrap_or_default();
         return Err(UpstreamError::Status {
             status,
-            body: bytes,
-            retry_after_secs: None,
+            body,
+            retry_after_secs,
         });
     }
-    Ok(bytes)
+    crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await
 }
 
 #[cfg(test)]
@@ -367,13 +393,30 @@ mod tests {
                     "context-1m-2025-08-07".to_owned(),
                 ),
             ],
+            ..Default::default()
         };
-        let (stripped, beta) = take_beta(&outbound);
+        let (stripped, beta) = take_beta(&outbound, false);
         assert_eq!(beta, format!("{required},context-1m-2025-08-07"));
         assert_eq!(
             stripped.extra_headers,
             vec![("user-agent".to_owned(), "claude-cli/1.0".to_owned())],
             "合并后透传头里不再有 anthropic-beta，避免发两行"
         );
+    }
+
+    #[test]
+    fn modern_auxiliary_profile_adds_oauth_without_main_client_features() {
+        let mut outbound = crate::Outbound::default();
+        outbound.extra_headers.push((
+            "anthropic-beta".into(),
+            "interleaved-thinking-2025-05-14,structured-outputs-2025-12-15".into(),
+        ));
+        let (outbound, beta) = take_beta(&outbound, true);
+        assert_eq!(
+            beta,
+            "oauth-2025-04-20,interleaved-thinking-2025-05-14,structured-outputs-2025-12-15"
+        );
+        assert!(outbound.extra_headers.is_empty());
+        assert!(!beta.contains("claude-code-20250219"));
     }
 }

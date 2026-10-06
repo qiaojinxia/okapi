@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH prev AS (SELECT id, exit_ip AS old_ip FROM proxies WHERE id = $1 FOR UPDATE)\n        UPDATE proxies p SET\n            exit_ip        = CASE WHEN $2 THEN COALESCE($3, p.exit_ip) ELSE p.exit_ip END,\n            exit_country   = CASE WHEN $2 AND $3 IS NOT NULL THEN $4 ELSE p.exit_country END,\n            latency_ms     = CASE WHEN $2 THEN $5 ELSE p.latency_ms END,\n            -- 后台探测成功不抹掉熔断中的那条失败原因（手动测试成功会一并清熔断，可以清）\n            last_error     = CASE\n                                 WHEN $2 AND ($7 OR p.cooldown_until IS NULL OR p.cooldown_until <= now())\n                                     THEN NULL\n                                 WHEN $2 THEN p.last_error\n                                 ELSE $6\n                             END,\n            previous_exit_ip = CASE WHEN $2 AND $3 IS NOT NULL AND prev.old_ip IS NOT NULL\n                                         AND prev.old_ip <> $3\n                                    THEN prev.old_ip ELSE p.previous_exit_ip END,\n            exit_ip_changed_at = CASE WHEN $2 AND $3 IS NOT NULL AND prev.old_ip IS NOT NULL\n                                           AND prev.old_ip <> $3\n                                      THEN now() ELSE p.exit_ip_changed_at END,\n            failed_count   = CASE WHEN $2 AND $7 THEN 0 ELSE p.failed_count END,\n            cooldown_until = CASE WHEN $2 AND $7 THEN NULL ELSE p.cooldown_until END,\n            checked_at     = now(),\n            updated_at     = now()\n        FROM prev\n        WHERE p.id = prev.id\n        RETURNING prev.old_ip AS \"old_ip?\", p.exit_ip AS \"new_ip?\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "old_ip?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "exit_ip"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "new_ip?",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "exit_ip"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Varchar",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "68e694d990bc3ca14cf9888f5f50c026c8df0127ea7b07dff9a6856a0931e162"
+}

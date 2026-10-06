@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT COUNT(*)::bigint AS \"c!\" FROM api_keys\n           WHERE user_id = $1 AND deleted_at IS NULL AND ($2::bigint IS NULL OR id=$2)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "c!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "73d1b677f6a765b479deb7af86619eb88e6e8eb0f0307152585b6a97311eb9fb"
+}

@@ -180,11 +180,16 @@ impl Trace {
             data.attempt_recorded = false;
             return;
         }
-        attempts.push(json!({
+        let mut attempt = json!({
             "channel_id": candidate.channel_id, "channel_key_id": candidate.channel_key_id,
             "provider": candidate.provider, "upstream_model": bounded(model, 256),
             "upstream_endpoint": bounded(endpoint, 256),
-        }));
+        });
+        // 这次尝试走的出口代理（§11.41）；直连不记。门户日志的 `public` 白名单不含 attempts
+        if let Some(proxy) = candidate.egress_proxy_id {
+            attempt["egress_proxy_id"] = json!(proxy);
+        }
+        attempts.push(attempt);
         data.attempt_started = Some(Instant::now());
         data.attempt_recorded = true;
     }
@@ -265,7 +270,7 @@ pub(crate) fn phase(code: &str) -> &'static str {
     match code {
         "no_available_channel" | "margin_blocked" | "unsupported_endpoint" => "routing",
         "insufficient_quota" | "rate_limited" | "overloaded" => "admission",
-        "upstream_timeout" => "network",
+        "upstream_timeout" | "client_closed_request" => "network",
         _ if code.starts_with("upstream") || code.starts_with("batch_") => "upstream",
         _ => "internal",
     }
@@ -289,8 +294,13 @@ fn error_details(error: &UpstreamError, secrets: &[String]) -> (&'static str, St
                 .unwrap_or_else(|| error.error_code());
             ("upstream", message.to_owned())
         }
-        UpstreamError::Timeout => ("network", "upstream_timeout".into()),
-        UpstreamError::Connect(_) => ("network", "upstream_connect".into()),
+        UpstreamError::Timeout
+        | UpstreamError::Unreachable {
+            timed_out: true, ..
+        } => ("network", "upstream_timeout".into()),
+        UpstreamError::Connect(_) | UpstreamError::Unreachable { .. } => {
+            ("network", "upstream_connect".into())
+        }
         UpstreamError::Stream(reason) => ("stream", reason.clone()),
         UpstreamError::Session { reason, .. } => ("stream", (*reason).into()),
         UpstreamError::Build(reason) => ("request", reason.clone()),

@@ -9,6 +9,7 @@ import { ModelMetadataFields } from './ModelMetadataFields'
 import { ModelOptionsSection } from './ModelOptionsSection'
 import { ModelTemplatePicker } from './ModelTemplatePicker'
 import { ModelPresetSummary } from './ModelPresetSummary'
+import { ModelPriceOverview } from './ModelPriceOverview'
 import { ModelRateField } from './ModelRateField'
 import { pricingDisabledReason, type PricingAxis } from './model-pricing-availability'
 import { MODEL_PRESETS, findModelPreset, presetCache, presetMetadata, referencePriceAvailable, type ModelPreset } from './model-presets'
@@ -123,14 +124,15 @@ export function ModelDrawer({
     setIndependent((previous) => ({ ...Object.fromEntries(Object.entries(previous)
       .filter(([key]) => key !== 'cache_write_5m' && key !== 'cache_write_1h')), ...cache.ttl }))
   }
-  const applyPreset = (preset: ModelPreset) => {
-    setName(preset.id); setMetadata(presetMetadata(preset)); setAppliedPreset(preset); setTemplateSource('')
+  // `id` may be an official alias of the preset (e.g. a dated Claude snapshot ID); keep what was chosen.
+  const applyPreset = (preset: ModelPreset, id = preset.id) => {
+    setName(id); setMetadata(presetMetadata(preset)); setAppliedPreset(preset); setTemplateSource('')
     changePresetCache(preset)
     // Selecting a specification never replaces entered input/output prices or routing.
   }
   const changeName = (value: string) => {
     setName(value)
-    if (appliedPreset && value !== appliedPreset.id) {
+    if (appliedPreset && value !== appliedPreset.id && !appliedPreset.aliases?.includes(value)) {
       setAppliedPreset(null); setMetadata(metadataDraft()); changePresetCache()
     }
   }
@@ -205,8 +207,15 @@ export function ModelDrawer({
             browseOnFocus
             placeholder={t('admin:modelPreset.placeholder')}
             onChange={changeName}
-            onChoose={(id) => { const preset = matchingPresets.find((preset) => preset.id === id); if (preset) applyPreset(preset) }}
-            options={matchingPresets.map((preset) => ({ value: preset.id, label: preset.displayName, description: preset.vendor }))}
+            onChoose={(id) => {
+              const preset = matchingPresets.find((preset) => preset.id === id || preset.aliases?.includes(id))
+              if (preset) applyPreset(preset, id)
+            }}
+            options={matchingPresets.flatMap((preset) => [
+              { value: preset.id, label: preset.displayName, description: preset.vendor },
+              ...(preset.aliases ?? []).map((alias) => ({ value: alias, label: preset.displayName,
+                description: t('admin:modelPreset.snapshotId', { vendor: preset.vendor }) })),
+            ])}
             emptyHint={t('admin:modelPreset.customHint')}
           />
         </div>
@@ -235,7 +244,10 @@ export function ModelDrawer({
           {!conversion && <p role="alert" className="text-xs leading-5 text-destructive">{t('admin:modelSimple.priceInvalid')}</p>}
           {conversion?.approximate && <p role="status" className="rounded-lg bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
             {t('admin:modelSimple.priceRounded', { input: conversion.effective.input, output: conversion.effective.output })}</p>}
-          <p className="text-xs leading-5 text-muted-foreground">{t('admin:modelSimple.baseHint', { price: basePriceMicro / 1_000_000 })}</p>
+          {conversion ? <ModelPriceOverview basePriceMicro={basePriceMicro} axes={axes} independent={independent}
+            cacheApplicable={!pricingDisabledReason(metadata, 'cache_ratio')} preset={referencePreset}
+            note={t('admin:modelSimple.baseHint', { price: basePriceMicro / 1_000_000 })} />
+            : <p className="text-xs leading-5 text-muted-foreground">{t('admin:modelSimple.baseHint', { price: basePriceMicro / 1_000_000 })}</p>}
         </>}
         {mode === 'tiered' && <>
           <div className="flex flex-col gap-1.5"><Label htmlFor="m-tier-expr">{t('admin:tierExpr')}</Label>
@@ -360,7 +372,7 @@ export function ModelDrawer({
       </ModelOptionsSection>
       </div>
       </ModelOptionsSection>
-      {!valid && <p role="status" className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{t('admin:modelMeta.validationHint')}</p>}
+      {!valid && name.trim() !== '' && <p role="status" className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">{t('admin:modelMeta.validationHint')}</p>}
       </div>
     </Drawer>
   )

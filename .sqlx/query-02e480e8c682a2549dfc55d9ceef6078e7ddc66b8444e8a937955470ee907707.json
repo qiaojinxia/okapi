@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT url_ciphertext FROM proxies WHERE id = $1 AND status = 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "url_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "proxies",
+            "name": "url_ciphertext"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "02e480e8c682a2549dfc55d9ceef6078e7ddc66b8444e8a937955470ee907707"
+}

@@ -17,6 +17,7 @@ import { ModelShareView } from '@/features/portal-overview/ModelShareView'
 import { SpendTrendView } from '@/features/portal-overview/SpendTrendView'
 import { TokenMixView } from '@/features/portal-overview/TokenMixView'
 import { UsageOverview } from '@/features/portal-overview/UsageOverview'
+import { cacheHit } from '@/features/portal-overview/cache-metrics'
 import type { BreakdownResp, Scope } from '@/features/portal-overview/types'
 import { runwayDays } from '@/features/portal-overview/types'
 import { GettingStartedCard } from '@/features/portal-guide/GettingStartedCard'
@@ -182,7 +183,11 @@ export function PortalOverviewPage() {
           label={t('common:tokens')}
           loading={loading}
           value={total ? formatCount(total.tokens, locale) : '—'}
-          sub={total ? t('portal:cacheHit', { v: total.prompt_tokens > 0 && total.cache_hit_bp != null ? formatBp(total.cache_hit_bp, locale) : '—' }) : ''}
+          sub={total ? (() => {
+            const hit = cacheHit(total)
+            return hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total.requests })
+              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })
+          })() : ''}
         />
         <LiveRateKpi
           live={live}

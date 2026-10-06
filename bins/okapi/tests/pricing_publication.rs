@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn drafts_stay_private_until_publication_including_reload_and_legacy_snapshots() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let url = std::env::var("DATABASE_URL").unwrap();
     let redis = std::env::var("OKAPI_REDIS_URL").unwrap();
     let admin = okapi_store::connect_pg(&url).await.unwrap();

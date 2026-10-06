@@ -118,7 +118,7 @@ pub async fn settle(
     let funded = if hold.status == Status::Pending {
         // Persist before Redis IO; loss of the seal acknowledgement must not allow re-entry.
         sqlx::query("UPDATE balance_holds SET cancel_requested=TRUE,updated_at=now() WHERE id=$1 AND user_id=$2 AND state='pending'")
-            .bind(hold.id).bind(hold.user_id).execute(guard.connection()).await?;
+            .bind(hold.id).bind(hold.user_id).execute(guard.connection()?).await?;
         if let Some(receipt) = hot::seal(ledger, &hold).await? {
             hold.pool = Some(receipt.pool);
             hold.source_window = (receipt.pool == 1).then_some(receipt.epoch);
@@ -168,7 +168,7 @@ pub async fn settle(
         BillingState::Reserved => return Err(LedgerError::InvalidHold("settlement_state")),
     };
     let actual = input.amount.as_micros();
-    let mut tx = guard.connection.begin().await?;
+    let mut tx = guard.connection()?.begin().await?;
     if !record_settlement_in_tx(&mut tx, input).await? {
         return Err(LedgerError::HoldConflict);
     }

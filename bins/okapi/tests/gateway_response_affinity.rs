@@ -1,4 +1,7 @@
 //! 真实 PG/Redis + 两个独立模拟上游：从网关返回的 ID 发起续聊，不预填绑定。
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::{
     Router,
     body::Bytes,
@@ -122,7 +125,7 @@ struct Env {
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = std::env::var("DATABASE_URL").unwrap();
     let redis = std::env::var("OKAPI_REDIS_URL").unwrap();
     let redis_client = okapi_store::connect_redis(&redis).await.unwrap();
@@ -168,6 +171,7 @@ async fn setup() -> Env {
     .unwrap();
     sqlx::query(r#"UPDATE channels SET priority=CASE WHEN id=$1 THEN 100 ELSE 1 END, retry_policy='{"same_key_retries":0}'::jsonb WHERE id=ANY($2)"#)
         .bind(channel).bind(vec![channel, secondary]).execute(&pg).await.unwrap();
+    published_pricing::publish(&pg, user).await;
     let state = gateway::build_state(&database, &redis, "affinity-test", None, None)
         .await
         .unwrap();
@@ -603,6 +607,7 @@ async fn oauth_refresh_keeps_account_identity_but_account_and_endpoint_changes_d
         refresh_token: "refresh-one".to_owned(),
         expires_at: 1,
         account_id: Some("account-one".to_owned()),
+        account_label: None,
     };
     candidate.credential = cred.to_plaintext();
     let original = ResponseBinding::from_candidate(&candidate);
@@ -700,6 +705,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
         .execute(&env.state.pg)
         .await
         .unwrap();
+    published_pricing::publish(&env.state.pg, env.user).await;
     let state = gateway::build_state(
         &std::env::var("DATABASE_URL").unwrap(),
         &std::env::var("OKAPI_REDIS_URL").unwrap(),
@@ -724,7 +730,14 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
         .execute(&env.state.pg)
         .await
         .unwrap();
-    assert!(env.state.sched.acquire_slot(env.channel_key, Some(1)).await);
+    let occupied = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+        &env.state.sched,
+        env.channel_key,
+        Some(1),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     env.clear();
     let before = env.balance().await;
     assert_eq!(
@@ -739,7 +752,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
             .status(),
         429
     );
-    env.state.sched.release_slot(env.channel_key, Some(1)).await;
+    occupied.release().await;
     env.idle().await;
     assert!(env.calls().is_empty());
     assert_eq!(env.balance().await, before);

@@ -13,6 +13,9 @@ use uuid::Uuid;
 #[path = "support/durable_sync.rs"]
 mod durable_sync;
 
+#[path = "support/refund_provenance.rs"]
+mod refund_provenance;
+
 struct Bed {
     pg: PgPool,
     user_id: i64,
@@ -20,7 +23,7 @@ struct Bed {
 }
 
 async fn bed() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
@@ -60,7 +63,7 @@ impl Bed {
             api_key_id: self.key_id,
             group_code: "default",
             model_name: "gpt-5",
-            channel_id: Some(1),
+            channel_id: Some(self.user_id),
             channel_key_id: Some(11),
             state: BillingState::Committed,
             usage: TokenUsage {
@@ -213,7 +216,10 @@ async fn assert_committed_record(bed: &Bed, rid: Uuid) {
         "INET 列真的落了"
     );
     assert_eq!(rec.pool, 0);
-    assert_eq!((rec.channel_id, rec.channel_key_id), (Some(1), Some(11)));
+    assert_eq!(
+        (rec.channel_id, rec.channel_key_id),
+        (Some(bed.user_id), Some(11))
+    );
     let details: serde_json::Value =
         sqlx::query_scalar("SELECT usage_details FROM billing_records WHERE request_id=$1")
             .bind(rid)
@@ -300,6 +306,10 @@ async fn settlement_lands_record_event_snapshot_key_usage_and_outbox_consistentl
 #[tokio::test]
 async fn replaying_a_settled_request_writes_nothing() {
     let bed = bed().await;
+    let tokens_before = okapi_store::channel_usage::token_snapshot(&bed.pg, bed.user_id, "total")
+        .await
+        .unwrap()
+        .tokens;
     record_credit(
         &bed.pg,
         bed.user_id,
@@ -319,6 +329,7 @@ async fn replaying_a_settled_request_writes_nothing() {
     let mut replay = bed.committed(rid);
     replay.amount = Money::from_micros(999_999);
     replay.delta_micro = -999_999;
+    replay.usage.prompt_tokens = 9000;
     record_settlement(&bed.pg, replay).await.unwrap();
 
     let records: i64 = sqlx::query_scalar!(
@@ -334,6 +345,14 @@ async fn replaying_a_settled_request_writes_nothing() {
     assert_eq!(bed.outbox(rid).await.len(), 1, "重放不得再进 outbox");
     assert_eq!(bed.wallet_snapshot().await, 10_000 - 240, "快照只扣一次");
     assert_eq!(bed.key_used().await.0, 240, "key 用量只加一次");
+    assert_eq!(
+        okapi_store::channel_usage::token_snapshot(&bed.pg, bed.user_id, "total")
+            .await
+            .unwrap()
+            .tokens,
+        tokens_before + 130,
+        "settlement replay must not count tokens twice"
+    );
 }
 
 /// 同一笔的**并发**结算也只落一次。上一条测的是先后重放；并发时两个事务会同时看到

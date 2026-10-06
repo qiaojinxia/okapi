@@ -9,6 +9,21 @@ const PAYLOADS: &str = "settlement:{retry}:payloads";
 const ORDER: &str = "settlement:{retry}:order";
 const ATTEMPTS: &str = "settlement:{retry}:attempts";
 const QUARANTINE: &str = "settlement:{retry}:quarantine";
+
+fn keys(state: &AppState) -> [std::borrow::Cow<'static, str>; 4] {
+    #[cfg(not(test))]
+    let _ = state;
+    #[cfg(test)]
+    if !state.settlement_journal_tag.is_empty() {
+        return ["payloads", "order", "attempts", "quarantine"].map(|suffix| {
+            std::borrow::Cow::Owned(format!(
+                "settlement:{{{}}}:{suffix}",
+                state.settlement_journal_tag
+            ))
+        });
+    }
+    [PAYLOADS, ORDER, ATTEMPTS, QUARANTINE].map(std::borrow::Cow::Borrowed)
+}
 const MAX_PAYLOAD_BYTES: usize = 262_144;
 const SAVE: &str = "
 local order_type=redis.call('TYPE',KEYS[2]).ok
@@ -28,7 +43,44 @@ fn configured_limit(name: &str, default: i64, max: i64) -> i64 {
         .unwrap_or(default)
 }
 
+/// 结算开始前留底的宽限期：正常落账会在此之前把它删掉，worker 只接手真正卡住或进程
+/// 已退出的那些。没有宽限时 worker 每秒都会和仍在进行的结算抢同一用户锁、重复做 PG 工作，
+/// 赢了还会让网关跳过渠道 key 的消费反馈（日消费上限因此少计）。
+const IN_FLIGHT_GRACE_MS: i64 = 120_000;
+
+/// 留底并立即交给 worker（网关自己的重试已失败，或调用方明确要立刻重放）。
 pub async fn save(state: &AppState, input: &SettlementInput<'_>) -> anyhow::Result<()> {
+    save_at(state, input, chrono::Utc::now().timestamp_millis()).await
+}
+
+/// 结算进行中的留底：宽限期过后才对 worker 可见。
+pub async fn save_in_flight(state: &AppState, input: &SettlementInput<'_>) -> anyhow::Result<()> {
+    let due = chrono::Utc::now()
+        .timestamp_millis()
+        .saturating_add(IN_FLIGHT_GRACE_MS);
+    save_at(state, input, due).await
+}
+
+/// 网关自己的重试都失败了：把在途留底改为立即可接手（条目不存在时不新建）。
+pub async fn due_now(state: &AppState, id: uuid::Uuid) -> anyhow::Result<()> {
+    let [_, order, _, _] = keys(state);
+    let _: i64 = state
+        .sched
+        .client()
+        .eval(
+            "return redis.call('ZADD',KEYS[1],'XX',ARGV[1],ARGV[2])",
+            vec![order.as_ref()],
+            vec![
+                chrono::Utc::now().timestamp_millis().to_string(),
+                id.to_string(),
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn save_at(state: &AppState, input: &SettlementInput<'_>, due_ms: i64) -> anyhow::Result<()> {
+    let [payloads, order, _, quarantine] = keys(state);
     let payload = serde_json::to_string(input)?;
     anyhow::ensure!(
         payload.len() <= MAX_PAYLOAD_BYTES,
@@ -39,11 +91,11 @@ pub async fn save(state: &AppState, input: &SettlementInput<'_>) -> anyhow::Resu
         .client()
         .eval(
             SAVE,
-            vec![PAYLOADS, ORDER, QUARANTINE],
+            vec![payloads.as_ref(), order.as_ref(), quarantine.as_ref()],
             vec![
                 input.request_id.to_string(),
                 payload,
-                chrono::Utc::now().timestamp_millis().to_string(),
+                due_ms.to_string(),
                 configured_limit("OKAPI_SETTLEMENT_JOURNAL_MAX", 100_000, 1_000_000).to_string(),
             ],
         )
@@ -60,23 +112,25 @@ pub async fn remove(state: &AppState, id: uuid::Uuid) -> anyhow::Result<()> {
 }
 
 async fn remove_ids(state: &AppState, ids: Vec<String>) -> anyhow::Result<()> {
+    let [payloads, order, attempts, _] = keys(state);
     if ids.is_empty() {
         return Ok(());
     }
     let _: i64 = state.sched.client().eval(
         "for _,id in ipairs(ARGV) do redis.call('HDEL',KEYS[1],id); redis.call('ZREM',KEYS[2],id); redis.call('HDEL',KEYS[3],id) end return 1",
-        vec![PAYLOADS,ORDER,ATTEMPTS],ids,
+        vec![payloads.as_ref(),order.as_ref(),attempts.as_ref()],ids,
     ).await?;
     Ok(())
 }
 
 pub async fn recover(state: &AppState) -> anyhow::Result<usize> {
+    let [_, order, _, _] = keys(state);
     let batch = configured_limit("OKAPI_SETTLEMENT_RECOVERY_BATCH", 500, 10_000);
     let ids: Vec<String> = state
         .sched
         .client()
         .zrangebyscore(
-            ORDER,
+            order.as_ref(),
             "-inf",
             chrono::Utc::now().timestamp_millis(),
             false,
@@ -102,11 +156,13 @@ pub async fn recover(state: &AppState) -> anyhow::Result<usize> {
 }
 
 async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<String>> {
-    let Some(payload): Option<String> = state.sched.client().hget(PAYLOADS, &id).await? else {
+    let [payloads, order, attempts, _] = keys(state);
+    let Some(payload): Option<String> = state.sched.client().hget(payloads.as_ref(), &id).await?
+    else {
         // A concurrent save may have populated it since HGET. Check again atomically.
         let _: i64=state.sched.client().eval(
             "if redis.call('HEXISTS',KEYS[1],ARGV[1])==0 then redis.call('ZREM',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[3],ARGV[1]) end return 1",
-            vec![PAYLOADS,ORDER,ATTEMPTS],vec![id],
+            vec![payloads.as_ref(),order.as_ref(),attempts.as_ref()],vec![id],
         ).await?;
         return Ok(None);
     };
@@ -122,10 +178,11 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
         }
     };
     let input = owned.as_input();
-    let _permit = state.settle_gate.acquire().await?;
     let result = if input.log_type == 2 {
+        // 用户轮次与结算闸由 persist_success 按序获取
         state.persist_success(input.clone()).await
     } else {
+        let _permit = state.settle_gate.acquire().await?;
         okapi_ledger::record_settlement(&state.pg, input.clone())
             .await
             .map(|()| false)
@@ -150,6 +207,15 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
                     input.usage.total_raw(),
                 )
                 .await;
+                // 网关在这笔落账前就放弃了，不会再做渠道 key 反馈：日消费上限照样要计入
+                if let Some(channel_key) = input.channel_key_id
+                    && input.amount.as_micros() > 0
+                {
+                    state
+                        .sched
+                        .channel_key_spend_add(channel_key, input.amount.as_micros())
+                        .await;
+                }
                 state
                     .sched
                     .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
@@ -185,17 +251,19 @@ fn permanent_failure(error: &okapi_ledger::LedgerError) -> bool {
 }
 
 async fn defer(state: &AppState, id: &str) -> anyhow::Result<()> {
+    let [_, order, attempts, _] = keys(state);
     let _: i64=state.sched.client().eval(
         "local n=redis.call('HINCRBY',KEYS[2],ARGV[1],1); local wait=math.min(300000,1000*2^math.min(n,9)); redis.call('ZADD',KEYS[1],tonumber(ARGV[2])+wait,ARGV[1]); return 1",
-        vec![ORDER,ATTEMPTS],vec![id.to_owned(),chrono::Utc::now().timestamp_millis().to_string()],
+        vec![order.as_ref(),attempts.as_ref()],vec![id.to_owned(),chrono::Utc::now().timestamp_millis().to_string()],
     ).await?;
     Ok(())
 }
 
 async fn quarantine(state: &AppState, id: &str, payload: &str) -> anyhow::Result<()> {
+    let [payloads, order, attempts, quarantine] = keys(state);
     let _: i64=state.sched.client().eval(
         "local p=redis.call('HGET',KEYS[1],ARGV[1]); if p==ARGV[2] then redis.call('HSET',KEYS[3],ARGV[1],p);redis.call('HDEL',KEYS[1],ARGV[1]);redis.call('ZREM',KEYS[2],ARGV[1]);redis.call('HDEL',KEYS[4],ARGV[1]) end return 1",
-        vec![PAYLOADS,ORDER,QUARANTINE,ATTEMPTS],vec![id.to_owned(),payload.to_owned()],
+        vec![payloads.as_ref(),order.as_ref(),quarantine.as_ref(),attempts.as_ref()],vec![id.to_owned(),payload.to_owned()],
     ).await?;
     Ok(())
 }
@@ -207,7 +275,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn pg_outage_journals_usage_and_replay_charges_once() {
-        dotenvy::dotenv().ok();
+        okapi_store::test_support::assert_isolated();
         let state = crate::gateway::build_state(
             &std::env::var("DATABASE_URL").unwrap(),
             &std::env::var("OKAPI_REDIS_URL").unwrap(),
@@ -217,6 +285,8 @@ mod tests {
         )
         .await
         .unwrap();
+        let [payload_key, order, _, quarantine] = keys(&state);
+        assert_ne!(payload_key.as_ref(), PAYLOADS);
         let suffix = uuid::Uuid::new_v4().to_string();
         let user = okapi_store::provision::create_user(&state.pg, &format!("journal-{suffix}"))
             .await
@@ -235,6 +305,25 @@ mod tests {
         )
         .await
         .unwrap();
+        let (channel, channel_key) = okapi_store::provision::create_channel(
+            &state.pg,
+            &format!("journal-channel-{suffix}"),
+            "openai",
+            "http://127.0.0.1:9/v1",
+            "test-credential",
+            &["test"],
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let mut cost_snapshot = serde_json::json!({});
+        crate::gateway::upstream_cost::pin(
+            &mut cost_snapshot,
+            channel,
+            1250,
+            Money::from_micros(500),
+        );
         let id = uuid::Uuid::new_v4();
         state
             .ledger
@@ -267,8 +356,8 @@ mod tests {
             api_key_id: kid,
             group_code: "default",
             model_name: "test",
-            channel_id: None,
-            channel_key_id: None,
+            channel_id: Some(channel),
+            channel_key_id: Some(channel_key),
             state: BillingState::Committed,
             usage: TokenUsage {
                 prompt_tokens: 20,
@@ -286,7 +375,7 @@ mod tests {
             list_price: Money::from_micros(500),
             upstream_cost: None,
             pricing_epoch: None,
-            pricing_snapshot: None,
+            pricing_snapshot: Some(cost_snapshot.clone()),
             latency_ms: 1,
             ttft_ms: None,
             is_stream: false,
@@ -314,14 +403,30 @@ mod tests {
         let journal: String = state
             .sched
             .client()
-            .hget(PAYLOADS, id.to_string())
+            .hget(payload_key.as_ref(), id.to_string())
             .await
             .unwrap();
         let journal: serde_json::Value = serde_json::from_str(&journal).unwrap();
         assert_eq!(journal["usage"]["prompt_tokens"], 20);
         assert_eq!(journal["usage"]["completion_tokens"], 5);
         assert_eq!(journal["usage"]["cache_write_tokens"], 3);
+        assert_eq!(journal["upstream_cost"], 625);
+        assert_eq!(journal["pricing_snapshot"], cost_snapshot);
+        sqlx::query("UPDATE channels SET upstream_unit_cost=$2 WHERE id=$1")
+            .bind(channel)
+            .bind(serde_json::json!({"relative_cost_milli":2500}))
+            .execute(&state.pg)
+            .await
+            .unwrap();
         recover(&state).await.unwrap();
+        let persisted: (Option<i64>, serde_json::Value) = sqlx::query_as(
+            "SELECT upstream_cost_micro,pricing_snapshot FROM billing_records WHERE request_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&state.pg)
+        .await
+        .unwrap();
+        assert_eq!(persisted, (Some(625), cost_snapshot));
         assert_eq!(state.ledger.balance(user).await.unwrap().as_micros(), 9500);
         save(&state, &input).await.unwrap();
         recover(&state).await.unwrap();
@@ -349,26 +454,31 @@ mod tests {
         let remaining: Option<String> = state
             .sched
             .client()
-            .hget(PAYLOADS, id.to_string())
+            .hget(payload_key.as_ref(), id.to_string())
             .await
             .unwrap();
         assert!(remaining.is_none());
         let poison = uuid::Uuid::new_v4().to_string();
-        let _:i64=state.sched.client().eval("redis.call('HSET',KEYS[1],ARGV[1],'invalid-json');redis.call('ZADD',KEYS[2],0,ARGV[1]);return 1",vec![PAYLOADS,ORDER],vec![poison.clone()]).await.unwrap();
+        let _:i64=state.sched.client().eval("redis.call('HSET',KEYS[1],ARGV[1],'invalid-json');redis.call('ZADD',KEYS[2],0,ARGV[1]);return 1",vec![payload_key.as_ref(),order.as_ref()],vec![poison.clone()]).await.unwrap();
         recover(&state).await.unwrap();
         let quarantined: Option<String> = state
             .sched
             .client()
-            .hget(QUARANTINE, &poison)
+            .hget(quarantine.as_ref(), &poison)
             .await
             .unwrap();
         assert_eq!(quarantined.as_deref(), Some("invalid-json"));
-        let active: Option<String> = state.sched.client().hget(PAYLOADS, &poison).await.unwrap();
+        let active: Option<String> = state
+            .sched
+            .client()
+            .hget(payload_key.as_ref(), &poison)
+            .await
+            .unwrap();
         assert!(active.is_none());
         let _: i64 = state
             .sched
             .client()
-            .hdel(QUARANTINE, &poison)
+            .hdel(quarantine.as_ref(), &poison)
             .await
             .unwrap();
 
@@ -381,14 +491,14 @@ mod tests {
         let invalid_payload: Option<String> = state
             .sched
             .client()
-            .hget(QUARANTINE, invalid.request_id.to_string())
+            .hget(quarantine.as_ref(), invalid.request_id.to_string())
             .await
             .unwrap();
         assert!(invalid_payload.is_some());
         let _: i64 = state
             .sched
             .client()
-            .hdel(QUARANTINE, invalid.request_id.to_string())
+            .hdel(quarantine.as_ref(), invalid.request_id.to_string())
             .await
             .unwrap();
 
@@ -427,9 +537,138 @@ mod tests {
             1
         );
     }
+    /// 结算进行中的留底在宽限期内对 worker 不可见（不再与在途结算抢锁）；网关放弃后立即可接手，
+    /// worker 落账时补记渠道 key 的日消费（网关已不会再做这一步）。
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn in_flight_entries_wait_for_the_gateway_and_recovery_feeds_channel_spend() {
+        okapi_store::test_support::assert_isolated();
+        let state = crate::gateway::build_state(
+            &std::env::var("DATABASE_URL").unwrap(),
+            &std::env::var("OKAPI_REDIS_URL").unwrap(),
+            "journal-grace-test",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let suffix = uuid::Uuid::new_v4().to_string();
+        let user = okapi_store::provision::create_user(&state.pg, &format!("grace-{suffix}"))
+            .await
+            .unwrap();
+        let kid = okapi_store::provision::create_api_key(&state.pg, user, &suffix, "grace")
+            .await
+            .unwrap();
+        okapi_ledger::operations::credit(
+            &state.pg,
+            &state.ledger,
+            user,
+            Money::from_micros(10_000),
+            "adjust",
+            "test",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let (channel, channel_key) = okapi_store::provision::create_channel(
+            &state.pg,
+            &format!("grace-channel-{suffix}"),
+            "openai",
+            "http://127.0.0.1:9/v1",
+            "test-credential",
+            &["test"],
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let id = uuid::Uuid::new_v4();
+        state
+            .ledger
+            .reserve_for_key(
+                &state.pg,
+                false,
+                okapi_ledger::ReserveRequest {
+                    user_id: user,
+                    api_key_id: kid,
+                    request_id: id,
+                    est: Money::from_micros(1000),
+                    caps: okapi_ledger::LimitCaps::default(),
+                    est_tokens: 0,
+                },
+                chrono::Utc::now(),
+            )
+            .await
+            .unwrap();
+        let input = SettlementInput {
+            source_window: None,
+            dimensions: okapi_ledger::pg::UsageDimensions::new(
+                "test",
+                "test",
+                "/v1/chat/completions",
+                "/v1/chat/completions",
+            ),
+            request_id: id,
+            log_type: 2,
+            user_id: user,
+            api_key_id: kid,
+            group_code: "default",
+            model_name: "test",
+            channel_id: Some(channel),
+            channel_key_id: Some(channel_key),
+            state: BillingState::Committed,
+            usage: TokenUsage {
+                prompt_tokens: 20,
+                completion_tokens: 5,
+                ..TokenUsage::default()
+            },
+            amount: Money::from_micros(500),
+            original: Money::from_micros(500),
+            discount: Money::ZERO,
+            list_price: Money::from_micros(500),
+            upstream_cost: None,
+            pricing_epoch: None,
+            pricing_snapshot: None,
+            latency_ms: 1,
+            ttft_ms: None,
+            is_stream: false,
+            retry_count: 0,
+            failover_count: 0,
+            upstream_status: Some(200),
+            error_code: None,
+            upstream_request_id: None,
+            node: "test",
+            sticky_layer: 0,
+            client_type: "test",
+            client_ip: None,
+            delta_micro: -500,
+            balance_after: None,
+            event_type: "commit",
+            pool: okapi_ledger::Pool::Wallet,
+        };
+        save_in_flight(&state, &input).await.unwrap();
+        assert_eq!(
+            recover(&state).await.unwrap(),
+            0,
+            "still owned by the gateway"
+        );
+        let bills: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE request_id=$1")
+                .bind(id)
+                .fetch_one(&state.pg)
+                .await
+                .unwrap();
+        assert_eq!(bills, 0);
+
+        due_now(&state, id).await.unwrap();
+        assert_eq!(recover(&state).await.unwrap(), 1);
+        assert_eq!(state.ledger.balance(user).await.unwrap().as_micros(), 9500);
+        assert_eq!(state.sched.channel_key_spend_get(channel_key).await, 500);
+    }
+
     #[tokio::test]
     async fn journal_capacity_keeps_existing_payloads() {
-        dotenvy::dotenv().ok();
+        okapi_store::test_support::assert_isolated();
         let client = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
             .await
             .unwrap();

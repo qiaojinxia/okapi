@@ -386,7 +386,7 @@ test('门户加载与失败不冒充零数据，旧缓存记录明确显示未�
   await page.route('**/api/me/stats/breakdown?*', (route) => { const data = report(); data.total.cache_write_tokens = null; data.data.forEach((r) => { r.cache_write_tokens = null }); return route.fulfill({ json: data }) })
   await page.getByRole('button', { name: '重试', exact: true }).click()
   await page.getByRole('tab', { name: 'Token 构成' }).click()
-  await expect(page.getByText(/部分请求或历史记录未上报缓存写入/)).toBeVisible()
+  await expect(page.getByText(/缓存写入仅展示已上报数量/)).toBeVisible()
 })
 
 test('手机和深色图表布局不溢出，提示框遵循深色主题', async ({ page }) => {

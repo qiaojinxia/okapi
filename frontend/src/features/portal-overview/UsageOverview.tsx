@@ -12,6 +12,8 @@ import type { Segment } from './TokenMixView'
 import type { PortalView } from './search'
 import type { BreakdownResp } from './types'
 import { sumByModel } from './types'
+import { cacheAmount, cacheHit } from './cache-metrics'
+import { CacheTokenValue } from './CacheTokenValue'
 import type { UsageMetric } from './usage-chart-data'
 
 // 首页复用同一份用量响应，切换到明细不会额外查询，也不会改变范围或日期。
@@ -20,6 +22,7 @@ export function UsageOverview({ data, logSearch, metric, onView }: { data: Break
   const locale = i18n.language
   const models = [...sumByModel(data.data).values()].sort((a, b) => b.amount_micro - a.amount_micro || b.requests - a.requests || a.model.localeCompare(b.model))
   const parts = segments(data.total)
+  const hit = cacheHit(data.total)
   const sum = parts.reduce((n, part) => n + part.value, 0)
   const labels: Record<Segment['key'], string> = {
     input: t('portal:tokInput'), cached: t('portal:tokCached'), write: t('charts:cacheWrite'),
@@ -60,10 +63,12 @@ export function UsageOverview({ data, logSearch, metric, onView }: { data: Break
         <dl className="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
           {parts.map((part) => <div key={part.key} className="flex min-w-0 items-center justify-between gap-2">
             <dt className="flex min-w-0 items-center gap-1.5 text-muted-foreground"><span aria-hidden className={`h-2 w-2 shrink-0 rounded-sm ${part.className}`} />{labels[part.key]}</dt>
-            <dd className="shrink-0 tabular-nums">{(part.key === 'write' && data.total.cache_write_tokens == null) || (part.key === 'cached' && data.total.cache_hit_bp == null) ? '-' : formatCount(part.value, locale)}</dd>
+            <dd className="shrink-0 tabular-nums">{part.key === 'write' || part.key === 'cached'
+              ? <CacheTokenValue value={cacheAmount(data.total, part.key === 'cached' ? 'read' : 'write')} /> : formatCount(part.value, locale)}</dd>
           </div>)}
         </dl>
-        {(data.total.cache_hit_bp == null || data.total.cache_write_tokens == null) && <p className="text-xs text-muted-foreground">{t('portal:cacheIncomplete')}</p>}
+        {(data.total.cache_hit_bp == null || data.total.cache_write_tokens == null) && <p className="text-xs text-muted-foreground">{t(data.total.cache_hit_bp == null ? 'portal:cacheIncomplete' : 'charts:missingCacheWrite')}</p>}
+        {hit.partial && <p className="text-xs text-muted-foreground">{t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: data.total.requests })}</p>}
       </section>
     </Card>
   </div>

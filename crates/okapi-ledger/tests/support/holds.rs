@@ -30,7 +30,7 @@ impl Bed {
         Self::with_pool(4).await
     }
     pub async fn with_pool(size: u32) -> TestResult<Self> {
-        dotenvy::dotenv().ok();
+        okapi_store::test_support::assert_isolated();
         let pg = PgPoolOptions::new()
             .max_connections(size)
             .acquire_timeout(std::time::Duration::from_secs(5))
@@ -85,6 +85,7 @@ impl Bed {
                 group_ratio: RatioFp::ONE,
                 user_multiplier: RatioFp::ONE,
                 rules: vec![],
+                server_tool_fees: vec![],
                 media_units: Some(3),
                 final_unit_price_input_per_1m_usd: None,
             },
@@ -193,7 +194,7 @@ impl Bed {
         let mut totals = [Money::ZERO; 2];
         for (pool, total) in [0_i16, 1].into_iter().zip(totals.iter_mut()) {
             *total = Money::from_micros(sqlx::query_scalar("SELECT COALESCE(SUM(delta_micro),0)::bigint FROM billing_events WHERE user_id=$1 AND pool=$2")
-                .bind(self.uid).bind(pool).fetch_one(guard.connection()).await?);
+                .bind(self.uid).bind(pool).fetch_one(guard.connection()?).await?);
         }
         Ok(guard.repair(&self.ledger, totals[0], totals[1]).await?)
     }

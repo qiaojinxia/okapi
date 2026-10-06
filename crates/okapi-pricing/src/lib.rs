@@ -16,14 +16,20 @@ pub mod modalities;
 pub mod model;
 pub mod ratio;
 pub mod rules;
+pub mod server_tools;
 pub mod snapshot;
 
 pub use book::{GroupEntry, ModelEntry, OverrideEntry, OverrideSpec, PriceBook, PriceBookSource};
-pub use engine::{CalcContext, Quote, calculate, calculate_characters};
+pub use engine::{
+    CalcContext, Quote, calculate, calculate_characters, calculate_with_server_tool_scope,
+};
 pub use error::{CompileError, PricingError};
 pub use handle::PriceBookHandle;
 pub use modalities::ModalityRatios;
 pub use model::{PricingMode, Tier, TierTable};
 pub use ratio::RatioFp;
 pub use rules::{PricingRule, RuleKind, RuleScope, Stacking, WeekdayMask};
+pub use server_tools::{
+    AnthropicToolPrices, AnthropicToolScope, ServerToolFee, ServerToolPrices, ToolPrice,
+};
 pub use snapshot::{AppliedRule, InputUnit, PricingSnapshot};

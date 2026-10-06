@@ -9,8 +9,9 @@ env:
   CARGO_TERM_COLOR: always
   # 编译期 SQL 校验走 .sqlx 离线快照；集成测试运行期连接 services
   SQLX_OFFLINE: "true"
-  DATABASE_URL: postgres://okapi:okapi_dev@localhost:5432/okapi
-  OKAPI_REDIS_URL: redis://localhost:6379
+  DATABASE_URL: postgres://okapi:okapi_dev@localhost:5432/okapi_test_ci
+  OKAPI_TEST_ISOLATED: "1"
+  OKAPI_REDIS_URL: redis://localhost:6379/3
   OKAPI_CLICKHOUSE_URL: http://okapi:okapi_dev@localhost:8123
   OKAPI_NATS_URL: nats://127.0.0.1:4222
   OKAPI_WEB_DIR: ${{ github.workspace }}/frontend/dist
@@ -25,7 +26,7 @@ jobs:
         env:
           POSTGRES_USER: okapi
           POSTGRES_PASSWORD: okapi_dev
-          POSTGRES_DB: okapi
+          POSTGRES_DB: okapi_test_ci
         ports:
           - 5432:5432
         options: >-
@@ -88,17 +89,31 @@ jobs:
           python3 scripts/api-surface.py --check docs/api-surface.json
       - name: clippy（-D warnings）
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 安装隔离测试使用的数据库客户端
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client redis-tools
       - name: 测试并生成逐套件报告
         shell: bash
         run: |
           # 全局配置用例顺序执行；用例内部的并发/竞态断言仍照常运行。
           set +e
-          cargo test --workspace --locked --no-fail-fast -- --test-threads=1 --nocapture 2>&1 | tee core-tests.log
+          python3 scripts/test-isolated.py --services 2>&1 | tee core-tests.log
           okapi_test_exit=${PIPESTATUS[0]}
           set -e
           python3 scripts/summarize-core-tests.py core-tests.log --out core-tests.json --exit-code "$okapi_test_exit"
           if [ "$okapi_test_exit" -ne 0 ]; then exit "$okapi_test_exit"; fi
-          python3 -c 'import json; r = json.load(open("core-tests.json")); assert r["execution_status"] == "passed", r["execution_status"]'
+          python3 - <<'PY'
+          import json
+          report = json.load(open("core-tests.json"))
+          assert report["execution_status"] in {"passed", "passed_with_skips_or_skip_signals"}, report["execution_status"]
+          assert not report["skip_signals"], report["skip_signals"]
+          allowed_opt_in = {
+              "cli_286_real_tool_result_round_trip_preserves_upstream_thinking_blocks",
+              "sdk_286_real_text_stream_completes",
+              "programming_clients::installed_claude_code_and_codex_complete_through_subscription_adapters",
+          }
+          ignored = {test["name"] for suite in report["suites"] for test in suite["tests"] if test["outcome"] == "ignored"}
+          assert ignored <= allowed_opt_in, ignored - allowed_opt_in
+          PY
       - name: 保存完整测试输出与验证报告
         if: always()
         uses: actions/upload-artifact@v6

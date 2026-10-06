@@ -99,7 +99,9 @@ impl BedrockUpstream {
             .map(str::to_owned);
         if !(200..300).contains(&status) {
             let retry_after_secs = crate::retry_after::seconds(resp.headers());
-            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?;
+            let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+                .await
+                .unwrap_or_default();
             return Err(UpstreamError::Status {
                 status,
                 body,
@@ -121,7 +123,13 @@ impl BedrockUpstream {
                 if failed {
                     return None;
                 }
-                let chunk = bytes.next().await?;
+                let Some(chunk) = bytes.next().await else {
+                    let error = decoder.finish().err()?;
+                    return Some((
+                        futures::stream::iter(vec![Err(error)]),
+                        (bytes, decoder, true),
+                    ));
+                };
                 let out: Vec<Result<AnthropicEvent, UpstreamError>> = match chunk {
                     Err(e) => {
                         failed = true;
@@ -233,7 +241,9 @@ impl BedrockUpstream {
         } else {
             Err(UpstreamError::Status {
                 status,
-                body: crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR)).await?,
+                body: crate::openai::response_bytes(resp, Some(crate::limits::MAX_ERROR))
+                    .await
+                    .unwrap_or_default(),
                 retry_after_secs: None,
             })
         }

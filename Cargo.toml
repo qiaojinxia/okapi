@@ -70,6 +70,7 @@ tower-http = { version = "0.7.0", features = ["trace", "cors", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.26.0", features = ["v4", "serde"] }
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

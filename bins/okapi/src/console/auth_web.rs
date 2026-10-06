@@ -5,9 +5,10 @@
 
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
+use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use okapi_store::identity;
@@ -141,7 +142,7 @@ pub async fn register(
         return Err(AppError::bad_request().with_param("register_fields"));
     }
     // 注册策略（§11.16）：关闭 / 邀请制 / 邮箱域名——在 Turnstile 与写库之前判定
-    let policy = super::registration::RegistrationPolicy::load(&state).await;
+    let policy = super::registration::RegistrationPolicy::load(&state).await?;
     super::registration::check(&policy, &email)?;
     let inviter = super::registration::resolve_inviter(&state, req.aff_code.as_deref()).await?;
     if policy.mode == super::registration::RegisterMode::InviteOnly && inviter.is_none() {
@@ -206,11 +207,13 @@ async fn site_name(state: &AppState) -> String {
         .unwrap_or_else(|| "Okapi".to_owned())
 }
 
-/// Reset links must use a configured canonical URL, never request-controlled headers.
-async fn site_base_url(state: &AppState) -> Result<String, AppError> {
-    let setting = state.setting_cached("site_url").await;
+/// Authentication links must use a configured canonical URL, never request headers.
+pub(crate) async fn site_base_url(state: &AppState) -> Result<String, AppError> {
+    let setting = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, "site_url")
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
     let base = setting
-        .as_ref()
         .as_ref()
         .and_then(Value::as_str)
         .map(str::trim)
@@ -254,7 +257,7 @@ pub async fn email_code(
     if !email.contains('@') || email.len() > 254 {
         return Err(AppError::bad_request().with_param("email"));
     }
-    let policy = super::registration::RegistrationPolicy::load(&state).await;
+    let policy = super::registration::RegistrationPolicy::load(&state).await?;
     super::registration::check(&policy, &email)?;
     if !policy.email_verification {
         // 策略没开验证却来取码：不是错误，但也没必要发信
@@ -444,12 +447,8 @@ async fn verify_turnstile(state: &AppState, token: Option<&str>) -> Result<(), A
         })
         .await;
     match outcome {
-        Ok(okapi_providers::custom_pass::PassResponse::Ok { mut stream, .. }) => {
-            use futures::StreamExt as _;
-            let mut buf = Vec::new();
-            while let Some(Ok(chunk)) = stream.next().await {
-                buf.extend_from_slice(&chunk);
-            }
+        Ok(okapi_providers::custom_pass::PassResponse::Ok { stream, .. }) => {
+            let buf = super::outbound_body::collect(stream, 64 * 1024).await?;
             let ok = serde_json::from_slice::<Value>(&buf)
                 .ok()
                 .and_then(|v| v.get("success").and_then(Value::as_bool))

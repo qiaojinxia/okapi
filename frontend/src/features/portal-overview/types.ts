@@ -1,7 +1,15 @@
 export type Scope = 'key' | 'user'
 
+export interface CacheMetrics {
+  cache_hit_bp?: number | null
+  measured_cache_hit_bp?: number | null
+  measured_cache_hit_requests?: number
+  measured_prompt_tokens?: number | null
+  measured_cache_read_tokens?: number | null
+}
+
 /// /api/me/stats/breakdown 的一行：(day, model) 粒度 + token 四轴。
-export interface BreakdownRow {
+export interface BreakdownRow extends CacheMetrics {
   day: string
   model: string
   requests: number
@@ -10,6 +18,7 @@ export interface BreakdownRow {
   cache_read_known_requests?: number
   cache_hit_bp?: number | null
   cache_write_tokens?: number | null
+  recorded_cache_write_tokens?: number | null
   cache_write_known_requests?: number
   completion_tokens: number
   reasoning_tokens: number
@@ -26,10 +35,11 @@ export interface BreakdownRow {
   ttft_samples?: number
 }
 
-export interface BreakdownTotal {
+export interface BreakdownTotal extends CacheMetrics {
   cache_read_known_requests?: number
   ttft_samples?: number
   cache_write_tokens?: number | null
+  recorded_cache_write_tokens?: number | null
   cache_write_known_requests?: number
   original_micro?: number
   errors?: number
@@ -85,14 +95,24 @@ export function sumByModel(rows: BreakdownRow[]): Map<string, BreakdownRow> {
   for (const r of rows) {
     const cur = out.get(r.model)
     if (cur === undefined) {
-      out.set(r.model, { ...r, day: '' })
+      out.set(r.model, { ...r, day: '', recorded_cache_write_tokens: r.recorded_cache_write_tokens ?? r.cache_write_tokens ?? null })
       continue
     }
     cur.requests += r.requests
     cur.prompt_tokens += r.prompt_tokens
     cur.cached_tokens += r.cached_tokens
+    cur.cache_hit_bp = cur.cache_hit_bp == null || r.cache_hit_bp == null || cur.prompt_tokens <= 0
+      ? null : Math.round(cur.cached_tokens * 10_000 / cur.prompt_tokens)
+    cur.measured_cache_hit_requests = (cur.measured_cache_hit_requests ?? 0) + (r.measured_cache_hit_requests ?? 0)
+    cur.measured_prompt_tokens = (cur.measured_prompt_tokens ?? 0) + (r.measured_prompt_tokens ?? 0)
+    cur.measured_cache_read_tokens = (cur.measured_cache_read_tokens ?? 0) + (r.measured_cache_read_tokens ?? 0)
+    cur.measured_cache_hit_bp = cur.measured_prompt_tokens > 0
+      ? Math.round(cur.measured_cache_read_tokens * 10_000 / cur.measured_prompt_tokens) : null
     cur.cache_read_known_requests = (cur.cache_read_known_requests ?? 0) + (r.cache_read_known_requests ?? 0)
     cur.cache_write_known_requests = (cur.cache_write_known_requests ?? 0) + (r.cache_write_known_requests ?? 0)
+    const recordedWrites = r.recorded_cache_write_tokens ?? r.cache_write_tokens
+    cur.recorded_cache_write_tokens = cur.recorded_cache_write_tokens == null && recordedWrites == null
+      ? null : (cur.recorded_cache_write_tokens ?? 0) + (recordedWrites ?? 0)
     cur.cache_write_tokens = cur.cache_write_tokens == null || r.cache_write_tokens == null ? null : cur.cache_write_tokens + r.cache_write_tokens
     cur.completion_tokens += r.completion_tokens
     cur.reasoning_tokens += r.reasoning_tokens

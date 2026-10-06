@@ -80,7 +80,7 @@ impl Bed {
 }
 
 async fn bed() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let admin = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -141,6 +141,11 @@ async fn bed() -> Bed {
     let app = console::router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let console = listener.local_addr().unwrap();
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('site_url',$1)")
+        .bind(json!(format!("http://{console}")))
+        .execute(&pg)
+        .await
+        .unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });

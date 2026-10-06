@@ -9,6 +9,9 @@
 //!
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
@@ -78,7 +81,7 @@ struct Bed {
 }
 
 async fn setup() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     setup_at(&database_url, &redis_url).await
@@ -155,6 +158,7 @@ async fn setup_at(database_url: &str, redis_url: &str) -> Bed {
     .await
     .unwrap();
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(database_url, redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -355,7 +359,7 @@ fn epay_sign(params: &BTreeMap<&str, String>) -> String {
 // 选池 / 越界 / 回同池 / 按池修复 / 在途保留 一体时序
 #[allow(clippy::too_many_lines)]
 async fn lua_pool_contract() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
     let ledger = BalanceLedger::new(redis);

@@ -10,10 +10,13 @@
 
 pub mod chsink;
 mod delivery;
+pub mod egress_probe;
 pub mod legacy_speech;
 pub mod margin_breaker;
 pub mod nats_relay;
 pub mod notify;
+pub mod oauth_refresh;
+mod supervision;
 
 use crate::config::Config;
 use okapi_ledger::{BalanceLedger, Pool};
@@ -116,28 +119,59 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     };
 
     let js = connect_jetstream(cfg.nats_url.as_deref()).await;
-    let image_state =
-        crate::gateway::build_state(&cfg.database_url, &cfg.redis_url, &cfg.node, None, None)
-            .await?;
+    let image_state = crate::gateway::build_state_with_resources(
+        pg.clone(),
+        redis.clone(),
+        &cfg.node,
+        None,
+        None,
+    )
+    .await?;
     let (image_stop, image_stopped) = tokio::sync::watch::channel(false);
-    let native_batch_worker = tokio::spawn(crate::gateway::images::batches::run_worker(
-        image_state.clone(),
-        image_stopped.clone(),
-    ));
+    let native_batch_worker =
+        tokio::spawn(supervision::run("image_batches", image_stopped.clone(), {
+            let state = image_state.clone();
+            let stop = image_stopped.clone();
+            move || crate::gateway::images::batches::run_worker(state.clone(), stop.clone())
+        }));
     let recovery_workers: Vec<_> = [false, true]
         .into_iter()
         .map(|video| {
-            tokio::spawn(run_recovery(
-                image_state.clone(),
+            tokio::spawn(supervision::run(
+                if video {
+                    "video_recovery"
+                } else {
+                    "settlement_recovery"
+                },
                 image_stopped.clone(),
-                video,
+                {
+                    let state = image_state.clone();
+                    let stop = image_stopped.clone();
+                    move || run_recovery(state.clone(), stop.clone(), video)
+                },
             ))
         })
         .collect();
-    let image_worker = tokio::spawn(crate::gateway::images::tasks::run_worker(
-        image_state,
-        image_stopped,
-    ));
+    let image_worker = tokio::spawn(supervision::run("image_tasks", image_stopped.clone(), {
+        // Image and credential workers share the same assembled state and credential gates.
+        let image_state = image_state.clone();
+        let stop = image_stopped.clone();
+        move || crate::gateway::images::tasks::run_worker(image_state.clone(), stop.clone())
+    }));
+
+    let credential_worker =
+        tokio::spawn(supervision::run("oauth_refresh", image_stopped.clone(), {
+            let state = image_state.clone();
+            let stop = image_stopped.clone();
+            move || oauth_refresh::run(state.clone(), stop.clone())
+        }));
+    // 出口代理后台探测（§11.41）：出口 IP 变化 / 在用代理不可达告警
+    let egress_worker = tokio::spawn(supervision::run("egress_probe", image_stopped.clone(), {
+        let state = image_state.clone();
+        let notifier = notifier.clone();
+        let stop = image_stopped.clone();
+        move || egress_probe::run(state.clone(), notifier.clone(), stop.clone())
+    }));
 
     tracing::info!(
         "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions/margin_breaker）"
@@ -152,7 +186,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         ch,
     });
     let mut workers = recovery_workers;
-    workers.extend([native_batch_worker, image_worker]);
+    workers.extend([
+        native_batch_worker,
+        image_worker,
+        credential_worker,
+        egress_worker,
+    ]);
     for (job, interval) in [
         (MaintenanceJob::chsink_tick, Duration::from_secs(1)),
         (MaintenanceJob::unit_calibration, Duration::from_secs(10)),
@@ -164,11 +203,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         (MaintenanceJob::margin, MARGIN_BREAKER_INTERVAL),
         (MaintenanceJob::balance_expiry, BALANCE_EXPIRY_INTERVAL),
     ] {
-        workers.push(tokio::spawn(run_maintenance(
-            maintenance.clone(),
+        workers.push(tokio::spawn(supervision::run(
+            job.name(),
             image_stop.subscribe(),
-            job,
-            interval,
+            {
+                let ctx = maintenance.clone();
+                let stop = image_stop.subscribe();
+                move || run_maintenance(ctx.clone(), stop.clone(), job, interval)
+            },
         )));
     }
     crate::shutdown::signal().await;
@@ -211,6 +253,22 @@ enum MaintenanceJob {
     cooldown,
     margin,
     balance_expiry,
+}
+
+impl MaintenanceJob {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::chsink_tick => "chsink",
+            Self::unit_calibration => "unit_calibration",
+            Self::subscriptions => "subscriptions",
+            Self::sweep => "sweep",
+            Self::reconcile => "reconcile",
+            Self::partition => "partition",
+            Self::cooldown => "cooldown",
+            Self::margin => "margin",
+            Self::balance_expiry => "balance_expiry",
+        }
+    }
 }
 
 async fn run_maintenance(
@@ -306,6 +364,9 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
             }
         }
         MaintenanceJob::cooldown => {
+            if let Err(error) = okapi_store::channel_usage::prune(pg).await {
+                tracing::warn!(%error,"channel usage window pruning failed");
+            }
             match recover_cooled_keys(pg).await {
                 Ok(0) => {}
                 Ok(n) => tracing::info!(recovered = n, "渠道 key 冷却到期恢复"),
@@ -414,15 +475,17 @@ pub async fn sweep_expired_reservations(
         }
         for user_id in user_ids {
             cursor = user_id;
-
+            // 单个用户的锁超时、坏回执或 Redis 抖动只跳过这个用户：此前一处 `?` 就中止整轮，
+            // 下一轮又从头卡在同一个用户上，id 更大的用户的过期预扣永远收不回来。
+            let user_sweep: anyhow::Result<()> = async {
             let reservations = ledger.list_reservations(user_id).await?;
             if !reservations.iter().any(|r| r.deadline_ms < now_ms) {
-                continue;
+                return Ok(());
             }
             let mut guard = okapi_ledger::holds::UserGuard::acquire(pg, user_id).await?;
             if let Err(error) = guard.synchronize(ledger).await {
                 tracing::error!(user_id, %error, "skip expiry while durable settlement is pending");
-                continue;
+                return Ok(());
             }
             for reservation in reservations {
                 if reservation.deadline_ms >= now_ms {
@@ -430,7 +493,7 @@ pub async fn sweep_expired_reservations(
                 }
                 // Serialize an image result/ledger commit with expiry. Otherwise the result
                 // transaction could commit immediately after this sweep had refunded its hold.
-                let mut tx = guard.connection().begin().await?;
+                let mut tx = guard.connection()?.begin().await?;
                 okapi_store::image_tasks::lock_for_balance_in_tx(&mut tx, reservation.request_id)
                     .await?;
                 okapi_store::history::read_lock(&mut tx).await?;
@@ -499,6 +562,12 @@ pub async fn sweep_expired_reservations(
                     released_micro: released.as_micros(),
                     action: "refund",
                 });
+            }
+            Ok(())
+            }
+            .await;
+            if let Err(error) = user_sweep {
+                tracing::error!(user_id, %error, "expired reservations of this user deferred");
             }
         }
     }
@@ -670,7 +739,7 @@ pub async fn repair_balance(
 ) -> anyhow::Result<Option<BalanceRepair>> {
     let mut guard = okapi_ledger::holds::UserGuard::acquire(pg, user_id).await?;
     guard.synchronize(ledger).await?;
-    let mut history = guard.connection().begin().await?;
+    let mut history = guard.connection()?.begin().await?;
     okapi_store::history::read_lock(&mut history).await?;
     let row = sqlx::query!(
         r#"
@@ -703,7 +772,7 @@ pub async fn repair_balance(
         user_id,
         row.events_sum
     )
-    .execute(guard.connection())
+    .execute(guard.connection()?)
     .await?;
     Ok(Some(BalanceRepair {
         user_id,
@@ -902,13 +971,17 @@ pub async fn drop_expired_partitions(
 
 /// 冷却到期自动恢复 active（§3.4）：cooling(2)/rate_limited(3)/quota_exhausted(4)。
 /// banned(5)/invalid(6) 仅人工恢复。
+/// cooling 恢复保留连续失败计数（半开）：恢复后很快再失败才能逐轮翻倍退避，
+/// 下一次成功会把它清零（`channels::clear_key_failures`）；限流 / 配额冷却与 5xx 无关，照旧清零。
 pub async fn recover_cooled_keys(pg: &PgPool) -> anyhow::Result<u64> {
-    let result = sqlx::query!(
-        r#"
+    let result = sqlx::query(
+        r"
         UPDATE channel_keys
-        SET status = 1, failed_count = 0, updated_at = now()
+        SET status = 1,
+            failed_count = CASE WHEN status = 2 THEN failed_count ELSE 0 END,
+            updated_at = now()
         WHERE status IN (2, 3, 4) AND cooldown_until IS NOT NULL AND cooldown_until < now()
-        "#
+        ",
     )
     .execute(pg)
     .await?;

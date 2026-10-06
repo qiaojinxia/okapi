@@ -7,16 +7,26 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Field } from '@/components/ui/field'
+import { OptionalSection } from '@/components/ui/optional-section'
 import { KeyParamRow } from '@/features/channels/KeyParamRow'
+import { OAuthKeyHealth } from '@/features/channels/oauth-key-health'
 import { ModelPicker } from '@/features/channels/ModelPicker'
 import { OAuthLoginCard } from '@/features/channels/OAuthLoginCard'
+import { ClientProfileEditor } from '@/features/channels/ClientProfileEditor'
+import { ChannelControlEditor } from '@/features/channels/ChannelControlEditor'
+import { ChannelEgress, NewChannelEgress } from '@/features/channels/ChannelEgress'
+import { toBinding } from '@/features/proxies/EgressPicker'
+import type { EgressDraft } from '@/features/proxies/EgressPicker'
+import { parseLimit } from './account-controls/policy'
+import { useAccountCapabilities } from './account-controls/api'
 import {
   PROVIDERS,
   apiBasePlaceholder,
   costMilliToRatio,
+  channelSettingsForSave,
+  defaultApiBase,
   defaultResponsesNative,
   isCloudManaged,
-  isOAuthProvider,
   ratioToCostMilli,
   readSettings,
   speaksOpenAi,
@@ -38,6 +48,10 @@ import { qk } from '@/lib/query-keys'
 
 const EDIT_TABS = ['conn', 'models', 'sched', 'behavior'] as const
 type EditTab = (typeof EDIT_TABS)[number]
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic_max: 'admin:providerClaudeSubscription',
+  codex: 'admin:providerCodexSubscription',
+}
 
 function ExtraHeadersEditor({
   value,
@@ -65,7 +79,7 @@ function ExtraHeadersEditor({
       <Label>{t('admin:extraHeaders')}</Label>
       <p className="text-xs text-muted-foreground">{t('admin:extraHeadersHint')}</p>
       {draft.map(([name, val], i) => (
-        <div key={`${name}-${i}`} className="flex gap-2">
+        <div key={i} className="flex gap-2">
           <Input
             value={name}
             placeholder="OpenAI-Organization"
@@ -136,7 +150,7 @@ function InjectFieldsEditor({
       <Label>{t('admin:injectFields')}</Label>
       <p className="text-xs text-muted-foreground">{t('admin:injectFieldsHint')}</p>
       {draft.map(([name, val], i) => (
-        <div key={`${name}-${i}`} className="flex gap-2">
+        <div key={i} className="flex gap-2">
           <Input
             value={name}
             placeholder="temperature"
@@ -189,13 +203,30 @@ export function ChannelDrawer({
     cost: costMilliToRatio(channel?.cost_milli ?? 1000),
     dataRetention: channel?.data_retention ?? '',
   })
+  const account = useAccountCapabilities(form.provider)
+  const authorization = account.capabilities?.authorization
+  const accountReady = account.isSuccess
   const costMilli = ratioToCostMilli(form.cost)
   const [models, setModels] = useState<string[]>(channel?.models ?? [])
   const [credential, setCredential] = useState('')
+  const [oauthInput, setOauthInput] = useState<'login' | 'import'>(
+    channel?.keys.some((key) => key.oauth_refreshable === false)
+      ? 'import' : 'login',
+  )
+  const [rotationKeyId, setRotationKeyId] = useState<number | undefined>(
+    channel?.keys.length === 1 ? channel.keys[0]?.id : undefined,
+  )
   const [settings, setSettings] = useState<ChannelSettings>(readSettings(channel?.settings ?? null))
+  const [controlValid, setControlValid] = useState(true)
+  const [newConcurrency, setNewConcurrency] = useState('')
+  const concurrency = parseLimit(newConcurrency)
+  const concurrencyValid = concurrency !== null && (concurrency === undefined || concurrency <= 2_147_483_647)
   // 新建时的池成员关系：缺省只进 default 池（建完即对 default 分组可用）；
   // 渠道只服务它所在的池，全站分组都配了专属池的站点在这里勾对应的池
   const [newPools, setNewPools] = useState<PoolMember[]>(defaultMembership)
+  // 新建时的出口（§11.41）：缺省继承全局默认；OAuth 登录在换码前就按它选代理
+  const [newEgress, setNewEgress] = useState<EgressDraft>({ mode: 'inherit' })
+  const egressBinding = toBinding(newEgress)
 
   const create = useMutation({
     mutationFn: () =>
@@ -208,11 +239,14 @@ export function ChannelDrawer({
           credential,
           models,
           priority: Number(form.priority) || 0,
-          settings,
+          settings: channelSettingsForSave(settings),
+          max_concurrency: concurrency ?? undefined,
           pools: newPools,
           cost_milli: costMilli ?? undefined,
           // 空串 = 清除声明；后端据此把键从 settings 里删掉
           data_retention: form.dataRetention,
+          // 继承是后端缺省：只在选了别的出口时才带，默认提交体保持不变
+          ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}),
         },
       }),
     onSuccess: () => {
@@ -231,7 +265,7 @@ export function ChannelDrawer({
           api_base: form.api_base,
           models,
           priority: Number(form.priority) || 0,
-          settings,
+          settings: channelSettingsForSave(settings),
           cost_milli: costMilli ?? undefined,
           data_retention: form.dataRetention,
         },
@@ -247,7 +281,8 @@ export function ChannelDrawer({
     mutationFn: () =>
       apiFetch(`/admin/channels/${channel?.id ?? 0}/credential`, {
         method: 'POST',
-        body: { credential },
+        body: { credential, ...(Boolean(authorization?.access_token_prefix) && oauthInput === 'import'
+          && rotationKeyId !== undefined ? { channel_key_id: rotationKeyId } : {}) },
       }),
     onSuccess: () => {
       setCredential('')
@@ -257,11 +292,34 @@ export function ChannelDrawer({
     onError: (err) => toast.error(describeError(err)),
   })
 
-  // OAuth 协议新建不走这个按钮：渠道由登录卡的 exchange 一步建出来
-  const oauth = isOAuthProvider(form.provider)
+  // Login uses exchange; imported Claude tokens use the ordinary channel create endpoint.
+  const oauth = Boolean(authorization)
+  const importToken = Boolean(authorization?.access_token_prefix) && oauthInput === 'import'
+  const defaultBase = account.descriptor?.default_base ?? defaultApiBase(form.provider)
+  const endpointRequired = defaultBase === undefined
+  const endpointValid = !endpointRequired || form.api_base.trim() !== ''
+  const scheduleCustom = form.priority !== '0' || form.cost !== '1' || form.dataRetention !== ''
+  const retentionLabels = { none: 'admin:channelRetentionNone', transient: 'admin:channelRetentionTransient', trains: 'admin:channelRetentionTrains' } as const
+  const scheduleSummary = scheduleCustom ? [
+    t('admin:channelScheduleSummary', { priority: form.priority, cost: form.cost }),
+    form.dataRetention && t(retentionLabels[form.dataRetention as keyof typeof retentionLabels] ?? 'admin:channelRetentionUnset'),
+  ].filter(Boolean).join(' · ') : t('admin:channelOptionsDefault')
+  const behaviorCustom = settings.thinking_to_content || settings.bill_by_response_model
+    || settings.responses_native !== undefined && settings.responses_native !== defaultResponsesNative(form.provider)
+    || settings.strip_request_fields.length > 0 || Object.keys(settings.inject_request_fields ?? {}).length > 0
+    || Object.keys(settings.extra_headers ?? {}).length > 0
+  const baseField = <div className="flex flex-col gap-1.5">
+    <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
+    <Input id="d-base" value={form.api_base} placeholder={defaultBase ?? apiBasePlaceholder(form.provider)} required={endpointRequired}
+      onChange={(e) => setForm((f) => ({ ...f, api_base: e.target.value }))} />
+    {form.provider === 'azure' && <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>}
+    {form.provider === 'bedrock' && <p className="text-xs text-muted-foreground">{t('admin:bedrockApiBaseHint')}</p>}
+    {form.provider === 'vertex' && <p className="text-xs text-muted-foreground">{t('admin:vertexApiBaseHint')}</p>}
+  </div>
   const canSubmit = isEdit
     ? form.name.trim() !== ''
-    : !oauth && form.name.trim() !== '' && credential.trim() !== '' && models.length > 0
+    : accountReady && (!oauth || importToken) && form.name.trim() !== '' && credential.trim() !== '' && models.length > 0
+      && egressBinding !== null
 
   return (
     <Drawer
@@ -275,7 +333,7 @@ export function ChannelDrawer({
             {t('common:cancel')}
           </Button>
           <Button
-            disabled={!canSubmit || create.isPending || save.isPending}
+            disabled={!canSubmit || !endpointValid || !controlValid || !concurrencyValid || costMilli === null || create.isPending || save.isPending}
             onClick={() => (isEdit ? save.mutate() : create.mutate())}
           >
             {isEdit ? t('common:save') : t('common:create')}
@@ -283,9 +341,6 @@ export function ChannelDrawer({
         </>
       }
     >
-      {form.provider === 'codex' && <p role="note" className="mb-4 rounded-lg border border-border bg-muted/40 p-3 text-sm leading-6">
-        {t('admin:codexEndpointHint')}
-      </p>}
       {isEdit && (
         <Tabs
           className="mb-4"
@@ -295,7 +350,7 @@ export function ChannelDrawer({
               (
                 {
                   conn: 'admin:groupBasic',
-                  models: 'admin:groupModels',
+                  models: 'admin:channelTabModels',
                   sched: 'admin:groupSchedule',
                   behavior: 'admin:groupBehavior',
                 } as const
@@ -307,6 +362,10 @@ export function ChannelDrawer({
         />
       )}
 
+          {account.isError && <div className="flex items-center justify-between gap-2">
+            <p role="alert" className="text-xs text-destructive">{describeError(account.error)}</p>
+            <Button size="sm" variant="outline" disabled={account.isFetching} onClick={() => void account.refetch()}>{t('common:retry')}</Button>
+          </div>}
       {(!isEdit || tab === 'conn') && (
         <>
           <FieldGroup title={t('admin:groupBasic')} hint={t('admin:groupBasicHint')}>
@@ -323,34 +382,32 @@ export function ChannelDrawer({
                 <Label htmlFor="d-provider">{t('admin:provider')}</Label>
                 {isEdit ? (
                   // 协议决定请求转换路径，改了等于换渠道语义；已有渠道只读，需要换就新建
-                  <Input id="d-provider" value={form.provider} readOnly className="opacity-60" />
+                  <Input id="d-provider" value={PROVIDER_LABELS[form.provider] ? t(PROVIDER_LABELS[form.provider]!) : form.provider} readOnly className="opacity-60" />
                 ) : (
                   <Select
                     id="d-provider"
                     value={form.provider}
-                    onChange={(v) => setForm((f) => ({ ...f, provider: v }))}
-                    options={PROVIDERS.map((p) => ({ value: p, label: p }))}
+                    onChange={(v) => {
+                      setForm((f) => ({ ...f, provider: v }))
+                      setCredential('')
+                      setOauthInput('login')
+                      setSettings(({ extensions: _drop, ...s }) => s)
+                    }}
+                    options={(account.data?.data.length ? account.data.data.map((item) => item.id) : PROVIDERS).map((p) => ({ value: p, label: PROVIDER_LABELS[p] ? t(PROVIDER_LABELS[p]!) : p }))}
                   />
                 )}
               </div>
-              <div className="col-span-2 flex flex-col gap-1.5">
-                <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
-                <Input
-                  id="d-base"
-                  value={form.api_base}
-                  placeholder={apiBasePlaceholder(form.provider)}
-                  onChange={(e) => setForm((f) => ({ ...f, api_base: e.target.value }))}
-                />
-                {form.provider === 'azure' && (
-                  <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>
-                )}
-                {form.provider === 'bedrock' && (
-                  <p className="text-xs text-muted-foreground">{t('admin:bedrockApiBaseHint')}</p>
-                )}
-                {form.provider === 'vertex' && (
-                  <p className="text-xs text-muted-foreground">{t('admin:vertexApiBaseHint')}</p>
-                )}
-              </div>
+              {endpointRequired && <div className="col-span-2">{baseField}</div>}
+            </div>
+          </FieldGroup>
+          {(!endpointRequired || form.provider === 'bedrock' || form.provider === 'azure') && (
+            <OptionalSection key={form.provider} id="channel-connection-options" title={t('admin:channelConnectionOptions')}
+              summary={t(!endpointRequired && form.api_base.trim() !== '' && form.api_base.replace(/\/$/, '') !== defaultBase?.replace(/\/$/, '')
+                || form.provider === 'bedrock' && settings.aws_region || form.provider === 'azure' && settings.api_version
+                ? 'admin:channelOptionsCustomized' : endpointRequired ? 'admin:channelOptionsDefault' : 'admin:channelConnectionDefault')}
+              hint={t('admin:channelConnectionOptionsHint')}>
+              {!endpointRequired && baseField}
+              {form.provider === 'codex' && <p role="note" className="text-xs leading-5 text-muted-foreground">{t('admin:codexEndpointHint')}</p>}
               {form.provider === 'bedrock' && (
                 <div className="col-span-2">
                   <Field
@@ -397,16 +454,44 @@ export function ChannelDrawer({
                   </Field>
                 </div>
               )}
-            </div>
-          </FieldGroup>
+            </OptionalSection>
+          )}
 
-          {oauth && isOAuthProvider(form.provider) ? (
+          {authorization?.access_token_prefix && (
+            <div data-slot="channel-auth-method" className="flex pb-4">
+              <Tabs ariaLabel={t('admin:oauthInputMethod')} active={oauthInput}
+                items={[{ id: 'login', label: t('admin:oauthBrowserLogin') }, { id: 'import', label: t('admin:oauthTokenImport') }]}
+                onChange={(mode) => {
+                  setOauthInput(mode as 'login' | 'import')
+                  setCredential('')
+                  if (!isEdit && mode === 'import') setSettings((s) => ({ ...s, extensions: {
+                    ...s.extensions, ...(authorization.import_profile ? { client_profile: authorization.import_profile } : {}),
+                  } }))
+                }} />
+            </div>
+          )}
+          {oauth && !importToken ? (
             <FieldGroup title={t('admin:oauthLoginTitle')} hint={t('admin:oauthLoginHint')}>
+              {isEdit && channel.keys.length > 1 && <div>
+                <Label htmlFor="d-reauthorization-key">{t('admin:oauthTokenTarget')}</Label>
+                <Select id="d-reauthorization-key" value={rotationKeyId === undefined ? '' : String(rotationKeyId)}
+                  placeholder={t('admin:oauthTokenTarget')} onChange={(value) => setRotationKeyId(Number(value))}
+                  options={channel.keys.map((key) => ({ value: String(key.id), label: `#${key.id}` }))} />
+              </div>}
               <OAuthLoginCard
                 provider={form.provider}
                 name={form.name}
                 models={models}
+                settings={channelSettingsForSave(settings)}
+                valid={controlValid && concurrencyValid && (isEdit ? rotationKeyId !== undefined
+                  : endpointValid && costMilli !== null && egressBinding !== null)}
+                creationOptions={!isEdit ? { api_base: form.api_base, priority: Number(form.priority) || 0,
+                  pools: newPools, cost_milli: costMilli ?? undefined, data_retention: form.dataRetention,
+                  ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}) }
+                  : undefined}
+                maxConcurrency={concurrency ?? undefined}
                 channelId={channel?.id}
+                channelKeyId={isEdit ? rotationKeyId : undefined}
                 onDone={() => {
                   onDone()
                   if (!isEdit) onClose()
@@ -414,7 +499,16 @@ export function ChannelDrawer({
               />
             </FieldGroup>
           ) : (
-          <FieldGroup title={t('admin:groupCredential')} hint={t('admin:groupCredentialHint')}>
+          <FieldGroup title={importToken ? t('admin:oauthTokenImport') : t('admin:groupCredential')}
+            hint={importToken ? t('admin:oauthTokenImportHint') : t('admin:groupCredentialHint')}>
+            {importToken && isEdit && channel.keys.length > 1 && (
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="d-rotation-key">{t('admin:oauthTokenTarget')}</Label>
+                <Select id="d-rotation-key" value={rotationKeyId === undefined ? '' : String(rotationKeyId)}
+                  placeholder={t('admin:oauthTokenTarget')} onChange={(value) => setRotationKeyId(Number(value))}
+                  options={channel.keys.map((key) => ({ value: String(key.id), label: `#${key.id}` }))} />
+              </div>
+            )}
             <div className="flex items-end gap-2">
               <div className="flex flex-1 flex-col gap-1.5">
                 <Label htmlFor="d-cred">
@@ -422,9 +516,12 @@ export function ChannelDrawer({
                 </Label>
                 <Input
                   id="d-cred"
+                  type={importToken ? 'password' : 'text'}
+                  autoComplete="off"
                   value={credential}
                   placeholder={
-                    form.provider === 'bedrock'
+                    importToken ? 'sk-ant-oat01-…'
+                    : form.provider === 'bedrock'
                       ? 'AKIA…:SECRET[:SESSION_TOKEN]'
                       : form.provider === 'vertex'
                         ? '{"type":"service_account",…}'
@@ -442,7 +539,8 @@ export function ChannelDrawer({
               {isEdit && (
                 <Button
                   variant="outline"
-                  disabled={credential.trim() === '' || rotate.isPending}
+                  disabled={!accountReady || credential.trim() === '' || rotate.isPending
+                    || importToken && channel.keys.length > 1 && rotationKeyId === undefined}
                   onClick={() => rotate.mutate()}
                 >
                   {t('admin:rotate')}
@@ -451,6 +549,14 @@ export function ChannelDrawer({
             </div>
           </FieldGroup>
           )}
+          {!isEdit && (form.provider === 'anthropic' || form.provider === 'anthropic_max')
+            && (!oauth || importToken) && (
+            <ClientProfileEditor settings={settings} onChange={setSettings} />
+          )}
+          {isEdit && <CredentialStatus channel={channel} onDone={onDone} />}
+          {/* 出口与凭证同属「接入」：订阅账号的登录、刷新、额度查询、测活都从这个出口出去 */}
+          {isEdit ? <ChannelEgress channel={channel} onDone={onDone} />
+            : <NewChannelEgress value={newEgress} onChange={setNewEgress} />}
         </>
       )}
 
@@ -501,16 +607,27 @@ export function ChannelDrawer({
           )}
         </FieldGroup>
       )}
-
-      {!isEdit && (
-        <FieldGroup title={t('admin:poolMembership')} hint={t('admin:poolMembershipHint')}>
-          <PoolMembershipEditor value={newPools} onChange={setNewPools} />
-        </FieldGroup>
+      {isEdit && tab === 'models' && (
+        <PoolMembership
+          channelId={channel.id}
+          current={channel.pool_members ?? []}
+          onDone={onDone}
+        />
       )}
 
-      {isEdit && tab === 'sched' && (
-        <>
-          <FieldGroup title={t('admin:groupSchedule')} hint={t('admin:groupScheduleHint')}>
+      {!isEdit && (
+        <OptionalSection id="channel-pools" title={t('admin:poolMembership')} hint={t('admin:poolMembershipHint')}
+          summary={newPools.map((member) => member.pool_code + (member.priority_override !== null || member.weight_override !== null
+            ? ` (${t('admin:channelOptionsCustomized')})` : '')).join(', ') || t('admin:channelPoolsEmpty')}
+          error={newPools.length === 0 ? t('admin:poolOrphanWarning') : undefined}>
+          <PoolMembershipEditor value={newPools} onChange={setNewPools} />
+        </OptionalSection>
+      )}
+
+      {(!isEdit || tab === 'sched') && (
+          <OptionalSection id="channel-schedule-options" title={t('admin:channelScheduleOptions')} hint={t('admin:groupScheduleHint')}
+            summary={scheduleSummary}
+            error={costMilli === null ? t('errors:bad_request', { param: 'cost_milli' }) : undefined}>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="d-priority">{t('admin:priority')}</Label>
               <Input
@@ -556,31 +673,29 @@ export function ChannelDrawer({
                 />
               </div>
             </Field>
-            {(channel.keys ?? []).length > 0 && (
-              <div className="flex flex-col gap-2">
-                <Label>{t('admin:channelKeys')}</Label>
-                <p className="text-xs text-muted-foreground">{t('admin:channelKeysHint')}</p>
-                {channel.keys.map((k) => (
-                  <KeyParamRow
-                    key={k.id}
-                    channelId={channel.id}
-                    row={k}
-                    onDone={onDone}
-                  />
-                ))}
-              </div>
-            )}
-          </FieldGroup>
-          <PoolMembership
-            channelId={channel.id}
-            current={channel.pool_members ?? []}
-            onDone={onDone}
-          />
-        </>
+          </OptionalSection>
       )}
 
+      {isEdit && tab === 'sched' && <KeySchedule channel={channel} onDone={onDone} />}
+      {(!isEdit || tab === 'sched') && <ChannelControlEditor value={settings.account_control}
+        onChange={(account_control) => setSettings((s) => ({ ...s, account_control }))}
+        onValidChange={setControlValid} provider={form.provider} channelId={channel?.id}
+        concurrencyValid={concurrencyValid}
+        summaryPrefix={!isEdit && newConcurrency ? t('admin:channelConcurrencySummary', { count: newConcurrency }) : undefined}
+        refreshable={isEdit ? channel.keys.some((key) => key.credential_kind === 1 && key.oauth_refreshable !== false) : !importToken}>
+        {!isEdit && <div className="flex min-w-0 flex-col gap-1.5">
+          <Label htmlFor="d-concurrency">{t('admin:channelInitialConcurrency')}</Label>
+          <Input id="d-concurrency" inputMode="numeric" value={newConcurrency} placeholder={t('admin:channelLimitUnlimited')}
+            aria-invalid={!concurrencyValid} onChange={(e) => setNewConcurrency(e.target.value)} />
+        </div>}
+      </ChannelControlEditor>}
+
+      {isEdit && tab === 'behavior' && (channel.provider === 'anthropic' || channel.provider === 'anthropic_max') && (
+        <ClientProfileEditor settings={settings} onChange={setSettings} />
+      )}
       {isEdit && tab === 'behavior' && (
-        <FieldGroup title={t('admin:groupBehavior')} hint={t('admin:groupBehaviorHint')}>
+        <OptionalSection id="channel-behavior-options" title={t('admin:groupBehavior')} hint={t('admin:groupBehaviorHint')} defaultOpen
+          summary={t(behaviorCustom ? 'admin:channelOptionsCustomized' : 'admin:channelOptionsDefault')}>
           <Switch
             label={t('admin:thinkingToContent')}
             description={t('admin:thinkingToContentHint')}
@@ -619,21 +734,6 @@ export function ChannelDrawer({
               )
             }
           />
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="d-proxy">{t('admin:proxyUrl')}</Label>
-            <p className="text-xs text-muted-foreground">{t('admin:proxyUrlHint')}</p>
-            <Input
-              id="d-proxy"
-              value={settings.proxy_url ?? ''}
-              placeholder="socks5://127.0.0.1:1080"
-              onChange={(e) => {
-                const v = e.target.value
-                setSettings(({ proxy_url: _drop, ...s }) =>
-                  v.trim() === '' ? s : { ...s, proxy_url: v },
-                )
-              }}
-            />
-          </div>
           <ExtraHeadersEditor
             value={settings.extra_headers ?? {}}
             onChange={(extra_headers) =>
@@ -642,8 +742,44 @@ export function ChannelDrawer({
               )
             }
           />
-        </FieldGroup>
+        </OptionalSection>
       )}
     </Drawer>
+  )
+}
+
+/// 每把 key 的并发与权重属于调度；凭证状态（到期、刷新、重新授权）由 `CredentialStatus` 放在接入信息。
+function KeySchedule({ channel, onDone }: { channel: ChannelRow; onDone: () => void }) {
+  const { t } = useTranslation()
+  const keys = channel.keys ?? []
+  const refreshEnabled = channel.settings?.account_control?.refresh_mode !== 'external'
+  const rows = keys.map((k) => (
+    <KeyParamRow key={k.id} channelId={channel.id} provider={channel.provider} row={k}
+      showIdentity={keys.length > 1} showCredential={false} refreshEnabled={refreshEnabled} onDone={onDone} />
+  ))
+  // 折叠区块包在 key 行里时拿不到同级的 first/last 间距规则，这里补上与其他区块一致的分隔和留白
+  return (
+    <div className="border-t border-border py-4">
+      {keys.length <= 1 ? rows
+        : <FieldGroup title={t('admin:channelKeys')} hint={t('admin:channelKeysHint')}>{rows}</FieldGroup>}
+    </div>
+  )
+}
+
+/// 订阅凭证的当前状态与它的操作，和上方的凭证输入同属「接入」。
+function CredentialStatus({ channel, onDone }: { channel: ChannelRow; onDone: () => void }) {
+  const keys = (channel.keys ?? []).filter((k) => k.credential_kind === 1)
+  const refreshEnabled = channel.settings?.account_control?.refresh_mode !== 'external'
+  if (keys.length === 0) return null
+  return (
+    <div className="flex flex-col gap-3">
+      {keys.map((k) => (
+        <div key={k.id} className="flex flex-col gap-1">
+          {keys.length > 1 && <span className="text-xs font-medium">#{k.id}</span>}
+          <OAuthKeyHealth channelId={channel.id} provider={channel.provider} row={k}
+            refreshEnabled={refreshEnabled} onDone={onDone} />
+        </div>
+      ))}
+    </div>
   )
 }

@@ -110,7 +110,7 @@ async fn temp_db_notifier(sink: &SocketAddr) -> (notify::Notifier, fred::clients
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn worker_alerts_carry_actionable_payloads() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let (sink, hits, bodies) = spawn_sink().await;
     let (notifier, redis, tmp) = temp_db_notifier(&sink).await;
@@ -271,7 +271,7 @@ async fn worker_alerts_carry_actionable_payloads() {
 /// 订阅命中才发、频率闸生效、事件包络字段完整。
 #[tokio::test]
 async fn notify_dispatch_and_mute() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let (sink, hits, bodies) = spawn_sink().await;
     let (notifier, _redis, tmp) = temp_db_notifier(&sink).await;
     // 每次用独立事件名，避免与并行跑的其他测试互踩频率闸
@@ -320,7 +320,7 @@ async fn webhook_failure_retries_and_signs_redacted_payload() {
     use axum::http::{HeaderMap, StatusCode};
     use hmac::{Hmac, KeyInit, Mac};
 
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let hits = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
     let (counter, capture) = (Arc::clone(&hits), Arc::clone(&seen));
@@ -383,7 +383,7 @@ async fn webhook_failure_retries_and_signs_redacted_payload() {
 /// 余额低扫描：阈值关闭返回空；开启后返回低于阈值的用户。
 #[tokio::test]
 async fn balance_low_scan_respects_threshold() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
@@ -436,7 +436,7 @@ async fn balance_low_scan_respects_threshold() {
 
 #[tokio::test]
 async fn rejected_private_webhook_is_visible_in_audit() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let (sink, hits, _) = spawn_sink().await;
     let (notifier, redis, bed) = temp_db_notifier(&sink).await;
     sqlx::query("UPDATE settings SET value='{}'::jsonb WHERE key='ssrf_policy'")

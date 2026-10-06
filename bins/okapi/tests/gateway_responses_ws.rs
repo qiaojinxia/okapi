@@ -7,6 +7,7 @@ use axum::{
     routing::get,
 };
 use futures::{SinkExt, StreamExt};
+use okapi::gateway::sched_redis::channel_permit::ChannelPermit;
 use okapi::{gateway, gateway::state::AppState};
 use okapi_domain::Money;
 use serde_json::{Value, json};
@@ -67,7 +68,7 @@ async fn publish_pricing(pg: &sqlx::PgPool, user: i64) {
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = std::env::var("DATABASE_URL").unwrap();
     let redis = std::env::var("OKAPI_REDIS_URL").unwrap();
     let pg = okapi_store::connect_pg(&database).await.unwrap();
@@ -433,12 +434,23 @@ async fn downstream_disconnect_drains_terminal_usage_and_releases_slots() {
     completed(&mut peer, None, 20).await;
     assert_eq!(env.amount(&event).await.0, 240);
     assert_eq!(env.balance().await, 10_000_000 - 240);
+    let mut permits = Vec::new();
     for _ in 0..4 {
-        assert!(env.state.sched.acquire_slot(env.channel_key, Some(4)).await);
+        permits.push(
+            ChannelPermit::acquire_key(&env.state.sched, env.channel_key, Some(4))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
     }
-    assert!(!env.state.sched.acquire_slot(env.channel_key, Some(4)).await);
-    for _ in 0..4 {
-        env.state.sched.release_slot(env.channel_key, Some(4)).await;
+    assert!(
+        ChannelPermit::acquire_key(&env.state.sched, env.channel_key, Some(4))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for permit in permits {
+        permit.release().await;
     }
 }
 
@@ -566,6 +578,7 @@ async fn codex_credentials_headers_and_opaque_input_use_native_ws_shape() {
         refresh_token: "refresh".into(),
         expires_at: chrono::Utc::now().timestamp() + 3600,
         account_id: Some("account".into()),
+        account_label: None,
     };
     sqlx::query("UPDATE channels SET provider='codex' WHERE id=$1")
         .bind(env.channel)

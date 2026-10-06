@@ -1,6 +1,9 @@
+import { useQuery } from '@tanstack/react-query'
 import { ScanSearch } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
+import { proxyOptions } from '@/features/proxies/options'
+import { usePermission } from '@/hooks/use-auth'
 import { DetailSection, InfoGrid, InfoItem } from './detail-ui'
 import { duration } from './types'
 import type { LogDiagnostics } from './types'
@@ -11,6 +14,13 @@ export function LogRequestDetails({ row }: { row: {
 } }) {
   const { t, i18n } = useTranslation(), locale = i18n.language
   const d = row.diagnostics
+  const can = usePermission()
+  // 出口代理名只在管理端能查（门户的诊断白名单里没有 attempts，也就不会触发这次请求）
+  const proxies = useQuery({
+    ...proxyOptions(),
+    enabled: Boolean(d?.attempts?.some((a) => a.egress_proxy_id !== undefined)) && can('channel.read'),
+  })
+  const proxyName = (id: number) => proxies.data?.find((p) => p.id === id)?.name ?? `#${id}`
   const models = [row.requested_model, row.model, row.upstream_model, d?.response_model]
     .filter((value): value is string => Boolean(value)).filter((value, index, values) => index === 0 || value !== values[index - 1])
   const fields = [
@@ -34,16 +44,19 @@ export function LogRequestDetails({ row }: { row: {
       {fields.map(([label, content]) => <InfoItem key={label} label={label} copy={content!}>{content}</InfoItem>)}
     </InfoGrid>
     {d?.attempts?.length ? <details className="rounded-lg border border-border/70 bg-card p-3" open={d.attempts.length > 1 || d.attempts.some(a => a.outcome === 'failure')}>
-      <summary className="cursor-pointer text-sm font-semibold">{t('logs:attempts')} · {d.attempts.length}</summary>
+      <summary className="cursor-pointer text-[13px] leading-5 font-medium">{t('logs:attempts')} · {d.attempts.length}</summary>
       <ol className="mt-3 space-y-3">
-        {d.attempts.map((attempt, index) => <li key={index} className={`min-w-0 space-y-2 rounded-lg border-l-2 bg-muted/30 p-3 text-xs ${attempt.outcome === 'failure' ? 'border-l-destructive' : attempt.outcome === 'success' ? 'border-l-success' : 'border-l-border'}`}>
+        {d.attempts.map((attempt, index) => <li key={index} className={`min-w-0 space-y-2 rounded-lg border-l-2 bg-muted/30 p-3 text-[13px] leading-5 ${attempt.outcome === 'failure' ? 'border-l-destructive' : attempt.outcome === 'success' ? 'border-l-success' : 'border-l-border'}`}>
           <div className="flex flex-wrap items-center gap-2"><span className="font-medium">#{index + 1} · {attempt.provider || '—'} · {t('analytics:dimChannel')} #{attempt.channel_id}</span>
             <Badge variant={attempt.outcome === 'failure' ? 'destructive' : 'muted'}>{attempt.status || (attempt.outcome === 'failure' ? t('logs:failed') : attempt.outcome === 'success' ? t('common:success') : '—')}</Badge>
             <span className="ml-auto tabular-nums" title={t('logs:attemptDuration')}>{duration(attempt.duration_ms, locale)}</span>
           </div>
-          <p className="break-all font-mono">{attempt.upstream_model} · {attempt.upstream_endpoint}</p>
-          <p className="text-muted-foreground">{t('admin:logsChannelKey')} #{attempt.channel_key_id}</p>
-          {attempt.error_code && <p className="break-all font-mono text-destructive">{attempt.error_code}</p>}
+          <p className="break-words [overflow-wrap:anywhere]">{attempt.upstream_model} · {attempt.upstream_endpoint}</p>
+          <p className="text-xs text-muted-foreground">
+            {t('admin:logsChannelKey')} #{attempt.channel_key_id}
+            {attempt.egress_proxy_id !== undefined && ` · ${t('logs:egressProxy')} ${proxyName(attempt.egress_proxy_id)}`}
+          </p>
+          {attempt.error_code && <p className="break-all text-destructive">{attempt.error_code}</p>}
           {attempt.error_message && <p className="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{attempt.error_message}</p>}
         </li>)}
       </ol>

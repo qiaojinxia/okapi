@@ -9,6 +9,7 @@ export const modelPresetZh = {
   applied: '已带入预设规格 · 展开可调整', referenceOnly: '官方参考 · 不自动覆盖现有配置',
   source: '官方规格 · 核对 {{date}}', pricingSource: '价格来源', ttls: '官方缓存时长：{{values}}',
   priceReference: '标准参考价：输入 ${{input}} / 输出 ${{output}} · USD / 1M',
+  snapshotId: '{{vendor}} · 快照 ID',
   applyPrice: '填入参考价', priceExpired: '参考价已过期', conditions: '适用条件与计价说明',
   scope: '预设是人工核对的离线参考，不是实时同步。实际接口和能力取决于渠道；未核实项保持未声明。价格仍需发布，渠道需单独配置。',
   cachePrecision: '缓存折扣相对当前输入价，倍率保留 6 位小数。未核实的倍率按普通输入价格起步；参考价不等于完整上游账单。',
@@ -44,6 +45,14 @@ export const modelAdminZh = {
   admin: {
     modelPreset: modelPresetZh,
     modelPresetNotices: modelPresetNoticesZh,
+    modelPriceOverview: {
+      title: '计费一览（USD / 百万 Token）',
+      input: '输入', output: '输出', cacheRead: '缓存读取',
+      cacheWrite5m: '缓存写入 5 分钟', cacheWrite1h: '缓存写入 1 小时',
+      official: '官方 {{price}}', officialTitle: '预设核对的官方标价；与售价不同时标黄',
+      markup: '售价为官方 ×{{ratio}}',
+      hint: '按当前倍率实时换算，未单独设置的时长档按通用写入倍率；分组折扣与计费规则另行生效。',
+    },
     modelMeta: {
       ...modelEditorZh,
       capabilities: '常用能力标签',

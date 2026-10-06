@@ -552,6 +552,7 @@ async fn connections_are_isolated_and_handshake_uses_proxy_and_trusted_headers()
             ("x-custom".into(), "kept".into()),
             ("chatgpt-account-id".into(), "wrong".into()),
         ],
+        ..Default::default()
     };
     let first = ResponsesSocket::connect(
         &HttpPool::new().unwrap(),

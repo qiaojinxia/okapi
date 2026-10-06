@@ -166,6 +166,54 @@ pub async fn remove_blocks(client: &Client, fields: &[String]) -> Result<(), fre
     client.hdel::<(), _, _>(BLOCKS_KEY, fields.to_vec()).await
 }
 
+/// Worker writes are fenced against the live value, including a concurrent lift.
+pub async fn compare_set_block(
+    client: &Client,
+    field: &str,
+    expected: Option<&BlockEntry>,
+    entry: &BlockEntry,
+) -> Result<bool, fred::error::Error> {
+    use fred::interfaces::LuaInterface;
+    let expected = expected
+        .map(serde_json::to_string)
+        .transpose()
+        .unwrap_or_default()
+        .unwrap_or_default();
+    let value = serde_json::to_string(entry).unwrap_or_default();
+    client
+        .eval(
+            r"
+        local old=redis.call('HGET',KEYS[1],ARGV[1]) or ''
+        if old~=ARGV[2] then return 0 end
+        redis.call('HSET',KEYS[1],ARGV[1],ARGV[3]); return 1
+    ",
+            vec![BLOCKS_KEY],
+            vec![field.to_owned(), expected, value],
+        )
+        .await
+}
+
+pub async fn prune_expired(client: &Client, now: i64) -> Result<usize, fred::error::Error> {
+    use fred::interfaces::LuaInterface;
+    client
+        .eval(
+            r"
+        local removed=0
+        local entries=redis.call('HGETALL',KEYS[1])
+        for i=1,#entries,2 do
+          local ok,entry=pcall(cjson.decode,entries[i+1])
+          if ok and tonumber(entry['until']) and tonumber(entry['until'])<=tonumber(ARGV[1]) then
+            redis.call('HDEL',KEYS[1],entries[i]); removed=removed+1
+          end
+        end
+        return removed
+    ",
+            vec![BLOCKS_KEY],
+            vec![now.to_string()],
+        )
+        .await
+}
+
 pub async fn clear_blocks(client: &Client) -> Result<(), fred::error::Error> {
     client.del::<(), _>(BLOCKS_KEY).await
 }

@@ -47,6 +47,15 @@ pub(super) async fn submit(
     if funding::stop_before_submit(state, row, lease).await? {
         return Ok(Step::Retry(0));
     }
+    if crate::gateway::account_control::admit(state, row.channel_id, Some(row.channel_key_id))
+        .await
+        .is_err()
+    {
+        store::abort_before_submission(&state.pg, lease, "no_available_channel")
+            .await
+            .map_err(map_store)?;
+        return Ok(Step::Retry(0));
+    }
     let submitted = store::mark_submitting(&state.pg, lease)
         .await
         .map_err(map_store)?;

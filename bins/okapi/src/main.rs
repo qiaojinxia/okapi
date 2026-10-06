@@ -159,5 +159,16 @@ async fn seal_credentials(cfg: &Config) -> anyhow::Result<()> {
     for id in &stats.unreadable {
         tracing::warn!(channel_key_id = id, "凭证非 UTF-8，已跳过");
     }
+    // 出口代理 URL 含认证信息，同一信封（§11.41；迁移来的旧 settings.proxy_url 是明文）
+    let proxies = okapi_store::egress::seal_existing(&pg, master_key).await?;
+    tracing::info!(
+        sealed = proxies.sealed,
+        already_sealed = proxies.already_sealed,
+        unreadable = proxies.unreadable.len(),
+        "存量代理地址封装完成"
+    );
+    for id in &proxies.unreadable {
+        tracing::warn!(proxy_id = id, "代理地址非 UTF-8，已跳过");
+    }
     Ok(())
 }

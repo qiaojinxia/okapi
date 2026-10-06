@@ -6,12 +6,14 @@
 pub mod error;
 pub mod ids;
 pub mod money;
+pub mod server_tools;
 pub mod state;
 pub mod tokens;
 
 pub use error::DomainError;
 pub use ids::{ApiKeyId, ChannelId, ChannelKeyId, GroupCode, ModelCode, UserId};
 pub use money::Money;
+pub use server_tools::{AnthropicToolUsage, ServerToolUsage};
 pub use state::{BillingEvent, BillingState, InvalidTransition};
 pub use tokens::{
     CacheModalities, ModalitiesReported, TokenDetailsReported, TokenUsage, UpstreamTokenCounts,

@@ -121,7 +121,7 @@ pub async fn process_once(ch: &ChClient, limit: u32) -> anyhow::Result<usize> {
     let limit = limit.clamp(1, 500);
     let candidate = "endpoint='/v1/audio/speech' AND input_unit='' AND isNull(input_characters)";
     let sql = format!(
-        "WITH page AS (SELECT ts,request_id FROM request_log_raw WHERE {candidate} AND (ts,request_id)>(toDateTime64({{cursor_ts:String}},3),toUUID({{cursor_id:String}})) GROUP BY ts,request_id ORDER BY ts,request_id LIMIT {limit}) SELECT {},count() AS copies FROM request_log_raw INNER JOIN page USING (ts,request_id) WHERE {candidate} GROUP BY ALL ORDER BY ts,request_id SETTINGS max_result_rows=10000,result_overflow_mode='throw'",
+        "WITH page AS (SELECT ts,request_id FROM request_log_raw WHERE {candidate} AND (ts,request_id)>(toDateTime64({{cursor_ts:String}},3,'UTC'),toUUID({{cursor_id:String}})) GROUP BY ts,request_id ORDER BY ts,request_id LIMIT {limit}) SELECT {},count() AS copies FROM request_log_raw INNER JOIN page USING (ts,request_id) WHERE {candidate} GROUP BY ALL ORDER BY ts,request_id SETTINGS max_result_rows=10000,result_overflow_mode='throw'",
         columns()
     );
     let rows = ch

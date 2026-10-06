@@ -13,10 +13,11 @@ use super::admin::{audit, ensure_channel_owner, guard, guard_scoped, guard_super
 use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
+use crate::gateway::extract::Path;
 use crate::gateway::ingress::Ingress;
 use crate::gateway::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};
 use okapi_store::auth::PermScope;
@@ -142,6 +143,11 @@ pub async fn list_settings(
         data.push(json!({ "key": key, "value": okapi_pricing::book::BASE_PRICE_PER_1M_MICRO,
             "published_value": published, "is_secret": false, "configured": false, "updated_at": null }));
     }
+    if !data.iter().any(|r| r["key"] == "oauth_refresh_policy") {
+        data.push(json!({"key":"oauth_refresh_policy",
+            "value":crate::worker::oauth_refresh::RefreshPolicy::default(),
+            "is_secret":false,"configured":false,"updated_at":null}));
+    }
     Ok(Json(json!({ "data": data })))
 }
 
@@ -150,8 +156,11 @@ pub async fn list_settings(
 #[derive(Deserialize)]
 pub struct BatchChannelReq {
     pub ids: Vec<i64>,
-    /// enable | disable | delete
+    /// enable | disable | delete | set_egress
     pub action: String,
+    /// `set_egress` 的目标绑定（§11.41），形状同 `POST /admin/channels/{id}/egress`。
+    #[serde(default)]
+    pub egress: Option<okapi_store::egress::Binding>,
 }
 
 /// 批量启停/删除渠道（对齐 new-api 批量操作）。
@@ -171,10 +180,23 @@ pub async fn batch_channels(
     if req.ids.is_empty() {
         return Err(AppError::bad_request().with_param("ids"));
     }
+    let mut assignment = None;
     let affected = match req.action.as_str() {
         "enable" => mutate::batch_set_channel_status(&state.pg, &req.ids, 1).await?,
         "disable" => mutate::batch_set_channel_status(&state.pg, &req.ids, 2).await?,
         "delete" => mutate::batch_delete_channels(&state.pg, &req.ids).await?,
+        // 按池批量换出口：前端取池成员 id 调这里（出口不挂在池上，见 §11.41）
+        "set_egress" => {
+            let binding = req
+                .egress
+                .as_ref()
+                .ok_or_else(|| AppError::bad_request().with_param("egress"))?;
+            super::egress::validate_binding(&state, binding, &actor, scope).await?;
+            let (affected, report) =
+                okapi_store::egress::set_channels_binding(&state.pg, &req.ids, binding).await?;
+            assignment = Some(report);
+            affected
+        }
         _ => return Err(AppError::bad_request().with_param("action")),
     };
     state.invalidate_routing_caches();
@@ -183,10 +205,12 @@ pub async fn batch_channels(
         &actor,
         "channel.batch",
         &req.action,
-        json!({"ids": req.ids, "affected": affected}),
+        json!({"ids": req.ids, "affected": affected, "egress": req.egress, "assignment": assignment}),
     )
     .await;
-    Ok(Json(json!({ "affected": affected })))
+    Ok(Json(
+        json!({ "affected": affected, "assignment": assignment }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -290,8 +314,14 @@ pub struct DiagnoseQuery {
     pub pool: Option<String>,
 }
 
-/// key 静态淘汰原因（与生产过滤 `ck.status = 1 AND cooldown 过期 AND subset 允许` 对应）。
-fn key_reason(status: i16, cooling: bool, subset_ok: bool) -> Option<&'static str> {
+/// key 静态淘汰原因（与生产过滤 `ck.status = 1 AND cooldown 过期 AND subset 允许 AND 出口可用`
+/// 对应）。出口原因见 `DiagKey::egress_block`（§11.41）。
+fn key_reason(
+    status: i16,
+    cooling: bool,
+    subset_ok: bool,
+    egress_block: Option<&str>,
+) -> Option<&'static str> {
     match status {
         2 => Some("key_cooling"),
         3 => Some("key_rate_limited"),
@@ -300,7 +330,11 @@ fn key_reason(status: i16, cooling: bool, subset_ok: bool) -> Option<&'static st
         6 => Some("key_invalid"),
         _ if cooling => Some("key_cooling"),
         _ if !subset_ok => Some("model_subset_mismatch"),
-        _ => None,
+        _ => egress_block.map(|block| match block {
+            "egress_cooling" => "egress_cooling",
+            "egress_unassigned" => "egress_unassigned",
+            _ => "egress_unavailable",
+        }),
     }
 }
 
@@ -446,7 +480,9 @@ pub async fn diagnose_route(
                 .iter()
                 .map(|k| {
                     let cooling = k.cooldown_until.is_some_and(|t| t > now);
-                    let reason = key_reason(k.status, cooling, k.subset_ok).or(excluded);
+                    let reason =
+                        key_reason(k.status, cooling, k.subset_ok, k.egress_block.as_deref())
+                            .or(excluded);
                     json!({
                         "key_id": k.key_id,
                         "status": k.status,
@@ -669,33 +705,7 @@ pub async fn manage_user(
     if matches!(action, UserAction::Promote | UserAction::Demote) {
         guard_super_admin(&state, &headers).await?;
     }
-    if id == actor.user_id {
-        return Err(AppError::bad_request().with_param("self_target"));
-    }
-    let target_role = sqlx::query_scalar!(
-        r#"SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL"#,
-        id
-    )
-    .fetch_optional(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?
-    .ok_or_else(not_found)?;
-    if target_role >= 100 {
-        return Err(
-            AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
-                .with_param("super_admin_protected"),
-        );
-    }
-    if !mutate::manage_user(&state.pg, id, action).await? {
-        return Err(not_found());
-    }
-    if matches!(
-        action,
-        okapi_store::mutate::UserAction::Ban | okapi_store::mutate::UserAction::Delete
-    ) {
-        state.sched.web_session_revoke_user(id).await;
-    }
-    state.sched.auth_flush().await;
+    super::user_management::apply(&state, &actor, id, action).await?;
     audit(
         &state,
         &actor,

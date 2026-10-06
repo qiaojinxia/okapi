@@ -170,6 +170,7 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         ""
     });
     let extra = json!({
+        "server_tool_usage": payload.get("server_tool_usage").filter(|v| !v.is_null()).map(Value::to_string).unwrap_or_default(),
         "cache_write_5m_tokens": payload.get("cache_write_5m_tokens"),
         "cache_write_1h_tokens": payload.get("cache_write_1h_tokens"),
         "audio_prompt_tokens": payload.get("audio_prompt_tokens"),

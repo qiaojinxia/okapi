@@ -10,8 +10,8 @@ import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { PoolReach } from '@/features/pools/PoolReach'
 import { DEFAULT_POOL } from '@/features/pools/types'
+import { poolOptions } from '@/features/pools/pool-options'
 import { apiFetch } from '@/lib/api'
-import { qk } from '@/lib/query-keys'
 import { describeError } from '@/lib/i18n'
 
 export function GroupDrawer({
@@ -40,10 +40,7 @@ export function GroupDrawer({
     text.trim() !== '' && (!Number.isInteger(Number(text.trim())) || Number(text.trim()) < 0)
 
   // 池清单从后端取：手输池代码会因不存在而被 FK 拒绝，且提示不直观
-  const pools = useQuery({
-    queryKey: qk.adminPools,
-    queryFn: () => apiFetch<{ data: { pool_code: string }[] }>('/admin/pools'),
-  })
+  const pools = useQuery(poolOptions())
 
   const upsert = useMutation({
     mutationFn: () =>

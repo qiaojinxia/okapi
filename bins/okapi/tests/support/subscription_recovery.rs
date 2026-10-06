@@ -578,7 +578,8 @@ async fn stale_window_tick_does_not_refill_consumed_credit() {
     let b = setup().await;
     let code = plan(&b).await;
     assert_eq!(b.admin_grant(&code).await.status(), 200);
-    sqlx::query("UPDATE user_subscriptions SET window_start=now()-interval '2 days',window_end=now()-interval '1 day' WHERE user_id=$1 AND status=1")
+    // Stay away from the exact rollover boundary: PG and gateway clocks can differ slightly.
+    sqlx::query("UPDATE user_subscriptions SET window_start=now()-interval '49 hours',window_end=now()-interval '25 hours' WHERE user_id=$1 AND status=1")
         .bind(b.user_id).execute(&b.pg).await.unwrap();
     let old = okapi_store::subscriptions::active_for_user(&b.pg, b.user_id)
         .await
@@ -589,7 +590,12 @@ async fn stale_window_tick_does_not_refill_consumed_credit() {
         .await
         .unwrap();
     assert_eq!(b.chat().await, 200);
-    b.wait_committed(&[]).await;
+    let (_, charged, pool) = b.wait_committed(&[]).await;
+    assert!(charged > 0);
+    assert_eq!(
+        pool, 1,
+        "the request must actually consume the rolled subscription"
+    );
     let spent = b.sub().await.0;
     assert!(spent < 2_000_000);
     okapi_ledger::subscriptions::roll(&b.pg, &b.ledger, &old, now, "test")

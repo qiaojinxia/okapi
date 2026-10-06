@@ -51,6 +51,9 @@ impl PricingMode {
 
     pub(crate) fn validate(&self, model: &str) -> Result<(), CompileError> {
         match self {
+            Self::PerCall { price } if price.as_micros() < 0 => {
+                Err(CompileError::NegativePerCallPrice(model.to_owned()))
+            }
             Self::Ratio { .. } | Self::PerCall { .. } => Ok(()),
             Self::Tiered { tiers, .. } => tiers.validate(model),
         }
@@ -107,6 +110,12 @@ impl TierTable {
     }
 
     fn validate(&self, model: &str) -> Result<(), CompileError> {
+        if self.0.iter().any(|tier| tier.price_per_1m.as_micros() < 0) {
+            return Err(CompileError::InvalidTierTable {
+                model: model.to_owned(),
+                reason: "negative price",
+            });
+        }
         let Some(first) = self.0.first() else {
             return Err(CompileError::InvalidTierTable {
                 model: model.to_owned(),
@@ -132,13 +141,13 @@ impl TierTable {
         Ok(())
     }
 
-    /// 按总 tokens 落档（最后一个 `from_tokens <= total` 的档位）。
+    /// 按请求输入 tokens 落档（最后一个 `from_tokens <= input` 的档位）。
     /// 前提：已通过 validate（首档从 0 起），故必有档位命中。
-    pub(crate) fn resolve(&self, total_tokens: u64) -> Option<Money> {
+    pub(crate) fn resolve(&self, input_tokens: u64) -> Option<Money> {
         self.0
             .iter()
             .rev()
-            .find(|tier| tier.from_tokens <= total_tokens)
+            .find(|tier| tier.from_tokens <= input_tokens)
             .map(|tier| tier.price_per_1m)
     }
 }

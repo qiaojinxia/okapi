@@ -398,31 +398,43 @@ fn pack_overview(rows: &[Value], known: [i64; 3]) -> Value {
     result
 }
 
-/// GET /admin/stats/overview：站点即时 KPI（今日 / 窗口双档）。
-///
-/// 与 `margin` 的分工：margin 是**按日明细 + 毛利率**（趋势图数据源），
-/// overview 是**单屏概览数字**（含活跃用户数，margin 未覆盖），
-/// 两者同源 mv_user_day，各取所需，不重复聚合逻辑。
+#[derive(Deserialize, Default)]
+pub struct OverviewQuery {
+    #[serde(default)]
+    pub cached: bool,
+    pub days: Option<u32>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+}
+
+/// GET /admin/stats/overview：所选日历窗口 KPI，另附今日与昨日全天参考。
+/// 与 `margin` 的按日趋势同源；日期校验、时区及边界复用分析页的口径。
 pub async fn overview(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(q): Query<WindowQuery>,
+    Query(q): Query<OverviewQuery>,
 ) -> Result<Json<Value>, AppError> {
     super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
     let ch = ch_or_disabled(&state)?;
-    let calendar = super::usage_details::CalendarWindow::read(ch, q.days(), None, None).await?;
+    let calendar = super::usage_details::CalendarWindow::read(
+        ch,
+        q.days.unwrap_or(7).clamp(1, 366),
+        q.start_date.as_deref(),
+        q.end_date.as_deref(),
+    )
+    .await?;
     let days = calendar.days();
     let range = calendar.day_filter();
 
-    // 昨日同档：单看"今日 1485 次请求"无法判断好坏，环比才是运营真正读的那个数。
-    // 取整日而非"昨日同一时刻"——同比对齐时刻要按小时聚合，mv_user_day 是日粒度；
-    // 前端据此标注为「昨日全天」，不假装是等时长对比。
+    // 取实际昨日全天，而非自定义区间终点的前一天；仅作参考，不计算今日涨跌。
     let cached = q.cached && super::stats_cache::allowed(&headers);
-    let yesterday_date = (calendar.end - chrono::Days::new(1)).to_string();
+    let today_date = chrono::NaiveDate::parse_from_str(&calendar.today, "%Y-%m-%d")
+        .map_err(|_| AppError::internal())?;
+    let yesterday_date = (today_date - chrono::Days::new(1)).to_string();
     let today_filter = format!("day = toDate('{}')", calendar.today);
     let yesterday_filter = format!("day = toDate('{yesterday_date}')");
     let coverage_sql = format!(
-        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} OR {yesterday_filter} GROUP BY day"
+        "SELECT toDate(hour) AS day, countIfMerge(cost_known) AS known, sumMerge(known_amount) AS revenue, sumMerge(known_cost) AS cost FROM mv_analysis_hour WHERE {range} OR {today_filter} OR {yesterday_filter} GROUP BY day"
     );
     let (today, yesterday, window, coverage) = tokio::try_join!(
         overview_sources(&state, &today_filter, cached),
@@ -445,9 +457,10 @@ pub async fn overview(
 
     Ok(Json(json!({
         "days": days,
+        "calendar": calendar.json(),
         "today": pack_overview(&today, known_for(&calendar.today, &calendar.today)),
         "yesterday": pack_overview(&yesterday, known_for(&yesterday_date, &yesterday_date)),
-        "window": pack_overview(&window, known_for(&calendar.start.to_string(), &calendar.today)),
+        "window": pack_overview(&window, known_for(&calendar.start.to_string(), &calendar.end.to_string())),
     })))
 }
 

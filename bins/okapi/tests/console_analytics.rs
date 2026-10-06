@@ -12,6 +12,9 @@ use uuid::Uuid;
 #[path = "support/statistics_sql_capture.rs"]
 mod statistics_sql_capture;
 
+#[path = "support/server_tool_statistics.rs"]
+mod server_tool_statistics;
+
 fn hash(token: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(token.as_bytes()))
@@ -33,11 +36,19 @@ struct Env {
 }
 
 async fn setup() -> Env {
+    setup_inner(None).await
+}
+
+async fn setup_with_ch_database(database: &str) -> Env {
+    setup_inner(Some(database)).await
+}
+
+async fn setup_inner(database: Option<&str>) -> Env {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_env_filter("okapi=error")
         .try_init();
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
@@ -112,6 +123,9 @@ async fn setup() -> Env {
     }
     if let Some(client) = statistics_sql_capture::configured(ch_url.as_deref(), None).await {
         state.ch = Some(client);
+    }
+    if let Some(database) = database {
+        state.ch = Some(okapi_store::ChClient::new(ch_url.as_deref().unwrap(), database).unwrap());
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

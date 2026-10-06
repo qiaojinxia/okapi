@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT credential_ciphertext, status FROM channel_keys WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "credential_ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "credential_ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "channel_keys",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8bd2a97a91fe31072d387738b05609aa99eb8c01c60560d9ebedf86e2415bda9"
+}

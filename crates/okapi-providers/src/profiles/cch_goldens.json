@@ -1,0 +1,44 @@
+[
+  {
+    "name": "basic",
+    "wire": "{\"model\":\"claude-sonnet-5-5\",\"max_tokens\":1024,\"messages\":[],\"system\":[{\"text\":\"x-anthropic-billing-header: cch=00000;\"}]}",
+    "filtered": "{\"model\":\"\",\"messages\":[],\"system\":[{\"text\":\"x-anthropic-billing-header: cch=00000;\"}]}",
+    "expected": 69402
+  },
+  {
+    "name": "escaping",
+    "wire": "{\"messages\":[{\"content\":\"ASCII cch=00000; \\\"model\\\":\\\"leave me\\\"\",\"role\":\"user\"}],\"model\":\"claude-sonnet-5-5\",\"system\":[{\"text\":\"cch=00000;\"}],\"max_tokens\":17}",
+    "filtered": "{\"messages\":[{\"content\":\"ASCII cch=00000; \\\"model\\\":\\\"leave me\\\"\",\"role\":\"user\"}],\"model\":\"\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "expected": 609962
+  },
+  {
+    "name": "nested",
+    "wire": "{\"model\":\"outer\",\"tools\":[{\"input_schema\":{\"model\":\"nested\",\"max_tokens\":99,\"type\":\"object\"}}],\"max_tokens\":100,\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "filtered": "{\"model\":\"\",\"tools\":[{\"input_schema\":{\"model\":\"\",\"type\":\"object\"}}],\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "expected": 531856
+  },
+  {
+    "name": "fallbacks",
+    "wire": "{\"fallbacks\":[\"a\",[\"b\",{\"x\":\"]\\\"\"}]],\"fallback_credit_token\":\"fixture\",\"model\":\"outer\",\"max_tokens\":100,\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "filtered": "{\"model\":\"\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "expected": 623869
+  },
+  {
+    "name": "last-fallback",
+    "wire": "{\"model\":\"x\",\"system\":[{\"text\":\"cch=00000;\"}],\"fallbacks\":[\"y\"]}",
+    "filtered": "{\"model\":\"\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "expected": 623869
+  },
+  {
+    "name": "first-cap",
+    "wire": "{\"max_tokens\":8,\"model\":\"x\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "filtered": "{\"model\":\"\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "expected": 623869
+  },
+  {
+    "name": "non-numeric-cap",
+    "wire": "{\"max_tokens\":\"literal\",\"model\":\"x\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "filtered": "{\"max_tokens\":\"literal\",\"model\":\"\",\"system\":[{\"text\":\"cch=00000;\"}]}",
+    "expected": 289235
+  }
+]

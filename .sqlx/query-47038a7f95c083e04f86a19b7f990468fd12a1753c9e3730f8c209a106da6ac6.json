@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH next AS (\n            SELECT id, CASE\n                WHEN failed_count >= $3::bigint AND (cooldown_until IS NULL\n                     OR cooldown_until < now() - make_interval(secs => $6::bigint::double precision))\n                THEN 1 ELSE failed_count + 1 END AS failed\n            FROM proxies\n            WHERE id = $1 AND (cooldown_until IS NULL OR cooldown_until <= now())\n            FOR UPDATE)\n        UPDATE proxies p SET failed_count = next.failed, last_error = $2,\n            cooldown_until = CASE WHEN next.failed >= $3::bigint\n                THEN now() + make_interval(secs => least($5::bigint::double precision,\n                     $4::bigint::double precision\n                     * power(2, least(20, greatest(0, next.failed - $3::bigint)))))\n                ELSE p.cooldown_until END,\n            updated_at = now()\n        FROM next WHERE p.id = next.id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Varchar",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47038a7f95c083e04f86a19b7f990468fd12a1753c9e3730f8c209a106da6ac6"
+}

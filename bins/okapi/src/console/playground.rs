@@ -41,7 +41,7 @@ pub async fn chat(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         match crate::gateway::chat::playground_parameters(&state, &headers, model).await {
             Ok(profile) => {
                 if let Err(param) = profile.validate(&value) {
-                    return AppError::new(StatusCode::BAD_REQUEST, "invalid_request_error")
+                    return AppError::new(StatusCode::BAD_REQUEST, okapi_api::codes::BAD_REQUEST)
                         .with_param(param)
                         .into_response_with(None);
                 }
@@ -70,8 +70,11 @@ pub struct ParameterQuery {
 pub async fn parameters(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<ParameterQuery>,
+    query: Result<Query<ParameterQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Json<Value>, AppError> {
+    // Authenticate before reporting malformed metadata queries, and keep the common error envelope.
+    crate::gateway::auth::authenticate(&state, &headers).await?;
+    let Query(query) = query.map_err(|_| AppError::bad_request().with_param("query"))?;
     if query.model.trim().is_empty() || query.model.len() > 256 {
         return Err(AppError::bad_request());
     }

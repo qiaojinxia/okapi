@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 #[path = "support/ratio_sync_pages.rs"]
 mod pages;
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
 
 struct Env {
     pg: PgPool,
@@ -95,7 +97,7 @@ async fn spawn_mock(ratio_model: String, per_call_model: String, new_model: Stri
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -142,6 +144,7 @@ async fn setup() -> Env {
         new_model.clone(),
     )
     .await;
+    published_pricing::publish(&pg, admin_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();

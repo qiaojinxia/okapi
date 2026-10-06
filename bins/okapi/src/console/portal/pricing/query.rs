@@ -158,7 +158,7 @@ pub(super) async fn models(
         (p.audio_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS audio_ratio,
         (p.audio_completion_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS audio_completion_ratio,
         (p.image_ratio_scaled / 1000000::numeric)::numeric(12,6)::text AS image_ratio,
-        p.modality_ratios, p.per_call_price_micro
+        p.modality_ratios, p.server_tool_prices, p.per_call_price_micro
         ",
     );
     sql.push(FROM)

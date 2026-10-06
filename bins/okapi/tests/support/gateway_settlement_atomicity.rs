@@ -1,4 +1,5 @@
 use super::*;
+use fred::interfaces::HashesInterface;
 use std::{collections::BTreeMap, time::Duration};
 
 async fn interrupted(
@@ -250,7 +251,8 @@ async fn json_success_waits_for_a_durable_bill() -> TestResult {
 }
 
 #[tokio::test]
-async fn pg_rejection_is_an_http_error_without_losing_or_charging_the_hold() -> TestResult {
+async fn pg_rejection_journals_success_without_retrying_generation_or_losing_the_hold() -> TestResult
+{
     let bed = Bed::new(false).await?;
     let rule = format!("test_no_success_{}", bed.uid);
     // Per-user constraint injects a real PG failure only for this request's
@@ -261,17 +263,45 @@ async fn pg_rejection_is_an_http_error_without_losing_or_charging_the_hold() -> 
     )))
     .execute(&bed.pg)
     .await?;
-    let result = bed.chat().await;
+    let (status, body) = bed.chat().await?;
+    assert_eq!(
+        status, 200,
+        "captured usage is durable in the journal: {body}"
+    );
+    bed.pending.wait_idle(Duration::from_secs(5)).await;
+    let holds = bed.ledger.list_reservations(bed.uid).await?;
+    assert_eq!(
+        holds.len(),
+        1,
+        "a journaled success keeps its original hold"
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM billing_records WHERE user_id=$1 AND status=20")
+            .bind(bed.uid)
+            .fetch_one(&bed.pg)
+            .await?;
+    assert_eq!(count, 0, "PG remains unavailable until recovery");
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "ALTER TABLE billing_records DROP CONSTRAINT {rule}"
     )))
     .execute(&bed.pg)
     .await?;
-    let (status, body) = result?;
-    assert_eq!(status, 500, "{body}");
-    assert_eq!(body["error"]["code"], "internal_error");
-    bed.pending.wait_idle(Duration::from_secs(5)).await;
-    assert_eq!(bed.ledger.balance(bed.uid).await?.as_micros(), 10_000_000);
+    let payload: String = bed
+        .redis
+        .hget(
+            "settlement:{retry}:payloads",
+            holds[0].request_id.to_string(),
+        )
+        .await?;
+    let saved: okapi_ledger::pg::OwnedSettlementInput = serde_json::from_str(&payload)?;
+    assert_eq!(saved.request_id, holds[0].request_id);
+    assert_eq!(saved.amount.as_micros(), 24);
+    assert!(bed.state.settle_success(saved.as_input()).await.unwrap());
+    assert!(!bed.state.settle_success(saved.as_input()).await.unwrap());
+    assert_eq!(
+        bed.ledger.balance(bed.uid).await?.as_micros(),
+        10_000_000 - 24
+    );
     assert!(bed.ledger.list_reservations(bed.uid).await?.is_empty());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_sync WHERE user_id=$1")
         .bind(bed.uid)
@@ -282,12 +312,6 @@ async fn pg_rejection_is_an_http_error_without_losing_or_charging_the_hold() -> 
         bed.hits.load(Ordering::SeqCst),
         1,
         "settlement failure must not retry generation"
-    );
-    let (status, body) = bed.chat().await?;
-    assert_eq!(status, 200, "{body}");
-    assert_eq!(
-        bed.ledger.balance(bed.uid).await?.as_micros(),
-        10_000_000 - 24
     );
     Ok(())
 }

@@ -4,7 +4,7 @@
 //! 三种源形状（判据与 new-api 一致）：ratio_config 对象、new-api `/api/pricing` 列表、Okapi `/api/pricing`。
 //! 数值全部以十进制字面量流转、经 `RatioFp` 定点校验，不经浮点。
 
-use super::admin::{audit, guard};
+use super::admin::guard;
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
@@ -220,6 +220,10 @@ pub fn parse_source(body: &Value) -> Option<PricingTable> {
 
 /// 本地定价表（与源同一形状，供对比）。
 async fn local_table(pg: &sqlx::PgPool) -> Result<PricingTable, AppError> {
+    local_table_in(&mut *pg.acquire().await.map_err(okapi_store::StoreError::from)?).await
+}
+
+async fn local_table_in(pg: &mut sqlx::PgConnection) -> Result<PricingTable, AppError> {
     let rows = sqlx::query!(
         r#"SELECT m.model_name, p.pricing_mode,
                   p.model_ratio::text AS model_ratio,
@@ -403,7 +407,6 @@ pub async fn apply(
     }
 
     // 同一模型的多轴改动合并成一次 upsert；其余轴取本地现值（缺省 1）
-    let local = local_table(&state.pg).await?;
     let mut by_model: BTreeMap<String, Vec<(&'static str, String)>> = BTreeMap::new();
     for c in &req.changes {
         let axis = axis_key(&c.axis).unwrap_or("model_ratio");
@@ -411,6 +414,29 @@ pub async fn apply(
             .entry(c.model.trim().to_owned())
             .or_default()
             .push((axis, c.value.trim().to_owned()));
+    }
+    let mut tx = state
+        .pg
+        .begin()
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    let names: Vec<_> = by_model.keys().cloned().collect();
+    sqlx::query("SELECT id FROM models WHERE model_name=ANY($1) ORDER BY model_name FOR UPDATE")
+        .bind(&names)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    let local = local_table_in(&mut tx).await?;
+    // Validate every model before the first write, including incomplete new models.
+    for (model, changes) in &by_model {
+        if changes.iter().any(|(axis, _)| *axis != "per_call_price")
+            && !changes.iter().any(|(axis, _)| *axis == "model_ratio")
+            && !local
+                .get(model)
+                .is_some_and(|axes| axes.contains_key("model_ratio"))
+        {
+            return Err(AppError::bad_request().with_param("model_ratio"));
+        }
     }
     let mut applied = 0usize;
     for (model, changes) in &by_model {
@@ -431,8 +457,8 @@ pub async fn apply(
                 .get("model_ratio")
                 .cloned()
                 .ok_or_else(|| AppError::bad_request().with_param("model_ratio"))?;
-            okapi_store::admin::upsert_model_ratio(
-                &state.pg,
+            okapi_store::admin::upsert_model_ratio_in(
+                &mut tx,
                 model,
                 okapi_store::admin::RatioAxes {
                     model: &model_ratio,
@@ -454,21 +480,15 @@ pub async fn apply(
                 .parse::<RatioFp>()
                 .map_err(|_| AppError::bad_request().with_param("value"))?
                 .as_scaled();
-            okapi_store::admin::upsert_model_per_call(&state.pg, model, micro).await?;
+            okapi_store::admin::upsert_model_per_call_in(&mut tx, model, micro).await?;
         }
         applied += changes.len();
     }
-    audit(
-        &state,
-        &actor,
-        "pricing.sync_apply",
-        "batch",
-        json!({
-            "applied": applied,
-            "changes": req.changes.iter().map(|c| json!({"model": c.model, "axis": c.axis, "value": c.value})).collect::<Vec<_>>(),
-        }),
-    )
-    .await;
+    okapi_store::admin::record_audit_in(&mut tx, &format!("admin:{}", actor.user_id), "pricing.sync_apply", "batch", json!({
+        "applied": applied,
+        "changes": req.changes.iter().map(|c| json!({"model": c.model, "axis": c.axis, "value": c.value})).collect::<Vec<_>>(),
+    })).await?;
+    tx.commit().await.map_err(okapi_store::StoreError::from)?;
     Ok(Json(json!({ "applied": applied, "published": false })))
 }
 

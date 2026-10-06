@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channel_keys k SET credential_ciphertext = $4, status = 1,\n              cooldown_until = NULL, failed_count = 0, last_error = NULL, updated_at = now()\n           WHERE id = $2 AND channel_id = $1 AND credential_kind = 1\n             AND credential_ciphertext = $3\n             AND EXISTS (SELECT 1 FROM channels c WHERE c.id = k.channel_id\n                         AND c.provider = $5 AND c.deleted_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Bytea",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d6f96b1f16f85b30bd68612e64a77575f075b6b6c261dbe66c8c538d91c4db9"
+}

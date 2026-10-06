@@ -113,6 +113,7 @@ impl Binding {
         let outbound = Outbound {
             proxy_url: self.proxy_url.clone(),
             extra_headers: self.extra_headers.clone(),
+            ..Default::default()
         };
         // Validate immutable protocol configuration before accepting/funding a job.
         // Vertex token refresh remains a worker operation; no cloud request is needed here.
@@ -144,6 +145,7 @@ impl Binding {
         let outbound = Outbound {
             proxy_url: self.proxy_url.clone(),
             extra_headers: self.extra_headers.clone(),
+            ..Default::default()
         };
         match self.provider.as_str() {
             "gemini" => Ok(Remote::Gemini(

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import { portalLogSearch } from '../src/features/logs/search'
 import { billingLines, cacheRead, cacheReadShare, cacheWrite, netAmount } from '../src/features/logs/types'
+import { formatOutputRate, outputRates } from '../src/features/logs/performance'
 
 const models = [
   { model: 'gpt-alpha', model_name: 'gpt-alpha', display_name: '通用助手', vendor: 'OpenAI' },
@@ -13,7 +14,7 @@ const log = {
   id: 20, request_id: 'req-20', upstream_request_id: 'upstream-20', model: 'gpt-alpha', log_type: 2, status: 20,
   user_id: 1, username: 'alice', api_key_id: 1, key_name: 'app-key', key_prefix: 'sk-prefix', channel_id: 1, channel_name: 'OpenAI Primary', channel_key_id: 2,
   provider: 'openai', client_type: 'sdk', client_ip: '203.0.113.1', node: 'edge-west', group: 'default',
-  usage: { prompt_tokens: 1000, cached_tokens: 100, completion_tokens: 500, reasoning_tokens: 50 },
+  usage: { prompt_tokens: 1000, cached_tokens: 100, completion_tokens: 500, reasoning_tokens: 50, input_unit: 'tokens' },
   amount_micro: 20000, original_amount_micro: 25000, discount_micro: 5000, upstream_cost_micro: 10000,
   pricing_snapshot: null, error_code: null, latency_ms: 800, ttft_ms: 100, is_stream: true,
   ts: '2026-09-26 12:00:00', created_at: '2026-09-26T12:00:00Z', retry_count: 0, failover_count: 0,
@@ -28,6 +29,84 @@ const detailedLog = {
 }
 
 const cacheSubsetLabels = ['其中 5 分钟写入', '其中 1 小时写入', '缓存读取 · 音频', '缓存读取 · 图片', '缓存写入 · 音频', '缓存写入 · 图片']
+
+for (const path of ['/admin/logs', '/portal/logs?scope=user']) {
+  for (const theme of ['light', 'dark']) {
+    test(`日志详情字体 ${path} ${theme}：字段和ID沿用正文字体，字级统一，复制不截断`, async ({ page }) => {
+      await prepare(page)
+      await page.addInitScript((theme) => {
+        localStorage.setItem('okapi.theme', theme)
+        Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (value: string) => {
+          (window as Window & { logDetailCopied?: string }).logDetailCopied = value
+        } }, configurable: true })
+      }, theme)
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      await page.setViewportSize({ width: 1440, height: 1000 })
+      const requestId = 'ccbd2d96-cdde-4e83-8c24-75a7945efef6'
+      const row = { ...detailedLog, request_id: requestId, upstream_model: 'gpt-alpha', upstream_endpoint: '/v1/responses',
+        ratio_snapshot: JSON.stringify(detailedLog.pricing_snapshot) }
+      await page.route('**/api/me/logs?*', route => route.fulfill({ json: { data: [row], next_before: null } }))
+      await page.route('**/admin/logs?*', route => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [row] } }))
+      await page.goto(path)
+      await page.getByRole('button', { name: `展开 ${requestId} 的明细`, exact: true }).click()
+      const drawer = page.getByRole('dialog', { name: '请求与账单详情' })
+      const body = drawer.locator('[data-slot="log-detail-body"]')
+      const family = await body.evaluate(node => getComputedStyle(node).fontFamily)
+      const styles = await body.locator('[data-slot="detail-field"] > dd, [data-slot="detail-id"] > dd').evaluateAll(nodes => nodes.map(node => {
+        const css = getComputedStyle(node)
+        return { family: css.fontFamily, size: css.fontSize, weight: css.fontWeight, lineHeight: css.lineHeight }
+      }))
+      expect(styles.length).toBeGreaterThan(12)
+      for (const css of styles) expect(css).toEqual({ family, size: '13px', weight: '400', lineHeight: '20px' })
+      for (const label of await body.locator('[data-slot="detail-field"] > dt, [data-slot="detail-id"] > dt').all()) {
+        expect(await label.evaluate(node => getComputedStyle(node).fontSize)).toBe('12px')
+      }
+      for (const title of await body.locator('[data-slot="detail-section"] h3').all()) {
+        expect(await title.evaluate(node => [getComputedStyle(node).fontSize, getComputedStyle(node).fontWeight])).toEqual(['14px', '600'])
+      }
+      expect(await body.locator('[data-slot="detail-amount-value"]').evaluate(node => [getComputedStyle(node).fontSize, getComputedStyle(node).fontWeight])).toEqual(['24px', '600'])
+      for (const stat of await body.locator('[data-slot="detail-stat"] > dd').all()) {
+        expect(await stat.evaluate(node => [getComputedStyle(node).fontSize, getComputedStyle(node).fontWeight])).toEqual(['13px', '500'])
+      }
+      const request = body.locator('[data-slot="detail-id"]').filter({ has: page.getByText(requestId, { exact: true }) })
+      await expect(request.locator('dd > span').first()).toHaveText(requestId)
+      expect(await request.locator('dd > span').first().evaluate(node => getComputedStyle(node).fontFamily)).toBe(family)
+      await drawer.screenshot({ path: `test-results/log-detail-type-${path.startsWith('/admin') ? 'admin' : 'portal'}-${theme}.png`, animations: 'disabled' })
+      await request.getByRole('button', { name: '复制', exact: true }).focus()
+      await page.keyboard.press('Enter')
+      await expect.poll(() => page.evaluate(() => (window as Window & { logDetailCopied?: string }).logDetailCopied)).toBe(requestId)
+      const billingTable = body.getByRole('table', { name: '快照计费分项' })
+      await expect(billingTable).toContainText('缓存写入')
+      expect(await billingTable.locator('tbody td').first().evaluate(node => getComputedStyle(node).fontSize)).toBe('13px')
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('tooltip')).toHaveCount(0)
+      await page.keyboard.press('Escape')
+      await expect(drawer).toHaveCount(0)
+    })
+  }
+}
+
+for (const path of ['/admin/logs', '/portal/logs?scope=user']) {
+  test(`日志详情字体 ${path} 长字段：统一字号后完整名称、模型和ID不溢出`, async ({ page }) => {
+    await prepare(page)
+    await page.setViewportSize({ width: 390, height: 844 })
+    const long = 'a-very-long-identifier-without-any-spaces-'.repeat(6)
+    const row = { ...detailedLog, username: long, key_name: long, channel_name: long, requested_model: long,
+      upstream_model: long, endpoint: `/v1/${long}`, request_id: 'req-20' }
+    await page.route('**/api/me/logs?*', route => route.fulfill({ json: { data: [row], next_before: null } }))
+    await page.route('**/admin/logs?*', route => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: [row] } }))
+    await page.goto(path)
+    await page.getByRole('button', { name: '展开 req-20 的明细', exact: true }).click()
+    const drawer = page.getByRole('dialog')
+    const body = drawer.locator('[data-slot="log-detail-body"]')
+    for (const node of await body.locator('[data-slot="detail-field"], [data-slot="detail-id"], [data-slot="detail-object"]').all()) {
+      expect(await node.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true)
+    }
+    expect(await body.evaluate(node => node.scrollWidth <= node.clientWidth + 1)).toBe(true)
+    await expect(body.getByText(long, { exact: true }).first()).toBeAttached()
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
 
 for (const fixture of [
   { name: '未上报', usage: {}, visible: {} },
@@ -699,11 +778,12 @@ for (const width of [390, 1366, 1920]) test(`管理日志失败信息 ${width}px
   await expect(cells.nth(2).getByText('失败', { exact: true })).toBeVisible()
   await expect(cells.nth(2).getByText('batch_failed', { exact: true })).toBeVisible()
   await expect(cells.nth(3)).toHaveText('hold-fixture-01')
-  for (const index of [2, 3]) expect((await cells.nth(index).boundingBox())!.width).toBeGreaterThanOrEqual(140)
+  expect((await cells.nth(2).boundingBox())!.width).toBeGreaterThanOrEqual(104)
+  expect((await cells.nth(3).boundingBox())!.width).toBeGreaterThanOrEqual(120)
   for (const locator of [cells.nth(2).getByText('batch_failed', { exact: true }), cells.nth(3)]) {
     expect(await locator.evaluate((el) => el.scrollWidth <= el.clientWidth + 1)).toBe(true)
   }
-  expect((await cells.nth(4).boundingBox())!.width).toBeGreaterThanOrEqual(160)
+  expect((await cells.nth(4).boundingBox())!.width).toBeGreaterThanOrEqual(112)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   expect(Math.abs((await rows.first().boundingBox())!.height - (width < 768 ? 56 : 44))).toBeLessThanOrEqual(1)
   await page.screenshot({ path: `test-results/admin-log-failures-${width}.png`, animations: 'disabled' })
@@ -1147,6 +1227,13 @@ for (const path of ['/portal/logs', '/admin/logs']) {
       const endpoint = path === '/admin/logs' ? '**/admin/logs?*' : '**/api/me/logs?*'
       await page.route(endpoint, (route) => route.fulfill({ json: { data: [row], next_before: null } }))
       await page.goto(path)
+      const rate = page.locator('[data-slot="output-throughput"]')
+      await expect(rate).toHaveText(sample.average)
+      await expect(rate).toHaveAccessibleName(`输出吞吐量 ${sample.average}`)
+      await rate.focus()
+      await expect(page.getByRole('tooltip')).toContainText('包含首字等待，不是纯生成速度')
+      // Collapsed row borders can round the first/last row up by one pixel.
+      expect(Math.abs(await page.locator('tbody tr').first().evaluate(node => node.offsetHeight) - 44)).toBeLessThanOrEqual(1)
       await page.getByRole('button', { name: '展开 req-20 的明细', exact: true }).click()
       const dialog = page.getByRole('dialog')
       const metric = (label: string) => dialog.locator('dt').filter({ hasText: new RegExp(`^${label}$`) }).locator('..').locator('dd')
@@ -1155,6 +1242,50 @@ for (const path of ['/portal/logs', '/admin/logs']) {
       if (!sample.is_stream) await expect(metric('首字')).toHaveText('不适用')
     })
   }
+}
+
+test('输出吞吐量：严格配对计量，零输出与缺失分开，不以模型或缓存推测速度', () => {
+  expect(outputRates(detailedLog)).toEqual({ average: 625, generation: 500 * 1000 / 700 })
+  expect(outputRates({ ...detailedLog, is_stream: false })).toEqual({ average: 625, generation: null })
+  expect(outputRates({ ...detailedLog, ttft_ms: null })).toEqual({ average: 625, generation: null })
+  expect(outputRates({ ...detailedLog, ttft_ms: 0 })).toEqual({ average: 625, generation: 625 })
+  expect(outputRates({ ...detailedLog, ttft_ms: 800 })).toEqual({ average: 625, generation: null })
+  expect(outputRates({ ...detailedLog, usage: { ...detailedLog.usage, completion_tokens: 0 } })).toEqual({ average: 0, generation: null })
+  for (const latency_ms of [null, 0, -1, Infinity, NaN]) expect(outputRates({ ...detailedLog, latency_ms })).toEqual({ average: null, generation: null })
+  for (const completion_tokens of [-1, NaN, Infinity, 0.5]) expect(outputRates({ ...detailedLog, usage: { ...detailedLog.usage, completion_tokens } })).toEqual({ average: null, generation: null })
+  for (const input_unit of [null, undefined, 'characters', 'unknown']) expect(outputRates({ ...detailedLog, usage: { ...detailedLog.usage, input_unit } })).toEqual({ average: null, generation: null })
+  expect(outputRates({ ...detailedLog, usage: { ...detailedLog.usage, input_characters: 100 } })).toEqual({ average: null, generation: null })
+  expect(formatOutputRate(0, 'en')).toBe('0 tok/s')
+  expect(formatOutputRate(null, 'en')).toBe('—')
+})
+
+for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
+  test(`输出吞吐量 ${path}：列表区分已测零、未知单位、字符与缺失耗时`, async ({ page }) => {
+    await prepare(page)
+    await page.setViewportSize({ width: 1920, height: 1000 })
+    const rows = [
+      detailedLog,
+      { ...detailedLog, usage: { ...detailedLog.usage, completion_tokens: 0 } },
+      { ...detailedLog, usage: { ...detailedLog.usage, input_unit: null } },
+      { ...detailedLog, usage: { ...detailedLog.usage, input_unit: 'characters', input_characters: 100 } },
+      { ...detailedLog, latency_ms: null },
+    ].map((row, i) => ({ ...row, id: 20 - i, request_id: `req-${20 - i}` }))
+    await page.route('**/api/me/logs?*', route => route.fulfill({ json: { data: rows, next_before: null } }))
+    await page.route('**/admin/logs?*', route => route.request().isNavigationRequest() ? route.fallback() : route.fulfill({ json: { data: rows } }))
+    await page.goto(path)
+    const rates = page.locator('[data-slot="output-throughput"]')
+    await expect(rates).toHaveText(['625 tok/s', '0 tok/s', '—', '—', '—'])
+    for (const index of [0, 1]) await expect(rates.nth(index)).toHaveAttribute('data-state', 'measured')
+    for (const index of [2, 3, 4]) await expect(rates.nth(index)).toHaveAttribute('data-state', 'missing')
+    for (const row of await page.locator('tbody tr').all()) expect(Math.abs(await row.evaluate(node => node.offsetHeight) - 44)).toBeLessThanOrEqual(1)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await rates.nth(2).focus()
+    await expect(page.getByRole('tooltip')).toContainText('暂无有效的 Token 计量或耗时数据')
+    await page.screenshot({ path: `test-results/log-throughput-${path.startsWith('/admin') ? 'admin' : 'personal'}.png`, animations: 'disabled' })
+    await page.getByRole('button', { name: '展开 req-18 的明细', exact: true }).click()
+    const performance = page.getByRole('dialog').locator('section').filter({ has: page.getByRole('heading', { name: '响应速度', exact: true }) })
+    await expect(performance.locator('dt').getByText('平均输出速度', { exact: true }).locator('..').locator('dd')).toHaveText('—')
+  })
 }
 
 for (const path of ['/portal/logs?scope=user', '/admin/logs']) {

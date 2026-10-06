@@ -158,7 +158,7 @@ async fn submit(state: &AppState, req: Request, id: Uuid) -> Result<Batch, AppEr
         state.master_key.as_deref(),
     )
     .await?;
-    let mut candidates = crate::gateway::scheduler::order_candidates(candidates)
+    let mut candidates: Vec<_> = crate::gateway::scheduler::order_candidates(candidates)
         .into_iter()
         .filter(|c| binding::eligible(c, input.provider.as_deref()))
         .collect();
@@ -209,6 +209,13 @@ async fn submit(state: &AppState, req: Request, id: Uuid) -> Result<Batch, AppEr
     let mut pricing =
         serde_json::to_value(&prepared.quote.snapshot).map_err(|_| AppError::internal())?;
     pricing["batch_ratio_milli"] = json!(ratio);
+    super::super::upstream_cost::pin(
+        &mut pricing,
+        candidate.channel_id,
+        candidate.cost_milli,
+        unit.list_price,
+    );
+    pricing["upstream_cost_basis"]["batch_cost_ratio_milli"] = json!(500);
     let previews: Vec<String> = input
         .items
         .iter()

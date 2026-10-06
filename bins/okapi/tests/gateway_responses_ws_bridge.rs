@@ -110,7 +110,7 @@ struct Env {
     channel_key: i64,
 }
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = std::env::var("DATABASE_URL").unwrap();
     let redis = std::env::var("OKAPI_REDIS_URL").unwrap();
     let pg = okapi_store::connect_pg(&database).await.unwrap();
@@ -491,8 +491,15 @@ async fn late_headers_and_disconnect_drain_usage_without_resending() {
     assert_eq!(env.amount(&delta).await.0, 240);
     assert_eq!(env.posts.load(Ordering::SeqCst), 2);
     env.no_post().await;
-    assert!(env.state.sched.acquire_slot(env.channel_key, Some(4)).await);
-    env.state.sched.release_slot(env.channel_key, Some(4)).await;
+    let permit = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+        &env.state.sched,
+        env.channel_key,
+        Some(4),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    permit.release().await;
 }
 
 #[tokio::test]
@@ -770,6 +777,7 @@ async fn codex_http_uses_oauth_identity_and_preserves_encrypted_items() {
         refresh_token: "bridge-refresh".into(),
         expires_at: chrono::Utc::now().timestamp() + 3600,
         account_id: Some("bridge-account".into()),
+        account_label: None,
     };
     sqlx::query("UPDATE channels SET provider='codex' WHERE id=$1")
         .bind(env.channel)
@@ -869,4 +877,30 @@ async fn inconsistent_response_ids_or_terminal_items_fail_but_reported_usage_is_
     assert_eq!(env.amount(&error).await.0, 240);
     assert_eq!(env.posts.load(Ordering::SeqCst), 2);
     env.no_post().await;
+}
+
+/// WS 轮次与 HTTP 同一规则：没写输出上限、模型 max_output 又大于预扣封顶时，
+/// 转发前补上预扣用的 32768；写了的原样转发。
+#[tokio::test]
+async fn omitted_output_cap_is_bounded_on_websocket_turns() {
+    let mut env = setup().await;
+    env.mode("http").await;
+    sqlx::query("UPDATE models SET max_output = 128000 WHERE model_name = $1")
+        .bind(&env.model)
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
+    let mut client = env.client().await;
+    let mut open = env.body("main");
+    open.as_object_mut().unwrap().remove("max_output_tokens");
+    send(&mut client, open).await;
+    let peer = env.peer().await;
+    assert_eq!(peer.body["max_output_tokens"], 32_768, "{}", peer.body);
+    peer.respond(&[completed(json!([]))]);
+    read(&mut client).await;
+    send(&mut client, env.body("main")).await;
+    let peer = env.peer().await;
+    assert_eq!(peer.body["max_output_tokens"], 64, "{}", peer.body);
+    peer.respond(&[completed(json!([]))]);
+    read(&mut client).await;
 }

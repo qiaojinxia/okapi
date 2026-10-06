@@ -1,4 +1,5 @@
 import type { BreakdownRow } from './types'
+import { aggregateCacheHit } from './cache-metrics'
 import { chartColor, OTHER_COLOR } from '../../lib/chart'
 import type { ChartPoint, ChartSeries } from '@/components/ui/time-chart'
 
@@ -26,9 +27,9 @@ export function usageChart(rows: BreakdownRow[], days: string[], metric: UsageMe
       const group = byDay.get(bucket) ?? []
       const sum = (field: keyof BreakdownRow) => group.reduce((acc, row) => acc + Number(row[field] ?? 0), 0)
       const requests = sum('requests')
-      const prompt = sum('prompt_tokens')
+      const cache = aggregateCacheHit(group)
       const completePerformance = requests > 0 && group.every((r) => r.performance_requests === r.requests)
-      return { bucket, value: metric === 'cache' ? (prompt > 0 ? sum('cached_tokens') / prompt * 100 : null)
+      return { bucket, value: metric === 'cache' ? (cache.bp == null ? null : cache.bp / 100)
         : metric === 'success' ? (requests > 0 ? (requests - sum('errors')) / requests * 100 : null)
           : completePerformance ? sum('latency_sum_ms') / requests : null,
         ttft: sum('ttft_samples') > 0 ? sum('ttft_sum_ms') / sum('ttft_samples') : null }

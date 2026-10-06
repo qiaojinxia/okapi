@@ -26,7 +26,7 @@ fn hash(token: &str) -> String {
     hex::encode(Sha256::digest(token.as_bytes()))
 }
 async fn setup() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database = std::env::var("DATABASE_URL").unwrap();
     let cleanup_url = database.clone();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
@@ -785,7 +785,7 @@ async fn opposing_lifetime_totals_do_not_overflow_before_net_balance_is_calculat
 
 #[tokio::test]
 async fn delivery_cleanup_preserves_pending_recent_and_dlq_batches() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let bed = setup().await;
     let mut ids = Vec::new();
     for (status, age, dlq) in [
@@ -823,7 +823,7 @@ async fn delivery_cleanup_preserves_pending_recent_and_dlq_batches() {
 
 #[tokio::test]
 async fn expiry_pg_failure_leaves_hot_funds_available_and_can_retry() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let bed = setup().await;
     bed.credit(10_000, "test").await;
     let now = Utc::now();

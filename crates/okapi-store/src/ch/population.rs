@@ -8,6 +8,27 @@ use spec::{CLASSIFIED, Spec};
 
 const HISTORY: &str = "statistics_request_history_incomplete";
 
+pub(super) fn reference_scope<'a>(name: &str, suffix: &'a str) -> Option<&'a str> {
+    let spec = spec::specs().ok()?.iter().find(|spec| spec.name == name)?;
+    scope::reference(suffix, spec)
+}
+
+pub(super) fn valid_scope(name: &str, predicate: &str) -> bool {
+    spec::specs().ok().is_some_and(|specs| {
+        specs
+            .iter()
+            .find(|spec| spec.name == name)
+            .is_some_and(|spec| scope::key_predicate(predicate, &spec.keys))
+    })
+}
+
+pub(super) fn calendar_time_key(name: &str) -> Option<&'static str> {
+    let spec = spec::specs().ok()?.iter().find(|spec| spec.name == name)?;
+    ["minute", "ts5", "hour", "day"]
+        .into_iter()
+        .find(|key| spec.keys.iter().any(|stored| stored == key))
+}
+
 // Measurement coverage is a subset of calls, not independent financial truth.
 // Its legacy record count cannot override a classified subset or the call parent.
 fn canonical(spec: &Spec) -> bool {

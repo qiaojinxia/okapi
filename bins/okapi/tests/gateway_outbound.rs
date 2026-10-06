@@ -1,6 +1,10 @@
-//! 渠道出站代理 + 额外请求头验收（IMPLEMENTATION §11.30）：
-//! extra_headers 出现在上游、受保护头被热路径跳过、HTTP 正向代理真正经手。
+//! 渠道出站代理 + 额外请求头验收（IMPLEMENTATION §11.30 / §11.41）：
+//! extra_headers 出现在上游、受保护头被热路径跳过、经出口绑定的 HTTP 正向代理真正经手、
+//! 退役的 settings.proxy_url 残留不再生效。
 //! 依赖 .env（scripts/dev-deps.sh up）。
+
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
@@ -91,6 +95,40 @@ async fn spawn_proxy(hits: Arc<AtomicUsize>) -> SocketAddr {
 
 use axum::http::StatusCode;
 
+/// 建一个代理并把渠道的出口绑到它（§11.41）。
+async fn bind_proxy(pg: &sqlx::PgPool, channel_id: i64, url: &str, suffix: &str) {
+    let endpoint = okapi_providers::http::ProxyEndpoint::parse(url).unwrap();
+    let proxy_id = okapi_store::egress::create_proxy(
+        pg,
+        &okapi_store::egress::NewProxy {
+            name: &format!("ob-px-{suffix}"),
+            url,
+            endpoint: okapi_store::egress::Endpoint {
+                scheme: &endpoint.scheme,
+                host: &endpoint.host,
+                port: i32::from(endpoint.port),
+                username: None,
+            },
+            max_keys: None,
+            max_concurrency: None,
+            note: None,
+            status: 1,
+            owner_id: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    okapi_store::egress::set_channel_binding(
+        pg,
+        channel_id,
+        &okapi_store::egress::Binding::Proxy { proxy_id },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+}
+
 struct TestEnv {
     gateway: SocketAddr,
     token: String,
@@ -100,7 +138,7 @@ struct TestEnv {
 }
 
 async fn setup(settings: Value) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -127,9 +165,20 @@ async fn setup(settings: Value) -> TestEnv {
     let upstream = spawn_upstream(Arc::clone(&captured)).await;
     let proxy_hits = Arc::new(AtomicUsize::new(0));
     let mut settings = settings;
-    if settings.get("proxy_url").is_some_and(|v| v == "USE_PROXY") {
+    // "USE_PROXY" = 经出口绑定（§11.41）挂一个代理；"LEGACY_PROXY" = 只在 settings 里残留旧键
+    let proxy_mode = settings
+        .get("proxy_url")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut proxy_url = None;
+    if proxy_mode.is_some() {
         let proxy = spawn_proxy(Arc::clone(&proxy_hits)).await;
-        settings["proxy_url"] = json!(format!("http://{proxy}"));
+        proxy_url = Some(format!("http://{proxy}"));
+        if proxy_mode.as_deref() == Some("LEGACY_PROXY") {
+            settings["proxy_url"] = json!(proxy_url);
+        } else {
+            settings.as_object_mut().unwrap().remove("proxy_url");
+        }
     }
 
     let (channel_id, _) = okapi_store::provision::create_channel(
@@ -150,7 +199,11 @@ async fn setup(settings: Value) -> TestEnv {
         .execute(&pg)
         .await
         .unwrap();
+    if proxy_mode.as_deref() == Some("USE_PROXY") {
+        bind_proxy(&pg, channel_id, &proxy_url.clone().unwrap(), &suffix).await;
+    }
 
+    published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
@@ -221,7 +274,7 @@ async fn extra_headers_sent_forbidden_skipped() {
     );
 }
 
-/// HTTP 正向代理真正经手（计数 > 0），上游仍收到请求。
+/// 渠道绑定的 HTTP 正向代理真正经手（计数 > 0），上游仍收到请求。
 #[tokio::test]
 async fn http_proxy_is_used() {
     let env = setup(json!({"proxy_url": "USE_PROXY"})).await;
@@ -231,4 +284,13 @@ async fn http_proxy_is_used() {
         env.proxy_hits.load(Ordering::SeqCst) >= 1,
         "请求必须经过代理"
     );
+}
+
+/// 退役的 settings.proxy_url 残留（迁移解析不了而保留、或绕过写入校验塞进库的）不再被任何路径
+/// 当成出口：出口只认绑定。
+#[tokio::test]
+async fn legacy_settings_proxy_is_ignored() {
+    let env = setup(json!({"proxy_url": "LEGACY_PROXY"})).await;
+    chat(&env).await;
+    assert_eq!(env.proxy_hits.load(Ordering::SeqCst), 0);
 }

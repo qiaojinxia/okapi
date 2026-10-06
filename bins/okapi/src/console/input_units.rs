@@ -36,13 +36,7 @@ pub(super) fn pg_sql() -> String {
 }
 
 fn time_sql(table: &str) -> &'static str {
-    match table {
-        "mv_channel_5min" => "toStartOfHour(ts5) AS hour, toDate(ts5) AS day",
-        "mv_key_model_day" | "mv_user_model_day" | "mv_user_day" | "mv_apikey_day" => {
-            "toStartOfDay(day) AS hour"
-        }
-        _ => "toDate(hour) AS day",
-    }
+    super::observation_sources::Grain::for_table(table).time_sql()
 }
 
 /// Internal SQL only; callers retain parameter binding for all string filters.

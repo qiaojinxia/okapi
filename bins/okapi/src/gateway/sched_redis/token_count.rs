@@ -4,7 +4,7 @@ use crate::gateway::error::AppError;
 use axum::http::StatusCode;
 use fred::interfaces::{LuaInterface, SortedSetsInterface};
 use okapi_api::codes;
-use okapi_store::{AuthedKey, ChannelCandidate};
+use okapi_store::AuthedKey;
 use uuid::Uuid;
 
 pub(crate) struct CountPermit {
@@ -91,41 +91,4 @@ impl Drop for CountPermit {
     }
 }
 
-/// 与生成请求共享渠道并发槽，任何返回/取消路径恰好归还一次。
-pub(crate) struct ChannelPermit {
-    sched: SchedulerRedis,
-    slot: Option<(i64, Option<i32>)>,
-}
-
-impl ChannelPermit {
-    pub async fn acquire(sched: &SchedulerRedis, cand: &ChannelCandidate) -> Option<Self> {
-        sched
-            .acquire_slot(cand.channel_key_id, cand.max_concurrency)
-            .await
-            .then(|| Self {
-                sched: sched.clone(),
-                slot: Some((cand.channel_key_id, cand.max_concurrency)),
-            })
-    }
-
-    pub async fn release(mut self) {
-        if let Some(task) = self.spawn_release() {
-            let _ = task.await;
-        }
-    }
-
-    fn spawn_release(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
-        let (key, cap) = self.slot.take()?;
-        let sched = self.sched.clone();
-        Some(runtime.spawn(async move {
-            sched.release_slot(key, cap).await;
-        }))
-    }
-}
-
-impl Drop for ChannelPermit {
-    fn drop(&mut self) {
-        self.spawn_release();
-    }
-}
+pub(crate) use super::channel_permit::ChannelPermit;

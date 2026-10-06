@@ -56,16 +56,19 @@ pub struct RegistrationPolicy {
 }
 
 impl RegistrationPolicy {
-    /// 从 settings 缓存读取；未配置或形状不对一律回缺省（开放注册、无限制、零赠送）——
-    /// 配错 JSON 不该把注册整个关掉。
-    pub async fn load(state: &AppState) -> Self {
-        state
-            .setting_cached(SETTING_KEY)
-            .await
-            .as_ref()
-            .as_ref()
-            .and_then(|v| serde_json::from_value::<Self>(v.clone()).ok())
-            .unwrap_or_default()
+    /// Only genuinely missing settings use defaults. Unavailable or malformed
+    /// registration policy must not reopen a closed installation.
+    pub async fn load(state: &AppState) -> Result<Self, AppError> {
+        let setting = state.try_setting_cached(SETTING_KEY).await?;
+        match setting.as_ref() {
+            None => Ok(Self::default()),
+            Some(value) => serde_json::from_value(value.clone()).map_err(|_| {
+                AppError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "registration_policy_invalid",
+                )
+            }),
+        }
     }
 
     /// 邮箱域名是否放行。清单条目 `*.edu.cn` 匹配任意子域，其余精确匹配（大小写不敏感）。
@@ -176,9 +179,9 @@ async fn credit(state: &AppState, user_id: i64, micro: i64, payload: Value) {
 
 /// GET /api/registration：登录页据此决定注册页签怎么画——关闭时不摆一个必然失败的表单，
 /// 邀请制时把邀请码变成必填，有赠送时把"注册即送 $X"写出来（new-api 注册页同有）。
-pub async fn public_policy(State(state): State<AppState>) -> Json<Value> {
-    let policy = RegistrationPolicy::load(&state).await;
-    Json(json!({
+pub async fn public_policy(State(state): State<AppState>) -> Result<Json<Value>, AppError> {
+    let policy = RegistrationPolicy::load(&state).await?;
+    Ok(Json(json!({
         "mode": policy.mode,
         "email_verification": policy.email_verification,
         "new_user_credit_micro": policy.new_user_credit_micro.max(0),
@@ -189,7 +192,7 @@ pub async fn public_policy(State(state): State<AppState>) -> Json<Value> {
         } else {
             Vec::new()
         },
-    }))
+    })))
 }
 
 #[cfg(test)]

@@ -21,7 +21,7 @@ struct Profile {
 async fn owner(state: &AppState, headers: &HeaderMap) -> Result<i64, AppError> {
     let key = authenticate(state, headers).await?;
     let user_id = super::auth_web::require_session(state, headers).await?;
-    if user_id != key.user_id {
+    if user_id != key.actor_user_id() {
         return Err(AppError::unauthorized(okapi_api::codes::INVALID_API_KEY));
     }
     Ok(user_id)

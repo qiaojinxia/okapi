@@ -46,6 +46,149 @@ async fn mock_fail() -> axum::response::Response {
         .into_response()
 }
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Redirect and refusal cases share one billed video task.
+async fn video_cdn_redirects_strip_credentials_and_reject_unsafe_or_looping_targets() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let hits = Arc::new(AtomicUsize::new(0));
+    let observed = hits.clone();
+    let cdn = Router::new().route(
+        "/asset",
+        get(move |headers: axum::http::HeaderMap| {
+            let hits = observed.clone();
+            async move {
+                assert!(headers.get("authorization").is_none());
+                assert!(headers.get("x-custom-secret").is_none());
+                hits.fetch_add(1, Ordering::SeqCst);
+                mock_content().await
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let cdn_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, cdn).await.unwrap();
+    });
+    let mode = Arc::new(AtomicUsize::new(0));
+    let current = mode.clone();
+    let upstream = Router::new().route("/v1/videos", post(mock_create)).route(
+        "/v1/videos/video_mock123/content",
+        get(move |headers: axum::http::HeaderMap| {
+            let mode = current.clone();
+            async move {
+                assert!(headers.get("authorization").is_some());
+                assert_eq!(headers["x-custom-secret"], "credential-extra");
+                match mode.load(Ordering::SeqCst) {
+                    0 => (
+                        axum::http::StatusCode::FOUND,
+                        [("location", format!("http://{cdn_addr}/asset"))],
+                    )
+                        .into_response(),
+                    1 => (
+                        axum::http::StatusCode::TEMPORARY_REDIRECT,
+                        [("location", "/v1/videos/video_mock123/content")],
+                    )
+                        .into_response(),
+                    _ => axum::http::StatusCode::FOUND.into_response(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+    let env = setup(Money::from_micros(1_000_000), "/ok/v1").await;
+    sqlx::query("UPDATE channels SET api_base=$1, settings=jsonb_build_object('extra_headers',jsonb_build_object('x-custom-secret','credential-extra')) WHERE name=$2")
+        .bind(format!("http://{upstream_addr}/v1"))
+        .bind(sqlx::query_scalar::<_, String>("SELECT name FROM channels WHERE models ? $1").bind(&env.model).fetch_one(&env.pg).await.unwrap())
+        .execute(&env.pg).await.unwrap();
+    sqlx::query("INSERT INTO settings(key,value) VALUES ('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(json!({"allow_http":true,"allow_private":true})).execute(&env.pg).await.unwrap();
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{}/v1/videos", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"prompt":"fixture","seconds":"4"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200);
+    let download = format!("http://{}/v1/videos/video_mock123/content", env.gateway);
+    let result = client
+        .get(&download)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.status(), 200);
+    assert_eq!(result.headers()["content-type"], "video/mp4");
+    assert_eq!(result.headers()["x-frame-options"], "DENY");
+    assert_eq!(
+        result.bytes().await.unwrap().as_ref(),
+        &[0x66u8, 0x74, 0x79, 0x70]
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    sqlx::query("UPDATE settings SET value=$1 WHERE key='ssrf_policy'")
+        .bind(json!({"allow_http":true,"allow_private":false}))
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let blocked = client
+        .get(&download)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 502);
+    assert_eq!(
+        blocked.json::<Value>().await.unwrap()["error"]["param"],
+        "video_download_redirect_target"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "rejected target must not receive a request"
+    );
+    sqlx::query("UPDATE settings SET value=$1 WHERE key='ssrf_policy'")
+        .bind(json!({"allow_http":true,"allow_private":true}))
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    mode.store(1, Ordering::SeqCst);
+    let looping = client
+        .get(&download)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(looping.status(), 502);
+    assert_eq!(
+        looping.json::<Value>().await.unwrap()["error"]["param"],
+        "video_download_redirect_limit"
+    );
+    mode.store(2, Ordering::SeqCst);
+    let missing = client
+        .get(&download)
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 502);
+    assert_eq!(
+        missing.json::<Value>().await.unwrap()["error"]["param"],
+        "video_download_redirect_location"
+    );
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        960_000
+    );
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
         .route("/ok/v1/videos", post(mock_create))
@@ -53,6 +196,11 @@ async fn spawn_mock() -> SocketAddr {
         .route("/ok/v1/videos/video_mock123/content", get(mock_content))
         .route("/fail/v1/videos", post(mock_fail))
         .route("/laterfail/v1/videos", post(mock_create))
+        .route("/stuck/v1/videos", post(mock_create))
+        .route(
+            "/stuck/v1/videos/video_mock123",
+            get(|| async { axum::Json(json!({"id":"video_mock123","status":"in_progress"})) }),
+        )
         .route(
             "/laterfail/v1/videos/video_mock123",
             get(|| async { axum::Json(json!({"id":"video_mock123","status":"failed"})) }),
@@ -79,7 +227,7 @@ struct TestEnv {
 
 /// per_call 定价 0.01 USD/秒（micro=10000）。base_path: "/ok/v1" 或 "/fail/v1"。
 async fn setup(balance: Money, base_path: &str) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
 
@@ -342,7 +490,8 @@ async fn generation_failure_after_creation_refunds_exactly_once() {
 async fn expired_video_and_interrupted_refund_close_once() {
     for claimed in [false, true] {
         let initial = Money::from_micros(10_000_000);
-        let env = setup(initial, "/ok/v1").await;
+        // 过期分支：上游 25 小时后仍在生成
+        let env = setup(initial, "/stuck/v1").await;
         let response = reqwest::Client::new()
             .post(format!("http://{}/v1/videos", env.gateway))
             .bearer_auth(&env.token)
@@ -373,4 +522,63 @@ async fn expired_video_and_interrupted_refund_close_once() {
             .unwrap();
         assert_eq!(state, "refunded");
     }
+}
+
+async fn create_video(env: &TestEnv) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/videos", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model":env.model,"prompt":"cat","seconds":"8"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    wait_committed(&env.pg, env.user_id, &env.model)
+        .await
+        .unwrap();
+}
+
+async fn age_and_poll(env: &TestEnv, hours: i32, channel_key: Option<i64>) -> String {
+    sqlx::query(
+        "UPDATE video_tasks SET created_at=now()-make_interval(hours=>$2),next_poll_at=now(),
+         channel_key_id=COALESCE($3,channel_key_id) WHERE user_id=$1",
+    )
+    .bind(env.user_id)
+    .bind(hours)
+    .bind(channel_key)
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    gateway::videos::poll_pending(&env.state).await.unwrap();
+    sqlx::query_scalar("SELECT state FROM video_tasks WHERE user_id=$1")
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap()
+}
+
+/// 过了 24 小时才轮询到「已完成」：成片照常收费，不按超时退款。
+/// 此前满 24 小时一律当失败退款，不看上游状态。
+#[tokio::test]
+async fn completed_video_past_the_deadline_is_not_refunded() {
+    let initial = Money::from_micros(10_000_000);
+    let env = setup(initial, "/ok/v1").await;
+    create_video(&env).await;
+    let charged = env.ledger.balance(env.user_id).await.unwrap();
+    assert!(charged < initial);
+    assert_eq!(age_and_poll(&env, 25, None).await, "completed");
+    assert_eq!(env.ledger.balance(env.user_id).await.unwrap(), charged);
+}
+
+/// 查不到上游状态（渠道 key 已不可用）不等于失败：宽限到 72 小时才退款。
+#[tokio::test]
+async fn unreachable_video_status_is_refunded_only_after_the_give_up_deadline() {
+    let initial = Money::from_micros(10_000_000);
+    let env = setup(initial, "/ok/v1").await;
+    create_video(&env).await;
+    let charged = env.ledger.balance(env.user_id).await.unwrap();
+    assert_eq!(age_and_poll(&env, 25, Some(-1)).await, "pending");
+    assert_eq!(env.ledger.balance(env.user_id).await.unwrap(), charged);
+    assert_eq!(age_and_poll(&env, 73, Some(-1)).await, "refunded");
+    assert_eq!(env.ledger.balance(env.user_id).await.unwrap(), initial);
 }

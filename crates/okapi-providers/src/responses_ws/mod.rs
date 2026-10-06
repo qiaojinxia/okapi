@@ -22,6 +22,20 @@ const MAX_PENDING: usize = 64;
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
 const BUFFER_BYTES: usize = 128 * 1024 * 1024;
 
+/// 经出口（代理 / 直连）建一条裸 RFC 6455 客户端连接：与 Responses WS 同一握手——HTTP/1 only、
+/// 不跟随重定向、不协商扩展与子协议、代理与 TLS 校验沿用 `HttpPool`。Realtime 等其它 WS 上游
+/// 走这里，出口绑定（IMPLEMENTATION §11.41）对 WebSocket 同样生效，不再有直连旁路。
+pub async fn connect_raw(
+    http: &HttpPool,
+    url: &str,
+    headers: &[(&str, &str)],
+    outbound: &Outbound,
+) -> Result<tokio_tungstenite::WebSocketStream<reqwest::Upgraded>, UpstreamError> {
+    handshake::connect(http, url, headers, outbound)
+        .await
+        .map(|(socket, _)| socket)
+}
+
 /// Transport deadlines; a session never exceeds the protocol's one-hour lifetime.
 #[derive(Clone, Copy)]
 pub struct SocketTimeouts {

@@ -47,6 +47,7 @@ fn configuration_refuses_ambiguous_authorities_versions_and_namespaces() {
     let out = Outbound {
         proxy_url: Some("file:///proxy".into()),
         extra_headers: vec![],
+        ..Default::default()
     };
     assert!(GeminiBatch::new("https://host/v1beta", "key", &out).is_err());
 }
@@ -82,6 +83,7 @@ async fn upload_headers_length_and_returned_file_identity_remain_controlled() {
             ("X-Goog-Upload-Offset".into(), "999".into()),
             ("X-Custom".into(), "kept".into()),
         ],
+        ..Default::default()
     };
     let client = GeminiBatch::new(
         &format!("{}/proxy/v1beta", server.base),

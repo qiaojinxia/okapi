@@ -278,20 +278,13 @@ fn merged_metrics(modern: bool, historical: bool) -> String {
                 // A partial provenance subtotal may not contain the old record.
                 // Only a complete chosen population admits an exact subtraction.
                 format!("toInt64(max(ifNull(us.{name},0)))-if(max(ifNull(us.source_observed,0))=countMerge(m.requests),toInt64(max(ifNull(td.legacy_characters,0))),toInt64(0)) AS v_{name}")
-            } else if super::output_rate::FIELDS.contains(name) {
-                format!("toInt64(max(ifNull(rf.{name}, 0))) AS v_{name}")
-            } else if name.starts_with("ttft_") {
-                format!("toInt64(max(ifNull(tf.{name}, 0))) AS v_{name}")
-            } else if name.starts_with("latency_") {
-                format!("toInt64(max(ifNull(lf.{name}, 0))) AS v_{name}")
-            } else if super::cache_usage::FIELDS.contains(name) {
-                cache_metric(name, modern)
-            } else if super::token_details::FIELDS.contains(name)
-                || super::input_units::FIELDS.contains(name)
-            {
-                format!("toInt64(max(ifNull(td.{name}, 0))) AS v_{name}")
-            } else if super::usage_sources::FIELDS.contains(name) {
-                format!("toInt64(max(ifNull(us.{name}, 0))) AS v_{name}")
+            } else if let Some(source) = super::observation_sources::owner(name) {
+                if source.kind == super::observation_sources::Kind::Cache {
+                    cache_metric(name, modern)
+                } else {
+                    let alias = source.alias;
+                    format!("toInt64(max(ifNull({alias}.{name}, 0))) AS v_{name}")
+                }
             } else {
                 format!("toInt64({func}(m.{name})) AS v_{name}")
             }
@@ -351,26 +344,24 @@ fn cache_remainder(name: &str, difference: &str) -> String {
 }
 
 fn remainder_metrics(historical: bool) -> String {
+    use super::observation_sources::{Kind, owner};
     METRICS.iter().map(|(name, _)| {
         let difference = format!("l.v_{name} - ifNull(c.c_{name}, 0)");
         if !historical && matches!(*name,"legacy_characters"|"legacy_character_n") {
-            format!("toInt64(0) AS {name}")
-        } else if super::output_rate::FIELDS.contains(name) {
-            rate_remainder(name, &difference,historical)
-        } else if let Some(prefix) = name.split_once('_').map(|(prefix, _)| prefix).filter(|prefix| matches!(*prefix, "ttft" | "latency")) {
-            format!("if(l.v_{prefix}_observed = l.v_requests AND ifNull(c.c_{prefix}_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}")
-        } else if super::cache_usage::FIELDS.contains(name) {
-            cache_remainder(name, &difference)
-        } else if super::input_units::FIELDS.contains(name) {
-            unit_remainder(name, &difference,historical)
-        } else if super::token_details::TTL_FIELDS.contains(name) {
-            format!("if(l.v_ttl_observed = l.v_requests AND ifNull(c.c_ttl_observed, 0) = ifNull(c.c_requests, 0) AND l.v_{name} >= ifNull(c.c_{name},0), {difference}, toInt64(0)) AS {name}")
-        } else if super::token_details::FIELDS.contains(name) {
-            format!("if(l.v_detail_observed = l.v_requests AND ifNull(c.c_detail_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}")
-        } else if super::usage_sources::FIELDS.contains(name) {
-            format!("if(l.v_source_observed = l.v_requests AND ifNull(c.c_source_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}")
-        } else {
-            format!("{difference} AS {name}")
+            return format!("toInt64(0) AS {name}");
+        }
+        match owner(name).map(|source| source.kind) {
+            Some(Kind::OutputRate) => rate_remainder(name, &difference,historical),
+            Some(Kind::Ttft | Kind::Latency) => {
+                let prefix = owner(name).unwrap().name;
+                format!("if(l.v_{prefix}_observed = l.v_requests AND ifNull(c.c_{prefix}_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}")
+            }
+            Some(Kind::Cache) => cache_remainder(name, &difference),
+            Some(Kind::Units) => unit_remainder(name, &difference,historical),
+            Some(Kind::Ttl) => format!("if(l.v_ttl_observed = l.v_requests AND ifNull(c.c_ttl_observed, 0) = ifNull(c.c_requests, 0) AND l.v_{name} >= ifNull(c.c_{name},0), {difference}, toInt64(0)) AS {name}"),
+            Some(Kind::Details) => format!("if(l.v_detail_observed = l.v_requests AND ifNull(c.c_detail_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}"),
+            Some(Kind::Usage) => format!("if(l.v_source_observed = l.v_requests AND ifNull(c.c_source_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}"),
+            None => format!("{difference} AS {name}"),
         }
     }).collect::<Vec<_>>().join(", ")
 }

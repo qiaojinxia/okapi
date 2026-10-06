@@ -8,7 +8,7 @@ export interface SettingRow {
 }
 
 export type SettingsSection = 'registration' | 'notice' | 'notify' | 'smtp'
-export type SettingEditor = 'auto' | 'number' | 'price' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth'
+export type SettingEditor = 'auto' | 'number' | 'price' | 'percent' | 'epay' | 'stripe' | 'limits' | 'ssrf' | 'oauth' | 'oauth_refresh'
 export type SettingGroup = 'payment' | 'identity' | 'traffic' | 'security' | 'other'
 
 export const SETTING_GROUPS = [
@@ -33,6 +33,7 @@ const CATALOG: Record<string, SettingMeta> = {
   payment_epay: { label: 'admin:settingEpay', description: 'admin:settingEpayDesc', group: 'payment', editor: 'epay' },
   payment_stripe: { label: 'admin:settingStripe', description: 'admin:settingStripeDesc', group: 'payment', editor: 'stripe' },
   oauth_providers: { label: 'admin:settingOAuth', description: 'admin:settingOAuthDesc', group: 'identity', editor: 'oauth' },
+  oauth_refresh_policy: { label: 'admin:oauthPolicyTitle', description: 'admin:oauthPolicyDescription', group: 'identity', editor: 'oauth_refresh' },
   notify_channels: { label: 'admin:notify', description: 'admin:settingNotifyDesc', group: 'identity', editor: 'auto', section: 'notify' },
   smtp: { label: 'admin:smtpTitle', description: 'admin:settingSmtpDesc', group: 'identity', editor: 'auto', section: 'smtp' },
   site_url: { label: 'admin:settingSiteUrl', description: 'admin:settingSiteUrlDesc', group: 'identity', editor: 'auto' },

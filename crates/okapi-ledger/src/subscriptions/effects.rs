@@ -50,12 +50,12 @@ pub(crate) async fn synchronize(
         r#"SELECT EXISTS(SELECT 1 FROM subscription_sync WHERE user_id=$1) AS "pending!""#,
         uid
     )
-    .fetch_one(guard.connection())
+    .fetch_one(guard.connection()?)
     .await?;
     if !pending {
         return Ok(());
     }
-    let totals = okapi_store::history::totals(guard.connection(), uid).await?;
+    let totals = okapi_store::history::totals(guard.connection()?, uid).await?;
     guard
         .repair(
             ledger,
@@ -64,7 +64,7 @@ pub(crate) async fn synchronize(
         )
         .await?;
     sqlx::query!("DELETE FROM subscription_sync WHERE user_id=$1", uid)
-        .execute(guard.connection())
+        .execute(guard.connection()?)
         .await?;
     Ok(())
 }

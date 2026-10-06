@@ -60,7 +60,7 @@ struct Env {
 
 /// `policy`：写进 channels.retry_policy 的 JSON（None = 不配，走缺省）。
 async fn setup(policy: Option<Value>, fail_first: usize) -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
     let suffix = Uuid::new_v4().simple().to_string();
@@ -250,7 +250,7 @@ async fn first_output_window_is_per_channel() {
         }
     });
 
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
     let suffix = Uuid::new_v4().simple().to_string();

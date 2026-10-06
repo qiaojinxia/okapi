@@ -1,4 +1,5 @@
 mod settlement;
+use super::error::AppError;
 use super::sched_redis::SchedulerRedis;
 use moka::future::Cache;
 use okapi_ledger::BalanceLedger;
@@ -32,6 +33,9 @@ pub fn no_candidates_code(margin_removed: usize) -> &'static str {
 /// 多副本靠 TTL 收敛）。
 #[derive(Clone)]
 pub struct AppState {
+    /// Unit tests must not expose their settlement journal to a live worker.
+    #[cfg(test)]
+    pub(crate) settlement_journal_tag: Arc<str>,
     pub pg: PgPool,
     pub ledger: BalanceLedger,
     /// 调度/鉴权 Redis：会话粘性 + 并发信号量 + auth:key 缓存。
@@ -42,6 +46,7 @@ pub struct AppState {
     /// 渠道候选缓存（model|groups → 候选行，5s；渠道状态分钟级变化可容忍）。
     pub cand_cache: Cache<String, Arc<Vec<ChannelCandidate>>>,
     pub upstream: OpenAiUpstream,
+    pub inference: okapi_providers::inference::Registry,
     /// Azure OpenAI 上游（部署 URL + api-key 头 + api-version；与 `upstream` 共用连接池）。
     pub azure: AzureUpstream,
     /// Anthropic 原生上游（/v1/messages）。
@@ -79,6 +84,16 @@ pub struct AppState {
     pub in_flight: super::inflight::InFlightGauge,
     /// 渠道相对成本系数缓存（channel_id → 千分比，60s；结算路径折算上游成本用）。
     pub channel_cost_cache: Cache<i64, i64>,
+    pub channel_control_cache: Cache<i64, Arc<super::account_control::policy::Policy>>,
+    /// 本进程登记过瞬态失败的渠道 key（24h）：该 key 下一次成功才回 PG 清零连续失败计数
+    /// （`key_health`），健康 key 的成功请求零额外 IO。
+    pub key_failures: Cache<i64, ()>,
+    /// 本进程登记过连接失败的出口代理（24h，§11.41）：同上，下一次经它成功才回 PG 清零。
+    pub egress_failures: Cache<i64, ()>,
+    /// 同一用户的预扣先在进程内排队，再拿 PG 连接与用户锁（`user_turns`）。
+    pub admission_turns: super::user_turns::UserTurns,
+    /// 同一用户的结算另排一队：等全局结算闸的结算不能挡住该用户新请求的准入。
+    pub settlement_turns: super::user_turns::UserTurns,
     /// 负毛利熔断表进程缓存（§11.34）：单键 → 此刻生效的 `<group>|<channel_id>` 集合，10s；
     /// 一次 HGETALL 供所有请求共用，HASH 为空时只是一次空往返。
     pub margin_cache: Cache<u8, Arc<std::collections::HashSet<String>>>,
@@ -156,6 +171,23 @@ impl AppState {
         Ok(())
     }
 
+    /// 预扣准入：先在进程内按用户排队，轮到了才拿 PG 连接与用户锁（见 `user_turns`）。
+    /// 所有计费端点都经这里，单个高并发用户不能把全站连接池耗在等锁上。
+    pub async fn reserve_for_key(
+        &self,
+        limited: bool,
+        request: okapi_ledger::ReserveRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<okapi_ledger::ReserveOutcome, okapi_ledger::LedgerError> {
+        let _turn = self
+            .admission_turns
+            .wait(request.user_id, super::user_turns::ADMISSION_WAIT)
+            .await?;
+        self.ledger
+            .reserve_for_key(&self.pg, limited, request, now)
+            .await
+    }
+
     /// 结算记账统一入口：信号量准入 + 瞬时失败退避重试（200ms/800ms/3.2s），
     /// PG 写失败保留 Redis 重试日志，worker 幂等补写；两个后端均故障时保留任务。
     pub fn settle_write<'a>(
@@ -184,7 +216,9 @@ impl AppState {
         }
         // 信号量关闭不可能（进程生命周期内不 close）；acquire 失败按直写降级
         let permit = self.settle_gate.acquire().await;
-        let journaled = super::settlement_retry::save(self, &input).await.is_ok();
+        let journaled = super::settlement_retry::save_in_flight(self, &input)
+            .await
+            .is_ok();
         let mut delay = std::time::Duration::from_millis(200);
         for attempt in 0..3u8 {
             match okapi_ledger::record_settlement(&self.pg, input.clone()).await {
@@ -203,7 +237,9 @@ impl AppState {
             }
         }
         drop(permit);
-        if !journaled {
+        if journaled {
+            let _ = super::settlement_retry::due_now(self, input.request_id).await;
+        } else {
             let state = self.clone();
             let owned = okapi_ledger::pg::OwnedSettlementInput::from(input);
             self.settlements.spawn(async move {
@@ -268,8 +304,9 @@ impl AppState {
     pub async fn retain_margin_ok(
         &self,
         group: &str,
-        candidates: &mut Vec<ChannelCandidate>,
+        candidates: &mut impl super::scheduler::CandidateSet,
     ) -> usize {
+        super::account_control::retain_available(self, candidates).await;
         let blocked = self.margin_blocked_fields().await;
         if blocked.is_empty() {
             return 0;
@@ -290,21 +327,34 @@ impl AppState {
             != Some(false)
     }
 
-    /// settings 点查（60s 进程缓存；miss 回源 PG，读失败按 None 缓存防打穿）。
-    pub async fn setting_cached(&self, key: &str) -> std::sync::Arc<Option<serde_json::Value>> {
+    /// Typed settings read: absence is cacheable; database failure is not absence.
+    pub async fn try_setting_cached(
+        &self,
+        key: &str,
+    ) -> Result<std::sync::Arc<Option<serde_json::Value>>, AppError> {
         if let Some(hit) = self.settings_cache.get(key).await {
-            return hit;
+            return Ok(hit);
         }
         let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = $1"#, key)
             .fetch_optional(&self.pg)
             .await
-            .ok()
-            .flatten();
+            .map_err(okapi_store::StoreError::from)?;
         let value = std::sync::Arc::new(value);
         self.settings_cache
             .insert(key.to_owned(), std::sync::Arc::clone(&value))
             .await;
-        value
+        Ok(value)
+    }
+
+    /// Best-effort reads are reserved for non-security display/telemetry defaults.
+    pub async fn setting_cached(&self, key: &str) -> std::sync::Arc<Option<serde_json::Value>> {
+        match self.try_setting_cached(key).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(key, error_code = error.code, "settings read unavailable");
+                std::sync::Arc::new(None)
+            }
+        }
     }
 
     /// 路由类缓存失效（渠道/模型/别名/分组绑定/settings 变更后调用）。
@@ -334,6 +384,7 @@ impl AppState {
         self.model_cache.invalidate_all();
         self.cand_cache.invalidate_all();
         self.channel_cost_cache.invalidate_all();
+        self.channel_control_cache.invalidate_all();
         self.settings_cache.invalidate_all();
     }
 }

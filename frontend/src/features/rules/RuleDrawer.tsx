@@ -79,6 +79,9 @@ export function RuleDrawer({
       return apiFetch('/admin/pricing/rules', {
         method: 'POST',
         body: {
+          enabled: initial?.enabled ?? true,
+          valid_from: initial?.valid_from ?? null,
+          valid_to: initial?.valid_to ?? null,
           rule_code: form.rule_code.trim(),
           rule_type: ruleType,
           multiplier: form.multiplier,

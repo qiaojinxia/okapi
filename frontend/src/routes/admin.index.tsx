@@ -1,16 +1,18 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { DashboardPage } from '@/features/dashboard/DashboardPage'
-import type { DashboardTrend, RankingMetric } from '@/features/dashboard/types'
+import type { DashboardTrend, DistributionView, RankingMetric } from '@/features/dashboard/types'
+import { dashboardPeriodSearch } from '@/features/dashboard/period'
 
 function ranking(value: unknown): RankingMetric | undefined {
   return value === 'requests' || value === 'tokens' ? value : undefined
 }
 
 export const Route = createFileRoute('/admin/')({
-  validateSearch: (search: Record<string, unknown>): { days?: number; scope?: 'today' | 'window'; trend?: DashboardTrend; model_rank?: RankingMetric; channel_rank?: RankingMetric } => ({
-    days: [1, 7, 30].includes(Number(search.days)) ? Number(search.days) : undefined,
-    scope: search.scope === 'window' ? 'window' : undefined,
+  staticData: { fitViewport: true },
+  validateSearch: (search: Record<string, unknown>): { days?: number; start_date?: string; end_date?: string; trend?: DashboardTrend; distribution?: DistributionView; model_rank?: RankingMetric; channel_rank?: RankingMetric } => ({
+    ...dashboardPeriodSearch(search),
     trend: search.trend === 'amount' ? 'amount' : ranking(search.trend),
+    distribution: search.distribution === 'channel' || search.distribution === 'tokens' ? search.distribution : undefined,
     model_rank: ranking(search.model_rank),
     channel_rank: ranking(search.channel_rank),
   }),

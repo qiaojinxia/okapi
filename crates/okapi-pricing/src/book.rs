@@ -65,6 +65,7 @@ pub struct PriceBook {
     base_price_per_1m_micro: i64,
     absolute_overrides: HashSet<(UserId, ModelCode)>,
     models: HashMap<ModelCode, PricingMode>,
+    pub(crate) server_tool_prices: HashMap<ModelCode, crate::ServerToolPrices>,
     /// service_tier 档位倍率（仅存配置了的模型）。
     tiers: HashMap<ModelCode, HashMap<String, RatioFp>>,
     groups: HashMap<GroupCode, RatioFp>,
@@ -187,6 +188,7 @@ pub fn compile_with_base(
         base_price_per_1m_micro,
         absolute_overrides,
         models,
+        server_tool_prices: HashMap::new(),
         tiers,
         groups,
         overrides,

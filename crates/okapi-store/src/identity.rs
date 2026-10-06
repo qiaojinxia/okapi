@@ -184,10 +184,12 @@ pub async fn link_oauth_user(
     )
     .fetch_optional(&mut *tx)
     .await?;
-    tx.commit().await?;
     if let Some(id) = inserted {
+        tx.commit().await?;
         return Ok(id);
     }
+    // The losing transaction also owns its provisional user. Never commit it.
+    tx.rollback().await?;
     let winner = sqlx::query_scalar!(
         r#"SELECT user_id FROM oauth_identities WHERE provider = $1 AND subject = $2"#,
         provider,

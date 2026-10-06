@@ -99,7 +99,7 @@ struct TestEnv {
 }
 
 async fn setup(balance: Money) -> TestEnv {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
 
@@ -229,6 +229,123 @@ async fn wait_record(pg: &PgPool, user_id: i64, model: &str) -> Option<(i16, i64
 
 // ---- 用例 ----
 
+/// 原始 TCP 正向代理：收绝对形式的请求行（明文 ws:// 经 HTTP 代理不走 CONNECT），
+/// 改写成源站形式转给目标，之后双向透传（含 101 之后的 WS 帧）。记下每条请求行。
+async fn spawn_raw_proxy(seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> SocketAddr {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let seen = std::sync::Arc::clone(&seen);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let Ok(n) = client.read(&mut buf).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    head.extend_from_slice(&buf[..n]);
+                }
+                let text = String::from_utf8_lossy(&head).into_owned();
+                let line = text.lines().next().unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(line.clone());
+                let mut parts = line.split(' ');
+                let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let Ok(url) = reqwest::Url::parse(target) else {
+                    return;
+                };
+                let origin_form = format!(
+                    "{}{}",
+                    url.path(),
+                    url.query().map(|q| format!("?{q}")).unwrap_or_default()
+                );
+                let rewritten =
+                    text.replacen(&line, &format!("{method} {origin_form} HTTP/1.1"), 1);
+                let Ok(mut upstream) = tokio::net::TcpStream::connect((
+                    url.host_str().unwrap_or("127.0.0.1"),
+                    url.port().unwrap_or(80),
+                ))
+                .await
+                else {
+                    return;
+                };
+                if upstream.write_all(rewritten.as_bytes()).await.is_err() {
+                    return;
+                }
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            });
+        }
+    });
+    addr
+}
+
+/// 渠道绑了出口代理（§11.41）时，Realtime 的上游 WebSocket 也经它握手、经它收发，
+/// 不再是 HTTP 走代理、WS 却直连的旁路。
+#[tokio::test]
+async fn realtime_upstream_websocket_goes_through_the_bound_proxy() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let proxy = spawn_raw_proxy(std::sync::Arc::clone(&seen)).await;
+    let channel: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE models @> $1")
+        .bind(json!([env.model]))
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let url = format!("http://{proxy}");
+    let endpoint = okapi_providers::http::ProxyEndpoint::parse(&url).unwrap();
+    let proxy_id = okapi_store::egress::create_proxy(
+        &env.pg,
+        &okapi_store::egress::NewProxy {
+            name: "realtime-proxy",
+            url: &url,
+            endpoint: okapi_store::egress::Endpoint {
+                scheme: &endpoint.scheme,
+                host: &endpoint.host,
+                port: i32::from(endpoint.port),
+                username: None,
+            },
+            max_keys: None,
+            max_concurrency: None,
+            note: None,
+            status: 1,
+            owner_id: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    okapi_store::egress::set_channel_binding(
+        &env.pg,
+        channel,
+        &okapi_store::egress::Binding::Proxy { proxy_id },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let mut ws = connect(&env).await.expect("握手应成功");
+    let created = recv_text(&mut ws).await;
+    assert_eq!(created["type"], "session.created", "经代理连到了上游");
+    ws.send(CliMsg::text(json!({"type": "response.create"}).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_text(&mut ws).await["type"],
+        "response.output_text.delta"
+    );
+    let lines = seen.lock().unwrap().clone();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].starts_with("GET http://") && lines[0].contains("/v1/realtime?model="),
+        "{lines:?}"
+    );
+    ws.close(None).await.unwrap();
+}
+
 /// 双向泵 + 计费闭环：事件转发、二进制回显、usage 累计、断开 commit、余额一致。
 #[tokio::test]
 async fn realtime_bridge_bills_on_disconnect() {
@@ -305,7 +422,288 @@ async fn realtime_bridge_bills_on_disconnect() {
     );
 }
 
+#[tokio::test]
+async fn realtime_cost_keeps_selected_config_until_disconnect() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let channel: i64 = sqlx::query_scalar(
+        "UPDATE channels SET upstream_unit_cost=$2 WHERE models @> $1 RETURNING id",
+    )
+    .bind(json!([env.model]))
+    .bind(json!({"relative_cost_milli":1250}))
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let mut ws = connect(&env).await.unwrap();
+    assert_eq!(recv_text(&mut ws).await["type"], "session.created");
+    sqlx::query("UPDATE channels SET upstream_unit_cost=$2 WHERE id=$1")
+        .bind(channel)
+        .bind(json!({"relative_cost_milli":2500}))
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    env.state.channel_cost_cache.invalidate_all();
+    ws.send(CliMsg::text(json!({"type":"response.create"}).to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_text(&mut ws).await["type"],
+        "response.output_text.delta"
+    );
+    assert_eq!(recv_text(&mut ws).await["type"], "response.done");
+    ws.close(None).await.unwrap();
+    drop(ws);
+    let (_, amount, _, _) = wait_record(&env.pg, env.user_id, &env.model).await.unwrap();
+    assert_eq!(amount, 1160);
+    let row: (i64,i64,i64,Option<i64>,Value,uuid::Uuid) = sqlx::query_as("SELECT amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,pricing_snapshot,request_id FROM billing_records WHERE user_id=$1 AND log_type=2")
+        .bind(env.user_id).fetch_one(&env.pg).await.unwrap();
+    assert_eq!((row.0, row.1, row.2, row.3), (1160, 1160, 0, Some(1450)));
+    assert_eq!(
+        row.4["upstream_cost_basis"],
+        json!({"version":1,"source":"selected_channel","channel_id":channel,"relative_cost_milli":1250,"list_price_micro":1160})
+    );
+    let event: Value = sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE topic='billing.completed' AND payload->>'request_id'=$1")
+        .bind(row.5.to_string()).fetch_one(&env.pg).await.unwrap();
+    assert_eq!(event["upstream_cost_micro"], 1450);
+    assert_eq!(event["upstream_cost_known"], true);
+    assert_eq!(
+        serde_json::from_str::<Value>(event["ratio_snapshot"].as_str().unwrap()).unwrap(),
+        row.4
+    );
+    assert_eq!(
+        env.ledger.balance(env.user_id).await.unwrap().as_micros(),
+        50_000_000 - 1160
+    );
+}
+
 /// 零产出会话：全额退款 + 失败留痕，余额不变。
+/// 连接预扣只够一份 max_output；会话内累计用量超过已覆盖额度就追加预扣，
+/// 余额不够时下发 insufficient_quota 并断开。此前会话能一直跑，结算「多退少补」把余额扣成大负数。
+#[tokio::test]
+async fn realtime_session_stops_when_usage_outgrows_the_balance() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let initial = env.ledger.balance(env.user_id).await.unwrap();
+    let mut ws = connect(&env).await.expect("握手应成功");
+    assert_eq!(recv_text(&mut ws).await["type"], "session.created");
+
+    let mut completed = 0_u32;
+    let mut stopped = None;
+    'session: for i in 0..50 {
+        let create = json!({"type": "response.create", "mock_response_id": format!("r{i}"),
+            "mock_usage": {"input_tokens": 3_000_000, "output_tokens": 0}});
+        if ws.send(CliMsg::text(create.to_string())).await.is_err() {
+            break;
+        }
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                .await
+                .expect("等待 WS 消息超时");
+            let Some(Ok(CliMsg::Text(t))) = msg else {
+                break 'session;
+            };
+            let v: Value = serde_json::from_str(&t).unwrap();
+            match v["type"].as_str() {
+                Some("response.done") => {
+                    completed += 1;
+                    continue 'session;
+                }
+                Some("error") => {
+                    stopped = v["error"]["code"].as_str().map(str::to_owned);
+                    break 'session;
+                }
+                _ => {}
+            }
+        }
+    }
+    drop(ws);
+    assert_eq!(
+        stopped.as_deref(),
+        Some("insufficient_quota"),
+        "余额耗尽时断开（已完成 {completed} 个 response）"
+    );
+
+    let (status, amount, pt, _) = wait_record(&env.pg, env.user_id, &env.model)
+        .await
+        .expect("断开后按累计用量结算");
+    assert_eq!(status, 20);
+    assert_eq!(i64::from(pt), 3_000_000 * i64::from(completed));
+    let per_response = amount / i64::from(completed);
+    assert!(
+        amount - initial.as_micros() < per_response,
+        "透支不超过最后一个 response：扣 {amount}，余额 {}，每个 {per_response}",
+        initial.as_micros()
+    );
+    for _ in 0..50 {
+        if env
+            .ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        env.ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "追加预扣全部退回"
+    );
+    let balance = env.ledger.balance(env.user_id).await.unwrap();
+    assert_eq!(balance.as_micros(), initial.as_micros() - amount);
+}
+
+async fn failed_record(pg: &PgPool, user_id: i64) -> Option<(i16, i64, Option<String>)> {
+    for _ in 0..50 {
+        let row = sqlx::query_as::<_, (i16, i64, Option<String>)>(
+            "SELECT status, amount_micro, error_code FROM billing_records
+             WHERE user_id = $1 AND log_type = 5",
+        )
+        .bind(user_id)
+        .fetch_optional(pg)
+        .await
+        .unwrap();
+        if row.is_some() {
+            return row;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// 握手请求发出就断开：预扣发生在升级之前，升级失败（或建连 handler 被取消）时
+/// 当场退款、留 `client_closed_request` 失败痕并释放连接租约。此前要等约 10 分钟的过期清理。
+#[tokio::test]
+async fn abandoned_handshake_refunds_and_releases_the_connection_slot() {
+    use tokio::io::AsyncWriteExt as _;
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let initial = env.ledger.balance(env.user_id).await.unwrap();
+    // 选路查询卡在表锁上：预扣已建立、handler 还没返回
+    let mut lock = env.pg.begin().await.unwrap();
+    sqlx::query("LOCK TABLE channels IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let mut tcp = tokio::net::TcpStream::connect(env.gateway).await.unwrap();
+    let request = format!(
+        "GET /v1/realtime?model={} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\n\
+         Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: realtime\r\n\
+         Authorization: Bearer {}\r\n\r\n",
+        env.model, env.gateway, env.token
+    );
+    tcp.write_all(request.as_bytes()).await.unwrap();
+    for _ in 0..50 {
+        if !env
+            .ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        env.ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "admitted before the client leaves"
+    );
+    drop(tcp);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    lock.rollback().await.unwrap();
+
+    assert_eq!(
+        failed_record(&env.pg, env.user_id).await,
+        Some((40, 0, Some("client_closed_request".to_owned())))
+    );
+    for _ in 0..50 {
+        if env
+            .ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        env.ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(env.ledger.balance(env.user_id).await.unwrap(), initial);
+    let leases: i64 = {
+        use fred::interfaces::SortedSetsInterface as _;
+        let key_id: i64 = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id = $1")
+            .bind(env.user_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+        let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+            .await
+            .unwrap();
+        redis.zcard(format!("ws:lease:k:{key_id}")).await.unwrap()
+    };
+    assert_eq!(leases, 0, "the connection slot is released");
+}
+
+/// 网关下线：升级后的会话不在 HTTP 排水里，收到下线信号即收尾、按已产出结算，
+/// 下线等待覆盖它的落账。此前进程退出直接掐断会话，账只能等过期退款（免费）。
+#[tokio::test]
+async fn shutdown_settles_open_realtime_sessions() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let mut ws = connect(&env).await.expect("握手应成功");
+    assert_eq!(recv_text(&mut ws).await["type"], "session.created");
+    ws.send(CliMsg::text(json!({"type": "response.create"}).to_string()))
+        .await
+        .unwrap();
+    loop {
+        if recv_text(&mut ws).await["type"] == "response.done" {
+            break;
+        }
+    }
+    assert!(
+        env.state.settlements.in_flight() >= 1,
+        "the session is tracked"
+    );
+
+    env.state.settlements.drain();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        env.state.settlements.wait_idle(Duration::from_secs(5)),
+    )
+    .await
+    .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(CliMsg::Close(_)) | Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the client sees the session end");
+    let (status, amount, pt, ct) = wait_record(&env.pg, env.user_id, &env.model)
+        .await
+        .expect("会话按已产出结算");
+    assert_eq!((status, pt, ct), (20, 100, 50));
+    assert!(amount > 0);
+}
+
 #[tokio::test]
 async fn realtime_zero_output_refunds_all() {
     let initial = Money::from_micros(50_000_000);

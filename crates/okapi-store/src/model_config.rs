@@ -109,6 +109,7 @@ pub struct ModelDraft<'a> {
     pub tier_expr: Option<&'a str>,
     pub per_call_price_micro: Option<i64>,
     pub tier_ratios: Option<&'a Value>,
+    pub server_tool_prices: Option<&'a Value>,
     pub fallbacks: Option<&'a [String]>,
     pub metadata: Option<&'a ModelMetadata>,
 }
@@ -158,10 +159,10 @@ pub async fn save(pool: &PgPool, draft: ModelDraft<'_>) -> Result<i64, StoreErro
     let a = draft.axes;
     sqlx::query(r"INSERT INTO model_pricing (model_id, pricing_mode, model_ratio, completion_ratio,
         cache_ratio, cache_write_ratio, audio_ratio, audio_completion_ratio, image_ratio,
-        modality_ratios, tier_expr, per_call_price_micro, tier_ratios)
+        modality_ratios, tier_expr, per_call_price_micro, tier_ratios, server_tool_prices)
         VALUES ($1, COALESCE($2, 'ratio'), ($3::text)::numeric, ($4::text)::numeric,
         ($5::text)::numeric, ($6::text)::numeric, ($7::text)::numeric, ($8::text)::numeric,
-        ($9::text)::numeric, COALESCE($10, '{}'::jsonb), $11, $12, NULLIF($13, '{}'::jsonb))
+        ($9::text)::numeric, COALESCE($10, '{}'::jsonb), $11, $12, NULLIF($13, '{}'::jsonb), NULLIF($14, '{}'::jsonb))
         ON CONFLICT (model_id) DO UPDATE SET
         pricing_mode = COALESCE($2, model_pricing.pricing_mode),
         model_ratio = EXCLUDED.model_ratio, completion_ratio = EXCLUDED.completion_ratio,
@@ -172,10 +173,12 @@ pub async fn save(pool: &PgPool, draft: ModelDraft<'_>) -> Result<i64, StoreErro
         tier_expr = CASE WHEN $2 = 'tiered' THEN $11 WHEN $2 IS NOT NULL THEN NULL ELSE model_pricing.tier_expr END,
         per_call_price_micro = CASE WHEN $2 = 'per_call' THEN $12 WHEN $2 IS NOT NULL THEN NULL ELSE model_pricing.per_call_price_micro END,
         tier_ratios = CASE WHEN $13::jsonb IS NULL THEN model_pricing.tier_ratios ELSE NULLIF($13, '{}'::jsonb) END,
+        server_tool_prices = CASE WHEN $14::jsonb IS NULL THEN model_pricing.server_tool_prices ELSE NULLIF($14, '{}'::jsonb) END,
         updated_at = now()")
         .bind(id).bind(draft.mode).bind(a.model).bind(a.completion).bind(a.cache).bind(a.cache_write)
         .bind(a.audio).bind(a.audio_completion).bind(a.image).bind(a.modality_ratios)
         .bind(draft.tier_expr).bind(draft.per_call_price_micro).bind(draft.tier_ratios)
+        .bind(draft.server_tool_prices)
         .execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(id)

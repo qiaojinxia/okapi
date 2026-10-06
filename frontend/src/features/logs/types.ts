@@ -59,7 +59,7 @@ export interface LogDiagnostics {
   request_failed?: boolean
   stream_end_reason?: string
   attempts_truncated?: boolean
-  attempts?: { channel_id: number; channel_key_id: number; provider?: string; upstream_model?: string; upstream_endpoint?: string; duration_ms?: number; status?: number; outcome?: string; error_code?: string; error_phase?: string; error_message?: string }[]
+  attempts?: { channel_id: number; channel_key_id: number; provider?: string; upstream_model?: string; upstream_endpoint?: string; duration_ms?: number; status?: number; outcome?: string; error_code?: string; error_phase?: string; error_message?: string; egress_proxy_id?: number }[]
 }
 
 export interface LogRow {

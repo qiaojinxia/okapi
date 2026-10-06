@@ -1,12 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, Bot, ChevronDown, Download, Eraser, FileDown, FlaskConical, RotateCcw, Save, Send, SlidersHorizontal, Square, Trash2 } from 'lucide-react'
-import { useEffect, useId, useRef, useState } from 'react'
+import { ArrowDown, Bot, ChevronDown, ChevronRight, Download, Eraser, FileDown, FlaskConical, RotateCcw, Save, Send, SlidersHorizontal, Square, Trash2, Wrench } from 'lucide-react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { estimateCost, outputSpeed } from './cost'
 import { conversationMarkdown, downloadText } from './export'
 import { modelsForKey, usePlaygroundKeys } from './keys'
 import type { KeyBlock, KeyChoice } from './keys'
 import { Markdown } from './markdown'
+import { ToolCallList } from './ToolCalls'
+import { EXAMPLE_TOOLS, parseTools } from './tools'
 import { ModelInfo } from './ModelInfo'
 import { DEFAULT_PARAMETERS, loadParameters, samplingAllowed } from './parameters'
 import type { SendOptions, Turn } from './use-chat-stream'
@@ -58,7 +60,7 @@ function formatDuration(ms: number): string {
 function Workspace({ userId, group }: { userId: number | undefined; group: string }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
-  const ids = { key: useId(), model: useId(), list: useId(), system: useId(), temp: useId(), topP: useId(), max: useId(), effort: useId(), budget: useId(), preset: useId(), input: useId(), config: useId() }
+  const ids = { key: useId(), model: useId(), list: useId(), system: useId(), temp: useId(), topP: useId(), max: useId(), effort: useId(), budget: useId(), tools: useId(), preset: useId(), input: useId(), config: useId() }
   const chat = useChatStream(userId)
 
   const [saved] = useState(() => readSettings(userId))
@@ -69,6 +71,10 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   const [maxTokens, setMaxTokens] = useState(saved?.maxTokens ?? '')
   const [reasoningEffort, setReasoningEffort] = useState(saved?.reasoningEffort ?? '')
   const [thinkingBudget, setThinkingBudget] = useState(saved?.thinkingBudget ?? '')
+  // 工具定义（JSON 文本）：空 = 不带工具；折叠区有内容时默认展开，免得用户忘了自己开着工具
+  const [tools, setTools] = useState(saved?.tools ?? '')
+  const [toolsOpen, setToolsOpen] = useState((saved?.tools ?? '').trim() !== '')
+  const toolsParsed = useMemo(() => parseTools(tools), [tools])
   // 选用的密钥（'' = 登录会话本身）；存的是用户的选择，能不能用由下面按当前密钥列表推导
   const [keyId, setKeyId] = useState(saved?.keyId ?? '')
   const [presetName, setPresetName] = useState('')
@@ -123,12 +129,12 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   const tempOk = tempNum === null || (Number.isFinite(tempNum) && tempNum >= 0 && tempNum <= profile.temperature_max!)
   const topPOk = topPNum === null || (Number.isFinite(topPNum) && topPNum >= 0 && topPNum <= 1)
   const maxOk = maxNum === null || (Number.isInteger(maxNum) && maxNum > 0)
-  const paramsOk = tempOk && topPOk && maxOk && budgetOk && modelValue.trim() !== '' && !keyPending && !parameters.isFetching
+  const paramsOk = tempOk && topPOk && maxOk && budgetOk && toolsParsed.error === null && modelValue.trim() !== '' && !keyPending && !parameters.isFetching
 
   // 记住当前这套参数：只存用户改过的值（model 为空 = 仍跟随目录首项，不把自动选中的值固化下来）
   useEffect(() => {
-    if (userId !== undefined) writeSettings(userId, { model, system, temperature, topP, maxTokens, keyId, reasoningEffort, thinkingBudget })
-  }, [userId, model, system, temperature, topP, maxTokens, keyId, reasoningEffort, thinkingBudget])
+    if (userId !== undefined) writeSettings(userId, { model, system, temperature, topP, maxTokens, keyId, reasoningEffort, thinkingBudget, tools })
+  }, [userId, model, system, temperature, topP, maxTokens, keyId, reasoningEffort, thinkingBudget, tools])
 
   // Rules can change after a channel edit or preset import. Drop incompatible
   // remembered values so they cannot reappear on a later model switch.
@@ -159,7 +165,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
 
   const options = (): SendOptions => ({
     model: modelValue, system, temperature: tempNum, top_p: topPNum, max_tokens: maxNum,
-    reasoning_effort: effortValue || null, thinking_budget: budgetNum, preserve_reasoning: profile.preserve_reasoning,
+    reasoning_effort: effortValue || null, thinking_budget: budgetNum, preserve_reasoning: profile.preserve_reasoning, tools: toolsParsed.tools,
     keyId: selectedKey?.id ?? null, keyName: selectedKey ? keyLabel(selectedKey) : null, group: effectiveGroup,
   })
 
@@ -203,7 +209,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
     const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')
     downloadText(
       `playground-${stamp}.md`,
-      conversationMarkdown(chat.turns, { title: t('portal:playgroundExportTitle'), user: t('portal:playgroundRoleUser'), assistant: t('portal:playgroundRoleAssistant'), usage: usageLine }),
+      conversationMarkdown(chat.turns, { title: t('portal:playgroundExportTitle'), user: t('portal:playgroundRoleUser'), assistant: t('portal:playgroundRoleAssistant'), toolCall: t('portal:playgroundExportToolCall'), toolResult: t('portal:playgroundExportToolResult'), usage: usageLine }),
     )
   }
 
@@ -306,6 +312,41 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
               onChange={(e) => setSystem(e.target.value)}
             />
           </Field>
+          <details
+            open={toolsOpen}
+            onToggle={(event) => setToolsOpen(event.currentTarget.open)}
+            data-slot="playground-tools"
+            className="group rounded-md border border-border"
+          >
+            <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md px-3 py-2 text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-primary/40 [&::-webkit-details-marker]:hidden">
+              <ChevronRight aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
+              <Wrench aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span className="flex-1">{t('portal:playgroundTools')}</span>
+              {toolsParsed.tools !== null && <Badge variant="muted">{t('portal:playgroundToolsCount', { n: toolsParsed.tools.length })}</Badge>}
+            </summary>
+            <div className="flex flex-col gap-2 border-t border-border p-3">
+              <Field
+                label={t('portal:playgroundToolsJson')}
+                htmlFor={ids.tools}
+                hint={t('portal:playgroundToolsHint')}
+                error={toolsParsed.error === null ? null : t(toolsParsed.error === 'syntax' ? 'portal:playgroundToolsSyntax' : 'portal:playgroundToolsShape')}
+              >
+                <Textarea
+                  id={ids.tools}
+                  rows={8}
+                  spellCheck={false}
+                  value={tools}
+                  aria-invalid={toolsParsed.error !== null}
+                  placeholder='[{"type":"function","function":{"name":"get_weather","parameters":{}}}]'
+                  onChange={(e) => setTools(e.target.value)}
+                />
+              </Field>
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setTools(EXAMPLE_TOOLS)}>{t('portal:playgroundToolsExample')}</Button>
+                <Button type="button" variant="ghost" size="sm" disabled={tools === ''} onClick={() => setTools('')}>{t('portal:playgroundToolsClear')}</Button>
+              </div>
+            </div>
+          </details>
           <div className="rounded-md border border-border bg-muted/30 p-3 text-xs text-muted-foreground" role="status">
             {parameters.isFetching ? t('portal:playgroundParametersLoading') : parameters.isError ? t('portal:playgroundParametersUnavailable') : profile.known ? t('portal:playgroundParametersAuto') : t('portal:playgroundParametersUnknown')}
           </div>
@@ -443,6 +484,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
                   locale={locale}
                   cost={turn.role === 'assistant' ? estimateCost(catalog.find((m) => m.model === turn.requested), factorOf(turn.group ?? group), turn.usage) : null}
                   onRegenerate={index === lastAssistant && !chat.busy && paramsOk ? regenerate : undefined}
+                  onToolResults={index === lastAssistant && !chat.busy && paramsOk ? (results) => { chat.submitToolResults(turn.id, results, options()); toBottom() } : undefined}
                 />
               ))
             )}
@@ -499,7 +541,7 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
   )
 }
 
-function TurnBubble({ turn, locale, cost, onRegenerate }: { turn: Turn; locale: string; cost: number | null; onRegenerate?: () => void }) {
+function TurnBubble({ turn, locale, cost, onRegenerate, onToolResults }: { turn: Turn; locale: string; cost: number | null; onRegenerate?: () => void; onToolResults?: (results: Record<string, string>) => void }) {
   const { t } = useTranslation()
   if (turn.role === 'user') {
     return (
@@ -521,7 +563,10 @@ function TurnBubble({ turn, locale, cost, onRegenerate }: { turn: Turn; locale: 
               <div className="mt-1 whitespace-pre-wrap">{turn.reasoning}</div>
             </details>
           )}
-          <Markdown source={turn.content} />
+          {turn.content !== '' && <Markdown source={turn.content} />}
+          {turn.toolCalls !== undefined && turn.toolCalls.length > 0 && (
+            <ToolCallList calls={turn.toolCalls} streaming={turn.streaming === true} onSubmit={onToolResults} />
+          )}
           {turn.streaming && <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-current align-text-bottom" aria-hidden />}
           {turn.error !== undefined && (
             <p className="mt-1 text-xs text-destructive" role="alert">

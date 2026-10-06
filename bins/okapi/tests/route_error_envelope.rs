@@ -51,7 +51,7 @@ fn fill_params(path: &str) -> String {
             "audit-model:generateContent"
         } else if name.contains("uuid") || name.contains("request") || name.contains("batch") {
             "00000000-0000-0000-0000-000000000000"
-        } else if name.contains("id") {
+        } else if name.contains("id") || name == "key" {
             "1"
         } else {
             "probe"
@@ -261,7 +261,7 @@ async fn serve(router: axum::Router) -> SocketAddr {
 
 #[tokio::test]
 async fn every_route_returns_a_well_formed_error_envelope_without_auth() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -371,7 +371,7 @@ async fn plain_user_token(pg: &sqlx::PgPool) -> String {
 /// 每个管理接口都必须返回 403；参数错误、资源不存在不能替代权限拒绝。
 #[tokio::test]
 async fn admin_routes_never_succeed_for_an_authenticated_unprivileged_user() {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();

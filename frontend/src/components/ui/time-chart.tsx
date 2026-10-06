@@ -21,7 +21,7 @@ export function chartNumber(n: number, locale: string): string {
   }).format(n)
 }
 
-export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, controls = true, paginateTable = false, secondaryAxis }: {
+export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis }: {
   data: ChartPoint[]
   series: ChartSeries[]
   format: (value: number) => string
@@ -34,6 +34,8 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   compact?: boolean
   /// 桌面端让绘图区撑满父级剩余高度（父级需为 flex 列），避免同排卡片更高时图下方留白。
   fill?: boolean
+  /// 视口型工作区可下调绘图区下限；其他统计页仍保留默认高度。
+  minPlotHeight?: number
   controls?: boolean
   paginateTable?: boolean
   secondaryAxis?: { unit: string; format: (value: number) => string }
@@ -84,7 +86,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
         {paginateTable && <Pagination total={data.length} limit={tableLimit} offset={tableOffset} onOffset={setTableOffset} pageSizes={PAGE_SIZES} onLimit={(limit) => { setTableLimit(limit); setTableOffset(0) }} className="rounded-lg shadow-none" />}
         </div>
       ) : (
-        <div className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:min-h-36 lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} aria-label={t('charts:plot')}>
+        <div className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} style={fill ? { minHeight: minPlotHeight } : undefined} aria-label={t('charts:plot')}>
           <ResponsiveContainer width="100%" height="100%" minWidth={0} className={fill ? 'lg:absolute lg:inset-0' : undefined}>
             <ComposedChart data={data} margin={{ top: 10, right: 10, bottom: 4, left: 0 }} accessibilityLayer>
               <defs>{series.map((s, i) => <linearGradient key={s.key} id={`${id}-${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={s.color} stopOpacity={0.28} /><stop offset="100%" stopColor={s.color} stopOpacity={0.025} /></linearGradient>)}</defs>

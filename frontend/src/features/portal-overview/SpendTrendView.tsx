@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/ui/state'
 import { TimeChart } from '@/components/ui/time-chart'
 import type { BreakdownResp, BreakdownRow } from './types'
 import { calendarDays, usageChart, USAGE_METRICS } from './usage-chart-data'
+import { aggregateCacheHit } from './cache-metrics'
 import type { UsageMetric } from './usage-chart-data'
 
 export function SpendTrendView({ rows, days, window, metric, onMetricChange, onExpand }: {
@@ -27,7 +28,7 @@ export function SpendTrendView({ rows, days, window, metric, onMetricChange, onE
         {onExpand ? <Button variant="ghost" size="sm" onClick={onExpand}>{t('portal:expandTrend')}</Button> : onMetricChange && <Segmented ariaLabel={t('charts:metric')} size="sm" value={metric} onChange={onMetricChange} options={USAGE_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))} />}
       </div>
       {rows.length === 0 ? <EmptyState hint={t('portal:emptyUsageHint')} /> : <TimeChart compact controls={!onExpand} key={metric} {...chart} percent={ratio} format={format} unit={money ? 'USD' : ratio ? '%' : metric === 'latency' ? 'ms' : t(`charts:metric_${metric}`)} label={t('charts:usageTrend')} />}
-      <p className="text-xs leading-5 text-muted-foreground">{metric === 'latency' ? t('charts:missingPerformance') : ratio ? t('charts:ratioGaps') : t('charts:zeroDays')}</p>
+      <p className="text-xs leading-5 text-muted-foreground">{metric === 'latency' ? t('charts:missingPerformance') : metric === 'cache' && aggregateCacheHit(rows).partial ? t('charts:partialCacheSamples') : ratio ? t('charts:ratioGaps') : t('charts:zeroDays')}</p>
       {window && <p className="text-xs text-muted-foreground">{t('charts:freshness', { time: window.generated_at })} · {window.timezone}</p>}
     </CardContent></Card>
   )

@@ -170,6 +170,10 @@ pub fn response_chat_to_responses(
         .unwrap_or(Value::Null);
 
     let mut output: Vec<Value> = Vec::new();
+    if let Some(reasoning) = reasoning_text(&message).filter(|text| !text.is_empty()) {
+        output.push(json!({"type":"reasoning","id":"rs_0","status":"completed",
+            "summary":[{"type":"summary_text","text":reasoning}]}));
+    }
     let text = message.get("content").and_then(Value::as_str).unwrap_or("");
     if !text.is_empty() {
         output.push(json!({
@@ -198,12 +202,17 @@ pub fn response_chat_to_responses(
         .filter(|u| !u.is_null())
         .and_then(|u| serde_json::from_value(u.clone()).ok());
     let probe = usage;
+    let finish = src
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str);
+    let (status, details) = response_completion(finish);
     let out = json!({
         "id": format!("resp_{}", src.get("id").and_then(Value::as_str).unwrap_or("0")),
         "object": "response",
         "created_at": src.get("created").and_then(Value::as_i64)
             .unwrap_or_else(|| chrono::Utc::now().timestamp()),
-        "status": "completed",
+        "status": status,
+        "incomplete_details": details,
         "model": src.get("model").and_then(Value::as_str).unwrap_or(""),
         "output": output,
         "usage": probe.map(responses_usage_json),
@@ -212,6 +221,14 @@ pub fn response_chat_to_responses(
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
     Ok((bytes, probe))
+}
+
+fn response_completion(reason: Option<&str>) -> (&'static str, Option<Value>) {
+    match reason {
+        Some("length") => ("incomplete", Some(json!({"reason":"max_output_tokens"}))),
+        Some("content_filter") => ("incomplete", Some(json!({"reason":"content_filter"}))),
+        _ => ("completed", None),
+    }
 }
 
 fn responses_usage_json(u: UsageProbe) -> Value {
@@ -241,14 +258,24 @@ struct StreamTool {
     arguments: String,
 }
 
+fn reasoning_text(value: &Value) -> Option<&str> {
+    value
+        .get("reasoning_content")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("reasoning").and_then(Value::as_str))
+}
+
 pub struct ChatStreamToResponses {
     model: String,
     id: String,
     created: i64,
     started: bool,
     text_open: bool,
+    finish_reason: Option<String>,
     text_buf: String,
     text_index: usize,
+    reasoning_index: Option<usize>,
+    reasoning_buf: String,
     next_index: usize,
     tools: std::collections::BTreeMap<usize, StreamTool>,
     usage: Option<UsageProbe>,
@@ -265,8 +292,11 @@ impl ChatStreamToResponses {
             created: chrono::Utc::now().timestamp(),
             started: false,
             text_open: false,
+            finish_reason: None,
             text_buf: String::new(),
             text_index: 0,
+            reasoning_index: None,
+            reasoning_buf: String::new(),
             next_index: 0,
             tools: std::collections::BTreeMap::new(),
             usage: None,
@@ -294,6 +324,12 @@ impl ChatStreamToResponses {
 
     fn on_chunk(&mut self, chunk: &Value) -> Vec<Result<ChatEvent, UpstreamError>> {
         let mut out = Vec::new();
+        if let Some(reason) = chunk
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+        {
+            self.finish_reason = Some(reason.to_owned());
+        }
         if !self.started {
             self.started = true;
             if let Some(id) = chunk.get("id").and_then(Value::as_str)
@@ -312,6 +348,13 @@ impl ChatStreamToResponses {
             out.push(Ok(self.named("response.created", &payload, false, 0, None)));
         }
 
+        if let Some(reasoning) = chunk
+            .pointer("/choices/0/delta")
+            .and_then(reasoning_text)
+            .filter(|text| !text.is_empty())
+        {
+            out.extend(self.on_reasoning(reasoning));
+        }
         if let Some(text) = chunk
             .pointer("/choices/0/delta/content")
             .and_then(Value::as_str)
@@ -354,6 +397,50 @@ impl ChatStreamToResponses {
             )));
         }
         out.extend(self.on_tools(chunk));
+        out
+    }
+
+    fn on_reasoning(&mut self, text: &str) -> Vec<Result<ChatEvent, UpstreamError>> {
+        if self.reasoning_buf.len().saturating_add(text.len()) > 16 * 1024 * 1024 {
+            return vec![Err(UpstreamError::Stream("reasoning_summary_limit".into()))];
+        }
+        let mut out = Vec::new();
+        let index = if let Some(index) = self.reasoning_index {
+            index
+        } else {
+            let index = self.next_index;
+            self.next_index += 1;
+            self.reasoning_index = Some(index);
+            let added = json!({"type":"response.output_item.added","output_index":index,
+                    "item":{"type":"reasoning","id":"rs_0","status":"in_progress","summary":[]}});
+            out.push(Ok(self.named(
+                "response.output_item.added",
+                &added,
+                false,
+                0,
+                None,
+            )));
+            let part = json!({"type":"response.reasoning_summary_part.added","item_id":"rs_0",
+                    "output_index":index,"summary_index":0,"part":{"type":"summary_text","text":""}});
+            out.push(Ok(self.named(
+                "response.reasoning_summary_part.added",
+                &part,
+                false,
+                0,
+                None,
+            )));
+            index
+        };
+        self.reasoning_buf.push_str(text);
+        let delta = json!({"type":"response.reasoning_summary_text.delta","item_id":"rs_0",
+            "output_index":index,"summary_index":0,"delta":text});
+        out.push(Ok(self.named(
+            "response.reasoning_summary_text.delta",
+            &delta,
+            true,
+            text.chars().count(),
+            None,
+        )));
         out
     }
 
@@ -424,6 +511,7 @@ impl ChatStreamToResponses {
         out
     }
 
+    #[allow(clippy::too_many_lines)] // Ordered protocol terminal events share one lifecycle.
     fn finish(&mut self) -> Vec<Result<ChatEvent, UpstreamError>> {
         if self.finished {
             return vec![Ok(ChatEvent::Done)];
@@ -443,8 +531,59 @@ impl ChatStreamToResponses {
             )));
         }
         let mut output = Vec::new();
+        if let Some(index) = self.reasoning_index {
+            let part = json!({"type":"summary_text","text":self.reasoning_buf});
+            let text_done = json!({"type":"response.reasoning_summary_text.done","item_id":"rs_0",
+                "output_index":index,"summary_index":0,"text":self.reasoning_buf});
+            out.push(Ok(self.named(
+                "response.reasoning_summary_text.done",
+                &text_done,
+                false,
+                0,
+                None,
+            )));
+            let part_done = json!({"type":"response.reasoning_summary_part.done","item_id":"rs_0",
+                "output_index":index,"summary_index":0,"part":part});
+            out.push(Ok(self.named(
+                "response.reasoning_summary_part.done",
+                &part_done,
+                false,
+                0,
+                None,
+            )));
+            let item =
+                json!({"type":"reasoning","id":"rs_0","status":"completed","summary":[part]});
+            let item_done =
+                json!({"type":"response.output_item.done","output_index":index,"item":item});
+            out.push(Ok(self.named(
+                "response.output_item.done",
+                &item_done,
+                false,
+                0,
+                None,
+            )));
+            output.push((index, item));
+        }
         if self.text_open {
-            output.push((self.text_index,json!({"type":"message","id":"msg_0","status":"completed","role":"assistant","content":[{"type":"output_text","text":self.text_buf,"annotations":[]}]})));
+            let part = json!({"type":"output_text","text":self.text_buf,"annotations":[]});
+            let part_done = json!({"type":"response.content_part.done","item_id":"msg_0","output_index":self.text_index,"content_index":0,"part":part});
+            out.push(Ok(self.named(
+                "response.content_part.done",
+                &part_done,
+                false,
+                0,
+                None,
+            )));
+            let item = json!({"type":"message","id":"msg_0","status":"completed","role":"assistant","content":[part]});
+            let item_done = json!({"type":"response.output_item.done","output_index":self.text_index,"item":item});
+            out.push(Ok(self.named(
+                "response.output_item.done",
+                &item_done,
+                false,
+                0,
+                None,
+            )));
+            output.push((self.text_index, item));
         }
         let tools = std::mem::take(&mut self.tools);
         for (index, tool) in tools {
@@ -470,19 +609,19 @@ impl ChatStreamToResponses {
         }
         output.sort_by_key(|(index, _)| *index);
         let output: Vec<_> = output.into_iter().map(|(_, item)| item).collect();
-        let completed = json!({"type": "response.completed", "response": {
+        let (status, details) = response_completion(self.finish_reason.as_deref());
+        let terminal = if status == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        let completed = json!({"type": terminal, "response": {
             "id": self.id, "object": "response", "created_at": self.created,
-            "status": "completed", "model": self.model,
+            "status": status, "incomplete_details": details, "model": self.model,
             "output": output,
             "usage": probe.map(responses_usage_json),
         }});
-        out.push(Ok(self.named(
-            "response.completed",
-            &completed,
-            false,
-            0,
-            probe,
-        )));
+        out.push(Ok(self.named(terminal, &completed, false, 0, probe)));
         out.push(Ok(ChatEvent::Done));
         out
     }
@@ -514,6 +653,73 @@ impl ChatStreamToResponses {
 #[cfg(test)]
 mod third_review_tests {
     use super::*;
+
+    #[test]
+    fn reasoning_fragments_survive_and_only_delta_characters_are_counted() {
+        for with_usage in [false, true] {
+            let mut state = ChatStreamToResponses::new("fixture");
+            let mut events = Vec::new();
+            let usage = serde_json::from_value::<UsageProbe>(json!({"prompt_tokens":7,"completion_tokens":10,"completion_tokens_details":{"reasoning_tokens":3}})).unwrap();
+            for (value, probe) in [
+                (
+                    json!({"choices":[{"delta":{"reasoning_content":"思考"}}]}),
+                    None,
+                ),
+                (json!({"choices":[{"delta":{"reasoning":" done"}}]}), None),
+                (json!({"choices":[{"delta":{"content":"OK"}}]}), None),
+                (json!({"choices":[]}), with_usage.then_some(usage)),
+            ] {
+                events.extend(state.step(Ok(ChatEvent::Data {
+                    raw: value.to_string(),
+                    event: None,
+                    has_output: false,
+                    content_chars: 0,
+                    usage: probe,
+                })));
+            }
+            events.extend(state.step(Ok(ChatEvent::Done)));
+            let counted: usize = events
+                .iter()
+                .filter_map(|event| match event {
+                    Ok(ChatEvent::Data { content_chars, .. }) => Some(*content_chars),
+                    _ => None,
+                })
+                .sum();
+            assert_eq!(counted, "思考 doneOK".chars().count());
+            assert!(events.iter().any(|event| matches!(event,Ok(ChatEvent::Data{has_output:true,event:Some(name),..}) if name=="response.reasoning_summary_text.delta")));
+            let completed = events
+                .iter()
+                .find_map(|event| match event {
+                    Ok(ChatEvent::Data {
+                        raw,
+                        event: Some(name),
+                        ..
+                    }) if name == "response.completed" => serde_json::from_str::<Value>(raw).ok(),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                completed["response"]["output"][0]["summary"][0]["text"],
+                "思考 done"
+            );
+            assert_eq!(
+                completed["response"]["output"][1]["content"][0]["text"],
+                "OK"
+            );
+            if with_usage {
+                assert_eq!(completed["response"]["usage"]["output_tokens"], 10);
+            } else {
+                assert!(completed["response"]["usage"].is_null());
+            }
+        }
+        let (body, _) = response_chat_to_responses(&Bytes::from(
+            json!({"choices":[{"message":{"content":"OK","reasoning_content":"think"}}]})
+                .to_string(),
+        ))
+        .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["output"][0]["summary"][0]["text"], "think");
+    }
     #[test]
     fn streamed_tool_arguments_survive_fragmentation_and_completion() {
         let mut state = ChatStreamToResponses::new("fixture");

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE channels SET egress_mode = NULL, egress_proxy_id = NULL\n           WHERE egress_proxy_id = $1 AND deleted_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0f342ec999c275eb31c7076d0d6b76cc25a31c1c7a678ccbfae5b78255047935"
+}

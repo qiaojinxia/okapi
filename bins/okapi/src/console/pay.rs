@@ -313,7 +313,7 @@ async fn settle_paid_order(
     };
     let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, user_id).await?;
     let mut tx = guard
-        .connection()
+        .connection()?
         .begin()
         .await
         .map_err(okapi_store::StoreError::from)?;

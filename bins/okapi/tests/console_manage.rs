@@ -43,7 +43,7 @@ struct Env {
 }
 
 async fn setup() -> Env {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
@@ -124,6 +124,10 @@ async fn setup() -> Env {
     )
     .await
     .unwrap();
+    // A cold test instance has no worker to bootstrap the statistics schema.
+    if let Some(ch) = &state.ch {
+        ch.ensure_schema().await.unwrap();
+    }
     let ch_enabled = state.ch.is_some();
     let console = serve(console::router(state)).await;
 
@@ -440,11 +444,15 @@ async fn outbound_settings_write_validation() {
     .await;
     assert_eq!(status, 400);
     assert_eq!(body["error"]["param"], "extra_headers");
+    // settings.proxy_url 已退役（§11.41 出口绑定）：合法地址也拒，免得旧客户端以为配上了代理
+    let (status, body) = post(with(
+        json!({"settings": {"proxy_url": "socks5://127.0.0.1:1080"}}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "proxy_url");
     let (status, body) = post(with(json!({
-        "settings": {
-            "proxy_url": "socks5://127.0.0.1:1080",
-            "extra_headers": {"OpenAI-Organization": "org-1"}
-        }
+        "settings": {"extra_headers": {"OpenAI-Organization": "org-1"}}
     })))
     .await;
     assert_eq!(status, 200, "{body}");
@@ -1152,9 +1160,9 @@ async fn stats_surface_exposes_clickhouse_views() {
             }
         }
         assert_eq!(body["days"], 7, "缺省窗口 7 天");
-        // 窗口参数钳制：超大 days 收敛到 90
+        // 窗口参数钳制：超大 days 收敛到支持的最大 366 天
         let (_, body) = get(env.console, "/admin/stats/overview?days=9999", t).await;
-        assert_eq!(body["days"], 90);
+        assert_eq!(body["days"], 366);
     }
 
     // 用户自助按日统计：只看自己，无需管理权限

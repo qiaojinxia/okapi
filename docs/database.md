@@ -19,7 +19,7 @@
 | 域 | 表 | 里程碑 |
 | --- | --- | --- |
 | 身份权限 | admin_roles, users, oauth_bindings, price_groups, user_groups, group_channel_bindings, api_keys | M1–M2 |
-| 渠道模型 | channels, channel_keys, models, model_aliases | M1–M2 |
+| 渠道模型 | channels, channel_keys, models, model_aliases, proxies, proxy_groups, proxy_group_members | M1–M2 |
 | 定价 | model_pricing, user_pricing, pricing_rules, pricing_epochs | M0–M2 |
 | 计费账本 | billing_records, billing_events, billing_event_carry, billing_record_receipts, billing_outbox, billing_dlq | M1–M2 |
 | 营收运营 | recharge_orders, redemption_codes, redemption_records | M2–M4 |
@@ -197,7 +197,8 @@ CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对
 -- （anthropic_version=vertex-2023-10-16），其余 → publishers/google `:generateContent|:streamGenerateContent?alt=sse`。两家只路由 chat 族入口。
 -- provider=anthropic_max / codex（IMPLEMENTATION §11.38，实验性）：站长自己的订阅经 OAuth 登录；channel_keys.credential_ciphertext 里是
 -- JSON `{"kind":"oauth","access_token","refresh_token","expires_at"(unix 秒),"account_id"?}`（仍经 AES-GCM 信封，非 JSON 凭证照旧当静态 key）。
--- 刷新按 §4.3 四步锁惰性发生（Redis `lock:cred:<key_id>`），refresh token 轮转即回写；invalid_grant → key status=6。
+-- 请求惰性刷新、worker 预刷新与手动刷新共用 §4.3 租约（Redis `lock:cred:<key_id>`），
+-- refresh token 轮转按原密文字节条件回写；invalid_grant 仅作废仍匹配原凭证的 key（status=6）。
 -- 首字前 OAuth API 401 对被拒 access_token 锁内强制刷新一次；仍失败冷却 30s，invalid_grant/缺 refresh_token 保持 invalid。
 -- anthropic_max：api_base 缺省 `https://api.anthropic.com/v1`，Bearer + `anthropic-beta: oauth-2025-04-20` + system 首句前置；
 -- codex：api_base 缺省 `https://chatgpt.com/backend-api/codex`，只走 Responses，头 `chatgpt-account-id` / `originator: codex_cli_rs`，store 恒 false。
@@ -402,9 +403,9 @@ CREATE TABLE billing_records (                        -- 请求级明细（分�
     amount_micro          BIGINT NOT NULL DEFAULT 0,  -- 实付
     original_amount_micro BIGINT NOT NULL DEFAULT 0,  -- 标价（无规则/个人折扣）
     discount_micro        BIGINT NOT NULL DEFAULT 0,  -- 原价 − 实付（账单「已节省」/让利报表）
-    upstream_cost_micro   BIGINT,                     -- 上游成本 = 官方价（乘分组倍率前）× 渠道 relative_cost_milli / 1000；结算时由 settle_write 折算；失败 / 退款 NULL（§11.18）
+    upstream_cost_micro   BIGINT,                     -- 上游成本 = 官方价（乘分组倍率前）× 实际候选冻结的 relative_cost_milli / 1000；依据存 pricing_snapshot；未成功结算的失败/释放记录 NULL，管理员退款仅翻转原账单状态并保留原成本（§11.18）
     pricing_epoch    BIGINT,                          -- 有报价快照时必须与 pricing_snapshot.epoch 相同，不能在上游返回后读取新版本标注旧金额
-    pricing_snapshot JSONB,                           -- 形状见 DESIGN §3.4
+    pricing_snapshot JSONB,                           -- 形状见 DESIGN §3.4；共享文本准入 reservation 包含主/已准入降级候选的完整估价依据；estimated_usage 不属于实测用量，失败记录只存 epoch/reservation
     latency_ms       INT, ttft_ms INT,
     is_stream        BOOLEAN NOT NULL DEFAULT false,
     retry_count      SMALLINT NOT NULL DEFAULT 0,
@@ -652,7 +653,7 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 `aff_percent_bp`（邀请返利基点，缺省 0=关）、`retention_months`（PG 分区保留，缺省 0=永久）、
 `notify_channels`（通知多路配置数组，可含 webhook `secret`；列表与审计脱敏）、`balance_low_threshold_micro`（余额低事件阈值，缺省 0=关）、
 `critical_rate_limits`（关键接口每 IP 限流覆写，对象键=login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key，0=关）、
-`site_url`（对外站点地址；找回密码必须配置合法 HTTP(S) 基址，绝不按请求 Host 推导；OAuth 的独立回调逻辑见相应接口）、
+`site_url`（对外站点地址；找回密码与 OAuth 回调必须配置合法 HTTP(S) 基址，绝不按请求 Host/转发头推导；缺失、非法或数据库读取失败均拒绝起跳）、
 `smtp`（邮件出口：host/port/security(starttls|tls|none)/username/password/from_address/from_name/reply_to；
 host 空=未配置；含密码故列表接口只回"已配置"，IMPLEMENTATION §11.27）、
 `surge_inflight_threshold`（surge 规则的负载判定阈值：Redis 汇总的集群 HTTP 请求与 Responses WS 活动轮次数 ≥ 该值即
@@ -715,6 +716,8 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
 | `conc:ck:<channel_key_id>` | STRING | 1h 泄漏保护 | 渠道 key 在途并发信号量；生成和原生 Token 计数共用 |
+| `conc:px:{<proxy_id>}:v1` | ZSET | 成员 90s 续租 / 键 2× | 出口代理在途并发租约（`proxies.max_concurrency`，§11.41）：与 key 租约一起占，任一满了当「渠道忙」并退回已占的那份；跨 key、跨网关实例共享 |
+| `egress:probe:round` | STRING | ≈ 探测间隔 | 出口代理后台探测的本轮租约（SET NX EX）：多 worker 实例时每轮只由拿到的那个执行 |
 | `inflight:gauge` | HASH | 整键 1h；字段超过 10s 不计入、5min 清除 | 集群在途量（HTTP 请求与 Responses WS 活动轮次）：`node → <count>\|<unix_ms>`。HTTP 在启用 surge 规则时跟踪响应体；Responses WS 跟踪单轮准入至结算；活动期间每秒续报，零/非零切换及时上报，其余变化一秒采样。正常结束、报错、断开、取消均释放；每实例串行写入，节点名称须唯一。软实时计价输入，不用于严格并发限流 |
 | `rpm:ck:<channel_key_id>:<分钟桶>` | STRING 计数 | 120s | 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。固定分钟窗，与 `crl:*` 同机制；超限即把该 key 从候选里摘掉而非拒绝请求——同渠道其它 key 仍可承接 |
 | `spend:ck:<channel_key_id>:<yyyymmdd>` | STRING | 48h | 渠道 key 当日累计消费 micro（`channel_keys.daily_spend_cap_micro`）。结算后累加、选路前比较：软实时，宁可略超也不阻塞热路径 |
@@ -736,8 +739,9 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `ch:test:<channel_id>` | STRING(JSON) | 30d | 最近一次测活结果（ok/latency_ms/http_status/error_code/at），渠道列表"最近测试"列回填（IMPLEMENTATION §11.12）。提示性信息不进 PG，过期即消失 |
 | `ch:balance:<channel_id>` | STRING(JSON) | 30d | 最近一次上游余额查询结果（probe/currency/balance_micro/at，IMPLEMENTATION §11.33），列表 `last_balance` 回填；与 `ch:test` 同一取舍 |
 | `ch:stat:<channel_id>` | HASH | 5min | 错误率/TTFT EMA（打分输入） |
-| `lock:cred:<channel_key_id>` | STRING NX | 30s | 凭证刷新分布式锁（§4.3 四步锁第二步；`anthropic_max` / `codex` 的 OAuth 刷新，IMPLEMENTATION §11.38） |
-| `oauth:cred:<state>` | STRING(JSON) | 10min | 渠道 OAuth 登录流程的 PKCE verifier + provider（`POST /admin/channels/oauth/start` 写、`/exchange` 一次性读删） |
+| `lock:cred:<channel_key_id>` | STRING NX | 90s | OAuth 刷新租约，值为随机持有者；释放时比较持有者。请求/后台/手动刷新共用；Redis 故障不无锁刷新，PG 按原密文字节条件回写 |
+| `oauth:refresh:<channel_key_id>` | STRING JSON | 30 天 | 脱敏刷新观测：尝试/成功时间、连续失败数、下次重试、错误码。瞬态失败退避 30 秒至 15 分钟；不存任何凭证或上游错误原文 |
+| `oauth:cred:<state>` | STRING(JSON) | 10min | 渠道 OAuth 登录流程的 PKCE verifier + provider + 发起管理员 ID + 可选 channel/key 目标；`start` 写，`exchange` 一次性读删并校验绑定 |
 | `kpi:{kpi}:<req\|tok\|amt\|err>:<unix_s>` | STRING 计数 | 360s | 平台实时 KPI 秒桶（四序列各一键/秒；单 Lua 四路累加，读侧 MGET 整窗且跳过累加中的当前秒）。`{kpi}` hash-tag 同槽使跨秒 MGET 在 Cluster 下成立。弃初稿 ZSET 滑窗——按请求存成员的内存 ∝ 流量，秒桶与流量无关（IMPLEMENTATION §11.12）。写入挂 gateway `settle_write` 收口处，只计 log_type 2/5 |
 
 `{<uid>}` 为 Redis Cluster hash-tag：同一用户的 余额/限速/并发 键同槽，保证 Lua 原子性与线性扩容（档位二关键，IMPLEMENTATION §12.1）。
@@ -871,6 +875,7 @@ CREATE TABLE request_log_raw (
     cache_write_tokens Nullable(UInt32) DEFAULT NULL, -- 未采集历史为 NULL；已采集且未写缓存为 0
     completion_tokens UInt32, reasoning_tokens UInt32,
     media_units       String,                 -- JSON
+    server_tool_usage String DEFAULT '',      -- 带 provider 的工具计数 JSON；空串=历史未采集
     -- 金额（售价/原价/优惠/成本 四列 = 毛利与让利分析，new-api 均缺失）
     amount_micro          Int64,
     original_amount_micro Int64,
@@ -893,6 +898,33 @@ PARTITION BY toYYYYMMDD(ts)
 ORDER BY (user_id, ts)
 TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1）
 ```
+
+`billing_records.usage_details.tokens.server_tool_usage` 与 outbox 同名字段保存同一原生工具
+观察。当前 provider 为 `anthropic`，包含可空/缺省的 `web_search_requests` 和
+`web_fetch_requests`；缺省未知、0 明确已观察，均不是 Token。CH 使用有界结构 JSON
+字符串，旧事件/旧行为空串，不回填零。迁移 0033 给 `model_pricing` 增加可空 JSONB
+`server_tool_prices`；随 `pricing_epochs.snapshot.models` 发布，不读取未发布价格。
+`pricing_snapshot.server_tool_fees` 保存逐工具 request 数量、用量契约、额外/已包含
+策略、整数 micro 单价及 list_price/original/amount/discount 分量。未知数量或未配置
+价格对应 null，明确免费是 additional 的 0 单价，已包含费用不重复计费。
+四金额合计沿现有 PG/outbox/CH 字段传递，退款按已结算合计退款。有未定价非零/未知
+工具数量或渠道成本估算溢出时，PG upstream_cost 为 NULL、
+事件/CH upstream_cost_known 为 false；不截成最大整数冒充真实成本。长期工具聚合仍待
+实现，Token 指标不包含工具次数。退费记录不制造新的工具
+调用，明细 API 的 provider 标签表示原用量契约，而不是入口方言。
+
+`tokens.server_tool_usage.code_execution_requests` 是可空的 Anthropic 原生执行
+请求次数；仅采集官方 usage 字段，不能由函数名、结果块数或容器 id 推导。
+同一对象经过 PG、outbox 与 CH `server_tool_usage` 字符串传递，不新增 Token。
+代码执行的容器时长/费用尚未配置时，明确声明或非零原生观察产生
+`pricing_snapshot.server_tool_cost_coverage={version:1,source:"anthropic_native_tool_usage",
+complete:false,reason:"container_duration_price_contract_unavailable",provider:"anthropic",
+tool:"code_execution",billing_unit:"container_duration",requested:bool,observed_requests:u32|null}`。
+此标记和现有未定价 search/fetch 分量均使整体成本未知；零数值载荷配合
+outbox/CH `upstream_cost_known=false`，PG `upstream_cost_micro=NULL`，不得显示为已知免费。
+退款不复制原工具实测，原快照标记仍保留；重放不查询当前价格补全容器费用。
+所有成功结算的统一准备步骤均检查非零代码执行观察；缺标记时补以上信息，
+不完整工具契约使调用方预填的 upstream_cost 也保持 NULL，不能依赖早返回跳过。
 
 ### 3.2 MV 矩阵（AggregatingMergeTree）
 
@@ -1058,7 +1090,7 @@ GROUP BY day ORDER BY day;
 
 - 写入：worker 每秒调度，PG 冻结批次最多 500 行；先提交批次/事件回执，再以 `billing-batch-v1-<UUID>` token 投递原行，重试不混入新事件。直连和 NATS 共用回执，完成事件即使已清理 outbox 或重新发布也不再次写 CH。relay 发布 ID 及消息 `_billing_event_id` 来自 outbox 服务端 UUID；NATS 在 PG 已持久接管后 ack，CH 五次失败由 PG 批次入 DLQ。选中任一成员重投会恢复整个原批次，HTTP/MCP 返回实际成员数，MCP dry_run 提供 `requeue_members`；重投保留 token 和行。**丢弃必须选择全部待处理成员，部分选择返回 400/`delivery_batch_members` 且不修改任何行**。DLQ 列表返回 `delivery_batch_id`/`delivery_batch_size`，按 `batch_id` 筛选时可读取最多 500 行。旧 DLQ 无批次身份仍重入 outbox。表侧 `non_replicated_deduplication_window=1000`，插入带 `deduplicate_blocks_in_dependent_materialized_views=1`；**CH 成功、PG 未完成且原 token 已被驱逐时仍不能保证去重**。历史重复/旧模糊批次不会自动修复，详见 [投递核对](billing-delivery-idempotency-audit.md)。
 - 查询（console/MCP 统一继承）：`max_execution_time=15s`、`max_memory_usage=2GiB`、结果缓存 60s–10min + singleflight。
-- 退款冲销：chsink 同时消费 `billing.refunded`，写负额修正行（同 request_id，log_type=6 退款，对齐 new-api LogTypeRefund），聚合口径自动一致。
+- 退款冲销：chsink 同时消费 `billing.refunded`，写负额修正行（同 request_id，log_type=6 退款，对齐 new-api LogTypeRefund），聚合口径自动一致。 退款事件沿用原成本 NULL/非 NULL 生成 `upstream_cost_known`，明确零成本为 true；保留原 `pricing_snapshot` 为 `ratio_snapshot`。活动账单保留原 `pricing_epoch`，归档回执只从原快照读取明确整数 epoch，缺失为 NULL，不查当前版本。Token 调整为零、工具实测不复制。四金额 checked 取反，溢出回滚整笔退款；已投递旧事件的补偿另行验证。
 
 ### 3.4 可关闭性
 
@@ -1236,6 +1268,16 @@ quarantine 同样计入容量上限。无效结算、预扣冲突以及 SQL 数�
 
 HTTP 请求 span 仅记录 URL 路径，查询字符串中的 Gemini key、OAuth code/state 不进入访问日志。失败账单保留实际错误码，包括上游超时、路由无候选和定价计算失败。
 
+复核补充：无初始化令牌时只允许无转发头的直接环回连接；反代请求即使声称环回来源也须提供 `OKAPI_SETUP_TOKEN`。所有 HTTP 面统一返回禁止框架嵌入的响应头。OAuth 和找回密码共享配置站点地址的验证逻辑，配置读取故障传播为内部错误。
+
+视频成片下载最多手动处理五次 301/302/303/307/308，每一跳都按 SSRF 策略验证，拒绝 HTTPS 降级与无效 Location；只有原始上游 origin 接收渠道凭证及自定义头，CDN 等其它 origin 不接收这些头。跳转响应在服务器消费，最终视频继续流式传输，下载建连与跳转总窗口 120 秒。其余数据面出站仍不跟随跳转。
+
+维护、图片与结算恢复 worker 的提前退出或 panic 会记录任务名并退避重启；下线期间不重启，仍受 30 秒总排空窗口约束。通知配置读取故障显式告警。结算 journal 单测使用每个 AppState 独立的 Redis hash-tag，生产键名及重启恢复范围保持不变；整套数据库测试须使用独立 PG/Redis/CH/NATS 实例。
+
+UTC 存储的历史扫描游标必须显式按 UTC 解析；统计原始流量恢复的五分钟文本桶须与保留聚合采用相同机器时区，避免 UTC/本地文本键不一致导致恢复样本丢失。
+
+Chat 到 Responses 的 reasoning 增量转换为独立 reasoning summary 项，增量字符只计一次，终态保留完整 summary；真实 usage 仍优先。合成 SSE 错误经入口协议统一组装，携带稳定错误码与 request_id；不生成成功终态来掩盖结算错误。对账 `limit` 继续表示每页用户数，worker 与 `all=true` 完整扫描，不以页大小截断覆盖范围。
+
 直接从小时或五分钟桶按机器日期取数时也检查桶是否跨越本地午夜。缺少更细证据时返回 `statistics_calendar_history_incomplete`，不能把整个跨日桶归给起点日期；已保留的分钟日聚合使用细粒度来源重建。复制的 UTC tzfile 可通过 Etc/UTC 等候选识别，绝对 TZ 路径统一成 IANA 名称，启动记录生效时区。
 
 ### 第三轮加固（迁移 0031）
@@ -1252,3 +1294,84 @@ NATS relay 使用 `billing_outbox.next_retry_at` 作为 10 分钟认领租约；
 CH 查询限定聚合与 Join 哈希预分配 8192（不截断实际分组），读块 8192；写入限定聚合预分配、块 8192、MV 目标块 8192 行/4MiB、JSON 串行解析。15 秒/2GB 查询执行护栏未扩大。该设置改变写入块形成，本轮八项实际投递幂等回归已通过，仍不代表生产容量验收。
 
 统计分类快路径证明可按实际 SELECT 范围裁剪：可确认仅使用持久粒度键 WHERE 的同名引用，在范围并集核对旧记录、新记录与分类覆盖，并使用数据查询的绑定参数和机器时区；复杂引用另核对全表。仅给各自证明覆盖的引用选择分类快路径，复杂引用未证明完整时继续恢复。该证明仍为每次读取生成，不改变恢复择一/缺分类拒绝的语义，也不扩大计划优化数或执行资源上限。
+
+### 原生服务端工具准入快照（2026-10-01）
+
+`pricing_snapshot.server_tool_admission` 保存准入时的原生工具完整定义（已补
+`max_uses`）及该请求所有允许模型报价的预扣最大金额。实际工具计数仍只来自
+`usage_details.tokens.server_tool_usage`；上限不是已发生用量，不能汇入 Token/TPM
+或长期使用量。此阶段不改 PG/CH 金额列、Redis 键或 Lua 契约；失败沿既有退款链。
+
+### 工具请求作用域与计数（2026-10-01）
+
+新报价的 `pricing_snapshot.server_tool_fees[]` 增加可选 `requested` 布尔值，明确本次是否声明该工具；
+老报价省略字段保留未知授权。`requested=false` 的未观察/明确零计数对应四费用
+分量零；`quantity` 保持原生观察值或 null，不伪造源用量。未请求非零用量拒绝结算。
+此标记随原快照进入 PG、outbox、CH，不改原生计数列、金额列或 Redis/Lua 契约。
+
+原生工具请求作用域也适用于已发布工具价格、但本次没有声明工具的请求；上游显式零计数仍保留为零，其他未报告轴保留未知，不为它们要求付费计数。四种入口携带的明确 Anthropic 搜索/读取声明均参与渠道 tools 能力过滤；明确禁用的渠道不接原生工具调用，普通调用继续可选。
+
+
+### 原生工具长期统计契约（retained tools v1）
+
+新增 `server_tool_minute_v1` 独立 UTC 分钟聚合，保留完整分析维度（用户、密钥、分组、计费/请求/上游模型、渠道、端点、上游端点、节点、流式/请求/计费类型）。无 POPULATE、无 TTL，旧数据只在原始明细仍完整时恢复；无法恢复的历史保留缺失覆盖率，不填零。原有 Token、四金额、TPM 和价格公式不改。
+
+三轴 `web_search`、`web_fetch`、`code_execution` 的实测次数只来自严格的 Anthropic 原生整数计数（0..=i32::MAX）；缺失/null/错误类型不是零。数量分母为实际调用（log_type 2/5），退款 6 不产生新调用。执行次数仍不是容器计费时长。
+
+费用独立读取原请求冻结的 `server_tool_fees`，仅认可已支持的 `anthropic_server_tool_use_v1/request` 搜索/抓取费用行；金额和原金额必须为非负 i64 整数，优惠允许有符号 i64，且 original=amount+discount，同一工具重复行或缺失/未知契约不认可；included/未声明行必须明确为零，additional 行须有合法请求单价、数量与一致 list_price，不从名称推断免费。Included/未声明的明确零费用可以有完整费用覆盖而没有完整数量覆盖。退款沿用原快照，按冲销事件取反；不读取当前价格。执行时长没有受支持的冻结费用契约，费用保持未知。
+
+每个小时与完整维度组只选一个来源：分钟保留完整时用保留值；否则在完整原始明细可用时恢复；都不完整时选择覆盖较多的一个部分来源，缺少的调用/财务分母保留为未知观察。来源不叠加；超过账务基准的计数拒绝查询。粗粒度缺失小时跨本地午夜或查询边界时拒绝按日期猜分；分钟完整数据支持夏令时与非整小时时区边界。
+
+`GET /admin/stats/tools` 要求 billing.read；`GET /api/me/stats/tools` 固定鉴权用户，默认当前密钥，scope=user 可看本人所有密钥。日期窗口、模型来源与分析维度过滤、按日/UTC 小时和维度拆分均在服务端验证；默认每页20行、最多100行，独立返回完整窗口 total 与过滤后的 total_rows。数量和费用分别返回 observed 值、覆盖率和 complete；任何范围/数值溢出拒绝返回。选择范围内未分类的历史事件不能伪装成零调用。
+
+2026-10-01 有符号费用修复契约：`server_tool_minute_v1` 维度、列类型和聚合状态不变，旧投影通过 MODIFY QUERY 更新未来写入的优惠校验；系统元数据中两轴 v2 标记存在时保持幂等。不删历史、无 POPULATE。旧费用覆盖不足且 raw 仍完整时，仅在原始调用/财务分母匹配、各观察轴覆盖不下降并有更多费用观察时替换整个小时来源；raw 过期的旧缺失费用保持未知。原金额/金额/单价/list_price 仍非负，优惠为有符号 i64 且原金额减金额等于优惠；退款翻转冻结三金额，不能按新价恢复旧丢失观察。具体迁移和真实账单验证见 [工具费用核对](server-tool-accounting.md)。
+
+
+工具统计分页的25模型实测曾触发旧隔离 CH 总内存护栏（3.61 GiB > 3.60 GiB），保留失败证据。v9 下调聚合哈希预分配到1024仍在既有请求分类测试触发3.80 GiB总内存，不能据此认定原因或解决容量问题；最终源码恢复原8192。新建本轮专属、相同镜像和4GiB容量的隔离 CH 继续功能验证，原服务、数据和配置保留。Join预分配8192、读写块8192、MV目标块8192行/4MiB、去重token、15秒/2GB查询护栏全部不变。新环境通过只证明所选功能与模拟样本；原统计500、旧隔离库内存与生产大基数容量仍待验证。
+
+
+v10 非整小时时区实测发现：缺失分钟后的粗小时在范围过滤中可能先被裁掉，导致小时内不可恢复的记录错误变成空结果。工具统计必须在最终日/分钟过滤之外，对完整窗口与维度的 mode 单独投影完整性标志，并与总计行一起返回；Rust 在输出任何结果前校验标志，缺失边界拒绝，不以空 total 绕过校验。这是同一服务端查询中的独立校验，不扩容、不降低测试断言。
+
+
+v11 独立校验仍复现 Kolkata 空结果；实际 ClickHouse 表达式确认本地00:00取整后是UTC18:30，而保留聚合的整小时桶为UTC18:00。最终契约要求先将日期窗口端点转为UTC再向小时下/上取整，保证扫描包括所有相交的UTC小时；日/分钟精确过滤仍用原本地窗口，独立完整性校验保留。完整分钟历史必须正确返回单日本地午夜后的首分钟，缺失分钟的相交粗小时必须拒绝猜分。
+
+### Channel account controls (migration 0034)
+
+`channels.settings.account_control` stores validated admission/refresh/cooldown policy.
+`channel_usage_windows` stores request-attempt counts keyed by `(channel_id, period,
+window_start)`, with UTC boundaries computed from the machine's calendar timezone.
+Admission holds a per-channel PG transaction advisory lock. Token and upstream cost
+usage is read from `billing_records`, and is not a new customer ledger. Expired windows
+are pruned in bounded 1000-row batches after 45 days. See
+[channel-account-controls.md](channel-account-controls.md) for limits and semantics.
+
+### Egress proxies (migration 0037, IMPLEMENTATION §11.41)
+
+Proxies are first-class resources. A channel binds its egress through three columns,
+`channels.egress_mode` (`NULL` = inherit the global default, `direct`, `proxy`, `group`),
+`egress_proxy_id` and `egress_group_code`, whose shape is enforced by the
+`channels_egress_shape` CHECK. The global default is the `settings` key `egress_default`
+(the same JSON shape; written only through `PUT /admin/egress/default`).
+
+| Object | Notes |
+| --- | --- |
+| `proxies` | `url_ciphertext` holds the whole URL (credentials included) in the credential envelope; `scheme/host/port/username` are display copies. `status` 1 enabled / 2 disabled. Passive breaker: `failed_count`, `cooldown_until`, `last_error` (cooling never changes `status`; an expired cooldown is half-open without a worker). `max_keys` caps pinned assignments per proxy across groups. Last console test: `exit_ip`, `exit_country`, `latency_ms`, `checked_at`. |
+| `proxy_groups` | `mode` = `pinned` (each key keeps one proxy) or `rotate` (per request: priority tier, weighted random). |
+| `proxy_group_members` | `(group_code, proxy_id)` with `priority` and `weight > 0`; cascades with either side. |
+| `channel_keys.egress_proxy_id` | The pinned assignment of this key (= one upstream account). Honoured only while the key's effective egress is a pinned group that still contains the proxy; `ON DELETE SET NULL`. |
+| view `channel_egress` | Effective egress per channel (channel binding, else the global default, else direct). A dangling default keeps `mode` and yields no proxy, so it fails closed. |
+| function `egress_pick(channel, key, healthy_only)` | The one resolution used by candidates, custom_pass, video polling, control-plane calls and diagnosis. Returns `mode` plus at most one proxy; no proxy with `mode <> 'direct'` means unavailable, never direct. Disabled proxies are never returned; cooling ones only when `healthy_only = false`. Declared `VOLATILE` because rotation uses `random()`. |
+
+Pinned assignments are reconciled in full, under one transaction-scoped advisory lock,
+by every write that changes bindings, members, capacity or the global default: stale
+assignments are released and waiting keys are assigned to an enabled, non-full member
+(healthy first, then least loaded, then priority). A tripped or disabled proxy never
+causes reassignment. Proxies or groups bound directly by a live channel, or used as the
+global default, cannot be deleted (409). The migration converts each distinct legacy
+`settings.proxy_url` into a `proxies` row bound to its channels and removes the key;
+unparseable non-empty values stay in place and their channels are disabled.
+
+Migration 0038 adds `proxies.max_concurrency` (in-flight cap through the proxy, enforced
+with the Redis lease `conc:px:{id}:v1` next to the key lease), `previous_exit_ip` and
+`exit_ip_changed_at` (set when a manual test or a background probe sees a different exit
+IP), and recreates `egress_pick` so it also returns the picked proxy's `max_concurrency`.

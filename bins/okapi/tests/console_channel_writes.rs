@@ -94,7 +94,7 @@ struct Bed {
 }
 
 async fn setup() -> Bed {
-    dotenvy::dotenv().ok();
+    okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
@@ -285,6 +285,63 @@ async fn rotated_credential_is_sealed_used_upstream_and_resets_key_state() {
 }
 
 /// 复制渠道：回执是新渠道的 `id` 与停用状态；新渠道确实落库、默认停用、配置与原渠道一致。
+/// 编辑抽屉以列表行为初始值、保存时整体回写 settings：列表必须带回完整 settings，
+/// 否则「改名后保存」会清空请求风格、代理、额外请求头等高级设置。
+#[tokio::test]
+async fn list_returns_settings_so_editing_one_field_keeps_the_rest() {
+    let _serial = SERIAL.lock().await;
+    let bed = setup().await;
+    let advanced = json!({"thinking_to_content": true,
+        "extra_headers": {"x-tenant": "t1"}, "strip_request_fields": ["user"]});
+    sqlx::query("UPDATE channels SET settings = $2 WHERE id = $1")
+        .bind(bed.channel_id)
+        .bind(&advanced)
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+    let listed: Value = reqwest::Client::new()
+        .get(format!("http://{}/admin/channels?limit=50", bed.console))
+        .bearer_auth(&bed.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == bed.channel_id)
+        .expect("channel listed")
+        .clone();
+    assert_eq!(row["settings"]["extra_headers"]["x-tenant"], "t1");
+    assert_eq!(row["settings"]["thinking_to_content"], true);
+    // 出口绑定（§11.41）随列表回显，抽屉据此渲染当前出口
+    assert_eq!(row["egress"], json!({"mode": "inherit"}));
+
+    // 抽屉的保存：名字改了，settings 原样回写
+    let renamed = format!("ccw-renamed-{}", bed.suffix);
+    let status = reqwest::Client::new()
+        .patch(format!(
+            "http://{}/admin/channels/{}",
+            bed.console, bed.channel_id
+        ))
+        .bearer_auth(&bed.admin_token)
+        .json(&json!({"name": renamed, "settings": row["settings"]}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, 200);
+    let stored: Value = sqlx::query_scalar("SELECT settings FROM channels WHERE id = $1")
+        .bind(bed.channel_id)
+        .fetch_one(&bed.pg)
+        .await
+        .unwrap();
+    assert_eq!(stored, advanced, "unrelated settings survive an edit");
+}
+
 #[tokio::test]
 async fn duplicate_returns_a_disabled_copy() {
     let _serial = SERIAL.lock().await;

@@ -255,6 +255,10 @@ okapi-providers/src/
 
 ### 4.2 核心 trait
 
+**2026-10-01 第一批架构落地**：编译期适配器注册表、独立凭证管理与能力执行计划的
+具体契约见 [编程客户端与上游适配架构](docs/provider-architecture.md)。下面的 trait 是
+早期接口示意；实际继续保留原生请求字节和显式方向转换，执行计划不引入统一 IR。
+
 ```rust
 #[async_trait]
 pub trait Provider: Send + Sync {
@@ -281,8 +285,9 @@ pub trait CredentialProvider: Send + Sync {
 
 主线实现 static_key；`oauth_refresh`（会轮转的 refresh token）于 §11.36 兑现——渠道 key 的凭证是一份
 JSON（access / refresh / expires_at），刷新按上面四步走：进程内单飞 → Redis `lock:cred:<key_id>` →
-加锁后重读 DB（他副本可能已刷）→ 刷新并回写；`invalid_grant` 时二次重读做竞争恢复，仍失败即 key
-置 invalid。Vertex 服务账号（§11.35）不属于这一类：SA 私钥是静态凭证，access token 是它的无状态
+加锁后重读 DB（他副本可能已刷）→ 刷新并按原密文字节条件回写；`invalid_grant` 也仅作废仍匹配
+原凭证的 key。请求、后台预刷新与手动刷新共用随机持有者租约，释放时比较持有者。
+策略与重新授权详见 `docs/provider-architecture.md`。Vertex 服务账号（§11.35）不属于这一类：SA 私钥是静态凭证，access token 是它的无状态
 派生物，每个 pod 自铸、进程内缓存、不落库，不需要四步锁。
 
 ### 4.4 协议覆盖矩阵（2026-08 与 new-api / Sub2API README 核对）
@@ -558,7 +563,7 @@ SKIP LOCKED 重投、CH AggregatingMergeTree MV、查询缓存。其性能基线
 | /v1/audio/translations | **本次补齐**（与 transcriptions 同构 per_call） |
 | /v1/completions（legacy） | backlog：转 chat 降级实现，老客户端存量场景按需 |
 | /v1/images/edits | **已实现，2026-09-26 补齐**：JSON 图片引用、multipart 多图输入；与 generations 共用严格张数校验和实际张数结算。流式/文件引用归属仍未完成，见 [图片契约](docs/images-contract.md) |
-| 出站代理池（proxy-groups/ips/nodes 全家桶 + 测试/统计/异常） | 不吸收全家桶（订阅模式 §1.4 已排除）；轻量版 **已实现**（§11.30）：`channels.settings.proxy_url` + `extra_headers`，per-channel 出站代理 + Client 缓存 |
+| 出站代理池（proxy-groups/ips/nodes 全家桶 + 测试/统计/异常） | 节点测速市场 / IP 采购等全家桶仍不吸收；出口本身 **已实现**（§11.41，取代 §11.30 的 `settings.proxy_url`）：代理 / 代理组成为一等资源，渠道按继承 / 直连 / 单个代理 / 代理组绑定，固定分配一号一 IP、被动熔断、全局默认出口 |
 | 计费规则绑定（users/tags/model-groups 维度） | users/models/groups 维度 pricing_rules.scope 已支持 ✓；tags 维度随用户标签 backlog |
 | model-groups（模型分组 + key 绑定组） | 等价能力已有（key model_allowlist + 渠道组可见性），不吸收结构 |
 | 公告系统（admin CRUD + 公开端点） | **已实现**（2026-09-01，§11.12）：settings.site_notice + `GET /api/notice` + 全站横幅，不新增表 |
@@ -2005,6 +2010,9 @@ azure_channel_write_validation`（协议白名单 / 必填端点 / api_version �
 **验收**：`gateway_outbound.rs`（额外头出现在上游、受保护头被跳过、HTTP 正向代理真正经手）；
 `console_manage.rs` 写入校验（非法 scheme / 受保护头名 400）；providers 单测（URL / 头形状）。
 
+> **2026-10-06 起 `settings.proxy_url` 由 §11.41 的出口绑定取代**：迁移 0037 把旧值转成 `proxies` 行并回填绑定，
+> settings 里不再接受该键；Realtime WebSocket 也已改走出口代理。
+
 ### 11.31 门户新手引导与接入指南（2026-09-06，对照 Sub2API Guide / UseKeyModal）
 
 **问题**：新用户登录后落在总览页，看到的是六张 KPI 和三个图表页签——对一个还没发过一次请求的人，
@@ -2276,8 +2284,8 @@ Anthropic 侧 `?beta=true` 与 `claude-code-20250219` beta（缺它上游可能�
 messages、注入 Codex base prompt）——那是把订阅卖给第三方客户端才需要的东西，与 §1.4 边界冲突；本节只
 **转发真实客户端的头**。另两处小改：刷新失败分类补 codex-rs 的 `refresh_token_expired|reused|invalidated`；
 Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推冷却时长（订阅 5h 窗口耗尽时
-不再每 60s 撞一次）。Sub2API 另有后台定时预刷新（5min 巡检、到期前 30min）、5h/7d 窗口利用率调度、
-账号级粘性等，均属多账号商用池需求，自用不做。
+不再每 60s 撞一次）。自用渠道现已支持可配置的后台预刷新、手动刷新与指定 key 重新授权，
+复用请求凭证管理。5h/7d 窗口利用率与额度调度仍待可靠上游观测，不推断未知额度。
 
 **定案**：
 
@@ -2285,11 +2293,12 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   "refresh_token","expires_at","account_id"?}`（仍经 AES-GCM 信封）。`okapi-store::credential::oauth`
   负责识别（首字节 `{` 且 `kind = oauth`）与解析；非 JSON 凭证一律照旧当静态 key。这样 key 状态机、
   凭证轮换端点、`seal-credentials`、候选查询**一行不改**——候选行里 `credential` 就是这份 JSON 原文。
-- **刷新 = §4.3 四步锁**（`gateway::oauth_cred::fresh_token`）：进程内按 key_id 单飞 → Redis
-  `SET lock:cred:<key_id> NX EX 30` → 加锁后 `SELECT credential_ciphertext` 重读（他副本可能已刷新，
-  直接用）→ 调 provider 的 refresh → 回写新 JSON（refresh token 若轮转则替换）。`invalid_grant` 二次重读；
-  仍失败 → `mark_key_failure(Invalid)`（仅人工恢复：重新登录）。到期前 120s 即视为需刷新；刷新失败但旧
-  token 尚未过期则先用旧的。刷新只在请求路径上惰性发生（站长自用，请求量小，不值得再开 worker 任务）。
+- **刷新 = §4.3 四步锁**（`gateway::credentials::oauth`）：进程内按 key_id 单飞 → Redis
+  `SET lock:cred:<key_id> NX EX 90`，随机持有者、比较释放 → 加锁后重读 DB（他副本可能已刷新，
+  直接用）→ 调 provider 的 refresh → 按原密文字节条件回写新 JSON（refresh token 若轮转则替换）。
+  `invalid_grant` 条件作废原凭证，不能覆盖重新授权；失效账号仅人工重新授权恢复。
+  请求提前 120s 按需刷新；后台默认提前 300s，频率/数量/并发均有配置边界，失败退避。
+  Redis 故障不无锁刷新；慢刷新期间跨进程有界等待。后台停用不影响请求刷新。
   **换码 / 刷新走渠道自己的 `proxy_url`**（不带渠道给上游 API 配的额外头）：订阅账号对出口 IP 敏感，
   刷新与 API 请求必须从同一个出口出去，只有代理能出网的部署也才刷得动；登录时新建的渠道此刻还没有
   设置，直连，追加 key 到既有渠道则用该渠道的代理。
@@ -2358,6 +2367,12 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   `settings.mimic_cc_version` 覆写（三段 semver），CLI 升级后需跟随——**这是对抗性维护承诺**：
   上游收紧检测 / CLI 改指纹时本模块要跟着改，标实验性，收口即随 key 状态机进 invalid。
   刻意未做：CLI 版本热跟随、temperature/max_tokens 缺省补齐、cache 断点重排、工具名混淆。
+- **【2026-10-05 更新】旧开关退役，只保留最新客户端**：`settings.mimic_cc` / `mimic_cc_version` 与 2.1.258
+  伪装已删除，模拟统一走渠道 `extensions.client_profile`，只实现本机抓包的 Claude Code **2.1.290**
+  （`okapi_providers::profiles::claude_code`；CLI/SDK 两入口、主请求/Haiku 辅助请求、cch 签名、版本指纹跳过
+  `<system-reminder>` 块，ToolSearch 时才带 `advanced-tool-use`）。迁移 `0036_claude_code_profile_latest`
+  把 `mimic_cc: true` 改写成 `mode: mimic` 的显式配置、已存的 2.1.258/2.1.286 改成 2.1.290；反序列化也把旧版本号
+  当 2.1.290 读，控制台拒绝再写 `mimic_cc`。已知差异：请求体字段按字母序（官方 CLI 按插入序），上游接受。
 
 **验收**：`gateway_oauth_channels.rs`——mock 授权服务器 + 上游：anthropic_max 换码后建渠道，请求打到
 `/v1/messages?beta=true`、带 Bearer / 三个必备 beta / 系统提示首句 / 客户端 `user-agent` 与 `x-app` 原样透传，
@@ -2366,11 +2381,9 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
 `originator`（客户端带了透传、没带缺省）/ `accept: text/event-stream`，`store=false`、`stream=true`、
 `instructions` 键存在、`previous_response_id` 被剥、system 角色改 developer；非流式客户端拿到由 SSE 聚合
 出的 JSON（含 usage 计费）；embeddings 不路由。providers 单测：PKCE 派生、授权 URL 参数、系统提示前置幂等、
-beta 头合并、id_token claim 解析、Codex 请求体整形、SSE 聚合。mimic 模式另有一案
-（`anthropic_max_mimic_forges_claude_code_identity`）：开 `mimic_cc` 后 OpenAI 入口请求在上游看到的
-是全套伪造指纹（UA / x-stainless / 全量 beta / billing 块 / metadata.user_id，账号 UUID 取自换码响应
-`account.uuid`），客户端缺省 UA 不透出；providers 单测另覆盖指纹算法（绑定版本与第 4/7/20 字符）、
-body 重写幂等、已有 user_id 不覆盖、已有 billing 块重写不新增。
+beta 头合并、id_token claim 解析、Codex 请求体整形、SSE 聚合。模拟模式见 `support/client_profiles.rs`（OAuth 与 API Key 两种认证经同一网关路径、单笔结算）与
+`retired_mimic_switch_migrates_to_the_latest_client_profile`（迁移改写旧开关与旧版本号、控制台拒写旧键）；
+providers 单测按 2.1.290 抓包核对 UA / SDK 版本 / 整串 beta / 版本指纹 / cch 金样本。
 
 ### 11.39 Playground 试用台 + 聊天客户端一键导入（2026-09-06，对照 new-api 操练场 / 聊天应用集成）
 
@@ -2434,6 +2447,16 @@ body 重写幂等、已有 user_id 不覆盖、已有 billing 块重写不新增
     `GET /api/me/keys` 本就返回 `group_override` / `model_allowlist` / `status` / `copy_status` / 独立额度，前端据此推导，
     不新增接口。选择记在本机设置里；恢复时密钥列表还没回来则禁止发送（免得把该走选定令牌的请求悄悄走成登录会话），
     密钥已被删 / 停用 / 过期则回到登录会话并提示。
+  - **工具调用（2026-10-01）**：模型流式返回的 `delta.tool_calls` 按 `index` 把分片的 `arguments` 拼成完整调用
+    （`id` / `name` 只在缺失时采纳，有的上游每块重发；收尾给缺 id 的调用补稳定 id、丢掉没名字的空洞），
+    每个调用一张**可折叠卡片**（与"推理过程"同为折叠展示）：折叠态只有函数名 + 单行参数预览 + 状态
+    （生成中 / 待回填 / 已回填 / 未回填），展开是缩进后的参数 JSON（可复制）与返回结果。等结果的调用生成完后自动展开，
+    回填完折叠，用户手动开合不被打断。为了让工具调用真能被触发与测试，左栏加折叠的"工具定义（可选）"——粘贴 OpenAI
+    `tools` 数组（校验到不会让上游报形状错为止，非法时禁发并分语法 / 形状报错；随设置记在本机），并支持**回填结果让模型继续**：
+    最后一条助手回复上填每个调用的返回结果，全部填完才能提交，续写请求不新增用户消息。
+    **请求必须成对**（`messages.ts::toWireMessages`）：只有每个调用都已回填的那一轮才带 `tool_calls`（正文为空时 `content: null`）并紧跟
+    各调用一条 `tool` 消息（`tool_call_id` 配对）；没回填就继续聊天的，那一轮退化为纯文本（无正文则略去），保证请求始终合法。
+    重新生成对续写只重做续写；导出 Markdown 含工具名、参数与返回结果。
   - **其他**：空态三条示例问题（点击只填入输入框，不自动发送——发送要花钱）；导出对话为 Markdown；仅在用户贴着底部时
     跟随新内容，往上翻时出现"回到最新"；路由声明 `fitViewport`，对话区占满视口；窄屏配置栏默认收起、对话在前。
 
@@ -2445,6 +2468,119 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
 头不合法 400 / 无登录 key 401）与前端用例（候选收窄、请求带密钥头、脚注标明所用密钥并按其分组估价、置灰原因、刷新恢复与失效回退、
 列表未回来前禁止发送）；完善部分另有 markdown 渲染与链接安全（`javascript:` 不成链接、HTML 当文本）、代码 / 回复复制、首字耗时与估价、
 重新生成与重试的请求历史、刷新恢复与清空、模型信息卡、示例问题不自动发送、导出内容、窄屏折叠与不横向溢出。
+
+### 11.40 密钥用量折线图（2026-10-01，"密钥用量概览"抽屉）
+
+**问题**：密钥列表里只有一条 7 天 Token 迷你折线，点开抽屉后只有"全部日期"的累计汇总，看不到这把密钥最近是涨是跌、
+哪天有峰值、花了多少钱。
+
+**定案**：
+
+- **新接口 `GET /api/me/logs/series`**（`console/portal/usage_logs.rs::series`，与 `list` / `stat` 同模块）：参数 `scope` /
+  `api_key_id`（同 `stat` 的归属过滤，`scope=user` 才能查名下其他密钥）、`days`（1–90，缺省 7，越界夹取）、`timezone`
+  （IANA，缺省 UTC，由 PG `pg_timezone_names` 校验并给出当地"今天"，不用浏览器时钟、不依赖 ClickHouse）。
+  **数据源与 `stat` / 列表完全相同**——PG 账本 + 同一条 `filtered` 谓词（所以归属、密钥过滤口径不会与汇总漂移），
+  按窗口时区的自然日分组；窗口内**每天都有一行，没调用的日子由服务端补零**（前端不必猜时区）。
+- **口径**：`requests` = 账本行数；`tokens` = 输入 + 输出（与列表迷你折线、`stat` 同一公式，缓存 / 推理不重复计）；
+  `amount_micro` 只计已结算（status=20，退款行不计，同 `stat.amount_micro`）；`errors` 与 `stat.errors` 同一判定。
+  默认 UTC，因此 7 天 Token 与列表迷你折线逐日相等（测试里断言）。
+- **前端**（`portal-keys/KeyUsageSeries.tsx`，挂在 `KeyUsageDrawer` 顶部，复用 `TimeChart`）：近 7 / 30 天切换；
+  Token / 请求数 / 消费金额三个读数既是合计也是图的指标页签；折线下给日均与峰值日；注明统计时区与"金额不含退款"。
+  **按需加载**：列表本身不请求序列，打开抽屉才请求，切指标不重取、切窗口才重取。失败给"趋势暂不可用 + 重试"（汇总不受影响），
+  旧后端 / 异常形状视为不可用而不是画一条全零平线；全零窗口明说"近 N 天没有调用记录"。
+- **验收**：`console_portal_pages` 里 `key_usage_series_is_owned_zero_filled_and_matches_the_trend`——逐日补零、
+  退款计 token 不计金额、失败计错误、挂在本人密钥上的外人账本行不漏入、别人的密钥 id 全零、30 天 / 90 天窗口边界与夹取、
+  参数非法 400、无凭证 401、与 `/api/me/keys` 的 `usage_trend` 七天 Token 一致；前端 `key-usage.spec.ts`
+  （按需请求与参数、指标 / 窗口切换、全零 / 失败重试 / 异常响应、窄屏与英文不撑宽）。
+
+### 11.41 出口代理：代理成为一等资源，渠道按账号绑定出口（2026-10-06，推翻 §11.30 的"不吸收代理池"）
+
+**问题**：§11.30 只给了渠道级一个 `settings.proxy_url` 字符串。站长把自己的订阅账号（§11.38）接进来以后，
+出口 IP 成了账号风控的一部分：多个账号要分散在多个静态 IP 上、一个账号要始终从同一个 IP 出去、代理挂了要能看见、
+服务器在受限网络时所有上游都要走代理。逐渠道手填 URL 表达不了「一组代理」「一号一 IP」「挂了等恢复」，
+代理密码还明文躺在 settings 里随渠道列表下发。§1.4 / 对照表里"不吸收代理池全家桶"的前提是订阅转售模式已放弃，
+但自用订阅（§11.38）同样需要按账号固定出口，所以这里推翻那条结论，只做出口本身，不做节点测速市场、IP 采购之类。
+
+**定案**：
+
+- **数据模型**（迁移 0037）：`proxies`（完整 URL 与凭证同一 AES-GCM 信封 `url_ciphertext`，另存 scheme/host/port/username
+  作展示与筛选；`status` 1 启用 / 2 停用；`max_keys` 容量；被动熔断三列；最近一次测试的出口 IP / 国家 / 延迟）、
+  `proxy_groups`（`mode` = `pinned` 固定分配 / `rotate` 轮换）、`proxy_group_members`（priority / weight）。
+  渠道绑定落 `channels.egress_mode / egress_proxy_id / egress_group_code` 三列（CHECK 约束保证形状；NULL = 继承），
+  全局默认出口是 settings 键 `egress_default`（只能经 `PUT /admin/egress/default` 写，通用设置端点拒绝它）。
+  固定分配的结果落 `channel_keys.egress_proxy_id`——分配的单位是 **key（= 一个上游账号）**，不是渠道。
+- **为什么不绑在渠道池上**：渠道与池是多对多（`pool_channels`），按池绑出口，同一个账号从 vip 池进来走 A、从 default
+  池进来走 B，正是风控最敏感的「一个账号多个 IP」；池回答的是「谁能用」，出口回答的是「这个账号在上游眼里从哪来」。
+  而且 OAuth 刷新、批任务 / 视频回源、余额查询这些后台路径根本没有池的上下文。按池批量换出口 = 在渠道列表选中池内渠道后
+  `POST /admin/channels/batch {action:"set_egress"}`。
+- **有效出口只有一处口径**：视图 `channel_egress`（渠道绑定 → 全局默认 → 直连）+ 函数 `egress_pick(channel, key,
+  healthy_only)`。全局默认指向的代理 / 组缺失时 mode 仍是 proxy/group 而 id 为空——**解析不出代理就不可调度，绝不退回直连**。
+  数据面 `healthy_only = true`（熔断中的不用）；控制面 `false`（固定出口熔断中照样用它，宁可失败也不换 IP）。手动停用的任何时候都不用。
+- **数据面**：`candidates_for_model` 在同一条 SQL 里 `CROSS JOIN LATERAL egress_pick(..)` 初抽一个，并对轮换组带出健康成员表；
+  解析不出的候选在 SQL 里就被滤掉。chat 的候选有 5s 进程缓存，所以轮换组在 `CandidateIter::next`（每次真正发出前）
+  按 priority 分层 + 层内 weight 指数时钟重抽，不会一个 TTL 内钉死一个出口。Responses WebSocket 会话按首轮的代理 id 固定，
+  后续轮次即使是轮换组也不换出口。custom_pass、视频回源同样经 `egress_pick`。
+- **固定分配 = 全量对账**：任何改变绑定 / 组员 / 容量 / 全局默认的写操作，在同一事务、同一把 advisory 锁下跑
+  `egress::reconcile`——释放「渠道已删 / 有效出口不再是 pinned 组 / 代理已不是组员」的分配，再给排队的 key 分配：
+  启用且未满的成员里健康优先 → 已分配最少 → priority → id。**从不因为熔断或停用而改分**（默认等恢复，不换 IP）；
+  熔断中的成员仍可分到新 key（它会恢复）。容量调小不驱逐已有分配。全量而不是按变更推算受影响的 key：哪条写路径漏了，
+  下一次写就自愈。复制渠道连 key 的分配一起带过去（同一份凭证 = 同一个账号）。
+- **OAuth 登录**：换码前就按待落的绑定选出口（`pick_for_new_key`），固定分配组当场选定代理，建渠道时以
+  `egress_preassigned` 落库——账号第一次访问上游用的 IP 就是它以后的 IP。重新授权沿用这把 key 现在的出口。
+- **所有出站路径都走出口**（「绑了代理就不能有直连旁路」）：推理（chat / responses / embeddings / images / audio / videos /
+  custom_pass）、OpenAI Realtime WebSocket（原先用 tokio-tungstenite 直连，§11.30 列为 backlog；改走 `responses_ws::connect_raw`，
+  与 Responses WS 同一套经 `HttpPool` 的握手）、OAuth 换码 / 刷新（数据面与 worker）、订阅额度轮询、测活、拉模型、余额查询。
+  控制面统一 `egress::resolve_for_key`，解析不出 → 409 `egress_unavailable`。`Outbound::from_settings` 不再读 settings
+  里的代理，必须由调用方传入解析结果——刻意不留「从 settings 读代理」的捷径。
+  **唯一例外**：持久化图片任务的「复制结果 URL」（`image_store::fetch`，可选）仍直连——它下载的是不带凭证的 CDN 链接，
+  靠本机解析并钉住 IP（`resolve_to_addrs`）防 SSRF，经代理会由代理去解析域名，这层防护就没了。
+- **失败归因**：新增 `UpstreamError::Unreachable { timed_out }`——reqwest 的连接阶段错误（TCP / TLS / 代理隧道 / 连接超时，
+  `is_connect()`）。对外与 `Connect`（超时则与 `Timeout`）同码同状态；单独成类是因为 `Connect` 还承载凭证解析等合成原因。
+  它映射成 `KeyFailure::Unreachable`：**不动 key**（请求没送到上游，凭证无从判断），走了代理就记到代理的被动熔断上：
+  连续 3 次进冷却，30s 起按轮翻倍、封顶 10 分钟；冷却中迟到的失败不续冷却；到期即半开放行（不依赖 worker 复位），
+  成功清零（同 `key_health` 的本地标记，健康请求零额外 IO）。控制台「测试」成功即视为人工确认恢复。
+- **管理面**：`/admin/proxies`（CRUD、`/{id}/test`、保存前 `/test`）、`/admin/proxy-groups`（CRUD、`/{code}/assignments`
+  一览与手动改分，目标满了 409 `proxy_full`）、`/admin/egress/default`、`/admin/channels/{id}/egress`。权限沿用
+  `channel.read / channel.write` 并继承 own/all 属主范围：own 范围只看得见、绑得上自己的代理与组（否则能借别人的出口、
+  看到别人的代理密码）；全局默认要 all 范围。被渠道直接绑定或是全局默认的代理 / 组删除 409；删除固定分配组的成员代理会改分。
+  测试缺省请求 Cloudflare `/cdn-cgi/trace`（一次拿到出口 IP 与国家），探测地址过 SSRF 闸，代理自身不过（同 §11.30）。
+  `settings.proxy_url` 写入一律 400（旧前端写进来只会被静默忽略、悄悄直连）。
+- **迁移**：旧 `settings.proxy_url` 按 URL 去重成 `proxies` 行（明文存放，`okapi seal-credentials` 一并封装），渠道回填为
+  「单个代理」绑定，属主随渠道（用它的渠道属主一致时）；空值清掉；解析不了的非空旧值此前每个请求都失败，迁移后没人再读它会变成直连，
+  所以停用该渠道、保留原值待人工处理。
+- **HttpPool**：代理 client 按 URL 缓存，改为闲置 15 分钟淘汰（新建 client 时顺手清），改密码 / 删代理不再留下永不释放的连接池。
+- **前端**：「出口代理」页（全局默认出口卡片、代理 / 代理组两个页签、测试、分配明细与手动改分）；渠道抽屉「接入」页签的出口选择器
+  （新建随建渠道提交、OAuth 登录换码前生效；编辑单独保存并显示每把 key 的固定分配）；渠道列表的显式出口徽章与批量「设置出口」；
+  路由诊断新增 `egress_cooling / egress_unassigned / egress_unavailable` 三个淘汰原因。
+
+- **二期（同日，迁移 0038）**：
+  - **后台探测**：worker `egress_probe` 按 `settings.egress_probe_policy`（缺省开启、10 分钟、Cloudflare trace，
+    写入时校验取值域并过 SSRF 闸）定时经每个启用中的代理请求探测地址，刷新出口 IP / 国家 / 延迟；多实例时每轮由
+    Redis 租约 `egress:probe:round` 选一个执行。**只记事实、不碰熔断**——探测地址不是上游，「能到 Cloudflare」证明不了
+    「能到上游」。出口 IP 与上次不同时记 `previous_exit_ip / exit_ip_changed_at` 并发通知事件 `egress_ip_changed`
+    （静态代理悄悄换 IP = 固定分配在它上面的账号全换了 IP）；有渠道在用（直接绑定、固定分配、经组或全局默认可达）的代理
+    探测失败发 `egress_down`，没人用的不吵。两个事件走既有通知多路（webhook / 邮件、订阅过滤、频率闸）。控制台手动测试
+    同样识别 IP 变化（成功仍清熔断，属人工确认）。
+  - **批量导入** `POST /admin/proxies/import`：每行一个，认完整 URL 与代理商常见的 `host:port:user:pass`（第二段是端口；
+    第四段起都算密码，凭证按原文百分号编码，可含 `@ :`）、`user:pass@host:port`、`host:port`；缺省协议 socks5h；
+    按（协议, 主机, 端口, 用户名）与已有（own 范围只比自己的）及同批查重；统一容量 / 并发 / 名称前缀；可选直接加进代理组
+    （同事务对账）。回执逐行给出新建与跳过原因（`duplicate` / `invalid`），一次最多 1000 行。
+  - **单代理并发上限** `proxies.max_concurrency`：`ChannelPermit` 一次准入同时占 key 租约与代理租约（`conc:px:{id}:v1`，
+    与 key 租约同一套可续租成员租约），任一满了就当「渠道忙」改投下一候选（不耗重试预算、不动凭证健康），已占的那份**当场
+    等退回完成再返回**，不会让紧接着的准入误以为被占；续租任一失败即整体失效。经 `account_control::execute` 的 HTTP 路径、
+    Responses WS、token 计数自动生效，Realtime 与 custom_pass 显式带上。已知局限：轮换组某成员满了，这次尝试按渠道忙
+    跳过，不在请求内换同组其它成员（下一次尝试会重抽）。
+  - **请求诊断**记下每次尝试走的出口（`attempts[].egress_proxy_id`）；管理端日志详情显示代理名。门户日志的诊断白名单
+    （`diagnostics::public`）不含 attempts，终端用户看不到。
+
+**验收**：`egress_proxies.rs`（地址校验 / 封信封 / 只回掩码；绑定的代理真正经手且停用后 503 而非直连；固定分配一号一代理、
+容量排队与放宽补分、停用不换 IP、移出组改分、手动改分的 `proxy_full` / `proxy_not_in_group`；轮换组分流；死代理只熔断代理不动 key、
+换地址即恢复；全局默认作用于继承的渠道、删除保护；own 范围隔离）；`gateway_realtime` 的 Realtime 上游 WS 经代理握手；
+`gateway_outbound`（绑定的代理经手、残留的 `settings.proxy_url` 不再生效）；`gateway_oauth_channels`（刷新与重新授权经绑定的代理）；
+`console_manage`（`settings.proxy_url` 400）；store / providers 单测（绑定形状、分配算法、熔断不可用即错、URL 解析与掩码、
+闲置淘汰、探测解析）；前端 `egress.spec.ts`。二期：`egress_proxies.rs` 的并发上限跨渠道共享、批量导入（代理商格式 / 查重 /
+入组）、诊断记录出口、后台探测（IP 变化与在用代理不可达告警、只记事实不进熔断）；`channel_permit` 单测（代理上限跨 key
+共享、满了退回 key 租约）；导入行解析与探测策略单测；前端导入 / 探测设置 / IP 变化标记用例。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
@@ -2597,3 +2733,19 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 Gemini 外部图片以 fileData.fileUri 转交上游获取，结构化输出以 responseJsonSchema 传递（[官方文件输入说明](https://ai.google.dev/gemini-api/docs/generate-content/file-input-methods)、[结构化输出说明](https://ai.google.dev/gemini-api/docs/structured-output)）；模型对外部 URL 的支持取决于供应商。
 
 复核后保留的既有语义：支付公开入口仅支持 epay/CNY 与 Stripe/USD，因此 JPY/KWD 两位小数问题在当前接口不可触发；reconciliation 的 limit 表示分页大小，all=true 按页扫描全部用户。点击劫持防护已补齐，报告中“跨源 iframe 可读 localStorage”不是浏览器的实际同源策略。
+
+### 第四轮复核补充（2026-10）
+
+OAuth 与密码重置共用配置的 `site_url`，不从 Host 推导地址；无令牌 setup 只接受直接环回连接，带转发头必须使用初始化令牌。网关与控制台共享防框架嵌入响应头。视频下载允许服务端最多五跳受 SSRF 校验的 CDN 跳转，跨 origin 清除渠道凭证和自定义头；其余出站仍拒绝重定向。后台 worker 提前退出或 panic 显式告警并退避重启，下线时停止重启。Chat→Responses 保留 reasoning summary 增量和终态，合成 SSE 错误按入口协议组装。完整数据库回归使用独立实例，journal 单测用独立 hash-tag。对账页大小不改为全域扫描上限，保持全量覆盖契约。
+
+非 UTC 机器上的统计恢复也遵守这一边界：原始流量与保留视图的时间桶均以机器时区的同一种文本键展示和匹配；后台历史语音扫描的游标始终按 UTC 解析，不使用查询会话时区推导存储时间。
+
+日视图转换须在扩展前保留可验证的用户、维度及日期范围，并下推到分钟、小时和 UTC 日粒度的保留源。日期按桶覆盖的本地日期端点取保守超集，避免其他用户或窗口外的未分类旧记录阻断本次查询；无法验证的复杂谓词继续使用完整覆盖检查。
+
+各粒度使用相同的完整 UTC 日包络裁剪范围，再在最终结果按本地日期过滤。恢复过程需要将 UTC 日总量与该日完整小时证据对比，不能先按本地日期剪掉半天证据后误报历史缺失。
+
+工具费用的 `included` 配置只接受 `billing` 字段；额外单价必须显式拒绝，不能由空结构反序列化静默忽略。此项仅收紧配置校验，保留已发布费用公式和现有回执格式。
+
+缺少上游 usage 时，非流式 Chat 可见 reasoning 文本与 Responses reasoning summary 也进入既有字符密度估算，和流式增量一致；summary 不重复计算，密文不按字符估算，真实上游 usage 仍优先。
+
+门户缓存展示区分完整命中率、已配对上游样本命中率与已记录缓存 Token。完整采集不足时优先展示接口的 `measured_cache_hit_bp` 并标明样本数量，不能将其冒充整个窗口的命中率；已记录的缓存 Token 不因命中率缺失被隐藏。日/模型折叠按样本输入 Token 加权，不平均百分比，未知和已观测零仍分开。
