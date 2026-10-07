@@ -31,6 +31,7 @@ async function prepare(page: Page, { signedIn }: { signedIn: boolean }) {
       '/api/notice': { notice: null },
       '/api/pricing': { models: [], groups: [] },
       '/api/me/keys': { total: 0, data: [] },
+      '/api/me/subscription': { subscription: null, history: [] },
     }
     return route.fulfill({ json: responses[path] ?? { data: [] } })
   })
@@ -55,11 +56,29 @@ test('登录页底部带「Powered by Okapi」与原项目链接，手机宽度�
   await expectAttribution(page)
 })
 
-test('门户外壳侧栏底部带署名（后台用同一个外壳）', async ({ page }) => {
+test('门户页面底部留白处带署名：不压内容、满屏页不因此出现整页滚动（后台用同一个外壳）', async ({ page }) => {
   await prepare(page, { signedIn: true })
   await page.goto('/portal/keys')
   await expect(page.locator('#main-content')).toBeVisible()
   await expectAttribution(page)
+  const attribution = (await page.locator(`a[href="${REPO}"]`).boundingBox())!
+  const content = (await page.locator('#main-content > div').first().boundingBox())!
+  expect(attribution.y).toBeGreaterThanOrEqual(content.y + content.height)
+  expect(attribution.y + attribution.height).toBeLessThanOrEqual(page.viewportSize()!.height)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight)).toBe(true)
+})
+
+test('内容短的普通页署名同样贴在视口底部，与满屏页同一位置', async ({ page }) => {
+  await prepare(page, { signedIn: true })
+  await page.goto('/portal/plans')
+  await expect(page.locator('#main-content')).toBeVisible()
+  await expectAttribution(page)
+  const attribution = (await page.locator(`a[href="${REPO}"]`).boundingBox())!
+  const content = (await page.locator('#main-content > div').first().boundingBox())!
+  const height = page.viewportSize()!.height
+  expect(content.y + content.height).toBeLessThan(height - 100)
+  expect(height - (attribution.y + attribution.height)).toBeLessThanOrEqual(8)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight)).toBe(true)
 })
 
 test('公开价格页页脚带署名', async ({ page }) => {

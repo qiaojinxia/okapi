@@ -184,8 +184,6 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
           </div>
         )}
         <SidebarFooter rail={rail} onNavigate={() => setOpen(false)} />
-        {/* 署名放侧栏不放内容区底部：首页、日志等满屏布局按视口精确分高，多一行页脚就撑出屏幕 */}
-        {!rail && <PoweredBy className="shrink-0 pb-2.5 text-center" />}
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col" inert={mobileOpen}>
@@ -197,13 +195,19 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
           onToggleNav={toggleCollapsed}
           onHelp={onHelp}
         />
-        <main id="main-content" tabIndex={-1} className={cn('flex-1 scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8 lg:[&:has([data-slot=dashboard-workspace])]:py-3', fitViewport && 'flex min-h-0 flex-col')}>
+        <main id="main-content" tabIndex={-1} className={cn('flex flex-1 flex-col scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8 lg:[&:has([data-slot=dashboard-workspace])]:py-3', fitViewport && 'min-h-0')}>
           <div className={cn('mx-auto flex w-full max-w-[1600px] flex-col gap-4', fitViewport && 'min-h-0 flex-1 [&>*]:shrink-0')}>
             {/* 站点公告置于所有页面内容之上：换页不丢，关掉即记住 */}
             <NoticeBanner />
             <div key={pathname} className={cn('animate-fade-up', fitViewport && 'min-h-0 flex-1')}>
               {children}
             </div>
+          </div>
+          {/* 署名落在 main 底部留白里：零高度锚点 + 绝对定位，不占布局高度——满屏页按视口精确分高，多一行就撑出屏幕。
+              mt-auto 把锚点推到 main 底边：内容短的页面也贴在视口底部，每页同一位置；长页面在内容末尾。
+              首页工作台大屏只留 12px，贴着留白顶部放 */}
+          <div className="relative mt-auto h-0 shrink-0">
+            <PoweredBy className="absolute inset-x-0 top-1 text-center text-[11px] leading-3 lg:[main:has([data-slot=dashboard-workspace])_&]:top-0" />
           </div>
         </main>
       </div>
