@@ -38,11 +38,11 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
   const grade = (pct: number | null, warn: number, bad: number) => pct == null ? undefined : { pct: Math.max(0, Math.min(100, pct)), tone: pct < bad ? 'bad' as const : pct < warn ? 'warn' as const : 'good' as const }
   const successRate = grade(hasRequests && total?.errors != null ? (1 - total.errors / total.requests!) * 100 : null, 99, 95)
   const coverageRate = grade(hasRequests && total?.cost_coverage_bp != null ? total.cost_coverage_bp / 100 : null, 100, 50)
-  type Metric = { label: string; value: string; measure?: TrendMetric; hint?: string; sample?: string; rate?: ReturnType<typeof grade> }
+  type Metric = { label: string; value: string; measure?: TrendMetric; hint?: string; sample?: string; rate?: ReturnType<typeof grade>; meter?: boolean }
   const costMetrics: Metric[] = [
     { label: t('admin:dashboardKnownCost'), value: known ? money(total?.known_cost_micro) : '—' },
     { label: t('analysis:coveredMargin'), value: known ? money(total?.known_margin_micro) : '—' },
-    { label: t('admin:dashboardCostCoverage'), value: hasRequests && total?.cost_coverage_bp != null ? formatBp(total.cost_coverage_bp, locale) : '—', rate: coverageRate },
+    { label: t('admin:dashboardCostCoverage'), value: hasRequests && total?.cost_coverage_bp != null ? formatBp(total.cost_coverage_bp, locale) : '—', rate: coverageRate, meter: true },
   ]
   const qualityMetrics: Metric[] = [
     { label: t('charts:metric_success'), value: hasRequests && total?.errors != null ? formatBp(Math.round((1 - total.errors / total.requests!) * 10000), locale) : '—', measure: 'error_rate', rate: successRate },
@@ -51,7 +51,7 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
     { label: t('charts:throughput'), value: hasRequests && throughput != null ? `${(throughput / 1000).toLocaleString(locale, { maximumFractionDigits: 1 })} Token/s` : '—', measure: 'throughput', hint: partialThroughput ? t('charts:throughputSampleHint') : t('charts:throughputHint'), sample: partialThroughput ? sampleText(throughputSamples) : undefined },
     { label: t('portal:cacheHitShort'), value: hasRequests && cache != null && (partialCache || (total?.prompt_tokens ?? 0) > 0) ? formatBp(cache, locale) : '—', measure: 'cache', hint: t(partialCache ? 'charts:cacheSampleHint' : 'charts:cacheHitHint'), sample: partialCache ? sampleText(cacheSamples) : undefined },
   ]
-  const renderMetric = ({ label, value, measure, hint, sample, rate }: Metric) => <div key={label} className="group relative min-h-11 min-w-0 rounded px-1 py-0.5 has-[a]:hover:bg-muted/60 sm:min-h-10 sm:py-0">
+  const renderMetric = ({ label, value, measure, hint, sample, rate, meter }: Metric) => <div key={label} className="group relative min-h-11 min-w-0 rounded px-1 py-0.5 has-[a]:hover:bg-muted/60 sm:min-h-10 sm:py-0">
     <dt className={cn('text-xs text-muted-foreground', measure === 'ttft' && 'font-medium text-primary')}>{measure === 'ttft' ? t('charts:ttftLabel') : label}</dt>
     <dd className={cn('mt-0.5 break-words text-base font-semibold tabular-nums', rate?.tone === 'warn' && 'text-warning', rate?.tone === 'bad' && 'text-destructive')}>
       {measure ? <Tooltip content={hint ?? ''}><Link to="/admin/stats" search={{ ...search, measure }} aria-label={t('admin:dashboardOpenMetric', { label, value })} className="underline-offset-4 outline-none after:absolute after:inset-0 after:rounded hover:underline focus-visible:after:ring-2 focus-visible:after:ring-primary/40">
@@ -59,7 +59,8 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
       </Link></Tooltip> : value}
     </dd>
     {sample && <p className="text-[11px] text-muted-foreground">{sample}</p>}
-    {rate && <div aria-hidden className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted"><div className={cn('h-full rounded-full', rate.tone === 'good' ? 'bg-success' : rate.tone === 'warn' ? 'bg-warning' : 'bg-destructive')} style={{ width: `${rate.pct}%` }} /></div>}
+    {/* 成功率只给数值上色，与门户总览一致；进度条只留给成本覆盖率 */}
+    {rate && meter && <div aria-hidden className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted"><div className={cn('h-full rounded-full', rate.tone === 'good' ? 'bg-success' : rate.tone === 'warn' ? 'bg-warning' : 'bg-destructive')} style={{ width: `${rate.pct}%` }} /></div>}
     {measure === 'ttft' && (total?.ttft_samples ?? 0) === 0 && !query.isPending && <p className="text-[11px] text-muted-foreground">{t(query.isError ? 'charts:statisticsUnavailable' : 'charts:ttftNoSamples')}</p>}
   </div>
   return <Card className="min-w-0 rounded-xl" role="region" aria-label={t('admin:dashboardOperations')}>

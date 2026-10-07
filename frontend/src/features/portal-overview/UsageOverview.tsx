@@ -23,6 +23,12 @@ export function UsageOverview({ data, logSearch, metric, onView }: { data: Break
   const models = [...sumByModel(data.data).values()].sort((a, b) => b.amount_micro - a.amount_micro || b.requests - a.requests || a.model.localeCompare(b.model))
   const parts = segments(data.total)
   const hit = cacheHit(data.total)
+  // 说明在大屏压成一行（悬停看全文），把高度让给排行；窄屏单列时照常换行
+  const notes = [
+    data.total.cache_hit_bp == null || data.total.cache_write_tokens == null
+      ? t(data.total.cache_hit_bp == null ? 'portal:cacheIncomplete' : 'charts:missingCacheWrite') : null,
+    hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: data.total.requests }) : null,
+  ].filter((note): note is string => note !== null)
   const sum = parts.reduce((n, part) => n + part.value, 0)
   const labels: Record<Segment['key'], string> = {
     input: t('portal:tokInput'), cached: t('portal:tokCached'), write: t('charts:cacheWrite'),
@@ -34,10 +40,10 @@ export function UsageOverview({ data, logSearch, metric, onView }: { data: Break
       <section aria-label={t('portal:modelSnapshot')} className="space-y-2 px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-x-2">
           <h2 className="text-sm font-semibold">{t('portal:modelSnapshot')}</h2>
-          <Button variant="ghost" size="sm" onClick={() => onView('models')}>{t('portal:allModels', { count: models.length })}</Button>
+          <Button variant="ghost" size="xs" onClick={() => onView('models')}>{t('portal:allModels', { count: models.length })}</Button>
         </div>
         {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <ol className="space-y-2">
-          {models.slice(0, 3).map((model, index) => {
+          {models.slice(0, 4).map((model, index) => {
             const share = data.total.amount_micro > 0 ? Math.min(100, model.amount_micro / data.total.amount_micro * 100) : 0
             return <li key={model.model} className="space-y-1">
               <div className="flex min-w-0 items-baseline justify-between gap-2 text-xs">
@@ -52,23 +58,22 @@ export function UsageOverview({ data, logSearch, metric, onView }: { data: Break
           })}
         </ol>}
       </section>
-      <section aria-label={t('portal:tokenSnapshot')} className="space-y-2 px-4 py-3">
+      <section aria-label={t('portal:tokenSnapshot')} className="space-y-1.5 px-4 py-2.5">
         <div className="flex flex-wrap items-center justify-between gap-x-2">
           <h2 className="text-sm font-semibold">{t('portal:tokenSnapshot')}</h2>
-          <Button variant="ghost" size="sm" onClick={() => onView('tokens')}>{t('portal:expandTokens')}</Button>
+          <Button variant="ghost" size="xs" onClick={() => onView('tokens')}>{t('portal:expandTokens')}</Button>
         </div>
         <div className="flex h-2 overflow-hidden rounded-full bg-muted" aria-hidden>
           {parts.filter((part) => part.value > 0).map((part) => <div key={part.key} className={part.className} style={{ width: `${sum > 0 ? part.value / sum * 100 : 0}%` }} />)}
         </div>
-        <dl className="grid grid-cols-1 gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3 lg:grid-cols-2 2xl:grid-cols-3">
           {parts.map((part) => <div key={part.key} className="flex min-w-0 items-center justify-between gap-2">
             <dt className="flex min-w-0 items-center gap-1.5 text-muted-foreground"><span aria-hidden className={`h-2 w-2 shrink-0 rounded-sm ${part.className}`} />{labels[part.key]}</dt>
             <dd className="shrink-0 tabular-nums">{part.key === 'write' || part.key === 'cached'
               ? <CacheTokenValue value={cacheAmount(data.total, part.key === 'cached' ? 'read' : 'write')} /> : formatCount(part.value, locale)}</dd>
           </div>)}
         </dl>
-        {(data.total.cache_hit_bp == null || data.total.cache_write_tokens == null) && <p className="text-xs text-muted-foreground">{t(data.total.cache_hit_bp == null ? 'portal:cacheIncomplete' : 'charts:missingCacheWrite')}</p>}
-        {hit.partial && <p className="text-xs text-muted-foreground">{t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: data.total.requests })}</p>}
+        {notes.map((note) => <p key={note} title={note} className="text-[11px] leading-4 text-muted-foreground lg:truncate">{note}</p>)}
       </section>
     </Card>
   </div>

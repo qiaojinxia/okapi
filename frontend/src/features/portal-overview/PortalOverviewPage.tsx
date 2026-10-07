@@ -128,6 +128,40 @@ export function PortalOverviewPage() {
         <Stat
           compact
           layout="stacked"
+          icon={Cpu}
+          iconClassName="bg-chart-4/12 text-chart-4"
+          label={t('common:tokens')}
+          loading={loading}
+          value={total ? formatCount(total.tokens, locale) : '—'}
+          sub={total ? (() => {
+            const hit = cacheHit(total)
+            return hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total.requests })
+              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })
+          })() : ''}
+        />
+        <Stat
+          compact
+          layout="stacked"
+          icon={Activity}
+          iconClassName="bg-chart-1/12 text-chart-1"
+          label={t('common:requests')}
+          loading={loading}
+          value={total ? formatCount(total.requests, locale) : '—'}
+          sub={
+            total
+              ? t('portal:avgRpm', { v: fmtMicroRate(total.avg_rpm_micro, locale) })
+              : ''
+          }
+        />
+        <LiveRateKpi
+          live={live}
+          scope={scope}
+          loading={loading}
+          avgTpmMicro={total?.avg_tpm_micro}
+        />
+        <Stat
+          compact
+          layout="stacked"
           icon={Wallet}
           className="border-primary/25 bg-linear-to-br from-primary/10 via-card to-card"
           iconClassName="bg-primary text-primary-foreground shadow-xs"
@@ -173,40 +207,6 @@ export function PortalOverviewPage() {
           sub={t('portal:savedHint')}
           tone={total && total.discount_micro > 0 ? 'good' : 'default'}
         />
-        <Stat
-          compact
-          layout="stacked"
-          icon={Activity}
-          iconClassName="bg-chart-1/12 text-chart-1"
-          label={t('common:requests')}
-          loading={loading}
-          value={total ? formatCount(total.requests, locale) : '—'}
-          sub={
-            total
-              ? t('portal:avgRpm', { v: fmtMicroRate(total.avg_rpm_micro, locale) })
-              : ''
-          }
-        />
-        <Stat
-          compact
-          layout="stacked"
-          icon={Cpu}
-          iconClassName="bg-chart-4/12 text-chart-4"
-          label={t('common:tokens')}
-          loading={loading}
-          value={total ? formatCount(total.tokens, locale) : '—'}
-          sub={total ? (() => {
-            const hit = cacheHit(total)
-            return hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total.requests })
-              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })
-          })() : ''}
-        />
-        <LiveRateKpi
-          live={live}
-          scope={scope}
-          loading={loading}
-          avgTpmMicro={total?.avg_tpm_micro}
-        />
       </section>
 
       <QualityStrip label={t('charts:performance')} loading={loading} items={[
@@ -227,11 +227,9 @@ export function PortalOverviewPage() {
         {
           icon: ShieldCheck, accent: 'bg-success/12 text-success', label: t('charts:metric_success'),
           value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
-          // 阈值同管理端错误率：失败 1% 起提醒、5% 起告警
-          meter: total?.success_rate_bp == null ? undefined : {
-            ratio: total.success_rate_bp / 10_000,
-            tone: total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
-          },
+          // 阈值同管理端错误率：失败 1% 起提醒、5% 起告警；只给数值上色、不画进度条，与运营概览一致
+          tone: total?.success_rate_bp == null ? undefined
+            : total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
         },
         {
           icon: Gauge, accent: 'bg-chart-4/12 text-chart-4', label: t('charts:throughput'),

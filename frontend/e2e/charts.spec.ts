@@ -295,7 +295,7 @@ test('综合构成按全量计算前三名占比，缺失缓存写入不显示�
   })
   await page.goto('/portal')
   const models = page.getByRole('region', { name: '模型消费排行', exact: true })
-  await expect(models.getByRole('listitem')).toHaveCount(3)
+  await expect(models.getByRole('listitem')).toHaveCount(4)
   await expect(models.getByRole('listitem').first()).toContainText('model-5')
   await expect(models.getByRole('listitem').first()).toContainText('33.33%')
   await expect(models.getByRole('button', { name: '全部 5 个模型' })).toBeVisible()

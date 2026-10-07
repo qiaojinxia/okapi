@@ -11,14 +11,14 @@ export interface QualityItem {
   /// 一行短说明；完整解释放在 `subTitle`（悬停可见）。
   sub?: string
   subTitle?: string
-  /// 0–1 的占比条（成功率）；tone 决定颜色。
-  meter?: { ratio: number; tone: 'good' | 'warn' | 'bad' }
+  /// 数值着色（成功率）：warn 转黄、bad 转红，与运营概览的质量指标同口径；不画进度条。
+  tone?: 'good' | 'warn' | 'bad'
 }
 
-const METER_TONE = {
-  good: 'bg-success',
-  warn: 'bg-warning',
-  bad: 'bg-destructive',
+const VALUE_TONE = {
+  good: '',
+  warn: 'text-warning',
+  bad: 'text-destructive',
 } as const
 
 /// 调用质量：四项指标挤在一张卡里，格子之间 1px 分隔线（gap-px 透出底色），不再是四张等高的大卡。
@@ -41,16 +41,8 @@ export function QualityStrip({ label, items, loading }: { label: string; items: 
             {loading ? (
               <Skeleton className="mt-1 h-6 w-20" />
             ) : (
-              <span title={item.value} className="text-lg font-semibold tracking-tight break-words tabular-nums">
+              <span title={item.value} className={cn('text-lg font-semibold tracking-tight break-words tabular-nums', item.tone && VALUE_TONE[item.tone])}>
                 {item.value}
-              </span>
-            )}
-            {!loading && item.meter && (
-              <span aria-hidden className="mt-1 block h-1 w-full overflow-hidden rounded-full bg-muted">
-                <span
-                  className={cn('block h-full rounded-full', METER_TONE[item.meter.tone])}
-                  style={{ width: `${Math.min(100, Math.max(0, item.meter.ratio * 100))}%` }}
-                />
               </span>
             )}
             {!loading && item.sub && (
