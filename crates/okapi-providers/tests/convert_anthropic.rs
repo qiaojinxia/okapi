@@ -55,6 +55,31 @@ fn request_extracts_system_and_maps_messages() {
     assert_eq!(img["source"]["data"], "QUJD");
 }
 
+/// OpenAI 合法的 temperature>1.0 到 Anthropic 必 400：出向按方言契约钳到 1.0。
+#[test]
+fn request_clamps_temperature_to_anthropic_range() {
+    let out = convert_req(&json!({
+        "model": "gpt-alias",
+        "temperature": 1.2,
+        "messages": [{"role": "user", "content": "hi"}]
+    }));
+    assert_eq!(out["temperature"], 1.0);
+    // 区间内原样保留
+    let out = convert_req(&json!({
+        "model": "gpt-alias",
+        "temperature": 0.5,
+        "messages": [{"role": "user", "content": "hi"}]
+    }));
+    assert_eq!(out["temperature"], 0.5);
+    // 非数值不钳（保持既有透传语义，交由上游校验）
+    let out = convert_req(&json!({
+        "model": "gpt-alias",
+        "temperature": null,
+        "messages": [{"role": "user", "content": "hi"}]
+    }));
+    assert_eq!(out["temperature"], Value::Null);
+}
+
 #[test]
 fn request_maps_tools_and_tool_results() {
     let out = convert_req(&json!({

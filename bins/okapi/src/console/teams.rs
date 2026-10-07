@@ -195,6 +195,10 @@ pub async fn upsert_member(
     if !matches!(req.role.as_str(), "admin" | "member") {
         return Err(AppError::bad_request().with_param("role"));
     }
+    // 负限额在网关判定 spent >= limit 下等于永久封禁该成员；上限只能是不限额(null)或非负
+    if req.monthly_spend_limit_micro.is_some_and(|v| v < 0) {
+        return Err(AppError::bad_request().with_param("monthly_spend_limit_micro"));
+    }
     let changed = sqlx::query!(
         r#"
         INSERT INTO team_members (team_user_id, member_user_id, role, monthly_spend_limit_micro)

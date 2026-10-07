@@ -2098,30 +2098,57 @@ pub async fn credit_user(
     ExtractJson(req): ExtractJson<CreditReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
-    if req.amount_micro <= 0 {
+    if req.amount_micro == 0 {
         return Err(AppError::bad_request().with_param("amount_micro"));
     }
-    let amount = Money::from_micros(req.amount_micro);
-    let balance_after = okapi_ledger::operations::credit(
-        &state.pg,
-        &state.ledger,
-        user_id,
-        amount,
-        "adjust",
-        &format!("admin:{}", actor.actor_user_id()),
-        json!({ "tags": ["manual_credit"], "reason": req.reason }),
-    )
-    .await?;
+    // 管理台契约（BalanceSection 提示语）："正数为充值，负数为扣减"。负数走
+    // debit：按可用余额钳制（与 expire 同语义），事件仍是 adjust 的**负额**——
+    // 现金流的 clawed 统计正是按负额 adjust 聚合的。
+    let admin = format!("admin:{}", actor.actor_user_id());
+    let (applied_micro, receipt, action) = if req.amount_micro > 0 {
+        let receipt = okapi_ledger::operations::credit(
+            &state.pg,
+            &state.ledger,
+            user_id,
+            Money::from_micros(req.amount_micro),
+            "adjust",
+            &admin,
+            json!({ "tags": ["manual_credit"], "reason": req.reason }),
+        )
+        .await?;
+        (req.amount_micro, Some(receipt), "user.credit")
+    } else {
+        let (applied, receipt) = okapi_ledger::operations::debit(
+            &state.pg,
+            &state.ledger,
+            user_id,
+            Money::from_micros(req.amount_micro.saturating_neg()),
+            "adjust",
+            &admin,
+            json!({ "tags": ["manual_debit"], "reason": req.reason }),
+        )
+        .await?;
+        (
+            applied.as_micros().saturating_neg(),
+            receipt,
+            "user.debit",
+        )
+    };
     audit(
         &state,
         &actor,
-        "user.credit",
+        action,
         &user_id.to_string(),
-        json!({ "amount_micro": req.amount_micro, "reason": req.reason }),
+        json!({ "amount_micro": req.amount_micro, "applied_micro": applied_micro, "reason": req.reason }),
     )
     .await;
     Ok(Json(
-        json!({ "balance_after_micro": balance_after.balance_after.map(okapi_domain::Money::as_micros), "operation_id": balance_after.operation_id, "pending": balance_after.balance_after.is_none() }),
+        json!({
+            "balance_after_micro": receipt.as_ref().and_then(|r| r.balance_after).map(okapi_domain::Money::as_micros),
+            "operation_id": receipt.as_ref().map(|r| r.operation_id),
+            "pending": receipt.as_ref().is_some_and(|r| r.balance_after.is_none()),
+            "applied_micro": applied_micro,
+        }),
     ))
 }
 

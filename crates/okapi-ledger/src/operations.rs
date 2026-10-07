@@ -1,4 +1,4 @@
-//! Serialize money operations and persist credit/refund recovery before Redis IO.
+/// Serialize money operations and persist credit/refund recovery before Redis IO.
 use crate::{BalanceLedger, LedgerError, holds::UserGuard, pg};
 use okapi_domain::Money;
 use serde_json::Value;
@@ -22,6 +22,51 @@ pub async fn credit(
         .await?;
     tx.commit().await?;
     Ok(crate::transfers::finish(&mut guard, ledger, user_id, id, crate::Pool::Wallet).await)
+}
+
+/// Administrative clawback: drain the hot balance by `amount` (positive), capped
+/// at the currently available funds — same clamp as `expire`. The event carries
+/// the **negative** amount, so downstream cash-flow aggregation sees one adjust
+/// stream. The negative fund transfer reuses the durable recovery intent.
+/// Returns the applied amount (smaller than requested when the balance is short)
+/// and the receipt; no PG event is written when there is nothing to drain.
+pub async fn debit(
+    db: &PgPool,
+    ledger: &BalanceLedger,
+    user_id: i64,
+    amount: Money,
+    event_type: &str,
+    actor: &str,
+    payload: Value,
+) -> Result<(Money, Option<crate::transfers::Receipt>), LedgerError> {
+    let mut guard = UserGuard::acquire(db, user_id).await?;
+    guard.synchronize(ledger).await?;
+    let available = ledger.balance(user_id).await?.as_micros().max(0);
+    let applied = amount.as_micros().min(available);
+    if applied == 0 {
+        return Ok((Money::ZERO, None));
+    }
+    let applied = Money::from_micros(applied);
+    let mut tx = guard.connection()?.begin().await?;
+    pg::record_credit_in_tx(
+        &mut tx,
+        user_id,
+        Money::from_micros(applied.as_micros().saturating_neg()),
+        event_type,
+        actor,
+        payload,
+    )
+    .await?;
+    let id = crate::transfers::enqueue(
+        &mut tx,
+        user_id,
+        Money::from_micros(-applied.as_micros()),
+        crate::Pool::Wallet,
+    )
+    .await?;
+    tx.commit().await?;
+    let receipt = crate::transfers::finish(&mut guard, ledger, user_id, id, crate::Pool::Wallet).await;
+    Ok((applied, Some(receipt)))
 }
 
 /// Refund status, bill/event updates and recovery intent are one PG commit.

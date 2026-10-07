@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT delta_micro AS \"delta_micro!\" FROM billing_events\n           WHERE user_id=$1 AND event_type='adjust' AND delta_micro<0",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "delta_micro!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_events",
+            "name": "delta_micro"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7741157ff3cd238e92a7fef44de6b17e790adc99577a6ebcf07728ddaa763367"
+}

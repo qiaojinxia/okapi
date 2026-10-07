@@ -27,6 +27,10 @@ export function TeamDetailCard({ teamId }: { teamId: number }) {
   const queryClient = useQueryClient()
   const [issued, setIssued] = useState<string | null>(null)
   const [form, setForm] = useState({ user_id: '', role: 'member', limit: '' })
+  // 限额按 USD 填：非空时必须是合法非负数。NaN 经 JSON.stringify 会变 null——
+  // 输错字母就静默存成"不限额"，负数则让成员被网关永久 429，都不能放行。
+  const limitValid =
+    form.limit.trim() === '' || (/^\d+(\.\d+)?$/.test(form.limit.trim()) && Number(form.limit) >= 0)
 
   const usage = useQuery({
     queryKey: qk.teamUsage(teamId),
@@ -171,7 +175,11 @@ export function TeamDetailCard({ teamId }: { teamId: number }) {
               onChange={(e) => setForm((f) => ({ ...f, limit: e.target.value }))}
             />
           </Field>
-          <Button type="submit" loading={upsertMember.isPending} disabled={form.user_id.trim() === ''}>
+          <Button
+            type="submit"
+            loading={upsertMember.isPending}
+            disabled={form.user_id.trim() === '' || !limitValid}
+          >
             <UserPlus className="h-4 w-4" />
             {t('team:upsertMember')}
           </Button>

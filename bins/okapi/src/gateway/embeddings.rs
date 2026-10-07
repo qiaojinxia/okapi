@@ -38,14 +38,33 @@ struct RerankProbe {
     documents: serde_json::Value,
 }
 
-fn input_chars(input: &serde_json::Value) -> usize {
-    match input {
-        serde_json::Value::String(s) => s.chars().count(),
-        serde_json::Value::Array(items) => items.iter().map(input_chars).sum(),
-        // token 数组等非文本输入：按元素个数近似
-        serde_json::Value::Number(_) => 1,
-        _ => 0,
+/// 估算 embeddings/rerank 输入的 prompt tokens（chat 链路同款 tiktoken 计数）。
+///
+/// 取代 chars/4 启发：那个式子对中文能差三到四倍（405 汉字 ≈ 108 tokens），预扣
+/// 失准，且上游不返 usage 时它就是计费口径、直接少收。分词器按模型名选
+/// （`estimate::encoding_for`，OpenAI 系 embedding 模型走 cl100k）。
+/// 数字元素是预分词的 token id 序列，个数即约 token 数；其余非文本不计。
+fn estimate_input_tokens(model: &str, inputs: &[&serde_json::Value]) -> u32 {
+    fn collect<'a>(input: &'a serde_json::Value, texts: &mut Vec<&'a str>, raw_tokens: &mut usize) {
+        match input {
+            serde_json::Value::String(s) => texts.push(s.as_str()),
+            serde_json::Value::Number(_) => *raw_tokens += 1,
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect(item, texts, raw_tokens);
+                }
+            }
+            _ => {}
+        }
     }
+    let mut texts: Vec<&str> = Vec::new();
+    let mut raw_tokens = 0usize;
+    for input in inputs {
+        collect(input, &mut texts, &mut raw_tokens);
+    }
+    // 无 chat 协议结构：message_count=0，只保留请求级常量（与旧式 +3 对齐）
+    super::estimate::estimate_prompt_tokens(model, &texts, 0)
+        .saturating_add(u32::try_from(raw_tokens).unwrap_or(u32::MAX))
 }
 
 pub async fn embeddings(
@@ -58,7 +77,7 @@ pub async fn embeddings(
     let Ok(probe) = serde_json::from_slice::<EmbeddingsProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let est = input_chars(&probe.input) / 4 + 3;
+    let est = estimate_input_tokens(&probe.model, &[&probe.input]);
     match handle(
         &state,
         &headers,
@@ -83,7 +102,8 @@ pub async fn rerank(State(state): State<AppState>, headers: HeaderMap, body: Byt
     let Ok(probe) = serde_json::from_slice::<RerankProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let est = (probe.query.chars().count() + input_chars(&probe.documents)) / 4 + 3;
+    let query = serde_json::Value::String(probe.query);
+    let est = estimate_input_tokens(&probe.model, &[&query, &probe.documents]);
     match handle(
         &state,
         &headers,
@@ -111,7 +131,7 @@ async fn handle(
     started: Instant,
     requested_model: &str,
     upstream_path: &str,
-    est_chars_based: usize,
+    est_prompt: u32,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
 
@@ -153,8 +173,7 @@ async fn handle(
         service_tier: None,
     };
 
-    // 估算：仅 prompt 侧（chars/4 启发）
-    let est_prompt = u32::try_from(est_chars_based).unwrap_or(u32::MAX);
+    // 估算：仅 prompt 侧（tiktoken，chat 链路同款）
     let est_usage = TokenUsage {
         prompt_tokens: est_prompt,
         cached_tokens: 0,
@@ -527,4 +546,29 @@ async fn forward(
 
 fn elapsed_ms(started: Instant) -> i32 {
     i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimate_input_tokens;
+    use serde_json::json;
+
+    /// 405 汉字按 chars/4 只有 108：中文 embedding 输入必须按真实分词计数。
+    #[test]
+    fn cjk_input_is_not_undercounted_like_chars_div_four() {
+        let text = "一二三四五".repeat(81);
+        let est = estimate_input_tokens("text-embedding-3-small", &[&json!(text)]);
+        assert!(est >= 300, "405 汉字的真实分词远超 chars/4 的 108，得到 {est}");
+        let en = estimate_input_tokens("text-embedding-3-small", &[&json!("word ".repeat(200))]);
+        assert!((150..=400).contains(&en), "200 词英文应在 150-400 tokens，得到 {en}");
+    }
+
+    /// 预分词的 token id 数组按元素个数计，不喂给分词器；请求级常量与旧式 +3 对齐。
+    #[test]
+    fn raw_token_arrays_count_elements() {
+        let est = estimate_input_tokens("text-embedding-3-small", &[&json!([101, 102, 103])]);
+        assert_eq!(est, 6, "3 个 id + 请求级常量 3");
+        let est = estimate_input_tokens("text-embedding-3-small", &[&json!("hi")]);
+        assert_eq!(est, 4, "hi = 1 token + 请求级常量 3");
+    }
 }

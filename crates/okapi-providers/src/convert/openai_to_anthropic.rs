@@ -104,11 +104,7 @@ pub fn request_openai_to_anthropic(
     }
     out.insert("messages".into(), Value::Array(messages));
 
-    for key in ["temperature", "top_p", "stream"] {
-        if let Some(v) = src.get(key) {
-            out.insert(key.into(), v.clone());
-        }
-    }
+    convert_sampling(src, &mut out);
     match src.get("stop") {
         Some(Value::String(s)) => {
             out.insert("stop_sequences".into(), json!([s]));
@@ -124,6 +120,27 @@ pub fn request_openai_to_anthropic(
     serde_json::to_vec(&Value::Object(out))
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// 采样参数透传，唯 temperature 按方言契约收敛：OpenAI 合法到 2.0，Anthropic
+/// messages 全程 0–1，直传 >1 上游必 400 并烧 failover。钳到 1.0 恰是 Anthropic
+/// 缺省温度，采样行为不劣化。
+fn convert_sampling(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map<String, Value>) {
+    for key in ["top_p", "stream"] {
+        if let Some(v) = src.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    match src.get("temperature") {
+        Some(v) if v.is_number() => {
+            let t = v.as_f64().unwrap_or(1.0).clamp(0.0, 1.0);
+            out.insert("temperature".into(), json!(t));
+        }
+        Some(v) => {
+            out.insert("temperature".into(), v.clone());
+        }
+        None => {}
+    }
 }
 
 /// tools / tool_choice 映射；tool_choice="none" 时整体不带 tools。

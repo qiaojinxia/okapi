@@ -312,6 +312,79 @@ async fn money_operations_reuse_a_single_connection_and_refund_once() -> TestRes
 }
 
 #[tokio::test]
+async fn debit_drains_available_balance_and_records_negative_adjust() -> TestResult {
+    let b = SyncBed::new(Pool::Wallet).await;
+    // SyncBed 留了一笔 1000 的在途预扣；先释放，让可用额 == 总额，断言口径才干净
+    b.ledger
+        .refund(b.base.user_id, b.base.key_id, b.input.request_id)
+        .await?;
+    okapi_ledger::operations::credit(
+        &b.base.pg,
+        &b.ledger,
+        b.base.user_id,
+        Money::from_micros(500),
+        "adjust",
+        "test:credit",
+        json!({}),
+    )
+    .await?;
+    // 余额充足：按请求额全扣，PG 事件与热账本同步为负额 adjust
+    let (applied, receipt) = okapi_ledger::operations::debit(
+        &b.base.pg,
+        &b.ledger,
+        b.base.user_id,
+        Money::from_micros(300),
+        "adjust",
+        "test:debit",
+        json!({}),
+    )
+    .await?;
+    assert_eq!(applied.as_micros(), 300);
+    assert_eq!(
+        receipt.unwrap().balance_after.unwrap().as_micros(),
+        10_200
+    );
+    assert_eq!(b.base.wallet_snapshot().await, 10_200);
+    let clawed: Vec<i64> = sqlx::query_scalar!(
+        r#"SELECT delta_micro AS "delta_micro!" FROM billing_events
+           WHERE user_id=$1 AND event_type='adjust' AND delta_micro<0"#,
+        b.base.user_id
+    )
+    .fetch_all(&b.base.pg)
+    .await?;
+    assert_eq!(clawed, vec![-300], "扣减必须以负额 adjust 留痕（clawed 统计口径）");
+    // 余额不足：钳到可用额度，绝不产生负余额
+    let (applied, receipt) = okapi_ledger::operations::debit(
+        &b.base.pg,
+        &b.ledger,
+        b.base.user_id,
+        Money::from_micros(50_000),
+        "adjust",
+        "test:debit",
+        json!({}),
+    )
+    .await?;
+    assert_eq!(applied.as_micros(), 10_200);
+    assert!(receipt.is_some());
+    assert_eq!(b.ledger.balance(b.base.user_id).await?.as_micros(), 0);
+    assert_eq!(b.base.wallet_snapshot().await, 0);
+    // 余额为 0：无事件、无转账
+    let (applied, receipt) = okapi_ledger::operations::debit(
+        &b.base.pg,
+        &b.ledger,
+        b.base.user_id,
+        Money::from_micros(5),
+        "adjust",
+        "test:debit",
+        json!({}),
+    )
+    .await?;
+    assert!(applied.is_zero());
+    assert!(receipt.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn invalid_user_rejects_and_redis_failure_retains_durable_credit() -> TestResult {
     let b = SyncBed::new(Pool::Wallet).await;
     let absent = -b.base.user_id;
