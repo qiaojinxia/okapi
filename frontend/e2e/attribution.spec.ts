@@ -55,7 +55,7 @@ test('登录页底部带「Powered by Okapi」与原项目链接，手机宽度�
   await expectAttribution(page)
 })
 
-test('门户外壳底部带署名（后台用同一个外壳）', async ({ page }) => {
+test('门户外壳侧栏底部带署名（后台用同一个外壳）', async ({ page }) => {
   await prepare(page, { signedIn: true })
   await page.goto('/portal/keys')
   await expect(page.locator('#main-content')).toBeVisible()

@@ -261,9 +261,9 @@ Copyright (C) 2026 The Okapi Developers
 
 > Additional terms under AGPLv3 Section 7 apply. Modified versions must preserve the attribution notice
 > `Powered by Okapi` in the appropriate legal notices and in any prominent about, legal, footer, or
-> attribution location presented by the user interface (as shipped: the footers of the admin console,
-> the user portal, the sign-in pages and the public pricing page). Modified versions that present a
-> user interface must also keep that notice linked to the original project:
+> attribution location presented by the user interface (as shipped: the sidebar of the admin console
+> and the user portal, and the footers of the sign-in pages and the public pricing page). Modified
+> versions that present a user interface must also keep that notice linked to the original project:
 > <https://github.com/qiaojinxia/okapi>.
 
 如果所在组织的政策不允许使用 AGPL-3.0 软件，或希望免除 AGPL-3.0 的开源义务，请发邮件至

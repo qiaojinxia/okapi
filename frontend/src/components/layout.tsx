@@ -184,6 +184,8 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
           </div>
         )}
         <SidebarFooter rail={rail} onNavigate={() => setOpen(false)} />
+        {/* 署名放侧栏不放内容区底部：首页、日志等满屏布局按视口精确分高，多一行页脚就撑出屏幕 */}
+        {!rail && <PoweredBy className="shrink-0 pb-2.5 text-center" />}
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col" inert={mobileOpen}>
@@ -204,9 +206,6 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
             </div>
           </div>
         </main>
-        <footer className="flex justify-center px-4 pb-4 sm:px-6 lg:px-8">
-          <PoweredBy />
-        </footer>
       </div>
     </div>
   )
