@@ -277,10 +277,6 @@ async fn handle_create(
                     );
                 };
                 super::key_health::success(state, &cand).await;
-                state
-                    .sched
-                    .video_task_set(key.user_id, &task_id, cand.channel_key_id)
-                    .await;
                 commit_and_record(
                     state,
                     &key,
@@ -300,6 +296,12 @@ async fn handle_create(
                 )
                 .await
                 .inspect_err(|error| failure.error(error))?;
+                // 映射在结算落定（或进了重试日志）之后才写：PG 任务行在结算事务里插入，取片路径
+                // 查不到行时回落到这条映射；先写映射的话，结算失败退了款的任务仍能被白拿去轮询取片
+                state
+                    .sched
+                    .video_task_set(key.user_id, &task_id, cand.channel_key_id)
+                    .await;
                 failure.disarm();
                 let out = Response::builder()
                     .status(resp.status)
@@ -370,16 +372,22 @@ async fn relay_task(
     // 不过 check_member_limit——花超的成员仍得取回已经付过费的视频
     super::auth::check_group_rate(state, &key).await?;
     // 键含 user_id：他人任务/过期/未知一律 404（不泄露存在性）
-    let channel_key_id = sqlx::query_scalar!(
-        "SELECT channel_key_id FROM video_tasks WHERE user_id=$1 AND task_id=$2",
+    let task = sqlx::query!(
+        "SELECT channel_key_id, state FROM video_tasks WHERE user_id=$1 AND task_id=$2",
         key.user_id,
         task_id
     )
     .fetch_optional(&state.pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
-    let channel_key_id = match channel_key_id {
-        Some(id) => Some(id),
+    let channel_key_id = match task {
+        // 退款中 / 已退款的任务不再放行取片：退了钱，上游事后完成也一样（按过期 404，也不回落
+        // 还要 48h 才过期的 Redis 映射）。轮询照常透传状态，客户端仍能看到失败原因；轮询也不会
+        // 把已退款改回完成（那条 UPDATE 只认 pending）
+        Some(task) if content && matches!(task.state.as_str(), "refund_pending" | "refunded") => {
+            None
+        }
+        Some(task) => Some(task.channel_key_id),
         None => state.sched.video_task_get(key.user_id, task_id).await,
     };
     let Some(channel_key_id) = channel_key_id else {
@@ -667,9 +675,24 @@ fn is_terminal(body: &[u8]) -> bool {
         })
 }
 
+/// 单批条数，与 `poll_batch` 里 SQL 的 `LIMIT 100` 一致。
+const POLL_BATCH: usize = 100;
+/// 一轮最长取多久：积压时连续取批，但别拖住下一轮（worker 每分钟一轮）。
+const POLL_ROUND_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// 每分钟一轮。只取一批时吞吐固定 100 条/分钟，积压一大，24h / 72h 的退款期限就兑现不了；
+/// 这里连续取批直到取空或用完本轮预算。取到的任务在同一条 UPDATE 里顺延了 next_poll_at，
+/// 同一轮内不会被重复取到。
 pub async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    while poll_batch(state).await? >= POLL_BATCH && started.elapsed() < POLL_ROUND_BUDGET {}
+    Ok(())
+}
+
+async fn poll_batch(state: &AppState) -> anyhow::Result<usize> {
     use futures::StreamExt as _;
     let tasks = sqlx::query!("UPDATE video_tasks SET next_poll_at=now()+interval '1 minute' WHERE (user_id,task_id) IN (SELECT user_id,task_id FROM video_tasks WHERE state IN ('pending','refund_pending') AND next_poll_at<=now() ORDER BY next_poll_at LIMIT 100 FOR UPDATE SKIP LOCKED) RETURNING user_id,task_id,channel_key_id,created_at,state").fetch_all(&state.pg).await?;
+    let fetched = tasks.len();
     futures::stream::iter(tasks)
         .map(|task| async move {
             let (user_id, task_id, channel_key_id) =
@@ -725,7 +748,7 @@ pub async fn poll_pending(state: &AppState) -> anyhow::Result<()> {
         .buffer_unordered(8)
         .collect::<Vec<_>>()
         .await;
-    Ok(())
+    Ok(fetched)
 }
 
 #[cfg(test)]

@@ -84,8 +84,10 @@ pub fn rewrite_model(
 /// 流末尾发 usage 帧，缺了它结算就只能落到 `estimate_completion_tokens` 的字符
 /// 估算——实测 405 汉字的 prompt 落账 108 tokens，少算三到四倍。
 ///
-/// 客户端已显式声明 `stream_options` 时不覆盖（尊重其取舍）。**调用方须自行
-/// 保证 `body` 是流式请求**：非流式带此字段会被 OpenAI 判 400，故不在此处再
+/// 客户端自带 `stream_options` 也强制 `include_usage: true`（保留其余字段）：否则传
+/// `{"include_usage": false}` 就能让上游不返 usage、结算落到字符估算，是可以刻意构造的少收
+/// （英文 prompt + 中文补全时补全轴少三四倍）。跨方言三条路的转换器同样无条件注入。
+/// **调用方须自行保证 `body` 是流式请求**：非流式带此字段会被 OpenAI 判 400，故不在此处再
 /// 解析一次 body 复核。挑食的兼容上游可用渠道
 /// `settings.strip_request_fields = ["stream_options"]` 逐个摘掉。
 pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
@@ -94,13 +96,20 @@ pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
     let Some(obj) = value.as_object_mut() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
-    if obj.contains_key("stream_options") {
-        return Ok(body.clone());
+    match obj.get_mut("stream_options") {
+        Some(serde_json::Value::Object(options)) => {
+            if options.get("include_usage") == Some(&serde_json::Value::Bool(true)) {
+                return Ok(body.clone());
+            }
+            options.insert("include_usage".to_owned(), serde_json::Value::Bool(true));
+        }
+        _ => {
+            obj.insert(
+                "stream_options".to_owned(),
+                serde_json::json!({"include_usage": true}),
+            );
+        }
     }
-    obj.insert(
-        "stream_options".to_owned(),
-        serde_json::json!({"include_usage": true}),
-    );
     serde_json::to_vec(&value)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
@@ -550,25 +559,28 @@ fn parse_event(data: &str) -> ChatEvent {
     if data.trim() == "[DONE]" {
         return ChatEvent::Done;
     }
-    match serde_json::from_str::<ChunkProbe>(data) {
-        Ok(probe) => ChatEvent::Data {
+    if let Ok(probe) = serde_json::from_str::<ChunkProbe>(data) {
+        return ChatEvent::Data {
             event: None,
             has_output: probe.has_output(),
             content_chars: probe.content_chars(),
             usage: probe.usage,
             raw: data.to_owned(),
-        },
-        // Unknown output shape remains pass-through; reported usage must still
-        // be validated rather than silently replaced by local estimates.
-        Err(_) => ChatEvent::Data {
-            event: None,
-            has_output: false,
-            content_chars: 0,
-            usage: serde_json::from_str::<serde_json::Value>(data)
-                .ok()
-                .and_then(|value| okapi_api::usage_from_chat(&value)),
-            raw: data.to_owned(),
-        },
+        };
+    }
+    // Unknown output shape remains pass-through; reported usage must still
+    // be validated rather than silently replaced by local estimates, and the
+    // output it carries still counts for first-token, empty-reply and estimates.
+    let value = serde_json::from_str::<serde_json::Value>(data).ok();
+    let (has_output, content_chars) = value
+        .as_ref()
+        .map_or((false, 0), okapi_api::chunk_output_lenient);
+    ChatEvent::Data {
+        event: None,
+        has_output,
+        content_chars,
+        usage: value.as_ref().and_then(okapi_api::usage_from_chat),
+        raw: data.to_owned(),
     }
 }
 
@@ -579,5 +591,55 @@ pub(crate) fn classify(e: &reqwest::Error) -> UpstreamError {
         UpstreamError::Timeout
     } else {
         UpstreamError::Stream(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod stream_usage_tests {
+    use super::{ChatEvent, ensure_stream_usage, parse_event};
+    use bytes::Bytes;
+    use serde_json::{Value, json};
+
+    fn ensured(body: &Value) -> Value {
+        let out = ensure_stream_usage(&Bytes::from(body.to_string())).unwrap();
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    #[test]
+    fn client_cannot_switch_off_stream_usage() {
+        let out = ensured(
+            &json!({"model": "m", "stream": true, "stream_options": {"include_usage": false}}),
+        );
+        assert_eq!(out["stream_options"]["include_usage"], json!(true));
+    }
+
+    #[test]
+    fn other_stream_options_survive_and_missing_options_are_added() {
+        let out =
+            ensured(&json!({"stream": true, "stream_options": {"continuous_usage_stats": true}}));
+        assert_eq!(
+            out["stream_options"],
+            json!({"continuous_usage_stats": true, "include_usage": true})
+        );
+        let out = ensured(&json!({"stream": true}));
+        assert_eq!(out["stream_options"], json!({"include_usage": true}));
+        let out = ensured(&json!({"stream": true, "stream_options": null}));
+        assert_eq!(out["stream_options"], json!({"include_usage": true}));
+    }
+
+    #[test]
+    fn unparseable_chunk_still_counts_its_output() {
+        // content 是分段数组：标准探针解析失败，产出仍要计入首字、空回复与字符估算
+        let raw = r#"{"choices":[{"delta":{"content":[{"type":"text","text":"你好"}],"tool_calls":[{"function":{"arguments":"{}"}}]}}]}"#;
+        let ChatEvent::Data {
+            has_output,
+            content_chars,
+            ..
+        } = parse_event(raw)
+        else {
+            panic!("expected a data event");
+        };
+        assert!(has_output);
+        assert_eq!(content_chars, 4);
     }
 }

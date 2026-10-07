@@ -25,6 +25,11 @@ pub struct RefreshGate {
 impl RefreshGate {
     async fn key_mutex(&self, channel_key_id: i64) -> Arc<tokio::sync::Mutex<()>> {
         let mut map = self.inner.lock().await;
+        // 按 key 只增不减会随 key 的增删慢慢涨：表大了就清掉没人持有的锁。正在刷新或排队等
+        // 结果的调用方各持一份 Arc，计数大于 1 的不会被清，单飞语义不受影响。
+        if map.len() >= 256 {
+            map.retain(|_, gate| Arc::strong_count(gate) > 1);
+        }
         Arc::clone(map.entry(channel_key_id).or_default())
     }
 }

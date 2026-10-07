@@ -88,3 +88,32 @@ async fn invalid_key_limit_is_per_ip() {
     let other = unique_ip();
     assert_eq!(hit(addr, &other, "sk-a").await.status(), 401);
 }
+
+/// 计数键一定带过期：INCR 与 EXPIRE 在同一条脚本里完成。旧版分两步写，两步之间崩溃或
+/// EXPIRE 失败会留下永不过期的键，该 IP 从此永久 429、只能人工删键；这类键下次计数时补上过期。
+#[tokio::test]
+async fn critical_rate_counters_always_expire() {
+    use fred::prelude::*;
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
+        .await
+        .unwrap();
+    let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
+
+    let legacy_ip = unique_ip();
+    let key = format!("crl:ttl_probe:{legacy_ip}");
+    let _: () = redis.set(&key, 5, None, None, false).await.unwrap();
+    assert_eq!(state.sched.crit_rate_incr("ttl_probe", &legacy_ip).await, 6);
+    let ttl: i64 = redis.ttl(&key).await.unwrap();
+    assert!((1..=60).contains(&ttl), "旧的无过期键要补上过期：ttl={ttl}");
+
+    let fresh_ip = unique_ip();
+    assert_eq!(state.sched.crit_rate_incr("ttl_probe", &fresh_ip).await, 1);
+    let ttl: i64 = redis
+        .ttl(format!("crl:ttl_probe:{fresh_ip}"))
+        .await
+        .unwrap();
+    assert!((1..=60).contains(&ttl), "新键第一次计数就带过期：ttl={ttl}");
+}

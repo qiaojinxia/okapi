@@ -19,11 +19,12 @@ use serde::Deserialize;
 /// 请求体里承载路由偏好的顶层键（OpenRouter 同名）。
 pub const PROVIDER_FIELD: &str = "provider";
 
-/// 单价上限（USD / 1M token）。只在调用方显式给了对应键时才判。
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// 单价上限（USD / 1M token），micro-USD 定点。只在调用方显式给了对应键时才判。
+/// 按请求原文的十进制字面量解析，不经浮点（计费红线：比价也不引入浮点舍入）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MaxPrice {
-    pub prompt: Option<f64>,
-    pub completion: Option<f64>,
+    pub prompt: Option<i64>,
+    pub completion: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,9 +73,21 @@ struct ProviderBlock {
 #[derive(Deserialize)]
 struct MaxPriceBlock {
     #[serde(default)]
-    prompt: Option<f64>,
+    prompt: Option<serde_json::Number>,
     #[serde(default)]
-    completion: Option<f64>,
+    completion: Option<serde_json::Number>,
+}
+
+/// USD / 1M 的上限字面量 → micro-USD。价格本身是整 micro，小数第 6 位之后截掉不改变任何
+/// 比较结果；负数与指数写法拒收。
+fn cap_micros(number: &serde_json::Number) -> Option<i64> {
+    // 开了 arbitrary_precision：Display 原样给出请求里的字面量
+    let literal = number.to_string();
+    let literal = match literal.split_once('.') {
+        Some((int, frac)) if frac.len() > 6 => format!("{int}.{}", &frac[..6]),
+        _ => literal,
+    };
+    okapi_pricing::ratio::parse_scaled_1e6(&literal).ok()
 }
 
 #[derive(Deserialize)]
@@ -98,21 +111,25 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     let Some(p) = env.provider else {
         return Ok(RoutingPrefs::default());
     };
-    if p.max_price.as_ref().is_some_and(|m| {
-        [m.prompt, m.completion]
-            .into_iter()
-            .flatten()
-            .any(|v| !v.is_finite() || v < 0.0)
-    }) {
-        return Err(super::error::AppError::bad_request().with_param("provider.max_price"));
-    }
+    let cap = |number: Option<&serde_json::Number>| {
+        number
+            .map(|number| {
+                cap_micros(number).ok_or_else(|| {
+                    super::error::AppError::bad_request().with_param("provider.max_price")
+                })
+            })
+            .transpose()
+    };
+    let max_price = match &p.max_price {
+        Some(m) => MaxPrice {
+            prompt: cap(m.prompt.as_ref())?,
+            completion: cap(m.completion.as_ref())?,
+        },
+        None => MaxPrice::default(),
+    };
     Ok(RoutingPrefs {
         allow_fallbacks: p.allow_fallbacks.unwrap_or(true),
-        max_price: p.max_price.map_or_else(MaxPrice::default, |m| MaxPrice {
-            // 负数/NaN 视为没写：上限只有正有限值才有意义
-            prompt: m.prompt.filter(|v| v.is_finite() && *v >= 0.0),
-            completion: m.completion.filter(|v| v.is_finite() && *v >= 0.0),
-        }),
+        max_price,
         zero_retention: p.zdr.unwrap_or(false) || p.data_collection.as_deref() == Some("deny"),
     })
 }
@@ -176,8 +193,8 @@ mod tests {
                  "max_price":{"prompt":3.0,"completion":9.5},"zdr":true}}"#,
         );
         assert!(!p.allow_fallbacks);
-        assert_eq!(p.max_price.prompt, Some(3.0));
-        assert_eq!(p.max_price.completion, Some(9.5));
+        assert_eq!(p.max_price.prompt, Some(3_000_000));
+        assert_eq!(p.max_price.completion, Some(9_500_000));
         assert!(p.zero_retention);
         assert!(!p.is_default());
     }

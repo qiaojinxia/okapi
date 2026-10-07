@@ -524,6 +524,50 @@ async fn expired_video_and_interrupted_refund_close_once() {
     }
 }
 
+/// 过期退款之后上游才真正出片：退了钱就不再放行取片（按过期返回 404），也不回落 Redis
+/// 映射；轮询照常透传状态，且不会把已退款改回完成。此前取片只查任务归属不查状态，等于钱退了、
+/// 片子照拿。
+#[tokio::test]
+async fn refunded_video_can_no_longer_be_downloaded() {
+    let initial = Money::from_micros(10_000_000);
+    let env = setup(initial, "/stuck/v1").await;
+    create_video(&env).await;
+    let client = reqwest::Client::new();
+    let fetch = |suffix: &'static str| {
+        client
+            .get(format!(
+                "http://{}/v1/videos/video_mock123{suffix}",
+                env.gateway
+            ))
+            .bearer_auth(&env.token)
+            .send()
+    };
+    assert_eq!(fetch("").await.unwrap().status(), 200, "退款前照常轮询");
+    assert_eq!(age_and_poll(&env, 25, None).await, "refunded");
+    assert_eq!(env.ledger.balance(env.user_id).await.unwrap(), initial);
+    // 上游事后完成、成片可取
+    sqlx::query(
+        "UPDATE channels SET api_base=replace(api_base,'/stuck/v1','/ok/v1') WHERE models ? $1",
+    )
+    .bind(&env.model)
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(
+        fetch("/content").await.unwrap().status(),
+        404,
+        "退款后不能再取片"
+    );
+    assert_eq!(fetch("").await.unwrap().status(), 200, "轮询照常透传状态");
+    let state: String = sqlx::query_scalar("SELECT state FROM video_tasks WHERE user_id=$1")
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(state, "refunded", "上游事后完成不把已退款改回完成");
+    assert_eq!(fetch("/content").await.unwrap().status(), 404);
+}
+
 async fn create_video(env: &TestEnv) {
     let response = reqwest::Client::new()
         .post(format!("http://{}/v1/videos", env.gateway))

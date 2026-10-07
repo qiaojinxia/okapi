@@ -496,7 +496,9 @@ test('folded subscription observations defer queries and recover errors without 
   await page.clock.runFor(50)
   const before = requests
   await page.clock.fastForward(45_000)
-  expect(requests).toBe(before)
+  // 列表行的额度单元格每 30s 自己刷新一次（与抽屉同一个查询键，fastForward 每个定时器最多触发一次）；
+  // 折起的区块不能再多查。原先断言 0 次只是赶上请求晚于断言才过，时序一变就红
+  expect(requests).toBeLessThanOrEqual(before + 1)
 })
 
 test('account catalog failure blocks creation and retry preserves the configuration draft', async ({ page }) => {

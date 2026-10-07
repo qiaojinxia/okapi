@@ -140,3 +140,27 @@ fn details_and_original_totals_remain_observed_only_when_every_response_reports_
         (142, 141)
     );
 }
+
+#[test]
+fn unfinished_response_without_usage_keeps_the_session() {
+    let mut meter = Meter::default();
+    meter.observe(&event("r1", &official_usage())).unwrap();
+    let billed = (meter.usage.prompt_tokens, meter.usage.completion_tokens);
+    for status in ["failed", "cancelled", "incomplete"] {
+        let done = json!({"type":"response.done", "response":{"id":format!("r-{status}"),
+            "status":status, "usage":null,
+            "status_details":{"type":status, "error":{"type":"server_error"}}}})
+        .to_string();
+        meter.observe(&done).unwrap();
+        meter.observe(&done).unwrap();
+    }
+    assert_eq!(meter.responses, 1, "没有 usage 的响应不计数");
+    assert_eq!(
+        (meter.usage.prompt_tokens, meter.usage.completion_tokens),
+        billed
+    );
+    // completed 却缺 usage 仍判无效：计费从严
+    let completed =
+        json!({"type":"response.done", "response":{"id":"r9", "status":"completed"}}).to_string();
+    assert_eq!(meter.observe(&completed), Err("invalid_realtime_usage"));
+}

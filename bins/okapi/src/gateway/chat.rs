@@ -246,31 +246,40 @@ enum AttemptError {
 /// 报价单价是否越过请求声明的上限；越过则返回 "轴:实际单价" 供 param 回显。
 ///
 /// 快照里的 `final_unit_price_input_per_1m_usd` 是**输入**侧最终单价；输出侧单价 =
-/// 它 × completion_ratio（补全倍率就是"输出比输入贵多少倍"的定义）。
+/// 它 × completion_ratio（补全倍率就是"输出比输入贵多少倍"的定义）。全程定点整数：
+/// micro-USD × 1e6 倍率与上限 × 1e6 在 i128 里比，不经浮点、不舍入。
 fn price_above_max(
     quote: &okapi_pricing::Quote,
     prefs: &super::routing_prefs::RoutingPrefs,
 ) -> Option<String> {
+    use okapi_pricing::ratio::RATIO_SCALE;
     if prefs.max_price.prompt.is_none() && prefs.max_price.completion.is_none() {
         return None;
     }
-    let snap = serde_json::to_value(&quote.snapshot).ok()?;
-    let input = snap
-        .get("final_unit_price_input_per_1m_usd")
-        .and_then(serde_json::Value::as_f64)?;
+    let input = quote
+        .snapshot
+        .final_unit_price_input_per_1m_usd?
+        .as_micros();
     if let Some(cap) = prefs.max_price.prompt
         && input > cap
     {
-        return Some(format!("prompt:{input}"));
+        return Some(format!(
+            "prompt:{}",
+            okapi_domain::Money::from_micros(input).to_usd_string()
+        ));
     }
     if let Some(cap) = prefs.max_price.completion {
-        let ratio = snap
-            .get("completion_ratio")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(1.0);
-        let output = input * ratio;
-        if output > cap {
-            return Some(format!("completion:{output}"));
+        let ratio = quote
+            .snapshot
+            .completion_ratio
+            .map_or(RATIO_SCALE, okapi_pricing::ratio::RatioFp::as_scaled);
+        let output_scaled = i128::from(input) * i128::from(ratio);
+        if output_scaled > i128::from(cap) * i128::from(RATIO_SCALE) {
+            let output = i64::try_from(output_scaled / i128::from(RATIO_SCALE)).unwrap_or(i64::MAX);
+            return Some(format!(
+                "completion:{}",
+                okapi_domain::Money::from_micros(output).to_usd_string()
+            ));
         }
     }
     None
@@ -3033,12 +3042,13 @@ async fn spawn_stream_pump(
         let mut next_sequence = 0;
 
         let mut terminal = Vec::new();
+        let mut terminal_gate = TerminalGate::new(bill.ingress, bill.choices);
         for event in buffered {
             if let ChatEvent::Data { raw, .. } = &event { bill.trace.stream_event(raw); }
             if resp_meta.model.is_none() || (bill.has_tier_pricing && resp_meta.service_tier.is_none()) {
                 capture_chunk_meta(&event, &mut resp_meta);
             }
-            if defer_settlement_terminal(&event, bill.ingress) {
+            if terminal_gate.defer(&event) {
                 capture_terminal_usage(&event, &mut usage, &mut content_chars);
                 terminal.push(event);
                 continue;
@@ -3075,7 +3085,7 @@ async fn spawn_stream_pump(
                         break;
                     }
                     saw_done = matches!(event, ChatEvent::Done);
-                    if defer_settlement_terminal(&event, bill.ingress) {
+                    if terminal_gate.defer(&event) {
                         capture_terminal_usage(&event, &mut usage, &mut content_chars);
                         if terminal.len() >= 16 { break; }
                         terminal.push(event);
@@ -3187,35 +3197,112 @@ async fn finish_settled_stream(
     }
 }
 
-fn defer_settlement_terminal(event: &ChatEvent, ingress: Ingress) -> bool {
-    match event {
-        ChatEvent::Done => true,
-        ChatEvent::Data {
-            event: name, raw, ..
-        } => {
-            if matches!(
-                name.as_deref(),
-                Some(
-                    "message_stop"
-                        | "response.completed"
-                        | "response.failed"
-                        | "response.incomplete"
-                )
-            ) {
-                return true;
-            }
-            if ingress == Ingress::Gemini {
-                return serde_json::from_str::<serde_json::Value>(raw)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("candidates")
-                            .and_then(serde_json::Value::as_array)
-                            .cloned()
-                    })
-                    .is_some_and(|rows| rows.iter().any(|c| c.get("finishReason").is_some()));
-            }
-            false
+/// 结尾帧扣到结算之后再投递。命名的终止事件与 `[DONE]` 即结尾；Gemini 没有独立的终止帧，
+/// 带 finishReason 的块就是结尾——但多候选（candidateCount>1）时各候选先后结束，只有收齐全部
+/// 候选结束标记的那一块才算，之后的块也一并扣住保序。只看"任一候选带 finishReason"会把先结束
+/// 的候选那一块扣住、让别的候选的后续增量先到（客户端顺序就乱了），结尾满 16 条还会丢帧。
+struct TerminalGate {
+    ingress: Ingress,
+    candidates: usize,
+    finished: std::collections::HashSet<u64>,
+    closed: bool,
+}
+
+impl TerminalGate {
+    fn new(ingress: Ingress, candidates: u32) -> Self {
+        Self {
+            ingress,
+            candidates: usize::try_from(candidates.max(1)).unwrap_or(1),
+            finished: std::collections::HashSet::new(),
+            closed: false,
         }
+    }
+
+    fn defer(&mut self, event: &ChatEvent) -> bool {
+        let ChatEvent::Data {
+            event: name, raw, ..
+        } = event
+        else {
+            return true;
+        };
+        if matches!(
+            name.as_deref(),
+            Some("message_stop" | "response.completed" | "response.failed" | "response.incomplete")
+        ) {
+            return true;
+        }
+        if self.ingress != Ingress::Gemini {
+            return false;
+        }
+        if self.closed {
+            return true;
+        }
+        let Ok(chunk) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return false;
+        };
+        let candidates = chunk
+            .get("candidates")
+            .and_then(serde_json::Value::as_array);
+        for candidate in candidates.into_iter().flatten() {
+            if candidate
+                .get("finishReason")
+                .is_some_and(|reason| !reason.is_null())
+            {
+                let index = candidate.get("index").and_then(serde_json::Value::as_u64);
+                self.finished.insert(index.unwrap_or(0));
+            }
+        }
+        self.closed = self.finished.len() >= self.candidates;
+        self.closed
+    }
+}
+
+#[cfg(test)]
+mod terminal_gate_tests {
+    use super::{ChatEvent, Ingress, TerminalGate};
+
+    fn chunk(raw: &str) -> ChatEvent {
+        ChatEvent::Data {
+            event: None,
+            has_output: true,
+            content_chars: 0,
+            usage: None,
+            raw: raw.to_owned(),
+        }
+    }
+
+    #[test]
+    fn gemini_holds_back_only_the_chunk_that_finishes_every_candidate() {
+        let mut gate = TerminalGate::new(Ingress::Gemini, 2);
+        let first_done = r#"{"candidates":[{"index":0,"content":{"parts":[{"text":"a"}]},"finishReason":"STOP"},{"index":1,"content":{"parts":[{"text":"b"}]}}]}"#;
+        assert!(!gate.defer(&chunk(first_done)), "只结束了候选 0，照常转发");
+        assert!(!gate.defer(&chunk(
+            r#"{"candidates":[{"index":1,"content":{"parts":[{"text":"c"}]}}]}"#
+        )));
+        assert!(
+            gate.defer(&chunk(
+                r#"{"candidates":[{"index":1,"finishReason":"STOP"}]}"#
+            )),
+            "收齐两个候选才算结尾"
+        );
+        assert!(
+            gate.defer(&chunk(r#"{"usageMetadata":{"totalTokenCount":9}}"#)),
+            "结尾之后的块一并扣住保序"
+        );
+    }
+
+    #[test]
+    fn single_candidate_and_other_ingresses_keep_their_terminals() {
+        let mut gate = TerminalGate::new(Ingress::Gemini, 1);
+        assert!(!gate.defer(&chunk(
+            r#"{"candidates":[{"content":{"parts":[{"text":"a"}]},"finishReason":null}]}"#
+        )));
+        assert!(gate.defer(&chunk(r#"{"candidates":[{"finishReason":"STOP"}]}"#)));
+        let mut gate = TerminalGate::new(Ingress::OpenAi, 1);
+        assert!(!gate.defer(&chunk(
+            r#"{"choices":[{"delta":{"content":"a"},"finish_reason":"stop"}]}"#
+        )));
+        assert!(gate.defer(&ChatEvent::Done));
     }
 }
 

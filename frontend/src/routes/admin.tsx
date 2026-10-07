@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, redirect, useMatches } from '@tanstack/react-router'
+import { Navigate, Outlet, createFileRoute, redirect, useMatches } from '@tanstack/react-router'
 import {
   BarChart3,
   Boxes,
@@ -24,6 +24,7 @@ import {
 import { useTranslation } from 'react-i18next'
 import { Shell } from '@/components/layout'
 import type { NavGroup } from '@/components/layout'
+import { useMe } from '@/hooks/use-auth'
 import { getKey } from '@/lib/api'
 
 export const Route = createFileRoute('/admin')({
@@ -37,6 +38,7 @@ export const Route = createFileRoute('/admin')({
 
 function AdminLayout() {
   const { t } = useTranslation()
+  const me = useMe()
   // 哪些页面要撑满视口由叶子路由的 staticData 说了算（见 main.tsx 的类型声明）
   const fitViewport = useMatches({
     select: (matches) => matches.some((m) => m.staticData.fitViewport === true),
@@ -95,6 +97,11 @@ function AdminLayout() {
       ],
     },
   ]
+  // 没有任何管理权限的账号不进后台外壳，回门户：接口本就 403（真正的拦截在后端），
+  // 这里只是别让人对着一屏报错，与导航按权限点隐藏入口同一口径
+  if (me.data && me.data.permissions.length === 0) {
+    return <Navigate to="/portal" replace />
+  }
   return (
     <Shell
       nav={nav}

@@ -836,6 +836,49 @@ pub struct ChunkDelta {
     pub reasoning_content: Option<String>,
 }
 
+/// [`ChunkProbe`] 解析不了的非标准 chunk（如 `content` 是分段数组）照样数产出：首字判定、
+/// 空回复判定与无 usage 时的字符估算都靠它，一律按零产出会把真实输出漏计。
+/// 口径同 [`ChunkProbe::has_output`] / [`ChunkProbe::content_chars`]，只是对字段类型宽容。
+#[must_use]
+pub fn chunk_output_lenient(chunk: &serde_json::Value) -> (bool, usize) {
+    fn text_chars(value: &serde_json::Value) -> usize {
+        match value {
+            serde_json::Value::String(text) => text.chars().count(),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .map(|part| match part {
+                    serde_json::Value::String(text) => text.chars().count(),
+                    serde_json::Value::Object(part) => part.get("text").map_or(0, text_chars),
+                    _ => 0,
+                })
+                .sum(),
+            _ => 0,
+        }
+    }
+    let mut has_output = false;
+    let mut chars = 0usize;
+    let choices = chunk.get("choices").and_then(serde_json::Value::as_array);
+    for delta in choices
+        .into_iter()
+        .flatten()
+        .filter_map(|choice| choice.get("delta"))
+    {
+        for field in ["content", "reasoning_content", "reasoning", "refusal"] {
+            let count = delta.get(field).map_or(0, text_chars);
+            has_output |= count > 0;
+            chars = chars.saturating_add(count);
+        }
+        if let Some(calls) = delta.get("tool_calls").filter(|calls| !calls.is_null()) {
+            has_output = true;
+            for call in calls.as_array().into_iter().flatten() {
+                let arguments = call.pointer("/function/arguments").map_or(0, text_chars);
+                chars = chars.saturating_add(arguments);
+            }
+        }
+    }
+    (has_output, chars)
+}
+
 impl ChunkProbe {
     /// 是否携带实际产出（内容/工具调用/拒答文本）——首字判定与空回复判定共用。
     #[must_use]

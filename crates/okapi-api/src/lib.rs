@@ -14,7 +14,7 @@ mod token_usage;
 pub use chat::{
     ChatRequestProbe, ChunkProbe, CompletionTokensDetails, GeminiRequestProbe, MessageProbe,
     MessagesRequestProbe, ModalTokensDetails, PromptTokensDetails, ResponsesRequestProbe,
-    UsageProbe,
+    UsageProbe, chunk_output_lenient,
 };
 pub use error::{ErrorBody, codes};
 pub use token_usage::{compatible_cache_details, has_bridged_usage_fields, usage_from_chat};

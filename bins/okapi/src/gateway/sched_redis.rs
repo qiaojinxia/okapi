@@ -659,33 +659,38 @@ impl SchedulerRedis {
     /// 返回窗口内计数；Redis 故障返回 0（放行，与其余限流失败语义一致）。
     pub async fn crit_rate_incr(&self, scope: &str, ip: &str) -> i64 {
         let key = format!("crl:{scope}:{ip}");
-        let count: Result<i64, _> = self.client.incr(&key).await;
-        let Ok(count) = count else {
-            return 0;
-        };
-        if count == 1 {
-            let _: Result<bool, _> = self.client.expire(&key, 60, None).await;
-        }
-        count
+        self.incr_with_ttl(&key, 60).await.unwrap_or(0)
+    }
+
+    /// 计数 +1 并保证键带过期，INCR 与 EXPIRE 在同一条脚本里原子完成。分两步写时，两步之间
+    /// 进程崩溃或 EXPIRE 失败会留下永不过期的计数键，该 IP 从此被永久限流、只能人工删键；
+    /// 这类旧键在下次计数时顺手补上过期。
+    async fn incr_with_ttl(&self, key: &str, ttl_secs: i64) -> Result<i64, fred::error::Error> {
+        const LUA: &str = r"
+            local n = redis.call('INCR', KEYS[1])
+            if n == 1 or redis.call('TTL', KEYS[1]) == -1 then
+                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            end
+            return n
+        ";
+        self.client
+            .eval(LUA, vec![key.to_owned()], vec![ttl_secs.to_string()])
+            .await
     }
 
     /// 兑换码批次 × IP 核销计数 +1（7d 窗口；#1790-5 max_per_ip 闸）。
     pub async fn redeem_ip_incr(&self, batch: uuid::Uuid, ip: &str) -> i64 {
         let key = format!("redeem:ip:{batch}:{ip}");
-        let count: Result<i64, _> = self.client.incr(&key).await;
-        let Ok(count) = count else {
-            return 1; // Redis 故障放行（限制是风控增强，不阻核销主流程）
-        };
-        if count == 1 {
-            let _: Result<bool, _> = self.client.expire(&key, 7 * 24 * 3600, None).await;
-        }
-        count
+        // Redis 故障放行（限制是风控增强，不阻核销主流程）
+        self.incr_with_ttl(&key, 7 * 24 * 3600).await.unwrap_or(1)
     }
 
     /// 核销失败回退计数（预查通过但翻转竞争失败时）。
     pub async fn redeem_ip_decr(&self, batch: uuid::Uuid, ip: &str) {
+        // 只回退仍在窗口内的计数：对已过期的键 DECR 会凭空建出一个不带过期的 -1
+        const LUA: &str = "if redis.call('EXISTS', KEYS[1]) == 1 then return redis.call('DECR', KEYS[1]) end return 0";
         let key = format!("redeem:ip:{batch}:{ip}");
-        let _: Result<i64, _> = self.client.decr(&key).await;
+        let _: Result<i64, _> = self.client.eval(LUA, vec![key], Vec::<String>::new()).await;
     }
 
     /// videos 任务 → 渠道 key 映射写入（48h；键含 user_id 天然租户隔离）。
@@ -717,40 +722,42 @@ impl SchedulerRedis {
     /// Realtime WS per-key 连接租约获取（§14.4；docs/database.md §2.1 ws:lease:k:*）。
     /// ZSET 成员 = 连接 id，score = 租约到期毫秒：先清过期再计数，原子准入。
     /// 崩溃的连接不续期即自然滚出窗口，无泄漏。Redis 故障放行（与其余限流一致）。
+    /// 到期时间按 Redis 服务器时钟算（同 `channel_permit`）：各副本本机时钟有偏差时，
+    /// 快的那台会把别的副本刚续上的存活租约当成过期清掉，放进超额连接。
     pub async fn ws_lease_acquire(&self, key_id: i64, conn_id: &str, limit: i64) -> bool {
         const LUA: &str = r"
-            redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', ARGV[1])
-            if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[2]) then return 0 end
-            redis.call('ZADD', KEYS[1], tonumber(ARGV[1]) + 60000, ARGV[3])
+            local t = redis.call('TIME')
+            local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+            redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
+            if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
+            redis.call('ZADD', KEYS[1], now + 60000, ARGV[2])
             redis.call('PEXPIRE', KEYS[1], 6 * 3600 * 1000)
             return 1
         ";
-        let now_ms = chrono::Utc::now().timestamp_millis();
         let result: Result<i64, _> = self
             .client
             .eval(
                 LUA,
                 vec![Self::ws_lease_key(key_id)],
-                vec![now_ms.to_string(), limit.to_string(), conn_id.to_owned()],
+                vec![limit.to_string(), conn_id.to_owned()],
             )
             .await;
         result.map_or(true, |v| v == 1)
     }
 
-    /// 租约续期（会话泵内每 20s；60s 窗口容忍两次丢失）。
-    // 毫秒时间戳 ~1.7e12 远小于 f64 尾数上限 2^53，转换无损（ZSET score 为 f64 是 Redis 语义）
-    #[allow(clippy::cast_precision_loss)]
+    /// 租约续期（会话泵内每 20s；60s 窗口容忍两次丢失）。与获取同用 Redis 服务器时钟。
     pub async fn ws_lease_renew(&self, key_id: i64, conn_id: &str) {
-        let expire_at = chrono::Utc::now().timestamp_millis() + 60_000;
+        const LUA: &str = r"
+            local t = redis.call('TIME')
+            local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+            return redis.call('ZADD', KEYS[1], 'XX', now + 60000, ARGV[1])
+        ";
         let _: Result<i64, _> = self
             .client
-            .zadd(
-                Self::ws_lease_key(key_id),
-                Some(fred::types::SetOptions::XX),
-                None,
-                false,
-                false,
-                (expire_at as f64, conn_id),
+            .eval(
+                LUA,
+                vec![Self::ws_lease_key(key_id)],
+                vec![conn_id.to_owned()],
             )
             .await;
     }

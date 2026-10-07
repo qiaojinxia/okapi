@@ -246,15 +246,16 @@ async fn non_stream_does_not_get_stream_options() {
     );
 }
 
-/// 客户端显式声明的 stream_options 不被覆盖。
+/// 客户端显式关掉 include_usage 也会被强制打开（其余 stream_options 保留）：否则上游不返
+/// usage、结算落到字符估算，是可以刻意构造的少收。
 #[tokio::test]
-async fn explicit_stream_options_survives() {
+async fn explicit_stream_options_cannot_switch_off_usage() {
     let env = setup().await;
     let resp = post_chat(
         &env,
         json!({
             "model": env.model, "stream": true,
-            "stream_options": {"include_usage": false},
+            "stream_options": {"include_usage": false, "continuous_usage_stats": true},
             "messages": [{"role": "user", "content": "hi"}]
         }),
     )
@@ -264,8 +265,8 @@ async fn explicit_stream_options_survives() {
 
     let upstream = env.seen.lock().unwrap().first().cloned().unwrap();
     assert_eq!(
-        upstream.pointer("/stream_options/include_usage"),
-        Some(&json!(false)),
-        "客户端显式声明是其取舍，网关不改写"
+        upstream.get("stream_options"),
+        Some(&json!({"include_usage": true, "continuous_usage_stats": true})),
+        "include_usage 强制为 true，其余字段原样保留"
     );
 }

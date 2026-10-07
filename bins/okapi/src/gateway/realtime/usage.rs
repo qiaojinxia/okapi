@@ -27,8 +27,23 @@ impl Meter {
             return Ok(());
         }
         // Bound bookkeeping for compatible servers that never close a session.
-        if self.responses >= 65_536 || id.is_some_and(|id| id.len() > 1024) {
+        if self.responses >= 65_536
+            || self.seen.len() >= 65_536
+            || id.is_some_and(|id| id.len() > 1024)
+        {
             return Err("realtime_usage_limit");
+        }
+        // 失败 / 取消 / 未完成的响应上游可能不带 usage：没有可计的量，记下 id 防重放，照常转发
+        // 给客户端（里面有上游真实的失败原因），会话继续。completed 却缺 usage 才判无效。
+        if response["usage"].is_null()
+            && response["status"]
+                .as_str()
+                .is_some_and(|status| status != "completed")
+        {
+            if let Some(id) = id {
+                self.seen.insert(id.to_owned());
+            }
+            return Ok(());
         }
         let raw: RawUsage = serde_json::from_value(response["usage"].clone())
             .map_err(|_| "invalid_realtime_usage")?;

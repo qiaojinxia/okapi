@@ -10,6 +10,10 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+if [[ ! -f .env ]]; then
+  echo "✗ 找不到 .env：先 cp .env.example .env（见 README「本地开发」）" >&2
+  exit 1
+fi
 set -a
 # shellcheck disable=SC1091
 . ./.env

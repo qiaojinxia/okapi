@@ -231,3 +231,9 @@ test('API Key 登录后浏览器返回不能再次停在登录页', async ({ pag
   await page.goBack()
   await expect(page).toHaveURL(/\/pricing$/)
 })
+
+test('没有任何管理权限的账号进 /admin 回门户，而不是对着一屏 403', async ({ page }) => {
+  await prepare(page, { key: fixtureKey })
+  await page.goto('/admin/channels')
+  await expect(page).toHaveURL(/\/portal$/)
+})

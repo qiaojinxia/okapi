@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT channel_key_id FROM video_tasks WHERE user_id=$1 AND task_id=$2",
+  "query": "SELECT channel_key_id, state FROM video_tasks WHERE user_id=$1 AND task_id=$2",
   "describe": {
     "columns": [
       {
@@ -13,6 +13,17 @@
             "name": "channel_key_id"
           }
         }
+      },
+      {
+        "ordinal": 1,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "video_tasks",
+            "name": "state"
+          }
+        }
       }
     ],
     "parameters": {
@@ -22,8 +33,9 @@
       ]
     },
     "nullable": [
+      false,
       false
     ]
   },
-  "hash": "008f3f66e287ff20e8394ef383c481144360680fa5800176b4f17f940f012459"
+  "hash": "4897349cec4e03a576a4935780579721a6937e4c0990fb08d2f6202728072f4f"
 }
