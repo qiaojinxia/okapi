@@ -14,6 +14,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 repository = "https://github.com/qiaojinxia/okapi"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 okapi-domain = { path = "crates/okapi-domain" }

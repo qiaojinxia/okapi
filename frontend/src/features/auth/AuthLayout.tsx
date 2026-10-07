@@ -3,6 +3,7 @@ import { CheckCircle2, Moon, Sun } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { BrandLockup, BrandMark } from '@/components/brand'
 import { NoticeBanner } from '@/components/notice-banner'
+import { PoweredBy } from '@/components/powered-by'
 import { Button } from '@/components/ui/button'
 import { useTheme } from '@/lib/theme'
 
@@ -93,6 +94,9 @@ export function AuthLayout({
             </div>
           )}
         </main>
+        <footer className="flex justify-center px-4 pb-6">
+          <PoweredBy />
+        </footer>
       </div>
     </div>
   )

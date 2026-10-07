@@ -1,6 +1,7 @@
 # Okapi
 
 [![ci](https://github.com/qiaojinxia/okapi/actions/workflows/ci.yml/badge.svg)](https://github.com/qiaojinxia/okapi/actions/workflows/ci.yml)
+[![license](https://img.shields.io/github/license/qiaojinxia/okapi)](LICENSE)
 
 AI API 中转网关（[ok-api](https://github.com/qiaojinxia/ok-api) v2 重构）：Rust 单二进制三角色
 （gateway / console / worker），倍率计费模型，PostgreSQL + Redis（+ 可选 ClickHouse / NATS），
@@ -247,3 +248,26 @@ crates/
 bins/okapi         # 单二进制多角色入口：okapi gateway|console|worker|all|migrate
 frontend/          # React 19 SPA（管理后台 + 用户门户 + 公开价格页）
 ```
+
+## 许可证
+
+Copyright (C) 2026 The Okapi Developers
+
+以 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0-only）开源：可以免费使用、修改和商用；分发本项目
+（含修改版）须沿用 AGPL-3.0 并提供源码；修改后以网络服务形式对外提供（例如运营中转站），须向该服务的使用者
+提供修改后的完整源码。
+
+依 AGPL-3.0 第 7 条附加以下条款（以英文为准）：
+
+> Additional terms under AGPLv3 Section 7 apply. Modified versions must preserve the attribution notice
+> `Powered by Okapi` in the appropriate legal notices and in any prominent about, legal, footer, or
+> attribution location presented by the user interface (as shipped: the footers of the admin console,
+> the user portal, the sign-in pages and the public pricing page). Modified versions that present a
+> user interface must also keep that notice linked to the original project:
+> <https://github.com/qiaojinxia/okapi>.
+
+如果所在组织的政策不允许使用 AGPL-3.0 软件，或希望免除 AGPL-3.0 的开源义务，请发邮件至
+[qiaojinxia77@gmail.com](mailto:qiaojinxia77@gmail.com) 商谈商业授权。
+
+`frontend/public/vendor-icons/` 下的供应商图标来自 [LobeHub Icons](https://github.com/lobehub/lobe-icons)，
+按其 MIT 许可证分发（见该目录下的 LICENSE）。

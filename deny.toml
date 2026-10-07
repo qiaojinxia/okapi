@@ -3,8 +3,8 @@ version = 2
 
 [licenses]
 version = 2
-# 自有 crate 全部 publish = false：项目许可证仍是 IMPLEMENTATION §15 的开放项，但不能让它把
-# 第三方依赖的许可证 / 漏洞 / 来源检查一起压成常红（常红的守卫等于没有守卫）
+# 自有 crate 全部 publish = false，按 private 跳过：项目自身是 AGPL-3.0-only（见 LICENSE），不进下面的放行表。
+# 第三方依赖只放行宽松许可证——混进 copyleft 依赖会堵死商业双许可（IMPLEMENTATION §15）
 private = { ignore = true }
 allow = [
     "0BSD",

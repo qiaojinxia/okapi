@@ -13,6 +13,7 @@ import { MAX_COMPARE } from './CompareToggle'
 import { CompareDrawer, CompareTray } from './ModelCompare'
 import { Pagination } from '@/components/ui/pagination'
 import { BrandLockup } from '@/components/brand'
+import { PoweredBy } from '@/components/powered-by'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Label } from '@/components/ui/input'
 import { SearchInput } from '@/components/ui/search-input'
@@ -183,6 +184,6 @@ export function PublicPricingPage() {
     {selected && <ModelDetails key={selected.model} model={selected} groups={groups} group={group} factor={factor} unit={unit} tab={search.tab ?? 'details'} onTab={(tab) => patch({ tab: tab === 'code' ? 'code' : undefined })} onGroup={(group) => patch({ group: group || undefined })} onClose={() => patch({ model: undefined, tab: undefined })} />}
     {compared.length > 0 && <CompareTray models={compared} onRemove={toggleCompare} onClear={() => setCompare([])} onStart={() => patch({ comparing: true }, false)} />}
     {search.comparing && compared.length >= 2 && <CompareDrawer models={compared} group={group} factor={factor} unit={unit} onRemove={toggleCompare} onClose={() => patch({ comparing: undefined })} />}
-    <footer className="border-t border-border"><div className="mx-auto flex max-w-[1480px] items-center justify-between px-4 py-6 text-xs text-muted-foreground sm:px-8"><span>{t('common:appName')}</span><span>{t('catalog:footer')}</span></div></footer>
+    <footer className="border-t border-border"><div className="mx-auto flex max-w-[1480px] flex-wrap items-center justify-between gap-x-6 gap-y-2 px-4 py-6 text-xs text-muted-foreground sm:px-8"><span>{t('common:appName')}</span><span>{t('catalog:footer')}</span><PoweredBy /></div></footer>
   </div>
 }

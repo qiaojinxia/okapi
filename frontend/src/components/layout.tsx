@@ -16,6 +16,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import { BrandLockup } from '@/components/brand'
 import { NoticeBanner } from '@/components/notice-banner'
+import { PoweredBy } from '@/components/powered-by'
 import { NavLink, SidebarNav } from '@/components/sidebar-nav'
 import type { NavGroup, NavItem } from '@/components/sidebar-nav'
 import { Badge } from '@/components/ui/badge'
@@ -203,6 +204,9 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
             </div>
           </div>
         </main>
+        <footer className="flex justify-center px-4 pb-4 sm:px-6 lg:px-8">
+          <PoweredBy />
+        </footer>
       </div>
     </div>
   )
