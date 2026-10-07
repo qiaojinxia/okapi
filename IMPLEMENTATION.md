@@ -950,7 +950,8 @@ upsert 校验链条目须为已存在模型（≤8、去重去自引用），删
 用例莫名失败（本轮实际踩到两次）。故三处必须一起清，脚本一条命令完成重置并灌注
 演示数据（超管 / 模型含多模态轴 / 三个池 / 五条渠道 / 分组绑池 / 发布 epoch）。
 
-**第二次压平（2026-10-06）**：应用户要求把 `0001–0039` 压成单个 `migrations/0001_baseline.sql`
+**第二次压平（2026-10-06）**：应用户要求把 `0001–0038` 连同当时只在本地跑过、没入库的 0039（会话绑定登录 key）
+压成单个 `migrations/0001_baseline.sql`
 （文档里出现的 00xx 都是历史编号，演进见 git 历史）。基线由完整迁移后库的 `pg_dump --schema-only`
 整理而来：按业务分区（身份 / 设置与审计 / 定价 / 订阅充值 / 渠道 / 出口代理 / 计费账本 / 媒体任务），
 主键、唯一约束、自增列收进建表语句，外键统一放在最后，视图与函数按依赖排序，种子只有默认池与默认分组。
@@ -960,8 +961,10 @@ upsert 校验链条目须为已存在模型（≤8、去重去自引用），删
 `settings.proxy_url` 转代理（0037）、作废无绑定的旧登录 key（0039）；相应两条重放旧迁移的用例改为
 直接验证仍然存在的逻辑（`channel_token_totals_follow_settled_records` 测触发器，
 `retired_mimic_switch_is_rejected_and_old_revisions_run_as_latest` 测运行时与写入拒绝）。
-已经跑过旧迁移的库：结构与基线一致，只需把 `_sqlx_migrations` 收成一行（删 2–39，版本 1 的
-description 改为 `baseline`、checksum 改为基线文件的 SHA-384），否则启动报 `VersionMissing / VersionMismatch`。
+项目仍在开发、没有部署，**不做历史兼容**：压平前建的库启动会报 `VersionMissing / VersionMismatch`，直接
+`scripts/dev-reset.sh` 重建。本机开发库当时已跑到 0039、结构与基线一致，所以只把 `_sqlx_migrations` 收成了一行
+（删 2–39，版本 1 的 description 改为 `baseline`、checksum 改为基线文件的 SHA-384）；按 git 历史建的库最多到 0038，
+缺 0039 的列，不能照此只改记录。
 
 
 ### 11.11 路由诊断器（2026-09-01）

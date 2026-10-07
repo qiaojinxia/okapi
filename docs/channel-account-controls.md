@@ -73,8 +73,7 @@ The default `total` period includes recorded history and never automatically res
 `day` and `week` use machine-timezone calendar boundaries (weeks start Monday).
 New requests stop at the cap; requests already running can exceed it.
 
-Migration 0035 backfills lifetime totals from bills and retained usage receipts.
-A billing insert trigger updates those totals in the same transaction; idempotent
+A billing insert trigger updates the lifetime totals in the same transaction; idempotent
 settlement replay never inserts another bill. Retention and refunds do not undo
 upstream tokens already used. Daily/weekly reads combine retained bills and receipts
 under the retention lock. Billing data is not an upstream subscription entitlement.

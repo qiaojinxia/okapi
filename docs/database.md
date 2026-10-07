@@ -9,7 +9,8 @@
 - 倍率用 NUMERIC 定点（编译进 PriceBook 后为 micro-USD/token 定点数）。
 - 时间 TIMESTAMPTZ；软删 `deleted_at`；主键 BIGINT IDENTITY。
 - 迁移：sqlx migrate，只前滚；大表加列须可空或带默认，禁止长锁回填（分批脚本）。2026-10-06 起从单个基线
-  `migrations/0001_baseline.sql` 开始（原 0001–0039 压平，见 IMPLEMENTATION §11.10）；本文提到的 00xx 为历史编号。
+  `migrations/0001_baseline.sql` 开始（原 0001–0038 连同会话绑定登录 key 压平，见 IMPLEMENTATION §11.10；开发阶段不做
+  历史兼容，压平前建的库直接 `scripts/dev-reset.sh` 重建）；本文提到的 00xx 为历史编号。
 - 大表（billing_records / billing_events / audit_logs）按月 RANGE 分区；worker 自动预建下月分区并按保留策略滚动删除（#1790-1）；删除账本分区前必须同事务保留资金结转与财务凭证，见 [历史账本结转](billing-retention.md)。
 - 老仓库 `billing_events_v2` 在 Okapi 新 schema 统一命名为 `billing_events`。
 
@@ -185,7 +186,7 @@ CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对
 -- / api_version（仅 provider=azure：数据面 api-version，`YYYY-MM-DD[-preview]`，管理面写入时校验形状；缺省 2024-10-21；每个出向请求都带 `?api-version=`）
 -- / image_stream_usage（直接 Images SSE 多图计数：cumulative 缺省，最后一份累计值且各计费轴不可回退；per_image 逐完成事件检查求和。写入只接受这两个字符串，派发时冻结，账单快照同步口径和完整性。JSON 回退始终按响应总用量一次结算。）
 -- / aws_region（仅 provider=bedrock：SigV4 签名区域覆写；缺省从 api_base 主机名 `bedrock-runtime.{region}.amazonaws.com` 解析，VPC 端点等解析不出时必填）
--- / proxy_url（渠道级出站代理：http / https / socks5 / socks5h；空 = 直连。绑在 reqwest Client 上按 URL 缓存；不走 api_base 的 SSRF 闸——企业代理常在 RFC1918 / 本机端口。Realtime WS 不走此代理）
+-- / proxy_url（已废弃，写入一律 400：出口改由 channels.egress_* 绑定代理 / 代理组，Realtime WS 同样经此握手，见下文 Egress proxies）
 -- / extra_headers（对象 string→string，附加到每条上游请求；写入拒 Authorization / api-key / x-api-key / x-goog-api-key / Host / Content-Type / 逐跳头 / x-okapi-request-id，热路径再跳过一次；鉴权头后写覆盖）。
 -- provider=azure 的约定：api_base = 资源端点 `https://{res}.openai.azure.com`（必填，无缺省；贴了 `/openai` 或 `/openai/v1` 后缀网关自行剥掉）；
 -- 出向 URL = `{endpoint}/openai/deployments/{deployment}/{chat/completions|embeddings|images/generations|images/edits|audio/*}?api-version=`，鉴权 `api-key` 头；
@@ -227,11 +228,11 @@ CREATE TABLE api_keys (
     last_used_at      TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at        TIMESTAMPTZ,
-    session_hash      TEXT                            -- 0039：登录 key 所属会话 sid 的 sha256 hex（null = 普通 key）。
+    session_hash      TEXT                            -- 登录 key 所属会话 sid 的 sha256 hex（null = 普通 key）。
                                                       -- 只在请求带着该会话 cookie 且会话有效时可用；门户密钥列表不显示
 );
 CREATE INDEX idx_api_keys_user ON api_keys(user_id) WHERE deleted_at IS NULL;
--- 0039：一个会话同一时刻只有一把有效登录 key；登录时按用户清理死会话的登录 key
+-- 一个会话同一时刻只有一把有效登录 key；登录时按用户清理死会话的登录 key
 CREATE UNIQUE INDEX api_keys_live_session_key ON api_keys (session_hash) WHERE session_hash IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX api_keys_user_session_keys ON api_keys (user_id) WHERE session_hash IS NOT NULL AND deleted_at IS NULL;
 ```
@@ -1373,9 +1374,9 @@ by every write that changes bindings, members, capacity or the global default: s
 assignments are released and waiting keys are assigned to an enabled, non-full member
 (healthy first, then least loaded, then priority). A tripped or disabled proxy never
 causes reassignment. Proxies or groups bound directly by a live channel, or used as the
-global default, cannot be deleted (409). The migration converts each distinct legacy
-`settings.proxy_url` into a `proxies` row bound to its channels and removes the key;
-unparseable non-empty values stay in place and their channels are disabled.
+global default, cannot be deleted (409). Writes of the retired
+`settings.proxy_url` are rejected with 400; the one-off conversion of legacy values was
+dropped when the migrations were squashed into the baseline (IMPLEMENTATION §11.10).
 
 Migration 0038 adds `proxies.max_concurrency` (in-flight cap through the proxy, enforced
 with the Redis lease `conc:px:{id}:v1` next to the key lease), `previous_exit_ip` and

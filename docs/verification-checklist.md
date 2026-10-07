@@ -69,7 +69,7 @@
 | `images.rs` | generations / edits（multipart 重组），per_call × n | A B | `gateway_images` | variations 未实现 |
 | `audio.rs` | speech 字符计费 / transcriptions & translations per_call | A B | `gateway_audio` | — |
 | `videos.rs` | 提交 / 轮询 / 下载，per_call × seconds，任务隔离 | A B C D | `gateway_videos`（跨用户隔离、上游失败退款） | — |
-| `realtime.rs` | WS 桥接、连接租约、断开结算 | A B C D | `gateway_realtime`（断开计费、零输出全退、第五连接拒绝、子协议鉴权） | 不走渠道 `proxy_url`（backlog） |
+| `realtime.rs` | WS 桥接、连接租约、断开结算 | A B C D | `gateway_realtime`（断开计费、零输出全退、第五连接拒绝、子协议鉴权） | 上游 WS 经渠道出口绑定握手（原 backlog 已由 §11.41 补上） |
 | `chat/websocket.rs`、`chat/websocket/*` | Responses 原生 WS / HTTP 桥接、逐轮准入、账号绑定、流队列、断开结算 | A B C D | `gateway_responses_ws` 14 项；`gateway_responses_ws_bridge` 15 项真实 WS + HTTP/SSE + PG/Redis 测试；运行记录见 `core-api-verification.md` | 中途干预、实际供应商缓存/恢复和性能未完成 |
 | `custom_pass.rs` | `/pass/{channel_id}/*` 白名单透传 | A B C | `gateway_custom_pass` | — |
 | `models.rs` | `/v1/models`、`/v1beta/models` | A | `gateway_models_list::lists_enabled_models_and_hides_disabled_ones`（09-24 第三十五轮）、`gateway_gemini_ingress::models_list_is_gemini_shaped`、`console_channel_test` | `/v1/models` 无鉴权、列出全部启用模型（目录与公开价格页同为公开信息，`public_pricing_no_auth`）；按 key / 分组过滤属特性待定，非缺口 |

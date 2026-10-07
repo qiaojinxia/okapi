@@ -72,7 +72,8 @@ flowchart LR
 - [x] AWS Bedrock（SigV4 或 Bedrock API key，EventStream 流解码）
 - [x] Google Vertex AI（服务账号 JWT 换 token；Claude rawPredict、Gemini generateContent）
 - [x] Claude Pro / Max、ChatGPT Codex 订阅凭证 OAuth 登录成渠道（实验性，只路由 chat 族）
-- [x] 渠道级出站代理 + 自定义请求头；请求字段剥离 / 注入；上游响应头白名单
+- [x] 出口代理：代理 / 代理组为一等资源，渠道按继承 / 直连 / 单个代理 / 代理组出站；一号一 IP 固定分配、后台探测、被动熔断、全局默认出口
+- [x] 渠道自定义请求头；请求字段剥离 / 注入；上游响应头白名单
 - [x] 上游模型发现（fetch-models）、上游余额查询、上游倍率在线同步（fetch / apply，不自动改价）
 - [x] 渠道凭证 AES-GCM 信封加密、上游 URL SSRF 校验
 - [ ] Bedrock 非 Anthropic 模型（Converse 转换）
@@ -112,7 +113,7 @@ flowchart LR
 - [x] 邮箱密码（argon2id）+ 邮件验证码 / 找回密码（SMTP）
 - [x] GitHub / Discord / LinuxDO 预设 + 任意标准 OAuth2 / OIDC 自定义接入
 - [x] TOTP 两步验证、Turnstile 注册风控、注册策略与邀请赠送
-- [x] web 会话列举 / 单条吊销 / 一键全吊 / 会话数上限
+- [x] web 会话列举 / 单条吊销 / 一键全吊 / 会话数上限；网页登录换到的 key 绑定会话，会话结束即失效
 - [x] RBAC 权限点 + 三内置角色 + 自定义角色；渠道属主 own / all；分组可见性矩阵；代客操作
 - [x] Team 层（成员限额、分账、团队 key）
 - [x] key 级 IP 白名单 + 转发头信任闸（信任代理 CIDR / Edge key 两模式）
@@ -161,7 +162,7 @@ flowchart LR
 ```bash
 bash scripts/dev-deps.sh up     # 起 PG + Redis + CH + NATS 开发容器（不在本机装服务）
 cp .env.example .env            # sqlx 编译期校验与运行时共用
-bash scripts/dev-reset.sh       # 重建库 + 灌演示数据（改了 migrations 后必跑）
+bash scripts/dev-reset.sh       # 重建库 + 灌演示数据（改了已应用的迁移后必跑；新增迁移启动时自动应用）
 cargo run --bin okapi -- all    # 单进程跑齐三角色
 ```
 
@@ -213,6 +214,8 @@ console 角色内置 MCP 服务（Streamable HTTP，协议 `2025-06-18`），可
 claude mcp add --transport http okapi http://127.0.0.1:8081/mcp \
   --header "Authorization: Bearer <你的 API key>"
 ```
+
+key 要用门户「密钥」页新建的普通 key：网页登录换到的 key 绑定浏览器会话，在外部客户端里无效。
 
 工具按调用方的 RBAC 权限点过滤：普通用户 key 看到 5 个只读工具（余额 / 用量 / 密钥 /
 价目 / 账单解释），超管看到 22 个（含平台 KPI、渠道健康、日志检索、对账、DLQ、全链路诊断、
