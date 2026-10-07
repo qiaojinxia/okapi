@@ -352,7 +352,7 @@ pub(super) fn prepare(
     output
         .extra_headers
         .push(("anthropic-beta".into(), betas.join(",")));
-    let mut headers = vec![
+    let headers = vec![
         (
             "user-agent".into(),
             format!("claude-cli/{VERSION} (external, {entry})"),
@@ -384,10 +384,6 @@ pub(super) fn prepare(
         ),
         ("x-client-request-id".into(), random_uuid()?),
     ];
-    if stream && !counting {
-        // 对 2.1.290 抓包的有意偏离：真实 SDK 仅流式 helper 带此头，防御上游校验"流式必带"。
-        headers.push(("x-stainless-helper-method".into(), "stream".into()));
-    }
     Ok(PreparedRequest {
         body,
         outbound: output,

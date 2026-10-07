@@ -67,9 +67,12 @@ fn cli_envelope_matches_the_installed_capture_and_retains_caller_tools() {
     ] {
         assert_eq!(header_value(&prepared, key), expected, "{key}");
     }
-    assert_eq!(
-        header_value(&prepared, "x-stainless-helper-method"),
-        "stream"
+    assert!(
+        !prepared
+            .headers
+            .iter()
+            .any(|(key, _)| key == "x-stainless-helper-method"),
+        "真机 2.1.292 抓包：主请求从不携带此头"
     );
     let attribution = body["system"][0]["text"].as_str().unwrap();
     assert!(attribution.contains("cc_version=2.1.290.fe6; cc_entrypoint=cli;"));
@@ -144,7 +147,7 @@ extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
 }
 
 #[test]
-fn helper_method_marks_streaming_requests_only() {
+fn helper_method_absent_in_all_request_classes() {
     let body = Bytes::from(
         serde_json::to_vec(&json!({"model":"claude-sonnet-5-5",
         "messages":[{"role":"user","content":"hello"}]}))
@@ -152,9 +155,12 @@ fn helper_method_marks_streaming_requests_only() {
     );
     let out = outbound("cli", "main");
     let streaming = prepare_anthropic(body.clone(), true, false, &out, None).unwrap();
-    assert_eq!(
-        header_value(&streaming, "x-stainless-helper-method"),
-        "stream"
+    assert!(
+        !streaming
+            .headers
+            .iter()
+            .any(|(key, _)| key == "x-stainless-helper-method"),
+        "真机抓包：真实 CLI 流式请求也不带此头（仅 TS SDK stream helper 会发）"
     );
     let unary = prepare_anthropic(body.clone(), false, false, &out, None).unwrap();
     assert!(
