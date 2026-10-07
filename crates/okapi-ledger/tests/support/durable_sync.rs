@@ -340,10 +340,7 @@ async fn debit_drains_available_balance_and_records_negative_adjust() -> TestRes
     )
     .await?;
     assert_eq!(applied.as_micros(), 300);
-    assert_eq!(
-        receipt.unwrap().balance_after.unwrap().as_micros(),
-        10_200
-    );
+    assert_eq!(receipt.unwrap().balance_after.unwrap().as_micros(), 10_200);
     assert_eq!(b.base.wallet_snapshot().await, 10_200);
     let clawed: Vec<i64> = sqlx::query_scalar!(
         r#"SELECT delta_micro AS "delta_micro!" FROM billing_events
@@ -352,7 +349,11 @@ async fn debit_drains_available_balance_and_records_negative_adjust() -> TestRes
     )
     .fetch_all(&b.base.pg)
     .await?;
-    assert_eq!(clawed, vec![-300], "扣减必须以负额 adjust 留痕（clawed 统计口径）");
+    assert_eq!(
+        clawed,
+        vec![-300],
+        "扣减必须以负额 adjust 留痕（clawed 统计口径）"
+    );
     // 余额不足：钳到可用额度，绝不产生负余额
     let (applied, receipt) = okapi_ledger::operations::debit(
         &b.base.pg,

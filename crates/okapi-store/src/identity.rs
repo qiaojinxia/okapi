@@ -55,7 +55,13 @@ async fn hash_password_async(password: &str) -> Result<String, StoreError> {
     .map_err(|_| StoreError::InvalidData("password_worker_failed"))?
 }
 
-async fn verify_password_async(password: &str, hash: String) -> Result<bool, StoreError> {
+/// 账户不存在或没有密码时空跑校验用的散列，参数与真实散列相同（`Argon2::default()`）。
+/// 这两种情况若立刻返回，登录耗时就能区分邮箱是否注册。首次用到时在工作线程里生成。
+static DUMMY_HASH: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| hash_password("okapi-login-timing").unwrap_or_default());
+
+/// `hash` 为 None（无此账户 / 无密码）时照样跑一次同等开销的校验，结果恒为 false。
+async fn verify_password_async(password: &str, hash: Option<String>) -> Result<bool, StoreError> {
     let permit = PASSWORD_WORK
         .acquire()
         .await
@@ -63,7 +69,12 @@ async fn verify_password_async(password: &str, hash: String) -> Result<bool, Sto
     let password = password.to_owned();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        verify_password(&password, &hash)
+        if let Some(hash) = hash {
+            verify_password(&password, &hash)
+        } else {
+            let _ = verify_password(&password, &DUMMY_HASH);
+            false
+        }
     })
     .await
     .map_err(|_| StoreError::InvalidData("password_worker_failed"))?;
@@ -115,13 +126,12 @@ pub async fn find_login_user(
     )
     .fetch_optional(pool)
     .await?;
-    let Some(row) = row else { return Ok(None) };
-    let Some(hash) = row.password_hash else {
-        return Ok(None); // OAuth-only 账户无密码
-    };
+    // 无此账户、OAuth-only 账户（无密码）都照常付一次校验的开销，不提前返回
+    let hash = row.as_ref().and_then(|row| row.password_hash.clone());
     if !verify_password_async(password, hash).await? {
         return Ok(None);
     }
+    let Some(row) = row else { return Ok(None) };
     Ok(Some(LoginUser {
         user_id: row.id,
         role: row.role,
@@ -314,7 +324,7 @@ pub async fn reauthenticate(
     let Some(hash) = row.password_hash else {
         return Ok(None);
     };
-    if !verify_password_async(password, hash).await? {
+    if !verify_password_async(password, Some(hash)).await? {
         return Ok(None);
     }
     Ok(Some(LoginUser {
@@ -361,6 +371,18 @@ mod tests {
         let hash = hash_password("hunter2!").unwrap();
         assert!(verify_password("hunter2!", &hash));
         assert!(!verify_password("wrong", &hash));
+    }
+
+    /// 空跑用的散列解析不了或参数更轻，校验就会提前失败，耗时又能区分邮箱是否注册。
+    #[test]
+    fn dummy_hash_costs_the_same_as_a_real_one() {
+        let real = hash_password("hunter2!").unwrap();
+        let real = PasswordHash::new(&real).unwrap();
+        let dummy = PasswordHash::new(&DUMMY_HASH).unwrap();
+        assert_eq!(dummy.algorithm, real.algorithm);
+        assert_eq!(dummy.version, real.version);
+        assert_eq!(dummy.params.to_string(), real.params.to_string());
+        assert!(!verify_password("hunter2!", &DUMMY_HASH));
     }
 
     #[test]

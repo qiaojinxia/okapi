@@ -256,10 +256,15 @@ fn price_above_max(
     if prefs.max_price.prompt.is_none() && prefs.max_price.completion.is_none() {
         return None;
     }
-    let input = quote
+    // 按次计价没有 token 单价可比。当作没超会让调用方的上限静默失效（一次按次价可能远高于
+    // 按单价估的花费），所以给了上限就拒，param 带上这次的按次实付价，便于调用方判断。
+    let Some(input) = quote
         .snapshot
-        .final_unit_price_input_per_1m_usd?
-        .as_micros();
+        .final_unit_price_input_per_1m_usd
+        .map(okapi_domain::Money::as_micros)
+    else {
+        return Some(format!("per_call:{}", quote.amount.to_usd_string()));
+    };
     if let Some(cap) = prefs.max_price.prompt
         && input > cap
     {
@@ -768,9 +773,14 @@ async fn count_tokens_inner(
     )
     .await
     .map_err(AppError::from)?;
-    let cand = order_candidates(rows)
-        .into_iter()
-        .find(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"));
+    // 全被账号准入挡住就退本地估算
+    let cand = first_admitted(
+        state,
+        order_candidates(rows)
+            .into_iter()
+            .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max")),
+    )
+    .await;
     if let Some(cand) = cand {
         if let Some(limit) = cand.rpm_limit
             && !state
@@ -838,6 +848,27 @@ async fn count_tokens_inner(
     let tokens =
         estimate_prompt_tokens(&probe.model, &probe.prompt_segments(), probe.messages.len());
     Ok(axum::Json(serde_json::json!({ "input_tokens": tokens })).into_response())
+}
+
+/// 第一个过得了账号准入（本地 token 上限、上游额度窗，与主链路同一套）的候选：
+/// 不计费的旁路同样会占用账号，被挡住的账号不碰。
+async fn first_admitted(
+    state: &AppState,
+    candidates: impl IntoIterator<Item = okapi_store::ChannelCandidate>,
+) -> Option<okapi_store::ChannelCandidate> {
+    for candidate in candidates {
+        if super::account_control::admit(
+            state,
+            candidate.channel_id,
+            Some(candidate.channel_key_id),
+        )
+        .await
+        .is_ok()
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// 请求特征探测（§3.8 能力感知路由）：tools 数组非空 / 消息含图像部件。
@@ -913,6 +944,10 @@ fn input_roots(ingress: Ingress, v: &serde_json::Value) -> [Option<&serde_json::
 
 /// PDF 每页上界：Anthropic 文档按页计文本 + 页面图像，约 1500–3000 token。
 const PDF_PAGE_TOKENS: u32 = 3_000;
+/// 单个 PDF 计入的页数上限：上游单文件最多处理约 1000 页（Gemini 的文档上限，Anthropic /
+/// OpenAI 更少）。页对象计数只是启发式，增量保存会重复写页对象，构造的文件可以任意堆
+/// `/Type /Page`；截到这里预扣仍是上界，也不会被虚增到无界。
+const PDF_MAX_PAGES: u32 = 1_000;
 /// 音频每 token 至少对应的字节数：码率不低于 32 kbps（4000 B/s），各家最高约 32 token/s（Gemini）。
 const AUDIO_BYTES_PER_TOKEN: usize = 125;
 
@@ -995,14 +1030,17 @@ fn media_tokens(mime: Option<&str>, base64_data: &str) -> u32 {
     pages.max(1).saturating_mul(PDF_PAGE_TOKENS)
 }
 
-/// 页对象数：`/Type /Page`（不含 `/Pages` 目录节点），空格可有可无。
+/// 页对象数：`/Type /Page`（不含 `/Pages` 目录节点），空格可有可无；数到 [`PDF_MAX_PAGES`] 为止。
 fn pdf_pages(pdf: &[u8]) -> u32 {
     let mut pages = 0_u32;
     for (index, _) in pdf.windows(5).enumerate().filter(|(_, w)| *w == b"/Type") {
         let rest = &pdf[index + 5..];
         let rest = &rest[rest.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
         if rest.starts_with(b"/Page") && !rest.starts_with(b"/Pages") {
-            pages = pages.saturating_add(1);
+            pages += 1;
+            if pages == PDF_MAX_PAGES {
+                break;
+            }
         }
     }
     pages
@@ -1840,12 +1878,19 @@ async fn try_model(
         attempted += 1;
 
         let upstream_model = cand.upstream_model(&bill.model).to_owned();
-        let Ok(mut body_up) = build_upstream_body(bill, info, &cand, body, &upstream_model) else {
-            return Err(ForwardFailure::app(
-                AppError::bad_request(),
-                failover,
-                Some((cand.channel_id, cand.channel_key_id)),
-            ));
+        let mut body_up = match build_upstream_body(bill, info, &cand, body, &upstream_model) {
+            Ok(body_up) => body_up,
+            Err(err) => {
+                let rejection = match &err {
+                    UpstreamError::Build(reason) => build_rejection(reason),
+                    _ => AppError::bad_request(),
+                };
+                return Err(ForwardFailure::app(
+                    rejection,
+                    failover,
+                    Some((cand.channel_id, cand.channel_key_id)),
+                ));
+            }
         };
         let base = cand.api_base.clone().unwrap_or_else(|| {
             okapi_providers::registry::lookup(&cand.provider)
@@ -2120,6 +2165,16 @@ async fn try_model(
 /// 按 入口协议 × 渠道协议 构造上游请求体：同方言重写 model 透传，跨方言走出向转换；
 /// Responses 对说 Responses 方言的渠道直转，否则先降级 chat，再按渠道协议二段转换。
 /// 末尾做 reasoning 后缀注入（按上游方言；显式字段不覆盖）。
+/// 上游请求体构造失败（`UpstreamError::Build` 的原因）→ 400。协议转换表达不了的 content part
+/// 回显 part 类型，调用方才知道是哪块附件不被支持；其它构造失败不带 param。
+fn build_rejection(reason: &str) -> AppError {
+    if reason.starts_with(okapi_providers::convert::UNSUPPORTED_CONTENT_PREFIX) {
+        AppError::bad_request().with_param(reason)
+    } else {
+        AppError::bad_request()
+    }
+}
+
 fn build_upstream_body(
     bill: &RequestBilling,
     info: &ProbeInfo,
@@ -2279,8 +2334,8 @@ fn classify_fatal(err: UpstreamError, failover: i16, channel: (i64, i64)) -> Att
                 Some(channel),
             ))
         }
-        UpstreamError::Build(_) => AttemptError::Fatal(ForwardFailure::app(
-            AppError::bad_request(),
+        UpstreamError::Build(reason) => AttemptError::Fatal(ForwardFailure::app(
+            build_rejection(&reason),
             failover,
             Some(channel),
         )),
@@ -4314,6 +4369,18 @@ mod failure_scope_tests {
                 ]}]})
             ),
             10
+        );
+    }
+
+    /// 堆满 `/Type /Page` 的构造文件只按上游单文件页数上限计，预扣不被虚增到无界。
+    #[test]
+    fn pdf_page_estimate_is_capped() {
+        use base64::Engine as _;
+        let pdf = format!("%PDF-1.4 {}", "<</Type /Page>> ".repeat(5_000));
+        let data = base64::prelude::BASE64_STANDARD.encode(pdf);
+        assert_eq!(
+            media_tokens(Some("application/pdf"), &data),
+            PDF_MAX_PAGES * PDF_PAGE_TOKENS
         );
     }
 

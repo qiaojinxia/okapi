@@ -3,7 +3,7 @@
 //! 此前路由控制全在配置侧（key.pool_override > 分组 pool_code > default），调用方
 //! 一点管不着。本轮先落三个子集：
 //! - `zdr` / `data_collection:"deny"`：只走声明不留存的渠道（未声明按不满足处理）
-//! - `max_price.{prompt,completion}`：单价上限，超了在**预扣之前**拒
+//! - `max_price.{prompt,completion}`：单价上限，超了在**预扣之前**拒；按次计价模型给了上限就拒
 //! - `allow_fallbacks:false`：失败即返回，不改投其它渠道
 //!
 //! 依赖 .env（scripts/dev-deps.sh up）。
@@ -52,12 +52,32 @@ struct Bed {
     user_id: i64,
     token: String,
     model: String,
+    /// 同一组渠道上的按次计价模型（$0.005 / 次）
+    call_model: String,
     gateway: SocketAddr,
     /// 声明 data_retention='none' 的渠道
     zero_channel: i64,
     /// 未声明留存的渠道（优先级更高，缺省会先投它）
     plain_channel: i64,
     seen: Seen,
+}
+
+/// 按次计价模型：$0.005 / 次。
+async fn create_per_call_model(pg: &PgPool, name: &str) {
+    let model_id: i64 =
+        sqlx::query_scalar("INSERT INTO models (model_name) VALUES ($1) RETURNING id")
+            .bind(name)
+            .fetch_one(pg)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO model_pricing (model_id, pricing_mode, per_call_price_micro)
+         VALUES ($1, 'per_call', 5000)",
+    )
+    .bind(model_id)
+    .execute(pg)
+    .await
+    .unwrap();
 }
 
 async fn setup() -> Bed {
@@ -90,11 +110,14 @@ async fn setup() -> Bed {
     okapi_store::provision::create_model_ratio(&pg, &model, "1.0", "1.0", "1.0")
         .await
         .unwrap();
+    let call_model = format!("rp-call-{suffix}");
+    create_per_call_model(&pg, &call_model).await;
 
     let mk = |name: String, priority: i32| {
         let pg = pg.clone();
         let base = format!("http://{mock}/v1");
         let m = model.clone();
+        let c = call_model.clone();
         async move {
             let (cid, _) = okapi_store::provision::create_channel(
                 &pg,
@@ -102,7 +125,7 @@ async fn setup() -> Bed {
                 "openai",
                 &base,
                 "cred",
-                &[m.as_str()],
+                &[m.as_str(), c.as_str()],
                 true,
                 None,
             )
@@ -157,6 +180,7 @@ async fn setup() -> Bed {
         user_id,
         token,
         model,
+        call_model,
         gateway: gw,
         zero_channel,
         plain_channel,
@@ -167,8 +191,12 @@ async fn setup() -> Bed {
 /// `msg` 决定 L2 会话哈希：同文 = 同会话 = 会命中粘性。要验路由选择的用例
 /// 必须逐次换文，否则第二次会被粘性直接送回上次成功的渠道，压根不走候选排序。
 async fn chat_msg(bed: &Bed, provider: Option<Value>, msg: &str) -> (u16, Value) {
+    chat_to(bed, &bed.model, provider, msg).await
+}
+
+async fn chat_to(bed: &Bed, model: &str, provider: Option<Value>, msg: &str) -> (u16, Value) {
     let mut body = json!({
-        "model": bed.model, "stream": false,
+        "model": model, "stream": false,
         "messages": [{"role": "user", "content": msg}]
     });
     if let Some(p) = provider {
@@ -305,6 +333,27 @@ async fn max_price_rejects_before_reserving() {
             .starts_with("completion:"),
         "{body}"
     );
+}
+
+/// 按次计价没有 token 单价可比：给了上限就拒，不能当作没超让上限静默失效；
+/// param 回显本次按次实付价。不给上限照常放行。
+#[tokio::test]
+async fn max_price_rejects_per_call_models() {
+    let bed = setup().await;
+    let before = bed.seen.lock().unwrap().len();
+    for cap in [json!({"prompt": 1000.0}), json!({"completion": 1000.0})] {
+        let (status, body) =
+            chat_to(&bed, &bed.call_model, Some(json!({"max_price": cap})), "hi").await;
+        assert_eq!(status, 402, "{body}");
+        assert_eq!(body["error"]["code"], "price_above_max");
+        assert_eq!(body["error"]["param"], "per_call:0.005", "{body}");
+    }
+    assert_eq!(
+        bed.seen.lock().unwrap().len(),
+        before,
+        "超限不该打上游——判在预扣之前"
+    );
+    assert_eq!(chat_to(&bed, &bed.call_model, None, "hi").await.0, 200);
 }
 
 /// allow_fallbacks=false：首次失败即返回；缺省仍照常 failover。

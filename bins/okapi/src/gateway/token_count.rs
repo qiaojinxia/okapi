@@ -214,15 +214,9 @@ async fn count_authorized(
         if attempts == 3 {
             break;
         }
-        if let Some(limit) = candidate.rpm_limit.filter(|n| *n > 0)
-            && !state
-                .sched
-                .channel_key_rate_ok(candidate.channel_key_id, i64::from(limit))
-                .await
-        {
+        if let Some(error) = unavailable(state, candidate).await {
             unsupported = false;
-            last_error = AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
-                .with_param("channel_rpm");
+            last_error = error;
             continue;
         }
         let Some(slot) = ChannelPermit::acquire(&state.sched, candidate)
@@ -264,6 +258,26 @@ async fn count_authorized(
         return estimate_response(candidates[0].upstream_model(canonical), &value);
     }
     Err(last_error)
+}
+
+/// 该候选此刻不能拿来计数的原因（渠道 RPM、账号准入）；None = 可以试。
+async fn unavailable(state: &AppState, candidate: &ChannelCandidate) -> Option<AppError> {
+    if let Some(limit) = candidate.rpm_limit.filter(|n| *n > 0)
+        && !state
+            .sched
+            .channel_key_rate_ok(candidate.channel_key_id, i64::from(limit))
+            .await
+    {
+        return Some(
+            AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED)
+                .with_param("channel_rpm"),
+        );
+    }
+    // 账号准入与主链路同一套（本地 token 上限、上游额度窗）：被挡住的账号不碰
+    super::account_control::admit(state, candidate.channel_id, Some(candidate.channel_key_id))
+        .await
+        .err()
+        .map(|error| super::account_control::attempt_error(&error))
 }
 
 async fn forward_count(

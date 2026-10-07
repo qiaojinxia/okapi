@@ -35,7 +35,7 @@ pub fn request_responses_to_chat(
         }
         Some(Value::Array(items)) => {
             for item in items {
-                convert_input_item(item, &mut messages);
+                convert_input_item(item, &mut messages)?;
             }
         }
         _ => {}
@@ -64,9 +64,9 @@ pub fn request_responses_to_chat(
         .map_err(|e| UpstreamError::Build(e.to_string()))
 }
 
-/// input item → chat 消息：message 项（input_text/output_text/input_image）、
+/// input item → chat 消息：message 项（文本 / 图片 / 内联文件 / 音频 part）、
 /// function_call / function_call_output 项。
-fn convert_input_item(item: &Value, messages: &mut Vec<Value>) {
+fn convert_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<(), UpstreamError> {
     match item.get("type").and_then(Value::as_str) {
         // 缺省视为 message 项（Responses 允许省略 type）
         None | Some("message") => {
@@ -76,20 +76,10 @@ fn convert_input_item(item: &Value, messages: &mut Vec<Value>) {
                     messages.push(json!({"role": role, "content": text}));
                 }
                 Some(Value::Array(parts)) => {
-                    let converted: Vec<Value> = parts
+                    let converted = parts
                         .iter()
-                        .filter_map(|p| match p.get("type").and_then(Value::as_str) {
-                            Some("input_text" | "output_text" | "text") => Some(json!({
-                                "type": "text",
-                                "text": p.get("text").and_then(Value::as_str).unwrap_or(""),
-                            })),
-                            Some("input_image") => {
-                                let url = p.get("image_url").and_then(Value::as_str)?;
-                                Some(json!({"type": "image_url", "image_url": {"url": url}}))
-                            }
-                            _ => None,
-                        })
-                        .collect();
+                        .map(input_part_to_chat)
+                        .collect::<Result<Vec<_>, _>>()?;
                     if !converted.is_empty() {
                         // 单段文本降级 string content
                         let only_text = converted.len() == 1
@@ -128,6 +118,40 @@ fn convert_input_item(item: &Value, messages: &mut Vec<Value>) {
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// Responses message part → chat content part；chat 表达不了的（file_id / file_url 引用、
+/// 未知类型）报错，见 [`super::unsupported_part`]。
+fn input_part_to_chat(part: &Value) -> Result<Value, UpstreamError> {
+    let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+    let converted = match kind {
+        "input_text" | "output_text" | "text" => Some(json!({
+            "type": "text",
+            "text": part.get("text").and_then(Value::as_str).unwrap_or(""),
+        })),
+        "refusal" => Some(json!({
+            "type": "text",
+            "text": part.get("refusal").and_then(Value::as_str).unwrap_or(""),
+        })),
+        "input_image" => part
+            .get("image_url")
+            .and_then(Value::as_str)
+            .map(|url| json!({"type": "image_url", "image_url": {"url": url}})),
+        "input_file" => part.get("file_data").and_then(Value::as_str).map(|data| {
+            let mut file = json!({"file_data": data});
+            if let Some(name) = part.get("filename").filter(|name| name.is_string()) {
+                file["filename"] = name.clone();
+            }
+            json!({"type": "file", "file": file})
+        }),
+        "input_audio" => part
+            .get("input_audio")
+            .filter(|audio| audio.is_object())
+            .map(|audio| json!({"type": "input_audio", "input_audio": audio})),
+        _ => None,
+    };
+    converted.ok_or_else(|| super::unsupported_part(kind))
 }
 
 /// Responses 工具形状（扁平 name/parameters）→ chat function 工具。
@@ -753,5 +777,47 @@ mod third_review_tests {
             completed["response"]["output"][0]["arguments"],
             r#"{"q":"hi"}"#
         );
+    }
+}
+
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+
+    fn convert(input: &Value) -> Result<Value, UpstreamError> {
+        let body = Bytes::from(json!({"model": "m", "input": input}).to_string());
+        request_responses_to_chat(&body, "up").map(|out| serde_json::from_slice(&out).unwrap())
+    }
+
+    /// 内联文件与 refusal 照样带过去；chat 表达不了的引用报错，不能静默丢掉。
+    #[test]
+    fn files_and_refusals_carry_over_and_references_are_rejected() {
+        let out = convert(&json!([
+            {"role": "user", "content": [
+                {"type": "input_text", "text": "read"},
+                {"type": "input_file", "filename": "a.pdf",
+                 "file_data": "data:application/pdf;base64,JVBERi0="}
+            ]},
+            {"role": "assistant", "content": [{"type": "refusal", "refusal": "no"}]}
+        ]))
+        .unwrap();
+        assert_eq!(
+            out["messages"][0]["content"][1],
+            json!({"type": "file", "file": {
+                "filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}})
+        );
+        assert_eq!(out["messages"][1]["content"], "no");
+        for part in [
+            json!({"type": "input_file", "file_id": "file-1"}),
+            json!({"type": "input_image", "file_id": "file-2"}),
+        ] {
+            let kind = part["type"].as_str().unwrap().to_owned();
+            let err = convert(&json!([{"role": "user", "content": [part]}])).unwrap_err();
+            assert!(
+                matches!(&err, UpstreamError::Build(reason)
+                    if *reason == format!("unsupported_content:{kind}")),
+                "{err:?}"
+            );
+        }
     }
 }

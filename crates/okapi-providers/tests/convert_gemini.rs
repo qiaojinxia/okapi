@@ -184,3 +184,54 @@ fn stream_error_payload_maps_to_stream_error() {
     assert_eq!(outs.len(), 1);
     assert!(outs[0].is_err());
 }
+
+/// 内联文件与音频照 data URL / format 内联；file_id 引用与未知类型报错，不能静默丢掉。
+#[test]
+fn request_inlines_files_and_audio_and_rejects_references() {
+    let out = convert_req(&json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": [
+            {"type": "file", "file": {"filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}},
+            {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
+        ]}]
+    }));
+    assert_eq!(
+        out["contents"][0]["parts"],
+        json!([
+            {"inlineData": {"mimeType": "application/pdf", "data": "JVBERi0="}},
+            {"inlineData": {"mimeType": "audio/wav", "data": "AAAA"}}
+        ])
+    );
+    for part in [
+        json!({"type": "file", "file": {"file_id": "file-1"}}),
+        json!({"type": "video_url", "video_url": {"url": "https://x/v.mp4"}}),
+    ] {
+        let kind = part["type"].as_str().unwrap().to_owned();
+        let body = json!({"model": "m", "messages": [{"role": "user", "content": [part]}]});
+        let err =
+            request_openai_to_gemini(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap_err();
+        assert!(
+            matches!(&err, okapi_providers::UpstreamError::Build(reason)
+                if *reason == format!("unsupported_content:{kind}")),
+            "{err:?}"
+        );
+    }
+}
+
+/// 截断的 tool_call 参数保留原文，不能静默换成空对象。
+#[test]
+fn request_keeps_unparseable_tool_arguments() {
+    let out = convert_req(&json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "[1,"}}
+            ]}
+        ]
+    }));
+    assert_eq!(
+        out["contents"][1]["parts"][0]["functionCall"]["args"],
+        json!({"_raw_arguments": "[1,"})
+    );
+}

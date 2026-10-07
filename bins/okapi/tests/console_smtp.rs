@@ -442,6 +442,58 @@ async fn email_code_respects_policy_and_config() {
     assert!(inbox.lock().unwrap().is_empty(), "策略拒绝不得发信");
 }
 
+/// 每收件箱每日上限：每次换 IP、等过冷却也只能发 10 封，`+标签` 写法算同一个信箱。
+/// 找回密码同样计数，邮箱存在与否一视同仁，429 不泄露是否注册。
+#[tokio::test]
+async fn mail_daily_cap_is_per_mailbox() {
+    let (smtp, inbox) = spawn_smtp().await;
+    let env = setup(
+        Some(smtp_setting(smtp)),
+        Some(json!({"mode": "open", "email_verification": true})),
+    )
+    .await;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    for round in 0..10 {
+        let address = if round % 2 == 0 {
+            format!("cap-{suffix}@ok.test")
+        } else {
+            format!("cap-{suffix}+{round}@ok.test")
+        };
+        let _: i64 =
+            fred::interfaces::KeysInterface::del(&redis, format!("verify:email:cd:{address}"))
+                .await
+                .unwrap();
+        let resp = post(&env, "/auth/email-code", json!({"email": address})).await;
+        assert_eq!(resp.status(), 200, "第 {round} 封");
+    }
+    wait_inbox(&inbox, 10).await;
+    let (status, code, _) = error_code(
+        post(
+            &env,
+            "/auth/email-code",
+            json!({"email": format!("cap-{suffix}+late@ok.test")}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!((status, code.as_str()), (429, "email_daily_limit"));
+
+    set_site_url(&env, "https://configured.okapi.test").await;
+    let nobody = format!("nobody-{suffix}@ok.test");
+    for _ in 0..10 {
+        let resp = post(&env, "/auth/password/forgot", json!({"email": nobody})).await;
+        assert_eq!(resp.status(), 200);
+    }
+    let (status, code, _) =
+        error_code(post(&env, "/auth/password/forgot", json!({"email": nobody})).await).await;
+    assert_eq!((status, code.as_str()), (429, "email_daily_limit"));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(inbox.lock().unwrap().len(), 10, "超限的请求不得发信");
+}
+
 // ---- 找回密码 ----
 
 /// `POST /auth/password/reset` 预期 400 且 `error.param` 为给定值。

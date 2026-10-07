@@ -12,7 +12,8 @@ import { formatMoney } from '@/lib/money'
 /// 余额分区：充值/扣减 + 余额有效期。
 ///
 /// 有效期用日期选择器而非手写 ISO8601——此前占位符是 2026-12-31T00:00:00Z，
-/// 格式差一个字符后端就 400。
+/// 格式差一个字符后端就 400。选中的日期含当天：按管理员本地时间当天结束提交，
+/// 门户也按本地日期显示到期日；提交 UTC 零点会在东八区当天早上就清零。
 export function BalanceSection({
   userId,
   onDone,
@@ -93,7 +94,7 @@ export function BalanceSection({
           variant="outline"
           onClick={() =>
             setBalanceExpiry.mutate(
-              expiry === '' ? null : new Date(`${expiry}T00:00:00Z`).toISOString(),
+              expiry === '' ? null : new Date(`${expiry}T23:59:59.999`).toISOString(),
             )
           }
         >

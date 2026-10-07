@@ -25,9 +25,10 @@ export function ToolCallList({ calls, streaming, onSubmit }: {
   const waiting = respondable && calls.some((call) => call.result === undefined)
   return (
     <div className="mt-2 space-y-1.5 first:mt-0" data-slot="tool-calls">
-      {calls.map((call) => (
+      {calls.map((call, index) => (
         <ToolCallCard
-          key={call.id || call.name}
+          // 流式中途有的调用还没拿到 id：按序号兜底，同名的并行调用不会撞 key
+          key={call.id || `pending-${index}`}
           call={call}
           streaming={streaming}
           respondable={respondable}

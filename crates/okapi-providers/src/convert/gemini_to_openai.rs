@@ -64,7 +64,7 @@ pub fn request_gemini_to_openai(
         if role == "model" {
             convert_model_parts(&parts, &mut messages, &mut pending_calls, &mut call_seq);
         } else {
-            convert_user_parts(&parts, &mut messages, &mut pending_calls);
+            convert_user_parts(&parts, &mut messages, &mut pending_calls)?;
         }
     }
 
@@ -143,11 +143,12 @@ fn convert_model_parts(
 
 /// `user` 角色：functionResponse → tool 消息；其余部件（text / inlineData / fileData）
 /// → 一条 user 消息（纯文本降成 string content，带媒体时用多段形状）。
+/// chat 表达不了的媒体（视频、按 URI 引用的非图片文件）报错，见 [`super::unsupported_part`]。
 fn convert_user_parts(
     parts: &[Value],
     messages: &mut Vec<Value>,
     pending_calls: &mut Vec<(String, String)>,
-) {
+) -> Result<(), UpstreamError> {
     let mut content: Vec<Value> = Vec::new();
     for part in parts {
         if let Some(fr) = part.get("functionResponse") {
@@ -189,25 +190,31 @@ fn convert_user_parts(
             } else if let Some(format) = mime.strip_prefix("audio/") {
                 content.push(json!({"type": "input_audio",
                     "input_audio": {"data": data, "format": format}}));
+            } else if mime == "application/pdf" {
+                content.push(json!({"type": "file",
+                    "file": {"file_data": format!("data:{mime};base64,{data}")}}));
+            } else {
+                return Err(super::unsupported_part(mime));
             }
-            // 其它 mime（pdf/video）OpenAI chat 无对应部件：丢弃
         } else if let Some(file) = part.get("fileData").or_else(|| part.get("file_data")) {
             let mime = file
                 .get("mimeType")
                 .or_else(|| file.get("mime_type"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if let Some(uri) = file
+            let Some(uri) = file
                 .get("fileUri")
                 .or_else(|| file.get("file_uri"))
                 .and_then(Value::as_str)
-                && mime.starts_with("image/")
-            {
-                content.push(json!({"type": "image_url", "image_url": {"url": uri}}));
-            }
+                .filter(|_| mime.starts_with("image/"))
+            else {
+                return Err(super::unsupported_part("fileData"));
+            };
+            content.push(json!({"type": "image_url", "image_url": {"url": uri}}));
         }
     }
     flush_user(&mut content, messages);
+    Ok(())
 }
 
 fn flush_user(content: &mut Vec<Value>, messages: &mut Vec<Value>) {

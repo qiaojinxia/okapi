@@ -46,7 +46,7 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
                 }
             }
             "assistant" => {
-                let mut parts = content_to_parts(content);
+                let mut parts = content_to_parts(content)?;
                 for call in msg
                     .get("tool_calls")
                     .and_then(Value::as_array)
@@ -57,11 +57,9 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
                         .pointer("/function/name")
                         .and_then(Value::as_str)
                         .unwrap_or("");
-                    let args = call
-                        .pointer("/function/arguments")
-                        .and_then(Value::as_str)
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or_else(|| json!({}));
+                    let args = super::tool_arguments(
+                        call.pointer("/function/arguments").and_then(Value::as_str),
+                    );
                     parts.push(json!({"functionCall": {"name": name, "args": args}}));
                 }
                 if !parts.is_empty() {
@@ -81,7 +79,7 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
                 push_content(&mut contents, "user", vec![part]);
             }
             _ => {
-                let parts = content_to_parts(content);
+                let parts = content_to_parts(content)?;
                 if !parts.is_empty() {
                     push_content(&mut contents, "user", parts);
                 }
@@ -184,32 +182,63 @@ fn push_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
     contents.push(json!({"role": role, "parts": parts}));
 }
 
-fn content_to_parts(content: &Value) -> Vec<Value> {
+/// OpenAI content（string | parts 数组）→ Gemini parts；表达不了的 part 报错（见
+/// [`super::unsupported_part`]）。
+fn content_to_parts(content: &Value) -> Result<Vec<Value>, UpstreamError> {
     match content {
-        Value::String(s) if !s.is_empty() => vec![json!({"text": s})],
+        Value::String(s) if !s.is_empty() => Ok(vec![json!({"text": s})]),
         Value::Array(parts) => parts
             .iter()
-            .filter_map(|p| match p.get("type").and_then(Value::as_str) {
-                Some("text") => p
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .map(|t| json!({"text": t})),
-                Some("image_url") => {
-                    let url = p.get("image_url")?.get("url").and_then(Value::as_str)?;
-                    if let Some(rest) = url.strip_prefix("data:") {
-                        let (mime, data) = rest.split_once(";base64,")?;
-                        Some(json!({"inlineData": {"mimeType": mime, "data": data}}))
-                    } else if url.starts_with("https://") {
-                        Some(json!({"fileData": {"fileUri": url}}))
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
+            .filter_map(|part| part_to_gemini(part).transpose())
             .collect(),
-        _ => Vec::new(),
+        _ => Ok(Vec::new()),
     }
+}
+
+fn part_to_gemini(part: &Value) -> Result<Option<Value>, UpstreamError> {
+    let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+    let converted = match kind {
+        // assistant 历史里的 refusal part 是纯文本
+        "text" | "refusal" => {
+            return Ok(part
+                .get(kind)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(|text| json!({"text": text})));
+        }
+        "image_url" => part
+            .pointer("/image_url/url")
+            .and_then(Value::as_str)
+            .and_then(|url| {
+                if url.starts_with("https://") {
+                    Some(json!({"fileData": {"fileUri": url}}))
+                } else {
+                    inline_data(url)
+                }
+            }),
+        // 内联文件（PDF 等）照 data URL 的类型原样内联；file_id 引用的是 OpenAI 那边的文件
+        "file" => part
+            .pointer("/file/file_data")
+            .and_then(Value::as_str)
+            .and_then(inline_data),
+        "input_audio" => part
+            .pointer("/input_audio/data")
+            .and_then(Value::as_str)
+            .zip(part.pointer("/input_audio/format").and_then(Value::as_str))
+            .map(|(data, format)| {
+                json!({"inlineData": {"mimeType": format!("audio/{format}"), "data": data}})
+            }),
+        _ => None,
+    };
+    converted
+        .map(Some)
+        .ok_or_else(|| super::unsupported_part(kind))
+}
+
+/// `data:<mime>;base64,<data>` → Gemini inlineData。
+fn inline_data(url: &str) -> Option<Value> {
+    let (mime, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
+    Some(json!({"inlineData": {"mimeType": mime, "data": data}}))
 }
 
 fn plain_text(content: &Value) -> String {

@@ -441,78 +441,113 @@ pub async fn redeem(
         ip_charge = Some((pre.batch_id, ip));
     }
 
-    let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, key.user_id).await?;
+    // 走到这里本 IP 已经计了一次。没核销成功（拿锁、开事务、翻转、入账、提交任何一步失败）
+    // 都退还，否则一次库故障就占掉这个 IP 7 天的配额；提交之后再失败不退，码已经用掉了。
+    let (mut guard, claimed, accepted) = match accept_redemption(&state, key.user_id, code).await {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            if let Some((batch, ip)) = &ip_charge {
+                state.sched.redeem_ip_decr(*batch, ip).await;
+            }
+            return Err(error);
+        }
+    };
+    match accepted {
+        Accepted::Subscription(id) => {
+            let receipt =
+                okapi_ledger::subscriptions::finish(&mut guard, &state.ledger, key.user_id, id)
+                    .await;
+            drop(guard);
+            state.sched.auth_flush().await;
+            let mut body = super::subscriptions::receipt_view(&state, &receipt).await?;
+            body["amount_micro"] = json!(0);
+            body["plan_code"] = json!(claimed.plan_code);
+            Ok(Json(body))
+        }
+        Accepted::Wallet(operation_id) => {
+            let receipt = okapi_ledger::transfers::finish(
+                &mut guard,
+                &state.ledger,
+                key.user_id,
+                operation_id,
+                okapi_ledger::Pool::Wallet,
+            )
+            .await;
+            Ok(Json(json!({
+                "amount_micro": claimed.amount_micro,
+                "balance_after_micro": receipt.balance_after.map(okapi_domain::Money::as_micros),
+                "operation_id": receipt.operation_id,
+                "pending": receipt.balance_after.is_none(),
+                "plan_code": claimed.plan_code,
+                "granted_group": claimed.grant_group,
+                "balance_valid_days": claimed.balance_valid_days,
+            })))
+        }
+    }
+}
+
+/// 兑换码在事务里落定的去处：订阅入队（激活单号）或钱包入账（操作号）。
+enum Accepted {
+    Subscription(uuid::Uuid),
+    Wallet(uuid::Uuid),
+}
+
+/// 锁用户、翻转兑换码并在同一事务里入账，一直到提交。返回 Err 时兑换码没有被用掉。
+async fn accept_redemption(
+    state: &AppState,
+    user_id: i64,
+    code: &str,
+) -> Result<
+    (
+        okapi_ledger::holds::UserGuard,
+        okapi_store::admin::ClaimedRedemption,
+        Accepted,
+    ),
+    AppError,
+> {
+    let mut guard = okapi_ledger::holds::UserGuard::acquire(&state.pg, user_id).await?;
     let mut tx = guard
         .connection()?
         .begin()
         .await
         .map_err(okapi_store::StoreError::from)?;
-    let claimed = okapi_store::admin::claim_redemption_in_tx(&mut tx, code, key.user_id).await?;
-    let Some(claimed) = claimed else {
-        // 预查通过但翻转失败（竞争被抢/绑定他人）：回退 IP 计数
-        if let Some((batch, ip)) = ip_charge {
-            state.sched.redeem_ip_decr(batch, &ip).await;
-        }
+    let Some(mut claimed) =
+        okapi_store::admin::claim_redemption_in_tx(&mut tx, code, user_id).await?
+    else {
+        // 预查通过但翻转失败（竞争被抢 / 绑定他人）
         return Err(AppError::new(StatusCode::NOT_FOUND, "redemption_invalid"));
     };
 
     // 绑订阅套餐（§11.28）：核销即激活 / 续期，钱包不动、面值忽略
-    if claimed.subscription_plan_id.is_some() {
+    let accepted = if claimed.subscription_plan_id.is_some() {
         let plan: okapi_store::subscriptions::SubPlan = serde_json::from_value(
             claimed
                 .subscription_snapshot
+                .take()
                 .ok_or_else(AppError::internal)?,
         )
         .map_err(|_| AppError::internal())?;
-        let accepted = okapi_ledger::subscriptions::enqueue(
+        let enqueued = okapi_ledger::subscriptions::enqueue(
             &mut tx,
-            key.user_id,
+            user_id,
             &plan,
             &format!("redeem:{}", claimed.code_id),
             "system:redeem",
             false,
         )
         .await;
-        let id = match accepted {
-            Ok(id) => id,
+        match enqueued {
+            Ok(id) => Accepted::Subscription(id),
             Err(error) => {
                 tx.rollback().await.map_err(okapi_store::StoreError::from)?;
-                if let Some((batch, ip)) = &ip_charge {
-                    state.sched.redeem_ip_decr(*batch, ip).await;
-                }
                 return Err(error.into());
             }
-        };
-        tx.commit().await.map_err(okapi_store::StoreError::from)?;
-        let receipt =
-            okapi_ledger::subscriptions::finish(&mut guard, &state.ledger, key.user_id, id).await;
-        drop(guard);
-        state.sched.auth_flush().await;
-        let mut body = super::subscriptions::receipt_view(&state, &receipt).await?;
-        body["amount_micro"] = json!(0);
-        body["plan_code"] = json!(claimed.plan_code);
-        return Ok(Json(body));
-    }
-
-    let operation_id = accept_wallet_redemption(&mut tx, key.user_id, &claimed).await?;
+        }
+    } else {
+        Accepted::Wallet(accept_wallet_redemption(&mut tx, user_id, &claimed).await?)
+    };
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
-    let receipt = okapi_ledger::transfers::finish(
-        &mut guard,
-        &state.ledger,
-        key.user_id,
-        operation_id,
-        okapi_ledger::Pool::Wallet,
-    )
-    .await;
-    Ok(Json(json!({
-        "amount_micro": claimed.amount_micro,
-        "balance_after_micro": receipt.balance_after.map(okapi_domain::Money::as_micros),
-        "operation_id": receipt.operation_id,
-        "pending": receipt.balance_after.is_none(),
-        "plan_code": claimed.plan_code,
-        "granted_group": claimed.grant_group,
-        "balance_valid_days": claimed.balance_valid_days,
-    })))
+    Ok((guard, claimed, accepted))
 }
 
 /// Keep optional plan benefits in the same transaction as code consumption.

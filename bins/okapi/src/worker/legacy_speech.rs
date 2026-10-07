@@ -119,7 +119,10 @@ pub async fn process_once(ch: &ChClient, limit: u32) -> anyhow::Result<usize> {
         .checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("legacy speech cursor overflow"))?;
     let limit = limit.clamp(1, 500);
-    let candidate = "endpoint='/v1/audio/speech' AND input_unit='' AND isNull(input_characters)";
+    // 单独的 `ts >=` 与元组比较等价，但只有它能让按天分区裁掉游标之前的数据；
+    // 只写元组比较时，校准完成前每一页都要扫整张表
+    let candidate = "endpoint='/v1/audio/speech' AND input_unit='' AND isNull(input_characters) \
+                     AND ts>=toDateTime64({cursor_ts:String},3,'UTC')";
     let sql = format!(
         "WITH page AS (SELECT ts,request_id FROM request_log_raw WHERE {candidate} AND (ts,request_id)>(toDateTime64({{cursor_ts:String}},3,'UTC'),toUUID({{cursor_id:String}})) GROUP BY ts,request_id ORDER BY ts,request_id LIMIT {limit}) SELECT {},count() AS copies FROM request_log_raw INNER JOIN page USING (ts,request_id) WHERE {candidate} GROUP BY ALL ORDER BY ts,request_id SETTINGS max_result_rows=10000,result_overflow_mode='throw'",
         columns()

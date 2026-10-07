@@ -663,3 +663,53 @@ async fn malformed_checkout_response_never_returns_a_successful_payment_link() {
         0
     );
 }
+
+/// 下单有频控与未支付上限：Stripe 每单都要调一次外部 API，未支付订单又不会自动作废，
+/// 不设限时任何登录用户都能刷商户 API、往订单表里灌单。
+#[tokio::test]
+async fn order_placement_is_rate_limited_and_caps_unpaid_orders() {
+    let env = setup().await;
+    let place = || {
+        reqwest::Client::new()
+            .post(format!("http://{}/api/me/topup", env.addr))
+            .bearer_auth(&env.user_token)
+            .json(&json!({"amount_micro":5_000_000,"gateway":"epay"}))
+            .send()
+    };
+    for _ in 0..10 {
+        assert_eq!(place().await.unwrap().status(), 200);
+    }
+    let limited = place().await.unwrap();
+    assert_eq!(limited.status(), 429);
+    let body: Value = limited.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+    assert_eq!(body["error"]["param"], "place_order", "{body}");
+
+    // 换个新用户，直接把未支付订单补到上限：频控之外还有总量闸
+    let other = setup().await;
+    sqlx::query(
+        "INSERT INTO recharge_orders(order_no,user_id,amount_micro,gateway)
+         SELECT 'cap-'||gen_random_uuid()::text,$1,5000000,'epay' FROM generate_series(1,20)",
+    )
+    .bind(other.user_id)
+    .execute(&other.pg)
+    .await
+    .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/me/topup", other.addr))
+        .bearer_auth(&other.user_token)
+        .json(&json!({"amount_micro":5_000_000,"gateway":"epay"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 429);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "too_many_pending_orders", "{body}");
+    let unpaid: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM recharge_orders WHERE user_id=$1 AND status=0")
+            .bind(other.user_id)
+            .fetch_one(&other.pg)
+            .await
+            .unwrap();
+    assert_eq!(unpaid, 20, "被拒的下单不能留下订单行");
+}

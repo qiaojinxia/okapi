@@ -146,7 +146,7 @@ fn request_maps_media_parts_to_multipart_user_content() {
             {"text": "what is this"},
             {"inlineData": {"mimeType": "image/png", "data": "AAAA"}},
             {"inline_data": {"mime_type": "audio/wav", "data": "BBBB"}},
-            // OpenAI chat 没有 pdf 部件：丢弃，不得把整条消息搞坏
+            // OpenAI chat 的 file 部件承载内联 PDF
             {"inlineData": {"mimeType": "application/pdf", "data": "CCCC"}}
         ]}]}),
         "m",
@@ -157,9 +157,34 @@ fn request_maps_media_parts_to_multipart_user_content() {
         json!([{"role": "user", "content": [
             {"type": "text", "text": "what is this"},
             {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
-            {"type": "input_audio", "input_audio": {"data": "BBBB", "format": "wav"}}
+            {"type": "input_audio", "input_audio": {"data": "BBBB", "format": "wav"}},
+            {"type": "file", "file": {"file_data": "data:application/pdf;base64,CCCC"}}
         ]}])
     );
+}
+
+/// chat 表达不了的媒体（视频、按 URI 引用的非图片文件）报错，不能静默丢掉：
+/// 丢掉后模型在看不到附件的情况下作答，调用方毫不知情。
+#[test]
+fn request_rejects_media_chat_cannot_express() {
+    for (part, reason) in [
+        (
+            json!({"inlineData": {"mimeType": "video/mp4", "data": "DDDD"}}),
+            "unsupported_content:video/mp4",
+        ),
+        (
+            json!({"fileData": {"mimeType": "application/pdf", "fileUri": "gs://b/a.pdf"}}),
+            "unsupported_content:fileData",
+        ),
+    ] {
+        let body = json!({"contents": [{"role": "user", "parts": [{"text": "see"}, part]}]});
+        let raw = Bytes::from(serde_json::to_vec(&body).unwrap());
+        let err = request_gemini_to_openai(&raw, "m", false).unwrap_err();
+        assert!(
+            matches!(&err, okapi_providers::UpstreamError::Build(r) if r == reason),
+            "{err:?}"
+        );
+    }
 }
 
 #[test]

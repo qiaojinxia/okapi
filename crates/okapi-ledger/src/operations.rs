@@ -65,7 +65,8 @@ pub async fn debit(
     )
     .await?;
     tx.commit().await?;
-    let receipt = crate::transfers::finish(&mut guard, ledger, user_id, id, crate::Pool::Wallet).await;
+    let receipt =
+        crate::transfers::finish(&mut guard, ledger, user_id, id, crate::Pool::Wallet).await;
     Ok((applied, Some(receipt)))
 }
 

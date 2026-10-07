@@ -16,15 +16,37 @@ import { usePermission } from '@/hooks/use-auth'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { parseInt32 } from '@/lib/int32'
 
 /// 缺省成员关系：只进 default 池、不覆盖。
 export function defaultMembership(): PoolMember[] {
   return [{ pool_code: DEFAULT_POOL, priority_override: null, weight_override: null }]
 }
 
-function parseOverride(raw: string): number | null {
-  const n = Number(raw.trim())
-  return raw.trim() === '' || !Number.isInteger(n) ? null : n
+/// 覆盖值输入：保留原始文本，输入中途的 "-"、"1a" 不会把整格清空；只有留空（继承）或合法的
+/// 32 位整数才写回，否则标红，失焦后恢复成最后一次合法的值——保存的永远是看得见的那个数。
+function OverrideInput({ value, placeholder, onChange }: {
+  value: number | null
+  placeholder: string
+  onChange: (next: number | null) => void
+}) {
+  const [draft, setDraft] = useState<string | null>(null)
+  const text = draft ?? (value === null ? '' : String(value))
+  return (
+    <Input
+      className="h-7 w-16 px-2 text-xs"
+      inputMode="numeric"
+      placeholder={placeholder}
+      value={text}
+      aria-invalid={parseInt32(text) === null}
+      onChange={(e) => {
+        setDraft(e.target.value)
+        const parsed = parseInt32(e.target.value)
+        if (parsed !== null) onChange(parsed ?? null)
+      }}
+      onBlur={() => setDraft(null)}
+    />
+  )
 }
 
 /// 池成员关系编辑器（受控）：每个池一行——勾选即加入；勾上后可给本池单独的
@@ -51,8 +73,8 @@ export function PoolMembershipEditor({
     if (find(code)) onChange(value.filter((m) => m.pool_code !== code))
     else onChange([...value, { pool_code: code, priority_override: null, weight_override: null }])
   }
-  const patch = (code: string, field: 'priority_override' | 'weight_override', raw: string) => {
-    onChange(value.map((m) => (m.pool_code === code ? { ...m, [field]: parseOverride(raw) } : m)))
+  const patch = (code: string, field: 'priority_override' | 'weight_override', next: number | null) => {
+    onChange(value.map((m) => (m.pool_code === code ? { ...m, [field]: next } : m)))
   }
 
   if (pools.isError && !pools.data) {
@@ -82,22 +104,18 @@ export function PoolMembershipEditor({
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <label className="flex items-center gap-1">
                   {t('admin:poolOverridePriority')}
-                  <Input
-                    className="h-7 w-16 px-2 text-xs"
-                    inputMode="numeric"
+                  <OverrideInput
+                    value={m.priority_override}
                     placeholder={t('admin:poolOverrideInherit')}
-                    value={m.priority_override ?? ''}
-                    onChange={(e) => patch(p.pool_code, 'priority_override', e.target.value)}
+                    onChange={(next) => patch(p.pool_code, 'priority_override', next)}
                   />
                 </label>
                 <label className="flex items-center gap-1">
                   {t('admin:poolOverrideWeight')}
-                  <Input
-                    className="h-7 w-16 px-2 text-xs"
-                    inputMode="numeric"
+                  <OverrideInput
+                    value={m.weight_override}
                     placeholder={t('admin:poolOverrideInherit')}
-                    value={m.weight_override ?? ''}
-                    onChange={(e) => patch(p.pool_code, 'weight_override', e.target.value)}
+                    onChange={(next) => patch(p.pool_code, 'weight_override', next)}
                   />
                 </label>
               </div>

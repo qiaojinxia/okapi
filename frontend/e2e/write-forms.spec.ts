@@ -1962,7 +1962,7 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
   expect(calls[3]).toMatchObject({ path: '/admin/users/7/subscription', method: 'DELETE' })
   await expect(drawer.getByText('当前没有激活的订阅。')).toBeVisible()
 
-  // 余额有效期：日期 → 当天 UTC 零点的 RFC3339；清空 → null（永不过期）
+  // 余额有效期：日期含当天 → 浏览器本地时间当天结束的 RFC3339；清空 → null（永不过期）
   await drawer.getByRole('tab', { name: '余额', exact: true }).click()
   await drawer.locator('#uexpiry').fill('2026-12-31')
   expiryFail = true
@@ -1974,7 +1974,7 @@ test('用户抽屉其余页签：角色只发改动的那一项、订阅只列�
   // 余额段在系数段之前：填了日期后它的按钮才叫"保存"，取第一个
   await drawer.getByRole('button', { name: '保存', exact: true }).first().click()
   await done
-  expect(calls[4]).toEqual({ path: '/admin/users/7/balance-expiry', method: 'POST', body: { expires_at: '2026-12-31T00:00:00.000Z' } })
+  expect(calls[4]).toEqual({ path: '/admin/users/7/balance-expiry', method: 'POST', body: { expires_at: new Date('2026-12-31T23:59:59.999').toISOString() } })
   await drawer.locator('#uexpiry').fill('')
   done = page.waitForRequest((r) => r.url().endsWith('/balance-expiry'))
   await drawer.getByRole('button', { name: '取消有效期' }).click()

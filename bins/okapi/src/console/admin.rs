@@ -2128,11 +2128,7 @@ pub async fn credit_user(
             json!({ "tags": ["manual_debit"], "reason": req.reason }),
         )
         .await?;
-        (
-            applied.as_micros().saturating_neg(),
-            receipt,
-            "user.debit",
-        )
+        (applied.as_micros().saturating_neg(), receipt, "user.debit")
     };
     audit(
         &state,
@@ -2142,14 +2138,12 @@ pub async fn credit_user(
         json!({ "amount_micro": req.amount_micro, "applied_micro": applied_micro, "reason": req.reason }),
     )
     .await;
-    Ok(Json(
-        json!({
-            "balance_after_micro": receipt.as_ref().and_then(|r| r.balance_after).map(okapi_domain::Money::as_micros),
-            "operation_id": receipt.as_ref().map(|r| r.operation_id),
-            "pending": receipt.as_ref().is_some_and(|r| r.balance_after.is_none()),
-            "applied_micro": applied_micro,
-        }),
-    ))
+    Ok(Json(json!({
+        "balance_after_micro": receipt.as_ref().and_then(|r| r.balance_after).map(okapi_domain::Money::as_micros),
+        "operation_id": receipt.as_ref().map(|r| r.operation_id),
+        "pending": receipt.as_ref().is_some_and(|r| r.balance_after.is_none()),
+        "applied_micro": applied_micro,
+    })))
 }
 
 #[derive(Deserialize)]

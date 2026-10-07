@@ -253,6 +253,12 @@ okapi-providers/src/
 └── credentials/       # static_key / oauth_refresh / cloud_sts
 ```
 
+**内容块转换规则（2026-10-07）**：对端表达得了的照转——内联 PDF 转成 Anthropic `document` 块 /
+Gemini `inlineData` / chat `file`，音频转成 Gemini `inlineData`；表达不了的（按 file_id / URL 引用的文件、
+对端不收的媒体、未知类型）直接 400 `bad_request`，param = `unsupported_content:<类型>`，**不静默丢弃**——
+丢掉后模型在看不到附件的情况下作答，整条 user turn 被丢时还会把上一条 assistant 当成预填续写。
+解析不出对象的 tool_call 参数（典型是上一轮被 max_tokens 截断）原文放进 `_raw_arguments`，不换成 `{}`。
+
 ### 4.2 核心 trait
 
 **2026-10-01 第一批架构落地**：编译期适配器注册表、独立凭证管理与能力执行计划的
@@ -1719,6 +1725,8 @@ N 个副本就是 N 倍并发写压向同一个 PG，闸的效力随副本数线
   `402 price_above_max`（param 回显是哪一轴超了、实际单价多少），不扣费也不打上游。
   比较基准取快照里的 `final_unit_price_input_per_1m_usd`——它已过模型/分组/个人系数与
   修饰器全链，正是这次真会按之的价；输出侧单价 = 它 × `completion_ratio`。
+  按次计价的模型没有 token 单价可比：给了任一上限就拒（param = `per_call:` + 本次按次实付价），
+  不当作没超——否则上限对它静默失效。备选模型同理跳过。
 - **`allow_fallbacks: false`** → 首次失败即返回，不改投。**先判再自增 `failover_count`**：
   它记的是"这次请求换了几回渠道"，拒绝改投时一次也没换，记成 1 会把分析面的 failover
   指标虚高一截。key 状态机照常登记——这条渠道确实出过问题，不因调用方不要 failover 而当没发生。
@@ -1867,12 +1875,15 @@ temperature 在 gemini 侧要落到 `generationConfig`）——本轮只放能�
   API 响应，不受"后端只回 error_code"约束。
 - **注册邮箱验证**：`registration_policy.email_verification: bool`（缺省 false）。开启时
   `POST /auth/email-code {email}` 先过注册策略（关闭 / 域名黑白名单都不给码，免费邮件不该给刷号者），
-  每 IP 限流 scope `email_code`（缺省 3/min）+ 每邮箱 60s 冷却（Redis `verify:email:cd:<email>`），
+  每 IP 限流 scope `email_code`（缺省 3/min）+ 每邮箱 60s 冷却（Redis `verify:email:cd:<email>`）
+  + 每收件箱每日 10 封（Redis `mail:day:email_code:<收件箱>`，24h 窗；收件箱去掉 `+标签`、Gmail 再去掉点，
+  换 IP 轮着发也只能发这么多，超出 429 `email_daily_limit`），
   6 位数字码存 Redis `verify:email:<email>`（10 min，覆盖旧码）。`/auth/register` 带 `email_code`，
   错码 400 `email_code_invalid`，对上即删（一次性）。SMTP 未配置而策略要求验证 → 501
   `smtp_not_configured`（配置矛盾要暴露，不能静默放行）。`GET /api/registration` 透出
   `email_verification` 供登录页决定是否画验证码栏。
-- **找回密码**：`POST /auth/password/forgot {email}` → 每 IP `password_forgot` 3/min；无论邮箱是否存在
+- **找回密码**：`POST /auth/password/forgot {email}` → 每 IP `password_forgot` 3/min + 每收件箱每日 10 封
+  （与验证码分开计；在查邮箱是否存在之前计，429 `email_daily_limit` 不泄露是否注册）；无论邮箱是否存在
   都回 `{ok:true}`（防枚举），存在且有密码（非 OAuth-only）才发信：token 32 位随机，Redis
   `pwreset:<sha256(token)>` → user_id（30 min，明文 token 只出现在邮件里）；链接
   `{site_url}/reset-password?token=…`，必须配置合法 `site_url`；缺失或非法配置对所有邮箱一致返回 `site_url_required`，不使用 Host/X-Forwarded-Proto。
@@ -1884,7 +1895,7 @@ temperature 在 gemini 侧要落到 `generationConfig`）——本轮只放能�
 - **不做**：SMS、邮件队列 / 重试（低频面，失败即日志 + 前端提示重发）、HTML 富模板编辑器
   （new-api 把模板放系统设置里改，实际很少有人改；需要时再开）、邮箱变更验证。
 
-**验收**：`console_smtp.rs`（本地 mock SMTP：注册验证码全流程 / 策略拒绝不发码 / 60s 冷却 /
+**验收**：`console_smtp.rs`（本地 mock SMTP：注册验证码全流程 / 策略拒绝不发码 / 60s 冷却 / 每收件箱每日上限 /
 找回密码 token 一次性 + 错 token 400 / 未配置 501 / email 通知通道）+ `mail` 单测（配置解析、
 模板双语）。前端：设置页 SMTP 卡（含测试发送）、注册策略卡加"邮箱验证"开关、登录页验证码栏 +
 "忘记密码"、`/reset-password` 页、通知卡 email 通道。
@@ -1936,7 +1947,9 @@ expires_at))` → `sub_reset`；② `expires_at <= now` → status 2 → `sub_se
 
 **API**：门户 `GET /api/plans`（kind 1 启用套餐）、`GET /api/me/subscription`（当前订阅 + Redis 池剩余 +
 窗口 / 到期时刻）、`POST /api/me/subscriptions/checkout {plan_code, gateway}`（与 `/api/me/topup` 同响应形状，
-`price_micro = 0` 的套餐 400 `plan_not_purchasable`）。管理 `POST /admin/plans` 请求体扩订阅字段；
+`price_micro = 0` 的套餐 400 `plan_not_purchasable`）。两种下单共用闸：每用户每分钟 10 单（429 `rate_limited`，
+param `place_order`）、24 小时内未支付订单满 20 单即拒（429 `too_many_pending_orders`）——Stripe 每单都要调一次
+建会话的外部 API，未支付订单又不会自动作废。管理 `POST /admin/plans` 请求体扩订阅字段；
 `GET /admin/plans` 列表带 `active_subscribers`；`POST /admin/users/{id}/subscription {plan_code}` 发放 / 续期、
 `DELETE` 立即到期（status 3）；`GET /admin/users/{id}/subscription`。`/v1/dashboard/billing/subscription`
 的 `hard_limit_usd` 计入订阅池剩余（客户端"总额 − 已用 = 剩余"的口径仍对）。
@@ -2728,6 +2741,8 @@ SIGTERM → 摘流量（readiness 置 false）→ 停接新请求 → 在途 SSE
 ### 14.4 入口硬化
 
 - **上游 URL SSRF 校验**（Sub2API url_allowlist 吸收）：管理员配置 channels.api_base 时校验 scheme（默认仅 https）与目标（默认禁私网/环回/链路本地段），内网上游场景可按部署放开；配合出口侧 egress 白名单。**【2026-09-07】管理面外呼不跟随重定向**：闸只校验得到管理员填的那个 URL，跟着 30x 走就能被公网地址引到私网 / 云元数据地址；`HttpPool` 分两族 client，测活 / 拉模型 / 余额 / Turnstile / OAuth userinfo / 支付 / 倍率同步走 `probe`（`Policy::none()`），数据面同样禁用重定向（第三轮审查：避免非 Authorization 自定义鉴权头泄漏，下载类端点也不得携凭证跟随 CDN 跳转）。同日续：订阅 OAuth 的换码 / 刷新、Vertex 服务账号换 token、Bedrock 列模型也换成 `probe`——凡是"拿一个 JSON 回来解析"的外呼都不跟随重定向；仍走数据面 client 的只剩 bedrock / vertex 的按模型测活（和真实请求同一条路）。**闸覆盖的地址不止 `api_base`**：`settings.oauth_token_url`（订阅 OAuth 刷新地址覆写）与 Vertex 服务账号 JSON 里的 `token_uri` 都是网关会 POST 的地址，凭证密封存储、写入口是唯一能校验的地方，建渠道 / 轮换凭证 / MCP 建渠道三处按凭证形状（能解析成服务账号 JSON 即查）过同一道闸，违规回 `credential_token_uri`。DNS rebinding 仍在 backlog。
+- **登录耗时不泄露邮箱是否注册**：无此账户、OAuth-only（无密码）账户也空跑一次与真实散列同参数的
+  argon2 校验（`identity::find_login_user`），不提前返回。
 - WS 治理（Realtime / Responses WS 入口，M4）：per-key 客户端连接数上限（Redis 60s 租约 / 20s 续期）、首消息总超时、turn 间空闲超时。
 - 请求体/行缓冲上限见 §3.7；管理后台与门户接口独立限流。
 

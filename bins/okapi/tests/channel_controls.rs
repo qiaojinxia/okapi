@@ -50,6 +50,10 @@ async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
         json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
     )
 }
+async fn count_tokens(State(mock): State<Mock>) -> Json<Value> {
+    mock.inference.fetch_add(1, Ordering::SeqCst);
+    Json(json!({"object":"response.input_tokens","input_tokens":4242}))
+}
 async fn refresh(State(mock): State<Mock>) -> Json<Value> {
     mock.refresh.fetch_add(1, Ordering::SeqCst);
     Json(
@@ -89,6 +93,8 @@ async fn setup(provider: &str, settings: Value) -> Env {
     let mock = Mock::default();
     let routes = Router::new()
         .route("/v1/chat/completions", post(inference))
+        .route("/messages/count_tokens", post(count_tokens))
+        .route("/v1/responses/input_tokens", post(count_tokens))
         .route("/api/oauth/usage", get(quota))
         .route("/backend-api/wham/usage", get(quota))
         .route("/api/codex/usage", get(quota))
@@ -566,6 +572,70 @@ async fn external_refresh_mode_never_consumes_a_shared_refresh_token() {
             .is_err()
     );
     assert_eq!(env.mock.refresh.load(Ordering::SeqCst), 0);
+}
+
+/// 计数端点不计费，但打上游同样占用账号：被账号准入挡住（这里是本地 token 上限）的账号
+/// 不拿去数。Messages 计数退本地估算，Responses 计数按无可用渠道拒。
+#[tokio::test]
+async fn token_counting_honours_account_admission() {
+    for (provider, path, body) in [
+        (
+            "anthropic_max",
+            "/v1/messages/count_tokens",
+            json!({"messages":[{"role":"user","content":"Hello"}]}),
+        ),
+        (
+            "openai",
+            "/v1/responses/input_tokens",
+            json!({"input":"Hello"}),
+        ),
+    ] {
+        let env = setup(
+            provider,
+            json!({"account_control":{"local_tokens":{"cap":20}}}),
+        )
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = gateway::router(env.state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut body = body;
+        body["model"] = json!(env.model);
+        let count = || {
+            reqwest::Client::new()
+                .post(format!("http://{addr}{path}"))
+                .bearer_auth(&env.client_token)
+                .json(&body)
+                .send()
+        };
+        let response = count().await.unwrap();
+        assert_eq!(response.status(), 200, "{provider}");
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["input_tokens"],
+            4242,
+            "{provider}"
+        );
+        assert_eq!(env.mock.inference.load(Ordering::SeqCst), 1, "{provider}");
+
+        bill(&env, 20, None, 0).await;
+        let response = count().await.unwrap();
+        let status = response.status();
+        let reply: Value = response.json().await.unwrap();
+        if provider == "anthropic_max" {
+            assert_eq!(status, 200, "{reply}");
+            assert_ne!(reply["input_tokens"], 4242, "{reply}");
+        } else {
+            assert_eq!(status, 503, "{reply}");
+            assert_eq!(reply["error"]["code"], "no_available_channel", "{reply}");
+        }
+        assert_eq!(
+            env.mock.inference.load(Ordering::SeqCst),
+            1,
+            "被挡住的账号不该再被拿去数 token：{provider}"
+        );
+    }
 }
 
 #[tokio::test]

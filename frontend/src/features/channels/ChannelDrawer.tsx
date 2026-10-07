@@ -44,6 +44,7 @@ import type { PoolMember } from '@/features/pools/types'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { parseInt32 } from '@/lib/int32'
 import { qk } from '@/lib/query-keys'
 
 const EDIT_TABS = ['conn', 'models', 'sched', 'behavior'] as const
@@ -221,6 +222,8 @@ export function ChannelDrawer({
   const [newConcurrency, setNewConcurrency] = useState('')
   const concurrency = parseLimit(newConcurrency)
   const concurrencyValid = concurrency !== null && (concurrency === undefined || concurrency <= 2_147_483_647)
+  // 留空按 0；写错（含越界）就拦下提交，不再悄悄按 0 存
+  const priority = parseInt32(form.priority)
   // 新建时的池成员关系：缺省只进 default 池（建完即对 default 分组可用）；
   // 渠道只服务它所在的池，全站分组都配了专属池的站点在这里勾对应的池
   const [newPools, setNewPools] = useState<PoolMember[]>(defaultMembership)
@@ -238,7 +241,7 @@ export function ChannelDrawer({
           api_base: form.api_base,
           credential,
           models,
-          priority: Number(form.priority) || 0,
+          priority: priority ?? 0,
           settings: channelSettingsForSave(settings),
           max_concurrency: concurrency ?? undefined,
           pools: newPools,
@@ -264,7 +267,7 @@ export function ChannelDrawer({
           name: form.name,
           api_base: form.api_base,
           models,
-          priority: Number(form.priority) || 0,
+          priority: priority ?? 0,
           settings: channelSettingsForSave(settings),
           cost_milli: costMilli ?? undefined,
           data_retention: form.dataRetention,
@@ -333,7 +336,7 @@ export function ChannelDrawer({
             {t('common:cancel')}
           </Button>
           <Button
-            disabled={!canSubmit || !endpointValid || !controlValid || !concurrencyValid || costMilli === null || create.isPending || save.isPending}
+            disabled={!canSubmit || !endpointValid || !controlValid || !concurrencyValid || costMilli === null || priority === null || create.isPending || save.isPending}
             onClick={() => (isEdit ? save.mutate() : create.mutate())}
           >
             {isEdit ? t('common:save') : t('common:create')}
@@ -484,8 +487,8 @@ export function ChannelDrawer({
                 models={models}
                 settings={channelSettingsForSave(settings)}
                 valid={controlValid && concurrencyValid && (isEdit ? rotationKeyId !== undefined
-                  : endpointValid && costMilli !== null && egressBinding !== null)}
-                creationOptions={!isEdit ? { api_base: form.api_base, priority: Number(form.priority) || 0,
+                  : endpointValid && costMilli !== null && priority !== null && egressBinding !== null)}
+                creationOptions={!isEdit ? { api_base: form.api_base, priority: priority ?? 0,
                   pools: newPools, cost_milli: costMilli ?? undefined, data_retention: form.dataRetention,
                   ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}) }
                   : undefined}
@@ -627,7 +630,8 @@ export function ChannelDrawer({
       {(!isEdit || tab === 'sched') && (
           <OptionalSection id="channel-schedule-options" title={t('admin:channelScheduleOptions')} hint={t('admin:groupScheduleHint')}
             summary={scheduleSummary}
-            error={costMilli === null ? t('errors:bad_request', { param: 'cost_milli' }) : undefined}>
+            error={costMilli === null ? t('errors:bad_request', { param: 'cost_milli' })
+              : priority === null ? t('errors:bad_request', { param: 'priority' }) : undefined}>
             <div className="flex flex-col gap-1.5">
               <Label htmlFor="d-priority">{t('admin:priority')}</Label>
               <Input
@@ -635,6 +639,7 @@ export function ChannelDrawer({
                 className="w-24"
                 inputMode="numeric"
                 value={form.priority}
+                aria-invalid={priority === null}
                 onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
               />
             </div>

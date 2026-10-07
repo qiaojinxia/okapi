@@ -6,7 +6,8 @@
 //!
 //! 取 OpenRouter 的字段形状（存量客户端已经在发 `provider: {...}`），先落三个子集：
 //! - `allow_fallbacks`（缺省 true）：false = 首次失败即返回，不做 failover
-//! - `max_price.{prompt,completion}`：单价上限（USD / 1M token），超了直接拒而不是先扣后悔
+//! - `max_price.{prompt,completion}`：单价上限（USD / 1M token），超了直接拒而不是先扣后悔；
+//!   按次计价的模型没有 token 单价可比，给了上限就拒
 //! - `zdr` / `data_collection: "deny"`：只路由到声明不留存数据的渠道
 //!
 //! 解析从**原文**做，与入口方言无关（chat / responses / messages 三个入口共用）；

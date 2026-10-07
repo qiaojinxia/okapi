@@ -395,3 +395,64 @@ fn response_stop_reason_table() {
     assert_eq!(finish(json!("stop_sequence")), "stop");
     assert_eq!(finish(Value::Null), "stop");
 }
+
+/// 内联 PDF 转成 document 块。转不了的 part（音频、file_id 引用、未知类型）报错，不能丢掉：
+/// 丢掉后整条 user turn 可能消失，上一条 assistant 会被当成预填接着写。
+#[test]
+fn request_maps_inline_pdfs_and_rejects_parts_it_cannot_express() {
+    let out = convert_req(&json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": ""},
+            {"type": "file", "file": {"filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}}
+        ]}]
+    }));
+    assert_eq!(
+        out["messages"][0]["content"],
+        json!([{"type": "document",
+            "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="}}])
+    );
+    for part in [
+        json!({"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}),
+        json!({"type": "file", "file": {"file_id": "file-1"}}),
+        json!({"type": "video_url", "video_url": {"url": "https://x/v.mp4"}}),
+    ] {
+        let kind = part["type"].as_str().unwrap().to_owned();
+        let body = json!({"model": "m", "messages": [
+            {"role": "assistant", "content": "earlier"},
+            {"role": "user", "content": [part]}
+        ]});
+        let err = request_openai_to_anthropic(
+            &Bytes::from(serde_json::to_vec(&body).unwrap()),
+            "claude-x",
+            4096,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, okapi_providers::UpstreamError::Build(reason)
+                if *reason == format!("unsupported_content:{kind}")),
+            "{err:?}"
+        );
+    }
+}
+
+/// 截断的 tool_call 参数保留原文，不能静默换成空对象；空串仍按无参数。
+#[test]
+fn request_keeps_unparseable_tool_arguments() {
+    let out = convert_req(&json!({
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{\"path\": \"/tmp/a"}},
+                {"id": "c2", "type": "function", "function": {"name": "g", "arguments": ""}}
+            ]}
+        ]
+    }));
+    let calls = &out["messages"][1]["content"];
+    assert_eq!(
+        calls[0]["input"],
+        json!({"_raw_arguments": "{\"path\": \"/tmp/a"})
+    );
+    assert_eq!(calls[1]["input"], json!({}));
+}

@@ -558,9 +558,15 @@ mod tests {
     fn cjk_input_is_not_undercounted_like_chars_div_four() {
         let text = "一二三四五".repeat(81);
         let est = estimate_input_tokens("text-embedding-3-small", &[&json!(text)]);
-        assert!(est >= 300, "405 汉字的真实分词远超 chars/4 的 108，得到 {est}");
+        assert!(
+            est >= 300,
+            "405 汉字的真实分词远超 chars/4 的 108，得到 {est}"
+        );
         let en = estimate_input_tokens("text-embedding-3-small", &[&json!("word ".repeat(200))]);
-        assert!((150..=400).contains(&en), "200 词英文应在 150-400 tokens，得到 {en}");
+        assert!(
+            (150..=400).contains(&en),
+            "200 词英文应在 150-400 tokens，得到 {en}"
+        );
     }
 
     /// 预分词的 token id 数组按元素个数计，不喂给分词器；请求级常量与旧式 +3 对齐。

@@ -67,7 +67,7 @@ pub fn request_openai_to_anthropic(
                 push_merged(&mut messages, "user", vec![block]);
             }
             "assistant" => {
-                let mut blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null));
+                let mut blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null))?;
                 for call in msg
                     .get("tool_calls")
                     .and_then(Value::as_array)
@@ -75,11 +75,7 @@ pub fn request_openai_to_anthropic(
                     .flatten()
                 {
                     let f = call.get("function").cloned().unwrap_or(Value::Null);
-                    let input = f
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                        .unwrap_or_else(|| json!({}));
+                    let input = super::tool_arguments(f.get("arguments").and_then(Value::as_str));
                     blocks.push(json!({
                         "type": "tool_use",
                         "id": call.get("id").and_then(Value::as_str).unwrap_or(""),
@@ -92,7 +88,7 @@ pub fn request_openai_to_anthropic(
                 }
             }
             _ => {
-                let blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null));
+                let blocks = content_to_blocks(msg.get("content").unwrap_or(&Value::Null))?;
                 if !blocks.is_empty() {
                     push_merged(&mut messages, "user", blocks);
                 }
@@ -125,7 +121,10 @@ pub fn request_openai_to_anthropic(
 /// 采样参数透传，唯 temperature 按方言契约收敛：OpenAI 合法到 2.0，Anthropic
 /// messages 全程 0–1，直传 >1 上游必 400 并烧 failover。钳到 1.0 恰是 Anthropic
 /// 缺省温度，采样行为不劣化。
-fn convert_sampling(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map<String, Value>) {
+fn convert_sampling(
+    src: &serde_json::Map<String, Value>,
+    out: &mut serde_json::Map<String, Value>,
+) {
     for key in ["top_p", "stream"] {
         if let Some(v) = src.get(key) {
             out.insert(key.into(), v.clone());
@@ -196,33 +195,52 @@ fn push_merged(messages: &mut Vec<Value>, role: &str, blocks: Vec<Value>) {
     messages.push(json!({"role": role, "content": blocks}));
 }
 
-/// OpenAI content（string | parts 数组）→ Anthropic 内容块。
-fn content_to_blocks(content: &Value) -> Vec<Value> {
+/// OpenAI content（string | parts 数组）→ Anthropic 内容块；表达不了的 part 报错（见
+/// [`super::unsupported_part`]）。空文本 part 跳过：Anthropic 拒收空 text 块。
+fn content_to_blocks(content: &Value) -> Result<Vec<Value>, UpstreamError> {
     match content {
-        Value::String(s) if !s.is_empty() => vec![json!({"type": "text", "text": s})],
-        Value::Array(parts) => parts.iter().filter_map(part_to_block).collect(),
-        _ => Vec::new(),
+        Value::String(s) if !s.is_empty() => Ok(vec![json!({"type": "text", "text": s})]),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| part_to_block(part).transpose())
+            .collect(),
+        _ => Ok(Vec::new()),
     }
 }
 
-fn part_to_block(part: &Value) -> Option<Value> {
-    match part.get("type").and_then(Value::as_str) {
-        Some("text") => {
-            let text = part.get("text").and_then(Value::as_str)?;
-            Some(json!({"type": "text", "text": text}))
+fn part_to_block(part: &Value) -> Result<Option<Value>, UpstreamError> {
+    let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+    let block = match kind {
+        // assistant 历史里的 refusal part 是纯文本
+        "text" | "refusal" => {
+            return Ok(part
+                .get(kind)
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty())
+                .map(|text| json!({"type": "text", "text": text})));
         }
-        Some("image_url") => {
-            let url = part.get("image_url")?.get("url").and_then(Value::as_str)?;
-            if let Some(rest) = url.strip_prefix("data:") {
-                let (media_type, data) = rest.split_once(";base64,")?;
-                Some(json!({"type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": data}}))
-            } else {
-                Some(json!({"type": "image", "source": {"type": "url", "url": url}}))
-            }
-        }
+        "image_url" => part
+            .pointer("/image_url/url")
+            .and_then(Value::as_str)
+            .and_then(|url| match url.strip_prefix("data:") {
+                Some(rest) => rest.split_once(";base64,").map(|(media_type, data)| {
+                    json!({"type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": data}})
+                }),
+                None => Some(json!({"type": "image", "source": {"type": "url", "url": url}})),
+            }),
+        // 内联 PDF → document 块；file_id 引用的是 OpenAI 那边的文件，这里取不到
+        "file" => part
+            .pointer("/file/file_data")
+            .and_then(Value::as_str)
+            .and_then(|url| url.strip_prefix("data:application/pdf;base64,"))
+            .map(|data| {
+                json!({"type": "document",
+                    "source": {"type": "base64", "media_type": "application/pdf", "data": data}})
+            }),
         _ => None,
-    }
+    };
+    block.map(Some).ok_or_else(|| super::unsupported_part(kind))
 }
 
 fn content_to_text(content: &Value) -> String {

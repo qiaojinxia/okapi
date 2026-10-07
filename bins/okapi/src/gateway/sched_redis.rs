@@ -678,6 +678,13 @@ impl SchedulerRedis {
             .await
     }
 
+    /// 收件箱当日发信计数 +1（24h 窗口，从窗口内第一封起算），返回窗口内累计。
+    /// Redis 故障按 0 放行：与每 IP 限流一样，限额是风控增强，不阻断发信主流程。
+    pub async fn mail_daily_incr(&self, scope: &str, mailbox: &str) -> i64 {
+        let key = format!("mail:day:{scope}:{mailbox}");
+        self.incr_with_ttl(&key, 24 * 3600).await.unwrap_or(0)
+    }
+
     /// 兑换码批次 × IP 核销计数 +1（7d 窗口；#1790-5 max_per_ip 闸）。
     pub async fn redeem_ip_incr(&self, batch: uuid::Uuid, ip: &str) -> i64 {
         let key = format!("redeem:ip:{batch}:{ip}");

@@ -27,6 +27,11 @@ use std::collections::BTreeMap;
 mod validation;
 
 const MIN_TOPUP_MICRO: i64 = 1_000_000; // $1 起充
+/// 每用户每分钟最多下几单（钱包充值与订阅购买合计）。Stripe 每单都要调一次外部 API 建会话，
+/// 不设限时任何登录用户都能拿本站的商户账号刷 API。
+const ORDERS_PER_MINUTE: i64 = 10;
+/// 24 小时内未支付订单上限：未支付订单不会自动作废，不设上限时订单表可以被无限灌入。
+const MAX_PENDING_ORDERS: i64 = 20;
 
 // ---- 配置 ----
 
@@ -150,6 +155,32 @@ pub async fn place_order(
 ) -> Result<Value, AppError> {
     if !(1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&amount_micro) {
         return Err(AppError::bad_request().with_param("amount_micro"));
+    }
+    if state
+        .sched
+        .crit_rate_incr("place_order", &format!("user:{user_id}"))
+        .await
+        > ORDERS_PER_MINUTE
+    {
+        return Err(AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            okapi_api::codes::RATE_LIMITED,
+        )
+        .with_param("place_order"));
+    }
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM recharge_orders
+         WHERE user_id = $1 AND status = 0 AND created_at > now() - interval '1 day'",
+    )
+    .bind(user_id)
+    .fetch_one(&state.pg)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    if pending >= MAX_PENDING_ORDERS {
+        return Err(AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_pending_orders",
+        ));
     }
     let order_no = format!(
         "okp{}{}",

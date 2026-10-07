@@ -175,6 +175,38 @@ pub async fn register(
 const EMAIL_CODE_TTL_SECS: i64 = 600;
 const EMAIL_CODE_COOLDOWN_SECS: i64 = 60;
 const PWRESET_TTL_SECS: i64 = 1800;
+/// 每个收件箱每天最多收几封验证码 / 找回密码邮件（两类分开计）。每 IP 限流挡不住
+/// 换 IP 轮着发，没有这道闸，任何人都能拿本站给别人的邮箱持续发信。
+const MAIL_DAILY_CAP: i64 = 10;
+
+/// 发信限额按收件箱计：去掉 `+标签`，Gmail 再去掉本地部分的点。这些写法投进同一个信箱，
+/// 分开计数等于给轰炸者无限个额度。只用于计数，不改用户填写的地址。
+fn mailbox_key(email: &str) -> String {
+    let Some((local, domain)) = email.rsplit_once('@') else {
+        return email.to_owned();
+    };
+    let local = local.split_once('+').map_or(local, |(base, _)| base);
+    if matches!(domain, "gmail.com" | "googlemail.com") {
+        return format!("{}@{domain}", local.replace('.', ""));
+    }
+    format!("{local}@{domain}")
+}
+
+/// 收件箱当日发信额度；在判断账号是否存在之前计，限额本身不泄露邮箱是否注册。
+async fn mail_daily_guard(state: &AppState, scope: &str, email: &str) -> Result<(), AppError> {
+    if state
+        .sched
+        .mail_daily_incr(scope, &mailbox_key(email))
+        .await
+        > MAIL_DAILY_CAP
+    {
+        return Err(AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "email_daily_limit",
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct EmailCodeReq {
@@ -245,7 +277,7 @@ fn map_mail_error(err: crate::mail::MailError) -> AppError {
 }
 
 /// POST /auth/email-code：注册邮箱验证码。先过注册策略（关闭 / 域名黑白名单都不给码），
-/// 每 IP 限流 + 每邮箱 60s 冷却；SMTP 未配置 501。
+/// 每 IP 限流 + 每邮箱 60s 冷却 + 每收件箱每日上限；SMTP 未配置 501。
 pub async fn email_code(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
@@ -276,6 +308,7 @@ pub async fn email_code(
             "email_code_cooldown",
         ));
     }
+    mail_daily_guard(&state, "email_code", &email).await?;
     let code = format!("{:06}", rand::rng().random_range(0..1_000_000u32));
     if !state
         .sched
@@ -305,6 +338,7 @@ pub struct ForgotReq {
 
 /// POST /auth/password/forgot：无论邮箱是否存在都回 ok（防枚举）；存在且有密码才发信。
 /// SMTP 未配置 501——这是配置问题，前端该提示"联系管理员"而不是假装发出去了。
+/// 每收件箱每日上限对存在与否一视同仁地计，429 不泄露邮箱是否注册。
 pub async fn password_forgot(
     State(state): State<AppState>,
     conn: MaybeConnectInfo,
@@ -320,6 +354,7 @@ pub async fn password_forgot(
         .await
         .map_err(map_mail_error)?;
     let base = site_base_url(&state).await?;
+    mail_daily_guard(&state, "password_forgot", &email).await?;
     let Some(user_id) = identity::find_password_account(&state.pg, &email).await? else {
         return Ok(Json(json!({ "ok": true })));
     };
@@ -1038,5 +1073,19 @@ mod cookie_tests {
             assert_eq!(cookie.contains("; Secure"), secure);
             assert!(cookie.contains("HttpOnly; SameSite=Lax; Path=/"));
         }
+    }
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::mailbox_key;
+
+    #[test]
+    fn variants_of_one_inbox_share_a_quota() {
+        assert_eq!(mailbox_key("a.b+x@ok.test"), "a.b@ok.test");
+        assert_eq!(mailbox_key("a.b+x+y@gmail.com"), "ab@gmail.com");
+        assert_eq!(mailbox_key("a.b@googlemail.com"), "ab@googlemail.com");
+        assert_eq!(mailbox_key("plain@ok.test"), "plain@ok.test");
+        assert_eq!(mailbox_key("no-at-sign"), "no-at-sign");
     }
 }

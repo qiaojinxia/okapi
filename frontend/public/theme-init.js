@@ -8,5 +8,7 @@
       pref === 'dark' ||
       (pref !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches)
     if (dark) document.documentElement.classList.add('dark')
-  } catch (e) {}
+  } catch {
+    // 读不到存储（隐私模式等）就按浅色首屏，交给应用启动后再判
+  }
 })()

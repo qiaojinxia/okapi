@@ -445,6 +445,17 @@ async fn handle(
                 last_err = Some(super::account_control::attempt_error(&err));
             }
             Err(err) => {
+                // 5xx / 超时 / 连接失败不换渠道（图片请求非幂等，重发可能让上游重复出图），
+                // 但 key 健康照常登记：连续失败后冷却，后面的请求才会去别的渠道
+                if err.retriable_before_first_token() {
+                    super::key_health::failure(
+                        state,
+                        &cand,
+                        err.error_code(),
+                        super::chat::failure_kind_of(&err),
+                    )
+                    .await;
+                }
                 last_err = Some(super::account_control::attempt_error(&err));
                 break;
             }

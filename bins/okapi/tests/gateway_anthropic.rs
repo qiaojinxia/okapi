@@ -293,3 +293,43 @@ async fn anthropic_json_end_to_end() {
     assert_eq!(cached, 800);
     assert_eq!(amount, 600_000);
 }
+
+/// 协议转换表达不了的附件（这里是 Anthropic 不收的音频）：400 并回显是哪种 part，
+/// 不打上游、不扣费，而不是丢掉附件让模型照常作答。
+#[tokio::test]
+async fn content_the_upstream_cannot_express_is_rejected_not_dropped() {
+    let env = setup().await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "model": env.model,
+            "max_tokens": 256,
+            "messages": [
+                {"role": "system", "content": "sys prompt"},
+                {"role": "user", "content": [
+                    {"type": "text", "text": "what did I say?"},
+                    {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}}
+                ]}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "bad_request", "{body}");
+    assert_eq!(
+        body["error"]["param"], "unsupported_content:input_audio",
+        "{body}"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let charged: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount_micro), 0)::bigint FROM billing_records WHERE user_id = $1",
+    )
+    .bind(env.user_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(charged, 0, "转换失败不能扣费");
+}

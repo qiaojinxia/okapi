@@ -591,3 +591,54 @@ async fn disable_batch_stops_only_unredeemed_codes() {
         .collect();
     assert_eq!(affected, vec![json!(2), json!(0)]);
 }
+
+/// 核销在提交前失败（这里用约束让钱包入账失败）时兑换码没有被用掉，本 IP 的次数也要退还；
+/// 否则一次库故障就占掉这个 IP 在该批次 7 天的配额。
+#[tokio::test]
+async fn failed_redemption_refunds_the_ip_allowance() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let batch: Value = client
+        .post(format!("http://{}/admin/redemptions", env.addr))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"count": 1, "amount_micro": 100_000, "max_per_ip": 1}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = batch["codes"][0].as_str().unwrap().to_owned();
+    let ip = format!("203.0.113.{}", u32::from(rand_octet()));
+    let redeem = || {
+        client
+            .post(format!("http://{}/api/me/redeem", env.addr))
+            .bearer_auth(&env.user_token)
+            .header("x-real-ip", &ip)
+            .json(&json!({ "code": code }))
+            .send()
+    };
+    let name = format!("reject_redeem_{}", env.user_id);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE fund_transfers ADD CONSTRAINT {name} CHECK(user_id<>{}) NOT VALID",
+        env.user_id
+    )))
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    let failed = redeem().await.unwrap().status();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE fund_transfers DROP CONSTRAINT {name}"
+    )))
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    assert!(failed.is_server_error(), "{failed}");
+    let retried = redeem().await.unwrap();
+    assert_eq!(
+        retried.status(),
+        200,
+        "{}",
+        retried.text().await.unwrap_or_default()
+    );
+}
