@@ -34,21 +34,28 @@ async fn run(archived: bool) {
     for cost in [Some(1250), Some(0), None] {
         for stream in [false, true] {
             let mut usage = anthropic_usage::fixture();
-            usage["server_tool_use"] = json!({"web_search_requests":2,"web_fetch_requests":0});
+            // 「成本未知」：上游报告了没有价格契约的原生代码执行，工具成本覆盖不完整。
+            // 未定价的工具请求准入即拒，造不出未知成本了
+            usage["server_tool_use"] = if cost.is_some() {
+                json!({"web_search_requests":2,"web_fetch_requests":0})
+            } else {
+                json!({"web_search_requests":2,"web_fetch_requests":0,"code_execution_requests":1})
+            };
             let env = setup(Protocol::Anthropic, usage).await;
             sqlx::query("UPDATE users SET role=100 WHERE id=$1")
                 .bind(env.user)
                 .execute(&env.state.pg)
                 .await
                 .unwrap();
+            // 搜索一律定价（未定价的工具请求准入即拒）
+            server_tool_fees::activate(
+                &env,
+                &server_tool_fees::prices(
+                    &json!({"billing":"additional","price_per_request_micro":10000}),
+                ),
+            )
+            .await;
             if let Some(cost) = cost {
-                server_tool_fees::activate(
-                    &env,
-                    &server_tool_fees::prices(
-                        &json!({"billing":"additional","price_per_request_micro":10000}),
-                    ),
-                )
-                .await;
                 sqlx::query("UPDATE channels SET upstream_unit_cost=$2 WHERE name=$1")
                     .bind(&env.model)
                     .bind(json!({"relative_cost_milli":cost}))
@@ -56,14 +63,16 @@ async fn run(archived: bool) {
                     .await
                     .unwrap();
             }
-            let response = request_with_tools(
-                &env,
-                Protocol::Anthropic,
-                stream,
-                false,
-                Some(json!([{"type":"web_search_20250305","name":"web_search","max_uses":5}])),
-            )
-            .await;
+            let mut tools =
+                json!([{"type":"web_search_20250305","name":"web_search","max_uses":5}]);
+            if cost.is_none() {
+                tools
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"type":"code_execution_20250825","name":"code_execution"}));
+            }
+            let response =
+                request_with_tools(&env, Protocol::Anthropic, stream, false, Some(tools)).await;
             assert_eq!(response.status(), 200);
             assert!(!response.text().await.unwrap().contains("upstream_error"));
             let receipt = record(&env).await;
@@ -71,7 +80,7 @@ async fn run(archived: bool) {
             let original: (i64,i64,i64,Option<i64>,i64,Value,Value) = sqlx::query_as(
                 "SELECT amount_micro,original_amount_micro,discount_micro,upstream_cost_micro,pricing_epoch,pricing_snapshot,usage_details FROM billing_records WHERE request_id::text=$1")
                 .bind(id).fetch_one(&env.state.pg).await.unwrap();
-            let expected_amount = if cost.is_some() { 21600 } else { 1600 };
+            let expected_amount = 21600;
             let expected_cost = cost.map(|c| expected_amount * c / 1000);
             assert_eq!(
                 (original.0, original.1, original.2, original.3),

@@ -48,7 +48,7 @@ CREATE TABLE users (
     role               SMALLINT NOT NULL DEFAULT 1,   -- 1=user 10=admin 100=super_admin（值对齐 new-api）
     admin_role_id      BIGINT REFERENCES admin_roles(id),  -- 自定义子角色，仅 role=10 时生效
     status             SMALLINT NOT NULL DEFAULT 1,   -- 1=active 2=disabled
-    price_multiplier   NUMERIC(8,4) NOT NULL DEFAULT 1,    -- 个人级微调（保留 ok-api 灵活性）
+    price_multiplier   NUMERIC(12,6) NOT NULL DEFAULT 1,   -- 个人级微调（保留 ok-api 灵活性）；0003 起 1e-6 精度
     balance_micro      BIGINT NOT NULL DEFAULT 0,     -- 快照列；真理源 = billing_events 重放
     balance_expires_at TIMESTAMPTZ,                   -- 余额有效期（NULL=永不过期；到期 worker 清零记 expire 事件并重置 NULL，M4 #1790-6）
     aff_code           VARCHAR(16),                   -- 邀请码（唯一部分索引；门户首查惰性生成，M4 aff）
@@ -111,7 +111,7 @@ CREATE TABLE redemption_codes (                       -- 兑换码（M4）：一
 
 CREATE TABLE price_groups (
     group_code  VARCHAR(32) PRIMARY KEY,              -- default / vip / svip / enterprise ...
-    group_ratio NUMERIC(6,4) NOT NULL DEFAULT 1,
+    group_ratio NUMERIC(12,6) NOT NULL DEFAULT 1,        -- 0003 起 1e-6 精度（4 位小数会把小倍率静默舍成 0）
     description VARCHAR(255),
     is_default  BOOLEAN NOT NULL DEFAULT false,
     sort_order  INT NOT NULL DEFAULT 0,
@@ -348,8 +348,8 @@ CREATE TABLE user_pricing (                           -- 用户×模型专属（
     override_kind             VARCHAR(8) NOT NULL,    -- ratio | absolute
     custom_model_ratio        NUMERIC(12,6),
     custom_completion_ratio   NUMERIC(12,6),
-    custom_cache_ratio        NUMERIC(6,4),
-    custom_cache_write_ratio  NUMERIC(6,4),           -- NULL = 用模型级值（0013）
+    custom_cache_ratio        NUMERIC(12,6),
+    custom_cache_write_ratio  NUMERIC(12,6),          -- NULL = 用模型级值（0013）；0003 起 1e-6 精度
     custom_input_per_1m_micro  BIGINT,                -- absolute 模式（落库时同步换算 ratio 冗余）
     custom_output_per_1m_micro BIGINT,
     reason                    VARCHAR(255),
@@ -913,7 +913,9 @@ TTL toDateTime(ts) + INTERVAL 180 DAY;        -- 保留期后台可配（#1790-1
 `server_tool_prices`；随 `pricing_epochs.snapshot.models` 发布，不读取未发布价格。
 `pricing_snapshot.server_tool_fees` 保存逐工具 request 数量、用量契约、额外/已包含
 策略、整数 micro 单价及 list_price/original/amount/discount 分量。未知数量或未配置
-价格对应 null，明确免费是 additional 的 0 单价，已包含费用不重复计费。
+价格对应 null，明确免费是 additional 的 0 单价，已包含费用不重复计费。2026-10-07 起，请求声明了
+原生工具而模型没有 `server_tool_prices` 时准入即拒（400 `server_tool_unpriced`），与模型未定价同口径，
+兜底链里没给工具定价的备选模型被跳过；未配置价格的 null 只剩历史数据。结算阶段按响应模型计价的规则不变。
 四金额合计沿现有 PG/outbox/CH 字段传递，退款按已结算合计退款。有未定价非零/未知
 工具数量或渠道成本估算溢出时，PG upstream_cost 为 NULL、
 事件/CH upstream_cost_known 为 false；不截成最大整数冒充真实成本。长期工具聚合仍待

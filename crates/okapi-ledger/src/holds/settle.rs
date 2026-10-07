@@ -78,6 +78,11 @@ fn receipt(input: &SettlementInput<'_>) -> Value {
 fn replay_receipt(mut value: Value) -> Value {
     // Receipts predating these additive fields mean "not reported", not a
     // different settlement. Preserve every explicit value and all financial fields.
+    // Diagnostics are free-form trace data, never money: a retry that recaptured
+    // them must not turn an idempotent replay into a HoldConflict.
+    if let Some(dimensions) = value.get_mut("dimensions").and_then(Value::as_object_mut) {
+        dimensions.remove("diagnostics");
+    }
     if let Some(usage) = value.get_mut("usage").and_then(Value::as_object_mut) {
         for field in ["cache_read_reported", "cache_write_reported"] {
             usage.entry(field).or_insert(Value::Bool(false));
@@ -191,4 +196,22 @@ pub async fn settle(
     tx.commit().await?;
     guard.synchronize(ledger).await?;
     db::get(&mut guard, hold.id).await
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::replay_receipt;
+    use serde_json::json;
+
+    #[test]
+    fn replay_ignores_diagnostics_but_not_money() {
+        let stored =
+            json!({"amount": 5000, "dimensions": {"model": "m", "diagnostics": {"trace": "a"}}});
+        let retried =
+            json!({"amount": 5000, "dimensions": {"model": "m", "diagnostics": {"trace": "b"}}});
+        assert_eq!(replay_receipt(stored.clone()), replay_receipt(retried));
+        let other =
+            json!({"amount": 5001, "dimensions": {"model": "m", "diagnostics": {"trace": "a"}}});
+        assert_ne!(replay_receipt(stored), replay_receipt(other));
+    }
 }

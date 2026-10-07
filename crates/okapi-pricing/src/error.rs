@@ -23,6 +23,10 @@ pub enum PricingError {
     MissingServerToolUsage,
     #[error("invalid_server_tool_admission: {0}")]
     InvalidServerToolAdmission(&'static str),
+    /// 请求声明了原生服务端工具（网页搜索 / 抓取），模型却没配工具价格。准入即拒，
+    /// 与「模型未定价即拒」同口径：上游按次计费的工具不能白送。
+    #[error("unpriced_server_tool")]
+    UnpricedServerTool,
 }
 
 /// 配置编译（PriceBook）错误。

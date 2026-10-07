@@ -217,6 +217,20 @@ impl ToolAdmission {
         Ok(())
     }
 
+    /// 声明了原生工具、模型却没配工具价格：准入即拒（同「模型未定价即拒」），上游按次计费的
+    /// 搜索不能白送。只在准入调用：结算沿用准入时冻结的价簿，响应模型缺工具价格仍按既有规则
+    /// 拒绝改价并退款，不能因为这里报错就悄悄退回按准入模型计费。
+    pub(super) fn require_prices(
+        &self,
+        book: &PriceBook,
+        model: &okapi_domain::ModelCode,
+    ) -> Result<(), PricingError> {
+        if self.has_tools() && book.server_tool_prices(model).is_none() {
+            return Err(PricingError::UnpricedServerTool);
+        }
+        Ok(())
+    }
+
     pub(super) fn quote(
         &self,
         book: &PriceBook,

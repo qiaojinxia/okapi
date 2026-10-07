@@ -268,7 +268,7 @@ async fn missing_published_paid_counter_refunds_instead_of_assuming_zero() {
 }
 
 #[tokio::test]
-async fn unconfigured_tool_cost_is_unknown_and_invalid_drafts_cannot_replace_prices() {
+async fn unconfigured_tools_are_rejected_and_invalid_drafts_cannot_replace_prices() {
     let mut usage = anthropic_usage::fixture();
     usage["server_tool_use"] = json!({"web_search_requests":2,"web_fetch_requests":3});
     let env = setup(Protocol::Anthropic, usage).await;
@@ -288,25 +288,24 @@ async fn unconfigured_tool_cost_is_unknown_and_invalid_drafts_cannot_replace_pri
     let stored: Option<Value> = sqlx::query_scalar("SELECT p.server_tool_prices FROM model_pricing p JOIN models m ON m.id=p.model_id WHERE m.model_name=$1")
         .bind(&env.model).fetch_one(&env.state.pg).await.unwrap();
     assert!(stored.is_none());
+    // 工具没配价格时声明了工具：准入即拒，不打上游、分文不动（同「模型未定价即拒」）
     let response = request(&env, Protocol::Anthropic, false, false).await;
-    assert_eq!(response.status(), 200);
-    response.text().await.unwrap();
-    let receipt = record(&env).await;
-    assert_eq!(receipt["amount_micro"], 1600);
-    let id = receipt["request_id"].as_str().unwrap();
-    let stored: (Option<i64>,Value) = sqlx::query_as("SELECT upstream_cost_micro,pricing_snapshot FROM billing_records WHERE request_id::text=$1")
-        .bind(id).fetch_one(&env.state.pg).await.unwrap();
-    assert!(stored.0.is_none());
-    assert!(stored.1["server_tool_fees"][0]["amount_micro"].is_null());
-    let event: Value = sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE topic='billing.completed' AND payload->>'request_id'=$1")
-        .bind(id).fetch_one(&env.state.pg).await.unwrap();
-    assert_eq!(event["upstream_cost_known"], false);
-    assert_eq!(event["upstream_cost_micro"], 0);
-    let ch = ch_row(&env, id, 2).await;
-    assert_eq!(integer(&ch["upstream_cost_micro"]), 0);
+    assert_eq!(response.status(), 400);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("server_tool_unpriced")
+    );
     assert_eq!(
-        serde_json::from_str::<Value>(ch["ratio_snapshot"].as_str().unwrap()).unwrap(),
-        stored.1
+        env.state
+            .ledger
+            .balance(env.user)
+            .await
+            .unwrap()
+            .as_micros(),
+        50_000_000
     );
 }
 

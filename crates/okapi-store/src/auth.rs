@@ -178,8 +178,9 @@ pub async fn find_key_by_hash(
                    COALESCE(
                        k.group_override,
                        (SELECT ug.group_code FROM user_groups ug
-                         WHERE ug.user_id = u.id ORDER BY ug.priority DESC LIMIT 1),
-                       (SELECT pg2.group_code FROM price_groups pg2 WHERE pg2.is_default LIMIT 1),
+                         WHERE ug.user_id = u.id ORDER BY ug.priority DESC, ug.group_code LIMIT 1),
+                       (SELECT pg2.group_code FROM price_groups pg2 WHERE pg2.is_default
+                         ORDER BY pg2.group_code LIMIT 1),
                        'default'
                    ) AS group_code
             FROM api_keys k

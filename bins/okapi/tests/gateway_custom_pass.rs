@@ -65,7 +65,13 @@ async fn spawn_mock() -> SocketAddr {
         .route("/ok/hang", get(mock_hang))
         .route("/ok/tool", post(mock_tool).get(mock_tool))
         .route("/ok/echo", post(mock_echo))
-        .route("/ok/boom", get(mock_boom));
+        .route("/ok/boom", get(mock_boom))
+        .route(
+            "/ok/redirect",
+            get(|| async {
+                (axum::http::StatusCode::FOUND, [("location", "/ok/tool")]).into_response()
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -221,6 +227,26 @@ async fn pass_through_bills_per_call() {
     assert_eq!(amount, 5000, "per_call $0.005");
     let balance = env.ledger.balance(env.user_id).await.unwrap();
     assert_eq!(balance.as_micros(), 1_000_000 - 5000);
+}
+
+/// 上游 30x 原样回给调用方，网关不跟随（跟随的话 SSRF 闸校验过的地址一跳就能引到私网）。
+#[tokio::test]
+async fn pass_through_relays_redirects_without_following() {
+    let env = setup().await;
+    let resp = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{}/pass/{}/ok/redirect",
+            env.gateway, env.channel_id
+        ))
+        .bearer_auth(&env.token)
+        .send()
+        .await
+        .unwrap();
+    // Location 不在上游响应头白名单里，不会透出；状态码原样返回即说明没在网关里跟随
+    assert_eq!(resp.status(), 302, "上游的 302 原样返回，不在网关里跟随");
 }
 
 /// 白名单外路径：403 且分文未动。

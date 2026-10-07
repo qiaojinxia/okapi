@@ -394,6 +394,18 @@ async fn plain_unknown_and_explicit_zero_quotes_preserve_their_reservation_seman
                 (kind != "plain").then(search),
             )
             .await;
+            if kind == "unknown" {
+                // 声明了工具却没给工具定价：准入即拒，没有预扣、没有账单
+                assert_eq!(response.status(), 400);
+                assert!(
+                    response
+                        .text()
+                        .await
+                        .unwrap()
+                        .contains("server_tool_unpriced")
+                );
+                continue;
+            }
             assert_eq!(response.status(), 200);
             assert!(!response.text().await.unwrap().contains("upstream_error"));
             let row = record(&env).await;

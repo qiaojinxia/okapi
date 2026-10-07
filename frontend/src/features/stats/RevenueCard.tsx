@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatBp, formatCount, formatMoney } from '@/lib/money'
+import { formatBp, formatCount, formatMoney, formatRatio } from '@/lib/money'
 import { healthVariant } from '@/features/stats/ChannelHealthCard'
 import { qk } from '@/lib/query-keys'
 import { calendarDays } from '@/features/portal-overview/usage-chart-data'
@@ -98,7 +98,7 @@ function GroupsTable({ days }: { days: number }) {
           {rows.map((g) => (
             <Tr key={g.group}>
               <Td className="font-mono text-xs">{g.group}</Td>
-              <Td className="text-xs">{g.group_ratio ? `×${g.group_ratio}` : '—'}</Td>
+              <Td className="text-xs">{g.group_ratio ? `×${formatRatio(g.group_ratio)}` : '—'}</Td>
               <Td>
                 <div className="flex items-center gap-2">
                   <div className="h-2 flex-1 overflow-hidden rounded bg-muted">

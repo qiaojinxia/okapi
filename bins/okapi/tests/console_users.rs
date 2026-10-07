@@ -152,7 +152,7 @@ async fn user_list_search_and_rbac() {
     assert_eq!(row["id"], env.user_id);
     assert_eq!(row["username"], env.username);
     assert_eq!(row["role"], 1, "新建用户为普通角色");
-    assert_eq!(row["price_multiplier"], "1.0000", "专属倍率缺省 1");
+    assert_eq!(row["price_multiplier"], "1.000000", "专属倍率缺省 1");
 
     // 注入面：搜索串走 bind 参数，特殊字符不得破坏语义
     let (status, body) = req(

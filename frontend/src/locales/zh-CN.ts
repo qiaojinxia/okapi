@@ -2956,6 +2956,7 @@ export default {
     margin_blocked: '该分组的全部候选渠道已被负毛利熔断暂停',
     no_zero_retention_channel: '请求要求零数据留存，但该模型的 {{param}} 个候选渠道都未声明不留存',
     price_above_max: '报价超过请求声明的价格上限（{{param}}）',
+    server_tool_unpriced: '该模型的服务端工具（网页搜索 / 网页抓取）尚未定价，暂不能使用，请联系管理员',
     upstream_error: '上游服务错误',
     upstream_timeout: '上游超时',
     empty_completion: '上游空回复（未计费）',

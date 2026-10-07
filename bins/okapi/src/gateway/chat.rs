@@ -288,9 +288,16 @@ fn price_above_max(
 /// 预扣用的单条补全上界。显式上限照单全收（不超过模型 max_output）：上游按它生成、
 /// 按实际计费，把它截到 `MAX_COMPLETION_CAP` 只会让预扣不再是扣费上界、余额可被透支。
 /// 未声明时才取模型缺省并封顶，免得为没要求长输出的请求冻结大额余额。
-fn admitted_completion_cap(requested: Option<u32>, max_output: Option<u32>) -> u32 {
+/// compact 端点不接受输出上限参数、cap 根本写不进请求，缺省只能按模型真实 max_output
+/// 全额预扣——否则预扣同样不是上界（封顶值到不了上游）。
+fn admitted_completion_cap(
+    ingress: Ingress,
+    requested: Option<u32>,
+    max_output: Option<u32>,
+) -> u32 {
     match requested {
         Some(requested) => max_output.map_or(requested, |max| requested.min(max)),
+        None if ingress == Ingress::ResponsesCompact => max_output.unwrap_or(MAX_COMPLETION_CAP),
         None => max_output
             .unwrap_or(DEFAULT_COMPLETION_CAP)
             .min(MAX_COMPLETION_CAP),
@@ -318,6 +325,23 @@ fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Byte
     let Some(obj) = value.as_object_mut() else {
         return body;
     };
+    // `"max_tokens": null` 在 admission 侧与缺席同形（serde null → None，预扣照封顶档
+    // 冻结），但"键存在即已声明"会让上限写不进请求——上游照模型 max_output 生成、
+    // 结算多退少补没有下限，余额被透支。null 一律视同缺席，先剥掉再判定。
+    for key in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        if obj.get(key).is_some_and(serde_json::Value::is_null) {
+            obj.remove(key);
+        }
+    }
+    if let Some(config) = obj
+        .get_mut("generationConfig")
+        .and_then(serde_json::Value::as_object_mut)
+        && config
+            .get("maxOutputTokens")
+            .is_some_and(serde_json::Value::is_null)
+    {
+        config.remove("maxOutputTokens");
+    }
     let inserted = match ingress {
         Ingress::OpenAi => {
             // max_tokens 兼容面最广；推理模型由 model_parameters 改写成 max_completion_tokens
@@ -1214,6 +1238,7 @@ async fn prepare_chat(
         .saturating_add(image_inputs(ingress, body).saturating_mul(IMAGE_INPUT_TOKENS))
         .saturating_add(attachment_tokens(ingress, body));
     let completion_cap = admitted_completion_cap(
+        ingress,
         info.completion_cap_req,
         meta.max_output.and_then(|v| u32::try_from(v).ok()),
     );
@@ -1238,6 +1263,7 @@ async fn prepare_chat(
         base_usage,
         admission_hints(state, &canonical, &pool_chain).await,
     );
+    server_tools.require_prices(&book, &calc.model)?;
     let est_quote = server_tools.quote(&book, &calc, est_usage)?;
 
     // reasoning 意图归一（§11.26）：模型名后缀是一条路，请求体参数是另一条，
@@ -1282,6 +1308,7 @@ async fn prepare_chat(
             let mut fallback_calc = calc.clone();
             fallback_calc.model = ModelCode::from(fallback.canonical.as_str());
             let fallback_cap = admitted_completion_cap(
+                ingress,
                 info.completion_cap_req,
                 fallback.max_output.and_then(|n| u32::try_from(n).ok()),
             );
@@ -1292,7 +1319,11 @@ async fn prepare_chat(
                 },
                 admission_hints(state, &fallback.canonical, &pool_chain).await,
             );
-            let Ok(quote) = server_tools.quote(&book, &fallback_calc, fallback_usage) else {
+            // 兜底链里没给工具定价的备选模型直接跳过，不拖垮整个请求
+            let Ok(quote) = server_tools
+                .require_prices(&book, &fallback_calc.model)
+                .and_then(|()| server_tools.quote(&book, &fallback_calc, fallback_usage))
+            else {
                 continue;
             };
             if price_above_max(&quote, &prefs).is_some() {
@@ -3755,6 +3786,14 @@ async fn settle_commit(
             bill.server_tools.quote(&bill.book, calc, usage)
         })
         .and_then(|quote| {
+            // 按响应模型计费的预扣上界：实际账单不得超过预扣。预扣按请求声明模型冻结，
+            // 不含"悄悄换成更贵模型"的余量，实收越过预扣等于绕过预扣透支余额
+            // （fail-closed 退款，与上方算价失败同一出口）。
+            if calc.model != bill.calc.model && quote.amount > bill.reserved_amount {
+                return Err(okapi_pricing::PricingError::InvalidServerToolAdmission(
+                    "response_price_above_reservation",
+                ));
+            }
             let snapshot =
                 super::reservation::settled_snapshot(&quote.snapshot, &bill.reservation_snapshot)?;
             Ok((quote, snapshot))
@@ -4144,15 +4183,30 @@ mod failure_scope_tests {
 
     #[test]
     fn explicit_caps_are_reserved_in_full_and_defaults_stay_bounded() {
-        assert_eq!(admitted_completion_cap(Some(100_000), None), 100_000);
-        assert_eq!(admitted_completion_cap(Some(100_000), Some(40_000)), 40_000);
-        assert_eq!(admitted_completion_cap(Some(512), Some(40_000)), 512);
         assert_eq!(
-            admitted_completion_cap(None, Some(128_000)),
+            admitted_completion_cap(Ingress::OpenAi, Some(100_000), None),
+            100_000
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::OpenAi, Some(100_000), Some(40_000)),
+            40_000
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::Anthropic, Some(512), Some(40_000)),
+            512
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::OpenAi, None, Some(128_000)),
             MAX_COMPLETION_CAP
         );
-        assert_eq!(admitted_completion_cap(None, Some(8_192)), 8_192);
-        assert_eq!(admitted_completion_cap(None, None), DEFAULT_COMPLETION_CAP);
+        assert_eq!(
+            admitted_completion_cap(Ingress::OpenAi, None, Some(8_192)),
+            8_192
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::OpenAi, None, None),
+            DEFAULT_COMPLETION_CAP
+        );
     }
 
     /// 四种入口的图片都计张，工具结果里嵌套的也算；非图片的内联文件不算。
@@ -4326,12 +4380,69 @@ mod failure_scope_tests {
         assert_eq!(gemini["generationConfig"]["temperature"], 0.2);
         let anthropic = json(Ingress::Anthropic, serde_json::json!({"model":"m"}));
         assert_eq!(anthropic["max_tokens"], MAX_COMPLETION_CAP);
+        // 显式 null 与缺席同形：上限照写，客户端不能借 null 绕开封顶
+        let nulled = json(
+            Ingress::OpenAi,
+            serde_json::json!({"model":"m","max_tokens":null}),
+        );
+        assert_eq!(nulled["max_tokens"], MAX_COMPLETION_CAP);
+        let nulled_completion = json(
+            Ingress::OpenAi,
+            serde_json::json!({"model":"m","max_completion_tokens":null}),
+        );
+        assert_eq!(nulled_completion["max_tokens"], MAX_COMPLETION_CAP);
+        assert!(nulled_completion.get("max_completion_tokens").is_none());
+        let nulled_responses = json(
+            Ingress::Responses,
+            serde_json::json!({"model":"m","max_output_tokens":null}),
+        );
+        assert_eq!(nulled_responses["max_output_tokens"], MAX_COMPLETION_CAP);
+        let nulled_gemini = json(
+            Ingress::Gemini,
+            serde_json::json!({"contents":[],"generationConfig":{"maxOutputTokens":null}}),
+        );
+        assert_eq!(
+            nulled_gemini["generationConfig"]["maxOutputTokens"],
+            MAX_COMPLETION_CAP
+        );
+        let nulled_anthropic = json(
+            Ingress::Anthropic,
+            serde_json::json!({"model":"m","max_tokens":null}),
+        );
+        assert_eq!(nulled_anthropic["max_tokens"], MAX_COMPLETION_CAP);
         let compact = json(Ingress::ResponsesCompact, serde_json::json!({"model":"m"}));
         assert!(compact.get("max_output_tokens").is_none());
         let untouched = Bytes::from_static(b"{\"model\":\"m\"}");
         assert_eq!(
             bound_default_output(Ingress::OpenAi, None, untouched.clone()),
             untouched
+        );
+    }
+
+    /// compact 端点的 cap 写不进请求：未声明时按模型 max_output 全额预扣，
+    /// 不吃 MAX_COMPLETION_CAP 封顶；其余入口维持封顶缺省。
+    #[test]
+    fn compact_reserves_full_model_output_when_no_cap_can_be_injected() {
+        assert_eq!(
+            admitted_completion_cap(Ingress::ResponsesCompact, None, Some(128_000)),
+            128_000
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::OpenAi, None, Some(128_000)),
+            MAX_COMPLETION_CAP
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::ResponsesCompact, None, None),
+            MAX_COMPLETION_CAP
+        );
+        // 显式声明的上限照单全收，两种入口一致
+        assert_eq!(
+            admitted_completion_cap(Ingress::ResponsesCompact, Some(100), Some(128_000)),
+            100
+        );
+        assert_eq!(
+            admitted_completion_cap(Ingress::OpenAi, Some(100), Some(128_000)),
+            100
         );
     }
 

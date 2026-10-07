@@ -297,6 +297,9 @@ impl From<PricingError> for AppError {
             PricingError::MissingServerToolUsage | PricingError::InvalidServerToolAdmission(_) => {
                 Self::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
             }
+            PricingError::UnpricedServerTool => {
+                Self::new(StatusCode::BAD_REQUEST, codes::SERVER_TOOL_UNPRICED).with_param("tools")
+            }
             PricingError::UnknownGroup(_) => {
                 tracing::error!(error = %err, "pricing group missing");
                 Self::internal()

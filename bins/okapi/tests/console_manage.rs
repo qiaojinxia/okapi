@@ -550,7 +550,7 @@ async fn admin_list_surface_covers_every_resource() {
         .iter()
         .find(|g| g["group_code"] == env.group.as_str())
         .expect("分组必须在列表");
-    assert_eq!(g["group_ratio"], "0.9000");
+    assert_eq!(g["group_ratio"], "0.900000");
     assert_eq!(g["user_count"], 0);
     // 分组必有池：未指定即 default 池，渠道数 = default 池成员数（新渠道缺省都在里面）
     assert_eq!(g["pool_code"], "default");

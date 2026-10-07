@@ -16,6 +16,12 @@ async fn native_tools_cannot_bypass_explicit_channel_denial_and_plain_requests_s
     ] {
         for stream in [false, true] {
             let env = setup(Protocol::Anthropic, anthropic_usage::fixture()).await;
+            // 工具先定价：未定价的工具请求在准入就被拒，测不到渠道层的拒绝
+            server_tool_fees::activate(
+                &env,
+                &server_tool_fees::prices(&json!({"billing":"included"})),
+            )
+            .await;
             sqlx::query("UPDATE channels SET capabilities=$2 WHERE name=$1")
                 .bind(&env.model)
                 .bind(json!({"tools":false}))

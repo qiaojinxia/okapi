@@ -14,11 +14,12 @@ x-okapi-env: &okapi-env
   OKAPI_BIND: 0.0.0.0:8080
   OKAPI_CONSOLE_BIND: 0.0.0.0:8081
   OKAPI_MASTER_KEY: ${OKAPI_MASTER_KEY:?run `openssl rand -hex 32`}
-  # 信任反代网段（§14.2）：容器里反代与网关不同 IP，环回缺省不够用。
-  # 只有来自这些来源的 X-Forwarded-For / CDN 头才作数——不配就等于 key 级 IP 白名单、
-  # 每 IP 限流与 client_ip 列可被调用方一个请求头改写。默认给 compose 的私网段；
-  # 前面还有一层公网 CDN 时改配 CDN 回源段，或改用 OKAPI_EDGE_KEY。
-  OKAPI_TRUSTED_PROXIES: ${OKAPI_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.16.0.0/12,10.0.0.0/8}
+  # 信任反代来源（§14.2）：只有来自这些地址的 X-Forwarded-For / CDN 头才作数，其余来源一律
+  # 按 socket 对端算 client_ip。缺省只信环回：整段私网（172.16/12、10/8）会让同机其他容器、
+  # 内网客户端伪造来源 IP，绕过 key 级 IP 白名单与每 IP 限流。前面有反代时把反代的地址或
+  # 网段写进来（容器反代给它固定 IP 再填那一个），公网 CDN 填回源段，或改用 OKAPI_EDGE_KEY；
+  # 不配则 client_ip 记成反代的地址。
+  OKAPI_TRUSTED_PROXIES: ${OKAPI_TRUSTED_PROXIES:-127.0.0.1/32,::1/128}
   OKAPI_SETUP_TOKEN: ${OKAPI_SETUP_TOKEN:?set OKAPI_SETUP_TOKEN for first initialization}
   OKAPI_EDGE_KEY: ${OKAPI_EDGE_KEY:-}
   # 每个容器各开一套 PG 池，总连接 = Σ(副本数 × 本值)。本文件 multi profile 是

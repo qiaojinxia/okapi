@@ -10,6 +10,7 @@ import { Select } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { poolOptions } from '@/features/pools/pool-options'
 
@@ -240,7 +241,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
               <Badge variant="muted">
                 {report.scope.group_code === null
                   ? t('admin:diagGroupNone')
-                  : `${report.scope.group_code} ×${report.scope.group_ratio ?? '1'}`}
+                  : `${report.scope.group_code} ×${formatRatio(report.scope.group_ratio ?? '1')}`}
               </Badge>
               <Badge variant="muted">
                 {`${report.scope.pool_code} (${report.scope.routing_strategy ?? ''})`}

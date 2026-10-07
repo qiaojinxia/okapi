@@ -3020,6 +3020,7 @@ export default {
     no_zero_retention_channel:
       'Zero data retention was requested, but none of the {{param}} candidate channels declares it',
     price_above_max: 'Quoted price exceeds the max_price declared in the request ({{param}})',
+    server_tool_unpriced: 'Server tools (web search / web fetch) are not priced for this model yet; contact the administrator',
     upstream_error: 'Upstream error',
     upstream_timeout: 'Upstream timeout',
     empty_completion: 'Empty completion (not billed)',

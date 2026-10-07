@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# 只读：没有任何一步需要写仓库；第三方 action 钉提交 SHA（注释是对应的版本标签），
+# 防止标签被改指向后悄悄换掉 CI 里跑的代码。
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # 编译期 SQL 校验走 .sqlx 离线快照；集成测试运行期连接 services
@@ -60,9 +65,9 @@ jobs:
           --health-timeout 5s
           --health-retries 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: 读取前端构建产物供 SPA 导航测试
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: frontend-dist
           path: frontend/dist
@@ -74,10 +79,10 @@ jobs:
             public.ecr.aws/docker/library/nats:2-alpine -js -m 8222
           curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused \
             http://127.0.0.1:8222/healthz
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: 格式检查
         run: cargo fmt --all --check
       - name: 计费红线守卫
@@ -116,7 +121,7 @@ jobs:
           PY
       - name: 保存完整测试输出与验证报告
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: core-api-verification
           path: |
@@ -128,17 +133,16 @@ jobs:
   deny:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: EmbarkStudios/cargo-deny-action@v2
-
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
   frontend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
         with:
           version: 11
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: pnpm
@@ -150,7 +154,7 @@ jobs:
         run: pnpm build
         working-directory: frontend
       - name: 保存前端构建产物
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: frontend-dist
           path: frontend/dist

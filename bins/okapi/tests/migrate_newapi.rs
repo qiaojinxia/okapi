@@ -209,7 +209,7 @@ async fn newapi_sample_migration_full_check() {
     .unwrap();
     assert_eq!(vip_group.pool_code, vip, "同名价格分组指向同名池");
     assert_eq!(
-        vip_group.ratio, "1.0000",
+        vip_group.ratio, "1.000000",
         "倍率占位 1，待站长按 GroupRatio 调"
     );
     assert_eq!(

@@ -241,30 +241,32 @@ async fn dearer_fallback_is_reserved_before_admission_and_billed_from_frozen_con
     );
 }
 
+/// 声明了原生工具、模型却没配工具价格：准入即拒（400 server_tool_unpriced），不打上游、
+/// 不预扣、分文不动——与「模型未定价即拒」同口径，上游按次计费的搜索不能白送。
 #[tokio::test]
-async fn declared_unpriced_tools_with_no_observation_keep_cost_unknown() {
+async fn declared_tools_without_tool_prices_are_rejected_before_the_upstream() {
     let env = setup(Protocol::Anthropic, anthropic_usage::fixture()).await;
-    sqlx::query("UPDATE channels SET upstream_unit_cost=$2 WHERE name=$1")
-        .bind(&env.model)
-        .bind(json!({"relative_cost_milli":1250}))
-        .execute(&env.state.pg)
-        .await
-        .unwrap();
-    let response = call(&env, native(Some(2)), false).await;
-    assert_eq!(response.status(), 200);
-    response.text().await.unwrap();
-    let row = record(&env).await;
-    assert_eq!(row["amount_micro"], 1600);
-    let id = row["request_id"].as_str().unwrap();
-    let stored: (Option<i64>, Value) = sqlx::query_as("SELECT upstream_cost_micro,pricing_snapshot FROM billing_records WHERE request_id::text=$1")
-        .bind(id).fetch_one(&env.state.pg).await.unwrap();
-    assert!(stored.0.is_none());
-    assert!(stored.1["server_tool_fees"][0]["quantity"].is_null());
-    assert!(stored.1["server_tool_fees"][0]["pricing"].is_null());
-    let event: Value = sqlx::query_scalar("SELECT payload FROM billing_outbox WHERE topic='billing.completed' AND payload->>'request_id'=$1")
-        .bind(id).fetch_one(&env.state.pg).await.unwrap();
-    assert_eq!(event["upstream_cost_known"], false);
-    assert!(event["server_tool_usage"].is_null());
+    for stream in [false, true] {
+        let response = call(&env, native(Some(2)), stream).await;
+        assert_eq!(response.status(), 400);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("server_tool_unpriced"), "{body}");
+    }
+    assert_eq!(
+        env.calls.load(Ordering::SeqCst),
+        0,
+        "未定价的工具请求不能打到上游"
+    );
+    assert_eq!(
+        env.state
+            .ledger
+            .balance(env.user)
+            .await
+            .unwrap()
+            .as_micros(),
+        50_000_000,
+        "准入即拒，分文不动"
+    );
 }
 
 #[tokio::test]

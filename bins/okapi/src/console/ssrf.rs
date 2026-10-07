@@ -92,8 +92,25 @@ pub(crate) async fn validate_url(pg: &sqlx::PgPool, api_base: &str) -> Result<()
     {
         return Err(AppError::bad_request().with_param("api_base_private_target"));
     }
-    if !policy.allow_private && (host == "localhost" || host.ends_with(".internal")) {
+    if !policy.allow_private
+        && (host == "localhost" || host.ends_with(".localhost") || host.ends_with(".internal"))
+    {
         return Err(AppError::bad_request().with_param("api_base_private_target"));
+    }
+    // 域名也看解析结果：公网域名解析到 169.254.169.254 / 内网段同样能打到内网。保存配置时
+    // 解析一次；解析失败不拦（运行时同样连不上）。DNS 重绑定要连接时校验，仍在 backlog。
+    if !policy.allow_private && host.parse::<IpAddr>().is_err() {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::net::lookup_host((host, port)),
+        )
+        .await;
+        if let Ok(Ok(mut addrs)) = resolved
+            && addrs.any(|addr| is_private_ip(addr.ip()))
+        {
+            return Err(AppError::bad_request().with_param("api_base_private_target"));
+        }
     }
     Ok(())
 }

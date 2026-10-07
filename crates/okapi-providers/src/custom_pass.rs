@@ -45,7 +45,8 @@ impl PassUpstream {
         })
     }
 
-    /// 数据面透传：跟随重定向（reqwest 缺省）。
+    /// 数据面透传：**不跟随重定向**（`HttpPool` 全局 `redirect::Policy::none()`），上游 30x
+    /// 原样回给调用方。跟随的话，SSRF 闸校验过的地址一跳 30x 就能把请求引到私网。
     pub async fn forward(&self, req: PassRequest) -> Result<PassResponse, UpstreamError> {
         self.send(req, false).await
     }

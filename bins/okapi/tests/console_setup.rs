@@ -59,7 +59,7 @@ async fn setup_wizard_on_fresh_database() {
     assert_eq!(status.headers()["x-frame-options"], "DENY");
     assert_eq!(
         status.headers()["content-security-policy"],
-        "frame-ancestors 'none'"
+        "frame-ancestors 'none'; script-src 'self'; object-src 'none'; base-uri 'self'"
     );
     let status: Value = status.json().await.unwrap();
     assert_eq!(status["needs_setup"], true, "空库必须提示初始化");
