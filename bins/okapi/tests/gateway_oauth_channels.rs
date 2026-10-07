@@ -1170,56 +1170,19 @@ async fn own_scope_cannot_attach_oauth_key_to_foreign_channel() {
     assert_eq!(keys_after, keys_before, "别人的渠道没有多出 key");
 }
 
-/// 旧开关 `settings.mimic_cc` 已退役：迁移把它改写成最新客户端的显式模拟配置，
-/// 已保存的旧版本号改成最新版本；控制台拒绝再写入旧键（旧前端写进来只会被静默忽略）。
+/// 旧开关 `settings.mimic_cc` 已退役，控制台拒绝再写入（旧前端写进来只会被静默忽略）；
+/// 已保存的旧客户端版本号在运行时按最新版本处理。（旧数据的改写迁移随迁移压成基线一起去掉。）
 #[tokio::test]
-async fn retired_mimic_switch_migrates_to_the_latest_client_profile() {
+async fn retired_mimic_switch_is_rejected_and_old_revisions_run_as_latest() {
     let env = setup().await;
-    let (legacy, _) = login_channel(&env, "anthropic_max").await;
     let (old_revision, _) = login_channel(&env, "anthropic_max").await;
     sqlx::query("UPDATE channels SET settings = settings || $2 WHERE id = $1")
-        .bind(legacy)
-        .bind(json!({"mimic_cc": true, "mimic_cc_version": "2.1.258", "extensions": null}))
-        .execute(&env.pg)
-        .await
-        .unwrap();
-    sqlx::query("UPDATE channels SET settings = settings || $2 WHERE id = $1")
         .bind(old_revision)
-        .bind(json!({"mimic_cc": false, "extensions": {"client_profile":
-            {"name": "claude-code", "mode": "auto", "revision": "2.1.286", "entrypoint": "sdk-cli"}}}))
+        .bind(json!({"extensions": {"client_profile":
+            {"name": "claude-code", "mode": "mimic", "revision": "2.1.286"}}}))
         .execute(&env.pg)
         .await
         .unwrap();
-    // 迁移只对旧数据生效：在已迁移的库上重放同一份 SQL
-    sqlx::raw_sql(include_str!(
-        "../../../crates/okapi-store/migrations/0036_claude_code_profile_latest.sql"
-    ))
-    .execute(&env.pg)
-    .await
-    .unwrap();
-    let settings = |id: i64| {
-        let pg = env.pg.clone();
-        async move {
-            sqlx::query_scalar::<_, Value>("SELECT settings FROM channels WHERE id = $1")
-                .bind(id)
-                .fetch_one(&pg)
-                .await
-                .unwrap()
-        }
-    };
-    let migrated = settings(legacy).await;
-    assert!(migrated.get("mimic_cc").is_none() && migrated.get("mimic_cc_version").is_none());
-    assert_eq!(
-        migrated["extensions"]["client_profile"],
-        json!({"name": "claude-code", "mode": "mimic", "revision": "2.1.290"})
-    );
-    let migrated = settings(old_revision).await;
-    assert!(migrated.get("mimic_cc").is_none());
-    assert_eq!(
-        migrated["extensions"]["client_profile"],
-        json!({"name": "claude-code", "mode": "auto", "revision": "2.1.290", "entrypoint": "sdk-cli"})
-    );
-
     env.state.invalidate_routing_caches();
     let resp = chat(&env).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
@@ -1227,7 +1190,10 @@ async fn retired_mimic_switch_migrates_to_the_latest_client_profile() {
     assert!(ua.starts_with("claude-cli/2.1.290 (external, "), "{ua}");
 
     let rejected = reqwest::Client::new()
-        .patch(format!("http://{}/admin/channels/{legacy}", env.console))
+        .patch(format!(
+            "http://{}/admin/channels/{old_revision}",
+            env.console
+        ))
         .bearer_auth(&env.admin_token)
         .json(&json!({"settings": {"mimic_cc": true}}))
         .send()

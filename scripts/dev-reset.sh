@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 开发环境重置 + 演示数据灌注。
 #
-# 为什么需要：改动 migrations/0001_init.sql 后，已应用的库会因校验和不符报
+# 为什么需要：改动已应用过的迁移（如基线 migrations/0001_baseline.sql）后，已应用的库会因校验和不符报
 # Migrate(VersionMismatch)；而只重建 PG 又会让 Redis 与 ClickHouse 里旧 user_id
 # 的存量数据串味（PG 的 id 从 1 重新开始，旧聚合会被算进新用户的账），
 # 表现为对账测试莫名失败。PG、Redis、CH、NATS 必须一起清。

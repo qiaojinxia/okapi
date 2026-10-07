@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT COUNT(*)::bigint AS \"c!\" FROM api_keys\n           WHERE user_id = $1 AND deleted_at IS NULL AND ($2::bigint IS NULL OR id=$2)",
+  "query": "SELECT COUNT(*)::bigint AS \"c!\" FROM api_keys\n           WHERE user_id = $1 AND deleted_at IS NULL AND session_hash IS NULL\n             AND ($2::bigint IS NULL OR id=$2)",
   "describe": {
     "columns": [
       {
@@ -20,5 +20,5 @@
       null
     ]
   },
-  "hash": "73d1b677f6a765b479deb7af86619eb88e6e8eb0f0307152585b6a97311eb9fb"
+  "hash": "7b542deeba703c9798b0cb35cafd61a1181199c86fff082dc2d66388febbde02"
 }

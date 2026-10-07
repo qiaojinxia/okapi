@@ -326,6 +326,8 @@ export function PortalKeysPage() {
                 k.ip_allowlist?.length && t('portal:keyIpPinned', { n: k.ip_allowlist.length }),
               ].filter(Boolean).join(' · ')
               const metadataHint = [metadata, k.model_allowlist?.join(', '), k.ip_allowlist?.join(', ')].filter(Boolean).join('\n')
+              // 当前登录正在用的这把：删了或停用就把自己锁在外面（后端同样拒绝 current_key_in_use）
+              const current = me.data?.key_id === k.id
               return (
               <Tr key={k.id}>
                 <Td className="whitespace-nowrap">
@@ -336,6 +338,7 @@ export function PortalKeysPage() {
                 </Td>
                 <Td className="text-left font-medium" title={k.name}>
                   <div className="flex min-w-0 flex-col leading-tight">
+                    <div className="flex min-w-0 items-center gap-1.5">
                     <button
                       type="button"
                       className="inline-flex h-6 min-w-0 max-w-full items-center self-start rounded text-left text-foreground outline-none hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
@@ -345,6 +348,8 @@ export function PortalKeysPage() {
                     >
                       <span className="truncate">{k.name}</span>
                     </button>
+                    {current && <Badge variant="info" className="shrink-0">{t('portal:keyCurrentSession')}</Badge>}
+                    </div>
                     <span className="block h-4 min-w-0 max-w-full truncate text-[11px] leading-4 font-normal text-muted-foreground" title={metadataHint}>{metadata}</span>
                   </div>
                 </Td>
@@ -377,7 +382,8 @@ export function PortalKeysPage() {
                   <div className="flex items-center justify-center gap-0.5">
                     <IconButton
                       icon={k.status === 1 ? PowerOff : Power}
-                      label={k.status === 1 ? t('admin:keyDisable') : t('admin:keyEnable')}
+                      label={current && k.status === 1 ? t('portal:keyCurrentNoDisable') : k.status === 1 ? t('admin:keyDisable') : t('admin:keyEnable')}
+                      disabled={current && k.status === 1}
                       onClick={() =>
                         patch.mutate({ id: k.id, body: { status: k.status === 1 ? 2 : 1 } })
                       }
@@ -398,8 +404,9 @@ export function PortalKeysPage() {
                     />
                     <IconButton
                       icon={Trash2}
-                      label={t('common:delete')}
+                      label={current ? t('portal:keyCurrentNoDelete') : t('common:delete')}
                       variant="destructive"
+                      disabled={current}
                       onClick={() =>
                         confirm({
                           title: t('common:confirmDeleteTitle', { name: k.name }),

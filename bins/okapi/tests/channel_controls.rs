@@ -236,49 +236,48 @@ async fn local_token_limit_counts_history_and_survives_archiving_and_transaction
     );
 }
 
+/// 渠道累计 token（channel_token_totals）由 billing_records 的插入触发器维护：只累计成功（2）与
+/// 流式中断（5）记录的输入 + 输出，其他类型不计。历史回填只对旧库有意义，随迁移压成基线一起去掉。
 #[tokio::test]
-async fn token_total_migration_backfills_retained_history_and_future_failed_usage() {
+async fn channel_token_totals_follow_settled_records() {
     okapi_store::test_support::assert_isolated();
     let pool = okapi_store::connect_pg(&std::env::var("DATABASE_URL").unwrap())
         .await
         .unwrap();
+    okapi_store::run_migrations(&pool).await.unwrap();
     let mut tx = pool.begin().await.unwrap();
-    let schema = format!("token_history_{}", Uuid::new_v4().simple());
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+    let channel = i64::from(rand_u32()) + 1_000_000;
+    for (log_type, prompt, completion) in [(2_i16, 8, 2), (6, 99, 99), (5, 3, 4)] {
+        sqlx::query(
+            "INSERT INTO billing_records \
+               (request_id, user_id, model_name, status, log_type, channel_id, prompt_tokens, completion_tokens) \
+             VALUES ($1, 1, 'token-total-model', 20, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(log_type)
+        .bind(channel)
+        .bind(prompt)
+        .bind(completion)
         .execute(&mut *tx)
         .await
         .unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "SET LOCAL search_path TO {schema}"
-    )))
-    .execute(&mut *tx)
-    .await
-    .unwrap();
-    sqlx::raw_sql("CREATE TABLE billing_records(channel_id bigint,log_type smallint,prompt_tokens int,completion_tokens int); CREATE TABLE billing_record_receipts(channel_id bigint,usage_details jsonb,created_at timestamptz); INSERT INTO billing_records VALUES(7,2,8,2),(7,6,99,99); INSERT INTO billing_record_receipts VALUES(7,'{\"tokens\":{\"prompt_tokens\":40,\"completion_tokens\":10}}',now()),(7,'{\"tokens\":{\"prompt_tokens\":\"bad\"}}',now())")
-        .execute(&mut *tx).await.unwrap();
-    sqlx::raw_sql(include_str!(
-        "../../../crates/okapi-store/migrations/0035_channel_token_totals.sql"
-    ))
-    .execute(&mut *tx)
-    .await
-    .unwrap();
+    }
     let total: i64 =
-        sqlx::query_scalar("SELECT tokens::bigint FROM channel_token_totals WHERE channel_id=7")
+        sqlx::query_scalar("SELECT tokens::bigint FROM channel_token_totals WHERE channel_id = $1")
+            .bind(channel)
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-    assert_eq!(total, 60);
-    sqlx::query("INSERT INTO billing_records VALUES(7,5,3,4),(7,6,100,100)")
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-    let total: i64 =
-        sqlx::query_scalar("SELECT tokens::bigint FROM channel_token_totals WHERE channel_id=7")
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-    assert_eq!(total, 67);
+    assert_eq!(
+        total, 17,
+        "8+2（成功）+ 3+4（流式中断）；失败记录的 99+99 不计"
+    );
     tx.rollback().await.unwrap();
+}
+
+fn rand_u32() -> u32 {
+    let bytes = Uuid::new_v4().into_bytes();
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) % 1_000_000_000
 }
 
 #[tokio::test]

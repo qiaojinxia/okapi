@@ -58,6 +58,10 @@ pub struct AuthedKey {
     pub member_user_id: Option<i64>,
     /// 成员月度限额（micro；None = 不限或非团 key）。
     pub member_monthly_limit_micro: Option<i64>,
+    /// 登录 key（网页登录经 /auth/session-key 换来）所属会话 sid 的 sha256 十六进制；None = 普通 key。
+    /// 登录 key 只在请求带着这条会话的 cookie、且会话仍有效时可用（gateway::auth 校验）。
+    #[serde(default)]
+    pub session_hash: Option<String>,
 }
 
 impl AuthedKey {
@@ -214,13 +218,15 @@ pub async fn find_key_by_hash(
     .fetch_optional(pool)
     .await?;
 
-    let quota_limited = if let Some(row) = &row {
-        sqlx::query_scalar::<_, bool>("SELECT quota_mode = 1 FROM api_keys WHERE id = $1")
-            .bind(row.key_id)
-            .fetch_one(pool)
-            .await?
+    let (quota_limited, session_hash) = if let Some(row) = &row {
+        sqlx::query_as::<_, (bool, Option<String>)>(
+            "SELECT quota_mode = 1, session_hash FROM api_keys WHERE id = $1",
+        )
+        .bind(row.key_id)
+        .fetch_one(pool)
+        .await?
     } else {
-        false
+        (false, None)
     };
     // Team keys authenticate the member as well as the wallet. Removing a
     // membership or banning its user must disable their delegated credentials.
@@ -265,6 +271,7 @@ pub async fn find_key_by_hash(
             expires_at: r.expires_at,
             member_user_id: r.member_user_id,
             member_monthly_limit_micro: r.member_monthly_limit_micro,
+            session_hash,
         })
     })
     .transpose()

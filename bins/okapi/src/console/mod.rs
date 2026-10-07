@@ -481,6 +481,7 @@ fn auth_routes() -> ConsoleRouter {
         .route("/auth/totp/confirm", post(auth_web::totp_confirm))
         .route("/auth/totp/disable", post(auth_web::totp_disable))
         .route("/auth/keys", post(auth_web::create_key))
+        .route("/auth/session-key", post(auth_web::session_key))
         .route("/auth/keys/{id}/copy", post(key_copy::copy))
         .route("/auth/oauth-providers", get(oauth::list_providers))
         .route("/auth/oauth/{provider}", get(oauth::start))

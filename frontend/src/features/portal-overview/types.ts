@@ -46,7 +46,11 @@ export interface BreakdownTotal extends CacheMetrics {
   success_rate_bp?: number | null
   avg_latency_ms?: number | null
   avg_ttft_ms?: number | null
+  /// 全量吞吐：窗口内每个请求的历史与计量单位都齐全才有值，否则 null。
   tokens_per_1k_sec?: number | null
+  /// 只按已采集样本算的吞吐（同一刻度）；全量不完整时（例如有失败请求、按次计费的媒体请求）退回显示它。
+  observed_output_tps_milli?: number | null
+  output_tps_samples?: number
   requests: number
   prompt_tokens: number
   cached_tokens: number

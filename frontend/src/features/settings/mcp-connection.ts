@@ -40,7 +40,9 @@ export async function testMcpConnection(): Promise<McpConnection> {
     const response = await fetch('/mcp', {
       method: 'POST',
       redirect: 'error',
-      credentials: 'omit',
+      // 网页登录的 key 绑定登录会话，只在带着会话 cookie 时有效（同源才会带上）；
+      // 外部 AI 客户端用的是用户自己建的 API key，与这里的诊断无关
+      credentials: 'same-origin',
       signal,
       headers: {
         Authorization: `Bearer ${key}`,

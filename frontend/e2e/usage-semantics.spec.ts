@@ -33,7 +33,7 @@ async function prepare(page: Page, mode: 'account' | 'key' | 'legacy' | 'signed-
       '/api/me/stats/breakdown': report(), '/api/me/logs': { data: [], next_before: null },
       '/api/me/stats/activity': { year: 2026, today: '2026-09-27', first_year: 2026, timezone: 'UTC', scope: url.searchParams.get('scope'), data: [] },
       '/api/registration': { mode: 'open', email_verification: false, new_user_credit_micro: 0 },
-      '/auth/oauth-providers': { providers: [] }, '/auth/login': { ok: true }, '/auth/keys': { api_key: 'web-fixture' },
+      '/auth/oauth-providers': { providers: [] }, '/auth/login': { ok: true }, '/auth/session-key': { api_key: 'web-fixture' },
     }
     return route.fulfill({ json: responses[url.pathname] ?? { data: [] } })
   })
@@ -107,6 +107,30 @@ test('首字延迟常驻显示，有样本显示毫秒，无样本和错误分�
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await expect(metrics).toContainText('统计暂不可用')
   await expect(metrics).not.toContainText('150 ms')
+})
+
+test('吞吐量全量口径不完整（窗口里有失败请求）时显示实测样本值并注明样本数，不显示「—」', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  const partial = report()
+  Object.assign(partial.total, { requests: 13, tokens_per_1k_sec: null, observed_output_tps_milli: 39040, output_tps_samples: 12 })
+  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
+  await page.goto('/portal')
+  const metrics = page.getByRole('region', { name: '调用质量', exact: true })
+  await expect(metrics).toContainText('39 Token/s')
+  await expect(metrics.getByText('实测样本 12 / 13 次')).toHaveAttribute('title', /当前数据不完整/)
+  // 全量口径齐全时只显示数值，不挂样本说明
+  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: report() }))
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(metrics).toContainText('50 Token/s')
+  await expect(metrics).not.toContainText('实测样本')
+  // 没有任何样本时仍是「—」
+  const none = report()
+  Object.assign(none.total, { tokens_per_1k_sec: null, observed_output_tps_milli: null, output_tps_samples: 0 })
+  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: none }))
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(metrics.getByTitle('—', { exact: true }).last()).toBeVisible()
+  await expect(metrics).not.toContainText('Token/s')
 })
 
 test('缓存零命中与缺失分开，文案不假定模型价格也不把折扣说成缓存节省', async ({ page }) => {

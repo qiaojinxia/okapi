@@ -123,7 +123,7 @@ for (const mode of ['account', 'key'] as const) {
     await expect(page).toHaveURL(/\/portal$/)
     await expect(page.getByRole('button', { name: '登录', exact: true })).toHaveCount(0)
     expect(calls).toContain('GET /api/me')
-    expect(calls).not.toContain('POST /auth/keys')
+    expect(calls).not.toContain('POST /auth/session-key')
     await page.goto('/')
     await expect(page).toHaveURL(/\/portal$/)
     await page.reload()
@@ -207,7 +207,7 @@ test('主动退出后可回登录页，不被反向守卫拉回门户', async ({
 test('OAuth 回调先兑换新会话，不被已有凭证的重定向抢走', async ({ page }) => {
   await prepare(page, { key: fixtureKey })
   const exchanges: unknown[] = []
-  await page.route('**/auth/keys', (route) => {
+  await page.route('**/auth/session-key', (route) => {
     exchanges.push(route.request().postDataJSON())
     return route.fulfill({ json: { api_key: 'oauth-routing-fixture', key_id: 2 } })
   })

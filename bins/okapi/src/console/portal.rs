@@ -643,13 +643,15 @@ pub async fn keys(
     let key = authenticate(&state, &headers).await?;
     let slice = q.slice();
     let delegated_key = key.member_user_id.map(|_| key.key_id);
+    // 登录 key（session_hash 非空）不在这里：它们随登录会话在「登录设备」里管理
     let (rows, total) = tokio::try_join!(
         sqlx::query!(
             r#"
         SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,
                daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,
                expires_at, last_used_at, created_at
-        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL AND ($4::bigint IS NULL OR id=$4) ORDER BY id
+        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL AND session_hash IS NULL
+          AND ($4::bigint IS NULL OR id=$4) ORDER BY id
         LIMIT $2 OFFSET $3
         "#,
             key.user_id,
@@ -662,7 +664,8 @@ pub async fn keys(
             slice,
             sqlx::query_scalar!(
                 r#"SELECT COUNT(*)::bigint AS "c!" FROM api_keys
-           WHERE user_id = $1 AND deleted_at IS NULL AND ($2::bigint IS NULL OR id=$2)"#,
+           WHERE user_id = $1 AND deleted_at IS NULL AND session_hash IS NULL
+             AND ($2::bigint IS NULL OR id=$2)"#,
                 key.user_id,
                 delegated_key
             )
@@ -878,6 +881,13 @@ pub async fn patch_key(
     {
         return Err(AppError::bad_request().with_param("status"));
     }
+    // 停用当前登录用的这把 key = 把自己锁在门外（同删除）
+    if req.status == Some(2) && id == key.key_id {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            codes::CURRENT_KEY_IN_USE,
+        ));
+    }
     let group_override = match req.group_code {
         Some(Some(code)) => {
             let code = code.trim().to_owned();
@@ -912,12 +922,19 @@ pub async fn patch_key(
 }
 
 /// DELETE /api/me/keys/{id}：吊销自己的 key（软删除，明文 key 立即失效）。
+/// 当前请求自己用的那把不能删：删了当前登录立刻失效，界面上所有请求都会变成 invalid_api_key。
 pub async fn delete_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
+    if id == key.key_id {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            codes::CURRENT_KEY_IN_USE,
+        ));
+    }
     // A delegated team credential manages itself. Owner/admin management of
     // other members uses the session-authenticated /api/teams endpoints.
     if key.member_user_id.is_some() && id != key.key_id {

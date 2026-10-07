@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,\n               daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,\n               expires_at, last_used_at, created_at\n        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL AND ($4::bigint IS NULL OR id=$4) ORDER BY id\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT id, name, key_prefix, status, used_micro, rpm_limit, tpm_limit, rpd_limit,\n               daily_token_limit, max_concurrency, model_allowlist, group_override, ip_allowlist,\n               expires_at, last_used_at, created_at\n        FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL AND session_hash IS NULL\n          AND ($4::bigint IS NULL OR id=$4) ORDER BY id\n        LIMIT $2 OFFSET $3\n        ",
   "describe": {
     "columns": [
       {
@@ -207,5 +207,5 @@
       false
     ]
   },
-  "hash": "bed7831d74f2448a38c76f7f9db9bcc94f142d56272ae41034c2f47eadebc0c5"
+  "hash": "89ad8750c85bc2b5bf19331abf752f40a13c6b20c971b0e57e18a978c6baa807"
 }

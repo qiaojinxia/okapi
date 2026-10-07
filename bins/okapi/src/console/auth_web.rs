@@ -90,8 +90,8 @@ fn rand_token(len: usize) -> String {
         .collect()
 }
 
-/// Cookie 头解析会话 id。
-fn session_id(headers: &HeaderMap) -> Option<String> {
+/// Cookie 头解析会话 id（网关校验登录 key 时也用）。
+pub(crate) fn session_id(headers: &HeaderMap) -> Option<String> {
     let cookies = headers.get(header::COOKIE)?.to_str().ok()?;
     cookies.split(';').find_map(|pair| {
         let (name, value) = pair.trim().split_once('=')?;
@@ -638,8 +638,109 @@ async fn verify_login(
 pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
     if let Some(sid) = session_id(&headers) {
         state.sched.web_session_del(&sid).await;
+        // 这条会话换来的登录 key 本就随会话失效了；这里把它也删掉，不留死 key
+        let revoked: Vec<String> = sqlx::query_scalar(
+            "UPDATE api_keys SET deleted_at = now() \
+             WHERE session_hash = $1 AND deleted_at IS NULL RETURNING key_hash",
+        )
+        .bind(session_hash(&sid))
+        .fetch_all(&state.pg)
+        .await
+        .unwrap_or_default();
+        for hash in &revoked {
+            state.sched.auth_del(hash).await;
+        }
     }
     Json(json!({ "ok": true }))
+}
+
+/// 登录 key 记的会话标识：sid 的 sha256 十六进制（sid 本身是能力令牌，不落库）。
+fn session_hash(sid: &str) -> String {
+    hex::encode(Sha256::digest(sid.as_bytes()))
+}
+
+#[derive(Deserialize, Default)]
+pub struct SessionKeyReq {
+    /// 只作展示（日志里分得出网页登录还是 OAuth 着陆）；缺省 web。
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// POST /auth/session-key：用当前登录会话换一把绑定它的登录 key（网页登录 / 注册 / OAuth 着陆后调用）。
+///
+/// 登录 key 只在请求带着这条会话的 cookie、且会话仍有效时可用：会话结束（退出、被踢、全部吊销、
+/// 改密码、超出在线上限、过期）它随之失效，被偷到别处也用不了。同一会话重复兑换作废上一把
+/// （明文只在这一刻返回，也不存可复制的密文）；顺手作废该用户已失效会话留下的登录 key。
+/// 门户密钥列表不显示登录 key——它们在「登录设备」里随会话管理。
+pub async fn session_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Option<Json<SessionKeyReq>>,
+) -> Result<Response, AppError> {
+    let unauthorized = || AppError::unauthorized(okapi_api::codes::INVALID_API_KEY);
+    let sid = session_id(&headers).ok_or_else(unauthorized)?;
+    let user_id = state
+        .sched
+        .web_session_get(&sid)
+        .await
+        .ok_or_else(unauthorized)?;
+    let bound = session_hash(&sid);
+    let name = body
+        .and_then(|Json(req)| req.name)
+        .map(|n| n.trim().to_owned())
+        .filter(|n| (1..=32).contains(&n.chars().count()))
+        .unwrap_or_else(|| "web".to_owned());
+    // 仍有效的会话；列表里连本会话都没有说明 Redis 读出了问题，那就只作废本会话的上一把
+    let mut live: Vec<String> = state
+        .sched
+        .web_session_list(user_id)
+        .await
+        .iter()
+        .map(|s| session_hash(&s.sid))
+        .collect();
+    if !live.contains(&bound) {
+        live.clear();
+    }
+    let token = format!("sk-okapi-{}", rand_token(43));
+    let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
+    let mut tx = state
+        .pg
+        .begin()
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+    let revoked: Vec<String> = sqlx::query_scalar(
+        "UPDATE api_keys SET deleted_at = now() \
+         WHERE user_id = $1 AND session_hash IS NOT NULL AND deleted_at IS NULL \
+           AND (session_hash = $2 OR (cardinality($3::text[]) > 0 AND NOT (session_hash = ANY($3)))) \
+         RETURNING key_hash",
+    )
+    .bind(user_id)
+    .bind(&bound)
+    .bind(&live)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    let key_id: i64 = sqlx::query_scalar(
+        "INSERT INTO api_keys (user_id, key_hash, key_prefix, name, session_hash) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(&key_hash)
+    .bind(token.chars().take(16).collect::<String>())
+    .bind(&name)
+    .bind(&bound)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(okapi_store::StoreError::from)?;
+    tx.commit().await.map_err(okapi_store::StoreError::from)?;
+    for hash in &revoked {
+        state.sched.auth_del(hash).await;
+    }
+    let mut response = Json(json!({ "key_id": key_id, "api_key": token })).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store, private".parse().unwrap());
+    Ok(response)
 }
 
 // ---- TOTP 两段式注册 ----

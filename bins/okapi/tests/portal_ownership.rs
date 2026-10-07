@@ -144,15 +144,20 @@ async fn portal_id_routes_reject_another_users_resources() {
     }
 
     // 反向对照：受害者操作自己的资源必须仍然通，否则上面的"全拒"可能只是端点整个坏了
+    let spare_token = format!("sk-okapi-own-spare-{}", Uuid::new_v4().simple());
+    let spare =
+        okapi_store::provision::create_api_key(&pg, victim.user_id, &hash(&spare_token), "sk-own")
+            .await
+            .unwrap();
     let own = client
-        .delete(format!("http://{cs}/api/me/keys/{vk}"))
+        .delete(format!("http://{cs}/api/me/keys/{spare}"))
         .bearer_auth(&victim.token)
         .send()
         .await
         .unwrap();
     assert!(
         own.status().is_success(),
-        "受害者删自己的 key 应当成功（否则上面的全拒是假阳）：{}",
+        "受害者删自己的另一把 key 应当成功（否则上面的全拒是假阳）：{}",
         own.status()
     );
 
@@ -162,4 +167,52 @@ async fn portal_id_routes_reject_another_users_resources() {
         problems.len(),
         problems.join("\n")
     );
+}
+
+/// 当前请求自己用的那把 key 删不掉、停用不了（否则立刻把自己锁在外面）；改名之类照常。
+#[tokio::test]
+async fn current_key_cannot_delete_or_disable_itself() {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
+    let pg = okapi_store::connect_pg(&database_url).await.unwrap();
+    okapi_store::run_migrations(&pg).await.unwrap();
+    let me = make_actor(&pg, "self").await;
+    let state = gateway::build_state(&database_url, &redis_url, "own-node", None, None)
+        .await
+        .unwrap();
+    let cs = serve(console::router(state)).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{cs}/api/me/keys/{}", me.key_id);
+    for (method, body) in [("DELETE", None), ("PATCH", Some(json!({"status": 2})))] {
+        let mut req = client
+            .request(method.parse().unwrap(), &url)
+            .bearer_auth(&me.token);
+        if let Some(body) = body {
+            req = req.json(&body);
+        }
+        let resp = req.send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 409, "{method} 当前 key");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "current_key_in_use");
+    }
+    let rename = client
+        .patch(&url)
+        .bearer_auth(&me.token)
+        .json(&json!({"name": "renamed"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        rename.status().is_success(),
+        "改名当前 key 照常：{}",
+        rename.status()
+    );
+    let status: i16 =
+        sqlx::query_scalar("SELECT status FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
+            .bind(me.key_id)
+            .fetch_one(&pg)
+            .await
+            .unwrap();
+    assert_eq!(status, 1, "当前 key 仍然有效");
 }

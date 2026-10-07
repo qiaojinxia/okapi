@@ -60,7 +60,22 @@ pub async fn authenticate(
     if !authed.is_usable(chrono::Utc::now()) {
         return Err(AppError::unauthorized(codes::KEY_DISABLED));
     }
+    // 登录 key 跟着登录会话走（§6.4）：请求必须带着它所属会话的 cookie，且会话仍有效（顺带续期）。
+    // 会话结束——退出、被踢、全部吊销、改密码、超出在线上限、过期——它随之失效；被偷到别处也用不了。
+    if let Some(bound) = authed.session_hash.as_deref()
+        && !session_alive(state, headers, bound, authed.user_id).await
+    {
+        return Err(AppError::unauthorized(codes::INVALID_API_KEY));
+    }
     Ok(authed)
+}
+
+async fn session_alive(state: &AppState, headers: &HeaderMap, bound: &str, user_id: i64) -> bool {
+    let Some(sid) = crate::console::auth_web::session_id(headers) else {
+        return false;
+    };
+    hex::encode(Sha256::digest(sid.as_bytes())) == bound
+        && state.sched.web_session_get(&sid).await == Some(user_id)
 }
 
 /// 无效凭证计数（缺 token / 哈希未命中）。超限改回 429，避免扫 key 打满 401。

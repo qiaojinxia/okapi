@@ -1264,8 +1264,8 @@ test('注册：关闭不摆表单；邀请制必填 aff；URL aff 不手填；�
     posts.push({ path: '/auth/login', body: route.request().postDataJSON() as Json })
     await route.fulfill({ json: { ok: true } })
   })
-  await page.route('**/auth/keys', async (route) => {
-    posts.push({ path: '/auth/keys', body: route.request().postDataJSON() as Json })
+  await page.route('**/auth/session-key', async (route) => {
+    posts.push({ path: '/auth/session-key', body: route.request().postDataJSON() as Json })
     await route.fulfill({ json: { api_key: 'sk-okapi-new', key_id: 2 } })
   })
 
@@ -1593,7 +1593,7 @@ test('邮箱登录：totp_required 后才带验证码；首次请求不含 totp_
     if (!body.totp_code) await route.fulfill(apiError(401, 'totp_required'))
     else await route.fulfill({ json: { ok: true } })
   })
-  await page.route('**/auth/keys', async (route) => {
+  await page.route('**/auth/session-key', async (route) => {
     await route.fulfill({ json: { api_key: 'sk-okapi-web', key_id: 3 } })
   })
 
@@ -2304,10 +2304,10 @@ test('登出：POST /auth/logout 空体后清 key 回到登录页', async ({ pag
   await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible()
 })
 
-test('OAuth 着陆：?oauth=done 兑 key 只带 name=oauth，然后进门户', async ({ page }) => {
+test('OAuth 着陆：?oauth=done 兑换登录 key 只带 name=oauth，然后进门户', async ({ page }) => {
   await prepare(page, { signedIn: false })
   const keys: Json[] = []
-  await page.route('**/auth/keys', async (route) => {
+  await page.route('**/auth/session-key', async (route) => {
     keys.push(route.request().postDataJSON() as Json)
     await route.fulfill({ json: { api_key: 'sk-okapi-oauth', key_id: 8 } })
   })

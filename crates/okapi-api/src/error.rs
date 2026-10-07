@@ -7,6 +7,9 @@ use serde::Serialize;
 pub mod codes {
     pub const INVALID_API_KEY: &str = "invalid_api_key";
     pub const KEY_DISABLED: &str = "key_disabled";
+    /// 要删除 / 停用的正是这次请求自己用的 key（网页登录换来的那把或粘贴登录的那把）：
+    /// 删了当前会话立刻失效，只能换一把 key 登录后再处理。
+    pub const CURRENT_KEY_IN_USE: &str = "current_key_in_use";
     pub const MODEL_NOT_ALLOWED: &str = "model_not_allowed";
     pub const MODEL_NOT_FOUND: &str = "model_not_found";
     pub const INSUFFICIENT_QUOTA: &str = "insufficient_quota";

@@ -23,7 +23,7 @@ export function useOauthLanding(onError: (msg: string) => void) {
   const exchange = useQuery({
     queryKey: qk.oauthExchange,
     queryFn: async () => {
-      const resp = await apiFetch<{ api_key: string }>('/auth/keys', {
+      const resp = await apiFetch<{ api_key: string }>('/auth/session-key', {
         method: 'POST',
         body: { name: 'oauth' },
       })
@@ -169,12 +169,12 @@ export function LoginForm() {
           email_code: emailVerification ? regForm.code.trim() : undefined,
         },
       })
-      // 注册即登录：建会话 → 兑 key 进门户（key 单轨）
+      // 注册即登录：建会话 → 兑换绑定该会话的登录 key 进门户（key 单轨；会话结束 key 随之失效）
       await apiFetch('/auth/login', {
         method: 'POST',
         body: { email: regForm.email.trim(), password: regForm.password },
       })
-      const keyResp = await apiFetch<{ api_key: string }>('/auth/keys', {
+      const keyResp = await apiFetch<{ api_key: string }>('/auth/session-key', {
         method: 'POST',
         body: { name: 'web' },
       })
@@ -199,8 +199,8 @@ export function LoginForm() {
           totp_code: totpNeeded && form.totp ? form.totp : undefined,
         },
       })
-      // 会话已建：兑 key 保持门户 key 单轨
-      const keyResp = await apiFetch<{ api_key: string }>('/auth/keys', {
+      // 会话已建：兑换绑定该会话的登录 key（退出 / 被踢 / 改密码后随会话失效）
+      const keyResp = await apiFetch<{ api_key: string }>('/auth/session-key', {
         method: 'POST',
         body: { name: 'web' },
       })

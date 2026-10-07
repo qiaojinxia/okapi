@@ -1002,3 +1002,236 @@ async fn session_limit_evicts_oldest() {
     assert_eq!(listed["data"].as_array().unwrap().len(), 2, "{listed}");
     assert_eq!(listed["limit"], 2);
 }
+
+// ---- 登录 key 跟着登录会话走（§6.4）----
+
+async fn register_user(client: &reqwest::Client, env: &TestEnv) -> (String, String) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let email = format!("sk-{suffix}@ok.test");
+    let password = "hunter2-strong".to_owned();
+    let resp = client
+        .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "username": format!("sk-{suffix}"), "password": password}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    (email, password)
+}
+
+async fn login_cookie(
+    client: &reqwest::Client,
+    env: &TestEnv,
+    email: &str,
+    password: &str,
+) -> String {
+    let login = client
+        .post(format!("http://{}/auth/login", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "password": password}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login.status(), 200);
+    cookie_of(&login)
+}
+
+async fn mint_session_key(client: &reqwest::Client, env: &TestEnv, cookie: &str) -> String {
+    let resp = client
+        .post(format!("http://{}/auth/session-key", env.addr))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(&json!({"name": "web"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    body["api_key"].as_str().unwrap().to_owned()
+}
+
+/// 用 key（可选带会话 cookie）请求门户；返回 (状态码, 响应体)。
+async fn portal(
+    client: &reqwest::Client,
+    env: &TestEnv,
+    method: reqwest::Method,
+    path: &str,
+    key: &str,
+    cookie: Option<&str>,
+) -> (u16, Value) {
+    let mut req = client
+        .request(method, format!("http://{}{path}", env.addr))
+        .bearer_auth(key);
+    if let Some(cookie) = cookie {
+        req = req.header(reqwest::header::COOKIE, cookie);
+    }
+    let resp = req.send().await.unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+async fn me_status(
+    client: &reqwest::Client,
+    env: &TestEnv,
+    key: &str,
+    cookie: Option<&str>,
+) -> u16 {
+    portal(client, env, reqwest::Method::GET, "/api/me", key, cookie)
+        .await
+        .0
+}
+
+async fn own_key(client: &reqwest::Client, env: &TestEnv, cookie: &str) -> String {
+    let created: Value = client
+        .post(format!("http://{}/auth/keys", env.addr))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(&json!({"name": "cli"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    created["api_key"].as_str().unwrap().to_owned()
+}
+
+/// 登录 key 只认带着所属会话 cookie 的请求（不带、带别的会话都 401）；同一会话重复兑换作废上一把；
+/// 门户密钥列表只有自己建的 key，不显示登录 key。
+#[tokio::test]
+async fn session_key_needs_its_own_session_and_rotates() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let (email, password) = register_user(&client, &env).await;
+    let a = login_cookie(&client, &env, &email, &password).await;
+    let b = login_cookie(&client, &env, &email, &password).await;
+    let k1 = mint_session_key(&client, &env, &a).await;
+    assert_eq!(me_status(&client, &env, &k1, Some(&a)).await, 200);
+    for cookie in [None, Some(b.as_str())] {
+        let (status, body) =
+            portal(&client, &env, reqwest::Method::GET, "/api/me", &k1, cookie).await;
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (401, Some("invalid_api_key"))
+        );
+    }
+    let k2 = mint_session_key(&client, &env, &a).await;
+    assert_eq!(
+        me_status(&client, &env, &k1, Some(&a)).await,
+        401,
+        "重复兑换作废上一把"
+    );
+    assert_eq!(me_status(&client, &env, &k2, Some(&a)).await, 200);
+    own_key(&client, &env, &a).await;
+    let (_, keys) = portal(
+        &client,
+        &env,
+        reqwest::Method::GET,
+        "/api/me/keys",
+        &k2,
+        Some(&a),
+    )
+    .await;
+    let names: Vec<&str> = keys["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k["name"].as_str())
+        .collect();
+    assert_eq!(names, ["cli"], "{keys}");
+}
+
+/// 在别的会话上吊销它、或它自己退出：它换的登录 key 立即失效；用户自己建的 key 不受影响。
+#[tokio::test]
+async fn session_key_dies_when_its_session_is_revoked_or_logged_out() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let (email, password) = register_user(&client, &env).await;
+    let a = login_cookie(&client, &env, &email, &password).await;
+    let b = login_cookie(&client, &env, &email, &password).await;
+    let ka = mint_session_key(&client, &env, &a).await;
+    let kb = mint_session_key(&client, &env, &b).await;
+    let own = own_key(&client, &env, &a).await;
+    let (_, sessions) = portal(
+        &client,
+        &env,
+        reqwest::Method::GET,
+        "/api/me/sessions",
+        &ka,
+        Some(&a),
+    )
+    .await;
+    let other = sessions["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["current"] == false)
+        .and_then(|s| s["sid"].as_str())
+        .unwrap()
+        .to_owned();
+    let path = format!("/api/me/sessions/{other}");
+    let (status, _) = portal(&client, &env, reqwest::Method::DELETE, &path, &ka, Some(&a)).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        me_status(&client, &env, &kb, Some(&b)).await,
+        401,
+        "被踢的会话"
+    );
+    let logout = client
+        .post(format!("http://{}/auth/logout", env.addr))
+        .header(reqwest::header::COOKIE, &a)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(logout.status(), 200);
+    assert_eq!(me_status(&client, &env, &ka, Some(&a)).await, 401, "已退出");
+    assert_eq!(
+        me_status(&client, &env, &own, None).await,
+        200,
+        "自建 key 不受影响"
+    );
+}
+
+/// 兑换新登录 key 时顺手作废该用户死会话留下的；「全部吊销」后当前这把也失效。
+#[tokio::test]
+async fn session_key_minting_sweeps_dead_sessions_and_revoke_all_kills_it() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let (email, password) = register_user(&client, &env).await;
+    let a = login_cookie(&client, &env, &email, &password).await;
+    let b = login_cookie(&client, &env, &email, &password).await;
+    let ka = mint_session_key(&client, &env, &a).await;
+    mint_session_key(&client, &env, &b).await;
+    let own = own_key(&client, &env, &a).await;
+    let (status, _) = portal(
+        &client,
+        &env,
+        reqwest::Method::DELETE,
+        "/api/me/sessions",
+        &ka,
+        Some(&a),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        me_status(&client, &env, &ka, Some(&a)).await,
+        401,
+        "全部吊销含当前"
+    );
+    let c = login_cookie(&client, &env, &email, &password).await;
+    let kc = mint_session_key(&client, &env, &c).await;
+    let pg = okapi_store::connect_pg(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM api_keys k JOIN users u ON u.id = k.user_id \
+         WHERE u.email = $1 AND k.session_hash IS NOT NULL AND k.deleted_at IS NULL",
+    )
+    .bind(&email)
+    .fetch_one(&pg)
+    .await
+    .unwrap();
+    assert_eq!(live, 1, "死会话的登录 key 已被清理，只剩新的这把");
+    assert_eq!(me_status(&client, &env, &kc, Some(&c)).await, 200);
+    assert_eq!(me_status(&client, &env, &own, None).await, 200);
+}

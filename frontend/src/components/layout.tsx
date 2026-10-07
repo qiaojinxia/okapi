@@ -25,7 +25,8 @@ import { Tooltip } from '@/components/ui/tooltip'
 import { useMe, usePermission } from '@/hooks/use-auth'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { useModalFocus } from '@/hooks/use-modal-focus'
-import { apiFetch, clearKey } from '@/lib/api'
+import { toast } from '@/components/ui/toast'
+import { apiFetch, clearKey, registerAuthExpired } from '@/lib/api'
 import { switchLanguage } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { useTheme } from '@/lib/theme'
@@ -69,6 +70,14 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
   const panel = useRef<HTMLElement>(null)
   const mobileOpen = open && !desktop
   useModalFocus(mobileOpen, panel, undefined, () => setOpen(false))
+  const navigate = useNavigate()
+
+  // 当前登录用的 key 失效了（在别处被删除 / 停用 / 过期）：清掉本地 key 回登录页并说明原因
+  useEffect(() => registerAuthExpired(() => {
+    clearKey()
+    toast.error(t('common:loginKeyRevoked'))
+    void navigate({ to: '/' })
+  }), [navigate, t])
 
 
   const toggleCollapsed = () => {

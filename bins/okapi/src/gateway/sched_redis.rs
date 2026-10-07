@@ -143,7 +143,8 @@ impl SchedulerRedis {
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(0);
         let entry: AuthCacheEntry = serde_json::from_str(&payload).ok()?;
-        if entry.ver != current_ver || entry.schema != 2 {
+        // schema 3：条目带登录 key 的 session_hash；旧条目一律当未命中回源
+        if entry.ver != current_ver || entry.schema != 3 {
             return None;
         }
         Some(entry.key)
@@ -161,7 +162,7 @@ impl SchedulerRedis {
     pub async fn auth_set(&self, key_hash: &str, key: &AuthedKey, ver: i64) {
         let entry = AuthCacheEntry {
             ver,
-            schema: 2,
+            schema: 3,
             key: key.clone(),
         };
         if let Ok(json) = serde_json::to_string(&entry) {

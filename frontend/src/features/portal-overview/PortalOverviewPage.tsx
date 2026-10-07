@@ -71,6 +71,12 @@ export function PortalOverviewPage() {
     timezone: logWindow?.timezone,
   }
   const loading = q.isPending
+  // 吞吐量与管理端运营概览同一做法：全量口径不完整（窗口里有失败请求、按次计费的媒体请求等，它们没有可测的输出速度）
+  // 但有实测样本时，显示样本值并注明样本数，而不是一律「—」
+  const throughputSamples = total?.output_tps_samples ?? 0
+  const partialThroughput = (total?.requests ?? 0) > 0 && total?.tokens_per_1k_sec == null
+    && throughputSamples > 0 && total?.observed_output_tps_milli != null
+  const throughput = partialThroughput ? total?.observed_output_tps_milli : total?.tokens_per_1k_sec
   const recentWalletSpend = q.isError || (range && q.data?.window?.end_date !== q.data?.window?.today) ? undefined : q.data?.wallet_window_spend_micro
   const refresh = async () => {
     setRefreshing(true)
@@ -229,7 +235,13 @@ export function PortalOverviewPage() {
         },
         {
           icon: Gauge, accent: 'bg-chart-4/12 text-chart-4', label: t('charts:throughput'),
-          value: total?.tokens_per_1k_sec == null ? '—' : `${formatTokensPerSec(total.tokens_per_1k_sec, locale)} Token/s`,
+          value: throughput == null ? '—' : `${formatTokensPerSec(throughput, locale)} Token/s`,
+          ...(partialThroughput
+            ? {
+                sub: t('portal:throughputMeasured', { n: formatCount(throughputSamples, locale), total: formatCount(total?.requests ?? 0, locale) }),
+                subTitle: t('charts:throughputSampleHint'),
+              }
+            : {}),
         },
       ]} />
 

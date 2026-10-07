@@ -8,7 +8,8 @@
 - **交易金额与余额使用 micro-USD `BIGINT`**（$1 = 1,000,000 micro）；历史 actor 结转使用 `NUMERIC(38,0)` 保存可能超过 bigint 的相抵累计额，返回余额时仍须校验 bigint 与 Redis 安全整数范围。quota 视图 = USD × 500,000 仅展示层换算；禁止浮点金额列。
 - 倍率用 NUMERIC 定点（编译进 PriceBook 后为 micro-USD/token 定点数）。
 - 时间 TIMESTAMPTZ；软删 `deleted_at`；主键 BIGINT IDENTITY。
-- 迁移：sqlx migrate，只前滚；大表加列须可空或带默认，禁止长锁回填（分批脚本）。
+- 迁移：sqlx migrate，只前滚；大表加列须可空或带默认，禁止长锁回填（分批脚本）。2026-10-06 起从单个基线
+  `migrations/0001_baseline.sql` 开始（原 0001–0039 压平，见 IMPLEMENTATION §11.10）；本文提到的 00xx 为历史编号。
 - 大表（billing_records / billing_events / audit_logs）按月 RANGE 分区；worker 自动预建下月分区并按保留策略滚动删除（#1790-1）；删除账本分区前必须同事务保留资金结转与财务凭证，见 [历史账本结转](billing-retention.md)。
 - 老仓库 `billing_events_v2` 在 Okapi 新 schema 统一命名为 `billing_events`。
 
@@ -225,9 +226,14 @@ CREATE TABLE api_keys (
     expires_at        TIMESTAMPTZ,
     last_used_at      TIMESTAMPTZ,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at        TIMESTAMPTZ
+    deleted_at        TIMESTAMPTZ,
+    session_hash      TEXT                            -- 0039：登录 key 所属会话 sid 的 sha256 hex（null = 普通 key）。
+                                                      -- 只在请求带着该会话 cookie 且会话有效时可用；门户密钥列表不显示
 );
 CREATE INDEX idx_api_keys_user ON api_keys(user_id) WHERE deleted_at IS NULL;
+-- 0039：一个会话同一时刻只有一把有效登录 key；登录时按用户清理死会话的登录 key
+CREATE UNIQUE INDEX api_keys_live_session_key ON api_keys (session_hash) WHERE session_hash IS NOT NULL AND deleted_at IS NULL;
+CREATE INDEX api_keys_user_session_keys ON api_keys (user_id) WHERE session_hash IS NOT NULL AND deleted_at IS NULL;
 ```
 
 ### 1.3 渠道与模型
@@ -726,7 +732,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `stick:sess:{<uid>}:v1:<session_hash>` | STRING | 1h 滑动 | 粘性 L2 → channel_key_id |
 | `auth:key:<sha256>` | STRING(JSON) | 60s | 鉴权缓存（key 元数据+限额+可见组）。值内嵌写入时版本号 |
 | `auth:ver` | STRING | 永久 | 鉴权缓存全局版本：console 角色/分组变更 INCR 即 O(1) 跨进程失效；key 级精确失效走单键 DEL |
-| `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面专用；门户/数据面仍 API key 单轨，§6.4） |
+| `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面；门户/数据面仍 API key 单轨，§6.4）。登录 key 绑定它：用登录 key 鉴权时校验并续期，会话没了 key 即失效 |
 | `sess:idx:<user_id>` | SET | 7d 滑动 | 该用户全部 web 会话 sid（列举 / 一键吊销 / 会话数上限裁剪；成员过期靠读时 SREM） |
 | `sess:meta:<sid>` | HASH | 7d 滑动 | 会话展示元数据：`ip` / `ua` / `created_at`（unix 秒，展示）/ `created_ms`（unix 毫秒，会话上限裁剪的排序键——同秒多次登录要分先后） |
 | `oauth:state:<token>` | STRING | 10min | OAuth authorization-code 流 CSRF state（一次性，校验即删） |

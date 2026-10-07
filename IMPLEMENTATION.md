@@ -395,7 +395,7 @@ group 一个实体、两种绑定：
 | 邮箱密码（argon2id）+ 邮箱验证 | M1 |
 | GitHub / LinuxDO / Telegram / Discord OAuth | M3【已实现（Telegram 除外——其登录部件非标 OAuth，M4 复评）：**配置驱动通用 authorization-code 模块**（`console/oauth.rs`），内置 github/discord/linuxdo 预设（settings.oauth_providers 只填 client_id/secret），任意标准 OAuth2/OIDC 上游可自定义 authorize/token/userinfo 三 URL 接入；state 走 Redis 一次性键；首登自动注册并绑定 (provider, subject)，回调发 web session → 前端兑 key】 |
 | 通用 OIDC（含 group→role/team 映射，#1106） | M3【userinfo 模式已随上覆盖；group→role/team 映射 M4 随 Team 层】 |
-| TOTP 两步验证（2FA，密钥 AES-GCM 加密落库）、Turnstile 注册风控 | M3【邮箱密码+会话+TOTP 已实现；实现定案：**web session（Redis `sess:web:*`，HttpOnly cookie）只服务 `/auth/*` 自助面**——注册/登录/2FA/兑换 key；门户与数据面保持 API key 单轨（登录成功经 `/auth/keys` 兑换 key，前端仍以 key 驱动）。会话索引 `sess:idx:<uid>` + 元数据 `sess:meta:<sid>` 支持门户列举 / 单条吊销 / 一键全吊 / **会话数上限**（`settings.web_session_limit`，缺省 0=不限；登录与 OAuth 回调建会话后超限即踢最早的，刚建的永不被踢，§11.37）；密码重置、封禁、删除用户一律清空该用户 web 会话。TOTP 密钥 AES-256-GCM 加密（`OKAPI_MASTER_KEY`），RFC 6238 HMAC-SHA1 30s 窗 ±1；Turnstile 经 settings.turnstile_secret 配置，未配置即跳过（缺省关）】 |
+| TOTP 两步验证（2FA，密钥 AES-GCM 加密落库）、Turnstile 注册风控 | M3【邮箱密码+会话+TOTP 已实现；实现定案：**web session（Redis `sess:web:*`，HttpOnly cookie）只服务 `/auth/*` 自助面**——注册/登录/2FA/兑换 key；门户与数据面保持 API key 单轨（登录成功经 `/auth/session-key` 兑换**绑定该会话的登录 key**，前端仍以 key 驱动；2026-10-06 改：此前经 `/auth/keys` 每次登录新建一把永久 key、退出 / 吊销 / 改密码都不碰它，key 越积越多且会话管控对门户形同虚设。现在登录 key 记 `api_keys.session_hash`（sid 的 sha256），鉴权时要求请求带着该会话 cookie 且会话有效（顺带续期）——退出、被踢、全部吊销、改密码、超出在线上限、过期即失效，被偷到别处也用不了；同一会话重复兑换作废上一把，兑换时顺手作废该用户死会话的登录 key，退出时删掉本会话的；门户密钥列表不显示登录 key；迁移 0039 作废旧的无绑定登录 key。当前请求自己用的 key 不能经门户删除 / 停用（409 `current_key_in_use`）；登录 key 在别处失效时前端经 `/api/me` 复核后回登录页）。会话索引 `sess:idx:<uid>` + 元数据 `sess:meta:<sid>` 支持门户列举 / 单条吊销 / 一键全吊 / **会话数上限**（`settings.web_session_limit`，缺省 0=不限；登录与 OAuth 回调建会话后超限即踢最早的，刚建的永不被踢，§11.37）；密码重置、封禁、删除用户一律清空该用户 web 会话。TOTP 密钥 AES-256-GCM 加密（`OKAPI_MASTER_KEY`），RFC 6238 HMAC-SHA1 30s 窗 ±1；Turnstile 经 settings.turnstile_secret 配置，未配置即跳过（缺省关）】 |
 | LDAP（#5703）、OIDC-IdP 反向输出（#6572） | 企业阶段（M4 后） |
 | 手机注册（#6207） | SMS provider trait 扩展点，不进主线 |
 
@@ -949,6 +949,19 @@ upsert 校验链条目须为已存在模型（≤8、去重去自引用），删
 存量数据串味——PG 的 id 从 1 重新开始，旧聚合会被算进新用户的账，表现为对账与 CH
 用例莫名失败（本轮实际踩到两次）。故三处必须一起清，脚本一条命令完成重置并灌注
 演示数据（超管 / 模型含多模态轴 / 三个池 / 五条渠道 / 分组绑池 / 发布 epoch）。
+
+**第二次压平（2026-10-06）**：应用户要求把 `0001–0039` 压成单个 `migrations/0001_baseline.sql`
+（文档里出现的 00xx 都是历史编号，演进见 git 历史）。基线由完整迁移后库的 `pg_dump --schema-only`
+整理而来：按业务分区（身份 / 设置与审计 / 定价 / 订阅充值 / 渠道 / 出口代理 / 计费账本 / 媒体任务），
+主键、唯一约束、自增列收进建表语句，外键统一放在最后，视图与函数按依赖排序，种子只有默认池与默认分组。
+等价性同样机器验证：两个空库分别跑旧链条与基线，`pg_dump` 结构逐字一致、种子数据一致（时间戳归一）；
+`col IN (...)` 形式的 CHECK 按原写法还原，否则 pg_dump 的展开式重新解析后存储树不同。
+只对旧数据有意义的修补随之去掉：渠道 token 累计的历史回填（0035）、Claude Code 旧配置改写（0036）、
+`settings.proxy_url` 转代理（0037）、作废无绑定的旧登录 key（0039）；相应两条重放旧迁移的用例改为
+直接验证仍然存在的逻辑（`channel_token_totals_follow_settled_records` 测触发器，
+`retired_mimic_switch_is_rejected_and_old_revisions_run_as_latest` 测运行时与写入拒绝）。
+已经跑过旧迁移的库：结构与基线一致，只需把 `_sqlx_migrations` 收成一行（删 2–39，版本 1 的
+description 改为 `baseline`、checksum 改为基线文件的 SHA-384），否则启动报 `VersionMissing / VersionMismatch`。
 
 
 ### 11.11 路由诊断器（2026-09-01）
