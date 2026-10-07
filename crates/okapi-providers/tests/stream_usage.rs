@@ -1,5 +1,5 @@
 //! `ensure_stream_usage`：OpenAI 方言流式请求补 `stream_options.include_usage`。
-//! 缺这一帧，结算只能落字符估算（漏收），故网关在客户端未声明时补齐。
+//! 缺这一帧，结算只能落字符估算（漏收），故网关一律补齐：客户端没声明就加上，声明了 false 也改回 true。
 
 use bytes::Bytes;
 use okapi_providers::ensure_stream_usage;
@@ -41,18 +41,18 @@ fn preserves_other_fields() {
 }
 
 #[test]
-fn does_not_override_explicit_stream_options() {
-    // 客户端显式关掉 usage 帧是其自身取舍（可能有严格的 chunk 解析器），不强改；
-    // 站长要兜住这部分收入应走本地 tokenizer 复核，而非覆盖客户端声明。
+fn explicit_stream_options_cannot_switch_off_usage() {
+    // 客户端传 include_usage:false 就能让上游不返 usage、结算落到字符估算，是可以刻意构造的
+    // 少收：一律改回 true，其余字段原样保留
     let out = ensure_stream_usage(&body(&json!({
         "model": "gpt-4o", "stream": true,
-        "stream_options": {"include_usage": false},
+        "stream_options": {"include_usage": false, "include_obfuscation": false},
         "messages": [{"role": "user", "content": "hi"}]
     })))
     .unwrap();
     assert_eq!(
         parse(&out)["stream_options"],
-        json!({"include_usage": false})
+        json!({"include_usage": true, "include_obfuscation": false})
     );
 }
 
