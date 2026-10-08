@@ -200,7 +200,9 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
    manifest 里已按副本上限配死（12 / 8 / 16），改 HPA 上限时记得一起改。
 2. **信任来源**。不配 `OKAPI_TRUSTED_PROXIES`，转发头一律不作数（只认 socket 对端），
    `client_ip` 会变成 Ingress 的地址、key 级 IP 白名单会误拒。容器里反代与网关不同 IP，
-   必须显式配网段；CDN 场景可改用 `OKAPI_EDGE_KEY`。
+   必须显式配网段或用 `OKAPI_EDGE_KEY`。K8s 模板走后者（集群内任何 pod 都在私网段里，
+   整段放行等于谁都能伪造来源 IP）：在 `okapi-env` 里设 `OKAPI_EDGE_KEY`，Ingress 回源注入
+   同值的 `X-Okapi-Edge-Key` 头。
 
 worker 保持单副本即可：周期任务（对账 / 清扫 / 分区 / 冷却恢复）不互斥，多副本只是重复劳动；
 只有 chsink 吞吐不够时才值得加（relay/chsink 走 `SKIP LOCKED` + JetStream durable，多副本安全）。

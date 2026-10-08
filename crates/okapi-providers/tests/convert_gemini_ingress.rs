@@ -440,3 +440,14 @@ fn response_without_usage_preserves_absence_instead_of_creating_a_zero_bill() {
     let out: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(out["usageMetadata"].is_null());
 }
+
+/// 上游拒答在 message.refusal（content 为 null）：Gemini 没有拒答字段，按正文给出而不是空回复。
+#[test]
+fn refusal_is_returned_as_text() {
+    let (out, _) = resp(&json!({"id":"c","model":"gpt-x","choices":[{"index":0,
+        "finish_reason":"stop","message":{"role":"assistant","content":null,"refusal":"No."}}]}));
+    assert_eq!(
+        out["candidates"][0]["content"]["parts"],
+        json!([{"text":"No."}])
+    );
+}

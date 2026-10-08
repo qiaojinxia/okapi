@@ -43,9 +43,14 @@ spec:
             # 每个 pod 各开一套 PG 池；HPA 上限 10 → 最多 10×12 = 120 条
             - name: OKAPI_PG_POOL
               value: "12"
-            # 信任反代网段（§14.2）：不配则转发头一律不作数，client_ip 会变成 Ingress 的地址
+            # 转发头信任（§14.2）：不按网段信任——集群内任何 pod 都在私网段里，放行整段等于谁都能
+            # 伪造 X-Forwarded-For 绕过每 IP 限流 / key 级 IP 白名单。改用边缘凭证（模式二）：
+            # okapi-env 里设 OKAPI_EDGE_KEY，Ingress 回源时注入同值的 X-Okapi-Edge-Key 头
+            # （ingress-nginx：proxy_set_header X-Okapi-Edge-Key <值>;）。两者都没配时 client_ip
+            # 退回 Ingress 的地址（安全但每 IP 限流按 Ingress 计）。确知 Ingress 控制器 pod 网段时
+            # 也可以把那一段写在这里。
             - name: OKAPI_TRUSTED_PROXIES
-              value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+              value: ""
             - name: OKAPI_NODE
               valueFrom:
                 fieldRef: { fieldPath: metadata.name }
@@ -113,8 +118,9 @@ spec:
             # 2 副本 × 8 = 16 条（控制面是点查为主，不需要大池）
             - name: OKAPI_PG_POOL
               value: "8"
+            # 同 gateway：靠 OKAPI_EDGE_KEY，不按私网整段信任
             - name: OKAPI_TRUSTED_PROXIES
-              value: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+              value: ""
           ports:
             - containerPort: 8081
           readinessProbe:

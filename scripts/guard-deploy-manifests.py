@@ -9,6 +9,7 @@
   IMPLEMENTATION §14.3 的排水口径（SSE 5min + 后台结算 30s = 330s）——进程现在真的会等，
   编排层宽限期不够就等于把优雅下线又改回硬杀；
 - K8s 的 Σ(副本上限 × OKAPI_PG_POOL) 不得超过模板注释里承诺的 PG max_connections 预算；
+- K8s 的 OKAPI_TRUSTED_PROXIES 不得放行整个私网段（集群内任何 pod 都在里面，等于谁都能伪造来源 IP）；
 - compose 依赖镜像来自 public.ecr.aws（项目镜像拉取约定），clickhouse 官方非 library 镜像除外。
 
 YAML 解析优先用 PyYAML；缺失时借系统 ruby 的 Psych 转成 JSON（macOS 自带）。
@@ -89,6 +90,12 @@ def check_k8s(problems: list[str]) -> str:
                 problems.append(f'{K8S}: {name}/{c.get("name")} 缺 resources.requests/limits')
             env = {e['name']: e.get('value') for e in c.get('env', []) if 'name' in e}
             pool_total += replicas * int(env.get('OKAPI_PG_POOL', '16'))
+            broad = {'10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'} & {
+                e.strip() for e in (env.get('OKAPI_TRUSTED_PROXIES') or '').split(',')
+            }
+            if broad:
+                problems.append(f'{K8S}: {name} 的 OKAPI_TRUSTED_PROXIES 放行整个私网段 {sorted(broad)}——'
+                                '集群内任何 pod 都能伪造转发头；用 OKAPI_EDGE_KEY 或 Ingress 控制器网段')
             if c.get('ports'):
                 probe = c.get('readinessProbe', {}).get('httpGet', {})
                 if probe.get('path') != '/healthz':

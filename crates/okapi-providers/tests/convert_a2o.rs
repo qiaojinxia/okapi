@@ -386,7 +386,8 @@ fn response_finish_reason_table() {
     assert_eq!(stop(Value::Null), "end_turn");
 }
 
-/// Inconsistent cache counts are rejected before subtraction, never clamped into a plausible bill.
+/// Inconsistent cache counts are rejected before subtraction, never clamped into a plausible bill;
+/// the client still gets the required usage object (zeros), not `null`.
 #[test]
 fn usage_rejects_cache_counts_that_exceed_prompt() {
     let usage_of = |usage: Value| {
@@ -404,11 +405,163 @@ fn usage_rejects_cache_counts_that_exceed_prompt() {
     assert_eq!(
         usage_of(json!({"prompt_tokens": 10, "completion_tokens": 1,
                         "prompt_tokens_details": {"cached_tokens": 50}})),
-        Value::Null
+        json!({"input_tokens": 0, "output_tokens": 0})
     );
     assert_eq!(
         usage_of(json!({"prompt_tokens": 10, "completion_tokens": 1,
                         "prompt_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 20}})),
-        Value::Null
+        json!({"input_tokens": 0, "output_tokens": 0})
     );
+}
+
+/// document 块：内联 PDF / 纯文本来源转成 chat part；URL 来源与未知块报 400 而不是静默丢弃
+/// （模型看不到附件仍会作答）；上一轮的 thinking 历史 chat 表达不了，去掉。
+#[test]
+fn documents_convert_or_reject_and_thinking_history_is_dropped() {
+    let convert = |content: Value| {
+        request_anthropic_to_openai(
+            &Bytes::from(
+                serde_json::to_vec(
+                    &json!({"max_tokens":1,"messages":[{"role":"user","content":content}]}),
+                )
+                .unwrap(),
+            ),
+            "gpt-x",
+        )
+        .map(|out| serde_json::from_slice::<Value>(&out).unwrap())
+    };
+    let out = convert(json!([
+        {"type":"document","title":"a.pdf","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}},
+        {"type":"document","source":{"type":"text","media_type":"text/plain","data":"notes"}},
+        {"type":"text","text":"summarize"}
+    ]))
+    .unwrap();
+    assert_eq!(
+        out["messages"][0]["content"],
+        json!([
+            {"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0=","filename":"a.pdf"}},
+            {"type":"text","text":"notes"},
+            {"type":"text","text":"summarize"}
+        ])
+    );
+    for (block, kind) in [
+        (
+            json!({"type":"document","source":{"type":"url","url":"https://x/a.pdf"}}),
+            "document",
+        ),
+        (
+            json!({"type":"image","source":{"type":"file","file_id":"f"}}),
+            "image",
+        ),
+        (
+            json!({"type":"search_result","source":"s","title":"t","content":[]}),
+            "search_result",
+        ),
+    ] {
+        let err = convert(json!([block, {"type":"text","text":"q"}])).unwrap_err();
+        assert!(
+            format!("{err:?}").contains(&format!("unsupported_content:{kind}")),
+            "{err}"
+        );
+    }
+    let out = request_anthropic_to_openai(
+        &Bytes::from(
+            serde_json::to_vec(&json!({"max_tokens":1,"messages":[
+                {"role":"user","content":"q"},
+                {"role":"assistant","content":[{"type":"thinking","thinking":"t","signature":"s"},{"type":"text","text":"a"}]}
+            ]}))
+            .unwrap(),
+        ),
+        "gpt-x",
+    )
+    .unwrap();
+    let out: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(out["messages"][1]["content"], "a");
+}
+
+/// 上游拒答（message.refusal / delta.refusal）作为正文给出、stop_reason = refusal；
+/// 上游没报 usage 时仍给出必有的 usage 对象。
+#[test]
+fn refusals_surface_as_text_with_refusal_stop_reason() {
+    let body = json!({"id":"c","model":"gpt-x","choices":[{"index":0,"finish_reason":"stop",
+        "message":{"role":"assistant","content":null,"refusal":"No."}}]});
+    let (out, _) =
+        response_openai_to_anthropic(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+    let out: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(out["content"], json!([{"type":"text","text":"No."}]));
+    assert_eq!(out["stop_reason"], "refusal");
+    assert_eq!(out["usage"], json!({"input_tokens":0,"output_tokens":0}));
+
+    let mut state = OaiStreamToAnthropic::new("gpt-x");
+    let mut events = Vec::new();
+    for chunk in [
+        json!({"id":"c","choices":[{"delta":{"refusal":"No"}}]}),
+        json!({"choices":[{"delta":{"refusal":"."},"finish_reason":"stop"}]}),
+    ] {
+        events.extend(state.step(Ok(ChatEvent::Data {
+            raw: chunk.to_string(),
+            event: None,
+            has_output: true,
+            content_chars: 0,
+            usage: None,
+        })));
+    }
+    events.extend(state.step(Ok(ChatEvent::Done)));
+    let payloads: Vec<Value> = events
+        .into_iter()
+        .filter_map(|event| match event.unwrap() {
+            ChatEvent::Data { raw, .. } => Some(serde_json::from_str(&raw).unwrap()),
+            ChatEvent::Done => None,
+        })
+        .collect();
+    let text: String = payloads
+        .iter()
+        .filter_map(|p| p.pointer("/delta/text").and_then(Value::as_str))
+        .collect();
+    assert_eq!(text, "No.");
+    let delta = payloads
+        .iter()
+        .find(|p| p["type"] == "message_delta")
+        .unwrap();
+    assert_eq!(delta["delta"]["stop_reason"], "refusal");
+    assert_eq!(delta["usage"], json!({"input_tokens":0,"output_tokens":0}));
+}
+
+/// 兼容上游常省略 tool_calls[].index：按 id 认槽，没有 id 的续写最近一个，不再整流报错。
+#[test]
+fn stream_tool_deltas_without_index_are_accepted() {
+    let mut state = OaiStreamToAnthropic::new("gpt-x");
+    let mut events = Vec::new();
+    for chunk in [
+        json!({"id":"c","choices":[{"delta":{"tool_calls":[{"id":"t1","function":{"name":"f","arguments":"{\"a\""}}]}}]}),
+        json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":":1}"}}]},"finish_reason":"tool_calls"}]}),
+    ] {
+        events.extend(state.step(Ok(ChatEvent::Data {
+            raw: chunk.to_string(),
+            event: None,
+            has_output: true,
+            content_chars: 0,
+            usage: None,
+        })));
+    }
+    events.extend(state.step(Ok(ChatEvent::Done)));
+    let payloads: Vec<Value> = events
+        .into_iter()
+        .map(|event| event.unwrap())
+        .filter_map(|event| match event {
+            ChatEvent::Data { raw, .. } => Some(serde_json::from_str(&raw).unwrap()),
+            ChatEvent::Done => None,
+        })
+        .collect();
+    let starts: Vec<&Value> = payloads
+        .iter()
+        .filter(|p| p["type"] == "content_block_start")
+        .collect();
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0]["content_block"]["id"], "t1");
+    let args: String = payloads
+        .iter()
+        .filter_map(|p| p.pointer("/delta/partial_json").and_then(Value::as_str))
+        .collect();
+    assert_eq!(args, "{\"a\":1}");
 }

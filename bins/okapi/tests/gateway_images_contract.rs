@@ -663,6 +663,13 @@ async fn malformed_success_refunds_and_never_replays_generation() {
 #[tokio::test]
 async fn uncertain_upstream_failures_do_not_replay_and_explicit_rejections_can_failover() {
     let mut env = setup().await;
+    // 5xx/超时虽不重放，仍登记 key 健康；阈值调高，这几次失败只计数不冷却，后段换渠道才有两个候选。
+    sqlx::query("UPDATE channels SET settings=$2 WHERE id=ANY($1)")
+        .bind(&env.channels)
+        .bind(json!({"account_control":{"failure_threshold":20}}))
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
     for status in [408, 500, 502, 503] {
         let task = launch(env.request(false).json(&env.body(1)));
         env.peer().await.raw(
@@ -679,6 +686,15 @@ async fn uncertain_upstream_failures_do_not_replay_and_explicit_rejections_can_f
         );
     }
     assert_eq!(env.hits.load(Ordering::SeqCst), 4);
+    let failures: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(failed_count),0)::bigint FROM channel_keys WHERE channel_id=ANY($1)",
+    )
+    .bind(&env.channels)
+    .fetch_one(&env.state.pg)
+    .await
+    .unwrap();
+    // 408 归请求级失败不动 key；500/502/503 三次按瞬态计数。
+    assert_eq!(failures, 3, "uncertain 5xx still feed key health");
     env.assert_money(0, 0).await;
     let task = launch(env.request(true).multipart(env.form()));
     env.peer().await.raw(429, "{}".into());

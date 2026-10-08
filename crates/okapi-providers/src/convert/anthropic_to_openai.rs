@@ -45,7 +45,7 @@ pub fn request_anthropic_to_openai(
             role,
             msg.get("content").unwrap_or(&Value::Null),
             &mut messages,
-        );
+        )?;
     }
     out.insert("messages".into(), Value::Array(messages));
 
@@ -87,7 +87,9 @@ fn system_to_text(system: &Value) -> String {
 
 /// 单条 Anthropic 消息 → 0..n 条 OpenAI 消息
 /// （tool_result 块拆为独立 role=tool 消息；其余块聚合为一条）。
-fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) {
+/// chat 表达不了的块报错（见 [`super::unsupported_part`]）；thinking 历史除外——那是上一轮
+/// 的推理过程，OpenAI 上游没有回放推理的字段，去掉不影响模型看到的对话内容。
+fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) -> Result<(), UpstreamError> {
     match content {
         Value::String(s) if !s.is_empty() => {
             out.push(json!({"role": role, "content": s}));
@@ -101,11 +103,14 @@ fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) {
                         "type": "text",
                         "text": block.get("text").and_then(Value::as_str).unwrap_or(""),
                     })),
-                    Some("image") => {
-                        if let Some(part) = image_to_part(block.get("source")) {
-                            parts.push(part);
-                        }
-                    }
+                    Some("image") => parts.push(
+                        image_to_part(block.get("source"))
+                            .ok_or_else(|| super::unsupported_part("image"))?,
+                    ),
+                    Some("document") => parts.push(
+                        document_to_part(block)
+                            .ok_or_else(|| super::unsupported_part("document"))?,
+                    ),
                     Some("tool_use") => tool_calls.push(json!({
                         "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
                         "type": "function",
@@ -124,7 +129,8 @@ fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) {
                             .unwrap_or(""),
                         "content": tool_result_text(block.get("content")),
                     })),
-                    _ => {}
+                    Some("thinking" | "redacted_thinking") => {}
+                    other => return Err(super::unsupported_part(other.unwrap_or_default())),
                 }
             }
             if !parts.is_empty() || !tool_calls.is_empty() {
@@ -151,6 +157,7 @@ fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) {
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn image_to_part(source: Option<&Value>) -> Option<Value> {
@@ -165,6 +172,36 @@ fn image_to_part(source: Option<&Value>) -> Option<Value> {
         Some("url") => {
             let url = source.get("url").and_then(Value::as_str)?;
             Some(json!({"type": "image_url", "image_url": {"url": url}}))
+        }
+        _ => None,
+    }
+}
+
+/// document 块 → chat part：内联 PDF → file part；纯文本 / 内容块来源 → text part。
+/// URL / file_id 引用的文档 chat 取不到，返回 `None` 由调用方报错。
+fn document_to_part(block: &Value) -> Option<Value> {
+    let source = block.get("source")?;
+    match source.get("type").and_then(Value::as_str) {
+        Some("base64")
+            if source.get("media_type").and_then(Value::as_str) == Some("application/pdf") =>
+        {
+            let data = source.get("data").and_then(Value::as_str)?;
+            let mut file = json!({"file_data": format!("data:application/pdf;base64,{data}")});
+            if let Some(title) = block.get("title").filter(|title| title.is_string()) {
+                file["filename"] = title.clone();
+            }
+            Some(json!({"type": "file", "file": file}))
+        }
+        Some("text") => {
+            let text = source.get("data").and_then(Value::as_str)?;
+            Some(json!({"type": "text", "text": text}))
+        }
+        Some("content") => {
+            let text = match source.get("content")? {
+                Value::String(text) => text.clone(),
+                blocks => tool_result_text(Some(blocks)),
+            };
+            Some(json!({"type": "text", "text": text}))
         }
         _ => None,
     }
@@ -248,10 +285,14 @@ pub fn response_openai_to_anthropic(
     {
         content.push(json!({"type": "thinking", "thinking": thinking, "signature": ""}));
     }
-    if let Some(text) = message.get("content").and_then(Value::as_str)
-        && !text.is_empty()
-    {
-        content.push(json!({"type": "text", "text": text}));
+    // 上游拒答在 message.refusal（content 为 null）；Anthropic 没有单独的拒答块，按正文给出，
+    // stop_reason 由 content_filter 映射成 refusal
+    for field in ["content", "refusal"] {
+        if let Some(text) = message.get(field).and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            content.push(json!({"type": "text", "text": text}));
+        }
     }
     for call in message
         .get("tool_calls")
@@ -284,14 +325,22 @@ pub fn response_openai_to_anthropic(
         "role": "assistant",
         "model": src.get("model").and_then(Value::as_str).unwrap_or(""),
         "content": content,
-        "stop_reason": map_finish_reason(finish),
+        "stop_reason": if refused(&message) { "refusal" } else { map_finish_reason(finish) },
         "stop_sequence": Value::Null,
-        "usage": probe.map(anthropic_usage_json),
+        "usage": anthropic_usage_json(probe),
     });
     let bytes = serde_json::to_vec(&out)
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
     Ok((bytes, probe))
+}
+
+/// 上游给了拒答文本：结构化输出拒答时 finish_reason 仍是 stop，stop_reason 要按拒答报。
+fn refused(message: &Value) -> bool {
+    message
+        .get("refusal")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
 }
 
 fn map_finish_reason(finish: Option<&str>) -> &'static str {
@@ -303,13 +352,14 @@ fn map_finish_reason(finish: Option<&str>) -> &'static str {
     }
 }
 
-/// OpenAI 口径探针 → Anthropic usage JSON（input 不含缓存）。
-fn anthropic_usage_json(u: UsageProbe) -> Value {
-    if u.with_estimates(0, 0).is_err() {
-        return Value::Null;
-    }
+/// OpenAI 口径探针 → Anthropic usage JSON（input 不含缓存）。Anthropic 的 usage 是必有对象、
+/// input/output_tokens 必有字段：上游没报或报得不合法时给 0，不写 null（严格客户端会直接崩）。
+fn anthropic_usage_json(probe: Option<UsageProbe>) -> Value {
+    let mut usage = json!({"input_tokens": 0, "output_tokens": 0});
+    let Some(u) = probe.filter(|u| u.with_estimates(0, 0).is_ok()) else {
+        return usage;
+    };
     let d = u.prompt_tokens_details;
-    let mut usage = json!({});
     if let Some(okapi_domain::ServerToolUsage::Anthropic(tools)) = u.server_tool_usage {
         usage["server_tool_use"] = json!(tools);
     }
@@ -359,7 +409,9 @@ pub struct OaiStreamToAnthropic {
     block: Block,
     block_index: i64,
     tool_blocks: std::collections::BTreeMap<usize, i64>,
+    tool_ids: Vec<String>,
     finish_reason: Option<String>,
+    refused: bool,
     usage: Option<UsageProbe>,
     finished: bool,
 }
@@ -374,7 +426,9 @@ impl OaiStreamToAnthropic {
             block: Block::None,
             block_index: -1,
             tool_blocks: std::collections::BTreeMap::new(),
+            tool_ids: Vec::new(),
             finish_reason: None,
+            refused: false,
             usage: None,
             finished: false,
         }
@@ -442,8 +496,11 @@ impl OaiStreamToAnthropic {
             )));
         }
 
-        if let Some(text) = delta.get("content").and_then(Value::as_str)
-            && !text.is_empty()
+        self.refused |= refused(&delta);
+        for text in ["content", "refusal"]
+            .into_iter()
+            .filter_map(|field| delta.get(field).and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
         {
             self.ensure_block(Block::Text, &mut out);
             let ev = json!({"type": "content_block_delta", "index": self.block_index,
@@ -463,12 +520,7 @@ impl OaiStreamToAnthropic {
             .into_iter()
             .flatten()
         {
-            let Some(index) = call
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|i| usize::try_from(i).ok())
-                .filter(|i| *i < 128)
-            else {
+            let Some(index) = super::stream_tool_slot(call, &mut self.tool_ids) else {
                 return vec![Err(UpstreamError::Stream("tool_index_invalid".into()))];
             };
             self.close_block(&mut out);
@@ -563,10 +615,14 @@ impl OaiStreamToAnthropic {
             )));
         }
         let probe = self.usage;
-        let stop = map_finish_reason(self.finish_reason.as_deref());
+        let stop = if self.refused {
+            "refusal"
+        } else {
+            map_finish_reason(self.finish_reason.as_deref())
+        };
         let ev = json!({"type": "message_delta",
             "delta": {"stop_reason": stop, "stop_sequence": Value::Null},
-            "usage": probe.map(anthropic_usage_json)});
+            "usage": anthropic_usage_json(probe)});
         out.push(Ok(named("message_delta", &ev, false, 0, probe)));
         out.push(Ok(named(
             "message_stop",

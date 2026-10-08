@@ -22,6 +22,13 @@ pub fn request_responses_to_chat(
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
+    // 历史引用指向上游 Responses 存储，chat 没有对应物：降级后上下文会整段消失而客户端毫无察觉。
+    // 网关只为原生响应建绑定、续聊锁原渠道，能走到这里的是绑定后渠道被改成降级的情形——明确拒绝。
+    for key in ["previous_response_id", "conversation"] {
+        if src.get(key).is_some_and(|value| !value.is_null()) {
+            return Err(super::unsupported_part(key));
+        }
+    }
 
     let mut messages: Vec<Value> = Vec::new();
     if let Some(instructions) = src.get("instructions").and_then(Value::as_str)
@@ -57,7 +64,7 @@ pub fn request_responses_to_chat(
         out.insert("stream".into(), json!(true));
         out.insert("stream_options".into(), json!({"include_usage": true}));
     }
-    convert_tools(src, &mut out);
+    convert_tools(src, &mut out)?;
 
     serde_json::to_vec(&Value::Object(out))
         .map(Bytes::from)
@@ -113,7 +120,7 @@ fn convert_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<(), Ups
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": item.get("call_id").and_then(Value::as_str).unwrap_or(""),
-                "content": item.get("output").and_then(Value::as_str).unwrap_or(""),
+                "content": tool_output_text(item.get("output"))?,
             }));
         }
         _ => {}
@@ -154,8 +161,53 @@ fn input_part_to_chat(part: &Value) -> Result<Value, UpstreamError> {
     converted.ok_or_else(|| super::unsupported_part(kind))
 }
 
+/// `function_call_output.output`：字符串，或 input part 数组。chat 的 tool 消息只收文本，
+/// 文本 part 依序拼接；图片 / 文件 part 表达不了，报错而不是丢掉。
+fn tool_output_text(output: Option<&Value>) -> Result<String, UpstreamError> {
+    match output {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .map(|part| {
+                let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+                match kind {
+                    "input_text" | "output_text" | "text" => {
+                        Ok(part.get("text").and_then(Value::as_str).unwrap_or(""))
+                    }
+                    _ => Err(super::unsupported_part(kind)),
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|texts| texts.join("\n")),
+        Some(other) => Ok(other.to_string()),
+    }
+}
+
+/// Responses `tool_choice` → chat 形状：字符串取值相同；指名函数从扁平
+/// `{"type":"function","name"}` 包成 `{"type":"function","function":{"name"}}`——原样透传时
+/// 两跳到 Anthropic / Gemini 认不出，静默退成 auto，客户端指名的工具被放开。
+/// 内置工具等降级路径表达不了的选择报错。
+fn tool_choice_to_chat(choice: &Value) -> Result<Value, UpstreamError> {
+    match choice {
+        Value::String(_) => Ok(choice.clone()),
+        Value::Object(obj) if obj.get("type").and_then(Value::as_str) == Some("function") => {
+            let name = obj
+                .get("name")
+                .or_else(|| choice.pointer("/function/name"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| super::unsupported_part("tool_choice"))?;
+            Ok(json!({"type": "function", "function": {"name": name}}))
+        }
+        _ => Err(super::unsupported_part("tool_choice")),
+    }
+}
+
 /// Responses 工具形状（扁平 name/parameters）→ chat function 工具。
-fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map<String, Value>) {
+fn convert_tools(
+    src: &serde_json::Map<String, Value>,
+    out: &mut serde_json::Map<String, Value>,
+) -> Result<(), UpstreamError> {
     let tools: Vec<Value> = src
         .get("tools")
         .and_then(Value::as_array)
@@ -175,9 +227,10 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
     if !tools.is_empty() {
         out.insert("tools".into(), Value::Array(tools));
     }
-    if let Some(choice) = src.get("tool_choice") {
-        out.insert("tool_choice".into(), choice.clone());
+    if let Some(choice) = src.get("tool_choice").filter(|choice| !choice.is_null()) {
+        out.insert("tool_choice".into(), tool_choice_to_chat(choice)?);
     }
+    Ok(())
 }
 
 // ---- 响应转换（非流式） ----
@@ -198,11 +251,22 @@ pub fn response_chat_to_responses(
         output.push(json!({"type":"reasoning","id":"rs_0","status":"completed",
             "summary":[{"type":"summary_text","text":reasoning}]}));
     }
-    let text = message.get("content").and_then(Value::as_str).unwrap_or("");
-    if !text.is_empty() {
+    let mut content: Vec<Value> = Vec::new();
+    if let Some(text) = message.get("content").and_then(Value::as_str)
+        && !text.is_empty()
+    {
+        content.push(json!({"type": "output_text", "text": text, "annotations": []}));
+    }
+    // 上游拒答放在 message.refusal（content 为 null）；不带出来客户端就只看到空回复
+    if let Some(refusal) = message.get("refusal").and_then(Value::as_str)
+        && !refusal.is_empty()
+    {
+        content.push(json!({"type": "refusal", "refusal": refusal}));
+    }
+    if !content.is_empty() {
         output.push(json!({
             "type": "message", "id": "msg_0", "status": "completed", "role": "assistant",
-            "content": [{"type": "output_text", "text": text, "annotations": []}],
+            "content": content,
         }));
     }
     for call in message
@@ -294,14 +358,19 @@ pub struct ChatStreamToResponses {
     id: String,
     created: i64,
     started: bool,
-    text_open: bool,
     finish_reason: Option<String>,
+    /// assistant message 项（msg_0）的 output_index；文本与拒答是它的两个 content part。
+    message_index: Option<usize>,
+    next_part: usize,
+    text_part: Option<usize>,
     text_buf: String,
-    text_index: usize,
+    refusal_part: Option<usize>,
+    refusal_buf: String,
     reasoning_index: Option<usize>,
     reasoning_buf: String,
     next_index: usize,
     tools: std::collections::BTreeMap<usize, StreamTool>,
+    tool_ids: Vec<String>,
     usage: Option<UsageProbe>,
     finished: bool,
     seq: i64,
@@ -315,14 +384,18 @@ impl ChatStreamToResponses {
             id: "resp".to_owned(),
             created: chrono::Utc::now().timestamp(),
             started: false,
-            text_open: false,
             finish_reason: None,
+            message_index: None,
+            next_part: 0,
+            text_part: None,
             text_buf: String::new(),
-            text_index: 0,
+            refusal_part: None,
+            refusal_buf: String::new(),
             reasoning_index: None,
             reasoning_buf: String::new(),
             next_index: 0,
             tools: std::collections::BTreeMap::new(),
+            tool_ids: Vec::new(),
             usage: None,
             finished: false,
             seq: 0,
@@ -355,7 +428,6 @@ impl ChatStreamToResponses {
             self.finish_reason = Some(reason.to_owned());
         }
         if !self.started {
-            self.started = true;
             if let Some(id) = chunk.get("id").and_then(Value::as_str)
                 && !id.is_empty()
             {
@@ -366,10 +438,7 @@ impl ChatStreamToResponses {
             {
                 model.clone_into(&mut self.model);
             }
-            let payload = json!({"type": "response.created",
-                "response": {"id": self.id, "object": "response", "created_at": self.created,
-                    "status": "in_progress", "model": self.model, "output": []}});
-            out.push(Ok(self.named("response.created", &payload, false, 0, None)));
+            out.push(Ok(self.created()));
         }
 
         if let Some(reasoning) = chunk
@@ -379,48 +448,102 @@ impl ChatStreamToResponses {
         {
             out.extend(self.on_reasoning(reasoning));
         }
-        if let Some(text) = chunk
-            .pointer("/choices/0/delta/content")
-            .and_then(Value::as_str)
-            && !text.is_empty()
-        {
-            if !self.text_open {
-                self.text_open = true;
-                self.text_index = self.next_index;
-                self.next_index += 1;
-                let added = json!({"type": "response.output_item.added", "output_index": self.text_index,
-                    "item": {"type": "message", "id": "msg_0", "status": "in_progress",
-                             "role": "assistant", "content": []}});
-                out.push(Ok(self.named(
-                    "response.output_item.added",
-                    &added,
-                    false,
-                    0,
-                    None,
-                )));
-                let part = json!({"type": "response.content_part.added", "item_id": "msg_0",
-                    "output_index": self.text_index, "content_index": 0,
-                    "part": {"type": "output_text", "text": "", "annotations": []}});
-                out.push(Ok(self.named(
-                    "response.content_part.added",
-                    &part,
-                    false,
-                    0,
-                    None,
-                )));
+        for (field, refusal) in [("content", false), ("refusal", true)] {
+            if let Some(text) = chunk
+                .pointer("/choices/0/delta")
+                .and_then(|delta| delta.get(field))
+                .and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                out.extend(self.on_message_delta(text, refusal));
             }
-            self.text_buf.push_str(text);
-            let delta = json!({"type": "response.output_text.delta", "item_id": "msg_0",
-                "output_index": self.text_index, "content_index": 0, "delta": text});
-            out.push(Ok(self.named(
-                "response.output_text.delta",
-                &delta,
-                true,
-                text.chars().count(),
-                None,
-            )));
         }
         out.extend(self.on_tools(chunk));
+        out
+    }
+
+    /// `response.created`：首个 chunk 时发；上游一个 chunk 都没给就结束时由终局补发，
+    /// 不能让客户端先看到 `response.completed`。
+    fn created(&mut self) -> ChatEvent {
+        self.started = true;
+        let payload = json!({"type": "response.created",
+            "response": {"id": self.id, "object": "response", "created_at": self.created,
+                "status": "in_progress", "model": self.model, "output": []}});
+        self.named("response.created", &payload, false, 0, None)
+    }
+
+    /// 正文或拒答增量：首次出现时开 message 项 / 对应 content part，再发 delta。
+    fn on_message_delta(
+        &mut self,
+        text: &str,
+        refusal: bool,
+    ) -> Vec<Result<ChatEvent, UpstreamError>> {
+        let mut out = Vec::new();
+        let output_index = if let Some(index) = self.message_index {
+            index
+        } else {
+            let index = self.next_index;
+            self.next_index += 1;
+            self.message_index = Some(index);
+            let added = json!({"type": "response.output_item.added", "output_index": index,
+                "item": {"type": "message", "id": "msg_0", "status": "in_progress",
+                         "role": "assistant", "content": []}});
+            out.push(Ok(self.named(
+                "response.output_item.added",
+                &added,
+                false,
+                0,
+                None,
+            )));
+            index
+        };
+        let slot = if refusal {
+            self.refusal_part
+        } else {
+            self.text_part
+        };
+        let content_index = if let Some(part) = slot {
+            part
+        } else {
+            let part = self.next_part;
+            self.next_part += 1;
+            if refusal {
+                self.refusal_part = Some(part);
+            } else {
+                self.text_part = Some(part);
+            }
+            let empty = if refusal {
+                json!({"type": "refusal", "refusal": ""})
+            } else {
+                json!({"type": "output_text", "text": "", "annotations": []})
+            };
+            let added = json!({"type": "response.content_part.added", "item_id": "msg_0",
+                "output_index": output_index, "content_index": part, "part": empty});
+            out.push(Ok(self.named(
+                "response.content_part.added",
+                &added,
+                false,
+                0,
+                None,
+            )));
+            part
+        };
+        let event = if refusal {
+            self.refusal_buf.push_str(text);
+            "response.refusal.delta"
+        } else {
+            self.text_buf.push_str(text);
+            "response.output_text.delta"
+        };
+        let delta = json!({"type": event, "item_id": "msg_0",
+            "output_index": output_index, "content_index": content_index, "delta": text});
+        out.push(Ok(self.named(
+            event,
+            &delta,
+            true,
+            text.chars().count(),
+            None,
+        )));
         out
     }
 
@@ -476,16 +599,9 @@ impl ChatStreamToResponses {
             .into_iter()
             .flatten()
         {
-            let Some(index) = delta
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|i| usize::try_from(i).ok())
-            else {
-                continue;
-            };
-            if index >= 128 {
+            let Some(index) = super::stream_tool_slot(delta, &mut self.tool_ids) else {
                 return vec![Err(UpstreamError::Stream("tool_count_limit".into()))];
-            }
+            };
             if !self.tools.contains_key(&index) {
                 let tool = StreamTool {
                     output_index: self.next_index,
@@ -542,18 +658,10 @@ impl ChatStreamToResponses {
         }
         self.finished = true;
         let mut out = Vec::new();
-        let probe = self.usage;
-        if self.text_open {
-            let done = json!({"type": "response.output_text.done", "item_id": "msg_0",
-                "output_index": self.text_index, "content_index": 0, "text": self.text_buf});
-            out.push(Ok(self.named(
-                "response.output_text.done",
-                &done,
-                false,
-                0,
-                None,
-            )));
+        if !self.started {
+            out.push(Ok(self.created()));
         }
+        let probe = self.usage;
         let mut output = Vec::new();
         if let Some(index) = self.reasoning_index {
             let part = json!({"type":"summary_text","text":self.reasoning_buf});
@@ -588,18 +696,51 @@ impl ChatStreamToResponses {
             )));
             output.push((index, item));
         }
-        if self.text_open {
-            let part = json!({"type":"output_text","text":self.text_buf,"annotations":[]});
-            let part_done = json!({"type":"response.content_part.done","item_id":"msg_0","output_index":self.text_index,"content_index":0,"part":part});
-            out.push(Ok(self.named(
-                "response.content_part.done",
-                &part_done,
-                false,
-                0,
-                None,
-            )));
-            let item = json!({"type":"message","id":"msg_0","status":"completed","role":"assistant","content":[part]});
-            let item_done = json!({"type":"response.output_item.done","output_index":self.text_index,"item":item});
+        if let Some(output_index) = self.message_index {
+            let mut parts = Vec::new();
+            if let Some(index) = self.text_part {
+                let done = json!({"type": "response.output_text.done", "item_id": "msg_0",
+                    "output_index": output_index, "content_index": index, "text": self.text_buf});
+                out.push(Ok(self.named(
+                    "response.output_text.done",
+                    &done,
+                    false,
+                    0,
+                    None,
+                )));
+                parts.push((
+                    index,
+                    json!({"type":"output_text","text":self.text_buf,"annotations":[]}),
+                ));
+            }
+            if let Some(index) = self.refusal_part {
+                let done = json!({"type": "response.refusal.done", "item_id": "msg_0",
+                    "output_index": output_index, "content_index": index, "refusal": self.refusal_buf});
+                out.push(Ok(self.named(
+                    "response.refusal.done",
+                    &done,
+                    false,
+                    0,
+                    None,
+                )));
+                parts.push((index, json!({"type":"refusal","refusal":self.refusal_buf})));
+            }
+            parts.sort_by_key(|(index, _)| *index);
+            for (index, part) in &parts {
+                let part_done = json!({"type":"response.content_part.done","item_id":"msg_0",
+                    "output_index":output_index,"content_index":index,"part":part});
+                out.push(Ok(self.named(
+                    "response.content_part.done",
+                    &part_done,
+                    false,
+                    0,
+                    None,
+                )));
+            }
+            let content: Vec<Value> = parts.into_iter().map(|(_, part)| part).collect();
+            let item = json!({"type":"message","id":"msg_0","status":"completed","role":"assistant","content":content});
+            let item_done =
+                json!({"type":"response.output_item.done","output_index":output_index,"item":item});
             out.push(Ok(self.named(
                 "response.output_item.done",
                 &item_done,
@@ -607,7 +748,7 @@ impl ChatStreamToResponses {
                 0,
                 None,
             )));
-            output.push((self.text_index, item));
+            output.push((output_index, item));
         }
         let tools = std::mem::take(&mut self.tools);
         for (index, tool) in tools {
@@ -819,5 +960,152 @@ mod part_tests {
                 "{err:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fifth_review_tests {
+    use super::*;
+
+    fn request(body: &Value) -> Result<Value, UpstreamError> {
+        request_responses_to_chat(&Bytes::from(body.to_string()), "up")
+            .map(|out| serde_json::from_slice(&out).unwrap())
+    }
+
+    fn stream(chunks: &[Value]) -> Vec<(String, Value)> {
+        let mut state = ChatStreamToResponses::new("fixture");
+        let mut events = Vec::new();
+        for chunk in chunks {
+            events.extend(state.step(Ok(ChatEvent::Data {
+                raw: chunk.to_string(),
+                event: None,
+                has_output: true,
+                content_chars: 0,
+                usage: None,
+            })));
+        }
+        events.extend(state.step(Ok(ChatEvent::Done)));
+        events
+            .into_iter()
+            .filter_map(|event| match event.unwrap() {
+                ChatEvent::Data {
+                    raw,
+                    event: Some(name),
+                    ..
+                } => Some((name, serde_json::from_str(&raw).unwrap())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn completed(events: &[(String, Value)]) -> &Value {
+        &events
+            .iter()
+            .find(|(name, _)| name == "response.completed")
+            .unwrap()
+            .1["response"]
+    }
+
+    #[test]
+    fn named_tool_choice_is_reshaped_and_hosted_choices_are_rejected() {
+        let tools = json!([{"type":"function","name":"f","parameters":{"type":"object"}}]);
+        for choice in [
+            json!({"type":"function","name":"f"}),
+            json!({"type":"function","function":{"name":"f"}}),
+        ] {
+            let out = request(&json!({"input":"hi","tools":tools,"tool_choice":choice})).unwrap();
+            assert_eq!(
+                out["tool_choice"],
+                json!({"type":"function","function":{"name":"f"}})
+            );
+        }
+        let out = request(&json!({"input":"hi","tools":tools,"tool_choice":"required"})).unwrap();
+        assert_eq!(out["tool_choice"], "required");
+        let err = request(&json!({"input":"hi","tool_choice":{"type":"web_search_preview"}}))
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unsupported_content:tool_choice"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn stored_history_references_are_rejected_instead_of_dropped() {
+        for key in ["previous_response_id", "conversation"] {
+            let err = request(&json!({"input":"next", key:"resp_1"})).unwrap_err();
+            assert!(
+                format!("{err:?}").contains(&format!("unsupported_content:{key}")),
+                "{err}"
+            );
+        }
+        assert!(request(&json!({"input":"next","previous_response_id":null})).is_ok());
+    }
+
+    #[test]
+    fn array_tool_outputs_keep_their_text_and_reject_media() {
+        let out = request(
+            &json!({"input":[{"type":"function_call_output","call_id":"c1",
+            "output":[{"type":"input_text","text":"a"},{"type":"input_text","text":"b"}]}]}),
+        )
+        .unwrap();
+        assert_eq!(out["messages"][0]["content"], "a\nb");
+        let err = request(
+            &json!({"input":[{"type":"function_call_output","call_id":"c1",
+            "output":[{"type":"input_image","image_url":"data:image/png;base64,AA=="}]}]}),
+        )
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("unsupported_content:input_image"));
+    }
+
+    #[test]
+    fn refusals_reach_the_client_in_json_and_stream() {
+        let (body, _) = response_chat_to_responses(&Bytes::from(
+            json!({"choices":[{"finish_reason":"stop",
+                "message":{"content":null,"refusal":"I can't help with that."}}]})
+            .to_string(),
+        ))
+        .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["output"][0]["content"],
+            json!([{"type":"refusal","refusal":"I can't help with that."}])
+        );
+
+        let events = stream(&[
+            json!({"id":"x","choices":[{"delta":{"refusal":"I can't"}}]}),
+            json!({"choices":[{"delta":{"refusal":" help."},"finish_reason":"stop"}]}),
+        ]);
+        let names: Vec<&str> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"response.refusal.delta"), "{names:?}");
+        let done = events
+            .iter()
+            .find(|(name, _)| name == "response.refusal.done")
+            .unwrap();
+        assert_eq!(done.1["refusal"], "I can't help.");
+        assert_eq!(
+            completed(&events)["output"][0]["content"],
+            json!([{"type":"refusal","refusal":"I can't help."}])
+        );
+    }
+
+    #[test]
+    fn empty_streams_still_open_with_response_created() {
+        let events = stream(&[]);
+        assert_eq!(events[0].0, "response.created");
+        assert_eq!(events.last().unwrap().0, "response.completed");
+    }
+
+    #[test]
+    fn tool_deltas_without_index_follow_their_call_id() {
+        let events = stream(&[
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"f","arguments":"{\"a\":"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"1}"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"id":"call_2","function":{"name":"g","arguments":"{}"}}]}}]}),
+        ]);
+        let output = &completed(&events)["output"];
+        assert_eq!(output[0]["call_id"], "call_1");
+        assert_eq!(output[0]["arguments"], "{\"a\":1}");
+        assert_eq!(output[1]["call_id"], "call_2");
+        assert_eq!(output[1]["name"], "g");
     }
 }

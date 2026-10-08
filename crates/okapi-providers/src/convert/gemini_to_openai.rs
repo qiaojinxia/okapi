@@ -377,10 +377,13 @@ pub fn response_openai_to_gemini(
     {
         parts.push(json!({"text": reasoning, "thought": true}));
     }
-    if let Some(text) = message.get("content").and_then(Value::as_str)
-        && !text.is_empty()
-    {
-        parts.push(json!({"text": text}));
+    // 上游拒答在 message.refusal（content 为 null）；Gemini 没有拒答字段，按正文给出
+    for field in ["content", "refusal"] {
+        if let Some(text) = message.get(field).and_then(Value::as_str)
+            && !text.is_empty()
+        {
+            parts.push(json!({"text": text}));
+        }
     }
     for call in message
         .get("tool_calls")
@@ -535,6 +538,7 @@ pub struct OaiStreamToGemini {
     model: String,
     id: String,
     calls: Vec<PendingCall>,
+    tool_ids: Vec<String>,
     finish_reason: Option<String>,
     usage: Option<UsageProbe>,
     finished: bool,
@@ -547,6 +551,7 @@ impl OaiStreamToGemini {
             model: fallback_model.to_owned(),
             id: String::new(),
             calls: Vec::new(),
+            tool_ids: Vec::new(),
             finish_reason: None,
             usage: None,
             finished: false,
@@ -597,8 +602,10 @@ impl OaiStreamToGemini {
                 text.chars().count(),
             )));
         }
-        if let Some(text) = delta.get("content").and_then(Value::as_str)
-            && !text.is_empty()
+        for text in ["content", "refusal"]
+            .into_iter()
+            .filter_map(|field| delta.get(field).and_then(Value::as_str))
+            .filter(|text| !text.is_empty())
         {
             out.push(Ok(self.chunk(
                 &[json!({"text": text})],
@@ -613,12 +620,7 @@ impl OaiStreamToGemini {
             .into_iter()
             .flatten()
         {
-            let Some(index) = call
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|i| usize::try_from(i).ok())
-                .filter(|i| *i < 128)
-            else {
+            let Some(index) = super::stream_tool_slot(call, &mut self.tool_ids) else {
                 return vec![Err(UpstreamError::Stream("tool_index_invalid".into()))];
             };
             while self.calls.len() <= index {

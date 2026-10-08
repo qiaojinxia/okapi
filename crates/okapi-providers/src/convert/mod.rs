@@ -34,5 +34,36 @@ pub(crate) fn unsupported_part(kind: &str) -> UpstreamError {
     UpstreamError::Build(format!("{UNSUPPORTED_CONTENT_PREFIX}{kind}"))
 }
 
+/// 流式 `tool_calls` 分片的槽位上限（每个槽对应一个工具调用）。
+pub(crate) const MAX_STREAM_TOOLS: usize = 128;
+
+/// 流式 `tool_calls` 分片 → 槽位。兼容上游常省略 `index`（单工具时尤甚）：缺省时按 id 认槽，
+/// 新 id 开新槽，没有 id 的续写最近一个槽。显式但非法（非整数 / 越界）的返回 `None`。
+pub(crate) fn stream_tool_slot(call: &Value, ids: &mut Vec<String>) -> Option<usize> {
+    let id = call
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let slot = match call.get("index") {
+        Some(index) => usize::try_from(index.as_u64()?).ok()?,
+        None => match id {
+            Some(id) => ids.iter().position(|seen| seen == id).unwrap_or(ids.len()),
+            None => ids.len().saturating_sub(1),
+        },
+    };
+    if slot >= MAX_STREAM_TOOLS {
+        return None;
+    }
+    if ids.len() <= slot {
+        ids.resize(slot + 1, String::new());
+    }
+    if let Some(id) = id
+        && ids[slot].is_empty()
+    {
+        id.clone_into(&mut ids[slot]);
+    }
+    Some(slot)
+}
+
 /// [`unsupported_part`] 的原因前缀，网关据此把构造失败映射成带 param 的 400。
 pub const UNSUPPORTED_CONTENT_PREFIX: &str = "unsupported_content:";
