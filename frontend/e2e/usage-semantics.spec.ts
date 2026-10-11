@@ -5,10 +5,7 @@ import { overviewSearch } from '../src/features/portal-overview/search'
 import { portalLogSearch } from '../src/features/logs/search'
 import { sumByModel } from '../src/features/portal-overview/types'
 import { cacheAmount, cacheHit } from '../src/features/portal-overview/cache-metrics'
-import { segments } from '../src/features/portal-overview/TokenMixView'
-
-/// 总览不再分页签：模型明细卡里用「费用 / Token」切换列
-const detailMode = (page: Page, mode: '费用' | 'Token') => page.getByRole('group', { name: '明细口径', exact: true }).getByRole('button', { name: mode, exact: true })
+import { segments } from '../src/features/portal-overview/token-segments'
 
 const usageRow = { day: '2026-09-27', model: 'model-a', requests: 2, prompt_tokens: 1000, cached_tokens: 0,
   cache_read_known_requests: 2, cache_write_known_requests: 2, cache_write_tokens: 0, completion_tokens: 100,
@@ -136,26 +133,24 @@ test('吞吐量全量口径不完整（窗口里有失败请求）时显示实�
   await expect(metrics).not.toContainText('Token/s')
 })
 
-test('缓存零命中与缺失分开，文案不假定模型价格也不把折扣说成缓存节省', async ({ page }) => {
+test('缓存零命中与缺失分开，不把折扣说成缓存节省', async ({ page }) => {
   await prepare(page)
-  await page.goto('/portal?view=tokens')
-  const panel = page.getByRole('region', { name: '模型明细', exact: true })
-  await expect(panel).toContainText('缓存命中率 0.0%')
-  await expect(panel).toContainText('1× 表示与普通输入同价')
-  await expect(panel).toContainText('读取上报 2 / 2 次')
-  await expect(page.getByRole('region', { name: '用量概览', exact: true })).toContainText('已省 US$0.0005')
+  await page.goto('/portal')
+  const kpis = page.getByRole('region', { name: '用量概览', exact: true })
+  const ranking = page.getByRole('region', { name: '模型消费排行', exact: true })
+  await expect(kpis).toContainText('缓存命中 0.0%')
+  await expect(kpis).toContainText('已省 US$0.0005')
   const missingWrite = { ...report(), total: { ...report().total, cache_write_tokens: null } }
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: missingWrite }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
-  await expect(panel).toContainText('缓存命中率 0.0%')
-  await expect(panel).not.toContainText('缓存数据未完整上报')
-  const partial = { ...report(), data: [{ ...usageRow, cache_read_known_requests: 1, cache_write_tokens: null }], total: { ...report().total, cache_read_known_requests: 1, cache_hit_bp: null, cache_write_tokens: null } }
-  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
+  await expect(kpis).toContainText('缓存命中 0.0%')
+  // 读取一次都没上报：命中率是未知，不是零
+  const unknown = { ...report(), data: [{ ...usageRow, cache_read_known_requests: 0, cache_hit_bp: null, cache_write_tokens: null }], total: { ...report().total, cache_read_known_requests: 0, cache_hit_bp: null, cache_write_tokens: null } }
+  await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: unknown }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
-  await expect(panel).toContainText('缓存命中率 —')
-  await expect(panel).toContainText('缓存数据未完整上报')
-  await expect(panel).not.toContainText('缓存命中率 0.0%')
-  await expect(panel).not.toContainText('通常 0.1')
+  await expect(kpis).toContainText('缓存命中 —')
+  await expect(kpis).not.toContainText('缓存命中 0.0%')
+  await expect(ranking).not.toContainText('缓存')
 })
 
 test('缓存样本率按输入 Token 加权，未知请求不会变成零命中', () => {
@@ -170,7 +165,7 @@ test('缓存样本率按输入 Token 加权，未知请求不会变成零命中'
   expect(cacheHit({ requests: 2, cache_hit_bp: null })).toEqual({ bp: null, partial: false, samples: 0 })
 })
 
-test('有缓存读取时首页、构成和模型页显示样本率及已记录数量', async ({ page }) => {
+test('只采到部分缓存样本时，指标卡和模型排行都写明样本数', async ({ page }) => {
   await prepare(page)
   const row = { ...usageRow, requests: 3, cached_tokens: 800, errors: 1, cache_read_known_requests: 2,
     cache_hit_bp: null, cache_write_tokens: null, measured_cache_hit_bp: 8000,
@@ -179,13 +174,8 @@ test('有缓存读取时首页、构成和模型页显示样本率及已记录�
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
   await page.goto('/portal')
   await expect(page.getByText('已采集缓存命中 80.0%（2 / 3 次）').first()).toBeVisible()
-  await detailMode(page, 'Token').click()
-  const tokens = page.getByRole('region', { name: '模型明细', exact: true })
-  await expect(tokens).toContainText('样本缓存命中率 80.0%')
-  await expect(tokens).toContainText('800')
-  await expect(tokens).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
-  await detailMode(page, '费用').click()
-  await expect(page.getByRole('region', { name: '模型明细', exact: true })).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
+  // 排行里同样写明只是部分样本
+  await expect(page.getByRole('region', { name: '模型消费排行', exact: true })).toContainText('缓存 80.0%（2 / 3 次）')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: 'test-results/cache-measured-mobile.png', fullPage: true, animations: 'disabled' })
 })
@@ -202,27 +192,5 @@ test('跨日期折叠保留部分写入量，图表不重复累加缓存', () =>
     const parts = segments(model)
     expect(parts.find((part) => part.key === 'write')?.value).toBe(20)
     expect(parts.reduce((sum, part) => sum + part.value, 0)).toBe(model.prompt_tokens + model.completion_tokens)
-  }
-})
-
-test('缓存数量在构成页签区分部分、明确零、完全缺失和完整采集', async ({ page }) => {
-  await prepare(page)
-  for (const fixture of [
-    { read: 90, write: 20, known: 1, expectedRead: '90部分', expectedWrite: '20部分' },
-    { read: 0, write: 0, known: 1, expectedRead: '0部分', expectedWrite: '0部分' },
-    { read: 0, write: null, known: 0, expectedRead: '-', expectedWrite: '-' },
-    { read: 0, write: 0, known: 2, expectedRead: '0', expectedWrite: '0' },
-  ]) {
-    const row = { ...usageRow, cached_tokens: fixture.read, cache_read_known_requests: fixture.known,
-      cache_write_known_requests: fixture.known, cache_write_tokens: fixture.known === 2 ? fixture.write : null,
-      recorded_cache_write_tokens: fixture.write }
-    const data = { ...report(), data: [row], total: { ...report().total, ...row, cache_hit_bp: fixture.known === 2 ? 0 : null } }
-    await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: data }))
-    await page.goto('/portal?view=tokens')
-    const panel = page.getByRole('region', { name: '模型明细', exact: true })
-    const cells = panel.getByRole('row').filter({ hasText: 'model-a' }).getByRole('cell')
-    await expect(cells.nth(2)).toHaveText(fixture.expectedRead)
-    await expect(cells.nth(3)).toHaveText(fixture.expectedWrite)
-    if (fixture.known !== 2) await expect(panel).not.toContainText('缓存命中率 0.0%')
   }
 })

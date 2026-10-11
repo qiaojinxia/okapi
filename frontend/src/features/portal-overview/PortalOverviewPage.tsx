@@ -12,7 +12,6 @@ import { Segmented } from '@/components/ui/segmented'
 import { UsageScope } from '@/components/usage-scope'
 import { useUsageScope } from '@/hooks/use-usage-scope'
 import { Stat } from '@/components/ui/stat'
-import { ModelDetails } from '@/features/portal-overview/ModelDetails'
 import { QualityStrip } from '@/features/portal-overview/QualityStrip'
 import { UsageOverview } from '@/features/portal-overview/UsageOverview'
 import { cacheHit } from '@/features/portal-overview/cache-metrics'
@@ -94,12 +93,12 @@ export function PortalOverviewPage() {
   })
   const previous = prev.isError ? undefined : prev.data?.total
 
-  // 旧链接里的 ?view=trend / models / tokens 曾是页签，现在滚到对应区块；只在首次数据回来时滚一次
+  // 旧链接里的 ?view=trend / models / tokens 曾是页签，现在滚到趋势或模型排行；只在首次数据回来时滚一次
   const scrolled = useRef(false)
   useEffect(() => {
     if (scrolled.current || !q.isSuccess || !view) return
     scrolled.current = true
-    document.getElementById(view === 'trend' ? 'portal-trend' : 'portal-details')?.scrollIntoView({ block: 'start' })
+    document.getElementById(view === 'trend' ? 'portal-trend' : 'portal-models')?.scrollIntoView({ block: 'start' })
   }, [q.isSuccess, view])
 
   const hit = total ? cacheHit(total) : null
@@ -245,16 +244,7 @@ export function PortalOverviewPage() {
       ) : q.isPending ? <LoadingState /> : q.data?.total && (
         <>
           <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
-            onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }), resetScroll: false })}
-            onShowModels={() => {
-              void navigate({ search: (prev) => ({ ...prev, view: undefined }), resetScroll: false })
-              document.getElementById('portal-details')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-            }} />
-          <ModelDetails rows={q.data.data} total={total ?? null} logSearch={logSearch}
-            mode={view === 'tokens' ? 'tokens' : 'models'}
-            onModeChange={(mode) => void navigate({ search: (prev) => ({ ...prev, view: mode === 'tokens' ? 'tokens' : undefined }), resetScroll: false })}
-            metric={search.model_measure ?? 'amount'} onMetricChange={(model_measure) => void navigate({ search: (prev) => ({ ...prev, model_measure }), resetScroll: false })}
-            query={search.model_query ?? ''} onQueryChange={(model_query) => void navigate({ search: (prev) => ({ ...prev, model_query: model_query || undefined }), replace: true, resetScroll: false })} />
+            onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }), resetScroll: false })} />
         </>
       )}
     </div>

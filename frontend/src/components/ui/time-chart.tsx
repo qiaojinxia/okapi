@@ -70,8 +70,12 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const leftBars = type === 'bar' && !line ? visible.filter((s) => !(secondaryAxis && s.axis === 'right')) : []
   const barLabels = leftBars.length > 0 && data.length <= MAX_BAR_LABELS
   const barTotal = (index: number) => leftBars.reduce((sum, s) => sum + (Number(data[index]?.[s.key]) || 0), 0)
-  const barLabel = (pick: (index: number) => number) => (props: { x?: number | string; y?: number | string; width?: number | string; index?: number }) => {
-    const value = pick(props.index ?? 0)
+  // 堆叠时合计写在这根柱子实际最上面的非零段上：最上层序列当天为 0 时它没有柱形，挂在它上面就显示不出来
+  const topBar = (index: number) => leftBars.findLast((s) => (Number(data[index]?.[s.key]) || 0) !== 0)
+  const barLabel = (s: ChartSeries) => (props: { x?: number | string; y?: number | string; width?: number | string; index?: number }) => {
+    const index = props.index ?? 0
+    if (stacked && topBar(index) !== s) return null
+    const value = stacked ? barTotal(index) : Number(data[index]?.[s.key]) || 0
     if (!value) return null
     return <text x={Number(props.x) + Number(props.width) / 2} y={Number(props.y) - 4} textAnchor="middle" fontSize={10} fill="var(--color-muted-foreground)" className="tabular-nums">{format(value)}</text>
   }
@@ -119,7 +123,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
                 return line || (s.axis === 'right' && secondaryAxis) ? <Line key={s.key} {...shared} type="linear" strokeWidth={2} strokeDasharray={s.axis === 'right' ? '5 3' : undefined} dot={data.length <= 31 ? { r: 2 } : false} activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--color-card)' }} connectNulls={false} />
                   : type === 'bar' ? <Bar key={s.key} {...shared} stroke="none" fill={s.color} stackId={stacked ? 'usage' : undefined} maxBarSize={32} radius={stacked ? undefined : [3, 3, 0, 0]}>
                     {partialBucket && data.map((point) => <Cell key={point.bucket} fillOpacity={point.bucket === partialBucket ? 0.4 : 1} />)}
-                    {barLabels && (stacked ? s === leftBars.at(-1) : leftBars.includes(s)) && <LabelList dataKey={s.key} content={barLabel(stacked ? barTotal : (index) => Number(data[index]?.[s.key]) || 0)} />}
+                    {barLabels && leftBars.includes(s) && <LabelList dataKey={s.key} content={barLabel(s)} />}
                   </Bar>
                     : <Area key={s.key} {...shared} type="linear" strokeWidth={2} fill={`url(#${id}-${series.indexOf(s)})`} stackId={stacked ? 'usage' : undefined} connectNulls={false} dot={data.length === 1 ? { r: 4 } : false} activeDot={{ r: 3 }} />
               })}

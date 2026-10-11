@@ -172,7 +172,7 @@ test('API key 登录直达门户总览：KPI 卡与一页式用量区', async ({
   // 用 i 标志：标题带 uppercase 样式，Playwright 匹配的是渲染后文本
   await expect(page.getByText(/额度与账单|billing/i).first()).toBeVisible()
 
-  // 总览是一页：趋势、模型排行和模型明细都在，新用户零调用时给出"还没有调用"的空态而非报错或白屏
+  // 总览是一页：趋势和模型排行都在，新用户零调用时给出"还没有调用"的空态而非报错或白屏
   await expect(main.getByText(/还没有调用|No calls in this window/).first()).toBeVisible()
   // 范围切换（本密钥 / 全账户）不报错
   await page.getByRole('button', { name: /全账户|Whole account/ }).click()

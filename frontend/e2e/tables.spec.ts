@@ -2,9 +2,6 @@ import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 
-/// 总览不再分页签：模型明细卡里用「费用 / Token」切换列
-const detailMode = (page: Page, mode: '费用' | 'Token') => page.getByRole('group', { name: '明细口径', exact: true }).getByRole('button', { name: mode, exact: true })
-
 function report(count = 40) {
   const data = Array.from({ length: count }, (_, i) => ({
     day: '2026-09-26', model: `model-${String(i + 1).padStart(2, '0')}`, requests: count - i,
@@ -20,6 +17,13 @@ function report(count = 40) {
   } }
 }
 
+/// 密钥页是门户里唯一的固定首列宽表，横向浏览的用例用它
+const KEY_PAGE = 10
+const keyRow = (id: number) => ({
+  id, name: `key-${String(id).padStart(2, '0')}-production-service`, key_prefix: `sk-okapi-${id}`, copy_status: 'available', status: 1,
+  used_micro: 12300, amount_micro: 12300, requests: 20, rpm_limit: null, created_at: '2026-10-06T00:00:00Z', group_override: null, ip_allowlist: null,
+})
+
 async function prepare(page: Page) {
   const requests: URL[] = []
   await page.addInitScript(() => { localStorage.setItem('okapi.key', 'table-fixture'); localStorage.setItem('okapi.lang', 'zh-CN') })
@@ -33,7 +37,7 @@ async function prepare(page: Page) {
     const limit = Number(url.searchParams.get('limit') ?? 10)
     const json = url.pathname === '/api/me' ? { user_id: 1, key_id: 1, role: 100, permissions: ['*'], balance_micro: 180000000, group: 'default' }
       : url.pathname === '/api/notice' ? { notice: null }
-        : url.pathname === '/api/me/keys' ? { total: 1, data: [{ used_micro: 12300, requests: 20 }] }
+        : url.pathname === '/api/me/keys' ? { total: 40, data: Array.from({ length: Math.max(0, Math.min(limit, 40 - offset)) }, (_, i) => keyRow(offset + i + 1)) }
           : url.pathname === '/api/me/stats/breakdown' ? report()
             : url.pathname === '/admin/groups' ? { total: 40, data: Array.from({ length: Math.max(0, Math.min(limit, 40 - offset)) }, (_, i) => ({ group_code: `group-${String(offset + i + 1).padStart(2, '0')}`, group_ratio: '1.5', description: 'Production group', user_count: 12, channel_count: 20, pool_code: 'default', is_default: false, self_select: false })) }
               : { data: [] }
@@ -42,13 +46,13 @@ async function prepare(page: Page) {
   return requests
 }
 
-for (const view of ['models', 'tokens']) for (const width of [320, 390]) {
-  test(`${view} 固定模型列 ${width}px：翻列前后保留重叠内容，不跳过被固定列遮住的数据`, async ({ page }) => {
+for (const width of [320, 390]) {
+  test(`密钥宽表固定首列 ${width}px：翻列前后保留重叠内容，不跳过被固定列遮住的数据`, async ({ page }) => {
     await prepare(page)
     await page.setViewportSize({ width, height: 844 })
-    await page.goto(`/portal?view=${view}`)
-    const table = page.getByRole('table', { name: view === 'models' ? '模型用量分布' : 'Token 构成', exact: true })
-    await expect(table.locator('tbody tr')).toHaveCount(40)
+    await page.goto('/portal/keys')
+    const table = page.getByRole('table', { name: '密钥', exact: true })
+    await expect(table.locator('tbody tr')).toHaveCount(KEY_PAGE)
     const viewport = table.locator('..')
     await viewport.evaluate((element) => element.scrollIntoView({ block: 'center' }))
     const forward = page.getByRole('group', { name: '表格横向浏览' }).getByRole('button', { name: '查看右侧列' })
@@ -68,9 +72,9 @@ for (const view of ['models', 'tokens']) for (const width of [320, 390]) {
 test('横向浏览按钮：键盘聚焦和回退不改变表格原有滚动位置，回到最左侧可继续向右', async ({ page }) => {
   await prepare(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/portal?view=tokens')
-  const table = page.getByRole('table', { name: 'Token 构成', exact: true })
-  await expect(table.locator('tbody tr')).toHaveCount(40)
+  await page.goto('/portal/keys')
+  const table = page.getByRole('table', { name: '密钥', exact: true })
+  await expect(table.locator('tbody tr')).toHaveCount(KEY_PAGE)
   const viewport = table.locator('..')
   await viewport.evaluate((element) => {
     element.scrollIntoView({ block: 'center' })
@@ -102,13 +106,13 @@ test('横向浏览按钮：键盘聚焦和回退不改变表格原有滚动位�
   await expect.poll(() => viewport.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
 })
 
-for (const view of ['models', 'tokens']) {
-  test(`${view} 窄屏宽表：左右按钮与键盘可用，模型列和表头固定，变宽后收起提示`, async ({ page }) => {
+{
+  test('密钥宽表窄屏：左右按钮与键盘可用，首列和表头固定，变宽后收起提示', async ({ page }) => {
     const requests = await prepare(page)
     await page.setViewportSize({ width: 390, height: 844 })
-    await page.goto(`/portal?view=${view}`)
-    const table = page.getByRole('table', { name: view === 'models' ? '模型用量分布' : 'Token 构成', exact: true })
-    await expect(table.locator('tbody tr')).toHaveCount(40)
+    await page.goto('/portal/keys')
+    const table = page.getByRole('table', { name: '密钥', exact: true })
+    await expect(table.locator('tbody tr')).toHaveCount(KEY_PAGE)
     const viewport = table.locator('..')
     await viewport.evaluate((element) => element.scrollIntoView({ block: 'center' }))
     const controls = page.getByRole('group', { name: '表格横向浏览' })
@@ -140,16 +144,16 @@ for (const view of ['models', 'tokens']) {
     await expect.poll(() => viewport.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0)
     await viewport.evaluate((element) => { element.scrollLeft = element.scrollWidth; element.scrollTop = 280 })
     await expect(forward).toBeDisabled()
-    const headerBox = (await table.getByRole('columnheader', { name: '模型', exact: true }).boundingBox())!
+    const headerBox = (await table.locator('thead th').first().boundingBox())!
     const pinnedBox = (await controls.boundingBox())!
     expect(Math.abs(headerBox.y - pinnedBox.y - pinnedBox.height)).toBeLessThan(2)
     expect(Math.abs(pinnedBox.x - containerBox.x - 1)).toBeLessThan(2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.screenshot({ path: `test-results/table-${view}-mobile.png`, fullPage: true, animations: 'disabled' })
+    await page.screenshot({ path: `test-results/table-keys-mobile.png`, fullPage: true, animations: 'disabled' })
     await page.setViewportSize({ width: 1800, height: 1000 })
     await expect(controls).toHaveCount(0)
     await viewport.evaluate((element) => { element.scrollTop = 280 })
-    await expect(table.getByRole('columnheader', { name: '模型', exact: true })).toBeInViewport({ ratio: 1 })
+    await expect(table.locator('thead th').first()).toBeInViewport({ ratio: 1 })
   })
 }
 
@@ -222,7 +226,7 @@ for (const { width, language } of [
   })
 }
 
-test('小表不产生多余滚动控件或焦点停靠，无输入 Token 时不显示虚假缓存命中率', async ({ page }) => {
+test('无输入 Token 时模型排行不显示虚假缓存命中率，也不出现多余的横向浏览控件', async ({ page }) => {
   await prepare(page)
   await page.setViewportSize({ width: 1800, height: 1000 })
   await page.route('**/api/me/stats/breakdown?*', (route) => {
@@ -231,15 +235,13 @@ test('小表不产生多余滚动控件或焦点停靠，无输入 Token 时不�
     Object.assign(data.total, { prompt_tokens: 0, cached_tokens: 0, amount_micro: 0, cache_hit_bp: 0 })
     return route.fulfill({ json: data })
   })
-  await page.goto('/portal?view=models')
-  const table = page.getByRole('table')
-  await expect(table.locator('tbody tr')).toHaveCount(1)
+  await page.goto('/portal')
+  const ranking = page.getByRole('region', { name: '模型消费排行', exact: true })
+  await expect(ranking.getByRole('listitem')).toHaveCount(1)
+  await expect(ranking.getByRole('listitem').first()).toContainText('1 次')
+  await expect(ranking).not.toContainText('缓存')
+  await expect(ranking.getByRole('listitem').first()).toContainText('—')
   await expect(page.getByRole('group', { name: '表格横向浏览' })).toHaveCount(0)
-  expect(await table.locator('..').getAttribute('tabindex')).toBeNull()
-  await expect(table.locator('tbody tr td').nth(1)).toHaveText('—')
-  await expect(table.locator('tbody tr td').last()).toHaveText('—')
-  await detailMode(page, 'Token').click()
-  await expect(table.locator('tbody tr td').last()).toHaveText('—')
 })
 
 for (const { width, language, unpriced } of [
