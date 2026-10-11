@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { ArrowUpRight, CircleHelp, LayoutDashboard, RefreshCw } from 'lucide-react'
@@ -20,6 +20,8 @@ import { effectiveDays } from '@/features/analytics/search'
 import { qk } from '@/lib/query-keys'
 
 const routeApi = getRouteApi('/admin/')
+/// 自动刷新时完整用量查询的最短间隔。
+const USAGE_AUTO_REFRESH_MS = 5 * 60_000
 
 /// 管理总览。
 ///
@@ -43,24 +45,31 @@ export function DashboardPage() {
   const navigate = routeApi.useNavigate()
   const queryClient = useQueryClient()
   const [refreshing, setRefreshing] = useState(false)
-  const refresh = useCallback(async () => {
-    setRefreshing(true)
+  const usageRefreshedAt = useRef(0)
+  const refresh = useCallback(async (auto = false) => {
+    if (!auto) setRefreshing(true)
+    // 费用、质量与 Token 构成那条完整查询是本页最重的（服务端单条规划就要秒级）：
+    // 自动刷新每 5 分钟才带上它一次，手动刷新照旧全部重查
+    const withUsage = !auto || Date.now() - usageRefreshedAt.current >= USAGE_AUTO_REFRESH_MS
+    if (withUsage) usageRefreshedAt.current = Date.now()
     try {
       // 只刷新本页已挂载的查询，避免牵动其他页面的缓存。
       await withFreshDashboardQueries(async () => { await Promise.all([
         qk.statsRealtime, dashboardOverviewKey(days, range), qk.statsInventory,
         qk.statsChannels(days), qk.adminModels, qk.adminPools, qk.reconciliation, qk.diagnose,
-        qk.statsTrend(dashboardTrendParams(days, range)), qk.statsTrend(dashboardChartParams(days, range)),
+        ...(withUsage ? [qk.statsTrend(dashboardTrendParams(days, range))] : []), qk.statsTrend(dashboardChartParams(days, range)),
         qk.statsBreakdown(dashboardBreakdownParams(days, 'model', model_rank, range)),
         qk.statsBreakdown(dashboardBreakdownParams(days, 'channel', channel_rank, range)),
       ].map((queryKey) => queryClient.refetchQueries({ queryKey, exact: true, type: 'active' }))) })
-    } finally { setRefreshing(false) }
+    } finally { if (!auto) setRefreshing(false) }
   }, [days, start_date, end_date, model_rank, channel_rank, queryClient])
 
   // 汇总、排行和诊断也定期更新，避免首页停留后只剩实时数字在变化。
   useEffect(() => {
+    // 初次加载已经查过完整用量，从现在起算 5 分钟
+    usageRefreshedAt.current = Date.now()
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void refresh()
+      if (document.visibilityState === 'visible') void refresh(true)
     }, 60_000)
     return () => window.clearInterval(timer)
   }, [refresh])

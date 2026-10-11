@@ -14,7 +14,8 @@ pub(crate) fn build() -> QueryCache {
             let bytes = serde_json::to_vec(rows.as_ref()).map_or(usize::MAX, |v| v.len());
             u32::try_from(key.len().saturating_add(bytes)).unwrap_or(u32::MAX)
         })
-        .time_to_live(Duration::from_secs(15))
+        // 运营概览每分钟自动刷新一次：15s 时每次都落空，多个管理员 / 标签页也各算一遍
+        .time_to_live(Duration::from_mins(1))
         .build()
 }
 
@@ -52,6 +53,12 @@ async fn load(
         })
 }
 
+/// 规划成本高的大 SQL（完整分析源、测量覆盖）：ClickHouse 24.8 光分析规划就要单核 ~2s，
+/// 与读多少行无关。一次刷新并发 6 条时，4 核机器上每条都拖过 15s 的执行上限被掐断。
+/// 进 ClickHouse 前在这里排队，排队不计入它的执行时限，几条按序各自 ~2s 跑完。
+const HEAVY_SQL_BYTES: usize = 16 * 1024;
+static HEAVY_QUERIES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 pub(super) async fn query(
     state: &AppState,
     sql: &str,
@@ -65,6 +72,11 @@ pub(super) async fn query(
         )
     })?;
     let fetch = async {
+        let _permit = if sql.len() >= HEAVY_SQL_BYTES {
+            HEAVY_QUERIES.acquire().await.ok()
+        } else {
+            None
+        };
         ch.query_with_params(sql, params)
             .await
             .map_err(AppError::from)

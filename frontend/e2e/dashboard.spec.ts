@@ -885,8 +885,9 @@ test('Dashboard 汇总每分钟更新当前时段，后台和离开页面停止�
   await page.clock.fastForward(60_000)
   await expect.poll(() => count('/admin/stats/overview?days=7')).toBe(2)
   expect(count('/admin/stats/margin')).toBe(0)
-  await expect.poll(() => requests.filter(isUsage).length).toBe(2)
+  // 完整用量查询最重：自动刷新每 5 分钟才带上它，第一分钟只刷图表等轻查询
   await expect.poll(() => requests.filter(isChart).length).toBe(2)
+  expect(requests.filter(isUsage)).toHaveLength(1)
   await expect.poll(() => count('/admin/stats/breakdown?days=7')).toBe(4)
   await page.getByRole('button', { name: '近 30 天', exact: true }).click()
   await expect(page.getByRole('region', { name: '费用与调用质量' })).toContainText('近 30 天')
