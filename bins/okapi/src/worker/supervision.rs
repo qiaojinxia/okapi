@@ -1,13 +1,48 @@
 //! Restart unexpectedly stopped workers without restarting during shutdown.
 use futures::FutureExt;
-use std::{future::Future, panic::AssertUnwindSafe, time::Duration};
+use std::{future::Future, panic::AssertUnwindSafe, sync::OnceLock, time::Duration};
 use tokio::sync::watch;
+
+/// 只观测 / 只外联、关掉也不影响记账的任务。气隙或只读部署用 `OKAPI_WORKER_DISABLE` 逗号分隔关掉；
+/// 结算恢复、清扫、对账、分区、chsink 这类任务关了会错账或撑爆存储，不在清单里，写了也只打 WARN。
+const OPTIONAL: &[&str] = &["egress_probe", "ops_sampler", "unit_calibration"];
+
+/// `(要关的, 不允许关 / 认不出的)`。
+fn parse_disabled(raw: &str) -> (Vec<&str>, Vec<&str>) {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .partition(|name| OPTIONAL.contains(name))
+}
+
+fn disabled(name: &str) -> bool {
+    static DISABLED: OnceLock<Vec<String>> = OnceLock::new();
+    DISABLED
+        .get_or_init(|| {
+            let raw = std::env::var("OKAPI_WORKER_DISABLE").unwrap_or_default();
+            let (off, rejected) = parse_disabled(&raw);
+            if !rejected.is_empty() {
+                tracing::warn!(
+                    ?rejected,
+                    allowed = ?OPTIONAL,
+                    "OKAPI_WORKER_DISABLE: these tasks cannot be disabled; ignored"
+                );
+            }
+            off.into_iter().map(str::to_owned).collect()
+        })
+        .iter()
+        .any(|off| off == name)
+}
 
 pub(super) async fn run<F, Fut>(name: &'static str, mut stop: watch::Receiver<bool>, mut start: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = ()>,
 {
+    if disabled(name) {
+        tracing::info!(worker = name, "disabled by OKAPI_WORKER_DISABLE");
+        return;
+    }
     let mut delay = Duration::from_secs(1);
     loop {
         if *stop.borrow() {
@@ -40,6 +75,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_optional_tasks_can_be_disabled() {
+        let (off, rejected) = parse_disabled(" egress_probe, ops_sampler ,,reconcile,sweep,typo");
+        assert_eq!(off, ["egress_probe", "ops_sampler"]);
+        assert_eq!(rejected, ["reconcile", "sweep", "typo"]);
+        assert_eq!(parse_disabled(""), (vec![], vec![]));
+    }
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},

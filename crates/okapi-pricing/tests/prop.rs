@@ -228,3 +228,23 @@ proptest! {
         prop_assert!(more.amount >= base.amount);
     }
 }
+
+proptest! {
+    /// 定点倍率的文本往返：任意非负定点值格式化后再解析得到原值（价簿发布、审计与导出都靠这条）。
+    #[test]
+    fn ratio_display_parse_round_trip(scaled in 0i64..=i64::MAX) {
+        let ratio = fp(scaled);
+        prop_assert_eq!(ratio.to_string().parse::<RatioFp>(), Ok(ratio));
+    }
+
+    /// 至多 6 位小数的字面量按整数精确解析（不经浮点），规范化文本再解析不变。
+    #[test]
+    fn ratio_literals_parse_exactly(int in 0i64..=1_000_000_000, frac in 0i64..1_000_000, digits in 1u32..=6) {
+        let frac = frac % 10i64.pow(digits);
+        let width = usize::try_from(digits).unwrap();
+        let literal = format!("{int}.{frac:0width$}");
+        let want = int * 1_000_000 + frac * 10i64.pow(6 - digits);
+        prop_assert_eq!(literal.parse::<RatioFp>().map(RatioFp::as_scaled), Ok(want));
+        prop_assert_eq!(fp(want).to_string().parse::<RatioFp>().map(RatioFp::as_scaled), Ok(want));
+    }
+}

@@ -80,13 +80,19 @@ pub(super) fn ch_sql() -> String {
 
 /// jsonb 数值 → bigint：只认 JSON 数字且是不越界的整数，其余（字符串、小数、超长）当未观测（NULL）。
 /// 一条脏记录不该让整页用量查询报错；也不做 regexp 清洗——"1a2" 洗成 12 是编造数据。
-fn pg_bigint(path: &str) -> String {
+/// `path` 必须是 `->` 取出的 jsonb（不是 `->>` 的文本）；门户日志、来源统计与本模块共用。
+pub(super) fn pg_bigint(path: &str) -> String {
     if !path.contains("->") {
         return path.to_owned(); // 普通列（reasoning_tokens）
     }
     format!(
         "CASE WHEN jsonb_typeof({path}) = 'number' AND ({path} #>> '{{}}') ~ '^-?[0-9]{{1,18}}$' THEN ({path} #>> '{{}}')::bigint END"
     )
+}
+
+/// jsonb 布尔 → boolean：只认 JSON 布尔，缺失或别的类型（`"yes"`、数字）都是 NULL，不做 `::boolean` 强转。
+pub(super) fn pg_flag(path: &str) -> String {
+    format!("(CASE WHEN jsonb_typeof({path}) = 'boolean' THEN ({path} #>> '{{}}')::boolean END)")
 }
 
 pub(super) fn pg_sql() -> String {

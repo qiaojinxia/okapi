@@ -258,7 +258,10 @@ pub async fn create_team_key(
             .collect::<String>()
     );
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
-    let name = req.name.as_deref().unwrap_or("team");
+    let name = match req.name.as_deref() {
+        Some(name) => super::identifiers::ensure_optional_text("name", name, 128)?,
+        None => "team",
+    };
     let key_id = sqlx::query_scalar!(
         r#"INSERT INTO api_keys (user_id, key_hash, key_prefix, name, member_user_id)
            VALUES ($1, $2, $3, $4, $5) RETURNING id"#,

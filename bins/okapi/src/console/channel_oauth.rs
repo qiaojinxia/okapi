@@ -164,13 +164,12 @@ pub async fn exchange(
         None
     };
     let api_base = if prepared.is_some() {
-        if req
-            .name
-            .as_deref()
-            .is_none_or(|name| name.trim().is_empty())
-        {
-            return Err(AppError::bad_request().with_param("name"));
-        }
+        // 与控制台建渠道同一套显示名规则（identifiers.rs）：非空、≤128 字符、无控制与不可见字符
+        super::identifiers::ensure_display_name(
+            "name",
+            req.name.as_deref().unwrap_or_default(),
+            128,
+        )?;
         if req.models.is_empty() {
             return Err(AppError::bad_request().with_param("models"));
         }

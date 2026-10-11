@@ -62,7 +62,14 @@ pub async fn list(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let window = q.window(&state.pg).await?;
-    let mut query = filtered(
+    // usage_details 是 JSON：只认对的类型，脏值当未上报（不让一条坏记录 500 整页）
+    let read_flag = crate::console::usage_observations::pg_flag(
+        "b.usage_details->'tokens'->'cache_read_reported'",
+    );
+    let write_flag = crate::console::usage_observations::pg_flag(
+        "b.usage_details->'tokens'->'cache_write_reported'",
+    );
+    let select = format!(
         r"SELECT jsonb_build_object(
             'id', b.id, 'request_id', b.request_id, 'model', b.model_name,
             'log_type', b.log_type, 'status', b.status,
@@ -78,8 +85,8 @@ pub async fn list(
                 'server_tool_usage', b.usage_details->'tokens'->'server_tool_usage',
                 'prompt_source', COALESCE(b.usage_details->>'prompt_source', 'unknown'),
                 'completion_source', COALESCE(b.usage_details->>'completion_source', 'unknown'),
-                'cache_read_reported', COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, NULLIF(b.cached_tokens > 0, false)),
-                'cache_write_reported', (b.usage_details->'tokens'->>'cache_write_reported')::boolean,
+                'cache_read_reported', COALESCE({read_flag}, NULLIF(b.cached_tokens > 0, false)),
+                'cache_write_reported', {write_flag},
                 'cache_write_tokens', b.usage_details->'tokens'->'cache_write_tokens',
                 'cache_write_5m_tokens', b.usage_details->'tokens'->'cache_write_5m_tokens',
                 'cache_write_1h_tokens', b.usage_details->'tokens'->'cache_write_1h_tokens',
@@ -100,12 +107,9 @@ pub async fn list(
             'diagnostics', b.usage_details->'diagnostics',
             'latency_ms', b.latency_ms, 'ttft_ms', b.ttft_ms,
             'is_stream', b.is_stream, 'created_at', b.created_at
-        )",
-        &q,
-        window.as_ref(),
-        key.user_id,
-        key.key_id,
-    )?;
+        )"
+    );
+    let mut query = filtered(&select, &q, window.as_ref(), key.user_id, key.key_id)?;
     if let Some(before) = q.before {
         // Keyset on (created_at, id) so the page walks idx_br_user_time instead of sorting
         // every matching row by id. The cursor row is resolved under the same owner; an
@@ -157,50 +161,7 @@ pub async fn stat(
     let window = q.window(&state.pg).await?;
     // Deliberately ignore cursor/limit: the summary describes ALL matching ledger rows.
     // Refunds change the original row to 30, retaining its original amount and usage.
-    let sources = crate::console::usage_sources::pg_sql();
-    let observations = crate::console::usage_observations::pg_sql();
-    let units = crate::console::input_units::pg_sql();
-    let output_rate = crate::console::output_rate::pg_sql();
-    let summary = format!(
-        r"SELECT jsonb_build_object(
-            'records', COUNT(*),
-            'settled', COUNT(*) FILTER (WHERE b.status = 20),
-            'failed', COUNT(*) FILTER (WHERE b.status = 40),
-            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true'),
-            'refunded', COUNT(*) FILTER (WHERE b.status = 30),
-            'pending', COUNT(*) FILTER (WHERE b.status = 10),
-            'amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 20), 0),
-            'refunded_amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 30), 0),
-            'prompt_tokens', COALESCE(SUM(b.prompt_tokens::bigint), 0),
-            'completion_tokens', COALESCE(SUM(b.completion_tokens::bigint), 0),
-            'cached_tokens', COALESCE(SUM(b.cached_tokens::bigint), 0),
-            'cache_read_samples', COUNT(*) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, b.cached_tokens > 0)),
-            'cache_write_tokens', SUM((b.usage_details->'tokens'->>'cache_write_tokens')::bigint) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_write_reported')::boolean, false) OR (b.usage_details->'tokens'->>'cache_write_tokens')::bigint > 0),
-            'cache_write_samples', COUNT(*) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_write_reported')::boolean, false) OR (b.usage_details->'tokens'->>'cache_write_tokens')::bigint > 0),
-            'cache_write_5m_tokens', SUM((b.usage_details->'tokens'->>'cache_write_5m_tokens')::bigint),
-            'cache_write_1h_tokens', SUM((b.usage_details->'tokens'->>'cache_write_1h_tokens')::bigint),
-            'cache_write_ttl_samples', COUNT(*) FILTER (WHERE b.usage_details->'tokens'->>'cache_write_5m_tokens' IS NOT NULL AND b.usage_details->'tokens'->>'cache_write_1h_tokens' IS NOT NULL),
-            'reasoning_tokens', COALESCE(SUM(b.reasoning_tokens::bigint), 0),
-            'audio_prompt_tokens', SUM((b.usage_details->'tokens'->>'audio_prompt_tokens')::bigint),
-            'image_prompt_tokens', SUM((b.usage_details->'tokens'->>'image_prompt_tokens')::bigint),
-            'audio_completion_tokens', SUM((b.usage_details->'tokens'->>'audio_completion_tokens')::bigint),
-            'image_completion_tokens', SUM((b.usage_details->'tokens'->>'image_completion_tokens')::bigint),
-            'audio_prompt_samples', COUNT(b.usage_details->'tokens'->>'audio_prompt_tokens'),
-            'image_prompt_samples', COUNT(b.usage_details->'tokens'->>'image_prompt_tokens'),
-            'audio_completion_samples', COUNT(b.usage_details->'tokens'->>'audio_completion_tokens'),
-            'image_completion_samples', COUNT(b.usage_details->'tokens'->>'image_completion_tokens'),
-            'cache_read_audio_tokens', SUM((b.usage_details->'tokens'->'cache_read_modalities'->>'audio_tokens')::bigint),
-            'cache_read_image_tokens', SUM((b.usage_details->'tokens'->'cache_read_modalities'->>'image_tokens')::bigint),
-            'cache_write_audio_tokens', SUM((b.usage_details->'tokens'->'cache_write_modalities'->>'audio_tokens')::bigint),
-            'cache_write_image_tokens', SUM((b.usage_details->'tokens'->'cache_write_modalities'->>'image_tokens')::bigint),
-            'cache_read_modal_samples', COUNT(b.usage_details->'tokens'->'cache_read_modalities'->>'audio_tokens'),
-            'cache_write_modal_samples', COUNT(b.usage_details->'tokens'->'cache_write_modalities'->>'audio_tokens'),
-            'avg_latency_ms', FLOOR(AVG(b.latency_ms) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0)),
-            'latency_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0),
-            'avg_ttft_ms', FLOOR(AVG(b.ttft_ms) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)),
-            'ttft_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)
-        ) || jsonb_build_object({sources}) || jsonb_build_object({observations}) || jsonb_build_object({units}) || jsonb_build_object({output_rate})"
-    );
+    let summary = summary_sql();
     let mut query = filtered(&summary, &q, window.as_ref(), key.user_id, key.key_id)?;
     let mut result: Value = query
         .build_query_scalar()
@@ -244,6 +205,80 @@ pub async fn stat(
         ));
     }
     Ok(Json(result))
+}
+
+/// 汇总查询的 SELECT。usage_details 是 JSON：数字与布尔只认对的类型，脏值当未上报，
+/// 不让一条坏记录把整页汇总变成 500（与 usage_observations 同一套守卫）。
+fn summary_sql() -> String {
+    let int = |path: &str| {
+        format!(
+            "({})",
+            crate::console::usage_observations::pg_bigint(&format!(
+                "b.usage_details->'tokens'->{path}"
+            ))
+        )
+    };
+    let read_flag = crate::console::usage_observations::pg_flag(
+        "b.usage_details->'tokens'->'cache_read_reported'",
+    );
+    let write_flag = crate::console::usage_observations::pg_flag(
+        "b.usage_details->'tokens'->'cache_write_reported'",
+    );
+    let cache_write = int("'cache_write_tokens'");
+    let ttl_short = int("'cache_write_5m_tokens'");
+    let ttl_long = int("'cache_write_1h_tokens'");
+    let audio_prompt = int("'audio_prompt_tokens'");
+    let image_prompt = int("'image_prompt_tokens'");
+    let audio_completion = int("'audio_completion_tokens'");
+    let image_completion = int("'image_completion_tokens'");
+    let read_audio = int("'cache_read_modalities'->'audio_tokens'");
+    let read_image = int("'cache_read_modalities'->'image_tokens'");
+    let write_audio = int("'cache_write_modalities'->'audio_tokens'");
+    let write_image = int("'cache_write_modalities'->'image_tokens'");
+    let sources = crate::console::usage_sources::pg_sql();
+    let observations = crate::console::usage_observations::pg_sql();
+    let units = crate::console::input_units::pg_sql();
+    let output_rate = crate::console::output_rate::pg_sql();
+    format!(
+        r"SELECT jsonb_build_object(
+            'records', COUNT(*),
+            'settled', COUNT(*) FILTER (WHERE b.status = 20),
+            'failed', COUNT(*) FILTER (WHERE b.status = 40),
+            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true'),
+            'refunded', COUNT(*) FILTER (WHERE b.status = 30),
+            'pending', COUNT(*) FILTER (WHERE b.status = 10),
+            'amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 20), 0),
+            'refunded_amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 30), 0),
+            'prompt_tokens', COALESCE(SUM(b.prompt_tokens::bigint), 0),
+            'completion_tokens', COALESCE(SUM(b.completion_tokens::bigint), 0),
+            'cached_tokens', COALESCE(SUM(b.cached_tokens::bigint), 0),
+            'cache_read_samples', COUNT(*) FILTER (WHERE COALESCE({read_flag}, b.cached_tokens > 0)),
+            'cache_write_tokens', SUM({cache_write}) FILTER (WHERE COALESCE({write_flag}, false) OR {cache_write} > 0),
+            'cache_write_samples', COUNT(*) FILTER (WHERE COALESCE({write_flag}, false) OR {cache_write} > 0),
+            'cache_write_5m_tokens', SUM({ttl_short}),
+            'cache_write_1h_tokens', SUM({ttl_long}),
+            'cache_write_ttl_samples', COUNT(*) FILTER (WHERE {ttl_short} IS NOT NULL AND {ttl_long} IS NOT NULL),
+            'reasoning_tokens', COALESCE(SUM(b.reasoning_tokens::bigint), 0),
+            'audio_prompt_tokens', SUM({audio_prompt}),
+            'image_prompt_tokens', SUM({image_prompt}),
+            'audio_completion_tokens', SUM({audio_completion}),
+            'image_completion_tokens', SUM({image_completion}),
+            'audio_prompt_samples', COUNT({audio_prompt}),
+            'image_prompt_samples', COUNT({image_prompt}),
+            'audio_completion_samples', COUNT({audio_completion}),
+            'image_completion_samples', COUNT({image_completion}),
+            'cache_read_audio_tokens', SUM({read_audio}),
+            'cache_read_image_tokens', SUM({read_image}),
+            'cache_write_audio_tokens', SUM({write_audio}),
+            'cache_write_image_tokens', SUM({write_image}),
+            'cache_read_modal_samples', COUNT({read_audio}),
+            'cache_write_modal_samples', COUNT({write_audio}),
+            'avg_latency_ms', FLOOR(AVG(b.latency_ms) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0)),
+            'latency_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0),
+            'avg_ttft_ms', FLOOR(AVG(b.ttft_ms) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)),
+            'ttft_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)
+        ) || jsonb_build_object({sources}) || jsonb_build_object({observations}) || jsonb_build_object({units}) || jsonb_build_object({output_rate})"
+    )
 }
 
 /// `GET /api/me/logs/series` 的参数：与 `stat` 同一套归属过滤（`scope` / `api_key_id`），外加回看窗口。

@@ -28,10 +28,12 @@ pub(super) fn raw_sql() -> String {
 
 pub(super) fn pg_sql() -> String {
     let unit = "b.usage_details->>'input_unit'";
-    let quantity = "b.usage_details->>'input_characters'";
-    // The ledger validates new character metadata before writing JSON. Missing old JSON stays unknown.
+    let raw = "b.usage_details->'input_characters'";
+    // The ledger validates new character metadata before writing JSON. Missing old JSON stays unknown;
+    // anything that is not a JSON integer counts as unknown too instead of failing the whole query.
+    let quantity = format!("({})", super::usage_observations::pg_bigint(raw));
     format!(
-        "'unit_observed', COUNT(*), 'unit_characters', SUM(({quantity})::bigint) FILTER (WHERE {unit} = 'characters'), 'unit_character_n', COUNT({quantity}) FILTER (WHERE {unit} = 'characters'), 'unit_token_n', COUNT(*) FILTER (WHERE {unit} = 'tokens' AND {quantity} IS NULL)"
+        "'unit_observed', COUNT(*), 'unit_characters', SUM({quantity}) FILTER (WHERE {unit} = 'characters'), 'unit_character_n', COUNT({quantity}) FILTER (WHERE {unit} = 'characters'), 'unit_token_n', COUNT(*) FILTER (WHERE {unit} = 'tokens' AND {raw} IS NULL)"
     )
 }
 

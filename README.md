@@ -212,6 +212,7 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
 
 worker 保持单副本即可：周期任务（对账 / 清扫 / 分区 / 冷却恢复）不互斥，多副本只是重复劳动；
 只有 chsink 吞吐不够时才值得加（relay/chsink 走 `SKIP LOCKED` + JetStream durable，多副本安全）。
+气隙或只读部署可用 `OKAPI_WORKER_DISABLE` 关掉只观测 / 只外联的任务（`egress_probe`、`ops_sampler`、`unit_calibration`）。
 
 主要环境变量见 [.env.example](.env.example)，每项都带了"为什么要有它"的注释。
 

@@ -379,7 +379,12 @@ pub(super) fn pg_sql() -> String {
     ] {
         fields.push(format!("'{field}', COALESCE(SUM(b.{column}::bigint),0)"));
     }
-    fields.push("'source_read_n', COUNT(*) FILTER (WHERE COALESCE((b.usage_details->'tokens'->>'cache_read_reported')::boolean, b.cached_tokens > 0))".to_owned());
+    // 只认 JSON 布尔：一条脏记录（"yes"、数字）当未上报，不让整页统计报错
+    let read_flag =
+        super::usage_observations::pg_flag("b.usage_details->'tokens'->'cache_read_reported'");
+    fields.push(format!(
+        "'source_read_n', COUNT(*) FILTER (WHERE COALESCE({read_flag}, b.cached_tokens > 0))"
+    ));
     let predicate = |axis: &str, state: &str| {
         let original = format!("b.usage_details->'tokens'->'upstream_usage'->'{axis}_tokens'");
         let condition = match state {
@@ -401,7 +406,7 @@ pub(super) fn pg_sql() -> String {
         }
     }
     let cache = format!(
-        "{} AND (b.usage_details->'tokens'->>'cache_read_reported')::boolean AND b.cached_tokens <= b.prompt_tokens",
+        "{} AND {read_flag} AND b.cached_tokens <= b.prompt_tokens",
         predicate("prompt", "upstream")
     );
     fields.push(format!("'source_cache_n', COUNT(*) FILTER (WHERE {cache})"));

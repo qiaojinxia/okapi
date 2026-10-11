@@ -309,7 +309,8 @@ function TopBar({ title, navOpen, onOpenNav, collapsed, onToggleNav, onHelp }: {
       >
         {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
       </Button>
-      <h1 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h1>
+      {/* 顶栏只是「当前页」标签；页内 PageHeader 才是唯一的 h1，避免一页两个一级标题 */}
+      <p className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</p>
 
       {me.data && (
         <div className="hidden items-center gap-1.5 sm:flex">

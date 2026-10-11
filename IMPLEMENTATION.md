@@ -20,7 +20,7 @@
 | 层 | 定案 | 理由 |
 | --- | --- | --- |
 | 运行时/HTTP | tokio + axum + tower（hyper 1.x，rustls） | TensorZero / Helicone 同款，中间件生态最全 |
-| 上游客户端 | reqwest 流式（HTTP/2 连接池） | SSE 透传，超时/重试分层控制 |
+| 上游客户端 | reqwest 流式（HTTP/2 连接池）；Claude Code 外形的渠道与 Claude 订阅账号接口走 BoringSSL + hyper HTTP/1.1（`client_tls`，§11.42） | SSE 透传，超时/重试分层控制；握手与真机一致 |
 | PostgreSQL | sqlx | 编译期 SQL 校验，契合 fail-fast 文化 |
 | Redis | fred | Cluster / pipeline / Lua 脚本缓存支持最好 |
 | ClickHouse | clickhouse crate | RowBinary 批写 + async_insert。**M2 过渡**：自研 HTTP JSONEachRow 薄客户端（store::ch，接口已封装），官方 crate 为 M3 性能项 |
@@ -2753,6 +2753,11 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   victim 的冷却键，能定向挡住别人取码。超出 varchar 的写入（PG 22001）统一回 400 `value_too_long`，不再 500 + ERROR 日志。
 - **日志与下载面**：`ops:logs` 捕获时把换行、控制字符与不可见字符转义成字面量，一条告警只占一行，伪造不出假的下一行；
   视频内容端点只回传 `video/*`（上游 JSON 错误体保留 `application/json`），其余一律 `application/octet-stream`，并带 `nosniff`。
+- **用量 JSON 读数统一守卫（第十二轮）**：门户日志列表 / 汇总、来源统计与字符计量里对 `usage_details` 的
+  `::bigint` / `::boolean` 强转都换成只认对的 JSON 类型（`usage_observations::pg_bigint` / `pg_flag`），脏值当未上报，
+  一条坏记录不再让整页 500。团队 key 名与 OAuth 建渠道的渠道名也走 `identifiers.rs` 的显示名规则。
+- **worker 可选任务开关**：`OKAPI_WORKER_DISABLE` 逗号分隔关掉只观测 / 只外联的任务（`egress_probe`、`ops_sampler`、
+  `unit_calibration`）；记账相关任务不在清单里，写了只打 WARN。实现收在 `supervision::run` 一处。
 - **测试容器不再留卷**：`scripts/test-isolated.py`、`scripts/dev-deps.sh` 拆容器用 `docker rm -fv`。此前每跑一个套件留下几个
   匿名卷，攒满 Docker 虚拟机盘后 ClickHouse 写不进、套件成片失败。
 

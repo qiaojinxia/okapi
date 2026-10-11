@@ -977,3 +977,66 @@ async fn failed_refunds_and_charged_stream_errors_are_visible_without_exposing_r
     assert_eq!(stat["refunded"], 1);
     assert_eq!(stat["amount_micro"], 100);
 }
+
+/// 第十二轮：usage_details 里类型不对的值（字符串数字、`"yes"`、小数）当未上报，列表与汇总都不 500。
+#[tokio::test]
+async fn dirty_usage_details_count_as_unreported_instead_of_failing_the_page() {
+    let env = setup().await;
+    let (user_id, token) = mk_user(&env.pg).await;
+    let key_id: i64 = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id=$1")
+        .bind(user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    let model = format!("dirty-{}", &Uuid::new_v4().simple().to_string()[..8]);
+    for details in [
+        json!({"tokens": {"cache_read_reported": "yes", "cache_write_reported": 1,
+            "cache_write_tokens": "abc", "cache_write_5m_tokens": "12", "cache_write_1h_tokens": 1.5,
+            "audio_prompt_tokens": "7", "image_completion_tokens": "x",
+            "cache_read_modalities": {"audio_tokens": "1"}},
+            "input_unit": "characters", "input_characters": "12a"}),
+        json!({"tokens": {"cache_read_reported": true, "cache_write_reported": true,
+            "cache_write_tokens": 20, "audio_prompt_tokens": 3}}),
+    ] {
+        sqlx::query("INSERT INTO billing_records (request_id, user_id, api_key_id, model_name, status, prompt_tokens, cached_tokens, completion_tokens, amount_micro, usage_details) VALUES ($1,$2,$3,$4,20,100,10,10,1,$5)")
+            .bind(Uuid::new_v4()).bind(user_id).bind(key_id).bind(&model).bind(details)
+            .execute(&env.pg).await.unwrap();
+    }
+    let client = reqwest::Client::new();
+    let get = |path: String| {
+        client
+            .get(format!("http://{}{path}", env.addr))
+            .bearer_auth(&token)
+            .send()
+    };
+    let resp = get(format!("/api/me/logs?scope=user&model={model}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let rows = resp.json::<Value>().await.unwrap();
+    let dirty = rows["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["usage"]["cache_write_tokens"] == "abc")
+        .expect("脏记录照常列出");
+    assert!(
+        dirty["usage"]["cache_write_reported"].is_null(),
+        "非布尔标志按未上报"
+    );
+    assert_eq!(
+        dirty["usage"]["cache_read_reported"], true,
+        "退回 cached_tokens > 0 的推断"
+    );
+
+    let resp = get(format!("/api/me/logs/stat?scope=user&model={model}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let stat = resp.json::<Value>().await.unwrap();
+    assert_eq!(stat["records"], 2);
+    // 只有干净记录的值进合计；字符串 "7" / "abc" 都不算数
+    assert_eq!(stat["cache_write_tokens"], 20);
+    assert_eq!(stat["audio_prompt_tokens"], 3);
+    assert_eq!(stat["audio_prompt_samples"], 1);
+}

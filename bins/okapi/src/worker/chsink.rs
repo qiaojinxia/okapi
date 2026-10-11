@@ -123,6 +123,8 @@ fn build_ch_row(ts: &str, payload: &Value) -> Value {
         "log_type": log_type,
         "user_id": get_i64(payload, "user_id"),
         "api_key_id": get_i64(payload, "api_key_id"),
+        // team_id / provider 不进 CH 维度：团队就是计费 user（团队用量按 user_id 与 PG used_micro 出），
+        // provider 是 channel_id 的函数，查询时从 PG 回填（ch_schema.sql 与 console/logs.rs 同此约定）
         "team_id": 0,
         "group_code": get_str(payload, "group"),
         "model": get_str(payload, "model"),

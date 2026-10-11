@@ -195,7 +195,7 @@ test('门户日志页：过滤卡 + 空态；账户流水页：两页签空态�
   await expect(page.getByRole('button', { name: /导出 CSV|Export CSV/ })).toBeDisabled()
 
   // 账户流水：余额变动 / 充值订单 两签，各自空态
-  // （顶部栏也有同名 h1——那是"当前页标题"，限定 main 才是页内标题）
+  // （顶部栏也显示同名的当前页标签，但不是标题；限定 main 仍是最稳的写法）
   await page.goto('/portal/ledger')
   await expect(
     page.getByRole('main').getByRole('heading', { name: /账户流水|Account ledger/ }),
