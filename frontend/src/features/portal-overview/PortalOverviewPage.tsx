@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { ArrowUpRight, Gauge, LayoutDashboard, RefreshCw, ShieldCheck, Timer, Zap } from 'lucide-react'
+import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, RefreshCw, ShieldCheck, Timer, Wallet, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ErrorState, LoadingState } from '@/components/ui/state'
@@ -35,7 +35,6 @@ import type { PortalView } from './search'
 
 const routeApi = getRouteApi('/portal/')
 /// 健康指标的图标一律中性色：颜色只留给状态（成功率的黄 / 红）。
-const QUIET = 'bg-muted text-muted-foreground'
 
 /// 门户总览（对齐 new-api 数据看板的用户侧 + Sub2API 的 Token 构成）。
 ///
@@ -111,7 +110,7 @@ export function PortalOverviewPage() {
 
   const health = <QualityStrip label={t('charts:performance')} loading={loading} items={[
     {
-      icon: Zap, accent: QUIET, label: t('analytics:ttft'),
+      icon: Zap, accent: 'bg-chart-3/12 text-chart-3', label: t('analytics:ttft'),
       value: total?.avg_ttft_ms == null ? '—' : formatDuration(total.avg_ttft_ms, locale),
       ...(q.isError
         ? { sub: t('charts:statisticsUnavailable') }
@@ -120,19 +119,19 @@ export function PortalOverviewPage() {
           : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
     },
     {
-      icon: Timer, accent: QUIET, label: t('charts:metric_latency'),
+      icon: Timer, accent: 'bg-chart-1/12 text-chart-1', label: t('charts:metric_latency'),
       value: total?.avg_latency_ms == null ? '—' : formatDuration(total.avg_latency_ms, locale),
       sub: t('portal:latencyCaption'),
     },
     {
-      icon: ShieldCheck, accent: QUIET, label: t('charts:metric_success'),
+      icon: ShieldCheck, accent: 'bg-success/12 text-success', label: t('charts:metric_success'),
       value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
       sub: total && total.requests > 0 && failed != null ? (failed > 0 ? t('portal:failedCount', { n: formatCount(failed, locale) }) : t('portal:noFailures')) : undefined,
       tone: total?.success_rate_bp == null ? undefined
         : total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
     },
     {
-      icon: Gauge, accent: QUIET, label: t('charts:throughput'),
+      icon: Gauge, accent: 'bg-chart-4/12 text-chart-4', label: t('charts:throughput'),
       value: throughput == null ? '—' : `${formatTokensPerSec(throughput, locale)} Token/s`,
       ...(partialThroughput
         ? {
@@ -177,20 +176,38 @@ export function PortalOverviewPage() {
         </div>
       </section>
 
-      {/* 四个数字：花了多少、还剩多少、调了多少次、用了多少 Token。其余指标放到下面安静的位置 */}
+      {/* 四个数字按用户先看什么排：用了多少 Token、调了多少次、还剩多少、花了多少。Token 用绿色最先抓住视线 */}
       <section aria-label={t('portal:dashboardMetrics')} className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Stat
           layout="stacked"
-          label={t('portal:totalSpend')}
+          icon={Cpu}
+          iconClassName="bg-success/12 text-success"
+          tone="good"
+          label={t('common:tokens')}
           loading={loading}
-          value={total ? formatUsd(total.amount_micro, locale) : '—'}
+          value={total ? formatCount(total.tokens, locale) : '—'}
           sub={<>
-            <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
-            {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
+            <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
+            {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
+              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })}</span>}
           </>}
         />
         <Stat
           layout="stacked"
+          icon={Activity}
+          iconClassName="bg-chart-1/12 text-chart-1"
+          label={t('common:requests')}
+          loading={loading}
+          value={total ? formatCount(total.requests, locale) : '—'}
+          sub={<>
+            <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
+            {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
+          </>}
+        />
+        <Stat
+          layout="stacked"
+          icon={Wallet}
+          iconClassName="bg-warning/14 text-warning"
           label={t('portal:accountBalance')}
           loading={me.isPending}
           value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'}
@@ -212,23 +229,14 @@ export function PortalOverviewPage() {
         />
         <Stat
           layout="stacked"
-          label={t('common:requests')}
+          icon={Coins}
+          iconClassName="bg-chart-3/12 text-chart-3"
+          label={t('portal:totalSpend')}
           loading={loading}
-          value={total ? formatCount(total.requests, locale) : '—'}
+          value={total ? formatUsd(total.amount_micro, locale) : '—'}
           sub={<>
-            <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
-            {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
-          </>}
-        />
-        <Stat
-          layout="stacked"
-          label={t('common:tokens')}
-          loading={loading}
-          value={total ? formatCount(total.tokens, locale) : '—'}
-          sub={<>
-            <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
-            {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
-              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })}</span>}
+            <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
+            {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
           </>}
         />
       </section>

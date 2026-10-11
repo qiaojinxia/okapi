@@ -1,5 +1,6 @@
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight } from 'lucide-react'
+import { Activity, AlertTriangle, ArrowUpRight, Coins, Cpu, Users } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Stat } from '@/components/ui/stat'
 import type { DateRange } from '@/components/ui/date-range'
@@ -11,7 +12,10 @@ import { formatBp, formatCount, formatMoneyAggregate } from '@/lib/money'
 import type { AnalyticsSearch } from '@/features/analytics/route-state'
 
 /// 主数字跟随统计口径，副行是和上一周期的对照；口径定义放进标签的悬停提示，不占副行。
+/// 图标按指标分色引导视线，Token 用绿色最先抓住注意力。
 function Kpi({
+  icon,
+  accent,
   period,
   label,
   hint,
@@ -22,13 +26,16 @@ function Kpi({
   search,
   detail,
 }: {
+  icon: LucideIcon
+  /// 图标块的色相：五张卡各用一种；Token 是主信息，图标和数值都用绿色。超阈值的错误率仍由 tone 染色。
+  accent?: string
   /// 时段已在页头，卡片上不再重复显示；读屏和链接名仍带上，脱离页头也知道是哪段时间
   period: string
   label: string
   hint: string
   today: string
   window: React.ReactNode
-  tone?: 'default' | 'warn' | 'bad'
+  tone?: 'default' | 'good' | 'warn' | 'bad'
   loading: boolean
   search: AnalyticsSearch
   detail?: string
@@ -38,13 +45,13 @@ function Kpi({
   const className = 'min-w-0 rounded-xl last:col-span-2 md:col-span-2 md:nth-4:col-span-3 md:last:col-span-3 lg:col-span-1 lg:nth-4:col-span-1 lg:last:col-span-1'
   const sub = <span className="max-w-full lg:truncate">{window}</span>
   const title = <span title={hint}><span className="sr-only">{t('admin:dashboardMetricLabel', { period, label: '' })}</span>{label}</span>
-  if (loading) return <Stat layout="stacked" compact className={`${className} lg:py-2`} label={title} value={today} sub={sub} loading />
+  if (loading) return <Stat layout="stacked" compact className={`${className} lg:py-2`} icon={icon} label={title} value={today} sub={sub} loading />
   return <Link to="/admin/stats" search={search} aria-label={t('admin:dashboardOpenMetric', { label: t('admin:dashboardMetricLabel', { period, label }), value: today })}
     className={`${className} group block outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background`}>
-    <Stat layout="stacked" compact className="h-full min-w-0 rounded-xl transition-colors group-hover:border-primary/40 group-hover:bg-accent/30 group-focus-visible:border-primary/40 lg:py-2 lg:max-xl:px-2"
+    <Stat layout="stacked" compact className="h-full min-w-0 rounded-xl transition-colors group-hover:border-primary/40 group-hover:bg-accent/30 group-focus-visible:border-primary/40 lg:py-2 lg:max-xl:px-2" icon={icon}
       label={title}
       value={<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-lg sm:text-xl"><span className="min-w-0" title={today}>{today}</span>{detail && <span className="text-[11px] font-normal text-muted-foreground">{detail}</span>}<ArrowUpRight aria-hidden className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover:text-primary group-hover:opacity-100 group-focus-visible:text-primary group-focus-visible:opacity-100 sm:block" /></span>}
-      sub={sub} tone={tone} />
+      sub={sub} tone={tone} iconClassName={accent} />
   </Link>
 }
 
@@ -95,6 +102,9 @@ export function KpiCards({ days, range }: { days: number; range?: DateRange | nu
       <Kpi
         period={period}
         loading={loading}
+        icon={Cpu}
+        accent="bg-success/12 text-success"
+        tone="good"
         label={t('admin:kpiTokens')}
         hint={t('admin:dashboardTokenBasis')}
         search={{ ...search, measure: 'tokens' }}
@@ -104,6 +114,8 @@ export function KpiCards({ days, range }: { days: number; range?: DateRange | nu
       <Kpi
         period={period}
         loading={loading}
+        icon={Activity}
+        accent="bg-chart-1/12 text-chart-1"
         label={t('admin:kpiRequests')}
         hint={t('admin:dashboardRequestBasis')}
         search={{ ...search, measure: 'requests' }}
@@ -113,6 +125,8 @@ export function KpiCards({ days, range }: { days: number; range?: DateRange | nu
       <Kpi
         period={period}
         loading={loading}
+        icon={AlertTriangle}
+        accent={errorBp < 100 ? 'bg-warning/14 text-warning' : undefined}
         label={t('admin:kpiErrorRate')}
         hint={t('admin:dashboardErrorBasis')}
         search={{ ...search, measure: 'error_rate' }}
@@ -125,6 +139,8 @@ export function KpiCards({ days, range }: { days: number; range?: DateRange | nu
       <Kpi
         period={period}
         loading={loading}
+        icon={Coins}
+        accent="bg-chart-3/12 text-chart-3"
         label={t('admin:kpiRevenue')}
         hint={t('admin:dashboardRevenueBasis')}
         search={{ ...search, measure: 'amount' }}
@@ -134,6 +150,8 @@ export function KpiCards({ days, range }: { days: number; range?: DateRange | nu
       <Kpi
         period={period}
         loading={loading}
+        icon={Users}
+        accent="bg-chart-2/12 text-chart-2"
         label={t('admin:kpiActiveUsers')}
         hint={t('admin:dashboardUserBasis')}
         search={{ ...search, view: 'breakdown', by: 'user' }}
