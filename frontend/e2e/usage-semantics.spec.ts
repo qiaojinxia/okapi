@@ -105,10 +105,8 @@ test('首字延迟常驻显示，有样本显示毫秒，无样本和错误分�
   await expect(metrics).toContainText('暂无首字样本')
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
-  // 用量查询失败时整块换成错误提示，不留旧的首字延迟
-  await expect(page.getByRole('alert')).toBeVisible()
-  await expect(metrics).toHaveCount(0)
-  await expect(page.getByText('150 ms')).toHaveCount(0)
+  await expect(metrics).toContainText('统计暂不可用')
+  await expect(metrics).not.toContainText('150 ms')
 })
 
 test('吞吐量全量口径不完整（窗口里有失败请求）时显示实测样本值并注明样本数，不显示「—」', async ({ page }) => {
@@ -178,8 +176,6 @@ test('有缓存读取时首页、构成和模型页显示样本率及已记录�
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
   await page.goto('/portal')
   await expect(page.getByText('已采集缓存命中 80.0%（2 / 3 次）').first()).toBeVisible()
-  const snapshot = page.getByRole('region', { name: 'Token 用量构成', exact: true })
-  await expect(snapshot).toContainText('800')
   await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
   const tokens = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
   await expect(tokens).toContainText('样本缓存命中率 80.0%')
@@ -206,7 +202,7 @@ test('跨日期折叠保留部分写入量，图表不重复累加缓存', () =>
   }
 })
 
-test('缓存数量在首页和构成区分部分、明确零、完全缺失和完整采集', async ({ page }) => {
+test('缓存数量在构成页签区分部分、明确零、完全缺失和完整采集', async ({ page }) => {
   await prepare(page)
   for (const fixture of [
     { read: 90, write: 20, known: 1, expectedRead: '90部分', expectedWrite: '20部分' },
@@ -219,11 +215,7 @@ test('缓存数量在首页和构成区分部分、明确零、完全缺失和�
       recorded_cache_write_tokens: fixture.write }
     const data = { ...report(), data: [row], total: { ...report().total, ...row, cache_hit_bp: fixture.known === 2 ? 0 : null } }
     await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: data }))
-    await page.goto('/portal?view=overview')
-    const snapshot = page.getByRole('region', { name: 'Token 用量构成', exact: true })
-    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存读取', { exact: true }) }).locator('dd > span').first()).toHaveText(fixture.expectedRead)
-    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存写入', { exact: true }) }).locator('dd > span').first()).toHaveText(fixture.expectedWrite)
-    await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
+    await page.goto('/portal?view=tokens')
     const panel = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
     const cells = panel.getByRole('row').filter({ hasText: 'model-a' }).getByRole('cell')
     await expect(cells.nth(2)).toHaveText(fixture.expectedRead)

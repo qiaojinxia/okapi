@@ -227,14 +227,13 @@ test('自定义范围应用后查询，模型占比切换及缓存写入展示�
   await expect(page.getByRole('button', { name: '应用日期', exact: true })).toBeDisabled()
 })
 
-test('门户默认综合视图同时展示趋势与构成，展开明细保留范围且复用数据', async ({ page }) => {
+test('门户默认综合视图展示趋势与模型排行，展开明细保留范围且复用数据', async ({ page }) => {
   const queries = await prepare(page)
   await page.goto('/portal?scope=user&start_date=2026-09-01&end_date=2026-09-04')
   await expect(page.getByRole('tab', { name: '综合', exact: true })).toHaveAttribute('aria-selected', 'true')
   const models = page.getByRole('region', { name: '模型消费排行', exact: true })
-  const tokens = page.getByRole('region', { name: 'Token 用量构成', exact: true })
   await expect(models.getByRole('listitem')).toHaveCount(2)
-  await expect(tokens).toContainText('缓存写入')
+  await expect(page.getByRole('region', { name: 'Token 用量构成', exact: true })).toHaveCount(0)
   await expect(page.getByLabel('趋势绘图区')).toBeVisible()
   await page.getByRole('button', { name: '详细趋势', exact: true }).click()
   await expect(page.getByRole('group', { name: '图表指标' }).getByRole('button')).toHaveCount(7)
@@ -243,8 +242,7 @@ test('门户默认综合视图同时展示趋势与构成，展开明细保留�
   await page.goBack()
   await models.getByRole('button', { name: '全部 2 个模型' }).click()
   await expect(page.getByRole('columnheader', { name: '每次均价' })).toBeVisible()
-  await page.getByRole('tab', { name: '综合', exact: true }).click()
-  await tokens.getByRole('button', { name: '构成明细' }).click()
+  await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
   await expect(page.getByRole('columnheader', { name: '缓存写入' })).toBeVisible()
   expect(queries.filter(currentBreakdown)).toHaveLength(1)
   await page.reload()
@@ -287,7 +285,7 @@ test('门户下钻调用明细保留日期和统计时区，排行与模型分�
   await expect(details).toHaveAttribute('href', '/portal/logs?scope=user&start_date=2026-08-29&end_date=2026-09-04&timezone=America%2FLos_Angeles')
 })
 
-test('综合构成按全量计算前五名占比，缺失缓存写入不显示零', async ({ page }) => {
+test('综合排行按全量计算前五名占比', async ({ page }) => {
   await prepare(page)
   await page.route('**/api/me/stats/breakdown?*', (route) => {
     const data = report()
@@ -302,7 +300,6 @@ test('综合构成按全量计算前五名占比，缺失缓存写入不显示�
   await expect(models.getByRole('listitem').first()).toContainText('model-5')
   await expect(models.getByRole('listitem').first()).toContainText('33.33%')
   await expect(models.getByRole('button', { name: '全部 5 个模型' })).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Token 用量构成' }).getByText('-', { exact: true })).toBeVisible()
 })
 
 test('门户筛选与视图刷新保留，前进后退同步日期草稿，预设日期清除自定义范围', async ({ page }) => {

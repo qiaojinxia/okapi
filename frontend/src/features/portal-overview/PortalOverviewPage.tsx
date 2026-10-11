@@ -233,6 +233,8 @@ export function PortalOverviewPage() {
         />
       </section>
 
+      {health}
+
       <Tabs
         id="portal-views"
         ariaLabel={t('portal:dashboardViews')}
@@ -245,9 +247,9 @@ export function PortalOverviewPage() {
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
       ) : q.isPending ? <LoadingState /> : (
         <>
-          {view === 'overview' && q.data?.total && <UsageOverview data={q.data} scope={scope} logSearch={logSearch} metric={search.measure ?? 'amount'}
+          {view === 'overview' && q.data?.total && <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
             onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }) })}
-            onView={(next) => void navigate({ search: (prev) => ({ ...prev, view: next }) })} health={health} />}
+            onView={(next) => void navigate({ search: (prev) => ({ ...prev, view: next }) })} />}
           {view === 'trend' && <SpendTrendView rows={q.data?.data ?? []} days={q.data?.days ?? days} window={q.data?.window} metric={search.measure ?? 'amount'} onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }) })} />}
           {view === 'models' && <ModelShareView rows={q.data?.data ?? []} logSearch={logSearch}
             metric={search.model_measure ?? 'amount'} onMetricChange={(model_measure) => void navigate({ search: (prev) => ({ ...prev, model_measure }) })}

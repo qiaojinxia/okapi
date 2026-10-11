@@ -164,8 +164,8 @@ test('API key 登录直达门户总览：六卡 KPI + 三页签零请求切换',
   // 三区布局：顶部栏常驻身份区（余额徽章）+ 内容区 KPI 卡，两者都应在
   await expect(page.getByText(/^(余额|Balance) \$/)).toBeVisible()
   const main = page.getByRole('main')
-  // 账户消费与计费优惠分开呈现，不把规则折扣解释成缓存节省。
-  for (const label of [/账户余额|Account balance/, /周期消费|Period spend/, /计费优惠|Billing discounts/, /^请求数$|^Requests$/]) {
+  // 新用户没有计费优惠，消费卡下不出现「已省」
+  for (const label of [/账户余额|Account balance/, /^消费$|^Spend$/, /^请求数$|^Requests$/]) {
     await expect(main.getByText(label).first()).toBeVisible()
   }
   // 侧栏分组标题：宽屏下可见（窄屏折叠为抽屉）。
