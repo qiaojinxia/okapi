@@ -54,7 +54,7 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
   const renderMetric = ({ label, value, measure, hint, sample, rate, meter }: Metric) => <div key={label} className="group relative min-h-11 min-w-0 rounded px-1 py-0.5 has-[a]:hover:bg-muted/60 sm:min-h-10 sm:py-0">
     <dt className={cn('text-xs text-muted-foreground', measure === 'ttft' && 'font-medium text-primary')}>{measure === 'ttft' ? t('charts:ttftLabel') : label}</dt>
     <dd className={cn('mt-0.5 break-words text-base font-semibold tabular-nums', rate?.tone === 'warn' && 'text-warning', rate?.tone === 'bad' && 'text-destructive')}>
-      {measure ? <Tooltip content={hint ?? ''}><Link to="/admin/stats" search={{ ...search, measure }} aria-label={t('admin:dashboardOpenMetric', { label, value })} className="underline-offset-4 outline-none after:absolute after:inset-0 after:rounded hover:underline focus-visible:after:ring-2 focus-visible:after:ring-primary/40">
+      {measure ? <Tooltip content={hint ?? ''}><Link to="/admin/stats" search={{ ...search, measure }} aria-label={t('admin:dashboardOpenMetric', { label, value })} className="outline-none transition-colors after:absolute after:inset-0 after:rounded hover:text-primary focus-visible:after:ring-2 focus-visible:after:ring-primary/40">
         {value}
       </Link></Tooltip> : value}
     </dd>
@@ -70,7 +70,7 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
       </div>
       <div className="flex flex-wrap items-center gap-x-3">
         <StatisticsStatus query={query} />
-        <Link to="/admin/stats" search={{ ...search, measure: 'latency' }} className="inline-flex min-h-11 items-center rounded text-xs text-primary outline-none underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-7">{t('admin:dashboardQualityDetails')}</Link>
+        <Link to="/admin/stats" search={{ ...search, measure: 'latency' }} className="inline-flex min-h-11 items-center rounded text-xs text-primary outline-none hover:text-primary/80 focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-7">{t('admin:dashboardQualityDetails')}</Link>
         <Tooltip content={partialCost && !costExpanded ? t('admin:dashboardPartialCost') : ''}>
           <button type="button" aria-expanded={costExpanded} aria-controls={costPanelId} onClick={() => setCostExpanded((expanded) => !expanded)} className="inline-flex min-h-11 items-center gap-1.5 rounded px-1 text-xs text-muted-foreground outline-none hover:bg-muted/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 sm:min-h-7">
             {partialCost && <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />}

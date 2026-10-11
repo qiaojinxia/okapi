@@ -602,6 +602,7 @@ export default {
     failedCount: '{{n}} failed',
     noFailures: 'No failures',
     throughputCaption: 'Output token generation speed',
+    modelShareChart: 'Spend share by model',
     otherModels: '{{count}} other models',
     dashboardDesc: 'Balance, usage, call quality, trends and model mix at a glance.',
     expandTrend: 'Detailed trends',

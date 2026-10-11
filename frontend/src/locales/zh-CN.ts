@@ -592,6 +592,7 @@ export default {
     failedCount: '{{n}} 次失败',
     noFailures: '没有失败',
     throughputCaption: '输出 Token 的生成速度',
+    modelShareChart: '各模型消费占比',
     otherModels: '其余 {{count}} 个模型',
     dashboardDesc: '余额、用量、调用质量、趋势与模型构成集中展示。',
     expandTrend: '详细趋势',
