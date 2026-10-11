@@ -49,7 +49,11 @@ impl InFlightGauge {
         // Create the guard before awaiting: cancellation during the initial
         // report must release the count too.
         let guard = InFlightGuard(Arc::clone(&self.inner));
-        self.inner.reporter.publish(false).await;
+        // 已有上报在写 Redis 时不排队：每个进门的请求都等这把锁，Redis 一慢（单次最长
+        // REPORT_TIMEOUT）全站请求就堵在门口。正在进行的上报或后台任务会把最新计数写上去。
+        if let Ok(last) = self.inner.reporter.last.try_lock() {
+            self.inner.reporter.publish_locked(last, false).await;
+        }
         guard
     }
 }
@@ -66,7 +70,15 @@ impl Drop for InFlightGuard {
 
 impl Reporter {
     async fn publish(&self, force: bool) {
-        let mut last = self.last.lock().await;
+        let last = self.last.lock().await;
+        self.publish_locked(last, force).await;
+    }
+
+    async fn publish_locked(
+        &self,
+        mut last: tokio::sync::MutexGuard<'_, Option<(Instant, i64)>>,
+        force: bool,
+    ) {
         let count = *self.latest.borrow();
         if last.is_none() && count == 0 {
             return;

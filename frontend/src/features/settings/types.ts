@@ -1,6 +1,6 @@
 /// 通知事件。与后端 worker::notify 的事件名一一对应，写死在这里是刻意的：
 /// 让用户从清单里勾，而不是猜字符串拼写。
-export const NOTIFY_EVENTS = ['drift', 'channel_cooldown', 'balance_low', 'margin_breaker', 'egress_ip_changed', 'egress_down'] as const
+export const NOTIFY_EVENTS = ['drift', 'channel_cooldown', 'balance_low', 'margin_breaker', 'egress_ip_changed', 'egress_down', 'dlq_backlog', 'settlement_quarantine'] as const
 
 
 
@@ -12,4 +12,6 @@ export const EVENT_LABEL = {
   margin_breaker: 'admin:notifyEventMarginBreaker',
   egress_ip_changed: 'admin:notifyEventEgressIpChanged',
   egress_down: 'admin:notifyEventEgressDown',
+  dlq_backlog: 'admin:notifyEventDlqBacklog',
+  settlement_quarantine: 'admin:notifyEventSettlementQuarantine',
 } as const

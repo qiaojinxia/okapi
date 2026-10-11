@@ -6,7 +6,7 @@
 use crate::error::LedgerError;
 use chrono::{DateTime, Utc};
 use fred::clients::Client;
-use fred::interfaces::{HashesInterface, LuaInterface};
+use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface};
 use fred::types::Value;
 use okapi_domain::Money;
 use uuid::Uuid;
@@ -223,7 +223,6 @@ impl BalanceLedger {
         } = req;
         let minute_bucket = now.timestamp().div_euclid(60);
         let day_bucket = now.format("%Y%m%d").to_string();
-        let deadline_ms = now.timestamp_millis().saturating_add(RESERVATION_TTL_MS);
 
         let keys = vec![
             Self::bal_key(user_id),
@@ -235,7 +234,8 @@ impl BalanceLedger {
         let args = vec![
             request_id.to_string(),
             est.as_micros().to_string(),
-            deadline_ms.to_string(),
+            // 截止时间由脚本按 Redis TIME 计算（与 sweep 同一时钟），这里只传时长
+            RESERVATION_TTL_MS.to_string(),
             caps.rpm.to_string(),
             caps.tpm.to_string(),
             caps.rpd.to_string(),
@@ -356,6 +356,23 @@ impl BalanceLedger {
 
     /// 全额释放（不计费路径）；幂等。返回释放金额、所在池余额与池。
     pub async fn refund(
+        &self,
+        user_id: i64,
+        api_key_id: i64,
+        request_id: Uuid,
+    ) -> Result<RefundOutcome, LedgerError> {
+        let result = self
+            .refund_reservation(user_id, api_key_id, request_id)
+            .await;
+        // 调用方大多 fire-and-forget（失败守卫、各端点的错误分支）：在这里统一留痕。
+        // 释放失败时预扣会悬置、占着用户余额，直到 worker 的过期清理收回。
+        if let Err(error) = &result {
+            tracing::warn!(user_id, api_key_id, %request_id, %error, "reservation release failed; expiry sweep will reclaim it");
+        }
+        result
+    }
+
+    async fn refund_reservation(
         &self,
         user_id: i64,
         api_key_id: i64,
@@ -492,6 +509,37 @@ impl BalanceLedger {
             .parse()
             .map(Money::from_micros)
             .map_err(|_| LedgerError::InvalidSettlement)
+    }
+
+    /// Redis 服务器时钟。预扣截止时间按它写入，sweep 也按它判过期：
+    /// 各副本本机时钟漂移不影响在途保护窗。
+    pub async fn server_now(&self) -> Result<chrono::DateTime<chrono::Utc>, LedgerError> {
+        let (secs, micros): (String, String) = self
+            .client
+            .eval(
+                "return redis.call('TIME')",
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )
+            .await?;
+        let secs: i64 = secs
+            .parse()
+            .map_err(|_| LedgerError::UnexpectedReply("time"))?;
+        let micros: i64 = micros
+            .parse()
+            .map_err(|_| LedgerError::UnexpectedReply("time"))?;
+        chrono::DateTime::from_timestamp(
+            secs,
+            u32::try_from(micros.clamp(0, 999_999)).unwrap_or(0) * 1000,
+        )
+        .ok_or(LedgerError::UnexpectedReply("time"))
+    }
+
+    /// 热余额键是否存在。`reserve.lua` 把缺失的键当余额 0：返回 false 说明热账本丢了
+    /// （Redis 重启未持久化、被淘汰、FLUSHDB），而不是用户真的没钱。
+    pub async fn balance_present(&self, user_id: i64) -> Result<bool, LedgerError> {
+        let exists: i64 = self.client.exists(Self::bal_key(user_id)).await?;
+        Ok(exists > 0)
     }
 
     /// 按账本权威值重建热余额（对账修复）。

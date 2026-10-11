@@ -74,13 +74,9 @@ async fn first_candidate(
     canonical: &str,
     key: &okapi_store::AuthedKey,
 ) -> Result<okapi_store::ChannelCandidate, AppError> {
-    let rows = okapi_store::channels::candidates_for_model(
-        &state.pg,
-        canonical,
-        &key.pool_chain(),
-        state.master_key.as_deref(),
-    )
-    .await?;
+    let rows = state
+        .candidates_for_model(canonical, &key.pool_chain())
+        .await?;
     let mut candidates: Vec<_> = super::scheduler::order_candidates(rows)
         .into_iter()
         .filter(|c| {

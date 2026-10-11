@@ -8,7 +8,7 @@ use okapi_ledger::SettlementInput;
 const PAYLOADS: &str = "settlement:{retry}:payloads";
 const ORDER: &str = "settlement:{retry}:order";
 const ATTEMPTS: &str = "settlement:{retry}:attempts";
-const QUARANTINE: &str = "settlement:{retry}:quarantine";
+pub(crate) const QUARANTINE: &str = "settlement:{retry}:quarantine";
 
 fn keys(state: &AppState) -> [std::borrow::Cow<'static, str>; 4] {
     #[cfg(not(test))]
@@ -77,7 +77,15 @@ pub async fn due_now(state: &AppState, id: uuid::Uuid) -> anyhow::Result<()> {
 
 async fn save_at(state: &AppState, input: &SettlementInput<'_>, due_ms: i64) -> anyhow::Result<()> {
     let [payloads, order, _, quarantine] = keys(state);
-    let payload = serde_json::to_string(input)?;
+    let mut payload = serde_json::to_string(input)?;
+    // 诊断 trace 只用于观测、不影响金额，却是载荷里最容易膨胀的部分（长上下文、多次重试）。
+    // 超限时去掉它再存：留底的目的是保住这笔账，不是保住诊断。
+    if payload.len() > MAX_PAYLOAD_BYTES && input.dimensions.diagnostics.is_some() {
+        let mut slim = input.clone();
+        slim.dimensions.diagnostics = None;
+        payload = serde_json::to_string(&slim)?;
+        tracing::warn!(request_id=%input.request_id, "settlement journal dropped diagnostics to fit the payload limit");
+    }
     anyhow::ensure!(
         payload.len() <= MAX_PAYLOAD_BYTES,
         "settlement journal payload too large"

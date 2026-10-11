@@ -21,7 +21,11 @@ pub(crate) async fn failure(
     code: &str,
     kind: KeyFailure,
 ) {
-    let _ = channels::mark_key_failure(&state.pg, cand.channel_key_id, code, kind).await;
+    // 登记失败不阻断请求，但要留痕：计数丢了，熔断和冷却就不会触发，坏 key 会继续接流量
+    if let Err(error) = channels::mark_key_failure(&state.pg, cand.channel_key_id, code, kind).await
+    {
+        tracing::warn!(channel_key_id = cand.channel_key_id, code, %error, "channel key failure could not be recorded");
+    }
     if matches!(kind, KeyFailure::Transient) {
         state.key_failures.insert(cand.channel_key_id, ()).await;
     }
@@ -64,9 +68,14 @@ pub(crate) async fn proxy_unreachable(
 
 async fn record_proxy_failure(state: &AppState, proxy: i64, reason: &str, confirmed: bool) {
     state.egress_failures.insert(proxy, ()).await;
-    let tripped = okapi_store::egress::mark_failure(&state.pg, proxy, reason, confirmed)
-        .await
-        .unwrap_or(false);
+    let tripped = match okapi_store::egress::mark_failure(&state.pg, proxy, reason, confirmed).await
+    {
+        Ok(tripped) => tripped,
+        Err(error) => {
+            tracing::warn!(proxy, reason, %error, "egress proxy failure could not be recorded");
+            false
+        }
+    };
     if tripped {
         // 刚熔断：别让 5s 的候选缓存继续把请求送进这个代理
         state.invalidate_routing_caches();

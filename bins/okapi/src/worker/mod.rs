@@ -28,6 +28,8 @@ const RECONCILE_INTERVAL: Duration = Duration::from_mins(5);
 const PARTITION_INTERVAL: Duration = Duration::from_hours(6);
 const COOLDOWN_INTERVAL: Duration = Duration::from_secs(30);
 const BALANCE_EXPIRY_INTERVAL: Duration = Duration::from_mins(5);
+/// 人工队列（统计死信、结算隔离区）巡检：非零即告警。
+const MANUAL_QUEUE_INTERVAL: Duration = Duration::from_mins(5);
 /// 订阅滚窗 / 到期扫描周期（IMPLEMENTATION §11.28：间隙内 reserve 自动落钱包，保守方向）。
 const SUBSCRIPTION_INTERVAL: Duration = Duration::from_mins(1);
 /// 负毛利熔断评估周期（IMPLEMENTATION §11.34；立方体按小时聚合，更密没有意义）。
@@ -221,6 +223,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         (MaintenanceJob::cooldown, COOLDOWN_INTERVAL),
         (MaintenanceJob::margin, MARGIN_BREAKER_INTERVAL),
         (MaintenanceJob::balance_expiry, BALANCE_EXPIRY_INTERVAL),
+        (MaintenanceJob::manual_queues, MANUAL_QUEUE_INTERVAL),
     ] {
         workers.push(tokio::spawn(supervision::run(
             job.name(),
@@ -295,6 +298,7 @@ enum MaintenanceJob {
     cooldown,
     margin,
     balance_expiry,
+    manual_queues,
 }
 
 impl MaintenanceJob {
@@ -309,6 +313,7 @@ impl MaintenanceJob {
             Self::cooldown => "cooldown",
             Self::margin => "margin",
             Self::balance_expiry => "balance_expiry",
+            Self::manual_queues => "manual_queues",
         }
     }
 }
@@ -377,7 +382,15 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
             }
         }
         MaintenanceJob::sweep => {
-            match sweep_expired_reservations(pg, ledger, chrono::Utc::now()).await {
+            // 预扣截止时间按 Redis TIME 写入，判过期也用它，不用 worker 本机时钟
+            let now = match ledger.server_now().await {
+                Ok(now) => now,
+                Err(err) => {
+                    tracing::error!(error = %err, "悬置预扣清理跳过：读取 Redis 时钟失败");
+                    return;
+                }
+            };
+            match sweep_expired_reservations(pg, ledger, now).await {
                 Ok(swept) if !swept.is_empty() => {
                     tracing::warn!(count = swept.len(), "悬置预扣已清理");
                 }
@@ -457,6 +470,15 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
             }
             if let Err(err) = notify::balance_low_and_notify(pg, notifier).await {
                 tracing::error!(error = %err, "余额低扫描失败");
+            }
+        }
+        MaintenanceJob::manual_queues => {
+            match notify::manual_queues_and_notify(pg, &ctx.redis, notifier).await {
+                Ok((dlq, quarantined)) if dlq > 0 || quarantined > 0 => {
+                    tracing::warn!(dlq, quarantined, "人工处理队列非空");
+                }
+                Ok(_) => {}
+                Err(err) => tracing::error!(error = %err, "人工处理队列巡检失败"),
             }
         }
     }

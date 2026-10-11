@@ -454,14 +454,10 @@ async fn forward(
     request_id: Uuid,
     est_prompt: u32,
 ) -> Result<ForwardOk, (AppError, Option<(i64, i64, String)>, i16)> {
-    let rows = okapi_store::channels::candidates_for_model(
-        &state.pg,
-        canonical,
-        &key.pool_chain(),
-        state.master_key.as_deref(),
-    )
-    .await
-    .map_err(|e| (AppError::from(e), None, 0))?;
+    let rows = state
+        .candidates_for_model(canonical, &key.pool_chain())
+        .await
+        .map_err(|e| (AppError::from(e), None, 0))?;
     let mut candidates: Vec<_> = super::scheduler::order_candidates(rows)
         .into_iter()
         .filter(|c| c.provider != "anthropic" && !super::dialect::chat_only(&c.provider))

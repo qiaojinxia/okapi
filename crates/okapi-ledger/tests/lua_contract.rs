@@ -134,10 +134,12 @@ async fn reserve_then_commit_settles_both_directions() {
     assert_eq!(rows[0].amount.as_micros(), 1_000);
     assert_eq!(rows[0].api_key_id, KID);
     assert_eq!(rows[0].pool, Pool::Wallet);
-    assert_eq!(
-        rows[0].deadline_ms,
-        bed.now.timestamp_millis() + 600_000,
-        "悬置时限 = 预扣时刻 + 10min"
+    // 截止时间按 Redis 服务器时钟写入（与过期清理同一时钟），不取调用方传入的 now
+    let expected = chrono::Utc::now().timestamp_millis() + 600_000;
+    assert!(
+        (rows[0].deadline_ms - expected).abs() < 5_000,
+        "悬置时限 = Redis 当前时刻 + 10min：{} vs {expected}",
+        rows[0].deadline_ms
     );
     assert_eq!(bed.conc(KID).await, 1);
 

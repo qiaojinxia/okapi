@@ -957,9 +957,9 @@ async fn one_broken_user_does_not_stall_reservation_expiry_for_others() {
         "the healthy user sorts after the broken one"
     );
     let request = Uuid::new_v4();
-    // 过期清理扫全库：拿 11 分钟前的时钟预扣（截止已过），清理用真实时钟，
-    // 并行用例的在途预扣就不会被当成过期退掉
-    let admitted = chrono::Utc::now() - chrono::Duration::minutes(11);
+    // 过期清理扫全库：截止时间按 Redis 时钟写入，先正常预扣，再把这笔回执的截止时间改到
+    // 11 分钟前；清理用真实时钟，并行用例的在途预扣就不会被当成过期退掉
+    let admitted = chrono::Utc::now();
     let reserved = env
         .ledger
         .reserve(
@@ -979,6 +979,14 @@ async fn one_broken_user_does_not_stall_reservation_expiry_for_others() {
         reserved,
         okapi_ledger::ReserveOutcome::Reserved { .. }
     ));
+    let expired = (chrono::Utc::now() - chrono::Duration::minutes(11)).timestamp_millis();
+    let _: i64 = redis
+        .hset(
+            format!("bal:{{{later}}}"),
+            (format!("r:{request}"), format!("1000|{expired}|{key}|0")),
+        )
+        .await
+        .unwrap();
 
     let swept = worker::sweep_expired_reservations(&env.pg, &env.ledger, chrono::Utc::now())
         .await

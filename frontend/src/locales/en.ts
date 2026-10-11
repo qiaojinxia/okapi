@@ -1920,6 +1920,8 @@ export default {
     egressProbeTargetHint: 'Empty uses Cloudflare trace (exit IP and country in one request). For proxies that only allow certain upstreams, use an upstream URL: any HTTP response counts as reachable.',
     notifyEventEgressIpChanged: 'Proxy exit IP changed',
     notifyEventEgressDown: 'Proxy in use unreachable',
+    notifyEventDlqBacklog: 'Stats delivery in dead-letter queue (requeue needed)',
+    notifyEventSettlementQuarantine: 'Settlement records quarantined (manual action needed)',
     extraHeaders: 'Extra request headers',
     extraHeadersHint:
       'Attached to every upstream request. Cannot override Authorization, API keys, Host, or hop-by-hop headers.',
@@ -3125,6 +3127,7 @@ export default {
     permission_denied: 'Permission denied',
     insufficient_quota: 'Insufficient balance',
     rate_limited: 'Rate limited ({{param}})',
+    auth_backend_unavailable: 'Session service temporarily unavailable; retry shortly',
     overloaded: 'Gateway settlement backlog overloaded ({{param}} pending); retry shortly',
     member_limit_exceeded: 'Team member monthly limit reached',
     model_not_found: 'Model not found',

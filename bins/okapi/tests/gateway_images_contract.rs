@@ -264,6 +264,8 @@ impl Env {
             .execute(&self.state.pg)
             .await
             .unwrap();
+        // 直接改库绕过了控制台：照控制台写路径的做法失效候选缓存
+        self.state.invalidate_routing_caches();
     }
     fn request(&self, edit: bool) -> reqwest::RequestBuilder {
         reqwest::Client::builder()

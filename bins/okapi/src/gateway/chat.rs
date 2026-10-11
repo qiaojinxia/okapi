@@ -1576,7 +1576,7 @@ fn fallback_billing(bill: &RequestBilling, fb: &AdmittedFallback) -> RequestBill
 
 /// 模型在池链上的候选渠道。5s 进程缓存（热路径零 PG 读；console 写路径主动失效，多副本靠 TTL
 /// 收敛）；缓存键含池链：不同池的候选集合不同，混用会把别的池的渠道发给用户。
-async fn cached_candidates(
+pub(crate) async fn cached_candidates(
     state: &AppState,
     model: &str,
     pool_chain: &[&str],

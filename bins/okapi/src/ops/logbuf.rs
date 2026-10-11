@@ -2,7 +2,12 @@
 //! Redis 列表 `ops:logs`（保留最近 2000 条，7 天无新告警整键过期）。多进程 / 多副本部署时所有角色的告警汇到
 //! 同一处，面板读 Redis；Redis 不可达时回退到本进程缓冲。
 //!
+//! ERROR 另存一个列表 `ops:logs:error`（保留 500 条），读取时与 WARN 合并：大量 WARN 刷屏时
+//! 关键 ERROR 不会被挤出面板。
+//!
 //! 写 Redis 失败只记 debug：本层只收 WARN 以上，失败日志不会再回到自己身上形成回路。
+//! 连续写不进时改向 stderr 打一行（stderr 不经 tracing、也不进本层），部署侧的标准输出采集能看到
+//! 「告警面本身失明」。
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -15,9 +20,15 @@ use tracing_subscriber::layer::{Context, Layer};
 
 pub const REDIS_KEY: &str = "ops:logs";
 const REDIS_KEEP: i64 = 2000;
+/// ERROR 单独保底：与 WARN 分开存，读取时合并。
+pub const REDIS_ERROR_KEY: &str = "ops:logs:error";
+const REDIS_ERROR_KEEP: i64 = 500;
+/// 连续这么多次写 Redis 失败（约 20 秒）就向 stderr 报一次。
+const FLUSH_FAILURES_BEFORE_STDERR: u32 = 10;
 /// 每次写入续期：持续有告警时滚动保留，全站静默 7 天后整列表过期，旧条目不永久驻留。
 const REDIS_TTL_SECS: i64 = 7 * 24 * 3600;
 const LOCAL_KEEP: usize = 500;
+const LOCAL_ERROR_KEEP: usize = 200;
 /// 待写 Redis 的上限：Redis 长时间不可达时丢最旧的，不让内存无界增长。
 const PENDING_KEEP: usize = 2000;
 const MESSAGE_MAX: usize = 2000;
@@ -37,7 +48,27 @@ pub struct Entry {
 #[derive(Default)]
 struct Buffers {
     recent: VecDeque<Entry>,
+    /// 本进程最近的 ERROR 另留一份，WARN 刷屏时回退面板也看得到
+    recent_errors: VecDeque<Entry>,
     pending: VecDeque<Entry>,
+}
+
+fn is_error(entry: &Entry) -> bool {
+    entry.level == "ERROR"
+}
+
+/// 待写队列超限时先丢最旧的 WARN，全是 ERROR 才丢最旧的 ERROR。
+fn trim_pending(pending: &mut VecDeque<Entry>) {
+    while pending.len() > PENDING_KEEP {
+        match pending.iter().position(|e| !is_error(e)) {
+            Some(index) => {
+                pending.remove(index);
+            }
+            None => {
+                pending.pop_front();
+            }
+        }
+    }
 }
 
 static BUFFERS: OnceLock<Mutex<Buffers>> = OnceLock::new();
@@ -51,14 +82,19 @@ fn push(entry: Entry) {
     let Ok(mut b) = buffers().lock() else {
         return;
     };
-    if b.recent.len() >= LOCAL_KEEP {
-        b.recent.pop_front();
-    }
-    b.recent.push_back(entry.clone());
-    if b.pending.len() >= PENDING_KEEP {
-        b.pending.pop_front();
+    if is_error(&entry) {
+        if b.recent_errors.len() >= LOCAL_ERROR_KEEP {
+            b.recent_errors.pop_front();
+        }
+        b.recent_errors.push_back(entry.clone());
+    } else {
+        if b.recent.len() >= LOCAL_KEEP {
+            b.recent.pop_front();
+        }
+        b.recent.push_back(entry.clone());
     }
     b.pending.push_back(entry);
+    trim_pending(&mut b.pending);
 }
 
 /// 写失败的一批放回待写队列头部（它们比失败期间新进来的更旧），总量仍按 [`PENDING_KEEP`] 丢最旧的。
@@ -69,9 +105,7 @@ fn requeue(batch: Vec<Entry>) {
     for entry in batch.into_iter().rev() {
         b.pending.push_front(entry);
     }
-    while b.pending.len() > PENDING_KEEP {
-        b.pending.pop_front();
-    }
+    trim_pending(&mut b.pending);
 }
 
 /// 本进程最近的告警（新的在前）。
@@ -79,8 +113,32 @@ fn requeue(batch: Vec<Entry>) {
 pub fn recent() -> Vec<Entry> {
     buffers()
         .lock()
-        .map(|b| b.recent.iter().rev().cloned().collect())
+        .map(|b| {
+            merge_newest_first(
+                b.recent.iter().rev().cloned().collect(),
+                b.recent_errors.iter().rev().cloned().collect(),
+            )
+        })
         .unwrap_or_default()
+}
+
+/// 两列都按新的在前，合并成一列（时间戳是同格式的 RFC 3339 UTC，可直接按字符串比较）。
+fn merge_newest_first(warnings: Vec<Entry>, errors: Vec<Entry>) -> Vec<Entry> {
+    let mut merged = Vec::with_capacity(warnings.len() + errors.len());
+    let (mut w, mut e) = (
+        warnings.into_iter().peekable(),
+        errors.into_iter().peekable(),
+    );
+    loop {
+        let take_error = match (w.peek(), e.peek()) {
+            (Some(warn), Some(error)) => error.ts >= warn.ts,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (None, None) => break,
+        };
+        merged.extend(if take_error { e.next() } else { w.next() });
+    }
+    merged
 }
 
 fn take_pending() -> Vec<Entry> {
@@ -172,6 +230,7 @@ pub fn spawn_flusher(redis: fred::clients::Client, node: &str, role: &str) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut failures = 0u32;
         loop {
             tick.tick().await;
             let batch = take_pending();
@@ -182,6 +241,21 @@ pub fn spawn_flusher(redis: fred::clients::Client, node: &str, role: &str) {
                 // Redis 故障正是最需要告警的时候：整批放回待写队列，恢复后补写，不随这一次失败丢掉
                 tracing::debug!(error = %e, requeued = batch.len(), "ops log flush failed");
                 requeue(batch);
+                failures = failures.saturating_add(1);
+                if failures == FLUSH_FAILURES_BEFORE_STDERR {
+                    eprintln!(
+                        "{} WARN okapi::ops::logbuf: ops log flush to Redis failing ({failures} attempts); alerts are buffered locally only: {e}",
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                    );
+                }
+            } else {
+                if failures >= FLUSH_FAILURES_BEFORE_STDERR {
+                    eprintln!(
+                        "{} INFO okapi::ops::logbuf: ops log flush to Redis recovered after {failures} failed attempts",
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                    );
+                }
+                failures = 0;
             }
         }
     });
@@ -189,14 +263,25 @@ pub fn spawn_flusher(redis: fred::clients::Client, node: &str, role: &str) {
 
 async fn write(redis: &fred::clients::Client, batch: &[Entry]) -> anyhow::Result<()> {
     use fred::interfaces::{KeysInterface, ListInterface};
-    let values: Vec<String> = batch
-        .iter()
-        .filter_map(|e| serde_json::to_string(e).ok())
-        .collect();
+    let encode = |errors: bool| -> Vec<String> {
+        batch
+            .iter()
+            .filter(|e| is_error(e) == errors)
+            .filter_map(|e| serde_json::to_string(e).ok())
+            .collect()
+    };
     let pipe = redis.pipeline();
-    let _: () = pipe.lpush(REDIS_KEY, values).await?;
-    let _: () = pipe.ltrim(REDIS_KEY, 0, REDIS_KEEP - 1).await?;
-    let _: () = pipe.expire(REDIS_KEY, REDIS_TTL_SECS, None).await?;
+    for (key, keep, values) in [
+        (REDIS_KEY, REDIS_KEEP, encode(false)),
+        (REDIS_ERROR_KEY, REDIS_ERROR_KEEP, encode(true)),
+    ] {
+        if values.is_empty() {
+            continue;
+        }
+        let _: () = pipe.lpush(key, values).await?;
+        let _: () = pipe.ltrim(key, 0, keep - 1).await?;
+        let _: () = pipe.expire(key, REDIS_TTL_SECS, None).await?;
+    }
     let _: Vec<fred::types::Value> = pipe.all().await?;
     Ok(())
 }
@@ -204,11 +289,16 @@ async fn write(redis: &fred::clients::Client, batch: &[Entry]) -> anyhow::Result
 /// 读汇总的告警（新的在前）。`Err` = Redis 不可达，调用方回退到 [`recent`]。
 pub async fn load(redis: &fred::clients::Client) -> anyhow::Result<Vec<Entry>> {
     use fred::interfaces::ListInterface;
-    let raw: Vec<String> = redis.lrange(REDIS_KEY, 0, REDIS_KEEP - 1).await?;
-    Ok(raw
-        .iter()
-        .filter_map(|r| serde_json::from_str(r).ok())
-        .collect())
+    let decode = |raw: Vec<String>| -> Vec<Entry> {
+        raw.iter()
+            .filter_map(|r| serde_json::from_str(r).ok())
+            .collect()
+    };
+    let warnings: Vec<String> = redis.lrange(REDIS_KEY, 0, REDIS_KEEP - 1).await?;
+    let errors: Vec<String> = redis
+        .lrange(REDIS_ERROR_KEY, 0, REDIS_ERROR_KEEP - 1)
+        .await?;
+    Ok(merge_newest_first(decode(warnings), decode(errors)))
 }
 
 #[cfg(test)]
@@ -269,6 +359,59 @@ mod tests {
         assert_eq!(
             entry.message,
             "ops-forge-test\\nERROR fake to=x@a.test\\nERROR forged node=gw-1 error=boom\\u{1b}[2J"
+        );
+    }
+
+    /// 待写队列满时先丢 WARN：Redis 长时间不可达、WARN 刷屏也不会把排队中的 ERROR 挤掉。
+    #[test]
+    fn pending_overflow_drops_warnings_before_errors() {
+        let entry = |level: &str, n: usize| Entry {
+            ts: format!("{n:06}"),
+            level: level.into(),
+            target: String::new(),
+            message: format!("{level}-{n}"),
+            node: String::new(),
+            role: String::new(),
+        };
+        let mut pending: VecDeque<Entry> = VecDeque::new();
+        pending.push_back(entry("ERROR", 0));
+        for n in 1..=PENDING_KEEP {
+            pending.push_back(entry("WARN", n));
+        }
+        trim_pending(&mut pending);
+        assert_eq!(pending.len(), PENDING_KEEP);
+        assert_eq!(pending.front().unwrap().message, "ERROR-0");
+        assert_eq!(pending[1].message, "WARN-2");
+    }
+
+    #[test]
+    fn merged_view_interleaves_errors_by_time() {
+        let entry = |level: &str, ts: &str| Entry {
+            ts: ts.into(),
+            level: level.into(),
+            target: String::new(),
+            message: String::new(),
+            node: String::new(),
+            role: String::new(),
+        };
+        let merged = merge_newest_first(
+            vec![
+                entry("WARN", "2026-10-11T00:00:03.000Z"),
+                entry("WARN", "2026-10-11T00:00:01.000Z"),
+            ],
+            vec![entry("ERROR", "2026-10-11T00:00:02.000Z")],
+        );
+        let order: Vec<_> = merged
+            .iter()
+            .map(|e| (e.level.as_str(), e.ts.as_str()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("WARN", "2026-10-11T00:00:03.000Z"),
+                ("ERROR", "2026-10-11T00:00:02.000Z"),
+                ("WARN", "2026-10-11T00:00:01.000Z")
+            ]
         );
     }
 

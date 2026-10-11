@@ -325,6 +325,38 @@ pub async fn balance_low_and_notify(pg: &PgPool, notifier: &Notifier) -> anyhow:
     Ok(low.len())
 }
 
+/// 需要人工处理的两条队列：统计投递死信（`dlq_backlog`）与结算 journal 隔离区
+/// （`settlement_quarantine`）。两者都不会自己消失，此前只有日志，没人会被叫醒。
+/// 非零就派发，重复提醒由通道的 `min_interval_secs` 节流。
+pub async fn manual_queues_and_notify(
+    pg: &PgPool,
+    redis: &Client,
+    notifier: &Notifier,
+) -> anyhow::Result<(i64, i64)> {
+    use fred::interfaces::HashesInterface;
+    let dlq =
+        sqlx::query_scalar!(r#"SELECT COUNT(*)::bigint AS "c!" FROM billing_dlq WHERE status = 0"#)
+            .fetch_one(pg)
+            .await?;
+    if dlq > 0 {
+        notifier
+            .dispatch("dlq_backlog", &serde_json::json!({ "pending": dlq }))
+            .await;
+    }
+    let quarantined: i64 = redis
+        .hlen(crate::gateway::settlement_retry::QUARANTINE)
+        .await?;
+    if quarantined > 0 {
+        notifier
+            .dispatch(
+                "settlement_quarantine",
+                &serde_json::json!({ "quarantined": quarantined }),
+            )
+            .await;
+    }
+    Ok((dlq, quarantined))
+}
+
 /// 冷却和凭证失效共用 `channel_cooldown` 订阅与频率闸；人工 banned 不告警。
 pub async fn channel_cooldown_and_notify(pg: &PgPool, notifier: &Notifier) -> anyhow::Result<i64> {
     let cooling = count_cooling_keys(pg).await?;

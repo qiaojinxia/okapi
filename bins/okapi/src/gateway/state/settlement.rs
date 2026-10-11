@@ -176,16 +176,74 @@ impl AppState {
                                 .await;
                             return Ok(false);
                         }
-                        let _ = self
-                            .ledger
-                            .refund(input.user_id, input.api_key_id, input.request_id)
-                            .await;
-                        return Err(error.into());
+                        // 开头没留住底（Redis 不可达 / journal 满 / 载荷超限）：再试一次立即留底
+                        if super::super::settlement_retry::save(self, &input)
+                            .await
+                            .is_ok()
+                        {
+                            tracing::warn!(request_id=%input.request_id, "settlement handed to retry journal after persistence failed");
+                            return Ok(false);
+                        }
+                        // 仍留不住：不立刻退款放弃计费，交给后台在保护窗内继续重试落账与留底。
+                        // 调用方按「已交接」处理（与进 journal 相同），上游成本已经发生，账不能就此作废。
+                        tracing::error!(request_id=%input.request_id, %error, "settlement could not be persisted or journaled; retrying in background");
+                        let owned = okapi_ledger::pg::OwnedSettlementInput::from(input.clone());
+                        let state = self.clone();
+                        self.settlements.spawn(async move {
+                            state.settle_in_background(owned.as_input()).await;
+                        });
+                        return Ok(false);
                     }
                 }
             }
         }
         Err(crate::gateway::error::AppError::internal())
+    }
+}
+
+/// 落账与留底都失败后的后台重试窗口：覆盖预扣保护期（600s），PG 与 Redis 任一恢复即收敛。
+/// 预扣若先被 sweep 退回，迟到的落账会经 billing_sync → repair 补扣，账最终仍正确。
+const BACKGROUND_SETTLEMENT_WINDOW: std::time::Duration = std::time::Duration::from_mins(10);
+const BACKGROUND_SETTLEMENT_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+
+impl AppState {
+    async fn settle_in_background(&self, input: SettlementInput<'_>) {
+        let _backlog = super::BacklogGuard::enter(&self.settle_backlog);
+        let started = std::time::Instant::now();
+        let mut delay = std::time::Duration::from_secs(2);
+        while started.elapsed() < BACKGROUND_SETTLEMENT_WINDOW {
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(BACKGROUND_SETTLEMENT_MAX_DELAY);
+            match Box::pin(self.persist_success(input.clone())).await {
+                Ok(inserted) => {
+                    if inserted {
+                        self.sched
+                            .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
+                            .await;
+                    }
+                    tracing::warn!(request_id=%input.request_id, waited_secs = started.elapsed().as_secs(), "background settlement persisted");
+                    return;
+                }
+                Err(error) => {
+                    if super::super::settlement_retry::save(self, &input)
+                        .await
+                        .is_ok()
+                    {
+                        tracing::warn!(request_id=%input.request_id, %error, "background settlement handed to retry journal");
+                        return;
+                    }
+                }
+            }
+        }
+        // 窗口用尽：这是资金路径唯一放弃计费的出口，日志写明，便于从上游与请求日志补账
+        tracing::error!(
+            request_id=%input.request_id, user_id=input.user_id, amount_micro=input.amount.as_micros(),
+            "settlement abandoned: neither PG nor the retry journal recovered within the window; request served unbilled"
+        );
+        let _ = self
+            .ledger
+            .refund(input.user_id, input.api_key_id, input.request_id)
+            .await;
     }
 }
 

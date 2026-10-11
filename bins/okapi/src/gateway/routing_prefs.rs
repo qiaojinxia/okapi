@@ -136,14 +136,9 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
 }
 
 /// 粗筛：请求体里是否出现过 `"provider"` 键名。
+/// 每个请求体都要过一遍，用 SIMD 子串查找；有反斜杠时键名可能写成转义形式，交给完整解析。
 fn contains_provider_key(body: &Bytes) -> bool {
-    memchr_find(body, b"\"provider\"") || body.contains(&b'\\')
-}
-
-fn memchr_find(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    memchr::memmem::find(body, b"\"provider\"").is_some() || memchr::memchr(b'\\', body).is_some()
 }
 
 /// 剥掉 `provider` 键后的请求体（转发上游前必做）。无该键时返回 None（零拷贝）。

@@ -173,6 +173,17 @@ impl AppState {
         Ok(())
     }
 
+    /// 模型的候选渠道（走 chat 同一份 5s 进程缓存，console 写路径主动失效）。
+    /// 各入口拿到的是自己的副本，可以就地排序、过滤。
+    pub async fn candidates_for_model(
+        &self,
+        model: &str,
+        pool_chain: &[&str],
+    ) -> Result<Vec<okapi_store::ChannelCandidate>, okapi_store::StoreError> {
+        let rows = super::chat::cached_candidates(self, model, pool_chain, false).await?;
+        Ok(rows.as_ref().clone())
+    }
+
     /// 预扣准入：先在进程内按用户排队，轮到了才拿 PG 连接与用户锁（见 `user_turns`）。
     /// 所有计费端点都经这里，单个高并发用户不能把全站连接池耗在等锁上。
     pub async fn reserve_for_key(
@@ -185,9 +196,37 @@ impl AppState {
             .admission_turns
             .wait(request.user_id, super::user_turns::ADMISSION_WAIT)
             .await?;
-        self.ledger
+        let outcome = self
+            .ledger
             .reserve_for_key(&self.pg, limited, request, now)
-            .await
+            .await?;
+        // 热账本丢失自愈：余额不足且这个用户的余额键根本不存在，说明 Redis 丢了数据
+        // （重启未持久化 / 淘汰 / FLUSHDB），不是用户没钱。按 PG 账本重建一次再准入，
+        // 不必等每日全量对账和人工修复。重建总会写回余额字段，同一用户最多触发一次。
+        if matches!(outcome, okapi_ledger::ReserveOutcome::Insufficient { .. })
+            && matches!(
+                self.ledger.balance_present(request.user_id).await,
+                Ok(false)
+            )
+        {
+            tracing::warn!(
+                user_id = request.user_id,
+                "hot balance missing; rebuilding from the ledger"
+            );
+            match crate::worker::repair_balance(&self.pg, &self.ledger, request.user_id).await {
+                Ok(Some(_)) => {
+                    return self
+                        .ledger
+                        .reserve_for_key(&self.pg, limited, request, now)
+                        .await;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(user_id = request.user_id, %error, "hot balance rebuild failed");
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     /// 结算记账统一入口：信号量准入 + 瞬时失败退避重试（200ms/800ms/3.2s），

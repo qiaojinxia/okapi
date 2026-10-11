@@ -62,20 +62,36 @@ pub async fn authenticate(
     }
     // 登录 key 跟着登录会话走（§6.4）：请求必须带着它所属会话的 cookie，且会话仍有效（顺带续期）。
     // 会话结束——退出、被踢、全部吊销、改密码、超出在线上限、过期——它随之失效；被偷到别处也用不了。
-    if let Some(bound) = authed.session_hash.as_deref()
-        && !session_alive(state, headers, bound, authed.user_id).await
-    {
-        return Err(AppError::unauthorized(codes::INVALID_API_KEY));
+    if let Some(bound) = authed.session_hash.as_deref() {
+        match session_alive(state, headers, bound, authed.user_id).await {
+            Ok(true) => {}
+            Ok(false) => return Err(AppError::unauthorized(codes::INVALID_API_KEY)),
+            // 会话存储不可达是服务端故障：报 503，不伪装成凭证无效把排障引向安全事件
+            Err(error) => {
+                tracing::error!(%error, "web session store unreachable while authorizing a session-bound key");
+                return Err(AppError::new(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    codes::AUTH_BACKEND_UNAVAILABLE,
+                ));
+            }
+        }
     }
     Ok(authed)
 }
 
-async fn session_alive(state: &AppState, headers: &HeaderMap, bound: &str, user_id: i64) -> bool {
+async fn session_alive(
+    state: &AppState,
+    headers: &HeaderMap,
+    bound: &str,
+    user_id: i64,
+) -> Result<bool, fred::error::Error> {
     let Some(sid) = crate::console::auth_web::session_id(headers) else {
-        return false;
+        return Ok(false);
     };
-    hex::encode(Sha256::digest(sid.as_bytes())) == bound
-        && state.sched.web_session_get(&sid).await == Some(user_id)
+    if hex::encode(Sha256::digest(sid.as_bytes())) != bound {
+        return Ok(false);
+    }
+    Ok(state.sched.web_session_check(&sid).await? == Some(user_id))
 }
 
 /// 无效凭证计数（缺 token / 哈希未命中）。超限改回 429，避免扫 key 打满 401。

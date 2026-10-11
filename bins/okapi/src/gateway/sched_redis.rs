@@ -309,8 +309,18 @@ impl SchedulerRedis {
     }
 
     pub async fn web_session_get(&self, sid: &str) -> Option<i64> {
-        let (web, idx, meta) = Self::web_session_keys(sid)?;
-        let uid = Self::web_session_owner(sid)?;
+        self.web_session_check(sid).await.ok().flatten()
+    }
+
+    /// 同 [`Self::web_session_get`]，但把「会话不存在 / 已失效」（`Ok(None)`）和
+    /// 「Redis 不可达」（`Err`）分开：数据面鉴权据此区分 401 与 503。
+    pub async fn web_session_check(&self, sid: &str) -> Result<Option<i64>, fred::error::Error> {
+        let Some((web, idx, meta)) = Self::web_session_keys(sid) else {
+            return Ok(None);
+        };
+        let Some(uid) = Self::web_session_owner(sid) else {
+            return Ok(None);
+        };
         // Verify mapping + membership and slide all three TTLs atomically with
         // revocation, so a replaced or revoked session cannot be authorized.
         let script = r"
@@ -332,9 +342,8 @@ impl SchedulerRedis {
                     WEB_SESSION_TTL_SECS.to_string(),
                 ],
             )
-            .await
-            .ok()?;
-        (valid == 1).then_some(uid)
+            .await?;
+        Ok((valid == 1).then_some(uid))
     }
 
     pub async fn web_session_del(&self, sid: &str) {
@@ -563,8 +572,9 @@ impl SchedulerRedis {
     /// 结算后累加渠道 key 当日消费。软实时：先花后记，可能略超上限。
     pub async fn channel_key_spend_add(&self, channel_key_id: i64, amount_micro: i64) {
         let key = Self::channel_key_spend_key(channel_key_id);
+        // warn 而非 debug：累加失败时渠道 key 日消费上限会静默失效（debug 不进运维日志）
         if let Err(err) = self.incr_by_with_ttl(&key, amount_micro, 172_800).await {
-            tracing::debug!(error = %err, "channel_key_spend 累加失败");
+            tracing::warn!(channel_key_id, error = %err, "channel_key_spend 累加失败，渠道 key 日消费上限少计");
         }
     }
 
@@ -637,9 +647,12 @@ impl SchedulerRedis {
             return;
         }
         let key = Self::member_spend_key(team, member);
-        let _: Result<i64, _> = self
+        if let Err(err) = self
             .incr_by_with_ttl(&key, amount_micro, 40 * 24 * 3600)
-            .await;
+            .await
+        {
+            tracing::warn!(team, member, error = %err, "团队成员月消费累加失败，成员月限额少计");
+        }
     }
 
     fn member_spend_key(team: i64, member: i64) -> String {
@@ -664,7 +677,9 @@ impl SchedulerRedis {
             return;
         }
         let key = Self::monthly_tokens_key(user_id);
-        let _: Result<i64, _> = self.incr_by_with_ttl(&key, delta, 40 * 24 * 3600).await;
+        if let Err(err) = self.incr_by_with_ttl(&key, delta, 40 * 24 * 3600).await {
+            tracing::warn!(user_id, error = %err, "月累计 token 累加失败，量级规则少计");
+        }
     }
 
     fn monthly_tokens_key(user_id: i64) -> String {
@@ -686,9 +701,12 @@ impl SchedulerRedis {
             return;
         }
         let key = Self::monthly_spend_key(user_id);
-        let _: Result<i64, _> = self
+        if let Err(err) = self
             .incr_by_with_ttl(&key, amount_micro, 40 * 24 * 3600)
-            .await;
+            .await
+        {
+            tracing::warn!(user_id, error = %err, "月累计消费累加失败，量级规则少计");
+        }
     }
 
     fn monthly_spend_key(user_id: i64) -> String {
@@ -712,7 +730,7 @@ impl SchedulerRedis {
 
     /// [`Self::incr_with_ttl`] 的任意增量版（消费 / token 累加器）：键名带时间桶，丢一次 EXPIRE
     /// 就是一个永不过期的旧桶，所以同样走原子脚本。
-    async fn incr_by_with_ttl(
+    pub(crate) async fn incr_by_with_ttl(
         &self,
         key: &str,
         delta: i64,

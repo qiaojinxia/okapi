@@ -2,7 +2,7 @@
 -- KEYS[1] bal:{uid}
 -- KEYS[2] rl:{uid}:k:<kid>:rpm:<bucket>  KEYS[3] rl:{uid}:k:<kid>:tpm:<bucket>
 -- KEYS[4] rl:{uid}:k:<kid>:rpd:<day>     KEYS[5] conc:{uid}:k:<kid>
--- ARGV[1] request_id  ARGV[2] est_micro  ARGV[3] deadline_ms
+-- ARGV[1] request_id  ARGV[2] est_micro  ARGV[3] ttl_ms（截止时间在脚本里按 Redis TIME 算）
 -- ARGV[4] rpm_cap  ARGV[5] tpm_cap  ARGV[6] rpd_cap  ARGV[7] conc_cap
 -- ARGV[8] est_tokens  ARGV[9] api_key_id  ARGV[10] now_unix_s
 -- 全部 KEYS 同 {uid} hash-tag（Cluster 单槽原子）。cap<=0 = 不限。
@@ -31,7 +31,8 @@ end
 
 local est = integer(ARGV[2], false)
 local est_tokens = integer(ARGV[8], false)
-if not est or not est_tokens then return {0, 'INVALID_RESERVATION'} end
+local ttl = integer(ARGV[3], false)
+if not est or not est_tokens or not ttl then return {0, 'INVALID_RESERVATION'} end
 
 -- A script is isolated, but Redis does not roll back writes on runtime errors.
 -- Validate ALL counters, including unlimited ones, before changing any state.
@@ -82,7 +83,11 @@ end
 -- Keep large safe integers as decimal strings when passing them to Redis.
 redis.call('HINCRBY', KEYS[1], field, est == 0 and '0' or '-' .. ARGV[2])
 if durable_slots then redis.call('HSET', KEYS[1], 'hc:' .. ARGV[9], tostring(durable_slots)) end
-local receipt = ARGV[2] .. '|' .. ARGV[3] .. '|' .. ARGV[9] .. '|' .. pool
+-- 截止时间用 Redis 自己的时钟：sweep 也按 Redis TIME 判过期，网关与 worker 的本机时钟漂移
+-- 不再缩放在途保护窗（以前网关写、worker 判，时钟差超过 TTL 就会把正在输出的请求提前退款）。
+local clock = redis.call('TIME')
+local deadline = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000) + ttl
+local receipt = ARGV[2] .. '|' .. string.format('%.0f', deadline) .. '|' .. ARGV[9] .. '|' .. pool
 if epoch ~= '' then receipt = receipt .. '|w:' .. epoch end
 redis.call('HSET', KEYS[1], 'r:' .. ARGV[1], receipt)
 redis.call('INCR', KEYS[2]); redis.call('EXPIRE', KEYS[2], 120)

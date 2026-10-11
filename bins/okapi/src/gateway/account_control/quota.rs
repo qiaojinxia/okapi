@@ -123,9 +123,57 @@ async fn observation_credential<'a>(
     }
 }
 
+/// 额度探测与推理走同一出口（§11.41）；出口不可用就不探测，绝不改走直连。
+/// 外层 None = 本轮不探测（已记日志）；内层是代理地址（None = 直连出口）。
+async fn probe_proxy(state: &AppState, key: i64) -> Option<Option<String>> {
+    let egress = match okapi_store::egress::resolve_for_key(
+        &state.pg,
+        key,
+        state.master_key.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(egress)) => egress,
+        Ok(None) => {
+            tracing::warn!(key, "quota observation skipped: egress unavailable");
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(key, %error, "quota observation skipped: egress could not be resolved");
+            return None;
+        }
+    };
+    if let Ok(url) = egress.proxy_url() {
+        Some(url)
+    } else {
+        tracing::warn!(key, "quota observation skipped: egress proxy URL invalid");
+        None
+    }
+}
+
+/// 本轮探测租约（跨副本只探一次）。
+async fn acquire_lease(state: &AppState, key: i64) -> bool {
+    let lease: Result<Option<String>, _> = state
+        .sched
+        .client()
+        .set(
+            format!("quota:poll:ck:{key}"),
+            "1",
+            Some(Expiration::EX(POLL_INTERVAL_SECS)),
+            Some(SetOptions::NX),
+            false,
+        )
+        .await;
+    matches!(lease, Ok(Some(_)))
+}
+
 pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow, plaintext: &str) {
-    let Ok(policy) = policy(state, row.channel_id).await else {
-        return;
+    let policy = match policy(state, row.channel_id).await {
+        Ok(policy) => policy,
+        Err(error) => {
+            tracing::warn!(key = row.id, %error, "quota observation skipped: channel policy unavailable");
+            return;
+        }
     };
     let Some(adapter) = okapi_providers::registry::lookup(&row.provider) else {
         return;
@@ -133,27 +181,11 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
     let Some(hook) = adapter.account.filter(|hook| hook.capabilities().quota) else {
         return;
     };
-    let lease: Result<Option<String>, _> = state
-        .sched
-        .client()
-        .set(
-            format!("quota:poll:ck:{}", row.id),
-            "1",
-            Some(Expiration::EX(POLL_INTERVAL_SECS)),
-            Some(SetOptions::NX),
-            false,
-        )
-        .await;
-    if !matches!(lease, Ok(Some(_))) {
+    if !acquire_lease(state, row.id).await {
         return;
     }
-    // 额度探测与推理走同一出口（§11.41）；出口不可用就不探测，绝不改走直连
-    let Ok(Some(egress)) =
-        okapi_store::egress::resolve_for_key(&state.pg, row.id, state.master_key.as_deref()).await
-    else {
-        return;
-    };
-    let Ok(proxy_url) = egress.proxy_url() else {
+    // 以下早退都发生在拿到本轮探测租约之后：这把 key 本轮观测就此缺席，要留痕
+    let Some(proxy_url) = probe_proxy(state, row.id).await else {
         return;
     };
     let Some(credential) = observation_credential(
@@ -165,9 +197,17 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
     )
     .await
     else {
+        tracing::warn!(
+            key = row.id,
+            "quota observation skipped: credential unavailable"
+        );
         return;
     };
     let Some(base) = api_base(state, row).await else {
+        tracing::warn!(
+            key = row.id,
+            "quota observation skipped: channel api_base unavailable"
+        );
         return;
     };
     let outbound = okapi_providers::Outbound::from_settings(&row.settings, proxy_url);
@@ -321,17 +361,12 @@ pub async fn plan(state: &AppState, key: i64, provider: &str, plaintext: &str) -
 
 /// Probe failure is not inference failure; keep status intact and back off polling.
 async fn back_off(state: &AppState, key: i64, error: &okapi_providers::UpstreamError) {
+    // INCR 与 EXPIRE 同一脚本原子完成：分两步时 EXPIRE 失败会留下永不过期的计数，退避从此卡在封顶
     let failures: i64 = state
         .sched
-        .client()
-        .incr(format!("quota:fail:ck:{key}"))
+        .incr_by_with_ttl(&format!("quota:fail:ck:{key}"), 1, BACKOFF_MAX_SECS * 2)
         .await
         .unwrap_or(1);
-    let _: Result<bool, _> = state
-        .sched
-        .client()
-        .expire(format!("quota:fail:ck:{key}"), BACKOFF_MAX_SECS * 2, None)
-        .await;
     let delay = backoff_secs(failures, error.retry_after_secs());
     let _: Result<bool, _> = state
         .sched

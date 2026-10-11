@@ -46,6 +46,8 @@ pub mod codes {
     /// 本进程的后台结算积压超过上界（IMPLEMENTATION §12.2）：数据面在鉴权前拒绝，
     /// 未预扣、未碰上游，客户端稍后重试即可（param = 当前积压笔数）。
     pub const OVERLOADED: &str = "overloaded";
+    /// 登录 key 要核对所属登录会话，但会话存储（Redis）暂不可达：服务端故障，不是凭证无效，稍后重试。
+    pub const AUTH_BACKEND_UNAVAILABLE: &str = "auth_backend_unavailable";
 }
 
 #[derive(Debug, Clone, Serialize)]
