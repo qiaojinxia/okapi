@@ -97,12 +97,22 @@ fn bounds(part: &Partition, keep_from: DateTime<Utc>) -> Option<(DateTime<Utc>, 
 /// Keeps the current month and preceding months-1 whole calendar months.
 pub async fn prune(pg: &PgPool, now: DateTime<Utc>) -> Result<Vec<String>, StoreError> {
     prune_delivery(pg, now).await?;
-    let months = sqlx::query_scalar!(
-        r#"SELECT (value #>> '{}')::bigint AS "v!" FROM settings WHERE key='retention_months'"#
-    )
-    .fetch_optional(pg)
-    .await?
-    .unwrap_or(0);
+    // 原值读出来在代码里解析：SQL 里直接 `::bigint` 时，设置被写成非数字就让每轮清理都报错停摆。
+    // 非法值当作「永久保留」，宁可不删也不误删。
+    let raw: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key='retention_months'")
+            .fetch_optional(pg)
+            .await?;
+    let months = match raw {
+        None => 0,
+        Some(value) => value
+            .as_i64()
+            .filter(|months| (0..=1200).contains(months))
+            .unwrap_or_else(|| {
+                tracing::warn!(%value, "settings.retention_months is not a month count in 0..=1200; keeping all history");
+                0
+            }),
+    };
     if months <= 0 {
         return Ok(Vec::new());
     }

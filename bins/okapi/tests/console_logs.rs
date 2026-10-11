@@ -1018,3 +1018,62 @@ async fn admin_logs_keep_missing_timing_null_and_include_charged_stream_failures
         "current ledger refunds override the immutable delivered status"
     );
 }
+
+/// relay 死信重投不能改写 topic：退款事件仍是 billing.refunded（审计消费者靠它区分退款与消费）。
+/// outbox 原行还在时保留原 topic；原行已被清掉时按 payload 的 log_type（6 = 退款冲销）还原。
+#[tokio::test]
+async fn dlq_requeue_keeps_refund_topics() {
+    let env = setup().await;
+    let mut refund = payload(&env, None);
+    refund["log_type"] = json!(6);
+    let kept = Uuid::new_v4();
+    refund["request_id"] = json!(kept);
+    let event_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO billing_outbox (topic, payload, status, retry_count) VALUES ('billing.refunded', $1, 2, 5) RETURNING event_id",
+    )
+    .bind(&refund)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let mut ids: Vec<i64> = Vec::new();
+    ids.push(
+        sqlx::query_scalar("INSERT INTO billing_dlq (source, payload, error, retry_count, event_key) VALUES ('relay', $1, 'x', 5, $2) RETURNING id")
+            .bind(&refund)
+            .bind(format!("outbox:{event_id}"))
+            .fetch_one(&env.pg)
+            .await
+            .unwrap(),
+    );
+    let orphan = Uuid::new_v4();
+    refund["request_id"] = json!(orphan);
+    ids.push(
+        sqlx::query_scalar("INSERT INTO billing_dlq (source, payload, error, retry_count, event_key) VALUES ('relay', $1, 'x', 5, $2) RETURNING id")
+            .bind(&refund)
+            .bind(format!("outbox:{}", Uuid::new_v4()))
+            .fetch_one(&env.pg)
+            .await
+            .unwrap(),
+    );
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/admin/dlq/requeue", env.addr))
+        .bearer_auth(&env.super_token)
+        .json(&json!({ "ids": ids }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    for request_id in [kept, orphan] {
+        let rows: Vec<(String, i16)> = sqlx::query_as(
+            "SELECT topic, status FROM billing_outbox WHERE payload->>'request_id' = $1",
+        )
+        .bind(request_id.to_string())
+        .fetch_all(&env.pg)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![("billing.refunded".to_owned(), 0)],
+            "{request_id}"
+        );
+    }
+}

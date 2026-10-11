@@ -23,18 +23,49 @@ const BATCH_LIMIT: usize = 500;
 /// 确保 BILLING 流与 chsink 消费者存在（幂等）。
 pub async fn ensure_topology(client: &async_nats::Client) -> anyhow::Result<jetstream::Context> {
     let js = jetstream::new(client.clone());
-    js.get_or_create_stream(jetstream::stream::Config {
+    // 副本数与容量上限可配，且每次启动按配置更新已有的流（以前只在首次创建时生效，
+    // 「生产 R=3」写在注释里永远不会落地）。容量满了丢最旧的：未消费的事件在 PG outbox
+    // 里仍有已发布记录，recover_published 会重新认领，不丢账。
+    let replicas =
+        okapi_store::env_config::number("OKAPI_NATS_REPLICAS", 1, |n| (1..=5).contains(n));
+    let max_bytes =
+        okapi_store::env_config::number("OKAPI_NATS_MAX_BYTES", 4 * 1024 * 1024 * 1024, |n| {
+            *n >= 64 * 1024 * 1024
+        });
+    js.create_or_update_stream(jetstream::stream::Config {
         name: STREAM_NAME.to_owned(),
         subjects: vec!["billing.>".to_owned()],
         retention: jetstream::stream::RetentionPolicy::Limits,
+        discard: jetstream::stream::DiscardPolicy::Old,
         max_age: Duration::from_hours(48),
+        max_bytes,
         storage: jetstream::stream::StorageType::File,
-        num_replicas: 1, // 生产 R=3（docs/database.md §4.1）
+        num_replicas: usize::try_from(replicas).unwrap_or(1),
         ..Default::default()
     })
     .await
     .map_err(|e| anyhow::anyhow!("ensure stream: {e}"))?;
     Ok(js)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Disposition {
+    Published,
+    /// 事件本身无效（毒消息）：进 DLQ 等人工修复。
+    DeadLetter,
+    /// 发布失败（NATS / 网络）：退避后重试，不限次数，不进 DLQ。
+    Retry,
+}
+
+/// 发布结果的处理规则。重试次数不参与判断：网络故障持续多久都不该把好事件打进 DLQ。
+fn disposition(published: bool, valid: bool) -> Disposition {
+    if !valid {
+        Disposition::DeadLetter
+    } else if published {
+        Disposition::Published
+    } else {
+        Disposition::Retry
+    }
 }
 
 /// relay 一批：outbox pending → JetStream 发布（确认后标记 published）。
@@ -98,19 +129,26 @@ pub async fn relay_once(pg: &PgPool, js: &jetstream::Context) -> anyhow::Result<
             tx.commit().await?;
             continue;
         }
-        if ok {
+        let disposition = disposition(ok, valid);
+        if disposition == Disposition::Published {
             sqlx::query!("UPDATE billing_outbox SET status=1,published_at=now(),stats_protocol=1,next_retry_at=NULL WHERE id=$1",row.id).execute(&mut *tx).await?;
-        } else if !valid || row.retry_count >= 4 {
+        } else if disposition == Disposition::DeadLetter {
+            // 只有事件本身无效（毒消息）才进 DLQ。发布失败是 NATS / 网络的问题，不消耗毒消息的
+            // 次数：以前 5 次（约 80 秒）就整批进 DLQ，统计断流到管理员逐批重投；而且进了 DLQ 的行
+            // 连 PG 直投 CH 的兜底路径（deliver_once 只认 status=0）也走不了。
             let key = delivery::outbox_key(row.event_id);
-            let error = if valid {
-                "relay_publish_retries_exhausted"
-            } else {
-                "relay_invalid_event"
-            };
+            let error = "relay_invalid_event";
             sqlx::query!(r#"INSERT INTO billing_dlq(source,payload,error,retry_count,event_key)
                 VALUES('relay',$1,$2,$3,$4) ON CONFLICT(event_key) WHERE event_key IS NOT NULL DO NOTHING"#,row.payload,error,row.retry_count.saturating_add(1),key).execute(&mut *tx).await?;
             sqlx::query!("UPDATE billing_outbox SET status=2,retry_count=retry_count+1,next_retry_at=NULL WHERE id=$1",row.id).execute(&mut *tx).await?;
         } else {
+            // 网络类失败：按退避一直重试（封顶 5 分钟），NATS 恢复后自动补发
+            if row.retry_count == 10 {
+                tracing::warn!(
+                    outbox_id = row.id,
+                    "outbox event still unpublished after repeated NATS failures; retrying with backoff"
+                );
+            }
             sqlx::query!("UPDATE billing_outbox SET retry_count=retry_count+1,next_retry_at=now()+make_interval(secs=>least(300,5*power(2,least(retry_count,6)))) WHERE id=$1",row.id).execute(&mut *tx).await?;
         }
         tx.commit().await?;
@@ -166,14 +204,23 @@ pub async fn chsink_js_once(
     let mut tx = pg.begin().await?;
     let mut events = Vec::with_capacity(messages.len());
     for msg in &messages {
-        let info = msg
-            .info()
-            .map_err(|e| anyhow::anyhow!("JS message identity: {e}"))?;
-        let legacy_key = format!(
-            "js:{}:{}",
-            stream.cached_info().created,
-            info.stream_sequence
-        );
+        // 取不到流序号（回复主题异常）的消息不能让整批报错：那样同一批会被反复投递、
+        // 卡住后面所有消息直到 48h 过期。改用 payload 哈希作兜底键，照常进 DLQ / 入库。
+        let legacy_key = match msg.info() {
+            Ok(info) => format!(
+                "js:{}:{}",
+                stream.cached_info().created,
+                info.stream_sequence
+            ),
+            Err(error) => {
+                use sha2::Digest as _;
+                tracing::warn!(%error, "JS message without stream identity; keyed by payload hash");
+                format!(
+                    "js:unknown:{}",
+                    hex::encode(sha2::Sha256::digest(&msg.payload))
+                )
+            }
+        };
         match parse_event(&msg.payload, &legacy_key) {
             Ok(event) => events.push(event),
             Err(err) => {
@@ -263,6 +310,15 @@ fn parse_event(data: &[u8], legacy_key: &str) -> anyhow::Result<Event> {
 
 #[cfg(test)]
 mod acknowledgement_tests {
+    #[test]
+    fn publish_failures_retry_forever_and_only_poison_dead_letters() {
+        use super::{Disposition, disposition};
+        assert_eq!(disposition(true, true), Disposition::Published);
+        assert_eq!(disposition(false, true), Disposition::Retry);
+        assert_eq!(disposition(false, false), Disposition::DeadLetter);
+        assert_eq!(disposition(true, false), Disposition::DeadLetter);
+    }
+
     #[tokio::test]
     async fn stalled_acknowledgements_have_a_batch_deadline() {
         let started = std::time::Instant::now();

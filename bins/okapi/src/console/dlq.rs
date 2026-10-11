@@ -172,8 +172,11 @@ pub(super) struct Requeued {
 }
 
 pub(super) async fn requeue(pg: &PgPool, ids: &[i64]) -> Result<Requeued, AppError> {
-    let n = sqlx::query!(
-        r#"
+    // 运行期查询：relay 死信重投时保留 outbox 行原有的 topic（退款是 billing.refunded，
+    // 以前一律改写成 billing.completed，审计消费者会把退款当成消费）；outbox 行已不在时
+    // 按 payload 的 log_type 还原（6 = 退款冲销）。
+    let n: (i64, Vec<i64>, Vec<uuid::Uuid>) = sqlx::query_as(
+        r"
         WITH locked_batches AS MATERIALIZED (
             SELECT id FROM billing_ch_batches WHERE status=2 AND id IN (
                 SELECT ch_batch_id FROM billing_dlq WHERE id=ANY($1) AND status=0
@@ -189,29 +192,30 @@ pub(super) async fn requeue(pg: &PgPool, ids: &[i64]) -> Result<Requeued, AppErr
             UPDATE billing_outbox SET status=0,retry_count=0,next_retry_at=NULL
             WHERE ch_batch_id IN (SELECT id FROM restored) RETURNING id
         ), restored_relay AS (
-            UPDATE billing_outbox o SET status=0,retry_count=0,next_retry_at=NULL,topic='billing.completed',payload=m.payload
+            UPDATE billing_outbox o SET status=0,retry_count=0,next_retry_at=NULL,payload=m.payload
             FROM moved m WHERE m.ch_batch_id IS NULL AND m.event_key='outbox:'||o.event_id::text
             RETURNING o.event_id
         ), ins AS (
             INSERT INTO billing_outbox (topic, payload)
-            SELECT 'billing.completed', payload FROM moved m WHERE ch_batch_id IS NULL
+            SELECT CASE WHEN payload->>'log_type' = '6' THEN 'billing.refunded' ELSE 'billing.completed' END, payload
+            FROM moved m WHERE ch_batch_id IS NULL
                 AND NOT EXISTS(SELECT 1 FROM billing_outbox o WHERE m.event_key='outbox:'||o.event_id::text)
             RETURNING 1
         )
-        SELECT COUNT(*)::bigint AS "c!",
-            COALESCE(array_agg(id),'{}'::bigint[]) AS "dlq_ids!",
+        SELECT COUNT(*)::bigint,
+            COALESCE(array_agg(id),'{}'::bigint[]),
             COALESCE(array_agg(DISTINCT ch_batch_id) FILTER (WHERE ch_batch_id IS NOT NULL),
-                     '{}'::uuid[]) AS "batch_ids!" FROM moved
-        "#,
-        ids
+                     '{}'::uuid[]) FROM moved
+        ",
     )
+    .bind(ids)
     .fetch_one(pg)
     .await
     .map_err(okapi_store::StoreError::from)?;
     Ok(Requeued {
-        count: n.c,
-        dlq_ids: n.dlq_ids,
-        batch_ids: n.batch_ids,
+        count: n.0,
+        dlq_ids: n.1,
+        batch_ids: n.2,
     })
 }
 

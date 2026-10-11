@@ -102,12 +102,13 @@ const TOOLS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "search_logs",
-        description: "Search billing records by user_id/model/status, newest first.",
+        description: "Search billing records by user_id/model/status within the last N days, newest first.",
         schema: || {
             json!({"type": "object", "properties": {
                 "user_id": {"type": "integer"},
                 "model": {"type": "string"},
                 "status": {"type": "integer"},
+                "days": {"type": "integer", "minimum": 1, "maximum": 90, "default": 7},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}
             }})
         },
@@ -611,6 +612,17 @@ async fn usage_stats(state: &AppState, args: &Value) -> Result<Value, AppError> 
     Ok(json!({"dimension": dim, "days": days, "data": rows}))
 }
 
+/// search_logs 的一行：request_id, user_id, model, status, amount, error_code, created_at。
+type LogRow = (
+    uuid::Uuid,
+    i64,
+    String,
+    i16,
+    i64,
+    Option<String>,
+    chrono::DateTime<chrono::Utc>,
+);
+
 async fn search_logs(state: &AppState, args: &Value) -> Result<Value, AppError> {
     let limit = args
         .get("limit")
@@ -623,28 +635,44 @@ async fn search_logs(state: &AppState, args: &Value) -> Result<Value, AppError> 
         .get("status")
         .and_then(Value::as_i64)
         .and_then(|v| i16::try_from(v).ok());
-    let rows = sqlx::query!(
-        r#"SELECT request_id, user_id, model_name, status, amount_micro, error_code, created_at
-           FROM billing_records
-           WHERE ($1::bigint IS NULL OR user_id = $1)
-             AND ($2::text IS NULL OR model_name = $2)
-             AND ($3::smallint IS NULL OR status = $3)
-           ORDER BY created_at DESC LIMIT $4"#,
-        user_id,
-        model,
-        status,
-        limit
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
+    let days = args
+        .get("days")
+        .and_then(Value::as_i64)
+        .unwrap_or(7)
+        .clamp(1, 90);
+    // 只拼实际给出的过滤条件，并且总带时间下界：`$1 IS NULL OR user_id = $1` 这种写法在
+    // 第 6 次执行后会换成通用计划、整个弃用索引；没有时间下界则要逐个分区扫全表。
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT request_id, user_id, model_name, status, amount_micro, error_code, created_at \
+         FROM billing_records WHERE created_at >= now() - make_interval(days => ",
+    );
+    query.push_bind(i32::try_from(days).unwrap_or(7)).push(")");
+    if let Some(user_id) = user_id {
+        query.push(" AND user_id = ").push_bind(user_id);
+    }
+    if let Some(model) = model {
+        query.push(" AND model_name = ").push_bind(model);
+    }
+    if let Some(status) = status {
+        query.push(" AND status = ").push_bind(status);
+    }
+    query
+        .push(" ORDER BY created_at DESC LIMIT ")
+        .push_bind(limit);
+    let rows: Vec<LogRow> = query
+        .build_query_as()
+        .fetch_all(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
     let data: Vec<Value> = rows
         .into_iter()
-        .map(|r| {
-            json!({"request_id": r.request_id, "user_id": r.user_id, "model": r.model_name,
-                   "status": r.status, "amount_micro": r.amount_micro,
-                   "error_code": r.error_code, "created_at": r.created_at.to_rfc3339()})
-        })
+        .map(
+            |(request_id, user_id, model, status, amount, error_code, created_at)| {
+                json!({"request_id": request_id, "user_id": user_id, "model": model,
+                   "status": status, "amount_micro": amount,
+                   "error_code": error_code, "created_at": created_at.to_rfc3339()})
+            },
+        )
         .collect();
     Ok(json!({"data": data}))
 }
