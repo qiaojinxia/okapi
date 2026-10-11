@@ -380,6 +380,7 @@ fn ops_routes() -> ConsoleRouter {
         .route("/admin/leaderboard", get(admin::leaderboard))
         .route("/admin/stats/overview", get(stats::overview))
         .route("/admin/stats/channels", get(stats::channels))
+        .route("/admin/stats/channel-usage", get(stats::channel_usage))
         .route("/admin/stats/models", get(stats::models))
         .route("/admin/stats/margin", get(stats::margin))
         .route("/admin/stats/realtime", get(stats::realtime))

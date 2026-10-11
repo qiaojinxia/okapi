@@ -290,6 +290,50 @@ pub async fn create_channel(
 
 /// GET /admin/channels：`?q=`（名称 / 地址）、`provider`、`status` 过滤，`limit/offset` 切片；
 /// 默认每页 20 条；需要全部渠道的调用方按 total 逐页读取。
+/// 订阅 OAuth key（§11.38）的列表附加字段：access token 到期、刷新健康度、能否刷新、
+/// 账号邮箱、订阅档位。只对 credential_kind=1 解密。
+async fn oauth_key_extras(
+    state: &AppState,
+    keys: &[okapi_store::admin::ChannelKeyRow],
+    providers: &std::collections::HashMap<i64, &str>,
+) -> std::collections::HashMap<i64, serde_json::Map<String, Value>> {
+    let mut extras = std::collections::HashMap::new();
+    for k in keys
+        .iter()
+        .filter(|k| k.credential_kind == okapi_store::admin::CREDENTIAL_KIND_OAUTH)
+    {
+        let mut fields = serde_json::Map::new();
+        if let Some(health) = crate::gateway::credentials::health::read(state, k.id).await {
+            fields.insert(
+                "oauth_refresh".into(),
+                serde_json::to_value(health).unwrap_or_default(),
+            );
+        }
+        if let Ok(Some(plain)) =
+            okapi_store::admin::read_key_credential(&state.pg, k.id, state.master_key.as_deref())
+                .await
+            && let Some(cred) = okapi_store::credential::OAuthCredential::parse(&plain)
+        {
+            if cred.expires_at > 0 {
+                fields.insert("credential_expires_at".into(), json!(cred.expires_at));
+            }
+            fields.insert("oauth_refreshable".into(), json!(cred.can_refresh()));
+            if let Some(label) = cred.account_label {
+                fields.insert("account_label".into(), json!(label));
+            }
+            if let Some(provider) = providers.get(&k.channel_id)
+                && let Some(plan) =
+                    crate::gateway::account_control::quota::plan(state, k.id, provider, &plain)
+                        .await
+            {
+                fields.insert("account_plan".into(), json!(plan));
+            }
+        }
+        extras.insert(k.id, fields);
+    }
+    extras
+}
+
 pub async fn list_channels(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -314,32 +358,13 @@ pub async fn list_channels(
     // key 与最近测活结果都只取本页渠道：渠道已切片，附属数据再整表拉就白分页了
     let ids: Vec<i64> = list.page.data.iter().map(|c| c.id).collect();
     let keys = okapi_store::admin::list_channel_keys_for(&state.pg, &ids).await?;
-    // 订阅 OAuth key（§11.38）：把 access token 到期时间解出来给列表看——只对 credential_kind=1 解密
-    let mut oauth_expiry: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    let mut oauth_health = std::collections::HashMap::new();
-    let mut oauth_refreshable = std::collections::HashMap::new();
-    let mut oauth_account = std::collections::HashMap::new();
-    for k in keys
+    let providers: std::collections::HashMap<i64, &str> = list
+        .page
+        .data
         .iter()
-        .filter(|k| k.credential_kind == okapi_store::admin::CREDENTIAL_KIND_OAUTH)
-    {
-        if let Some(health) = crate::gateway::credentials::health::read(&state, k.id).await {
-            oauth_health.insert(k.id, health);
-        }
-        if let Ok(Some(plain)) =
-            okapi_store::admin::read_key_credential(&state.pg, k.id, state.master_key.as_deref())
-                .await
-            && let Some(cred) = okapi_store::credential::OAuthCredential::parse(&plain)
-        {
-            if cred.expires_at > 0 {
-                oauth_expiry.insert(k.id, cred.expires_at);
-            }
-            oauth_refreshable.insert(k.id, cred.can_refresh());
-            if let Some(label) = cred.account_label {
-                oauth_account.insert(k.id, label);
-            }
-        }
-    }
+        .map(|c| (c.id, c.provider.as_str()))
+        .collect();
+    let mut oauth_extras = oauth_key_extras(&state, &keys, &providers).await;
     // 最近测活 / 余额查询结果各一次 MGET 回填（Redis 30 天 TTL；没测过 / 已过期 = null）
     let mut last_tests = state.sched.channel_test_get_many(&ids).await;
     let mut last_balances = state.sched.channel_balance_get_many(&ids).await;
@@ -353,17 +378,10 @@ pub async fn list_channels(
                 .filter(|k| k.channel_id == c.id)
                 .map(|k| {
                     let mut v = serde_json::to_value(k).unwrap_or_default();
-                    if let Some(exp) = oauth_expiry.get(&k.id) {
-                        v["credential_expires_at"] = json!(exp);
-                    }
-                    if let Some(health) = oauth_health.get(&k.id) {
-                        v["oauth_refresh"] = serde_json::to_value(health).unwrap_or_default();
-                    }
-                    if let Some(refreshable) = oauth_refreshable.get(&k.id) {
-                        v["oauth_refreshable"] = json!(refreshable);
-                    }
-                    if let Some(label) = oauth_account.get(&k.id) {
-                        v["account_label"] = json!(label);
+                    if let (Some(extras), Some(obj)) =
+                        (oauth_extras.remove(&k.id), v.as_object_mut())
+                    {
+                        obj.extend(extras);
                     }
                     v
                 })

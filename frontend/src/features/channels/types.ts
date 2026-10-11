@@ -95,6 +95,8 @@ export interface ChannelKeyRow {
   oauth_refreshable?: boolean
   /// 订阅账号邮箱（换码时记录），仅展示
   account_label?: string
+  /// 订阅档位（额度探测时顺带查 profile，每天一次）：pro / max_5x / max_20x / max / team / enterprise
+  account_plan?: string
   oauth_refresh?: {
     last_attempt_at: number | null
     last_success_at: number | null

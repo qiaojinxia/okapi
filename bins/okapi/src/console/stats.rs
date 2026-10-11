@@ -159,6 +159,50 @@ pub async fn channels(
     ))
 }
 
+/// GET /admin/stats/channel-usage：每条渠道窗口内的 token 与金额（渠道列表行内展示）。
+///
+/// 健康榜单（`/admin/stats/channels`）按请求数分页、来自 `mv_channel_5min`，没有输入 token；
+/// 这里一次给全部有流量的渠道，列表按 id 对上即可。`mv_cube_hour` 小时粒度，窗口起点取整到小时。
+pub async fn channel_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<WindowQuery>,
+) -> Result<Json<Value>, AppError> {
+    super::admin::guard(&state, &headers, permissions::BILLING_READ).await?;
+    let ch = ch_or_disabled(&state)?;
+    let days = q.days.unwrap_or(30).clamp(1, 90);
+    let since = chrono::Utc::now().timestamp() - i64::from(days) * 86_400;
+    let rows = ch
+        .query_json_each_row(&format!(
+            "SELECT channel_id, \
+                    countMerge(requests) AS requests, \
+                    sumMerge(prompt_tokens) AS prompt_tokens, \
+                    sumMerge(cached_tokens) AS cached_tokens, \
+                    sumMerge(completion_tokens) AS completion_tokens, \
+                    sumMerge(amount) AS amount_micro, \
+                    sumMerge(upstream_cost) AS upstream_cost_micro \
+             FROM mv_cube_hour WHERE hour >= toStartOfHour(fromUnixTimestamp({since})) \
+             GROUP BY channel_id ORDER BY channel_id LIMIT 10000"
+        ))
+        .await
+        .map_err(AppError::from)?;
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "channel_id": ch_i64(r, "channel_id"),
+                "requests": ch_i64(r, "requests"),
+                "prompt_tokens": ch_i64(r, "prompt_tokens"),
+                "cached_tokens": ch_i64(r, "cached_tokens"),
+                "completion_tokens": ch_i64(r, "completion_tokens"),
+                "amount_micro": ch_i64(r, "amount_micro"),
+                "upstream_cost_micro": ch_i64(r, "upstream_cost_micro"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "days": days, "data": data })))
+}
+
 #[derive(Deserialize)]
 pub struct TimelineQuery {
     /// 回看小时数（1–168，缺省 24）。

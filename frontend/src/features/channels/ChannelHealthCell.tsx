@@ -7,8 +7,9 @@ import { ChannelTimelineDrawer } from '@/features/channels/ChannelTimelineDrawer
 import type { ChannelBalance, ChannelKeyRow, ChannelProbe } from '@/features/channels/types'
 import type { ChannelRow as ChannelStatRow } from '@/features/stats/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
+import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
-import { formatBp, formatCount, formatUpstreamBalance } from '@/lib/money'
+import { formatBp, formatCount, formatMoneyAggregate, formatUpstreamBalance } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
 /// channel_keys.status：1 active / 2 cooling / 3 rate_limited / 4 quota_exhausted / 5 banned / 6 invalid
@@ -200,5 +201,57 @@ export function Health24h({
       </button>
       {open && <ChannelTimelineDrawer channel={channel} open onClose={() => setOpen(false)} />}
     </>
+  )
+}
+
+export interface ChannelUsageRow {
+  channel_id: number
+  requests: number
+  /// 含缓存命中（OpenAI 口径），总量 = prompt + completion
+  prompt_tokens: number
+  cached_tokens: number
+  completion_tokens: number
+  amount_micro: number
+  upstream_cost_micro: number
+}
+
+export const USAGE_DAYS = 30
+
+/// 近 30 天每条渠道的 token 与金额（mv_cube_hour），整表一次查询、按 channel_id 分发。
+export function useChannelUsage() {
+  // 用量走分析库，要 billing.read；没有这项权限的管理员不发这次必 403 的请求，行内也就不显示用量
+  const enabled = usePermission()('billing.read')
+  return useQuery({
+    enabled,
+    queryKey: qk.statsChannelUsage(USAGE_DAYS),
+    queryFn: () => apiFetch<{ data: ChannelUsageRow[] }>(`/admin/stats/channel-usage?days=${USAGE_DAYS}`),
+    retry: false,
+    staleTime: 60_000,
+  })
+}
+
+/// 行内一行：近 30 天 token 总量 · 计费金额；悬停看输入 / 缓存 / 输出与上游成本。
+export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) {
+  const { t, i18n } = useTranslation()
+  if (!usage || usage.requests === 0) return null
+  const lang = i18n.language
+  const total = usage.prompt_tokens + usage.completion_tokens
+  const detail = t('admin:channelUsageDetail', {
+    days: USAGE_DAYS,
+    requests: formatCount(usage.requests, lang),
+    prompt: formatCount(usage.prompt_tokens, lang),
+    cached: formatCount(usage.cached_tokens, lang),
+    completion: formatCount(usage.completion_tokens, lang),
+    amount: formatMoneyAggregate(usage.amount_micro, lang),
+    cost: formatMoneyAggregate(usage.upstream_cost_micro, lang),
+  })
+  return (
+    <span className="whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={detail}>
+      {t('admin:channelUsage', {
+        days: USAGE_DAYS,
+        tokens: new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 }).format(total),
+        amount: formatMoneyAggregate(usage.amount_micro, lang),
+      })}
+    </span>
   )
 }

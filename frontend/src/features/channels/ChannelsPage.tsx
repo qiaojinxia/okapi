@@ -23,11 +23,13 @@ import { Button } from '@/components/ui/button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
 import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
 import {
+  ChannelUsage,
   Health24h,
   KeyStateSummary,
   LastBalance,
   LastProbe,
   useChannelHealth24h,
+  useChannelUsage,
 } from '@/features/channels/ChannelHealthCell'
 import { RouteDiagnosisDrawer } from '@/features/channels/RouteDiagnosis'
 import { BatchEgressDrawer } from '@/features/channels/ChannelEgress'
@@ -106,6 +108,7 @@ export function ChannelsPage() {
 
   // 近 24h 健康：一次整表查询按 channel_id 分发到各行（CH 未启用则各行显示 —）
   const health = useChannelHealth24h()
+  const usage = useChannelUsage()
   // 过滤与切片都在服务端：几百条渠道每条带 keys / pools，整表拉回来再筛既慢又占内存。
   // 列表接口不传 limit 才回全量——那是给"测活全部"和模型页的渠道计数用的。
   const channels = useQuery({
@@ -495,6 +498,7 @@ export function ChannelsPage() {
                       stat={health.data?.data.find((s) => s.channel_id === c.id)}
                       channel={{ id: c.id, name: c.name, provider: c.provider }}
                     />
+                    <ChannelUsage usage={usage.data?.data.find((u) => u.channel_id === c.id)} />
                     <LastBalance balance={c.last_balance} />
                   </div>
                 </Td>
@@ -605,15 +609,35 @@ export function ChannelsPage() {
 }
 
 /// 订阅渠道绑定的账号（邮箱）：多把 key 时显示首个并标出其余数量，悬停看全部。
-function ChannelAccounts({ keys }: { keys?: { account_label?: string }[] }) {
+function ChannelAccounts({ keys }: { keys?: { account_label?: string; account_plan?: string }[] }) {
   const { t } = useTranslation()
   const labels = [...new Set((keys ?? []).map((k) => k.account_label).filter((v): v is string => Boolean(v)))]
-  if (labels.length === 0) return null
+  // 档位按 key 去重；多把 key 档位不同时都列出（Pro + Max 20x）
+  const plans = [...new Set((keys ?? []).map((k) => k.account_plan).filter((v): v is string => Boolean(v)))]
+  if (labels.length === 0 && plans.length === 0) return null
   return (
     <span className="flex max-w-40 min-[1400px]:max-w-48 items-center gap-1 text-xs text-muted-foreground" title={labels.join('\n')}>
       <UserRound aria-label={t('admin:channelAccount')} className="h-3 w-3 shrink-0" />
-      <span className="truncate">{labels[0]}</span>
+      {plans.map((plan) => (
+        <Badge key={plan} variant="outline" className="shrink-0 px-1 py-0 text-[10px] leading-4" title={t('admin:channelPlanHint')}>
+          {planLabel(plan)}
+        </Badge>
+      ))}
+      {labels.length > 0 && <span className="truncate">{labels[0]}</span>}
       {labels.length > 1 && <span className="shrink-0">+{labels.length - 1}</span>}
     </span>
   )
+}
+
+const PLAN_LABELS: Record<string, string> = {
+  pro: 'Pro',
+  max: 'Max',
+  max_5x: 'Max 5x',
+  max_20x: 'Max 20x',
+  team: 'Team',
+  enterprise: 'Enterprise',
+}
+
+function planLabel(plan: string): string {
+  return PLAN_LABELS[plan] ?? plan
 }

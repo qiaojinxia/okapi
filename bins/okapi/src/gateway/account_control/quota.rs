@@ -184,6 +184,16 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
         .await
     {
         Ok(snapshot) => {
+            refresh_plan(
+                state,
+                row.id,
+                hook,
+                &credential,
+                &row.provider,
+                &base,
+                &outbound,
+            )
+            .await;
             let observation = Observation {
                 identity: identity(&row.provider, &credential),
                 snapshot,
@@ -212,6 +222,101 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
         }
         Err(error) => back_off(state, row.id, &error).await,
     }
+}
+
+/// 订阅档位很少变：额度探测成功后顺带查，每把 key 每天最多一次（失败或中途退出一小时后再试）。
+const PLAN_POLL_SECS: i64 = 86_400;
+const PLAN_RETRY_SECS: i64 = 3_600;
+/// 观测保留两个周期，一次失败不会让列表上的档位消失。
+const PLAN_MAX_AGE_SECS: i64 = 2 * PLAN_POLL_SECS;
+
+#[derive(Deserialize, Serialize)]
+struct PlanObservation {
+    identity: String,
+    plan: String,
+}
+
+async fn refresh_plan(
+    state: &AppState,
+    key: i64,
+    hook: &dyn okapi_providers::account::AccountHooks,
+    credential: &ResolvedCredential<'_>,
+    provider: &str,
+    base: &str,
+    outbound: &okapi_providers::Outbound,
+) {
+    let lease: Result<Option<String>, _> = state
+        .sched
+        .client()
+        .set(
+            format!("plan:poll:ck:{key}"),
+            "1",
+            // 先占短租约：探测到一半进程退出，最多一小时后就会再试，不会整天没有档位
+            Some(Expiration::EX(PLAN_RETRY_SECS)),
+            Some(SetOptions::NX),
+            false,
+        )
+        .await;
+    if !matches!(lease, Ok(Some(_))) {
+        return;
+    }
+    let result = hook
+        .plan(okapi_providers::account::QuotaContext {
+            http: state.upstream.http(),
+            api_base: base,
+            access_token: credential.material(),
+            account_id: credential
+                .oauth()
+                .and_then(|oauth| oauth.account_id.as_deref()),
+            outbound,
+        })
+        .await;
+    let plan = match result {
+        Ok(plan) => {
+            // 有应答（认得出或认不出档位）才把租约延到一天；失败就留着短租约，一小时后重试
+            let _: Result<bool, _> = state
+                .sched
+                .client()
+                .expire(format!("plan:poll:ck:{key}"), PLAN_POLL_SECS, None)
+                .await;
+            let Some(plan) = plan else { return };
+            plan
+        }
+        Err(error) => {
+            tracing::debug!(key, %error, "subscription plan probe failed");
+            return;
+        }
+    };
+    let observation = PlanObservation {
+        identity: identity(provider, credential),
+        plan,
+    };
+    if let Ok(payload) = serde_json::to_string(&observation) {
+        let _: Result<(), _> = state
+            .sched
+            .client()
+            .set(
+                format!("plan:ck:{key}"),
+                payload,
+                Some(Expiration::EX(PLAN_MAX_AGE_SECS)),
+                None,
+                false,
+            )
+            .await;
+    }
+}
+
+/// 列表展示用：最近一次查到的档位；换了账号（凭证身份不符）就不显示旧档位。
+pub async fn plan(state: &AppState, key: i64, provider: &str, plaintext: &str) -> Option<String> {
+    let payload: Option<String> = state
+        .sched
+        .client()
+        .get(format!("plan:ck:{key}"))
+        .await
+        .ok()?;
+    let observation: PlanObservation = serde_json::from_str(payload.as_deref()?).ok()?;
+    let credential = stored_credential(provider, plaintext).ok()?;
+    (identity(provider, &credential) == observation.identity).then_some(observation.plan)
 }
 
 /// Probe failure is not inference failure; keep status intact and back off polling.

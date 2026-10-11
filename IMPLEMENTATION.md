@@ -2402,6 +2402,13 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   `<system-reminder>` 块，ToolSearch 时才带 `advanced-tool-use`）。迁移 `0036_claude_code_profile_latest`
   把 `mimic_cc: true` 改写成 `mode: mimic` 的显式配置、已存的 2.1.258/2.1.286 改成 2.1.290；反序列化也把旧版本号
   当 2.1.290 读，控制台拒绝再写 `mimic_cc`。已知差异：请求体字段按字母序（官方 CLI 按插入序），上游接受。
+- **【2026-10-10】渠道列表显示订阅档位与近 30 天用量**：`AccountHooks::plan` 用
+  `GET /api/oauth/profile`（与额度探测同一个探针 client、同一个 Bearer token）读
+  `organization.organization_type` + `rate_limit_tier` → `pro` / `max_5x` / `max_20x` / `max` / `team` / `enterprise`。
+  挂在额度探测成功之后，同出口同 token，每把 key 每天最多一次（`plan:poll:ck:*`，失败 1h 后重试），
+  结果连凭证身份存 `plan:ck:*`（48h）；换了账号身份不符就不显示。列表 key 带 `account_plan`。
+  `GET /admin/stats/channel-usage?days=30`（`mv_cube_hour` 按渠道汇总请求、输入/缓存/输出 token、计费与上游成本），
+  列表「测试 / 近 24h」列下多一行「近 30 天 N tokens · $X」，悬停看明细。
 
 **验收**：`gateway_oauth_channels.rs`——mock 授权服务器 + 上游：anthropic_max 换码后建渠道，请求打到
 `/v1/messages?beta=true`、带 Bearer / 三个必备 beta / 系统提示首句 / 客户端 `user-agent` 与 `x-app` 原样透传，

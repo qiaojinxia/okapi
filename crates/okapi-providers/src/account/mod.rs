@@ -124,4 +124,13 @@ pub trait AccountHooks: std::fmt::Debug + Send + Sync {
     ) -> BoxFuture<'a, Result<Tokens, UpstreamError>> {
         Box::pin(async { Err(UpstreamError::Build("oauth_credential_expected".into())) })
     }
+
+    /// 订阅档位（如 `pro` / `max_5x` / `max_20x`），只供控制台展示；`None` = 不支持或认不出。
+    /// 与额度探测共用凭证、出口与上游地址。
+    fn plan<'a>(
+        &'a self,
+        _context: QuotaContext<'a>,
+    ) -> BoxFuture<'a, Result<Option<String>, UpstreamError>> {
+        Box::pin(async { Ok(None) })
+    }
 }

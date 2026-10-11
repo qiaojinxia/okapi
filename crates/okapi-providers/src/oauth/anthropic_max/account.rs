@@ -106,6 +106,22 @@ impl AccountHooks for ClaudeAccount {
         })
     }
 
+    fn plan<'a>(
+        &'a self,
+        context: QuotaContext<'a>,
+    ) -> BoxFuture<'a, Result<Option<String>, UpstreamError>> {
+        Box::pin(async move {
+            let user_agent = crate::profiles::ClaudeCodeRevision::default().account_user_agent();
+            let data = quota::fetch(
+                &context,
+                "/api/oauth/profile",
+                &[("user-agent", user_agent.as_str())],
+            )
+            .await?;
+            Ok(plan_from_profile(&data))
+        })
+    }
+
     fn refresh<'a>(
         &'a self,
         context: RefreshContext<'a>,
@@ -116,5 +132,59 @@ impl AccountHooks for ClaudeAccount {
             context.refresh_token,
             context.proxy_url,
         ))
+    }
+}
+
+/// `/api/oauth/profile` → 档位。CLI 把 `organization_type` 映射成 pro / max / team / enterprise，
+/// Max 的 5x / 20x 只体现在 `rate_limit_tier`（`default_claude_max_5x` / `default_claude_max_20x`）。
+#[must_use]
+pub fn plan_from_profile(profile: &Value) -> Option<String> {
+    let organization = profile.get("organization")?;
+    let kind = organization.get("organization_type")?.as_str()?;
+    let tier = organization
+        .get("rate_limit_tier")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let plan = match kind {
+        "claude_pro" => "pro",
+        "claude_max" if tier.ends_with("_20x") => "max_20x",
+        "claude_max" if tier.ends_with("_5x") => "max_5x",
+        "claude_max" => "max",
+        "claude_team" => "team",
+        "claude_enterprise" => "enterprise",
+        _ => return None,
+    };
+    Some(plan.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_from_profile;
+    use serde_json::json;
+
+    #[test]
+    fn plan_follows_organization_type_and_rate_limit_tier() {
+        let plan = |kind: &str, tier: &str| {
+            plan_from_profile(
+                &json!({"organization":{"organization_type":kind,"rate_limit_tier":tier}}),
+            )
+        };
+        // Pro 取自真实账号的 profile 响应；Max 两档的 tier 串取自 2.1.296 CLI 源码
+        assert_eq!(
+            plan("claude_pro", "default_claude_ai").as_deref(),
+            Some("pro")
+        );
+        assert_eq!(
+            plan("claude_max", "default_claude_max_5x").as_deref(),
+            Some("max_5x")
+        );
+        assert_eq!(
+            plan("claude_max", "default_claude_max_20x").as_deref(),
+            Some("max_20x")
+        );
+        assert_eq!(plan("claude_max", "").as_deref(), Some("max"));
+        assert_eq!(plan("claude_team", "x").as_deref(), Some("team"));
+        assert_eq!(plan("api", "x"), None);
+        assert_eq!(plan_from_profile(&json!({})), None);
     }
 }

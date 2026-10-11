@@ -64,6 +64,7 @@ export const qk = {
   teamUsage: (id: number) => ['team', 'usage', id] as const,
   // 首页摘要、质量分页和渠道列表必须区分页宽与偏移，避免复用另一页的数据。
   statsChannels: (days: number, limit = 20, offset = 0) => ['admin', 'stats', 'channels', days, limit, offset] as const,
+  statsChannelUsage: (days: number) => ['admin', 'stats', 'channel-usage', days] as const,
   statsModels: (days: number, limit = 20, offset = 0) => ['admin', 'stats', 'models', days, limit, offset] as const,
   statsMargin: (days: number) => ['admin', 'stats', 'margin', days] as const,
   statsRealtime: ['admin', 'stats', 'realtime'] as const,

@@ -26,6 +26,7 @@ struct Mock {
     inference: Arc<AtomicUsize>,
     quota: Arc<AtomicUsize>,
     refresh: Arc<AtomicUsize>,
+    profile: Arc<AtomicUsize>,
 }
 async fn inference(State(mock): State<Mock>) -> Json<Value> {
     mock.inference.fetch_add(1, Ordering::SeqCst);
@@ -48,6 +49,13 @@ async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
     };
     Json(
         json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
+    )
+}
+async fn profile(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
+    mock.profile.fetch_add(1, Ordering::SeqCst);
+    assert!(headers.contains_key("authorization"));
+    Json(
+        json!({"account":{"uuid":"a","email":"x@example.com","has_claude_max":true},"organization":{"uuid":"o","organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}),
     )
 }
 async fn count_tokens(State(mock): State<Mock>) -> Json<Value> {
@@ -96,6 +104,7 @@ async fn setup(provider: &str, settings: Value) -> Env {
         .route("/messages/count_tokens", post(count_tokens))
         .route("/v1/responses/input_tokens", post(count_tokens))
         .route("/api/oauth/usage", get(quota))
+        .route("/api/oauth/profile", get(profile))
         .route("/backend-api/wham/usage", get(quota))
         .route("/api/codex/usage", get(quota))
         .route("/token", post(refresh))
@@ -486,6 +495,53 @@ async fn configured_cooldown_threshold_and_retry_after_take_effect() {
         let remaining:i64=sqlx::query_scalar("SELECT floor(extract(epoch FROM cooldown_until-now()))::bigint FROM channel_keys WHERE id=$1").bind(env.key).fetch_one(&env.state.pg).await.unwrap();
         assert!((expected - 2..=expected).contains(&remaining));
     }
+}
+
+#[tokio::test]
+async fn subscription_plan_rides_the_quota_probe_once_a_day_and_never_follows_a_new_account() {
+    use fred::interfaces::KeysInterface;
+    let env = setup(
+        "anthropic_max",
+        json!({"account_control":{"quota_aware":true,"refresh_mode":"external"}}),
+    )
+    .await;
+    let row = okapi_store::oauth_credentials::target(&env.state.pg, env.channel, env.key)
+        .await
+        .unwrap()
+        .unwrap();
+    let plaintext = okapi_store::credential::open(None, &row.credential_ciphertext).unwrap();
+    account_control::quota::poll(&env.state, &row, &plaintext).await;
+    assert_eq!(env.mock.profile.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        account_control::quota::plan(&env.state, env.key, "anthropic_max", &plaintext)
+            .await
+            .as_deref(),
+        Some("max_20x")
+    );
+    // 额度探测照常每 5 分钟一次，profile 不跟着查
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let _: i64 = redis
+        .del(format!("quota:poll:ck:{}", env.key))
+        .await
+        .unwrap();
+    account_control::quota::poll(&env.state, &row, &plaintext).await;
+    assert_eq!(env.mock.quota.load(Ordering::SeqCst), 2);
+    assert_eq!(env.mock.profile.load(Ordering::SeqCst), 1);
+    let mut credential = OAuthCredential::parse(&plaintext).unwrap();
+    credential.account_id = Some("another-account".into());
+    assert!(
+        account_control::quota::plan(
+            &env.state,
+            env.key,
+            "anthropic_max",
+            &credential.to_plaintext()
+        )
+        .await
+        .is_none(),
+        "换了账号不显示旧档位"
+    );
 }
 
 #[tokio::test]
