@@ -187,8 +187,3 @@ async fn ttl_counts_remain_queryable_after_raw_expiry() {
 async fn ttl_zero_unknown_refund_and_scope_survive_raw_expiry() {
     isolated(true, false).await;
 }
-
-#[tokio::test]
-async fn ttl_upgrade_recovers_raw_and_keeps_old_modality_history_when_unrecoverable() {
-    isolated(true, true).await;
-}

@@ -105,13 +105,11 @@ pub fn source_with_coverage(
 ) -> String {
     let predicate = format!("{window}{scope}");
     let detail_keys = format!("{KEYS}, {DIMS}");
-    let parent_cache =
-        super::cache_usage::prepared(KEYS, "mv_cube_hour", &predicate, coverage.legacy.cache);
+    let parent_cache = super::cache_usage::source(KEYS, &predicate);
     let detail_from = joined_measurements(
         "mv_analysis_hour",
         &detail_keys,
         &predicate,
-        coverage.detail,
         coverage.historical_units,
         Some(&parent_cache),
     );
@@ -119,7 +117,6 @@ pub fn source_with_coverage(
         "mv_cube_hour",
         KEYS,
         &predicate,
-        coverage.legacy,
         coverage.historical_units,
         None,
     );
@@ -186,61 +183,36 @@ fn joined_measurements(
     table: &str,
     keys: &str,
     predicate: &str,
-    modes: super::measurement_coverage::Modes,
     historical: bool,
     parent_cache: Option<&str>,
 ) -> String {
     let sources = [
         (
             "td",
-            super::token_details::prepared(
-                keys,
-                table,
-                predicate,
-                modes.details,
-                modes.units,
-                modes.ttl,
-                historical,
-            ),
+            super::token_details::prepared(keys, table, predicate, historical),
         ),
-        (
-            "us",
-            super::usage_sources::prepared(keys, table, predicate, modes.usage),
-        ),
+        ("us", super::usage_sources::source(keys, predicate)),
         (
             "lf",
-            super::performance_source::prepared(
+            super::performance_source::source(
                 super::performance_source::Kind::Latency,
                 keys,
-                table,
                 predicate,
-                modes.latency,
             ),
         ),
         (
             "rf",
-            super::output_rate::prepared_with_calibration(
-                keys,
-                table,
-                predicate,
-                modes.output_rate,
-                historical,
-            ),
+            super::output_rate::prepared_with_calibration(keys, table, predicate, historical),
         ),
         (
             "tf",
-            super::performance_source::prepared(
+            super::performance_source::source(
                 super::performance_source::Kind::Ttft,
                 keys,
-                table,
                 predicate,
-                modes.ttft,
             ),
         ),
-        (
-            "cs",
-            super::cache_usage::prepared(keys, table, predicate, modes.cache),
-        ),
+        ("cs", super::cache_usage::source(keys, predicate)),
     ];
     // Each source has at most one row per grain. Use the primary key directly,
     // instead of recursively merging the same keys through a chain of USING.
@@ -402,7 +374,7 @@ fn unit_remainder(name: &str, difference: &str, historical: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::console::measurement_coverage::{Coverage, Mode, Modes};
+    use crate::console::measurement_coverage::Coverage;
 
     fn balanced(sql: &str) -> bool {
         let mut depth = 0_i64;
@@ -427,26 +399,10 @@ mod tests {
 
     #[test]
     fn structural_sources_are_table_functions_not_cte_or_inline_subqueries() {
-        let aggregate = Modes {
-            ttft: Mode::Aggregate,
-            latency: Mode::Aggregate,
-            usage: Mode::Aggregate,
-            details: Mode::Aggregate,
-            ttl: Mode::Aggregate,
-            cache: Mode::Aggregate,
-            units: Mode::Aggregate,
-            output_rate: Mode::Aggregate,
-        };
         for coverage in [
             Coverage::default(),
             Coverage {
-                detail: aggregate,
-                legacy: aggregate,
-                historical_units: false,
-            },
-            Coverage {
                 historical_units: true,
-                ..Coverage::default()
             },
         ] {
             let sql = source_with_coverage(

@@ -94,62 +94,22 @@ fn merged_sql() -> String {
         .join(", ")
 }
 
-/// All arguments are validated/internal SQL. Recover only missing grains in this scope.
-pub(super) fn source(keys: &str, table: &str, predicate: &str) -> String {
-    prepared(
-        keys,
-        table,
-        predicate,
-        super::measurement_coverage::Mode::Recover,
-    )
-}
-
-pub(super) fn prepared(
-    keys: &str,
-    table: &str,
-    predicate: &str,
-    mode: super::measurement_coverage::Mode,
-) -> String {
+/// Token 来源（上游 / 估算 / 本地覆盖）读预聚合 `mv_usage_sources_5min`。
+/// 所有参数都是校验过的内部 SQL。
+pub(super) fn source(keys: &str, predicate: &str) -> String {
     let keys = if keys.is_empty() {
         "source_scope"
     } else {
         keys
     };
-    let time = super::observation_sources::Grain::for_table(table).time_sql();
-    let aggregate = merged_sql();
-    let raw = raw_sql();
-    if mode != super::measurement_coverage::Mode::Recover {
-        let expected = format!(
-            "WITH {time}, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}"
-        );
-        let counts = format!(
-            "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM mv_usage_sources_5min WHERE {predicate} GROUP BY {keys}"
-        );
-        let aggregate = format!(
-            "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {aggregate} FROM mv_usage_sources_5min WHERE {predicate}"
-        );
-        let raw = format!(
-            "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {raw} FROM request_log_calls WHERE {predicate}"
-        );
-        return super::measurement_coverage::fast_source(
-            mode, keys, &expected, &counts, &aggregate, &raw,
-        );
-    }
-    let selected_keys = keys
-        .split(", ")
-        .map(|key| format!("e.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let selected = FIELDS.map(|field| format!("toInt64(if(use_aggregate, ifNull(a.{field}, 0), if(ifNull(r.source_observed, 0) <= e.expected, ifNull(r.{field}, 0), 0))) AS {field}")).join(", ");
+    let aggregate = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {} FROM mv_usage_sources_5min WHERE {predicate}",
+        merged_sql()
+    );
+    // 预聚合按构造完整：该粒度应有的请求数就是观测到的数（`with_provenance` 据此判断能否做字符校正）
     format!(
-        "(WITH \
-        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, {time}, toUInt8(1) AS source_scope FROM {table} WHERE {predicate}) WHERE {predicate} GROUP BY {keys}), \
-        a AS (SELECT {keys}, {aggregate} FROM (SELECT *, toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope FROM mv_usage_sources_5min) WHERE {predicate} GROUP BY {keys}), \
-        missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.source_observed, 0)), \
-        r AS (SELECT {keys}, {raw} FROM (SELECT *, toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope FROM request_log_calls) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
-        SELECT {selected_keys}, {selected}, e.expected AS source_expected, \
-        (ifNull(a.source_observed, 0) <= e.expected AND ifNull(a.source_observed, 0) >= if(ifNull(r.source_observed, 0) <= e.expected, ifNull(r.source_observed, 0), 0)) AS use_aggregate \
-        FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"
+        "(SELECT *, toInt64(source_observed) AS source_expected FROM {})",
+        super::measurement_coverage::aggregate_source(keys, &aggregate)
     )
 }
 

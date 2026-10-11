@@ -1,5 +1,4 @@
 //! Retained detail observations; raw and aggregates overlap and are selected per grain.
-use super::measurement_coverage::Mode;
 use super::stats::{ch_i64, scaled_ratio};
 use crate::gateway::error::AppError;
 use okapi_store::ChClient;
@@ -69,54 +68,28 @@ fn merged_sql(fields: &[&str]) -> String {
 }
 
 pub(super) fn source(keys: &str, table: &str, predicate: &str) -> String {
-    prepared(
-        keys,
-        table,
-        predicate,
-        Mode::Recover,
-        Mode::Recover,
-        Mode::Recover,
-        true,
-    )
+    prepared(keys, table, predicate, true)
 }
 
 /// Keys, table and predicate are validated/internal SQL; user strings stay bound.
-pub(super) fn prepared(
-    keys: &str,
-    table: &str,
-    predicate: &str,
-    mode: Mode,
-    units_mode: Mode,
-    ttl_mode: Mode,
-    historical: bool,
-) -> String {
+pub(super) fn prepared(keys: &str, table: &str, predicate: &str, historical: bool) -> String {
     let details = observation_source(
         keys,
-        table,
         predicate,
-        mode,
         &Observation {
             table: "mv_token_details_5min",
-            count: "detail_observed",
             fields: &FIELDS[..DETAIL_FIELD_COUNT],
-            raw: super::usage_observations::ch_detail_sql(),
         },
     );
     let ttl = observation_source(
         keys,
-        table,
         predicate,
-        ttl_mode,
         &Observation {
             table: "mv_cache_ttl_5min",
-            count: "ttl_observed",
             fields: &TTL_FIELDS,
-            raw: super::usage_observations::ch_ttl_sql(),
         },
     );
-    let units = super::input_units::prepared_with_calibration(
-        keys, table, predicate, units_mode, historical,
-    );
+    let units = super::input_units::prepared_with_calibration(keys, table, predicate, historical);
     let keys = if keys.is_empty() {
         "source_scope"
     } else {
@@ -147,69 +120,26 @@ pub(super) fn prepared(
 
 struct Observation<'a> {
     table: &'static str,
-    count: &'static str,
     fields: &'a [&'a str],
-    raw: String,
 }
 
-fn observation_source(
-    keys: &str,
-    table: &str,
-    predicate: &str,
-    mode: Mode,
-    observation: &Observation<'_>,
-) -> String {
+fn observation_source(keys: &str, predicate: &str, observation: &Observation<'_>) -> String {
     let observed_table = observation.table;
-    let observed_count = observation.count;
-
     let keys = if keys.is_empty() {
         "source_scope"
     } else {
         keys
     };
-    let time = super::observation_sources::Grain::for_table(table).time_sql();
-    let aggregate = merged_sql(observation.fields);
-    let raw = format!("count() AS {observed_count}, {}", observation.raw);
-    if mode != Mode::Recover {
-        let expected = format!(
-            "WITH {time}, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}"
-        );
-        let counts = format!(
-            "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM {observed_table} WHERE {predicate} GROUP BY {keys}"
-        );
-        let aggregate = format!(
-            "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {aggregate} FROM {observed_table} WHERE {predicate}"
-        );
-        let raw = format!(
-            "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {raw} FROM request_log_calls WHERE {predicate}"
-        );
-        return super::measurement_coverage::fast_source(
-            mode, keys, &expected, &counts, &aggregate, &raw,
-        );
-    }
-    let selected_keys = keys
-        .split(", ")
-        .map(|key| format!("e.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let selected = observation.fields.iter().map(|field| format!(
-        "toInt64(if(use_aggregate, ifNull(a.{field}, 0), if(ifNull(r.{observed_count}, 0) <= e.expected, ifNull(r.{field}, 0), 0))) AS {field}"
-    )).collect::<Vec<_>>().join(", ");
-    format!(
-        "(WITH \
-        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, {time}, toUInt8(1) AS source_scope FROM {table} WHERE {predicate}) WHERE {predicate} GROUP BY {keys}), \
-        a AS (SELECT {keys}, {aggregate} FROM (SELECT *, toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope FROM {observed_table}) WHERE {predicate} GROUP BY {keys}), \
-        missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.{observed_count}, 0)), \
-        r AS (SELECT {keys}, {raw} FROM (SELECT *, toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope FROM request_log_calls) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
-        SELECT {selected_keys}, {selected}, \
-        (ifNull(a.{observed_count}, 0) <= e.expected AND ifNull(a.{observed_count}, 0) >= if(ifNull(r.{observed_count}, 0) <= e.expected, ifNull(r.{observed_count}, 0), 0)) AS use_aggregate \
-        FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"
-    )
+    let aggregate = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {} FROM {observed_table} WHERE {predicate}",
+        merged_sql(observation.fields)
+    );
+    super::measurement_coverage::aggregate_source(keys, &aggregate)
 }
 
 /// Combine two independent aggregate families without another HTTP round trip.
 pub(super) fn with_provenance(keys: &str, table: &str, predicate: &str) -> String {
-    let provenance = super::usage_sources::source(keys, table, predicate);
+    let provenance = super::usage_sources::source(keys, predicate);
     let details = source(keys, table, predicate);
     let keys = if keys.is_empty() {
         "source_scope"

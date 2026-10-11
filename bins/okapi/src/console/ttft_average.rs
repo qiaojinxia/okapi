@@ -5,13 +5,8 @@ use serde_json::{Map, Value, json};
 
 pub(super) const VALID: &str = "stream = 1 AND ifNull(ttft_reported, toUInt8(ttft_ms > 0)) = 1";
 
-pub(super) fn source(keys: &str, expected_table: &str, predicate: &str) -> String {
-    super::performance_source::source(
-        super::performance_source::Kind::Ttft,
-        keys,
-        expected_table,
-        predicate,
-    )
+pub(super) fn source(keys: &str, predicate: &str) -> String {
+    super::performance_source::source(super::performance_source::Kind::Ttft, keys, predicate)
 }
 
 pub(super) fn metrics(sum: i64, samples: i64, requests: i64, observed: i64) -> Map<String, Value> {

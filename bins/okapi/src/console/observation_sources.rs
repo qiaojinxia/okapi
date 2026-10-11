@@ -16,7 +16,6 @@ pub(super) enum Kind {
 pub(super) struct Source {
     pub kind: Kind,
     pub name: &'static str,
-    pub table: &'static str,
     pub alias: &'static str,
     pub fields: &'static [&'static str],
 }
@@ -25,14 +24,12 @@ pub(super) const SOURCES: &[Source] = &[
     Source {
         kind: Kind::Ttft,
         name: "ttft",
-        table: "mv_ttft_reporting_hour",
         alias: "tf",
         fields: &["ttft_sum", "ttft_samples", "ttft_observed"],
     },
     Source {
         kind: Kind::Latency,
         name: "latency",
-        table: "mv_latency_reporting_hour",
         alias: "lf",
         fields: &[
             "latency_sum",
@@ -44,42 +41,36 @@ pub(super) const SOURCES: &[Source] = &[
     Source {
         kind: Kind::Usage,
         name: "usage",
-        table: "mv_usage_sources_5min",
         alias: "us",
         fields: &super::usage_sources::FIELDS,
     },
     Source {
         kind: Kind::Ttl,
         name: "ttl",
-        table: "mv_cache_ttl_5min",
         alias: "td",
         fields: &super::token_details::TTL_FIELDS,
     },
     Source {
         kind: Kind::Details,
         name: "details",
-        table: "mv_token_details_5min",
         alias: "td",
         fields: &DETAILS,
     },
     Source {
         kind: Kind::Cache,
         name: "cache",
-        table: "mv_cache_totals_5min",
         alias: "cs",
         fields: &super::cache_usage::FIELDS,
     },
     Source {
         kind: Kind::Units,
         name: "units",
-        table: "mv_input_units_5min",
         alias: "td",
         fields: &super::input_units::FIELDS,
     },
     Source {
         kind: Kind::OutputRate,
         name: "output_rate",
-        table: "mv_output_rate_5min",
         alias: "rf",
         fields: &super::output_rate::FIELDS,
     },

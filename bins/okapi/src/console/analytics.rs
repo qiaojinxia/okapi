@@ -169,36 +169,16 @@ impl CubeQuery {
         });
         self.window_meta["previous_start_date"] = json!(self.previous_start);
         self.window_meta["previous_end_date"] = json!((w.start - Days::new(1)).to_string());
-        // A missing current-period aggregate must not expand historical recovery
-        // for a complete previous period (including an empty previous period).
+        // 当期与上期各自判断有没有历史字符口径（老语音计费数据要做 prompt_tokens 校正）。
         let primary = self.primary_scope();
         let params = primary.borrow();
         let predicate = format!("{}{}", self.window(false), primary.clause);
-        self.coverage = if self.core_candidate() {
-            // 精简查询只需要知道有没有历史字符口径；其余测量口径的覆盖探测只服务完整源。
-            let core =
-                super::measurement_coverage::Coverage::read_historical(state, &predicate, &params)
-                    .await?;
-            if core.historical_units {
-                // 有历史字符口径时 prompt_tokens 要校正，必须回退完整源，需要完整覆盖探测。
-                super::measurement_coverage::Coverage::read(state, &predicate, &params, self.cached)
-                    .await?
-            } else {
-                core
-            }
-        } else {
-            super::measurement_coverage::Coverage::read(state, &predicate, &params, self.cached)
-                .await?
-        };
+        self.coverage =
+            super::measurement_coverage::Coverage::read(state, &predicate, &params).await?;
         if self.compares() {
             let predicate = format!("{}{}", self.window(true), primary.clause);
-            self.previous_coverage = super::measurement_coverage::Coverage::read(
-                state,
-                &predicate,
-                &params,
-                self.cached,
-            )
-            .await?;
+            self.previous_coverage =
+                super::measurement_coverage::Coverage::read(state, &predicate, &params).await?;
         }
         Ok(())
     }
@@ -215,17 +195,6 @@ impl CubeQuery {
     /// 精简查询（`fields=core`）从不查上一窗口：它既不带环比，也没有测量口径可对比。
     fn compares(&self) -> bool {
         self.compare.unwrap_or(true) && trimmed(self.fields.as_deref()) != Some("core")
-    }
-
-    /// 精简查询的静态条件：与 `core_source_ok` 的区别只在"窗口里有没有历史字符口径"——
-    /// 那要读一次探测才知道，所以 `prepare` 先按这里的条件决定读哪种覆盖探测。
-    fn core_candidate(&self) -> bool {
-        let by = self.by.as_deref().unwrap_or("model");
-        self.core_requested().unwrap_or(false)
-            && !self.has_detail_filter()
-            && self.model_column().is_ok_and(|column| column == "model")
-            && matches!(self.stack_column(), Ok(None))
-            && breakdown_key(by).is_ok_and(primary_key_column)
     }
 
     /// 精简源只含主键维度的核心列。没有明细过滤、拆分维度属于主键、没有历史字符口径
@@ -383,190 +352,6 @@ impl CubeQuery {
             }
         }
         Scope { clause, params }
-    }
-
-    /// Old day totals may be recoverable even when their hourly allocation is not.
-    async fn recover_cache(
-        &self,
-        state: &AppState,
-        previous: bool,
-        time: Option<&str>,
-        dimension: Option<&str>,
-        rows: &mut [Value],
-    ) -> Result<(), AppError> {
-        if rows.is_empty()
-            || self.coverage_for(previous).legacy.cache
-                != super::measurement_coverage::Mode::Recover
-        {
-            return Ok(());
-        }
-        let mut keys = Vec::new();
-        let mut projections = Vec::new();
-        let mut match_columns = Vec::new();
-        if let Some(time) = time {
-            keys.push(time);
-            projections.push(format!("toString({time}) AS bucket"));
-            match_columns.push("bucket");
-        }
-        if let Some(dimension) = dimension {
-            if let Some(tuple) = dimension
-                .strip_prefix("toJSONString(tuple(")
-                .and_then(|s| s.strip_suffix("))"))
-            {
-                keys.extend(tuple.split(", "));
-            } else {
-                keys.push(dimension);
-            }
-            projections.push(format!("{dimension} AS k"));
-            match_columns.push("k");
-        }
-        let keys = keys.join(", ");
-        let (sql, scope) =
-            self.cache_measurement_query(&keys, &projections.join(", "), previous, "");
-        let recovered =
-            super::stats_cache::query(state, &sql, &scope.borrow(), self.cached).await?;
-        let key = |row: &Value| {
-            match_columns
-                .iter()
-                .map(|column| {
-                    row[*column]
-                        .as_str()
-                        .map_or_else(|| row[*column].to_string(), str::to_owned)
-                })
-                .collect::<Vec<_>>()
-        };
-        let recovered: HashMap<_, _> = recovered.into_iter().map(|row| (key(&row), row)).collect();
-        for row in rows {
-            if let Some(cache) = recovered
-                .get(&key(row))
-                .filter(|cache| ch_i64(cache, "cache_expected") == ch_i64(row, "reqs"))
-            {
-                row["write_sum"] = cache["cache_writes"].clone();
-                row["write_n"] = cache["cache_write_n"].clone();
-                row["read_n"] = cache["cache_read_n"].clone();
-                for field in super::usage_sources::FIELDS {
-                    row[field] = cache[field].clone();
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn cache_measurement_query(
-        &self,
-        keys: &str,
-        projections: &str,
-        previous: bool,
-        extra: &str,
-    ) -> (String, Scope) {
-        let scope = self.scope();
-        let predicate = format!("{}{}{extra}", self.window(previous), scope.clause);
-        let table = if self.has_detail_filter()
-            || keys.split(", ").any(|key| {
-                !matches!(
-                    key,
-                    "" | "hour"
-                        | "day"
-                        | "model"
-                        | "user_id"
-                        | "api_key_id"
-                        | "channel_id"
-                        | "group_code"
-                )
-            }) {
-            "mv_analysis_hour"
-        } else {
-            "mv_cube_hour"
-        };
-        let cache = super::cache_usage::source(keys, table, &predicate);
-        let usage = super::usage_sources::source(keys, table, &predicate);
-        let join_keys = if keys.is_empty() {
-            "source_scope"
-        } else {
-            keys
-        };
-        let projections = if projections.is_empty() {
-            String::new()
-        } else {
-            format!("{projections}, ")
-        };
-        let sql = format!(
-            "SELECT {projections}cs.cache_expected, cs.cache_writes, cs.cache_write_n, cs.cache_read_n, {} FROM {cache} cs LEFT JOIN {usage} us USING ({join_keys})",
-            super::usage_sources::FIELDS
-                .map(|field| format!("us.{field} AS {field}"))
-                .join(", ")
-        );
-        (sql, scope)
-    }
-
-    async fn recover_provider_cache(
-        &self,
-        state: &AppState,
-        buckets: &mut [Bucket],
-        rows: &[Value],
-        names: &Names,
-    ) -> Result<(), AppError> {
-        if self.coverage.legacy.cache != super::measurement_coverage::Mode::Recover {
-            return Ok(());
-        }
-        for bucket in buckets {
-            let ids = rows
-                .iter()
-                .filter_map(|row| row_key(row).parse::<i64>().ok())
-                .filter(|id| {
-                    *id >= 0
-                        && names.channels.get(id).map_or("unknown", |c| c.1.as_str()) == bucket.key
-                })
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>();
-            if ids.is_empty() {
-                continue;
-            }
-            let (sql, scope) = self.cache_measurement_query(
-                "",
-                "",
-                false,
-                &format!(" AND channel_id IN ({})", ids.join(",")),
-            );
-            let measured =
-                super::stats_cache::query(state, &sql, &scope.borrow(), self.cached).await?;
-            let requests = bucket.metrics["requests"].as_i64().unwrap_or(0);
-            if let Some(measured) = measured
-                .first()
-                .filter(|row| ch_i64(row, "cache_expected") == requests)
-            {
-                let counters = json!({"write_n":measured["cache_write_n"], "read_n":measured["cache_read_n"], "write_sum":measured["cache_writes"]});
-                bucket.metrics.extend(cache_metrics(&counters, requests));
-                bucket.metrics.extend(super::usage_sources::metrics(
-                    measured,
-                    requests,
-                    [
-                        bucket.metrics["prompt_tokens"].as_i64(),
-                        bucket.metrics["completion_tokens"].as_i64(),
-                    ],
-                    bucket.metrics["cached_tokens"].as_i64(),
-                    ch_i64(measured, "cache_read_n"),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    async fn trend_totals(
-        &self,
-        state: &AppState,
-        dimension: Option<&str>,
-        rows: &mut [Value],
-        previous: &mut [Value],
-    ) -> Result<Vec<Value>, AppError> {
-        self.recover_cache(state, false, self.granularity.as_deref(), dimension, rows)
-            .await?;
-        let mut total = vec![sum_metric_rows(rows)];
-        self.recover_cache(state, false, None, None, &mut total)
-            .await?;
-        self.recover_cache(state, true, None, None, previous)
-            .await?;
-        Ok(total)
     }
 
     fn has_detail_filter(&self) -> bool {
@@ -1026,13 +811,11 @@ pub async fn trend(
             q.window(false),
             scope.clause
         );
-        let (mut rows, mut previous) = tokio::try_join!(
+        let (rows, previous) = tokio::try_join!(
             super::stats_cache::query(&state, &stacked_sql, &params, q.cached),
             q.previous_totals(&state, &agg, &scope),
         )?;
-        let total = q
-            .trend_totals(&state, Some(&stack_col), &mut rows, &mut previous)
-            .await?;
+        let total = vec![sum_metric_rows(&rows)];
         let (series, data) = fold_stacked(
             &rows,
             limit,
@@ -1059,13 +842,11 @@ pub async fn trend(
         })));
     }
 
-    let (mut series, mut previous) = tokio::try_join!(
+    let (series, previous) = tokio::try_join!(
         super::stats_cache::query(&state, &series_sql, &params, q.cached),
         q.previous_totals(&state, &agg, &scope),
     )?;
-    let total = q
-        .trend_totals(&state, None, &mut series, &mut previous)
-        .await?;
+    let total = vec![sum_metric_rows(&series)];
     let data: Vec<Value> = series
         .iter()
         .map(|r| {
@@ -1574,7 +1355,7 @@ pub async fn breakdown(
     let core = q.core_requested()? && q.core_source_ok(Some(key_col), false);
     let (cur_sql, total_sql, prev_sql) =
         breakdown_sql(&q, &scope, key_col, fold_provider, limit, metric, core);
-    let (mut cur, total, prev) = tokio::try_join!(
+    let (cur, total, prev) = tokio::try_join!(
         super::stats_cache::query(&state, &cur_sql, &params, q.cached),
         super::stats_cache::query(&state, &total_sql, &params, q.cached),
         async {
@@ -1584,11 +1365,6 @@ pub async fn breakdown(
             }
         },
     )?;
-
-    if !core {
-        q.recover_cache(&state, false, None, Some(key_col), &mut cur)
-            .await?;
-    }
 
     // 名字回填：渠道维度还要 provider（折叠依据）
     let int_keys: Vec<i64> = cur
@@ -1626,11 +1402,7 @@ pub async fn breakdown(
         }
     };
     let prev_ranks = previous_ranks(&prev, &fold_key, metric);
-    let mut buckets = metric.top_buckets(&cur, &fold_key, core, limit);
-    if fold_provider && !core {
-        q.recover_provider_cache(&state, &mut buckets, &cur, &names)
-            .await?;
-    }
+    let buckets = metric.top_buckets(&cur, &fold_key, core, limit);
 
     let total_spend = total.first().map_or(0, |r| ch_i64(r, "spend"));
     let total_reqs = total.first().map_or(0, |r| ch_i64(r, "reqs"));
@@ -1891,9 +1663,7 @@ pub async fn flow(
         scope.clause
     );
     let combos = ch.query_with_params(&combo_sql, &params).await?;
-    let mut total = ch.query_with_params(&total_sql, &params).await?;
-    q.recover_cache(&state, false, None, None, &mut total)
-        .await?;
+    let total = ch.query_with_params(&total_sql, &params).await?;
     let total_metric = total.first().map_or(0, |r| ch_i64(r, order_col));
 
     let graph = FlowGraph::build(&combos, per_stage, order_col, &stages);
@@ -2334,7 +2104,6 @@ mod tests {
         let mut q = query();
         q.coverage = Coverage {
             historical_units: true,
-            ..Coverage::default()
         };
         assert!(!q.core_source_ok(None, false));
         // The previous window is judged on its own coverage.
@@ -2367,38 +2136,6 @@ mod tests {
         let mut full = query();
         full.compare = Some(true);
         assert!(full.compares());
-    }
-
-    #[test]
-    fn core_candidate_follows_the_static_conditions_of_the_lean_source() {
-        let mut q = query();
-        assert!(!q.core_candidate(), "without fields=core nothing is lean");
-        q.fields = Some("core".to_owned());
-        assert!(q.core_candidate());
-        for by in ["model", "channel", "provider", "user", "api_key", "group"] {
-            q.by = Some(by.to_owned());
-            assert!(q.core_candidate(), "{by}");
-        }
-        for by in ["endpoint", "node", "model_group", "requested_model"] {
-            q.by = Some(by.to_owned());
-            assert!(!q.core_candidate(), "{by}");
-        }
-        q.by = None;
-        let mut detail = q_core();
-        detail.stream = Some(true);
-        assert!(!detail.core_candidate());
-        let mut stacked = q_core();
-        stacked.stack = Some("model".to_owned());
-        assert!(!stacked.core_candidate());
-        let mut requested = q_core();
-        requested.model_source = Some("requested".to_owned());
-        assert!(!requested.core_candidate());
-    }
-
-    fn q_core() -> CubeQuery {
-        let mut q = query();
-        q.fields = Some("core".to_owned());
-        q
     }
 
     #[test]

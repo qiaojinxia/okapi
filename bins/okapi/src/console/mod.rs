@@ -12,7 +12,6 @@ pub mod analytics;
 pub mod audit;
 pub mod auth_web;
 mod cache_usage;
-mod cache_usage_legacy;
 pub mod channel_balance;
 mod channel_creation;
 mod channel_credentials;

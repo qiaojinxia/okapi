@@ -1,5 +1,4 @@
 //! Token throughput has its own paired samples; character latency is not a Token denominator.
-use super::measurement_coverage::Mode;
 use super::stats::{ch_i64, scaled_ratio};
 use serde_json::{Map, Value, json};
 
@@ -44,18 +43,17 @@ pub(super) fn accumulate(total: &mut Value, row: &Value) {
     }
 }
 
-pub(super) fn prepared(keys: &str, table: &str, predicate: &str, mode: Mode) -> String {
-    prepared_with_calibration(keys, table, predicate, mode, true)
+pub(super) fn prepared(keys: &str, table: &str, predicate: &str) -> String {
+    prepared_with_calibration(keys, table, predicate, true)
 }
 
 pub(super) fn prepared_with_calibration(
     keys: &str,
     table: &str,
     predicate: &str,
-    mode: Mode,
     historical: bool,
 ) -> String {
-    let base = uncalibrated(keys, table, predicate, mode);
+    let base = uncalibrated(keys, predicate);
     if !historical {
         return base;
     }
@@ -81,42 +79,11 @@ fn time_sql(table: &str) -> &'static str {
     super::observation_sources::Grain::for_table(table).time_sql()
 }
 
-fn uncalibrated(keys: &str, table: &str, predicate: &str, mode: Mode) -> String {
-    let time = time_sql(table);
-    let raw_sql = raw_sql();
+fn uncalibrated(keys: &str, predicate: &str) -> String {
     let aggregate = format!(
         "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day SELECT {keys}, {MERGED} FROM mv_output_rate_5min WHERE {predicate}"
     );
-    let raw = format!(
-        "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day SELECT {keys}, {raw_sql} FROM request_log_calls WHERE {predicate}"
-    );
-    let expected = format!(
-        "WITH {time} SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}"
-    );
-    let counts = format!(
-        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day SELECT {keys}, countMerge(requests) AS n FROM mv_output_rate_5min WHERE {predicate} GROUP BY {keys}"
-    );
-    if mode != Mode::Recover {
-        return super::measurement_coverage::fast_source(
-            mode, keys, &expected, &counts, &aggregate, &raw,
-        );
-    }
-    let selected_keys = keys
-        .split(", ")
-        .map(|key| format!("e.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let selected = FIELDS.map(|field| format!(
-        "toInt64(if(use_aggregate, ifNull(a.{field}, 0), if(ifNull(r.output_rate_observed, 0) <= e.n, ifNull(r.{field}, 0), 0))) AS {field}"
-    )).join(", ");
-    format!(
-        "(WITH e AS ({expected}), a AS ({aggregate} GROUP BY {keys}), \
-        missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.n != ifNull(a.output_rate_observed, 0)), \
-        r AS ({raw} AND ({keys}) IN (SELECT {keys} FROM missing) GROUP BY {keys}) \
-        SELECT {selected_keys}, {selected}, \
-        (ifNull(a.output_rate_observed, 0) <= e.n AND ifNull(a.output_rate_observed, 0) >= if(ifNull(r.output_rate_observed, 0) <= e.n, ifNull(r.output_rate_observed, 0), 0)) AS use_aggregate \
-        FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"
-    )
+    super::measurement_coverage::aggregate_source(keys, &aggregate)
 }
 
 pub(super) fn metrics(row: &Value, requests: i64) -> Map<String, Value> {
@@ -179,7 +146,7 @@ pub(super) async fn enrich_entities(
     table: &str,
     predicate: &str,
 ) -> Result<(), crate::gateway::error::AppError> {
-    let source = prepared(key, table, predicate, Mode::Recover);
+    let source = prepared(key, table, predicate);
     let data = ch
         .query_json_each_row(&format!(
             "SELECT toString({key}) AS metric_key, * FROM {source}"
@@ -209,7 +176,7 @@ pub(super) async fn enrich_model_days(
     table: &str,
     predicate: &str,
 ) -> Result<(), crate::gateway::error::AppError> {
-    let source = prepared("day, model", table, predicate, Mode::Recover);
+    let source = prepared("day, model", table, predicate);
     let data = ch
         .query_json_each_row(&format!("SELECT * FROM {source}"))
         .await?;
@@ -287,7 +254,6 @@ pub(super) async fn enrich_quality(
         key,
         table,
         &format!("{predicate} AND {key} IN ({bindings})"),
-        Mode::Recover,
     );
     let data = ch
         .query_with_params(

@@ -130,13 +130,8 @@ async fn performance_rows(
     range: &str,
 ) -> Result<(ModelDayRows, ModelDayRows), AppError> {
     let predicate = format!("{owner} AND {range}");
-    let latency = super::latency::source("day, model", "mv_cube_hour", &predicate);
-    let rate = super::output_rate::prepared(
-        "day, model",
-        "mv_cube_hour",
-        &predicate,
-        super::measurement_coverage::Mode::Recover,
-    );
+    let latency = super::latency::source("day, model", &predicate);
+    let rate = super::output_rate::prepared("day, model", "mv_cube_hour", &predicate);
     let latency = ch
         .query_json_each_row(&format!("SELECT * FROM {latency}"))
         .await?;
@@ -162,22 +157,13 @@ pub async fn enrich(
     let sources = source_rows(ch, owner, range).await?;
     let mut source_totals = json!({});
     let (perf, rates) = performance_rows(ch, owner, range).await?;
-    let ttft_sql = super::ttft_average::source(
-        "day, model",
-        "mv_cube_hour",
-        &format!("{owner} AND {range}"),
-    );
+    let ttft_sql = super::ttft_average::source("day, model", &format!("{owner} AND {range}"));
     let ttft = ch
         .query_json_each_row(&format!("SELECT * FROM {ttft_sql}"))
         .await?;
     let ttft: HashMap<_, _> = ttft.iter().map(|r| (row_key(r), r)).collect();
-    let cache = super::cache_usage::query(
-        ch,
-        "day, model",
-        "mv_key_model_day",
-        &format!("{owner} AND {range}"),
-    )
-    .await?;
+    let cache =
+        super::cache_usage::query(ch, "day, model", &format!("{owner} AND {range}")).await?;
     let cache: HashMap<_, _> = cache.iter().map(|r| (row_key(r), r)).collect();
     let mut counts = [0_i64; 14]; // requests, known writes, writes, perf samples, latency, ttft, ttft samples, output, known reads, prompt, cached, ttft observed, latency observed
     for row in data {

@@ -2,13 +2,8 @@
 use super::stats::rate_bp;
 use serde_json::{Map, Value, json};
 
-pub(super) fn source(keys: &str, expected_table: &str, predicate: &str) -> String {
-    super::performance_source::source(
-        super::performance_source::Kind::Latency,
-        keys,
-        expected_table,
-        predicate,
-    )
+pub(super) fn source(keys: &str, predicate: &str) -> String {
+    super::performance_source::source(super::performance_source::Kind::Latency, keys, predicate)
 }
 
 pub(super) fn metrics(

@@ -1,15 +1,8 @@
 //! Independent input units; unknown history never becomes a measured character zero.
-use super::measurement_coverage::Mode;
 use super::stats::{ch_i64, scaled_ratio};
 use crate::gateway::error::AppError;
 use serde_json::{Map, Value, json};
 
-const CORE_FIELDS: [&str; 4] = [
-    "unit_observed",
-    "unit_characters",
-    "unit_character_n",
-    "unit_token_n",
-];
 pub(super) const FIELDS: [&str; 6] = [
     "unit_observed",
     "unit_characters",
@@ -64,10 +57,9 @@ pub(super) fn prepared_with_calibration(
     keys: &str,
     table: &str,
     predicate: &str,
-    mode: Mode,
     historical: bool,
 ) -> String {
-    let base = uncalibrated(keys, table, predicate, mode);
+    let base = uncalibrated(keys, predicate);
     if !historical {
         return format!(
             "(SELECT u.*,toInt64(0) AS legacy_characters,toInt64(0) AS legacy_character_n FROM {base} u)"
@@ -118,48 +110,17 @@ pub(super) fn correct_totals(row: &mut Value, evidence: &Value) -> Result<(), Ap
     Ok(())
 }
 
-fn uncalibrated(keys: &str, table: &str, predicate: &str, mode: Mode) -> String {
+fn uncalibrated(keys: &str, predicate: &str) -> String {
     let keys = if keys.is_empty() {
         "source_scope"
     } else {
         keys
     };
-    let time = time_sql(table);
     let merged = "countMerge(requests) AS unit_observed, sumIfMerge(unit_characters) AS unit_characters, countIfMerge(unit_character_n) AS unit_character_n, countIfMerge(unit_token_n) AS unit_token_n";
-    let raw = raw_sql();
-    if mode != Mode::Recover {
-        let expected = format!(
-            "WITH {time}, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM {table} WHERE {predicate} GROUP BY {keys}"
-        );
-        let counts = format!(
-            "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, countMerge(requests) AS n FROM mv_input_units_5min WHERE {predicate} GROUP BY {keys}"
-        );
-        let aggregate = format!(
-            "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {merged} FROM mv_input_units_5min WHERE {predicate}"
-        );
-        let raw = format!(
-            "WITH toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope SELECT {keys}, {raw} FROM request_log_calls WHERE {predicate}"
-        );
-        return super::measurement_coverage::fast_source(
-            mode, keys, &expected, &counts, &aggregate, &raw,
-        );
-    }
-    let selected_keys = keys
-        .split(", ")
-        .map(|key| format!("e.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let selected=CORE_FIELDS.map(|field|format!("toInt64(if(use_aggregate, ifNull(a.{field}, 0), if(ifNull(r.unit_observed, 0) <= e.expected, ifNull(r.{field}, 0), 0))) AS {field}")).join(", ");
-    format!(
-        "(WITH \
-        e AS (SELECT {keys}, countMerge(requests) AS expected FROM (SELECT *, {time}, toUInt8(1) AS source_scope FROM {table} WHERE {predicate}) WHERE {predicate} GROUP BY {keys}), \
-        a AS (SELECT {keys}, {merged} FROM (SELECT *, toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope FROM mv_input_units_5min) WHERE {predicate} GROUP BY {keys}), \
-        missing AS (SELECT {keys} FROM e LEFT JOIN a USING ({keys}) WHERE e.expected != ifNull(a.unit_observed, 0)), \
-        r AS (SELECT {keys}, {raw} FROM (SELECT *, toStartOfFiveMinutes(ts) AS ts5, toStartOfHour(ts) AS hour, toDate(ts) AS day, toUInt8(1) AS source_scope FROM request_log_calls) raw_rows INNER JOIN missing USING ({keys}) WHERE {predicate} GROUP BY {keys}) \
-        SELECT {selected_keys}, {selected}, \
-        (ifNull(a.unit_observed, 0) <= e.expected AND ifNull(a.unit_observed, 0) >= if(ifNull(r.unit_observed, 0) <= e.expected, ifNull(r.unit_observed, 0), 0)) AS use_aggregate \
-        FROM e LEFT JOIN a USING ({keys}) LEFT JOIN r USING ({keys}))"
-    )
+    let aggregate = format!(
+        "WITH toStartOfHour(ts5) AS hour, toDate(ts5) AS day, toUInt8(1) AS source_scope SELECT {keys}, {merged} FROM mv_input_units_5min WHERE {predicate}"
+    );
+    super::measurement_coverage::aggregate_source(keys, &aggregate)
 }
 
 pub(super) fn metrics(row: &Value, records: i64) -> Map<String, Value> {

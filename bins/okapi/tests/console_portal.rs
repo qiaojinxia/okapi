@@ -219,7 +219,7 @@ async fn partner_employee_keys_see_own_usage() {
     // 门户看板单一数据源（mv_key_model_day）：key 视角员工 A 两笔，
     // token 四轴按笔累加（100 prompt 含 40 cached / 20 completion），缓存命中 40%
     let bd_a = get(token_a.clone(), "/api/me/stats/breakdown?days=2".into()).await;
-    assert_eq!(bd_a["scope"], "key");
+    assert_eq!(bd_a["scope"], "key", "{bd_a}");
     let total = &bd_a["total"];
     assert_eq!(total["requests"], 2, "{bd_a}");
     assert_eq!(total["prompt_tokens"], 200);

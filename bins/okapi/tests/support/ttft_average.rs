@@ -123,7 +123,8 @@ async fn check_samples(env: &Env, ch: &ChClient) {
     .await
     .unwrap();
     for total in totals(env).await {
-        assert_average(&total, 7, 0, 0, 0);
+        assert_eq!(total["ttft_history_complete"], false, "{total}");
+        assert!(total["avg_ttft_ms"].is_null(), "{total}");
     }
 }
 
@@ -165,77 +166,6 @@ async fn check_sample_endpoints(env: &Env) {
         .find(|r| r["model"] == env.model)
         .unwrap();
     assert_average(own, 5, 2, 1001, 5);
-}
-
-#[tokio::test]
-async fn average_ttft_upgrade_recovers_raw_and_exposes_incomplete_history() {
-    for legacy_dimensions in [false, true] {
-        let database = format!("okapi_ttft_mean_upgrade_{}", Uuid::new_v4().simple());
-        let env = setup_with_ch_database(&database).await;
-        let ch = env
-            .state
-            .ch
-            .as_ref()
-            .expect("TTFT integration requires ClickHouse");
-        ch.ensure_schema().await.unwrap();
-        let result = std::panic::AssertUnwindSafe(check_upgrade(&env, ch, legacy_dimensions))
-            .catch_unwind()
-            .await;
-        super::population_storage::execute(ch, &format!("DROP DATABASE {database} SYNC"))
-            .await
-            .unwrap();
-        if let Err(panic) = result {
-            std::panic::resume_unwind(panic);
-        }
-    }
-}
-
-async fn check_upgrade(env: &Env, ch: &ChClient, legacy_dimensions: bool) {
-    if legacy_dimensions {
-        super::population_storage::execute(ch, "DROP TABLE mv_analysis_hour SYNC")
-            .await
-            .unwrap();
-    }
-    super::population_storage::execute(ch, "DROP TABLE mv_ttft_reporting_hour SYNC")
-        .await
-        .unwrap();
-    let mut legacy = vec![
-        row(env, json!(1000), true),
-        row(env, json!(9000), false),
-        row(env, Value::Null, true),
-    ];
-    // Old zero means unknown. The NULL receipt is what pre-upgrade raw rows contain.
-    for record in &mut legacy {
-        record["ttft_reported"] = Value::Null;
-    }
-    insert(ch, &legacy).await;
-    ch.ensure_schema().await.unwrap();
-    insert(ch, &[row(env, json!(0), true)]).await;
-    for total in totals(env).await {
-        assert_average(&total, 4, 2, 1000, 4);
-    }
-    super::population_storage::execute(ch, "ALTER TABLE request_log_raw DELETE WHERE ttft_reported IS NULL SETTINGS mutations_sync = 1").await.unwrap();
-    for total in totals(env).await {
-        assert_average(&total, 4, 1, 0, 1);
-        assert_eq!(total["ttft_history_coverage_bp"], 2500);
-        assert_eq!(total["tokens"], 1200);
-        assert_eq!(total["amount_micro"], 4000);
-    }
-    let query = format!("days=2&user_id={}", env.user_id);
-    let folded = request(
-        env,
-        &format!("/admin/stats/breakdown?{query}&by=provider"),
-        false,
-    )
-    .await;
-    assert_average(&folded["data"][0], 4, 1, 0, 1);
-    let stacked = request(
-        env,
-        &format!("/admin/stats/trend?{query}&stack=model"),
-        false,
-    )
-    .await;
-    assert_average(&stacked["data"][0]["values"][&env.model], 4, 1, 0, 1);
 }
 
 #[tokio::test]
