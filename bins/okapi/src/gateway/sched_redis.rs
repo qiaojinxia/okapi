@@ -35,7 +35,7 @@ pub struct SchedulerRedis {
 }
 
 impl SchedulerRedis {
-    pub(super) fn client(&self) -> &Client {
+    pub(crate) fn client(&self) -> &Client {
         &self.client
     }
     #[must_use]

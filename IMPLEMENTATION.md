@@ -2626,6 +2626,29 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
 `tunnel_failures_are_verified_before_tripping_a_shared_proxy`（上游挂了不连累共用代理、代理坏了核实后直接熔断）
 与 providers `proxy_hop_markers`（钉住错误文本）。
 
+### 11.43 运维监控面板（2026-10-09，后台「系统 → 运维监控」）
+
+**问题**：站长看不到机器和中间件的状态。`/admin/diagnose` 只有「通 / 不通」，CPU、内存、磁盘要上服务器敲命令，
+PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才知道；WARN / ERROR 只在容器 stdout 里，多进程部署时散在各处。
+
+**定案**（只读；会改数据的动作仍在「运维操作」页）：
+
+- **服务器压力**（`okapi::ops::host`）：读 Linux `/proc`（stat / meminfo / loadavg / net/dev / self/status）与 `statvfs("/")`（rustix，
+  项目禁 unsafe）。容器里 CPU、内存、负载是宿主机的，网卡是容器网络命名空间的；非 Linux 各项为空，面板显示「不支持」。
+  CPU 与网卡速率要两次读数：实时接口隔 0.5 秒读两次，采样任务用上一分钟的读数。
+- **中间件占用**（`okapi::ops::probes`）：PG（连接 / 上限、执行中、事务空闲、库大小、缓存命中、最长查询、本进程池、最大的表——分区父表把分区大小加回）、
+  Redis（`INFO`：内存 / 上限、碎片率、客户端、每秒命令、命中率、淘汰、键数、持久化）、ClickHouse（`system.metrics` / `asynchronous_metrics` /
+  `disks` / `parts`）、NATS（连接状态、收发计数、JetStream 账户与流）。每项独立 3 秒超时，挂一个不拖累其余；运行时查询，不进 `.sqlx`。
+- **趋势**：worker 的 `ops_sampler` 每分钟采一个点 `RPUSH ops:samples`，`LTRIM` 保留 1440 点（24 小时）。多副本用 `SET NX EX 50` 租约，每分钟只采一次。
+- **告警日志**（`okapi::ops::logbuf`）：tracing 层只收 WARN / ERROR，进程内环形缓冲 + 每 2 秒批量 `LPUSH ops:logs`（保留 2000 条，每次写入续期 7 天 TTL，带 node / role）。
+  服务角色启动时各开一条独立 Redis 连接写日志；写失败只记 debug、整批放回待写队列等恢复后补写（仍按 2000 条上限丢最旧），
+  不会回到本层形成回路；Redis 不可达时接口回退本进程缓冲并提示。凭证类字段（`api_key` / `token` / `password` / `secret` /
+  `credential` / `authorization` / `cookie` 及 `*_token` 等后缀）的值写成 `[redacted]`——这里比 stdout 受众宽（共享 Redis +
+  `settings.read`），单用户模式首启的 root key 就是 WARN 级带 `api_key` 打印的，只该出现在 stdout。
+- **接口**：`GET /admin/monitor/overview | history?hours=1..24 | logs?level=error&q=`，权限 `settings.read`（主机与中间件内部状态与系统设置同级）。
+- **前端**：`/admin/monitor` 三个页签（实时概况 / 趋势 / 告警日志），可选 10 / 30 秒自动刷新；占用条按 75% / 90% 分「正常 / 偏高 / 告急」，状态有文字不只靠颜色；
+  趋势图字节类纵轴按窗口最大值换算 KB / MB / GB。e2e：`frontend/e2e/monitor.spec.ts`。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

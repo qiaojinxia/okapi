@@ -1,5 +1,6 @@
 import { Navigate, Outlet, createFileRoute, redirect, useMatches } from '@tanstack/react-router'
 import {
+  Activity,
   BarChart3,
   Boxes,
   Coins,
@@ -92,6 +93,7 @@ function AdminLayout() {
       title: t('admin:navSystem'),
       items: [
         { to: '/admin/settings', label: t('admin:settingsTitle'), icon: Settings, permission: 'settings.read' },
+        { to: '/admin/monitor', label: t('monitor:title'), icon: Activity, permission: 'settings.read' },
         { to: '/admin/ops', label: t('admin:opsTitle'), icon: Wrench, permission: 'settings.write' },
         { to: '/admin/audit', label: t('admin:auditTitle'), icon: History, permission: 'audit.read' },
       ],

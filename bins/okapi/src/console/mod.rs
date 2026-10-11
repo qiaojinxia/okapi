@@ -29,6 +29,7 @@ pub mod manage;
 pub mod margin;
 pub mod mcp;
 mod measurement_coverage;
+mod monitor;
 pub mod oauth;
 mod observation_sources;
 mod outbound_body;
@@ -382,6 +383,10 @@ fn ops_routes() -> ConsoleRouter {
         .route("/admin/stats/inventory", get(analytics::inventory))
         .route("/admin/stats/entity-usage", get(analytics::entity_usage))
         .route("/admin/diagnose", get(stats::diagnose))
+        // 运维监控（§11.43）：服务器压力、中间件占用、趋势、告警日志
+        .route("/admin/monitor/overview", get(monitor::overview))
+        .route("/admin/monitor/history", get(monitor::history))
+        .route("/admin/monitor/logs", get(monitor::logs))
         .route("/admin/logs", get(logs::search))
         .route("/admin/logs/stat", get(logs::stat))
         .route("/admin/billing/refund", post(admin::refund_by_request))

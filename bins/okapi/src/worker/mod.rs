@@ -173,6 +173,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         move || egress_probe::run(state.clone(), notifier.clone(), stop.clone())
     }));
 
+    // 运维监控趋势采样（§11.43）：每分钟一个点，保留 24 小时
+    let ops_sampler = tokio::spawn(supervision::run("ops_sampler", image_stopped.clone(), {
+        let probes = crate::ops::probes::Probes {
+            pg: pg.clone(),
+            redis: redis.clone(),
+            ch: ch.clone(),
+            nats: js.as_ref().map(async_nats::jetstream::Context::client),
+        };
+        let node = cfg.node.clone();
+        let stop = image_stopped.clone();
+        move || crate::ops::sampler::run(probes.clone(), node.clone(), stop.clone())
+    }));
+
     tracing::info!(
         "okapi worker 启动（relay/chsink/sweep/reconcile/partition/cooldown/subscriptions/margin_breaker）"
     );
@@ -191,6 +204,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         image_worker,
         credential_worker,
         egress_worker,
+        ops_sampler,
     ]);
     for (job, interval) in [
         (MaintenanceJob::chsink_tick, Duration::from_secs(1)),

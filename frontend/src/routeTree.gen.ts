@@ -22,6 +22,7 @@ import { Route as AdminCodesRouteImport } from './routes/admin.codes'
 import { Route as AdminGroupsRouteImport } from './routes/admin.groups'
 import { Route as AdminKeysRouteImport } from './routes/admin.keys'
 import { Route as AdminLogsRouteImport } from './routes/admin.logs'
+import { Route as AdminMonitorRouteImport } from './routes/admin.monitor'
 import { Route as AdminOpsRouteImport } from './routes/admin.ops'
 import { Route as AdminPlansRouteImport } from './routes/admin.plans'
 import { Route as AdminPoolsRouteImport } from './routes/admin.pools'
@@ -109,6 +110,11 @@ const AdminKeysRoute = AdminKeysRouteImport.update({
 const AdminLogsRoute = AdminLogsRouteImport.update({
   id: '/logs',
   path: '/logs',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminMonitorRoute = AdminMonitorRouteImport.update({
+  id: '/monitor',
+  path: '/monitor',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminOpsRoute = AdminOpsRouteImport.update({
@@ -240,6 +246,7 @@ export interface FileRoutesByFullPath {
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/logs': typeof AdminLogsRoute
+  '/admin/monitor': typeof AdminMonitorRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
@@ -276,6 +283,7 @@ export interface FileRoutesByTo {
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/logs': typeof AdminLogsRoute
+  '/admin/monitor': typeof AdminMonitorRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
@@ -315,6 +323,7 @@ export interface FileRoutesById {
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/logs': typeof AdminLogsRoute
+  '/admin/monitor': typeof AdminMonitorRoute
   '/admin/ops': typeof AdminOpsRoute
   '/admin/plans': typeof AdminPlansRoute
   '/admin/pools': typeof AdminPoolsRoute
@@ -355,6 +364,7 @@ export interface FileRouteTypes {
     | '/admin/groups'
     | '/admin/keys'
     | '/admin/logs'
+    | '/admin/monitor'
     | '/admin/ops'
     | '/admin/plans'
     | '/admin/pools'
@@ -391,6 +401,7 @@ export interface FileRouteTypes {
     | '/admin/groups'
     | '/admin/keys'
     | '/admin/logs'
+    | '/admin/monitor'
     | '/admin/ops'
     | '/admin/plans'
     | '/admin/pools'
@@ -429,6 +440,7 @@ export interface FileRouteTypes {
     | '/admin/groups'
     | '/admin/keys'
     | '/admin/logs'
+    | '/admin/monitor'
     | '/admin/ops'
     | '/admin/plans'
     | '/admin/pools'
@@ -555,6 +567,13 @@ declare module '@tanstack/react-router' {
       path: '/logs'
       fullPath: '/admin/logs'
       preLoaderRoute: typeof AdminLogsRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/monitor': {
+      id: '/admin/monitor'
+      path: '/monitor'
+      fullPath: '/admin/monitor'
+      preLoaderRoute: typeof AdminMonitorRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/ops': {
@@ -728,6 +747,7 @@ interface AdminRouteChildren {
   AdminGroupsRoute: typeof AdminGroupsRoute
   AdminKeysRoute: typeof AdminKeysRoute
   AdminLogsRoute: typeof AdminLogsRoute
+  AdminMonitorRoute: typeof AdminMonitorRoute
   AdminOpsRoute: typeof AdminOpsRoute
   AdminPlansRoute: typeof AdminPlansRoute
   AdminPoolsRoute: typeof AdminPoolsRoute
@@ -750,6 +770,7 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminGroupsRoute: AdminGroupsRoute,
   AdminKeysRoute: AdminKeysRoute,
   AdminLogsRoute: AdminLogsRoute,
+  AdminMonitorRoute: AdminMonitorRoute,
   AdminOpsRoute: AdminOpsRoute,
   AdminPlansRoute: AdminPlansRoute,
   AdminPoolsRoute: AdminPoolsRoute,

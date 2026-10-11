@@ -7,6 +7,7 @@ pub mod gateway;
 pub mod mail;
 pub mod margin;
 pub mod migrate;
+pub mod ops;
 pub(crate) mod security_headers;
 pub mod shutdown;
 pub mod worker;
