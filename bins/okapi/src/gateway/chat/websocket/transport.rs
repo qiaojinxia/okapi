@@ -103,7 +103,7 @@ async fn credentials(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
 ) -> Result<Credentials, UpstreamError> {
-    let outbound = oauth_cred::outbound_with_client(cand, &bill.client_headers);
+    let outbound = oauth_cred::outbound_with_client(cand, &bill.client_headers, Some(bill.user_id));
     let credential = CredentialManager.resolve(&bill.state, cand).await?;
     let token = credential.material();
     let mut headers = vec![("authorization".into(), format!("Bearer {token}"))];

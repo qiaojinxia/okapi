@@ -91,6 +91,7 @@ fn setup(entry: &str, class: &str) -> (Outbound, String, String) {
         context: RequestContext {
             extensions: json!({"client_profile":{"name":"claude-code","revision":"2.1.290","mode":"mimic","entrypoint":entry,"request_class":class}}),
             identity_seed: Some("live-smoke".into()),
+            session_scope: None,
             client_headers: vec![
                 (
                     "x-claude-code-session-id".into(),

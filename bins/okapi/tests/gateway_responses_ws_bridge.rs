@@ -778,6 +778,7 @@ async fn codex_http_uses_oauth_identity_and_preserves_encrypted_items() {
         expires_at: chrono::Utc::now().timestamp() + 3600,
         account_id: Some("bridge-account".into()),
         account_label: None,
+        scope: None,
     };
     sqlx::query("UPDATE channels SET provider='codex' WHERE id=$1")
         .bind(env.channel)

@@ -154,7 +154,7 @@ pub fn extra_headers_ok(value: &Value) -> bool {
     })
 }
 
-fn parse_proxy_url(raw: &str) -> Option<reqwest::Url> {
+pub(crate) fn parse_proxy_url(raw: &str) -> Option<reqwest::Url> {
     let url = reqwest::Url::parse(raw).ok()?;
     matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
         .then_some(url)
@@ -212,6 +212,10 @@ struct Clients {
     probe_proxied: RwLock<HashMap<String, Cached>>,
     websocket_default: reqwest::Client,
     websocket_proxied: RwLock<HashMap<String, Cached>>,
+    /// Claude Code 外形渠道的出站连接（BoringSSL 握手，见 `client_tls`）。
+    claude_code: crate::client_tls::ClaudeCodeTls,
+    /// Claude 订阅的账号接口（换码、刷新、用量）：真机走 axios，握手是另一套。
+    claude_account: crate::client_tls::ClaudeCodeTls,
 }
 
 /// 代理 client + 最近一次取用时刻（相对进程内基准的秒数，读锁下也能更新）。
@@ -220,7 +224,7 @@ struct Cached {
     last_used: AtomicU64,
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_secs()
 }
@@ -242,6 +246,12 @@ impl HttpPool {
                 probe_proxied: RwLock::new(HashMap::new()),
                 websocket_default: build_client(None, ClientPolicy::WebSocket)?,
                 websocket_proxied: RwLock::new(HashMap::new()),
+                claude_code: crate::client_tls::ClaudeCodeTls::new(
+                    crate::client_tls::Shape::Messages,
+                )?,
+                claude_account: crate::client_tls::ClaudeCodeTls::new(
+                    crate::client_tls::Shape::Account,
+                )?,
             }),
         })
     }
@@ -296,6 +306,43 @@ impl HttpPool {
             client.request(method, url),
             &outbound.extra_headers,
         ))
+    }
+
+    /// 发出一个由本池构造的请求。渠道配了 Claude Code 客户端外形时换用与真机同款的 TLS 握手
+    /// （`client_tls`），其余照常走 reqwest；两条路的错误分类一致（`anthropic::classify`）。
+    pub async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+        outbound: &Outbound,
+    ) -> Result<reqwest::Response, UpstreamError> {
+        if crate::profiles::claude_code_transport(&outbound.context.extensions) {
+            let request = request
+                .build()
+                .map_err(|e| UpstreamError::Build(e.to_string()))?;
+            return self
+                .clients
+                .claude_code
+                .send_for(
+                    outbound.context.identity_seed.as_deref(),
+                    request,
+                    outbound.proxy_url.as_deref(),
+                )
+                .await;
+        }
+        request
+            .send()
+            .await
+            .map_err(|e| crate::anthropic::classify(&e))
+    }
+
+    /// Claude 订阅账号接口的请求（`oauth::anthropic_max` 照真机 axios 的头构造好）：与真机账号接口
+    /// 同款的握手，不跟随重定向。
+    pub(crate) async fn send_claude_account(
+        &self,
+        request: reqwest::Request,
+        proxy_url: Option<&str>,
+    ) -> Result<reqwest::Response, UpstreamError> {
+        self.clients.claude_account.send(request, proxy_url).await
     }
 
     pub fn post(

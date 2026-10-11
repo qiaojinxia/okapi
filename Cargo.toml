@@ -63,6 +63,20 @@ moka = { version = "0.12.16", features = ["future"] }
 rand = "0.10.2"
 tiktoken-rs = "0.12"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "http2", "multipart", "socks"] }
+# Claude Code 客户端外形的 TLS 握手（BoringSSL，与 Bun 内置同源）+ 自管 HTTP/1.1 连接池（IMPLEMENTATION §11.42）
+boring = "5.2"
+tokio-boring = "5.2"
+hyper = { version = "1.11", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["client-legacy", "http1", "tokio"] }
+http = "1.5"
+http-body = "1.1"
+tower-service = "0.3"
+percent-encoding = "2.3"
+webpki-roots = "1"
+webpki-root-certs = "1"
+# client_tls 的响应解压（真机声明 gzip / deflate / br / zstd，见 IMPLEMENTATION §11.42）
+async-compression = { version = "0.4.50", features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
 sha2 = "0.11.0"
 sqlx = { version = "0.9.0", features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate", "chrono", "uuid", "json"] }
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "net"] }

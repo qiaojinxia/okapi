@@ -185,7 +185,11 @@ pub(super) fn prepare(
     let context = &outbound.context;
     let session = header(context, "x-claude-code-session-id").filter(|id| valid_uuid(id));
     // Keep the legacy conversation seed for callers without an explicit session ID.
-    let uid = identity.metadata_user_id_for_session(&first_user_text(&value), session);
+    let uid = identity.metadata_user_id_for_session(
+        &first_user_text(&value),
+        session,
+        context.session_scope.as_deref(),
+    );
     let metadata: Value =
         serde_json::from_str(&uid).map_err(|e| UpstreamError::Build(e.to_string()))?;
     let session_id = metadata["session_id"]
@@ -317,7 +321,9 @@ pub(super) fn prepare(
     }
     // Sign the bytes that will actually be sent, after all profile transformations.
     // The credential adapter only adds headers; it must not reserialize this body.
-    let mut wire = serde_json::to_vec(&value).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    // 字段顺序照真机（`Value` 本身按字母序），原请求体的键序用来排调用方内容。
+    let shape = serde_json::from_slice(body).unwrap_or_default();
+    let mut wire = super::wire_order::to_vec(&value, &shape)?;
     cch::sign(&mut wire)?;
     let body = Bytes::from(wire);
     let mut betas = if class == RequestClass::Main {

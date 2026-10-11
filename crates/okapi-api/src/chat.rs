@@ -147,9 +147,29 @@ pub struct MessagesRequestProbe {
     pub system: serde_json::Value,
     #[serde(default, deserialize_with = "tool_json")]
     pub tools: String,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
 }
 
 impl MessagesRequestProbe {
+    /// Claude Code 在 `metadata.user_id` 里带的会话 ID：新版是 JSON 字符串
+    /// `{"device_id","account_uuid","session_id"}`，旧版是 `user_<hash>_account_<uuid>_session_<uuid>`。
+    #[must_use]
+    pub fn client_session_id(&self) -> Option<String> {
+        let user_id = self.metadata.get("user_id")?.as_str()?;
+        let session = if user_id.starts_with('{') {
+            serde_json::from_str::<serde_json::Value>(user_id)
+                .ok()?
+                .get("session_id")?
+                .as_str()?
+                .to_owned()
+        } else {
+            user_id.rsplit_once("_session_")?.1.to_owned()
+        };
+        let session = session.trim();
+        (!session.is_empty()).then(|| session.to_owned())
+    }
+
     /// 预扣用的补全上限：max_tokens > 模型缺省。
     #[must_use]
     pub fn completion_cap(&self, model_default: u32) -> u32 {
@@ -1088,5 +1108,38 @@ mod tool_traffic_tests {
         assert_eq!(chat.choices(), 1);
         let gemini: GeminiRequestProbe = serde_json::from_value(json!({})).unwrap();
         assert_eq!(gemini.choices(), 1);
+    }
+}
+
+#[cfg(test)]
+mod client_session_tests {
+    use super::MessagesRequestProbe;
+    use serde_json::json;
+
+    fn probe(metadata: &serde_json::Value) -> MessagesRequestProbe {
+        serde_json::from_value(json!({"model":"m","metadata":metadata})).unwrap()
+    }
+
+    #[test]
+    fn claude_code_session_is_read_from_both_user_id_formats() {
+        let current = json!({"user_id": json!({"device_id":"d","account_uuid":"a",
+            "session_id":"4e15302c-9891-462e-8782-87b1eec70318"}).to_string()});
+        assert_eq!(
+            probe(&current).client_session_id().as_deref(),
+            Some("4e15302c-9891-462e-8782-87b1eec70318")
+        );
+        let legacy = json!({"user_id":"user_abc_account_acc-1_session_9b2f3c1e-0000-4000-8000-000000000001"});
+        assert_eq!(
+            probe(&legacy).client_session_id().as_deref(),
+            Some("9b2f3c1e-0000-4000-8000-000000000001")
+        );
+        for other in [
+            json!({}),
+            json!({"user_id":"tenant-42"}),
+            json!({"user_id":"{\"session_id\":\"  \"}"}),
+            json!({"user_id":"{not json"}),
+        ] {
+            assert_eq!(probe(&other).client_session_id(), None);
+        }
     }
 }

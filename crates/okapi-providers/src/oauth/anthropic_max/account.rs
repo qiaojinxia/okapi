@@ -92,15 +92,29 @@ impl AccountHooks for ClaudeAccount {
     ) -> BoxFuture<'a, Result<quota::Snapshot, UpstreamError>> {
         Box::pin(async move {
             let user_agent = crate::profiles::ClaudeCodeRevision::default().account_user_agent();
-            let data = quota::fetch(
-                &context,
-                "/api/oauth/usage",
+            let authorization = format!("Bearer {}", context.access_token);
+            let response = super::send_account(
+                context.http,
+                reqwest::Method::GET,
+                quota::url(&context, "/api/oauth/usage")?,
                 &[
-                    ("anthropic-beta", "oauth-2025-04-20"),
+                    ("authorization", authorization.as_str()),
+                    ("anthropic-beta", super::OAUTH_BETA),
                     ("user-agent", user_agent.as_str()),
                 ],
+                None,
+                std::time::Duration::from_secs(10),
+                context.outbound.proxy_url.as_deref(),
             )
-            .await?;
+            .await
+            .map_err(|error| match error {
+                UpstreamError::Timeout
+                | UpstreamError::Unreachable {
+                    timed_out: true, ..
+                } => UpstreamError::Timeout,
+                _ => UpstreamError::Connect("quota_probe".into()),
+            })?;
+            let data = quota::read(response).await?;
             self.parse_quota(&data, chrono::Utc::now().timestamp())
                 .ok_or_else(|| UpstreamError::Build("quota_unknown".into()))
         })
@@ -111,13 +125,26 @@ impl AccountHooks for ClaudeAccount {
         context: QuotaContext<'a>,
     ) -> BoxFuture<'a, Result<Option<String>, UpstreamError>> {
         Box::pin(async move {
+            // 与 CLI 登录后取 profile 同形（2.1.296 源码）：axios GET，UA/Authorization/
+            // Content-Type/Cache-Control 四个头，不带 beta。
             let user_agent = crate::profiles::ClaudeCodeRevision::default().account_user_agent();
-            let data = quota::fetch(
-                &context,
-                "/api/oauth/profile",
-                &[("user-agent", user_agent.as_str())],
+            let authorization = format!("Bearer {}", context.access_token);
+            let response = super::send_account(
+                context.http,
+                reqwest::Method::GET,
+                quota::url(&context, "/api/oauth/profile")?,
+                &[
+                    ("user-agent", user_agent.as_str()),
+                    ("authorization", authorization.as_str()),
+                    ("content-type", "application/json"),
+                    ("cache-control", "no-cache"),
+                ],
+                None,
+                std::time::Duration::from_secs(10),
+                context.outbound.proxy_url.as_deref(),
             )
             .await?;
+            let data = quota::read(response).await?;
             Ok(plan_from_profile(&data))
         })
     }
@@ -130,6 +157,7 @@ impl AccountHooks for ClaudeAccount {
             context.http,
             context.token_url.unwrap_or(super::TOKEN_URL),
             context.refresh_token,
+            context.scope,
             context.proxy_url,
         ))
     }

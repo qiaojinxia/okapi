@@ -132,6 +132,7 @@ async fn setup(provider: &str) -> Env {
             expires_at: chrono::Utc::now().timestamp() + 3600,
             account_id: Some("count-account".to_owned()),
             account_label: None,
+            scope: None,
         }
         .to_plaintext()
     } else {

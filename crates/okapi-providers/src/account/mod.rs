@@ -73,6 +73,8 @@ pub struct RefreshContext<'a> {
     pub http: &'a HttpPool,
     pub token_url: Option<&'a str>,
     pub refresh_token: &'a str,
+    /// 凭证记录的已授 scope（旧凭证为 None）。
+    pub scope: Option<&'a str>,
     pub proxy_url: Option<&'a str>,
 }
 

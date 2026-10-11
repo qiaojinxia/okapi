@@ -359,6 +359,8 @@ async fn refresh_locked(
                     .saturating_add(tokens.expires_in),
                 account_id: tokens.account_id.or_else(|| basis.account_id.clone()),
                 account_label: tokens.account_label.or_else(|| basis.account_label.clone()),
+                // 刷新响应不带 scope 时沿用旧值：下次刷新被拒 invalid_scope 要靠它判断能不能降级
+                scope: tokens.scope.or_else(|| basis.scope.clone()),
             };
             if basis.account_id.is_some() && next.account_id != basis.account_id {
                 return invalidate_current(state, key, &current.stored, "oauth_account_changed")
@@ -471,6 +473,7 @@ async fn do_refresh(
         http: state.upstream.http(),
         token_url: key.token_url,
         refresh_token: &basis.refresh_token,
+        scope: basis.scope.as_deref(),
         proxy_url: key.proxy_url,
     })
     .await

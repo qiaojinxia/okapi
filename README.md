@@ -160,6 +160,9 @@ flowchart LR
 
 ## 本地开发
 
+编译需要 cmake、clang 与 git（Claude Code 渠道的 TLS 握手用 BoringSSL，随构建从源码编译）：
+macOS `brew install cmake`，Debian/Ubuntu `apt install cmake make clang libclang-dev git`。
+
 ```bash
 bash scripts/dev-deps.sh up     # 起 PG + Redis + CH + NATS 开发容器（不在本机装服务）
 cp .env.example .env            # sqlx 编译期校验与运行时共用

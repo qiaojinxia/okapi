@@ -15,7 +15,8 @@ RUN cd frontend && pnpm build
 # 二进制拿到 bookworm-slim 运行时会 `GLIBC_2.38 not found` 直接起不来（scripts/verify-deploy.sh 抓到）
 FROM public.ecr.aws/docker/library/rust:1-slim-bookworm AS builder
 WORKDIR /src
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# cmake / make / clang / libclang / git：从源码编译 BoringSSL（Claude Code 外形的 TLS 握手，IMPLEMENTATION §11.42；boring-sys 用 git 打补丁）
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev cmake make clang libclang-dev git && rm -rf /var/lib/apt/lists/*
 COPY . .
 COPY --from=web /src/frontend/dist frontend/dist
 # 编译期 SQL 校验走离线快照（仓库内 .sqlx）

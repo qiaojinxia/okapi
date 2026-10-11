@@ -382,6 +382,7 @@ async fn setup_with_cache_write(
             expires_at: chrono::Utc::now().timestamp() + 3600,
             account_id: Some("acct-compact-fixture".to_owned()),
             account_label: None,
+            scope: None,
         }
         .to_plaintext()
     } else {

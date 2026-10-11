@@ -146,7 +146,7 @@ sequenceDiagram
 | L2 session 亲和 | `stick:sess:{uid}:v1:<session_hash>` | 1h 滑动 | 会话前缀哈希 → 同 channel_key，提升上游 prompt cache 命中率（直接降低用户账单的 cache_ratio 部分） |
 | L3 打分兜底 | — | — | 无粘性时进入 §3.3 |
 
-- L2 键优先取客户端会话头（`session_id` / `x-session-id`；Responses 的 `prompt_cache_key` 随 M3 接入），缺省回退前两条消息规范化文本哈希。当前实现哈希 = SHA-256 前 8 字节（xxhash64 为 M3 性能项）。注意 Nginx 默认丢弃带下划线的请求头，部署模板须加 `underscores_in_headers on`（§14.1）。
+- L2 键优先取客户端自报的会话 ID：Claude Code 的 `x-claude-code-session-id` 头 → Anthropic 请求体 `metadata.user_id` 里的 session（新版 JSON 串 / 旧版 `_session_<uuid>` 后缀）→ 通用会话头（`session_id` / `x-session-id`；Responses 的 `prompt_cache_key` 随 M3 接入），都没有才回退前两条消息规范化文本哈希（开场相同的会话会撞键、压缩上下文后同一会话会换键，只是近似）。当前实现哈希 = SHA-256 前 8 字节（xxhash64 为 M3 性能项）。注意 Nginx 默认丢弃带下划线的请求头，部署模板须加 `underscores_in_headers on`（§14.1）。
 - 键内嵌哈希算法版本号 `v1`；升级时双写双读一个 TTL 周期后下线旧版。
 - L2 亲和目标 key 不可用时走 L3 并刷新映射；L1 历史目标不可用时必须报错，不可替换为另一账号。
 
@@ -2402,8 +2402,8 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   `<system-reminder>` 块，ToolSearch 时才带 `advanced-tool-use`）。迁移 `0036_claude_code_profile_latest`
   把 `mimic_cc: true` 改写成 `mode: mimic` 的显式配置、已存的 2.1.258/2.1.286 改成 2.1.290；反序列化也把旧版本号
   当 2.1.290 读，控制台拒绝再写 `mimic_cc`。已知差异：请求体字段按字母序（官方 CLI 按插入序），上游接受。
-- **【2026-10-10】渠道列表显示订阅档位与近 30 天用量**：`AccountHooks::plan` 用
-  `GET /api/oauth/profile`（与额度探测同一个探针 client、同一个 Bearer token）读
+- **【2026-10-10】渠道列表显示订阅档位与近 30 天用量**：`AccountHooks::plan` 照 CLI 登录后的
+  `GET /api/oauth/profile`（UA / Authorization / Content-Type / Cache-Control，无 beta）读
   `organization.organization_type` + `rate_limit_tier` → `pro` / `max_5x` / `max_20x` / `max` / `team` / `enterprise`。
   挂在额度探测成功之后，同出口同 token，每把 key 每天最多一次（`plan:poll:ck:*`，失败 1h 后重试），
   结果连凭证身份存 `plan:ck:*`（48h）；换了账号身份不符就不显示。列表 key 带 `account_plan`。
@@ -2632,6 +2632,67 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
 代理商格式导入后认证、网关经代理出站、代理挂了不改走直连与恢复；据此修正失败归因并补
 `tunnel_failures_are_verified_before_tripping_a_shared_proxy`（上游挂了不连累共用代理、代理坏了核实后直接熔断）
 与 providers `proxy_hop_markers`（钉住错误文本）。
+
+### 11.42 Claude Code 外形的 TLS 握手与会话键（2026-10-07，对照 Sub2API / 9Router）
+
+**问题**：请求头、请求体、cch 与版本指纹已与真机逐字一致（§11.38 之后的 2.1.293 校对），但连接层还是
+reqwest + rustls：ClientHello 的 JA4 是 `t13d1011h2_61a7ad8aa9b6_0d308c48d2a3`，ALPN 带 h2、实际走 HTTP/2；
+真机（Bun 内置 BoringSSL）是 `t13d1713h1_5b57614c22b0_6a3d802a7139`、只说 http/1.1。头和体再像，握手一眼就能分开。
+另外 L2 会话粘性不认 Claude Code 自报的会话 ID，只按前两条消息哈希：开场相同的会话撞键、压缩上下文后同一会话换键。
+
+**定案**：
+
+- **TLS**（`okapi_providers::client_tls`）：渠道配了 `extensions.client_profile = claude-code`（任何模式——
+  auto / passthrough 转发的是真机请求，连接也该像真机）时，`HttpPool::send` 改走 BoringSSL 连接器 + hyper
+  HTTP/1.1 连接池；其余渠道照旧 reqwest。请求仍由 reqwest 构造，转成 `http::Request` 发送，响应转回
+  `reqwest::Response`，下游流式解析与错误处理不变。参数按 2.1.293 第一方抓包：14 个 TLS 1.2 套件（含 CBC
+  老套件）、组 `X25519MLKEM768:X25519:P-256:P-384`、ALPN 只有 http/1.1、开 OCSP / SCT；扩展顺序与签名算法
+  是 BoringSSL 原生值，无 GREASE。JA3 / JA4 与真机逐字相同，单测在本地截下 ClientHello 逐项比对。
+  以上是 `/v1/messages` 与 count_tokens 那套（`Shape::Messages`）。
+- **账号接口**（`Shape::Account`）：真机的换码、刷新（`platform.claude.com/v1/oauth/token`）与 `/api/...` 走 axios，
+  握手是另一套——JA4 `t13d181000_5d04281c6031_78e6aca7449b`：15 个 TLS 1.2 套件（RSA 在 ECDSA 前、多一个
+  `ECDHE-RSA-AES128-SHA256`），无 ALPN / OCSP / SCT。Claude 订阅的换码、刷新与用量查询（`oauth::anthropic_max::send_account`）
+  一律走它（不看渠道扩展，这三类请求只有真机 CLI 会发），头照抓包：`Accept: application/json, text/plain, */*` 打头，
+  换码 / 刷新 `Content-Type` + `User-Agent: axios/1.15.2`，用量 `Authorization` + `anthropic-beta` + `User-Agent: claude-code/<版本>`，
+  然后 `Content-Length`、`Accept-Encoding: gzip, compress, deflate, br`、`Host`、`Connection: close`（axios 每次新开连接）。
+  刷新请求体照 CLI 源码：`grant_type, refresh_token, client_id, scope`，总是申请含 `user:plugins` 的 `REFRESH_SCOPE`
+  （`expires_in` 只出现在环境变量登录路径，不带）。被拒 `invalid_scope` 时只在凭证记下的已授 scope（token 响应的
+  `scope`，存进 `OAuthCredential.scope`）确实不含 `user:plugins` 时退回原 scope 重试一次；已授过 plugins 的不降级，
+  这次刷新直接失败（上游误报不该让新 token 永久丢掉 plugins）。没记录 scope 的旧凭证按授权早于 plugins 的 scope 退回。
+- **`/v1/messages` 的头顺序与连接头**：真机（Bun fetch）的顺序是 `Accept`、`Authorization`、`Content-Type`、`User-Agent`、
+  `X-Claude-Code-Session-Id`、`X-Stainless-*`（字母序）、`anthropic-*`、`x-app`、`x-claude-code-*`、`x-client-request-id`、
+  `Connection: keep-alive`、`Host`、`Accept-Encoding: gzip, deflate, br, zstd`、`Content-Length`（主请求、起标题请求、sdk-cli
+  三份抓包一致）。`client_tls` 在发送前补上缺的连接头、显式写入 `Host` / `Content-Length`（免得 hyper 追加到末尾），
+  再按 `MESSAGES_ORDER` 重排；渠道额外头等表外的头排在 `x-client-request-id` 之后。
+- **响应解压**：既然声明了压缩，上游就可能压缩，SSE 也不例外。`client_tls` 按 `Content-Encoding`
+  （gzip / deflate(zlib) / br / zstd，`async-compression`）流式解压后去掉 `Content-Encoding` / `Content-Length`，
+  下游拿到原文；上游只发出一个事件时下游就能读到它；总时限的超时照样以 `TimedOut` 透出。两套握手都经过这一层。
+- **头名大小写**：hyper 写 HTTP/1 头名一律小写，真机按调用方写法原样发（`Content-Type`、`X-Stainless-OS` 与
+  `anthropic-version`、`x-app` 并存）。hyper 不开放客户端指定拼写，于是在连接层改写：请求头部逐字节过一遍，
+  头名按抓包表（`client_tls::WIRE_NAMES`）换回原拼写，只改大小写、长度不变；请求体按 Content-Length 原样放过，
+  认不出边界（分块编码）的连接此后不再改写。两套握手都经过这一层。
+- **出口代理**：连接器自建隧道（http / https CONNECT、socks5 / socks5h 含用户名密码），按代理 URL 缓存连接池。
+  失败分类与 reqwest 路径一致：连不上代理、代理拒绝认证 → 代理这一跳（进 §11.41 被动熔断）；代理报目标不可达、
+  目标握手失败 → 分不清，交给网关核实。总时限与 reqwest `timeout()` 同义，覆盖到响应体读完（超时报 `TimedOut`）。
+- **会话键**（`sched_redis::session_hash`）：优先 `x-claude-code-session-id` → Anthropic 请求体 `metadata.user_id`
+  里的 session（新版 JSON / 旧版 `_session_<uuid>`）→ `session_id` / `x-session-id` → 前两条消息哈希。
+- **上游会话 id 按下游用户隔开**：客户端不带 `x-claude-code-session-id` 时，模拟出的 `metadata.user_id.session_id`
+  由「装机 id（渠道 key）+ 下游用户 id + 首条用户消息」派生（`RequestContext::session_scope`）。此前不含用户：同一渠道 key 下
+  两个用户开场白相同就会落进同一个上游会话（内容不串——Messages 无服务端会话状态，只是标签相同）。
+- **构建**：BoringSSL 由 `boring-sys` 源码编译，需要 cmake / make / clang / libclang / git（Dockerfile 构建阶段已装、
+  已在 `rust:1-slim-bookworm` 实测；GitHub ubuntu-24.04 runner 自带）。
+- **证书校验不放松**：`SSL_VERIFY_PEER` + 主机名校验 + SNI，根证书用 webpki 的 Mozilla 集。`boring-sys` 自带的两个放松
+  补丁（`relax-cert-validation`：RSA keyUsage 不符降为非致命；`allow-crl-extensions-bad-version`：容忍证书版本号）
+  都挂在同名 cargo feature 后面，boring-sys 无默认 feature、我们也不开，所以都不进构建；唯一无条件打的是后量子补丁。
+  升级 `boring` 时复核这两个 feature 仍是默认关、且没有新的无条件放松补丁。
+
+**不照搬的**：Sub2API 去掉 cch（依据是经 `ANTHROPIC_BASE_URL` 接入时 CLI 不发，直连官方时一直在发）、它的 TLS
+模板是 Node 24（与 Bun 不同）、按 GitHub 发版每小时自动改版本号（2.1.293 的起标题请求换了模型和 beta，只改版本号
+会发出真机不存在的组合）；9Router 的 sha256 假 cch / 随机 build 段、工具名加 `_ide` 后缀与诱饵工具、压缩工具输出。
+
+**验收**：`client_tls_tests.rs`（两套 ClientHello 与抓包逐项一致；头名拼写与顺序（含同一连接连发、任意切分写入）；四种压缩的解压、压缩 SSE 边到边解、解压路径的总时限；直连 / HTTP CONNECT / socks5 / socks5h 真实 TLS 往返与连接复用；
+五类连接失败的 proxy_hop 判定；总时限覆盖响应体；明文 http 目标）；`anthropic_max` 账号请求的原始头逐行对照抓包；`session_hash_tests`、`client_session_tests`；
+真实订阅冒烟 `claude_code_live` 3 例在新连接上通过。
 
 ### 11.43 运维监控面板（2026-10-09，后台「系统 → 运维监控」）
 

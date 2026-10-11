@@ -479,7 +479,7 @@ pub async fn chat_completions(
             probe.messages.len(),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, &probe.messages),
+        session: session_hash(&headers, None, &probe.messages),
         service_tier: probe.service_tier.clone(),
         needs_tools,
         needs_vision,
@@ -575,7 +575,7 @@ async fn responses_entry(
             input_messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, &input_messages),
+        session: session_hash(&headers, None, &input_messages),
         service_tier: probe.service_tier.clone(),
         needs_tools,
         needs_vision,
@@ -652,7 +652,7 @@ pub async fn gemini_generate(
             input_messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, &input_messages),
+        session: session_hash(&headers, None, &input_messages),
         service_tier: None,
         needs_tools,
         needs_vision,
@@ -697,7 +697,11 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
             probe.messages.len(),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, &probe.messages),
+        session: session_hash(
+            &headers,
+            probe.client_session_id().as_deref(),
+            &probe.messages,
+        ),
         service_tier: None,
         needs_tools,
         needs_vision,
@@ -804,10 +808,8 @@ async fn count_tokens_inner(
             .api_base
             .clone()
             .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE.to_owned());
-        let outbound = super::oauth_cred::outbound_with_client(
-            &cand,
-            &super::oauth_cred::client_headers(headers),
-        );
+        let client = super::oauth_cred::client_headers(headers);
+        let outbound = super::oauth_cred::outbound_with_client(&cand, &client, Some(key.user_id));
         let counted = if cand.provider == "anthropic_max" {
             match super::oauth_cred::fresh_credential(state, &cand).await {
                 Ok(cred) => {
@@ -2543,7 +2545,8 @@ async fn dispatch_chat(
     bill.server_tools.verify_outbound(&body)?;
     let upstream_model = cand.upstream_model(&bill.model).to_owned();
     // 订阅 provider 额外带上客户端身份头（真实 Claude Code / Codex CLI 经网关出去时上游看到它自己）
-    let outbound = super::oauth_cred::outbound_with_client(cand, &bill.client_headers);
+    let outbound =
+        super::oauth_cred::outbound_with_client(cand, &bill.client_headers, Some(bill.user_id));
     // 方言臂内部再按 provider 选传输（直连 / bedrock / vertex），见 dialect.rs
     let dialect = plan.dialect.as_str();
     let resp = match (bill.ingress, dialect) {

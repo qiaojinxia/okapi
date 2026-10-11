@@ -26,6 +26,7 @@ pub fn normalize(provider: &str, plaintext: &str) -> Result<String, AppError> {
             expires_at: 0,
             account_id: None,
             account_label: None,
+            scope: None,
         }
     } else {
         return Err(AppError::bad_request().with_param("credential"));

@@ -276,6 +276,7 @@ pub async fn exchange(
         expires_at: now.saturating_add(tokens.expires_in),
         account_id: tokens.account_id,
         account_label: tokens.account_label,
+        scope: tokens.scope,
     };
     if hook
         .capabilities()

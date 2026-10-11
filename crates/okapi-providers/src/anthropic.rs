@@ -107,7 +107,7 @@ impl AnthropicUpstream {
         for (name, value) in prepared.headers {
             req = req.header(name.as_str(), value.as_str());
         }
-        let resp = req.send().await.map_err(|e| classify(&e))?;
+        let resp = self.http.send(req, &prepared.outbound).await?;
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
             let retry_after_secs = crate::retry_after::seconds(resp.headers());
@@ -152,7 +152,7 @@ pub async fn send_messages_at(
         req = req.timeout(NON_STREAM_TIMEOUT);
     }
 
-    let resp = req.send().await.map_err(|e| classify(&e))?;
+    let resp = http.send(req, outbound).await?;
     let status = resp.status().as_u16();
     let upstream_request_id = ["request-id", "x-request-id"]
         .iter()

@@ -63,6 +63,8 @@ pub struct Tokens {
     /// 账号邮箱，仅供控制台展示：codex 取 id_token 的 `email`，anthropic_max 取
     /// 换码响应的 `account.email_address`。刷新响应通常不带，沿用旧值。
     pub account_label: Option<String>,
+    /// token 响应的 `scope`（已授权范围，空格分隔）；没给就是 None。
+    pub scope: Option<String>,
 }
 
 /// 通用 token 响应解析：`access_token` 必有，`expires_in` 缺省 1h。
@@ -97,6 +99,12 @@ pub(crate) fn parse_tokens(body: &[u8]) -> Result<Tokens, UpstreamError> {
                         .map(str::to_owned)
                 })
             }),
+        scope: v
+            .get("scope")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
         account_label: v
             .get("id_token")
             .and_then(Value::as_str)
@@ -226,6 +234,7 @@ mod tests {
                 expires_in: 28800,
                 account_id: None,
                 account_label: None,
+                scope: None,
             }
         );
         let t = parse_tokens(br#"{"access_token":"a"}"#).unwrap();

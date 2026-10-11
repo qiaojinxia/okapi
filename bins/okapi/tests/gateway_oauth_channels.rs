@@ -909,7 +909,7 @@ async fn token_endpoint_redirect_is_not_followed() {
         )
     };
     assert!(is_302(
-        okapi_providers::oauth::anthropic_max::refresh(&http, &token_url, "rt", None).await
+        okapi_providers::oauth::anthropic_max::refresh(&http, &token_url, "rt", None, None).await
     ));
     assert!(is_302(
         okapi_providers::oauth::anthropic_max::exchange(&http, &token_url, "code", "v", None).await

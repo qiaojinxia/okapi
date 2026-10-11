@@ -579,6 +579,7 @@ async fn codex_credentials_headers_and_opaque_input_use_native_ws_shape() {
         expires_at: chrono::Utc::now().timestamp() + 3600,
         account_id: Some("account".into()),
         account_label: None,
+        scope: None,
     };
     sqlx::query("UPDATE channels SET provider='codex' WHERE id=$1")
         .bind(env.channel)

@@ -10,6 +10,7 @@ fn outbound(entry: &str, class: &str) -> Outbound {
             extensions: json!({"client_profile":{"name":"claude-code","mode":"mimic",
                 "revision":"2.1.290","entrypoint":entry,"request_class":class}}),
             identity_seed: Some("fixture-key".into()),
+            session_scope: None,
             client_headers: vec![
                 ("x-claude-code-session-id".into(), SESSION.into()),
                 ("x-claude-code-prompt-id".into(), PROMPT.into()),
@@ -33,6 +34,34 @@ fn prepare_value(body: Value, out: &Outbound, counting: bool) -> (PreparedReques
     (prepared, value)
 }
 
+/// 按出现顺序取顶层键。
+fn top_level_keys(body: &[u8]) -> Vec<String> {
+    struct Keys(Vec<String>);
+    impl<'de> serde::Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some((key, _)) = map.next_entry::<String, serde::de::IgnoredAny>()? {
+                        keys.push(key);
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            d.deserialize_map(V)
+        }
+    }
+    serde_json::from_slice::<Keys>(body).unwrap().0
+}
+
 fn header_value<'a>(prepared: &'a PreparedRequest, name: &str) -> &'a str {
     &prepared
         .headers
@@ -40,6 +69,57 @@ fn header_value<'a>(prepared: &'a PreparedRequest, name: &str) -> &'a str {
         .find(|(key, _)| key == name)
         .unwrap()
         .1
+}
+
+#[test]
+fn body_fields_go_out_in_the_cli_order() {
+    let (prepared, _) = prepare_value(
+        json!({"model":"claude-sonnet-5-5","stream":true,
+        "tools":[{"name":"lookup","description":"Find a value","input_schema":{"type":"object"}}],
+        "messages":[{"role":"user","content":"Reply exactly OK."}],"system":"Caller policy"}),
+        &outbound("cli", "main"),
+        false,
+    );
+    // 字段顺序与 2.1.293 抓包（out-293-tui 主请求，去掉本例没有的 safeguards）一致，不是字母序
+    let order = top_level_keys(&prepared.body);
+    assert_eq!(
+        order,
+        [
+            "model",
+            "messages",
+            "system",
+            "tools",
+            "metadata",
+            "max_tokens",
+            "thinking",
+            "context_management",
+            "output_config",
+            "diagnostics",
+            "stream"
+        ]
+    );
+    assert!(
+        String::from_utf8_lossy(&prepared.body).contains(r#"{"role":"user","content":"#),
+        "消息按 role、content 写出"
+    );
+    // 嵌套对象也照 2.1.296 抓包：user_id 串内 device_id 打头，编辑项 type 打头
+    let body: Value = serde_json::from_slice(&prepared.body).unwrap();
+    let user_id = body["metadata"]["user_id"].as_str().unwrap();
+    let keys: Vec<&str> = user_id
+        .split("\":")
+        .map(|s| s.rsplit('"').next().unwrap())
+        .collect();
+    assert_eq!(
+        keys[..3],
+        ["device_id", "account_uuid", "session_id"],
+        "{user_id}"
+    );
+    assert!(
+        String::from_utf8_lossy(&prepared.body).contains(
+            r#""context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}"#
+        ),
+        "编辑项 type 打头"
+    );
 }
 
 #[test]

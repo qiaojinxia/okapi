@@ -98,6 +98,10 @@ pub struct OAuthCredential {
     /// 账号的可读标识（邮箱），只用于控制台展示，不参与鉴权或身份模拟。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
+    /// token 端点最近一次回报的已授 scope（空格分隔）。刷新被拒 `invalid_scope` 时据此判断能否
+    /// 退回旧 scope：原本就授过的 scope 不能因上游一次误报被降级。旧凭证没有此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 impl OAuthCredential {
@@ -288,6 +292,7 @@ mod tests {
             expires_at: 1_700_000_000,
             account_id: None,
             account_label: None,
+            scope: None,
         };
         let text = cred.to_plaintext();
         assert!(text.contains(r#""kind":"oauth""#));

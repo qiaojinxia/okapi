@@ -109,6 +109,7 @@ mod tests {
                 expires_at: 123,
                 account_id: Some("secret-account".into()),
                 account_label: None,
+                scope: None,
             }),
         ];
         for credential in credentials {

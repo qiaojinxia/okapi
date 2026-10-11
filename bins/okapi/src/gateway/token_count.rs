@@ -290,9 +290,11 @@ async fn forward_count(
 ) -> Result<okapi_providers::responses::InputTokenCount, UpstreamError> {
     let model = candidate.upstream_model(canonical);
     let body = okapi_providers::rewrite_model(&body, requested, model)?;
+    // Responses 输入计数只到 Codex / OpenAI，不经 Claude Code 模拟，无需会话隔离
     let outbound = super::oauth_cred::outbound_with_client(
         candidate,
         &super::oauth_cred::client_headers(headers),
+        None,
     );
     let oauth = if candidate.provider == "codex" {
         Some(super::oauth_cred::fresh_credential(state, candidate).await?)

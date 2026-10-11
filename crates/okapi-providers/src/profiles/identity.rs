@@ -3,7 +3,7 @@
 //! 请求整形（UA、beta、system 块、cch 签名）只在 [`crate::profiles`] 的最新客户端配置里，
 //! 由渠道的 `extensions.client_profile` 选用。这里只放与版本无关、跨请求必须稳定的身份。
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// `cc_version` 指纹盐：真实 CLI 抓包逆出的常量（Sub2API `FINGERPRINT_SALT` 同源）。
@@ -57,14 +57,15 @@ impl MimicIdentity {
         }
     }
 
-    /// 会话 UUID（v4 形态）：种子 = device_id + 首条 user 消息文本。对话只在尾部追加，
-    /// 这两样跨轮不变 → 同一会话稳定；不同对话的开场白相同时会碰撞（Sub2API `buildStableSessionSeed`
-    /// 同思路；无状态代理无法恢复真实 CLI 的进程级随机 UUID，只能这样近似）。
-    fn session_uuid(&self, first_user_text: &str) -> String {
-        uuid_from_sha256(Sha256::digest(format!(
-            "{}::{}",
-            self.device_id, first_user_text
-        )))
+    /// 会话 UUID（v4 形态）：种子 = device_id +（有则）下游用户 + 首条 user 消息文本。对话只在尾部追加，
+    /// 这几样跨轮不变 → 同一会话稳定；同一用户的不同对话开场白相同时仍会碰撞（Sub2API
+    /// `buildStableSessionSeed` 同思路；无状态代理无法恢复真实 CLI 的进程级随机 UUID，只能这样近似）。
+    fn session_uuid(&self, scope: Option<&str>, first_user_text: &str) -> String {
+        let seed = match scope {
+            Some(scope) => format!("{}::{scope}::{first_user_text}", self.device_id),
+            None => format!("{}::{first_user_text}", self.device_id),
+        };
+        uuid_from_sha256(Sha256::digest(seed))
     }
 
     /// `metadata.user_id`：CLI ≥ 2.1.78 的 JSON 字符串格式。显式会话 ID 优先。
@@ -72,13 +73,17 @@ impl MimicIdentity {
         &self,
         first_user_text: &str,
         session_id: Option<&str>,
+        scope: Option<&str>,
     ) -> String {
-        json!({
-            "device_id": self.device_id,
-            "account_uuid": self.account_uuid,
-            "session_id": session_id.map_or_else(|| self.session_uuid(first_user_text), str::to_owned),
-        })
-        .to_string()
+        // 手工拼：`json!` 会按字母序排键，真机是 device_id → account_uuid → session_id。
+        let session =
+            session_id.map_or_else(|| self.session_uuid(scope, first_user_text), str::to_owned);
+        format!(
+            r#"{{"device_id":{},"account_uuid":{},"session_id":{}}}"#,
+            Value::from(self.device_id.as_str()),
+            Value::from(self.account_uuid.as_str()),
+            Value::from(session),
+        )
     }
 }
 
@@ -152,6 +157,7 @@ fn first_user_text(body: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const VERSION: &str = "2.1.290";
 
@@ -173,9 +179,28 @@ mod tests {
     #[test]
     fn session_uuid_stable_within_conversation_varies_across() {
         let id = identity();
-        let s1 = id.session_uuid("hello world");
-        assert_eq!(s1, id.session_uuid("hello world"), "同一会话 session 稳定");
-        assert_ne!(id.session_uuid("another conversation"), s1, "不同会话互异");
+        let s1 = id.session_uuid(None, "hello world");
+        assert_eq!(
+            s1,
+            id.session_uuid(None, "hello world"),
+            "同一会话 session 稳定"
+        );
+        assert_ne!(
+            id.session_uuid(None, "another conversation"),
+            s1,
+            "不同会话互异"
+        );
+        let mine = id.session_uuid(Some("7"), "hello world");
+        assert_eq!(
+            mine,
+            id.session_uuid(Some("7"), "hello world"),
+            "同一用户同一会话稳定"
+        );
+        assert_ne!(
+            mine,
+            id.session_uuid(Some("8"), "hello world"),
+            "开场白相同的不同用户不撞"
+        );
         let parts: Vec<&str> = s1.split('-').collect();
         assert_eq!(
             parts.iter().map(|p| p.len()).collect::<Vec<_>>(),
@@ -191,12 +216,12 @@ mod tests {
 
     #[test]
     fn metadata_user_id_is_json_with_three_fields() {
-        let uid = identity().metadata_user_id_for_session("hi", None);
+        let uid = identity().metadata_user_id_for_session("hi", None, None);
         let v: Value = serde_json::from_str(&uid).unwrap();
         assert_eq!(v["device_id"], identity().device_id);
         assert_eq!(v["account_uuid"], "acc-uuid-1");
         assert!(v["session_id"].as_str().is_some_and(|s| s.len() == 36));
-        let explicit = identity().metadata_user_id_for_session("hi", Some("s"));
+        let explicit = identity().metadata_user_id_for_session("hi", Some("s"), Some("7"));
         assert_eq!(
             serde_json::from_str::<Value>(&explicit).unwrap()["session_id"],
             "s"

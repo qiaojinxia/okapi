@@ -6,6 +6,7 @@ fn outbound(mode: &str) -> Outbound {
         context: RequestContext {
             extensions: json!({"client_profile":{"name":"claude-code","mode":mode}}),
             identity_seed: Some("account-key-42".into()),
+            session_scope: None,
             client_headers: vec![("user-agent".into(), "python-sdk/1.0".into())],
         },
         ..Default::default()

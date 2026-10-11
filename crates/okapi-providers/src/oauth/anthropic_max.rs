@@ -16,10 +16,11 @@
 pub mod account;
 
 use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
-use crate::anthropic::{ANTHROPIC_VERSION, MessagesResponse, classify, send_messages_at};
+use crate::anthropic::{ANTHROPIC_VERSION, MessagesResponse, send_messages_at};
 use crate::error::UpstreamError;
 use crate::profiles::identity::BETA_TOKEN_COUNTING;
 use bytes::Bytes;
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -29,7 +30,13 @@ pub const AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 /// 手动回调页：浏览器授权后页面直接显示 `code#state`，站长贴回控制面。
 pub const REDIRECT_URI: &str = "https://platform.claude.com/oauth/code/callback";
-const SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
+/// 授权时申请的 scope，与 CLI 登录一致（2.1.294：`org:create_api_key` + 刷新那组）。
+const SCOPE: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
+/// 刷新时申请的 scope：CLI 每次都带，不含 `org:create_api_key`。
+const REFRESH_SCOPE: &str = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins";
+/// 申请 `REFRESH_SCOPE` 被拒（`invalid_scope`，没授过 `user:plugins` 的旧 token）时退回的 scope：
+/// CLI 退回 token 当初授到的那组，即加 `user:plugins` 之前的授权 scope。
+const GRANTED_SCOPE_BEFORE_PLUGINS: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 /// 订阅 token 走 Bearer 必须带的 beta 标记。
 pub const OAUTH_BETA: &str = "oauth-2025-04-20";
 /// 订阅路径必带的 beta 集合：缺 `claude-code-20250219` 上游可能把请求当非 Claude Code 拒收。
@@ -79,58 +86,117 @@ pub async fn exchange(
     verifier: &str,
     proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
-    post_token(
-        http,
-        token_url,
-        json!({
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": REDIRECT_URI,
-            "client_id": CLIENT_ID,
-            "code_verifier": verifier,
-            "state": verifier,
-        }),
-        proxy_url,
-    )
-    .await
+    /// 字段顺序即 CLI 的插入顺序（serde_json 的 `Value` 会按字母序重排，这里用结构体）。
+    #[derive(Serialize)]
+    struct Exchange<'a> {
+        grant_type: &'a str,
+        code: &'a str,
+        redirect_uri: &'a str,
+        client_id: &'a str,
+        code_verifier: &'a str,
+        state: &'a str,
+    }
+    let body = Exchange {
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: REDIRECT_URI,
+        client_id: CLIENT_ID,
+        code_verifier: verifier,
+        state: verifier,
+    };
+    post_token(http, token_url, json_body(&body)?, proxy_url).await
 }
 
-/// 刷新（JSON 体）。
+/// 刷新（JSON 体）。照 CLI：总是申请 `REFRESH_SCOPE`，被拒 `invalid_scope` 再按 token 原有的 scope 重试一次；
+/// 不带 `expires_in`（那只出现在 `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` 环境变量登录的路径上）。
+///
+/// `granted` 是凭证记下的已授 scope。只有它确实不含 `user:plugins`（授权早于 plugins 的旧 token）才退回：
+/// 原本就授过的 scope 被拒多半是上游误报，降级重试拿到的新 token 会永久丢掉 plugins，宁可这次刷新失败。
+/// 没记录（旧凭证）时按授权早于 plugins 的 scope 退回，与此前行为一致。
 pub async fn refresh(
     http: &crate::http::HttpPool,
     token_url: &str,
     refresh_token: &str,
+    granted: Option<&str>,
     proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
-    post_token(
-        http,
-        token_url,
-        json!({
-            "grant_type": "refresh_token",
-            "client_id": CLIENT_ID,
-            "refresh_token": refresh_token,
-        }),
-        proxy_url,
-    )
-    .await
+    #[derive(Serialize)]
+    struct TokenRefresh<'a> {
+        grant_type: &'a str,
+        refresh_token: &'a str,
+        client_id: &'a str,
+        scope: &'a str,
+    }
+    let body = |scope| {
+        json_body(&TokenRefresh {
+            grant_type: "refresh_token",
+            refresh_token,
+            client_id: CLIENT_ID,
+            scope,
+        })
+    };
+    match post_token(http, token_url, body(REFRESH_SCOPE)?, proxy_url).await {
+        Err(UpstreamError::Status {
+            status: 400,
+            body: rejected,
+            ..
+        }) if invalid_scope(&rejected) => match downgrade_scope(granted) {
+            Some(scope) => post_token(http, token_url, body(scope)?, proxy_url).await,
+            None => Err(UpstreamError::Status {
+                status: 400,
+                body: rejected,
+                retry_after_secs: None,
+            }),
+        },
+        other => other,
+    }
 }
 
-/// token 端点走不跟随重定向的探针 client：地址可被管理员覆写（`oauth_token_url`），
-/// SSRF 闸只看得到填进来的那个 URL。
+/// `invalid_scope` 之后退回哪个 scope；`None` = 不退（已授过 plugins）。
+fn downgrade_scope(granted: Option<&str>) -> Option<&str> {
+    match granted {
+        None => Some(GRANTED_SCOPE_BEFORE_PLUGINS),
+        Some(scope) if scope.split_whitespace().any(|s| s == "user:plugins") => None,
+        Some(scope) => Some(scope),
+    }
+}
+
+fn json_body(body: &impl Serialize) -> Result<String, UpstreamError> {
+    serde_json::to_string(body).map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// token 端点的 400 是不是 `invalid_scope`（标准 OAuth 写在 `error`，也认 `code` / `error.type`）。
+fn invalid_scope(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    [&value["error"], &value["code"], &value["error"]["type"]]
+        .iter()
+        .any(|field| field.as_str() == Some("invalid_scope"))
+}
+
+/// token 端点不跟随重定向：地址可被管理员覆写（`oauth_token_url`），SSRF 闸只看得到填进来的那个 URL。
 async fn post_token(
     http: &crate::http::HttpPool,
     token_url: &str,
-    body: Value,
+    body: String,
     proxy_url: Option<&str>,
 ) -> Result<Tokens, UpstreamError> {
-    let resp = http
-        .probe(&token_outbound(proxy_url), reqwest::Method::POST, token_url)?
-        .timeout(TOKEN_TIMEOUT)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body.to_string())
-        .send()
-        .await
-        .map_err(|e| classify(&e))?;
+    let url = reqwest::Url::parse(token_url).map_err(|e| UpstreamError::Build(e.to_string()))?;
+    let user_agent = crate::profiles::ClaudeCodeRevision::default().axios_user_agent();
+    let resp = send_account(
+        http,
+        reqwest::Method::POST,
+        url,
+        &[
+            ("content-type", "application/json"),
+            ("user-agent", user_agent),
+        ],
+        Some(body),
+        TOKEN_TIMEOUT,
+        proxy_url,
+    )
+    .await?;
     let status = resp.status().as_u16();
     let bytes = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
     if !(200..300).contains(&status) {
@@ -141,6 +207,47 @@ async fn post_token(
         });
     }
     parse_tokens(&bytes)
+}
+
+/// 账号接口（换码、刷新、`/api/oauth/usage`）照真机发：CLI 在这里用 axios，握手是另一套
+/// （`client_tls::Shape::Account`）；头的取舍与顺序按 2.1.293 第一方抓包——`Accept` 打头，调用方的头，
+/// 有体时 `Content-Length`，最后 `Accept-Encoding`、`Host`、`Connection: close`（axios 每次新开连接）。
+/// 响应按 `Content-Encoding` 由 `client_tls` 解压（`compress` 上游实际不用）。
+pub(crate) async fn send_account(
+    http: &crate::http::HttpPool,
+    method: reqwest::Method,
+    url: reqwest::Url,
+    headers: &[(&str, &str)],
+    body: Option<String>,
+    timeout: Duration,
+    proxy_url: Option<&str>,
+) -> Result<reqwest::Response, UpstreamError> {
+    let host = match (url.host_str(), url.port()) {
+        (Some(host), Some(port)) => format!("{host}:{port}"),
+        (Some(host), None) => host.to_owned(),
+        (None, _) => return Err(UpstreamError::Build("account_url_host".into())),
+    };
+    let mut request = http
+        .probe(&token_outbound(proxy_url), method, url)?
+        .timeout(timeout)
+        .header("accept", "application/json, text/plain, */*");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    if let Some(body) = &body {
+        request = request.header("content-length", body.len());
+    }
+    request = request
+        .header("accept-encoding", "gzip, compress, deflate, br")
+        .header("host", host)
+        .header("connection", "close");
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    let request = request
+        .build()
+        .map_err(|e| UpstreamError::Build(e.to_string()))?;
+    http.send_claude_account(request, proxy_url).await
 }
 
 /// 把 Anthropic Messages 请求体改成订阅路径要求的形状：system 首元素前置自述句（字符串 system
@@ -303,7 +410,7 @@ pub async fn count_tokens(
     for (k, v) in prepared.headers {
         req = req.header(k.as_str(), v.as_str());
     }
-    let resp = req.send().await.map_err(|e| classify(&e))?;
+    let resp = http.send(req, &outbound).await?;
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
         let retry_after_secs = crate::retry_after::seconds(resp.headers());
@@ -418,5 +525,214 @@ mod tests {
         );
         assert!(outbound.extra_headers.is_empty());
         assert!(!beta.contains("claude-code-20250219"));
+    }
+
+    /// 收一个请求，把原始请求（头 + 体）当响应体回过去。
+    async fn echo_once() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            while !raw.ends_with(b"\r\n\r\n") {
+                raw.push(tcp.read_u8().await.unwrap());
+            }
+            let head = String::from_utf8(raw.clone()).unwrap();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .map_or(0, |v| v.parse::<usize>().unwrap());
+            let mut body = vec![0u8; length];
+            tcp.read_exact(&mut body).await.unwrap();
+            raw.extend_from_slice(&body);
+            let mut response =
+                format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n", raw.len()).into_bytes();
+            response.extend_from_slice(&raw);
+            tcp.write_all(&response).await.unwrap();
+        });
+        addr
+    }
+
+    /// 依次用 `replies` 应答，每条连接一个请求；把收到的请求体按序交回。
+    async fn token_endpoint(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/oauth/token", listener.local_addr().unwrap());
+        let (sent, received) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            for (status, reply) in replies {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(tcp.read_u8().await.unwrap());
+                }
+                let length = String::from_utf8_lossy(&head)
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Content-Length: "))
+                    .map_or(0, |v| v.parse::<usize>().unwrap());
+                let mut body = vec![0u8; length];
+                tcp.read_exact(&mut body).await.unwrap();
+                sent.send(String::from_utf8(body).unwrap()).unwrap();
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n\r\n{reply}",
+                    reply.len()
+                );
+                tcp.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, received)
+    }
+
+    /// 字段与顺序照 CLI 源码（`grant_type, refresh_token, client_id, scope`，无 `expires_in`）；
+    /// 旧 token 申请不到 `user:plugins` 时退回原授权 scope 再试一次。
+    #[tokio::test]
+    async fn refresh_asks_for_the_cli_scope_and_falls_back_on_invalid_scope() {
+        let http = crate::http::HttpPool::new().unwrap();
+        let (url, mut bodies) = token_endpoint(vec![
+            (400, r#"{"error":"invalid_scope","error_description":"x"}"#),
+            (
+                200,
+                r#"{"access_token":"a","refresh_token":"r2","expires_in":28800}"#,
+            ),
+        ])
+        .await;
+        let tokens = refresh(&http, &url, "r1", None, None).await.unwrap();
+        assert_eq!(tokens.access_token, "a");
+        assert_eq!(
+            bodies.recv().await.unwrap(),
+            format!(
+                r#"{{"grant_type":"refresh_token","refresh_token":"r1","client_id":"{CLIENT_ID}","scope":"{REFRESH_SCOPE}"}}"#
+            )
+        );
+        assert_eq!(
+            bodies.recv().await.unwrap(),
+            format!(
+                r#"{{"grant_type":"refresh_token","refresh_token":"r1","client_id":"{CLIENT_ID}","scope":"{GRANTED_SCOPE_BEFORE_PLUGINS}"}}"#
+            )
+        );
+
+        // 别的 400 不重试
+        let (url, mut bodies) = token_endpoint(vec![(400, r#"{"error":"invalid_grant"}"#)]).await;
+        assert!(matches!(
+            refresh(&http, &url, "r1", None, None).await,
+            Err(UpstreamError::Status { status: 400, .. })
+        ));
+        bodies.recv().await.unwrap();
+        assert!(bodies.recv().await.is_none());
+
+        // 记录过的旧 scope 照原样退回
+        let (url, mut bodies) = token_endpoint(vec![
+            (400, r#"{"error":"invalid_scope"}"#),
+            (200, r#"{"access_token":"a","expires_in":28800}"#),
+        ])
+        .await;
+        refresh(&http, &url, "r1", Some("user:profile user:inference"), None)
+            .await
+            .unwrap();
+        bodies.recv().await.unwrap();
+        assert!(
+            bodies
+                .recv()
+                .await
+                .unwrap()
+                .contains(r#""scope":"user:profile user:inference""#)
+        );
+    }
+
+    /// 已授过 `user:plugins` 的 token 被拒 invalid_scope 是上游误报：不降级重试，免得新 token 永久丢掉 plugins。
+    #[tokio::test]
+    async fn refresh_never_downgrades_a_token_that_already_holds_plugins() {
+        let http = crate::http::HttpPool::new().unwrap();
+        let (url, mut bodies) = token_endpoint(vec![(400, r#"{"error":"invalid_scope"}"#)]).await;
+        assert!(matches!(
+            refresh(&http, &url, "r1", Some(REFRESH_SCOPE), None).await,
+            Err(UpstreamError::Status { status: 400, .. })
+        ));
+        bodies.recv().await.unwrap();
+        assert!(bodies.recv().await.is_none(), "只发了一次刷新");
+    }
+
+    #[test]
+    fn token_response_scope_is_recorded() {
+        let tokens = crate::oauth::parse_tokens(
+            br#"{"access_token":"a","expires_in":1,"scope":"user:inference user:plugins"}"#,
+        )
+        .unwrap();
+        assert_eq!(tokens.scope.as_deref(), Some("user:inference user:plugins"));
+    }
+
+    #[tokio::test]
+    async fn exchange_body_keeps_the_cli_field_order() {
+        let http = crate::http::HttpPool::new().unwrap();
+        let (url, mut bodies) =
+            token_endpoint(vec![(200, r#"{"access_token":"a","expires_in":28800}"#)]).await;
+        exchange(&http, &url, "c", "v", None).await.unwrap();
+        assert_eq!(
+            bodies.recv().await.unwrap(),
+            format!(
+                r#"{{"grant_type":"authorization_code","code":"c","redirect_uri":"{REDIRECT_URI}","client_id":"{CLIENT_ID}","code_verifier":"v","state":"v"}}"#
+            )
+        );
+    }
+
+    /// 与 2.1.293 第一方抓包逐行对照。
+    #[tokio::test]
+    async fn account_requests_go_out_like_the_cli_axios_calls() {
+        let http = crate::http::HttpPool::new().unwrap();
+        let addr = echo_once().await;
+        let body = r#"{"grant_type":"refresh_token"}"#;
+        let response = send_account(
+            &http,
+            reqwest::Method::POST,
+            reqwest::Url::parse(&format!("http://{addr}/v1/oauth/token")).unwrap(),
+            &[
+                ("content-type", "application/json"),
+                ("user-agent", "axios/1.15.2"),
+            ],
+            Some(body.to_owned()),
+            TOKEN_TIMEOUT,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.text().await.unwrap(),
+            format!(
+                "POST /v1/oauth/token HTTP/1.1\r\nAccept: application/json, text/plain, */*\r\n\
+                 Content-Type: application/json\r\nUser-Agent: axios/1.15.2\r\n\
+                 Content-Length: {}\r\nAccept-Encoding: gzip, compress, deflate, br\r\n\
+                 Host: {addr}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        );
+
+        let addr = echo_once().await;
+        let response = send_account(
+            &http,
+            reqwest::Method::GET,
+            reqwest::Url::parse(&format!("http://{addr}/api/oauth/usage")).unwrap(),
+            &[
+                ("authorization", "Bearer t"),
+                ("anthropic-beta", OAUTH_BETA),
+                ("user-agent", "claude-code/2.1.296"),
+            ],
+            None,
+            TOKEN_TIMEOUT,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.text().await.unwrap(),
+            format!(
+                "GET /api/oauth/usage HTTP/1.1\r\nAccept: application/json, text/plain, */*\r\n\
+                 Authorization: Bearer t\r\nanthropic-beta: oauth-2025-04-20\r\n\
+                 User-Agent: claude-code/2.1.296\r\n\
+                 Accept-Encoding: gzip, compress, deflate, br\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+            )
+        );
     }
 }

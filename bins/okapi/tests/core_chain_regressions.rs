@@ -1021,8 +1021,10 @@ async fn subscription_credential_failure_fails_over_without_leaking_the_token_en
             .await
             .unwrap();
         }
+        // 凭证记着已授 user:plugins：被拒 invalid_scope 不降级重试（上游误报不能让新 token 丢 scope），只刷一次
         let expired = json!({"kind": "oauth", "access_token": "stale", "refresh_token": "refresh",
-            "expires_at": chrono::Utc::now().timestamp() - 60})
+            "expires_at": chrono::Utc::now().timestamp() - 60,
+            "scope": "user:profile user:inference user:plugins"})
         .to_string();
         let settings = json!({"oauth_token_url": format!("http://{}/oauth/token", env.upstream)});
         okapi_store::provision::create_channel_configured(

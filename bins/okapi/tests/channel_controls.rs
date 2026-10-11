@@ -53,7 +53,11 @@ async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
 }
 async fn profile(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
     mock.profile.fetch_add(1, Ordering::SeqCst);
-    assert!(headers.contains_key("authorization"));
+    assert!(
+        headers.get("anthropic-beta").is_none(),
+        "CLI 取 profile 不带 beta"
+    );
+    assert_eq!(headers["cache-control"], "no-cache");
     Json(
         json!({"account":{"uuid":"a","email":"x@example.com","has_claude_max":true},"organization":{"uuid":"o","organization_type":"claude_max","rate_limit_tier":"default_claude_max_20x"}}),
     )
@@ -120,6 +124,7 @@ async fn setup(provider: &str, settings: Value) -> Env {
         expires_at: chrono::Utc::now().timestamp() + 3600,
         account_id: Some(suffix.clone()),
         account_label: None,
+        scope: None,
     };
     let plain = if provider == "openai" {
         "mock-key".into()

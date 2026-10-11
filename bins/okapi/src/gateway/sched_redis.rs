@@ -1195,20 +1195,30 @@ pub struct KpiSecond {
     pub errors: i64,
 }
 
-/// 会话标识提取（§3.2）：优先客户端会话头（`session_id` / `x-session-id`，
-/// Nginx 需 `underscores_in_headers on`），缺省取首两条消息规范化文本哈希。
+/// 会话标识提取（§3.2）：优先客户端自报的会话 ID——Claude Code 的 `x-claude-code-session-id`
+/// 头、请求体 `metadata.user_id` 里的 session（`body_session`，仅 Anthropic 入口）、通用的
+/// `session_id` / `x-session-id` 头（Nginx 需 `underscores_in_headers on`）；都没有才取首两条消息
+/// 规范化文本哈希。内容哈希只是近似：开场相同的两个会话会撞在一起，压缩上下文后同一会话会变。
 /// 哈希 = SHA-256 前 8 字节 hex（xxhash 为 M3 性能优化项）。
 #[must_use]
-pub fn session_hash(headers: &HeaderMap, messages: &[okapi_api::MessageProbe]) -> Option<String> {
-    for name in ["session_id", "x-session-id"] {
-        if let Some(value) = headers
+pub fn session_hash(
+    headers: &HeaderMap,
+    body_session: Option<&str>,
+    messages: &[okapi_api::MessageProbe],
+) -> Option<String> {
+    let header = |name: &str| {
+        headers
             .get(name)
             .and_then(|v| v.to_str().ok())
             .map(str::trim)
             .filter(|v| !v.is_empty())
-        {
-            return Some(short_hash(value.as_bytes()));
-        }
+    };
+    let explicit = header("x-claude-code-session-id")
+        .or(body_session.map(str::trim).filter(|v| !v.is_empty()))
+        .or_else(|| header("session_id"))
+        .or_else(|| header("x-session-id"));
+    if let Some(value) = explicit {
+        return Some(short_hash(value.as_bytes()));
     }
 
     let mut text = String::new();
@@ -1241,6 +1251,75 @@ fn append_content_text(out: &mut String, content: &serde_json::Value) {
 fn short_hash(input: &[u8]) -> String {
     let digest = Sha256::digest(input);
     hex::encode(&digest[..8])
+}
+
+#[cfg(test)]
+mod session_hash_tests {
+    use super::session_hash;
+    use axum::http::HeaderMap;
+    use okapi_api::MessageProbe;
+
+    fn messages(first: &str) -> Vec<MessageProbe> {
+        vec![MessageProbe {
+            role: "user".into(),
+            content: serde_json::json!(first),
+            tool_calls: serde_json::Value::Null,
+        }]
+    }
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        let mut map = HeaderMap::new();
+        for (name, value) in pairs {
+            map.insert(*name, value.parse().unwrap());
+        }
+        map
+    }
+
+    /// 客户端自报的会话 ID 优先于内容哈希：开场相同的两个 Claude Code 会话分开粘，
+    /// 同一会话压缩上下文（首条消息变了）后仍粘原账号。
+    #[test]
+    fn client_session_ids_take_precedence_over_content() {
+        let none = HeaderMap::new();
+        let same_opening = messages("hello");
+        assert_eq!(
+            session_hash(&none, None, &same_opening),
+            session_hash(&none, None, &same_opening)
+        );
+        let a = headers(&[("x-claude-code-session-id", "session-a")]);
+        let b = headers(&[("x-claude-code-session-id", "session-b")]);
+        assert_ne!(
+            session_hash(&a, None, &same_opening),
+            session_hash(&b, None, &same_opening)
+        );
+        assert_eq!(
+            session_hash(&a, None, &messages("hello")),
+            session_hash(&a, None, &messages("summary after compaction"))
+        );
+        // 头与 metadata 指同一会话时键相同；头优先于 metadata，metadata 优先于通用头。
+        assert_eq!(
+            session_hash(&a, Some("other"), &same_opening),
+            session_hash(&none, Some("session-a"), &same_opening)
+        );
+        let generic = headers(&[("session_id", "generic")]);
+        assert_eq!(
+            session_hash(&generic, Some("session-a"), &same_opening),
+            session_hash(&a, None, &same_opening)
+        );
+        assert_eq!(
+            session_hash(&generic, None, &same_opening),
+            session_hash(
+                &headers(&[("x-session-id", "generic")]),
+                None,
+                &same_opening
+            )
+        );
+        let blank = headers(&[("x-claude-code-session-id", "  ")]);
+        assert_eq!(
+            session_hash(&blank, Some(" "), &same_opening),
+            session_hash(&none, None, &same_opening),
+            "空白 ID 回落到内容哈希"
+        );
+    }
 }
 
 #[cfg(test)]

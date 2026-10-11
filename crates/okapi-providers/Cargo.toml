@@ -23,6 +23,20 @@ futures = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 reqwest = { workspace = true }
+# Claude Code 外形的出站连接（client_tls.rs）：BoringSSL 握手 + hyper HTTP/1.1；https 出口代理那一跳用 rustls
+boring = { workspace = true }
+tokio-boring = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+tower-service = { workspace = true }
+percent-encoding = { workspace = true }
+tokio-rustls = { workspace = true }
+webpki-roots = { workspace = true }
+webpki-root-certs = { workspace = true }
+async-compression = { workspace = true }
+tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
@@ -33,7 +47,6 @@ tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
-tokio-rustls = { workspace = true }
 
 [lints]
 workspace = true

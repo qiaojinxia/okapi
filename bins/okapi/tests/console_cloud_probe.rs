@@ -384,6 +384,7 @@ fn oauth_credential(expires_at: i64, account_id: Option<&str>) -> String {
         expires_at,
         account_id: account_id.map(str::to_owned),
         account_label: None,
+        scope: None,
     }
     .to_plaintext()
 }

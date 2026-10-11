@@ -608,6 +608,7 @@ async fn oauth_refresh_keeps_account_identity_but_account_and_endpoint_changes_d
         expires_at: 1,
         account_id: Some("account-one".to_owned()),
         account_label: None,
+        scope: None,
     };
     candidate.credential = cred.to_plaintext();
     let original = ResponseBinding::from_candidate(&candidate);

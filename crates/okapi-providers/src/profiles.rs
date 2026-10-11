@@ -7,11 +7,14 @@ use serde_json::Value;
 
 mod claude_code;
 pub mod identity;
+mod wire_order;
 
 #[derive(Clone, Debug, Default)]
 pub struct RequestContext {
     pub extensions: Value,
     pub identity_seed: Option<String>,
+    /// 下游用户：派生会话 id 时并进种子，不同用户的开场白相同也不会落进同一个上游会话。
+    pub session_scope: Option<String>,
     pub client_headers: Vec<(String, String)>,
 }
 
@@ -44,6 +47,13 @@ impl ClaudeCodeRevision {
     /// Messages requests use `claude-cli/<version> (external, <entrypoint>)` instead.
     pub fn account_user_agent(self) -> String {
         format!("claude-code/{}", self.version())
+    }
+
+    /// OAuth 换码、刷新不设 UA，发的是 CLI 内置 axios 的缺省值（同一抓包）。
+    pub const fn axios_user_agent(self) -> &'static str {
+        match self {
+            Self::V2_1_290 => "axios/1.15.2",
+        }
     }
 }
 
@@ -144,6 +154,15 @@ impl AdmissionHints {
             .unwrap_or(u32::MAX)
             .saturating_add(self.added_prompt_tokens)
     }
+}
+
+/// 渠道是否以 Claude Code 的身份出站（任何模式：auto / passthrough 转发的是真机请求，
+/// 连接同样要像真机）。决定 `HttpPool::send` 走哪条 TLS 栈。
+pub(crate) fn claude_code_transport(extensions: &Value) -> bool {
+    matches!(
+        client_profile(extensions),
+        Ok(Some(ClientProfile::ClaudeCode { .. }))
+    )
 }
 
 /// Admission hints for a channel's configured extension. Invalid or absent extensions

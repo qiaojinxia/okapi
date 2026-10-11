@@ -75,16 +75,25 @@ pub(crate) fn percentage(value: &Value) -> Option<u8> {
     rounded.try_into().ok()
 }
 
-pub(crate) async fn fetch(
+/// 用量地址：渠道 API 基址的源 + 固定路径。
+pub(crate) fn url(
     context: &super::QuotaContext<'_>,
     path: &str,
-    headers: &[(&str, &str)],
-) -> Result<Value, UpstreamError> {
+) -> Result<reqwest::Url, UpstreamError> {
     let mut url = reqwest::Url::parse(context.api_base)
         .map_err(|_| UpstreamError::Build("quota_api_base".into()))?;
     url.set_query(None);
     url.set_fragment(None);
     url.set_path(path);
+    Ok(url)
+}
+
+pub(crate) async fn fetch(
+    context: &super::QuotaContext<'_>,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> Result<Value, UpstreamError> {
+    let url = url(context, path)?;
     let mut request = context
         .http
         .probe_client(context.outbound.proxy_url.as_deref())?
@@ -101,6 +110,11 @@ pub(crate) async fn fetch(
             UpstreamError::Connect("quota_probe".into())
         }
     })?;
+    read(response).await
+}
+
+/// 用量接口的应答：非 2xx 带上 `Retry-After` 报错，2xx 读成 JSON。
+pub(crate) async fn read(response: reqwest::Response) -> Result<Value, UpstreamError> {
     if !response.status().is_success() {
         return Err(UpstreamError::Status {
             status: response.status().as_u16(),
