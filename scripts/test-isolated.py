@@ -151,7 +151,8 @@ def run():
         return int(bool(failures))
     finally:
         for name in owned.values():
-            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # -v: also drop the anonymous volumes the images declare; without it every run leaves a few behind
+            subprocess.run(["docker", "rm", "-fv", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

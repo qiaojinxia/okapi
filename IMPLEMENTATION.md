@@ -2753,6 +2753,8 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   victim 的冷却键，能定向挡住别人取码。超出 varchar 的写入（PG 22001）统一回 400 `value_too_long`，不再 500 + ERROR 日志。
 - **日志与下载面**：`ops:logs` 捕获时把换行、控制字符与不可见字符转义成字面量，一条告警只占一行，伪造不出假的下一行；
   视频内容端点只回传 `video/*`（上游 JSON 错误体保留 `application/json`），其余一律 `application/octet-stream`，并带 `nosniff`。
+- **测试容器不再留卷**：`scripts/test-isolated.py`、`scripts/dev-deps.sh` 拆容器用 `docker rm -fv`。此前每跑一个套件留下几个
+  匿名卷，攒满 Docker 虚拟机盘后 ClickHouse 写不进、套件成片失败。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

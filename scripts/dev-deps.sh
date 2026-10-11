@@ -21,7 +21,7 @@ CH_NATIVE_PORT=19000
 
 case "${1:-}" in
   up)
-    docker rm -f "$PG_NAME" "$REDIS_NAME" "$NATS_NAME" "$CH_NAME" >/dev/null 2>&1 || true
+    docker rm -fv "$PG_NAME" "$REDIS_NAME" "$NATS_NAME" "$CH_NAME" >/dev/null 2>&1 || true
     # max_connections 提到 300：cargo test 并行跑多个测试二进制，每个各建连接池
     # （setup 一个 + build_state 一个），默认 100 会连接耗尽导致测试随机失败
     docker run -d --name "$PG_NAME" \
@@ -42,7 +42,7 @@ case "${1:-}" in
     echo "dev 依赖就绪：PG=:$PG_PORT Redis=:$REDIS_PORT NATS=:$NATS_PORT CH=:${CH_HTTP_PORT}（对齐 .env.example）"
     ;;
   down)
-    docker rm -f "$PG_NAME" "$REDIS_NAME" "$NATS_NAME" "$CH_NAME"
+    docker rm -fv "$PG_NAME" "$REDIS_NAME" "$NATS_NAME" "$CH_NAME"
     ;;
   status)
     docker ps --filter "name=okapi-dev" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
