@@ -105,8 +105,10 @@ test('首字延迟常驻显示，有样本显示毫秒，无样本和错误分�
   await expect(metrics).toContainText('暂无首字样本')
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ status: 500, json: { error: { code: 'internal_error' } } }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
-  await expect(metrics).toContainText('统计暂不可用')
-  await expect(metrics).not.toContainText('150 ms')
+  // 用量查询失败时整块换成错误提示，不留旧的首字延迟
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(metrics).toHaveCount(0)
+  await expect(page.getByText('150 ms')).toHaveCount(0)
 })
 
 test('吞吐量全量口径不完整（窗口里有失败请求）时显示实测样本值并注明样本数，不显示「—」', async ({ page }) => {
@@ -140,7 +142,7 @@ test('缓存零命中与缺失分开，文案不假定模型价格也不把折�
   await expect(panel).toContainText('缓存命中率 0.0%')
   await expect(panel).toContainText('1× 表示与普通输入同价')
   await expect(panel).toContainText('读取上报 2 / 2 次')
-  await expect(page.getByText('计费优惠', { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: '用量概览', exact: true })).toContainText('已省 US$0.0005')
   const missingWrite = { ...report(), total: { ...report().total, cache_write_tokens: null } }
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: missingWrite }))
   await page.getByRole('button', { name: '刷新', exact: true }).click()
@@ -219,8 +221,8 @@ test('缓存数量在首页和构成区分部分、明确零、完全缺失和�
     await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: data }))
     await page.goto('/portal?view=overview')
     const snapshot = page.getByRole('region', { name: 'Token 用量构成', exact: true })
-    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存读取', { exact: true }) }).locator('dd')).toHaveText(fixture.expectedRead)
-    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存写入', { exact: true }) }).locator('dd')).toHaveText(fixture.expectedWrite)
+    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存读取', { exact: true }) }).locator('dd > span').first()).toHaveText(fixture.expectedRead)
+    await expect(snapshot.locator('dl > div').filter({ has: page.getByText('缓存写入', { exact: true }) }).locator('dd > span').first()).toHaveText(fixture.expectedWrite)
     await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
     const panel = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
     const cells = panel.getByRole('row').filter({ hasText: 'model-a' }).getByRole('cell')

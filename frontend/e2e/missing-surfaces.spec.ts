@@ -2116,7 +2116,7 @@ function breakdown(scope: string, days: number) {
   }
 }
 
-test('门户总览：scope/days 进查询；key 视角本分钟 RPM；全账户退回平均 TPM；订阅剩余与到期', async ({ page }) => {
+test('门户总览：scope/days 进查询；key 视角实时 RPM；全账户不显示实时速率；订阅剩余与到期', async ({ page }) => {
   await prepare(page)
   const qs: URLSearchParams[] = []
   await page.route('**/api/me', (route) => {
@@ -2138,15 +2138,15 @@ test('门户总览：scope/days 进查询；key 视角本分钟 RPM；全账户�
   await page.goto('/portal')
   await expect.poll(() => qs[0]?.get('scope')).toBe('key')
   expect(qs[0]?.get('days')).toBe('7')
-  await expect(page.getByText('本分钟 RPM')).toBeVisible()
-  await expect(page.getByText('12 / 60')).toBeVisible()
+  await expect(page.getByText('实时 RPM 12/60 · TPM 100/1,000')).toBeVisible()
   await expect(page.getByRole('link', { name: /订阅剩余/ })).toHaveAttribute('href', '/portal/plans')
   await expect(page.getByText(/\$2\.00/)).toBeVisible()
   await expect(page.getByText(/到期清零/)).toBeVisible()
 
   await page.getByRole('button', { name: '全账户' }).click()
   await expect.poll(() => qs.some((p) => p.get('scope') === 'user' && p.get('days') === '7')).toBe(true)
-  await expect(page.getByText('平均 TPM')).toBeVisible()
+  // 全账户没有限流器读数，不显示实时速率
+  await expect(page.getByText(/实时 RPM/)).toHaveCount(0)
   await page.getByRole('button', { name: '近 90 天' }).click()
   await expect.poll(() => qs.some((p) => p.get('scope') === 'user' && p.get('days') === '90')).toBe(true)
   await expect(page.getByRole('region', { name: '模型消费排行', exact: true }).getByText('当前范围和时段内还没有调用。发起请求后，等待用量入库即可查看。')).toBeVisible()

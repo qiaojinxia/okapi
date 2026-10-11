@@ -502,7 +502,9 @@ test('旧 scope 深链不再切换独立口径，非法或不完整的自定义�
     await expect(page.getByRole('region', { name: '经营概览' })).toContainText('近 7 天 · 请求数')
     await expect(page.getByRole('button', { name: '近 7 天', exact: true })).toHaveAttribute('aria-pressed', 'true')
   }
-  expect(requests.filter((url) => url.startsWith('/admin/stats/overview?')).every((url) => !url.includes('start_date'))).toBe(true)
+  // 非法日期不会发出去；唯一带日期的是近 7 天的上一周期（指标卡环比）
+  expect(requests.filter((url) => url.startsWith('/admin/stats/overview?') && url.includes('start_date'))
+    .every((url) => url.includes('start_date=2026-09-13&end_date=2026-09-19'))).toBe(true)
 })
 
 test('Dashboard：刷新覆盖当前卡片，图表补零且日均按完整时段计算，切换指标不重复查询', async ({ page }) => {
@@ -535,7 +537,7 @@ test('Dashboard 综合趋势默认同屏展示数量与收入，单位独立且�
   await expect(page.getByRole('group', { name: '图表指标' }).getByRole('button', { name: '综合' })).toHaveAttribute('aria-pressed', 'true')
   await expect(trend).toContainText('左轴：请求数 · 右轴：USD')
   await expect(page.getByText('每次请求均价').locator('..')).toContainText('US$0.02')
-  await expect(trend.locator('.recharts-area')).toHaveCount(1)
+  await expect(trend.locator('.recharts-bar')).toHaveCount(1)
   await expect(trend.locator('.recharts-line')).toHaveCount(1)
   await trend.locator('.recharts-line-dots circle').last().hover()
   const tooltip = trend.locator('.recharts-tooltip-wrapper')
@@ -617,7 +619,8 @@ test('Dashboard 待办摘要共用检查数据，可从首屏直接定位详情�
   await expect(page.locator('#dashboard-attention')).toBeInViewport()
   await expect(page.locator('#dashboard-attention')).toBeFocused()
   await expect(page.locator('#dashboard-attention')).toContainText('Redis')
-  expect(requests.filter((url) => url.startsWith('/admin/stats/overview'))).toHaveLength(1)
+  // 另一条带日期的是上一周期（指标卡环比），不算重复查询
+  expect(requests.filter((url) => url.startsWith('/admin/stats/overview') && !url.includes('start_date'))).toHaveLength(1)
 })
 
 test('Dashboard：成本覆盖率与质量同窗，未知成本不推算利润，刷新失败隐藏旧值', async ({ page }) => {
@@ -877,7 +880,8 @@ test('Dashboard 汇总每分钟更新当前时段，后台和离开页面停止�
   const requests = await prepare(page)
   await page.goto('/admin')
   await expect(page.getByRole('region', { name: '费用与调用质量' }).locator('dd')).toHaveCount(5)
-  const count = (prefix: string) => requests.filter((url) => url.startsWith(prefix)).length
+  // 带日期的 overview 是上一周期（指标卡环比），缓存 5 分钟、不随每分钟刷新，这里不计
+  const count = (prefix: string) => requests.filter((url) => url.startsWith(prefix) && !(url.startsWith('/admin/stats/overview') && url.includes('start_date'))).length
   await page.clock.fastForward(60_000)
   await expect.poll(() => count('/admin/stats/overview?days=7')).toBe(2)
   expect(count('/admin/stats/margin')).toBe(0)

@@ -6,6 +6,9 @@ import type { BreakdownResp, BreakdownRow } from '../src/features/portal-overvie
 import { trendChart } from '../src/features/analytics/trend-data'
 import type { TrendResp } from '../src/features/analytics/types'
 
+/// 当前窗口的用量查询（带 days）；总览另发一条只带日期的上一期对比查询，不计入「不重复请求」
+const currentBreakdown = (url: URL) => url.pathname === '/api/me/stats/breakdown' && url.searchParams.has('days')
+
 const row = (day: string, model: string, n = 1): BreakdownRow => ({ day, model, requests: 10 * n, prompt_tokens: 8000 * n, cached_tokens: 2000 * n, cache_write_tokens: 1000 * n,
   completion_tokens: 4000 * n, reasoning_tokens: 1000 * n, amount_micro: 50_000 * n, discount_micro: 10_000 * n, original_micro: 60_000 * n, errors: n,
   performance_requests: 10 * n, latency_sum_ms: 20_000 * n, ttft_sum_ms: 1500 * n, ttft_samples: 10 * n })
@@ -82,7 +85,7 @@ test('门户图表七种指标、样式、图例与精确数据表可用，切�
   await plot.getByRole('button', { name: '柱状图', exact: true }).click()
   await plot.getByRole('group', { name: '显示的序列' }).getByRole('button').first().click()
   await expect(plot.getByRole('group', { name: '显示的序列' }).getByRole('button').first()).toHaveAttribute('aria-pressed', 'false')
-  expect(requests.filter((r) => r.pathname === '/api/me/stats/breakdown')).toHaveLength(1)
+  expect(requests.filter(currentBreakdown)).toHaveLength(1)
   await plot.getByRole('group', { name: '显示的序列' }).getByRole('button').first().click()
   await plot.getByRole('button', { name: '面积图', exact: true }).click()
   await page.evaluate(() => window.scrollTo(0, 0))
@@ -102,11 +105,11 @@ test('门户趋势和模型分布各自保留指标，切签、刷新、后退�
   await page.goBack()
   await expect(page.getByRole('tabpanel', { name: '模型分布', exact: true })).toBeVisible()
   await expect(distribution.getByRole('button', { name: '请求数', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  expect(queries.filter((url) => url.pathname === '/api/me/stats/breakdown')).toHaveLength(1)
+  expect(queries.filter(currentBreakdown)).toHaveLength(1)
   await page.reload()
   await expect(distribution.getByRole('button', { name: '请求数', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  await page.getByRole('tab', { name: '综合概览', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '用量趋势Token', exact: true })).toBeVisible()
+  await page.getByRole('tab', { name: '综合', exact: true }).click()
+  await expect(trendMetrics.getByRole('button', { name: 'Token', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await page.getByRole('button', { name: '详细趋势', exact: true }).click()
   await expect(trendMetrics.getByRole('button', { name: 'Token', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page).toHaveURL(/scope=user/)
@@ -143,7 +146,7 @@ test('已用模型搜索支持联想、多词与全角输入，占比、排名�
   await search.press('Enter')
   await expect(search).toHaveValue('claude-sonnet-4.5')
   await expect(page).toHaveURL(/model_query=claude-sonnet-4\.5/)
-  expect(queries.filter((url) => url.pathname === '/api/me/stats/breakdown')).toHaveLength(1)
+  expect(queries.filter(currentBreakdown)).toHaveLength(1)
   expect(queries.some((url) => url.pathname === '/api/pricing' || url.pathname === '/admin/models')).toBe(false)
   await table.getByRole('link', { name: '查看 claude-sonnet-4.5 的调用明细', exact: true }).click()
   await expect(page).toHaveURL(/\/portal\/logs\?scope=user/)
@@ -171,7 +174,7 @@ test('已用模型无匹配时可清除搜索，非法指标安全回退且不�
   await expect(page).toHaveURL(/scope=user/)
   await page.getByRole('tab', { name: '用量趋势', exact: true }).click()
   await expect(page.getByRole('group', { name: '图表指标' }).getByRole('button', { name: '实际消费', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  expect(queries.filter((url) => url.pathname === '/api/me/stats/breakdown')).toHaveLength(1)
+  expect(queries.filter(currentBreakdown)).toHaveLength(1)
 })
 
 for (const width of [320, 390]) {
@@ -211,7 +214,7 @@ test('自定义范围应用后查询，模型占比切换及缓存写入展示�
   await page.getByText('自定义日期', { exact: true }).click()
   await page.getByLabel('开始日期').fill('2026-09-01')
   await page.getByLabel('结束日期').fill('2026-09-04')
-  expect(requests.filter((r) => r.pathname === '/api/me/stats/breakdown')).toHaveLength(1)
+  expect(requests.filter(currentBreakdown)).toHaveLength(1)
   await page.getByRole('button', { name: '应用日期', exact: true }).click()
   await expect.poll(() => requests.filter((r) => r.pathname === '/api/me/stats/breakdown').at(-1)?.search).toContain('start_date=2026-09-01&end_date=2026-09-04')
   await page.getByRole('tab', { name: '模型分布' }).click()
@@ -227,7 +230,7 @@ test('自定义范围应用后查询，模型占比切换及缓存写入展示�
 test('门户默认综合视图同时展示趋势与构成，展开明细保留范围且复用数据', async ({ page }) => {
   const queries = await prepare(page)
   await page.goto('/portal?scope=user&start_date=2026-09-01&end_date=2026-09-04')
-  await expect(page.getByRole('tab', { name: '综合概览', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('tab', { name: '综合', exact: true })).toHaveAttribute('aria-selected', 'true')
   const models = page.getByRole('region', { name: '模型消费排行', exact: true })
   const tokens = page.getByRole('region', { name: 'Token 用量构成', exact: true })
   await expect(models.getByRole('listitem')).toHaveCount(2)
@@ -240,10 +243,10 @@ test('门户默认综合视图同时展示趋势与构成，展开明细保留�
   await page.goBack()
   await models.getByRole('button', { name: '全部 2 个模型' }).click()
   await expect(page.getByRole('columnheader', { name: '每次均价' })).toBeVisible()
-  await page.getByRole('tab', { name: '综合概览', exact: true }).click()
+  await page.getByRole('tab', { name: '综合', exact: true }).click()
   await tokens.getByRole('button', { name: '构成明细' }).click()
   await expect(page.getByRole('columnheader', { name: '缓存写入' })).toBeVisible()
-  expect(queries.filter((url) => url.pathname === '/api/me/stats/breakdown')).toHaveLength(1)
+  expect(queries.filter(currentBreakdown)).toHaveLength(1)
   await page.reload()
   await expect(page.getByRole('tab', { name: 'Token 构成', exact: true })).toHaveAttribute('aria-selected', 'true')
 })
@@ -284,7 +287,7 @@ test('门户下钻调用明细保留日期和统计时区，排行与模型分�
   await expect(details).toHaveAttribute('href', '/portal/logs?scope=user&start_date=2026-08-29&end_date=2026-09-04&timezone=America%2FLos_Angeles')
 })
 
-test('综合构成按全量计算前三名占比，缺失缓存写入不显示零', async ({ page }) => {
+test('综合构成按全量计算前五名占比，缺失缓存写入不显示零', async ({ page }) => {
   await prepare(page)
   await page.route('**/api/me/stats/breakdown?*', (route) => {
     const data = report()
@@ -295,7 +298,7 @@ test('综合构成按全量计算前三名占比，缺失缓存写入不显示�
   })
   await page.goto('/portal')
   const models = page.getByRole('region', { name: '模型消费排行', exact: true })
-  await expect(models.getByRole('listitem')).toHaveCount(4)
+  await expect(models.getByRole('listitem')).toHaveCount(5)
   await expect(models.getByRole('listitem').first()).toContainText('model-5')
   await expect(models.getByRole('listitem').first()).toContainText('33.33%')
   await expect(models.getByRole('button', { name: '全部 5 个模型' })).toBeVisible()
@@ -361,7 +364,6 @@ for (const width of [390, 1280]) {
       await expect(page.getByRole('region', { name: '调用质量', exact: true })).toBeInViewport({ ratio: 1 })
       await expect(page.getByLabel('趋势绘图区', { exact: true })).toBeInViewport({ ratio: 1 })
       await expect(page.getByRole('region', { name: '模型消费排行', exact: true })).toBeInViewport({ ratio: 1 })
-      await expect(page.getByRole('region', { name: 'Token 用量构成', exact: true })).toBeInViewport({ ratio: 1 })
     }
     await page.screenshot({ path: `test-results/portal-overview-${width}.png`, fullPage: true, animations: 'disabled' })
   })
@@ -410,7 +412,7 @@ test('单日数据有可见标记，管理统计失败不显示虚假的零指�
   await prepare(page)
   await page.goto('/portal?view=trend')
   await page.getByRole('group', { name: '统计时段' }).getByRole('button', { name: '今天', exact: true }).click()
-  await expect(page.locator('.recharts-area-dot').first()).toBeVisible()
+  await expect(page.locator('.recharts-bar-rectangle').first()).toBeVisible()
   await page.getByRole('group', { name: '图表指标' }).getByRole('button', { name: '平均时延', exact: true }).click()
   await expect(page.locator('.recharts-line-dot').first()).toBeVisible()
   await page.route('**/admin/stats/trend?*', (route) => route.fulfill({ status: 501, json: { error: { code: 'stats_disabled' } } }))

@@ -1,6 +1,6 @@
 import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Area, CartesianGrid, ComposedChart, Bar, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, CartesianGrid, Cell, ComposedChart, Bar, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Download, Table2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Segmented } from '@/components/ui/segmented'
@@ -21,7 +21,7 @@ export function chartNumber(n: number, locale: string): string {
   }).format(n)
 }
 
-export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'area', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis }: {
+export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'bar', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis, partialBucket }: {
   data: ChartPoint[]
   series: ChartSeries[]
   format: (value: number) => string
@@ -39,6 +39,8 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   controls?: boolean
   paginateTable?: boolean
   secondaryAxis?: { unit: string; format: (value: number) => string }
+  /// 还在累计中的桶（通常是今天）：柱子画浅一些、提示里标「截至目前」，不让半天的量看起来像骤降。
+  partialBucket?: string
 }) {
   const { t, i18n } = useTranslation()
   const id = useId().replaceAll(':', '')
@@ -97,12 +99,14 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
               <Tooltip cursor={{ stroke: 'var(--color-muted-foreground)', strokeDasharray: '4 4', fill: 'var(--color-muted)', fillOpacity: 0.25 }} content={({ active, payload, label: date }) => {
                 if (!active || !payload?.length) return null
                 const points = payload.filter((p) => typeof p.value === 'number')
-                return <div className="max-w-[min(22rem,80vw)] rounded-xl border border-border bg-popover p-3 text-xs text-popover-foreground shadow-popover"><p className="mb-2 font-medium">{String(date)}</p><div className="max-h-56 space-y-2 overflow-auto">{points.map((p) => <div key={String(p.dataKey)} className="flex items-center gap-2"><span className="h-2 w-2 shrink-0 rounded-full" style={{ background: p.color }} /><span className="min-w-0 flex-1 break-all text-muted-foreground">{p.name}</span><span className="shrink-0 font-medium tabular-nums">{seriesFormat(series.find((s) => s.key === p.dataKey))(Number(p.value))}</span></div>)}</div>{stacked && !secondaryAxis && points.length > 1 && <div className="mt-2 flex justify-between gap-4 border-t border-border pt-2 font-semibold"><span>{t('charts:visibleTotal')}</span><span>{format(points.reduce((sum, p) => sum + Number(p.value), 0))}</span></div>}</div>
+                return <div className="max-w-[min(22rem,80vw)] rounded-xl border border-border bg-popover p-3 text-xs text-popover-foreground shadow-popover"><p className="mb-2 font-medium">{String(date)}{date === partialBucket && <span className="ml-1.5 font-normal text-muted-foreground">{t('charts:soFar')}</span>}</p><div className="max-h-56 space-y-2 overflow-auto">{points.map((p) => <div key={String(p.dataKey)} className="flex items-center gap-2"><span className="h-2 w-2 shrink-0 rounded-full" style={{ background: p.color }} /><span className="min-w-0 flex-1 break-all text-muted-foreground">{p.name}</span><span className="shrink-0 font-medium tabular-nums">{seriesFormat(series.find((s) => s.key === p.dataKey))(Number(p.value))}</span></div>)}</div>{stacked && !secondaryAxis && points.length > 1 && <div className="mt-2 flex justify-between gap-4 border-t border-border pt-2 font-semibold"><span>{t('charts:visibleTotal')}</span><span>{format(points.reduce((sum, p) => sum + Number(p.value), 0))}</span></div>}</div>
               }} />
               {visible.map((s) => {
                 const shared = { dataKey: s.key, name: s.label, stroke: s.color, isAnimationActive: false, yAxisId: s.axis === 'right' && secondaryAxis ? 'right' : 0 }
                 return line || (s.axis === 'right' && secondaryAxis) ? <Line key={s.key} {...shared} type="linear" strokeWidth={2} strokeDasharray={s.axis === 'right' ? '5 3' : undefined} dot={data.length <= 31 ? { r: 2 } : false} activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--color-card)' }} connectNulls={false} />
-                  : type === 'bar' ? <Bar key={s.key} {...shared} stroke="none" fill={s.color} stackId={stacked ? 'usage' : undefined} maxBarSize={32} radius={stacked ? undefined : [3, 3, 0, 0]} />
+                  : type === 'bar' ? <Bar key={s.key} {...shared} stroke="none" fill={s.color} stackId={stacked ? 'usage' : undefined} maxBarSize={32} radius={stacked ? undefined : [3, 3, 0, 0]}>
+                    {partialBucket && data.map((point) => <Cell key={point.bucket} fillOpacity={point.bucket === partialBucket ? 0.4 : 1} />)}
+                  </Bar>
                     : <Area key={s.key} {...shared} type="linear" strokeWidth={2} fill={`url(#${id}-${series.indexOf(s)})`} stackId={stacked ? 'usage' : undefined} connectNulls={false} dot={data.length === 1 ? { r: 4 } : false} activeDot={{ r: 3 }} />
               })}
             </ComposedChart>

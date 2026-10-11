@@ -60,6 +60,26 @@ export function useDashboardOverview(days: number, range?: DateRange | null) {
   return useQuery({ queryKey: dashboardOverviewKey(days, range), queryFn: () => dashboardFetch<OverviewResp>(`/admin/stats/overview?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })
 }
 
+/// 上一个等长周期的汇总，只给指标卡算环比。今天视角不用（今天没过完，和昨天全天比没意义）；
+/// 上期数据不再变化，缓存久一些，页面刷新也不跟着重查。
+export function useDashboardPreviousOverview(days: number, current?: OverviewResp['calendar']) {
+  const range = current && days > 1 ? previousRange(current.start_date, days) : null
+  return useQuery({
+    queryKey: range ? dashboardOverviewKey(days, range) : [...qk.statsOverview(days), 'previous'],
+    queryFn: () => dashboardFetch<OverviewResp>(`/admin/stats/overview?${cubeParams(dashboardSearch(days, range), { cached: 'true' })}`),
+    enabled: range !== null,
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+}
+
+function previousRange(start: string, days: number): DateRange | null {
+  const first = Date.parse(`${start}T00:00:00Z`)
+  if (Number.isNaN(first)) return null
+  const day = (offset: number) => new Date(first + offset * 86_400_000).toISOString().slice(0, 10)
+  return { start: day(-days), end: day(-1) }
+}
+
 export function useDashboardChart(days: number, range?: DateRange | null) {
   const params = dashboardChartParams(days, range)
   return useQuery({ queryKey: qk.statsTrend(params), queryFn: () => dashboardFetch<TrendResp>(`/admin/stats/trend?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })

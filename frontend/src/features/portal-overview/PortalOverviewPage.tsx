@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, PiggyBank, RefreshCw, ShieldCheck, Timer, Wallet, Zap } from 'lucide-react'
+import { ArrowUpRight, Gauge, LayoutDashboard, RefreshCw, ShieldCheck, Timer, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ErrorState, LoadingState } from '@/components/ui/state'
@@ -27,12 +27,15 @@ import type { Me } from '@/hooks/use-auth'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
-import { formatBp, formatCount, formatMoney, formatTokensPerSec } from '@/lib/money'
+import { formatBp, formatCount, formatTokensPerSec } from '@/lib/money'
+import { delta, formatDuration, formatUsd } from './format'
 import { qk } from '@/lib/query-keys'
 import { PORTAL_VIEWS } from './search'
 import type { PortalView } from './search'
 
 const routeApi = getRouteApi('/portal/')
+/// 健康指标的图标一律中性色：颜色只留给状态（成功率的黄 / 红）。
+const QUIET = 'bg-muted text-muted-foreground'
 
 /// 门户总览（对齐 new-api 数据看板的用户侧 + Sub2API 的 Token 构成）。
 ///
@@ -84,164 +87,151 @@ export function PortalOverviewPage() {
     finally { setRefreshing(false) }
   }
 
+  // 上一段等长窗口：给三张主卡的「较前 N 天」。只在当前窗口回来之后查，口径与当前窗口一致
+  const win = q.data?.window
+  const span = q.data?.days ?? days
+  const prevRange = win ? previousWindow(win.start_date, span) : null
+  const prev = useQuery({
+    queryKey: qk.myBreakdown(scope, span, `prev:${prevRange?.start}`),
+    queryFn: () => apiFetch<BreakdownResp>(`/api/me/stats/breakdown?scope=${scope}&start_date=${prevRange!.start}&end_date=${prevRange!.end}`),
+    enabled: usageScope.ready && prevRange !== null,
+    retry: false,
+    staleTime: 5 * 60_000,
+  })
+  const previous = prev.isError ? undefined : prev.data?.total
+
   const labels: Record<PortalView, string> = {
     overview: t('portal:viewOverview'),
     trend: t('portal:viewTrend'),
     models: t('portal:viewModels'),
     tokens: t('portal:viewTokens'),
   }
+  const hit = total ? cacheHit(total) : null
+  const failed = total?.errors
+
+  const health = <QualityStrip label={t('charts:performance')} loading={loading} items={[
+    {
+      icon: Zap, accent: QUIET, label: t('analytics:ttft'),
+      value: total?.avg_ttft_ms == null ? '—' : formatDuration(total.avg_ttft_ms, locale),
+      ...(q.isError
+        ? { sub: t('charts:statisticsUnavailable') }
+        : total?.avg_ttft_ms == null
+          ? { sub: t('charts:ttftNoSamples'), subTitle: t('charts:ttftUnavailable') }
+          : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
+    },
+    {
+      icon: Timer, accent: QUIET, label: t('charts:metric_latency'),
+      value: total?.avg_latency_ms == null ? '—' : formatDuration(total.avg_latency_ms, locale),
+      sub: t('portal:latencyCaption'),
+    },
+    {
+      icon: ShieldCheck, accent: QUIET, label: t('charts:metric_success'),
+      value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
+      sub: total && total.requests > 0 && failed != null ? (failed > 0 ? t('portal:failedCount', { n: formatCount(failed, locale) }) : t('portal:noFailures')) : undefined,
+      tone: total?.success_rate_bp == null ? undefined
+        : total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
+    },
+    {
+      icon: Gauge, accent: QUIET, label: t('charts:throughput'),
+      value: throughput == null ? '—' : `${formatTokensPerSec(throughput, locale)} Token/s`,
+      ...(partialThroughput
+        ? {
+            sub: t('portal:throughputMeasured', { n: formatCount(throughputSamples, locale), total: formatCount(total?.requests ?? 0, locale) }),
+            subTitle: t('charts:throughputSampleHint'),
+          }
+        : { sub: t('portal:throughputCaption') }),
+    },
+  ]} />
 
   return (
-    <div className="flex min-w-0 flex-col gap-3">
+    <div className="flex min-w-0 flex-col gap-4">
       <PageHeader
         icon={LayoutDashboard}
         title={t('portal:dashboard')}
+        meta={<LiveBadge live={live} scope={scope} />}
         action={<>
           <Button variant="outline" loading={refreshing} onClick={() => void refresh()}>
             {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
           </Button>
-          <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground shadow-xs outline-none hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-primary/40">
+          <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium shadow-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40">
             {t('portal:usageDetails')}<ArrowUpRight className="h-4 w-4" />
           </Link>
         </>}
       />
       {/* 新用户优先看到下一步；已完成接入的账户直接展示数据。 */}
       <GettingStartedCard />
-      <section aria-label={t('portal:dashboardFilters')} className="flex min-w-0 flex-wrap items-center justify-between gap-3 rounded-xl border border-border bg-card px-3 py-2">
-          <UsageScope {...usageScope} onChange={(value) => {
-            usageScope.setScope(value)
-            void navigate({ search: (prev) => ({ ...prev, scope: value }) })
-          }} />
-          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-            <Segmented
-              ariaLabel={t('charts:period')}
-              value={range ? 0 : days}
-              onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
-              options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
-            />
-          </div>
+      <section aria-label={t('portal:dashboardFilters')} className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <UsageScope {...usageScope} onChange={(value) => {
+          usageScope.setScope(value)
+          void navigate({ search: (prev) => ({ ...prev, scope: value }) })
+        }} />
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+          <Segmented
+            ariaLabel={t('charts:period')}
+            value={range ? 0 : days}
+            onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
+            options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
+          />
           <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range}
             onApply={(value) => void navigate({ search: (prev) => ({ ...prev, start_date: value.start, end_date: value.end }) })} />
+        </div>
       </section>
 
-      <section aria-label={t('portal:dashboardMetrics')} className="grid min-w-0 grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      {/* 四个数字：花了多少、还剩多少、调了多少次、用了多少 Token。其余指标放到下面安静的位置 */}
+      <section aria-label={t('portal:dashboardMetrics')} className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Stat
-          compact
           layout="stacked"
-          icon={Cpu}
-          iconClassName="bg-chart-4/12 text-chart-4"
-          label={t('common:tokens')}
+          label={t('portal:totalSpend')}
           loading={loading}
-          value={total ? formatCount(total.tokens, locale) : '—'}
-          sub={total ? (() => {
-            const hit = cacheHit(total)
-            return hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total.requests })
-              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })
-          })() : ''}
+          value={total ? formatUsd(total.amount_micro, locale) : '—'}
+          sub={<>
+            <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
+            {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
+          </>}
         />
         <Stat
-          compact
           layout="stacked"
-          icon={Activity}
-          iconClassName="bg-chart-1/12 text-chart-1"
-          label={t('common:requests')}
-          loading={loading}
-          value={total ? formatCount(total.requests, locale) : '—'}
-          sub={
-            total
-              ? t('portal:avgRpm', { v: fmtMicroRate(total.avg_rpm_micro, locale) })
-              : ''
-          }
-        />
-        <LiveRateKpi
-          live={live}
-          scope={scope}
-          loading={loading}
-          avgTpmMicro={total?.avg_tpm_micro}
-        />
-        <Stat
-          compact
-          layout="stacked"
-          icon={Wallet}
-          className="border-primary/25 bg-linear-to-br from-primary/10 via-card to-card"
-          iconClassName="bg-primary text-primary-foreground shadow-xs"
           label={t('portal:accountBalance')}
           loading={me.isPending}
-          value={me.data ? formatMoney(me.data.balance_micro, locale) : '—'}
+          value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'}
           // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
-          // 两者都没有才退回分组文案。14 天内转黄、3 天内转红。
-          // 有订阅时再挂一行订阅剩余（§11.28）——请求先扣它，钱包数字单看会误导。
+          // 14 天内转黄、3 天内转红。有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
           sub={
             me.data && me.data.subscription_until_unix > 0 ? (
               <>
-                <span>{balanceSub(me.data, recentWalletSpend, q.data?.days ?? days, t)}</span>
+                <span>{balanceSub(me.data, recentWalletSpend, span, t)}</span>
                 <Link to="/portal/plans" className="text-primary underline decoration-dotted">
-                  {t('portal:balanceSubLine', {
-                    amount: formatMoney(me.data.subscription_remaining_micro, locale),
-                  })}
+                  {t('portal:balanceSubLine', { amount: formatUsd(me.data.subscription_remaining_micro, locale) })}
                 </Link>
               </>
             ) : (
-              balanceSub(me.data ?? null, recentWalletSpend, q.data?.days ?? days, t)
+              balanceSub(me.data ?? null, recentWalletSpend, span, t)
             )
           }
-          tone={balanceTone(me.data ?? null, recentWalletSpend, q.data?.days ?? days)}
+          tone={balanceTone(me.data ?? null, recentWalletSpend, span)}
         />
         <Stat
-          compact
           layout="stacked"
-          icon={Coins}
-          iconClassName="bg-chart-3/12 text-chart-3"
-          label={t('portal:totalSpend')}
+          label={t('common:requests')}
           loading={loading}
-          value={total ? formatMoney(total.amount_micro, locale) : '—'}
-          sub={range ? `${range.start} — ${range.end}` : t('portal:kpiWindow', { days: q.data?.days ?? days })}
+          value={total ? formatCount(total.requests, locale) : '—'}
+          sub={<>
+            <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
+            {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
+          </>}
         />
         <Stat
-          compact
           layout="stacked"
-          icon={PiggyBank}
-          label={t('portal:saved')}
+          label={t('common:tokens')}
           loading={loading}
-          value={total ? formatMoney(total.discount_micro, locale) : '—'}
-          sub={t('portal:savedHint')}
-          tone={total && total.discount_micro > 0 ? 'good' : 'default'}
+          value={total ? formatCount(total.tokens, locale) : '—'}
+          sub={<>
+            <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
+            {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
+              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })}</span>}
+          </>}
         />
       </section>
-
-      <QualityStrip label={t('charts:performance')} loading={loading} items={[
-        {
-          icon: Zap, accent: 'bg-chart-3/12 text-chart-3', label: t('analytics:ttft'),
-          value: total?.avg_ttft_ms == null ? '—' : `${formatCount(total.avg_ttft_ms, locale)} ms`,
-          // 指标带里只放一句短的，完整口径说明悬停看
-          ...(q.isError
-            ? { sub: t('charts:statisticsUnavailable') }
-            : total?.avg_ttft_ms == null
-              ? { sub: t('charts:ttftNoSamples'), subTitle: t('charts:ttftUnavailable') }
-              : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
-        },
-        {
-          icon: Timer, accent: 'bg-chart-1/12 text-chart-1', label: t('charts:metric_latency'),
-          value: total?.avg_latency_ms == null ? '—' : `${formatCount(total.avg_latency_ms, locale)} ms`,
-        },
-        {
-          icon: ShieldCheck, accent: 'bg-success/12 text-success', label: t('charts:metric_success'),
-          value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
-          // 阈值同管理端错误率：失败 1% 起提醒、5% 起告警；只给数值上色、不画进度条，与运营概览一致
-          tone: total?.success_rate_bp == null ? undefined
-            : total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
-        },
-        {
-          icon: Gauge, accent: 'bg-chart-4/12 text-chart-4', label: t('charts:throughput'),
-          value: throughput == null ? '—' : `${formatTokensPerSec(throughput, locale)} Token/s`,
-          ...(partialThroughput
-            ? {
-                sub: t('portal:throughputMeasured', { n: formatCount(throughputSamples, locale), total: formatCount(total?.requests ?? 0, locale) }),
-                subTitle: t('charts:throughputSampleHint'),
-              }
-            : {}),
-        },
-      ]} />
 
       <Tabs
         id="portal-views"
@@ -255,7 +245,9 @@ export function PortalOverviewPage() {
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
       ) : q.isPending ? <LoadingState /> : (
         <>
-          {view === 'overview' && q.data?.total && <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'} onView={(next) => void navigate({ search: (prev) => ({ ...prev, view: next }) })} />}
+          {view === 'overview' && q.data?.total && <UsageOverview data={q.data} scope={scope} logSearch={logSearch} metric={search.measure ?? 'amount'}
+            onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }) })}
+            onView={(next) => void navigate({ search: (prev) => ({ ...prev, view: next }) })} health={health} />}
           {view === 'trend' && <SpendTrendView rows={q.data?.data ?? []} days={q.data?.days ?? days} window={q.data?.window} metric={search.measure ?? 'amount'} onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }) })} />}
           {view === 'models' && <ModelShareView rows={q.data?.data ?? []} logSearch={logSearch}
             metric={search.model_measure ?? 'amount'} onMetricChange={(model_measure) => void navigate({ search: (prev) => ({ ...prev, model_measure }) })}
@@ -266,6 +258,43 @@ export function PortalOverviewPage() {
       </div>
     </div>
   )
+}
+
+/// 当前窗口之前、等长的一段（起止都是日历日）。
+function previousWindow(start: string, days: number): { start: string; end: string } | null {
+  const first = dayjs(start)
+  if (!first.isValid() || days < 1) return null
+  return { start: first.subtract(days, 'day').format('YYYY-MM-DD'), end: first.subtract(1, 'day').format('YYYY-MM-DD') }
+}
+
+function perDay(n: number, days: number, locale: string): string {
+  const v = n / Math.max(1, days)
+  return v.toLocaleString(locale, { maximumFractionDigits: v >= 10 ? 0 : 1 })
+}
+
+/// 「较前 7 天 ▲12%」：上涨 / 下跌只用箭头和文字表达，不上色——花得多不一定是坏事。
+function DeltaText({ value, days }: { value: number | null; days: number }) {
+  const { t, i18n } = useTranslation()
+  if (value === null) return null
+  const pct = Math.abs(value * 100)
+  const shown = pct >= 100 ? Math.round(pct).toLocaleString(i18n.language) : pct.toLocaleString(i18n.language, { maximumFractionDigits: pct < 10 ? 1 : 0 })
+  const arrow = value > 0.0005 ? '▲' : value < -0.0005 ? '▼' : '·'
+  return <span className="tabular-nums">{t('portal:periodChange', { days, delta: `${arrow} ${shown}%` })}</span>
+}
+
+/// 标题旁的实时速率：只有单把 key 视角有限流器读数。接近上限（≥80%）转黄、触顶转红。
+function LiveBadge({ live, scope }: { live: BreakdownResp['live']; scope: Scope }) {
+  const { t, i18n } = useTranslation()
+  if (scope === 'user' || live === null) return null
+  const locale = i18n.language
+  const ratio = live.rpm_limit ? live.rpm / live.rpm_limit : 0
+  const tone = ratio >= 1 ? 'border-destructive/40 text-destructive' : ratio >= 0.8 ? 'border-warning/40 text-warning' : 'border-border text-muted-foreground'
+  const rpm = live.rpm_limit ? `${formatCount(live.rpm, locale)}/${formatCount(live.rpm_limit, locale)}` : formatCount(live.rpm, locale)
+  const tpm = live.tpm_limit ? `${formatCount(live.tpm, locale)}/${formatCount(live.tpm_limit, locale)}` : formatCount(live.tpm, locale)
+  return <span title={t('portal:liveHint')} className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs tabular-nums ${tone}`}>
+    <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-success" />
+    {t('portal:liveRate', { rpm, tpm })}
+  </span>
 }
 
 /// 余额"还能活几天"：取到期清零与按日均烧完两者中更近的一个；都没有 → null。
@@ -309,79 +338,4 @@ function balanceSub(
   if (h.days < 1) return t('portal:runwayUnderDay')
   if (h.days > 999) return t('portal:runwayLong')
   return t('portal:runwayDays', { n: Math.floor(h.days), days })
-}
-
-/// 百万分位速率 → 人读的数：≥1 给一位小数，<1 给三位（0.007/min 这种量级
-/// 是个人用户的常态，两位小数会显示成 0.00）。
-function fmtMicroRate(micro: number, locale: string): string {
-  const v = micro / 1_000_000
-  return v.toLocaleString(locale, { maximumFractionDigits: v >= 1 ? 1 : 3 })
-}
-
-/// 当前速率卡：key 视角给限流器视角的**本分钟 RPM / 上限**（老 ok-api 用户页取法
-/// + 对照上限——直接回答"我离限流还有多远"）；汇总视角没有单一上限，
-/// 退回 new-api 的窗口平均 TPM。接近上限（≥80%）转黄、触顶转红。
-function LiveRateKpi({
-  live,
-  scope,
-  loading,
-  avgTpmMicro,
-}: {
-  live: BreakdownResp['live']
-  scope: Scope
-  loading: boolean
-  avgTpmMicro: number | undefined
-}) {
-  const { t, i18n } = useTranslation()
-  const locale = i18n.language
-  if (scope === 'user' || live === null) {
-    return (
-      <Stat
-        compact
-        layout="stacked"
-        icon={Gauge}
-        iconClassName="bg-chart-2/12 text-chart-2"
-        label={t('portal:avgTpm')}
-        loading={loading}
-        value={avgTpmMicro === undefined ? '—' : fmtMicroRate(avgTpmMicro, locale)}
-        sub={t('portal:avgTpmHint')}
-      />
-    )
-  }
-  const ratio = live.rpm_limit ? live.rpm / live.rpm_limit : 0
-  return (
-    <Stat
-      compact
-      layout="stacked"
-      icon={Gauge}
-      // 接近 / 触顶时图标随 tone 变黄变红，平时与平均 TPM 同色
-      iconClassName={ratio >= 0.8 ? undefined : 'bg-chart-2/12 text-chart-2'}
-      label={t('portal:liveRpm')}
-      loading={loading}
-      value={
-        live.rpm_limit
-          ? `${formatCount(live.rpm, locale)} / ${formatCount(live.rpm_limit, locale)}`
-          : formatCount(live.rpm, locale)
-      }
-      sub={<>
-        <span>
-          {live.tpm_limit
-            ? t('portal:liveTpmCapped', {
-                v: formatCount(live.tpm, locale),
-                cap: formatCount(live.tpm_limit, locale),
-              })
-            : t('portal:liveTpm', { v: formatCount(live.tpm, locale) })}
-        </span>
-        {live.rpm_limit ? (
-          <span aria-hidden className="mt-1 block h-1 w-full basis-full overflow-hidden rounded-full bg-muted">
-            <span
-              className={`block h-full rounded-full ${ratio >= 1 ? 'bg-destructive' : ratio >= 0.8 ? 'bg-warning' : 'bg-chart-2'}`}
-              style={{ width: `${Math.min(100, ratio * 100)}%` }}
-            />
-          </span>
-        ) : null}
-      </>}
-      tone={ratio >= 1 ? 'bad' : ratio >= 0.8 ? 'warn' : 'default'}
-    />
-  )
 }

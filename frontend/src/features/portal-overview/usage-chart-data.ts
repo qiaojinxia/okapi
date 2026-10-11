@@ -19,7 +19,18 @@ export function usageValue(row: BreakdownRow, metric: UsageMetric): number {
     : metric === 'requests' ? row.requests : row.prompt_tokens + row.completion_tokens
 }
 
-export function usageChart(rows: BreakdownRow[], days: string[], metric: UsageMetric, other: string, labels: { total: string; latency: string; ttft: string }) {
+/// 模型配色按窗口内金额排名固定：趋势图、模型排行、明细表里同一个模型永远同一种颜色，
+/// 不随切换指标变色。
+export function modelColors(rows: BreakdownRow[]): Map<string, string> {
+  const spend = new Map<string, number>()
+  for (const row of rows) spend.set(row.model, (spend.get(row.model) ?? 0) + row.amount_micro + row.requests * 1e-6)
+  return new Map([...spend].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([model], i) => [model, chartColor(i)]))
+}
+
+/// 占比不到 1% 的模型画出来只有一条看不见的细缝：并进「其他」。
+const MIN_SERIES_SHARE = 0.01
+
+export function usageChart(rows: BreakdownRow[], days: string[], metric: UsageMetric, other: string, labels: { total: string; latency: string; ttft: string }, colors = modelColors(rows)) {
   const byDay = new Map<string, BreakdownRow[]>()
   for (const row of rows) byDay.set(row.day, [...(byDay.get(row.day) ?? []), row])
   if (metric === 'cache' || metric === 'success' || metric === 'latency') {
@@ -40,11 +51,13 @@ export function usageChart(rows: BreakdownRow[], days: string[], metric: UsageMe
   }
   const rank = new Map<string, number>()
   for (const row of rows) rank.set(row.model, (rank.get(row.model) ?? 0) + usageValue(row, metric))
-  const models = [...rank].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name)
-  const top = models.slice(0, 6)
+  const ranked = [...rank].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+  const sum = ranked.reduce((acc, [, value]) => acc + value, 0)
+  const models = ranked.map(([name]) => name)
+  const top = ranked.filter(([, value], i) => i === 0 || (i < 6 && sum > 0 && value / sum >= MIN_SERIES_SHARE)).map(([name]) => name)
   const hasOther = models.length > top.length
   // 独立序列 ID 防止带点号、方括号或 __proto__ 的模型名被当成属性路径。
-  const series = top.map((label, i) => ({ key: `s${i}`, label, color: chartColor(i) }))
+  const series = top.map((label, i) => ({ key: `s${i}`, label, color: colors.get(label) ?? chartColor(i) }))
   if (hasOther) series.push({ key: 'other', label: other, color: OTHER_COLOR })
   const data: ChartPoint[] = days.map((bucket) => {
     const point: ChartPoint = { bucket }
