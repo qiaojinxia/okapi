@@ -104,7 +104,10 @@ test('出口代理页：列表只显示掩码地址与出口事实，熔断中�
   const drawer = await openedDialog(page)
   await drawer.locator('#px-url').fill('ftp://nope')
   await expect(drawer.getByRole('button', { name: '保存', exact: true })).toBeDisabled()
-  await drawer.locator('#px-url').fill('http://10.0.0.3:3128')
+  // 选 http 协议、地址只填主机端口，提交的是拼好的完整 URL
+  await drawer.locator('#px-scheme').selectOption('http')
+  await drawer.locator('#px-url').fill('10.0.0.3:3128')
+  await expect(drawer.getByText('推荐 socks5h')).toHaveCount(0)
   await drawer.locator('#px-cap').fill('3')
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => created).toEqual({ url: 'http://10.0.0.3:3128', max_keys: 3, status: 1 })

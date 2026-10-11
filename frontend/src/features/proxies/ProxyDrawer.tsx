@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Field } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
@@ -13,6 +14,15 @@ import { ProbeSummary } from './ProbeSummary'
 import type { ProbeResult, ProxyRow, ReconcileReport } from './types'
 
 const URL_PATTERN = /^(https?|socks5h?):\/\/[^\s/]+\/?$/i
+const SCHEMES = ['socks5h', 'socks5', 'http', 'https'] as const
+type Scheme = (typeof SCHEMES)[number]
+
+/// 地址栏可只填 `[用户:密码@]主机:端口`，协议取下拉框；自带 `scheme://` 时以自带的为准。
+function composeUrl(scheme: Scheme, raw: string): string {
+  const trimmed = raw.trim()
+  if (trimmed === '' || trimmed.includes('://')) return trimmed
+  return `${scheme}://${trimmed}`
+}
 
 function parseCap(raw: string): number | null | undefined {
   const trimmed = raw.trim()
@@ -38,7 +48,11 @@ export function ProxyDrawer({
   const { t } = useTranslation()
   const isEdit = proxy !== undefined
   const [name, setName] = useState(proxy?.name ?? '')
-  const [url, setUrl] = useState('')
+  const [scheme, setScheme] = useState<Scheme>(
+    SCHEMES.find((s) => s === proxy?.scheme) ?? 'socks5h',
+  )
+  const [address, setAddress] = useState('')
+  const url = composeUrl(scheme, address)
   const [cap, setCap] = useState(proxy?.max_keys == null ? '' : String(proxy.max_keys))
   const [concurrencyRaw, setConcurrencyRaw] = useState(
     proxy?.max_concurrency == null ? '' : String(proxy.max_concurrency),
@@ -48,11 +62,13 @@ export function ProxyDrawer({
   const [enabled, setEnabled] = useState((proxy?.status ?? 1) === 1)
   const [probe, setProbe] = useState<ProbeResult | null>(null)
   const maxKeys = parseCap(cap)
-  const urlValid = url.trim() === '' ? isEdit : URL_PATTERN.test(url.trim())
+  // 新建时空着只禁用保存、不报错：还没填就标红没有意义
+  const urlValid = url === '' || URL_PATTERN.test(url)
+  const urlReady = url === '' ? isEdit : urlValid
 
   const test = useMutation({
     mutationFn: () =>
-      apiFetch<ProbeResult>('/admin/proxies/test', { method: 'POST', body: { url: url.trim() } }),
+      apiFetch<ProbeResult>('/admin/proxies/test', { method: 'POST', body: { url } }),
     onSuccess: setProbe,
     onError: (err) => toast.error(describeError(err)),
   })
@@ -64,7 +80,7 @@ export function ProxyDrawer({
             method: 'PATCH',
             body: {
               name: name.trim(),
-              ...(url.trim() === '' ? {} : { url: url.trim() }),
+              ...(url === '' ? {} : { url }),
               max_keys: maxKeys ?? null,
               max_concurrency: concurrency ?? null,
               note: note.trim() === '' ? null : note.trim(),
@@ -75,7 +91,7 @@ export function ProxyDrawer({
             method: 'POST',
             body: {
               ...(name.trim() === '' ? {} : { name: name.trim() }),
-              url: url.trim(),
+              url,
               max_keys: maxKeys ?? undefined,
               max_concurrency: concurrency ?? undefined,
               note: note.trim() === '' ? undefined : note.trim(),
@@ -101,7 +117,7 @@ export function ProxyDrawer({
             {t('common:cancel')}
           </Button>
           <Button
-            disabled={!urlValid || maxKeys === undefined || concurrency === undefined
+            disabled={!urlReady || maxKeys === undefined || concurrency === undefined
               || (isEdit && name.trim() === '') || save.isPending}
             onClick={() => save.mutate()}
           >
@@ -121,23 +137,38 @@ export function ProxyDrawer({
           error={!urlValid ? t('errors:bad_request', { param: 'url' }) : undefined}
         >
           <div className="flex gap-2">
+            <Select
+              id="px-scheme"
+              aria-label={t('admin:proxyScheme')}
+              className="w-32 shrink-0"
+              value={scheme}
+              onChange={(v) => {
+                setScheme(v as Scheme)
+                setProbe(null)
+              }}
+              options={SCHEMES.map((s) => ({ value: s, label: s }))}
+            />
             <Input
               id="px-url"
               className="font-mono text-sm"
               type="text"
               autoComplete="off"
               spellCheck={false}
-              value={url}
-              placeholder={isEdit ? proxy.url_masked : 'socks5h://user:pass@1.2.3.4:1080'}
+              value={address}
+              placeholder={isEdit ? proxy.url_masked : 'user:pass@1.2.3.4:1080'}
               aria-invalid={!urlValid}
               onChange={(e) => {
-                setUrl(e.target.value)
+                const next = e.target.value
+                // 粘贴了完整 URL 就让下拉框跟上，免得两处显示的协议对不上
+                const typed = SCHEMES.find((s) => next.trim().toLowerCase().startsWith(`${s}://`))
+                if (typed) setScheme(typed)
+                setAddress(next)
                 setProbe(null)
               }}
             />
             <Button
               variant="outline"
-              disabled={url.trim() === '' || !urlValid}
+              disabled={url === '' || !urlValid}
               loading={test.isPending}
               onClick={() => test.mutate()}
             >
@@ -146,7 +177,9 @@ export function ProxyDrawer({
           </div>
         </Field>
         {probe && <ProbeSummary result={probe} />}
-        <p role="note" className="text-xs text-muted-foreground">{t('admin:proxySocksDnsHint')}</p>
+        {scheme.startsWith('socks') && (
+          <p role="note" className="text-xs text-muted-foreground">{t('admin:proxySocksDnsHint')}</p>
+        )}
       </FieldGroup>
 
       <FieldGroup title={t('admin:proxyCapacity')} hint={t('admin:proxyCapacityHint')}>
