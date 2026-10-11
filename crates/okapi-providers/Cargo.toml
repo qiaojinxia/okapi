@@ -8,6 +8,8 @@ publish = false
 description = "Okapi 上游适配：Provider trait + 按方向拆的协议转换（M1+）"
 
 [dependencies]
+# 请求体里找 reasoning 相关键名（SIMD 子串查找；已在依赖树里）
+memchr = "2.8"
 okapi-api = { workspace = true }
 okapi-domain = { workspace = true }
 

@@ -2303,6 +2303,7 @@ dependencies = [
  "http-body",
  "hyper",
  "hyper-util",
+ "memchr",
  "okapi-api",
  "okapi-domain",
  "percent-encoding",

@@ -151,10 +151,10 @@ impl RequestReasoning {
 
 /// 请求体里是否可能出现 reasoning 相关键（省掉绝大多数请求的整体反序列化）。
 /// `"reasoning` 不带尾引号，一次覆盖 `"reasoning"` 与 `"reasoning_effort"`。
+/// 三个入口每个请求都要过一遍，用 SIMD 子串查找（逐字节滑窗在长请求体上明显更慢）。
 fn mentions_reasoning(body: &[u8]) -> bool {
-    [b"\"reasoning".as_slice(), b"\"thinking\"".as_slice()]
-        .iter()
-        .any(|needle| body.windows(needle.len()).any(|w| w == *needle))
+    memchr::memmem::find(body, b"\"reasoning").is_some()
+        || memchr::memmem::find(body, b"\"thinking\"").is_some()
 }
 
 /// 从请求原文解析 reasoning 意图，与入口方言无关（三个入口共用一份）。

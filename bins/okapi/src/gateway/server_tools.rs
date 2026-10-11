@@ -1,4 +1,9 @@
 //! Request authorization and monetary bounds for native Anthropic tools.
+//!
+//! 已接受的风险（有意为之，2026-10-11 定）：OpenAI / Gemini 的内置工具（`web_search*`、
+//! `file_search`、`code_interpreter`、`googleSearch` 等）不在这里识别，原样透传给上游，
+//! 网关既不按 `max_uses` 限次，也不计量计费——上游按次收取的工具费由平台承担，只收 token 费。
+//! 要收口得另立这些厂商的价格结构与用量解析（`ServerToolPrices` 目前只有 Anthropic 一种契约）。
 use bytes::Bytes;
 use okapi_domain::{AnthropicToolUsage, Money, ServerToolUsage};
 use okapi_pricing::{
@@ -359,8 +364,10 @@ mod tests {
         assert!(!plan(&json!({"name":"web_search","input_schema":{"type":"object"}})).has_tools());
     }
 
+    /// 已接受的风险：其他厂商的内置工具有意透传、不限次、不计费（见模块注释）。
+    /// 这条测试同时钉住两件事：不会被错当成 Anthropic 工具去限次计价，也不会被改写或丢弃。
     #[test]
-    fn other_provider_builtin_tools_are_not_misclassified_as_anthropic() {
+    fn other_provider_builtin_tools_pass_through_unmetered_by_design() {
         for tool in [
             json!({"type":"web_search"}),
             json!({"type":"web_search_preview"}),
