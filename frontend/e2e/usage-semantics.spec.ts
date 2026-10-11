@@ -7,6 +7,9 @@ import { sumByModel } from '../src/features/portal-overview/types'
 import { cacheAmount, cacheHit } from '../src/features/portal-overview/cache-metrics'
 import { segments } from '../src/features/portal-overview/TokenMixView'
 
+/// 总览不再分页签：模型明细卡里用「费用 / Token」切换列
+const detailMode = (page: Page, mode: '费用' | 'Token') => page.getByRole('group', { name: '明细口径', exact: true }).getByRole('button', { name: mode, exact: true })
+
 const usageRow = { day: '2026-09-27', model: 'model-a', requests: 2, prompt_tokens: 1000, cached_tokens: 0,
   cache_read_known_requests: 2, cache_write_known_requests: 2, cache_write_tokens: 0, completion_tokens: 100,
   reasoning_tokens: 0, amount_micro: 10000, discount_micro: 500, errors: 0 }
@@ -136,7 +139,7 @@ test('吞吐量全量口径不完整（窗口里有失败请求）时显示实�
 test('缓存零命中与缺失分开，文案不假定模型价格也不把折扣说成缓存节省', async ({ page }) => {
   await prepare(page)
   await page.goto('/portal?view=tokens')
-  const panel = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
+  const panel = page.getByRole('region', { name: '模型明细', exact: true })
   await expect(panel).toContainText('缓存命中率 0.0%')
   await expect(panel).toContainText('1× 表示与普通输入同价')
   await expect(panel).toContainText('读取上报 2 / 2 次')
@@ -176,13 +179,13 @@ test('有缓存读取时首页、构成和模型页显示样本率及已记录�
   await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: partial }))
   await page.goto('/portal')
   await expect(page.getByText('已采集缓存命中 80.0%（2 / 3 次）').first()).toBeVisible()
-  await page.getByRole('tab', { name: 'Token 构成', exact: true }).click()
-  const tokens = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
+  await detailMode(page, 'Token').click()
+  const tokens = page.getByRole('region', { name: '模型明细', exact: true })
   await expect(tokens).toContainText('样本缓存命中率 80.0%')
   await expect(tokens).toContainText('800')
   await expect(tokens).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
-  await page.getByRole('tab', { name: '模型分布', exact: true }).click()
-  await expect(page.getByRole('tabpanel', { name: '模型分布', exact: true })).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
+  await detailMode(page, '费用').click()
+  await expect(page.getByRole('region', { name: '模型明细', exact: true })).toContainText('已采集缓存命中 80.0%（2 / 3 次）')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: 'test-results/cache-measured-mobile.png', fullPage: true, animations: 'disabled' })
 })
@@ -216,7 +219,7 @@ test('缓存数量在构成页签区分部分、明确零、完全缺失和完�
     const data = { ...report(), data: [row], total: { ...report().total, ...row, cache_hit_bp: fixture.known === 2 ? 0 : null } }
     await page.route('**/api/me/stats/breakdown?*', (route) => route.fulfill({ json: data }))
     await page.goto('/portal?view=tokens')
-    const panel = page.getByRole('tabpanel', { name: 'Token 构成', exact: true })
+    const panel = page.getByRole('region', { name: '模型明细', exact: true })
     const cells = panel.getByRole('row').filter({ hasText: 'model-a' }).getByRole('cell')
     await expect(cells.nth(2)).toHaveText(fixture.expectedRead)
     await expect(cells.nth(3)).toHaveText(fixture.expectedWrite)

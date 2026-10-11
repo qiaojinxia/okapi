@@ -1,6 +1,6 @@
 import { useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Area, CartesianGrid, Cell, ComposedChart, Bar, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Area, CartesianGrid, Cell, ComposedChart, Bar, LabelList, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Download, Table2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Segmented } from '@/components/ui/segmented'
@@ -9,6 +9,9 @@ import { Pagination } from '@/components/ui/pagination'
 import { clampOffset, DEFAULT_PAGE_SIZE, PAGE_SIZES } from '@/hooks/use-pagination'
 import { downloadCsv } from '@/lib/csv'
 import { cn } from '@/lib/utils'
+
+/// 柱子数不超过它时在柱顶标数值。
+const MAX_BAR_LABELS = 16
 
 export interface ChartSeries { key: string; label: string; color: string; axis?: 'right' }
 export interface ChartPoint { bucket: string; [key: string]: string | number | null }
@@ -62,6 +65,16 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const seriesUnit = (s: ChartSeries) => s.axis === 'right' && secondaryAxis ? secondaryAxis.unit : unit
   const seriesFormat = (s: ChartSeries | undefined) => s?.axis === 'right' && secondaryAxis ? secondaryAxis.format : format
   const seriesLabel = (s: ChartSeries) => secondaryAxis && seriesUnit(s) !== s.label ? `${s.label} (${seriesUnit(s)})` : s.label
+  // 柱顶标数值：柱子不多时直接把每天的数写在柱顶，不用悬停也能读。堆叠时只在最上面一段标整根柱子的合计。
+  // 柱子太密（如近 30 天、按小时）时文字会挤在一起，留给悬停提示。
+  const leftBars = type === 'bar' && !line ? visible.filter((s) => !(secondaryAxis && s.axis === 'right')) : []
+  const barLabels = leftBars.length > 0 && data.length <= MAX_BAR_LABELS
+  const barTotal = (index: number) => leftBars.reduce((sum, s) => sum + (Number(data[index]?.[s.key]) || 0), 0)
+  const barLabel = (pick: (index: number) => number) => (props: { x?: number | string; y?: number | string; width?: number | string; index?: number }) => {
+    const value = pick(props.index ?? 0)
+    if (!value) return null
+    return <text x={Number(props.x) + Number(props.width) / 2} y={Number(props.y) - 4} textAnchor="middle" fontSize={10} fill="var(--color-muted-foreground)" className="tabular-nums">{format(value)}</text>
+  }
   const exportRows = () => downloadCsv('usage-chart', [t('charts:date'), ...series.map((s) => `${s.label} (${seriesUnit(s)})`)], data.map((d) => [d.bucket, ...series.map((s) => d[s.key])]))
   const legend = <div role="group" aria-label={t('charts:legend')} className={cn('flex flex-wrap gap-1.5', !secondaryAxis && 'border-t border-border/60', !secondaryAxis && (compact ? 'pt-1' : 'pt-3'))}>
     {series.map((s) => <button type="button" key={s.key} aria-pressed={!hidden.includes(s.key)} disabled={!hidden.includes(s.key) && visible.length === 1} onClick={() => setHidden((previous) => previous.includes(s.key) ? previous.filter((key) => key !== s.key) : [...previous, s.key])} className={cn('inline-flex min-h-8 max-w-full items-center gap-2 rounded-md px-2 text-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-default', secondaryAxis && 'px-1', hidden.includes(s.key) && 'opacity-45')}>
@@ -90,7 +103,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
       ) : (
         <div className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} style={fill ? { minHeight: minPlotHeight } : undefined} aria-label={t('charts:plot')}>
           <ResponsiveContainer width="100%" height="100%" minWidth={0} className={fill ? 'lg:absolute lg:inset-0' : undefined}>
-            <ComposedChart data={data} margin={{ top: 10, right: 10, bottom: 4, left: 0 }} accessibilityLayer>
+            <ComposedChart data={data} margin={{ top: barLabels ? 20 : 10, right: 10, bottom: 4, left: 0 }} accessibilityLayer>
               <defs>{series.map((s, i) => <linearGradient key={s.key} id={`${id}-${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={s.color} stopOpacity={0.28} /><stop offset="100%" stopColor={s.color} stopOpacity={0.025} /></linearGradient>)}</defs>
               <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 5" strokeOpacity={0.7} />
               <XAxis dataKey="bucket" tickFormatter={(value: string) => value.length > 10 ? `${value.slice(5, 10)} ${value.slice(11, 16)}` : value.slice(5)} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} minTickGap={32} tickMargin={10} />
@@ -106,6 +119,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
                 return line || (s.axis === 'right' && secondaryAxis) ? <Line key={s.key} {...shared} type="linear" strokeWidth={2} strokeDasharray={s.axis === 'right' ? '5 3' : undefined} dot={data.length <= 31 ? { r: 2 } : false} activeDot={{ r: 4, strokeWidth: 2, stroke: 'var(--color-card)' }} connectNulls={false} />
                   : type === 'bar' ? <Bar key={s.key} {...shared} stroke="none" fill={s.color} stackId={stacked ? 'usage' : undefined} maxBarSize={32} radius={stacked ? undefined : [3, 3, 0, 0]}>
                     {partialBucket && data.map((point) => <Cell key={point.bucket} fillOpacity={point.bucket === partialBucket ? 0.4 : 1} />)}
+                    {barLabels && (stacked ? s === leftBars.at(-1) : leftBars.includes(s)) && <LabelList dataKey={s.key} content={barLabel(stacked ? barTotal : (index) => Number(data[index]?.[s.key]) || 0)} />}
                   </Bar>
                     : <Area key={s.key} {...shared} type="linear" strokeWidth={2} fill={`url(#${id}-${series.indexOf(s)})`} stackId={stacked ? 'usage' : undefined} connectNulls={false} dot={data.length === 1 ? { r: 4 } : false} activeDot={{ r: 3 }} />
               })}

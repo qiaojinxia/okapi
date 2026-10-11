@@ -159,7 +159,7 @@ test('登出同时清服务端 session（共享设备不留残留会话）', asy
   expect(after.status(), '登出必须使服务端 session 失效').toBe(401)
 })
 
-test('API key 登录直达门户总览：六卡 KPI + 三页签零请求切换', async ({ page, request }) => {
+test('API key 登录直达门户总览：KPI 卡与一页式用量区', async ({ page, request }) => {
   await signInWithKey(page, (await sharedUser(request)).apiKey)
   // 三区布局：顶部栏常驻身份区（余额徽章）+ 内容区 KPI 卡，两者都应在
   await expect(page.getByText(/^(余额|Balance) \$/)).toBeVisible()
@@ -172,15 +172,11 @@ test('API key 登录直达门户总览：六卡 KPI + 三页签零请求切换',
   // 用 i 标志：标题带 uppercase 样式，Playwright 匹配的是渲染后文本
   await expect(page.getByText(/额度与账单|billing/i).first()).toBeVisible()
 
-  // 三个页签是同一份数据的不同切法：新用户零调用，每签都应给出"还没有调用"的空态
-  // 而非报错或白屏
-  for (const tab of [/模型分布|By model/, /Token 构成|Token mix/, /用量趋势|Usage trend/]) {
-    await page.getByRole('tab', { name: tab }).click()
-    await expect(main.getByText(/还没有调用|No calls in this window/)).toBeVisible()
-  }
+  // 总览是一页：趋势、模型排行和模型明细都在，新用户零调用时给出"还没有调用"的空态而非报错或白屏
+  await expect(main.getByText(/还没有调用|No calls in this window/).first()).toBeVisible()
   // 范围切换（本密钥 / 全账户）不报错
   await page.getByRole('button', { name: /全账户|Whole account/ }).click()
-  await expect(main.getByText(/还没有调用|No calls in this window/)).toBeVisible()
+  await expect(main.getByText(/还没有调用|No calls in this window/).first()).toBeVisible()
 })
 
 test('门户日志页：过滤卡 + 空态；账户流水页：两页签空态；充值页挂流水入口', async ({ page, request }) => {

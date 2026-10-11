@@ -671,7 +671,7 @@ test('Dashboard 质量摘要前移，各指标可键盘进入对应分析并保�
   await expect.poll(() => requests.includes('/admin/stats/trend?days=30&metric=ttft')).toBe(true)
   await page.goBack()
   await expect(page).toHaveURL('/admin?days=30')
-  await expect(operations.locator('dd')).toHaveText(['99.0%', '1,300 ms', '150 ms', '42.5 Token/s', '35.0%'])
+  await expect(operations.locator('dd')).toHaveText(['99.0%', '42.5 Token/s', '150 ms', '1,300 ms', '35.0%'])
 })
 
 for (const { width, language, dark } of [
@@ -688,7 +688,7 @@ for (const { width, language, dark } of [
   const costs = page.locator(`[id="${await toggle.getAttribute('aria-controls')}"]`)
   await expect(toggle).toHaveAttribute('aria-expanded', 'false')
   await expect(costs).toBeHidden()
-  await expect(operations.locator('dd')).toHaveText(['99.0%', '1,300 ms', '150 ms', '42.5 Token/s', '35.0%'])
+  await expect(operations.locator('dd')).toHaveText(['99.0%', '42.5 Token/s', '150 ms', '1,300 ms', '35.0%'])
   const tops = await operations.locator('dt').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().top))
   expect(Math.max(...tops) - Math.min(...tops)).toBeLessThan(1)
   const collapsedHeight = (await operations.boundingBox())!.height
@@ -700,7 +700,7 @@ for (const { width, language, dark } of [
   await expect(costs).toBeVisible()
   const currency = language === 'en' ? '$' : 'US$'
   await expect(costs.locator('dd')).toHaveText([`${currency}4.20`, `${currency}1.80`, '50.0%'])
-  await expect(operations.locator('dd')).toHaveText(['99.0%', '1,300 ms', '150 ms', '42.5 Token/s', '35.0%', `${currency}4.20`, `${currency}1.80`, '50.0%'])
+  await expect(operations.locator('dd')).toHaveText(['99.0%', '42.5 Token/s', '150 ms', '1,300 ms', '35.0%', `${currency}4.20`, `${currency}1.80`, '50.0%'])
   expect(requests.filter(isUsage)).toHaveLength(1)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await toggle.press('Escape')

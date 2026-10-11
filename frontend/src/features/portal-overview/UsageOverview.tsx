@@ -7,17 +7,16 @@ import { Card } from '@/components/ui/card'
 import { OTHER_COLOR } from '@/lib/chart'
 import { formatBp } from '@/lib/money'
 import { SpendTrendView } from './SpendTrendView'
-import type { PortalView } from './search'
 import type { BreakdownResp } from './types'
 import { sumByModel } from './types'
 import { formatUsd } from './format'
 import { modelColors } from './usage-chart-data'
 import type { UsageMetric } from './usage-chart-data'
 
-/// 总览页签只回答「钱花在哪」：趋势 + 模型排行。Token 构成在自己的页签里，复用同一份用量响应，切换不额外查询。
-export function UsageOverview({ data, logSearch, metric, onMetricChange, onView }: {
+/// 趋势 + 模型消费环形图：回答「钱花在哪、怎么变的」。逐模型的数字在下方模型明细表里。
+export function UsageOverview({ data, logSearch, metric, onMetricChange, onShowModels }: {
   data: BreakdownResp; logSearch: PortalLogSearch; metric: UsageMetric
-  onMetricChange: (metric: UsageMetric) => void; onView: (view: PortalView) => void
+  onMetricChange: (metric: UsageMetric) => void; onShowModels: () => void
 }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
@@ -38,12 +37,12 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, onView 
     }) : []
 
   return <div className="grid min-w-0 gap-3 lg:grid-cols-12">
-    <div className="min-w-0 lg:col-span-8"><SpendTrendView quick rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} onExpand={() => onView('trend')} /></div>
+    <div className="min-w-0 lg:col-span-8"><SpendTrendView rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} /></div>
     <Card className="flex min-w-0 flex-col rounded-xl px-4 py-3 lg:col-span-4">
       <section aria-label={t('portal:modelSnapshot')} className="flex flex-1 flex-col gap-3">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">{t('portal:modelSnapshot')}</h2>
-          {models.length > 0 && <Button variant="ghost" size="xs" onClick={() => onView('models')}>{t('portal:allModels', { count: models.length })}</Button>}
+          {models.length > 0 && <Button variant="ghost" size="xs" onClick={onShowModels}>{t('portal:allModels', { count: models.length })}</Button>}
         </div>
         {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <>
           <div role="img" aria-label={t('portal:modelShareChart')} data-slot="model-donut" className="relative mx-auto size-32 shrink-0 rounded-full bg-muted sm:size-36" style={{ background: slices.length ? `conic-gradient(${slices.join(', ')})` : undefined }}>

@@ -4,6 +4,7 @@ import { oneOf, text } from '@/lib/search-params'
 import { USAGE_METRICS } from './usage-chart-data'
 import type { UsageMetric } from './usage-chart-data'
 
+/// 总览曾分页签；现在是一页，`view` 只用来：tokens 让模型明细显示 Token 列，trend / models 打开时滚到对应区块。
 export const PORTAL_VIEWS = ['overview', 'trend', 'models', 'tokens'] as const
 export type PortalView = (typeof PORTAL_VIEWS)[number]
 export const MODEL_METRICS = ['amount', 'requests', 'tokens'] as const

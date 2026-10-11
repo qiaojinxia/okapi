@@ -46,9 +46,9 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
   ]
   const qualityMetrics: Metric[] = [
     { label: t('charts:metric_success'), value: hasRequests && total?.errors != null ? formatBp(Math.round((1 - total.errors / total.requests!) * 10000), locale) : '—', measure: 'error_rate', rate: successRate },
-    { label: t('charts:metric_latency'), value: latency(total?.avg_latency_ms, hasRequests), measure: 'latency' },
-    { label: t('analytics:ttft'), value: latency(total?.avg_ttft_ms, (total?.ttft_samples ?? 0) > 0), measure: 'ttft', hint: (total?.ttft_samples ?? 0) > 0 ? t('charts:ttftHint', { count: total?.ttft_samples }) : t('charts:ttftUnavailable') },
     { label: t('charts:throughput'), value: hasRequests && throughput != null ? `${(throughput / 1000).toLocaleString(locale, { maximumFractionDigits: 1 })} Token/s` : '—', measure: 'throughput', hint: partialThroughput ? t('charts:throughputSampleHint') : t('charts:throughputHint'), sample: partialThroughput ? sampleText(throughputSamples) : undefined },
+    { label: t('analytics:ttft'), value: latency(total?.avg_ttft_ms, (total?.ttft_samples ?? 0) > 0), measure: 'ttft', hint: (total?.ttft_samples ?? 0) > 0 ? t('charts:ttftHint', { count: total?.ttft_samples }) : t('charts:ttftUnavailable') },
+    { label: t('charts:metric_latency'), value: latency(total?.avg_latency_ms, hasRequests), measure: 'latency' },
     { label: t('portal:cacheHitShort'), value: hasRequests && cache != null && (partialCache || (total?.prompt_tokens ?? 0) > 0) ? formatBp(cache, locale) : '—', measure: 'cache', hint: t(partialCache ? 'charts:cacheSampleHint' : 'charts:cacheHitHint'), sample: partialCache ? sampleText(cacheSamples) : undefined },
   ]
   const renderMetric = ({ label, value, measure, hint, sample, rate, meter }: Metric) => <div key={label} className="group relative min-h-11 min-w-0 rounded px-1 py-0.5 has-[a]:hover:bg-muted/60 sm:min-h-10 sm:py-0">

@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useTranslation } from 'react-i18next'
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
+import { Bar, BarChart, LabelList, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
 import { Badge } from '@/components/ui/badge'
 import { FieldGroup } from '@/components/ui/drawer'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
@@ -53,7 +53,7 @@ export function UsageSection({ userId }: { userId: number }) {
         {d.stats_available && d.daily.length > 0 ? (
           <div className="h-24">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={d.daily.map((x) => ({ ...x, day: x.day.slice(5), usd: x.amount_micro / 1_000_000 }))}>
+              <BarChart data={d.daily.map((x) => ({ ...x, day: x.day.slice(5), usd: x.amount_micro / 1_000_000 }))} margin={{ top: 14, right: 4, left: 4, bottom: 0 }}>
                 <XAxis dataKey="day" fontSize={10} />
                 <Tooltip
                   formatter={(v) => [`$${Number(v).toFixed(4)}`, t('common:amount')]}
@@ -63,7 +63,10 @@ export function UsageSection({ userId }: { userId: number }) {
                   fill="var(--color-primary)"
                   radius={[2, 2, 0, 0]}
                   isAnimationActive={false}
-                />
+                >
+                  {/* 柱顶直接标当天消费，0 不标 */}
+                  <LabelList dataKey="amount_micro" position="top" fontSize={9} fill="var(--color-muted-foreground)" formatter={(v) => Number(v) > 0 ? formatMoney(Number(v), locale) : ''} />
+                </Bar>
               </BarChart>
             </ResponsiveContainer>
           </div>

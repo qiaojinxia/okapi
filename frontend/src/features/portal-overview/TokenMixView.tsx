@@ -1,5 +1,4 @@
 import { useTranslation } from 'react-i18next'
-import { Card, CardContent } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import type { BreakdownRow, BreakdownTotal } from '@/features/portal-overview/types'
@@ -36,7 +35,7 @@ export function segments(t: {
   ]
 }
 
-/// 按已记录的用量拆分；采集不完整时不把缺失值解释成零命中。
+/// 模型明细的「Token」视图：按已记录的用量拆分；采集不完整时不把缺失值解释成零命中。
 export function TokenMixView({
   rows,
   total,
@@ -47,13 +46,7 @@ export function TokenMixView({
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   if (total === null || total.tokens === 0) {
-    return (
-      <Card>
-        <CardContent>
-          <EmptyState hint={t('portal:emptyUsageHint')} />
-        </CardContent>
-      </Card>
-    )
+    return <EmptyState hint={t('portal:emptyUsageHint')} />
   }
   const segs = segments(total)
   const hit = cacheHit(total)
@@ -68,8 +61,7 @@ export function TokenMixView({
   const models = [...sumByModel(rows).values()].sort((a, b) => b.prompt_tokens + b.completion_tokens - (a.prompt_tokens + a.completion_tokens))
 
   return (
-    <Card>
-      <CardContent className="flex flex-col gap-4 pt-4">
+      <div className="flex flex-col gap-4">
         {/* 一根横向堆叠条：四段占比一眼可读；段太窄（<1%）不画文字只留色块 */}
         <div className="flex h-4 w-full overflow-hidden rounded bg-muted">
           {segs
@@ -137,7 +129,6 @@ export function TokenMixView({
             })}
           </TBody>
         </Table>
-      </CardContent>
-    </Card>
+      </div>
   )
 }

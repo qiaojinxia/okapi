@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, RefreshCw, ShieldCheck, Timer, Wallet, Zap } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Button } from '@/components/ui/button'
@@ -12,11 +12,8 @@ import { Segmented } from '@/components/ui/segmented'
 import { UsageScope } from '@/components/usage-scope'
 import { useUsageScope } from '@/hooks/use-usage-scope'
 import { Stat } from '@/components/ui/stat'
-import { Tabs } from '@/components/ui/tabs'
-import { ModelShareView } from '@/features/portal-overview/ModelShareView'
+import { ModelDetails } from '@/features/portal-overview/ModelDetails'
 import { QualityStrip } from '@/features/portal-overview/QualityStrip'
-import { SpendTrendView } from '@/features/portal-overview/SpendTrendView'
-import { TokenMixView } from '@/features/portal-overview/TokenMixView'
 import { UsageOverview } from '@/features/portal-overview/UsageOverview'
 import { cacheHit } from '@/features/portal-overview/cache-metrics'
 import type { BreakdownResp, Scope } from '@/features/portal-overview/types'
@@ -30,8 +27,6 @@ import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatTokensPerSec } from '@/lib/money'
 import { delta, formatDuration, formatUsd } from './format'
 import { qk } from '@/lib/query-keys'
-import { PORTAL_VIEWS } from './search'
-import type { PortalView } from './search'
 
 const routeApi = getRouteApi('/portal/')
 /// 健康指标的图标一律中性色：颜色只留给状态（成功率的黄 / 红）。
@@ -47,7 +42,7 @@ export function PortalOverviewPage() {
   const me = useMe()
   const search = routeApi.useSearch()
   const navigate = routeApi.useNavigate()
-  const { days = 7, view = 'overview' } = search
+  const { days = 7, view } = search
   const usageScope = useUsageScope(search.scope)
   const { scope } = usageScope
   const range = search.start_date && search.end_date ? { start: search.start_date, end: search.end_date } : null
@@ -99,30 +94,18 @@ export function PortalOverviewPage() {
   })
   const previous = prev.isError ? undefined : prev.data?.total
 
-  const labels: Record<PortalView, string> = {
-    overview: t('portal:viewOverview'),
-    trend: t('portal:viewTrend'),
-    models: t('portal:viewModels'),
-    tokens: t('portal:viewTokens'),
-  }
+  // 旧链接里的 ?view=trend / models / tokens 曾是页签，现在滚到对应区块；只在首次数据回来时滚一次
+  const scrolled = useRef(false)
+  useEffect(() => {
+    if (scrolled.current || !q.isSuccess || !view) return
+    scrolled.current = true
+    document.getElementById(view === 'trend' ? 'portal-trend' : 'portal-details')?.scrollIntoView({ block: 'start' })
+  }, [q.isSuccess, view])
+
   const hit = total ? cacheHit(total) : null
   const failed = total?.errors
 
   const health = <QualityStrip label={t('charts:performance')} loading={loading} items={[
-    {
-      icon: Zap, accent: 'bg-chart-3/12 text-chart-3', label: t('analytics:ttft'),
-      value: total?.avg_ttft_ms == null ? '—' : formatDuration(total.avg_ttft_ms, locale),
-      ...(q.isError
-        ? { sub: t('charts:statisticsUnavailable') }
-        : total?.avg_ttft_ms == null
-          ? { sub: t('charts:ttftNoSamples'), subTitle: t('charts:ttftUnavailable') }
-          : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
-    },
-    {
-      icon: Timer, accent: 'bg-chart-1/12 text-chart-1', label: t('charts:metric_latency'),
-      value: total?.avg_latency_ms == null ? '—' : formatDuration(total.avg_latency_ms, locale),
-      sub: t('portal:latencyCaption'),
-    },
     {
       icon: ShieldCheck, accent: 'bg-success/12 text-success', label: t('charts:metric_success'),
       value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
@@ -139,6 +122,20 @@ export function PortalOverviewPage() {
             subTitle: t('charts:throughputSampleHint'),
           }
         : { sub: t('portal:throughputCaption') }),
+    },
+    {
+      icon: Zap, accent: 'bg-chart-3/12 text-chart-3', label: t('analytics:ttft'),
+      value: total?.avg_ttft_ms == null ? '—' : formatDuration(total.avg_ttft_ms, locale),
+      ...(q.isError
+        ? { sub: t('charts:statisticsUnavailable') }
+        : total?.avg_ttft_ms == null
+          ? { sub: t('charts:ttftNoSamples'), subTitle: t('charts:ttftUnavailable') }
+          : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
+    },
+    {
+      icon: Timer, accent: 'bg-chart-1/12 text-chart-1', label: t('charts:metric_latency'),
+      value: total?.avg_latency_ms == null ? '—' : formatDuration(total.avg_latency_ms, locale),
+      sub: t('portal:latencyCaption'),
     },
   ]} />
 
@@ -243,29 +240,23 @@ export function PortalOverviewPage() {
 
       {health}
 
-      <Tabs
-        id="portal-views"
-        ariaLabel={t('portal:dashboardViews')}
-        items={PORTAL_VIEWS.map((id) => ({ id, label: labels[id], panelId: `portal-view-${id}` }))}
-        active={view}
-        onChange={(id) => void navigate({ search: (prev) => ({ ...prev, view: id as PortalView }) })}
-      />
-      <div id={`portal-view-${view}`} role="tabpanel" aria-labelledby={`portal-views-${view}`} tabIndex={0} className="min-w-0 rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
       {q.isError ? (
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
-      ) : q.isPending ? <LoadingState /> : (
+      ) : q.isPending ? <LoadingState /> : q.data?.total && (
         <>
-          {view === 'overview' && q.data?.total && <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
-            onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }) })}
-            onView={(next) => void navigate({ search: (prev) => ({ ...prev, view: next }) })} />}
-          {view === 'trend' && <SpendTrendView rows={q.data?.data ?? []} days={q.data?.days ?? days} window={q.data?.window} metric={search.measure ?? 'amount'} onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }) })} />}
-          {view === 'models' && <ModelShareView rows={q.data?.data ?? []} logSearch={logSearch}
-            metric={search.model_measure ?? 'amount'} onMetricChange={(model_measure) => void navigate({ search: (prev) => ({ ...prev, model_measure }) })}
-            query={search.model_query ?? ''} onQueryChange={(model_query) => void navigate({ search: (prev) => ({ ...prev, model_query: model_query || undefined }), replace: true })} />}
-          {view === 'tokens' && <TokenMixView rows={q.data?.data ?? []} total={total ?? null} />}
+          <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
+            onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }), resetScroll: false })}
+            onShowModels={() => {
+              void navigate({ search: (prev) => ({ ...prev, view: undefined }), resetScroll: false })
+              document.getElementById('portal-details')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }} />
+          <ModelDetails rows={q.data.data} total={total ?? null} logSearch={logSearch}
+            mode={view === 'tokens' ? 'tokens' : 'models'}
+            onModeChange={(mode) => void navigate({ search: (prev) => ({ ...prev, view: mode === 'tokens' ? 'tokens' : undefined }), resetScroll: false })}
+            metric={search.model_measure ?? 'amount'} onMetricChange={(model_measure) => void navigate({ search: (prev) => ({ ...prev, model_measure }), resetScroll: false })}
+            query={search.model_query ?? ''} onQueryChange={(model_query) => void navigate({ search: (prev) => ({ ...prev, model_query: model_query || undefined }), replace: true, resetScroll: false })} />
         </>
       )}
-      </div>
     </div>
   )
 }

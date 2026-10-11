@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button'
 import { Segmented } from '@/components/ui/segmented'
 import { chartColor } from '@/lib/chart'
 import { usageValue } from './usage-chart-data'
-import { Card, CardContent } from '@/components/ui/card'
 import { EmptyState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import type { BreakdownRow } from '@/features/portal-overview/types'
@@ -17,10 +16,9 @@ import { formatBp, formatCount, formatMoney } from '@/lib/money'
 import { MODEL_METRICS } from './search'
 import type { ModelMetric } from './search'
 
-/// 模型分布（new-api 的"模型消耗分布 + 调用次数占比"两张饼合成一张表）。
+/// 模型明细的「费用」视图：金额占比、请求数、每次均价。
 ///
-/// 表而非饼：饼图超过五片就读不出谁是谁，而表能同时给金额占比、请求数、
-/// 每次均价——"贵模型用得少但一次很贵" 这种事只有均价列能看出来。
+/// 均价列能看出「贵模型用得少但一次很贵」；概览的环形图只回答谁占大头。
 export function ModelShareView({ rows, logSearch, metric, onMetricChange, query, onQueryChange }: {
   rows: BreakdownRow[]; logSearch: PortalLogSearch; metric: ModelMetric
   onMetricChange: (metric: ModelMetric) => void; query: string; onQueryChange: (query: string) => void
@@ -33,17 +31,16 @@ export function ModelShareView({ rows, logSearch, metric, onMetricChange, query,
   const visible = models.map((model, index) => ({ ...model, rank: index + 1 })).filter((model) => terms.every((term) => model.model.normalize('NFKC').toLowerCase().includes(term)))
 
   return (
-    <Card className="min-w-0 rounded-xl">
-      <CardContent className="space-y-3 px-4 py-3">
-        <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
-          <div><h2 className="font-semibold">{t('charts:modelDistribution')}</h2><p className="mt-1 text-xs text-muted-foreground">{t('charts:distributionHint')}</p></div>
-          <Segmented ariaLabel={t('charts:distributionMetric')} value={metric} onChange={onMetricChange} options={MODEL_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))} />
-        </div>
+      <div className="space-y-3">
         <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
           <AutocompleteInput search className="w-full sm:w-72" inputClassName="h-11 md:h-9" maxLength={256}
             aria-label={t('portal:usedModelSearch')} placeholder={t('portal:usedModelSearchHint')} value={query} onChange={onQueryChange}
             options={models.map((model) => ({ value: model.model }))} emptyHint={t('portal:usedModelNoMatches')} />
           <p className="text-xs text-muted-foreground" aria-live="polite" aria-atomic="true">{t('portal:usedModelCount', { shown: visible.length, total: models.length })}</p>
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 sm:ml-auto">
+            <span className="text-xs text-muted-foreground" title={t('charts:distributionHint')}>{t('portal:sortBy')}</span>
+            <Segmented ariaLabel={t('charts:distributionMetric')} size="sm" value={metric} onChange={onMetricChange} options={MODEL_METRICS.map((value) => ({ value, label: t(`charts:metric_${value}`) }))} />
+          </div>
         </div>
         <p className="text-xs text-muted-foreground">{t('portal:usedModelShareHint')}</p>
         {visible.length === 0 ? <EmptyState hint={terms.length ? t('portal:usedModelNoMatches') : t('portal:emptyUsageHint')}
@@ -93,7 +90,6 @@ export function ModelShareView({ rows, logSearch, metric, onMetricChange, query,
             })}
           </TBody>
         </Table>}
-      </CardContent>
-    </Card>
+      </div>
   )
 }

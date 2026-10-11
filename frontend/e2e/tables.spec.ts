@@ -2,6 +2,9 @@ import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 
+/// 总览不再分页签：模型明细卡里用「费用 / Token」切换列
+const detailMode = (page: Page, mode: '费用' | 'Token') => page.getByRole('group', { name: '明细口径', exact: true }).getByRole('button', { name: mode, exact: true })
+
 function report(count = 40) {
   const data = Array.from({ length: count }, (_, i) => ({
     day: '2026-09-26', model: `model-${String(i + 1).padStart(2, '0')}`, requests: count - i,
@@ -235,7 +238,7 @@ test('小表不产生多余滚动控件或焦点停靠，无输入 Token 时不�
   expect(await table.locator('..').getAttribute('tabindex')).toBeNull()
   await expect(table.locator('tbody tr td').nth(1)).toHaveText('—')
   await expect(table.locator('tbody tr td').last()).toHaveText('—')
-  await page.getByRole('tab', { name: 'Token 构成' }).click()
+  await detailMode(page, 'Token').click()
   await expect(table.locator('tbody tr td').last()).toHaveText('—')
 })
 
