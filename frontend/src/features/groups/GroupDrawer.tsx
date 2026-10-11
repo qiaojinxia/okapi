@@ -12,6 +12,7 @@ import { PoolReach } from '@/features/pools/PoolReach'
 import { DEFAULT_POOL } from '@/features/pools/types'
 import { poolOptions } from '@/features/pools/pool-options'
 import { apiFetch } from '@/lib/api'
+import { isMachineCode } from '@/lib/codes'
 import { describeError } from '@/lib/i18n'
 
 export function GroupDrawer({
@@ -63,6 +64,8 @@ export function GroupDrawer({
     onError: (err) => toast.error(describeError(err)),
   })
 
+  // 只在新建时校验格式：已有分组的 code 只读，不该因规则收紧就不让改别的字段
+  const codeInvalid = group === undefined && form.group_code.trim() !== '' && !isMachineCode(form.group_code)
   return (
     <Drawer
       open
@@ -77,6 +80,7 @@ export function GroupDrawer({
           <Button
             disabled={
               form.group_code.trim() === '' ||
+              codeInvalid ||
               limitInvalid(form.rpm_limit) ||
               limitInvalid(form.rph_limit) ||
               upsert.isPending
@@ -97,8 +101,11 @@ export function GroupDrawer({
             value={form.group_code}
             readOnly={group !== undefined}
             placeholder="vip"
+            maxLength={32}
+            aria-invalid={codeInvalid || undefined}
             onChange={(e) => setForm((f) => ({ ...f, group_code: e.target.value }))}
           />
+          {codeInvalid && <p role="alert" className="text-xs text-destructive">{t('admin:codeFormatInvalid', { max: 32 })}</p>}
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="g-ratio">{t('admin:groupRatio')}</Label>

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input, Label } from '@/components/ui/input'
 import { ErrorState } from '@/components/ui/state'
 import { apiFetch, ApiError } from '@/lib/api'
+import { isMachineCode } from '@/lib/codes'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import { poolOptions } from './pool-options'
@@ -22,6 +23,7 @@ export function PoolCreateInline({ pools, onCreated, onCancel }: {
   const [code, setCode] = useState('')
   const trimmed = code.trim()
   const exists = pools.some((pool) => pool.pool_code === trimmed)
+  const invalid = trimmed !== '' && !isMachineCode(trimmed)
   const create = useMutation({
     mutationFn: async () => {
       // POST also edits existing pools. Refresh the catalog before creating to
@@ -48,19 +50,20 @@ export function PoolCreateInline({ pools, onCreated, onCancel }: {
   return <form className="flex min-w-0 flex-col gap-3 rounded-md border border-border bg-muted/20 p-3"
     aria-label={t('admin:poolCreate')} onSubmit={(event) => {
       event.preventDefault()
-      if (trimmed && !exists && !create.isPending) create.mutate()
+      if (trimmed && !exists && !invalid && !create.isPending) create.mutate()
     }}>
     <div className="flex flex-col gap-1.5">
       <Label htmlFor="channel-new-pool-code">{t('admin:poolCode')}</Label>
       <Input id="channel-new-pool-code" value={code} maxLength={32} placeholder="stable"
-        autoFocus disabled={create.isPending} aria-invalid={exists}
+        autoFocus disabled={create.isPending} aria-invalid={exists || invalid}
         onChange={(event) => { setCode(event.target.value); create.reset() }} />
       {exists && <p role="alert" className="text-xs text-destructive">{t('admin:poolCodeExists')}</p>}
+      {invalid && <p role="alert" className="text-xs text-destructive">{t('admin:codeFormatInvalid', { max: 32 })}</p>}
     </div>
     <p className="text-xs leading-5 text-muted-foreground">{t('admin:poolCreateInlineHint')}</p>
     {create.isError && <ErrorState message={describeError(create.error)} />}
     <div className="flex flex-wrap gap-2">
-      <Button size="sm" type="submit" disabled={!trimmed || exists} loading={create.isPending}>
+      <Button size="sm" type="submit" disabled={!trimmed || exists || invalid} loading={create.isPending}>
         {t('admin:poolCreateAndSelect')}
       </Button>
       <Button size="sm" variant="ghost" disabled={create.isPending} onClick={onCancel}>{t('common:cancel')}</Button>

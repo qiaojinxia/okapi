@@ -658,16 +658,7 @@ pub async fn import_proxies(
 const GROUP_MODES: [&str; 2] = ["pinned", "rotate"];
 
 fn ensure_group_code(code: &str) -> Result<&str, AppError> {
-    let code = code.trim();
-    let ok = (1..=32).contains(&code.len())
-        && code
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'));
-    if ok {
-        Ok(code)
-    } else {
-        Err(AppError::bad_request().with_param("code"))
-    }
+    super::identifiers::ensure_code("code", code, 32)
 }
 
 /// GET /admin/proxy-groups。

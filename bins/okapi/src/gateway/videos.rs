@@ -431,16 +431,16 @@ async fn relay_task(
         .map_err(|_| AppError::new(StatusCode::GATEWAY_TIMEOUT, codes::UPSTREAM_TIMEOUT))??;
         let status =
             StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_owned();
+        let content_type = served_content_type(
+            resp.headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+        );
         let body = Body::from_stream(resp.bytes_stream());
         Ok(Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, content_type)
+            .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
             .body(body)
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
     } else {
@@ -769,6 +769,58 @@ mod duration_tests {
             Value::Null,
         ] {
             assert!(parse_seconds(Some(&value)).is_err());
+        }
+    }
+}
+
+/// 视频内容端点回给客户端的 Content-Type：只认 `video/*`，上游的 JSON 错误体原样标 JSON，
+/// 其余（`text/html`、`image/svg+xml` …）一律按字节流下发。上游是管理员配的渠道，但被劫持或
+/// 配错时不能让它在本站源上渲染页面；配合 `nosniff` 浏览器也不会再猜类型。
+fn served_content_type(upstream: Option<&str>) -> String {
+    let essence = upstream
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let subtype_ok = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-'))
+    };
+    match essence.split_once('/') {
+        Some(("video", subtype)) if subtype_ok(subtype) => essence,
+        Some(("application", "json")) => essence,
+        _ => "application/octet-stream".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod served_content_type_tests {
+    use super::served_content_type;
+
+    #[test]
+    fn only_video_and_json_types_are_reflected() {
+        assert_eq!(served_content_type(Some("video/mp4")), "video/mp4");
+        assert_eq!(
+            served_content_type(Some("Video/WebM; codecs=vp9")),
+            "video/webm"
+        );
+        assert_eq!(
+            served_content_type(Some("application/json; charset=utf-8")),
+            "application/json"
+        );
+        for other in [
+            Some("text/html"),
+            Some("image/svg+xml"),
+            Some("video/"),
+            Some("video/mp4<script>"),
+            Some("text/html;video/mp4"),
+            None,
+        ] {
+            assert_eq!(
+                served_content_type(other),
+                "application/octet-stream",
+                "{other:?}"
+            );
         }
     }
 }

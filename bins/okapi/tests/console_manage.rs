@@ -1243,3 +1243,49 @@ async fn unrestricted_admin_cannot_promote_or_demote_users() {
     assert_eq!(role, 10);
     assert_eq!(binding, None);
 }
+
+/// 第十一轮：分组 / 池 / 套餐的 code 会拼进 Redis 键与 `<group>|<channel_id>` 字段，只收
+/// `[A-Za-z0-9_.-]`；漏校验的文本超出列宽时回 400（`value_too_long`），不再是 500 + ERROR 日志。
+#[tokio::test]
+async fn codes_reject_separators_and_overlong_text_is_a_bad_request() {
+    let env = setup().await;
+    let post = |path: &'static str, body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            path,
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    for (path, body, param) in [
+        (
+            "/admin/groups",
+            json!({"group_code": "a|0|999", "group_ratio": "1"}),
+            "group_code",
+        ),
+        (
+            "/admin/groups",
+            json!({"group_code": "x\nrl:1", "group_ratio": "1"}),
+            "group_code",
+        ),
+        ("/admin/pools", json!({"pool_code": "x:y"}), "pool_code"),
+        (
+            "/admin/plans",
+            json!({"plan_code": "bad code", "display_name": "x", "kind": 0, "grant_micro": 1}),
+            "plan_code",
+        ),
+    ] {
+        let (status, resp) = post(path, body).await;
+        assert_eq!(status, 400, "{path}: {resp}");
+        assert_eq!(resp["error"]["param"], param, "{path}: {resp}");
+    }
+    let code = format!("len-{}", &env.suffix[..8]);
+    let (status, resp) = post(
+        "/admin/groups",
+        json!({"group_code": code, "group_ratio": "1", "description": "d".repeat(300)}),
+    )
+    .await;
+    assert_eq!(status, 400, "{resp}");
+    assert_eq!(resp["error"]["param"], "value_too_long");
+}

@@ -1878,7 +1878,7 @@ temperature 在 gemini 侧要落到 `generationConfig`）——本轮只放能�
   每 IP 限流 scope `email_code`（缺省 3/min）+ 每邮箱 60s 冷却（Redis `verify:email:cd:<email>`）
   + 每收件箱每日 10 封（Redis `mail:day:email_code:<收件箱>`，24h 窗；收件箱去掉 `+标签`、Gmail 再去掉点，
   换 IP 轮着发也只能发这么多，超出 429 `email_daily_limit`），
-  6 位数字码存 Redis `verify:email:<email>`（10 min，覆盖旧码）。`/auth/register` 带 `email_code`，
+  6 位数字码存 Redis `verify:email:code:<email>`（10 min，覆盖旧码）。`/auth/register` 带 `email_code`，
   错码 400 `email_code_invalid`，对上即删（一次性）。SMTP 未配置而策略要求验证 → 501
   `smtp_not_configured`（配置矛盾要暴露，不能静默放行）。`GET /api/registration` 透出
   `email_verification` 供登录页决定是否画验证码栏。
@@ -2745,6 +2745,14 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   outbox 未入批的部分索引（chsink 每秒认领）；DLQ `ch_batch_id`（清理批次时的外键检查）。
 - **前端产物缓存**：embed-web 形态下 `assets/`（文件名带哈希）回 `immutable` 一年，index.html 等入口 `no-cache`，发布后不再拿旧 shell。
 - **时区**：时段折扣与统计页「今天 / 本月」按进程本地时区，多副本必须设同一 `TZ`；用量限额与渠道日 / 月计数器固定按 UTC 自然日 / 月重置（README 部署节）。
+- **标识符统一校验（第十一轮，`console/identifiers.rs`）**：分组 / 池 / 套餐 / 出口组的 code 只收 `[A-Za-z0-9_.-]`
+  （会拼进 Redis 键与 `mb:blocks` 的 `<group>|<channel_id>` 字段，`|`、`:`、空白进不来）；渠道名、key 名、套餐名、模型名
+  按字符计长、禁控制与不可见字符（模型名合法地带 `:` `/` `@`，不套 code 规则）；用户名 NFC 后入库，注册与改名同一套规则，
+  注册撞用户名回 409 `profile_username_taken`（此前唯一键报错是 500）；邮箱要求单个 `@`、dot-atom 本地部分、带点的域名。
+  验证码键改为 `verify:email:code:<email>`，与冷却键 `verify:email:cd:<email>` 分开——此前邮箱 `cd:victim@…` 的码键就是
+  victim 的冷却键，能定向挡住别人取码。超出 varchar 的写入（PG 22001）统一回 400 `value_too_long`，不再 500 + ERROR 日志。
+- **日志与下载面**：`ops:logs` 捕获时把换行、控制字符与不可见字符转义成字面量，一条告警只占一行，伪造不出假的下一行；
+  视频内容端点只回传 `video/*`（上游 JSON 错误体保留 `application/json`），其余一律 `application/octet-stream`，并带 `nosniff`。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

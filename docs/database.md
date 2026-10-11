@@ -720,7 +720,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `notify:mute:<idx>:<event>` | STRING | 投递租约 120s / 成功后 min_interval_secs | SET NX 认领 owner UUID，单键 Lua 核对 owner 后：成功置 sent 并启动静默窗，失败 DEL；告警审计使用独立事件键 |
 | `totp:pending:<uid>:<sha256(sid)>:<ticket>` | STRING | 5min | 服务端密封 TOTP 秘钥；仅用户和发起会话可确认，成功后删除。时间片防重放真理源为 users.totp_last_counter |
 | `mb:blocks` | HASH | 永久（字段按 `until` 由 worker 剪除） | 负毛利熔断状态（IMPLEMENTATION §11.34）：字段 `<group>\|<channel_id>` → JSON `{state: blocked\|lifted, since, until, requests, amount_micro, cost_micro, margin_bp}`。worker 每 5 分钟按 settings.margin_breaker 评估 CH mv_analysis_hour 写入；gateway 10s 进程缓存一次 HGETALL，`blocked` 且未到 `until` 的对从候选里摘掉（Redis 故障 = 不熔）；`lifted` 为管理员解除，期间评估器跳过该对；关闭功能时整键删除 |
-| `verify:email:<email>` | STRING | 10min | 注册邮箱验证码（6 位数字；重发覆盖旧码；注册对上即 DEL，一次性。IMPLEMENTATION §11.27） |
+| `verify:email:code:<email>` | STRING | 10min | 注册邮箱验证码（6 位数字；重发覆盖旧码；注册对上即 DEL，一次性。IMPLEMENTATION §11.27） |
 | `verify:email:cd:<email>` | STRING | 60s | 同一邮箱验证码重发冷却（SET NX） |
 | `pwreset:<sha256(token)>` | STRING | 30min | 找回密码 token → user_id（明文 token 只出现在邮件链接里；重设成功即 DEL） |
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |

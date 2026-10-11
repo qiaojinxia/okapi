@@ -914,11 +914,13 @@ impl SchedulerRedis {
     }
 
     /// 存验证码（覆盖旧码）。返回 false = Redis 故障，调用方应报错而不是发一封对不上的码。
+    /// 码与冷却各占 `code:` / `cd:` 前缀：此前码键是 `verify:email:<email>`，邮箱 `cd:victim@…`
+    /// 的码键恰好就是 victim 的冷却键，能定向挡住别人取码。
     pub async fn email_code_set(&self, email: &str, code: &str, ttl_secs: i64) -> bool {
         let result: Result<(), _> = self
             .client
             .set(
-                format!("verify:email:{email}"),
+                format!("verify:email:code:{email}"),
                 code,
                 Some(Expiration::EX(ttl_secs)),
                 None,
@@ -937,7 +939,7 @@ impl SchedulerRedis {
         // even when two requests present the right code concurrently.
         let stored: Option<String> = self
             .client
-            .getdel(format!("verify:email:{email}"))
+            .getdel(format!("verify:email:code:{email}"))
             .await
             .ok()
             .flatten();

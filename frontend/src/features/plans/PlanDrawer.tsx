@@ -9,6 +9,7 @@ import { Select } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
+import { isMachineCode } from '@/lib/codes'
 import { describeError } from '@/lib/i18n'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
@@ -82,6 +83,8 @@ export function PlanDrawer({
   const priceMicro = form.price_usd.trim() === '' ? 0 : toMicro(form.price_usd)
   const durationDays = intOrUndef(form.duration_days)
   const subscriptionInvalid = kind === 1 && (durationDays === undefined || priceMicro < 0)
+  // 编辑时 code 锁定，只在新建时按机器标识规则校验（后端 ensure_code，最长 64）
+  const codeInvalid = !editing && form.plan_code.trim() !== '' && !isMachineCode(form.plan_code, 64)
 
   const upsert = useMutation({
     mutationFn: () =>
@@ -124,7 +127,7 @@ export function PlanDrawer({
           </Button>
           <Button
             disabled={
-              upsert.isPending || form.plan_code.trim() === '' || grantMicro <= 0 || subscriptionInvalid
+              upsert.isPending || form.plan_code.trim() === '' || codeInvalid || grantMicro <= 0 || subscriptionInvalid
             }
             onClick={() => upsert.mutate()}
           >
@@ -159,8 +162,11 @@ export function PlanDrawer({
               value={form.plan_code}
               placeholder="starter"
               disabled={editing}
+              maxLength={64}
+              aria-invalid={codeInvalid || undefined}
               onChange={(e) => setForm((f) => ({ ...f, plan_code: e.target.value }))}
             />
+            {codeInvalid && <p role="alert" className="text-xs text-destructive">{t('admin:codeFormatInvalid', { max: 64 })}</p>}
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="p-name">{t('admin:planName')}</Label>

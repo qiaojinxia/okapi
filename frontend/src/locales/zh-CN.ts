@@ -1115,6 +1115,7 @@ export default {
     poolCreate: '新建池',
     poolCreateAndSelect: '创建并选中',
     poolCreateInlineHint: '填写池代码即可创建，默认使用“优先级 + 加权”。创建后自动勾选，保存渠道或池成员关系后生效。',
+    codeFormatInvalid: '只能用字母、数字和 _ . -，最长 {{max}} 个字符。',
     poolCodeExists: '此池已存在，请在上方直接勾选。',
     poolEdit: '编辑 {{name}}',
     poolDrawerDesc: '池代码建后不可改（分组与令牌按代码引用）。',

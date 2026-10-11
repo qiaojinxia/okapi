@@ -140,8 +140,10 @@ impl<S: Subscriber> Layer<S> for OpsLogLayer {
         }
         let mut msg = Message::default();
         event.record(&mut msg);
-        let mut message = msg.text;
-        message.push_str(&msg.fields);
+        msg.text.push_str(&msg.fields);
+        // 换行与控制字符转义：上游错误原文、用户填的邮箱都可能带 `\n`，面板按行渲染，
+        // 不转义的话一条 WARN 能伪造出一行假的 ERROR
+        let mut message = crate::text::escape_for_log(&msg.text).into_owned();
         if message.len() > MESSAGE_MAX {
             let cut = (0..=MESSAGE_MAX)
                 .rev()
@@ -245,6 +247,28 @@ mod tests {
         assert_eq!(
             entry.message,
             "ops-redact-test api_key=[redacted] tokens=12"
+        );
+    }
+
+    /// 一条告警只占面板的一行：消息与字段里的换行、终端转义都转义掉，伪造不出假的下一行。
+    #[test]
+    fn captured_lines_cannot_forge_extra_rows() {
+        let subscriber = tracing_subscriber::registry().with(OpsLogLayer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(
+                to = %"x@a.test\nERROR forged node=gw-1",
+                error = %"boom\u{1b}[2J",
+                "ops-forge-test\nERROR fake"
+            );
+        });
+        let entry = recent()
+            .into_iter()
+            .find(|e| e.message.starts_with("ops-forge-test"))
+            .unwrap();
+        assert!(!entry.message.contains('\n') && !entry.message.contains('\u{1b}'));
+        assert_eq!(
+            entry.message,
+            "ops-forge-test\\nERROR fake to=x@a.test\\nERROR forged node=gw-1 error=boom\\u{1b}[2J"
         );
     }
 

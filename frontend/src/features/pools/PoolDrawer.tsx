@@ -9,6 +9,7 @@ import { ROUTING_STRATEGIES, STRATEGY_HINT, STRATEGY_LABEL } from '@/features/po
 import type { PoolRow } from '@/features/pools/types'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
+import { isMachineCode } from '@/lib/codes'
 import { describeError } from '@/lib/i18n'
 import { poolOptions } from './pool-options'
 
@@ -34,6 +35,7 @@ export function PoolDrawer({
   // 降级目标候选：其它池（不能选自己）
   const pools = useQuery(poolOptions())
   const codeExists = pool === undefined && (pools.data?.data ?? []).some((p) => p.pool_code === code.trim())
+  const codeInvalid = pool === undefined && code.trim() !== '' && !isMachineCode(code)
   const fallbackOptions = (pools.data?.data ?? [])
     .filter((p) => p.pool_code !== code.trim())
     .map((p) => ({ value: p.pool_code, label: p.pool_code }))
@@ -67,7 +69,7 @@ export function PoolDrawer({
           <Button variant="ghost" onClick={onClose}>
             {t('common:cancel')}
           </Button>
-          <Button disabled={code.trim() === '' || codeExists || save.isPending} onClick={() => save.mutate()}>
+          <Button disabled={code.trim() === '' || codeExists || codeInvalid || save.isPending} onClick={() => save.mutate()}>
             {t('common:save')}
           </Button>
         </>
@@ -83,10 +85,11 @@ export function PoolDrawer({
             readOnly={pool !== undefined}
             placeholder="stable"
             maxLength={32}
-            aria-invalid={codeExists}
+            aria-invalid={codeExists || codeInvalid}
             onChange={(e) => setCode(e.target.value)}
           />
           {codeExists && <p role="alert" className="text-xs text-destructive">{t('admin:poolCodeExists')}</p>}
+          {codeInvalid && <p role="alert" className="text-xs text-destructive">{t('admin:codeFormatInvalid', { max: 32 })}</p>}
         </div>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="pool-desc">{t('common:description')}</Label>

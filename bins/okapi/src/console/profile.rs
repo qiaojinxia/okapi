@@ -45,27 +45,19 @@ pub struct UpdateProfile {
     language: String,
 }
 
-fn valid_username(username: &str) -> bool {
-    !username.is_empty()
-        && username.chars().count() <= 64
-        && !username.chars().any(char::is_control)
-}
-
 pub async fn update(
     State(state): State<AppState>,
     headers: HeaderMap,
     ExtractJson(req): ExtractJson<UpdateProfile>,
 ) -> Result<Json<Value>, AppError> {
     let user_id = owner(&state, &headers).await?;
-    let username = req.username.trim();
-    if !valid_username(username) {
-        return Err(AppError::bad_request().with_param("username"));
-    }
+    // 与注册同一套规则：NFC 后入库，长度按字符、禁控制与不可见字符（identifiers.rs）
+    let username = super::identifiers::normalize_username(&req.username)?;
     if !matches!(req.language.as_str(), "auto" | "zh-CN" | "en") {
         return Err(AppError::bad_request().with_param("language"));
     }
     let row = sqlx::query_as::<_, Profile>("UPDATE users SET username=$2,language=$3,updated_at=now() WHERE id=$1 AND deleted_at IS NULL AND status=1 AND kind='user' RETURNING username,email,language,created_at")
-        .bind(user_id).bind(username).bind(&req.language).fetch_optional(&state.pg).await
+        .bind(user_id).bind(&username).bind(&req.language).fetch_optional(&state.pg).await
         .map_err(|error| {
             if error.as_database_error().is_some_and(sqlx::error::DatabaseError::is_unique_violation) {
                 AppError::new(StatusCode::CONFLICT, "profile_username_taken")
@@ -89,14 +81,6 @@ pub async fn update(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn validates_unicode_length_and_rejects_hidden_controls() {
-        assert!(valid_username("中文用户"));
-        assert!(valid_username(&"中".repeat(64)));
-        assert!(!valid_username(&"中".repeat(65)));
-        assert!(!valid_username(""));
-        assert!(!valid_username("name\nspoof"));
-    }
     #[test]
     fn cannot_supply_another_user_or_privileged_fields() {
         assert!(

@@ -1235,3 +1235,82 @@ async fn session_key_minting_sweeps_dead_sessions_and_revoke_all_kills_it() {
     assert_eq!(me_status(&client, &env, &kc, Some(&c)).await, 200);
     assert_eq!(me_status(&client, &env, &own, None).await, 200);
 }
+
+/// 第十一轮：注册入口的标识符校验与验证码键隔离。
+#[tokio::test]
+async fn registration_validates_identifiers_and_verification_keys_stay_apart() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let register = |email: String, username: String| {
+        client
+            .post(format!("http://{}/auth/register", env.addr))
+            .header("x-real-ip", uniq_ip())
+            .json(&json!({"email": email, "username": username, "password": "hunter2-strong"}))
+            .send()
+    };
+    // 超长 / 带零宽字符的用户名：400（此前超长名在 PG 那里变成 500）
+    for name in ["n".repeat(65), format!("ad\u{200b}min{}", &suffix[..8])] {
+        let email = format!("id-{}@ok.test", Uuid::new_v4().simple());
+        let resp = register(email, name).await.unwrap();
+        assert_eq!(resp.status(), 400);
+        assert_eq!(
+            resp.json::<Value>().await.unwrap()["error"]["param"],
+            "username"
+        );
+    }
+    // 邮箱不再只看有没有 `@`
+    let resp = register(format!("cd:victim-{suffix}@ok.test"), format!("v-{suffix}"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    // NFC：组合写法注册后，预组合写法撞同一个用户名 → 409（此前唯一键报错是 500）
+    let resp = register(
+        format!("nfc-a-{suffix}@ok.test"),
+        format!("Re\u{301}my-{}", &suffix[..8]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let resp = register(
+        format!("nfc-b-{suffix}@ok.test"),
+        format!("R\u{e9}my-{}", &suffix[..8]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 409);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["error"]["code"],
+        "profile_username_taken"
+    );
+    // 取码入口同样先校验邮箱，不碰策略与 SMTP
+    let resp = client
+        .post(format!("http://{}/auth/email-code", env.addr))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": format!("cd:victim-{suffix}@ok.test")}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    // 码与冷却分属 `code:` / `cd:` 前缀：`cd:` 开头的「邮箱」的码键不再是 victim 的冷却键
+    let state = gateway::build_state(
+        &std::env::var("DATABASE_URL").unwrap(),
+        &std::env::var("OKAPI_REDIS_URL").unwrap(),
+        "test-node",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let victim = format!("victim-{suffix}@ok.test");
+    assert!(
+        state
+            .sched
+            .email_code_set(&format!("cd:{victim}"), "123456", 60)
+            .await
+    );
+    assert!(
+        state.sched.email_code_cooldown_acquire(&victim, 60).await,
+        "别人的码挡不住 victim 取码"
+    );
+}

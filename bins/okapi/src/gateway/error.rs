@@ -250,6 +250,13 @@ impl From<StoreError> for AppError {
         if let StoreError::Conflict(code) = err {
             return Self::new(StatusCode::CONFLICT, code);
         }
+        // 超出 varchar 长度（22001）是输入问题：回 400、不打 error 日志。漏校验的字段也不该让
+        // 任何人借超长值把告警日志刷满
+        if let StoreError::Sqlx(sqlx::Error::Database(db)) = &err
+            && db.code().as_deref() == Some("22001")
+        {
+            return Self::bad_request().with_param("value_too_long");
+        }
         if let StoreError::InvalidData(
             code @ ("statistics_calendar_history_incomplete"
             | "statistics_request_history_incomplete"),

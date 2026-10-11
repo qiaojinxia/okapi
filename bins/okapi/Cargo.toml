@@ -9,6 +9,8 @@ description = "Okapi 单二进制多角色入口：gateway / console / worker / 
 
 [dependencies]
 rustix = { version = "1", features = ["fs"] }
+# 用户名入库前做 NFC（已经随 sqlx-postgres 进依赖树）
+unicode-normalization = "0.1.25"
 tiktoken-rs = { workspace = true }
 okapi-api = { workspace = true }
 okapi-domain = { workspace = true }

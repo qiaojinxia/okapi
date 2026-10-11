@@ -246,11 +246,12 @@ pub async fn create_channel(
         super::channel_creation::prepare(&state, &req.provider, req.options, scope).await?;
     super::egress::validate_binding(&state, &prepared.egress, &actor, scope).await?;
     let credential = super::channel_credentials::normalize(&req.provider, &req.credential)?;
+    let name = super::identifiers::ensure_display_name("name", &req.name, 128)?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel_configured(
         &state.pg,
         okapi_store::provision::ChannelCreate {
-            name: &req.name,
+            name,
             provider: &req.provider,
             api_base,
             credential: &credential,
@@ -279,7 +280,7 @@ pub async fn create_channel(
         &actor,
         "channel.create",
         &channel_id.to_string(),
-        json!({ "name": req.name, "provider": req.provider, "models": req.models, "pools": pool_codes,
+        json!({ "name": name, "provider": req.provider, "models": req.models, "pools": pool_codes,
                 "egress": prepared.egress }),
     )
     .await;
@@ -839,8 +840,13 @@ pub async fn update_channel(
     ensure_cost_milli(req.cost_milli)?;
     ensure_data_retention(req.data_retention.as_deref())?;
 
+    let name = req
+        .name
+        .as_deref()
+        .map(|name| super::identifiers::ensure_display_name("name", name, 128))
+        .transpose()?;
     let patch = okapi_store::admin::ChannelPatch {
-        name: req.name.as_deref(),
+        name,
         provider: req.provider.as_deref(),
         api_base: req.api_base.as_deref(),
         models: models.as_ref(),
@@ -862,7 +868,7 @@ pub async fn update_channel(
         "channel.update",
         &id.to_string(),
         json!({
-            "name": req.name, "provider": req.provider, "api_base": req.api_base,
+            "name": name, "provider": req.provider, "api_base": req.api_base,
             "models": req.models, "priority": req.priority,
             "trust_upstream_usage": req.trust_upstream_usage,
             "cost_milli": req.cost_milli,
@@ -1084,7 +1090,13 @@ pub async fn patch_api_key(
 
     let patch = okapi_store::admin::ApiKeyPatch {
         quota_micro: req.quota_micro,
-        name: req.name.clone().map(|n| n.trim().to_owned()),
+        name: req
+            .name
+            .as_deref()
+            .map(|name| {
+                super::identifiers::ensure_optional_text("name", name, 128).map(str::to_owned)
+            })
+            .transpose()?,
         status: req.status,
         expires_at: req.expires_at,
         model_allowlist: req
@@ -1176,6 +1188,8 @@ pub async fn upsert_group(
     ExtractJson(req): ExtractJson<UpsertGroupReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    // 分组码会拼进限流键与 `mb:blocks` 字段（`<group>|<channel_id>`），分隔符必须进不来
+    let group_code = super::identifiers::ensure_code("group_code", &req.group_code, 32)?;
     if req.group_ratio.parse::<okapi_pricing::RatioFp>().is_err() {
         return Err(AppError::bad_request().with_param("group_ratio"));
     }
@@ -1197,7 +1211,7 @@ pub async fn upsert_group(
     okapi_store::admin::upsert_price_group(
         &state.pg,
         okapi_store::admin::PriceGroupInput {
-            group_code: &req.group_code,
+            group_code,
             group_ratio: &req.group_ratio,
             description: &req.description,
             pool_code: Some(pool_code),
@@ -1214,7 +1228,7 @@ pub async fn upsert_group(
         &state,
         &actor,
         "pricing.upsert_group",
-        &req.group_code,
+        group_code,
         json!({ "group_ratio": req.group_ratio, "pool_code": pool_code, "self_select": req.self_select,
                 "rpm_limit": per_minute, "rph_limit": per_hour }),
     )
@@ -1259,7 +1273,10 @@ pub async fn upsert_pool(
     headers: HeaderMap,
     ExtractJson(req): ExtractJson<UpsertPoolReq>,
 ) -> Result<Json<Value>, AppError> {
-    let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    // 池是全站共享的选路单元、没有属主：own 范围若能建/改池（改 routing_strategy、
+    // 指定 fallback 链），等同于改写全站路由行为，与挂载渠道同级，一并只留给 all。
+    ensure_pool_scope(scope)?;
     let strategy = req
         .routing_strategy
         .as_deref()
@@ -1267,10 +1284,7 @@ pub async fn upsert_pool(
     if !ROUTING_STRATEGIES.contains(&strategy) {
         return Err(AppError::bad_request().with_param("routing_strategy"));
     }
-    let pool_code = req.pool_code.trim();
-    if pool_code.is_empty() {
-        return Err(AppError::bad_request().with_param("pool_code"));
-    }
+    let pool_code = super::identifiers::ensure_code("pool_code", &req.pool_code, 32)?;
     let fallback = req
         .fallback_pool_code
         .as_deref()
@@ -1624,10 +1638,8 @@ fn default_one() -> String {
 }
 
 fn validate_model_draft(req: &UpsertModelReq) -> Result<(), AppError> {
-    let name = req.model_name.trim();
-    if name.is_empty() || name.chars().count() > 128 {
-        return Err(AppError::bad_request().with_param("model_name"));
-    }
+    // 模型名合法地带 `:`、`/`、`@`（Bedrock `…-v1:0`、Vertex `…@20240620`），不套机器标识字符集
+    super::identifiers::ensure_display_name("model_name", &req.model_name, 128)?;
     if let Some(meta) = &req.metadata {
         meta.validate()
             .map_err(|param| AppError::bad_request().with_param(param))?;
@@ -2757,9 +2769,12 @@ pub async fn upsert_plan(
     ExtractJson(req): ExtractJson<UpsertPlanReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
-    if req.grant_micro <= 0 || req.plan_code.trim().is_empty() {
+    if req.grant_micro <= 0 {
         return Err(AppError::bad_request().with_param("plan"));
     }
+    let plan_code = super::identifiers::ensure_code("plan_code", &req.plan_code, 64)?;
+    let display_name =
+        super::identifiers::ensure_optional_text("display_name", &req.display_name, 128)?;
     if req.balance_valid_days.is_some_and(|d| d <= 0) {
         return Err(AppError::bad_request().with_param("balance_valid_days"));
     }
@@ -2799,8 +2814,8 @@ pub async fn upsert_plan(
     let id = okapi_store::admin::create_plan(
         &state.pg,
         &okapi_store::admin::PlanSpec {
-            plan_code: req.plan_code.trim(),
-            display_name: req.display_name.trim(),
+            plan_code,
+            display_name,
             kind: req.kind,
             grant_micro: req.grant_micro,
             group_code: req.group_code.as_deref(),
@@ -2821,7 +2836,7 @@ pub async fn upsert_plan(
         &state,
         &actor,
         "plan.upsert",
-        &req.plan_code,
+        plan_code,
         json!({
             "kind": req.kind,
             "grant_micro": req.grant_micro,

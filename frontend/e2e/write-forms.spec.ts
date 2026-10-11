@@ -876,7 +876,12 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   const create = await openedDialog(page)
   const save = create.getByRole('button', { name: '保存', exact: true })
   await expect(save).toBeDisabled()
+  // 分组码会拼进 Redis 键与 `<group>|<channel_id>` 字段：分隔符当场拦下，不等后端 400
+  await create.locator('#g-code').fill('team|a')
+  await expect(create.getByRole('alert').filter({ hasText: '只能用字母、数字和 _ . -' })).toBeVisible()
+  await expect(save).toBeDisabled()
   await create.locator('#g-code').fill('team-a')
+  await expect(create.getByRole('alert')).toHaveCount(0)
   await expect(create.locator('#g-ratio')).toHaveValue('1')
   await expect(create.locator('#g-pool')).toHaveValue('default')
   const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))

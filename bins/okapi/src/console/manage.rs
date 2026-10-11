@@ -9,7 +9,9 @@
 //! - 不存在 → 404；被引用 → 409（error_code 指明占用方，前端渲染文案）；
 //! - 写操作全量落 audit_logs；定价类变更回 `requires_publish` 提示需发布新 epoch。
 
-use super::admin::{audit, ensure_channel_owner, guard, guard_scoped, guard_super_admin};
+use super::admin::{
+    audit, ensure_channel_owner, ensure_pool_scope, guard, guard_scoped, guard_super_admin,
+};
 use super::query::{PageQuery, Query};
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
@@ -226,10 +228,7 @@ pub async fn duplicate_channel(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
-    let name = req.name.trim();
-    if name.is_empty() {
-        return Err(AppError::bad_request().with_param("name"));
-    }
+    let name = super::identifiers::ensure_display_name("name", &req.name, 128)?;
     let new_id = mutate::duplicate_channel(&state.pg, id, name)
         .await?
         .ok_or_else(not_found)?;
@@ -585,7 +584,9 @@ pub async fn delete_pool(
     headers: HeaderMap,
     Path(code): Path<String>,
 ) -> Result<Json<Value>, AppError> {
-    let actor = guard(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    // 与 upsert_pool 同口径：池成员关系只有 all 范围能写，删除连带 CASCADE 清空成员
+    ensure_pool_scope(scope)?;
     if !mutate::delete_channel_pool(&state.pg, &code).await? {
         return Err(not_found());
     }

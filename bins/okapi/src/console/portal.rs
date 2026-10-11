@@ -943,7 +943,13 @@ pub async fn patch_key(
     };
     let patch = okapi_store::admin::ApiKeyPatch {
         quota_micro: req.quota_micro,
-        name: req.name.map(|n| n.trim().to_owned()),
+        name: req
+            .name
+            .as_deref()
+            .map(|name| {
+                super::identifiers::ensure_optional_text("name", name, 128).map(str::to_owned)
+            })
+            .transpose()?,
         status: req.status,
         expires_at: req.expires_at,
         model_allowlist: req.model_allowlist.map(normalize_allowlist),

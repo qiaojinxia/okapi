@@ -138,9 +138,11 @@ pub async fn register(
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "register", 5).await?;
     let email = req.email.trim().to_lowercase();
-    if !email.contains('@') || req.username.trim().is_empty() || req.password.len() < 8 {
+    if !super::identifiers::valid_email(&email) || req.password.len() < 8 {
         return Err(AppError::bad_request().with_param("register_fields"));
     }
+    // 与资料页改名同一套规则；此前注册只查非空，超长名在 PG 那里变成 500
+    let username = super::identifiers::normalize_username(&req.username)?;
     // 注册策略（§11.16）：关闭 / 邀请制 / 邮箱域名——在 Turnstile 与写库之前判定
     let policy = super::registration::RegistrationPolicy::load(&state).await?;
     super::registration::check(&policy, &email)?;
@@ -162,8 +164,20 @@ pub async fn register(
             return Err(AppError::bad_request().with_param("email_code_invalid"));
         }
     }
-    let user_id = identity::register_user(&state.pg, &email, req.username.trim(), &req.password)
-        .await?
+    // 邮箱冲突在 SQL 里 DO NOTHING；用户名冲突是唯一键报错，此前直接成了 500
+    let user_id =
+        match identity::register_user(&state.pg, &email, &username, &req.password).await {
+            Ok(user_id) => user_id,
+            Err(okapi_store::StoreError::Sqlx(sqlx::Error::Database(db)))
+                if db.constraint() == Some("users_username_key") =>
+            {
+                return Err(AppError::new(
+                    StatusCode::CONFLICT,
+                    "profile_username_taken",
+                ));
+            }
+            Err(err) => return Err(err.into()),
+        }
         .ok_or_else(|| AppError::new(StatusCode::CONFLICT, "email_taken"))?;
     bind_inviter(&state, user_id, inviter).await;
     super::registration::grant_credits(&state, &policy, user_id, inviter).await;
@@ -286,7 +300,7 @@ pub async fn email_code(
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "email_code", 3).await?;
     let email = req.email.trim().to_lowercase();
-    if !email.contains('@') || email.len() > 254 {
+    if !super::identifiers::valid_email(&email) {
         return Err(AppError::bad_request().with_param("email"));
     }
     let policy = super::registration::RegistrationPolicy::load(&state).await?;
@@ -347,7 +361,7 @@ pub async fn password_forgot(
 ) -> Result<Json<Value>, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "password_forgot", 3).await?;
     let email = req.email.trim().to_lowercase();
-    if !email.contains('@') {
+    if !super::identifiers::valid_email(&email) {
         return Err(AppError::bad_request().with_param("email"));
     }
     let mailer = crate::mail::Mailer::from_state(&state)
@@ -937,7 +951,10 @@ pub async fn create_key(
     super::portal::validate_key_limits(req.quota_micro, req.expires_at)?;
     let token = format!("sk-okapi-{}", rand_token(43));
     let key_hash = hex::encode(Sha256::digest(token.as_bytes()));
-    let name = req.name.as_deref().map_or("web", str::trim);
+    let name = match req.name.as_deref() {
+        Some(name) => super::identifiers::ensure_optional_text("name", name, 128)?,
+        None => "web",
+    };
     let allowlist = super::portal::normalize_allowlist(req.model_allowlist);
     let group_code = req
         .group_code

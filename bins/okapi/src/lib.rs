@@ -10,4 +10,5 @@ pub mod migrate;
 pub mod ops;
 pub(crate) mod security_headers;
 pub mod shutdown;
+pub(crate) mod text;
 pub mod worker;

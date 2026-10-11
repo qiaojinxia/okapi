@@ -1115,6 +1115,7 @@ export default {
     poolCreate: 'New pool',
     poolCreateAndSelect: 'Create and select',
     poolCreateInlineHint: 'Enter a pool code to create it with priority and weighted routing. It is selected automatically; save the channel or membership to apply it.',
+    codeFormatInvalid: 'Use letters, digits, _ . - only, up to {{max}} characters.',
     poolCodeExists: 'This pool already exists. Select it from the list above.',
     poolEdit: 'Edit {{name}}',
     poolDrawerDesc: 'The pool code cannot be changed later (groups and keys reference it by code).',
