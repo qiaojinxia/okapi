@@ -264,7 +264,7 @@ async fn setup_inner(
     okapi_store::test_support::assert_isolated();
     let pg_url = std::env::var("DATABASE_URL").unwrap();
     let redis_url = std::env::var("OKAPI_REDIS_URL").unwrap();
-    let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
     let pg = okapi_store::connect_pg(&pg_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
     let suffix = Uuid::new_v4().simple().to_string();

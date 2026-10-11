@@ -144,7 +144,7 @@ async fn setup(balance: Money) -> TestEnv {
     .unwrap();
 
     published_pricing::publish(&pg, user_id).await;
-    let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
     let state = gateway::build_state(
         &database_url,
         &redis_url,

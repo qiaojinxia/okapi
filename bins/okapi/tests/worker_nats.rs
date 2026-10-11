@@ -20,11 +20,11 @@ struct NatsEnv {
 
 async fn setup() -> Option<NatsEnv> {
     okapi_store::test_support::assert_isolated();
-    let Ok(nats_url) = std::env::var("OKAPI_NATS_URL") else {
+    let Some(nats_url) = okapi_store::test_support::optional_service("OKAPI_NATS_URL") else {
         eprintln!("跳过：未配置 OKAPI_NATS_URL");
         return None;
     };
-    let Ok(ch_url) = std::env::var("OKAPI_CLICKHOUSE_URL") else {
+    let Some(ch_url) = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL") else {
         eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
         return None;
     };

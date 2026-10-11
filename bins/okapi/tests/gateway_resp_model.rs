@@ -227,3 +227,77 @@ async fn disabled_flag_keeps_canonical() {
     assert_eq!(model_name, env.model);
     assert_eq!(amount, 240);
 }
+
+/// 按响应模型计费不能绕过预扣：预扣按请求模型（1.0 倍率、max_tokens 封顶）冻结，上游报告的
+/// 响应模型按 3.0 倍率算出的金额超过预扣时，结算 fail-closed——全额退回预扣、记一笔 0 元失败账，
+/// 不落任何扣费记录。
+#[tokio::test]
+async fn response_model_above_reservation_refunds_instead_of_overdrawing() {
+    use okapi_ledger::BalanceLedger;
+    let env = setup(true, true).await;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let ledger = BalanceLedger::new(redis);
+    let before = ledger.balance(env.user_id).await.unwrap();
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "model": env.model, "stream": false, "max_tokens": 20,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), 200, "实收会越过预扣，不能当成功返回");
+
+    let mut failure = None;
+    for _ in 0..50 {
+        let rows: Vec<(i16, i16, i64, Option<String>)> = sqlx::query_as(
+            "SELECT status, log_type, amount_micro, error_code FROM billing_records WHERE user_id = $1",
+        )
+        .bind(env.user_id)
+        .fetch_all(&env.pg)
+        .await
+        .unwrap();
+        if !rows.is_empty() {
+            failure = Some(rows);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let rows = failure.expect("应记一笔失败账");
+    assert_eq!(rows.len(), 1, "失败账恰好一笔");
+    let (status, log_type, amount, error_code) = &rows[0];
+    assert_eq!(error_code.as_deref(), Some("pricing_settle_failed"));
+    assert_eq!(*log_type, 5);
+    assert_eq!(*amount, 0);
+    assert_ne!(*status, 20, "不能留下扣费记录");
+
+    for _ in 0..50 {
+        if ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        ledger
+            .list_reservations(env.user_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "预扣已释放"
+    );
+    assert_eq!(
+        ledger.balance(env.user_id).await.unwrap(),
+        before,
+        "余额分文不少"
+    );
+}

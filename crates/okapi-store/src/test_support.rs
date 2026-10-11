@@ -31,6 +31,23 @@ pub fn assert_isolated() {
     validate_resources(&marker, &pg, &redis).expect("unsafe integration-test resources");
 }
 
+/// 可选外部服务（ClickHouse、NATS）的地址。没配时返回 None，调用方照旧跳过；但设了
+/// `OKAPI_REQUIRE_SERVICES=1`（隔离测试脚本总会设）时直接 panic——服务缺席时整组统计 /
+/// 投递用例「跳过即通过」，绿灯毫无意义。
+#[must_use]
+pub fn optional_service(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => {
+            assert!(
+                std::env::var("OKAPI_REQUIRE_SERVICES").as_deref() != Ok("1"),
+                "{name} is required (OKAPI_REQUIRE_SERVICES=1); refusing to skip vacuously"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_resources;

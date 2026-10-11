@@ -254,6 +254,32 @@ async fn cancelling_an_insufficient_pending_hold_never_credits_unfrozen_money() 
     bed.evidence(id, 0).await
 }
 
+/// 余额不足而停在 Pending 的持久预扣从没冻结过钱：直接拿「已提交」账单来结算必须拒绝，
+/// 且不改动任何状态——不能凭空扣一笔没冻结的钱，也不能顺手把它封口。
+#[tokio::test]
+async fn committing_a_pending_hold_is_rejected_without_side_effects() -> TestResult {
+    let bed = Bed::new().await?;
+    let id = Uuid::new_v4();
+    assert!(matches!(
+        holds::reserve(&bed.pg, &bed.ledger, bed.request(id, 20_000), bed.now).await?,
+        Admission::Insufficient { .. }
+    ));
+    let before = bed.row(id).await?;
+    assert_eq!(before.status, Status::Pending);
+    let mut bill = bed.bill(id, 1_000)?;
+    bill.state = okapi_domain::BillingState::Committed;
+    assert!(matches!(
+        holds::settle(&bed.pg, &bed.ledger, bill, bed.now).await,
+        Err(LedgerError::InvalidHold("not_held"))
+    ));
+    let after = bed.row(id).await?;
+    assert_eq!(after.status, Status::Pending);
+    assert!(!after.cancel_requested, "拒绝时不能顺手封口");
+    assert_eq!(bed.wallet().await?, 10_000);
+    assert_eq!(bed.event_total(0).await?, 10_000);
+    Ok(())
+}
+
 #[tokio::test]
 async fn cancelling_uncertain_admission_refunds_its_existing_hold() -> TestResult {
     let bed = Bed::new().await?;

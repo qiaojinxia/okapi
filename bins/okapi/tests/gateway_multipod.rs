@@ -19,7 +19,7 @@ async fn build() -> gateway::state::AppState {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
-    let nats = std::env::var("OKAPI_NATS_URL").ok();
+    let nats = okapi_store::test_support::optional_service("OKAPI_NATS_URL");
     gateway::build_state(
         &database_url,
         &redis_url,

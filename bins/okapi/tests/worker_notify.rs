@@ -462,3 +462,84 @@ async fn rejected_private_webhook_is_visible_in_audit() {
     );
     bed.teardown().await;
 }
+
+/// 人工队列巡检：统计死信与结算隔离区都不会自己消失，非零就各派发一次、载荷带上数量；
+/// 清空后再扫一条都不发（没事不吵）。
+#[tokio::test]
+async fn manual_queues_wake_operators_only_when_non_empty() {
+    use fred::interfaces::{HashesInterface, KeysInterface};
+    okapi_store::test_support::assert_isolated();
+    let (sink, _hits, bodies) = spawn_sink().await;
+    let (notifier, redis, tmp) = temp_db_notifier(&sink).await;
+    sqlx::query("UPDATE settings SET value = $1 WHERE key = 'notify_channels'")
+        .bind(
+            json!([{ "type": "webhook", "url": format!("http://{sink}/hook"),
+                       "events": ["dlq_backlog", "settlement_quarantine"],
+                       "min_interval_secs": 1 }]),
+        )
+        .execute(&tmp.pool)
+        .await
+        .unwrap();
+    let quarantine = "settlement:{retry}:quarantine";
+    for key in [
+        "notify:mute:0:dlq_backlog",
+        "notify:mute:0:settlement_quarantine",
+        quarantine,
+    ] {
+        let _: i64 = redis.del(key).await.unwrap();
+    }
+    let take = || std::mem::take(&mut *bodies.lock().unwrap());
+
+    // 两条队列都空：不发
+    assert_eq!(
+        notify::manual_queues_and_notify(&tmp.pool, &redis, &notifier)
+            .await
+            .unwrap(),
+        (0, 0)
+    );
+    assert!(take().is_empty());
+
+    // 死信两条（一条已处理不算）+ 隔离一条：各派发一次，数量对得上
+    for status in [0_i16, 0, 2] {
+        sqlx::query("INSERT INTO billing_dlq (source, payload, status) VALUES ('ch_batch', '{}'::jsonb, $1)")
+            .bind(status)
+            .execute(&tmp.pool)
+            .await
+            .unwrap();
+    }
+    let _: i64 = redis
+        .hset(quarantine, ("00000000-0000-0000-0000-000000000001", "{}"))
+        .await
+        .unwrap();
+    assert_eq!(
+        notify::manual_queues_and_notify(&tmp.pool, &redis, &notifier)
+            .await
+            .unwrap(),
+        (2, 1)
+    );
+    let sent = take();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    let event = |name: &str| {
+        sent.iter()
+            .find(|b| b["event"] == name)
+            .unwrap_or_else(|| panic!("missing {name}: {sent:?}"))
+    };
+    assert_eq!(event("dlq_backlog")["payload"]["pending"], 2);
+    assert_eq!(event("settlement_quarantine")["payload"]["quarantined"], 1);
+
+    // 处理完：再扫不发
+    sqlx::query("UPDATE billing_dlq SET status = 2")
+        .execute(&tmp.pool)
+        .await
+        .unwrap();
+    let _: i64 = redis.del(quarantine).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(
+        notify::manual_queues_and_notify(&tmp.pool, &redis, &notifier)
+            .await
+            .unwrap(),
+        (0, 0)
+    );
+    assert!(take().is_empty());
+    tmp.teardown().await;
+}

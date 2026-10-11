@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 async fn setup() -> Option<(PgPool, ChClient)> {
     okapi_store::test_support::assert_isolated();
-    let Ok(ch_url) = std::env::var("OKAPI_CLICKHOUSE_URL") else {
+    let Some(ch_url) = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL") else {
         eprintln!("跳过：未配置 OKAPI_CLICKHOUSE_URL");
         return None;
     };

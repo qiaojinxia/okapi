@@ -42,6 +42,8 @@ def run():
     environment = os.environ.copy()
     environment["SQLX_OFFLINE"] = "true"
     environment["OKAPI_TEST_ISOLATED"] = "1"
+    # 本脚本总会备好 ClickHouse 与 NATS：用例里「未配置就跳过」在这里一律改为失败，不许假通过
+    environment["OKAPI_REQUIRE_SERVICES"] = "1"
     failures = []
     try:
         if options.services:
@@ -54,6 +56,9 @@ def run():
                 raise RuntimeError("refusing to flush Redis outside an explicit nonzero test database")
             if not shutil.which("psql") or not shutil.which("redis-cli"):
                 raise RuntimeError("--services requires psql and redis-cli")
+            for required in ("OKAPI_CLICKHOUSE_URL", "OKAPI_NATS_URL"):
+                if not environment.get(required):
+                    raise RuntimeError(f"--services requires {required}; CH/NATS suites must not pass vacuously")
         else:
             for kind, image, container_port, extra in [
                 ("pg", "postgres:16-alpine", 5432, ["-e", "POSTGRES_PASSWORD=okapi-test-local"]),

@@ -41,7 +41,7 @@ async fn setup() -> Env {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
-    let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
 
@@ -721,7 +721,7 @@ async fn log_stat_switches_rate_source() {
 #[tokio::test]
 async fn unknown_raw_events_remain_visible_but_cannot_be_guessed_as_calls() {
     let mut env = setup().await;
-    let Some(url) = std::env::var("OKAPI_CLICKHOUSE_URL").ok() else {
+    let Some(url) = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL") else {
         panic!("needs isolated ClickHouse to validate classification");
     };
     let database = format!("okapi_log_population_{}", Uuid::new_v4().simple());

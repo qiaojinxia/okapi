@@ -323,7 +323,7 @@ async fn setup() -> Bed {
 
     // CH 必须带上：`/api/me/usage`、`/api/me/stats/daily`、`/admin/logs` 都由它支撑，
     // 传 None 会让这些出口回 501 stats_disabled，跨出口对账就只剩 PG 半边。
-    let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
     published_pricing::publish(&pg, admin_id).await;
     let state = gateway::build_state(
         &database_url,

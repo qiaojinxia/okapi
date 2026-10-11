@@ -22,7 +22,7 @@ async fn setup() -> TestEnv {
     let pg = okapi_store::connect_pg(&database_url).await.unwrap();
     okapi_store::run_migrations(&pg).await.unwrap();
     // 接上 CH：query_usage / platform_kpi 没有它一律 stats_disabled，接不上就等于没测
-    let ch_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
     let mut state = gateway::build_state(
         &database_url,
         &redis_url,
@@ -400,7 +400,7 @@ async fn readonly_tools_cover_keys_pricing_health_and_ch_backed_usage() {
     // —— 两个走 CH 的：没接 CH 时按定案回 stats_disabled，接上了就要给出形状 ——
     let usage = call(&user_token, "query_usage", json!({ "days": 3 })).await;
     let kpi = call(&admin_token, "platform_kpi", json!({})).await;
-    if std::env::var("OKAPI_CLICKHOUSE_URL").is_err() {
+    if okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL").is_none() {
         assert_eq!(usage["error"]["message"], "stats_disabled");
         assert_eq!(kpi["error"]["message"], "stats_disabled");
         eprintln!("跳过 CH 断言：未配置 OKAPI_CLICKHOUSE_URL");
