@@ -269,6 +269,12 @@ pub async fn record_settlement(
     Ok(())
 }
 
+/// 上游请求 id 来自上游响应头 / 任务 id，长度不受我们控制，而列是 `varchar(128)`：超长会让 INSERT 报
+/// 22001、整笔结算被当永久失败隔离——一个超长响应头就能让成功请求的账单丢失。按字符截到 128。
+fn bounded_upstream_id(id: &str) -> &str {
+    id.char_indices().nth(128).map_or(id, |(cut, _)| &id[..cut])
+}
+
 /// Allows a durable task result and its ledger entry to share one commit.
 /// The caller must commit/rollback; false means the request was already recorded.
 #[allow(clippy::too_many_lines)]
@@ -324,7 +330,7 @@ pub async fn record_settlement_in_tx(
         ",
     )
     .bind(input.request_id)
-    .bind(input.upstream_request_id)
+    .bind(input.upstream_request_id.map(bounded_upstream_id))
     .bind(input.log_type)
     .bind(input.user_id)
     .bind(input.api_key_id)
@@ -463,7 +469,7 @@ pub async fn record_settlement_in_tx(
             "failover_count": input.failover_count,
             "error_code": input.error_code,
             "upstream_status": input.upstream_status,
-            "upstream_request_id": input.upstream_request_id,
+            "upstream_request_id": input.upstream_request_id.map(bounded_upstream_id),
             "node": input.node,
             "sticky_layer": input.sticky_layer,
             "client_type": input.client_type,
@@ -740,5 +746,18 @@ mod unit_tests {
         ] {
             assert!(input_units(usage, Some(&snapshot)).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod upstream_id_tests {
+    #[test]
+    fn upstream_ids_are_cut_to_the_column_width_on_char_boundaries() {
+        assert_eq!(super::bounded_upstream_id("req_123"), "req_123");
+        let long = "界".repeat(200);
+        let cut = super::bounded_upstream_id(&long);
+        assert_eq!(cut.chars().count(), 128);
+        assert!(long.starts_with(cut));
+        assert_eq!(super::bounded_upstream_id(&"a".repeat(128)).len(), 128);
     }
 }

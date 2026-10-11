@@ -664,3 +664,31 @@ async fn admin_refund_reverses_once_and_is_idempotent() {
             .is_none()
     );
 }
+
+/// 上游请求 id 由上游控制：超长时截到列宽照常落账，不让一笔成功请求因 22001 被隔离丢账。
+#[tokio::test]
+async fn oversized_upstream_request_id_is_truncated_not_quarantined() {
+    let bed = bed().await;
+    record_credit(
+        &bed.pg,
+        bed.user_id,
+        Money::from_micros(10_000),
+        "recharge",
+        "system:test",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    let rid = Uuid::new_v4();
+    let long = "x".repeat(300);
+    let mut input = bed.committed(rid);
+    input.upstream_request_id = Some(&long);
+    record_settlement(&bed.pg, input).await.unwrap();
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT upstream_request_id FROM billing_records WHERE request_id = $1")
+            .bind(rid)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(stored.as_deref().map(str::len), Some(128));
+}
