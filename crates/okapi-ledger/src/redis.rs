@@ -37,6 +37,16 @@ const REPAIR_LUA: &str = concat!(
     "\n",
     include_str!("lua/repair.lua")
 );
+const CREDIT_POOL_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/credit_pool.lua")
+);
+const DRAIN_LUA: &str = concat!(
+    include_str!("lua/reservation_state.lua"),
+    "\n",
+    include_str!("lua/drain.lua")
+);
 const SUB_SET_LUA: &str = concat!(
     include_str!("lua/reservation_state.lua"),
     "\n",
@@ -380,15 +390,24 @@ impl BalanceLedger {
         amount: Money,
         pool: Pool,
     ) -> Result<Money, LedgerError> {
-        let after: i64 = self
+        // 与其余资金脚本同一不变式：|余额| ≤ 2^53−1，越界整笔拒绝，不留下 reserve 读不了的余额
+        let after: String = self
             .client
-            .hincrby(Self::bal_key(user_id), pool.field(), amount.as_micros())
+            .eval(
+                CREDIT_POOL_LUA,
+                vec![Self::bal_key(user_id)],
+                vec![pool.field().to_owned(), amount.as_micros().to_string()],
+            )
             .await?;
-        Ok(Money::from_micros(after))
+        after
+            .parse()
+            .map(Money::from_micros)
+            .map_err(|_| LedgerError::InvalidSettlement)
     }
 
     /// 订阅池置额（激活 / 滚窗 / 到期；`lua/sub_set.lua`）。`quota` 为新窗额度（到期传 0），
     /// `sub_until` 为池可用截止 unix 秒（到期传 0）。在途订阅预扣自动加回，见脚本注释。
+    /// 旧低层接口，生产代码不调用（激活 / 滚窗走 PG + UserGuard 与 `hold_repair`），只给测试与兼容路径用。
     pub async fn sub_set(
         &self,
         user_id: i64,
@@ -460,17 +479,19 @@ impl BalanceLedger {
     /// 余额有效期到期清零：原子取出全部可用余额并返回（在途预扣不动，
     /// 各自按结算/退款路径终结）。avail ≤ 0 时不动返回 0。
     pub async fn drain(&self, user_id: i64) -> Result<Money, LedgerError> {
-        const LUA: &str = r"
-            local v = tonumber(redis.call('HGET', KEYS[1], 'avail') or '0')
-            if v <= 0 then return 0 end
-            redis.call('HSET', KEYS[1], 'avail', 0)
-            return v
-        ";
-        let drained: i64 = self
+        // 返回十进制字符串：大额经 Lua double 回传会被取整
+        let drained: String = self
             .client
-            .eval(LUA, vec![Self::bal_key(user_id)], Vec::<String>::new())
+            .eval(
+                DRAIN_LUA,
+                vec![Self::bal_key(user_id)],
+                Vec::<String>::new(),
+            )
             .await?;
-        Ok(Money::from_micros(drained))
+        drained
+            .parse()
+            .map(Money::from_micros)
+            .map_err(|_| LedgerError::InvalidSettlement)
     }
 
     /// 按账本权威值重建热余额（对账修复）。

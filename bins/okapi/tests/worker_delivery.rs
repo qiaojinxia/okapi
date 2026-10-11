@@ -496,3 +496,25 @@ async fn expired_js_message_is_recovered_from_original_outbox_and_late_replay_is
     nats_relay::chsink_js_once(&pg, &js, &ch).await.unwrap();
     assert_totals(&ch, user, 1, 10).await;
 }
+
+/// 第十三轮：只有统计类型（2/5/6）写进 CH。别的 log_type 落进 request_log_raw 会让该统计桶
+/// 永久判为历史不完整；拦下后事件照常完成，outbox 不会被反复认领。
+#[tokio::test]
+async fn non_statistics_log_types_complete_without_reaching_clickhouse() {
+    let Some((pg, ch)) = setup().await else {
+        return;
+    };
+    let user = user_id();
+    let mut admin = payload(user, 7);
+    admin["log_type"] = json!(3);
+    let skipped = insert(&pg, &admin).await;
+    insert(&pg, &payload(user, 10)).await;
+    drain(&pg, &ch).await;
+    assert_totals(&ch, user, 1, 10).await;
+    let status: i16 = sqlx::query_scalar("SELECT status FROM billing_outbox WHERE id=$1")
+        .bind(skipped)
+        .fetch_one(&pg)
+        .await
+        .unwrap();
+    assert_eq!(status, 1, "跳过 CH 的事件照常完成，不会反复重投");
+}

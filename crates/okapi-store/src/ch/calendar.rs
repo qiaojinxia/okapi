@@ -202,6 +202,9 @@ fn history(name: &str) -> Option<DayHistory> {
     })
 }
 
+/// 旧 `_day` 表比小时表多出的样本（升级前的日聚合）无法按本地日重建：这一支只做守门。
+/// WHERE 选出这类行，投影里的 `throwIf` 让整条查询以 `statistics_calendar_history_incomplete`
+/// fail-closed（docs/database.md：原表保留供核查）。它从不产出行，`day` 列只为与 UNION 另一支对齐类型。
 fn missing_days(name: &str, zone: &str) -> Option<String> {
     let DayHistory {
         dimensions,
@@ -221,9 +224,7 @@ fn missing_days(name: &str, zone: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join(",");
     Some(format!(
-        "SELECT {projection},arrayJoin(arrayDistinct([\
-         toDate(toDateTime(d.day,'UTC'),'{zone}'),\
-         toDate(toDateTime(d.day,'UTC')+INTERVAL 86399 SECOND,'{zone}')])) AS day,{checked} \
+        "SELECT {projection},toDate(toDateTime(d.day,'UTC'),'{zone}') AS day,{checked} \
          FROM (SELECT {dimensions},day,{merge},{count} AS legacy_n FROM {name} v GROUP BY {dimensions},day) d \
          LEFT JOIN (SELECT {dimensions},toDate(hour,'UTC') AS day,{count} AS retained_n FROM {hourly} v GROUP BY {dimensions},day) h \
          USING ({dimensions},day) WHERE d.legacy_n>ifNull(h.retained_n,0)"

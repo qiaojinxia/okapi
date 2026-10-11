@@ -168,6 +168,18 @@ fn parse() -> Result<Vec<Spec>, StoreError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn classified_filter_matches_the_delivery_whitelist() {
+        let listed: Vec<String> = crate::ch::STATISTICS_LOG_TYPES
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            super::CLASSIFIED,
+            format!("log_type IN ({})", listed.join(","))
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -6,6 +6,9 @@
 -- 返回 {prev_sub, new_sub}（字符串；调用方据 new - prev 记 pool=1 事件）
 --
 -- new_sub = quota + Σ无周期身份的旧在途(pool=1)，仅保留低层兼容行为。
+-- 这些凭据结算时还会按 est − actual 退回 sub，所以新窗会多出一份 est；调用方按 new − prev 记的
+-- 重置事件把这部分也记进账本，`sub + 在途 == Σ事件` 仍成立（console_subscriptions::lua_pool_contract）。
+-- 生产滚窗不走这里：holds/repair.rs → hold_repair 按「权威值 − 冻结在途」重建，口径不同，不要混用。
 -- 旧热账本 epoch 已知时先补到旧凭据；有身份的普通预扣不带入新窗。
 -- 生产订阅流程对仍无身份的凭据返回待恢复错误，不能依赖此脚本推断归属。
 -- 钱包字段与钱包在途一律不碰；长期 h:* 使用独立 PG 冻结契约。

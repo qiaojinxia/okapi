@@ -60,14 +60,27 @@ pub(super) async fn admit(tx: &mut PgConnection, mut events: Vec<Event>) -> anyh
         .into_iter()
         .filter(|e| claimed.contains(&e.key))
         .collect();
-    let count = i32::try_from(events.len())?;
-    let rows = Value::Array(events.iter().map(|e| e.row.clone()).collect());
-    let payloads = Value::Array(
-        events
-            .iter()
-            .map(|e| json!({"key":e.key,"payload":e.payload}))
-            .collect(),
-    );
+    // 只有统计类型进 CH：别的 log_type 落进 request_log_raw 会让该统计桶永久判为历史不完整。
+    // 事件照常认领、批次照常完成（outbox 不会反复重投），只是不写 CH。
+    let mut rows = Vec::with_capacity(events.len());
+    let mut payloads = Vec::with_capacity(events.len());
+    for event in &events {
+        match event.row.get("log_type").and_then(Value::as_i64) {
+            Some(kind) if okapi_store::ch::STATISTICS_LOG_TYPES.contains(&kind) => {
+                rows.push(event.row.clone());
+                payloads.push(json!({"key":event.key,"payload":event.payload}));
+            }
+            kind => tracing::warn!(
+                event = %event.key,
+                log_type = ?kind,
+                "billing event type is not a statistics type; not written to ClickHouse"
+            ),
+        }
+    }
+    // 批次表约束 rows / payloads 条数都等于 event_count：被拦下的事件两边都不进
+    let count = i32::try_from(rows.len())?;
+    let rows = Value::Array(rows);
+    let payloads = Value::Array(payloads);
     sqlx::query!(
         "UPDATE billing_ch_batches SET event_count=$2,rows=$3,payloads=$4 WHERE id=$1",
         id,

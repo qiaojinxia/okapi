@@ -13,6 +13,11 @@ use crate::error::StoreError;
 use calendar::calendar_sql;
 use std::time::Duration;
 
+/// 进 `request_log_raw` 的账本类型：消费 2、错误 5、退款 6（docs/database.md logs 表，其余留 PG）。
+/// 统计读视图按同一份清单（population 规格的 `CLASSIFIED`）判定桶是否完整，写进别的类型会让该桶
+/// 永久判为历史不完整，所以投递入口按它拦截。
+pub const STATISTICS_LOG_TYPES: [i64; 3] = [2, 5, 6];
+
 const AGGREGATION_GUARD: &str = "max_size_to_preallocate_for_aggregation=8192&max_block_size=8192&max_insert_block_size=8192&min_insert_block_size_rows_for_materialized_views=8192&min_insert_block_size_bytes_for_materialized_views=4194304&input_format_parallel_parsing=0";
 
 const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192";

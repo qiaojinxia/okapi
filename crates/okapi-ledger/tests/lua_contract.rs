@@ -513,3 +513,41 @@ async fn invariant_holds_across_interleaved_operations() {
         "5 次占槽对应 5 次释放，重复终结不多减"
     );
 }
+
+/// 第十三轮：入账与过期清零守住 |余额| ≤ 2^53−1，大额按十进制原样往返，坏值报错不取整。
+#[tokio::test]
+async fn credit_and_drain_keep_the_ledger_bound_and_exact_values() {
+    let bed = Bed::new().await;
+    let max = okapi_ledger::holds::MAXIMUM_MICROS;
+    bed.ledger
+        .credit(bed.uid, Money::from_micros(max))
+        .await
+        .unwrap();
+    assert!(
+        bed.ledger
+            .credit(bed.uid, Money::from_micros(1))
+            .await
+            .is_err(),
+        "越过 2^53−1 整笔拒绝"
+    );
+    assert_eq!(bed.avail().await, max, "被拒的入账不动余额");
+    assert_eq!(
+        bed.ledger.drain(bed.uid).await.unwrap().as_micros(),
+        max,
+        "大额经十进制原样返回，不经 double 取整"
+    );
+    assert_eq!(bed.avail().await, 0);
+
+    let _: () = bed
+        .redis
+        .hset(format!("bal:{{{}}}", bed.uid), ("avail", "1e3"))
+        .await
+        .unwrap();
+    assert!(bed.ledger.drain(bed.uid).await.is_err(), "坏值报错");
+    assert!(
+        bed.ledger
+            .credit(bed.uid, Money::from_micros(5))
+            .await
+            .is_err()
+    );
+}

@@ -2758,6 +2758,13 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   一条坏记录不再让整页 500。团队 key 名与 OAuth 建渠道的渠道名也走 `identifiers.rs` 的显示名规则。
 - **worker 可选任务开关**：`OKAPI_WORKER_DISABLE` 逗号分隔关掉只观测 / 只外联的任务（`egress_probe`、`ops_sampler`、
   `unit_calibration`）；记账相关任务不在清单里，写了只打 WARN。实现收在 `supervision::run` 一处。
+- **统计写入只收 2/5/6（第十三轮）**：投递入口按 `okapi_store::ch::STATISTICS_LOG_TYPES` 过滤，别的 `log_type`
+  事件照常完成、不写 `request_log_raw`——落进去会让对应统计桶永久判为历史不完整。清单与 population 规格的
+  `CLASSIFIED` 由单测锁成同一份。日历历史守门支（`calendar::missing_days`）写成直白的 fail-closed，删掉永远走不到的双日挂接。
+- **账本脚本边界**：`credit_pool` / `drain` 改走带 2^53−1 上界校验的脚本（此前裸 `HINCRBY` 能把余额推到 reserve 读不了的值，
+  `drain` 经 double 回传会取整）；`hold_reserve` / `hold_repair` / `repair` 的数字解析只认规范十进制，`repair` 先校验旧值再写。
+  旧低层 `sub_set` 把无周期身份的在途加回新窗、结算再退一次——只有测试调用，加回部分进了重置事件，账自洽；
+  生产滚窗走 `hold_repair`（权威值 − 冻结在途），两者不要混用。
 - **测试容器不再留卷**：`scripts/test-isolated.py`、`scripts/dev-deps.sh` 拆容器用 `docker rm -fv`。此前每跑一个套件留下几个
   匿名卷，攒满 Docker 虚拟机盘后 ClickHouse 写不进、套件成片失败。
 

@@ -7,6 +7,12 @@ if not ARGV[8] or ledger_balance_state(KEYS[1]) ~= ARGV[8] then
 end
 local maximum = 9007199254740991
 local function integer(raw)
+    if type(raw) == 'string' then
+        -- 只认规范十进制（与 reserve / fund_transfer 一致）："1e3"、"+5"、"007" 一律拒
+        if raw ~= '0' and not string.match(raw, '^%-?[1-9][0-9]*$') then return nil end
+    elseif type(raw) ~= 'number' then
+        return nil
+    end
     local n = tonumber(raw)
     if not n or math.abs(n) > maximum or n ~= math.floor(n) then return nil end
     return n

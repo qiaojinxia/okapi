@@ -13,10 +13,19 @@
 -- 夹成 0 等于凭空送钱；负 avail 会让 reserve 一直判 INSUFFICIENT，正是想要的语义。
 
 local maximum = 9007199254740991
-local target = tonumber(ARGV[1])
-if not target or math.abs(target) > maximum or target ~= math.floor(target) then
-    return redis.error_reply('amount_overflow')
+local function integer(raw)
+    if type(raw) == 'string' then
+        -- 只认规范十进制（与 reserve / fund_transfer 一致）："1e3"、"+5"、"007" 一律拒
+        if raw ~= '0' and not string.match(raw, '^%-?[1-9][0-9]*$') then return nil end
+    elseif type(raw) ~= 'number' then
+        return nil
+    end
+    local n = tonumber(raw)
+    if not n or math.abs(n) > maximum or n ~= math.floor(n) then return nil end
+    return n
 end
+local target = integer(ARGV[1])
+if not target then return redis.error_reply('amount_overflow') end
 local pool_field = ARGV[2] or 'avail'
 local want_pool = (pool_field == 'sub') and '1' or '0'
 local inflight = 0
@@ -36,15 +45,17 @@ for i = 1, #all, 2 do
             return redis.error_reply('invalid_durable_hold')
         end
         if tostring(hold.pool) == want_pool then
-            local amount = tonumber(hold.amount)
+            local amount = integer(hold.amount)
             if not amount or amount < 0 then return redis.error_reply('invalid_durable_hold') end
-            if amount > maximum - inflight or amount ~= math.floor(amount) then return redis.error_reply('amount_overflow') end
+            if amount > maximum - inflight then return redis.error_reply('amount_overflow') end
             inflight = inflight + amount
         end
     end
 end
 
-local prev = tonumber(redis.call('HGET', KEYS[1], pool_field) or '0')
+-- 旧值也先校验：此前坏值会在 HSET 之后的格式化里报错，脚本不回滚，留下写了一半的结果
+local prev = integer(redis.call('HGET', KEYS[1], pool_field) or '0')
+if not prev then return redis.error_reply('invalid_balance') end
 if target < -maximum + inflight then return redis.error_reply('amount_overflow') end
 local next_val = target - inflight
 redis.call('HSET', KEYS[1], pool_field, string.format('%.0f', next_val))
