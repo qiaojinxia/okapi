@@ -161,7 +161,7 @@ pub async fn usage(
 pub struct LogsQuery {
     #[serde(default = "default_limit")]
     pub limit: i64,
-    /// 游标：取该 id 之前的记录（created_at 倒序翻页）。
+    /// 游标：上一页最后一行的 id；按 (created_at, id) 倒序取它之后的记录。
     #[serde(default)]
     pub before: Option<i64>,
     /// `key`（缺省）| `user`：与 /api/me/usage 同一语义——合作商员工缺省只见自己那把 key。
@@ -181,6 +181,9 @@ pub struct LogsQuery {
     pub timezone: Option<String>,
 }
 
+/// 门户日志列表与汇总的缺省回看天数（含今天）。
+const DEFAULT_LOG_DAYS: u32 = 30;
+
 struct LogWindow {
     start: chrono::NaiveDate,
     end: chrono::NaiveDate,
@@ -188,8 +191,10 @@ struct LogWindow {
 }
 
 impl LogsQuery {
+    /// 没给日期时缺省近 [`DEFAULT_LOG_DAYS`] 天：账单表按 created_at 分区，无时间界的列表 / 汇总
+    /// 要扫用户全部历史分区，成本随终身账单行数线性涨（保留期缺省永久）。按 request_id 点查不加界。
     async fn window(&self, pg: &sqlx::PgPool) -> Result<Option<LogWindow>, AppError> {
-        if self.start_date.is_none() && self.end_date.is_none() {
+        if self.start_date.is_none() && self.end_date.is_none() && self.request_id.is_some() {
             return Ok(None);
         }
         let timezone = self.timezone.as_deref().unwrap_or("UTC");
@@ -207,7 +212,7 @@ impl LogsQuery {
         .ok_or_else(|| AppError::bad_request().with_param("timezone"))?;
         let (start, end) = super::usage_details::CalendarWindow::bounds(
             today,
-            1,
+            DEFAULT_LOG_DAYS,
             self.start_date.as_deref(),
             self.end_date.as_deref(),
         )?;

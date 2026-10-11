@@ -47,7 +47,10 @@ struct Bed {
 }
 
 async fn session_cookie(state: &gateway::state::AppState, user_id: i64) -> String {
-    let sid = Uuid::new_v4().to_string();
+    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        user_id,
+        &Uuid::new_v4().simple().to_string(),
+    );
     state.sched.web_session_set(&sid, user_id, None, None).await;
     format!("okapi_session={sid}")
 }

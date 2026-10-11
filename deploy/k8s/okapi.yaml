@@ -146,7 +146,8 @@ metadata:
   name: okapi-worker
   labels: { app: okapi, role: worker }
 spec:
-  # worker 可多副本：outbox SKIP LOCKED / JS durable 消费者天然互斥
+  # worker 保持单副本即可（同 README）：对账 / 清扫 / 分区 / 冷却恢复等周期任务不互斥，多副本只是重复劳动。
+  # 只有 chsink 吞吐不够时才加——relay/chsink 走 outbox SKIP LOCKED + JetStream durable，多副本安全。
   replicas: 1
   selector:
     matchLabels: { app: okapi, role: worker }

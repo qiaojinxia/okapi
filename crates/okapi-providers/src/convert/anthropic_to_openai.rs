@@ -446,8 +446,11 @@ impl OaiStreamToAnthropic {
                 if let Some(u) = usage {
                     self.usage = Some(u.with_previous(self.usage));
                 }
-                let chunk: Value = serde_json::from_str(&raw).unwrap_or_default();
-                self.on_chunk(&chunk)
+                match super::chat_chunk(&raw) {
+                    Some(Ok(chunk)) => self.on_chunk(&chunk),
+                    Some(Err(err)) => vec![Err(err)],
+                    None => Vec::new(),
+                }
             }
         }
     }

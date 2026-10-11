@@ -36,11 +36,7 @@ redis.call('ZADD',KEYS[2],'NX',ARGV[3],ARGV[1])
 return 1";
 
 fn configured_limit(name: &str, default: i64, max: i64) -> i64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|v| *v > 0 && *v <= max)
-        .unwrap_or(default)
+    okapi_store::env_config::number(name, default, |v| *v > 0 && *v <= max)
 }
 
 /// 结算开始前留底的宽限期：正常落账会在此之前把它删掉，worker 只接手真正卡住或进程

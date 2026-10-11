@@ -152,12 +152,7 @@ pub(crate) async fn build_state_with_resources(
             .build(),
         // 容量 = pool 的一半：留一半连接给点查/鉴权回源等前台路径
         settle_gate: Arc::new(tokio::sync::Semaphore::new(
-            std::env::var("OKAPI_PG_POOL")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .filter(|v| *v > 0)
-                .unwrap_or(16)
-                .div_ceil(2),
+            okapi_store::env_config::number("OKAPI_PG_POOL", 16usize, |v| *v > 0).div_ceil(2),
         )),
         image_download_gate: Arc::new(tokio::sync::Semaphore::new(4)),
         batch_submit_gate: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -193,10 +188,11 @@ pub(crate) async fn build_state_with_resources(
         settlements: crate::shutdown::Pending::default(),
         settle_backlog: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         // 缺省 ≈ 档位一 PG 记账速率（约 1k TPS）× 30s 下线窗口（§12.2 / §14.3）
-        settle_backlog_max: std::env::var("OKAPI_SETTLE_BACKLOG_MAX")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(20_000),
+        settle_backlog_max: okapi_store::env_config::number(
+            "OKAPI_SETTLE_BACKLOG_MAX",
+            20_000usize,
+            |_| true,
+        ),
         settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
@@ -303,7 +299,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // §6.5 生产护栏：release 构建启用单用户模式须显式二次确认
     if cfg.single_user_mode
         && !cfg!(debug_assertions)
-        && std::env::var("OKAPI_SINGLE_USER_CONFIRM").ok().as_deref() != Some("true")
+        && okapi_store::env_config::flag("OKAPI_SINGLE_USER_CONFIRM") != Some(true)
     {
         anyhow::bail!(
             "single_user_mode 在 release 构建需同时设 OKAPI_SINGLE_USER_CONFIRM=true（root key 会进日志，误开公网代价高）"

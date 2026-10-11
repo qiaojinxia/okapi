@@ -453,6 +453,9 @@ CREATE TABLE billing_events (                         -- 余额账本，append-o
     PRIMARY KEY (event_id, created_at)
 ) PARTITION BY RANGE (created_at);
 CREATE INDEX idx_be_user_time ON billing_events (user_id, created_at DESC);
+CREATE INDEX idx_be_created_brin ON billing_events USING brin (created_at);          -- 增量对账取近期活跃用户
+CREATE INDEX idx_be_cashflow ON billing_events (created_at)
+    WHERE event_type IN ('recharge', 'adjust', 'expire');                            -- 资金流入概要
 -- billing_records 同样带 pool SMALLINT NOT NULL DEFAULT 0（这笔请求由哪个池付）。
 -- 不变式（reconciler 两池分别核）：
 --   钱包  Redis bal.avail + Σ在途(pool=0) == Σ delta_micro WHERE pool=0 == users.balance_micro
@@ -493,6 +496,8 @@ CREATE TABLE billing_outbox (                         -- 与业务同事务写�
     published_at TIMESTAMPTZ
 );
 CREATE INDEX idx_outbox_pending ON billing_outbox (next_retry_at) WHERE status <> 1;
+CREATE INDEX idx_outbox_ch_unassigned ON billing_outbox (id)
+    WHERE ch_batch_id IS NULL AND (status = 0 OR (status = 1 AND stats_protocol = 1));  -- chsink 认领
 CREATE UNIQUE INDEX idx_outbox_event_id ON billing_outbox(event_id);
 CREATE INDEX idx_outbox_ch_batch ON billing_outbox(ch_batch_id) WHERE ch_batch_id IS NOT NULL;
 CREATE INDEX idx_outbox_published_unassigned ON billing_outbox(id) WHERE status=1 AND stats_protocol=1 AND ch_batch_id IS NULL;
@@ -707,7 +712,6 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `rl:{<uid>}:k:<key_id>:rpd:<yyyymmdd>` | STRING | 48h | key 级每日请求数（RPD） |
 | `count:{<key_id>}:rpm:<分钟桶>` / `:rpd:<UTC日桶>` | STRING 计数 | 120s / 48h | Responses input_tokens 独立准入；RPM/RPD 取 key 正数配置，RPM 默认 60、RPD 默认不限；不写生成的余额/Token 计数。与 leases 使用相同 Cluster hash tag，Lua 原子校验后递增 |
 | `count:{<key_id>}:leases` | ZSET | 成员 90s / 键 120s | 计数在途租约，member 为请求 UUID；并发取 key 正数配置，否则 4。准入先删过期成员；正常返回或取得租约后的取消异步 ZREM。Redis 故障拒绝准入 |
-| `rl:{<uid>}:tokd:<key_id>:<yyyymmdd>` | STRING | 48h | key 日 token 上限计数 |
 | `rl:{<uid>}:m:<model>:rpm:<分钟桶>` | STRING 计数 | 120s | 用户×模型级 RPM（settings.model_rpm_limits；INCR 固定分钟窗，尽力语义，Redis 故障放行） |
 | `rl:{<uid>}:g:<group>:rpm:<分钟桶>` / `:rph:<小时桶>` | STRING 计数 | 120s / 7200s | 分组级限流（`price_groups.rpm_limit / rph_limit`，IMPLEMENTATION §11.32）：分组内**每用户**固定窗计数，全部计费端点在 reserve 前检查；超限 429 `rate_limited` param=group_rpm / group_rph；限额随鉴权缓存下发，未配置零往返 |
 | `ws:lease:k:<key_id>` | ZSET | 成员 60s 租约/20s 续期；键 6h 兜底 | Realtime WS per-key 连接租约：member=连接 id（request_id），score=到期毫秒；准入 Lua 先 ZREMRANGEBYSCORE 清过期再 ZCARD 比上限（settings.realtime_max_conns_per_key 缺省 4），崩溃连接不续期自然滚出（§14.4） |
@@ -722,7 +726,7 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |
 | `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
-| `conc:ck:<channel_key_id>` | STRING | 1h 泄漏保护 | 渠道 key 在途并发信号量；生成和原生 Token 计数共用 |
+| `conc:ck:{<channel_key_id>}:v2` | ZSET | 成员 90s / 键 2× | 渠道 key 在途并发租约（member = 请求租约，score = Redis 服务器时钟的到期毫秒；准入先 ZREMRANGEBYSCORE 清过期）；生成和原生 Token 计数共用 |
 | `conc:px:{<proxy_id>}:v1` | ZSET | 成员 90s 续租 / 键 2× | 出口代理在途并发租约（`proxies.max_concurrency`，§11.41）：与 key 租约一起占，任一满了当「渠道忙」并退回已占的那份；跨 key、跨网关实例共享 |
 | `egress:probe:round` | STRING | ≈ 探测间隔 | 出口代理后台探测的本轮租约（SET NX EX）：多 worker 实例时每轮只由拿到的那个执行 |
 | `inflight:gauge` | HASH | 整键 1h；字段超过 10s 不计入、5min 清除 | 集群在途量（HTTP 请求与 Responses WS 活动轮次）：`node → <count>\|<unix_ms>`。HTTP 在启用 surge 规则时跟踪响应体；Responses WS 跟踪单轮准入至结算；活动期间每秒续报，零/非零切换及时上报，其余变化一秒采样。正常结束、报错、断开、取消均释放；每实例串行写入，节点名称须唯一。软实时计价输入，不用于严格并发限流 |
@@ -733,19 +737,19 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `stick:sess:{<uid>}:v1:<session_hash>` | STRING | 1h 滑动 | 粘性 L2 → channel_key_id |
 | `auth:key:<sha256>` | STRING(JSON) | 60s | 鉴权缓存（key 元数据+限额+可见组）。值内嵌写入时版本号 |
 | `auth:ver` | STRING | 永久 | 鉴权缓存全局版本：console 角色/分组变更 INCR 即 O(1) 跨进程失效；key 级精确失效走单键 DEL |
-| `sess:web:<sid>` | STRING | 7d 滑动 | web 会话（/auth/* 自助面；门户/数据面仍 API key 单轨，§6.4）。登录 key 绑定它：用登录 key 鉴权时校验并续期，会话没了 key 即失效 |
-| `sess:idx:<user_id>` | SET | 7d 滑动 | 该用户全部 web 会话 sid（列举 / 一键吊销 / 会话数上限裁剪；成员过期靠读时 SREM） |
-| `sess:meta:<sid>` | HASH | 7d 滑动 | 会话展示元数据：`ip` / `ua` / `created_at`（unix 秒，展示）/ `created_ms`（unix 毫秒，会话上限裁剪的排序键——同秒多次登录要分先后） |
+| `sess:{<uid>}:web:<sid>` | STRING | 7d 滑动 | web 会话（sid = `<uid>.<随机串>`，三把会话键同一 `{uid}` tag，登记 / 校验 / 吊销的 Lua 在 Cluster 下同槽）（/auth/* 自助面；门户/数据面仍 API key 单轨，§6.4）。登录 key 绑定它：用登录 key 鉴权时校验并续期，会话没了 key 即失效 |
+| `sess:{<uid>}:idx` | SET | 7d 滑动 | 该用户全部 web 会话 sid（列举 / 一键吊销 / 会话数上限裁剪；成员过期靠读时 SREM） |
+| `sess:{<uid>}:meta:<sid>` | HASH | 7d 滑动 | 会话展示元数据：`ip` / `ua` / `created_at`（unix 秒，展示）/ `created_ms`（unix 毫秒，会话上限裁剪的排序键——同秒多次登录要分先后） |
 | `oauth:state:<token>` | STRING | 10min | OAuth authorization-code 流 CSRF state（一次性，校验即删） |
 | `spend:tm:{team}:{member}:<yyyymm>` | STRING | 40d | 团成员月度消费计数（结算后累加，预扣前比较；软实时限额） |
 | `tok:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计 token（`pricing_rules` volume 规则的 token 轴输入）。结算后累加实际 usage 总量、报价前读取，语义与团成员计数同构（软实时：跨月自然滚动、Redis 故障按 0 处理即不打折，宁少算不错算）。**仅当生效 PriceBook 含启用的 volume 规则时才产生读写**（`PriceBook::has_volume_rules`），无此类规则时热路径零额外 Redis 往返 |
 | `usd:{<uid>}:<yyyymm>` | STRING | 40d | 用户本月累计消费 micro（volume 规则的**消费额轴**输入，服务"贵模型大客户用量少但付费多"）。与 tok 计数完全同构；门控独立为 `PriceBook::has_spend_rules`（含 min_monthly_spend_micro>0 的规则才读写），只用 token 阈值的站点不付此往返 |
 | `pb:epoch` | STRING | 永久 | 【M3 接入】当前 PriceBook epoch。当前实现：gateway 每 30s 直接轮询 PG `MAX(epoch)`（单机/中小规模更简，见 §2.3） |
 | `pb:data:<epoch>` | STRING(bin) | 保留 2 版 | 【M3 接入】编译后 PriceBook 快照（多副本大表分发 + PG 减负时启用） |
-| `ch:cool:<channel_key_id>` | STRING | =冷却时长 | 状态机冷却镜像 |
+| `ch:cool:<channel_key_id>` | STRING | =冷却时长 | 【未实现】状态机冷却镜像（冷却现由 PG `channel_keys.cooldown_until` 承载） |
 | `ch:test:<channel_id>` | STRING(JSON) | 30d | 最近一次测活结果（ok/latency_ms/http_status/error_code/at），渠道列表"最近测试"列回填（IMPLEMENTATION §11.12）。提示性信息不进 PG，过期即消失 |
 | `ch:balance:<channel_id>` | STRING(JSON) | 30d | 最近一次上游余额查询结果（probe/currency/balance_micro/at，IMPLEMENTATION §11.33），列表 `last_balance` 回填；与 `ch:test` 同一取舍 |
-| `ch:stat:<channel_id>` | HASH | 5min | 错误率/TTFT EMA（打分输入） |
+| `ch:stat:<channel_id>` | HASH | 5min | 【未实现】错误率/TTFT EMA（打分输入；现有时延 EWMA 在 `lat:ck:<channel_key_id>`） |
 | `lock:cred:<channel_key_id>` | STRING NX | 90s | OAuth 刷新租约，值为随机持有者；释放时比较持有者。请求/后台/手动刷新共用；Redis 故障不无锁刷新，PG 按原密文字节条件回写 |
 | `oauth:refresh:<channel_key_id>` | STRING JSON | 30 天 | 脱敏刷新观测：尝试/成功时间、连续失败数、下次重试、错误码。瞬态失败退避 30 秒至 15 分钟；不存任何凭证或上游错误原文 |
 | `oauth:cred:<state>` | STRING(JSON) | 10min | 渠道 OAuth 登录流程的 PKCE verifier + provider + 发起管理员 ID + 可选 channel/key 目标；`start` 写，`exchange` 一次性读删并校验绑定 |
@@ -814,7 +818,8 @@ ARGV = quota_micro, sub_until_unix_s, sub_epoch（旧调用默认空字符串）
 - Redis Lua 运行时错误不会撤销先前写入。普通预扣先验证四个会修改的计数器，再检查限额与选池；类型、规范整数或范围异常不会留下扣款、预扣凭证、计数增量或新 TTL。异常数据不自动清零，账本错误仍返回既有 HTTP 500 `internal_error`，不会被当作正常 429。这里的保证针对已校验的数据异常，不替代 Redis 断连/执行确认丢失时的原有对账机制，也不将脚本外的模型/分组限流纳入资金原子事务。
 - 普通结算/退款在改钱、删除 r:* 之前验证所选余额、并发键及结果的 2^53−1 安全整数界限。凭证接受完整的两段旧格式（key=0、pool=0）、三段旧格式（pool=0）、四段格式，以及第五段为 `w:epoch` 的订阅格式。epoch 必须非空、至多 128 字节，仅含 ASCII 字母、数字及 `-:._`；空字段、未知 pool、非法整数及多余字段均拒绝，不猜测成钱包。key 作为规范十进制字符串比较，支持完整非负 PG bigint 身份，不受 Lua 浮点截断影响。
 - 无凭证退款的 pool=0 是既有幂等返回约定，不代表原请求由钱包支付。Chat、Embeddings/Rerank 和 Realtime 保留 reserve 返回的池，用于退款错误或零释放结果时的失败账单归属；重复退款不得额外入账。普通成功请求现先在 PG 保存账单与待同步记录，再关闭 Redis 预扣，详见下文；该保证从 PG 提交成功后生效。`repair` 另对在途累加与最终减法检查 Lua 安全整数界限，超限拒绝写入。
-- `conc:ck:*` acquire/release 为独立单键操作（与用户槽无关）。
+- `conc:ck:{*}:v2` acquire/renew/release 为独立单键操作（与用户槽无关）。
+- 跨槽的批量读（`auth:key:*` + `auth:ver`、`lat:ck:*`、`ch:test:*` / `ch:balance:*`）走管道逐条 GET，不用 MGET——MGET 要求同槽，Cluster 下会 CROSSSLOT。
 
 普通持久结算由 `0016_billing_sync.sql` 新增 `billing_sync`：request_id 主键、用户/key、实际 micro 金额、预扣池与创建时间。成功账单、用量、事件、用户/key 累计、outbox 与待同步行同事务提交；PG 失败不关闭 Redis，Redis 失败保留待同步记录。worker 在过期清理之前恢复，且共用用户锁，防止订阅滚窗/余额修复与待同步实际费用交错。Redis 凭证已不存在时，根据 PG 事件重建两池，保留其他活跃预扣和长期冻结，不猜测再次扣款。管理员退款持有同一用户锁并先恢复待同步结算，恢复失败则拒绝继续。普通成功事件的 `balance_after_micro` 为 NULL，不能在 Redis 同步之前伪造同步后余额。见 [普通持久结算契约](synchronous-settlements.md)。
 

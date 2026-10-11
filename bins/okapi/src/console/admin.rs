@@ -183,6 +183,20 @@ impl PoolMemberReq {
 }
 
 /// 池成员列表归一化：去空白、去重、校验池存在（不存在回 404 而非让 FK 报 500）。
+/// 池成员关系只有 all 范围能写。池是全站共享的选路单元、没有属主：own 范围管的是"自己的渠道"，
+/// 若能把它挂进 default（或付费分组的池、带最高优先级覆盖），几秒后全站请求就路由到它的
+/// api_base——prompt 与响应全量外泄。own 范围建的渠道因此是孤儿，由 all 范围管理员审过再入池。
+pub(super) fn ensure_pool_scope(scope: PermScope) -> Result<(), AppError> {
+    if scope == PermScope::All {
+        Ok(())
+    } else {
+        Err(
+            AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
+                .with_param("pools_require_all_scope"),
+        )
+    }
+}
+
 pub(super) async fn normalize_members(
     state: &AppState,
     reqs: Vec<PoolMemberReq>,
@@ -228,7 +242,8 @@ pub async fn create_channel(
         super::channel_creation::endpoint(&state, &req.provider, Some(&req.api_base)).await?;
     ensure_azure_api_base(&req.provider, Some(api_base))?;
     super::ssrf::validate_credential(&state, &req.credential).await?;
-    let prepared = super::channel_creation::prepare(&state, &req.provider, req.options).await?;
+    let prepared =
+        super::channel_creation::prepare(&state, &req.provider, req.options, scope).await?;
     super::egress::validate_binding(&state, &prepared.egress, &actor, scope).await?;
     let credential = super::channel_credentials::normalize(&req.provider, &req.credential)?;
     let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
@@ -429,6 +444,7 @@ pub async fn set_channel_pools(
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
+    ensure_pool_scope(scope)?;
     let members = normalize_members(&state, req.pools).await?;
     okapi_store::admin::set_channel_pools(&state.pg, id, &members).await?;
     state.invalidate_routing_caches();
@@ -1377,6 +1393,10 @@ pub async fn set_setting(
         if let Some(target) = policy.target.as_deref() {
             super::ssrf::validate_api_base(&state, target).await?;
         }
+    }
+    // 清理任务按 `(value #>> '{}')::bigint` 读：null / 小数 / 字符串会让它每轮报错且永不清理
+    if req.key == "retention_months" && req.value.as_u64().is_none_or(|months| months > 1200) {
+        return Err(AppError::bad_request().with_param("retention_months"));
     }
     if is_pricing_base && crate::gateway::pricing_loader::valid_base_price(&req.value).is_none() {
         return Err(AppError::bad_request().with_param("pricing_base_per_1m_micro"));

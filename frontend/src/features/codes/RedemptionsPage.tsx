@@ -17,6 +17,7 @@ import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { Select } from '@/components/ui/select'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
+import { usePermission } from '@/hooks/use-auth'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
@@ -45,6 +46,9 @@ interface CodeRow {
 /// 放在抽屉里并把结果留在抽屉内让用户复制，而不是塞在列表页顶部。
 export function RedemptionsPage() {
   const { t, i18n } = useTranslation()
+  // 生成走 POST /admin/redemptions，后端要 user.balance_adjust（发码等于发钱）；导航只要 pricing.write，
+  // 没这项权限的看得到列表、停用得了批次，但不给一个点了必 403 的按钮
+  const canCreate = usePermission()('user.balance_adjust')
   const queryClient = useQueryClient()
   // 状态筛选与页码都在地址里。此前写死 limit=100：一批码就能生成几百上千张，
   // 超出的那部分在页面上根本看不到
@@ -98,10 +102,12 @@ export function RedemptionsPage() {
         title={t('admin:codeListTitle')}
         description={t('admin:codesDesc')}
         action={
-          <Button onClick={() => setDrawer(true)}>
-            <Plus className="h-4 w-4" />
-            {t('admin:redeemGenerate')}
-          </Button>
+          canCreate && (
+            <Button onClick={() => setDrawer(true)}>
+              <Plus className="h-4 w-4" />
+              {t('admin:redeemGenerate')}
+            </Button>
+          )
         }
       />
 
@@ -140,10 +146,12 @@ export function RedemptionsPage() {
         <EmptyState
           hint={t('admin:codesEmptyHint')}
           action={
-            <Button onClick={() => setDrawer(true)}>
-              <Plus className="h-4 w-4" />
-              {t('admin:redeemGenerate')}
-            </Button>
+            canCreate && (
+              <Button onClick={() => setDrawer(true)}>
+                <Plus className="h-4 w-4" />
+                {t('admin:redeemGenerate')}
+              </Button>
+            )
           }
         />
       ) : (

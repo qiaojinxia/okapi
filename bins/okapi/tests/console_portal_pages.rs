@@ -688,9 +688,10 @@ async fn me_logs_calendar_range_preserves_scope_and_cursor() {
         row_ids(&get(format!("{base}&errors_only=true")).await).is_empty(),
         "refunded records are not failed requests"
     );
+    // 按 (created_at, id) 倒序：第二把 key 的 10:00Z 早于 ids[2] 的次日 07:59Z
     assert_eq!(
         row_ids(&get(format!("{base}&scope=user")).await),
-        [ids[4], ids[2], ids[1]]
+        [ids[2], ids[4], ids[1]]
     );
     let utc = get("model=range-model&start_date=2024-11-03&end_date=2024-11-03".to_owned()).await;
     assert_eq!(
@@ -699,13 +700,34 @@ async fn me_logs_calendar_range_preserves_scope_and_cursor() {
         "缺省 UTC，不能把次日当地记录混入"
     );
     assert_eq!(utc["window"]["timezone"], "UTC");
+    // 不给日期缺省近 30 天：账单表按 created_at 分区，无界查询会扫用户全部历史
+    let recent: i64 = sqlx::query_scalar(
+        "INSERT INTO billing_records (request_id, log_type, user_id, api_key_id, group_code, model_name, status) \
+         VALUES ($1, 2, $2, $3, 'default', 'range-model', 20) RETURNING id",
+    )
+    .bind(Uuid::new_v4())
+    .bind(user_id)
+    .bind(key_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
     let all = get("model=range-model".to_owned()).await;
     assert_eq!(
         row_ids(&all),
-        [ids[3], ids[2], ids[1], ids[0]],
-        "清除日期恢复全部日期，隔离仍有效"
+        [recent],
+        "缺省窗口排除 30 天前的记录，隔离仍有效"
     );
-    assert!(all["window"].is_null());
+    assert_eq!(all["window"]["timezone"], "UTC");
+    // 按 request_id 点查不加时间界
+    let old_request: Uuid =
+        sqlx::query_scalar("SELECT request_id FROM billing_records WHERE id = $1")
+            .bind(ids[0])
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    let lookup = get(format!("request_id={old_request}")).await;
+    assert_eq!(row_ids(&lookup), [ids[0]]);
+    assert!(lookup["window"].is_null());
 }
 
 #[tokio::test]

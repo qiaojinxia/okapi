@@ -107,12 +107,20 @@ pub async fn list(
         key.key_id,
     )?;
     if let Some(before) = q.before {
-        query.push(" AND b.id < ").push_bind(before);
+        // Keyset on (created_at, id) so the page walks idx_br_user_time instead of sorting
+        // every matching row by id. The cursor row is resolved under the same owner; an
+        // unknown cursor yields an empty page rather than restarting from the top.
+        query
+            .push(" AND (b.created_at, b.id) < (SELECT c.created_at, c.id FROM billing_records c WHERE c.id = ")
+            .push_bind(before)
+            .push(" AND c.user_id = ")
+            .push_bind(key.user_id)
+            .push(")");
     }
     let limit = q.limit.clamp(1, 200);
     // Fetch one extra row so exactly-full final pages do not advertise another page.
     query
-        .push(" ORDER BY b.id DESC LIMIT ")
+        .push(" ORDER BY b.created_at DESC, b.id DESC LIMIT ")
         .push_bind(limit + 1);
     let mut data: Vec<Value> = query
         .build_query_scalar()

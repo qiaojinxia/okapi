@@ -433,11 +433,7 @@ impl GeminiStreamState {
             Err(_) => return vec![Err(UpstreamError::Stream("gemini_chunk_json".into()))],
         };
         if let Some(err) = src.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("upstream_error");
-            return vec![Err(UpstreamError::Stream(msg.to_owned()))];
+            return vec![Err(crate::gemini::stream_error(err, &data))];
         }
 
         let mut out = Vec::new();

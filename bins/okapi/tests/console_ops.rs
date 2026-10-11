@@ -63,6 +63,7 @@ struct Env {
     model: String,
     super_token: String,
     user_id: i64,
+    user_key_id: i64,
     user_token: String,
 }
 
@@ -93,9 +94,10 @@ async fn setup() -> Env {
         .await
         .unwrap();
     let user_token = format!("sk-okapi-ops-u-{suffix}");
-    okapi_store::provision::create_api_key(&pg, user_id, &hash(&user_token), "sk-ops-u")
-        .await
-        .unwrap();
+    let user_key_id =
+        okapi_store::provision::create_api_key(&pg, user_id, &hash(&user_token), "sk-ops-u")
+            .await
+            .unwrap();
 
     okapi_store::provision::create_model_ratio(&pg, &model, "1", "1", "1")
         .await
@@ -150,6 +152,7 @@ async fn setup() -> Env {
         model,
         super_token,
         user_id,
+        user_key_id,
         user_token,
     }
 }
@@ -537,7 +540,7 @@ async fn settings_get_and_leaderboard() {
         log_type: 2,
         pool: okapi_ledger::Pool::Wallet,
         user_id: env.user_id,
-        api_key_id: 0,
+        api_key_id: env.user_key_id,
         group_code: "default",
         model_name: &env.model,
         channel_id: None,

@@ -786,7 +786,7 @@ async fn realtime_kpi_counts_settlements() {
                 log_type,
                 pool: okapi_ledger::Pool::Wallet,
                 user_id: env.user_id,
-                api_key_id: 0,
+                api_key_id: env.user_key_id,
                 group_code: "default",
                 model_name: &env.model,
                 channel_id: None,

@@ -128,6 +128,19 @@ impl SchedulerRedis {
         }
     }
 
+    /// 多键读，键不同槽也成立：管道里逐条 GET，单机仍是一次往返，Cluster 下 fred 按槽分发。
+    /// MGET 要求所有键同槽，`auth:key:*` + `auth:ver`、`lat:ck:*` 这类无 tag 的键在 Cluster 下会 CROSSSLOT。
+    async fn get_many<T: fred::types::FromValue>(
+        &self,
+        keys: Vec<String>,
+    ) -> Result<Vec<Option<T>>, fred::error::Error> {
+        let pipe = self.client.pipeline();
+        for key in keys {
+            let _: () = pipe.get(key).await?;
+        }
+        pipe.all().await
+    }
+
     // ---- 鉴权缓存（docs/database.md §2.1 auth:key:<sha256>，60s TTL）----
     // 失效模型：全局版本键 auth:ver，值内嵌写入时版本；INCR 即 O(1) 全量失效，
     // 跨进程立即生效（满足 §2.4 console 精确撤销语义），另有 60s TTL 兜底。
@@ -135,7 +148,7 @@ impl SchedulerRedis {
     /// 读鉴权缓存（版本不匹配视为 miss）。
     pub async fn auth_get(&self, key_hash: &str) -> Option<AuthedKey> {
         let keys = vec![format!("auth:key:{key_hash}"), "auth:ver".to_owned()];
-        let values: Vec<Option<String>> = self.client.mget(keys).await.ok()?;
+        let values: Vec<Option<String>> = self.get_many(keys).await.ok()?;
         let payload = values.first()?.clone()?;
         let current_ver = values
             .get(1)
@@ -216,7 +229,33 @@ pub struct WebSessionRow {
 }
 
 impl SchedulerRedis {
+    /// web 会话 id：`<user_id>.<随机串>`。三把会话键都挂 `{user_id}` hash-tag（Cluster 下同槽，
+    /// 登记 / 校验 / 吊销的 Lua 才成立），校验时只有 cookie 里的 sid，属主得能从 sid 里读出来。
+    #[must_use]
+    pub fn web_session_sid(user_id: i64, random: &str) -> String {
+        format!("{user_id}.{random}")
+    }
+
+    /// sid 的属主（前缀）；不是 `<数字>.<非空>` 形状的一律当无效会话。
+    fn web_session_owner(sid: &str) -> Option<i64> {
+        let (uid, rest) = sid.split_once('.')?;
+        (!rest.is_empty()).then_some(())?;
+        uid.parse().ok().filter(|uid: &i64| *uid > 0)
+    }
+
+    /// (会话键, 用户索引键, 元数据键)，同一个 `{user_id}` tag。
+    #[must_use]
+    pub fn web_session_keys(sid: &str) -> Option<(String, String, String)> {
+        let uid = Self::web_session_owner(sid)?;
+        Some((
+            format!("sess:{{{uid}}}:web:{sid}"),
+            format!("sess:{{{uid}}}:idx"),
+            format!("sess:{{{uid}}}:meta:{sid}"),
+        ))
+    }
+
     /// web 会话（/auth/* 自助面专用，§6.4）：7d 滑动过期；同步写入用户索引与展示元数据。
+    /// `sid` 必须由 [`Self::web_session_sid`] 为同一用户生成。
     pub async fn web_session_set(
         &self,
         sid: &str,
@@ -224,9 +263,15 @@ impl SchedulerRedis {
         ip: Option<&str>,
         ua: Option<&str>,
     ) {
-        let web = format!("sess:web:{sid}");
-        let idx = format!("sess:idx:{user_id}");
-        let meta = format!("sess:meta:{sid}");
+        let Some((web, idx, meta)) =
+            Self::web_session_keys(sid).filter(|_| Self::web_session_owner(sid) == Some(user_id))
+        else {
+            tracing::error!(
+                user_id,
+                "web session id does not belong to the user; not stored"
+            );
+            return;
+        };
         // Index first, valid session last. Lua is atomic but does not roll back
         // command errors: this ordering also handles ACL rejection safely.
         let now = chrono::Utc::now();
@@ -264,12 +309,10 @@ impl SchedulerRedis {
     }
 
     pub async fn web_session_get(&self, sid: &str) -> Option<i64> {
-        let key = format!("sess:web:{sid}");
-        let value: Option<String> = self.client.get(&key).await.ok()?;
-        let uid: i64 = value?.parse().ok()?;
-        // Verify membership and slide all three TTLs atomically with revocation.
-        // Re-check the mapping after the initial uid lookup so a replaced or
-        // revoked session cannot be authorized by a stale read.
+        let (web, idx, meta) = Self::web_session_keys(sid)?;
+        let uid = Self::web_session_owner(sid)?;
+        // Verify mapping + membership and slide all three TTLs atomically with
+        // revocation, so a replaced or revoked session cannot be authorized.
         let script = r"
           if redis.call('GET',KEYS[1]) ~= ARGV[2] then return 0 end
           if redis.call('SISMEMBER',KEYS[2],ARGV[1]) ~= 1 then return 0 end
@@ -282,7 +325,7 @@ impl SchedulerRedis {
             .client
             .eval(
                 script,
-                vec![key, format!("sess:idx:{uid}"), format!("sess:meta:{sid}")],
+                vec![web, idx, meta],
                 vec![
                     sid.to_owned(),
                     uid.to_string(),
@@ -295,33 +338,36 @@ impl SchedulerRedis {
     }
 
     pub async fn web_session_del(&self, sid: &str) {
-        if let Some(uid) = self.web_session_get_raw(sid).await {
-            let _: Result<i64, _> = self.client.srem(format!("sess:idx:{uid}"), sid).await;
-        }
+        let Some((web, idx, meta)) = Self::web_session_keys(sid) else {
+            return;
+        };
+        let script = r"
+          redis.call('SREM',KEYS[2],ARGV[1])
+          return redis.call('DEL',KEYS[1],KEYS[3])
+        ";
         let _: Result<i64, _> = self
             .client
-            .del(vec![format!("sess:web:{sid}"), format!("sess:meta:{sid}")])
+            .eval(script, vec![web, idx, meta], vec![sid.to_owned()])
             .await;
     }
 
     async fn web_session_get_raw(&self, sid: &str) -> Option<i64> {
-        let value: Option<String> = self.client.get(format!("sess:web:{sid}")).await.ok()?;
+        let (web, _, _) = Self::web_session_keys(sid)?;
+        let value: Option<String> = self.client.get(web).await.ok()?;
         value?.parse().ok()
     }
 
     /// 该用户仍有效的 web 会话（过期成员顺手从索引摘掉）。
     pub async fn web_session_list(&self, user_id: i64) -> Vec<WebSessionRow> {
-        let idx = format!("sess:idx:{user_id}");
+        let idx = format!("sess:{{{user_id}}}:idx");
         let members: Vec<String> = self.client.smembers(&idx).await.unwrap_or_default();
         let mut out = Vec::with_capacity(members.len());
         for sid in members {
-            match self.web_session_get_raw(&sid).await {
-                Some(uid) if uid == user_id => {
-                    let meta: std::collections::HashMap<String, String> = self
-                        .client
-                        .hgetall(format!("sess:meta:{sid}"))
-                        .await
-                        .unwrap_or_default();
+            let meta_key = Self::web_session_keys(&sid).map(|(_, _, meta)| meta);
+            match (self.web_session_get_raw(&sid).await, meta_key) {
+                (Some(uid), Some(meta_key)) if uid == user_id => {
+                    let meta: std::collections::HashMap<String, String> =
+                        self.client.hgetall(meta_key).await.unwrap_or_default();
                     let created_at = meta
                         .get("created_at")
                         .and_then(|s| s.parse::<i64>().ok())
@@ -380,12 +426,13 @@ impl SchedulerRedis {
         }
     }
 
-    /// 清空该用户全部 web 会话（密码重置 / 封禁 / 删除）。
+    /// 清空该用户全部 web 会话（密码重置 / 封禁 / 删除）。脚本里拼出的会话键与 KEYS[1]
+    /// 同一个 `{user_id}` tag，Cluster 下仍在同槽。
     pub async fn web_session_revoke_user(&self, user_id: i64) {
         let script = r"
           local members=redis.call('SMEMBERS',KEYS[1])
           for _,sid in ipairs(members) do
-            redis.call('DEL','sess:web:'..sid,'sess:meta:'..sid)
+            redis.call('DEL',ARGV[1]..'web:'..sid,ARGV[1]..'meta:'..sid)
           end
           redis.call('DEL',KEYS[1])
           return #members
@@ -394,8 +441,8 @@ impl SchedulerRedis {
             .client
             .eval(
                 script,
-                vec![format!("sess:idx:{user_id}")],
-                Vec::<String>::new(),
+                vec![format!("sess:{{{user_id}}}:idx")],
+                vec![format!("sess:{{{user_id}}}:")],
             )
             .await;
         if let Err(error) = result {
@@ -406,16 +453,13 @@ impl SchedulerRedis {
     /// 固定窗计数闸：INCR 后比上限（先计后判的"尽力语义"）；首次写入挂 TTL。
     /// Redis 故障放行——保护性限流宁可短暂失守，也不因缓存抖动打挂全站（账本才 fail-closed）。
     async fn fixed_window_ok(&self, key: &str, ttl_secs: i64, limit: i64) -> bool {
-        let count: i64 = match self.client.incr(key).await {
+        let count: i64 = match self.incr_with_ttl(key, ttl_secs).await {
             Ok(n) => n,
             Err(err) => {
                 tracing::debug!(error = %err, key, "固定窗计数 incr 失败（放行）");
                 return true;
             }
         };
-        if count == 1 {
-            let _: Result<bool, _> = self.client.expire(key, ttl_secs, None).await;
-        }
         count <= limit
     }
 
@@ -519,11 +563,9 @@ impl SchedulerRedis {
     /// 结算后累加渠道 key 当日消费。软实时：先花后记，可能略超上限。
     pub async fn channel_key_spend_add(&self, channel_key_id: i64, amount_micro: i64) {
         let key = Self::channel_key_spend_key(channel_key_id);
-        if let Err(err) = self.client.incr_by::<i64, _>(&key, amount_micro).await {
+        if let Err(err) = self.incr_by_with_ttl(&key, amount_micro, 172_800).await {
             tracing::debug!(error = %err, "channel_key_spend 累加失败");
-            return;
         }
-        let _: Result<bool, _> = self.client.expire(&key, 172_800, None).await;
     }
 
     fn channel_key_spend_key(channel_key_id: i64) -> String {
@@ -551,7 +593,7 @@ impl SchedulerRedis {
             return std::collections::HashMap::new();
         }
         let keys: Vec<_> = ids.iter().map(|id| format!("lat:ck:{id}")).collect();
-        let values: Vec<Option<u32>> = self.client.mget(keys).await.unwrap_or_default();
+        let values: Vec<Option<u32>> = self.get_many(keys).await.unwrap_or_default();
         ids.into_iter()
             .zip(values)
             .filter_map(|(id, value)| value.map(|ms| (id, ms)))
@@ -569,13 +611,17 @@ impl SchedulerRedis {
         let next = u32::try_from(next).unwrap_or(u32::MAX);
         if let Err(err) = self
             .client
-            .set::<(), _, _>(&key, next, None, None, false)
+            .set::<(), _, _>(
+                &key,
+                next,
+                Some(fred::types::Expiration::EX(600)),
+                None,
+                false,
+            )
             .await
         {
             tracing::debug!(error = %err, "时延 EWMA 写入失败");
-            return;
         }
-        let _: Result<bool, _> = self.client.expire(&key, 600, None).await;
     }
 
     /// 团成员本月消费计数（软实时限额语义，IMPLEMENTATION §6.1）。
@@ -591,10 +637,9 @@ impl SchedulerRedis {
             return;
         }
         let key = Self::member_spend_key(team, member);
-        let incr: Result<i64, _> = self.client.incr_by(&key, amount_micro).await;
-        if incr.is_ok() {
-            let _: Result<bool, _> = self.client.expire(&key, 40 * 24 * 3600, None).await;
-        }
+        let _: Result<i64, _> = self
+            .incr_by_with_ttl(&key, amount_micro, 40 * 24 * 3600)
+            .await;
     }
 
     fn member_spend_key(team: i64, member: i64) -> String {
@@ -619,10 +664,7 @@ impl SchedulerRedis {
             return;
         }
         let key = Self::monthly_tokens_key(user_id);
-        let incr: Result<i64, _> = self.client.incr_by(&key, delta).await;
-        if incr.is_ok() {
-            let _: Result<bool, _> = self.client.expire(&key, 40 * 24 * 3600, None).await;
-        }
+        let _: Result<i64, _> = self.incr_by_with_ttl(&key, delta, 40 * 24 * 3600).await;
     }
 
     fn monthly_tokens_key(user_id: i64) -> String {
@@ -644,10 +686,9 @@ impl SchedulerRedis {
             return;
         }
         let key = Self::monthly_spend_key(user_id);
-        let incr: Result<i64, _> = self.client.incr_by(&key, amount_micro).await;
-        if incr.is_ok() {
-            let _: Result<bool, _> = self.client.expire(&key, 40 * 24 * 3600, None).await;
-        }
+        let _: Result<i64, _> = self
+            .incr_by_with_ttl(&key, amount_micro, 40 * 24 * 3600)
+            .await;
     }
 
     fn monthly_spend_key(user_id: i64) -> String {
@@ -666,15 +707,30 @@ impl SchedulerRedis {
     /// 进程崩溃或 EXPIRE 失败会留下永不过期的计数键，该 IP 从此被永久限流、只能人工删键；
     /// 这类旧键在下次计数时顺手补上过期。
     async fn incr_with_ttl(&self, key: &str, ttl_secs: i64) -> Result<i64, fred::error::Error> {
+        self.incr_by_with_ttl(key, 1, ttl_secs).await
+    }
+
+    /// [`Self::incr_with_ttl`] 的任意增量版（消费 / token 累加器）：键名带时间桶，丢一次 EXPIRE
+    /// 就是一个永不过期的旧桶，所以同样走原子脚本。
+    async fn incr_by_with_ttl(
+        &self,
+        key: &str,
+        delta: i64,
+        ttl_secs: i64,
+    ) -> Result<i64, fred::error::Error> {
         const LUA: &str = r"
-            local n = redis.call('INCR', KEYS[1])
-            if n == 1 or redis.call('TTL', KEYS[1]) == -1 then
-                redis.call('EXPIRE', KEYS[1], ARGV[1])
+            local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+            if n == tonumber(ARGV[1]) or redis.call('TTL', KEYS[1]) == -1 then
+                redis.call('EXPIRE', KEYS[1], ARGV[2])
             end
             return n
         ";
         self.client
-            .eval(LUA, vec![key.to_owned()], vec![ttl_secs.to_string()])
+            .eval(
+                LUA,
+                vec![key.to_owned()],
+                vec![delta.to_string(), ttl_secs.to_string()],
+            )
             .await
     }
 
@@ -1082,7 +1138,7 @@ impl SchedulerRedis {
             .iter()
             .map(|id| format!("{prefix}:{id}"))
             .collect();
-        let values: Vec<Option<String>> = self.client.mget(keys).await.unwrap_or_default();
+        let values: Vec<Option<String>> = self.get_many(keys).await.unwrap_or_default();
         channel_ids
             .iter()
             .zip(values)

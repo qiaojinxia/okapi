@@ -6,56 +6,56 @@ const FIELDS: [(&str, &str, &str, &str); 9] = [
     (
         "audio_prompt_tokens",
         "audio_prompt_reported",
-        "(b.usage_details->'tokens'->>'audio_prompt_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'prompt'->>'audio'",
+        "b.usage_details->'tokens'->'audio_prompt_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'prompt'->'audio'",
     ),
     (
         "image_prompt_tokens",
         "image_prompt_reported",
-        "(b.usage_details->'tokens'->>'image_prompt_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'prompt'->>'image'",
+        "b.usage_details->'tokens'->'image_prompt_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'prompt'->'image'",
     ),
     (
         "audio_completion_tokens",
         "audio_completion_reported",
-        "(b.usage_details->'tokens'->>'audio_completion_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'completion'->>'audio'",
+        "b.usage_details->'tokens'->'audio_completion_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'completion'->'audio'",
     ),
     (
         "image_completion_tokens",
         "image_completion_reported",
-        "(b.usage_details->'tokens'->>'image_completion_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'completion'->>'image'",
+        "b.usage_details->'tokens'->'image_completion_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'completion'->'image'",
     ),
     (
         "cache_read_audio_tokens",
         "cache_read_audio_reported",
-        "(b.usage_details->'tokens'->'cache_read_modalities'->>'audio_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'cache_read'->>'audio'",
+        "b.usage_details->'tokens'->'cache_read_modalities'->'audio_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'cache_read'->'audio'",
     ),
     (
         "cache_read_image_tokens",
         "cache_read_image_reported",
-        "(b.usage_details->'tokens'->'cache_read_modalities'->>'image_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'cache_read'->>'image'",
+        "b.usage_details->'tokens'->'cache_read_modalities'->'image_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'cache_read'->'image'",
     ),
     (
         "cache_write_audio_tokens",
         "cache_write_audio_reported",
-        "(b.usage_details->'tokens'->'cache_write_modalities'->>'audio_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'cache_write'->>'audio'",
+        "b.usage_details->'tokens'->'cache_write_modalities'->'audio_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'cache_write'->'audio'",
     ),
     (
         "cache_write_image_tokens",
         "cache_write_image_reported",
-        "(b.usage_details->'tokens'->'cache_write_modalities'->>'image_tokens')::bigint",
-        "b.usage_details->'tokens'->'reported_details'->'cache_write'->>'image'",
+        "b.usage_details->'tokens'->'cache_write_modalities'->'image_tokens'",
+        "b.usage_details->'tokens'->'reported_details'->'cache_write'->'image'",
     ),
     (
         "reasoning_tokens",
         "reasoning_reported",
         "b.reasoning_tokens",
-        "b.usage_details->'tokens'->'reported_details'->>'reasoning'",
+        "b.usage_details->'tokens'->'reported_details'->'reasoning'",
     ),
 ];
 
@@ -78,13 +78,28 @@ pub(super) fn ch_sql() -> String {
     format!("{}, {}", ch_detail_sql(), ch_ttl_sql())
 }
 
+/// jsonb 数值 → bigint：只认 JSON 数字且是不越界的整数，其余（字符串、小数、超长）当未观测（NULL）。
+/// 一条脏记录不该让整页用量查询报错；也不做 regexp 清洗——"1a2" 洗成 12 是编造数据。
+fn pg_bigint(path: &str) -> String {
+    if !path.contains("->") {
+        return path.to_owned(); // 普通列（reasoning_tokens）
+    }
+    format!(
+        "CASE WHEN jsonb_typeof({path}) = 'number' AND ({path} #>> '{{}}') ~ '^-?[0-9]{{1,18}}$' THEN ({path} #>> '{{}}')::bigint END"
+    )
+}
+
 pub(super) fn pg_sql() -> String {
-    let details = FIELDS.iter().map(|(name, _, value, flag)| format!(
-        "'observed_{name}', SUM({value}) FILTER (WHERE ({flag})::boolean = true), 'observed_{name}_n', COUNT({value}) FILTER (WHERE ({flag})::boolean = true)"
-    )).collect::<Vec<_>>().join(", ");
-    let value = |name| format!("(b.usage_details->'tokens'->>'{name}')::bigint");
+    let details = FIELDS.iter().map(|(name, _, value, flag)| {
+        let value = pg_bigint(value);
+        // 标志位是 serde 写的 JSON 布尔；非布尔按未上报，不做 ::boolean 强转（"yes" 会让整条查询失败）
+        format!(
+            "'observed_{name}', SUM({value}) FILTER (WHERE {flag} = 'true'::jsonb), 'observed_{name}_n', COUNT({value}) FILTER (WHERE {flag} = 'true'::jsonb)"
+        )
+    }).collect::<Vec<_>>().join(", ");
+    let value = |name| pg_bigint(&format!("b.usage_details->'tokens'->'{name}'"));
     let known = format!(
-        "COALESCE((b.usage_details->'tokens'->>'cache_write_reported')::boolean, false) AND {} >= 0 AND {} >= 0 AND {} + {} = {}",
+        "b.usage_details->'tokens'->'cache_write_reported' = 'true'::jsonb AND {} >= 0 AND {} >= 0 AND {} + {} = {}",
         value("cache_write_5m_tokens"),
         value("cache_write_1h_tokens"),
         value("cache_write_5m_tokens"),

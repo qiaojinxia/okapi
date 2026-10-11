@@ -84,7 +84,10 @@ async fn portal_id_routes_reject_another_users_resources() {
         .unwrap();
     let cs = serve(console::router(state.clone())).await;
     // 给受害者开一条 web 会话，好让攻击者有个真实 sid 可以试着吊销
-    let victim_sid = format!("victimsid{}", Uuid::new_v4().simple());
+    let victim_sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        victim.user_id,
+        &format!("victimsid{}", Uuid::new_v4().simple()),
+    );
     state
         .sched
         .web_session_set(&victim_sid, victim.user_id, None, None)

@@ -2649,6 +2649,35 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
 - **前端**：`/admin/monitor` 三个页签（实时概况 / 趋势 / 告警日志），可选 10 / 30 秒自动刷新；占用条按 75% / 90% 分「正常 / 偏高 / 告急」，状态有文字不只靠颜色；
   趋势图字节类纵轴按窗口最大值换算 KB / MB / GB。e2e：`frontend/e2e/monitor.spec.ts`。
 
+### 11.44 评审轮次的行为变更（2026-10-10）
+
+- **入池只有全站范围能做**：池是全站共享的选路单元、没有属主。`channel.write.own` 的管理员能把自己的渠道挂进 default
+  （或付费分组的池、带最高优先级覆盖），几秒后全站请求就路由到它的 `api_base`。现在 `POST /admin/channels/{id}/pools`
+  与建渠道（控制台 / OAuth / MCP）对 own 范围：显式带池 → 403 `pools_require_all_scope`，不带 → 建成孤儿，由全站管理员审过再入池；
+  前端对 own 范围隐藏池编辑器并提示。复制渠道沿用源渠道已审过的成员关系（复制体缺省停用），不在此限。
+- **web 会话键同槽**：sid 改为 `<user_id>.<随机串>`，三把键 `sess:{uid}:web:<sid>` / `sess:{uid}:idx` / `sess:{uid}:meta:<sid>`
+  同一 hash-tag，登记 / 校验 / 吊销的 Lua 在 Redis Cluster 下不再 CROSSSLOT。旧格式 cookie 全部失效、需重新登录（开发阶段不做兼容）。
+  跨槽批量读（`auth:key:*`+`auth:ver`、`lat:ck:*`、`ch:test:*`/`ch:balance:*`）改为管道逐条 GET。
+- **计数器原子带 TTL**：分组 / 模型 / key 固定窗限流与 spend / tok / usd 累加器统一走 INCRBY + 补 EXPIRE 的单脚本，
+  丢一次 EXPIRE 不再留下永不过期的旧桶。Responses WS 连接租约改用 Redis `TIME`（与 `ws_lease_acquire` 同口径）。
+- **流内错误保留类型**：Anthropic `error.type`（直通与 OpenAI 转换两条路）和 Gemini 错误帧的 `code` / `status` 映射回同义 HTTP 状态
+  （529 / 429 / 500 / 503 …），重试矩阵与 key 冷却才能分流；认不出的仍按断流。Chat 转换流遇到解析不了的 data 行报 `chat_chunk_json`，
+  不再当空对象吞掉一段文本；Gemini 请求里 chat 装不下的 part（`executableCode` / `codeExecutionResult`、model 里的媒体）报 400。
+- **写入校验**：`retention_months` 只收 0..=1200 的整数（清理任务按 bigint 读，坏值会让它每轮报错）；倍率列加 `>= 0` CHECK
+  （迁移 0004）；门户用量明细的 jsonb 读数只认 JSON 整数，脏值按未观测，不让整页查询报错。前端兑换码 / 规则 / 保留期表单写错拦下提交，
+  不再 NaN → null / undefined 悄悄改语义；生成兑换码按钮只对有 `user.balance_adjust` 的管理员显示。
+- **环境变量**：布尔大小写不敏感（`true/1/yes/on`、`false/0/no/off`），认不得的与数值解析失败都打 WARN 再用缺省（`okapi_store::env_config`）。
+- **门户日志缺省近 30 天**：`/api/me/logs` 与 `/logs/stat` 不带日期时窗口取近 30 天（按 request_id 点查不加界），列表按
+  `(created_at, id)` 倒序键集翻页（`before` 仍传上一页末行 id，服务端在同一属主下取它的 created_at），走 `idx_br_user_time`。
+  此前无日期时 `ORDER BY id` 与唯一可用索引不匹配、分区也裁剪不了，成本随用户终身账单行数线性涨（保留期缺省永久）。
+  前端「全部日期」改为「近 30 天」，密钥用量抽屉同口径；更长时段走日期选择（≤366 天）。
+- **对账增量化**：周期对账每 5 分钟只查上一轮起点（回推 10 分钟）以来有账本事件的用户，进程启动后首轮与之后每 24 小时一轮全量。
+  没有新事件的用户 PG 两侧数字不变，唯一漂移来源是 Redis 被外部改动，由全量轮兜底；控制台 / MCP 的手动对账仍是全量。
+- **热路径索引（迁移 0005）**：`billing_events` 上 created_at BRIN（增量对账取活跃用户）与充值 / 调整 / 过期的部分索引（资金流入概要）；
+  outbox 未入批的部分索引（chsink 每秒认领）；DLQ `ch_batch_id`（清理批次时的外键检查）。
+- **前端产物缓存**：embed-web 形态下 `assets/`（文件名带哈希）回 `immutable` 一年，index.html 等入口 `no-cache`，发布后不再拿旧 shell。
+- **时区**：时段折扣与统计页「今天 / 本月」按进程本地时区，多副本必须设同一 `TZ`；用量限额与渠道日 / 月计数器固定按 UTC 自然日 / 月重置（README 部署节）。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

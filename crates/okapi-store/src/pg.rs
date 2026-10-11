@@ -14,11 +14,7 @@ use std::time::Duration;
 /// `acquire_timeout` 超时而不是"连不上"，很难一眼归因。所以启动即把生效值打进日志，
 /// 让"这个 pod 到底占了几条"在 pod 日志里可查；部署侧的取值见 deploy/k8s/okapi.yaml。
 pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
-    let max = std::env::var("OKAPI_PG_POOL")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(16);
+    let max = crate::env_config::number("OKAPI_PG_POOL", 16u32, |v| *v > 0);
     let pool = PgPoolOptions::new()
         .max_connections(max)
         .acquire_timeout(Duration::from_secs(5))

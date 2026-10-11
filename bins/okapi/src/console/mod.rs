@@ -157,9 +157,26 @@ async fn spa_navigation(req: Request, next: Next) -> Response {
         && !SERVER_HANDLED.iter().any(|p| path.starts_with(p))
         && let Some(html) = spa_index_bytes().await
     {
-        return ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+        return (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, spa_cache_control("index.html")),
+            ],
+            html,
+        )
+            .into_response();
     }
     next.run(req).await
+}
+
+/// 前端产物的缓存策略：Vite 把 `assets/` 下文件名带内容哈希，可永久缓存；index.html 等入口
+/// 每次回源校验，否则发布后浏览器会拿旧 shell 去引用已不存在的旧资源。
+fn spa_cache_control(name: &str) -> &'static str {
+    if name.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    }
 }
 
 /// 导航兜底用的 index.html，与 `spa_router` 取同一份产物。
@@ -531,6 +548,10 @@ fn spa_router() -> Router<crate::gateway::state::AppState> {
         if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
             resp.headers_mut().insert(header::CONTENT_TYPE, value);
         }
+        resp.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static(spa_cache_control(name)),
+        );
         resp
     }
     Router::new().fallback(serve)

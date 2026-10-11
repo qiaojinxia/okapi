@@ -20,6 +20,7 @@ import { ModelTagsInput } from '@/features/models/model-input'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { parseInt32, parseNonNegativeInt } from '@/lib/int32'
 
 const str = (v: unknown, fallback = ''): string =>
   v === undefined || v === null ? fallback : String(v)
@@ -68,14 +69,30 @@ export function RuleDrawer({
   const [models, setModels] = useState<string[]>(initial?.scope.models ?? [])
   const [users, setUsers] = useState<string[]>((initial?.scope.users ?? []).map(String))
 
+  // 写错的数字拦下提交（null），不再悄悄按 0 / 不限发出去：优先级归零会改命中裁决，
+  // 阈值消失会把用量规则降成纯消费额规则，时间窗归零会变成另一个窗口
+  const priority = parseInt32(form.priority)
+  const minTokens = parseNonNegativeInt(form.min_monthly_tokens)
+  const startMinute = parseNonNegativeInt(form.start_minute, 1439)
+  const endMinute = parseNonNegativeInt(form.end_minute, 1439)
+  // 消费阈值以 USD 输入、以 micro 整数落库（配置值一次换算，非计费热路径）
+  const spendText = form.min_monthly_spend_usd.trim()
+  const spendUsd = Number(spendText)
+  const spendMicro =
+    spendText === ''
+      ? undefined
+      : Number.isFinite(spendUsd) && spendUsd >= 0
+        ? Math.round(spendUsd * 1_000_000) || undefined
+        : null
+  const userIds = users.map((u) => parseNonNegativeInt(u))
+  const paramsValid =
+    priority !== null &&
+    userIds.every((id) => id !== undefined && id !== null) &&
+    (ruleType !== 'volume' || (minTokens !== null && spendMicro !== null)) &&
+    (ruleType !== 'time_based' || (startMinute !== null && endMinute !== null))
+
   const upsert = useMutation({
     mutationFn: () => {
-      // 消费阈值以 USD 输入、以 micro 整数落库（配置值一次换算，非计费热路径）
-      const spendUsd = Number(form.min_monthly_spend_usd)
-      const spendMicro =
-        ruleType === 'volume' && Number.isFinite(spendUsd) && spendUsd > 0
-          ? Math.round(spendUsd * 1_000_000)
-          : undefined
       return apiFetch('/admin/pricing/rules', {
         method: 'POST',
         body: {
@@ -85,21 +102,20 @@ export function RuleDrawer({
           rule_code: form.rule_code.trim(),
           rule_type: ruleType,
           multiplier: form.multiplier,
-          priority: Number(form.priority) || 0,
+          priority: priority ?? 0,
           stacking_mode: stacking,
           // 后端按 rule_type 校验必填项，这里只负责不发送无关字段
-          min_monthly_tokens:
-            ruleType === 'volume' ? Number(form.min_monthly_tokens) || 0 : undefined,
-          min_monthly_spend_micro: spendMicro,
-          start_minute: ruleType === 'time_based' ? Number(form.start_minute) || 0 : undefined,
-          end_minute: ruleType === 'time_based' ? Number(form.end_minute) || 0 : undefined,
+          min_monthly_tokens: ruleType === 'volume' ? (minTokens ?? 0) : undefined,
+          min_monthly_spend_micro: ruleType === 'volume' ? (spendMicro ?? undefined) : undefined,
+          start_minute: ruleType === 'time_based' ? (startMinute ?? 0) : undefined,
+          end_minute: ruleType === 'time_based' ? (endMinute ?? 0) : undefined,
           weekdays:
             ruleType === 'time_based' && weekdays.size > 0 ? [...weekdays].sort() : undefined,
           // 空数组要发成 undefined：{} 与 {"groups":[]} 语义不同，后者会命中零个分组
           scope: {
             groups: groups.length > 0 ? groups : undefined,
             models: models.length > 0 ? models : undefined,
-            users: users.length > 0 ? users.map(Number).filter((n) => !Number.isNaN(n)) : undefined,
+            users: users.length > 0 ? (userIds as number[]) : undefined,
           },
         },
       })
@@ -123,7 +139,7 @@ export function RuleDrawer({
             {t('common:cancel')}
           </Button>
           <Button
-            disabled={form.rule_code.trim() === '' || upsert.isPending}
+            disabled={form.rule_code.trim() === '' || !paramsValid || upsert.isPending}
             onClick={() => upsert.mutate()}
           >
             {t('common:save')}
@@ -172,6 +188,7 @@ export function RuleDrawer({
             <Label htmlFor="r-prio">{t('admin:priority')}</Label>
             <Input
               id="r-prio"
+              aria-invalid={priority === null}
               inputMode="numeric"
               value={form.priority}
               onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
@@ -183,6 +200,7 @@ export function RuleDrawer({
                 <Label htmlFor="r-thr">{t('admin:ruleThreshold')}</Label>
                 <Input
                   id="r-thr"
+                  aria-invalid={minTokens === null}
                   inputMode="numeric"
                   value={form.min_monthly_tokens}
                   onChange={(e) => setForm((f) => ({ ...f, min_monthly_tokens: e.target.value }))}
@@ -192,6 +210,7 @@ export function RuleDrawer({
                 <Label htmlFor="r-spend">{t('admin:ruleSpendThreshold')}</Label>
                 <Input
                   id="r-spend"
+                  aria-invalid={spendMicro === null}
                   inputMode="decimal"
                   placeholder="50"
                   value={form.min_monthly_spend_usd}
@@ -208,6 +227,7 @@ export function RuleDrawer({
                 <Label htmlFor="r-start">{t('admin:ruleStart')}</Label>
                 <Input
                   id="r-start"
+                  aria-invalid={startMinute === null}
                   inputMode="numeric"
                   placeholder="0"
                   value={form.start_minute}
@@ -218,6 +238,7 @@ export function RuleDrawer({
                 <Label htmlFor="r-end">{t('admin:ruleEnd')}</Label>
                 <Input
                   id="r-end"
+                  aria-invalid={endMinute === null}
                   inputMode="numeric"
                   placeholder="1439"
                   value={form.end_minute}
@@ -299,6 +320,9 @@ export function RuleDrawer({
             onChange={setUsers}
             placeholder={t('admin:scopeUsersHint')}
           />
+          {userIds.some((id) => id === undefined || id === null) && (
+            <p className="text-xs text-destructive">{t('errors:bad_request', { param: 'users' })}</p>
+          )}
         </div>
       </FieldGroup>
     </Drawer>

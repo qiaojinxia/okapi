@@ -153,6 +153,14 @@ async fn mcp_write_full_scenario() {
     let channel_id = created["result"]["structuredContent"]["channel_id"]
         .as_i64()
         .expect("必须返回渠道 id");
+    // all 范围建的照旧进 default 池（own 范围建成孤儿，见 console_visibility）
+    let pools: Vec<String> =
+        sqlx::query_scalar("SELECT pool_code::text FROM pool_channels WHERE channel_id = $1")
+            .bind(channel_id)
+            .fetch_all(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(pools, ["default"]);
 
     let toggled = call(
         &env,

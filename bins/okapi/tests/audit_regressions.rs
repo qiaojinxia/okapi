@@ -55,12 +55,16 @@ async fn sessions_reject_orphans_slide_all_ttls_and_revoke_atomically() -> Resul
     let state = state().await?;
     let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
     let uid = user(&state.pg).await?;
-    let sid = Uuid::new_v4().to_string();
-    let index = format!("sess:idx:{uid}");
+    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        uid,
+        &Uuid::new_v4().simple().to_string(),
+    );
+    let (web, index, meta) =
+        okapi::gateway::sched_redis::SchedulerRedis::web_session_keys(&sid).unwrap();
     let _: () = redis.set(&index, "wrong-type", None, None, false).await?;
     state.sched.web_session_set(&sid, uid, None, None).await;
     assert_eq!(state.sched.web_session_get(&sid).await, None);
-    let exists: bool = redis.exists(format!("sess:web:{sid}")).await?;
+    let exists: bool = redis.exists(&web).await?;
     assert!(
         !exists,
         "index write failure must not leave an authorized orphan"
@@ -70,19 +74,11 @@ async fn sessions_reject_orphans_slide_all_ttls_and_revoke_atomically() -> Resul
         .sched
         .web_session_set(&sid, uid, Some("192.0.2.1"), None)
         .await;
-    for key in [
-        &index,
-        &format!("sess:web:{sid}"),
-        &format!("sess:meta:{sid}"),
-    ] {
+    for key in [&index, &web, &meta] {
         let _: bool = redis.expire(key, 2, None).await?;
     }
     assert_eq!(state.sched.web_session_get(&sid).await, Some(uid));
-    for key in [
-        &index,
-        &format!("sess:web:{sid}"),
-        &format!("sess:meta:{sid}"),
-    ] {
+    for key in [&index, &web, &meta] {
         let ttl: i64 = redis.ttl(key).await?;
         assert!(ttl > 600_000, "{key}: {ttl}");
     }

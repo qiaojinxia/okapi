@@ -165,6 +165,7 @@ async fn settled_amount(pg: &PgPool, resp: reqwest::Response) -> i64 {
 
 /// own 范围：channel_admin 只能看到/操作自己创建的渠道。
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // 一条 own 范围的完整隔离剧本，拆开反而看不出各断言的先后关系
 async fn own_scope_isolates_channel_admins() {
     let env = setup().await;
     let (_, super_token) = mk_user(&env.pg, 100, None).await;
@@ -203,6 +204,57 @@ async fn own_scope_isolates_channel_admins() {
         .await
         .unwrap();
     assert_eq!(owner, Some(x_id), "创建人即属主");
+
+    // 入池只有 all 范围能做：own 范围建的渠道是孤儿，显式选池 / 改成员关系都 403。
+    // 否则把自己的渠道挂进 default 池，全站请求就会路由到它的 api_base。
+    let pools: Vec<String> =
+        sqlx::query_scalar("SELECT pool_code::text FROM pool_channels WHERE channel_id = $1")
+            .bind(channel_id)
+            .fetch_all(&env.pg)
+            .await
+            .unwrap();
+    assert!(pools.is_empty(), "own 范围建的渠道不进任何池：{pools:?}");
+    let r = cpost(
+        &env,
+        &x_token,
+        "/admin/channels",
+        json!({"name": format!("own-pool-{suffix}"), "api_base": "http://127.0.0.1:9/v1",
+               "credential": "c", "models": [format!("m-own-{suffix}")], "pools": ["default"]}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["param"],
+        "pools_require_all_scope"
+    );
+    let r = cpost(
+        &env,
+        &x_token,
+        &format!("/admin/channels/{channel_id}/pools"),
+        json!({"pools": [{"pool_code": "default", "priority_override": 1000}]}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["param"],
+        "pools_require_all_scope"
+    );
+    // 池本身的增改删同样只给全站范围：own 管理员改不了路由策略 / 回退池，也删不掉池让渠道变孤儿
+    let r = cpost(
+        &env,
+        &x_token,
+        "/admin/pools",
+        json!({"pool_code": format!("own-pool-{suffix}"), "routing_strategy": "priority_weighted"}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    let r = reqwest::Client::new()
+        .delete(format!("http://{}/admin/pools/default", env.console))
+        .bearer_auth(&x_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
 
     // 在同一搜索范围核对 X/super 可见、Y 不可见，不把第一页当成全量。
     let listing = format!("/admin/channels?q=own-{suffix}");

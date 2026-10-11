@@ -32,8 +32,12 @@ const BALANCE_EXPIRY_INTERVAL: Duration = Duration::from_mins(5);
 const SUBSCRIPTION_INTERVAL: Duration = Duration::from_mins(1);
 /// 负毛利熔断评估周期（IMPLEMENTATION §11.34；立方体按小时聚合，更密没有意义）。
 const MARGIN_BREAKER_INTERVAL: Duration = Duration::from_mins(5);
-/// 对账分页大小；每轮遍历全部用户。
+/// 对账分页大小。
 const RECONCILE_BATCH: i64 = 1000;
+/// 全量对账周期：其余各轮只查上一轮以来有账本事件的用户（见 [`reconcile_active_balances`]）。
+const RECONCILE_FULL_INTERVAL: Duration = Duration::from_hours(24);
+/// 增量轮的回看余量：上一轮起点再往前推这么多，覆盖事务提交晚于 created_at 的事件。
+const RECONCILE_OVERLAP: Duration = Duration::from_mins(10);
 /// 订阅每轮处理上限（到点的订阅按 window_end 升序）。
 const SUBSCRIPTION_BATCH: i64 = 500;
 
@@ -197,6 +201,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         notifier,
         js,
         ch,
+        reconcile: std::sync::Mutex::default(),
     });
     let mut workers = recovery_workers;
     workers.extend([
@@ -253,6 +258,29 @@ struct MaintenanceContext {
     notifier: notify::Notifier,
     js: Option<async_nats::jetstream::Context>,
     ch: Option<okapi_store::ChClient>,
+    reconcile: std::sync::Mutex<ReconcileClock>,
+}
+
+/// 对账节奏：进程启动后第一轮与之后每 [`RECONCILE_FULL_INTERVAL`] 一轮做全量，其余增量。
+#[derive(Default)]
+struct ReconcileClock {
+    last_full: Option<std::time::Instant>,
+    /// 上一轮（无论全量增量）成功时的起点。
+    last_pass: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl ReconcileClock {
+    /// None = 这一轮做全量；Some(t) = 只查 t 之后有事件的用户。
+    fn plan(&self, now: std::time::Instant) -> Option<chrono::DateTime<chrono::Utc>> {
+        let full_due = self
+            .last_full
+            .is_none_or(|at| now.duration_since(at) >= RECONCILE_FULL_INTERVAL);
+        if full_due {
+            return None;
+        }
+        let overlap = chrono::Duration::from_std(RECONCILE_OVERLAP).unwrap_or_default();
+        self.last_pass.map(|at| at - overlap)
+    }
 }
 
 #[allow(non_camel_case_types)]
@@ -317,6 +345,7 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
         notifier,
         js,
         ch,
+        reconcile,
     } = ctx;
     match job {
         MaintenanceJob::chsink_tick => {
@@ -357,8 +386,23 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
             }
         }
         MaintenanceJob::reconcile => {
-            if let Err(err) = reconcile_and_notify(pg, ledger, RECONCILE_BATCH, notifier).await {
-                tracing::error!(error = %err, "对账失败");
+            let started = chrono::Utc::now();
+            let now = std::time::Instant::now();
+            let since = reconcile
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .plan(now);
+            match reconcile_and_notify(pg, ledger, RECONCILE_BATCH, since, notifier).await {
+                Ok(_) => {
+                    let mut clock = reconcile
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    clock.last_pass = Some(started);
+                    if since.is_none() {
+                        clock.last_full = Some(now);
+                    }
+                }
+                Err(err) => tracing::error!(error = %err, "对账失败"),
             }
         }
         MaintenanceJob::partition => {
@@ -629,16 +673,17 @@ async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result
     ))
 }
 
-/// 对账一轮 + 告警：有差异就逐条 error 日志并派发 `drift`（只带前 20 个用户，够运维定位即可）。
+/// 对账一轮 + 告警（`since` 见 [`reconcile_active_balances`]，None = 全量）：有差异就逐条 error 日志并派发 `drift`（只带前 20 个用户，够运维定位即可）。
 ///
 /// 载荷拼在这里而不是 worker 主循环的 `select!` 臂里，理由同 `notify::balance_low_and_notify`。
 pub async fn reconcile_and_notify(
     pg: &PgPool,
     ledger: &BalanceLedger,
     limit: i64,
+    since: Option<chrono::DateTime<chrono::Utc>>,
     notifier: &notify::Notifier,
 ) -> anyhow::Result<Vec<BalanceDrift>> {
-    let drifts = reconcile_balances(pg, ledger, limit).await?;
+    let drifts = reconcile_scoped(pg, ledger, limit, since).await?;
     if drifts.is_empty() {
         tracing::debug!("对账零差异");
         return Ok(drifts);
@@ -662,16 +707,44 @@ pub async fn reconcile_and_notify(
     Ok(drifts)
 }
 
-/// 三方对账（docs/database.md §5）：返回不一致的用户。
+/// 三方对账（docs/database.md §5）：返回不一致的用户。遍历全部用户。
 pub async fn reconcile_balances(
     pg: &PgPool,
     ledger: &BalanceLedger,
     limit: i64,
 ) -> anyhow::Result<Vec<BalanceDrift>> {
-    let mut drifts = Vec::new();
-    let mut cursor = 0_i64;
-    loop {
-        let mut history = okapi_store::history::read(pg).await?;
+    reconcile_scoped(pg, ledger, limit, None).await
+}
+
+/// 只对账 `since` 之后有过账本事件的用户（周期任务的增量轮）。
+///
+/// 账本总额是终身事件求和，每 5 分钟对全部用户各求一遍等于反复扫整张 billing_events；
+/// 没有新事件的用户 PG 侧两个数都不会变，只剩 Redis 被外部改动这一种漂移来源，交给
+/// 每日一次的全量轮（[`RECONCILE_FULL_INTERVAL`]）兜底。活跃用户从 created_at 上的 BRIN
+/// 索引取，只读近期数据块。
+pub async fn reconcile_active_balances(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    limit: i64,
+    since: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<Vec<BalanceDrift>> {
+    reconcile_scoped(pg, ledger, limit, Some(since)).await
+}
+
+struct ReconcileRow {
+    user_id: i64,
+    balance_micro: i64,
+    events_sum: i64,
+    sub_events_sum: i64,
+}
+
+async fn reconcile_page(
+    conn: &mut sqlx::PgConnection,
+    limit: i64,
+    cursor: i64,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> sqlx::Result<Vec<ReconcileRow>> {
+    let Some(since) = since else {
         let rows = sqlx::query!(
             r#"
         WITH page AS (
@@ -692,11 +765,73 @@ pub async fn reconcile_balances(
         ) e ON true
         ORDER BY u.id
         "#,
-            limit.clamp(1, 1000),
+            limit,
             cursor
         )
-        .fetch_all(&mut *history)
+        .fetch_all(conn)
         .await?;
+        return Ok(rows
+            .into_iter()
+            .map(|r| ReconcileRow {
+                user_id: r.user_id,
+                balance_micro: r.balance_micro,
+                events_sum: r.events_sum,
+                sub_events_sum: r.sub_events_sum,
+            })
+            .collect());
+    };
+    let rows: Vec<(i64, i64, i64, i64)> = sqlx::query_as(
+        r"
+        WITH active AS (
+            SELECT DISTINCT user_id FROM billing_events
+            WHERE created_at >= $3 AND user_id > $2
+        ), page AS (
+            SELECT u.id, u.balance_micro FROM users u JOIN active a ON a.user_id = u.id
+            WHERE u.deleted_at IS NULL
+            ORDER BY u.id LIMIT $1
+        )
+        SELECT u.id, u.balance_micro,
+               COALESCE(e.wallet_sum, 0)::bigint,
+               COALESCE(e.sub_sum, 0)::bigint
+        FROM page u
+        LEFT JOIN LATERAL (
+            SELECT SUM(delta_micro) FILTER (WHERE pool = 0) AS wallet_sum,
+                   SUM(delta_micro) FILTER (WHERE pool = 1) AS sub_sum
+            FROM billing_balance_totals
+            WHERE user_id = u.id
+        ) e ON true
+        ORDER BY u.id
+        ",
+    )
+    .bind(limit)
+    .bind(cursor)
+    .bind(since)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(user_id, balance_micro, events_sum, sub_events_sum)| ReconcileRow {
+                user_id,
+                balance_micro,
+                events_sum,
+                sub_events_sum,
+            },
+        )
+        .collect())
+}
+
+async fn reconcile_scoped(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    limit: i64,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> anyhow::Result<Vec<BalanceDrift>> {
+    let mut drifts = Vec::new();
+    let mut cursor = 0_i64;
+    loop {
+        let mut history = okapi_store::history::read(pg).await?;
+        let rows = reconcile_page(&mut history, limit.clamp(1, 1000), cursor, since).await?;
         // Release the retention lock and PG connection before any Redis IO.
         history.commit().await?;
 

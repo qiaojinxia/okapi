@@ -135,7 +135,7 @@ async fn worker_alerts_carry_actionable_payloads() {
         0
     );
     assert!(
-        okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, &notifier)
+        okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, None, &notifier)
             .await
             .unwrap()
             .is_empty()
@@ -154,7 +154,7 @@ async fn worker_alerts_carry_actionable_payloads() {
     .execute(&tmp.pool)
     .await
     .unwrap();
-    let drifts = okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, &notifier)
+    let drifts = okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, None, &notifier)
         .await
         .unwrap();
     assert_eq!(drifts.len(), 1, "只该有本用例造的这一个：{drifts:?}");

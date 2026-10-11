@@ -109,7 +109,7 @@ export function LogsPage() {
         maxLength={36} aria-invalid={!validRequest(draft.requestId)} onChange={(e) => setDraft({ ...draft, requestId: e.target.value })}
         onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) commit(draft) }} />
       {(applied.requestId || applied.keyId) && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, requestId: '', keyId: '' })}>{t('logs:clearLookup')}</Button>}
-      <p className="min-w-0 text-xs text-muted-foreground sm:ml-auto">{!valid ? t('logs:invalidLookup') : <>{!applied.range && <>{t('logs:allDatesShort')} · </>}{t('logs:displayTimezone', { timezone: applied.timezone })}</>}</p>
+      <p className="min-w-0 text-xs text-muted-foreground sm:ml-auto">{!valid ? t('logs:invalidLookup') : <>{!applied.range && <>{t(applied.requestId.trim() ? 'logs:allDatesShort' : 'logs:recentDaysShort')} · </>}{t('logs:displayTimezone', { timezone: applied.timezone })}</>}</p>
       </section>
     </section>
   } />

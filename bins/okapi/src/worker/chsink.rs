@@ -92,11 +92,17 @@ fn to_ch_row(created_at: DateTime<Utc>, payload: &Value) -> Value {
 
 /// JetStream 消息 payload → CH 行（relay 发布时已内嵌 "ts"）。
 pub fn js_payload_to_ch_row(payload: &Value) -> Value {
-    let ts = payload
-        .get("ts")
-        .and_then(Value::as_str)
-        .unwrap_or("1970-01-01 00:00:00.000")
-        .to_owned();
+    // relay 总会内嵌 ts；缺了说明消息不是 relay 发的，落 1970 分区查不到，要留痕
+    let ts = payload.get("ts").and_then(Value::as_str).map_or_else(
+        || {
+            tracing::warn!(
+                request_id = get_str(payload, "request_id"),
+                "jetstream payload has no ts; row lands at the epoch"
+            );
+            "1970-01-01 00:00:00.000".to_owned()
+        },
+        str::to_owned,
+    );
     build_ch_row(&ts, payload)
 }
 

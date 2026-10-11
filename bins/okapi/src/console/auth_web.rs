@@ -564,7 +564,8 @@ pub(super) async fn open_web_session(
     ip: Option<&str>,
     headers: &HeaderMap,
 ) -> String {
-    let sid = rand_token(48);
+    let sid =
+        crate::gateway::sched_redis::SchedulerRedis::web_session_sid(user_id, &rand_token(48));
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());
@@ -608,8 +609,7 @@ pub(super) fn session_cookie(sid: &str) -> String {
 pub(super) fn secure_cookie() -> bool {
     static SECURE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *SECURE.get_or_init(|| {
-        let secure = std::env::var("OKAPI_COOKIE_SECURE")
-            .map_or(true, |value| !matches!(value.as_str(), "false" | "0"));
+        let secure = okapi_store::env_config::flag("OKAPI_COOKIE_SECURE").unwrap_or(true);
         if !secure {
             tracing::warn!("Secure cookies explicitly disabled for HTTP deployment");
         }

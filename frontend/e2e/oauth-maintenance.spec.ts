@@ -88,6 +88,12 @@ for (const width of [390, 1366]) {
       }
       await expect(section.getByRole('heading')).toHaveText('用订阅账号登录')
       await checkSpacing()
+      if (editing) {
+        // 凭证状态是普通块、没有下内边距：下一节（出口代理）的分隔线不能贴住刷新 / 重新授权按钮
+        const reauth = (await drawer.getByRole('button', { name: '重新授权', exact: true }).boundingBox())!
+        const egress = (await drawer.locator('section:has(> #channel-egress-edit)').boundingBox())!
+        expect(egress.y - reauth.y - reauth.height).toBeGreaterThanOrEqual(12)
+      }
       await drawer.screenshot({ path: test.info().outputPath('authorization-spacing.png'), animations: 'disabled' })
       await methods.getByRole('tab', { name: '直接导入 Token', exact: true }).click()
       await expect(section.getByRole('heading')).toHaveText('直接导入 Token')

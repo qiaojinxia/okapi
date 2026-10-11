@@ -970,7 +970,7 @@ test('门户日志日期：应用、清除、刷新和后退保留其他条件�
   await expect(period).toContainText('2024-11-01 — 2024-11-03')
   await page.getByRole('switch', { name: '只看失败' }).click()
   await page.getByRole('button', { name: '清除日期', exact: true }).click()
-  await expect(period).toContainText('全部日期')
+  await expect(period).toContainText('近 30 天')
   await expect(page).toHaveURL('/portal/logs?scope=user&model=gpt-alpha&errors_only=true')
   await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.has('start_date')).toBe(false)
   await page.goBack()

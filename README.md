@@ -203,6 +203,9 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
    必须显式配网段或用 `OKAPI_EDGE_KEY`。K8s 模板走后者（集群内任何 pod 都在私网段里，
    整段放行等于谁都能伪造来源 IP）：在 `okapi-env` 里设 `OKAPI_EDGE_KEY`，Ingress 回源注入
    同值的 `X-Okapi-Edge-Key` 头。
+3. **时区一致**。时段折扣的分钟窗与星期按进程本地时区判定（`TZ` 环境变量），统计页的"今天 /
+   本月"缺省也按它翻页；所有副本必须设同一个 `TZ`，否则同一请求落到不同副本会按不同价计费。
+   用量限额与渠道日 / 月计数器固定按 UTC 自然日 / 自然月重置，与 `TZ` 无关——对账时注意两种口径。
 
 worker 保持单副本即可：周期任务（对账 / 清扫 / 分区 / 冷却恢复）不互斥，多副本只是重复劳动；
 只有 chsink 吞吐不够时才值得加（relay/chsink 走 `SKIP LOCKED` + JetStream durable，多副本安全）。
@@ -247,7 +250,7 @@ crates/
   okapi-providers  # Provider trait + 按方向拆的协议转换 + Bedrock / Vertex / OAuth
   okapi-store      # sqlx / fred / clickhouse / async-nats 薄封装
   okapi-api        # OpenAI 兼容 DTO + 错误码 + 权限点清单
-bins/okapi         # 单二进制多角色入口：okapi gateway|console|worker|all|migrate
+bins/okapi         # 单二进制多角色入口：okapi gateway|console|worker|all|migrate|seal-credentials
 frontend/          # React 19 SPA（管理后台 + 用户门户 + 公开价格页）
 ```
 

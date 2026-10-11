@@ -241,14 +241,7 @@ impl MetaScanner {
                         .sum()
                 });
             }
-            "error" => {
-                let msg = data
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("upstream_error");
-                return vec![Err(UpstreamError::Stream(msg.to_owned()))];
-            }
+            "error" => return vec![Err(stream_error(&data, ev.data.as_bytes()))],
             _ => {}
         }
         let passthrough = ChatEvent::Data {
@@ -263,6 +256,42 @@ impl MetaScanner {
         } else {
             vec![Ok(passthrough)]
         }
+    }
+}
+
+/// 流中的 `error` 事件 → 上游错误。`error.type` 与同义的 HTTP 状态对齐（`overloaded_error`=529、
+/// `rate_limit_error`=429、`api_error`=500 …），重试矩阵与 key 冷却（529 退避、429 限速）才能分流；
+/// 体保留原事件，首字前失败时客户端拿到上游原样的 Anthropic 错误。认不出的类型仍按断流处理。
+pub(crate) fn stream_error(data: &serde_json::Value, raw: &[u8]) -> UpstreamError {
+    let error = data.get("error");
+    let status = match error
+        .and_then(|e| e.get("type"))
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("overloaded_error") => Some(529),
+        Some("rate_limit_error") => Some(429),
+        Some("api_error") => Some(500),
+        Some("timeout_error") => Some(504),
+        Some("invalid_request_error") => Some(400),
+        Some("authentication_error") => Some(401),
+        Some("permission_error") => Some(403),
+        Some("not_found_error") => Some(404),
+        Some("request_too_large") => Some(413),
+        _ => None,
+    };
+    match status {
+        Some(status) => UpstreamError::Status {
+            status,
+            body: bytes::Bytes::copy_from_slice(raw),
+            retry_after_secs: None,
+        },
+        None => UpstreamError::Stream(
+            error
+                .and_then(|e| e.get("message"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("upstream_error")
+                .to_owned(),
+        ),
     }
 }
 
@@ -303,5 +332,37 @@ mod tests {
             HeaderValue::from_static("1"),
         );
         assert_eq!(retry_after_secs(&past), None, "已过去的重置点不冷却");
+    }
+}
+
+#[cfg(test)]
+mod stream_error_tests {
+    use super::stream_error;
+    use crate::UpstreamError;
+    use serde_json::json;
+
+    #[test]
+    fn stream_error_keeps_the_anthropic_error_type() {
+        let status = |kind: &str| {
+            let data = json!({"type":"error","error":{"type":kind,"message":"m"}});
+            match stream_error(&data, data.to_string().as_bytes()) {
+                UpstreamError::Status { status, body, .. } => {
+                    assert!(
+                        String::from_utf8_lossy(&body).contains(kind),
+                        "保留原事件体"
+                    );
+                    Some(status)
+                }
+                _ => None,
+            }
+        };
+        assert_eq!(status("overloaded_error"), Some(529));
+        assert_eq!(status("rate_limit_error"), Some(429));
+        assert_eq!(status("api_error"), Some(500));
+        assert_eq!(status("something_new"), None);
+        assert!(matches!(
+            stream_error(&json!({"error":{"message":"boom"}}), b""),
+            UpstreamError::Stream(m) if m == "boom"
+        ));
     }
 }

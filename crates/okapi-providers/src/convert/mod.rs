@@ -34,6 +34,16 @@ pub(crate) fn unsupported_part(kind: &str) -> UpstreamError {
     UpstreamError::Build(format!("{UNSUPPORTED_CONTENT_PREFIX}{kind}"))
 }
 
+/// Chat 流的一条 data 行 → JSON。转换器得逐字段重组，解析不了就不知道丢了什么：
+/// 按断流报错（与 Gemini 透传的 `gemini_chunk_json` 同理），不再当空对象悄悄吞掉一段文本。
+/// 空行不是内容，跳过（`None`）。
+pub(crate) fn chat_chunk(raw: &str) -> Option<Result<Value, UpstreamError>> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(serde_json::from_str(raw).map_err(|_| UpstreamError::Stream("chat_chunk_json".into())))
+}
+
 /// 流式 `tool_calls` 分片的槽位上限（每个槽对应一个工具调用）。
 pub(crate) const MAX_STREAM_TOOLS: usize = 128;
 
@@ -67,3 +77,18 @@ pub(crate) fn stream_tool_slot(call: &Value, ids: &mut Vec<String>) -> Option<us
 
 /// [`unsupported_part`] 的原因前缀，网关据此把构造失败映射成带 param 的 400。
 pub const UNSUPPORTED_CONTENT_PREFIX: &str = "unsupported_content:";
+
+#[cfg(test)]
+mod chat_chunk_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_chat_chunks_fail_instead_of_vanishing() {
+        assert!(chat_chunk("  ").is_none());
+        assert!(matches!(chat_chunk(r#"{"id":"x"}"#), Some(Ok(_))));
+        assert!(matches!(
+            chat_chunk(r#"{"choices":[{"delta":{"content":"lost"#),
+            Some(Err(UpstreamError::Stream(reason))) if reason == "chat_chunk_json"
+        ));
+    }
+}

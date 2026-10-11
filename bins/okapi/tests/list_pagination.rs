@@ -119,7 +119,10 @@ async fn setup() -> Bed {
     let state = gateway::build_state(&database_url, &redis_url, "page-node", None, None)
         .await
         .unwrap();
-    let sid = format!("pg-session-{suffix}");
+    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        user_id,
+        &format!("pg-session-{suffix}"),
+    );
     state.sched.web_session_set(&sid, user_id, None, None).await;
     let user_cookie = format!("okapi_session={sid}");
     let console = serve(console::router(state)).await;

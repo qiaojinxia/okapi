@@ -26,7 +26,8 @@ interface ExchangeResp {
 interface CreationOptions {
   api_base: string
   priority: number
-  pools: PoolMember[]
+  /// 省略 = 后端缺省（all 范围进 default 池，own 范围建成孤儿）
+  pools?: PoolMember[]
   cost_milli?: number
   data_retention: string
   /// 出口绑定（§11.41）：换码就从这个出口出去，固定分配组当场选定代理。

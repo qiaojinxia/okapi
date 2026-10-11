@@ -44,7 +44,10 @@ async fn setup(master: bool) -> Env {
         okapi_store::provision::create_api_key(&state.pg, user, &hash, "sk-copy-fixture")
             .await
             .unwrap();
-    let sid = Uuid::new_v4().to_string();
+    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        user,
+        &Uuid::new_v4().simple().to_string(),
+    );
     state.sched.web_session_set(&sid, user, None, None).await;
     let base = serve(state.clone()).await;
     Env {

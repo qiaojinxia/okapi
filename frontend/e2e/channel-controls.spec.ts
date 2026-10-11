@@ -250,23 +250,34 @@ test('pool selectors load all pages and retained multi-credential channels keep 
   await expect(drawer.getByRole('checkbox', { name: 'pool-20', exact: true })).not.toBeChecked()
 })
 
-test('pool loading errors offer retry and users without global channel write cannot create pools', async ({ page }) => {
+test('pool loading errors offer retry', async ({ page }) => {
   await prepare(page, [{ ...channel, keys: [keyRow(2)], settings: {} }])
   let failed = true
   await page.route('**/admin/pools', (route) => route.fulfill(failed
     ? { status: 500, json: { error: { code: 'internal_error' } } }
     : { json: { data: [poolRow('default')], total: 1 } }))
-  await page.route('**/api/me', (route) => route.fulfill({ json: {
-    user_id: 1, key_id: 1, group: 'default', balance_micro: 10000000, role: 10,
-    permissions: ['channel.read', 'channel.write.own'],
-  } }))
   await page.reload()
   const drawer = await openPools(page)
   await expect(drawer.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   failed = false
   await drawer.getByRole('button', { name: '重试', exact: true }).click()
   await expect(drawer.getByRole('checkbox', { name: 'default（内置默认池）' })).toBeVisible()
-  await expect(drawer.getByRole('button', { name: '新建池', exact: true })).toHaveCount(0)
+})
+
+// 入池只有全站 channel.write 能做（后端 pools_require_all_scope）：own 范围看不到池编辑器、新建时也不发 pools
+test('users without global channel write cannot change pool membership', async ({ page }) => {
+  await prepare(page, [{ ...channel, keys: [keyRow(2)], settings: {} }])
+  await page.route('**/api/me', (route) => route.fulfill({ json: {
+    user_id: 1, key_id: 1, group: 'default', balance_micro: 10000000, role: 10,
+    permissions: ['channel.read', 'channel.write.own'],
+  } }))
+  await page.reload()
+  await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
+  await expect(drawer.getByRole('note').filter({ hasText: '联系管理员审核' })).toBeVisible()
+  await expect(drawer.locator('#channel-pools')).toHaveCount(0)
+  await expect(drawer.getByRole('checkbox', { name: 'default（内置默认池）' })).toHaveCount(0)
 })
 
 test('editing removes retired local budgets and the retired proxy_url, preserving unrelated extension settings', async ({ page }) => {

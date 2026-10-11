@@ -10,6 +10,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { parseInt32, parseNonNegativeInt } from '@/lib/int32'
 import { formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 
@@ -33,19 +34,25 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
   })
 
   const amountMicro = Math.round((Number(form.amount_usd) || 0) * 1_000_000)
+  // 写错的限制拦下提交（null）：以前 NaN 变 undefined、字段从请求体消失，后端按"不限"生成——
+  // 以为绑定到人的码实际谁都能核销
+  const count = parseNonNegativeInt(form.count, 4_294_967_295)
+  const bindUserId = parseNonNegativeInt(form.bind_user_id)
+  const maxPerIp = parseInt32(form.max_per_ip)
+  const countValid = count !== undefined && count !== null && count > 0
+  const bindValid = bindUserId !== null && bindUserId !== 0
+  const maxPerIpValid = maxPerIp === undefined || (maxPerIp !== null && maxPerIp > 0)
 
   const create = useMutation({
     mutationFn: () =>
       apiFetch<CreateResp>('/admin/redemptions', {
         method: 'POST',
         body: {
-          count: Number(form.count) || 0,
+          count,
           amount_micro: amountMicro,
           plan_code: form.plan_code === '' ? undefined : form.plan_code,
-          bind_user_id:
-            form.bind_user_id.trim() === '' ? undefined : Number(form.bind_user_id) || undefined,
-          max_per_ip:
-            form.max_per_ip.trim() === '' ? undefined : Number(form.max_per_ip) || undefined,
+          bind_user_id: bindUserId,
+          max_per_ip: maxPerIp ?? undefined,
           // datetime-local 无时区，按本地时间转 UTC ISO 交给后端
           expires_at:
             form.expires_at === '' ? undefined : new Date(form.expires_at).toISOString(),
@@ -80,7 +87,7 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
           </Button>
           {result === null && (
             <Button
-              disabled={create.isPending || amountMicro <= 0}
+              disabled={create.isPending || amountMicro <= 0 || !countValid || !bindValid || !maxPerIpValid}
               onClick={() => create.mutate()}
             >
               {t('admin:redeemGenerate')}
@@ -97,6 +104,7 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
                 <Label htmlFor="c-count">{t('admin:redeemCount')}</Label>
                 <Input
                   id="c-count"
+                  aria-invalid={!countValid}
                   inputMode="numeric"
                   value={form.count}
                   onChange={(e) => setForm((f) => ({ ...f, count: e.target.value }))}
@@ -141,6 +149,7 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
                 <Label htmlFor="c-bind">{t('admin:redeemBindUser')}</Label>
                 <Input
                   id="c-bind"
+                  aria-invalid={!bindValid}
                   inputMode="numeric"
                   value={form.bind_user_id}
                   placeholder={t('admin:redeemAnyone')}
@@ -151,6 +160,7 @@ export function GenerateDrawer({ onClose, onDone }: { onClose: () => void; onDon
                 <Label htmlFor="c-ip">{t('admin:redeemMaxPerIp')}</Label>
                 <Input
                   id="c-ip"
+                  aria-invalid={!maxPerIpValid}
                   inputMode="numeric"
                   value={form.max_per_ip}
                   placeholder={t('team:noLimit')}

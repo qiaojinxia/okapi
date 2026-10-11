@@ -45,6 +45,7 @@ import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { parseInt32 } from '@/lib/int32'
+import { usePermission } from '@/hooks/use-auth'
 import { qk } from '@/lib/query-keys'
 
 const EDIT_TABS = ['conn', 'models', 'sched', 'behavior'] as const
@@ -195,6 +196,8 @@ export function ChannelDrawer({
   const { t } = useTranslation()
   const queryClient = useQueryClient()
   const isEdit = channel !== undefined
+  // 入池只有全站范围的 channel.write 能做（后端 pools_require_all_scope）；own 范围建出来是孤儿，等管理员审过再入池
+  const canManagePools = usePermission()('channel.write')
   const [tab, setTab] = useState<EditTab>('conn')
   const [form, setForm] = useState({
     name: channel?.name ?? '',
@@ -244,7 +247,7 @@ export function ChannelDrawer({
           priority: priority ?? 0,
           settings: channelSettingsForSave(settings),
           max_concurrency: concurrency ?? undefined,
-          pools: newPools,
+          pools: canManagePools ? newPools : undefined,
           cost_milli: costMilli ?? undefined,
           // 空串 = 清除声明；后端据此把键从 settings 里删掉
           data_retention: form.dataRetention,
@@ -489,7 +492,7 @@ export function ChannelDrawer({
                 valid={controlValid && concurrencyValid && (isEdit ? rotationKeyId !== undefined
                   : endpointValid && costMilli !== null && priority !== null && egressBinding !== null)}
                 creationOptions={!isEdit ? { api_base: form.api_base, priority: priority ?? 0,
-                  pools: newPools, cost_milli: costMilli ?? undefined, data_retention: form.dataRetention,
+                  pools: canManagePools ? newPools : undefined, cost_milli: costMilli ?? undefined, data_retention: form.dataRetention,
                   ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}) }
                   : undefined}
                 maxConcurrency={concurrency ?? undefined}
@@ -610,15 +613,18 @@ export function ChannelDrawer({
           )}
         </FieldGroup>
       )}
-      {isEdit && tab === 'models' && (
+      {isEdit && tab === 'models' && canManagePools && (
         <PoolMembership
           channelId={channel.id}
           current={channel.pool_members ?? []}
           onDone={onDone}
         />
       )}
+      {!canManagePools && (!isEdit || tab === 'models') && (
+        <p role="note" className="text-xs text-muted-foreground">{t('admin:poolsAdminOnly')}</p>
+      )}
 
-      {!isEdit && (
+      {!isEdit && canManagePools && (
         <OptionalSection id="channel-pools" title={t('admin:poolMembership')} hint={t('admin:poolMembershipHint')}
           summary={newPools.map((member) => member.pool_code + (member.priority_override !== null || member.weight_override !== null
             ? ` (${t('admin:channelOptionsCustomized')})` : '')).join(', ') || t('admin:channelPoolsEmpty')}
@@ -764,10 +770,10 @@ function KeySchedule({ channel, onDone }: { channel: ChannelRow; onDone: () => v
   ))
   // 折叠区块包在 key 行里时拿不到同级的 first/last 间距规则，这里补上与其他区块一致的分隔和留白
   return (
-    <div className="border-t border-border py-4">
+    <section className="border-t border-border py-4 first:border-t-0 first:pt-0 last:pb-0">
       {keys.length <= 1 ? rows
         : <FieldGroup title={t('admin:channelKeys')} hint={t('admin:channelKeysHint')}>{rows}</FieldGroup>}
-    </div>
+    </section>
   )
 }
 
@@ -776,8 +782,9 @@ function CredentialStatus({ channel, onDone }: { channel: ChannelRow; onDone: ()
   const keys = (channel.keys ?? []).filter((k) => k.credential_kind === 1)
   const refreshEnabled = channel.settings?.account_control?.refresh_mode !== 'external'
   if (keys.length === 0) return null
+  // 夹在分节之间的普通块自带下留白（同 channel-auth-method），否则下一节的分隔线贴住按钮
   return (
-    <div className="flex flex-col gap-3">
+    <div data-slot="channel-credential-status" className="flex flex-col gap-3 pb-4">
       {keys.map((k) => (
         <div key={k.id} className="flex flex-col gap-1">
           {keys.length > 1 && <span className="text-xs font-medium">#{k.id}</span>}

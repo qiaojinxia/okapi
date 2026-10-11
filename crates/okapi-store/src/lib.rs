@@ -13,6 +13,7 @@ pub mod channels;
 pub mod credential;
 pub mod delivery;
 pub mod egress;
+pub mod env_config;
 pub mod error;
 pub mod history;
 pub mod identity;

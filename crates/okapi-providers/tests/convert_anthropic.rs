@@ -348,7 +348,11 @@ fn stream_error_event_maps_to_stream_error() {
         &json!({"type": "error", "error": {"type": "overloaded_error", "message": "overloaded"}}),
     ));
     assert_eq!(outs.len(), 1);
-    assert!(outs[0].is_err());
+    // 类型要留住：overloaded 映射成 529，网关才走过载退避而不是当普通断流
+    assert!(matches!(
+        outs[0],
+        Err(okapi_providers::UpstreamError::Status { status: 529, .. })
+    ));
 }
 
 /// 客户端同时带 `max_completion_tokens` 与 `max_tokens` 时以前者为准。

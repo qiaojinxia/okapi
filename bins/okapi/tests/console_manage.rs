@@ -731,6 +731,25 @@ async fn admin_list_surface_covers_every_resource() {
         "明文绝不可出现在响应中"
     );
 
+    // ---- 数据保留月数：只收非负整数，写错不落库（清理任务按 bigint 读，坏值让它每轮报错） ----
+    for bad in [
+        json!(null),
+        json!("abc"),
+        json!(2.5),
+        json!(-1),
+        json!(1201),
+    ] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/settings",
+            t,
+            Some(json!({"key":"retention_months","value":bad})),
+        )
+        .await;
+        assert_eq!(status, 400, "retention_months={bad} 必须拒绝");
+    }
+
     // ---- 权限分级：普通用户对管理面一律 403 ----
     for path in [
         "/admin/models",

@@ -30,7 +30,7 @@ impl Config {
             .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
             .parse()?;
         let single_user_mode =
-            std::env::var("OKAPI_SINGLE_USER_MODE").is_ok_and(|v| v == "true" || v == "1");
+            okapi_store::env_config::flag("OKAPI_SINGLE_USER_MODE").unwrap_or(false);
         // 实例名。缺省退到容器/主机名而不是固定串——多副本部署里它是**区分实例**的唯一凭据：
         // 记账的 node 列、以及 surge 的集群在途量表（每个实例只写自己那格）都靠它。
         // 都叫 okapi-1 的话，量表会挤在同一格互相覆盖，集群在途数直接算少。

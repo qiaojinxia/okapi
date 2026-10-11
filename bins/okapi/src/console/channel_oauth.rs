@@ -156,7 +156,7 @@ pub async fn exchange(
         ));
     }
     let prepared = if req.channel_id.is_none() {
-        Some(super::channel_creation::prepare(&state, &provider, req.options).await?)
+        Some(super::channel_creation::prepare(&state, &provider, req.options, scope).await?)
     } else {
         super::admin::ensure_max_concurrency(req.options.max_concurrency)?;
         super::admin::validate_channel_settings(&state, &provider, req.options.settings.as_ref())

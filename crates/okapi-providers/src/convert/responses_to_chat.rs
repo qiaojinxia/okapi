@@ -123,7 +123,12 @@ fn convert_input_item(item: &Value, messages: &mut Vec<Value>) -> Result<(), Ups
                 "content": tool_output_text(item.get("output"))?,
             }));
         }
-        _ => {}
+        // reasoning 是上游自己的推理（多为加密），Chat 没有对应字段；客户端回放整段输出时会带上，
+        // 丢掉不改变对话内容
+        Some("reasoning") => {}
+        // 其余（item_reference 引用的存储项、内置工具调用及其输出等）Chat 表达不了：
+        // 悄悄丢掉会让上游看到缺了一截的对话，明确 400
+        Some(other) => return Err(super::unsupported_part(&format!("input_item.{other}"))),
     }
     Ok(())
 }
@@ -413,8 +418,11 @@ impl ChatStreamToResponses {
                 if let Some(u) = usage {
                     self.usage = Some(u.with_previous(self.usage));
                 }
-                let chunk: Value = serde_json::from_str(&raw).unwrap_or_default();
-                self.on_chunk(&chunk)
+                match super::chat_chunk(&raw) {
+                    Some(Ok(chunk)) => self.on_chunk(&chunk),
+                    Some(Err(err)) => vec![Err(err)],
+                    None => Vec::new(),
+                }
             }
         }
     }
@@ -1107,5 +1115,20 @@ mod fifth_review_tests {
         assert_eq!(output[0]["arguments"], "{\"a\":1}");
         assert_eq!(output[1]["call_id"], "call_2");
         assert_eq!(output[1]["name"], "g");
+    }
+
+    #[test]
+    fn unknown_input_items_are_rejected_instead_of_dropped() {
+        for kind in ["item_reference", "web_search_call", "custom_tool_call"] {
+            let err =
+                request(&json!({"input":[{"type":kind,"id":"x"},{"role":"user","content":"hi"}]}))
+                    .unwrap_err();
+            assert!(
+                matches!(&err, UpstreamError::Build(reason) if reason.ends_with(&format!("input_item.{kind}"))),
+                "{kind}: {err:?}"
+            );
+        }
+        // 回放的 reasoning 项照旧略过
+        assert!(request(&json!({"input":[{"type":"reasoning","id":"r","summary":[]},{"role":"user","content":"hi"}]})).is_ok());
     }
 }

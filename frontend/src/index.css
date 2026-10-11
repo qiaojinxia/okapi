@@ -271,6 +271,23 @@
   }
 }
 
+/* 没走 <Select> 组件的原生 select：浏览器自带箭头离右边框的距离各平台不同，与 <Select>
+   （lucide ChevronDown、h-4、right-2.5、muted 色）并排时一眼就偏。这里换成同一个箭头，按字号等比
+   （text-sm 下即 16px 图标、距右 10px），紧凑的 text-xs 下拉也不会撑宽。<Select> 自带 appearance-none
+   与覆盖层图标，不受影响。故意不进 @layer：需要压过各处的 px-* 工具类给箭头留位。
+   SVG 内不能读 CSS 变量，描边色取 --muted-fg 两套主题的 sRGB 近似值。 */
+select:not(.appearance-none, [multiple], [size]) {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235d646f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.715em center;
+  background-size: 1.143em;
+  padding-right: 2.3em;
+}
+.dark select:not(.appearance-none, [multiple], [size]) {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238e9398' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+}
+
 @layer utilities {
   /* 叶子路由使用 fitViewport，列表页按实际页头/筛选器高度分配剩余空间。
      表内滚动，分页常驻；小视口可正常纵向滚动，不裁切表单和展开详情。 */

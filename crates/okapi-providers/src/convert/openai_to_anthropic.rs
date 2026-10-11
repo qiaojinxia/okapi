@@ -257,6 +257,15 @@ fn content_to_text(content: &Value) -> String {
 
 // ---- 响应转换（非流式） ----
 
+/// chat 形状装不下的 content block：成功响应已经计费，不为它整单报错，但要留痕——
+/// 上游新增块类型或内置工具意外生效时，日志里看得到内容被丢了。
+fn unknown_block(kind: Option<&str>) {
+    tracing::warn!(
+        block_type = kind.unwrap_or("<missing>"),
+        "anthropic content block has no chat equivalent; dropped"
+    );
+}
+
 /// Anthropic message 响应 → OpenAI chat.completion（含 usage 探针）。
 pub fn response_anthropic_to_openai(
     body: &Bytes,
@@ -286,7 +295,9 @@ pub fn response_anthropic_to_openai(
                     "arguments": block.get("input").map_or_else(String::new, std::string::ToString::to_string),
                 }
             })),
-            _ => {}
+            // 加密思考 chat 没有承载位；内置工具块（server_tool_use 等）请求侧不发内置工具、正常不会出现
+            Some("redacted_thinking") => {}
+            other => unknown_block(other),
         }
     }
 
@@ -398,14 +409,11 @@ impl StreamState {
                 events.push(Ok(ChatEvent::Done));
                 events
             }
-            "error" => {
-                let msg = data
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("upstream_error");
-                vec![Err(UpstreamError::Stream(msg.to_owned()))]
-            }
+            // 与直通同一套类型映射：overloaded / rate_limit 走 529 / 429 的退避与冷却
+            "error" => vec![Err(crate::anthropic::stream_error(
+                &data,
+                ev.data.as_bytes(),
+            ))],
             // ping / content_block_stop / 未知事件
             _ => Vec::new(),
         }
@@ -433,8 +441,14 @@ impl StreamState {
 
     fn on_block_start(&mut self, data: &Value) -> Vec<Result<ChatEvent, UpstreamError>> {
         let block = data.get("content_block");
-        self.current_block_is_tool =
-            block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use");
+        let kind = block.and_then(|b| b.get("type")).and_then(Value::as_str);
+        if !matches!(
+            kind,
+            Some("text" | "thinking" | "redacted_thinking" | "tool_use")
+        ) {
+            unknown_block(kind);
+        }
+        self.current_block_is_tool = kind == Some("tool_use");
         if !self.current_block_is_tool {
             return Vec::new();
         }

@@ -62,7 +62,7 @@ pub fn request_gemini_to_openai(
             .cloned()
             .unwrap_or_default();
         if role == "model" {
-            convert_model_parts(&parts, &mut messages, &mut pending_calls, &mut call_seq);
+            convert_model_parts(&parts, &mut messages, &mut pending_calls, &mut call_seq)?;
         } else {
             convert_user_parts(&parts, &mut messages, &mut pending_calls)?;
         }
@@ -89,17 +89,50 @@ pub fn request_gemini_to_openai(
         .map_err(|e| UpstreamError::Build(e.to_string()))
 }
 
+/// 只携带元数据、没有内容的 part 键（思维签名、媒体分辨率等）：跳过不算丢内容。
+const PART_METADATA_KEYS: &[&str] = &[
+    "thought",
+    "thoughtSignature",
+    "thought_signature",
+    "videoMetadata",
+    "video_metadata",
+    "mediaResolution",
+    "media_resolution",
+    "partMetadata",
+    "part_metadata",
+];
+
+/// 本角色认不出的内容 part（`executableCode` / `codeExecutionResult`、model 里的媒体……）
+/// 报 400 而不是悄悄丢：丢掉代码执行历史，上游看到的是一段断了因果的对话。
+fn reject_unhandled_part(part: &Value, handled: &[&str]) -> Result<(), UpstreamError> {
+    let Some(obj) = part.as_object() else {
+        return Ok(());
+    };
+    if handled.iter().any(|key| obj.contains_key(*key)) {
+        return Ok(());
+    }
+    match obj
+        .keys()
+        .find(|key| !PART_METADATA_KEYS.contains(&key.as_str()))
+    {
+        Some(key) => Err(super::unsupported_part(&format!("part.{key}"))),
+        None => Ok(()),
+    }
+}
+
 /// `model` 角色：text → assistant content（thought 部件不回灌，OpenAI 无对应位）；
 /// functionCall → tool_calls（同一条 content 内的多个调用并成一条 assistant 消息）。
+/// 其余内容 part chat 的 assistant 消息装不下，见 [`reject_unhandled_part`]。
 fn convert_model_parts(
     parts: &[Value],
     messages: &mut Vec<Value>,
     pending_calls: &mut Vec<(String, String)>,
     call_seq: &mut usize,
-) {
+) -> Result<(), UpstreamError> {
     let mut text = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     for part in parts {
+        reject_unhandled_part(part, &["text", "functionCall"])?;
         if let Some(t) = part.get("text").and_then(Value::as_str)
             && part.get("thought").and_then(Value::as_bool) != Some(true)
         {
@@ -123,7 +156,7 @@ fn convert_model_parts(
         }
     }
     if text.is_empty() && tool_calls.is_empty() {
-        return;
+        return Ok(());
     }
     let mut msg = serde_json::Map::new();
     msg.insert("role".into(), json!("assistant"));
@@ -139,6 +172,7 @@ fn convert_model_parts(
         msg.insert("tool_calls".into(), Value::Array(tool_calls));
     }
     messages.push(Value::Object(msg));
+    Ok(())
 }
 
 /// `user` 角色：functionResponse → tool 消息；其余部件（text / inlineData / fileData）
@@ -151,6 +185,17 @@ fn convert_user_parts(
 ) -> Result<(), UpstreamError> {
     let mut content: Vec<Value> = Vec::new();
     for part in parts {
+        reject_unhandled_part(
+            part,
+            &[
+                "functionResponse",
+                "text",
+                "inlineData",
+                "inline_data",
+                "fileData",
+                "file_data",
+            ],
+        )?;
         if let Some(fr) = part.get("functionResponse") {
             flush_user(&mut content, messages);
             let name = fr.get("name").and_then(Value::as_str).unwrap_or("");
@@ -569,8 +614,11 @@ impl OaiStreamToGemini {
                 if let Some(u) = usage {
                     self.usage = Some(u.with_previous(self.usage));
                 }
-                let chunk: Value = serde_json::from_str(&raw).unwrap_or_default();
-                self.on_chunk(&chunk)
+                match super::chat_chunk(&raw) {
+                    Some(Ok(chunk)) => self.on_chunk(&chunk),
+                    Some(Err(err)) => vec![Err(err)],
+                    None => Vec::new(),
+                }
             }
         }
     }
@@ -738,6 +786,39 @@ mod tests {
     fn req(v: &Value) -> Value {
         let out = request_gemini_to_openai(&Bytes::from(v.to_string()), "gpt-x", false).unwrap();
         serde_json::from_slice(&out).unwrap()
+    }
+
+    #[test]
+    fn code_execution_parts_are_rejected_instead_of_dropped() {
+        let build = |contents: Value| {
+            request_gemini_to_openai(
+                &Bytes::from(json!({"contents": contents}).to_string()),
+                "gpt-x",
+                false,
+            )
+        };
+        let rejected = |contents: Value| match build(contents) {
+            Err(UpstreamError::Build(reason)) => reason,
+            other => panic!("应拒收，实际 {other:?}"),
+        };
+        assert!(
+            rejected(json!([{"role": "model", "parts": [
+                {"executableCode": {"language": "PYTHON", "code": "print(1)"}}]}]))
+            .ends_with("part.executableCode")
+        );
+        assert!(
+            rejected(json!([{"role": "user", "parts": [
+                {"codeExecutionResult": {"outcome": "OUTCOME_OK", "output": "1"}}]}]))
+            .ends_with("part.codeExecutionResult")
+        );
+        // 只带思维签名的空 part 不是内容，照常跳过
+        assert!(
+            build(json!([
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"thoughtSignature": "sig"}, {"text": "ok"}]}
+            ]))
+            .is_ok()
+        );
     }
 
     #[test]

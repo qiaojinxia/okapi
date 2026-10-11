@@ -397,23 +397,33 @@ pub async fn record_settlement_in_tx(
     .await?;
 
     // 钱包余额快照列（展示用；真理源 = 事件流，M2 reconciler 校准）。订阅池不落 PG 快照。
+    // 两条快照 UPDATE 都必须命中一行：应用不硬删用户与 key，命中 0 行只能是库被绕过应用改过。
+    // 整笔回滚并报 InvalidSettlement（重试日志按永久失败隔离待修），不留下事件与快照对不上的账。
     if input.pool == Pool::Wallet {
-        sqlx::query!(
+        let updated = sqlx::query!(
             r#"UPDATE users SET balance_micro = balance_micro + $2, updated_at = now() WHERE id = $1"#,
             input.user_id,
             input.delta_micro
         )
         .execute(&mut **tx)
         .await?;
+        if updated.rows_affected() != 1 {
+            tracing::error!(user_id = input.user_id, request_id = %input.request_id, "settlement user row missing");
+            return Err(LedgerError::InvalidSettlement);
+        }
     }
 
-    sqlx::query!(
+    let updated = sqlx::query!(
         r#"UPDATE api_keys SET used_micro = used_micro + $2, last_used_at = now() WHERE id = $1"#,
         input.api_key_id,
         input.amount.as_micros()
     )
     .execute(&mut **tx)
     .await?;
+    if updated.rows_affected() != 1 {
+        tracing::error!(api_key_id = input.api_key_id, request_id = %input.request_id, "settlement api key row missing");
+        return Err(LedgerError::InvalidSettlement);
+    }
 
     sqlx::query!(
         r#"INSERT INTO billing_outbox (topic, payload) VALUES ('billing.completed', $1)"#,

@@ -53,12 +53,21 @@ pub async fn prepare(
     state: &AppState,
     provider: &str,
     options: Options,
+    scope: okapi_store::auth::PermScope,
 ) -> Result<Prepared, AppError> {
     admin::ensure_cost_milli(options.cost_milli)?;
     admin::ensure_max_concurrency(options.max_concurrency)?;
     admin::ensure_data_retention(options.data_retention.as_deref())?;
     admin::validate_channel_settings(state, provider, options.settings.as_ref()).await?;
     let pools = match options.pools {
+        // own 范围不能选池（见 admin::ensure_pool_scope）：显式带了池就拒，不带就建成孤儿
+        Some(members) if scope != okapi_store::auth::PermScope::All => {
+            if !members.is_empty() {
+                admin::ensure_pool_scope(scope)?;
+            }
+            Vec::new()
+        }
+        None if scope != okapi_store::auth::PermScope::All => Vec::new(),
         Some(members) => admin::normalize_members(state, members).await?,
         None => vec![okapi_store::admin::PoolMember {
             pool_code: okapi_store::channels::DEFAULT_POOL.into(),

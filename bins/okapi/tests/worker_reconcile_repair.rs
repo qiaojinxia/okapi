@@ -417,3 +417,30 @@ async fn reconciliation_reaches_users_beyond_the_first_page() {
         .await
         .unwrap();
 }
+
+/// 周期任务的增量轮只查近期有账本事件的用户；全量轮兜底其余用户（Redis 被外部改动的漂移）。
+#[tokio::test]
+async fn active_reconcile_only_covers_users_with_recent_events() {
+    let bed = setup().await;
+    lose_hot_balance(&bed).await;
+    let active = |since: chrono::DateTime<chrono::Utc>| {
+        let bed = &bed;
+        async move {
+            worker::reconcile_active_balances(&bed.pg, &bed.ledger, 100_000, since)
+                .await
+                .unwrap()
+                .into_iter()
+                .any(|d| d.user_id == bed.user_id)
+        }
+    };
+    let now = chrono::Utc::now();
+    assert!(
+        active(now - chrono::Duration::hours(1)).await,
+        "入账事件在窗口内：增量轮必须查到"
+    );
+    assert!(
+        !active(now + chrono::Duration::minutes(1)).await,
+        "窗口内没有新事件：增量轮跳过"
+    );
+    assert!(drift_of(&bed).await.is_some(), "全量轮照样查到");
+}

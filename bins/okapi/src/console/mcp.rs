@@ -771,18 +771,31 @@ async fn channel_create(
     if models.is_empty() {
         return Err(AppError::bad_request().with_param("models"));
     }
-    let (channel_id, channel_key_id) = okapi_store::provision::create_channel(
+    // own 范围建的渠道不入池（admin::ensure_pool_scope）：同一事务里建成孤儿，不留"先进 default 再摘"的窗口
+    let orphan: &[okapi_store::admin::PoolMember] = &[];
+    let pools =
+        (key.permission_scope(permissions::CHANNEL_WRITE) != PermScope::All).then_some(orphan);
+    let (channel_id, channel_key_id) = okapi_store::provision::create_channel_configured(
         &state.pg,
-        name,
-        provider,
-        api_base,
-        credential,
-        &models,
-        false,
+        okapi_store::provision::ChannelCreate {
+            name,
+            provider,
+            api_base,
+            credential,
+            models: &models,
+            trust_upstream_usage: false,
+            owner_id: Some(key.user_id),
+            settings: None,
+            priority: 0,
+            max_concurrency: None,
+            cost_milli: None,
+            pools,
+            egress: None,
+            egress_preassigned: None,
+        },
         state.master_key.as_deref(),
     )
     .await?;
-    okapi_store::admin::set_channel_owner(&state.pg, channel_id, key.user_id).await?;
     state.invalidate_routing_caches();
     mcp_audit(
         state,

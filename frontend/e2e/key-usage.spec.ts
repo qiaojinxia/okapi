@@ -162,7 +162,7 @@ for (const mode of ['account', 'key', 'legacy'] as const) {
     await page.keyboard.press('Enter')
     const dialog = page.getByRole('dialog', { name: '密钥用量概览' })
     await expect(dialog).toContainText('#42')
-    await expect(dialog).toContainText('全部日期 · 仅当前密钥')
+    await expect(dialog).toContainText('近 30 天 · 仅当前密钥')
     await expect(dialog).toContainText('US$0.000869')
     await expect(dialog).toContainText('已排除退款 US$0.000202')
     await expect(dialog).toContainText('结算 73 · 失败 3 · 退款 1')

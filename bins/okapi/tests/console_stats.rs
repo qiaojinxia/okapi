@@ -462,7 +462,10 @@ async fn portal_identity_matches_web_session_owner_without_exposing_key_secret()
     assert_eq!(me["key_prefix"], "sk-stat-u");
     assert!(me["key_name"].is_string());
     assert!(!me.to_string().contains(&env.user_token));
-    let sid = Uuid::new_v4().to_string();
+    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        env.user_id,
+        &Uuid::new_v4().simple().to_string(),
+    );
     env.state
         .sched
         .web_session_set(&sid, env.user_id, None, None)

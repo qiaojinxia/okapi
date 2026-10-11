@@ -42,7 +42,10 @@ async fn profile_editing_is_owned_validated_and_persisted() {
         okapi_store::provision::create_api_key(&pg, id, &hash(&token), "sk-profile")
             .await
             .unwrap();
-        let sid = Uuid::new_v4().to_string();
+        let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+            id,
+            &Uuid::new_v4().simple().to_string(),
+        );
         state.sched.web_session_set(&sid, id, None, None).await;
         owners.push((id, token, format!("okapi_session={sid}")));
     }
