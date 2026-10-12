@@ -241,8 +241,9 @@ async fn dearer_fallback_is_reserved_before_admission_and_billed_from_frozen_con
     );
 }
 
-/// 声明了原生工具、模型却没配工具价格：准入即拒（400 server_tool_unpriced），不打上游、
-/// 不预扣、分文不动——与「模型未定价即拒」同口径，上游按次计费的搜索不能白送。
+/// 声明了原生工具、模型却没配工具价格，又没有订阅渠道可走：拒绝（400 server_tool_unpriced），
+/// 不打上游、分文不动——API key 渠道上游按次计费的搜索不能白送。订阅渠道免配置的情形见
+/// gateway_oauth_channels。
 #[tokio::test]
 async fn declared_tools_without_tool_prices_are_rejected_before_the_upstream() {
     let env = setup(Protocol::Anthropic, anthropic_usage::fixture()).await;

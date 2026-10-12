@@ -24,6 +24,12 @@ pub enum ServerToolPrices {
 }
 
 impl ServerToolPrices {
+    /// 搜索与抓取都含在别处的费用里（例如订阅），不另收按次费。
+    pub const INCLUDED: Self = Self::AnthropicServerToolUseV1(AnthropicToolPrices {
+        web_search: ToolPrice::Included {},
+        web_fetch: ToolPrice::Included {},
+    });
+
     /// An empty object explicitly clears a draft; omission is handled by the caller.
     pub fn parse(value: &serde_json::Value) -> Result<Option<Self>, &'static str> {
         let object = value.as_object().ok_or("server_tool_prices")?;
@@ -197,6 +203,7 @@ pub(crate) fn add_to_quote(
     model: &ModelCode,
     usage: Option<ServerToolUsage>,
     scope: Option<AnthropicToolScope>,
+    unpriced: Option<ServerToolPrices>,
 ) -> Result<Quote, PricingError> {
     let usage = match usage {
         Some(ServerToolUsage::Anthropic(u)) => u,
@@ -206,8 +213,10 @@ pub(crate) fn add_to_quote(
     let prices = book
         .server_tool_prices
         .get(model)
+        .copied()
+        .or(unpriced)
         .map(|prices| match prices {
-            ServerToolPrices::AnthropicServerToolUseV1(prices) => *prices,
+            ServerToolPrices::AnthropicServerToolUseV1(prices) => prices,
         });
     let rows = [
         fee(

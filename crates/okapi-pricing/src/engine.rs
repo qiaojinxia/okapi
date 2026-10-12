@@ -134,7 +134,7 @@ pub fn calculate(
     ctx: &CalcContext,
     usage: TokenUsage,
 ) -> Result<Quote, PricingError> {
-    calculate_inner(book, ctx, usage, None)
+    calculate_inner(book, ctx, usage, None, None)
 }
 
 /// Quote under explicit native-tool request authority, without changing observed quantities.
@@ -144,7 +144,19 @@ pub fn calculate_with_server_tool_scope(
     usage: TokenUsage,
     scope: crate::AnthropicToolScope,
 ) -> Result<Quote, PricingError> {
-    calculate_inner(book, ctx, usage, Some(scope))
+    calculate_inner(book, ctx, usage, Some(scope), None)
+}
+
+/// 同上，但价簿没给这个模型配工具价格时按 `unpriced` 计（调用方决定什么情况下可以这样算，
+/// 例如订阅渠道的工具次数含在订阅里，按「已包含」计）。价簿配了的永远以价簿为准。
+pub fn calculate_with_server_tool_default(
+    book: &PriceBook,
+    ctx: &CalcContext,
+    usage: TokenUsage,
+    scope: crate::AnthropicToolScope,
+    unpriced: crate::ServerToolPrices,
+) -> Result<Quote, PricingError> {
+    calculate_inner(book, ctx, usage, Some(scope), Some(unpriced))
 }
 
 fn calculate_inner(
@@ -152,6 +164,7 @@ fn calculate_inner(
     ctx: &CalcContext,
     usage: TokenUsage,
     scope: Option<crate::AnthropicToolScope>,
+    unpriced: Option<crate::ServerToolPrices>,
 ) -> Result<Quote, PricingError> {
     usage.validate()?;
     let resolved = book.resolve(ctx.user, &ctx.model, &ctx.group)?;
@@ -233,7 +246,14 @@ fn calculate_inner(
             calc_per_call(book, ctx, effective, group_ratio, tier.as_ref())
         }
     }?;
-    crate::server_tools::add_to_quote(quote, book, &ctx.model, usage.server_tool_usage, scope)
+    crate::server_tools::add_to_quote(
+        quote,
+        book,
+        &ctx.model,
+        usage.server_tool_usage,
+        scope,
+        unpriced,
+    )
 }
 
 /// Character-priced input follows the existing price chain, including tiers and

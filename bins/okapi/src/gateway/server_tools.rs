@@ -8,7 +8,7 @@ use bytes::Bytes;
 use okapi_domain::{AnthropicToolUsage, Money, ServerToolUsage};
 use okapi_pricing::{
     AnthropicToolScope, CalcContext, PriceBook, PricingError, Quote, ServerToolPrices, ToolPrice,
-    calculate, calculate_with_server_tool_scope,
+    calculate, calculate_with_server_tool_default, calculate_with_server_tool_scope,
 };
 use okapi_providers::UpstreamError;
 use serde_json::{Value, json};
@@ -22,6 +22,8 @@ pub(super) struct ToolAdmission {
     search: Option<u32>,
     fetch: Option<u32>,
     execution: bool,
+    /// 模型没配工具价格：只许走订阅渠道，工具次数含在订阅里，按「已包含」计。
+    subscription_only: bool,
 }
 
 fn kind(tool: &Value) -> Result<Option<&'static str>, &'static str> {
@@ -222,18 +224,36 @@ impl ToolAdmission {
         Ok(())
     }
 
-    /// 声明了原生工具、模型却没配工具价格：准入即拒（同「模型未定价即拒」），上游按次计费的
-    /// 搜索不能白送。只在准入调用：结算沿用准入时冻结的价簿，响应模型缺工具价格仍按既有规则
-    /// 拒绝改价并退款，不能因为这里报错就悄悄退回按准入模型计费。
-    pub(super) fn require_prices(
+    /// 准入时按请求模型定下计价方式。声明了原生工具、模型却没配工具价格：上游按次计费的搜索
+    /// 不能白送，所以只许走订阅渠道（次数含在订阅里，Anthropic 不另收），按「已包含」计；
+    /// 没有可用订阅渠道时选渠道那一步回 `SERVER_TOOL_UNPRICED`。只在准入调用：结算沿用准入时
+    /// 冻结的价簿和这个决定，响应模型缺工具价格仍按既有规则拒绝改价并退款。
+    pub(super) fn admit(&mut self, book: &PriceBook, model: &okapi_domain::ModelCode) {
+        self.subscription_only = self.has_tools() && book.server_tool_prices(model).is_none();
+    }
+
+    pub(super) fn subscription_only(&self) -> bool {
+        self.subscription_only
+    }
+
+    /// 兜底链上的备选模型能不能接这次请求：请求模型配了工具价格时，备选也得配
+    /// （不然换了模型就白送）；只走订阅时备选同样按「已包含」计。
+    pub(super) fn allows_fallback(
         &self,
         book: &PriceBook,
         model: &okapi_domain::ModelCode,
-    ) -> Result<(), PricingError> {
-        if self.has_tools() && book.server_tool_prices(model).is_none() {
-            return Err(PricingError::UnpricedServerTool);
-        }
-        Ok(())
+    ) -> bool {
+        !self.has_tools() || self.subscription_only || book.server_tool_prices(model).is_some()
+    }
+
+    /// 实际生效的工具价格：价簿配了以价簿为准，只走订阅时缺省按「已包含」。
+    pub(super) fn prices(
+        &self,
+        book: &PriceBook,
+        model: &okapi_domain::ModelCode,
+    ) -> Option<ServerToolPrices> {
+        book.server_tool_prices(model)
+            .or(self.subscription_only.then_some(ServerToolPrices::INCLUDED))
     }
 
     pub(super) fn quote(
@@ -242,16 +262,14 @@ impl ToolAdmission {
         calc: &CalcContext,
         usage: okapi_domain::TokenUsage,
     ) -> Result<Quote, PricingError> {
-        if self.has_tools() || book.server_tool_prices(&calc.model).is_some() {
-            calculate_with_server_tool_scope(
-                book,
-                calc,
-                usage,
-                AnthropicToolScope {
-                    web_search: self.search.is_some(),
-                    web_fetch: self.fetch.is_some(),
-                },
-            )
+        let scope = AnthropicToolScope {
+            web_search: self.search.is_some(),
+            web_fetch: self.fetch.is_some(),
+        };
+        if self.subscription_only {
+            calculate_with_server_tool_default(book, calc, usage, scope, ServerToolPrices::INCLUDED)
+        } else if self.has_tools() || book.server_tool_prices(&calc.model).is_some() {
+            calculate_with_server_tool_scope(book, calc, usage, scope)
         } else {
             calculate(book, calc, usage)
         }

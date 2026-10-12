@@ -1282,7 +1282,7 @@ async fn prepare_chat(
         info.completion_cap_req,
         meta.max_output.and_then(|v| u32::try_from(v).ok()),
     );
-    let server_tools = super::server_tools::ToolAdmission::parse(body)
+    let mut server_tools = super::server_tools::ToolAdmission::parse(body)
         .map_err(|param| AppError::bad_request().with_param(param))?;
     let base_usage = TokenUsage {
         server_tool_usage: server_tools.estimated_usage(),
@@ -1303,7 +1303,7 @@ async fn prepare_chat(
         base_usage,
         admission_hints(state, &canonical, &pool_chain).await,
     );
-    server_tools.require_prices(&book, &calc.model)?;
+    server_tools.admit(&book, &calc.model);
     let est_quote = server_tools.quote(&book, &calc, est_usage)?;
 
     // reasoning 意图归一（§11.26）：模型名后缀是一条路，请求体参数是另一条，
@@ -1360,10 +1360,10 @@ async fn prepare_chat(
                 admission_hints(state, &fallback.canonical, &pool_chain).await,
             );
             // 兜底链里没给工具定价的备选模型直接跳过，不拖垮整个请求
-            let Ok(quote) = server_tools
-                .require_prices(&book, &fallback_calc.model)
-                .and_then(|()| server_tools.quote(&book, &fallback_calc, fallback_usage))
-            else {
+            if !server_tools.allows_fallback(&book, &fallback_calc.model) {
+                continue;
+            }
+            let Ok(quote) = server_tools.quote(&book, &fallback_calc, fallback_usage) else {
                 continue;
             };
             if price_above_max(&quote, &prefs).is_some() {
@@ -1691,6 +1691,18 @@ async fn eligible_candidates(
     };
     candidates
         .retain(|c| ExecutionPlan::compile(bill.ingress, c, &bill.model, requirements).is_ok());
+    // 模型没配工具价格的搜索/抓取只走订阅：API key 渠道上游按次收费，不能白送
+    if bill.server_tools.subscription_only() {
+        candidates.retain(|c| super::oauth_cred::is_oauth_provider(&c.provider));
+        if candidates.is_empty() {
+            return Err(ForwardFailure::app(
+                AppError::new(StatusCode::BAD_REQUEST, codes::SERVER_TOOL_UNPRICED)
+                    .with_param("tools"),
+                0,
+                None,
+            ));
+        }
+    }
     // 零留存要求（§11.24）：只留声明 data_retention='none' 的渠道。
     // 未声明按不满足处理——"不知道对方留不留"不能当成"不留"。
     // 单独给错误码：候选被这一条筛空时，回 no_available_channel 会让人以为渠道全挂了。
@@ -3815,13 +3827,16 @@ async fn settle_commit(
     let (quote, snapshot): (Quote, serde_json::Value) = match bill
         .server_tools
         .validate_usage(
-            bill.book.server_tool_prices(&calc.model),
+            bill.server_tools.prices(&bill.book, &calc.model),
             usage.server_tool_usage,
         )
         .and_then(|()| {
             if bill.server_tools.has_tools() && calc.model != bill.calc.model {
-                if bill.book.server_tool_prices(&bill.calc.model).is_some()
-                    && bill.book.server_tool_prices(&calc.model).is_none()
+                if bill
+                    .server_tools
+                    .prices(&bill.book, &bill.calc.model)
+                    .is_some()
+                    && bill.server_tools.prices(&bill.book, &calc.model).is_none()
                 {
                     return Err(okapi_pricing::PricingError::InvalidServerToolAdmission(
                         "response_tool_price_missing",

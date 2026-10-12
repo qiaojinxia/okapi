@@ -218,11 +218,18 @@ async fn mock_messages(
             "access-token-seen",
             auth.trim_start_matches("Bearer ").to_owned(),
         )],
-        axum::Json(
-            json!({"id":"msg_o","type":"message","role":"assistant","model":"claude-x",
+        axum::Json({
+            let mut reply = json!({"id":"msg_o","type":"message","role":"assistant","model":"claude-x",
             "content":[{"type":"text","text":"Hello max"}],"stop_reason":"end_turn",
-            "usage":{"input_tokens":100,"output_tokens":50}}),
-        ),
+            "usage":{"input_tokens":100,"output_tokens":50}});
+            // 带了联网搜索就像上游那样报一次搜索
+            if req["tools"].as_array().is_some_and(|tools| {
+                tools.iter().any(|t| t["type"] == "web_search_20250305")
+            }) {
+                reply["usage"]["server_tool_use"] = json!({"web_search_requests": 1});
+            }
+            reply
+        }),
     )
         .into_response()
 }
@@ -1200,6 +1207,46 @@ async fn retired_mimic_switch_is_rejected_and_old_revisions_run_as_latest() {
         .await
         .unwrap();
     assert_eq!(rejected.status(), 400);
+}
+
+/// 订阅渠道上的联网搜索含在订阅里：模型没配工具价格也放行，按「已包含」记账，只收 token 费。
+#[tokio::test]
+async fn subscription_web_search_needs_no_tool_price_and_bills_as_included() {
+    let env = setup().await;
+    let (channel, _) = login_channel(&env, "anthropic_max").await;
+    let before = env.state.ledger.balance(env.user_id).await.unwrap();
+    let request_id = Uuid::new_v4().to_string();
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/messages", env.gateway))
+        .bearer_auth(&env.user_token)
+        .header("x-request-id", &request_id)
+        .json(&json!({"model": env.model, "max_tokens": 64,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            "messages": [{"role": "user", "content": "search the news"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let seen = env.mock_state.last_body().unwrap();
+    assert_eq!(seen["tools"][0]["type"], "web_search_20250305");
+    assert!(
+        seen["tools"][0]["max_uses"].is_u64(),
+        "网关仍按缺省上限限次"
+    );
+    client_profiles::assert_settlement(&env, channel, before).await;
+    let snapshot: Value = sqlx::query_scalar(
+        "SELECT pricing_snapshot FROM billing_records WHERE user_id=$1 AND channel_id=$2 AND status=20",
+    )
+    .bind(env.user_id)
+    .bind(channel)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let search = &snapshot["server_tool_fees"][0];
+    assert_eq!(search["tool"], "web_search", "{snapshot}");
+    assert_eq!(search["quantity"], 1);
+    assert_eq!(search["pricing"], json!({"billing": "included"}));
+    assert_eq!(search["amount_micro"], 0);
 }
 
 #[tokio::test]

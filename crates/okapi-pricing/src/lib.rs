@@ -21,7 +21,8 @@ pub mod snapshot;
 
 pub use book::{GroupEntry, ModelEntry, OverrideEntry, OverrideSpec, PriceBook, PriceBookSource};
 pub use engine::{
-    CalcContext, Quote, calculate, calculate_characters, calculate_with_server_tool_scope,
+    CalcContext, Quote, calculate, calculate_characters, calculate_with_server_tool_default,
+    calculate_with_server_tool_scope,
 };
 pub use error::{CompileError, PricingError};
 pub use handle::PriceBookHandle;
