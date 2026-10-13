@@ -839,7 +839,8 @@ async fn count_tokens_inner(
                 )
                 .into_response());
             }
-            Err(_) => {
+            Err(error) => {
+                log_count_upstream_failure(&cand, &error);
                 return Err(AppError::new(
                     StatusCode::BAD_GATEWAY,
                     codes::UPSTREAM_ERROR,
@@ -850,6 +851,26 @@ async fn count_tokens_inner(
     let tokens =
         estimate_prompt_tokens(&probe.model, &probe.prompt_segments(), probe.messages.len());
     Ok(axum::Json(serde_json::json!({ "input_tokens": tokens })).into_response())
+}
+
+/// 上游的拒绝原因只在这里看得到（客户端只拿到 502）。
+fn log_count_upstream_failure(
+    cand: &okapi_store::ChannelCandidate,
+    error: &okapi_providers::UpstreamError,
+) {
+    let detail = match error {
+        okapi_providers::UpstreamError::Status { body, .. } => {
+            String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned()
+        }
+        _ => String::new(),
+    };
+    tracing::warn!(
+        channel_id = cand.channel_id,
+        channel_key_id = cand.channel_key_id,
+        error = %error,
+        detail,
+        "count_tokens upstream failed"
+    );
 }
 
 /// 第一个过得了账号准入（本地 token 上限、上游额度窗，与主链路同一套）的候选：

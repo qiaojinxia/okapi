@@ -352,13 +352,15 @@ fn cache_budget_and_counting_do_not_gain_messages_parameters() {
         false,
     );
     assert_eq!(cache_markers(&body), 4);
+    // count_tokens 端点拒收 metadata，调用方带了也要去掉
     let (count, body) = prepare_value(
-        json!({"model":"claude-sonnet-5-5",
+        json!({"model":"claude-sonnet-5-5","metadata":{"user_id":"caller"},
         "messages":[{"role":"user","content":"hello"}]}),
         &outbound("cli", "main"),
         true,
     );
     for key in [
+        "metadata",
         "max_tokens",
         "thinking",
         "diagnostics",

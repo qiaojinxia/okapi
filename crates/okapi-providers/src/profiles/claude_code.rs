@@ -290,12 +290,15 @@ pub(super) fn prepare(
     let obj = value
         .as_object_mut()
         .ok_or_else(|| UpstreamError::Build("body_not_object".into()))?;
-    obj.entry("metadata")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| UpstreamError::Build("metadata_not_object".into()))?
-        .insert("user_id".into(), json!(uid));
-    if !counting {
+    if counting {
+        // count_tokens 不收 metadata（上游 400 "metadata: Extra inputs are not permitted"）
+        obj.remove("metadata");
+    } else {
+        obj.entry("metadata")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| UpstreamError::Build("metadata_not_object".into()))?
+            .insert("user_id".into(), json!(uid));
         defaults(&mut value, entrypoint, class, stream);
         if class == RequestClass::Main {
             if let Some(last) = value
