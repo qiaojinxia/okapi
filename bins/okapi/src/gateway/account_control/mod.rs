@@ -52,7 +52,7 @@ fn quota_blocked(
         value == 0 || policy.quota_aware && value <= 100 - policy.quota_threshold_pct
     });
     legacy_blocked
-        || now.saturating_sub(quota.observed_at) <= 120
+        || quota.fresh(now)
             && quota.windows.iter().any(|window| {
                 window.resets_at.is_none_or(|at| at > now)
                     && window
@@ -192,12 +192,14 @@ mod tests {
             )
             .unwrap();
             assert!(quota_blocked(&policy, &quota, 1000));
+            // 两次轮询之间（观测后 200 秒）阈值仍然生效；过了有效期才放行
+            assert!(quota_blocked(&policy, &quota, 1200));
+            assert!(!quota_blocked(&policy, &quota, 1601));
             let policy = Policy::parse(
                 &json!({"account_control":{"quota_limits":{"18000":21,"604800":81}}}),
             )
             .unwrap();
             assert!(!quota_blocked(&policy, &quota, 1000));
-            assert!(!quota_blocked(&policy, &quota, 1121));
             let mut fresh = quota.clone();
             fresh.observed_at = 1900;
             let policy =

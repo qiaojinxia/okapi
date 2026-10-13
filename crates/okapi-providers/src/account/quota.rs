@@ -22,9 +22,19 @@ pub struct Snapshot {
     pub threshold_window: Option<String>,
 }
 
+/// 一次观测在多久内算数。额度只靠后台轮询（每 5 分钟一次），有效期必须长过轮询间隔，
+/// 否则两次轮询之间阈值不生效、超额账号照常放行。
+pub const MAX_AGE_SECS: i64 = 600;
+
 impl Snapshot {
+    /// 观测是否还在有效期内。
+    #[must_use]
+    pub const fn fresh(&self, now: i64) -> bool {
+        now.saturating_sub(self.observed_at) <= MAX_AGE_SECS
+    }
+
     pub fn headroom(&self, now: i64) -> Option<u8> {
-        if now.saturating_sub(self.observed_at) > 120 {
+        if !self.fresh(now) {
             return None;
         }
         // A passed reset is not proof of zero usage; get a new observation.

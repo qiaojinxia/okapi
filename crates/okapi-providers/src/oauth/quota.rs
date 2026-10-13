@@ -40,7 +40,9 @@ mod tests {
         let value = parse("codex", &json!({"rate_limit":{"primary_window":{"used_percent":90.1,"limit_window_seconds":2_628_000,"reset_at":2000},"secondary_window":null}}),1000).unwrap();
         assert_eq!(value.headroom(1000), Some(9));
         assert_eq!(value.windows[0].window_secs, Some(2_628_000));
-        assert_eq!(value.headroom(1121), None);
+        // 轮询间隔内仍有效，过了有效期才算未知
+        assert_eq!(value.headroom(1121), Some(9));
+        assert_eq!(value.headroom(1601), None);
         let value = parse(
             "anthropic_max",
             &json!({"five_hour":{"utilization":0,"resets_at":"1970-01-01T00:20:00Z"}}),
@@ -123,6 +125,6 @@ mod tests {
             .unwrap()
             .scope_quota(&mut cached);
         assert_eq!(cached.headroom(1000), Some(60));
-        assert_eq!(cached.headroom(1121), None);
+        assert_eq!(cached.headroom(1601), None);
     }
 }

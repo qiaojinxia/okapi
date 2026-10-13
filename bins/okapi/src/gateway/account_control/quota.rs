@@ -31,7 +31,7 @@ fn identity(provider: &str, credential: &ResolvedCredential<'_>) -> String {
 /// 每分钟探测会长期停在 429。
 const POLL_INTERVAL_SECS: i64 = 300;
 /// 观测有效期须长于探测间隔，否则两次探测之间额度限制会失效。
-const OBSERVATION_MAX_AGE_SECS: i64 = 600;
+const OBSERVATION_MAX_AGE_SECS: i64 = okapi_providers::account::quota::MAX_AGE_SECS;
 /// 失败退避：2、4、8…分钟，封顶 1 小时；成功即清零。
 const BACKOFF_BASE_SECS: i64 = 120;
 const BACKOFF_MAX_SECS: i64 = 3600;
