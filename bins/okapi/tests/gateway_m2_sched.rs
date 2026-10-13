@@ -73,9 +73,27 @@ async fn mock_401(_body: axum::body::Bytes) -> axum::response::Response {
         .into_response()
 }
 
+/// `/flip`：置位后像额度用完的账号一样回 429（只给粘性切换用例用）。
+static FLIP_EXHAUSTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+async fn mock_flip(body: axum::body::Bytes) -> axum::response::Response {
+    if FLIP_EXHAUSTED.load(std::sync::atomic::Ordering::SeqCst) {
+        return (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, "3600")],
+            axum::Json(
+                json!({"error":{"message":"usage limit reached","type":"rate_limit_error"}}),
+            ),
+        )
+            .into_response();
+    }
+    mock_ok(body).await
+}
+
 async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
         .route("/ok/v1/chat/completions", post(mock_ok))
+        .route("/flip/v1/chat/completions", post(mock_flip))
         .route("/slow/v1/chat/completions", post(mock_slow))
         .route("/r429/v1/chat/completions", post(mock_429))
         .route("/r429q/v1/chat/completions", post(mock_429_quota))
@@ -289,6 +307,59 @@ async fn session_sticky_hits_same_channel_key() {
         "同会话应命中同一渠道 key"
     );
     assert_eq!(rec2.sticky_layer, 2, "第二次应为 session 层命中");
+}
+
+/// 粘住的 key 额度用完（429）：同一请求内换到别的 key，原 key 进冷却，会话改粘到新 key；
+/// 原 key 恢复后会话也不切回去（不来回抖）。
+#[tokio::test]
+async fn sticky_key_exhausted_fails_over_and_rebinds() {
+    // 高优先级的 flip 先被选中并粘住
+    let env = setup(&[("/flip/v1", 10), ("/ok/v1", 0)]).await;
+    let (exhausting, spare) = (env.channel_keys[0], env.channel_keys[1]);
+    let session = format!("sess-{}", Uuid::new_v4().simple());
+    let send = || async {
+        let resp = post_chat(&env, &env.model, Some(&session)).await;
+        assert_eq!(resp.status(), 200);
+        let id = rid(&resp);
+        let _ = resp.text().await.unwrap();
+        wait_record(&env.pg, id).await
+    };
+
+    let first = send().await;
+    assert_eq!(first.channel_key_id, Some(exhausting));
+    assert_eq!(send().await.sticky_layer, 2, "已粘住");
+
+    FLIP_EXHAUSTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let switched = send().await;
+    assert_eq!(
+        switched.channel_key_id,
+        Some(spare),
+        "同一请求内换到备用 key"
+    );
+    let (status, cooling) = sqlx::query_as::<_, (i16, bool)>(
+        "SELECT status, cooldown_until > now() + interval '50 minutes' FROM channel_keys WHERE id = $1",
+    )
+    .bind(exhausting)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!((status, cooling), (3, true), "按 Retry-After 冷却");
+
+    let next = send().await;
+    assert_eq!(next.channel_key_id, Some(spare));
+    assert_eq!(next.sticky_layer, 2, "会话改粘到备用 key");
+
+    // 原 key 恢复（冷却结束 + 不再 429）：会话留在备用 key 上
+    FLIP_EXHAUSTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    sqlx::query("UPDATE channel_keys SET status = 1, cooldown_until = NULL WHERE id = $1")
+        .bind(exhausting)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(6)).await; // 候选缓存 5s
+    let after = send().await;
+    assert_eq!(after.channel_key_id, Some(spare));
+    assert_eq!(after.sticky_layer, 2);
 }
 
 /// key 级并发信号量：max_concurrency=1 时并发第二请求被拒（503），完成后恢复。
