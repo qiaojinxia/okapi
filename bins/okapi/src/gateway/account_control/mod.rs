@@ -28,6 +28,20 @@ pub async fn policy(state: &AppState, channel: i64) -> Result<Arc<Policy>, Upstr
     Ok(policy)
 }
 
+/// 诊断里最多记这么多条被排除的 key。
+const MAX_EXCLUDED: usize = 24;
+
+/// `blocked()` 的原因（去掉 `channel_control:` 前缀）。
+fn reason(error: &UpstreamError) -> String {
+    match error {
+        UpstreamError::Build(text) => text
+            .strip_prefix("channel_control:")
+            .unwrap_or(text)
+            .to_owned(),
+        other => other.error_code().to_owned(),
+    }
+}
+
 pub fn blocked(reason: &str) -> UpstreamError {
     UpstreamError::Build(format!("channel_control:{reason}"))
 }
@@ -77,8 +91,20 @@ async fn token_blocked(
 }
 
 /// Pre-filter before sticky promotion; blocked account affinity never overrides admission.
+/// 被挡下的 key 与原因记进请求诊断（`excluded`，只在管理端日志里）：选路被筛空时，
+/// 「没有可用渠道」到底是停用、本地上限还是上游额度，看日志就知道。
 pub async fn retain_available(state: &AppState, candidates: &mut impl CandidateSet) {
-    let mut policies: std::collections::HashMap<i64, Option<Arc<Policy>>> =
+    let mut excluded: Vec<serde_json::Value> = Vec::new();
+    let mut exclude = |candidate: &ChannelCandidate, reason: &str| {
+        if excluded.len() < MAX_EXCLUDED {
+            excluded.push(serde_json::json!({
+                "channel_id": candidate.channel_id,
+                "channel_key_id": candidate.channel_key_id,
+                "reason": reason,
+            }));
+        }
+    };
+    let mut policies: std::collections::HashMap<i64, Result<Arc<Policy>, String>> =
         std::collections::HashMap::new();
     let mut available = std::collections::HashSet::with_capacity(candidates.len());
     let mut headroom = std::collections::HashMap::new();
@@ -87,12 +113,18 @@ pub async fn retain_available(state: &AppState, candidates: &mut impl CandidateS
         let policy = match policies.entry(candidate.channel_id) {
             std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                let value = policy(state, candidate.channel_id).await.ok();
+                let value = policy(state, candidate.channel_id)
+                    .await
+                    .map_err(|error| reason(&error));
                 e.insert(value).clone()
             }
         };
-        let Some(policy) = policy else {
-            continue;
+        let policy = match policy {
+            Ok(policy) => policy,
+            Err(reason) => {
+                exclude(candidate, &reason);
+                continue;
+            }
         };
         let is_token_blocked = match token_limits.entry(candidate.channel_id) {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
@@ -103,12 +135,14 @@ pub async fn retain_available(state: &AppState, candidates: &mut impl CandidateS
             ),
         };
         if is_token_blocked {
+            exclude(candidate, "local_tokens");
             continue;
         }
         if let Some(quota) = quota::read_for(state, candidate).await {
             let now = chrono::Utc::now().timestamp();
             let remaining = quota.headroom(now);
             if quota_blocked(&policy, &quota, now) {
+                exclude(candidate, "upstream_quota");
                 continue;
             }
             if let Some(remaining) = remaining {
@@ -120,6 +154,11 @@ pub async fn retain_available(state: &AppState, candidates: &mut impl CandidateS
     // Stable ordering preserves the existing weighted/latency order when headroom ties.
     // Unknown quota is neutral, rather than falsely claiming an unused account.
     candidates.retain(|c| available.contains(&c.channel_key_id));
+    if !excluded.is_empty()
+        && let Some(trace) = diagnostics::Trace::current()
+    {
+        trace.set("excluded", serde_json::Value::Array(excluded));
+    }
     candidates.sort_by_key(|c| {
         (
             c.pool_rank,

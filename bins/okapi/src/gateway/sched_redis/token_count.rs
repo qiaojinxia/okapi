@@ -7,6 +7,10 @@ use okapi_api::codes;
 use okapi_store::AuthedKey;
 use uuid::Uuid;
 
+/// key 没设 RPM / 并发上限时计数用的缺省值。
+const DEFAULT_RPM: i32 = 300;
+const DEFAULT_CONCURRENCY: i32 = 16;
+
 pub(crate) struct CountPermit {
     sched: SchedulerRedis,
     lease: Option<(String, String)>,
@@ -29,9 +33,14 @@ impl CountPermit {
         let prefix = format!("count:{{{}}}", key.key_id);
         let lease = format!("{prefix}:leases");
         let request = Uuid::new_v4().to_string();
-        let rpm = key.rpm_limit.filter(|n| *n > 0).unwrap_or(60);
+        // 缺省按 Claude Code 的用法放宽：它启动时会一次并发几十个 count_tokens（真机直连官方
+        // 也是这样发），并发 4 / 每分钟 60 会把大半挡成 429、让客户端成批重试。
+        let rpm = key.rpm_limit.filter(|n| *n > 0).unwrap_or(DEFAULT_RPM);
         let rpd = key.rpd_limit.filter(|n| *n > 0).unwrap_or(0);
-        let concurrency = key.max_concurrency.filter(|n| *n > 0).unwrap_or(4);
+        let concurrency = key
+            .max_concurrency
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_CONCURRENCY);
         let outcome: i64 = sched
             .client
             .eval(

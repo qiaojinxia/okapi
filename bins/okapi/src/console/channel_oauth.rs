@@ -256,13 +256,23 @@ pub async fn exchange(
             proxy_url: proxy_url.as_deref(),
         })
         .await
-        .map_err(|err| match err {
-            UpstreamError::Status { status, .. } => {
-                AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
-                    .with_param(format!("oauth_exchange_status_{status}"))
+        .map_err(|err| {
+            // 授权码一次性、state 也已取走：失败只能重新授权，原因只在这里看得到
+            let detail = match &err {
+                UpstreamError::Status { body, .. } => {
+                    String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned()
+                }
+                other => other.to_string(),
+            };
+            tracing::warn!(provider, error = %err, detail, "oauth code exchange failed");
+            match err {
+                UpstreamError::Status { status, .. } => {
+                    AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+                        .with_param(format!("oauth_exchange_status_{status}"))
+                }
+                other => AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
+                    .with_param(other.error_code()),
             }
-            other => AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
-                .with_param(other.error_code()),
         })?;
     let Some(refresh_token) = tokens.refresh_token.clone() else {
         // 没有 refresh token 的登录撑不过一次到期，不落库

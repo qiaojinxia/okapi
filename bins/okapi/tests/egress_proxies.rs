@@ -1586,3 +1586,38 @@ async fn proxied_traffic_is_metered_flushed_and_charted() {
     let (status, _) = traffic("30d").await;
     assert_eq!(status, 400);
 }
+
+/// 选路被账号准入筛空时，诊断里写明被挡的 key 和原因（这里是本地 token 上限用满）。
+#[tokio::test]
+async fn admission_exclusions_are_recorded_in_request_diagnostics() {
+    let _serial = SERIAL.lock().await;
+    let bed = setup().await;
+    let (channel, key) = bed.channel("excluded", 0).await;
+    sqlx::query(
+        r#"UPDATE channels SET settings = '{"account_control":{"local_tokens":{"cap":5}}}' WHERE id = $1"#,
+    )
+    .bind(channel)
+    .execute(&bed.pg)
+    .await
+    .unwrap();
+    let user: i64 = sqlx::query_scalar("SELECT id FROM users ORDER BY id LIMIT 1")
+        .fetch_one(&bed.pg)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO billing_records(request_id,log_type,user_id,model_name,channel_id,status,prompt_tokens,completion_tokens,cached_tokens,reasoning_tokens) VALUES($1,2,$2,$3,$4,20,4,6,0,0)")
+        .bind(Uuid::new_v4())
+        .bind(user)
+        .bind(format!("used-{}", bed.suffix))
+        .bind(channel)
+        .execute(&bed.pg)
+        .await
+        .unwrap();
+    assert_eq!(bed.chat().await, 503);
+    let diagnostics = bed.latest_diagnostics().await;
+    assert_eq!(diagnostics["error_phase"], "routing", "{diagnostics}");
+    assert_eq!(
+        diagnostics["excluded"],
+        json!([{"channel_id": channel, "channel_key_id": key, "reason": "local_tokens"}]),
+        "{diagnostics}"
+    );
+}
