@@ -176,8 +176,9 @@ impl ClaudeCodeTls {
             Some(url) => Hop::parse(url)?,
             None => Hop::Direct,
         };
+        let meter = crate::egress_meter::counter(key.proxy.as_deref());
         let Ok(mut guard) = self.pools.write() else {
-            return Ok(pool(&self.ssl, hop));
+            return Ok(pool(&self.ssl, hop, meter));
         };
         // 并发首用时别人可能已经建好了，复用它，免得各建一个池
         if let Some((pool, last_used)) = guard.get(&key) {
@@ -187,7 +188,7 @@ impl ClaudeCodeTls {
         guard.retain(|_, (_, last_used)| {
             now.saturating_sub(last_used.load(Ordering::Relaxed)) < POOL_ENTRY_IDLE.as_secs()
         });
-        let built = pool(&self.ssl, hop);
+        let built = pool(&self.ssl, hop, meter);
         guard.insert(key, (built.clone(), AtomicU64::new(now)));
         Ok(built)
     }
@@ -232,6 +233,7 @@ impl ClaudeCodeTls {
         if self.shape == Shape::Messages {
             arrange_messages(&mut request);
         }
+        crate::egress_meter::count_request(crate::egress_meter::counter(proxy_url).as_deref());
         let pending = self.pool(account, proxy_url)?.request(request);
         let response = match deadline {
             Some(at) => tokio::time::timeout_at(at, pending)
@@ -374,12 +376,13 @@ fn ssl_connector(shape: Shape, extra_root: Option<&[u8]>) -> Result<SslConnector
     Ok(builder.build())
 }
 
-fn pool(ssl: &SslConnector, hop: Hop) -> Pool {
+fn pool(ssl: &SslConnector, hop: Hop, meter: Option<Arc<crate::egress_meter::Counter>>) -> Pool {
     Client::builder(TokioExecutor::new())
         .pool_idle_timeout(POOL_IDLE)
         .build(Connector {
             ssl: ssl.clone(),
             hop: Arc::new(hop),
+            meter,
         })
 }
 
@@ -726,6 +729,8 @@ fn classify(error: &hyper_util::client::legacy::Error) -> UpstreamError {
 struct Connector {
     ssl: SslConnector,
     hop: Arc<Hop>,
+    /// 经代理时数这条连接上的字节（含目标 TLS 与请求头）。
+    meter: Option<Arc<crate::egress_meter::Counter>>,
 }
 
 impl tower_service::Service<Uri> for Connector {
@@ -775,6 +780,10 @@ impl Connector {
                     "connect timed out".into()
                 },
             })??;
+        let stream: BoxIo = match &self.meter {
+            Some(counter) => Box::new(crate::egress_meter::MeteredIo::new(stream, counter.clone())),
+            None => stream,
+        };
         if !https {
             return Ok(Conn::new(stream, forward));
         }

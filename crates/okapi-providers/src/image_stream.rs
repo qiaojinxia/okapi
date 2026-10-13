@@ -1,4 +1,5 @@
 //! Bounded Images SSE transport, shared by OpenAI-compatible and Azure endpoints.
+use crate::egress_meter::MeteredSend as _;
 use crate::openai::{EmbeddingsResponse, MAX_IMAGE_RESPONSE_BYTES, classify, response_bytes};
 use crate::{AzureUpstream, OpenAiUpstream, Outbound, UpstreamError};
 use bytes::Bytes;
@@ -45,7 +46,7 @@ impl OpenAiUpstream {
             reqwest::Method::POST,
             format!("{}{path}", base.trim_end_matches('/')),
         )?;
-        send(req.bearer_auth(credential), body).await
+        send(req.bearer_auth(credential), body, outbound).await
     }
 }
 
@@ -64,6 +65,7 @@ impl AzureUpstream {
         send(
             self.post(endpoint, deployment, path, version, credential, outbound)?,
             body,
+            outbound,
         )
         .await
     }
@@ -97,11 +99,12 @@ fn request_body(
 async fn send(
     req: reqwest::RequestBuilder,
     body: ImageBody,
+    outbound: &Outbound,
 ) -> Result<ImageResponse, UpstreamError> {
     let response = request_body(req, body)?
         .header("accept", "text/event-stream, application/json")
         .timeout(IMAGE_STREAM_TIMEOUT)
-        .send()
+        .send_via(outbound.proxy_url.as_deref())
         .await
         .map_err(|error| classify(&error))?;
     let status = response.status().as_u16();

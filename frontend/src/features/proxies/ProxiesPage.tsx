@@ -23,11 +23,14 @@ import { AssignmentsDrawer } from './AssignmentsDrawer'
 import { GroupDrawer } from './GroupDrawer'
 import { ImportDrawer } from './ImportDrawer'
 import { ProxyDrawer } from './ProxyDrawer'
+import { TrafficPanel } from './TrafficPanel'
+import { proxyTrafficOptions } from './options'
+import { formatBytes } from '@/features/monitor/format'
 import { useReportToast } from './report'
 import type { ProbeResult, ProxyGroupRow, ProxyRow } from './types'
 import { GROUP_MODE_LABEL, exitIpRecentlyChanged } from './types'
 
-type Tab = 'proxies' | 'groups'
+type Tab = 'proxies' | 'groups' | 'traffic'
 
 /// 出口代理页（IMPLEMENTATION §11.41）。
 ///
@@ -44,6 +47,7 @@ export function ProxiesPage() {
       items={[
         { id: 'proxies', label: t('admin:proxiesTab') },
         { id: 'groups', label: t('admin:proxyGroupsTab') },
+        { id: 'traffic', label: t('admin:proxyTrafficTab') },
       ]}
       active={tab}
       onChange={(id) => setTab(id as Tab)}
@@ -62,7 +66,13 @@ export function ProxiesPage() {
           </Link>
         ) : undefined}
       />
-      {tab === 'proxies' ? <ProxyList tabs={tabs} /> : <GroupList tabs={tabs} />}
+      {tab === 'proxies' ? (
+        <ProxyList tabs={tabs} />
+      ) : tab === 'groups' ? (
+        <GroupList tabs={tabs} />
+      ) : (
+        <TrafficPanel tabs={tabs} />
+      )}
     </div>
   )
 }
@@ -84,6 +94,23 @@ function ProxyStatus({ proxy }: { proxy: ProxyRow }) {
     )
   }
   return <Badge variant="success" dot>{t('common:enabled')}</Badge>
+}
+
+/// 列表里的近 24 小时流量：合计加上下行。
+function TrafficCell({ row }: { row: { up_bytes: number; down_bytes: number } | undefined }) {
+  const { t, i18n } = useTranslation()
+  if (!row) return <span className="text-muted-foreground">—</span>
+  return (
+    <span className="flex flex-col items-end tabular-nums">
+      <span className="font-medium">{formatBytes(row.up_bytes + row.down_bytes, i18n.language)}</span>
+      <span className="text-muted-foreground">
+        {t('admin:proxyTrafficSplit', {
+          down: formatBytes(row.down_bytes, i18n.language),
+          up: formatBytes(row.up_bytes, i18n.language),
+        })}
+      </span>
+    </span>
+  )
 }
 
 /// 页签、条数与操作按钮同一行，表格紧跟其后（页头下不再单独占两行）。
@@ -116,6 +143,9 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
       ),
     placeholderData: keepPreviousData,
   })
+  // 近 24 小时流量是附加列：没有 ClickHouse（501）或查不到时只显示「—」，不挡列表
+  const traffic = useQuery({ ...proxyTrafficOptions('24h'), retry: false })
+  const trafficOf = (id: number) => traffic.data?.proxies.find((r) => r.proxy_id === id)
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: qk.adminProxies })
     void queryClient.invalidateQueries({ queryKey: qk.adminProxyGroups })
@@ -171,7 +201,7 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
       {list.isError ? (
         <ErrorState message={describeError(list.error)} onRetry={() => void list.refetch()} />
       ) : list.isPending ? (
-        <TableSkeleton rows={6} cols={6} />
+        <TableSkeleton rows={6} cols={7} />
       ) : rows.length === 0 ? (
         <EmptyState hint={t('admin:proxiesEmptyHint')} action={create} />
       ) : (
@@ -182,6 +212,7 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
               <Th>{t('common:status')}</Th>
               <Th>{t('admin:proxyExit')}</Th>
               <Th>{t('admin:proxyUsage')}</Th>
+              <Th numeric>{t('admin:proxyTraffic24h')}</Th>
               <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -263,6 +294,9 @@ function ProxyList({ tabs }: { tabs: React.ReactNode }) {
                         </span>
                       )}
                     </span>
+                  </Td>
+                  <Td numeric className="text-xs">
+                    <TrafficCell row={trafficOf(p.id)} />
                   </Td>
                   <Td>
                     <div className="flex items-center justify-end gap-0.5">

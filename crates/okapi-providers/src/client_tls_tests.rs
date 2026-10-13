@@ -615,6 +615,30 @@ async fn requests_round_trip_directly_and_through_every_proxy_kind() {
     }
 }
 
+/// 经代理的连接按字节计入该代理（含握手与请求头，远大于请求体）；直连不计。
+#[tokio::test]
+async fn proxied_connections_are_metered_per_proxy() {
+    let origin = origin(false).await;
+    let proxy = format!("http://{}", connect_proxy(None).await);
+    let tls = ClaudeCodeTls::with_root(Shape::Messages, CA).unwrap();
+    let mut body_bytes = 0;
+    for round in 0..2 {
+        let body = format!("body-{round}");
+        body_bytes += body.len();
+        let response = timeout(WAIT, tls.send(request(origin.port(), &body), Some(&proxy)))
+            .await
+            .unwrap()
+            .unwrap();
+        response.text().await.unwrap();
+    }
+    let crate::egress_meter::Sample { up, down, requests } =
+        crate::egress_meter::counter(Some(&proxy)).unwrap().take();
+    assert_eq!(requests, 2);
+    assert!(up > body_bytes as u64 + 200, "up={up}");
+    // 服务端证书在握手里，下行至少有几百字节
+    assert!(down > 500, "down={down}");
+}
+
 fn unreachable(result: Result<reqwest::Response, UpstreamError>) -> (bool, bool) {
     match result {
         Err(UpstreamError::Unreachable {

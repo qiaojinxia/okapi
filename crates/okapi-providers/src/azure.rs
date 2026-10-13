@@ -107,7 +107,9 @@ impl AzureUpstream {
             credential,
             outbound,
         )?;
-        self.inner.send_chat(req, body, stream).await
+        self.inner
+            .send_chat(req, outbound.proxy_url.as_deref(), body, stream)
+            .await
     }
 
     /// 非流式 JSON 端点（embeddings / images/generations 等），`path` 为部署之后的相对路径。
@@ -131,7 +133,12 @@ impl AzureUpstream {
             outbound,
         )?;
         self.inner
-            .send_json(req, body, image_response_limit(path))
+            .send_json(
+                req,
+                outbound.proxy_url.as_deref(),
+                body,
+                image_response_limit(path),
+            )
             .await
     }
 
@@ -153,7 +160,9 @@ impl AzureUpstream {
             credential,
             outbound,
         )?;
-        self.inner.send_speech(req, body).await
+        self.inner
+            .send_speech(req, outbound.proxy_url.as_deref(), body)
+            .await
     }
 
     /// audio/transcriptions | translations：multipart 入、JSON 出。
@@ -177,7 +186,12 @@ impl AzureUpstream {
             outbound,
         )?;
         self.inner
-            .send_multipart(req, parts, image_response_limit(path))
+            .send_multipart(
+                req,
+                outbound.proxy_url.as_deref(),
+                parts,
+                image_response_limit(path),
+            )
             .await
     }
 }

@@ -43,6 +43,22 @@ const channel = {
   egress: { mode: 'proxy', proxy_id: 1 },
 }
 
+/// 近 24 小时 hk-1 有流量（两个 5 分钟桶），jp-1 没有。
+function traffic(range: string | null) {
+  const bucket = range === '1h' ? 60 : range === '7d' ? 3600 : 300
+  const now = Math.floor(Date.now() / 1000 / bucket) * bucket
+  return {
+    range: range ?? '24h', bucket_secs: bucket, span_secs: range === '1h' ? 3600 : range === '7d' ? 604_800 : 86_400,
+    proxies: [{
+      proxy_id: 1, up_bytes: 3 * 1024 * 1024, down_bytes: 45 * 1024 * 1024, requests: 120,
+      points: [
+        { t: now - bucket, up_bytes: 1024 * 1024, down_bytes: 15 * 1024 * 1024, requests: 40 },
+        { t: now, up_bytes: 2 * 1024 * 1024, down_bytes: 30 * 1024 * 1024, requests: 80 },
+      ],
+    }],
+  }
+}
+
 async function prepare(page: Page, path: string) {
   await page.addInitScript(() => {
     localStorage.setItem('okapi.key', 'egress-ui-fixture')
@@ -60,6 +76,7 @@ async function prepare(page: Page, path: string) {
       ? { user_id: 1, key_id: 1, group: 'default', balance_micro: 10_000_000, role: 100, permissions: ['*'] }
       : url.pathname === '/api/notice' ? { notice: null }
         : url.pathname === '/admin/proxies' ? { data: proxies, total: proxies.length }
+        : url.pathname === '/admin/proxies/traffic' ? traffic(url.searchParams.get('range'))
           : url.pathname === '/admin/proxy-groups' ? { data: groups, total: groups.length }
             : url.pathname === '/admin/egress/default' ? { egress: { mode: 'direct' } }
               : url.pathname === '/admin/channels' ? { data: [channel], total: 1, enabled: 1 }
@@ -250,4 +267,29 @@ test('高级设置里的出口配置键给「前往设置」，跳到「出口�
   await expect(page.getByRole('tab', { name: '出口代理', exact: true })).toBeFocused()
   await expect(page.getByRole('switch', { name: '开启后台探测' })).toBeVisible()
   await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+test('流量：列表带近 24 小时流量；流量页签有上下行合计、趋势图和各代理汇总，换范围重新取数', async ({ page }) => {
+  const ranges: string[] = []
+  page.on('request', (request) => {
+    const url = new URL(request.url())
+    if (url.pathname === '/admin/proxies/traffic') ranges.push(url.searchParams.get('range') ?? '')
+  })
+  await prepare(page, '/admin/proxies')
+  const hk = page.getByRole('row').filter({ hasText: 'hk-1' })
+  await expect(hk).toContainText('48 MB')
+  await expect(hk).toContainText('↓45 MB · ↑3 MB')
+  await expect(page.getByRole('row').filter({ hasText: 'jp-1' })).toContainText('—')
+
+  await page.getByRole('tab', { name: '流量' }).click()
+  await expect(page.getByText('下行').first()).toBeVisible()
+  await expect(page.getByText('45 MB').first()).toBeVisible()
+  await expect(page.getByText('120', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('group', { name: '流量趋势' })).toBeVisible()
+  const row = page.getByRole('row').filter({ hasText: 'hk-1' })
+  await expect(row).toContainText('48 MB')
+  await expect(page.getByText(/订阅渠道（Claude Code 外形）按连接字节统计/)).toBeVisible()
+  await page.screenshot({ path: process.env.TRAFFIC_SHOT ?? 'test-results/proxy-traffic.png', fullPage: true })
+  await page.getByRole('button', { name: '近 7 天' }).click()
+  await expect.poll(() => ranges).toContain('7d')
 })

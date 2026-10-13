@@ -707,3 +707,17 @@ AS SELECT
     sumState(toUInt64(ifNull(cache_write_tokens, 0))) AS write_tokens
 FROM request_log_raw
 GROUP BY user_id, api_key_id, model, hour;
+
+-- 出口代理流量：每个进程每分钟每个代理一行（node 区分副本），读时 sum；只留 7 天。
+CREATE TABLE IF NOT EXISTS egress_traffic_minute (
+    minute     DateTime('UTC'),
+    proxy_id   UInt64,
+    node       LowCardinality(String),
+    up_bytes   UInt64,
+    down_bytes UInt64,
+    requests   UInt64
+) ENGINE = SummingMergeTree
+PARTITION BY toYYYYMMDD(minute)
+ORDER BY (proxy_id, minute, node)
+TTL minute + INTERVAL 7 DAY
+SETTINGS non_replicated_deduplication_window = 1000;

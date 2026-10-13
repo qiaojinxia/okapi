@@ -19,6 +19,7 @@ use okapi_providers::http::ProxyEndpoint;
 use okapi_store::AuthedKey;
 use okapi_store::auth::PermScope;
 use okapi_store::egress::{self, Binding, GroupMember};
+use okapi_store::egress_traffic;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -189,6 +190,69 @@ pub async fn list_proxies(
         })
         .collect();
     Ok(Json(json!({ "data": data, "total": page.total })))
+}
+
+#[derive(Deserialize)]
+pub struct TrafficQuery {
+    /// `1h` / `24h`（缺省）/ `7d`。
+    #[serde(default)]
+    pub range: Option<String>,
+}
+
+/// GET /admin/proxies/traffic：各代理在范围内的上下行字节与请求数，按范围自动分桶
+/// （1h 按分钟、24h 按 5 分钟、7d 按小时）。没有流量的代理不出现。
+pub async fn proxy_traffic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<TrafficQuery>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_READ).await?;
+    let range = egress_traffic::Range::parse(q.range.as_deref())
+        .ok_or_else(|| AppError::bad_request().with_param("range"))?;
+    let Some(ch) = state.ch.as_ref() else {
+        return Err(AppError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            codes::STATS_DISABLED,
+        ));
+    };
+    let owned = match owner_filter(scope, &actor) {
+        Some(owner) => Some(egress_traffic::owned_proxy_ids(&state.pg, owner).await?),
+        None => None,
+    };
+    let points = egress_traffic::series(ch, range, owned.as_deref()).await?;
+    let mut proxies: Vec<Value> = Vec::new();
+    for point in points {
+        let entry = json!({
+            "t": point.t,
+            "up_bytes": point.up_bytes,
+            "down_bytes": point.down_bytes,
+            "requests": point.requests,
+        });
+        match proxies.last_mut() {
+            Some(last) if last["proxy_id"] == point.proxy_id => {
+                for key in ["up_bytes", "down_bytes", "requests"] {
+                    last[key] =
+                        json!(last[key].as_u64().unwrap_or(0) + entry[key].as_u64().unwrap_or(0));
+                }
+                if let Some(list) = last["points"].as_array_mut() {
+                    list.push(entry);
+                }
+            }
+            _ => proxies.push(json!({
+                "proxy_id": point.proxy_id,
+                "up_bytes": point.up_bytes,
+                "down_bytes": point.down_bytes,
+                "requests": point.requests,
+                "points": [entry],
+            })),
+        }
+    }
+    Ok(Json(json!({
+        "range": q.range.as_deref().unwrap_or("24h"),
+        "bucket_secs": range.bucket_secs(),
+        "span_secs": range.span_secs(),
+        "proxies": proxies,
+    })))
 }
 
 #[derive(Deserialize)]

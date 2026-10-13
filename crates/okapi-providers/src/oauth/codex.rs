@@ -11,6 +11,7 @@
 pub mod account;
 
 use super::{Pkce, Tokens, form_encode, parse_tokens, token_outbound};
+use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
 use crate::openai::{ChatResponse, StreamHandle, classify};
 use crate::responses::usage_from_responses;
@@ -334,7 +335,10 @@ pub async fn list_models(
     for (name, value) in headers {
         req = req.header(name, value);
     }
-    let resp = req.send().await.map_err(|e| classify(&e))?;
+    let resp = req
+        .send_via(outbound.proxy_url.as_deref())
+        .await
+        .map_err(|e| classify(&e))?;
     let status = resp.status().as_u16();
     let bytes = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
     if !(200..300).contains(&status) {

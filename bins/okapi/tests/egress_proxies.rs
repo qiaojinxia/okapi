@@ -1508,3 +1508,81 @@ async fn tunnel_failures_are_verified_before_tripping_a_shared_proxy() {
         .await
         .unwrap();
 }
+
+/// 经代理的请求计入该代理的流量：落 ClickHouse 后由 `/admin/proxies/traffic` 按范围分桶读出。
+#[tokio::test]
+async fn proxied_traffic_is_metered_flushed_and_charted() {
+    let _serial = SERIAL.lock().await;
+    let Some(ch_url) = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL") else {
+        return;
+    };
+    let bed = setup().await;
+    let ch = okapi_store::ChClient::new(&ch_url, "okapi").unwrap();
+    ch.ensure_schema().await.unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let proxy = bed
+        .proxy("metered", spawn_proxy(Arc::clone(&hits)).await, None)
+        .await;
+    let (channel, _) = bed.channel("metered", 0).await;
+    bed.bind(channel, json!({"mode": "proxy", "proxy_id": proxy}))
+        .await;
+    for _ in 0..2 {
+        assert_eq!(bed.chat().await, 200);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 2);
+    okapi::ops::egress_traffic::Flusher::new(
+        bed.pg.clone(),
+        ch.clone(),
+        Some(master_key()),
+        "traffic-test".into(),
+    )
+    .flush()
+    .await;
+
+    // 统计接口要 ClickHouse：另起一个带 CH 的控制台
+    let mut state = gateway::build_state(
+        &std::env::var("DATABASE_URL").unwrap(),
+        &std::env::var("OKAPI_REDIS_URL").unwrap(),
+        "traffic-test",
+        Some(&ch_url),
+        None,
+    )
+    .await
+    .unwrap();
+    state.master_key = Some(Arc::from(master_key().as_str()));
+    let console = serve(console::router(state)).await;
+    let traffic = |range: &'static str| {
+        let url = format!("http://{console}/admin/proxies/traffic?range={range}");
+        let token = bed.admin_token.clone();
+        async move {
+            let resp = reqwest::Client::new()
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap();
+            (resp.status().as_u16(), resp.json::<Value>().await.unwrap())
+        }
+    };
+    let (status, body) = traffic("1h").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["bucket_secs"], 60);
+    let entry = body["proxies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["proxy_id"] == proxy)
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(entry["requests"], 2, "{entry}");
+    // 请求体是两次聊天的 JSON，响应体是上游的应答
+    assert!(entry["up_bytes"].as_u64().unwrap() > 100, "{entry}");
+    assert!(entry["down_bytes"].as_u64().unwrap() > 100, "{entry}");
+    let points = entry["points"].as_array().unwrap();
+    assert!(!points.is_empty());
+    let summed: u64 = points.iter().map(|p| p["up_bytes"].as_u64().unwrap()).sum();
+    assert_eq!(summed, entry["up_bytes"].as_u64().unwrap());
+    let (status, body) = traffic("7d").await;
+    assert_eq!((status, body["bucket_secs"].clone()), (200, json!(3600)));
+    let (status, _) = traffic("30d").await;
+    assert_eq!(status, 400);
+}

@@ -1,7 +1,7 @@
 import { queryOptions } from '@tanstack/react-query'
 import { apiFetch, ApiError } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
-import type { EgressBinding, ProxyGroupRow, ProxyRow } from './types'
+import type { EgressBinding, ProxyGroupRow, ProxyRow, TrafficRange, TrafficResp } from './types'
 
 /// 选择器要的是完整目录，与列表页的分页无关（同 `poolOptions`）。
 async function loadAll<T>(base: string, id: (row: T) => string | number): Promise<T[]> {
@@ -44,4 +44,13 @@ export const egressDefaultOptions = () =>
     queryKey: qk.egressDefault,
     queryFn: () => apiFetch<{ egress: EgressBinding }>('/admin/egress/default'),
     staleTime: 30_000,
+  })
+
+/// 流量每分钟落库一次，一分钟刷新足够。
+export const proxyTrafficOptions = (range: TrafficRange) =>
+  queryOptions({
+    queryKey: qk.adminProxyTraffic(range),
+    queryFn: () => apiFetch<TrafficResp>(`/admin/proxies/traffic?range=${range}`),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
   })

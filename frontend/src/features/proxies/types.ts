@@ -151,3 +151,30 @@ export const GROUP_MODE_HINT = {
   pinned: 'admin:proxyGroupPinnedHint',
   rotate: 'admin:proxyGroupRotateHint',
 } as const
+
+/// GET /admin/proxies/traffic 的范围：粒度跟着走（1h 按分钟、24h 按 5 分钟、7d 按小时）。
+export type TrafficRange = '1h' | '24h' | '7d'
+
+export interface TrafficPoint {
+  /// 桶起点（Unix 秒）。
+  t: number
+  up_bytes: number
+  down_bytes: number
+  requests: number
+}
+
+/// 一个代理在范围内的流量；没有流量的代理不出现。
+export interface ProxyTraffic {
+  proxy_id: number
+  up_bytes: number
+  down_bytes: number
+  requests: number
+  points: TrafficPoint[]
+}
+
+export interface TrafficResp {
+  range: TrafficRange
+  bucket_secs: number
+  span_secs: number
+  proxies: ProxyTraffic[]
+}

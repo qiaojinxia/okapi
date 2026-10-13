@@ -329,8 +329,7 @@ impl HttpPool {
                 )
                 .await;
         }
-        request
-            .send()
+        crate::egress_meter::send(request, outbound.proxy_url.as_deref())
             .await
             .map_err(|e| crate::anthropic::classify(&e))
     }

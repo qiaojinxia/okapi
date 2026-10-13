@@ -9,6 +9,7 @@
 //! 本模块只负责传输、事件切分与 usage 解析：事件原文透出（保留 event 名），
 //! 提取首字判定 / 字符数 / usage 供 gateway 泵送与结算。
 
+use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
 use crate::openai::{ChatResponse, OpenAiUpstream, StreamHandle};
 use crate::types::ChatEvent;
@@ -48,7 +49,7 @@ pub async fn count_input_tokens_at(
         request = request.header(*name, *value);
     }
     let mut response = request
-        .send()
+        .send_via(outbound.proxy_url.as_deref())
         .await
         .map_err(|e| crate::openai::classify(&e))?;
     let status = response.status().as_u16();
@@ -297,7 +298,10 @@ pub async fn send_responses_at(
         req = req.timeout(NON_STREAM_TIMEOUT);
     }
 
-    let resp = req.send().await.map_err(|e| crate::openai::classify(&e))?;
+    let resp = req
+        .send_via(outbound.proxy_url.as_deref())
+        .await
+        .map_err(|e| crate::openai::classify(&e))?;
     let status = resp.status().as_u16();
     let upstream_request_id = resp
         .headers()

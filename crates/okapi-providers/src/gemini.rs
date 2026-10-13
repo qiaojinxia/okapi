@@ -3,6 +3,7 @@
 //! 只负责传输与事件切分：流式返回原生 GenerateContentResponse chunk 原文，
 //! 协议转换在 convert::openai_to_gemini 进行（禁统一 IR）。
 
+use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
 use bytes::Bytes;
 use eventsource_stream::Eventsource;
@@ -87,7 +88,10 @@ pub async fn send_generate_at(
         req = req.timeout(NON_STREAM_TIMEOUT);
     }
 
-    let resp = req.send().await.map_err(|e| classify(&e))?;
+    let resp = req
+        .send_via(outbound.proxy_url.as_deref())
+        .await
+        .map_err(|e| classify(&e))?;
     let status = resp.status().as_u16();
     let upstream_request_id = resp
         .headers()

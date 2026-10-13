@@ -258,6 +258,7 @@ fn channel_routes() -> ConsoleRouter {
             get(egress::list_proxies).post(egress::create_proxy),
         )
         .route("/admin/proxies/test", post(egress::test_proxy_url))
+        .route("/admin/proxies/traffic", get(egress::proxy_traffic))
         .route("/admin/proxies/import", post(egress::import_proxies))
         .route(
             "/admin/proxies/{id}",

@@ -1,5 +1,6 @@
 //! OpenAI 方向上游客户端（原生 OpenAI 与一切 OpenAI 兼容上游共用）。
 
+use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
 use crate::http::{HttpPool, Outbound};
 use crate::types::ChatEvent;
@@ -149,7 +150,8 @@ impl OpenAiUpstream {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {credential}"),
         );
-        self.send_chat(req, body, stream).await
+        self.send_chat(req, outbound.proxy_url.as_deref(), body, stream)
+            .await
     }
 
     /// chat completions 的发送与响应解析（URL 与鉴权头由调用方装好）：
@@ -157,6 +159,7 @@ impl OpenAiUpstream {
     pub(crate) async fn send_chat(
         &self,
         req: reqwest::RequestBuilder,
+        proxy_url: Option<&str>,
         body: Bytes,
         stream: bool,
     ) -> Result<ChatResponse, UpstreamError> {
@@ -167,7 +170,7 @@ impl OpenAiUpstream {
             req = req.timeout(NON_STREAM_TIMEOUT);
         }
 
-        let resp = req.send().await.map_err(|e| classify(&e))?;
+        let resp = req.send_via(proxy_url).await.map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
         let upstream_request_id = resp
             .headers()
@@ -253,13 +256,15 @@ impl OpenAiUpstream {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {credential}"),
         );
-        self.send_json(req, body, limit).await
+        self.send_json(req, outbound.proxy_url.as_deref(), body, limit)
+            .await
     }
 
     /// 非流式 JSON 请求的发送与响应解析（URL 与鉴权头由调用方装好）。
     pub(crate) async fn send_json(
         &self,
         req: reqwest::RequestBuilder,
+        proxy_url: Option<&str>,
         body: Bytes,
         limit: Option<usize>,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
@@ -267,7 +272,7 @@ impl OpenAiUpstream {
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone())
             .timeout(NON_STREAM_TIMEOUT)
-            .send()
+            .send_via(proxy_url)
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
@@ -324,20 +329,22 @@ impl OpenAiUpstream {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {credential}"),
         );
-        self.send_speech(req, body).await
+        self.send_speech(req, outbound.proxy_url.as_deref(), body)
+            .await
     }
 
     /// speech 的发送与二进制响应读取（URL 与鉴权头由调用方装好）。
     pub(crate) async fn send_speech(
         &self,
         req: reqwest::RequestBuilder,
+        proxy_url: Option<&str>,
         body: Bytes,
     ) -> Result<(u16, String, Bytes), UpstreamError> {
         let resp = req
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone())
             .timeout(NON_STREAM_TIMEOUT)
-            .send()
+            .send_via(proxy_url)
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
@@ -401,13 +408,15 @@ impl OpenAiUpstream {
             reqwest::header::AUTHORIZATION,
             format!("Bearer {credential}"),
         );
-        self.send_multipart(req, parts, limit).await
+        self.send_multipart(req, outbound.proxy_url.as_deref(), parts, limit)
+            .await
     }
 
     /// multipart 的组装、发送与 JSON 响应读取（URL 与鉴权头由调用方装好）。
     pub(crate) async fn send_multipart(
         &self,
         req: reqwest::RequestBuilder,
+        proxy_url: Option<&str>,
         parts: Vec<(String, Option<String>, Option<String>, Bytes)>,
         limit: Option<usize>,
     ) -> Result<EmbeddingsResponse, UpstreamError> {
@@ -435,7 +444,7 @@ impl OpenAiUpstream {
         let resp = req
             .multipart(form)
             .timeout(NON_STREAM_TIMEOUT)
-            .send()
+            .send_via(proxy_url)
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
@@ -506,7 +515,7 @@ impl OpenAiUpstream {
                 format!("Bearer {credential}"),
             )
             .timeout(NON_STREAM_TIMEOUT)
-            .send()
+            .send_via(outbound.proxy_url.as_deref())
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
@@ -551,7 +560,10 @@ impl OpenAiUpstream {
                 format!("Bearer {credential}"),
             );
         }
-        request.send().await.map_err(|error| classify(&error))
+        request
+            .send_via(outbound.proxy_url.as_deref())
+            .await
+            .map_err(|error| classify(&error))
     }
 }
 

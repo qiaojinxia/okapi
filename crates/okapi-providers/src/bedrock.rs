@@ -8,6 +8,7 @@
 use crate::anthropic::{AnthropicEvent, MessagesResponse, MessagesStream, classify};
 use crate::aws_eventstream::Decoder;
 use crate::aws_sigv4::{self, AwsCredentials, SignParams};
+use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
 use base64::Engine as _;
 use bytes::Bytes;
@@ -194,7 +195,10 @@ impl BedrockUpstream {
         for (k, v) in &signed {
             req = req.header(k.as_str(), v.as_str());
         }
-        let resp = req.send().await.map_err(|e| classify(&e))?;
+        let resp = req
+            .send_via(outbound.proxy_url.as_deref())
+            .await
+            .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
         let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         if !(200..300).contains(&status) {
@@ -232,7 +236,7 @@ impl BedrockUpstream {
                 format!("Bearer {credential}"),
             )
             .timeout(NON_STREAM_TIMEOUT)
-            .send()
+            .send_via(outbound.proxy_url.as_deref())
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
@@ -307,7 +311,10 @@ impl BedrockUpstream {
         if !stream {
             req = req.timeout(NON_STREAM_TIMEOUT);
         }
-        req.body(payload).send().await.map_err(|e| classify(&e))
+        req.body(payload)
+            .send_via(outbound.proxy_url.as_deref())
+            .await
+            .map_err(|e| classify(&e))
     }
 }
 

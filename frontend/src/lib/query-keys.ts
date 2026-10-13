@@ -37,6 +37,7 @@ export const qk = {
   /// 出口代理（§11.41）：列表分页变体与选择器全量目录同挂前缀，写操作按前缀一起失效。
   adminProxies: ['admin', 'proxies'] as const,
   adminProxyOptions: ['admin', 'proxies', 'options'] as const,
+  adminProxyTraffic: (range: string) => ['admin', 'proxies', 'traffic', range] as const,
   adminProxyGroups: ['admin', 'proxy-groups'] as const,
   adminProxyGroupOptions: ['admin', 'proxy-groups', 'options'] as const,
   proxyGroupAssignments: (code: string) => ['admin', 'proxy-groups', 'assignments', code] as const,

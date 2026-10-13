@@ -1,6 +1,7 @@
 //! custom_pass 透传传输（IMPLEMENTATION §4.1 模块位 / §4.4 语义）：
 //! 任意方法 + 路径的透明代理，响应体流式回传；协议语义与计费由 gateway 决策。
 
+use crate::egress_meter::MeteredSend as _;
 use crate::error::UpstreamError;
 use crate::http::{HttpPool, Outbound};
 use bytes::Bytes;
@@ -78,7 +79,10 @@ impl PassUpstream {
             builder = builder.body(req.body.to_vec());
         }
 
-        let resp = builder.send().await.map_err(|e| classify(&e))?;
+        let resp = builder
+            .send_via(outbound.proxy_url.as_deref())
+            .await
+            .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
         if (200..300).contains(&status) {
             let content_type = resp

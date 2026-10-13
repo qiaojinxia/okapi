@@ -24,6 +24,7 @@ pub mod bedrock;
 mod client_tls;
 pub mod convert;
 pub mod custom_pass;
+pub mod egress_meter;
 pub mod egress_probe;
 pub mod error;
 pub mod gemini;

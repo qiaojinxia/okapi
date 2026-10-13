@@ -1,4 +1,5 @@
 //! One HTTP/SSE Responses request for a WS ingress turn. No replay or protocol conversion.
+use crate::egress_meter::MeteredSend as _;
 use crate::{ChatEvent, HttpPool, Outbound, StreamHandle, UpstreamError, responses};
 use bytes::Bytes;
 use eventsource_stream::Eventsource;
@@ -23,7 +24,7 @@ pub async fn send(
         request = request.header(*name, *value);
     }
     let mut response = request
-        .send()
+        .send_via(outbound.proxy_url.as_deref())
         .await
         .map_err(|_| invalid("responses_http_transport"))?;
     let status = response.status().as_u16();

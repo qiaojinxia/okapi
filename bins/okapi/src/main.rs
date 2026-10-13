@@ -40,8 +40,8 @@ enum Role {
     SealCredentials,
 }
 
-/// 服务角色把告警日志汇总到 Redis（§11.43）。独立连接：日志汇总不该和业务共用一条
-/// 连接排队；连不上就只留本进程缓冲。迁移等一次性命令不启动。
+/// 服务角色把告警日志汇总到 Redis（§11.43），并启动出口代理流量的落库。独立连接：
+/// 日志汇总不该和业务共用一条连接排队；连不上就只留本进程缓冲。迁移等一次性命令不启动。
 async fn start_ops_log(role: &Role, cfg: &Config) {
     let role = match role {
         Role::Gateway => "gateway",
@@ -50,6 +50,8 @@ async fn start_ops_log(role: &Role, cfg: &Config) {
         Role::All => "all",
         Role::Migrate { .. } | Role::SealCredentials => return,
     };
+    // 出口代理流量同样每个服务进程各自落库
+    okapi::ops::egress_traffic::spawn(cfg);
     match okapi_store::connect_redis(&cfg.redis_url).await {
         Ok(redis) => okapi::ops::logbuf::spawn_flusher(redis, &cfg.node, role),
         Err(e) => tracing::warn!(error = %e, "ops log flusher disabled"),
