@@ -6,6 +6,7 @@
 use axum::Router;
 use axum::response::IntoResponse;
 use axum::routing::post;
+use futures::StreamExt as _;
 use okapi::gateway;
 use okapi_domain::Money;
 use serde_json::{Value, json};
@@ -60,6 +61,13 @@ struct Env {
 
 /// `policy`：写进 channels.retry_policy 的 JSON（None = 不配，走缺省）。
 async fn setup(policy: Option<Value>, fail_first: usize) -> Env {
+    let hits: Hits = Arc::new(AtomicUsize::new(0));
+    let mock = spawn_flaky_mock(Arc::clone(&hits), fail_first).await;
+    setup_at(policy, mock, hits).await
+}
+
+/// 同 `setup`，上游换成调用方给的 mock（路径 `/up/v1/chat/completions`）。
+async fn setup_at(policy: Option<Value>, mock: SocketAddr, hits: Hits) -> Env {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL（.env）");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL（.env）");
@@ -92,8 +100,6 @@ async fn setup(policy: Option<Value>, fail_first: usize) -> Env {
         .await
         .unwrap();
 
-    let hits: Hits = Arc::new(AtomicUsize::new(0));
-    let mock = spawn_flaky_mock(Arc::clone(&hits), fail_first).await;
     let (channel_id, _) = okapi_store::provision::create_channel(
         &pg,
         &format!("ch-{suffix}"),
@@ -232,6 +238,66 @@ async fn out_of_range_policy_is_clamped() {
     let env = setup(Some(json!({"same_key_retries": 99})), 9).await;
     assert_ne!(chat(&env).await, 200, "9 连挂超出夹取后的 3 次预算");
     assert_eq!(env.hits.load(Ordering::SeqCst), 4, "首发 + 夹到 3 次重试");
+}
+
+/// 上游已开始回事件（这里是只带 role 的首块；Anthropic 是 message_start 与 ping）但首字很慢：
+/// 长上下文的预填充/思考常超过首字窗口，不能判超时重发——那会把同一个大请求在订阅账号上反复烧。
+#[tokio::test]
+async fn slow_first_token_after_stream_start_is_not_a_timeout() {
+    let hits: Hits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+    let handler = move |_b: axum::body::Bytes| {
+        let hits = Arc::clone(&counted);
+        async move {
+            hits.fetch_add(1, Ordering::SeqCst);
+            let events = futures::stream::iter([0u64, 1, 2])
+                .then(|i| async move {
+                    let chunk = match i {
+                        0 => json!({"choices":[{"index":0,"delta":{"role":"assistant"}}]}),
+                        1 => {
+                            // 流已开始，首字 6s 后才来（渠道窗口 5s，下限）
+                            tokio::time::sleep(Duration::from_secs(6)).await;
+                            json!({"choices":[{"index":0,"delta":{"content":"late"}}]})
+                        }
+                        _ => {
+                            json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}})
+                        }
+                    };
+                    Ok::<_, std::convert::Infallible>(format!("data: {chunk}\n\n"))
+                })
+                .chain(futures::stream::once(async {
+                    Ok("data: [DONE]\n\n".to_owned())
+                }));
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                axum::body::Body::from_stream(events),
+            )
+                .into_response()
+        }
+    };
+    let router = Router::new().route("/up/v1/chat/completions", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let env = setup_at(
+        Some(json!({"first_output_timeout_secs": 5, "same_key_retries": 1})),
+        mock,
+        Arc::clone(&hits),
+    )
+    .await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({"model": env.model, "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(response.text().await.unwrap().contains("late"));
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "不重发");
 }
 
 /// 首字窗口按渠道生效：配 5 秒的渠道不会等满 30 秒缺省窗口。

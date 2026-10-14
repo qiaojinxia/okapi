@@ -82,9 +82,13 @@ pub(super) fn prepared_with_calibration(
         .join(", ");
     // Evidence can cover an old row whose original unit aggregate was never
     // installed. Known units are disjoint; observations must never exceed bills.
+    // The two MVs are read at different instants while the outbox keeps inserting, so
+    // the bill count may trail by in-flight rows; the units' own MV count cannot.
     let count = "ifNull(c.legacy_character_n,0)";
     let quantity = "ifNull(c.legacy_characters,0)";
-    let guard = format!("toInt64(throwIf({count}+u.unit_character_n+u.unit_token_n>e.expected))");
+    let guard = format!(
+        "toInt64(throwIf({count}+u.unit_character_n+u.unit_token_n>greatest(e.expected,u.unit_observed)))"
+    );
     format!(
         "(SELECT {selected},greatest(u.unit_observed,u.unit_character_n+u.unit_token_n+{count})+{guard} AS unit_observed,u.unit_characters+{quantity} AS unit_characters,u.unit_character_n+{count} AS unit_character_n,u.unit_token_n AS unit_token_n,{quantity} AS legacy_characters,{count} AS legacy_character_n FROM {base} u LEFT JOIN {legacy} c USING ({keys}) LEFT JOIN {expected} e USING ({keys}))"
     )

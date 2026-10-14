@@ -70,8 +70,10 @@ pub(super) fn prepared_with_calibration(
     let known = "r.output_rate_known+ifNull(c.legacy_character_n,0)";
     // Proven old characters can establish non-Token coverage even when their
     // rate MV was never installed. They add no Token/duration sample.
+    // `e.n` is read from another MV and may trail in-flight inserts; the rate MV's own
+    // request count bounds its known units atomically.
     format!(
-        "(SELECT {selected_keys},greatest(r.output_rate_observed,{known})+toInt64(throwIf({known}>e.n)) AS output_rate_observed,r.output_rate_sum,r.output_rate_samples,r.output_rate_output,{known} AS output_rate_known,r.output_rate_tokens FROM {base} r LEFT JOIN {correction} c USING ({keys}) LEFT JOIN {expected} e USING ({keys}))"
+        "(SELECT {selected_keys},greatest(r.output_rate_observed,{known})+toInt64(throwIf({known}>greatest(e.n,r.output_rate_observed))) AS output_rate_observed,r.output_rate_sum,r.output_rate_samples,r.output_rate_output,{known} AS output_rate_known,r.output_rate_tokens FROM {base} r LEFT JOIN {correction} c USING ({keys}) LEFT JOIN {expected} e USING ({keys}))"
     )
 }
 

@@ -46,6 +46,8 @@ const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
 /// 首字窗口（连接 + 首个产出事件）；窗口内失败可无痕 failover。
 /// 缺省值——渠道可用 `retry_policy.first_output_timeout_secs` 覆盖（5..=300）。
 const FIRST_OUTPUT_TIMEOUT: Duration = Duration::from_secs(30);
+/// 上游已回过事件后的首字空闲窗口（见 `attempt_stream`）。
+const STARTED_IDLE_WINDOW: Duration = Duration::from_mins(5);
 /// 单请求最多尝试的渠道 key 数。
 const MAX_ATTEMPTS: usize = 3;
 /// 预扣补全上限的兜底值与硬顶。
@@ -2872,11 +2874,15 @@ async fn attempt_stream(
     };
 
     // 首字前只缓冲：窗口内失败/空回复对客户端无痕（§3.7-1/2）
+    // 窗口分两段：一个事件都没有按渠道的首字窗口判挂死；上游已经开始回事件（message_start、
+    // ping）说明在处理，长上下文的预填充与思考常超过 30 秒，改按空闲计、每来一个事件重新计时。
     let mut buffered: Vec<ChatEvent> = Vec::new();
-    let first = tokio::time::timeout(first_output_window, async {
+    let first: Result<Result<bool, UpstreamError>, tokio::time::error::Elapsed> = async {
+        let mut window = first_output_window;
         loop {
-            match handle.events.next().await {
+            match tokio::time::timeout(window, handle.events.next()).await? {
                 Some(Ok(event @ ChatEvent::Data { .. })) => {
+                    window = first_output_window.max(STARTED_IDLE_WINDOW);
                     let has_output = matches!(
                         event,
                         ChatEvent::Data {
@@ -2885,22 +2891,27 @@ async fn attempt_stream(
                         }
                     );
                     if first_output_buffer_full(&buffered) {
-                        return Err(UpstreamError::Stream("first_output_buffer_limit".into()));
+                        return Ok(Err(UpstreamError::Stream(
+                            "first_output_buffer_limit".into(),
+                        )));
                     }
                     buffered.push(event);
                     if has_output {
-                        return Ok(true);
+                        return Ok(Ok(true));
                     }
                 }
-                Some(Ok(ChatEvent::Done)) | None => return Ok(false),
-                Some(Err(err)) => return Err(err),
+                Some(Ok(ChatEvent::Done)) | None => return Ok(Ok(false)),
+                Some(Err(err)) => return Ok(Err(err)),
             }
         }
-    })
+    }
     .await;
 
     match first {
         Err(_) => {
+            // 超时前收到了几个事件：0 = 上游挂死；>0 = 已开始处理但空闲超过窗口
+            bill.trace
+                .set("first_output_events", serde_json::json!(buffered.len()));
             bill.trace.failure(&UpstreamError::Timeout);
             Err(AttemptError::Retriable {
                 code: codes::UPSTREAM_TIMEOUT,
