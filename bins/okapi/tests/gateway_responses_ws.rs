@@ -547,6 +547,48 @@ async fn handshake_failover_is_allowed_before_create_and_stops_after_create() {
     assert!(env.accepted.try_recv().is_err());
 }
 
+/// 断线重连（新连接）回到上一条连接落的账号：会话中途换账号，历史里的加密推理项新账号验不过。
+#[tokio::test]
+async fn reconnect_with_same_session_returns_to_the_same_account() {
+    let mut env = setup().await;
+    let session = |env: &Env| {
+        let mut request = env.request();
+        request
+            .headers_mut()
+            .insert("session_id", "codex-session-1".parse().unwrap());
+        request
+    };
+    env.handshake_failure.store(503, Ordering::SeqCst);
+    let mut client = timeout(WAIT, tokio_tungstenite::connect_async(session(&env)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    send(&mut client, env.body(None)).await;
+    let (mut peer, _, path) = env.peer().await;
+    assert_eq!(path, "/b/responses", "高优先级的 a 握手失败，落到 b");
+    upstream_read(&mut peer).await;
+    completed(&mut peer, None, 20).await;
+    read(&mut client).await;
+    client.close(None).await.unwrap();
+    drop(peer);
+
+    // a 恢复且优先级更高；同一会话重连仍回到 b
+    env.handshake_failure.store(0, Ordering::SeqCst);
+    let mut client = timeout(WAIT, tokio_tungstenite::connect_async(session(&env)))
+        .await
+        .unwrap()
+        .unwrap()
+        .0;
+    send(&mut client, env.body(None)).await;
+    let (mut peer, _, path) = env.peer().await;
+    assert_eq!(path, "/b/responses", "重连沿用会话粘性");
+    upstream_read(&mut peer).await;
+    completed(&mut peer, None, 20).await;
+    read(&mut client).await;
+    env.idle().await;
+}
+
 #[tokio::test]
 async fn malformed_frames_and_warmup_without_usage_do_not_fabricate_charges() {
     let mut env = setup().await;

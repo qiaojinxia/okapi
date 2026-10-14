@@ -277,6 +277,30 @@ fn compact_response_valid(body: &[u8]) -> bool {
         && value["usage"]["output_tokens"].as_u64().is_some()
 }
 
+/// 上游验不过历史里的加密推理项：`encrypted_content` 绑签发账号的组织，会话换了账号
+/// （额度切换、并发满、粘性过期）后新账号回 400 `invalid_encrypted_content`。
+#[must_use]
+pub fn rejects_foreign_encrypted_content(status: u16, body: &[u8]) -> bool {
+    status == 400
+        && serde_json::from_slice::<Value>(body)
+            .is_ok_and(|v| v["error"]["code"] == "invalid_encrypted_content")
+}
+
+/// 去掉 `input` 里的推理项（连同 id：`store=false` 时只留 id 新账号也找不到）。推理项只是
+/// 上一轮的思考过程，去掉后模型在新账号上重新推理，消息、工具调用与结果原样保留。
+/// 压缩项不动：它替代了压缩前的全部历史，去掉就丢上下文。没有可去的返回 None。
+#[must_use]
+pub fn without_reasoning_items(body: &[u8]) -> Option<Bytes> {
+    let mut value: Value = serde_json::from_slice(body).ok()?;
+    let items = value.get_mut("input")?.as_array_mut()?;
+    let before = items.len();
+    items.retain(|item| item["type"] != "reasoning");
+    if items.len() == before {
+        return None;
+    }
+    serde_json::to_vec(&value).ok().map(Bytes::from)
+}
+
 /// 向任意 URL 发一次 Responses 请求（鉴权 / 附加头由调用方给）：官方走 Bearer，Codex 订阅后端
 /// 还要 `chatgpt-account-id` / `originator`（IMPLEMENTATION §11.38）。事件解析与 usage 提取同一份。
 pub async fn send_responses_at(
@@ -354,6 +378,38 @@ pub async fn send_responses_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_encrypted_content_is_recognised_and_only_reasoning_is_dropped() {
+        let rejection =
+            br#"{"error":{"code":"invalid_encrypted_content","type":"invalid_request_error"}}"#;
+        assert!(rejects_foreign_encrypted_content(400, rejection));
+        assert!(!rejects_foreign_encrypted_content(500, rejection));
+        assert!(!rejects_foreign_encrypted_content(
+            400,
+            br#"{"error":{"code":"invalid_value"}}"#
+        ));
+        let body = serde_json::json!({"input": [
+            {"type": "compaction", "encrypted_content": "c"},
+            {"type": "reasoning", "id": "rs_1", "encrypted_content": "r"},
+            {"role": "user", "content": "hi"}
+        ], "include": ["reasoning.encrypted_content"]});
+        let stripped: Value = serde_json::from_slice(
+            &without_reasoning_items(&serde_json::to_vec(&body).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            stripped,
+            serde_json::json!({"input": [
+                {"type": "compaction", "encrypted_content": "c"},
+                {"role": "user", "content": "hi"}
+            ], "include": ["reasoning.encrypted_content"]})
+        );
+        assert!(without_reasoning_items(br#"{"input":"hi"}"#).is_none());
+        assert!(
+            without_reasoning_items(br#"{"input":[{"role":"user","content":"hi"}]}"#).is_none()
+        );
+    }
 
     #[test]
     fn usage_maps_official_shape() {

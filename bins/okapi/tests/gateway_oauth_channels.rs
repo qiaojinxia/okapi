@@ -48,6 +48,8 @@ struct Mock {
     last_headers: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// Anthropic 上游最近一次收到的请求体（断言 mimic 的 system / metadata 重写）。
     last_body: Arc<std::sync::Mutex<Option<Value>>>,
+    /// Codex 上游把收到的推理项都当成别的账号签发的（会话换了账号）：回 400 invalid_encrypted_content。
+    foreign_reasoning: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Mock {
@@ -269,6 +271,21 @@ async fn mock_codex_responses(
         Some("text/event-stream")
     );
     let req: Value = serde_json::from_slice(&body).unwrap();
+    st.remember_body(&body);
+    if st.foreign_reasoning.load(Ordering::SeqCst)
+        && req["input"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|i| i["type"] == "reasoning" || i["type"] == "compaction")
+        })
+    {
+        // 上游原文（pydantic/pydantic-ai#4608 里的报错）
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error":{"message":"The encrypted content for item rs_1 could not be verified. Reason: Encrypted content organization_id did not match the target organization.","type":"invalid_request_error","param":null,"code":"invalid_encrypted_content"}})),
+        )
+            .into_response();
+    }
     if st.cli_mode.load(Ordering::SeqCst) {
         return programming_clients::responses_stream(&req);
     }
@@ -404,6 +421,7 @@ async fn setup() -> Env {
         reject_refresh: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         last_headers: Arc::default(),
         last_body: Arc::default(),
+        foreign_reasoning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let mock = spawn_mock(mock_state.clone()).await;
 
@@ -838,6 +856,77 @@ async fn codex_404_does_not_replay_or_fallback_to_chat() {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+/// 会话换了 Codex 账号：历史里上个账号签发的加密推理项新账号验不过（400 invalid_encrypted_content）。
+/// 网关去掉推理项在同一账号上重发一次，客户端拿到正常回复，其余历史原样保留。
+#[tokio::test]
+async fn codex_foreign_encrypted_reasoning_is_dropped_and_retried_once() {
+    let env = setup().await;
+    login_channel(&env, "codex").await;
+    env.mock_state
+        .foreign_reasoning
+        .store(true, Ordering::SeqCst);
+    let input = json!([
+        {"role": "user", "content": "first"},
+        {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAAA-from-another-account"},
+        {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+        {"role": "user", "content": "second"}
+    ]);
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.user_token)
+        .header("session_id", "sess-switch")
+        .json(&json!({"model": env.model, "stream": true, "store": false,
+            "include": ["reasoning.encrypted_content"], "input": input}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("response.completed")
+    );
+    assert_eq!(
+        env.mock_state.codex_calls.load(Ordering::SeqCst),
+        2,
+        "只重发一次"
+    );
+    let sent = env.mock_state.last_body().unwrap();
+    let kept: Vec<Value> = input
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] != "reasoning")
+        .cloned()
+        .collect();
+    assert_eq!(sent["input"], Value::Array(kept), "只去掉推理项");
+    assert_eq!(sent["include"], json!(["reasoning.encrypted_content"]));
+
+    // 压缩项去不掉（去了就丢了压缩前的上下文）：重发一次仍被拒，上游的 400 原样回给客户端
+    env.mock_state.codex_calls.store(0, Ordering::SeqCst);
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.user_token)
+        .json(&json!({"model": env.model, "stream": true, "input": [
+            {"type": "compaction", "encrypted_content": "gAAAA-summary"},
+            {"type": "reasoning", "id": "rs_2", "summary": [], "encrypted_content": "x"},
+            {"role": "user", "content": "third"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "invalid_encrypted_content");
+    assert_eq!(
+        env.mock_state.codex_calls.load(Ordering::SeqCst),
+        2,
+        "最多重发一次"
     );
 }
 

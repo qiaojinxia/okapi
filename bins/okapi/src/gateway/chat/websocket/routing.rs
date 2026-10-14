@@ -309,7 +309,12 @@ pub(super) async fn route(
         }
         match selected {
             Transport::Native(socket) => {
-                return create_turn(&socket, body, bill, &cand, sticky, failover, permit).await;
+                let routed =
+                    create_turn(&socket, body, bill, &cand, sticky, failover, permit).await;
+                if routed.is_ok() {
+                    remember_session(bill, &cand).await;
+                }
+                return routed;
             }
             Transport::Http => {
                 permit.release().await;
@@ -336,6 +341,7 @@ pub(super) async fn route(
                 if bridge.local_warmup {
                     info.upstream_endpoint.clear();
                 }
+                remember_session(bill, &cand).await;
                 return Ok(Routed {
                     handle,
                     info,
@@ -348,6 +354,17 @@ pub(super) async fn route(
         }
     }
     Err(last)
+}
+
+/// 与 HTTP 一样记下会话落在哪个 key：断线重连（新的 WS 连接）回到同一账号，
+/// 历史里的加密推理项才验得过。
+async fn remember_session(bill: &RequestBilling, cand: &ChannelCandidate) {
+    if let Some(session) = &bill.session {
+        bill.state
+            .sched
+            .sticky_set(bill.user_id, session, cand.channel_key_id)
+            .await;
+    }
 }
 
 async fn create_turn(

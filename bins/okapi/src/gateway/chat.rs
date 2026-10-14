@@ -1951,6 +1951,7 @@ async fn try_model(
         let mut retry: i16 = 0;
         let oauth = super::oauth_cred::is_oauth_provider(&cand.provider);
         let mut refreshed_401 = false;
+        let mut dropped_reasoning = false;
         let attempt = loop {
             // Keep the candidate equal to the token actually sent; a forced refresh can
             // then distinguish a rejected token from one another request just rotated.
@@ -2057,6 +2058,32 @@ async fn try_model(
                 }) = &mut result
             {
                 *retry_after_secs = Some(retry_after_secs.unwrap_or(5));
+            }
+            // 会话换了账号（额度切换、并发满、粘性过期）：历史里上个账号签发的加密推理项新账号
+            // 验不过。去掉推理项在同一候选上重发一次——不计 failover、不标 key 失败；换别的
+            // 账号也一样验不过。压缩项去不掉，仍被拒就把上游的 400 回给客户端。
+            if bill.ingress == Ingress::Responses
+                && !dropped_reasoning
+                && matches!(
+                    &result,
+                    Err(AttemptError::Fatal(ForwardFailure {
+                        reply: FailureReply::Upstream { status, body },
+                        ..
+                    })) if okapi_providers::responses::rejects_foreign_encrypted_content(*status, body)
+                )
+                && let Some(stripped) =
+                    okapi_providers::responses::without_reasoning_items(&body_up)
+            {
+                dropped_reasoning = true;
+                tracing::info!(
+                    request_id = %bill.request_id,
+                    channel_key = cand.channel_key_id,
+                    "加密推理项不属于本账号，去掉推理项重发"
+                );
+                bill.trace
+                    .set("dropped_reasoning", serde_json::Value::Bool(true));
+                body_up = stripped;
+                continue;
             }
             // Responses 直转撞上 404/405 = 这个上游根本没有 /responses（"openai" 渠道指着
             // 只实现了 chat 的第三方地址是常态）。同一候选就地改走降级链再来一次：
