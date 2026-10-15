@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { OTHER_COLOR } from '@/lib/chart'
 import { formatBp, formatCount } from '@/lib/money'
+import { cn } from '@/lib/utils'
 import { SpendTrendView } from './SpendTrendView'
 import type { BreakdownResp } from './types'
 import { sumByModel } from './types'
@@ -17,6 +18,8 @@ import type { UsageMetric } from './usage-chart-data'
 
 /// 环形图里的前几名；展开后列表给出全部模型。
 const TOP = 5
+/// 「其余模型」那一段的键（不会与模型名冲突）。
+const OTHER = '\u0000other'
 
 /// 趋势 + 模型消费排行：回答「钱花在哪、怎么变的」。
 /// 排行每行除金额和占比外，再给请求数、Token、每次均价和缓存命中——原先单独一张明细表的内容并在这里。
@@ -34,15 +37,13 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
   const listed = expanded ? models : top
   const sum = data.total.amount_micro
   const share = (micro: number) => sum > 0 ? formatBp(Math.round(Math.min(1, micro / sum) * 10_000), locale) : '—'
+  const ratio = (micro: number) => sum > 0 ? Math.min(1, micro / sum) : 0
   // 环形图：前 5 个模型各一段（颜色与趋势图一致），其余合并成灰色一段
-  let offset = 0
-  const slices = sum > 0 ? [...top.map((m) => [m.amount_micro, colors.get(m.model) ?? OTHER_COLOR] as const), [rest, OTHER_COLOR] as const]
-    .filter(([micro]) => micro > 0)
-    .map(([micro, color]) => {
-      const start = offset
-      offset += micro
-      return `${color} ${start / sum * 100}% ${Math.min(100, offset / sum * 100)}%`
-    }) : []
+  const slices = sum > 0 ? [...top.map((m) => ({ key: m.model, micro: m.amount_micro, color: colors.get(m.model) ?? OTHER_COLOR })), { key: OTHER, micro: rest, color: OTHER_COLOR }]
+    .filter((slice) => slice.micro > 0) : []
+  // 悬停排行某一行时环形图突出对应一段，其余变淡
+  const [active, setActive] = useState<string | null>(null)
+  const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
 
   return <div className="grid min-w-0 gap-3 lg:grid-cols-12">
     <div className="min-w-0 lg:col-span-8"><SpendTrendView rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} /></div>
@@ -55,15 +56,18 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
           </Button>}
         </div>
         {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <>
-          <div role="img" aria-label={t('portal:modelShareChart')} data-slot="model-donut" className="relative mx-auto size-32 shrink-0 rounded-full bg-muted" style={{ background: slices.length ? `conic-gradient(${slices.join(', ')})` : undefined }}>
-            <div aria-hidden className="absolute inset-[16%] flex flex-col items-center justify-center rounded-full bg-card px-2">
-              <span className="text-base font-semibold tabular-nums">{formatUsd(sum, locale)}</span>
+          <div className="relative mx-auto size-32 shrink-0">
+            <Donut slices={slices} total={sum} active={active} label={t('portal:modelShareChart')} />
+            <div aria-hidden className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
               <span className="text-[11px] text-muted-foreground">{t('portal:totalSpend')}</span>
+              <span className="text-lg font-semibold leading-tight tabular-nums">{formatUsd(sum, locale)}</span>
+              <span className="text-[11px] text-muted-foreground">{t('portal:modelCount', { count: models.length })}</span>
             </div>
           </div>
-          <ol className={expanded ? 'max-h-96 space-y-2.5 overflow-y-auto pr-1' : 'space-y-2.5'}>
-            {listed.map((model) => {
+          <ol className={expanded ? '-mx-2 max-h-96 space-y-0.5 overflow-y-auto' : '-mx-2 space-y-0.5'}>
+            {listed.map((model, index) => {
               const hit = cacheHit(model)
+              const color = colors.get(model.model) ?? OTHER_COLOR
               const details = [
                 t('portal:modelRequests', { n: formatCount(model.requests, locale) }),
                 t('portal:modelTokens', { n: formatCount(model.prompt_tokens + model.completion_tokens, locale) }),
@@ -73,28 +77,62 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
                   ? t('portal:modelCacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: model.requests })
                   : t('portal:modelCacheHit', { v: formatBp(hit.bp, locale) }),
               ].filter(Boolean).join(' · ')
-              return <li key={model.model} className="min-w-0 space-y-0.5">
-                <div className="flex min-w-0 items-center justify-between gap-2 text-sm">
-                  <Link to="/portal/logs" search={{ ...logSearch, model: model.model }} aria-label={t('portal:modelLogs', { model: model.model })} className="group flex min-w-0 items-center gap-2 rounded outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40">
-                    <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: colors.get(model.model) ?? OTHER_COLOR }} />
-                    <span className="truncate" title={model.model}>{model.model}</span>
-                    <ArrowUpRight aria-hidden className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" />
-                  </Link>
-                  <span className="flex shrink-0 items-baseline gap-2 tabular-nums">
-                    {formatUsd(model.amount_micro, locale)}
-                    <span className="w-12 text-right text-xs text-muted-foreground">{share(model.amount_micro)}</span>
+              const dimmed = active != null && active !== model.model
+              return <li key={model.model} className="min-w-0">
+                <Link to="/portal/logs" search={{ ...logSearch, model: model.model }} aria-label={t('portal:modelLogs', { model: model.model })} {...hover(model.model)}
+                  className={cn('group block min-w-0 rounded-lg px-2 py-1 outline-none transition-[background-color,opacity] hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/40', dimmed && 'opacity-60')}>
+                  <div className="flex min-w-0 items-center gap-2 text-sm">
+                    <span aria-hidden className="w-4 shrink-0 text-center text-[11px] font-medium tabular-nums text-muted-foreground">{index + 1}</span>
+                    <span className="min-w-0 flex-1 truncate font-medium" title={model.model}>{model.model}</span>
+                    <ArrowUpRight aria-hidden className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
+                    <span className="shrink-0 font-semibold tabular-nums">{formatUsd(model.amount_micro, locale)}</span>
+                    <span className="w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{share(model.amount_micro)}</span>
+                  </div>
+                  <span aria-hidden className="mt-1 ml-6 block h-1 overflow-hidden rounded-full bg-muted">
+                    <span className="block h-full rounded-full" style={{ width: `${Math.max(ratio(model.amount_micro) * 100, 1.5)}%`, background: color }} />
                   </span>
-                </div>
-                <p className="truncate pl-4 text-[11px] tabular-nums text-muted-foreground" title={details}>{details}</p>
+                  <p className="mt-0.5 truncate pl-6 text-[11px] tabular-nums text-muted-foreground" title={details}>{details}</p>
+                </Link>
               </li>
             })}
-            {!expanded && rest > 0 && <li className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-              <span className="flex items-center gap-2"><span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: OTHER_COLOR }} />{t('portal:otherModels', { count: models.length - top.length })}</span>
-              <span className="flex items-baseline gap-2 tabular-nums">{formatUsd(rest, locale)}<span className="w-12 text-right">{share(rest)}</span></span>
+            {!expanded && rest > 0 && <li className={cn('min-w-0 rounded-lg px-2 py-1 text-xs text-muted-foreground transition-opacity', active != null && active !== OTHER && 'opacity-60')} {...hover(OTHER)}>
+              <div className="flex items-center gap-2">
+                <span aria-hidden className="w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{t('portal:otherModels', { count: models.length - top.length })}</span>
+                <span className="shrink-0 tabular-nums">{formatUsd(rest, locale)}</span>
+                <span className="w-12 shrink-0 text-right tabular-nums">{share(rest)}</span>
+              </div>
+              <span aria-hidden className="mt-1 ml-6 block h-1 overflow-hidden rounded-full bg-muted">
+                <span className="block h-full rounded-full" style={{ width: `${Math.max(ratio(rest) * 100, 1.5)}%`, background: OTHER_COLOR }} />
+              </span>
             </li>}
           </ol>
         </>}
       </section>
     </Card>
   </div>
+}
+
+/// 环形图（SVG）：段与段之间留一道细缝，悬停排行时对应一段加粗、其余变淡。
+function Donut({ slices, total, active, label }: {
+  slices: { key: string; micro: number; color: string }[]; total: number; active: string | null; label: string
+}) {
+  const radius = 42
+  const circumference = 2 * Math.PI * radius
+  // 只有一段时不留缝，否则整圈会缺一口
+  const gap = slices.length > 1 ? 1.6 : 0
+  let offset = 0
+  return <svg role="img" aria-label={label} data-slot="model-donut" viewBox="0 0 100 100" className="size-full -rotate-90">
+    <circle cx="50" cy="50" r={radius} fill="none" strokeWidth="10" className="stroke-muted" />
+    {total > 0 && slices.map((slice) => {
+      const length = slice.micro / total * circumference
+      const dash = Math.max(length - gap, 0.4)
+      const start = offset
+      offset += length
+      const dimmed = active != null && active !== slice.key
+      return <circle key={slice.key} cx="50" cy="50" r={radius} fill="none" stroke={slice.color}
+        strokeWidth={active === slice.key ? 13 : 10} strokeDasharray={`${dash} ${circumference - dash}`} strokeDashoffset={-start}
+        className="transition-[stroke-width,opacity] duration-200" opacity={dimmed ? 0.35 : 1} />
+    })}
+  </svg>
 }

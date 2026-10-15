@@ -599,6 +599,7 @@ export default {
     dashboardDesc: '余额、用量、调用质量、趋势与模型构成集中展示。',
     expandTrend: '详细趋势',
     modelSnapshot: '模型消费排行',
+    modelCount: '{{count}} 个模型',
     allModels: '全部 {{count}} 个模型',
     tokenSnapshot: 'Token 用量构成',
     dashboardFilters: '用量筛选',

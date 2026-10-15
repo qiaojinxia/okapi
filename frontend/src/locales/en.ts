@@ -609,6 +609,7 @@ export default {
     dashboardDesc: 'Balance, usage, call quality, trends and model mix at a glance.',
     expandTrend: 'Detailed trends',
     modelSnapshot: 'Top models by spend',
+    modelCount: '{{count}} models',
     allModels: 'All {{count}} models',
     tokenSnapshot: 'Token usage mix',
     dashboardFilters: 'Usage filters',
