@@ -13,6 +13,8 @@ pub(crate) fn request_span(request: &axum::extract::Request) -> tracing::Span {
 
 const RULES: &[(&str, &str)] = &[
     // 编码智能体 / CLI
+    // 真机 UA 是 `claude-cli/<版本> (external, cli)`；桌面版内嵌的 Claude Code 也是这个形状
+    ("claude-cli", "claude-code"),
     ("claude-code", "claude-code"),
     ("claude_cli", "claude-code"),
     ("codex", "codex-cli"),
@@ -21,6 +23,8 @@ const RULES: &[(&str, &str)] = &[
     ("cline", "cline"),
     ("continue", "continue"),
     // 桌面 / Web 聊天客户端
+    // Claude 桌面版（Electron）：`Mozilla/5.0 … Claude/<版本> Chrome/… Electron/…`
+    ("claude/", "claude-desktop"),
     ("lobechat", "lobechat"),
     ("lobe-chat", "lobechat"),
     ("cherry", "cherry-studio"),
@@ -273,6 +277,28 @@ mod tests {
         );
         assert_eq!(detect("Cursor/0.45 OpenAI/JS 4.7"), "cursor");
         assert_eq!(detect("codex_cli_rs/0.9.0"), "codex-cli");
+    }
+
+    /// 线上抓到的真实 UA：CLI 用连字符 `claude-cli`，此前规则只认 `claude-code` / `claude_cli`，
+    /// Claude Code 流量全落进「未知」。
+    #[test]
+    fn real_claude_code_and_desktop_user_agents_are_recognised() {
+        assert_eq!(detect("claude-cli/2.1.299 (external, cli)"), "claude-code");
+        assert_eq!(
+            detect("claude-cli/2.1.299 (external, sdk-cli)"),
+            "claude-code"
+        );
+        assert_eq!(
+            detect("claude-cli/2.1.295 (external, claude-desktop-3p, agent-sdk/0.3.295)"),
+            "claude-code",
+            "桌面版内嵌的 Claude Code 仍是 Claude Code"
+        );
+        assert_eq!(
+            detect(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Claude/2.31226.1 Chrome/152.0.7977.130 Electron/44.4.3 Safari/537.36 MSIX"
+            ),
+            "claude-desktop"
+        );
     }
 
     #[test]
