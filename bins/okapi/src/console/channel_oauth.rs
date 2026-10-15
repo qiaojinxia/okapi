@@ -266,6 +266,16 @@ pub async fn exchange(
             };
             tracing::warn!(provider, error = %err, detail, "oauth code exchange failed");
             match err {
+                // 授权码贴错、过期或已用过：是操作问题不是网关故障，回 400 让页面提示重新授权
+                UpstreamError::Status {
+                    status: 400 | 401,
+                    ref body,
+                    ..
+                } if serde_json::from_slice::<serde_json::Value>(body)
+                    .is_ok_and(|v| v["error"] == "invalid_grant") =>
+                {
+                    AppError::new(StatusCode::BAD_REQUEST, "oauth_code_invalid")
+                }
                 UpstreamError::Status { status, .. } => {
                     AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)
                         .with_param(format!("oauth_exchange_status_{status}"))

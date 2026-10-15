@@ -119,6 +119,14 @@ async fn mock_token(
         st.refresh_started.notify_one();
         st.refresh_continue.notified().await;
     }
+    if grant == "authorization_code" && body.contains("bad-code") {
+        // 上游原文（2026-10-15 线上：贴错的授权码）
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "invalid_grant", "error_description": "Invalid 'code' in request."})),
+        )
+            .into_response();
+    }
     if grant == "refresh_token" && st.refresh_unavailable.load(Ordering::SeqCst) {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -928,6 +936,39 @@ async fn codex_foreign_encrypted_reasoning_is_dropped_and_retried_once() {
         2,
         "最多重发一次"
     );
+}
+
+/// 贴错 / 过期的授权码：上游 invalid_grant 是操作问题，回 400 `oauth_code_invalid`，不是 502。
+#[tokio::test]
+async fn rejected_authorization_code_is_a_client_error() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let started: Value = client
+        .post(format!("http://{}/admin/channels/oauth/start", env.console))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"provider": "anthropic_max"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let state = started["state"].as_str().unwrap();
+    let response = client
+        .post(format!(
+            "http://{}/admin/channels/oauth/exchange",
+            env.console
+        ))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"state": state, "code": format!("bad-code#{state}"),
+            "name": format!("bad-{}", Uuid::new_v4().simple()), "models": [env.model],
+            "token_url": format!("http://{}/token", env.mock)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "oauth_code_invalid", "{body}");
 }
 
 /// 用过的 state 不能二次兑换；非 OAuth 协议 400。

@@ -3095,6 +3095,7 @@ export default {
     too_many_pending_orders: '未支付的订单太多了，请先完成支付，或一天后再下单',
     email_taken: '邮箱已注册',
     already_initialized: '系统已初始化',
+    oauth_code_invalid: '授权码无效或已过期（每个授权码只能用一次），请重新发起授权',
     oauth_state_invalid: '登录会话已过期，请重试',
     oauth_provider_not_configured: '该登录方式未配置',
     oauth_token_exchange_failed: '第三方登录换取令牌失败，请重试',

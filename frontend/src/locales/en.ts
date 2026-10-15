@@ -3159,6 +3159,7 @@ export default {
     too_many_pending_orders: 'Too many unpaid orders — complete one or try again tomorrow',
     email_taken: 'Email already registered',
     already_initialized: 'Already initialized',
+    oauth_code_invalid: 'The authorization code is invalid or expired (each code works once). Start the authorization again.',
     oauth_state_invalid: 'Login session expired, please retry',
     oauth_provider_not_configured: 'This login method is not configured',
     oauth_token_exchange_failed: 'Third-party login could not exchange the code for a token, please retry',

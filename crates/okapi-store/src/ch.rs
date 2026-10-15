@@ -20,7 +20,10 @@ pub const STATISTICS_LOG_TYPES: [i64; 3] = [2, 5, 6];
 
 const AGGREGATION_GUARD: &str = "max_size_to_preallocate_for_aggregation=8192&max_block_size=8192&max_insert_block_size=8192&min_insert_block_size_rows_for_materialized_views=8192&min_insert_block_size_bytes_for_materialized_views=4194304&input_format_parallel_parsing=0";
 
-const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192";
+/// `join_algorithm`：统计查询把几十个小汇总源 LEFT JOIN 起来，哈希连接每个至少占十来 MiB，
+/// 一条看板查询就到 ~375MiB（线上只有几千行时也是），几个面板并发就撞 4GB 机器的内存上限；
+/// partial_merge 同一条只用 ~48MiB、耗时不变，结果逐行一致。它不支持的连接回落到 hash。
+const QUERY_GUARD: &str = "max_execution_time=15&max_memory_usage=2000000000&max_query_size=1048576&max_size_to_preallocate_for_aggregation=8192&max_size_to_preallocate_for_joins=8192&max_block_size=8192&join_algorithm=partial_merge%2Chash";
 
 #[derive(Clone)]
 pub struct ChClient {
