@@ -12,6 +12,6 @@ export function ModelOptionsSection({ id, title, hint, configured = false, child
         {hint && <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{hint}</span>}</span>
       <ChevronDown aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground transition-transform" />
     </summary>
-    <div className="border-t border-border px-4 py-4">{children}</div>
+    <div className="flex flex-col gap-4 border-t border-border px-4 py-4">{children}</div>
   </details>
 }

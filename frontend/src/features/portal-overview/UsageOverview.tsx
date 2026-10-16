@@ -48,23 +48,24 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
   return <div className="grid min-w-0 gap-3 lg:grid-cols-12">
     <div className="min-w-0 lg:col-span-8"><SpendTrendView rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} /></div>
     <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl px-4 py-3 lg:col-span-4">
-      <section aria-label={t('portal:modelSnapshot')} className="flex min-h-0 flex-1 flex-col gap-3">
+      <section aria-label={t('portal:modelSnapshot')} className="@container flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">{t('portal:modelSnapshot')}</h2>
           {models.length > TOP && <Button variant="ghost" size="xs" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
             {expanded ? t('portal:showTopModels', { count: TOP }) : t('portal:allModels', { count: models.length })}
           </Button>}
         </div>
-        {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <>
-          <div className="relative mx-auto size-32 shrink-0">
+        {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <div className="flex min-w-0 flex-col gap-3 @xl:flex-row @xl:items-center @xl:gap-6">
+          {/* 卡片够宽（单列布局占满一行）时环形图放左、排行放右，免得下面空一大片 */}
+          <div className="relative mx-auto size-28 shrink-0 @xl:mx-2 @xl:size-36">
             <Donut slices={slices} total={sum} active={active} label={t('portal:modelShareChart')} />
             <div aria-hidden className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-[11px] text-muted-foreground">{t('portal:totalSpend')}</span>
-              <span className="text-lg font-semibold leading-tight tabular-nums">{formatUsd(sum, locale)}</span>
-              <span className="text-[11px] text-muted-foreground">{t('portal:modelCount', { count: models.length })}</span>
+              <span className="text-[10px] text-muted-foreground">{t('portal:totalSpend')}</span>
+              <span className={cn('font-semibold leading-tight tabular-nums', formatUsd(sum, locale).length > 9 ? 'text-xs' : 'text-[13px]', '@xl:text-sm')}>{formatUsd(sum, locale)}</span>
+              <span className="text-[10px] text-muted-foreground">{t('portal:modelCount', { count: models.length })}</span>
             </div>
           </div>
-          <ol className={expanded ? '-mx-2 max-h-96 space-y-0.5 overflow-y-auto' : '-mx-2 space-y-0.5'}>
+          <ol className={cn('-mx-2 min-w-0 space-y-0.5 @xl:mx-0 @xl:flex-1', expanded && 'max-h-96 overflow-y-auto')}>
             {listed.map((model, index) => {
               const hit = cacheHit(model)
               const color = colors.get(model.model) ?? OTHER_COLOR
@@ -81,12 +82,12 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
               return <li key={model.model} className="min-w-0">
                 <Link to="/portal/logs" search={{ ...logSearch, model: model.model }} aria-label={t('portal:modelLogs', { model: model.model })} {...hover(model.model)}
                   className={cn('group block min-w-0 rounded-lg px-2 py-1 outline-none transition-[background-color,opacity] hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/40', dimmed && 'opacity-60')}>
-                  <div className="flex min-w-0 items-center gap-2 text-sm">
+                  <div className="flex min-w-0 items-center gap-2 text-[13px]">
                     <span aria-hidden className="w-4 shrink-0 text-center text-[11px] font-medium tabular-nums text-muted-foreground">{index + 1}</span>
                     <span className="min-w-0 flex-1 truncate font-medium" title={model.model}>{model.model}</span>
                     <ArrowUpRight aria-hidden className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                     <span className="shrink-0 font-semibold tabular-nums">{formatUsd(model.amount_micro, locale)}</span>
-                    <span className="w-12 shrink-0 text-right text-xs tabular-nums text-muted-foreground">{share(model.amount_micro)}</span>
+                    <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">{share(model.amount_micro)}</span>
                   </div>
                   <span aria-hidden className="mt-1 ml-6 block h-1 overflow-hidden rounded-full bg-muted">
                     <span className="block h-full rounded-full" style={{ width: `${Math.max(ratio(model.amount_micro) * 100, 1.5)}%`, background: color }} />
@@ -100,14 +101,14 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
                 <span aria-hidden className="w-4 shrink-0" />
                 <span className="min-w-0 flex-1 truncate">{t('portal:otherModels', { count: models.length - top.length })}</span>
                 <span className="shrink-0 tabular-nums">{formatUsd(rest, locale)}</span>
-                <span className="w-12 shrink-0 text-right tabular-nums">{share(rest)}</span>
+                <span className="w-12 shrink-0 text-right text-[11px] tabular-nums">{share(rest)}</span>
               </div>
               <span aria-hidden className="mt-1 ml-6 block h-1 overflow-hidden rounded-full bg-muted">
                 <span className="block h-full rounded-full" style={{ width: `${Math.max(ratio(rest) * 100, 1.5)}%`, background: OTHER_COLOR }} />
               </span>
             </li>}
           </ol>
-        </>}
+        </div>}
       </section>
     </Card>
   </div>

@@ -1626,3 +1626,22 @@ test('首页 768px 平板：五张指标卡 3+2 铺满两行，实时指标五�
   expect(Math.max(...ys) - Math.min(...ys)).toBeLessThanOrEqual(1)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
+
+test('首页趋势柱顶数值对齐各自日期：中间有空日时不错位', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 1366, height: 900 })
+  await page.goto('/admin')
+  const plot = page.locator('[data-slot="dashboard-trend"]').getByLabel('趋势绘图区')
+  await expect(plot).toBeVisible()
+  // 09-21、09-22 没有请求（没有柱形）：后面每根柱子顶上的数值仍须是它自己那天的
+  const centers = async (selector: string) => (await plot.locator(selector).evaluateAll((nodes) => nodes.map((node) => {
+    const box = node.getBoundingClientRect()
+    return { x: box.x + box.width / 2, text: node.textContent ?? '' }
+  }))).sort((a, b) => a.x - b.x)
+  const bars = (await centers('.recharts-bar-rectangle path')).filter((bar) => bar.x > 0)
+  const labels = await centers('.recharts-label-list text')
+  expect(labels.map((label) => label.text)).toEqual(['2,800', '1,400', '4,200'])
+  expect(bars).toHaveLength(3)
+  for (const [index, label] of labels.entries()) expect(Math.abs(label.x - bars[index]!.x)).toBeLessThanOrEqual(2)
+  await page.screenshot({ path: test.info().outputPath('dashboard-trend.png'), animations: 'disabled' })
+})
