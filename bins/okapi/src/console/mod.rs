@@ -16,6 +16,7 @@ pub mod channel_balance;
 mod channel_creation;
 mod channel_credentials;
 pub mod channel_oauth;
+pub mod channel_try;
 mod cloud_probe;
 mod core_source;
 pub mod dlq;
@@ -233,6 +234,7 @@ fn channel_routes() -> ConsoleRouter {
             post(manage::duplicate_channel),
         )
         .route("/admin/channels/{id}/test", post(admin::test_channel))
+        .route("/admin/channels/{id}/try", post(channel_try::try_channel))
         .route(
             "/admin/channels/{id}/fetch-models",
             get(admin::fetch_channel_models),

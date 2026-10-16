@@ -13,6 +13,13 @@ function level(percent: number) {
   return { bar: 'bg-success', text: 'text-foreground' }
 }
 
+/// 窗口标签色：5 小时与 7 天两档最常见，各给一个固定色，列表里扫一眼就能对上号。
+function windowTone(secs: number | null) {
+  if (secs === 18_000) return 'bg-indigo-500/12 text-indigo-700 dark:text-indigo-300'
+  if (secs === 604_800) return 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300'
+  return 'bg-muted text-muted-foreground'
+}
+
 /// 订阅额度各窗口的用量条。`limits` 是渠道配置的百分比上限（窗口秒数 → 百分比），
 /// 画成一条竖线，站长能一眼看出离自动停用还有多远。`compact` 用于列表行。
 export function QuotaMeters({ quota, limits, compact = false }: {
@@ -33,7 +40,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
     const clock = date.toLocaleString(i18n.language, sameDay
       ? { hour: '2-digit', minute: '2-digit', hour12: false }
       : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
-    return t('admin:channelQuotaResetCompact', { span, at: clock })
+    return { span, full: t('admin:channelQuotaResetCompact', { span, at: clock }) }
   }
   const resetIn = (at: number) => {
     const minutes = Math.max(0, Math.round((at * 1000 - now) / 60_000))
@@ -44,7 +51,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
   }
   if (compact) {
     return (
-      <div className="grid w-max grid-cols-[auto_4.5rem_2.5rem] min-[1400px]:grid-cols-[auto_4.5rem_2.5rem_auto] items-center gap-x-2 gap-y-1 text-xs">
+      <div className="grid w-max grid-cols-[auto_4rem_2.5rem_auto] items-center gap-x-2 gap-y-1 text-xs">
         {quota.allowed === false && <p className="col-span-4 text-destructive">{t('admin:channelQuotaBlocked')}</p>}
         {quota.windows.map((window) => {
           const stale = window.resets_at !== null && window.resets_at * 1000 <= now
@@ -53,7 +60,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
           const label = windowLabel(window.window_secs)
           return (
             <div key={window.name} className="contents">
-              <span className="whitespace-nowrap text-muted-foreground">{label}</span>
+              <span className={cn('inline-flex h-5 items-center justify-center whitespace-nowrap rounded px-1.5 text-[11px] font-medium', windowTone(window.window_secs))}>{label}</span>
               <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar"
                 aria-label={t('admin:channelQuotaMeterLabel', { window: label })}
                 aria-valuemin={0} aria-valuemax={100} aria-valuenow={stale ? undefined : percent}>
@@ -62,11 +69,12 @@ export function QuotaMeters({ quota, limits, compact = false }: {
               <span className={cn('text-right font-medium tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
                 {stale ? '—' : `${percent}%`}
               </span>
-              {/* 窄屏把重置时间放到条形下一行，避免表格横向滚动 */}
-              <span className="col-span-3 col-start-2 -mt-0.5 inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums min-[1400px]:col-span-1 min-[1400px]:col-start-auto min-[1400px]:mt-0 min-[1400px]:text-xs">
+              {/* 行内只放剩余时长，具体重置时刻进悬停提示：表格不必为它横向滚动 */}
+              <span className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums"
+                title={!stale && window.resets_at !== null ? resetCompact(window.resets_at).full : undefined}>
                 {stale ? t('admin:channelQuotaRefreshing') : window.resets_at !== null && <>
                   <RotateCcw aria-label={t('admin:channelQuotaResetLabel')} className="h-3 w-3 shrink-0" />
-                  {resetCompact(window.resets_at)}
+                  {resetCompact(window.resets_at).span}
                 </>}
               </span>
             </div>

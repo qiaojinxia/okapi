@@ -4,6 +4,8 @@
 
 #[path = "support/channel_creation.rs"]
 mod channel_creation;
+#[path = "support/channel_try.rs"]
+mod channel_try;
 #[path = "support/client_profiles.rs"]
 mod client_profiles;
 #[path = "support/oauth_maintenance.rs"]

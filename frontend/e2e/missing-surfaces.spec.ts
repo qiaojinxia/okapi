@@ -3063,7 +3063,7 @@ test('渠道 key 状态与近 24h：部分可用/冷却/未入池；健康查询
   await expect(page.getByText('HTTP 429')).toBeVisible()
   await expect(page.getByText('没有 key')).toBeVisible()
   await expect(page.getByText('未测过').first()).toBeVisible()
-  await expect(page.getByRole('row').filter({ hasText: 'idle-west' }).getByText('1 把 key 全部可用')).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'idle-west' }).getByTitle('1 把 key 全部可用')).toHaveText('正常')
   await expect(page.getByRole('row').filter({ hasText: 'parked' }).getByText('停用')).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: 'idle-west' }).getByText('—')).toBeVisible()
 })

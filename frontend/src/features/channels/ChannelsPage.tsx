@@ -3,6 +3,7 @@ import {
   Copy,
   ExternalLink,
   Globe,
+  MessageSquareText,
   Pencil,
   Plus,
   Power,
@@ -22,6 +23,9 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
 import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
+import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
+import { ProviderChip } from '@/features/channels/ProviderChip'
+import { Switch } from '@/components/ui/switch'
 import {
   ChannelUsage,
   Health24h,
@@ -87,6 +91,7 @@ export function ChannelsPage() {
     { mode: 'create' } | { mode: 'edit'; channel: ChannelRow } | null
   >(null)
   const [diagnosing, setDiagnosing] = useState(false)
+  const [trying, setTrying] = useState<ChannelRow | null>(null)
   const [batchEgress, setBatchEgress] = useState(false)
   // 出口徽章要代理 / 组的名字（§11.41）；目录整表缓存，列表翻页不重拉
   const proxies = useQuery(proxyOptions())
@@ -415,9 +420,10 @@ export function ChannelsPage() {
                 />
               </Th>
               <Th>{t('admin:channelName')}</Th>
-              <Th>{t('admin:provider')}</Th>
+              <Th>{t('admin:channelColPlatform')}</Th>
               <Th>{t('common:status')}</Th>
-              <Th>{t('admin:healthCol')}</Th>
+              <Th>{t('admin:channelColSchedule')}</Th>
+              <Th>{t('admin:channelColUsage')}</Th>
               <Th className="text-right">{t('common:actions')}</Th>
             </Tr>
           </THead>
@@ -434,11 +440,11 @@ export function ChannelsPage() {
                 <Td>
                   <div className="flex flex-col">
                     {/* 名字与地址同宽截断（hover 见全名）：长名字不该决定整表宽度；ID 并进名字行，省一列 */}
-                    <span className="flex max-w-40 min-[1400px]:max-w-48 items-baseline gap-1.5">
+                    <span className="flex max-w-36 min-[1600px]:max-w-48 items-baseline gap-1.5">
                       <span className="shrink-0 text-xs text-muted-foreground tabular-nums">#{c.id}</span>
                       <span className="truncate font-medium" title={c.name}>{c.name}</span>
                     </span>
-                    <span className="max-w-40 min-[1400px]:max-w-48 truncate font-mono text-xs text-muted-foreground" title={c.api_base ?? undefined}>
+                    <span className="max-w-36 min-[1600px]:max-w-48 truncate font-mono text-xs text-muted-foreground" title={c.api_base ?? undefined}>
                       {c.api_base ?? '—'}
                     </span>
                     <ChannelAccounts keys={c.keys} />
@@ -447,10 +453,9 @@ export function ChannelsPage() {
                 {/* 协议列顺带模型数与优先级：两个短数字各占一列太浪费横向空间 */}
                 <Td>
                   <div className="flex flex-col items-start gap-1">
-                    <span className="inline-flex items-center gap-1">
-                      <Badge variant="outline" className="font-mono">
-                        {c.provider}
-                      </Badge>
+                    <ProviderChip provider={c.provider} />
+                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground tabular-nums">
+                      {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
                       {/* 供应商控制台直达（new-api #7146）：查上游余额/状态时不必再去搜网址 */}
                       {providerConsoleUrl(c.provider, c.api_base) !== null && (
                         <a
@@ -461,18 +466,15 @@ export function ChannelsPage() {
                           title={t('admin:providerConsole')}
                           aria-label={t('admin:providerConsole')}
                         >
-                          <ExternalLink className="h-3.5 w-3.5" />
+                          <ExternalLink className="h-3 w-3" />
                         </a>
                       )}
                     </span>
-                    <span className="text-xs text-muted-foreground tabular-nums">
-                      {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
-                    </span>
                   </div>
                 </Td>
-                {/* 渠道"启用"≠ 能打：状态列 = 渠道开关 + key 状态机汇总，近 24h 错误率另列 */}
+                {/* 渠道"启用"≠ 能打：状态列 = 渠道开关 + key 状态机汇总，第二行最近测试与近 24h 错误率 */}
                 <Td>
-                  <div className="flex flex-wrap items-center gap-1">
+                  <div className="flex min-w-44 flex-wrap items-center gap-1">
                     <KeyStateSummary keys={c.keys} enabled={c.status === 1} />
                     {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见 */}
                     {c.status === 1 && (c.pools ?? []).length === 0 && (
@@ -481,33 +483,45 @@ export function ChannelsPage() {
                       </Badge>
                     )}
                     {/* 显式出口（代理 / 组 / 直连）才标；继承全局默认的不标，免得每行一个徽章 */}
+                    {/* 最近测试与近 24h 同属「能不能打」，并进状态列第二行 */}
+                    <div className="flex basis-full flex-wrap items-center gap-x-2 gap-y-1">
+                      <LastProbe probe={c.last_test} />
+                      <Health24h
+                        stat={health.data?.data.find((s) => s.channel_id === c.id)}
+                        channel={{ id: c.id, name: c.name, provider: c.provider }}
+                      />
+                    </div>
                     {c.egress !== undefined && c.egress.mode !== 'inherit' && (
                       <Badge variant="outline" title={t('admin:egressTitle')}>
                         <Globe className="h-3 w-3" aria-hidden />
                         {describeEgress(t, c.egress, proxies.data, proxyGroups.data)}
                       </Badge>
                     )}
-                    {c.status === 1 && <div className="basis-full"><ChannelQuotaCell channelId={c.id} provider={c.provider} /></div>}
                   </div>
                 </Td>
-                {/* 最近测试与近 24h 同属"能不能打"，合成一列上下排，省出横向空间 */}
                 <Td>
-                  <div className="flex flex-col items-start gap-1">
-                    <LastProbe probe={c.last_test} />
-                    <Health24h
-                      stat={health.data?.data.find((s) => s.channel_id === c.id)}
-                      channel={{ id: c.id, name: c.name, provider: c.provider }}
-                    />
+                  <Switch
+                    hideLabel
+                    label={t('admin:channelScheduleToggle', { name: c.name })}
+                    checked={c.status === 1}
+                    disabled={setStatus.isPending}
+                    onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
+                  />
+                </Td>
+                {/* 用量窗口：近 30 天用量胶囊 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}
+                <Td>
+                  <div className="flex flex-col items-start gap-1.5">
                     <ChannelUsage usage={usage.data?.data.find((u) => u.channel_id === c.id)} />
+                    {c.status === 1 && <ChannelQuotaCell channelId={c.id} provider={c.provider} />}
                     <LastBalance balance={c.last_balance} />
                   </div>
                 </Td>
                 <Td>
                   <div className="flex items-center justify-end gap-0.5">
                     <IconButton
-                      icon={c.status === 1 ? PowerOff : Power}
-                      label={c.status === 1 ? t('common:disabled') : t('common:enabled')}
-                      onClick={() => setStatus.mutate({ id: c.id, status: c.status === 1 ? 2 : 1 })}
+                      icon={MessageSquareText}
+                      label={t('admin:channelTryAction')}
+                      onClick={() => setTrying(c)}
                     />
                     <IconButton
                       icon={Activity}
@@ -593,6 +607,7 @@ export function ChannelsPage() {
           onDone={invalidate}
         />
       )}
+      {trying !== null && <ChannelTryDrawer channel={trying} onClose={() => setTrying(null)} />}
       {diagnosing && <RouteDiagnosisDrawer onClose={() => setDiagnosing(false)} />}
       {batchEgress && (
         <BatchEgressDrawer
@@ -616,7 +631,7 @@ function ChannelAccounts({ keys }: { keys?: { account_label?: string; account_pl
   const plans = [...new Set((keys ?? []).map((k) => k.account_plan).filter((v): v is string => Boolean(v)))]
   if (labels.length === 0 && plans.length === 0) return null
   return (
-    <span className="flex max-w-40 min-[1400px]:max-w-48 items-center gap-1 text-xs text-muted-foreground" title={labels.join('\n')}>
+    <span className="flex max-w-36 min-[1600px]:max-w-48 items-center gap-1 text-xs text-muted-foreground" title={labels.join('\n')}>
       <UserRound aria-label={t('admin:channelAccount')} className="h-3 w-3 shrink-0" />
       {plans.map((plan) => (
         <Badge key={plan} variant="outline" className="shrink-0 px-1 py-0 text-[10px] leading-4" title={t('admin:channelPlanHint')}>

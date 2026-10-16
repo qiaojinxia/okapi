@@ -4,6 +4,7 @@ pub mod account_control;
 pub mod audio;
 pub mod auth;
 pub mod bootstrap;
+pub mod channel_test;
 pub mod chat;
 pub mod clients;
 pub mod credentials;

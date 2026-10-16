@@ -120,6 +120,8 @@ struct RequestBilling {
     session: Option<String>,
     /// UA 识别的客户端类型。
     client_type: &'static str,
+    /// 控制台账号测试钉住的渠道 / 账号（数据面正常请求为 None）。
+    pin: Option<Arc<super::channel_test::ChannelPin>>,
     /// 请求来自真实 Claude Code 客户端（只看 `/v1/messages`）：仅限真机的渠道只收这类请求。
     claude_code_native: bool,
     /// 客户端 IP（CDN 头按序，§14.2）。
@@ -1336,7 +1338,11 @@ async fn prepare_chat(
         reasoning_tokens: 0,
         ..TokenUsage::default()
     };
-    let pool_chain = key.pool_chain();
+    let pin = super::channel_test::current();
+    let pool_chain: Vec<&str> = match &pin {
+        Some(pin) => pin.pools.iter().map(String::as_str).collect(),
+        None => key.pool_chain(),
+    };
     let est_usage = with_admission_hints(
         base_usage,
         admission_hints(state, &canonical, &pool_chain).await,
@@ -1371,7 +1377,8 @@ async fn prepare_chat(
         est_usage,
         &est_quote,
     )?];
-    if prefs.allow_fallbacks && response_parent.is_none() {
+    // 测试钉住了渠道：换模型就不是在测它了
+    if prefs.allow_fallbacks && response_parent.is_none() && pin.is_none() {
         for fb in meta
             .fallback_models
             .iter()
@@ -1544,7 +1551,8 @@ async fn prepare_chat(
             && okapi_providers::profiles::is_native_claude_code(body, user_agent(headers)),
         client_ip: super::clients::detect_client_ip(headers),
         client_headers: Arc::new(super::oauth_cred::client_headers(headers)),
-        pool_chain: key.pool_chain().into_iter().map(str::to_owned).collect(),
+        pool_chain: pool_chain.iter().map(|p| (*p).to_owned()).collect(),
+        pin: pin.map(Arc::new),
         pool_strategy: key.pool_strategy.clone(),
         service_tier: info.service_tier.clone(),
         has_tier_pricing: book.has_tiers(&ModelCode::from(bill_model_for_tier.as_str())),
@@ -1731,7 +1739,19 @@ async fn eligible_candidates(
     }
     // 仅限真机的渠道（client_profile.native_only）：其它客户端跳过它们，
     // 由同池其它渠道与降级池承接；被这一条筛空单独给错误码，不冒充渠道全挂。
-    if !bill.claude_code_native {
+    if let Some(pin) = &bill.pin {
+        candidates.retain(|c| pin.matches(c));
+        if candidates.is_empty() {
+            return Err(ForwardFailure::app(
+                AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL)
+                    .with_param("channel_test"),
+                0,
+                None,
+            ));
+        }
+    }
+    // 账号测试是管理员点名测这条渠道，不受「仅限真机」约束
+    if !bill.claude_code_native && bill.pin.is_none() {
         let before = candidates.len();
         candidates.retain(|c| !okapi_providers::profiles::native_only(&c.extensions));
         if before > 0 && candidates.is_empty() {
@@ -1810,7 +1830,7 @@ async fn eligible_candidates(
 
     // L2 会话粘性命中：把映射的 channel_key 提到候选首位（§3.2）
     let mut sticky_key: Option<i64> = None;
-    if let Some(session) = &bill.session {
+    if let Some(session) = bill.session.as_ref().filter(|_| bill.pin.is_none()) {
         sticky_key = bill.state.sched.sticky_get(bill.user_id, session).await;
         let position =
             sticky_key.and_then(|kid| candidates.iter().position(|c| c.channel_key_id == kid));
@@ -2177,7 +2197,8 @@ async fn try_model(
         match attempt {
             Ok(resp) => {
                 // 成功建立输出：刷新会话粘性映射；响应持有并发许可直到 EOF/drop。
-                if let Some(session) = &bill.session {
+                // 账号测试是钉住的，不该改写管理员真实会话的粘性。
+                if let Some(session) = bill.session.as_ref().filter(|_| bill.pin.is_none()) {
                     bill.state
                         .sched
                         .sticky_set(bill.user_id, session, cand.channel_key_id)

@@ -740,3 +740,50 @@ test('a Claude Code profile can restrict the channel to the real client and fold
     client_profile: { name: 'claude-code', mode: 'auto', native_only: true } } } })
   await page.screenshot({ path: 'test-results/native-only.png', fullPage: false })
 })
+
+test('the scheduling switch toggles a channel and the account test streams pinned output', async ({ page }) => {
+  const subscription = { ...channel, provider: 'anthropic_max', models: ['model-a', 'model-b'], settings: {},
+    keys: [{ ...keyRow(7), credential_kind: 1, account_label: 'ops@example.com' }, { ...keyRow(8), credential_kind: 1 }] }
+  await prepare(page, [subscription])
+  let status: Json | undefined, tried: Json | undefined
+  await page.route('**/admin/channels/42/status', async (route) => {
+    status = route.request().postDataJSON()
+    return route.fulfill({ json: { ok: true } })
+  })
+  await page.route('**/admin/channels/42/try', async (route) => {
+    tried = route.request().postDataJSON()
+    const chunk = (v: object) => `data: ${JSON.stringify(v)}\n\n`
+    return route.fulfill({ contentType: 'text/event-stream', body:
+      chunk({ choices: [{ delta: { content: 'Hello from ' } }] }) + chunk({ choices: [{ delta: { content: 'the pinned account' } }] })
+      + chunk({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 5 } }) + 'data: [DONE]\n\n' })
+  })
+  const row = page.getByRole('row').filter({ hasText: channel.name })
+  await expect(row).toContainText('Claude')
+  await expect(row).toContainText('订阅')
+  const toggle = row.getByRole('switch', { name: `参与调度：${channel.name}` })
+  await expect(toggle).toBeChecked()
+  await toggle.click()
+  await expect.poll(() => status).toEqual({ status: 2 })
+
+  await row.getByRole('button', { name: '测试输出', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await drawer.locator('#try-model').selectOption('model-b')
+  await drawer.locator('#try-key').selectOption('7')
+  await drawer.locator('#try-prompt').fill('ping')
+  await drawer.getByRole('button', { name: '开始测试', exact: true }).click()
+  await expect(drawer.getByRole('log')).toHaveText('Hello from the pinned account')
+  await expect(drawer).toContainText('输入 9 / 输出 5 tokens')
+  expect(tried).toEqual({ model: 'model-b', prompt: 'ping', key_id: 7 })
+})
+
+test('an account test failure shows the gateway error', async ({ page }) => {
+  await prepare(page, [{ ...channel, keys: [keyRow(7)] }])
+  await page.route('**/admin/channels/42/try', (route) => route.fulfill({ status: 503,
+    json: { error: { code: 'no_available_channel', message: 'no_available_channel', type: 'okapi_error' } } }))
+  await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '测试输出', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.locator('#try-key')).toHaveCount(0)
+  await drawer.getByRole('button', { name: '开始测试', exact: true }).click()
+  await expect(drawer.getByRole('log')).toContainText('无可用渠道')
+  await expect(drawer).toContainText('失败')
+})

@@ -202,7 +202,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
   })
   await expect(page.getByRole('status').filter({ hasText: /连通正常（12 ms）/ })).toBeVisible()
 
-  await openai.getByRole('button', { name: '停用', exact: true }).click()
+  await openai.getByRole('switch', { name: '参与调度：openai-main' }).click()
   await expect.poll(() => calls.length).toBe(3)
   expect(calls[2]).toEqual({
     path: '/admin/channels/42/status',
@@ -211,7 +211,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
   })
   await dismissToasts(page)
   await page.route('**/admin/channels/*/status', (route) => route.fulfill(apiError(500, 'internal_error')))
-  await openai.getByRole('button', { name: '停用', exact: true }).click()
+  await openai.getByRole('switch', { name: '参与调度：openai-main' }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   await dismissToasts(page)
   await page.route('**/admin/channels/*/status', async (route) => {

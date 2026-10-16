@@ -8,6 +8,8 @@ interface SwitchProps {
   /// （"按响应模型计费"打开后账单依据就变了），故把后果写在开关旁边而不是文档里。
   description?: string
   disabled?: boolean
+  /// 只留给读屏的标签：表格行内的开关由列头说明，可见文字只会挤占列宽。
+  hideLabel?: boolean
   className?: string
 }
 
@@ -19,6 +21,7 @@ export function Switch({
   label,
   description,
   disabled = false,
+  hideLabel = false,
   className,
 }: SwitchProps) {
   return (
@@ -29,7 +32,7 @@ export function Switch({
         className,
       )}
     >
-      <span className="flex min-w-0 flex-col gap-0.5">
+      <span className={cn('flex min-w-0 flex-col gap-0.5', hideLabel && 'sr-only')}>
         <span className="text-sm">{label}</span>
         {description !== undefined && (
           <span className="text-xs leading-5 text-muted-foreground">{description}</span>

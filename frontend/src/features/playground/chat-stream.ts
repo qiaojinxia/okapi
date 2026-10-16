@@ -34,6 +34,11 @@ export interface StreamDelta {
 }
 
 interface RawChunk {
+  /// Responses 事件才有（`response.output_text.delta` 等）；Chat Completions 块没有。
+  type?: string
+  delta?: string
+  response?: { model?: string; usage?: { input_tokens?: number; output_tokens?: number;
+    input_tokens_details?: { cached_tokens?: number }; output_tokens_details?: { reasoning_tokens?: number } } | null }
   model?: string
   choices?: Array<{
     delta?: {
@@ -62,6 +67,7 @@ export function applyChunk(data: string): StreamDelta {
   } catch {
     return empty
   }
+  if (typeof raw.type === 'string' && raw.type.startsWith('response.')) return applyResponsesEvent(raw, empty)
   const choice = raw.choices?.[0]
   const usage = raw.usage
     ? {
@@ -83,6 +89,31 @@ export function applyChunk(data: string): StreamDelta {
     model: typeof raw.model === 'string' && raw.model !== '' ? raw.model : null,
     usage,
     finish: choice?.finish_reason ?? null,
+  }
+}
+
+/// Responses 流（Codex 渠道的账号测试）：只取正文 / 推理摘要增量与收尾 usage。
+function applyResponsesEvent(raw: RawChunk, empty: StreamDelta): StreamDelta {
+  const delta = typeof raw.delta === 'string' ? raw.delta : ''
+  switch (raw.type) {
+    case 'response.output_text.delta':
+      return { ...empty, content: delta }
+    case 'response.reasoning_summary_text.delta':
+    case 'response.reasoning_text.delta':
+      return { ...empty, reasoning: delta }
+    case 'response.created':
+      return { ...empty, model: raw.response?.model ?? null }
+    case 'response.completed': {
+      const usage = raw.response?.usage
+      return { ...empty, finish: 'stop', usage: usage ? {
+        prompt_tokens: usage.input_tokens ?? 0,
+        completion_tokens: usage.output_tokens ?? 0,
+        cached_tokens: usage.input_tokens_details?.cached_tokens ?? 0,
+        reasoning_tokens: usage.output_tokens_details?.reasoning_tokens ?? 0,
+      } : null }
+    }
+    default:
+      return empty
   }
 }
 
@@ -148,15 +179,21 @@ function errorMessage(error: ErrorEnvelope['error']): string | undefined {
 /// 中继地址是同源 `/api/me/playground/chat`：数据面不开 CORS，控制面在本进程内转交处理器。
 /// `selectedKeyId` 非空时，请求改以该令牌（须与登录 key 同属一个用户）的身份调用。
 export function streamChat(params: ChatParams, key: string, cb: StreamCallbacks, selectedKeyId: number | null = null): () => void {
+  // 选用的令牌只带 id：明文由服务端解出并以它的身份调用，不经过浏览器
+  return streamSse('/api/me/playground/chat', { ...params, stream: true }, key, cb,
+    selectedKeyId !== null ? { 'X-Okapi-Playground-Key': String(selectedKeyId) } : {})
+}
+
+/// 同源 POST 一个流式请求并按 SSE 解析（试用台与渠道账号测试共用）。返回中断函数。
+export function streamSse(url: string, body: unknown, key: string, cb: StreamCallbacks, headers: Record<string, string> = {}): () => void {
   const controller = new AbortController()
   void (async () => {
     let resp: Response
     try {
-      resp = await fetch('/api/me/playground/chat', {
+      resp = await fetch(url, {
         method: 'POST',
-        // 选用的令牌只带 id：明文由服务端解出并以它的身份调用，不经过浏览器
-        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...(selectedKeyId !== null ? { 'X-Okapi-Playground-Key': String(selectedKeyId) } : {}) },
-        body: JSON.stringify({ ...params, stream: true }),
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body),
         signal: controller.signal,
       })
     } catch {

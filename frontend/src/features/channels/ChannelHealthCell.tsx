@@ -31,20 +31,19 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
   const { t } = useTranslation()
   // 渠道级停用：站长手动关的，此时 key 状态无意义，直接说"已停用"（少一列"状态"）
   if (!enabled) {
-    return <Badge variant="muted">{t('common:disabled')}</Badge>
+    return <Badge variant="muted" dot>{t('common:disabled')}</Badge>
   }
   if (keys.length === 0) {
-    return <Badge variant="destructive">{t('admin:keyStateNoKeys')}</Badge>
+    return <Badge variant="destructive" dot>{t('admin:keyStateNoKeys')}</Badge>
   }
   const active = keys.filter((k) => k.status === 1).length
   if (active === keys.length) {
     return (
       // 窄屏允许 token 到期换到下一行，状态列不撑宽表格
       <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 whitespace-nowrap">
-        <Badge variant="success">{t('common:enabled')}</Badge>
-        <span className="text-xs text-muted-foreground">
-          {t('admin:keyStateAllActive', { n: keys.length })}
-        </span>
+        <Badge variant="success" dot title={t('admin:keyStateAllActive', { n: keys.length })}>
+          {t('admin:channelStateNormal')}
+        </Badge>
         <OAuthExpiry keys={keys} />
       </span>
     )
@@ -61,7 +60,7 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
     .sort((a, b) => a.valueOf() - b.valueOf())[0]
   return (
     <div className="flex flex-wrap items-center gap-1 whitespace-nowrap">
-      <Badge variant={active === 0 ? 'destructive' : 'warning'}>
+      <Badge variant={active === 0 ? 'destructive' : 'warning'} dot>
         {active === 0
           ? t('admin:keyStateNoneActive')
           : t('admin:keyStateSomeActive', { active, total: keys.length })}
@@ -230,7 +229,7 @@ export function useChannelUsage() {
   })
 }
 
-/// 行内一行：近 30 天 token 总量 · 计费金额；悬停看输入 / 缓存 / 输出与上游成本。
+/// 近 30 天用量胶囊：请求数 / token / 计费 / 上游成本各一块，悬停看输入 / 缓存 / 输出明细。
 export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) {
   const { t, i18n } = useTranslation()
   if (!usage || usage.requests === 0) return null
@@ -245,13 +244,13 @@ export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) 
     amount: formatMoneyAggregate(usage.amount_micro, lang),
     cost: formatMoneyAggregate(usage.upstream_cost_micro, lang),
   })
+  const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
+  const chip = 'inline-flex h-5 items-center rounded bg-muted px-1.5 text-[11px] text-muted-foreground tabular-nums'
   return (
-    <span className="whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={detail}>
-      {t('admin:channelUsage', {
-        days: USAGE_DAYS,
-        tokens: new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 }).format(total),
-        amount: formatMoneyAggregate(usage.amount_micro, lang),
-      })}
+    <span className="flex flex-wrap items-center gap-1 whitespace-nowrap" title={detail}>
+      <span className={chip}>{t('admin:channelUsageChipRequests', { n: compact.format(usage.requests) })}</span>
+      <span className={chip}>{t('admin:channelUsageChipTokens', { n: compact.format(total) })}</span>
+      <span className={chip}>{t('admin:channelUsageChipAmount', { v: formatMoneyAggregate(usage.amount_micro, lang) })}</span>
     </span>
   )
 }
