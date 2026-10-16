@@ -716,3 +716,27 @@ test('required cloud and pass-through addresses remain visible', async ({ page }
     await expect(drawer.getByRole('button', { name: '新建', exact: true })).toBeEnabled()
   }
 })
+
+test('a Claude Code profile can restrict the channel to the real client and folds the switch into its summary', async ({ page }) => {
+  const profiled = { ...channel, provider: 'anthropic_max', settings: { extensions: {
+    client_profile: { name: 'claude-code', mode: 'auto', revision: '2.1.301' } } } }
+  await prepare(page, [profiled])
+  let saved: Json | undefined
+  await page.route('**/admin/channels/42', async (route) => {
+    saved = route.request().postDataJSON()
+    return route.fulfill({ json: { ok: true } })
+  })
+  await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await drawer.getByRole('tab', { name: '请求与计费行为', exact: true }).click()
+  const section = drawer.locator('#channel-client-options')
+  await section.locator('summary').click()
+  const toggle = section.getByRole('switch', { name: '仅接受 Claude Code 客户端' })
+  await expect(toggle).not.toBeChecked()
+  await toggle.check()
+  await expect(section.locator('summary')).toContainText('仅 Claude Code')
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => saved).toMatchObject({ settings: { extensions: {
+    client_profile: { name: 'claude-code', mode: 'auto', native_only: true } } } })
+  await page.screenshot({ path: 'test-results/native-only.png', fullPage: false })
+})

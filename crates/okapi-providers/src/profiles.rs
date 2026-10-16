@@ -87,6 +87,10 @@ pub enum ClientProfile {
         entrypoint: ClaudeCodeEntrypoint,
         #[serde(default)]
         request_class: ClaudeCodeRequestClass,
+        /// Route only requests from the real Claude Code client to this channel; other
+        /// clients skip it during candidate selection (the gateway enforces this).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        native_only: bool,
     },
 }
 
@@ -162,6 +166,18 @@ pub(crate) fn claude_code_transport(extensions: &Value) -> bool {
     matches!(
         client_profile(extensions),
         Ok(Some(ClientProfile::ClaudeCode { .. }))
+    )
+}
+
+/// The channel accepts only the real Claude Code client (`client_profile.native_only`).
+#[must_use]
+pub fn native_only(extensions: &Value) -> bool {
+    matches!(
+        client_profile(extensions),
+        Ok(Some(ClientProfile::ClaudeCode {
+            native_only: true,
+            ..
+        }))
     )
 }
 
@@ -247,15 +263,38 @@ fn legacy_metadata(value: &str) -> bool {
         })
 }
 
-/// Compatibility classification protects native system/cache bytes, never grants authority.
-fn native_claude_code(body: &[u8], context: &RequestContext) -> bool {
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+/// Classifies a Messages body as the real Claude Code client: a CLI-shaped
+/// `metadata.user_id`, plus the CLI User-Agent or its billing attribution block.
+/// It keeps native bytes intact and routes native-only channels; any client that
+/// copies the shape passes, so it is a routing rule, not authentication.
+#[must_use]
+pub fn is_native_claude_code(body: &[u8], user_agent: Option<&str>) -> bool {
+    #[derive(Deserialize)]
+    struct Metadata {
+        user_id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Block {
+        text: Option<String>,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum System {
+        Blocks(Vec<Block>),
+        Other(serde::de::IgnoredAny),
+    }
+    #[derive(Deserialize)]
+    struct Probe {
+        metadata: Option<Metadata>,
+        system: Option<System>,
+    }
+    let Ok(value) = serde_json::from_slice::<Probe>(body) else {
         return false;
     };
-    let Some(user_id) = value.pointer("/metadata/user_id").and_then(Value::as_str) else {
+    let Some(user_id) = value.metadata.and_then(|metadata| metadata.user_id) else {
         return false;
     };
-    let valid_id = serde_json::from_str::<Value>(user_id)
+    let valid_id = serde_json::from_str::<Value>(&user_id)
         .ok()
         .is_some_and(|id| {
             id.get("device_id")
@@ -268,22 +307,22 @@ fn native_claude_code(body: &[u8], context: &RequestContext) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(valid_uuid)
         })
-        || legacy_metadata(user_id);
+        || legacy_metadata(&user_id);
     if !valid_id {
         return false;
     }
-    header(context, "user-agent").is_some_and(|ua| ua.starts_with("claude-cli/"))
-        || value
-            .get("system")
-            .and_then(Value::as_array)
-            .is_some_and(|blocks| {
-                blocks.iter().any(|block| {
-                    block
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .is_some_and(|text| text.starts_with(identity::BILLING_PREFIX))
-                })
-            })
+    user_agent.is_some_and(|ua| ua.starts_with("claude-cli/"))
+        || matches!(value.system, Some(System::Blocks(blocks)) if blocks.iter().any(|block| {
+            block
+                .text
+                .as_deref()
+                .is_some_and(|text| text.starts_with(identity::BILLING_PREFIX))
+        }))
+}
+
+/// Compatibility classification protects native system/cache bytes, never grants authority.
+fn native_claude_code(body: &[u8], context: &RequestContext) -> bool {
+    is_native_claude_code(body, header(context, "user-agent"))
 }
 
 pub struct PreparedRequest {
@@ -319,6 +358,7 @@ pub fn prepare_anthropic(
         revision,
         entrypoint,
         request_class,
+        ..
     }) = profile
     else {
         return Ok(prepared);

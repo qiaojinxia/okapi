@@ -120,6 +120,8 @@ struct RequestBilling {
     session: Option<String>,
     /// UA 识别的客户端类型。
     client_type: &'static str,
+    /// 请求来自真实 Claude Code 客户端（只看 `/v1/messages`）：仅限真机的渠道只收这类请求。
+    claude_code_native: bool,
     /// 客户端 IP（CDN 头按序，§14.2）。
     client_ip: Option<String>,
     /// 客户端身份头（只在订阅 provider 的出向上透传，§11.38）。
@@ -748,6 +750,18 @@ pub async fn messages_count_tokens(
     }
 }
 
+/// count_tokens 不带 metadata：仅限真机的渠道只认 UA，不收就退本地估算。
+fn counts_for(c: &ChannelCandidate, headers: &HeaderMap) -> bool {
+    !okapi_providers::profiles::native_only(&c.extensions)
+        || user_agent(headers).is_some_and(|ua| ua.starts_with("claude-cli/"))
+}
+
+fn user_agent(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+}
+
 async fn count_tokens_inner(
     state: &AppState,
     headers: &HeaderMap,
@@ -784,7 +798,8 @@ async fn count_tokens_inner(
         state,
         order_candidates(rows)
             .into_iter()
-            .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max")),
+            .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"))
+            .filter(|c| counts_for(c, headers)),
     )
     .await;
     if let Some(cand) = cand {
@@ -1525,6 +1540,8 @@ async fn prepare_chat(
         response_parent,
         session: info.session.clone(),
         client_type: detect_client_type(headers),
+        claude_code_native: ingress == Ingress::Anthropic
+            && okapi_providers::profiles::is_native_claude_code(body, user_agent(headers)),
         client_ip: super::clients::detect_client_ip(headers),
         client_headers: Arc::new(super::oauth_cred::client_headers(headers)),
         pool_chain: key.pool_chain().into_iter().map(str::to_owned).collect(),
@@ -1544,7 +1561,7 @@ async fn prepare_chat(
 
 /// 模型级降级（DESIGN §3.4.1）：请求模型**零可用候选**（渠道停用/冷却/全被限住）
 /// 时按 `models.fallback_models` 顺序改投。三条铁律：
-/// - 只有零候选（含入口协议不匹配）触发——上游 4xx/5xx 是"打过了没打通"，
+/// - 只有零候选（含入口协议不匹配、只剩仅限真机的渠道）触发——上游 4xx/5xx 是"打过了没打通"，
 ///   换模型只会藏住真实错误并让用户为两次调用付钱；
 /// - 单跳：只读请求模型自己的链，不递归降级模型的链；
 /// - 按实际服务模型计费（fallback_billing 重建计费上下文，快照记 requested_model）。
@@ -1556,7 +1573,10 @@ async fn forward(
     let first = try_model(bill, info, body).await;
     let zero_candidates = matches!(
         &first,
-        Err(f) if matches!(f.error_code.as_str(), codes::NO_AVAILABLE_CHANNEL | codes::UNSUPPORTED_ENDPOINT)
+        Err(f) if matches!(
+            f.error_code.as_str(),
+            codes::NO_AVAILABLE_CHANNEL | codes::UNSUPPORTED_ENDPOINT | codes::CLAUDE_CODE_CLIENT_REQUIRED
+        )
     );
     if !zero_candidates || bill.fallback_models.is_empty() || bill.response_parent.is_some() {
         return first;
@@ -1574,7 +1594,9 @@ async fn forward(
             Err(f)
                 if matches!(
                     f.error_code.as_str(),
-                    codes::NO_AVAILABLE_CHANNEL | codes::UNSUPPORTED_ENDPOINT
+                    codes::NO_AVAILABLE_CHANNEL
+                        | codes::UNSUPPORTED_ENDPOINT
+                        | codes::CLAUDE_CODE_CLIENT_REQUIRED
                 ) => {}
             // 成功或真实上游失败：终止。降级只救"无人可打"，不救"打了没打通"
             other => return other,
@@ -1706,6 +1728,19 @@ async fn eligible_candidates(
             0,
             None,
         ));
+    }
+    // 仅限真机的渠道（client_profile.native_only）：其它客户端跳过它们，
+    // 由同池其它渠道与降级池承接；被这一条筛空单独给错误码，不冒充渠道全挂。
+    if !bill.claude_code_native {
+        let before = candidates.len();
+        candidates.retain(|c| !okapi_providers::profiles::native_only(&c.extensions));
+        if before > 0 && candidates.is_empty() {
+            return Err(ForwardFailure::app(
+                AppError::new(StatusCode::FORBIDDEN, codes::CLAUDE_CODE_CLIENT_REQUIRED),
+                0,
+                None,
+            ));
+        }
     }
     let requirements = Requirements {
         tools: info.needs_tools,

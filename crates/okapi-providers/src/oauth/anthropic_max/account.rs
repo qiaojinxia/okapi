@@ -25,6 +25,7 @@ impl AccountHooks for ClaudeAccount {
                     revision: crate::profiles::ClaudeCodeRevision::V2_1_290,
                     entrypoint: crate::profiles::ClaudeCodeEntrypoint::Cli,
                     request_class: crate::profiles::ClaudeCodeRequestClass::Main,
+                    native_only: false,
                 }),
             }),
             subscription: Some(SubscriptionControls {

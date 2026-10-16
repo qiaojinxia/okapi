@@ -1601,6 +1601,9 @@ export default {
     clientProfileLegacy: 'Default: add subscription essentials only',
     clientProfileNative: 'Forward as-is, no rewriting',
     clientProfileAuto: 'Auto: preserve native requests, mimic ordinary requests',
+    clientProfileNativeOnly: 'Accept only the Claude Code client',
+    clientProfileNativeOnlyShort: 'Claude Code only',
+    clientProfileNativeOnlyHint: 'Requests from other clients skip this channel and go to other channels in the pool or the fallback pool; with none left they are rejected. Detection uses the CLI-shaped metadata.user_id plus the claude-cli User-Agent or the billing attribution block: it stops ordinary clients, not deliberate imitation.',
     clientProfilePassthrough: 'Pass native Claude Code requests through',
     clientProfileMimic: 'Mimic the Claude Code client',
     clientProfileVersion: 'Client version',
@@ -3137,6 +3140,7 @@ export default {
     no_available_channel: 'No available channel',
     unsupported_endpoint: 'This model does not support the requested endpoint. Use {{param}} with the corresponding request body.',
     margin_blocked: 'Every channel for this group is paused by the margin breaker (negative margin)',
+    claude_code_client_required: 'The available channels for this model accept only the Claude Code client',
     no_zero_retention_channel:
       'Zero data retention was requested, but none of the {{param}} candidate channels declares it',
     price_above_max: 'Quoted price exceeds the max_price declared in the request ({{param}})',

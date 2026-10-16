@@ -221,3 +221,68 @@ async fn simulated_channels_reserve_for_what_the_profile_adds() {
     let resp = send().await.unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 }
+
+/// 仅限真机的订阅渠道：其它客户端跳过它改投同池渠道，没有可改投的就 403；
+/// 真机请求照常命中并原样透传。
+#[tokio::test]
+async fn native_only_channel_serves_only_the_real_claude_code_client() {
+    let env = setup().await;
+    let (native, _) = login_channel(&env, "anthropic_max").await;
+    patch(
+        &env,
+        native,
+        &json!({"extensions":{"client_profile":{"name":"claude-code","mode":"auto","native_only":true}}}),
+    )
+    .await;
+    let messages = |ua: &str| {
+        reqwest::Client::new()
+            .post(format!("http://{}/v1/messages", env.gateway))
+            .bearer_auth(&env.user_token)
+            .header("user-agent", ua)
+            .json(&json!({"model":env.model,"max_tokens":64,
+                "system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}],
+                "metadata":{"user_id":json!({"device_id":"a".repeat(64),"account_uuid":"","session_id":"12345678-1234-4234-8234-123456789012"}).to_string()},
+                "messages":[{"role":"user","content":format!("q-{}", Uuid::new_v4())}]}))
+            .send()
+    };
+
+    // 只有这一条渠道：普通客户端（含只抄了 UA 却没有 CLI metadata 的）被拒，不打上游
+    let resp = chat(&env).await;
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "claude_code_client_required");
+    let resp = messages("opencode/1.0").await.unwrap();
+    assert_eq!(resp.status(), 403);
+    // count_tokens 不收就退本地估算，同样不用这条渠道的凭证
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/messages/count_tokens", env.gateway))
+        .bearer_auth(&env.user_token)
+        .json(&json!({"model":env.model,"messages":[{"role":"user","content":"hello"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(
+        env.mock_state.last_body().is_none(),
+        "被拒的请求不能打到上游"
+    );
+    assert!(env.mock_state.seen("user-agent").is_none());
+
+    let before = env.state.ledger.balance(env.user_id).await.unwrap();
+    let resp = messages("claude-cli/2.1.301 (external, cli)")
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        env.mock_state.seen("user-agent").as_deref(),
+        Some("claude-cli/2.1.301 (external, cli)")
+    );
+    assert_settlement(&env, native, before).await;
+
+    // 同池再加一条不设限的渠道：普通客户端改投它，真机请求不受影响
+    let (open, _) = login_channel(&env, "anthropic_max").await;
+    let before = env.state.ledger.balance(env.user_id).await.unwrap();
+    let resp = chat(&env).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_settlement(&env, open, before).await;
+}

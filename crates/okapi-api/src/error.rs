@@ -41,6 +41,9 @@ pub mod codes {
     pub const SERVER_TOOL_UNPRICED: &str = "server_tool_unpriced";
     /// 请求要求零数据留存，但没有渠道声明不留存（param = 该模型的候选数）。
     pub const NO_ZERO_RETENTION_CHANNEL: &str = "no_zero_retention_channel";
+    /// 该模型的候选渠道都只接受真实 Claude Code 客户端（渠道 `client_profile.native_only`），
+    /// 本次请求不是。
+    pub const CLAUDE_CODE_CLIENT_REQUIRED: &str = "claude_code_client_required";
     /// 该分组对此模型的全部候选渠道都因负毛利被熔断（IMPLEMENTATION §11.34；param = 摘掉的候选数）。
     pub const MARGIN_BLOCKED: &str = "margin_blocked";
     /// 本进程的后台结算积压超过上界（IMPLEMENTATION §12.2）：数据面在鉴权前拒绝，

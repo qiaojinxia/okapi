@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import { Select } from '@/components/ui/select'
 import { Input, Label } from '@/components/ui/input'
+import { Switch } from '@/components/ui/switch'
 import { OptionalSection } from '@/components/ui/optional-section'
 import type { ChannelSettings } from './types'
 
@@ -15,7 +16,9 @@ export function ClientProfileEditor({ settings, onChange }: {
     auto: 'admin:clientProfileAuto', passthrough: 'admin:clientProfilePassthrough', mimic: 'admin:clientProfileMimic' } as const
   // 版本只由服务端决定：新配置不写版本，保存后服务端填入它实现的最新客户端。
   const revision = profile?.name === 'claude-code' ? profile.revision ?? t('admin:clientProfileLatest') : ''
-  const summary = [t(labels[value]), value !== 'passthrough' ? revision : ''].filter(Boolean).join(' · ')
+  const nativeOnly = profile?.name === 'claude-code' && profile.native_only === true
+  const summary = [t(labels[value]), value !== 'passthrough' ? revision : '',
+    nativeOnly ? t('admin:clientProfileNativeOnlyShort') : ''].filter(Boolean).join(' · ')
   return (
     <OptionalSection id="channel-client-options" title={t('admin:clientProfile')} summary={summary}>
       <div className="flex flex-col gap-1.5">
@@ -36,6 +39,15 @@ export function ClientProfileEditor({ settings, onChange }: {
           { value: 'passthrough', label: t('admin:clientProfilePassthrough') },
           { value: 'mimic', label: t('admin:clientProfileMimic') },
         ]} />
+        {profile?.name === 'claude-code' && (
+          <Switch className="mt-2" checked={nativeOnly} label={t('admin:clientProfileNativeOnly')}
+            description={t('admin:clientProfileNativeOnlyHint')}
+            onChange={(on) => {
+              const { native_only: _off, ...rest } = profile
+              onChange({ ...settings, extensions: { ...settings.extensions,
+                client_profile: on ? { ...rest, native_only: true } : rest } })
+            }} />
+        )}
         {profile?.name === 'claude-code' && value !== 'passthrough' && <>
           <Label htmlFor="d-client-profile-version">{t('admin:clientProfileVersion')}</Label>
           <Input id="d-client-profile-version" value={revision} readOnly />

@@ -134,6 +134,8 @@ export interface ChannelSettings {
       revision?: string
       entrypoint?: 'cli' | 'sdk-cli'
       request_class?: 'main' | 'auxiliary'
+      /** Only the real Claude Code client is routed here; other clients skip the channel. */
+      native_only?: boolean
     }
   }
 }

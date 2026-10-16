@@ -2642,6 +2642,13 @@ reqwest + rustls：ClientHello 的 JA4 是 `t13d1011h2_61a7ad8aa9b6_0d308c48d2a3
 
 **定案**：
 
+- **仅限真机（2026-10-16）**：`client_profile` 加 `native_only: true` 后，这条渠道只收真实 Claude Code 请求。
+  识别复用 auto 模式的判定（`profiles::is_native_claude_code`：CLI 形状的 `metadata.user_id`，加 `claude-cli/` UA
+  或计费归因块），只在 `/v1/messages` 入口算一次；其它入口一律不算真机。选路时非真机请求跳过这类渠道，
+  由同池其它渠道与降级池承接；被它筛空回 403 `claude_code_client_required`，也触发模型级降级。
+  `count_tokens` 不带 metadata，只看 UA，不收时退本地估算。这是选路规则而非鉴权：照抄形状的客户端能通过，
+  挡的是普通客户端误用订阅账号。对照 Sub2API 的分组 `claude_code_only` + 降级分组：这里按渠道设，
+  降级沿用池链，不另设降级分组。
 - **TLS**（`okapi_providers::client_tls`）：渠道配了 `extensions.client_profile = claude-code`（任何模式——
   auto / passthrough 转发的是真机请求，连接也该像真机）时，`HttpPool::send` 改走 BoringSSL 连接器 + hyper
   HTTP/1.1 连接池；其余渠道照旧 reqwest。请求仍由 reqwest 构造，转成 `http::Request` 发送，响应转回

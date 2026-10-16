@@ -61,6 +61,7 @@ fn retired_revisions_read_as_the_latest_client() {
                 revision: ClaudeCodeRevision::V2_1_290,
                 entrypoint: ClaudeCodeEntrypoint::Cli,
                 request_class: ClaudeCodeRequestClass::Main,
+                native_only: false,
             }),
             "{revision}"
         );
@@ -218,4 +219,62 @@ fn admission_hints_follow_the_profile_that_reshapes_requests() {
     assert_eq!(AdmissionHints::default().prompt_tokens(1000), 1000);
     let merged = AdmissionHints::default().max(hints("mimic"));
     assert_eq!(merged, hints("mimic"));
+}
+
+#[test]
+fn native_only_is_an_opt_in_claude_code_switch() {
+    let on = json!({"client_profile":{"name":"claude-code","mode":"auto","native_only":true}});
+    assert!(native_only(&on));
+    assert!(validate_extensions("anthropic_max", &on).is_ok());
+    for off in [
+        json!({"client_profile":{"name":"claude-code","mode":"auto"}}),
+        json!({"client_profile":{"name":"native"}}),
+        Value::Null,
+    ] {
+        assert!(!native_only(&off), "{off}");
+    }
+    // 关着时不落盘，已存配置的形状不变
+    let profile = client_profile(&json!({"client_profile":{"name":"claude-code"}}))
+        .unwrap()
+        .unwrap();
+    assert!(
+        serde_json::to_value(profile)
+            .unwrap()
+            .get("native_only")
+            .is_none()
+    );
+}
+
+#[test]
+fn native_claude_code_needs_cli_metadata_and_a_cli_marker() {
+    let device = "a".repeat(64);
+    let session = "12345678-1234-4234-8234-123456789012";
+    let user_id = json!({"device_id":device,"session_id":session}).to_string();
+    let body = |value: Value| serde_json::to_vec(&value).unwrap();
+    let plain = body(json!({"metadata":{"user_id":user_id},"messages":[]}));
+    assert!(is_native_claude_code(
+        &plain,
+        Some("claude-cli/2.1.301 (external, cli)")
+    ));
+    assert!(!is_native_claude_code(&plain, Some("opencode/1.0")));
+    assert!(!is_native_claude_code(&plain, None));
+    // UA 被中间网关改写：计费归因块仍能认出真机
+    let billed = body(json!({
+        "metadata":{"user_id":user_id},
+        "system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.301.7bd; cc_entrypoint=cli;"}],
+    }));
+    assert!(is_native_claude_code(&billed, Some("Go-http-client/2.0")));
+    let legacy = format!("user_{device}_account__session_{session}");
+    let legacy = body(json!({"metadata":{"user_id":legacy},"system":"plain"}));
+    assert!(is_native_claude_code(&legacy, Some("claude-cli/2.1.301")));
+    // 只抄 UA 不带 CLI 形状的 metadata 不算
+    for forged in [
+        body(json!({"metadata":{"user_id":"anything"}})),
+        body(
+            json!({"system":[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude."}]}),
+        ),
+        b"not json".to_vec(),
+    ] {
+        assert!(!is_native_claude_code(&forged, Some("claude-cli/2.1.301")));
+    }
 }
