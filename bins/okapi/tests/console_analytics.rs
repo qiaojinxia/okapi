@@ -227,6 +227,20 @@ async fn get(env: &Env, path: &str, token: &str) -> (u16, Value) {
     (status, body)
 }
 
+/// 统计窗口按机器时区切日：「昨天中午」也按本地时区取，否则 UTC 与本地跨日的那几个小时里
+/// UTC 的昨天会落进本地的今天，上期为空。
+fn local_yesterday_noon() -> String {
+    (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+        .and_hms_opt(12, 0, 0)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .earliest()
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 /// drain + 查询直到谓词成立（outbox 是全局队列，并行用例持锁时 drain 会提前收敛）。
 async fn poll_until<F>(env: &Env, path: &str, ready: F) -> Value
 where
@@ -678,12 +692,12 @@ async fn breakdown_metric_ranks_before_limit_and_preserves_totals() {
         }
     }
     // 历史名次跟随所选指标，而金额环比继续使用真实金额。
-    let yesterday = chrono::Utc::now().date_naive() - chrono::Duration::days(1);
+    let yesterday_noon = local_yesterday_noon();
     let mut previous = rows.clone();
     for row in &mut previous {
         row["request_id"] = json!(Uuid::new_v4());
     }
-    insert_values(&env, &previous, Some(&format!("{yesterday}T12:00:00Z"))).await;
+    insert_values(&env, &previous, Some(&yesterday_noon)).await;
     poll_until(
         &env,
         &format!("/admin/stats/breakdown?by=model&metric=requests&{base}"),
