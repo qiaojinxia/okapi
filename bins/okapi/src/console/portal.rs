@@ -997,6 +997,49 @@ pub async fn delete_key(
     Ok(Json(json!({ "ok": true, "key_id": id })))
 }
 
+/// 惰性生成邀请码：8 位小写字母数字。只有唯一索引冲突才换码重试，且有次数上限——曾把一切
+/// PG 错误都当成冲突、无上限地重试（读回失败或账号已删也会一直转），库故障时在这里热循环打库。
+async fn generate_aff_code(state: &AppState, user_id: i64) -> Result<String, AppError> {
+    const ATTEMPTS: usize = 8;
+    for _ in 0..ATTEMPTS {
+        let candidate: String = {
+            use rand::RngExt;
+            use rand::distr::Alphanumeric;
+            rand::rng()
+                .sample_iter(&Alphanumeric)
+                .take(8)
+                .map(|c| (c as char).to_ascii_lowercase())
+                .collect()
+        };
+        let updated = sqlx::query!(
+            r#"UPDATE users SET aff_code = $2 WHERE id = $1 AND aff_code IS NULL"#,
+            user_id,
+            candidate
+        )
+        .execute(&state.pg)
+        .await;
+        match updated {
+            Ok(r) if r.rows_affected() == 1 => return Ok(candidate),
+            Ok(_) => {
+                // 并发请求已经生成：读回；读不到说明账号已不在，不再重试
+                return sqlx::query_scalar!(r#"SELECT aff_code FROM users WHERE id = $1"#, user_id)
+                    .fetch_optional(&state.pg)
+                    .await
+                    .map_err(okapi_store::StoreError::from)?
+                    .flatten()
+                    .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
+            }
+            Err(error)
+                if error
+                    .as_database_error()
+                    .is_some_and(sqlx::error::DatabaseError::is_unique_violation) => {}
+            Err(error) => return Err(okapi_store::StoreError::from(error).into()),
+        }
+    }
+    tracing::error!(user_id, "aff code generation kept colliding");
+    Err(AppError::internal())
+}
+
 /// GET /api/me/aff：邀请码（惰性生成）+ 邀请人数 + 累计返利（M4 aff）。
 pub async fn aff(
     State(state): State<AppState>,
@@ -1014,41 +1057,7 @@ pub async fn aff(
     let code = if let Some(code) = code {
         code
     } else {
-        // 惰性生成：8 位小写字母数字；唯一索引冲突重试
-        loop {
-            let candidate: String = {
-                use rand::RngExt;
-                use rand::distr::Alphanumeric;
-                rand::rng()
-                    .sample_iter(&Alphanumeric)
-                    .take(8)
-                    .map(|c| (c as char).to_ascii_lowercase())
-                    .collect()
-            };
-            let updated = sqlx::query!(
-                r#"UPDATE users SET aff_code = $2 WHERE id = $1 AND aff_code IS NULL"#,
-                key.user_id,
-                candidate
-            )
-            .execute(&state.pg)
-            .await;
-            match updated {
-                Ok(r) if r.rows_affected() == 1 => break candidate,
-                Ok(_) => {
-                    // 并发已生成：读回
-                    if let Ok(Some(Some(existing))) = sqlx::query_scalar!(
-                        r#"SELECT aff_code FROM users WHERE id = $1"#,
-                        key.user_id
-                    )
-                    .fetch_optional(&state.pg)
-                    .await
-                    {
-                        break existing;
-                    }
-                }
-                Err(_) => {} // 唯一冲突：换码重试
-            }
-        }
+        generate_aff_code(&state, key.user_id).await?
     };
 
     let invitees = sqlx::query_scalar!(
