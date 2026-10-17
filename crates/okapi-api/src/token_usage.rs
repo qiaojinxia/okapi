@@ -342,12 +342,36 @@ pub(super) fn with_estimates(
     if probe.missing_prompt {
         let details = probe.prompt_tokens_details;
         // A conservative lower bound keeps known subsets; their intersections are
-        // still validated by normalize, never silently clipped.
+        // still validated by normalize, never silently clipped. audio / image are
+        // totals that include their cached share: modal tokens a cache detail
+        // reports are already inside cached / cache_write, so only the uncached
+        // remainder is added (as normalize subtracts them). Adding the totals counted
+        // the intersection twice and billed it again as uncached text.
+        let modal = |cache: Option<ModalTokensDetails>| {
+            cache.map_or((0, 0), |cache| {
+                (
+                    cache.audio_tokens.unwrap_or(0),
+                    cache.image_tokens.unwrap_or(0),
+                )
+            })
+        };
+        let (read_audio, read_image) = modal(details.cached_tokens_details);
+        let (write_audio, write_image) = modal(details.cache_write_tokens_details);
+        let uncached = |total: u32, read: u32, write: u32| {
+            total
+                .checked_sub(read)
+                .and_then(|n| n.checked_sub(write))
+                .ok_or_else(invalid)
+        };
         let floor = details
             .cached_tokens
             .checked_add(details.cache_write_tokens)
-            .and_then(|n| n.checked_add(details.audio_tokens))
-            .and_then(|n| n.checked_add(details.image_tokens))
+            .and_then(|n| {
+                n.checked_add(uncached(details.audio_tokens, read_audio, write_audio).ok()?)
+            })
+            .and_then(|n| {
+                n.checked_add(uncached(details.image_tokens, read_image, write_image).ok()?)
+            })
             .ok_or_else(invalid)?;
         probe.prompt_tokens = prompt.max(floor);
         probe.missing_prompt = false;

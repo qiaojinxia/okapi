@@ -164,3 +164,38 @@ fn stream_cache_snapshots_replace_counts_and_do_not_retain_stale_audio_splits() 
             .is_err()
     );
 }
+
+/// 上游漏报 prompt_tokens 时的下限：audio / image 是含缓存部分的总量，缓存明细里报了的模态
+/// token 已经算在 cached_tokens 里，不能再叠一遍（曾把 80 个缓存音频当成 80 个未缓存文本多收）。
+#[test]
+fn estimated_prompt_floor_counts_cached_modal_tokens_once() {
+    for (modal, cached_detail) in [
+        ("audio_tokens", "audio_tokens"),
+        ("image_tokens", "image_tokens"),
+    ] {
+        let mut details = json!({"cached_tokens":100,"cached_tokens_details":{"text_tokens":20}});
+        details[modal] = json!(80);
+        details["cached_tokens_details"][cached_detail] = json!(80);
+        let usage = parse(json!({"completion_tokens":10,"prompt_tokens_details":details}))
+            .with_estimates(50, 10)
+            .unwrap();
+        assert_eq!(usage.prompt_tokens, 100, "{modal}");
+        assert_eq!(usage.cached_tokens, 100, "{modal}");
+        assert_eq!(
+            usage.audio_prompt_tokens + usage.image_prompt_tokens,
+            0,
+            "{modal}: 未缓存模态为 0"
+        );
+        assert_eq!(
+            usage.upstream_usage.unwrap().prompt_tokens,
+            None,
+            "{modal}: 估算值不冒充上游实报"
+        );
+    }
+    // 本地估算更大时以估算为准，下限只兜底
+    let usage = parse(json!({"completion_tokens":10,"prompt_tokens_details":{
+        "cached_tokens":100,"audio_tokens":80,"cached_tokens_details":{"text_tokens":20,"audio_tokens":80}}}))
+    .with_estimates(150, 10)
+    .unwrap();
+    assert_eq!(usage.prompt_tokens, 150);
+}
