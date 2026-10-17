@@ -3,6 +3,7 @@ import type { Page, Route } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { ParameterProfile } from '../src/features/playground/parameters'
+import { applyChunk, MAX_TOOL_CALLS } from '../src/features/playground/chat-stream'
 
 // Playground 试用台（IMPLEMENTATION §11.39）：接口桩 + SSE 桩。
 // 覆盖：模型下拉只列本分组可用、发送 → 流式内容 + usage 脚注、停止按钮中断、
@@ -132,6 +133,17 @@ async function prepare(page: Page, opts: Options = {}) {
   })
   return bodies
 }
+
+test('工具调用增量：index 超界、非整数或 Infinity 的整条丢弃，缺失 / 负数按位置', () => {
+  const calls = (entries: unknown[]) => applyChunk(JSON.stringify({ choices: [{ delta: { tool_calls: entries } }] })).toolCalls
+  const call = (index: unknown) => ({ ...(index === undefined ? {} : { index }), id: 'c', function: { name: 'f', arguments: '{}' } })
+  expect(calls([call(MAX_TOOL_CALLS - 1)]).map((c) => c.index)).toEqual([MAX_TOOL_CALLS - 1])
+  for (const index of [MAX_TOOL_CALLS, 1e9, 1.5]) expect(calls([call(index)]), String(index)).toEqual([])
+  // JSON 里的 1e400 解析出来是 Infinity：曾让合并时的 while 死循环
+  expect(applyChunk('{"choices":[{"delta":{"tool_calls":[{"index":1e400,"function":{"name":"f"}}]}}]}').toolCalls).toEqual([])
+  expect(calls([call(undefined), call(-1)]).map((c) => c.index)).toEqual([0, 1])
+  expect(calls([call(2), call(1e9), call(3)]).map((c) => c.index)).toEqual([2, 3])
+})
 
 test('模型下拉只列本分组可用，发送后流式内容与 usage 脚注出现', async ({ page }) => {
   await prepare(page)

@@ -57,6 +57,11 @@ interface RawChunk {
   } | null
 }
 
+/// 一条回复里工具调用 `index` 的上限（不含）。`index` 决定合并时预留的数组长度：异常或被篡改的
+/// 上游给一个 1e9（或 JSON 里的 1e400 → Infinity），会一次塞进上亿个空调用把标签页卡死；
+/// 小数 index 合并时取不到槽位会直接抛错。超界 / 非整数的增量整条丢弃。
+export const MAX_TOOL_CALLS = 256
+
 /// 一个 SSE 事件的 data 行 JSON → 增量。认不出的块返回空增量而不是抛错：
 /// 上游偶发的心跳 / 未知事件不该打断一段正在显示的回复。
 export function applyChunk(data: string): StreamDelta {
@@ -80,12 +85,16 @@ export function applyChunk(data: string): StreamDelta {
   return {
     content: choice?.delta?.content ?? '',
     reasoning: choice?.delta?.reasoning_content ?? choice?.delta?.reasoning ?? '',
-    toolCalls: (choice?.delta?.tool_calls ?? []).map((call, position) => ({
-      index: typeof call.index === 'number' && call.index >= 0 ? call.index : position,
-      ...(typeof call.id === 'string' && call.id !== '' ? { id: call.id } : {}),
-      ...(typeof call.function?.name === 'string' && call.function.name !== '' ? { name: call.function.name } : {}),
-      arguments: typeof call.function?.arguments === 'string' ? call.function.arguments : '',
-    })),
+    toolCalls: (choice?.delta?.tool_calls ?? []).flatMap((call, position) => {
+      const index = typeof call.index === 'number' && call.index >= 0 ? call.index : position
+      if (!Number.isInteger(index) || index >= MAX_TOOL_CALLS) return []
+      return [{
+        index,
+        ...(typeof call.id === 'string' && call.id !== '' ? { id: call.id } : {}),
+        ...(typeof call.function?.name === 'string' && call.function.name !== '' ? { name: call.function.name } : {}),
+        arguments: typeof call.function?.arguments === 'string' ? call.function.arguments : '',
+      }]
+    }),
     model: typeof raw.model === 'string' && raw.model !== '' ? raw.model : null,
     usage,
     finish: choice?.finish_reason ?? null,
