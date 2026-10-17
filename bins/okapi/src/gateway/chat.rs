@@ -1781,25 +1781,6 @@ async fn eligible_candidates(
             ));
         }
     }
-    // 零留存要求（§11.24）：只留声明 data_retention='none' 的渠道。
-    // 未声明按不满足处理——"不知道对方留不留"不能当成"不留"。
-    // 单独给错误码：候选被这一条筛空时，回 no_available_channel 会让人以为渠道全挂了。
-    if bill.prefs.zero_retention {
-        let before = candidates.len();
-        candidates
-            .retain(|c| super::routing_prefs::retention_ok(c.data_retention.as_deref(), true));
-        if candidates.is_empty() {
-            return Err(ForwardFailure::app(
-                AppError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    codes::NO_ZERO_RETENTION_CHANNEL,
-                )
-                .with_param(before.to_string()),
-                0,
-                None,
-            ));
-        }
-    }
     // 负毛利熔断（§11.34）：该分组打这条渠道在亏钱，摘掉让同池其它渠道承接
     let margin_removed = bill
         .state

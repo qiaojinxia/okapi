@@ -845,12 +845,6 @@ export default {
   admin: {
     channelCostMilliHint: 'What this channel charges relative to the official list price: 1.0 = list price; 0.5 = half-price reseller; 0 = self-hosted / free. Drives margin accounting (upstream cost = official price × factor) and scheduling weight (cheaper channels win more often at equal priority).',
     channelCostMilli: 'Relative cost',
-    channelDataRetention: 'Data retention',
-    channelDataRetentionHint: 'What this upstream does with request content. Only channels declared as no-retention are eligible for requests asking for provider.zdr / data_collection:"deny"; **undeclared counts as not eligible** — not knowing whether they keep it is not the same as knowing they do not. This records what you know about the upstream; okapi does not verify it.',
-    channelRetentionUnset: 'Not declared',
-    channelRetentionNone: 'No retention',
-    channelRetentionTransient: 'Short-term, not trained on',
-    channelRetentionTrains: 'May be used for training',
     statUpstreamCost: 'Upstream cost',
     statMarginPendingHint: 'Cost is derived per successful settlement from the channel\'s relative-cost factor; nothing in this window carries a cost yet.',
     overviewDesc: 'Current site status, pending actions and recent trend.',
@@ -3169,8 +3163,6 @@ export default {
     unsupported_endpoint: 'This model does not support the requested endpoint. Use {{param}} with the corresponding request body.',
     margin_blocked: 'Every channel for this group is paused by the margin breaker (negative margin)',
     claude_code_client_required: 'The available channels for this model accept only the Claude Code client',
-    no_zero_retention_channel:
-      'Zero data retention was requested, but none of the {{param}} candidate channels declares it',
     price_above_max: 'Quoted price exceeds the max_price declared in the request ({{param}})',
     server_tool_unpriced: 'Server tools (web search / web fetch) are not priced for this model yet; contact the administrator',
     upstream_error: 'Upstream error',

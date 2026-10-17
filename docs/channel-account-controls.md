@@ -82,7 +82,7 @@ under the retention lock. Billing data is not an upstream subscription entitleme
 
 API-key imports and subscription code exchange use the same validated creation
 options and transactional writer. Settings, owner, priority, concurrency, relative
-procurement cost, retention declaration, the one initial credential and pool
+procurement cost, the one initial credential and pool
 memberships commit together. Invalid settings/pools are rejected before supplier
 code exchange; a later database failure rolls back the whole creation. Empty
 endpoints resolve from the provider registration. New subscription authorization

@@ -307,7 +307,7 @@ async fn native_count_preserves_context_maps_models_and_never_bills() {
 }
 
 #[tokio::test]
-async fn count_validates_input_auth_model_pool_and_retention_before_upstream() {
+async fn count_validates_input_auth_model_and_pool_before_upstream() {
     let env = setup("openai").await;
     let response = reqwest::Client::new()
         .post(format!("http://{}/v1/responses/input_tokens", env.gateway))
@@ -368,9 +368,6 @@ async fn count_validates_input_auth_model_pool_and_retention_before_upstream() {
         .await
         .unwrap();
     env.flush_auth().await;
-    let mut body = env.body();
-    body["provider"] = json!({"zdr":true});
-    assert_eq!(env.post(&body).await.status(), 503);
     sqlx::query("DELETE FROM pool_channels WHERE channel_id=$1")
         .bind(env.channel_id)
         .execute(&env.pg)

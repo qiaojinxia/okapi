@@ -125,20 +125,6 @@ pub struct CreateChannelReq {
     pub options: super::channel_creation::Options,
 }
 
-/// 数据留存声明的取值域。
-///
-/// 三档：`none` 上游不留存（可满足零留存要求）/ `transient` 短期留存但不用于训练 /
-/// `trains` 可能用于训练。**未声明 ≠ none**——请求要求零留存时，未声明的渠道会被排除，
-/// 因为"不知道对方留不留"不能当成"不留"。
-pub(super) fn ensure_data_retention(value: Option<&str>) -> Result<(), AppError> {
-    match value {
-        Some(v) if !matches!(v, "" | "none" | "transient" | "trains") => {
-            Err(AppError::bad_request().with_param("data_retention"))
-        }
-        _ => Ok(()),
-    }
-}
-
 /// 相对成本系数取值域：0（免费）～ 100×官方价，负数与离谱值都是手滑。
 pub(super) fn ensure_cost_milli(value: Option<i64>) -> Result<(), AppError> {
     match value {
@@ -395,7 +381,6 @@ pub async fn list_channels(
                 "pools": c.pools,
                 "pool_members": c.pool_members,
                 "cost_milli": c.cost_milli,
-                "data_retention": c.data_retention,
                 // 编辑抽屉以列表行为初始值，保存时整体回写 settings；缺了它，改任意字段
                 // 都会把请求风格、账号控制、代理等高级设置一并清空。
                 "settings": c.settings,
@@ -738,9 +723,6 @@ pub struct PatchChannelReq {
     /// 相对成本系数（千分比）。
     #[serde(default)]
     pub cost_milli: Option<i64>,
-    /// 数据留存声明；空串 = 清除声明。
-    #[serde(default)]
-    pub data_retention: Option<String>,
 }
 
 /// PATCH /admin/channels/{id}：改渠道配置（缺省字段不动）。
@@ -838,7 +820,6 @@ pub async fn update_channel(
         None => None,
     };
     ensure_cost_milli(req.cost_milli)?;
-    ensure_data_retention(req.data_retention.as_deref())?;
 
     let name = req
         .name
@@ -856,7 +837,6 @@ pub async fn update_channel(
         priority: req.priority,
         trust_upstream_usage: req.trust_upstream_usage,
         cost_milli: req.cost_milli,
-        data_retention: req.data_retention.as_deref(),
     };
     if !okapi_store::admin::patch_channel(&state.pg, id, patch).await? {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
@@ -872,7 +852,6 @@ pub async fn update_channel(
             "models": req.models, "priority": req.priority,
             "trust_upstream_usage": req.trust_upstream_usage,
             "cost_milli": req.cost_milli,
-            "data_retention": req.data_retention,
         }),
     )
     .await;

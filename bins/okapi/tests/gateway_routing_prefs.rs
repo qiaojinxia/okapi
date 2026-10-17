@@ -1,8 +1,7 @@
 //! 请求级路由偏好验收（IMPLEMENTATION §11.24，形状对齐 OpenRouter `provider` 对象）。
 //!
 //! 此前路由控制全在配置侧（key.pool_override > 分组 pool_code > default），调用方
-//! 一点管不着。本轮先落三个子集：
-//! - `zdr` / `data_collection:"deny"`：只走声明不留存的渠道（未声明按不满足处理）
+//! 一点管不着。落两个子集（零留存一项已撤，`zdr` 等其余 OpenRouter 键不认、随整键剥掉）：
 //! - `max_price.{prompt,completion}`：单价上限，超了在**预扣之前**拒；按次计价模型给了上限就拒
 //! - `allow_fallbacks:false`：失败即返回，不改投其它渠道
 //!
@@ -55,9 +54,9 @@ struct Bed {
     /// 同一组渠道上的按次计价模型（$0.005 / 次）
     call_model: String,
     gateway: SocketAddr,
-    /// 声明 data_retention='none' 的渠道
-    zero_channel: i64,
-    /// 未声明留存的渠道（优先级更高，缺省会先投它）
+    /// 低优先级渠道（plain 失败时的改投目标）
+    backup_channel: i64,
+    /// 优先级更高的渠道，缺省先投它
     plain_channel: i64,
     seen: Seen,
 }
@@ -142,19 +141,9 @@ async fn setup() -> Bed {
             cid
         }
     };
-    // plain 优先级更高：缺省请求会先投它，从而能验出 zdr 把它筛掉
+    // plain 优先级更高：缺省请求会先投它
     let plain_channel = mk(format!("rp-plain-{suffix}"), 50).await;
-    let zero_channel = mk(format!("rp-zero-{suffix}"), 10).await;
-    okapi_store::admin::patch_channel(
-        &pg,
-        zero_channel,
-        okapi_store::admin::ChannelPatch {
-            data_retention: Some("none"),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let backup_channel = mk(format!("rp-backup-{suffix}"), 10).await;
 
     let user_id = okapi_store::provision::create_user(&pg, &format!("rp-u-{suffix}"))
         .await
@@ -182,7 +171,7 @@ async fn setup() -> Bed {
         model,
         call_model,
         gateway: gw,
-        zero_channel,
+        backup_channel,
         plain_channel,
         seen,
     }
@@ -237,52 +226,19 @@ async fn last_record(pg: &PgPool, user_id: i64, n: usize) -> (i64, i64) {
     panic!("第 {n} 笔结算未落库");
 }
 
-/// 零留存：只走声明 none 的渠道；没有这样的渠道时给专门的错误码而不是"无可用渠道"。
+/// 零留存一项已撤：`zdr` / `data_collection` 不认，照常按优先级路由，不再有专门的错误码。
 #[tokio::test]
-async fn zero_retention_filters_candidates() {
+async fn zero_retention_keys_are_ignored() {
     let bed = setup().await;
-
-    // 缺省：优先级更高的 plain 渠道接单
-    assert_eq!(chat_msg(&bed, None, "z1").await.0, 200);
-    let (ch, _) = last_record(&bed.pg, bed.user_id, 1).await;
-    assert_eq!(ch, bed.plain_channel, "缺省应投优先级更高的未声明渠道");
-
-    // zdr=true：plain 被筛掉，落到声明 none 的渠道
-    assert_eq!(
-        chat_msg(&bed, Some(json!({"zdr": true})), "z2").await.0,
-        200
-    );
-    let (ch, _) = last_record(&bed.pg, bed.user_id, 2).await;
-    assert_eq!(ch, bed.zero_channel, "要求零留存必须落到声明 none 的渠道");
-
-    // data_collection:"deny" 是同一个诉求
-    assert_eq!(
-        chat_msg(&bed, Some(json!({"data_collection": "deny"})), "z3")
-            .await
-            .0,
-        200
-    );
-    let (ch, _) = last_record(&bed.pg, bed.user_id, 3).await;
-    assert_eq!(ch, bed.zero_channel);
-
-    // 把唯一的零留存渠道也改成会训练 → 专门的错误码（不是 no_available_channel，
-    // 否则运维会以为渠道全挂了）
-    okapi_store::admin::patch_channel(
-        &bed.pg,
-        bed.zero_channel,
-        okapi_store::admin::ChannelPatch {
-            data_retention: Some("trains"),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(5_200)).await; // 候选缓存 5s
-    let (status, body) = chat(&bed, Some(json!({"zdr": true}))).await;
-    assert_eq!(status, 503, "{body}");
-    assert_eq!(body["error"]["code"], "no_zero_retention_channel");
-    // 不要求零留存时照常可用
-    assert_eq!(chat(&bed, None).await.0, 200);
+    for (n, provider) in [json!({"zdr": true}), json!({"data_collection": "deny"})]
+        .into_iter()
+        .enumerate()
+    {
+        let (status, body) = chat_msg(&bed, Some(provider), &format!("z{n}")).await;
+        assert_eq!(status, 200, "{body}");
+        let (ch, _) = last_record(&bed.pg, bed.user_id, n + 1).await;
+        assert_eq!(ch, bed.plain_channel, "不再按留存声明筛候选");
+    }
 }
 
 /// 单价上限：在预扣之前判，超限不扣费、不打上游。
@@ -374,7 +330,7 @@ async fn allow_fallbacks_false_stops_at_first_failure() {
     let (status, body) = chat_msg(&bed, None, "round-one").await;
     assert_eq!(status, 200, "缺省应 failover 到可用渠道：{body}");
     let (ch, _) = last_record(&bed.pg, bed.user_id, 1).await;
-    assert_eq!(ch, bed.zero_channel);
+    assert_eq!(ch, bed.backup_channel);
 
     // 复位坏渠道的 key 状态：上一次 failover 已经给它记了失败，连续 3 次会转冷却而被
     // 候选查询直接排除——那样第二次请求压根没有"要不要改投"的选择，前提就没了

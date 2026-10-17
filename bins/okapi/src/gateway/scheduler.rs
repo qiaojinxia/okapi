@@ -229,7 +229,6 @@ mod tests {
             provider: "openai".to_owned(),
             api_base: None,
             credential: String::new(),
-            data_retention: None,
             priority,
             weight,
             trust_upstream_usage: false,

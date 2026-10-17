@@ -114,7 +114,6 @@ const CHANNEL_ON = {
   pools: ['default'],
   pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
   cost_milli: 1000,
-  data_retention: null,
   last_test: null,
   last_balance: null,
 }

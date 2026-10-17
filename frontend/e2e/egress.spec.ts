@@ -39,7 +39,7 @@ const channel = {
   pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
   keys: [{ id: 7, status: 1, failed_count: 0, cooldown_until: null, last_error: null, weight: 1,
     max_concurrency: null, credential_kind: 0, egress_proxy_id: null }],
-  cost_milli: 1000, data_retention: null, last_test: null, last_balance: null, settings: {},
+  cost_milli: 1000, last_test: null, last_balance: null, settings: {},
   egress: { mode: 'proxy', proxy_id: 1 },
 }
 

@@ -39,8 +39,6 @@ pub mod codes {
     /// 按次计价模型没有单价可比，param = `per_call:` 加本次按次实付价）。
     pub const PRICE_ABOVE_MAX: &str = "price_above_max";
     pub const SERVER_TOOL_UNPRICED: &str = "server_tool_unpriced";
-    /// 请求要求零数据留存，但没有渠道声明不留存（param = 该模型的候选数）。
-    pub const NO_ZERO_RETENTION_CHANNEL: &str = "no_zero_retention_channel";
     /// 该模型的候选渠道都只接受真实 Claude Code 客户端（渠道 `client_profile.native_only`），
     /// 本次请求不是。
     pub const CLAUDE_CODE_CLIENT_REQUIRED: &str = "claude_code_client_required";

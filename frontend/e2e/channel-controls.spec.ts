@@ -9,7 +9,7 @@ const usage = { timezone: 'America/Los_Angeles', usage: {
 }, token_usage: { tokens: 456, window_start: null, window_end: null }, quotas: [] }
 const channel = { id: 42, name: 'controlled-channel', provider: 'openai', api_base: 'https://api.openai.com/v1',
   status: 1, priority: 0, models: ['mock-model'], keys: [], pools: ['default'], pool_members: [],
-  cost_milli: 1000, data_retention: null, last_test: null, last_balance: null,
+  cost_milli: 1000, last_test: null, last_balance: null,
   settings: { extensions: {}, proxy_url: 'http://proxy.example:3128', account_control: {
     usage: { period: 'day', requests: 20, tokens: 10000, cost_micro: 1_234_567 },
   } },
@@ -676,7 +676,7 @@ test('default creation leaves all optional sections folded and submits unchanged
   await drawer.getByRole('button', { name: '新建', exact: true }).click()
   await expect.poll(() => saved).toEqual({
     name: 'new-controlled-channel', provider: 'anthropic', api_base: '', credential: 'mock-api-key',
-    models: ['mock-model'], priority: 0, cost_milli: 1000, data_retention: '',
+    models: ['mock-model'], priority: 0, cost_milli: 1000,
     settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
     pools: [{ pool_code: 'default', priority_override: null, weight_override: null }],
   })

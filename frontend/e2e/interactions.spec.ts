@@ -952,7 +952,7 @@ test('列表分页：服务端按 limit/offset 与筛选取页，页宽切换保
   await prepare(page, ['*'], 'zh-CN')
   const channel = (i: number) => ({
     id: i + 1, name: `ch-${i + 1}`, provider: i % 3 === 0 ? 'anthropic' : 'openai', api_base: null, status: 1, priority: 1,
-    models: ['gpt-5'], keys: [], settings: null, pools: ['default'], pool_members: [], cost_milli: 1000, data_retention: null, last_test: null,
+    models: ['gpt-5'], keys: [], settings: null, pools: ['default'], pool_members: [], cost_milli: 1000, last_test: null,
   })
   const channels = Array.from({ length: 45 }, (_, i) => channel(i))
   const channelHits: string[] = []

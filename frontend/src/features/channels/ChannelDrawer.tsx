@@ -205,7 +205,6 @@ export function ChannelDrawer({
     api_base: channel?.api_base ?? '',
     priority: String(channel?.priority ?? 0),
     cost: costMilliToRatio(channel?.cost_milli ?? 1000),
-    dataRetention: channel?.data_retention ?? '',
   })
   const account = useAccountCapabilities(form.provider)
   const authorization = account.capabilities?.authorization
@@ -249,8 +248,6 @@ export function ChannelDrawer({
           max_concurrency: concurrency ?? undefined,
           pools: canManagePools ? newPools : undefined,
           cost_milli: costMilli ?? undefined,
-          // 空串 = 清除声明；后端据此把键从 settings 里删掉
-          data_retention: form.dataRetention,
           // 继承是后端缺省：只在选了别的出口时才带，默认提交体保持不变
           ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}),
         },
@@ -273,7 +270,6 @@ export function ChannelDrawer({
           priority: priority ?? 0,
           settings: channelSettingsForSave(settings),
           cost_milli: costMilli ?? undefined,
-          data_retention: form.dataRetention,
         },
       }),
     onSuccess: () => {
@@ -304,12 +300,10 @@ export function ChannelDrawer({
   const defaultBase = account.descriptor?.default_base ?? defaultApiBase(form.provider)
   const endpointRequired = defaultBase === undefined
   const endpointValid = !endpointRequired || form.api_base.trim() !== ''
-  const scheduleCustom = form.priority !== '0' || form.cost !== '1' || form.dataRetention !== ''
-  const retentionLabels = { none: 'admin:channelRetentionNone', transient: 'admin:channelRetentionTransient', trains: 'admin:channelRetentionTrains' } as const
-  const scheduleSummary = scheduleCustom ? [
-    t('admin:channelScheduleSummary', { priority: form.priority, cost: form.cost }),
-    form.dataRetention && t(retentionLabels[form.dataRetention as keyof typeof retentionLabels] ?? 'admin:channelRetentionUnset'),
-  ].filter(Boolean).join(' · ') : t('admin:channelOptionsDefault')
+  const scheduleCustom = form.priority !== '0' || form.cost !== '1'
+  const scheduleSummary = scheduleCustom
+    ? t('admin:channelScheduleSummary', { priority: form.priority, cost: form.cost })
+    : t('admin:channelOptionsDefault')
   const behaviorCustom = settings.thinking_to_content || settings.bill_by_response_model
     || settings.responses_native !== undefined && settings.responses_native !== defaultResponsesNative(form.provider)
     || settings.strip_request_fields.length > 0 || Object.keys(settings.inject_request_fields ?? {}).length > 0
@@ -492,7 +486,7 @@ export function ChannelDrawer({
                 valid={controlValid && concurrencyValid && (isEdit ? rotationKeyId !== undefined
                   : endpointValid && costMilli !== null && priority !== null && egressBinding !== null)}
                 creationOptions={!isEdit ? { api_base: form.api_base, priority: priority ?? 0,
-                  pools: canManagePools ? newPools : undefined, cost_milli: costMilli ?? undefined, data_retention: form.dataRetention,
+                  pools: canManagePools ? newPools : undefined, cost_milli: costMilli ?? undefined,
                   ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}) }
                   : undefined}
                 maxConcurrency={concurrency ?? undefined}
@@ -649,24 +643,6 @@ export function ChannelDrawer({
                 onChange={(e) => setForm((f) => ({ ...f, priority: e.target.value }))}
               />
             </div>
-            <Field
-              label={t('admin:channelDataRetention')}
-              htmlFor="d-retention"
-              hint={t('admin:channelDataRetentionHint')}
-            >
-              <Select
-                id="d-retention"
-                className="w-44"
-                value={form.dataRetention}
-                onChange={(v) => setForm((f) => ({ ...f, dataRetention: v }))}
-                placeholder={t('admin:channelRetentionUnset')}
-                options={[
-                  { value: 'none', label: t('admin:channelRetentionNone') },
-                  { value: 'transient', label: t('admin:channelRetentionTransient') },
-                  { value: 'trains', label: t('admin:channelRetentionTrains') },
-                ]}
-              />
-            </Field>
             <Field
               label={t('admin:channelCostMilli')}
               htmlFor="d-cost"

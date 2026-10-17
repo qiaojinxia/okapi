@@ -93,7 +93,6 @@ const CHANNEL = {
   pools: ['default'],
   pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
   cost_milli: 1000,
-  data_retention: null,
   last_test: null,
   last_balance: null,
 }
@@ -1646,7 +1645,7 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   expect(deletes).toEqual(['/admin/pools/spare'])
 })
 
-test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉上游模型覆盖清单；调度页签的成本 / 留存随保存走，池成员单独保存并按覆盖值落体；新建同时带池成员', async ({ page }) => {
+test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉上游模型覆盖清单；调度页签的成本随保存走，池成员单独保存并按覆盖值落体；新建同时带池成员', async ({ page }) => {
   // 一条用例走完编辑四个页签再新建两次，含查询失败重试的退避，超出默认 20s
   test.setTimeout(45_000)
   await prepare(page)
@@ -1723,12 +1722,11 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
-  // 调度页签：成本倍数 → 千分比、留存声明随主"保存"提交；池成员单独保存，覆盖值按整数、留空 null
+  // 调度页签：成本倍数 → 千分比随主"保存"提交；池成员单独保存，覆盖值按整数、留空 null
   await drawer.getByRole('tab', { name: '调度', exact: true }).click()
   await drawer.locator('#channel-schedule-options > summary').click()
   await drawer.locator('#d-priority').fill('7')
   await drawer.locator('#d-cost').fill('0.5')
-  await drawer.locator('#d-retention').selectOption('transient')
   // 池成员与模型同页签；切页签不丢上面未保存的调度草稿
   await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
   await drawer.locator('#channel-pools > summary').click()
@@ -1775,7 +1773,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
     body: {
       name: 'openai-main', api_base: 'https://api.openai.com/v1', models: ['gpt-5', 'gpt-5-mini', 'o4'], priority: 7,
       settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
-      cost_milli: 500, data_retention: 'transient',
+      cost_milli: 500,
     },
   })
   // 右下角还堆着几条成功 toast，会盖住抽屉页脚的"取消"，用 Esc 关抽屉
@@ -1805,7 +1803,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
       name: 'anthropic-eu', provider: 'anthropic', api_base: '', credential: 'sk-ant-1', models: ['claude-sonnet-4'], priority: 0,
       settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
       pools: [{ pool_code: 'default', priority_override: null, weight_override: null }],
-      cost_milli: 1000, data_retention: '',
+      cost_milli: 1000,
     },
   })
 

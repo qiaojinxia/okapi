@@ -426,7 +426,6 @@ test('订阅 OAuth 登录卡：缺名/模型不换码；start 只带 provider；
             pools: ['default'],
             pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
             cost_milli: 1000,
-            data_retention: null,
             last_test: null,
             last_balance: null,
           },
@@ -603,7 +602,6 @@ test('渠道健康时间线：点近 24h 打开抽屉、hours 进查询、空态
             pools: ['default'],
             pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
             cost_milli: 1000,
-            data_retention: null,
             last_test: null,
             last_balance: null,
           },
@@ -722,7 +720,7 @@ for (const variant of [
     id: 42, name: 'sparse-test', provider: 'openai', api_base: 'https://fixture.invalid/v1', status: 1, priority: 0,
     models: ['fixture-model'], keys: [{ status: 1 }], settings: {}, pools: ['default'],
     pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
-    cost_milli: 1000, data_retention: null, last_test: null, last_balance: null,
+    cost_milli: 1000, last_test: null, last_balance: null,
   }], total: 1, enabled: 1 } }))
   await page.route('**/admin/stats/channels?*', (route) => route.fulfill({ json: { data: [health] } }))
   const windows: string[] = []
@@ -3004,7 +3002,6 @@ test('渠道 key 状态与近 24h：部分可用/冷却/未入池；健康查询
             { id: 2, status: 2, failed_count: 3, cooldown_until: soon, last_error: '429', weight: 1, max_concurrency: null, credential_kind: 1, credential_expires_at: Math.floor(Date.now() / 1000) - 120 },
           ],
           settings: {}, pools: [], pool_members: [], cost_milli: 1000,
-          data_retention: null,
           last_test: { ok: true, latency_ms: 120, at: new Date().toISOString() },
           last_balance: null,
         }, {
@@ -3014,7 +3011,6 @@ test('渠道 key 状态与近 24h：部分可用/冷却/未入池；健康查询
             { id: 3, status: 1, failed_count: 0, cooldown_until: null, last_error: null, weight: 1, max_concurrency: null, credential_kind: 0 },
           ],
           settings: {}, pools: ['default'], pool_members: [], cost_milli: 1000,
-          data_retention: null,
           last_test: { ok: false, latency_ms: 0, http_status: 429, at: new Date().toISOString() },
           last_balance: null,
         }, {
@@ -3022,7 +3018,7 @@ test('渠道 key 状态与近 24h：部分可用/冷却/未入池；健康查询
           status: 1, priority: 0, models: ['gpt-5'],
           keys: [],
           settings: {}, pools: ['default'], pool_members: [], cost_milli: 1000,
-          data_retention: null,           last_test: null, last_balance: null,
+          last_test: null, last_balance: null,
         }, {
           id: 45, name: 'parked', provider: 'openai', api_base: 'https://api.openai.com/v1',
           status: 2, priority: 0, models: ['gpt-5'],
@@ -3030,7 +3026,7 @@ test('渠道 key 状态与近 24h：部分可用/冷却/未入池；健康查询
             { id: 4, status: 1, failed_count: 0, cooldown_until: null, last_error: null, weight: 1, max_concurrency: null, credential_kind: 0 },
           ],
           settings: {}, pools: ['default'], pool_members: [], cost_milli: 1000,
-          data_retention: null, last_test: null, last_balance: null,
+          last_test: null, last_balance: null,
         }],
         total: 4, enabled: 3,
       },
@@ -3304,7 +3300,7 @@ test('渠道列表搜索：q trim 与协议进 URL；空结果可清空', async 
     status: 1, priority: 0, models: ['gpt-5', 'o1'],
     keys: [{ id: 1, status: 1, failed_count: 0, cooldown_until: null, last_error: null, weight: 1, max_concurrency: null, credential_kind: 0 }],
     settings: {}, pools: ['default'], pool_members: [], cost_milli: 1000,
-    data_retention: null, last_test: null,
+    last_test: null,
     last_balance: {
       probe: 'openai', currency: 'CNY', balance_micro: 110_500_000,
       total_micro: null, used_micro: null, at: new Date().toISOString(),

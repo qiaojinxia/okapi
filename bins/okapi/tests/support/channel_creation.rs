@@ -19,7 +19,7 @@ async fn api_and_oauth_creation_share_all_options_and_one_initial_credential() {
     for provider in ["openai", "anthropic_max", "codex"] {
         let mut body = json!({"name":format!("options-{provider}-{}",env.model),"models":[env.model],
             "api_base":format!("http://{}/v1",env.mock),"priority":17,"max_concurrency":4,
-            "cost_milli":250,"data_retention":"none","pools":[{"pool_code":pool,"priority_override":9,"weight_override":2}],
+            "cost_milli":250,"pools":[{"pool_code":pool,"priority_override":9,"weight_override":2}],
             "settings":{"account_control":{"refresh_mode":"external","failure_threshold":5},"extra_headers":{"x-creation-test":"preserved"}}});
         let endpoint = if provider == "openai" {
             body["provider"] = json!(provider);
@@ -65,7 +65,6 @@ async fn api_and_oauth_creation_share_all_options_and_one_initial_credential() {
             250
         );
         let settings: Value = row.get("settings");
-        assert_eq!(settings["data_retention"], "none");
         assert_eq!(settings["extra_headers"]["x-creation-test"], "preserved");
         assert_eq!(settings["account_control"]["failure_threshold"], 5);
         let keys: Vec<(i16, Option<i32>)> = sqlx::query_as(

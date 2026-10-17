@@ -16,8 +16,6 @@ pub struct Options {
     pub settings: Option<Value>,
     #[serde(default)]
     pub cost_milli: Option<i64>,
-    #[serde(default)]
-    pub data_retention: Option<String>,
     /// 出口绑定（§11.41）；缺省 = 继承全局默认。OAuth 登录在换码前就按它选出口。
     #[serde(default)]
     pub egress: Option<okapi_store::egress::Binding>,
@@ -57,7 +55,6 @@ pub async fn prepare(
 ) -> Result<Prepared, AppError> {
     admin::ensure_cost_milli(options.cost_milli)?;
     admin::ensure_max_concurrency(options.max_concurrency)?;
-    admin::ensure_data_retention(options.data_retention.as_deref())?;
     admin::validate_channel_settings(state, provider, options.settings.as_ref()).await?;
     let pools = match options.pools {
         // own 范围不能选池（见 admin::ensure_pool_scope）：显式带了池就拒，不带就建成孤儿
@@ -75,14 +72,7 @@ pub async fn prepare(
             weight_override: None,
         }],
     };
-    let mut settings = options.settings.unwrap_or_else(|| json!({}));
-    if let Some(retention) = options.data_retention {
-        if retention.is_empty() {
-            settings.as_object_mut().unwrap().remove("data_retention");
-        } else {
-            settings["data_retention"] = json!(retention);
-        }
-    }
+    let settings = options.settings.unwrap_or_else(|| json!({}));
     Ok(Prepared {
         priority: options.priority,
         max_concurrency: options.max_concurrency,

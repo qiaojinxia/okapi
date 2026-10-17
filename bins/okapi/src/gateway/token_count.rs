@@ -181,17 +181,10 @@ async fn count_authorized(
         )
         .await?,
     );
-    candidates.retain(|c| {
-        super::routing_prefs::retention_ok(c.data_retention.as_deref(), prefs.zero_retention)
-    });
     if candidates.is_empty() {
         return Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
-            if prefs.zero_retention {
-                codes::NO_ZERO_RETENTION_CHANNEL
-            } else {
-                codes::NO_AVAILABLE_CHANNEL
-            },
+            codes::NO_AVAILABLE_CHANNEL,
         ));
     }
     if let Some(parent) = parent {

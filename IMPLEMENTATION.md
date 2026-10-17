@@ -1707,7 +1707,13 @@ N 个副本就是 N 倍并发写压向同一个 PG，闸的效力随副本数线
 「压测确认 PG 写瓶颈后引入」——没有压测数据就动热路径写批，是拿正确性换想象中的性能，
 故按其自身前提继续挂着。
 
-### 11.24 请求级路由偏好与渠道数据留存声明（2026-09-05，吸收 OpenRouter）
+### 11.24 请求级路由偏好（2026-09-05，吸收 OpenRouter）
+
+> **2026-10-16 撤掉零留存一项**：只有请求级 `zdr` 而没有分组/账号级默认，真在意合规的客户
+> 得每个请求都记得带、Claude Code / Codex 这类客户端根本不发 `provider`，实际没人用。渠道
+> `settings.data_retention`、抽屉里的三档下拉、`no_zero_retention_channel` 一并删除；请求里的
+> `zdr` / `data_collection` 与其它未支持的 OpenRouter 键一样不认、随 `provider` 整键剥掉。
+> 下文保留当时的设计记录，零留存相关条目已不再适用。
 
 **发现**（三方对照：OpenRouter / new-api / Sub2API / experiential）：okapi 的路由控制**全在
 配置侧**——`api_keys.pool_override` > 生效分组 `price_groups.pool_code` > `default`，调用方

@@ -2,13 +2,14 @@
 //!
 //! 此前 okapi 的路由控制全在**配置侧**（`api_keys.pool_override` > 分组 `pool_code` >
 //! `default`），调用方一点也管不着：既没法说"这次别给我路由到贵渠道"，也没法说
-//! "这次失败就直接返回、别换渠道重试"，更没法要求"只走不留存数据的上游"。
+//! "这次失败就直接返回、别换渠道重试"。
 //!
-//! 取 OpenRouter 的字段形状（存量客户端已经在发 `provider: {...}`），先落三个子集：
+//! 取 OpenRouter 的字段形状（存量客户端已经在发 `provider: {...}`），先落两个子集：
 //! - `allow_fallbacks`（缺省 true）：false = 首次失败即返回，不做 failover
 //! - `max_price.{prompt,completion}`：单价上限（USD / 1M token），超了直接拒而不是先扣后悔；
 //!   按次计价的模型没有 token 单价可比，给了上限就拒
-//! - `zdr` / `data_collection: "deny"`：只路由到声明不留存数据的渠道
+//!
+//! 其余 OpenRouter 键（`order` / `only` / `zdr` / `data_collection` …）不认、不报错，随整个键剥掉。
 //!
 //! 解析从**原文**做，与入口方言无关（chat / responses / messages 三个入口共用）；
 //! 请求体没有 `provider` 键时零解析开销。这些是 okapi 自己的指令，转发前必须剥掉——
@@ -33,8 +34,6 @@ pub struct RoutingPrefs {
     /// 允许失败后改投其它渠道。缺省 true（保持既有行为）。
     pub allow_fallbacks: bool,
     pub max_price: MaxPrice,
-    /// 只走声明「不留存」的渠道（`zdr: true` 或 `data_collection: "deny"`）。
-    pub zero_retention: bool,
 }
 
 impl Default for RoutingPrefs {
@@ -42,7 +41,6 @@ impl Default for RoutingPrefs {
         Self {
             allow_fallbacks: true,
             max_price: MaxPrice::default(),
-            zero_retention: false,
         }
     }
 }
@@ -54,7 +52,6 @@ impl RoutingPrefs {
         self.allow_fallbacks
             && self.max_price.prompt.is_none()
             && self.max_price.completion.is_none()
-            && !self.zero_retention
     }
 }
 
@@ -64,11 +61,6 @@ struct ProviderBlock {
     allow_fallbacks: Option<bool>,
     #[serde(default)]
     max_price: Option<MaxPriceBlock>,
-    #[serde(default)]
-    zdr: Option<bool>,
-    /// OpenRouter 的 `allow` / `deny`；deny = 不接受会留存数据的上游。
-    #[serde(default)]
-    data_collection: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -131,7 +123,6 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     Ok(RoutingPrefs {
         allow_fallbacks: p.allow_fallbacks.unwrap_or(true),
         max_price,
-        zero_retention: p.zdr.unwrap_or(false) || p.data_collection.as_deref() == Some("deny"),
     })
 }
 
@@ -151,14 +142,6 @@ pub fn strip(body: &Bytes) -> Option<Bytes> {
     let obj = value.as_object_mut()?;
     obj.remove(PROVIDER_FIELD)?;
     Some(Bytes::from(serde_json::to_vec(&value).ok()?))
-}
-
-/// 渠道的数据留存声明是否满足「零留存」要求。
-///
-/// **未声明按不满足处理**：不知道对方留不留，不能当成不留。
-#[must_use]
-pub fn retention_ok(declared: Option<&str>, require_zero: bool) -> bool {
-    !require_zero || declared == Some("none")
 }
 
 #[cfg(test)]
@@ -183,56 +166,45 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_three_subsets() {
+    fn parses_the_two_subsets() {
         let p = prefs(
             r#"{"model":"m","provider":{"allow_fallbacks":false,
-                 "max_price":{"prompt":3.0,"completion":9.5},"zdr":true}}"#,
+                 "max_price":{"prompt":3.0,"completion":9.5}}}"#,
         );
         assert!(!p.allow_fallbacks);
         assert_eq!(p.max_price.prompt, Some(3_000_000));
         assert_eq!(p.max_price.completion, Some(9_500_000));
-        assert!(p.zero_retention);
         assert!(!p.is_default());
     }
 
     #[test]
-    fn data_collection_deny_is_the_same_ask_as_zdr() {
-        assert!(prefs(r#"{"provider":{"data_collection":"deny"}}"#).zero_retention);
-        assert!(!prefs(r#"{"provider":{"data_collection":"allow"}}"#).zero_retention);
+    fn unsupported_openrouter_keys_are_ignored() {
+        let p = prefs(r#"{"provider":{"zdr":true,"data_collection":"deny","order":["a"]}}"#);
+        assert!(p.is_default());
     }
 
     #[test]
-    fn invalid_price_preserves_privacy_by_rejecting_the_request() {
+    fn invalid_price_rejects_the_request() {
         assert!(
             parse(&Bytes::from_static(
-                br#"{"provider":{"zdr":true,"max_price":{"prompt":-1}}}"#
+                br#"{"provider":{"max_price":{"prompt":-1}}}"#
             ))
             .is_err()
         );
-        let p = prefs(r#"{"provi\u0064er":{"zdr":true,"allow_fallbacks":false}}"#);
-        assert!(p.zero_retention);
+        let p = prefs(r#"{"provi\u0064er":{"allow_fallbacks":false}}"#);
         assert!(!p.allow_fallbacks);
     }
 
     #[test]
     fn strip_removes_only_the_directive() {
-        let body = Bytes::from(r#"{"model":"m","provider":{"zdr":true},"stream":true}"#.to_owned());
+        let body = Bytes::from(
+            r#"{"model":"m","provider":{"allow_fallbacks":false},"stream":true}"#.to_owned(),
+        );
         let out = strip(&body).expect("有 provider 键应返回新体");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert!(v.get("provider").is_none(), "指令必须剥掉，上游不认识它");
         assert_eq!(v["model"], "m");
         assert_eq!(v["stream"], true);
         assert!(strip(&Bytes::from(r#"{"model":"m"}"#.to_owned())).is_none());
-    }
-
-    #[test]
-    fn undeclared_retention_fails_closed() {
-        assert!(retention_ok(Some("none"), true));
-        assert!(!retention_ok(Some("transient"), true));
-        assert!(!retention_ok(Some("trains"), true));
-        assert!(!retention_ok(None, true), "未声明 ≠ 不留存");
-        // 没要求零留存时一律放行
-        assert!(retention_ok(None, false));
-        assert!(retention_ok(Some("trains"), false));
     }
 }

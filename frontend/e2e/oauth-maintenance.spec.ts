@@ -39,7 +39,7 @@ async function openKey(page: Page, status: number) {
   await page.route('**/admin/channels?*', (route) => route.fulfill({ json: {
     data: [{ id: 42, name: 'my-subscription', provider: 'codex', api_base: 'https://chatgpt.com/backend-api/codex',
       status: 1, priority: 0, models: ['fixture-model'], settings: {}, pools: ['default'], pool_members: [],
-      cost_milli: 1000, data_retention: null, last_test: null, last_balance: null,
+      cost_milli: 1000, last_test: null, last_balance: null,
       keys: [{ id: 7, status, weight: 10, max_concurrency: null, cooldown_until: null,
         failed_count: 1, credential_kind: 1, credential_expires_at: 2_000_000_000,
         oauth_refresh: { last_attempt_at: 1_999_900_000, last_success_at: null, consecutive_failures: 1,
@@ -63,7 +63,7 @@ for (const width of [390, 1366]) {
       if (editing) await page.route('**/admin/channels?*', (route) => route.fulfill({ json: {
         data: [{ id: 42, name: 'subscription-spacing', provider: 'anthropic_max', api_base: '', status: 1,
           priority: 0, models: ['fixture-model'], settings: {}, pools: ['default'], pool_members: [],
-          cost_milli: 1000, data_retention: null, last_test: null, last_balance: null,
+          cost_milli: 1000, last_test: null, last_balance: null,
           keys: [{ id: 7, status: 1, weight: 10, max_concurrency: null, cooldown_until: null,
             failed_count: 0, credential_kind: 1, oauth_refreshable: true }],
         }], total: 1, enabled: 1,
@@ -213,7 +213,7 @@ test('token-only 隐藏刷新按钮，多 key 替换显式选定且保存请求�
   await page.route('**/admin/channels?*', (route) => route.fulfill({ json: {
     data: [{ id: 42, name: 'direct-token', provider: 'anthropic_max', api_base: '',
       status: 1, priority: 0, models: ['fixture-model'], settings, pools: ['default'], pool_members: [],
-      cost_milli: 1000, data_retention: null, last_test: null, last_balance: null,
+      cost_milli: 1000, last_test: null, last_balance: null,
       keys: [{ ...key, id: 7 }, { ...key, id: 9 }],
     }], total: 1, enabled: 1,
   } }))

@@ -19,7 +19,7 @@ curl "$OKAPI_BASE_URL/v1/responses/input_tokens" \
 | --- | --- |
 | `native`（默认） | 只请求上游 `/responses/input_tokens`；不支持时返回错误，不自动估算。 |
 | `auto` | 优先原生计数。没有支持计数的原生候选，或尝试的候选都返回 404/405/501 时，可对完整文本上下文估算。权限、限流、超时、5xx、畸形响应不触发本地估算。`provider.allow_fallbacks=false` 时首个上游错误直接返回。 |
-| `estimate` | 使用本地分词估算，不请求计数上游。仍检查模型权限、可见渠道、留存偏好以及请求准入。 |
+| `estimate` | 使用本地分词估算，不请求计数上游。仍检查模型权限、可见渠道以及请求准入。 |
 
 原生候选要求 `responses_native=true` 且未配置 `capabilities.input_tokens=false`。普通 OpenAI、显式开启原生 Responses 的兼容渠道以及 Codex OAuth 使用各自凭证和请求头；上游计数能力须由实际供应商支持。最多尝试三个实际上游请求，渠道 RPM/并发不足的候选不会被发送请求。
 
@@ -48,7 +48,7 @@ curl "$OKAPI_BASE_URL/v1/responses/input_tokens" \
 
 ## 权限、限流与失败
 
-检查 API key 状态、模型白名单、IP 白名单、可见渠道池和 `provider.zdr` / `data_collection: deny`。共享现有分组和用户×模型 RPM；原生请求还共享渠道 key 的 RPM 与并发槽。
+检查 API key 状态、模型白名单、IP 白名单、可见渠道池。共享现有分组和用户×模型 RPM；原生请求还共享渠道 key 的 RPM 与并发槽。
 
 计数自身使用独立的 per-key RPM/RPD/并发租约，不消耗生成请求的余额预扣或 Token 额度。RPM 取 key 的正数配置，否则每分钟 60；RPD 取正数配置，否则不限制；并发取正数配置，否则为 4。准入 Lua 无法执行时返回 503。
 
@@ -60,7 +60,7 @@ curl "$OKAPI_BASE_URL/v1/responses/input_tokens" \
 | 429 | key、分组、模型、渠道限流/并发，或上游返回 429。 |
 | 501 | 没有原生计数能力，或上游返回 404/405/501；`error.param=input_tokens_unsupported`。 |
 | 502 | 上游认证失败、重定向、服务错误或不可用的计数响应。上游私密错误原文不会回显。 |
-| 503 | 无可见候选、留存条件不满足、计数准入不可用等。 |
+| 503 | 无可见候选、计数准入不可用等。 |
 | 504 | 上游或整个计数请求超时。 |
 
 单次上游超时取渠道首响应超时与 20 秒的较小值；整个 handler 最长 60 秒。禁止跟随上游重定向，响应体最多 32 KiB。成功、失败、超时和已取得租约后的 handler 取消都会归还占用；进程崩溃或 Redis 清理失败依靠租约/信号量 TTL 兜底，不能把正常取消测试当成全故障释放证明。

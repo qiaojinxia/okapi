@@ -28,10 +28,6 @@ pub struct ChannelCandidate {
     pub daily_spend_cap_micro: Option<i64>,
     /// 对外模型名 → 上游模型名（无映射则原名透传）。
     pub model_mapping: serde_json::Value,
-    /// 上游数据留存声明（channels.settings.data_retention）：
-    /// `none` 不留存 / `transient` 短期留存不训练 / `trains` 可能用于训练；
-    /// **None = 未声明**——请求要求零留存时按"不知道"处理，即排除（fail-closed）。
-    pub data_retention: Option<String>,
     /// 渠道开关：思维链转 <think> 正文（channels.settings.thinking_to_content）。
     pub thinking_to_content: bool,
     /// 渠道开关：按上游响应报告的模型计费（channels.settings.bill_by_response_model，
@@ -243,7 +239,6 @@ pub async fn candidates_for_model(
                c.settings -> 'strip_request_fields' AS strip_request_fields,
                c.settings -> 'inject_request_fields' AS inject_request_fields,
                (c.settings ->> 'responses_native')::boolean AS responses_native,
-               c.settings ->> 'data_retention' AS data_retention,
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
                NULLIF(c.settings ->> 'aws_region', '') AS aws_region,
                NULLIF(c.settings ->> 'oauth_token_url', '') AS oauth_token_url,
@@ -347,7 +342,6 @@ pub async fn candidates_for_model(
                 rpm_limit: r.rpm_limit,
                 daily_spend_cap_micro: r.daily_spend_cap_micro,
                 model_mapping: r.model_mapping,
-                data_retention: r.data_retention,
                 thinking_to_content: r.thinking_to_content,
                 bill_by_response_model: r.bill_by_response_model,
                 strip_request_fields: r
