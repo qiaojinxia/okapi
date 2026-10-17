@@ -43,6 +43,16 @@ x-okapi-image: &okapi-image
 services:
   postgres:
     image: public.ecr.aws/docker/library/postgres:16-alpine
+    # 慢查询可观测：pg_stat_statements 按归一化语句累计次数 / 耗时（扩展需在库里
+    # `CREATE EXTENSION pg_stat_statements` 一次），超过 1 秒的语句另写进 PG 日志。
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=top
+      - -c
+      - log_min_duration_statement=1000
     environment:
       POSTGRES_USER: okapi
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
