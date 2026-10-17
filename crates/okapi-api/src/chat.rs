@@ -613,6 +613,15 @@ impl PromptTokensDetails {
             self.cache_write_tokens_details = self
                 .cache_write_tokens_details
                 .or(previous.cache_write_tokens_details);
+        } else if self.cache_write_5m_tokens.is_none()
+            && self.cache_write_1h_tokens.is_none()
+            && self.cache_write_tokens == previous.cache_write_tokens
+        {
+            // 与 Anthropic 原生合并（anthropic_usage::merge）同一规则：较新的聚合只重报写入总量、
+            // 没带 TTL 拆分时，总量没变则之前的拆分仍然成立（如末帧只给总数）；总量变了旧拆分才过期。
+            // 曾直接丢掉拆分，缓存写入只能退回通用倍率，与原生路径计价不一致。
+            self.cache_write_5m_tokens = previous.cache_write_5m_tokens;
+            self.cache_write_1h_tokens = previous.cache_write_1h_tokens;
         }
         if !self.modalities_reported.audio && self.audio_tokens == 0 {
             self.audio_tokens = previous.audio_tokens;

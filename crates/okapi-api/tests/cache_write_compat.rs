@@ -156,3 +156,31 @@ fn streaming_writes_are_snapshots_and_updated_totals_discard_stale_lifetimes() {
             .is_err()
     );
 }
+
+/// 较新的快照只重报同一写入总量、没带 TTL 拆分（末帧常见）：之前的拆分沿用，与 Anthropic 原生
+/// 合并同一口径；总量变了旧拆分才作废。曾直接丢掉拆分，缓存写入只能按通用倍率计价。
+#[test]
+fn a_repeated_write_total_without_lifetimes_keeps_the_earlier_split() {
+    let start = parse(json!({"cache_creation_input_tokens":20,
+        "cache_creation":{"ephemeral_5m_input_tokens":12,"ephemeral_1h_input_tokens":8}}));
+    let repeated = parse(json!({"cache_creation_input_tokens":20})).with_previous(Some(start));
+    let usage = repeated.to_token_usage().unwrap();
+    assert_eq!(
+        (
+            usage.cache_write_tokens,
+            usage.cache_write_5m_tokens,
+            usage.cache_write_1h_tokens
+        ),
+        (20, Some(12), Some(8))
+    );
+    let changed = parse(json!({"cache_write_tokens":25})).with_previous(Some(repeated));
+    let usage = changed.to_token_usage().unwrap();
+    assert_eq!(
+        (
+            usage.cache_write_tokens,
+            usage.cache_write_5m_tokens,
+            usage.cache_write_1h_tokens
+        ),
+        (25, None, None)
+    );
+}
