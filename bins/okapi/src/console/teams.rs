@@ -215,7 +215,18 @@ pub async fn upsert_member(
     )
     .execute(&state.pg)
     .await
-    .map_err(okapi_store::StoreError::from)?;
+    .map_err(|error| {
+        // member_user_id 的外键：加一个不存在的用户是调用方的输入问题（曾直接 500）。
+        // 团队本身已由上面的 member_role 校验过，这里的 23503 只可能来自成员 id。
+        if error
+            .as_database_error()
+            .is_some_and(|database| database.code().as_deref() == Some("23503"))
+        {
+            AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND).with_param("user_id")
+        } else {
+            okapi_store::StoreError::from(error).into()
+        }
+    })?;
     if changed.rows_affected() == 0 {
         return Err(
             AppError::new(StatusCode::FORBIDDEN, okapi_api::codes::PERMISSION_DENIED)

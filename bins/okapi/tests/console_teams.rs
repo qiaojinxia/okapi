@@ -210,6 +210,22 @@ async fn team_wallet_member_limit_full_cycle() {
         .unwrap();
     assert_eq!(demote.status(), 403, "owner cannot demote the team owner");
 
+    // 加一个不存在的用户：成员外键冲突是输入错误（404 + param），不是 500
+    let missing = client
+        .post(format!(
+            "http://{}/api/teams/{team_id}/members",
+            env.console
+        ))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .json(&json!({"user_id": i64::MAX, "role": "member"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), 404);
+    let missing: Value = missing.json().await.unwrap();
+    assert_eq!(missing["error"]["code"], "not_found");
+    assert_eq!(missing["error"]["param"], "user_id");
+
     // owner 加 bob（限额 600 micro）
     let added = client
         .post(format!(
