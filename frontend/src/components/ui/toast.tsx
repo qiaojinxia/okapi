@@ -101,8 +101,10 @@ function ToastCard({ item }: { item: ToastItem }) {
   const { t } = useTranslation()
   const [paused, setPaused] = useState(false)
   const Icon = TONE[item.tone].icon
+  // 悬停暂停计时：正要读错误详情时消息滑走是最恼人的交互。只对要读的消息暂停（错误、警告、
+  // 带说明的）：一句话的成功提示盖在右下角按钮上时，鼠标移过去点按钮就是悬停，暂停会让它一直挡着。
+  const pausable = item.tone === 'error' || item.tone === 'warning' || item.description !== undefined
 
-  // 悬停暂停计时：正要读错误详情时消息滑走是最恼人的交互
   useEffect(() => {
     if (item.duration === 0 || paused) return undefined
     const timer = window.setTimeout(() => dismissToast(item.id), item.duration)
@@ -112,8 +114,8 @@ function ToastCard({ item }: { item: ToastItem }) {
   return (
     <div
       role={item.tone === 'error' ? 'alert' : 'status'}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
+      onMouseEnter={pausable ? () => setPaused(true) : undefined}
+      onMouseLeave={pausable ? () => setPaused(false) : undefined}
       className={cn(
         'pointer-events-auto flex w-full max-w-sm items-start gap-3 rounded-lg border border-border bg-popover p-3.5 pr-2.5 text-sm shadow-popover',
         'animate-toast-in',

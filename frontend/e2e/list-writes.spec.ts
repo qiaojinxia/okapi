@@ -1371,6 +1371,36 @@ test('通知配置：间隔保留原始输入，非法值定位到字段，留�
   expect(posts[1]).toEqual({ key: 'notify_channels', value: [{ ...channel, min_interval_secs: 0 }] })
 })
 
+// 右下角的提示框可能正好盖在页脚按钮上：鼠标移去点按钮就是悬停。一句话的成功提示悬停也照常消失，
+// 否则它会一直挡着（连续保存两次就卡住）；错误提示悬停时停住，留时间读完。
+test('提示框：成功提示悬停照常消失不挡按钮，错误提示悬停时停住、移开后再消失', async ({ page }) => {
+  await page.clock.install()
+  const channel = { type: 'webhook', url: 'https://hooks.example.com/okapi', events: ['drift'], min_interval_secs: 60 }
+  const { open, panel, posts } = await prepareNotifications(page, [channel])
+  await open()
+  const toasts = page.locator('[aria-live="polite"]')
+  const save = panel.getByRole('button', { name: '保存', exact: true })
+  await save.click()
+  await expect.poll(() => posts.length).toBe(1)
+  const success = toasts.getByRole('status').filter({ hasText: '已保存' })
+  await expect(success).toBeVisible()
+  await success.hover()
+  await page.clock.runFor(4_000)
+  await expect(success).toHaveCount(0)
+
+  await page.route('**/admin/settings', (route) => route.request().method() === 'POST'
+    ? route.fulfill(apiError(500, 'internal_error')) : route.fallback())
+  await save.click()
+  const failure = toasts.getByRole('alert').filter({ hasText: '服务内部错误' })
+  await expect(failure).toBeVisible()
+  await failure.hover()
+  await page.clock.runFor(10_000)
+  await expect(failure).toBeVisible()
+  await page.mouse.move(0, 0)
+  await page.clock.runFor(7_000)
+  await expect(failure).toHaveCount(0)
+})
+
 for (const width of [320, 1280]) test(`通知配置 ${width}px：地址与邮箱错误就地提示，批量收件人直接保存，不选事件显示停发说明`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 })
   const { open, panel, posts } = await prepareNotifications(page)
