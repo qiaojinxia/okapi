@@ -139,7 +139,9 @@ pub async fn list(
         .unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::hours(hours));
     let to = q.to;
     let actor = trimmed(q.actor.as_deref());
-    let action = trimmed(q.action.as_deref());
+    // 前缀匹配（`action LIKE $4 || '%'`）：动作名里的 `_` / `%` / `\` 按字面，不当通配
+    let action =
+        trimmed(q.action.as_deref()).map(|prefix| okapi_store::listing::escape_like(&prefix));
     let target = trimmed(q.target.as_deref());
 
     let rows = sqlx::query!(

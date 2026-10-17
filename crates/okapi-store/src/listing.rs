@@ -79,7 +79,16 @@ pub fn len_as_total(len: usize) -> i64 {
     i64::try_from(len).unwrap_or(i64::MAX)
 }
 
-/// 关键词 → ILIKE 模式；转义 `%` `_` 防调用方注入通配符。
+/// LIKE / ILIKE 模式里的字面量转义。PG 默认以 `\` 为转义符（本仓查询都不写 `ESCAPE`），
+/// 所以先转义 `\` 自身，再转义 `%` `_`：漏了 `\` 时搜 `C:\Users` 会变成 `C:Users`（`\U` 被吞成 `U`）。
+#[must_use]
+pub fn escape_like(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// 关键词 → ILIKE 模式（`%关键词%`），关键词按字面匹配（见 [`escape_like`]）。
 /// 所有走 `ILIKE $n` 的列表（含 console 层直写 SQL 的用户列表）都应经它，避免搜索词里的
 /// 下划线被当成单字符通配。
 #[must_use]
@@ -87,7 +96,7 @@ pub fn like_pattern(query: Option<&str>) -> Option<String> {
     query
         .map(str::trim)
         .filter(|q| !q.is_empty())
-        .map(|q| format!("%{}%", q.replace('%', "\\%").replace('_', "\\_")))
+        .map(|q| format!("%{}%", escape_like(q)))
 }
 
 /// 分页信封（`total` 供前端翻页器）。
@@ -779,6 +788,12 @@ mod tests {
         // 调用方传入的通配符必须被转义，否则 "%" 会退化为全表扫描
         assert_eq!(like_pattern(Some("a%b")).as_deref(), Some("%a\\%b%"));
         assert_eq!(like_pattern(Some("a_b")).as_deref(), Some("%a\\_b%"));
+        // 反斜杠本身是 LIKE 转义符，必须先转义，否则 `\U` 会被当成字面 `U`
+        assert_eq!(
+            like_pattern(Some(r"C:\Users")).as_deref(),
+            Some(r"%C:\\Users%")
+        );
+        assert_eq!(like_pattern(Some(r"a\%")).as_deref(), Some(r"%a\\\%%"));
         assert_eq!(like_pattern(Some("   ")), None, "空白视为不过滤");
         assert_eq!(like_pattern(None), None);
     }

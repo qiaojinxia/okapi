@@ -791,6 +791,7 @@ pub struct ResolvedModel {
 
 /// 模型解析（#3001 + §5.1 预扣缺省）：模型真名直命中优先；
 /// 否则走别名（精确 > 通配，priority 降序）。返回 None = 模型不存在（404）。
+/// 通配只认 `*`：模式里的 `\` `%` `_` 先转义成字面再换 `*`，否则 `gpt_4*` 也会命中 `gpt-4o`。
 pub async fn resolve_model(
     pool: &PgPool,
     requested: &str,
@@ -804,7 +805,7 @@ pub async fn resolve_model(
                 m.model_name = $1
                 OR m.model_name = (
                     SELECT target_model FROM model_aliases
-                    WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(pattern, '*', '%'))
+                    WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(REPLACE(REPLACE(REPLACE(pattern, '\', '\\'), '%', '\%'), '_', '\_'), '*', '%'))
                     ORDER BY (pattern = $1) DESC, priority DESC, pattern
                     LIMIT 1
                 )

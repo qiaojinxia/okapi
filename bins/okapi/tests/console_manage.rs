@@ -626,6 +626,31 @@ async fn admin_list_surface_covers_every_resource() {
     );
     assert_eq!(body["total"], 1, "但 total 仍是过滤集总数");
 
+    // ---- 搜索词按字面匹配：`\` 是 LIKE 的转义符、`_` 是单字符通配，都不能被当成通配 / 吞掉 ----
+    let literal = format!(r"mg-bs-{}\x_y", env.suffix);
+    okapi_store::provision::create_channel(
+        &env.pg,
+        &literal,
+        "openai",
+        "http://127.0.0.1:1/v1",
+        "cred",
+        &[],
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    for (query, expected) in [
+        (literal.clone(), 1),
+        (format!(r"mg-bs-{}\xAy", env.suffix), 0),
+        (format!("mg-bs-{}x_y", env.suffix), 0),
+    ] {
+        let path = format!("/admin/channels?q={}", query.replace('\\', "%5C"));
+        let (status, body) = get(env.console, &path, t).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], expected, "q={query}: {body}");
+    }
+
     // ---- 模型列表：关键词 + 只看未定价（测试模型已定价，不该出现在未定价视图）----
     let (status, body) = get(
         env.console,

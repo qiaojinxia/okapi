@@ -357,6 +357,7 @@ pub async fn diagnose_route(
     }
 
     // 环节 1：模型身份（别名感知、不过滤 status——"已停用"与"不存在"是两种病）
+    // 别名通配只认 `*`（与 okapi_store::channels::resolve_model 同一写法）
     let model_row = sqlx::query!(
         r#"
         SELECT m.model_name AS canonical, m.status, m.fallback_models,
@@ -366,7 +367,7 @@ pub async fn diagnose_route(
         WHERE m.model_name = $1
            OR m.model_name = (
                SELECT target_model FROM model_aliases
-               WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(pattern, '*', '%'))
+               WHERE enabled AND (pattern = $1 OR $1 LIKE REPLACE(REPLACE(REPLACE(REPLACE(pattern, '\', '\\'), '%', '\%'), '_', '\_'), '*', '%'))
                ORDER BY (pattern = $1) DESC, priority DESC, pattern
                LIMIT 1
            )

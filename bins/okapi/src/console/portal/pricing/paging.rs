@@ -34,14 +34,9 @@ pub(super) fn trimmed(
 }
 
 pub(super) fn pattern(value: Option<String>) -> Option<String> {
-    value.filter(|q| !q.is_empty()).map(|q| {
-        format!(
-            "%{}%",
-            q.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        )
-    })
+    value
+        .filter(|q| !q.is_empty())
+        .map(|q| format!("%{}%", okapi_store::listing::escape_like(&q)))
 }
 
 #[derive(Serialize)]

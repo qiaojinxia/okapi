@@ -282,6 +282,22 @@ async fn model_alias_resolves_to_canonical() {
     let _ = resp.text().await.unwrap();
     let rec = wait_record(&env.pg, id).await;
     assert_eq!(rec.model_name, env.model);
+
+    // 通配只认 `*`：模式里的 `_` / `%` 按字面，曾被 LIKE 当成单字符 / 任意串通配
+    let literal = format!("lit_{}%", &suffix[..8]);
+    sqlx::query("INSERT INTO model_aliases (pattern, target_model, priority) VALUES ($1, $2, 0)")
+        .bind(format!("{literal}-*"))
+        .bind(&env.model)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let resp = post_chat(&env, &format!("{literal}-x"), None).await;
+    assert_eq!(resp.status(), 200);
+    let _ = resp.text().await.unwrap();
+    let resp = post_chat(&env, &format!("litX{}anything-x", &suffix[..8]), None).await;
+    let status = resp.status();
+    let body = resp.text().await.unwrap();
+    assert_ne!(status, 200, "`_` / `%` 不得当通配：{body}");
 }
 
 /// L2 会话粘性：同 session 第二次请求命中同一 channel_key，sticky_layer=2。
