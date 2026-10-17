@@ -108,17 +108,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let ch = if let Some(url) = &cfg.clickhouse_url {
         let client = okapi_store::ChClient::new(url, "okapi")
             .map_err(|e| anyhow::anyhow!("clickhouse client: {e}"))?;
-        if client.ping().await {
-            client
-                .ensure_schema()
-                .await
-                .map_err(|e| anyhow::anyhow!("clickhouse schema: {e}"))?;
-            tracing::info!("chsink 就绪（outbox → ClickHouse）");
-            Some(client)
-        } else {
-            tracing::warn!("ClickHouse 不可达，chsink 停用（统计接口 fail-closed）");
-            None
+        let sink = ChSink::new(client);
+        if sink.ready().await.is_none() {
+            tracing::warn!(
+                "ClickHouse 暂不可达，chsink 待命（统计接口 fail-closed），就绪后自动接上"
+            );
         }
+        Some(sink)
     } else {
         tracing::info!("未配置 OKAPI_CLICKHOUSE_URL，chsink 停用");
         None
@@ -184,7 +180,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         let probes = crate::ops::probes::Probes {
             pg: pg.clone(),
             redis: redis.clone(),
-            ch: ch.clone(),
+            // 探针拿配置好的客户端，不论启动时连没连上：连不上要报"异常"而不是"未配置"
+            ch: ch.as_ref().map(|sink| sink.client.clone()),
             nats: js.as_ref().map(async_nats::jetstream::Context::client),
         };
         let node = cfg.node.clone();
@@ -260,8 +257,58 @@ struct MaintenanceContext {
     redis: fred::clients::Client,
     notifier: notify::Notifier,
     js: Option<async_nats::jetstream::Context>,
-    ch: Option<okapi_store::ChClient>,
+    ch: Option<ChSink>,
     reconcile: std::sync::Mutex<ReconcileClock>,
+}
+
+/// 启动时 ClickHouse 可能还没起来（整机重启时各容器同时拉起）。只在启动那一刻 ping 一次的话，
+/// chsink 会一直停到下次重启，outbox 里的事件始终进不了统计。这里改成没就绪就隔一段再试，
+/// 首次接上时补建表结构。
+struct ChSink {
+    client: okapi_store::ChClient,
+    ready: std::sync::atomic::AtomicBool,
+    next_try: std::sync::Mutex<std::time::Instant>,
+}
+
+const CH_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+impl ChSink {
+    fn new(client: okapi_store::ChClient) -> Self {
+        Self {
+            client,
+            ready: std::sync::atomic::AtomicBool::new(false),
+            next_try: std::sync::Mutex::new(std::time::Instant::now()),
+        }
+    }
+
+    /// 就绪则返回客户端；未就绪时到了重试时间才去 ping，其余 tick 直接返回 None。
+    async fn ready(&self) -> Option<&okapi_store::ChClient> {
+        use std::sync::atomic::Ordering;
+        if self.ready.load(Ordering::Acquire) {
+            return Some(&self.client);
+        }
+        {
+            let mut next = self
+                .next_try
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = std::time::Instant::now();
+            if now < *next {
+                return None;
+            }
+            *next = now + CH_RETRY_INTERVAL;
+        }
+        if !self.client.ping().await {
+            return None;
+        }
+        if let Err(error) = self.client.ensure_schema().await {
+            tracing::error!(%error, "ClickHouse 表结构初始化失败，稍后重试");
+            return None;
+        }
+        self.ready.store(true, Ordering::Release);
+        tracing::info!("chsink 就绪（outbox → ClickHouse）");
+        Some(&self.client)
+    }
 }
 
 /// 对账节奏：进程启动后第一轮与之后每 [`RECONCILE_FULL_INTERVAL`] 一轮做全量，其余增量。
@@ -352,12 +399,16 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
         ch,
         reconcile,
     } = ctx;
+    let ch = match ch {
+        Some(sink) => sink.ready().await,
+        None => None,
+    };
     match job {
         MaintenanceJob::chsink_tick => {
-            transport_tick(pg, js.as_ref(), ch.as_ref()).await;
+            transport_tick(pg, js.as_ref(), ch).await;
         }
         MaintenanceJob::unit_calibration => {
-            if let Some(ch) = ch.as_ref() {
+            if let Some(ch) = ch {
                 match legacy_speech::process_once(ch, 500).await {
                     Ok(0) => {}
                     Ok(rows) => tracing::debug!(rows, "historical speech unit calibration batch"),
@@ -448,14 +499,9 @@ async fn maintenance_once(ctx: &MaintenanceContext, job: MaintenanceJob) {
             }
         }
         MaintenanceJob::margin => {
-            if let Err(err) = margin_breaker::evaluate_and_notify(
-                pg,
-                ch.as_ref(),
-                redis,
-                chrono::Utc::now(),
-                notifier,
-            )
-            .await
+            if let Err(err) =
+                margin_breaker::evaluate_and_notify(pg, ch, redis, chrono::Utc::now(), notifier)
+                    .await
             {
                 tracing::error!(error = %err, "负毛利熔断评估失败");
             }

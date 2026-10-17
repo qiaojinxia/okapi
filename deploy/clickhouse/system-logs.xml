@@ -1,0 +1,27 @@
+<!--
+  单机小内存（4G）部署的系统日志收敛。默认配置下 ClickHouse 每秒往十几张 system.*_log 写自身遥测：
+  一周能攒上亿行、数 GB，其中 metric_log 上千列，后台合并会撞 max_server_memory_usage
+  （Memory limit (total) exceeded）反复失败重试。okapi 只用 query_log（慢查询排查）和 part_log，
+  其余关掉；留下的两张 7 天过期。
+-->
+<clickhouse>
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <query_views_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+    <backup_log remove="1"/>
+    <s3queue_log remove="1"/>
+    <blob_storage_log remove="1"/>
+    <error_log remove="1"/>
+    <query_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+    <part_log>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </part_log>
+</clickhouse>

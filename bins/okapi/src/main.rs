@@ -42,7 +42,7 @@ enum Role {
 
 /// 服务角色把告警日志汇总到 Redis（§11.43），并启动出口代理流量的落库。独立连接：
 /// 日志汇总不该和业务共用一条连接排队；连不上就只留本进程缓冲。迁移等一次性命令不启动。
-async fn start_ops_log(role: &Role, cfg: &Config) {
+fn start_ops_log(role: &Role, cfg: &Config) {
     let role = match role {
         Role::Gateway => "gateway",
         Role::Console => "console",
@@ -52,10 +52,25 @@ async fn start_ops_log(role: &Role, cfg: &Config) {
     };
     // 出口代理流量同样每个服务进程各自落库
     okapi::ops::egress_traffic::spawn(cfg);
-    match okapi_store::connect_redis(&cfg.redis_url).await {
-        Ok(redis) => okapi::ops::logbuf::spawn_flusher(redis, &cfg.node, role),
-        Err(e) => tracing::warn!(error = %e, "ops log flusher disabled"),
-    }
+    // 整机重启时 Redis 可能还在加载数据集（LOADING）：连不上就退避重试，不能一次失败就停到下次重启。
+    // 等待期间告警照常进本进程缓冲，接上后补写。
+    let (redis_url, node) = (cfg.redis_url.clone(), cfg.node.clone());
+    tokio::spawn(async move {
+        let mut backoff = std::time::Duration::from_secs(2);
+        loop {
+            match okapi_store::connect_redis(&redis_url).await {
+                Ok(redis) => {
+                    okapi::ops::logbuf::spawn_flusher(redis, &node, role);
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, retry_in_secs = backoff.as_secs(), "ops log flusher waiting for Redis");
+                }
+            }
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(std::time::Duration::from_mins(1));
+        }
+    });
 }
 
 #[tokio::main]
@@ -73,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let cfg = Config::from_env()?;
-    start_ops_log(&cli.role, &cfg).await;
+    start_ops_log(&cli.role, &cfg);
 
     match cli.role {
         Role::SealCredentials => seal_credentials(&cfg).await,

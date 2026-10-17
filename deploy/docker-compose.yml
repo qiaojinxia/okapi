@@ -81,6 +81,7 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD}
     volumes:
       - ch-data:/var/lib/clickhouse
+      - ./clickhouse/system-logs.xml:/etc/clickhouse-server/config.d/okapi-system-logs.xml:ro
     ulimits:
       nofile: 262144
     restart: unless-stopped
