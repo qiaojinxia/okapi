@@ -425,6 +425,36 @@ async fn unsupported_handshake_falls_back_once_and_post_errors_never_retry() {
     assert_eq!(env.gets.load(Ordering::SeqCst), 1);
 }
 
+/// 桥接这一轮的流没结束，渠道并发租约就一直被它占着：曾在 POST 前就归还，`max_concurrency`
+/// 管不住桥接流量，另一条连接照样能发出第二个 POST。
+#[tokio::test]
+async fn bridged_turn_holds_the_channel_lease_until_its_stream_ends() {
+    let mut env = setup().await;
+    env.mode("http").await;
+    sqlx::query("UPDATE channel_keys SET max_concurrency=1 WHERE id=$1")
+        .bind(env.channel_key)
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
+    let mut first = env.client().await;
+    send(&mut first, env.body("main")).await;
+    let open = env.peer().await.stream();
+    let mut second = env.client().await;
+    send(&mut second, env.body("main")).await;
+    let busy = read(&mut second).await;
+    assert_eq!(busy["status"], 503, "{busy}");
+    env.no_post().await;
+
+    open.send(Ok(Bytes::from(frame(&completed(json!([]))))))
+        .await
+        .unwrap();
+    drop(open);
+    assert_eq!(env.amount(&read(&mut first).await).await.0, 240);
+    send(&mut second, env.body("main")).await;
+    env.peer().await.respond(&[completed(json!([]))]);
+    assert_eq!(env.amount(&read(&mut second).await).await.0, 240);
+}
+
 #[tokio::test]
 async fn explicit_native_override_and_auth_failures_do_not_http_fallback() {
     let mut env = setup().await;

@@ -317,8 +317,25 @@ pub(super) async fn route(
                 return routed;
             }
             Transport::Http => {
-                permit.release().await;
-                let (handle, bridge) =
+                // 与 Native 分支、HTTP 入口（account_control::execute）同一套准入：POST 前再过一次账号控制
+                // （候选预筛之后额度可能刚好用尽），渠道并发租约挂在这一轮的流上，流结束才归还。
+                // 此前在 POST 前就归还，max_concurrency 管不住桥接流量。本地预热不打上游，租约立即归还。
+                let permit = if work.warmup {
+                    permit.release().await;
+                    None
+                } else {
+                    if let Err(error) = crate::gateway::account_control::admit(
+                        &bill.state,
+                        cand.channel_id,
+                        Some(cand.channel_key_id),
+                    )
+                    .await
+                    {
+                        return Err(failure(error, bill, &cand, failover));
+                    }
+                    Some(permit)
+                };
+                let (mut handle, bridge) =
                     match bridge::start(session, bill, &cand, &body, context, work).await {
                         Ok(result) => result,
                         Err(error) => {
@@ -329,6 +346,10 @@ pub(super) async fn route(
                             ));
                         }
                     };
+                if let Some(permit) = permit {
+                    handle.events =
+                        okapi_providers::response_lifetime::guard_stream(handle.events, permit);
+                }
                 bill.trace.finish(None, None);
                 let mut info = cand_info(
                     &cand,
