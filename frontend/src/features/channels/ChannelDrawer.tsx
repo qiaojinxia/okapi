@@ -1,6 +1,6 @@
 import { ModelTagsInput } from '@/features/models/model-input'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChannelRow, ChannelSettings } from '@/features/channels/types'
 import { Button } from '@/components/ui/button'
@@ -55,6 +55,15 @@ const PROVIDER_LABELS: Record<string, string> = {
   codex: 'admin:providerCodexSubscription',
 }
 
+/// 可增删的键值行带一个稳定 id 作 React key、增删改都按 id 定位。用下标作 key 时删掉中间一行，
+/// React 会把后一行的 DOM 让给前一行的数据：焦点（刚点的 ×、正在输入的框）跟着落到另一行，
+/// 继续打字或回车就改错 / 删错行。
+interface KeyValueRow {
+  id: number
+  name: string
+  val: string
+}
+
 function ExtraHeadersEditor({
   value,
   onChange,
@@ -63,37 +72,32 @@ function ExtraHeadersEditor({
   onChange: (next: Record<string, string>) => void
 }) {
   const { t } = useTranslation()
-  const [draft, setDraft] = useState<Array<[string, string]>>(() => Object.entries(value))
-  const commit = (next: Array<[string, string]>) => {
+  const nextId = useRef(0)
+  const [draft, setDraft] = useState<KeyValueRow[]>(() => Object.entries(value).map(([name, val]) => ({ id: nextId.current++, name, val })))
+  const commit = (next: KeyValueRow[]) => {
     setDraft(next)
-    onChange(Object.fromEntries(next.filter(([k]) => k.trim() !== '')))
+    onChange(Object.fromEntries(next.filter((row) => row.name.trim() !== '').map((row) => [row.name, row.val])))
   }
-  const setRow = (index: number, name: string, val: string) => {
-    const next = [...draft]
-    next[index] = [name, val]
-    commit(next)
-  }
-  const removeRow = (index: number) => {
-    commit(draft.filter((_, i) => i !== index))
-  }
+  const setRow = (id: number, patch: Partial<KeyValueRow>) => commit(draft.map((row) => (row.id === id ? { ...row, ...patch } : row)))
+  const removeRow = (id: number) => commit(draft.filter((row) => row.id !== id))
   return (
     <div className="flex flex-col gap-1.5">
       <Label>{t('admin:extraHeaders')}</Label>
       <p className="text-xs text-muted-foreground">{t('admin:extraHeadersHint')}</p>
-      {draft.map(([name, val], i) => (
-        <div key={i} className="flex gap-2">
+      {draft.map((row) => (
+        <div key={row.id} className="flex gap-2">
           <Input
-            value={name}
+            value={row.name}
             placeholder="OpenAI-Organization"
-            onChange={(e) => setRow(i, e.target.value, val)}
+            onChange={(e) => setRow(row.id, { name: e.target.value })}
           />
-          <Input value={val} placeholder="org-…" onChange={(e) => setRow(i, name, e.target.value)} />
-          <Button type="button" variant="ghost" onClick={() => removeRow(i)}>
+          <Input value={row.val} placeholder="org-…" onChange={(e) => setRow(row.id, { val: e.target.value })} />
+          <Button type="button" variant="ghost" onClick={() => removeRow(row.id)}>
             ×
           </Button>
         </div>
       ))}
-      <Button type="button" variant="outline" onClick={() => commit([...draft, ['', '']])}>
+      <Button type="button" variant="outline" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
         {t('admin:extraHeadersAdd')}
       </Button>
     </div>
@@ -127,48 +131,43 @@ function InjectFieldsEditor({
   onChange: (next: Record<string, unknown>) => void
 }) {
   const { t } = useTranslation()
-  const [draft, setDraft] = useState<Array<[string, string]>>(() =>
-    Object.entries(value).map(([k, v]) => [k, formatInjectValue(v)]),
+  const nextId = useRef(0)
+  const [draft, setDraft] = useState<KeyValueRow[]>(() =>
+    Object.entries(value).map(([name, v]) => ({ id: nextId.current++, name, val: formatInjectValue(v) })),
   )
-  const commit = (next: Array<[string, string]>) => {
+  const commit = (next: KeyValueRow[]) => {
     setDraft(next)
     const obj: Record<string, unknown> = {}
-    for (const [k, v] of next) {
-      if (k.trim() === '') continue
-      obj[k.trim()] = parseInjectValue(v)
+    for (const row of next) {
+      if (row.name.trim() === '') continue
+      obj[row.name.trim()] = parseInjectValue(row.val)
     }
     onChange(obj)
   }
-  const setRow = (index: number, name: string, val: string) => {
-    const next = [...draft]
-    next[index] = [name, val]
-    commit(next)
-  }
-  const removeRow = (index: number) => {
-    commit(draft.filter((_, i) => i !== index))
-  }
+  const setRow = (id: number, patch: Partial<KeyValueRow>) => commit(draft.map((row) => (row.id === id ? { ...row, ...patch } : row)))
+  const removeRow = (id: number) => commit(draft.filter((row) => row.id !== id))
   return (
     <div className="flex flex-col gap-1.5">
       <Label>{t('admin:injectFields')}</Label>
       <p className="text-xs text-muted-foreground">{t('admin:injectFieldsHint')}</p>
-      {draft.map(([name, val], i) => (
-        <div key={i} className="flex gap-2">
+      {draft.map((row) => (
+        <div key={row.id} className="flex gap-2">
           <Input
-            value={name}
+            value={row.name}
             placeholder="temperature"
-            onChange={(e) => setRow(i, e.target.value, val)}
+            onChange={(e) => setRow(row.id, { name: e.target.value })}
           />
           <Input
-            value={val}
+            value={row.val}
             placeholder='0.2 or "forced"'
-            onChange={(e) => setRow(i, name, e.target.value)}
+            onChange={(e) => setRow(row.id, { val: e.target.value })}
           />
-          <Button type="button" variant="ghost" onClick={() => removeRow(i)}>
+          <Button type="button" variant="ghost" onClick={() => removeRow(row.id)}>
             ×
           </Button>
         </div>
       ))}
-      <Button type="button" variant="outline" onClick={() => commit([...draft, ['', '']])}>
+      <Button type="button" variant="outline" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
         {t('admin:injectFieldsAdd')}
       </Button>
     </div>

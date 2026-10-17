@@ -1,6 +1,6 @@
 import { Plus, Trash2 } from 'lucide-react'
 import { useMutation } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ModelListRow } from '@/features/models/types'
 import { AXIS_LABEL, INDEPENDENT_AXES, MODAL_AXES } from '@/features/models/types'
@@ -50,7 +50,9 @@ export function ModelDrawer({
   const presetVendors = [...new Set(MODEL_PRESETS.map((preset) => preset.vendor))]
   const matchingPresets = MODEL_PRESETS.filter((preset) => presetVendor === '' || preset.vendor === presetVendor)
   const referencePreset = appliedPreset ?? (model ? findModelPreset(model.model_name) : undefined)
-  const [tiers, setTiers] = useState<{ tier: string; ratio: string }[]>(() => Object.entries(model?.tier_ratios ?? {}).map(([tier, ratio]) => ({ tier, ratio: String(ratio) })))
+  // 档位行带稳定 id 作 key / 标签关联：用下标的话删掉中间一档，后一档的输入框会接过焦点，倍率写到别的档位上
+  const nextTierId = useRef(0)
+  const [tiers, setTiers] = useState<{ id: number; tier: string; ratio: string }[]>(() => Object.entries(model?.tier_ratios ?? {}).map(([tier, ratio]) => ({ id: nextTierId.current++, tier, ratio: String(ratio) })))
   // 阶梯计价表 "0:2.5,128000:5"（from_tokens:USD_per_1M）。空串 = ratio 模式。
   // 与 model_ratio 互斥：填了阶梯，每 token 基准单价改由查表得出，model_ratio 不再参与。
   const [tierExpr, setTierExpr] = useState(model?.tier_expr ?? '')
@@ -113,7 +115,7 @@ export function ModelDrawer({
     setMode(source.pricing_mode ?? 'ratio')
     setCallPrice(priceFromMicro(source.per_call_price_micro))
     setIndependent(source.modality_ratios ?? {})
-    setTiers(Object.entries(source.tier_ratios ?? {}).map(([tier, ratio]) => ({ tier, ratio: String(ratio) })))
+    setTiers(Object.entries(source.tier_ratios ?? {}).map(([tier, ratio]) => ({ id: nextTierId.current++, tier, ratio: String(ratio) })))
     setTierExpr(source.tier_expr ?? ''); setTemplateSource(source.model_name)
     setAppliedPreset(null)
     // Identity and fallback routing are not copied by a pricing template.
@@ -331,31 +333,31 @@ export function ModelDrawer({
       </ModelOptionsSection>
       <ModelOptionsSection id="model-tiers-section" title={t('admin:tierRatios')} hint={t('admin:tierRatiosHint')} configured={namedTiers.length > 0}>
       <FieldGroup title={t('admin:tierRatios')} hint={t('admin:tierRatiosHint')}>
-        {tiers.map((row, i) => (
-          <div key={i} className="flex items-end gap-2">
+        {tiers.map((row) => (
+          <div key={row.id} className="flex items-end gap-2">
             <div className="flex flex-1 flex-col gap-1.5">
-              <Label htmlFor={`tier-${i}`}>{t('admin:tierName')}</Label>
+              <Label htmlFor={`tier-${row.id}`}>{t('admin:tierName')}</Label>
               <Input
-                id={`tier-${i}`}
+                id={`tier-${row.id}`}
                 value={row.tier}
                 placeholder="flex"
-                onChange={(e) => { const value = e.target.value; setTiers((ts) => ts.map((x, j) => (i === j ? { ...x, tier: value } : x))) }}
+                onChange={(e) => { const value = e.target.value; setTiers((ts) => ts.map((x) => (x.id === row.id ? { ...x, tier: value } : x))) }}
               />
             </div>
             <div className="flex w-28 flex-col gap-1.5">
-              <Label htmlFor={`tratio-${i}`}>{t('admin:ruleMultiplier')}</Label>
+              <Label htmlFor={`tratio-${row.id}`}>{t('admin:ruleMultiplier')}</Label>
               <Input
-                id={`tratio-${i}`}
+                id={`tratio-${row.id}`}
                 value={row.ratio}
                 inputMode="decimal"
-                onChange={(e) => { const value = e.target.value; setTiers((ts) => ts.map((x, j) => (i === j ? { ...x, ratio: value } : x))) }}
+                onChange={(e) => { const value = e.target.value; setTiers((ts) => ts.map((x) => (x.id === row.id ? { ...x, ratio: value } : x))) }}
               />
             </div>
             <IconButton
               icon={Trash2}
               label={t('common:delete')}
               variant="destructive"
-              onClick={() => setTiers((ts) => ts.filter((_, j) => j !== i))}
+              onClick={() => setTiers((ts) => ts.filter((x) => x.id !== row.id))}
             />
           </div>
         ))}
@@ -363,7 +365,7 @@ export function ModelDrawer({
           size="sm"
           variant="outline"
           className="self-start"
-          onClick={() => setTiers((ts) => [...ts, { tier: '', ratio: '1' }])}
+          onClick={() => setTiers((ts) => [...ts, { id: nextTierId.current++, tier: '', ratio: '1' }])}
         >
           <Plus className="h-4 w-4" />
           {t('admin:tierAdd')}

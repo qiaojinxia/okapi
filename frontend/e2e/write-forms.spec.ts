@@ -452,6 +452,86 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   ])
 })
 
+// 删掉中间一行后，点过的删除键随整行消失：曾以下标作 key，后一行接过那个已聚焦的删除键，
+// 紧接着按回车（或继续打字）就落到了另一行上。
+test('渠道抽屉键值行：删掉中间一行后剩余行与焦点都不串行，保存体只剩首尾两行', async ({ page }) => {
+  await prepare(page)
+  const patches: Json[] = []
+  await page.route('**/admin/channels?*', (route) => route.fulfill({ json: { data: [CHANNEL], total: 1, enabled: 1 } }))
+  await page.route('**/admin/channels/42', async (route) => {
+    patches.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.goto('/admin/channels')
+  await page.getByRole('row').filter({ hasText: 'openai-main' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = await openedDialog(page)
+  await drawer.getByRole('tab', { name: '请求与计费行为' }).click()
+
+  const headerNames = drawer.getByPlaceholder('OpenAI-Organization')
+  for (const [name, value] of [['X-B', 'b'], ['X-C', 'c']]) {
+    await drawer.getByRole('button', { name: '添加请求头' }).click()
+    await headerNames.last().fill(name)
+    await drawer.getByPlaceholder('org-…').last().fill(value)
+  }
+  await headerNames.nth(1).locator('..').getByRole('button', { name: '×' }).click()
+  await page.keyboard.press('Enter')
+  await expect(headerNames).toHaveCount(2)
+  expect(await headerNames.evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value))).toEqual(['OpenAI-Organization', 'X-C'])
+
+  const fieldNames = drawer.getByPlaceholder('temperature')
+  for (const [name, value] of [['a', '1'], ['b', '2'], ['c', '3']]) {
+    await drawer.getByRole('button', { name: '添加字段' }).click()
+    await fieldNames.last().fill(name)
+    await drawer.getByPlaceholder('0.2 or "forced"').last().fill(value)
+  }
+  await fieldNames.nth(1).locator('..').getByRole('button', { name: '×' }).click()
+  await page.keyboard.press('Enter')
+  await expect(fieldNames).toHaveCount(2)
+  expect(await fieldNames.evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value))).toEqual(['a', 'c'])
+
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => patches.length).toBe(1)
+  const settings = (patches[0] as { settings: Json }).settings
+  expect(settings.extra_headers).toEqual({ 'OpenAI-Organization': 'org-1', 'X-C': 'c' })
+  expect(settings.inject_request_fields).toEqual({ a: 1, c: 3 })
+})
+
+test('模型抽屉档位行：删掉中间一档后倍率不串到别的档位，保存体只剩首尾两档', async ({ page }) => {
+  await prepare(page)
+  const posts: Json[] = []
+  const model = {
+    model_name: 'gpt-5', vendor: 'OpenAI', status: 1, pricing_mode: 'ratio',
+    model_ratio: '1', completion_ratio: '1', cache_ratio: null, cache_write_ratio: null, tier_expr: null,
+    audio_ratio: null, audio_completion_ratio: null, image_ratio: null, per_call_price_micro: null, fallback_models: [],
+  }
+  await page.route('**/admin/models?*', (route) => route.fulfill({ json: { data: [model], total: 1, unpriced: 0 } }))
+  await page.route('**/admin/models', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    posts.push(route.request().postDataJSON() as Json)
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.goto('/admin/pricing')
+  await page.getByRole('row').filter({ hasText: 'gpt-5' }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = await openedDialog(page)
+  await drawer.locator('#model-advanced-section > summary').click()
+  await drawer.locator('#model-tiers-section > summary').click()
+  const names = drawer.getByLabel('档位名', { exact: true })
+  const ratios = drawer.getByLabel('命中倍率', { exact: true })
+  for (const [name, ratio] of [['flex', '0.5'], ['batch', '0.6'], ['priority', '2']]) {
+    await drawer.getByRole('button', { name: '添加档位' }).click()
+    await names.last().fill(name)
+    await ratios.last().fill(ratio)
+  }
+  await names.nth(1).locator('../..').getByRole('button', { name: '删除', exact: true }).click()
+  await page.keyboard.press('Enter')
+  await expect(names).toHaveCount(2)
+  expect(await names.evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value))).toEqual(['flex', 'priority'])
+  expect(await ratios.evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value))).toEqual(['0.5', '2'])
+  await drawer.getByRole('button', { name: '保存', exact: true }).click()
+  await expect.poll(() => posts.length).toBe(1)
+  expect(posts[0]).toMatchObject({ tier_ratios: { flex: '0.5', priority: '2' } })
+})
+
 test('模型定价抽屉：倍率轴按十进制字符串提交，空档位行被过滤，阶梯表达式与降级链显式回传', async ({ page }) => {
   await prepare(page)
   const posts: Json[] = []
