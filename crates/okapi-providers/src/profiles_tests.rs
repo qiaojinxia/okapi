@@ -200,6 +200,26 @@ fn counting_and_passthrough_use_the_same_extension_boundary() {
     assert!(!is_client_header("x-api-key"));
 }
 
+/// Codex CLI 0.160 经网关模式实发的身份头（本地录制）：会话头改成连字符，子代理请求另带两项。
+#[test]
+fn codex_cli_identity_headers_are_forwarded() {
+    for name in [
+        "session-id",
+        "thread-id",
+        "x-openai-subagent",
+        "x-codex-parent-thread-id",
+        "x-codex-turn-metadata",
+        "x-codex-turn-state",
+        "x-codex-window-id",
+        "x-codex-beta-features",
+        "x-client-request-id",
+        "originator",
+        "user-agent",
+    ] {
+        assert!(is_client_header(name), "{name}");
+    }
+}
+
 /// 模拟（含自动）会改写请求的渠道才放大预扣；透传、原生与未配置不变。
 #[test]
 fn admission_hints_follow_the_profile_that_reshapes_requests() {

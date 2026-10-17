@@ -118,7 +118,7 @@ async fn credentials(
             headers.push(("originator".into(), codex::ORIGINATOR.into()));
         }
         if !has("openai-beta") {
-            headers.push(("openai-beta".into(), "responses=experimental".into()));
+            headers.push(("openai-beta".into(), codex::WEBSOCKET_BETA.into()));
         }
         if let Some(account) = &credential.account_id {
             headers.push(("chatgpt-account-id".into(), account.clone()));

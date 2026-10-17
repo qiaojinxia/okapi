@@ -32,7 +32,9 @@ const SCOPE: &str = "openid profile email offline_access";
 pub const ORIGINATOR: &str = "codex_cli_rs";
 pub const DEFAULT_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 /// 模型目录接口的 `client_version`（Codex CLI 版本号，随 CLI 升级可调）。
-pub const CLIENT_VERSION: &str = "0.155.0";
+pub const CLIENT_VERSION: &str = "0.160.0";
+/// Codex CLI 建 WebSocket 时带的 `OpenAI-Beta`（0.160 二进制取值）。HTTP 请求它什么 beta 都不带。
+pub const WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 const TOKEN_TIMEOUT: Duration = Duration::from_secs(20);
 const MODELS_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -257,12 +259,10 @@ pub async fn responses(
         ("authorization", bearer.as_str()),
         ("accept", "text/event-stream"),
     ];
-    // 真实 Codex 客户端自带的 originator / OpenAI-Beta 已经透传在 extra_headers 里，不覆盖
+    // 真实 Codex 客户端自带的 originator / OpenAI-Beta 已经透传在 extra_headers 里，不覆盖。
+    // 客户端没带 beta 就不带：Codex CLI 0.160 的 HTTP 请求不发 OpenAI-Beta，补一个反而不像它
     if !has_header(outbound, "originator") {
         headers.push(("originator", ORIGINATOR));
-    }
-    if !has_header(outbound, "openai-beta") {
-        headers.push(("openai-beta", "responses=experimental"));
     }
     if let Some(id) = account_id {
         headers.push(("chatgpt-account-id", id));
@@ -288,9 +288,6 @@ pub async fn responses_compact(
     let mut headers = vec![("authorization", bearer.as_str())];
     if !has_header(outbound, "originator") {
         headers.push(("originator", ORIGINATOR));
-    }
-    if !has_header(outbound, "openai-beta") {
-        headers.push(("openai-beta", "responses=experimental"));
     }
     if let Some(id) = account_id {
         headers.push(("chatgpt-account-id", id));

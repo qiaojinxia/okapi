@@ -243,7 +243,10 @@ async fn mock_compact(
     if uri.path().starts_with("/codex/") {
         assert_eq!(headers["chatgpt-account-id"], "acct-compact-fixture");
         assert_eq!(headers["originator"], "codex-fixture");
-        assert_eq!(headers["openai-beta"], "responses=experimental");
+        assert!(
+            headers.get("openai-beta").is_none(),
+            "客户端没带 beta 时网关不编造（Codex CLI 0.160 的 HTTP 请求不发它）"
+        );
     }
     let req: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(req["model"], "gpt-upstream");

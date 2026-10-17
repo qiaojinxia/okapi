@@ -59,7 +59,11 @@ fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInf
             messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&session.headers, None, &messages),
+        session: session_hash(
+            &session.headers,
+            probe.prompt_cache_key.as_deref(),
+            &messages,
+        ),
         needs_tools,
         needs_vision,
         service_tier: probe.service_tier.clone(),

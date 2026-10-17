@@ -1216,9 +1216,10 @@ pub struct KpiSecond {
 }
 
 /// 会话标识提取（§3.2）：优先客户端自报的会话 ID——Claude Code 的 `x-claude-code-session-id`
-/// 头、请求体 `metadata.user_id` 里的 session（`body_session`，仅 Anthropic 入口）、通用的
-/// `session_id` / `x-session-id` 头（Nginx 需 `underscores_in_headers on`）；都没有才取首两条消息
-/// 规范化文本哈希。内容哈希只是近似：开场相同的两个会话会撞在一起，压缩上下文后同一会话会变。
+/// 头、请求体自报的会话（`body_session`：Anthropic 入口是 `metadata.user_id` 里的 session，
+/// Responses 入口是 `prompt_cache_key`，Codex CLI 填的就是会话 id）、通用的 `session_id` /
+/// `session-id`（Codex CLI 0.160 起）/ `x-session-id` 头（Nginx 需 `underscores_in_headers on`）；
+/// 都没有才取首两条消息规范化文本哈希。内容哈希只是近似：开场相同的两个会话会撞在一起，压缩上下文后同一会话会变。
 /// 哈希 = SHA-256 前 8 字节 hex（xxhash 为 M3 性能优化项）。
 #[must_use]
 pub fn session_hash(
@@ -1236,6 +1237,7 @@ pub fn session_hash(
     let explicit = header("x-claude-code-session-id")
         .or(body_session.map(str::trim).filter(|v| !v.is_empty()))
         .or_else(|| header("session_id"))
+        .or_else(|| header("session-id"))
         .or_else(|| header("x-session-id"));
     if let Some(value) = explicit {
         return Some(short_hash(value.as_bytes()));
@@ -1332,6 +1334,16 @@ mod session_hash_tests {
                 None,
                 &same_opening
             )
+        );
+        // Codex CLI 0.160：连字符会话头，与请求体 prompt_cache_key 是同一个值，HTTP / WS 落同一键
+        let codex = headers(&[("session-id", "thread-1")]);
+        assert_eq!(
+            session_hash(&codex, None, &same_opening),
+            session_hash(&headers(&[("session_id", "thread-1")]), None, &same_opening)
+        );
+        assert_eq!(
+            session_hash(&codex, None, &same_opening),
+            session_hash(&none, Some("thread-1"), &messages("after compaction"))
         );
         let blank = headers(&[("x-claude-code-session-id", "  ")]);
         assert_eq!(

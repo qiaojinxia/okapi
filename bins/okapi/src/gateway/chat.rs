@@ -581,7 +581,7 @@ async fn responses_entry(
             input_messages.len().max(1),
         ),
         prompt_chars: probe.prompt_chars(),
-        session: session_hash(&headers, None, &input_messages),
+        session: session_hash(&headers, probe.prompt_cache_key.as_deref(), &input_messages),
         service_tier: probe.service_tier.clone(),
         needs_tools,
         needs_vision,

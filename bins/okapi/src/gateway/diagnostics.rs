@@ -47,7 +47,7 @@ impl Trace {
             fields["user_agent"] = json!(bounded(&sanitize(ua, &secrets), 512));
         }
         // Explicit client correlation only; never persist a prompt-derived sticky hash.
-        if let Some(session) = header(&["session_id", "x-session-id"]) {
+        if let Some(session) = header(&["session_id", "session-id", "x-session-id"]) {
             fields["session_id"] = json!(bounded(&sanitize(session, &secrets), 256));
         }
         Self(Arc::new(Mutex::new(Data {

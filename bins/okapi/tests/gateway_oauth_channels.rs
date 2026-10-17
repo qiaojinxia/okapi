@@ -834,6 +834,41 @@ async fn codex_login_routes_only_responses_ingress() {
     assert_eq!(resp.status(), 503);
 }
 
+/// Codex CLI 0.160 经网关模式实发的头（本地录制）：连字符会话头、子代理头原样到上游；
+/// 它的 HTTP 请求不带 OpenAI-Beta，网关也不替它补。
+#[tokio::test]
+async fn codex_forwards_cli_0160_identity_headers_without_inventing_beta() {
+    let env = setup().await;
+    login_channel(&env, "codex").await;
+    let forwarded = [
+        ("originator", "codex_exec"),
+        ("session-id", "thread-1"),
+        ("thread-id", "thread-1"),
+        ("x-openai-subagent", "review"),
+        ("x-codex-parent-thread-id", "thread-0"),
+        ("x-codex-window-id", "thread-1:0"),
+        ("x-codex-turn-metadata", r#"{"turn_id":"turn-1"}"#),
+    ];
+    let mut request = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.user_token);
+    for (name, value) in forwarded {
+        request = request.header(name, value);
+    }
+    let resp = request
+        .json(&json!({"model": env.model, "input": "hi", "stream": true,
+            "prompt_cache_key": "thread-1"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(resp.text().await.unwrap().contains("response.completed"));
+    for (name, value) in forwarded {
+        assert_eq!(env.mock_state.seen(name).as_deref(), Some(value), "{name}");
+    }
+    assert_eq!(env.mock_state.seen("openai-beta"), None);
+}
+
 #[tokio::test]
 async fn codex_404_does_not_replay_or_fallback_to_chat() {
     let env = setup().await;

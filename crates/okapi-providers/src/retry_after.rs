@@ -27,12 +27,18 @@ fn at(headers: &HeaderMap, now: i64) -> Option<i64> {
             windows.push(delay);
         }
     }
+    // Codex CLI 0.160 只读 `-reset-at`（Unix 秒）；旧的 `-reset-after-seconds` 留作兜底
     for window in ["primary", "secondary"] {
         if text(&format!("x-codex-{window}-used-percent"))
             .is_some_and(|value| exhausted(value, 100))
-            && let Some(delay) = text(&format!("x-codex-{window}-reset-after-seconds"))
+            && let Some(delay) = text(&format!("x-codex-{window}-reset-at"))
                 .and_then(|value| value.parse().ok())
-                .and_then(positive)
+                .and_then(remaining)
+                .or_else(|| {
+                    text(&format!("x-codex-{window}-reset-after-seconds"))
+                        .and_then(|value| value.parse().ok())
+                        .and_then(positive)
+                })
         {
             windows.push(delay);
         }
@@ -97,6 +103,16 @@ mod tests {
         assert_eq!(at(&h, 1000), Some(5));
         h.insert("x-codex-primary-used-percent", "100.0".parse().unwrap());
         assert_eq!(at(&h, 1000), Some(604_800));
+        // 绝对时间优先；已过去的绝对时间不算数，退回相对秒数
+        h.insert("x-codex-primary-reset-at", "19000".parse().unwrap());
+        assert_eq!(at(&h, 1000), Some(18_000));
+        h.insert("x-codex-primary-reset-at", "900".parse().unwrap());
+        assert_eq!(at(&h, 1000), Some(604_800));
+        let h = headers(&[
+            ("x-codex-secondary-used-percent", "100"),
+            ("x-codex-secondary-reset-at", "4600"),
+        ]);
+        assert_eq!(at(&h, 1000), Some(3600), "新版只发 reset-at 也能算出冷却");
         let h = headers(&[
             ("anthropic-ratelimit-unified-5h-utilization", "1.0"),
             ("anthropic-ratelimit-unified-5h-reset", "2000"),

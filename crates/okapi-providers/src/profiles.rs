@@ -223,7 +223,12 @@ pub fn is_client_header(name: &str) -> bool {
             | "version"
             | "session_id"
             | "conversation_id"
+            // Codex CLI 0.160 起改发连字符会话头，不再带上面两项
+            | "session-id"
+            | "thread-id"
             | "openai-beta"
+            | "x-openai-subagent"
+            | "x-codex-parent-thread-id"
             | "x-codex-beta-features"
             | "x-codex-installation-id"
             | "x-codex-window-id"

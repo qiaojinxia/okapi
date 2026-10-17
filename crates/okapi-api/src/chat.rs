@@ -220,6 +220,9 @@ pub struct ResponsesRequestProbe {
     pub background: Option<bool>,
     #[serde(default, deserialize_with = "tool_json")]
     pub tools: String,
+    /// 客户端声明的缓存分组（Codex CLI 填会话 id），作 L2 粘性键。
+    #[serde(default)]
+    pub prompt_cache_key: Option<String>,
 }
 
 impl ResponsesRequestProbe {

@@ -146,7 +146,7 @@ sequenceDiagram
 | L2 session 亲和 | `stick:sess:{uid}:v1:<session_hash>` | 1h 滑动 | 会话前缀哈希 → 同 channel_key，提升上游 prompt cache 命中率（直接降低用户账单的 cache_ratio 部分） |
 | L3 打分兜底 | — | — | 无粘性时进入 §3.3 |
 
-- L2 键优先取客户端自报的会话 ID：Claude Code 的 `x-claude-code-session-id` 头 → Anthropic 请求体 `metadata.user_id` 里的 session（新版 JSON 串 / 旧版 `_session_<uuid>` 后缀）→ 通用会话头（`session_id` / `x-session-id`；Responses 的 `prompt_cache_key` 随 M3 接入），都没有才回退前两条消息规范化文本哈希（开场相同的会话会撞键、压缩上下文后同一会话会换键，只是近似）。当前实现哈希 = SHA-256 前 8 字节（xxhash64 为 M3 性能项）。注意 Nginx 默认丢弃带下划线的请求头，部署模板须加 `underscores_in_headers on`（§14.1）。
+- L2 键优先取客户端自报的会话 ID：Claude Code 的 `x-claude-code-session-id` 头 → Anthropic 请求体 `metadata.user_id` 里的 session（新版 JSON 串 / 旧版 `_session_<uuid>` 后缀）→ Responses 请求体的 `prompt_cache_key`（Codex CLI 填会话 id）→ 通用会话头（`session_id` / `session-id`（Codex CLI 0.160 起）/ `x-session-id`），都没有才回退前两条消息规范化文本哈希（开场相同的会话会撞键、压缩上下文后同一会话会换键，只是近似）。当前实现哈希 = SHA-256 前 8 字节（xxhash64 为 M3 性能项）。注意 Nginx 默认丢弃带下划线的请求头，部署模板须加 `underscores_in_headers on`（§14.1）。
 - 键内嵌哈希算法版本号 `v1`；升级时双写双读一个 TTL 周期后下线旧版。
 - L2 亲和目标 key 不可用时走 L3 并刷新映射；L1 历史目标不可用时必须报错，不可替换为另一账号。
 
@@ -2360,8 +2360,8 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   刷新用 JSON，与 openai/codex 源码一致）；`account_id` 从 id_token 的 `https://api.openai.com/auth.
   chatgpt_account_id` claim 取，落进凭证 JSON。请求只走 **Responses**：`POST {api_base}/responses`
   （`api_base` 缺省 `https://chatgpt.com/backend-api/codex`），头 `Authorization: Bearer` +
-  `chatgpt-account-id` + `accept: text/event-stream` + `originator` / `OpenAI-Beta`（客户端带了就透传它的，
-  没带缺省 `codex_cli_rs` / `responses=experimental`）。**请求体按该后端的硬要求整形**（`codex::prepare_body`）：
+  `chatgpt-account-id` + `accept: text/event-stream` + `originator` / `OpenAI-Beta`（客户端带了就透传它的；
+  没带时 originator 缺省 `codex_cli_rs`，OpenAI-Beta 自 2026-10-17 起不补，见下方修正）。**请求体按该后端的硬要求整形**（`codex::prepare_body`）：
   `store=false`、`stream=true`（后端只有流式面；客户端要非流式时网关消费 SSE，取终态事件的 `response`
   对象回 JSON，`output` 缺失则用 `response.output_item.done` 逐项拼）、`instructions` 键缺省补空串、
   `input[].role = system` 改 `developer`、剥掉 `previous_response_id` / `stream_options` /
@@ -2373,7 +2373,8 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
 - **客户端身份头透传**（`gateway::oauth_cred::client_headers`，只对这两个 provider 生效）：入口请求里
   的一组允许名单头原样进 `Outbound.extra_headers`——Anthropic 族 `user-agent` / `x-app` / `anthropic-beta` /
   `anthropic-dangerous-direct-browser-access` / `x-stainless-*`；Codex 族 `user-agent` / `originator` /
-  `version` / `session_id` / `conversation_id` / `openai-beta` / `accept-language` / `x-codex-*`。真实
+  `version` / `session_id` / `conversation_id` / `session-id` / `thread-id` / `openai-beta` / `accept-language` /
+  `x-openai-subagent` / `x-codex-*`。真实
   Claude Code / Codex CLI 经网关出去时上游看到的就是它自己；其它客户端（SDK、curl）不带就不带，网关
   **不编造**。鉴权 / Host / Content-Type 等受保护头仍由 `is_forbidden_header` 拦住。API key 渠道不受影响
   （`extra_headers` 对它们仍只来自渠道设置）。
@@ -2390,6 +2391,14 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   自己拉的那份，响应 `{"models":[{"id"}]}`），已实现拉取；另测活 model 范围的探测体 `input` 曾以
   字符串发出被后端 400 `Input must be a list`，`prepare_body` 现把字符串 input 包成 Codex CLI
   形状的消息列表（真实流量同样受益）。
+  **【2026-10-17 修正】** 对照本机 Codex CLI 0.160.0（隔离 `CODEX_HOME` + 假 key 打本地录制端，即网关
+  收到的形态）：会话头改成连字符 `session-id` / `thread-id`，不再发 `session_id` / `conversation_id` /
+  `version`；HTTP 请求不带任何 `OpenAI-Beta`（二进制里已无 `responses=experimental`），WS 握手带
+  `responses_websockets=2026-02-06`；子代理请求另带 `x-openai-subagent` / `x-codex-parent-thread-id`；
+  额度头读 `x-codex-{primary,secondary}-reset-at`（Unix 秒）。相应改动：白名单补这四个头；L2 粘性认
+  `session-id` 与 `prompt_cache_key`；HTTP / compact 不再替客户端补 beta，WS 缺省改用上面的取值；
+  429 冷却先读 `-reset-at`、旧的 `-reset-after-seconds` 兜底；模型目录 `client_version` 升到 0.160.0；
+  Nginx 模板 `/v1/` 补 WebSocket Upgrade。上游回的 `x-codex-turn-state`（轮内粘性令牌）仍不回传客户端。
 - **前端**：协议下拉加两家（标"实验性"）；新建渠道选到它们时凭证区变成"登录"按钮 + 贴 code 输入框；
   列表行显示凭证到期时间（`credential_expires_at`，从 JSON 取，列表接口回填）。
 - **【2026-09-29 追加】全伪装模式（可选开关，`settings.mimic_cc`）**：上面"不编造"的定案只约束
@@ -2863,11 +2872,13 @@ Nginx：
 
 ```nginx
 underscores_in_headers on;    # http 块；带下划线的会话头（如 session_id）默认被丢弃，会破坏粘性路由
+map $http_upgrade $okapi_connection { default upgrade; '' ''; }   # http 块；WS 带 Upgrade，其余保持空 Connection
 
 location /v1/ {
     proxy_pass http://okapi_gateway;
     proxy_http_version 1.1;
-    proxy_set_header Connection "";
+    proxy_set_header Upgrade $http_upgrade;               # Responses WS / Realtime 握手；缺了这两行 WS 握手过不去
+    proxy_set_header Connection $okapi_connection;
     proxy_buffering off;          # SSE 必须；配合响应头 X-Accel-Buffering: no
     gzip off;                     # event-stream 禁压缩缓冲
     proxy_read_timeout 1h;        # 长流；禁止默认 60s
