@@ -161,8 +161,17 @@ pub async fn stat(
     let window = q.window(&state.pg).await?;
     // Deliberately ignore cursor/limit: the summary describes ALL matching ledger rows.
     // Refunds change the original row to 30, retaining its original amount and usage.
-    let summary = summary_sql();
-    let mut query = filtered(&summary, &q, window.as_ref(), key.user_id, key.key_id)?;
+    // 汇总表达式对 usage_details 的同一批路径引用上百次：先在带 OFFSET 0（优化屏障，防止子查询被拉平
+    // 后又逐处重算）的子查询里每行各提取一次，外层只引用提取结果。
+    let (select, columns) = hoist_json_paths(&summary_sql());
+    let mut query = filtered(
+        &format!("{select} FROM (SELECT b.*{columns}"),
+        &q,
+        window.as_ref(),
+        key.user_id,
+        key.key_id,
+    )?;
+    query.push(" OFFSET 0) b");
     let mut result: Value = query
         .build_query_scalar()
         .fetch_one(&state.pg)
@@ -205,6 +214,45 @@ pub async fn stat(
         ));
     }
     Ok(Json(result))
+}
+
+/// 把 `b.usage_details->'a'->'b'` 形式的路径换成 `b.ud{i}`，返回改写后的 SQL 与预提取列
+/// （`, b.usage_details->'a'->'b' AS ud{i}`…，直接接在 `SELECT b.*` 之后）。
+/// 只吞 `->'key'` 段：`->>` 取文本留在外层，前面的对象路径照样预提取。
+fn hoist_json_paths(sql: &str) -> (String, String) {
+    use std::fmt::Write as _;
+    const ROOT: &str = "b.usage_details";
+    let mut paths: Vec<&str> = Vec::new();
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(at) = rest.find(ROOT) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + ROOT.len()..];
+        let mut len = 0;
+        while let Some(segment) = tail[len..].strip_prefix("->'") {
+            let Some(end) = segment.find('\'') else {
+                break;
+            };
+            len += 3 + end + 1;
+        }
+        if len == 0 {
+            out.push_str(ROOT);
+        } else {
+            let path = &tail[..len];
+            let index = paths.iter().position(|p| *p == path).unwrap_or_else(|| {
+                paths.push(path);
+                paths.len() - 1
+            });
+            let _ = write!(out, "b.ud{index}");
+        }
+        rest = &tail[len..];
+    }
+    out.push_str(rest);
+    let mut columns = String::new();
+    for (index, path) in paths.iter().enumerate() {
+        let _ = write!(columns, ", {ROOT}{path} AS ud{index}");
+    }
+    (out, columns)
 }
 
 /// 汇总查询的 SELECT。usage_details 是 JSON：数字与布尔只认对的类型，脏值当未上报，
@@ -398,4 +446,32 @@ pub async fn series(
         "total": { "requests": total[0], "errors": total[1], "tokens": total[2], "amount_micro": total[3] },
         "data": data,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hoist_json_paths;
+
+    #[test]
+    fn hoists_each_object_path_once_and_keeps_text_access_outside() {
+        let (sql, columns) = hoist_json_paths(
+            "SUM(b.usage_details->'tokens'->'x') + COUNT(b.usage_details->'tokens'->'x') \
+             + b.usage_details->'tokens'->>'y' + b.usage_details->>'unit' + b.usage_details_other",
+        );
+        assert_eq!(
+            sql,
+            "SUM(b.ud0) + COUNT(b.ud0) + b.ud1->>'y' + b.usage_details->>'unit' + b.usage_details_other"
+        );
+        assert_eq!(
+            columns,
+            ", b.usage_details->'tokens'->'x' AS ud0, b.usage_details->'tokens' AS ud1"
+        );
+    }
+
+    #[test]
+    fn the_summary_keeps_no_hoistable_reference() {
+        let (sql, columns) = hoist_json_paths(&super::summary_sql());
+        assert!(!sql.contains("b.usage_details->'"), "{sql}");
+        assert!(columns.matches(" AS ud").count() > 10);
+    }
 }
