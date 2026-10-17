@@ -167,10 +167,18 @@ for (const fixture of [
     const summary = page.getByRole('region', { name: '筛选范围汇总' })
     await summary.getByText('更多用量指标', { exact: true }).click()
     await expect(summary.getByText('缓存写入', { exact: true }).locator('..')).toContainText('100')
-    for (const label of cacheSubsetLabels) {
+    // 时长拆分并进缓存写入那一格；实报为 0 的多模态子项收进"另有 N 项为 0"，未上报的不出现
+    for (const label of ['5 分钟', '1 小时']) {
       const term = summary.locator('dt').getByText(label, { exact: true })
       if (fixture.shown) await expect(term.locator('..').locator('dd').first()).toHaveText('0')
       else await expect(term).toHaveCount(0)
+    }
+    for (const label of cacheSubsetLabels.slice(2)) await expect(summary.locator('dt').getByText(label, { exact: true })).toHaveCount(0)
+    const zeros = summary.getByRole('button', { name: '另有 4 项为 0', exact: true })
+    await expect(zeros).toHaveCount(fixture.shown ? 1 : 0)
+    if (fixture.shown) {
+      await zeros.hover()
+      await expect(page.getByRole('tooltip')).toHaveText('缓存读取 · 音频、缓存读取 · 图片、缓存写入 · 音频、缓存写入 · 图片')
     }
   })
 }
@@ -207,8 +215,8 @@ test('新增用量指标：汇总保留覆盖率，详情显示TTL、图片输�
   await page.goto('/portal/logs?scope=user')
   const summary = page.getByRole('region', { name: '筛选范围汇总' })
   await summary.getByText('更多用量指标', { exact: true }).click()
-  await expect(summary).toContainText('已上报 1 / 10 条；缺失不作零')
-  await expect(summary.getByText('其中 5 分钟写入', { exact: true }).locator('..')).toContainText('60')
+  await expect(summary.getByTitle('已上报 1 / 10 条；缺失不作零').first()).toHaveText('1/10')
+  await expect(summary.getByText('5 分钟', { exact: true }).locator('..')).toContainText('60')
   await expect(summary.getByText('图片输出', { exact: true }).locator('..')).toContainText('20')
   await summary.getByText('更多用量指标', { exact: true }).click()
   await page.getByRole('button', { name: '展开 req-20 的明细' }).click()

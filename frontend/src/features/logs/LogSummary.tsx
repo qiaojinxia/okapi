@@ -96,27 +96,55 @@ export function ExtraMetrics({ data, expanded }: { data?: Partial<LogStats>; exp
   ]
   const visibleMetrics = metrics.filter(([key, n, samples]) => !CACHE_SUBSET_FIELDS.has(key)
     || (n != null && (samples === undefined || samples > 0)))
-  const content = <div className="space-y-3 py-3">
-      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        {visibleMetrics.map(([key, n, samples]) => <div key={key} className="min-w-0 space-y-1">
-          <dt className="text-muted-foreground">{t(`logs:${key}`)}</dt><dd className="font-medium tabular-nums">{value(n)}</dd>
-          {samples !== undefined && <dd className="text-[11px] text-muted-foreground">{t('logs:cacheCoverage', { n: samples, total: data?.records })}</dd>}
+  const records = data?.records
+  // 覆盖率只在不完整时露出，且只写分数；"缺失不作零"的口径进说明提示，不在每格重复
+  const coverage = (samples: number | undefined) => samples === undefined || records == null || samples >= records ? null
+    : <span className="text-[11px] font-normal text-muted-foreground" title={t('logs:cacheCoverage', { n: samples, total: records })}>{samples.toLocaleString(locale)}/{records.toLocaleString(locale)}</span>
+  // 缓存写入的 5 分钟 / 1 小时拆分并进总量那一格
+  const ttl = visibleMetrics.filter(([key]) => key === 'cacheWrite5m' || key === 'cacheWrite1h')
+  const rest = visibleMetrics.filter(([key]) => key !== 'cacheWrite5m' && key !== 'cacheWrite1h')
+  // 实报为 0 的项收成一行（悬停看名单）；未上报的不出现，与真实零仍区分开
+  const zeros = rest.filter(([key, n]) => n === 0 && key !== 'cacheWrite')
+  const shown = rest.filter((metric) => !zeros.includes(metric))
+  const help = [t('logs:tokenHint'), ttl.length > 0 || visibleMetrics.some(([key]) => CACHE_SUBSET_FIELDS.has(key)) ? t('logs:cacheSubsetsHint') : '', t('logs:coverageHint')].filter(Boolean).join(' ')
+  const content = <div className="@container space-y-3 py-3">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 @2xl:grid-cols-4">
+        {shown.map(([key, n, samples]) => <div key={key} className="min-w-0">
+          <dt className="truncate text-muted-foreground">{t(`logs:${key}`)}</dt>
+          <dd className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5"><span className="text-sm font-medium tabular-nums">{value(n)}</span>{coverage(samples)}</dd>
+          {key === 'cacheWrite' && ttl.length > 0 && <dd>
+            <dl className="mt-1 space-y-0.5 border-l-2 border-border pl-2 text-[11px] text-muted-foreground">
+              {ttl.map(([sub, m]) => <div key={sub} className="flex gap-2"><dt>{t(`logs:${sub === 'cacheWrite5m' ? 'ttl5m' : 'ttl1h'}`)}</dt><dd className="tabular-nums text-foreground/80">{value(m)}</dd></div>)}
+            </dl>
+          </dd>}
         </div>)}
       </dl>
-      <p className="text-[11px] leading-5 text-muted-foreground">{t('logs:tokenHint')} {visibleMetrics.some(([key]) => CACHE_SUBSET_FIELDS.has(key)) && t('logs:cacheSubsetsHint')}</p>
-      <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/30 px-2 py-1.5">
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        {zeros.length > 0 && <Tooltip content={zeros.map(([key]) => t(`logs:${key}`)).join('、')}>
+          <button type="button" className="rounded underline decoration-dotted underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{t('logs:zeroMetrics', { count: zeros.length })}</button>
+        </Tooltip>}
+        <Tooltip content={help}>
+          <button type="button" className="ml-auto inline-flex items-center gap-1 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40"><CircleHelp aria-hidden className="h-3 w-3" />{t('logs:metricsHelp')}</button>
+        </Tooltip>
+      </div>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-md bg-muted/30 px-2 py-1.5">
         <span className="text-muted-foreground">{t('logs:measuredCacheRate')}</span>
         <span className="font-medium tabular-nums">{data?.measured_cache_hit_bp == null ? '—' : `${(data.measured_cache_hit_bp / 100).toLocaleString(locale, { maximumFractionDigits: 2 })}%`}</span>
-        <span className="text-muted-foreground">{t('logs:cacheCoverage', { n: data?.measured_cache_hit_requests ?? 0, total: data?.records ?? 0 })}</span>
+        {coverage(data?.measured_cache_hit_requests ?? 0)}
       </div>
-      {data?.token_provenance && <div className="grid gap-3 sm:grid-cols-2">
-        {(['prompt', 'completion'] as const).map((axis) => <div key={axis} className="space-y-2 rounded-md border border-border p-2">
-          <p className="font-medium">{t('logs:usageSource')} · {t(axis === 'prompt' ? 'logs:input' : 'logs:output')}</p>
-          <dl className="space-y-1">{(['upstream', 'estimated', 'local_override', 'unknown'] as const).map((source) => {
-            const counts = data.token_provenance?.[axis]?.[source]
-            return <div key={source} className="flex flex-wrap justify-between gap-2"><dt className="text-muted-foreground">{t(`logs:source_${source}`)}</dt><dd className="tabular-nums">{t('logs:sourceCounts', { n: counts?.requests ?? '—', tokens: value(counts?.tokens) })}</dd></div>
-          })}</dl>
-        </div>)}
+      {data?.token_provenance && <div className="grid gap-3 @xl:grid-cols-2">
+        {(['prompt', 'completion'] as const).map((axis) => {
+          // 0 条的来源不占行；全是 0 时留一行"上游实报"免得空框
+          const rows = (['upstream', 'estimated', 'local_override', 'unknown'] as const)
+            .filter((source) => source === 'upstream' || (data.token_provenance?.[axis]?.[source]?.requests ?? 0) > 0)
+          return <div key={axis} className="space-y-1.5 rounded-md border border-border px-2.5 py-2">
+            <p className="font-medium">{t('logs:usageSource')} · {t(axis === 'prompt' ? 'logs:input' : 'logs:output')}</p>
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">{rows.map((source) => {
+              const counts = data.token_provenance?.[axis]?.[source]
+              return <div key={source} className="contents"><dt className="text-muted-foreground">{t(`logs:source_${source}`)}</dt><dd className="text-right whitespace-nowrap tabular-nums">{t('logs:sourceCounts', { n: counts?.requests ?? '—', tokens: value(counts?.tokens) })}</dd></div>
+            })}</dl>
+          </div>
+        })}
       </div>}
     </div>
   return expanded === undefined ? <details className="border-t border-border/60 px-3 text-xs">
