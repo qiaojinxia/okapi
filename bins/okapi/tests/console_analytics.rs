@@ -953,44 +953,6 @@ async fn insert_values(env: &Env, rows: &[Value], day: Option<&str>) {
     }
 }
 
-/// Genuine classified calls survive after detailed dimensions/measurements and
-/// raw history expire. Keep both coarse generations, erase both detail sources.
-async fn classified_legacy_calls(env: &Env, day: &str) {
-    let rows = [
-        payload(env, &env.model_a, 1000, false),
-        payload(env, &env.model_a, 1000, false),
-    ];
-    insert_values(env, &rows, Some(day)).await;
-    drain(env).await;
-    let ch = env.state.ch.as_ref().unwrap();
-    for table in [
-        "mv_analysis_hour",
-        "mv_latency_reporting_hour",
-        "mv_ttft_reporting_hour",
-        "mv_cache_reporting_hour",
-        "mv_usage_sources_5min",
-        "mv_token_details_5min",
-        "mv_cache_totals_5min",
-        "mv_input_units_5min",
-        "mv_output_rate_5min",
-    ] {
-        for name in [table.to_owned(), format!("population_v1_{table}")] {
-            ch.execute(&format!(
-                "ALTER TABLE {name} DELETE WHERE user_id={} SETTINGS mutations_sync=2",
-                env.user_id
-            ))
-            .await
-            .unwrap();
-        }
-    }
-    ch.execute(&format!(
-        "ALTER TABLE request_log_raw DELETE WHERE user_id={} SETTINGS mutations_sync=2",
-        env.user_id
-    ))
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn cache_reporting_distinguishes_unknown_from_zero_across_admin_views() {
     let env = setup().await;
@@ -1329,106 +1291,6 @@ async fn advanced_filters_calendar_quality_and_partial_cost_are_consistent() {
 }
 
 #[tokio::test]
-async fn classified_aggregate_remainder_is_preserved_once_and_marked_unknown() {
-    let env = setup().await;
-    if !has_ch(&env) {
-        return;
-    }
-    classified_legacy_calls(&env, "2026-08-26 12:00:00+00").await;
-    insert_values(
-        &env,
-        &[advanced_payload(&env, "up.a", "default", 1000, true, 0)],
-        Some("2026-08-26 12:00:00+00"),
-    )
-    .await;
-    drain(&env).await;
-    let query = format!(
-        "start_date=2026-08-26&end_date=2026-08-26&user_id={}",
-        env.user_id
-    );
-    // 新记录可能由并行进程写入 CH：mv_cube_hour 先落地时 requests 已是 3 而
-    // cost_known 仍是 0，须等 mv_analysis_hour 也可见。
-    let trend = poll_until(&env, &format!("/admin/stats/trend?{query}"), |b| {
-        b["total"]["requests"].as_i64() == Some(3)
-            && b["total"]["cost_known_requests"].as_i64() == Some(1)
-    })
-    .await;
-    assert_eq!(trend["total"]["requests"], 3);
-    assert_eq!(trend["total"]["amount_micro"], 3000);
-    assert_eq!(trend["total"]["cost_known_requests"], 1);
-    assert!(
-        trend["total"]["avg_latency_ms"].is_null(),
-        "legacy duration sampling is unknown without raw history"
-    );
-    assert_eq!(trend["total"]["latency_observed_requests"], 1);
-    assert!(trend["total"]["cache_write_tokens"].is_null());
-    let (_, by) = get(
-        &env,
-        &format!("/admin/stats/breakdown?{query}&by=endpoint"),
-        &env.super_token,
-    )
-    .await;
-    let rows = by["data"].as_array().unwrap();
-    assert_eq!(rows.iter().find(|r| r["key"] == "").unwrap()["requests"], 2);
-    assert_eq!(
-        rows.iter().find(|r| r["key"] == "/v1/responses").unwrap()["requests"],
-        1
-    );
-}
-
-#[tokio::test]
-async fn unclassified_legacy_calls_fail_closed_without_losing_money() {
-    let env = setup().await;
-    assert!(has_ch(&env), "requires real ClickHouse history recovery");
-    insert_values(
-        &env,
-        &[advanced_payload(&env, "up.a", "default", 1000, true, 0)],
-        Some("2026-08-26 12:00:00+00"),
-    )
-    .await;
-    drain(&env).await;
-    let ch = env.state.ch.as_ref().unwrap();
-    ch.execute(&format!("INSERT INTO mv_cube_hour SELECT toDateTime('2026-08-26 12:00:00') AS hour, toInt64({}) AS user_id, toInt64({}) AS api_key_id, 'default' AS group_code, '{}' AS model, toInt64({}) AS channel_id, countState() AS requests, sumState(toUInt64(100)) AS prompt_tokens, sumState(toUInt64(40)) AS cached_tokens, sumState(toUInt64(200)) AS completion_tokens, sumState(toUInt64(10)) AS reasoning_tokens, sumState(toInt64(1000)) AS amount, sumState(toInt64(250)) AS discount, sumState(toInt64(0)) AS upstream_cost, sumState(toUInt64(0)) AS errors, sumState(toUInt64(5000)) AS latency_sum, sumState(toUInt64(500)) AS ttft_sum, countIfState(toUInt32(500)>0) AS ttft_samples FROM numbers(2) GROUP BY hour, user_id, api_key_id, group_code, model, channel_id", env.user_id, env.key_id, env.model_a, env.channel_id)).await.unwrap();
-    let finance = ch.query_json_each_row(&format!(
-        "SELECT sumMerge(amount) AS amount,countMerge(financial_records) AS records FROM mv_cube_hour WHERE user_id={}", env.user_id
-    )).await.unwrap();
-    assert_eq!(finance[0], json!({"amount":"3000","records":"3"}));
-    let error = ch
-        .query_json_each_row(&format!(
-            "SELECT countMerge(requests) FROM mv_cube_hour WHERE user_id={}",
-            env.user_id
-        ))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            okapi_store::StoreError::InvalidData("statistics_request_history_incomplete")
-        ),
-        "{error}"
-    );
-    for endpoint in ["trend", "breakdown", "flow"] {
-        let (status, body) = get(
-            &env,
-            &format!(
-                "/admin/stats/{endpoint}?start_date=2026-08-26&end_date=2026-08-26&user_id={}",
-                env.user_id
-            ),
-            &env.super_token,
-        )
-        .await;
-        assert_eq!(status, 500, "{endpoint}: {body}");
-        assert_eq!(body["error"]["code"], "internal_error");
-    }
-    ch.execute(&format!(
-        "ALTER TABLE mv_cube_hour DELETE WHERE user_id={} SETTINGS mutations_sync=2",
-        env.user_id
-    ))
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
 async fn invalid_analysis_ranges_and_dimensions_are_rejected() {
     let env = setup().await;
     if !has_ch(&env) {
@@ -1553,11 +1415,11 @@ fn assert_core_equal(core: &Value, full: &Value, context: &str) {
 }
 
 /// `fields=core` 走精简数据源，只为跳过 ~300 个测量子查询的规划耗时；它必须与完整数据源
-/// 在核心字段上逐值相同——包括旧立方体多出来的剩余部分、明细维度、多渠道与多分组——
+/// 在核心字段上逐值相同——包括明细维度、多渠道与多分组——
 /// 并且在不能保证相同时（明细过滤）回退完整源，不能静默给出另一个数。
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // One fixture compared across every endpoint and dimension.
-async fn core_fields_match_the_full_source_including_legacy_remainder() {
+async fn core_fields_match_the_full_source() {
     let env = setup().await;
     if !has_ch(&env) {
         return;
@@ -1574,7 +1436,6 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     )
     .await
     .unwrap();
-    classified_legacy_calls(&env, "2026-08-21 12:00:00+00").await;
     let ok = |model: &str, group: &str, channel: i64, amount: i64| {
         let mut row = advanced_payload(&env, "up.a", group, 1_000, true, 0);
         row["model"] = json!(model);
@@ -1602,17 +1463,16 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     )
     .await;
     drain(&env).await;
-    // Two genuinely classified coarse calls precede the new detailed record.
     let query = format!(
         "start_date=2026-08-20&end_date=2026-08-21&user_id={}",
         env.user_id
     );
     let full = poll_until(&env, &format!("/admin/stats/trend?{query}"), |b| {
-        b["total"]["requests"].as_i64() == Some(6)
+        b["total"]["requests"].as_i64() == Some(4)
             && b["total"]["cost_known_requests"].as_i64() == Some(4)
     })
     .await;
-    assert_eq!(full["total"]["amount_micro"], 5_000);
+    assert_eq!(full["total"]["amount_micro"], 3_000);
     assert_eq!(full["fields"], "all");
 
     // 趋势：总计与逐桶一致；精简响应不带任何测量口径，也不带上期。
@@ -1707,10 +1567,7 @@ async fn core_fields_match_the_full_source_including_legacy_remainder() {
     )
     .await;
     assert_eq!(by_model["data"][0]["key"], env.model_a);
-    assert_eq!(
-        by_model["data"][0]["requests"], 5,
-        "2 + 1 条明细 + 2 条旧聚合剩余"
-    );
+    assert_eq!(by_model["data"][0]["requests"], 3, "2 + 1 条明细");
 
     // 带明细过滤时不能走精简源：回退完整源，指标与不带 fields 时完全相同。
     let filtered = format!("{query}&stream=true");

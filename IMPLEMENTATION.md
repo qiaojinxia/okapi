@@ -1249,12 +1249,16 @@ clamp 到 168。`console_portal` 增：`wallet_window_spend_micro` 在员工 A /
   从 3.85s 掉到 0.10s；每个 `if(...)` 剩余列约 30–55ms。CTE 与内联子查询一样会触发，换内联无改善。
   生产 compose / CI 固定 `clickhouse-server:24.8-alpine`，该行为就是线上会遇到的。
 
+> **2026-10-17 去掉旧立方体剩余支**：完整源 / 精简源都只读 `mv_analysis_hour`。它与 `mv_cube_hour` 都由
+> `request_log_raw` 无条件写入、都不过期（线上核对 101 个键余量为 0），剩余只可能是明细上线前的历史，开发阶段
+> 不兼容旧库。剩余支要把 `d` 再汇总一遍并 join 一整套测量子源：同一条 97KB 的日历趋势本地规划 0.48s→0.11s，
+> 线上 2–3.6s 量级随之下降。顺带验证过 ClickHouse 25.8 LTS：同一条 SQL 反而更慢（0.75s），不升级。
+
 **两处修复**：
 1. **精简源**（`console/core_source.rs`）：只投影 9 个核心列（requests / prompt / cached / completion /
    reasoning / amount / discount / upstream_cost / errors），SQL ~3KB、冷查询 ~100ms。这 9 列在完整源里
    都是直接取自 MV 的 `*Merge`、不经任何测量子源 join，故与完整源逐值相同（`console_analytics::
-   core_fields_match_the_full_source_including_legacy_remainder` 对 6 个维度 × 排序指标、趋势总计与逐桶、
-   旧立方体剩余部分逐值核对，并做过变异检查）。接口参数：`fields=core`（精简响应，不含任何测量口径）、
+   core_fields_match_the_full_source` 对 6 个维度 × 排序指标、趋势总计与逐桶逐值核对，并做过变异检查）。接口参数：`fields=core`（精简响应，不含任何测量口径）、
    `compare=false`（不查上一窗口，上期名次 / 环比 / 上期金额为 null——未知，不是 0）。**`fields=core` 隐含
    `compare=false`**，并且 `prepare()` 只读"有没有历史字符口径"这一条探测，不跑完整源才需要的 16 分支覆盖探测
    （有历史字符口径时才补读完整覆盖，因为要回退完整源）。完整趋势 / 排行响应带 `fields: "all"`。

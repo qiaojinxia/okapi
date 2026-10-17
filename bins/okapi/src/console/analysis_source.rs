@@ -98,6 +98,10 @@ fn as_view(subquery: &str) -> String {
 }
 
 /// `window` 和 `scope` 是已校验的 SQL，字符串过滤均由调用方绑定。
+///
+/// 只读明细聚合 `mv_analysis_hour`。它与旧立方体 `mv_cube_hour` 都由 `request_log_raw` 无条件写入、
+/// 都不过期，旧立方体比明细多出来的部分只可能是明细上线前的历史；开发阶段不兼容旧库，所以不再
+/// 拼「旧立方体剩余」那一支——它要把 `d` 再汇总一遍并 join 一整套测量子源，规划耗时是现在的 4 倍。
 pub fn source_with_coverage(
     window: &str,
     scope: &str,
@@ -113,55 +117,24 @@ pub fn source_with_coverage(
         coverage.historical_units,
         Some(&parent_cache),
     );
-    let legacy_from = joined_measurements(
-        "mv_cube_hour",
-        KEYS,
-        &predicate,
-        coverage.historical_units,
-        None,
-    );
-    let merged = merged_metrics(false, coverage.historical_units);
-    let detail_merged = merged_metrics(true, coverage.historical_units);
-    let sums = METRICS
-        .iter()
-        .map(|(name, _)| format!("sum(v_{name}) AS c_{name}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let detail_merged = merged_metrics(coverage.historical_units);
     let detailed = METRICS
         .iter()
         .map(|(name, _)| format!("v_{name} AS {name}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let remainder = remainder_metrics(coverage.historical_units);
-    let legacy_keys = KEYS
-        .split(", ")
-        .map(|k| format!("l.{k} AS {k}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let detail_projection = projection(&detail_keys);
-    let legacy_projection = projection(KEYS);
     let detail_group = qualified(&detail_keys);
-    let legacy_group = qualified(KEYS);
-    // 明细 d、旧立方体 l 与按键汇总的明细 c 都以 `view(...)` 引用，不用 CTE 名字：CTE 与内联
-    // 子查询一样会让每个引用它的列表达式重复哈希整棵子树（见 `as_view`）。d 在两处引用。
+    // d 以 `view(...)` 引用，不用 CTE 名字：CTE 与内联子查询一样会让每个引用它的列表达式重复哈希
+    // 整棵子树（见 `as_view`）。
     let d = as_view(&format!(
         "(SELECT {detail_projection}, {detail_merged}, \
             toInt64(countIfMerge(m.cost_known)) AS cost_samples, sumMerge(m.known_amount) AS covered_amount, sumMerge(m.known_cost) AS covered_cost, \
             maxMerge(m.last_event) AS event_at, maxMerge(m.last_ingested) AS ingested_at \
             FROM {detail_from} GROUP BY {detail_group})"
     ));
-    let l = as_view(&format!(
-        "(SELECT {legacy_projection}, {merged} FROM {legacy_from} GROUP BY {legacy_group})"
-    ));
-    let c = as_view(&format!("(SELECT {KEYS}, {sums} FROM {d} GROUP BY {KEYS})"));
     format!(
-        "(SELECT {KEYS}, {DIMS}, {detailed}, v_cache_writes AS write_tokens, v_cache_write_n AS write_samples, v_cache_read_n AS read_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM {d} \
-        UNION ALL \
-        SELECT {legacy_keys}, '' AS requested_model, '' AS upstream_model, '' AS endpoint, '' AS upstream_endpoint, '' AS node, \
-            toUInt8(2) AS stream, '' AS request_type, '' AS billing_type, {remainder}, \
-            cache_writes AS write_tokens, cache_write_n AS write_samples, cache_read_n AS read_samples, toInt64(0) AS cost_samples, toInt64(0) AS covered_amount, toInt64(0) AS covered_cost, \
-            toDateTime64(0, 3) AS event_at, toDateTime64(0, 3) AS ingested_at \
-        FROM {l} AS l LEFT JOIN {c} AS c USING ({KEYS}) WHERE l.v_financial_records > ifNull(c.c_financial_records, 0))"
+        "(SELECT {KEYS}, {DIMS}, {detailed}, v_cache_writes AS write_tokens, v_cache_write_n AS write_samples, v_cache_read_n AS read_samples, cost_samples, covered_amount, covered_cost, event_at, ingested_at FROM {d})"
     )
 }
 
@@ -236,7 +209,7 @@ fn join_measurement(from: &mut String, source: &str, alias: &str, keys: &str) {
     let _ = write!(from, " LEFT JOIN {} {alias} ON {on}", as_view(source));
 }
 
-fn merged_metrics(modern: bool, historical: bool) -> String {
+fn merged_metrics(historical: bool) -> String {
     METRICS
         .iter()
         .map(|(name, func)| {
@@ -252,7 +225,7 @@ fn merged_metrics(modern: bool, historical: bool) -> String {
                 format!("toInt64(max(ifNull(us.{name},0)))-if(max(ifNull(us.source_observed,0))=countMerge(m.requests),toInt64(max(ifNull(td.legacy_characters,0))),toInt64(0)) AS v_{name}")
             } else if let Some(source) = super::observation_sources::owner(name) {
                 if source.kind == super::observation_sources::Kind::Cache {
-                    cache_metric(name, modern)
+                    cache_metric(name)
                 } else {
                     let alias = source.alias;
                     format!("toInt64(max(ifNull({alias}.{name}, 0))) AS v_{name}")
@@ -265,110 +238,33 @@ fn merged_metrics(modern: bool, historical: bool) -> String {
         .join(", ")
 }
 
-fn cache_metric(name: &str, modern: bool) -> String {
+fn cache_metric(name: &str) -> String {
     let own = format!("max(ifNull(cs.{name}, 0))");
     let complete = |axis: &str| {
         format!(
             "max(ifNull(pc.cache_expected, 0)) >= countMerge(m.requests) AND max(ifNull(pc.cache_expected, 0)) > 0 AND max(ifNull(pc.cache_{axis}_n, 0)) = max(ifNull(pc.cache_expected, 0))"
         )
     };
-    let expression = if modern {
-        match name {
-            "cache_write_n" => format!(
-                "if({}, toInt64(countMerge(m.requests)), toInt64({own}))",
-                complete("write")
-            ),
-            "cache_read_n" => format!(
-                "if({}, toInt64(countMerge(m.requests)), toInt64({own}))",
-                complete("read")
-            ),
-            "cache_writes" => format!(
-                "if({} OR max(ifNull(cs.cache_write_n, 0)) = countMerge(m.requests), toInt64(sumMerge(m.writes)), toInt64({own}))",
-                complete("write")
-            ),
-            _ => format!(
-                "if(({}) AND ({}), toInt64(countMerge(m.requests)), toInt64({own}))",
-                complete("write"),
-                complete("read")
-            ),
-        }
-    } else {
-        own
+    let expression = match name {
+        "cache_write_n" => format!(
+            "if({}, toInt64(countMerge(m.requests)), toInt64({own}))",
+            complete("write")
+        ),
+        "cache_read_n" => format!(
+            "if({}, toInt64(countMerge(m.requests)), toInt64({own}))",
+            complete("read")
+        ),
+        "cache_writes" => format!(
+            "if({} OR max(ifNull(cs.cache_write_n, 0)) = countMerge(m.requests), toInt64(sumMerge(m.writes)), toInt64({own}))",
+            complete("write")
+        ),
+        _ => format!(
+            "if(({}) AND ({}), toInt64(countMerge(m.requests)), toInt64({own}))",
+            complete("write"),
+            complete("read")
+        ),
     };
     format!("toInt64({expression}) AS v_{name}")
-}
-
-fn cache_remainder(name: &str, difference: &str) -> String {
-    let observed = "l.v_cache_observed = l.v_requests AND ifNull(c.c_cache_observed, 0) = ifNull(c.c_requests, 0)";
-    let complete = |axis: &str| {
-        format!(
-            "l.v_cache_{axis}_n = l.v_requests AND ifNull(c.c_cache_{axis}_n, 0) = ifNull(c.c_requests, 0)"
-        )
-    };
-    let covered = match name {
-        "cache_write_n" | "cache_writes" => format!("({observed}) OR ({})", complete("write")),
-        "cache_read_n" => format!("({observed}) OR ({})", complete("read")),
-        _ => observed.to_owned(),
-    };
-    format!(
-        "if(({covered}) AND l.v_{name} >= ifNull(c.c_{name}, 0), {difference}, toInt64(0)) AS {name}"
-    )
-}
-
-fn remainder_metrics(historical: bool) -> String {
-    use super::observation_sources::{Kind, owner};
-    METRICS.iter().map(|(name, _)| {
-        let difference = format!("l.v_{name} - ifNull(c.c_{name}, 0)");
-        if !historical && matches!(*name,"legacy_characters"|"legacy_character_n") {
-            return format!("toInt64(0) AS {name}");
-        }
-        match owner(name).map(|source| source.kind) {
-            Some(Kind::OutputRate) => rate_remainder(name, &difference,historical),
-            Some(Kind::Ttft | Kind::Latency) => {
-                let prefix = owner(name).unwrap().name;
-                format!("if(l.v_{prefix}_observed = l.v_requests AND ifNull(c.c_{prefix}_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}")
-            }
-            Some(Kind::Cache) => cache_remainder(name, &difference),
-            Some(Kind::Units) => unit_remainder(name, &difference,historical),
-            Some(Kind::Ttl) => format!("if(l.v_ttl_observed = l.v_requests AND ifNull(c.c_ttl_observed, 0) = ifNull(c.c_requests, 0) AND l.v_{name} >= ifNull(c.c_{name},0), {difference}, toInt64(0)) AS {name}"),
-            Some(Kind::Details) => format!("if(l.v_detail_observed = l.v_requests AND ifNull(c.c_detail_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}"),
-            Some(Kind::Usage) => format!("if(l.v_source_observed = l.v_requests AND ifNull(c.c_source_observed, 0) = ifNull(c.c_requests, 0), {difference}, toInt64(0)) AS {name}"),
-            None => format!("{difference} AS {name}"),
-        }
-    }).collect::<Vec<_>>().join(", ")
-}
-
-fn rate_remainder(name: &str, difference: &str, historical: bool) -> String {
-    let fallback = if historical && matches!(name, "output_rate_observed" | "output_rate_known") {
-        "l.v_legacy_character_n-ifNull(c.c_legacy_character_n,0)"
-    } else {
-        "toInt64(0)"
-    };
-    format!(
-        "if(l.v_output_rate_observed=l.v_requests AND ifNull(c.c_output_rate_observed,0)=ifNull(c.c_requests,0) AND l.v_{name}>=ifNull(c.c_{name},0),{difference},{fallback}) AS {name}"
-    )
-}
-
-fn unit_remainder(name: &str, difference: &str, historical: bool) -> String {
-    // Partial generic metadata cannot be subtracted. Independent historical
-    // proof has the same identities in both scopes and can retain its residual.
-    let fallback = if historical {
-        match name {
-            "unit_observed" | "unit_character_n" => {
-                "l.v_legacy_character_n-ifNull(c.c_legacy_character_n,0)".to_owned()
-            }
-            "unit_characters" => "l.v_legacy_characters-ifNull(c.c_legacy_characters,0)".to_owned(),
-            "legacy_characters" | "legacy_character_n" => difference.to_owned(),
-            _ => "toInt64(0)".to_owned(),
-        }
-    } else {
-        "toInt64(0)".to_owned()
-    };
-    let complete =
-        "l.v_unit_observed=l.v_requests AND ifNull(c.c_unit_observed,0)=ifNull(c.c_requests,0)";
-    format!(
-        "if(({complete}) AND l.v_{name}>=ifNull(c.c_{name},0),{difference},{fallback}) AS {name}"
-    )
 }
 
 #[cfg(test)]
@@ -412,32 +308,18 @@ mod tests {
             );
             assert!(sql.starts_with("(SELECT "), "{}", &sql[..40]);
             assert!(balanced(&sql));
-            // 近百个列表达式引用 d / l / c 与测量子源：任何一个退回 CTE 或括号子查询都会让规划耗时数倍。
-            assert!(
-                !sql.contains("WITH d AS") && !sql.contains("l AS ("),
-                "不得使用 CTE"
-            );
-            // 本层的 join：每个测量子源（`ON m.hour=…`）加上 `l LEFT JOIN c` 都必须是 view(...)。
+            // 近百个列表达式引用 d 与测量子源：任何一个退回 CTE 或括号子查询都会让规划耗时数倍。
+            assert!(!sql.contains("WITH d AS"), "不得使用 CTE");
+            // 本层的 join：每个测量子源（`ON m.hour=…`）都必须是 view(...)。
             // 子源内部（别的模块生成的 e / a / r 等）的普通 join 不在此列。
             assert_eq!(
                 sql.matches(" LEFT JOIN view(").count(),
-                sql.matches(" ON m.hour=").count() + 1,
+                sql.matches(" ON m.hour=").count(),
                 "测量子源必须以 view(...) 引用"
             );
-            assert!(
-                sql.contains(" AS l LEFT JOIN view(SELECT "),
-                "l 与 c 必须以 view(...) 引用"
-            );
-            assert!(sql.contains(
-                ") AS c USING (hour, user_id, api_key_id, group_code, model, channel_id)"
-            ));
-            assert!(
-                sql.matches("FROM view(SELECT ").count() >= 2,
-                "d 在 UNION 第一支与 c 中各引用一次"
-            );
-            assert!(
-                sql.contains("WHERE l.v_financial_records > ifNull(c.c_financial_records, 0))")
-            );
+            // 只读明细聚合，d 只出现一次：旧立方体剩余那一支会把 d 再分析一遍。
+            assert_eq!(sql.matches("FROM view(SELECT ").count(), 1);
+            assert!(!sql.contains("mv_cube_hour") && !sql.contains("UNION ALL SELECT l."));
         }
     }
 }

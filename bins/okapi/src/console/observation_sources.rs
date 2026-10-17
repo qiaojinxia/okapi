@@ -15,7 +15,6 @@ pub(super) enum Kind {
 
 pub(super) struct Source {
     pub kind: Kind,
-    pub name: &'static str,
     pub alias: &'static str,
     pub fields: &'static [&'static str],
 }
@@ -23,13 +22,11 @@ pub(super) struct Source {
 pub(super) const SOURCES: &[Source] = &[
     Source {
         kind: Kind::Ttft,
-        name: "ttft",
         alias: "tf",
         fields: &["ttft_sum", "ttft_samples", "ttft_observed"],
     },
     Source {
         kind: Kind::Latency,
-        name: "latency",
         alias: "lf",
         fields: &[
             "latency_sum",
@@ -40,37 +37,31 @@ pub(super) const SOURCES: &[Source] = &[
     },
     Source {
         kind: Kind::Usage,
-        name: "usage",
         alias: "us",
         fields: &super::usage_sources::FIELDS,
     },
     Source {
         kind: Kind::Ttl,
-        name: "ttl",
         alias: "td",
         fields: &super::token_details::TTL_FIELDS,
     },
     Source {
         kind: Kind::Details,
-        name: "details",
         alias: "td",
         fields: &DETAILS,
     },
     Source {
         kind: Kind::Cache,
-        name: "cache",
         alias: "cs",
         fields: &super::cache_usage::FIELDS,
     },
     Source {
         kind: Kind::Units,
-        name: "units",
         alias: "td",
         fields: &super::input_units::FIELDS,
     },
     Source {
         kind: Kind::OutputRate,
-        name: "output_rate",
         alias: "rf",
         fields: &super::output_rate::FIELDS,
     },

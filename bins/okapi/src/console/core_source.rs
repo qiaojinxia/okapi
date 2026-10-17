@@ -4,12 +4,12 @@
 //! 延迟、TTFT、缓存……）会拼出 ~100KB、约 300 个子查询的 SQL。ClickHouse 对它的
 //! 分析与规划就要 ~5s 的单核 CPU，而实际只读几千行——耗时与数据量无关。
 //! 首页排行、趋势图和各类"全量分母"只读下面九列，这些列在完整源里都是直接取自 MV 的
-//! `*Merge`（不经任何测量子源 join），因此可以用同样的 `d / l / c` 结构只投影这九列，
-//! 结果与完整源逐值相同（见 `console_analytics` 的对照用例），SQL 降到 ~3KB。
+//! `*Merge`（不经任何测量子源 join），因此可以只投影这九列，结果与完整源逐值相同
+//! （见 `console_analytics` 的对照用例），SQL 降到 ~1KB。
 //!
 //! 与完整源的差别只有两处，都不改变这九列的和：
-//! - `d` 只按 `KEYS` 分组，不再带明细维度——明细维度只是同一 `KEYS` 下的细分，
-//!   `c` 本来就要把 `d` 按 `KEYS` 汇总；调用方带明细过滤时必须回退完整源。
+//! - 只按 `KEYS` 分组，不再带明细维度——明细维度只是同一 `KEYS` 下的细分；
+//!   调用方带明细过滤时必须回退完整源。
 //! - 不 join 任何测量子源。`prompt_tokens` 只有在存在历史字符口径（`historical_units`）
 //!   时才需要 `td` 校正，此时同样必须回退完整源。
 
@@ -48,40 +48,14 @@ pub(super) fn source(window: &str, scope: &str) -> String {
         .map(|key| format!("m.{key}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let legacy_keys = KEYS
-        .split(", ")
-        .map(|key| format!("l.{key} AS {key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let merged = COLUMNS
-        .iter()
-        .map(|(name, func)| format!("toInt64({func}(m.{name})) AS v_{name}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sums = COLUMNS
-        .iter()
-        .map(|(name, _)| format!("sum(v_{name}) AS c_{name}"))
-        .collect::<Vec<_>>()
-        .join(", ");
     let detailed = COLUMNS
         .iter()
-        .map(|(name, _)| format!("v_{name} AS {name}"))
+        .map(|(name, func)| format!("toInt64({func}(m.{name})) AS {name}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let remainder = COLUMNS
-        .iter()
-        .map(|(name, _)| format!("l.v_{name} - ifNull(c.c_{name}, 0) AS {name}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // 明细聚合已覆盖的粒度以明细为准；旧立方体比明细多出的请求数才作为剩余部分补上。
+    // 与完整源同样只读明细聚合（旧立方体剩余那一支已随完整源一起去掉，见 analysis_source）。
     format!(
-        "(WITH \
-        d AS (SELECT {projection}, {merged} FROM (SELECT * FROM mv_analysis_hour WHERE {predicate}) m GROUP BY {group}), \
-        l AS (SELECT {projection}, {merged} FROM (SELECT * FROM mv_cube_hour WHERE {predicate}) m GROUP BY {group}), \
-        c AS (SELECT {KEYS}, {sums} FROM d GROUP BY {KEYS}) \
-        SELECT {KEYS}, {detailed} FROM d \
-        UNION ALL \
-        SELECT {legacy_keys}, {remainder} FROM l LEFT JOIN c USING ({KEYS}) WHERE l.v_financial_records > ifNull(c.c_financial_records, 0))"
+        "(SELECT {projection}, {detailed} FROM (SELECT * FROM mv_analysis_hour WHERE {predicate}) m GROUP BY {group})"
     )
 }
 
@@ -140,19 +114,15 @@ mod tests {
     }
 
     #[test]
-    fn source_has_no_measurement_joins_and_keeps_the_legacy_remainder() {
+    fn source_reads_only_the_detail_aggregate_without_joins() {
         let sql = source("hour >= toDateTime('2026-09-01')", " AND user_id = 7");
-        assert!(sql.len() < 6_000, "精简源应保持在几 KB：{}", sql.len());
-        assert_eq!(sql.matches(" LEFT JOIN ").count(), 1);
-        assert!(sql.contains("FROM l LEFT JOIN c USING"));
-        assert!(sql.contains("WHERE l.v_financial_records > ifNull(c.c_financial_records, 0)"));
+        assert!(sql.len() < 2_000, "精简源应保持在 1–2 KB：{}", sql.len());
+        assert!(!sql.contains(" JOIN "));
         assert!(
             sql.contains("mv_analysis_hour WHERE hour >= toDateTime('2026-09-01') AND user_id = 7")
         );
-        assert!(
-            sql.contains("mv_cube_hour WHERE hour >= toDateTime('2026-09-01') AND user_id = 7")
-        );
         for forbidden in [
+            "mv_cube_hour",
             "mv_token_details",
             "mv_usage_sources",
             "latency",
