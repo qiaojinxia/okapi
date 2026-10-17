@@ -350,7 +350,8 @@ impl TokenUsage {
         .unwrap_or(0)
     }
 
-    /// 原始总 token 数（prompt + completion，不含倍率加权），用于阶梯档位判定。
+    /// 原始总 token 数（prompt + completion，不含倍率加权）：用量统计与"有没有产生用量"的判断用。
+    /// 阶梯档位不看它——按输入 `prompt_tokens`（含缓存读写）落档，见 okapi-pricing 引擎的 Tiered 分支。
     #[must_use]
     pub fn total_raw(&self) -> u64 {
         u64::from(self.prompt_tokens) + u64::from(self.completion_tokens)

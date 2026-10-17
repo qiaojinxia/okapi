@@ -290,8 +290,9 @@ fn mul_ratio(a: RatioFp, b: RatioFp) -> Result<RatioFp, PricingError> {
 ///
 /// 多命中裁决（桶内策略，§11.5）：stackable 桶全数生效；exclusive 桶只留
 /// priority 最大的一条；best_for_user 桶只留乘数最小（对用户最有利）的一条；
-/// 平手一律取 code 字典序小者（确定性可复现）。三桶胜者按编译期固定序
-/// 统一施加——乘法顺序数值无关，但快照顺序必须可审计。
+/// 平手一律取 code 字典序小者（确定性可复现）。选中的规则按价簿编译时排好的顺序
+/// （kind → priority → code，见 `book::compile`）逐条施加。每一步 `step` 都向下取整，
+/// 乘法顺序会影响末位，所以这个顺序本身是计价口径的一部分；快照按同一顺序记录，可复算。
 fn apply_modifiers(
     book: &PriceBook,
     ctx: &CalcContext,
