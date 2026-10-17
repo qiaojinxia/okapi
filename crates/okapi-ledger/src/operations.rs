@@ -16,6 +16,10 @@ pub async fn credit(
     actor: &str,
     payload: Value,
 ) -> Result<crate::transfers::Receipt, LedgerError> {
+    // 负额入账就是一笔不受可用余额钳制的扣款（debit 才会钳到可用额），不允许借道
+    if amount.as_micros() < 0 {
+        return Err(LedgerError::InvalidAmount);
+    }
     let mut guard = UserGuard::acquire(db, user_id).await?;
     let mut tx = guard.connection()?.begin().await?;
     let id = crate::transfers::credit_in_tx(&mut tx, user_id, amount, event_type, actor, payload)
@@ -24,7 +28,8 @@ pub async fn credit(
     Ok(crate::transfers::finish(&mut guard, ledger, user_id, id, crate::Pool::Wallet).await)
 }
 
-/// Administrative clawback: drain the hot balance by `amount` (positive), capped
+/// Administrative clawback: drain the hot balance by `amount` (non-negative; a
+/// negative amount is rejected with `InvalidAmount`), capped
 /// at the currently available funds — same clamp as `expire`. The event carries
 /// the **negative** amount, so downstream cash-flow aggregation sees one adjust
 /// stream. The negative fund transfer reuses the durable recovery intent.
@@ -39,6 +44,10 @@ pub async fn debit(
     actor: &str,
     payload: Value,
 ) -> Result<(Money, Option<crate::transfers::Receipt>), LedgerError> {
+    // 负额会绕过下面「钳到可用额、为 0 早退」，取反后 PG 事件与 Redis 转账都按加钱执行
+    if amount.as_micros() < 0 {
+        return Err(LedgerError::InvalidAmount);
+    }
     let mut guard = UserGuard::acquire(db, user_id).await?;
     guard.synchronize(ledger).await?;
     let available = ledger.balance(user_id).await?.as_micros().max(0);

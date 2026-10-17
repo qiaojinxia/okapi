@@ -12,6 +12,10 @@ pub enum LedgerError {
     #[error("ledger_user_not_found")]
     UserNotFound,
 
+    /// 入账 / 扣减金额为负：方向由调用的函数决定，负数会让资金反向流动（扣款变充值），一律拒绝。
+    #[error("ledger_invalid_amount")]
+    InvalidAmount,
+
     #[error("ledger_unexpected_reply: {0}")]
     UnexpectedReply(&'static str),
 

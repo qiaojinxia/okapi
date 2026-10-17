@@ -385,6 +385,54 @@ async fn debit_drains_available_balance_and_records_negative_adjust() -> TestRes
     Ok(())
 }
 
+/// 资金方向由函数决定：负额 debit 曾被取反成充值、负额 credit 是不受余额钳制的扣款。
+#[tokio::test]
+async fn negative_amounts_are_rejected_without_moving_money() -> TestResult {
+    let b = SyncBed::new(Pool::Wallet).await;
+    let balance = b.ledger.balance(b.base.user_id).await?;
+    let snapshot = b.base.wallet_snapshot().await;
+    let adjusts = || {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM billing_events WHERE user_id=$1 AND event_type='adjust'",
+        )
+        .bind(b.base.user_id)
+        .fetch_one(&b.base.pg)
+    };
+    let before = adjusts().await?;
+    let debit = okapi_ledger::operations::debit(
+        &b.base.pg,
+        &b.ledger,
+        b.base.user_id,
+        Money::from_micros(-300),
+        "adjust",
+        "test:debit",
+        json!({}),
+    )
+    .await;
+    assert!(matches!(
+        debit,
+        Err(okapi_ledger::LedgerError::InvalidAmount)
+    ));
+    let credit = okapi_ledger::operations::credit(
+        &b.base.pg,
+        &b.ledger,
+        b.base.user_id,
+        Money::from_micros(-300),
+        "adjust",
+        "test:credit",
+        json!({}),
+    )
+    .await;
+    assert!(matches!(
+        credit,
+        Err(okapi_ledger::LedgerError::InvalidAmount)
+    ));
+    assert_eq!(b.ledger.balance(b.base.user_id).await?, balance);
+    assert_eq!(b.base.wallet_snapshot().await, snapshot);
+    assert_eq!(adjusts().await?, before, "拒绝时不得写任何调账事件");
+    Ok(())
+}
+
 #[tokio::test]
 async fn invalid_user_rejects_and_redis_failure_retains_durable_credit() -> TestResult {
     let b = SyncBed::new(Pool::Wallet).await;
