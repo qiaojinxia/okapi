@@ -65,6 +65,14 @@ async fn mock_429_quota(_body: axum::body::Bytes) -> axum::response::Response {
         .into_response()
 }
 
+async fn mock_500(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(json!({"error":{"message":"upstream exploded","type":"server_error"}})),
+    )
+        .into_response()
+}
+
 async fn mock_401(_body: axum::body::Bytes) -> axum::response::Response {
     (
         axum::http::StatusCode::UNAUTHORIZED,
@@ -97,7 +105,8 @@ async fn spawn_mock() -> SocketAddr {
         .route("/slow/v1/chat/completions", post(mock_slow))
         .route("/r429/v1/chat/completions", post(mock_429))
         .route("/r429q/v1/chat/completions", post(mock_429_quota))
-        .route("/r401/v1/chat/completions", post(mock_401));
+        .route("/r401/v1/chat/completions", post(mock_401))
+        .route("/r500/v1/chat/completions", post(mock_500));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -416,6 +425,40 @@ async fn key_concurrency_slot_limits_inflight() {
         }
     }
     assert!(ok, "完成后信号量应释放，请求恢复可用");
+}
+
+/// 真实的上游失败之后其余候选全忙：最终报那次真实失败（502，记在失败的渠道上），
+/// 不能被"全忙"改写成 503 no_available_channel，把真实的 5xx 盖掉。
+#[tokio::test]
+async fn real_failure_is_reported_when_the_remaining_candidates_are_busy() {
+    let env = setup(&[("/r500/v1", 10), ("/slow/v1", 0)]).await;
+    sqlx::query!(
+        "UPDATE channel_keys SET max_concurrency = 1 WHERE id = $1",
+        env.channel_keys[1]
+    )
+    .execute(&env.pg)
+    .await
+    .unwrap();
+    // 先到的请求在 r500 失败后改投慢渠道，占着它唯一的并发名额约 800ms
+    let holder = post_chat(&env, &env.model, None);
+    let probe = async {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        post_chat(&env, &env.model, None).await
+    };
+    let (held, resp) = tokio::join!(holder, probe);
+    assert_eq!(held.status(), 200);
+    let _ = held.text().await.unwrap();
+    let status = resp.status();
+    let id = rid(&resp);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 502, "{body}");
+    assert_ne!(body["error"]["code"], "no_available_channel", "{body}");
+    let rec = wait_record(&env.pg, id).await;
+    assert_eq!(
+        rec.channel_key_id,
+        Some(env.channel_keys[0]),
+        "失败记在真正出错的渠道上"
+    );
 }
 
 /// 429 + insufficient_quota body：语义为配额耗尽 → quota_exhausted（冷却到次日），

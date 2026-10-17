@@ -1971,6 +1971,8 @@ async fn try_model(
                 .unwrap_or_default()
                 .to_owned()
         });
+        // 被并发 / 准入挡下的候选不算一次真实尝试，届时恢复成上一次真实失败的渠道与上游
+        let previous_attempt = (last_channel, last_upstream.clone());
         last_channel = Some((cand.channel_id, cand.channel_key_id));
         last_upstream = Some((
             upstream_model.clone(),
@@ -2197,7 +2199,13 @@ async fn try_model(
                     // Admission denied before the wire attempt. Busy candidates
                     // neither consume retry budget nor change credential health.
                     attempted = attempted.saturating_sub(1);
-                    last_code = code;
+                    if attempted > 0 {
+                        // 之前已有真实的上游失败：最终仍报它的错误码 / 状态 / 渠道。后面的候选全忙只说明
+                        // 没法再改投，不是失败原因（曾被覆盖成 503 no_available_channel，盖住真实的 5xx）。
+                        (last_channel, last_upstream) = previous_attempt;
+                    } else {
+                        last_code = code;
+                    }
                     continue;
                 }
                 tracing::warn!(
