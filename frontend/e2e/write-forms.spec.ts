@@ -1423,7 +1423,12 @@ test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、非法端口
 
   await page.route('**/admin/settings/smtp/test', (route) => route.fulfill(apiError(500, 'internal_error')))
   await send.click()
-  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  const failures = page.getByRole('alert').filter({ hasText: '服务内部错误' })
+  await expect(failures).toHaveCount(1)
+  // 关掉这条再触发保存失败：错误提示停留 6s，留着它的话，下面的断言可能在保存请求返回前
+  // 就被这条旧提示满足（负载高时则两条同时在，严格模式直接报错）。
+  await failures.getByRole('button', { name: '关闭', exact: true }).click()
+  await expect(failures).toHaveCount(0)
 
   // 有未保存草稿时不许发测试信：测的是已保存配置，发了也是误导
   await panel.locator('#smtp-from-name').fill('Okapi Ops')
@@ -1434,7 +1439,7 @@ test('SMTP 卡：单键回显、去空格与 reply_to 空转 null、非法端口
     return route.fulfill(apiError(500, 'internal_error'))
   })
   await save.click()
-  await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
+  await expect(failures).toHaveCount(1)
 })
 
 test('TOTP 绑定：开始绑定拿 otpauth 与 pending，验证码不足 6 位不放行，错码显示错误并可重试，确认后进入已开启态；无会话时降级提示', async ({ page }) => {
