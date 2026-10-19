@@ -317,7 +317,14 @@ async fn mock_codex_responses(
         "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello codex\",\"annotations\":[]}]}}\n\n",
         "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_o\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5\",\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150}}}\n\n",
     );
-    ([("content-type", "text/event-stream")], sse).into_response()
+    (
+        [
+            ("content-type", "text/event-stream"),
+            ("x-codex-turn-state", "ts-upstream"),
+        ],
+        sse,
+    )
+        .into_response()
 }
 
 async fn mock_codex_socket(
@@ -867,6 +874,54 @@ async fn codex_forwards_cli_0160_identity_headers_without_inventing_beta() {
         assert_eq!(env.mock_state.seen(name).as_deref(), Some(value), "{name}");
     }
     assert_eq!(env.mock_state.seen("openai-beta"), None);
+}
+
+/// 上游的轮内粘性令牌回给客户端（带账号标签）；客户端带回时只转给签发它的账号。
+#[tokio::test]
+async fn codex_turn_state_returns_to_the_client_and_only_to_its_account() {
+    let env = setup().await;
+    login_channel(&env, "codex").await;
+    let send = |turn_state: Option<&str>, stream: bool| {
+        let mut request = reqwest::Client::new()
+            .post(format!("http://{}/v1/responses", env.gateway))
+            .bearer_auth(&env.user_token)
+            .json(&json!({"model": env.model, "input": "hi", "stream": stream}));
+        if let Some(value) = turn_state {
+            request = request.header("x-codex-turn-state", value);
+        }
+        request.send()
+    };
+    let relayed = |resp: &reqwest::Response| {
+        resp.headers()
+            .get("x-codex-turn-state")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+
+    let resp = send(None, true).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let issued = relayed(&resp).expect("stream response relays the turn state");
+    let (tag, raw) = issued.split_once('.').unwrap();
+    assert_eq!((tag.len(), raw), (16, "ts-upstream"));
+    resp.text().await.unwrap();
+    assert_eq!(env.mock_state.seen("x-codex-turn-state"), None);
+
+    // 同一轮带回：去掉标签后转给签发它的账号；非流式响应同样回传
+    let resp = send(Some(&issued), false).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(relayed(&resp).as_deref(), Some(issued.as_str()));
+    assert_eq!(
+        env.mock_state.seen("x-codex-turn-state").as_deref(),
+        Some("ts-upstream")
+    );
+
+    // 别的账号签发的、或不是网关签发的令牌都不转
+    for foreign in ["0000000000000000.ts-upstream", "ts-upstream"] {
+        let resp = send(Some(foreign), true).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        resp.text().await.unwrap();
+        assert_eq!(env.mock_state.seen("x-codex-turn-state"), None, "{foreign}");
+    }
 }
 
 #[tokio::test]

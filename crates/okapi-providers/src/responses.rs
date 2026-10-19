@@ -344,6 +344,7 @@ pub async fn send_responses_at(
             retry_after_secs,
         });
     }
+    crate::response_relay::record(resp.headers());
 
     if stream {
         let events = crate::limits::sse(resp)

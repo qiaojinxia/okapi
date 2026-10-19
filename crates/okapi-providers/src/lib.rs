@@ -41,6 +41,7 @@ pub mod profiles;
 pub mod reasoning;
 pub mod registry;
 pub mod response_lifetime;
+pub mod response_relay;
 pub mod responses;
 pub mod responses_bridge;
 pub mod responses_ws;

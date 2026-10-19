@@ -24,33 +24,43 @@ pub struct ResponseBinding {
 impl ResponseBinding {
     #[must_use]
     pub fn from_candidate(candidate: &ChannelCandidate) -> Self {
-        let account = if candidate.provider == "codex" {
-            okapi_store::credential::OAuthCredential::parse(&candidate.credential)
-                .and_then(|c| c.account_id)
-                .filter(|id| !id.is_empty())
-        } else {
-            None
-        };
-        // base / provider / org-project 头也属于上游历史空间，配置变更不能沿用旧映射。
-        let mut headers = candidate.extra_headers.clone();
-        headers.sort();
-        let namespace = serde_json::json!([
-            candidate.provider,
-            candidate.api_base,
-            account.as_deref().unwrap_or(&candidate.credential),
-            headers
-        ]);
         Self {
             channel_id: candidate.channel_id,
             channel_key_id: candidate.channel_key_id,
-            identity: hex::encode(Sha256::digest(namespace.to_string().as_bytes())),
+            identity: hex::encode(upstream_digest(candidate)),
         }
+    }
+
+    /// 同一份上游身份摘要的前 8 字节（16 位十六进制），给回传客户端的不透明令牌打账号标签。
+    #[must_use]
+    pub fn account_tag(candidate: &ChannelCandidate) -> String {
+        hex::encode(&upstream_digest(candidate)[..8])
     }
 
     #[must_use]
     pub fn matches(&self, candidate: &ChannelCandidate) -> bool {
         candidate.responses_native && *self == Self::from_candidate(candidate)
     }
+}
+
+fn upstream_digest(candidate: &ChannelCandidate) -> [u8; 32] {
+    let account = if candidate.provider == "codex" {
+        okapi_store::credential::OAuthCredential::parse(&candidate.credential)
+            .and_then(|c| c.account_id)
+            .filter(|id| !id.is_empty())
+    } else {
+        None
+    };
+    // base / provider / org-project 头也属于上游历史空间，配置变更不能沿用旧映射。
+    let mut headers = candidate.extra_headers.clone();
+    headers.sort();
+    let namespace = serde_json::json!([
+        candidate.provider,
+        candidate.api_base,
+        account.as_deref().unwrap_or(&candidate.credential),
+        headers
+    ]);
+    Sha256::digest(namespace.to_string().as_bytes()).into()
 }
 
 #[derive(Clone)]

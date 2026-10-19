@@ -30,6 +30,7 @@ use okapi_providers::convert::{
     openai_to_gemini as conv_gem, responses_to_chat as conv_resp,
 };
 use okapi_providers::reasoning::{self, ReasoningDirective};
+use okapi_providers::response_relay::{TURN_STATE_HEADER, capture_turn_state};
 use okapi_providers::{
     ChatEvent, ChatResponse, StreamHandle, UpstreamError, ensure_stream_usage, rewrite_model,
 };
@@ -2896,9 +2897,9 @@ async fn attempt_stream(
     retry: i16,
 ) -> Result<Response, AttemptError> {
     let channel = (cand.channel_id, cand.channel_key_id);
-    let connect = dispatch_chat(bill, cand, base, body, true);
+    let connect = capture_turn_state(dispatch_chat(bill, cand, base, body, true));
     let first_output_window = first_output_window(cand);
-    let resp = match tokio::time::timeout(first_output_window, connect).await {
+    let (resp, turn_state) = match tokio::time::timeout(first_output_window, connect).await {
         Err(_) => {
             bill.trace.failure(&UpstreamError::Timeout);
             return Err(AttemptError::Retriable {
@@ -2907,8 +2908,8 @@ async fn attempt_stream(
                 failure_kind: KeyFailure::Request,
             });
         }
-        Ok(Err(err)) => return Err(classify_fatal(err, failover, channel)),
-        Ok(Ok(resp)) => resp,
+        Ok((Err(err), _)) => return Err(classify_fatal(err, failover, channel)),
+        Ok((Ok(resp), turn_state)) => (resp, turn_state),
     };
     let ChatResponse::Stream(mut handle) = resp else {
         return Err(AttemptError::Retriable {
@@ -2979,8 +2980,7 @@ async fn attempt_stream(
                         AttemptError::Fatal(ForwardFailure::app(err, failover, Some(channel)))
                     })?;
             }
-            let ttft_ms = elapsed_ms_i32(bill.started);
-            Ok(spawn_stream_pump(
+            let resp = spawn_stream_pump(
                 bill.clone(),
                 cand_info(
                     cand,
@@ -2993,12 +2993,28 @@ async fn attempt_stream(
                 handle,
                 buffered,
                 writer,
-                ttft_ms,
+                elapsed_ms_i32(bill.started),
                 failover,
             )
-            .await)
+            .await;
+            Ok(with_turn_state(resp, cand, turn_state))
         }
     }
+}
+
+/// 上游给了轮内粘性令牌就回给客户端（带账号标签，见 `extensions::turn_state_for_client`）。
+fn with_turn_state(
+    mut resp: Response,
+    cand: &ChannelCandidate,
+    upstream: Option<String>,
+) -> Response {
+    if let Some(value) = upstream
+        .map(|upstream| super::extensions::turn_state_for_client(cand, &upstream))
+        .and_then(|value| axum::http::HeaderValue::from_str(&value).ok())
+    {
+        resp.headers_mut().insert(TURN_STATE_HEADER, value);
+    }
+    resp
 }
 
 /// 空流照旧换渠道、不计费；只有说不出原因的空流才记成这把 key 的瞬态失败。
@@ -3690,7 +3706,9 @@ async fn attempt_json(
     retry: i16,
 ) -> Result<Response, AttemptError> {
     let channel = (cand.channel_id, cand.channel_key_id);
-    match dispatch_chat(bill, cand, base, body, false).await {
+    let (result, turn_state) =
+        capture_turn_state(dispatch_chat(bill, cand, base, body, false)).await;
+    match result {
         Ok(ChatResponse::Json {
             status,
             upstream_request_id,
@@ -3763,7 +3781,7 @@ async fn attempt_json(
                 .body(Body::from(body))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             resp = with_request_id(resp, bill.request_id);
-            Ok(resp)
+            Ok(with_turn_state(resp, cand, turn_state))
         }
         Ok(ChatResponse::Stream(_)) => Err(AttemptError::Retriable {
             code: codes::UPSTREAM_ERROR,

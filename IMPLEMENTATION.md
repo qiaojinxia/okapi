@@ -2398,7 +2398,10 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   额度头读 `x-codex-{primary,secondary}-reset-at`（Unix 秒）。相应改动：白名单补这四个头；L2 粘性认
   `session-id` 与 `prompt_cache_key`；HTTP / compact 不再替客户端补 beta，WS 缺省改用上面的取值；
   429 冷却先读 `-reset-at`、旧的 `-reset-after-seconds` 兜底；模型目录 `client_version` 升到 0.160.0；
-  Nginx 模板 `/v1/` 补 WebSocket Upgrade。上游回的 `x-codex-turn-state`（轮内粘性令牌）仍不回传客户端。
+  Nginx 模板 `/v1/` 补 WebSocket Upgrade。上游回的 `x-codex-turn-state`（轮内粘性令牌）经 task-local
+  （`okapi_providers::response_relay`）带出，加上账号标签（Responses 历史绑定同一份身份摘要的前 16 位）
+  回给客户端；客户端同一轮带回时去掉标签、只转给签发它的账号，故障转移到别的账号就不带。WS 入口的
+  握手已由网关应答，上游握手响应头无从回传，只做带回方向。
 - **前端**：协议下拉加两家（标"实验性"）；新建渠道选到它们时凭证区变成"登录"按钮 + 贴 code 输入框；
   列表行显示凭证到期时间（`credential_expires_at`，从 JSON 取，列表接口回填）。
 - **【2026-09-29 追加】全伪装模式（可选开关，`settings.mimic_cc`）**：上面"不编造"的定案只约束
