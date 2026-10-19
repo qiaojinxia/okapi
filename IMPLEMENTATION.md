@@ -972,6 +972,16 @@ upsert 校验链条目须为已存在模型（≤8、去重去自引用），删
 （删 2–39，版本 1 的 description 改为 `baseline`、checksum 改为基线文件的 SHA-384）；按 git 历史建的库最多到 0038，
 缺 0039 的列，不能照此只改记录。
 
+**第三次压平（2026-10-19）**：把基线之后的 0003–0008（倍率精度与非负约束、热路径与准入维护索引、`billing_outbox`
+的 autovacuum / fillfactor、`usage_details` 不压缩、用量明细生成列）并回 `0001_baseline.sql`，迁移目录又只剩一个文件。
+各项写回所属表的定义处；`IN (...)` 谓词照原迁移写法，不用 pg_dump 的展开式（理由同上）；`billing_events` 上两个索引
+的建立顺序照旧，分区上自动生成的索引名（`…_created_at_idx` / `…_idx1`）才一致；0007 里重写旧压缩值的 UPDATE
+只对旧数据有意义，去掉。等价性三重验证：旧链条库与新基线库 `pg_dump --schema-only` 逐字一致（只差 pg_dump 每次随机的
+`\restrict` 令牌），种子一致；新基线库补上线上才有的 `pg_stat_statements`、`_sqlx_migrations` 与 worker 建的下月分区后，
+与线上库的 pg_dump 也逐字一致。这次已有线上库（45.158.23.170，有真实数据），不能重建：结构本就与基线一致，只把
+`_sqlx_migrations` 收成一行（删 3–8，版本 1 的 checksum 换成新基线的 SHA-384），在新镜像起来前一刻改，旧二进制不会
+在两者之间重启。本机或别处按旧链条建的库同样处理：先确认已跑到 0008，再照改记录；没跑到的直接 `scripts/dev-reset.sh`。
+
 
 ### 11.11 路由诊断器（2026-09-01）
 
@@ -2813,7 +2823,7 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
 
 - **用户日志汇总改读生成列**：`GET /api/me/logs/stat` 每行从 `usage_details` 取约 30 个值、在 SQL 里引用 280 次，每次取 JSON、
   判类型、正则校验再转型。线上 5135 行要 3.2 秒（EXPLAIN：扫描 10ms，聚合 3.1s、46 万次 TOAST 缓冲读），每行只取一次 JSON
-  也还要 2.3 秒，且随行数线性增长。迁移 `0008_usage_detail_columns` 给 `billing_records` 加 29 个 STORED 生成列（与 CH 事件表
+  也还要 2.3 秒，且随行数线性增长。迁移 `0008_usage_detail_columns`（当天并入基线，见 §11.10）给 `billing_records` 加 29 个 STORED 生成列（与 CH 事件表
   同名同义：缓存写入与 TTL 拆分、模态 token 与上报标志、上游原值、来源、计量单位、`request_failed`），写入时由 PG 按原先的守卫
   算一次，脏值仍是 NULL = 未上报；汇总、`errors_only` 过滤、按日序列与列表的错误标记都改读列，列表展示的原始 JSON 不变。
   顺带修了一处口径错误：按 token 计的请求写的是 `input_characters: null`，旧 SQL 用 `usage_details->'input_characters' IS NULL`

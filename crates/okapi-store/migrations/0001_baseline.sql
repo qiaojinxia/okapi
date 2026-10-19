@@ -1,7 +1,7 @@
--- Okapi 数据库基线（2026-10-06 由原 0001–0039 号迁移压成单个文件）。
+-- Okapi 数据库基线（2026-10-06 由原 0001–0039 号迁移压成单个文件，2026-10-19 再并入 0003–0008）。
 --
--- 内容等价于依次执行原来的 39 个迁移后的最终结构与种子数据（已用两库 pg_dump 逐项比对）；
--- 只对旧数据有意义的修补（历史回填、旧配置改写、作废旧登录 key 等）不再保留。
+-- 内容等价于依次执行原来各迁移后的最终结构与种子数据（每次都用两库 pg_dump 逐项比对）；
+-- 只对旧数据有意义的修补（历史回填、旧配置改写、作废旧登录 key、重写已压缩的旧值等）不再保留。
 -- 各表与列的设计说明见 docs/database.md 与 IMPLEMENTATION.md；逐次演进见 git 历史。
 -- 以后的结构变更照常追加新的编号迁移（0002 起）。
 
@@ -16,7 +16,7 @@ CREATE TABLE users (
     admin_role_id bigint,
     status smallint DEFAULT 1 NOT NULL,
     kind varchar(8) DEFAULT 'user' NOT NULL,
-    price_multiplier numeric(8,4) DEFAULT 1 NOT NULL,
+    price_multiplier numeric(12,6) DEFAULT 1 NOT NULL,
     balance_micro bigint DEFAULT 0 NOT NULL,
     balance_expires_at timestamptz,
     language varchar(8) DEFAULT 'auto' NOT NULL,
@@ -27,6 +27,7 @@ CREATE TABLE users (
     updated_at timestamptz DEFAULT now() NOT NULL,
     deleted_at timestamptz,
     totp_last_counter bigint,
+    CONSTRAINT users_price_multiplier_nonnegative CHECK ((price_multiplier >= (0)::numeric)),
     CONSTRAINT users_aff_code_key UNIQUE (aff_code),
     CONSTRAINT users_email_key UNIQUE (email),
     CONSTRAINT users_pkey PRIMARY KEY (id),
@@ -72,12 +73,13 @@ CREATE TABLE user_pricing (
     override_kind varchar(8) NOT NULL,
     custom_model_ratio numeric(12,6),
     custom_completion_ratio numeric(12,6),
-    custom_cache_ratio numeric(6,4),
-    custom_cache_write_ratio numeric(6,4),
+    custom_cache_ratio numeric(12,6),
+    custom_cache_write_ratio numeric(12,6),
     custom_input_per_1m_micro bigint,
     custom_output_per_1m_micro bigint,
     reason varchar(255),
     expires_at timestamptz,
+    CONSTRAINT user_pricing_ratios_nonnegative CHECK ((((custom_model_ratio IS NULL) OR (custom_model_ratio >= (0)::numeric)) AND ((custom_completion_ratio IS NULL) OR (custom_completion_ratio >= (0)::numeric)) AND ((custom_cache_ratio IS NULL) OR (custom_cache_ratio >= (0)::numeric)) AND ((custom_cache_write_ratio IS NULL) OR (custom_cache_write_ratio >= (0)::numeric)))),
     CONSTRAINT user_pricing_pkey PRIMARY KEY (id),
     CONSTRAINT user_pricing_user_id_model_id_key UNIQUE (user_id, model_id)
 );
@@ -208,6 +210,7 @@ CREATE TABLE model_pricing (
     server_tool_prices jsonb,
     CONSTRAINT model_pricing_modality_ratios_check CHECK ((jsonb_typeof(modality_ratios) = 'object'::text)),
     CONSTRAINT server_tool_prices_object CHECK (((server_tool_prices IS NULL) OR (jsonb_typeof(server_tool_prices) = 'object'::text))),
+    CONSTRAINT model_pricing_ratios_nonnegative CHECK ((((model_ratio IS NULL) OR (model_ratio >= (0)::numeric)) AND (completion_ratio >= (0)::numeric) AND (cache_ratio >= (0)::numeric) AND (cache_write_ratio >= (0)::numeric) AND (audio_ratio >= (0)::numeric) AND (audio_completion_ratio >= (0)::numeric) AND (image_ratio >= (0)::numeric))),
     CONSTRAINT model_pricing_pkey PRIMARY KEY (model_id)
 );
 COMMENT ON COLUMN model_pricing.cache_write_ratio IS '缓存写入倍率（Anthropic cache_creation；1.0=按常规输入计，官方 1.25×@5m / 2.0×@1h）';
@@ -218,7 +221,7 @@ COMMENT ON COLUMN model_pricing.tier_ratios IS 'service_tier 档位倍率，如 
 
 CREATE TABLE price_groups (
     group_code varchar(32) NOT NULL,
-    group_ratio numeric(6,4) DEFAULT 1 NOT NULL,
+    group_ratio numeric(12,6) DEFAULT 1 NOT NULL,
     description varchar(255),
     is_default boolean DEFAULT false NOT NULL,
     sort_order integer DEFAULT 0 NOT NULL,
@@ -228,6 +231,7 @@ CREATE TABLE price_groups (
     rph_limit integer,
     CONSTRAINT price_groups_rph_limit_check CHECK (((rph_limit IS NULL) OR (rph_limit > 0))),
     CONSTRAINT price_groups_rpm_limit_check CHECK (((rpm_limit IS NULL) OR (rpm_limit > 0))),
+    CONSTRAINT price_groups_group_ratio_nonnegative CHECK ((group_ratio >= (0)::numeric)),
     CONSTRAINT price_groups_pkey PRIMARY KEY (group_code)
 );
 COMMENT ON COLUMN price_groups.pool_code IS '该分组的用户打哪个池；缺省 default。池的 fallback_pool_code 再决定池内无候选时退到哪';
@@ -307,6 +311,8 @@ CREATE TABLE user_subscriptions (
     CONSTRAINT user_subscriptions_pkey PRIMARY KEY (id)
 );
 CREATE INDEX idx_user_sub_window ON user_subscriptions (window_end) WHERE (status = 1);
+CREATE INDEX idx_user_sub_expiry ON user_subscriptions (expires_at) WHERE (status = 1);
+CREATE INDEX idx_user_sub_history ON user_subscriptions (user_id, id DESC);
 CREATE UNIQUE INDEX uq_user_sub_active ON user_subscriptions (user_id) WHERE (status = 1);
 
 CREATE TABLE subscription_grants (
@@ -624,6 +630,7 @@ CREATE TABLE balance_holds (
 );
 CREATE INDEX balance_holds_active ON balance_holds (user_id, created_at, id) WHERE (state <> 'closed'::text);
 CREATE INDEX balance_holds_closing ON balance_holds (updated_at, id) WHERE (state = 'closing'::text);
+CREATE INDEX balance_holds_key_open ON balance_holds (api_key_id) INCLUDE (maximum_micro) WHERE state IN ('pending', 'held');
 
 CREATE TABLE billing_records (
     id bigint GENERATED ALWAYS AS IDENTITY,
@@ -666,12 +673,104 @@ CREATE TABLE billing_records (
     pool smallint DEFAULT 0 NOT NULL,
     usage_details jsonb,
     source_window text,
+    -- 用量明细里汇总要用的值，写入时由 PG 从 usage_details 算一次（与 CH 事件表同名同义）：
+    -- 数字只认不越界的 JSON 整数，布尔只认 JSON 布尔，其余（字符串、小数、缺失、JSON null）都是 NULL
+    cache_read_reported boolean GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_read_reported') = 'boolean'
+             THEN (usage_details->'tokens'->'cache_read_reported' #>> '{}')::boolean END) STORED,
+    cache_write_reported boolean GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_write_reported') = 'boolean'
+             THEN (usage_details->'tokens'->'cache_write_reported' #>> '{}')::boolean END) STORED,
+    cache_write_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_write_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_write_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_write_tokens' #>> '{}')::bigint END) STORED,
+    cache_write_5m_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_write_5m_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_write_5m_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_write_5m_tokens' #>> '{}')::bigint END) STORED,
+    cache_write_1h_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_write_1h_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_write_1h_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_write_1h_tokens' #>> '{}')::bigint END) STORED,
+    audio_prompt_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'audio_prompt_tokens') = 'number'
+              AND (usage_details->'tokens'->'audio_prompt_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'audio_prompt_tokens' #>> '{}')::bigint END) STORED,
+    image_prompt_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'image_prompt_tokens') = 'number'
+              AND (usage_details->'tokens'->'image_prompt_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'image_prompt_tokens' #>> '{}')::bigint END) STORED,
+    audio_completion_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'audio_completion_tokens') = 'number'
+              AND (usage_details->'tokens'->'audio_completion_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'audio_completion_tokens' #>> '{}')::bigint END) STORED,
+    image_completion_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'image_completion_tokens') = 'number'
+              AND (usage_details->'tokens'->'image_completion_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'image_completion_tokens' #>> '{}')::bigint END) STORED,
+    cache_read_audio_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_read_modalities'->'audio_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_read_modalities'->'audio_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_read_modalities'->'audio_tokens' #>> '{}')::bigint END) STORED,
+    cache_read_image_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_read_modalities'->'image_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_read_modalities'->'image_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_read_modalities'->'image_tokens' #>> '{}')::bigint END) STORED,
+    cache_write_audio_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_write_modalities'->'audio_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_write_modalities'->'audio_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_write_modalities'->'audio_tokens' #>> '{}')::bigint END) STORED,
+    cache_write_image_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'cache_write_modalities'->'image_tokens') = 'number'
+              AND (usage_details->'tokens'->'cache_write_modalities'->'image_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'cache_write_modalities'->'image_tokens' #>> '{}')::bigint END) STORED,
+    -- 明细是否上报（reported_details）：只有 JSON true 算上报
+    audio_prompt_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'prompt'->'audio' = 'true'::jsonb) STORED,
+    image_prompt_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'prompt'->'image' = 'true'::jsonb) STORED,
+    audio_completion_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'completion'->'audio' = 'true'::jsonb) STORED,
+    image_completion_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'completion'->'image' = 'true'::jsonb) STORED,
+    cache_read_audio_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'cache_read'->'audio' = 'true'::jsonb) STORED,
+    cache_read_image_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'cache_read'->'image' = 'true'::jsonb) STORED,
+    cache_write_audio_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'cache_write'->'audio' = 'true'::jsonb) STORED,
+    cache_write_image_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'cache_write'->'image' = 'true'::jsonb) STORED,
+    reasoning_reported boolean GENERATED ALWAYS AS (
+        usage_details->'tokens'->'reported_details'->'reasoning' = 'true'::jsonb) STORED,
+    -- 上游原始用量：与 prompt_tokens / completion_tokens 比出来源（上游 / 估算 / 本地改写）
+    upstream_prompt_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'upstream_usage'->'prompt_tokens') = 'number'
+              AND (usage_details->'tokens'->'upstream_usage'->'prompt_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'upstream_usage'->'prompt_tokens' #>> '{}')::bigint END) STORED,
+    upstream_completion_tokens bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'tokens'->'upstream_usage'->'completion_tokens') = 'number'
+              AND (usage_details->'tokens'->'upstream_usage'->'completion_tokens' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'tokens'->'upstream_usage'->'completion_tokens' #>> '{}')::bigint END) STORED,
+    prompt_source text GENERATED ALWAYS AS (usage_details->>'prompt_source') STORED,
+    completion_source text GENERATED ALWAYS AS (usage_details->>'completion_source') STORED,
+    -- 计量单位：按 token 计的请求写的是 input_characters: null，JSON null 也是 NULL
+    input_unit text GENERATED ALWAYS AS (usage_details->>'input_unit') STORED,
+    input_characters bigint GENERATED ALWAYS AS (
+        CASE WHEN jsonb_typeof(usage_details->'input_characters') = 'number'
+              AND (usage_details->'input_characters' #>> '{}') ~ '^-?[0-9]{1,18}$'
+             THEN (usage_details->'input_characters' #>> '{}')::bigint END) STORED,
+    request_failed boolean GENERATED ALWAYS AS (
+        usage_details->'diagnostics'->>'request_failed' = 'true') STORED,
     CONSTRAINT billing_records_pkey PRIMARY KEY (id, created_at)
 )
 PARTITION BY RANGE (created_at);
 COMMENT ON COLUMN billing_records.usage_details IS 'Normalized token usage and public request dimensions at settlement; NULL for historical records';
 
 CREATE TABLE billing_records_default PARTITION OF billing_records DEFAULT;
+-- 汇总不再读这一列；列表页取明细时不必逐个解压（EXTERNAL = 行内不压缩，超过 TOAST 阈值才外置）
+ALTER TABLE billing_records ALTER COLUMN usage_details SET STORAGE EXTERNAL;
 
 CREATE TABLE billing_record_receipts (
     request_id uuid NOT NULL,
@@ -742,11 +841,13 @@ CREATE TABLE billing_outbox (
     stats_protocol smallint DEFAULT 0 NOT NULL,
     CONSTRAINT billing_outbox_stats_protocol_check CHECK ((stats_protocol = ANY (ARRAY[0, 1]))),
     CONSTRAINT billing_outbox_pkey PRIMARY KEY (id)
-);
+)
+WITH (autovacuum_vacuum_scale_factor = 0.05, fillfactor = 70);
 CREATE INDEX idx_outbox_ch_batch ON billing_outbox (ch_batch_id) WHERE (ch_batch_id IS NOT NULL);
 CREATE UNIQUE INDEX idx_outbox_event_id ON billing_outbox (event_id);
 CREATE INDEX idx_outbox_pending ON billing_outbox (next_retry_at) WHERE (status <> 1);
 CREATE INDEX idx_outbox_published_unassigned ON billing_outbox (id) WHERE ((status = 1) AND (stats_protocol = 1) AND (ch_batch_id IS NULL));
+CREATE INDEX idx_outbox_ch_unassigned ON billing_outbox (id) WHERE ((ch_batch_id IS NULL) AND ((status = 0) OR ((status = 1) AND (stats_protocol = 1))));
 
 CREATE TABLE billing_sync (
     request_id uuid NOT NULL,
@@ -803,12 +904,15 @@ CREATE TABLE billing_dlq (
     CONSTRAINT billing_dlq_pkey PRIMARY KEY (id)
 );
 CREATE UNIQUE INDEX idx_dlq_delivery_event ON billing_dlq (event_key) WHERE (event_key IS NOT NULL);
+CREATE INDEX idx_dlq_ch_batch ON billing_dlq (ch_batch_id) WHERE (ch_batch_id IS NOT NULL);
 
 CREATE INDEX idx_br_channel_time ON billing_records (channel_id, created_at DESC);
 CREATE INDEX idx_br_request ON billing_records (request_id);
 CREATE INDEX idx_br_user_time ON billing_records (user_id, created_at DESC);
 
 CREATE INDEX idx_be_user_time ON billing_events (user_id, created_at DESC);
+CREATE INDEX idx_be_created_brin ON billing_events USING brin (created_at);
+CREATE INDEX idx_be_cashflow ON billing_events (created_at) WHERE event_type IN ('recharge', 'adjust', 'expire');
 
 -- ════════ 图片与视频任务 ════════
 
@@ -853,6 +957,7 @@ CREATE TABLE image_tasks (
     CONSTRAINT image_tasks_user_id_api_key_id_idempotency_hash_key UNIQUE (user_id, api_key_id, idempotency_hash)
 );
 CREATE INDEX image_tasks_billing ON image_tasks (updated_at) WHERE billing_pending;
+CREATE INDEX image_tasks_capacity ON image_tasks (user_id) INCLUDE (status, storage_budget);
 CREATE INDEX image_tasks_expiry ON image_tasks (expires_at);
 CREATE INDEX image_tasks_owner ON image_tasks (user_id, api_key_id, created_at DESC);
 CREATE INDEX image_tasks_queue ON image_tasks (created_at, id) WHERE (status = 'queued'::text);
