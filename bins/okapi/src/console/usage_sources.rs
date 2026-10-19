@@ -339,22 +339,20 @@ pub(super) fn pg_sql() -> String {
     ] {
         fields.push(format!("'{field}', COALESCE(SUM(b.{column}::bigint),0)"));
     }
-    // 只认 JSON 布尔：一条脏记录（"yes"、数字）当未上报，不让整页统计报错
-    let read_flag =
-        super::usage_observations::pg_flag("b.usage_details->'tokens'->'cache_read_reported'");
+    // billing_records 的生成列从 usage_details 算出（与 CH 同名同义）：脏值写入时就是 NULL = 未上报
+    let read_flag = "b.cache_read_reported";
     fields.push(format!(
         "'source_read_n', COUNT(*) FILTER (WHERE COALESCE({read_flag}, b.cached_tokens > 0))"
     ));
+    // 与 CH 的 `measured` 同一判定：上游原值缺失（含 JSON null、非整数）算估算
     let predicate = |axis: &str, state: &str| {
-        let original = format!("b.usage_details->'tokens'->'upstream_usage'->'{axis}_tokens'");
+        let original = format!("b.upstream_{axis}_tokens");
         let condition = match state {
-            "upstream" => format!("{original} = to_jsonb(b.{axis}_tokens)"),
-            "estimated" => format!("({original} IS NULL OR {original} = 'null'::jsonb)"),
-            _ => format!(
-                "jsonb_typeof({original})='number' AND {original} != to_jsonb(b.{axis}_tokens)"
-            ),
+            "upstream" => format!("{original} = b.{axis}_tokens"),
+            "estimated" => format!("{original} IS NULL"),
+            _ => format!("{original} <> b.{axis}_tokens"),
         };
-        format!("b.usage_details->>'{axis}_source' = '{state}' AND {condition}")
+        format!("b.{axis}_source = '{state}' AND {condition}")
     };
     for axis in ["prompt", "completion"] {
         for state in STATES {

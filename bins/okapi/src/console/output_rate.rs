@@ -23,9 +23,9 @@ pub(super) fn raw_sql() -> String {
 }
 
 pub(super) fn pg_sql() -> String {
-    let token = "b.usage_details->>'input_unit' = 'tokens' AND b.usage_details->>'input_characters' IS NULL";
+    let token = "b.input_unit = 'tokens' AND b.input_characters IS NULL";
     let valid = format!("({token}) AND b.status IN (20,30,40) AND b.latency_ms >= 0");
-    let character = "b.usage_details->>'input_unit' = 'characters' AND b.usage_details->>'input_characters' IS NOT NULL AND b.prompt_tokens = 0 AND b.completion_tokens = 0 AND b.cached_tokens = 0 AND b.reasoning_tokens = 0";
+    let character = super::input_units::PG_VALID_CHAR;
     format!(
         "'output_rate_observed', COUNT(*), 'output_rate_sum', COALESCE(SUM(b.latency_ms) FILTER (WHERE {valid}), 0), 'output_rate_samples', COUNT(*) FILTER (WHERE {valid}), 'output_rate_output', COALESCE(SUM(b.completion_tokens) FILTER (WHERE {valid}), 0), 'output_rate_known', COUNT(*) FILTER (WHERE ({token}) OR ({character})), 'output_rate_tokens', COUNT(*) FILTER (WHERE {token})"
     )

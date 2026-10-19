@@ -457,6 +457,9 @@ CREATE INDEX idx_be_created_brin ON billing_events USING brin (created_at);     
 CREATE INDEX idx_be_cashflow ON billing_events (created_at)
     WHERE event_type IN ('recharge', 'adjust', 'expire');                            -- 资金流入概要
 -- billing_records 同样带 pool SMALLINT NOT NULL DEFAULT 0（这笔请求由哪个池付）。
+-- billing_records 另有 29 个 STORED 生成列（cache_write_tokens、*_reported、upstream_*_tokens、
+-- prompt_source、input_unit、input_characters、request_failed 等，与 CH 事件表同名同义），写入时由 PG
+-- 从 usage_details 算一次：数字只认 JSON 整数、布尔只认 JSON 布尔，其余为 NULL。门户日志汇总只读这些列。
 -- 不变式（reconciler 两池分别核）：
 --   钱包  Redis bal.avail + Σ在途(pool=0) == Σ delta_micro WHERE pool=0 == users.balance_micro
 --   订阅  Redis bal.sub   + Σ在途(pool=1) == Σ delta_micro WHERE pool=1（sub_reset/sub_expire 记的是池变动 delta，跨窗口累计成立）

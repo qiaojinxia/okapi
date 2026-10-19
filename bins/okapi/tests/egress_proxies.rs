@@ -1223,7 +1223,7 @@ async fn insert_proxy(pg: &PgPool, name: &str, addr: SocketAddr) -> i64 {
 }
 
 /// 后台探测：经代理请求探测地址，记出口 IP；IP 变了记下变化前后并发 `egress_ip_changed`；
-/// 在用的代理不可达发 `egress_down`（没人用的不吵）；只记事实，不碰熔断。
+/// 在用的代理连续两轮不可达才发 `egress_down`（单次抖动不吵，没人用的也不吵）；只记事实，不碰熔断。
 /// `notify_channels` / `ssrf_policy` 是全站设置，放在用完即删的临时库里。
 #[tokio::test]
 #[allow(clippy::too_many_lines)] // 两轮探测前后状态相连，拆开要重建代理、渠道与通知通道
@@ -1313,7 +1313,14 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
     let live_hits = Arc::new(AtomicUsize::new(0));
     let live = insert_proxy(&pg, "live", spawn_proxy(Arc::clone(&live_hits)).await).await;
     let dead = insert_proxy(&pg, "dead", dead_addr().await).await;
-    insert_proxy(&pg, "idle", dead_addr().await).await;
+    let idle = insert_proxy(&pg, "idle", dead_addr().await).await;
+    // 临时库的代理 id 从 1 起，Redis 是共用的：清掉以前留下的连续失败计数
+    for proxy in [live, dead, idle] {
+        let _: Option<i64> =
+            fred::interfaces::KeysInterface::del(&redis, format!("egress:probe:fail:{proxy}"))
+                .await
+                .unwrap();
+    }
     for proxy in [live, dead] {
         let (channel, _) = okapi_store::provision::create_channel(
             &pg,
@@ -1353,17 +1360,10 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
             .unwrap();
     assert_eq!(row, (Some("203.0.113.10".into()), Some("US".into()), None));
     let sent: Vec<Value> = std::mem::take(&mut *bodies.lock().unwrap());
-    let down = sent
-        .iter()
-        .find(|b| b["event"] == "egress_down")
-        .expect("在用的死代理要告警");
-    let names: Vec<&str> = down["payload"]["proxies"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|p| p["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["dead"], "没人用的 idle 不告警：{down}");
+    assert!(
+        sent.iter().all(|b| b["event"] != "egress_down"),
+        "探不通一轮只记日志，不告警：{sent:?}"
+    );
 
     rounds.store(1, Ordering::SeqCst);
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
@@ -1387,6 +1387,22 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
         )
     );
     let sent: Vec<Value> = std::mem::take(&mut *bodies.lock().unwrap());
+    let down = sent
+        .iter()
+        .find(|b| b["event"] == "egress_down")
+        .expect("在用的死代理连续两轮不通要告警");
+    let names: Vec<(&str, i64)> = down["payload"]["proxies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap(),
+                p["consecutive_failures"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(names, [("dead", 2)], "没人用的 idle 不告警：{down}");
     let changed = sent
         .iter()
         .find(|b| b["event"] == "egress_ip_changed")

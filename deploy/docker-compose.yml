@@ -34,6 +34,13 @@ x-okapi-image: &okapi-image
   restart: unless-stopped
   # SIGTERM 后排完在途 SSE（§14.3 口径 5min）再等后台结算落账；compose 缺省 10s 就 SIGKILL
   stop_grace_period: 5m30s
+  # json-file 缺省不限大小，按大小轮转。它的日志随容器删除，每次部署重建容器就清空了；
+  # 要跨部署留存，在宿主机的 override 里换成 journald（Docker Desktop 不支持，所以不设成缺省）。
+  logging:
+    driver: json-file
+    options:
+      max-size: 50m
+      max-file: "5"
   depends_on:
     postgres:
       condition: service_healthy

@@ -2639,7 +2639,9 @@ key、非流式请求被强制为流式、无 key 401、超 1MB 413；`GET /api/
     证明不了「能到上游」（同一地址另被网关用来核实可疑代理，见上「失败归因」）。出口 IP 与上次不同时记 `previous_exit_ip / exit_ip_changed_at` 并发通知事件 `egress_ip_changed`
     （静态代理悄悄换 IP = 固定分配在它上面的账号全换了 IP）；有渠道在用（直接绑定、固定分配、经组或全局默认可达）的代理
     探测失败发 `egress_down`，没人用的不吵。两个事件走既有通知多路（webhook / 邮件、订阅过滤、频率闸）。控制台手动测试
-    同样识别 IP 变化（成功仍清熔断，属人工确认）。
+    同样识别 IP 变化（成功仍清熔断，属人工确认）。【2026-10-19】`egress_down` 改为连续两轮探不通才发（Redis
+    `egress:probe:fail:{id}`，三个探测间隔内有效，通了即清）：住宅代理偶尔一轮探不通很常见，线上出现过一轮两个代理不通、
+    下一轮全好的情况，次次通知会淹掉真故障。每次失败都打一行日志，带代理 id、名称、错误码与连续轮数（原先只有个数，事后查不出是谁）。
   - **批量导入** `POST /admin/proxies/import`：每行一个，认完整 URL 与代理商常见的 `host:port:user:pass`（第二段是端口；
     第四段起都算密码，凭证按原文百分号编码，可含 `@ :`）、`user:pass@host:port`、`host:port`；缺省协议 socks5h；
     按（协议, 主机, 端口, 用户名）与已有（own 范围只比自己的）及同批查重；统一容量 / 并发 / 名称前缀；可选直接加进代理组
@@ -2806,6 +2808,21 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   生产滚窗走 `hold_repair`（权威值 − 冻结在途），两者不要混用。
 - **测试容器不再留卷**：`scripts/test-isolated.py`、`scripts/dev-deps.sh` 拆容器用 `docker rm -fv`。此前每跑一个套件留下几个
   匿名卷，攒满 Docker 虚拟机盘后 ClickHouse 写不进、套件成片失败。
+
+### 11.45 线上日志排查后的修正（2026-10-19）
+
+- **用户日志汇总改读生成列**：`GET /api/me/logs/stat` 每行从 `usage_details` 取约 30 个值、在 SQL 里引用 280 次，每次取 JSON、
+  判类型、正则校验再转型。线上 5135 行要 3.2 秒（EXPLAIN：扫描 10ms，聚合 3.1s、46 万次 TOAST 缓冲读），每行只取一次 JSON
+  也还要 2.3 秒，且随行数线性增长。迁移 `0008_usage_detail_columns` 给 `billing_records` 加 29 个 STORED 生成列（与 CH 事件表
+  同名同义：缓存写入与 TTL 拆分、模态 token 与上报标志、上游原值、来源、计量单位、`request_failed`），写入时由 PG 按原先的守卫
+  算一次，脏值仍是 NULL = 未上报；汇总、`errors_only` 过滤、按日序列与列表的错误标记都改读列，列表展示的原始 JSON 不变。
+  顺带修了一处口径错误：按 token 计的请求写的是 `input_characters: null`，旧 SQL 用 `usage_details->'input_characters' IS NULL`
+  判（JSON null 不是 SQL NULL），`token_requests` 恒为 0、计量单位覆盖率显示 0%；列上 JSON null 就是 NULL，与 CH 的 `isNull` 一致。
+  来源判定也与 CH 对齐：上游原值不是整数（缺失、null、脏值）一律算估算；字符计量行也照 CH 的 `VALID_CHAR` 只认 token 全为 0 的
+  （`input_units::PG_VALID_CHAR`，计量单位与输出速度两处共用），带 token 的字符行此前在 PG 算字符、在 CH 算未知，两边对不上。
+- **出口探测告警**：见 §11.41「后台探测」，连续两轮不通才发 `egress_down`，每次失败日志带代理 id 与错误码。
+- **容器日志**：compose 给 Okapi 各角色的 json-file 日志加大小上限（50MB × 5）。json-file 日志随容器删除，部署一次就清空，
+  线上排查时网关日志只剩 12 小时；单机部署在宿主机 override 里换成 journald（Docker Desktop 不支持，所以不设成仓库缺省）。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

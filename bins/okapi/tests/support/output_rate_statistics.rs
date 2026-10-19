@@ -322,6 +322,15 @@ async fn check_logs(env: &Env, partial: bool) {
             if partial { None } else { Some(220_000) },
             Some(220_000),
         );
+        // 按 token 计的请求写的是 input_characters: null（不是缺失）：PG 账本与 CH 都要认成 token
+        assert_eq!(
+            result["input_units"]["token_requests"], 5,
+            "{path}: {result}"
+        );
+        assert_eq!(
+            result["input_units"]["character_requests"], 1,
+            "{path}: {result}"
+        );
     }
 }
 

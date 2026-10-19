@@ -36,7 +36,7 @@ fn filtered(
     if q.errors_only == Some(true) {
         // Request failure and financial disposition are independent: an all-failed
         // batch releases its hold (status=30), while log_type=5 retains its outcome.
-        query.push(" AND (b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true')");
+        query.push(" AND (b.log_type = 5 OR b.status = 40 OR b.request_failed)");
     }
     if let Some(window) = window {
         query
@@ -62,18 +62,10 @@ pub async fn list(
 ) -> Result<Json<Value>, AppError> {
     let key = authenticate(&state, &headers).await?;
     let window = q.window(&state.pg).await?;
-    // usage_details 是 JSON：只认对的类型，脏值当未上报（不让一条坏记录 500 整页）
-    let read_flag = crate::console::usage_observations::pg_flag(
-        "b.usage_details->'tokens'->'cache_read_reported'",
-    );
-    let write_flag = crate::console::usage_observations::pg_flag(
-        "b.usage_details->'tokens'->'cache_write_reported'",
-    );
-    let select = format!(
-        r"SELECT jsonb_build_object(
+    let select = r"SELECT jsonb_build_object(
             'id', b.id, 'request_id', b.request_id, 'model', b.model_name,
             'log_type', b.log_type, 'status', b.status,
-            'is_error', (b.log_type = 5 OR b.status = 40 OR COALESCE(b.usage_details->'diagnostics'->>'request_failed' = 'true', false)),
+            'is_error', (b.log_type = 5 OR b.status = 40 OR COALESCE(b.request_failed, false)),
             'upstream_request_id', b.upstream_request_id,
             'api_key_id', b.api_key_id, 'key_name', COALESCE(k.name, ''),
             'usage', jsonb_build_object(
@@ -85,8 +77,8 @@ pub async fn list(
                 'server_tool_usage', b.usage_details->'tokens'->'server_tool_usage',
                 'prompt_source', COALESCE(b.usage_details->>'prompt_source', 'unknown'),
                 'completion_source', COALESCE(b.usage_details->>'completion_source', 'unknown'),
-                'cache_read_reported', COALESCE({read_flag}, NULLIF(b.cached_tokens > 0, false)),
-                'cache_write_reported', {write_flag},
+                'cache_read_reported', COALESCE(b.cache_read_reported, NULLIF(b.cached_tokens > 0, false)),
+                'cache_write_reported', b.cache_write_reported,
                 'cache_write_tokens', b.usage_details->'tokens'->'cache_write_tokens',
                 'cache_write_5m_tokens', b.usage_details->'tokens'->'cache_write_5m_tokens',
                 'cache_write_1h_tokens', b.usage_details->'tokens'->'cache_write_1h_tokens',
@@ -107,9 +99,8 @@ pub async fn list(
             'diagnostics', b.usage_details->'diagnostics',
             'latency_ms', b.latency_ms, 'ttft_ms', b.ttft_ms,
             'is_stream', b.is_stream, 'created_at', b.created_at
-        )"
-    );
-    let mut query = filtered(&select, &q, window.as_ref(), key.user_id, key.key_id)?;
+        )";
+    let mut query = filtered(select, &q, window.as_ref(), key.user_id, key.key_id)?;
     if let Some(before) = q.before {
         // Keyset on (created_at, id) so the page walks idx_br_user_time instead of sorting
         // every matching row by id. The cursor row is resolved under the same owner; an
@@ -207,34 +198,9 @@ pub async fn stat(
     Ok(Json(result))
 }
 
-/// 汇总查询的 SELECT。usage_details 是 JSON：数字与布尔只认对的类型，脏值当未上报，
-/// 不让一条坏记录把整页汇总变成 500（与 usage_observations 同一套守卫）。
+/// 汇总查询的 SELECT。用量明细读 billing_records 从 usage_details 生成的列：数字与布尔只认对的类型，
+/// 脏值写入时就成了 NULL（未上报），不让一条坏记录把整页汇总变成 500；每行不再解析 JSON。
 fn summary_sql() -> String {
-    let int = |path: &str| {
-        format!(
-            "({})",
-            crate::console::usage_observations::pg_bigint(&format!(
-                "b.usage_details->'tokens'->{path}"
-            ))
-        )
-    };
-    let read_flag = crate::console::usage_observations::pg_flag(
-        "b.usage_details->'tokens'->'cache_read_reported'",
-    );
-    let write_flag = crate::console::usage_observations::pg_flag(
-        "b.usage_details->'tokens'->'cache_write_reported'",
-    );
-    let cache_write = int("'cache_write_tokens'");
-    let ttl_short = int("'cache_write_5m_tokens'");
-    let ttl_long = int("'cache_write_1h_tokens'");
-    let audio_prompt = int("'audio_prompt_tokens'");
-    let image_prompt = int("'image_prompt_tokens'");
-    let audio_completion = int("'audio_completion_tokens'");
-    let image_completion = int("'image_completion_tokens'");
-    let read_audio = int("'cache_read_modalities'->'audio_tokens'");
-    let read_image = int("'cache_read_modalities'->'image_tokens'");
-    let write_audio = int("'cache_write_modalities'->'audio_tokens'");
-    let write_image = int("'cache_write_modalities'->'image_tokens'");
     let sources = crate::console::usage_sources::pg_sql();
     let observations = crate::console::usage_observations::pg_sql();
     let units = crate::console::input_units::pg_sql();
@@ -244,7 +210,7 @@ fn summary_sql() -> String {
             'records', COUNT(*),
             'settled', COUNT(*) FILTER (WHERE b.status = 20),
             'failed', COUNT(*) FILTER (WHERE b.status = 40),
-            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true'),
+            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.request_failed),
             'refunded', COUNT(*) FILTER (WHERE b.status = 30),
             'pending', COUNT(*) FILTER (WHERE b.status = 10),
             'amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 20), 0),
@@ -252,27 +218,27 @@ fn summary_sql() -> String {
             'prompt_tokens', COALESCE(SUM(b.prompt_tokens::bigint), 0),
             'completion_tokens', COALESCE(SUM(b.completion_tokens::bigint), 0),
             'cached_tokens', COALESCE(SUM(b.cached_tokens::bigint), 0),
-            'cache_read_samples', COUNT(*) FILTER (WHERE COALESCE({read_flag}, b.cached_tokens > 0)),
-            'cache_write_tokens', SUM({cache_write}) FILTER (WHERE COALESCE({write_flag}, false) OR {cache_write} > 0),
-            'cache_write_samples', COUNT(*) FILTER (WHERE COALESCE({write_flag}, false) OR {cache_write} > 0),
-            'cache_write_5m_tokens', SUM({ttl_short}),
-            'cache_write_1h_tokens', SUM({ttl_long}),
-            'cache_write_ttl_samples', COUNT(*) FILTER (WHERE {ttl_short} IS NOT NULL AND {ttl_long} IS NOT NULL),
+            'cache_read_samples', COUNT(*) FILTER (WHERE COALESCE(b.cache_read_reported, b.cached_tokens > 0)),
+            'cache_write_tokens', SUM(b.cache_write_tokens) FILTER (WHERE COALESCE(b.cache_write_reported, false) OR b.cache_write_tokens > 0),
+            'cache_write_samples', COUNT(*) FILTER (WHERE COALESCE(b.cache_write_reported, false) OR b.cache_write_tokens > 0),
+            'cache_write_5m_tokens', SUM(b.cache_write_5m_tokens),
+            'cache_write_1h_tokens', SUM(b.cache_write_1h_tokens),
+            'cache_write_ttl_samples', COUNT(*) FILTER (WHERE b.cache_write_5m_tokens IS NOT NULL AND b.cache_write_1h_tokens IS NOT NULL),
             'reasoning_tokens', COALESCE(SUM(b.reasoning_tokens::bigint), 0),
-            'audio_prompt_tokens', SUM({audio_prompt}),
-            'image_prompt_tokens', SUM({image_prompt}),
-            'audio_completion_tokens', SUM({audio_completion}),
-            'image_completion_tokens', SUM({image_completion}),
-            'audio_prompt_samples', COUNT({audio_prompt}),
-            'image_prompt_samples', COUNT({image_prompt}),
-            'audio_completion_samples', COUNT({audio_completion}),
-            'image_completion_samples', COUNT({image_completion}),
-            'cache_read_audio_tokens', SUM({read_audio}),
-            'cache_read_image_tokens', SUM({read_image}),
-            'cache_write_audio_tokens', SUM({write_audio}),
-            'cache_write_image_tokens', SUM({write_image}),
-            'cache_read_modal_samples', COUNT({read_audio}),
-            'cache_write_modal_samples', COUNT({write_audio}),
+            'audio_prompt_tokens', SUM(b.audio_prompt_tokens),
+            'image_prompt_tokens', SUM(b.image_prompt_tokens),
+            'audio_completion_tokens', SUM(b.audio_completion_tokens),
+            'image_completion_tokens', SUM(b.image_completion_tokens),
+            'audio_prompt_samples', COUNT(b.audio_prompt_tokens),
+            'image_prompt_samples', COUNT(b.image_prompt_tokens),
+            'audio_completion_samples', COUNT(b.audio_completion_tokens),
+            'image_completion_samples', COUNT(b.image_completion_tokens),
+            'cache_read_audio_tokens', SUM(b.cache_read_audio_tokens),
+            'cache_read_image_tokens', SUM(b.cache_read_image_tokens),
+            'cache_write_audio_tokens', SUM(b.cache_write_audio_tokens),
+            'cache_write_image_tokens', SUM(b.cache_write_image_tokens),
+            'cache_read_modal_samples', COUNT(b.cache_read_audio_tokens),
+            'cache_write_modal_samples', COUNT(b.cache_write_audio_tokens),
             'avg_latency_ms', FLOOR(AVG(b.latency_ms) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0)),
             'latency_samples', COUNT(*) FILTER (WHERE b.status IN (20,30,40) AND b.latency_ms >= 0),
             'avg_ttft_ms', FLOOR(AVG(b.ttft_ms) FILTER (WHERE b.status IN (20,30,40) AND b.is_stream AND b.ttft_ms >= 0)),
@@ -348,7 +314,7 @@ pub async fn series(
         r"SELECT jsonb_build_object(
             'day', {day}::text,
             'requests', COUNT(*),
-            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.usage_details->'diagnostics'->>'request_failed' = 'true'),
+            'errors', COUNT(*) FILTER (WHERE b.log_type = 5 OR b.status = 40 OR b.request_failed),
             'tokens', COALESCE(SUM(b.prompt_tokens::bigint + b.completion_tokens::bigint), 0),
             'amount_micro', COALESCE(SUM(b.amount_micro) FILTER (WHERE b.status = 20), 0)
         )"

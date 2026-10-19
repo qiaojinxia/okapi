@@ -2,65 +2,21 @@
 use super::stats::{ch_i64, scaled_ratio};
 use serde_json::{Value, json};
 
-const FIELDS: [(&str, &str, &str, &str); 9] = [
-    (
-        "audio_prompt_tokens",
-        "audio_prompt_reported",
-        "b.usage_details->'tokens'->'audio_prompt_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'prompt'->'audio'",
-    ),
-    (
-        "image_prompt_tokens",
-        "image_prompt_reported",
-        "b.usage_details->'tokens'->'image_prompt_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'prompt'->'image'",
-    ),
-    (
-        "audio_completion_tokens",
-        "audio_completion_reported",
-        "b.usage_details->'tokens'->'audio_completion_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'completion'->'audio'",
-    ),
-    (
-        "image_completion_tokens",
-        "image_completion_reported",
-        "b.usage_details->'tokens'->'image_completion_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'completion'->'image'",
-    ),
-    (
-        "cache_read_audio_tokens",
-        "cache_read_audio_reported",
-        "b.usage_details->'tokens'->'cache_read_modalities'->'audio_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'cache_read'->'audio'",
-    ),
-    (
-        "cache_read_image_tokens",
-        "cache_read_image_reported",
-        "b.usage_details->'tokens'->'cache_read_modalities'->'image_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'cache_read'->'image'",
-    ),
-    (
-        "cache_write_audio_tokens",
-        "cache_write_audio_reported",
-        "b.usage_details->'tokens'->'cache_write_modalities'->'audio_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'cache_write'->'audio'",
-    ),
-    (
-        "cache_write_image_tokens",
-        "cache_write_image_reported",
-        "b.usage_details->'tokens'->'cache_write_modalities'->'image_tokens'",
-        "b.usage_details->'tokens'->'reported_details'->'cache_write'->'image'",
-    ),
-    (
-        "reasoning_tokens",
-        "reasoning_reported",
-        "b.reasoning_tokens",
-        "b.usage_details->'tokens'->'reported_details'->'reasoning'",
-    ),
+/// (数值列, 上报标志列)：CH 事件表与 PG 账本（billing_records 的生成列）同名同义。
+const FIELDS: [(&str, &str); 9] = [
+    ("audio_prompt_tokens", "audio_prompt_reported"),
+    ("image_prompt_tokens", "image_prompt_reported"),
+    ("audio_completion_tokens", "audio_completion_reported"),
+    ("image_completion_tokens", "image_completion_reported"),
+    ("cache_read_audio_tokens", "cache_read_audio_reported"),
+    ("cache_read_image_tokens", "cache_read_image_reported"),
+    ("cache_write_audio_tokens", "cache_write_audio_reported"),
+    ("cache_write_image_tokens", "cache_write_image_reported"),
+    ("reasoning_tokens", "reasoning_reported"),
 ];
 
 pub(super) fn ch_detail_sql() -> String {
-    FIELDS.iter().map(|(value, flag, _, _)| format!(
+    FIELDS.iter().map(|(value, flag)| format!(
         "sumOrNullIf({value}, ifNull({flag}, 0) = 1) AS observed_{value}, countIf(ifNull({flag}, 0) = 1 AND isNotNull({value})) AS observed_{value}_n"
     )).collect::<Vec<_>>().join(", ")
 }
@@ -78,49 +34,23 @@ pub(super) fn ch_sql() -> String {
     format!("{}, {}", ch_detail_sql(), ch_ttl_sql())
 }
 
-/// jsonb 数值 → bigint：只认 JSON 数字且是不越界的整数，其余（字符串、小数、超长）当未观测（NULL）。
-/// 一条脏记录不该让整页用量查询报错；也不做 regexp 清洗——"1a2" 洗成 12 是编造数据。
-/// `path` 必须是 `->` 取出的 jsonb（不是 `->>` 的文本）；门户日志、来源统计与本模块共用。
-pub(super) fn pg_bigint(path: &str) -> String {
-    if !path.contains("->") {
-        return path.to_owned(); // 普通列（reasoning_tokens）
-    }
-    format!(
-        "CASE WHEN jsonb_typeof({path}) = 'number' AND ({path} #>> '{{}}') ~ '^-?[0-9]{{1,18}}$' THEN ({path} #>> '{{}}')::bigint END"
-    )
-}
-
-/// jsonb 布尔 → boolean：只认 JSON 布尔，缺失或别的类型（`"yes"`、数字）都是 NULL，不做 `::boolean` 强转。
-pub(super) fn pg_flag(path: &str) -> String {
-    format!("(CASE WHEN jsonb_typeof({path}) = 'boolean' THEN ({path} #>> '{{}}')::boolean END)")
-}
-
+/// PG 账本汇总：读 billing_records 从 usage_details 生成的列。数字只认不越界的 JSON 整数、布尔只认
+/// JSON 布尔，其余写入时就成了 NULL（未上报），一条脏记录不会让整页汇总报错。
 pub(super) fn pg_sql() -> String {
-    let details = FIELDS.iter().map(|(name, _, value, flag)| {
-        let value = pg_bigint(value);
-        // 标志位是 serde 写的 JSON 布尔；非布尔按未上报，不做 ::boolean 强转（"yes" 会让整条查询失败）
-        format!(
-            "'observed_{name}', SUM({value}) FILTER (WHERE {flag} = 'true'::jsonb), 'observed_{name}_n', COUNT({value}) FILTER (WHERE {flag} = 'true'::jsonb)"
-        )
-    }).collect::<Vec<_>>().join(", ");
-    let value = |name| pg_bigint(&format!("b.usage_details->'tokens'->'{name}'"));
-    let known = format!(
-        "b.usage_details->'tokens'->'cache_write_reported' = 'true'::jsonb AND {} >= 0 AND {} >= 0 AND {} + {} = {}",
-        value("cache_write_5m_tokens"),
-        value("cache_write_1h_tokens"),
-        value("cache_write_5m_tokens"),
-        value("cache_write_1h_tokens"),
-        value("cache_write_tokens")
-    );
+    let details = FIELDS.iter().map(|(value, flag)| format!(
+        "'observed_{value}', SUM(b.{value}) FILTER (WHERE b.{flag}), 'observed_{value}_n', COUNT(b.{value}) FILTER (WHERE b.{flag})"
+    )).collect::<Vec<_>>().join(", ");
+    let known = "b.cache_write_reported AND b.cache_write_5m_tokens >= 0 AND b.cache_write_1h_tokens >= 0 \
+        AND b.cache_write_5m_tokens + b.cache_write_1h_tokens = b.cache_write_tokens";
     let ttl = TTL_AXES.map(|name| format!(
-        "'observed_{name}', SUM({}) FILTER (WHERE {known}), 'observed_{name}_n', COUNT({}) FILTER (WHERE {known})",value(name),value(name)
+        "'observed_{name}', SUM(b.{name}) FILTER (WHERE {known}), 'observed_{name}_n', COUNT(b.{name}) FILTER (WHERE {known})"
     )).join(", ");
     format!("{details}, {ttl}")
 }
 
 pub(super) fn enrich(row: &Value, result: &mut Value, records: i64) {
     let mut observations = json!({});
-    for name in FIELDS.iter().map(|(name, _, _, _)| *name).chain(TTL_AXES) {
+    for name in FIELDS.iter().map(|(name, _)| *name).chain(TTL_AXES) {
         let count = ch_i64(row, &format!("observed_{name}_n"));
         let sum = &row[format!("observed_{name}")];
         let complete = records > 0 && count == records && !sum.is_null();
@@ -142,11 +72,11 @@ pub(super) fn enrich(row: &Value, result: &mut Value, records: i64) {
 }
 
 pub(super) fn from_ch(row: &Value) -> Value {
-    if FIELDS.iter().all(|(_, flag, _, _)| row[*flag].is_null()) {
+    if FIELDS.iter().all(|(_, flag)| row[*flag].is_null()) {
         return Value::Null;
     }
     let mut details = json!({});
-    for (index, (_, flag, _, _)) in FIELDS.iter().enumerate() {
+    for (index, (_, flag)) in FIELDS.iter().enumerate() {
         let value = if row[*flag].is_null() {
             Value::Null
         } else {

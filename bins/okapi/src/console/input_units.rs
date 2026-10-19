@@ -19,14 +19,14 @@ pub(super) fn raw_sql() -> String {
     )
 }
 
+/// PG 账本上的 [`VALID_CHAR`]：同样只认 token 全为 0 的字符计量行，带 token 的算口径冲突、留在未知里。
+pub(super) const PG_VALID_CHAR: &str = "b.input_unit = 'characters' AND b.input_characters IS NOT NULL AND b.prompt_tokens = 0 AND b.completion_tokens = 0 AND b.cached_tokens = 0 AND COALESCE(b.cache_write_tokens, 0) = 0 AND b.reasoning_tokens = 0 AND COALESCE(b.audio_prompt_tokens, 0) = 0 AND COALESCE(b.audio_completion_tokens, 0) = 0 AND COALESCE(b.image_prompt_tokens, 0) = 0 AND COALESCE(b.image_completion_tokens, 0) = 0";
+
 pub(super) fn pg_sql() -> String {
-    let unit = "b.usage_details->>'input_unit'";
-    let raw = "b.usage_details->'input_characters'";
-    // The ledger validates new character metadata before writing JSON. Missing old JSON stays unknown;
-    // anything that is not a JSON integer counts as unknown too instead of failing the whole query.
-    let quantity = format!("({})", super::usage_observations::pg_bigint(raw));
+    // billing_records 的生成列：input_characters 只认 JSON 整数，缺失、JSON null（按 token 计的请求就这样写）
+    // 与脏值都是 NULL，与 CH 的 isNull 同义；没有 input_unit 的旧记录两边都不算，留在未知里。
     format!(
-        "'unit_observed', COUNT(*), 'unit_characters', SUM({quantity}) FILTER (WHERE {unit} = 'characters'), 'unit_character_n', COUNT({quantity}) FILTER (WHERE {unit} = 'characters'), 'unit_token_n', COUNT(*) FILTER (WHERE {unit} = 'tokens' AND {raw} IS NULL)"
+        "'unit_observed', COUNT(*), 'unit_characters', SUM(b.input_characters) FILTER (WHERE {PG_VALID_CHAR}), 'unit_character_n', COUNT(*) FILTER (WHERE {PG_VALID_CHAR}), 'unit_token_n', COUNT(*) FILTER (WHERE b.input_unit = 'tokens' AND b.input_characters IS NULL)"
     )
 }
 
