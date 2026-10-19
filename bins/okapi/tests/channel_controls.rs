@@ -48,7 +48,7 @@ async fn quota(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
         10
     };
     Json(
-        json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
+        json!({"five_hour":{"utilization":used,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":10,"resets_at":"2099-01-01T00:00:00Z"},"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":used,"limit_window_seconds":604_800,"reset_at":4_070_908_800_i64},"secondary_window":{"used_percent":10,"limit_window_seconds":18000,"reset_at":4_070_908_800_i64}}}),
     )
 }
 async fn profile(State(mock): State<Mock>, headers: HeaderMap) -> Json<Value> {
@@ -546,6 +546,36 @@ async fn subscription_plan_rides_the_quota_probe_once_a_day_and_never_follows_a_
         .await
         .is_none(),
         "换了账号不显示旧档位"
+    );
+}
+
+/// Codex 的档位与额度窗口出自同一个用量接口（`plan_type`），控制台据此显示订阅类型。
+/// 这个接口限流很严，档位必须随额度那一次请求带回，不能再单独打一次。
+#[tokio::test]
+async fn codex_plan_rides_the_quota_response_without_a_second_request() {
+    let env = setup(
+        "codex",
+        json!({"account_control":{"quota_aware":true,"refresh_mode":"external"}}),
+    )
+    .await;
+    let row = okapi_store::oauth_credentials::target(&env.state.pg, env.channel, env.key)
+        .await
+        .unwrap()
+        .unwrap();
+    let plaintext = okapi_store::credential::open(None, &row.credential_ciphertext).unwrap();
+    account_control::quota::poll(&env.state, &row, &plaintext).await;
+    assert_eq!(env.mock.quota.load(Ordering::SeqCst), 1);
+    assert!(
+        account_control::quota::read(&env.state, env.key)
+            .await
+            .is_some(),
+        "额度观测照常落库"
+    );
+    assert_eq!(
+        account_control::quota::plan(&env.state, env.key, "codex", &plaintext)
+            .await
+            .as_deref(),
+        Some("prolite")
     );
 }
 

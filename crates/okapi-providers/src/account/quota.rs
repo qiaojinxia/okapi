@@ -20,6 +20,10 @@ pub struct Snapshot {
     /// Other reported windows still enforce the upstream's hard exhaustion.
     #[serde(default)]
     pub threshold_window: Option<String>,
+    /// 用量应答里顺带给出的订阅档位（Codex 的 `plan_type`）。只交给档位观测，不进额度观测：
+    /// 有它就不必再为档位单独请求一次限流很严的用量接口。
+    #[serde(skip)]
+    pub plan: Option<String>,
 }
 
 /// 一次观测在多久内算数。额度只靠后台轮询（每 5 分钟一次），有效期必须长过轮询间隔，

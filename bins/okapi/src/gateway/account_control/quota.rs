@@ -211,33 +211,23 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
         return;
     };
     let outbound = okapi_providers::Outbound::from_settings(&row.settings, proxy_url);
-    match hook
-        .quota(okapi_providers::account::QuotaContext {
-            http: state.upstream.http(),
-            api_base: &base,
-            access_token: credential.material(),
-            account_id: credential
-                .oauth()
-                .and_then(|oauth| oauth.account_id.as_deref()),
-            outbound: &outbound,
-        })
-        .await
-    {
-        Ok(snapshot) => {
-            refresh_plan(
-                state,
-                row.id,
-                hook,
-                &credential,
-                &row.provider,
-                &base,
-                &outbound,
-            )
-            .await;
+    let context = || okapi_providers::account::QuotaContext {
+        http: state.upstream.http(),
+        api_base: &base,
+        access_token: credential.material(),
+        account_id: credential
+            .oauth()
+            .and_then(|oauth| oauth.account_id.as_deref()),
+        outbound: &outbound,
+    };
+    match hook.quota(context()).await {
+        Ok(mut snapshot) => {
+            let reported_plan = snapshot.plan.take();
             let observation = Observation {
                 identity: identity(&row.provider, &credential),
                 snapshot,
             };
+            // 路由靠额度观测：先落库，档位（只供展示，可能还要再请求一次上游）放在后面
             if let Ok(payload) = serde_json::to_string(&observation) {
                 let result: Result<(), _> = state
                     .sched
@@ -259,12 +249,22 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
                     tracing::warn!(key=row.id,%error,"quota observation persistence failed");
                 }
             }
+            refresh_plan(
+                state,
+                row.id,
+                hook,
+                observation.identity,
+                reported_plan,
+                context(),
+            )
+            .await;
         }
         Err(error) => back_off(state, row.id, &error).await,
     }
 }
 
 /// 订阅档位很少变：额度探测成功后顺带查，每把 key 每天最多一次（失败或中途退出一小时后再试）。
+/// 额度应答里已带档位的（Codex）每次探测直接记下，不另发请求。
 const PLAN_POLL_SECS: i64 = 86_400;
 const PLAN_RETRY_SECS: i64 = 3_600;
 /// 观测保留两个周期，一次失败不会让列表上的档位消失。
@@ -280,11 +280,40 @@ async fn refresh_plan(
     state: &AppState,
     key: i64,
     hook: &dyn okapi_providers::account::AccountHooks,
-    credential: &ResolvedCredential<'_>,
-    provider: &str,
-    base: &str,
-    outbound: &okapi_providers::Outbound,
+    identity: String,
+    reported: Option<String>,
+    context: okapi_providers::account::QuotaContext<'_>,
 ) {
+    let plan = match reported {
+        Some(plan) => plan,
+        None => match probe_plan(state, key, hook, context).await {
+            Some(plan) => plan,
+            None => return,
+        },
+    };
+    let observation = PlanObservation { identity, plan };
+    if let Ok(payload) = serde_json::to_string(&observation) {
+        let _: Result<(), _> = state
+            .sched
+            .client()
+            .set(
+                format!("plan:ck:{key}"),
+                payload,
+                Some(Expiration::EX(PLAN_MAX_AGE_SECS)),
+                None,
+                false,
+            )
+            .await;
+    }
+}
+
+/// 单独查档位（Claude 走 profile），受每天一次的租约约束。
+async fn probe_plan(
+    state: &AppState,
+    key: i64,
+    hook: &dyn okapi_providers::account::AccountHooks,
+    context: okapi_providers::account::QuotaContext<'_>,
+) -> Option<String> {
     let lease: Result<Option<String>, _> = state
         .sched
         .client()
@@ -298,20 +327,9 @@ async fn refresh_plan(
         )
         .await;
     if !matches!(lease, Ok(Some(_))) {
-        return;
+        return None;
     }
-    let result = hook
-        .plan(okapi_providers::account::QuotaContext {
-            http: state.upstream.http(),
-            api_base: base,
-            access_token: credential.material(),
-            account_id: credential
-                .oauth()
-                .and_then(|oauth| oauth.account_id.as_deref()),
-            outbound,
-        })
-        .await;
-    let plan = match result {
+    match hook.plan(context).await {
         Ok(plan) => {
             // 有应答（认得出或认不出档位）才把租约延到一天；失败就留着短租约，一小时后重试
             let _: Result<bool, _> = state
@@ -319,30 +337,12 @@ async fn refresh_plan(
                 .client()
                 .expire(format!("plan:poll:ck:{key}"), PLAN_POLL_SECS, None)
                 .await;
-            let Some(plan) = plan else { return };
             plan
         }
         Err(error) => {
             tracing::debug!(key, %error, "subscription plan probe failed");
-            return;
+            None
         }
-    };
-    let observation = PlanObservation {
-        identity: identity(provider, credential),
-        plan,
-    };
-    if let Ok(payload) = serde_json::to_string(&observation) {
-        let _: Result<(), _> = state
-            .sched
-            .client()
-            .set(
-                format!("plan:ck:{key}"),
-                payload,
-                Some(Expiration::EX(PLAN_MAX_AGE_SECS)),
-                None,
-                false,
-            )
-            .await;
     }
 }
 

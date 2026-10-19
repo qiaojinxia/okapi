@@ -101,6 +101,16 @@ pub fn email_from_id_token(id_token: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// access token（同为 JWT）里签发时的订阅档位：`https://api.openai.com/auth`.`chatgpt_plan_type`。
+#[must_use]
+pub fn plan_from_access_token(access_token: &str) -> Option<String> {
+    account::known_plan(
+        id_token_claims(access_token)?
+            .get("https://api.openai.com/auth")?
+            .get("chatgpt_plan_type"),
+    )
+}
+
 /// 只解码载荷，不验签：值只用于展示与 header，不作为信任依据。
 fn id_token_claims(id_token: &str) -> Option<Value> {
     let payload = id_token.split('.').nth(1)?;
@@ -469,6 +479,8 @@ mod tests {
             r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-xyz","chatgpt_plan_type":"plus"}}"#,
         );
         assert_eq!(account_id_from_id_token(&jwt).as_deref(), Some("acct-xyz"));
+        assert_eq!(plan_from_access_token(&jwt).as_deref(), Some("plus"));
+        assert!(plan_from_access_token(&jwt_with_payload(r#"{"sub":"u"}"#)).is_none());
         assert!(account_id_from_id_token(&jwt_with_payload(r#"{"sub":"u"}"#)).is_none());
         assert!(account_id_from_id_token("not-a-jwt").is_none());
         // 经 parse_tokens 整体解析也能带出来

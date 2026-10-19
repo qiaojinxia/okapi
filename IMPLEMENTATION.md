@@ -2429,6 +2429,9 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   `organization.organization_type` + `rate_limit_tier` → `pro` / `max_5x` / `max_20x` / `max` / `team` / `enterprise`。
   挂在额度探测成功之后，同出口同 token，每把 key 每天最多一次（`plan:poll:ck:*`，失败 1h 后重试），
   结果连凭证身份存 `plan:ck:*`（48h）；换了账号身份不符就不显示。列表 key 带 `account_plan`。
+  【2026-10-18】Codex 的档位就在用量接口的同一份应答里（`plan_type`）：随额度探测带回（`Snapshot.plan`，
+  不进额度观测），每次探测直接记下，不再为档位单独打这个限流很严的接口；应答没给时 `plan` 钩子只读
+  access token 的 `chatgpt_plan_type`，不发请求。额度观测先落库，档位放在后面，路由不再等展示数据。
   `GET /admin/stats/channel-usage?days=30`（`mv_cube_hour` 按渠道汇总请求、输入/缓存/输出 token、计费与上游成本），
   列表「测试 / 近 24h」列下多一行「近 30 天 N tokens · $X」，悬停看明细。
 

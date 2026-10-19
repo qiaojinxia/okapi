@@ -84,6 +84,7 @@ impl AccountHooks for ClaudeAccount {
             allowed: None,
             windows,
             threshold_window: Some("five_hour".into()),
+            plan: None,
         })
     }
 
