@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { ChannelTimelineDrawer } from '@/features/channels/ChannelTimelineDrawer'
@@ -11,6 +11,7 @@ import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { formatBp, formatCount, formatMoneyAggregate, formatUpstreamBalance } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { cn } from '@/lib/utils'
 
 /// channel_keys.status：1 active / 2 cooling / 3 rate_limited / 4 quota_exhausted / 5 banned / 6 invalid
 const KEY_STATE: Record<number, string> = {
@@ -39,13 +40,9 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
   const active = keys.filter((k) => k.status === 1).length
   if (active === keys.length) {
     return (
-      // 窄屏允许 token 到期换到下一行，状态列不撑宽表格
-      <span className="inline-flex flex-wrap items-center gap-x-1.5 gap-y-1 whitespace-nowrap">
-        <Badge variant="success" dot title={t('admin:keyStateAllActive', { n: keys.length })}>
-          {t('admin:channelStateNormal')}
-        </Badge>
-        <OAuthExpiry keys={keys} />
-      </span>
+      <Badge variant="success" dot title={t('admin:keyStateAllActive', { n: keys.length })}>
+        {t('admin:channelStateNormal')}
+      </Badge>
     )
   }
   // 各非活跃态计数；冷却态附最近一把恢复的时间（"几分钟后自愈"与"要人工介入"是两种事）
@@ -75,14 +72,26 @@ export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enab
           {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(soonest.diff(dayjs(), 'minute', true))) })}
         </span>
       )}
-      <OAuthExpiry keys={keys} />
     </div>
   )
 }
 
+/// 状态列的明细行：左列短标签说明是什么，右列是值。放在 `<dl>` 两列网格里，标签自然对齐。
+/// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看徽章，明细只在异常时抢眼。
+export function StatusLine({ label, title, children }: { label: string; title?: string; children: ReactNode }) {
+  return (
+    <>
+      <dt className="whitespace-nowrap text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 whitespace-nowrap" title={title}>{children}</dd>
+    </>
+  )
+}
+
+const stampOf = (when: dayjs.Dayjs) => (when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm'))
+
 /// 订阅 OAuth 凭证（§11.38）的 access token 到期：最早到期的那把。过期不是故障——
-/// 下次请求会刷新——所以只是灰字提示，不进状态徽章。
-function OAuthExpiry({ keys }: { keys: ChannelKeyRow[] }) {
+/// 下次请求会刷新——所以只占一行明细，不进状态徽章。
+export function CredentialExpiry({ keys }: { keys: ChannelKeyRow[] }) {
   const { t } = useTranslation()
   const soonest = keys
     .map((k) => k.credential_expires_at)
@@ -90,41 +99,37 @@ function OAuthExpiry({ keys }: { keys: ChannelKeyRow[] }) {
     .sort((a, b) => a - b)[0]
   if (soonest === undefined) return null
   const when = dayjs.unix(soonest)
-  const stamp = when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm')
   return (
-    <span className="text-xs text-muted-foreground" title={when.format('YYYY-MM-DD HH:mm')}>
-      {when.isAfter(dayjs())
-        ? t('admin:keyOAuthExpires', { when: stamp })
-        : t('admin:keyOAuthExpired')}
-    </span>
+    <StatusLine label={t('admin:channelStatusCredential')} title={when.format('YYYY-MM-DD HH:mm')}>
+      {when.isAfter(dayjs()) ? (
+        <span className="tabular-nums">{t('admin:keyOAuthExpires', { when: stampOf(when) })}</span>
+      ) : (
+        <span className="text-muted-foreground">{t('admin:keyOAuthExpired')}</span>
+      )}
+    </StatusLine>
   )
 }
 
-/// 最近测活（new-api 渠道页"响应时间"列的对齐）：ms + 何时测的；失败给原因。
-/// 时间只显示到分钟——这列回答"最近一次探测多快、还新鲜吗"，不是精确时间戳。
+/// 最近测试（new-api 渠道页"响应时间"列的对齐）：延迟 + 何时测的；失败给原因。
+/// 时间只显示到分钟——这行回答"最近一次探测多快、还新鲜吗"，不是精确时间戳。
 export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
   const { t } = useTranslation()
   if (probe === null) {
-    return <span className="text-xs text-muted-foreground">{t('admin:probeNever')}</span>
+    return <span className="text-muted-foreground">{t('admin:probeNever')}</span>
   }
   const when = dayjs(probe.at)
-  const stamp = when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm')
-  if (probe.ok) {
-    // 探测的是 /models 这类轻量端点，>2s 已经算慢
-    const variant = probe.latency_ms >= 2_000 ? 'warning' : 'success'
-    return (
-      <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-        <Badge variant={variant}>{probe.latency_ms} ms</Badge>
-        <span className="text-xs text-muted-foreground">{stamp}</span>
-      </span>
-    )
-  }
+  // 探测的是 /models 这类轻量端点，>2s 已经算慢
+  const result = probe.ok ? (
+    <span className={cn('font-medium tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
+  ) : (
+    <span className="font-medium text-destructive">
+      {probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))}
+    </span>
+  )
   return (
-    <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-      <Badge variant="destructive">
-        {probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))}
-      </Badge>
-      <span className="text-xs text-muted-foreground">{stamp}</span>
+    <span className="inline-flex items-baseline gap-1.5">
+      {result}
+      <span className="text-muted-foreground tabular-nums" title={when.format('YYYY-MM-DD HH:mm')}>{stampOf(when)}</span>
     </span>
   )
 }
@@ -179,21 +184,23 @@ export function Health24h({
       : stat.error_rate_bp >= WARN_BP
         ? 'warning'
         : 'success'
+  const tone = { muted: 'text-muted-foreground', destructive: 'text-destructive', warning: 'text-warning', success: '' }[variant]
   return (
     <>
       <button
         type="button"
-        className="inline-flex items-center gap-1.5 rounded-md whitespace-nowrap hover:bg-muted/60"
+        className="-mx-1 inline-flex items-baseline gap-1.5 rounded px-1 whitespace-nowrap underline-offset-2 hover:bg-muted/60 hover:underline"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >
         {idle ? (
-          <span className="px-1 text-xs text-muted-foreground">—</span>
+          <span className="text-muted-foreground">{t('admin:health24hIdle')}</span>
         ) : (
           <>
-            <Badge variant={variant}>{formatBp(stat.error_rate_bp, i18n.language)}</Badge>
-            <span className="text-xs text-muted-foreground">
-              {t('admin:health24hRequests', { n: formatCount(stat.requests, i18n.language) })}
+            <span className="text-muted-foreground">{t('admin:health24hErrorRate')}</span>
+            <span className={cn('font-medium tabular-nums', tone)}>{formatBp(stat.error_rate_bp, i18n.language)}</span>
+            <span className="text-muted-foreground">
+              · {t('admin:health24hRequests', { n: formatCount(stat.requests, i18n.language) })}
             </span>
           </>
         )}

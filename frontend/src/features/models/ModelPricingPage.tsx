@@ -10,6 +10,8 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { IconButton } from '@/components/ui/icon-button'
 import { ImportDrawer } from '@/features/models/ImportDrawer'
+import { modelVendor } from '@/features/public-pricing/catalog-data'
+import { VendorIcon } from '@/features/public-pricing/VendorIcon'
 import { ModelDrawer } from '@/features/models/ModelDrawer'
 import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
@@ -254,13 +256,18 @@ export function ModelPricingPage() {
             {rows.map((m) => (
               <Tr key={m.model_name}>
                 <Td className="whitespace-nowrap text-xs">
-                  <p className="font-mono font-medium">{m.model_name}</p>
-                  {(m.display_name || m.catalog_config?.kind) && <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
-                    {m.catalog_config?.kind && <Badge variant="muted">{t(`admin:modelKinds.${m.catalog_config.kind}`, { defaultValue: m.catalog_config.kind })}</Badge>}
-                    {m.display_name && m.display_name !== m.model_name && <span>{m.display_name}</span>}
-                  </div>}
+                  <div className="flex items-center gap-2.5">
+                    <VendorIcon vendor={modelVendor(m)} size="sm" />
+                    <div className="min-w-0">
+                      <p className="font-mono font-medium">{m.model_name}</p>
+                      {(m.display_name || m.catalog_config?.kind) && <div className="mt-1 flex items-center gap-1.5 text-muted-foreground">
+                        {m.catalog_config?.kind && <Badge variant="muted">{t(`admin:modelKinds.${m.catalog_config.kind}`, { defaultValue: m.catalog_config.kind })}</Badge>}
+                        {m.display_name && m.display_name !== m.model_name && <span>{m.display_name}</span>}
+                      </div>}
+                    </div>
+                  </div>
                 </Td>
-                <Td className="text-xs text-muted-foreground">{m.vendor ?? '—'}</Td>
+                <Td className="whitespace-nowrap text-xs text-muted-foreground">{modelVendor(m).name || '—'}</Td>
                 <Td>
                   {m.pricing_mode === null ? (
                     <Badge variant="destructive">{t('admin:unpriced')}</Badge>

@@ -28,10 +28,12 @@ import { ProviderChip } from '@/features/channels/ProviderChip'
 import { Switch } from '@/components/ui/switch'
 import {
   ChannelUsage,
+  CredentialExpiry,
   Health24h,
   KeyStateSummary,
   LastBalance,
   LastProbe,
+  StatusLine,
   useChannelHealth24h,
   useChannelUsage,
 } from '@/features/channels/ChannelHealthCell'
@@ -453,16 +455,15 @@ export function ChannelsPage() {
                 {/* 协议列顺带模型数与优先级：两个短数字各占一列太浪费横向空间 */}
                 <Td>
                   <div className="flex flex-col items-start gap-1">
-                    <ProviderChip provider={c.provider} />
-                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground tabular-nums">
-                      {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
+                    <span className="inline-flex items-center gap-1">
+                      <ProviderChip provider={c.provider} />
                       {/* 供应商控制台直达（new-api #7146）：查上游余额/状态时不必再去搜网址 */}
                       {providerConsoleUrl(c.provider, c.api_base) !== null && (
                         <a
                           href={providerConsoleUrl(c.provider, c.api_base) ?? undefined}
                           target="_blank"
                           rel="noreferrer noopener"
-                          className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
                           title={t('admin:providerConsole')}
                           aria-label={t('admin:providerConsole')}
                         >
@@ -470,33 +471,42 @@ export function ChannelsPage() {
                         </a>
                       )}
                     </span>
+                    <span className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+                      {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
+                    </span>
                   </div>
                 </Td>
-                {/* 渠道"启用"≠ 能打：状态列 = 渠道开关 + key 状态机汇总，第二行最近测试与近 24h 错误率 */}
+                {/* 渠道"启用"≠ 能打：首行是渠道开关 + key 状态机汇总（主状态），
+                    下面是带标签的明细：最近测试、近 24h、凭证到期、出口，一行一项不混排 */}
                 <Td>
-                  <div className="flex min-w-44 flex-wrap items-center gap-1">
-                    <KeyStateSummary keys={c.keys} enabled={c.status === 1} />
-                    {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见 */}
-                    {c.status === 1 && (c.pools ?? []).length === 0 && (
-                      <Badge variant="destructive" title={t('admin:poolOrphanWarning')}>
-                        {t('admin:channelOrphan')}
-                      </Badge>
-                    )}
-                    {/* 显式出口（代理 / 组 / 直连）才标；继承全局默认的不标，免得每行一个徽章 */}
-                    {/* 最近测试与近 24h 同属「能不能打」，并进状态列第二行 */}
-                    <div className="flex basis-full flex-wrap items-center gap-x-2 gap-y-1">
-                      <LastProbe probe={c.last_test} />
-                      <Health24h
-                        stat={health.data?.data.find((s) => s.channel_id === c.id)}
-                        channel={{ id: c.id, name: c.name, provider: c.provider }}
-                      />
+                  <div className="flex min-w-48 flex-col items-start gap-1.5">
+                    <div className="flex flex-wrap items-center gap-1">
+                      <KeyStateSummary keys={c.keys} enabled={c.status === 1} />
+                      {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见 */}
+                      {c.status === 1 && (c.pools ?? []).length === 0 && (
+                        <Badge variant="destructive" title={t('admin:poolOrphanWarning')}>
+                          {t('admin:channelOrphan')}
+                        </Badge>
+                      )}
                     </div>
-                    {c.egress !== undefined && c.egress.mode !== 'inherit' && (
-                      <Badge variant="outline" title={t('admin:egressTitle')}>
-                        <Globe className="h-3 w-3" aria-hidden />
-                        {describeEgress(t, c.egress, proxies.data, proxyGroups.data)}
-                      </Badge>
-                    )}
+                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5 text-xs">
+                      <StatusLine label={t('admin:channelStatusProbe')}>
+                        <LastProbe probe={c.last_test} />
+                      </StatusLine>
+                      <StatusLine label={t('admin:channelStatus24h')}>
+                        <Health24h
+                          stat={health.data?.data.find((s) => s.channel_id === c.id)}
+                          channel={{ id: c.id, name: c.name, provider: c.provider }}
+                        />
+                      </StatusLine>
+                      <CredentialExpiry keys={c.keys} />
+                      {/* 显式出口（代理 / 组 / 直连）才列；继承全局默认的不列，免得每行多一行 */}
+                      {c.egress !== undefined && c.egress.mode !== 'inherit' && (
+                        <StatusLine label={t('admin:channelStatusEgress')} title={t('admin:egressTitle')}>
+                          {describeEgress(t, c.egress, proxies.data, proxyGroups.data)}
+                        </StatusLine>
+                      )}
+                    </dl>
                   </div>
                 </Td>
                 <Td>
@@ -651,6 +661,14 @@ const PLAN_LABELS: Record<string, string> = {
   max_20x: 'Max 20x',
   team: 'Team',
   enterprise: 'Enterprise',
+  // ChatGPT（Codex）档位，取自用量接口的 plan_type
+  free: 'Free',
+  go: 'Go',
+  plus: 'Plus',
+  prolite: 'Pro Lite',
+  promax: 'Pro Max',
+  business: 'Business',
+  edu: 'Edu',
 }
 
 function planLabel(plan: string): string {
