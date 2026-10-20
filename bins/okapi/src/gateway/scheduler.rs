@@ -3,8 +3,13 @@
 //! 层内怎么排由池的 routing_strategy 决定（docs/database.md §3.7）：
 //! - `priority_weighted`（默认）：成本修正后加权随机。有效权重 = weight × 1000 / cost_milli。
 //! - `least_latency`：按时延 EWMA 升序，无样本者按本层中位数插队。
+//! - `least_usage`：按 key 当日消费 ÷ 权重升序（`spend:ck:*`）。
+//! - `least_concurrency`：按 key 在途请求数 ÷ 权重升序（`conc:ck:*` 租约）。
 //!
-//! priority 分层在两种策略下都严格生效——层是运维显式表达的"先用谁"，
+//! 后两种读数相同（包括都为 0）时按 `priority_weighted` 的同一抽样随机排，空闲时与默认策略
+//! 一样按权重分流；没有读数的 key 按 0 处理——当日没花过钱、眼下没有在途，本来就该先用它。
+//!
+//! priority 分层在所有策略下都严格生效——层是运维显式表达的"先用谁"，
 //! 不该被时延或权重推翻。分层键是 (pool_rank, priority)：主池的全部层排完才进
 //! 降级池（IMPLEMENTATION §11.14）——降级池里优先级再高的渠道，也是"主池打不通
 //! 才轮到"的备胎。
@@ -19,6 +24,8 @@ use std::sync::Arc;
 pub enum Strategy {
     PriorityWeighted,
     LeastLatency,
+    LeastUsage,
+    LeastConcurrency,
 }
 
 impl Strategy {
@@ -26,6 +33,8 @@ impl Strategy {
     pub fn parse(raw: Option<&str>) -> Self {
         match raw {
             Some("least_latency") => Self::LeastLatency,
+            Some("least_usage") => Self::LeastUsage,
+            Some("least_concurrency") => Self::LeastConcurrency,
             _ => Self::PriorityWeighted,
         }
     }
@@ -48,6 +57,8 @@ fn layer_key(c: &ChannelCandidate) -> LayerKey {
 pub struct CandidateQueue {
     source: Arc<Vec<ChannelCandidate>>,
     indices: Vec<usize>,
+    /// 发出的候选带上 `count_in_flight`（`least_concurrency` 池要读在途数）。
+    count_in_flight: bool,
 }
 
 pub trait CandidateSet: Send + Sync {
@@ -93,14 +104,35 @@ impl CandidateSet for CandidateQueue {
 impl CandidateQueue {
     pub fn weighted(source: Arc<Vec<ChannelCandidate>>) -> Self {
         let indices = weighted_indices(&source);
-        Self { source, indices }
+        Self::ordered(source, indices)
     }
     pub fn by_latency<S: std::hash::BuildHasher>(
         source: Arc<Vec<ChannelCandidate>>,
         latency: &HashMap<i64, u32, S>,
     ) -> Self {
         let indices = latency_indices(&source, latency);
-        Self { source, indices }
+        Self::ordered(source, indices)
+    }
+    /// `least_usage` / `least_concurrency`：层内按 读数 ÷ 权重 升序。
+    pub fn by_load<S: std::hash::BuildHasher>(
+        source: Arc<Vec<ChannelCandidate>>,
+        load: &HashMap<i64, i64, S>,
+    ) -> Self {
+        let indices = load_indices(&source, load);
+        Self::ordered(source, indices)
+    }
+    fn ordered(source: Arc<Vec<ChannelCandidate>>, indices: Vec<usize>) -> Self {
+        Self {
+            source,
+            indices,
+            count_in_flight: false,
+        }
+    }
+    /// 发出的每个候选都登记在途（不设并发上限也登记，只计数）。
+    #[must_use]
+    pub fn counting_in_flight(mut self) -> Self {
+        self.count_in_flight = true;
+        self
     }
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
@@ -120,6 +152,7 @@ impl IntoIterator for CandidateQueue {
         CandidateIter {
             source: self.source,
             indices: self.indices.into_iter(),
+            count_in_flight: self.count_in_flight,
         }
     }
 }
@@ -127,6 +160,7 @@ impl IntoIterator for CandidateQueue {
 pub struct CandidateIter {
     source: Arc<Vec<ChannelCandidate>>,
     indices: std::vec::IntoIter<usize>,
+    count_in_flight: bool,
 }
 impl Iterator for CandidateIter {
     type Item = ChannelCandidate;
@@ -135,6 +169,7 @@ impl Iterator for CandidateIter {
             let mut candidate = self.source[i].clone();
             // 候选快照会缓存几秒：轮换组在每次真正发出前重抽，而不是一个 TTL 内钉死一个出口
             candidate.reroll_egress();
+            candidate.count_in_flight |= self.count_in_flight;
             candidate
         })
     }
@@ -196,6 +231,41 @@ fn latency_indices<S: std::hash::BuildHasher>(
     ordered
 }
 
+/// 层内按 读数 ÷ 权重 升序；读数相同按 [`weighted_indices`] 的同一抽样（指数时钟）随机排。
+#[allow(clippy::cast_precision_loss)] // i32 weight × 1000 is below 2^42, exactly representable.
+fn load_indices<S: std::hash::BuildHasher>(
+    candidates: &[ChannelCandidate],
+    load: &HashMap<i64, i64, S>,
+) -> Vec<usize> {
+    let mut rng = rand::rng();
+    let mut scores: Vec<_> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, candidate)| {
+            let reading = load
+                .get(&candidate.channel_key_id)
+                .copied()
+                .unwrap_or(0)
+                .max(0);
+            let share = i128::from(reading) * 1000 / i128::from(candidate.weight.max(1));
+            let uniform = 1.0 - rng.random::<f64>(); // (0,1], so ln is always finite.
+            (
+                layer_key(candidate),
+                share,
+                -uniform.ln() / effective_weight(candidate) as f64,
+                i,
+            )
+        })
+        .collect();
+    scores.sort_unstable_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then_with(|| a.2.total_cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+    scores.into_iter().map(|(_, _, _, index)| index).collect()
+}
+
 fn move_ordered(candidates: Vec<ChannelCandidate>, indices: Vec<usize>) -> Vec<ChannelCandidate> {
     let mut candidates: Vec<_> = candidates.into_iter().map(Some).collect();
     indices
@@ -255,6 +325,7 @@ mod tests {
             capabilities: serde_json::json!({}),
             cost_milli,
             pool_rank: 0,
+            count_in_flight: false,
         }
     }
 
@@ -416,10 +487,87 @@ mod tests {
             Strategy::parse(Some("least_latency")),
             Strategy::LeastLatency
         );
+        assert_eq!(Strategy::parse(Some("least_usage")), Strategy::LeastUsage);
+        assert_eq!(
+            Strategy::parse(Some("least_concurrency")),
+            Strategy::LeastConcurrency
+        );
         assert_eq!(
             Strategy::parse(Some("nonsense")),
             Strategy::PriorityWeighted
         );
         assert_eq!(Strategy::parse(None), Strategy::PriorityWeighted);
+    }
+
+    fn keys(queue: &CandidateQueue) -> Vec<i64> {
+        queue.iter().map(|c| c.channel_key_id).collect()
+    }
+
+    /// least_usage / least_concurrency：层内按 读数 ÷ 权重 升序；没有读数按 0；
+    /// 高优先层读数再大也在前，降级池读数再小也在后。
+    #[test]
+    fn least_load_orders_by_share_of_weight_within_layer_only() {
+        let mut busy_light = cand_with_key(1, 10); // 300 ÷ 1 = 300
+        busy_light.weight = 1;
+        let mut busy_heavy = cand_with_key(2, 10); // 600 ÷ 3 = 200
+        busy_heavy.weight = 3;
+        let idle = cand_with_key(3, 10); // 无读数 = 0
+        let lower_layer = cand_with_key(4, 0); // 低优先层，读数 0
+        let fallback = cand_in_pool(5, 1, 100); // 降级池，读数 0
+        let source = Arc::new(vec![fallback, lower_layer, busy_light, busy_heavy, idle]);
+        let load = HashMap::from([(1, 300_i64), (2, 600), (4, 0)]);
+        for _ in 0..50 {
+            assert_eq!(
+                keys(&CandidateQueue::by_load(source.clone(), &load)),
+                vec![3, 2, 1, 4, 5]
+            );
+        }
+    }
+
+    /// 读数相同（含都为 0）时退回权重抽样：空闲时与 priority_weighted 一样按权重分流，
+    /// 而不是永远先给输入序里的第一把 key。
+    #[test]
+    fn least_load_ties_split_by_weight() {
+        let mut light = cand_with_key(1, 0);
+        light.weight = 1;
+        let mut heavy = cand_with_key(2, 0);
+        heavy.weight = 3;
+        let source = Arc::new(vec![light, heavy]);
+        let load = HashMap::from([(1, 7_i64), (2, 21)]); // 7 ÷ 1 = 21 ÷ 3
+        let mut heavy_first = 0;
+        for _ in 0..5000 {
+            heavy_first +=
+                usize::from(keys(&CandidateQueue::by_load(source.clone(), &load))[0] == 2);
+        }
+        assert!(
+            (3300..4200).contains(&heavy_first),
+            "heavy first {heavy_first}/5000"
+        );
+        let idle = HashMap::new();
+        let mut heavy_first = 0;
+        for _ in 0..5000 {
+            heavy_first +=
+                usize::from(keys(&CandidateQueue::by_load(source.clone(), &idle))[0] == 2);
+        }
+        assert!(
+            (3300..4200).contains(&heavy_first),
+            "idle heavy first {heavy_first}/5000"
+        );
+    }
+
+    /// 只有 least_concurrency 的队列发出的候选带 count_in_flight；缓存里的快照不被改动。
+    #[test]
+    fn counting_queue_marks_emitted_candidates_only() {
+        let source = Arc::new(vec![cand_with_key(1, 0), cand_with_key(2, 0)]);
+        let plain: Vec<_> = CandidateQueue::by_load(source.clone(), &HashMap::new())
+            .into_iter()
+            .collect();
+        assert!(plain.iter().all(|c| !c.count_in_flight));
+        let counted: Vec<_> = CandidateQueue::by_load(source.clone(), &HashMap::new())
+            .counting_in_flight()
+            .into_iter()
+            .collect();
+        assert!(counted.iter().all(|c| c.count_in_flight));
+        assert!(source.iter().all(|c| !c.count_in_flight));
     }
 }

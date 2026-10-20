@@ -137,11 +137,13 @@ CREATE TABLE channel_pools (
     routing_strategy   VARCHAR(24) NOT NULL DEFAULT 'priority_weighted',
     -- priority_weighted：priority 分层 + 层内成本修正加权随机（历史行为，默认）
     -- least_latency  ：层内按 Redis 时延 EWMA 升序（需 lat:ck:* 有数据，缺数据退化为 priority_weighted）
+    -- least_usage    ：层内按 key 当日消费 ÷ 权重升序（spend:ck:*，UTC 零点清零；读数相同按权重随机）
+    -- least_concurrency：层内按 key 在途请求数 ÷ 权重升序（conc:ck:* 租约；读数相同按权重随机）
     fallback_pool_code VARCHAR(32) REFERENCES channel_pools(pool_code), -- 本池无候选时退到的池（单跳）
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT channel_pools_strategy_chk
-        CHECK (routing_strategy IN ('priority_weighted', 'least_latency')),
+        CHECK (routing_strategy IN ('priority_weighted', 'least_latency', 'least_usage', 'least_concurrency')),
     CONSTRAINT channel_pools_fallback_not_self
         CHECK (fallback_pool_code IS NULL OR fallback_pool_code <> pool_code)
 );
@@ -729,12 +731,12 @@ PG 只服务**点查与账本**（鉴权回源、CRUD、事件重放对账）；
 | `redeem:ip:<batch_id>:<ip>` | STRING | 7d | 兑换码同批次单 IP 核销计数（max_per_ip 闸；IP 取 CDN 头，直连无头不限；翻转失败回退） |
 | `crl:<scope>:<ip>` | STRING | 60s | 关键接口每 IP 固定窗限流（login/register/totp/setup/redeem/email_code/password_forgot/password_reset/invalid_api_key；settings.critical_rate_limits 覆写缺省，对齐 new-api rc.24） |
 | `conc:{<uid>}:k:<key_id>` | STRING | 1h 泄漏保护 | key 级在途并发（api_keys.max_concurrency） |
-| `conc:ck:{<channel_key_id>}:v2` | ZSET | 成员 90s / 键 2× | 渠道 key 在途并发租约（member = 请求租约，score = Redis 服务器时钟的到期毫秒；准入先 ZREMRANGEBYSCORE 清过期）；生成和原生 Token 计数共用 |
+| `conc:ck:{<channel_key_id>}:v2` | ZSET | 成员 90s / 键 2× | 渠道 key 在途并发租约（member = 请求租约，score = Redis 服务器时钟的到期毫秒；准入先 ZREMRANGEBYSCORE 清过期）；生成和原生 Token 计数共用。`least_concurrency` 池没设上限的 key 也登记（只计数不拦），选路时按 ZCOUNT 读在途数 |
 | `conc:px:{<proxy_id>}:v1` | ZSET | 成员 90s 续租 / 键 2× | 出口代理在途并发租约（`proxies.max_concurrency`，§11.41）：与 key 租约一起占，任一满了当「渠道忙」并退回已占的那份；跨 key、跨网关实例共享 |
 | `egress:probe:round` | STRING | ≈ 探测间隔 | 出口代理后台探测的本轮租约（SET NX EX）：多 worker 实例时每轮只由拿到的那个执行 |
 | `inflight:gauge` | HASH | 整键 1h；字段超过 10s 不计入、5min 清除 | 集群在途量（HTTP 请求与 Responses WS 活动轮次）：`node → <count>\|<unix_ms>`。HTTP 在启用 surge 规则时跟踪响应体；Responses WS 跟踪单轮准入至结算；活动期间每秒续报，零/非零切换及时上报，其余变化一秒采样。正常结束、报错、断开、取消均释放；每实例串行写入，节点名称须唯一。软实时计价输入，不用于严格并发限流 |
 | `rpm:ck:<channel_key_id>:<分钟桶>` | STRING 计数 | 120s | 渠道 key 级 RPM 闸（`channel_keys.rpm_limit`）。固定分钟窗，与 `crl:*` 同机制；超限即把该 key 从候选里摘掉而非拒绝请求——同渠道其它 key 仍可承接 |
-| `spend:ck:<channel_key_id>:<yyyymmdd>` | STRING | 48h | 渠道 key 当日累计消费 micro（`channel_keys.daily_spend_cap_micro`）。结算后累加、选路前比较：软实时，宁可略超也不阻塞热路径 |
+| `spend:ck:<channel_key_id>:<yyyymmdd>` | STRING | 48h | 渠道 key 当日累计消费 micro（`channel_keys.daily_spend_cap_micro`）。结算后累加、选路前比较：软实时，宁可略超也不阻塞热路径；`least_usage` 池选路也读它 |
 | `lat:ck:<channel_key_id>` | STRING | 10min | 时延 EWMA（毫秒）。结算侧按 `new = old*0.7 + sample*0.3` 更新；`least_latency` 池按此升序。无数据的 key 视为中位数，避免新 key 因"无历史"被永久冷落或被优先灌流 |
 | `stick:resp:{<uid>}:v2:<api_key_id>:<sha256(response_id)>` | STRING/JSON | 30 天固定 | Responses L1：渠道 ID、凭证 ID、上游账号摘要；按用户/API key 隔离，Lua 原子建立且不可改绑，读取不续期；读写故障均拒绝改投。详见 [历史路由](responses-history-routing.md) |
 | `stick:sess:{<uid>}:v1:<session_hash>` | STRING | 1h 滑动 | 粘性 L2 → channel_key_id |

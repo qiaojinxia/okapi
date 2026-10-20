@@ -46,14 +46,25 @@ export interface PoolMember {
 export const DEFAULT_POOL = 'default'
 
 /// 与库 CHECK 约束和后端 ROUTING_STRATEGIES 一致。
-export const ROUTING_STRATEGIES = ['priority_weighted', 'least_latency'] as const
+export const ROUTING_STRATEGIES = ['priority_weighted', 'least_latency', 'least_usage', 'least_concurrency'] as const
+
+export type RoutingStrategy = (typeof ROUTING_STRATEGIES)[number]
+
+/// 未知取值按默认策略显示，与后端 `Strategy::parse` 一致。
+export function strategyOf(raw: string | null | undefined): RoutingStrategy {
+  return ROUTING_STRATEGIES.find((s) => s === raw) ?? 'priority_weighted'
+}
 
 export const STRATEGY_LABEL = {
   priority_weighted: 'admin:strategyPriorityWeighted',
   least_latency: 'admin:strategyLeastLatency',
+  least_usage: 'admin:strategyLeastUsage',
+  least_concurrency: 'admin:strategyLeastConcurrency',
 } as const
 
 export const STRATEGY_HINT = {
   priority_weighted: 'admin:strategyPriorityWeightedHint',
   least_latency: 'admin:strategyLeastLatencyHint',
+  least_usage: 'admin:strategyLeastUsageHint',
+  least_concurrency: 'admin:strategyLeastConcurrencyHint',
 } as const

@@ -5,15 +5,13 @@ import { Button } from '@/components/ui/button'
 import { Drawer, FieldGroup } from '@/components/ui/drawer'
 import { Input, Label } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
-import { ROUTING_STRATEGIES, STRATEGY_HINT, STRATEGY_LABEL } from '@/features/pools/types'
-import type { PoolRow } from '@/features/pools/types'
+import { ROUTING_STRATEGIES, STRATEGY_HINT, STRATEGY_LABEL, strategyOf } from '@/features/pools/types'
+import type { PoolRow, RoutingStrategy } from '@/features/pools/types'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
 import { isMachineCode } from '@/lib/codes'
 import { describeError } from '@/lib/i18n'
 import { poolOptions } from './pool-options'
-
-type Strategy = (typeof ROUTING_STRATEGIES)[number]
 
 export function PoolDrawer({
   pool,
@@ -27,9 +25,7 @@ export function PoolDrawer({
   const { t } = useTranslation()
   const [code, setCode] = useState(pool?.pool_code ?? '')
   const [description, setDescription] = useState(pool?.description ?? '')
-  const [strategy, setStrategy] = useState<Strategy>(
-    (pool?.routing_strategy as Strategy | undefined) ?? 'priority_weighted',
-  )
+  const [strategy, setStrategy] = useState<RoutingStrategy>(strategyOf(pool?.routing_strategy))
   const [fallback, setFallback] = useState(pool?.fallback_pool_code ?? '')
 
   // 降级目标候选：其它池（不能选自己）
@@ -106,7 +102,7 @@ export function PoolDrawer({
           id="pool-strategy"
           className="w-56"
           value={strategy}
-          onChange={(v) => setStrategy(v as Strategy)}
+          onChange={(v) => setStrategy(strategyOf(v))}
           options={ROUTING_STRATEGIES.map((s) => ({ value: s, label: t(STRATEGY_LABEL[s]) }))}
         />
         <p className="text-xs text-muted-foreground">{t(STRATEGY_HINT[strategy])}</p>

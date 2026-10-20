@@ -1727,6 +1727,22 @@ async fn eligible_candidates(
                 .await;
             CandidateQueue::by_latency(Arc::clone(&raw), &latency)
         }
+        Strategy::LeastUsage => {
+            let spend = bill
+                .state
+                .sched
+                .channel_key_spends(raw.iter().map(|c| c.channel_key_id))
+                .await;
+            CandidateQueue::by_load(Arc::clone(&raw), &spend)
+        }
+        Strategy::LeastConcurrency => {
+            let in_flight = bill
+                .state
+                .sched
+                .channel_key_in_flight(raw.iter().map(|c| c.channel_key_id))
+                .await;
+            CandidateQueue::by_load(Arc::clone(&raw), &in_flight).counting_in_flight()
+        }
     };
     // 与诊断和接入示例共用入口规则；配置正常但入口错误时不要报服务不可用。
     candidates.retain(|c| bill.ingress.accepts(c, &bill.model));

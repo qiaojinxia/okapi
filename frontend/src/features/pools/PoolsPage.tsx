@@ -13,6 +13,7 @@ import { EmptyState, ErrorState } from '@/components/ui/state'
 import { toast } from '@/components/ui/toast'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
 import { PoolDrawer } from '@/features/pools/PoolDrawer'
+import { STRATEGY_LABEL, strategyOf } from '@/features/pools/types'
 import type { PoolRow } from '@/features/pools/types'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
@@ -110,12 +111,8 @@ export function PoolsPage() {
                     </span>
                   </Td>
                   <Td>
-                    <Badge variant={p.routing_strategy === 'least_latency' ? 'default' : 'muted'}>
-                      {t(
-                        p.routing_strategy === 'least_latency'
-                          ? 'admin:strategyLeastLatency'
-                          : 'admin:strategyPriorityWeighted',
-                      )}
+                    <Badge variant={strategyOf(p.routing_strategy) === 'priority_weighted' ? 'muted' : 'default'}>
+                      {t(STRATEGY_LABEL[strategyOf(p.routing_strategy)])}
                     </Badge>
                   </Td>
                   <Td className="font-mono text-xs">

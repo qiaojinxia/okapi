@@ -1646,7 +1646,7 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   const pools = [
     { pool_code: 'default', description: null, routing_strategy: 'priority_weighted', fallback_pool_code: null, builtin: true, channel_count: 3, group_count: 2, key_count: 0, fallback_ref_count: 1 },
     { pool_code: 'premium', description: 'paid', routing_strategy: 'least_latency', fallback_pool_code: 'default', builtin: false, channel_count: 1, group_count: 1, key_count: 0, fallback_ref_count: 0 },
-    { pool_code: 'spare', description: null, routing_strategy: 'priority_weighted', fallback_pool_code: null, builtin: false, channel_count: 0, group_count: 0, key_count: 0, fallback_ref_count: 0 },
+    { pool_code: 'spare', description: null, routing_strategy: 'least_concurrency', fallback_pool_code: null, builtin: false, channel_count: 0, group_count: 0, key_count: 0, fallback_ref_count: 0 },
   ]
   await page.route('**/admin/pools?*', (route) => route.fulfill({ json: { data: pools, total: pools.length } }))
   await page.route('**/admin/pools', async (route) => {
@@ -1667,6 +1667,8 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   await expect(rowOf('default').getByRole('button', { name: '删除', exact: true })).toBeDisabled()
   await expect(rowOf('premium').getByRole('button', { name: '删除', exact: true })).toBeDisabled()
   await expect(rowOf('spare').getByRole('button', { name: '删除', exact: true })).toBeEnabled()
+  await expect(rowOf('premium')).toContainText('最低时延')
+  await expect(rowOf('spare')).toContainText('最少并发')
 
   await rowOf('premium').getByRole('button', { name: '编辑', exact: true }).click()
   const edit = await openedDialog(page)
@@ -1702,11 +1704,13 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   const save = create.getByRole('button', { name: '保存', exact: true })
   await expect(save).toBeDisabled()
   await create.locator('#pool-code').fill(' stable ')
+  await create.locator('#pool-strategy').selectOption('least_usage')
+  await expect(create).toContainText('当日消费最少')
   await create.locator('#pool-fallback').selectOption('default')
   saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/pools'))
   await save.click()
   await saved
-  expect(posts[1]).toEqual({ pool_code: 'stable', description: '', routing_strategy: 'priority_weighted', fallback_pool_code: 'default' })
+  expect(posts[1]).toEqual({ pool_code: 'stable', description: '', routing_strategy: 'least_usage', fallback_pool_code: 'default' })
 
   await rowOf('spare').getByRole('button', { name: '删除', exact: true }).click()
   const confirm = page.getByRole('alertdialog')

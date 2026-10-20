@@ -520,3 +520,134 @@ async fn key_state_machine_branches() {
     assert_eq!(row.status, 6, "401 应转 invalid（仅人工恢复）");
     assert!(row.cooldown_until.is_none());
 }
+
+/// 给令牌单独建一个池（全部渠道只在这个池里），选路策略由参数给出。
+async fn pin_to_pool(env: &TestEnv, strategy: &str) {
+    let pool = format!("p-{}", &Uuid::new_v4().simple().to_string()[..10]);
+    okapi_store::admin::upsert_channel_pool(&env.pg, &pool, "t", strategy, None)
+        .await
+        .unwrap();
+    for key in &env.channel_keys {
+        let channel: i64 = sqlx::query_scalar("SELECT channel_id FROM channel_keys WHERE id = $1")
+            .bind(key)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+        let member = okapi_store::admin::PoolMember {
+            pool_code: pool.clone(),
+            priority_override: None,
+            weight_override: None,
+        };
+        okapi_store::admin::set_channel_pools(&env.pg, channel, &[member])
+            .await
+            .unwrap();
+    }
+    let key_hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(env.token.as_bytes()))
+    };
+    sqlx::query("UPDATE api_keys SET pool_override = $1 WHERE key_hash = $2")
+        .bind(&pool)
+        .bind(&key_hash)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
+
+async fn redis() -> fred::clients::Client {
+    okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap()
+}
+
+/// 某把 key 未到期的在途租约数（与网关读数同一口径）。
+async fn in_flight(redis: &fred::clients::Client, key: i64) -> i64 {
+    use fred::interfaces::SortedSetsInterface;
+    #[allow(clippy::cast_precision_loss)]
+    let now = chrono::Utc::now().timestamp_millis() as f64;
+    redis
+        .zcount(format!("conc:ck:{{{key}}}:v2"), now, f64::MAX)
+        .await
+        .unwrap()
+}
+
+async fn served_by(env: &TestEnv, resp: reqwest::Response) -> i64 {
+    assert_eq!(resp.status(), 200);
+    let id = rid(&resp);
+    resp.text().await.unwrap();
+    wait_record(&env.pg, id).await.channel_key_id.unwrap()
+}
+
+/// least_usage：同一层里当日消费多的 key 让路，请求都落到消费少的那把。
+#[tokio::test]
+async fn least_usage_pool_routes_to_the_key_with_less_spend_today() {
+    use fred::interfaces::KeysInterface;
+    let env = setup(&[("/ok/v1", 0), ("/ok/v1", 0)]).await;
+    pin_to_pool(&env, "least_usage").await;
+    let (heavy, light) = (env.channel_keys[0], env.channel_keys[1]);
+    let day = chrono::Utc::now().format("%Y%m%d");
+    let _: () = redis()
+        .await
+        .set(
+            format!("spend:ck:{heavy}:{day}"),
+            1_000_000_000_i64,
+            Some(fred::types::Expiration::EX(600)),
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        let resp = post_chat(&env, &env.model, None).await;
+        assert_eq!(served_by(&env, resp).await, light);
+    }
+}
+
+/// least_concurrency：两把 key 都没设并发上限，第一个请求在途时第二个分到另一把；
+/// 结束后两把 key 的在途都归零。
+#[tokio::test]
+async fn least_concurrency_pool_spreads_overlapping_requests() {
+    let env = setup(&[("/slow/v1", 0), ("/slow/v1", 0)]).await;
+    pin_to_pool(&env, "least_concurrency").await;
+    let redis = redis().await;
+    let first = tokio::spawn({
+        let (gateway, token, model) = (env.gateway, env.token.clone(), env.model.clone());
+        async move {
+            reqwest::Client::new()
+                .post(format!("http://{gateway}/v1/chat/completions"))
+                .bearer_auth(token)
+                .json(&json!({"model": model, "stream": true, "max_tokens": 32,
+                    "messages": [{"role":"user","content":"first"}]}))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let mut busy = None;
+    for _ in 0..200 {
+        for key in &env.channel_keys {
+            if in_flight(&redis, *key).await == 1 {
+                busy = Some(*key);
+            }
+        }
+        if busy.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let busy = busy.expect("没设上限的 key 也应登记在途");
+    let second = post_chat(&env, &env.model, None).await;
+    assert_ne!(served_by(&env, second).await, busy);
+    assert_eq!(served_by(&env, first.await.unwrap()).await, busy);
+    for _ in 0..50 {
+        let mut total = 0;
+        for key in &env.channel_keys {
+            total += in_flight(&redis, *key).await;
+        }
+        if total == 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("请求结束后在途租约应退回");
+}

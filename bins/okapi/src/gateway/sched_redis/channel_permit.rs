@@ -31,6 +31,11 @@ const RENEW: &str = r"
  return 1
 ";
 
+/// key 的并发租约集合：成员是一次在途尝试，分数是租约到期的毫秒时刻。
+pub(super) fn key_leases(key: i64) -> String {
+    format!("conc:ck:{{{key}}}:v2")
+}
+
 pub struct ChannelPermit {
     sched: SchedulerRedis,
     leases: Vec<(String, String)>,
@@ -38,18 +43,21 @@ pub struct ChannelPermit {
     expired: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 impl ChannelPermit {
-    /// key 并发上限 + 该候选出口代理的并发上限（若有）。
+    /// key 并发上限 + 该候选出口代理的并发上限（若有）。`least_concurrency` 池的候选
+    /// （[`okapi_store::ChannelCandidate::count_in_flight`]）没设上限也登记一份只计数的租约。
     pub async fn acquire(
         sched: &SchedulerRedis,
         candidate: &okapi_store::ChannelCandidate,
     ) -> Result<Option<Self>, UpstreamError> {
-        Self::acquire_parts(
+        Self::acquire_with_ttl(
             sched,
             candidate.channel_key_id,
             candidate.max_concurrency,
             candidate
                 .egress_proxy_id
                 .zip(candidate.egress_max_concurrency),
+            candidate.count_in_flight,
+            LEASE_MS,
         )
         .await
     }
@@ -67,21 +75,26 @@ impl ChannelPermit {
         cap: Option<i32>,
         proxy: Option<(i64, i32)>,
     ) -> Result<Option<Self>, UpstreamError> {
-        Self::acquire_with_ttl(sched, key, cap, proxy, LEASE_MS).await
+        Self::acquire_with_ttl(sched, key, cap, proxy, false, LEASE_MS).await
     }
+    #[allow(clippy::too_many_lines)] // 准入、回滚与续租共用同一份租约清单，拆开反而难核对
     async fn acquire_with_ttl(
         sched: &SchedulerRedis,
         key: i64,
         cap: Option<i32>,
         proxy: Option<(i64, i32)>,
+        count: bool,
         ttl: u64,
     ) -> Result<Option<Self>, UpstreamError> {
+        // (租约集合, 上限, 是否拦截)。只计数的租约上限放到最大：登记不上、续不上都不影响请求
         let mut wanted = Vec::new();
-        if let Some(cap) = cap.filter(|cap| *cap > 0) {
-            wanted.push((format!("conc:ck:{{{key}}}:v2"), cap));
+        match cap.filter(|cap| *cap > 0) {
+            Some(cap) => wanted.push((key_leases(key), cap, true)),
+            None if count => wanted.push((key_leases(key), i32::MAX, false)),
+            None => {}
         }
         if let Some((proxy, cap)) = proxy.filter(|(_, cap)| *cap > 0) {
-            wanted.push((format!("conc:px:{{{proxy}}}:v1"), cap));
+            wanted.push((format!("conc:px:{{{proxy}}}:v1"), cap, true));
         }
         // 先拿到的租约挂在 permit 上：后一份失败时随 drop 一并退回
         let mut permit = Self {
@@ -90,11 +103,9 @@ impl ChannelPermit {
             heartbeat: None,
             expired: Box::pin(std::future::pending()),
         };
-        if wanted.is_empty() {
-            return Ok(Some(permit));
-        }
         let id = Uuid::new_v4().to_string();
-        for (name, cap) in wanted {
+        let mut renewal = Vec::new();
+        for (name, cap, enforced) in wanted {
             let admitted = sched
                 .client
                 .eval::<i64, _, _, _>(
@@ -103,6 +114,14 @@ impl ChannelPermit {
                     vec![cap.to_string(), id.clone(), ttl.to_string()],
                 )
                 .await;
+            if !enforced {
+                // Redis 抖一下只是少计这一次在途，不能因此把请求拦下
+                if matches!(admitted, Ok(1)) {
+                    permit.leases.push((name.clone(), id.clone()));
+                    renewal.push((name, id.clone(), false));
+                }
+                continue;
+            }
             if !matches!(admitted, Ok(1)) {
                 // 前面已占的租约等退回完成再返回：紧接着的下一次准入不能还看到它被占着
                 permit.release().await;
@@ -113,33 +132,46 @@ impl ChannelPermit {
                     )),
                 };
             }
-            permit.leases.push((name, id.clone()));
+            permit.leases.push((name.clone(), id.clone()));
+            renewal.push((name, id.clone(), true));
+        }
+        if renewal.is_empty() {
+            return Ok(Some(permit));
         }
         let (lost_tx, lost_rx) = tokio::sync::oneshot::channel();
-        let renewal = (sched.clone(), permit.leases.clone());
+        let client = sched.client.clone();
         let heartbeat = tokio::spawn(async move {
             let mut timer = tokio::time::interval(Duration::from_millis((ttl / 3).max(1)));
             timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             timer.tick().await;
-            loop {
+            while !renewal.is_empty() {
                 timer.tick().await;
-                for (name, id) in &renewal.1 {
+                let mut kept = Vec::with_capacity(renewal.len());
+                for (name, id, enforced) in renewal {
                     let renewed = tokio::time::timeout(
                         Duration::from_millis((ttl / 3).max(1)),
-                        renewal.0.client.eval::<i64, _, _, _>(
+                        client.eval::<i64, _, _, _>(
                             RENEW,
                             vec![name.clone()],
                             vec![id.clone(), ttl.to_string()],
                         ),
                     )
                     .await;
-                    if !matches!(renewed, Ok(Ok(1))) {
+                    if matches!(renewed, Ok(Ok(1))) {
+                        kept.push((name, id, enforced));
+                    } else if enforced {
                         tracing::warn!(channel_key = key, lease = %name, "channel concurrency lease lost");
                         let _ = lost_tx.send(());
                         return;
+                    } else {
+                        // 只计数的租约续不上就不再计这次在途，请求照常
+                        tracing::debug!(channel_key = key, lease = %name, "in-flight counting lease lapsed");
                     }
                 }
+                renewal = kept;
             }
+            // 没有可续的租约了：守着 lost_tx 等 release 中止，别让 expired 误报租约丢失
+            std::future::pending::<()>().await;
         });
         permit.heartbeat = Some(heartbeat);
         permit.expired = Box::pin(async {
@@ -202,7 +234,7 @@ mod tests {
     async fn active_leases_renew_past_the_initial_expiry() {
         let sched = scheduler().await;
         let key = key();
-        let permit = ChannelPermit::acquire_with_ttl(&sched, key, Some(1), None, 450)
+        let permit = ChannelPermit::acquire_with_ttl(&sched, key, Some(1), None, false, 450)
             .await
             .unwrap()
             .unwrap();
@@ -327,7 +359,7 @@ mod tests {
         use okapi_providers::response_lifetime::ResponseLifetime;
         let sched = scheduler().await;
         let key = key();
-        let permit = ChannelPermit::acquire_with_ttl(&sched, key, Some(1), None, 150)
+        let permit = ChannelPermit::acquire_with_ttl(&sched, key, Some(1), None, false, 150)
             .await
             .unwrap()
             .unwrap();
@@ -362,5 +394,57 @@ mod tests {
                 .is_none()
         );
         next.release().await;
+    }
+    /// least_concurrency 池：没设上限的 key 也登记只计数的租约——从不拦、读得到在途、
+    /// 长请求照常续租、退回后归零；不计数的尝试不出现在读数里。
+    #[tokio::test]
+    async fn counting_leases_never_block_and_are_counted_until_released() {
+        let sched = scheduler().await;
+        let key = key();
+        let in_flight = || async {
+            sched
+                .channel_key_in_flight(std::iter::once(key))
+                .await
+                .get(&key)
+                .copied()
+                .unwrap_or(0)
+        };
+        let first = ChannelPermit::acquire_with_ttl(&sched, key, None, None, true, 450)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = ChannelPermit::acquire_with_ttl(&sched, key, None, None, true, 450)
+            .await
+            .unwrap()
+            .unwrap();
+        let uncounted = ChannelPermit::acquire_key(&sched, key, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_flight().await, 2);
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(in_flight().await, 2, "续租后仍在途");
+        first.release().await;
+        assert_eq!(in_flight().await, 1);
+        uncounted.release().await;
+        second.release().await;
+        assert_eq!(in_flight().await, 0);
+    }
+    /// 只计数的租约丢了（Redis 被清、续租失败）只是少计，不能当成并发位丢失去中断请求。
+    #[tokio::test]
+    async fn losing_a_counting_lease_never_expires_the_permit() {
+        let sched = scheduler().await;
+        let key = key();
+        let mut permit = ChannelPermit::acquire_with_ttl(&sched, key, None, None, true, 150)
+            .await
+            .unwrap()
+            .unwrap();
+        let _: i64 = sched.client.del(key_leases(key)).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), permit.expired())
+                .await
+                .is_err()
+        );
+        permit.release().await;
     }
 }

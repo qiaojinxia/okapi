@@ -909,7 +909,7 @@ secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占
 | per-key RPM 上限 | 老 ok-api `provider_api_keys.rate_limit_rpm` | `channel_keys.rpm_limit` + Redis `rpm:ck:*`；超限**摘出候选**而非拒绝请求，同渠道其它 key 仍承接 |
 | per-key 日消费上限 | Sub2API account 级限额 | `channel_keys.daily_spend_cap_micro` + Redis `spend:ck:*`（结算后累加，软实时） |
 | per-key 模型子集 | 老 ok-api `supported_models` | `channel_keys.model_subset`（null = 继承渠道）；同组织两把 key 的模型权限常不一致，此前只能靠拆渠道表达 |
-| 可配路由策略 | 老 ok-api `routing_mode` / LiteLLM `routing_strategy` | `channel_pools.routing_strategy`：`priority_weighted`（默认，历史行为）/ `least_latency` |
+| 可配路由策略 | 老 ok-api `routing_mode` / LiteLLM `routing_strategy` | `channel_pools.routing_strategy`：`priority_weighted`（默认，历史行为）/ `least_latency` / `least_usage` / `least_concurrency`（2026-10-20） |
 
 `least_latency` 落到实处而非只存一个字符串：结算侧按 `new = old*0.7 + sample*0.3`
 写 Redis `lat:ck:*`（只采成功请求，失败请求的耗时多是超时，混进去会把刚恢复的 key
@@ -919,6 +919,24 @@ secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占
 
 热路径成本：默认池零额外 Redis 往返；`least_latency` 池才逐 key 取 EWMA；
 RPM 与日消费闸仅在该 key 配了上限时才发起 Redis 调用。
+
+**【2026-10-20】按使用量 / 最少并发**（迁移 `0002_pool_load_strategies`）：池策略加 `least_usage`、
+`least_concurrency`，与 `least_latency` 一样只用于对话类入口（chat / messages / responses / gemini），
+只排层内先后，priority 分层与主池 / 降级池顺序照旧。
+- `least_usage`：读数是 key 当日消费 `spend:ck:*`（日消费上限闸那份计数，UTC 零点清零）。多个订阅账号放同一池时
+  用它把用量摊平，少撞单个账号的限额。
+- `least_concurrency`：读数是 key 未到期的在途租约数 `conc:ck:*`（并发上限那套租约）。此前只有配了上限的 key
+  才登记；该策略的调度队列发出的候选带 `count_in_flight`，没设上限也登记一份上限为 `i32::MAX` 的只计数租约。
+  它登记不上、续不上都只是少计这一次，不拦请求、不中断流（不触发 `concurrency_lease_lost`）。同一把 key 经别的
+  策略的池转发、又没设上限时不登记，这部分在途读不到。
+- 排序键是「读数 ÷ 权重」，权重仍表达分流份额；读数相同（包括空闲时都为 0）按 `priority_weighted` 的同一
+  抽样随机排，不会永远先给输入序第一把 key。没有读数的 key 按 0：当日没花过钱、眼下没有在途，本来就该先用它。
+  读 Redis 失败时整份读数为空，退化为按权重随机。
+- 每个请求多一次 Redis 往返（管道里逐 key GET / ZCOUNT）；`least_concurrency` 另有租约登记、续租与退回。
+- 验收：`scheduler` 单测（层内按读数 ÷ 权重排、层间不被推翻、读数相同按权重抽样、只有该队列打标）、
+  `channel_permit` 单测（只计数租约不拦、续租、退回归零、丢失不判过期）、`gateway_m2_sched` 两个端到端用例
+  （消费多的 key 让路；两把无上限 key 上第一个慢请求在途时第二个分到另一把，结束后在途归零）、
+  `console_write_receipts`（新取值能存能读、未知值 400）、前端 `write-forms` 池抽屉。
 
 **明确不借**：老 ok-api 的 provider 分域模型（定价重复 + 名字歧义）、绝对价存储
 （倍率心智已与主流对齐，§11.5）、new-api 的物化 `abilities` 表——候选查询当前不是

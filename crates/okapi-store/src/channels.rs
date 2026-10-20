@@ -82,6 +82,9 @@ pub struct ChannelCandidate {
     /// 所属池在池链里的序号（0 = 主池，1 = 降级池）。调度先耗尽低序号的全部层，
     /// 再进入下一序号——降级池的高优先级渠道也排在主池最低优先级之后。
     pub pool_rank: i32,
+    /// 本次尝试是否在 Redis `conc:ck:*` 登记在途：没设并发上限也登记，只计数不拦截。
+    /// 候选缓存里恒为 false，由 `least_concurrency` 池的调度队列逐个发出时打开。
+    pub count_in_flight: bool,
 }
 
 /// 内置默认池：新渠道缺省加入、未指定池的分组走这里。
@@ -358,6 +361,7 @@ pub async fn candidates_for_model(
                 same_key_retries,
                 first_output_timeout_secs,
                 pool_rank: r.pool_rank,
+                count_in_flight: false,
             })
         })
         .collect()

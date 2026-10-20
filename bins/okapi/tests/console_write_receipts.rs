@@ -339,3 +339,42 @@ async fn pool_detail_aggregates_members_models_and_groups() {
     )
     .await;
 }
+
+/// 池策略：按使用量 / 最少并发两种新取值能存能读，库外的取值 400。
+#[tokio::test]
+async fn pool_strategy_accepts_load_strategies_and_rejects_unknown() {
+    let _serial = SERIAL.lock().await;
+    let bed = setup().await;
+    let pool = format!("cwrs{}", bed.suffix);
+    for strategy in ["least_usage", "least_concurrency"] {
+        let (status, body) = call(
+            &bed,
+            "POST",
+            "/admin/pools",
+            &bed.admin_token,
+            Some(json!({"pool_code": pool, "routing_strategy": strategy})),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let (status, d) = call(
+            &bed,
+            "GET",
+            &format!("/admin/pools/{pool}"),
+            &bed.admin_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, 200, "{d}");
+        assert_eq!(d["routing_strategy"], strategy);
+    }
+    let (status, body) = call(
+        &bed,
+        "POST",
+        "/admin/pools",
+        &bed.admin_token,
+        Some(json!({"pool_code": pool, "routing_strategy": "most_usage"})),
+    )
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["param"], "routing_strategy", "{body}");
+}

@@ -583,6 +583,56 @@ impl SchedulerRedis {
         format!("spend:ck:{channel_key_id}:{day}")
     }
 
+    /// `least_usage` 池的读数：候选 key 当日消费（micro），一次往返。没有记录的 key 不在结果里
+    /// （调度按 0 处理）；Redis 读失败时整份为空，退化为按权重随机。
+    pub async fn channel_key_spends(
+        &self,
+        ids: impl Iterator<Item = i64>,
+    ) -> std::collections::HashMap<i64, i64> {
+        let ids: Vec<_> = ids.collect();
+        if ids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        let keys = ids
+            .iter()
+            .map(|id| Self::channel_key_spend_key(*id))
+            .collect();
+        let values: Vec<Option<i64>> = self.get_many(keys).await.unwrap_or_default();
+        ids.into_iter()
+            .zip(values)
+            .filter_map(|(id, value)| value.map(|micro| (id, micro)))
+            .collect()
+    }
+
+    /// `least_concurrency` 池的读数：候选 key 未到期的在途租约数（`conc:ck:*`），一次往返。
+    /// 读失败时整份为空，退化为按权重随机。
+    pub async fn channel_key_in_flight(
+        &self,
+        ids: impl Iterator<Item = i64>,
+    ) -> std::collections::HashMap<i64, i64> {
+        let ids: Vec<_> = ids.collect();
+        if ids.is_empty() {
+            return std::collections::HashMap::new();
+        }
+        #[allow(clippy::cast_precision_loss)] // 毫秒时间戳远小于 2^53
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        let pipe = self.client.pipeline();
+        for id in &ids {
+            if pipe
+                .zcount::<(), _>(channel_permit::key_leases(*id), now, f64::MAX)
+                .await
+                .is_err()
+            {
+                return std::collections::HashMap::new();
+            }
+        }
+        let counts: Vec<i64> = pipe.all().await.unwrap_or_default();
+        ids.into_iter()
+            .zip(counts)
+            .filter(|(_, count)| *count > 0)
+            .collect()
+    }
+
     /// 渠道 key 时延 EWMA（毫秒）。无样本返回 None，调用方按中位数处理，
     /// 避免新 key 因"没有历史"被永久冷落，也避免被误判为最快而被灌流。
     pub async fn channel_key_latency(&self, channel_key_id: i64) -> Option<u32> {
