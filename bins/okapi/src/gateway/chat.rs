@@ -30,7 +30,7 @@ use okapi_providers::convert::{
     openai_to_gemini as conv_gem, responses_to_chat as conv_resp,
 };
 use okapi_providers::reasoning::{self, ReasoningDirective};
-use okapi_providers::response_relay::{TURN_STATE_HEADER, capture_turn_state};
+use okapi_providers::response_relay::{self, Relayed, capture_relayed};
 use okapi_providers::{
     ChatEvent, ChatResponse, StreamHandle, UpstreamError, ensure_stream_usage, rewrite_model,
 };
@@ -2923,9 +2923,9 @@ async fn attempt_stream(
     retry: i16,
 ) -> Result<Response, AttemptError> {
     let channel = (cand.channel_id, cand.channel_key_id);
-    let connect = capture_turn_state(dispatch_chat(bill, cand, base, body, true));
+    let connect = capture_relayed(dispatch_chat(bill, cand, base, body, true));
     let first_output_window = first_output_window(cand);
-    let (resp, turn_state) = match tokio::time::timeout(first_output_window, connect).await {
+    let (resp, relayed) = match tokio::time::timeout(first_output_window, connect).await {
         Err(_) => {
             bill.trace.failure(&UpstreamError::Timeout);
             return Err(AttemptError::Retriable {
@@ -2935,7 +2935,7 @@ async fn attempt_stream(
             });
         }
         Ok((Err(err), _)) => return Err(classify_fatal(err, failover, channel)),
-        Ok((Ok(resp), turn_state)) => (resp, turn_state),
+        Ok((Ok(resp), relayed)) => (resp, relayed),
     };
     let ChatResponse::Stream(mut handle) = resp else {
         return Err(AttemptError::Retriable {
@@ -3023,22 +3023,47 @@ async fn attempt_stream(
                 failover,
             )
             .await;
-            Ok(with_turn_state(resp, cand, turn_state))
+            Ok(with_relayed(resp, cand, bill, relayed))
         }
     }
 }
 
-/// 上游给了轮内粘性令牌就回给客户端（带账号标签，见 `extensions::turn_state_for_client`）。
-fn with_turn_state(
+/// 上游给的、Codex CLI 要读的头回给客户端：轮内粘性令牌带账号标签（见
+/// `extensions::turn_state_for_client`）；`openai-model` 等于渠道映射后的上游名时换回客户端
+/// 请求的名字（别名与渠道映射都不是改路由，原样回传会让 CLI 误报模型被换；模型级降级才是，
+/// 那时回降级到的模型）；`x-reasoning-included` 原样。
+fn with_relayed(
     mut resp: Response,
     cand: &ChannelCandidate,
-    upstream: Option<String>,
+    bill: &RequestBilling,
+    relayed: Relayed,
 ) -> Response {
-    if let Some(value) = upstream
-        .map(|upstream| super::extensions::turn_state_for_client(cand, &upstream))
-        .and_then(|value| axum::http::HeaderValue::from_str(&value).ok())
-    {
-        resp.headers_mut().insert(TURN_STATE_HEADER, value);
+    let model = relayed.model.map(|served| {
+        if served != cand.upstream_model(&bill.model) {
+            served
+        } else if bill.downgraded_from.is_some() {
+            bill.model.clone()
+        } else {
+            bill.requested_model.clone()
+        }
+    });
+    let headers = [
+        (
+            response_relay::TURN_STATE_HEADER,
+            relayed
+                .turn_state
+                .map(|upstream| super::extensions::turn_state_for_client(cand, &upstream)),
+        ),
+        (response_relay::MODEL_HEADER, model),
+        (
+            response_relay::REASONING_INCLUDED_HEADER,
+            relayed.reasoning_included,
+        ),
+    ];
+    for (name, value) in headers {
+        if let Some(value) = value.and_then(|v| axum::http::HeaderValue::from_str(&v).ok()) {
+            resp.headers_mut().insert(name, value);
+        }
     }
     resp
 }
@@ -3732,8 +3757,7 @@ async fn attempt_json(
     retry: i16,
 ) -> Result<Response, AttemptError> {
     let channel = (cand.channel_id, cand.channel_key_id);
-    let (result, turn_state) =
-        capture_turn_state(dispatch_chat(bill, cand, base, body, false)).await;
+    let (result, relayed) = capture_relayed(dispatch_chat(bill, cand, base, body, false)).await;
     match result {
         Ok(ChatResponse::Json {
             status,
@@ -3807,7 +3831,7 @@ async fn attempt_json(
                 .body(Body::from(body))
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
             resp = with_request_id(resp, bill.request_id);
-            Ok(with_turn_state(resp, cand, turn_state))
+            Ok(with_relayed(resp, cand, bill, relayed))
         }
         Ok(ChatResponse::Stream(_)) => Err(AttemptError::Retriable {
             code: codes::UPSTREAM_ERROR,

@@ -53,7 +53,7 @@ async fn generic_client_streams_without_a_beta_header_and_yields_a_turn_state() 
     let (token, account) = credentials();
     let body =
         Bytes::from(serde_json::to_vec(&json!({"model": model(), "input": PROMPT})).unwrap());
-    let (response, turn_state) = response_relay::capture_turn_state(codex::responses(
+    let (response, relayed) = response_relay::capture_relayed(codex::responses(
         &HttpPool::new().unwrap(),
         codex::DEFAULT_API_BASE,
         &token,
@@ -67,7 +67,7 @@ async fn generic_client_streams_without_a_beta_header_and_yields_a_turn_state() 
         panic!("expected a stream");
     };
     assert!(reply_text(handle).await.contains("OK"));
-    eprintln!("turn state returned: {}", turn_state.is_some());
+    eprintln!("turn state returned: {}", relayed.turn_state.is_some());
 }
 
 #[tokio::test]

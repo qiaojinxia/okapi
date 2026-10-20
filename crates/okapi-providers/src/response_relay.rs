@@ -5,50 +5,89 @@ use std::cell::RefCell;
 /// Codex 后端的轮内粘性令牌：同一轮的第一个响应带回，客户端在这一轮后续请求里原样回传，
 /// 上游据此把整轮路由到同一处（Codex CLI 0.160 `core/src/client.rs`）。
 pub const TURN_STATE_HEADER: &str = "x-codex-turn-state";
+/// 上游实际服务的模型。Codex CLI 拿它和请求的模型比，不同就提示被改路由。
+pub const MODEL_HEADER: &str = "openai-model";
+/// 上游声明历史推理已计入上下文。Codex CLI 据此估算上下文用量、决定何时自动压缩。
+pub const REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 
-tokio::task_local! {
-    static TURN_STATE: RefCell<Option<String>>;
+/// 一次尝试里上游给出的、要回给客户端的头。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Relayed {
+    pub turn_state: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_included: Option<String>,
 }
 
-/// Runs one upstream attempt and returns the turn state its response carried, if any.
-pub async fn capture_turn_state<F: Future>(attempt: F) -> (F::Output, Option<String>) {
-    TURN_STATE
-        .scope(RefCell::new(None), async move {
+tokio::task_local! {
+    static RELAYED: RefCell<Relayed>;
+}
+
+/// Runs one upstream attempt and returns the headers its response carried for the client.
+pub async fn capture_relayed<F: Future>(attempt: F) -> (F::Output, Relayed) {
+    RELAYED
+        .scope(RefCell::new(Relayed::default()), async move {
             let output = attempt.await;
-            (output, TURN_STATE.with(|slot| slot.borrow_mut().take()))
+            (output, RELAYED.with(RefCell::take))
         })
         .await
 }
 
-/// Outside [`capture_turn_state`] (probes, token counting) nothing is recorded.
+/// Outside [`capture_relayed`] (probes, token counting) nothing is recorded.
 pub(crate) fn record(headers: &reqwest::header::HeaderMap) {
-    if let Some(value) = headers
-        .get(TURN_STATE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-    {
-        let _ = TURN_STATE.try_with(|slot| *slot.borrow_mut() = Some(value.to_owned()));
-    }
+    let value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let relayed = Relayed {
+        turn_state: value(TURN_STATE_HEADER),
+        model: value(MODEL_HEADER),
+        reasoning_included: value(REASONING_INCLUDED_HEADER),
+    };
+    let _ = RELAYED.try_with(|slot| *slot.borrow_mut() = relayed);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn headers(value: &str) -> reqwest::header::HeaderMap {
+    fn headers(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(TURN_STATE_HEADER, value.parse().unwrap());
+        for (name, value) in pairs {
+            headers.insert(*name, value.parse().unwrap());
+        }
         headers
     }
 
     #[tokio::test]
-    async fn turn_state_is_captured_only_inside_the_attempt_scope() {
-        record(&headers("outside"));
-        let ((), state) = capture_turn_state(async { record(&headers("ts-1")) }).await;
-        assert_eq!(state.as_deref(), Some("ts-1"));
-        let ((), state) = capture_turn_state(async {}).await;
-        assert_eq!(state, None, "每次尝试独立，上一次的值不会漏过来");
-        let ((), state) = capture_turn_state(async { record(&headers("")) }).await;
-        assert_eq!(state, None);
+    async fn relayed_headers_are_captured_only_inside_the_attempt_scope() {
+        record(&headers(&[(TURN_STATE_HEADER, "outside")]));
+        let ((), relayed) = capture_relayed(async {
+            record(&headers(&[
+                (TURN_STATE_HEADER, "ts-1"),
+                (MODEL_HEADER, "gpt-6.1-sol"),
+                (REASONING_INCLUDED_HEADER, "true"),
+            ]));
+        })
+        .await;
+        assert_eq!(
+            relayed,
+            Relayed {
+                turn_state: Some("ts-1".into()),
+                model: Some("gpt-6.1-sol".into()),
+                reasoning_included: Some("true".into()),
+            }
+        );
+        let ((), relayed) = capture_relayed(async {}).await;
+        assert_eq!(
+            relayed,
+            Relayed::default(),
+            "每次尝试独立，上一次的值不会漏过来"
+        );
+        let ((), relayed) =
+            capture_relayed(async { record(&headers(&[(TURN_STATE_HEADER, "")])) }).await;
+        assert_eq!(relayed.turn_state, None);
     }
 }

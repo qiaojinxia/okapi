@@ -317,10 +317,13 @@ async fn mock_codex_responses(
         "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"m1\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Hello codex\",\"annotations\":[]}]}}\n\n",
         "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_o\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"gpt-5\",\"output\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150}}}\n\n",
     );
+    let served = req["model"].as_str().unwrap_or_default().to_owned();
     (
         [
-            ("content-type", "text/event-stream"),
-            ("x-codex-turn-state", "ts-upstream"),
+            ("content-type", "text/event-stream".to_owned()),
+            ("x-codex-turn-state", "ts-upstream".to_owned()),
+            ("openai-model", served),
+            ("x-reasoning-included", "true".to_owned()),
         ],
         sse,
     )
@@ -922,6 +925,64 @@ async fn codex_turn_state_returns_to_the_client_and_only_to_its_account() {
         resp.text().await.unwrap();
         assert_eq!(env.mock_state.seen("x-codex-turn-state"), None, "{foreign}");
     }
+}
+
+/// Codex CLI 读的另外两个头也回给客户端：`openai-model` 是上游实际服务的模型，渠道映射过的名字
+/// 要换回客户端请求的名字（不然 CLI 会误报模型被换）；`x-reasoning-included` 原样。
+#[tokio::test]
+async fn codex_model_and_reasoning_headers_reach_the_client() {
+    let env = setup().await;
+    let (channel, _) = login_channel(&env, "codex").await;
+    let header = |resp: &reqwest::Response, name: &str| {
+        resp.headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    for stream in [true, false] {
+        let resp = reqwest::Client::new()
+            .post(format!("http://{}/v1/responses", env.gateway))
+            .bearer_auth(&env.user_token)
+            .json(&json!({"model": env.model, "input": "hi", "stream": stream}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            header(&resp, "openai-model").as_deref(),
+            Some(env.model.as_str())
+        );
+        assert_eq!(
+            header(&resp, "x-reasoning-included").as_deref(),
+            Some("true")
+        );
+        resp.text().await.unwrap();
+    }
+    // 渠道把对外名映射成别的上游名：上游回的是映射后的名字，客户端看到的仍是它请求的名字
+    sqlx::query("UPDATE channels SET model_mapping = jsonb_build_object($1::text, 'gpt-upstream-name') WHERE id = $2")
+        .bind(&env.model)
+        .bind(channel)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await; // 候选缓存 5s
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.user_token)
+        .json(&json!({"model": env.model, "input": "hi", "stream": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        env.mock_state.last_body().unwrap()["model"],
+        "gpt-upstream-name"
+    );
+    assert_eq!(
+        header(&resp, "openai-model").as_deref(),
+        Some(env.model.as_str())
+    );
+    resp.text().await.unwrap();
 }
 
 #[tokio::test]

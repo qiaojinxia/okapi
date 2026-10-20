@@ -2443,6 +2443,10 @@ Anthropic 429 无 `Retry-After` 时按 `anthropic-ratelimit-unified-reset` 推�
   （`okapi_providers::response_relay`）带出，加上账号标签（Responses 历史绑定同一份身份摘要的前 16 位）
   回给客户端；客户端同一轮带回时去掉标签、只转给签发它的账号，故障转移到别的账号就不带。WS 入口的
   握手已由网关应答，上游握手响应头无从回传，只做带回方向。
+  【2026-10-20】同一处（`response_relay::capture_relayed`）再带出 Codex CLI 要读的另外两个头：`openai-model`
+  （CLI 拿它和请求的模型比，不同就提示被改路由）与 `x-reasoning-included`（历史推理已计入上下文，影响 CLI
+  估算上下文与自动压缩时机）。`openai-model` 等于渠道映射后的上游名时换回客户端请求的名字——别名和渠道映射
+  都不是改路由，原样回传会让 CLI 误报；模型级降级才是，那时回降级到的模型；与映射名不同时原样回传。
 - **前端**：协议下拉加两家（标"实验性"）；新建渠道选到它们时凭证区变成"登录"按钮 + 贴 code 输入框；
   列表行显示凭证到期时间（`credential_expires_at`，从 JSON 取，列表接口回填）。
 - **【2026-09-29 追加】全伪装模式（可选开关，`settings.mimic_cc`）**：上面"不编造"的定案只约束
