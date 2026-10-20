@@ -37,10 +37,39 @@ pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
     Ok(pool)
 }
 
+/// 迁移排队用的会话级咨询锁（"OKMIGRAT"）。
+const MIGRATION_GATE: i64 = 0x4F4B_4D49_4752_4154;
+
 /// 运行嵌入式迁移（migrations/ 目录随二进制打包，部署零外部工具）。
+///
+/// 单机模式的三个角色、多副本同时启动时都会一起跑迁移。sqlx 用阻塞的 `pg_advisory_lock`
+/// 排队，等过 1 秒就记一条慢语句告警，每次部署都混进运维告警里。这里先用 try-lock
+/// 轮询排队，轮到时 sqlx 自己那把锁已无人争用。
 pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
-    // Partition DDL and storage defaults remain UTC, independently of calendar reporting.
     let mut connection = pool.acquire().await?;
+    while !sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+        .bind(MIGRATION_GATE)
+        .fetch_one(&mut *connection)
+        .await?
+    {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let migrated = migrate_in_utc(&mut connection).await;
+    let unlocked = sqlx::query_scalar::<_, bool>("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATION_GATE)
+        .fetch_one(&mut *connection)
+        .await;
+    if !matches!(unlocked, Ok(true)) {
+        // 会话锁随连接走：放不掉就关掉这条连接，别让持锁的连接回池把别的进程堵住
+        connection.close_on_drop();
+    }
+    migrated?;
+    unlocked?;
+    Ok(())
+}
+
+async fn migrate_in_utc(connection: &mut sqlx::PgConnection) -> Result<(), StoreError> {
+    // Partition DDL and storage defaults remain UTC, independently of calendar reporting.
     sqlx::query!("SELECT set_config('TimeZone',$1,false)", "UTC")
         .fetch_one(&mut *connection)
         .await?;

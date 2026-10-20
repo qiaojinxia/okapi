@@ -2833,6 +2833,11 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
 - **出口探测告警**：见 §11.41「后台探测」，连续两轮不通才发 `egress_down`，每次失败日志带代理 id 与错误码。
 - **容器日志**：compose 给 Okapi 各角色的 json-file 日志加大小上限（50MB × 5）。json-file 日志随容器删除，部署一次就清空，
   线上排查时网关日志只剩 12 小时；单机部署在宿主机 override 里换成 journald（Docker Desktop 不支持，所以不设成仓库缺省）。
+- **【2026-10-20】启动时的迁移慢语句告警**：单机模式网关、控制台、worker 三个角色同时启动、各跑一遍迁移，sqlx 用阻塞的
+  `pg_advisory_lock` 排队，后到的等过 1 秒就记一条 `slow statement`（线上每次部署 2–3 条，混进运维告警）。
+  `okapi_store::run_migrations` 先用会话级 `pg_try_advisory_lock` 每 100ms 轮询排队（锁 `OKMIGRAT`），轮到时 sqlx 自己那把锁
+  已无人争用；锁放不掉时关掉这条连接，免得持锁的连接回池。多副本同时启动同样受益。测试 `okapi-store/tests/migrations.rs`：
+  空库上三路并发迁移都成功、结束后不留咨询锁。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
