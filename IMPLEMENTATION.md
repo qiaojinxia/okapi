@@ -2881,6 +2881,39 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   已无人争用；锁放不掉时关掉这条连接，免得持锁的连接回池。多副本同时启动同样受益。测试 `okapi-store/tests/migrations.rs`：
   空库上三路并发迁移都成功、结束后不留咨询锁。
 
+### 11.46 对照 new-api / Sub2API 的差距补齐（2026-10-20，`docs/competitive-gap-2026-10.md` 逐条核实后）
+
+核实结论：文档 P0-1（Codex 模型目录）前提不成立——Codex 0.160 接自定义网关只发 `POST /v1/responses`，
+不请求 `/models`，二进制里也没有 `models?client_version`；P1-2 余额定时刷新、P1-1 参数覆盖 DSL 对当前只有订阅账号
+的部署没有收益，暂不做。做了四项：
+- 额度余量不再推翻池策略 + `soonest_reset` + 结构化跳过原因：见 §11.14 末尾。
+- Codex 的 `openai-model` / `x-reasoning-included` 回传：见 §11.38 的 turn-state 一段。
+- 审计兜底：见 §11.15 末尾。
+- **工具丢失的诚实拒绝**（本节，对照 new-api `tool_loss_policy`）。
+
+**问题。** 各方言之间的转换只搬普通函数工具，其余静默丢掉：Responses 降级成 Chat 时 `responses_to_chat` 只留
+`type: function`（Codex 的 apply_patch 是 `custom`、还有 `web_search` / `local_shell` / `computer_use*`）；Chat 的 `custom`
+到 Anthropic、Anthropic 带 `type` 的客户端工具（bash / text_editor / computer / memory）到 OpenAI / Gemini、Gemini 的
+googleSearch / codeExecution 等到别家同样如此。客户端给了工具、上游没收到、模型凭空作答，只在跨方言时出现，最难排查。
+文档原文举的「没有 name 的工具被过滤」本是非法请求，不是要害；要害是上面这些。
+
+**做法。** `okapi_providers::convert::tool_loss::foreign_tools(入口格式, 请求)` 列出转成别家方言会丢的工具类型，分两类：
+上游托管（搜索、代码解释器、取图、远程 MCP）丢了模型照样能答；客户端执行（`custom`、本地 shell、computer use、
+Anthropic 的 bash / text_editor）丢了 agent 就没法干活。渠道 `settings.tool_loss_policy`：
+- `safe`（缺省）：只丢托管工具；会丢客户端工具的候选不走。
+- `strict`：会丢任何工具的候选都不走。
+- `allow`：全丢照转（此前的行为）。
+
+请求特征里带上这份清单，候选筛选时只看「这条渠道的执行计划要转换方言」（`ExecutionPlan::converts`）的候选；全被挡下时
+回 400 `tool_conversion_unsupported`，param 是挡住它的工具类型（safe 下是客户端工具），而不是笼统的「没有可用渠道」，
+也不打上游。确实丢了（safe 的托管工具、allow 的全部）时，请求诊断记 `dropped_tools`。直转 Responses 撞上 404 就地降级
+那条旁路同样按策略判断，策略不接受就不降，把上游的 404 报出去，不静默丢工具。控制台渠道「请求与计费行为」页加下拉，
+写入只认三个取值。
+
+**验收**：`tool_loss` 单测（各方言的分类、三种策略）、`gateway_responses::downgrade_rejects_or_records_tools_it_cannot_carry`
+（safe 拒 custom 且不打上游、托管工具照转并记诊断、strict 拒托管工具、allow 照转）、`console_channel_writes`（取值校验）、
+前端 `write-forms` 渠道行为页。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

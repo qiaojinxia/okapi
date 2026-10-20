@@ -550,6 +550,20 @@ fn ensure_settings_mimic(settings: Option<&Value>) -> Result<(), AppError> {
     Ok(())
 }
 
+/// `tool_loss_policy`：跨方言转换会丢工具时怎么办，只认 safe / strict / allow（缺省 safe）。
+fn ensure_settings_tool_loss_policy(settings: Option<&Value>) -> Result<(), AppError> {
+    match settings.and_then(|s| s.get("tool_loss_policy")) {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::String(value))
+            if okapi_providers::convert::tool_loss::ToolLossPolicy::VALUES
+                .contains(&value.as_str()) =>
+        {
+            Ok(())
+        }
+        Some(_) => Err(AppError::bad_request().with_param("tool_loss_policy")),
+    }
+}
+
 fn ensure_request_extensions(provider: &str, settings: Option<&Value>) -> Result<(), AppError> {
     let extensions = settings
         .and_then(|settings| settings.get("extensions"))
@@ -578,6 +592,7 @@ pub(super) async fn validate_channel_settings(
     ensure_settings_outbound(settings)?;
     ensure_settings_oauth_token_url(state, settings).await?;
     ensure_settings_mimic(settings)?;
+    ensure_settings_tool_loss_policy(settings)?;
     ensure_request_extensions(provider, settings)?;
     ensure_account_control(settings)
 }
@@ -754,6 +769,7 @@ pub async fn update_channel(
     ensure_settings_outbound(req.settings.as_ref())?;
     ensure_settings_oauth_token_url(&state, req.settings.as_ref()).await?;
     ensure_settings_mimic(req.settings.as_ref())?;
+    ensure_settings_tool_loss_policy(req.settings.as_ref())?;
     ensure_account_control(req.settings.as_ref())?;
     if req.provider.is_some() || req.settings.is_some() {
         let (current_provider, current_settings): (String, Value) = sqlx::query_as(

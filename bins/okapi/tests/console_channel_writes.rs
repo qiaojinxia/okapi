@@ -340,6 +340,26 @@ async fn list_returns_settings_so_editing_one_field_keeps_the_rest() {
         .await
         .unwrap();
     assert_eq!(stored, advanced, "unrelated settings survive an edit");
+
+    // 工具转换策略只认 safe / strict / allow
+    let patch = |policy: Value| {
+        let mut settings = advanced.clone();
+        settings["tool_loss_policy"] = policy;
+        reqwest::Client::new()
+            .patch(format!(
+                "http://{}/admin/channels/{}",
+                bed.console, bed.channel_id
+            ))
+            .bearer_auth(&bed.admin_token)
+            .json(&json!({"settings": settings}))
+            .send()
+    };
+    let resp = patch(json!("strict")).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let resp = patch(json!("lenient")).await.unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["param"], "tool_loss_policy", "{body}");
 }
 
 #[tokio::test]

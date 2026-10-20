@@ -107,6 +107,18 @@ impl ExecutionPlan {
         })
     }
 
+    /// 这次转发要不要把请求从入口方言转成别家的（转了就可能丢工具，见 `convert::tool_loss`）。
+    pub const fn converts(self, ingress: Ingress) -> bool {
+        !matches!(
+            (ingress, self.operation),
+            (Ingress::OpenAi, Operation::ChatCompletions)
+                | (Ingress::Anthropic, Operation::Messages)
+                | (Ingress::Gemini, Operation::GenerateContent)
+                | (Ingress::Responses, Operation::Responses)
+                | (Ingress::ResponsesCompact, _)
+        )
+    }
+
     pub const fn native_responses(self) -> bool {
         matches!(
             self.operation,
@@ -142,7 +154,7 @@ impl ExecutionPlan {
     }
 }
 
-fn format(ingress: Ingress) -> ApiFormat {
+pub(crate) fn format(ingress: Ingress) -> ApiFormat {
     match ingress {
         Ingress::OpenAi => ApiFormat::ChatCompletions,
         Ingress::Anthropic => ApiFormat::Messages,

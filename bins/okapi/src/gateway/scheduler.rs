@@ -316,6 +316,7 @@ pub(crate) mod tests {
             strip_request_fields: Vec::new(),
             inject_request_fields: serde_json::Map::new(),
             responses_native: true,
+            tool_loss_policy: None,
             api_version: None,
             aws_region: None,
             oauth_token_url: None,

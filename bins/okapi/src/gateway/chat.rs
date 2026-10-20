@@ -25,6 +25,7 @@ use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, U
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
 use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp};
+use okapi_providers::convert::tool_loss::{ForeignTools, ToolLossPolicy};
 use okapi_providers::convert::{
     anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o, openai_to_anthropic as convert,
     openai_to_gemini as conv_gem, responses_to_chat as conv_resp,
@@ -75,6 +76,8 @@ struct ProbeInfo {
     /// 请求特征（能力感知路由输入，§3.8）。
     needs_tools: bool,
     needs_vision: bool,
+    /// 转成别家方言会丢的工具（渠道按 `tool_loss_policy` 拒绝或丢弃）。
+    foreign_tools: ForeignTools,
     /// OpenAI service_tier 请求声明（tier 计费轴；chat 与 responses 入口有，anthropic 无此概念）。
     service_tier: Option<String>,
 }
@@ -473,7 +476,7 @@ pub async fn chat_completions(
     let Ok(probe) = serde_json::from_slice::<ChatRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let (needs_tools, needs_vision) = request_features(Ingress::OpenAi, &body);
+    let features = request_features(Ingress::OpenAi, &body);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
@@ -488,8 +491,9 @@ pub async fn chat_completions(
         prompt_chars: probe.prompt_chars(),
         session: session_hash(&headers, None, &probe.messages),
         service_tier: probe.service_tier.clone(),
-        needs_tools,
-        needs_vision,
+        needs_tools: features.tools,
+        needs_vision: features.vision,
+        foreign_tools: features.foreign_tools,
     };
     match Box::pin(handle_chat(
         &state,
@@ -569,7 +573,7 @@ async fn responses_entry(
         body
     };
     let input_messages = probe.input_messages();
-    let (needs_tools, needs_vision) = request_features(ingress, &body);
+    let features = request_features(ingress, &body);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
@@ -584,8 +588,9 @@ async fn responses_entry(
         prompt_chars: probe.prompt_chars(),
         session: session_hash(&headers, probe.prompt_cache_key.as_deref(), &input_messages),
         service_tier: probe.service_tier.clone(),
-        needs_tools,
-        needs_vision,
+        needs_tools: features.tools,
+        needs_vision: features.vision,
+        foreign_tools: features.foreign_tools,
     };
     match Box::pin(handle_chat(
         &state, &headers, &body, request_id, started, ingress, &info,
@@ -646,7 +651,7 @@ pub async fn gemini_generate(
         return AppError::bad_request().into_gemini_response_with(Some(request_id));
     };
     let input_messages = probe.input_messages();
-    let (needs_tools, needs_vision) = request_features(Ingress::Gemini, &body);
+    let features = request_features(Ingress::Gemini, &body);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: model.to_owned(),
@@ -661,8 +666,9 @@ pub async fn gemini_generate(
         prompt_chars: probe.prompt_chars(),
         session: session_hash(&headers, None, &input_messages),
         service_tier: None,
-        needs_tools,
-        needs_vision,
+        needs_tools: features.tools,
+        needs_vision: features.vision,
+        foreign_tools: features.foreign_tools,
     };
     match Box::pin(handle_chat(
         &state,
@@ -691,7 +697,7 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
     let Ok(probe) = serde_json::from_slice::<MessagesRequestProbe>(&body) else {
         return AppError::bad_request().into_anthropic_response_with(Some(request_id));
     };
-    let (needs_tools, needs_vision) = request_features(Ingress::Anthropic, &body);
+    let features = request_features(Ingress::Anthropic, &body);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
@@ -710,8 +716,9 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
             &probe.messages,
         ),
         service_tier: None,
-        needs_tools,
-        needs_vision,
+        needs_tools: features.tools,
+        needs_vision: features.vision,
+        foreign_tools: features.foreign_tools,
     };
     match Box::pin(handle_chat(
         &state,
@@ -915,13 +922,35 @@ async fn first_admitted(
 }
 
 /// 请求特征探测（§3.8 能力感知路由）：tools 数组非空 / 消息含图像部件。
-fn request_features(ingress: Ingress, body: &Bytes) -> (bool, bool) {
+/// 请求特征：要不要工具 / 视觉能力（§3.8），以及转成别家方言会丢哪些工具。
+#[derive(Default)]
+pub(super) struct RequestFeatures {
+    pub tools: bool,
+    pub vision: bool,
+    pub foreign_tools: ForeignTools,
+}
+
+pub(super) fn request_features(ingress: Ingress, body: &Bytes) -> RequestFeatures {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return (false, false);
+        return RequestFeatures::default();
     };
-    if ingress == Ingress::Gemini {
-        return gemini_request_features(&v);
+    let foreign_tools = okapi_providers::convert::tool_loss::foreign_tools(
+        super::execution_plan::format(ingress),
+        &v,
+    );
+    let (tools, vision) = if ingress == Ingress::Gemini {
+        gemini_request_features(&v)
+    } else {
+        message_request_features(ingress, &v)
+    };
+    RequestFeatures {
+        tools,
+        vision,
+        foreign_tools,
     }
+}
+
+fn message_request_features(ingress: Ingress, v: &serde_json::Value) -> (bool, bool) {
     let needs_tools = v
         .get("tools")
         .and_then(|t| t.as_array())
@@ -1789,6 +1818,29 @@ async fn eligible_candidates(
     };
     candidates
         .retain(|c| ExecutionPlan::compile(bill.ingress, c, &bill.model, requirements).is_ok());
+    // 转成别家方言会丢工具：渠道按 tool_loss_policy 决定还能不能走。全被挡下时说清是哪些工具
+    // 过不去，而不是笼统的「没有可用渠道」——静默丢掉客户端工具，agent 就在看不见工具的情况下作答。
+    if !info.foreign_tools.is_empty() {
+        let before = candidates.len();
+        candidates.retain(|c| {
+            ExecutionPlan::compile(bill.ingress, c, &bill.model, requirements)
+                .is_ok_and(|plan| !plan.converts(bill.ingress))
+                || ToolLossPolicy::parse(c.tool_loss_policy.as_deref()).admits(&info.foreign_tools)
+        });
+        if before > 0 && candidates.is_empty() {
+            let blocking = if info.foreign_tools.client.is_empty() {
+                info.foreign_tools.all()
+            } else {
+                info.foreign_tools.client.clone()
+            };
+            return Err(ForwardFailure::app(
+                AppError::new(StatusCode::BAD_REQUEST, codes::TOOL_CONVERSION_UNSUPPORTED)
+                    .with_param(blocking.join(",")),
+                0,
+                None,
+            ));
+        }
+    }
     // 模型没配工具价格的搜索/抓取只走订阅：API key 渠道上游按次收费，不能白送
     if bill.server_tools.subscription_only() {
         candidates.retain(|c| super::oauth_cred::is_oauth_provider(&c.provider));
@@ -2154,10 +2206,13 @@ async fn try_model(
             }
             // Responses 直转撞上 404/405 = 这个上游根本没有 /responses（"openai" 渠道指着
             // 只实现了 chat 的第三方地址是常态）。同一候选就地改走降级链再来一次：
-            // 不计 failover、不计 retry、不标 key 失败——渠道没坏，是方言不对。
+            // 不计 failover、不计 retry、不标 key 失败——渠道没坏，是方言不对。降级会丢工具而渠道的
+            // tool_loss_policy 不接受时不降：宁可把上游的 404 报出去，也不静默丢掉客户端工具。
             if bill.ingress == Ingress::Responses
                 && bill.response_parent.is_none()
                 && cand.responses_native
+                && ToolLossPolicy::parse(cand.tool_loss_policy.as_deref())
+                    .admits(&info.foreign_tools)
                 && ExecutionPlan::compile(bill.ingress, &cand, &bill.model, Requirements::default())
                     .is_ok_and(ExecutionPlan::can_fallback_to_chat)
                 && matches!(
@@ -2328,6 +2383,11 @@ fn build_upstream_body(
             server_tools: bill.server_tools.has_tools(),
         },
     )?;
+    // 渠道允许丢的工具：这次转换确实丢了，记进诊断，日志里看得到少了什么
+    if plan.converts(bill.ingress) && !info.foreign_tools.is_empty() {
+        bill.trace
+            .set("dropped_tools", serde_json::json!(info.foreign_tools.all()));
+    }
     let native_responses = plan.native_responses();
     let dialect = plan.dialect.as_str();
     let built = match (bill.ingress, dialect) {

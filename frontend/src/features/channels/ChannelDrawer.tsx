@@ -30,6 +30,7 @@ import {
   ratioToCostMilli,
   readSettings,
   speaksOpenAi,
+  TOOL_LOSS_POLICIES,
 } from '@/features/channels/types'
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
@@ -304,6 +305,7 @@ export function ChannelDrawer({
     ? t('admin:channelScheduleSummary', { priority: form.priority, cost: form.cost })
     : t('admin:channelOptionsDefault')
   const behaviorCustom = settings.thinking_to_content || settings.bill_by_response_model
+    || (settings.tool_loss_policy ?? 'safe') !== 'safe'
     || settings.responses_native !== undefined && settings.responses_native !== defaultResponsesNative(form.provider)
     || settings.strip_request_fields.length > 0 || Object.keys(settings.inject_request_fields ?? {}).length > 0
     || Object.keys(settings.extra_headers ?? {}).length > 0
@@ -702,6 +704,17 @@ export function ChannelDrawer({
               onChange={(v) => setSettings((s) => ({ ...s, responses_native: v }))}
             />
           )}
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="d-tool-loss">{t('admin:toolLossPolicy')}</Label>
+            <p className="text-xs text-muted-foreground">{t('admin:toolLossPolicyHint')}</p>
+            <Select
+              id="d-tool-loss"
+              className="w-72"
+              value={settings.tool_loss_policy ?? 'safe'}
+              onChange={(v) => setSettings((s) => ({ ...s, tool_loss_policy: TOOL_LOSS_POLICIES.find((p) => p === v) ?? 'safe' }))}
+              options={TOOL_LOSS_POLICIES.map((p) => ({ value: p, label: t(`admin:toolLoss_${p}`) }))}
+            />
+          </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="d-strip">{t('admin:stripFields')}</Label>
             <p className="text-xs text-muted-foreground">{t('admin:stripFieldsHint')}</p>

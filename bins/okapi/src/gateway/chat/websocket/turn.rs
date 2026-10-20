@@ -42,7 +42,7 @@ fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInf
     let probe: ResponsesRequestProbe =
         serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     let messages = probe.input_messages();
-    let (needs_tools, needs_vision) = request_features(Ingress::Responses, body);
+    let features = request_features(Ingress::Responses, body);
     Ok(ProbeInfo {
         authenticated: None,
         requested_model: probe.model.clone(),
@@ -64,8 +64,9 @@ fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInf
             probe.prompt_cache_key.as_deref(),
             &messages,
         ),
-        needs_tools,
-        needs_vision,
+        needs_tools: features.tools,
+        needs_vision: features.vision,
+        foreign_tools: features.foreign_tools,
         service_tier: probe.service_tier.clone(),
     })
 }

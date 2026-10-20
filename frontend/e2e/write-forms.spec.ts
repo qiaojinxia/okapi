@@ -131,6 +131,9 @@ test('渠道抽屉：注入字段按 JSON 解析、额外头可改可清、退�
   const headerName = drawer.getByPlaceholder('OpenAI-Organization')
   await expect(headerName).toHaveValue('OpenAI-Organization')
   await expect(drawer.getByPlaceholder('org-…')).toHaveValue('org-1')
+  // 工具无法转换时：未配置显示缺省「安全」，改成「严格」后随 settings 提交
+  await expect(drawer.locator('#d-tool-loss')).toHaveValue('safe')
+  await drawer.locator('#d-tool-loss').selectOption('strict')
 
   // 注入两行：数字按 JSON 解析成 number，带引号的字面量解析成 string
   await drawer.getByRole('button', { name: '添加字段' }).click()
@@ -153,6 +156,7 @@ test('渠道抽屉：注入字段按 JSON 解析、额外头可改可清、退�
     bill_by_response_model: false,
     strip_request_fields: ['logit_bias'],
     inject_request_fields: { temperature: 0.2, user: 'forced' },
+    tool_loss_policy: 'strict',
   })
   expect(patches[0]).toMatchObject({ name: 'openai-main', models: ['gpt-5'], priority: 0 })
 

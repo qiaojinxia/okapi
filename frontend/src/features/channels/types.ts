@@ -119,6 +119,8 @@ export interface ChannelSettings {
   /// `/v1/responses` 是否同方言直转到该渠道；undefined = 跟随协议缺省
   /// （openai 直转 / openai_compat 降级）。只对说 OpenAI 方言的渠道有意义。
   responses_native?: boolean
+  /// 跨方言转换会丢工具时怎么办；undefined = 后端缺省 `safe`（丢托管工具、拒客户端工具）。
+  tool_loss_policy?: ToolLossPolicy
   /// Azure 数据面 api-version（`YYYY-MM-DD[-preview]`）；undefined = 后端缺省。只对 azure 有意义。
   api_version?: string
   /// Bedrock SigV4 区域覆写；undefined = 从 api_base 主机名解析。只对 bedrock 有意义。
@@ -214,6 +216,9 @@ export interface ChannelRow {
 
 
 
+export const TOOL_LOSS_POLICIES = ['safe', 'strict', 'allow'] as const
+export type ToolLossPolicy = (typeof TOOL_LOSS_POLICIES)[number]
+
 export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSettings {
   // settings.proxy_url 已退役（§11.41 出口绑定）：残留值不能被抽屉整体回写（后端会 400）
   const { proxy_url: _retired, ...opaque } = (raw ?? {}) as Partial<ChannelSettings> & { proxy_url?: unknown }
@@ -226,6 +231,7 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
     // 不在这里补缺省：未配置就保持 undefined，保存回去仍是"跟随协议缺省"，
     // 站长改协议时不会被一个早先写死的布尔值绊住
     ...(typeof raw?.responses_native === 'boolean' ? { responses_native: raw.responses_native } : {}),
+    ...(raw?.tool_loss_policy && TOOL_LOSS_POLICIES.includes(raw.tool_loss_policy) ? { tool_loss_policy: raw.tool_loss_policy } : {}),
     ...(typeof raw?.api_version === 'string' && raw.api_version !== ''
       ? { api_version: raw.api_version }
       : {}),

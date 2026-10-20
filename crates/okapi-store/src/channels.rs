@@ -39,6 +39,9 @@ pub struct ChannelCandidate {
     /// 强制写入请求顶层的字段（channels.settings.inject_request_fields）；
     /// 在 strip 之后浅合并。model/messages/stream/provider 受保护。
     pub inject_request_fields: serde_json::Map<String, serde_json::Value>,
+    /// 跨方言转换会丢工具时怎么办（channels.settings.tool_loss_policy：safe / strict / allow；
+    /// None = 缺省 safe，解析见 `okapi_providers::convert::tool_loss::ToolLossPolicy`）。
+    pub tool_loss_policy: Option<String>,
     /// `/v1/responses` 入口对该渠道是否同方言直转（channels.settings.responses_native）。
     /// 缺省：provider=openai 为 true（官方必支持），openai_compat 为 false（兼容上游
     /// 多数只实现 chat，先降级保可用；确认支持的再显式打开）；其它 provider 恒 false。
@@ -242,6 +245,7 @@ pub async fn candidates_for_model(
                c.settings -> 'strip_request_fields' AS strip_request_fields,
                c.settings -> 'inject_request_fields' AS inject_request_fields,
                (c.settings ->> 'responses_native')::boolean AS responses_native,
+               NULLIF(c.settings ->> 'tool_loss_policy', '') AS tool_loss_policy,
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
                NULLIF(c.settings ->> 'aws_region', '') AS aws_region,
                NULLIF(c.settings ->> 'oauth_token_url', '') AS oauth_token_url,
@@ -356,6 +360,7 @@ pub async fn candidates_for_model(
                     .and_then(|v| v.as_object().cloned())
                     .unwrap_or_default(),
                 responses_native,
+                tool_loss_policy: r.tool_loss_policy,
                 capabilities: r.capabilities,
                 cost_milli: r.cost_milli,
                 same_key_retries,

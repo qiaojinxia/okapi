@@ -1123,3 +1123,79 @@ async fn reasoning_downgrade_preserves_output_and_usage_in_json_and_sse() {
         );
     }
 }
+
+async fn post_with_tools(env: &TestEnv, tools: &Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.token)
+        .json(&json!({
+            "model": env.model,
+            "stream": false,
+            "max_output_tokens": 128,
+            "instructions": "be helpful",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi there"}]}],
+            "tools": tools,
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn error_of(resp: reqwest::Response) -> (u16, Value) {
+    let status = resp.status().as_u16();
+    (status, resp.json::<Value>().await.unwrap()["error"].clone())
+}
+
+/// 降级链带不过去的工具：缺省 safe 下会丢客户端执行的工具（apply_patch 这类 custom）就拒绝、说清
+/// 是哪些，且不打上游；只丢托管工具（web_search）照常转发，诊断里记下丢了什么。strict 连托管工具
+/// 也拒；allow 全丢照转（此前的行为）。
+#[tokio::test]
+async fn downgrade_rejects_or_records_tools_it_cannot_carry() {
+    let function = json!({"type": "function", "name": "shell", "parameters": {"type": "object"}});
+    let client_tool =
+        json!([function, {"type": "custom", "name": "apply_patch"}, {"type": "web_search"}]);
+    let hosted_only = json!([function, {"type": "web_search"}]);
+
+    let env = setup("openai_compat", "/oai/v1", None).await;
+    let (status, error) = error_of(post_with_tools(&env, &client_tool).await).await;
+    assert_eq!(status, 400, "{error}");
+    assert_eq!(error["code"], "tool_conversion_unsupported");
+    assert_eq!(error["param"], "custom");
+    assert!(env.calls.lock().unwrap().is_empty(), "拒绝发生在打上游之前");
+
+    let resp = post_with_tools(&env, &hosted_only).await;
+    assert_eq!(resp.status(), 200);
+    resp.text().await.unwrap();
+    wait_record(&env.pg, env.user_id).await;
+    let diagnostics: Value = sqlx::query_scalar(
+        "SELECT usage_details->'diagnostics' FROM billing_records WHERE user_id = $1 AND log_type = 2",
+    )
+    .bind(env.user_id)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(diagnostics["dropped_tools"], json!(["web_search"]));
+
+    let strict = setup(
+        "openai_compat",
+        "/oai/v1",
+        Some(json!({"tool_loss_policy": "strict"})),
+    )
+    .await;
+    let (status, error) = error_of(post_with_tools(&strict, &hosted_only).await).await;
+    assert_eq!(
+        (status, error["param"].clone()),
+        (400, json!("web_search")),
+        "{error}"
+    );
+
+    let allow = setup(
+        "openai_compat",
+        "/oai/v1",
+        Some(json!({"tool_loss_policy": "allow"})),
+    )
+    .await;
+    let resp = post_with_tools(&allow, &client_tool).await;
+    assert_eq!(resp.status(), 200);
+    resp.text().await.unwrap();
+}
