@@ -60,6 +60,21 @@ export interface LogDiagnostics {
   stream_end_reason?: string
   attempts_truncated?: boolean
   attempts?: { channel_id: number; channel_key_id: number; provider?: string; upstream_model?: string; upstream_endpoint?: string; duration_ms?: number; status?: number; outcome?: string; error_code?: string; error_phase?: string; error_message?: string; egress_proxy_id?: number }[]
+  /// 准入时被跳过的候选；额度类原因带窗口、用量、上限与重置时刻（只在管理端日志里）。
+  excluded?: ExcludedCandidate[]
+}
+
+export interface ExcludedCandidate {
+  channel_id: number
+  channel_key_id: number
+  reason: string
+  rule?: 'exhausted' | 'threshold' | 'window_limit'
+  window?: string | null
+  used_percent?: number
+  limit_percent?: number
+  headroom_percent?: number
+  threshold_percent?: number
+  resets_at?: number | null
 }
 
 export interface LogRow {

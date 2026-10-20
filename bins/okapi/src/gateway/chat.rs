@@ -1718,7 +1718,10 @@ async fn eligible_candidates(
     .await
     .map_err(|e| ForwardFailure::app(AppError::from(e), 0, None))?;
     let mut candidates = match Strategy::parse(bill.pool_strategy.as_deref()) {
-        Strategy::PriorityWeighted => CandidateQueue::weighted(Arc::clone(&raw)),
+        // soonest_reset 的先后要读额度观测，在下面的准入筛选里排；这里的加权随机只管同一时刻的并列
+        Strategy::PriorityWeighted | Strategy::SoonestReset => {
+            CandidateQueue::weighted(Arc::clone(&raw))
+        }
         Strategy::LeastLatency => {
             let latency = bill
                 .state
@@ -1799,9 +1802,16 @@ async fn eligible_candidates(
         }
     }
     // 负毛利熔断（§11.34）：该分组打这条渠道在亏钱，摘掉让同池其它渠道承接
+    let quota_order = match Strategy::parse(bill.pool_strategy.as_deref()) {
+        Strategy::PriorityWeighted => super::account_control::QuotaOrder::HeadroomTiers,
+        Strategy::SoonestReset => super::account_control::QuotaOrder::SoonestReset,
+        Strategy::LeastLatency | Strategy::LeastUsage | Strategy::LeastConcurrency => {
+            super::account_control::QuotaOrder::Keep
+        }
+    };
     let margin_removed = bill
         .state
-        .retain_margin_ok(&bill.group, &mut candidates)
+        .retain_margin_ok_ordered(&bill.group, &mut candidates, quota_order)
         .await;
     if candidates.is_empty() {
         return Err(ForwardFailure::app(

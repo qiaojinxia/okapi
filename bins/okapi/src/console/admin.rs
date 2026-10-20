@@ -1237,6 +1237,7 @@ const ROUTING_STRATEGIES: &[&str] = &[
     "least_latency",
     "least_usage",
     "least_concurrency",
+    "soonest_reset",
 ];
 
 #[derive(Deserialize)]

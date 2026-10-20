@@ -347,7 +347,22 @@ impl AppState {
         group: &str,
         candidates: &mut impl super::scheduler::CandidateSet,
     ) -> usize {
-        super::account_control::retain_available(self, candidates).await;
+        self.retain_margin_ok_ordered(
+            group,
+            candidates,
+            super::account_control::QuotaOrder::HeadroomTiers,
+        )
+        .await
+    }
+
+    /// 同 [`Self::retain_margin_ok`]，额度观测按池策略参与层内排序（见 `QuotaOrder`）。
+    pub async fn retain_margin_ok_ordered(
+        &self,
+        group: &str,
+        candidates: &mut impl super::scheduler::CandidateSet,
+        order: super::account_control::QuotaOrder,
+    ) -> usize {
+        super::account_control::retain_available(self, candidates, order).await;
         let blocked = self.margin_blocked_fields().await;
         if blocked.is_empty() {
             return 0;

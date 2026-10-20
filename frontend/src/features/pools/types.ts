@@ -46,7 +46,7 @@ export interface PoolMember {
 export const DEFAULT_POOL = 'default'
 
 /// 与库 CHECK 约束和后端 ROUTING_STRATEGIES 一致。
-export const ROUTING_STRATEGIES = ['priority_weighted', 'least_latency', 'least_usage', 'least_concurrency'] as const
+export const ROUTING_STRATEGIES = ['priority_weighted', 'least_latency', 'least_usage', 'least_concurrency', 'soonest_reset'] as const
 
 export type RoutingStrategy = (typeof ROUTING_STRATEGIES)[number]
 
@@ -60,6 +60,7 @@ export const STRATEGY_LABEL = {
   least_latency: 'admin:strategyLeastLatency',
   least_usage: 'admin:strategyLeastUsage',
   least_concurrency: 'admin:strategyLeastConcurrency',
+  soonest_reset: 'admin:strategySoonestReset',
 } as const
 
 export const STRATEGY_HINT = {
@@ -67,4 +68,5 @@ export const STRATEGY_HINT = {
   least_latency: 'admin:strategyLeastLatencyHint',
   least_usage: 'admin:strategyLeastUsageHint',
   least_concurrency: 'admin:strategyLeastConcurrencyHint',
+  soonest_reset: 'admin:strategySoonestResetHint',
 } as const

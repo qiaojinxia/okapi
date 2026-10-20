@@ -37,6 +37,19 @@ impl Snapshot {
         now.saturating_sub(self.observed_at) <= MAX_AGE_SECS
     }
 
+    /// 最近一次窗口重置的时刻（还没到点的窗口里最早的那个）。观测过期或上游没给重置时刻时为 None。
+    #[must_use]
+    pub fn next_reset(&self, now: i64) -> Option<i64> {
+        if !self.fresh(now) {
+            return None;
+        }
+        self.windows
+            .iter()
+            .filter_map(|w| w.resets_at)
+            .filter(|at| *at > now)
+            .min()
+    }
+
     pub fn headroom(&self, now: i64) -> Option<u8> {
         if !self.fresh(now) {
             return None;
@@ -142,4 +155,27 @@ pub(crate) async fn read(response: reqwest::Response) -> Result<Value, UpstreamE
     }
     let body = crate::openai::response_bytes(response, Some(262_144)).await?;
     serde_json::from_slice(&body).map_err(|_| UpstreamError::Build("quota_bad_response".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_reset_is_the_earliest_upcoming_window_of_a_fresh_observation() {
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+        "observed_at": 1000, "allowed": null, "windows": [
+            {"name": "stale", "used_percent": 90, "resets_at": 900, "window_secs": 18000},
+            {"name": "week", "used_percent": 40, "resets_at": 2400, "window_secs": 604_800},
+            {"name": "five_hour", "used_percent": 20, "resets_at": 1800, "window_secs": 18000},
+            {"name": "unknown", "used_percent": 5, "resets_at": null, "window_secs": null},
+        ]}))
+        .unwrap();
+        assert_eq!(snapshot.next_reset(1000), Some(1800));
+        assert_eq!(
+            snapshot.next_reset(1000 + MAX_AGE_SECS + 1),
+            None,
+            "过期观测不算"
+        );
+    }
 }

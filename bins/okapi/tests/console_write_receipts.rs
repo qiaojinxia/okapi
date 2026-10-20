@@ -346,7 +346,7 @@ async fn pool_strategy_accepts_load_strategies_and_rejects_unknown() {
     let _serial = SERIAL.lock().await;
     let bed = setup().await;
     let pool = format!("cwrs{}", bed.suffix);
-    for strategy in ["least_usage", "least_concurrency"] {
+    for strategy in ["least_usage", "least_concurrency", "soonest_reset"] {
         let (status, body) = call(
             &bed,
             "POST",

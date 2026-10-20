@@ -139,11 +139,12 @@ CREATE TABLE channel_pools (
     -- least_latency  ：层内按 Redis 时延 EWMA 升序（需 lat:ck:* 有数据，缺数据退化为 priority_weighted）
     -- least_usage    ：层内按 key 当日消费 ÷ 权重升序（spend:ck:*，UTC 零点清零；读数相同按权重随机）
     -- least_concurrency：层内按 key 在途请求数 ÷ 权重升序（conc:ck:* 租约；读数相同按权重随机）
+    -- soonest_reset  ：层内按额度窗口最近一次重置升序（订阅账号的额度观测；没有观测按本层中位数）
     fallback_pool_code VARCHAR(32) REFERENCES channel_pools(pool_code), -- 本池无候选时退到的池（单跳）
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT channel_pools_strategy_chk
-        CHECK (routing_strategy IN ('priority_weighted', 'least_latency', 'least_usage', 'least_concurrency')),
+        CHECK (routing_strategy IN ('priority_weighted', 'least_latency', 'least_usage', 'least_concurrency', 'soonest_reset')),
     CONSTRAINT channel_pools_fallback_not_self
         CHECK (fallback_pool_code IS NULL OR fallback_pool_code <> pool_code)
 );

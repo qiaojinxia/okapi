@@ -1306,6 +1306,9 @@ for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
       ...(path.startsWith('/admin') ? { user_agent: 'sdk/2', session_id: 'client-session', attempts: [
         { channel_id: 1, channel_key_id: 2, provider: 'openai', upstream_model: 'provider-model', upstream_endpoint: '/v1/responses', status: 429, outcome: 'failure', error_message: 'quota exceeded', duration_ms: 100 },
         { channel_id: 3, channel_key_id: 4, provider: 'openai', upstream_model: 'provider-model', upstream_endpoint: '/v1/responses', status: 503, outcome: 'failure', error_message: 'temporarily unavailable', duration_ms: 200 },
+      ], excluded: [
+        { channel_id: 5, channel_key_id: 6, reason: 'upstream_quota', rule: 'window_limit', window: 'seven_day', window_secs: 604800, used_percent: 85, limit_percent: 80, resets_at: 1792500000 },
+        { channel_id: 7, channel_key_id: 8, reason: 'local_tokens' },
       ] } : {}),
     }
     const row = { ...detailedLog, status: 30, log_type: 5, is_error: true, error_code: 'upstream_status', upstream_request_id: upstreamId, diagnostics }
@@ -1329,7 +1332,13 @@ for (const path of ['/portal/logs?scope=user', '/admin/logs']) {
       await expect(drawer.locator('ol li')).toHaveCount(2)
       await expect(drawer).toContainText('temporarily unavailable')
       await expect(drawer).toContainText('client-session')
-    } else await expect(drawer.locator('ol li')).toHaveCount(0)
+      await drawer.getByText('跳过的候选 · 2', { exact: true }).click()
+      await expect(drawer).toContainText('seven_day 窗口已用 85%，达到上限 80%，')
+      await expect(drawer).toContainText('本地 token 上限已满')
+    } else {
+      await expect(drawer.locator('ol li')).toHaveCount(0)
+      await expect(drawer).not.toContainText('跳过的候选')
+    }
     expect(await drawer.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
     await drawer.getByText('请求诊断', { exact: true }).scrollIntoViewIfNeeded()
     await page.screenshot({ path: `test-results/log-diagnostics-${path.startsWith('/admin') ? 'admin' : 'personal'}-mobile.png`, animations: 'disabled' })

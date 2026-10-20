@@ -909,7 +909,7 @@ secret/key/token/password/webhook/credential 的键只回 `configured` 布尔占
 | per-key RPM 上限 | 老 ok-api `provider_api_keys.rate_limit_rpm` | `channel_keys.rpm_limit` + Redis `rpm:ck:*`；超限**摘出候选**而非拒绝请求，同渠道其它 key 仍承接 |
 | per-key 日消费上限 | Sub2API account 级限额 | `channel_keys.daily_spend_cap_micro` + Redis `spend:ck:*`（结算后累加，软实时） |
 | per-key 模型子集 | 老 ok-api `supported_models` | `channel_keys.model_subset`（null = 继承渠道）；同组织两把 key 的模型权限常不一致，此前只能靠拆渠道表达 |
-| 可配路由策略 | 老 ok-api `routing_mode` / LiteLLM `routing_strategy` | `channel_pools.routing_strategy`：`priority_weighted`（默认，历史行为）/ `least_latency` / `least_usage` / `least_concurrency`（2026-10-20） |
+| 可配路由策略 | 老 ok-api `routing_mode` / LiteLLM `routing_strategy` | `channel_pools.routing_strategy`：`priority_weighted`（默认，历史行为）/ `least_latency` / `least_usage` / `least_concurrency` / `soonest_reset`（2026-10-20） |
 
 `least_latency` 落到实处而非只存一个字符串：结算侧按 `new = old*0.7 + sample*0.3`
 写 Redis `lat:ck:*`（只采成功请求，失败请求的耗时多是超时，混进去会把刚恢复的 key
@@ -937,6 +937,19 @@ RPM 与日消费闸仅在该 key 配了上限时才发起 Redis 调用。
   `channel_permit` 单测（只计数租约不拦、续租、退回归零、丢失不判过期）、`gateway_m2_sched` 两个端到端用例
   （消费多的 key 让路；两把无上限 key 上第一个慢请求在途时第二个分到另一把，结束后在途归零）、
   `console_write_receipts`（新取值能存能读、未知值 400）、前端 `write-forms` 池抽屉。
+
+**【2026-10-20】额度余量不再推翻池策略；加 `soonest_reset`**（迁移 `0003_pool_soonest_reset`）：
+- 问题：`account_control::retain_available` 在池策略排好序之后，又按订阅账号的额度余量（精确到 1%）把同层重排一遍。
+  订阅账号都有观测、余量各不相同，所以任何策略都被它覆盖，新会话全去余量最大的那个账号；余量每 5 分钟才观测一次，
+  两次观测之间同一个账号连续吃下所有新会话（线上按小时看，4 个账号常常只有 1–2 个在接）。
+- 现在额度观测怎样参与排序由池策略决定（`QuotaOrder`，排除在任何策略下都照旧生效）：
+  `priority_weighted` 按余量分三档（≥50 / 20–49 / <20，没有观测按中档），档内保持加权随机；
+  `least_latency` / `least_usage` / `least_concurrency` 只筛不排；新策略 `soonest_reset` 层内按最近一次窗口重置升序
+  （`Snapshot::next_reset`，先用快要重置、过期作废的额度；没有观测的按本层中位数）。层与主池 / 降级池顺序都不被推翻。
+- 诊断里被跳过的候选（`excluded`）带结构化原因：`rule`（`exhausted` / `threshold` / `window_limit`）、窗口、
+  用量、上限、重置时刻；管理端日志详情新增「跳过的候选」一段直接渲染（门户的诊断白名单不含它）。
+- 验收：`account_control` 单测（原因字段、分档保持层内顺序、只筛不排、soonest_reset 的中位数）、`Snapshot::next_reset`
+  单测、`console_write_receipts` 新取值、前端 `logs` 诊断抽屉。
 
 **明确不借**：老 ok-api 的 provider 分域模型（定价重复 + 名字歧义）、绝对价存储
 （倍率心智已与主流对齐，§11.5）、new-api 的物化 `abilities` 表——候选查询当前不是

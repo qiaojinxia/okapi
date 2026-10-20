@@ -5,6 +5,7 @@
 //! - `least_latency`：按时延 EWMA 升序，无样本者按本层中位数插队。
 //! - `least_usage`：按 key 当日消费 ÷ 权重升序（`spend:ck:*`）。
 //! - `least_concurrency`：按 key 在途请求数 ÷ 权重升序（`conc:ck:*` 租约）。
+//! - `soonest_reset`：订阅账号先用额度窗口最快重置的（读额度观测，在 `account_control` 准入时排）。
 //!
 //! 后两种读数相同（包括都为 0）时按 `priority_weighted` 的同一抽样随机排，空闲时与默认策略
 //! 一样按权重分流；没有读数的 key 按 0 处理——当日没花过钱、眼下没有在途，本来就该先用它。
@@ -26,6 +27,7 @@ pub enum Strategy {
     LeastLatency,
     LeastUsage,
     LeastConcurrency,
+    SoonestReset,
 }
 
 impl Strategy {
@@ -35,6 +37,7 @@ impl Strategy {
             Some("least_latency") => Self::LeastLatency,
             Some("least_usage") => Self::LeastUsage,
             Some("least_concurrency") => Self::LeastConcurrency,
+            Some("soonest_reset") => Self::SoonestReset,
             _ => Self::PriorityWeighted,
         }
     }
@@ -288,10 +291,10 @@ pub fn order_candidates_by_latency<S: std::hash::BuildHasher>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn cand(priority: i32, weight: i32, cost_milli: i64) -> ChannelCandidate {
+    pub(crate) fn cand(priority: i32, weight: i32, cost_milli: i64) -> ChannelCandidate {
         ChannelCandidate {
             channel_id: 1,
             channel_key_id: 1,
@@ -377,7 +380,7 @@ mod tests {
         assert_eq!(ordered[1].priority, 0);
     }
 
-    fn cand_with_key(key: i64, priority: i32) -> ChannelCandidate {
+    pub(crate) fn cand_with_key(key: i64, priority: i32) -> ChannelCandidate {
         let mut c = cand(priority, 1, 1000);
         c.channel_key_id = key;
         c
@@ -491,6 +494,10 @@ mod tests {
         assert_eq!(
             Strategy::parse(Some("least_concurrency")),
             Strategy::LeastConcurrency
+        );
+        assert_eq!(
+            Strategy::parse(Some("soonest_reset")),
+            Strategy::SoonestReset
         );
         assert_eq!(
             Strategy::parse(Some("nonsense")),

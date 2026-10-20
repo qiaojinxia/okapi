@@ -6,7 +6,7 @@ import { proxyOptions } from '@/features/proxies/options'
 import { usePermission } from '@/hooks/use-auth'
 import { DetailSection, InfoGrid, InfoItem } from './detail-ui'
 import { duration } from './types'
-import type { LogDiagnostics } from './types'
+import type { ExcludedCandidate, LogDiagnostics } from './types'
 
 export function LogRequestDetails({ row }: { row: {
   diagnostics?: LogDiagnostics | null; requested_model?: string | null; model: string
@@ -36,7 +36,16 @@ export function LogRequestDetails({ row }: { row: {
     [t('logs:requestType'), row.request_type ? t(`logs:requestType_${row.request_type}`, { defaultValue: row.request_type }) : undefined],
     [t('logs:streamEndReason'), d?.stream_end_reason ? t(`logs:streamEnd_${d.stream_end_reason}`, { defaultValue: d.stream_end_reason }) : undefined],
   ].filter(([, value]) => value)
-  if (!fields.length && models.length < 2 && !d?.attempts?.length) return null
+  if (!fields.length && models.length < 2 && !d?.attempts?.length && !d?.excluded?.length) return null
+  const excludedReason = (e: ExcludedCandidate): string => {
+    const resets = e.resets_at ? t('logs:excludedResetsAt', { time: new Date(e.resets_at * 1000).toLocaleString(locale) }) : ''
+    switch (e.rule) {
+      case 'exhausted': return t('logs:excludedExhausted')
+      case 'threshold': return t('logs:excludedThreshold', { headroom: e.headroom_percent, threshold: e.threshold_percent })
+      case 'window_limit': return t('logs:excludedWindowLimit', { window: e.window ?? '—', used: e.used_percent, limit: e.limit_percent }) + resets
+      default: return t(`logs:excluded_${e.reason}`, { defaultValue: e.reason })
+    }
+  }
   const chain = models.join(' → ')
   return <DetailSection icon={ScanSearch} title={t('logs:requestDiagnostics')}>
     <InfoGrid cols={2}>
@@ -61,6 +70,15 @@ export function LogRequestDetails({ row }: { row: {
         </li>)}
       </ol>
       {d.attempts_truncated && <p className="mt-3 text-xs text-muted-foreground">{t('logs:attemptsTruncated')}</p>}
+    </details> : null}
+    {d?.excluded?.length ? <details className="rounded-lg border border-border/70 bg-card p-3">
+      <summary className="cursor-pointer text-[13px] leading-5 font-medium">{t('logs:excludedCandidates')} · {d.excluded.length}</summary>
+      <ul className="mt-3 space-y-2">
+        {d.excluded.map((e, index) => <li key={index} className="min-w-0 rounded-lg bg-muted/30 p-3 text-[13px] leading-5">
+          <span className="font-medium">{t('analytics:dimChannel')} #{e.channel_id} · {t('admin:logsChannelKey')} #{e.channel_key_id}</span>
+          <p className="break-words text-muted-foreground [overflow-wrap:anywhere]">{excludedReason(e)}</p>
+        </li>)}
+      </ul>
     </details> : null}
   </DetailSection>
 }
