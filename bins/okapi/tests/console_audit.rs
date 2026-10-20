@@ -306,3 +306,63 @@ async fn login_attempts_are_audited() {
     assert_eq!(mine[1]["reason"], "invalid_credentials");
     assert!(mine[0]["ua"].as_str().is_some());
 }
+
+/// 审计兜底：管理端写接口成功、处理器却没写审计时补一条 `api.<方法>`（对象是路由模板）；
+/// 处理器自己写过的不重复，失败的请求不补。
+#[tokio::test]
+async fn unaudited_admin_writes_get_one_generic_row() {
+    let env = setup().await;
+    let pool = format!("au-fb-{}", env.suffix);
+    let (status, body) = post(
+        &env,
+        "/admin/pools",
+        &env.super_token,
+        json!({"pool_code": pool}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (_, rows) = get(
+        &env,
+        &format!("/admin/audit?target={pool}"),
+        &env.super_token,
+    )
+    .await;
+    let rows = rows["data"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["action"], "channel.upsert_pool");
+    let actor = rows[0]["actor"].as_str().unwrap().to_owned();
+
+    let (status, body) = post(
+        &env,
+        "/admin/channels/oauth/start",
+        &env.super_token,
+        json!({"provider": "codex"}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post(
+        &env,
+        "/admin/channels/oauth/start",
+        &env.super_token,
+        json!({"provider": "no-such-provider"}),
+    )
+    .await;
+    assert_ne!(status, 200, "{body}");
+
+    let (_, rows) = get(
+        &env,
+        &format!("/admin/audit?actor={actor}&action=api."),
+        &env.super_token,
+    )
+    .await;
+    let rows = rows["data"].as_array().unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "建池已自带审计、失败的请求不补，只剩一条：{rows:?}"
+    );
+    assert_eq!(rows[0]["action"], "api.post");
+    assert_eq!(rows[0]["target"], "/admin/channels/oauth/start");
+    assert_eq!(rows[0]["detail"]["path"], "/admin/channels/oauth/start");
+    assert_eq!(rows[0]["detail"]["status"], 200);
+}

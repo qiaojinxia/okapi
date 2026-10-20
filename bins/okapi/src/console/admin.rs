@@ -32,6 +32,7 @@ pub(super) async fn guard(
                 .with_param(permission.to_owned()),
         );
     }
+    super::audit_fallback::note_actor(key.actor_user_id(), permission);
     Ok(key)
 }
 
@@ -47,7 +48,10 @@ pub(super) async fn guard_scoped(
             AppError::new(StatusCode::FORBIDDEN, codes::PERMISSION_DENIED)
                 .with_param(base.to_owned()),
         ),
-        scope => Ok((key, scope)),
+        scope => {
+            super::audit_fallback::note_actor(key.actor_user_id(), base);
+            Ok((key, scope))
+        }
     }
 }
 
@@ -94,6 +98,7 @@ pub(super) async fn audit(
     target: &str,
     detail: Value,
 ) {
+    super::audit_fallback::note_audited();
     if let Err(err) = okapi_store::admin::record_audit(
         &state.pg,
         &format!("admin:{}", actor.actor_user_id()),

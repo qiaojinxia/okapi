@@ -484,6 +484,7 @@ pub async fn apply(
         }
         applied += changes.len();
     }
+    super::audit_fallback::note_audited();
     okapi_store::admin::record_audit_in(&mut tx, &format!("admin:{}", actor.user_id), "pricing.sync_apply", "batch", json!({
         "applied": applied,
         "changes": req.changes.iter().map(|c| json!({"model": c.model, "axis": c.axis, "value": c.value})).collect::<Vec<_>>(),

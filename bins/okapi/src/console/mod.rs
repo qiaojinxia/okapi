@@ -10,6 +10,7 @@ mod analysis_freshness;
 mod analysis_source;
 pub mod analytics;
 pub mod audit;
+mod audit_fallback;
 pub mod auth_web;
 mod cache_usage;
 pub mod channel_balance;
@@ -122,6 +123,11 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes())
         .route("/mcp", post(mcp::endpoint))
         .route("/healthz", get(|| async { "ok" }))
+        // 只套在上面这些 API 路由上（route_layer 在路由匹配之后运行，拿得到路由模板）
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            audit_fallback::layer,
+        ))
         .merge(spa_router())
         .layer(axum::middleware::from_fn(spa_navigation))
         // 与 gateway 同一把闸：登录 / 注册 / 兑换的每 IP 限流与审计 IP 都经

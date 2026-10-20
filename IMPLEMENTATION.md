@@ -1420,6 +1420,13 @@ detail 缺省只露前两个键、点行展开为**键值行**而非整块 JSON�
 展开 ip 键、安全页最近登录卡；`screenshots.spec` 增两张。`permissions::ALL` 单测自动核对
 新权限点已登记。
 
+**【2026-10-20】审计兜底**（对照 new-api `middleware/audit.go`）：此前管理写操作的审计全靠每个处理器显式调
+`admin::audit`（71 处），新接口漏写就没有留痕。`console::audit_fallback` 作为 `route_layer` 套在 API 路由上：
+`/admin/` 下的 POST / PUT / PATCH / DELETE 由权限守卫（`guard` / `guard_scoped`）记下操作者与所查权限点，
+`admin::audit` 与定价同步的事务内审计记下「已写过」；请求成功、守卫查的不是只读权限（`*.read`）、处理器又没写过
+审计时，补一行动作 `api.<方法>`、对象为路由模板、detail 带实际路径与状态码。已有显式审计的接口不重复，失败的
+请求不补。验收：`console_audit` 的 `unaudited_admin_writes_get_one_generic_row`。
+
 ### 11.16 注册策略与邀请赠送（2026-09-02）
 
 **调研**：new-api 的注册相关开关散在"系统设置"一页里（`RegisterEnabled` / `EmailVerificationEnabled` /
