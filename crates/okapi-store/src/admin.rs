@@ -89,8 +89,10 @@ pub async fn upsert_model_ratio_in(
             audio_completion_ratio = EXCLUDED.audio_completion_ratio,
             image_ratio = EXCLUDED.image_ratio,
             modality_ratios = COALESCE($9, model_pricing.modality_ratios),
-            -- 改回 ratio 必须清掉阶梯表：留着它，下次误切 tiered 会拿到一张早已过期的旧表
+            -- 改回 ratio 必须清掉阶梯表：留着它，下次误切 tiered 会拿到一张早已过期的旧表；
+            -- 按次单价同理——对外的定价清单 / MCP 不看模式就把它列出来
             tier_expr = NULL,
+            per_call_price_micro = NULL,
             updated_at = now()
         "#,
         model_id,

@@ -129,10 +129,13 @@ pub async fn batch_delete_channels(pool: &PgPool, ids: &[i64]) -> Result<u64, St
     .execute(&mut *tx)
     .await?
     .rows_affected();
-    sqlx::query!(
-        r#"UPDATE channel_keys SET status = 2 WHERE channel_id = ANY($1)"#,
-        ids
+    // 只停用这次真正删掉的渠道的 key（deleted_at 是本事务的 now()）：已软删的渠道当时就停过了，
+    // 这里再动它们等于改写没被这次操作碰到的行，与单删的 affected > 0 门控也不同口径
+    sqlx::query(
+        "UPDATE channel_keys SET status = 2
+         WHERE channel_id IN (SELECT id FROM channels WHERE id = ANY($1) AND deleted_at = now())",
     )
+    .bind(ids)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
