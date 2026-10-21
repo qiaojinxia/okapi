@@ -102,6 +102,35 @@ test('密钥限制：旧后端不可静默忽略额度配置', async ({ page }) 
   await expect(page.getByText('当前后端尚未支持额度限制，升级后可配置。')).toBeVisible()
 })
 
+test('抽屉入场的焦点定时器不抢已经落在层内的焦点，否则随后敲的字会进错字段', async ({ page }) => {
+  // 入场时把焦点送进第一个输入框的定时器是 30ms：手快的人（或自动填充、测试驱动）在它触发前就点进了别的字段，
+  // 它再把焦点拽回来，接下来的输入就落到名称框里。用暂停的时钟让这个时序确定
+  await page.clock.install({ time: new Date('2026-10-01T08:00:00') })
+  await prepare(page)
+  await expect(page.locator('tbody tr')).toHaveCount(1)
+  await page.clock.pauseAt(new Date('2026-10-01T09:00:00'))
+  await page.getByRole('button', { name: '新建密钥', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '新建密钥' })
+  const quota = dialog.getByLabel('累计消费上限（USD）')
+  await quota.focus()
+  await page.clock.runFor(100)
+  await expect(quota).toBeFocused()
+  await quota.fill('5')
+  await expect(dialog.getByLabel('名称', { exact: true })).toHaveValue('')
+})
+
+test('抽屉入场时焦点还在层外：定时器照旧把焦点送进第一个输入框', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-10-01T08:00:00') })
+  await prepare(page)
+  await expect(page.locator('tbody tr')).toHaveCount(1)
+  await page.clock.pauseAt(new Date('2026-10-01T09:00:00'))
+  await page.getByRole('button', { name: '新建密钥', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '新建密钥' })
+  await expect(dialog).toBeVisible()
+  await page.clock.runFor(100)
+  await expect(dialog.getByLabel('名称', { exact: true })).toBeFocused()
+})
+
 test('密钥限制：最大金额编辑回显不丢失微美元精度', async ({ page }) => {
   const writes = await prepare(page, true, 9007199254740991)
   await page.locator('tbody tr').getByRole('button', { name: '编辑', exact: true }).click()

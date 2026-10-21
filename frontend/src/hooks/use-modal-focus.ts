@@ -54,6 +54,10 @@ export function useModalFocus(
     const timer = window.setTimeout(() => {
       const root = panel.current
       if (!root) return
+      // 这 30ms 里焦点已经落进层内某个控件（手快的人点进了别的字段、自动填充、`autoFocus`）：
+      // 别再把它拽回第一个输入框，否则紧接着敲的字会进错字段
+      const active = document.activeElement
+      if (active !== null && active !== root && root.contains(active)) return
       const first = initial?.(root) ?? focusable(root)[0]
       first?.focus({ preventScroll: true })
     }, 30)
