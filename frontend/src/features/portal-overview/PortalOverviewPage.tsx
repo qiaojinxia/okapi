@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
 import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, RefreshCw, ShieldCheck, Timer, Wallet, Zap } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Button } from '@/components/ui/button'
@@ -11,10 +11,12 @@ import { PageHeader } from '@/components/ui/page'
 import { Segmented } from '@/components/ui/segmented'
 import { UsageScope } from '@/components/usage-scope'
 import { useUsageScope } from '@/hooks/use-usage-scope'
+import { Sparkline } from '@/components/ui/sparkline'
 import { Stat } from '@/components/ui/stat'
 import { QualityStrip } from '@/features/portal-overview/QualityStrip'
 import { UsageOverview } from '@/features/portal-overview/UsageOverview'
 import { cacheHit } from '@/features/portal-overview/cache-metrics'
+import { calendarDays, usageValue } from '@/features/portal-overview/usage-chart-data'
 import type { BreakdownResp, Scope } from '@/features/portal-overview/types'
 import { runwayDays } from '@/features/portal-overview/types'
 import { GettingStartedCard } from '@/features/portal-guide/GettingStartedCard'
@@ -103,6 +105,19 @@ export function PortalOverviewPage() {
 
   const hit = total ? cacheHit(total) : null
   const failed = total?.errors
+  // 数字卡里的迷你趋势：逐日的 Token / 请求 / 金额，空日补零，与下方趋势图同一份数据
+  const daily = useMemo(() => {
+    const w = q.isError ? undefined : q.data?.window
+    if (!q.data || !w) return null
+    const byDay = new Map<string, { tokens: number; requests: number; amount: number }>()
+    for (const row of q.data.data) {
+      const day = byDay.get(row.day) ?? { tokens: 0, requests: 0, amount: 0 }
+      day.tokens += usageValue(row, 'tokens'); day.requests += row.requests; day.amount += row.amount_micro
+      byDay.set(row.day, day)
+    }
+    const days = calendarDays(w.start_date, w.end_date).map((d) => byDay.get(d) ?? { tokens: 0, requests: 0, amount: 0 })
+    return { tokens: days.map((d) => d.tokens), requests: days.map((d) => d.requests), amount: days.map((d) => d.amount) }
+  }, [q.data, q.isError])
 
   const health = <QualityStrip label={t('charts:performance')} loading={loading} items={[
     {
@@ -139,116 +154,130 @@ export function PortalOverviewPage() {
   ]} />
 
   return (
-    <div className="flex min-w-0 flex-col gap-4">
-      <PageHeader
-        icon={LayoutDashboard}
-        title={t('portal:dashboard')}
-        meta={<LiveBadge live={live} scope={scope} />}
-        action={<>
-          <Button variant="outline" loading={refreshing} onClick={() => void refresh()}>
-            {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
-          </Button>
-          <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium shadow-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40">
-            {t('portal:usageDetails')}<ArrowUpRight className="h-4 w-4" />
-          </Link>
-        </>}
-      />
-      {/* 新用户优先看到下一步；已完成接入的账户直接展示数据。 */}
-      <GettingStartedCard />
-      <section aria-label={t('portal:dashboardFilters')} className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <UsageScope {...usageScope} onChange={(value) => {
-          usageScope.setScope(value)
-          void navigate({ search: (prev) => ({ ...prev, scope: value }) })
-        }} />
-        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-          <Segmented
-            ariaLabel={t('charts:period')}
-            value={range ? 0 : days}
-            onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
-            options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
+    // 大屏撑满视口：上半部分（页头、筛选、指标）保持自身高度，趋势与排行吃掉剩余高度，视口放不下时在页内滚动
+    <div data-slot="portal-overview" className="flex min-w-0 flex-col gap-4 lg:h-full lg:min-h-0 lg:overflow-y-auto">
+      <div className="flex min-w-0 shrink-0 flex-col gap-4">
+        <PageHeader
+          icon={LayoutDashboard}
+          title={t('portal:dashboard')}
+          meta={<LiveBadge live={live} scope={scope} />}
+          action={<>
+            <Button variant="outline" loading={refreshing} onClick={() => void refresh()}>
+              {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
+            </Button>
+            <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium shadow-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40">
+              {t('portal:usageDetails')}<ArrowUpRight className="h-4 w-4" />
+            </Link>
+          </>}
+        />
+        {/* 新用户优先看到下一步；已完成接入的账户直接展示数据。 */}
+        <GettingStartedCard />
+        <section aria-label={t('portal:dashboardFilters')} className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <UsageScope {...usageScope} onChange={(value) => {
+            usageScope.setScope(value)
+            void navigate({ search: (prev) => ({ ...prev, scope: value }) })
+          }} />
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+            <Segmented
+              ariaLabel={t('charts:period')}
+              value={range ? 0 : days}
+              onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
+              options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
+            />
+            <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range}
+              onApply={(value) => void navigate({ search: (prev) => ({ ...prev, start_date: value.start, end_date: value.end }) })} />
+          </div>
+        </section>
+
+        {/* 四个数字按用户先看什么排：用了多少 Token、调了多少次、还剩多少、花了多少。Token 用绿色最先抓住视线 */}
+        <section aria-label={t('portal:dashboardMetrics')} className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <Stat
+            layout="stacked"
+            icon={Cpu}
+            iconClassName="bg-success/12 text-success"
+            tone="good"
+            label={t('common:tokens')}
+            loading={loading}
+            className="@container"
+            aside={daily && <KpiTrend values={daily.tokens} color="var(--color-success)" />}
+            value={total ? formatCount(total.tokens, locale) : '—'}
+            sub={<>
+              <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
+              {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
+                : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })}</span>}
+            </>}
           />
-          <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range}
-            onApply={(value) => void navigate({ search: (prev) => ({ ...prev, start_date: value.start, end_date: value.end }) })} />
-        </div>
-      </section>
+          <Stat
+            layout="stacked"
+            icon={Activity}
+            iconClassName="bg-chart-1/12 text-chart-1"
+            label={t('common:requests')}
+            loading={loading}
+            className="@container"
+            aside={daily && <KpiTrend values={daily.requests} color="var(--color-chart-1)" />}
+            value={total ? formatCount(total.requests, locale) : '—'}
+            sub={<>
+              <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
+              {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
+            </>}
+          />
+          <Stat
+            layout="stacked"
+            icon={Wallet}
+            iconClassName="bg-warning/14 text-warning"
+            label={t('portal:accountBalance')}
+            loading={me.isPending}
+            value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'}
+            // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
+            // 14 天内转黄、3 天内转红。有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
+            sub={
+              me.data && me.data.subscription_until_unix > 0 ? (
+                <>
+                  <span>{balanceSub(me.data, recentWalletSpend, span, t)}</span>
+                  <Link to="/portal/plans" className="text-primary underline decoration-dotted">
+                    {t('portal:balanceSubLine', { amount: formatUsd(me.data.subscription_remaining_micro, locale) })}
+                  </Link>
+                </>
+              ) : (
+                balanceSub(me.data ?? null, recentWalletSpend, span, t)
+              )
+            }
+            tone={balanceTone(me.data ?? null, recentWalletSpend, span)}
+          />
+          <Stat
+            layout="stacked"
+            icon={Coins}
+            iconClassName="bg-chart-3/12 text-chart-3"
+            label={t('portal:totalSpend')}
+            loading={loading}
+            className="@container"
+            aside={daily && <KpiTrend values={daily.amount} color="var(--color-chart-3)" />}
+            value={total ? formatUsd(total.amount_micro, locale) : '—'}
+            sub={<>
+              <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
+              {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
+            </>}
+          />
+        </section>
 
-      {/* 四个数字按用户先看什么排：用了多少 Token、调了多少次、还剩多少、花了多少。Token 用绿色最先抓住视线 */}
-      <section aria-label={t('portal:dashboardMetrics')} className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Stat
-          layout="stacked"
-          icon={Cpu}
-          iconClassName="bg-success/12 text-success"
-          tone="good"
-          label={t('common:tokens')}
-          loading={loading}
-          value={total ? formatCount(total.tokens, locale) : '—'}
-          sub={<>
-            <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
-            {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
-              : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })}</span>}
-          </>}
-        />
-        <Stat
-          layout="stacked"
-          icon={Activity}
-          iconClassName="bg-chart-1/12 text-chart-1"
-          label={t('common:requests')}
-          loading={loading}
-          value={total ? formatCount(total.requests, locale) : '—'}
-          sub={<>
-            <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
-            {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
-          </>}
-        />
-        <Stat
-          layout="stacked"
-          icon={Wallet}
-          iconClassName="bg-warning/14 text-warning"
-          label={t('portal:accountBalance')}
-          loading={me.isPending}
-          value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'}
-          // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
-          // 14 天内转黄、3 天内转红。有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
-          sub={
-            me.data && me.data.subscription_until_unix > 0 ? (
-              <>
-                <span>{balanceSub(me.data, recentWalletSpend, span, t)}</span>
-                <Link to="/portal/plans" className="text-primary underline decoration-dotted">
-                  {t('portal:balanceSubLine', { amount: formatUsd(me.data.subscription_remaining_micro, locale) })}
-                </Link>
-              </>
-            ) : (
-              balanceSub(me.data ?? null, recentWalletSpend, span, t)
-            )
-          }
-          tone={balanceTone(me.data ?? null, recentWalletSpend, span)}
-        />
-        <Stat
-          layout="stacked"
-          icon={Coins}
-          iconClassName="bg-chart-3/12 text-chart-3"
-          label={t('portal:totalSpend')}
-          loading={loading}
-          value={total ? formatUsd(total.amount_micro, locale) : '—'}
-          sub={<>
-            <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
-            {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
-          </>}
-        />
-      </section>
-
-      {health}
+        {health}
+      </div>
 
       {q.isError ? (
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
       ) : q.isPending ? <LoadingState /> : q.data?.total && (
-        <>
-          <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
-            onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }), resetScroll: false })} />
-        </>
+        <UsageOverview className="lg:flex-1" data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
+          onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }), resetScroll: false })} />
       )}
     </div>
   )
+}
+
+/// 数字卡右侧的迷你趋势：卡片够宽才显示（数值与副行优先），位置对齐数值那一行。
+function KpiTrend({ values, color }: { values: number[]; color: string }) {
+  return <div aria-hidden className="pointer-events-none absolute top-11 right-4 hidden h-7 w-20 @[13rem]:block">
+    <Sparkline values={values} color={color} className="size-full" />
+  </div>
 }
 
 /// 当前窗口之前、等长的一段（起止都是日历日）。

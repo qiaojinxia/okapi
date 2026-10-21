@@ -23,9 +23,10 @@ const OTHER = '\u0000other'
 
 /// 趋势 + 模型消费排行：回答「钱花在哪、怎么变的」。
 /// 排行每行除金额和占比外，再给请求数、Token、每次均价和缓存命中——原先单独一张明细表的内容并在这里。
-export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
+export function UsageOverview({ data, logSearch, metric, onMetricChange, className }: {
   data: BreakdownResp; logSearch: PortalLogSearch; metric: UsageMetric
   onMetricChange: (metric: UsageMetric) => void
+  className?: string
 }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
@@ -45,27 +46,36 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange }: {
   const [active, setActive] = useState<string | null>(null)
   const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
 
-  return <div className="grid min-w-0 gap-3 lg:grid-cols-12">
-    <div className="min-w-0 lg:col-span-8"><SpendTrendView rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} /></div>
-    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl px-4 py-3 lg:col-span-4">
+  // 大屏下这一行吃掉页面剩余高度：两张卡同高，趋势图随之拉高，排行里的环形图在余量里居中放大。
+  // 视口放不下时按排行实际要列的行数定下限（每行约 3.4rem，加上标题、圆环最小高度与内边距），
+  // 模型少就不白占高度；行数很多时封顶，超出的部分在排行卡内滚动。
+  const listedRows = expanded ? TOP : Math.min(models.length, TOP) + (rest > 0 ? 1 : 0)
+  const minHeight = `${Math.min(30, Math.max(22, 11.5 + listedRows * 3.4))}rem`
+  return <div data-slot="usage-overview" style={{ '--usage-min': minHeight } as React.CSSProperties}
+    className={cn('grid min-w-0 gap-3 lg:min-h-[var(--usage-min)] lg:grid-cols-12 lg:grid-rows-[minmax(0,1fr)]', className)}>
+    <SpendTrendView className="lg:col-span-8 lg:min-h-0" rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} />
+    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl px-4 py-3 lg:col-span-4 lg:min-h-0">
       <section aria-label={t('portal:modelSnapshot')} className="@container flex min-h-0 flex-1 flex-col gap-3">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex shrink-0 items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">{t('portal:modelSnapshot')}</h2>
           {models.length > TOP && <Button variant="ghost" size="xs" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
             {expanded ? t('portal:showTopModels', { count: TOP }) : t('portal:allModels', { count: models.length })}
           </Button>}
         </div>
-        {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <div className="flex min-w-0 flex-col gap-3 @xl:flex-row @xl:items-center @xl:gap-6">
-          {/* 卡片够宽（单列布局占满一行）时环形图放左、排行放右，免得下面空一大片 */}
-          <div className="relative mx-auto size-28 shrink-0 @xl:mx-2 @xl:size-36">
-            <Donut slices={slices} total={sum} active={active} label={t('portal:modelShareChart')} />
-            <div aria-hidden className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-[10px] text-muted-foreground">{t('portal:totalSpend')}</span>
-              <span className={cn('font-semibold leading-tight tabular-nums', formatUsd(sum, locale).length > 9 ? 'text-xs' : 'text-[13px]', '@xl:text-sm')}>{formatUsd(sum, locale)}</span>
-              <span className="text-[10px] text-muted-foreground">{t('portal:modelCount', { count: models.length })}</span>
+        {models.length === 0 ? <p className="py-2 text-xs text-muted-foreground">{t('portal:emptyUsageHint')}</p> : <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3 @xl:flex-row @xl:items-center @xl:gap-6">
+          {/* 卡片够宽（单列布局占满一行）时环形图放左、排行放右，免得下面空一大片；
+              大屏列布局时环形图区吃掉卡片的剩余高度，圆环在里面居中并随高度放大（最大 18rem） */}
+          <div className="flex shrink-0 items-center justify-center lg:min-h-28 lg:flex-1">
+            <div className="relative mx-auto size-28 shrink-0 @xl:mx-2 @xl:size-36 lg:aspect-square lg:h-full lg:max-h-72 lg:min-h-28 lg:w-auto">
+              <Donut slices={slices} total={sum} active={active} label={t('portal:modelShareChart')} />
+              <div aria-hidden className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+                <span className="text-[10px] text-muted-foreground">{t('portal:totalSpend')}</span>
+                <span className={cn('font-semibold leading-tight tabular-nums', formatUsd(sum, locale).length > 9 ? 'text-xs' : 'text-[13px]', '@xl:text-sm lg:text-sm')}>{formatUsd(sum, locale)}</span>
+                <span className="text-[10px] text-muted-foreground">{t('portal:modelCount', { count: models.length })}</span>
+              </div>
             </div>
           </div>
-          <ol className={cn('-mx-2 min-w-0 space-y-0.5 @xl:mx-0 @xl:flex-1', expanded && 'max-h-96 overflow-y-auto')}>
+          <ol className={cn('-mx-2 min-w-0 shrink-0 space-y-0.5 @xl:mx-0 @xl:flex-1 lg:min-h-0 lg:shrink lg:overflow-y-auto', expanded && 'max-h-96 overflow-y-auto lg:max-h-none')}>
             {listed.map((model, index) => {
               const hit = cacheHit(model)
               const color = colors.get(model.model) ?? OTHER_COLOR

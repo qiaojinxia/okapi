@@ -4,6 +4,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { EmptyState } from '@/components/ui/state'
 import { TimeChart } from '@/components/ui/time-chart'
+import { cn } from '@/lib/utils'
 import type { BreakdownResp, BreakdownRow } from './types'
 import { calendarDays, modelColors, usageChart, USAGE_METRICS } from './usage-chart-data'
 import { aggregateCacheHit } from './cache-metrics'
@@ -19,9 +20,10 @@ export function zoneLabel(zone: string | undefined): string {
   return zone === 'Etc/UTC' || zone === 'UTC' || zone === 'Etc/GMT' ? 'UTC' : zone
 }
 
-export function SpendTrendView({ rows, days, window, metric, onMetricChange }: {
+export function SpendTrendView({ rows, days, window, metric, onMetricChange, className }: {
   rows: BreakdownRow[]; days: number; window?: BreakdownResp['window']; metric: UsageMetric
   onMetricChange: (metric: UsageMetric) => void
+  className?: string
 }) {
   const { t, i18n } = useTranslation()
   const end = window?.end_date ?? new Date().toISOString().slice(0, 10)
@@ -36,7 +38,7 @@ export function SpendTrendView({ rows, days, window, metric, onMetricChange }: {
   // 只在口径本身有需要解释的地方加一句，常规口径不重复说明
   const note = metric === 'latency' ? t('charts:missingPerformance') : metric === 'cache' && aggregateCacheHit(rows).partial ? t('charts:partialCacheSamples') : ratio ? t('charts:ratioGaps') : null
   return (
-    <Card id="portal-trend" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl"><CardContent className="flex flex-1 flex-col space-y-2 px-4 py-3">
+    <Card id="portal-trend" className={cn('flex min-w-0 scroll-mt-4 flex-col rounded-xl', className)}><CardContent className="flex flex-1 flex-col space-y-2 px-4 py-3 lg:min-h-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="font-semibold">{t('charts:usageTrend')}</h2>
@@ -51,7 +53,7 @@ export function SpendTrendView({ rows, days, window, metric, onMetricChange }: {
         </div>
       </div>
       {rows.length === 0 ? <EmptyState hint={t('portal:emptyUsageHint')} />
-        : <TimeChart compact key={metric} {...chart} partialBucket={partial} percent={ratio} format={format} unit={money ? 'USD' : ratio ? '%' : metric === 'latency' ? 'ms' : t(`charts:metric_${metric}`)} label={t('charts:usageTrend')} />}
+        : <TimeChart compact fill minPlotHeight={176} key={metric} {...chart} partialBucket={partial} percent={ratio} format={format} unit={money ? 'USD' : ratio ? '%' : metric === 'latency' ? 'ms' : t(`charts:metric_${metric}`)} label={t('charts:usageTrend')} />}
       {note && <p className="text-xs leading-5 text-muted-foreground">{note}</p>}
     </CardContent></Card>
   )

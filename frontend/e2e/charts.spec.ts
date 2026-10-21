@@ -306,6 +306,24 @@ for (const width of [390, 1280]) {
   })
 }
 
+test('门户 1440×900：趋势与模型排行同高、底边撑到视口底部且页面不溢出，数字卡带迷你趋势', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.route('**/api/me/keys?*', (route) => route.fulfill({ json: { total: 1, data: [{ used_micro: 2700000, requests: 540, last_used_at: '2026-09-04T10:00:00Z' }] } }))
+  await page.goto('/portal')
+  await expect(page.locator('.recharts-surface').first()).toBeVisible()
+  const bottom = async (selector: string) => {
+    const box = await page.locator(selector).boundingBox()
+    return box ? box.y + box.height : 0
+  }
+  // 入场动画（淡入上移）结束后才量，免得读到位移中的值
+  await expect.poll(async () => Math.round(await bottom('#portal-models'))).toBeGreaterThan(900 - 48)
+  expect(Math.abs((await bottom('#portal-trend')) - (await bottom('#portal-models')))).toBeLessThan(1.5)
+  expect(await bottom('#portal-models')).toBeLessThanOrEqual(900)
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBe(true)
+  await expect(page.locator('[data-slot="sparkline"]')).toHaveCount(3)
+})
+
 test('门户加载与失败不冒充零数据，旧缓存记录明确显示未采集', async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 800 })
   await prepare(page)
