@@ -199,13 +199,16 @@ impl UserGuard {
                     || hot.key != row.api_key_id.to_string()
                     || hot.proof != row.request_hash
                     || (row.status == Status::Held
-                        && crate::Pool::from_i16(hot.pool) != row.pool()?))
+                        && crate::Pool::try_from(hot.pool)? != row.pool()?))
             {
                 return Err(LedgerError::HoldConflict);
             }
             let pool = match row.status {
                 Status::Held => Some(row.pool()?),
-                Status::Pending => hot.as_ref().map(|h| crate::Pool::from_i16(h.pool)),
+                Status::Pending => hot
+                    .as_ref()
+                    .map(|h| crate::Pool::try_from(h.pool))
+                    .transpose()?,
                 _ => return Err(LedgerError::HoldConflict),
             };
             if pool == Some(crate::Pool::Subscription) {

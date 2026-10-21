@@ -56,7 +56,7 @@ impl UserGuard {
             .into_iter()
             .filter(|row| row.applied_at.is_none())
             .map(|row| row.manifest())
-            .collect();
+            .collect::<Result<_, _>>()?;
         let fund_sequence = crate::transfers::high_water(self, self.user_id).await?;
         let raw = hot::eval(
             ledger,

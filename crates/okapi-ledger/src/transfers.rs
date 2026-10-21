@@ -23,8 +23,10 @@ pub(crate) struct Transfer {
     pub applied_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 impl Transfer {
-    pub(crate) fn manifest(&self) -> Value {
-        json!({"id": self.id, "receipt": format!("{}|{}", Pool::from_i16(self.pool).field(), self.amount_micro)})
+    pub(crate) fn manifest(&self) -> Result<Value, LedgerError> {
+        Ok(
+            json!({"id": self.id, "receipt": format!("{}|{}", Pool::try_from(self.pool)?.field(), self.amount_micro)}),
+        )
     }
 }
 
@@ -134,7 +136,7 @@ pub(crate) async fn synchronize(
                     vec![
                         row.id.to_string(),
                         row.amount_micro.to_string(),
-                        Pool::from_i16(row.pool).field().to_owned(),
+                        Pool::try_from(row.pool)?.field().to_owned(),
                         row.sequence.to_string(),
                     ],
                 ),

@@ -287,6 +287,42 @@ async fn insufficient_is_fail_closed_and_writes_nothing() {
     ));
 }
 
+/// est = 0 的免费请求不能把丢了的余额键「建」回来：键一旦存在，`balance_present` 就说没丢，
+/// 网关按 PG 重建热账本的自愈不再触发，付费请求从此只看到余额 0。键不在就按余额不足返回
+/// （零写入），键在（哪怕余额是 0）免费请求照常放行。
+#[tokio::test]
+async fn free_request_does_not_recreate_a_lost_balance_key() {
+    let bed = Bed::new().await;
+    assert!(!bed.ledger.balance_present(bed.uid).await.unwrap());
+    assert!(matches!(
+        bed.reserve(Uuid::new_v4(), 0).await,
+        ReserveOutcome::Insufficient { balance } if balance.as_micros() == 0
+    ));
+    assert!(
+        !bed.ledger.balance_present(bed.uid).await.unwrap(),
+        "拒绝路径零写入：键仍然不存在，丢失信号还在"
+    );
+    assert!(
+        bed.ledger
+            .list_reservations(bed.uid)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(bed.conc(KID).await, 0);
+    assert!(bed.rpm_counter(KID).await.is_none());
+
+    // 键在（重建后）：免费请求放行，余额不变
+    bed.ledger
+        .credit(bed.uid, Money::from_micros(5_000))
+        .await
+        .unwrap();
+    let free = Uuid::new_v4();
+    assert_eq!(reserved_balance(&bed.reserve(free, 0).await), 5_000);
+    committed(&bed.commit(free, 0).await);
+    assert_eq!(bed.avail().await, 5_000);
+}
+
 /// 四个 key 级限额各自触发对应的 which；超限不产生任何写入；并发槽随 commit 释放后可再进。
 #[tokio::test]
 async fn rate_limits_reject_without_writes_and_release_with_commit() {

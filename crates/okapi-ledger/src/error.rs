@@ -38,6 +38,10 @@ pub enum LedgerError {
     #[error("ledger_settlement_state_invalid")]
     SettlementStateInvalid,
 
+    /// 库里 / 回执里的池编号既不是 0（钱包）也不是 1（订阅池）：账本数据坏了，不能默认某个池。
+    #[error("ledger_pool_invalid: {0}")]
+    InvalidPool(i16),
+
     #[error("ledger_hold_invalid: {0}")]
     InvalidHold(&'static str),
     #[error("ledger_hold_conflict")]

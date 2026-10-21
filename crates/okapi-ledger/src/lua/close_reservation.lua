@@ -36,6 +36,9 @@ local function close_reservation(balance_key, concurrency_key, id, key, actual_r
     local delta_raw = ledger_decimal(delta)
     redis.call('HINCRBY', balance_key, receipt.field, delta_raw)
     redis.call('HDEL', balance_key, field)
+    -- 并发键挂 3600s TTL、而预扣最长 600s（RESERVATION_TTL_MS）：正常结算时槽一定还在。
+    -- 键已过期（sweep 严重滞后）就没有槽可放，不减；`> 0` 守卫保证计数不会被减成负数，
+    -- 晚到的结算最多让重建后的计数短暂少 1，在途请求都结算完就归位，不会永久漂移。
     if concurrency > 0 then redis.call('DECR', concurrency_key) end
     return {1, delta_raw, redis.call('HGET', balance_key, receipt.field), receipt.pool, 1}
 end

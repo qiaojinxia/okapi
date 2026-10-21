@@ -63,7 +63,7 @@ pub async fn admin_refund_in_tx(
     let Some((rec, archived)) = refundable(tx, request_id).await? else {
         return Ok(None);
     };
-    let pool = Pool::from_i16(rec.pool);
+    let pool = Pool::try_from(rec.pool)?;
     let reversal = refund_payload(request_id, &rec, pool, archived)?;
     let expired =
         crate::windows::expired_refund(tx, rec.user_id, pool, rec.source_window.as_deref()).await?;

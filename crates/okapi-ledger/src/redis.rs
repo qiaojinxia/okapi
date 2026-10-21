@@ -76,21 +76,26 @@ impl Pool {
         }
     }
 
-    #[must_use]
-    pub const fn from_i16(v: i16) -> Self {
-        if v == 1 {
-            Self::Subscription
-        } else {
-            Self::Wallet
-        }
-    }
-
     /// `bal:{uid}` 里的字段名（repair.lua 的 `pool_field` 参数）。
     #[must_use]
     pub const fn field(self) -> &'static str {
         match self {
             Self::Wallet => "avail",
             Self::Subscription => "sub",
+        }
+    }
+}
+
+/// 库里 / 回执里的池编号 → 池。认不得的值（既不是 0 也不是 1）是账本数据坏了：
+/// 默认成钱包会把一笔订阅池的钱悄悄记到钱包上，且没有任何信号，所以报错。
+impl TryFrom<i16> for Pool {
+    type Error = LedgerError;
+
+    fn try_from(value: i16) -> Result<Self, LedgerError> {
+        match value {
+            0 => Ok(Self::Wallet),
+            1 => Ok(Self::Subscription),
+            other => Err(LedgerError::InvalidPool(other)),
         }
     }
 }
@@ -625,10 +630,14 @@ impl BalanceLedger {
                 .next()
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(0);
-            let pool = parts
-                .next()
-                .and_then(|s| s.parse::<i16>().ok())
-                .map_or(Pool::Wallet, Pool::from_i16);
+            // 缺位（没有池段的老回执）按钱包；有但不是 0 / 1 的不猜
+            let pool = match parts.next() {
+                None => Pool::Wallet,
+                Some(raw) => raw
+                    .parse::<i16>()
+                    .map_err(|_| LedgerError::UnexpectedReply("reservation_pool"))
+                    .and_then(Pool::try_from)?,
+            };
             let source_window = parts
                 .next()
                 .map(|raw| {
@@ -713,4 +722,21 @@ fn money_at(items: &[Value], idx: usize) -> Result<Money, LedgerError> {
         .and_then(value_i64)
         .map(Money::from_micros)
         .ok_or(LedgerError::UnexpectedReply("missing_int"))
+}
+
+#[cfg(test)]
+mod pool_tests {
+    use super::*;
+
+    #[test]
+    fn only_zero_and_one_are_pools() {
+        assert_eq!(Pool::try_from(0).unwrap(), Pool::Wallet);
+        assert_eq!(Pool::try_from(1).unwrap(), Pool::Subscription);
+        for bad in [-1, 2, 7, i16::MAX] {
+            assert!(
+                matches!(Pool::try_from(bad), Err(LedgerError::InvalidPool(v)) if v == bad),
+                "{bad} 不能被悄悄当成钱包"
+            );
+        }
+    }
 }

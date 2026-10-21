@@ -78,6 +78,12 @@ else
     if bal < est then
         return {0, 'INSUFFICIENT', redis.call('HGET', KEYS[1], 'avail') or '0'}
     end
+    -- est 为 0 的免费请求在余额键整个不存在时也走得到这里，而后面的 HINCRBY 0 / HSET 会把键建出来，
+    -- 抹掉「热账本丢了」唯一的信号（balance_present 就是 EXISTS bal:{uid}）：之后付费请求只看到余额 0，
+    -- 再也不会触发按 PG 重建。键不存在就按余额不足返回，由网关先重建再放行。
+    if est == 0 and redis.call('EXISTS', KEYS[1]) == 0 then
+        return {0, 'INSUFFICIENT', '0'}
+    end
 end
 
 -- Keep large safe integers as decimal strings when passing them to Redis.

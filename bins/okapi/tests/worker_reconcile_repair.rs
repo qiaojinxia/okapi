@@ -21,6 +21,7 @@ fn hash(token: &str) -> String {
 }
 
 struct Bed {
+    state: okapi::gateway::state::AppState,
     pg: PgPool,
     ledger: okapi_ledger::BalanceLedger,
     user_id: i64,
@@ -72,7 +73,7 @@ async fn setup() -> Bed {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let console_addr = listener.local_addr().unwrap();
     let ledger = state.ledger.clone();
-    let app = console::router(state);
+    let app = console::router(state.clone());
     tokio::spawn(async move {
         axum::serve(
             listener,
@@ -83,6 +84,7 @@ async fn setup() -> Bed {
     });
 
     Bed {
+        state,
         pg,
         ledger,
         user_id,
@@ -443,4 +445,53 @@ async fn active_reconcile_only_covers_users_with_recent_events() {
         "窗口内没有新事件：增量轮跳过"
     );
     assert!(drift_of(&bed).await.is_some(), "全量轮照样查到");
+}
+
+/// 热账本整个丢了（键没了）时，est = 0 的免费请求不能把键「建」回来：那会抹掉「余额键不存在」
+/// 这个唯一的丢失信号，之后的付费请求只看到余额 0、再也不触发按 PG 重建。
+/// 现在免费请求自己就触发重建，并照常放行。
+#[tokio::test]
+async fn a_free_request_after_losing_the_hot_balance_triggers_the_rebuild() {
+    use fred::interfaces::KeysInterface;
+    let bed = setup().await;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
+        .await
+        .unwrap();
+    let _: i64 = redis.del(format!("bal:{{{}}}", bed.user_id)).await.unwrap();
+    assert!(!bed.ledger.balance_present(bed.user_id).await.unwrap());
+
+    let request = |est: i64| ReserveRequest {
+        user_id: bed.user_id,
+        api_key_id: bed.api_key_id,
+        request_id: Uuid::new_v4(),
+        est: Money::from_micros(est),
+        caps: LimitCaps::default(),
+        est_tokens: 10,
+    };
+    let now = chrono::Utc::now();
+    let free = bed
+        .state
+        .reserve_for_key(false, request(0), now)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&free, okapi_ledger::ReserveOutcome::Reserved { balance_after, .. }
+            if balance_after.as_micros() == 9_000_000),
+        "免费请求应触发按账本重建并放行：{free:?}"
+    );
+    assert!(bed.ledger.balance_present(bed.user_id).await.unwrap());
+
+    let paid = bed
+        .state
+        .reserve_for_key(false, request(1_000_000), now)
+        .await
+        .unwrap();
+    assert!(
+        matches!(paid, okapi_ledger::ReserveOutcome::Reserved { .. }),
+        "付费请求随后照常放行：{paid:?}"
+    );
+    assert_eq!(
+        bed.ledger.balance(bed.user_id).await.unwrap().as_micros(),
+        8_000_000
+    );
 }

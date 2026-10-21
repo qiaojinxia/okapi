@@ -102,7 +102,7 @@ pub(crate) async fn synchronize(
                 row.api_key_id,
                 row.request_id,
                 Money::from_micros(row.amount_micro),
-                crate::Pool::from_i16(row.pool),
+                crate::Pool::try_from(row.pool)?,
                 row.source_window.as_deref(),
             )
             .await?

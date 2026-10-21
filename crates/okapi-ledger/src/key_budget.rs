@@ -36,7 +36,12 @@ pub(crate) async fn check(
             total += i128::from(reservation.amount.as_micros());
         }
     }
-    let limit = limit.unwrap_or(0);
+    // 所有写入口都让 quota_mode = 1 与 quota_micro 非空同生同灭；到这里是空的说明行被改坏了。
+    // 当成限额 0 会让这把 key 静默地永远 429，运维看不出原因——按状态非法拒绝并留错误日志。
+    let Some(limit) = limit else {
+        tracing::error!(key_id, "api_keys.quota_mode = 1 but quota_micro is NULL");
+        return Err(LedgerError::AdmissionStateInvalid);
+    };
     if spent >= limit || total > i128::from(limit) {
         return Err(LedgerError::KeyQuotaExceeded);
     }

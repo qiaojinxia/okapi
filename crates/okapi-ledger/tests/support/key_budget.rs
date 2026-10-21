@@ -13,6 +13,26 @@ async fn cap(bed: &Bed, amount: Option<i64>) -> TestResult {
     Ok(())
 }
 
+/// quota_mode = 1 而 quota_micro 为空是被改坏的行：不能当成「限额 0」静默地永远 429，
+/// 要按状态非法拒绝（并留错误日志），而且什么都不预扣。
+#[tokio::test]
+async fn a_limited_key_without_a_limit_is_a_broken_row_not_a_zero_limit() -> TestResult {
+    let bed = Bed::new().await?;
+    sqlx::query("UPDATE api_keys SET quota_mode=1,quota_micro=NULL WHERE id=$1")
+        .bind(bed.kid)
+        .execute(&bed.pg)
+        .await?;
+    assert!(matches!(
+        bed.ledger
+            .reserve_for_key(&bed.pg, true, bed.regular(Uuid::new_v4()), bed.now)
+            .await,
+        Err(LedgerError::AdmissionStateInvalid)
+    ));
+    assert!(bed.ledger.list_reservations(bed.uid).await?.is_empty());
+    assert_eq!(bed.wallet().await?, 10_000);
+    Ok(())
+}
+
 #[tokio::test]
 async fn concurrent_requests_cannot_reserve_the_same_key_budget() -> TestResult {
     let bed = Bed::new().await?;
