@@ -34,9 +34,12 @@ async fn totals(state: &AppState, headers: &HeaderMap) -> Result<(i64, i64), App
 
 /// 展示层 USD 字符串（分粒度，非计费路径）。
 fn micro_to_usd_json(micro: i64) -> Value {
-    // 生态客户端期望 JSON number：以分精度构造（整数除法两段拼）
+    // 生态客户端期望 JSON number：以分精度构造（整数除法两段拼）。
+    // 符号单独处理：负余额在 −$1 以内时 cents / 100 是 0，不带符号会把 −0.15 显示成 0.15
     let cents = micro / 10_000;
-    let value = format!("{}.{:02}", cents / 100, (cents % 100).abs());
+    let sign = if cents < 0 { "-" } else { "" };
+    let cents = cents.unsigned_abs();
+    let value = format!("{sign}{}.{:02}", cents / 100, cents % 100);
     value
         .parse::<serde_json::Number>()
         .map_or(json!(0), Value::Number)
@@ -68,4 +71,25 @@ pub async fn usage(
         "object": "list",
         "total_usage": micro_to_usd_json(used.saturating_mul(100)),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::micro_to_usd_json;
+
+    #[test]
+    fn usd_amounts_keep_their_sign_and_cent_precision() {
+        // serde_json 开了 arbitrary_precision：数字按文本比较，两位小数是对外格式的一部分
+        let usd = |micro: i64| micro_to_usd_json(micro).to_string();
+        assert_eq!(usd(1_230_000), "1.23");
+        assert_eq!(usd(0), "0.00");
+        // 负余额不到 $1：整数除法的商是 0，符号不能跟着丢
+        assert_eq!(usd(-150_000), "-0.15");
+        assert_eq!(usd(-10_000), "-0.01");
+        assert_eq!(usd(-1_500_000), "-1.50");
+        assert_eq!(usd(-12_345_600), "-12.34");
+        // 不足一分的负数按分取整后是 0，不显示成 -0.00
+        assert_eq!(usd(-5_000), "0.00");
+        assert!(micro_to_usd_json(i64::MIN).is_number());
+    }
 }
