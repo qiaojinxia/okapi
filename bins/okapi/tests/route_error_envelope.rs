@@ -214,6 +214,7 @@ fn console_probe_body(path: &str) -> Value {
         "/admin/users/{id}/multiplier" => json!({"multiplier": "1"}),
         "/admin/users/{id}/subscription" => json!({"plan_code": "audit"}),
         "/admin/channels/{id}/egress" | "/admin/egress/default" => json!({"mode": "direct"}),
+        "/admin/channels/{id}/try" => json!({"model": "audit-model"}),
         "/admin/proxies" | "/admin/proxies/test" => json!({"url": "http://127.0.0.1:9"}),
         "/admin/proxies/import" => json!({"text": "127.0.0.1:9"}),
         "/admin/proxy-groups" => json!({"code": "audit", "mode": "pinned"}),
