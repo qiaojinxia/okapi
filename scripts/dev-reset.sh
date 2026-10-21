@@ -19,7 +19,9 @@ set -a
 . ./.env
 set +a
 
-DB_NAME="${DATABASE_URL##*/}"
+# URL 尾部可能带 ?sslmode=… 之类的参数（值里甚至可能有 /）：先去掉参数再取库名，别把参数拼进 DROP / CREATE DATABASE
+DB_NAME="${DATABASE_URL%%\?*}"
+DB_NAME="${DB_NAME##*/}"
 PG_CONTAINER="${PG_CONTAINER:-okapi-dev-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-okapi-dev-redis}"
 CH_URL="${OKAPI_CLICKHOUSE_URL:-}"
