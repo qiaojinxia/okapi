@@ -3525,7 +3525,10 @@ async fn spawn_stream_pump(
     });
 
     let sse = Sse::new(rx).keep_alive(KeepAlive::new().interval(policy.heartbeat).text("ping"));
-    with_request_id(sse.into_response(), request_id)
+    with_request_id(
+        super::stream_policy::unbuffered(sse.into_response()),
+        request_id,
+    )
 }
 
 fn capture_terminal_usage(event: &ChatEvent, usage: &mut Option<UsageProbe>, chars: &mut usize) {

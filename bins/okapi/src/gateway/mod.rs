@@ -335,7 +335,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
 /// 下线时等待后台结算的上限。结算本身只是 Redis commit + 一次 PG 事务（含三次退避重试
 /// 共约 4s），30s 足够；超时留给对账修复而不是无限期拖住编排层的 terminationGracePeriod。
-const SETTLE_DRAIN_CAP: Duration = Duration::from_secs(30);
+pub(crate) const SETTLE_DRAIN_CAP: Duration = Duration::from_secs(30);
 
 fn log_response_failure(class: &ServerErrorsFailureClass, latency: Duration) {
     // 503 有独立的过载/渠道信号，逐请求 ERROR 会在过载时放大日志压力。

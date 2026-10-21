@@ -2,6 +2,17 @@
 use serde_json::Value;
 use std::time::Duration;
 
+/// SSE 响应不让前置反代缓冲：nginx 对带 `X-Accel-Buffering: no` 的响应关掉 proxy_buffering。
+/// `/v1/` 的 location 本来就关了缓冲，但控制面里的 Playground 与渠道试用（同样是数据面处理器的 SSE）
+/// 落在 `location /` 下，没有这个头就会被攒成整段再发——打字机效果没了，首字延迟变成整段延迟。
+pub(crate) fn unbuffered(mut response: axum::response::Response) -> axum::response::Response {
+    response.headers_mut().insert(
+        "x-accel-buffering",
+        axum::http::HeaderValue::from_static("no"),
+    );
+    response
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StreamPolicy {
     pub idle: Duration,

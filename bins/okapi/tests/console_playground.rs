@@ -281,6 +281,13 @@ async fn relay_forces_stream_and_bills() {
         Some("text/event-stream"),
         "非流式请求应被强制为流式"
     );
+    assert_eq!(
+        resp.headers()
+            .get("x-accel-buffering")
+            .and_then(|v| v.to_str().ok()),
+        Some("no"),
+        "控制面里的 SSE 要告诉前置反代别缓冲"
+    );
     let text = resp.text().await.unwrap();
     let content: String = text
         .lines()

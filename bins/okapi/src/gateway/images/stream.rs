@@ -96,7 +96,9 @@ pub(super) async fn start(
     let events = futures::stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|event| (event, rx))
     });
-    Ok(Sse::new(events).into_response())
+    Ok(crate::gateway::stream_policy::unbuffered(
+        Sse::new(events).into_response(),
+    ))
 }
 
 async fn open(

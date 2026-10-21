@@ -5,7 +5,7 @@
 本机没有 compose 插件与 kubectl，所以只做与部署语义强相关的结构断言，而不是 schema 校验：
 - 每个 K8s 文档都有 apiVersion / kind / metadata.name；Service 的 selector 必须对得上某个 Deployment；
 - 每个容器有 image、resources.requests / limits；对外服务的容器有 /healthz readinessProbe；
-- gateway 的 terminationGracePeriodSeconds 与 compose 应用服务的 stop_grace_period 必须覆盖
+- gateway 与 console 的 terminationGracePeriodSeconds（console 也承载付费 SSE）与 compose 应用服务的 stop_grace_period 必须覆盖
   IMPLEMENTATION §14.3 的排水口径（SSE 5min + 后台结算 30s = 330s）——进程现在真的会等，
   编排层宽限期不够就等于把优雅下线又改回硬杀；
 - K8s 的 Σ(副本上限 × OKAPI_PG_POOL) 不得超过模板注释里承诺的 PG max_connections 预算；
@@ -22,6 +22,7 @@ import subprocess
 import sys
 
 K8S = 'deploy/k8s/okapi.yaml'
+NGINX = 'deploy/nginx-sse.conf'
 COMPOSE = 'deploy/docker-compose.yml'
 COMPOSE_DEV = 'deploy/docker-compose.dev.yml'
 DRAIN_SECS = 330
@@ -100,7 +101,7 @@ def check_k8s(problems: list[str]) -> str:
                 probe = c.get('readinessProbe', {}).get('httpGet', {})
                 if probe.get('path') != '/healthz':
                     problems.append(f'{K8S}: {name}/{c.get("name")} 对外服务缺 /healthz readinessProbe')
-        if labels.get('role') == 'gateway':
+        if labels.get('role') in ('gateway', 'console'):
             grace = spec.get('terminationGracePeriodSeconds', 30)
             if grace < DRAIN_SECS:
                 problems.append(
@@ -113,6 +114,25 @@ def check_k8s(problems: list[str]) -> str:
     if pool_total > PG_BUDGET:
         problems.append(f'{K8S}: Σ(副本上限 × OKAPI_PG_POOL) = {pool_total} > 预算 {PG_BUDGET}（改 HPA 时同步改池大小）')
     return f'{len(deployments)} 个 Deployment，PG 连接总账 {pool_total}/{PG_BUDGET}'
+
+
+def check_nginx(problems: list[str]) -> str:
+    """控制面里的两条 SSE（Playground 中继、渠道试用）不在 /v1/ 下，必须有自己的 location：
+    关缓冲、放宽读超时；否则落在 location / 里被缓冲成整段、60s 静默就被切。"""
+    with open(NGINX, encoding='utf-8') as f:
+        text = f.read()
+    block = re.search(r'location\s+~\s+[^{]*playground/chat[^{]*\{(.*?)\n\s*\}', text, re.S)
+    if block is None:
+        problems.append(f'{NGINX}: 缺少 /api/me/playground/chat 与 /admin/channels/*/try 的 SSE location')
+        return 'SSE location 缺失'
+    body = block.group(1)
+    if not re.search(r'proxy_buffering\s+off\s*;', body):
+        problems.append(f'{NGINX}: 控制面 SSE location 没有 proxy_buffering off')
+    if not re.search(r'proxy_read_timeout\s+(\d+[smh]|\d+)\s*;', body):
+        problems.append(f'{NGINX}: 控制面 SSE location 没有放宽 proxy_read_timeout')
+    if 'admin/channels' not in block.group(0):
+        problems.append(f'{NGINX}: 控制面 SSE location 没覆盖 /admin/channels/*/try')
+    return '控制面 SSE location 就位'
 
 
 def check_compose(path: str, problems: list[str], app_services: bool) -> str:
@@ -147,6 +167,7 @@ def check_compose(path: str, problems: list[str], app_services: bool) -> str:
 def main() -> int:
     problems: list[str] = []
     k8s = check_k8s(problems)
+    nginx = check_nginx(problems)
     compose = check_compose(COMPOSE, problems, app_services=True)
     dev = check_compose(COMPOSE_DEV, problems, app_services=False)
     if problems:
@@ -154,7 +175,7 @@ def main() -> int:
         for p in problems:
             print(f'   {p}')
         return 1
-    print(f'✅ guard-deploy-manifests：k8s {k8s}；compose {compose}；compose.dev {dev}')
+    print(f'✅ guard-deploy-manifests：k8s {k8s}；nginx {nginx}；compose {compose}；compose.dev {dev}')
     return 0
 
 

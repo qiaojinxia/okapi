@@ -98,6 +98,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     gateway::spawn_epoch_subscriber(state.clone());
     gateway::spawn_epoch_poller(state.clone());
     gateway::spawn_routing_invalidate_subscriber(state.clone());
+    let settlements = state.settlements.clone();
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.console_bind).await?;
     tracing::info!(bind = %cfg.console_bind, "okapi console 启动");
@@ -108,6 +109,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     )
     .with_graceful_shutdown(crate::shutdown::signal())
     .await?;
+    // 同 gateway：Playground 中继与渠道试用走的是数据面处理器，结算在响应之后的后台任务里，
+    // 连接排完不等于账已落，等它们归零再退出，免得滚动发布时留下只剩 Redis 预扣的请求
+    settlements.drain();
+    settlements.wait_idle(gateway::SETTLE_DRAIN_CAP).await;
+    tracing::info!("okapi console 已下线");
     Ok(())
 }
 

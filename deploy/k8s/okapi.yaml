@@ -106,6 +106,9 @@ spec:
     metadata:
       labels: { app: okapi, role: console }
     spec:
+      # console 也承载付费 SSE（Playground 中继、渠道试用）和它们的后台结算：K8s 缺省 30s 就 SIGKILL，
+      # 滚动发布会把在途的流掐在半截。排水口径同 gateway（§14.3）
+      terminationGracePeriodSeconds: 330
       containers:
         - name: console
           image: okapi:latest
