@@ -52,6 +52,10 @@ pub async fn collect(state: &AppState, book: &PriceBook, user_id: i64) -> RuleIn
 
 /// 结算后累加本月 token 与消费（各自仅在存在对应规则时写，
 /// 避免给未用该能力的站点留垃圾键）。
+///
+/// 已知暂态：计数只在**当前价簿有对应规则**时才累加。新发布一张带 volume 规则的价簿时，
+/// 计数从那一刻起算，当月此前的用量不在里面；那个月里阈值会比"真实月用量"晚到，
+/// 下个自然月起与真实值一致（自收敛）。为这一个月回填历史用量的代价（要扫账本）不值得。
 pub async fn record_tokens(state: &AppState, user_id: i64, tokens: u64, amount_micro: i64) {
     let book = state.pricebook.load();
     if book.has_volume_rules() {
