@@ -681,6 +681,40 @@ pub async fn mark_key_failure(
     Ok(())
 }
 
+/// 池链里能服务该模型、正在冷却（cooling / 限流 / 配额，worker 到点恢复）的 key 最早何时回来；
+/// 没有冷却中的 key 时为 None。候选全空时据此给客户端 `Retry-After`。
+/// 条件与 [`candidates_for_model`] 的渠道 / key 过滤一致，只把「已冷却完」换成「冷却中」。
+pub async fn next_key_recovery(
+    pool: &PgPool,
+    model: &str,
+    pools: &[&str],
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, StoreError> {
+    let model_json = serde_json::json!([model]);
+    let chain: Vec<String> = if pools.is_empty() {
+        vec![DEFAULT_POOL.to_owned()]
+    } else {
+        pools.iter().map(|p| (*p).to_owned()).collect()
+    };
+    let at = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+        r"SELECT min(ck.cooldown_until)
+          FROM channels c
+          JOIN channel_keys ck ON ck.channel_id = c.id
+          JOIN pool_channels pc ON pc.channel_id = c.id AND pc.pool_code = ANY($2::varchar[])
+          WHERE c.status = 1
+            AND c.deleted_at IS NULL
+            AND c.models @> $1
+            AND ck.status IN (1, 2, 3, 4)
+            AND (ck.status <> 1 OR ck.cooldown_until > now())
+            AND ck.cooldown_until IS NOT NULL
+            AND (ck.model_subset IS NULL OR ck.model_subset @> $1)",
+    )
+    .bind(model_json)
+    .bind(&chain)
+    .fetch_one(pool)
+    .await?;
+    Ok(at)
+}
+
 /// 路由诊断的 key 视图（不过滤，静态事实 + 配置的运行期闸）。
 #[derive(Debug, serde::Serialize)]
 pub struct DiagKey {

@@ -66,7 +66,8 @@ fn quota_blocked(
 }
 
 /// 账号为什么被上游额度挡下：写进请求诊断的结构化原因（哪条规则、哪个窗口、用了多少、
-/// 上限多少、何时重置），不只是一个 `upstream_quota`。
+/// 上限多少、何时重置），不只是一个 `upstream_quota`。用尽 / 低于停用线时的 `resets_at` 取最近一次
+/// 窗口重置，是「最早可能恢复」的时刻。
 fn quota_block(
     policy: &Policy,
     quota: &okapi_providers::account::quota::Snapshot,
@@ -74,7 +75,11 @@ fn quota_block(
 ) -> Option<serde_json::Value> {
     if let Some(headroom) = quota.headroom(now) {
         if headroom == 0 {
-            return Some(serde_json::json!({"rule": "exhausted", "headroom_percent": 0}));
+            return Some(serde_json::json!({
+                "rule": "exhausted",
+                "headroom_percent": 0,
+                "resets_at": quota.next_reset(now),
+            }));
         }
         if policy.quota_aware && headroom <= 100 - policy.quota_threshold_pct {
             return Some(serde_json::json!({
@@ -82,6 +87,7 @@ fn quota_block(
                 "headroom_percent": headroom,
                 "threshold_percent": policy.quota_threshold_pct,
                 "window": quota.threshold_window,
+                "resets_at": quota.next_reset(now),
             }));
         }
     }
@@ -145,13 +151,15 @@ async fn token_blocked(
 /// 被挡下的 key 与原因记进请求诊断（`excluded`，只在管理端日志里）：选路被筛空时，
 /// 「没有可用渠道」到底是停用、本地上限还是上游额度，看日志就知道；额度类原因带窗口、
 /// 用量、上限与重置时刻。留下的候选按 `order` 在层内调整先后（见 [`QuotaOrder`]）。
+/// 返回被额度挡下的候选里最早的重置时刻（Unix 秒），候选全空时据此告诉客户端何时再试。
 #[allow(clippy::too_many_lines)] // 逐 key 准入与诊断记录共用同一份缓存，拆开要来回传四张表
 pub async fn retain_available(
     state: &AppState,
     candidates: &mut impl CandidateSet,
     order: QuotaOrder,
-) {
+) -> Option<i64> {
     let mut excluded: Vec<serde_json::Value> = Vec::new();
+    let mut earliest_reset: Option<i64> = None;
     let mut exclude =
         |candidate: &ChannelCandidate, reason: &str, detail: Option<serde_json::Value>| {
             if excluded.len() < MAX_EXCLUDED {
@@ -207,6 +215,9 @@ pub async fn retain_available(
         if let Some(quota) = quota::read_for(state, candidate).await {
             let now = chrono::Utc::now().timestamp();
             if let Some(detail) = quota_block(&policy, &quota, now) {
+                if let Some(at) = detail["resets_at"].as_i64() {
+                    earliest_reset = Some(earliest_reset.map_or(at, |seen| seen.min(at)));
+                }
                 exclude(candidate, "upstream_quota", Some(detail));
                 continue;
             }
@@ -226,6 +237,7 @@ pub async fn retain_available(
         trace.set("excluded", serde_json::Value::Array(excluded));
     }
     order_by_quota(candidates, &headroom, &resets, order);
+    earliest_reset
 }
 
 /// 层内按额度观测调整先后。稳定排序：键相同的候选保持池策略排好的先后
@@ -384,7 +396,8 @@ mod tests {
         let tight = json!([{"name": "five_hour", "used_percent": 95, "resets_at": 1800, "window_secs": 18000}]);
         assert_eq!(
             quota_block(&policy, &quota(&tight), 1000).unwrap(),
-            json!({"rule": "threshold", "headroom_percent": 5, "threshold_percent": 90, "window": null})
+            json!({"rule": "threshold", "headroom_percent": 5, "threshold_percent": 90, "window": null,
+                   "resets_at": 1800})
         );
         let full = json!([{"name": "five_hour", "used_percent": 100, "resets_at": 1800, "window_secs": 18000}]);
         assert_eq!(

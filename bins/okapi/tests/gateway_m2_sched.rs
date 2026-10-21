@@ -427,6 +427,31 @@ async fn key_concurrency_slot_limits_inflight() {
     assert!(ok, "完成后信号量应释放，请求恢复可用");
 }
 
+/// 池里唯一的 key 在冷却：503 no_available_channel 带 `Retry-After`，指向它冷却结束的时刻，
+/// 客户端不用盲目重试。
+#[tokio::test]
+async fn cooling_pool_reports_when_a_key_comes_back() {
+    let env = setup(&[("/ok/v1", 0)]).await;
+    sqlx::query(
+        "UPDATE channel_keys SET status = 3, cooldown_until = now() + interval '120 seconds' WHERE id = $1",
+    )
+    .bind(env.channel_keys[0])
+    .execute(&env.pg)
+    .await
+    .unwrap();
+
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(resp.status(), 503);
+    let seconds: u64 = resp.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((100..=120).contains(&seconds), "Retry-After = {seconds}");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "no_available_channel", "{body}");
+}
+
 /// 真实的上游失败之后其余候选全忙：最终报那次真实失败（502，记在失败的渠道上），
 /// 不能被"全忙"改写成 503 no_available_channel，把真实的 5xx 盖掉。
 #[tokio::test]

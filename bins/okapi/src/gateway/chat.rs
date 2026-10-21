@@ -1893,19 +1893,21 @@ async fn eligible_candidates(
             super::account_control::QuotaOrder::Keep
         }
     };
-    let margin_removed = bill
+    let retained = bill
         .state
         .retain_margin_ok_ordered(&bill.group, &mut candidates, quota_order)
         .await;
     if candidates.is_empty() {
-        return Err(ForwardFailure::app(
-            AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                super::state::no_candidates_code(margin_removed),
-            ),
-            0,
-            None,
-        ));
+        let mut err = AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            super::state::no_candidates_code(retained.margin_removed),
+        );
+        if retained.margin_removed == 0
+            && let Some(secs) = recovery_secs(bill, retained.next_quota_reset).await
+        {
+            err = err.with_retry_after(secs);
+        }
+        return Err(ForwardFailure::app(err, 0, None));
     }
 
     // 续聊只允许当前仍有权限、能力和可用性的原账号；不可借 L2 或 failover 改投。
@@ -1933,6 +1935,21 @@ async fn eligible_candidates(
     }
 
     Ok((candidates, sticky_key))
+}
+
+/// 候选全空时最早多少秒后可能有账号回来：被上游额度挡下的账号窗口重置、池里冷却中的 key 到期，
+/// 取最早的那个。两样都不知道时为 None——不编一个数给客户端。
+async fn recovery_secs(bill: &RequestBilling, next_quota_reset: Option<i64>) -> Option<u64> {
+    let chain: Vec<&str> = bill.pool_chain.iter().map(String::as_str).collect();
+    let cooldown = okapi_store::channels::next_key_recovery(&bill.state.pg, &bill.model, &chain)
+        .await
+        .inspect_err(|err| tracing::warn!(error = %err, "查询 key 冷却到期时刻失败"))
+        .ok()
+        .flatten()
+        .map(|at| at.timestamp());
+    let at = next_quota_reset.into_iter().chain(cooldown).min()?;
+    let secs = at.saturating_sub(chrono::Utc::now().timestamp());
+    Some(u64::try_from(secs).unwrap_or(0))
 }
 
 /// Read-only playground contract: same identity, canonical model, group and

@@ -50,6 +50,7 @@ async fn load(
             status: err.status,
             code: err.code.clone(),
             param: err.param.clone(),
+            retry_after_secs: err.retry_after_secs,
         })
 }
 

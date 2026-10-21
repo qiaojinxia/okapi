@@ -27,6 +27,14 @@ pub fn no_candidates_code(margin_removed: usize) -> &'static str {
     }
 }
 
+/// [`AppState::retain_margin_ok_ordered`] 筛完之后的结果。
+pub struct Retained {
+    /// 被负毛利熔断摘掉的条数（见 [`no_candidates_code`]）。
+    pub margin_removed: usize,
+    /// 被上游额度挡下的账号里最早的窗口重置时刻（Unix 秒）。
+    pub next_quota_reset: Option<i64>,
+}
+
 /// gateway 共享状态：热路径只碰 Redis 与上游（IMPLEMENTATION §2.1）。
 /// 鉴权缓存在 Redis（docs/database.md §2.1 auth:key:*，console 跨进程失效）；
 /// 下面两个进程内短缓存消除热路径 PG 读，console 写路径主动失效（同进程即时，
@@ -353,6 +361,7 @@ impl AppState {
             super::account_control::QuotaOrder::HeadroomTiers,
         )
         .await
+        .margin_removed
     }
 
     /// 同 [`Self::retain_margin_ok`]，额度观测按池策略参与层内排序（见 `QuotaOrder`）。
@@ -361,15 +370,22 @@ impl AppState {
         group: &str,
         candidates: &mut impl super::scheduler::CandidateSet,
         order: super::account_control::QuotaOrder,
-    ) -> usize {
-        super::account_control::retain_available(self, candidates, order).await;
+    ) -> Retained {
+        let next_quota_reset =
+            super::account_control::retain_available(self, candidates, order).await;
         let blocked = self.margin_blocked_fields().await;
         if blocked.is_empty() {
-            return 0;
+            return Retained {
+                margin_removed: 0,
+                next_quota_reset,
+            };
         }
         let before = candidates.len();
         candidates.retain(|c| !blocked.contains(&crate::margin::field(group, c.channel_id)));
-        before - candidates.len()
+        Retained {
+            margin_removed: before - candidates.len(),
+            next_quota_reset,
+        }
     }
 
     /// 是否记录请求来源 IP（`settings.record_ip_log`）。缺省 true——此前一直在记，

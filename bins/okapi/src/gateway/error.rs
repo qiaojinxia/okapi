@@ -93,6 +93,8 @@ pub struct AppError {
     pub status: StatusCode,
     pub code: String,
     pub param: Option<String>,
+    /// 已知何时恢复时写进 `Retry-After`（秒）：例如渠道全在冷却、最早一个何时回来。
+    pub retry_after_secs: Option<u64>,
 }
 
 impl AppError {
@@ -102,12 +104,20 @@ impl AppError {
             status,
             code: code.to_owned(),
             param: None,
+            retry_after_secs: None,
         }
     }
 
     #[must_use]
     pub fn with_param(mut self, param: impl Into<String>) -> Self {
         self.param = Some(param.into());
+        self
+    }
+
+    /// 告诉客户端多少秒后再试（至少 1 秒）。
+    #[must_use]
+    pub fn with_retry_after(mut self, secs: u64) -> Self {
+        self.retry_after_secs = Some(secs.max(1));
         self
     }
 
@@ -145,6 +155,14 @@ impl AppError {
     }
 
     fn attach_retry_after(&self, response: &mut Response) {
+        if let Some(secs) = self.retry_after_secs {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+            return;
+        }
         if self.status != StatusCode::TOO_MANY_REQUESTS || self.code != codes::RATE_LIMITED {
             return;
         }
@@ -372,5 +390,22 @@ mod retry_after_tests {
                 .into_response_with(None);
             assert!(!response.headers().contains_key("retry-after"));
         }
+    }
+    #[test]
+    fn a_known_recovery_time_is_sent_on_any_status() {
+        let error = || {
+            AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL)
+                .with_retry_after(0)
+        };
+        for response in [
+            error().into_response_with(None),
+            error().into_anthropic_response_with(None),
+            error().into_gemini_response_with(None),
+        ] {
+            assert_eq!(response.headers()["retry-after"], "1", "至少 1 秒");
+        }
+        let unknown = AppError::new(StatusCode::SERVICE_UNAVAILABLE, codes::NO_AVAILABLE_CHANNEL)
+            .into_response_with(None);
+        assert!(!unknown.headers().contains_key("retry-after"));
     }
 }
