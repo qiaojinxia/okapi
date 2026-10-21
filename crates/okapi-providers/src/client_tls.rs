@@ -293,19 +293,31 @@ fn arrange_messages(request: &mut http::Request<reqwest::Body>) {
     }
 }
 
+/// `Content-Encoding` 里的编码，按上游施加的顺序（`gzip, br` = 先 gzip 再 br）；`identity` 不算。
+/// 同名头出现多次按出现顺序合并。没有头、全是 `identity`、或有一个认不出的 → `None`。
+fn content_codings(headers: &http::HeaderMap) -> Option<Vec<String>> {
+    let mut codings = Vec::new();
+    for value in headers.get_all(http::header::CONTENT_ENCODING) {
+        for token in value.to_str().ok()?.split(',') {
+            let token = token.trim().to_ascii_lowercase();
+            match token.as_str() {
+                "" | "identity" => {}
+                "gzip" | "x-gzip" | "deflate" | "br" | "zstd" => codings.push(token),
+                _ => return None,
+            }
+        }
+    }
+    (!codings.is_empty()).then_some(codings)
+}
+
 /// 按 `Content-Encoding` 流式解压响应体（真机声明了 gzip / deflate / br / zstd，上游就可能压缩，
-/// SSE 也不例外）。解压后去掉 `Content-Encoding` / `Content-Length`，下游拿到的就是原文；
-/// 认不出的编码原样交出。
+/// SSE 也不例外）。多个编码叠加（`gzip, br`）倒着逐层解开。解压后去掉 `Content-Encoding` /
+/// `Content-Length`，下游拿到的就是原文；有认不出的编码就整体原样交出（头也不动，不留半解的体）。
 fn decode(headers: &mut http::HeaderMap, body: DeadlineBody) -> reqwest::Body {
     use async_compression::tokio::bufread::{BrotliDecoder, GzipDecoder, ZlibDecoder, ZstdDecoder};
+    use tokio::io::{AsyncBufRead, BufReader};
     use tokio_util::io::{ReaderStream, StreamReader};
-    let encoding = headers
-        .get(http::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim().to_ascii_lowercase());
-    let Some(encoding) =
-        encoding.filter(|e| matches!(e.as_str(), "gzip" | "x-gzip" | "deflate" | "br" | "zstd"))
-    else {
+    let Some(codings) = content_codings(headers) else {
         return reqwest::Body::wrap(body);
     };
     headers.remove(http::header::CONTENT_ENCODING);
@@ -331,15 +343,16 @@ fn decode(headers: &mut http::HeaderMap, body: DeadlineBody) -> reqwest::Body {
             }
         }
     });
-    let reader = StreamReader::new(chunks);
-    match encoding.as_str() {
-        "gzip" | "x-gzip" => {
-            reqwest::Body::wrap_stream(ReaderStream::new(GzipDecoder::new(reader)))
-        }
-        "deflate" => reqwest::Body::wrap_stream(ReaderStream::new(ZlibDecoder::new(reader))),
-        "br" => reqwest::Body::wrap_stream(ReaderStream::new(BrotliDecoder::new(reader))),
-        _ => reqwest::Body::wrap_stream(ReaderStream::new(ZstdDecoder::new(reader))),
+    let mut reader: Pin<Box<dyn AsyncBufRead + Send>> = Box::pin(StreamReader::new(chunks));
+    for coding in codings.iter().rev() {
+        reader = match coding.as_str() {
+            "gzip" | "x-gzip" => Box::pin(BufReader::new(GzipDecoder::new(reader))),
+            "deflate" => Box::pin(BufReader::new(ZlibDecoder::new(reader))),
+            "br" => Box::pin(BufReader::new(BrotliDecoder::new(reader))),
+            _ => Box::pin(BufReader::new(ZstdDecoder::new(reader))),
+        };
     }
+    reqwest::Body::wrap_stream(ReaderStream::new(reader))
 }
 
 fn ssl_connector(shape: Shape, extra_root: Option<&[u8]>) -> Result<SslConnector, UpstreamError> {

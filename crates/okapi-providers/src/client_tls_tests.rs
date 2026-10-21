@@ -305,6 +305,74 @@ async fn compressed_responses_are_decoded_for_every_declared_encoding() {
     }
 }
 
+/// 叠加的编码（`gzip, br` = 先 gzip 再 br）倒着逐层解开；同名头拆成两行、大小写和空格不一也一样。
+#[tokio::test]
+async fn stacked_content_encodings_are_decoded_in_reverse_order() {
+    let text = "event: message_start\ndata: {\"type\":\"message_start\"}\n\n".repeat(50);
+    let body = compress("br", &compress("gzip", text.as_bytes()).await).await;
+    for header in [
+        "content-encoding: gzip, br\r\n",
+        "content-encoding: Gzip ,BR\r\n",
+        "content-encoding: gzip\r\ncontent-encoding: br\r\n",
+        "content-encoding: identity, gzip, br\r\n",
+    ] {
+        let origin = reply_once(
+            format!(
+                "HTTP/1.1 200 OK\r\n{header}content-length: {}\r\n\r\n",
+                body.len()
+            ),
+            body.clone(),
+        )
+        .await;
+        let tls = ClaudeCodeTls::new(Shape::Messages).unwrap();
+        let request = reqwest::Client::new()
+            .get(format!("http://{origin}/"))
+            .build()
+            .unwrap();
+        let response = timeout(WAIT, tls.send(request, None))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            response.headers().get("content-encoding").is_none(),
+            "{header}"
+        );
+        assert!(
+            response.headers().get("content-length").is_none(),
+            "{header}"
+        );
+        assert_eq!(response.text().await.unwrap(), text, "{header}");
+    }
+}
+
+/// 有认不出的编码就整体原样交出，头也不动：不留一个解了一半、头还说压缩着的体。
+#[tokio::test]
+async fn unknown_content_encodings_pass_through_untouched() {
+    let body = compress("gzip", b"data: x\n\n").await;
+    let origin = reply_once(
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-encoding: gzip, x-custom\r\ncontent-length: {}\r\n\r\n",
+            body.len()
+        ),
+        body.clone(),
+    )
+    .await;
+    let tls = ClaudeCodeTls::new(Shape::Messages).unwrap();
+    let request = reqwest::Client::new()
+        .get(format!("http://{origin}/"))
+        .build()
+        .unwrap();
+    let response = timeout(WAIT, tls.send(request, None))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        response.headers().get("content-encoding").unwrap(),
+        "gzip, x-custom"
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), body.as_slice());
+}
+
 /// 压缩的 SSE 边到边解：上游只发出第一个事件时，下游就能读到它。
 #[tokio::test]
 async fn compressed_event_streams_are_decoded_as_they_arrive() {
