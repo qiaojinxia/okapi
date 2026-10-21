@@ -181,6 +181,35 @@ impl TokenUsage {
                 )?,
             }))
         };
+        // 缓存写入的 TTL 拆分是一项"观测"，只有每一笔写入的 TTL 都已知，合起来的拆分才成立：
+        // - 两边都带完整拆分：相加；都没有：聚合也没有（按通用写入价计）；
+        // - 一边有拆分、另一边一个缓存写入都没有（且写入已上报）：没有东西需要分配，拆分原样保留；
+        // - 一边有拆分、另一边有写入却没回细分：那部分写入的 TTL 无从分配。静默把整个拆分清零，等于
+        //   把另一边已观测到的 1h 溢价按通用价重算（少收），与 okapi-pricing 对"分配不明"的 fail-closed
+        //   政策矛盾，所以报错，由调用方决定怎么收口。
+        let ttl_split = || -> Result<(Option<u32>, Option<u32>), DomainError> {
+            let carry = |split: (u32, u32), unsplit: &Self| {
+                if unsplit.cache_write_tokens > 0 {
+                    Err(DomainError::InvalidTokenUsage {
+                        reason: "cache write TTL split missing for part of the combined usage",
+                    })
+                } else if self.cache_write_reported && other.cache_write_reported {
+                    Ok((Some(split.0), Some(split.1)))
+                } else {
+                    Ok((None, None))
+                }
+            };
+            match (
+                self.cache_write_5m_tokens.zip(self.cache_write_1h_tokens),
+                other.cache_write_5m_tokens.zip(other.cache_write_1h_tokens),
+            ) {
+                (Some((a5, a1)), Some((b5, b1))) => Ok((Some(add(a5, b5)?), Some(add(a1, b1)?))),
+                (None, None) => Ok((None, None)),
+                (Some(split), None) => carry(split, &other),
+                (None, Some(split)) => carry(split, &self),
+            }
+        };
+        let (short_ttl, long_ttl) = ttl_split()?;
         let upstream_usage = match (self.upstream_usage, other.upstream_usage) {
             (Some(a), Some(b)) => Some(UpstreamTokenCounts {
                 prompt_tokens: optional(a.prompt_tokens, b.prompt_tokens)?,
@@ -202,14 +231,8 @@ impl TokenUsage {
             completion_tokens: add(self.completion_tokens, other.completion_tokens)?,
             cached_tokens: add(self.cached_tokens, other.cached_tokens)?,
             cache_write_tokens: add(self.cache_write_tokens, other.cache_write_tokens)?,
-            cache_write_5m_tokens: optional(
-                self.cache_write_5m_tokens,
-                other.cache_write_5m_tokens,
-            )?,
-            cache_write_1h_tokens: optional(
-                self.cache_write_1h_tokens,
-                other.cache_write_1h_tokens,
-            )?,
+            cache_write_5m_tokens: short_ttl,
+            cache_write_1h_tokens: long_ttl,
             cache_read_modalities: modalities(
                 self.cache_read_modalities,
                 other.cache_read_modalities,
@@ -381,6 +404,48 @@ mod tests {
         assert!(usage.validate().is_err());
         usage.cache_write_5m_tokens = None;
         assert!(usage.validate().is_ok());
+    }
+
+    #[test]
+    fn merging_keeps_a_ttl_split_only_when_every_cache_write_can_be_allocated() {
+        let split = TokenUsage {
+            prompt_tokens: 100,
+            cache_write_tokens: 80,
+            cache_write_reported: true,
+            cache_write_5m_tokens: Some(30),
+            cache_write_1h_tokens: Some(50),
+            ..TokenUsage::default()
+        };
+        let pair = |usage: TokenUsage| (usage.cache_write_5m_tokens, usage.cache_write_1h_tokens);
+        // 对方一个缓存写入都没有、且写入已上报：没有东西要分配，拆分原样保留（两个方向）
+        let idle = TokenUsage {
+            prompt_tokens: 10,
+            cache_write_reported: true,
+            ..TokenUsage::default()
+        };
+        assert_eq!(pair(split.checked_add(idle).unwrap()), (Some(30), Some(50)));
+        assert_eq!(pair(idle.checked_add(split).unwrap()), (Some(30), Some(50)));
+        // 对方连写入有没有都没上报：拆分不成立，退回通用写入价
+        let unreported = TokenUsage {
+            prompt_tokens: 10,
+            ..TokenUsage::default()
+        };
+        assert_eq!(pair(split.checked_add(unreported).unwrap()), (None, None));
+        // 对方有写入却没回细分：那部分的 TTL 无从分配，不能静默把整个拆分清零
+        let unsplit = TokenUsage {
+            prompt_tokens: 60,
+            cache_write_tokens: 40,
+            cache_write_reported: true,
+            ..TokenUsage::default()
+        };
+        assert!(split.checked_add(unsplit).is_err());
+        assert!(unsplit.checked_add(split).is_err());
+        // 两边都有拆分：相加；两边都没有：聚合也没有
+        assert_eq!(
+            pair(split.checked_add(split).unwrap()),
+            (Some(60), Some(100))
+        );
+        assert_eq!(pair(unsplit.checked_add(unsplit).unwrap()), (None, None));
     }
 
     #[test]
