@@ -299,6 +299,12 @@ pub trait CredentialProvider: Send + Sync {
 JSON（access / refresh / expires_at），刷新按上面四步走：进程内单飞 → Redis `lock:cred:<key_id>` →
 加锁后重读 DB（他副本可能已刷）→ 刷新并按原密文字节条件回写；`invalid_grant` 也仅作废仍匹配
 原凭证的 key。请求、后台预刷新与手动刷新共用随机持有者租约，释放时比较持有者。
+**临界区有界（2026-10-21）**：租约 90 秒，临界区里每一步都有上限——重读 ≤ 10 秒、上游刷新 ≤ 45 秒、
+回写每次 ≤ 10 秒；刷新一成功就续满租约。上游已经让旧 refresh token 作废（Codex 等强制单次轮换），
+所以新凭据回写失败时按 200ms / 800ms 间隔再试两次（每次仍以旧值做 CAS：前一次其实已落盘、只是应答丢了，
+重试返回 false，`replaced_credential` 读到的就是我们自己写进去的那份）——不重试的话，一次连接抖动就把新三件套
+丢掉，下次刷新撞 invalid_grant，账号只能人工重登。token 端点的 `invalid_request` 只有说明里点名
+refresh token / grant 才算终态（形状错不能把全部订阅 key 一次性判死）。
 策略与重新授权详见 `docs/provider-architecture.md`。Vertex 服务账号（§11.35）不属于这一类：SA 私钥是静态凭证，access token 是它的无状态
 派生物，每个 pod 自铸、进程内缓存、不落库，不需要四步锁。
 
