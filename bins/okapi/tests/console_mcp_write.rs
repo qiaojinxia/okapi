@@ -153,6 +153,34 @@ async fn mcp_write_full_scenario() {
     let channel_id = created["result"]["structuredContent"]["channel_id"]
         .as_i64()
         .expect("必须返回渠道 id");
+    // 与 REST 同一套入参校验：未知 provider、带控制字符的名称、OAuth 渠道的裸 token 之外的垃圾都拒
+    // （此前 MCP 通道一概放过，建出配置坏掉的渠道）
+    let base = "http://127.0.0.1:9/v1";
+    for (args, code) in [
+        (
+            json!({"name": format!("mcp-bad-{suffix}"), "provider": "no-such-provider",
+                "api_base": base, "credential": "c", "models": ["m"]}),
+            "bad_request",
+        ),
+        (
+            json!({"name": "bad\nname", "api_base": base, "credential": "c", "models": ["m"]}),
+            "bad_request",
+        ),
+        (
+            json!({"name": format!("mcp-oauth-{suffix}"), "provider": "anthropic_max",
+                "api_base": base, "credential": "not-an-oauth-token", "models": ["m"]}),
+            "bad_request",
+        ),
+    ] {
+        let resp = call(&env, "channel_create", args).await;
+        assert_tool_error(&resp, code);
+    }
+    let strays: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE name LIKE $1")
+        .bind(format!("mcp-%{suffix}"))
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(strays, 1, "被拒的请求不能留下渠道（只有上面成功建的那条）");
     // all 范围建的照旧进 default 池（own 范围建成孤儿，见 console_visibility）
     let pools: Vec<String> =
         sqlx::query_scalar("SELECT pool_code::text FROM pool_channels WHERE channel_id = $1")

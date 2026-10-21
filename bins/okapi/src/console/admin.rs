@@ -704,7 +704,10 @@ fn inject_request_fields_ok(value: &Value) -> bool {
 /// azure / bedrock / vertex 渠道必须有地址：三家都没有全局缺省，缺了只能拼出打向
 /// api.openai.com 的错误请求。vertex 还要求带 `/projects/{p}/locations/{l}`（§11.35）。
 /// `provider` 是本次生效的协议，`api_base` 是本次生效的地址。
-fn ensure_azure_api_base(provider: &str, api_base: Option<&str>) -> Result<(), AppError> {
+pub(super) fn ensure_azure_api_base(
+    provider: &str,
+    api_base: Option<&str>,
+) -> Result<(), AppError> {
     let base = api_base.map(str::trim).filter(|b| !b.is_empty());
     match provider {
         "azure" | "bedrock" if base.is_none() => {

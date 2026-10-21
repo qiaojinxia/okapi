@@ -781,16 +781,25 @@ async fn channel_create(
         .get("provider")
         .and_then(Value::as_str)
         .unwrap_or("openai");
-    let api_base = args
-        .get("api_base")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::bad_request().with_param("api_base"))?;
-    super::ssrf::validate_api_base(state, api_base).await?;
+    // 与 REST 的 create_channel 同一套入参校验与归一化：两条通道建同一种东西，不能一宽一窄
+    // （此前这里认任意 provider、不规整名称与地址、OAuth 凭证原样入库，建出来的渠道是坏的）
+    if okapi_providers::registry::lookup(provider).is_none() {
+        return Err(AppError::bad_request().with_param("provider"));
+    }
+    let api_base = super::channel_creation::endpoint(
+        state,
+        provider,
+        args.get("api_base").and_then(Value::as_str),
+    )
+    .await?;
+    super::admin::ensure_azure_api_base(provider, Some(api_base))?;
     let credential = args
         .get("credential")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request().with_param("credential"))?;
     super::ssrf::validate_credential(state, credential).await?;
+    let credential = super::channel_credentials::normalize(provider, credential)?;
+    let name = super::identifiers::ensure_display_name("name", name, 128)?;
     let models: Vec<&str> = args
         .get("models")
         .and_then(Value::as_array)
@@ -809,7 +818,7 @@ async fn channel_create(
             name,
             provider,
             api_base,
-            credential,
+            credential: &credential,
             models: &models,
             trust_upstream_usage: false,
             owner_id: Some(key.user_id),
