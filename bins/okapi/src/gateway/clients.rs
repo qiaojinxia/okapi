@@ -114,6 +114,12 @@ pub async fn stamp_peer_ip(
 ///
 /// 不可信来源一律取 socket 对端。可信来源下 XFF 取**最右非信任跳**——反代追加的那一段
 /// 才是它亲眼看到的对端，更左侧全是上一跳的转述。
+///
+/// 部署约束：可信来源下 `True-Client-IP` / `CF-Connecting-IP` / `X-Real-IP` 这三个单值头
+/// **排在 XFF 前面**，而它们同样是调用方可写的。信任的若是一台**不是 CDN** 的反代，这台反代
+/// 必须自己清掉或重设这三个头（自带的 `deploy/nginx-sse.conf` 已经这么做）；否则调用方
+/// 一个头就能指定来源 IP，key 级 IP 白名单随之失效。用 `OKAPI_EDGE_KEY` 时同理，
+/// 由持有凭证的那一层保证它们是干净的。
 pub struct TrustPolicy {
     /// 信任反代 / CDN 回源段（地址或 CIDR）。空 = 只认边缘凭证。
     proxies: Vec<String>,

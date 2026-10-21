@@ -258,6 +258,12 @@ Gemini `inlineData` / chat `file`，音频转成 Gemini `inlineData`；表达不
 对端不收的媒体、未知类型）直接 400 `bad_request`，param = `unsupported_content:<类型>`，**不静默丢弃**——
 丢掉后模型在看不到附件的情况下作答，整条 user turn 被丢时还会把上一条 assistant 当成预填续写。
 解析不出对象的 tool_call 参数（典型是上一轮被 max_tokens 截断）原文放进 `_raw_arguments`，不换成 `{}`。
+**同一条原则的几处边角（2026-10-21）**：①空串消息（Anthropic `"content": ""`）照转成空 chat 消息，只有
+末尾的空 assistant（等于没有预填）不下发，否则两条 user 相邻会改变上游看到的轮次；②chat `tool` 消息
+在 Gemini 方向必须有函数名——按 `tool_call_id` 对回 assistant 的调用，对不上再认消息自带的 `name`，
+都没有就 400 `unsupported_content:tool_call_id`，不把 `functionResponse.name = ""` 送上游；③`tool_use` 缺
+`input`（或 null）的 `arguments` 是 `{}`，不是空串；④`thinking_to_content` 遇到分段数组 `content` 时把
+`<think>` 块作为首个 `{type:"text"}` 片段插进去、原有片段不动，认不得的 content 形状原样放行。
 
 ### 4.2 核心 trait
 

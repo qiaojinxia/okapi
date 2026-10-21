@@ -205,7 +205,9 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
    `client_ip` 会变成 Ingress 的地址、key 级 IP 白名单会误拒。容器里反代与网关不同 IP，
    必须显式配网段或用 `OKAPI_EDGE_KEY`。K8s 模板走后者（集群内任何 pod 都在私网段里，
    整段放行等于谁都能伪造来源 IP）：在 `okapi-env` 里设 `OKAPI_EDGE_KEY`，Ingress 回源注入
-   同值的 `X-Okapi-Edge-Key` 头。
+   同值的 `X-Okapi-Edge-Key` 头。信任一台自己的反代（不是 CDN）时，那台反代还得清掉或重设
+   `True-Client-IP` / `CF-Connecting-IP` / `X-Real-IP`——网关在可信来源下先读这三个头、再看
+   `X-Forwarded-For`，它们调用方可写；`deploy/nginx-sse.conf` 已经处理，换成别的反代要照做。
 3. **时区一致**。时段折扣的分钟窗与星期按进程本地时区判定（`TZ` 环境变量），统计页的"今天 /
    本月"缺省也按它翻页；所有副本必须设同一个 `TZ`，否则同一请求落到不同副本会按不同价计费。
    用量限额与渠道日 / 月计数器固定按 UTC 自然日 / 自然月重置，与 `TZ` 无关——对账时注意两种口径。
