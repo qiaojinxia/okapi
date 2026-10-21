@@ -515,6 +515,9 @@ impl SchedulerRedis {
         self.fixed_window_ok(&key, 120, limit).await
     }
 
+    /// 刷新租约的时长（秒）。临界区里每一步都有上限（见 `credentials::oauth`），总长压得进它。
+    const CRED_LOCK_TTL_SECS: i64 = 90;
+
     /// Refresh lease shared by request, worker and manual refresh. Redis failure is fail-closed.
     pub async fn cred_lock_acquire(
         &self,
@@ -526,12 +529,26 @@ impl SchedulerRedis {
             .set(
                 format!("lock:cred:{channel_key_id}"),
                 owner.clone(),
-                Some(Expiration::EX(90)),
+                Some(Expiration::EX(Self::CRED_LOCK_TTL_SECS)),
                 Some(SetOptions::NX),
                 false,
             )
             .await;
         set.map(|result| result.map(|_| owner))
+    }
+
+    /// 续租：锁仍归 `owner` 才把剩余时间拉回满额；返回是否续上。刷新成功后立刻续一次，
+    /// 让"旧 refresh token 已作废 → 新凭据落盘"这一段有整段租约可用。
+    pub async fn cred_lock_extend(&self, channel_key_id: i64, owner: &str) -> bool {
+        let renewed: Result<i64, _> = self
+            .client
+            .eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('EXPIRE', KEYS[1], ARGV[2]) else return 0 end",
+                vec![format!("lock:cred:{channel_key_id}")],
+                vec![owner.to_owned(), Self::CRED_LOCK_TTL_SECS.to_string()],
+            )
+            .await;
+        matches!(renewed, Ok(1))
     }
 
     pub async fn cred_lock_release(&self, channel_key_id: i64, owner: &str) {

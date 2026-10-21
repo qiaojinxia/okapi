@@ -12,9 +12,39 @@ use okapi_store::channels::ChannelCandidate;
 use okapi_store::credential::OAuthCredential;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 到期前多久算"该刷了"：一次长流式请求也不该撞上过期。
 const REFRESH_MARGIN_SECS: i64 = 120;
+/// 刷新临界区里单次数据库读 / 写的上限。租约只有 90 秒（刷新成功后还会续满），所以临界区里的每一步
+/// 都得有界：上游 HTTP 最长 45 秒，前面的重读 ≤ 10 秒，后面的写最多尝试三次、每次 ≤ 10 秒。
+/// 不设上限的话，一次数据库卡死就能让租约过期，别的副本拿同一个 refresh token 再刷一遍。
+const STORE_STEP_TIMEOUT: Duration = Duration::from_secs(10);
+/// 刷新成功后新凭据落盘失败的重试间隔（共三次尝试）。
+const WRITE_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(200), Duration::from_millis(800)];
+
+/// 失败就按 `delays` 的间隔重试（尝试次数 = `delays.len() + 1`），返回最后一次的结果。
+async fn with_retries<T, E, Fut>(
+    delays: &[Duration],
+    mut attempt: impl FnMut() -> Fut,
+) -> Result<T, E>
+where
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut tried = 0;
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => match delays.get(tried) {
+                Some(delay) => {
+                    tokio::time::sleep(*delay).await;
+                    tried += 1;
+                }
+                None => return Err(error),
+            },
+        }
+    }
+}
 
 /// 进程内单飞：同一把 key 的并发请求只让一个去刷，其余等它的结果。
 #[derive(Default)]
@@ -262,6 +292,7 @@ async fn refresh_with_lock(
         chrono::Utc::now().timestamp(),
         rejected_token,
         margin_secs,
+        &owner,
     ))
     .await;
     state
@@ -278,11 +309,14 @@ struct CurrentCredential {
 }
 
 async fn reread(state: &AppState, key: i64) -> Result<CurrentCredential, UpstreamError> {
-    let snapshot =
-        okapi_store::oauth_credentials::snapshot(&state.pg, key, state.master_key.as_deref())
-            .await
-            .map_err(|_| UpstreamError::Build("oauth_credential_read_failed".into()))?
-            .ok_or_else(|| UpstreamError::Build("oauth_credential_missing".into()))?;
+    let snapshot = tokio::time::timeout(
+        STORE_STEP_TIMEOUT,
+        okapi_store::oauth_credentials::snapshot(&state.pg, key, state.master_key.as_deref()),
+    )
+    .await
+    .map_err(|_| UpstreamError::Build("oauth_credential_read_failed".into()))?
+    .map_err(|_| UpstreamError::Build("oauth_credential_read_failed".into()))?
+    .ok_or_else(|| UpstreamError::Build("oauth_credential_missing".into()))?;
     Ok(CurrentCredential {
         credential: OAuthCredential::parse(&snapshot.plaintext)
             .ok_or_else(|| UpstreamError::Build("oauth_credential_expected".into()))?,
@@ -311,6 +345,7 @@ async fn refresh_locked(
     now: i64,
     rejected: Option<&str>,
     margin_secs: i64,
+    owner: &str,
 ) -> Result<OAuthCredential, UpstreamError> {
     let current = reread(state, key.channel_key_id).await?;
     if !matches!(current.status, 1..=3) {
@@ -349,6 +384,17 @@ async fn refresh_locked(
     .unwrap_or(Err(UpstreamError::Timeout));
     match outcome {
         Ok(tokens) => {
+            // 旧 refresh token 此刻已在上游作废：到落盘完成之前租约不能过期、被别的副本抢走
+            if !state
+                .sched
+                .cred_lock_extend(key.channel_key_id, owner)
+                .await
+            {
+                tracing::warn!(
+                    key = key.channel_key_id,
+                    "OAuth 刷新租约在刷新期间已丢失，仍按 CAS 落盘"
+                );
+            }
             let next = OAuthCredential {
                 access_token: tokens.access_token,
                 refresh_token: tokens
@@ -375,16 +421,32 @@ async fn refresh_locked(
                 .await;
                 return Err(UpstreamError::Build("oauth_invalid_token_response".into()));
             }
-            let saved = okapi_store::oauth_credentials::write_if_current(
-                &state.pg,
-                key.channel_key_id,
-                key.provider,
-                &current.stored,
-                &next.to_plaintext(),
-                state.master_key.as_deref(),
-            )
+            // 上游已经消费了旧 refresh token（Codex 等强制单次轮换），新凭据只活在内存里：这一步
+            // 遇到瞬时故障（连接抖动、超时）就丢掉的话，下次刷新只会撞 invalid_grant，账号只能人工重登。
+            // 所以重试几次。每次都以旧值做 CAS：前一次其实已落盘、只是应答丢了，重试返回 false，
+            // 下面的 `replaced_credential` 会读到我们自己写进去的那份。
+            let saved = with_retries(&WRITE_RETRY_DELAYS, || async {
+                tokio::time::timeout(
+                    STORE_STEP_TIMEOUT,
+                    okapi_store::oauth_credentials::write_if_current(
+                        &state.pg,
+                        key.channel_key_id,
+                        key.provider,
+                        &current.stored,
+                        &next.to_plaintext(),
+                        state.master_key.as_deref(),
+                    ),
+                )
+                .await
+                .map_err(|_| ())?
+                .map_err(|_| ())
+            })
             .await;
             let Ok(saved) = saved else {
+                tracing::error!(
+                    key = key.channel_key_id,
+                    "OAuth 刷新已让上游作废旧 refresh token，但新凭据三次落盘都失败"
+                );
                 super::health::record(
                     state,
                     key.channel_key_id,
@@ -477,4 +539,52 @@ async fn do_refresh(
         proxy_url: key.proxy_url,
     })
     .await
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const TINY: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(1)];
+
+    #[tokio::test]
+    async fn transient_failures_are_retried_until_one_attempt_succeeds() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<u32, &str> = with_retries(&TINY, || async {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err("db blip")
+            } else {
+                Ok(7)
+            }
+        })
+        .await;
+        assert_eq!(result, Ok(7));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "两次失败后第三次成功");
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_the_last_delay_with_the_last_error() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<u32, usize> = with_retries(&TINY, || async {
+            Err(calls.fetch_add(1, Ordering::SeqCst))
+        })
+        .await;
+        assert_eq!(result, Err(2), "共三次尝试，返回最后一次的错误");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_first_attempt_success_does_not_retry_or_wait() {
+        let calls = AtomicUsize::new(0);
+        let started = std::time::Instant::now();
+        let result: Result<bool, ()> = with_retries(&WRITE_RETRY_DELAYS, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(true)
+        })
+        .await;
+        assert_eq!(result, Ok(true));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_millis(150));
+    }
 }
