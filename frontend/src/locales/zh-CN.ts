@@ -908,7 +908,7 @@ export default {
     dashboardDistribution_model: '模型',
     dashboardDistribution_channel: '渠道',
     dashboardDistribution_tokens: 'Token',
-    dashboardDistributionChart: '{{label}}条形图',
+    dashboardDistributionChart: '{{label}}扇形图',
     dashboardDistributionTopShare: '前 {{count}} 项占比 {{value}}',
     dashboardViewAll: '查看全部',
     dashboardRankingHint: '近 {{days}} 天 · 消费前 {{count}} 项',

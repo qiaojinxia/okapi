@@ -1,8 +1,11 @@
+import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { CircleHelp, ArrowUpRight, FlaskConical } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { PieChart } from '@/components/ui/pie-chart'
+import type { PieSlice } from '@/components/ui/pie-chart'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { CubeMetrics, TokenSource } from '@/features/analytics/types'
@@ -62,14 +65,15 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
   const reasoning = total?.reasoning_tokens ?? 0
   const parts = collected ? segments({ prompt_tokens: total!.prompt_tokens!, completion_tokens: total!.completion_tokens!, cached_tokens: cached, cache_write_tokens: writes, reasoning_tokens: reasoning }) : []
   const sum = collected ? total!.prompt_tokens! + total!.completion_tokens! : 0
-  let offset = 0
-  const slices = parts.filter((part) => part.value > 0).map((part) => {
-    const start = offset
-    offset += part.value
-    return `${tokenColors[part.key]} ${sum > 0 ? start / sum * 100 : 0}% ${sum > 0 ? offset / sum * 100 : 0}%`
-  })
+  const [active, setActive] = useState<string | null>(null)
+  const slices: PieSlice[] = parts.map((part) => ({ key: part.key, value: part.value, color: tokenColors[part.key] }))
   const labels = { input: t('portal:tokInput'), cached: t('portal:tokCached'), write: t('charts:cacheWrite'), output: t('portal:tokOutput'), reasoning: t('portal:tokReasoning') }
   const count = (n: number | null | undefined) => n == null ? '—' : formatCount(n, locale)
+  const focused = sum > 0 ? parts.find((part) => part.key === active && part.value > 0) : undefined
+  const centre = focused
+    ? { top: labels[focused.key], main: formatBp(Math.round(focused.value / sum * 10000), locale), sub: count(focused.value) }
+    : { top: t('common:tokens'), main: count(sum), sub: null }
+  const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
   const coverage = (n: number | undefined) => n == null || requests <= 0 ? '—' : `${count(n)} / ${count(requests)} · ${formatBp(Math.floor(n * 10000 / requests), locale)}`
   const readComplete = requests > 0 && readCount === requests
   const writeComplete = requests > 0 && writeCount === requests
@@ -91,18 +95,23 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
           <Tooltip content={t('admin:dashboardRecordedTokenHint')}><Badge variant="muted" tabIndex={0} className="min-h-5 text-[11px]">{t('admin:dashboardRecordedTokens')}</Badge></Tooltip>
           <span className="text-muted-foreground">{t('admin:dashboardTokenTotal', { input: count(total?.prompt_tokens), output: count(total?.completion_tokens) })}</span>
         </div>
-        <div data-slot="token-composition" className="flex flex-col items-center gap-4 sm:flex-row lg:flex-1 lg:gap-4">
+        {/* 与模型 / 渠道页签同一套布局：大屏固定高度时本区是尺寸容器，扇形图按高 / 宽取较小者，图例在右侧垂直居中 */}
+        <div data-slot="token-composition" className="@container flex flex-col items-center gap-4 @md:flex-row @md:gap-6 lg:min-h-[6.5rem] lg:flex-1 lg:flex-row lg:gap-5 lg:[container-type:size]">
         <Tooltip className="shrink-0" content={t('admin:dashboardTokenHint')}>
-          <div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} data-slot="token-donut" className="relative size-36 shrink-0 rounded-full bg-muted outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:size-[clamp(6rem,calc(100dvh-42rem),11rem)]" style={{ background: slices.length ? `conic-gradient(${slices.join(', ')})` : undefined }}>
-            <div aria-hidden className="absolute inset-[14%] flex flex-col items-center justify-center rounded-full bg-card px-2"><span className="text-lg font-semibold tabular-nums lg:text-base lg:[@media(min-height:900px)]:text-xl">{count(sum)}</span><span className="text-[11px] text-muted-foreground">{t('common:tokens')}</span></div>
+          <div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} data-slot="token-donut" className="size-40 shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:size-[clamp(5rem,min(100cqh,42cqw),22rem)]">
+            <PieChart decorative slices={slices} active={active} onActiveChange={setActive} className="size-full">
+              <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
+              <span className="max-w-full truncate text-sm leading-tight font-semibold tabular-nums @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
+              {centre.sub && <span className="max-w-full truncate text-[10px] leading-4 tabular-nums text-muted-foreground @[11rem]:text-[11px]">{centre.sub}</span>}
+            </PieChart>
           </div>
         </Tooltip>
-        <dl data-slot="token-segments" className="grid w-full min-w-0 flex-1 gap-y-2 lg:gap-y-1">
+        <dl data-slot="token-segments" className="grid w-full min-w-0 gap-y-0.5 @md:w-auto @md:max-w-[21rem] @md:flex-1 lg:max-h-full lg:w-auto lg:max-w-[21rem] lg:flex-1 lg:overflow-y-auto">
           {parts.map((part) => {
             const known = part.key === 'cached' ? cached > 0 || (readCount ?? 0) > 0 : part.key === 'write' ? writes != null : part.key === 'reasoning' ? reasoning > 0 || (total?.token_detail_observations?.reasoning_tokens?.observed_records ?? 0) > 0 : true
             const incomplete = part.key === 'cached' ? !readComplete : part.key === 'write' ? !writeComplete : false
-            return <div key={part.key} className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 text-xs">
-              <dt className="flex items-center gap-1 text-muted-foreground"><span aria-hidden className={`h-2 w-2 shrink-0 rounded-sm ${part.className}`} />{labels[part.key]}</dt>
+            return <div key={part.key} {...hover(part.key)} className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 rounded-lg px-2 py-1.5 text-xs transition-colors [@container(max-height:16rem)]:py-0.5 hover:bg-muted/70 ${active === part.key ? 'bg-muted/70' : ''}`}>
+              <dt className="flex items-center gap-2 text-muted-foreground"><span aria-hidden className={`size-2.5 shrink-0 rounded-[3px] ${part.className}`} />{labels[part.key]}</dt>
               <dd className="font-medium tabular-nums" title={known ? part.value.toLocaleString(locale) : undefined}>{known ? count(part.value) : '—'}{known && incomplete && <span className="ml-1 text-[10px] font-normal text-warning">{t('admin:dashboardPartialTokens')}</span>}</dd>
               <span className="min-w-9 text-right text-[11px] tabular-nums text-muted-foreground">{known && sum > 0 ? formatBp(Math.round(part.value / sum * 10000), locale) : '—'}</span>
             </div>

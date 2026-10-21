@@ -38,24 +38,28 @@ for (const { width, height, theme, language } of [
       await showDistribution(page, view)
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight)).toBe(true)
       if (view !== 'tokens') {
-        const bars = distribution.locator('[data-slot="distribution-bar"]:visible')
-        await expect(bars).toHaveCount(5)
+        const pie = distribution.locator('[data-slot="distribution-pie"]:visible')
+        await expect(pie).toHaveCount(1)
+        // 五项各一个扇区，榜外（占比 25%）再多一块灰色
+        await expect(pie.locator('[data-slot="pie-slice"]')).toHaveCount(6)
+        await expect(distribution.getByRole('listitem')).toHaveCount(5)
         const card = (await distribution.boundingBox())!
-        const tracks = await bars.evaluateAll((nodes) => nodes.map((node) => node.parentElement!.getBoundingClientRect()))
-        expect(Math.max(...tracks.map((track) => track.x)) - Math.min(...tracks.map((track) => track.x))).toBeLessThanOrEqual(1)
-        expect(Math.max(...tracks.map((track) => track.width)) - Math.min(...tracks.map((track) => track.width))).toBeLessThanOrEqual(1)
-        for (const bar of await bars.all()) {
-          const box = (await bar.boundingBox())!
-          expect(box.height).toBe(6)
-          expect(box.y + box.height).toBeLessThanOrEqual(card.y + card.height - 1)
-        }
+        const chart = (await pie.boundingBox())!
+        const legend = (await distribution.locator('[data-slot="distribution-body"]:visible ol').boundingBox())!
+        expect(Math.abs(chart.width - chart.height)).toBeLessThanOrEqual(1)
+        expect(chart.width).toBeGreaterThanOrEqual(80)
+        expect(chart.y + chart.height).toBeLessThanOrEqual(card.y + card.height - 1)
+        // 图在左、图例在右：不重叠，也不超出卡片
+        expect(chart.x + chart.width).toBeLessThanOrEqual(legend.x)
+        expect(legend.x + legend.width).toBeLessThanOrEqual(card.x + card.width - 1)
       }
       await page.screenshot({ path: test.info().outputPath(`dashboard-${view}.png`), animations: 'disabled' })
     }
     const donut = (await distribution.locator('[data-slot="token-donut"]').boundingBox())!
     const legend = (await distribution.locator('[data-slot="token-segments"]').boundingBox())!
     const card = (await distribution.boundingBox())!
-    expect(donut.width).toBe(height >= 900 ? 176 : 96)
+    expect(donut.width).toBeGreaterThanOrEqual(height >= 900 ? 160 : 80)
+    expect(donut.width).toBeLessThanOrEqual(352)
     expect(Math.abs(donut.width - donut.height)).toBeLessThanOrEqual(1)
     expect(Math.abs(donut.y + donut.height / 2 - legend.y - legend.height / 2)).toBeLessThanOrEqual(1)
     expect(legend.x + legend.width).toBeLessThanOrEqual(card.x + card.width - 1)
@@ -117,9 +121,11 @@ for (const viewport of [{ width: 1024, height: 768 }, { width: 1366, height: 768
         const card = (await distribution.boundingBox())!
         expect(donut.y + donut.height).toBeLessThanOrEqual(card.y + card.height - 1)
       } else {
-        const bar = (await distribution.locator('[data-slot="distribution-bar"]:visible').last().boundingBox())!
+        const pie = (await distribution.locator('[data-slot="distribution-pie"]:visible').boundingBox())!
+        const legend = (await distribution.locator('[data-slot="distribution-body"]:visible ol').boundingBox())!
         const card = (await distribution.boundingBox())!
-        expect(bar.y + bar.height).toBeLessThanOrEqual(card.y + card.height - 1)
+        expect(pie.y + pie.height).toBeLessThanOrEqual(card.y + card.height - 1)
+        expect(legend.y + legend.height).toBeLessThanOrEqual(card.y + card.height - 1)
       }
     }
     expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1)
@@ -150,9 +156,22 @@ for (const { width, language } of [{ width: 1366, language: 'zh-CN' }, { width: 
     await expect(card).toHaveCount(1)
     await expect(tabs).toHaveCount(3)
     await expect(card.getByRole('tabpanel')).toHaveCount(1)
-    await expect(card.locator('[data-slot="distribution-bars"]:visible')).toHaveCount(1)
-    await expect(card.locator('[data-slot="distribution-bar"]:visible').first()).toHaveAttribute('data-share-bp', '2500')
-    await expect(card.locator('[data-slot="distribution-bar"]:visible').first()).toHaveAttribute('style', /width: 25%/)
+    await expect(card.locator('[data-slot="distribution-pie"]:visible')).toHaveCount(1)
+    // 扇区按占比画：第一名 25%，榜外 25% 画成最后一块
+    const slices = card.locator('[data-slot="distribution-pie"]:visible [data-slot="pie-slice"]')
+    await expect(slices.first()).toHaveAttribute('data-share-bp', '2500')
+    await expect(slices.last()).toHaveAttribute('data-share-bp', '2500')
+    expect(await slices.evaluateAll((nodes) => nodes.reduce((sum, node) => sum + Number(node.getAttribute('data-share-bp')), 0))).toBe(10000)
+    // 悬停图例：中心换成该项的名称与占比，该扇区保持原样、其余变淡；移开后恢复
+    const pie = card.locator('[data-slot="distribution-pie"]:visible')
+    await expect(pie).toContainText(language === 'en' ? 'Actual spend' : '实际消费')
+    await card.getByRole('listitem').nth(1).hover()
+    await expect(pie).toContainText('claude-sonnet-4.5')
+    await expect(pie).toContainText('20.0%')
+    await expect(slices.nth(1)).toHaveCSS('opacity', '1')
+    await expect(slices.nth(0)).toHaveCSS('opacity', '0.4')
+    await page.mouse.move(0, 0)
+    await expect(slices.nth(0)).toHaveCSS('opacity', '1')
     await expect(card).toContainText(language === 'en' ? 'Top 5 share 75.0%' : '前 5 项占比 75.0%')
     await card.scrollIntoViewIfNeeded()
     const scroll = await page.evaluate(() => window.scrollY)
@@ -172,11 +191,12 @@ for (const { width, language } of [{ width: 1366, language: 'zh-CN' }, { width: 
     await expect(page).toHaveURL('/admin?days=30&distribution=tokens')
     await expect(card.getByRole('tabpanel')).toHaveCount(1)
     await expect(card.locator('[data-slot="token-donut"]:visible')).toHaveCount(1)
-    await expect(card.locator('[data-slot="distribution-bars"]:visible')).toHaveCount(0)
+    await expect(card.locator('[data-slot="distribution-pie"]:visible')).toHaveCount(0)
     await expect(card.locator('[data-slot="token-segments"] dd')).toHaveText(language === 'en' ? ['240K', '140K', '20,000', '170K', '30,000'] : ['24万', '14万', '20,000', '17万', '30,000'])
-    const donut = card.locator('[data-slot="token-donut"]')
-    await expect(donut).toHaveAttribute('style', /conic-gradient/)
-    await expect(donut).toHaveAttribute('style', /100%/)
+    // 五段互斥、合起来占满整圈
+    const tokenSlices = card.locator('[data-slot="token-donut"] [data-slot="pie-slice"]')
+    await expect(tokenSlices).toHaveCount(5)
+    expect(Math.abs(await tokenSlices.evaluateAll((nodes) => nodes.reduce((sum, node) => sum + Number(node.getAttribute('data-share-bp')), 0)) - 10000)).toBeLessThanOrEqual(5)
     expect(requests.filter(isUsage)).toHaveLength(1)
     expect(requests.filter((url) => url.startsWith('/admin/stats/breakdown?'))).toHaveLength(2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
@@ -1302,6 +1322,8 @@ test('Dashboard 排行直接展示请求量，免费调用有数量且不能伪�
     await expect(row).toContainText('US$0.00')
     await expect(row).toContainText('—')
     await expect(row).not.toContainText('0%')
+    // 总消费为 0 时占比未知：只画一圈灰底，不画任何扇区
+    await expect(ranking.locator('[data-slot="pie-slice"]')).toHaveCount(0)
   }
   // 请求次数取自已返回的排行，不追加实体或日志查询。
   expect(requests.filter((url) => url.startsWith('/admin/logs'))).toHaveLength(0)
@@ -1560,7 +1582,7 @@ for (const width of [1024, 1440]) {
       await expect(models).toContainText('前 5 项')
       await expect(models.getByRole('button', { name: /再看|收起/ })).toHaveCount(0)
       if (count > 0) {
-        expect((await models.getByRole('list').boundingBox())!.height).toBeGreaterThanOrEqual(160)
+        expect((await models.locator('[data-slot="distribution-pie"]').boundingBox())!.height).toBeGreaterThanOrEqual(80)
         const height = (await distribution.boundingBox())!.height
         if (previousHeight !== undefined) expect(Math.abs(height - previousHeight)).toBeLessThanOrEqual(1)
         previousHeight = height

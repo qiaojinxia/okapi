@@ -908,7 +908,7 @@ export default {
     dashboardDistribution_model: 'Models',
     dashboardDistribution_channel: 'Channels',
     dashboardDistribution_tokens: 'Tokens',
-    dashboardDistributionChart: '{{label}} bar chart',
+    dashboardDistributionChart: '{{label}} pie chart',
     dashboardDistributionTopShare: 'Top {{count}} share {{value}}',
     dashboardViewAll: 'View all',
     dashboardRankingHint: 'Last {{days}} days · Top {{count}} by spend',

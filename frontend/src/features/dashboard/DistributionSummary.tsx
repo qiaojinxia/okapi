@@ -1,16 +1,18 @@
-import { useId } from 'react'
+import { useId, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { PieChart } from '@/components/ui/pie-chart'
+import type { PieSlice } from '@/components/ui/pie-chart'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Tooltip } from '@/components/ui/tooltip'
 import { Tabs } from '@/components/ui/tabs'
 import type { BreakdownResp } from '@/features/analytics/types'
-import { chartColor } from '@/lib/chart'
+import { chartColor, OTHER_COLOR } from '@/lib/chart'
 import { describeError } from '@/lib/i18n'
-import { formatBp, formatCount, formatMoney } from '@/lib/money'
+import { formatBp, formatCount, formatMoney, formatMoneyAggregate } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { DASHBOARD_RANKING_LIMIT, DASHBOARD_STALE_TIME, dashboardBreakdownParams, dashboardFetch } from './data'
 import type { DistributionView, RankingMetric } from './types'
@@ -19,12 +21,17 @@ import type { DateRange } from '@/components/ui/date-range'
 import { dashboardPeriodLabel, dashboardSearch } from './period'
 
 const detailClass = 'inline-flex min-h-8 shrink-0 items-center gap-1 rounded text-xs text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-6'
+/// 「榜外」那一块的键（与行键不会冲突）。
+const OTHER = '\u0000other'
+/// 榜外占比低于 0.05% 时扇区只有一条看不见的细缝，不单画。
+const OTHER_MIN_BP = 5
 
 function Ranking({ days, range, by, metric, onMetricChange }: { days: number; range?: DateRange | null; by: 'model' | 'channel'; metric: RankingMetric; onMetricChange: (metric: RankingMetric) => void }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
   const params = dashboardBreakdownParams(days, by, metric, range)
   const search = dashboardSearch(days, range)
+  const [active, setActive] = useState<string | null>(null)
   const query = useQuery({ queryKey: qk.statsBreakdown(params), queryFn: () => dashboardFetch<BreakdownResp>(`/admin/stats/breakdown?${params}`), staleTime: DASHBOARD_STALE_TIME, retry: false })
   const title = metric === 'amount' ? t(by === 'model' ? 'portal:modelSnapshot' : 'admin:dashboardChannelRanking') : t(`admin:dashboardRanking_${by}_${metric}`)
   const data = query.isError ? undefined : query.data
@@ -35,6 +42,21 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
   const totalLabel = metric === 'amount' ? t('admin:dashboardAllSpend', { amount: total == null ? '—' : formatMoney(total, locale) }) : t('admin:dashboardRankingAll', { value: total == null ? '—' : format(total) })
   const shares = visible.map((row) => metric === 'amount' ? row.share_bp : metric === 'requests' ? row.request_share_bp : row.token_share_bp)
   const topShare = total != null && total > 0 && shares.every((share) => share != null) ? Math.min(10000, shares.reduce((sum, share) => sum + Math.max(0, share!), 0)) : null
+  const rest = topShare == null ? 0 : 10000 - topShare
+  const rowKey = (row: (typeof rows)[number]) => `${row.rank}:${row.key}`
+  const nameOf = (row: (typeof rows)[number]) => row.label || (by === 'model' ? row.key || t('analysis:notCollected') : (row.channel_id ?? 0) > 0 ? t('admin:dashboardUnnamedChannel', { id: row.channel_id }) : t('admin:dashboardUnassignedChannel'))
+  // 扇区按占比画；占比未知（总量为 0、旧数据缺字段）时只画一圈灰底，不伪造
+  const slices: PieSlice[] = topShare == null ? [] : [
+    ...visible.map((row, i) => ({ key: rowKey(row), value: Math.max(0, shares[i]!), color: chartColor(row.rank - 1) })),
+    ...(rest >= OTHER_MIN_BP ? [{ key: OTHER, value: rest, color: OTHER_COLOR }] : []),
+  ]
+  const focused = visible.find((row, i) => rowKey(row) === active && shares[i] != null)
+  const centre = active === OTHER
+    ? { top: t('analytics:other'), main: formatBp(rest, locale), sub: null }
+    : focused
+      ? { top: nameOf(focused), main: formatBp(Math.max(0, Math.min(10000, shares[visible.indexOf(focused)]!)), locale), sub: metric === 'requests' ? null : format((metric === 'amount' ? focused.amount_micro : focused[metric]) ?? 0) }
+      : { top: t(`charts:metric_${metric}`), main: total == null ? '—' : metric === 'amount' ? formatMoneyAggregate(total, locale) : formatCount(total, locale), sub: null }
+  const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
   return <div role="region" aria-label={title} className="flex h-full min-w-0 flex-col">
     <CardHeader className="shrink-0 gap-0 px-4 pt-1 pb-2 lg:py-0">
       <CardTitle className="lg:sr-only">{title}</CardTitle>
@@ -49,38 +71,55 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
         </div>
       </div>
     </CardHeader>
-    <CardContent className="flex flex-1 flex-col gap-3 px-4 pt-0 pb-3 lg:gap-1.5 lg:pb-2">
+    <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-0 pb-3 lg:gap-1.5 lg:pb-2">
       {query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.isPending ? <LoadingState /> : rows.length === 0 ? <p className="px-1 py-6 text-xs text-muted-foreground">{t('admin:trendEmptyHint')}</p> : <>
-        {/* Shares include the full window, not just the displayed ranking. Reserve equal slots without fabricating missing rows. */}
-        <ol data-slot="distribution-bars" aria-label={t('admin:dashboardDistributionChart', { label: title })} className="grid flex-1 [--ranking-row-min:3.5rem] lg:[--ranking-row-min:2rem]" style={{ gridTemplateRows: `repeat(${DASHBOARD_RANKING_LIMIT}, minmax(var(--ranking-row-min), 1fr))` }}>
-          {visible.map((row) => {
-            const name = row.label || (by === 'model' ? row.key || t('analysis:notCollected') : (row.channel_id ?? 0) > 0 ? t('admin:dashboardUnnamedChannel', { id: row.channel_id }) : t('admin:dashboardUnassignedChannel'))
-            const value = metric === 'amount' ? row.amount_micro : row[metric]
-            const proportion = metric === 'amount' ? row.share_bp : metric === 'requests' ? row.request_share_bp : row.token_share_bp
-            const share = total != null && total > 0 && proportion != null ? Math.max(0, Math.min(10000, proportion)) : null
-            const displayValue = value == null ? '—' : format(value)
-            const content = <>
-              <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[11px] font-semibold tabular-nums ${row.rank === 1 ? 'bg-primary/12 text-primary' : 'bg-muted text-muted-foreground'}`}>{row.rank}</span>
-              <span className="min-w-0 flex-1 space-y-1 lg:space-y-0">
-                <span className="flex min-w-0 items-baseline justify-between gap-2">
-                  <span className="min-w-0 truncate text-sm font-medium lg:text-xs lg:leading-4" title={name}>{name}</span>
-                  <span className="shrink-0 text-[11px] leading-4 tabular-nums text-muted-foreground" title={t('admin:dashboardRankingRequests', { n: row.requests.toLocaleString(locale) })}>{t('admin:dashboardRankingCalls', { n: formatCount(row.requests, locale) })}</span>
-                </span>
-                <span className="grid grid-cols-[6rem_minmax(0,1fr)_3rem] items-center gap-2 text-xs text-muted-foreground lg:text-[11px] lg:leading-3.5">
-                  <span className="min-w-0 truncate font-medium tabular-nums text-foreground" title={displayValue}>{displayValue}</span>
-                  <span className="block h-1.5 overflow-hidden rounded-full bg-muted/50" aria-hidden style={{ backgroundImage: 'linear-gradient(to right, var(--color-border) 1px, transparent 1px)', backgroundSize: '25% 100%' }}><span data-slot="distribution-bar" data-share-bp={share ?? undefined} className="block h-full rounded-full" style={{ width: `${(share ?? 0) / 100}%`, background: chartColor(row.rank - 1) }} /></span>
-                  <span className="min-w-9 text-right tabular-nums">{share === null ? '—' : formatBp(share, locale)}</span>
-                </span>
-              </span>
-            </>
-            const className = 'flex h-full min-h-14 items-center gap-2 rounded-lg px-1 py-1 lg:min-h-8 lg:py-px'
-            const canFocus = by === 'model' ? !!row.key : (row.channel_id ?? 0) > 0
-            const description = `${name} · ${t('admin:dashboardRankingRequests', { n: formatCount(row.requests, locale) })}`
-            return <li key={row.key} className="min-w-0">{canFocus ? <Link to="/admin/stats" title={description} aria-label={`${description} · ${displayValue} · ${share === null ? '—' : formatBp(share, locale)}`} search={{ ...search, measure: metric === 'amount' ? undefined : metric, ...(by === 'model' ? { model: row.key } : { channel_id: row.channel_id }) }} className={`${className} outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/40`}>{content}</Link> : <div title={description} className={className}>{content}</div>}</li>
-          })}
-        </ol>
-        <div aria-hidden className="ml-8 flex justify-between px-1 text-[10px] tabular-nums text-muted-foreground lg:hidden"><span>0%</span><span>50%</span><span>100%</span></div>
-        <div className="mt-auto flex flex-wrap items-center justify-between gap-x-2 gap-y-1 border-t border-border px-1 pt-2 lg:pt-1">
+        {/* 大屏固定高度：本区是尺寸容器，扇形图按它的高 / 宽取较小者（cqh / cqw），图例在右侧垂直居中，放不下时图例内部滚动。
+            窄屏自然高度：图在上、图例在下；够宽（容器 ≥ 28rem）时并排。 */}
+        <div data-slot="distribution-body" className="@container flex flex-1 flex-col items-center justify-center gap-4 @md:flex-row @md:gap-6 lg:min-h-0 lg:flex-row lg:gap-5 lg:[container-type:size]">
+          <PieChart slot="distribution-pie" slices={slices} active={active} onActiveChange={setActive} label={t('admin:dashboardDistributionChart', { label: title })}
+            className="size-40 shrink-0 lg:size-[clamp(5rem,min(100cqh,42cqw),22rem)]">
+            <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
+            <span className="max-w-full truncate text-sm leading-tight font-semibold tabular-nums @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
+            {centre.sub && <span className="max-w-full truncate text-[10px] leading-4 tabular-nums text-muted-foreground @[11rem]:text-[11px]">{centre.sub}</span>}
+          </PieChart>
+          <div className="flex w-full min-w-0 flex-col gap-1 @md:w-auto @md:max-w-[21rem] @md:flex-1 lg:max-h-full lg:w-auto lg:max-w-[21rem] lg:flex-1 lg:overflow-y-auto">
+            <ol aria-label={title} className="flex min-w-0 flex-col gap-0.5">
+              {visible.map((row, index) => {
+                const name = nameOf(row)
+                const value = metric === 'amount' ? row.amount_micro : row[metric]
+                const share = total != null && total > 0 && shares[index] != null ? Math.max(0, Math.min(10000, shares[index]!)) : null
+                const displayValue = value == null ? '—' : format(value)
+                const key = rowKey(row)
+                const calls = t('admin:dashboardRankingCalls', { n: formatCount(row.requests, locale) })
+                const content = <>
+                  <span aria-hidden className="size-2.5 shrink-0 rounded-[3px]" style={{ background: chartColor(row.rank - 1) }} />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-baseline justify-between gap-2">
+                      <span className="min-w-0 truncate text-xs font-medium" title={name}>{name}</span>
+                      {/* 图例放不下两行时（大屏固定高度、卡片矮）收成单行：金额挪到名称行，次数留在悬停提示里 */}
+                      {metric !== 'requests' && <span className="hidden shrink-0 text-[11px] tabular-nums text-muted-foreground [@container(max-height:16rem)_and_(min-width:28rem)]:inline">{displayValue}</span>}
+                      <span className="shrink-0 text-xs font-semibold tabular-nums">{share === null ? '—' : formatBp(share, locale)}</span>
+                    </span>
+                    <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] leading-4 tabular-nums text-muted-foreground [@container(max-height:16rem)]:hidden">
+                      {metric !== 'requests' && <><span className="min-w-0 truncate" title={displayValue}>{displayValue}</span><span aria-hidden>·</span></>}
+                      <span className="shrink-0" title={t('admin:dashboardRankingRequests', { n: row.requests.toLocaleString(locale) })}>{calls}</span>
+                    </span>
+                  </span>
+                </>
+                const className = `flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors [@container(max-height:16rem)]:py-1 ${active === key ? 'bg-muted/70' : ''}`
+                const canFocus = by === 'model' ? !!row.key : (row.channel_id ?? 0) > 0
+                const description = `${name} · ${t('admin:dashboardRankingRequests', { n: formatCount(row.requests, locale) })}`
+                return <li key={key} className="min-w-0" {...hover(key)}>{canFocus ? <Link to="/admin/stats" title={description} aria-label={`${description} · ${displayValue} · ${share === null ? '—' : formatBp(share, locale)}`} search={{ ...search, measure: metric === 'amount' ? undefined : metric, ...(by === 'model' ? { model: row.key } : { channel_id: row.channel_id }) }} className={`${className} outline-none hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-primary/40`}>{content}</Link> : <div title={description} className={className}>{content}</div>}</li>
+              })}
+            </ol>
+            {slices.some((slice) => slice.key === OTHER) && <div {...hover(OTHER)} className={`flex items-center gap-2.5 rounded-lg px-2 py-1 text-[11px] text-muted-foreground transition-colors ${active === OTHER ? 'bg-muted/70' : ''}`}>
+              <span aria-hidden className="size-2.5 shrink-0 rounded-[3px]" style={{ background: OTHER_COLOR }} />
+              <span className="min-w-0 flex-1 truncate">{t('analytics:other')}</span>
+              <span className="shrink-0 tabular-nums">{formatBp(rest, locale)}</span>
+            </div>}
+          </div>
+        </div>
+        <div className="mt-auto flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-lg bg-muted/40 px-2.5 py-1.5 lg:py-1">
           <Tooltip content={t('admin:dashboardRankingDenominator')}>
             <span tabIndex={0} className="text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{totalLabel}</span>
           </Tooltip>
