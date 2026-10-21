@@ -146,11 +146,8 @@ pub(crate) async fn read(response: reqwest::Response) -> Result<Value, UpstreamE
         return Err(UpstreamError::Status {
             status: response.status().as_u16(),
             body: bytes::Bytes::new(),
-            retry_after_secs: response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.parse().ok()),
+            // 与其它上游调用同一套解析：数字秒或 HTTP 日期，负数 / 过去的时间不算
+            retry_after_secs: crate::retry_after::seconds(response.headers()),
         });
     }
     let body = crate::openai::response_bytes(response, Some(262_144)).await?;
@@ -160,6 +157,29 @@ pub(crate) async fn read(response: reqwest::Response) -> Result<Value, UpstreamE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn quota_probe_errors_carry_only_sane_retry_after_seconds() {
+        let response = |value: &str| {
+            reqwest::Response::from(
+                http::Response::builder()
+                    .status(429)
+                    .header("retry-after", value)
+                    .body("")
+                    .unwrap(),
+            )
+        };
+        for (value, want) in [("30", Some(30)), ("-5", None), ("junk", None)] {
+            match read(response(value)).await {
+                Err(UpstreamError::Status {
+                    status: 429,
+                    retry_after_secs,
+                    ..
+                }) => assert_eq!(retry_after_secs, want, "{value}"),
+                other => panic!("{value}: {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn next_reset_is_the_earliest_upcoming_window_of_a_fresh_observation() {

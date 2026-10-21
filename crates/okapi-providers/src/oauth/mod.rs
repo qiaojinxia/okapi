@@ -138,15 +138,46 @@ pub fn is_invalid_grant(status: u16, body: &[u8]) -> bool {
             })
         })
         .unwrap_or_default();
-    matches!(
-        code,
+    match code {
         "invalid_grant"
-            | "invalid_request"
-            | "unauthorized_client"
-            | "refresh_token_expired"
-            | "refresh_token_reused"
-            | "refresh_token_invalidated"
-    )
+        | "unauthorized_client"
+        | "refresh_token_expired"
+        | "refresh_token_reused"
+        | "refresh_token_invalidated" => true,
+        // OAuth 里 invalid_request 本是"请求形状错"（缺必填参数之类）：上游哪天多要一个参数，
+        // 一概判死会让所有订阅 key 一次性进 invalid，只能人工重登。有的上游对失效的 refresh token
+        // 也回这个码，所以只有说明里点名了 refresh token / grant 才当终态，其余按瞬态重试。
+        "invalid_request" => {
+            let text = error_text(&v);
+            [
+                "refresh token",
+                "refresh_token",
+                "grant",
+                "revoked",
+                "expired",
+            ]
+            .iter()
+            .any(|needle| text.contains(needle))
+        }
+        _ => false,
+    }
+}
+
+/// 错误体里的人话说明（`error_description` / `message` / `detail`，顶层或 `error` 对象里），小写。
+fn error_text(body: &Value) -> String {
+    let pick = |value: &Value| {
+        ["error_description", "message", "detail"]
+            .iter()
+            .filter_map(|key| value.get(*key).and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut text = pick(body);
+    if let Some(inner) = body.get("error").filter(|e| e.is_object()) {
+        text.push(' ');
+        text.push_str(&pick(inner));
+    }
+    text.to_lowercase()
 }
 
 /// token 端点的出站修饰：走渠道自己的代理（刷新与 API 请求得从同一个出口出去，
@@ -255,6 +286,20 @@ mod tests {
             400,
             br#"{"error":{"code":"refresh_token_reused","message":"x"}}"#
         ));
+        // invalid_request 只有点名了 refresh token / grant 才算终态；形状错不能把所有 key 打死
+        for body in [
+            br#"{"error":"invalid_request","error_description":"Refresh token not found or invalid"}"#.as_slice(),
+            br#"{"error":{"code":"invalid_request","message":"The provided authorization grant is expired"}}"#.as_slice(),
+        ] {
+            assert!(is_invalid_grant(400, body), "{}", String::from_utf8_lossy(body));
+        }
+        for body in [
+            br#"{"error":"invalid_request","error_description":"Missing required parameter: client_id"}"#.as_slice(),
+            br#"{"error":"invalid_request"}"#.as_slice(),
+            br#"{"error":{"type":"invalid_request","message":"unsupported field"}}"#.as_slice(),
+        ] {
+            assert!(!is_invalid_grant(400, body), "{}", String::from_utf8_lossy(body));
+        }
         assert!(!is_invalid_grant(500, b"upstream down"));
         assert!(!is_invalid_grant(429, br#"{"error":"rate_limited"}"#));
     }
