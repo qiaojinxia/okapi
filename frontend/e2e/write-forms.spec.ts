@@ -2622,6 +2622,16 @@ test('充值下单：快捷档与最低额挡在提交前，下单体是 micro �
   expect(pays).toHaveLength(2)
   expect(page.url()).toContain('/portal/topup')
 
+  // 地址不是 http(s)（被误配 / 被改写成 javascript: 之类）：同样原地报错，不跳转、更不执行
+  reply = { order_no: 'OK-4', gateway: 'stripe', pay_url: 'javascript:window.__pwned = true' }
+  await page.goto('/portal/topup')
+  await page.getByRole('group', { name: '支付网关' }).getByRole('button', { name: 'Stripe' }).click()
+  await page.getByLabel('金额（USD）').fill('10')
+  await page.getByRole('button', { name: /去支付/ }).click()
+  await expect(page.getByRole('alert')).toContainText('网关未返回支付地址')
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: boolean }).__pwned)).toBeUndefined()
+  expect(pays).toHaveLength(2)
+
   await page.route('**/api/me/topup', (route) => route.fulfill(apiError(500, 'internal_error')))
   await page.getByRole('button', { name: /去支付/ }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()

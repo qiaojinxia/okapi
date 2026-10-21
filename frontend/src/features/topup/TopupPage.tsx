@@ -215,7 +215,7 @@ function RechargeCard() {
         setError(t('portal:topupNoUrl'))
         return
       }
-      gotoPayment(data)
+      if (!gotoPayment(data)) setError(t('portal:topupNoUrl'))
     },
     onError: (err) => setError(describeError(err)),
   })
