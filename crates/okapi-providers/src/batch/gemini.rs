@@ -274,7 +274,10 @@ impl GeminiBatch {
             self.http
                 .request(
                     Method::POST,
-                    self.url(&format!("/v1beta/models/{model}:batchGenerateContent")),
+                    self.url(&format!(
+                        "/v1beta/models/{}:batchGenerateContent",
+                        crate::gemini::path_segment(model)
+                    )),
                 )
                 .header("content-type", "application/json")
                 .body(body),

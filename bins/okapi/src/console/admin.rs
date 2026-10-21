@@ -3165,7 +3165,10 @@ fn probe_request(
                    "messages": [{"role": "user", "content": "ping"}]}),
         ),
         "gemini" => (
-            format!("{base}/models/{m}:generateContent"),
+            format!(
+                "{base}/models/{}:generateContent",
+                okapi_providers::gemini::path_segment(m)
+            ),
             json!({"contents": [{"parts": [{"text": "ping"}]}],
                    "generationConfig": {"maxOutputTokens": PROBE_MAX_TOKENS}}),
         ),

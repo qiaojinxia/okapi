@@ -13,6 +13,25 @@ use std::time::Duration;
 
 const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
 
+/// 模型名作为 URL 路径段：unreserved 字符和 `@`（Vertex 的 Claude 版本号 `…@20250929`）原样，
+/// 其余字节逐个 `%XX`。直接拼进 URL 的话，`?` `#` `/` `%` 空格之类会改写路径或查询串，
+/// 整个渠道的请求都跑偏，而报错出在离配置很远的地方。
+#[must_use]
+pub fn path_segment(model: &str) -> String {
+    crate::aws_sigv4::uri_encode(model).replace("%40", "@")
+}
+
+/// generateContent / streamGenerateContent?alt=sse 的 URL。
+fn generate_url(base: &str, model: &str, stream: bool) -> String {
+    let base = base.trim_end_matches('/');
+    let model = path_segment(model);
+    if stream {
+        format!("{base}/models/{model}:streamGenerateContent?alt=sse")
+    } else {
+        format!("{base}/models/{model}:generateContent")
+    }
+}
+
 pub struct GeminiStream {
     pub upstream_request_id: Option<String>,
     /// 原生 chunk（data 行 JSON 原文）。
@@ -50,12 +69,7 @@ impl GeminiUpstream {
         stream: bool,
         outbound: &crate::http::Outbound,
     ) -> Result<GeminiResponse, UpstreamError> {
-        let base = api_base.trim_end_matches('/');
-        let url = if stream {
-            format!("{base}/models/{model}:streamGenerateContent?alt=sse")
-        } else {
-            format!("{base}/models/{model}:generateContent")
-        };
+        let url = generate_url(api_base, model, stream);
         send_generate_at(
             &self.http,
             url,
@@ -241,6 +255,41 @@ fn classify(e: &reqwest::Error) -> UpstreamError {
         UpstreamError::Timeout
     } else {
         UpstreamError::Stream(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn model_names_are_escaped_as_one_path_segment() {
+        assert_eq!(path_segment("gemini-2.5-pro"), "gemini-2.5-pro");
+        assert_eq!(
+            path_segment("claude-sonnet-4-5@20250929"),
+            "claude-sonnet-4-5@20250929",
+            "Vertex 的版本号里的 @ 保持原样"
+        );
+        assert_eq!(path_segment("a?b#c%d e/f"), "a%3Fb%23c%25d%20e%2Ff");
+        assert_eq!(path_segment("%40"), "%2540", "字面的 %40 不能被当成 @");
+        assert_eq!(path_segment("模"), "%E6%A8%A1");
+    }
+
+    #[test]
+    fn a_hostile_model_name_cannot_rewrite_path_or_query() {
+        let url = generate_url("https://g.example/v1beta/", "x?alt=json#/../../y", true);
+        assert_eq!(
+            url,
+            "https://g.example/v1beta/models/x%3Falt%3Djson%23%2F..%2F..%2Fy:streamGenerateContent?alt=sse"
+        );
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert_eq!(parsed.query(), Some("alt=sse"));
+        assert_eq!(parsed.fragment(), None);
+        assert!(parsed.path().starts_with("/v1beta/models/x%3F"));
+        assert_eq!(
+            generate_url("https://g.example/v1beta", "m", false),
+            "https://g.example/v1beta/models/m:generateContent"
+        );
     }
 }
 

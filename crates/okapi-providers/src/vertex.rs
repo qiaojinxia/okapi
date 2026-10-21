@@ -216,15 +216,7 @@ impl VertexUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<MessagesResponse, UpstreamError> {
         let token = self.access_token(credential, outbound).await?;
-        let action = if stream {
-            "streamRawPredict"
-        } else {
-            "rawPredict"
-        };
-        let url = format!(
-            "{}/publishers/anthropic/models/{model}:{action}",
-            api_base.trim_end_matches('/')
-        );
+        let url = raw_predict_url(api_base, model, stream);
         let body = raw_predict_body(&body)?;
         let bearer = format!("Bearer {token}");
         send_messages_at(
@@ -249,12 +241,7 @@ impl VertexUpstream {
         outbound: &crate::http::Outbound,
     ) -> Result<GeminiResponse, UpstreamError> {
         let token = self.access_token(credential, outbound).await?;
-        let base = api_base.trim_end_matches('/');
-        let url = if stream {
-            format!("{base}/publishers/google/models/{model}:streamGenerateContent?alt=sse")
-        } else {
-            format!("{base}/publishers/google/models/{model}:generateContent")
-        };
+        let url = generate_url(api_base, model, stream);
         let bearer = format!("Bearer {token}");
         send_generate_at(
             &self.http,
@@ -265,6 +252,31 @@ impl VertexUpstream {
             outbound,
         )
         .await
+    }
+}
+
+/// Claude on Vertex 的 rawPredict / streamRawPredict URL（模型名按路径段转义）。
+fn raw_predict_url(api_base: &str, model: &str, stream: bool) -> String {
+    let action = if stream {
+        "streamRawPredict"
+    } else {
+        "rawPredict"
+    };
+    format!(
+        "{}/publishers/anthropic/models/{}:{action}",
+        api_base.trim_end_matches('/'),
+        crate::gemini::path_segment(model)
+    )
+}
+
+/// Gemini on Vertex 的 generateContent / streamGenerateContent?alt=sse URL（模型名按路径段转义）。
+fn generate_url(api_base: &str, model: &str, stream: bool) -> String {
+    let base = api_base.trim_end_matches('/');
+    let model = crate::gemini::path_segment(model);
+    if stream {
+        format!("{base}/publishers/google/models/{model}:streamGenerateContent?alt=sse")
+    } else {
+        format!("{base}/publishers/google/models/{model}:generateContent")
     }
 }
 
@@ -306,6 +318,27 @@ mod tests {
             "https://generativelanguage.googleapis.com/v1beta"
         ));
         assert!(!api_base_ok("not a url"));
+    }
+
+    #[test]
+    fn model_names_are_escaped_in_both_publisher_urls() {
+        let base = "https://aiplatform.googleapis.com/v1/projects/p/locations/global/";
+        assert_eq!(
+            raw_predict_url(base, "claude-sonnet-4-5@20250929", true),
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/claude-sonnet-4-5@20250929:streamRawPredict"
+        );
+        assert_eq!(
+            raw_predict_url(base, "c?x#y", false),
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/c%3Fx%23y:rawPredict"
+        );
+        assert_eq!(
+            generate_url(base, "gemini-2.5-pro", false),
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/gemini-2.5-pro:generateContent"
+        );
+        assert_eq!(
+            generate_url(base, "g%/x", true),
+            "https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/google/models/g%25%2Fx:streamGenerateContent?alt=sse"
+        );
     }
 
     #[test]
