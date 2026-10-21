@@ -2349,6 +2349,7 @@ export default {
     syncSelected: '{{n}} selected',
     syncApply: 'Apply {{n}} change(s)',
     syncApplied: 'Applied {{n}} change(s). Publish pricing to take effect.',
+    syncSkipped: '{{n}} per-call price change(s) did not take effect: the same model also had a ratio change in this batch, so it was saved in ratio mode.',
     syncAxisModel: 'Model ratio',
     syncAxisCompletion: 'Completion ratio',
     syncAxisCache: 'Cache read ratio',

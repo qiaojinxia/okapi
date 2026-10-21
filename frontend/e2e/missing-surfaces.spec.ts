@@ -365,7 +365,7 @@ test('导入定价：粘贴 JSON 整段 POST；在线同步默认不选、点源
       method: r.method(),
       body: r.postDataJSON() as Json,
     })
-    await route.fulfill({ json: { applied: 1 } })
+    await route.fulfill({ json: { applied: 1, skipped: 1 } })
   })
   const applied = page.waitForRequest((r) => r.url().includes('/sync/apply'))
   await drawer.getByRole('button', { name: '应用 1 项' }).click()
@@ -376,6 +376,8 @@ test('导入定价：粘贴 JSON 整段 POST；在线同步默认不选、点源
     body: { changes: [{ model: 'gpt-5', axis: 'model_ratio', value: '1.500000' }] },
   })
   await expect(page.getByRole('status').filter({ hasText: '已应用 1 项' })).toBeVisible()
+  // 被同批倍率改动盖掉的按次价单独提示，不混进"已应用"的数里
+  await expect(page.getByText('有 1 项按次价改动没有生效')).toBeVisible()
 
   await page.route('**/admin/pricing/sync/fetch', async (route) => {
     const r = route.request()

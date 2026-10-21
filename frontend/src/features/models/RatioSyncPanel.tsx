@@ -88,7 +88,7 @@ export function RatioSyncPanel({ onApplied }: { onApplied: () => void }) {
 
   const apply = useMutation({
     mutationFn: () =>
-      apiFetch<{ applied: number }>('/admin/pricing/sync/apply', {
+      apiFetch<{ applied: number; skipped?: number }>('/admin/pricing/sync/apply', {
         method: 'POST',
         body: {
           changes: Object.entries(selected).map(([key, pick]) => {
@@ -99,6 +99,7 @@ export function RatioSyncPanel({ onApplied }: { onApplied: () => void }) {
       }),
     onSuccess: (r) => {
       toast.success(t('admin:syncApplied', { n: r.applied }))
+      if (r.skipped) toast.warning(t('admin:syncSkipped', { n: r.skipped }))
       setSelected({})
       setResult(null)
       onApplied()

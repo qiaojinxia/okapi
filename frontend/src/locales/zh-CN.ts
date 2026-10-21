@@ -2290,6 +2290,7 @@ export default {
     syncSelected: '已选 {{n}} 项',
     syncApply: '应用 {{n}} 项',
     syncApplied: '已应用 {{n}} 项。发布定价后生效。',
+    syncSkipped: '有 {{n}} 项按次价改动没有生效：同一模型同批里有倍率改动，模型已按倍率模式保存。',
     syncAxisModel: '模型倍率',
     syncAxisCompletion: '补全倍率',
     syncAxisCache: '缓存读倍率',

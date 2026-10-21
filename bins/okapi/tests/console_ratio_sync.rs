@@ -257,6 +257,36 @@ async fn fetch_builds_three_state_differences_and_reports_bad_sources() {
     assert_eq!(body["error"]["param"], "sources.name");
 }
 
+/// 同一模型同一批里既有倍率改动又有按次价：倍率模式胜出（与 import 同一语义），按次价这一条
+/// 没有生效——响应不能把它算进 applied，要在 skipped 里报出来；落库的也不再带按次单价。
+#[tokio::test]
+async fn apply_reports_the_per_call_price_that_a_ratio_change_overrides() {
+    let env = setup().await;
+    let (status, body) = post(
+        &env,
+        "/admin/pricing/sync/apply",
+        json!({"changes": [
+            {"model": env.per_call_model, "axis": "model_ratio", "value": "2"},
+            {"model": env.per_call_model, "axis": "per_call_price", "value": "0.07"},
+            {"model": env.ratio_model, "axis": "completion_ratio", "value": "6"}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["applied"], 2, "{body}");
+    assert_eq!(body["skipped"], 1, "{body}");
+    let (mode, price): (String, Option<i64>) = sqlx::query_as(
+        "SELECT p.pricing_mode::text, p.per_call_price_micro
+           FROM model_pricing p JOIN models m ON m.id = p.model_id WHERE m.model_name = $1",
+    )
+    .bind(&env.per_call_model)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(mode, "ratio");
+    assert_eq!(price, None, "切成倍率模式后不再留按次单价");
+}
+
 #[tokio::test]
 async fn apply_changes_only_selected_axes_and_audits() {
     let env = setup().await;

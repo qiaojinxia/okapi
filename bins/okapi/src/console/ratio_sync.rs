@@ -388,6 +388,8 @@ pub struct ApplyReq {
 }
 
 /// POST /admin/pricing/sync/apply：逐项写入选中的改动；未选中的轴保持本地现值。
+// 同一个事务里先整体校验、再逐模型写入、最后落审计：拆开只会把事务边界拆得更难读
+#[allow(clippy::too_many_lines)]
 pub async fn apply(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -439,6 +441,7 @@ pub async fn apply(
         }
     }
     let mut applied = 0usize;
+    let mut skipped = 0usize;
     for (model, changes) in &by_model {
         let mut axes: ModelAxes = local.get(model).cloned().unwrap_or_default();
         let mut per_call: Option<String> = None;
@@ -482,15 +485,29 @@ pub async fn apply(
                 .as_scaled();
             okapi_store::admin::upsert_model_per_call_in(&mut tx, model, micro).await?;
         }
-        applied += changes.len();
+        // 同批的倍率改动把模型写成倍率模式，这一批里的按次价随之作废：它没有生效，
+        // 不能算进 applied（此前照数不误，响应说"改了 N 项"实际少了），单独报在 skipped 里
+        let overridden = if ratio_changed {
+            changes
+                .iter()
+                .filter(|(axis, _)| *axis == "per_call_price")
+                .count()
+        } else {
+            0
+        };
+        applied += changes.len() - overridden;
+        skipped += overridden;
     }
     super::audit_fallback::note_audited();
     okapi_store::admin::record_audit_in(&mut tx, &format!("admin:{}", actor.user_id), "pricing.sync_apply", "batch", json!({
         "applied": applied,
+        "skipped": skipped,
         "changes": req.changes.iter().map(|c| json!({"model": c.model, "axis": c.axis, "value": c.value})).collect::<Vec<_>>(),
     })).await?;
     tx.commit().await.map_err(okapi_store::StoreError::from)?;
-    Ok(Json(json!({ "applied": applied, "published": false })))
+    Ok(Json(
+        json!({ "applied": applied, "skipped": skipped, "published": false }),
+    ))
 }
 
 #[cfg(test)]
