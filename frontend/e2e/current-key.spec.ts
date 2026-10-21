@@ -39,6 +39,12 @@ test('当前登录的密钥标「当前登录」，停用与删除禁用并说�
   await page.goto('/portal/keys')
   const current = page.getByRole('row').filter({ hasText: 'web' })
   await expect(current.getByText('当前登录', { exact: true })).toBeVisible()
+  // 「当前登录」与同一行「状态」列的徽标垂直居中对齐，不挂在名称第一行上比它高半行
+  const center = async (text: string) => {
+    const box = await current.getByText(text, { exact: true }).boundingBox()
+    return box ? box.y + box.height / 2 : Number.NaN
+  }
+  expect(Math.abs((await center('当前登录')) - (await center('启用')))).toBeLessThan(1.5)
   await expect(current.getByRole('button', { name: '当前登录正在使用这把密钥，不能删除' })).toBeDisabled()
   await expect(current.getByRole('button', { name: '当前登录正在使用这把密钥，不能停用' })).toBeDisabled()
   const other = page.getByRole('row').filter({ hasText: 'production' })

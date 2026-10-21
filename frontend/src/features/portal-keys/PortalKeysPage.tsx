@@ -337,20 +337,20 @@ export function PortalKeysPage() {
                   </div>
                 </Td>
                 <Td className="text-left font-medium" title={k.name}>
-                  <div className="flex min-w-0 flex-col leading-tight">
-                    <div className="flex min-w-0 items-center gap-1.5">
+                  {/* 两列网格：名称 / 元数据在左两行，「当前登录」徽标在右列跨两行居中——与同一行「状态」列
+                      的徽标同一水平线，而不是挂在第一行上比它高半行。按钮与元数据仍是外层 div 的直接子元素。 */}
+                  <div className="grid min-w-0 grid-cols-[minmax(0,max-content)_auto] items-center justify-start gap-x-1.5 leading-tight">
                     <button
                       type="button"
-                      className="inline-flex h-6 min-w-0 max-w-full items-center self-start rounded text-left text-foreground outline-none hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
+                      className="col-start-1 row-start-1 inline-flex h-6 min-w-0 max-w-full items-center justify-self-start rounded text-left text-foreground outline-none hover:text-primary hover:underline hover:underline-offset-4 focus-visible:ring-2 focus-visible:ring-primary/40"
                       aria-label={t('portal:keyUsageOpen', { name: k.name, id: k.id })}
                       aria-haspopup="dialog"
                       onClick={() => setUsageKeyId(k.id)}
                     >
                       <span className="truncate">{k.name}</span>
                     </button>
-                    {current && <Badge variant="info" className="shrink-0">{t('portal:keyCurrentSession')}</Badge>}
-                    </div>
-                    <span className="block h-4 min-w-0 max-w-full truncate text-[11px] leading-4 font-normal text-muted-foreground" title={metadataHint}>{metadata}</span>
+                    <span className="col-start-1 row-start-2 block h-4 min-w-0 max-w-full truncate text-[11px] leading-4 font-normal text-muted-foreground" title={metadataHint}>{metadata}</span>
+                    {current && <div className="col-start-2 row-span-2 row-start-1 flex items-center"><Badge variant="info" className="shrink-0">{t('portal:keyCurrentSession')}</Badge></div>}
                   </div>
                 </Td>
                 <Td>
