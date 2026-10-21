@@ -146,6 +146,39 @@ for (const viewport of [{ width: 1024, height: 768 }, { width: 1366, height: 768
   })
 }
 
+for (const viewport of [{ width: 1024, height: 768 }, { width: 1366, height: 768 }, { width: 1440, height: 900 }, { width: 1920, height: 1080 }]) {
+  test(`用量分布 ${viewport.width}×${viewport.height}：模型、渠道、Token 三个页签里的扇形图和图例位置、大小一致`, async ({ page }) => {
+    await prepare(page)
+    await page.setViewportSize(viewport)
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    await page.goto('/admin')
+    const distribution = page.locator('[data-slot="dashboard-distribution"]')
+    const boxes = []
+    for (const view of ['model', 'channel', 'tokens'] as const) {
+      await showDistribution(page, view)
+      const pie = distribution.locator('[data-slot="distribution-pie"]:visible, [data-slot="token-donut"]:visible')
+      await expect(pie).toHaveCount(1)
+      boxes.push({
+        pie: (await pie.boundingBox())!,
+        legend: (await distribution.locator('[data-slot="distribution-legend"]:visible').boundingBox())!,
+        head: (await distribution.locator('[data-slot="distribution-head"]:visible').boundingBox())!,
+      })
+      // 底部放得下：Token 的缓存上报条和来源详情在预留里，面板不出现内部滚动，图区不被顶开
+      expect(await distribution.locator('[role="tabpanel"]:visible').evaluate((node) => node.scrollHeight <= node.clientHeight + 1)).toBe(true)
+    }
+    for (const other of boxes.slice(1)) {
+      for (const key of ['x', 'y', 'width', 'height'] as const) {
+        expect(Math.abs(other.pie[key] - boxes[0].pie[key]), `pie.${key}`).toBeLessThanOrEqual(1)
+        expect(Math.abs(other.head[key] - boxes[0].head[key]), `head.${key}`).toBeLessThanOrEqual(1)
+      }
+      expect(Math.abs(other.legend.x - boxes[0].legend.x), 'legend.x').toBeLessThanOrEqual(1)
+      expect(Math.abs(other.legend.width - boxes[0].legend.width), 'legend.width').toBeLessThanOrEqual(1)
+    }
+    // 图例在圆的同一条水平中线上
+    for (const box of boxes) expect(Math.abs(box.legend.y + box.legend.height / 2 - box.pie.y - box.pie.height / 2)).toBeLessThanOrEqual(1)
+  })
+}
+
 for (const { width, language } of [{ width: 1366, language: 'zh-CN' }, { width: 390, language: 'en' }]) {
   test(`用量分布 ${width}px ${language}：三签单图、键盘切换和返回保留视图，不重复请求或重复计数`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 })

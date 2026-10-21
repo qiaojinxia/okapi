@@ -19,8 +19,8 @@ import type { DistributionView, RankingMetric } from './types'
 import { TokenSummary } from './TokenSummary'
 import type { DateRange } from '@/components/ui/date-range'
 import { dashboardPeriodLabel, dashboardSearch } from './period'
+import { BODY, HEAD, HEAD_LINK, HEAD_ROW, LEGEND, PANEL, PIE, STAGE } from './distribution-layout'
 
-const detailClass = 'inline-flex min-h-8 shrink-0 items-center gap-1 rounded text-xs text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-6'
 /// 「榜外」那一块的键（与行键不会冲突）。
 const OTHER = '\u0000other'
 /// 榜外占比低于 0.05% 时扇区只有一条看不见的细缝，不单画。
@@ -57,33 +57,33 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
       ? { top: nameOf(focused), main: formatBp(Math.max(0, Math.min(10000, shares[visible.indexOf(focused)]!)), locale), sub: metric === 'requests' ? null : format((metric === 'amount' ? focused.amount_micro : focused[metric]) ?? 0) }
       : { top: t(`charts:metric_${metric}`), main: total == null ? '—' : metric === 'amount' ? formatMoneyAggregate(total, locale) : formatCount(total, locale), sub: null }
   const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
-  return <div role="region" aria-label={title} className="flex h-full min-w-0 flex-col">
-    <CardHeader className="shrink-0 gap-0 px-4 pt-1 pb-2 lg:py-0">
+  return <div role="region" aria-label={title} className={PANEL}>
+    <CardHeader className={HEAD}>
       <CardTitle className="lg:sr-only">{title}</CardTitle>
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-1 text-xs text-muted-foreground">
+      <div data-slot="distribution-head" className={HEAD_ROW}>
         <span>{t('admin:dashboardRankingPeriod', { period: dashboardPeriodLabel(days, range, t), count: DASHBOARD_RANKING_LIMIT })}</span>
         <div className="flex items-center gap-2">
         <select aria-label={t('admin:dashboardRankingSort', { by: t(by === 'model' ? 'admin:invModels' : 'admin:invChannels') })} value={metric}
           onChange={(event) => onMetricChange(event.target.value as RankingMetric)} className="min-h-8 min-w-0 rounded border border-transparent bg-transparent px-1 text-xs text-foreground outline-none hover:bg-muted focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-6">
           {(['amount', 'requests', 'tokens'] as const).map((value) => <option key={value} value={value}>{t(`charts:metric_${value}`)}</option>)}
         </select>
-        <Link to="/admin/stats" search={{ ...search, view: 'breakdown', by, metric: metric === 'amount' ? undefined : metric }} className={detailClass}>{t('admin:dashboardViewAll')}<ArrowUpRight aria-hidden size={13} /></Link>
+        <Link to="/admin/stats" search={{ ...search, view: 'breakdown', by, metric: metric === 'amount' ? undefined : metric }} className={HEAD_LINK}>{t('admin:dashboardViewAll')}<ArrowUpRight aria-hidden size={13} /></Link>
         </div>
       </div>
     </CardHeader>
-    <CardContent className="flex min-h-0 flex-1 flex-col gap-3 px-4 pt-0 pb-3 lg:gap-1.5 lg:pb-2">
+    <CardContent className={BODY}>
       {query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.isPending ? <LoadingState /> : rows.length === 0 ? <p className="px-1 py-6 text-xs text-muted-foreground">{t('admin:trendEmptyHint')}</p> : <>
         {/* 大屏固定高度：本区是尺寸容器，扇形图按它的高 / 宽取较小者（cqh / cqw），图例在右侧垂直居中，放不下时图例内部滚动。
             窄屏自然高度：图在上、图例在下；够宽（容器 ≥ 28rem）时并排。 */}
-        <div data-slot="distribution-body" className="@container flex flex-1 flex-col items-center justify-center gap-4 @md:flex-row @md:gap-6 lg:min-h-0 lg:flex-row lg:gap-5 lg:[container-type:size]">
+        <div data-slot="distribution-body" className={STAGE}>
           <PieChart slot="distribution-pie" slices={slices} active={active} onActiveChange={setActive} label={t('admin:dashboardDistributionChart', { label: title })}
-            className="size-40 shrink-0 lg:size-[clamp(5rem,min(100cqh,42cqw),22rem)]">
+            className={PIE}>
             <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
-            <span className="max-w-full truncate text-sm leading-tight font-semibold tabular-nums @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
+            <span className="max-w-full truncate text-xs leading-tight font-semibold tabular-nums @[10rem]:text-[13px] @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
             {centre.sub && <span className="max-w-full truncate text-[10px] leading-4 tabular-nums text-muted-foreground @[11rem]:text-[11px]">{centre.sub}</span>}
           </PieChart>
-          <div className="flex w-full min-w-0 flex-col gap-1 @md:w-auto @md:max-w-[21rem] @md:flex-1 lg:max-h-full lg:w-auto lg:max-w-[21rem] lg:flex-1 lg:overflow-y-auto">
-            <ol aria-label={title} className="flex min-w-0 flex-col gap-0.5">
+          <div data-slot="distribution-legend" className={LEGEND}>
+            <ol aria-label={title} className="flex min-w-0 flex-col gap-0.5 [@container(max-height:16rem)]:gap-0">
               {visible.map((row, index) => {
                 const name = nameOf(row)
                 const value = metric === 'amount' ? row.amount_micro : row[metric]

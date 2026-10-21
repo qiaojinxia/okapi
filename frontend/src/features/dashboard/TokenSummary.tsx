@@ -15,6 +15,7 @@ import { formatBp, formatCount } from '@/lib/money'
 import { useDashboardUsage } from './data'
 import type { DateRange } from '@/components/ui/date-range'
 import { dashboardPeriodLabel, dashboardSearch } from './period'
+import { BODY, FOOT, HEAD, HEAD_LINK, HEAD_ROW, LEGEND, PANEL, PIE, STAGE } from './distribution-layout'
 
 const sources: TokenSource[] = ['upstream', 'estimated', 'local_override', 'unknown']
 const sourceColors = { upstream: 'bg-success', estimated: 'bg-warning', local_override: 'bg-primary', unknown: 'bg-muted-foreground' }
@@ -78,35 +79,37 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
   const readComplete = requests > 0 && readCount === requests
   const writeComplete = requests > 0 && writeCount === requests
   const partial = !readComplete || !writeComplete
-  return <div role="region" aria-label={t('portal:tokenSnapshot')} className="flex h-full min-w-0 flex-col">
-    <CardHeader className="shrink-0 gap-0 px-4 pt-1 pb-2 lg:pb-1">
-      <div className="flex flex-wrap items-center justify-between gap-x-2">
-        <CardTitle className="flex flex-wrap items-baseline gap-x-2">
-          <span>{t('portal:tokenSnapshot')}</span>
-          {query.isSuccess && collected && <span className="font-semibold tabular-nums" title={sum.toLocaleString(locale)}>{count(sum)} <span className="text-xs font-normal text-muted-foreground">{t('common:tokens')}</span></span>}
-          <span className="text-xs font-normal text-muted-foreground">{dashboardPeriodLabel(days, range, t)}</span>
-        </CardTitle>
-        <Link to="/admin/stats" search={{ ...dashboardSearch(days, range), measure: 'tokens' }} className="inline-flex min-h-8 shrink-0 items-center gap-1 rounded text-xs text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-6">{t('portal:expandTrend')}<ArrowUpRight aria-hidden size={13} /></Link>
+  return <div role="region" aria-label={t('portal:tokenSnapshot')} className={PANEL}>
+    <CardHeader className={HEAD}>
+      <CardTitle className="lg:sr-only">{t('portal:tokenSnapshot')}</CardTitle>
+      <div data-slot="distribution-head" className={HEAD_ROW}>
+        <span className="min-w-0 truncate">
+          {dashboardPeriodLabel(days, range, t)}
+          {query.isSuccess && collected && <> · <span className="font-medium tabular-nums text-foreground" title={sum.toLocaleString(locale)}>{count(sum)} <span className="font-normal text-muted-foreground">{t('common:tokens')}</span></span></>}
+        </span>
+        <Link to="/admin/stats" search={{ ...dashboardSearch(days, range), measure: 'tokens' }} className={HEAD_LINK}>{t('portal:expandTrend')}<ArrowUpRight aria-hidden size={13} /></Link>
       </div>
     </CardHeader>
-    <CardContent className="flex flex-1 flex-col gap-3 px-4 pt-0 pb-3 lg:gap-1.5 lg:pb-2">
+    <CardContent className={BODY}>
       {query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.isPending ? <LoadingState /> : !collected ? <p className="py-6 text-xs text-muted-foreground">{t('analysis:notCollected')}</p> : <>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] lg:hidden">
           <Tooltip content={t('admin:dashboardRecordedTokenHint')}><Badge variant="muted" tabIndex={0} className="min-h-5 text-[11px]">{t('admin:dashboardRecordedTokens')}</Badge></Tooltip>
           <span className="text-muted-foreground">{t('admin:dashboardTokenTotal', { input: count(total?.prompt_tokens), output: count(total?.completion_tokens) })}</span>
         </div>
-        {/* 与模型 / 渠道页签同一套布局：大屏固定高度时本区是尺寸容器，扇形图按高 / 宽取较小者，图例在右侧垂直居中 */}
-        <div data-slot="token-composition" className="@container flex flex-col items-center gap-4 @md:flex-row @md:gap-6 lg:min-h-[6.5rem] lg:flex-1 lg:flex-row lg:gap-5 lg:[container-type:size]">
+        {/* 与模型 / 渠道页签同一套版式（见 distribution-layout）：圆和图例的位置、大小与它们一致，
+            缓存上报条、来源详情放在下面的底部，不影响这里 */}
+        <div data-slot="token-composition" className={STAGE}>
         <Tooltip className="shrink-0" content={t('admin:dashboardTokenHint')}>
-          <div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} data-slot="token-donut" className="size-40 shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:size-[clamp(5rem,min(100cqh,42cqw),22rem)]">
+          <div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} data-slot="token-donut" className={`${PIE} rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary/40`}>
             <PieChart decorative slices={slices} active={active} onActiveChange={setActive} className="size-full">
               <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
-              <span className="max-w-full truncate text-sm leading-tight font-semibold tabular-nums @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
+              <span className="max-w-full truncate text-xs leading-tight font-semibold tabular-nums @[10rem]:text-[13px] @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
               {centre.sub && <span className="max-w-full truncate text-[10px] leading-4 tabular-nums text-muted-foreground @[11rem]:text-[11px]">{centre.sub}</span>}
             </PieChart>
           </div>
         </Tooltip>
-        <dl data-slot="token-segments" className="grid w-full min-w-0 gap-y-0.5 @md:w-auto @md:max-w-[21rem] @md:flex-1 lg:max-h-full lg:w-auto lg:max-w-[21rem] lg:flex-1 lg:overflow-y-auto">
+        <div data-slot="distribution-legend" className={LEGEND}>
+        <dl data-slot="token-segments" className="grid min-w-0 gap-y-0.5 [@container(max-height:16rem)]:gap-y-0">
           {parts.map((part) => {
             const known = part.key === 'cached' ? cached > 0 || (readCount ?? 0) > 0 : part.key === 'write' ? writes != null : part.key === 'reasoning' ? reasoning > 0 || (total?.token_detail_observations?.reasoning_tokens?.observed_records ?? 0) > 0 : true
             const incomplete = part.key === 'cached' ? !readComplete : part.key === 'write' ? !writeComplete : false
@@ -118,18 +121,21 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
           })}
         </dl>
         </div>
+        </div>
+        <div className={FOOT}>
         <div role="group" className="grid gap-x-3 gap-y-1 rounded-md bg-muted/40 px-2 py-1.5 text-[11px] sm:grid-cols-2" aria-label={t('admin:dashboardCacheCoverage')}>
           <p className="flex flex-wrap justify-between gap-x-2"><span className="text-muted-foreground">{t('admin:dashboardCacheReadCoverage')}</span><span className="tabular-nums">{coverage(readCount)}</span></p>
           <p className="flex flex-wrap justify-between gap-x-2"><span className="text-muted-foreground">{t('admin:dashboardCacheWriteCoverage')}</span><span className="tabular-nums">{coverage(writeCount)}</span></p>
-          <Tooltip content={t('admin:dashboardMeasuredCacheHint', { read: count(total?.measured_cache_read_tokens), input: count(total?.measured_prompt_tokens) })}>
-            <p tabIndex={0} className="flex flex-wrap items-center justify-between gap-x-2 sm:col-span-2"><span className="text-muted-foreground">{t('logs:measuredCacheRate')}</span><span className="tabular-nums">{total?.measured_cache_hit_bp == null ? '—' : formatBp(total.measured_cache_hit_bp, locale)} <span className="text-muted-foreground">{t('admin:dashboardMeasuredSamples', { n: count(total?.measured_cache_hit_requests), total: count(requests) })}</span></span></p>
+          <Tooltip className="sm:col-span-2" content={t('admin:dashboardMeasuredCacheHint', { read: count(total?.measured_cache_read_tokens), input: count(total?.measured_prompt_tokens) })}>
+            <p tabIndex={0} className="flex w-full flex-wrap items-center justify-between gap-x-2"><span className="text-muted-foreground">{t('logs:measuredCacheRate')}</span><span className="tabular-nums">{total?.measured_cache_hit_bp == null ? '—' : formatBp(total.measured_cache_hit_bp, locale)} <span className="text-muted-foreground">{t('admin:dashboardMeasuredSamples', { n: count(total?.measured_cache_hit_requests), total: count(requests) })}</span></span></p>
           </Tooltip>
         </div>
         {partial && requests > 0 && <p className="text-[11px] leading-4 text-muted-foreground">{t('admin:dashboardCacheIncomplete')}</p>}
         {(total?.suspected_test_requests ?? 0) > 0 && <Tooltip content={t('admin:dashboardTestHint')}>
           <p tabIndex={0} className="flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1.5 text-[11px] leading-4 text-warning"><FlaskConical aria-hidden size={13} className="mt-0.5 shrink-0" /><span>{t('admin:dashboardTestRecords', { n: count(total?.suspected_test_requests), tokens: count(total?.suspected_test_tokens) })}</span></p>
         </Tooltip>}
-        <div className="mt-auto"><SourceQuality total={total!} /></div>
+        <SourceQuality total={total!} />
+        </div>
       </>}
     </CardContent>
   </div>
