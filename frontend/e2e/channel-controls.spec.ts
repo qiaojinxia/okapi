@@ -787,3 +787,23 @@ test('an account test failure shows the gateway error', async ({ page }) => {
   await expect(drawer.getByRole('log')).toContainText('无可用渠道')
   await expect(drawer).toContainText('失败')
 })
+
+test('Codex channel can accept only official clients within a version window', async ({ page }) => {
+  await prepare(page, [{ ...channel, provider: 'codex', settings: {} }])
+  let saved: Json | undefined
+  await page.route('**/admin/channels/42', async (route) => {
+    saved = route.request().postDataJSON()
+    return route.fulfill({ json: { ok: true } })
+  })
+  await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await drawer.getByRole('tab', { name: '请求与计费行为', exact: true }).click()
+  await drawer.locator('#channel-codex-client > summary').click()
+  await expect(drawer.locator('#d-codex-min')).toHaveCount(0)
+  await drawer.getByRole('switch', { name: '仅接受 Codex 官方客户端', exact: true }).click()
+  await drawer.locator('#d-codex-min').fill('0.150.0')
+  await expect(drawer.locator('#channel-codex-client > summary')).toContainText('仅官方客户端 · ≥ 0.150.0')
+  await drawer.getByRole('button', { name: '保存', exact: true }).last().click()
+  await expect.poll(() => saved).toMatchObject({ settings: { extensions: { codex_client: { official_only: true, min_version: '0.150.0' } } } })
+  expect((saved as { settings: { extensions: { codex_client: Json } } }).settings.extensions.codex_client).not.toHaveProperty('max_version')
+})

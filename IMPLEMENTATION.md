@@ -2890,6 +2890,7 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
 - Codex 的 `openai-model` / `x-reasoning-included` 回传：见 §11.38 的 turn-state 一段。
 - 审计兜底：见 §11.15 末尾。
 - **工具丢失的诚实拒绝**（本节，对照 new-api `tool_loss_policy`）。
+- 随后对照两家的客户端识别，补了 **Codex 渠道仅限官方客户端**（本节末尾）。
 
 **问题。** 各方言之间的转换只搬普通函数工具，其余静默丢掉：Responses 降级成 Chat 时 `responses_to_chat` 只留
 `type: function`（Codex 的 apply_patch 是 `custom`、还有 `web_search` / `local_shell` / `computer_use*`）；Chat 的 `custom`
@@ -2913,6 +2914,20 @@ Anthropic 的 bash / text_editor）丢了 agent 就没法干活。渠道 `settin
 **验收**：`tool_loss` 单测（各方言的分类、三种策略）、`gateway_responses::downgrade_rejects_or_records_tools_it_cannot_carry`
 （safe 拒 custom 且不打上游、托管工具照转并记诊断、strict 拒托管工具、allow 照转）、`console_channel_writes`（取值校验）、
 前端 `write-forms` 渠道行为页。
+
+**【2026-10-20】Codex 渠道仅限官方客户端**（对照 Sub2API `codex_cli_only`，对应 Claude 的 `client_profile.native_only`）：
+此前任何第三方客户端都能经 Codex 订阅账号发请求。渠道 `settings.extensions.codex_client = {official_only, min_version,
+max_version}`（`RequestExtensionKind::CodexClient`，只登记给 codex）。`profiles::codex_client::detect` 只看请求头：UA 以
+官方前缀开头（`codex_cli_rs/` `codex-tui/` `codex_exec/` `codex_vscode(_copilot)/` `codex_app/` `codex_chatgpt_desktop/`
+`codex_atlas/` `codex_sdk_ts/`，只做前缀匹配）或 `originator` 是官方取值（精确匹配，另认 `Codex ` 开头的桌面端），并且带
+至少一个 `x-codex-` 头；配了版本窗口时还要从 UA 解析出版本并落在窗口里。前缀表与 codex-rs 的 first-party 判定一致，
+并用本机 Codex 0.160 二进制核过。不符合的请求跳过这类渠道（同池其它渠道、降级池照常承接），全被跳过时回 403
+`codex_client_required`，param 说明原因（`official_client` / `client_version` / `min_version:x` / `max_version:x`），模型级降级
+链对它与 `claude_code_client_required` 同样处理。HTTP 与 WS 走同一个 `prepare_chat`，握手头一样参与判定。控制台写入
+校验版本格式（`x.y.z`、下限不高于上限），非 Codex 渠道不收这个扩展；渠道「请求与计费行为」页加开关与版本窗口。
+与 native_only 一样是路由规则而非鉴权：抄全这些头的客户端照样通过。没有照搬 Sub2API 的全局黑白名单与可配置指纹信号表，
+单站点用不上。验收：`codex_client` 单测（官方判定、伪造前缀、缺 `x-codex-` 头、版本窗口、写入校验）、
+`gateway_oauth_channels::codex_channel_can_accept_only_official_clients`、前端 `channel-controls`。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

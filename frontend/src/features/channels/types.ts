@@ -140,7 +140,16 @@ export interface ChannelSettings {
       /** Only the real Claude Code client is routed here; other clients skip the channel. */
       native_only?: boolean
     }
+    /** Codex 渠道只接官方客户端（可带版本窗口）；其它客户端跳过这个渠道。 */
+    codex_client?: CodexClientGate
   }
+}
+
+export interface CodexClientGate {
+  official_only?: boolean
+  /** `x.y.z`，含；缺省不限。 */
+  min_version?: string
+  max_version?: string
 }
 
 export interface AccountControl {

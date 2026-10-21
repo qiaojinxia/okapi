@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod claude_code;
+pub mod codex_client;
 pub mod identity;
 mod wire_order;
 
@@ -99,18 +100,32 @@ pub enum ClientProfile {
 struct Extensions {
     #[serde(default)]
     client_profile: Option<ClientProfile>,
+    #[serde(default)]
+    codex_client: Option<codex_client::CodexClientGate>,
+}
+
+fn extensions(value: &Value) -> Result<Extensions, UpstreamError> {
+    if value.is_null() {
+        return Ok(Extensions::default());
+    }
+    if !value.is_object() {
+        return Err(UpstreamError::Build("request_extensions_invalid".into()));
+    }
+    serde_json::from_value::<Extensions>(value.clone())
+        .map_err(|_| UpstreamError::Build("request_extensions_invalid".into()))
 }
 
 pub fn client_profile(extensions: &Value) -> Result<Option<ClientProfile>, UpstreamError> {
-    if extensions.is_null() {
-        return Ok(None);
-    }
-    if !extensions.is_object() {
-        return Err(UpstreamError::Build("request_extensions_invalid".into()));
-    }
-    serde_json::from_value::<Extensions>(extensions.clone())
-        .map(|value| value.client_profile)
-        .map_err(|_| UpstreamError::Build("request_extensions_invalid".into()))
+    self::extensions(extensions).map(|value| value.client_profile)
+}
+
+/// Codex 渠道的官方客户端门（`extensions.codex_client`）；没配或没开启时为 None。
+#[must_use]
+pub fn codex_client_gate(extensions: &Value) -> Option<codex_client::CodexClientGate> {
+    self::extensions(extensions)
+        .ok()?
+        .codex_client
+        .filter(codex_client::CodexClientGate::enforced)
 }
 
 /// How a client profile changes a request's cost before it reshapes the body. Admission
@@ -194,15 +209,23 @@ pub fn admission_hints(extensions: &Value) -> AdmissionHints {
 }
 
 pub fn validate_extensions(provider: &str, extensions: &Value) -> Result<(), UpstreamError> {
-    let profile = client_profile(extensions)?;
+    let parsed = self::extensions(extensions)?;
     let adapter = crate::registry::lookup(provider)
         .ok_or_else(|| UpstreamError::Build("adapter_unregistered".into()))?;
-    if matches!(profile, Some(ClientProfile::ClaudeCode { .. }))
-        && !adapter
-            .extensions
-            .contains(&crate::registry::RequestExtensionKind::ClaudeCode)
+    let supports = |kind| adapter.extensions.contains(&kind);
+    if matches!(
+        parsed.client_profile,
+        Some(ClientProfile::ClaudeCode { .. })
+    ) && !supports(crate::registry::RequestExtensionKind::ClaudeCode)
     {
         return Err(UpstreamError::Build("request_extension_unsupported".into()));
+    }
+    if let Some(gate) = &parsed.codex_client {
+        if !supports(crate::registry::RequestExtensionKind::CodexClient) {
+            return Err(UpstreamError::Build("request_extension_unsupported".into()));
+        }
+        gate.validate()
+            .map_err(|_| UpstreamError::Build("request_extensions_invalid".into()))?;
     }
     Ok(())
 }

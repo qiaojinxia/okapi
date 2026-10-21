@@ -13,6 +13,7 @@ import { OAuthKeyHealth } from '@/features/channels/oauth-key-health'
 import { ModelPicker } from '@/features/channels/ModelPicker'
 import { OAuthLoginCard } from '@/features/channels/OAuthLoginCard'
 import { ClientProfileEditor } from '@/features/channels/ClientProfileEditor'
+import { CodexClientEditor } from '@/features/channels/CodexClientEditor'
 import { ChannelControlEditor } from '@/features/channels/ChannelControlEditor'
 import { ChannelEgress, NewChannelEgress } from '@/features/channels/ChannelEgress'
 import { toBinding } from '@/features/proxies/EgressPicker'
@@ -680,6 +681,9 @@ export function ChannelDrawer({
 
       {isEdit && tab === 'behavior' && (channel.provider === 'anthropic' || channel.provider === 'anthropic_max') && (
         <ClientProfileEditor settings={settings} onChange={setSettings} />
+      )}
+      {isEdit && tab === 'behavior' && channel.provider === 'codex' && (
+        <CodexClientEditor settings={settings} onChange={setSettings} />
       )}
       {isEdit && tab === 'behavior' && (
         <OptionalSection id="channel-behavior-options" title={t('admin:groupBehavior')} hint={t('admin:groupBehaviorHint')} defaultOpen

@@ -44,6 +44,9 @@ pub mod codes {
     /// 该模型的候选渠道都只接受真实 Claude Code 客户端（渠道 `client_profile.native_only`），
     /// 本次请求不是。
     pub const CLAUDE_CODE_CLIENT_REQUIRED: &str = "claude_code_client_required";
+    /// 该模型的候选渠道都只接受 Codex 官方客户端（渠道 `extensions.codex_client`），请求不是
+    /// 官方客户端或版本不在窗口里；param 是 `official_client` / `client_version` / `min_version:x` / `max_version:x`。
+    pub const CODEX_CLIENT_REQUIRED: &str = "codex_client_required";
     /// 该分组对此模型的全部候选渠道都因负毛利被熔断（IMPLEMENTATION §11.34；param = 摘掉的候选数）。
     pub const MARGIN_BLOCKED: &str = "margin_blocked";
     /// 本进程的后台结算积压超过上界（IMPLEMENTATION §12.2）：数据面在鉴权前拒绝，

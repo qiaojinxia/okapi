@@ -67,6 +67,8 @@ pub enum WireTransport {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RequestExtensionKind {
     ClaudeCode,
+    /// Codex 渠道只接官方客户端（`extensions.codex_client`）。
+    CodexClient,
 }
 
 pub use okapi_api::provider_contract::NativeResponses;
@@ -288,7 +290,7 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         native_responses: okapi_api::provider_contract::CODEX.native_responses,
         ingress: RESPONSES_FORMATS,
         transports: HTTP_AND_WS,
-        extensions: &[],
+        extensions: &[RequestExtensionKind::CodexClient],
         forward_client_identity: true,
         account: Some(&crate::oauth::codex::account::HOOKS),
     },

@@ -128,6 +128,9 @@ struct RequestBilling {
     pin: Option<Arc<super::channel_test::ChannelPin>>,
     /// 请求来自真实 Claude Code 客户端（只看 `/v1/messages`）：仅限真机的渠道只收这类请求。
     claude_code_native: bool,
+    /// 请求出自哪个 Codex 官方客户端（按请求头认，见 `profiles::codex_client`）；
+    /// 只接官方客户端的 Codex 渠道（`extensions.codex_client`）据此放行。
+    codex_client: Option<okapi_providers::profiles::codex_client::CodexClient>,
     /// 客户端 IP（CDN 头按序，§14.2）。
     client_ip: Option<String>,
     /// 客户端身份头（只在订阅 provider 的出向上透传，§11.38）。
@@ -1579,6 +1582,7 @@ async fn prepare_chat(
         client_type: detect_client_type(headers),
         claude_code_native: ingress == Ingress::Anthropic
             && okapi_providers::profiles::is_native_claude_code(body, user_agent(headers)),
+        codex_client: okapi_providers::profiles::codex_client::detect(headers),
         client_ip: super::clients::detect_client_ip(headers),
         client_headers: Arc::new(super::oauth_cred::client_headers(headers)),
         pool_chain: pool_chain.iter().map(|p| (*p).to_owned()).collect(),
@@ -1613,7 +1617,10 @@ async fn forward(
         &first,
         Err(f) if matches!(
             f.error_code.as_str(),
-            codes::NO_AVAILABLE_CHANNEL | codes::UNSUPPORTED_ENDPOINT | codes::CLAUDE_CODE_CLIENT_REQUIRED
+            codes::NO_AVAILABLE_CHANNEL
+                | codes::UNSUPPORTED_ENDPOINT
+                | codes::CLAUDE_CODE_CLIENT_REQUIRED
+                | codes::CODEX_CLIENT_REQUIRED
         )
     );
     if !zero_candidates || bill.fallback_models.is_empty() || bill.response_parent.is_some() {
@@ -1635,6 +1642,7 @@ async fn forward(
                     codes::NO_AVAILABLE_CHANNEL
                         | codes::UNSUPPORTED_ENDPOINT
                         | codes::CLAUDE_CODE_CLIENT_REQUIRED
+                        | codes::CODEX_CLIENT_REQUIRED
                 ) => {}
             // 成功或真实上游失败：终止。降级只救"无人可打"，不救"打了没打通"
             other => return other,
@@ -1806,6 +1814,30 @@ async fn eligible_candidates(
         if before > 0 && candidates.is_empty() {
             return Err(ForwardFailure::app(
                 AppError::new(StatusCode::FORBIDDEN, codes::CLAUDE_CODE_CLIENT_REQUIRED),
+                0,
+                None,
+            ));
+        }
+    }
+    // 只接官方 Codex 客户端的渠道（extensions.codex_client）：同上，第三方客户端与版本不在窗口里的
+    // 跳过它们；被这一条筛空时说清是不是官方客户端、版本差在哪。
+    if bill.pin.is_none() {
+        let before = candidates.len();
+        let mut refusal = None;
+        candidates.retain(|c| {
+            okapi_providers::profiles::codex_client_gate(&c.extensions).is_none_or(|gate| {
+                gate.admits(bill.codex_client.as_ref())
+                    .map_err(|reason| refusal.get_or_insert(reason).clone())
+                    .is_ok()
+            })
+        });
+        if before > 0
+            && candidates.is_empty()
+            && let Some(refusal) = refusal
+        {
+            return Err(ForwardFailure::app(
+                AppError::new(StatusCode::FORBIDDEN, codes::CODEX_CLIENT_REQUIRED)
+                    .with_param(refusal.param()),
                 0,
                 None,
             ));

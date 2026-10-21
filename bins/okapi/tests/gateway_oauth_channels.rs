@@ -927,6 +927,87 @@ async fn codex_turn_state_returns_to_the_client_and_only_to_its_account() {
     }
 }
 
+/// Codex 渠道只接官方客户端（`extensions.codex_client`）：第三方客户端与版本不在窗口里的被挡下，
+/// 说清原因；官方客户端（UA / originator + x-codex- 头）放行。写入时校验版本格式，非 Codex 渠道不收。
+#[tokio::test]
+async fn codex_channel_can_accept_only_official_clients() {
+    let env = setup().await;
+    let (channel, _) = login_channel(&env, "codex").await;
+    let set_gate = |gate: Value| {
+        sqlx::query("UPDATE channels SET settings = jsonb_set(settings, '{extensions}', jsonb_build_object('codex_client', $2::jsonb)) WHERE id = $1")
+            .bind(channel)
+            .bind(gate)
+            .execute(&env.pg)
+    };
+    set_gate(json!({"official_only": true, "min_version": "0.161.0"}))
+        .await
+        .unwrap();
+    let send = |official: bool| {
+        let mut request = reqwest::Client::new()
+            .post(format!("http://{}/v1/responses", env.gateway))
+            .bearer_auth(&env.user_token)
+            .json(&json!({"model": env.model, "input": "hi", "stream": true}));
+        if official {
+            request = request
+                .header(
+                    "user-agent",
+                    "codex_exec/0.160.0 (Mac OS 26.5.1; arm64) unknown (codex_exec; 0.160.0)",
+                )
+                .header("originator", "codex_exec")
+                .header("x-codex-window-id", "window-1");
+        }
+        request.send()
+    };
+    let refused = |resp: reqwest::Response| async move {
+        assert_eq!(resp.status(), 403);
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "codex_client_required", "{body}");
+        body["error"]["param"].as_str().unwrap().to_owned()
+    };
+    assert_eq!(refused(send(false).await.unwrap()).await, "official_client");
+    assert_eq!(
+        refused(send(true).await.unwrap()).await,
+        "min_version:0.161.0"
+    );
+
+    set_gate(json!({"official_only": true, "min_version": "0.150.0"}))
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await; // 候选缓存 5s
+    let resp = send(true).await.unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.text().await.unwrap();
+    assert_eq!(refused(send(false).await.unwrap()).await, "official_client");
+
+    // 控制台：版本必须是 x.y.z；Claude 渠道不收这个扩展
+    let patch = |id: i64, extensions: Value| {
+        reqwest::Client::new()
+            .patch(format!("http://{}/admin/channels/{id}", env.console))
+            .bearer_auth(&env.admin_token)
+            .json(&json!({"settings": {"extensions": extensions}}))
+            .send()
+    };
+    let resp = patch(
+        channel,
+        json!({"codex_client": {"official_only": true, "min_version": "0.150"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 400);
+    let resp = patch(
+        channel,
+        json!({"codex_client": {"official_only": true, "max_version": "0.170.0"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (claude, _) = login_channel(&env, "anthropic_max").await;
+    let resp = patch(claude, json!({"codex_client": {"official_only": true}}))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
 /// Codex CLI 读的另外两个头也回给客户端：`openai-model` 是上游实际服务的模型，渠道映射过的名字
 /// 要换回客户端请求的名字（不然 CLI 会误报模型被换）；`x-reasoning-included` 原样。
 #[tokio::test]
