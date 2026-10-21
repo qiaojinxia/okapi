@@ -3,6 +3,7 @@ import { AlertTriangle, Info, Megaphone, X } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { apiFetch } from '@/lib/api'
+import { rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
@@ -32,7 +33,7 @@ export function NoticeBanner({ className }: { className?: string }) {
   if (!n || (n.level !== 'critical' && dismissed === n.updated_at)) return null
 
   return <NoticeMessage notice={n} className={className} onDismiss={() => {
-    localStorage.setItem(DISMISS_KEY, n.updated_at)
+    rememberLocal(DISMISS_KEY, n.updated_at)
     setDismissed(n.updated_at)
   }} />
 }

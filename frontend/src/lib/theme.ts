@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { rememberLocal } from '@/lib/storage'
 
 /// 主题偏好：跟随系统 / 亮 / 暗。
 ///
@@ -34,8 +35,7 @@ function apply(pref: ThemePreference): void {
 }
 
 export function setThemePreference(pref: ThemePreference): void {
-  if (pref === 'system') localStorage.removeItem(THEME_STORAGE)
-  else localStorage.setItem(THEME_STORAGE, pref)
+  rememberLocal(THEME_STORAGE, pref === 'system' ? null : pref)
   apply(pref)
 }
 

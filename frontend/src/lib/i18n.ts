@@ -4,6 +4,7 @@ import zhCN from '@/locales/zh-CN'
 import en from '@/locales/en'
 import { withModelEditorZh } from '@/locales/model-editor-zh'
 import { ApiError } from '@/lib/api'
+import { rememberLocal } from '@/lib/storage'
 
 const LANG_STORAGE = 'okapi.lang'
 
@@ -24,7 +25,7 @@ export function initI18n(): typeof i18n {
 }
 
 export function switchLanguage(lang: 'zh-CN' | 'en'): void {
-  localStorage.setItem(LANG_STORAGE, lang)
+  rememberLocal(LANG_STORAGE, lang)
   void i18n.changeLanguage(lang)
 }
 

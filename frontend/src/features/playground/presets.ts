@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useCallback, useSyncExternalStore } from 'react'
 import { apiFetch } from '@/lib/api'
+import { rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 
 /// 聊天预设 = 模型 + 系统提示词 + 采样参数（IMPLEMENTATION §11.39）。
@@ -84,7 +85,7 @@ export function readPresets(userId: number): Preset[] {
 }
 
 function writePresets(userId: number, presets: Preset[]): void {
-  localStorage.setItem(storageKey(userId), JSON.stringify(presets.slice(0, MAX_PRESETS)))
+  rememberLocal(storageKey(userId), JSON.stringify(presets.slice(0, MAX_PRESETS)))
   for (const l of listeners) l()
 }
 

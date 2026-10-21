@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { createContext, useContext, useSyncExternalStore } from 'react'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
+import { rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 
 export const GUIDE_STEPS = ['key', 'model', 'connect', 'call'] as const
@@ -45,7 +46,7 @@ const listeners = new Set<() => void>()
 
 /// "不再显示"按用户记忆：同一台电脑上换账号登录（合作商 / 员工）各自有各自的引导状态。
 export function dismissGuide(userId: number): void {
-  localStorage.setItem(storageKey(userId), 'dismissed')
+  rememberLocal(storageKey(userId), 'dismissed')
   for (const l of listeners) l()
 }
 

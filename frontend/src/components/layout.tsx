@@ -29,6 +29,7 @@ import { useModalFocus } from '@/hooks/use-modal-focus'
 import { toast } from '@/components/ui/toast'
 import { apiFetch, clearKey, registerAuthExpired } from '@/lib/api'
 import { switchLanguage } from '@/lib/i18n'
+import { rememberLocal } from '@/lib/storage'
 import { formatMoney } from '@/lib/money'
 import { useTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
@@ -83,7 +84,7 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
 
   const toggleCollapsed = () => {
     const next = !rail
-    localStorage.setItem(SIDEBAR_STORAGE, next ? 'rail' : 'full')
+    rememberLocal(SIDEBAR_STORAGE, next ? 'rail' : 'full')
     setCollapsedPref(next)
   }
 
