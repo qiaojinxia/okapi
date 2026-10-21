@@ -95,7 +95,9 @@ pub fn margin_bp(amount_micro: i64, cost_micro: i64) -> i64 {
         return -10_000;
     }
     let margin = i128::from(amount_micro) - i128::from(cost_micro);
-    i64::try_from(margin * 10_000 / i128::from(amount_micro)).unwrap_or(i64::MIN)
+    // 向下取整：负毛利按 `/` 会向零截断，把 -3333.3 报成 -3333，比实际乐观 1bp；
+    // 正毛利两种取整结果相同。熔断判定 `trips()` 本来就是整数精确比较，不受这里影响
+    i64::try_from((margin * 10_000).div_euclid(i128::from(amount_micro))).unwrap_or(i64::MIN)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +281,9 @@ mod tests {
     fn margin_bp_math_and_field_roundtrip() {
         assert_eq!(margin_bp(10_000_000, 7_500_000), 2_500);
         assert_eq!(margin_bp(10_000_000, 12_000_000), -2_000);
+        // 负毛利取整向下（更悲观），不向零截断；正毛利不变
+        assert_eq!(margin_bp(3, 4), -3_334);
+        assert_eq!(margin_bp(3, 2), 3_333);
         assert_eq!(margin_bp(0, 1), -10_000);
         assert_eq!(parse_field(&field("vip", 42)), Some(("vip", 42)));
         assert_eq!(parse_field("no-separator"), None);
