@@ -22,9 +22,13 @@ AND (($5::text IS NULL AND $6::text IS NULL AND NOT $10::boolean) OR EXISTS (
             ON pg.group_code = g.group_code
         WHERE (COALESCE($5::text, CASE WHEN $10::boolean THEN $12::text END) IS NULL
             OR g.group_code = COALESCE($5::text, CASE WHEN $10::boolean THEN $12::text END))
-        AND (g.self_select OR g.is_default OR EXISTS (
+        AND (g.self_select OR EXISTS (
             SELECT 1 FROM user_groups ug WHERE ug.group_code = g.group_code AND ug.user_id = $7
-        ))
+        ) OR (g.is_default AND NOT EXISTS (
+            SELECT 1 FROM user_groups ug WHERE ug.user_id = $7 AND NOT EXISTS (
+                SELECT 1 FROM user_subscriptions s WHERE s.user_id = ug.user_id AND s.status = 1
+                    AND s.granted_group AND s.group_code_snapshot = ug.group_code)
+        )))
         AND pc.pool_code IN (g.pool_code, cp.fallback_pool_code)
     )
     AND ($6::text IS NULL OR CASE $6

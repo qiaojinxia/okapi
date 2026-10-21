@@ -45,7 +45,7 @@ export function GroupDrawer({
 
   const upsert = useMutation({
     mutationFn: () =>
-      apiFetch('/admin/groups', {
+      apiFetch<{ requires_publish?: boolean }>('/admin/groups', {
         method: 'POST',
         body: {
           group_code: form.group_code.trim(),
@@ -57,7 +57,8 @@ export function GroupDrawer({
           rph_limit: limitValue(form.rph_limit),
         },
       }),
-    onSuccess: () => {
+    onSuccess: (r) => {
+      if (r.requires_publish) toast.warning(t('admin:groupRequiresPublish'))
       onDone()
       onClose()
     },

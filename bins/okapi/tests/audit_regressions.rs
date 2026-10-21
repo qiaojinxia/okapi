@@ -532,7 +532,7 @@ async fn replacing_empty_membership_is_serialized_on_the_parent() -> Result {
                 )
                 .await
             } else {
-                set_user_groups(&pg, parent, &[(code, 1)]).await
+                set_user_groups(&pg, parent, &[(code, 1)]).await.map(drop)
             }
         });
         tokio::time::timeout(Duration::from_secs(5),async {loop {
@@ -553,7 +553,7 @@ async fn replacing_empty_membership_is_serialized_on_the_parent() -> Result {
                 )
                 .await
             } else {
-                set_user_groups(&pg, parent, &[(code, 2)]).await
+                set_user_groups(&pg, parent, &[(code, 2)]).await.map(drop)
             }
         });
         tokio::time::sleep(Duration::from_millis(50)).await;

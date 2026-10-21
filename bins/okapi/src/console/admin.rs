@@ -1081,11 +1081,8 @@ pub async fn patch_api_key(
         "max_concurrency",
         req.max_concurrency.map(|v| v.map(i64::from)),
     )?;
-    // 分组前置校验：直接撞 FK 只能回 500，拿不到可渲染的 error_code
-    if let Some(Some(group)) = &req.group_override
-        && !okapi_store::admin::price_group_exists(&state.pg, group).await?
-    {
-        return Err(AppError::bad_request().with_param("group_override"));
+    if let Some(Some(group)) = &req.group_override {
+        ensure_group_usable(&state, group, "group_override").await?;
     }
 
     let patch = okapi_store::admin::ApiKeyPatch {
@@ -1190,9 +1187,9 @@ pub async fn upsert_group(
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     // 分组码会拼进限流键与 `mb:blocks` 字段（`<group>|<channel_id>`），分隔符必须进不来
     let group_code = super::identifiers::ensure_code("group_code", &req.group_code, 32)?;
-    if req.group_ratio.parse::<okapi_pricing::RatioFp>().is_err() {
+    let Ok(ratio) = req.group_ratio.parse::<okapi_pricing::RatioFp>() else {
         return Err(AppError::bad_request().with_param("group_ratio"));
-    }
+    };
     // 0 与 null 同义（不限）；负数是笔误而不是"不限"，拒掉让人改
     let limit = |v: Option<i32>, param: &'static str| match v {
         Some(n) if n < 0 => Err(AppError::bad_request().with_param(param)),
@@ -1233,7 +1230,46 @@ pub async fn upsert_group(
                 "rpm_limit": per_minute, "rph_limit": per_hour }),
     )
     .await;
-    Ok(Json(json!({ "ok": true })))
+    // 池、限额、自选即时生效；新分组与倍率要等发布进价簿，告诉前端提示去发布
+    let requires_publish = fresh_pricebook(&state)
+        .await
+        .group_ratio(&okapi_domain::GroupCode::from(group_code))
+        != Some(ratio);
+    Ok(Json(
+        json!({ "ok": true, "requires_publish": requires_publish }),
+    ))
+}
+
+/// 追到最新已发布的价簿再读：本进程价簿可能落后（console 只订阅广播、未配 NATS 时从不刷新），
+/// 落后只会造成误拒，不会放进坏状态。
+async fn fresh_pricebook(state: &AppState) -> Arc<okapi_pricing::PriceBook> {
+    if let Err(err) = crate::gateway::refresh_pricebook_if_newer(state).await {
+        tracing::warn!(error = %err, "刷新价簿失败，按当前价簿校验");
+    }
+    state.pricebook.load()
+}
+
+/// 分组存在且已发布进价簿。分组写进 `price_groups` 要等下一次发布才进价簿；把用户或 key 放进价簿
+/// 还不认识的分组，之后每笔请求都会在计价处撞 `UnknownGroup`（fail-closed 回 500），直到有人发布。
+async fn ensure_group_usable(
+    state: &AppState,
+    group_code: &str,
+    param: &'static str,
+) -> Result<(), AppError> {
+    // 直接撞 FK 只能回 500，拿不到可渲染的 error_code
+    if !okapi_store::admin::price_group_exists(&state.pg, group_code).await? {
+        return Err(AppError::bad_request().with_param(param));
+    }
+    if !fresh_pricebook(state)
+        .await
+        .has_group(&okapi_domain::GroupCode::from(group_code))
+    {
+        return Err(
+            AppError::new(StatusCode::CONFLICT, codes::GROUP_NOT_PUBLISHED)
+                .with_param(group_code.to_owned()),
+        );
+    }
+    Ok(())
 }
 
 /// 池存在性校验：不存在回 404 带 param，而不是让外键违约变成 500。
@@ -1362,37 +1398,23 @@ pub async fn set_user_groups(
     if live.is_none() {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
-    // 两道写入前校验，把配置错误拦在这一步，而不是让它变成用户侧的 500：
-    // 1) 分组必须存在——否则撞 user_groups 外键，被当成内部错误回 500；
-    // 2) 分组必须已进价簿——分组写进 price_groups 要等下一次发布才进价簿，把用户放进价簿
-    //    还不认识的分组，他之后的每笔请求都会在计价处撞 UnknownGroup（fail-closed 回 500），
-    //    直到有人发布。校验前先追一次最新 epoch：本进程价簿可能落后（console 只订阅广播、
-    //    未配 NATS 时从不刷新），落后只会造成误拒，不会放进坏状态。
-    if !groups.is_empty() {
-        if let Err(err) = crate::gateway::refresh_pricebook_if_newer(&state).await {
-            tracing::warn!(error = %err, "改分组前刷新价簿失败，按当前价簿校验");
-        }
-        let book = state.pricebook.load();
-        for (code, _) in &groups {
-            if !okapi_store::admin::price_group_exists(&state.pg, code).await? {
-                return Err(AppError::bad_request().with_param("group_code"));
-            }
-            if !book.has_group(&okapi_domain::GroupCode::from(code.as_str())) {
-                return Err(AppError::bad_request().with_param("group_not_published"));
-            }
-        }
+    // 写入前校验分组存在且已发布，把配置错误拦在这一步，而不是让它变成用户侧的 500
+    for (code, _) in &groups {
+        ensure_group_usable(&state, code, "group_code").await?;
     }
-    okapi_store::admin::set_user_groups(&state.pg, user_id, &groups).await?;
+    // 绑在新可选范围之外的 key 同一事务里改回跟随用户分组（见 store 注释）
+    let keys_reset = okapi_store::admin::set_user_groups(&state.pg, user_id, &groups).await?;
     state.sched.auth_flush().await;
     audit(
         &state,
         &actor,
         "user.set_groups",
         &user_id.to_string(),
-        json!({ "groups": groups.iter().map(|(c, p)| json!({"code": c, "priority": p})).collect::<Vec<_>>() }),
+        json!({ "groups": groups.iter().map(|(c, p)| json!({"code": c, "priority": p})).collect::<Vec<_>>(),
+                "keys_reset": keys_reset }),
     )
     .await;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "keys_reset": keys_reset })))
 }
 
 #[derive(Deserialize)]

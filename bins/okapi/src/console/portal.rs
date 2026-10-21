@@ -590,7 +590,9 @@ async fn accept_wallet_redemption(
 }
 
 /// 用户可为自己的 key 选择的分组（IMPLEMENTATION §11.14 R4，对齐 new-api UserUsableGroups）：
-/// 管理员分配给他的组 ∪ 标为 `self_select` 的公开档位 ∪ 默认组。
+/// 管理员分配给他的组 ∪ 标为 `self_select` 的公开档位 ∪ 默认组（管理员给他分配了分组时不含
+/// 默认组，见 `okapi_store::admin::selectable_groups`）。还没发布进价簿的组不列：选了它的 key
+/// 每笔请求都会在计价处失败。
 /// 价随组走：选了 vip 就按 vip 倍率计费、走 vip 池——这是产品层的"自选套餐档位"。
 pub(super) struct SelectableGroup {
     pub code: String,
@@ -604,23 +606,15 @@ pub(super) async fn selectable_groups(
     state: &AppState,
     user_id: i64,
 ) -> Result<Vec<SelectableGroup>, AppError> {
-    let rows = sqlx::query!(
-        r#"SELECT g.group_code, g.group_ratio::text AS "ratio!", g.description, g.is_default,
-                  g.self_select,
-                  EXISTS(SELECT 1 FROM user_groups ug
-                          WHERE ug.user_id = $1 AND ug.group_code = g.group_code) AS "assigned!"
-           FROM price_groups g
-           WHERE g.self_select OR g.is_default
-              OR EXISTS(SELECT 1 FROM user_groups ug
-                         WHERE ug.user_id = $1 AND ug.group_code = g.group_code)
-           ORDER BY g.sort_order, g.group_code"#,
-        user_id
-    )
-    .fetch_all(&state.pg)
-    .await
-    .map_err(okapi_store::StoreError::from)?;
+    let rows = okapi_store::admin::selectable_groups(&state.pg, user_id).await?;
+    // 本进程价簿可能落后（console 只订阅广播）：先追一次最新 epoch，免得把刚发布的组漏掉
+    if let Err(err) = crate::gateway::refresh_pricebook_if_newer(state).await {
+        tracing::warn!(error = %err, "列可选分组前刷新价簿失败，按当前价簿过滤");
+    }
+    let book = state.pricebook.load();
     Ok(rows
         .into_iter()
+        .filter(|r| book.has_group(&okapi_domain::GroupCode::from(r.group_code.as_str())))
         .map(|r| SelectableGroup {
             source: if r.assigned {
                 "assigned"

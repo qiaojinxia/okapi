@@ -57,7 +57,22 @@ pub async fn list_groups(
 ) -> Result<Json<Value>, AppError> {
     guard(&state, &headers, permissions::PRICING_READ).await?;
     let page = okapi_store::listing::list_groups(&state.pg, q.slice()).await?;
-    Ok(Json(json!({ "data": page.data, "total": page.total })))
+    // 新建的分组要发布一次定价才进价簿，之前分配给用户、给 key 选都会被拒：列表上标出来
+    if let Err(err) = crate::gateway::refresh_pricebook_if_newer(&state).await {
+        tracing::warn!(error = %err, "列分组前刷新价簿失败，按当前价簿标注");
+    }
+    let book = state.pricebook.load();
+    let data: Vec<Value> = page
+        .data
+        .into_iter()
+        .map(|row| {
+            let published = book.has_group(&okapi_domain::GroupCode::from(row.group_code.as_str()));
+            let mut value = serde_json::to_value(row).unwrap_or_default();
+            value["published"] = Value::Bool(published);
+            value
+        })
+        .collect();
+    Ok(Json(json!({ "data": data, "total": page.total })))
 }
 
 pub async fn list_plans(

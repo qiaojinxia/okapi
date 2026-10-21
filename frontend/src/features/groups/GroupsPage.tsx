@@ -128,8 +128,13 @@ export function GroupsPage() {
                       <span className="truncate font-mono font-medium" title={g.group_code}>
                         {g.group_code}
                       </span>
-                      {(g.is_default || g.self_select) && (
+                      {(g.is_default || g.self_select || g.published === false) && (
                         <div className="flex flex-wrap items-center gap-1">
+                          {g.published === false && (
+                            <Badge variant="warning" className="min-h-5 py-0" title={t('admin:groupUnpublishedHint')}>
+                              {t('admin:groupUnpublished')}
+                            </Badge>
+                          )}
                           {g.is_default && (
                             <Badge variant="muted" className="min-h-5 py-0">
                               {t('admin:groupDefault')}

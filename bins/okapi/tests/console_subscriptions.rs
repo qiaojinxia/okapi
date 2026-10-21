@@ -563,6 +563,14 @@ async fn gateway_bills_subscription_pool_first() {
     assert_eq!(granted["subscription"]["remaining_micro"], quota);
     assert_eq!(granted["subscription"]["granted_group"], true);
     assert!(bed.in_group().await, "订阅附加分组");
+    // 套餐带来的分组不算管理员分配：不会把人锁进去，照样能选默认组
+    let selectable = okapi_store::admin::selectable_groups(&bed.pg, bed.user_id)
+        .await
+        .unwrap();
+    assert!(
+        selectable.iter().any(|g| g.group_code == "default"),
+        "{selectable:?}"
+    );
     assert_eq!(bed.sub().await.0, quota);
     assert_eq!(
         bed.events(1).await,

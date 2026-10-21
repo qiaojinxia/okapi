@@ -12,4 +12,6 @@ export interface GroupListRow {
   /// 分组内每用户每分钟 / 每小时请求上限；null = 不限。
   rpm_limit: number | null
   rph_limit: number | null
+  /// 已随定价发布进价簿；新建的分组发布前不能分配、不能给 key 选。
+  published?: boolean
 }

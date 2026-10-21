@@ -142,6 +142,27 @@ async fn catalogs_only_expose_selectable_groups_for_each_viewer() {
         assert_eq!(invalid.status(), 401);
     }
 
+    // An assigned viewer is limited to the assigned groups: the default group is not offered to
+    // them, while viewers without assignments still see it.
+    let sees_default = |token: String| {
+        let env = &env;
+        async move {
+            let body: Value = env
+                .client
+                .get(env.url("/api/pricing/groups", &[("code", "default")]))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            body["total"] == 1
+        }
+    };
+    assert!(!sees_default(alice_key.clone()).await);
+    assert!(sees_default(bob_key.clone()).await);
+
     // A changed assignment is evaluated from PG on the next read, not a catalog cache.
     sqlx::query("DELETE FROM user_groups WHERE user_id=$1 AND group_code=$2")
         .bind(alice)
@@ -161,6 +182,10 @@ async fn catalogs_only_expose_selectable_groups_for_each_viewer() {
         .unwrap();
     assert_eq!(body["total"], 1);
     assert_eq!(body["groups"][0]["code"], open);
+    assert!(
+        sees_default(alice_key.clone()).await,
+        "the default group returns once the assignment is removed"
+    );
     let default: Value = env
         .client
         .get(env.url("/api/pricing/groups", &[("code", "default")]))

@@ -1354,7 +1354,7 @@ routing 分离）与本项目现状逐项复核。**两轴拆分（分组=付多
 | R1 | **唯一规则：渠道只服务它所在的池。** 内置 `default` 池（不可删）；`price_groups.pool_code NOT NULL DEFAULT 'default'`；`provision::create_channel` 与 `POST /admin/channels`（不传 `pools`）缺省入 default 池，显式 `pools: []` = 孤儿（对谁都不可达，响应带 `orphan: true`）；退役 `strict_group_isolation`。迁移把未入池渠道并入 default 池、无池分组指向 default 池——老部署可见性不变 | `channels.rs::candidates_for_model` / `custom_pass_channel`（`JOIN pool_channels ... = ANY(chain)`）、`auth.rs`（`COALESCE(override, group.pool, 'default')`）、`portal::public_pricing`、`manage::diagnose_route`（`orphan_channel` / `not_in_pool` / `via_fallback`）、inventory `channels.orphan`、渠道列表"未入池"红徽章、站点规模条 |
 | R2 | **池级降级** `channel_pools.fallback_pool_code`（单跳，CHECK 禁自引用；被引用的池不可删）。`AuthedKey.pool_fallback` + `pool_chain()`；候选按 `(池序, 有效优先级 DESC, key id)` 返回并按 key 去重（同渠道两池共存只按靠前的池算）；调度分层键改为 `(pool_rank, priority)`——降级池里 priority 100 的渠道也排在主池 priority 0 之后，`least_latency` 同样不能把降级池提前；候选缓存键含整条池链；**计费仍按请求者分组倍率**（测试钉死：经降级池服务的请求仍按 vip 0.5 计 120） | `scheduler.rs` / `chat.rs` / 六个计费端点 / `PoolDrawer` 降级选择 / 池列表降级列 |
 | R3 | **成员级覆盖** `pool_channels.priority_override / weight_override`（NULL 继承）。`POST /admin/channels/{id}/pools` 接受 `"vip"` 或 `{"pool_code","priority_override","weight_override"}` 两种形态（老脚本不用改）；不存在的池 404 带 param 而非 FK 500 | `PoolMembershipEditor`：勾选即入池、勾上后可填覆盖、一个不勾就地红字"孤儿" |
-| R4 | **用户自选档位** `price_groups.self_select`。`GET /api/me/groups` = 已分配 ∪ self_select ∪ 默认组；`POST /auth/keys` / `PATCH /api/me/keys/{id}` 接受 `group_code`（null = 跟随用户分组），不在可选集合 → 403 `group_not_selectable`（不是 404：组存在，只是他没资格选）；写后按 key 精确失效鉴权缓存 | 门户建 key / 改 key 的"档位"下拉（只有一个可选时不显示）、行内"档位：vip"、分组页"可自选"徽章与开关 |
+| R4 | **用户自选档位** `price_groups.self_select`。`GET /api/me/groups` = 已分配 ∪ self_select ∪ 默认组（管理员分配了分组时不含默认组、只列已发布的组，见 §11.47）；`POST /auth/keys` / `PATCH /api/me/keys/{id}` 接受 `group_code`（null = 跟随用户分组），不在可选集合 → 403 `group_not_selectable`（不是 404：组存在，只是他没资格选）；写后按 key 精确失效鉴权缓存 | 门户建 key / 改 key 的"档位"下拉（只有一个可选时不显示）、行内"档位：vip"、分组页"可自选"徽章与开关 |
 | R5 | **三跳一处看全**：`GET /admin/pools/{code}` 返回成员（含覆盖、可用 key 数）/ 可服务模型并集 / 引用分组；分组抽屉选池即显示 `PoolReach` 摘要；新建渠道表单加入池编辑器（default 预选）；三处错误文案改写；`okapi migrate new-api` 读 `channels.group` CSV 建同名池与同名价格分组（倍率 1 占位）、`users.group` → user_groups、`tokens.group` → group_override（`auto` 跟随用户分组） | `listing::pool_detail`、`migrate.rs::ensure_group_and_pool` |
 
 **取舍**：
@@ -2928,6 +2928,38 @@ max_version}`（`RequestExtensionKind::CodexClient`，只登记给 codex）。`p
 与 native_only 一样是路由规则而非鉴权：抄全这些头的客户端照样通过。没有照搬 Sub2API 的全局黑白名单与可配置指纹信号表，
 单站点用不上。验收：`codex_client` 单测（官方判定、伪造前缀、缺 `x-codex-` 头、版本窗口、写入校验）、
 `gateway_oauth_channels::codex_channel_can_accept_only_official_clients`、前端 `channel-controls`。
+
+### 11.47 分组锁定、未发布分组与渠道回来的时刻（2026-10-21，线上排查后）
+
+**分组锁定。** 线上一位用户被配到私有池，管理员以为「给用户打上分组」就只能用这个组。实际是：可选范围 = 分配的 ∪ 开放自选 ∪
+默认组，默认组永远在；key 绑定的组也不随分配变化。现在规则是：**管理员给用户分配了分组，可选范围就只剩分配的组和开放自选的组，
+不再带默认组**；没分配时照旧。套餐带来的组（`user_subscriptions.granted_group`、套餐有效）不算管理员分配，随套餐收回，
+买了套餐照样能选默认组。判定写在 `okapi_store::admin::selectable_group!`，门户可选清单与 `set_user_groups` 共用；
+模型广场的四处可见性条件（`portal/pricing/filter.sql`、`sort-input.sql`、`sort-output.sql`、`groups.rs`）同步改，
+与 `docs/catalog-group-visibility.md` 的「广场与门户同一条规则」保持一致。
+
+`set_user_groups` 在同一事务里把他名下绑在新可选范围之外的 key 改回「跟随用户分组」，响应与审计带 `keys_reset`：
+分配私有组时收走绑在默认组上的 key，移出私有组时收走绑在它上面的 key。**没有在鉴权时逐笔复核 key 的绑定**：
+new-api 迁移来的令牌分组、管理员在后台给 key 直接钉的组都可能在用户可选范围之外，鉴权时一律改写会悄悄换掉它们的价与池；
+只在管理员改分配这个明确动作上收口。
+
+**未发布的分组。** 新建分组要发布一次定价才进价簿，之前分配给用户、给 key 选，之后每笔请求都会在计价处撞 `UnknownGroup`
+（fail-closed 回 500）。原先只有管理端「分配给用户」挡了，报的是 400 `bad_request` + param，前端显示成「请求参数有误
+（group_not_published）」；门户自选和后台给 key 钉组都没挡。现在：新错误码 409 `group_not_published`（param = 分组码），
+管理端分配与给 key 钉组都校验；门户可选清单只列价簿里有的组（列之前追一次最新 epoch）；分组列表带 `published`，
+页面标「未发布」；保存分组时响应带 `requires_publish`（新组或倍率与价簿不同），前端提示去「模型定价」发布。
+渠道池、自选、限流不用发布，即时生效。没有做「保存即发布」：发布会把别的未就绪改价一并推上线。
+
+**渠道回来的时刻。** 候选全空的 503 `no_available_channel` 现在带 `Retry-After`：取被上游额度挡下的账号里最早的窗口重置
+（`account_control::retain_available` 返回）与池链里能服务该模型、冷却中（status 2/3/4）的 key 最早的 `cooldown_until`
+（`channels::next_key_recovery`）中较早的那个；都不知道时不带，不编数字。只在 chat / messages / responses 这条路径上做，
+负毛利熔断（`margin_blocked`）与全忙（并发满）不带。
+
+**验收**：`console_auth_web::assigned_groups_lock_the_user_in`（分配后清单不含默认组、只有绑在默认组上的 key 被改回、
+公开档位照常、改回默认组 403、移出私有组收回绑定、未发布的公开档位不列）、`console_subscriptions` 套餐组不锁定、
+`catalog_visibility` 广场对被分配用户不显示默认组、`console_pricing_write` 409 `group_not_published`、
+`gateway_m2_sched::cooling_pool_reports_when_a_key_comes_back`、`error.rs` 单测、前端 `write-forms`（未发布徽章、保存提示、
+分配时挡下未发布组、`keys_reset` 提示）。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

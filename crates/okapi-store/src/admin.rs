@@ -1056,12 +1056,64 @@ pub async fn delete_pricing_rule(pool: &PgPool, rule_code: &str) -> Result<bool,
     Ok(affected > 0)
 }
 
+/// 用户能给自己的 key 选的分组（IMPLEMENTATION §11.14 R4），`g` = price_groups、`$1` = user_id：
+/// 分配给他的组 ∪ 标为 `self_select` 的公开档位 ∪ 默认组。默认组只在管理员没给他分配分组时才给：
+/// 分配了分组，就是把他限定在这些组（外加公开档位）里。套餐带来的组（`granted_group`）随套餐收回，
+/// 不算管理员分配，买了套餐照样能选默认组。宏而不是常量：要在编译期 `concat!` 进查询文本。
+macro_rules! selectable_group {
+    () => {
+        r"(
+    g.self_select
+    OR EXISTS (SELECT 1 FROM user_groups ug WHERE ug.user_id = $1 AND ug.group_code = g.group_code)
+    OR (g.is_default AND NOT EXISTS (
+        SELECT 1 FROM user_groups ug
+        WHERE ug.user_id = $1
+          AND NOT EXISTS (SELECT 1 FROM user_subscriptions s
+                          WHERE s.user_id = ug.user_id AND s.status = 1 AND s.granted_group
+                            AND s.group_code_snapshot = ug.group_code)))
+)"
+    };
+}
+
+/// 可选分组的一行（门户建 key / 改 key 的档位下拉）。
+#[derive(Debug, sqlx::FromRow)]
+pub struct SelectableGroupRow {
+    pub group_code: String,
+    pub ratio: String,
+    pub description: Option<String>,
+    pub self_select: bool,
+    /// 在 `user_groups` 里（管理员分配或套餐带来）。
+    pub assigned: bool,
+}
+
+/// 用户可选的分组，见 `selectable_group!`。
+pub async fn selectable_groups(
+    pool: &PgPool,
+    user_id: i64,
+) -> Result<Vec<SelectableGroupRow>, StoreError> {
+    Ok(sqlx::query_as::<_, SelectableGroupRow>(concat!(
+        "SELECT g.group_code, g.group_ratio::text AS ratio, g.description, g.self_select,
+                EXISTS (SELECT 1 FROM user_groups ug
+                         WHERE ug.user_id = $1 AND ug.group_code = g.group_code) AS assigned
+         FROM price_groups g
+         WHERE ",
+        selectable_group!(),
+        " ORDER BY g.sort_order, g.group_code"
+    ))
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 /// 覆盖式设置用户分组（定价取最高 priority，可见性取并集，§6.3）。
+///
+/// 同一事务里把他名下绑在可选范围之外的 key 改回「跟随用户分组」，返回改了几把：分配分组是把人
+/// 限定在这些组里，留着绑在默认组或别的组上的 key 就等于没限定；从私有组里移出时同理收回。
 pub async fn set_user_groups(
     pool: &PgPool,
     user_id: i64,
     groups: &[(String, i32)],
-) -> Result<(), StoreError> {
+) -> Result<u64, StoreError> {
     let codes: Vec<String> = groups.iter().map(|(c, _)| c.clone()).collect();
     let priorities: Vec<i32> = groups.iter().map(|(_, p)| *p).collect();
     let mut tx = pool.begin().await?;
@@ -1086,8 +1138,20 @@ pub async fn set_user_groups(
         .execute(&mut *tx)
         .await?;
     }
+    let reset = sqlx::query(concat!(
+        "UPDATE api_keys k SET group_override = NULL
+         WHERE k.user_id = $1 AND k.deleted_at IS NULL AND k.group_override IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM price_groups g
+                           WHERE g.group_code = k.group_override AND ",
+        selectable_group!(),
+        ")"
+    ))
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
     tx.commit().await?;
-    Ok(())
+    Ok(reset)
 }
 
 /// 全局设置写入（settings KV）。

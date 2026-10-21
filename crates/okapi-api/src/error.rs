@@ -31,6 +31,8 @@ pub mod codes {
     pub const NOT_FOUND: &str = "not_found";
     /// 用户给 key 选的分组不在其可选集合内（组可能存在，只是他没资格选）。
     pub const GROUP_NOT_SELECTABLE: &str = "group_not_selectable";
+    /// 分组还没进价簿：新建的分组要发布一次定价才能用（param = 分组码）。
+    pub const GROUP_NOT_PUBLISHED: &str = "group_not_published";
     /// 来源 IP 不在该 key 的白名单内（param = 识别到的来源 IP，便于用户对照）。
     pub const IP_NOT_ALLOWED: &str = "ip_not_allowed";
     /// 该账户此刻正在结算，账目在动——对账修复要等它稳定下来再来（隔几秒重试）。

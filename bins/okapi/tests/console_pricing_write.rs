@@ -403,7 +403,7 @@ async fn record_ip_log_switch_suppresses_client_ip() {
 /// 四件事此前都没被钉住，前三件都会回 500：
 /// - 分组写进 `price_groups` 要等发布才进价簿。放进一个**未发布**的分组，写入照样 200，
 ///   而该用户之后每笔请求都撞 `UnknownGroup`（fail-closed 回 500），直到有人发布——
-///   现在写入这一步就回 400 `group_not_published`，用户不受影响；
+///   现在写入这一步就回 409 `group_not_published`，用户不受影响；
 /// - 放进**不存在**的分组撞 `user_groups` 外键，被当成内部错误回 500——现在回 400 `group_code`；
 /// - 给**不存在**的用户设分组撞 `user_id` 外键回 500——现在回 404，与改角色 / 改倍率一致；
 /// - 生效分组随 `AuthedKey` 缓存，写完调 `auth_flush()`；变异测试删掉这一行全量无一变红。
@@ -459,8 +459,9 @@ async fn group_assignment_is_validated_and_billed_immediately() {
         json!({"groups": [{"group_code": group, "priority": 10}]}),
     )
     .await;
-    assert_eq!(status, 400, "未发布的分组不得分配给用户：{body}");
-    assert_eq!(body["error"]["param"], "group_not_published", "{body}");
+    assert_eq!(status, 409, "未发布的分组不得分配给用户：{body}");
+    assert_eq!(body["error"]["code"], "group_not_published", "{body}");
+    assert_eq!(body["error"]["param"], group, "{body}");
     assert_eq!(chat(&bed).await, 200, "被拒的分配不得影响用户的请求");
 
     // 不存在：拒绝（而不是撞外键回 500）
@@ -481,6 +482,7 @@ async fn group_assignment_is_validated_and_billed_immediately() {
     )
     .await;
     assert_eq!(status, 200, "已发布的分组应能分配：{body}");
+    assert_eq!(body["keys_reset"], 0, "没有绑在别组的 key：{body}");
 
     // 不存在的用户：404，与改角色 / 改倍率一致——此前非空分组会撞 user_id 外键回 500
     let (status, body) = post(

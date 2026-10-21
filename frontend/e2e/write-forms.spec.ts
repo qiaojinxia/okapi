@@ -338,7 +338,7 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
     }
     if (path.endsWith('/manage') && body.action === 'ban') status = 2
     if (path.endsWith('/manage') && body.action === 'unban') status = 1
-    await route.fulfill({ json: { ok: true } })
+    await route.fulfill({ json: path.endsWith('/groups') ? { ok: true, keys_reset: 2 } : { ok: true } })
   })
 
   await page.goto('/admin/users')
@@ -392,14 +392,21 @@ test('用户抽屉：入账按 USD 输入换成 micro 整数，系数按字符�
   await page.route('**/admin/groups', (route) => route.fulfill({ json: { data: [
     { group_code: 'default', group_ratio: '1', description: '默认分组', self_select: false },
     { group_code: 'vip', group_ratio: '0.85', description: 'VIP', self_select: false },
+    { group_code: 'draft', group_ratio: '1', description: '草稿', self_select: false, published: false },
   ] } }))
   await drawer.getByRole('tab', { name: '分组', exact: true }).click()
   const groupSearch = drawer.getByRole('combobox', { name: '添加系统分组' })
+  // 还没发布的分组：选项里标出来，选了也不加进去（后端会 409 拒绝）
+  await groupSearch.fill('draft')
+  await drawer.getByRole('option', { name: /draft.*未发布/ }).click()
+  await expect(page.getByText('draft 还没发布：先到「模型定价」发布一次定价，再分配给用户。')).toBeVisible()
+  await expect(drawer.getByRole('list', { name: /已选分组/ }).getByText('draft', { exact: true })).toHaveCount(0)
   await groupSearch.fill('vip')
   await drawer.getByRole('option', { name: /vip/ }).click()
   const groupsSaved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/groups'))
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await groupsSaved
+  await expect(page.getByText('已保存；2 把绑在其他分组上的密钥已改回跟随分组。')).toBeVisible()
   expect(posts.find((p) => p.path.endsWith('/groups'))?.body).toEqual({
     groups: [
       { group_code: 'default', priority: 2 },
@@ -833,7 +840,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   const groups = [
     { group_code: 'default', group_ratio: '1', description: null, is_default: true, user_count: 12, channel_count: 3, pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: null },
     { group_code: 'vip', group_ratio: '0.8', description: 'VIP', is_default: false, user_count: 2, channel_count: 1, pool_code: 'premium', self_select: true, rpm_limit: 60, rph_limit: null },
-    { group_code: 'empty', group_ratio: '1', description: null, is_default: false, user_count: 0, channel_count: 0, pool_code: 'spare', self_select: false, rpm_limit: null, rph_limit: null },
+    { group_code: 'empty', group_ratio: '1', description: null, is_default: false, user_count: 0, channel_count: 0, pool_code: 'spare', self_select: false, rpm_limit: null, rph_limit: null, published: false },
   ]
   await page.route('**/admin/groups?*', (route) => route.fulfill({ json: { data: groups, total: groups.length } }))
   await page.route('**/admin/groups', async (route) => {
@@ -866,6 +873,9 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await expect(page.getByRole('row').filter({ hasText: 'vip' }).getByText('60 / 分 · ∞ / 时')).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: 'vip' }).getByText('可自选')).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: 'empty' }).getByText('空池')).toBeVisible()
+  // 新建后还没发布定价的分组：标「未发布」，已发布的不标
+  await expect(page.getByRole('row').filter({ hasText: 'empty' }).getByText('未发布')).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'vip' }).getByText('未发布')).toHaveCount(0)
   // default 行的描述列也是 —，限流列取该行第二个
   await expect(page.getByRole('row').filter({ hasText: 'default' }).first().getByText('—', { exact: true })).toHaveCount(2)
 
@@ -918,8 +928,10 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
   await page.route('**/admin/groups', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback()
-    posts.push(route.request().postDataJSON() as Json)
-    await route.fulfill({ json: { ok: true } })
+    const body = route.request().postDataJSON() as Json
+    posts.push(body)
+    // 新分组要发布进价簿才生效；改池 / 自选 / 限流即时生效
+    await route.fulfill({ json: { ok: true, requires_publish: body.group_code === 'team-a' } })
   })
   const saved = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
   await edit.getByRole('button', { name: '保存', exact: true }).click()
@@ -970,6 +982,7 @@ test('价格分组抽屉：倍率按字符串提交、池从后端清单选、�
   const created = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/admin/groups'))
   await save.click()
   await created
+  await expect(page.getByRole('status').filter({ hasText: '新分组或倍率改动要到「模型定价」发布定价后生效' })).toBeVisible()
   expect(posts[1]).toMatchObject({ group_code: 'team-a', group_ratio: '1', description: '', pool_code: 'default', self_select: false, rpm_limit: null, rph_limit: null })
 
   await page.route('**/admin/groups?*', (route) => {

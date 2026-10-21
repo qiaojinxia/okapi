@@ -30,9 +30,13 @@ const FROM: &str = r"FROM price_groups g
         ON pg.group_code = g.group_code
     WHERE ($1::text IS NULL OR g.group_code ILIKE $1 ESCAPE E'\\' OR g.description ILIKE $1 ESCAPE E'\\')
     AND ($2::text IS NULL OR g.group_code = $2)
-    AND (g.self_select OR g.is_default OR EXISTS (
+    AND (g.self_select OR EXISTS (
         SELECT 1 FROM user_groups ug WHERE ug.group_code = g.group_code AND ug.user_id = $4
-    ))
+    ) OR (g.is_default AND NOT EXISTS (
+        SELECT 1 FROM user_groups ug WHERE ug.user_id = $4 AND NOT EXISTS (
+            SELECT 1 FROM user_subscriptions s WHERE s.user_id = ug.user_id AND s.status = 1
+                AND s.granted_group AND s.group_code_snapshot = ug.group_code)
+    )))
     AND ($3::text IS NULL OR EXISTS (
         SELECT 1 FROM models m
         JOIN jsonb_to_recordset($5::jsonb -> 'models') AS mp(model_name text)

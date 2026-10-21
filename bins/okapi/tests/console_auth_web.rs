@@ -1,6 +1,9 @@
 //! /auth/* 自助面验收（§6.4）：注册→登录（cookie 会话）→兑换 key→
 //! TOTP 两段式注册→带码登录→登出失效。依赖 .env（scripts/dev-deps.sh up）。
 
+#[path = "support/published_pricing.rs"]
+mod published_pricing;
+
 use okapi::{console, gateway};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -447,6 +450,181 @@ async fn critical_rate_limit_guards_login() {
         .unwrap();
 }
 
+/// 管理员给用户分配了分组，就是把他限定在这些组（外加公开档位）里：可选清单不再带默认组，
+/// 名下绑在可选范围之外的 key 当场改回跟随用户分组。还没发布进价簿的组不列出来——选了它的 key
+/// 每笔请求都会在计价处失败。
+#[tokio::test]
+// 一条时序：建组 → 发布 → 建 key → 分配 → 校验清单与 key → 再试改回默认组
+#[allow(clippy::too_many_lines)]
+async fn assigned_groups_lock_the_user_in() {
+    let env = setup().await;
+    let addr = env.addr;
+    let client = reqwest::Client::new();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let pg = okapi_store::connect_pg(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let private = format!("priv-{}", &suffix[..8]);
+    let public = format!("pub-{}", &suffix[..8]);
+    let draft = format!("draft-{}", &suffix[..8]);
+    let group = |code: &str, self_select: bool| {
+        let (pg, code) = (pg.clone(), code.to_owned());
+        async move {
+            okapi_store::admin::upsert_price_group(
+                &pg,
+                okapi_store::admin::PriceGroupInput {
+                    group_code: &code,
+                    group_ratio: "1",
+                    description: "tier",
+                    pool_code: None,
+                    self_select,
+                    rpm_limit: None,
+                    rph_limit: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+    };
+    group(&private, false).await;
+    group(&public, true).await;
+
+    let email = format!("lock-{suffix}@ok.test");
+    client
+        .post(format!("http://{addr}/auth/register"))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "username": format!("lock-{suffix}"), "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    let login = client
+        .post(format!("http://{addr}/auth/login"))
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({"email": email, "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = cookie_of(&login);
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+        .bind(&email)
+        .fetch_one(&pg)
+        .await
+        .unwrap();
+    published_pricing::publish(&pg, uid).await;
+    // 发布之后才建的公开档位：还没进价簿
+    group(&draft, true).await;
+
+    let create = |group: Option<&str>| {
+        let (client, cookie) = (client.clone(), cookie.clone());
+        let body = json!({"name": "k", "group_code": group});
+        async move {
+            let created: Value = client
+                .post(format!("http://{addr}/auth/keys"))
+                .header(reqwest::header::COOKIE, &cookie)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            (
+                created["key_id"].as_i64().unwrap(),
+                created["api_key"].as_str().unwrap().to_owned(),
+            )
+        }
+    };
+    let (on_default, _) = create(Some("default")).await;
+    let (on_public, _) = create(Some(&public)).await;
+    let (_, follows) = create(None).await;
+    let selectable = || {
+        let (client, follows) = (client.clone(), follows.clone());
+        async move {
+            let groups: Value = client
+                .get(format!("http://{addr}/api/me/groups"))
+                .bearer_auth(follows)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let mut codes: Vec<String> = groups["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g["code"].as_str().unwrap().to_owned())
+                .collect();
+            codes.sort();
+            codes
+        }
+    };
+    let mut expected = vec!["default".to_owned(), public.clone()];
+    expected.sort();
+    assert_eq!(
+        selectable().await,
+        expected,
+        "未分配：默认组 + 公开档位，没发布的不列"
+    );
+
+    let reset = okapi_store::admin::set_user_groups(&pg, uid, &[(private.clone(), 10)])
+        .await
+        .unwrap();
+    assert_eq!(reset, 1, "只有绑在默认组的那把被改回跟随");
+    let mut expected = vec![private.clone(), public.clone()];
+    expected.sort();
+    assert_eq!(selectable().await, expected, "分配后不再带默认组");
+    let pinned = |id: i64| {
+        let pg = pg.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>(
+                "SELECT group_override FROM api_keys WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pg)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(pinned(on_default).await, None);
+    assert_eq!(
+        pinned(on_public).await,
+        Some(public.clone()),
+        "公开档位照常可用"
+    );
+
+    let repin = |id: i64, group: &str| {
+        let (client, follows) = (client.clone(), follows.clone());
+        let body = json!({"group_code": group});
+        async move {
+            client
+                .patch(format!("http://{addr}/api/me/keys/{id}"))
+                .bearer_auth(follows)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let back = repin(on_public, "default").await;
+    assert_eq!(back.status(), 403);
+    assert_eq!(
+        back.json::<Value>().await.unwrap()["error"]["code"],
+        "group_not_selectable"
+    );
+
+    // 绑到私有组，再把人移出：绑定一并收回
+    assert_eq!(repin(on_default, &private).await.status(), 200);
+    let reset = okapi_store::admin::set_user_groups(&pg, uid, &[])
+        .await
+        .unwrap();
+    assert_eq!(reset, 1);
+    assert_eq!(pinned(on_default).await, None);
+    let mut expected = vec!["default".to_owned(), public.clone()];
+    expected.sort();
+    assert_eq!(selectable().await, expected);
+}
+
 /// 自选档位（IMPLEMENTATION §11.14 R4）：用户只能在 已分配 ∪ self_select ∪ 默认组 里
 /// 给自己的 key 选分组；不可选的组 403 `group_not_selectable`（不是 404——组存在，
 /// 只是他没资格）；选定后 /api/me 的生效分组随之变化，改回 null 则跟随用户分组。
@@ -495,6 +673,13 @@ async fn self_select_group_on_own_keys() {
         .await
         .unwrap();
     let cookie = cookie_of(&login);
+    // 新分组要发布进价簿才可选（没发布的组不在可选清单里）
+    let uid: i64 = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+        .bind(&email)
+        .fetch_one(&pg)
+        .await
+        .unwrap();
+    published_pricing::publish(&pg, uid).await;
 
     // 不可选的组 → 403 带码
     let denied = client

@@ -50,7 +50,7 @@ export function GroupsSection({
       if (!ready || !catalog.isSuccess || codes.some((code) => !byCode.has(code))) {
         throw new Error(t('admin:userGroupsInvalid'))
       }
-      return apiFetch(`/admin/users/${userId}/groups`, {
+      return apiFetch<{ keys_reset?: number }>(`/admin/users/${userId}/groups`, {
         method: 'POST',
         body: {
           groups: codes.map((group_code, idx) => ({
@@ -60,8 +60,8 @@ export function GroupsSection({
         },
       })
     },
-    onSuccess: () => {
-      toast.success(t('common:success'))
+    onSuccess: (r) => {
+      toast.success(r.keys_reset ? t('admin:userGroupsKeysReset', { n: r.keys_reset }) : t('common:success'))
       onDone()
     },
     onError: (err) => {
@@ -93,13 +93,21 @@ export function GroupsSection({
               onChange={setSearch}
               onChoose={(code) => {
                 if (disabled || !byCode.has(code) || codes.includes(code)) return
+                if (byCode.get(code)?.published === false) {
+                  toast.warning(t('admin:userGroupsUnpublished', { code }))
+                  return
+                }
                 setDraft([...codes, code])
                 setSearch('')
               }}
               options={(catalog.data?.data ?? []).filter((group) => !codes.includes(group.group_code)).map((group) => ({
                 value: group.group_code,
                 label: group.description ?? undefined,
-                description: `${t('admin:userGroupsRatio', { ratio: formatRatio(group.group_ratio ?? '1') })} · ${t(group.self_select ? 'admin:userGroupsPublic' : 'admin:userGroupsAdminOnly')}`,
+                description: [
+                  t('admin:userGroupsRatio', { ratio: formatRatio(group.group_ratio ?? '1') }),
+                  t(group.self_select ? 'admin:userGroupsPublic' : 'admin:userGroupsAdminOnly'),
+                  group.published === false && t('admin:groupUnpublished'),
+                ].filter(Boolean).join(' · '),
               }))}
               placeholder={t('admin:userGroupsSearch')}
               emptyHint={catalog.data?.data.length ? t('admin:userGroupsNoMatch') : t('admin:userGroupsNoCatalog')}

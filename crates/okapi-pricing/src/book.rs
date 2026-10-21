@@ -327,6 +327,12 @@ impl PriceBook {
         self.groups.contains_key(group)
     }
 
+    /// 该分组在本价簿里的倍率；价簿还不认识它时为 None。
+    #[must_use]
+    pub fn group_ratio(&self, group: &GroupCode) -> Option<RatioFp> {
+        self.groups.get(group).copied()
+    }
+
     /// 是否存在启用的 volume 规则（gateway 据此决定是否读 `tok:{uid}:<yyyymm>`）。
     #[must_use]
     pub const fn has_volume_rules(&self) -> bool {
