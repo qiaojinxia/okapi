@@ -292,7 +292,7 @@ pub fn response_anthropic_to_openai(
                 "type": "function",
                 "function": {
                     "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
-                    "arguments": block.get("input").map_or_else(String::new, std::string::ToString::to_string),
+                    "arguments": super::tool_input_arguments(block.get("input")),
                 }
             })),
             // 加密思考 chat 没有承载位；内置工具块（server_tool_use 等）请求侧不发内置工具、正常不会出现
@@ -492,14 +492,16 @@ impl StreamState {
                     None,
                 ))]
             }
-            Some("input_json_delta") => {
+            // 没有打开的 tool_use 块就没有可挂的槽位（server_tool_use 等被丢弃的块也会流 JSON 增量）：
+            // 硬挂到 index 0 会把参数拼进别的工具调用里
+            Some("input_json_delta") if self.current_block_is_tool => {
                 let partial = delta
                     .get("partial_json")
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 let chars = partial.chars().count();
                 let d = json!({"tool_calls": [{
-                    "index": self.tool_index.max(0),
+                    "index": self.tool_index,
                     "function": {"arguments": partial},
                 }]});
                 vec![Ok(self.data_event(&d, None, true, chars, None))]

@@ -47,6 +47,12 @@ pub fn request_anthropic_to_openai(
             &mut messages,
         )?;
     }
+    // Anthropic 允许最后一条 assistant 消息为空（等于没有预填）；chat 里它会变成一轮空回复
+    if messages.last().is_some_and(|last| {
+        last["role"] == "assistant" && last["content"] == "" && last.get("tool_calls").is_none()
+    }) {
+        messages.pop();
+    }
     out.insert("messages".into(), Value::Array(messages));
 
     if let Some(v) = src.get("max_tokens") {
@@ -89,9 +95,10 @@ fn system_to_text(system: &Value) -> String {
 /// （tool_result 块拆为独立 role=tool 消息；其余块聚合为一条）。
 /// chat 表达不了的块报错（见 [`super::unsupported_part`]）；thinking 历史除外——那是上一轮
 /// 的推理过程，OpenAI 上游没有回放推理的字段，去掉不影响模型看到的对话内容。
+/// 空串也是一条消息（与 `[{"type":"text","text":""}]` 等价）：丢掉会改变上游看到的轮次。
 fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) -> Result<(), UpstreamError> {
     match content {
-        Value::String(s) if !s.is_empty() => {
+        Value::String(s) => {
             out.push(json!({"role": role, "content": s}));
         }
         Value::Array(blocks) => {
@@ -116,9 +123,7 @@ fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) -> Result<
                         "type": "function",
                         "function": {
                             "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
-                            "arguments": block
-                                .get("input")
-                                .map_or_else(String::new, std::string::ToString::to_string),
+                            "arguments": super::tool_input_arguments(block.get("input")),
                         }
                     })),
                     Some("tool_result") => out.push(json!({

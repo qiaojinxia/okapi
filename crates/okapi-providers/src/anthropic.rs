@@ -232,7 +232,6 @@ impl MetaScanner {
                     == Some("tool_use");
             }
             "content_block_delta" => {
-                has_output = true;
                 content_chars = data.get("delta").map_or(0, |d| {
                     ["text", "thinking", "partial_json"]
                         .iter()
@@ -240,6 +239,9 @@ impl MetaScanner {
                         .map(|s| s.chars().count())
                         .sum()
                 });
+                // 只有带正文 / 思考 / 工具参数的增量才算产出；signature_delta 之类的元数据不算，
+                // 否则一条只发签名的畸形流就能绕过空回复判定
+                has_output = content_chars > 0;
             }
             "error" => return vec![Err(stream_error(&data, ev.data.as_bytes()))],
             _ => {}

@@ -71,7 +71,17 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
                     .get("tool_call_id")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                let name = call_names.get(id).map_or("", String::as_str);
+                // functionResponse 必须带 name：先按 id 对回 assistant 的调用，对不上再认消息自带的
+                // name（有些客户端会带）。都没有就在这里拒绝：放过去只会换来上游整轮 400
+                let name = call_names
+                    .get(id)
+                    .map(String::as_str)
+                    .or_else(|| {
+                        msg.get("name")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                    })
+                    .ok_or_else(|| super::unsupported_part("tool_call_id"))?;
                 let part = json!({"functionResponse": {
                     "name": name,
                     "response": {"content": plain_text(content)},

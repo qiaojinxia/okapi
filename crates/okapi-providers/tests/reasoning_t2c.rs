@@ -173,3 +173,146 @@ fn t2c_json_prefixes_think_block() {
     let out = rewrite_json(&bytes);
     assert_eq!(out, bytes);
 }
+
+#[test]
+fn t2c_json_keeps_array_content_parts() {
+    let image = json!({"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}});
+    let body_in = json!({"choices": [{"index": 0, "message": {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "answer"}, image.clone()],
+        "reasoning_content": "hmm"}}]});
+    let out = rewrite_json(&body(&body_in));
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    let msg = &v["choices"][0]["message"];
+    assert!(msg.get("reasoning_content").is_none());
+    assert_eq!(
+        msg["content"],
+        json!([
+            {"type": "text", "text": "<think>\nhmm\n</think>\n"},
+            {"type": "text", "text": "answer"},
+            image,
+        ]),
+        "原有分段一个不丢，思考块作为第一个文本片段"
+    );
+}
+
+#[test]
+fn t2c_json_empty_or_null_content_becomes_the_think_block() {
+    for content in [json!([]), Value::Null] {
+        let body_in = json!({"choices": [{"index": 0, "message": {
+            "role": "assistant", "content": content, "reasoning_content": "hmm"}}]});
+        let out = rewrite_json(&body(&body_in));
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            v["choices"][0]["message"]["content"],
+            "<think>\nhmm\n</think>\n"
+        );
+    }
+}
+
+#[test]
+fn t2c_json_leaves_unknown_content_shape_alone() {
+    let body_in = json!({"choices": [{"index": 0, "message": {
+        "content": {"unexpected": true}, "reasoning_content": "hmm"}}]});
+    let bytes = body(&body_in);
+    assert_eq!(
+        rewrite_json(&bytes),
+        bytes,
+        "认不得的形状原样放行，不吞内容"
+    );
+}
+
+fn delta_chunk(delta: &Value) -> ChatEvent {
+    let chunk = json!({"id": "c", "object": "chat.completion.chunk",
+        "choices": [{"index": 0, "delta": delta}]});
+    ChatEvent::Data {
+        raw: chunk.to_string(),
+        event: None,
+        has_output: true,
+        content_chars: 0,
+        usage: None,
+    }
+}
+
+/// 过一遍转换器，返回每个事件改写后的 `delta` 与 `content_chars`。
+fn run_stream(items: Vec<ChatEvent>) -> Vec<(Value, usize)> {
+    let mut st = ThinkingToContent::new();
+    let mut out = Vec::new();
+    for item in items {
+        for event in st.step(Ok(item)) {
+            let ChatEvent::Data {
+                raw, content_chars, ..
+            } = event.unwrap()
+            else {
+                continue;
+            };
+            let v: Value = serde_json::from_str(&raw).unwrap();
+            out.push((v["choices"][0]["delta"].clone(), content_chars));
+        }
+    }
+    out
+}
+
+#[test]
+fn t2c_stream_array_content_keeps_its_parts_and_closes_the_think_block() {
+    let parts = json!([{"type": "text", "text": "answer"}]);
+    let out = run_stream(vec![
+        reasoning_chunk("step one"),
+        delta_chunk(&json!({"content": parts})),
+        content_chunk(" tail"),
+    ]);
+    assert_eq!(out[0].0["content"], "<think>\nstep one");
+    assert_eq!(
+        out[1].0["content"],
+        json!([
+            {"type": "text", "text": "\n</think>\n"},
+            {"type": "text", "text": "answer"},
+        ]),
+        "分段正文一个不丢，闭合标签作为首个片段"
+    );
+    assert_eq!(out[2].0["content"], " tail", "已闭合，后续正文原样");
+}
+
+#[test]
+fn t2c_stream_reasoning_and_array_content_in_one_chunk() {
+    let parts = json!([{"type": "text", "text": "answer"}]);
+    let out = run_stream(vec![delta_chunk(
+        &json!({"reasoning_content": "why", "content": parts}),
+    )]);
+    let (delta, chars) = &out[0];
+    assert!(delta.get("reasoning_content").is_none());
+    assert_eq!(
+        delta["content"],
+        json!([
+            {"type": "text", "text": "<think>\nwhy\n</think>\n"},
+            {"type": "text", "text": "answer"},
+        ])
+    );
+    assert_eq!(
+        *chars,
+        "<think>\nwhy\n</think>\n".chars().count() + "answer".chars().count(),
+        "改写后重数：标签、思考和分段正文都算"
+    );
+}
+
+#[test]
+fn t2c_stream_unknown_content_shape_passes_through_without_advancing() {
+    let weird = delta_chunk(&json!({"reasoning_content": "x", "content": {"weird": 1}}));
+    let ChatEvent::Data { raw: before, .. } = &weird else {
+        unreachable!()
+    };
+    let before = before.clone();
+    let mut st = ThinkingToContent::new();
+    let out = st.step(Ok(weird));
+    let ChatEvent::Data { raw, .. } = out.into_iter().next().unwrap().unwrap() else {
+        panic!("expected data")
+    };
+    assert_eq!(raw, before, "认不得的形状原样放行");
+    // 状态没被这个 chunk 推进：随后的第一段思考仍带开标签
+    let out = st.step(Ok(reasoning_chunk("y")));
+    let ChatEvent::Data { raw, .. } = out.into_iter().next().unwrap().unwrap() else {
+        panic!("expected data")
+    };
+    let v: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["choices"][0]["delta"]["content"], "<think>\ny");
+}

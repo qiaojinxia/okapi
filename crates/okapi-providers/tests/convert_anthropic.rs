@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 use okapi_providers::ChatEvent;
-use okapi_providers::anthropic::AnthropicEvent;
+use okapi_providers::anthropic::{AnthropicEvent, MetaScanner};
 use okapi_providers::convert::openai_to_anthropic::{
     StreamState, request_openai_to_anthropic, response_anthropic_to_openai,
 };
@@ -459,4 +459,106 @@ fn request_keeps_unparseable_tool_arguments() {
         json!({"_raw_arguments": "{\"path\": \"/tmp/a"})
     );
     assert_eq!(calls[1]["input"], json!({}));
+}
+
+/// `tool_use` 缺 input（或 null）：arguments 是 `{}`，不是空串——空串不是合法 JSON，
+/// 客户端 `JSON.parse` 会炸。
+#[test]
+fn response_tool_use_without_input_has_empty_object_arguments() {
+    for block in [
+        json!({"type": "tool_use", "id": "t", "name": "f"}),
+        json!({"type": "tool_use", "id": "t", "name": "f", "input": null}),
+    ] {
+        let body = json!({"id": "m", "model": "x", "content": [block], "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}});
+        let (out, _) =
+            response_anthropic_to_openai(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let out: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            out["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "{}"
+        );
+    }
+}
+
+/// 没有打开的 tool_use 块就没有可挂的槽位：开头的、server_tool_use / text 块里的 input_json_delta
+/// 一律忽略，不能被硬挂到 index 0（那会把参数拼进前一个真实工具调用里）。
+#[test]
+fn stream_input_json_delta_outside_a_tool_block_is_ignored() {
+    let delta = |partial: &str| {
+        ev(
+            "content_block_delta",
+            &json!({"index": 0, "delta": {"type": "input_json_delta", "partial_json": partial}}),
+        )
+    };
+    let mut st = StreamState::new("m");
+    assert!(st.step(delta("{\"early\":1}")).is_empty(), "还没有任何块");
+
+    let mut args = String::new();
+    let mut indexes = Vec::new();
+    for item in [
+        ev(
+            "content_block_start",
+            &json!({"index": 0, "content_block": {"type": "tool_use", "id": "t1", "name": "f", "input": {}}}),
+        ),
+        delta("{\"x\":"),
+        ev(
+            "content_block_start",
+            &json!({"index": 1, "content_block": {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {}}}),
+        ),
+        delta("{\"query\":\"q\"}"),
+        ev(
+            "content_block_start",
+            &json!({"index": 2, "content_block": {"type": "text", "text": ""}}),
+        ),
+        delta("{\"stray\":true}"),
+    ] {
+        for out in st.step(item) {
+            let ChatEvent::Data { raw, .. } = out.unwrap() else {
+                continue;
+            };
+            let v: Value = serde_json::from_str(&raw).unwrap();
+            if let Some(call) = v.pointer("/choices/0/delta/tool_calls/0") {
+                indexes.push(call["index"].as_i64().unwrap());
+                args.push_str(
+                    call.pointer("/function/arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                );
+            }
+        }
+    }
+    assert_eq!(args, "{\"x\":", "只有真实工具调用的参数");
+    assert_eq!(indexes, [0, 0]);
+}
+
+/// 透传扫描：只有正文 / 思考 / 工具参数的增量才算产出；signature_delta 之类的元数据不算，
+/// 否则一条只发签名的畸形流就能绕过空回复判定。
+#[test]
+fn passthrough_scanner_counts_only_real_content_as_output() {
+    let mut scanner = MetaScanner::new();
+    let mut has_output = |delta: Value| {
+        let out = scanner.scan(ev(
+            "content_block_delta",
+            &json!({"index": 0, "delta": delta}),
+        ));
+        let Some(Ok(ChatEvent::Data { has_output, .. })) = out.into_iter().next() else {
+            panic!("应透传一条 Data 事件");
+        };
+        has_output
+    };
+    assert!(!has_output(
+        json!({"type": "signature_delta", "signature": "abc"})
+    ));
+    assert!(!has_output(
+        json!({"type": "citations_delta", "citation": {"cited_text": "x"}})
+    ));
+    assert!(!has_output(json!({"type": "text_delta", "text": ""})));
+    assert!(has_output(json!({"type": "text_delta", "text": "hi"})));
+    assert!(has_output(
+        json!({"type": "thinking_delta", "thinking": "hmm"})
+    ));
+    assert!(has_output(
+        json!({"type": "input_json_delta", "partial_json": "{"})
+    ));
 }

@@ -6,10 +6,28 @@
 use crate::error::UpstreamError;
 use crate::types::ChatEvent;
 use bytes::Bytes;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 const OPEN_TAG: &str = "<think>\n";
 const CLOSE_TAG: &str = "\n</think>\n";
+
+/// 把 `lead` 放到 `content` 最前面，原有内容一个字不丢：字符串 / 缺省 / null 拼成字符串；
+/// 分段数组（多模态输出的合法形状）在头部插一个 `{"type":"text"}` 片段，原有片段原样保留；
+/// 空数组没有东西可保，退成字符串。别的形状认不得，返回 false 且不改动，
+/// 调用方原样放行——宁可客户端多看到一个 `reasoning_content`，也不静默吞掉上游内容。
+fn prepend_text(holder: &mut Map<String, Value>, lead: &str) -> bool {
+    match holder.get_mut("content") {
+        Some(Value::String(text)) => text.insert_str(0, lead),
+        Some(Value::Array(parts)) if !parts.is_empty() => {
+            parts.insert(0, json!({"type": "text", "text": lead}));
+        }
+        None | Some(Value::Null | Value::Array(_)) => {
+            holder.insert("content".into(), json!(lead));
+        }
+        Some(_) => return false,
+    }
+    true
+}
 
 /// 流式转换器：reasoning 增量改写为带 `<think>` 标签的 content 增量。
 #[derive(Default)]
@@ -65,33 +83,32 @@ impl ThinkingToContent {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_owned();
-        let content = delta
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
+        // 正文既可能是字符串，也可能是分段数组；两者都算"有正文"
+        let has_content = match delta.get("content") {
+            Some(Value::String(text)) => !text.is_empty(),
+            Some(Value::Array(parts)) => !parts.is_empty(),
+            _ => false,
+        };
 
-        let mut rewritten: Option<String> = None;
+        let mut lead = String::new();
+        let (mut opened, mut closed) = (self.opened, self.closed);
         if !reasoning.is_empty() {
-            let mut text = String::new();
-            if !self.opened {
-                self.opened = true;
-                text.push_str(OPEN_TAG);
+            if !opened {
+                opened = true;
+                lead.push_str(OPEN_TAG);
             }
-            text.push_str(&reasoning);
-            // 思考与正文同 chunk 到达：闭合后拼正文
-            if !content.is_empty() {
-                self.closed = true;
-                text.push_str(CLOSE_TAG);
-                text.push_str(&content);
+            lead.push_str(&reasoning);
+            // 思考与正文同 chunk 到达：闭合后接正文
+            if has_content {
+                closed = true;
+                lead.push_str(CLOSE_TAG);
             }
-            rewritten = Some(text);
-        } else if !content.is_empty() && self.opened && !self.closed {
-            self.closed = true;
-            rewritten = Some(format!("{CLOSE_TAG}{content}"));
+        } else if has_content && opened && !closed {
+            closed = true;
+            lead.push_str(CLOSE_TAG);
         }
 
-        let Some(text) = rewritten else {
+        if lead.is_empty() || !prepend_text(delta, &lead) {
             return vec![Ok(ChatEvent::Data {
                 raw,
                 event,
@@ -99,10 +116,11 @@ impl ThinkingToContent {
                 content_chars,
                 usage,
             })];
-        };
-        let chars = text.chars().count();
+        }
+        (self.opened, self.closed) = (opened, closed);
         delta.remove("reasoning_content");
-        delta.insert("content".into(), json!(text));
+        // 改写后的 chunk 按统一口径重数（数组正文、拒答、工具参数一并算入）
+        let (_, chars) = okapi_api::chunk_output_lenient(&chunk);
         vec![Ok(ChatEvent::Data {
             raw: chunk.to_string(),
             event,
@@ -133,15 +151,9 @@ pub fn rewrite_json(body: &Bytes) -> Bytes {
     else {
         return body.clone();
     };
-    let content = message
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
+    if !prepend_text(message, &format!("{OPEN_TAG}{reasoning}{CLOSE_TAG}")) {
+        return body.clone();
+    }
     message.remove("reasoning_content");
-    message.insert(
-        "content".into(),
-        json!(format!("{OPEN_TAG}{reasoning}{CLOSE_TAG}{content}")),
-    );
     serde_json::to_vec(&value).map_or_else(|_| body.clone(), Bytes::from)
 }

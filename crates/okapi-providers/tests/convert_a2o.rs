@@ -565,3 +565,69 @@ fn stream_tool_deltas_without_index_are_accepted() {
         .collect();
     assert_eq!(args, "{\"a\":1}");
 }
+
+/// 空串消息不能悄悄消失：它们撑着对话的轮次（两条 user 相邻、tool 配对错位）。
+/// 只有末尾的空 assistant 例外——在 Anthropic 里那等于没有预填。
+#[test]
+fn empty_string_messages_keep_the_turn_structure() {
+    let out = convert_req(&json!({"max_tokens": 1, "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": ""},
+        {"role": "assistant", "content": "a"},
+        {"role": "user", "content": "q2"},
+    ]}));
+    let roles: Vec<(&str, &str)> = out["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["role"].as_str().unwrap(), m["content"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        roles,
+        [
+            ("user", "q1"),
+            ("assistant", ""),
+            ("user", ""),
+            ("assistant", "a"),
+            ("user", "q2"),
+        ]
+    );
+
+    for trailing in [json!(""), json!([{"type": "text", "text": ""}])] {
+        let out = convert_req(&json!({"max_tokens": 1, "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": trailing},
+        ]}));
+        assert_eq!(
+            out["messages"],
+            json!([{"role": "user", "content": "q"}]),
+            "末尾空 assistant（空预填）不下发"
+        );
+    }
+
+    // 末尾是带工具调用的 assistant 就不是空预填
+    let out = convert_req(&json!({"max_tokens": 1, "messages": [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t", "name": "f", "input": {}}]},
+    ]}));
+    assert_eq!(out["messages"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn tool_use_without_input_sends_empty_object_arguments() {
+    for block in [
+        json!({"type": "tool_use", "id": "t", "name": "f"}),
+        json!({"type": "tool_use", "id": "t", "name": "f", "input": null}),
+    ] {
+        let out = convert_req(&json!({"max_tokens": 1, "messages": [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": [block]},
+        ]}));
+        let arguments = out["messages"][1]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert_eq!(arguments, "{}", "空串不是合法 JSON，上游会拒");
+    }
+}

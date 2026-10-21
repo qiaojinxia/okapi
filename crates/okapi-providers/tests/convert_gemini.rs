@@ -235,3 +235,44 @@ fn request_keeps_unparseable_tool_arguments() {
         json!({"_raw_arguments": "[1,"})
     );
 }
+
+/// functionResponse 必须有函数名：按 tool_call_id 对不回 assistant 的调用时，认消息自带的 name；
+/// 两者都没有就在网关这一侧 400，不把 `name: ""` 送给上游换整轮失败。
+#[test]
+fn tool_message_resolves_its_function_name_or_is_rejected() {
+    let call = json!({"role": "assistant", "content": null, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]});
+    let name_of = |tool: Value| {
+        let body = json!({"model": "m", "messages": [
+            {"role": "user", "content": "go"}, call.clone(), tool]});
+        request_openai_to_gemini(&Bytes::from(serde_json::to_vec(&body).unwrap())).map(|out| {
+            let out: Value = serde_json::from_slice(&out).unwrap();
+            out["contents"][2]["parts"][0]["functionResponse"]["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+    };
+    assert_eq!(
+        name_of(json!({"role": "tool", "tool_call_id": "c1", "content": "ok"})).unwrap(),
+        "f"
+    );
+    assert_eq!(
+        name_of(json!({"role": "tool", "tool_call_id": "zzz", "name": "g", "content": "ok"}))
+            .unwrap(),
+        "g",
+        "id 对不上时认消息自带的 name"
+    );
+    for tool in [
+        json!({"role": "tool", "tool_call_id": "zzz", "content": "ok"}),
+        json!({"role": "tool", "content": "ok"}),
+        json!({"role": "tool", "tool_call_id": "zzz", "name": "", "content": "ok"}),
+    ] {
+        let err = name_of(tool).unwrap_err();
+        assert!(
+            matches!(&err, okapi_providers::UpstreamError::Build(reason)
+                if reason == "unsupported_content:tool_call_id"),
+            "{err:?}"
+        );
+    }
+}

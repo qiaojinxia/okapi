@@ -29,6 +29,14 @@ pub(crate) fn tool_arguments(arguments: Option<&str>) -> Value {
     }
 }
 
+/// Anthropic `tool_use.input`（对象）→ OpenAI `function.arguments`（JSON 字符串）。缺省或 null
+/// 按无参数 `{}`：空串不是合法 JSON，客户端 `JSON.parse` 会炸，上游也会拒。
+pub(crate) fn tool_input_arguments(input: Option<&Value>) -> String {
+    input
+        .filter(|input| !input.is_null())
+        .map_or_else(|| "{}".to_owned(), Value::to_string)
+}
+
 /// 对端表达不了的 content part。直接报错而不是丢掉：丢掉后模型在看不到附件的情况下作答，
 /// 整条 user turn 被丢时还会把上一条 assistant 当成预填接着写。网关把它映射成 400，param = part 类型。
 pub(crate) fn unsupported_part(kind: &str) -> UpstreamError {
