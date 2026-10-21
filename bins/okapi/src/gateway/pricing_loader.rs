@@ -327,13 +327,76 @@ pub fn compile_rows(
     book.with_server_tool_prices(entries.into_iter().flatten())
 }
 
+/// 装载已发布快照时最多容忍丢掉的条目数；再多说明快照整体有问题，照旧报错。
+const MAX_DROPPED_ENTRIES: usize = 64;
+
+/// 定位 `error` 点名的那一条脏条目并从行集里摘掉，返回摘了什么；点不到具体条目（重复键、
+/// 基准价非法这类结构性错误）返回 None。
+fn drop_offender(
+    rows: &mut PricingSourceRows,
+    error: &okapi_pricing::CompileError,
+) -> Option<String> {
+    use okapi_pricing::CompileError as E;
+    match error {
+        E::NegativePerCallPrice(model) | E::InvalidTierTable { model, .. } => {
+            let before = rows.models.len();
+            rows.models.retain(|row| row.model_name != *model);
+            (rows.models.len() < before).then(|| format!("model {model}: {error}"))
+        }
+        E::InvalidServerToolPrices { model, .. } => {
+            let row = rows
+                .models
+                .iter_mut()
+                .find(|row| row.model_name == *model && row.server_tool_prices.is_some())?;
+            row.server_tool_prices = None;
+            Some(format!("server tool prices of {model}: {error}"))
+        }
+        E::InvalidAbsoluteOverride { user, model, .. } => {
+            let before = rows.overrides.len();
+            rows.overrides
+                .retain(|row| !(row.user_id == *user && row.model_name == *model));
+            (rows.overrides.len() < before)
+                .then(|| format!("override of user {user} on {model}: {error}"))
+        }
+        _ => None,
+    }
+}
+
+/// 容错编译：碰到能定位到单条的脏条目就摘掉重编，返回价簿和被摘掉的条目说明。
+///
+/// 发布时 `compile_rows` 已经把关（脏值进不了快照），所以装载时再编失败只可能是绕过控制面直写了
+/// 快照，或这个版本的校验比发布时更严。严格报错的话网关起不来、热更永远卡在旧价簿上——
+/// 一条脏条目拖垮全站。摘掉之后，相关模型的请求查不到价会被拒（fail-closed），不会免费放行。
+/// 发布和草稿预览仍走严格的 `compile_rows`：那里要让管理员看到错误并修好。
+pub fn compile_tolerant(
+    mut rows: PricingSourceRows,
+    base: i64,
+) -> Result<(PriceBook, Vec<String>), okapi_pricing::CompileError> {
+    let mut dropped = Vec::new();
+    loop {
+        match compile_rows(&rows, base) {
+            Ok(book) => return Ok((book, dropped)),
+            Err(error) if dropped.len() < MAX_DROPPED_ENTRIES => {
+                match drop_offender(&mut rows, &error) {
+                    Some(entry) => dropped.push(entry),
+                    None => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 /// Only a published snapshot can activate prices, even after restart/cache clear.
 pub async fn load_pricebook(pool: &PgPool) -> anyhow::Result<PriceBook> {
     let mut conn = pool.acquire().await?;
     let publication = okapi_store::pricing::published_pricing(&mut conn).await?;
     let base = publication_base_price(&publication)?;
-    let compiled = compile_rows(&publication.source, base)
+    let (compiled, dropped) = compile_tolerant(publication.source, base)
         .map_err(|e| anyhow::anyhow!("pricebook compile: {e}"))?;
+    for entry in &dropped {
+        tracing::error!(%entry, "已发布价簿里有无法编译的条目，已跳过（相关模型 / 覆盖的请求会被拒）");
+    }
     Ok(compiled)
 }
 
@@ -390,6 +453,89 @@ mod tests {
             assert_eq!(quote.amount.as_micros(), 50);
         }
     }
+    fn ratio_row(model: &str) -> okapi_store::pricing::ModelPricingRow {
+        okapi_store::pricing::ModelPricingRow {
+            model_name: model.into(),
+            pricing_mode: "ratio".into(),
+            model_ratio_scaled: Some(1_000_000),
+            completion_ratio_scaled: 1_000_000,
+            cache_ratio_scaled: 1_000_000,
+            cache_write_ratio_scaled: 1_000_000,
+            audio_ratio_scaled: 1_000_000,
+            audio_completion_ratio_scaled: 1_000_000,
+            image_ratio_scaled: 1_000_000,
+            modality_ratios: serde_json::json!({}),
+            server_tool_prices: None,
+            per_call_price_micro: None,
+            tier_expr: None,
+            tier_ratios: None,
+        }
+    }
+
+    #[test]
+    fn a_dirty_published_entry_is_dropped_instead_of_blocking_the_whole_book() {
+        let bad_call = okapi_store::pricing::ModelPricingRow {
+            pricing_mode: "per_call".into(),
+            model_ratio_scaled: None,
+            per_call_price_micro: Some(-5),
+            ..ratio_row("bad-call")
+        };
+        let bad_tier = okapi_store::pricing::ModelPricingRow {
+            pricing_mode: "tiered".into(),
+            model_ratio_scaled: None,
+            tier_expr: Some("1000:2,2000:4".into()),
+            ..ratio_row("bad-tier")
+        };
+        let bad_tools = okapi_store::pricing::ModelPricingRow {
+            server_tool_prices: Some(serde_json::json!({"web_search": "not-a-price-table"})),
+            ..ratio_row("bad-tools")
+        };
+        let rows = PricingSourceRows {
+            epoch: 3,
+            models: vec![ratio_row("ok-model"), bad_call, bad_tier, bad_tools],
+            rules: vec![],
+            groups: vec![okapi_store::pricing::GroupRow {
+                group_code: "default".into(),
+                ratio_scaled: 1_000_000,
+            }],
+            overrides: vec![UserPricingRow {
+                user_id: 9,
+                model_name: "ok-model".into(),
+                override_kind: "absolute".into(),
+                custom_model_ratio_scaled: None,
+                custom_completion_ratio_scaled: None,
+                custom_cache_ratio_scaled: None,
+                custom_cache_write_ratio_scaled: None,
+                custom_input_per_1m_micro: Some(0),
+                custom_output_per_1m_micro: Some(10),
+            }],
+        };
+        // 严格路径（发布 / 预览）照旧报错，让管理员看见
+        assert!(compile_rows(&rows, book::BASE_PRICE_PER_1M_MICRO).is_err());
+        let (book, dropped) = compile_tolerant(rows, book::BASE_PRICE_PER_1M_MICRO).unwrap();
+        assert!(book.has_model(&ModelCode::from("ok-model")));
+        for gone in ["bad-call", "bad-tier"] {
+            assert!(!book.has_model(&ModelCode::from(gone)), "{gone}");
+        }
+        assert!(
+            book.has_model(&ModelCode::from("bad-tools")),
+            "只摘掉脏的内置工具价，模型本身的 token 定价保留"
+        );
+        assert_eq!(dropped.len(), 4, "{dropped:?}");
+    }
+
+    #[test]
+    fn structural_errors_still_fail_the_load() {
+        let rows = PricingSourceRows {
+            epoch: 1,
+            models: vec![ratio_row("dup"), ratio_row("dup")],
+            rules: vec![],
+            groups: vec![],
+            overrides: vec![],
+        };
+        assert!(compile_tolerant(rows, book::BASE_PRICE_PER_1M_MICRO).is_err());
+    }
+
     #[test]
     fn tier_ratios_parse_decimal_without_float_or_silent_drop() {
         let value: serde_json::Value =

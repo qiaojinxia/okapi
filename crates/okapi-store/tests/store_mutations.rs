@@ -90,3 +90,49 @@ async fn switching_back_to_ratio_drops_the_per_call_price(pool: PgPool) {
     .unwrap();
     assert_eq!(pricing().await, ("ratio".to_owned(), None));
 }
+
+/// 会让整本价簿编译失败的脏值（负的按次单价、非正的专属绝对价）在写入这一步就被拦下，
+/// 不是留到发布 / 装载快照时才炸。
+#[sqlx::test(migrations = "./migrations")]
+async fn dirty_pricing_values_are_refused_when_written(pool: PgPool) {
+    okapi_store::admin::upsert_model_per_call(&pool, "guarded", 1_000)
+        .await
+        .unwrap();
+    let negative = sqlx::query("UPDATE model_pricing SET per_call_price_micro = -1")
+        .execute(&pool)
+        .await;
+    assert!(negative.is_err(), "负的按次单价必须被拒");
+    okapi_store::admin::upsert_model_per_call(&pool, "guarded", 0)
+        .await
+        .expect("按次单价 0（免费）是合法值");
+
+    let user = okapi_store::provision::create_user(&pool, "guard-user")
+        .await
+        .unwrap();
+    let model_id: i64 = sqlx::query_scalar("SELECT id FROM models WHERE model_name = 'guarded'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let absolute = |input: i64, output: i64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO user_pricing
+                    (user_id, model_id, override_kind, custom_input_per_1m_micro, custom_output_per_1m_micro)
+                 VALUES ($1, $2, 'absolute', $3, $4)
+                 ON CONFLICT (user_id, model_id) DO UPDATE SET
+                    custom_input_per_1m_micro = EXCLUDED.custom_input_per_1m_micro,
+                    custom_output_per_1m_micro = EXCLUDED.custom_output_per_1m_micro",
+            )
+            .bind(user)
+            .bind(model_id)
+            .bind(input)
+            .bind(output)
+            .execute(&pool)
+            .await
+        }
+    };
+    assert!(absolute(0, 10).await.is_err(), "输入单价必须为正");
+    assert!(absolute(10, -1).await.is_err(), "输出单价不能为负");
+    assert!(absolute(10, 0).await.is_ok(), "输出免费是合法的");
+}
