@@ -1,7 +1,7 @@
 import { Link, useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, KeyRound, Mail, UserPlus } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import i18n from 'i18next'
 import { useTranslation } from 'react-i18next'
 import { ApiError, apiFetch, setKey } from '@/lib/api'
@@ -19,19 +19,31 @@ import { qk } from '@/lib/query-keys'
 /// OAuth 回调着陆（?oauth=done）：会话已建，兑 key 进门户。
 export function useOauthLanding(onError: (msg: string) => void) {
   const navigate = useNavigate()
-  const landed = new URLSearchParams(window.location.search).get('oauth') === 'done'
+  // 只在着陆那一次读，随后把 ?oauth=done 从地址栏抹掉：这个标记不是一次性的话，刷新或后退回这一条
+  // 历史会再兑一遍，每次都多发一把新的会话 key
+  const [landed] = useState(() => new URLSearchParams(window.location.search).get('oauth') === 'done')
+  useEffect(() => {
+    if (!landed) return
+    const url = new URL(window.location.href)
+    url.searchParams.delete('oauth')
+    window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
+  }, [landed])
+  // setKey 会清空整个查询缓存（含这条正在跑的查询），观察者随后重建它：靠 enabled 挡住，别再兑第二次
+  const started = useRef(false)
   const exchange = useQuery({
     queryKey: qk.oauthExchange,
     queryFn: async () => {
+      started.current = true
       const resp = await apiFetch<{ api_key: string }>('/auth/session-key', {
         method: 'POST',
         body: { name: 'oauth' },
       })
       setKey(resp.api_key, 'account')
-      await navigate({ to: '/portal' })
+      // replace：着陆这一条历史被换成门户，后退不会再回到 ?oauth=done
+      await navigate({ to: '/portal', replace: true })
       return true
     },
-    enabled: landed,
+    enabled: landed && !started.current,
     retry: 0,
   })
   if (exchange.isError && landed) {

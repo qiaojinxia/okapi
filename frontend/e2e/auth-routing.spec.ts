@@ -217,6 +217,26 @@ test('OAuth 回调先兑换新会话，不被已有凭证的重定向抢走', as
   expect(await page.evaluate(() => localStorage.getItem('okapi.key'))).toBe('oauth-routing-fixture')
 })
 
+test('OAuth 着陆只兑一次：兑完着陆这条历史被换成门户，后退 / 刷新都不再多发一把 key', async ({ page }) => {
+  await prepare(page)
+  const exchanges: unknown[] = []
+  await page.route('**/auth/session-key', (route) => {
+    exchanges.push(route.request().postDataJSON())
+    return route.fulfill({ json: { api_key: 'oauth-once-fixture', key_id: 3 } })
+  })
+  await page.goto('/pricing')
+  await page.goto('/?oauth=done')
+  await expect(page).toHaveURL(/\/portal$/)
+  expect(exchanges).toEqual([{ name: 'oauth' }])
+  await page.goBack()
+  await expect(page).toHaveURL(/\/pricing$/)
+  await page.goForward()
+  await expect(page).toHaveURL(/\/portal$/)
+  await page.reload()
+  await expect(page).toHaveURL(/\/portal$/)
+  expect(exchanges).toHaveLength(1)
+})
+
 test('API Key 登录后浏览器返回不能再次停在登录页', async ({ page }) => {
   await prepare(page)
   await page.goto('/pricing')
