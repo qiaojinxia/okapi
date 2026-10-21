@@ -1077,6 +1077,26 @@ async fn sessions_list_and_revoke() {
         .await
         .unwrap();
     assert_eq!(dead_b.status(), 401);
+
+    // 吊销是安全相关的写操作：每次都留审计，记下是哪把 key 做的（持 key 的一方就能吊销）
+    let pg = okapi_store::connect_pg(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let audited: Vec<(String, String)> = sqlx::query_as(
+        "SELECT action, target FROM audit_logs
+          WHERE action IN ('user.session_revoke', 'user.session_revoke_all')
+            AND detail->>'key_id' = $1 ORDER BY id",
+    )
+    .bind(key_resp["key_id"].as_i64().unwrap().to_string())
+    .fetch_all(&pg)
+    .await
+    .unwrap();
+    assert_eq!(audited.len(), 2, "{audited:?}");
+    assert_eq!(
+        audited[0],
+        ("user.session_revoke".to_owned(), sid_a.to_owned())
+    );
+    assert_eq!(audited[1].0, "user.session_revoke_all");
 }
 
 /// 不配 web_session_limit 时也必须有上限：缺省值要真的到达用户（列表回 limit）。

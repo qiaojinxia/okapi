@@ -1001,6 +1001,27 @@ pub async fn create_key(
     Ok(response)
 }
 
+/// 吊销 web 会话是安全相关的写操作：留一条审计，记下是哪把 key 把哪个会话踢掉的
+/// （门户 API key 鉴权下，持 key 的一方就能做这件事，事后要能查到）。
+async fn audit_session_revoke(
+    state: &AppState,
+    key: &okapi_store::auth::AuthedKey,
+    action: &str,
+    target: &str,
+) {
+    if let Err(error) = okapi_store::admin::record_audit(
+        &state.pg,
+        &format!("user:{}", key.user_id),
+        action,
+        target,
+        json!({"key_id": key.key_id}),
+    )
+    .await
+    {
+        tracing::error!(%error, action, "会话吊销审计写入失败");
+    }
+}
+
 /// GET /api/me/sessions：当前用户仍有效的 web 会话（门户 API key 鉴权）。
 pub async fn list_sessions(
     State(state): State<AppState>,
@@ -1062,6 +1083,7 @@ pub async fn revoke_session(
             AppError::new(StatusCode::NOT_FOUND, okapi_api::codes::NOT_FOUND).with_param("session"),
         );
     }
+    audit_session_revoke(&state, &key, "user.session_revoke", &sid).await;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1077,6 +1099,13 @@ pub async fn revoke_all_sessions(
 ) -> Result<Json<Value>, AppError> {
     let key = crate::gateway::auth::authenticate(&state, &headers).await?;
     state.sched.web_session_revoke_user(key.user_id).await;
+    audit_session_revoke(
+        &state,
+        &key,
+        "user.session_revoke_all",
+        &key.user_id.to_string(),
+    )
+    .await;
     Ok(Json(json!({ "ok": true })))
 }
 
