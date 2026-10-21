@@ -109,7 +109,9 @@ export async function apiFetch<T>(
     }
     throw new ApiError(resp.status, code, param)
   }
-  const result = (await resp.json()) as T
+  // 成功但没有响应体（204 / 空 200）：没有 JSON 可解，交给调用方一个 undefined，别炸成 SyntaxError
+  const text = await resp.text()
+  const result = (text.trim() === '' ? undefined : JSON.parse(text)) as T
   if (epoch !== authEpoch) throw new ApiError(401, 'auth_context_changed')
   return result
 }

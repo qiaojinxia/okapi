@@ -45,6 +45,11 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
   // 悬停排行某一行时环形图突出对应一段，其余变淡
   const [active, setActive] = useState<string | null>(null)
   const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
+  // 悬停的行在环上对应哪一段：有金额的前几名是自己那段，展开后榜外的并在「其余」那段；
+  // 金额为 0 的行环上没有段，环就不动——否则每一段都被判成「别人」，整圈一起变暗
+  const activeSlice = active == null ? null
+    : slices.some((slice) => slice.key === active) ? active
+      : models.some((m) => m.model === active && m.amount_micro > 0) && slices.some((slice) => slice.key === OTHER) ? OTHER : null
 
   // 大屏下这一行吃掉页面剩余高度：两张卡同高，趋势图随之拉高，排行里的环形图在余量里居中放大。
   // 视口放不下时按排行实际要列的行数定下限（每行约 3.4rem，加上标题、圆环最小高度与内边距），
@@ -67,7 +72,7 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
               大屏列布局时环形图区吃掉卡片的剩余高度，圆环在里面居中并随高度放大（最大 18rem） */}
           <div className="flex shrink-0 items-center justify-center lg:min-h-28 lg:flex-1">
             <div className="relative mx-auto size-28 shrink-0 @xl:mx-2 @xl:size-36 lg:aspect-square lg:h-full lg:max-h-72 lg:min-h-28 lg:w-auto">
-              <Donut slices={slices} total={sum} active={active} label={t('portal:modelShareChart')} />
+              <Donut slices={slices} total={sum} active={activeSlice} label={t('portal:modelShareChart')} />
               <div aria-hidden className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                 <span className="text-[10px] text-muted-foreground">{t('portal:totalSpend')}</span>
                 <span className={cn('font-semibold leading-tight tabular-nums', formatUsd(sum, locale).length > 9 ? 'text-xs' : 'text-[13px]', '@xl:text-sm lg:text-sm')}>{formatUsd(sum, locale)}</span>

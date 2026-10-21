@@ -242,6 +242,29 @@ test('超过 5 个模型时排行折叠其余为一行，可在卡内展开全�
   await expect(models.getByRole('listitem')).toHaveCount(6)
 })
 
+test('悬停金额为 0 的模型行，环形图不整圈变暗；榜外有金额的模型对应「其余」那一段', async ({ page }) => {
+  await prepare(page)
+  await page.route('**/api/me/stats/breakdown?*', (route) => {
+    const data = report()
+    data.data = [...[1, 2, 3, 4, 5, 6].map((n) => row('2026-09-04', `model-${n}`, n)), { ...row('2026-09-04', 'idle-model', 1), amount_micro: 0 }]
+    data.total.amount_micro = data.data.reduce((sum, r) => sum + r.amount_micro, 0)
+    return route.fulfill({ json: data })
+  })
+  await page.goto('/portal')
+  const models = page.getByRole('region', { name: '模型消费排行', exact: true })
+  await models.getByRole('button', { name: '全部 7 个模型' }).click()
+  await expect(models.getByRole('listitem')).toHaveCount(7)
+  // 环上是金额最高的 5 个（model-6 … model-2）加「其余」一段，按这个顺序
+  const opacities = () => page.locator('[data-slot="model-donut"] circle[opacity]').evaluateAll((circles) => circles.map((circle) => circle.getAttribute('opacity')))
+  expect(await opacities()).toEqual(['1', '1', '1', '1', '1', '1'])
+  await models.getByRole('link', { name: '查看 idle-model 的调用明细', exact: true }).hover()
+  expect(await opacities(), '金额为 0 的行在环上没有段，环不动').toEqual(['1', '1', '1', '1', '1', '1'])
+  await models.getByRole('link', { name: '查看 model-1 的调用明细', exact: true }).hover()
+  expect(await opacities(), '榜外模型并在「其余」段里').toEqual(['0.35', '0.35', '0.35', '0.35', '0.35', '1'])
+  await models.getByRole('link', { name: '查看 model-6 的调用明细', exact: true }).hover()
+  expect(await opacities(), '榜内模型只突出自己那段').toEqual(['1', '0.35', '0.35', '0.35', '0.35', '0.35'])
+})
+
 test('门户筛选与视图刷新保留，前进后退同步日期草稿，预设日期清除自定义范围', async ({ page }) => {
   await prepare(page)
   await page.goto('/portal')
