@@ -111,6 +111,15 @@ impl ToolAdmission {
         !self.tools.is_empty()
     }
 
+    /// 转换后由 [`Self::restore`] 原样装回上游体的原生工具类型：转换不会丢它们，
+    /// 不该再算进 `tool_loss` 的「会丢的工具」。
+    pub(super) fn carried_types(&self) -> Vec<&str> {
+        self.tools
+            .iter()
+            .filter_map(|t| t.get("type").and_then(Value::as_str))
+            .collect()
+    }
+
     pub(super) fn estimated_usage(&self) -> Option<ServerToolUsage> {
         (self.search.is_some() || self.fetch.is_some()).then_some(ServerToolUsage::Anthropic(
             AnthropicToolUsage {

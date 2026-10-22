@@ -30,6 +30,21 @@ impl ForeignTools {
         self.hosted.iter().chain(&self.client).cloned().collect()
     }
 
+    /// 去掉另有管线原样带过转换的类型（网关的原生工具准入会把它们装回上游体）。
+    #[must_use]
+    pub fn without(&self, carried: &[&str]) -> Self {
+        let keep = |list: &[String]| -> Vec<String> {
+            list.iter()
+                .filter(|k| !carried.contains(&k.as_str()))
+                .cloned()
+                .collect()
+        };
+        Self {
+            hosted: keep(&self.hosted),
+            client: keep(&self.client),
+        }
+    }
+
     fn push(&mut self, kind: &str, hosted: bool) {
         let list = if hosted {
             &mut self.hosted
@@ -95,18 +110,29 @@ pub fn foreign_tools(format: ApiFormat, body: &Value) -> ForeignTools {
             }
             ApiFormat::ChatCompletions => match tool.get("type").and_then(Value::as_str) {
                 Some("function") | None => {}
-                Some(kind) => found.push(kind, false),
+                Some(kind) => found.push(kind, anthropic_hosted(kind)),
             },
             ApiFormat::Messages => match tool.get("type").and_then(Value::as_str) {
                 Some("custom") | None => {}
                 Some(kind) => found.push(kind, anthropic_hosted(kind)),
             },
+            // 带 `type` 的不是 Gemini 的 Tool，而是随 Gemini 请求进来的 Anthropic 原生工具
+            // （`{"type":"web_search_20250305","name":..,"max_uses":..}`）：按 `type` 认，别把它的
+            // 字段名 type / name / max_uses 当成三种工具。
             ApiFormat::Gemini => {
-                for kind in tool.as_object().into_iter().flat_map(|t| t.keys()) {
-                    if !matches!(
-                        kind.as_str(),
-                        "functionDeclarations" | "function_declarations"
-                    ) {
+                if let Some(kind) = tool.get("type").and_then(Value::as_str) {
+                    found.push(kind, anthropic_hosted(kind));
+                    continue;
+                }
+                // Gemini 的 Tool 以字段名区分种类；值为 null 的字段是 SDK 把未设的可选字段也序列化了，
+                // 不是声明了这个工具。
+                for (kind, value) in tool.as_object().into_iter().flatten() {
+                    if !value.is_null()
+                        && !matches!(
+                            kind.as_str(),
+                            "functionDeclarations" | "function_declarations"
+                        )
+                    {
                         found.push(kind, gemini_hosted(kind));
                     }
                 }
@@ -117,8 +143,10 @@ pub fn foreign_tools(format: ApiFormat, body: &Value) -> ForeignTools {
 }
 
 /// Responses 内置工具里由上游执行的那些；其余（`custom`、`local_shell`、`computer_use*`……）在客户端执行。
+/// Anthropic 的服务端工具（`web_fetch_*`、`code_execution_*`）也能随 Responses / Chat 请求进来，同样是托管的。
 fn responses_hosted(kind: &str) -> bool {
     kind.starts_with("web_search")
+        || anthropic_hosted(kind)
         || matches!(
             kind,
             "file_search" | "code_interpreter" | "image_generation" | "mcp"
@@ -197,6 +225,40 @@ mod tests {
                 vec!["googleSearch".to_owned()],
                 vec!["computerUse".to_owned()]
             )
+        );
+    }
+
+    #[test]
+    fn anthropic_server_tools_are_hosted_in_any_dialect_and_carried_ones_drop_out() {
+        let body = json!({"tools": [
+            {"type": "web_fetch_20250910", "name": "web_fetch"},
+            {"type": "code_execution_20250825", "name": "code_execution"},
+            {"type": "custom", "name": "apply_patch"},
+        ]});
+        for format in [ApiFormat::Responses, ApiFormat::ChatCompletions] {
+            let found = foreign_tools(format, &body);
+            assert_eq!(
+                found.hosted,
+                ["web_fetch_20250910", "code_execution_20250825"]
+            );
+            assert_eq!(found.client, ["custom"]);
+            let left = found.without(&["web_fetch_20250910", "code_execution_20250825"]);
+            assert_eq!(
+                (left.hosted.len(), left.client.as_slice()),
+                (0, ["custom".to_owned()].as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_reads_tool_kinds_from_set_fields_and_native_tools_from_type() {
+        let gemini = json!({"tools": [{"functionDeclarations": [], "googleSearch": null, "computerUse": null}]});
+        assert!(foreign_tools(ApiFormat::Gemini, &gemini).is_empty());
+        let native = json!({"tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 2}]});
+        let found = foreign_tools(ApiFormat::Gemini, &native);
+        assert_eq!(
+            (found.hosted.as_slice(), found.client.len()),
+            (["web_search_20250305".to_owned()].as_slice(), 0)
         );
     }
 

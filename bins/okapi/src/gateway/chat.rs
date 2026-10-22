@@ -924,6 +924,12 @@ async fn first_admitted(
     None
 }
 
+/// 转换真正会丢的工具：原生工具准入（`server_tools`）会在转换后把它认得的工具原样装回，不算丢。
+fn lost_tools(info: &ProbeInfo, bill: &RequestBilling) -> ForeignTools {
+    info.foreign_tools
+        .without(&bill.server_tools.carried_types())
+}
+
 /// 请求特征探测（§3.8 能力感知路由）：tools 数组非空 / 消息含图像部件。
 /// 请求特征：要不要工具 / 视觉能力（§3.8），以及转成别家方言会丢哪些工具。
 #[derive(Default)]
@@ -1852,18 +1858,19 @@ async fn eligible_candidates(
         .retain(|c| ExecutionPlan::compile(bill.ingress, c, &bill.model, requirements).is_ok());
     // 转成别家方言会丢工具：渠道按 tool_loss_policy 决定还能不能走。全被挡下时说清是哪些工具
     // 过不去，而不是笼统的「没有可用渠道」——静默丢掉客户端工具，agent 就在看不见工具的情况下作答。
-    if !info.foreign_tools.is_empty() {
+    let lost = lost_tools(info, bill);
+    if !lost.is_empty() {
         let before = candidates.len();
         candidates.retain(|c| {
             ExecutionPlan::compile(bill.ingress, c, &bill.model, requirements)
                 .is_ok_and(|plan| !plan.converts(bill.ingress))
-                || ToolLossPolicy::parse(c.tool_loss_policy.as_deref()).admits(&info.foreign_tools)
+                || ToolLossPolicy::parse(c.tool_loss_policy.as_deref()).admits(&lost)
         });
         if before > 0 && candidates.is_empty() {
-            let blocking = if info.foreign_tools.client.is_empty() {
-                info.foreign_tools.all()
+            let blocking = if lost.client.is_empty() {
+                lost.all()
             } else {
-                info.foreign_tools.client.clone()
+                lost.client.clone()
             };
             return Err(ForwardFailure::app(
                 AppError::new(StatusCode::BAD_REQUEST, codes::TOOL_CONVERSION_UNSUPPORTED)
@@ -2261,7 +2268,7 @@ async fn try_model(
                 && bill.response_parent.is_none()
                 && cand.responses_native
                 && ToolLossPolicy::parse(cand.tool_loss_policy.as_deref())
-                    .admits(&info.foreign_tools)
+                    .admits(&lost_tools(info, bill))
                 && ExecutionPlan::compile(bill.ingress, &cand, &bill.model, Requirements::default())
                     .is_ok_and(ExecutionPlan::can_fallback_to_chat)
                 && matches!(
@@ -2433,9 +2440,10 @@ fn build_upstream_body(
         },
     )?;
     // 渠道允许丢的工具：这次转换确实丢了，记进诊断，日志里看得到少了什么
-    if plan.converts(bill.ingress) && !info.foreign_tools.is_empty() {
+    let lost = lost_tools(info, bill);
+    if plan.converts(bill.ingress) && !lost.is_empty() {
         bill.trace
-            .set("dropped_tools", serde_json::json!(info.foreign_tools.all()));
+            .set("dropped_tools", serde_json::json!(lost.all()));
     }
     let native_responses = plan.native_responses();
     let dialect = plan.dialect.as_str();
