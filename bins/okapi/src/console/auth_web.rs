@@ -426,6 +426,18 @@ pub async fn password_reset(
         return Err(AppError::bad_request().with_param("reset_token_invalid"));
     }
     state.sched.web_session_revoke_user(user_id).await;
+    // 改了密码、踢掉了全部会话：和门户里吊销会话一样留审计（这里没有 key，凭的是重置 token）
+    if let Err(error) = okapi_store::admin::record_audit(
+        &state.pg,
+        &format!("user:{user_id}"),
+        "user.password_reset",
+        &user_id.to_string(),
+        json!({"sessions_revoked": true}),
+    )
+    .await
+    {
+        tracing::error!(%error, "找回密码审计写入失败");
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
