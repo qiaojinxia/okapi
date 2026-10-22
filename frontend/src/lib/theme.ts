@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 
 /// 主题偏好：跟随系统 / 亮 / 暗。
 ///
@@ -13,7 +13,7 @@ export const THEME_STORAGE = 'okapi.theme'
 const listeners = new Set<() => void>()
 
 export function getThemePreference(): ThemePreference {
-  const v = localStorage.getItem(THEME_STORAGE)
+  const v = readLocal(THEME_STORAGE)
   return v === 'light' || v === 'dark' ? v : 'system'
 }
 

@@ -29,7 +29,7 @@ import { useModalFocus } from '@/hooks/use-modal-focus'
 import { toast } from '@/components/ui/toast'
 import { apiFetch, clearKey, registerAuthExpired } from '@/lib/api'
 import { switchLanguage } from '@/lib/i18n'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 import { formatMoney } from '@/lib/money'
 import { useTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
@@ -40,7 +40,7 @@ export type { NavItem, NavGroup } from '@/components/sidebar-nav'
 const SIDEBAR_STORAGE = 'okapi.sidebar'
 
 function loadCollapsed(): boolean | null {
-  const saved = localStorage.getItem(SIDEBAR_STORAGE)
+  const saved = readLocal(SIDEBAR_STORAGE)
   return saved === 'rail' ? true : saved === 'full' ? false : null
 }
 

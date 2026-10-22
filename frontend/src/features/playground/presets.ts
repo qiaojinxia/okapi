@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { useCallback, useSyncExternalStore } from 'react'
 import { apiFetch } from '@/lib/api'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 
 /// 聊天预设 = 模型 + 系统提示词 + 采样参数（IMPLEMENTATION §11.39）。
@@ -77,7 +77,7 @@ function isPreset(v: unknown): v is Preset {
 
 export function readPresets(userId: number): Preset[] {
   try {
-    const raw = JSON.parse(localStorage.getItem(storageKey(userId)) ?? '[]') as unknown
+    const raw = JSON.parse(readLocal(storageKey(userId)) ?? '[]') as unknown
     return Array.isArray(raw) ? raw.filter(isPreset) : []
   } catch {
     return []
@@ -105,7 +105,7 @@ export function useUserPresets(userId: number | undefined) {
     return () => listeners.delete(onChange)
   }, [])
   // 快照必须引用稳定：按序列化串缓存，内容不变就返回同一个数组
-  const snapshot = useCallback(() => (userId === undefined ? '[]' : (localStorage.getItem(storageKey(userId)) ?? '[]')), [userId])
+  const snapshot = useCallback(() => (userId === undefined ? '[]' : (readLocal(storageKey(userId)) ?? '[]')), [userId])
   const raw = useSyncExternalStore(subscribe, snapshot, () => '[]')
   return parseCached(raw)
 }

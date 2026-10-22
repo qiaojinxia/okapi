@@ -3,7 +3,7 @@ import { AlertTriangle, Info, Megaphone, X } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { apiFetch } from '@/lib/api'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
@@ -22,7 +22,7 @@ const DISMISS_KEY = 'okapi.notice.dismissed'
 /// 用户抱怨"价格变了没通知"时，站长至少能确认通知确实弹过。
 /// critical 档不可关闭：停服级通知不该被一次误触永久隐藏。
 export function NoticeBanner({ className }: { className?: string }) {
-  const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISS_KEY) ?? '')
+  const [dismissed, setDismissed] = useState(() => readLocal(DISMISS_KEY) ?? '')
   const q = useQuery({
     queryKey: qk.notice,
     queryFn: () => apiFetch<{ notice: Notice | null }>('/api/notice'),

@@ -39,3 +39,28 @@ test('偏好写入存储失败（配额满 / 存储被禁）：切主题、切�
 
   expect(errors.filter((message) => /quota/i.test(message)), '存储写入失败不应冒成未捕获异常').toEqual([])
 })
+
+test('站点数据被完全禁用（连读 localStorage 都抛 SecurityError）：页面照常渲染出登录表单', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (error) => errors.push(error.message))
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new DOMException('The operation is insecure.', 'SecurityError')
+      },
+    })
+  })
+  await page.route('**/*', (route) => {
+    const request = route.request(), path = new URL(request.url()).pathname
+    if (request.isNavigationRequest()) return route.fulfill({
+      path: fileURLToPath(new URL('../dist/index.html', import.meta.url)), contentType: 'text/html',
+    })
+    if (!/^\/(api|auth|admin)\//.test(path)) return route.continue()
+    return route.fulfill({ json: { data: [] } })
+  })
+  await page.goto('/portal')
+  // 读不到登录态就是未登录：落到登录表单，而不是白屏
+  await expect(page.locator('input[type="password"]')).toBeVisible()
+  expect(errors, '读存储失败不应冒成未捕获异常').toEqual([])
+})

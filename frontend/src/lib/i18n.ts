@@ -4,12 +4,12 @@ import zhCN from '@/locales/zh-CN'
 import en from '@/locales/en'
 import { withModelEditorZh } from '@/locales/model-editor-zh'
 import { ApiError } from '@/lib/api'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 
 const LANG_STORAGE = 'okapi.lang'
 
 export function initI18n(): typeof i18n {
-  const saved = localStorage.getItem(LANG_STORAGE)
+  const saved = readLocal(LANG_STORAGE)
   const fallback = navigator.language.startsWith('zh') ? 'zh-CN' : 'en'
   void i18n.use(initReactI18next).init({
     resources: {

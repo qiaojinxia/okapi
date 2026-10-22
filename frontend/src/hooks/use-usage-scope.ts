@@ -1,7 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import type { Scope } from '@/features/portal-overview/types'
 import { getLoginMode, USAGE_SCOPE_STORAGE } from '@/lib/api'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 import { useMe } from './use-auth'
 
 const event = 'okapi:usage-scope'
@@ -14,7 +14,7 @@ function subscribe(callback: () => void) {
   }
 }
 function snapshot(): Scope | null {
-  const value = localStorage.getItem(USAGE_SCOPE_STORAGE)
+  const value = readLocal(USAGE_SCOPE_STORAGE)
   return value === 'key' || value === 'user' ? value : null
 }
 function setScope(value: Scope) {

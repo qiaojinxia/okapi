@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { createContext, useContext, useSyncExternalStore } from 'react'
 import { useMe } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
-import { rememberLocal } from '@/lib/storage'
+import { readLocal, rememberLocal } from '@/lib/storage'
 import { qk } from '@/lib/query-keys'
 
 export const GUIDE_STEPS = ['key', 'model', 'connect', 'call'] as const
@@ -59,7 +59,7 @@ export function useGuideDismissed(): boolean {
       return () => listeners.delete(onChange)
     },
     // 用户信息未回来前当作已关闭：宁可晚一瞬出现，也不要闪一下再消失
-    () => (userId === undefined ? true : localStorage.getItem(storageKey(userId)) === 'dismissed'),
+    () => (userId === undefined ? true : readLocal(storageKey(userId)) === 'dismissed'),
   )
 }
 

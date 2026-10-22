@@ -1,6 +1,8 @@
 // API client：Bearer key 鉴权；后端只回 error_code + param（i18n 红线），
 // 文案渲染在 errors 命名空间完成。
 
+import { readLocal, rememberLocal } from '@/lib/storage'
+
 const KEY_STORAGE = 'okapi.key'
 const LOGIN_STORAGE = 'okapi.login-mode'
 export const USAGE_SCOPE_STORAGE = 'okapi.usage-scope'
@@ -30,12 +32,12 @@ const KEY_REVOKED_CODES = new Set(['invalid_api_key', 'key_disabled'])
 let verifyingKey: Promise<unknown> | null = null
 
 export function getLoginMode(): 'account' | 'key' | null {
-  const value = localStorage.getItem(LOGIN_STORAGE)
+  const value = readLocal(LOGIN_STORAGE)
   return value === 'account' || value === 'key' ? value : null
 }
 
 export function getKey(): string | null {
-  return localStorage.getItem(KEY_STORAGE)
+  return readLocal(KEY_STORAGE)
 }
 
 export function setKey(key: string, mode: 'account' | 'key' = 'key'): void {
@@ -47,9 +49,10 @@ export function setKey(key: string, mode: 'account' | 'key' = 'key'): void {
 
 export function clearKey(): void {
   resetAuthContext()
-  localStorage.removeItem(KEY_STORAGE)
-  localStorage.removeItem(LOGIN_STORAGE)
-  localStorage.removeItem(USAGE_SCOPE_STORAGE)
+  // 退出时存储不可用：本来就没存进去，清不掉也无妨，别让退出按钮抛错
+  rememberLocal(KEY_STORAGE, null)
+  rememberLocal(LOGIN_STORAGE, null)
+  rememberLocal(USAGE_SCOPE_STORAGE, null)
 }
 
 export class ApiError extends Error {
