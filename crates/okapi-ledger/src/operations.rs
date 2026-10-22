@@ -122,6 +122,10 @@ pub async fn import_credit(
     actor: &str,
     payload: Value,
 ) -> Result<(), LedgerError> {
+    // 导入只加钱：负额会绕过 debit 的「钳到可用额」，和 credit 同样拒掉
+    if amount.as_micros() < 0 {
+        return Err(LedgerError::InvalidAmount);
+    }
     let mut guard = UserGuard::acquire(db, user_id).await?;
     if let Some(ledger) = ledger {
         guard.synchronize(ledger).await?;

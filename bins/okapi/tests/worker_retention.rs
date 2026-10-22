@@ -648,7 +648,18 @@ async fn retention_handles_calendar_boundaries_and_disabled_or_extreme_values() 
 async fn zero_net_import_actor_still_blocks_reimport_after_retention() {
     let b = setup().await;
     b.credit(1000, "import:net-zero").await;
-    b.credit(-1000, "import:net-zero").await;
+    let (applied, _) = okapi_ledger::operations::debit(
+        &b.pg,
+        &b.ledger,
+        b.uid,
+        Money::from_micros(1000),
+        "adjust",
+        "import:net-zero",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(applied.as_micros(), 1000);
     b.age().await;
     b.prune().await;
     okapi_ledger::operations::import_credit(

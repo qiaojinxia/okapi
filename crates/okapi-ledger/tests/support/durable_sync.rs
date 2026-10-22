@@ -427,6 +427,19 @@ async fn negative_amounts_are_rejected_without_moving_money() -> TestResult {
         credit,
         Err(okapi_ledger::LedgerError::InvalidAmount)
     ));
+    let import = okapi_ledger::operations::import_credit(
+        &b.base.pg,
+        Some(&b.ledger),
+        b.base.user_id,
+        Money::from_micros(-300),
+        "test:import",
+        json!({}),
+    )
+    .await;
+    assert!(matches!(
+        import,
+        Err(okapi_ledger::LedgerError::InvalidAmount)
+    ));
     assert_eq!(b.ledger.balance(b.base.user_id).await?, balance);
     assert_eq!(b.base.wallet_snapshot().await, snapshot);
     assert_eq!(adjusts().await?, before, "拒绝时不得写任何调账事件");
