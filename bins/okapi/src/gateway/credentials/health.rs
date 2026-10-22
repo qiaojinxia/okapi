@@ -1,7 +1,6 @@
 //! Non-secret refresh observations; failure backoff is shared by worker replicas.
 use super::super::state::AppState;
 use fred::interfaces::KeysInterface;
-use fred::types::Expiration;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -35,40 +34,70 @@ impl RefreshHealth {
     }
 }
 
-pub async fn read(state: &AppState, key: i64) -> Option<RefreshHealth> {
-    let payload: Option<String> = state
+async fn read_raw(state: &AppState, key: i64) -> Result<Option<String>, fred::error::Error> {
+    state
         .sched
         .client()
         .get(format!("oauth:refresh:{key}"))
         .await
-        .ok()?;
+}
+
+pub async fn read(state: &AppState, key: i64) -> Option<RefreshHealth> {
+    let payload = read_raw(state, key).await.ok()?;
     serde_json::from_str(payload.as_deref()?).ok()
 }
 
+/// gateway 与 worker 会并发记同一把 key：读出原文、在本地算新值，只在原文没被别人改过时写回，
+/// 被抢先就重读再算。裸 GET→SET 会让并发的两次失败只记成一次，退避提前结束。
 pub async fn record(state: &AppState, key: i64, failure: Option<&str>) {
-    let mut health = read(state, key).await.unwrap_or_default();
-    let now = chrono::Utc::now().timestamp();
-    match failure {
-        Some(code) => health.failed(now, code),
-        None => health.succeeded(now),
+    use fred::interfaces::LuaInterface;
+    for _ in 0..8 {
+        let raw = match read_raw(state, key).await {
+            Ok(raw) => raw,
+            Err(error) => {
+                tracing::warn!(key, error = %error, "OAuth refresh observation unavailable");
+                return;
+            }
+        };
+        let mut health: RefreshHealth = raw
+            .as_deref()
+            .and_then(|p| serde_json::from_str(p).ok())
+            .unwrap_or_default();
+        let now = chrono::Utc::now().timestamp();
+        match failure {
+            Some(code) => health.failed(now, code),
+            None => health.succeeded(now),
+        }
+        let Ok(payload) = serde_json::to_string(&health) else {
+            return;
+        };
+        let written: Result<i64, _> = state
+            .sched
+            .client()
+            .eval(
+                r"
+            local old=redis.call('GET',KEYS[1]) or ''
+            if old~=ARGV[1] then return 0 end
+            redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]); return 1
+        ",
+                vec![format!("oauth:refresh:{key}")],
+                vec![
+                    raw.unwrap_or_default(),
+                    payload,
+                    (30 * 24 * 3600).to_string(),
+                ],
+            )
+            .await;
+        match written {
+            Ok(1) => return,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(key, error = %error, "OAuth refresh observation unavailable");
+                return;
+            }
+        }
     }
-    let Ok(payload) = serde_json::to_string(&health) else {
-        return;
-    };
-    let result: Result<(), _> = state
-        .sched
-        .client()
-        .set(
-            format!("oauth:refresh:{key}"),
-            payload,
-            Some(Expiration::EX(30 * 24 * 3600)),
-            None,
-            false,
-        )
-        .await;
-    if let Err(error) = result {
-        tracing::warn!(key, error = %error, "OAuth refresh observation unavailable");
-    }
+    tracing::warn!(key, "OAuth refresh observation lost to concurrent writers");
 }
 
 #[cfg(test)]
