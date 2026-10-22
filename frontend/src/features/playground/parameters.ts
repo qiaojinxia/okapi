@@ -25,8 +25,10 @@ export async function loadParameters(model: string, keyId: number | null, signal
     signal,
     headers: { ...(key ? { Authorization: `Bearer ${key}` } : {}), ...(keyId === null ? {} : { 'X-Okapi-Playground-Key': String(keyId) }) },
   })
-  const value = await response.json()
-  if (!response.ok) throw new ApiError(response.status, value.error?.code ?? 'internal_error', value.error?.param)
+  // 与 apiFetch 同口径：空体 / 非 JSON（网关前面的代理回的 HTML 错误页）不能变成未捕获的 SyntaxError
+  const value = await response.json().catch(() => null)
+  if (!response.ok) throw new ApiError(response.status, value?.error?.code ?? 'internal_error', value?.error?.param)
+  if (value === null || typeof value !== 'object') throw new ApiError(502, 'internal_error')
   if (typeof value.known !== 'boolean' || !Array.isArray(value.efforts)
     || !value.efforts.every((e: unknown) => typeof e === 'string')
     || !(value.temperature_max === null || (typeof value.temperature_max === 'number' && Number.isFinite(value.temperature_max)))
