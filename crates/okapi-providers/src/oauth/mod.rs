@@ -143,24 +143,42 @@ pub fn is_invalid_grant(status: u16, body: &[u8]) -> bool {
         | "unauthorized_client"
         | "refresh_token_expired"
         | "refresh_token_reused"
-        | "refresh_token_invalidated" => true,
+        | "refresh_token_invalidated"
+        | "token_invalidated"
+        | "token_expired"
+        | "token_revoked" => true,
         // OAuth 里 invalid_request 本是"请求形状错"（缺必填参数之类）：上游哪天多要一个参数，
         // 一概判死会让所有订阅 key 一次性进 invalid，只能人工重登。有的上游对失效的 refresh token
-        // 也回这个码，所以只有说明里点名了 refresh token / grant 才当终态，其余按瞬态重试。
-        "invalid_request" => {
-            let text = error_text(&v);
-            [
-                "refresh token",
-                "refresh_token",
-                "grant",
-                "revoked",
-                "expired",
-            ]
-            .iter()
-            .any(|needle| text.contains(needle))
-        }
+        // 也回这个码，所以只有说明里点名了凭据本身失效才当终态，其余按瞬态重试。
+        "invalid_request" | "invalid_request_error" => names_dead_credential(&error_text(&v)),
         _ => false,
     }
+}
+
+/// 说明里是不是在讲凭据本身失效。按词比对：`grant_type` 里的 grant 不算 grant；
+/// 讲缺参数 / 不认识的参数的是形状错，哪怕参数名里带 grant、refresh_token。
+fn names_dead_credential(text: &str) -> bool {
+    let words: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let has = |word: &str| words.contains(&word);
+    if [
+        "missing",
+        "required",
+        "unsupported",
+        "unknown",
+        "unrecognized",
+    ]
+    .iter()
+    .any(|w| has(w))
+    {
+        return false;
+    }
+    has("grant")
+        || has("refresh_token")
+        || words.windows(2).any(|pair| pair == ["refresh", "token"])
+        || ["revoked", "expired", "invalidated"].iter().any(|w| has(w))
 }
 
 /// 错误体里的人话说明（`error_description` / `message` / `detail`，顶层或 `error` 对象里），小写。
@@ -290,6 +308,8 @@ mod tests {
         for body in [
             br#"{"error":"invalid_request","error_description":"Refresh token not found or invalid"}"#.as_slice(),
             br#"{"error":{"code":"invalid_request","message":"The provided authorization grant is expired"}}"#.as_slice(),
+            br#"{"error":{"type":"invalid_request_error","code":"token_invalidated","message":"Your authentication token has been invalidated."}}"#.as_slice(),
+            br#"{"error":"invalid_request","error_description":"Token has been invalidated"}"#.as_slice(),
         ] {
             assert!(is_invalid_grant(400, body), "{}", String::from_utf8_lossy(body));
         }
@@ -297,6 +317,9 @@ mod tests {
             br#"{"error":"invalid_request","error_description":"Missing required parameter: client_id"}"#.as_slice(),
             br#"{"error":"invalid_request"}"#.as_slice(),
             br#"{"error":{"type":"invalid_request","message":"unsupported field"}}"#.as_slice(),
+            br#"{"error":"invalid_request","error_description":"Missing required parameter: grant_type"}"#.as_slice(),
+            br#"{"error":"invalid_request","error_description":"Unsupported grant_type"}"#.as_slice(),
+            br#"{"error":"invalid_request","error_description":"refresh_token is required"}"#.as_slice(),
         ] {
             assert!(!is_invalid_grant(400, body), "{}", String::from_utf8_lossy(body));
         }
