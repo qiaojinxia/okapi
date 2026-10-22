@@ -173,3 +173,5 @@ jobs:
         run: python3 scripts/guard-error-codes.py
       - name: 部署模板守卫（healthz 探针、下线宽限期、PG 连接预算）
         run: python3 scripts/guard-deploy-manifests.py
+      - name: e2e spec 登记守卫（没列进 testMatch 的 spec 永远不会跑）
+        run: python3 scripts/guard-e2e-specs.py
