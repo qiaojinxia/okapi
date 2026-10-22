@@ -1,7 +1,8 @@
 use super::error::AppError;
+use super::extract::Query;
 use super::state::AppState;
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::HeaderMap;
 use serde_json::json;
 

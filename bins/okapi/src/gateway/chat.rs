@@ -479,6 +479,9 @@ pub async fn chat_completions(
     let Ok(probe) = serde_json::from_slice::<ChatRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
+    if let Err(error) = check_input(Ingress::OpenAi, &body) {
+        return error.into_response_with(Some(request_id));
+    }
     let features = request_features(Ingress::OpenAi, &body);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
@@ -554,6 +557,9 @@ async fn responses_entry(
     let Ok(probe) = serde_json::from_slice::<ResponsesRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
+    if let Err(error) = check_input(Ingress::Responses, &body) {
+        return error.into_response_with(Some(request_id));
+    }
     // 后台模式先回「排队中」、不带用量，生成在本次结算之后继续——网关只能按估算收一点，
     // 推理费用全由站方承担，且没有取回结果的接口。WS 入口同样拒绝。
     if probe.background == Some(true) {
@@ -619,12 +625,22 @@ pub struct GeminiQuery {
 pub async fn gemini_generate(
     State(state): State<AppState>,
     axum::extract::Path(model_action): axum::extract::Path<String>,
-    axum::extract::Query(query): axum::extract::Query<GeminiQuery>,
+    uri: axum::http::Uri,
     mut headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let request_id = Uuid::new_v4();
     let started = Instant::now();
+    // 自己解析查询串：axum 的 Query 拒绝时回框架的纯文本 400（如重复的 `?key=`），不走 Gemini 错误壳
+    let query = match axum::extract::Query::<GeminiQuery>::try_from_uri(&uri) {
+        Ok(axum::extract::Query(query)) => query,
+        Err(error) => {
+            tracing::debug!(%error, "bad Gemini query string");
+            return AppError::bad_request()
+                .with_param("query")
+                .into_gemini_response_with(Some(request_id));
+        }
+    };
     let Some((model, action)) = model_action.rsplit_once(':') else {
         return AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND)
             .into_gemini_response_with(Some(request_id));
@@ -653,6 +669,9 @@ pub async fn gemini_generate(
     let Ok(probe) = serde_json::from_slice::<okapi_api::GeminiRequestProbe>(&body) else {
         return AppError::bad_request().into_gemini_response_with(Some(request_id));
     };
+    if let Err(error) = check_input(Ingress::Gemini, &body) {
+        return error.into_gemini_response_with(Some(request_id));
+    }
     let input_messages = probe.input_messages();
     let features = request_features(Ingress::Gemini, &body);
     let info = ProbeInfo {
@@ -700,6 +719,9 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
     let Ok(probe) = serde_json::from_slice::<MessagesRequestProbe>(&body) else {
         return AppError::bad_request().into_anthropic_response_with(Some(request_id));
     };
+    if let Err(error) = check_input(Ingress::Anthropic, &body) {
+        return error.into_anthropic_response_with(Some(request_id));
+    }
     let features = request_features(Ingress::Anthropic, &body);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
@@ -785,8 +807,7 @@ async fn count_tokens_inner(
     // 不计费，但有 anthropic 候选时会拿渠道凭证打上游 tokenizer：按分组窗限速（§11.32）。
     // 不过 check_member_limit——那是月度消费上限，不该挡住不花钱的调用
     super::auth::check_group_rate(state, &key).await?;
-    let probe: MessagesRequestProbe =
-        serde_json::from_slice(&body).map_err(|_| AppError::bad_request())?;
+    let probe: MessagesRequestProbe = parse_checked(Ingress::Anthropic, &body)?;
     let meta = resolve_model_cached(state, &probe.model).await?;
     let Some(meta) = meta.as_ref() else {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND));
@@ -922,6 +943,51 @@ async fn first_admitted(
         }
     }
     None
+}
+
+/// 探针之外的入参口径：负 temperature 和 max_tokens 负值一样在入口拒掉，不原样透传给上游；
+/// Chat / Messages 的 `messages`、Gemini 的 `contents` 为空没有可答的内容，也在入口拒掉，
+/// 不再选渠道、打上游后才失败。拒绝时 param 是出错的参数名。
+fn check_input(ingress: Ingress, body: &[u8]) -> Result<(), AppError> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Ok(());
+    };
+    let temperature = if ingress == Ingress::Gemini {
+        v.get("generationConfig")
+            .or_else(|| v.get("generation_config"))
+            .and_then(|c| c.get("temperature"))
+    } else {
+        v.get("temperature")
+    };
+    if temperature
+        .and_then(serde_json::Value::as_f64)
+        .is_some_and(|t| t < 0.0)
+    {
+        return Err(AppError::bad_request().with_param("temperature"));
+    }
+    let (field, required) = match ingress {
+        Ingress::OpenAi | Ingress::Anthropic => ("messages", true),
+        Ingress::Gemini => ("contents", true),
+        _ => ("", false),
+    };
+    if required
+        && v.get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(Vec::is_empty)
+    {
+        return Err(AppError::bad_request().with_param(field));
+    }
+    Ok(())
+}
+
+/// 解析入口探针并过 [`check_input`]。
+fn parse_checked<T: serde::de::DeserializeOwned>(
+    ingress: Ingress,
+    body: &[u8],
+) -> Result<T, AppError> {
+    let probe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    check_input(ingress, body)?;
+    Ok(probe)
 }
 
 /// 转换真正会丢的工具：原生工具准入（`server_tools`）会在转换后把它认得的工具原样装回，不算丢。
