@@ -14,7 +14,7 @@ const CLOSE_TAG: &str = "\n</think>\n";
 /// 把 `lead` 放到 `content` 最前面，原有内容一个字不丢：字符串 / 缺省 / null 拼成字符串；
 /// 分段数组（多模态输出的合法形状）在头部插一个 `{"type":"text"}` 片段，原有片段原样保留；
 /// 空数组没有东西可保，退成字符串。别的形状认不得，返回 false 且不改动，
-/// 调用方原样放行——宁可客户端多看到一个 `reasoning_content`，也不静默吞掉上游内容。
+/// 调用方把思考另发一条、原 chunk 照发——不静默吞掉上游内容。
 fn prepend_text(holder: &mut Map<String, Value>, lead: &str) -> bool {
     match holder.get_mut("content") {
         Some(Value::String(text)) => text.insert_str(0, lead),
@@ -108,7 +108,7 @@ impl ThinkingToContent {
             lead.push_str(CLOSE_TAG);
         }
 
-        if lead.is_empty() || !prepend_text(delta, &lead) {
+        if lead.is_empty() {
             return vec![Ok(ChatEvent::Data {
                 raw,
                 event,
@@ -116,6 +116,11 @@ impl ThinkingToContent {
                 content_chars,
                 usage,
             })];
+        }
+        if !prepend_text(delta, &lead) {
+            delta.remove("reasoning_content");
+            (self.opened, self.closed) = (opened, closed);
+            return split_thinking(&chunk, &lead, event, usage);
         }
         (self.opened, self.closed) = (opened, closed);
         delta.remove("reasoning_content");
@@ -129,6 +134,45 @@ impl ThinkingToContent {
             usage,
         })]
     }
+}
+
+/// 正文形状认不得、思考拼不进去：思考单独发成一条只带正文的 chunk，原 chunk（已去掉
+/// reasoning_content）照发。开标签照常记下，后面的思考不会再从标签外漏出来。
+fn split_thinking(
+    chunk: &Value,
+    lead: &str,
+    event: Option<String>,
+    usage: Option<okapi_api::UsageProbe>,
+) -> Vec<Result<ChatEvent, UpstreamError>> {
+    let mut think = chunk.clone();
+    if let Some(map) = think.as_object_mut() {
+        map.remove("usage");
+    }
+    if let Some(choice) = think
+        .pointer_mut("/choices/0")
+        .and_then(Value::as_object_mut)
+    {
+        choice.insert("delta".into(), json!({ "content": lead }));
+        choice.insert("finish_reason".into(), Value::Null);
+    }
+    let (_, think_chars) = okapi_api::chunk_output_lenient(&think);
+    let (rest_output, rest_chars) = okapi_api::chunk_output_lenient(chunk);
+    vec![
+        Ok(ChatEvent::Data {
+            raw: think.to_string(),
+            event: event.clone(),
+            has_output: true,
+            content_chars: think_chars,
+            usage: None,
+        }),
+        Ok(ChatEvent::Data {
+            raw: chunk.to_string(),
+            event,
+            has_output: rest_output,
+            content_chars: rest_chars,
+            usage,
+        }),
+    ]
 }
 
 /// 非流式：message.reasoning_content → `<think>…</think>` 前缀正文。

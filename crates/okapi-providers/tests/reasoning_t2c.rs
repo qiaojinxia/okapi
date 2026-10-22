@@ -296,23 +296,20 @@ fn t2c_stream_reasoning_and_array_content_in_one_chunk() {
 }
 
 #[test]
-fn t2c_stream_unknown_content_shape_passes_through_without_advancing() {
-    let weird = delta_chunk(&json!({"reasoning_content": "x", "content": {"weird": 1}}));
-    let ChatEvent::Data { raw: before, .. } = &weird else {
-        unreachable!()
-    };
-    let before = before.clone();
-    let mut st = ThinkingToContent::new();
-    let out = st.step(Ok(weird));
-    let ChatEvent::Data { raw, .. } = out.into_iter().next().unwrap().unwrap() else {
-        panic!("expected data")
-    };
-    assert_eq!(raw, before, "认不得的形状原样放行");
-    // 状态没被这个 chunk 推进：随后的第一段思考仍带开标签
-    let out = st.step(Ok(reasoning_chunk("y")));
-    let ChatEvent::Data { raw, .. } = out.into_iter().next().unwrap().unwrap() else {
-        panic!("expected data")
-    };
-    let v: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(v["choices"][0]["delta"]["content"], "<think>\ny");
+fn t2c_stream_unknown_content_shape_splits_the_thinking_off_and_keeps_the_rest() {
+    let out = run_stream(vec![
+        delta_chunk(&json!({"reasoning_content": "x", "content": {"weird": 1}})),
+        reasoning_chunk("y"),
+        content_chunk("answer"),
+    ]);
+    // 认不得的正文拼不进标签：思考单独成一条，原 chunk 去掉 reasoning_content、正文原样保留
+    assert_eq!(out[0].0, json!({"content": "<think>\nx"}));
+    assert_eq!(out[1].0, json!({"content": {"weird": 1}}));
+    // 开标签已记下：后续思考接在标签里，不会再从标签外漏出来
+    assert_eq!(out[2].0["content"], "y");
+    assert_eq!(out[3].0["content"], "\n</think>\nanswer");
+    assert!(
+        out.iter()
+            .all(|(delta, _)| delta.get("reasoning_content").is_none())
+    );
 }
