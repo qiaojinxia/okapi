@@ -36,6 +36,22 @@ pub(super) async fn guard(
     Ok(key)
 }
 
+/// `/admin/` 下全是要登录的接口：先鉴权再交给处理器。请求体 / 查询串提取器跑在处理器体之前，
+/// 不先鉴权的话，匿名请求带坏请求体拿到的是 400 而不是 401。权限点仍由处理器里的 [`guard`] 查。
+pub(super) async fn authenticate_first(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if request.uri().path().starts_with("/admin/")
+        && let Err(error) = authenticate(&state, request.headers()).await
+    {
+        return error.into_response();
+    }
+    next.run(request).await
+}
+
 /// 带 own/all 范围的守卫（#6267）：Denied → 403；返回范围供 handler 做属主过滤。
 pub(super) async fn guard_scoped(
     state: &AppState,

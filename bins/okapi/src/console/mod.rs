@@ -129,6 +129,10 @@ pub fn router(state: AppState) -> Router {
         .merge(auth_routes())
         .route("/mcp", post(mcp::endpoint))
         .route("/healthz", get(|| async { "ok" }))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin::authenticate_first,
+        ))
         // 只套在上面这些 API 路由上（route_layer 在路由匹配之后运行，拿得到路由模板）
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
