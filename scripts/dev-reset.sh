@@ -22,6 +22,11 @@ set +a
 # URL 尾部可能带 ?sslmode=… 之类的参数（值里甚至可能有 /）：先去掉参数再取库名，别把参数拼进 DROP / CREATE DATABASE
 DB_NAME="${DATABASE_URL%%\?*}"
 DB_NAME="${DB_NAME##*/}"
+# 库名直接拼进 DROP DATABASE：只认普通标识符，免得一个写错的 .env 把 SQL 拼歪
+if [[ ! "$DB_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  echo "DATABASE_URL 里的库名 ${DB_NAME} 不是普通标识符，拒绝重置" >&2
+  exit 1
+fi
 PG_CONTAINER="${PG_CONTAINER:-okapi-dev-pg}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-okapi-dev-redis}"
 CH_URL="${OKAPI_CLICKHOUSE_URL:-}"
@@ -38,8 +43,8 @@ fi
 
 echo "▶ 重建 PostgreSQL 库 ${DB_NAME}"
 docker exec "$PG_CONTAINER" psql -U okapi -d postgres -q \
-  -c "DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)" \
-  -c "CREATE DATABASE ${DB_NAME}"
+  -c "DROP DATABASE IF EXISTS \"${DB_NAME}\" WITH (FORCE)" \
+  -c "CREATE DATABASE \"${DB_NAME}\""
 
 echo "▶ 应用迁移"
 (cd crates/okapi-store && sqlx migrate run)

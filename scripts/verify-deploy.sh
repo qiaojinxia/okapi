@@ -80,7 +80,9 @@ if [ "${OKAPI_VERIFY_IMAGE:-0}" = "1" ]; then
   # previously applied but is missing"），所以给镜像一个临时空库，顺便验证首启建表与 Setup 向导
   IMG_DB="okapi_image_verify_$(date +%s)"
   docker exec "${PG_CONTAINER:-okapi-dev-pg}" psql -U okapi -d postgres -q -c "CREATE DATABASE \"$IMG_DB\""
-  HOST_PG="${DATABASE_URL%/*}/$IMG_DB"
+  # 先拆掉 ?参数 再换库名（参数值里可能有 /），参数原样接回去
+  PG_BASE="${DATABASE_URL%%\?*}"
+  HOST_PG="${PG_BASE%/*}/$IMG_DB${DATABASE_URL#"$PG_BASE"}"
   HOST_PG=${HOST_PG//localhost/host.docker.internal}
   HOST_PG=${HOST_PG//127.0.0.1/host.docker.internal}
   HOST_REDIS=${OKAPI_REDIS_URL//localhost/host.docker.internal}
