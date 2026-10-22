@@ -159,13 +159,22 @@ where
         .bind(input.api_key_id).bind(input.user_id).fetch_one(&mut *tx).await?;
     let outstanding:i64=sqlx::query_scalar("SELECT COALESCE(SUM(maximum_micro),0)::bigint FROM balance_holds WHERE api_key_id=$1 AND state<>'closed'")
         .bind(input.api_key_id).fetch_one(&mut *tx).await?;
-    if mode == 1
-        && spent
+    if mode == 1 {
+        // 与 key_budget 同一口径：限额模式却没有限额是被改坏的行，不能当成「限额 0」静默地永远拒
+        let Some(quota) = quota else {
+            tracing::error!(
+                key_id = input.api_key_id,
+                "api_keys.quota_mode = 1 but quota_micro is NULL"
+            );
+            return Err(Error::AdmissionStateInvalid);
+        };
+        if spent
             .checked_add(outstanding)
             .and_then(|n| n.checked_add(input.maximum.as_micros()))
-            .is_none_or(|n| n > quota.unwrap_or(0))
-    {
-        return Err(Error::Budget);
+            .is_none_or(|n| n > quota)
+        {
+            return Err(Error::Budget);
+        }
     }
     if let Some(parent) = input.parent_id {
         let parent_owned:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM image_batches WHERE id=$1 AND user_id=$2 AND api_key_id=$3 AND NOT delete_requested)")

@@ -16,6 +16,9 @@ pub enum Error {
     Capacity,
     #[error("batch_budget")]
     Budget,
+    /// 准入要读的行状态非法（如限额模式的 key 没有限额）：要人修数据，不是调用方的错。
+    #[error("batch_admission_state_invalid")]
+    AdmissionStateInvalid,
     #[error("batch_idempotency_conflict")]
     IdempotencyConflict,
     #[error("batch_lease_lost")]

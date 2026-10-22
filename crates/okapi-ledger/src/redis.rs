@@ -100,12 +100,15 @@ impl TryFrom<i16> for Pool {
     }
 }
 
-fn pool_at(items: &[Value], idx: usize) -> Pool {
-    // Lua 回的是整数 0/1；缺位（老脚本）按钱包
-    match items.get(idx).and_then(value_i64) {
-        Some(1) => Pool::Subscription,
-        _ => Pool::Wallet,
-    }
+fn pool_at(items: &[Value], idx: usize) -> Result<Pool, LedgerError> {
+    // Lua 回的是整数 0/1；缺位（老脚本）按钱包。认不得的值不默认成钱包：和 `TryFrom<i16>` 一样拒掉，
+    // 免得把订阅池的钱记回钱包
+    let Some(item) = items.get(idx) else {
+        return Ok(Pool::Wallet);
+    };
+    let raw = value_i64(item).ok_or(LedgerError::UnexpectedReply("pool"))?;
+    let raw = i16::try_from(raw).map_err(|_| LedgerError::UnexpectedReply("pool"))?;
+    Pool::try_from(raw)
 }
 
 /// key 级限额（<=0 表示不限）。
@@ -255,7 +258,7 @@ impl BalanceLedger {
         match (first_i64(items), second_str(items)) {
             (Some(1), _) => Ok(ReserveOutcome::Reserved {
                 balance_after: money_at(items, 1)?,
-                pool: pool_at(items, 2),
+                pool: pool_at(items, 2)?,
                 source_window: items
                     .get(3)
                     .and_then(value_str)
@@ -349,7 +352,7 @@ impl BalanceLedger {
             (Some(1), _) => Ok(CommitOutcome::Committed {
                 refund_delta: money_at(items, 1)?,
                 balance_after: money_at(items, 2)?,
-                pool: pool_at(items, 3),
+                pool: pool_at(items, 3)?,
             }),
             (Some(0), Some("NO_RESERVATION")) => Ok(CommitOutcome::NoReservation),
             (Some(0), Some("INVALID_SETTLEMENT")) => Err(LedgerError::InvalidSettlement),
@@ -392,7 +395,7 @@ impl BalanceLedger {
                 closed: items.get(4).and_then(value_i64) == Some(1),
                 released: money_at(items, 1)?,
                 balance_after: money_at(items, 2)?,
-                pool: pool_at(items, 3),
+                pool: pool_at(items, 3)?,
             }),
             (Some(0), Some("RESERVATION_CONFLICT")) => Err(LedgerError::ReservationConflict),
             (Some(0), Some("SETTLEMENT_STATE_INVALID")) => Err(LedgerError::SettlementStateInvalid),
@@ -738,5 +741,23 @@ mod pool_tests {
                 "{bad} 不能被悄悄当成钱包"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pool_reply_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_pool_values_are_rejected_instead_of_read_as_wallet() {
+        let items = [Value::Integer(1), Value::Integer(0), Value::Integer(1)];
+        assert_eq!(pool_at(&items, 2).unwrap(), Pool::Subscription);
+        assert_eq!(pool_at(&items, 1).unwrap(), Pool::Wallet);
+        assert_eq!(pool_at(&items, 3).unwrap(), Pool::Wallet);
+        assert!(matches!(
+            pool_at(&[Value::Integer(7)], 0),
+            Err(LedgerError::InvalidPool(7))
+        ));
+        assert!(pool_at(&[Value::String("x".into())], 0).is_err());
     }
 }

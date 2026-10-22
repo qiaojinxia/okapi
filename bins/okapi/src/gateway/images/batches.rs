@@ -54,6 +54,9 @@ fn map_store(error: store::Error) -> AppError {
             AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::INSUFFICIENT_QUOTA)
                 .with_param("batch_budget")
         }
+        store::Error::AdmissionStateInvalid => {
+            AppError::new(StatusCode::INTERNAL_SERVER_ERROR, codes::INTERNAL_ERROR)
+        }
         store::Error::IdempotencyConflict => {
             AppError::new(StatusCode::CONFLICT, codes::BAD_REQUEST).with_param("idempotency_key")
         }
