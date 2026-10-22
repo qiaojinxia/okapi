@@ -4,6 +4,11 @@
 //! 到期前 120s 即刷；刷新按 进程内单飞 → Redis `lock:cred` → 加锁后重读 DB → 刷新并回写
 //! 四步走，`invalid_grant` 二次重读后仍失败则把 key 置 invalid（仅人工重登可恢复）。
 //! 刷新失败但旧 token 还没过期时先用旧的——上游 token 端点抖一下不该让请求失败。
+//!
+//! 新凭据落盘三次都失败时，留一份在本进程内存里（[`RefreshGate`] 的待写表），下次进刷新临界区先补写它、
+//! 写不进去也先用它，而不是拿已作废的旧 refresh token 再去刷。没盖住的两种情况：进程在补写成功前退出
+//! （内存那份随之丢失）；上游已经轮换了 refresh token、应答却没回到我们这里（45 秒超时、连接中断）——
+//! 新凭据从没到手，下次刷新只会撞 invalid_grant，账号要人工重登。
 
 use super::super::state::AppState;
 use okapi_providers::UpstreamError;
@@ -50,6 +55,9 @@ where
 #[derive(Default)]
 pub struct RefreshGate {
     inner: tokio::sync::Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
+    /// 刷新成功、落盘却失败的新凭据：key → (落盘要比对的旧值, 新凭据)。上游已作废旧 refresh token，
+    /// 这是新凭据唯一的一份。
+    pending: std::sync::Mutex<HashMap<i64, (Vec<u8>, OAuthCredential)>>,
 }
 
 impl RefreshGate {
@@ -61,6 +69,19 @@ impl RefreshGate {
             map.retain(|_, gate| Arc::strong_count(gate) > 1);
         }
         Arc::clone(map.entry(channel_key_id).or_default())
+    }
+
+    fn stash(&self, channel_key_id: i64, expected: Vec<u8>, next: OAuthCredential) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(channel_key_id, (expected, next));
+        }
+    }
+
+    /// 取出待写的新凭据。库里的值已经不是当初要比对的旧值（别处写过新凭据、或已置失效）时，
+    /// 这份就过时了，直接丢掉。
+    fn take_pending(&self, channel_key_id: i64, current: &[u8]) -> Option<OAuthCredential> {
+        let (expected, next) = self.pending.lock().ok()?.remove(&channel_key_id)?;
+        (expected == current).then_some(next)
     }
 }
 
@@ -361,6 +382,12 @@ async fn refresh_locked(
     {
         return Ok(basis.clone());
     }
+    if let Some(next) = state
+        .refresh_gate
+        .take_pending(key.channel_key_id, &current.stored)
+    {
+        return save_refreshed(state, key, &current.stored, next).await;
+    }
     if rejected.is_none()
         && super::health::read(state, key.channel_key_id)
             .await
@@ -421,46 +448,7 @@ async fn refresh_locked(
                 .await;
                 return Err(UpstreamError::Build("oauth_invalid_token_response".into()));
             }
-            // 上游已经消费了旧 refresh token（Codex 等强制单次轮换），新凭据只活在内存里：这一步
-            // 遇到瞬时故障（连接抖动、超时）就丢掉的话，下次刷新只会撞 invalid_grant，账号只能人工重登。
-            // 所以重试几次。每次都以旧值做 CAS：前一次其实已落盘、只是应答丢了，重试返回 false，
-            // 下面的 `replaced_credential` 会读到我们自己写进去的那份。
-            let saved = with_retries(&WRITE_RETRY_DELAYS, || async {
-                tokio::time::timeout(
-                    STORE_STEP_TIMEOUT,
-                    okapi_store::oauth_credentials::write_if_current(
-                        &state.pg,
-                        key.channel_key_id,
-                        key.provider,
-                        &current.stored,
-                        &next.to_plaintext(),
-                        state.master_key.as_deref(),
-                    ),
-                )
-                .await
-                .map_err(|_| ())?
-                .map_err(|_| ())
-            })
-            .await;
-            let Ok(saved) = saved else {
-                tracing::error!(
-                    key = key.channel_key_id,
-                    "OAuth 刷新已让上游作废旧 refresh token，但新凭据三次落盘都失败"
-                );
-                super::health::record(
-                    state,
-                    key.channel_key_id,
-                    Some("oauth_credential_write_failed"),
-                )
-                .await;
-                return Err(UpstreamError::Build("oauth_credential_write_failed".into()));
-            };
-            if !saved {
-                return replaced_credential(state, key.channel_key_id, &current.stored).await;
-            }
-            state.invalidate_routing_caches();
-            super::health::record(state, key.channel_key_id, None).await;
-            Ok(next)
+            save_refreshed(state, key, &current.stored, next).await
         }
         Err(UpstreamError::Status { status, body, .. }) if is_invalid_grant(status, &body) => {
             invalidate_current(state, key, &current.stored, "oauth_invalid_grant").await
@@ -483,6 +471,65 @@ async fn refresh_locked(
             }
         }
     }
+}
+
+/// 把刷新得到的新凭据以 `expected` 为旧值 CAS 落盘。
+///
+/// 上游已经消费了旧 refresh token（Codex 等强制单次轮换），新凭据只活在内存里：这一步遇到瞬时故障
+/// （连接抖动、超时）就丢掉的话，下次刷新只会撞 invalid_grant，账号只能人工重登。所以重试几次，
+/// 每次都以旧值做 CAS：前一次其实已落盘、只是应答丢了，重试返回 false，`replaced_credential`
+/// 会读到我们自己写进去的那份。三次都失败就把新凭据留在进程内存里，下次进临界区先补写，
+/// 这次照样拿它去用（access token 是有效的）。
+async fn save_refreshed(
+    state: &AppState,
+    key: &OAuthKey<'_>,
+    expected: &[u8],
+    next: OAuthCredential,
+) -> Result<OAuthCredential, UpstreamError> {
+    let saved = with_retries(&WRITE_RETRY_DELAYS, || async {
+        tokio::time::timeout(
+            STORE_STEP_TIMEOUT,
+            okapi_store::oauth_credentials::write_if_current(
+                &state.pg,
+                key.channel_key_id,
+                key.provider,
+                expected,
+                &next.to_plaintext(),
+                state.master_key.as_deref(),
+            ),
+        )
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())
+    })
+    .await;
+    let Ok(saved) = saved else {
+        tracing::error!(
+            key = key.channel_key_id,
+            "OAuth 刷新已让上游作废旧 refresh token，但新凭据三次落盘都失败；暂存在进程内存里待补写"
+        );
+        super::health::record(
+            state,
+            key.channel_key_id,
+            Some("oauth_credential_write_failed"),
+        )
+        .await;
+        let usable = next.expires_at > chrono::Utc::now().timestamp();
+        state
+            .refresh_gate
+            .stash(key.channel_key_id, expected.to_vec(), next.clone());
+        return if usable {
+            Ok(next)
+        } else {
+            Err(UpstreamError::Build("oauth_credential_write_failed".into()))
+        };
+    };
+    if !saved {
+        return replaced_credential(state, key.channel_key_id, expected).await;
+    }
+    state.invalidate_routing_caches();
+    super::health::record(state, key.channel_key_id, None).await;
+    Ok(next)
 }
 
 async fn invalidate_current(
@@ -544,6 +591,32 @@ async fn do_refresh(
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+
+    fn credential(token: &str) -> OAuthCredential {
+        OAuthCredential {
+            access_token: token.to_owned(),
+            refresh_token: "r".to_owned(),
+            expires_at: i64::MAX,
+            account_id: None,
+            account_label: None,
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn a_stashed_credential_is_taken_once_and_only_against_the_value_it_replaces() {
+        let gate = RefreshGate::default();
+        gate.stash(7, b"old".to_vec(), credential("new"));
+        assert!(gate.take_pending(8, b"old").is_none());
+        assert_eq!(gate.take_pending(7, b"old").unwrap().access_token, "new");
+        assert!(gate.take_pending(7, b"old").is_none(), "取过一次就没了");
+        gate.stash(7, b"old".to_vec(), credential("new"));
+        assert!(
+            gate.take_pending(7, b"written elsewhere").is_none(),
+            "库里已换过值：这份过时，丢掉"
+        );
+        assert!(gate.take_pending(7, b"old").is_none());
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TINY: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(1)];
