@@ -110,7 +110,8 @@ pub fn foreign_tools(format: ApiFormat, body: &Value) -> ForeignTools {
             }
             ApiFormat::ChatCompletions => match tool.get("type").and_then(Value::as_str) {
                 Some("function") | None => {}
-                Some(kind) => found.push(kind, anthropic_hosted(kind)),
+                // 与 Responses 臂同一张托管表：同名工具不因入口不同而被分到两边
+                Some(kind) => found.push(kind, responses_hosted(kind)),
             },
             ApiFormat::Messages => match tool.get("type").and_then(Value::as_str) {
                 Some("custom") | None => {}
