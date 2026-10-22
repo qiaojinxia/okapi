@@ -58,15 +58,19 @@ where
         parts: &mut Parts,
         _state: &S,
     ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(
-            axum::extract::Query::<T>::try_from_uri(&parts.uri)
-                .map(|axum::extract::Query(inner)| Self(inner))
-                .map_err(|err| {
-                    tracing::debug!(error = %err, path = %parts.uri.path(), "bad query string");
-                    AppError::bad_request().with_param("query")
-                }),
-        )
+        std::future::ready(query_from_uri(&parts.uri).map(Self))
     }
+}
+
+/// 按 [`Query`] 的口径解析查询串（重复字段、类型不对都是 400 `param=query`）。要按别家错误壳回错
+/// 的入口（Gemini）不走提取器，在处理器里调它，再用自己的壳包错误。
+pub fn query_from_uri<T: DeserializeOwned>(uri: &axum::http::Uri) -> Result<T, AppError> {
+    axum::extract::Query::<T>::try_from_uri(uri)
+        .map(|axum::extract::Query(inner)| inner)
+        .map_err(|err| {
+            tracing::debug!(error = %err, path = %uri.path(), "bad query string");
+            AppError::bad_request().with_param("query")
+        })
 }
 
 /// `axum::Json` 的替身（**仅用于提取**；返回体继续用 `axum::Json`）。
@@ -118,5 +122,26 @@ where
                 tracing::debug!(error = %err, %path, "bad multipart body");
                 AppError::bad_request().with_param("multipart")
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize, Debug)]
+    struct KeyQuery {
+        #[allow(dead_code)]
+        key: Option<String>,
+    }
+
+    #[test]
+    fn duplicate_or_malformed_query_fields_are_a_bad_request_on_query() {
+        let uri: axum::http::Uri = "/v1beta/models?key=a&key=b".parse().unwrap();
+        let error = query_from_uri::<KeyQuery>(&uri).unwrap_err();
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(error.param.as_deref(), Some("query"));
+        let uri: axum::http::Uri = "/v1beta/models?key=a&alt=sse".parse().unwrap();
+        assert!(query_from_uri::<KeyQuery>(&uri).is_ok());
     }
 }

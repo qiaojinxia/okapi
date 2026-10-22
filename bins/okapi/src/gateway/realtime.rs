@@ -481,6 +481,14 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
                     Some(Ok(m)) => {
                         awaiting_first = false;
                         idle_deadline = tokio::time::Instant::now() + IDLE_TIMEOUT;
+                        if let AxumMsg::Text(t) = &m
+                            && let Some(param) = client_frame_error(t.as_str()) {
+                                let event = serde_json::json!({"type":"error", "error":{"type":"invalid_request", "code":codes::BAD_REQUEST, "param":param}});
+                                if !tokio::time::timeout_at(expires.min(idle_deadline), cl_tx.send(AxumMsg::Text(event.to_string().into()))).await.is_ok_and(|r| r.is_ok()) {
+                                    break;
+                                }
+                                continue;
+                        }
                         let forward = match m {
                             AxumMsg::Text(t) => TungMsg::text(t.to_string()),
                             AxumMsg::Binary(b) => TungMsg::binary(b),
@@ -542,6 +550,19 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
         .sched
         .ws_lease_release(prep.key.key_id, &conn_id)
         .await;
+}
+
+/// 客户端事件里的 temperature 与 HTTP 入口（`chat::check_input`）同一口径：负数或不是数就不转给上游，
+/// 回一条 error 事件、会话继续。返回出错的参数名。
+fn client_frame_error(text: &str) -> Option<&'static str> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let (holder, param) = match v.get("type")?.as_str()? {
+        "session.update" => (v.get("session")?, "session.temperature"),
+        "response.create" => (v.get("response")?, "response.temperature"),
+        _ => return None,
+    };
+    let t = holder.get("temperature")?;
+    (!t.is_null() && t.as_f64().is_none_or(|t| t < 0.0)).then_some(param)
 }
 
 /// 升级后上游失败：客户端收一条 error 事件（error_code 语义，前端语言包渲染），
@@ -703,4 +724,42 @@ async fn record_failure(
         pool,
     };
     state.settle_write(input).await;
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::client_frame_error;
+
+    #[test]
+    fn negative_or_non_numeric_temperature_in_client_events_is_refused() {
+        for (frame, param) in [
+            (
+                r#"{"type":"session.update","session":{"temperature":-0.1}}"#,
+                Some("session.temperature"),
+            ),
+            (
+                r#"{"type":"session.update","session":{"temperature":"-1"}}"#,
+                Some("session.temperature"),
+            ),
+            (
+                r#"{"type":"response.create","response":{"temperature":-1}}"#,
+                Some("response.temperature"),
+            ),
+            (
+                r#"{"type":"session.update","session":{"temperature":0.8}}"#,
+                None,
+            ),
+            (
+                r#"{"type":"session.update","session":{"temperature":null}}"#,
+                None,
+            ),
+            (
+                r#"{"type":"input_audio_buffer.append","audio":"AAAA"}"#,
+                None,
+            ),
+            ("not json", None),
+        ] {
+            assert_eq!(client_frame_error(frame), param, "{frame}");
+        }
+    }
 }

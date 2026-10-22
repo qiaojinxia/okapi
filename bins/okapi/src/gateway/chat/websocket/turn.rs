@@ -1,8 +1,8 @@
 use super::super::{
     AppError, ChatEvent, FailureReply, ForwardFailure, Ingress, ProbeInfo, RequestBilling,
     RespMeta, ResponsesRequestProbe, StatusCode, UsageProbe, capture_chunk_meta,
-    capture_response_event, codes, elapsed_ms_i32, estimate_prompt_tokens, prepare_chat,
-    request_features, session_hash, settle_failure, settle_stream,
+    capture_response_event, check_input, codes, elapsed_ms_i32, estimate_prompt_tokens,
+    prepare_chat, request_features, session_hash, settle_failure, settle_stream,
 };
 use super::{Session, Work, bridge, history, routing};
 use futures::StreamExt;
@@ -41,8 +41,11 @@ fn report(session: &Session, work: &Work, failure: &ForwardFailure) {
 fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInfo, AppError> {
     let probe: ResponsesRequestProbe =
         serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    let value: Value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    // 与 HTTP 的 /v1/responses 同一口径（负 temperature 等在入口拒掉）
+    check_input(Ingress::Responses, &value)?;
     let messages = probe.input_messages();
-    let features = request_features(Ingress::Responses, body);
+    let features = request_features(Ingress::Responses, &value);
     Ok(ProbeInfo {
         authenticated: None,
         requested_model: probe.model.clone(),

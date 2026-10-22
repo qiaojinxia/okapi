@@ -479,10 +479,13 @@ pub async fn chat_completions(
     let Ok(probe) = serde_json::from_slice::<ChatRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    if let Err(error) = check_input(Ingress::OpenAi, &body) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return AppError::bad_request().into_response_with(Some(request_id));
+    };
+    if let Err(error) = check_input(Ingress::OpenAi, &value) {
         return error.into_response_with(Some(request_id));
     }
-    let features = request_features(Ingress::OpenAi, &body);
+    let features = request_features(Ingress::OpenAi, &value);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
@@ -557,7 +560,10 @@ async fn responses_entry(
     let Ok(probe) = serde_json::from_slice::<ResponsesRequestProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    if let Err(error) = check_input(Ingress::Responses, &body) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return AppError::bad_request().into_response_with(Some(request_id));
+    };
+    if let Err(error) = check_input(Ingress::Responses, &value) {
         return error.into_response_with(Some(request_id));
     }
     // 后台模式先回「排队中」、不带用量，生成在本次结算之后继续——网关只能按估算收一点，
@@ -582,7 +588,7 @@ async fn responses_entry(
         body
     };
     let input_messages = probe.input_messages();
-    let features = request_features(ingress, &body);
+    let features = request_features(ingress, &value);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
@@ -632,14 +638,9 @@ pub async fn gemini_generate(
     let request_id = Uuid::new_v4();
     let started = Instant::now();
     // 自己解析查询串：axum 的 Query 拒绝时回框架的纯文本 400（如重复的 `?key=`），不走 Gemini 错误壳
-    let query = match axum::extract::Query::<GeminiQuery>::try_from_uri(&uri) {
-        Ok(axum::extract::Query(query)) => query,
-        Err(error) => {
-            tracing::debug!(%error, "bad Gemini query string");
-            return AppError::bad_request()
-                .with_param("query")
-                .into_gemini_response_with(Some(request_id));
-        }
+    let query: GeminiQuery = match super::extract::query_from_uri(&uri) {
+        Ok(query) => query,
+        Err(error) => return error.into_gemini_response_with(Some(request_id)),
     };
     let Some((model, action)) = model_action.rsplit_once(':') else {
         return AppError::new(StatusCode::NOT_FOUND, codes::MODEL_NOT_FOUND)
@@ -669,11 +670,14 @@ pub async fn gemini_generate(
     let Ok(probe) = serde_json::from_slice::<okapi_api::GeminiRequestProbe>(&body) else {
         return AppError::bad_request().into_gemini_response_with(Some(request_id));
     };
-    if let Err(error) = check_input(Ingress::Gemini, &body) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return AppError::bad_request().into_gemini_response_with(Some(request_id));
+    };
+    if let Err(error) = check_input(Ingress::Gemini, &value) {
         return error.into_gemini_response_with(Some(request_id));
     }
     let input_messages = probe.input_messages();
-    let features = request_features(Ingress::Gemini, &body);
+    let features = request_features(Ingress::Gemini, &value);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: model.to_owned(),
@@ -719,10 +723,13 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
     let Ok(probe) = serde_json::from_slice::<MessagesRequestProbe>(&body) else {
         return AppError::bad_request().into_anthropic_response_with(Some(request_id));
     };
-    if let Err(error) = check_input(Ingress::Anthropic, &body) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return AppError::bad_request().into_anthropic_response_with(Some(request_id));
+    };
+    if let Err(error) = check_input(Ingress::Anthropic, &value) {
         return error.into_anthropic_response_with(Some(request_id));
     }
-    let features = request_features(Ingress::Anthropic, &body);
+    let features = request_features(Ingress::Anthropic, &value);
     let info = ProbeInfo {
         authenticated: Some(authenticated),
         requested_model: probe.model.clone(),
@@ -948,10 +955,7 @@ async fn first_admitted(
 /// 探针之外的入参口径：负 temperature 和 max_tokens 负值一样在入口拒掉，不原样透传给上游；
 /// Chat / Messages 的 `messages`、Gemini 的 `contents` 为空没有可答的内容，也在入口拒掉，
 /// 不再选渠道、打上游后才失败。拒绝时 param 是出错的参数名。
-fn check_input(ingress: Ingress, body: &[u8]) -> Result<(), AppError> {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return Ok(());
-    };
+pub(super) fn check_input(ingress: Ingress, v: &serde_json::Value) -> Result<(), AppError> {
     let temperature = if ingress == Ingress::Gemini {
         v.get("generationConfig")
             .or_else(|| v.get("generation_config"))
@@ -959,10 +963,8 @@ fn check_input(ingress: Ingress, body: &[u8]) -> Result<(), AppError> {
     } else {
         v.get("temperature")
     };
-    if temperature
-        .and_then(serde_json::Value::as_f64)
-        .is_some_and(|t| t < 0.0)
-    {
+    // 与 max_tokens 的强类型拒绝对称：不是数（如字符串 "-1"）或是负数都拒，null 视为没给
+    if temperature.is_some_and(|t| !t.is_null() && t.as_f64().is_none_or(|t| t < 0.0)) {
         return Err(AppError::bad_request().with_param("temperature"));
     }
     let (field, required) = match ingress {
@@ -986,7 +988,8 @@ fn parse_checked<T: serde::de::DeserializeOwned>(
     body: &[u8],
 ) -> Result<T, AppError> {
     let probe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
-    check_input(ingress, body)?;
+    let value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    check_input(ingress, &value)?;
     Ok(probe)
 }
 
@@ -1005,18 +1008,16 @@ pub(super) struct RequestFeatures {
     pub foreign_tools: ForeignTools,
 }
 
-pub(super) fn request_features(ingress: Ingress, body: &Bytes) -> RequestFeatures {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return RequestFeatures::default();
-    };
+/// 入参已由调用方解析成 `Value`（与 [`check_input`] 共用这一份，大请求体不再反复全量解析）。
+pub(super) fn request_features(ingress: Ingress, v: &serde_json::Value) -> RequestFeatures {
     let foreign_tools = okapi_providers::convert::tool_loss::foreign_tools(
         super::execution_plan::format(ingress),
-        &v,
+        v,
     );
     let (tools, vision) = if ingress == Ingress::Gemini {
-        gemini_request_features(&v)
+        gemini_request_features(v)
     } else {
-        message_request_features(ingress, &v)
+        message_request_features(ingress, v)
     };
     RequestFeatures {
         tools,
@@ -4951,5 +4952,74 @@ mod failure_scope_tests {
             failure_kind_of(&status(503, "")),
             KeyFailure::Transient
         ));
+    }
+}
+
+#[cfg(test)]
+mod check_input_tests {
+    use super::{Ingress, check_input};
+    use serde_json::json;
+
+    fn param(ingress: Ingress, body: &serde_json::Value) -> Option<String> {
+        check_input(ingress, body).err().and_then(|e| e.param)
+    }
+
+    #[test]
+    fn temperature_must_be_a_non_negative_number_on_every_http_ingress() {
+        let messages = json!([{"role": "user", "content": "hi"}]);
+        for ingress in [Ingress::OpenAi, Ingress::Anthropic, Ingress::Responses] {
+            for (temperature, refused) in [
+                (json!(-0.1), true),
+                (json!("-1"), true),
+                (json!("0.5"), true),
+                (json!(0), false),
+                (json!(1.2), false),
+                (json!(null), false),
+            ] {
+                let body = json!({"model": "m", "messages": messages, "temperature": temperature});
+                assert_eq!(
+                    param(ingress, &body).as_deref(),
+                    refused.then_some("temperature"),
+                    "{ingress:?} {temperature}"
+                );
+            }
+        }
+        let gemini = json!({"contents": [{"parts": [{"text": "hi"}]}], "generationConfig": {"temperature": -1}});
+        assert_eq!(
+            param(Ingress::Gemini, &gemini).as_deref(),
+            Some("temperature")
+        );
+        let snake = json!({"contents": [{"parts": [{"text": "hi"}]}], "generation_config": {"temperature": "x"}});
+        assert_eq!(
+            param(Ingress::Gemini, &snake).as_deref(),
+            Some("temperature")
+        );
+    }
+
+    #[test]
+    fn empty_conversations_are_refused_where_the_dialect_requires_one() {
+        for ingress in [Ingress::OpenAi, Ingress::Anthropic] {
+            assert_eq!(
+                param(ingress, &json!({"model": "m", "messages": []})).as_deref(),
+                Some("messages")
+            );
+            assert_eq!(
+                param(ingress, &json!({"model": "m"})).as_deref(),
+                Some("messages")
+            );
+            assert!(
+                check_input(
+                    ingress,
+                    &json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+                )
+                .is_ok()
+            );
+        }
+        assert_eq!(
+            param(Ingress::Gemini, &json!({"contents": []})).as_deref(),
+            Some("contents")
+        );
+        // Responses 的输入可以只靠 previous_response_id 续上，这里不要求
+        assert!(check_input(Ingress::Responses, &json!({"model": "m"})).is_ok());
     }
 }
