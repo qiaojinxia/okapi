@@ -39,7 +39,11 @@ pub async fn connect_pg(database_url: &str) -> Result<PgPool, StoreError> {
 }
 
 /// 迁移排队用的会话级咨询锁（"OKMIGRAT"）。
-const MIGRATION_GATE: i64 = 0x4F4B_4D49_4752_4154;
+pub const MIGRATION_GATE: i64 = 0x4F4B_4D49_4752_4154;
+/// 排队等门锁的上限；超过就报 `migration_gate_timeout`。
+const MIGRATION_GATE_MAX_WAIT: Duration = Duration::from_mins(30);
+/// 排队期间多久记一条"还在等"。
+const MIGRATION_GATE_NOTICE_EVERY: Duration = Duration::from_mins(1);
 
 /// 运行嵌入式迁移（migrations/ 目录随二进制打包，部署零外部工具）。
 ///
@@ -47,12 +51,32 @@ const MIGRATION_GATE: i64 = 0x4F4B_4D49_4752_4154;
 /// 排队，等过 1 秒就记一条慢语句告警，每次部署都混进运维告警里。这里先用 try-lock
 /// 轮询排队，轮到时 sqlx 自己那把锁已无人争用。
 pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
+    run_migrations_within(pool, MIGRATION_GATE_MAX_WAIT).await
+}
+
+/// 同 [`run_migrations`]，排队等门锁最多 `max_wait`。迁移本身通常几秒；等过一分钟还没轮到，
+/// 说明持锁的进程在跑很长的迁移或已经卡死（长事务堵着 DDL 之类），这时每分钟记一条告警说明在等，
+/// 超过上限则明确报错——让编排层重启并留下日志，而不是让所有副本无声地永远挂在启动里。
+pub async fn run_migrations_within(pool: &PgPool, max_wait: Duration) -> Result<(), StoreError> {
     let mut connection = pool.acquire().await?;
+    let started = tokio::time::Instant::now();
+    let mut last_notice = started;
     while !sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
         .bind(MIGRATION_GATE)
         .fetch_one(&mut *connection)
         .await?
     {
+        let waited = started.elapsed();
+        if waited >= max_wait {
+            return Err(StoreError::MigrationGateTimeout(waited.as_secs()));
+        }
+        if last_notice.elapsed() >= MIGRATION_GATE_NOTICE_EVERY {
+            tracing::warn!(
+                waited_secs = waited.as_secs(),
+                "正在等另一个进程跑完数据库迁移（门锁一直被占）"
+            );
+            last_notice = tokio::time::Instant::now();
+        }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let migrated = migrate_in_utc(&mut connection).await;

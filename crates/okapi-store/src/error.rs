@@ -7,6 +7,10 @@ pub enum StoreError {
     #[error("db_migrate_error: {0}")]
     Migrate(#[from] sqlx::migrate::MigrateError),
 
+    /// 等迁移门锁超过上限（持锁的进程卡死或迁移异常漫长），参数是已等的秒数。
+    #[error("migration_gate_timeout: waited {0}s")]
+    MigrationGateTimeout(u64),
+
     #[error("redis_error: {0}")]
     Redis(#[from] fred::error::Error),
 
