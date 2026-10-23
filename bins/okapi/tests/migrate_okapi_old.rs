@@ -55,6 +55,10 @@ async fn setup() -> Env {
         // 无 username：按 email 本地部分兜底；负余额不入账
         json!({"id": carol_id, "email": format!("old-carol-{suffix}@okapi.test"),
                "role": "admin", "status": "active", "balance": "-5.5"}),
+        // 余额写成千分位：解析不了，必须留注记而不是静默按 0 入库
+        json!({"id": Uuid::new_v4().to_string(), "email": format!("old-dave-{suffix}@okapi.test"),
+               "username": format!("old-dave-{suffix}"), "role": "user",
+               "status": "active", "balance": "1,234.50"}),
     ];
 
     // ---- api_keys：可解密 / 无密文 / 错口令密文 / 非 sk 明文 / 孤儿 ----
@@ -144,7 +148,7 @@ async fn okapi_old_sample_migration_full_check() {
     let stats = migrate::run_okapi_old(&env.pg, None, &env.dir, Some(ENC_PASS), true, None)
         .await
         .unwrap();
-    assert_eq!(stats.users, 3);
+    assert_eq!(stats.users, 4);
     assert_eq!(stats.keys, 1, "仅可解密且 sk- 前缀的 key 计入");
     assert_eq!(stats.keys_undecryptable, 3, "无密文/错口令/非 sk 三种");
     assert_eq!(stats.channels, 2, "孤儿 provider_id 跳过");
@@ -169,11 +173,19 @@ async fn okapi_old_sample_migration_full_check() {
     )
     .await
     .unwrap();
-    assert_eq!(stats.users, 3);
+    assert_eq!(stats.users, 4);
     assert_eq!(stats.users_credited, 1);
     assert!(
         stats.skipped.iter().any(|w| w.contains("负余额")),
         "负余额必须告警：{:?}",
+        stats.skipped
+    );
+    assert!(
+        stats
+            .skipped
+            .iter()
+            .any(|w| w.contains(&format!("old-dave-{sfx}")) && w.contains("无法解析")),
+        "写了却解析不了的余额必须告警，不能静默按 0 入库：{:?}",
         stats.skipped
     );
     assert!(
@@ -376,6 +388,26 @@ async fn okapi_old_sample_migration_full_check() {
     .await
     .unwrap();
 
+    // 源系统轮换了 k1 的上游 key、调了权重：重跑要同步过来，而不是静默保留旧值
+    let rotated_keys = [
+        json!({"provider_id": 1, "key_name": format!("k1-{sfx}"), "api_key": "up-secret-1-rotated",
+               "base_url": "https://anthropic-proxy.example", "adapter_type": "claude",
+               "supported_models": ["claude-3-5-sonnet", "claude-3-opus"],
+               "weight": 6, "priority": 7, "status": "active"}),
+        json!({"provider_id": 2, "key_name": format!("k2-{sfx}"), "api_key": "up-secret-2",
+               "base_url": "", "supported_models": "w-model-a, w-model-b", "status": "inactive"}),
+    ];
+    std::fs::write(
+        env.dir.join("provider_api_keys.jsonl"),
+        rotated_keys
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+
     let stats2 = migrate::run_okapi_old(
         &env.pg,
         Some(&env.ledger),
@@ -386,7 +418,24 @@ async fn okapi_old_sample_migration_full_check() {
     )
     .await
     .unwrap();
-    assert_eq!(stats2.users, 3);
+    assert_eq!(stats2.users, 4);
+    let (k1_id, k1_weight): (i64, i32) = sqlx::query_as(
+        "SELECT k.id, k.weight FROM channel_keys k JOIN channels c ON c.id = k.channel_id
+         WHERE c.name = $1",
+    )
+    .bind(format!("old/anthropic/k1-{sfx}"))
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(k1_weight, 6, "重跑同步权重");
+    assert_eq!(
+        okapi_store::admin::read_key_credential(&env.pg, k1_id, None)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("up-secret-1-rotated"),
+        "重跑同步轮换后的上游凭证"
+    );
     assert_eq!(
         env.ledger.balance(alice.id).await.unwrap().as_micros(),
         12_345_678,
@@ -432,7 +481,7 @@ async fn okapi_old_sample_migration_full_check() {
         .unwrap();
     assert_eq!(stats3.keys, 0);
     assert_eq!(stats3.keys_undecryptable, 4, "含孤儿外的四把全部不可解密");
-    assert_eq!(stats3.users, 3);
+    assert_eq!(stats3.users, 4);
     assert_eq!(stats3.channels, 2);
 
     std::fs::remove_dir_all(&env.dir).ok();

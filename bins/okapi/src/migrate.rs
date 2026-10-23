@@ -108,6 +108,13 @@ fn i(v: &Value, key: &str) -> Option<i64> {
         .or_else(|| field.as_str().and_then(|x| x.parse().ok()))
 }
 
+/// new-api `tokens.expired_time`：Unix 秒；-1（偶见 0）= 永不过期 → None。
+fn expired_time(row: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    i(row, "expired_time")
+        .filter(|secs| *secs > 0)
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+}
+
 /// 执行迁移。`ledger` 为 None 时（dry-run 或 Redis 不可用）余额只统计不入账。
 // 线性三表导入脚本，拆分割裂迁移时序
 #[allow(clippy::too_many_lines)]
@@ -242,19 +249,32 @@ pub async fn run_newapi(
         if let Some(g) = token_group {
             ensure_group_and_pool(pg, g).await?;
         }
+        // 过期时间：new-api 的 `expired_time` 是 Unix 秒，-1（或 0）= 永不过期。此前整列被忽略，
+        // 带过期时间的令牌迁过来就成了永久有效；写不进来的值记注记，不静默当永久
+        let expires_at = expired_time(&row);
+        if expires_at.is_none()
+            && row.get("expired_time").is_some_and(|v| !v.is_null())
+            && i(&row, "expired_time").is_none()
+        {
+            stats.skipped.push(format!(
+                "tokens:{name} expired_time 无法解析，按永久有效导入"
+            ));
+        }
         sqlx::query!(
             r#"
-            INSERT INTO api_keys (user_id, key_hash, key_prefix, name, status, group_override)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO api_keys (user_id, key_hash, key_prefix, name, status, group_override, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (key_hash) DO UPDATE SET status = EXCLUDED.status,
-                                                 group_override = EXCLUDED.group_override
+                                                 group_override = EXCLUDED.group_override,
+                                                 expires_at = EXCLUDED.expires_at
             "#,
             new_user,
             key_hash,
             prefix,
             name,
             row_status,
-            token_group
+            token_group,
+            expires_at
         )
         .execute(pg)
         .await?;
@@ -334,6 +354,14 @@ pub async fn run_newapi(
             )
             .execute(pg)
             .await?;
+            // 凭证与权重也跟着源系统走：此前只改渠道行，源系统轮换 key 后重跑迁移，这里仍是旧凭证
+            let source = KeySource {
+                name,
+                credential,
+                weight,
+                master_key,
+            };
+            sync_imported_key(pg, channel_id, &source, &mut stats.skipped).await?;
         } else {
             let model_refs: Vec<&str> = models.iter().map(String::as_str).collect();
             let (channel_id, key_id) = okapi_store::provision::create_channel(
@@ -401,6 +429,57 @@ pub async fn run_newapi(
     }
 
     Ok(stats)
+}
+
+/// 重跑时源系统里这条渠道的 key 与权重。
+struct KeySource<'a> {
+    name: &'a str,
+    credential: &'a str,
+    weight: i32,
+    master_key: Option<&'a str>,
+}
+
+/// 把重跑的源 key / 权重同步到导入时建的那把 key。对得上的只有那一把：渠道后来被运维加了第二把 key
+/// 就不猜是哪一把，记注记留给人。凭证没变就不动（轮换会把 key 状态机复位，不该因为重跑清掉冷却 / 失效标记）。
+async fn sync_imported_key(
+    pg: &PgPool,
+    channel_id: i64,
+    source: &KeySource<'_>,
+    skipped: &mut Vec<String>,
+) -> anyhow::Result<()> {
+    let keys = sqlx::query_scalar!(
+        r#"SELECT id FROM channel_keys WHERE channel_id = $1 ORDER BY id LIMIT 2"#,
+        channel_id
+    )
+    .fetch_all(pg)
+    .await?;
+    let [key_id] = keys.as_slice() else {
+        if keys.len() > 1 {
+            skipped.push(format!(
+                "channels:{} 有多把 key，重跑不更新凭证与权重",
+                source.name
+            ));
+        }
+        return Ok(());
+    };
+    // 读不出（主密钥对不上等）按「不同」处理：宁可用源系统的凭证覆盖，也不留一把读不了的
+    let current = okapi_store::admin::read_key_credential(pg, *key_id, source.master_key)
+        .await
+        .ok()
+        .flatten();
+    if current.as_deref() != Some(source.credential) {
+        okapi_store::admin::rotate_channel_credential(
+            pg,
+            channel_id,
+            Some(*key_id),
+            source.credential,
+            source.master_key,
+        )
+        .await?;
+    }
+    okapi_store::admin::patch_channel_key(pg, channel_id, *key_id, Some(source.weight), None, None)
+        .await?;
+    Ok(())
 }
 
 /// new-api 分组名 → 同名池 + 同名价格分组（倍率 1，站长事后按 GroupRatio 调）。
@@ -646,9 +725,17 @@ pub async fn run_okapi_old(
             || email.split('@').next().unwrap_or(email).to_owned(),
             str::to_owned,
         );
-        let balance_micro = dec_field(&row, "balance")
-            .and_then(|b| dec_str_to_micro(&b, true))
-            .unwrap_or(0);
+        // 缺 / 空 = 没有余额；写了却解析不了（千分位、科学计数法、越界……）要记注记，不能静默按 0 入库——
+        // 那是一笔凭空消失的钱，而同一处的负余额反倒有注记
+        let balance_micro = match dec_field(&row, "balance") {
+            None => 0,
+            Some(raw) => dec_str_to_micro(&raw, true).unwrap_or_else(|| {
+                stats
+                    .skipped
+                    .push(format!("users:{email} 余额 {raw} 无法解析，按 0 迁移"));
+                0
+            }),
+        };
         let role = old_role(s(&row, "role").unwrap_or("user"));
         let row_status = old_status(s(&row, "status"));
         let password_hash = s(&row, "password_hash");
@@ -846,6 +933,13 @@ pub async fn run_okapi_old(
             )
             .execute(pg)
             .await?;
+            let source = KeySource {
+                name: &name,
+                credential,
+                weight,
+                master_key,
+            };
+            sync_imported_key(pg, channel_id, &source, &mut stats.skipped).await?;
         } else {
             let model_refs: Vec<&str> = models.iter().map(String::as_str).collect();
             let (channel_id, key_id) = okapi_store::provision::create_channel(
