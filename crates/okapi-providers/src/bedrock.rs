@@ -318,7 +318,24 @@ impl BedrockUpstream {
     }
 }
 
+/// 流中异常帧的类型 → 同义的 HTTP 状态（Bedrock Runtime API 文档里各异常对应的状态码）。
+/// 只映射会影响 key / 渠道健康判断的几种；其余（校验失败、模型流错误……）仍按通用流错误。
+fn exception_status(kind: &str) -> Option<u16> {
+    match kind.to_ascii_lowercase().as_str() {
+        // Bedrock 的 TPM / RPM 限流常常发生在生成中途，以异常帧而不是 HTTP 429 出现
+        "throttlingexception" | "modelnotreadyexception" | "servicequotaexceededexception" => {
+            Some(429)
+        }
+        "serviceunavailableexception" => Some(503),
+        "internalserverexception" => Some(500),
+        "modeltimeoutexception" => Some(408),
+        _ => None,
+    }
+}
+
 /// 一帧 → 一个 Anthropic 事件；非 chunk 的事件帧（无载荷）跳过，异常帧转成流错误。
+/// 能对应到 HTTP 状态的异常帧（限流、不可用……）按 `Status` 报，这样 429 才进 key 冷却与
+/// retry-after 的分类；此前一律是通用 `Stream` 错误，流中限流不会触发冷却。
 fn frame_to_event(
     frame: &crate::aws_eventstream::Frame,
 ) -> Option<Result<AnthropicEvent, UpstreamError>> {
@@ -332,6 +349,13 @@ fn frame_to_event(
             .header(":exception-type")
             .or_else(|| frame.header(":error-code"))
             .unwrap_or("bedrock_stream_error");
+        if let Some(status) = exception_status(kind) {
+            return Some(Err(UpstreamError::Status {
+                status,
+                body: Bytes::copy_from_slice(&frame.payload),
+                retry_after_secs: None,
+            }));
+        }
         return Some(Err(UpstreamError::Stream(format!("{kind}: {detail}"))));
     }
     if frame.header(":event-type") != Some("chunk") {
@@ -379,6 +403,45 @@ mod tests {
                 payload: payload.to_vec(),
             };
             assert!(matches!(frame_to_event(&frame), Some(Err(_))));
+        }
+    }
+
+    #[test]
+    fn exception_frames_keep_their_http_classification() {
+        let exception = |kind: &str| Frame {
+            headers: vec![
+                (":message-type".into(), "exception".into()),
+                (":exception-type".into(), kind.into()),
+            ],
+            payload: br#"{"message":"Too many requests"}"#.to_vec(),
+        };
+        for (kind, expected) in [
+            ("throttlingException", 429),
+            ("modelNotReadyException", 429),
+            ("serviceQuotaExceededException", 429),
+            ("serviceUnavailableException", 503),
+            ("internalServerException", 500),
+            ("modelTimeoutException", 408),
+        ] {
+            assert!(
+                matches!(
+                    frame_to_event(&exception(kind)),
+                    Some(Err(UpstreamError::Status { status, ref body, .. }))
+                        if status == expected && body.starts_with(b"{\"message\"")
+                ),
+                "{kind}"
+            );
+        }
+        // 认不出 / 不影响健康判断的异常仍是通用流错误，原因文本保留
+        for kind in [
+            "validationException",
+            "modelStreamErrorException",
+            "somethingNew",
+        ] {
+            let Some(Err(UpstreamError::Stream(reason))) = frame_to_event(&exception(kind)) else {
+                panic!("{kind} 应是通用流错误");
+            };
+            assert!(reason.starts_with(kind), "{reason}");
         }
     }
 
@@ -435,14 +498,15 @@ mod tests {
                 (":message-type".to_owned(), "exception".to_owned()),
                 (
                     ":exception-type".to_owned(),
-                    "throttlingException".to_owned(),
+                    "validationException".to_owned(),
                 ),
             ],
-            payload: br#"{"message":"Too many requests"}"#.to_vec(),
+            payload: br#"{"message":"Malformed input request"}"#.to_vec(),
         };
+        // 没有对应 HTTP 状态的异常保持通用流错误（限流等见 exception_frames_keep_their_http_classification）
         match frame_to_event(&frame) {
             Some(Err(UpstreamError::Stream(msg))) => {
-                assert_eq!(msg, "throttlingException: Too many requests");
+                assert_eq!(msg, "validationException: Malformed input request");
             }
             other => panic!("unexpected {other:?}"),
         }
