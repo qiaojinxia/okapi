@@ -2861,6 +2861,15 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   - **其余**：MCP `usage_stats` 的 group 维度改用视图里真实的 `group_code` 列（此前用不存在的 `group`，每次都查询报错）；
     Bedrock 流内异常帧中能对应 HTTP 状态的（`throttlingException` 等 → 429，`serviceUnavailableException` → 503，
     `internalServerException` → 500，`modelTimeoutException` → 408）按 `Status` 报，key 冷却与 retry-after 对流中限流才生效。
+- **第五轮评审后补（store 写路径一致性）**：
+  - **计价模式互切清掉另一种模式的列**：`upsert_model_per_call(_in)` 把 `tier_expr` 置空、`upsert_model_tiered` 把
+    `per_call_price_micro` 置空，与 `upsert_model_ratio_in` / `model_config::save` 同口径——不看模式的对外定价清单、MCP 会把这两列
+    原样列出来，旧阶梯表还会在下次误切 tiered 时复活。
+  - **配额耗尽冷却到「次日 0 点（UTC）」**：连接池的会话时区是本机时区，`date_trunc('day', now() + interval '1 day')` 落在本地午夜
+    （偏出时区偏移那么多小时），与文档和 `spend:ck:*` 的 UTC 日对不上；现在先换成 UTC 的无时区时间再截断 / 加一天。
+  - **复制渠道带上 key 级护栏**：`rpm_limit` / `daily_spend_cap_micro` / `model_subset` 一并复制（此前只拷 6 列，克隆体对同一个上游账号
+    变成「不限」）；人工封禁(5) / 凭证失效(6) 只能人工恢复，复制后保持原状态与 `last_error`，不因启用复制体复活；
+    冷却 / 限流 / 配额这些运行态从 active 起步。
 - **环境变量**：布尔大小写不敏感（`true/1/yes/on`、`false/0/no/off`），认不得的与数值解析失败都打 WARN 再用缺省（`okapi_store::env_config`）。
 - **门户日志缺省近 30 天**：`/api/me/logs` 与 `/logs/stat` 不带日期时窗口取近 30 天（按 request_id 点查不加界），列表按
   `(created_at, id)` 倒序键集翻页（`before` 仍传上一页末行 id，服务端在同一属主下取它的 created_at），走 `idx_br_user_time`。
