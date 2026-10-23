@@ -87,6 +87,12 @@ impl Pending {
         self.0.draining.send_replace(true);
     }
 
+    /// 是否已进入下线（同步读，给循环顶部的判断用；要等它发生用 [`Self::draining`]）。
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        *self.0.draining.borrow()
+    }
+
     /// 下线开始时完成；之前一直挂起。
     pub async fn draining(&self) {
         let mut draining = self.0.draining.subscribe();
@@ -154,6 +160,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), pending.draining())
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn is_draining_follows_drain() {
+        let pending = Pending::default();
+        assert!(!pending.is_draining());
+        pending.drain();
+        assert!(pending.is_draining());
     }
 
     #[tokio::test]

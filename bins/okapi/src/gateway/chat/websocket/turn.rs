@@ -10,6 +10,20 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 use tokio::time::Instant as Deadline;
 
+/// 客户端断开（或首字 / 空闲超时）之后，继续读上游终态用量的窗口。
+const USAGE_DRAIN: Duration = Duration::from_secs(30);
+/// 网关下线时的窗口。进程只等后台结算 `SETTLE_DRAIN_CAP`（30s）：读用量用满 30 秒就没有时间落账了，
+/// 要给结算（含三次退避重试约 4s）留出余量；读不到终态就按已累计的用量收尾。
+const SHUTDOWN_USAGE_DRAIN: Duration = Duration::from_secs(20);
+
+fn usage_drain_window(shutting_down: bool) -> Duration {
+    if shutting_down {
+        SHUTDOWN_USAGE_DRAIN
+    } else {
+        USAGE_DRAIN
+    }
+}
+
 fn report(session: &Session, work: &Work, failure: &ForwardFailure) {
     match &failure.reply {
         FailureReply::App(error) => session.output.error(error, work.request, work.lane.clone()),
@@ -376,7 +390,8 @@ async fn consume(
         // select must wake the watch, not disable it and wait the five-minute idle deadline.
         let disconnected = session.output.is_closed();
         if disconnected && draining.is_none() {
-            draining = Some(Deadline::now() + Duration::from_secs(30));
+            draining =
+                Some(Deadline::now() + usage_drain_window(session.state.settlements.is_draining()));
         }
         let deadline = draining.unwrap_or_else(|| {
             let idle = if received {
@@ -399,7 +414,9 @@ async fn consume(
                     if let Some(pin) = session.upstream.lock().await.as_ref() { pin.transport.close(); }
                     break;
                 }
-                draining = Some(Deadline::now() + Duration::from_secs(30));
+                draining = Some(
+                    Deadline::now() + usage_drain_window(session.state.settlements.is_draining()),
+                );
                 continue;
             }
             event = routed.handle.events.next() => event,
@@ -452,4 +469,19 @@ async fn consume(
         }
     }
     progress
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 下线窗口读完用量之后还要有时间落账：整个进程只等 `SETTLE_DRAIN_CAP`。
+    #[test]
+    fn shutdown_usage_window_leaves_room_to_settle_inside_the_drain_cap() {
+        assert_eq!(usage_drain_window(false), Duration::from_secs(30));
+        assert!(
+            usage_drain_window(true) + Duration::from_secs(5) <= crate::gateway::SETTLE_DRAIN_CAP,
+            "读用量的窗口 + 结算（含重试）必须落在下线等待上限之内"
+        );
+    }
 }

@@ -490,6 +490,47 @@ async fn downstream_disconnect_drains_terminal_usage_and_releases_slots() {
     }
 }
 
+/// 网关下线（SIGTERM 之后 `settlements.drain()`）时：会话停止接新 turn、以 1001 关掉客户端这一侧，
+/// 在途 turn 仍收上游的终态用量并按它结算。此前这条会话循环没有 drain 分支：下线窗口里继续接 turn，
+/// 窗口一过整个进程退出，被腰斩的 turn 只剩一笔 10 分钟后被清扫全额退款的预扣，已流出的输出永远不计费。
+#[tokio::test]
+async fn gateway_drain_closes_the_session_and_still_settles_the_active_turn() {
+    let mut env = setup().await;
+    let mut client = env.client().await;
+    send(&mut client, env.body(None)).await;
+    let (mut peer, _, _) = env.peer().await;
+    upstream_read(&mut peer).await;
+    emit(
+        &mut peer,
+        json!({"type":"response.output_text.delta","delta":"hello"}),
+        None,
+    )
+    .await;
+    let event = read(&mut client).await;
+
+    env.state.settlements.drain();
+
+    // 客户端这一侧被带 1001 的关闭帧收尾，而不是挂着等 5 分钟的空闲超时
+    let close = loop {
+        match timeout(WAIT, client.next())
+            .await
+            .expect("下线后会话必须被关闭")
+        {
+            Some(Ok(Message::Close(frame))) => break frame,
+            Some(Ok(_)) => {}
+            other => panic!("expected a close frame, got {other:?}"),
+        }
+    };
+    let close = close.expect("关闭帧要带状态码");
+    assert_eq!(u16::from(close.code), 1001);
+    assert_eq!(close.reason.as_str(), "gateway_shutting_down");
+
+    // 在途 turn 仍然拿到上游的终态用量并结算（客户端已走，输出只是不再送达）
+    completed(&mut peer, None, 20).await;
+    assert_eq!(env.amount(&event).await.0, 240);
+    assert_eq!(env.balance().await, 10_000_000 - 240);
+}
+
 #[tokio::test]
 async fn live_channel_changes_cannot_reuse_pinned_account_or_change_protocol_fields() {
     let mut env = setup().await;

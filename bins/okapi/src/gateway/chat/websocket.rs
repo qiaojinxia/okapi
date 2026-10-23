@@ -307,7 +307,11 @@ async fn run(
     let lifetime = Instant::now() + Duration::from_hours(1);
     let mut received = false;
     loop {
-        if session.output.is_closed() {
+        // 网关下线：升级后的 WebSocket 不在 HTTP 排水里，不收尾的话会话会继续接新 turn，直到进程在
+        // SETTLE_DRAIN_CAP 之后整个退出——被腰斩的 turn 只剩一笔 10 分钟后被清扫全额退款的预扣，
+        // 已经流给客户端的那部分输出永远不计费。与 realtime 同口径：停止接新 turn、关掉客户端这一侧
+        // （循环之后以 1001 收尾），在途 turn 走断连后的读用量窗口（下线时更短，见 turn.rs）再结算
+        if session.output.is_closed() || session.state.settlements.is_draining() {
             break;
         }
         queue.start(&session, &finished);
@@ -319,24 +323,18 @@ async fn run(
             };
         tokio::select! {
             _ = gone.changed() => break,
+            () = session.state.settlements.draining() => break,
             _ = activity.changed() => {},
             () = tokio::time::sleep_until(lifetime.min(idle)) => break,
             _ = renewal.tick() => {
-                let valid = crate::gateway::auth::authenticate_data_plane(&session.state, &session.headers).await
-                    .is_ok_and(|k| (k.user_id, k.key_id) == principal);
-                if !valid || !session.state.sched.responses_ws_renew(principal.1, &session.lease.connection).await.unwrap_or(false) { break; }
+                if !lease_alive(&session, principal).await { break; }
             }
             Some(lane) = completions.recv() => { queue.active.remove(&lane); },
             event = reader.next() => match event {
                 Some(Ok(Message::Text(raw))) => {
                     received = true;
                     session.output.touch();
-                    if let Err(error) = queue.enqueue(raw.as_str()) {
-                        let lane = serde_json::from_str::<Value>(raw.as_str()).ok()
-                            .and_then(|v| v.get("stream_id").and_then(Value::as_str).map(str::to_owned))
-                            .filter(|name| !name.is_empty() && name.len() <= 256 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b)));
-                        session.output.error(&error, Uuid::new_v4(), lane);
-                    }
+                    accept_text(&session, &mut queue, raw.as_str());
                 }
                 Some(Ok(Message::Ping(data))) => { session.output.push(Message::Pong(data)); }
                 Some(Ok(Message::Pong(_))) => {},
@@ -352,7 +350,48 @@ async fn run(
             }
         }
     }
-    session.output.close();
+    if session.state.settlements.is_draining() {
+        session
+            .output
+            .close_with(crate::gateway::realtime::ws_close::going_away());
+    } else {
+        session.output.close();
+    }
     // Pending frames were never admitted or charged. Active turns retain the
     // session/upstream and drain terminal usage independently of the client.
+}
+
+/// 每 20s 的续租：key 仍然有效、连接租约也续得上，会话才继续。
+async fn lease_alive(session: &Session, principal: (i64, i64)) -> bool {
+    let valid = crate::gateway::auth::authenticate_data_plane(&session.state, &session.headers)
+        .await
+        .is_ok_and(|k| (k.user_id, k.key_id) == principal);
+    valid
+        && session
+            .state
+            .sched
+            .responses_ws_renew(principal.1, &session.lease.connection)
+            .await
+            .unwrap_or(false)
+}
+
+/// 客户端发来的一帧文本入队；排不上（队满 / 非法）就把错误回给这一帧所属的 lane。
+fn accept_text(session: &Session, queue: &mut Queue, raw: &str) {
+    if let Err(error) = queue.enqueue(raw) {
+        let lane = serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|v| {
+                v.get("stream_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .filter(|name| {
+                !name.is_empty()
+                    && name.len() <= 256
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            });
+        session.output.error(&error, Uuid::new_v4(), lane);
+    }
 }

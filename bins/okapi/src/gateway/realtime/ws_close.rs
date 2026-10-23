@@ -17,6 +17,15 @@ fn classify(error: &WsError) -> Option<(u16, &'static str)> {
     }
 }
 
+/// 网关下线时回给客户端的关闭帧：1001 Going Away，客户端据此知道是服务端在重启、重连即可，
+/// 而不是自己的帧有问题。
+pub(crate) fn going_away() -> CloseFrame {
+    CloseFrame {
+        code: close_code::AWAY,
+        reason: "gateway_shutting_down".into(),
+    }
+}
+
 /// 客户端读流出错时该回的关闭帧；对端已断开之类没有可回的就是 `None`。
 pub(crate) fn for_read_error(error: &axum::Error) -> Option<CloseFrame> {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
@@ -75,5 +84,14 @@ mod tests {
         assert_eq!(frame(WsError::AlreadyClosed), None);
         // 不是 tungstenite 的错误（比如上游换了实现）也不乱回
         assert!(for_read_error(&axum::Error::new("something else")).is_none());
+    }
+
+    #[test]
+    fn shutdown_is_announced_as_going_away() {
+        let frame = super::going_away();
+        assert_eq!(
+            (frame.code, frame.reason.to_string()),
+            (1001, "gateway_shutting_down".to_owned())
+        );
     }
 }
