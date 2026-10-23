@@ -172,9 +172,18 @@ pub async fn duplicate_channel(
         return Ok(None);
     };
     // 复制体与源用的是同一份凭证 = 同一个上游账号：固定分配的出口一并带过去（§11.41），
-    // 同一账号不能因为复制就多出一个出口 IP
+    // 同一账号不能因为复制就多出一个出口 IP。key 级护栏（rpm / 日消费上限 / 模型子集）同理要带，
+    // 丢了就是同一个账号、不再受限；人工封禁(5) / 凭证失效(6) 只能人工恢复，复制后保持原状态，
+    // 启用复制体不能让它们复活。其余状态（冷却 / 限流 / 配额）是运行态，复制体从 active 起步
     sqlx::query(
-        "INSERT INTO channel_keys (channel_id,credential_ciphertext,credential_kind,weight,max_concurrency,egress_proxy_id) SELECT $2,credential_ciphertext,credential_kind,weight,max_concurrency,egress_proxy_id FROM channel_keys WHERE channel_id=$1"
+        "INSERT INTO channel_keys
+            (channel_id, credential_ciphertext, credential_kind, weight, max_concurrency, egress_proxy_id,
+             model_subset, rpm_limit, daily_spend_cap_micro, status, last_error)
+         SELECT $2, credential_ciphertext, credential_kind, weight, max_concurrency, egress_proxy_id,
+                model_subset, rpm_limit, daily_spend_cap_micro,
+                CASE WHEN status IN (5, 6) THEN status ELSE 1 END,
+                CASE WHEN status IN (5, 6) THEN last_error END
+           FROM channel_keys WHERE channel_id = $1"
     ).bind(channel_id).bind(new_id).execute(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO pool_channels (pool_code,channel_id,priority_override,weight_override) SELECT pool_code,$2,priority_override,weight_override FROM pool_channels WHERE channel_id=$1"

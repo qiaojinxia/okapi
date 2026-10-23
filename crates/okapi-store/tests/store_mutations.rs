@@ -371,3 +371,115 @@ async fn quota_exhaustion_cools_down_to_the_next_utc_midnight_in_any_session_zon
         local.close().await;
     }
 }
+
+#[derive(Debug, sqlx::FromRow)]
+struct KeyCopy {
+    credential: String,
+    weight: i32,
+    max_concurrency: Option<i32>,
+    rpm_limit: Option<i32>,
+    daily_spend_cap_micro: Option<i64>,
+    model_subset: Option<String>,
+    status: i16,
+    last_error: Option<String>,
+    failed_count: i32,
+    cooling: bool,
+}
+
+async fn key_copies(pool: &PgPool, channel: i64) -> Vec<KeyCopy> {
+    sqlx::query_as(
+        "SELECT convert_from(credential_ciphertext, 'UTF8') AS credential, weight, max_concurrency,
+                rpm_limit, daily_spend_cap_micro, model_subset::text AS model_subset,
+                status, last_error, failed_count, cooldown_until IS NOT NULL AS cooling
+           FROM channel_keys WHERE channel_id = $1",
+    )
+    .bind(channel)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// 复制渠道要把 key 级护栏和人工处置一起带上：rpm / 日消费上限 / 模型子集是写在 key 上的，
+/// 克隆体丢了它们就成了「同一个上游账号、却不再受限」；人工封禁(5) / 凭证失效(6) 只能人工恢复，
+/// 启用复制体不能让它们复活。冷却中的 key 是运行态，复制体从 active 重新开始。
+#[sqlx::test(migrations = "./migrations")]
+async fn duplicating_a_channel_keeps_key_guardrails_and_manual_verdicts(pool: PgPool) {
+    let (source, limited) = channel(&pool, "origin").await;
+    sqlx::query(
+        "UPDATE channel_keys SET weight = 3, max_concurrency = 4, rpm_limit = 60,
+                daily_spend_cap_micro = 5000000, model_subset = '[\"m\"]'::jsonb
+          WHERE id = $1",
+    )
+    .bind(limited)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (credential, status, last_error, failed_count) in [
+        ("k-banned", 5_i16, "abuse", 0_i32),
+        ("k-invalid", 6, "401 unauthorized", 1),
+        ("k-cooling", 2, "upstream 503", 3),
+    ] {
+        sqlx::query(
+            "INSERT INTO channel_keys
+                (channel_id, credential_ciphertext, status, last_error, failed_count, rpm_limit,
+                 cooldown_until)
+             VALUES ($1, convert_to($2, 'UTF8'), $3::smallint, $4, $5, 30,
+                     CASE WHEN $3::smallint = 2 THEN now() + interval '1 hour' END)",
+        )
+        .bind(source)
+        .bind(credential)
+        .bind(status)
+        .bind(last_error)
+        .bind(failed_count)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let copy = mutate::duplicate_channel(&pool, source, "origin-copy")
+        .await
+        .unwrap()
+        .expect("源渠道存在");
+    let cloned = key_copies(&pool, copy).await;
+    assert_eq!(cloned.len(), 4);
+    let key = |name: &str| cloned.iter().find(|k| k.credential == name).unwrap();
+
+    let limited = key("sk-test");
+    assert_eq!(
+        (
+            limited.weight,
+            limited.max_concurrency,
+            limited.rpm_limit,
+            limited.daily_spend_cap_micro,
+            limited.model_subset.as_deref(),
+            limited.status,
+        ),
+        (3, Some(4), Some(60), Some(5_000_000), Some(r#"["m"]"#), 1)
+    );
+    for (name, status, last_error) in [
+        ("k-banned", 5, Some("abuse")),
+        ("k-invalid", 6, Some("401 unauthorized")),
+    ] {
+        let k = key(name);
+        assert_eq!(
+            (k.rpm_limit, k.status, k.last_error.as_deref()),
+            (Some(30), status, last_error),
+            "{name}：护栏与只能人工恢复的处置要带过去"
+        );
+        assert_eq!((k.failed_count, k.cooling), (0, false), "{name}");
+    }
+    let cooling = key("k-cooling");
+    assert_eq!(cooling.rpm_limit, Some(30));
+    assert_eq!(
+        (
+            cooling.status,
+            cooling.last_error.as_deref(),
+            cooling.failed_count,
+            cooling.cooling
+        ),
+        (1, None, 0, false),
+        "冷却是运行态，复制体从 active 重新开始"
+    );
+    // 源渠道的 key 原样不动
+    assert_eq!(key_copies(&pool, source).await.len(), 4);
+}
