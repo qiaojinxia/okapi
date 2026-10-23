@@ -124,6 +124,159 @@ async fn ssrf_default_policy_blocks_private_targets() {
     .await;
 }
 
+/// DNS 重绑定：保存时过闸（策略放行、域名解析出来的地址当时都算合格），之后同一个域名改指内网 /
+/// 策略收紧，连接时必须再被拦下。此前只在保存时解析一次 DNS，连接时直接信任系统解析的结果，
+/// 一个改了 DNS 的域名就能让网关带着渠道凭证去打内网。这里用 `localhost` 充当「重绑定之后解析到环回」的域名。
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // 一条完整的重绑定剧本：建库 / 起上游 / 存渠道 / 先拦后放，拆开看不出先后
+async fn a_host_that_turns_private_after_the_save_is_refused_at_connect_time() {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+
+    let admin_pool = okapi_store::connect_pg(&database_url).await.unwrap();
+    let db_name = format!("okapi_ssrf_{}", &Uuid::new_v4().simple().to_string()[..12]);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"CREATE DATABASE "{db_name}""#
+    )))
+    .execute(&admin_pool)
+    .await
+    .unwrap();
+    let base = database_url.rsplit_once('/').map(|(b, _)| b).unwrap();
+    let fresh_url = format!("{base}/{db_name}");
+    let pg = okapi_store::connect_pg(&fresh_url).await.unwrap();
+    okapi_store::run_migrations(&pg).await.unwrap();
+
+    // 策略放行 http + 私网：保存 `http://localhost:…` 时能过闸
+    let policy = |allow_private: bool| json!({"allow_http": true, "allow_private": allow_private});
+    sqlx::query("INSERT INTO settings(key,value) VALUES('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(policy(true))
+        .execute(&pg)
+        .await
+        .unwrap();
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let admin_id = okapi_store::provision::create_user(&pg, &format!("rb-{suffix}"))
+        .await
+        .unwrap();
+    sqlx::query!("UPDATE users SET role = 100 WHERE id = $1", admin_id)
+        .execute(&pg)
+        .await
+        .unwrap();
+    let token = format!("sk-okapi-rb-{suffix}");
+    let hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(token.as_bytes()))
+    };
+    okapi_store::provision::create_api_key(&pg, admin_id, &hash, "sk-okapi-rb")
+        .await
+        .unwrap();
+
+    // 假上游：只听 127.0.0.1，数命中
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    let upstream = axum::Router::new().route(
+        "/v1/models",
+        axum::routing::get(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                axum::Json(json!({"data": []}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, upstream).await.unwrap();
+    });
+
+    let state = gateway::build_state(&fresh_url, &redis_url, "test-node", None, None)
+        .await
+        .unwrap();
+    let app = console::router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/admin/channels"))
+        .bearer_auth(&token)
+        .json(
+            &json!({"name": format!("rb-{suffix}"), "credential": "c", "models": ["m-x"],
+            "api_base": format!("http://localhost:{upstream_port}/v1")}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 200, "{:?}", created.text().await);
+    let channel_id = created.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
+    let probe = || {
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/admin/channels/{channel_id}/test"))
+                .bearer_auth(&token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let sync = || async {
+        // settings 有 60s 缓存：先清掉，再按库里的策略同步给出站校验（运行中是 15s 一次的后台同步）
+        state.invalidate_routing_caches_local();
+        gateway::sync_ssrf_policy(&state).await;
+    };
+
+    // 保存之后、第一次连接之前，策略不再放行私网（等价于域名在保存后改指了内网）：连接时被拦，
+    // 请求到不了上游。必须先拦后放——reqwest 会复用已经建好的 keep-alive 连接，先放行一次的话，
+    // 之后的探测根本不再解析、不再过校验，测不出这道闸
+    sqlx::query("UPDATE settings SET value = $1 WHERE key = 'ssrf_policy'")
+        .bind(policy(false))
+        .execute(&pg)
+        .await
+        .unwrap();
+    sync().await;
+    let blocked = probe().await;
+    assert_eq!(blocked["ok"], false, "{blocked}");
+    assert!(
+        blocked.get("http_status").is_none(),
+        "不是上游回的状态，而是连接就被拦了：{blocked}"
+    );
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "被拦下的请求不得到达上游"
+    );
+
+    // 再放行：同一个渠道连得上（策略是连接时才看的；同时恢复开关，免得残留影响同进程里别的用例）
+    sqlx::query("UPDATE settings SET value = $1 WHERE key = 'ssrf_policy'")
+        .bind(policy(true))
+        .execute(&pg)
+        .await
+        .unwrap();
+    sync().await;
+    let reached = probe().await;
+    assert_eq!(reached["ok"], true, "{reached}");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    pg.close().await;
+    let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+        r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+    )))
+    .execute(&admin_pool)
+    .await;
+}
+
 /// settings.oauth_token_url 过同一道闸：网关刷新 token 时会往它 POST refresh token，
 /// 渠道设置的通用写入口不能成为绕过 OAuth 登录端点校验的后门。
 async fn oauth_token_url_goes_through_the_same_gate(

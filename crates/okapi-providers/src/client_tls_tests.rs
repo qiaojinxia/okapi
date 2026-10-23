@@ -643,6 +643,8 @@ async fn socks_proxy() -> SocketAddr {
 }
 
 fn request(port: u16, body: &str) -> reqwest::Request {
+    // The fixture is addressed as `localhost`; the connect-time SSRF guard is strict by default.
+    crate::ssrf::set_allow_private(true);
     reqwest::Client::new()
         .post(format!("https://localhost:{port}/v1/messages?beta=true"))
         .header("x-probe", "kept")

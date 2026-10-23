@@ -98,6 +98,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     gateway::spawn_epoch_subscriber(state.clone());
     gateway::spawn_epoch_poller(state.clone());
     gateway::spawn_routing_invalidate_subscriber(state.clone());
+    gateway::spawn_ssrf_policy_sync(state.clone());
     let settlements = state.settlements.clone();
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(cfg.console_bind).await?;

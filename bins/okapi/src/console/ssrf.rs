@@ -1,12 +1,14 @@
 //! 上游 URL SSRF 校验（IMPLEMENTATION §14.4，Sub2API url_allowlist 吸收）：
 //! 管理面写入 channels.api_base、`settings.oauth_token_url` 与 Vertex 服务账号 `token_uri`
 //! 时执行——scheme 默认仅 https、
-//! 目标默认禁私网/环回/链路本地（IP 字面量层面；DNS rebinding 深化列 backlog，
-//! 配合出口 egress 白名单）。内网上游场景经 settings.ssrf_policy 放开：
-//! `{"allow_http": bool, "allow_private": bool}`。
+//! 目标默认禁私网/环回/链路本地（IP 字面量 + 保存时解析一次域名）。这是第一层；
+//! 域名保存之后可以改指内网（DNS 重绑定），所以出站直连在**连接时**还会按同一判据再校验一次、
+//! 并只连校验过的地址（第二层，`okapi_providers::ssrf`，策略由 `gateway::sync_ssrf_policy` 同步）。
+//! 内网上游场景经 settings.ssrf_policy 放开：`{"allow_http": bool, "allow_private": bool}`。
 
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use okapi_providers::ssrf::is_private_ip;
 use serde::Deserialize;
 use std::net::IpAddr;
 
@@ -38,26 +40,6 @@ fn host_of(url: &str) -> Option<&str> {
         return stripped.split(']').next();
     }
     Some(authority.split(':').next().unwrap_or(authority))
-}
-
-fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-        }
-        IpAddr::V6(v6) => {
-            v6.to_ipv4_mapped().is_some_and(|ip| is_private_ip(IpAddr::V4(ip)))
-                || v6.is_loopback()
-                || v6.is_unspecified()
-                // fc00::/7 ULA 与 fe80::/10 链路本地
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-        }
-    }
 }
 
 /// 校验 api_base；violation 返回 400（error_code 带原因参数）。
@@ -98,7 +80,8 @@ pub(crate) async fn validate_url(pg: &sqlx::PgPool, api_base: &str) -> Result<()
         return Err(AppError::bad_request().with_param("api_base_private_target"));
     }
     // 域名也看解析结果：公网域名解析到 169.254.169.254 / 内网段同样能打到内网。保存配置时
-    // 解析一次；解析失败不拦（运行时同样连不上）。DNS 重绑定要连接时校验，仍在 backlog。
+    // 解析一次；解析失败不拦（运行时同样连不上）。保存之后域名再改指内网（DNS 重绑定）由出站连接时的
+    // 同一判据拦（`okapi_providers::ssrf`）。
     if !policy.allow_private && host.parse::<IpAddr>().is_err() {
         let port = parsed.port_or_known_default().unwrap_or(443);
         let resolved = tokio::time::timeout(

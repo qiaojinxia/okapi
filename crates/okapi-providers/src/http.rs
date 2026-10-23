@@ -437,6 +437,10 @@ fn client_builder(
         let proxy = reqwest::Proxy::all(url)
             .map_err(|e| UpstreamError::Build(format!("proxy_url: {e}")))?;
         builder = builder.proxy(proxy);
+    } else {
+        // 直连：域名的解析结果在连接时过 SSRF 校验，reqwest 只连校验过的地址（见 `ssrf` 模块：保存 URL 时
+        // 解析一次挡不住 DNS 重绑定）。经代理的连接由代理去解析目标，这里管不到
+        builder = builder.dns_resolver(std::sync::Arc::new(crate::ssrf::GuardedResolver));
     }
     Ok(builder)
 }

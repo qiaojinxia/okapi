@@ -129,6 +129,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         None,
     )
     .await?;
+    // worker 的原生批量 / 图片任务同样直连上游：策略改了不能要重启才生效
+    crate::gateway::spawn_ssrf_policy_sync(image_state.clone());
     let (image_stop, image_stopped) = tokio::sync::watch::channel(false);
     let native_batch_worker =
         tokio::spawn(supervision::run("image_batches", image_stopped.clone(), {

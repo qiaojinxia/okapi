@@ -29,6 +29,9 @@ const WAIT: Duration = Duration::from_secs(5);
 type TlsPeer = oneshot::Receiver<std::io::Result<TlsStream<TcpStream>>>;
 
 async fn tls_server() -> (SocketAddr, TlsPeer) {
+    // These tests reach the fixture by the name `localhost`; the connect-time SSRF guard
+    // (strict by default) would otherwise refuse a name that resolves to loopback.
+    crate::ssrf::set_allow_private(true);
     // The full workspace enables both ring and aws-lc-rs. Pick a local provider
     // rather than mutating process-wide defaults or depending on test order.
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(

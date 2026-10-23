@@ -115,7 +115,7 @@ pub(crate) async fn build_state_with_resources(
     let inference = okapi_providers::inference::Registry::builtin(&resources)
         .map_err(|e| anyhow::anyhow!("provider registration: {e}"))?;
     let upstream = resources.openai.clone();
-    Ok(AppState {
+    let state = AppState {
         #[cfg(test)]
         settlement_journal_tag: Arc::from(format!("retry-test-{}", uuid::Uuid::new_v4())),
         pg,
@@ -195,7 +195,44 @@ pub(crate) async fn build_state_with_resources(
             |_| true,
         ),
         settle_shedding: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    })
+    };
+    // 出站连接的 SSRF 校验从第一个请求起就按库里的策略走，而不是先严格 / 先宽松再等第一次轮询
+    sync_ssrf_policy(&state).await;
+    Ok(state)
+}
+
+/// 把 `settings.ssrf_policy.allow_private` 同步给出站直连的连接时校验（`okapi_providers::ssrf`，进程级开关）。
+/// 读不到（PG 暂不可用）就沿用上一次的值，不往宽松或严格任一边猜。
+pub async fn sync_ssrf_policy(state: &AppState) {
+    match state.try_setting_cached("ssrf_policy").await {
+        Ok(policy) => {
+            let allow = policy
+                .as_ref()
+                .as_ref()
+                .and_then(|value| value.get("allow_private"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            okapi_providers::ssrf::set_allow_private(allow);
+        }
+        Err(error) => {
+            tracing::warn!(
+                error_code = error.code,
+                "ssrf_policy 读取失败，沿用上一次的出站校验策略"
+            );
+        }
+    }
+}
+
+/// 管理员改了 `ssrf_policy` 之后，各进程最迟一个 settings 缓存 TTL（60s）加一个轮询周期内跟上。
+pub fn spawn_ssrf_policy_sync(state: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(15));
+        tick.tick().await; // 首个 tick 立即完成：构造时已经同步过一次
+        loop {
+            tick.tick().await;
+            sync_ssrf_policy(&state).await;
+        }
+    });
 }
 
 /// PriceBook 热更兜底：PG 最新 epoch 比当前新则重载替换。
@@ -312,6 +349,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     spawn_epoch_poller(state.clone());
     spawn_epoch_subscriber(state.clone());
     spawn_routing_invalidate_subscriber(state.clone());
+    spawn_ssrf_policy_sync(state.clone());
 
     let settlements = state.settlements.clone();
     let app = router(state);

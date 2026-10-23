@@ -461,10 +461,16 @@ impl Hop {
     /// 只连到代理、不建隧道，请求用绝对 URI 交给代理转发。
     async fn open(&self, target: &str, port: u16, forward: bool) -> Result<BoxIo, ConnectError> {
         match self {
-            Self::Direct => TcpStream::connect((target, port))
-                .await
-                .map(|tcp| Box::new(nodelay(tcp)) as BoxIo)
-                .map_err(|e| ConnectError::target(format!("tcp connect error: {e}"))),
+            // 直连：先解析并过 SSRF 校验，再只连校验过的地址（不二次解析，DNS 重绑定没有空窗）
+            Self::Direct => {
+                let addrs = crate::ssrf::resolve_checked(target, port)
+                    .await
+                    .map_err(|e| ConnectError::target(format!("dns: {e}")))?;
+                TcpStream::connect(addrs.as_slice())
+                    .await
+                    .map(|tcp| Box::new(nodelay(tcp)) as BoxIo)
+                    .map_err(|e| ConnectError::target(format!("tcp connect error: {e}")))
+            }
             Self::Http {
                 host,
                 port: proxy_port,
@@ -638,10 +644,12 @@ async fn socks5_connect(
         );
         request.extend_from_slice(name);
     } else {
-        let addr = tokio::net::lookup_host((target, port))
+        // 本地解析目标再把 IP 交给代理：这一步是我们自己在解析，同样过 SSRF 校验
+        let addr = crate::ssrf::resolve_checked(target, port)
             .await
-            .ok()
-            .and_then(|mut addrs| addrs.next())
+            .map_err(|e| ConnectError::target(format!("socks: cannot resolve {target}: {e}")))?
+            .into_iter()
+            .next()
             .ok_or_else(|| ConnectError::target(format!("socks: cannot resolve {target}")))?;
         match addr.ip() {
             std::net::IpAddr::V4(ip) => {
