@@ -30,7 +30,9 @@ pub async fn ensure_topology(client: &async_nats::Client) -> anyhow::Result<jets
         okapi_store::env_config::number("OKAPI_NATS_REPLICAS", 1, |n| (1..=5).contains(n));
     let max_bytes =
         okapi_store::env_config::number("OKAPI_NATS_MAX_BYTES", 4 * 1024 * 1024 * 1024, |n| {
-            *n >= 64 * 1024 * 1024
+            // 下限防误配成几 KB 把流挤爆；上限 1 TiB 防把「GB」当成「字节」多写几个 0，
+            // 声明的容量远超磁盘时 JetStream 不会拒，满盘时才一起出事
+            (64 * 1024 * 1024..=1 << 40).contains(n)
         });
     js.create_or_update_stream(jetstream::stream::Config {
         name: STREAM_NAME.to_owned(),

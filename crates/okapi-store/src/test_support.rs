@@ -40,12 +40,23 @@ pub fn optional_service(name: &str) -> Option<String> {
         Ok(value) if !value.is_empty() => Some(value),
         _ => {
             assert!(
-                std::env::var("OKAPI_REQUIRE_SERVICES").as_deref() != Ok("1"),
+                !services_required(),
                 "{name} is required (OKAPI_REQUIRE_SERVICES=1); refusing to skip vacuously"
             );
             None
         }
     }
+}
+
+/// 要求服务在场：只有明确写了「关」（0 / false / no / off）或没设才算不要求。写成 `true`、`yes`
+/// 或拼错，都按要求处理——这里认错方向的代价是用例空跑出一片绿，宁可多拒。
+fn services_required() -> bool {
+    std::env::var("OKAPI_REQUIRE_SERVICES").is_ok_and(|raw| {
+        !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 #[cfg(test)]

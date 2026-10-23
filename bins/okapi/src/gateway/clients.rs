@@ -148,8 +148,10 @@ impl TrustPolicy {
                 })
                 .collect(),
         };
+        // 和请求头比对时头值不带首尾空白：.env / secret 里多出的换行不能让凭证永远对不上
         let edge_key = std::env::var("OKAPI_EDGE_KEY")
             .ok()
+            .map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty());
         if proxies.is_empty() && edge_key.is_none() {
             tracing::info!("无信任来源：转发头一律不作数，来源 IP 只取 socket 对端");
