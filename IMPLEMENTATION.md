@@ -322,7 +322,7 @@ refresh token / grant 才算终态（形状错不能把全部订阅 key 一次�
 | custom_pass 透传【已实现，语义定案：`/pass/{channel_id}/{*path}`（任意方法）；渠道 provider=custom_pass；settings 必填 `allowed_paths`（前缀白名单，空拒绝——SSRF 第二道闸，第一道是 api_base 固定）与 `billing_model`（models 表 per_call 模型，按次预扣/结算，禁零费裸透传）；可选 `auth_header`/`auth_scheme`（缺省 Authorization: Bearer）；请求体/查询串原样，响应流式回传仅透 content-type】 | M3 |
 | thinking-to-content 转换（客户端不支持 reasoning 输出时转正文）【已实现：渠道 settings.thinking_to_content，流式+非流式】 | M3 |
 | reasoning effort 模型名后缀（-high/-medium/-low、-thinking、-thinking-128 预算 → 请求参数改写，接在别名解析旁）【已实现：全名直命中优先；openai→reasoning_effort / anthropic→thinking 预算（自动抬 max_tokens）/ gemini→thinkingConfig；计费落基名】 | M3 |
-| OpenAI Realtime API（WebSocket 双向 + 音频 token 计费；WS 治理见 §14.4） | M4【实现定案：入口 `GET /v1/realtime?model=`（升级 WS；鉴权 Bearer 头或 `openai-insecure-api-key.<key>` 子协议）；上游 = openai 渠道 api_base 的 ws(s) 形态；**计费时机**：连接时按模型 max_output 预扣一笔，会话内逐 `response.done` 累计 usage（text+audio tokens 合并按模型倍率，audio 独立倍率列 backlog、细分进快照），断开时按累计 commit（无产出全额退款）；治理：per-key WS 连接租约（ZSET 60s 租约/20s 续期，崩溃自然滚出，docs/database.md §2.1 ws:lease:k:*）、首消息 30s、空闲 5min。四用例已验收（双向泵计费/零产出退款/限连 429/子协议鉴权）】 |
+| OpenAI Realtime API（WebSocket 双向 + 音频 token 计费；WS 治理见 §14.4） | M4【实现定案：入口 `GET /v1/realtime?model=`（升级 WS；鉴权 Bearer 头或 `openai-insecure-api-key.<key>` 子协议）；上游 = openai 渠道 api_base 的 ws(s) 形态；**计费时机**：连接时按模型 max_output 预扣一笔，会话内逐 `response.done` 累计 usage（text+audio tokens 合并按模型倍率，audio 独立倍率列 backlog、细分进快照），断开时按累计 commit（无产出全额退款）；治理：per-key WS 连接租约（ZSET 60s 租约/20s 续期，崩溃自然滚出，docs/database.md §2.1 ws:lease:k:*）、上游握手（TCP/TLS 到 101）10s、首消息 30s、空闲 5min、会话上限 8 分钟。**第三轮评审后补**：上游握手 10s 限时放在 `responses_ws::connect_raw` 里（此前只有会话级的 30s 兜底，收了连接不回 101 的慢死上游要占会话槽 30s），超时与建连超时回 `upstream_timeout`；客户端发违规帧（未掩码 / 帧或消息超限 / 非法 UTF-8）时，Realtime 与 Responses WS 两个入口回带状态码的关闭帧（1002 / 1009 / 1007 + 短原因），不再是没有状态码的空关闭；**不校验 Origin**（凭据只有请求头与 `openai-insecure-api-key.` 子协议，没有会被浏览器自动带上的 cookie 会话，CSWSH 不适用，浏览器直连是受支持用法）；会话内余额不足断开时按累计用量 commit，透支最多最后一个 response，是 §4.4 既定取舍。四用例已验收（双向泵计费/零产出退款/限连 429/子协议鉴权）】 |
 | Responses WebSocket 入口 | 原生 GET `/v1/responses`、逐轮鉴权/预扣/结算与固定账号连接已实现；14 项模拟上游网关集成测试通过。HTTP/SSE 桥接与 native/http/auto 协议选择已接入，15 项桥接集成测试通过；中途干预和真实供应商联调仍待补齐。契约与实测记录见 `docs/responses-websocket.md`、`docs/core-api-verification.md` |
 | Azure OpenAI 上游类型（provider=`azure`：`{endpoint}/openai/deployments/{deployment}/…?api-version=` + `api-key` 头；部署名 = model_mapping 值）【已实现，见 §11.29；chat / embeddings / images / audio 四类端点覆盖；videos / realtime 不路由 azure】 | M4 |
 | Bedrock / Vertex AI 上游类型（provider=`bedrock`：InvokeModel + SigV4 / Bedrock API key，Anthropic 方言；provider=`vertex`：服务账号 OAuth，Claude 走 rawPredict、Gemini 走 generateContent） | M4【已实现，见 §11.35（推翻 §11.29 的"不做"）：两家都是"已有方言 + 新传输"，chat 族四入口全覆盖；embeddings / images / audio / videos / realtime 不路由；Bedrock 非 Anthropic 模型（Converse 转换）列 backlog】 |
@@ -2837,8 +2837,14 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   （529 / 429 / 500 / 503 …），重试矩阵与 key 冷却才能分流；认不出的仍按断流。Chat 转换流遇到解析不了的 data 行报 `chat_chunk_json`，
   不再当空对象吞掉一段文本；Gemini 请求里 chat 装不下的 part（`executableCode` / `codeExecutionResult`、model 里的媒体）报 400。
 - **写入校验**：`retention_months` 只收 0..=1200 的整数（清理任务按 bigint 读，坏值会让它每轮报错）；倍率列加 `>= 0` CHECK
-  （迁移 0004）；门户用量明细的 jsonb 读数只认 JSON 整数，脏值按未观测，不让整页查询报错。前端兑换码 / 规则 / 保留期表单写错拦下提交，
+  （迁移 0004）；`override_kind` 只能是 `ratio` / `absolute`、`tier_ratios` 只能是对象或 NULL（迁移 0005，同样 `NOT VALID`）；门户用量明细的 jsonb 读数只认 JSON 整数，脏值按未观测，不让整页查询报错。前端兑换码 / 规则 / 保留期表单写错拦下提交，
   不再 NaN → null / undefined 悄悄改语义；生成兑换码按钮只对有 `user.balance_adjust` 的管理员显示。
+- **保留策略的 DEFAULT 分区**：月分区只提前建下个月的，首月数据全落在三张分区表的 DEFAULT 分区，保留任务对它按
+  `ORDER BY created_at, <主键> LIMIT 1000` 分批清理；迁移 0005 在这三个 DEFAULT 分区上建 `(created_at, 主键)` 索引（父表上没有以
+  `created_at` 打头的索引），否则每批都是整表扫描 + 排序，数据量大了批批撞 10s 语句超时、永远清不动。只建在 DEFAULT 分区上，
+  月分区的写入路径不多维护索引。0005 同时删掉 `users.aff_code` 上与 `users_aff_code_key` 重复的部分唯一索引。
+  迁移门锁（`pg_try_advisory_lock` 轮询排队）等待超过 1 分钟每分钟记一条告警，超过 30 分钟报 `migration_gate_timeout`，
+  不再无声地永远挂在启动里。
 - **环境变量**：布尔大小写不敏感（`true/1/yes/on`、`false/0/no/off`），认不得的与数值解析失败都打 WARN 再用缺省（`okapi_store::env_config`）。
 - **门户日志缺省近 30 天**：`/api/me/logs` 与 `/logs/stat` 不带日期时窗口取近 30 天（按 request_id 点查不加界），列表按
   `(created_at, id)` 倒序键集翻页（`before` 仍传上一页末行 id，服务端在同一属主下取它的 created_at），走 `idx_br_user_time`。
