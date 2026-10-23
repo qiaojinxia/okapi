@@ -3,36 +3,36 @@
 
 为什么要有这道闸：缺键在运行时不报错，只是把 "admin:channelsTitle" 这种原始键
 直接渲染到界面上——本地跑一遍未必点到那个页面，等用户看见就晚了。
+
+「已定义的键」由 scripts/locale-keys.mjs 让 Node 对前端实际装载的资源求值得到（含嵌套键
+`admin:modelMeta.callUnit`），而不是用正则切 TS 源码：此前只认到每个命名空间的直接子键，
+前端里 `t('admin:modelMeta.xxx')` 这类点分调用（70 多处）整体逃过校验。
 """
 
 import glob
+import json
 import re
+import subprocess
 import sys
 
-LOCALES = {
-    # Keep these in sync with the resource composition in frontend/src/lib/i18n.ts.
-    'zh-CN': ['frontend/src/locales/zh-CN.ts', 'frontend/src/locales/model-editor-zh.ts'],
-    'en': ['frontend/src/locales/en.ts'],
-}
+
+def defined_keys() -> dict[str, set[str]]:
+    """语言 → 该语言全部键（`ns:path`，嵌套的用点连接；对象节点本身也算已定义）。"""
+    try:
+        run = subprocess.run(
+            ['node', '--experimental-strip-types', '--disable-warning=ExperimentalWarning',
+             'scripts/locale-keys.mjs'],
+            capture_output=True, text=True, check=True,
+        )
+    except FileNotFoundError:
+        raise SystemExit('❌ 找不到 node：这道闸要用 Node 对语言包求值（CI 前端 job 已装 Node 22）')
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(f'❌ 语言包求值失败（locale-keys.mjs）：\n{error.stderr}')
+    return {lang: set(keys) for lang, keys in json.loads(run.stdout).items()}
 
 
-def flatten(path: str) -> set[str]:
-    """按花括号配平切出顶层命名空间，再收集其直接子键（ns:key）。"""
-    src = open(path, encoding='utf-8').read()
-    keys: set[str] = set()
-    for m in re.finditer(r'^  ([A-Za-z0-9_]+): \{$', src, re.M):
-        ns = m.group(1)
-        depth, i = 1, m.end()
-        while depth > 0 and i < len(src):
-            if src[i] == '{':
-                depth += 1
-            elif src[i] == '}':
-                depth -= 1
-            i += 1
-        body = src[m.end():i]
-        for km in re.finditer(r'^    ([A-Za-z0-9_]+):', body, re.M):
-            keys.add(f'{ns}:{km.group(1)}')
-    return keys
+# `t('ns:key')` 与嵌套的 `t('ns:a.b.c')`。
+USED = re.compile(r"(?<![A-Za-z0-9_.$])t\('([A-Za-z0-9_]+:[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)'")
 
 
 def used_keys() -> dict[str, set[str]]:
@@ -45,13 +45,13 @@ def used_keys() -> dict[str, set[str]]:
             continue
         src = open(f, encoding='utf-8').read()
         # 前置断言排除 `format('HH:mm')` 这类以 t 结尾的方法名——那不是翻译调用
-        for m in re.finditer(r"(?<![A-Za-z0-9_.$])t\('([A-Za-z0-9_]+:[A-Za-z0-9_]+)'", src):
+        for m in USED.finditer(src):
             out.setdefault(m.group(1), set()).add(f)
     return out
 
 
 def main() -> int:
-    defined = {name: set().union(*(flatten(path) for path in paths)) for name, paths in LOCALES.items()}
+    defined = defined_keys()
     used = used_keys()
     failed = False
 
@@ -75,7 +75,8 @@ def main() -> int:
             print(f'❌ zh-CN 缺少 {len(only_en)} 个键: {", ".join(only_en[:12])}')
 
     if not failed:
-        print(f'✅ guard-i18n-keys：{len(used)} 个引用键均已定义，中英对齐')
+        nested = sum(1 for k in used if '.' in k)
+        print(f'✅ guard-i18n-keys：{len(used)} 个引用键（含 {nested} 个嵌套键）均已定义，中英对齐')
     return 1 if failed else 0
 
 
