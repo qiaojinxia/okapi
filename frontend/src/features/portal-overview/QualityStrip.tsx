@@ -28,10 +28,10 @@ export function QualityStrip({ label, items, loading }: { label: string; items: 
     <section
       aria-label={label}
       aria-busy={loading}
-      className="grid min-w-0 grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border shadow-card xl:grid-cols-4"
+      className="grid min-w-0 grid-cols-2 gap-px overflow-hidden rounded-2xl border border-border/70 bg-border shadow-card xl:grid-cols-4"
     >
       {items.map((item) => (
-        <div key={item.label} className="flex min-w-0 items-start gap-3 bg-card px-3 py-3 sm:px-4">
+        <div key={item.label} className="flex min-w-0 items-start gap-3 bg-linear-to-br from-card to-muted/15 px-3 py-3 sm:px-4">
           {/* 窄屏两列时格子只有一百多像素宽：图标让位给数字，数字与标签宁可换行也不截断 */}
           <span className={cn('mt-0.5 hidden h-8 w-8 shrink-0 items-center justify-center rounded-lg sm:flex', item.accent)}>
             <item.icon aria-hidden className="h-4 w-4" />
@@ -41,7 +41,7 @@ export function QualityStrip({ label, items, loading }: { label: string; items: 
             {loading ? (
               <Skeleton className="mt-1 h-6 w-20" />
             ) : (
-              <span title={item.value} className={cn('text-lg font-semibold tracking-tight break-words tabular-nums', item.tone && VALUE_TONE[item.tone])}>
+              <span title={item.value} className={cn('text-xl leading-8 font-semibold tracking-tight break-words tabular-nums', item.tone && VALUE_TONE[item.tone])}>
                 {item.value}
               </span>
             )}

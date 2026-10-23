@@ -51,9 +51,9 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
     { label: t('charts:metric_latency'), value: latency(total?.avg_latency_ms, hasRequests), measure: 'latency' },
     { label: t('portal:cacheHitShort'), value: hasRequests && cache != null && (partialCache || (total?.prompt_tokens ?? 0) > 0) ? formatBp(cache, locale) : '—', measure: 'cache', hint: t(partialCache ? 'charts:cacheSampleHint' : 'charts:cacheHitHint'), sample: partialCache ? sampleText(cacheSamples) : undefined },
   ]
-  const renderMetric = ({ label, value, measure, hint, sample, rate, meter }: Metric) => <div key={label} className="group relative min-h-11 min-w-0 rounded px-1 py-0.5 has-[a]:hover:bg-muted/60 sm:min-h-10 sm:py-0">
+  const renderMetric = ({ label, value, measure, hint, sample, rate, meter }: Metric) => <div key={label} className="group relative min-h-11 min-w-0 rounded px-1 py-0.5 has-[a]:hover:bg-muted/60 sm:min-h-10 sm:py-0 lg:px-4 lg:first:pl-1 lg:[&:not(:first-child)]:border-l lg:[&:not(:first-child)]:border-border/70 lg:[@media(min-height:900px)]:min-h-12 lg:[@media(min-height:900px)]:py-1">
     <dt className={cn('text-xs text-muted-foreground', measure === 'ttft' && 'font-medium text-primary')}>{measure === 'ttft' ? t('charts:ttftLabel') : label}</dt>
-    <dd className={cn('mt-0.5 break-words text-base font-semibold tabular-nums', rate?.tone === 'warn' && 'text-warning', rate?.tone === 'bad' && 'text-destructive')}>
+    <dd className={cn('mt-0.5 break-words text-base font-semibold tracking-tight tabular-nums lg:[@media(min-height:900px)]:text-lg', rate?.tone === 'warn' && 'text-warning', rate?.tone === 'bad' && 'text-destructive')}>
       {measure ? <Tooltip content={hint ?? ''}><Link to="/admin/stats" search={{ ...search, measure }} aria-label={t('admin:dashboardOpenMetric', { label, value })} className="outline-none transition-colors after:absolute after:inset-0 after:rounded hover:text-primary focus-visible:after:ring-2 focus-visible:after:ring-primary/40">
         {value}
       </Link></Tooltip> : value}
@@ -63,10 +63,10 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
     {rate && meter && <div aria-hidden className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted"><div className={cn('h-full rounded-full', rate.tone === 'good' ? 'bg-success' : rate.tone === 'warn' ? 'bg-warning' : 'bg-destructive')} style={{ width: `${rate.pct}%` }} /></div>}
     {measure === 'ttft' && (total?.ttft_samples ?? 0) === 0 && !query.isPending && <p className="text-[11px] text-muted-foreground">{t(query.isError ? 'charts:statisticsUnavailable' : 'charts:ttftNoSamples')}</p>}
   </div>
-  return <Card className="min-w-0 rounded-xl" role="region" aria-label={t('admin:dashboardOperations')}>
-    <CardHeader className="flex-row flex-wrap items-center justify-between gap-x-3 gap-y-0 px-4 pt-1 pb-0">
+  return <Card className="min-w-0 rounded-2xl border-border/70" role="region" aria-label={t('admin:dashboardOperations')}>
+    <CardHeader className="flex-row flex-wrap items-center justify-between gap-x-3 gap-y-0 px-4 pt-1 pb-0 lg:[@media(min-height:900px)]:pt-3 lg:[@media(min-height:900px)]:pb-1">
       <div className="flex min-w-0 flex-wrap items-center gap-x-3">
-        <CardTitle>{t('admin:dashboardOperations')} <span className="ml-2 font-normal text-muted-foreground">{dashboardPeriodLabel(days, range, t)}</span></CardTitle>
+        <CardTitle className="text-[15px] tracking-tight">{t('admin:dashboardOperations')} <span className="ml-2 inline-flex rounded-md bg-muted/55 px-2 py-0.5 text-xs font-medium text-muted-foreground">{dashboardPeriodLabel(days, range, t)}</span></CardTitle>
       </div>
       <div className="flex flex-wrap items-center gap-x-3">
         <StatisticsStatus query={query} />
@@ -80,10 +80,10 @@ export function OperationsSummary({ days, range }: { days: number; range?: DateR
         </Tooltip>
       </div>
     </CardHeader>
-    <CardContent className="px-3 pt-1 pb-2 sm:pb-1">
+    <CardContent className="px-3 pt-1 pb-2 sm:pb-1 lg:[@media(min-height:900px)]:pt-0 lg:[@media(min-height:900px)]:pb-2">
       {query.isError && <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} />}
       {query.isPending && <LoadingState className="py-2" />}
-      <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-5">
+      <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3 lg:grid-cols-5 lg:gap-x-0">
         {qualityMetrics.map(renderMetric)}
       </dl>
       <div id={costPanelId} hidden={!costExpanded}>

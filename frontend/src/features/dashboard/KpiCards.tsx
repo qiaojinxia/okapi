@@ -42,16 +42,16 @@ function Kpi({
 }) {
   const { t } = useTranslation()
   // 平板 6 栏：前三张各占 2 栏、后两张各占 3 栏，五张卡正好铺满两行，不留空位；桌面回到五栏一行
-  const className = 'min-w-0 rounded-xl last:col-span-2 md:col-span-2 md:nth-4:col-span-3 md:last:col-span-3 lg:col-span-1 lg:nth-4:col-span-1 lg:last:col-span-1'
-  const sub = <span className="max-w-full lg:truncate">{window}</span>
+  const className = 'min-w-0 rounded-2xl last:col-span-2 md:col-span-2 md:nth-4:col-span-3 md:last:col-span-3 lg:col-span-1 lg:nth-4:col-span-1 lg:last:col-span-1'
+  const sub = <span className="max-w-full rounded-md bg-muted/45 px-1.5 py-0.5 leading-4 lg:truncate lg:py-0 lg:[@media(min-height:900px)]:py-0.5">{window}</span>
   const title = <span title={hint}><span className="sr-only">{t('admin:dashboardMetricLabel', { period, label: '' })}</span>{label}</span>
-  if (loading) return <Stat layout="stacked" compact className={`${className} lg:py-2`} icon={icon} label={title} value={today} sub={sub} loading />
+  if (loading) return <Stat layout="stacked" compact className={`${className} border-border/70 bg-linear-to-br from-card to-muted/20 lg:py-2`} icon={icon} label={title} value={today} sub={sub} loading />
   return <Link to="/admin/stats" search={search} aria-label={t('admin:dashboardOpenMetric', { label: t('admin:dashboardMetricLabel', { period, label }), value: today })}
     className={`${className} group block outline-none focus-visible:ring-2 focus-visible:ring-primary/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background`}>
-    <Stat layout="stacked" compact className="h-full min-w-0 rounded-xl transition-colors group-hover:border-primary/40 group-hover:bg-accent/30 group-focus-visible:border-primary/40 lg:py-2 lg:max-xl:px-2" icon={icon}
+    <Stat layout="stacked" compact className="h-full min-w-0 rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25 transition-[border-color,box-shadow,transform] group-hover:-translate-y-0.5 group-hover:border-primary/35 group-hover:shadow-popover group-focus-visible:border-primary/40 lg:py-2 lg:max-xl:px-2" icon={icon}
       label={title}
-      value={<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-lg sm:text-xl"><span className="min-w-0" title={today}>{today}</span>{detail && <span className="text-[11px] font-normal text-muted-foreground">{detail}</span>}<ArrowUpRight aria-hidden className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover:text-primary group-hover:opacity-100 group-focus-visible:text-primary group-focus-visible:opacity-100 sm:block" /></span>}
-      sub={sub} tone={tone} iconClassName={accent} />
+      value={<span className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-xl leading-8 sm:text-2xl lg:pr-9 lg:text-xl lg:leading-7 2xl:text-2xl 2xl:leading-8"><span className="min-w-0" title={today}>{today}</span>{detail && <span className="text-[11px] leading-4 font-normal text-muted-foreground">{detail}</span>}<ArrowUpRight aria-hidden className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 group-hover:text-primary group-hover:opacity-100 group-focus-visible:text-primary group-focus-visible:opacity-100 sm:block" /></span>}
+      sub={sub} tone={tone} iconClassName={accent ? `h-8 w-8 rounded-lg ${accent}` : undefined} />
   </Link>
 }
 
@@ -126,7 +126,7 @@ export function KpiCards({ days, range }: { days: number; range?: DateRange | nu
         period={period}
         loading={loading}
         icon={AlertTriangle}
-        accent={errorBp < 100 ? 'bg-warning/14 text-warning' : undefined}
+        accent={errorBp >= 500 ? 'bg-destructive/12 text-destructive' : 'bg-warning/14 text-warning'}
         label={t('admin:kpiErrorRate')}
         hint={t('admin:dashboardErrorBasis')}
         search={{ ...search, measure: 'error_rate' }}

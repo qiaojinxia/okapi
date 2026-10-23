@@ -155,17 +155,18 @@ export function PortalOverviewPage() {
 
   return (
     // 大屏撑满视口：上半部分（页头、筛选、指标）保持自身高度，趋势与排行吃掉剩余高度，视口放不下时在页内滚动
-    <div data-slot="portal-overview" className="flex min-w-0 flex-col gap-4 lg:h-full lg:min-h-0 lg:overflow-y-auto">
-      <div className="flex min-w-0 shrink-0 flex-col gap-4">
+    <div data-slot="portal-overview" className="flex min-w-0 flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-y-auto">
+      <div className="flex min-w-0 shrink-0 flex-col gap-3">
         <PageHeader
           icon={LayoutDashboard}
           title={t('portal:dashboard')}
           meta={<LiveBadge live={live} scope={scope} />}
+          className="[&_h1]:text-[22px]"
           action={<>
-            <Button variant="outline" loading={refreshing} onClick={() => void refresh()}>
+            <Button variant="outline" loading={refreshing} onClick={() => void refresh()} className="rounded-lg">
               {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
             </Button>
-            <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-md border border-border bg-card px-3 text-sm font-medium shadow-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40">
+            <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-primary px-3.5 text-sm font-medium text-primary-foreground shadow-xs outline-none transition-shadow hover:bg-primary/90 hover:shadow-popover focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9">
               {t('portal:usageDetails')}<ArrowUpRight className="h-4 w-4" />
             </Link>
           </>}
@@ -194,13 +195,13 @@ export function PortalOverviewPage() {
           <Stat
             layout="stacked"
             icon={Cpu}
-            iconClassName="bg-success/12 text-success"
+            iconClassName="h-8 w-8 rounded-lg bg-success/12 text-success"
             tone="good"
             label={t('common:tokens')}
             loading={loading}
-            className="@container"
+            className="@container rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
             aside={daily && <KpiTrend values={daily.tokens} color="var(--color-success)" />}
-            value={total ? formatCount(total.tokens, locale) : '—'}
+            value={<KpiValue value={total ? formatCount(total.tokens, locale) : '—'} trend />}
             sub={<>
               <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
               {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
@@ -210,12 +211,12 @@ export function PortalOverviewPage() {
           <Stat
             layout="stacked"
             icon={Activity}
-            iconClassName="bg-chart-1/12 text-chart-1"
+            iconClassName="h-8 w-8 rounded-lg bg-chart-1/12 text-chart-1"
             label={t('common:requests')}
             loading={loading}
-            className="@container"
+            className="@container rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
             aside={daily && <KpiTrend values={daily.requests} color="var(--color-chart-1)" />}
-            value={total ? formatCount(total.requests, locale) : '—'}
+            value={<KpiValue value={total ? formatCount(total.requests, locale) : '—'} trend />}
             sub={<>
               <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
               {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
@@ -224,10 +225,11 @@ export function PortalOverviewPage() {
           <Stat
             layout="stacked"
             icon={Wallet}
-            iconClassName="bg-warning/14 text-warning"
+            iconClassName="h-8 w-8 rounded-lg bg-warning/14 text-warning"
             label={t('portal:accountBalance')}
             loading={me.isPending}
-            value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'}
+            className="rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
+            value={<KpiValue value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'} />}
             // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
             // 14 天内转黄、3 天内转红。有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
             sub={
@@ -247,12 +249,12 @@ export function PortalOverviewPage() {
           <Stat
             layout="stacked"
             icon={Coins}
-            iconClassName="bg-chart-3/12 text-chart-3"
+            iconClassName="h-8 w-8 rounded-lg bg-chart-3/12 text-chart-3"
             label={t('portal:totalSpend')}
             loading={loading}
-            className="@container"
+            className="@container rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
             aside={daily && <KpiTrend values={daily.amount} color="var(--color-chart-3)" />}
-            value={total ? formatUsd(total.amount_micro, locale) : '—'}
+            value={<KpiValue value={total ? formatUsd(total.amount_micro, locale) : '—'} trend />}
             sub={<>
               <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
               {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
@@ -271,6 +273,11 @@ export function PortalOverviewPage() {
       )}
     </div>
   )
+}
+
+/// 与管理端一致的主数字层级；右侧图标或迷你趋势始终有独立空间，不压金额。
+function KpiValue({ value, trend = false }: { value: string; trend?: boolean }) {
+  return <span title={value} className={`block pr-8 text-2xl leading-8 ${trend ? '@[13rem]:pr-20' : ''}`}>{value}</span>
 }
 
 /// 数字卡右侧的迷你趋势：卡片够宽才显示（数值与副行优先），位置对齐数值那一行。
@@ -299,7 +306,7 @@ function DeltaText({ value, days }: { value: number | null; days: number }) {
   const pct = Math.abs(value * 100)
   const shown = pct >= 100 ? Math.round(pct).toLocaleString(i18n.language) : pct.toLocaleString(i18n.language, { maximumFractionDigits: pct < 10 ? 1 : 0 })
   const arrow = value > 0.0005 ? '▲' : value < -0.0005 ? '▼' : '·'
-  return <span className="tabular-nums">{t('portal:periodChange', { days, delta: `${arrow} ${shown}%` })}</span>
+  return <span className="inline-flex w-fit rounded-md bg-muted/45 px-1.5 py-0.5 leading-4 tabular-nums">{t('portal:periodChange', { days, delta: `${arrow} ${shown}%` })}</span>
 }
 
 /// 标题旁的实时速率：只有单把 key 视角有限流器读数。接近上限（≥80%）转黄、触顶转红。

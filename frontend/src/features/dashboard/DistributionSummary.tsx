@@ -76,7 +76,7 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
         {/* 大屏固定高度：本区是尺寸容器，扇形图按它的高 / 宽取较小者（cqh / cqw），图例在右侧垂直居中，放不下时图例内部滚动。
             窄屏自然高度：图在上、图例在下；够宽（容器 ≥ 28rem）时并排。 */}
         <div data-slot="distribution-body" className={STAGE}>
-          <PieChart slot="distribution-pie" slices={slices} active={active} onActiveChange={setActive} label={t('admin:dashboardDistributionChart', { label: title })}
+          <PieChart slot="distribution-pie" slices={slices} active={active} onActiveChange={setActive} label={t('admin:dashboardDistributionChart', { label: title })} hole={0.62}
             className={PIE}>
             <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
             <span className="max-w-full truncate text-xs leading-tight font-semibold tabular-nums @[10rem]:text-[13px] @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
@@ -119,7 +119,7 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
             </div>}
           </div>
         </div>
-        <div className="mt-auto flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-lg bg-muted/40 px-2.5 py-1.5 lg:py-1">
+        <div className="mt-auto flex shrink-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 rounded-xl border border-border/50 bg-muted/25 px-2.5 py-1.5 lg:py-[3px] lg:[@media(min-height:900px)]:py-1">
           <Tooltip content={t('admin:dashboardRankingDenominator')}>
             <span tabIndex={0} className="text-[11px] text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{totalLabel}</span>
           </Tooltip>
@@ -134,9 +134,9 @@ export function DistributionSummary({ days, range, view, onViewChange, modelMetr
   const { t } = useTranslation()
   const tabsId = useId()
   const views: DistributionView[] = ['model', 'channel', 'tokens']
-  return <Card data-slot="dashboard-distribution" role="region" aria-label={t('admin:dashboardDistribution')} className="flex min-w-0 flex-col rounded-xl lg:min-h-0">
-    <CardHeader className="shrink-0 flex-row flex-wrap items-center justify-between gap-2 px-4 pt-2 pb-2">
-      <CardTitle>{t('admin:dashboardDistribution')}</CardTitle>
+  return <Card data-slot="dashboard-distribution" role="region" aria-label={t('admin:dashboardDistribution')} className="flex min-w-0 flex-col rounded-2xl border-border/70 lg:min-h-0">
+    <CardHeader className="shrink-0 flex-row flex-wrap items-center justify-between gap-2 px-5 pt-3 pb-2 lg:flex-nowrap lg:pt-2 lg:[@media(min-height:900px)]:pt-3">
+      <CardTitle className="shrink-0 text-[15px] tracking-tight">{t('admin:dashboardDistribution')}</CardTitle>
       <Tabs id={tabsId} className="lg:[&_button]:min-h-7 lg:[&_button]:text-xs" ariaLabel={t('admin:dashboardDistributionViews')} active={view} onChange={(next) => onViewChange(next as DistributionView)} items={views.map((id) => ({ id, label: t(`admin:dashboardDistribution_${id}`), panelId: `${tabsId}-${id}-panel` }))} />
     </CardHeader>
     <div className="grid min-w-0 flex-1 lg:min-h-0 lg:grid-rows-[minmax(0,1fr)]">

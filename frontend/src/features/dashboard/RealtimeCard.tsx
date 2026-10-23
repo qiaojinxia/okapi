@@ -37,11 +37,11 @@ export function RealtimeCard({ days }: { days: number }) {
   const recentQps = d ? (d.qps_milli / 1_000).toLocaleString(locale, { maximumFractionDigits: 3 }) : '—'
   const hasRequests = (d?.requests ?? 0) > 0
   const liveHint = [t('admin:dashboardLiveHint'), q.dataUpdatedAt > 0 && !q.isError ? t('common:updatedAt', { time: new Date(q.dataUpdatedAt).toLocaleTimeString(locale) }) : ''].filter(Boolean).join(' · ')
-  return <Card className="min-w-0 rounded-xl" role="region" aria-label={t('admin:dashboardLive')}>
-    <CardContent className="grid gap-3 px-4 py-3 lg:grid-cols-[12rem_minmax(0,1fr)] lg:items-center lg:py-1">
-      <div className="flex flex-wrap items-center justify-between gap-2 lg:gap-0.5">
+  return <Card className="min-w-0 overflow-hidden rounded-2xl border-border/70" role="region" aria-label={t('admin:dashboardLive')}>
+    <CardContent className="grid gap-3 px-4 py-3 lg:grid-cols-[12rem_minmax(0,1fr)] lg:items-center lg:gap-5 lg:py-0.5 lg:[@media(min-height:900px)]:py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 lg:gap-0.5 lg:[@media(min-height:900px)]:gap-1">
         <HelpTooltip content={liveHint}>
-          <div tabIndex={0} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+          <div tabIndex={0} className="flex w-fit flex-wrap items-center gap-x-2 gap-y-0.5 rounded-full bg-success/7 px-2.5 py-1 outline-none focus-visible:ring-2 focus-visible:ring-primary/40 lg:py-0 lg:[@media(min-height:900px)]:py-1">
             <span aria-hidden className="relative flex h-2 w-2">
               {d && <span className="absolute inline-flex h-full w-full rounded-full bg-success/60 motion-safe:animate-ping" />}
               <span className={cn('relative inline-flex h-2 w-2 rounded-full', d ? 'bg-success' : 'bg-muted-foreground/40')} />
@@ -65,7 +65,7 @@ export function RealtimeCard({ days }: { days: number }) {
             <InlineStat label={t('admin:kpiTokens')} value={d ? formatCount(d.tokens, locale) : '—'} />
             <InlineStat label={t('admin:kpiRevenue')} value={d ? formatMoneyAggregate(d.amount_micro, locale, true) : '—'} />
           </div>
-          <div className="hidden h-10 min-w-0 rounded-lg bg-muted/30 px-2 md:block" role="img" aria-label={t('admin:dashboardLiveChart')}>
+          <div className="hidden h-10 min-w-0 rounded-xl border border-border/50 bg-muted/25 px-2 md:block" role="img" aria-label={t('admin:dashboardLiveChart')}>
             {d && d.series.some((p) => p.requests > 0) ? <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <AreaChart data={d.series} margin={{ top: 6, bottom: 3, left: 0, right: 0 }}>
                 <defs><linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--color-primary)" stopOpacity={0.3} /><stop offset="100%" stopColor="var(--color-primary)" stopOpacity={0.02} /></linearGradient></defs>

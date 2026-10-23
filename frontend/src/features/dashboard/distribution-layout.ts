@@ -14,12 +14,12 @@
 /// 面板根：大屏是尺寸容器。
 export const PANEL = 'flex h-full min-w-0 flex-col lg:[container-type:size]'
 /// 页签头与其中的一行（描述文字在左，控件在右）。
-export const HEAD = 'shrink-0 gap-0 px-4 pt-1 pb-2 lg:h-7 lg:py-0'
+export const HEAD = 'shrink-0 gap-0 px-5 pt-1 pb-2 lg:h-7 lg:py-0'
 export const HEAD_ROW = 'flex min-w-0 flex-wrap items-center justify-between gap-x-2 text-xs text-muted-foreground lg:h-full lg:flex-nowrap'
 /// 页签头里的「查看全部」类链接。
 export const HEAD_LINK = 'inline-flex min-h-8 shrink-0 items-center gap-1 rounded text-xs text-primary outline-none hover:underline focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-6'
 /// 页签头下面的内容区。
-export const BODY = 'flex flex-1 flex-col gap-3 px-4 pt-0 pb-3 lg:min-h-0 lg:gap-1.5 lg:pb-2'
+export const BODY = 'flex flex-1 flex-col gap-3 px-5 pt-0 pb-3 lg:min-h-0 lg:gap-1.5 lg:px-4 lg:pb-2 lg:[@media(min-height:900px)]:px-5'
 /// 图区：圆 + 图例，整体居中。大屏高度固定，自己也是尺寸容器。
 export const STAGE = '@container flex flex-col items-center justify-center gap-4 @md:flex-row @md:gap-6 lg:h-[max(6rem,calc(100cqh-7.75rem))] lg:shrink-0 lg:flex-row lg:gap-5 lg:[container-type:size]'
 /// 圆：取图区高 / 宽里较小的一个（宽取 42%，给图例留位置），最大 22rem。

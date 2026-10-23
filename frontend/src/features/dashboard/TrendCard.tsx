@@ -41,18 +41,18 @@ export function TrendCard({ days, range, metric, onMetricChange }: { days: numbe
     [t(q.data?.granularity === 'hour' ? 'admin:dashboardHourlyAverage' : 'admin:dashboardTrendAverage'), format(total / Math.max(data.length, 1))],
     [t(q.data?.granularity === 'hour' ? 'admin:dashboardHourlyPeak' : 'admin:dashboardTrendPeak'), peak && peak[selected] > 0 ? `${format(peak[selected])} · ${peak.bucket.slice(5)}` : '—'],
   ]
-  return <Card data-slot="dashboard-trend" className="flex min-w-0 flex-col rounded-xl lg:min-h-0">
-    <CardHeader className="shrink-0 gap-1 px-4 pt-3 pb-2 lg:pt-2">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <CardTitle>{title}</CardTitle>
-        <Segmented size="sm" ariaLabel={t('charts:metric')} value={metric} onChange={onMetricChange} options={(['combined', 'requests', 'amount', 'tokens'] as const).map((value) => ({ value, label: value === 'combined' ? t('admin:dashboardCompareTrend') : t(`charts:metric_${value}`) }))} />
+  return <Card data-slot="dashboard-trend" className="flex min-w-0 flex-col rounded-2xl border-border/70 lg:min-h-0">
+    <CardHeader className="shrink-0 gap-1 px-5 pt-3 pb-2 lg:pt-2 lg:[@media(min-height:900px)]:pt-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 lg:flex-nowrap lg:gap-2">
+        <CardTitle className="shrink-0 text-[15px] tracking-tight">{title}</CardTitle>
+        <Segmented size="sm" className="lg:[&_button]:px-2" ariaLabel={t('charts:metric')} value={metric} onChange={onMetricChange} options={(['combined', 'requests', 'amount', 'tokens'] as const).map((value) => ({ value, label: value === 'combined' ? t('admin:dashboardCompareTrend') : t(`charts:metric_${value}`) }))} />
       </div>
       <p className="text-xs leading-5 text-muted-foreground">{q.isSuccess && start && end ? `${start} — ${end}${q.data.window?.timezone ? ` · ${q.data.window.timezone}` : ''}` : dashboardPeriodLabel(days, range, t)}</p>
     </CardHeader>
-    <CardContent className="flex flex-1 flex-col px-4 pt-0 pb-3 lg:min-h-0 lg:overflow-y-auto lg:pb-2">
+    <CardContent className="flex flex-1 flex-col px-5 pt-0 pb-3 lg:min-h-0 lg:overflow-y-auto lg:pb-2">
       {q.isPending ? <LoadingState /> : q.isError ? <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /> : !q.data?.data.length ? <EmptyState hint={t('admin:trendEmptyHint')} /> : <>
-        <div className="mb-2 grid grid-cols-2 gap-2 rounded-lg bg-muted/40 px-3 py-2 sm:grid-cols-3 lg:mb-1 lg:flex lg:flex-wrap lg:justify-between lg:py-1.5">
-          {summary.map(([name, value]) => <div key={name} className="min-w-0 last:col-span-2 sm:last:col-span-1 lg:flex lg:flex-wrap lg:items-baseline lg:gap-x-1.5"><p className="text-xs text-muted-foreground">{name}</p><p className="mt-1 break-words text-sm font-semibold tabular-nums lg:mt-0">{value}</p></div>)}
+        <div className="mb-2 grid grid-cols-2 gap-2 rounded-xl border border-border/55 bg-linear-to-r from-muted/35 to-muted/15 px-3 py-2 sm:grid-cols-3 lg:mb-1 lg:flex lg:flex-wrap lg:justify-between lg:py-[5px] lg:[@media(min-height:900px)]:py-1.5">
+          {summary.map(([name, value]) => <div key={name} className="min-w-0 last:col-span-2 sm:last:col-span-1 lg:flex lg:flex-wrap lg:items-baseline lg:gap-x-1.5"><p className="text-xs text-muted-foreground">{name}</p><p className="mt-1 break-words text-sm font-semibold tabular-nums lg:mt-0 lg:text-[15px]">{value}</p></div>)}
         </div>
         <TimeChart compact fill minPlotHeight={112} key={metric} data={data} label={title} unit={metric === 'amount' ? 'USD' : label} format={format}
           secondaryAxis={combined ? { unit: 'USD', format: money } : undefined}

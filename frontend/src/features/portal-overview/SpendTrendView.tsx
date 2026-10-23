@@ -38,10 +38,10 @@ export function SpendTrendView({ rows, days, window, metric, onMetricChange, cla
   // 只在口径本身有需要解释的地方加一句，常规口径不重复说明
   const note = metric === 'latency' ? t('charts:missingPerformance') : metric === 'cache' && aggregateCacheHit(rows).partial ? t('charts:partialCacheSamples') : ratio ? t('charts:ratioGaps') : null
   return (
-    <Card id="portal-trend" className={cn('flex min-w-0 scroll-mt-4 flex-col rounded-xl', className)}><CardContent className="flex flex-1 flex-col space-y-2 px-4 py-3 lg:min-h-0">
+    <Card id="portal-trend" className={cn('flex min-w-0 scroll-mt-4 flex-col rounded-2xl border-border/70', className)}><CardContent className="flex flex-1 flex-col space-y-2 px-5 py-3 lg:min-h-0">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="font-semibold">{t('charts:usageTrend')}</h2>
+          <h2 className="text-[15px] font-semibold tracking-tight">{t('charts:usageTrend')}</h2>
           <p className="mt-1 text-xs text-muted-foreground">{start} — {end}{window?.timezone ? ` · ${zoneLabel(window.timezone)}` : ''}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

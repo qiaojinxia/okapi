@@ -101,7 +101,7 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
         <div data-slot="token-composition" className={STAGE}>
         <Tooltip className="shrink-0" content={t('admin:dashboardTokenHint')}>
           <div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} data-slot="token-donut" className={`${PIE} rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary/40`}>
-            <PieChart decorative slices={slices} active={active} onActiveChange={setActive} className="size-full">
+            <PieChart decorative slices={slices} active={active} onActiveChange={setActive} hole={0.62} className="size-full">
               <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
               <span className="max-w-full truncate text-xs leading-tight font-semibold tabular-nums @[10rem]:text-[13px] @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
               {centre.sub && <span className="max-w-full truncate text-[10px] leading-4 tabular-nums text-muted-foreground @[11rem]:text-[11px]">{centre.sub}</span>}

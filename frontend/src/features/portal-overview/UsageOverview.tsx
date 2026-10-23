@@ -58,11 +58,11 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
   const minHeight = `${Math.min(30, Math.max(22, 11.5 + listedRows * 3.4))}rem`
   return <div data-slot="usage-overview" style={{ '--usage-min': minHeight } as React.CSSProperties}
     className={cn('grid min-w-0 gap-3 lg:min-h-[var(--usage-min)] lg:grid-cols-12 lg:grid-rows-[minmax(0,1fr)]', className)}>
-    <SpendTrendView className="lg:col-span-8 lg:min-h-0" rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} />
-    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-xl px-4 py-3 lg:col-span-4 lg:min-h-0">
+    <SpendTrendView className="lg:col-span-7 lg:min-h-0" rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} />
+    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-2xl border-border/70 px-5 py-3 lg:col-span-5 lg:min-h-0">
       <section aria-label={t('portal:modelSnapshot')} className="@container flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex shrink-0 items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">{t('portal:modelSnapshot')}</h2>
+          <h2 className="text-[15px] font-semibold tracking-tight">{t('portal:modelSnapshot')}</h2>
           {models.length > TOP && <Button variant="ghost" size="xs" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)}>
             {expanded ? t('portal:showTopModels', { count: TOP }) : t('portal:allModels', { count: models.length })}
           </Button>}
@@ -133,13 +133,13 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
 function Donut({ slices, total, active, label }: {
   slices: { key: string; micro: number; color: string }[]; total: number; active: string | null; label: string
 }) {
-  const radius = 42
+  const radius = 38
   const circumference = 2 * Math.PI * radius
   // 只有一段时不留缝，否则整圈会缺一口
   const gap = slices.length > 1 ? 1.6 : 0
   let offset = 0
   return <svg role="img" aria-label={label} data-slot="model-donut" viewBox="0 0 100 100" className="size-full -rotate-90">
-    <circle cx="50" cy="50" r={radius} fill="none" strokeWidth="10" className="stroke-muted" />
+    <circle cx="50" cy="50" r={radius} fill="none" strokeWidth="16" className="stroke-muted" />
     {total > 0 && slices.map((slice) => {
       const length = slice.micro / total * circumference
       const dash = Math.max(length - gap, 0.4)
@@ -147,7 +147,7 @@ function Donut({ slices, total, active, label }: {
       offset += length
       const dimmed = active != null && active !== slice.key
       return <circle key={slice.key} cx="50" cy="50" r={radius} fill="none" stroke={slice.color}
-        strokeWidth={active === slice.key ? 13 : 10} strokeDasharray={`${dash} ${circumference - dash}`} strokeDashoffset={-start}
+        strokeWidth={active === slice.key ? 19 : 16} strokeDasharray={`${dash} ${circumference - dash}`} strokeDashoffset={-start}
         className="transition-[stroke-width,opacity] duration-200" opacity={dimmed ? 0.35 : 1} />
     })}
   </svg>

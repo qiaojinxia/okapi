@@ -150,7 +150,7 @@ export function InventoryStrip({ compact = false }: { compact?: boolean }) {
           to="/admin/pricing"
         />
       </>
-  if (compact) return <section aria-label={t('admin:dashboardInventory')} className="grid min-w-0 grid-cols-2 gap-x-2 border-t border-border/60 px-2 py-0.5 sm:grid-cols-4">{items}</section>
+  if (compact) return <section aria-label={t('admin:dashboardInventory')} className="grid min-w-0 grid-cols-2 gap-x-2 border-t border-border/60 bg-muted/20 px-2 py-1 sm:grid-cols-4 lg:py-0.5 lg:[@media(min-height:900px)]:py-1">{items}</section>
   return (
     <Card className="rounded-xl">
       <CardHeader className="px-4 pt-2 pb-0"><CardTitle className="text-xs text-muted-foreground">{t('admin:invTitle')}</CardTitle></CardHeader>

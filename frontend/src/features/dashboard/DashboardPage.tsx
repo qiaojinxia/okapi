@@ -80,7 +80,7 @@ export function DashboardPage() {
         icon={LayoutDashboard}
         title={t('admin:overview')}
         meta={<AttentionStatus days={days} />}
-        className="lg:flex-wrap lg:items-center lg:gap-x-2 lg:gap-y-0 lg:max-2xl:[&>div:first-child>span]:hidden [&>div:last-child]:max-w-full [&>div:last-child]:shrink"
+        className="[&_h1]:text-[22px] lg:flex-wrap lg:items-center lg:gap-x-2 lg:gap-y-0 lg:max-2xl:[&>div:first-child>span]:hidden [&>div:last-child]:max-w-full [&>div:last-child]:shrink"
         action={<>
           <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
             {start && end && timezone && <p data-slot="dashboard-calendar" className="basis-full text-xs leading-4 tabular-nums text-muted-foreground sm:basis-auto lg:max-2xl:max-w-52 2xl:whitespace-nowrap">{t('admin:dashboardCalendar', { start, end, timezone })}</p>}
@@ -92,10 +92,10 @@ export function DashboardPage() {
             </Tooltip>
           </div>
           {today && <DateRangePicker today={today} value={range} closeOnApply onApply={(value) => void navigate({ search: (prev) => ({ ...prev, days: undefined, start_date: value.start, end_date: value.end }) })} className="min-w-0 max-w-full px-2 py-1 text-xs" />}
-          <Button variant="outline" loading={refreshing} onClick={() => void refresh()}>
+          <Button variant="outline" loading={refreshing} onClick={() => void refresh()} className="rounded-lg">
             {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
           </Button>
-          <Link to="/admin/stats" search={search} className="inline-flex min-h-10 items-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground shadow-xs outline-none hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9">
+          <Link to="/admin/stats" search={search} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-primary px-3.5 text-sm font-medium text-primary-foreground shadow-xs outline-none transition-shadow hover:bg-primary/90 hover:shadow-popover focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9">
             {t('admin:dashboardAnalyze')}<ArrowUpRight className="h-4 w-4" />
           </Link>
         </>}
@@ -106,7 +106,7 @@ export function DashboardPage() {
         <KpiCards days={days} range={range} />
       </section>
       <OperationsSummary days={days} range={range} />
-      <div data-slot="dashboard-charts" className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:min-h-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:[@media(min-height:900px)]:gap-3">
+      <div data-slot="dashboard-charts" className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:min-h-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:[@media(min-height:900px)]:gap-3 2xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
         <TrendCard days={days} range={range} metric={trend} onMetricChange={(value) => void navigate({ search: (prev) => ({ ...prev, trend: value === 'combined' ? undefined : value }) })} />
         <DistributionSummary days={days} range={range} view={distribution} onViewChange={(view) => void navigate({ resetScroll: false, search: (prev) => ({ ...prev, distribution: view === 'model' ? undefined : view }) })} modelMetric={model_rank} channelMetric={channel_rank} onMetricChange={(by, metric) => void navigate({ resetScroll: false, search: (prev) => ({ ...prev, [`${by}_rank`]: metric === 'amount' ? undefined : metric }) })} />
       </div>
