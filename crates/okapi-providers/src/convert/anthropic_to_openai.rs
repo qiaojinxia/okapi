@@ -132,7 +132,7 @@ fn convert_message(role: &str, content: &Value, out: &mut Vec<Value>) -> Result<
                             .get("tool_use_id")
                             .and_then(Value::as_str)
                             .unwrap_or(""),
-                        "content": tool_result_text(block.get("content")),
+                        "content": tool_result_text(block.get("content"))?,
                     })),
                     Some("thinking" | "redacted_thinking") => {}
                     other => return Err(super::unsupported_part(other.unwrap_or_default())),
@@ -204,7 +204,8 @@ fn document_to_part(block: &Value) -> Option<Value> {
         Some("content") => {
             let text = match source.get("content")? {
                 Value::String(text) => text.clone(),
-                blocks => tool_result_text(Some(blocks)),
+                // 内容块里有文本以外的块 → None，由调用方按"document 不支持"报错
+                blocks => tool_result_text(Some(blocks)).ok()?,
             };
             Some(json!({"type": "text", "text": text}))
         }
@@ -212,15 +213,24 @@ fn document_to_part(block: &Value) -> Option<Value> {
     }
 }
 
-fn tool_result_text(content: Option<&Value>) -> String {
+/// tool_result 的内容 → chat `tool` 消息的文本。chat 的 tool 消息只装得下文本：图片 / 文档这类块
+/// 报错（`tool_result.<type>`，网关映射成 400），不再静默丢掉——丢掉后模型在看不到截图的情况下
+/// 照常作答，与顶层 image 块报错的原则（见 [`super::unsupported_part`]）自相矛盾。
+fn tool_result_text(content: Option<&Value>) -> Result<String, UpstreamError> {
     match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
+        Some(Value::String(s)) => Ok(s.clone()),
+        Some(Value::Array(blocks)) => {
+            let mut texts = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                let Some(text) = block.get("text").and_then(Value::as_str) else {
+                    let kind = block.get("type").and_then(Value::as_str).unwrap_or("block");
+                    return Err(super::unsupported_part(&format!("tool_result.{kind}")));
+                };
+                texts.push(text);
+            }
+            Ok(texts.join("\n"))
+        }
+        _ => Ok(String::new()),
     }
 }
 

@@ -363,6 +363,51 @@ fn request_maps_url_images_sampling_schema_and_multipart_text() {
     );
 }
 
+/// chat 的 tool 消息只装得下文本：tool_result 里的图片 / 文档块报错（400 `unsupported_content`），
+/// 不再静默丢掉——丢掉后模型在看不到截图的情况下照常作答。纯文本的多段内容照旧以换行拼接。
+#[test]
+fn tool_result_with_non_text_blocks_is_rejected_instead_of_dropped() {
+    let convert = |content: Value| {
+        request_anthropic_to_openai(
+            &Bytes::from(
+                serde_json::to_vec(&json!({"max_tokens": 1, "messages": [
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "tu_1", "name": "shot", "input": {}}]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "tu_1", "content": content}]}
+                ]}))
+                .unwrap(),
+            ),
+            "gpt-x",
+        )
+    };
+    let image = json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aW1n"}});
+    for (blocks, kind) in [
+        (
+            json!([{"type": "text", "text": "see"}, image.clone()]),
+            "tool_result.image",
+        ),
+        (
+            json!([{"type": "document", "source": {"type": "text", "data": "d"}}]),
+            "tool_result.document",
+        ),
+    ] {
+        let err = convert(blocks).unwrap_err();
+        assert!(
+            format!("{err:?}").contains(&format!("unsupported_content:{kind}")),
+            "{err:?}"
+        );
+    }
+    // 文本块照常；字符串内容照常；没有内容是空串
+    let ok =
+        convert(json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}])).unwrap();
+    let ok: Value = serde_json::from_slice(&ok).unwrap();
+    assert_eq!(ok["messages"][1]["content"], "a\nb");
+    let text = convert(json!("plain")).unwrap();
+    let text: Value = serde_json::from_slice(&text).unwrap();
+    assert_eq!(text["messages"][1]["content"], "plain");
+}
+
 /// OpenAI `finish_reason` → Anthropic `stop_reason` 全表。此前只有 `tool_calls` 一项被直接断言；
 /// `length → max_tokens`、`content_filter → refusal` 改坏后全量无一变红——
 /// Claude Code 靠 `max_tokens` 判断输出被截断、靠 `refusal` 判断拒答。
