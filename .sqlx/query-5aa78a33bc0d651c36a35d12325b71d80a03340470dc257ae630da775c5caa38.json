@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO model_pricing (model_id, pricing_mode, per_call_price_micro)\n        VALUES ($1, 'per_call', $2)\n        ON CONFLICT (model_id) DO UPDATE SET\n            pricing_mode = 'per_call',\n            per_call_price_micro = EXCLUDED.per_call_price_micro,\n            -- 切到按次要清掉阶梯表：留着它，下次误切 tiered 会拿到一张早已过期的旧表，\n            -- 不看模式的对外定价清单 / MCP 也会把它列出来（同 upsert_model_ratio_in）\n            tier_expr = NULL,\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5aa78a33bc0d651c36a35d12325b71d80a03340470dc257ae630da775c5caa38"
+}

@@ -91,6 +91,48 @@ async fn switching_back_to_ratio_drops_the_per_call_price(pool: PgPool) {
     assert_eq!(pricing().await, ("ratio".to_owned(), None));
 }
 
+/// per_call ↔ tiered 互切：另一种模式的列（阶梯表 / 按次单价）也要一起清掉，理由同改回 ratio——
+/// 它们会被不看模式的对外清单（MCP、同步导出）列出来，旧阶梯表还会在下次误切 tiered 时复活。
+#[sqlx::test(migrations = "./migrations")]
+async fn switching_between_per_call_and_tiered_drops_the_other_modes_columns(pool: PgPool) {
+    let pricing = || async {
+        sqlx::query_as::<_, (String, Option<i64>, Option<String>)>(
+            "SELECT p.pricing_mode::text, p.per_call_price_micro, p.tier_expr
+               FROM model_pricing p JOIN models m ON m.id = p.model_id
+              WHERE m.model_name = 'mode-hop'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let axes = RatioAxes::basic("1", "4", "0.5");
+    okapi_store::admin::upsert_model_tiered(&pool, "mode-hop", axes, "0:5,1000:1")
+        .await
+        .unwrap();
+    assert_eq!(
+        pricing().await,
+        ("tiered".to_owned(), None, Some("0:5,1000:1".to_owned()))
+    );
+
+    okapi_store::admin::upsert_model_per_call(&pool, "mode-hop", 12_345)
+        .await
+        .unwrap();
+    assert_eq!(
+        pricing().await,
+        ("per_call".to_owned(), Some(12_345), None),
+        "改成按次计价要清掉旧阶梯表"
+    );
+
+    okapi_store::admin::upsert_model_tiered(&pool, "mode-hop", axes, "0:7,2000:2")
+        .await
+        .unwrap();
+    assert_eq!(
+        pricing().await,
+        ("tiered".to_owned(), None, Some("0:7,2000:2".to_owned())),
+        "改回阶梯计价要清掉旧按次单价"
+    );
+}
+
 /// 会让整本价簿编译失败的脏值（负的按次单价、非正的专属绝对价）在写入这一步就被拦下，
 /// 不是留到发布 / 装载快照时才炸。
 #[sqlx::test(migrations = "./migrations")]

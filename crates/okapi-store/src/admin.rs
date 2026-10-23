@@ -157,6 +157,8 @@ pub async fn upsert_model_tiered(
             image_ratio = EXCLUDED.image_ratio,
             tier_expr = EXCLUDED.tier_expr,
             modality_ratios = COALESCE($10, model_pricing.modality_ratios),
+            -- 切到阶梯要清掉按次单价：留着它，不看模式的对外定价清单 / MCP 会把它列出来（同 upsert_model_ratio_in）
+            per_call_price_micro = NULL,
             updated_at = now()
         "#,
         model_id,
@@ -545,6 +547,9 @@ pub async fn upsert_model_per_call_in(
         ON CONFLICT (model_id) DO UPDATE SET
             pricing_mode = 'per_call',
             per_call_price_micro = EXCLUDED.per_call_price_micro,
+            -- 切到按次要清掉阶梯表：留着它，下次误切 tiered 会拿到一张早已过期的旧表，
+            -- 不看模式的对外定价清单 / MCP 也会把它列出来（同 upsert_model_ratio_in）
+            tier_expr = NULL,
             updated_at = now()
         "#,
         model_id,
