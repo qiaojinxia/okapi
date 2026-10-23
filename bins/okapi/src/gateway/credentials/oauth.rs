@@ -5,10 +5,11 @@
 //! 四步走，`invalid_grant` 二次重读后仍失败则把 key 置 invalid（仅人工重登可恢复）。
 //! 刷新失败但旧 token 还没过期时先用旧的——上游 token 端点抖一下不该让请求失败。
 //!
-//! 新凭据落盘三次都失败时，留一份在本进程内存里（[`RefreshGate`] 的待写表），下次进刷新临界区先补写它、
-//! 写不进去也先用它，而不是拿已作废的旧 refresh token 再去刷。没盖住的两种情况：进程在补写成功前退出
-//! （内存那份随之丢失）；上游已经轮换了 refresh token、应答却没回到我们这里（45 秒超时、连接中断）——
-//! 新凭据从没到手，下次刷新只会撞 invalid_grant，账号要人工重登。
+//! 新凭据落盘三次都失败时，暂存进 Redis（各副本可见）和本进程内存（见 [`super::pending`]），
+//! 任一副本下次进刷新临界区先补写它、写不进去也先用它，而不是拿已作废的旧 refresh token 再去刷。
+//! 没盖住的情况：Redis 与本进程同时丢了这份（Redis 不可用时进程又在补写前退出），或 24 小时内都没
+//! 补写成功；上游已经轮换了 refresh token、应答却没回到我们这里（45 秒超时、连接中断）——新凭据
+//! 从没到手，下次刷新只会撞 invalid_grant，账号要人工重登。
 
 use super::super::state::AppState;
 use okapi_providers::UpstreamError;
@@ -55,9 +56,8 @@ where
 #[derive(Default)]
 pub struct RefreshGate {
     inner: tokio::sync::Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>,
-    /// 刷新成功、落盘却失败的新凭据：key → (落盘要比对的旧值, 新凭据)。上游已作废旧 refresh token，
-    /// 这是新凭据唯一的一份。
-    pending: std::sync::Mutex<HashMap<i64, (Vec<u8>, OAuthCredential)>>,
+    /// 刷新成功、落盘却失败的新凭据在本进程的那一份（见 [`super::pending`]）。
+    pub(super) pending: super::pending::Memory,
 }
 
 impl RefreshGate {
@@ -69,19 +69,6 @@ impl RefreshGate {
             map.retain(|_, gate| Arc::strong_count(gate) > 1);
         }
         Arc::clone(map.entry(channel_key_id).or_default())
-    }
-
-    fn stash(&self, channel_key_id: i64, expected: Vec<u8>, next: OAuthCredential) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.insert(channel_key_id, (expected, next));
-        }
-    }
-
-    /// 取出待写的新凭据。库里的值已经不是当初要比对的旧值（别处写过新凭据、或已置失效）时，
-    /// 这份就过时了，直接丢掉。
-    fn take_pending(&self, channel_key_id: i64, current: &[u8]) -> Option<OAuthCredential> {
-        let (expected, next) = self.pending.lock().ok()?.remove(&channel_key_id)?;
-        (expected == current).then_some(next)
     }
 }
 
@@ -370,6 +357,7 @@ async fn refresh_locked(
 ) -> Result<OAuthCredential, UpstreamError> {
     let current = reread(state, key.channel_key_id).await?;
     if !matches!(current.status, 1..=3) {
+        super::pending::clear(state, key.channel_key_id).await;
         return Err(UpstreamError::Status {
             status: 401,
             body: bytes::Bytes::new(),
@@ -382,10 +370,7 @@ async fn refresh_locked(
     {
         return Ok(basis.clone());
     }
-    if let Some(next) = state
-        .refresh_gate
-        .take_pending(key.channel_key_id, &current.stored)
-    {
+    if let Some(next) = super::pending::take(state, key.channel_key_id, &current.stored).await {
         return save_refreshed(state, key, &current.stored, next).await;
     }
     if rejected.is_none()
@@ -478,8 +463,8 @@ async fn refresh_locked(
 /// 上游已经消费了旧 refresh token（Codex 等强制单次轮换），新凭据只活在内存里：这一步遇到瞬时故障
 /// （连接抖动、超时）就丢掉的话，下次刷新只会撞 invalid_grant，账号只能人工重登。所以重试几次，
 /// 每次都以旧值做 CAS：前一次其实已落盘、只是应答丢了，重试返回 false，`replaced_credential`
-/// 会读到我们自己写进去的那份。三次都失败就把新凭据留在进程内存里，下次进临界区先补写，
-/// 这次照样拿它去用（access token 是有效的）。
+/// 会读到我们自己写进去的那份。三次都失败就把新凭据暂存起来（Redis + 本进程，见
+/// [`super::pending`]），任一副本下次进临界区先补写，这次照样拿它去用（access token 是有效的）。
 async fn save_refreshed(
     state: &AppState,
     key: &OAuthKey<'_>,
@@ -506,7 +491,7 @@ async fn save_refreshed(
     let Ok(saved) = saved else {
         tracing::error!(
             key = key.channel_key_id,
-            "OAuth 刷新已让上游作废旧 refresh token，但新凭据三次落盘都失败；暂存在进程内存里待补写"
+            "OAuth 刷新已让上游作废旧 refresh token，但新凭据三次落盘都失败；已暂存待补写"
         );
         super::health::record(
             state,
@@ -515,15 +500,14 @@ async fn save_refreshed(
         )
         .await;
         let usable = next.expires_at > chrono::Utc::now().timestamp();
-        state
-            .refresh_gate
-            .stash(key.channel_key_id, expected.to_vec(), next.clone());
+        super::pending::put(state, key.channel_key_id, expected, &next).await;
         return if usable {
             Ok(next)
         } else {
             Err(UpstreamError::Build("oauth_credential_write_failed".into()))
         };
     };
+    super::pending::clear(state, key.channel_key_id).await;
     if !saved {
         return replaced_credential(state, key.channel_key_id, expected).await;
     }
@@ -550,6 +534,7 @@ async fn invalidate_current(
     if !changed {
         return replaced_credential(state, key.channel_key_id, expected).await;
     }
+    super::pending::clear(state, key.channel_key_id).await;
     state.invalidate_routing_caches();
     super::health::record(state, key.channel_key_id, Some(code)).await;
     Err(UpstreamError::Status {
@@ -591,32 +576,6 @@ async fn do_refresh(
 #[cfg(test)]
 mod retry_tests {
     use super::*;
-
-    fn credential(token: &str) -> OAuthCredential {
-        OAuthCredential {
-            access_token: token.to_owned(),
-            refresh_token: "r".to_owned(),
-            expires_at: i64::MAX,
-            account_id: None,
-            account_label: None,
-            scope: None,
-        }
-    }
-
-    #[test]
-    fn a_stashed_credential_is_taken_once_and_only_against_the_value_it_replaces() {
-        let gate = RefreshGate::default();
-        gate.stash(7, b"old".to_vec(), credential("new"));
-        assert!(gate.take_pending(8, b"old").is_none());
-        assert_eq!(gate.take_pending(7, b"old").unwrap().access_token, "new");
-        assert!(gate.take_pending(7, b"old").is_none(), "取过一次就没了");
-        gate.stash(7, b"old".to_vec(), credential("new"));
-        assert!(
-            gate.take_pending(7, b"written elsewhere").is_none(),
-            "库里已换过值：这份过时，丢掉"
-        );
-        assert!(gate.take_pending(7, b"old").is_none());
-    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     const TINY: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(1)];

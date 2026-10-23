@@ -2,6 +2,7 @@
 //! Keep secrets out of Debug output and leave cloud signing/token derivation to its adapter.
 pub mod health;
 pub mod oauth;
+pub mod pending;
 
 use super::state::AppState;
 use okapi_providers::UpstreamError;
