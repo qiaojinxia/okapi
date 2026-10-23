@@ -387,12 +387,12 @@ fn collect_parts(src: &Value) -> (String, String, Vec<Value>) {
 }
 
 fn map_finish(finish: Option<&str>, has_tools: bool) -> &'static str {
-    if has_tools {
-        return "tool_calls";
-    }
     match finish {
+        // 输出被截断 / 被拦截时哪怕带着 functionCall 也不能报成正常的工具调用：参数可能是残缺的
+        // JSON，客户端见到 `tool_calls` 会照着执行。截断与过滤优先于 tool_calls
         Some("MAX_TOKENS") => "length",
         Some("SAFETY" | "RECITATION" | "BLOCKLIST" | "PROHIBITED_CONTENT") => "content_filter",
+        _ if has_tools => "tool_calls",
         _ => "stop",
     }
 }

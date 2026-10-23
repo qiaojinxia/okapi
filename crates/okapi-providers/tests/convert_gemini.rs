@@ -123,6 +123,46 @@ fn response_maps_thought_tools_and_usage() {
     assert_eq!(probe.completion_tokens_details.reasoning_tokens, 10);
 }
 
+/// 输出被截断 / 被拦截时，哪怕带着 functionCall 也不能报成 `tool_calls`：参数可能是残缺的 JSON，
+/// 客户端见到 `tool_calls` 会照着执行。截断（`length`）与过滤（`content_filter`）优先；正常结束才是 `tool_calls`。
+#[test]
+fn truncated_or_blocked_output_with_a_function_call_is_not_reported_as_tool_calls() {
+    let finish_of = |finish: &str| {
+        let body = json!({
+            "candidates": [{"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "S"}}}
+            ]}, "finishReason": finish}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 4}
+        });
+        let (out, _) =
+            response_gemini_to_openai(&Bytes::from(serde_json::to_vec(&body).unwrap()), "g-x")
+                .unwrap();
+        serde_json::from_slice::<Value>(&out).unwrap()["choices"][0]["finish_reason"].clone()
+    };
+    assert_eq!(finish_of("MAX_TOKENS"), "length");
+    assert_eq!(finish_of("SAFETY"), "content_filter");
+    assert_eq!(finish_of("PROHIBITED_CONTENT"), "content_filter");
+    assert_eq!(finish_of("STOP"), "tool_calls");
+
+    // 流式同一口径
+    let stream_finish = |finish: &str| {
+        let mut st = GeminiStreamState::new("g-x");
+        let chunk = json!({"candidates": [{"content": {"parts": [
+            {"functionCall": {"name": "get_weather", "args": {"city": "S"}}}
+        ]}, "finishReason": finish}]})
+        .to_string();
+        st.step(Ok(chunk))
+            .into_iter()
+            .filter_map(|event| match event.unwrap() {
+                ChatEvent::Data { raw, .. } => serde_json::from_str::<Value>(&raw).ok(),
+                ChatEvent::Done => None,
+            })
+            .find_map(|c| c["choices"][0]["finish_reason"].as_str().map(str::to_owned))
+    };
+    assert_eq!(stream_finish("MAX_TOKENS").as_deref(), Some("length"));
+    assert_eq!(stream_finish("STOP").as_deref(), Some("tool_calls"));
+}
+
 #[test]
 fn stream_chunks_map_finish_and_accept_trailing_usage() {
     let mut st = GeminiStreamState::new("g-x");

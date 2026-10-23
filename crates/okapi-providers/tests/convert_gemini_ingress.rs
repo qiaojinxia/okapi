@@ -139,6 +139,47 @@ fn request_pairs_function_responses_with_generated_call_ids() {
     assert_eq!(second, json!({"t": 20, "rain": false}));
 }
 
+/// 同一条 user content 里文本排在 functionResponse 之前：转换后 tool 消息必须紧跟在带 tool_calls 的
+/// assistant 消息后面，文本等到所有 tool 应答之后再作为 user 消息发出。此前文本先 flush，
+/// user 消息插在 assistant(tool_calls) 与 tool 之间，OpenAI 方言上游会整条 400。
+#[test]
+fn text_before_a_function_response_does_not_split_the_tool_calls_from_their_answers() {
+    let out = req(
+        &json!({"contents": [
+            {"role": "user", "parts": [{"text": "weather?"}]},
+            {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "SF"}}},
+                {"functionCall": {"name": "get_time", "args": {"tz": "UTC"}}}
+            ]},
+            {"role": "user", "parts": [
+                {"text": "here are the results"},
+                {"functionResponse": {"name": "get_weather", "response": {"result": "sunny"}}},
+                {"functionResponse": {"name": "get_time", "response": {"result": "noon"}}},
+                {"text": "thanks"}
+            ]}
+        ]}),
+        "gpt-x",
+        false,
+    );
+    let roles: Vec<&str> = out["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "tool", "tool", "user"]);
+    let messages = out["messages"].as_array().unwrap();
+    assert_eq!(messages[2]["content"], "sunny");
+    assert_eq!(messages[3]["content"], "noon");
+    assert_eq!(
+        messages[4]["content"],
+        json!([
+            {"type": "text", "text": "here are the results"},
+            {"type": "text", "text": "thanks"}
+        ])
+    );
+}
+
 #[test]
 fn request_maps_media_parts_to_multipart_user_content() {
     let out = req(

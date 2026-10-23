@@ -177,6 +177,9 @@ fn convert_model_parts(
 
 /// `user` 角色：functionResponse → tool 消息；其余部件（text / inlineData / fileData）
 /// → 一条 user 消息（纯文本降成 string content，带媒体时用多段形状）。
+/// **tool 消息先于这条 user 消息**：OpenAI 要求带 tool_calls 的 assistant 消息后面紧跟各个 tool 应答，
+/// 中间插进 user 消息上游会整条 400；所以同一条 content 里文本排在 functionResponse 之前时，
+/// 文本也要等 tool 应答之后再发。
 /// chat 表达不了的媒体（视频、按 URI 引用的非图片文件）报错，见 [`super::unsupported_part`]。
 fn convert_user_parts(
     parts: &[Value],
@@ -197,7 +200,6 @@ fn convert_user_parts(
             ],
         )?;
         if let Some(fr) = part.get("functionResponse") {
-            flush_user(&mut content, messages);
             let name = fr.get("name").and_then(Value::as_str).unwrap_or("");
             let id = match pending_calls.iter().position(|(n, _)| n == name) {
                 Some(pos) => pending_calls.remove(pos).1,
