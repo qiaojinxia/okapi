@@ -34,23 +34,53 @@ pub struct ChClient {
 }
 
 /// 拆出 URL 内嵌凭证（`http://user:pass@host:port`）→（纯净 base，凭证）。
-fn split_credentials(url: &str) -> (String, Option<(String, String)>) {
-    let Some(scheme_end) = url.find("://") else {
-        return (url.to_owned(), None);
+///
+/// userinfo 到**最后一个** `@` 为止：密码里没转义的 `@`、`/`、`?`、`#` 都留在密码里（部署模板直接把
+/// 随机密码拼进 URL，不会替人转义）；用户名与密码再按百分号编码解码（`p%40ss` 就是 `p@ss`）。
+/// 去掉凭证后的 base 按 URL 标准校验：只认 http(s)、必须有主机、不许带查询串或片段——这些错写过去
+/// 不会报错，只会表现成 ClickHouse「连不上」，和宕机分不出来，所以启动时就拒掉。
+fn split_credentials(url: &str) -> Result<(String, Option<(String, String)>), StoreError> {
+    let invalid = || StoreError::InvalidData("clickhouse_url");
+    let (scheme, rest) = url.split_once("://").ok_or_else(invalid)?;
+    let (credentials, host) = match rest.rsplit_once('@') {
+        Some((userinfo, host)) => {
+            let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+            (Some((percent_decode(user), percent_decode(pass))), host)
+        }
+        None => (None, rest),
     };
-    let (scheme, rest) = url.split_at(scheme_end + 3);
-    let Some(at) = rest.find('@') else {
-        return (url.to_owned(), None);
-    };
-    let (userinfo, host) = rest.split_at(at);
-    let host = &host[1..];
-    let (user, pass) = userinfo
-        .split_once(':')
-        .map_or((userinfo, ""), |(u, p)| (u, p));
-    (
-        format!("{scheme}{host}"),
-        Some((user.to_owned(), pass.to_owned())),
-    )
+    let base = format!("{scheme}://{host}");
+    let parsed = reqwest::Url::parse(&base).map_err(|_| invalid())?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none_or(str::is_empty)
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    Ok((base.trim_end_matches('/').to_owned(), credentials))
+}
+
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| char::from(b).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push(u8::try_from(hi * 16 + lo).unwrap_or(b'?'));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 impl ChClient {
@@ -63,7 +93,7 @@ impl ChClient {
             .timeout(Duration::from_secs(30))
             .pool_idle_timeout(Duration::from_secs(2))
             .build()?;
-        let (base, credentials) = split_credentials(base_url.trim_end_matches('/'));
+        let (base, credentials) = split_credentials(base_url.trim())?;
         Ok(Self {
             http,
             base,
@@ -325,4 +355,37 @@ fn urlencode(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::split_credentials;
+
+    #[test]
+    fn credentials_are_split_by_the_url_standard_and_decoded() {
+        let (base, creds) = split_credentials("http://okapi:p%40ss%3Aw@ch.local:8123/").unwrap();
+        assert_eq!(base, "http://ch.local:8123");
+        assert_eq!(creds, Some(("okapi".into(), "p@ss:w".into())));
+        // 没转义的 @ 也落在密码里，而不是把一半密码当成主机
+        let (base, creds) = split_credentials("http://okapi:p@ss@ch.local:8123").unwrap();
+        assert_eq!(base, "http://ch.local:8123");
+        assert_eq!(creds, Some(("okapi".into(), "p@ss".into())));
+        let (_, creds) = split_credentials("http://okapi:a/b?c#d@ch.local:8123").unwrap();
+        assert_eq!(creds, Some(("okapi".into(), "a/b?c#d".into())));
+        let (base, creds) = split_credentials("https://ch.local").unwrap();
+        assert_eq!((base.as_str(), creds), ("https://ch.local", None));
+    }
+
+    #[test]
+    fn urls_that_would_only_ever_look_unreachable_are_refused() {
+        for url in [
+            "ch.local:8123",
+            "tcp://ch.local:9000",
+            "http://ch.local:8123/?database=x",
+            "http://:8123",
+            "",
+        ] {
+            assert!(split_credentials(url).is_err(), "{url}");
+        }
+    }
 }
