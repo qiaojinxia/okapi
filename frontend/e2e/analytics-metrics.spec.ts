@@ -87,6 +87,27 @@ test('分析拆分和趋势保留已测量的零时延，不将缺失测量补�
   expect(plot('ttft', unknown).data.at(-1)?.value).toBeNull()
 })
 
+test('分析窗口超过日志页 90 天上限时，调用明细深链改用绝对起点，不让 hours 被后端静默截成 90 天', async ({ page }) => {
+  await prepare(page)
+  const open = async (days: number) => {
+    await page.goto(`/admin/stats?view=breakdown&days=${days}`)
+    await page.getByRole('row').filter({ hasText: 'measured-zero' })
+      .getByRole('button', { name: '查看这一行的调用明细' }).click()
+    await expect(page).toHaveURL(/\/admin\/logs\?/)
+    return new URL(page.url()).searchParams
+  }
+  const short = await open(30)
+  expect(short.get('hours')).toBe('720')
+  expect(short.get('from')).toBeNull()
+  expect(short.get('model')).toBe('measured-zero')
+  const long = await open(180)
+  expect(long.get('hours')).toBeNull()
+  const age = Date.now() - Date.parse(long.get('from') ?? '')
+  expect(age).toBeGreaterThan(179 * 86_400_000)
+  expect(age).toBeLessThan(181 * 86_400_000)
+  expect(long.get('model')).toBe('measured-zero')
+})
+
 test('分析 KPI 区分明确零缓存与未知缓存，缺失当前时延不显示负百分百', async ({ page }) => {
   let data = report({ ...metrics, cache_hit_bp: 0, cached_tokens: 0 })
   await prepare(page, () => data)

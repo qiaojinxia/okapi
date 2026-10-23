@@ -14,6 +14,17 @@ export function effectiveDays(s: AnalyticsSearch): number {
   return s.days ?? DEFAULT_DAYS
 }
 
+/// 日志页「回看小时数」的后端上限（console/logs.rs 把 hours 钳到 1–2160，e2e/analytics-search.spec.ts 钉着两边同值）。
+/// 分析窗口更长时再塞 hours 会被静默截成 90 天，对账就漏掉更早的记录。
+export const LOG_MAX_HOURS = 2160
+
+/// 分析窗口（天）→ 日志页的时间条件：不超过上限用相对的 hours；更长的改用绝对起点 from
+/// （RFC3339 UTC；日志页 from 单给 = 从该时刻到现在）。
+export function logsWindow(days: number, now: number = Date.now()): { hours?: number; from?: string } {
+  const hours = days * 24
+  return hours <= LOG_MAX_HOURS ? { hours } : { from: new Date(now - days * 86_400_000).toISOString() }
+}
+
 /// URL search → 立方体端点的 query string（只带过滤维度与时间窗；视图参数另加）。
 export function cubeParams(s: AnalyticsSearch, extra?: Record<string, string | undefined>): string {
   const p = new URLSearchParams()

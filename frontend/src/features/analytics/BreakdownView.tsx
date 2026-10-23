@@ -11,7 +11,7 @@ import { IconButton } from '@/components/ui/icon-button'
 import { dimensionLabel, ADVANCED_KEYS, selectClass } from './AnalysisControls'
 import { EmptyState, ErrorState, LoadingState } from '@/components/ui/state'
 import { TBody, THead, Table, Td, Th, Tr } from '@/components/ui/table'
-import { cleanSearch, cubeParams, effectiveDays } from '@/features/analytics/search'
+import { cleanSearch, cubeParams, effectiveDays, logsWindow } from '@/features/analytics/search'
 import type { BreakdownResp, BreakdownRow } from '@/features/analytics/types'
 import { BAD_BP, WARN_BP } from '@/features/stats/types'
 import { apiFetch } from '@/lib/api'
@@ -128,7 +128,8 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
       user_id: search.user_id,
       api_key_id: search.api_key_id,
       channel_id: search.channel_id,
-      hours: effectiveDays(search) * 24,
+      // 超过日志页 90 天上限的窗口改用绝对起点：hours 会被后端静默钳到 2160，对账漏掉更早的记录
+      ...logsWindow(effectiveDays(search)),
     }
     if (by === 'model') s.model = row.key
     if (by === 'channel') s.channel_id = row.channel_id
