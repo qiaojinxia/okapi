@@ -65,6 +65,19 @@ fn provider_of(newapi_type: i64) -> (&'static str, bool) {
     }
 }
 
+/// 导出目录要真的是这次的导出：目录不存在、或一份认得的 JSONL 都没有（多半是路径拼错），
+/// 不能当成「源库是空的」跑出 users=0 / keys=0 的假成功。缺个别文件仍按部分导出处理。
+fn require_export(dir: &Path, files: &[&str]) -> anyhow::Result<()> {
+    anyhow::ensure!(dir.is_dir(), "迁移目录 {} 不存在或不是目录", dir.display());
+    anyhow::ensure!(
+        files.iter().any(|name| dir.join(name).is_file()),
+        "迁移目录 {} 里没有任何导出文件（应有 {} 之一），检查 --dir 是否写错",
+        dir.display(),
+        files.join(" / ")
+    );
+    Ok(())
+}
+
 fn read_jsonl(dir: &Path, name: &str) -> anyhow::Result<Vec<Value>> {
     let path = dir.join(name);
     if !path.exists() {
@@ -105,6 +118,7 @@ pub async fn run_newapi(
     dry_run: bool,
     master_key: Option<&str>,
 ) -> anyhow::Result<MigrateStats> {
+    require_export(dir, &["users.jsonl", "tokens.jsonl", "channels.jsonl"])?;
     let mut stats = MigrateStats::default();
 
     // ---- users ----
@@ -598,6 +612,16 @@ pub async fn run_okapi_old(
     dry_run: bool,
     master_key: Option<&str>,
 ) -> anyhow::Result<OldStats> {
+    require_export(
+        dir,
+        &[
+            "users.jsonl",
+            "api_keys.jsonl",
+            "providers.jsonl",
+            "provider_api_keys.jsonl",
+            "models.jsonl",
+        ],
+    )?;
     let mut stats = OldStats::default();
     let enc_key = enc_passphrase.map(derive_old_key);
 
