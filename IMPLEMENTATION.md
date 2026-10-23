@@ -2870,6 +2870,34 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   - **复制渠道带上 key 级护栏**：`rpm_limit` / `daily_spend_cap_micro` / `model_subset` 一并复制（此前只拷 6 列，克隆体对同一个上游账号
     变成「不限」）；人工封禁(5) / 凭证失效(6) 只能人工恢复，复制后保持原状态与 `last_error`，不因启用复制体复活；
     冷却 / 限流 / 配额这些运行态从 active 起步。
+- **第六轮评审后补（部署模板 / 迁移 / 下线收尾 / 出站校验）**：
+  - **nginx 模板与网关路由表对齐**：模板此前只把 `/v1/`、`/pass/` 转给网关，Gemini 的 `/v1beta/` 与无前缀的 `/images/` 任务别名落进
+    `location /`，客户端拿到控制面 SPA 的 HTML 壳；server 级 `client_max_body_size 32m` 把网关明确放到 128MB 的
+    `/v1/images/batches` 在反代就 413 掉（现在是精确匹配的专段 128m，其余入口仍 32m）；默认 combined 日志格式把 Gemini 的
+    `?key=<API key>` 写进访问日志（网关自己特意只记路径）——现在用 `okapi_redacted` 格式把 key 参数值抹成 `***`。
+    `guard-deploy-manifests.py` 按 `docs/api-surface.json`、路由里的 `DefaultBodyLimit` 与日志格式核对这三条，模板再漂移 CI 就红。
+    出错请求在 nginx error_log 里的 `request:` 行仍带完整查询串，要彻底避免需客户端改用 `x-goog-api-key` 头。
+    线上的 nginx 是另一份（`/etc/nginx/snippets/okapi-gateway.conf`）：`/v1beta`、`/images` 早就补上，批量上传的 128m 专段与日志脱敏没有。
+  - **守卫的盲区**：`guard-i18n-keys.py` 此前只认命名空间的直接子键、且正则不匹配带点的 key，`t('admin:modelMeta.xxx')` 这类
+    70 处嵌套调用整体逃过校验——现在由 `scripts/locale-keys.mjs` 让 Node 对前端实际装载的资源求值（含 spread 与
+    `withModelEditorZh` 的合并）；`guard-no-float.sh` 此前只 grep `f32`/`f64` 记号，裸的 `0.5` 照样推断成浮点——现在剥掉注释与字符串后
+    再找浮点字面量（`scripts/guard-float-literals.py`，带单测）；`dev-reset.sh` 漏掉单进程三合一的 `okapi all`；`smoke-all.sh` 在端口被旧实例
+    占着时新进程退出了冒烟仍对旧实例通过——现在端口已有应答就拒绝，子进程死了立刻失败。
+  - **迁移工具忠于源**：new-api 的 `tokens.expired_time` 此前整列被忽略，带过期时间的令牌迁过来永久有效（现在进 `api_keys.expires_at`，
+    -1 / 0 = 永久，读不懂的值记注记）；两条迁移路径重跑时只改渠道行，源系统轮换 key / 调权重后仍是旧值——现在同步导入时建的那把 key 的
+    凭证与权重（凭证没变不动，免得复位冷却 / 失效标记；渠道后来又有了第二把 key 就记注记不猜）；老 ok-api 的余额写了却解析不了（千分位、
+    越界）此前静默按 0，现在记注记。
+  - **Responses WebSocket 下线收尾**：SSE 被排水等待、Realtime 会话监听 `settlements.draining()`，唯独 Responses WS 的会话循环没有
+    drain 分支，继续接新 turn，进程在 `SETTLE_DRAIN_CAP` 后退出时被腰斩的 turn 只剩一笔 10 分钟后被清扫全额退款的预扣——已流给客户端的
+    输出永远不计费。现在下线时停止接新 turn、以 1001 `gateway_shutting_down` 关掉客户端这一侧，在途 turn 走断连后的读用量窗口
+    （下线时 20s，平时 30s，给结算留在 30s 上限内）再按已累计用量结算。
+  - **出站直连的 SSRF 连接时校验**：`console::ssrf` 只在保存时把域名解析一次，之后域名改指内网（DNS 重绑定）网关就会带着渠道凭证向内网
+    发请求。现在直连的 reqwest client 与 Claude Code TLS client 在连接时对解析结果再过同一条判据（只要有一个私网地址就整体拒绝），
+    并只连校验过的地址（无二次解析的空窗）；策略取 `settings.ssrf_policy.allow_private`，由各角色在构造 state 时同步一次、之后 15s 一次。
+    只管直连：经 HTTP / SOCKS 代理出去的连接由代理解析目标；IP 字面量不经解析，仍由保存时的检查把关。**行为变化**：策略不允许私网时，
+    此前保存时通过、之后解析到私网的域名渠道（含用 `migrate` 导入绕过保存检查的）现在会连接失败。
+  - **其余**：分析页「调用明细」深链 `hours` 最大 8784 而日志页钳到 2160，超过 90 天的窗口被静默截断——现在更长的窗口带绝对起点 `from`；
+    几处测试辅助函数的卫生（共享的 `payment_stripe.api_base` 用完还原、`chat_and_settle` / `settled_amount` 只认 `status = 20`）。
 - **环境变量**：布尔大小写不敏感（`true/1/yes/on`、`false/0/no/off`），认不得的与数值解析失败都打 WARN 再用缺省（`okapi_store::env_config`）。
 - **门户日志缺省近 30 天**：`/api/me/logs` 与 `/logs/stat` 不带日期时窗口取近 30 天（按 request_id 点查不加界），列表按
   `(created_at, id)` 倒序键集翻页（`before` 仍传上一页末行 id，服务端在同一属主下取它的 created_at），走 `idx_br_user_time`。
