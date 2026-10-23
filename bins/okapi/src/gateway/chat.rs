@@ -331,6 +331,9 @@ fn default_output_cap(requested: Option<u32>, max_output: Option<u32>) -> Option
         .then_some(MAX_COMPLETION_CAP)
 }
 
+/// Gemini 请求里生成配置对象的两种键名（写入时首选 camelCase）。
+const GEMINI_CONFIG_KEYS: [&str; 2] = ["generationConfig", "generation_config"];
+
 /// 按入口方言写入缺省输出上限（转换路径各自翻译成上游字段）。已有上限的不动；
 /// compact 端点不接受输出上限参数，跳过。
 fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Bytes {
@@ -351,14 +354,23 @@ fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Byte
             obj.remove(key);
         }
     }
-    if let Some(config) = obj
-        .get_mut("generationConfig")
-        .and_then(serde_json::Value::as_object_mut)
-        && config
-            .get("maxOutputTokens")
-            .is_some_and(serde_json::Value::is_null)
-    {
-        config.remove("maxOutputTokens");
+    // Gemini 的配置对象有两种拼写（探针 `GeminiRequestProbe` 认 `generationConfig` 与 `generation_config`），
+    // 里面的上限键也是 camel / snake 两种。对象本身是 null、或里面的上限是 null，都与缺席同形，先剥掉：
+    // 否则下面 Gemini 臂在 `generationConfig: null` 上取不到对象就原样放行，上限写不进请求（同样透支）。
+    for config_key in GEMINI_CONFIG_KEYS {
+        if obj.get(config_key).is_some_and(serde_json::Value::is_null) {
+            obj.remove(config_key);
+        }
+        if let Some(config) = obj
+            .get_mut(config_key)
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            for name in ["maxOutputTokens", "max_output_tokens"] {
+                if config.get(name).is_some_and(serde_json::Value::is_null) {
+                    config.remove(name);
+                }
+            }
+        }
     }
     let inserted = match ingress {
         Ingress::OpenAi => {
@@ -372,8 +384,13 @@ fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Byte
         Ingress::Anthropic => obj.insert("max_tokens".into(), cap.into()).is_none(),
         Ingress::Responses => obj.insert("max_output_tokens".into(), cap.into()).is_none(),
         Ingress::Gemini => {
+            // 客户端用哪种拼写就写进哪个对象，别再并排造出第二个配置对象
+            let config_key = GEMINI_CONFIG_KEYS
+                .into_iter()
+                .find(|key| obj.contains_key(*key))
+                .unwrap_or(GEMINI_CONFIG_KEYS[0]);
             let Some(config) = obj
-                .entry("generationConfig")
+                .entry(config_key)
                 .or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
             else {
@@ -2454,11 +2471,7 @@ async fn try_model(
         ));
     }
 
-    let err_code = if last_code == codes::EMPTY_COMPLETION {
-        codes::EMPTY_COMPLETION
-    } else {
-        last_code
-    };
+    let err_code = last_code;
     let mut failure = ForwardFailure::app(
         AppError::new(
             if err_code == codes::NO_AVAILABLE_CHANNEL {
@@ -4861,6 +4874,45 @@ mod failure_scope_tests {
             bound_default_output(Ingress::OpenAi, None, untouched.clone()),
             untouched
         );
+    }
+
+    /// Gemini 的生成配置对象整个是 null、或用 snake_case 拼写时，缺省上限同样要写进请求：
+    /// 此前 `"generationConfig": null` 让 Gemini 臂取不到对象而原样放行，预扣封顶 32768 而上游照模型
+    /// max_output 生成，余额被透支。snake_case 对象则把上限写进它，不并排再造一个 camelCase 对象。
+    #[test]
+    fn gemini_null_or_snake_case_config_still_gets_the_default_cap() {
+        let cap = Some(MAX_COMPLETION_CAP);
+        let json = |v: serde_json::Value| -> serde_json::Value {
+            let out = bound_default_output(Ingress::Gemini, cap, Bytes::from(v.to_string()));
+            serde_json::from_slice(&out).unwrap()
+        };
+        // 整个配置对象是 null 同样视同缺席（此前原样放行，上限写不进请求）
+        let null_config = json(serde_json::json!({"contents":[],"generationConfig":null}));
+        assert_eq!(
+            null_config["generationConfig"]["maxOutputTokens"],
+            MAX_COMPLETION_CAP
+        );
+        let null_snake_config = json(serde_json::json!({"contents":[],"generation_config":null}));
+        assert_eq!(
+            null_snake_config["generationConfig"]["maxOutputTokens"],
+            MAX_COMPLETION_CAP
+        );
+        assert!(null_snake_config.get("generation_config").is_none());
+        // snake_case 的配置对象：上限写进它，不并排再造一个 camelCase 对象
+        let snake = json(
+            serde_json::json!({"contents":[],"generation_config":{"temperature":0.2,"max_output_tokens":null}}),
+        );
+        assert_eq!(
+            snake["generation_config"]["maxOutputTokens"],
+            MAX_COMPLETION_CAP
+        );
+        assert!(
+            snake["generation_config"]
+                .get("max_output_tokens")
+                .is_none()
+        );
+        assert_eq!(snake["generation_config"]["temperature"], 0.2);
+        assert!(snake.get("generationConfig").is_none());
     }
 
     /// compact 端点的 cap 写不进请求：未声明时按模型 max_output 全额预扣，
