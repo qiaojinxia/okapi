@@ -1,5 +1,9 @@
 //! sqlx creates and removes an isolated test database; no live account or price writes.
-use okapi_store::{admin::RatioAxes, mutate, provision};
+use okapi_store::{
+    admin::RatioAxes,
+    channels::{self, KeyFailure},
+    mutate, provision,
+};
 use sqlx::PgPool;
 
 async fn channel(pool: &PgPool, name: &str) -> (i64, i64) {
@@ -307,4 +311,63 @@ async fn retention_indexes_and_schema_guards_from_migration_0005(pool: PgPool) {
             .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
         "{err}"
     );
+}
+
+/// 配额耗尽的冷却写明「次日 0 点（UTC）」，与文档、与 `spend:ck:*` 的 UTC 日同一条边界。
+/// 生产池的会话时区是本机时区（`connect_pg` 的 after_connect）：不显式换算的 `date_trunc('day', ..)`
+/// 会落在本地午夜，偏出时区偏移那么多小时。
+#[sqlx::test(migrations = "./migrations")]
+async fn quota_exhaustion_cools_down_to_the_next_utc_midnight_in_any_session_zone(pool: PgPool) {
+    let (_, key) = channel(&pool, "quota").await;
+    for zone in ["Asia/Shanghai", "America/Los_Angeles"] {
+        // 单连接池 + 非 UTC 的会话时区，复现生产池的状态
+        let local = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |connection, _| {
+                Box::pin(async move {
+                    sqlx::query(sqlx::AssertSqlSafe(format!("SET TIME ZONE '{zone}'")))
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*pool.connect_options()).clone())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE channel_keys SET status = 1, cooldown_until = NULL WHERE id = $1")
+            .bind(key)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let before = chrono::Utc::now();
+        channels::mark_key_failure(
+            &local,
+            key,
+            "insufficient_quota",
+            KeyFailure::QuotaExhausted,
+        )
+        .await
+        .unwrap();
+        let after = chrono::Utc::now();
+
+        let (status, until): (i16, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as("SELECT status, cooldown_until FROM channel_keys WHERE id = $1")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, 4);
+        let until = until.expect("配额耗尽要写冷却截止时间");
+        assert_eq!(
+            until.time(),
+            chrono::NaiveTime::MIN,
+            "{zone}：截止时间要落在 UTC 午夜，实际 {until}"
+        );
+        assert!(
+            until > before && until <= after + chrono::Duration::days(1),
+            "{zone}：应是下一个 UTC 午夜，实际 {until}"
+        );
+        local.close().await;
+    }
 }

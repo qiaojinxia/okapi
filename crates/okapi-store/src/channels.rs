@@ -644,13 +644,19 @@ pub async fn mark_key_failure(
                 WHERE id=$1 AND status IN (1,2,3,4)").bind(channel_key_id).bind(error).bind(secs).execute(pool).await?;
         }
         KeyFailure::QuotaExhausted => {
+            // 「次日 0 点」按 UTC 算，与文档、与 `spend:ck:*` 的 UTC 日同一条边界。连接池的会话时区是本机时区
+            // （pg.rs），`date_trunc('day', now())` 会落在本地午夜；先换成 UTC 的无时区时间再截断 / 加一天，
+            // 本地时区的夏令时也就碰不到这个「+1 day」
             sqlx::query!(
                 r#"
                 UPDATE channel_keys
                 SET failed_count = failed_count + 1,
                     last_error = $2,
                     status = 4,
-                    cooldown_until = greatest(cooldown_until, date_trunc('day', now() + interval '1 day')),
+                    cooldown_until = greatest(
+                        cooldown_until,
+                        (date_trunc('day', now() AT TIME ZONE 'UTC') + interval '1 day') AT TIME ZONE 'UTC'
+                    ),
                     updated_at = now()
                 WHERE id = $1 AND status IN (1, 2, 3, 4)
                 "#,
