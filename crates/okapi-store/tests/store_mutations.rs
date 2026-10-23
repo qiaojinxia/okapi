@@ -136,3 +136,133 @@ async fn dirty_pricing_values_are_refused_when_written(pool: PgPool) {
     assert!(absolute(10, -1).await.is_err(), "输出单价不能为负");
     assert!(absolute(10, 0).await.is_ok(), "输出免费是合法的");
 }
+
+/// 迁移 0005：保留策略逐批清理 DEFAULT 分区用的 `ORDER BY created_at, <主键列> LIMIT 1000`
+/// 有以 created_at 打头的索引可走；未知的 override_kind / 非对象的 tier_ratios 在写入时就被拦下；
+/// 去掉重复的部分唯一索引后 aff_code 仍然唯一。
+#[sqlx::test(migrations = "./migrations")]
+async fn retention_indexes_and_schema_guards_from_migration_0005(pool: PgPool) {
+    // 每张分区表的 DEFAULT 分区：保留批次的取数语句必须能走新索引（关掉顺序扫描才看得出"能不能走"）
+    for (table, index, key) in [
+        (
+            "billing_records_default",
+            "billing_records_default_created",
+            "id",
+        ),
+        (
+            "billing_events_default",
+            "billing_events_default_created",
+            "event_id",
+        ),
+        ("audit_logs_default", "audit_logs_default_created", "id"),
+    ] {
+        let mut tx = pool.begin().await.unwrap();
+        // 空表的统计下规划器会选"位图扫描 + 排序"；关掉顺序扫描与位图扫描，只看索引能不能直接给出顺序
+        for setting in ["enable_seqscan", "enable_bitmapscan"] {
+            sqlx::query(sqlx::AssertSqlSafe(format!("SET LOCAL {setting} = off")))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+        }
+        // 表名与列名是上面这张常量表里的，没有外部输入
+        let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN (FORMAT JSON) SELECT {key}, created_at FROM {table} \
+             WHERE created_at < now() ORDER BY created_at, {key} LIMIT 1000"
+        )))
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        let plan = plan.to_string();
+        assert!(
+            plan.contains(index),
+            "{table} 的有序取数应走 {index}：{plan}"
+        );
+        assert!(!plan.contains("\"Sort\""), "{table} 不应再需要排序：{plan}");
+    }
+
+    // 值域守卫
+    let user = provision::create_user(&pool, "guard-0005").await.unwrap();
+    okapi_store::admin::upsert_model_per_call(&pool, "guarded-0005", 1_000)
+        .await
+        .unwrap();
+    let model_id: i64 =
+        sqlx::query_scalar("SELECT id FROM models WHERE model_name = 'guarded-0005'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let override_kind = |kind: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "INSERT INTO user_pricing (user_id, model_id, override_kind, custom_model_ratio)
+                 VALUES ($1, $2, $3, 1)
+                 ON CONFLICT (user_id, model_id) DO UPDATE SET override_kind = EXCLUDED.override_kind",
+            )
+            .bind(user)
+            .bind(model_id)
+            .bind(kind)
+            .execute(&pool)
+            .await
+        }
+    };
+    assert!(
+        override_kind("bogus").await.is_err(),
+        "未知的 override_kind 必须被拒"
+    );
+    assert!(override_kind("ratio").await.is_ok());
+    assert!(
+        override_kind("absolute").await.is_ok(),
+        "absolute 也是已知的种类"
+    );
+    let tiers = |value: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE model_pricing SET tier_ratios = $1::jsonb WHERE model_id = $2")
+                .bind(value)
+                .bind(model_id)
+                .execute(&pool)
+                .await
+        }
+    };
+    assert!(tiers("[]").await.is_err(), "数组形的 tier_ratios 必须被拒");
+    assert!(
+        tiers("\"flex\"").await.is_err(),
+        "字符串形的 tier_ratios 必须被拒"
+    );
+    assert!(
+        tiers("null").await.is_err(),
+        "JSON null 不是对象（没有档位应写 SQL NULL）"
+    );
+    assert!(tiers(r#"{"flex":"0.5"}"#).await.is_ok());
+    sqlx::query("UPDATE model_pricing SET tier_ratios = NULL WHERE model_id = $1")
+        .bind(model_id)
+        .execute(&pool)
+        .await
+        .expect("SQL NULL 表示没有档位，必须可写");
+
+    // aff_code：重复的部分唯一索引没了，唯一性由 users_aff_code_key 保证
+    let other = provision::create_user(&pool, "guard-0005-b").await.unwrap();
+    let has_partial: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_users_aff_code')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(!has_partial, "重复的部分唯一索引应已删除");
+    let set = |id: i64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE users SET aff_code = 'dup-code' WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+        }
+    };
+    set(user).await.unwrap();
+    let err = set(other).await.unwrap_err();
+    assert!(
+        err.as_database_error()
+            .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
+        "{err}"
+    );
+}
