@@ -624,9 +624,24 @@ async fn stripe_checks_raw_body_and_rejects_ambiguous_signature_timestamps() {
     }
 }
 
+async fn set_stripe_api_base(env: &TestEnv, api_base: &Value) {
+    sqlx::query("UPDATE settings SET value=jsonb_set(value,'{api_base}',$1::jsonb) WHERE key='payment_stripe'")
+        .bind(api_base)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn malformed_checkout_response_never_returns_a_successful_payment_link() {
     let env = setup().await;
+    // settings 表是整库共享的：这条用例把 api_base 临时指到畸形响应的 mock 上，用完必须还原，
+    // 否则同库里别的用例（本地并行跑时）的下单会被路由到一个已经关掉的端口而假失败
+    let original: Value =
+        sqlx::query_scalar("SELECT value->'api_base' FROM settings WHERE key='payment_stripe'")
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
     for fixture in [
         json!({}),
         json!({"id":"cs_bad","url":"javascript:alert(1)"}),
@@ -639,8 +654,7 @@ async fn malformed_checkout_response_never_returns_a_successful_payment_link() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        sqlx::query("UPDATE settings SET value=jsonb_set(value,'{api_base}',$1::jsonb) WHERE key='payment_stripe'")
-            .bind(json!(format!("http://{addr}"))).execute(&env.pg).await.unwrap();
+        set_stripe_api_base(&env, &json!(format!("http://{addr}"))).await;
         let response = reqwest::Client::new()
             .post(format!("http://{}/api/me/topup", env.addr))
             .bearer_auth(&env.user_token)
@@ -649,6 +663,8 @@ async fn malformed_checkout_response_never_returns_a_successful_payment_link() {
             .await
             .unwrap();
         server.abort();
+        // 先还原再断言：断言失败（panic）也不留着指向已关端口的 api_base
+        set_stripe_api_base(&env, &original).await;
         assert_eq!(response.status(), 502);
         assert_eq!(
             response.json::<Value>().await.unwrap()["error"]["code"],

@@ -148,8 +148,9 @@ async fn settled_amount(pg: &PgPool, resp: reqwest::Response) -> i64 {
         .unwrap();
     let _ = resp.text().await.unwrap();
     for _ in 0..50 {
+        // 只认已结算（status=20）的那一行，同 console_m2 / request_population 里的同类辅助函数
         if let Some(r) = sqlx::query!(
-            r#"SELECT amount_micro FROM billing_records WHERE request_id = $1"#,
+            r#"SELECT amount_micro FROM billing_records WHERE request_id = $1 AND status = 20"#,
             request_id
         )
         .fetch_optional(pg)

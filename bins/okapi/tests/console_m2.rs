@@ -353,8 +353,9 @@ async fn chat_and_settle(env: &Env, token: &str, model: &str) -> i64 {
         .unwrap();
     let _ = resp.text().await.unwrap();
     for _ in 0..50 {
+        // 只认已结算（status=20）的那一行：同族的辅助函数都带这个过滤，别的状态的行会让相对断言悄悄取错数
         let row = sqlx::query!(
-            r#"SELECT amount_micro FROM billing_records WHERE request_id = $1"#,
+            r#"SELECT amount_micro FROM billing_records WHERE request_id = $1 AND status = 20"#,
             request_id
         )
         .fetch_optional(&env.pg)
