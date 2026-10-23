@@ -9,12 +9,24 @@ BIN=${OKAPI_BIN:-target/debug/okapi}
 [ -x "$BIN" ] || cargo build --quiet --bin okapi
 
 LOG=$(mktemp /tmp/okapi-smoke.XXXXXX)
+# 端口上已经有实例在应答，下面的探测就会打到它而不是刚起的二进制（新进程绑不上端口退出了，
+# 冒烟照样报通过）：先拒绝，别带着旧实例往下测
+for port in 8080 8081; do
+  if curl -sf -m 2 "http://127.0.0.1:$port/healthz" >/dev/null 2>&1; then
+    echo "❌ smoke-all：127.0.0.1:$port 上已有实例在应答，冒烟会测到它而不是新二进制；先停掉再跑" >&2
+    exit 1
+  fi
+done
 OKAPI_SINGLE_USER_MODE=true "$BIN" all >"$LOG" 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null || true' EXIT
 
 ok=false
 for _ in $(seq 1 30); do
+  # 新进程已经退出（配置不对、端口冲突……）就立刻失败，别空等到超时再报一个看不出原因的「健康检查超时」
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo "❌ smoke-all：okapi all 进程已退出"; tail -20 "$LOG"; exit 1
+  fi
   if curl -sf -m 2 http://127.0.0.1:8080/healthz >/dev/null 2>&1 \
      && curl -sf -m 2 http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
     ok=true

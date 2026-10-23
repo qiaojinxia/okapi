@@ -32,8 +32,9 @@ REDIS_CONTAINER="${REDIS_CONTAINER:-okapi-dev-redis}"
 CH_URL="${OKAPI_CLICKHOUSE_URL:-}"
 
 # Refuse to reset under a producer/consumer that could repopulate the stores.
-if pgrep -f '[/]okapi (gateway|console|worker)' >/dev/null; then
-  echo "请先停止 Okapi gateway/console/worker，再重置开发依赖" >&2
+# `okapi all` 是单机三合一形态（smoke-all.sh 就这么起），三个角色都在它一个进程里。
+if pgrep -f '[/]okapi (all|gateway|console|worker)' >/dev/null; then
+  echo "请先停止 Okapi all/gateway/console/worker，再重置开发依赖" >&2
   exit 1
 fi
 if [[ -n "${OKAPI_NATS_URL:-}" ]]; then
