@@ -86,7 +86,9 @@ jobs:
       - name: 格式检查
         run: cargo fmt --all --check
       - name: 计费红线守卫
-        run: bash scripts/guard-no-float.sh
+        run: |
+          python3 scripts/test_guard_float_literals.py
+          bash scripts/guard-no-float.sh
       - name: API 路由清单与验证报告守卫
         run: |
           python3 scripts/test_api_surface.py

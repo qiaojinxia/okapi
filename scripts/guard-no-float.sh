@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 计费红线守卫（.cursor/rules/billing-safety.mdc）：
-#   1) okapi-domain / okapi-pricing / okapi-ledger 的 src 与 tests 禁一切浮点
+#   1) okapi-domain / okapi-pricing / okapi-ledger 的 src 与 tests 禁一切浮点：
+#      既禁 f32/f64 类型记号，也禁裸浮点字面量（`let x = 0.5;` 一个记号都不带就能推断成浮点）
 #   2) 上述 crate 的 src 禁 unwrap/expect/panic!/todo!/unimplemented!
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,6 +17,11 @@ for crate in "${CRATES[@]}"; do
         [ -d "$dir" ] || continue
         if grep -rnE "$FLOAT_PATTERN" "$dir"; then
             echo "❌ 计费红线：$dir 中出现浮点类型（含测试）" >&2
+            fail=1
+        fi
+        # 字面量要先剥掉注释和字符串再找（文档里写的 "0.5"、测试里的 "1.25" 十进制字符串不算）
+        if ! python3 scripts/guard-float-literals.py "$dir"; then
+            echo "❌ 计费红线：$dir 中出现浮点字面量（含测试）" >&2
             fail=1
         fi
     done
