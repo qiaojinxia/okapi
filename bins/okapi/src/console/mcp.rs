@@ -595,7 +595,8 @@ async fn usage_stats(state: &AppState, args: &Value) -> Result<Value, AppError> 
         Some("user") => ("mv_user_day", "user_id"),
         Some("model") => ("mv_user_model_day", "model"),
         Some("channel") => ("mv_channel_5min", "channel_id"),
-        Some("group") => ("mv_group_day", "group"),
+        // 视图里的列叫 group_code；`group` 既不是列名、还是 SQL 保留字，这一维此前每次都查询报错
+        Some("group") => ("mv_group_day", "group_code"),
         _ => return Err(AppError::bad_request().with_param("dimension")),
     };
     let time_col = if mv == "mv_channel_5min" {
@@ -924,6 +925,7 @@ async fn user_adjust_balance(
         .and_then(Value::as_i64)
         .filter(|v| *v > 0)
         .ok_or_else(|| AppError::bad_request().with_param("amount_micro"))?;
+    super::admin::ensure_adjust_amount(amount_micro)?;
     let reason = args.get("reason").and_then(Value::as_str).unwrap_or("");
     let current = state.ledger.balance(user_id).await?;
     // 两段式：无 confirm 只出预览

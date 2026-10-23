@@ -251,6 +251,7 @@ async fn pricing_publish_hot_reload_e2e() {
     // 逐接口探针把这个接口的响应体换掉，此前没有任何用例察觉。
     let credited: Value = r.json().await.unwrap();
     assert_eq!(credited["balance_after_micro"], 10_000_000, "{credited}");
+    assert_credit_beyond_the_money_bound_is_refused(&env, &super_token, user_id).await;
 
     // 第一笔：ratio 1 → 240 micro
     let amount1 = chat_and_settle(&env, &user_token, &model).await;
@@ -305,6 +306,27 @@ async fn pricing_publish_hot_reload_e2e() {
     .await
     .unwrap();
     assert!(audits >= 5, "写操作应全量审计，got {audits}");
+}
+
+/// 人工调账金额与其它资金入口同一条不变量（|金额| ≤ 2^53-1）：越界回 400，不是一路送进账本炸成 500。
+async fn assert_credit_beyond_the_money_bound_is_refused(env: &Env, token: &str, user_id: i64) {
+    for amount in [
+        i64::MAX,
+        i64::MIN,
+        9_007_199_254_740_992,
+        -9_007_199_254_740_992,
+    ] {
+        let r = console_post(
+            env,
+            token,
+            &format!("/admin/users/{user_id}/credit"),
+            json!({"amount_micro": amount, "reason": "too big"}),
+        )
+        .await;
+        assert_eq!(r.status(), 400, "{amount}");
+        let body: Value = r.json().await.unwrap();
+        assert_eq!(body["error"]["param"], "amount_micro", "{body}");
+    }
 }
 
 async fn chat_raw(env: &Env, token: &str, model: &str) -> reqwest::Response {

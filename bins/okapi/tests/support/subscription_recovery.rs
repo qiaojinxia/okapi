@@ -82,6 +82,8 @@ async fn new_group(b: &Bed) -> String {
     )
     .await
     .unwrap();
+    // 新建的分组要发布进价簿，套餐才能绑它（否则 409 group_not_published）
+    published_pricing::publish(&b.pg, b.user_id).await;
     code
 }
 

@@ -426,4 +426,24 @@ async fn readonly_tools_cover_keys_pricing_health_and_ch_backed_usage() {
     for field in ["requests", "tokens", "amount_micro", "active_users"] {
         assert!(today.get(field).is_some(), "今日 KPI 缺字段 {field}：{kpi}");
     }
+
+    // usage_stats 四个维度都得查得通：group 维度此前用了不存在的列名 `group`（还是 SQL 保留字），
+    // 每次都在 CH 里报错；视图里的列叫 group_code
+    for (dimension, column) in [
+        ("user", "user_id"),
+        ("model", "model"),
+        ("channel", "channel_id"),
+        ("group", "group_code"),
+    ] {
+        let stats = call(
+            &admin_token,
+            "usage_stats",
+            json!({ "dimension": dimension }),
+        )
+        .await;
+        let sc = &stats["result"]["structuredContent"];
+        assert_eq!(stats["result"]["isError"], false, "{dimension}：{stats}");
+        assert_eq!(sc["dimension"], column, "{dimension}：{stats}");
+        assert!(sc["data"].is_array(), "{dimension}：{stats}");
+    }
 }

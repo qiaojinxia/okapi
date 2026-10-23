@@ -329,6 +329,15 @@ async fn redemption_plan_bind_and_ip_cap() {
     .execute(&env.pg)
     .await
     .unwrap();
+    // 分组要发布进价簿，套餐才能绑它（否则 409 group_not_published）
+    let published = client
+        .post(format!("http://{}/admin/pricing/publish", env.addr))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), 200);
     let plan_resp = client
         .post(format!("http://{}/admin/plans", env.addr))
         .bearer_auth(&env.admin_token)

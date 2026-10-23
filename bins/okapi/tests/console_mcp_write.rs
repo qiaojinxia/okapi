@@ -237,6 +237,14 @@ async fn mcp_write_full_scenario() {
     .unwrap();
     assert_eq!(events, 0, "dry-run 不得产生账务事件");
 
+    // 与 REST 同一条金额不变量：超出 2^53-1 的值挡在入口，不一路送进账本
+    let too_big = call(
+        &env,
+        "user_adjust_balance",
+        json!({"user_id": target, "amount_micro": 9_007_199_254_740_992_i64, "confirm": true}),
+    )
+    .await;
+    assert_eq!(too_big["result"]["isError"], true, "{too_big}");
     let applied = call(
         &env,
         "user_adjust_balance",

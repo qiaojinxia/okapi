@@ -1142,6 +1142,38 @@ async fn plan_validation() {
     assert_eq!(ok.status(), 200);
 }
 
+/// 套餐绑的分组要**已发布进价簿**，不只是存在：绑一个还没发布的组，买了这个套餐的用户每笔请求都在计价处
+/// 撞 `UnknownGroup`（fail-closed 回 500），直到有人发布。与另外两处设组入口同一道闸，回 409 `group_not_published`。
+#[tokio::test]
+async fn plan_cannot_bind_a_group_the_price_book_does_not_know_yet() {
+    let bed = setup().await;
+    let fresh = format!("fresh-{}", bed.suffix);
+    okapi_store::admin::upsert_price_group(
+        &bed.pg,
+        okapi_store::admin::PriceGroupInput {
+            group_code: &fresh,
+            group_ratio: "1.0",
+            description: "",
+            pool_code: None,
+            self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+    let code = format!("pub-{}", bed.suffix);
+    let body =
+        json!({"plan_code": code, "display_name": "x", "grant_micro": 1, "group_code": fresh});
+    let resp = bed.upsert_plan(body.clone()).await;
+    assert_eq!(resp.status(), 409);
+    let err: Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "group_not_published", "{err}");
+    // 发布之后就能绑
+    published_pricing::publish(&bed.pg, bed.user_id).await;
+    assert_eq!(bed.upsert_plan(body).await.status(), 200);
+}
+
 /// 管理端订阅三件套的回执与一致性。
 ///
 /// 逐接口端到端探针把 `POST /admin/plans`、`GET/DELETE /admin/users/{id}/subscription`

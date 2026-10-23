@@ -2188,6 +2188,17 @@ pub async fn set_user_multiplier(
     Ok(Json(json!({ "ok": true, "multiplier": raw })))
 }
 
+/// 人工调账金额的合法范围：与其它资金入口同一条不变量（|金额| ≤ `MAXIMUM_MICROS`，账本与 Lua 的定量上限）。
+/// 越界值此前一路送进账本，在 bigint 加法或入账后的余额检查里变成 500，这里先挡成 400。
+pub(super) fn ensure_adjust_amount(amount_micro: i64) -> Result<(), AppError> {
+    let max = okapi_ledger::holds::MAXIMUM_MICROS;
+    if (-max..=max).contains(&amount_micro) {
+        Ok(())
+    } else {
+        Err(AppError::bad_request().with_param("amount_micro"))
+    }
+}
+
 pub async fn credit_user(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2198,6 +2209,7 @@ pub async fn credit_user(
     if req.amount_micro == 0 {
         return Err(AppError::bad_request().with_param("amount_micro"));
     }
+    ensure_adjust_amount(req.amount_micro)?;
     // 管理台契约（BalanceSection 提示语）："正数为充值，负数为扣减"。负数走
     // debit：按可用余额钳制（与 expire 同语义），事件仍是 adjust 的**负额**——
     // 现金流的 clawed 统计正是按负额 adjust 聚合的。
@@ -2846,17 +2858,10 @@ pub async fn upsert_plan(
         }
         _ => return Err(AppError::bad_request().with_param("kind")),
     };
+    // 与另外两处设组入口同一道闸：分组要存在**且已发布进价簿**。只校验存在的话，套餐绑了还没发布的组，
+    // 买了它的用户每笔请求都在计价处撞 `UnknownGroup`（fail-closed 回 500），直到有人发布
     if let Some(group) = req.group_code.as_deref() {
-        let exists = sqlx::query_scalar!(
-            r#"SELECT EXISTS(SELECT 1 FROM price_groups WHERE group_code = $1) AS "e!""#,
-            group
-        )
-        .fetch_one(&state.pg)
-        .await
-        .map_err(okapi_store::StoreError::from)?;
-        if !exists {
-            return Err(AppError::bad_request().with_param("group_code"));
-        }
+        ensure_group_usable(&state, group, "group_code").await?;
     }
     let id = okapi_store::admin::create_plan(
         &state.pg,
