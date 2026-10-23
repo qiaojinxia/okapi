@@ -2845,6 +2845,22 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   月分区的写入路径不多维护索引。0005 同时删掉 `users.aff_code` 上与 `users_aff_code_key` 重复的部分唯一索引。
   迁移门锁（`pg_try_advisory_lock` 轮询排队）等待超过 1 分钟每分钟记一条告警，超过 30 分钟报 `migration_gate_timeout`，
   不再无声地永远挂在启动里。
+- **第四轮评审后补（计费上限 / 转换 / 入口一致性）**：
+  - **缺省输出上限必须写得进请求**：`bound_default_output` 把 `generationConfig: null`（或 `generation_config: null`）视同缺席，
+    上限写进客户端用的那种拼写的配置对象，不并排再造一个；此前 Gemini 臂在 `generationConfig: null` 上取不到对象就原样放行，
+    预扣封顶 32768 而上游照模型 max_output 生成，余额被透支。
+  - **转换不静默丢内容**：Anthropic → OpenAI 兼容上游时，`tool_result` 里的 image / document 块报 400
+    `unsupported_content:tool_result.<类型>`（chat 的 tool 消息只装得下文本，丢掉后模型在看不到截图的情况下照常作答）；
+    Gemini → OpenAI 时同一条 user content 里 functionResponse 的 tool 消息排在文本之前（上游要求带 tool_calls 的 assistant 消息后面
+    紧跟各个 tool 应答）；Gemini 响应 `MAX_TOKENS` / `SAFETY…` 优先于 `tool_calls` 映射成 `length` / `content_filter`
+    （截断的工具参数可能是残缺 JSON，客户端见到 `tool_calls` 会照着执行）。
+  - **图片流式与非流式同口径**：候选渠道只是准入被拒（并发满 / 额度挡下）时换下一个渠道，全部被拒回 503 `no_available_channel`；
+    此前流式路径直接 502 放弃。
+  - **资金入口同一条不变量**：人工调账（`POST /admin/users/{id}/credit` 与 MCP `user_adjust_balance`）金额须在 ±2^53−1 内，越界 400
+    `amount_micro`；套餐绑定的分组须已发布进价簿（409 `group_not_published`，与另两处设组入口同一道闸）。
+  - **其余**：MCP `usage_stats` 的 group 维度改用视图里真实的 `group_code` 列（此前用不存在的 `group`，每次都查询报错）；
+    Bedrock 流内异常帧中能对应 HTTP 状态的（`throttlingException` 等 → 429，`serviceUnavailableException` → 503，
+    `internalServerException` → 500，`modelTimeoutException` → 408）按 `Status` 报，key 冷却与 retry-after 对流中限流才生效。
 - **环境变量**：布尔大小写不敏感（`true/1/yes/on`、`false/0/no/off`），认不得的与数值解析失败都打 WARN 再用缺省（`okapi_store::env_config`）。
 - **门户日志缺省近 30 天**：`/api/me/logs` 与 `/logs/stat` 不带日期时窗口取近 30 天（按 request_id 点查不加界），列表按
   `(created_at, id)` 倒序键集翻页（`before` 仍传上一页末行 id，服务端在同一属主下取它的 created_at），走 `idx_br_user_time`。
