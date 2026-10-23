@@ -105,6 +105,7 @@ async fn open(
     ctx: &Context,
     candidates: Vec<okapi_store::ChannelCandidate>,
 ) -> Result<(ImageResponse, okapi_store::ChannelCandidate, i16, Mode), AppError> {
+    let mut last: Option<AppError> = None;
     for (index, candidate) in candidates.into_iter().take(super::MAX_ATTEMPTS).enumerate() {
         let mode = Mode::load(&ctx.state, candidate.channel_id).await?;
         let model = candidate.upstream_model(&ctx.prepared.canonical);
@@ -122,6 +123,11 @@ async fn open(
                     mode,
                 ));
             }
+            // 准入被拒（渠道忙 / 满载 / 额度挡下）：请求还没发给上游，换下一个渠道是安全的——
+            // 非流式图片路径与 chat 主链对同一情形都是这样；此前这里直接回 502 放弃，池里其余健康渠道白白闲着
+            Err(error) if error.error_code() == codes::NO_AVAILABLE_CHANNEL => {
+                last = Some(super::super::account_control::attempt_error(&error));
+            }
             Err(
                 error @ UpstreamError::Status {
                     status: 401 | 402 | 403 | 429,
@@ -135,14 +141,13 @@ async fn open(
                     super::super::chat::failure_kind_of(&error),
                 )
                 .await;
+                last = Some(super::super::account_control::attempt_error(&error));
             }
-            Err(error) => return Err(AppError::new(StatusCode::BAD_GATEWAY, error.error_code())),
+            Err(error) => return Err(super::super::account_control::attempt_error(&error)),
         }
     }
-    Err(AppError::new(
-        StatusCode::BAD_GATEWAY,
-        codes::UPSTREAM_ERROR,
-    ))
+    // 状态码与非流式路径同口径：全部候选都是准入被拒回 503 `no_available_channel`，其余 502
+    Err(last.unwrap_or_else(|| AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR)))
 }
 
 async fn settle(

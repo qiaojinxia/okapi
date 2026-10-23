@@ -36,6 +36,99 @@ async fn rejected_http_requests_only_fail_over_for_explicit_refusals() {
     }
 }
 
+/// 候选渠道只是准入被拒（单 key 并发已满）时，请求还没发给上游，要换下一个渠道——非流式图片路径和
+/// chat 主链都这样；流式路径此前直接回 502，池里其余健康渠道白白闲着。
+#[tokio::test]
+async fn admission_rejection_fails_over_to_the_next_candidate() {
+    use okapi::gateway::sched_redis::channel_permit::ChannelPermit;
+    let mut env = setup().await;
+    let first_key: i64 = sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id=$1")
+        .bind(env.channels[0])
+        .fetch_one(&env.state.pg)
+        .await
+        .unwrap();
+    // 第一个渠道排在前面，且它唯一的 key 并发上限 1 已被占满
+    sqlx::query(
+        "UPDATE channels SET priority = CASE WHEN id=$1 THEN 10 ELSE 0 END WHERE id=ANY($2)",
+    )
+    .bind(env.channels[0])
+    .bind(&env.channels)
+    .execute(&env.state.pg)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE channel_keys SET max_concurrency=1 WHERE id=$1")
+        .bind(first_key)
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
+    let held = ChannelPermit::acquire_key(&env.state.sched, first_key, Some(1))
+        .await
+        .unwrap()
+        .expect("占满第一个渠道的并发");
+
+    let call = launch(env.request(false).json(&body(&env, 1)));
+    let tx = stream(env.peer().await);
+    send(&tx, completed(false, None)).await;
+    drop(tx);
+    let response = finish(call, 200).await;
+    assert_eq!(env.record(&response).await["failover_count"], 1);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("image_generation.completed")
+    );
+    env.assert_money(PRICE, 1).await;
+    assert_eq!(env.hits.load(Ordering::SeqCst), 1, "被拒的渠道不该收到请求");
+    held.release().await;
+}
+
+/// 所有候选都是准入被拒：回 503 `no_available_channel`（与非流式路径同口径），不是 502。
+#[tokio::test]
+async fn all_candidates_rejected_by_admission_answer_503() {
+    use okapi::gateway::sched_redis::channel_permit::ChannelPermit;
+    let env = setup().await;
+    let keys: Vec<i64> = sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id=ANY($1)")
+        .bind(&env.channels)
+        .fetch_all(&env.state.pg)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channel_keys SET max_concurrency=1 WHERE id=ANY($1)")
+        .bind(&keys)
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
+    let mut held = Vec::new();
+    for key in keys {
+        held.push(
+            ChannelPermit::acquire_key(&env.state.sched, key, Some(1))
+                .await
+                .unwrap()
+                .expect("占满并发"),
+        );
+    }
+    let response = env
+        .request(false)
+        .json(&body(&env, 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("no_available_channel")
+    );
+    env.assert_money(0, 0).await;
+    assert_eq!(env.hits.load(Ordering::SeqCst), 0);
+    for permit in held {
+        permit.release().await;
+    }
+}
+
 #[tokio::test]
 async fn corrupt_frame_duplicate_fields_and_event_type_mismatch_refund() {
     let mut env = setup().await;
