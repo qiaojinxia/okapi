@@ -11,7 +11,7 @@ use axum::extract::ws::{
     Message, WebSocket, WebSocketUpgrade, rejection::WebSocketUpgradeRejection,
 };
 use axum::response::{IntoResponse, Response};
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream::SplitSink};
 use okapi_providers::responses_ws::{MAX_ACTIVE, MAX_NAMED_STREAMS};
 use output::Output;
 use serde_json::Value;
@@ -19,7 +19,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::time::Instant;
+use tokio::time::{Instant, timeout};
 use uuid::Uuid;
 
 const MAX_MESSAGE: usize = 64 * 1024 * 1024;
@@ -235,6 +235,19 @@ impl Queue {
     }
 }
 
+/// 写端收尾：先把"带关闭帧收尾"留下的关闭帧（客户端发了违规帧时才有）发出去，再关连接。
+async fn finish_writer(output: &Output, mut writer: SplitSink<WebSocket, Message>) {
+    output.close();
+    if let Some(frame) = output.take_farewell() {
+        let _ = timeout(
+            Duration::from_secs(1),
+            writer.send(Message::Close(Some(frame))),
+        )
+        .await;
+    }
+    let _ = timeout(Duration::from_secs(1), writer.close()).await;
+}
+
 async fn run(
     state: AppState,
     headers: HeaderMap,
@@ -262,8 +275,7 @@ async fn run(
                 break;
             }
         }
-        write_output.close();
-        let _ = tokio::time::timeout(Duration::from_secs(1), writer.close()).await;
+        finish_writer(&write_output, writer).await;
     });
     let context_limit = state.setting_cached("responses_ws_context_bytes").await;
     let context_limit = context_limit
@@ -329,6 +341,13 @@ async fn run(
                 Some(Ok(Message::Ping(data))) => { session.output.push(Message::Pong(data)); }
                 Some(Ok(Message::Pong(_))) => {},
                 Some(Ok(Message::Binary(_))) => session.output.error(&AppError::bad_request().with_param("text_frame"), Uuid::new_v4(), None),
+                Some(Err(error)) => {
+                    // 违规帧（未掩码、超限、非法 UTF-8…）：回带状态码的关闭帧再收尾
+                    if let Some(frame) = crate::gateway::realtime::ws_close::for_read_error(&error) {
+                        session.output.close_with(frame);
+                    }
+                    break;
+                }
                 _ => break,
             }
         }

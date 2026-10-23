@@ -27,6 +27,10 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 
+#[allow(dead_code)]
+#[path = "support/raw_ws.rs"]
+mod raw_ws;
+
 type Client = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 type Accepted = (WebSocket, HeaderMap, String);
 const WAIT: Duration = Duration::from_secs(10);
@@ -290,6 +294,38 @@ async fn upgrade_authentication_connection_cap_and_release() {
     .unwrap();
     replacement.close(None).await.unwrap();
     assert_eq!(env.balance().await, 10_000_000);
+}
+
+/// 客户端发违规帧：回带状态码的关闭帧（1002 / 1009 / 1007），不是没有状态码的空关闭。
+#[tokio::test]
+async fn protocol_violations_are_answered_with_a_status_code() {
+    use tokio::io::AsyncWriteExt;
+    let env = setup().await;
+    for (name, bytes, expected) in [
+        (
+            "未掩码的客户端帧",
+            raw_ws::unmasked_text(),
+            (1002, "protocol_error"),
+        ),
+        (
+            "帧长度超过上限",
+            raw_ws::oversized_header(100 << 20),
+            (1009, "message_too_big"),
+        ),
+        (
+            "文本帧不是合法 UTF-8",
+            raw_ws::invalid_utf8_text(),
+            (1007, "invalid_utf8"),
+        ),
+    ] {
+        let mut ws = raw_ws::upgrade(env.address, "/v1/responses", &env.token).await;
+        ws.write_all(&bytes).await.unwrap();
+        assert_eq!(
+            raw_ws::close(&mut ws).await,
+            Some((expected.0, expected.1.to_owned())),
+            "{name}"
+        );
+    }
 }
 
 #[tokio::test]

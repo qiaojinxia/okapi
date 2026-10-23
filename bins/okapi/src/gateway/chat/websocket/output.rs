@@ -1,5 +1,6 @@
 use super::{AppError, Lane, MAX_BUFFER, Message, Semaphore};
-use std::sync::Arc;
+use axum::extract::ws::CloseFrame;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -15,6 +16,8 @@ pub(super) struct Output {
     bytes: Arc<Semaphore>,
     pub closed: watch::Sender<bool>,
     pub activity: watch::Sender<Instant>,
+    /// 因客户端违规而收尾时要回给它的关闭帧：写端退出发送循环后发出（排队中的事件不再投递）。
+    farewell: Arc<Mutex<Option<CloseFrame>>>,
 }
 
 impl Output {
@@ -28,6 +31,7 @@ impl Output {
                 bytes: Arc::new(Semaphore::new(MAX_BUFFER)),
                 closed,
                 activity,
+                farewell: Arc::new(Mutex::new(None)),
             },
             rx,
         )
@@ -41,6 +45,18 @@ impl Output {
     }
     pub fn touch(&self) {
         self.activity.send_replace(Instant::now());
+    }
+
+    /// 带关闭帧收尾：写端先把它发给客户端（状态码 + 原因），再关连接。
+    pub fn close_with(&self, frame: CloseFrame) {
+        *self.farewell.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
+        self.close();
+    }
+    pub fn take_farewell(&self) -> Option<CloseFrame> {
+        self.farewell
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     pub fn push(&self, message: Message) {

@@ -21,6 +21,10 @@ use uuid::Uuid;
 #[path = "support/realtime_usage.rs"]
 mod usage_tests;
 
+#[allow(dead_code)]
+#[path = "support/raw_ws.rs"]
+mod raw_ws;
+
 // ---- mock 上游 WS ----
 
 /// 行为：连上先发 session.created；response.create → delta + response.done(usage)；
@@ -344,6 +348,86 @@ async fn realtime_upstream_websocket_goes_through_the_bound_proxy() {
         "{lines:?}"
     );
     ws.close(None).await.unwrap();
+}
+
+/// 上游收了 TCP 连接却不回 101：客户端在上游握手时限（10 秒）内就收到 `upstream_timeout`，
+/// 而不是等到首消息超时那 30 秒；预扣随之退款、记一笔失败。
+#[tokio::test]
+async fn realtime_upstream_that_never_answers_the_upgrade_times_out_at_the_handshake_limit() {
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent = listener.local_addr().unwrap();
+    let holder = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    sqlx::query("UPDATE channels SET api_base = $1 WHERE models @> $2")
+        .bind(format!("http://{silent}/v1"))
+        .bind(json!([env.model]))
+        .execute(&env.pg)
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let mut ws = connect(&env).await.expect("握手应成功");
+    let event = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(20), ws.next())
+            .await
+            .expect("上游握手卡住时客户端应在时限内收到错误事件")
+            .expect("WS 流提前结束")
+            .expect("WS 读取错误");
+        if let CliMsg::Text(t) = msg {
+            break serde_json::from_str::<Value>(&t).unwrap();
+        }
+    };
+    assert_eq!(event["type"], "error");
+    assert_eq!(event["error"]["code"], "upstream_timeout", "{event}");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "不能等到 30 秒的首消息超时：{:?}",
+        started.elapsed()
+    );
+    let (status, amount, ..) = wait_record(&env.pg, env.user_id, &env.model)
+        .await
+        .expect("应留下失败记录");
+    assert_eq!((status, amount), (40, 0));
+    holder.abort();
+}
+
+/// 客户端发违规帧：回一个带状态码的关闭帧（1002 协议违例 / 1009 帧过大 / 1007 非法 UTF-8），
+/// 而不是没有状态码的空关闭——客户端据此能知道是自己的帧不合规。
+#[tokio::test]
+async fn realtime_protocol_violations_are_answered_with_a_status_code() {
+    use tokio::io::AsyncWriteExt;
+    let env = setup(Money::from_micros(50_000_000)).await;
+    let path = format!("/v1/realtime?model={}", env.model);
+    for (name, bytes, expected) in [
+        (
+            "未掩码的客户端帧",
+            raw_ws::unmasked_text(),
+            (1002, "protocol_error"),
+        ),
+        (
+            "帧长度超过上限",
+            raw_ws::oversized_header(20 << 20),
+            (1009, "message_too_big"),
+        ),
+        (
+            "文本帧不是合法 UTF-8",
+            raw_ws::invalid_utf8_text(),
+            (1007, "invalid_utf8"),
+        ),
+    ] {
+        let mut ws = raw_ws::upgrade(env.gateway, &path, &env.token).await;
+        ws.write_all(&bytes).await.unwrap();
+        assert_eq!(
+            raw_ws::close(&mut ws).await,
+            Some((expected.0, expected.1.to_owned())),
+            "{name}"
+        );
+    }
 }
 
 /// 双向泵 + 计费闭环：事件转发、二进制回显、usage 累计、断开 commit、余额一致。

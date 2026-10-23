@@ -25,14 +25,20 @@ const BUFFER_BYTES: usize = 128 * 1024 * 1024;
 /// 经出口（代理 / 直连）建一条裸 RFC 6455 客户端连接：与 Responses WS 同一握手——HTTP/1 only、
 /// 不跟随重定向、不协商扩展与子协议、代理与 TLS 校验沿用 `HttpPool`。Realtime 等其它 WS 上游
 /// 走这里，出口绑定（IMPLEMENTATION §11.41）对 WebSocket 同样生效，不再有直连旁路。
+///
+/// `deadline` 是整个升级（TCP / TLS 到收到 101）的总时限，超时为 `UpstreamError::Timeout`。
+/// reqwest 的 `connect_timeout` 只管到 TLS 建好；上游收了连接却不回 101 时，没有这一层就只能靠
+/// 调用方的会话级兜底（Realtime 是 30 秒），慢死的上游会长时间占着会话槽。
 pub async fn connect_raw(
     http: &HttpPool,
     url: &str,
     headers: &[(&str, &str)],
     outbound: &Outbound,
+    deadline: Duration,
 ) -> Result<tokio_tungstenite::WebSocketStream<reqwest::Upgraded>, UpstreamError> {
-    handshake::connect(http, url, headers, outbound)
+    tokio::time::timeout(deadline, handshake::connect(http, url, headers, outbound))
         .await
+        .map_err(|_| UpstreamError::Timeout)?
         .map(|(socket, _)| socket)
 }
 

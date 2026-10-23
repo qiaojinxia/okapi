@@ -466,6 +466,36 @@ async fn stalled_consumer_triggers_bounded_backpressure_failure() {
     failed(&events, "responses_ws_backpressure");
 }
 
+/// Realtime 等裸连接用的 `connect_raw`：上游收了 TCP 连接却不回 101 时，握手时限一到就是
+/// `Timeout`。此前它没有自己的时限，只能等调用方的会话级兜底（Realtime 是 30 秒），
+/// 慢死的上游会一直占着会话槽。
+#[tokio::test]
+async fn raw_connect_gives_up_on_an_upstream_that_never_answers_the_upgrade() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let silent = tokio::spawn(async move {
+        let (held, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(held);
+    });
+    let started = std::time::Instant::now();
+    let result = okapi_providers::responses_ws::connect_raw(
+        &HttpPool::new().unwrap(),
+        &format!("ws://{addr}/v1/realtime"),
+        &[("authorization", "Bearer fixture-secret")],
+        &Outbound::default(),
+        Duration::from_millis(300),
+    )
+    .await;
+    assert!(
+        matches!(result, Err(UpstreamError::Timeout)),
+        "握手应当超时：{:?}",
+        result.err()
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    silent.abort();
+}
+
 #[tokio::test]
 async fn idle_and_lifetime_timeouts_terminate_active_turns_without_retry() {
     for lifetime in [false, true] {

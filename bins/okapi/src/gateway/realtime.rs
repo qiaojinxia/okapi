@@ -9,7 +9,9 @@ use super::error::AppError;
 use super::extract::Query;
 use super::state::AppState;
 use axum::extract::State;
-use axum::extract::ws::{Message as AxumMsg, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{
+    CloseFrame as AxumCloseFrame, Message as AxumMsg, WebSocket, WebSocketUpgrade,
+};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
@@ -22,11 +24,16 @@ use serde_json::Value;
 
 mod topup;
 mod usage;
+/// 两个 WS 入口（Realtime、Responses WS）共用：读到违规帧时回带状态码的关闭帧。
+pub(crate) mod ws_close;
 use std::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message as TungMsg;
 use uuid::Uuid;
 
 const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 上游 WS 握手（TCP / TLS 到收到 101）的总时限，与 Responses WS 的 `SocketTimeouts::handshake` 同值。
+/// 上游收了连接却不回 101 时，会话槽与渠道许可最多被占这么久，而不是等到首消息超时那 30 秒。
+const UPSTREAM_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_mins(5);
 const SESSION_MAX: Duration = Duration::from_mins(8);
 const DEFAULT_COMPLETION_CAP: u32 = 4096;
@@ -47,6 +54,10 @@ fn token_from_subprotocol(headers: &HeaderMap) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// 不校验 `Origin`：凭据只有请求头 `Authorization` 与 `openai-insecure-api-key.<key>` 子协议两种，
+/// 都得调用方主动带上，浏览器不会替跨站页面自动附带（没有可被劫持的 cookie 会话），
+/// 跨站 WebSocket 劫持（CSWSH）不适用；而浏览器里直连 Realtime 是受支持的用法（子协议就是为它留的），
+/// 校验 Origin 只会挡掉合法客户端。
 pub async fn realtime(
     State(state): State<AppState>,
     Query(q): Query<RealtimeQuery>,
@@ -412,19 +423,17 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
         proxy_url: prep.proxy_url.clone(),
         ..Default::default()
     };
-    let upstream = tokio::time::timeout(
-        FIRST_MESSAGE_TIMEOUT,
-        okapi_providers::responses_ws::connect_raw(
-            state.upstream.http(),
-            &prep.upstream_url,
-            &[("authorization", authorization.as_str())],
-            &outbound,
-        ),
+    let upstream = okapi_providers::responses_ws::connect_raw(
+        state.upstream.http(),
+        &prep.upstream_url,
+        &[("authorization", authorization.as_str())],
+        &outbound,
+        UPSTREAM_HANDSHAKE_TIMEOUT,
     )
     .await;
     let upstream_ws = match upstream {
-        Ok(Ok(socket)) => socket,
-        Ok(Err(err)) => {
+        Ok(socket) => socket,
+        Err(err) => {
             tracing::warn!(request_id = %request_id, error = %err, "realtime 上游连接失败");
             // 连接阶段失败且走了代理：与 HTTP 路径同一口径归因（坏在代理这一跳才直接记熔断）
             if let okapi_providers::UpstreamError::Unreachable {
@@ -443,11 +452,7 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
                 )
                 .await;
             }
-            fail_session(&state, &prep, client, codes::UPSTREAM_ERROR).await;
-            return;
-        }
-        Err(_) => {
-            fail_session(&state, &prep, client, codes::UPSTREAM_TIMEOUT).await;
+            fail_session(&state, &prep, client, connect_failure_code(&err)).await;
             return;
         }
     };
@@ -462,6 +467,8 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
     let conn_id = request_id.to_string();
     let mut renew = tokio::time::interval(Duration::from_secs(20));
     renew.tick().await; // 首个 tick 立即完成，跳过
+    // 客户端读流因违规帧出错时，收尾前先回给它的关闭帧（状态码 + 原因）
+    let mut farewell: Option<AxumCloseFrame> = None;
 
     // 双向泵：任一侧关闭/出错即收尾；超时窗口 = 首消息 30s，其后任意方向静默 5min；
     // 每 20s 续租连接租约（§14.4）
@@ -500,7 +507,11 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
                             break;
                         }
                     }
-                    _ => break,
+                    Some(Err(error)) => {
+                        farewell = ws_close::for_read_error(&error);
+                        break;
+                    }
+                    None => break,
                 }
             }
             msg = up_rx.next() => {
@@ -540,6 +551,13 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
             }
         }
     }
+    if let Some(frame) = farewell {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            cl_tx.send(AxumMsg::Close(Some(frame))),
+        )
+        .await;
+    }
     let _ = tokio::time::timeout(Duration::from_secs(2), cl_tx.close()).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), up_tx.close()).await;
 
@@ -563,6 +581,19 @@ fn client_frame_error(text: &str) -> Option<&'static str> {
     };
     let t = holder.get("temperature")?;
     (!t.is_null() && t.as_f64().is_none_or(|t| t < 0.0)).then_some(param)
+}
+
+/// 上游握手失败给客户端的 error 码：超时（含 TCP / TLS 建连超时）单独报 `upstream_timeout`，
+/// 其余（拒绝连接、非 101 应答、握手校验失败）仍是 `upstream_error`。
+fn connect_failure_code(err: &okapi_providers::UpstreamError) -> &'static str {
+    use okapi_providers::UpstreamError;
+    match err {
+        UpstreamError::Timeout
+        | UpstreamError::Unreachable {
+            timed_out: true, ..
+        } => codes::UPSTREAM_TIMEOUT,
+        _ => codes::UPSTREAM_ERROR,
+    }
 }
 
 /// 升级后上游失败：客户端收一条 error 事件（error_code 语义，前端语言包渲染），
@@ -728,7 +759,27 @@ async fn record_failure(
 
 #[cfg(test)]
 mod frame_tests {
-    use super::client_frame_error;
+    use super::{client_frame_error, connect_failure_code};
+    use okapi_providers::UpstreamError;
+
+    #[test]
+    fn handshake_timeouts_are_reported_as_timeouts_and_the_rest_as_upstream_errors() {
+        let unreachable = |timed_out| UpstreamError::Unreachable {
+            timed_out,
+            proxy_hop: false,
+            detail: "responses_ws_handshake".into(),
+        };
+        assert_eq!(
+            connect_failure_code(&UpstreamError::Timeout),
+            "upstream_timeout"
+        );
+        assert_eq!(connect_failure_code(&unreachable(true)), "upstream_timeout");
+        assert_eq!(connect_failure_code(&unreachable(false)), "upstream_error");
+        assert_eq!(
+            connect_failure_code(&UpstreamError::Connect("responses_ws_upgrade".into())),
+            "upstream_error"
+        );
+    }
 
     #[test]
     fn negative_or_non_numeric_temperature_in_client_events_is_refused() {
