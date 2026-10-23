@@ -553,6 +553,12 @@ fn dec_field(v: &Value, key: &str) -> Option<String> {
     }
 }
 
+/// 源 id 的前 8 个**字符**，用来给撞名的用户名消歧。id 来自导入文件，可能含多字节字符：
+/// 按字节切（`&id[..8]`）会在字符中间 panic，一份坏数据就能让整个导入退出。
+fn short_id(src_id: &str) -> String {
+    src_id.chars().take(8).collect()
+}
+
 fn old_role(role: &str) -> i16 {
     match role {
         "super_admin" => 100,
@@ -682,7 +688,7 @@ pub async fn run_okapi_old(
         let user_id = if let Ok(id) = inserted {
             id
         } else {
-            let alt = format!("{username}-{}", &src_id[..src_id.len().min(8)]);
+            let alt = format!("{username}-{}", short_id(src_id));
             sqlx::query_scalar!(
                 r#"
                 INSERT INTO users (email, username, password_hash, role, status)
@@ -975,6 +981,16 @@ mod tests {
         assert_eq!(decrypt_old(&key, &ct).as_deref(), Some("sk-abc123"));
         let wrong = derive_old_key("wrong");
         assert_eq!(decrypt_old(&wrong, &ct), None);
+    }
+
+    #[test]
+    fn short_id_takes_characters_not_bytes() {
+        assert_eq!(short_id("0123456789"), "01234567");
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id(""), "");
+        // 第 8 个字节落在 'é'（2 字节）中间：按字节切会 panic
+        assert_eq!(short_id("abcdefgéhij"), "abcdefgé");
+        assert_eq!(short_id("用户编号一二三四五六"), "用户编号一二三四");
     }
 
     #[test]
