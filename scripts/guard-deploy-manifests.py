@@ -4,7 +4,7 @@
 为什么要有这道闸：这些模板不在任何编译期或测试期路径上，改坏了只会在发布那天才知道。
 本机没有 compose 插件与 kubectl，所以只做与部署语义强相关的结构断言，而不是 schema 校验：
 - 每个 K8s 文档都有 apiVersion / kind / metadata.name；Service 的 selector 必须对得上某个 Deployment；
-- 每个容器有 image、resources.requests / limits；对外服务的容器有 /healthz readinessProbe；
+- 每个容器有 image、resources.requests / limits；对外服务的容器有 /healthz readinessProbe，有 livenessProbe 的还得有 startupProbe；
 - gateway 与 console 的 terminationGracePeriodSeconds（console 也承载付费 SSE）与 compose 应用服务的 stop_grace_period 必须覆盖
   IMPLEMENTATION §14.3 的排水口径（SSE 5min + 后台结算 30s = 330s）——进程现在真的会等，
   编排层宽限期不够就等于把优雅下线又改回硬杀；
@@ -101,6 +101,9 @@ def check_k8s(problems: list[str]) -> str:
                 probe = c.get('readinessProbe', {}).get('httpGet', {})
                 if probe.get('path') != '/healthz':
                     problems.append(f'{K8S}: {name}/{c.get("name")} 对外服务缺 /healthz readinessProbe')
+                # 有 liveness 就得有 startupProbe：否则首启慢迁移期间 kubelet 会反复杀容器
+                if 'livenessProbe' in c and 'startupProbe' not in c:
+                    problems.append(f'{K8S}: {name}/{c.get("name")} 有 livenessProbe 却没有 startupProbe（慢迁移会被反复杀）')
         if labels.get('role') in ('gateway', 'console'):
             grace = spec.get('terminationGracePeriodSeconds', 30)
             if grace < DRAIN_SECS:

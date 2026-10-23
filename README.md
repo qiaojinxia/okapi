@@ -197,7 +197,8 @@ kubectl apply -f deploy/k8s/okapi.yaml                                # K8s（ga
 
 **横向扩展前必须核两件事**：
 
-1. **连接数**。每个 pod 各开一套 PG 池，总连接 = Σ(副本数 × `OKAPI_PG_POOL`)。
+1. **连接数**。每个 pod 各开一套 PG 池，总连接 = Σ(副本数 × `OKAPI_PG_POOL`)；`all` 单进程模式里
+   gateway / console / worker 三个角色各开一套，一个进程就占 3 × `OKAPI_PG_POOL`。
    走缺省 16 时 gateway 10 + console 2 + worker 1 就是 208 条，而 PG 缺省
    `max_connections=100`——扩到一半开始耗尽，且现象是 acquire 超时而非"连不上"。
    manifest 里已按副本上限配死（12 / 8 / 16），改 HPA 上限时记得一起改。

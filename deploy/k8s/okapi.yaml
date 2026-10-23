@@ -56,6 +56,13 @@ spec:
                 fieldRef: { fieldPath: metadata.name }
           ports:
             - containerPort: 8080
+          # 启动时先跑迁移、/healthz 迁移完才起来：首次部署或大迁移可能要几分钟。没有 startupProbe 的话
+          # livenessProbe 一开始就计数，连败 3 次（30 秒）kubelet 就杀掉重来，迁移永远跑不完。
+          # startupProbe 通过之前 liveness 不生效；这里给 10 分钟。
+          startupProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 60
           readinessProbe:
             httpGet: { path: /healthz, port: 8080 }
             periodSeconds: 5

@@ -28,7 +28,9 @@ FROM public.ecr.aws/docker/library/debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/okapi /usr/local/bin/okapi
 USER 65534:65534
-# gateway :8080 / console :8081
+# gateway :8080 / console :8081。程序缺省只听回环（裸机上不意外暴露）；容器里听回环则
+# `docker run -p` 永远连不上，所以镜像里改成全部网卡，对外暴露与否交给端口映射决定
+ENV OKAPI_BIND=0.0.0.0:8080 OKAPI_CONSOLE_BIND=0.0.0.0:8081
 EXPOSE 8080 8081
 ENTRYPOINT ["okapi"]
 CMD ["all"]
