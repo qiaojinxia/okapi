@@ -20,15 +20,18 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> anyhow::Result<Self> {
+    /// `needs_redis = false` 给不碰 Redis 的一次性命令（`seal-credentials`、`migrate --dry-run`）：
+    /// 没设 `OKAPI_REDIS_URL` 也能跑，`redis_url` 为空串。
+    pub fn from_env(needs_redis: bool) -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
         let database_url = std::env::var("DATABASE_URL")
             .map_err(|_| anyhow::anyhow!("DATABASE_URL 未设置（见 .env.example）"))?;
-        let redis_url = std::env::var("OKAPI_REDIS_URL")
-            .map_err(|_| anyhow::anyhow!("OKAPI_REDIS_URL 未设置（见 .env.example）"))?;
-        let bind: SocketAddr = std::env::var("OKAPI_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
-            .parse()?;
+        let redis_url = match std::env::var("OKAPI_REDIS_URL") {
+            Ok(url) => url,
+            Err(_) if !needs_redis => String::new(),
+            Err(_) => anyhow::bail!("OKAPI_REDIS_URL 未设置（见 .env.example）"),
+        };
+        let bind = socket_addr("OKAPI_BIND", "127.0.0.1:8080")?;
         let single_user_mode =
             okapi_store::env_config::flag("OKAPI_SINGLE_USER_MODE").unwrap_or(false);
         // 实例名。缺省退到容器/主机名而不是固定串——多副本部署里它是**区分实例**的唯一凭据：
@@ -45,9 +48,14 @@ impl Config {
         let clickhouse_url = std::env::var("OKAPI_CLICKHOUSE_URL").ok();
         let nats_url = std::env::var("OKAPI_NATS_URL").ok();
         let master_key = master_key_from_env();
-        let console_bind: std::net::SocketAddr = std::env::var("OKAPI_CONSOLE_BIND")
-            .unwrap_or_else(|_| "127.0.0.1:8081".to_owned())
-            .parse()?;
+        // 主密钥写错（不是 64 位 hex）时启动照常、到第一次加密才炸，表现成某个写操作莫名 500：
+        // 启动时就封一次试试
+        if let Some(key) = master_key.as_deref() {
+            okapi_store::credential::seal(key, "probe").map_err(|error| {
+                anyhow::anyhow!("OKAPI_MASTER_KEY 无效（应为 64 位 hex，即 32 字节）：{error}")
+            })?;
+        }
+        let console_bind = socket_addr("OKAPI_CONSOLE_BIND", "127.0.0.1:8081")?;
         Ok(Self {
             database_url,
             redis_url,
@@ -60,6 +68,14 @@ impl Config {
             master_key,
         })
     }
+}
+
+/// 监听地址：解析失败时报出是哪个变量、写的是什么，而不是一句不带上下文的 `invalid socket address`。
+fn socket_addr(name: &str, default: &str) -> anyhow::Result<SocketAddr> {
+    let raw = std::env::var(name).unwrap_or_else(|_| default.to_owned());
+    raw.trim().parse().map_err(|error| {
+        anyhow::anyhow!("{name}={raw} 不是合法的监听地址（如 0.0.0.0:8080）：{error}")
+    })
 }
 
 /// `.env.example` 的空值表示未配置，与没有该变量一致。

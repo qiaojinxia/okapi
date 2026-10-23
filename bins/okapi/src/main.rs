@@ -40,6 +40,16 @@ enum Role {
     SealCredentials,
 }
 
+impl Role {
+    /// 只读写 PG 的一次性命令（封装存量凭证、只统计的迁移）不要求配 Redis。
+    fn needs_redis(&self) -> bool {
+        !matches!(
+            self,
+            Self::SealCredentials | Self::Migrate { dry_run: true, .. }
+        )
+    }
+}
+
 /// 服务角色把告警日志汇总到 Redis（§11.43），并启动出口代理流量的落库。独立连接：
 /// 日志汇总不该和业务共用一条连接排队；连不上就只留本进程缓冲。迁移等一次性命令不启动。
 fn start_ops_log(role: &Role, cfg: &Config) {
@@ -87,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let cfg = Config::from_env()?;
+    let cfg = Config::from_env(cli.role.needs_redis())?;
     start_ops_log(&cli.role, &cfg);
 
     match cli.role {
