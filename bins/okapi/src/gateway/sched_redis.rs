@@ -1039,21 +1039,50 @@ impl SchedulerRedis {
     }
 
     /// 找回密码 token → user_id（键存 token 的 sha256，明文只出现在邮件里）。
+    ///
+    /// 每个用户同一时刻只有一个有效 token：`pwreset:user:<uid>` 记着他当前那把的哈希，发新的
+    /// 就把上一把作废。否则早先发出、可能已经泄露的链接在 TTL 内一直能重置密码——用户用新链接
+    /// 改完密码之后也一样。先落新 token 再换指针：并发的两次申请里，后换指针的那次一定能看到
+    /// 并删掉先换的那把，不会漏下一个删不掉的。返回 false = Redis 故障（调用方不要发信）。
     pub async fn pwreset_set(&self, token_hash: &str, user_id: i64, ttl_secs: i64) -> bool {
-        let result: Result<(), _> = self
+        let token_key = format!("pwreset:{token_hash}");
+        let stored: Result<(), _> = self
             .client
             .set(
-                format!("pwreset:{token_hash}"),
+                token_key.clone(),
                 user_id.to_string(),
                 Some(Expiration::EX(ttl_secs)),
                 None,
                 false,
             )
             .await;
-        if let Err(err) = &result {
+        if let Err(err) = &stored {
             tracing::warn!(error = %err, "pwreset_set 失败");
+            return false;
         }
-        result.is_ok()
+        let swapped: Result<Option<String>, _> = self
+            .client
+            .set(
+                format!("pwreset:user:{user_id}"),
+                token_hash,
+                Some(Expiration::EX(ttl_secs)),
+                None,
+                true,
+            )
+            .await;
+        match swapped {
+            Ok(Some(previous)) if previous != token_hash => {
+                let _: Result<i64, _> = self.client.del(format!("pwreset:{previous}")).await;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                // 守不住「只留一把」就不发这把：撤回刚落的 token，让调用方报错
+                tracing::warn!(error = %err, "pwreset 指针更新失败");
+                let _: Result<i64, _> = self.client.del(token_key).await;
+                return false;
+            }
+        }
+        true
     }
 
     /// 取出并销毁 token（GETDEL），返回 user_id。

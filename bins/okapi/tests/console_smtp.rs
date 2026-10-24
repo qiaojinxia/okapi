@@ -573,6 +573,11 @@ async fn password_reset_flow() {
         "配了 site_url 就该用它，且不留双斜杠：{}",
         mails[1].data
     );
+    // 每个用户只留最新一封信里的 token：重新发信就作废上一封里还没用的那个
+    // （早先发出、可能已经泄露的链接不能在 TTL 内一直能重置密码）
+    let latest = extract_after(&mails[1].data, "reset-password?token=").expect("第二封信含 token");
+    assert_ne!(latest, token);
+    reset_expect_400(&env, &token, "new-password-22", "reset_token_invalid").await;
     // Clearing canonical URL must fail uniformly, even for unregistered addresses.
     set_site_url(&env, "   ").await;
     for address in [&email, "unregistered@okapi.test"] {
@@ -588,18 +593,19 @@ async fn password_reset_flow() {
 
     // 错 token / 短密码：都是 400 + param
     reset_expect_400(&env, "nope-nope", "new-password-22", "reset_token_invalid").await;
-    reset_expect_400(&env, &token, "short", "password").await;
+    reset_expect_400(&env, &latest, "short", "password").await;
 
     // 重设成功
     let resp = post(
         &env,
         "/auth/password/reset",
-        json!({"token": token, "password": "new-password-22"}),
+        json!({"token": latest, "password": "new-password-22"}),
     )
     .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
     // token 一次性
+    reset_expect_400(&env, &latest, "new-password-33", "reset_token_invalid").await;
     reset_expect_400(&env, &token, "new-password-33", "reset_token_invalid").await;
 
     // 旧密码 401、新密码 200
