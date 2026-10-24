@@ -54,30 +54,12 @@ fn parse_url(raw: &str) -> Result<Url, StorageError> {
     Ok(url)
 }
 
+/// 在管理面保存 URL、出站连接校验同一条判据（`crate::ssrf::is_private_ip`）之上，再拒基准测试段
+/// 198.18.0.0/15：这里抓的是调用方给的 URL，不像管理员配的上游要兼容 fake-ip 代理环境。
 fn public_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => {
-            let [a, b, c, _] = ip.octets();
-            !(matches!(a, 0 | 10 | 127 | 224..=255)
-                || (a == 100 && (64..=127).contains(&b))
-                || (a == 169 && b == 254)
-                || (a == 172 && (16..=31).contains(&b))
-                || (a == 192 && (b == 168 || b == 0 || (b == 88 && c == 99)))
-                || (a == 198 && matches!(b, 18 | 19))
-                || (a == 198 && b == 51 && c == 100)
-                || (a == 203 && b == 0 && c == 113))
-        }
-        IpAddr::V6(ip) => {
-            if let Some(ip) = ip.to_ipv4_mapped() {
-                return public_ip(ip.into());
-            }
-            let s = ip.segments();
-            (s[0] & 0xe000) == 0x2000
-                && s[0] != 0x2002
-                && !(s[0] == 0x2001 && (s[1] < 0x200 || s[1] == 0xdb8))
-                && !(s[0] == 0x3fff && s[1] < 0x1000)
-        }
-    }
+    let ip = ip.to_canonical();
+    let benchmarking = matches!(ip, IpAddr::V4(v4) if matches!(v4.octets(), [198, 18 | 19, _, _]));
+    !crate::ssrf::is_private_ip(ip) && !benchmarking
 }
 
 async fn client(url: &Url, policy: &FetchPolicy) -> Result<Client, StorageError> {
@@ -231,9 +213,11 @@ mod tests {
             "127.0.0.1",
             "10.0.0.1",
             "100.64.0.1",
+            "100.100.100.200",
             "169.254.169.254",
             "192.0.2.1",
             "198.18.0.1",
+            "::ffff:198.19.0.1",
             "198.51.100.1",
             "203.0.113.1",
             "224.0.0.1",

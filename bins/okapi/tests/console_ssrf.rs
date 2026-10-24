@@ -86,6 +86,10 @@ async fn ssrf_default_policy_blocks_private_targets() {
         "https://127.0.0.1:8080/v1",
         "https://[::1]/v1",
         "https://localhost/v1",
+        // 共享地址空间：阿里云元数据 100.100.100.200 在 100.64.0.0/10 里，以及内嵌私网地址的 v6 写法
+        "https://100.100.100.200/latest/meta-data",
+        "https://[::ffff:169.254.169.254]/v1",
+        "https://[64:ff9b::a9fe:a9fe]/v1",
     ] {
         let resp = create(target).await;
         assert_eq!(resp.status(), 400, "{target} 必须被拒");
