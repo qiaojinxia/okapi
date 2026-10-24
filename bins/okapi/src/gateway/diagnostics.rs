@@ -150,17 +150,29 @@ impl Trace {
         if !candidate.credential.is_empty() && !data.secrets.contains(&candidate.credential) {
             data.secrets.push(candidate.credential.clone());
             if let Ok(value) = serde_json::from_str::<Value>(&candidate.credential) {
+                // 云身份是一整份 JSON：上游只会回显其中某个字段，不会回显整份
                 for key in [
                     "access_token",
                     "refresh_token",
                     "api_key",
                     "token",
                     "secret",
+                    "private_key",
+                    "client_secret",
+                    "secret_access_key",
+                    "session_token",
                 ] {
                     if let Some(secret) = value[key].as_str().filter(|s| !s.is_empty()) {
                         data.secrets.push(secret.to_owned());
                     }
                 }
+            }
+        }
+        // 渠道自配的额外请求头常放第二把凭证（组织 token、网关密钥）：上游回显时同样打码。
+        // 太短的值（`1`、`json` 之类）不登记，免得把错误信息里的普通词也换掉
+        for (_, value) in &candidate.extra_headers {
+            if value.len() >= 12 && !data.secrets.contains(value) {
+                data.secrets.push(value.clone());
             }
         }
         let open = data.attempt_started.is_some();

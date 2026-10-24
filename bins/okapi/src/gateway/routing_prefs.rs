@@ -91,9 +91,10 @@ struct Envelope {
 
 /// 从请求原文解析路由偏好。
 ///
-/// 解析不了、或压根没有 `provider` 键 → 缺省偏好（行为与此前完全一致）。
-/// **不因为偏好写错就拒请求**：这是路由提示不是计费输入，宁可按缺省走通，
-/// 也不要让一个拼错的字段打断主链（与 §3.7 的 fail-safe 取向一致）。
+/// 压根没有 `provider` 键 → 缺省偏好（行为与此前完全一致）；OpenRouter 的其余键照常忽略。
+/// 有 `provider` 但形状不对（不是对象、`allow_fallbacks` 不是布尔、`max_price` 不是合法价格）→ 400
+/// `param=provider*`：`max_price` 是调用方给自己设的花费上限，按缺省走通等于悄悄把上限拿掉、
+/// 按更贵的渠道扣钱；`allow_fallbacks:false` 写错同理会悄悄允许换渠道。宁可拒，让调用方看见。
 pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     // 绝大多数请求没有这个键，先做一次子串预检省掉整体反序列化
     if !contains_provider_key(body) {
@@ -153,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_broken_falls_back_to_defaults() {
+    fn absent_prefs_are_defaults_and_malformed_ones_are_refused() {
         let base = RoutingPrefs::default();
         assert_eq!(prefs(r#"{"model":"m"}"#), base, "没有 provider 键 = 缺省");
         assert!(parse(&Bytes::from_static(br#"{"provider":"openai"}"#)).is_err());

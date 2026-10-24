@@ -720,7 +720,15 @@ async fn ensure_settings_oauth_token_url(
 
 /// `inject_request_fields`：对象、最多 32 键 / 4KB，受保护键不可写。
 fn inject_request_fields_ok(value: &Value) -> bool {
-    const PROTECTED: &[&str] = &["model", "messages", "stream", "provider"];
+    // 与网关注入时跳过的键（`gateway::chat::inject_request_fields`）同一份：少两键时能存、却静默不生效
+    const PROTECTED: &[&str] = &[
+        "model",
+        "messages",
+        "stream",
+        "provider",
+        "previous_response_id",
+        "conversation",
+    ];
     let Some(obj) = value.as_object() else {
         return false;
     };
