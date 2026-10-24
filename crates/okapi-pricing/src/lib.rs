@@ -9,6 +9,7 @@
 //! micro-USD（`okapi_domain::Money`）；最终取整语义 = 向下截断（与 new-api `int()` 对齐）。
 
 pub mod book;
+pub mod catalog;
 pub mod engine;
 pub mod error;
 pub mod handle;
