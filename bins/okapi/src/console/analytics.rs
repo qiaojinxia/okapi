@@ -126,6 +126,16 @@ impl CubeQuery {
     }
 
     async fn prepare(&mut self, state: &AppState) -> Result<(), AppError> {
+        // 负数 id 在拼条件时会被跳过：界面上显示「已限定某用户」，数字却是全站的。0 是「未归属」，合法
+        for (param, value) in [
+            ("user_id", self.user_id),
+            ("api_key_id", self.api_key_id),
+            ("channel_id", self.channel_id),
+        ] {
+            if value.is_some_and(|v| v < 0) {
+                return Err(AppError::bad_request().with_param(param));
+            }
+        }
         let ch = ch_or_disabled(state)?;
         self.core_requested()?;
         let w = super::usage_details::CalendarWindow::read(
@@ -1057,33 +1067,8 @@ fn fold_rows(rows: &[Value], fold_key: &dyn Fn(&str) -> String, core: bool) -> V
         super::usage_sources::accumulate(totals, r);
         super::token_details::accumulate(totals, r);
         super::output_rate::accumulate(totals, r);
-        for field in [
-            "reqs",
-            "financial_records",
-            "prompt",
-            "completion",
-            "cached",
-            "reasoning",
-            "spend",
-            "saved",
-            "cost",
-            "errs",
-            "lat_sum",
-            "lat_n",
-            "lat_observed",
-            "lat_output",
-            "ttft_s",
-            "ttft_n",
-            "ttft_observed",
-            "write_sum",
-            "write_n",
-            "read_n",
-            "cost_n",
-            "covered_spend",
-            "covered_cost_sum",
-        ] {
-            totals[field] = json!(ch_i64(totals, field).saturating_add(ch_i64(r, field)));
-        }
+        // 与趋势堆叠同一份清单：漏一项（曾漏 fixture_reqs / fixture_tokens）就会在排行里恒为 0
+        accumulate_core_metrics(totals, r);
         *folded += 1;
     }
     raw.into_iter()
@@ -1646,13 +1631,14 @@ pub async fn flow(
         .copied()
         .filter(|s| selected.is_empty() || selected.iter().any(|v| v == s))
         .collect();
+    let probe = FLOW_ROWS + 1;
     let combo_sql = format!(
         "SELECT user_id, api_key_id, group_code, {model_col} AS flow_model, channel_id, node, \
                 sum(requests) AS reqs, sum(amount) AS spend, \
                 sum(prompt_tokens) + sum(completion_tokens) AS toks \
          FROM {current_source} WHERE {}{} \
          GROUP BY user_id, api_key_id, group_code, flow_model, channel_id, node \
-         ORDER BY {order_col} DESC LIMIT {FLOW_ROWS}",
+         ORDER BY {order_col} DESC LIMIT {probe}",
         q.window(false),
         scope.clause
     );
@@ -1662,7 +1648,10 @@ pub async fn flow(
         q.window(false),
         scope.clause
     );
-    let combos = ch.query_with_params(&combo_sql, &params).await?;
+    let mut combos = ch.query_with_params(&combo_sql, &params).await?;
+    // 多取一行判断是否真的截断：恰好 FLOW_ROWS 个组合时不算截断
+    let truncated = combos.len() > FLOW_ROWS;
+    combos.truncate(FLOW_ROWS);
     let total = ch.query_with_params(&total_sql, &params).await?;
     let total_metric = total.first().map_or(0, |r| ch_i64(r, order_col));
 
@@ -1706,7 +1695,7 @@ pub async fn flow(
         "total": total_metric,
         "metrics": total.first().map(pack_metrics),
         "coverage_bp": rate_bp(graph.covered, total_metric),
-        "truncated": combos.len() >= FLOW_ROWS,
+        "truncated": truncated,
         "nodes": nodes,
         "links": links,
     })))
@@ -1972,6 +1961,18 @@ fn parse_choices(name: &str, value: Option<&str>) -> Result<Vec<String>, AppErro
 mod tests {
     use super::*;
     use crate::console::measurement_coverage::Coverage;
+
+    #[test]
+    fn folding_breakdown_rows_keeps_every_trend_counter() {
+        let rows = [
+            json!({"k": "a", "reqs": 3, "fixture_reqs": 2, "fixture_tokens": 40}),
+            json!({"k": "b", "reqs": 1, "fixture_reqs": 1, "fixture_tokens": 5}),
+        ];
+        let buckets = fold_rows(&rows, &|_| "all".to_owned(), false);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].metrics["suspected_test_requests"], 3);
+        assert_eq!(buckets[0].metrics["suspected_test_tokens"], 45);
+    }
 
     fn query() -> CubeQuery {
         CubeQuery::default()
