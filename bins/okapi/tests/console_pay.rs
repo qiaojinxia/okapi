@@ -30,6 +30,7 @@ struct TestEnv {
 
 const EPAY_KEY: &str = "epay-merchant-secret";
 const STRIPE_WH: &str = "whsec_test_secret";
+const SITE: &str = "https://okapi.test";
 
 /// mock Stripe API：POST /v1/checkout/sessions → 每单独立 session。
 /// 每次调用给一个独一无二的来源 IP。
@@ -56,6 +57,15 @@ async fn mock_stripe(headers: axum::http::HeaderMap, body: String) -> axum::resp
     let fields: BTreeMap<_, _> = form.query_pairs().into_owned().collect();
     assert_eq!(fields["line_items[0][price_data][unit_amount]"], "500");
     assert_eq!(headers["idempotency-key"], fields["metadata[order_no]"]);
+    // 付完 / 取消都回本站（settings.site_url），不是占位域名
+    assert_eq!(
+        fields["success_url"],
+        format!("{SITE}/portal/topup?payment=success")
+    );
+    assert_eq!(
+        fields["cancel_url"],
+        format!("{SITE}/portal/topup?payment=cancelled")
+    );
     let id = format!("cs_{}", fields["metadata[order_no]"]);
     axum::Json(json!({"id": id, "url": format!("https://checkout.stripe.test/pay/{id}")}))
         .into_response()
@@ -87,6 +97,7 @@ async fn setup() -> TestEnv {
             json!({"secret_key": "sk_test_abc", "webhook_secret": STRIPE_WH,
                    "api_base": format!("http://{stripe_addr}")}),
         ),
+        ("site_url", json!(SITE)),
     ] {
         sqlx::query!(
             r#"INSERT INTO settings (key, value) VALUES ($1, $2)
@@ -171,20 +182,22 @@ async fn payment_full_cycle_epay_and_stripe() {
         order["params"]["money"], "86.42",
         "12.3456 USD × 7.0 = 86.4192 → 分向上取整"
     );
-    // 服务器签名可用商户密钥复验
-    let mut p: BTreeMap<&str, String> = BTreeMap::new();
-    for k in ["pid", "type", "out_trade_no", "name", "money"] {
-        p.insert(
-            match k {
-                "pid" => "pid",
-                "type" => "type",
-                "out_trade_no" => "out_trade_no",
-                "name" => "name",
-                _ => "money",
-            },
-            order["params"][k].as_str().unwrap().to_owned(),
-        );
-    }
+    // 配了站点地址：带上异步回调与付完回跳的地址（签名覆盖它们）
+    assert_eq!(
+        order["params"]["notify_url"],
+        format!("{SITE}/pay/callback/epay")
+    );
+    assert_eq!(
+        order["params"]["return_url"],
+        format!("{SITE}/portal/topup")
+    );
+    // 服务器签名可用商户密钥复验（除 sign / sign_type 外的全部参数）
+    let p: BTreeMap<&str, String> = order["params"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str().unwrap().to_owned()))
+        .collect();
     assert_eq!(order["params"]["sign"].as_str().unwrap(), epay_sign(&p));
 
     // —— epay 回调：正确签名核销 ——

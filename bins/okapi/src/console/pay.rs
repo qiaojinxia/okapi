@@ -44,6 +44,15 @@ struct EpayCfg {
     usd_to_cny_milli: i64,
 }
 
+/// 站点地址：没配返回 None，配了但不合法照样报错（与 OAuth / 找回密码同一校验）。
+async fn optional_site_url(state: &AppState) -> Result<Option<String>, AppError> {
+    match super::auth_web::site_base_url(state).await {
+        Ok(site) => Ok(Some(site)),
+        Err(error) if error.param.as_deref() == Some("site_url_required") => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn default_rate() -> i64 {
     7000
 }
@@ -192,8 +201,16 @@ pub async fn place_order(
             .collect::<String>()
     );
 
+    // 付完款回到哪一页、epay 往哪儿回调：都按站点地址（`site_url`）拼，不看请求头
+    let page = if plan.is_some() {
+        "/portal/plans"
+    } else {
+        "/portal/topup"
+    };
     match gateway {
         "epay" => {
+            // 没配站点地址时不带这两项，沿用商户后台里配的回调（此前的行为）；配了就显式带上
+            let site = optional_site_url(state).await?;
             let cfg: EpayCfg = load_cfg(state, "payment_epay").await?;
             let money = decimal_cents(quote_cents(amount_micro, cfg.usd_to_cny_milli)?);
             okapi_store::admin::create_recharge_order(
@@ -220,21 +237,31 @@ pub async fn place_order(
             params.insert("out_trade_no", order_no.clone());
             params.insert("name", item_name.to_owned());
             params.insert("money", money.clone());
+            if let Some(site) = &site {
+                params.insert("notify_url", format!("{site}/pay/callback/epay"));
+                params.insert("return_url", format!("{site}{page}"));
+            }
             let sign = epay_sign(&params, &cfg.key);
+            // 前端以表单/查询串提交给 epay 网关：签过名的参数原样给出，再加签名
+            let mut fields: serde_json::Map<String, Value> = params
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), json!(v)))
+                .collect();
+            fields.insert("sign".into(), json!(sign));
+            fields.insert("sign_type".into(), json!("MD5"));
             Ok(json!({
                 "order_no": order_no,
                 "gateway": "epay",
                 "pay_url": cfg.gateway_url,
-                // 前端以表单/查询串提交给 epay 网关
-                "params": {
-                    "pid": cfg.pid, "type": "alipay", "out_trade_no": order_no,
-                    "name": item_name, "money": money,
-                    "sign": sign, "sign_type": "MD5",
-                },
+                "params": fields,
             }))
         }
         "stripe" => {
             let cfg: StripeCfg = load_cfg(state, "payment_stripe").await?;
+            // Checkout 付完 / 取消后浏览器要回到本站：没有站点地址就没有可回的地方，下单前就拒
+            let site = super::auth_web::site_base_url(state).await?;
+            let success_url = format!("{site}{page}?payment=success");
+            let cancel_url = format!("{site}{page}?payment=cancelled");
             let cents = quote_cents(amount_micro, 1000)?;
             let usd = decimal_cents(cents);
             okapi_store::admin::create_recharge_order(
@@ -260,8 +287,8 @@ pub async fn place_order(
                 .map_err(|_| AppError::internal())?;
             form.query_pairs_mut().extend_pairs([
                 ("mode", "payment"),
-                ("success_url", "https://example.invalid/ok"),
-                ("cancel_url", "https://example.invalid/cancel"),
+                ("success_url", success_url.as_str()),
+                ("cancel_url", cancel_url.as_str()),
                 ("metadata[order_no]", &order_no),
                 ("line_items[0][quantity]", "1"),
                 ("line_items[0][price_data][currency]", "usd"),
@@ -512,7 +539,9 @@ async fn aff_reward(state: &AppState, invitee: i64, amount_micro: i64, order_no:
     let Some(inviter_id) = inviter_id else {
         return;
     };
-    let reward = amount_micro.saturating_mul(bp.min(10_000)) / 10_000;
+    // i128 里乘：单笔上限 2^53 微元 × 1 万基点放不进 i64，saturating 会把大额返利算少
+    let reward = i64::try_from(i128::from(amount_micro) * i128::from(bp.min(10_000)) / 10_000)
+        .unwrap_or(i64::MAX);
     if reward <= 0 {
         return;
     }
