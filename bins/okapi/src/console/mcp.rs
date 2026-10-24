@@ -1054,7 +1054,7 @@ async fn redemption_create(
     let amount_micro = args
         .get("amount_micro")
         .and_then(Value::as_i64)
-        .filter(|v| *v > 0)
+        .filter(|v| (1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(v))
         .ok_or_else(|| AppError::bad_request().with_param("amount_micro"))?;
     if args.get("confirm").and_then(Value::as_bool) != Some(true) {
         return Ok(json!({"dry_run": true, "count": count, "amount_micro": amount_micro}));

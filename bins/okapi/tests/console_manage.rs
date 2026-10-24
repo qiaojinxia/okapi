@@ -1300,6 +1300,34 @@ async fn codes_reject_separators_and_overlong_text_is_a_bad_request() {
             json!({"plan_code": "bad code", "display_name": "x", "kind": 0, "grant_micro": 1}),
             "plan_code",
         ),
+        // 规则码是 varchar(64) 的主键：空串、超长此前直接进库（空串当主键、超长 500）
+        (
+            "/admin/pricing/rules",
+            json!({"rule_code": "", "rule_type": "discount", "multiplier": "0.9"}),
+            "rule_code",
+        ),
+        (
+            "/admin/pricing/rules",
+            json!({"rule_code": "r".repeat(65), "rule_type": "discount", "multiplier": "0.9"}),
+            "rule_code",
+        ),
+        // 解析得过却放不进 numeric(12,6) 的倍率、超出账本范围的金额：400，不是落库时 500
+        (
+            "/admin/groups",
+            json!({"group_code": "ratio-too-big", "group_ratio": "1234567"}),
+            "group_ratio",
+        ),
+        (
+            "/admin/redemptions",
+            json!({"count": 1, "amount_micro": 9_007_199_254_740_992_i64}),
+            "count_or_amount",
+        ),
+        (
+            "/admin/models",
+            json!({"model_name": "per-call-too-dear", "model_ratio": "1",
+                   "pricing_mode": "per_call", "per_call_price_micro": 9_007_199_254_740_992_i64}),
+            "per_call_price_micro",
+        ),
     ] {
         let (status, resp) = post(path, body).await;
         assert_eq!(status, 400, "{path}: {resp}");

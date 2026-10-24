@@ -1206,7 +1206,12 @@ pub async fn upsert_group(
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
     // 分组码会拼进限流键与 `mb:blocks` 字段（`<group>|<channel_id>`），分隔符必须进不来
     let group_code = super::identifiers::ensure_code("group_code", &req.group_code, 32)?;
-    let Ok(ratio) = req.group_ratio.parse::<okapi_pricing::RatioFp>() else {
+    let Some(ratio) = req
+        .group_ratio
+        .parse::<okapi_pricing::RatioFp>()
+        .ok()
+        .filter(|ratio| ratio.as_scaled() <= RATIO_COLUMN_MAX_SCALED)
+    else {
         return Err(AppError::bad_request().with_param("group_ratio"));
     };
     // 0 与 null 同义（不限）；负数是笔误而不是"不限"，拒掉让人改
@@ -1701,10 +1706,7 @@ fn validate_model_draft(req: &UpsertModelReq) -> Result<(), AppError> {
         &req.audio_completion_ratio,
         &req.image_ratio,
     ] {
-        if !literal
-            .parse::<okapi_pricing::RatioFp>()
-            .is_ok_and(|v| v.as_scaled() <= 999_999_999_999)
-        {
+        if !ratio_fits(literal) {
             return Err(AppError::bad_request().with_param("ratio"));
         }
     }
@@ -1755,7 +1757,11 @@ fn model_price_selection(req: &UpsertModelReq) -> Result<(Option<&str>, Option<&
                 AppError::bad_request().with_param(format!("tier_expr:{reason}"))
             })?;
         }
-        Some("per_call") if req.per_call_price_micro.is_none_or(|v| v < 0) => {
+        Some("per_call")
+            if req
+                .per_call_price_micro
+                .is_none_or(|v| !(0..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&v)) =>
+        {
             return Err(AppError::bad_request().with_param("per_call_price_micro"));
         }
         Some("ratio" | "per_call") | None => {}
@@ -1767,6 +1773,26 @@ fn model_price_selection(req: &UpsertModelReq) -> Result<(Option<&str>, Option<&
 #[cfg(test)]
 mod model_draft_tests {
     use super::*;
+
+    /// 倍率列是 numeric(12,6)：能解析但放不进的值要在入口挡掉，不能等落库溢出成 500。
+    #[test]
+    fn ratio_literals_must_fit_the_column() {
+        for fits in ["0", "1", "0.000001", "999999.999999", " 2.5 "] {
+            assert!(ratio_fits(fits), "{fits}");
+        }
+        for too_big in ["1000000", "1234567", "999999.9999991", "-1", "", "abc"] {
+            assert!(!ratio_fits(too_big), "{too_big}");
+        }
+    }
+
+    #[test]
+    fn redemption_amounts_stay_inside_the_ledger_range() {
+        assert!(ensure_redemption_amount(1).is_ok());
+        assert!(ensure_redemption_amount(okapi_ledger::holds::MAXIMUM_MICROS).is_ok());
+        for bad in [0, -5, okapi_ledger::holds::MAXIMUM_MICROS + 1, i64::MAX] {
+            assert!(ensure_redemption_amount(bad).is_err(), "{bad}");
+        }
+    }
 
     fn request(extra: Value) -> UpsertModelReq {
         let mut body = json!({"model_name":"test-model", "model_ratio":"1"});
@@ -1799,6 +1825,19 @@ mod model_draft_tests {
                 json!({"pricing_mode":"per_call", "per_call_price_micro":0})
             ))
             .is_ok()
+        );
+        // 账本 / Lua 的定量上限：超出的单价每笔请求都在入账处失败
+        assert!(
+            model_price_selection(&request(
+                json!({"pricing_mode":"per_call", "per_call_price_micro":okapi_ledger::holds::MAXIMUM_MICROS})
+            ))
+            .is_ok()
+        );
+        assert!(
+            model_price_selection(&request(
+                json!({"pricing_mode":"per_call", "per_call_price_micro":okapi_ledger::holds::MAXIMUM_MICROS + 1})
+            ))
+            .is_err()
         );
         assert!(
             model_price_selection(&request(
@@ -2012,6 +2051,8 @@ pub async fn upsert_pricing_rule(
     ExtractJson(req): ExtractJson<UpsertRuleReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::PRICING_WRITE).await?;
+    // 规则码是主键（varchar(64)）：与分组码等其它机器标识同一道校验，空串 / 超长 / 怪字符都 400
+    let rule_code = super::identifiers::ensure_code("rule_code", &req.rule_code, 64)?;
     let params = rule_params(&req)?;
     let scope = req.scope.clone().unwrap_or_else(|| json!({}));
     if !scope.is_object() {
@@ -2027,7 +2068,7 @@ pub async fn upsert_pricing_rule(
     okapi_store::admin::upsert_pricing_rule(
         &state.pg,
         okapi_store::admin::PricingRuleInput {
-            rule_code: &req.rule_code,
+            rule_code,
             rule_type: &req.rule_type,
             scope: &scope,
             params: &params,
@@ -2042,7 +2083,7 @@ pub async fn upsert_pricing_rule(
         &state,
         &actor,
         "pricing.upsert_rule",
-        &req.rule_code,
+        rule_code,
         json!({ "rule_type": req.rule_type, "params": params, "enabled": req.enabled }),
     )
     .await;
@@ -2186,6 +2227,27 @@ pub async fn set_user_multiplier(
     )
     .await;
     Ok(Json(json!({ "ok": true, "multiplier": raw })))
+}
+
+/// `numeric(12,6)` 倍率列能存的最大值（scale=1e6 的定点）。model_pricing / price_groups 的倍率列都是这个类型，
+/// 超出的值解析得过、落库时才溢出成 500。
+const RATIO_COLUMN_MAX_SCALED: i64 = 999_999_999_999;
+
+/// 倍率字面量：能解析、非负，且放得进倍率列。
+fn ratio_fits(literal: &str) -> bool {
+    literal
+        .parse::<okapi_pricing::RatioFp>()
+        .is_ok_and(|v| v.as_scaled() <= RATIO_COLUMN_MAX_SCALED)
+}
+
+/// 兑换码面值的合法范围：1..=`MAXIMUM_MICROS`（账本与 Lua 的定量上限）。
+/// 超限的码生成时不拦，核销时才在入账处永久报错，码也就作废了。
+pub(super) fn ensure_redemption_amount(amount_micro: i64) -> Result<(), AppError> {
+    if (1..=okapi_ledger::holds::MAXIMUM_MICROS).contains(&amount_micro) {
+        Ok(())
+    } else {
+        Err(AppError::bad_request().with_param("count_or_amount"))
+    }
 }
 
 /// 人工调账金额的合法范围：与其它资金入口同一条不变量（|金额| ≤ `MAXIMUM_MICROS`，账本与 Lua 的定量上限）。
@@ -2927,9 +2989,10 @@ pub async fn create_redemptions(
     ExtractJson(req): ExtractJson<CreateRedemptionsReq>,
 ) -> Result<Json<Value>, AppError> {
     let actor = guard(&state, &headers, permissions::USER_BALANCE_ADJUST).await?;
-    if req.amount_micro <= 0 || req.count == 0 || req.count > 1000 {
+    if req.count == 0 || req.count > 1000 {
         return Err(AppError::bad_request().with_param("count_or_amount"));
     }
+    ensure_redemption_amount(req.amount_micro)?;
     let codes: Vec<String> = (0..req.count)
         .map(|_| {
             use rand::RngExt;
@@ -3049,8 +3112,9 @@ pub async fn import_newapi_pricing(
         let audio = pick(&req.audio_ratio);
         let audio_completion = pick(&req.audio_completion_ratio);
         let image = pick(&req.image_ratio);
-        // 复用定价域解析器做入库前校验（纯整数定点，禁浮点）
-        if [
+        // 复用定价域解析器做入库前校验（纯整数定点，禁浮点），并按列宽卡上限：
+        // 解析得过却放不进 numeric(12,6) 的值落库时才溢出，会让导入在中途 500、留下前半批
+        if ![
             &model_ratio,
             &completion,
             &cache,
@@ -3060,7 +3124,7 @@ pub async fn import_newapi_pricing(
             &image,
         ]
         .iter()
-        .any(|s| s.parse::<okapi_pricing::RatioFp>().is_err())
+        .all(|literal| ratio_fits(literal))
         {
             skipped.push(model.clone());
             continue;
@@ -3088,12 +3152,17 @@ pub async fn import_newapi_pricing(
             skipped.push(model.clone());
             continue;
         };
-        // USD 十进制 → micro（scale=1e6 定点解析，恰为 micro-USD）
-        let Ok(ratio) = literal.parse::<okapi_pricing::RatioFp>() else {
+        // USD 十进制 → micro（scale=1e6 定点解析，恰为 micro-USD），与单模型写入同一条上限
+        let Some(price) = literal
+            .parse::<okapi_pricing::RatioFp>()
+            .ok()
+            .map(okapi_pricing::RatioFp::as_scaled)
+            .filter(|micro| *micro <= okapi_ledger::holds::MAXIMUM_MICROS)
+        else {
             skipped.push(model.clone());
             continue;
         };
-        okapi_store::admin::upsert_model_per_call(&state.pg, model, ratio.as_scaled()).await?;
+        okapi_store::admin::upsert_model_per_call(&state.pg, model, price).await?;
         imported += 1;
     }
 

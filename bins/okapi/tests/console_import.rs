@@ -139,3 +139,50 @@ async fn import_newapi_ratio_json_end_to_end() {
         .unwrap();
     assert!(publish["epoch"].as_i64().unwrap() > 0, "{publish}");
 }
+
+/// 解析得过却放不进 `numeric(12,6)` 的倍率、超出账本范围的按次价，要被跳过并报告，
+/// 而不是落库时溢出成 500（每个模型是独立事务，前半批已经入库）。
+#[tokio::test]
+async fn import_newapi_skips_values_the_columns_cannot_hold() {
+    let env = setup().await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let name = |tag: &str| format!("na-{}-{tag}", &suffix[..8]);
+    let payload = json!({
+        "model_ratio": {
+            name("ok"): 2,
+            name("edge"): "999999.999999",
+            name("huge"): "1234567",
+            name("hugecompletion"): 1,
+        },
+        "completion_ratio": { name("hugecompletion"): "1000000" },
+        "model_price": { name("price"): "0.1", name("hugeprice"): "9007199254.740992" },
+    });
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/admin/pricing/import-newapi", env.addr))
+        .bearer_auth(&env.admin_token)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let resp: Value = response.json().await.unwrap();
+    assert_eq!(resp["imported"], 3, "{resp}");
+    let mut skipped: Vec<String> = resp["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    skipped.sort();
+    let mut expected = vec![name("huge"), name("hugecompletion"), name("hugeprice")];
+    expected.sort();
+    assert_eq!(skipped, expected, "{resp}");
+    for stored in &expected {
+        let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM models WHERE model_name = $1")
+            .bind(stored)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "{stored} 不该入库");
+    }
+}
