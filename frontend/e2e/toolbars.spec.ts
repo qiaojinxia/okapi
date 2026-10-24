@@ -21,6 +21,12 @@ async function prepare(page: Page, language: string) {
   })
 }
 
+/// 页面入场动画走完再量位置：刚挂载的一帧里内容还带着 translate，前后两次量的 y 会差几个像素。
+async function settle(page: Page) {
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)))
+}
+
 async function expectNoOverlap(toolbar: Locator) {
   // 外框与全部控件的矩形在页面里一次取完：页面入场动画还在位移时，先量外框、再逐个量控件，
   // 量到的是不同帧的坐标，偶发地差几个像素（全量并行、机器忙时出现过一次）。
@@ -94,6 +100,8 @@ test('令牌筛选错误不移动输入行；长搜索提示在自己的区域�
   await page.goto('/admin/keys')
   const toolbar = page.locator('[data-slot="toolbar"]')
   const button = toolbar.getByRole('button', { name: '搜索', exact: true })
+  await expect(button).toBeVisible()
+  await settle(page)
   const before = (await button.boundingBox())!
   await page.locator('#kuid').fill('-1')
   await button.click()
