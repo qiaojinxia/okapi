@@ -72,13 +72,33 @@ jobs:
           name: frontend-dist
           path: frontend/dist
       # services 不支持传入 -js；独立启动，确保消息链路在 CI 真正执行。
+      # `docker run` 在 runner 上偶发直接以 125 退出（同一份 workflow 有的 run 过、有的 run 挂在这一步，
+      # 看不到 runner 日志，推测是镜像拉取的瞬时失败）。重试几次，前两次用 ECR 镜像、后两次换 Docker Hub，
+      # 最后一次还不行就把现场打出来，下次红了能直接看出原因。
       - name: 启动 NATS JetStream
         run: |
-          docker run -d --name okapi-ci-nats \
-            -p 127.0.0.1:4222:4222 -p 127.0.0.1:8222:8222 \
-            public.ecr.aws/docker/library/nats:2-alpine -js -m 8222
-          curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused \
-            http://127.0.0.1:8222/healthz
+          for attempt in 1 2 3 4; do
+            image=public.ecr.aws/docker/library/nats:2-alpine
+            if [ "$attempt" -gt 2 ]; then image=nats:2-alpine; fi
+            docker rm -f okapi-ci-nats > /dev/null 2>&1 || true
+            docker run -d --name okapi-ci-nats \
+              -p 127.0.0.1:4222:4222 -p 127.0.0.1:8222:8222 \
+              "$image" -js -m 8222 && break
+            status=$?
+            echo "::warning::NATS 容器启动失败（第 ${attempt} 次，镜像 ${image}，退出码 ${status}）"
+            if [ "$attempt" -eq 4 ]; then
+              docker version || true
+              docker info 2>&1 | head -30 || true
+              docker ps -a || true
+              exit "$status"
+            fi
+            sleep $((attempt * 5))
+          done
+          if ! curl --fail --silent --show-error --retry 20 --retry-delay 1 --retry-connrefused \
+            http://127.0.0.1:8222/healthz; then
+            docker logs okapi-ci-nats || true
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt, clippy
