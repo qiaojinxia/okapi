@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 
 // 第 3 节第 13 条此前没有写操作 e2e 的列表级 / 运维 / 设置 / 兑换 / 门户密钥动作。
@@ -101,6 +101,12 @@ async function pickChannels(page: Page, names: string[]) {
   await expect(page.getByRole('toolbar', { name: `已选 ${names.length} 项` })).toBeVisible()
 }
 
+/// 渠道行里复制 / 删除 / 测试输出 / 查上游余额收在「···」菜单里：先开菜单再点菜单项。
+async function rowAction(row: Locator, name: string) {
+  await row.getByRole('button', { name: '更多操作', exact: true }).click()
+  await row.page().getByRole('menuitem', { name, exact: true }).click()
+}
+
 const CHANNEL_ON = {
   id: 42,
   name: 'openai-main',
@@ -175,7 +181,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
   const openai = page.getByRole('row').filter({ hasText: 'openai-main' })
   const spare = page.getByRole('row').filter({ hasText: 'spare-compat' })
 
-  await openai.getByRole('button', { name: '复制', exact: true }).click()
+  await rowAction(openai, '复制')
   await expect.poll(() => calls.length).toBe(1)
   expect(calls[0]).toEqual({
     path: '/admin/channels/42/duplicate',
@@ -184,7 +190,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
   })
   await dismissToasts(page)
   await page.route('**/admin/channels/*/duplicate', (route) => route.fulfill(apiError(500, 'internal_error')))
-  await openai.getByRole('button', { name: '复制', exact: true }).click()
+  await rowAction(openai, '复制')
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
   await page.route('**/admin/channels/*/duplicate', async (route) => {
@@ -192,7 +198,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
     await route.fulfill({ json: { ok: true } })
   })
 
-  await openai.getByRole('button', { name: '测活', exact: true }).click()
+  await openai.getByRole('button', { name: '测试', exact: true }).click()
   await expect.poll(() => calls.length).toBe(2)
   expect(calls[1]).toEqual({
     path: '/admin/channels/42/test',
@@ -239,7 +245,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
       },
     })
   })
-  await openai.getByRole('button', { name: '测活', exact: true }).click()
+  await openai.getByRole('button', { name: '测试', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: /模型 gpt-5 调不通（model_not_found）：unknown model xyz/ })).toBeVisible()
   await dismissToasts(page)
 
@@ -247,12 +253,12 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
     record(route)
     await route.fulfill({ json: { ok: false, error_code: 'upstream_timeout' } })
   })
-  await openai.getByRole('button', { name: '测活', exact: true }).click()
+  await openai.getByRole('button', { name: '测试', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: /测活失败：upstream_timeout/ })).toBeVisible()
   await dismissToasts(page)
 
   await page.route('**/admin/channels/*/test', (route) => route.fulfill(apiError(500, 'internal_error')))
-  await openai.getByRole('button', { name: '测活', exact: true }).click()
+  await openai.getByRole('button', { name: '测试', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   await dismissToasts(page)
   await page.route('**/admin/channels/*/test', async (route) => {
@@ -309,7 +315,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
     action: 'delete',
   })
 
-  await spare.getByRole('button', { name: '删除', exact: true }).click()
+  await rowAction(spare, '删除')
   const one = page.getByRole('alertdialog')
   await expect(one.getByRole('button', { name: '删除', exact: true })).toBeDisabled()
   await one.locator('#confirm-text').fill('spare-compat')
@@ -325,7 +331,7 @@ test('渠道列表：复制名为 -copy、行测活带第一个模型、测全�
     record(route)
     await route.fulfill({ json: { ok: true } })
   })
-  await spare.getByRole('button', { name: '删除', exact: true }).click()
+  await rowAction(spare, '删除')
   const retry = page.getByRole('alertdialog')
   await retry.locator('#confirm-text').fill('spare-compat')
   await retry.getByRole('button', { name: '删除', exact: true }).click()

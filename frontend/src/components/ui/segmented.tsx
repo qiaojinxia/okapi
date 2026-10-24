@@ -14,7 +14,8 @@ interface SegmentedProps<T extends string | number> {
   options: SegmentedOption<T>[]
   value: T
   onChange: (value: T) => void
-  size?: 'sm' | 'md'
+  /// `field`：整条分段控件与同一行的 `h-9` 输入框等高（36px），工具栏里并排放时用。
+  size?: 'sm' | 'md' | 'field'
   /// 给屏幕阅读器的分组名。
   ariaLabel?: string
   className?: string
@@ -90,7 +91,7 @@ export function Segmented<T extends string | number>({
             className={cn(
               'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-md font-medium whitespace-nowrap transition-all outline-none',
               'focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/60 disabled:pointer-events-none disabled:opacity-50',
-              size === 'sm' ? 'h-11 px-2.5 text-xs md:h-7' : 'h-11 px-3 text-sm md:h-8',
+              size === 'sm' ? 'h-11 px-2.5 text-xs md:h-7' : size === 'field' ? 'h-11 px-3 text-sm md:h-7.5' : 'h-11 px-3 text-sm md:h-8',
               active
                 ? 'bg-card text-foreground shadow-card'
                 : 'text-muted-foreground hover:text-foreground',

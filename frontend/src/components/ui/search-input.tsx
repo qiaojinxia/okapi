@@ -9,6 +9,8 @@ interface SearchInputProps
   onChange: (value: string) => void
   /// 回车提交（服务端检索的页面用；纯前端过滤的页面不传）。
   onSubmit?: () => void
+  /// 不画放大镜：占位文字已经说明用途、且紧挨着其他筛选控件时用。
+  hideIcon?: boolean
   className?: string
   inputClassName?: string
 }
@@ -22,6 +24,7 @@ export function SearchInput({
   onChange,
   onSubmit,
   onKeyDown,
+  hideIcon = false,
   className,
   inputClassName,
   ...props
@@ -30,7 +33,7 @@ export function SearchInput({
   const input = useRef<HTMLInputElement>(null)
   return (
     <div className={cn('relative flex min-w-0 max-w-full items-center', className)}>
-      <Search className="pointer-events-none absolute left-2.5 h-4 w-4 text-muted-foreground" />
+      {!hideIcon && <Search className="pointer-events-none absolute left-2.5 h-4 w-4 text-muted-foreground" />}
       <input
         ref={input}
         type="search"
@@ -46,7 +49,8 @@ export function SearchInput({
           onKeyDown?.(e)
         }}
         className={cn(
-          'h-9 w-full rounded-md border border-input bg-card pr-8 pl-8 text-sm shadow-xs outline-none transition-colors',
+          'h-9 w-full rounded-md border border-input bg-card pr-8 text-sm shadow-xs outline-none transition-colors',
+          hideIcon ? 'pl-3.5' : 'pl-8',
           'placeholder:text-muted-foreground hover:border-muted-foreground/40 focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/25',
           '[&::-webkit-search-cancel-button]:appearance-none',
           inputClassName,

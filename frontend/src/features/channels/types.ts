@@ -67,13 +67,20 @@ export function defaultResponsesNative(provider: string): boolean {
   return provider === 'openai'
 }
 
-/// `/admin/channels` 的 search params：分页 + 关键词 + 协议过滤。
+/// 列表的状态筛选；不带 = 全部。地址里写词而不写数字：数字形的字符串会被路由器序列化成
+/// 带引号的 `status=%222%22`；发给接口时再换成 channels.status 的值（1 启用 / 2 停用）。
+export const CHANNEL_STATUS_FILTERS = ['enabled', 'disabled'] as const
+export type ChannelStatusFilter = (typeof CHANNEL_STATUS_FILTERS)[number]
+export const CHANNEL_STATUS_VALUE: Record<ChannelStatusFilter, string> = { enabled: '1', disabled: '2' }
+
+/// `/admin/channels` 的 search params：分页 + 关键词 + 协议过滤 + 状态筛选。
 export interface ChannelsSearch {
   page?: number
   limit?: number
   /// 关键词（名称 / 地址）。
   q?: string
   provider?: Provider
+  status?: ChannelStatusFilter
 }
 
 

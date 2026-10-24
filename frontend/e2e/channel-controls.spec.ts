@@ -765,7 +765,8 @@ test('the scheduling switch toggles a channel and the account test streams pinne
   await toggle.click()
   await expect.poll(() => status).toEqual({ status: 2 })
 
-  await row.getByRole('button', { name: '测试输出', exact: true }).click()
+  await row.getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '测试输出', exact: true }).click()
   const drawer = page.getByRole('dialog')
   await drawer.locator('#try-model').selectOption('model-b')
   await drawer.locator('#try-key').selectOption('7')
@@ -780,7 +781,8 @@ test('an account test failure shows the gateway error', async ({ page }) => {
   await prepare(page, [{ ...channel, keys: [keyRow(7)] }])
   await page.route('**/admin/channels/42/try', (route) => route.fulfill({ status: 503,
     json: { error: { code: 'no_available_channel', message: 'no_available_channel', type: 'okapi_error' } } }))
-  await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '测试输出', exact: true }).click()
+  await page.getByRole('row').filter({ hasText: channel.name }).getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '测试输出', exact: true }).click()
   const drawer = page.getByRole('dialog')
   await expect(drawer.locator('#try-key')).toHaveCount(0)
   await drawer.getByRole('button', { name: '开始测试', exact: true }).click()

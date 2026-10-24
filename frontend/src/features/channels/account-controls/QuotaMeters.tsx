@@ -1,4 +1,4 @@
-import { RotateCcw } from 'lucide-react'
+import { RotateCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import type { UsageResponse } from './api'
@@ -13,11 +13,12 @@ function level(percent: number) {
   return { bar: 'bg-success', text: 'text-foreground' }
 }
 
-/// 窗口标签色：5 小时与 7 天两档最常见，各给一个固定色，列表里扫一眼就能对上号。
-function windowTone(secs: number | null) {
-  if (secs === 18_000) return 'bg-indigo-500/12 text-indigo-700 dark:text-indigo-300'
-  if (secs === 604_800) return 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300'
-  return 'bg-muted text-muted-foreground'
+/// 列表行的额度条：常态颜色按窗口分——5 小时一条琥珀、其余（7 天等）主色，两条一眼对得上号；
+/// 越接近上限越醒目，70% 起转黄、90% 起转红，与抽屉里的条同一阈值。
+function listLevel(percent: number, secs: number | null) {
+  if (percent >= 90) return { bar: 'bg-destructive', text: 'text-destructive' }
+  if (percent >= 70) return { bar: 'bg-warning', text: 'text-warning' }
+  return { bar: secs === 18_000 ? 'bg-amber-700 dark:bg-amber-500' : 'bg-primary', text: 'text-foreground' }
 }
 
 /// 订阅额度各窗口的用量条。`limits` 是渠道配置的百分比上限（窗口秒数 → 百分比），
@@ -51,29 +52,29 @@ export function QuotaMeters({ quota, limits, compact = false }: {
   }
   if (compact) {
     return (
-      <div className="grid w-max grid-cols-[auto_4rem_2.5rem_auto] items-center gap-x-2 gap-y-1 text-xs">
+      <div className="grid max-w-full grid-cols-[auto_minmax(4rem,14.75rem)_2rem_auto] items-center gap-x-3 gap-y-1.5">
         {quota.allowed === false && <p className="col-span-4 text-destructive">{t('admin:channelQuotaBlocked')}</p>}
         {quota.windows.map((window) => {
           const stale = window.resets_at !== null && window.resets_at * 1000 <= now
           const percent = Math.min(100, Math.max(0, window.used_percent))
-          const tone = level(percent)
+          const tone = listLevel(percent, window.window_secs)
           const label = windowLabel(window.window_secs)
           return (
             <div key={window.name} className="contents">
-              <span className={cn('inline-flex h-5 items-center justify-center whitespace-nowrap rounded px-1.5 text-[11px] font-medium', windowTone(window.window_secs))}>{label}</span>
+              <span className="whitespace-nowrap text-muted-foreground/80">{label}</span>
               <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar"
                 aria-label={t('admin:channelQuotaMeterLabel', { window: label })}
                 aria-valuemin={0} aria-valuemax={100} aria-valuenow={stale ? undefined : percent}>
                 {!stale && <div className={cn('h-full rounded-full', tone.bar)} style={{ width: `${percent}%` }} />}
               </div>
-              <span className={cn('text-right font-medium tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
+              <span className={cn('text-right font-semibold tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
                 {stale ? '—' : `${percent}%`}
               </span>
               {/* 行内只放剩余时长，具体重置时刻进悬停提示：表格不必为它横向滚动 */}
-              <span className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums"
+              <span className="inline-flex items-center gap-1 whitespace-nowrap text-muted-foreground/70 tabular-nums"
                 title={!stale && window.resets_at !== null ? resetCompact(window.resets_at).full : undefined}>
                 {stale ? t('admin:channelQuotaRefreshing') : window.resets_at !== null && <>
-                  <RotateCcw aria-label={t('admin:channelQuotaResetLabel')} className="h-3 w-3 shrink-0" />
+                  <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-2.5 w-2.5 shrink-0" />
                   {resetCompact(window.resets_at).span}
                 </>}
               </span>

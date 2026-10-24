@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { cloneElement, createContext, useContext, useEffect, useId, useRef, useState } from 'react'
+import { cloneElement, createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { cn } from '@/lib/utils'
 
 interface MenuCtx {
@@ -11,6 +11,10 @@ interface MenuProps {
   /// 单个按钮或透传原生按钮 props 的组件（如 Button）。
   trigger: React.ReactElement<React.ButtonHTMLAttributes<HTMLButtonElement>>
   align?: 'start' | 'end'
+  /// `fixed`：面板按触发器的屏幕坐标浮出，不会被表格这类 `overflow` 容器裁掉；
+  /// 下方放不下而上方放得下就翻到上方，页面滚动或窗口缩放时收起。
+  /// 缺省 `absolute` 跟随触发器所在的定位容器（顶栏菜单）。
+  strategy?: 'absolute' | 'fixed'
   /// 弹层最小宽度类，如 `min-w-56`。
   className?: string
   children: React.ReactNode
@@ -20,8 +24,9 @@ interface MenuProps {
 ///
 /// 用在顶栏身份菜单与表格行的"更多"动作——五个以上的行动作平铺成一排图标已经
 /// 认不出谁是谁，折进菜单给文字。方向键定位，Enter / Space 选择，Esc 返回触发器。
-export function Menu({ trigger, align = 'end', className, children }: MenuProps) {
+export function Menu({ trigger, align = 'end', strategy = 'absolute', className, children }: MenuProps) {
   const [open, setOpen] = useState(false)
+  const [place, setPlace] = useState<{ top?: number; bottom?: number; left?: number; right?: number }>({})
   const root = useRef<HTMLDivElement>(null)
   const panel = useRef<HTMLDivElement>(null)
   const startAtEnd = useRef(false)
@@ -45,6 +50,40 @@ export function Menu({ trigger, align = 'end', className, children }: MenuProps)
       document.removeEventListener('pointerdown', onDown)
     }
   }, [open])
+
+  // fixed 浮层：打开时按触发器位置定位（绘制前完成，不闪）；
+  // 下方放不下而上方放得下，就翻到触发器上方。
+  useLayoutEffect(() => {
+    if (!open || strategy !== 'fixed') return
+    const anchor = root.current?.getBoundingClientRect()
+    if (!anchor) return
+    const height = panel.current?.getBoundingClientRect().height ?? 0
+    const gap = 6
+    const flip = window.innerHeight - anchor.bottom < height + gap + 8 && anchor.top > height + gap + 8
+    setPlace({
+      ...(flip ? { bottom: window.innerHeight - anchor.top + gap } : { top: anchor.bottom + gap }),
+      ...(align === 'end' ? { right: window.innerWidth - anchor.right } : { left: anchor.left }),
+    })
+  }, [open, strategy, align])
+
+  // 浮层脱离了触发器所在的滚动容器，触发器一动它就会悬在半空：触发器位置变了就收起。
+  // 只看位置、不看滚动事件本身——打开前刚发生的滚动（点击前滚到可见）事件会在打开后才送达，
+  // 那种滚动并没有让触发器离开浮层。
+  useEffect(() => {
+    if (!open || strategy !== 'fixed') return undefined
+    const anchor = root.current?.getBoundingClientRect()
+    const dismiss = () => setOpen(false)
+    const dismissIfMoved = () => {
+      const now = root.current?.getBoundingClientRect()
+      if (!anchor || !now || Math.abs(now.top - anchor.top) > 1 || Math.abs(now.left - anchor.left) > 1) setOpen(false)
+    }
+    window.addEventListener('resize', dismiss)
+    window.addEventListener('scroll', dismissIfMoved, true)
+    return () => {
+      window.removeEventListener('resize', dismiss)
+      window.removeEventListener('scroll', dismissIfMoved, true)
+    }
+  }, [open, strategy])
 
   return (
     <div
@@ -106,9 +145,13 @@ export function Menu({ trigger, align = 'end', className, children }: MenuProps)
               e.preventDefault()
               items[next]?.focus({ preventScroll: true })
             }}
+            style={strategy === 'fixed' ? place : undefined}
             className={cn(
-              'absolute top-full z-50 mt-1.5 flex min-w-48 flex-col gap-0.5 rounded-lg border border-border bg-popover p-1 shadow-popover animate-zoom-in',
-              align === 'end' ? 'right-0 origin-top-right' : 'left-0 origin-top-left',
+              'z-50 flex min-w-48 flex-col gap-0.5 rounded-lg border border-border bg-popover p-1 shadow-popover animate-zoom-in',
+              strategy === 'fixed' ? 'fixed' : cn('absolute top-full mt-1.5', align === 'end' ? 'right-0' : 'left-0'),
+              strategy === 'fixed' && place.bottom !== undefined
+                ? align === 'end' ? 'origin-bottom-right' : 'origin-bottom-left'
+                : align === 'end' ? 'origin-top-right' : 'origin-top-left',
               className,
             )}
           >

@@ -2524,16 +2524,25 @@ test('渠道列表查上游余额：只对支持的协议露出按钮，成功�
   await page.goto('/admin/channels')
   const openai = page.getByRole('row').filter({ hasText: 'openai-main' })
   const anthropic = page.getByRole('row').filter({ hasText: 'claude-main' })
-  await expect(openai.getByRole('button', { name: '查上游余额', exact: true })).toBeVisible()
-  await expect(anthropic.getByRole('button', { name: '查上游余额', exact: true })).toHaveCount(0)
+  // 余额查询收在「···」菜单里：只有支持的协议才有这一项
+  const queryBalance = async () => {
+    await openai.getByRole('button', { name: '更多操作', exact: true }).click()
+    await page.getByRole('menuitem', { name: '查上游余额', exact: true }).click()
+  }
+  await openai.getByRole('button', { name: '更多操作', exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: '查上游余额', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await anthropic.getByRole('button', { name: '更多操作', exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: '查上游余额', exact: true })).toHaveCount(0)
+  await page.keyboard.press('Escape')
 
   // 形状不认 → 错误码 + param 文案
-  await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
+  await queryBalance()
   await expect(page.getByRole('alert')).toContainText('请求参数有误（balance_shape）')
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
 
   await page.route('**/admin/channels/42/balance', (route) => route.fulfill(apiError(500, 'internal_error')))
-  await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
+  await queryBalance()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
   await page.route('**/admin/channels/42/balance', async (route) => {
@@ -2545,8 +2554,8 @@ test('渠道列表查上游余额：只对支持的协议露出按钮，成功�
     await route.fulfill({ json: lastBalance })
   })
 
-  // 成功：人民币 110.5 → ¥110.50，probe 口径进提示；列表刷新后"余额"徽章回填
-  await openai.getByRole('button', { name: '查上游余额', exact: true }).click()
+  // 成功：人民币 110.5 → ¥110.50，probe 口径进提示；列表刷新后"余额"一行回填
+  await queryBalance()
   await expect(page.getByRole('status').filter({ hasText: /余额 ¥110\.50（deepseek 口径）/ })).toBeVisible()
   await expect(openai.getByText('¥110.50')).toBeVisible()
   expect(balanceCalls).toBe(2)

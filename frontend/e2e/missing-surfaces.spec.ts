@@ -3361,7 +3361,7 @@ test('渠道列表搜索：q trim 与协议进 URL；空结果可清空', async 
   await expect(page.getByRole('row').filter({ hasText: 'broke-east' }).getByText(/\$0\.00/)).toBeVisible()
 
   await page.getByPlaceholder('按名称或地址搜索').fill('  openai ')
-  await page.getByRole('button', { name: '搜索', exact: true }).click()
+  await page.getByPlaceholder('按名称或地址搜索').press('Enter')
   await expect(page).toHaveURL(/q=openai/)
   await expect.poll(() => qs.some((p) => p.get('q') === 'openai')).toBe(true)
   await expect(page.getByRole('row').filter({ hasText: 'claude-west' })).toHaveCount(0)

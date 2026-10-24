@@ -1,17 +1,14 @@
 import {
-  Activity,
   Copy,
   ExternalLink,
   Globe,
+  Loader2,
   MessageSquareText,
-  Pencil,
   Plus,
   Power,
   PowerOff,
   Server,
-  Stethoscope,
   Trash2,
-  UserRound,
   Wallet,
 } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -30,6 +27,7 @@ import {
   ChannelUsage,
   CredentialExpiry,
   Health24h,
+  KeyStateDetail,
   KeyStateSummary,
   LastBalance,
   LastProbe,
@@ -43,11 +41,12 @@ import { describeEgress } from '@/features/proxies/EgressPicker'
 import { proxyGroupOptions, proxyOptions } from '@/features/proxies/options'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
-import { IconButton } from '@/components/ui/icon-button'
-import { PROVIDERS, balanceSupported, providerConsoleUrl } from '@/features/channels/types'
-import { PageHeader, Toolbar, ToolbarSearch } from '@/components/ui/page'
+import { Menu, MenuItem, MenuSeparator } from '@/components/ui/menu'
+import { CHANNEL_STATUS_FILTERS, CHANNEL_STATUS_VALUE, PROVIDERS, balanceSupported, providerConsoleUrl } from '@/features/channels/types'
+import { PageHeader } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
+import { Segmented } from '@/components/ui/segmented'
 import { Select } from '@/components/ui/select'
 import { SelectionBar } from '@/components/ui/selection-bar'
 import { TableSkeleton } from '@/components/ui/skeleton'
@@ -88,6 +87,7 @@ export function ChannelsPage() {
   const navigate = routeApi.useNavigate()
   const query = search.q ?? ''
   const providerFilter = search.provider ?? ''
+  const statusFilter = search.status ?? ''
   const [draft, setDraft] = useDraft(query)
   const [drawer, setDrawer] = useState<
     { mode: 'create' } | { mode: 'edit'; channel: ChannelRow } | null
@@ -103,12 +103,13 @@ export function ChannelsPage() {
   const { confirm, dialog } = useConfirm()
   const pager = usePagination()
   // 过滤器与页码同一次导航更新：只按"新条件 + 第一页"请求一次
-  const setFilters = (next: { q?: string; provider?: string }) =>
+  const setFilters = (next: { q?: string; provider?: string; status?: string }) =>
     void navigate({
       search: (prev) => ({
         ...prev,
         ...('q' in next ? { q: text(next.q) } : {}),
         ...('provider' in next ? { provider: oneOf(next.provider, PROVIDERS) } : {}),
+        ...('status' in next ? { status: oneOf(next.status, CHANNEL_STATUS_FILTERS) } : {}),
         page: undefined,
       }),
     })
@@ -119,7 +120,7 @@ export function ChannelsPage() {
   // 过滤与切片都在服务端：几百条渠道每条带 keys / pools，整表拉回来再筛既慢又占内存。
   // 列表接口不传 limit 才回全量——那是给"测活全部"和模型页的渠道计数用的。
   const channels = useQuery({
-    queryKey: [...qk.adminChannels, query, providerFilter, pager.offset, pager.limit],
+    queryKey: [...qk.adminChannels, query, providerFilter, statusFilter, pager.offset, pager.limit],
     queryFn: () => {
       const params = new URLSearchParams({
         limit: String(pager.limit),
@@ -127,6 +128,7 @@ export function ChannelsPage() {
       })
       if (query !== '') params.set('q', query)
       if (providerFilter !== '') params.set('provider', providerFilter)
+      if (statusFilter !== '') params.set('status', CHANNEL_STATUS_VALUE[statusFilter])
       return apiFetch<ChannelPage>(`/admin/channels?${params}`)
     },
     placeholderData: keepPreviousData,
@@ -276,9 +278,9 @@ export function ChannelsPage() {
   // 表头勾选只管本页；别页勾下的仍留在 picked 里，底部 SelectionBar 的计数会把它们算上
   const allPicked = rows.length > 0 && rows.every((c) => picked.has(c.id))
   const somePicked = rows.some((c) => picked.has(c.id))
-  const filtered = query !== '' || providerFilter !== ''
+  const filtered = query !== '' || providerFilter !== '' || statusFilter !== ''
   const applySearch = () => setFilters({ q: draft })
-  const clearFilters = () => setFilters({ q: '', provider: '' })
+  const clearFilters = () => setFilters({ q: '', provider: '', status: '' })
 
   const togglePick = (id: number) =>
     setPicked((prev) => {
@@ -299,84 +301,82 @@ export function ChannelsPage() {
   return (
     <div className="list-page">
       <PageHeader
+        className="lg:items-center"
         title={t('admin:channelsTitle')}
         description={t('admin:channelsDesc')}
-        icon={Server}
         meta={
           channels.data && (
-            <Badge variant="muted">
+            <span className="ml-1 text-sm font-normal text-muted-foreground tabular-nums">
               {t('admin:channelsSummary', { total, enabled: enabledCount })}
-            </Badge>
+            </span>
           )
         }
         action={
           <>
             <Button
               variant="outline"
+              className="px-3.5"
               loading={testAll.isPending}
               // 筛选中的"0 启用"不代表全站没有可测的
               disabled={enabledCount === 0 && !filtered}
               onClick={() => testAll.mutate()}
             >
-              {!testAll.isPending && <Activity className="h-4 w-4" />}
               {testAll.isPending ? t('admin:testAllRunning') : t('admin:testAll')}
             </Button>
-            <Button variant="outline" onClick={() => setDiagnosing(true)}>
-              <Stethoscope className="h-4 w-4" />
+            <Button variant="outline" className="px-3.5" onClick={() => setDiagnosing(true)}>
               {t('admin:diagTitle')}
             </Button>
-            <Button onClick={() => setDrawer({ mode: 'create' })}>
-              <Plus className="h-4 w-4" />
+            <Button className="gap-1.5" onClick={() => setDrawer({ mode: 'create' })}>
+              <span aria-hidden>+</span>
               {t('admin:createChannel')}
             </Button>
           </>
         }
       />
 
-      <Toolbar
-        filters={
-          <>
-            <ToolbarSearch>
-              <SearchInput
-                id="ch-search"
-                className="min-w-0 flex-1"
-                aria-label={t('admin:channelSearchHint')}
-                value={draft}
-                placeholder={t('admin:channelSearchHint')}
-                onChange={setDraft}
-                onSubmit={applySearch}
-              />
-              <Button size="sm" variant="outline" onClick={applySearch}>
-                {t('common:search')}
-              </Button>
-            </ToolbarSearch>
-            <Select
-              id="ch-provider"
-              className="w-40"
-              aria-label={t('admin:provider')}
-              value={providerFilter}
-              onChange={(provider) => setFilters({ provider })}
-              placeholder={t('common:all')}
-              options={PROVIDERS.map((p) => ({ value: p, label: p }))}
-            />
-            {filtered && (
-              <Button size="sm" variant="ghost" onClick={clearFilters}>
-                {t('common:clearFilters')}
-              </Button>
-            )}
-          </>
-        }
-        selection={
-          <Badge variant="muted" className="tabular-nums">
-            {t('common:resultCount', { n: total })}
-          </Badge>
-        }
-      />
+      {/* 筛选直接放在页面底色上（不再包一层卡片）：搜索回车提交；状态是互斥短选项，用分段控件 */}
+      <div data-slot="toolbar" className="flex min-w-0 shrink-0 flex-wrap items-center gap-3">
+        <SearchInput
+          id="ch-search"
+          hideIcon
+          className="w-85"
+          aria-label={t('admin:channelSearchHint')}
+          value={draft}
+          placeholder={t('admin:channelSearchHint')}
+          onChange={setDraft}
+          onSubmit={applySearch}
+        />
+        <Segmented
+          size="field"
+          ariaLabel={t('common:status')}
+          value={statusFilter}
+          onChange={(status) => setFilters({ status })}
+          options={[
+            { value: '', label: t('common:all') },
+            { value: 'enabled', label: t('admin:channelFilterEnabled') },
+            { value: 'disabled', label: t('admin:channelFilterDisabled') },
+          ]}
+        />
+        <Select
+          id="ch-provider"
+          className="w-40"
+          aria-label={t('admin:provider')}
+          value={providerFilter}
+          onChange={(provider) => setFilters({ provider })}
+          placeholder={t('common:all')}
+          options={PROVIDERS.map((p) => ({ value: p, label: p }))}
+        />
+        {filtered && (
+          <Button size="sm" variant="ghost" onClick={clearFilters}>
+            {t('common:clearFilters')}
+          </Button>
+        )}
+      </div>
 
       {channels.isError ? (
         <ErrorState message={describeError(channels.error)} onRetry={() => void channels.refetch()} />
       ) : channels.isPending ? (
-        <TableSkeleton rows={8} cols={9} />
+        <TableSkeleton rows={8} cols={5} />
       ) : rows.length === 0 ? (
         filtered ? (
           <EmptyState
@@ -401,10 +401,10 @@ export function ChannelsPage() {
           />
         )
       ) : (
-        <Table stickyHeader>
-          <THead>
+        <Table stickyHeader className="[&_thead_th]:bg-card">
+          <THead className="bg-card [&_th]:font-normal [&_th]:text-muted-foreground/70">
             <Tr>
-              <Th className="w-10">
+              <Th className="w-11 min-w-11 pr-0 pl-5">
                 <Checkbox
                   srLabel={t('admin:batchPickAll')}
                   checked={allPicked}
@@ -421,155 +421,129 @@ export function ChannelsPage() {
                   }
                 />
               </Th>
-              <Th>{t('admin:channelName')}</Th>
-              <Th>{t('admin:channelColPlatform')}</Th>
-              <Th>{t('common:status')}</Th>
-              <Th>{t('admin:channelColSchedule')}</Th>
-              <Th>{t('admin:channelColUsage')}</Th>
-              <Th className="text-right">{t('common:actions')}</Th>
+              <Th className="w-[29%] min-w-60">{t('admin:channelsTitle')}</Th>
+              <Th className="w-[27%] min-w-56">{t('common:status')}</Th>
+              <Th className="w-[31%] min-w-64">{t('admin:channelColUsage')}</Th>
+              <Th className="w-[9%] min-w-36 pr-5 text-right">{t('admin:channelColActions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((c) => (
-              <Tr key={c.id} selected={picked.has(c.id)}>
-                <Td>
+              <Tr key={c.id} selected={picked.has(c.id)} className="group/row">
+                <Td className="py-3.5 pr-0 pl-5">
                   <Checkbox
                     srLabel={t('admin:batchPick', { name: c.name })}
                     checked={picked.has(c.id)}
                     onChange={() => togglePick(c.id)}
                   />
                 </Td>
-                <Td>
-                  <div className="flex flex-col">
-                    {/* 名字与地址同宽截断（hover 见全名）：长名字不该决定整表宽度；ID 并进名字行，省一列 */}
-                    <span className="flex max-w-36 min-[1600px]:max-w-48 items-baseline gap-1.5">
-                      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">#{c.id}</span>
-                      <span className="truncate font-medium" title={c.name}>{c.name}</span>
-                    </span>
-                    <span className="max-w-36 min-[1600px]:max-w-48 truncate font-mono text-xs text-muted-foreground" title={c.api_base ?? undefined}>
-                      {c.api_base ?? '—'}
-                    </span>
-                    <ChannelAccounts keys={c.keys} />
-                  </div>
+                <Td className="py-3.5">
+                  <ChannelNameCell channel={c} />
                 </Td>
-                {/* 协议列顺带模型数与优先级：两个短数字各占一列太浪费横向空间 */}
-                <Td>
-                  <div className="flex flex-col items-start gap-1">
-                    <span className="inline-flex items-center gap-1">
-                      <ProviderChip provider={c.provider} />
-                      {/* 供应商控制台直达（new-api #7146）：查上游余额/状态时不必再去搜网址 */}
-                      {providerConsoleUrl(c.provider, c.api_base) !== null && (
-                        <a
-                          href={providerConsoleUrl(c.provider, c.api_base) ?? undefined}
-                          target="_blank"
-                          rel="noreferrer noopener"
-                          className="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
-                          title={t('admin:providerConsole')}
-                          aria-label={t('admin:providerConsole')}
-                        >
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      )}
-                    </span>
-                    <span className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
-                      {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
-                    </span>
-                  </div>
-                </Td>
-                {/* 渠道"启用"≠ 能打：首行是渠道开关 + key 状态机汇总（主状态），
-                    下面是带标签的明细：最近测试、近 24h、凭证到期、出口，一行一项不混排 */}
-                <Td>
-                  <div className="flex min-w-48 flex-col items-start gap-1.5">
-                    <div className="flex flex-wrap items-center gap-1">
+                {/* 渠道"启用"≠ 能打：首行是状态点（key 状态机汇总）+ 最近一次测试，
+                    下面是带标签的明细：近 24h、凭证到期、出口，一行一项不混排 */}
+                <Td className="py-3.5">
+                  <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2.5 gap-y-px text-foreground/80">
+                    <dt>
                       <KeyStateSummary keys={c.keys} enabled={c.status === 1} />
+                    </dt>
+                    <dd className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+                      <LastProbe probe={c.last_test} />
+                      <KeyStateDetail keys={c.keys} enabled={c.status === 1} />
                       {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见 */}
                       {c.status === 1 && (c.pools ?? []).length === 0 && (
                         <Badge variant="destructive" title={t('admin:poolOrphanWarning')}>
                           {t('admin:channelOrphan')}
                         </Badge>
                       )}
-                    </div>
-                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-3 gap-y-0.5 text-xs">
-                      <StatusLine label={t('admin:channelStatusProbe')}>
-                        <LastProbe probe={c.last_test} />
+                    </dd>
+                    <StatusLine label={t('admin:channelStatus24h')}>
+                      <Health24h
+                        stat={health.data?.data.find((s) => s.channel_id === c.id)}
+                        channel={{ id: c.id, name: c.name, provider: c.provider }}
+                      />
+                    </StatusLine>
+                    <CredentialExpiry keys={c.keys} />
+                    {/* 显式出口（代理 / 组 / 直连）才列；继承全局默认的不列，免得每行多一行 */}
+                    {c.egress !== undefined && c.egress.mode !== 'inherit' && (
+                      <StatusLine label={t('admin:channelStatusEgress')} title={t('admin:egressTitle')}>
+                        {describeEgress(t, c.egress, proxies.data, proxyGroups.data)}
                       </StatusLine>
-                      <StatusLine label={t('admin:channelStatus24h')}>
-                        <Health24h
-                          stat={health.data?.data.find((s) => s.channel_id === c.id)}
-                          channel={{ id: c.id, name: c.name, provider: c.provider }}
-                        />
-                      </StatusLine>
-                      <CredentialExpiry keys={c.keys} />
-                      {/* 显式出口（代理 / 组 / 直连）才列；继承全局默认的不列，免得每行多一行 */}
-                      {c.egress !== undefined && c.egress.mode !== 'inherit' && (
-                        <StatusLine label={t('admin:channelStatusEgress')} title={t('admin:egressTitle')}>
-                          {describeEgress(t, c.egress, proxies.data, proxyGroups.data)}
-                        </StatusLine>
-                      )}
-                    </dl>
-                  </div>
+                    )}
+                  </dl>
                 </Td>
-                <Td>
-                  <Switch
-                    hideLabel
-                    label={t('admin:channelScheduleToggle', { name: c.name })}
-                    checked={c.status === 1}
-                    disabled={setStatus.isPending}
-                    onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
-                  />
-                </Td>
-                {/* 用量窗口：近 30 天用量胶囊 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}
-                <Td>
+                {/* 用量窗口：近 30 天用量一行 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}
+                <Td className="py-3.5">
                   <div className="flex flex-col items-start gap-1.5">
                     <ChannelUsage usage={usage.data?.data.find((u) => u.channel_id === c.id)} />
                     {c.status === 1 && <ChannelQuotaCell channelId={c.id} provider={c.provider} />}
                     <LastBalance balance={c.last_balance} />
                   </div>
                 </Td>
-                <Td>
-                  <div className="flex items-center justify-end gap-0.5">
-                    <IconButton
-                      icon={MessageSquareText}
-                      label={t('admin:channelTryAction')}
-                      onClick={() => setTrying(c)}
+                {/* 调度开关在上，常用动作（测试 / 编辑）在下，其余动作收进「···」菜单 */}
+                <Td className="py-3.5 pr-5">
+                  <div className="flex flex-col items-end gap-3">
+                    <Switch
+                      hideLabel
+                      label={t('admin:channelScheduleToggle', { name: c.name })}
+                      checked={c.status === 1}
+                      disabled={setStatus.isPending}
+                      onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
                     />
-                    <IconButton
-                      icon={Activity}
-                      label={t('admin:testChannel')}
-                      loading={testingId === c.id}
-                      onClick={() => test.mutate(c)}
-                    />
-                    {balanceSupported(c.provider) && (
-                      <IconButton
-                        icon={Wallet}
-                        label={t('admin:balanceQuery')}
-                        loading={balancingId === c.id}
-                        onClick={() => balance.mutate(c)}
-                      />
-                    )}
-                    <IconButton
-                      icon={Pencil}
-                      label={t('common:edit')}
-                      onClick={() => setDrawer({ mode: 'edit', channel: c })}
-                    />
-                    <IconButton
-                      icon={Copy}
-                      label={t('admin:duplicate')}
-                      onClick={() => duplicate.mutate(c)}
-                    />
-                    <IconButton
-                      icon={Trash2}
-                      label={t('common:delete')}
-                      variant="destructive"
-                      onClick={() =>
-                        confirm({
-                          title: t('common:confirmDeleteTitle', { name: c.name }),
-                          description: t('common:confirmChannelDelete'),
-                          requireText: c.name,
-                          onConfirm: () => remove.mutate(c.id),
-                        })
-                      }
-                    />
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        className={ROW_ACTION}
+                        disabled={testingId === c.id}
+                        onClick={() => test.mutate(c)}
+                      >
+                        {testingId === c.id && <Loader2 aria-hidden className="h-3 w-3 animate-spin" />}
+                        {t('admin:testChannel')}
+                      </button>
+                      <button
+                        type="button"
+                        className={ROW_ACTION}
+                        onClick={() => setDrawer({ mode: 'edit', channel: c })}
+                      >
+                        {t('common:edit')}
+                      </button>
+                      <Menu
+                        strategy="fixed"
+                        className="min-w-44"
+                        trigger={
+                          <button type="button" className={ROW_ACTION} aria-label={t('admin:channelMoreActions')}>
+                            <span aria-hidden className="tracking-widest">···</span>
+                          </button>
+                        }
+                      >
+                        <MenuItem icon={MessageSquareText} onSelect={() => setTrying(c)}>
+                          {t('admin:channelTryAction')}
+                        </MenuItem>
+                        {balanceSupported(c.provider) && (
+                          <MenuItem icon={Wallet} disabled={balancingId === c.id} onSelect={() => balance.mutate(c)}>
+                            {t('admin:balanceQuery')}
+                          </MenuItem>
+                        )}
+                        <MenuItem icon={Copy} onSelect={() => duplicate.mutate(c)}>
+                          {t('admin:duplicate')}
+                        </MenuItem>
+                        <MenuSeparator />
+                        <MenuItem
+                          icon={Trash2}
+                          destructive
+                          onSelect={() =>
+                            confirm({
+                              title: t('common:confirmDeleteTitle', { name: c.name }),
+                              description: t('common:confirmChannelDelete'),
+                              requireText: c.name,
+                              onConfirm: () => remove.mutate(c.id),
+                            })
+                          }
+                        >
+                          {t('common:delete')}
+                        </MenuItem>
+                      </Menu>
+                    </div>
                   </div>
                 </Td>
               </Tr>
@@ -633,44 +607,57 @@ export function ChannelsPage() {
   )
 }
 
-/// 订阅渠道绑定的账号（邮箱）：多把 key 时显示首个并标出其余数量，悬停看全部。
-function ChannelAccounts({ keys }: { keys?: { account_label?: string; account_plan?: string }[] }) {
+/// 行内文字动作（测试 / 编辑 / ···）：贴着数据的轻量文字按钮，悬停才有底色。
+const ROW_ACTION =
+  'inline-flex h-9 items-center gap-1 rounded-md px-1.5 text-[13px] text-foreground/80 transition-colors outline-none select-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-50 md:h-7'
+
+/// 渠道格：ID + 名称、地址、平台 / 档位胶囊 + 模型数与优先级。
+///
+/// 名字与地址同宽截断（hover 见全名）：长名字不该决定整表宽度。订阅账号的邮箱通常就是渠道名，
+/// 只在与名称不同时另起一行补出（多个账号时显示首个并标出其余数量，悬停看全部）。
+/// 供应商控制台直达（new-api #7146）：查余额 / 状态时不必再去搜网址；平时不抢眼，
+/// 悬停整行或键盘聚焦时才现身，触屏设备常显。
+function ChannelNameCell({ channel: c }: { channel: ChannelRow }) {
   const { t } = useTranslation()
-  const labels = [...new Set((keys ?? []).map((k) => k.account_label).filter((v): v is string => Boolean(v)))]
-  // 档位按 key 去重；多把 key 档位不同时都列出（Pro + Max 20x）
-  const plans = [...new Set((keys ?? []).map((k) => k.account_plan).filter((v): v is string => Boolean(v)))]
-  if (labels.length === 0 && plans.length === 0) return null
+  // 档位按 key 去重；多把 key 档位不同时都列出（Pro · Max 20x）
+  const plans = [...new Set(c.keys.map((k) => k.account_plan).filter((v): v is string => Boolean(v)))]
+  const accounts = [...new Set(c.keys.map((k) => k.account_label).filter((v): v is string => Boolean(v)))]
+  const extra = accounts.filter((label) => label !== c.name)
+  const consoleUrl = providerConsoleUrl(c.provider, c.api_base)
   return (
-    <span className="flex max-w-36 min-[1600px]:max-w-48 items-center gap-1 text-xs text-muted-foreground" title={labels.join('\n')}>
-      <UserRound aria-label={t('admin:channelAccount')} className="h-3 w-3 shrink-0" />
-      {plans.map((plan) => (
-        <Badge key={plan} variant="outline" className="shrink-0 px-1 py-0 text-[10px] leading-4" title={t('admin:channelPlanHint')}>
-          {planLabel(plan)}
-        </Badge>
-      ))}
-      {labels.length > 0 && <span className="truncate">{labels[0]}</span>}
-      {labels.length > 1 && <span className="shrink-0">+{labels.length - 1}</span>}
-    </span>
+    <div className="flex w-0 min-w-full flex-col gap-0.5">
+      <span className="flex min-w-0 items-baseline gap-1.5">
+        <span className="shrink-0 text-xs text-muted-foreground/60 tabular-nums">#{c.id}</span>
+        <span className="truncate text-sm" title={c.name}>{c.name}</span>
+      </span>
+      <span className="truncate font-mono text-xs text-muted-foreground/80" title={c.api_base ?? undefined}>
+        {c.api_base ?? '—'}
+      </span>
+      {extra.length > 0 && (
+        <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground" title={accounts.join('\n')}>
+          <span className="shrink-0">{t('admin:channelAccount')}</span>
+          <span className="truncate">{extra[0]}</span>
+          {extra.length > 1 && <span className="shrink-0">+{extra.length - 1}</span>}
+        </span>
+      )}
+      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <ProviderChip provider={c.provider} plans={plans} />
+        <span className="whitespace-nowrap text-[13px] text-muted-foreground tabular-nums">
+          {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
+        </span>
+        {consoleUrl !== null && (
+          <a
+            href={consoleUrl}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="-ml-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+            title={t('admin:providerConsole')}
+            aria-label={t('admin:providerConsole')}
+          >
+            <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </span>
+    </div>
   )
-}
-
-const PLAN_LABELS: Record<string, string> = {
-  pro: 'Pro',
-  max: 'Max',
-  max_5x: 'Max 5x',
-  max_20x: 'Max 20x',
-  team: 'Team',
-  enterprise: 'Enterprise',
-  // ChatGPT（Codex）档位，取自用量接口的 plan_type
-  free: 'Free',
-  go: 'Go',
-  plus: 'Plus',
-  prolite: 'Pro Lite',
-  promax: 'Pro Max',
-  business: 'Business',
-  edu: 'Edu',
-}
-
-function planLabel(plan: string): string {
-  return PLAN_LABELS[plan] ?? plan
 }

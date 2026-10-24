@@ -26,62 +26,105 @@ const KEY_STATE: Record<number, string> = {
 ///
 /// 渠道级"启用"只说明站长没有手动停它；一条 3 把 key 全在冷却的渠道照样是绿色
 /// "启用"——这正是 new-api 用"自动禁用"状态、Sub2API 用账号状态视图去解决的盲区。
-/// 汇总语义：全部 key 可用 → 静默（不加噪音）；部分不可用 → 黄，列出各态计数；
-/// 一把可用的都没有 → 红"无可用 key"，这条渠道实际上已经下线。
-export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
-  const { t } = useTranslation()
+/// 汇总语义：全部 key 可用 → 绿点「正常」；部分不可用 → 黄点，下面列各态计数；
+/// 一把可用的都没有 → 红点"无可用 key"，这条渠道实际上已经下线。
+type KeyStateView =
+  | { kind: 'disabled' }
+  | { kind: 'noKeys' }
+  | { kind: 'allActive'; total: number }
+  | { kind: 'partial'; active: number; total: number; counts: [string, number][]; titles: Map<string, string>; soonest?: dayjs.Dayjs }
+
+function keyStateOf(keys: ChannelKeyRow[], enabled: boolean): KeyStateView {
   // 渠道级停用：站长手动关的，此时 key 状态无意义，直接说"已停用"（少一列"状态"）
-  if (!enabled) {
-    return <Badge variant="muted" dot>{t('common:disabled')}</Badge>
-  }
-  if (keys.length === 0) {
-    return <Badge variant="destructive" dot>{t('admin:keyStateNoKeys')}</Badge>
-  }
+  if (!enabled) return { kind: 'disabled' }
+  if (keys.length === 0) return { kind: 'noKeys' }
   const active = keys.filter((k) => k.status === 1).length
-  if (active === keys.length) {
-    return (
-      <Badge variant="success" dot title={t('admin:keyStateAllActive', { n: keys.length })}>
-        {t('admin:channelStateNormal')}
-      </Badge>
-    )
-  }
+  if (active === keys.length) return { kind: 'allActive', total: keys.length }
   // 各非活跃态计数；冷却态附最近一把恢复的时间（"几分钟后自愈"与"要人工介入"是两种事）
   const counts = new Map<string, number>()
+  const titles = new Map<string, string>()
   for (const k of keys) {
     const state = KEY_STATE[k.status]
-    if (state) counts.set(state, (counts.get(state) ?? 0) + 1)
+    if (!state) continue
+    counts.set(state, (counts.get(state) ?? 0) + 1)
+    if (!titles.has(state)) titles.set(state, k.last_error ?? '')
   }
   const soonest = keys
     .filter((k) => k.cooldown_until !== null && (k.status === 2 || k.status === 3))
     .map((k) => dayjs(k.cooldown_until))
     .sort((a, b) => a.valueOf() - b.valueOf())[0]
+  return { kind: 'partial', active, total: keys.length, counts: [...counts.entries()], titles, soonest }
+}
+
+/// 状态点 + 文字（没有底色胶囊）：一眼扫过去只看点的颜色，细节写在后面。
+function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'destructive' | 'muted'; title?: string; children: ReactNode }) {
+  const color = { success: 'text-success', warning: 'text-warning', destructive: 'text-destructive', muted: 'text-muted-foreground' }[tone]
+  // 点用伪元素画在文字前面：整块仍是一个行内元素，基线与右边的测试延迟对得上
   return (
-    <div className="flex flex-wrap items-center gap-1 whitespace-nowrap">
-      <Badge variant={active === 0 ? 'destructive' : 'warning'} dot>
-        {active === 0
-          ? t('admin:keyStateNoneActive')
-          : t('admin:keyStateSomeActive', { active, total: keys.length })}
-      </Badge>
-      {[...counts.entries()].map(([state, n]) => (
-        <Badge key={state} variant="muted" title={keys.find((k) => KEY_STATE[k.status] === state)?.last_error ?? ''}>
-          {t(`admin:keyState_${state}`, { n })}
+    <span
+      className={cn(
+        'font-medium whitespace-nowrap before:mr-1.5 before:inline-block before:size-1.5 before:rounded-full before:bg-current before:align-middle',
+        color,
+      )}
+      title={title}
+    >
+      {children}
+    </span>
+  )
+}
+
+export function KeyStateSummary({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
+  const { t } = useTranslation()
+  const state = keyStateOf(keys, enabled)
+  switch (state.kind) {
+    case 'disabled':
+      return <StateDot tone="muted">{t('common:disabled')}</StateDot>
+    case 'noKeys':
+      return <StateDot tone="destructive">{t('admin:keyStateNoKeys')}</StateDot>
+    case 'allActive':
+      return (
+        <StateDot tone="success" title={t('admin:keyStateAllActive', { n: state.total })}>
+          {t('admin:channelStateNormal')}
+        </StateDot>
+      )
+    case 'partial':
+      return (
+        <StateDot tone={state.active === 0 ? 'destructive' : 'warning'}>
+          {state.active === 0
+            ? t('admin:keyStateNoneActive')
+            : t('admin:keyStateSomeActive', { active: state.active, total: state.total })}
+        </StateDot>
+      )
+  }
+}
+
+/// 状态点后面的补充：部分 key 不可用时的各态计数与最近一把的恢复时间；其余状态没有补充。
+export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabled: boolean }) {
+  const { t } = useTranslation()
+  const state = keyStateOf(keys, enabled)
+  if (state.kind !== 'partial') return null
+  return (
+    <>
+      {state.counts.map(([name, n]) => (
+        <Badge key={name} variant="muted" title={state.titles.get(name) ?? ''}>
+          {t(`admin:keyState_${name}`, { n })}
         </Badge>
       ))}
-      {soonest && soonest.isAfter(dayjs()) && (
+      {state.soonest && state.soonest.isAfter(dayjs()) && (
         <span className="text-xs text-muted-foreground">
-          {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(soonest.diff(dayjs(), 'minute', true))) })}
+          {t('admin:keyStateRecovers', { min: Math.max(1, Math.ceil(state.soonest.diff(dayjs(), 'minute', true))) })}
         </span>
       )}
-    </div>
+    </>
   )
 }
 
 /// 状态列的明细行：左列短标签说明是什么，右列是值。放在 `<dl>` 两列网格里，标签自然对齐。
-/// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看徽章，明细只在异常时抢眼。
+/// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看状态点，明细只在异常时抢眼。
 export function StatusLine({ label, title, children }: { label: string; title?: string; children: ReactNode }) {
   return (
     <>
-      <dt className="whitespace-nowrap text-muted-foreground">{label}</dt>
+      <dt className="whitespace-nowrap text-muted-foreground/80">{label}</dt>
       <dd className="min-w-0 whitespace-nowrap" title={title}>{children}</dd>
     </>
   )
@@ -90,7 +133,7 @@ export function StatusLine({ label, title, children }: { label: string; title?: 
 const stampOf = (when: dayjs.Dayjs) => (when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm'))
 
 /// 订阅 OAuth 凭证（§11.38）的 access token 到期：最早到期的那把。过期不是故障——
-/// 下次请求会刷新——所以只占一行明细，不进状态徽章。
+/// 下次请求会刷新——所以只占一行明细，不进状态点。
 export function CredentialExpiry({ keys }: { keys: ChannelKeyRow[] }) {
   const { t } = useTranslation()
   const soonest = keys
@@ -120,16 +163,16 @@ export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
   const when = dayjs(probe.at)
   // 探测的是 /models 这类轻量端点，>2s 已经算慢
   const result = probe.ok ? (
-    <span className={cn('font-medium tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
+    <span className={cn('font-semibold tabular-nums', probe.latency_ms >= 2_000 && 'text-warning')}>{probe.latency_ms} ms</span>
   ) : (
-    <span className="font-medium text-destructive">
+    <span className="font-semibold text-destructive">
       {probe.http_status !== undefined ? `HTTP ${probe.http_status}` : (probe.error_code ?? t('logs:failed'))}
     </span>
   )
   return (
-    <span className="inline-flex items-baseline gap-1.5">
+    <span className="inline-flex items-baseline gap-1">
       {result}
-      <span className="text-muted-foreground tabular-nums" title={when.format('YYYY-MM-DD HH:mm')}>{stampOf(when)}</span>
+      <span className="text-muted-foreground/70 tabular-nums" title={when.format('YYYY-MM-DD HH:mm')}>{stampOf(when)}</span>
     </span>
   )
 }
@@ -140,16 +183,16 @@ export function LastBalance({ balance }: { balance: ChannelBalance | null | unde
   const { i18n, t } = useTranslation()
   if (balance === null || balance === undefined) return null
   const when = dayjs(balance.at)
-  const stamp = when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm')
   return (
     <span
-      className="inline-flex items-center gap-1.5 whitespace-nowrap"
+      className="inline-flex items-baseline gap-1.5 whitespace-nowrap"
       title={t('admin:balanceProbe', { probe: balance.probe })}
     >
-      <Badge variant={balance.balance_micro <= 0 ? 'destructive' : 'muted'}>
+      <span className="text-muted-foreground/80">{t('admin:channelBalanceLabel')}</span>
+      <span className={cn('font-medium tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
         {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language)}
-      </Badge>
-      <span className="text-xs text-muted-foreground">{stamp}</span>
+      </span>
+      <span className="text-muted-foreground/70 tabular-nums">{stampOf(when)}</span>
     </span>
   )
 }
@@ -189,19 +232,17 @@ export function Health24h({
     <>
       <button
         type="button"
-        className="-mx-1 inline-flex items-baseline gap-1.5 rounded px-1 whitespace-nowrap underline-offset-2 hover:bg-muted/60 hover:underline"
+        className="-mx-1 rounded px-1 whitespace-nowrap underline-offset-2 hover:bg-muted/60 hover:underline"
         title={idle ? t('admin:timelineOpen') : t('admin:health24hHint', { p95: stat.ttft_p95_ms })}
         onClick={() => setOpen(true)}
       >
         {idle ? (
           <span className="text-muted-foreground">{t('admin:health24hIdle')}</span>
         ) : (
+          // 一整句「0.0% 错误 · 1 次」：错误率着色，其余同字色；真空格而不是 flex 间距，读屏与复制都是通顺的一句
           <>
-            <span className="text-muted-foreground">{t('admin:health24hErrorRate')}</span>
-            <span className={cn('font-medium tabular-nums', tone)}>{formatBp(stat.error_rate_bp, i18n.language)}</span>
-            <span className="text-muted-foreground">
-              · {t('admin:health24hRequests', { n: formatCount(stat.requests, i18n.language) })}
-            </span>
+            <span className={cn('font-medium tabular-nums', tone)}>{formatBp(stat.error_rate_bp, i18n.language)}</span>{' '}
+            {t('admin:health24hErrorRate')} · {t('admin:channelUsageRequests', { n: formatCount(stat.requests, i18n.language) })}
           </>
         )}
       </button>
@@ -236,7 +277,8 @@ export function useChannelUsage() {
   })
 }
 
-/// 近 30 天用量胶囊：请求数 / token / 计费 / 上游成本各一块，悬停看输入 / 缓存 / 输出明细。
+/// 近 30 天用量一行：请求数 · token · 计费金额（金额是这行的重点，用前景色），
+/// 悬停看输入 / 缓存 / 输出明细与上游成本。
 export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) {
   const { t, i18n } = useTranslation()
   if (!usage || usage.requests === 0) return null
@@ -252,12 +294,13 @@ export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) 
     cost: formatMoneyAggregate(usage.upstream_cost_micro, lang),
   })
   const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
-  const chip = 'inline-flex h-5 items-center rounded bg-muted px-1.5 text-[11px] text-muted-foreground tabular-nums'
   return (
-    <span className="flex flex-wrap items-center gap-1 whitespace-nowrap" title={detail}>
-      <span className={chip}>{t('admin:channelUsageChipRequests', { n: compact.format(usage.requests) })}</span>
-      <span className={chip}>{t('admin:channelUsageChipTokens', { n: compact.format(total) })}</span>
-      <span className={chip}>{t('admin:channelUsageChipAmount', { v: formatMoneyAggregate(usage.amount_micro, lang) })}</span>
+    <span className="whitespace-nowrap text-muted-foreground tabular-nums" title={detail}>
+      {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
+      {' · '}
+      {t('admin:channelUsageTokens', { n: compact.format(total) })}
+      {' · '}
+      <span className="font-medium text-foreground">{formatMoneyAggregate(usage.amount_micro, lang)}</span>
     </span>
   )
 }
