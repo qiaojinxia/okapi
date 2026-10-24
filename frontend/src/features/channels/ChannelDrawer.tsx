@@ -45,6 +45,7 @@ import {
 import type { PoolMember } from '@/features/pools/types'
 import { toast } from '@/components/ui/toast'
 import { apiFetch } from '@/lib/api'
+import { configuredModelsOptions } from '@/features/models/configured-models'
 import { describeError } from '@/lib/i18n'
 import { parseInt32 } from '@/lib/int32'
 import { usePermission } from '@/hooks/use-auth'
@@ -302,6 +303,40 @@ export function ChannelDrawer({
   const defaultBase = account.descriptor?.default_base ?? defaultApiBase(form.provider)
   const endpointRequired = defaultBase === undefined
   const endpointValid = !endpointRequired || form.api_base.trim() !== ''
+  // 拉上游模型：已保存的渠道走渠道自己的凭证；新建时用表单里刚填的（订阅账号要先登录，没有草稿凭证可用）
+  const canDiscover = isEdit || (accountReady && !oauth && endpointValid && credential.trim() !== '' && egressBinding !== null)
+  const [unknownModels, setUnknownModels] = useState<string[]>([])
+  const discover = useMutation({
+    mutationFn: async () => {
+      const found = isEdit
+        ? await queryClient.fetchQuery({
+          queryKey: qk.channelModels(channel.id),
+          queryFn: () => apiFetch<{ models: string[] }>(`/admin/channels/${channel.id}/fetch-models`),
+        })
+        : await apiFetch<{ models: string[] }>('/admin/channels/fetch-models', {
+          method: 'POST',
+          body: {
+            provider: form.provider,
+            api_base: form.api_base,
+            credential,
+            settings: channelSettingsForSave(settings),
+            ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}),
+          },
+        })
+      // 价簿里还没有这些名字的模型：请求会因未定价被拒。读不到价簿（没有定价读取权限）就不提示
+      const priced = await queryClient.fetchQuery(configuredModelsOptions())
+        .then((list) => new Set(list.data.map((model) => model.model_name))).catch(() => null)
+      return { found: found.models, unknown: priced === null ? [] : found.models.filter((name) => !priced.has(name)) }
+    },
+    onSuccess: ({ found, unknown }) => {
+      const added = found.filter((name) => !models.includes(name))
+      // 并入而不是覆盖：手填的名字（别名、上游列表里没有的）不会被一键清掉
+      setModels((current) => [...current, ...found.filter((name) => !current.includes(name))])
+      setUnknownModels(unknown)
+      toast.success(t('admin:discovered', { n: found.length, added: added.length }))
+    },
+    onError: (err) => toast.error(describeError(err)),
+  })
   const scheduleCustom = form.priority !== '0' || form.cost !== '1'
   const scheduleSummary = scheduleCustom
     ? t('admin:channelScheduleSummary', { priority: form.priority, cost: form.cost })
@@ -586,27 +621,21 @@ export function ChannelDrawer({
               placeholder={t('admin:tagInputHint')}
             />
           </div>
-          {isEdit && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="self-start"
-              onClick={() =>
-                void queryClient
-                  .fetchQuery({
-                    queryKey: qk.channelModels(channel.id),
-                    queryFn: () =>
-                      apiFetch<{ models: string[] }>(`/admin/channels/${channel.id}/fetch-models`),
-                  })
-                  .then((r) => {
-                    setModels(r.models)
-                    toast.success(t('admin:discovered', { n: r.models.length }))
-                  })
-                  .catch((err: unknown) => toast.error(describeError(err)))
-              }
-            >
-              {t('admin:fetchModels')}
-            </Button>
+          {(isEdit || !oauth) && (
+            <div className="flex flex-col gap-1.5">
+              <Button size="sm" variant="outline" className="self-start" disabled={!canDiscover || discover.isPending}
+                onClick={() => discover.mutate()}>
+                {t('admin:fetchModels')}
+              </Button>
+              {!isEdit && credential.trim() === '' && <p className="text-xs text-muted-foreground">{t('admin:fetchModelsNeedsCredential')}</p>}
+            </div>
+          )}
+          {!isEdit && oauth && <p className="text-xs text-muted-foreground">{t('admin:fetchModelsAfterLogin')}</p>}
+          {unknownModels.length > 0 && (
+            <p role="status" data-testid="discovered-unpriced" className="rounded-lg bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
+              {t('admin:discoveredUnknown', { n: unknownModels.length, first: unknownModels.slice(0, 3).join(', ') })}{' '}
+              <a href="/admin/pricing" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">{t('admin:discoveredUnknownGo')}</a>
+            </p>
           )}
         </FieldGroup>
       )}

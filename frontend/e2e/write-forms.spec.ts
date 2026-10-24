@@ -1751,7 +1751,7 @@ test('渠道池抽屉：策略与降级目标可选且不能选自己，不降�
   expect(deletes).toEqual(['/admin/pools/spare'])
 })
 
-test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉上游模型覆盖清单；调度页签的成本随保存走，池成员单独保存并按覆盖值落体；新建同时带池成员', async ({ page }) => {
+test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉上游模型并入清单；调度页签的成本随保存走，池成员单独保存并按覆盖值落体；新建同时带池成员', async ({ page }) => {
   // 一条用例走完编辑四个页签再新建两次，含查询失败重试的退避，超出默认 20s
   test.setTimeout(45_000)
   await prepare(page)
@@ -1818,7 +1818,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
   await rotate.click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
 
-  // 模型页签：拉上游模型直接覆盖清单，并提示发现数量
+  // 模型页签：拉上游模型并入清单（手填的保留），并提示发现与新增数量
   await drawer.getByRole('tab', { name: '模型与渠道池', exact: true }).click()
   await drawer.getByRole('button', { name: '拉取上游模型' }).click()
   await expect(page.getByRole('status').filter({ hasText: '发现 3 个模型' })).toBeVisible()
