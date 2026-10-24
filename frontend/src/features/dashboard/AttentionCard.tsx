@@ -11,6 +11,7 @@ import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import type { QualitySearch } from '@/features/quality/search'
 import { useDashboardInventory } from './data'
+import { maskEmails } from '@/lib/mask'
 
 /// 与 /admin/stats/channels 的行形状对齐（渠道名字段是 `name`，不是 `channel_name`——
 /// 此前写错字段，待办文案里的"如 xxx"永远是空括号）。
@@ -228,7 +229,7 @@ function useAttention(days: number) {
       text: t('admin:attnBadChannel', {
         n: bad.length,
         // 示例优先挑有名字的渠道；id=0 是"无渠道"的聚合桶，"如 #0"对人没有信息量
-        first: bad.find((c) => c.name)?.name ?? (bad.some((c) => c.channel_id > 0)
+        first: maskEmails(bad.find((c) => c.name)?.name ?? '') || (bad.some((c) => c.channel_id > 0)
           ? t('admin:dashboardUnnamedChannel', { id: bad.find((c) => c.channel_id > 0)!.channel_id })
           : t('admin:dashboardUnassignedChannel')),
       }),

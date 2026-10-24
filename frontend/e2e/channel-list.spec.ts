@@ -147,6 +147,10 @@ async function prepare(page: Page, { onList, path = '/admin/channels' }: { onLis
 }
 
 const rowOf =(page: Page, name: string) => page.getByRole('row').filter({ hasText: name })
+// 订阅账号邮箱在界面上遮住中间部分：渠道名、账号行、开关与勾选框的名字都是遮过的
+const ALICE_MASKED = 'al***ev@gmail.com'
+const BOB_MASKED = 'b***@hot-shot.com'
+const CAROL_MASKED = 'c***l@outlook.com'
 
 test('渠道列表：页头统计是朴素文字，按钮无图标，新建渠道的加号只是装饰', async ({ page }) => {
   await prepare(page)
@@ -225,7 +229,7 @@ test('渠道列表：地址里手敲 status=enabled 直接生效，数字和别�
 
 test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / 调度与操作', async ({ page }) => {
   await prepare(page)
-  const alice = rowOf(page, 'alice.dev@gmail.com')
+  const alice = rowOf(page, ALICE_MASKED)
   await expect(alice).toBeVisible()
 
   // 渠道格：#ID + 名称、地址、平台 + 档位胶囊、模型数与优先级
@@ -258,40 +262,45 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / �
   await expect(sevenDay).toHaveAttribute('aria-valuenow', '0')
   await expect(alice).toContainText('5天22小时')
 
-  // 调度开关在上，测试 / 编辑文字按钮与「更多操作」在下
-  await expect(alice.getByRole('switch', { name: '参与调度：alice.dev@gmail.com' })).toBeChecked()
-  await expect(alice.getByRole('button', { name: '测试', exact: true })).toBeVisible()
-  await expect(alice.getByRole('button', { name: '编辑', exact: true })).toBeVisible()
-  await expect(alice.getByRole('button', { name: '更多操作', exact: true })).toBeVisible()
+  // 调度开关在上，测试 / 编辑 / 更多操作三个图标按钮在下（名字在读屏名与悬停提示里，按钮上没有字）
+  await expect(alice.getByRole('switch', { name: `参与调度：${ALICE_MASKED}` })).toBeChecked()
+  for (const name of ['测试', '编辑', '更多操作']) {
+    const button = alice.getByRole('button', { name, exact: true })
+    await expect(button).toBeVisible()
+    await expect(button).toHaveText('')
+    await expect(button.locator('svg')).toHaveCount(1)
+  }
   // 旧的六个图标按钮已收起
   await expect(alice.getByRole('button', { name: '复制', exact: true })).toHaveCount(0)
   await expect(alice.getByRole('button', { name: '删除', exact: true })).toHaveCount(0)
   await expect(alice.getByRole('button', { name: '测试输出', exact: true })).toHaveCount(0)
 })
 
-test('渠道列表：额度条按窗口着色，近上限转黄转红；账号与渠道名不同时补一行账号', async ({ page }) => {
+test('渠道列表：额度条只用红黄绿三种颜色；账号与渠道名不同时补一行账号', async ({ page }) => {
   await prepare(page)
   const bob = rowOf(page, 'bob-team')
   await expect(bob).toContainText('Claude Max 5x')
   // 邮箱不是渠道名：补一行「账号」
   await expect(bob.getByText('账号', { exact: true })).toBeVisible()
-  await expect(bob).toContainText('bob@hot-shot.com')
+  await expect(bob).toContainText(BOB_MASKED)
+  await expect(bob).not.toContainText('bob@hot-shot.com')
   const bobFive = bob.getByRole('progressbar', { name: '5小时额度用量' })
   const bobSeven = bob.getByRole('progressbar', { name: '7天额度用量' })
   await expect(bobFive).toHaveAttribute('aria-valuenow', '55')
   await expect(bobSeven).toHaveAttribute('aria-valuenow', '18')
-  await expect(bobFive.locator('div')).toHaveClass(/bg-amber-700/)
-  await expect(bobSeven.locator('div')).toHaveClass(/bg-primary/)
+  // 5 小时和 7 天都不到 70%：同一种绿，不再按窗口各配一种颜色
+  await expect(bobFive.locator('div')).toHaveClass(/bg-success/)
+  await expect(bobSeven.locator('div')).toHaveClass(/bg-success/)
   await expect(bob).toContainText('15分钟')
 
-  const carol = rowOf(page, 'carol@outlook.com')
+  const carol = rowOf(page, CAROL_MASKED)
   await expect(carol.getByRole('progressbar', { name: '5小时额度用量' }).locator('div')).toHaveClass(/bg-destructive/)
   await expect(carol.getByRole('progressbar', { name: '7天额度用量' }).locator('div')).toHaveClass(/bg-warning/)
 })
 
 test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复时间；停用与未入池各有标识', async ({ page }) => {
   await prepare(page)
-  const carol = rowOf(page, 'carol@outlook.com')
+  const carol = rowOf(page, CAROL_MASKED)
   await expect(carol.locator('dt').first()).toHaveText('1/2 可用')
   await expect(carol).toContainText('冷却 1')
   await expect(carol).toContainText('约 20 分钟后恢复')
@@ -357,7 +366,7 @@ test('渠道列表：「···」菜单收纳试聊 / 余额 / 复制 / 删除�
   await page.keyboard.press('Escape')
 
   // 没有余额接口的协议不列「查上游余额」
-  const alice = rowOf(page, 'alice.dev@gmail.com')
+  const alice = rowOf(page, ALICE_MASKED)
   await alice.getByRole('button', { name: '更多操作', exact: true }).click()
   await expect(page.getByRole('menu').getByRole('menuitem')).toHaveText(['测试输出', '复制', '删除'])
   // 点菜单外收起
@@ -437,7 +446,7 @@ test('渠道列表：菜单浮在表格之上不被裁掉；末行放不下就�
 
 test('渠道列表：窗口缩放时「···」菜单收起；窄屏表格横向滚动而不是把列挤坏', async ({ page }) => {
   await prepare(page)
-  await rowOf(page, 'alice.dev@gmail.com').getByRole('button', { name: '更多操作', exact: true }).click()
+  await rowOf(page, ALICE_MASKED).getByRole('button', { name: '更多操作', exact: true }).click()
   await expect(page.getByRole('menu')).toBeVisible()
   await page.setViewportSize({ width: 1100, height: 800 })
   await expect(page.getByRole('menu')).toHaveCount(0)
@@ -464,7 +473,136 @@ test('渠道列表：深色主题下状态点与额度条仍用语义色', async
   await page.addInitScript(() => localStorage.setItem('okapi.theme', 'dark'))
   await prepare(page)
   await expect(page.locator('html')).toHaveClass(/dark/)
-  const carol = rowOf(page, 'carol@outlook.com')
+  const carol = rowOf(page, CAROL_MASKED)
   await expect(carol.locator('dt span').first()).toHaveClass(/text-warning/)
   await expect(carol.getByRole('progressbar', { name: '5小时额度用量' }).locator('div')).toHaveClass(/bg-destructive/)
 })
+
+test('渠道列表：额度条只有红黄绿三种颜色表示剩余，边界 70% 转黄、90% 转红', async ({ page }) => {
+  await prepare(page)
+  // 渠道 1 / 2 的额度改成踩着阈值的几组数
+  const windows = (five: number, seven: number) => quota([
+    { name: '5h', used_percent: five, resets_at: nowSec + 3600, window_secs: 18000 },
+    { name: '7d', used_percent: seven, resets_at: nowSec + 3 * 86400, window_secs: 604800 },
+  ])
+  await page.route('**/admin/channels/1/usage?*', (route) => route.fulfill({ json: windows(69, 70) }))
+  await page.route('**/admin/channels/2/usage?*', (route) => route.fulfill({ json: windows(89, 90) }))
+  await page.reload()
+  const bar = (row: string, label: string) => rowOf(page, row).getByRole('progressbar', { name: label }).locator('div')
+  await expect(bar(ALICE_MASKED, '5小时额度用量')).toHaveClass(/bg-success/)
+  await expect(bar(ALICE_MASKED, '7天额度用量')).toHaveClass(/bg-warning/)
+  await expect(bar('bob-team', '5小时额度用量')).toHaveClass(/bg-warning/)
+  await expect(bar('bob-team', '7天额度用量')).toHaveClass(/bg-destructive/)
+  // 整张表里的额度条颜色只会是这三种，不会再出现琥珀 / 主色 / 其他色相
+  const classes = await page.getByRole('progressbar').evaluateAll((nodes) => nodes.map((node) => node.firstElementChild?.className ?? ''))
+  expect(classes.length).toBeGreaterThanOrEqual(6)
+  for (const name of classes) {
+    expect(name, name).toMatch(/\bbg-(success|warning|destructive)\b/)
+    expect(name, name).not.toMatch(/\bbg-(amber|primary|info|blue|sky|emerald|green|red|yellow|orange|purple)\b/)
+  }
+})
+
+test('渠道列表：测试 / 编辑 / 更多是图标按钮：悬停是便签提示，测试进行中转圈并禁用，结果提示里的渠道名已遮住', async ({ page }) => {
+  await prepare(page)
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/admin/channels/1/test', async (route) => {
+    await gate
+    await route.fulfill({ json: { ok: true, latency_ms: 321 } })
+  })
+  const alice = rowOf(page, ALICE_MASKED)
+  const test = alice.getByRole('button', { name: '测试', exact: true })
+  const edit = alice.getByRole('button', { name: '编辑', exact: true })
+  const more = alice.getByRole('button', { name: '更多操作', exact: true })
+  // 三个一样大的图标按钮并排
+  const boxes = await Promise.all([test, edit, more].map(async (button) => (await button.boundingBox())!))
+  for (const box of boxes) {
+    expect(box.width).toBe(32)
+    expect(box.height).toBe(32)
+  }
+  expect(Math.abs(boxes[0].y - boxes[1].y)).toBeLessThanOrEqual(1)
+  expect(Math.abs(boxes[1].y - boxes[2].y)).toBeLessThanOrEqual(1)
+  // 悬停：便签样式的提示，字是按钮的名字
+  await edit.hover()
+  const tip = page.getByRole('tooltip')
+  await expect(tip).toHaveText('编辑')
+  await expect(tip).toHaveClass(/\bnote\b/)
+  await page.mouse.move(0, 0)
+  // 点测试：进行中按钮禁用并转圈，别的行不受影响
+  await test.click()
+  await expect(test).toBeDisabled()
+  await expect(test).toHaveAttribute('aria-busy', 'true')
+  await expect(test.locator('svg.animate-spin')).toBeVisible()
+  await expect(rowOf(page, BOB_MASKED).getByRole('button', { name: '测试', exact: true })).toBeEnabled()
+  release()
+  // 结果 toast 的标题是渠道名：遮过的，不带完整邮箱
+  const toast = page.getByText('321', { exact: false }).first()
+  await expect(toast).toBeVisible()
+  await expect(page.getByText(ALICE_MASKED).first()).toBeVisible()
+  await expect(test).toBeEnabled()
+  expect(await page.locator('body').innerText()).not.toContain('alice.dev@gmail.com')
+})
+
+test('渠道列表：订阅账号处处遮住中间部分——名字、账号行、悬停标题、勾选名、删除确认、试聊抽屉', async ({ page }) => {
+  await prepare(page)
+  const bob = rowOf(page, 'bob-team')
+  const alice = rowOf(page, ALICE_MASKED)
+  const carol = rowOf(page, CAROL_MASKED)
+  // 名字（常常就是邮箱）：遮过，悬停标题也是遮过的
+  await expect(alice.getByText(ALICE_MASKED, { exact: true })).toHaveAttribute('title', ALICE_MASKED)
+  // 邮箱不是渠道名时另起一行的账号
+  await expect(bob.getByText(BOB_MASKED, { exact: true })).toBeVisible()
+  await expect(bob.locator(`[title="${BOB_MASKED}"]`)).toHaveCount(1)
+  // 勾选与开关的读屏名也是遮过的
+  await expect(alice.getByRole('checkbox', { name: `勾选 ${ALICE_MASKED}` })).toBeVisible()
+  // 整页文字里没有任何一个完整邮箱
+  const text = await page.locator('body').innerText()
+  for (const raw of ['alice.dev@gmail.com', 'bob@hot-shot.com', 'carol@outlook.com']) expect(text).not.toContain(raw)
+  const html = await page.locator('table').innerHTML()
+  for (const raw of ['alice.dev@gmail.com', 'bob@hot-shot.com', 'carol@outlook.com']) expect(html).not.toContain(raw)
+
+  // 试聊抽屉：标题、头部、账号下拉都是遮过的（carol 有两把 key，下拉里列账号）
+  await carol.getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '测试输出', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer).toContainText(`账号测试 · ${CAROL_MASKED}`)
+  const accounts = drawer.getByLabel('账号', { exact: true })
+  await expect(accounts.locator('option')).toHaveText(['按调度顺序任选可用账号', `#31 · ${CAROL_MASKED}`, '#32'])
+  expect(await drawer.innerText()).not.toContain('carol@outlook.com')
+  await page.keyboard.press('Escape')
+
+  // 删除确认：标题与要手输的文字都是遮过的，看到什么输什么
+  await alice.getByRole('button', { name: '更多操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '删除', exact: true }).click()
+  const confirm = page.getByRole('alertdialog')
+  await expect(confirm).toContainText(`删除 ${ALICE_MASKED}？`)
+  await expect(confirm.getByRole('button', { name: '删除', exact: true })).toBeDisabled()
+  await confirm.locator('#confirm-text').fill(ALICE_MASKED)
+  await expect(confirm.getByRole('button', { name: '删除', exact: true })).toBeEnabled()
+  expect(await confirm.innerText()).not.toContain('alice.dev@gmail.com')
+})
+
+test('渠道列表：渠道名只有被识别为账号名才遮中间——邮箱、或等于自己 key 的账号标识；其余渠道名原样', async ({ page }) => {
+  await prepare(page)
+  const named = (id: number, name: string, accountLabel?: string) => ({
+    ...base, id, name, provider: 'anthropic_max', api_base: 'https://api.anthropic.com', status: 1, models: ['claude-sonnet-4-5'],
+    keys: [key({ id: id * 10, ...(accountLabel ? { account_label: accountLabel } : {}) })],
+  })
+  const rows = [
+    named(11, 'dave-claude-pro', 'dave-claude-pro'), // 名字等于账号标识（账号不是邮箱）→ 遮
+    named(12, 'team-shared', 'erin@hot-shot.com'), // 名字是普通名字，账号是邮箱 → 名字原样，账号行遮
+    named(13, 'frank@gmail.com'), // 名字本身是邮箱（没记录账号标识）→ 遮
+    named(14, 'openai-main'), // 普通渠道名 → 原样
+  ]
+  await page.route('**/admin/channels?*', (route) => route.fulfill({ json: { data: rows, total: rows.length, enabled: rows.length } }))
+  await page.reload()
+  const table = page.getByRole('table')
+  await expect(table.getByText('da***ro', { exact: true })).toBeVisible()
+  await expect(table.getByText('team-shared', { exact: true })).toBeVisible()
+  await expect(table.getByText('e***n@hot-shot.com', { exact: true })).toBeVisible() // 另起一行的账号
+  await expect(table.getByText('f***k@gmail.com', { exact: true })).toBeVisible()
+  await expect(table.getByText('openai-main', { exact: true })).toBeVisible()
+  const html = await table.innerHTML()
+  for (const raw of ['dave-claude-pro', 'erin@hot-shot.com', 'frank@gmail.com']) expect(html, raw).not.toContain(raw)
+})
+

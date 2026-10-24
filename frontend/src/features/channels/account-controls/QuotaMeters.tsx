@@ -6,19 +6,12 @@ import { useQuotaLabels } from './use-quota-labels'
 
 type Quota = NonNullable<UsageResponse['quotas'][number]['quota']>
 
-/// 用量越接近上限越醒目：70% 起转黄，90% 起转红（与渠道额度阈值缺省 90% 对齐）。
-function level(percent: number) {
+/// 红黄绿三种颜色表示还剩多少，列表行和抽屉里的条共用，不再按窗口另配颜色：
+/// 用量不到 70%（剩得还多）绿，70% 起（快用完了）黄，90% 起（几乎没了，与渠道额度阈值缺省 90% 对齐）红。
+export function quotaTone(percent: number) {
   if (percent >= 90) return { bar: 'bg-destructive', text: 'text-destructive' }
   if (percent >= 70) return { bar: 'bg-warning', text: 'text-warning' }
   return { bar: 'bg-success', text: 'text-foreground' }
-}
-
-/// 列表行的额度条：常态颜色按窗口分——5 小时一条琥珀、其余（7 天等）主色，两条一眼对得上号；
-/// 越接近上限越醒目，70% 起转黄、90% 起转红，与抽屉里的条同一阈值。
-function listLevel(percent: number, secs: number | null) {
-  if (percent >= 90) return { bar: 'bg-destructive', text: 'text-destructive' }
-  if (percent >= 70) return { bar: 'bg-warning', text: 'text-warning' }
-  return { bar: secs === 18_000 ? 'bg-amber-700 dark:bg-amber-500' : 'bg-primary', text: 'text-foreground' }
 }
 
 /// 订阅额度各窗口的用量条。`limits` 是渠道配置的百分比上限（窗口秒数 → 百分比），
@@ -57,7 +50,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
         {quota.windows.map((window) => {
           const stale = window.resets_at !== null && window.resets_at * 1000 <= now
           const percent = Math.min(100, Math.max(0, window.used_percent))
-          const tone = listLevel(percent, window.window_secs)
+          const tone = quotaTone(percent)
           const label = windowLabel(window.window_secs)
           return (
             <div key={window.name} className="contents">
@@ -91,7 +84,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
         const stale = window.resets_at !== null && window.resets_at * 1000 <= now
         const percent = Math.min(100, Math.max(0, window.used_percent))
         const limit = window.window_secs !== null ? limits?.[String(window.window_secs)] : undefined
-        const tone = level(percent)
+        const tone = quotaTone(percent)
         const label = windowLabel(window.window_secs)
         return (
           <div key={window.name} className="flex flex-col gap-1">

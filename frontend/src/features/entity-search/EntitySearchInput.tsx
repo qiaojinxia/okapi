@@ -7,6 +7,7 @@ import { usePermission } from '@/hooks/use-auth'
 import { apiFetch } from '@/lib/api'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
+import { maskEmails } from '@/lib/mask'
 
 export type EntityKind = 'user' | 'api_key' | 'channel'
 export interface EntityOption { id: number; name: string; description?: string }
@@ -88,6 +89,8 @@ function EntitySearchField({ kind, value, onChange, onChoose, knownOptions = [],
           : [row.username || (row.user_id ? t('analytics:entityOwnerId', { id: row.user_id }) : undefined), row.key_prefix ? `${row.key_prefix}…` : undefined].filter(Boolean).join(' · '),
     })),
   ].filter((option) => Number.isSafeInteger(option.id) && option.id > 0).map((option) => [String(option.id), option])).values()]
+    // 渠道名常常就是订阅账号的邮箱：下拉里的、已选回填到输入框的、提示句里的都遮住中间（用户 / 密钥不遮）
+    .map((option) => kind === 'channel' ? { ...option, name: maskEmails(option.name) } : option)
   const selected = options.find((option) => String(option.id) === term)
   const hint = selected ? t('admin:userFilterSelected', { name: selected.name, id: selected.id }) : undefined
   const pendingChoice = !validEntityId(value) && !malformedEntityId(value) && !props['aria-invalid']

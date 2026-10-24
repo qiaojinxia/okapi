@@ -12,6 +12,7 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { qk } from '@/lib/query-keys'
 import type { AssignmentRow, ProxyGroupRow } from './types'
+import { maskEmails } from '@/lib/mask'
 
 /// 固定分配明细：「哪个账号（key）在哪个出口上」一览，可手动改分到组内另一个代理
 /// （目标满了后端回 409 proxy_full）。经全局默认继承该组的渠道也列在这里。
@@ -75,7 +76,7 @@ export function AssignmentsDrawer({ group, onClose }: { group: ProxyGroupRow; on
               <Tr key={row.key_id}>
                 <Td>
                   <span className="flex flex-col">
-                    <span className="truncate font-medium">{row.channel_name}</span>
+                    <span className="truncate font-medium">{maskEmails(row.channel_name)}</span>
                     <span className="text-xs text-muted-foreground tabular-nums">
                       #{row.channel_id} · key #{row.key_id}
                     </span>

@@ -1,9 +1,11 @@
 import {
+  Activity,
   Copy,
+  Ellipsis,
   ExternalLink,
   Globe,
-  Loader2,
   MessageSquareText,
+  Pencil,
   Plus,
   Power,
   PowerOff,
@@ -18,6 +20,7 @@ import { useTranslation } from 'react-i18next'
 import type { ChannelBalance, ChannelRow } from '@/features/channels/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
 import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
@@ -56,12 +59,17 @@ import { useDraft } from '@/hooks/use-draft'
 import { usePagination } from '@/hooks/use-pagination'
 import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { maskAccount, maskChannelName } from '@/lib/mask'
 import { formatUpstreamBalance } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { oneOf, text } from '@/lib/search-params'
 import { useConfirm } from '@/components/ui/confirm'
+import { cn } from '@/lib/utils'
 
 const routeApi = getRouteApi('/admin/channels')
+
+/// 界面上显示的渠道名：渠道名就是订阅账号（邮箱，或等于某把 key 的账号标识）时遮住中间，其余原样。
+const shownName = (c: ChannelRow) => maskChannelName(c.name, c.keys.map((k) => k.account_label))
 
 /// 列表接口的一页：`total` / `enabled` 都是过滤集内的计数（未筛选时即全站）。
 interface ChannelPage {
@@ -186,17 +194,17 @@ export function ChannelsPage() {
       return probeOne(c.id, c.models[0])
     },
     onSuccess: (r, c) => {
-      if (r.ok) toast.success(c.name, t('admin:testOk', { ms: r.latency_ms ?? 0 }))
+      if (r.ok) toast.success(shownName(c), t('admin:testOk', { ms: r.latency_ms ?? 0 }))
       else if (r.scope === 'model')
         toast.error(
-          c.name,
+          shownName(c),
           t('admin:testModelFail', {
             model: c.models[0] ?? '',
             code: r.error_code ?? String(r.http_status ?? ''),
             detail: (r.upstream_body ?? '').slice(0, 120),
           }),
         )
-      else toast.error(c.name, t('admin:testFail', { code: r.error_code ?? 'unknown' }))
+      else toast.error(shownName(c), t('admin:testFail', { code: r.error_code ?? 'unknown' }))
       // 结果已在服务端留痕，刷新列表让"最近测试"列跟上
       invalidate()
     },
@@ -212,7 +220,7 @@ export function ChannelsPage() {
     },
     onSuccess: (r, c) => {
       toast.success(
-        c.name,
+        shownName(c),
         t('admin:balanceResult', {
           amount: formatUpstreamBalance(r.balance_micro, r.currency, i18n.language),
           probe: r.probe,
@@ -429,7 +437,7 @@ export function ChannelsPage() {
               <Tr key={c.id} selected={picked.has(c.id)} className="group/row">
                 <Td className="py-3.5 pr-0 pl-5">
                   <Checkbox
-                    srLabel={t('admin:batchPick', { name: c.name })}
+                    srLabel={t('admin:batchPick', { name: shownName(c) })}
                     checked={picked.has(c.id)}
                     onChange={() => togglePick(c.id)}
                   />
@@ -482,35 +490,34 @@ export function ChannelsPage() {
                   <div className="flex flex-col items-end gap-3">
                     <Switch
                       hideLabel
-                      label={t('admin:channelScheduleToggle', { name: c.name })}
+                      label={t('admin:channelScheduleToggle', { name: shownName(c) })}
                       checked={c.status === 1}
                       disabled={setStatus.isPending}
                       onChange={(on) => setStatus.mutate({ id: c.id, status: on ? 1 : 2 })}
                     />
-                    <div className="flex items-center gap-0.5">
-                      <button
-                        type="button"
-                        className={ROW_ACTION}
-                        disabled={testingId === c.id}
+                    {/* 图标动作：平时淡一档，悬停整行变深，悬停自己才有底色；名字在悬停提示（便签）与读屏名里。
+                        「更多」菜单的触发器不套悬停提示：提示常驻时 Esc 会先关提示，菜单得按两次才关 */}
+                    <div className="flex items-center gap-1">
+                      <IconButton
+                        icon={Activity}
+                        label={t('admin:testChannel')}
+                        loading={testingId === c.id}
+                        className={ROW_ICON}
                         onClick={() => test.mutate(c)}
-                      >
-                        {testingId === c.id && <Loader2 aria-hidden className="h-3 w-3 animate-spin" />}
-                        {t('admin:testChannel')}
-                      </button>
-                      <button
-                        type="button"
-                        className={ROW_ACTION}
+                      />
+                      <IconButton
+                        icon={Pencil}
+                        label={t('common:edit')}
+                        className={ROW_ICON}
                         onClick={() => setDrawer({ mode: 'edit', channel: c })}
-                      >
-                        {t('common:edit')}
-                      </button>
+                      />
                       <Menu
                         strategy="fixed"
                         className="min-w-44"
                         trigger={
-                          <button type="button" className={ROW_ACTION} aria-label={t('admin:channelMoreActions')}>
-                            <span aria-hidden className="tracking-widest">···</span>
-                          </button>
+                          <Button size="icon" variant="ghost" aria-label={t('admin:channelMoreActions')} className={cn(ICON_BUTTON_CLASS, ROW_ICON)}>
+                            <Ellipsis />
+                          </Button>
                         }
                       >
                         <MenuItem icon={MessageSquareText} onSelect={() => setTrying(c)}>
@@ -530,9 +537,10 @@ export function ChannelsPage() {
                           destructive
                           onSelect={() =>
                             confirm({
-                              title: t('common:confirmDeleteTitle', { name: c.name }),
+                              title: t('common:confirmDeleteTitle', { name: shownName(c) }),
                               description: t('common:confirmChannelDelete'),
-                              requireText: c.name,
+                              // 对话框里显示的是遮过的名字，要输入的也是它：看到什么就输入什么
+                              requireText: shownName(c),
                               onConfirm: () => remove.mutate(c.id),
                             })
                           }
@@ -604,14 +612,15 @@ export function ChannelsPage() {
   )
 }
 
-/// 行内文字动作（测试 / 编辑 / ···）：贴着数据的轻量文字按钮，悬停才有底色。
-const ROW_ACTION =
-  'inline-flex h-9 items-center gap-1 rounded-md px-1.5 text-[13px] text-foreground/80 transition-colors outline-none select-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 disabled:pointer-events-none disabled:opacity-50 md:h-7'
+/// 行内图标动作的配色：平时比普通图标淡一档，悬停所在行时变深，悬停到自己才有底色。
+const ROW_ICON =
+  'rounded-lg text-muted-foreground/75 group-hover/row:text-foreground/80 hover:bg-accent hover:text-foreground'
 
 /// 渠道格：ID + 名称、地址、平台 / 档位胶囊 + 模型数与优先级。
 ///
 /// 名字与地址同宽截断（hover 见全名）：长名字不该决定整表宽度。订阅账号的邮箱通常就是渠道名，
 /// 只在与名称不同时另起一行补出（多个账号时显示首个并标出其余数量，悬停看全部）。
+/// 订阅账号（包括被当作渠道名的）一律遮住中间部分再显示；渠道名不是账号就原样，见 `lib/mask.ts`。
 /// 供应商控制台直达（new-api #7146）：查余额 / 状态时不必再去搜网址；平时不抢眼，
 /// 悬停整行或键盘聚焦时才现身，触屏设备常显。
 function ChannelNameCell({ channel: c }: { channel: ChannelRow }) {
@@ -625,15 +634,15 @@ function ChannelNameCell({ channel: c }: { channel: ChannelRow }) {
     <div className="flex w-0 min-w-full flex-col gap-0.5">
       <span className="flex min-w-0 items-baseline gap-1.5">
         <span className="shrink-0 text-xs text-muted-foreground/60 tabular-nums">#{c.id}</span>
-        <span className="truncate text-sm" title={c.name}>{c.name}</span>
+        <span className="truncate text-sm" title={shownName(c)}>{shownName(c)}</span>
       </span>
       <span className="truncate font-mono text-xs text-muted-foreground/80" title={c.api_base ?? undefined}>
         {c.api_base ?? '—'}
       </span>
       {extra.length > 0 && (
-        <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground" title={accounts.join('\n')}>
+        <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground" title={accounts.map(maskAccount).join('\n')}>
           <span className="shrink-0">{t('admin:channelAccount')}</span>
-          <span className="truncate">{extra[0]}</span>
+          <span className="truncate">{maskAccount(extra[0])}</span>
           {extra.length > 1 && <span className="shrink-0">+{extra.length - 1}</span>}
         </span>
       )}

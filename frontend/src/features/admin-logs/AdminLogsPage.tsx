@@ -58,6 +58,7 @@ import { qk } from '@/lib/query-keys'
 import { TokenBreakdown } from '@/features/logs/TokenBreakdown'
 import { ExtraMetrics } from '@/features/logs/LogSummary'
 import type { LogStats, TokenDetails, LogDiagnostics, Snapshot } from '@/features/logs/types'
+import { maskEmails } from '@/lib/mask'
 
 /// 检索条件（受控草稿 → 点查询才提交）。
 ///
@@ -690,8 +691,8 @@ function LogTable({ applied, pager, q }: { applied: Draft; pager: Pager; q: Retu
                     {r.username || `ID ${r.user_id}`}
                   </Td>
                   <Td className="truncate font-mono text-xs" title={r.model}>{r.model}</Td>
-                  <Td className="truncate text-xs" title={r.channel_name || undefined}>
-                    {r.channel_name || (r.channel_id > 0 ? `ID ${r.channel_id}` : t('admin:dashboardUnassignedChannel'))}
+                  <Td className="truncate text-xs" title={r.channel_name ? maskEmails(r.channel_name) : undefined}>
+                    {r.channel_name ? maskEmails(r.channel_name) : (r.channel_id > 0 ? `ID ${r.channel_id}` : t('admin:dashboardUnassignedChannel'))}
                   </Td>
                   <Td className="py-1"><LogTokenUsage row={r} /></Td>
                   <Td numeric className="whitespace-nowrap font-medium">{logMoney(r.amount_micro, locale)}</Td>
@@ -910,7 +911,7 @@ function RowDetail({ row }: { row: LogRow }) {
         {[
           { label: t('analytics:dimUser'), icon: User, name: row.username, id: row.user_id },
           { label: t('analytics:dimApiKey'), icon: KeyRound, name: row.key_name || (row.key_prefix ? t('flow:unnamed_api_key') : undefined), id: row.api_key_id, prefix: row.key_prefix },
-          { label: t('analytics:dimChannel'), icon: Server, name: row.channel_name || (row.channel_id <= 0 ? t('admin:dashboardUnassignedChannel') : undefined), id: row.channel_id },
+          { label: t('analytics:dimChannel'), icon: Server, name: row.channel_name ? maskEmails(row.channel_name) : (row.channel_id <= 0 ? t('admin:dashboardUnassignedChannel') : undefined), id: row.channel_id },
         ].map((object) => <div data-slot="detail-object" key={object.label} className="min-w-0 space-y-1 rounded-xl border border-border bg-card p-3">
           <dt className="flex items-center gap-1.5 text-xs leading-5 text-muted-foreground"><span aria-hidden className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-primary/8 text-primary"><object.icon className="h-3 w-3" /></span>{object.label}</dt>
           <dd className="break-words text-[13px] leading-5 font-medium [overflow-wrap:anywhere]">{object.name || t('admin:logsNameUnavailable')}</dd>

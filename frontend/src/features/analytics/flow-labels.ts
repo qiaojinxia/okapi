@@ -1,5 +1,6 @@
 import type { TFunction } from 'i18next'
 import type { FlowNode } from './types'
+import { maskEmails } from '@/lib/mask'
 
 const ENTITY_STAGES = ['user', 'api_key', 'channel']
 export function flowIdentity(node: FlowNode, t: TFunction) {
@@ -19,7 +20,8 @@ export function flowIdentity(node: FlowNode, t: TFunction) {
   const context = [node.owner_name, node.key_prefix ? `${node.key_prefix}…` : null, node.provider].filter(Boolean).join(' · ')
   const status = node.entity_status === 'deleted' ? t('flow:deleted') : missing ? t('flow:missing') : ''
   const detail = [id, context, status].filter(Boolean).join(' · ')
-  return { primary, detail, id, missing, deleted: node.entity_status === 'deleted' }
+  // 渠道名常常就是订阅账号的邮箱：流向图的节点名、图例、明细表都从这里取，遮一次就处处遮住
+  return { primary: node.stage === 'channel' ? maskEmails(primary) : primary, detail, id, missing, deleted: node.entity_status === 'deleted' }
 }
 
 // Approximate rendered width instead of truncating CJK and Latin labels at the same character count.

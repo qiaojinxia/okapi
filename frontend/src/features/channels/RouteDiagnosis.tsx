@@ -13,6 +13,7 @@ import { describeError } from '@/lib/i18n'
 import { formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { poolOptions } from '@/features/pools/pool-options'
+import { maskEmails } from '@/lib/mask'
 
 interface DiagKeyReport {
   key_id: number
@@ -263,7 +264,7 @@ export function RouteDiagnosisDrawer({ onClose }: { onClose: () => void }) {
                 {report.channels.map((ch) => (
                   <div key={ch.channel_id} className="rounded-md border border-border p-2">
                     <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <span className="font-medium">{ch.name}</span>
+                      <span className="font-medium">{maskEmails(ch.name)}</span>
                       <Badge variant="muted">{ch.provider}</Badge>
                       <Badge variant="muted">P{ch.priority}</Badge>
                       {ch.pools.map((p) => (

@@ -16,6 +16,7 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatMoney } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { maskEmails } from '@/lib/mask'
 
 /// 后端 `settings.margin_breaker` 的生效值（缺键已按缺省填好、越界已夹取）。
 interface BreakerConfig {
@@ -240,7 +241,7 @@ export function MarginBreakerCard() {
                     <div className="flex flex-col">
                       <span className="font-mono text-xs">{r.group_code}</span>
                       <span className="text-xs text-muted-foreground">
-                        #{r.channel_id} {r.channel_name ?? ''}
+                        #{r.channel_id} {maskEmails(r.channel_name ?? '')}
                       </span>
                     </div>
                   </Td>

@@ -12,6 +12,7 @@ import type { EntityKind, EntityOption } from '@/features/entity-search/EntitySe
 import { FILTER_DIMS, cleanSearch } from '@/features/analytics/search'
 import type { FilterDim } from '@/features/analytics/search'
 import type { ScopeEcho } from '@/features/analytics/types'
+import { maskEmails } from '@/lib/mask'
 
 /// 过滤条：一个"维度 + 值"输入器 + 生效中的过滤芯片。
 ///
@@ -79,7 +80,7 @@ export function FilterBar({ search, scope }: { search: AnalyticsSearch; scope?: 
   if (search.channel_id !== undefined) {
     chips.push({
       dim: 'channel_id',
-      text: (scope?.channel?.id === search.channel_id && scope.channel.name) || `ID ${search.channel_id}`,
+      text: maskEmails((scope?.channel?.id === search.channel_id && scope.channel.name) || `ID ${search.channel_id}`),
     })
   }
   if (search.model !== undefined) chips.push({ dim: 'model', text: search.model })

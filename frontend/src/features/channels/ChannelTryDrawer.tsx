@@ -11,6 +11,7 @@ import type { ChannelRow } from '@/features/channels/types'
 import { type ChatUsage, streamSse } from '@/features/playground/chat-stream'
 import { ApiError, getKey } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
+import { maskAccount, maskChannelName } from '@/lib/mask'
 
 type Phase = 'idle' | 'running' | 'done' | 'failed'
 
@@ -18,6 +19,8 @@ type Phase = 'idle' | 'running' | 'done' | 'failed'
 /// 与列表上的「测试」不同——那个只验凭证连通，这里看模型到底能不能正常说话。
 export function ChannelTryDrawer({ channel, onClose }: { channel: ChannelRow; onClose: () => void }) {
   const { t } = useTranslation()
+  // 渠道名就是订阅账号（邮箱，或等于某把 key 的账号标识）时遮住中间，其余原样
+  const shownName = maskChannelName(channel.name, channel.keys.map((k) => k.account_label))
   const [model, setModel] = useState(channel.models[0] ?? '')
   const [keyId, setKeyId] = useState('')
   const [prompt, setPrompt] = useState(() => t('admin:channelTryPromptDefault'))
@@ -83,7 +86,7 @@ export function ChannelTryDrawer({ channel, onClose }: { channel: ChannelRow; on
       open
       onClose={onClose}
       size="lg"
-      title={t('admin:channelTryTitle', { name: channel.name })}
+      title={t('admin:channelTryTitle', { name: shownName })}
       description={t('admin:channelTryDescription')}
       footer={
         <>
@@ -100,7 +103,7 @@ export function ChannelTryDrawer({ channel, onClose }: { channel: ChannelRow; on
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <ProviderChip provider={channel.provider} />
           <span className="text-muted-foreground tabular-nums">#{channel.id}</span>
-          <span className="font-medium">{channel.name}</span>
+          <span className="font-medium">{shownName}</span>
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
@@ -113,7 +116,7 @@ export function ChannelTryDrawer({ channel, onClose }: { channel: ChannelRow; on
               <Label htmlFor="try-key">{t('admin:channelTryAccount')}</Label>
               <Select id="try-key" value={keyId} onChange={setKeyId} options={[
                 { value: '', label: t('admin:channelTryAnyAccount') },
-                ...channel.keys.map((k) => ({ value: String(k.id), label: k.account_label ? `#${k.id} · ${k.account_label}` : `#${k.id}` })),
+                ...channel.keys.map((k) => ({ value: String(k.id), label: k.account_label ? `#${k.id} · ${maskAccount(k.account_label)}` : `#${k.id}` })),
               ]} />
             </div>
           )}

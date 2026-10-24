@@ -19,6 +19,7 @@ import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney, formatMoneyAggregate, formatRatio } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
+import { maskEmails } from '@/lib/mask'
 
 /// 某维度已被过滤时，再按它拆分只会得到一行——该选项置灰。
 function dimFiltered(dim: BreakdownDim, s: AnalyticsSearch): boolean {
@@ -215,8 +216,8 @@ export function BreakdownView({ search }: { search: AnalyticsSearch }) {
                   </Td>
                   <Td>
                     <div className="flex max-w-64 flex-col leading-tight">
-                      <span className="truncate font-medium" title={row.label ?? row.key}>
-                        {row.label || row.key || t('analysis:notCollected')}
+                      <span className="truncate font-medium" title={by === 'channel' ? maskEmails(row.label ?? row.key) : row.label ?? row.key}>
+                        {by === 'channel' ? maskEmails(row.label || row.key || t('analysis:notCollected')) : row.label || row.key || t('analysis:notCollected')}
                       </span>
                       {secondary(row) !== null && (
                         <span className="truncate text-xs text-muted-foreground">{secondary(row)}</span>

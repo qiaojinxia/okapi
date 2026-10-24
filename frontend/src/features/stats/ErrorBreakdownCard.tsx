@@ -11,6 +11,7 @@ import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { usePagination } from '@/hooks/use-pagination'
+import { maskEmails } from '@/lib/mask'
 
 interface ErrorRow {
   error_code: string
@@ -98,7 +99,7 @@ export function ErrorBreakdownCard({ days }: { days: number }) {
                     )}
                   </Td>
                   <Td className="max-w-32 truncate text-xs">
-                    {r.top_channel_name || (r.top_channel_id > 0 ? `#${r.top_channel_id}` : '—')}
+                    {maskEmails(r.top_channel_name || (r.top_channel_id > 0 ? `#${r.top_channel_id}` : '—'))}
                   </Td>
                   <Td className="font-mono text-xs">{r.top_model || '—'}</Td>
                 </Tr>

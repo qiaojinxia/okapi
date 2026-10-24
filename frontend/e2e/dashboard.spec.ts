@@ -1382,6 +1382,26 @@ test('Dashboard 排行直接展示请求量，免费调用有数量且不能伪�
   expect(requests.filter((url) => url.startsWith('/admin/logs'))).toHaveLength(0)
 })
 
+test('Dashboard 渠道排行：渠道名是邮箱就遮住中间，普通渠道名与模型排行原样', async ({ page }) => {
+  await prepare(page)
+  await page.route('**/admin/stats/breakdown?*', (route) => route.fulfill({ json: {
+    total_amount_micro: 3_000_000, total_requests: 30, data: [
+      { rank: 1, key: '1', label: 'harry.potter@gmail.com', channel_id: 1, amount_micro: 2_000_000, share_bp: 6667, requests: 20 },
+      { rank: 2, key: '2', label: 'openai-main', channel_id: 2, amount_micro: 1_000_000, share_bp: 3333, requests: 10 },
+    ],
+  } }))
+  await page.goto('/admin?days=30')
+  await showDistribution(page, 'channel')
+  const channels = page.getByRole('region', { name: '渠道消费排行', exact: true })
+  await expect(channels.getByRole('link', { name: /ha\*\*\*er@gmail\.com/ })).toBeVisible()
+  await expect(channels).toContainText('openai-main')
+  expect(await channels.innerText()).not.toContain('harry.potter@gmail.com')
+  expect(await channels.innerHTML()).not.toContain('harry.potter@gmail.com')
+  // 只有渠道维度遮：同样的行放进模型排行，label 是模型名，原样
+  await showDistribution(page, 'model')
+  await expect(page.getByRole('region', { name: '模型消费排行', exact: true })).toContainText('harry.potter@gmail.com')
+})
+
 test('Dashboard 站点速览直接呈现资源增量和异常数，停用与无密钥同时展示且摘要口径一致', async ({ page }) => {
   const requests = await prepare(page)
   await page.setViewportSize({ width: 1366, height: 768 })

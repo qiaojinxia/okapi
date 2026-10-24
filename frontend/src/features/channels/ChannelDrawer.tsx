@@ -49,6 +49,7 @@ import { describeError } from '@/lib/i18n'
 import { parseInt32 } from '@/lib/int32'
 import { usePermission } from '@/hooks/use-auth'
 import { qk } from '@/lib/query-keys'
+import { maskChannelName } from '@/lib/mask'
 
 const EDIT_TABS = ['conn', 'models', 'sched', 'behavior'] as const
 type EditTab = (typeof EDIT_TABS)[number]
@@ -327,7 +328,7 @@ export function ChannelDrawer({
     <Drawer
       open
       onClose={onClose}
-      title={isEdit ? t('admin:editChannel', { name: channel.name }) : t('admin:createChannel')}
+      title={isEdit ? t('admin:editChannel', { name: maskChannelName(channel.name, channel.keys.map((k) => k.account_label)) }) : t('admin:createChannel')}
       description={t('admin:channelDrawerDesc')}
       footer={
         <>

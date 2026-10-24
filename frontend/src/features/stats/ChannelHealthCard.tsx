@@ -13,6 +13,7 @@ import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount, formatMoney, formatTokensPerSec } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
 import { usePagination } from '@/hooks/use-pagination'
+import { maskEmails } from '@/lib/mask'
 
 export function healthVariant(bp: number): 'success' | 'muted' | 'destructive' {
   if (bp >= BAD_BP) return 'destructive'
@@ -67,7 +68,7 @@ export function ChannelHealthCard({ days }: { days: number }) {
                       }}
                       className="underline decoration-dotted hover:text-foreground"
                     >
-                      {c.name || `#${c.channel_id}`}
+                      {maskEmails(c.name || `#${c.channel_id}`)}
                     </Link>
                   </Td>
                   <Td>

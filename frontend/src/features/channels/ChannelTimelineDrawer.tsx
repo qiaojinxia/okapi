@@ -26,6 +26,7 @@ import { apiFetch } from '@/lib/api'
 import { describeError } from '@/lib/i18n'
 import { formatBp, formatCount } from '@/lib/money'
 import { qk } from '@/lib/query-keys'
+import { maskEmails } from '@/lib/mask'
 
 const RANGES = [6, 24, 168] as const
 type Range = (typeof RANGES)[number]
@@ -139,7 +140,7 @@ export function ChannelTimelineDrawer({
       open={open}
       onClose={onClose}
       size="lg"
-      title={t('admin:timelineTitle', { name: channel.name })}
+      title={t('admin:timelineTitle', { name: maskEmails(channel.name) })}
       description={t('admin:timelineDesc')}
       footer={
         <div className="flex w-full flex-wrap items-center justify-between gap-2">

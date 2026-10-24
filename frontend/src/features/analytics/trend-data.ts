@@ -1,6 +1,7 @@
 import type { ChartPoint, ChartSeries } from '@/components/ui/time-chart'
 import type { CubeMetrics, StackedBucket, TrendBucket, TrendResp } from './types'
 import { chartColor, OTHER_COLOR, OTHER_KEY } from '../../lib/chart'
+import { maskEmails } from '@/lib/mask'
 
 export const TREND_METRICS = ['amount', 'requests', 'tokens', 'error_rate', 'cache', 'latency', 'ttft', 'throughput'] as const
 export type TrendMetric = typeof TREND_METRICS[number]
@@ -46,7 +47,9 @@ export function trendChart(resp: TrendResp, metric: TrendMetric, label: string, 
   const buckets = keys(resp)
   if (resp.stack) {
     const source = resp.series ?? []
-    const series: ChartSeries[] = source.map((s, i) => ({ key: `s${i}`, label: s.key === OTHER_KEY ? other : seriesLabel(s.key, s.label, unknown), color: s.key === OTHER_KEY ? OTHER_COLOR : chartColor(i) }))
+    // 按渠道堆叠时图例是渠道名（常常就是订阅账号的邮箱），遮住中间
+    const named = (s: (typeof source)[number]) => resp.stack === 'channel' ? maskEmails(seriesLabel(s.key, s.label, unknown)) : seriesLabel(s.key, s.label, unknown)
+    const series: ChartSeries[] = source.map((s, i) => ({ key: `s${i}`, label: s.key === OTHER_KEY ? other : named(s), color: s.key === OTHER_KEY ? OTHER_COLOR : chartColor(i) }))
     const index = new Map((resp.data as StackedBucket[]).map((row) => [row.bucket, row]))
     const data: ChartPoint[] = buckets.map((bucket) => {
       const point: ChartPoint = { bucket }

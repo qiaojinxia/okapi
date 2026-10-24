@@ -15,6 +15,11 @@ interface IconButtonProps {
   className?: string
 }
 
+/// 图标按钮的尺寸与配色：触屏 44px、桌面 32px；平时灰、悬停转前景色。
+/// 作为菜单触发器的图标按钮（不能再包一层 Tooltip）直接用它，免得与 `IconButton` 长得不一样。
+export const ICON_BUTTON_CLASS =
+  'h-11 w-11 shrink-0 text-muted-foreground hover:text-foreground md:h-8 md:w-8 [&_svg]:h-4 [&_svg]:w-4'
+
 /// 图标动作按钮。
 ///
 /// 表格行动作此前是一排文字按钮（停用/测试/编辑/复制/删除），在被其他列挤窄后
@@ -45,7 +50,7 @@ export function IconButton({
           onClick()
         }}
         className={cn(
-          'h-11 w-11 shrink-0 text-muted-foreground hover:text-foreground md:h-8 md:w-8 [&_svg]:h-4 [&_svg]:w-4',
+          ICON_BUTTON_CLASS,
           variant === 'destructive' && 'hover:bg-destructive/10 hover:text-destructive',
           className,
         )}

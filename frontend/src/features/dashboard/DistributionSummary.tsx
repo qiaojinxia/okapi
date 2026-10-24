@@ -17,6 +17,7 @@ import { TokenSummary } from './TokenSummary'
 import type { DateRange } from '@/components/ui/date-range'
 import { dashboardPeriodLabel, dashboardSearch } from './period'
 import { HEAD_LINK } from './distribution-layout'
+import { maskEmails } from '@/lib/mask'
 
 function Ranking({ days, range, by, metric, onMetricChange }: { days: number; range?: DateRange | null; by: 'model' | 'channel'; metric: RankingMetric; onMetricChange: (metric: RankingMetric) => void }) {
   const { t, i18n } = useTranslation()
@@ -34,7 +35,10 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
   const shares = visible.map((row) => metric === 'amount' ? row.share_bp : metric === 'requests' ? row.request_share_bp : row.token_share_bp)
   const topShare = total != null && total > 0 && shares.every((share) => share != null) ? Math.min(10000, shares.reduce((sum, share) => sum + Math.max(0, share!), 0)) : null
   const rowKey = (row: (typeof rows)[number]) => `${row.rank}:${row.key}`
-  const nameOf = (row: (typeof rows)[number]) => row.label || (by === 'model' ? row.key || t('analysis:notCollected') : (row.channel_id ?? 0) > 0 ? t('admin:dashboardUnnamedChannel', { id: row.channel_id }) : t('admin:dashboardUnassignedChannel'))
+  const nameOf = (row: (typeof rows)[number]) => {
+    const name = row.label || (by === 'model' ? row.key || t('analysis:notCollected') : (row.channel_id ?? 0) > 0 ? t('admin:dashboardUnnamedChannel', { id: row.channel_id }) : t('admin:dashboardUnassignedChannel'))
+    return by === 'channel' ? maskEmails(name) : name
+  }
   return <div role="region" aria-label={title} className="flex min-w-0 flex-col gap-3">
     <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
       <div className="flex min-w-0 flex-col gap-0.5">
