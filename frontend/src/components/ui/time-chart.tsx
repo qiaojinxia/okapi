@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Area, CartesianGrid, Cell, ComposedChart, Bar, LabelList, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Download, Table2 } from 'lucide-react'
@@ -7,7 +7,6 @@ import { Segmented } from '@/components/ui/segmented'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/table'
 import { Pagination } from '@/components/ui/pagination'
 import { clampOffset, DEFAULT_PAGE_SIZE, PAGE_SIZES } from '@/hooks/use-pagination'
-import { useMediaQuery } from '@/hooks/use-media-query'
 import { downloadCsv } from '@/lib/csv'
 import { cn } from '@/lib/utils'
 
@@ -25,7 +24,7 @@ export function chartNumber(n: number, locale: string): string {
   }).format(n)
 }
 
-export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'bar', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis, partialBucket, legendDetail, legendExtra, header }: {
+export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'bar', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis, partialBucket, legendDetail, legendExtra, header, resetKey }: {
   data: ChartPoint[]
   series: ChartSeries[]
   format: (value: number) => string
@@ -51,6 +50,9 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   legendExtra?: React.ReactNode
   /// 卡片头部：拿到图表自带的控件（类型、数据表、导出）后自己决定放哪，控件就不再单独占一行。
   header?: (controls: React.ReactNode) => React.ReactNode
+  /// 变了就把图表自带的状态（类型、数据表、隐藏的序列）重置回缺省，但不重新挂载：
+  /// 头部（口径页签）在图表里面，用 `key` 重挂会让刚按下的页签丢掉键盘焦点。
+  resetKey?: string
 }) {
   const { t, i18n } = useTranslation()
   const id = useId().replaceAll(':', '')
@@ -61,7 +63,24 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const offset = clampOffset(tableOffset, tableLimit, data.length)
   const tableRows = paginateTable ? data.slice(offset, offset + tableLimit) : data
   const [hidden, setHidden] = useState<string[]>([])
-  const showBarLabels = useMediaQuery('(min-width: 640px)')
+  const [seenReset, setSeenReset] = useState(resetKey)
+  if (seenReset !== resetKey) {
+    setSeenReset(resetKey)
+    setType(defaultType)
+    setTable(false)
+    setTableOffset(0)
+    setHidden([])
+  }
+  // 柱顶数值放不放得下取决于绘图区的实际宽度（卡片并排或叠放时同一个视口宽度下宽度不同），所以量它，不按视口断点猜。
+  const plot = useRef<HTMLDivElement>(null)
+  const [plotWidth, setPlotWidth] = useState(0)
+  useEffect(() => {
+    const node = plot.current
+    if (!node) return
+    const observer = new ResizeObserver(([entry]) => setPlotWidth(entry?.contentRect.width ?? 0))
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [table])
   const visible = series.filter((s) => !hidden.includes(s.key))
   const axisMinimum = (right = false) => {
     const onAxis = visible.filter((s) => !!(secondaryAxis && s.axis === 'right') === right)
@@ -73,11 +92,14 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const seriesUnit = (s: ChartSeries) => s.axis === 'right' && secondaryAxis ? secondaryAxis.unit : unit
   const seriesFormat = (s: ChartSeries | undefined) => s?.axis === 'right' && secondaryAxis ? secondaryAxis.format : format
   const seriesLabel = (s: ChartSeries) => secondaryAxis && seriesUnit(s) !== s.label ? `${s.label} (${seriesUnit(s)})` : s.label
-  // 宽屏且柱子不多时直接把数值写在柱顶；堆叠时只在最上面一段标整根柱子的合计。
-  // 手机或密集团（如近 30 天、按小时）留给悬停提示，避免相邻标签互相覆盖；叠着右轴折线时同样不标，数值会被折线盖住。
+  // 柱子不多、每根柱子的位置放得下最长的数值时，直接把数值写在柱顶；堆叠时只在最上面一段标整根柱子的合计。
+  // 放不下（手机、并排窄卡片、近 30 天、按小时）留给悬停提示，避免相邻标签互相覆盖；叠着右轴折线时同样不标，数值会被折线盖住。
   const leftBars = type === 'bar' && !line ? visible.filter((s) => !(secondaryAxis && s.axis === 'right')) : []
-  const barLabels = showBarLabels && !secondaryAxis && leftBars.length > 0 && data.length <= MAX_BAR_LABELS
   const barTotal = (index: number) => leftBars.reduce((sum, s) => sum + (Number(data[index]?.[s.key]) || 0), 0)
+  const widestLabel = leftBars.length === 0 || data.length > MAX_BAR_LABELS ? 0 : Math.max(0, ...data.flatMap((_, i) => stacked ? [format(barTotal(i)).length] : leftBars.map((s) => format(Number(data[i]?.[s.key]) || 0).length)))
+  // 纵轴 64 + 右边距 10；每个位置按序列数均分，一个字符约 6.4px（11px 数字），两边各留 3px
+  const slot = (plotWidth - 74) / Math.max(data.length, 1) / (stacked ? 1 : Math.max(leftBars.length, 1))
+  const barLabels = !secondaryAxis && leftBars.length > 0 && data.length <= MAX_BAR_LABELS && plotWidth > 0 && slot >= widestLabel * 6.4 + 6
   // 堆叠时合计写在这根柱子实际最上面的非零段上：最上层序列当天为 0 时它没有柱形，挂在它上面就显示不出来
   const topBar = (index: number) => leftBars.findLast((s) => (Number(data[index]?.[s.key]) || 0) !== 0)
   // recharts 的 index 只数画出来的柱子：某天为 0 没有柱形，后面的标签会整体错一位。
@@ -107,10 +129,11 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   return (
     <div className={cn('min-w-0', compact ? 'space-y-2' : 'space-y-4', fill && 'flex flex-col lg:min-h-0 lg:flex-1')} role="group" aria-label={label}>
       {header?.(toolbar)}
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* 自带卡片头时单位由卡片自己交代，不再单占一行 */}
+      {(legendOnTop || !header) && <div className="flex flex-wrap items-center justify-between gap-3">
         {legendOnTop ? <>{secondaryAxis && <span className="sr-only">{t('charts:dualAxis', { left: unit, right: secondaryAxis.unit })}</span>}{legend}</> : <span className="text-xs text-muted-foreground">{t('charts:unit', { unit })}</span>}
         {!header && toolbar}
-      </div>
+      </div>}
       {table ? (
         <div className="space-y-3">
         <Table dense stickyHeader wrapperClassName="max-h-80" className="tabular-nums" aria-label={label}>
@@ -120,7 +143,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
         {paginateTable && <Pagination total={data.length} limit={tableLimit} offset={tableOffset} onOffset={setTableOffset} pageSizes={PAGE_SIZES} onLimit={(limit) => { setTableLimit(limit); setTableOffset(0) }} className="rounded-lg shadow-none" />}
         </div>
       ) : (
-        <div className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} style={fill ? { minHeight: minPlotHeight } : undefined} aria-label={t('charts:plot')}>
+        <div ref={plot} className={cn('min-w-0', fill ? 'h-44 lg:relative lg:h-auto lg:flex-1' : compact ? 'h-44 lg:h-[clamp(8rem,calc(100dvh-40rem),14rem)]' : 'h-72 sm:h-80')} style={fill ? { minHeight: minPlotHeight } : undefined} aria-label={t('charts:plot')}>
           <ResponsiveContainer width="100%" height="100%" minWidth={0} className={fill ? 'lg:absolute lg:inset-0' : undefined}>
             <ComposedChart data={data} margin={{ top: barLabels ? 20 : 10, right: 10, bottom: 4, left: 0 }} accessibilityLayer>
               <defs>{series.map((s, i) => <linearGradient key={s.key} id={`${id}-${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={s.color} stopOpacity={0.28} /><stop offset="100%" stopColor={s.color} stopOpacity={0.025} /></linearGradient>)}</defs>

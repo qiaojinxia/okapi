@@ -337,6 +337,48 @@ test('Dashboard 无请求时不把错误率显示为 0%，仍可进入同窗分�
   await expect(error).toHaveAttribute('href', '/admin/stats?days=1&measure=error_rate')
 })
 
+test('Dashboard 指标卡：涨跌对照上一周期，错误率按百分点比较，迷你趋势不含还在累计的今天', async ({ page }) => {
+  await prepare(page)
+  const calendar = { start_date: '2026-09-20', end_date: '2026-09-26', today: '2026-09-26', timezone: 'UTC' }
+  // 带 start_date 的是上一周期：请求 / Token / 收入都是本期的一半，错误率 0.5% → 1.0%
+  await page.route('**/admin/stats/overview?*', (route) => {
+    const previous = new URL(route.request().url()).searchParams.has('start_date')
+    return route.fulfill({ json: { days: 7, calendar, today: bucket(100), yesterday: bucket(100), window: previous ? { ...bucket(4200), error_rate_bp: 50 } : { ...bucket(8400), error_rate_bp: 100 } } })
+  })
+  await page.goto('/admin')
+  const summary = page.getByRole('region', { name: '经营概览' })
+  await expect(summary.getByRole('link', { name: /近 7 天 · 请求数/ })).toBeVisible()
+  // 三个用量类指标翻倍：箭头加百分比，涨为绿；副行说明对照的是哪一段
+  await expect(summary.getByText('▲ 100%', { exact: true })).toHaveCount(3)
+  await expect(summary.locator('.text-success', { hasText: '▲ 100%' })).toHaveCount(3)
+  await expect(summary.getByText('较前 7 天', { exact: true })).toHaveCount(2)
+  // 错误率是比例：直接比数值（百分点），涨是坏事所以标红，副行给上一周期的值
+  const rate = summary.getByRole('link', { name: /近 7 天 · 错误率/ })
+  await expect(rate.getByText('▲ 0.5pp', { exact: true })).toHaveClass(/text-destructive/)
+  await expect(rate).toContainText('前 7 天 0.5%')
+  // 迷你趋势取自同一次精简图表查询：近 7 天去掉还在累计的今天，剩 6 个点；全是 0 的错误率不画线
+  const sparks = summary.locator('[data-slot="sparkline"]')
+  await expect(sparks).toHaveCount(3)
+  expect((await sparks.first().locator('polyline').getAttribute('points'))!.trim().split(' ')).toHaveLength(6)
+})
+
+test('Dashboard 趋势口径用键盘切换后焦点仍在页签上，图表自带的数据表随口径回到图', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/admin')
+  const metrics = page.getByRole('group', { name: '图表指标' })
+  const requests = metrics.getByRole('button', { name: '请求数', exact: true })
+  await requests.focus()
+  await requests.press('Enter')
+  await expect(requests).toHaveAttribute('aria-pressed', 'true')
+  // 口径页签在图表组件里面：切换不能把它重新挂载，否则键盘焦点会丢
+  await expect(requests).toBeFocused()
+  const trend = page.getByRole('group', { name: '请求量与收入趋势', exact: true })
+  await trend.getByRole('button', { name: '数据表' }).click()
+  await expect(trend.getByRole('table')).toBeVisible()
+  await metrics.getByRole('button', { name: '实际消费' }).click()
+  await expect(trend.getByRole('table')).toHaveCount(0)
+})
+
 for (const width of [320, 390]) {
   test(`Dashboard ${width}px 慢请求：骨架保持卡片列宽，加载中没有可误点的指标`, async ({ page }) => {
     await prepare(page)
@@ -1496,6 +1538,7 @@ for (const width of [1024, 1440]) {
     const links = actions.getByRole('link')
     await expect(links).toHaveCount(4)
     await expect(links.nth(0)).toHaveAccessibleName(/Redis 不可达/)
+    await expect(links.nth(0)).toContainText('严重')
     await expect(links.nth(1)).toHaveAccessibleName(/死信队列有 3 条/)
     await expect(links.nth(2)).toHaveAccessibleName(/4 个模型未配置定价/)
     await expect(links.nth(3)).toHaveAccessibleName(/2 条已自动停用/)
@@ -1527,6 +1570,8 @@ for (const width of [1024, 1440]) {
     await expect(page.locator(`[id="${listId}"]`).getByRole('link')).toHaveCount(9)
     await expect(actions.getByRole('link', { name: /渠道错误率超 5%/ })).toHaveAttribute('href', '/admin/quality?days=30&tab=channels')
     await expect(actions.getByRole('link', { name: /渠道池是空的/ })).toHaveAttribute('href', '/admin/pools')
+    // 严重的排在前面，提醒（积压、冷却中的 key、空池）在后
+    await expect(actions.getByRole('link', { name: /outbox 积压/ })).toContainText('提醒')
     expect(requests.length).toBe(before)
     await less.press('Enter')
     await expect(links).toHaveCount(4)

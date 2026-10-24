@@ -51,7 +51,7 @@ export function TrendCard({ days, range, metric, onMetricChange }: { days: numbe
   </div>
   return <section data-slot="dashboard-trend" aria-label={title} className="flex min-w-0 flex-[2_1_35rem] flex-col gap-2.5 rounded-xl border border-border bg-card p-3.5">
     {q.isPending ? <>{head()}<LoadingState /></> : q.isError ? <>{head()}<ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /></> : !q.data?.data.length ? <>{head()}<EmptyState hint={t('admin:trendEmptyHint')} /></> : <>
-      <TimeChart compact fill minPlotHeight={240} key={metric} header={head} data={data} label={title} unit={metric === 'amount' ? 'USD' : label} format={format}
+      <TimeChart compact fill minPlotHeight={240} resetKey={metric} header={head} data={data} label={title} unit={metric === 'amount' ? 'USD' : label} format={format}
         secondaryAxis={combined ? { unit: 'USD', format: money } : undefined}
         partialBucket={partial}
         legendDetail={combined ? { requests: legendTotal(requests, 'requests'), amount: legendTotal(revenue, 'amount') } : { [selected]: legendTotal(total, selected) }}
