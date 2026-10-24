@@ -424,10 +424,11 @@ impl BalanceLedger {
                 vec![pool.field().to_owned(), amount.as_micros().to_string()],
             )
             .await?;
-        after
-            .parse()
-            .map(Money::from_micros)
-            .map_err(|_| LedgerError::InvalidSettlement)
+        // 脚本自己的拒绝走 error_reply（上面的 `?`）；这里解析不了是回执本身坏了，不是账单数据非法
+        after.parse().map(Money::from_micros).map_err(|_| {
+            tracing::error!(user_id, reply = %after, "credit_pool returned an unreadable balance");
+            LedgerError::UnexpectedReply("credit_pool")
+        })
     }
 
     /// 订阅池置额（激活 / 滚窗 / 到期；`lua/sub_set.lua`）。`quota` 为新窗额度（到期传 0），
@@ -513,10 +514,10 @@ impl BalanceLedger {
                 Vec::<String>::new(),
             )
             .await?;
-        drained
-            .parse()
-            .map(Money::from_micros)
-            .map_err(|_| LedgerError::InvalidSettlement)
+        drained.parse().map(Money::from_micros).map_err(|_| {
+            tracing::error!(user_id, reply = %drained, "drain returned an unreadable amount");
+            LedgerError::UnexpectedReply("drain")
+        })
     }
 
     /// Redis 服务器时钟。预扣截止时间按它写入，sweep 也按它判过期：

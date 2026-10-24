@@ -322,8 +322,14 @@ async fn reread(state: &AppState, key: i64) -> Result<CurrentCredential, Upstrea
         okapi_store::oauth_credentials::snapshot(&state.pg, key, state.master_key.as_deref()),
     )
     .await
-    .map_err(|_| UpstreamError::Build("oauth_credential_read_failed".into()))?
-    .map_err(|_| UpstreamError::Build("oauth_credential_read_failed".into()))?
+    .map_err(|_| {
+        tracing::warn!(key, "OAuth credential reread timed out");
+        UpstreamError::Build("oauth_credential_read_failed".into())
+    })?
+    .map_err(|error| {
+        tracing::warn!(key, %error, "OAuth credential reread failed");
+        UpstreamError::Build("oauth_credential_read_failed".into())
+    })?
     .ok_or_else(|| UpstreamError::Build("oauth_credential_missing".into()))?;
     Ok(CurrentCredential {
         credential: OAuthCredential::parse(&snapshot.plaintext)
@@ -370,8 +376,23 @@ async fn refresh_locked(
     {
         return Ok(basis.clone());
     }
-    if let Some(next) = super::pending::take(state, key.channel_key_id, &current.stored).await {
-        return save_refreshed(state, key, &current.stored, next).await;
+    match super::pending::take(state, key.channel_key_id, &current.stored).await {
+        Ok(Some(next)) => return save_refreshed(state, key, &current.stored, next).await,
+        Ok(None) => {}
+        // 不知道有没有待补写的新凭据：这时拿旧 refresh token 去刷，可能把它作废、把账号判死。
+        // 这一次不刷，旧 access token 还能用就先用
+        Err(code) => {
+            tracing::error!(
+                key = key.channel_key_id,
+                code,
+                "OAuth 待补写凭据读不出来，本次不刷新"
+            );
+            let error = UpstreamError::Connect(code.to_owned());
+            if rejected.is_some() {
+                return Err(error);
+            }
+            return stale_or_err(basis.clone(), now).map_err(|_| error);
+        }
     }
     if rejected.is_none()
         && super::health::read(state, key.channel_key_id)
@@ -490,8 +511,10 @@ async fn save_refreshed(
             ),
         )
         .await
-        .map_err(|_| ())?
-        .map_err(|_| ())
+        .map_err(|_| tracing::warn!(key = key.channel_key_id, "OAuth credential write timed out"))?
+        .map_err(|error| {
+            tracing::warn!(key = key.channel_key_id, %error, "OAuth credential write failed");
+        })
     })
     .await;
     let Ok(saved) = saved else {

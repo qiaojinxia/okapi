@@ -353,7 +353,14 @@ pub async fn candidates_for_model(
                 bill_by_response_model: r.bill_by_response_model,
                 strip_request_fields: r
                     .strip_request_fields
-                    .and_then(|v| serde_json::from_value(v).ok())
+                    .and_then(|v| {
+                        serde_json::from_value(v)
+                            .inspect_err(|error| {
+                                // 控制台写入时已校验；读到坏值说明行被改过，按「不剥」走但要留痕
+                                tracing::warn!(channel_id = r.channel_id, %error, "settings.strip_request_fields is not a string list; ignored");
+                            })
+                            .ok()
+                    })
                     .unwrap_or_default(),
                 inject_request_fields: r
                     .inject_request_fields

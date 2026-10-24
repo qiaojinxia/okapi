@@ -724,7 +724,11 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Json<V
         .bind(session_hash(&sid))
         .fetch_all(&state.pg)
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|error| {
+            // 会话已删，绑定它的 key 鉴权时也过不了；只是行没删掉，留痕好查
+            tracing::error!(%error, "退出登录时作废会话绑定的登录 key 失败");
+            Vec::new()
+        });
         for hash in &revoked {
             state.sched.auth_del(hash).await;
         }

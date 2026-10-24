@@ -454,18 +454,22 @@ async fn resolve_names(state: &AppState, rows: &[Value], q: &LogQuery) -> Names 
     key_ids.sort_unstable();
     key_ids.dedup();
     let mut names = Names::default();
-    if !key_ids.is_empty()
-        && let Ok(rows) = sqlx::query!(
+    if !key_ids.is_empty() {
+        match sqlx::query!(
             r#"SELECT id, name, key_prefix, user_id FROM api_keys WHERE id = ANY($1)"#,
             &key_ids
         )
         .fetch_all(&state.pg)
         .await
-    {
-        names.keys = rows
-            .into_iter()
-            .map(|r| (r.id, (r.name, r.key_prefix, r.user_id)))
-            .collect();
+        {
+            Ok(rows) => {
+                names.keys = rows
+                    .into_iter()
+                    .map(|r| (r.id, (r.name, r.key_prefix, r.user_id)))
+                    .collect();
+            }
+            Err(error) => names_unavailable("api_keys", &error),
+        }
     }
     let mut user_ids: Vec<i64> = rows
         .iter()
@@ -485,30 +489,42 @@ async fn resolve_names(state: &AppState, rows: &[Value], q: &LogQuery) -> Names 
     channel_ids.sort_unstable();
     channel_ids.dedup();
 
-    if !user_ids.is_empty()
-        && let Ok(rows) = sqlx::query!(
+    if !user_ids.is_empty() {
+        match sqlx::query!(
             r#"SELECT id, username FROM users WHERE id = ANY($1)"#,
             &user_ids
         )
         .fetch_all(&state.pg)
         .await
-    {
-        names.users = rows.into_iter().map(|r| (r.id, r.username)).collect();
+        {
+            Ok(rows) => names.users = rows.into_iter().map(|r| (r.id, r.username)).collect(),
+            Err(error) => names_unavailable("users", &error),
+        }
     }
-    if !channel_ids.is_empty()
-        && let Ok(rows) = sqlx::query!(
+    if !channel_ids.is_empty() {
+        match sqlx::query!(
             r#"SELECT id, name, provider FROM channels WHERE id = ANY($1)"#,
             &channel_ids
         )
         .fetch_all(&state.pg)
         .await
-    {
-        names.channels = rows
-            .into_iter()
-            .map(|r| (r.id, (r.name, r.provider)))
-            .collect();
+        {
+            Ok(rows) => {
+                names.channels = rows
+                    .into_iter()
+                    .map(|r| (r.id, (r.name, r.provider)))
+                    .collect();
+            }
+            Err(error) => names_unavailable("channels", &error),
+        }
     }
     names
+}
+
+/// 名字只是给日志行配的显示列：PG 一时查不到时日志照样返回，但要留痕——
+/// 不然界面上整列空着，分不清是实体已删还是数据库出了问题。
+fn names_unavailable(table: &str, error: &sqlx::Error) {
+    tracing::warn!(table, %error, "log rows returned without display names: lookup failed");
 }
 
 /// GET /admin/logs/stat：日志页统计条（docs/database.md §3.5 末条）。

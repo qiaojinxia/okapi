@@ -108,22 +108,40 @@ pub async fn put(state: &AppState, key: i64, expected: &[u8], next: &OAuthCreden
 
 /// 取待补写的新凭据：库里当前值（`current`）还是当初要比对的旧值才返回；否则这份已作废，顺手清掉。
 /// 不在这里删：补写成功后由调用方 [`clear`]，再失败就还留着给下一次。
-pub async fn take(state: &AppState, key: i64, current: &[u8]) -> Option<OAuthCredential> {
+///
+/// `Err` = 读不到 / 读出来是坏的，**不能**当成「没有待补写」：那样调用方会拿库里已作废的旧
+/// refresh token 去刷，正好撞上这个模块要防的 invalid_grant 判死。
+pub async fn take(
+    state: &AppState,
+    key: i64,
+    current: &[u8],
+) -> Result<Option<OAuthCredential>, &'static str> {
     let current = fingerprint(current);
     if let Some(next) = state.refresh_gate.pending.get(key, &current) {
-        return Some(next);
+        return Ok(Some(next));
     }
-    let raw: Option<String> = state.sched.client().get(redis_key(key)).await.ok()?;
-    let stored: Stored = serde_json::from_str(&raw?).ok()?;
+    let raw: Option<String> = state
+        .sched
+        .client()
+        .get(redis_key(key))
+        .await
+        .map_err(|_| "oauth_pending_unavailable")?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let stored: Stored = serde_json::from_str(&raw).map_err(|_| "oauth_pending_unreadable")?;
     if stored.expected != current {
         clear(state, key).await;
-        return None;
+        return Ok(None);
     }
     let sealed = base64::engine::general_purpose::STANDARD
         .decode(stored.sealed)
-        .ok()?;
-    let plaintext = okapi_store::credential::open(state.master_key.as_deref(), &sealed).ok()?;
+        .map_err(|_| "oauth_pending_unreadable")?;
+    let plaintext = okapi_store::credential::open(state.master_key.as_deref(), &sealed)
+        .map_err(|_| "oauth_pending_unreadable")?;
     OAuthCredential::parse(&plaintext)
+        .map(Some)
+        .ok_or("oauth_pending_unreadable")
 }
 
 /// 补写成功、或库里的 key 已失效 / 被换掉：两处一起清。
