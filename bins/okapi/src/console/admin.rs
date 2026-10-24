@@ -1443,6 +1443,11 @@ pub async fn set_user_groups(
     if live.is_none() {
         return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND));
     }
+    // 同一分组列两次会撞 user_groups 主键回 500；优先级该取哪一个也说不清，直接拒
+    let mut seen = std::collections::HashSet::new();
+    if groups.iter().any(|(code, _)| !seen.insert(code.as_str())) {
+        return Err(AppError::bad_request().with_param("groups.duplicate"));
+    }
     // 写入前校验分组存在且已发布，把配置错误拦在这一步，而不是让它变成用户侧的 500
     for (code, _) in &groups {
         ensure_group_usable(&state, code, "group_code").await?;
@@ -2255,7 +2260,7 @@ pub async fn set_user_multiplier(
 const RATIO_COLUMN_MAX_SCALED: i64 = 999_999_999_999;
 
 /// 倍率字面量：能解析、非负，且放得进倍率列。
-fn ratio_fits(literal: &str) -> bool {
+pub(super) fn ratio_fits(literal: &str) -> bool {
     literal
         .parse::<okapi_pricing::RatioFp>()
         .is_ok_and(|v| v.as_scaled() <= RATIO_COLUMN_MAX_SCALED)
@@ -3028,6 +3033,22 @@ pub async fn create_redemptions(
         return Err(AppError::bad_request().with_param("count_or_amount"));
     }
     ensure_redemption_amount(req.amount_micro)?;
+    // 这两项原来靠库约束兜底（CHECK max_per_ip > 0、bind_user_id 外键），违反时回 500
+    if req.max_per_ip.is_some_and(|cap| cap <= 0) {
+        return Err(AppError::bad_request().with_param("max_per_ip"));
+    }
+    if let Some(bound) = req.bind_user_id {
+        let live = sqlx::query_scalar!(
+            r#"SELECT role FROM users WHERE id = $1 AND deleted_at IS NULL"#,
+            bound
+        )
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(okapi_store::StoreError::from)?;
+        if live.is_none() {
+            return Err(AppError::bad_request().with_param("bind_user_id"));
+        }
+    }
     let codes: Vec<String> = (0..req.count)
         .map(|_| {
             use rand::RngExt;

@@ -403,7 +403,17 @@ pub async fn apply(
         if c.model.trim().is_empty() || axis_key(&c.axis).is_none() {
             return Err(AppError::bad_request().with_param("axis"));
         }
-        if c.value.parse::<RatioFp>().is_err() {
+        // 与单模型保存、new-api 导入同一上限：倍率要放得进 numeric(12,6) 列，按次价不超过账本上限。
+        // 只看能不能解析的话，超限值在写库时才溢出，整批事务回滚、回 500
+        let fits = if axis_key(&c.axis) == Some("per_call_price") {
+            c.value
+                .trim()
+                .parse::<RatioFp>()
+                .is_ok_and(|price| price.as_scaled() <= okapi_ledger::holds::MAXIMUM_MICROS)
+        } else {
+            super::admin::ratio_fits(c.value.trim())
+        };
+        if !fits {
             return Err(AppError::bad_request().with_param("value"));
         }
     }
