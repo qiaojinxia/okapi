@@ -41,7 +41,7 @@ pub fn spawn(cfg: &Config) {
         tick.tick().await;
         loop {
             tick.tick().await;
-            flusher.flush().await;
+            super::guarded("egress_traffic", flusher.flush()).await;
         }
     });
 }

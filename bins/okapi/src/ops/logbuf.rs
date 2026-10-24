@@ -233,30 +233,33 @@ pub fn spawn_flusher(redis: fred::clients::Client, node: &str, role: &str) {
         let mut failures = 0u32;
         loop {
             tick.tick().await;
-            let batch = take_pending();
-            if batch.is_empty() {
-                continue;
-            }
-            if let Err(e) = write(&redis, &batch).await {
-                // Redis 故障正是最需要告警的时候：整批放回待写队列，恢复后补写，不随这一次失败丢掉
-                tracing::debug!(error = %e, requeued = batch.len(), "ops log flush failed");
-                requeue(batch);
-                failures = failures.saturating_add(1);
-                if failures == FLUSH_FAILURES_BEFORE_STDERR {
-                    eprintln!(
-                        "{} WARN okapi::ops::logbuf: ops log flush to Redis failing ({failures} attempts); alerts are buffered locally only: {e}",
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                    );
+            super::guarded("ops_logbuf", async {
+                let batch = take_pending();
+                if batch.is_empty() {
+                    return;
                 }
-            } else {
-                if failures >= FLUSH_FAILURES_BEFORE_STDERR {
-                    eprintln!(
-                        "{} INFO okapi::ops::logbuf: ops log flush to Redis recovered after {failures} failed attempts",
-                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-                    );
+                if let Err(e) = write(&redis, &batch).await {
+                    // Redis 故障正是最需要告警的时候：整批放回待写队列，恢复后补写，不随这一次失败丢掉
+                    tracing::debug!(error = %e, requeued = batch.len(), "ops log flush failed");
+                    requeue(batch);
+                    failures = failures.saturating_add(1);
+                    if failures == FLUSH_FAILURES_BEFORE_STDERR {
+                        eprintln!(
+                            "{} WARN okapi::ops::logbuf: ops log flush to Redis failing ({failures} attempts); alerts are buffered locally only: {e}",
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                        );
+                    }
+                } else {
+                    if failures >= FLUSH_FAILURES_BEFORE_STDERR {
+                        eprintln!(
+                            "{} INFO okapi::ops::logbuf: ops log flush to Redis recovered after {failures} failed attempts",
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                        );
+                    }
+                    failures = 0;
                 }
-                failures = 0;
-            }
+            })
+            .await;
         }
     });
 }
