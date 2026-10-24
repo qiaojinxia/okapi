@@ -710,3 +710,48 @@ fn tool_use_without_input_sends_empty_object_arguments() {
         assert_eq!(arguments, "{}", "空串不是合法 JSON，上游会拒");
     }
 }
+
+/// 块一次只开一个：两个工具接连来、工具之后又来正文，都要先关上一个再开下一个，不能交叠。
+#[test]
+fn stream_blocks_never_overlap() {
+    let mut state = OaiStreamToAnthropic::new("gpt-x");
+    let mut events = Vec::new();
+    for delta in [
+        json!({"tool_calls":[{"index":0,"id":"t1","function":{"name":"a","arguments":"{}"}}]}),
+        json!({"tool_calls":[{"index":1,"id":"t2","function":{"name":"b","arguments":"{}"}}]}),
+        json!({"content":"done"}),
+    ] {
+        events.extend(state.step(Ok(ChatEvent::Data {
+            raw: json!({"id":"c","choices":[{"delta":delta}]}).to_string(),
+            event: None,
+            has_output: true,
+            content_chars: 0,
+            usage: None,
+        })));
+    }
+    events.extend(state.step(Ok(ChatEvent::Done)));
+    let mut open: Option<i64> = None;
+    let mut starts = 0;
+    for event in events {
+        let ChatEvent::Data { raw, .. } = event.unwrap() else {
+            continue;
+        };
+        let p: Value = serde_json::from_str(&raw).unwrap();
+        let index = p["index"].as_i64();
+        match p["type"].as_str().unwrap() {
+            "content_block_start" => {
+                assert!(open.is_none(), "上一个块还没关就开了新块：{p}");
+                open = index;
+                starts += 1;
+            }
+            "content_block_delta" => assert_eq!(open, index, "增量必须落在开着的块上：{p}"),
+            "content_block_stop" => {
+                assert_eq!(open, index, "{p}");
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(starts, 3);
+    assert!(open.is_none());
+}

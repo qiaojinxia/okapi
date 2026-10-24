@@ -316,3 +316,54 @@ fn tool_message_resolves_its_function_name_or_is_rejected() {
         );
     }
 }
+
+/// tool 消息里的图片装不进 functionResponse：报 400，而不是只取文字、让模型看不到工具返回的图。
+#[test]
+fn tool_message_images_are_refused_instead_of_dropped() {
+    let messages = |content: Value| {
+        json!({"model": "m", "messages": [
+            {"role": "user", "content": "look"},
+            {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+                "function": {"name": "shot", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": content},
+        ]})
+    };
+    let body = messages(json!([
+        {"type": "text", "text": "here"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]));
+    let err =
+        request_openai_to_gemini(&Bytes::from(serde_json::to_vec(&body).unwrap())).unwrap_err();
+    assert!(
+        matches!(&err, okapi_providers::UpstreamError::Build(reason)
+            if reason == "unsupported_content:image_url"),
+        "{err:?}"
+    );
+    let ok = convert_req(&messages(
+        json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]),
+    ));
+    assert_eq!(
+        ok["contents"][2]["parts"][0]["functionResponse"]["response"]["content"],
+        "a\nb"
+    );
+}
+
+/// 多候选跨方言搬不过去：n > 1 报 400，n = 1 照常。
+#[test]
+fn several_choices_are_refused_across_dialects() {
+    let body =
+        |n: u32| json!({"model": "m", "n": n, "messages": [{"role": "user", "content": "hi"}]});
+    let err =
+        request_openai_to_gemini(&Bytes::from(serde_json::to_vec(&body(2)).unwrap())).unwrap_err();
+    assert!(
+        matches!(&err, okapi_providers::UpstreamError::Build(reason) if reason == "unsupported_content:n"),
+        "{err:?}"
+    );
+    assert!(request_openai_to_gemini(&Bytes::from(serde_json::to_vec(&body(1)).unwrap())).is_ok());
+    let anthropic = okapi_providers::convert::openai_to_anthropic::request_openai_to_anthropic(
+        &Bytes::from(serde_json::to_vec(&body(3)).unwrap()),
+        "claude-x",
+        1024,
+    );
+    assert!(anthropic.is_err());
+}

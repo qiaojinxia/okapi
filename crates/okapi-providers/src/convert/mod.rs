@@ -37,6 +37,15 @@ pub(crate) fn tool_input_arguments(input: Option<&Value>) -> String {
         .map_or_else(|| "{}".to_owned(), Value::to_string)
 }
 
+/// 一次要多条候选（OpenAI `n` / Gemini `candidateCount` 大于 1）：转换器两头都只搬第一条，
+/// 放过去客户端会静默只拿到一条（预扣却按条数算）。跨方言时直接报 400，param = 字段名。
+pub(crate) fn single_choice(value: Option<&Value>, field: &str) -> Result<(), UpstreamError> {
+    if value.and_then(Value::as_u64).is_some_and(|n| n > 1) {
+        return Err(unsupported_part(field));
+    }
+    Ok(())
+}
+
 /// 对端表达不了的 content part。直接报错而不是丢掉：丢掉后模型在看不到附件的情况下作答，
 /// 整条 user turn 被丢时还会把上一条 assistant 当成预填接着写。网关把它映射成 400，param = part 类型。
 pub(crate) fn unsupported_part(kind: &str) -> UpstreamError {

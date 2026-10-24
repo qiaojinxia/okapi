@@ -492,3 +492,18 @@ fn refusal_is_returned_as_text() {
         json!([{"text":"No."}])
     );
 }
+
+/// candidateCount > 1 转不过去（回向只搬第一条候选）：报 400，而不是静默只回一条。
+#[test]
+fn several_candidates_are_refused() {
+    for config in ["generationConfig", "generation_config"] {
+        let body = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}], config: {"candidateCount": 2}});
+        let raw = Bytes::from(serde_json::to_vec(&body).unwrap());
+        assert!(
+            request_gemini_to_openai(&raw, "m", false).is_err(),
+            "{config}"
+        );
+    }
+    let one = json!({"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"candidateCount": 1}});
+    req(&one, "m", false);
+}

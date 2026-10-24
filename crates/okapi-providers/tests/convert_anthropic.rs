@@ -600,3 +600,27 @@ fn passthrough_scanner_counts_only_real_content_as_output() {
         json!({"type": "input_json_delta", "partial_json": "{"})
     ));
 }
+
+/// tool 消息的分段内容按块搬进 tool_result：工具返回的截图要到得了模型。
+#[test]
+fn tool_message_parts_keep_their_images() {
+    let out = convert_req(&json!({"model": "m", "messages": [
+        {"role": "user", "content": "look"},
+        {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function",
+            "function": {"name": "shot", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": [
+            {"type": "text", "text": "here"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c2", "content": "plain"},
+    ]}));
+    let results = &out["messages"][2]["content"];
+    assert_eq!(
+        results[0]["content"],
+        json!([
+            {"type": "text", "text": "here"},
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+        ])
+    );
+    assert_eq!(results[1]["content"], "plain");
+}

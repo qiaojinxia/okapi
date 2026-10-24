@@ -433,6 +433,9 @@ pub struct OaiStreamToAnthropic {
     block: Block,
     block_index: i64,
     tool_blocks: std::collections::BTreeMap<usize, i64>,
+    /// 当前开着的 tool_use 块。Anthropic 的块一次只开一个、按序关：换到正文 / 思考 / 下一个工具前
+    /// 先把它关掉，不能让几个块交叠着开（严格的 SDK 会丢内容）。
+    open_tool: Option<i64>,
     tool_ids: Vec<String>,
     finish_reason: Option<String>,
     refused: bool,
@@ -450,6 +453,7 @@ impl OaiStreamToAnthropic {
             block: Block::None,
             block_index: -1,
             tool_blocks: std::collections::BTreeMap::new(),
+            open_tool: None,
             tool_ids: Vec::new(),
             finish_reason: None,
             refused: false,
@@ -550,11 +554,19 @@ impl OaiStreamToAnthropic {
             let Some(index) = super::stream_tool_slot(call, &mut self.tool_ids) else {
                 return vec![Err(UpstreamError::Stream("tool_index_invalid".into()))];
             };
-            self.close_block(&mut out);
             let block_index = if let Some(&existing) = self.tool_blocks.get(&index) {
+                if self.open_tool != Some(existing) {
+                    // 上游在别的块之后又给这个工具补参数（非常规）：块已关，无处可放，挂回原索引
+                    tracing::warn!(
+                        index,
+                        "tool arguments resumed after another block; appended to its closed block"
+                    );
+                }
                 existing
             } else {
+                self.close_block(&mut out);
                 self.block_index += 1;
+                self.open_tool = Some(self.block_index);
                 self.tool_blocks.insert(index, self.block_index);
                 let ev = json!({"type":"content_block_start", "index":self.block_index,
                     "content_block":{"type":"tool_use","id":call.get("id").and_then(Value::as_str).unwrap_or(""),
@@ -605,6 +617,10 @@ impl OaiStreamToAnthropic {
     }
 
     fn close_block(&mut self, out: &mut Vec<Result<ChatEvent, UpstreamError>>) {
+        if let Some(index) = self.open_tool.take() {
+            let ev = json!({"type": "content_block_stop", "index": index});
+            out.push(Ok(named("content_block_stop", &ev, false, 0, None)));
+        }
         if self.block == Block::None {
             return;
         }
@@ -631,16 +647,9 @@ impl OaiStreamToAnthropic {
             out.push(Ok(named("message_start", &start, false, 0, None)));
             self.started = true;
         }
+        // 开着的块（正文 / 思考 / 最后一个工具）在这里关；更早的工具块换块时已经关过
         self.close_block(&mut out);
-        for (_, index) in std::mem::take(&mut self.tool_blocks) {
-            out.push(Ok(named(
-                "content_block_stop",
-                &json!({"type":"content_block_stop","index":index}),
-                false,
-                0,
-                None,
-            )));
-        }
+        self.tool_blocks.clear();
         let probe = self.usage;
         let stop = if self.refused {
             "refusal"

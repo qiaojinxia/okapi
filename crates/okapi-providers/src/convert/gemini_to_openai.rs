@@ -30,6 +30,13 @@ pub fn request_gemini_to_openai(
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
+    let config = src
+        .get("generationConfig")
+        .or_else(|| src.get("generation_config"));
+    super::single_choice(
+        config.and_then(|c| c.get("candidateCount").or_else(|| c.get("candidate_count"))),
+        "candidateCount",
+    )?;
 
     let mut messages: Vec<Value> = Vec::new();
     if let Some(system) = src

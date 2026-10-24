@@ -29,6 +29,7 @@ pub fn request_openai_to_anthropic(
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
+    super::single_choice(src.get("n"), "n")?;
 
     let mut out = serde_json::Map::new();
     out.insert("model".into(), json!(upstream_model));
@@ -59,10 +60,18 @@ pub fn request_openai_to_anthropic(
                 }
             }
             "tool" => {
+                // 分段内容按块搬（tool_result 能装 text / image / document）：只取 text 会把工具返回的
+                // 截图静默丢掉，模型在看不到图的情况下作答；装不下的 part 照常报 400
+                let content = match msg.get("content").unwrap_or(&Value::Null) {
+                    Value::Array(_) => Value::Array(content_to_blocks(
+                        msg.get("content").unwrap_or(&Value::Null),
+                    )?),
+                    other => json!(content_to_text(other)),
+                };
                 let block = json!({
                     "type": "tool_result",
                     "tool_use_id": msg.get("tool_call_id").and_then(Value::as_str).unwrap_or(""),
-                    "content": content_to_text(msg.get("content").unwrap_or(&Value::Null)),
+                    "content": content,
                 });
                 push_merged(&mut messages, "user", vec![block]);
             }

@@ -25,6 +25,7 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
     let Some(src) = src.as_object() else {
         return Err(UpstreamError::Build("body_not_object".to_owned()));
     };
+    super::single_choice(src.get("n"), "n")?;
 
     let call_names = collect_call_names(src);
 
@@ -84,7 +85,7 @@ pub fn request_openai_to_gemini(body: &Bytes) -> Result<Bytes, UpstreamError> {
                     .ok_or_else(|| super::unsupported_part("tool_call_id"))?;
                 let part = json!({"functionResponse": {
                     "name": name,
-                    "response": {"content": plain_text(content)},
+                    "response": {"content": tool_text(content)?},
                 }});
                 push_content(&mut contents, "user", vec![part]);
             }
@@ -249,6 +250,20 @@ fn part_to_gemini(part: &Value) -> Result<Option<Value>, UpstreamError> {
 fn inline_data(url: &str) -> Option<Value> {
     let (mime, data) = url.strip_prefix("data:")?.split_once(";base64,")?;
     Some(json!({"inlineData": {"mimeType": mime, "data": data}}))
+}
+
+/// tool 消息的内容：functionResponse 只装得下文本。分段里有图片等别的 part 就报 400（与
+/// anthropic→chat 方向同一原则），而不是只取文字、让模型在看不到工具返回的图时作答。
+fn tool_text(content: &Value) -> Result<String, UpstreamError> {
+    if let Value::Array(parts) = content
+        && let Some(kind) = parts
+            .iter()
+            .map(|p| p.get("type").and_then(Value::as_str).unwrap_or_default())
+            .find(|kind| *kind != "text")
+    {
+        return Err(super::unsupported_part(kind));
+    }
+    Ok(plain_text(content))
 }
 
 fn plain_text(content: &Value) -> String {
