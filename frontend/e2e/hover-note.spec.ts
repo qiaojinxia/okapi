@@ -62,13 +62,14 @@ async function paperColors(page: Page, selector: string) {
     const element = document.querySelector(selector)!
     const style = getComputedStyle(element)
     const root = getComputedStyle(document.documentElement)
-    const paper = rgb(style.backgroundColor), ink = rgb(style.color), card = rgb(root.getPropertyValue('--card'))
+    const paper = rgb(style.backgroundColor), ink = rgb(style.color), card = rgb(root.getPropertyValue('--card')), page = rgb(root.getPropertyValue('--bg'))
     return {
       paper, ink,
       paperLuminance: luminance(paper),
       cardLuminance: luminance(card),
-      // 黄调：红通道比蓝通道高多少（页面纸面只有 3–14，便签要明显黄一些）
+      // 黄调：红通道比蓝通道高多少；页面纸面（--bg）只有 3–14
       yellow: paper[0] - paper[2],
+      pageYellow: page[0] - page[2],
       contrast: contrast(ink, paper),
       token: rgb(root.getPropertyValue('--note')),
       border: rgb(style.borderTopColor),
@@ -94,8 +95,9 @@ for (const theme of ['light', 'dark'] as const) {
     expect(colors.border).toEqual(colors.borderToken)
     expect(colors.contrast, '字与纸的对比度').toBeGreaterThanOrEqual(10)
     if (theme === 'light') {
-      expect(colors.yellow, '浅色便签比页面纸面更黄').toBeGreaterThanOrEqual(16)
-      expect(colors.yellow).toBeLessThanOrEqual(60)
+      // 朴素：比页面纸面黄一档就够，不是荧光便利贴
+      expect(colors.yellow - colors.pageYellow, '浅色便签比页面纸面更暖').toBeGreaterThanOrEqual(8)
+      expect(colors.yellow, '但不能黄得抢眼').toBeLessThanOrEqual(30)
       expect(colors.paperLuminance, '浅色便签是亮纸').toBeGreaterThanOrEqual(0.85)
     } else {
       expect(colors.paperLuminance, '暗色便签是深色纸').toBeLessThanOrEqual(0.12)
