@@ -4,6 +4,7 @@ import type { TFunction } from 'i18next'
 import { ChevronDown, SlidersHorizontal, X } from 'lucide-react'
 import type { AnalyticsSearch } from '@/features/analytics/route-state'
 import { Button } from '@/components/ui/button'
+import { DateRangeField } from '@/components/ui/date-range'
 import { Input } from '@/components/ui/input'
 import { ModelInput } from '@/features/models/model-input'
 import { ADVANCED_KEYS } from './advanced-search'
@@ -62,6 +63,8 @@ function Editor({ value, onApply, today }: { value: AnalyticsSearch; onApply: (n
   const { t } = useTranslation()
   const [draft, setDraft] = useState(value)
   const [error, setError] = useState(false)
+  // 数据还没回来时 today 是空的：先用浏览器的日期给月历定个“今天”，校验仍只认服务端给的 today
+  const calendarToday = today ?? new Date().toISOString().slice(0, 10)
   const form = useRef<HTMLFormElement>(null)
   const fields = useRef<HTMLDivElement>(null)
   const actions = useRef<HTMLDivElement>(null)
@@ -114,7 +117,10 @@ function Editor({ value, onApply, today }: { value: AnalyticsSearch; onApply: (n
     <fieldset className="min-w-0 space-y-3">
       <legend className="text-sm font-medium">{t('analysis:timeSection')}</legend>
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
-      {(['start_date', 'end_date'] as const).map((name) => <label key={name} className="min-w-0 space-y-1 text-xs text-muted-foreground">{t(name === 'start_date' ? 'charts:range_start' : 'charts:range_end')}<Input type="date" className="min-w-0" min="1971-01-01" max={today} value={draft[name] ?? ''} onChange={(e) => patch({ [name]: e.target.value || undefined })} /></label>)}
+      <div className="col-span-2 min-w-0 space-y-1">
+        <span className="block text-xs text-muted-foreground">{t('analysis:dateRange')}</span>
+        <DateRangeField today={calendarToday} label={t('analysis:dateRange')} placeholder={t('analysis:dateRangePlaceholder')} value={{ start: draft.start_date ?? '', end: draft.end_date ?? '' }} onChange={(range) => patch({ start_date: range.start || undefined, end_date: range.end || undefined })} />
+      </div>
       <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:granularity')}<select aria-label={t('analysis:granularity')} className={selectClass} value={draft.granularity ?? ''} onChange={(e) => patch({ granularity: e.target.value as AnalyticsSearch['granularity'] || undefined })}>{['', 'hour', 'day'].map((v) => <option key={v} value={v}>{t(`analysis:${v || 'auto'}`)}</option>)}</select></label>
       <label className="space-y-1 text-xs text-muted-foreground">{t('analysis:model_source')}<select aria-label={t('analysis:model_source')} className={selectClass} value={draft.model_source ?? 'billed'} onChange={(e) => patch({ model_source: e.target.value as AnalyticsSearch['model_source'] })}>{['billed', 'requested', 'upstream'].map((v) => <option key={v} value={v}>{t(`analysis:source_${v}`)}</option>)}</select></label>
       </div>

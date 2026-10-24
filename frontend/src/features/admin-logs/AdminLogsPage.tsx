@@ -1,9 +1,8 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  CalendarDays,
   ChevronDown,
   SlidersHorizontal,
   Download,
@@ -24,7 +23,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { useConfirm } from '@/components/ui/confirm'
 import { Field } from '@/components/ui/field'
+import { DateTrigger } from '@/components/ui/date-range'
 import { Input } from '@/components/ui/input'
+import { Popover } from '@/components/ui/popover'
 import { Select } from '@/components/ui/select'
 import { Drawer } from '@/components/ui/drawer'
 import { LogTokenUsage } from '@/features/logs/LogTokenUsage'
@@ -343,57 +344,89 @@ function RangePicker({
     { h: 720, label: t('admin:logsHours720') },
   ]
   const absolute = draft.from !== ''
-  const [customOpen, setCustomOpen] = useState(Boolean(draft.from || draft.to))
-  useEffect(() => { if (draft.from || draft.to) setCustomOpen(true) }, [draft.from, draft.to])
-  const valid = validRange(draft)
-  const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.nativeEvent.isComposing) { e.preventDefault(); if (valid) onApplyRange() }
+  const [open, setOpen] = useState(false)
+  // 打开时记下当时的起止；没点「应用」就关掉（Esc / 点外面 / 取消）就退回去，别留半截输入
+  const snapshot = useRef({ from: draft.from, to: draft.to })
+  const applied = useRef(false)
+  const change = (next: boolean) => {
+    if (next) {
+      snapshot.current = { from: draft.from, to: draft.to }
+      applied.current = false
+    } else if (!applied.current) {
+      onRange(snapshot.current.from, snapshot.current.to)
+    }
+    setOpen(next)
   }
+  const valid = validRange(draft)
   return (
-    <section aria-label={t('admin:logsRange')} className="flex min-w-0 flex-1 basis-96 flex-wrap items-start gap-x-3 gap-y-2">
+    <section aria-label={t('admin:logsRange')} className="flex min-w-0 flex-1 basis-96 flex-wrap items-center gap-x-3 gap-y-2">
       <Segmented
         size="sm"
         ariaLabel={t('admin:logsRange')}
         // 绝对区间生效时没有预设被选中：传一个不存在的值让全部熄灭
         value={absolute ? -1 : draft.hours}
-        onChange={(h) => { setCustomOpen(false); onPreset(h) }}
+        onChange={(h) => onPreset(h)}
         options={options.map((o) => ({ value: o.h, label: o.label }))}
       />
-      <details open={customOpen} onToggle={(event) => setCustomOpen(event.currentTarget.open)} className="min-w-0 max-w-full open:w-full">
-        <summary className="flex min-h-9 cursor-pointer items-center gap-2 rounded-md px-2 text-sm outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40">
-          <CalendarDays aria-hidden className="h-4 w-4 shrink-0 text-muted-foreground" />
-          <span className="break-words">{absolute ? `${draft.from.replace('T', ' ')} — ${draft.to.replace('T', ' ') || t('admin:logsUntilNow')}` : t('admin:logsCustomRange')}</span>
-        </summary>
-        <div className="mt-2 grid min-w-0 gap-3 border-t border-border pt-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,20rem)_max-content] sm:items-end">
-          <Field label={t('admin:logsFrom')} htmlFor="logs-from">
-            <Input
-              id="logs-from"
-              type="datetime-local" step="0.001"
-              className="h-11 min-w-0 w-full md:h-9"
-              aria-label={t('admin:logsFrom')}
-              value={draft.from}
-              onChange={(e) => onRange(e.target.value, draft.to)}
-              onKeyDown={onKey}
-            />
-          </Field>
-          <Field label={t('admin:logsTo')} htmlFor="logs-to">
-            <Input
-              id="logs-to"
-              type="datetime-local" step="0.001"
-              className="h-11 min-w-0 w-full md:h-9"
-              aria-label={t('admin:logsTo')}
-              value={draft.to}
-              onChange={(e) => onRange(draft.from, e.target.value)}
-              onKeyDown={onKey}
-            />
-          </Field>
-          <Button className="min-h-11 md:min-h-9" variant={absolute ? 'default' : 'outline'} disabled={!valid} onClick={onApplyRange}>
-            {t('admin:logsApplyRange')}
-          </Button>
-        </div>
-        <p className="mt-2 text-xs text-muted-foreground">{t('admin:logsLocalTime')}</p>
-        {(draft.from || draft.to) && !valid && <p role="alert" className="mt-1 text-xs text-destructive">{t('admin:logsInvalidRange')}</p>}
-      </details>
+      <Popover
+        open={open}
+        onOpenChange={change}
+        label={t('admin:logsCustomRange')}
+        trigger={
+          <DateTrigger active={absolute} className="h-11 md:h-9">
+            {absolute ? `${draft.from.replace('T', ' ')} — ${draft.to.replace('T', ' ') || t('admin:logsUntilNow')}` : t('admin:logsCustomRange')}
+          </DateTrigger>
+        }
+      >
+        {({ close }) => {
+          const submit = () => {
+            if (!valid) return
+            applied.current = true
+            onApplyRange()
+            close()
+          }
+          const onKey = (e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+              e.preventDefault()
+              submit()
+            }
+          }
+          return (
+            <div className="grid w-[min(34rem,calc(100vw-2.5rem))] gap-3">
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2">
+                <Field label={t('admin:logsFrom')} htmlFor="logs-from">
+                  <Input
+                    id="logs-from"
+                    type="datetime-local" step="0.001"
+                    className="h-11 min-w-0 w-full md:h-9"
+                    aria-label={t('admin:logsFrom')}
+                    value={draft.from}
+                    onChange={(e) => onRange(e.target.value, draft.to)}
+                    onKeyDown={onKey}
+                  />
+                </Field>
+                <Field label={t('admin:logsTo')} htmlFor="logs-to">
+                  <Input
+                    id="logs-to"
+                    type="datetime-local" step="0.001"
+                    className="h-11 min-w-0 w-full md:h-9"
+                    aria-label={t('admin:logsTo')}
+                    value={draft.to}
+                    onChange={(e) => onRange(draft.from, e.target.value)}
+                    onKeyDown={onKey}
+                  />
+                </Field>
+              </div>
+              <p className="text-xs text-muted-foreground">{t('admin:logsLocalTime')}</p>
+              {(draft.from || draft.to) && !valid && <p role="alert" className="text-xs text-destructive">{t('admin:logsInvalidRange')}</p>}
+              <div className="flex items-center justify-end gap-2">
+                <Button variant="outline" size="sm" onClick={close}>{t('common:cancel')}</Button>
+                <Button size="sm" disabled={!valid} onClick={submit}>{t('admin:logsApplyRange')}</Button>
+              </div>
+            </div>
+          )
+        }}
+      </Popover>
     </section>
   )
 }

@@ -93,6 +93,7 @@ test('A53 admin log date filters retain seconds and milliseconds after applying 
   const queries:URLSearchParams[]=[]
   await page.route('**/admin/logs?*',route=>{if(route.request().isNavigationRequest()) return route.fallback();queries.push(new URL(route.request().url()).searchParams);return route.fulfill({json:{data:[]}})})
   await page.goto(`/admin/logs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`)
+  await page.getByRole('region', { name: '时间窗' }).locator('button[aria-haspopup=dialog]').click()
   await expect(page.locator('#logs-from')).toBeVisible()
   expect(new Date(await page.locator('#logs-from').inputValue()).toISOString()).toBe(from)
   expect(new Date(await page.locator('#logs-to').inputValue()).toISOString()).toBe(to)

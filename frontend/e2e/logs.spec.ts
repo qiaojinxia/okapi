@@ -964,7 +964,7 @@ test('门户日志日期：应用、清除、刷新和后退保留其他条件�
   await page.goto('/portal/logs?scope=user&model=gpt-alpha&start_date=2024-11-03&end_date=2024-11-03&timezone=America%2FLos_Angeles')
   const period = page.getByRole('region', { name: '统计时段', exact: true })
   await expect(period).toContainText('2024-11-03 — 2024-11-03')
-  await period.locator('summary').click()
+  await period.getByRole('button', { name: '2024-11-03 — 2024-11-03', exact: true }).click()
   await expect(page.getByLabel('开始日期')).toHaveValue('2024-11-03')
   const count = queries.filter((url) => url.pathname === '/api/me/logs').length
   await page.getByLabel('开始日期').fill('2024-11-01')
@@ -1007,7 +1007,7 @@ test('门户日志按日期翻页保留条件，重新选日期从第一页开�
   await expect(page.getByRole('button', { name: '收起 req-100 的明细', exact: true })).toHaveAttribute('aria-expanded', 'true')
   await expect(page.getByRole('dialog', { name: '请求与账单详情' })).toBeVisible()
   await page.keyboard.press('Escape')
-  await page.getByRole('region', { name: '统计时段', exact: true }).locator('summary').click()
+  await page.getByRole('region', { name: '统计时段', exact: true }).getByRole('button', { name: '2024-11-03 — 2024-11-03', exact: true }).click()
   await page.getByLabel('开始日期').fill('2024-11-02')
   await page.getByRole('button', { name: '应用日期', exact: true }).click()
   await expect.poll(() => queries.filter((url) => url.pathname === '/api/me/logs').at(-1)?.searchParams.get('start_date')).toBe('2024-11-02')
@@ -1038,11 +1038,13 @@ for (const width of [320, 390]) {
     if (width === 390) await page.addInitScript(() => { localStorage.setItem('okapi.lang', 'en'); localStorage.setItem('okapi.theme', 'dark') })
     await page.goto('/portal/logs?scope=user&model=long-historical-model-for-a-specific-workload&start_date=2024-11-03&end_date=2024-11-03&timezone=America%2FLos_Angeles')
     const period = page.getByRole('region', { name: width === 320 ? '统计时段' : 'Time period', exact: true })
-    await period.locator('summary').click()
-    await expect(period.locator('input[type=date]')).toHaveCount(2)
+    await period.getByRole('button', { name: '2024-11-03 — 2024-11-03', exact: true }).click()
+    const panel = page.getByRole('dialog', { name: width === 320 ? '自定义日期' : 'Custom dates' })
+    await expect(panel.locator('input[type=date]')).toHaveCount(2)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    for (const input of await period.locator('input[type=date]').all()) {
-      expect(await input.evaluate((node) => node.getBoundingClientRect().right <= innerWidth)).toBe(true)
+    // 日期面板整个落在窗口内，两个输入框也不出界
+    for (const node of [panel, ...(await panel.locator('input[type=date]').all())]) {
+      expect(await node.evaluate((el) => { const box = el.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth })).toBe(true)
     }
     await page.screenshot({ path: `test-results/portal-log-range-${width}.png`, fullPage: true, animations: 'disabled' })
   })
@@ -1066,7 +1068,8 @@ for (const width of [390, 1024, 1440, 1920]) {
       expect(request.width).toBeGreaterThanOrEqual(error.width)
       expect(request.width).toBeLessThanOrEqual(512)
       expect(Math.abs(error.y - request.y)).toBeLessThanOrEqual(1)
-      const from = (await page.locator('#logs-from').boundingBox())!, to = (await page.locator('#logs-to').boundingBox())!
+      // 浮层刚弹出时有一帧入场动画：两个输入框在同一次求值里一起量，别分两次异步去取
+      const [from, to] = await page.evaluate(() => ['logs-from', 'logs-to'].map((id) => { const box = document.getElementById(id)!.getBoundingClientRect(); return { width: box.width, y: box.y } }))
       expect(from.width).toBeLessThanOrEqual(320)
       expect(to.width).toBeLessThanOrEqual(320)
       expect(Math.abs(from.y - to.y)).toBeLessThanOrEqual(1)

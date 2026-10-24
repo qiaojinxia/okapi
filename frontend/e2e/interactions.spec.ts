@@ -3,6 +3,7 @@ import type { Page } from '@playwright/test'
 import { fileURLToPath } from 'node:url'
 import { buildActivity } from '../src/features/profile/activity'
 import type { ActivityResponse } from '../src/features/profile/activity'
+import { pickDay } from './calendar'
 
 function profileData(year = 2026, scope: 'key' | 'user' = 'key'): ActivityResponse {
   const row = (day: string, n = 1) => ({ day, model: 'gpt-5', requests: 2 * n,
@@ -21,6 +22,14 @@ function profileData(year = 2026, scope: 'key' | 'user' = 'key'): ActivityRespon
   }
   return { year, scope, today: '2026-09-04', timezone: 'UTC', first_year: 2024,
     data: scope === 'user' ? data.map((r) => ({ ...r, requests: r.requests * 2 })) : data }
+}
+
+/// 个人中心「选择日期」：点开月历弹出框，翻到那个月再点那一天，选完按钮上就是这一天。
+async function chooseDay(page: Page, day: string) {
+  await page.getByRole('button', { name: /^选择日期/ }).click()
+  await pickDay(page.getByRole('dialog', { name: '选择日期' }), day)
+  await expect(page.getByRole('dialog', { name: '选择日期' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /^选择日期/ })).toHaveText(day)
 }
 
 async function prepareProfile(page: Page, language = 'zh-CN') {
@@ -64,23 +73,48 @@ test('底部头像进入个人中心，热力图可点击、键盘切日并切�
   expect(cellSize?.width).toBe(cellSize?.height)
   await page.locator('[data-day="2026-01-01"]').click()
   const details = page.getByRole('region', { name: '当天明细', exact: true })
-  await expect(details.getByLabel('选择日期')).toHaveValue('2026-01-01')
+  await expect(details.getByRole('button', { name: /^选择日期/ })).toHaveText('2026-01-01')
   await expect(details.locator('dl')).toContainText('2,000')
   await expect(details.locator('tbody tr')).toHaveCount(2)
   await expect(details.locator('tbody tr').first()).toContainText('1,500')
   await page.locator('[data-day="2026-01-01"]').press('ArrowRight')
   await expect(page.locator('[data-day="2026-01-08"]')).toBeFocused()
-  await expect(details.getByLabel('选择日期')).toHaveValue('2026-01-08')
+  await expect(details.getByRole('button', { name: /^选择日期/ })).toHaveText('2026-01-08')
   await page.locator('[data-day="2026-01-08"]').press('Home')
   await expect(page.locator('[data-day="2026-01-01"]')).toBeFocused()
   await expect(page.locator('[data-day="2026-09-04"]')).toHaveAttribute('data-level', '0')
   await page.getByRole('group', { name: '热力图指标' }).getByRole('button', { name: '请求数', exact: true }).click()
   await expect(page.locator('[data-day="2026-09-04"]')).not.toHaveAttribute('data-level', '0')
   expect(queries).toEqual(['?scope=key'])
-  await page.getByLabel('选择日期').fill('2026-09-03')
+  await chooseDay(page, '2026-09-03')
   await page.getByRole('group', { name: '热力图指标' }).getByRole('button', { name: 'Token', exact: true }).click()
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: 'test-results/personal-center-desktop.png', fullPage: true, animations: 'disabled' })
+})
+
+test('个人中心选择日期：月历只含当年的日子，键盘选定后收起并把焦点还给按钮', async ({ page }) => {
+  await prepareProfile(page)
+  await page.goto('/portal/profile')
+  const trigger = page.getByRole('button', { name: /^选择日期/ })
+  await expect(trigger).toHaveText('2026-09-04')
+  await trigger.click()
+  const panel = page.getByRole('dialog', { name: '选择日期' })
+  // 打开后焦点直接落在当前选中的那一天，方向键立刻可用
+  await expect(panel.locator('[data-date="2026-09-04"]')).toBeFocused()
+  await expect(panel.locator('[data-date="2026-09-05"]'), '今天之后的日子不可选').toHaveAttribute('aria-disabled', 'true')
+  // 只含 2026 年：翻到 1 月就到头，不能再往前
+  const previous = panel.getByRole('button', { name: '上个月', exact: true })
+  while (await previous.isEnabled()) await previous.click()
+  await expect(panel.getByRole('grid')).toHaveAttribute('data-month', '2026-01')
+  await expect(panel.getByRole('button', { name: '上一年', exact: true })).toBeDisabled()
+  await panel.locator('[data-date="2026-01-01"]').focus()
+  await page.keyboard.press('ArrowLeft')
+  await expect(panel.locator('[data-date="2026-01-01"]'), '越过年初停在 1 月 1 日').toBeFocused()
+  await page.keyboard.press('Enter')
+  await expect(panel).toHaveCount(0)
+  await expect(trigger).toHaveText('2026-01-01')
+  await expect(trigger).toBeFocused()
+  await expect(page.getByRole('region', { name: '当天明细', exact: true }).locator('dl')).toContainText('2,000')
 })
 
 test('年份与账户范围分别查询，空年和空日可辨识', async ({ page }) => {
@@ -88,12 +122,12 @@ test('年份与账户范围分别查询，空年和空日可辨识', async ({ pa
   await page.goto('/portal/profile')
   await page.getByLabel('年份', { exact: true }).selectOption('2024')
   await expect(page.locator('button[data-day]')).toHaveCount(366)
-  await page.getByLabel('选择日期').fill('2024-02-29')
+  await chooseDay(page, '2024-02-29')
   await expect(page.getByRole('region', { name: '当天明细', exact: true })).toContainText('1,500')
   await page.getByRole('group', { name: '统计范围' }).getByRole('button', { name: '全账户' }).click()
   await expect.poll(() => queries.at(-1)).toBe('?scope=user&year=2024')
   await expect(page.locator('[data-day="2024-02-29"]')).toHaveAttribute('aria-label', /4 次请求/)
-  await page.getByLabel('选择日期').fill('2024-01-01')
+  await chooseDay(page, '2024-01-01')
   await expect(page.getByText('当天暂无使用记录', { exact: true })).toBeVisible()
   await page.getByLabel('年份', { exact: true }).selectOption('2025')
   await expect(page.getByText(/该年份和统计范围内暂无使用记录/)).toBeVisible()
@@ -108,7 +142,7 @@ test('移动端头像入口关闭菜单，日历不撑宽页面，日期选择�
   await expect(page.getByRole('dialog').getByRole('link', { name: '个人中心', exact: true })).toContainText('root #1 · default')
   await page.getByRole('dialog').getByRole('link', { name: '个人中心', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await page.getByLabel('选择日期').fill('2026-01-01')
+  await chooseDay(page, '2026-01-01')
   await expect(page.getByRole('region', { name: '当天明细', exact: true })).toContainText('2,000')
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.evaluate(() => window.scrollTo(0, 0))

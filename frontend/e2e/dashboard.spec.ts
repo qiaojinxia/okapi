@@ -517,7 +517,7 @@ test('自定义日期同步概览、质量、图表和排行；详情、刷新�
   await expect.poll(() => selected().length).toBe(10)
   await page.reload()
   await expect(summary.getByRole('link', { name: /自定义日期 · 请求数/ })).toBeVisible()
-  await page.locator('details > summary').filter({ hasText: '2026-09-10 — 2026-09-13' }).click()
+  await page.getByRole('button', { name: '2026-09-10 — 2026-09-13', exact: true }).click()
   await page.getByLabel('开始日期', { exact: true }).fill('2026-09-14')
   await page.getByLabel('结束日期', { exact: true }).fill('2026-09-17')
   await page.getByRole('button', { name: '应用日期', exact: true }).click()

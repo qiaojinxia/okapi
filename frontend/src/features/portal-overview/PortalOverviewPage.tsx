@@ -217,7 +217,7 @@ export function PortalOverviewPage() {
             onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
             options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
           />
-          <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range} className="min-w-0 max-w-full px-3 py-1 text-[13px] [&>summary]:min-h-6"
+          <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range} className="h-[34px] text-[13px]"
             onApply={(value) => void navigate({ search: (prev) => ({ ...prev, start_date: value.start, end_date: value.end }) })} />
           {win && <span data-slot="portal-calendar" className="text-[13px] tabular-nums text-muted-foreground/80">{win.start_date} — {win.end_date}{win.timezone ? ` · ${zoneLabel(win.timezone)}` : ''}</span>}
           <LiveBadge live={live} scope={scope} />

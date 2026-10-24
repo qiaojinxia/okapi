@@ -3105,11 +3105,13 @@ test('服务质量趋势：缺省 metric=error_rate；切 stack 与天数进查�
   await expect.poll(() => qs.some((p) => p.get('granularity') === 'hour' && p.get('days') === '30')).toBe(true)
   await page.getByRole('button', { name: '重置高级条件' }).click()
   await expect.poll(() => qs.at(-1)?.get('granularity')).toBeNull()
+  // 弹出框里只填起点没法确定：半截日期进不了表单
+  await page.getByRole('button', { name: /^起止日期/ }).click()
   await page.getByLabel('开始日期').fill('2026-09-01')
-  await page.getByRole('button', { name: '应用分析条件' }).click()
-  await expect(page.getByRole('alert')).toContainText('请选择截至今天、包含首尾的 1–366 天有效日期')
+  await expect(page.getByRole('button', { name: '确定', exact: true })).toBeDisabled()
   await page.getByLabel('开始日期').fill('2026-08-01')
   await page.getByLabel('结束日期').fill('2026-09-08')
+  await page.getByRole('button', { name: '确定', exact: true }).click()
   await page.getByLabel('时间粒度').selectOption('hour')
   const beforeHourRange = qs.length
   await page.getByRole('button', { name: '应用分析条件' }).click()

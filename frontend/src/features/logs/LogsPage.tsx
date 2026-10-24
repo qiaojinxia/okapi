@@ -103,7 +103,7 @@ export function LogsPage() {
       <Button size="sm" className="ml-auto h-11 md:h-9" disabled={!valid} onClick={() => commit(draft)}><Search className="h-3.5 w-3.5" />{t('common:search')}</Button>
       </div>
       <section aria-label={t('charts:period')} className="flex min-w-0 flex-wrap items-center gap-2 border-t border-border/60 pt-2">
-      <DateRangePicker className="md:py-1 md:[&_summary]:min-h-6" today={todayInTimezone(applied.timezone)} value={applied.range} onApply={(range) => commit({ ...draft, range })} />
+      <DateRangePicker className="h-11 md:h-9" today={todayInTimezone(applied.timezone)} value={applied.range} onApply={(range) => commit({ ...draft, range })} />
       {applied.range && <Button size="sm" variant="ghost" onClick={() => commit({ ...applied, range: null })}>{t('portal:logsClearDates')}</Button>}
       <Input className="w-full font-mono sm:w-80" aria-label={t('admin:logsRequestId')} placeholder={t('logs:requestFilterHint')} value={draft.requestId}
         maxLength={36} aria-invalid={!validRequest(draft.requestId)} onChange={(e) => setDraft({ ...draft, requestId: e.target.value })}

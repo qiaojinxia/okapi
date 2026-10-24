@@ -4,6 +4,7 @@ import { Activity, ArrowUpRight, CalendarDays, Coins, Cpu, KeyRound, Monitor, Sh
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
+import { DateField } from '@/components/ui/date-field'
 import { PageBody, PageHeader } from '@/components/ui/page'
 import { UsageScope } from '@/components/usage-scope'
 import { Tabs, TabPanel } from '@/components/ui/tabs'
@@ -142,12 +143,11 @@ function ActivityContent({ data }: { data: ActivityResponse }) {
             <h3 className="font-semibold">{t('profile:dayDetails')}</h3>
             <p className="mt-1 text-sm text-muted-foreground" aria-live="polite">{new Intl.DateTimeFormat(i18n.language, { dateStyle: 'full', timeZone: 'UTC' }).format(calendarDate(selected))}</p>
           </div>
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            {t('profile:chooseDay')}
-            <input type="date" value={selected} min={`${data.year}-01-01`} max={lastDay}
-              onChange={(event) => { const value = event.target.value; if (activity.lookup.has(value) && value <= lastDay) setSelected(value) }}
-              className="h-11 max-w-full rounded-lg border border-border bg-background px-3 text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40 dark:[color-scheme:dark]" />
-          </label>
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <span aria-hidden>{t('profile:chooseDay')}</span>
+            <DateField label={t('profile:chooseDay')} today={data.today} value={selected} min={`${data.year}-01-01`} max={lastDay}
+              isDisabled={(value) => !activity.lookup.has(value)} onChange={setSelected} className="h-11 text-foreground" />
+          </div>
         </div>
         <DayDetails day={day} />
       </section>

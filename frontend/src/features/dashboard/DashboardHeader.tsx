@@ -49,7 +49,7 @@ export function DashboardHeader({ title, days, range, calendar, today, refreshin
       <Tooltip content={t('admin:dashboardPeriodHint')}>
         <button type="button" aria-label={t('admin:dashboardScope')} className="flex h-8 w-8 items-center justify-center rounded text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40"><CircleHelp className="h-4 w-4" /></button>
       </Tooltip>
-      {today && <DateRangePicker today={today} value={range} closeOnApply onApply={onRange} className="min-w-0 max-w-full px-3 py-1 text-[13px] [&>summary]:min-h-6" />}
+      {today && <DateRangePicker today={today} value={range} onApply={onRange} className="h-[34px] text-[13px]" />}
       <Button variant="outline" size="icon" loading={refreshing} aria-label={t('common:refresh')} title={t('common:refresh')} onClick={onRefresh} className="size-[34px] rounded-lg">
         {!refreshing && <RefreshCw className="h-[15px] w-[15px]" />}
       </Button>
