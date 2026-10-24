@@ -247,6 +247,11 @@ fn channel_routes() -> ConsoleRouter {
             get(manage::pool_detail).delete(manage::delete_pool),
         )
         .route("/admin/channels/batch", post(manage::batch_channels))
+        // 新建渠道时的上游模型发现：渠道还没落库，用表单里的地址 / 凭证
+        .route(
+            "/admin/channels/fetch-models",
+            post(admin::fetch_draft_models),
+        )
         .route(
             "/admin/channels/{id}/duplicate",
             post(manage::duplicate_channel),

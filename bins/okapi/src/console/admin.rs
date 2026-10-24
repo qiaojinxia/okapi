@@ -3533,26 +3533,116 @@ pub async fn fetch_channel_models(
     let credential =
         okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let base = row.api_base.unwrap_or_default();
-    let base = base.trim_end_matches('/');
-    if super::cloud_probe::is_cloud(&row.provider) {
-        let models = super::cloud_probe::fetch_models(
-            &state,
-            &row.provider,
-            base,
-            &row.settings,
-            &credential,
-            row.channel_key_id,
-            super::egress::key_proxy(&state, row.channel_key_id).await?,
-        )
-        .await?;
-        return Ok(Json(json!({ "channel_id": channel_id, "models": models })));
-    }
-    let (url, auth_header, auth_value) = models_probe_target(&row.provider, base, credential);
+    let proxy_url = super::egress::key_proxy(&state, row.channel_key_id).await?;
+    let models = discover_models(
+        &state,
+        DiscoverTarget {
+            provider: &row.provider,
+            base: base.trim_end_matches('/'),
+            settings: &row.settings,
+            credential,
+            channel_key_id: row.channel_key_id,
+            proxy_url,
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "channel_id": channel_id, "models": models })))
+}
 
-    let outbound = okapi_providers::Outbound::from_settings(
-        &row.settings,
-        super::egress::key_proxy(&state, row.channel_key_id).await?,
-    );
+#[derive(Deserialize)]
+pub struct DraftModelsReq {
+    pub provider: String,
+    #[serde(default)]
+    pub api_base: Option<String>,
+    pub credential: String,
+    #[serde(default)]
+    pub settings: Option<Value>,
+    #[serde(default)]
+    pub egress: Option<okapi_store::egress::Binding>,
+}
+
+/// 新建渠道时的上游模型发现：渠道还没落库，用表单里刚填的地址 / 凭证 / 设置 / 出口。
+/// 校验与建渠道同一套（地址过 SSRF 闸、设置合法、出口对操作者可见）；凭证只用于这一次请求，
+/// 不落库。订阅账号（OAuth）的凭证是登录流程换出来的令牌，没有可拿来试的草稿凭证，要先建渠道。
+pub async fn fetch_draft_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ExtractJson(req): ExtractJson<DraftModelsReq>,
+) -> Result<Json<Value>, AppError> {
+    let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
+    let provider = req.provider.trim();
+    let descriptor = okapi_providers::registry::lookup(provider)
+        .ok_or_else(|| AppError::bad_request().with_param("provider"))?;
+    if matches!(
+        descriptor.credential,
+        okapi_providers::registry::CredentialKind::OAuth(_)
+    ) {
+        return Err(AppError::bad_request().with_param("fetch_models_requires_saved_channel"));
+    }
+    let credential = req.credential.trim();
+    if credential.is_empty() {
+        return Err(AppError::bad_request().with_param("credential"));
+    }
+    validate_channel_settings(&state, provider, req.settings.as_ref()).await?;
+    let binding = req.egress.unwrap_or(okapi_store::egress::Binding::Inherit);
+    super::egress::validate_binding(&state, &binding, &actor, scope).await?;
+    let base = super::channel_creation::endpoint(&state, provider, req.api_base.as_deref()).await?;
+    let (resolved, _) =
+        okapi_store::egress::pick_for_new_key(&state.pg, &binding, state.master_key.as_deref())
+            .await?;
+    let settings = req.settings.unwrap_or_else(|| json!({}));
+    let models = discover_models(
+        &state,
+        DiscoverTarget {
+            provider,
+            base: base.trim_end_matches('/'),
+            settings: &settings,
+            credential: credential.to_owned(),
+            channel_key_id: 0,
+            proxy_url: resolved.proxy_url()?,
+        },
+    )
+    .await?;
+    Ok(Json(json!({ "models": models })))
+}
+
+/// 一次上游模型发现要用到的全部输入。`channel_key_id` 在草稿（还没落库）时是 0，只有订阅账号才用得上。
+struct DiscoverTarget<'a> {
+    provider: &'a str,
+    base: &'a str,
+    settings: &'a Value,
+    credential: String,
+    channel_key_id: i64,
+    proxy_url: Option<String>,
+}
+
+/// 云厂商走各自的签名 / 令牌流程，其余协议拉 `{base}/models`（Azure 拉部署列表），返回去重排序的 id。
+async fn discover_models(
+    state: &AppState,
+    target: DiscoverTarget<'_>,
+) -> Result<Vec<String>, AppError> {
+    let DiscoverTarget {
+        provider,
+        base,
+        settings,
+        credential,
+        channel_key_id,
+        proxy_url,
+    } = target;
+    if super::cloud_probe::is_cloud(provider) {
+        return super::cloud_probe::fetch_models(
+            state,
+            provider,
+            base,
+            settings,
+            &credential,
+            channel_key_id,
+            proxy_url,
+        )
+        .await;
+    }
+    let (url, auth_header, auth_value) = models_probe_target(provider, base, credential);
+    let outbound = okapi_providers::Outbound::from_settings(settings, proxy_url);
     let outcome = state
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {
@@ -3585,8 +3675,7 @@ pub async fn fetch_channel_models(
     };
     let parsed: Value = serde_json::from_slice(&body)
         .map_err(|_| AppError::bad_request().with_param("upstream_models_not_json"))?;
-    let models = parse_upstream_model_ids(&parsed);
-    Ok(Json(json!({ "channel_id": channel_id, "models": models })))
+    Ok(parse_upstream_model_ids(&parsed))
 }
 
 fn models_probe_target(provider: &str, base: &str, credential: String) -> (String, String, String) {

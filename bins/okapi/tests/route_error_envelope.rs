@@ -190,6 +190,9 @@ fn console_probe_body(path: &str) -> Value {
             json!({"name": "audit", "api_base": "http://127.0.0.1:9/v1", "credential": "audit-fixture", "models": ["audit-model"]})
         }
         "/admin/channels/batch" => json!({"ids": [1], "action": "enable"}),
+        "/admin/channels/fetch-models" => {
+            json!({"provider": "openai", "credential": "audit-fixture"})
+        }
         "/admin/channels/oauth/start" => json!({"provider": "codex"}),
         "/admin/channels/oauth/exchange" => json!({"state": "audit", "code": "audit"}),
         "/admin/channels/{id}/credential" => json!({"credential": "audit-fixture"}),

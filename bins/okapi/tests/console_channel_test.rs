@@ -377,3 +377,117 @@ async fn channel_test_prefers_an_enabled_key() {
         .unwrap();
     assert_eq!(models["models"], json!(["gpt-x-1", "gpt-x-2"]), "{models}");
 }
+
+/// 新建渠道时的上游模型发现：渠道还没落库，用表单里刚填的地址 / 凭证。校验与建渠道同一套
+/// （地址过 SSRF 闸、设置合法、出口对操作者可见）；订阅账号要先建渠道；什么都不落库。
+#[tokio::test]
+async fn draft_model_discovery_works_before_the_channel_exists() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/admin/channels/fetch-models", env.addr);
+    let base = format!("http://{}/v1", env.mock);
+    let post = |token: Option<&str>, body: Value| {
+        let mut request = client.post(&url).json(&body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            (
+                status,
+                response.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    let draft = |credential: &str| json!({"provider": "openai", "api_base": base, "credential": credential});
+    let channels = || async {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels")
+            .fetch_one(&env.pg)
+            .await
+            .unwrap()
+    };
+    let before = channels().await;
+
+    // 未登录 401；没有 channel.write 的用户 403
+    assert_eq!(post(None, draft("good-credential")).await.0, 401);
+    let suffix = Uuid::new_v4().simple().to_string();
+    let plain = okapi_store::provision::create_user(&env.pg, &format!("plain-{suffix}"))
+        .await
+        .unwrap();
+    let plain_token = format!("sk-okapi-plain-{suffix}");
+    let plain_hash = {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(plain_token.as_bytes()))
+    };
+    okapi_store::provision::create_api_key(&env.pg, plain, &plain_hash, "sk-okapi-plain")
+        .await
+        .unwrap();
+    let (status, body) = post(Some(&plain_token), draft("good-credential")).await;
+    assert_eq!(
+        (status, &body["error"]["param"]),
+        (403, &json!("channel.write"))
+    );
+
+    // 缺省策略下回环 http 地址过不了 SSRF 闸（与建渠道同一道闸），凭证没有发出去
+    let (status, body) = post(Some(&env.admin_token), draft("good-credential")).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["param"], "api_base_scheme_https_only");
+
+    // 放开策略后：按表单里的凭证拉到列表，去重排序
+    sqlx::query("INSERT INTO settings(key,value) VALUES('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+        .bind(json!({"allow_http": true, "allow_private": true}))
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let (status, body) = post(Some(&env.admin_token), draft("good-credential")).await;
+    assert_eq!(
+        (status, &body["models"]),
+        (200, &json!(["gpt-x-1", "gpt-x-2"])),
+        "{body}"
+    );
+    // 错的凭证原样回上游状态
+    let (status, body) = post(Some(&env.admin_token), draft("bad-credential")).await;
+    assert_eq!(
+        (status, &body["error"]["param"]),
+        (502, &json!("status_401")),
+        "{body}"
+    );
+
+    // 参数校验
+    let cases = [
+        (
+            json!({"provider": "codex", "credential": "x"}),
+            "fetch_models_requires_saved_channel",
+        ),
+        (
+            json!({"provider": "anthropic_max", "credential": "x"}),
+            "fetch_models_requires_saved_channel",
+        ),
+        (
+            json!({"provider": "no-such-protocol", "credential": "x"}),
+            "provider",
+        ),
+        (draft("   "), "credential"),
+        (
+            json!({"provider": "openai", "api_base": base, "credential": "x", "settings": "nope"}),
+            "settings",
+        ),
+    ];
+    for (request, param) in cases {
+        let (status, body) = post(Some(&env.admin_token), request.clone()).await;
+        assert_eq!(status, 400, "{request}: {body}");
+        assert_eq!(body["error"]["param"], param, "{request}");
+    }
+    // 出口也按建渠道的规则校验：不存在的代理 404
+    let mut with_proxy = draft("good-credential");
+    with_proxy["egress"] = json!({"mode": "proxy", "proxy_id": 999_999_999});
+    assert_eq!(post(Some(&env.admin_token), with_proxy).await.0, 404);
+
+    // 只是问了一下上游：没有建渠道，也没有把凭证存下来
+    assert_eq!(channels().await, before);
+    sqlx::query("DELETE FROM settings WHERE key = 'ssrf_policy'")
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
