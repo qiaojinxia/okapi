@@ -3098,6 +3098,28 @@ new-api 迁移来的令牌分组、管理员在后台给 key 直接钉的组都�
 `gateway_m2_sched::cooling_pool_reports_when_a_key_comes_back`、`error.rs` 单测、前端 `write-forms`（未发布徽章、保存提示、
 分配时挡下未发布组、`keys_reset` 提示）。
 
+### 11.48 价目目录建议价与新建渠道时拉上游模型（2026-10-24，对照 Sub2API 内置 LiteLLM 目录 / new-api FetchModels）
+
+新模型上线的两处手工活：渠道里一个个敲模型名，价簿里一个个查官方文档录价。
+
+- **价目目录建议**（详见 `docs/pricing-catalog.md`）：`okapi_pricing::catalog` 把 LiteLLM 社区价目表的裁剪快照（约 3900 条、1 MB，
+  `scripts/refresh-pricing-catalog.py` 刷新）编进二进制；`GET /admin/pricing/catalog/lookup|search`（`pricing.read`）按**完整名字**给出建议：
+  输入 / 输出 USD/1M、缓存读写 / 1 小时倍率、输入输出上限、能力、长上下文加价 / 服务档位 / 弃用等备注、同名备选。
+  它只是模型表单的输入辅助——建议卡上点「填入建议价」「带入规格」才进表单草稿，保存、发布之后价簿快照才是计费依据（可回放不变）；
+  **不**像 Sub2API 那样做成请求时的定价解析链。匹配只认同一个名字（大小写、`@` 与 `-`、`厂商/` 前缀不计较，不做前缀 / 近似猜测），
+  同名取第一方；换算全程整数十进制（`Dec`，18 位小数，无浮点），守卫 `guard-no-float.sh` 照样盖到。校验基准：填的价与参考价
+  （预设核对价优先，其次目录价）差一倍以上或不到一半时提醒，不拦保存。
+- **新建渠道时拉上游模型**：Okapi 早有 `GET /admin/channels/{id}/fetch-models`（保存后的渠道，openai 兼容 / anthropic / gemini / azure 部署 /
+  bedrock / codex 订阅目录），缺的是**新建**时——渠道还没落库就没有入口。新增 `POST /admin/channels/fetch-models`（`channel.write`）：
+  用表单里的 `provider` / `api_base` / `credential` / `settings` / `egress` 拉，校验与建渠道同一套（地址过 SSRF 闸、设置合法、出口对操作者可见），
+  凭证只用于这一次请求、不落库；订阅账号（OAuth）的凭证是登录换出来的令牌，没有草稿凭证，回 400 `fetch_models_requires_saved_channel`。
+  两个端点共用 `discover_models`。抽屉里按钮新建态也可用；拉回来的名字**并入**清单（此前是覆盖，手填的别名会被一键清掉），
+  并提示其中哪些还没在价簿里建模型、链到模型定价页补价。
+
+**验收**：`okapi-pricing` `catalog` 单测（匹配 / 换算 / 备选 / 联想 / 坏快照拒绝 / 真快照与前端预设核对价一致）、
+`console_pricing_catalog`（401 / 403 / 400 / 响应形状 / 联想封顶）、`console_channel_test::draft_model_discovery_works_before_the_channel_exists`、
+前端 `model-catalog.spec`、`channel-fetch-models.spec`。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
