@@ -839,12 +839,15 @@ pub struct ChunkProbe {
 impl<'de> Deserialize<'de> for ChunkProbe {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let choices = value
-            .get("choices")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([]));
+        // 从借用的子树反序列化：每个流式事件都过这里，不必先把 choices 深拷贝一份
+        let choices = match value.get("choices") {
+            Some(choices) => {
+                Vec::<ChunkChoice>::deserialize(choices).map_err(serde::de::Error::custom)?
+            }
+            None => Vec::new(),
+        };
         Ok(Self {
-            choices: serde_json::from_value(choices).map_err(serde::de::Error::custom)?,
+            choices,
             usage: crate::usage_from_chat(&value),
         })
     }

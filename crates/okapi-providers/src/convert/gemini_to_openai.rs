@@ -644,10 +644,9 @@ impl OaiStreamToGemini {
             id.clone_into(&mut self.id);
         }
         let mut out = Vec::new();
-        let delta = chunk
-            .pointer("/choices/0/delta")
-            .cloned()
-            .unwrap_or_default();
+        // 只读：借用即可，不必把整个 delta（含 tool_calls 参数）深拷贝一遍
+        let empty = Value::Null;
+        let delta = chunk.pointer("/choices/0/delta").unwrap_or(&empty);
 
         if let Some(text) = delta.get("reasoning_content").and_then(Value::as_str)
             && !text.is_empty()

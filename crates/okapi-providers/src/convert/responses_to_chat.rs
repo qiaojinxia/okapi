@@ -547,7 +547,7 @@ impl ChatStreamToResponses {
         let payload = json!({"type": "response.created",
             "response": {"id": self.id, "object": "response", "created_at": self.created,
                 "status": "in_progress", "model": self.model, "output": []}});
-        self.named("response.created", &payload, false, 0, None)
+        self.named("response.created", payload, false, 0, None)
     }
 
     /// 正文或拒答增量：首次出现时开 message 项 / 对应 content part，再发 delta。
@@ -568,7 +568,7 @@ impl ChatStreamToResponses {
                          "role": "assistant", "content": []}});
             out.push(Ok(self.named(
                 "response.output_item.added",
-                &added,
+                added,
                 false,
                 0,
                 None,
@@ -599,7 +599,7 @@ impl ChatStreamToResponses {
                 "output_index": output_index, "content_index": part, "part": empty});
             out.push(Ok(self.named(
                 "response.content_part.added",
-                &added,
+                added,
                 false,
                 0,
                 None,
@@ -617,7 +617,7 @@ impl ChatStreamToResponses {
             "output_index": output_index, "content_index": content_index, "delta": text});
         out.push(Ok(self.named(
             event,
-            &delta,
+            delta,
             true,
             text.chars().count(),
             None,
@@ -640,7 +640,7 @@ impl ChatStreamToResponses {
                     "item":{"type":"reasoning","id":"rs_0","status":"in_progress","summary":[]}});
             out.push(Ok(self.named(
                 "response.output_item.added",
-                &added,
+                added,
                 false,
                 0,
                 None,
@@ -649,7 +649,7 @@ impl ChatStreamToResponses {
                     "output_index":index,"summary_index":0,"part":{"type":"summary_text","text":""}});
             out.push(Ok(self.named(
                 "response.reasoning_summary_part.added",
-                &part,
+                part,
                 false,
                 0,
                 None,
@@ -661,7 +661,7 @@ impl ChatStreamToResponses {
             "output_index":index,"summary_index":0,"delta":text});
         out.push(Ok(self.named(
             "response.reasoning_summary_text.delta",
-            &delta,
+            delta,
             true,
             text.chars().count(),
             None,
@@ -696,7 +696,7 @@ impl ChatStreamToResponses {
                 self.tools.insert(index, tool);
                 out.push(Ok(self.named(
                     "response.output_item.added",
-                    &added,
+                    added,
                     true,
                     0,
                     None,
@@ -718,7 +718,7 @@ impl ChatStreamToResponses {
                     let payload = json!({"type":"response.function_call_arguments.delta","item_id":format!("fc_{index}"),"output_index":tool.output_index,"delta":args});
                     out.push(Ok(self.named(
                         "response.function_call_arguments.delta",
-                        &payload,
+                        payload,
                         true,
                         args.chars().count(),
                         None,
@@ -747,7 +747,7 @@ impl ChatStreamToResponses {
                 "output_index":index,"summary_index":0,"text":self.reasoning_buf});
             out.push(Ok(self.named(
                 "response.reasoning_summary_text.done",
-                &text_done,
+                text_done,
                 false,
                 0,
                 None,
@@ -756,7 +756,7 @@ impl ChatStreamToResponses {
                 "output_index":index,"summary_index":0,"part":part});
             out.push(Ok(self.named(
                 "response.reasoning_summary_part.done",
-                &part_done,
+                part_done,
                 false,
                 0,
                 None,
@@ -767,7 +767,7 @@ impl ChatStreamToResponses {
                 json!({"type":"response.output_item.done","output_index":index,"item":item});
             out.push(Ok(self.named(
                 "response.output_item.done",
-                &item_done,
+                item_done,
                 false,
                 0,
                 None,
@@ -781,7 +781,7 @@ impl ChatStreamToResponses {
                     "output_index": output_index, "content_index": index, "text": self.text_buf});
                 out.push(Ok(self.named(
                     "response.output_text.done",
-                    &done,
+                    done,
                     false,
                     0,
                     None,
@@ -796,7 +796,7 @@ impl ChatStreamToResponses {
                     "output_index": output_index, "content_index": index, "refusal": self.refusal_buf});
                 out.push(Ok(self.named(
                     "response.refusal.done",
-                    &done,
+                    done,
                     false,
                     0,
                     None,
@@ -809,7 +809,7 @@ impl ChatStreamToResponses {
                     "output_index":output_index,"content_index":index,"part":part});
                 out.push(Ok(self.named(
                     "response.content_part.done",
-                    &part_done,
+                    part_done,
                     false,
                     0,
                     None,
@@ -821,7 +821,7 @@ impl ChatStreamToResponses {
                 json!({"type":"response.output_item.done","output_index":output_index,"item":item});
             out.push(Ok(self.named(
                 "response.output_item.done",
-                &item_done,
+                item_done,
                 false,
                 0,
                 None,
@@ -834,7 +834,7 @@ impl ChatStreamToResponses {
             let args_done = json!({"type":"response.function_call_arguments.done","item_id":item_id,"output_index":tool.output_index,"arguments":tool.arguments});
             out.push(Ok(self.named(
                 "response.function_call_arguments.done",
-                &args_done,
+                args_done,
                 false,
                 0,
                 None,
@@ -843,7 +843,7 @@ impl ChatStreamToResponses {
             let done = json!({"type":"response.output_item.done","output_index":tool.output_index,"item":item});
             out.push(Ok(self.named(
                 "response.output_item.done",
-                &done,
+                done,
                 false,
                 0,
                 None,
@@ -864,7 +864,7 @@ impl ChatStreamToResponses {
             "output": output,
             "usage": probe.map(responses_usage_json),
         }});
-        out.push(Ok(self.named(terminal, &completed, false, 0, probe)));
+        out.push(Ok(self.named(terminal, completed, false, 0, probe)));
         out.push(Ok(ChatEvent::Done));
         out
     }
@@ -872,13 +872,13 @@ impl ChatStreamToResponses {
     fn named(
         &mut self,
         event: &str,
-        data: &Value,
+        mut data: Value,
         has_output: bool,
         content_chars: usize,
         usage: Option<UsageProbe>,
     ) -> ChatEvent {
-        // sequence_number：Responses SSE 规范字段（客户端断点续传参考）
-        let mut data = data.clone();
+        // sequence_number：Responses SSE 规范字段（客户端断点续传参考）。按值收：每个事件都要发，
+        // 不必为插这一个字段把整棵树深拷贝一遍
         if let Some(obj) = data.as_object_mut() {
             obj.insert("sequence_number".into(), json!(self.seq));
         }
