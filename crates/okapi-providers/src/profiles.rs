@@ -111,7 +111,8 @@ fn extensions(value: &Value) -> Result<Extensions, UpstreamError> {
     if !value.is_object() {
         return Err(UpstreamError::Build("request_extensions_invalid".into()));
     }
-    serde_json::from_value::<Extensions>(value.clone())
+    // 借着 `&Value` 反序列化：每个请求要走好几次（客户端形态、Codex 门、校验），不再每次深拷贝整块扩展配置
+    Extensions::deserialize(value)
         .map_err(|_| UpstreamError::Build("request_extensions_invalid".into()))
 }
 
