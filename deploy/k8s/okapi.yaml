@@ -6,7 +6,12 @@
 #     --from-literal=OKAPI_REDIS_URL=redis://... \
 #     --from-literal=OKAPI_NATS_URL=nats://... \
 #     --from-literal=OKAPI_CLICKHOUSE_URL=http://... \
-#     --from-literal=OKAPI_MASTER_KEY=$(openssl rand -hex 32)
+#     --from-literal=OKAPI_MASTER_KEY=$(openssl rand -hex 32) \
+#     --from-literal=OKAPI_SETUP_TOKEN=$(openssl rand -hex 16)
+#
+# OKAPI_SETUP_TOKEN：首次初始化（POST /api/setup 创建超管）的口令，请求体带 setup_token。
+# console 在 Ingress 之后，请求不是直接的环回连接；没配这个口令时初始化一律 403
+# （setup_token_required），集群里就建不出第一个管理员。初始化完成后可以从 Secret 里去掉。
 ---
 # 连接数总账（扩容前必须核）：每个 pod 各开一套 PG 池，总连接 = Σ(副本数 × OKAPI_PG_POOL)。
 #   gateway 10（HPA 上限）× 12 = 120
