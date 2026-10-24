@@ -43,7 +43,8 @@ struct RerankProbe {
 /// 取代 chars/4 启发：那个式子对中文能差三到四倍（405 汉字 ≈ 108 tokens），预扣
 /// 失准，且上游不返 usage 时它就是计费口径、直接少收。分词器按模型名选
 /// （`estimate::encoding_for`，OpenAI 系 embedding 模型走 cl100k）。
-/// 数字元素是预分词的 token id 序列，个数即约 token 数；其余非文本不计。
+/// 数字元素是预分词的 token id 序列，个数即约 token 数。对象逐个取值往下数：rerank 的标准形状
+/// `documents: [{"text": "…"}]`（Jina / Cohere）以前按 0 计，上游不返 usage 时文档文本整段白送。
 fn estimate_input_tokens(model: &str, inputs: &[&serde_json::Value]) -> u32 {
     fn collect<'a>(input: &'a serde_json::Value, texts: &mut Vec<&'a str>, raw_tokens: &mut usize) {
         match input {
@@ -54,7 +55,12 @@ fn estimate_input_tokens(model: &str, inputs: &[&serde_json::Value]) -> u32 {
                     collect(item, texts, raw_tokens);
                 }
             }
-            _ => {}
+            serde_json::Value::Object(fields) => {
+                for value in fields.values() {
+                    collect(value, texts, raw_tokens);
+                }
+            }
+            serde_json::Value::Bool(_) | serde_json::Value::Null => {}
         }
     }
     let mut texts: Vec<&str> = Vec::new();
@@ -77,7 +83,6 @@ pub async fn embeddings(
     let Ok(probe) = serde_json::from_slice::<EmbeddingsProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let est = estimate_input_tokens(&probe.model, &[&probe.input]);
     match handle(
         &state,
         &headers,
@@ -86,7 +91,7 @@ pub async fn embeddings(
         started,
         &probe.model,
         "/embeddings",
-        est,
+        || estimate_input_tokens(&probe.model, &[&probe.input]),
     )
     .await
     {
@@ -102,8 +107,7 @@ pub async fn rerank(State(state): State<AppState>, headers: HeaderMap, body: Byt
     let Ok(probe) = serde_json::from_slice::<RerankProbe>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let query = serde_json::Value::String(probe.query);
-    let est = estimate_input_tokens(&probe.model, &[&query, &probe.documents]);
+    let query = serde_json::Value::String(probe.query.clone());
     match handle(
         &state,
         &headers,
@@ -112,7 +116,7 @@ pub async fn rerank(State(state): State<AppState>, headers: HeaderMap, body: Byt
         started,
         &probe.model,
         "/rerank",
-        est,
+        || estimate_input_tokens(&probe.model, &[&query, &probe.documents]),
     )
     .await
     {
@@ -131,9 +135,11 @@ async fn handle(
     started: Instant,
     requested_model: &str,
     upstream_path: &str,
-    est_prompt: u32,
+    estimate: impl FnOnce() -> u32,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
+    // 分词放在鉴权之后：匿名请求不该让网关替它跑整段 BPE（与 images 先鉴权再碰请求体同一纪律）
+    let est_prompt = estimate();
 
     let meta = super::chat::resolve_model_cached(state, requested_model).await?;
     let Some(meta) = meta.as_ref() else {
@@ -572,5 +578,14 @@ mod tests {
         assert_eq!(est, 6, "3 个 id + 请求级常量 3");
         let est = estimate_input_tokens("text-embedding-3-small", &[&json!("hi")]);
         assert_eq!(est, 4, "hi = 1 token + 请求级常量 3");
+    }
+
+    #[test]
+    fn rerank_object_documents_count_their_text() {
+        let text = "word ".repeat(200);
+        let plain = estimate_input_tokens("rerank-x", &[&json!("q"), &json!([text.clone()])]);
+        let objects = estimate_input_tokens("rerank-x", &[&json!("q"), &json!([{"text": text}])]);
+        assert_eq!(objects, plain, "{{\"text\": …}} 与字符串文档同样计数");
+        assert!(objects > 100);
     }
 }
