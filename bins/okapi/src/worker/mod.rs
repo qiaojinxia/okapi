@@ -747,7 +747,32 @@ async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result
     ))
 }
 
-/// 对账一轮 + 告警（`since` 见 [`reconcile_active_balances`]，None = 全量）：有差异就逐条 error 日志并派发 `drift`（只带前 20 个用户，够运维定位即可）。
+/// 一轮对账最多逐条记这么多个用户的差异，也是 `drift` 通知里带的用户数。
+const DRIFT_LOG_LIMIT: usize = 20;
+
+/// 差异逐条记 error 日志，超出 [`DRIFT_LOG_LIMIT`] 的合并成一条汇总。Redis 被清空 / 回滚到旧快照时
+/// 所有用户一起漂移，逐条记就是每轮（增量 5 分钟一次、全量每日）写出用户数那么多行 error，
+/// 把真正要看的日志淹掉；完整名单走 `GET /admin/reconciliation`。
+fn log_drifts(drifts: &[BalanceDrift]) {
+    for d in drifts.iter().take(DRIFT_LOG_LIMIT) {
+        tracing::error!(
+            user_id = d.user_id,
+            events_sum = d.events_sum_micro,
+            redis_effective = d.redis_effective_micro,
+            pg_snapshot = d.pg_snapshot_micro,
+            "对账差异（不会自愈：按账本修复走 /admin/reconciliation/repair）"
+        );
+    }
+    if drifts.len() > DRIFT_LOG_LIMIT {
+        tracing::error!(
+            count = drifts.len(),
+            logged = DRIFT_LOG_LIMIT,
+            "对账差异用户数超过逐条日志上限；完整名单见 GET /admin/reconciliation"
+        );
+    }
+}
+
+/// 对账一轮 + 告警（`since` 见 [`reconcile_active_balances`]，None = 全量）：有差异就记 error 日志（逐条最多 20 个用户，其余合并成一条汇总）并派发 `drift`（只带前 20 个用户，够运维定位即可）。
 ///
 /// 载荷拼在这里而不是 worker 主循环的 `select!` 臂里，理由同 `notify::balance_low_and_notify`。
 pub async fn reconcile_and_notify(
@@ -762,16 +787,12 @@ pub async fn reconcile_and_notify(
         tracing::debug!("对账零差异");
         return Ok(drifts);
     }
-    for d in &drifts {
-        tracing::error!(
-            user_id = d.user_id,
-            events_sum = d.events_sum_micro,
-            redis_effective = d.redis_effective_micro,
-            pg_snapshot = d.pg_snapshot_micro,
-            "对账差异（不会自愈：按账本修复走 /admin/reconciliation/repair）"
-        );
-    }
-    let users: Vec<i64> = drifts.iter().take(20).map(|d| d.user_id).collect();
+    log_drifts(&drifts);
+    let users: Vec<i64> = drifts
+        .iter()
+        .take(DRIFT_LOG_LIMIT)
+        .map(|d| d.user_id)
+        .collect();
     notifier
         .dispatch(
             "drift",
@@ -1235,4 +1256,58 @@ pub async fn recover_cooled_keys(pg: &PgPool) -> anyhow::Result<u64> {
     .execute(pg)
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod drift_log_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tracing_subscriber::prelude::*;
+
+    struct CountErrors(Arc<AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountErrors {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() == tracing::Level::ERROR {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn drift(user_id: i64) -> BalanceDrift {
+        BalanceDrift {
+            user_id,
+            events_sum_micro: 10,
+            redis_effective_micro: 20,
+            pg_snapshot_micro: 10,
+            sub_events_sum_micro: 0,
+            sub_redis_effective_micro: 0,
+        }
+    }
+
+    fn error_lines(count: i64) -> usize {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(CountErrors(seen.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            log_drifts(&(1..=count).map(drift).collect::<Vec<_>>());
+        });
+        seen.load(Ordering::SeqCst)
+    }
+
+    /// 全员漂移（Redis 被清空 / 回滚）时每轮只写有限几行：逐条前 20 个 + 一条汇总。
+    #[test]
+    fn a_mass_drift_writes_a_bounded_number_of_error_lines() {
+        assert_eq!(error_lines(0), 0);
+        assert_eq!(error_lines(3), 3, "差异少时仍是逐条，没有汇总行");
+        assert_eq!(error_lines(20), 20, "刚好到上限：逐条，没有汇总行");
+        assert_eq!(error_lines(21), 21, "超出一个：20 条逐条 + 1 条汇总");
+        assert_eq!(error_lines(100_000), 21, "再多也是这 21 行");
+    }
 }
