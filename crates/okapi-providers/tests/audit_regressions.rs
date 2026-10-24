@@ -236,6 +236,60 @@ async fn count_tokens_preserves_limit_headers_even_when_error_body_is_truncated(
         }
     }
 }
+/// WS→HTTP 桥和图片流自己发请求，Retry-After 与订阅窗口头的解析要走同一份（`retry_after::seconds`）。
+/// 此前它们只认整数秒：Codex 订阅窗口用尽时上游只发 `x-codex-*` 头，冷却是 None，
+/// 被撞上的账号几秒后又被选中；HTTP-date 形式的 Retry-After 同样被丢掉。
+#[tokio::test]
+async fn bridge_and_image_stream_errors_share_the_retry_after_rules() {
+    let outbound = okapi_providers::Outbound::default();
+    let base = raw_upstream(
+        429,
+        "x-codex-primary-used-percent: 100\r\nx-codex-primary-reset-after-seconds: 7200\r\nContent-Type: application/json\r\n",
+        br#"{"error":{"message":"usage limit"}}"#.to_vec(),
+        false,
+    )
+    .await;
+    let Err(error) = okapi_providers::responses_bridge::send(
+        &okapi_providers::HttpPool::new().unwrap(),
+        format!("{base}/v1/responses"),
+        &[],
+        Bytes::from_static(b"{}"),
+        &outbound,
+    )
+    .await
+    else {
+        panic!("429 expected")
+    };
+    assert_eq!(error.upstream_status(), Some(429));
+    assert_eq!(error.retry_after_secs(), Some(7200));
+
+    let base = raw_upstream(
+        429,
+        "Retry-After: Fri, 31 Dec 2100 23:59:59 GMT\r\nContent-Type: application/json\r\n",
+        b"{}".to_vec(),
+        false,
+    )
+    .await;
+    let upstream = okapi_providers::OpenAiUpstream::new().unwrap();
+    let Err(error) = upstream
+        .image_stream(
+            &base,
+            "/v1/images/generations",
+            "synthetic",
+            okapi_providers::image_stream::ImageBody::Json(Bytes::from_static(b"{}")),
+            &outbound,
+        )
+        .await
+    else {
+        panic!("429 expected")
+    };
+    assert_eq!(error.upstream_status(), Some(429));
+    assert!(
+        error.retry_after_secs().is_some_and(|secs| secs > 3600),
+        "{:?}",
+        error.retry_after_secs()
+    );
+}
 #[tokio::test]
 async fn bedrock_partial_frame_at_eof_is_an_error() {
     use futures::StreamExt;

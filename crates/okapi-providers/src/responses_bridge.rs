@@ -29,11 +29,7 @@ pub async fn send(
         .map_err(|_| invalid("responses_http_transport"))?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        let retry_after_secs = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok());
+        let retry_after_secs = crate::retry_after::seconds(response.headers());
         let mut body = Vec::new();
         while let Some(chunk) = response
             .chunk()

@@ -179,12 +179,13 @@ impl VertexUpstream {
             .await
             .map_err(|e| classify(&e))?;
         let status = resp.status().as_u16();
+        let retry_after_secs = crate::retry_after::seconds(resp.headers());
         let body = crate::openai::response_bytes(resp, Some(crate::limits::MAX_BODY)).await?;
         if !(200..300).contains(&status) {
             return Err(UpstreamError::Status {
                 status,
                 body,
-                retry_after_secs: None,
+                retry_after_secs,
             });
         }
         let parsed: Value =

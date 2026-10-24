@@ -114,11 +114,7 @@ async fn send(
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
     if !(200..300).contains(&status) {
-        let retry_after_secs = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse().ok());
+        let retry_after_secs = crate::retry_after::seconds(response.headers());
         return Err(UpstreamError::Status {
             status,
             body: response_bytes(response, Some(64 * 1024))

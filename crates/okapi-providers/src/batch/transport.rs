@@ -121,11 +121,8 @@ pub(super) async fn send(
     Err(BatchError {
         code: "batch_http_status",
         status: Some(status),
-        retry_after_secs: response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse().ok()),
+        retry_after_secs: crate::retry_after::seconds(response.headers())
+            .and_then(|secs| u64::try_from(secs).ok()),
         may_have_executed: mutation && (!(400..500).contains(&status) || status == 408),
     })
 }

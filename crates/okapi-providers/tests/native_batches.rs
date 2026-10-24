@@ -268,6 +268,29 @@ async fn cancel_is_only_acknowledged_and_later_success_is_preserved() {
     call.await.unwrap().unwrap();
 }
 
+/// 批处理的 Retry-After 与其他上游路径同一套规则：HTTP-date 形式算数，负数 / 乱码不当成冷却。
+#[tokio::test]
+async fn batch_retry_after_follows_the_shared_rules() {
+    let mut server = Server::new().await;
+    let client = gemini(&server);
+    for (value, cooled) in [
+        ("Fri, 31 Dec 2100 23:59:59 GMT", true),
+        ("-5", false),
+        ("soon", false),
+    ] {
+        let c = client.clone();
+        let call =
+            tokio::spawn(async move { c.create_inline("image", "pictures", &requests()).await });
+        let req = server.next().await;
+        let mut reply = Reply::empty(429);
+        reply.headers = vec![("retry-after", value.into())];
+        req.respond(reply);
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.retry_after_secs.is_some(), cooled, "{value}");
+        server.quiet().await;
+    }
+}
+
 #[tokio::test]
 async fn create_failures_are_bounded_sanitized_and_never_retried_or_redirected() {
     let mut server = Server::new().await;
