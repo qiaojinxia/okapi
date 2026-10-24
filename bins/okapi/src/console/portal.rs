@@ -464,7 +464,19 @@ pub async fn redeem(
                     .await;
             drop(guard);
             state.sched.auth_flush().await;
-            let mut body = super::subscriptions::receipt_view(&state, &receipt).await?;
+            // 码已经核销、订阅已经入队：回执视图读失败（PG / Redis 抖一下）不能回 500，
+            // 否则用户以为没兑成、拿同一个码再试只会得到「兑换码无效」
+            let mut body = match super::subscriptions::receipt_view(&state, &receipt).await {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::error!(
+                        status = %error.status, code = %error.code,
+                        "订阅兑换码已生效，但回执渲染失败"
+                    );
+                    json!({"operation_id": receipt.id, "pending": true,
+                        "outcome": "pending", "subscription": null})
+                }
+            };
             body["amount_micro"] = json!(0);
             body["plan_code"] = json!(claimed.plan_code);
             Ok(Json(body))
