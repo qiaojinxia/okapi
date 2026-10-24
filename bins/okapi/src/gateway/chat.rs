@@ -494,10 +494,11 @@ pub async fn chat_completions(
         Ok(key) => key,
         Err(error) => return error.into_response_with(Some(request_id)),
     };
-    let Ok(probe) = serde_json::from_slice::<ChatRequestProbe>(&body) else {
+    // 请求体只解析成 Value 一次，探针从 Value 取（不再按字节各解析一遍）
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(probe) = <ChatRequestProbe as serde::Deserialize>::deserialize(&value) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
     if let Err(error) = check_input(Ingress::OpenAi, &value) {
@@ -575,10 +576,11 @@ async fn responses_entry(
         Ok(key) => key,
         Err(error) => return error.into_response_with(Some(request_id)),
     };
-    let Ok(probe) = serde_json::from_slice::<ResponsesRequestProbe>(&body) else {
+    // 请求体只解析成 Value 一次，探针从 Value 取（不再按字节各解析一遍）
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(probe) = <ResponsesRequestProbe as serde::Deserialize>::deserialize(&value) else {
         return AppError::bad_request().into_response_with(Some(request_id));
     };
     if let Err(error) = check_input(Ingress::Responses, &value) {
@@ -685,10 +687,12 @@ pub async fn gemini_generate(
         Ok(key) => key,
         Err(error) => return error.into_gemini_response_with(Some(request_id)),
     };
-    let Ok(probe) = serde_json::from_slice::<okapi_api::GeminiRequestProbe>(&body) else {
+    // 请求体只解析成 Value 一次，探针从 Value 取（不再按字节各解析一遍）
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return AppError::bad_request().into_gemini_response_with(Some(request_id));
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(probe) = <okapi_api::GeminiRequestProbe as serde::Deserialize>::deserialize(&value)
+    else {
         return AppError::bad_request().into_gemini_response_with(Some(request_id));
     };
     if let Err(error) = check_input(Ingress::Gemini, &value) {
@@ -738,10 +742,11 @@ pub async fn messages(State(state): State<AppState>, headers: HeaderMap, body: B
         Ok(key) => key,
         Err(error) => return error.into_anthropic_response_with(Some(request_id)),
     };
-    let Ok(probe) = serde_json::from_slice::<MessagesRequestProbe>(&body) else {
+    // 请求体只解析成 Value 一次，探针从 Value 取（不再按字节各解析一遍）
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return AppError::bad_request().into_anthropic_response_with(Some(request_id));
     };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+    let Ok(probe) = <MessagesRequestProbe as serde::Deserialize>::deserialize(&value) else {
         return AppError::bad_request().into_anthropic_response_with(Some(request_id));
     };
     if let Err(error) = check_input(Ingress::Anthropic, &value) {
@@ -1008,8 +1013,9 @@ fn parse_checked<T: serde::de::DeserializeOwned>(
     ingress: Ingress,
     body: &[u8],
 ) -> Result<T, AppError> {
-    let probe = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
-    let value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    let value: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    let probe = T::deserialize(&value).map_err(|_| AppError::bad_request())?;
     check_input(ingress, &value)?;
     Ok(probe)
 }
@@ -1086,11 +1092,8 @@ fn message_request_features(ingress: Ingress, v: &serde_json::Value) -> (bool, b
 const IMAGE_INPUT_TOKENS: u32 = 2_560;
 
 /// 请求里的图片输入张数，含工具结果里嵌套的图片。
-fn image_inputs(ingress: Ingress, body: &Bytes) -> u32 {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return 0;
-    };
-    input_roots(ingress, &v)
+fn image_inputs(ingress: Ingress, v: &serde_json::Value) -> u32 {
+    input_roots(ingress, v)
         .into_iter()
         .flatten()
         .map(count_images)
@@ -1122,11 +1125,8 @@ const AUDIO_BYTES_PER_TOKEN: usize = 125;
 
 /// 内联文件与音频输入的 token 上界（只看请求里带着的数据；URL / file_id 本地取不到，不计）。
 /// 只用于预扣与缺用量时的兜底，实际仍按上游用量结算。
-fn attachment_tokens(ingress: Ingress, body: &Bytes) -> u32 {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return 0;
-    };
-    input_roots(ingress, &v)
+fn attachment_tokens(ingress: Ingress, v: &serde_json::Value) -> u32 {
+    input_roots(ingress, v)
         .into_iter()
         .flatten()
         .map(count_attachments)
@@ -1440,16 +1440,23 @@ async fn prepare_chat(
     // 估价（预扣补全缺省 = models.max_output，无则 2048，§5.1）
     let est_prompt = info.prompt_tokens;
     let density = estimate::prompt_density(est_prompt, info.prompt_chars);
+    // 请求体在这里只解析一次：图片 / 附件估算与原生工具准入共用（大请求体每多解析一遍都是毫秒级 CPU）
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(body).ok();
     // 图片输入另计（密度只描述文本，先算完再加）
-    let est_prompt = est_prompt
-        .saturating_add(image_inputs(ingress, body).saturating_mul(IMAGE_INPUT_TOKENS))
-        .saturating_add(attachment_tokens(ingress, body));
+    let est_prompt = parsed.as_ref().map_or(est_prompt, |v| {
+        est_prompt
+            .saturating_add(image_inputs(ingress, v).saturating_mul(IMAGE_INPUT_TOKENS))
+            .saturating_add(attachment_tokens(ingress, v))
+    });
     let completion_cap = admitted_completion_cap(
         ingress,
         info.completion_cap_req,
         meta.max_output.and_then(|v| u32::try_from(v).ok()),
     );
-    let mut server_tools = super::server_tools::ToolAdmission::parse(body)
+    let mut server_tools = parsed
+        .as_ref()
+        .ok_or("tools")
+        .and_then(super::server_tools::ToolAdmission::from_value)
         .map_err(|param| AppError::bad_request().with_param(param))?;
     let base_usage = TokenUsage {
         server_tool_usage: server_tools.estimated_usage(),
@@ -2786,37 +2793,22 @@ fn wrap_thinking_to_content(resp: ChatResponse) -> ChatResponse {
 /// 泵送与结算无感。
 // 四象限线性分派，拆分破坏矩阵完整视野
 #[allow(clippy::too_many_lines)]
-/// 渠道字段透传控制（new-api rc.23 #6847 对齐）：剥除配置的请求顶层字段。
-/// 方言无关（对入口原文生效，转换路径自然继承）；`model`/`messages`/`stream`
-/// 受保护不可剥（防误配打断主链）。仅配置非空时解析（缺省零开销）。
-fn strip_request_fields(body: &Bytes, fields: &[String]) -> Option<Bytes> {
-    const PROTECTED: [&str; 5] = [
+/// 渠道字段透传控制（new-api rc.23 #6847 对齐）：先剥除配置的顶层字段，再浅合并强制注入的字段。
+/// 方言无关（对入口原文生效，转换路径自然继承）；受保护键两边都不动（防误配打断主链）。
+/// 两项都没配时不解析（缺省零开销）；配了也只解析一次。
+fn adjust_request_fields(
+    body: &Bytes,
+    strip: &[String],
+    inject: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Bytes> {
+    const STRIP_PROTECTED: [&str; 5] = [
         "model",
         "messages",
         "stream",
         "previous_response_id",
         "conversation",
     ];
-    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let obj = value.as_object_mut()?;
-    let mut changed = false;
-    for field in fields {
-        if PROTECTED.contains(&field.as_str()) {
-            continue;
-        }
-        if obj.remove(field).is_some() {
-            changed = true;
-        }
-    }
-    changed.then(|| Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
-}
-
-/// 渠道强制注入（在 strip 之后）：浅合并顶层键。受保护键跳过。
-fn inject_request_fields(
-    body: &Bytes,
-    fields: &serde_json::Map<String, serde_json::Value>,
-) -> Option<Bytes> {
-    const PROTECTED: [&str; 6] = [
+    const INJECT_PROTECTED: [&str; 6] = [
         "model",
         "messages",
         "stream",
@@ -2824,18 +2816,22 @@ fn inject_request_fields(
         "previous_response_id",
         "conversation",
     ];
-    if fields.is_empty() {
+    if strip.is_empty() && inject.is_empty() {
         return None;
     }
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let obj = value.as_object_mut()?;
     let mut changed = false;
-    for (key, val) in fields {
-        if PROTECTED.contains(&key.as_str()) {
-            continue;
+    for field in strip {
+        if !STRIP_PROTECTED.contains(&field.as_str()) && obj.remove(field).is_some() {
+            changed = true;
         }
-        obj.insert(key.clone(), val.clone());
-        changed = true;
+    }
+    for (key, val) in inject {
+        if !INJECT_PROTECTED.contains(&key.as_str()) {
+            obj.insert(key.clone(), val.clone());
+            changed = true;
+        }
     }
     changed.then(|| Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
 }
@@ -2858,16 +2854,12 @@ fn shape_upstream_body(
     } else {
         reasoning::strip_unified(&body).unwrap_or(body)
     };
-    let body = if cand.strip_request_fields.is_empty() {
-        body
-    } else {
-        strip_request_fields(&body, &cand.strip_request_fields).unwrap_or(body)
-    };
-    let body = if cand.inject_request_fields.is_empty() {
-        body
-    } else {
-        inject_request_fields(&body, &cand.inject_request_fields).unwrap_or(body)
-    };
+    let body = adjust_request_fields(
+        &body,
+        &cand.strip_request_fields,
+        &cand.inject_request_fields,
+    )
+    .unwrap_or(body);
     if let Some(parent) = &bill.response_parent {
         let parsed: serde_json::Value =
             serde_json::from_slice(&body).map_err(|e| UpstreamError::Build(e.to_string()))?;
@@ -4681,8 +4673,7 @@ mod failure_scope_tests {
     /// 四种入口的图片都计张，工具结果里嵌套的也算；非图片的内联文件不算。
     #[test]
     fn image_inputs_are_counted_across_ingresses() {
-        let count =
-            |ingress, v: serde_json::Value| image_inputs(ingress, &Bytes::from(v.to_string()));
+        let count = |ingress, v: serde_json::Value| image_inputs(ingress, &v);
         assert_eq!(
             count(
                 Ingress::OpenAi,
@@ -4741,8 +4732,7 @@ mod failure_scope_tests {
         let pdf = b64(
             b"%PDF-1.4 1 0 obj <</Type /Pages /Count 2>> 2 0 obj <</Type /Page>> 3 0 obj <</Type/Page>>",
         );
-        let count =
-            |ingress, v: serde_json::Value| attachment_tokens(ingress, &Bytes::from(v.to_string()));
+        let count = |ingress, v: serde_json::Value| attachment_tokens(ingress, &v);
         assert_eq!(
             count(
                 Ingress::Anthropic,

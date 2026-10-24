@@ -53,9 +53,9 @@ fn report(session: &Session, work: &Work, failure: &ForwardFailure) {
 }
 
 fn probe(session: &Session, work: &Work, body: &super::Bytes) -> Result<ProbeInfo, AppError> {
-    let probe: ResponsesRequestProbe =
-        serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
     let value: Value = serde_json::from_slice(body).map_err(|_| AppError::bad_request())?;
+    let probe = <ResponsesRequestProbe as serde::Deserialize>::deserialize(&value)
+        .map_err(|_| AppError::bad_request())?;
     // 与 HTTP 的 /v1/responses 同一口径（负 temperature 等在入口拒掉）
     check_input(Ingress::Responses, &value)?;
     let messages = probe.input_messages();

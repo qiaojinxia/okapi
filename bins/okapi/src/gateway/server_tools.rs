@@ -60,8 +60,14 @@ fn build_error(param: &str) -> UpstreamError {
 }
 
 impl ToolAdmission {
+    #[cfg(test)]
     pub(super) fn parse(body: &[u8]) -> Result<Self, &'static str> {
         let value: Value = serde_json::from_slice(body).map_err(|_| "tools")?;
+        Self::from_value(&value)
+    }
+
+    /// 已解析好的请求体（`prepare_chat` 共用同一份，不再按字节重解析）。
+    pub(super) fn from_value(value: &Value) -> Result<Self, &'static str> {
         let mut plan = Self::default();
         for tool in value
             .get("tools")
