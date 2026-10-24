@@ -159,7 +159,7 @@ async fn account_client_hello_matches_the_captured_axios_connection() {
     assert_eq!(hello.extensions, ACCOUNT_EXTENSIONS, "无 ALPN / OCSP / SCT");
     assert_eq!(hello.groups, REAL_GROUPS);
     assert_eq!(hello.sigalgs, REAL_SIGALGS);
-    assert!(hello.alpn.is_empty());
+    assert!(hello.alpn.is_empty(), "hello.alpn should be empty");
     assert_eq!(hello.sni, "platform.claude.com");
 }
 

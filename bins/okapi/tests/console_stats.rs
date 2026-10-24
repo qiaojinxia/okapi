@@ -322,7 +322,10 @@ async fn personal_activity_covers_calendar_year_and_isolates_owners() {
     );
     let (status, empty) = get(&env, "/api/me/stats/activity?year=2023", &env.user_token).await;
     assert_eq!(status, 200);
-    assert!(empty["data"].as_array().unwrap().is_empty());
+    assert!(
+        empty["data"].as_array().unwrap().is_empty(),
+        "empty[\"data\"].as_array().unwrap() should be empty"
+    );
     // Classification loss after raw expires must not invent old call counts.
     ch.execute(&format!("ALTER TABLE population_v1_mv_key_model_day DELETE WHERE user_id={} SETTINGS mutations_sync=2", env.user_id)).await.unwrap();
     let (status, missing) = get(&env, path, &env.user_token).await;

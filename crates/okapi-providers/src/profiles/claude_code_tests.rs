@@ -392,7 +392,10 @@ fn auto_preserves_native_checksum_and_body_bytes() {
     ));
     let prepared = prepare_anthropic(body.clone(), true, false, &out, None).unwrap();
     assert_eq!(prepared.body, body);
-    assert!(prepared.headers.is_empty());
+    assert!(
+        prepared.headers.is_empty(),
+        "prepared.headers should be empty"
+    );
     for (entry, class) in [("sdk-cli", "main"), ("cli", "auxiliary")] {
         let out = outbound(entry, class);
         assert!(validate_extensions("anthropic_max", &out.context.extensions).is_ok());

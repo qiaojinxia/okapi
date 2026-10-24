@@ -1177,7 +1177,10 @@ async fn import_accepts_vendor_formats_dedupes_and_joins_a_group() {
         )
         .await;
     assert_eq!(status, 200, "{body}");
-    assert!(body["created"].as_array().unwrap().is_empty());
+    assert!(
+        body["created"].as_array().unwrap().is_empty(),
+        "body[\"created\"].as_array().unwrap() should be empty"
+    );
     assert_eq!(
         body["skipped"],
         json!([{"line": 1, "reason": "duplicate"}, {"line": 2, "reason": "duplicate"}])
@@ -1594,7 +1597,7 @@ async fn proxied_traffic_is_metered_flushed_and_charted() {
     assert!(entry["up_bytes"].as_u64().unwrap() > 100, "{entry}");
     assert!(entry["down_bytes"].as_u64().unwrap() > 100, "{entry}");
     let points = entry["points"].as_array().unwrap();
-    assert!(!points.is_empty());
+    assert!(!points.is_empty(), "points should not be empty");
     let summed: u64 = points.iter().map(|p| p["up_bytes"].as_u64().unwrap()).sum();
     assert_eq!(summed, entry["up_bytes"].as_u64().unwrap());
     let (status, body) = traffic("7d").await;

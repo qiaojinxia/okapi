@@ -168,8 +168,14 @@ async fn pg_failure_cannot_close_or_charge_a_reservation() -> TestResult {
     assert!(sync::record(&b.base.pg, &b.ledger, bad).await.is_err());
     assert_eq!(b.balance().await, before);
     assert_eq!(b.pending().await, 0);
-    assert!(b.base.events(b.input.request_id).await.is_empty());
-    assert!(b.base.outbox(b.input.request_id).await.is_empty());
+    assert!(
+        b.base.events(b.input.request_id).await.is_empty(),
+        "b.base.events(b.input.request_id).await should be empty"
+    );
+    assert!(
+        b.base.outbox(b.input.request_id).await.is_empty(),
+        "b.base.outbox(b.input.request_id).await should be empty"
+    );
     assert_eq!(b.base.key_used().await.0, 0);
     assert!(sync::record(&b.base.pg, &b.ledger, b.input.clone()).await?);
     b.check_closed().await;

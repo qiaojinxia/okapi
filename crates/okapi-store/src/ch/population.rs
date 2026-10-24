@@ -14,7 +14,7 @@ pub(super) fn reference_scope<'a>(name: &str, suffix: &'a str) -> Option<&'a str
 }
 
 pub(super) fn valid_scope(name: &str, predicate: &str) -> bool {
-    spec::specs().ok().is_some_and(|specs| {
+    spec::specs().is_ok_and(|specs| {
         specs
             .iter()
             .find(|spec| spec.name == name)

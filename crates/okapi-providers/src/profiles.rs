@@ -322,20 +322,17 @@ pub fn is_native_claude_code(body: &[u8], user_agent: Option<&str>) -> bool {
     let Some(user_id) = value.metadata.and_then(|metadata| metadata.user_id) else {
         return false;
     };
-    let valid_id = serde_json::from_str::<Value>(&user_id)
-        .ok()
-        .is_some_and(|id| {
-            id.get("device_id")
+    let valid_id = serde_json::from_str::<Value>(&user_id).is_ok_and(|id| {
+        id.get("device_id")
+            .and_then(Value::as_str)
+            .is_some_and(|device| {
+                device.len() == 64 && device.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            && id
+                .get("session_id")
                 .and_then(Value::as_str)
-                .is_some_and(|device| {
-                    device.len() == 64 && device.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-                && id
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(valid_uuid)
-        })
-        || legacy_metadata(&user_id);
+                .is_some_and(valid_uuid)
+    }) || legacy_metadata(&user_id);
     if !valid_id {
         return false;
     }

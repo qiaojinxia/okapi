@@ -210,6 +210,9 @@ mod tests {
             frames[0].headers,
             vec![(":event-type".to_owned(), "chunk".to_owned())]
         );
-        assert!(frames[0].payload.is_empty());
+        assert!(
+            frames[0].payload.is_empty(),
+            "frames[0].payload should be empty"
+        );
     }
 }

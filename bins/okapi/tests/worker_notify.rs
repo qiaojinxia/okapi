@@ -230,7 +230,7 @@ async fn worker_alerts_carry_actionable_payloads() {
         0,
         "阈值未配置时不告警"
     );
-    assert!(take(&bodies).is_empty());
+    assert!(take(&bodies).is_empty(), "take(&bodies) should be empty");
 
     sqlx::query!(
         r#"INSERT INTO settings (key, value) VALUES ('balance_low_threshold_micro', '101'::jsonb)"#
@@ -393,7 +393,10 @@ async fn balance_low_scan_respects_threshold() {
         .execute(&pg)
         .await
         .unwrap();
-    assert!(notify::scan_balance_low(&pg).await.unwrap().is_empty());
+    assert!(
+        notify::scan_balance_low(&pg).await.unwrap().is_empty(),
+        "notify::scan_balance_low(&pg).await.unwrap() should be empty"
+    );
 
     // 造一个低余额用户并开启阈值
     let suffix = Uuid::new_v4().simple().to_string();
@@ -497,7 +500,7 @@ async fn manual_queues_wake_operators_only_when_non_empty() {
             .unwrap(),
         (0, 0)
     );
-    assert!(take().is_empty());
+    assert!(take().is_empty(), "take() should be empty");
 
     // 死信两条（一条已处理不算）+ 隔离一条：各派发一次，数量对得上
     for status in [0_i16, 0, 2] {
@@ -540,6 +543,6 @@ async fn manual_queues_wake_operators_only_when_non_empty() {
             .unwrap(),
         (0, 0)
     );
-    assert!(take().is_empty());
+    assert!(take().is_empty(), "take() should be empty");
     tmp.teardown().await;
 }

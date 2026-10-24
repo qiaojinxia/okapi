@@ -204,7 +204,7 @@ async fn next_month_partitions_created_idempotently() {
     let second = worker::ensure_next_month_partitions(&pg, now)
         .await
         .unwrap();
-    assert!(second.is_empty());
+    assert!(second.is_empty(), "second should be empty");
 
     let (y, m) = (now.year(), now.month());
     let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };

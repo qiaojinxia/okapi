@@ -381,7 +381,7 @@ async fn unknown_other_user_other_key_expired_and_invalid_ids_never_reach_upstre
             .status(),
         404
     );
-    assert!(env.calls().is_empty());
+    assert!(env.calls().is_empty(), "env.calls() should be empty");
 }
 
 #[tokio::test]
@@ -570,7 +570,7 @@ async fn binding_corruption_write_failure_and_collision_fail_closed() {
             .status(),
         503
     );
-    assert!(env.calls().is_empty());
+    assert!(env.calls().is_empty(), "env.calls() should be empty");
     let before = env.balance().await;
     for stream in [false, true] {
         let id = format!("resp_{}", Uuid::new_v4().simple());
@@ -755,7 +755,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
     );
     occupied.release().await;
     env.idle().await;
-    assert!(env.calls().is_empty());
+    assert!(env.calls().is_empty(), "env.calls() should be empty");
     assert_eq!(env.balance().await, before);
     // 当前模型白名单拒绝优先于历史路由。
     sqlx::query("UPDATE api_keys SET model_allowlist=$2 WHERE id=$1")
@@ -771,7 +771,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
             .status(),
         403
     );
-    assert!(env.calls().is_empty());
+    assert!(env.calls().is_empty(), "env.calls() should be empty");
 }
 
 #[tokio::test]

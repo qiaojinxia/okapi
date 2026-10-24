@@ -414,7 +414,10 @@ async fn paid_conflicting_plan_stays_visible_and_delivers_after_active_plan_ends
     fresh_worker(&b).await;
     let mine = b.mine().await;
     assert_eq!(mine["subscription"]["plan_code"], code);
-    assert!(mine["pending_grants"].as_array().unwrap().is_empty());
+    assert!(
+        mine["pending_grants"].as_array().unwrap().is_empty(),
+        "mine[\"pending_grants\"].as_array().unwrap() should be empty"
+    );
     assert_eq!(b.sub().await.0, 2_000_000);
 }
 

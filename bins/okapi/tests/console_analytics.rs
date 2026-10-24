@@ -451,7 +451,7 @@ async fn trend_filters_by_dimension_and_resolves_scope() {
     assert_eq!(body["scope"]["user"]["username"], env.username);
     assert!(body["previous"]["requests"].is_null() || body["previous"]["requests"] == 0);
     let buckets = body["data"].as_array().unwrap();
-    assert!(!buckets.is_empty());
+    assert!(!buckets.is_empty(), "buckets should not be empty");
     assert!(
         buckets[0]["bucket"].as_str().unwrap().contains(':'),
         "小时桶应带时分秒：{}",
@@ -926,7 +926,7 @@ async fn channel_timeline_buckets() {
     assert_eq!(body["error_rate_bp"], 2_000);
     assert_eq!(body["channel_id"], env.channel_id);
     let data = body["data"].as_array().unwrap();
-    assert!(!data.is_empty());
+    assert!(!data.is_empty(), "data should not be empty");
     let total: i64 = data.iter().map(|d| d["requests"].as_i64().unwrap()).sum();
     assert_eq!(total, 10);
     assert!(data[0]["bucket"].as_str().unwrap().contains(':'));
@@ -1600,7 +1600,10 @@ async fn core_fields_match_the_full_source() {
     assert_eq!(status, 200, "{fallback}");
     assert_eq!(fallback["fields"], "all");
     assert_eq!(fallback["data"], expected["data"]);
-    assert!(!expected["data"].as_array().unwrap().is_empty());
+    assert!(
+        !expected["data"].as_array().unwrap().is_empty(),
+        "expected[\"data\"].as_array().unwrap() should not be empty"
+    );
 
     // fields=core 隐含不查上期：即便显式 compare=true 也是 null，不会再付一条上期查询。
     let (status, implied) = get(

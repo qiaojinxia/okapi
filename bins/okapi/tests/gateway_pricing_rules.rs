@@ -716,7 +716,10 @@ async fn rule_delete_is_authorized_audited_and_takes_effect_after_publish() {
     let request_id = chat(&env).await;
     let (amount, snapshot) = wait_committed(&env, request_id).await;
     assert_eq!(amount, 240, "发布后恢复未打折金额");
-    assert!(snapshot["rules"].as_array().unwrap().is_empty());
+    assert!(
+        snapshot["rules"].as_array().unwrap().is_empty(),
+        "snapshot[\"rules\"].as_array().unwrap() should be empty"
+    );
     let audit_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM audit_logs WHERE action = 'pricing.delete_rule' AND target = $1",
     )

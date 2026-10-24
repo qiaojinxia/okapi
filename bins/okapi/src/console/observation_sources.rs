@@ -113,7 +113,10 @@ mod tests {
     fn every_observation_field_has_exactly_one_owner() {
         let mut names = std::collections::HashSet::new();
         for source in SOURCES {
-            assert!(!source.fields.is_empty());
+            assert!(
+                !source.fields.is_empty(),
+                "source.fields should not be empty"
+            );
             for field in source.fields {
                 assert!(names.insert(field), "ambiguous field {field}");
             }

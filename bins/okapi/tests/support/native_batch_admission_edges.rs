@@ -54,7 +54,10 @@ async fn two_gateway_instances_share_idempotency_and_the_last_daily_slot() {
         rows(&env, 1).await;
         let (rpm, _, rpd) = env.state.sched.key_rate_snapshot(env.uid, env.kid).await;
         assert_eq!((rpm, rpd), (1, 1));
-        assert!(env.peer.lock().unwrap().calls.is_empty());
+        assert!(
+            env.peer.lock().unwrap().calls.is_empty(),
+            "env.peer.lock().unwrap().calls should be empty"
+        );
         assert_eq!(
             env.state.ledger.balance(env.uid).await.unwrap().as_micros(),
             BALANCE

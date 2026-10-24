@@ -23,7 +23,10 @@ fn absent_extension_preserves_original_bytes_and_channel_headers() {
     let prepared = prepare_anthropic(body.clone(), false, false, &out, None).unwrap();
     assert_eq!(prepared.body, body);
     assert_eq!(prepared.outbound.extra_headers, out.extra_headers);
-    assert!(prepared.headers.is_empty());
+    assert!(
+        prepared.headers.is_empty(),
+        "prepared.headers should be empty"
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn auto_protects_native_system_cache_and_thinking_bytes_even_with_an_identity() 
     })).unwrap());
     let prepared = prepare_anthropic(body.clone(), true, false, &out, Some("account")).unwrap();
     assert_eq!(prepared.body, body);
-    assert!(prepared.headers.is_empty());
+    assert!(
+        prepared.headers.is_empty(),
+        "prepared.headers should be empty"
+    );
     assert!(
         prepared
             .outbound
@@ -195,7 +201,10 @@ fn counting_and_passthrough_use_the_same_extension_boundary() {
     let prepared =
         prepare_anthropic(body.clone(), false, true, &outbound("passthrough"), None).unwrap();
     assert_eq!(prepared.body, body);
-    assert!(prepared.headers.is_empty());
+    assert!(
+        prepared.headers.is_empty(),
+        "prepared.headers should be empty"
+    );
     assert!(!is_client_header("authorization"));
     assert!(!is_client_header("x-api-key"));
 }

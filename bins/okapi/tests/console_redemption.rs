@@ -161,7 +161,10 @@ async fn redemption_list_pages_twenty_by_default_and_bounds_requests() {
     assert_eq!(minimum["data"].as_array().unwrap().len(), 1);
     let past_end = list("&limit=20&offset=220".into()).await;
     assert_eq!(past_end["total"], 205);
-    assert!(past_end["data"].as_array().unwrap().is_empty());
+    assert!(
+        past_end["data"].as_array().unwrap().is_empty(),
+        "past_end[\"data\"].as_array().unwrap() should be empty"
+    );
 
     sqlx::query("UPDATE redemption_codes SET status = 3 WHERE batch_id = $1 AND id = ANY($2)")
         .bind(batch)

@@ -65,7 +65,10 @@ async fn funded_batch_occupies_the_key_slot_until_cancellation_is_settled() {
     env.step(&job).await.unwrap();
     assert_eq!(env.poll(&job).await["status"], "preparing");
     denied(&env).await;
-    assert!(env.peer.lock().unwrap().calls.is_empty());
+    assert!(
+        env.peer.lock().unwrap().calls.is_empty(),
+        "env.peer.lock().unwrap().calls should be empty"
+    );
     env.value(reqwest::Method::POST, &path(&job, "/cancel"))
         .await;
     denied(&env).await;
@@ -198,7 +201,10 @@ async fn cancellation_while_waiting_never_releases_the_ordinary_requests_slot() 
         env.state.ledger.balance(env.uid).await.unwrap().as_micros(),
         BALANCE - PRICE
     );
-    assert!(env.peer.lock().unwrap().calls.is_empty());
+    assert!(
+        env.peer.lock().unwrap().calls.is_empty(),
+        "env.peer.lock().unwrap().calls should be empty"
+    );
     env.state
         .ledger
         .refund(env.uid, env.kid, ordinary)

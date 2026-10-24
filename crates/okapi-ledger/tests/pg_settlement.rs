@@ -448,8 +448,14 @@ async fn oversized_token_counters_never_diverge_between_pg_and_outbox() {
                 .await
                 .unwrap();
         assert_eq!(count, 0);
-        assert!(bed.events(rid).await.is_empty());
-        assert!(bed.outbox(rid).await.is_empty());
+        assert!(
+            bed.events(rid).await.is_empty(),
+            "bed.events(rid).await should be empty"
+        );
+        assert!(
+            bed.outbox(rid).await.is_empty(),
+            "bed.outbox(rid).await should be empty"
+        );
         assert_eq!(bed.wallet_snapshot().await, before);
         assert_eq!(bed.key_used().await.0, 0);
     }

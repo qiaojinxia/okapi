@@ -683,7 +683,10 @@ async fn me_logs_calendar_range_preserves_scope_and_cursor() {
     assert_eq!(row_ids(&first), [ids[2]]);
     let next = get(format!("{base}&limit=1&before={}", first["next_before"])).await;
     assert_eq!(row_ids(&next), [ids[1]]);
-    assert!(row_ids(&get(format!("{base}&before={}", ids[1])).await).is_empty());
+    assert!(
+        row_ids(&get(format!("{base}&before={}", ids[1])).await).is_empty(),
+        "row_ids(&get(format!(\"{{base}}&before={{}}\", ids[1])).await) should be empty"
+    );
     assert!(
         row_ids(&get(format!("{base}&errors_only=true")).await).is_empty(),
         "refunded records are not failed requests"

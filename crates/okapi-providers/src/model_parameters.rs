@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(p.efforts, ["low", "high", "max"]);
         assert_eq!(p.default_effort, None);
         p.intersect(&ParameterProfile::default());
-        assert!(p.efforts.is_empty());
+        assert!(p.efforts.is_empty(), "p.efforts should be empty");
     }
 
     #[test]

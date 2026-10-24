@@ -617,7 +617,10 @@ async fn cancellation_and_revocation_before_dispatch_close_pending_or_frozen_hol
         env.step(&job).await.unwrap();
         env.money(&job, 0).await;
         assert_eq!(env.creates(), 0);
-        assert!(env.peer.lock().unwrap().calls.is_empty());
+        assert!(
+            env.peer.lock().unwrap().calls.is_empty(),
+            "env.peer.lock().unwrap().calls should be empty"
+        );
         env.close().await;
     }
 }

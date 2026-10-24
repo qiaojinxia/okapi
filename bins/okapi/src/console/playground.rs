@@ -256,7 +256,13 @@ mod tests {
                 .get("secret")
                 .is_none()
         );
-        assert!(sanitize_presets(Some(&json!({"not": "array"}))).is_empty());
-        assert!(sanitize_presets(None).is_empty());
+        assert!(
+            sanitize_presets(Some(&json!({"not": "array"}))).is_empty(),
+            "sanitize_presets(Some(&json!({{\"not\": \"array\"}}))) should be empty"
+        );
+        assert!(
+            sanitize_presets(None).is_empty(),
+            "sanitize_presets(None) should be empty"
+        );
     }
 }

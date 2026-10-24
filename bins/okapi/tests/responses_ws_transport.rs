@@ -363,7 +363,7 @@ async fn malformed_or_misrouted_events_fail_closed_without_replay() {
         let first = collect(a).await;
         let second = collect(b).await;
         assert_eq!(raws(&first).len(), 1);
-        assert!(raws(&second).is_empty());
+        assert!(raws(&second).is_empty(), "raws(&second) should be empty");
         for events in [&first, &second] {
             let error = events.iter().find_map(|e| e.as_ref().err()).unwrap();
             assert!(!error.retriable_before_first_token());

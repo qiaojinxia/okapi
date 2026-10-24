@@ -419,7 +419,8 @@ async fn plain_unknown_and_explicit_zero_quotes_preserve_their_reservation_seman
                     c["components"]["server_tool_fees"]
                         .as_array()
                         .unwrap()
-                        .is_empty()
+                        .is_empty(),
+                    "a plain candidate carries no server-tool fees: {c}"
                 );
             } else {
                 verify_candidate(

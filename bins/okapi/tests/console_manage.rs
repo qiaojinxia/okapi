@@ -612,7 +612,10 @@ async fn admin_list_surface_covers_every_resource() {
     .await;
     assert_eq!(status, 200);
     assert_eq!(body["total"], 0);
-    assert!(body["data"].as_array().unwrap().is_empty());
+    assert!(
+        body["data"].as_array().unwrap().is_empty(),
+        "body[\"data\"].as_array().unwrap() should be empty"
+    );
     let (status, body) = get(
         env.console,
         &format!("/admin/channels?q={mine}&limit=1&offset=1"),

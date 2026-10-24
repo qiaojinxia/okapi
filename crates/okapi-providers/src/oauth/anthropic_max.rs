@@ -523,7 +523,10 @@ mod tests {
             beta,
             "oauth-2025-04-20,interleaved-thinking-2025-05-14,structured-outputs-2025-12-15"
         );
-        assert!(outbound.extra_headers.is_empty());
+        assert!(
+            outbound.extra_headers.is_empty(),
+            "outbound.extra_headers should be empty"
+        );
         assert!(!beta.contains("claude-code-20250219"));
     }
 

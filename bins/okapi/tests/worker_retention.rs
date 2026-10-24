@@ -327,7 +327,10 @@ async fn pruned_events_still_repair_both_balances_and_preserve_inflight() {
         !drifts.iter().any(|d| d.user_id == b.uid),
         "retention must not create false drift"
     );
-    assert!(b.prune().await.is_empty());
+    assert!(
+        b.prune().await.is_empty(),
+        "b.prune().await should be empty"
+    );
     let again = b.repair().await;
     assert_eq!(again["data"][0]["redis_after_micro"], 8_900_000);
 }
@@ -609,7 +612,10 @@ async fn history_reader_fences_drop_until_its_financial_snapshot_is_read() {
     .await
     .unwrap();
     reader.commit().await.unwrap();
-    assert!(!prune.await.unwrap().unwrap().is_empty());
+    assert!(
+        !prune.await.unwrap().unwrap().is_empty(),
+        "prune.await.unwrap().unwrap() should not be empty"
+    );
     let after = okapi_store::history::totals(&mut b.pg.acquire().await.unwrap(), b.uid)
         .await
         .unwrap();
@@ -626,7 +632,10 @@ async fn retention_handles_calendar_boundaries_and_disabled_or_extreme_values() 
             .execute(&b.pg)
             .await
             .unwrap();
-        assert!(b.prune().await.is_empty());
+        assert!(
+            b.prune().await.is_empty(),
+            "b.prune().await should be empty"
+        );
     }
     sqlx::query("UPDATE settings SET value='2' WHERE key='retention_months'")
         .execute(&b.pg)
@@ -637,7 +646,8 @@ async fn retention_handles_calendar_boundaries_and_disabled_or_extreme_values() 
         worker::drop_expired_partitions(&b.pg, feb)
             .await
             .unwrap()
-            .is_empty()
+            .is_empty(),
+        "nothing has aged out yet on the last day of February"
     );
     let march = "2020-03-01T00:00:00Z".parse().unwrap();
     let dropped = worker::drop_expired_partitions(&b.pg, march).await.unwrap();

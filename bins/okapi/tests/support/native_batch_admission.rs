@@ -58,7 +58,10 @@ async fn native_and_regular_requests_share_daily_limits_in_both_directions() {
             let job = env.submit(1, "daily").await;
             rejected(chat(&env).await, "rpd").await;
             assert_eq!(env.submit(1, "daily").await["id"], job["id"]);
-            assert!(env.peer.lock().unwrap().calls.is_empty());
+            assert!(
+                env.peer.lock().unwrap().calls.is_empty(),
+                "env.peer.lock().unwrap().calls should be empty"
+            );
             rows(&env, 1).await;
             assert_eq!(
                 env.state.ledger.balance(env.uid).await.unwrap().as_micros(),
@@ -103,7 +106,10 @@ async fn batch_limits_count_each_upstream_output_before_creating_any_hold() {
     let (rpm, _, rpd) = env.state.sched.key_rate_snapshot(env.uid, env.kid).await;
     assert_eq!((rpm, rpd), (2, 2));
     rows(&env, 1).await;
-    assert!(env.peer.lock().unwrap().calls.is_empty());
+    assert!(
+        env.peer.lock().unwrap().calls.is_empty(),
+        "env.peer.lock().unwrap().calls should be empty"
+    );
     assert_eq!(
         env.state.ledger.balance(env.uid).await.unwrap().as_micros(),
         BALANCE
@@ -226,7 +232,10 @@ async fn corrupted_rate_storage_fails_closed_without_partial_admission() {
             (0, 0, 0)
         );
         rows(&env, 0).await;
-        assert!(env.peer.lock().unwrap().calls.is_empty());
+        assert!(
+            env.peer.lock().unwrap().calls.is_empty(),
+            "env.peer.lock().unwrap().calls should be empty"
+        );
     }
     redis.del::<i64, _>(&model_key).await.unwrap();
     env.submit(1, "recovered").await;
