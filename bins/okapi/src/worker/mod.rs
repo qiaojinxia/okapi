@@ -601,12 +601,16 @@ pub async fn sweep_expired_reservations(
         if user_ids.is_empty() {
             break;
         }
-        for user_id in user_ids {
+        // 一页用户的预扣一次往返读完：此前逐用户 HGETALL，每分钟要扫全部用户就是用户数那么多次往返。
+        // 读到处理之间预扣可能已被正常结算，但下面的 commit / refund 本就幂等（`closed=false` 即跳过）；
+        // 预扣的 deadline 创建后不会被延长，读到的过期判断不会变成误判。
+        let held = ledger.list_reservations_many(&user_ids).await?;
+        for (user_id, reservations) in user_ids.into_iter().zip(held) {
             cursor = user_id;
             // 单个用户的锁超时、坏回执或 Redis 抖动只跳过这个用户：此前一处 `?` 就中止整轮，
             // 下一轮又从头卡在同一个用户上，id 更大的用户的过期预扣永远收不回来。
             let user_sweep: anyhow::Result<()> = async {
-            let reservations = ledger.list_reservations(user_id).await?;
+            let reservations = reservations?;
             if !reservations.iter().any(|r| r.deadline_ms < now_ms) {
                 return Ok(());
             }

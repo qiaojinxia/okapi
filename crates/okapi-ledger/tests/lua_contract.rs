@@ -589,3 +589,63 @@ async fn credit_and_drain_keep_the_ledger_bound_and_exact_values() {
             .is_err()
     );
 }
+
+/// 悬置清扫一页 1000 个用户一次往返读完：结果与逐个 `list_reservations` 一致、同序，
+/// 没有账本键的用户是空列表；某个用户的哈希里混进坏回执，错误只落在它自己那一格。
+#[tokio::test]
+async fn batch_reservation_read_matches_per_user_reads_and_isolates_a_corrupt_user() {
+    let first = Bed::new().await;
+    let second = Bed::new().await;
+    let broken = Bed::new().await;
+    let absent = Bed::new().await;
+    for bed in [&first, &second, &broken] {
+        bed.ledger
+            .credit(bed.uid, Money::from_micros(10_000))
+            .await
+            .unwrap();
+    }
+    let a = Uuid::new_v4();
+    let b1 = Uuid::new_v4();
+    let b2 = Uuid::new_v4();
+    first.reserve(a, 1_000).await;
+    second.reserve(b1, 2_000).await;
+    second.reserve(b2, 3_000).await;
+    broken.reserve(Uuid::new_v4(), 500).await;
+    let _: () = broken
+        .redis
+        .hset(
+            format!("bal:{{{}}}", broken.uid),
+            (format!("r:{}", Uuid::new_v4()), "not-a-number|0"),
+        )
+        .await
+        .unwrap();
+
+    let ids = [first.uid, second.uid, broken.uid, absent.uid];
+    let read = first.ledger.list_reservations_many(&ids).await.unwrap();
+    assert_eq!(read.len(), ids.len(), "一格对一个用户，同序");
+
+    let mut got_first = read[0].as_ref().unwrap().clone();
+    assert_eq!(got_first.len(), 1);
+    assert_eq!(got_first.remove(0).request_id, a);
+
+    let mut got_second: Vec<_> = read[1]
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|r| (r.request_id, r.amount.as_micros()))
+        .collect();
+    got_second.sort_by_key(|(_, amount)| *amount);
+    assert_eq!(got_second, [(b1, 2_000), (b2, 3_000)]);
+
+    assert!(read[2].is_err(), "坏回执只让这个用户那一格报错");
+    assert!(
+        read[3].as_ref().unwrap().is_empty(),
+        "没有账本键的用户读出空列表"
+    );
+    let nobody = first.ledger.list_reservations_many(&[]).await.unwrap();
+    assert!(nobody.is_empty(), "空名单读出空结果，不发请求");
+
+    // 与逐个读取同口径
+    let single = second.ledger.list_reservations(second.uid).await.unwrap();
+    assert_eq!(single.len(), read[1].as_ref().unwrap().len());
+}

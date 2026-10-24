@@ -612,59 +612,92 @@ impl BalanceLedger {
     pub async fn list_reservations(&self, user_id: i64) -> Result<Vec<Reservation>, LedgerError> {
         let map: std::collections::HashMap<String, String> =
             self.client.hgetall(Self::bal_key(user_id)).await?;
-        let mut out = Vec::new();
-        for (field, value) in map {
-            let Some(id_str) = field.strip_prefix("r:") else {
-                continue;
-            };
-            let Ok(request_id) = Uuid::parse_str(id_str) else {
-                continue;
-            };
-            // 字段格式 "<amount>|<deadline_ms>|<api_key_id>|<pool>"（旧格式缺 kid 取 0、缺 pool 取钱包）
-            let mut parts = value.split('|');
-            let amount = parts
-                .next()
-                .and_then(|s| s.parse::<i64>().ok())
-                .ok_or(LedgerError::UnexpectedReply("reservation_amount"))?;
-            let deadline_ms = parts
-                .next()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
-            let api_key_id = parts
-                .next()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
-            // 缺位（没有池段的老回执）按钱包；有但不是 0 / 1 的不猜
-            let pool = match parts.next() {
-                None => Pool::Wallet,
-                Some(raw) => raw
-                    .parse::<i16>()
-                    .map_err(|_| LedgerError::UnexpectedReply("reservation_pool"))
-                    .and_then(Pool::try_from)?,
-            };
-            let source_window = parts
-                .next()
-                .map(|raw| {
-                    raw.strip_prefix("w:")
-                        .filter(|v| !v.is_empty())
-                        .map(str::to_owned)
-                        .ok_or(LedgerError::UnexpectedReply("reservation_window"))
-                })
-                .transpose()?;
-            if parts.next().is_some() {
-                return Err(LedgerError::UnexpectedReply("reservation_fields"));
-            }
-            out.push(Reservation {
-                request_id,
-                amount: Money::from_micros(amount),
-                deadline_ms,
-                api_key_id,
-                pool,
-                source_window,
-            });
-        }
-        Ok(out)
+        parse_reservations(map)
     }
+
+    /// 一批用户的在途预扣，流水线一次往返读完：悬置清扫每分钟要扫全部用户，逐个 `HGETALL`
+    /// 是用户数那么多次往返。返回与 `user_ids` 等长、同序；某个用户的键读不出或回执坏了，
+    /// 错误只落在它自己那一格，不连累同批其他用户。
+    pub async fn list_reservations_many(
+        &self,
+        user_ids: &[i64],
+    ) -> Result<Vec<Result<Vec<Reservation>, LedgerError>>, LedgerError> {
+        if user_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let pipe = self.client.pipeline();
+        for user_id in user_ids {
+            let _: () = pipe.hgetall(Self::bal_key(*user_id)).await?;
+        }
+        let replies = pipe
+            .try_all::<std::collections::HashMap<String, String>>()
+            .await;
+        if replies.len() != user_ids.len() {
+            return Err(LedgerError::UnexpectedReply("reservation_batch"));
+        }
+        Ok(replies
+            .into_iter()
+            .map(|reply| parse_reservations(reply?))
+            .collect())
+    }
+}
+
+/// 余额哈希里的 `r:<request_id>` 字段 → 在途预扣。
+fn parse_reservations(
+    map: std::collections::HashMap<String, String>,
+) -> Result<Vec<Reservation>, LedgerError> {
+    let mut out = Vec::new();
+    for (field, value) in map {
+        let Some(id_str) = field.strip_prefix("r:") else {
+            continue;
+        };
+        let Ok(request_id) = Uuid::parse_str(id_str) else {
+            continue;
+        };
+        // 字段格式 "<amount>|<deadline_ms>|<api_key_id>|<pool>"（旧格式缺 kid 取 0、缺 pool 取钱包）
+        let mut parts = value.split('|');
+        let amount = parts
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .ok_or(LedgerError::UnexpectedReply("reservation_amount"))?;
+        let deadline_ms = parts
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        let api_key_id = parts
+            .next()
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+        // 缺位（没有池段的老回执）按钱包；有但不是 0 / 1 的不猜
+        let pool = match parts.next() {
+            None => Pool::Wallet,
+            Some(raw) => raw
+                .parse::<i16>()
+                .map_err(|_| LedgerError::UnexpectedReply("reservation_pool"))
+                .and_then(Pool::try_from)?,
+        };
+        let source_window = parts
+            .next()
+            .map(|raw| {
+                raw.strip_prefix("w:")
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_owned)
+                    .ok_or(LedgerError::UnexpectedReply("reservation_window"))
+            })
+            .transpose()?;
+        if parts.next().is_some() {
+            return Err(LedgerError::UnexpectedReply("reservation_fields"));
+        }
+        out.push(Reservation {
+            request_id,
+            amount: Money::from_micros(amount),
+            deadline_ms,
+            api_key_id,
+            pool,
+            source_window,
+        });
+    }
+    Ok(out)
 }
 
 /// 一笔在途预扣。
