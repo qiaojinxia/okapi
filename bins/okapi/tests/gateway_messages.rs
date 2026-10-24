@@ -409,6 +409,55 @@ async fn count_tokens_proxies_anthropic() {
     assert_eq!(n, 0, "count_tokens 不计费");
 }
 
+/// 优先的那把 key 撞上渠道 RPM 时换下一个候选，别让同模型下空闲的 key 白白闲着而整体 429；
+/// 所有能用的候选都撞上限速才 429。
+#[tokio::test]
+async fn count_tokens_moves_past_a_key_at_its_channel_rpm() {
+    let env = setup("anthropic").await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let first: (i64, i64) = sqlx::query_as(
+        "SELECT c.id, ck.id FROM channels c JOIN channel_keys ck ON ck.channel_id = c.id
+         WHERE c.models @> $1::jsonb",
+    )
+    .bind(json!([env.model]))
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let mock = spawn_mock().await;
+    let (_, second_key) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("anthropic-second-{suffix}"),
+        "anthropic",
+        &format!("http://{mock}/anthropic/v1"),
+        "mock-credential",
+        &[env.model.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    // 优先级高的先试；两把 key 每分钟都只放一次
+    sqlx::query("UPDATE channels SET priority = 10 WHERE id = $1")
+        .bind(first.0)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE channel_keys SET rpm_limit = 1 WHERE id = ANY($1)")
+        .bind(vec![first.1, second_key])
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let resp = post_count(&env).await;
+        assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    }
+    assert_eq!(
+        post_count(&env).await.status(),
+        429,
+        "两把 key 的当分钟额度都用完了"
+    );
+}
+
 /// 无 anthropic 渠道：本地估算仍回 input_tokens，不计费。
 #[tokio::test]
 async fn count_tokens_local_estimate_without_anthropic() {

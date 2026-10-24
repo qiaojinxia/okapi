@@ -852,81 +852,105 @@ async fn count_tokens_inner(
     )
     .await
     .map_err(AppError::from)?;
-    // 全被账号准入挡住就退本地估算
-    let cand = first_admitted(
-        state,
-        order_candidates(rows)
-            .into_iter()
-            .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"))
-            .filter(|c| counts_for(c, headers)),
-    )
-    .await;
-    if let Some(cand) = cand {
+    // 被挡住的候选（账号准入：本地 token 上限、上游额度窗，与主链路同一套；key RPM；渠道并发）
+    // 换下一个——不计费的旁路同样占用账号，同模型下别的 key 空闲时不该整体 429；
+    // 能用的候选都挡在限速上才报限速，全被账号准入挡住（或根本没有 anthropic 候选）就退本地估算
+    let mut limited = None;
+    let candidates = order_candidates(rows)
+        .into_iter()
+        .filter(|c| matches!(c.provider.as_str(), "anthropic" | "anthropic_max"))
+        .filter(|c| counts_for(c, headers));
+    for cand in candidates {
+        if super::account_control::admit(state, cand.channel_id, Some(cand.channel_key_id))
+            .await
+            .is_err()
+        {
+            continue;
+        }
         if let Some(limit) = cand.rpm_limit
             && !state
                 .sched
                 .channel_key_rate_ok(cand.channel_key_id, i64::from(limit))
                 .await
         {
-            return Err(AppError::new(
-                StatusCode::TOO_MANY_REQUESTS,
-                codes::RATE_LIMITED,
-            ));
+            limited = Some("channel_rpm");
+            continue;
         }
-        let _slot = super::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
-            .await
-            .map_err(|error| super::account_control::attempt_error(&error))?
-            .ok_or_else(|| AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED))?;
-        let upstream_model = cand.upstream_model(&canonical).to_owned();
-        let body_up = rewrite_model(&body, &probe.model, &upstream_model)
-            .map_err(|_| AppError::bad_request())?;
-        let base = cand
-            .api_base
-            .clone()
-            .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE.to_owned());
-        let client = super::oauth_cred::client_headers(headers);
-        let outbound = super::oauth_cred::outbound_with_client(&cand, &client, Some(key.user_id));
-        let counted = if cand.provider == "anthropic_max" {
-            match super::oauth_cred::fresh_credential(state, &cand).await {
-                Ok(cred) => {
-                    okapi_providers::oauth::anthropic_max::count_tokens(
-                        state.anthropic.http(),
-                        &base,
-                        &cred.access_token,
-                        body_up,
-                        &outbound,
-                        cred.account_id.as_deref(),
-                    )
-                    .await
-                }
-                Err(err) => Err(err),
-            }
-        } else {
-            state
-                .anthropic
-                .count_tokens(&base, &cand.credential, body_up, &outbound)
+        let Some(_slot) =
+            super::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
                 .await
+                .map_err(|error| super::account_control::attempt_error(&error))?
+        else {
+            limited = Some("channel_concurrency");
+            continue;
         };
-        match counted {
-            Ok(up) => {
-                return Ok(axum::Json(
-                    serde_json::from_slice::<serde_json::Value>(&up)
-                        .unwrap_or_else(|_| serde_json::json!({"input_tokens": 0})),
-                )
-                .into_response());
-            }
-            Err(error) => {
-                log_count_upstream_failure(&cand, &error);
-                return Err(AppError::new(
-                    StatusCode::BAD_GATEWAY,
-                    codes::UPSTREAM_ERROR,
-                ));
-            }
-        }
+        return count_via_upstream(state, headers, &key, &cand, &canonical, &probe.model, &body)
+            .await;
+    }
+    if let Some(param) = limited {
+        return Err(
+            AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param(param),
+        );
     }
     let tokens =
         estimate_prompt_tokens(&probe.model, &probe.prompt_segments(), probe.messages.len());
     Ok(axum::Json(serde_json::json!({ "input_tokens": tokens })).into_response())
+}
+
+/// 用选中的 anthropic 候选的凭证打上游 tokenizer（调用方持有渠道并发许可）。
+async fn count_via_upstream(
+    state: &AppState,
+    headers: &HeaderMap,
+    key: &okapi_store::AuthedKey,
+    cand: &ChannelCandidate,
+    canonical: &str,
+    requested_model: &str,
+    body: &Bytes,
+) -> Result<Response, AppError> {
+    let upstream_model = cand.upstream_model(canonical).to_owned();
+    let body_up = rewrite_model(body, requested_model, &upstream_model)
+        .map_err(|_| AppError::bad_request())?;
+    let base = cand
+        .api_base
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ANTHROPIC_BASE.to_owned());
+    let client = super::oauth_cred::client_headers(headers);
+    let outbound = super::oauth_cred::outbound_with_client(cand, &client, Some(key.user_id));
+    let counted = if cand.provider == "anthropic_max" {
+        match super::oauth_cred::fresh_credential(state, cand).await {
+            Ok(cred) => {
+                okapi_providers::oauth::anthropic_max::count_tokens(
+                    state.anthropic.http(),
+                    &base,
+                    &cred.access_token,
+                    body_up,
+                    &outbound,
+                    cred.account_id.as_deref(),
+                )
+                .await
+            }
+            Err(err) => Err(err),
+        }
+    } else {
+        state
+            .anthropic
+            .count_tokens(&base, &cand.credential, body_up, &outbound)
+            .await
+    };
+    match counted {
+        Ok(up) => Ok(axum::Json(
+            serde_json::from_slice::<serde_json::Value>(&up)
+                .unwrap_or_else(|_| serde_json::json!({"input_tokens": 0})),
+        )
+        .into_response()),
+        Err(error) => {
+            log_count_upstream_failure(cand, &error);
+            Err(AppError::new(
+                StatusCode::BAD_GATEWAY,
+                codes::UPSTREAM_ERROR,
+            ))
+        }
+    }
 }
 
 /// 上游的拒绝原因只在这里看得到（客户端只拿到 502）。
@@ -947,27 +971,6 @@ fn log_count_upstream_failure(
         detail,
         "count_tokens upstream failed"
     );
-}
-
-/// 第一个过得了账号准入（本地 token 上限、上游额度窗，与主链路同一套）的候选：
-/// 不计费的旁路同样会占用账号，被挡住的账号不碰。
-async fn first_admitted(
-    state: &AppState,
-    candidates: impl IntoIterator<Item = okapi_store::ChannelCandidate>,
-) -> Option<okapi_store::ChannelCandidate> {
-    for candidate in candidates {
-        if super::account_control::admit(
-            state,
-            candidate.channel_id,
-            Some(candidate.channel_key_id),
-        )
-        .await
-        .is_ok()
-        {
-            return Some(candidate);
-        }
-    }
-    None
 }
 
 /// 探针之外的入参口径：负 temperature 和 max_tokens 负值一样在入口拒掉，不原样透传给上游；
