@@ -1,7 +1,7 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { InfiniteData } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import { CircleHelp, Download, FileText, RotateCw, Search } from 'lucide-react'
+import { CircleHelp, Download, RotateCw, Search } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -160,7 +160,7 @@ function LogList({ filter, ready, limit, onLimit, filters }: { filter: Filter; r
   }
   const showKey = filter.scope === 'user'
   return <div className="list-page [--page-gap:8px]">
-    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} icon={FileText} compact className="[&_p]:text-xs [&_p]:leading-5" action={<>
+    <PageHeader title={t('logs:title')} description={t('portal:logsDesc')} compact className="[&_p]:text-xs [&_p]:leading-5" action={<>
           <Button size="sm" variant="outline" disabled={!rows.length || q.isFetching} onClick={() => exportCsv(rows, showKey)} title={t('logs:exportPageHint', { n: rows.length })}>
             <Download className="h-3.5 w-3.5" />{t('logs:exportPage')}
           </Button>

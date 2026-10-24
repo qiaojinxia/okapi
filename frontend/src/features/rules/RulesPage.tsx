@@ -1,4 +1,4 @@
-import { Percent, Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Power, PowerOff, Trash2 } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -130,12 +130,9 @@ export function RulesPage() {
   return (
     <div className="list-page">
       <PageHeader
-        icon={Percent}
         title={t('admin:rulesTitle')}
         description={t('admin:rulesHint')}
-        meta={
-          <Badge variant="muted">{t('admin:keyTotal', { n: rules.data?.total ?? 0 })}</Badge>
-        }
+        meta={t('admin:keyTotal', { n: rules.data?.total ?? 0 })}
         action={
           <Button onClick={() => setDrawer('create')}>
             <Plus className="h-4 w-4" />

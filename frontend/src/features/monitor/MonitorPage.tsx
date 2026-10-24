@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { Activity, Cpu, Gauge, HardDrive, MemoryStick, Network, RotateCw, ScrollText, TrendingUp } from 'lucide-react'
+import { Cpu, Gauge, HardDrive, MemoryStick, Network, RotateCw, ScrollText, TrendingUp } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -43,7 +43,6 @@ export function MonitorPage() {
       <PageHeader
         title={t('monitor:title')}
         description={t('monitor:desc')}
-        icon={Activity}
         action={
           <Segmented
             size="sm"

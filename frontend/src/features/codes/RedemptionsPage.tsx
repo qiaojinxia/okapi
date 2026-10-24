@@ -1,4 +1,4 @@
-import { Ban, Plus, Ticket } from 'lucide-react'
+import { Ban, Plus } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
@@ -98,7 +98,6 @@ export function RedemptionsPage() {
     <div className="list-page">
       <PageHeader
         className="shrink-0"
-        icon={Ticket}
         title={t('admin:codeListTitle')}
         description={t('admin:codesDesc')}
         action={

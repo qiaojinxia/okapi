@@ -1,7 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
-import { ChartNoAxesCombined } from 'lucide-react'
 import type { AnalyticsView } from '@/features/analytics/route-state'
 import { ANALYTICS_VIEWS } from '@/features/analytics/route-state'
 import { PageHeader } from '@/components/ui/page'
@@ -54,7 +53,6 @@ export function AnalyticsPage() {
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <PageHeader
-        icon={ChartNoAxesCombined}
         title={t('analytics:title')}
         action={
           <DaysPicker

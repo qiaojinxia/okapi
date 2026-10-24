@@ -208,12 +208,7 @@ export function PortalKeysPage() {
       <PageHeader
         title={t('portal:keys')}
         description={t('portal:keysDesc')}
-        icon={KeyRound}
-        meta={
-          keys.data && (
-            <Badge variant="muted">{t('common:resultCount', { n: keys.data.total })}</Badge>
-          )
-        }
+        meta={keys.data && t('common:resultCount', { n: keys.data.total })}
         action={
           <>
             <Button variant="outline" loading={keys.isFetching} onClick={() => void keys.refetch()}>
@@ -288,7 +283,7 @@ export function PortalKeysPage() {
         />
       ) : (
         <Table stickyHeader stickyFirstColumn
-          className="min-w-[1100px] table-fixed [&_th]:px-2 [&_td]:px-2 [&_thead_th]:bg-muted/60 [&_thead_th]:text-foreground/70 [&_thead_tr>:first-child:not([colspan])]:bg-muted/60 [&_tbody_tr:hover>td:first-child:not([colspan])]:bg-[color-mix(in_srgb,var(--card)_60%,var(--accent))]"
+          className="min-w-[1100px] table-fixed [&_th]:px-2 [&_td]:px-2 [&_tbody_tr:hover>td:first-child:not([colspan])]:bg-[color-mix(in_srgb,var(--card)_60%,var(--accent))]"
           scrollResetKey={`${pager.offset}:${pager.limit}`} aria-label={t('portal:keys')}>
           <colgroup>
             {/* Explicit widths share extra desktop space; the name no longer absorbs it all. */}

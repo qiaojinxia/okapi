@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
-import { KeyRound, ShieldCheck, Smartphone } from 'lucide-react'
+import { KeyRound, Smartphone } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Alert } from '@/components/ui/alert'
@@ -92,7 +92,7 @@ function SecurityPage() {
 
   return (
     <div className="flex min-w-0 flex-col gap-4 lg:h-full lg:min-h-0">
-      <PageHeader title={t('security:nav')} description={t('security:desc')} icon={ShieldCheck} />
+      <PageHeader title={t('security:nav')} description={t('security:desc')} />
 
       <div data-slot="security-grid" className="grid min-w-0 gap-4 lg:min-h-0 lg:flex-1 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:grid-rows-[minmax(0,1fr)]">
         <Card

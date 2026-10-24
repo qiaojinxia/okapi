@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, Bot, ChevronDown, ChevronRight, Download, Eraser, FileDown, FlaskConical, RotateCcw, Save, Send, SlidersHorizontal, Square, Trash2, Wrench } from 'lucide-react'
+import { ArrowDown, Bot, ChevronDown, ChevronRight, Download, Eraser, FileDown, RotateCcw, Save, Send, SlidersHorizontal, Square, Trash2, Wrench } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { estimateCost, outputSpeed } from './cost'
@@ -235,7 +235,6 @@ function Workspace({ userId, group }: { userId: number | undefined; group: strin
     <div className="flex min-h-0 flex-col gap-4 max-lg:overflow-y-auto lg:h-full">
       <PageHeader
         className="shrink-0"
-        icon={FlaskConical}
         title={t('portal:playgroundTitle')}
         description={t('portal:playgroundDesc')}
         action={

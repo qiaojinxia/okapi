@@ -43,7 +43,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Menu, MenuItem, MenuSeparator } from '@/components/ui/menu'
 import { CHANNEL_STATUS_FILTERS, CHANNEL_STATUS_VALUE, PROVIDERS, balanceSupported, providerConsoleUrl } from '@/features/channels/types'
-import { PageHeader } from '@/components/ui/page'
+import { PageHeader, Toolbar } from '@/components/ui/page'
 import { Pagination } from '@/components/ui/pagination'
 import { SearchInput } from '@/components/ui/search-input'
 import { Segmented } from '@/components/ui/segmented'
@@ -301,16 +301,9 @@ export function ChannelsPage() {
   return (
     <div className="list-page">
       <PageHeader
-        className="lg:items-center"
         title={t('admin:channelsTitle')}
         description={t('admin:channelsDesc')}
-        meta={
-          channels.data && (
-            <span className="ml-1 text-sm font-normal text-muted-foreground tabular-nums">
-              {t('admin:channelsSummary', { total, enabled: enabledCount })}
-            </span>
-          )
-        }
+        meta={channels.data && t('admin:channelsSummary', { total, enabled: enabledCount })}
         action={
           <>
             <Button
@@ -334,44 +327,48 @@ export function ChannelsPage() {
         }
       />
 
-      {/* 筛选直接放在页面底色上（不再包一层卡片）：搜索回车提交；状态是互斥短选项，用分段控件 */}
-      <div data-slot="toolbar" className="flex min-w-0 shrink-0 flex-wrap items-center gap-3">
-        <SearchInput
-          id="ch-search"
-          hideIcon
-          className="w-85"
-          aria-label={t('admin:channelSearchHint')}
-          value={draft}
-          placeholder={t('admin:channelSearchHint')}
-          onChange={setDraft}
-          onSubmit={applySearch}
-        />
-        <Segmented
-          size="field"
-          ariaLabel={t('common:status')}
-          value={statusFilter}
-          onChange={(status) => setFilters({ status })}
-          options={[
-            { value: '', label: t('common:all') },
-            { value: 'enabled', label: t('admin:channelFilterEnabled') },
-            { value: 'disabled', label: t('admin:channelFilterDisabled') },
-          ]}
-        />
-        <Select
-          id="ch-provider"
-          className="w-40"
-          aria-label={t('admin:provider')}
-          value={providerFilter}
-          onChange={(provider) => setFilters({ provider })}
-          placeholder={t('common:all')}
-          options={PROVIDERS.map((p) => ({ value: p, label: p }))}
-        />
-        {filtered && (
-          <Button size="sm" variant="ghost" onClick={clearFilters}>
-            {t('common:clearFilters')}
-          </Button>
-        )}
-      </div>
+      {/* 搜索回车提交；状态是互斥短选项，用分段控件 */}
+      <Toolbar
+        filters={
+          <>
+            <SearchInput
+              id="ch-search"
+              hideIcon
+              className="w-85"
+              aria-label={t('admin:channelSearchHint')}
+              value={draft}
+              placeholder={t('admin:channelSearchHint')}
+              onChange={setDraft}
+              onSubmit={applySearch}
+            />
+            <Segmented
+              size="field"
+              ariaLabel={t('common:status')}
+              value={statusFilter}
+              onChange={(status) => setFilters({ status })}
+              options={[
+                { value: '', label: t('common:all') },
+                { value: 'enabled', label: t('admin:channelFilterEnabled') },
+                { value: 'disabled', label: t('admin:channelFilterDisabled') },
+              ]}
+            />
+            <Select
+              id="ch-provider"
+              className="w-40"
+              aria-label={t('admin:provider')}
+              value={providerFilter}
+              onChange={(provider) => setFilters({ provider })}
+              placeholder={t('common:all')}
+              options={PROVIDERS.map((p) => ({ value: p, label: p }))}
+            />
+            {filtered && (
+              <Button size="sm" variant="ghost" onClick={clearFilters}>
+                {t('common:clearFilters')}
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {channels.isError ? (
         <ErrorState message={describeError(channels.error)} onRetry={() => void channels.refetch()} />
@@ -401,8 +398,8 @@ export function ChannelsPage() {
           />
         )
       ) : (
-        <Table stickyHeader className="[&_thead_th]:bg-card">
-          <THead className="bg-card [&_th]:font-normal [&_th]:text-muted-foreground/70">
+        <Table stickyHeader>
+          <THead>
             <Tr>
               <Th className="w-11 min-w-11 pr-0 pl-5">
                 <Checkbox

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute } from '@tanstack/react-router'
-import { Coins, Gift, Link2, Users } from 'lucide-react'
+import { Coins, Link2, Users } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -39,7 +39,7 @@ function AffPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title={t('portal:affTitle')} description={t('portal:affHint')} icon={Gift} />
+      <PageHeader title={t('portal:affTitle')} description={t('portal:affHint')} />
 
       {aff.isError && <ErrorState message={describeError(aff.error)} onRetry={() => void aff.refetch()} />}
 

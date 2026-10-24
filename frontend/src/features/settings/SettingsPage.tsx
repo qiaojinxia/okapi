@@ -1,5 +1,5 @@
 import { getRouteApi } from '@tanstack/react-router'
-import { Bell, Bot, Globe, Mail, Megaphone, Settings, ShieldCheck, SlidersHorizontal, UserPlus } from 'lucide-react'
+import { Bell, Bot, Globe, Mail, Megaphone, ShieldCheck, SlidersHorizontal, UserPlus } from 'lucide-react'
 import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { EgressSettings } from '@/features/settings/EgressSettings'
@@ -62,7 +62,7 @@ export function SettingsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title={t('admin:settingsTitle')} description={t('admin:settingsHint')} icon={Settings} />
+      <PageHeader title={t('admin:settingsTitle')} description={t('admin:settingsHint')} />
       <Tabs
         id="settings-tabs"
         className="scroll-mt-20"

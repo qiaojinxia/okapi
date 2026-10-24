@@ -421,3 +421,93 @@ test('英文与深色主题沿用表格尺寸，窄屏下可完整访问操作�
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/style-roles-dark-en.png', fullPage: true, animations: 'disabled' })
 })
+
+test('所有列表页同一副面孔：页头无图标方块、统计是朴素文字，筛选不套卡片，表头与表体同是纸白，分页没有外框', async ({ page }) => {
+  await prepareListStyles(page, 12)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  for (const path of ['/admin/groups', '/admin/roles', '/admin/pools', '/admin/users', '/portal/keys', '/portal/teams']) {
+    await page.goto(path)
+    const header = page.locator('[data-slot="page-header"]')
+    await expect(header, path).toBeVisible()
+    await expect(page.getByRole('table').locator('tbody tr').first(), path).toBeVisible()
+    // 页头：没有图标方块（以前是主色淡底的 h-9 w-9 方块）；统计若有，是标题后面的朴素文字而不是徽章
+    await expect(header.locator('.bg-primary\\/10'), path).toHaveCount(0)
+    await expect(header.locator('h1 ~ span [class*="rounded-full"]'), path).toHaveCount(0)
+    // 表头与表体同色，不再给表头铺一条灰带；表头字重是 medium，不是 semibold。
+    // 粘性表头会在表格上给 thead / th 再盖一层 bg-card，所以除了看实际生效的颜色，
+    // 还要看 THead 自己的类——非粘性的表只靠它
+    const look = await page.evaluate(() => {
+      const frame = document.querySelector('[data-slot="table-frame"]') as HTMLElement
+      const th = document.querySelector('table th') as HTMLElement
+      const effective = (start: Element | null) => {
+        for (let el = start; el; el = el.parentElement) {
+          const color = getComputedStyle(el).backgroundColor
+          if (color !== 'rgba(0, 0, 0, 0)') return color
+        }
+        return ''
+      }
+      return { header: effective(th), frame: getComputedStyle(frame).backgroundColor, weight: getComputedStyle(th).fontWeight }
+    })
+    expect(look.header, path).toBe(look.frame)
+    expect(look.weight, path).toBe('500')
+    await expect(page.locator('table thead').first(), path).toHaveClass(/bg-card/)
+    // 筛选直接放在页面底色上，不再包卡片
+    const toolbar = page.locator('[data-slot="toolbar"]')
+    if ((await toolbar.count()) > 0) {
+      await expect(toolbar.first(), path).toHaveCSS('border-top-width', '0px')
+      await expect(toolbar.first(), path).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)')
+    }
+    // 分页：没有外框，当前页是淡色胶囊而不是实心主色
+    const pager = page.locator('[data-slot="pagination"]')
+    if ((await pager.count()) > 0) {
+      await expect(pager, path).toHaveCSS('border-top-width', '0px')
+      const current = pager.locator('[aria-current="page"]')
+      await expect(current, path).toHaveClass(/bg-muted/)
+      await expect(current, path).not.toHaveClass(/bg-primary/)
+    }
+  }
+})
+
+test('纸质感色板：页底暖一点、卡片纸白（比页底亮），次级文字在两种底上都 ≥4.5:1', async ({ page }) => {
+  await prepareListStyles(page, 1)
+  await page.goto('/admin/roles')
+  const palette = await page.evaluate(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 1
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!
+    const rgb = (css: string) => {
+      ctx.clearRect(0, 0, 1, 1)
+      ctx.fillStyle = '#000'
+      ctx.fillStyle = css.trim()
+      ctx.fillRect(0, 0, 1, 1)
+      const data = ctx.getImageData(0, 0, 1, 1).data
+      return [data[0], data[1], data[2]]
+    }
+    const luminance = ([r, g, b]: number[]) => {
+      const channel = (v: number) => (v / 255 <= 0.03928 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4)
+      return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    }
+    const contrast = (a: number[], b: number[]) => {
+      const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+      return (hi + 0.05) / (lo + 0.05)
+    }
+    const root = getComputedStyle(document.documentElement)
+    const token = (name: string) => rgb(root.getPropertyValue(name))
+    const [bg, card, fg, muted] = [token('--bg'), token('--card'), token('--fg'), token('--muted-fg')]
+    return {
+      warm: bg[0] - bg[2],
+      layer: luminance(card) - luminance(bg),
+      mutedOnBg: contrast(muted, bg),
+      mutedOnCard: contrast(muted, card),
+      fgOnBg: contrast(fg, bg),
+    }
+  })
+  // 暖：红通道比蓝通道高几级——看得出是纸而不是灰蓝，又不至于发黄
+  expect(palette.warm).toBeGreaterThanOrEqual(3)
+  expect(palette.warm).toBeLessThanOrEqual(14)
+  // 纸白卡片比页底亮：层次靠明度差，不靠阴影和粗边
+  expect(palette.layer).toBeGreaterThan(0.02)
+  expect(palette.mutedOnBg).toBeGreaterThanOrEqual(4.5)
+  expect(palette.mutedOnCard).toBeGreaterThanOrEqual(4.5)
+  expect(palette.fgOnBg).toBeGreaterThanOrEqual(12)
+})

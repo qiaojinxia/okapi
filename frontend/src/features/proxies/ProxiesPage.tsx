@@ -1,6 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { Activity, Globe, ListTree, Pencil, Plus, Settings, Trash2, Upload } from 'lucide-react'
+import { Activity, ListTree, Pencil, Plus, Settings, Trash2, Upload } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
@@ -56,7 +56,6 @@ export function ProxiesPage() {
   return (
     <div className="list-page">
       <PageHeader
-        icon={Globe}
         title={t('admin:proxiesTitle')}
         description={t('admin:proxiesDesc')}
         action={can('settings.read') ? (

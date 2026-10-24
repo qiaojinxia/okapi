@@ -1,4 +1,4 @@
-import { Package, Pencil, Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -75,7 +75,6 @@ export function PlansPage() {
   return (
     <div className="list-page">
       <PageHeader
-        icon={Package}
         title={t('admin:planListTitle')}
         description={t('admin:planHint')}
         action={

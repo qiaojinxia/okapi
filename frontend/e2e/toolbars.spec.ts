@@ -22,10 +22,16 @@ async function prepare(page: Page, language: string) {
 }
 
 async function expectNoOverlap(toolbar: Locator) {
-  const frame = (await toolbar.boundingBox())!
+  // 外框与全部控件的矩形在页面里一次取完：页面入场动画还在位移时，先量外框、再逐个量控件，
+  // 量到的是不同帧的坐标，偶发地差几个像素（全量并行、机器忙时出现过一次）。
   // 排除搜索框内部的清空按钮，和在自身滚动容器内浏览的分段按钮。
-  const controls = await toolbar.locator('input, select, button[data-slot="button"]').all()
-  const boxes = await Promise.all(controls.map(async (control) => (await control.boundingBox())!))
+  const { frame, boxes } = await toolbar.evaluate((root) => {
+    const rect = (element: Element) => {
+      const { x, y, width, height } = element.getBoundingClientRect()
+      return { x, y, width, height }
+    }
+    return { frame: rect(root), boxes: [...root.querySelectorAll('input, select, button[data-slot="button"]')].map(rect) }
+  })
   for (const box of boxes) {
     expect(box.x).toBeGreaterThanOrEqual(frame.x)
     expect(box.x + box.width).toBeLessThanOrEqual(frame.x + frame.width)

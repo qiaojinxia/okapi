@@ -1,5 +1,4 @@
 import { getRouteApi, Link } from '@tanstack/react-router'
-import { HeartPulse } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { PageHeader } from '@/components/ui/page'
 import { Tabs } from '@/components/ui/tabs'
@@ -39,7 +38,6 @@ export function QualityPage() {
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <PageHeader
-        icon={HeartPulse}
         title={t('analytics:qualityTitle')}
         description={t('analytics:qualityDesc')}
         action={<DaysPicker days={tab === 'trend' && customRange ? 0 : days} onPick={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined, page: undefined }) })} />}

@@ -1,4 +1,4 @@
-import { Archive, Inbox, Scale, TrendingDown, Undo2, Wrench } from 'lucide-react'
+import { Archive, Inbox, Scale, TrendingDown, Undo2 } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { DlqCard } from '@/features/ops/DlqCard'
@@ -29,7 +29,7 @@ export function OpsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title={t('admin:opsTitle')} description={t('admin:opsDesc')} icon={Wrench} />
+      <PageHeader title={t('admin:opsTitle')} description={t('admin:opsDesc')} />
       <Tabs variant="underline" items={items} active={tab} onChange={(id) => setTab(id as OpsTab)} />
       {tab === 'refund' && <RefundCard />}
       {tab === 'dlq' && <DlqCard />}

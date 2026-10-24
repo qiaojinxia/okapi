@@ -16,7 +16,7 @@ export function Skeleton({ className, ...props }: React.HTMLAttributes<HTMLDivEl
 export function TableSkeleton({ rows = 6, cols = 5, dense = false }: { rows?: number; cols?: number; dense?: boolean }) {
   return (
     <div data-slot="table-skeleton" data-density={dense ? 'compact' : 'default'} aria-busy="true" className="w-full overflow-hidden rounded-xl border border-border bg-card shadow-card">
-      <div className="flex h-[var(--table-header-height)] items-center gap-3 border-b border-border bg-muted px-3">
+      <div className="flex h-[var(--table-header-height)] items-center gap-3 border-b border-border bg-card px-3">
         {Array.from({ length: cols }).map((_, i) => (
           <Skeleton key={i} className="h-3 flex-1" style={{ maxWidth: i === 0 ? 48 : 140 }} />
         ))}

@@ -1,4 +1,4 @@
-import { Settings2, Users } from 'lucide-react'
+import { Settings2 } from 'lucide-react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { useState } from 'react'
@@ -81,12 +81,7 @@ export function UsersPage() {
       <PageHeader
         title={t('admin:usersTitle')}
         description={t('admin:usersDesc')}
-        icon={Users}
-        meta={
-          users.data && (
-            <Badge variant="muted">{t('admin:usersTotal', { total: users.data.total })}</Badge>
-          )
-        }
+        meta={users.data && t('admin:usersTotal', { total: users.data.total })}
       />
 
       <Toolbar

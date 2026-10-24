@@ -1,7 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { ArrowRight, CreditCard, Receipt, Ticket, Wallet } from 'lucide-react'
+import { ArrowRight, CreditCard, Receipt, Ticket } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Alert } from '@/components/ui/alert'
@@ -47,14 +47,7 @@ export function TopupPage() {
       <PageHeader
         title={t('portal:topupNav')}
         description={t('portal:topupDesc')}
-        icon={Wallet}
-        meta={
-          me.data && (
-            <span className="rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary tabular-nums">
-              {t('common:balance')} {formatMoney(me.data.balance_micro, i18n.language)}
-            </span>
-          )
-        }
+        meta={me.data && `${t('common:balance')} ${formatMoney(me.data.balance_micro, i18n.language)}`}
         action={
           <Link to="/portal/ledger" className={buttonVariants({ variant: 'outline' })}>
             <Receipt className="h-4 w-4" />

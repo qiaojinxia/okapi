@@ -1,4 +1,4 @@
-import { AlertTriangle, Coins, Info, Pencil, Plus, Rocket, Trash2, Upload } from 'lucide-react'
+import { AlertTriangle, Info, Pencil, Plus, Rocket, Trash2, Upload } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -142,7 +142,6 @@ export function ModelPricingPage() {
       <PageHeader
         title={t('admin:modelListTitle')}
         description={t('admin:modelsDesc')}
-        icon={Coins}
         action={
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={() => setImporting(true)}>

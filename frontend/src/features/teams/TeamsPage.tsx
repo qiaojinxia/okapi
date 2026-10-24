@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Users } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TeamRow } from '@/features/teams/types'
@@ -68,7 +68,6 @@ export function TeamsPage() {
       <PageHeader
         title={t('team:title')}
         description={t('team:hint')}
-        icon={Users}
         action={
           !locked && (
             <Button onClick={() => setCreating(true)}>

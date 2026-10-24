@@ -5,7 +5,6 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Receipt } from 'lucide-react'
 import { PageHeader } from '@/components/ui/page'
 import { CopyText } from '@/components/ui/copy-button'
 import { TableSkeleton } from '@/components/ui/skeleton'
@@ -32,7 +31,7 @@ export function LedgerPage() {
   const [tab, setTab] = useState<Tab>('ledger')
   return (
     <div className="list-page">
-      <PageHeader title={t('portal:ledgerNav')} description={t('portal:ledgerDesc')} icon={Receipt} />
+      <PageHeader title={t('portal:ledgerNav')} description={t('portal:ledgerDesc')} />
       <Tabs
         items={TABS.map((id) => ({
           id,

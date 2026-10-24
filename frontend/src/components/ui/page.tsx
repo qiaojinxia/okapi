@@ -1,14 +1,15 @@
-import type { LucideIcon } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 /// 页头：标题 + 这一页负责什么 + 主操作（通常是"新建"）。
 ///
 /// 一页一职责的前提是用户能一眼知道这页管什么。此前列表页直接甩出表格，
 /// 页面之间只靠侧栏高亮区分，同屏还混着别的资源的表单。
+///
+/// 只有文字：没有图标方块，计数 / 状态写成标题后面的一句朴素文字（「共 5 条 · 4 启用」），
+/// 不再套徽章胶囊；主操作在桌面端与「标题 + 说明」这一块垂直居中。
 export function PageHeader({
   title,
   description,
-  icon: Icon,
   meta,
   action,
   className,
@@ -16,8 +17,7 @@ export function PageHeader({
 }: {
   title: string
   description?: string
-  icon?: LucideIcon
-  /// 标题右侧的小徽章（计数 / 状态）。
+  /// 标题后面的一句统计 / 状态（朴素文字）。
   meta?: React.ReactNode
   action?: React.ReactNode
   className?: string
@@ -25,22 +25,17 @@ export function PageHeader({
   compact?: boolean
 }) {
   return (
-    <header data-slot="page-header" className={cn('flex min-w-0 shrink-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between', className)}>
-      <div className={cn('flex min-w-0 items-start gap-3', compact && 'lg:items-center')}>
-        {Icon && (
-          <span className="mt-0.5 hidden h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary sm:flex">
-            <Icon className="h-4.5 w-4.5" />
-          </span>
-        )}
-        <div className={cn('flex min-w-0 flex-col gap-1', compact && 'lg:flex-row lg:items-center lg:gap-3')}>
-          <div className="flex flex-wrap items-center gap-2">
-            <h1 className="text-xl font-semibold leading-7 tracking-tight">{title}</h1>
-            {meta}
-          </div>
-          {description !== undefined && (
-            <p className={cn('max-w-3xl text-sm leading-6 text-muted-foreground', compact && 'text-xs leading-5')}>{description}</p>
+    <header data-slot="page-header" className={cn('flex min-w-0 shrink-0 flex-col gap-4 lg:flex-row lg:items-center lg:justify-between', className)}>
+      <div className={cn('flex min-w-0 flex-col gap-1', compact && 'lg:flex-row lg:items-center lg:gap-3')}>
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h1 className="text-xl font-semibold leading-7 tracking-tight">{title}</h1>
+          {meta !== undefined && meta !== null && meta !== false && (
+            <span className="text-sm text-muted-foreground tabular-nums">{meta}</span>
           )}
         </div>
+        {description !== undefined && (
+          <p className={cn('max-w-3xl text-sm leading-6 text-muted-foreground', compact && 'text-xs leading-5')}>{description}</p>
+        )}
       </div>
       {action !== undefined && <div className="flex shrink-0 flex-wrap items-center gap-2 [&_button]:min-h-10 lg:justify-end lg:[&_button]:min-h-9">{action}</div>}
     </header>
@@ -49,6 +44,7 @@ export function PageHeader({
 
 /// 工具栏：搜索/过滤在左，右侧放计数或次级动作。
 ///
+/// 不再包一层卡片：筛选控件直接放在页面底色上，表格才是页面里唯一的「纸」。
 /// 批量操作不再放这里——选中若干条后由底部浮起的 `SelectionBar` 承载，
 /// 顶部只留"怎么筛"。
 export function Toolbar({
@@ -68,10 +64,7 @@ export function Toolbar({
   return (
     <div
       data-slot="toolbar"
-      className={cn(
-        'flex min-h-15 min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-3 rounded-xl border border-border bg-card p-3 shadow-card',
-        className,
-      )}
+      className={cn('flex min-w-0 shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-3', className)}
     >
       <div className={cn('flex min-w-0 max-w-full flex-1 basis-96 flex-wrap items-center gap-3', filtersClassName)}>{filters}</div>
       {selection !== undefined && (

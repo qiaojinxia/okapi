@@ -1,4 +1,4 @@
-import { Layers, Pencil, Plus, Trash2 } from 'lucide-react'
+import { Pencil, Plus, Trash2 } from 'lucide-react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -57,12 +57,9 @@ export function GroupsPage() {
     <div className="list-page">
       <PageHeader
         className="shrink-0"
-        icon={Layers}
         title={t('admin:groupsTitle')}
         description={t('admin:groupsDesc')}
-        meta={groups.data?.total === undefined ? undefined : (
-          <Badge variant="muted">{t('admin:keyTotal', { n: groups.data.total })}</Badge>
-        )}
+        meta={groups.data?.total === undefined ? undefined : t('admin:keyTotal', { n: groups.data.total })}
         action={
           <Button onClick={() => setDrawer({})}>
             <Plus className="h-4 w-4" />

@@ -1,7 +1,6 @@
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { ScrollText } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AuditSearch } from '@/routes/admin.audit'
@@ -152,7 +151,7 @@ export function AuditPage() {
 
   return (
     <div className="list-page">
-      <PageHeader title={t('admin:auditTitle')} description={t('admin:auditDesc')} icon={ScrollText} />
+      <PageHeader title={t('admin:auditTitle')} description={t('admin:auditDesc')} />
 
       <Toolbar
         filtersClassName="items-end"

@@ -1,7 +1,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, getRouteApi } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { KeyRound, Power, PowerOff, ScrollText, Trash2 } from 'lucide-react'
+import { Power, PowerOff, ScrollText, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useState } from 'react'
 import { Badge } from '@/components/ui/badge'
@@ -145,10 +145,7 @@ export function AdminKeysPage() {
       <PageHeader
         title={t('admin:keysNav')}
         description={t('admin:keysDesc')}
-        icon={KeyRound}
-        meta={
-          keys.data && <Badge variant="muted">{t('admin:keyTotal', { n: keys.data.total })}</Badge>
-        }
+        meta={keys.data && t('admin:keyTotal', { n: keys.data.total })}
       />
       <Toolbar
         selection={keys.isFetching ? <span role="status" className="text-xs text-muted-foreground">{t('common:loading')}</span> : undefined}

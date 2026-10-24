@@ -96,8 +96,8 @@ export function Table({
           // 粘性表头保持不透明，行不会从表头底下透出来。
           // 另外 sticky 元素上的 border-bottom 不随边框合并渲染，靠 th 的 box-shadow 补一条分隔线。
           stickyHeader &&
-            '[&_thead]:sticky [&_thead]:top-0 [&_thead]:z-10 [&_thead]:bg-card [&_thead_th]:bg-muted [&_thead_th]:shadow-[inset_0_-1px_0_var(--border)]',
-          stickyFirstColumn && '[&_tr>:first-child:not([colspan])]:sticky [&_tr>:first-child:not([colspan])]:left-0 [&_tr>:first-child:not([colspan])]:z-1 [&_tr>:first-child:not([colspan])]:shadow-[1px_0_0_var(--border)] [&_tbody_tr>:first-child:not([colspan])]:bg-card [&_thead_tr>:first-child:not([colspan])]:bg-muted',
+            '[&_thead]:sticky [&_thead]:top-0 [&_thead]:z-10 [&_thead]:bg-card [&_thead_th]:bg-card [&_thead_th]:shadow-[inset_0_-1px_0_var(--border)]',
+          stickyFirstColumn && '[&_tr>:first-child:not([colspan])]:sticky [&_tr>:first-child:not([colspan])]:left-0 [&_tr>:first-child:not([colspan])]:z-1 [&_tr>:first-child:not([colspan])]:shadow-[1px_0_0_var(--border)] [&_tbody_tr>:first-child:not([colspan])]:bg-card [&_thead_tr>:first-child:not([colspan])]:bg-card',
           className,
         )}
         {...props}
@@ -107,8 +107,9 @@ export function Table({
   )
 }
 
+/// 表头与表体同是纸白，只靠一条细线隔开：不再给表头铺一条灰带，整张表读起来是一页纸而不是一个格子。
 export function THead({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={cn('bg-muted [&_tr]:border-b [&_tr]:border-border', className)} {...props} />
+  return <thead className={cn('bg-card [&_tr]:border-b [&_tr]:border-border', className)} {...props} />
 }
 
 export function TBody({ className, ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
@@ -142,7 +143,7 @@ export function Th({ className, numeric = false, ...props }: ThProps) {
   return (
     <th
       className={cn(
-        'h-[var(--table-header-height)] px-3 py-2 text-left text-xs leading-4 font-semibold align-middle whitespace-nowrap text-muted-foreground',
+        'h-[var(--table-header-height)] px-3 py-2 text-left text-xs leading-4 font-medium align-middle whitespace-nowrap text-muted-foreground',
         numeric && 'text-right',
         className,
       )}

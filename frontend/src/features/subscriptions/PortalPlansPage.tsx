@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
-import { ArrowRight, CalendarClock, Check, Package, RefreshCw, Ticket } from 'lucide-react'
+import { ArrowRight, CalendarClock, Check, RefreshCw, Ticket } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Alert } from '@/components/ui/alert'
@@ -114,7 +114,6 @@ export function PortalPlansPage() {
       <PageHeader
         title={t('portal:plansNav')}
         description={t('portal:plansDesc')}
-        icon={Package}
         action={
           <Field label={t('portal:planPayWith')}>
             <Segmented

@@ -50,7 +50,7 @@ export function ProfilePage() {
 
   return (
     <PageBody>
-      <PageHeader title={t('profile:title')} description={t('profile:description')} icon={UserRound} />
+      <PageHeader title={t('profile:title')} description={t('profile:description')} />
       <section className="flex flex-wrap items-center justify-between gap-5 rounded-xl border border-border bg-card p-5 shadow-card" aria-label={t('profile:account')}>
         <div className="flex min-w-0 items-center gap-4">
           <span className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-primary/10 text-primary"><UserRound className="h-7 w-7" /></span>

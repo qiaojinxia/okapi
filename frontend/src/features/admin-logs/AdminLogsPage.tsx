@@ -8,7 +8,6 @@ import {
   SlidersHorizontal,
   Download,
   RotateCw,
-  FileText,
   Search,
   Undo2,
   Fingerprint,
@@ -291,7 +290,6 @@ export function AdminLogsPage() {
       <PageHeader
         title={t('admin:logsNav')}
         description={t('admin:logsDesc')}
-        icon={FileText}
         compact
         className="[&_p]:text-xs [&_p]:leading-5"
         action={<>
