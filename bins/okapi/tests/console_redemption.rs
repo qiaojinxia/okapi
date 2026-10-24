@@ -1,6 +1,7 @@
 //! 兑换码验收：批量生成（明文一次）→ 门户核销入账 → 重放/并发拒绝 → 过期拒绝。
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
+use chrono::SubsecRound as _;
 use okapi::{console, gateway};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -358,7 +359,7 @@ async fn redemption_plan_bind_and_ip_cap() {
         .post(format!("http://{}/admin/redemptions", env.addr))
         .bearer_auth(&env.admin_token)
         .json(&json!({
-            "count": 1, "amount_micro": 1,
+            "count": 3, "amount_micro": 1,
             "plan_code": format!("plan-{}", &suffix[..8])
         }))
         .send()
@@ -368,6 +369,8 @@ async fn redemption_plan_bind_and_ip_cap() {
         .await
         .unwrap();
     let plan_code_str = created["codes"][0].as_str().unwrap().to_owned();
+    let longer_code = created["codes"][1].as_str().unwrap().to_owned();
+    let shorter_code = created["codes"][2].as_str().unwrap().to_owned();
 
     let before = env.ledger.balance(env.user_id).await.unwrap().as_micros();
     let redeemed: Value = client
@@ -406,6 +409,25 @@ async fn redemption_plan_bind_and_ip_cap() {
     .await
     .unwrap();
     assert!(expires.is_some(), "套餐应设置余额有效期");
+
+    // 兑换码只能把有效期往后推，不能缩短用户已有的：到期会把整个钱包连旧钱一起清零。
+    // 已有 300 天的用户兑 30 天的码，有效期不变；只剩 10 天的，被推到约 30 天
+    let now = chrono::Utc::now();
+    let long = (now + chrono::Duration::days(300)).trunc_subsecs(6);
+    set_balance_expiry(&env, Some(long)).await;
+    redeem_ok(&env, &client, &longer_code).await;
+    assert_eq!(
+        balance_expiry(&env).await,
+        Some(long),
+        "30 天的码不能把已有的 300 天有效期缩短"
+    );
+    set_balance_expiry(&env, Some(now + chrono::Duration::days(10))).await;
+    redeem_ok(&env, &client, &shorter_code).await;
+    let extended = balance_expiry(&env).await.expect("有效期仍在");
+    assert!(
+        extended > now + chrono::Duration::days(29) && extended < now + chrono::Duration::days(31),
+        "只剩 10 天的有效期应被 30 天的码推后：{extended}"
+    );
     // 清理有效期，防 worker 清零本测试用户
     sqlx::query!(
         r#"UPDATE users SET balance_expires_at = NULL WHERE id = $1"#,
@@ -486,6 +508,35 @@ async fn admin_id_of(env: &TestEnv) -> i64 {
         .fetch_one(&env.pg)
         .await
         .unwrap()
+}
+
+async fn set_balance_expiry(env: &TestEnv, at: Option<chrono::DateTime<chrono::Utc>>) {
+    sqlx::query("UPDATE users SET balance_expires_at = $2 WHERE id = $1")
+        .bind(env.user_id)
+        .bind(at)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
+
+async fn balance_expiry(env: &TestEnv) -> Option<chrono::DateTime<chrono::Utc>> {
+    sqlx::query_scalar("SELECT balance_expires_at FROM users WHERE id = $1")
+        .bind(env.user_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap()
+}
+
+async fn redeem_ok(env: &TestEnv, client: &reqwest::Client, code: &str) {
+    let resp = client
+        .post(format!("http://{}/api/me/redeem", env.addr))
+        .bearer_auth(&env.user_token)
+        .header("x-real-ip", uniq_ip())
+        .json(&json!({ "code": code }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 }
 
 fn rand_octet() -> u8 {

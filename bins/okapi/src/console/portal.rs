@@ -577,8 +577,11 @@ async fn accept_wallet_redemption(
     }
     if let Some(days) = claimed.balance_valid_days {
         let expires = chrono::Utc::now() + chrono::Duration::days(i64::from(days));
+        // 到期是整个钱包的一个时间点，到点连旧钱一起清零：兑换码只能把它往后推，不能缩短用户
+        // 已有的有效期（已有 300 天的用户兑一个 30 天的码，不该在第 30 天丢掉旧钱）。
+        // GREATEST 忽略 NULL：原本没有有效期的钱包照旧按这个码设置。
         sqlx::query!(
-            "UPDATE users SET balance_expires_at=$2,updated_at=now() WHERE id=$1",
+            "UPDATE users SET balance_expires_at=GREATEST(balance_expires_at,$2),updated_at=now() WHERE id=$1",
             user_id,
             expires
         )
