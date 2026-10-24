@@ -360,10 +360,13 @@ impl SchedulerRedis {
             .await;
     }
 
-    async fn web_session_get_raw(&self, sid: &str) -> Option<i64> {
-        let (web, _, _) = Self::web_session_keys(sid)?;
-        let value: Option<String> = self.client.get(web).await.ok()?;
-        value?.parse().ok()
+    /// 会话属主。`Err` = Redis 读失败：调用方不能把它当成「会话已失效」。
+    async fn web_session_get_raw(&self, sid: &str) -> Result<Option<i64>, fred::error::Error> {
+        let Some((web, _, _)) = Self::web_session_keys(sid) else {
+            return Ok(None);
+        };
+        let value: Option<String> = self.client.get(web).await?;
+        Ok(value.and_then(|value| value.parse().ok()))
     }
 
     /// 该用户仍有效的 web 会话（过期成员顺手从索引摘掉）。
@@ -373,7 +376,16 @@ impl SchedulerRedis {
         let mut out = Vec::with_capacity(members.len());
         for sid in members {
             let meta_key = Self::web_session_keys(&sid).map(|(_, _, meta)| meta);
-            match (self.web_session_get_raw(&sid).await, meta_key) {
+            let owner = match self.web_session_get_raw(&sid).await {
+                Ok(owner) => owner,
+                // 读失败不等于会话已死：把它从索引里摘掉，`web_session_check` 的成员资格检查
+                // 就再也过不了，还活着的会话等于被永久登出。这次先不列它
+                Err(error) => {
+                    tracing::warn!(%error, user_id, "读取 web 会话失败，本次不列出也不清理");
+                    continue;
+                }
+            };
+            match (owner, meta_key) {
                 (Some(uid), Some(meta_key)) if uid == user_id => {
                     let meta: std::collections::HashMap<String, String> =
                         self.client.hgetall(meta_key).await.unwrap_or_default();
@@ -427,11 +439,15 @@ impl SchedulerRedis {
     /// 吊销一条：必须属于该用户。
     pub async fn web_session_revoke(&self, user_id: i64, sid: &str) -> bool {
         match self.web_session_get_raw(sid).await {
-            Some(uid) if uid == user_id => {
+            Ok(Some(uid)) if uid == user_id => {
                 self.web_session_del(sid).await;
                 true
             }
-            _ => false,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(%error, user_id, "读取 web 会话失败，无法吊销");
+                false
+            }
         }
     }
 

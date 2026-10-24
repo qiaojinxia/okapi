@@ -106,11 +106,27 @@ pub(super) async fn require_session(
 ) -> Result<i64, AppError> {
     let sid = session_id(headers)
         .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
-    state
-        .sched
-        .web_session_get(&sid)
-        .await
-        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))
+    session_user(state, &sid).await
+}
+
+/// 会话 id → 用户。会话存储不可达是服务端故障：报 503，不伪装成 401——前端把 401 当成
+/// 「登录失效」直接踢回登录页，Redis 抖一下全站用户都被登出；数据面鉴权同样把两者分开。
+pub(super) async fn session_user(state: &AppState, sid: &str) -> Result<i64, AppError> {
+    session_outcome(state.sched.web_session_check(sid).await)
+}
+
+fn session_outcome(checked: Result<Option<i64>, fred::error::Error>) -> Result<i64, AppError> {
+    match checked {
+        Ok(Some(user_id)) => Ok(user_id),
+        Ok(None) => Err(AppError::unauthorized(okapi_api::codes::INVALID_API_KEY)),
+        Err(error) => {
+            tracing::error!(%error, "web session store unreachable");
+            Err(AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                okapi_api::codes::AUTH_BACKEND_UNAVAILABLE,
+            ))
+        }
+    }
 }
 
 // ---- 注册 ----
@@ -200,8 +216,9 @@ fn mailbox_key(email: &str) -> String {
         return email.to_owned();
     };
     let local = local.split_once('+').map_or(local, |(base, _)| base);
+    // googlemail.com 是 gmail.com 的别名，两个域名投进同一个信箱
     if matches!(domain, "gmail.com" | "googlemail.com") {
-        return format!("{}@{domain}", local.replace('.', ""));
+        return format!("{}@gmail.com", local.replace('.', ""));
     }
     format!("{local}@{domain}")
 }
@@ -740,11 +757,7 @@ pub async fn session_key(
 ) -> Result<Response, AppError> {
     let unauthorized = || AppError::unauthorized(okapi_api::codes::INVALID_API_KEY);
     let sid = session_id(&headers).ok_or_else(unauthorized)?;
-    let user_id = state
-        .sched
-        .web_session_get(&sid)
-        .await
-        .ok_or_else(unauthorized)?;
+    let user_id = session_user(&state, &sid).await?;
     let bound = session_hash(&sid);
     let name = body
         .and_then(|Json(req)| req.name)
@@ -1135,6 +1148,28 @@ mod cookie_tests {
 }
 
 #[cfg(test)]
+mod session_outcome_tests {
+    use super::session_outcome;
+    use axum::http::StatusCode;
+
+    /// 会话不存在是 401，会话存储不可达是 503：前端把 401 当「登录失效」踢回登录页，
+    /// Redis 抖一下不能让全站用户都被登出。
+    #[test]
+    fn a_dead_session_is_401_and_an_unreachable_store_is_503() {
+        assert_eq!(session_outcome(Ok(Some(7))).unwrap(), 7);
+        let gone = session_outcome(Ok(None)).unwrap_err();
+        assert_eq!(gone.status, StatusCode::UNAUTHORIZED);
+        let down = session_outcome(Err(fred::error::Error::new(
+            fred::error::ErrorKind::IO,
+            "connection refused",
+        )))
+        .unwrap_err();
+        assert_eq!(down.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(down.code, okapi_api::codes::AUTH_BACKEND_UNAVAILABLE);
+    }
+}
+
+#[cfg(test)]
 mod mailbox_tests {
     use super::mailbox_key;
 
@@ -1142,7 +1177,12 @@ mod mailbox_tests {
     fn variants_of_one_inbox_share_a_quota() {
         assert_eq!(mailbox_key("a.b+x@ok.test"), "a.b@ok.test");
         assert_eq!(mailbox_key("a.b+x+y@gmail.com"), "ab@gmail.com");
-        assert_eq!(mailbox_key("a.b@googlemail.com"), "ab@googlemail.com");
+        // googlemail.com 是 gmail.com 的别名：同一个信箱不能靠换域名拿到第二份额度
+        assert_eq!(mailbox_key("a.b@googlemail.com"), "ab@gmail.com");
+        assert_eq!(
+            mailbox_key("a.b@googlemail.com"),
+            mailbox_key("ab+tag@gmail.com")
+        );
         assert_eq!(mailbox_key("plain@ok.test"), "plain@ok.test");
         assert_eq!(mailbox_key("no-at-sign"), "no-at-sign");
     }

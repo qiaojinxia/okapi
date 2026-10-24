@@ -88,6 +88,38 @@ async fn sessions_reject_orphans_slide_all_ttls_and_revoke_atomically() -> Resul
     assert!(!indexed);
     Ok(())
 }
+/// 列会话时读某把会话键失败（这里用错误类型的键制造 WRONGTYPE）不等于会话已死：
+/// 把它从用户索引里摘掉，`web_session_check` 的成员资格检查就再也过不了，还活着的会话被永久登出。
+#[tokio::test]
+async fn a_failed_session_read_leaves_the_session_in_its_index() -> Result {
+    let state = state().await?;
+    let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
+    let uid = user(&state.pg).await?;
+    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+        uid,
+        &Uuid::new_v4().simple().to_string(),
+    );
+    let (web, index, _) =
+        okapi::gateway::sched_redis::SchedulerRedis::web_session_keys(&sid).unwrap();
+    state.sched.web_session_set(&sid, uid, None, None).await;
+    assert_eq!(state.sched.web_session_get(&sid).await, Some(uid));
+
+    let _: i64 = redis.del(&web).await?;
+    let _: i64 = redis.sadd(&web, "not-a-string").await?;
+    assert!(
+        state.sched.web_session_list(uid).await.is_empty(),
+        "读不出来的会话这一次不列"
+    );
+    let indexed: bool = redis.sismember(&index, &sid).await?;
+    assert!(indexed, "读失败不能把会话从索引里摘掉");
+
+    // 键恢复正常后，会话仍然有效
+    let _: i64 = redis.del(&web).await?;
+    let _: () = redis.set(&web, uid.to_string(), None, None, false).await?;
+    assert_eq!(state.sched.web_session_get(&sid).await, Some(uid));
+    assert_eq!(state.sched.web_session_list(uid).await.len(), 1);
+    Ok(())
+}
 #[tokio::test]
 async fn late_auth_snapshot_cannot_restore_revoked_key() -> Result {
     let state = state().await?;

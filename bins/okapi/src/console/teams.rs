@@ -9,30 +9,16 @@ use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode};
 use rand::RngExt;
 use rand::distr::Alphanumeric;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-/// Cookie 会话 → user_id（复用 auth_web 的会话存储）。
+/// Cookie 会话 → user_id（复用 auth_web 的会话鉴权：存储不可达回 503，不是 401）。
 async fn require_session(state: &AppState, headers: &HeaderMap) -> Result<i64, AppError> {
-    let sid = headers
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| {
-            cookies.split(';').find_map(|pair| {
-                let (name, value) = pair.trim().split_once('=')?;
-                (name == "okapi_session").then(|| value.to_owned())
-            })
-        })
-        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))?;
-    state
-        .sched
-        .web_session_get(&sid)
-        .await
-        .ok_or_else(|| AppError::unauthorized(okapi_api::codes::INVALID_API_KEY))
+    super::auth_web::require_session(state, headers).await
 }
 
 /// 成员角色查询；None = 非成员。
