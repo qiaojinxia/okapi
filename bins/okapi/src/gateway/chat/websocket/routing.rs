@@ -164,11 +164,15 @@ pub(super) async fn route(
         )
         .is_ok_and(crate::gateway::execution_plan::ExecutionPlan::websocket_ingress)
     });
+    // 上游连接被关了（某一轮超时收尾时关掉了共享连接、或上游断开）：账号与出口仍按原样钉住，
+    // 只把连接重建一次。此前死连接一直钉着，之后每一轮都立刻报 responses_ws_closed，只能客户端重连。
+    let mut egress: Option<(Option<i64>, Option<String>)> = None;
     if let Some(pin) = pinned.as_ref() {
-        if pin.transport.closed() {
-            return Err(unavailable("responses_ws_closed"));
-        }
         candidates.retain(|c| pin.binding.matches(c) && c.egress_admits(pin.proxy_id));
+        if pin.transport.closed() {
+            egress = Some((pin.proxy_id, pin.proxy.clone()));
+            *pinned = None;
+        }
     }
     let mut last = unavailable("responses_websocket");
     let mut attempted: i16 = 0;
@@ -193,17 +197,22 @@ pub(super) async fn route(
             if !policy.allows(&pin.transport, &cand) {
                 continue;
             }
-        } else if policy.prefer_http(&cand) {
-            if !policy.allows(&Transport::Http, &cand) {
+        } else {
+            if let Some((proxy_id, proxy)) = &egress {
+                cand.pin_egress(*proxy_id, proxy.clone());
+            }
+            if policy.prefer_http(&cand) {
+                if !policy.allows(&Transport::Http, &cand) {
+                    continue;
+                }
+            } else if cand
+                .capabilities
+                .get("responses_websocket")
+                .and_then(Value::as_bool)
+                == Some(false)
+            {
                 continue;
             }
-        } else if cand
-            .capabilities
-            .get("responses_websocket")
-            .and_then(Value::as_bool)
-            == Some(false)
-        {
-            continue;
         }
         if !slot(bill, &cand).await {
             continue;
