@@ -2898,6 +2898,44 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
     此前保存时通过、之后解析到私网的域名渠道（含用 `migrate` 导入绕过保存检查的）现在会连接失败。
   - **其余**：分析页「调用明细」深链 `hours` 最大 8784 而日志页钳到 2160，超过 90 天的窗口被静默截断——现在更长的窗口带绝对起点 `from`；
     几处测试辅助函数的卫生（共享的 `payment_stripe.api_base` 用完还原、`chat_and_settle` / `settled_amount` 只认 `status = 20`）。
+- **第七轮评审后补（跨方言输出上限 / TPM / count_tokens / CI）**：
+  - **缺省输出上限先写进入口原文、再转换**：客户端没声明上限、模型 `max_output` 又大于预扣封顶值时往请求里补封顶值，这一步原来在
+    `dispatch_chat` 里、出向转换**之后**按*入口*方言挑字段名，跨方言时落成上游不认的键——Gemini 上游多出顶层 `max_tokens`（OpenAI 入口）
+    或 `max_output_tokens`（Responses 入口），却没有 `generationConfig.maxOutputTokens`；Anthropic 上游在自己的 `max_tokens` 旁多出
+    `max_output_tokens` / `generationConfig`，Messages API 会拒；chat 上游收到 `max_output_tokens` / `generationConfig` 而没有 `max_tokens`；
+    OpenAI 推理模型在 `completion_cap` 把 `max_tokens` 改名**之后**又被写进 `max_tokens`，请求被拒。现在 `build_upstream_body` 在转换前写
+    （Responses WebSocket 路径本来就是这个顺序），`apply_effort` 仍看客户端原文，补上的缺省不会被当成客户端设的硬上限。
+    `gateway_default_output_cap` 逐入口 × 逐上游方言核对上限只落在该上游自己读的字段。
+  - **TPM 与预扣同口径**：按放大后的 prompt（客户端模拟加的身份块、分词器系数）加补全上限计，取主模型与各备选里最大的；备选模型冻结不下来
+    （用量 / 报价过不了校验）改成跳过并告警，不再让整个请求失败。
+  - **`/v1/messages/count_tokens` 逐个候选尝试**：被账号准入、key RPM 或渠道并发挡住的候选换下一个，能用的都被限速才回 429（带
+    `channel_rpm` / `channel_concurrency`，与 input_tokens 端点同口径）；此前只取第一个通过账号准入的候选，它撞上限就整体 429。
+  - **CI**：`console_spa_navigation` 的 405 断言改为 401（`/admin/` 先鉴权再分派方法，匿名请求不该得知方法表），405 改在公开的 `/auth/login` 上验；
+    `ctutils` 0.4.2 → 0.4.5（RUSTSEC-2026-0385）、`tokio` 1.53.1 → 1.53.3（RUSTSEC-2026-0386），`cargo deny check` 与 `cargo audit` 通过；
+    「启动 NATS JetStream」一步偶发以 125 退出（最近 25 次 run 里 10 次），改为最多 4 次重试（后两次换 Docker Hub 镜像），最终失败时输出
+    docker 现场；另外 10 次 run 死在 clippy：CI 装当天的 stable（现在是 1.99），旧代码里 48 处断言判空（`assert_is_empty`）与 2 处
+    `.ok().is_some_and(..)` 一直是红的，本地靠 `-A` 绕开——现在逐处补上失败信息 / 改成 `is_ok_and`，1.95 与 1.99 的
+    `cargo clippy --workspace --all-targets -- -D warnings` 都不带 `-A` 通过；k8s 配方补上 `OKAPI_SETUP_TOKEN`（Ingress 之后的控制台不是直连环回，
+    没有它首次初始化一律 403）。
+- **第八轮评审后补（控制面写入 / 会话 / Responses 降级）**：
+  - **密码重置 token 每个用户只留一把**：`pwreset:user:<uid>` 记着当前那把的哈希，发新的就作废上一把（先落新 token 再换指针，并发申请不会漏下
+    删不掉的）；此前早先发出、可能已经泄露的链接在 30 分钟 TTL 内始终能重置密码，用户用新链接自救之后也一样。
+  - **兑换码只把余额有效期往后推**：`GREATEST(balance_expires_at, now + N 天)`。有效期是整个钱包的时间点，到点连旧钱一起清零；此前已有 300 天
+    有效期的用户兑一个 30 天的码，第 30 天就丢掉旧钱。原本没有有效期的钱包照旧按码设置。
+  - **控制面数值与列宽对齐**：new-api 定价导入与分组倍率按 `numeric(12,6)` 卡上限（导入跳过并报告，不再中途 500、留下前半批）；按次价与兑换码
+    面值 ≤ 2^53−1（HTTP 与 MCP 同一条，超限的码此前能生成、核销时才永久报错）；规则码走 `ensure_code`（空串 / 超长 / 怪字符 400）；
+    `assign_role` 的子角色不存在回 404（外键）。
+  - **渠道写入规整**：模型清单去空白、去重、空项 400，创建要求非空（MCP 同口径）；更新时地址去首尾空白；测活 / 模型发现先取启用的 key；
+    MCP `channel_toggle` 对不存在的渠道回 404（all 范围不查属主，此前报成功还写审计）。
+  - **Web 会话**：列会话时某条读失败（Redis 抖动）不再把它从用户索引里摘掉——`web_session_check` 要求成员资格，摘掉就是永久登出；
+    控制台的会话鉴权（含团队接口）在会话存储不可达时回 503，不再伪装成 401 让前端把用户踢回登录页；`googlemail.com` 与 `gmail.com`
+    共用发信额度。
+  - **Responses 降级不再丢字段**：`text.format`（`json_schema` / `json_object`）映射成 chat 的 `response_format`（表达不了的类型 400）；
+    `parallel_tool_calls` 带着工具时传给 chat，OpenAI → Anthropic 译成 `tool_choice.disable_parallel_tool_use`（Anthropic → OpenAI 反向译回）；
+    chat 上游回的分段数组形 `content`（非流式与流式）按序拼成输出文本，不再丢掉却照样计费。订阅兑换码核销后回执渲染失败不再回 500
+    （码已用掉，返回待定回执）。
+  - **核实后未改**：`explain_bill` 的取行（`billing_records` 里同一 `request_id` 事实上只有一行：结算在同一把锁里先查 `billing_financial_records`）；
+    对账 / 修复的 `limit`（`reconcile_scoped` 内部已钳到 1..1000）。
 - **环境变量**：布尔大小写不敏感（`true/1/yes/on`、`false/0/no/off`），认不得的与数值解析失败都打 WARN 再用缺省（`okapi_store::env_config`）。
 - **门户日志缺省近 30 天**：`/api/me/logs` 与 `/logs/stat` 不带日期时窗口取近 30 天（按 request_id 点查不加界），列表按
   `(created_at, id)` 倒序键集翻页（`before` 仍传上一页末行 id，服务端在同一属主下取它的 created_at），走 `idx_br_user_time`。
