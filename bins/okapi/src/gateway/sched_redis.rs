@@ -910,20 +910,25 @@ impl SchedulerRedis {
     }
 
     /// 租约续期（会话泵内每 20s；60s 窗口容忍两次丢失）。与获取同用 Redis 服务器时钟。
-    pub async fn ws_lease_renew(&self, key_id: i64, conn_id: &str) {
+    /// 续租；返回 false = 租约已不在（过期被别的连接清掉、或已释放），会话应当结束。
+    /// Redis 不可达时照旧放行：与 `ws_lease_acquire` 同为 fail-open，Redis 抖一下不该掐断所有会话。
+    pub async fn ws_lease_renew(&self, key_id: i64, conn_id: &str) -> bool {
         const LUA: &str = r"
             local t = redis.call('TIME')
             local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
-            return redis.call('ZADD', KEYS[1], 'XX', now + 60000, ARGV[1])
+            local old = redis.call('ZSCORE', KEYS[1], ARGV[1])
+            if not old or tonumber(old) <= now then return 0 end
+            redis.call('ZADD', KEYS[1], now + 60000, ARGV[1])
+            return 1
         ";
-        let _: Result<i64, _> = self
-            .client
-            .eval(
+        self.client
+            .eval::<i64, _, _, _>(
                 LUA,
                 vec![Self::ws_lease_key(key_id)],
                 vec![conn_id.to_owned()],
             )
-            .await;
+            .await
+            .map_or(true, |renewed| renewed == 1)
     }
 
     /// 连接断开释放租约（断开/失败路径统一走这里）。

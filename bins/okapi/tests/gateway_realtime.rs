@@ -774,13 +774,15 @@ async fn shutdown_settles_open_realtime_sessions() {
     let closed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match ws.next().await {
-                Some(Ok(CliMsg::Close(_)) | Err(_)) | None => break,
+                Some(Ok(CliMsg::Close(frame))) => break frame.map(|f| u16::from(f.code)),
+                Some(Err(_)) | None => break None,
                 Some(Ok(_)) => {}
             }
         }
     })
     .await;
-    assert!(closed.is_ok(), "the client sees the session end");
+    // 1001 Going Away：客户端据此知道是服务端在重启，重连即可
+    assert_eq!(closed.expect("the client sees the session end"), Some(1001));
     let (status, amount, pt, ct) = wait_record(&env.pg, env.user_id, &env.model)
         .await
         .expect("会话按已产出结算");

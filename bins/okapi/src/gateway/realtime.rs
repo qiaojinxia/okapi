@@ -66,16 +66,21 @@ pub async fn realtime(
 ) -> Response {
     let request_id = Uuid::new_v4();
     // 鉴权在升级前完成：拒绝直接走 HTTP 错误（客户端拿到 401/403 而非握手失败裸断）
-    let key = if headers.contains_key(axum::http::header::AUTHORIZATION) {
-        super::auth::authenticate_data_plane(&state, &headers).await
-    } else if let Some(token) = token_from_subprotocol(&headers) {
-        let mut synth = HeaderMap::new();
-        if let Ok(v) = axum::http::HeaderValue::from_str(&format!("Bearer {token}")) {
-            synth.insert(axum::http::header::AUTHORIZATION, v);
-        }
-        super::auth::authenticate_data_plane(&state, &synth).await
+    // 会话期间每 20s 拿同一份鉴权头复查 key（见 `session_alive`）
+    let auth_headers = if headers.contains_key(axum::http::header::AUTHORIZATION) {
+        Some(headers.clone())
     } else {
-        Err(AppError::unauthorized(codes::INVALID_API_KEY))
+        token_from_subprotocol(&headers).map(|token| {
+            let mut synth = HeaderMap::new();
+            if let Ok(v) = axum::http::HeaderValue::from_str(&format!("Bearer {token}")) {
+                synth.insert(axum::http::header::AUTHORIZATION, v);
+            }
+            synth
+        })
+    };
+    let key = match &auth_headers {
+        Some(auth) => super::auth::authenticate_data_plane(&state, auth).await,
+        None => Err(AppError::unauthorized(codes::INVALID_API_KEY)),
     };
     let key = match key {
         Ok(k) => k,
@@ -83,13 +88,15 @@ pub async fn realtime(
     };
 
     match prepare(&state, &key, &q.model, request_id).await {
-        Ok(prep) => ws
-            .protocols(["realtime"])
-            .on_upgrade(move |socket| async move {
-                // 受下线跟踪：进程退出前等会话收尾落账，不留给 10 分钟后的过期退款
-                let pending = state.settlements.clone();
-                pending.spawn(Box::pin(bridge_session(state, socket, prep)));
-            }),
+        Ok(mut prep) => {
+            prep.auth_headers = auth_headers.unwrap_or_default();
+            ws.protocols(["realtime"])
+                .on_upgrade(move |socket| async move {
+                    // 受下线跟踪：进程退出前等会话收尾落账，不留给 10 分钟后的过期退款
+                    let pending = state.settlements.clone();
+                    pending.spawn(Box::pin(bridge_session(state, socket, prep)));
+                })
+        }
         Err(err) => err.into_response_with(Some(request_id)),
     }
 }
@@ -123,6 +130,8 @@ impl Drop for Admission {
 struct Prep {
     admission: Admission,
     key: std::sync::Arc<okapi_store::AuthedKey>,
+    /// 握手时用来鉴权的请求头（`Authorization` 或由子协议合成），会话期间复查 key 用。
+    auth_headers: HeaderMap,
     request_id: Uuid,
     reserved: Money,
     reservation_pool: Pool,
@@ -345,6 +354,7 @@ async fn prepare(
     Ok(Prep {
         admission,
         key: std::sync::Arc::clone(key),
+        auth_headers: HeaderMap::new(),
         request_id,
         reserved: est.amount,
         reservation_pool,
@@ -475,13 +485,26 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
     loop {
         tokio::select! {
             () = permit.expired() => { tracing::warn!(%request_id,"realtime channel lease lost"); break; }
-            () = state.settlements.draining() => { tracing::info!(%request_id, "网关下线，realtime 会话收尾结算"); break; }
+            () = state.settlements.draining() => {
+                tracing::info!(%request_id, "网关下线，realtime 会话收尾结算");
+                // 1001 Going Away：客户端知道是服务端在重启、重连即可（Responses-WS 下线时同样这么回）
+                farewell = Some(ws_close::going_away());
+                break;
+            }
             () = tokio::time::sleep_until(expires.min(idle_deadline)) => {
                 tracing::info!(request_id = %request_id, awaiting_first, "realtime 超时，关闭会话");
                 break;
             }
             _ = renew.tick() => {
-                state.sched.ws_lease_renew(prep.key.key_id, &conn_id).await;
+                // 与 Responses-WS 每 20s 的续租同一口径：key 仍然有效（没被吊销 / 禁用 / 改绑）、
+                // 连接租约也续得上，会话才继续。此前续租结果不看，key 禁用后会话照跑到 8 分钟上限，
+                // 租约丢了也照跑，按 key 的连接上限就能超发
+                if !session_alive(&state, &prep, &conn_id).await {
+                    tracing::info!(%request_id, "realtime key 已失效或连接租约丢失，关闭会话");
+                    let event = serde_json::json!({"type":"error", "error":{"type":"invalid_request", "code":codes::KEY_DISABLED}});
+                    let _ = tokio::time::timeout_at(expires.min(idle_deadline), cl_tx.send(AxumMsg::Text(event.to_string().into()))).await;
+                    break;
+                }
             }
             msg = cl_rx.next() => {
                 match msg {
@@ -568,6 +591,13 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
         .sched
         .ws_lease_release(prep.key.key_id, &conn_id)
         .await;
+}
+
+async fn session_alive(state: &AppState, prep: &Prep, conn_id: &str) -> bool {
+    let key = super::auth::authenticate_data_plane(state, &prep.auth_headers)
+        .await
+        .is_ok_and(|k| (k.user_id, k.key_id) == (prep.key.user_id, prep.key.key_id));
+    key && state.sched.ws_lease_renew(prep.key.key_id, conn_id).await
 }
 
 /// 客户端事件里的 temperature 与 HTTP 入口（`chat::check_input`）同一口径：负数或不是数就不转给上游，
