@@ -133,6 +133,44 @@ fn request_drops_tools_when_choice_none() {
     assert!(out.get("tools").is_none());
 }
 
+/// `parallel_tool_calls: false` 是「一次只调一个工具」的约束，Anthropic 上对应
+/// `tool_choice.disable_parallel_tool_use`；缺省的 auto 也要显式写出来，否则约束在转换里悄悄失效。
+#[test]
+fn request_maps_disabled_parallel_tool_calls() {
+    let tools = json!([{"type": "function", "function": {"name": "f", "parameters": {}}}]);
+    let convert = |choice: Value, parallel: Value| {
+        let mut body = json!({
+            "model": "m", "tools": tools, "parallel_tool_calls": parallel,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        if !choice.is_null() {
+            body["tool_choice"] = choice;
+        }
+        convert_req(&body)["tool_choice"].clone()
+    };
+    assert_eq!(
+        convert(Value::Null, json!(false)),
+        json!({"type": "auto", "disable_parallel_tool_use": true})
+    );
+    assert_eq!(
+        convert(json!("required"), json!(false)),
+        json!({"type": "any", "disable_parallel_tool_use": true})
+    );
+    assert_eq!(
+        convert(
+            json!({"type": "function", "function": {"name": "f"}}),
+            json!(false)
+        ),
+        json!({"type": "tool", "name": "f", "disable_parallel_tool_use": true})
+    );
+    // 默认（并行）与显式 true 都不写：Anthropic 缺省就是可并行
+    assert_eq!(convert(Value::Null, json!(true)), Value::Null);
+    assert_eq!(
+        convert(json!("required"), json!(true)),
+        json!({"type": "any"})
+    );
+}
+
 #[test]
 fn response_maps_text_tools_and_cache_usage() {
     let body = json!({

@@ -166,20 +166,24 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
         return;
     }
     out.insert("tools".into(), Value::Array(tools));
-    match choice {
-        Some(Value::String(s)) if s == "required" => {
-            out.insert("tool_choice".into(), json!({"type": "any"}));
-        }
-        Some(Value::Object(o)) => {
-            if let Some(name) = o
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(Value::as_str)
-            {
-                out.insert("tool_choice".into(), json!({"type": "tool", "name": name}));
-            }
-        }
-        _ => {} // auto 缺省
+    let mut tool_choice = match choice {
+        Some(Value::String(s)) if s == "required" => Some(json!({"type": "any"})),
+        Some(Value::Object(o)) => o
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+            .map(|name| json!({"type": "tool", "name": name})),
+        _ => None, // auto 缺省
+    };
+    // parallel_tool_calls:false 对应 tool_choice.disable_parallel_tool_use；缺省的 auto 也要显式写出来，
+    // 否则要求一次只调一个工具的 agent 在 Anthropic 上游被放开并行
+    if src.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false) {
+        let mut choice = tool_choice.unwrap_or_else(|| json!({"type": "auto"}));
+        choice["disable_parallel_tool_use"] = json!(true);
+        tool_choice = Some(choice);
+    }
+    if let Some(tool_choice) = tool_choice {
+        out.insert("tool_choice".into(), tool_choice);
     }
 }
 

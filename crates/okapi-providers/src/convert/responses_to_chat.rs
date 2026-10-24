@@ -59,6 +59,16 @@ pub fn request_responses_to_chat(
             out.insert(key.into(), v.clone());
         }
     }
+    // 结构化输出：text.format 对应 chat 的 response_format。不映射的话客户端要的 JSON 在降级后
+    // 悄悄变成自由文本；表达不了的类型照本文件的口径报错。
+    if let Some(format) = src
+        .get("text")
+        .and_then(|text| text.get("format"))
+        .filter(|format| !format.is_null())
+        && let Some(response_format) = text_format_to_response_format(format)?
+    {
+        out.insert("response_format".into(), response_format);
+    }
     let stream = src.get("stream").and_then(Value::as_bool).unwrap_or(false);
     if stream {
         out.insert("stream".into(), json!(true));
@@ -69,6 +79,40 @@ pub fn request_responses_to_chat(
     serde_json::to_vec(&Value::Object(out))
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))
+}
+
+/// Responses `text.format` → chat `response_format`。`text` 是缺省，不必声明；`json_schema` 把
+/// 扁平的 name / schema / strict / description 装进 chat 的 `json_schema` 对象（name 在两边都必填，
+/// 缺了按 `response` 补，与 Gemini 入口同一口径）。
+fn text_format_to_response_format(format: &Value) -> Result<Option<Value>, UpstreamError> {
+    match format.get("type").and_then(Value::as_str) {
+        Some("text") => Ok(None),
+        Some("json_object") => Ok(Some(json!({"type": "json_object"}))),
+        Some("json_schema") => {
+            let schema = format
+                .get("schema")
+                .filter(|schema| schema.is_object())
+                .ok_or_else(|| super::unsupported_part("text.format.schema"))?;
+            let mut inner = serde_json::Map::new();
+            inner.insert(
+                "name".into(),
+                format
+                    .get("name")
+                    .cloned()
+                    .unwrap_or_else(|| json!("response")),
+            );
+            inner.insert("schema".into(), schema.clone());
+            for key in ["strict", "description"] {
+                if let Some(value) = format.get(key).filter(|value| !value.is_null()) {
+                    inner.insert(key.into(), value.clone());
+                }
+            }
+            Ok(Some(
+                json!({"type": "json_schema", "json_schema": Value::Object(inner)}),
+            ))
+        }
+        _ => Err(super::unsupported_part("text.format")),
+    }
 }
 
 /// input item → chat 消息：message 项（文本 / 图片 / 内联文件 / 音频 part）、
@@ -235,6 +279,14 @@ fn convert_tools(
     if let Some(choice) = src.get("tool_choice").filter(|choice| !choice.is_null()) {
         out.insert("tool_choice".into(), tool_choice_to_chat(choice)?);
     }
+    // chat 有同名开关；没有工具时上游会拒收它，所以只在带了工具时传
+    if out.contains_key("tools")
+        && let Some(parallel) = src
+            .get("parallel_tool_calls")
+            .filter(|value| value.is_boolean())
+    {
+        out.insert("parallel_tool_calls".into(), parallel.clone());
+    }
     Ok(())
 }
 
@@ -257,7 +309,7 @@ pub fn response_chat_to_responses(
             "summary":[{"type":"summary_text","text":reasoning}]}));
     }
     let mut content: Vec<Value> = Vec::new();
-    if let Some(text) = message.get("content").and_then(Value::as_str)
+    if let Some(text) = message.get("content").and_then(content_text)
         && !text.is_empty()
     {
         content.push(json!({"type": "output_text", "text": text, "annotations": []}));
@@ -314,6 +366,24 @@ pub fn response_chat_to_responses(
         .map(Bytes::from)
         .map_err(|e| UpstreamError::Build(e.to_string()))?;
     Ok((bytes, probe))
+}
+
+/// chat 的 `content`：字符串，或分段数组（部分兼容上游这样回）。数组按顺序拼接其中的文本段
+/// （`type` 缺省或为 `text` / `output_text`）；其余类型在 Responses 的输出文本里没有对应，跳过。
+fn content_text(content: &Value) -> Option<String> {
+    match content {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(parts) => Some(
+            parts
+                .iter()
+                .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                    None | Some("text" | "output_text") => part.get("text").and_then(Value::as_str),
+                    Some(_) => None,
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
 }
 
 fn response_completion(reason: Option<&str>) -> (&'static str, Option<Value>) {
@@ -460,10 +530,10 @@ impl ChatStreamToResponses {
             if let Some(text) = chunk
                 .pointer("/choices/0/delta")
                 .and_then(|delta| delta.get(field))
-                .and_then(Value::as_str)
+                .and_then(content_text)
                 && !text.is_empty()
             {
-                out.extend(self.on_message_delta(text, refusal));
+                out.extend(self.on_message_delta(&text, refusal));
             }
         }
         out.extend(self.on_tools(chunk));
@@ -1130,5 +1200,118 @@ mod fifth_review_tests {
         }
         // 回放的 reasoning 项照旧略过
         assert!(request(&json!({"input":[{"type":"reasoning","id":"r","summary":[]},{"role":"user","content":"hi"}]})).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod sixth_scan_tests {
+    use super::*;
+
+    fn request(body: &Value) -> Result<Value, UpstreamError> {
+        request_responses_to_chat(&Bytes::from(body.to_string()), "up")
+            .map(|out| serde_json::from_slice(&out).unwrap())
+    }
+
+    /// `text.format` 是 Responses 的结构化输出开关：降级到 chat 时对应 `response_format`，
+    /// 不能悄悄丢掉让客户端拿到自由文本。
+    #[test]
+    fn structured_output_formats_reach_chat_as_response_format() {
+        let out = request(&json!({"input":"hi","text":{"format":{
+            "type":"json_schema","name":"answer","strict":true,"description":"d",
+            "schema":{"type":"object","properties":{"a":{"type":"string"}}}}}}))
+        .unwrap();
+        assert_eq!(
+            out["response_format"],
+            json!({"type":"json_schema","json_schema":{
+                "name":"answer","strict":true,"description":"d",
+                "schema":{"type":"object","properties":{"a":{"type":"string"}}}}})
+        );
+        // name 缺了按 response 补；strict / description 没给就不带
+        let out = request(&json!({"input":"hi","text":{"format":{
+            "type":"json_schema","schema":{"type":"object"}}}}))
+        .unwrap();
+        assert_eq!(
+            out["response_format"],
+            json!({"type":"json_schema","json_schema":{"name":"response","schema":{"type":"object"}}})
+        );
+        let out = request(&json!({"input":"hi","text":{"format":{"type":"json_object"}}})).unwrap();
+        assert_eq!(out["response_format"], json!({"type":"json_object"}));
+        // 纯文本是缺省：不带 response_format
+        for text in [
+            json!({"format":{"type":"text"}}),
+            json!({"verbosity":"low"}),
+        ] {
+            let out = request(&json!({"input":"hi","text":text})).unwrap();
+            assert!(out.get("response_format").is_none(), "{out}");
+        }
+        // 表达不了的：报错，不静默退成自由文本
+        for format in [json!({"type":"grammar"}), json!({"type":"json_schema"})] {
+            let err = request(&json!({"input":"hi","text":{"format":format}})).unwrap_err();
+            assert!(
+                format!("{err:?}").contains("unsupported_content:text.format"),
+                "{err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_tool_calls_follows_the_tools() {
+        let tools = json!([{"type":"function","name":"f","parameters":{"type":"object"}}]);
+        for flag in [true, false] {
+            let out =
+                request(&json!({"input":"hi","tools":tools,"parallel_tool_calls":flag})).unwrap();
+            assert_eq!(out["parallel_tool_calls"], flag);
+        }
+        // 没有工具时上游拒收这个参数
+        let out = request(&json!({"input":"hi","parallel_tool_calls":false})).unwrap();
+        assert!(out.get("parallel_tool_calls").is_none(), "{out}");
+    }
+
+    /// 部分兼容上游把 `content` 回成分段数组：文本段照样交付，不能丢掉却照样计费。
+    #[test]
+    fn segmented_chat_content_is_delivered_in_json_and_stream() {
+        let (body, _) = response_chat_to_responses(&Bytes::from(
+            json!({"choices":[{"finish_reason":"stop","message":{"content":[
+                {"type":"text","text":"Hel"},
+                {"type":"image_url","image_url":{"url":"x"}},
+                {"text":"lo"}]}}]})
+            .to_string(),
+        ))
+        .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["output"][0]["content"][0]["text"], "Hello", "{body}");
+
+        let mut state = ChatStreamToResponses::new("fixture");
+        let mut events = Vec::new();
+        for chunk in [
+            json!({"choices":[{"delta":{"content":[{"type":"text","text":"Hel"}]}}]}),
+            json!({"choices":[{"delta":{"content":[{"type":"text","text":"lo"}]},"finish_reason":"stop"}]}),
+        ] {
+            events.extend(state.step(Ok(ChatEvent::Data {
+                raw: chunk.to_string(),
+                event: None,
+                has_output: true,
+                content_chars: 0,
+                usage: None,
+            })));
+        }
+        events.extend(state.step(Ok(ChatEvent::Done)));
+        let completed = events
+            .into_iter()
+            .find_map(|event| match event.unwrap() {
+                ChatEvent::Data {
+                    raw,
+                    event: Some(name),
+                    ..
+                } if name == "response.completed" => {
+                    Some(serde_json::from_str::<Value>(&raw).unwrap())
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            completed["response"]["output"][0]["content"][0]["text"],
+            "Hello"
+        );
     }
 }

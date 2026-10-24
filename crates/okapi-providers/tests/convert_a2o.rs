@@ -267,6 +267,40 @@ fn tool_choice_maps_all_four_values() {
     assert_eq!(with_choice(json!({"type": "auto"})), Value::Null);
 }
 
+/// `tool_choice.disable_parallel_tool_use` 是「一次只调一个工具」的约束，chat 上对应
+/// `parallel_tool_calls: false`；不带它（或为 false）就不写，上游缺省本来就可并行。
+#[test]
+fn disabled_parallel_tool_use_becomes_parallel_tool_calls_false() {
+    let convert = |choice: Value| {
+        convert_req(&json!({
+            "model": "claude-x", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "get_weather", "input_schema": {"type": "object"}}],
+            "tool_choice": choice
+        }))
+    };
+    for choice in [
+        json!({"type": "auto", "disable_parallel_tool_use": true}),
+        json!({"type": "any", "disable_parallel_tool_use": true}),
+        json!({"type": "tool", "name": "get_weather", "disable_parallel_tool_use": true}),
+    ] {
+        assert_eq!(
+            convert(choice.clone())["parallel_tool_calls"],
+            false,
+            "{choice}"
+        );
+    }
+    for choice in [
+        json!({"type": "auto"}),
+        json!({"type": "any", "disable_parallel_tool_use": false}),
+    ] {
+        assert!(
+            convert(choice.clone()).get("parallel_tool_calls").is_none(),
+            "{choice}"
+        );
+    }
+}
+
 /// 两跳往返：Anthropic usage → `openai_to_anthropic` 转成 OpenAI 形状 → `anthropic_to_openai`
 /// 再转回 Anthropic 形状，四个数必须原样还原，第二跳的计费探针也必须带着缓存写入。
 ///

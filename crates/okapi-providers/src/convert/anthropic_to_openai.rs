@@ -252,6 +252,15 @@ fn convert_tools(src: &serde_json::Map<String, Value>, out: &mut serde_json::Map
         return;
     }
     out.insert("tools".into(), Value::Array(tools));
+    // disable_parallel_tool_use 是 chat `parallel_tool_calls: false` 的同义开关
+    if src
+        .get("tool_choice")
+        .and_then(|choice| choice.get("disable_parallel_tool_use"))
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        out.insert("parallel_tool_calls".into(), json!(false));
+    }
     match src
         .get("tool_choice")
         .and_then(|c| c.get("type"))
