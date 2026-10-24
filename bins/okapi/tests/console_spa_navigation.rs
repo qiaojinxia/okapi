@@ -58,9 +58,19 @@ async fn api_clients_keep_json_semantics() {
         .unwrap();
     assert_eq!(resp.status(), 401, "Accept: */* 不构成浏览器导航");
 
-    // 方法不匹配的路径同理（/admin/cache/flush 仅 POST）：405 而非被 SPA fallback 吞成 200
+    // 方法不匹配的路径同理（/admin/cache/flush 仅 POST）：/admin/ 先鉴权再分派方法，匿名请求拿 401，
+    // 既不会被 SPA fallback 吞成 200，也不向匿名者透露这条路由接受哪些方法
     let resp = client
         .get(format!("http://{addr}/admin/cache/flush"))
+        .header("accept", "application/json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // 公开路径没有鉴权层：方法不匹配仍是 405（/auth/login 仅 POST），同样不被 SPA fallback 吞掉
+    let resp = client
+        .get(format!("http://{addr}/auth/login"))
         .header("accept", "application/json")
         .send()
         .await
