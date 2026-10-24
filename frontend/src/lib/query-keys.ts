@@ -53,6 +53,9 @@ export const qk = {
   adminModels: ['admin', 'models'] as const,
   // Complete selector catalog; never reuse a single page from a list/dashboard.
   adminModelOptions: ['admin', 'models', 'options'] as const,
+  // Built-in price catalog (suggestions only); keyed by the exact text asked about.
+  catalogLookup: (name: string) => ['admin', 'pricing', 'catalog', 'lookup', name] as const,
+  catalogSearch: (text: string) => ['admin', 'pricing', 'catalog', 'search', text] as const,
   adminKeysAll: adminKeys,
   adminKeys: (userId: number | null, q: string) => [...adminKeys, userId, q] as const,
   adminRedemptionsAll: adminRedemptions,

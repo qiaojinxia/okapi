@@ -32,6 +32,38 @@ export const modelPresetNoticesZh = {
   partial: '只填入已核实规格；未声明的输出限制和缓存倍率请与实际上游核对。',
 }
 
+/// 内置价目目录（LiteLLM 社区价目表）的建议：只是输入辅助，点了才进表单草稿。
+export const modelCatalogZh = {
+  title: '目录建议', unverified: 'LiteLLM 社区价目表 · 未经核对',
+  snapshot: '快照 {{date}}', source: '价格来源',
+  matched: '匹配条目 {{key}} · {{provider}}',
+  priceLine: '输入 ${{input}} / 输出 ${{output}} · USD / 1M',
+  priceLineInput: '输入 ${{input}} · USD / 1M',
+  cacheRead: '缓存读 {{value}}×', cacheWrite: '缓存写 {{value}}×', cacheWrite1h: '1 小时缓存写 {{value}}×',
+  perCall: '按次价 ${{price}} / 次',
+  unsupported: '目录按秒或其他单位计价，Okapi 的计价方式表达不了，不能直接填入；规格仍可带入。',
+  limitsContext: '输入上限 {{context}}', limitsOutput: '输出上限 {{output}}',
+  applyPrice: '填入建议价', applyPerCall: '填入按次价', applySpecs: '带入规格',
+  needsRatio: '先把计价方式切到匹配的一种再填入。',
+  none: '目录里没有这个名字。只按完整名字匹配，不做近似猜测，可以手动配置。',
+  failed: '目录查询失败，不影响手动配置。',
+  scope: '目录是社区维护的参考数据，可能滞后或有误，只含标准档价格。点击只改表单草稿；保存并发布后价格才生效，计费以发布的价簿快照为准。',
+  deprecatedPast: '目录标注该模型已于 {{date}} 弃用，请确认上游是否仍可用。',
+  deprecatedFuture: '目录标注该模型将于 {{date}} 弃用。',
+  alternatives: '同名条目还有',
+  notes: {
+    long_context: '超过 {{above_tokens}} token 的请求另有加价：输入 ${{input_per_1m}} / 输出 ${{output_per_1m}}（USD / 1M）。建议价不含这条规则，需要的话单独配置。',
+    service_tiers: '目录还列有 {{tiers}} 档价格；建议价只含标准档。',
+    reasoning_price: '推理 token 在目录里单独计价：${{output_per_1m}} / 1M。',
+    audio_price: '音频 token 在目录里单独计价：输入 ${{input_per_1m}} / 输出 ${{output_per_1m}}（USD / 1M）。',
+    per_second: '目录按秒计价：输入 ${{input_usd}} / 输出 ${{output_usd}}（USD / 秒）。',
+    free: '目录标注该模型免费（价格为 0）。',
+    no_price: '目录没有这个条目的价格，只有规格。',
+  },
+  deviation: '{{lane}}价是{{source}}的 {{ratio}}×，请确认不是录错（加价、折扣属正常，小数点和单位错位才要拦）。',
+  deviationSourcePreset: '核对过的参考价', deviationSourceCatalog: '目录建议价',
+}
+
 export const modelEditorZh = {
   capabilitiesEmpty: '未声明常用能力。选择模型预设可自动带入，也可按需调整个别标签。',
   editCapabilities: '调整常用标签', retainedCapabilities: '其他预设或历史能力声明保留，不需逐项配置。',
@@ -45,6 +77,7 @@ export const modelAdminZh = {
   admin: {
     modelPreset: modelPresetZh,
     modelPresetNotices: modelPresetNoticesZh,
+    modelCatalog: modelCatalogZh,
     modelPriceOverview: {
       title: '计费一览（USD / 百万 Token）',
       input: '输入', output: '输出', cacheRead: '缓存读取',

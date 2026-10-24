@@ -9,6 +9,8 @@ import { ModelMetadataFields } from './ModelMetadataFields'
 import { ModelOptionsSection } from './ModelOptionsSection'
 import { ModelTemplatePicker } from './ModelTemplatePicker'
 import { ModelPresetSummary } from './ModelPresetSummary'
+import { CatalogSuggestionCard } from './CatalogSuggestionCard'
+import { deviates, mergeCatalogSpecs, priceRatio, useCatalogSearch, useCatalogSuggestion } from './catalog'
 import { ModelPriceOverview } from './ModelPriceOverview'
 import { ModelRateField } from './ModelRateField'
 import { pricingDisabledReason, type PricingAxis } from './model-pricing-availability'
@@ -50,6 +52,22 @@ export function ModelDrawer({
   const presetVendors = [...new Set(MODEL_PRESETS.map((preset) => preset.vendor))]
   const matchingPresets = MODEL_PRESETS.filter((preset) => presetVendor === '' || preset.vendor === presetVendor)
   const referencePreset = appliedPreset ?? (model ? findModelPreset(model.model_name) : undefined)
+  // 手工核对过的预设优先；没有预设的名字才去问内置价目目录（只是建议，点了才进表单草稿）
+  const lookup = useCatalogSuggestion(referencePreset ? '' : name)
+  const catalog = referencePreset ? undefined : lookup.query.data?.suggestion ?? undefined
+  const catalogHits = useCatalogSearch(name, model === undefined && presetVendor === '' && !referencePreset)
+  // 预设是人工核对过的，排在前面；目录联想只补预设里没有的名字（同一个 ID 两边都有时只留预设）
+  const presetOptions = matchingPresets.flatMap((preset) => [
+    { value: preset.id, label: preset.displayName, description: preset.vendor },
+    ...(preset.aliases ?? []).map((alias) => ({ value: alias, label: preset.displayName,
+      description: t('admin:modelPreset.snapshotId', { vendor: preset.vendor }) })),
+  ])
+  const presetIds = new Set(presetOptions.map((option) => option.value))
+  const nameOptions = [
+    ...presetOptions,
+    ...(catalogHits.data?.data ?? []).filter((hit) => !presetIds.has(hit.id)).map((hit) => ({ value: hit.id,
+      description: `${hit.provider}${hit.input_per_1m !== null ? ` · $${hit.input_per_1m}${hit.output_per_1m !== null ? ` / $${hit.output_per_1m}` : ''}` : ''}` })),
+  ]
   // 档位行带稳定 id 作 key / 标签关联：用下标的话删掉中间一档，后一档的输入框会接过焦点，倍率写到别的档位上
   const nextTierId = useRef(0)
   const [tiers, setTiers] = useState<{ id: number; tier: string; ratio: string }[]>(() => Object.entries(model?.tier_ratios ?? {}).map(([tier, ratio]) => ({ id: nextTierId.current++, tier, ratio: String(ratio) })))
@@ -145,6 +163,36 @@ export function ModelDrawer({
     setPrices({ input: price.input, output: price.output })
     if (converted) setAxes((previous) => ({ ...previous, model_ratio: converted.model_ratio, completion_ratio: converted.completion_ratio }))
   }
+  // 目录建议只改这份草稿：价格、缓存倍率（目录给了才改）；其余价格轴、路由、降级链不动
+  const applyCatalogPrice = () => {
+    if (!catalog) return
+    if (catalog.billing === 'per_call' && catalog.per_call_usd) {
+      setMode('per_call'); setCallPrice(catalog.per_call_usd)
+      return
+    }
+    if (catalog.billing !== 'ratio' || !catalog.input_per_1m || mode !== 'ratio') return
+    const output = catalog.output_per_1m ?? prices.output
+    const converted = ratiosFromPrices(basePriceMicro, catalog.input_per_1m, output)
+    setPrices({ input: catalog.input_per_1m, output })
+    setAxes((previous) => ({
+      ...previous,
+      ...(converted ? { model_ratio: converted.model_ratio, completion_ratio: converted.completion_ratio } : {}),
+      ...(catalog.cache_read_ratio ? { cache_ratio: catalog.cache_read_ratio } : {}),
+      ...(catalog.cache_write_ratio ? { cache_write_ratio: catalog.cache_write_ratio } : {}),
+    }))
+    const oneHour = catalog.cache_write_1h_ratio
+    if (oneHour) setIndependent((previous) => ({ ...previous, cache_write_1h: oneHour }))
+  }
+  const applyCatalogSpecs = () => { if (catalog) setMetadata((previous) => mergeCatalogSpecs(previous, catalog)) }
+  const catalogCanApply = catalog !== undefined && (catalog.billing === 'per_call' ? mode !== 'tiered' : mode === 'ratio')
+  // 校验基准：填的价与参考价（预设核对价优先，其次目录）差一倍以上 / 不到一半时提醒，不拦保存
+  const presetPrice = referencePreset && referencePriceAvailable(referencePreset) ? referencePreset.referencePrice : undefined
+  const benchmark: { input: string | null; output: string | null; source: 'preset' | 'catalog' } | undefined = presetPrice
+    ? { input: presetPrice.input, output: presetPrice.output, source: 'preset' }
+    : catalog ? { input: catalog.input_per_1m, output: catalog.output_per_1m, source: 'catalog' } : undefined
+  const deviations = mode === 'ratio' && benchmark
+    ? (['input', 'output'] as const).map((lane) => ({ lane, ratio: priceRatio(prices[lane], benchmark[lane]) })).filter((row) => deviates(row.ratio))
+    : []
   const advancedConfigured = Object.keys(independent).length > 0 || namedTiers.length > 0 || fallbacks.length > 0
     || ['cache_ratio', 'cache_write_ratio', ...MODAL_AXES].some((key) => Number(axes[key]) !== 1)
   const metadataConfigured = Boolean(metadata.display_name || metadata.description || metadata.context_window || metadata.max_output
@@ -213,17 +261,19 @@ export function ModelDrawer({
               const preset = matchingPresets.find((preset) => preset.id === id || preset.aliases?.includes(id))
               if (preset) applyPreset(preset, id)
             }}
-            options={matchingPresets.flatMap((preset) => [
-              { value: preset.id, label: preset.displayName, description: preset.vendor },
-              ...(preset.aliases ?? []).map((alias) => ({ value: alias, label: preset.displayName,
-                description: t('admin:modelPreset.snapshotId', { vendor: preset.vendor }) })),
-            ])}
+            options={nameOptions}
             emptyHint={t('admin:modelPreset.customHint')}
           />
         </div>
         </div>
         {referencePreset && <ModelPresetSummary preset={referencePreset} metadata={metadata} applied={Boolean(appliedPreset)}
           canApplyPrice={mode === 'ratio'} onApplyPrice={applyReferencePrice} />}
+        {catalog && lookup.query.data && <CatalogSuggestionCard suggestion={catalog} snapshot={lookup.query.data.snapshot}
+          canApplyPrice={catalogCanApply} onApplyPrice={applyCatalogPrice} onApplySpecs={applyCatalogSpecs} />}
+        {!referencePreset && lookup.settled && lookup.query.isSuccess && lookup.query.data.suggestion === null
+          && <p className="text-xs leading-5 text-muted-foreground" data-testid="model-catalog-none">{t('admin:modelCatalog.none')}</p>}
+        {!referencePreset && lookup.settled && lookup.query.isError
+          && <p className="text-xs leading-5 text-muted-foreground" data-testid="model-catalog-failed">{t('admin:modelCatalog.failed')}</p>}
         {!model && !appliedPreset && <p className="text-xs leading-5 text-muted-foreground">{t('admin:modelPreset.selectHint', { n: matchingPresets.length })}</p>}
       </section>
       <FieldGroup title={t('admin:modelSimple.basicPricing')} hint={t('admin:modelSimple.priceHint')}>
@@ -246,6 +296,13 @@ export function ModelDrawer({
           {!conversion && <p role="alert" className="text-xs leading-5 text-destructive">{t('admin:modelSimple.priceInvalid')}</p>}
           {conversion?.approximate && <p role="status" className="rounded-lg bg-muted/60 p-3 text-xs leading-5 text-muted-foreground">
             {t('admin:modelSimple.priceRounded', { input: conversion.effective.input, output: conversion.effective.output })}</p>}
+          {benchmark && deviations.length > 0 && <div role="status" className="space-y-0.5 text-xs leading-5 text-amber-600 dark:text-amber-400" data-testid="price-deviation">
+            {deviations.map((row) => <p key={row.lane}>{t('admin:modelCatalog.deviation', {
+              lane: t(`admin:modelPriceOverview.${row.lane}`),
+              source: t(benchmark.source === 'preset' ? 'admin:modelCatalog.deviationSourcePreset' : 'admin:modelCatalog.deviationSourceCatalog'),
+              ratio: row.ratio === null ? '' : row.ratio.toLocaleString('en-US', { maximumFractionDigits: 2 }),
+            })}</p>)}
+          </div>}
           {conversion ? <ModelPriceOverview basePriceMicro={basePriceMicro} axes={axes} independent={independent}
             cacheApplicable={!pricingDisabledReason(metadata, 'cache_ratio')} preset={referencePreset}
             note={t('admin:modelSimple.baseHint', { price: basePriceMicro / 1_000_000 })} />
