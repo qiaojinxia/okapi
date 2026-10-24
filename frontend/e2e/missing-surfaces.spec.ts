@@ -1404,7 +1404,7 @@ test('门户日志：范围/模型/失败进查询；展开账单快照；分页
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
 })
 
-test('总览待办：健康芯片、全清文案、死信/未定价/空池/高错误率深链；切天数重拉渠道', async ({ page }) => {
+test('总览待办：服务状态一句话、全清不占位、死信/未定价/空池/高错误率深链；切天数重拉渠道', async ({ page }) => {
   await prepare(page)
   const channelDays: string[] = []
   const diagnose = {
@@ -1463,9 +1463,8 @@ test('总览待办：健康芯片、全清文案、死信/未定价/空池/高�
   await page.goto('/admin')
   const card = page.getByRole('region', { name: '优先处理', exact: true })
   const healthChips = page.getByRole('region', { name: '系统连接状态', exact: true })
-  await expect(healthChips.getByText('PG', { exact: true })).toBeVisible()
-  await expect(healthChips.getByText('Redis', { exact: true })).toBeVisible()
-  await expect(healthChips.getByText('CH', { exact: true })).toBeVisible()
+  await expect(healthChips).toContainText('服务 PG / Redis / CH 异常')
+  await expect(healthChips).toContainText('NATS: 未启用或未连接')
   await card.getByRole('button', { name: '全部 8 项', exact: true }).click()
   await expect(card.getByText(/PostgreSQL \/ Redis \/ ClickHouse 不可达/)).toBeVisible()
   await expect(card.getByText(/死信队列有 3 条/)).toBeVisible()
@@ -1503,16 +1502,18 @@ test('总览待办：健康芯片、全清文案、死信/未定价/空池/高�
     models: { total: 1, priced: 1, served: 1 }, groups: 1,
   } }))
   await page.reload()
-  await expect(page.getByText('没有待办，一切正常。')).toBeVisible()
+  // 全清：服务一句话说正常（未启用的 CH 不计入），待办条整条不占位
+  await expect(healthChips).toContainText('服务 3/3 正常')
+  await expect(card).toHaveCount(0)
 
   await page.route('**/admin/diagnose', (route) => {
     if (route.request().isNavigationRequest()) return route.fallback()
     return route.fulfill(apiError(500, 'internal_error'))
   })
   await page.reload()
-  await expect(page.getByText('没有待办，一切正常。')).toHaveCount(0)
   await expect(page.getByText('部分检查未完成，暂时无法确认全部状态。')).toBeVisible()
-  await expect(page.getByText('PG', { exact: true })).toHaveCount(0)
+  await expect(healthChips.getByRole('link', { name: '系统状态待确认' })).toBeVisible()
+  await expect(healthChips).not.toContainText('连接正常')
 })
 
 test('消耗排行：金额 micro→USD、用户链到日志 hours=天数×24；切窗重拉 days', async ({ page }) => {
@@ -2465,7 +2466,7 @@ test('模型定价：仅看未定价进 URL 与查询；搜索 q 一并带上', 
   await expect(page.getByRole('button', { name: '重试' })).toBeVisible()
 })
 
-test('总览 KPI / 实时条：overview?days= 与 realtime?window=60；切窗重拉', async ({ page }) => {
+test('总览 KPI / 实时状态：overview?days= 与 realtime?window=60；切窗重拉', async ({ page }) => {
   await prepare(page)
   const overviewDays: string[] = []
   const realtimeQ: string[] = []
@@ -2537,11 +2538,13 @@ test('总览 KPI / 实时条：overview?days= 与 realtime?window=60；切窗重
   await expect.poll(() => overviewDays[0]).toBe('7')
   await expect.poll(() => trendDays[0]).toBe('7')
   await expect.poll(() => realtimeQ.some((s) => s.includes('window=60'))).toBe(true)
-  await expect(page.getByText('实时')).toBeVisible()
-  await expect(page.getByText('平均 QPS', { exact: true }).locator('..')).toContainText('0.7')
-  await expect(page.getByText('60 秒请求')).toBeVisible()
-  await expect(page.getByText('42', { exact: true }).first()).toBeVisible()
-  await expect(page.getByText(/\$1\.23/).first()).toBeVisible()
+  // 页头副行一句话：最近 60 秒的请求数与平均 QPS；token 与收入在聚焦说明里
+  const live = page.getByRole('region', { name: '实时流量' })
+  await expect(live).toContainText('最近 60 秒 42 次请求 · 0.7 QPS')
+  await live.locator('[tabindex="0"]').focus()
+  await expect(page.getByRole('tooltip')).toContainText('Token 数 1,234')
+  await expect(page.getByRole('tooltip')).toContainText('收入 US$1.23')
+  await page.keyboard.press('Escape')
   const summary = page.getByRole('region', { name: '经营概览' })
   await expect(summary.getByRole('link', { name: /近 7 天 · 请求数/ })).toContainText('100')
   await expect(summary).not.toContainText('昨日')
@@ -2559,7 +2562,7 @@ test('总览 KPI / 实时条：overview?days= 与 realtime?window=60；切窗重
   await metric.getByRole('button', { name: '实际消费' }).click()
   await expect(metric.getByRole('button', { name: '实际消费' })).toHaveAttribute('aria-pressed', 'true')
   await trend.getByRole('button', { name: '数据表' }).click()
-  await expect(trend.getByText(/\$1\.23/)).toBeVisible()
+  await expect(trend.getByRole('cell', { name: /\$1\.23/ })).toBeVisible()
 
   await page.route('**/admin/stats/trend*', (route) => route.fulfill(apiError(500, 'internal_error')))
   await page.reload()

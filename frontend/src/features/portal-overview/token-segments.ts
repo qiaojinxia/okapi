@@ -1,4 +1,4 @@
-/// Token 用量拆成互斥的几段：运营概览的 Token 构成环形图在用。
+/// Token 用量拆成互斥的几段：运营概览「用量分布」的 Token 构成页签在用。
 
 export interface Segment {
   key: 'input' | 'cached' | 'write' | 'output' | 'reasoning'

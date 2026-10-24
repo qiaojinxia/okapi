@@ -1,21 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { getRouteApi, Link } from '@tanstack/react-router'
-import { ArrowUpRight, CircleHelp, LayoutDashboard, RefreshCw } from 'lucide-react'
+import { getRouteApi } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
-import { PageHeader } from '@/components/ui/page'
-import { Button } from '@/components/ui/button'
-import { Segmented } from '@/components/ui/segmented'
-import { DateRangePicker } from '@/components/ui/date-range'
-import { Tooltip } from '@/components/ui/tooltip'
-import { AttentionStatus } from '@/features/dashboard/AttentionCard'
+import { AttentionStrip } from '@/features/dashboard/AttentionCard'
+import { DashboardHeader } from '@/features/dashboard/DashboardHeader'
 import { KpiCards } from '@/features/dashboard/KpiCards'
-import { RealtimeCard } from '@/features/dashboard/RealtimeCard'
 import { TrendCard } from '@/features/dashboard/TrendCard'
 import { OperationsSummary } from '@/features/dashboard/OperationsSummary'
 import { DistributionSummary } from '@/features/dashboard/DistributionSummary'
 import { dashboardBreakdownParams, dashboardChartParams, dashboardTrendParams, useDashboardChart, useDashboardOverview, withFreshDashboardQueries } from '@/features/dashboard/data'
-import { dashboardOverviewKey, dashboardPeriodLabel, dashboardSearch } from './period'
+import { dashboardOverviewKey, dashboardPeriodLabel } from './period'
 import { effectiveDays } from '@/features/analytics/search'
 import { qk } from '@/lib/query-keys'
 
@@ -25,7 +19,8 @@ const USAGE_AUTO_REFRESH_MS = 5 * 60_000
 
 /// 管理总览。
 ///
-/// 实时、资源和待办置顶，其后展示经营与质量指标，下方保留趋势和分布。
+/// 页头一行说清统计日历、实时流量和服务健康；待办在其下成条，其后是经营指标与调用质量，
+/// 下方并排趋势和分布。整页自然流动，窄屏逐块折行。
 export function DashboardPage() {
   const { t } = useTranslation()
   const { days: presetDays = 7, start_date, end_date, trend = 'combined', distribution = 'model', model_rank = 'amount', channel_rank = 'amount' } = routeApi.useSearch()
@@ -41,7 +36,6 @@ export function DashboardPage() {
   const timezone = calendar?.timezone ?? chartWindow?.timezone
   const today = calendar?.today ?? chartWindow?.today ?? chartWindow?.end_at?.slice(0, 10)
   const period = dashboardPeriodLabel(days, range, t)
-  const search = dashboardSearch(days, range)
   const navigate = routeApi.useNavigate()
   const queryClient = useQueryClient()
   const [refreshing, setRefreshing] = useState(false)
@@ -75,38 +69,25 @@ export function DashboardPage() {
   }, [refresh])
 
   return (
-    <div data-slot="dashboard-workspace" className="flex min-w-0 flex-col gap-2 lg:grid lg:h-full lg:min-h-0 lg:grid-rows-[auto_auto_auto_auto_minmax(0,1fr)] lg:gap-1.5 lg:overflow-y-auto lg:[@media(min-height:900px)]:gap-3">
-      <PageHeader
-        icon={LayoutDashboard}
+    <div data-slot="dashboard-workspace" className="@container flex min-w-0 flex-col gap-2.5">
+      <DashboardHeader
         title={t('admin:overview')}
-        meta={<AttentionStatus days={days} />}
-        className="[&_h1]:text-[22px] lg:flex-wrap lg:items-center lg:gap-x-2 lg:gap-y-0 lg:max-2xl:[&>div:first-child>span]:hidden [&>div:last-child]:max-w-full [&>div:last-child]:shrink"
-        action={<>
-          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-            {start && end && timezone && <p data-slot="dashboard-calendar" className="basis-full text-xs leading-4 tabular-nums text-muted-foreground sm:basis-auto lg:max-2xl:max-w-52 2xl:whitespace-nowrap">{t('admin:dashboardCalendar', { start, end, timezone })}</p>}
-            <Segmented ariaLabel={t('charts:period')} value={range ? 'custom' : String(days)}
-              onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: Number(value), start_date: undefined, end_date: undefined }) })}
-              options={[1, 7, 30].map((value) => ({ value: String(value), label: value === 1 ? t('admin:kpiToday') : t('admin:lastDays', { days: value }) }))} />
-            <Tooltip content={t('admin:dashboardPeriodHint')}>
-              <button type="button" aria-label={t('admin:dashboardScope')} className="flex h-8 w-8 items-center justify-center rounded text-muted-foreground outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40"><CircleHelp className="h-4 w-4" /></button>
-            </Tooltip>
-          </div>
-          {today && <DateRangePicker today={today} value={range} closeOnApply onApply={(value) => void navigate({ search: (prev) => ({ ...prev, days: undefined, start_date: value.start, end_date: value.end }) })} className="min-w-0 max-w-full px-2 py-1 text-xs" />}
-          <Button variant="outline" loading={refreshing} onClick={() => void refresh()} className="rounded-lg">
-            {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
-          </Button>
-          <Link to="/admin/stats" search={search} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-primary px-3.5 text-sm font-medium text-primary-foreground shadow-xs outline-none transition-shadow hover:bg-primary/90 hover:shadow-popover focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9">
-            {t('admin:dashboardAnalyze')}<ArrowUpRight className="h-4 w-4" />
-          </Link>
-        </>}
+        days={days}
+        range={range}
+        calendar={start && end && timezone ? { start, end, timezone } : undefined}
+        today={today}
+        refreshing={refreshing}
+        onRefresh={() => void refresh()}
+        onPeriod={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
+        onRange={(value) => void navigate({ search: (prev) => ({ ...prev, days: undefined, start_date: value.start, end_date: value.end }) })}
       />
-      <RealtimeCard days={days} />
-      <section aria-label={t('admin:dashboardSummary')} className="min-w-0 space-y-2">
-        <h2 className="text-xs font-medium text-muted-foreground md:sr-only">{t('admin:dashboardMetricLabel', { period, label: t('admin:dashboardSummary') })}</h2>
+      <AttentionStrip days={days} />
+      <section aria-label={t('admin:dashboardSummary')} className="min-w-0">
+        <h2 className="sr-only">{t('admin:dashboardMetricLabel', { period, label: t('admin:dashboardSummary') })}</h2>
         <KpiCards days={days} range={range} />
       </section>
       <OperationsSummary days={days} range={range} />
-      <div data-slot="dashboard-charts" className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:min-h-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)] lg:grid-rows-[minmax(0,1fr)] lg:[@media(min-height:900px)]:gap-3 2xl:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+      <div data-slot="dashboard-charts" className="flex min-w-0 flex-wrap items-stretch gap-2.5">
         <TrendCard days={days} range={range} metric={trend} onMetricChange={(value) => void navigate({ search: (prev) => ({ ...prev, trend: value === 'combined' ? undefined : value }) })} />
         <DistributionSummary days={days} range={range} view={distribution} onViewChange={(view) => void navigate({ resetScroll: false, search: (prev) => ({ ...prev, distribution: view === 'model' ? undefined : view }) })} modelMetric={model_rank} channelMetric={channel_rank} onMetricChange={(by, metric) => void navigate({ resetScroll: false, search: (prev) => ({ ...prev, [`${by}_rank`]: metric === 'amount' ? undefined : metric }) })} />
       </div>

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { CheckCircle2, ChevronRight, TriangleAlert } from 'lucide-react'
+import { ChevronRight, TriangleAlert } from 'lucide-react'
 import { useEffect, useId, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
@@ -43,39 +43,11 @@ interface Item {
   key: string
   summary: string
   text: string
+  /// 行末入口的文字（“查看渠道”），去向由 `to` 决定。
+  action: string
   to: string
   tone: 'warning' | 'destructive'
   search?: QualitySearch
-}
-
-/// 组件状态芯片行：四个绿点比四行文字快得多；未启用的组件显示为灰而非红——
-/// 单机形态没有 NATS/CH 是正常配置，不是故障。
-function HealthChips({ h }: { h: Diagnose }) {
-  const { t } = useTranslation()
-  const chips: { name: string; state: 'ok' | 'down' | 'off' }[] = [
-    { name: 'PG', state: h.postgres ? 'ok' : 'down' },
-    { name: 'Redis', state: h.redis ? 'ok' : 'down' },
-    { name: 'CH', state: h.clickhouse === null ? 'off' : h.clickhouse ? 'ok' : 'down' },
-    { name: 'NATS', state: h.nats_connected ? 'ok' : 'off' },
-  ]
-  return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1" title={t('admin:healthEpoch', { n: h.pricebook_epoch })}>
-      {chips.map((c) => (
-        <span key={c.name} aria-label={`${c.name}: ${t(`admin:dashboardHealth_${c.state}`)}`} title={t(`admin:dashboardHealth_${c.state}`)} className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <span
-            className={
-              c.state === 'ok'
-                ? 'h-2 w-2 rounded-full bg-success'
-                : c.state === 'down'
-                  ? 'h-2 w-2 rounded-full bg-destructive'
-                  : 'h-2 w-2 rounded-full bg-muted-foreground/40'
-            }
-          />
-          {c.name}
-        </span>
-      ))}
-    </div>
-  )
 }
 
 function useDashboardHealth() {
@@ -87,20 +59,38 @@ function useDashboardHealth() {
   })
 }
 
-export function DashboardHealth() {
+/// 页头副行里的服务状态：“服务 4/4 正常”。未启用的组件不计入分母，也不算故障——
+/// 单机形态没有 NATS / CH 是正常配置；各组件逐项状态放进悬停说明和读屏名称。
+export function HealthSummary() {
   const { t } = useTranslation()
   const health = useDashboardHealth()
-  return <div role="region" aria-label={t('admin:dashboardSystemHealth')}>
-    {health.isError ? <a href="#dashboard-attention" className="rounded text-xs text-warning underline underline-offset-2 focus-visible:ring-2 focus-visible:ring-primary/40">{t('admin:dashboardSystemUnavailable')}</a>
-      : health.data ? <HealthChips h={health.data} /> : <span role="status" className="text-xs text-muted-foreground">{t('admin:dashboardChecking')}</span>}
-  </div>
+  const h = health.isError ? undefined : health.data
+  const frame = (children: React.ReactNode) => <span role="region" aria-label={t('admin:dashboardSystemHealth')} className="inline-flex">{children}</span>
+  if (health.isError) return frame(<a href="#dashboard-attention" className="rounded text-warning underline underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{t('admin:dashboardSystemUnavailable')}</a>)
+  if (!h) return frame(<span role="status">{t('admin:dashboardChecking')}</span>)
+  const parts: { name: string; state: 'ok' | 'down' | 'off' }[] = [
+    { name: 'PG', state: h.postgres ? 'ok' : 'down' },
+    { name: 'Redis', state: h.redis ? 'ok' : 'down' },
+    { name: 'CH', state: h.clickhouse === null ? 'off' : h.clickhouse ? 'ok' : 'down' },
+    { name: 'NATS', state: h.nats_connected ? 'ok' : 'off' },
+  ]
+  const enabled = parts.filter((part) => part.state !== 'off')
+  const down = enabled.filter((part) => part.state === 'down')
+  const detail = [...parts.map((part) => `${part.name}: ${t(`admin:dashboardHealth_${part.state}`)}`), t('admin:healthEpoch', { n: h.pricebook_epoch })].join(' · ')
+  return frame(<Tooltip content={detail}>
+    <span tabIndex={0} className={cn('rounded outline-none focus-visible:ring-2 focus-visible:ring-primary/40', down.length > 0 && 'font-medium text-destructive')}>
+      {down.length > 0 ? t('admin:dashboardServicesDown', { names: down.map((part) => part.name).join(' / ') }) : t('admin:dashboardServicesOk', { ok: enabled.length, total: enabled.length })}
+      <span className="sr-only"> ({detail})</span>
+    </span>
+  </Tooltip>)
 }
 
-/// "需要注意"面板。
+/// 待办汇总。
 ///
 /// 落地页的价值不是把所有数字摆出来，而是回答"我现在该做什么"。此前这里是一张
 /// 三方对账漂移表——那是排障工具，不是日常动线，且没有漂移时整页空着。
-/// 现在只列真正需要动手的项，全清时明确说"没有待办"而不是留一片空白。
+/// 现在只列真正需要动手的项；全清时待办条整条不出现（页头的服务状态已说明一切正常），
+/// 检查没做完或失败时不能当成“全清”，由待办条保留提示和重试。
 function useAttention(days: number) {
   const { t } = useTranslation()
   const inventory = useDashboardInventory()
@@ -144,6 +134,7 @@ function useAttention(days: number) {
         key: 'component-down',
         summary: t('admin:dashboardConnectionIssue'),
         text: t('admin:attnComponentDown', { names: down.join(' / ') }),
+        action: t('admin:attnGoOps'),
         to: '/admin/ops',
         tone: 'destructive',
       })
@@ -154,6 +145,7 @@ function useAttention(days: number) {
         key: 'dlq',
         summary: t('admin:dashboardLedgerIssue'),
         text: t('admin:attnDlq', { n: h.dlq_depth }),
+        action: t('admin:attnGoOps'),
         to: '/admin/ops',
         tone: 'destructive',
       })
@@ -163,6 +155,7 @@ function useAttention(days: number) {
         key: 'outbox',
         summary: t('admin:dashboardBacklogIssue'),
         text: t('admin:attnOutbox', { n: h.outbox_pending }),
+        action: t('admin:attnGoOps'),
         to: '/admin/ops',
         tone: 'warning',
       })
@@ -172,6 +165,7 @@ function useAttention(days: number) {
         key: 'cooling',
         summary: t('admin:dashboardKeyIssue'),
         text: t('admin:attnCooling', { n: h.cooling_keys }),
+        action: t('admin:attnGoChannels'),
         to: '/admin/channels',
         tone: 'warning',
       })
@@ -187,6 +181,7 @@ function useAttention(days: number) {
       key: 'unpriced',
       summary: t('admin:dashboardPricingIssue'),
       text: unpriced[0]?.model_name ? t('admin:attnUnpriced', { n: unpricedCount, first: unpriced[0].model_name }) : t('admin:dashboardUnpricedAction', { n: unpricedCount }),
+      action: t('admin:attnGoPricing'),
       to: '/admin/pricing',
       tone: 'destructive',
     })
@@ -202,6 +197,7 @@ function useAttention(days: number) {
       key: 'channel-availability',
       summary: t('admin:dashboardAvailabilityIssue'),
       text: t('admin:dashboardAvailabilityAction', { issues: channelIssues.join('；') }),
+      action: t('admin:attnGoChannels'),
       to: '/admin/channels',
       tone: stock.channels.auto_disabled > 0 ? 'destructive' : 'warning',
     })
@@ -217,6 +213,7 @@ function useAttention(days: number) {
         n: emptyPools.length,
         first: emptyPools[0]?.pool_code ?? '',
       }),
+      action: t('admin:attnGoPools'),
       to: '/admin/pools',
       tone: 'warning',
     })
@@ -235,6 +232,7 @@ function useAttention(days: number) {
           ? t('admin:dashboardUnnamedChannel', { id: bad.find((c) => c.channel_id > 0)!.channel_id })
           : t('admin:dashboardUnassignedChannel')),
       }),
+      action: t('admin:attnGoChannels'),
       to: '/admin/quality',
       search: { days, tab: 'channels' },
       tone: 'destructive',
@@ -248,6 +246,7 @@ function useAttention(days: number) {
       key: 'drift',
       summary: t('admin:dashboardBalanceIssue'),
       text: t('admin:attnDrift', { n: drifted.length }),
+      action: t('admin:attnGoReconcile'),
       to: '/admin/ops',
       tone: 'destructive',
     })
@@ -255,64 +254,41 @@ function useAttention(days: number) {
 
   const queries = [channels, models, pools, drift, health, inventory]
   const incomplete = queries.some((query) => query.isError)
-  const checking = queries.some((query) => query.isPending)
   items.sort((a, b) => Number(b.tone === 'destructive') - Number(a.tone === 'destructive'))
 
-  return { items, h, incomplete, checking, retry: () => Promise.all(queries.filter((query) => query.isError).map((query) => query.refetch())) }
+  return { items, incomplete, retry: () => Promise.all(queries.filter((query) => query.isError).map((query) => query.refetch())) }
 }
 
-// 页头待办入口定位到实时区域内的同一份提醒，不另设重复栏目。
-export function AttentionStatus({ days }: { days: number }) {
+/// 待办条：一张卡，每项一行——严重 / 提醒标签、标题、说明，行末是去处理的入口。
+/// 全部清空时不占位（页头的服务状态已经说明系统是好的）；检查没做完也不报“暂无待办”，
+/// 检查失败则保留一行提示和重试。桌面每行两项，超过四项在原位展开。
+export function AttentionStrip({ days }: { days: number }) {
   const { t } = useTranslation()
-  const { items, incomplete, checking } = useAttention(days)
-  const urgent = items.some((item) => item.tone === 'destructive')
-  const label = items.length > 0 ? t('admin:dashboardPending', { count: items.length })
-    : incomplete ? t('admin:dashboardStatusIncomplete') : checking ? t('admin:dashboardChecking') : t('admin:dashboardNoPending')
-  const first = items[0]
-  const description = [incomplete ? t('admin:dashboardChecksIncomplete') : checking ? t('admin:dashboardChecking') : '', ...items.map((item) => item.text)].filter(Boolean).join('；')
-  return <Tooltip content={description} className="min-w-0 max-w-full"><a href="#dashboard-attention" aria-label={first ? `${first.summary} · ${label}` : label} className={cn('inline-flex min-h-11 max-w-full items-center gap-1.5 rounded-full px-2.5 text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-primary/40 md:min-h-8',
-    urgent ? 'bg-destructive/10 text-destructive' : incomplete || items.length > 0 ? 'bg-warning/10 text-warning' : 'bg-muted text-muted-foreground')}>
-    <span aria-hidden className={cn('h-1.5 w-1.5 shrink-0 rounded-full', urgent ? 'bg-destructive' : incomplete || items.length > 0 ? 'bg-warning' : checking ? 'bg-muted-foreground' : 'bg-success')} />
-    <span className="min-w-0 max-w-36 truncate">{first?.summary ?? label}</span>
-    {first && <span aria-hidden className="shrink-0 rounded bg-current/10 px-1.5 tabular-nums">{items.length}</span>}
-    <ChevronRight aria-hidden size={12} className="shrink-0" />
-  </a></Tooltip>
-}
-
-// 桌面横向四项，超过四项在原位展开；加载、检查失败和正常状态同样保留锚点。
-export function AttentionPreview({ days }: { days: number }) {
-  const { t } = useTranslation()
-  const { items, incomplete, checking, retry } = useAttention(days)
+  const { items, incomplete, retry } = useAttention(days)
   const [expanded, setExpanded] = useState(false)
   const listId = useId()
   useEffect(() => { setExpanded(false) }, [days])
+  if (items.length === 0 && !incomplete) return null
   const visible = expanded ? items : items.slice(0, 4)
 
   return <section id="dashboard-attention" tabIndex={-1} aria-label={t('admin:dashboardPriorityActions')}
-    className="min-w-0 scroll-mt-4 border-t border-border/60 px-3 py-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40">
-    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 lg:flex-nowrap">
-      <span className="inline-flex shrink-0 items-center gap-1 text-muted-foreground"><TriangleAlert aria-hidden size={13} />{t('admin:dashboardPriorityActions')}</span>
-      {items.length > 0 && <div id={listId} className="grid min-w-0 basis-full grid-cols-1 gap-x-2 gap-y-1 sm:grid-cols-2 lg:flex-1 lg:basis-auto lg:grid-cols-4">
-        {visible.map((item) => <Tooltip key={item.key} content={item.text} className="min-w-0">
-          <Link to={item.to} search={item.search} aria-label={item.text}
-            className="group flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-0.5 outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9">
-            <span aria-hidden className={cn('h-1.5 w-1.5 shrink-0 rounded-full', item.tone === 'destructive' ? 'bg-destructive' : 'bg-warning')} />
-            <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-              <span className={cn('truncate font-medium leading-4', item.tone === 'destructive' ? 'text-destructive' : 'text-foreground')}>{item.summary}</span>
-              <span className="truncate text-[11px] leading-4 text-muted-foreground">{item.text}</span>
-            </span>
-            <ChevronRight aria-hidden size={12} className="shrink-0 text-muted-foreground group-hover:text-primary" />
-          </Link>
-        </Tooltip>)}
-      </div>}
-      {items.length > 4 && <button type="button" aria-expanded={expanded} aria-controls={listId} onClick={() => setExpanded((value) => !value)}
-        className="ml-auto inline-flex min-h-8 shrink-0 items-center gap-1 rounded text-muted-foreground outline-none hover:text-primary focus-visible:ring-2 focus-visible:ring-primary/40">
-        {expanded ? t('admin:dashboardShowLess') : t('admin:dashboardAllIssues', { count: items.length })}<ChevronRight aria-hidden size={12} className={cn('transition-transform', expanded ? '-rotate-90' : 'rotate-90')} />
-      </button>}
-      {items.length === 0 && !checking && !incomplete && <span className="inline-flex min-h-8 items-center gap-1.5 text-muted-foreground"><CheckCircle2 aria-hidden className="h-3.5 w-3.5 text-success" />{t('admin:attnClear')}</span>}
-      {checking && <span role="status" className="inline-flex min-h-8 items-center text-muted-foreground">{t('admin:dashboardChecking')}</span>}
-    </div>
-    {incomplete && <div role="alert" className="flex min-w-0 items-center gap-2 py-1 text-muted-foreground">
+    className="min-w-0 scroll-mt-4 overflow-hidden rounded-xl border border-border bg-card outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
+    {items.length > 0 && <div id={listId} className="flex flex-wrap gap-px bg-border">
+      {visible.map((item) => {
+        const critical = item.tone === 'destructive'
+        return <Link key={item.key} to={item.to} search={item.search} aria-label={item.text}
+          className={cn('group flex min-h-11 min-w-0 flex-1 basis-[22.5rem] items-center gap-3 bg-card px-3.5 py-2 text-[13px] outline-none hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40', critical && 'border-l-[3px] border-l-destructive')}>
+          <span className={cn('shrink-0 rounded-[5px] px-2 py-0.5 text-xs font-semibold whitespace-nowrap', critical ? 'bg-destructive/10 text-destructive' : 'bg-warning/15 text-warning')}>{critical ? t('admin:attnCritical') : t('admin:attnNotice')}</span>
+          <span className="min-w-0 flex-1 leading-5"><b className="font-semibold">{item.summary}</b><span className="text-muted-foreground"> · {item.text}</span></span>
+          <span className="shrink-0 whitespace-nowrap text-primary group-hover:underline">{item.action}<span aria-hidden> →</span></span>
+        </Link>
+      })}
+    </div>}
+    {items.length > 4 && <button type="button" aria-expanded={expanded} aria-controls={listId} onClick={() => setExpanded((value) => !value)}
+      className="flex min-h-9 w-full items-center justify-center gap-1 border-t border-border text-xs text-muted-foreground outline-none hover:bg-muted/50 hover:text-primary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary/40">
+      {expanded ? t('admin:dashboardShowLess') : t('admin:dashboardAllIssues', { count: items.length })}<ChevronRight aria-hidden size={12} className={cn('transition-transform', expanded ? '-rotate-90' : 'rotate-90')} />
+    </button>}
+    {incomplete && <div role="alert" className={cn('flex min-w-0 items-center gap-2 px-3.5 py-2 text-[13px] text-muted-foreground', items.length > 0 && 'border-t border-border')}>
       <TriangleAlert aria-hidden className="h-3.5 w-3.5 shrink-0 text-warning" />
       <span className="min-w-0 flex-1">{t('admin:dashboardChecksIncomplete')}</span>
       <Button size="xs" variant="outline" onClick={() => void retry()}>{t('common:retry')}</Button>

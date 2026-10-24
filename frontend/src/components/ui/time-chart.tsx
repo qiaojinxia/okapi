@@ -25,7 +25,7 @@ export function chartNumber(n: number, locale: string): string {
   }).format(n)
 }
 
-export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'bar', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis, partialBucket }: {
+export function TimeChart({ data, series, format, unit, label, stacked = false, line = false, percent = false, defaultType = 'bar', compact = false, fill = false, minPlotHeight = 144, controls = true, paginateTable = false, secondaryAxis, partialBucket, legendDetail, legendExtra, header }: {
   data: ChartPoint[]
   series: ChartSeries[]
   format: (value: number) => string
@@ -45,6 +45,12 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   secondaryAxis?: { unit: string; format: (value: number) => string }
   /// 还在累计中的桶（通常是今天）：柱子画浅一些、提示里标「截至目前」，不让半天的量看起来像骤降。
   partialBucket?: string
+  /// 图例项后面挂的合计（序列键 → 已格式化的文字）；给了它或 `legendExtra`，图例就放到图表上方，替掉「单位」说明。
+  legendDetail?: Record<string, string>
+  /// 图例行末尾的附加内容（如「每次请求均价」）。
+  legendExtra?: React.ReactNode
+  /// 卡片头部：拿到图表自带的控件（类型、数据表、导出）后自己决定放哪，控件就不再单独占一行。
+  header?: (controls: React.ReactNode) => React.ReactNode
 }) {
   const { t, i18n } = useTranslation()
   const id = useId().replaceAll(':', '')
@@ -68,9 +74,9 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const seriesFormat = (s: ChartSeries | undefined) => s?.axis === 'right' && secondaryAxis ? secondaryAxis.format : format
   const seriesLabel = (s: ChartSeries) => secondaryAxis && seriesUnit(s) !== s.label ? `${s.label} (${seriesUnit(s)})` : s.label
   // 宽屏且柱子不多时直接把数值写在柱顶；堆叠时只在最上面一段标整根柱子的合计。
-  // 手机或密集团（如近 30 天、按小时）留给悬停提示，避免相邻标签互相覆盖。
+  // 手机或密集团（如近 30 天、按小时）留给悬停提示，避免相邻标签互相覆盖；叠着右轴折线时同样不标，数值会被折线盖住。
   const leftBars = type === 'bar' && !line ? visible.filter((s) => !(secondaryAxis && s.axis === 'right')) : []
-  const barLabels = showBarLabels && leftBars.length > 0 && data.length <= MAX_BAR_LABELS
+  const barLabels = showBarLabels && !secondaryAxis && leftBars.length > 0 && data.length <= MAX_BAR_LABELS
   const barTotal = (index: number) => leftBars.reduce((sum, s) => sum + (Number(data[index]?.[s.key]) || 0), 0)
   // 堆叠时合计写在这根柱子实际最上面的非零段上：最上层序列当天为 0 时它没有柱形，挂在它上面就显示不出来
   const topBar = (index: number) => leftBars.findLast((s) => (Number(data[index]?.[s.key]) || 0) !== 0)
@@ -85,21 +91,25 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
     return <text x={Number(props.x) + Number(props.width) / 2} y={Number(props.y) - 5} textAnchor="middle" fontSize={11} fill="var(--color-muted-foreground)" pointerEvents="none" className="tabular-nums">{format(value)}</text>
   }
   const exportRows = () => downloadCsv('usage-chart', [t('charts:date'), ...series.map((s) => `${s.label} (${seriesUnit(s)})`)], data.map((d) => [d.bucket, ...series.map((s) => d[s.key])]))
-  const legend = <div role="group" aria-label={t('charts:legend')} className={cn('flex flex-wrap gap-1.5', !secondaryAxis && 'border-t border-border/60', !secondaryAxis && (compact ? 'pt-1' : 'pt-3'))}>
+  const legendOnTop = !!secondaryAxis || !!legendDetail || !!legendExtra
+  const legend = <div role="group" aria-label={t('charts:legend')} className={cn('flex flex-wrap items-center gap-x-1.5 gap-y-0.5', !legendOnTop && 'border-t border-border/60', !legendOnTop && (compact ? 'pt-1' : 'pt-3'))}>
     {series.map((s) => <button type="button" key={s.key} aria-pressed={!hidden.includes(s.key)} disabled={!hidden.includes(s.key) && visible.length === 1} onClick={() => setHidden((previous) => previous.includes(s.key) ? previous.filter((key) => key !== s.key) : [...previous, s.key])} className={cn('inline-flex min-h-8 max-w-full items-center gap-2 rounded-md px-2 text-xs outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-primary/40 disabled:cursor-default', secondaryAxis && 'px-1', hidden.includes(s.key) && 'opacity-45')}>
       <span className={cn('relative shrink-0', s.axis === 'right' ? 'h-0.5 w-4 rounded-full' : 'h-2 w-2 rounded-full')} style={{ background: s.color }}>{s.axis === 'right' && <span className="absolute top-1/2 left-1/2 h-1.5 w-1.5 -translate-1/2 rounded-full ring-2 ring-card" style={{ background: s.color }} />}</span>
-      <span className="truncate">{seriesLabel(s)}{secondaryAxis && <span className="ml-1 text-muted-foreground">{t(s.axis === 'right' ? 'charts:rightAxis' : 'charts:leftAxis')}</span>}</span>
+      <span className="truncate">{legendDetail?.[s.key] ? s.label : seriesLabel(s)}{legendDetail?.[s.key] && <b className="ml-1.5 text-sm font-semibold text-foreground tabular-nums">{legendDetail[s.key]}</b>}{secondaryAxis && <span className="ml-1 text-muted-foreground">{t(s.axis === 'right' ? 'charts:rightAxis' : 'charts:leftAxis')}</span>}</span>
     </button>)}
+    {legendExtra}
   </div>
+  const toolbar = controls ? <div className="flex flex-wrap items-center gap-2">
+    {!line && !secondaryAxis && <Segmented size="sm" ariaLabel={t('charts:type')} value={type} onChange={setType} options={[{ value: 'area', label: t('charts:area') }, { value: 'bar', label: t('charts:bar') }]} />}
+    <Button variant="ghost" size="sm" aria-pressed={table} onClick={() => setTable(!table)}><Table2 className="h-3.5 w-3.5" />{t('charts:table')}</Button>
+    <Button variant="outline" size="sm" onClick={exportRows}><Download className="h-3.5 w-3.5" />{t('charts:export')}</Button>
+  </div> : null
   return (
     <div className={cn('min-w-0', compact ? 'space-y-2' : 'space-y-4', fill && 'flex flex-col lg:min-h-0 lg:flex-1')} role="group" aria-label={label}>
+      {header?.(toolbar)}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        {secondaryAxis ? <><span className="sr-only">{t('charts:dualAxis', { left: unit, right: secondaryAxis.unit })}</span>{legend}</> : <span className="text-xs text-muted-foreground">{t('charts:unit', { unit })}</span>}
-        {controls && <div className="flex flex-wrap items-center gap-2">
-          {!line && !secondaryAxis && <Segmented size="sm" ariaLabel={t('charts:type')} value={type} onChange={setType} options={[{ value: 'area', label: t('charts:area') }, { value: 'bar', label: t('charts:bar') }]} />}
-          <Button variant="ghost" size="sm" aria-pressed={table} onClick={() => setTable(!table)}><Table2 className="h-3.5 w-3.5" />{t('charts:table')}</Button>
-          <Button variant="outline" size="sm" onClick={exportRows}><Download className="h-3.5 w-3.5" />{t('charts:export')}</Button>
-        </div>}
+        {legendOnTop ? <>{secondaryAxis && <span className="sr-only">{t('charts:dualAxis', { left: unit, right: secondaryAxis.unit })}</span>}{legend}</> : <span className="text-xs text-muted-foreground">{t('charts:unit', { unit })}</span>}
+        {!header && toolbar}
       </div>
       {table ? (
         <div className="space-y-3">
@@ -136,7 +146,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
           </ResponsiveContainer>
         </div>
       )}
-      {!secondaryAxis && (!compact || series.length > 1) && legend}
+      {!legendOnTop && (!compact || series.length > 1) && legend}
     </div>
   )
 }

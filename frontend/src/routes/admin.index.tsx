@@ -8,7 +8,6 @@ function ranking(value: unknown): RankingMetric | undefined {
 }
 
 export const Route = createFileRoute('/admin/')({
-  staticData: { fitViewport: true },
   validateSearch: (search: Record<string, unknown>): { days?: number; start_date?: string; end_date?: string; trend?: DashboardTrend; distribution?: DistributionView; model_rank?: RankingMetric; channel_rank?: RankingMetric } => ({
     ...dashboardPeriodSearch(search),
     trend: search.trend === 'amount' ? 'amount' : ranking(search.trend),

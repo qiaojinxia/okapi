@@ -1,11 +1,7 @@
-import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
-import { CircleHelp, ArrowUpRight, FlaskConical } from 'lucide-react'
+import { CircleHelp, FlaskConical } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
-import { CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { PieChart } from '@/components/ui/pie-chart'
-import type { PieSlice } from '@/components/ui/pie-chart'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { CubeMetrics, TokenSource } from '@/features/analytics/types'
@@ -15,11 +11,11 @@ import { formatBp, formatCount } from '@/lib/money'
 import { useDashboardUsage } from './data'
 import type { DateRange } from '@/components/ui/date-range'
 import { dashboardPeriodLabel, dashboardSearch } from './period'
-import { BODY, FOOT, HEAD, HEAD_LINK, HEAD_ROW, LEGEND, PANEL, PIE, STAGE } from './distribution-layout'
+import { HEAD_LINK } from './distribution-layout'
+import { ShareBar } from './ShareBar'
 
 const sources: TokenSource[] = ['upstream', 'estimated', 'local_override', 'unknown']
 const sourceColors = { upstream: 'bg-success', estimated: 'bg-warning', local_override: 'bg-primary', unknown: 'bg-muted-foreground' }
-const tokenColors = { input: 'var(--color-primary)', cached: 'var(--color-success)', write: 'var(--color-chart-5)', output: 'var(--color-warning)', reasoning: 'var(--color-muted-foreground)' }
 
 function SourceQuality({ total }: { total: Partial<CubeMetrics> }) {
   const { t, i18n } = useTranslation()
@@ -37,7 +33,7 @@ function SourceQuality({ total }: { total: Partial<CubeMetrics> }) {
       })}</span>
     </summary>
     {!total.token_provenance ? <p className="mt-2 text-xs text-muted-foreground">{t('admin:dashboardSourceUnavailable')}</p> : <>
-      <div role="group" className="mt-2 grid grid-cols-2 gap-2 lg:grid-cols-4" aria-label={t('logs:usageSource')}>
+      <div role="group" className="mt-2 grid grid-cols-2 gap-2" aria-label={t('logs:usageSource')}>
         {sources.map((source) => {
           const input = total.token_provenance!.prompt[source], output = total.token_provenance!.completion[source]
           const sum = input.tokens == null || output.tokens == null ? null : input.tokens + output.tokens
@@ -53,6 +49,8 @@ function SourceQuality({ total }: { total: Partial<CubeMetrics> }) {
   </details>
 }
 
+/// Token 构成：把已记录的用量拆成互斥的几段（其他输入、缓存读取、缓存写入、输出、推理），
+/// 版式和模型 / 渠道排行一致——名称、数量、占比，下面一条占比条。缓存上报覆盖率和来源详情放在底部。
 export function TokenSummary({ days, range }: { days: number; range?: DateRange | null }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.language, query = useDashboardUsage(days, range)
@@ -66,63 +64,45 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
   const reasoning = total?.reasoning_tokens ?? 0
   const parts = collected ? segments({ prompt_tokens: total!.prompt_tokens!, completion_tokens: total!.completion_tokens!, cached_tokens: cached, cache_write_tokens: writes, reasoning_tokens: reasoning }) : []
   const sum = collected ? total!.prompt_tokens! + total!.completion_tokens! : 0
-  const [active, setActive] = useState<string | null>(null)
-  const slices: PieSlice[] = parts.map((part) => ({ key: part.key, value: part.value, color: tokenColors[part.key] }))
   const labels = { input: t('portal:tokInput'), cached: t('portal:tokCached'), write: t('charts:cacheWrite'), output: t('portal:tokOutput'), reasoning: t('portal:tokReasoning') }
   const count = (n: number | null | undefined) => n == null ? '—' : formatCount(n, locale)
-  const focused = sum > 0 ? parts.find((part) => part.key === active && part.value > 0) : undefined
-  const centre = focused
-    ? { top: labels[focused.key], main: formatBp(Math.round(focused.value / sum * 10000), locale), sub: count(focused.value) }
-    : { top: t('common:tokens'), main: count(sum), sub: null }
-  const hover = (key: string) => ({ onMouseEnter: () => setActive(key), onMouseLeave: () => setActive(null), onFocus: () => setActive(key), onBlur: () => setActive(null) })
   const coverage = (n: number | undefined) => n == null || requests <= 0 ? '—' : `${count(n)} / ${count(requests)} · ${formatBp(Math.floor(n * 10000 / requests), locale)}`
   const readComplete = requests > 0 && readCount === requests
   const writeComplete = requests > 0 && writeCount === requests
   const partial = !readComplete || !writeComplete
-  return <div role="region" aria-label={t('portal:tokenSnapshot')} className={PANEL}>
-    <CardHeader className={HEAD}>
-      <CardTitle className="lg:sr-only">{t('portal:tokenSnapshot')}</CardTitle>
-      <div data-slot="distribution-head" className={HEAD_ROW}>
-        <span className="min-w-0 truncate">
-          {dashboardPeriodLabel(days, range, t)}
-          {query.isSuccess && collected && <> · <span className="font-medium tabular-nums text-foreground" title={sum.toLocaleString(locale)}>{count(sum)} <span className="font-normal text-muted-foreground">{t('common:tokens')}</span></span></>}
-        </span>
-        <Link to="/admin/stats" search={{ ...dashboardSearch(days, range), measure: 'tokens' }} className={HEAD_LINK}>{t('portal:expandTrend')}<ArrowUpRight aria-hidden size={13} /></Link>
-      </div>
-    </CardHeader>
-    <CardContent className={BODY}>
-      {query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.isPending ? <LoadingState /> : !collected ? <p className="py-6 text-xs text-muted-foreground">{t('analysis:notCollected')}</p> : <>
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] lg:hidden">
-          <Tooltip content={t('admin:dashboardRecordedTokenHint')}><Badge variant="muted" tabIndex={0} className="min-h-5 text-[11px]">{t('admin:dashboardRecordedTokens')}</Badge></Tooltip>
-          <span className="text-muted-foreground">{t('admin:dashboardTokenTotal', { input: count(total?.prompt_tokens), output: count(total?.completion_tokens) })}</span>
-        </div>
-        {/* 与模型 / 渠道页签同一套版式（见 distribution-layout）：圆和图例的位置、大小与它们一致，
-            缓存上报条、来源详情放在下面的底部，不影响这里 */}
-        <div data-slot="token-composition" className={STAGE}>
-        <Tooltip className="shrink-0" content={t('admin:dashboardTokenHint')}>
-          <div tabIndex={0} role="img" aria-label={t('admin:dashboardTokenHint')} data-slot="token-donut" className={`${PIE} rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary/40`}>
-            <PieChart decorative slices={slices} active={active} onActiveChange={setActive} hole={0.62} className="size-full">
-              <span className="max-w-full truncate text-[10px] leading-4 text-muted-foreground @[11rem]:text-[11px]" title={centre.top}>{centre.top}</span>
-              <span className="max-w-full truncate text-xs leading-tight font-semibold tabular-nums @[10rem]:text-[13px] @[11rem]:text-base @[14rem]:text-xl">{centre.main}</span>
-              {centre.sub && <span className="max-w-full truncate text-[10px] leading-4 tabular-nums text-muted-foreground @[11rem]:text-[11px]">{centre.sub}</span>}
-            </PieChart>
-          </div>
+  return <div role="region" aria-label={t('portal:tokenSnapshot')} className="flex min-w-0 flex-col gap-3">
+    <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <Tooltip content={t('admin:dashboardTokenHint')}>
+          <span tabIndex={0} className="rounded text-xs text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary/40">{dashboardPeriodLabel(days, range, t)} · {t('portal:tokenSnapshot')}</span>
         </Tooltip>
-        <div data-slot="distribution-legend" className={LEGEND}>
-        <dl data-slot="token-segments" className="grid min-w-0 gap-y-0.5 [@container(max-height:16rem)]:gap-y-0">
-          {parts.map((part) => {
-            const known = part.key === 'cached' ? cached > 0 || (readCount ?? 0) > 0 : part.key === 'write' ? writes != null : part.key === 'reasoning' ? reasoning > 0 || (total?.token_detail_observations?.reasoning_tokens?.observed_records ?? 0) > 0 : true
-            const incomplete = part.key === 'cached' ? !readComplete : part.key === 'write' ? !writeComplete : false
-            return <div key={part.key} {...hover(part.key)} className={`grid min-w-0 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 rounded-lg px-2 py-1.5 text-xs transition-colors [@container(max-height:16rem)]:py-0.5 hover:bg-muted/70 ${active === part.key ? 'bg-muted/70' : ''}`}>
-              <dt className="flex items-center gap-2 text-muted-foreground"><span aria-hidden className={`size-2.5 shrink-0 rounded-[3px] ${part.className}`} />{labels[part.key]}</dt>
-              <dd className="font-medium tabular-nums" title={known ? part.value.toLocaleString(locale) : undefined}>{known ? count(part.value) : '—'}{known && incomplete && <span className="ml-1 text-[10px] font-normal text-warning">{t('admin:dashboardPartialTokens')}</span>}</dd>
-              <span className="min-w-9 text-right text-[11px] tabular-nums text-muted-foreground">{known && sum > 0 ? formatBp(Math.round(part.value / sum * 10000), locale) : '—'}</span>
+        <span className="text-lg leading-7 font-bold tabular-nums" title={collected ? sum.toLocaleString(locale) : undefined}>
+          {query.isSuccess && collected ? <>{count(sum)} <span className="text-xs font-normal text-muted-foreground">{t('common:tokens')}</span></> : '—'}
+        </span>
+      </div>
+      <Link to="/admin/stats" search={{ ...dashboardSearch(days, range), measure: 'tokens' }} className={HEAD_LINK}>{t('admin:dashboardViewAll')}<span aria-hidden>&nbsp;→</span></Link>
+    </div>
+    {query.isError ? <ErrorState message={describeError(query.error)} onRetry={() => void query.refetch()} /> : query.isPending ? <LoadingState /> : !collected ? <p className="py-6 text-xs text-muted-foreground">{t('analysis:notCollected')}</p> : <>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
+        <Tooltip content={t('admin:dashboardRecordedTokenHint')}><Badge variant="muted" tabIndex={0} className="min-h-5 text-[11px]">{t('admin:dashboardRecordedTokens')}</Badge></Tooltip>
+        <span className="text-muted-foreground">{t('admin:dashboardTokenTotal', { input: count(total?.prompt_tokens), output: count(total?.completion_tokens) })}</span>
+      </div>
+      <dl data-slot="token-segments" className="flex flex-col gap-3">
+        {parts.map((part) => {
+          const known = part.key === 'cached' ? cached > 0 || (readCount ?? 0) > 0 : part.key === 'write' ? writes != null : part.key === 'reasoning' ? reasoning > 0 || (total?.token_detail_observations?.reasoning_tokens?.observed_records ?? 0) > 0 : true
+          const incomplete = part.key === 'cached' ? !readComplete : part.key === 'write' ? !writeComplete : false
+          const share = known && sum > 0 ? Math.round(part.value / sum * 10000) : null
+          return <div key={part.key} className="flex min-w-0 flex-col gap-1.5">
+            <div className="flex items-baseline gap-2 text-[13px]">
+              <dt className="flex min-w-0 flex-1 items-center gap-2 font-medium"><span aria-hidden className={`size-2 shrink-0 rounded-[2px] ${part.className}`} />{labels[part.key]}</dt>
+              <dd className="shrink-0 text-xs text-muted-foreground tabular-nums" title={known ? part.value.toLocaleString(locale) : undefined}>{known ? count(part.value) : '—'}{known && incomplete && <span className="ml-1 text-[10px] text-warning">{t('admin:dashboardPartialTokens')}</span>}</dd>
+              <dd className="w-[52px] shrink-0 text-right font-semibold tabular-nums">{share == null ? '—' : formatBp(share, locale)}</dd>
             </div>
-          })}
-        </dl>
-        </div>
-        </div>
-        <div className={FOOT}>
+            <ShareBar bp={share} className={part.className} />
+          </div>
+        })}
+      </dl>
+      <div className="flex flex-col gap-2">
         <div role="group" className="grid gap-x-3 gap-y-1 rounded-md bg-muted/40 px-2 py-1.5 text-[11px] sm:grid-cols-2" aria-label={t('admin:dashboardCacheCoverage')}>
           <p className="flex flex-wrap justify-between gap-x-2"><span className="text-muted-foreground">{t('admin:dashboardCacheReadCoverage')}</span><span className="tabular-nums">{coverage(readCount)}</span></p>
           <p className="flex flex-wrap justify-between gap-x-2"><span className="text-muted-foreground">{t('admin:dashboardCacheWriteCoverage')}</span><span className="tabular-nums">{coverage(writeCount)}</span></p>
@@ -135,8 +115,7 @@ export function TokenSummary({ days, range }: { days: number; range?: DateRange 
           <p tabIndex={0} className="flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1.5 text-[11px] leading-4 text-warning"><FlaskConical aria-hidden size={13} className="mt-0.5 shrink-0" /><span>{t('admin:dashboardTestRecords', { n: count(total?.suspected_test_requests), tokens: count(total?.suspected_test_tokens) })}</span></p>
         </Tooltip>}
         <SourceQuality total={total!} />
-        </div>
-      </>}
-    </CardContent>
+      </div>
+    </>}
   </div>
 }
