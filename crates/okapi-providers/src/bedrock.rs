@@ -117,37 +117,7 @@ impl BedrockUpstream {
                 body,
             });
         }
-        // event-stream 帧 → Anthropic 事件：一帧一个 chunk，chunk.bytes 是 base64 的事件 JSON
-        let events = futures::stream::unfold(
-            (resp.bytes_stream(), Decoder::new(), false),
-            |(mut bytes, mut decoder, mut failed)| async move {
-                if failed {
-                    return None;
-                }
-                let Some(chunk) = bytes.next().await else {
-                    let error = decoder.finish().err()?;
-                    return Some((
-                        futures::stream::iter(vec![Err(error)]),
-                        (bytes, decoder, true),
-                    ));
-                };
-                let out: Vec<Result<AnthropicEvent, UpstreamError>> = match chunk {
-                    Err(e) => {
-                        failed = true;
-                        vec![Err(UpstreamError::Stream(e.to_string()))]
-                    }
-                    Ok(bytes) => match decoder.push(&bytes) {
-                        Ok(frames) => frames.iter().filter_map(frame_to_event).collect(),
-                        Err(e) => {
-                            failed = true;
-                            vec![Err(e)]
-                        }
-                    },
-                };
-                Some((futures::stream::iter(out), (bytes, decoder, failed)))
-            },
-        )
-        .flatten();
+        let events = event_stream(resp.bytes_stream(), crate::limits::MAX_STREAM);
         Ok(MessagesResponse::Stream(MessagesStream {
             upstream_request_id,
             events: Box::pin(events),
@@ -333,6 +303,51 @@ fn exception_status(kind: &str) -> Option<u16> {
     }
 }
 
+/// event-stream 帧 → Anthropic 事件：一帧一个 chunk，chunk.bytes 是 base64 的事件 JSON。
+/// 累计字节数受 `total_limit` 约束，与 SSE 路径的 `limits::sse` 同一口径——单帧有上限，
+/// 但没有总量上限时，一个源源不断吐合法帧的上游能把网关的这条流拖到天荒地老。
+fn event_stream<S, E>(
+    bytes: S,
+    total_limit: usize,
+) -> impl futures::Stream<Item = Result<AnthropicEvent, UpstreamError>> + Send
+where
+    S: futures::Stream<Item = Result<Bytes, E>> + Unpin + Send,
+    E: std::fmt::Display,
+{
+    futures::stream::unfold(
+        (bytes, Decoder::new(), 0usize, false),
+        move |(mut bytes, mut decoder, mut total, mut failed)| async move {
+            if failed {
+                return None;
+            }
+            let Some(chunk) = bytes.next().await else {
+                let error = decoder.finish().err()?;
+                return Some((
+                    futures::stream::iter(vec![Err(error)]),
+                    (bytes, decoder, total, true),
+                ));
+            };
+            let out: Vec<Result<AnthropicEvent, UpstreamError>> = match chunk {
+                Err(e) => {
+                    failed = true;
+                    vec![Err(UpstreamError::Stream(e.to_string()))]
+                }
+                Ok(chunk) => match crate::limits::charge(&mut total, chunk.len(), total_limit)
+                    .and_then(|()| decoder.push(&chunk))
+                {
+                    Ok(frames) => frames.iter().filter_map(frame_to_event).collect(),
+                    Err(e) => {
+                        failed = true;
+                        vec![Err(e)]
+                    }
+                },
+            };
+            Some((futures::stream::iter(out), (bytes, decoder, total, failed)))
+        },
+    )
+    .flatten()
+}
+
 /// 一帧 → 一个 Anthropic 事件；非 chunk 的事件帧（无载荷）跳过，异常帧转成流错误。
 /// 能对应到 HTTP 状态的异常帧（限流、不可用……）按 `Status` 报，这样 429 才进 key 冷却与
 /// retry-after 的分类；此前一律是通用 `Stream` 错误，流中限流不会触发冷却。
@@ -443,6 +458,47 @@ mod tests {
             };
             assert!(reason.starts_with(kind), "{reason}");
         }
+    }
+
+    fn chunk_frame(text: &str) -> Bytes {
+        let event = serde_json::json!({"type": "content_block_delta", "text": text}).to_string();
+        let envelope = serde_json::json!({
+            "bytes": base64::engine::general_purpose::STANDARD.encode(event)
+        });
+        Bytes::from(encode_frame(
+            &[(":event-type", "chunk")],
+            envelope.to_string().as_bytes(),
+        ))
+    }
+
+    /// 流的累计字节数超过上限就截断并报错，后面的帧不再放出来。
+    #[tokio::test]
+    async fn a_stream_past_the_total_cap_is_cut_with_an_error() {
+        let frame = chunk_frame("x");
+        let limit = frame.len() * 2 + frame.len() / 2;
+        let source = futures::stream::iter(
+            (0..5)
+                .map(|_| Ok::<_, std::io::Error>(frame.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let events: Vec<_> = event_stream(source, limit).collect().await;
+        assert_eq!(events.len(), 3, "两帧在上限内，第三块越界：{events:?}");
+        assert!(events[0].is_ok() && events[1].is_ok());
+        assert!(
+            matches!(&events[2], Err(UpstreamError::Stream(reason)) if reason == "upstream_stream_too_large"),
+            "{:?}",
+            events[2]
+        );
+
+        // 上限之内的流原样放行
+        let source = futures::stream::iter(
+            (0..5)
+                .map(|_| Ok::<_, std::io::Error>(frame.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let events: Vec<_> = event_stream(source, frame.len() * 5).collect().await;
+        assert_eq!(events.len(), 5);
+        assert!(events.iter().all(Result::is_ok));
     }
 
     #[test]

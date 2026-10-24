@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 
 const MAX_EVENT: usize = 16 * 1024 * 1024;
-const MAX_STREAM: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_STREAM: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_BODY: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_ERROR: usize = 1024 * 1024;
 
@@ -26,6 +26,15 @@ pub async fn collect(
     })
     .await
     .map_err(|_| UpstreamError::Timeout)?
+}
+
+/// 流式响应的累计字节记账：加上这一块之后超过 `limit` 就报错，不超过就记上。
+pub(crate) fn charge(total: &mut usize, chunk: usize, limit: usize) -> Result<(), UpstreamError> {
+    if chunk > limit.saturating_sub(*total) {
+        return Err(UpstreamError::Stream("upstream_stream_too_large".into()));
+    }
+    *total += chunk;
+    Ok(())
 }
 
 pub(crate) fn sse(
@@ -52,10 +61,7 @@ fn bounded(
                 return Ok(None);
             };
             let chunk = chunk?;
-            if chunk.len() > total_limit.saturating_sub(total) {
-                return Err(UpstreamError::Stream("upstream_stream_too_large".into()));
-            }
-            total += chunk.len();
+            charge(&mut total, chunk.len(), total_limit)?;
             for &byte in &chunk {
                 if byte == b'\n' && cr {
                     cr = false;
@@ -83,6 +89,21 @@ fn bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn charge_accumulates_and_refuses_the_chunk_that_crosses_the_limit() {
+        let mut total = 0;
+        assert!(charge(&mut total, 6, 10).is_ok());
+        assert!(charge(&mut total, 4, 10).is_ok(), "刚好到上限还可以");
+        assert_eq!(total, 10);
+        assert!(matches!(
+            charge(&mut total, 1, 10),
+            Err(UpstreamError::Stream(reason)) if reason == "upstream_stream_too_large"
+        ));
+        assert_eq!(total, 10, "被拒的一块不记账");
+        let mut near_overflow = usize::MAX - 1;
+        assert!(charge(&mut near_overflow, 2, usize::MAX).is_err());
+    }
+
     #[tokio::test]
     async fn fragmented_and_multiline_limits() {
         let input = futures::stream::iter(vec![
