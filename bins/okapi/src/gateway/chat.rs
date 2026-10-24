@@ -335,7 +335,8 @@ fn default_output_cap(requested: Option<u32>, max_output: Option<u32>) -> Option
 const GEMINI_CONFIG_KEYS: [&str; 2] = ["generationConfig", "generation_config"];
 
 /// 按入口方言写入缺省输出上限（转换路径各自翻译成上游字段）。已有上限的不动；
-/// compact 端点不接受输出上限参数，跳过。
+/// compact 端点不接受输出上限参数，跳过。作用在入口方言的原文上，必须先于出向转换
+/// （见 `build_upstream_body`）：转换之后的体已经是上游方言，再按入口方言写字段名就错位了。
 fn bound_default_output(ingress: Ingress, cap: Option<u32>, body: Bytes) -> Bytes {
     let Some(cap) = cap else {
         return body;
@@ -2506,7 +2507,7 @@ fn build_upstream_body(
     bill: &RequestBilling,
     info: &ProbeInfo,
     cand: &ChannelCandidate,
-    body: &Bytes,
+    source: &Bytes,
     upstream_model: &str,
 ) -> Result<Bytes, UpstreamError> {
     let plan = ExecutionPlan::compile(
@@ -2527,6 +2528,12 @@ fn build_upstream_body(
     }
     let native_responses = plan.native_responses();
     let dialect = plan.dialect.as_str();
+    // 缺省输出上限写进入口方言的原文，由下面的出向转换器翻译成上游自己的字段：写在转换之后，
+    // 跨方言时就落成上游不认的键（Gemini 上游的顶层 max_tokens，Anthropic / chat 上游的
+    // max_output_tokens 与 generationConfig），推理模型的 chat 上游还会在 completion_cap
+    // 改名之后收到被拒的 max_tokens。`source` 仍是客户端的原文：后面判断"客户端自己写没写
+    // 上限"要看它，补上的缺省不能被当成客户端的硬上限。
+    let body = &bound_default_output(bill.ingress, bill.default_output_cap, source.clone());
     let built = match (bill.ingress, dialect) {
         // Responses 同方言：只改 model，其余字段（previous_response_id/store/include/
         // 内置工具/reasoning）一律原样——这正是直转相对降级链的全部价值。
@@ -2601,7 +2608,7 @@ fn build_upstream_body(
             &profile,
             dialect,
             &built,
-            body,
+            source,
             bill.directive,
             native_responses,
         )
@@ -2871,7 +2878,6 @@ async fn dispatch_chat(
     use futures::StreamExt as _;
     let plan = ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?;
     let native_responses = plan.native_responses();
-    let body = bound_default_output(bill.ingress, bill.default_output_cap, body);
     let body = shape_upstream_body(bill, cand, body)?;
     bill.server_tools.verify_outbound(&body)?;
     let upstream_model = cand.upstream_model(&bill.model).to_owned();

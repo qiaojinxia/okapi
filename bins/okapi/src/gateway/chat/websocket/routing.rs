@@ -103,17 +103,12 @@ fn body(
     cand: &ChannelCandidate,
     work: &Work,
 ) -> Result<Bytes, UpstreamError> {
-    // 与 HTTP 同一规则：没写输出上限时按预扣封顶补上（Responses 原文，转换前）
-    let bounded = super::super::bound_default_output(
-        crate::gateway::ingress::Ingress::Responses,
-        bill.default_output_cap,
-        work.body.clone(),
-    );
+    // 没写输出上限时按预扣封顶补上，由 build_upstream_body 在转换前对 Responses 原文做（与 HTTP 同一处）
     let built = build_upstream_body(
         bill,
         probe,
         cand,
-        &bounded,
+        &work.body,
         cand.upstream_model(&bill.model),
     )?;
     let shaped = shape_upstream_body(bill, cand, built)?;
