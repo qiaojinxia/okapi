@@ -431,7 +431,13 @@ async fn refresh_locked(
                     Some("oauth_invalid_token_response"),
                 )
                 .await;
-                return Err(UpstreamError::Build("oauth_invalid_token_response".into()));
+                // 与显式失败同一兜底：旧 access token 还没过期、也没被上游拒过，就先用旧的
+                let invalid = || UpstreamError::Build("oauth_invalid_token_response".into());
+                if rejected.is_some() {
+                    return Err(invalid());
+                }
+                return stale_or_err(basis.clone(), chrono::Utc::now().timestamp())
+                    .map_err(|_| invalid());
             }
             save_refreshed(state, key, &current.stored, next).await
         }
@@ -522,14 +528,20 @@ async fn invalidate_current(
     expected: &[u8],
     code: &str,
 ) -> Result<OAuthCredential, UpstreamError> {
-    let changed = okapi_store::oauth_credentials::invalidate_if_current(
-        &state.pg,
-        key.channel_key_id,
-        key.provider,
-        expected,
-        code,
+    // 临界区里的每一步都要有界（见 STORE_STEP_TIMEOUT）：这一步卡住，租约就会过期，
+    // 别的副本拿同一个已作废的 refresh token 再刷一遍
+    let changed = tokio::time::timeout(
+        STORE_STEP_TIMEOUT,
+        okapi_store::oauth_credentials::invalidate_if_current(
+            &state.pg,
+            key.channel_key_id,
+            key.provider,
+            expected,
+            code,
+        ),
     )
     .await
+    .map_err(|_| UpstreamError::Build("oauth_credential_write_failed".into()))?
     .map_err(|_| UpstreamError::Build("oauth_credential_write_failed".into()))?;
     if !changed {
         return replaced_credential(state, key.channel_key_id, expected).await;
