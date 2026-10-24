@@ -2969,6 +2969,34 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
   生产滚窗走 `hold_repair`（权威值 − 冻结在途），两者不要混用。
 - **测试容器不再留卷**：`scripts/test-isolated.py`、`scripts/dev-deps.sh` 拆容器用 `docker rm -fv`。此前每跑一个套件留下几个
   匿名卷，攒满 Docker 虚拟机盘后 ClickHouse 写不进、套件成片失败。
+- **第九轮评审后补（后台链路 / providers 剩余模块 / 前端依赖）**：
+  - **出站目标判据合一（`okapi_providers::ssrf::is_private_ip`）**：保存 URL、出站连接时的解析结果校验、图片抓取共用一条判据，补上此前漏掉的
+    IANA 特殊用途段——共享地址空间 `100.64.0.0/10`（阿里云元数据 `100.100.100.200` 就在里面）、Azure WireServer `168.63.129.16`、`0.0.0.0/8`、`192.0.0.0/24`、文档段
+    （`192.0.2.0/24`、`198.51.100.0/24`、`203.0.113.0/24`）、`224.0.0.0/4` 多播与 `240.0.0.0/4` 保留段；v6 在 `2000::/3` 之外的全部，
+    以及 `2001::/23` 协议保留、`2001:db8::/32`、`3fff::/20`；v4 映射、v4 兼容、NAT64 `64:ff9b::/96`、6to4 `2002::/16` 落到内嵌的 v4 上判。
+    **升级影响**：走 Tailscale 等共享地址空间的自建上游，现在要开 `ssrf_policy.allow_private`。基准测试段 `198.18.0.0/15` 通用判据不拦
+    （代理软件的 fake-ip DNS 会把所有域名解析进去，流量由本机代理接走），图片抓取（调用方给的 URL）仍拒。
+  - **预扣清扫批量读**：每分钟扫全部用户时，一页（1000 个）用户的在途预扣用一次流水线读完（`BalanceLedger::list_reservations_many`），
+    此前逐用户 `HGETALL` 是用户数那么多次往返。读到处理之间被正常结算的预扣仍由 commit / refund 的幂等兜住（预扣的 deadline 创建后不会被延长），
+    单个用户的坏回执只影响它自己那一格。
+  - **对账差异日志封顶**：一轮对账最多逐条记 20 个用户的 error，其余合并成一条汇总；Redis 被清空 / 回滚到旧快照时全员漂移，此前一轮写出用户数那么多行
+    （增量每 5 分钟、全量每日）。`drift` 通知本来就只带前 20 个，完整名单走 `GET /admin/reconciliation`。
+  - **两个裸 `spawn` 的循环每轮兜 panic**：出口代理流量落库与运维告警日志写 Redis 的循环，某一轮 panic 此前会让任务无声无息地死掉、之后永远不再执行；
+    现在 `ops::guarded` 兜住并记一条 error，下一轮照常。
+  - **Bedrock 流式响应补总量上限**：与 SSE 路径同口径（64 MB，`limits::charge`），此前只有单帧上限，源源不断吐合法帧的上游能把这条流拖到天荒地老。
+  - **Retry-After 走同一份解析（`retry_after::seconds`）**：WS→HTTP 桥、图片流、原生批处理与 Vertex 令牌端点此前只认整数秒；现在和其他上游路径一样认 HTTP-date，
+    并读 Codex / Claude 订阅窗口头——订阅窗口用尽时上游只发 `x-codex-*`，此前冷却是 None，被撞上的账号几秒后又被选中。
+  - **`Mailer::from_pg` 区分读库失败**：库读不出来不再报成「SMTP 未配置」（通知通道写 error 日志，`POST /admin/settings/smtp/test` 回 500 而不是 501）。
+  - **迁移工具逐行读导出**：JSONL 先整份扫一遍校验（只解析不留存，非法行在该文件任何一行写库之前报出），再惰性逐行处理，内存里只有当前一行；
+    此前整份读成字符串再解析成 `Vec<Value>`，导出文件大了会占几倍于文件的内存。
+  - **前端**：去掉没人引用的 `zod`、`@tanstack/react-table`（`zod` 仍作为路由插件的传递依赖留在锁文件里），删掉误提交的 `features/channels/Okapi.code-workspace`；
+    请求扩展配置反序列化不再深拷贝一份（`profiles::extensions` 借着 `&Value` 解析）。
+  - **核实后未改**：PG 连接池没有 `statement_timeout`——全局加会误伤迁移、分区维护、回填这类长语句，要先看 `slow statement` 日志，再按角色
+    （`ALTER ROLE … SET statement_timeout`）设；`nats_relay` 结算每行一个事务（每行要单独 `FOR UPDATE` 复核租约）与 chsink 每轮 create-or-update consumer
+    （一次 JetStream API 调用）；每个上游适配器自带一个 `HttpPool`（共享要改所有 `Upstream::new()` 的构造，收益只是少几个空闲连接池）；
+    `MetaScanner` 解析失败的事件按空值原样透传（透传形态不因解析失败断流）；`ProfilePage` 热力图 60 秒轮询（后台标签页 react-query 自动暂停）；
+    `use-paged-catalog` 的 `gcTime: 0` 与每次挂载一个 scope（不同 key 的分组过滤结果不留在缓存里）；`bins/okapi/tests/responses_ws_transport.rs` 里
+    30 秒的 sleep 是最后被 `abort` 的「沉默上游」，用例自己断言 3 秒内结束。
 
 ### 11.45 线上日志排查后的修正（2026-10-19）
 
