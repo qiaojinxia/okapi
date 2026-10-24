@@ -197,11 +197,12 @@ async fn handle_create(
         Ok(rows) => super::scheduler::order_candidates(rows)
             .into_iter()
             // azure：Sora 走 `/openai/v1/video/generations/jobs` 另一套任务 API，本期不接
+            // 订阅类渠道（codex / anthropic_max …）只有对话接口：配了视频模型也只会 502，与 audio 同样排除
             .filter(|c| {
                 !matches!(
                     c.provider.as_str(),
                     "anthropic" | "gemini" | "azure" | "bedrock" | "vertex"
-                )
+                ) && !super::dialect::chat_only(&c.provider)
             })
             .collect(),
         Err(err) => {

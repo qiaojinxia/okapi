@@ -126,10 +126,39 @@ async fn redirect_uri(state: &AppState, code: &str) -> Result<String, AppError> 
     Ok(format!("{base}/auth/oauth/{code}/callback"))
 }
 
+/// 授权跳转查询串 / token 交换表单里的值。RFC 3986 允许留在 query 里、表单里也没有特殊含义的字符
+/// （`:` `/` `@` 等）原样保留；`% & = + #`、空白和非 ASCII 一律百分号编码。只转 `% & =` 不够：
+/// 字面 `+` 会被对端解码成空格（授权码、client_secret 里都可能有）。
 fn form_escape(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace('&', "%26")
-        .replace('=', "%3D")
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for byte in s.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b':'
+                    | b'/'
+                    | b'@'
+                    | b'!'
+                    | b'$'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b','
+                    | b';'
+                    | b'?'
+            )
+        {
+            out.push(char::from(byte));
+        } else {
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }
 
 /// GET /auth/oauth/{provider}：302 到 IdP 授权页。
@@ -312,5 +341,19 @@ mod cookie_tests {
             assert_eq!(cookie.contains("; Secure"), secure);
             assert!(cookie.contains("HttpOnly; SameSite=Lax; Path=/auth/oauth/provider"));
         }
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    #[test]
+    fn form_values_survive_plus_spaces_and_reserved_characters() {
+        assert_eq!(
+            super::form_escape("a+b c&d=e%f#g"),
+            "a%2Bb%20c%26d%3De%25f%23g"
+        );
+        assert_eq!(super::form_escape("https://x/cb"), "https://x/cb");
+        assert_eq!(super::form_escape("AZaz09-._~"), "AZaz09-._~");
+        assert_eq!(super::form_escape("码"), "%E7%A0%81");
     }
 }

@@ -107,7 +107,15 @@ async fn open(
 ) -> Result<(ImageResponse, okapi_store::ChannelCandidate, i16, Mode), AppError> {
     let mut last: Option<AppError> = None;
     for (index, candidate) in candidates.into_iter().take(super::MAX_ATTEMPTS).enumerate() {
-        let mode = Mode::load(&ctx.state, candidate.channel_id).await?;
+        // 一个渠道的设置读坏了只跳过它，别让后面健康的候选也试不到
+        let mode = match Mode::load(&ctx.state, candidate.channel_id).await {
+            Ok(mode) => mode,
+            Err(error) => {
+                tracing::warn!(channel = candidate.channel_id, code = %error.code, "image stream mode unreadable; trying the next candidate");
+                last = Some(error);
+                continue;
+            }
+        };
         let model = candidate.upstream_model(&ctx.prepared.canonical);
         match ctx
             .input
