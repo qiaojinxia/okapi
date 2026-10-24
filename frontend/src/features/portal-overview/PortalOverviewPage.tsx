@@ -1,20 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import dayjs from 'dayjs'
-import { Activity, ArrowUpRight, Coins, Cpu, Gauge, LayoutDashboard, RefreshCw, ShieldCheck, Timer, Wallet, Zap } from 'lucide-react'
+import { ArrowUpRight, RefreshCw } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ErrorState, LoadingState } from '@/components/ui/state'
 import { Button } from '@/components/ui/button'
 import { DateRangePicker } from '@/components/ui/date-range'
-import { PageHeader } from '@/components/ui/page'
 import { Segmented } from '@/components/ui/segmented'
 import { UsageScope } from '@/components/usage-scope'
 import { useUsageScope } from '@/hooks/use-usage-scope'
-import { Sparkline } from '@/components/ui/sparkline'
-import { Stat } from '@/components/ui/stat'
+import { KpiStrip } from '@/features/portal-overview/KpiStrip'
+import type { KpiCell } from '@/features/portal-overview/KpiStrip'
 import { QualityStrip } from '@/features/portal-overview/QualityStrip'
 import { UsageOverview } from '@/features/portal-overview/UsageOverview'
+import { zoneLabel } from '@/features/portal-overview/SpendTrendView'
 import { cacheHit } from '@/features/portal-overview/cache-metrics'
 import { calendarDays, usageValue } from '@/features/portal-overview/usage-chart-data'
 import type { BreakdownResp, Scope } from '@/features/portal-overview/types'
@@ -30,13 +30,13 @@ import { delta, formatDuration, formatUsd } from './format'
 import { qk } from '@/lib/query-keys'
 
 const routeApi = getRouteApi('/portal/')
-/// 健康指标的图标一律中性色：颜色只留给状态（成功率的黄 / 红）。
 
 /// 门户总览（对齐 new-api 数据看板的用户侧 + Sub2API 的 Token 构成）。
 ///
 /// 一次查询（/api/me/stats/breakdown：day × model × token 四轴）喂全部视图：
-/// 六张 KPI 常驻，默认综合视图展示趋势和构成，明细页签复用数据，切签零请求。
+/// 四格数字和调用质量常驻，下面并排趋势与模型排行，明细页签复用数据，切签零请求。
 /// 这与管理端统计页"每签一查询"不同：管理端各签打不同的 MV，这里只有一张。
+/// 整页自然流动：控制行（范围、时段、日期、刷新与明细）就是页头，标题只留给读屏。
 export function PortalOverviewPage() {
   const { t, i18n } = useTranslation()
   const locale = i18n.language
@@ -83,7 +83,7 @@ export function PortalOverviewPage() {
   }
 
   // 上一段等长窗口：给三张主卡的「较前 N 天」。只在当前窗口回来之后查，口径与当前窗口一致
-  const win = q.data?.window
+  const win = q.isError ? undefined : q.data?.window
   const span = q.data?.days ?? days
   const prevRange = win ? previousWindow(win.start_date, span) : null
   const prev = useQuery({
@@ -121,14 +121,14 @@ export function PortalOverviewPage() {
 
   const health = <QualityStrip label={t('charts:performance')} loading={loading} items={[
     {
-      icon: ShieldCheck, accent: 'bg-success/12 text-success', label: t('charts:metric_success'),
+      label: t('charts:metric_success'),
       value: total?.success_rate_bp == null ? '—' : formatBp(total.success_rate_bp, locale),
       sub: total && total.requests > 0 && failed != null ? (failed > 0 ? t('portal:failedCount', { n: formatCount(failed, locale) }) : t('portal:noFailures')) : undefined,
       tone: total?.success_rate_bp == null ? undefined
         : total.success_rate_bp <= 9_500 ? 'bad' : total.success_rate_bp <= 9_900 ? 'warn' : 'good',
     },
     {
-      icon: Gauge, accent: 'bg-chart-4/12 text-chart-4', label: t('charts:throughput'),
+      label: t('charts:throughput'),
       value: throughput == null ? '—' : `${formatTokensPerSec(throughput, locale)} Token/s`,
       ...(partialThroughput
         ? {
@@ -138,7 +138,7 @@ export function PortalOverviewPage() {
         : { sub: t('portal:throughputCaption') }),
     },
     {
-      icon: Zap, accent: 'bg-chart-3/12 text-chart-3', label: t('analytics:ttft'),
+      label: t('analytics:ttft'),
       value: total?.avg_ttft_ms == null ? '—' : formatDuration(total.avg_ttft_ms, locale),
       ...(q.isError
         ? { sub: t('charts:statisticsUnavailable') }
@@ -147,144 +147,103 @@ export function PortalOverviewPage() {
           : { sub: t('portal:ttftSamples', { count: total.ttft_samples ?? 0 }), subTitle: t('charts:ttftHint', { count: total.ttft_samples ?? 0 }) }),
     },
     {
-      icon: Timer, accent: 'bg-chart-1/12 text-chart-1', label: t('charts:metric_latency'),
+      label: t('charts:metric_latency'),
       value: total?.avg_latency_ms == null ? '—' : formatDuration(total.avg_latency_ms, locale),
       sub: t('portal:latencyCaption'),
     },
   ]} />
 
+  const balance = balanceDisplay(me.data ?? null, recentWalletSpend, span, t)
+  const balanceToneValue = balanceTone(me.data ?? null, recentWalletSpend, span)
+  // 四个数字按用户先看什么排：用了多少 Token、调了多少次、花了多少、还剩多少
+  const cells: (KpiCell & { loading?: boolean })[] = [
+    {
+      label: t('common:tokens'), slot: 'portal-kpi-tokens', loading,
+      value: total ? formatCount(total.tokens, locale) : '—',
+      ...changePill(total ? delta(total.tokens, previous?.tokens) : null, span, locale, t),
+      sub: hit ? (hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
+        : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })) : undefined,
+      spark: daily?.tokens,
+    },
+    {
+      label: t('common:requests'), slot: 'portal-kpi-requests', loading,
+      value: total ? formatCount(total.requests, locale) : '—',
+      ...changePill(total ? delta(total.requests, previous?.requests) : null, span, locale, t),
+      sub: total && total.requests > 0 ? t('portal:callsPerDay', { v: perDay(total.requests, span, locale) }) : undefined,
+      spark: daily?.requests,
+    },
+    {
+      label: t('portal:totalSpend'), slot: 'portal-kpi-spend', loading,
+      value: total ? formatUsd(total.amount_micro, locale) : '—',
+      ...changePill(total ? delta(total.amount_micro, previous?.amount_micro) : null, span, locale, t),
+      sub: [
+        total && delta(total.amount_micro, previous?.amount_micro) !== null ? t('portal:vsPrevious', { days: span }) : '',
+        total && total.discount_micro > 0 ? t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) }) : '',
+      ].filter(Boolean).join(' · '),
+      spark: daily?.amount,
+    },
+    {
+      label: t('portal:accountBalance'), slot: 'portal-kpi-balance', loading: me.isPending,
+      value: me.data ? formatUsd(me.data.balance_micro, locale) : '—',
+      pill: balance.pill, pillTitle: balance.pillTitle, pillTone: balanceToneValue,
+      tone: balanceToneValue,
+      // 有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
+      sub: me.data && me.data.subscription_until_unix > 0 ? (
+        <>
+          <span>{balance.sub}</span>
+          <Link to="/portal/plans" className="text-primary underline decoration-dotted">
+            {t('portal:balanceSubLine', { amount: formatUsd(me.data.subscription_remaining_micro, locale) })}
+          </Link>
+        </>
+      ) : balance.sub,
+    },
+  ]
+
   return (
-    // 大屏撑满视口：上半部分（页头、筛选、指标）保持自身高度，趋势与排行吃掉剩余高度，视口放不下时在页内滚动
-    <div data-slot="portal-overview" className="flex min-w-0 flex-col gap-3 lg:h-full lg:min-h-0 lg:overflow-y-auto">
-      <div className="flex min-w-0 shrink-0 flex-col gap-3">
-        <PageHeader
-          icon={LayoutDashboard}
-          title={t('portal:dashboard')}
-          meta={<LiveBadge live={live} scope={scope} />}
-          className="[&_h1]:text-[22px]"
-          action={<>
-            <Button variant="outline" loading={refreshing} onClick={() => void refresh()} className="rounded-lg">
-              {!refreshing && <RefreshCw className="h-4 w-4" />}{t('common:refresh')}
-            </Button>
-            <Link to="/portal/logs" search={logSearch} className="inline-flex min-h-10 items-center gap-2 rounded-lg bg-primary px-3.5 text-sm font-medium text-primary-foreground shadow-xs outline-none transition-shadow hover:bg-primary/90 hover:shadow-popover focus-visible:ring-2 focus-visible:ring-primary/40 lg:min-h-9">
-              {t('portal:usageDetails')}<ArrowUpRight className="h-4 w-4" />
-            </Link>
-          </>}
-        />
-        {/* 新用户优先看到下一步；已完成接入的账户直接展示数据。 */}
-        <GettingStartedCard />
-        <section aria-label={t('portal:dashboardFilters')} className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+    <div data-slot="portal-overview" className="flex min-w-0 flex-col gap-4">
+      <h1 className="sr-only">{t('portal:dashboard')}</h1>
+      {/* 新用户优先看到下一步；已完成接入的账户直接展示数据。 */}
+      <GettingStartedCard />
+      <section aria-label={t('portal:dashboardFilters')} className="flex min-w-0 flex-col gap-2 md:flex-row md:items-start md:justify-between md:gap-3">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
           <UsageScope {...usageScope} onChange={(value) => {
             usageScope.setScope(value)
             void navigate({ search: (prev) => ({ ...prev, scope: value }) })
           }} />
-          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
-            <Segmented
-              ariaLabel={t('charts:period')}
-              value={range ? 0 : days}
-              onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
-              options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
-            />
-            <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range}
-              onApply={(value) => void navigate({ search: (prev) => ({ ...prev, start_date: value.start, end_date: value.end }) })} />
-          </div>
-        </section>
+          <Segmented
+            size="sm"
+            ariaLabel={t('charts:period')}
+            value={range ? 0 : days}
+            onChange={(value) => void navigate({ search: (prev) => ({ ...prev, days: value, start_date: undefined, end_date: undefined }) })}
+            options={[1, 7, 30, 90].map((d) => ({ value: d, label: d === 1 ? t('charts:today') : t(`common:days_${d}`) }))}
+          />
+          <DateRangePicker today={q.data?.window?.today ?? new Date().toISOString().slice(0, 10)} value={range} className="min-w-0 max-w-full px-3 py-1 text-[13px] [&>summary]:min-h-6"
+            onApply={(value) => void navigate({ search: (prev) => ({ ...prev, start_date: value.start, end_date: value.end }) })} />
+          {win && <span data-slot="portal-calendar" className="text-[13px] tabular-nums text-muted-foreground/80">{win.start_date} — {win.end_date}{win.timezone ? ` · ${zoneLabel(win.timezone)}` : ''}</span>}
+          <LiveBadge live={live} scope={scope} />
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="outline" loading={refreshing} onClick={() => void refresh()} className="h-[34px] rounded-lg px-3.5 text-[13px]">
+            {!refreshing && <RefreshCw className="h-[15px] w-[15px]" />}{t('common:refresh')}
+          </Button>
+          <Link to="/portal/logs" search={logSearch} className="inline-flex h-[34px] items-center gap-1.5 rounded-lg bg-primary px-3.5 text-[13px] font-medium text-primary-foreground outline-none transition-colors hover:bg-primary/90 focus-visible:ring-2 focus-visible:ring-primary/40">
+            {t('portal:usageDetails')}<ArrowUpRight className="h-[13px] w-[13px]" />
+          </Link>
+        </div>
+      </section>
 
-        {/* 四个数字按用户先看什么排：用了多少 Token、调了多少次、还剩多少、花了多少。Token 用绿色最先抓住视线 */}
-        <section aria-label={t('portal:dashboardMetrics')} className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <Stat
-            layout="stacked"
-            icon={Cpu}
-            iconClassName="h-8 w-8 rounded-lg bg-success/12 text-success"
-            tone="good"
-            label={t('common:tokens')}
-            loading={loading}
-            className="@container rounded-2xl border-border/70 bg-card"
-            aside={daily && <KpiTrend values={daily.tokens} color="var(--color-success)" />}
-            value={<KpiValue value={total ? formatCount(total.tokens, locale) : '—'} trend />}
-            sub={<>
-              <DeltaText value={total ? delta(total.tokens, previous?.tokens) : null} days={span} />
-              {hit && <span>{hit.partial ? t('portal:cacheHitMeasured', { v: formatBp(hit.bp, locale), n: hit.samples, total: total?.requests ?? 0 })
-                : t('portal:cacheHit', { v: hit.bp == null ? '—' : formatBp(hit.bp, locale) })}</span>}
-            </>}
-          />
-          <Stat
-            layout="stacked"
-            icon={Activity}
-            iconClassName="h-8 w-8 rounded-lg bg-chart-1/12 text-chart-1"
-            label={t('common:requests')}
-            loading={loading}
-            className="@container rounded-2xl border-border/70 bg-card"
-            aside={daily && <KpiTrend values={daily.requests} color="var(--color-chart-1)" />}
-            value={<KpiValue value={total ? formatCount(total.requests, locale) : '—'} trend />}
-            sub={<>
-              <DeltaText value={total ? delta(total.requests, previous?.requests) : null} days={span} />
-              {total && total.requests > 0 && <span>{t('portal:callsPerDay', { v: perDay(total.requests, span, locale) })}</span>}
-            </>}
-          />
-          <Stat
-            layout="stacked"
-            icon={Wallet}
-            iconClassName="h-8 w-8 rounded-lg bg-warning/14 text-warning"
-            label={t('portal:accountBalance')}
-            loading={me.isPending}
-            className="rounded-2xl border-border/70 bg-card"
-            value={<KpiValue value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'} />}
-            // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
-            // 14 天内转黄、3 天内转红。有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
-            sub={
-              me.data && me.data.subscription_until_unix > 0 ? (
-                <>
-                  <span>{balanceSub(me.data, recentWalletSpend, span, t)}</span>
-                  <Link to="/portal/plans" className="text-primary underline decoration-dotted">
-                    {t('portal:balanceSubLine', { amount: formatUsd(me.data.subscription_remaining_micro, locale) })}
-                  </Link>
-                </>
-              ) : (
-                balanceSub(me.data ?? null, recentWalletSpend, span, t)
-              )
-            }
-            tone={balanceTone(me.data ?? null, recentWalletSpend, span)}
-          />
-          <Stat
-            layout="stacked"
-            icon={Coins}
-            iconClassName="h-8 w-8 rounded-lg bg-chart-3/12 text-chart-3"
-            label={t('portal:totalSpend')}
-            loading={loading}
-            className="@container rounded-2xl border-border/70 bg-card"
-            aside={daily && <KpiTrend values={daily.amount} color="var(--color-chart-3)" />}
-            value={<KpiValue value={total ? formatUsd(total.amount_micro, locale) : '—'} trend />}
-            sub={<>
-              <DeltaText value={total ? delta(total.amount_micro, previous?.amount_micro) : null} days={span} />
-              {total && total.discount_micro > 0 && <span>{t('portal:savedLine', { amount: formatUsd(total.discount_micro, locale) })}</span>}
-            </>}
-          />
-        </section>
+      <KpiStrip label={t('portal:dashboardMetrics')} loading={loading} cells={cells} />
 
-        {health}
-      </div>
+      {health}
 
       {q.isError ? (
         <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} />
       ) : q.isPending ? <LoadingState /> : q.data?.total && (
-        <UsageOverview className="lg:flex-1" data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
+        <UsageOverview data={q.data} logSearch={logSearch} metric={search.measure ?? 'amount'}
           onMetricChange={(measure) => void navigate({ search: (prev) => ({ ...prev, measure }), resetScroll: false })} />
       )}
     </div>
   )
-}
-
-/// 与管理端一致的主数字层级；右侧图标或迷你趋势始终有独立空间，不压金额。
-function KpiValue({ value, trend = false }: { value: string; trend?: boolean }) {
-  return <span title={value} className={`block pr-8 text-2xl leading-8 ${trend ? '@[13rem]:pr-20' : ''}`}>{value}</span>
-}
-
-/// 数字卡右侧的迷你趋势：卡片够宽才显示（数值与副行优先），位置对齐数值那一行。
-function KpiTrend({ values, color }: { values: number[]; color: string }) {
-  return <div aria-hidden className="pointer-events-none absolute top-11 right-4 hidden h-7 w-20 @[13rem]:block">
-    <Sparkline values={values} color={color} className="size-full" />
-  </div>
 }
 
 /// 当前窗口之前、等长的一段（起止都是日历日）。
@@ -299,17 +258,18 @@ function perDay(n: number, days: number, locale: string): string {
   return v.toLocaleString(locale, { maximumFractionDigits: v >= 10 ? 0 : 1 })
 }
 
-/// 「较前 7 天 ▲12%」：上涨 / 下跌只用箭头和文字表达，不上色——花得多不一定是坏事。
-function DeltaText({ value, days }: { value: number | null; days: number }) {
-  const { t, i18n } = useTranslation()
-  if (value === null) return null
+/// 数字卡右上角的涨跌小胶囊「▲ 12%」：上涨 / 下跌只用箭头和文字表达，不上色——花得多不一定是坏事；
+/// 完整说明（较前 N 天）放在悬停提示里。上期为 0 时没有可比的基数，不给胶囊。
+function changePill(value: number | null, days: number, locale: string, t: (key: string, opts?: Record<string, unknown>) => string): Pick<KpiCell, 'pill' | 'pillTitle'> {
+  if (value === null) return {}
   const pct = Math.abs(value * 100)
-  const shown = pct >= 100 ? Math.round(pct).toLocaleString(i18n.language) : pct.toLocaleString(i18n.language, { maximumFractionDigits: pct < 10 ? 1 : 0 })
+  const shown = pct >= 100 ? Math.round(pct).toLocaleString(locale) : pct.toLocaleString(locale, { maximumFractionDigits: pct < 10 ? 1 : 0 })
   const arrow = value > 0.0005 ? '▲' : value < -0.0005 ? '▼' : '·'
-  return <span className="inline-flex w-fit rounded-md bg-muted/45 px-1.5 py-0.5 leading-4 tabular-nums">{t('portal:periodChange', { days, delta: `${arrow} ${shown}%` })}</span>
+  const text = `${arrow} ${shown}%`
+  return { pill: text, pillTitle: t('portal:periodChange', { days, delta: text }) }
 }
 
-/// 标题旁的实时速率：只有单把 key 视角有限流器读数。接近上限（≥80%）转黄、触顶转红。
+/// 页头控制行里的实时速率：只有单把 key 视角有限流器读数。接近上限（≥80%）转黄、触顶转红。
 function LiveBadge({ live, scope }: { live: BreakdownResp['live']; scope: Scope }) {
   const { t, i18n } = useTranslation()
   if (scope === 'user' || live === null) return null
@@ -349,20 +309,22 @@ function balanceTone(me: Me | null, walletSpend: number | undefined, days: numbe
   return 'default'
 }
 
-function balanceSub(
+/// 余额格的胶囊与副行：按日均消费估算时胶囊写「约可用 N 天」、副行交代估算口径（完整句子放胶囊的悬停提示）；
+/// 到期清零、已用完、没有估算依据时只有副行。
+function balanceDisplay(
   me: Me | null,
   walletSpend: number | undefined,
   days: number,
   t: (key: string, opts?: Record<string, unknown>) => string,
-): string {
-  if (me === null) return ''
+): { pill?: string; pillTitle?: string; sub: string } {
+  if (me === null) return { sub: '' }
   const h = balanceHorizon(me, walletSpend, days)
-  if (h === null) return `${t('logs:group')} ${me.group}`
-  if (h.kind === 'depleted') return t('portal:balanceDepleted')
+  if (h === null) return { sub: `${t('logs:group')} ${me.group}` }
+  if (h.kind === 'depleted') return { sub: t('portal:balanceDepleted') }
   if (h.kind === 'expiry') {
-    return t('portal:balanceExpires', { date: dayjs(me.balance_expires_at).format('YYYY-MM-DD') })
+    return { sub: t('portal:balanceExpires', { date: dayjs(me.balance_expires_at).format('YYYY-MM-DD') }) }
   }
-  if (h.days < 1) return t('portal:runwayUnderDay')
-  if (h.days > 999) return t('portal:runwayLong')
-  return t('portal:runwayDays', { n: Math.floor(h.days), days })
+  const left = h.days < 1 ? '<1' : h.days > 999 ? '999+' : String(Math.floor(h.days))
+  const sentence = h.days < 1 ? t('portal:runwayUnderDay') : h.days > 999 ? t('portal:runwayLong') : t('portal:runwayDays', { n: Math.floor(h.days), days })
+  return { pill: t('portal:runwayPill', { n: left }), pillTitle: sentence, sub: t('portal:runwayBasis', { days }) }
 }

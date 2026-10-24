@@ -197,10 +197,10 @@ export function Shell({ nav: rawNav, workspace, children, fitViewport = false, o
           onHelp={onHelp}
         />
         <main id="main-content" tabIndex={-1} className={cn('flex flex-1 flex-col scroll-mt-16 px-4 py-5 outline-none sm:px-6 lg:px-8', fitViewport && 'min-h-0')}>
-          <div className={cn('mx-auto flex w-full max-w-[1600px] flex-col gap-4', fitViewport && 'min-h-0 flex-1 [&>*]:shrink-0', fitViewport && '[&:has([data-slot=portal-overview])]:max-lg:flex-none')}>
+          <div className={cn('mx-auto flex w-full max-w-[1600px] flex-col gap-4', fitViewport && 'min-h-0 flex-1 [&>*]:shrink-0')}>
             {/* 站点公告置于所有页面内容之上：换页不丢，关掉即记住 */}
             <NoticeBanner />
-            <div key={pathname} className={cn('animate-fade-up', fitViewport && 'min-h-0 flex-1', fitViewport && '[&:has([data-slot=portal-overview])]:max-lg:flex-none')}>
+            <div key={pathname} className={cn('animate-fade-up', fitViewport && 'min-h-0 flex-1')}>
               {children}
             </div>
           </div>

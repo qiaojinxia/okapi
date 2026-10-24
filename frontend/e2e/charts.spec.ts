@@ -242,7 +242,7 @@ test('超过 5 个模型时排行折叠其余为一行，可在卡内展开全�
   await expect(models.getByRole('listitem')).toHaveCount(6)
 })
 
-test('悬停金额为 0 的模型行，环形图不整圈变暗；榜外有金额的模型对应「其余」那一段', async ({ page }) => {
+test('悬停金额为 0 的模型行，分段条不整条变暗；榜外有金额的模型对应「其余」那一段', async ({ page }) => {
   await prepare(page)
   await page.route('**/api/me/stats/breakdown?*', (route) => {
     const data = report()
@@ -254,11 +254,11 @@ test('悬停金额为 0 的模型行，环形图不整圈变暗；榜外有金�
   const models = page.getByRole('region', { name: '模型消费排行', exact: true })
   await models.getByRole('button', { name: '全部 7 个模型' }).click()
   await expect(models.getByRole('listitem')).toHaveCount(7)
-  // 环上是金额最高的 5 个（model-6 … model-2）加「其余」一段，按这个顺序
-  const opacities = () => page.locator('[data-slot="model-donut"] circle[opacity]').evaluateAll((circles) => circles.map((circle) => circle.getAttribute('opacity')))
+  // 分段条上是金额最高的 5 个（model-6 … model-2）加「其余」一段，按这个顺序
+  const opacities = () => page.locator('[data-slot="model-share-segment"]').evaluateAll((segments) => segments.map((segment) => (segment as HTMLElement).style.opacity))
   expect(await opacities()).toEqual(['1', '1', '1', '1', '1', '1'])
   await models.getByRole('link', { name: '查看 idle-model 的调用明细', exact: true }).hover()
-  expect(await opacities(), '金额为 0 的行在环上没有段，环不动').toEqual(['1', '1', '1', '1', '1', '1'])
+  expect(await opacities(), '金额为 0 的行在条上没有段，条不动').toEqual(['1', '1', '1', '1', '1', '1'])
   await models.getByRole('link', { name: '查看 model-1 的调用明细', exact: true }).hover()
   expect(await opacities(), '榜外模型并在「其余」段里').toEqual(['0.35', '0.35', '0.35', '0.35', '0.35', '1'])
   await models.getByRole('link', { name: '查看 model-6 的调用明细', exact: true }).hover()
@@ -310,6 +310,76 @@ test('门户刷新更新用量和账户余额，刷新失败不把缓存的用�
   await expect(metrics.getByTitle('US$180.00', { exact: true })).toBeVisible()
 })
 
+test('门户数字条：Tokens、请求数、消费、账户余额四格；涨跌胶囊带完整说明，余额按日均消费估算可用天数', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/portal')
+  const metrics = page.getByRole('region', { name: '用量概览', exact: true })
+  const cells = metrics.locator('[data-slot^="portal-kpi-"]')
+  await expect(cells).toHaveCount(4)
+  await expect(cells.locator('> div:first-child > span:first-child')).toHaveText(['Tokens', '请求数', '消费', '账户余额'])
+  // 三个用量格带「较前 7 天」涨跌胶囊（上一期与本期同形，所以持平），完整说明在悬停提示里；余额格没有
+  await expect(metrics.getByTitle(/^较前 7 天/)).toHaveCount(3)
+  await expect(metrics.getByTitle('较前 7 天 · 0%', { exact: true })).toHaveCount(3)
+  // 余额 US$180.00，近 7 天钱包日均 US$0.39：约可用 466 天，不到两周才转黄、不到三天才转红
+  const balance = metrics.locator('[data-slot="portal-kpi-balance"]')
+  await expect(balance).toContainText('约可用 466 天')
+  await expect(balance).toContainText('按近 7 天日均消费估算')
+  await expect(balance.getByTitle('US$180.00', { exact: true })).not.toHaveClass(/text-(warning|destructive)/)
+  await expect(metrics.locator('[data-slot="portal-kpi-requests"]')).toContainText('日均')
+  await expect(metrics.locator('[data-slot="sparkline"]')).toHaveCount(3)
+})
+
+test('门户数字条与调用质量条随容器宽度折成 4 / 2 / 1 列，四格不出现孤格', async ({ page }) => {
+  await prepare(page)
+  for (const [width, columns] of [[1440, 4], [768, 2], [390, 1]] as const) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/portal')
+    for (const name of ['用量概览', '调用质量']) {
+      const strip = page.getByRole('region', { name, exact: true })
+      await expect(strip.locator('> div')).toHaveCount(4)
+      const rows = await strip.locator('> div').evaluateAll((nodes) => [...new Set(nodes.map((node) => Math.round(node.getBoundingClientRect().y)))].length)
+      expect(rows, `${name} @${width}`).toBe(4 / columns)
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  }
+})
+
+test('门户趋势卡的大字合计与口径一致，模型排行的分段条按金额占比画', async ({ page }) => {
+  await prepare(page)
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.goto('/portal')
+  const total = page.locator('[data-slot="trend-total"]')
+  await expect(total).toHaveText('US$2.70')
+  const metric = page.getByRole('group', { name: '图表指标', exact: true })
+  await metric.getByRole('button', { name: '请求数', exact: true }).click()
+  await expect(total).toHaveText('540')
+  await metric.getByRole('button', { name: '实际消费', exact: true }).click()
+  await expect(total).toHaveText('US$2.70')
+  // 近 7 天 6 个有数据的日子：gpt-5.1 合计 US$1.45、claude-sonnet-4.5 合计 US$1.25，分段宽度之比 = 金额之比
+  const segments = page.locator('[data-slot="model-share-segment"]')
+  await expect(segments).toHaveCount(2)
+  await expect(segments.first()).toHaveAttribute('data-key', 'gpt-5.1')
+  const widths = await segments.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().width))
+  expect(Math.abs(widths[0] / widths[1] - 1.45 / 1.25)).toBeLessThan(0.03)
+  await expect(page.getByRole('region', { name: '模型消费排行', exact: true })).toContainText('2 个模型 · 共 US$2.70')
+})
+
+test('门户趋势口径用键盘切换后焦点仍在页签上，数据表随口径回到图', async ({ page }) => {
+  await prepare(page)
+  await page.goto('/portal')
+  const metrics = page.getByRole('group', { name: '图表指标', exact: true })
+  const tokens = metrics.getByRole('button', { name: 'Token', exact: true })
+  await tokens.focus()
+  await tokens.press('Enter')
+  await expect(tokens).toHaveAttribute('aria-pressed', 'true')
+  await expect(tokens).toBeFocused()
+  const plot = page.getByRole('group', { name: '用量趋势', exact: true })
+  await plot.getByRole('button', { name: '数据表' }).click()
+  await expect(plot.getByRole('table')).toBeVisible()
+  await metrics.getByRole('button', { name: '请求数', exact: true }).click()
+  await expect(plot.getByRole('table')).toHaveCount(0)
+})
+
 for (const width of [390, 1280]) {
   test(`门户 ${width}px：已接入用户首屏概览、趋势和日期布局`, async ({ page }) => {
     await prepare(page)
@@ -322,28 +392,30 @@ for (const width of [390, 1280]) {
     if (width === 1280) {
       await expect(page.getByRole('region', { name: '用量概览', exact: true })).toBeInViewport({ ratio: 1 })
       await expect(page.getByRole('region', { name: '调用质量', exact: true })).toBeInViewport({ ratio: 1 })
-      await expect(page.getByLabel('趋势绘图区', { exact: true })).toBeInViewport({ ratio: 1 })
-      await expect(page.getByRole('region', { name: '模型消费排行', exact: true })).toBeInViewport({ ratio: 1 })
+      // 页面自然向下流动：趋势在首屏下沿露出一截，趋势与排行向下滚动即可完整看到
+      await expect(page.getByLabel('趋势绘图区', { exact: true })).toBeInViewport()
+      for (const panel of [page.locator('#portal-trend'), page.getByRole('region', { name: '模型消费排行', exact: true })]) {
+        await panel.scrollIntoViewIfNeeded()
+        await expect(panel).toBeInViewport({ ratio: 0.98 })
+      }
     }
     await page.screenshot({ path: `test-results/portal-overview-${width}.png`, fullPage: true, animations: 'disabled' })
   })
 }
 
-test('门户 1440×900：趋势与模型排行同高、底边撑到视口底部且页面不溢出，数字卡带迷你趋势', async ({ page }) => {
+test('门户 1440×900：趋势与模型排行等宽同高并排，页面不横向溢出，三格数字带迷你趋势', async ({ page }) => {
   await prepare(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.route('**/api/me/keys?*', (route) => route.fulfill({ json: { total: 1, data: [{ used_micro: 2700000, requests: 540, last_used_at: '2026-09-04T10:00:00Z' }] } }))
   await page.goto('/portal')
   await expect(page.locator('.recharts-surface').first()).toBeVisible()
-  const bottom = async (selector: string) => {
-    const box = await page.locator(selector).boundingBox()
-    return box ? box.y + box.height : 0
-  }
+  const frame = async (selector: string) => (await page.locator(selector).boundingBox()) ?? { x: 0, y: 0, width: 0, height: 0 }
   // 入场动画（淡入上移）结束后才量，免得读到位移中的值
-  await expect.poll(async () => Math.round(await bottom('#portal-models'))).toBeGreaterThan(900 - 48)
-  expect(Math.abs((await bottom('#portal-trend')) - (await bottom('#portal-models')))).toBeLessThan(1.5)
-  expect(await bottom('#portal-models')).toBeLessThanOrEqual(900)
-  expect(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight)).toBe(true)
+  await expect.poll(async () => {
+    const [trend, models] = [await frame('#portal-trend'), await frame('#portal-models')]
+    return trend.width > 0 && Math.abs(trend.y - models.y) < 1.5 && Math.abs(trend.y + trend.height - models.y - models.height) < 1.5 && Math.abs(trend.width - models.width) < 1.5
+  }).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await expect(page.locator('[data-slot="sparkline"]')).toHaveCount(3)
 })
 
