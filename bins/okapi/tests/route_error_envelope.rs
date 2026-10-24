@@ -117,7 +117,12 @@ fn probe_request(
 ) -> reqwest::RequestBuilder {
     let mut path = fill_params(&endpoint.path);
     let websocket = endpoint.surface == "gateway" && endpoint.path == "/v1/realtime";
-    if websocket || endpoint.path == "/admin/diagnose/route" {
+    if websocket
+        || matches!(
+            endpoint.path.as_str(),
+            "/admin/diagnose/route" | "/admin/pricing/catalog/lookup"
+        )
+    {
         path.push_str("?model=audit-model");
     } else if endpoint.path == "/admin/stats/entity-usage" {
         path.push_str("?kind=user&ids=1");

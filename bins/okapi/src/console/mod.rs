@@ -40,6 +40,7 @@ pub mod pay;
 mod performance_source;
 pub mod playground;
 pub mod portal;
+mod pricing_catalog;
 mod profile;
 pub mod query;
 pub mod ratio_sync;
@@ -349,6 +350,15 @@ fn pricing_routes() -> ConsoleRouter {
         // 上游倍率在线同步（§11.36）：先看差异，再勾选应用
         .route("/admin/pricing/sync/fetch", post(ratio_sync::fetch))
         .route("/admin/pricing/sync/apply", post(ratio_sync::apply))
+        // 内置价目目录的建议价 / 联想（§11.48）：模型表单的输入辅助，只读
+        .route(
+            "/admin/pricing/catalog/lookup",
+            get(pricing_catalog::lookup),
+        )
+        .route(
+            "/admin/pricing/catalog/search",
+            get(pricing_catalog::search),
+        )
 }
 
 /// 用户与令牌管理 + 权限分级（角色 / 权限点清单）。
