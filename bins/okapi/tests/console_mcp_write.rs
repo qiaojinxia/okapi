@@ -197,6 +197,14 @@ async fn mcp_write_full_scenario() {
     )
     .await;
     assert_eq!(toggled["result"]["structuredContent"]["status"], 2);
+    // 不存在的渠道：all 范围不查属主，此前这里照样回 ok 还写一条审计；REST 版回 404（下面的审计计数也盯着它）
+    let ghost = call(
+        &env,
+        "channel_toggle",
+        json!({"channel_id": i64::MAX, "enable": false}),
+    )
+    .await;
+    assert_tool_error(&ghost, "not_found");
 
     // 测活（不可达上游 → ok=false 带 error_code）
     let probed = call(&env, "channel_test", json!({"channel_id": channel_id})).await;

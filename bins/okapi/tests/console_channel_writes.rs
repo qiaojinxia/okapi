@@ -572,3 +572,59 @@ async fn cache_flush_scopes_take_effect() {
         "刷 auth 后停用的 key 仍能用——这个作用域没有生效"
     );
 }
+
+/// 渠道的模型清单和（更新时的）地址入库前先规整：带空白的模型名永远匹配不上请求里的名字，
+/// 渠道看起来配好了却不接这个模型；带空白的地址会拼出坏 URL。空清单 / 空项直接 400。
+#[tokio::test]
+async fn channel_models_and_address_are_normalized_on_write() {
+    let _serial = SERIAL.lock().await;
+    let bed = setup().await;
+    let create = |models: Value| {
+        admin_post(
+            &bed,
+            "/admin/channels",
+            json!({"name": format!("ccw-norm-{}", bed.suffix), "provider": "openai",
+                "api_base": "https://api.openai.com/v1", "credential": "sk-norm", "models": models}),
+        )
+    };
+    for bad in [json!([]), json!(["  "]), json!(["ok", ""])] {
+        let (status, body) = create(bad.clone()).await;
+        assert_eq!(status, 400, "{bad}: {body}");
+        assert_eq!(body["error"]["param"], "models", "{bad}: {body}");
+    }
+    let (status, body) = create(json!([" m-a ", "m-a", "m-b"])).await;
+    assert_eq!(status, 200, "{body}");
+    let channel_id = body["channel_id"].as_i64().unwrap();
+    let stored: Value = sqlx::query_scalar("SELECT models FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_one(&bed.pg)
+        .await
+        .unwrap();
+    assert_eq!(stored, json!(["m-a", "m-b"]), "去空白、去重、保持顺序");
+
+    let patch = |body: Value| {
+        reqwest::Client::new()
+            .patch(format!(
+                "http://{}/admin/channels/{channel_id}",
+                bed.console
+            ))
+            .bearer_auth(&bed.admin_token)
+            .json(&body)
+            .send()
+    };
+    let resp =
+        patch(json!({"models": [" m-c ", "m-c"], "api_base": " https://api.openai.com/v1/ "}))
+            .await
+            .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (models, api_base): (Value, String) =
+        sqlx::query_as("SELECT models, api_base FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .fetch_one(&bed.pg)
+            .await
+            .unwrap();
+    assert_eq!(models, json!(["m-c"]));
+    assert_eq!(api_base, "https://api.openai.com/v1/", "只去首尾空白");
+    let resp = patch(json!({"models": ["m-c", " "]})).await.unwrap();
+    assert_eq!(resp.status(), 400, "更新时空项同样拒绝");
+}

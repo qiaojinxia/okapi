@@ -337,3 +337,43 @@ async fn channel_test_does_not_follow_redirects() {
     );
     assert_eq!(leaked.load(Ordering::SeqCst), 0, "重定向目标不得被请求");
 }
+
+/// 测活和模型发现先取启用的 key：id 最小的那把如果已停用 / 失效，测出来的 401 会把运维引到
+/// 「渠道坏了」，其实别的 key 好好的。
+#[tokio::test]
+async fn channel_test_prefers_an_enabled_key() {
+    let env = setup().await;
+    let id = mk_channel(&env, "bad-credential", &format!("http://{}/v1", env.mock)).await;
+    sqlx::query("UPDATE channel_keys SET status = 2 WHERE channel_id = $1")
+        .bind(id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_keys (channel_id, credential_ciphertext, status) VALUES ($1, $2, 1)",
+    )
+    .bind(id)
+    .bind(b"good-credential".as_slice())
+    .execute(&env.pg)
+    .await
+    .unwrap();
+
+    let probed = test_channel(&env, id).await;
+    assert_eq!(
+        probed["ok"], true,
+        "停用的第一把 key 不该决定测活结果：{probed}"
+    );
+    let models: Value = reqwest::Client::new()
+        .get(format!(
+            "http://{}/admin/channels/{id}/fetch-models",
+            env.addr
+        ))
+        .bearer_auth(&env.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(models["models"], json!(["gpt-x-1", "gpt-x-2"]), "{models}");
+}

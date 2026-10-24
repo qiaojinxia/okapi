@@ -290,6 +290,18 @@ async fn custom_role_create_list_and_assign() {
     let (status, _) = req(&env, "GET", "/admin/users", &env.user_token, None).await;
     assert_eq!(status, 200, "补上 user.read 后应即时放行（鉴权缓存已失效）");
 
+    // 不存在的自定义角色：404，不是撞外键的 500
+    let (status, body) = req(
+        &env,
+        "POST",
+        &format!("/admin/users/{}/role", env.user_id),
+        &env.super_token,
+        Some(serde_json::json!({ "role": 10, "admin_role_id": i64::MAX })),
+    )
+    .await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["param"], "admin_role_id", "{body}");
+
     // 非超管不得改角色（防自我提权）
     let (status, _) = req(
         &env,

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT c.provider, c.api_base, c.model_mapping, c.settings,\n               NULLIF(c.settings ->> 'api_version', '') AS api_version,\n               ck.id AS channel_key_id, ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1 AND c.deleted_at IS NULL\n        ORDER BY ck.id\n        LIMIT 1\n        ",
+  "query": "\n        SELECT c.provider, c.api_base, c.model_mapping, c.settings,\n               NULLIF(c.settings ->> 'api_version', '') AS api_version,\n               ck.id AS channel_key_id, ck.credential_ciphertext\n        FROM channels c\n        JOIN channel_keys ck ON ck.channel_id = c.id\n        WHERE c.id = $1 AND c.deleted_at IS NULL\n        ORDER BY (ck.status = 1) DESC, ck.id\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -91,5 +91,5 @@
       false
     ]
   },
-  "hash": "06d2ef6bdc6d0bba592507efdc7a5da1427e86b0fb4546fffa44c0fbd82156e3"
+  "hash": "ef72362f0f06fd572e141ff12487ec466c6d48c916c4d6716ad3a6ea570d50b5"
 }

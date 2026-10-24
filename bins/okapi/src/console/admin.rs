@@ -236,6 +236,22 @@ pub(super) async fn normalize_members(
     Ok(members)
 }
 
+/// 渠道的模型清单入库前规整：每项去首尾空白、空项拒绝（400 `models`）、重复项去掉（保持首次出现的顺序）。
+/// 带空白的模型名永远匹配不上请求里的名字，渠道看起来配好了却不接这个模型。
+pub(super) fn normalize_models(raw: &[String]) -> Result<Vec<String>, AppError> {
+    let mut models: Vec<String> = Vec::with_capacity(raw.len());
+    for model in raw {
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(AppError::bad_request().with_param("models"));
+        }
+        if !models.iter().any(|known| known == model) {
+            models.push(model.to_owned());
+        }
+    }
+    Ok(models)
+}
+
 pub async fn create_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -254,7 +270,11 @@ pub async fn create_channel(
     super::egress::validate_binding(&state, &prepared.egress, &actor, scope).await?;
     let credential = super::channel_credentials::normalize(&req.provider, &req.credential)?;
     let name = super::identifiers::ensure_display_name("name", &req.name, 128)?;
-    let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
+    let models = normalize_models(&req.models)?;
+    if models.is_empty() {
+        return Err(AppError::bad_request().with_param("models"));
+    }
+    let models: Vec<&str> = models.iter().map(String::as_str).collect();
     let (channel_id, channel_key_id) = okapi_store::provision::create_channel_configured(
         &state.pg,
         okapi_store::provision::ChannelCreate {
@@ -287,7 +307,7 @@ pub async fn create_channel(
         &actor,
         "channel.create",
         &channel_id.to_string(),
-        json!({ "name": name, "provider": req.provider, "models": req.models, "pools": pool_codes,
+        json!({ "name": name, "provider": req.provider, "models": models, "pools": pool_codes,
                 "egress": prepared.egress }),
     )
     .await;
@@ -771,10 +791,12 @@ pub async fn update_channel(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    ExtractJson(req): ExtractJson<PatchChannelReq>,
+    ExtractJson(mut req): ExtractJson<PatchChannelReq>,
 ) -> Result<Json<Value>, AppError> {
     let (actor, scope) = guard_scoped(&state, &headers, permissions::CHANNEL_WRITE).await?;
     ensure_channel_owner(&state, id, &actor, scope).await?;
+    // 校验过的地址和落库的是同一个字符串：URL 解析会吞掉首尾空白，原样入库的空白却会拼进请求路径
+    req.api_base = req.api_base.map(|base| base.trim().to_owned());
 
     if let Some(provider) = &req.provider
         && okapi_providers::registry::lookup(provider).is_none()
@@ -852,13 +874,12 @@ pub async fn update_channel(
             return Err(AppError::bad_request().with_param(field));
         }
     }
-    let models = match &req.models {
-        Some(list) if list.iter().any(|m| m.trim().is_empty()) => {
-            return Err(AppError::bad_request().with_param("models"));
-        }
-        Some(list) => Some(json!(list)),
-        None => None,
-    };
+    let models = req
+        .models
+        .as_deref()
+        .map(normalize_models)
+        .transpose()?
+        .map(|list| json!(list));
     ensure_cost_milli(req.cost_milli)?;
 
     let name = req
@@ -2429,6 +2450,20 @@ pub async fn assign_role(
     {
         return Err(AppError::bad_request().with_param("role"));
     }
+    // admin_role_id 有外键：不存在的子角色会让 UPDATE 撞约束变成 500，先挡成 404
+    if let Some(role_id) = req.admin_role_id {
+        let known: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM admin_roles WHERE id = $1)")
+                .bind(role_id)
+                .fetch_one(&state.pg)
+                .await
+                .map_err(okapi_store::StoreError::from)?;
+        if !known {
+            return Err(
+                AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND).with_param("admin_role_id")
+            );
+        }
+    }
     let hit = okapi_store::admin::assign_user_role(&state.pg, user_id, req.role, req.admin_role_id)
         .await?;
     if !hit {
@@ -3307,6 +3342,7 @@ pub(crate) async fn probe_channel(
     channel_id: i64,
     model: Option<&str>,
 ) -> Result<Value, AppError> {
+    // 先取启用的 key：停用 / 失效的 key 测出来的 401 会把运维引到「渠道坏了」，其实别的 key 好好的
     let row = sqlx::query!(
         r#"
         SELECT c.provider, c.api_base, c.model_mapping, c.settings,
@@ -3315,7 +3351,7 @@ pub(crate) async fn probe_channel(
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
-        ORDER BY ck.id
+        ORDER BY (ck.status = 1) DESC, ck.id
         LIMIT 1
         "#,
         channel_id
@@ -3443,7 +3479,7 @@ pub async fn fetch_channel_models(
         FROM channels c
         JOIN channel_keys ck ON ck.channel_id = c.id
         WHERE c.id = $1 AND c.deleted_at IS NULL
-        ORDER BY ck.id
+        ORDER BY (ck.status = 1) DESC, ck.id
         LIMIT 1
         "#,
         channel_id

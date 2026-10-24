@@ -801,14 +801,22 @@ async fn channel_create(
     super::ssrf::validate_credential(state, credential).await?;
     let credential = super::channel_credentials::normalize(provider, credential)?;
     let name = super::identifiers::ensure_display_name("name", name, 128)?;
-    let models: Vec<&str> = args
+    let requested: Vec<String> = args
         .get("models")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default();
+    // 与 REST 同一套规整：去空白、去重、空项拒绝
+    let models = super::admin::normalize_models(&requested)?;
     if models.is_empty() {
         return Err(AppError::bad_request().with_param("models"));
     }
+    let models: Vec<&str> = models.iter().map(String::as_str).collect();
     // own 范围建的渠道不入池（admin::ensure_pool_scope）：同一事务里建成孤儿，不留"先进 default 再摘"的窗口
     let orphan: &[okapi_store::admin::PoolMember] = &[];
     let pools =
@@ -864,7 +872,13 @@ async fn channel_toggle(
     )
     .await?;
     let status: i16 = if enable { 1 } else { 2 };
-    okapi_store::admin::set_channel_status(&state.pg, channel_id, status).await?;
+    // all 范围不查属主，不存在的渠道在这里才露馅：与 REST 一样回 404，别报成功还写一条审计
+    if !okapi_store::admin::set_channel_status(&state.pg, channel_id, status).await? {
+        return Err(AppError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            okapi_api::codes::NOT_FOUND,
+        ));
+    }
     state.invalidate_routing_caches();
     mcp_audit(
         state,
