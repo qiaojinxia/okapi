@@ -7,6 +7,7 @@ import { Segmented } from '@/components/ui/segmented'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/table'
 import { Pagination } from '@/components/ui/pagination'
 import { clampOffset, DEFAULT_PAGE_SIZE, PAGE_SIZES } from '@/hooks/use-pagination'
+import { useMediaQuery } from '@/hooks/use-media-query'
 import { downloadCsv } from '@/lib/csv'
 import { cn } from '@/lib/utils'
 
@@ -54,6 +55,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const offset = clampOffset(tableOffset, tableLimit, data.length)
   const tableRows = paginateTable ? data.slice(offset, offset + tableLimit) : data
   const [hidden, setHidden] = useState<string[]>([])
+  const showBarLabels = useMediaQuery('(min-width: 640px)')
   const visible = series.filter((s) => !hidden.includes(s.key))
   const axisMinimum = (right = false) => {
     const onAxis = visible.filter((s) => !!(secondaryAxis && s.axis === 'right') === right)
@@ -65,10 +67,10 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
   const seriesUnit = (s: ChartSeries) => s.axis === 'right' && secondaryAxis ? secondaryAxis.unit : unit
   const seriesFormat = (s: ChartSeries | undefined) => s?.axis === 'right' && secondaryAxis ? secondaryAxis.format : format
   const seriesLabel = (s: ChartSeries) => secondaryAxis && seriesUnit(s) !== s.label ? `${s.label} (${seriesUnit(s)})` : s.label
-  // 柱顶标数值：柱子不多时直接把每天的数写在柱顶，不用悬停也能读。堆叠时只在最上面一段标整根柱子的合计。
-  // 柱子太密（如近 30 天、按小时）时文字会挤在一起，留给悬停提示。
+  // 宽屏且柱子不多时直接把数值写在柱顶；堆叠时只在最上面一段标整根柱子的合计。
+  // 手机或密集团（如近 30 天、按小时）留给悬停提示，避免相邻标签互相覆盖。
   const leftBars = type === 'bar' && !line ? visible.filter((s) => !(secondaryAxis && s.axis === 'right')) : []
-  const barLabels = leftBars.length > 0 && data.length <= MAX_BAR_LABELS
+  const barLabels = showBarLabels && leftBars.length > 0 && data.length <= MAX_BAR_LABELS
   const barTotal = (index: number) => leftBars.reduce((sum, s) => sum + (Number(data[index]?.[s.key]) || 0), 0)
   // 堆叠时合计写在这根柱子实际最上面的非零段上：最上层序列当天为 0 时它没有柱形，挂在它上面就显示不出来
   const topBar = (index: number) => leftBars.findLast((s) => (Number(data[index]?.[s.key]) || 0) !== 0)
@@ -80,7 +82,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
     if (stacked && topBar(index) !== s) return null
     const value = stacked ? barTotal(index) : Number(data[index]?.[s.key]) || 0
     if (!value) return null
-    return <text x={Number(props.x) + Number(props.width) / 2} y={Number(props.y) - 4} textAnchor="middle" fontSize={10} fill="var(--color-muted-foreground)" pointerEvents="none" className="tabular-nums">{format(value)}</text>
+    return <text x={Number(props.x) + Number(props.width) / 2} y={Number(props.y) - 5} textAnchor="middle" fontSize={11} fill="var(--color-muted-foreground)" pointerEvents="none" className="tabular-nums">{format(value)}</text>
   }
   const exportRows = () => downloadCsv('usage-chart', [t('charts:date'), ...series.map((s) => `${s.label} (${seriesUnit(s)})`)], data.map((d) => [d.bucket, ...series.map((s) => d[s.key])]))
   const legend = <div role="group" aria-label={t('charts:legend')} className={cn('flex flex-wrap gap-1.5', !secondaryAxis && 'border-t border-border/60', !secondaryAxis && (compact ? 'pt-1' : 'pt-3'))}>
@@ -112,7 +114,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
           <ResponsiveContainer width="100%" height="100%" minWidth={0} className={fill ? 'lg:absolute lg:inset-0' : undefined}>
             <ComposedChart data={data} margin={{ top: barLabels ? 20 : 10, right: 10, bottom: 4, left: 0 }} accessibilityLayer>
               <defs>{series.map((s, i) => <linearGradient key={s.key} id={`${id}-${i}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={s.color} stopOpacity={0.28} /><stop offset="100%" stopColor={s.color} stopOpacity={0.025} /></linearGradient>)}</defs>
-              <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 5" strokeOpacity={0.7} />
+              <CartesianGrid vertical={false} stroke="var(--color-border)" strokeDasharray="3 5" strokeOpacity={0.45} />
               <XAxis dataKey="bucket" tickFormatter={(value: string) => value.length > 10 ? `${value.slice(5, 10)} ${value.slice(11, 16)}` : value.slice(5)} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} minTickGap={32} tickMargin={10} />
               <YAxis width={64} domain={percent ? [0, 100] : [axisMinimum(), 'auto']} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} tickFormatter={(n) => `${chartNumber(Number(n), i18n.language)}${percent ? '%' : ''}`} axisLine={false} tickLine={false} tickMargin={8} />
               {secondaryAxis && <YAxis yAxisId="right" orientation="right" width={56} domain={[axisMinimum(true), 'auto']} tick={{ fontSize: 11, fill: 'var(--color-muted-foreground)' }} tickFormatter={(n) => chartNumber(Number(n), i18n.language)} axisLine={false} tickLine={false} tickMargin={8} />}
@@ -124,7 +126,7 @@ export function TimeChart({ data, series, format, unit, label, stacked = false, 
               {visible.map((s) => {
                 const shared = { dataKey: s.key, name: s.label, stroke: s.color, isAnimationActive: false, yAxisId: s.axis === 'right' && secondaryAxis ? 'right' : 0 }
                 return line || (s.axis === 'right' && secondaryAxis) ? <Line key={s.key} {...shared} type="monotone" strokeWidth={2.25} strokeLinecap="round" strokeLinejoin="round" dot={data.length <= 31 ? { r: 3, strokeWidth: 2, stroke: 'var(--color-card)', fill: s.color } : false} activeDot={{ r: 5, strokeWidth: 2, stroke: 'var(--color-card)', fill: s.color }} connectNulls={false} />
-                  : type === 'bar' ? <Bar key={s.key} {...shared} stroke="none" fill={s.color} stackId={stacked ? 'usage' : undefined} maxBarSize={32} radius={stacked ? undefined : [3, 3, 0, 0]}>
+                  : type === 'bar' ? <Bar key={s.key} {...shared} stroke="none" fill={s.color} stackId={stacked ? 'usage' : undefined} maxBarSize={32} radius={stacked ? undefined : [5, 5, 1, 1]}>
                     {partialBucket && data.map((point) => <Cell key={point.bucket} fillOpacity={point.bucket === partialBucket ? 0.4 : 1} />)}
                     {barLabels && leftBars.includes(s) && <LabelList valueAccessor={(entry: { payload?: ChartPoint }) => entry.payload?.bucket} content={barLabel(s)} />}
                   </Bar>

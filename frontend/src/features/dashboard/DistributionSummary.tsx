@@ -96,12 +96,12 @@ function Ranking({ days, range, by, metric, onMetricChange }: { days: number; ra
                   <span className="min-w-0 flex-1">
                     <span className="flex min-w-0 items-baseline justify-between gap-2">
                       <span className="min-w-0 truncate text-xs font-medium" title={name}>{name}</span>
-                      {/* 图例放不下两行时（大屏固定高度、卡片矮）收成单行：金额挪到名称行，次数留在悬停提示里 */}
-                      {metric !== 'requests' && <span className="hidden shrink-0 text-[11px] tabular-nums text-muted-foreground [@container(max-height:16rem)_and_(min-width:28rem)]:inline">{displayValue}</span>}
-                      <span className="shrink-0 text-xs font-semibold tabular-nums">{share === null ? '—' : formatBp(share, locale)}</span>
+                      {/* 宽图例中金额与占比在同一行，名称过长时优先截断名称；窄图例保留第二行金额。 */}
+                      {metric !== 'requests' && <span className="hidden shrink-0 text-[11px] tabular-nums text-muted-foreground [@container(min-width:28rem)]:inline">{displayValue}</span>}
+                      <span className="w-12 shrink-0 text-right text-xs font-semibold tabular-nums">{share === null ? '—' : formatBp(share, locale)}</span>
                     </span>
                     <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] leading-4 tabular-nums text-muted-foreground [@container(max-height:16rem)]:hidden">
-                      {metric !== 'requests' && <><span className="min-w-0 truncate" title={displayValue}>{displayValue}</span><span aria-hidden>·</span></>}
+                      {metric !== 'requests' && <><span className="min-w-0 truncate [@container(min-width:28rem)]:hidden" title={displayValue}>{displayValue}</span><span aria-hidden className="[@container(min-width:28rem)]:hidden">·</span></>}
                       <span className="shrink-0" title={t('admin:dashboardRankingRequests', { n: row.requests.toLocaleString(locale) })}>{calls}</span>
                     </span>
                   </span>

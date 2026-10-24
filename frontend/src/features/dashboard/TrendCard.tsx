@@ -51,7 +51,7 @@ export function TrendCard({ days, range, metric, onMetricChange }: { days: numbe
     </CardHeader>
     <CardContent className="flex flex-1 flex-col px-5 pt-0 pb-3 lg:min-h-0 lg:overflow-y-auto lg:pb-2">
       {q.isPending ? <LoadingState /> : q.isError ? <ErrorState message={describeError(q.error)} onRetry={() => void q.refetch()} /> : !q.data?.data.length ? <EmptyState hint={t('admin:trendEmptyHint')} /> : <>
-        <div className="mb-2 grid grid-cols-2 gap-2 rounded-xl border border-border/55 bg-linear-to-r from-muted/35 to-muted/15 px-3 py-2 sm:grid-cols-3 lg:mb-1 lg:flex lg:flex-wrap lg:justify-between lg:py-[5px] lg:[@media(min-height:900px)]:py-1.5">
+        <div className="mb-2 grid grid-cols-2 gap-2 rounded-xl border border-border/55 bg-muted/25 px-3 py-2 sm:grid-cols-3 lg:mb-1 lg:flex lg:flex-wrap lg:justify-between lg:py-[5px] lg:[@media(min-height:900px)]:py-1.5">
           {summary.map(([name, value]) => <div key={name} className="min-w-0 last:col-span-2 sm:last:col-span-1 lg:flex lg:flex-wrap lg:items-baseline lg:gap-x-1.5"><p className="text-xs text-muted-foreground">{name}</p><p className="mt-1 break-words text-sm font-semibold tabular-nums lg:mt-0 lg:text-[15px]">{value}</p></div>)}
         </div>
         <TimeChart compact fill minPlotHeight={112} key={metric} data={data} label={title} unit={metric === 'amount' ? 'USD' : label} format={format}

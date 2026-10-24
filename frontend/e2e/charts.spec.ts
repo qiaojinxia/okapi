@@ -374,11 +374,20 @@ test('手机和深色图表布局不溢出，提示框遵循深色主题', async
   await page.goto('/portal')
   await expect(page.locator('.recharts-surface').first()).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  // 手机柱宽不足以放下金额标签，保留提示框而不让相邻文字互相覆盖。
+  await expect(page.locator('#portal-trend .recharts-label-list')).toHaveCount(0)
+  // 长页署名跟在内容后面，不再覆盖首屏里的 KPI。
+  const [rankingBox, poweredBox] = await Promise.all([
+    page.locator('#portal-models').boundingBox(),
+    page.locator('main p').filter({ hasText: 'Powered by' }).boundingBox(),
+  ])
+  expect(poweredBox!.y).toBeGreaterThanOrEqual(rankingBox!.y + rankingBox!.height)
   const balance = page.getByTitle('US$180.00', { exact: true })
   expect(await balance.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true)
   await page.screenshot({ path: 'test-results/usage-charts-mobile.png', fullPage: true, animations: 'disabled' })
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.evaluate(() => document.documentElement.classList.add('dark'))
+  await expect(page.locator('#portal-trend .recharts-label-list text').first()).toBeVisible()
   await page.locator('.recharts-surface').first().hover({ position: { x: 400, y: 100 } })
   await expect(page.locator('.recharts-tooltip-wrapper .bg-popover')).toBeVisible()
   await page.evaluate(() => window.scrollTo(0, 0))

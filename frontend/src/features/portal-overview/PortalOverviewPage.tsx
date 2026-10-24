@@ -199,7 +199,7 @@ export function PortalOverviewPage() {
             tone="good"
             label={t('common:tokens')}
             loading={loading}
-            className="@container rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
+            className="@container rounded-2xl border-border/70 bg-card"
             aside={daily && <KpiTrend values={daily.tokens} color="var(--color-success)" />}
             value={<KpiValue value={total ? formatCount(total.tokens, locale) : '—'} trend />}
             sub={<>
@@ -214,7 +214,7 @@ export function PortalOverviewPage() {
             iconClassName="h-8 w-8 rounded-lg bg-chart-1/12 text-chart-1"
             label={t('common:requests')}
             loading={loading}
-            className="@container rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
+            className="@container rounded-2xl border-border/70 bg-card"
             aside={daily && <KpiTrend values={daily.requests} color="var(--color-chart-1)" />}
             value={<KpiValue value={total ? formatCount(total.requests, locale) : '—'} trend />}
             sub={<>
@@ -228,7 +228,7 @@ export function PortalOverviewPage() {
             iconClassName="h-8 w-8 rounded-lg bg-warning/14 text-warning"
             label={t('portal:accountBalance')}
             loading={me.isPending}
-            className="rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
+            className="rounded-2xl border-border/70 bg-card"
             value={<KpiValue value={me.data ? formatUsd(me.data.balance_micro, locale) : '—'} />}
             // 副行按"钱什么时候没"排优先级：到期清零日 vs 按日均烧完的那天，谁更近说谁；
             // 14 天内转黄、3 天内转红。有订阅时再挂一行订阅剩余（§11.28）——请求先扣它。
@@ -252,7 +252,7 @@ export function PortalOverviewPage() {
             iconClassName="h-8 w-8 rounded-lg bg-chart-3/12 text-chart-3"
             label={t('portal:totalSpend')}
             loading={loading}
-            className="@container rounded-2xl border-border/70 bg-linear-to-br from-card via-card to-muted/25"
+            className="@container rounded-2xl border-border/70 bg-card"
             aside={daily && <KpiTrend values={daily.amount} color="var(--color-chart-3)" />}
             value={<KpiValue value={total ? formatUsd(total.amount_micro, locale) : '—'} trend />}
             sub={<>

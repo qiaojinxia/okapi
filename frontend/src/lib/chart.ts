@@ -13,7 +13,7 @@ export const CHART_PALETTE = [
 
 /// Top N 之外的折叠桶：恒用中性灰——"其他"不该比任何具名序列显眼。
 export const OTHER_KEY = '__other'
-export const OTHER_COLOR = 'var(--color-muted-foreground)'
+export const OTHER_COLOR = 'color-mix(in oklch, var(--color-muted-foreground) 45%, var(--color-card))'
 
 export function chartColor(idx: number): string {
   return CHART_PALETTE[idx % CHART_PALETTE.length]

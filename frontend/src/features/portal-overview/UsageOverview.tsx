@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpRight } from 'lucide-react'
 import type { PortalLogSearch } from '@/features/logs/search'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -58,8 +57,8 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
   const minHeight = `${Math.min(30, Math.max(22, 11.5 + listedRows * 3.4))}rem`
   return <div data-slot="usage-overview" style={{ '--usage-min': minHeight } as React.CSSProperties}
     className={cn('grid min-w-0 gap-3 lg:min-h-[var(--usage-min)] lg:grid-cols-12 lg:grid-rows-[minmax(0,1fr)]', className)}>
-    <SpendTrendView className="lg:col-span-7 lg:min-h-0" rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} />
-    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-2xl border-border/70 px-5 py-3 lg:col-span-5 lg:min-h-0">
+    <SpendTrendView className="lg:col-span-8 lg:min-h-0" rows={data.data} days={data.days} window={data.window} metric={metric} onMetricChange={onMetricChange} />
+    <Card id="portal-models" className="flex min-w-0 scroll-mt-4 flex-col rounded-2xl border-border/70 px-5 py-3 lg:col-span-4 lg:min-h-0">
       <section aria-label={t('portal:modelSnapshot')} className="@container flex min-h-0 flex-1 flex-col gap-3">
         <div className="flex shrink-0 items-center justify-between gap-2">
           <h2 className="text-[15px] font-semibold tracking-tight">{t('portal:modelSnapshot')}</h2>
@@ -71,7 +70,7 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
           {/* 卡片够宽（单列布局占满一行）时环形图放左、排行放右，免得下面空一大片；
               大屏列布局时环形图区吃掉卡片的剩余高度，圆环在里面居中并随高度放大（最大 18rem） */}
           <div className="flex shrink-0 items-center justify-center lg:min-h-28 lg:flex-1">
-            <div className="relative mx-auto size-28 shrink-0 @xl:mx-2 @xl:size-36 lg:aspect-square lg:h-full lg:max-h-72 lg:min-h-28 lg:w-auto">
+            <div className="relative mx-auto size-28 shrink-0 @xl:mx-2 @xl:size-36 lg:aspect-square lg:h-full lg:max-h-60 lg:min-h-28 lg:w-auto">
               <Donut slices={slices} total={sum} active={activeSlice} label={t('portal:modelShareChart')} />
               <div aria-hidden className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                 <span className="text-[10px] text-muted-foreground">{t('portal:totalSpend')}</span>
@@ -100,7 +99,6 @@ export function UsageOverview({ data, logSearch, metric, onMetricChange, classNa
                   <div className="flex min-w-0 items-center gap-2 text-[13px]">
                     <span aria-hidden className="w-4 shrink-0 text-center text-[11px] font-medium tabular-nums text-muted-foreground">{index + 1}</span>
                     <span className="min-w-0 flex-1 truncate font-medium" title={model.model}>{model.model}</span>
-                    <ArrowUpRight aria-hidden className="h-3 w-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                     <span className="shrink-0 font-semibold tabular-nums">{formatUsd(model.amount_micro, locale)}</span>
                     <span className="w-12 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">{share(model.amount_micro)}</span>
                   </div>
