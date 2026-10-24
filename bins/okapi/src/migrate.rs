@@ -78,23 +78,70 @@ fn require_export(dir: &Path, files: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_jsonl(dir: &Path, name: &str) -> anyhow::Result<Vec<Value>> {
+/// 一份 JSONL 逐行读出来的行：内存里始终只有当前这一行，导出文件再大也不会整份读进来。
+struct JsonlRows {
+    name: String,
+    lines: Option<std::io::Lines<std::io::BufReader<std::fs::File>>>,
+    lineno: usize,
+}
+
+impl JsonlRows {
+    fn open(path: &Path, name: &str) -> anyhow::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        Ok(Self {
+            name: name.to_owned(),
+            lines: Some(std::io::BufRead::lines(std::io::BufReader::new(file))),
+            lineno: 0,
+        })
+    }
+}
+
+impl Iterator for JsonlRows {
+    type Item = anyhow::Result<Value>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let line = self.lines.as_mut()?.next()?;
+            self.lineno += 1;
+            let parsed = line
+                .map_err(|e| anyhow::anyhow!("{}:{} 读取失败：{e}", self.name, self.lineno))
+                .and_then(|line| {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        return Ok(None);
+                    }
+                    serde_json::from_str(line).map(Some).map_err(|e| {
+                        anyhow::anyhow!("{}:{} 非法 JSON：{e}", self.name, self.lineno)
+                    })
+                });
+            match parsed {
+                Ok(None) => {}
+                Ok(Some(value)) => return Some(Ok(value)),
+                Err(error) => {
+                    // 出错之后不再往下读：后面的行已经没有意义
+                    self.lines = None;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+}
+
+/// 读一份导出文件（不存在 = 没有行）。先整份扫一遍校验（只解析、不留存），非法行在这个文件的
+/// 任何一行写库之前就报出来；再返回惰性迭代器，边读边处理。
+fn read_jsonl(dir: &Path, name: &str) -> anyhow::Result<JsonlRows> {
     let path = dir.join(name);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(JsonlRows {
+            name: name.to_owned(),
+            lines: None,
+            lineno: 0,
+        });
     }
-    let text = std::fs::read_to_string(&path)?;
-    let mut rows = Vec::new();
-    for (lineno, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| anyhow::anyhow!("{name}:{} 非法 JSON：{e}", lineno + 1))?;
-        rows.push(value);
+    for row in JsonlRows::open(&path, name)? {
+        row?;
     }
-    Ok(rows)
+    JsonlRows::open(&path, name)
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -132,6 +179,7 @@ pub async fn run_newapi(
     // 源 id → 新 id（tokens 关联用）
     let mut user_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     for row in read_jsonl(dir, "users.jsonl")? {
+        let row = row?;
         let Some(username) = s(&row, "username") else {
             stats.skipped.push(format!("users: 缺 username（{row}）"));
             continue;
@@ -214,6 +262,7 @@ pub async fn run_newapi(
 
     // ---- tokens → api_keys ----
     for row in read_jsonl(dir, "tokens.jsonl")? {
+        let row = row?;
         let Some(key) = s(&row, "key") else {
             stats.skipped.push("tokens: 缺 key".to_owned());
             continue;
@@ -282,6 +331,7 @@ pub async fn run_newapi(
 
     // ---- channels ----
     for row in read_jsonl(dir, "channels.jsonl")? {
+        let row = row?;
         let Some(name) = s(&row, "name") else {
             stats.skipped.push("channels: 缺 name".to_owned());
             continue;
@@ -713,6 +763,7 @@ pub async fn run_okapi_old(
     // ---- users ----（uuid → 新 id）
     let mut user_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     for row in read_jsonl(dir, "users.jsonl")? {
+        let row = row?;
         let Some(email) = s(&row, "email") else {
             stats.skipped.push(format!("users: 缺 email（{row}）"));
             continue;
@@ -810,6 +861,7 @@ pub async fn run_okapi_old(
 
     // ---- api_keys ----（bcrypt 不可逆：依赖 key_encrypted 解密重哈希）
     for row in read_jsonl(dir, "api_keys.jsonl")? {
+        let row = row?;
         let Some(new_user) = s(&row, "user_id").and_then(|src| user_map.get(src).copied()) else {
             stats
                 .skipped
@@ -870,12 +922,14 @@ pub async fn run_okapi_old(
     let mut providers: std::collections::HashMap<i64, (String, String)> =
         std::collections::HashMap::new();
     for row in read_jsonl(dir, "providers.jsonl")? {
+        let row = row?;
         if let (Some(id), Some(code)) = (i(&row, "id"), s(&row, "provider_code")) {
             let endpoint = s(&row, "api_endpoint").unwrap_or("").to_owned();
             providers.insert(id, (code.to_owned(), endpoint));
         }
     }
     for row in read_jsonl(dir, "provider_api_keys.jsonl")? {
+        let row = row?;
         let Some((code, endpoint)) = i(&row, "provider_id").and_then(|id| providers.get(&id))
         else {
             stats
@@ -974,6 +1028,7 @@ pub async fn run_okapi_old(
     // ---- models → model_pricing ----（token: USD/1K → 倍率；request: → per_call）
     let mut seen_models: std::collections::HashSet<String> = std::collections::HashSet::new();
     for row in read_jsonl(dir, "models.jsonl")? {
+        let row = row?;
         let Some(code) = s(&row, "model_code") else {
             stats.skipped.push("models: 缺 model_code".to_owned());
             continue;
@@ -1057,6 +1112,48 @@ pub async fn run_okapi_old(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("okapi-jsonl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 导出文件逐行读：空行跳过、缺文件当没有行；非法行在任何一行被处理之前整体报错并带上行号。
+    #[test]
+    fn jsonl_is_read_row_by_row_and_validated_before_the_first_row_is_handed_out() {
+        let dir = scratch_dir();
+        std::fs::write(dir.join("users.jsonl"), "{\"id\":1}\n\n  \n{\"id\":2}\n").unwrap();
+        let ids: Vec<i64> = read_jsonl(&dir, "users.jsonl")
+            .unwrap()
+            .map(|row| row.unwrap()["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [1, 2]);
+        assert_eq!(read_jsonl(&dir, "absent.jsonl").unwrap().count(), 0);
+
+        // 第 3 行非法：一行都不放出来，报错带文件名与行号
+        std::fs::write(dir.join("tokens.jsonl"), "{\"id\":1}\n{\"id\":2}\n{oops\n").unwrap();
+        let Err(error) = read_jsonl(&dir, "tokens.jsonl") else {
+            panic!("非法行必须在放出任何一行之前报错");
+        };
+        assert!(
+            error.to_string().starts_with("tokens.jsonl:3 非法 JSON"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 一行一行地读：很多行的文件迭代时每行都是独立解析出来的，不需要先整份进内存。
+    #[test]
+    fn a_large_export_is_walked_without_being_collected() {
+        let dir = scratch_dir();
+        let line = format!("{{\"pad\":\"{}\"}}\n", "x".repeat(1000));
+        std::fs::write(dir.join("channels.jsonl"), line.repeat(2_000)).unwrap();
+        let mut rows = read_jsonl(&dir, "channels.jsonl").unwrap();
+        assert!(rows.next().unwrap().is_ok());
+        assert_eq!(rows.lineno, 1, "只读到第一行，其余还留在文件里");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// RFC 7914 §11 PBKDF2-HMAC-SHA256 测试向量（P="passwd" S="salt" c=1 dkLen=64 的前 32B）。
     #[test]
