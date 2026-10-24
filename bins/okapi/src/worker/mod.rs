@@ -899,6 +899,7 @@ async fn reconcile_scoped(
 ) -> anyhow::Result<Vec<BalanceDrift>> {
     let mut drifts = Vec::new();
     let mut cursor = 0_i64;
+    let (mut skipped, mut last_error) = (0_u64, None::<anyhow::Error>);
     loop {
         let mut history = okapi_store::history::read(pg).await?;
         let rows = reconcile_page(&mut history, limit.clamp(1, 1000), cursor, since).await?;
@@ -910,7 +911,16 @@ async fn reconcile_scoped(
         }
         cursor = rows.last().map_or(cursor, |row| row.user_id);
         for row in rows {
-            let (wallet, sub) = redis_effective(ledger, row.user_id).await?;
+            // 一个用户的 Redis 读失败只跳过他：整轮报错会把前面几页已扫出的漂移一起丢掉，告警晚一轮。
+            // 跳过的人数最后汇总成一条日志（Redis 整个不可用时不必每个用户刷一行）
+            let (wallet, sub) = match redis_effective(ledger, row.user_id).await {
+                Ok(effective) => effective,
+                Err(error) => {
+                    skipped += 1;
+                    last_error = Some(error);
+                    continue;
+                }
+            };
             if wallet != row.events_sum
                 || row.balance_micro != row.events_sum
                 || sub != row.sub_events_sum
@@ -925,6 +935,9 @@ async fn reconcile_scoped(
                 });
             }
         }
+    }
+    if let Some(error) = last_error {
+        tracing::warn!(skipped, %error, "reconcile skipped users whose Redis balance could not be read");
     }
     Ok(drifts)
 }
@@ -1082,8 +1095,13 @@ pub async fn repair_drifted(
         {
             continue;
         }
-        if let Some(fixed) = repair_balance(pg, ledger, d.user_id).await? {
-            out.push(fixed);
+        // 一个用户修不了（锁超时、同步冲突）只跳过他，别让后面真漂移的用户等下一轮
+        match repair_balance(pg, ledger, d.user_id).await {
+            Ok(Some(fixed)) => out.push(fixed),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(user_id = d.user_id, %error, "balance repair failed for this user; skipped");
+            }
         }
     }
     Ok(out)
@@ -1146,7 +1164,15 @@ pub async fn expire_balances(
         }
         for user_id in user_ids {
             cursor = user_id;
-            let drained = okapi_ledger::operations::expire(pg, ledger, user_id, now).await?;
+            // 与 sweep 同一口径：一个用户清不掉（锁超时、账本同步冲突）只跳过他，不中止整轮——
+            // 否则下一轮又从头卡在同一个人身上，id 更大的用户的到期余额一直可花
+            let drained = match okapi_ledger::operations::expire(pg, ledger, user_id, now).await {
+                Ok(drained) => drained,
+                Err(error) => {
+                    tracing::error!(user_id, %error, "balance expiry failed for this user; skipped this round");
+                    continue;
+                }
+            };
             if !drained.is_zero() {
                 expired.push(ExpiredBalance {
                     user_id,
