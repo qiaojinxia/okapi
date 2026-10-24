@@ -209,7 +209,7 @@ export function FlowView({ search }: { search: AnalyticsSearch }) {
               >
                 <Tooltip
                   formatter={(v) => fmt(Number(v))}
-                  contentStyle={{ fontSize: 12, maxWidth: 360, whiteSpace: 'normal', overflowWrap: 'anywhere', background: 'var(--color-popover)', color: 'var(--color-popover-foreground)', borderColor: 'var(--color-border)', borderRadius: 10 }}
+                  contentStyle={{ fontSize: 12, maxWidth: 360, whiteSpace: 'normal', overflowWrap: 'anywhere' }}
                 />
               </Sankey>
             </ResponsiveContainer>

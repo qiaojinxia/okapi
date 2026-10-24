@@ -469,7 +469,7 @@ test('手机和深色图表布局不溢出，提示框遵循深色主题', async
   await page.evaluate(() => document.documentElement.classList.add('dark'))
   await expect(page.locator('#portal-trend .recharts-label-list text').first()).toBeVisible()
   await page.locator('.recharts-surface').first().hover({ position: { x: 400, y: 100 } })
-  await expect(page.locator('.recharts-tooltip-wrapper .bg-popover')).toBeVisible()
+  await expect(page.locator('.recharts-tooltip-wrapper .note-body')).toBeVisible()
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: 'test-results/usage-charts-dark.png', fullPage: true, animations: 'disabled' })
 })

@@ -221,7 +221,7 @@ export function ChannelTimelineDrawer({
                     <YAxis fontSize={10} allowDecimals={false} domain={[0, (max: number) => Math.max(2, Math.ceil(max * 1.15))]} tick={{ fill: 'var(--color-muted-foreground)' }} axisLine={false} tickLine={false} />
                     <Tooltip
                       cursor={{ fill: 'var(--color-primary)', fillOpacity: 0.08 }}
-                      contentStyle={{ fontSize: 12, background: 'var(--color-card)', borderColor: 'var(--color-border)', borderRadius: 8 }}
+                      contentStyle={{ fontSize: 12 }}
                       formatter={(v) => formatCount(Number(v), locale)}
                     />
                     <Legend itemSorter={null} />

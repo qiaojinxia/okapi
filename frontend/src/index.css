@@ -29,6 +29,10 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-info: var(--info);
+  /* 便签：悬停提示与图表悬浮卡的纸色（见下方 .note） */
+  --color-note: var(--note);
+  --color-note-foreground: var(--note-fg);
+  --color-note-border: var(--note-border);
   /* 侧栏独立一组：与内容区拉开一档明度，让导航与数据面板有前后关系 */
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-fg);
@@ -141,6 +145,7 @@
   --table-cell-padding: 0.375rem;
   --table-min-height: 10rem;
   --table-radius: var(--radius-xl);
+  --note-curl: 0.5rem;
   color-scheme: light;
   /* 浅色主题是「纸」：页底是暖一点的米白，卡片 / 表格是纸白，线条与悬停底是暖灰（色相 85 / 70，
      色度只有 0.004–0.012，几乎看不出偏色，只让整体不再发冷发蓝）。语义色（主色 / 成功 / 警告 /
@@ -159,6 +164,14 @@
   --success: oklch(0.6 0.15 155);
   --warning: oklch(0.68 0.15 75);
   --info: oklch(0.6 0.13 215);
+  /* 便签纸：页面纸面（色相 85）的奶油黄版，字用暖深褐（对比 >12:1）。粘条 / 折角各深一档，
+     投影基色是暖褐而不是纯黑，整体读起来是一张贴在页面上的小纸片 */
+  --note: oklch(0.972 0.034 92);
+  --note-fg: oklch(0.28 0.03 75);
+  --note-border: oklch(0.87 0.065 90);
+  --note-strip: oklch(0.935 0.06 90);
+  --note-fold: oklch(0.915 0.07 88);
+  --note-shadow: oklch(0.38 0.06 70);
   --sidebar: oklch(0.974 0.004 85);
   --sidebar-fg: oklch(0.3 0.01 70);
   --sidebar-accent: oklch(0.94 0.006 85);
@@ -189,6 +202,13 @@
   --success: oklch(0.7 0.14 155);
   --warning: oklch(0.76 0.14 75);
   --info: oklch(0.72 0.12 215);
+  /* 暗色下是一张暖调的深色纸：比卡片亮一档才浮得起来，折角是翻过来的那一面所以更亮 */
+  --note: oklch(0.315 0.022 90);
+  --note-fg: oklch(0.94 0.015 90);
+  --note-border: oklch(0.45 0.05 88);
+  --note-strip: oklch(0.365 0.032 88);
+  --note-fold: oklch(0.43 0.05 88);
+  --note-shadow: oklch(0 0 0);
   --sidebar: oklch(0.185 0.015 260);
   --sidebar-fg: oklch(0.8 0.008 255);
   --sidebar-accent: oklch(0.27 0.018 260);
@@ -271,6 +291,48 @@
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
     }
+  }
+}
+
+@layer components {
+  /* 便签：悬停提示（components/ui/tooltip.tsx）与图表悬浮卡（recharts 的 tooltip）共用的外观。
+     两层：外层 .note 只管投影和折角——投影用 drop-shadow，才能跟着内层被切掉的右下角走；
+     内层 .note-body 是纸：奶油黄底、顶部一抹粘条、细边、小圆角、右下角折掉一个小三角。
+     recharts 自己生成的外层 / 内层（.recharts-tooltip-wrapper / .recharts-default-tooltip）
+     套同一套规则；它的内联样式（白底、灰边）用 !important 压掉。recharts 的外层在内容为空时也可能
+     显示（自定义内容返回 null），折角只给里面真有便签的外层画。 */
+  .note,
+  .recharts-tooltip-wrapper {
+    position: relative;
+    filter: drop-shadow(0 1px 1px color-mix(in oklch, var(--note-shadow) 16%, transparent))
+      drop-shadow(0 9px 10px color-mix(in oklch, var(--note-shadow) 24%, transparent));
+  }
+  .note::after,
+  .recharts-tooltip-wrapper:has(> .note-body, > .recharts-default-tooltip)::after {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: var(--note-curl);
+    height: var(--note-curl);
+    pointer-events: none;
+    /* 只画左上那半个三角：翻过来的纸角；右下那半是被切掉的缺口，保持透明 */
+    background: linear-gradient(to top left, transparent 50%, var(--note-fold) 50%);
+    border-top-left-radius: 0.125rem;
+  }
+  .note-body,
+  .recharts-default-tooltip {
+    color: var(--note-fg);
+    background: linear-gradient(to bottom, var(--note-strip), transparent 0.8rem), var(--note) !important;
+    border: 1px solid var(--note-border) !important;
+    border-radius: 0.25rem;
+    clip-path: polygon(
+      0 0,
+      100% 0,
+      100% calc(100% - var(--note-curl)),
+      calc(100% - var(--note-curl)) 100%,
+      0 100%
+    );
   }
 }
 

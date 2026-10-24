@@ -18,6 +18,10 @@ interface TooltipProps {
 /// 表格里一排图标按钮全靠它辨认动作，慢一拍就会点错。portal 而非就地渲染是因为
 /// 表格容器 `overflow-auto` 会把上方弹出的提示裁掉。
 /// 长说明与触发控件关联；靠近视口边缘时换行、翻转并限制位置。
+///
+/// 外观是一张便签（index.css 的 `.note` / `.note-body`）：奶油黄的纸、顶部粘条、右下折角、暖褐投影，
+/// 颜色取自 `--note*` 令牌，暗色下是一张暖调的深色纸。外层负责定位与投影，内层是纸（要被切角，
+/// 投影才不会被一起切掉）。
 export function Tooltip({ content, side = 'top', children, className }: TooltipProps) {
   const anchor = useRef<HTMLSpanElement>(null)
   const popup = useRef<HTMLSpanElement>(null)
@@ -112,10 +116,13 @@ export function Tooltip({ content, side = 'top', children, className }: TooltipP
             id={id} ref={popup} role="tooltip"
             onMouseEnter={() => { hovered.current = true; cancelClose() }}
             onMouseLeave={() => { hovered.current = false; leave() }}
-            className="fixed z-[80] w-max max-w-xs overflow-auto overscroll-contain rounded-md bg-foreground px-2.5 py-1.5 text-xs leading-5 font-medium whitespace-normal text-background shadow-popover [overflow-wrap:anywhere]"
+            className="note fixed z-[80] w-max max-w-xs"
             style={{ visibility: 'hidden', left: 0, top: 0 }}
           >
-            {content}
+            {/* max-h-[inherit]：定位代码把可用高度写在外层上，内层照这个高度滚动 */}
+            <span className="note-body block max-h-[inherit] overflow-auto overscroll-contain px-3 py-2 text-xs leading-5 whitespace-normal [overflow-wrap:anywhere]">
+              {content}
+            </span>
           </span>,
           document.body,
         )}
