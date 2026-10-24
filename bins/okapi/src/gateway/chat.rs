@@ -1492,7 +1492,7 @@ async fn prepare_chat(
     // Freeze every usable one-hop fallback before reserve. Never discover a dearer
     // fallback after the hold has already been established.
     let mut reserved_amount = est_quote.amount;
-    let mut reserved_completion = est_usage.completion_tokens;
+    let mut reserved_tokens = reserved_token_count(&est_usage);
     let mut fallback_models = Vec::new();
     let mut reservation_candidates = vec![super::reservation::Candidate::new(
         "primary",
@@ -1538,15 +1538,24 @@ async fn prepare_chat(
             if price_above_max(&quote, &prefs).is_some() {
                 continue;
             }
-            reservation_candidates.push(super::reservation::Candidate::new(
+            // 备选模型冻结不下来（用量或报价过不了校验）就和上面几种情形一样跳过：
+            // 这条备选只是兜底，不该拖垮主模型本来可以放行的请求
+            let candidate = match super::reservation::Candidate::new(
                 "fallback",
                 &fallback.canonical,
                 fallback_calc.model.as_str(),
                 fallback_usage,
                 &quote,
-            )?);
+            ) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    tracing::warn!(model = %fallback.canonical, %error, "备选模型预扣冻结失败，跳过这条备选");
+                    continue;
+                }
+            };
+            reservation_candidates.push(candidate);
             reserved_amount = reserved_amount.max(quote.amount);
-            reserved_completion = reserved_completion.max(fallback_usage.completion_tokens);
+            reserved_tokens = reserved_tokens.max(reserved_token_count(&fallback_usage));
             let has_tier_pricing = book.has_tiers(&fallback_calc.model);
             fallback_models.push(AdmittedFallback {
                 model: fallback.canonical.clone(),
@@ -1597,7 +1606,7 @@ async fn prepare_chat(
         rpd: cap(key.rpd_limit),
         concurrency: cap(key.max_concurrency),
     };
-    let est_tokens = u64::from(est_prompt).saturating_add(u64::from(reserved_completion));
+    let est_tokens = reserved_tokens;
     let (reservation_pool, source_window) = match state
         .reserve_for_key(
             key.quota_limited,
@@ -1801,6 +1810,12 @@ async fn admission_hints(
                 )
         })
         .unwrap_or_default()
+}
+
+/// 按 TPM 限额计的 token 数：和预扣同一口径（客户端配置放大后的 prompt + 补全上限）。
+/// 用放大之前的 prompt 会让开了客户端模拟的 key 实际吃掉的 token 比计入限额的多。
+fn reserved_token_count(usage: &TokenUsage) -> u64 {
+    u64::from(usage.prompt_tokens).saturating_add(u64::from(usage.completion_tokens))
 }
 
 /// 把客户端配置带来的成本放进预扣估算：放大 prompt、按 1h 缓存写入计价（首个请求的上界）。
@@ -4801,6 +4816,24 @@ mod failure_scope_tests {
             with_admission_hints(base, okapi_providers::profiles::AdmissionHints::default());
         plain.validate().unwrap();
         assert_eq!(plain, base);
+    }
+
+    /// TPM 限额按放大后的 prompt 计，与预扣同一口径；没有放大时就是 prompt + 补全上限。
+    #[test]
+    fn rate_limited_tokens_follow_the_hinted_prompt() {
+        let base = TokenUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 64,
+            ..TokenUsage::default()
+        };
+        assert_eq!(reserved_token_count(&base), 1064);
+        let hinted = with_admission_hints(
+            base,
+            okapi_providers::profiles::admission_hints(
+                &serde_json::json!({"client_profile":{"name":"claude-code","mode":"mimic"}}),
+            ),
+        );
+        assert_eq!(reserved_token_count(&hinted), 1728 + 64);
     }
 
     /// 缺省上限只在模型能输出得比预扣封顶更多时写入；显式上限、未知 max_output 不动。
