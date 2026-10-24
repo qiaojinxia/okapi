@@ -1578,7 +1578,15 @@ pub async fn smtp_test(
     // 绕过 60s 设置缓存：配置页"保存→测试"是连贯操作，必须读到刚保存的值
     let mailer = crate::mail::Mailer::from_pg(&state.pg)
         .await
-        .map_err(|_| AppError::new(StatusCode::NOT_IMPLEMENTED, "smtp_not_configured"))?;
+        .map_err(|error| match error {
+            crate::mail::MailError::NotConfigured => {
+                AppError::new(StatusCode::NOT_IMPLEMENTED, "smtp_not_configured")
+            }
+            other => {
+                tracing::error!(error = %other, "SMTP 配置读取失败");
+                AppError::internal()
+            }
+        })?;
     let accept = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok());

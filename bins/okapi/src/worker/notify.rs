@@ -149,8 +149,12 @@ impl Notifier {
         }
         let mailer = match crate::mail::Mailer::from_pg(&self.pg).await {
             Ok(m) => m,
-            Err(err) => {
-                tracing::warn!(event, error = %err, "email 通知通道跳过：SMTP 未配置");
+            Err(crate::mail::MailError::NotConfigured) => {
+                tracing::warn!(event, "email 通知通道跳过：SMTP 未配置");
+                return false;
+            }
+            Err(error) => {
+                tracing::error!(event, %error, "email 通知通道跳过：SMTP 配置读取失败");
                 return false;
             }
         };

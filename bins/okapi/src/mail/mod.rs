@@ -70,6 +70,9 @@ impl SmtpConfig {
 pub enum MailError {
     #[error("smtp_not_configured")]
     NotConfigured,
+    /// 读 `settings.smtp` 的数据库调用失败：不是「没配置」，调用方不能当成没配置处理。
+    #[error("settings: {0}")]
+    Settings(#[from] sqlx::Error),
     #[error("invalid address: {0}")]
     Address(String),
     #[error("build: {0}")]
@@ -97,13 +100,11 @@ impl Mailer {
         Self::from_config(SmtpConfig::from_value(value.as_ref().as_ref()))
     }
 
-    /// 直读 PG（worker 无 AppState 时用）。
+    /// 直读 PG（worker 无 AppState 时用）。库读不出来是 `Settings`，没有这一行或形状不对才是 `NotConfigured`。
     pub async fn from_pg(pg: &sqlx::PgPool) -> Result<Self, MailError> {
         let value = sqlx::query_scalar!(r#"SELECT value FROM settings WHERE key = 'smtp'"#)
             .fetch_optional(pg)
-            .await
-            .ok()
-            .flatten();
+            .await?;
         Self::from_config(SmtpConfig::from_value(value.as_ref()))
     }
 
@@ -179,6 +180,20 @@ impl Mailer {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 读不到 `settings.smtp`（库连不上）不能报成「SMTP 未配置」：管理员会照着去重填一份已有的配置，
+    /// 通知通道的日志也会把库故障说成配置缺失。
+    #[tokio::test]
+    async fn an_unreadable_settings_row_is_not_reported_as_smtp_not_configured() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(2))
+            .connect_lazy("postgres://okapi:unused@127.0.0.1:1/okapi")
+            .unwrap();
+        let Err(error) = Mailer::from_pg(&pool).await else {
+            panic!("没有数据库时必须是错误");
+        };
+        assert!(matches!(error, MailError::Settings(_)), "{error}");
+    }
 
     #[test]
     fn config_parsing_and_defaults() {
