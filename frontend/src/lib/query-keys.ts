@@ -61,6 +61,8 @@ export const qk = {
   adminRedemptionsAll: adminRedemptions,
   adminRedemptions: (status: string) => [...adminRedemptions, status] as const,
   channelModels: (id: number) => ['admin', 'channel-models', id] as const,
+  channelCompat: (id: number) => ['admin', 'channel-compat', id] as const,
+  compatVendors: ['admin', 'compat-vendors'] as const,
   statsOverview: (days: number) => ['admin', 'stats', 'overview', days] as const,
   myBreakdown: (scope: string, days: number, range = '') => ['me', 'stats', 'breakdown', scope, days, range] as const,
   myActivity: (scope: string, year?: number) => ['me', 'stats', 'activity', scope, year] as const,

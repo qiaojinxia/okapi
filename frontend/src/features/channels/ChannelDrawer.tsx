@@ -1,6 +1,6 @@
 import { ModelTagsInput } from '@/features/models/model-input'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { ChannelRow, ChannelSettings } from '@/features/channels/types'
 import { Button } from '@/components/ui/button'
@@ -36,7 +36,12 @@ import {
 import { Select } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Tabs } from '@/components/ui/tabs'
-import { TagInput } from '@/components/ui/tag-input'
+import { ExtraHeadersEditor } from '@/features/channels/KeyValueEditors'
+import { CompatPanel } from '@/features/channels/CompatPanel'
+import { withoutSaved } from '@/features/channels/CompatPanel'
+import type { CompatDraft } from '@/features/channels/CompatPanel'
+import { readSimpleRules, sameRules, useChannelCompat, writeSimpleRules } from '@/features/channels/compat'
+import type { CompatView } from '@/features/channels/compat'
 import {
   PoolMembership,
   PoolMembershipEditor,
@@ -57,125 +62,6 @@ type EditTab = (typeof EDIT_TABS)[number]
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic_max: 'admin:providerClaudeSubscription',
   codex: 'admin:providerCodexSubscription',
-}
-
-/// 可增删的键值行带一个稳定 id 作 React key、增删改都按 id 定位。用下标作 key 时删掉中间一行，
-/// React 会把后一行的 DOM 让给前一行的数据：焦点（刚点的 ×、正在输入的框）跟着落到另一行，
-/// 继续打字或回车就改错 / 删错行。
-interface KeyValueRow {
-  id: number
-  name: string
-  val: string
-}
-
-function ExtraHeadersEditor({
-  value,
-  onChange,
-}: {
-  value: Record<string, string>
-  onChange: (next: Record<string, string>) => void
-}) {
-  const { t } = useTranslation()
-  const nextId = useRef(0)
-  const [draft, setDraft] = useState<KeyValueRow[]>(() => Object.entries(value).map(([name, val]) => ({ id: nextId.current++, name, val })))
-  const commit = (next: KeyValueRow[]) => {
-    setDraft(next)
-    onChange(Object.fromEntries(next.filter((row) => row.name.trim() !== '').map((row) => [row.name, row.val])))
-  }
-  const setRow = (id: number, patch: Partial<KeyValueRow>) => commit(draft.map((row) => (row.id === id ? { ...row, ...patch } : row)))
-  const removeRow = (id: number) => commit(draft.filter((row) => row.id !== id))
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{t('admin:extraHeaders')}</Label>
-      <p className="text-xs text-muted-foreground">{t('admin:extraHeadersHint')}</p>
-      {draft.map((row) => (
-        <div key={row.id} className="flex gap-2">
-          <Input
-            value={row.name}
-            placeholder="OpenAI-Organization"
-            onChange={(e) => setRow(row.id, { name: e.target.value })}
-          />
-          <Input value={row.val} placeholder="org-…" onChange={(e) => setRow(row.id, { val: e.target.value })} />
-          <Button type="button" variant="ghost" onClick={() => removeRow(row.id)}>
-            ×
-          </Button>
-        </div>
-      ))}
-      <Button type="button" variant="outline" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
-        {t('admin:extraHeadersAdd')}
-      </Button>
-    </div>
-  )
-}
-
-function parseInjectValue(raw: string): unknown {
-  const trimmed = raw.trim()
-  if (trimmed === '') return ''
-  try {
-    return JSON.parse(trimmed) as unknown
-  } catch {
-    return raw
-  }
-}
-
-function formatInjectValue(value: unknown): string {
-  if (typeof value === 'string') return value
-  try {
-    return JSON.stringify(value)
-  } catch {
-    return String(value)
-  }
-}
-
-function InjectFieldsEditor({
-  value,
-  onChange,
-}: {
-  value: Record<string, unknown>
-  onChange: (next: Record<string, unknown>) => void
-}) {
-  const { t } = useTranslation()
-  const nextId = useRef(0)
-  const [draft, setDraft] = useState<KeyValueRow[]>(() =>
-    Object.entries(value).map(([name, v]) => ({ id: nextId.current++, name, val: formatInjectValue(v) })),
-  )
-  const commit = (next: KeyValueRow[]) => {
-    setDraft(next)
-    const obj: Record<string, unknown> = {}
-    for (const row of next) {
-      if (row.name.trim() === '') continue
-      obj[row.name.trim()] = parseInjectValue(row.val)
-    }
-    onChange(obj)
-  }
-  const setRow = (id: number, patch: Partial<KeyValueRow>) => commit(draft.map((row) => (row.id === id ? { ...row, ...patch } : row)))
-  const removeRow = (id: number) => commit(draft.filter((row) => row.id !== id))
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{t('admin:injectFields')}</Label>
-      <p className="text-xs text-muted-foreground">{t('admin:injectFieldsHint')}</p>
-      {draft.map((row) => (
-        <div key={row.id} className="flex gap-2">
-          <Input
-            value={row.name}
-            placeholder="temperature"
-            onChange={(e) => setRow(row.id, { name: e.target.value })}
-          />
-          <Input
-            value={row.val}
-            placeholder='0.2 or "forced"'
-            onChange={(e) => setRow(row.id, { val: e.target.value })}
-          />
-          <Button type="button" variant="ghost" onClick={() => removeRow(row.id)}>
-            ×
-          </Button>
-        </div>
-      ))}
-      <Button type="button" variant="outline" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
-        {t('admin:injectFieldsAdd')}
-      </Button>
-    </div>
-  )
 }
 
 /// 渠道抽屉：新建与编辑共用，但形态不同。
@@ -223,6 +109,9 @@ export function ChannelDrawer({
     channel?.keys.length === 1 ? channel.keys[0]?.id : undefined,
   )
   const [settings, setSettings] = useState<ChannelSettings>(readSettings(channel?.settings ?? null))
+  // 适配规则：厂商与剥 / 注字段的未保存改动（缺省字段 = 没动），保存时才折算成请求体
+  const [compatDraft, setCompatDraft] = useState<CompatDraft>({})
+  const compatView = useChannelCompat(channel?.id)
   const [controlValid, setControlValid] = useState(true)
   const [newConcurrency, setNewConcurrency] = useState('')
   const concurrency = parseLimit(newConcurrency)
@@ -262,8 +151,22 @@ export function ChannelDrawer({
     onError: (err) => toast.error(describeError(err)),
   })
 
+  // 相对已加载的版本，真有改动才带：每次点保存都发一个相同的规则集只会白白多出一个版本
+  const compatPatch = (draft: CompatDraft) => {
+    const view = queryClient.getQueryData<CompatView>(qk.channelCompat(channel?.id ?? 0))
+    if (view === undefined) return {}
+    const rules = view.channel?.rules ?? []
+    const simple = readSimpleRules(rules)
+    const next = writeSimpleRules(rules, draft.strip ?? simple.strip, draft.inject ?? simple.inject)
+    return {
+      ...(draft.vendor !== undefined && draft.vendor !== view.vendor ? { vendor: draft.vendor } : {}),
+      ...(sameRules(next, rules) ? {} : { compat: { rules: next, base_version: view.channel?.version ?? 0 } }),
+    }
+  }
+
   const save = useMutation({
-    mutationFn: () =>
+    // 按点击保存那一刻的草稿提交；保存期间用户接着改的东西不能被成功回调一起清掉
+    mutationFn: (draft: CompatDraft) =>
       apiFetch(`/admin/channels/${channel?.id ?? 0}`, {
         method: 'PATCH',
         body: {
@@ -273,10 +176,14 @@ export function ChannelDrawer({
           priority: priority ?? 0,
           settings: channelSettingsForSave(settings),
           cost_milli: costMilli ?? undefined,
+          ...compatPatch(draft),
         },
       }),
-    onSuccess: () => {
+    onSuccess: async (_, saved) => {
       toast.success(t('common:success'))
+      // 先等规则视图刷新到刚保存的版本，再丢掉已保存的草稿：否则这一瞬间界面会退回保存前的值
+      await queryClient.invalidateQueries({ queryKey: qk.channelCompat(channel?.id ?? 0) })
+      setCompatDraft((current) => withoutSaved(current, saved))
       onDone()
     },
     onError: (err) => toast.error(describeError(err)),
@@ -344,7 +251,7 @@ export function ChannelDrawer({
   const behaviorCustom = settings.thinking_to_content || settings.bill_by_response_model
     || (settings.tool_loss_policy ?? 'safe') !== 'safe'
     || settings.responses_native !== undefined && settings.responses_native !== defaultResponsesNative(form.provider)
-    || settings.strip_request_fields.length > 0 || Object.keys(settings.inject_request_fields ?? {}).length > 0
+    || (compatView.data?.vendor ?? null) !== null || (compatView.data?.channel?.rules.length ?? 0) > 0
     || Object.keys(settings.extra_headers ?? {}).length > 0
   const baseField = <div className="flex flex-col gap-1.5">
     <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
@@ -372,7 +279,7 @@ export function ChannelDrawer({
           </Button>
           <Button
             disabled={!canSubmit || !endpointValid || !controlValid || !concurrencyValid || costMilli === null || priority === null || create.isPending || save.isPending}
-            onClick={() => (isEdit ? save.mutate() : create.mutate())}
+            onClick={() => (isEdit ? save.mutate(compatDraft) : create.mutate())}
           >
             {isEdit ? t('common:save') : t('common:create')}
           </Button>
@@ -749,23 +656,10 @@ export function ChannelDrawer({
               options={TOOL_LOSS_POLICIES.map((p) => ({ value: p, label: t(`admin:toolLoss_${p}`) }))}
             />
           </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="d-strip">{t('admin:stripFields')}</Label>
-            <p className="text-xs text-muted-foreground">{t('admin:stripFieldsHint')}</p>
-            <TagInput
-              id="d-strip"
-              value={settings.strip_request_fields}
-              onChange={(v) => setSettings((s) => ({ ...s, strip_request_fields: v }))}
-              placeholder="logit_bias"
-            />
-          </div>
-          <InjectFieldsEditor
-            value={settings.inject_request_fields ?? {}}
-            onChange={(inject_request_fields) =>
-              setSettings(({ inject_request_fields: _drop, ...s }) =>
-                Object.keys(inject_request_fields).length === 0 ? s : { ...s, inject_request_fields },
-              )
-            }
+          <CompatPanel
+            channelId={channel.id}
+            draft={compatDraft}
+            onDraft={(patch) => setCompatDraft((d) => ({ ...d, ...patch }))}
           />
           <ExtraHeadersEditor
             value={settings.extra_headers ?? {}}

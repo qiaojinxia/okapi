@@ -677,7 +677,7 @@ test('default creation leaves all optional sections folded and submits unchanged
   await expect.poll(() => saved).toEqual({
     name: 'new-controlled-channel', provider: 'anthropic', api_base: '', credential: 'mock-api-key',
     models: ['mock-model'], priority: 0, cost_milli: 1000,
-    settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
+    settings: { thinking_to_content: false, bill_by_response_model: false },
     pools: [{ pool_code: 'default', priority_override: null, weight_override: null }],
   })
 })

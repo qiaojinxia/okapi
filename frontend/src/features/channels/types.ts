@@ -122,7 +122,6 @@ export interface ChannelSettings {
   account_control?: AccountControl
   thinking_to_content: boolean
   bill_by_response_model: boolean
-  strip_request_fields: string[]
   /// `/v1/responses` 是否同方言直转到该渠道；undefined = 跟随协议缺省
   /// （openai 直转 / openai_compat 降级）。只对说 OpenAI 方言的渠道有意义。
   responses_native?: boolean
@@ -134,8 +133,6 @@ export interface ChannelSettings {
   aws_region?: string
   /// 额外请求头（对象）。鉴权 / Host / 逐跳头后端会拒。
   extra_headers?: Record<string, string>
-  /// 强制写入请求顶层的字段。model / messages / stream / provider 后端会拒。
-  inject_request_fields?: Record<string, unknown>
   extensions?: {
     client_profile?: { name: 'native' } | {
       name: 'claude-code'
@@ -218,6 +215,8 @@ export interface ChannelRow {
   models: string[]
   keys: ChannelKeyRow[]
   settings: Partial<ChannelSettings> | null
+  /// 选定的内置厂商（带命名空间，如 `builtin:deepseek`）；null = 没选，不套厂商层适配规则。
+  vendor?: string | null
   /// 所属池代码；空数组 = 孤儿（不在任何池，对谁都不可达）。
   pools: string[]
   /// 池成员关系明细（含成员级 priority / weight 覆盖）。
@@ -236,14 +235,23 @@ export const TOOL_LOSS_POLICIES = ['safe', 'strict', 'allow'] as const
 export type ToolLossPolicy = (typeof TOOL_LOSS_POLICIES)[number]
 
 export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSettings {
-  // settings.proxy_url 已退役（§11.41 出口绑定）：残留值不能被抽屉整体回写（后端会 400）
-  const { proxy_url: _retired, ...opaque } = (raw ?? {}) as Partial<ChannelSettings> & { proxy_url?: unknown }
+  // 已退役的键：残留值不能被抽屉整体回写（后端会 400）。
+  // proxy_url 由出口绑定取代（§11.41）；剥 / 注字段两个键已迁成渠道层适配规则（compat.ts）。
+  const {
+    proxy_url: _proxy,
+    strip_request_fields: _strip,
+    inject_request_fields: _inject,
+    ...opaque
+  } = (raw ?? {}) as Partial<ChannelSettings> & {
+    proxy_url?: unknown
+    strip_request_fields?: unknown
+    inject_request_fields?: unknown
+  }
   return {
     // Preserve opaque provider/extension settings when editing unrelated form fields.
     ...opaque,
     thinking_to_content: raw?.thinking_to_content ?? false,
     bill_by_response_model: raw?.bill_by_response_model ?? false,
-    strip_request_fields: raw?.strip_request_fields ?? [],
     // 不在这里补缺省：未配置就保持 undefined，保存回去仍是"跟随协议缺省"，
     // 站长改协议时不会被一个早先写死的布尔值绊住
     ...(typeof raw?.responses_native === 'boolean' ? { responses_native: raw.responses_native } : {}),
@@ -256,11 +264,6 @@ export function readSettings(raw: Partial<ChannelSettings> | null): ChannelSetti
       : {}),
     ...(raw?.extra_headers && typeof raw.extra_headers === 'object' && !Array.isArray(raw.extra_headers)
       ? { extra_headers: raw.extra_headers }
-      : {}),
-    ...(raw?.inject_request_fields &&
-    typeof raw.inject_request_fields === 'object' &&
-    !Array.isArray(raw.inject_request_fields)
-      ? { inject_request_fields: raw.inject_request_fields }
       : {}),
   }
 }
