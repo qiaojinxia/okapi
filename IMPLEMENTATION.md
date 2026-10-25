@@ -2204,6 +2204,15 @@ Moonshot 这类按余额计费的官方上游，站长最常做的运维动作�
 用量 1234.5 美分 → `balance_micro = 87_655_000`、`currency = USD`、列表 `last_balance` 回填；anthropic 渠道 400
 `balance_unsupported`；单测覆盖四家官方响应形状的解析。
 
+**更新（2026-10-25，适配规则 P2）**：探针不再是 `channel_balance.rs` 里的五个解析函数，而是**厂商数据**（`okapi-compat` 的声明式 `ProbeSpec`，`probes.balance`：
+请求列表、`remaining` / `total` / `used` 的 JSON 指针与整数除数、币种常量或映射表、来源与核对日期；金额沿用定点解析，不经浮点）。`channel_balance.rs` 只剩执行：
+选探针 → 带渠道凭证依次 GET → 交给规格解析。选择顺序：渠道**明确选了的厂商**（档案取它 `extends` 的内置厂商）→ 按 `api_base` 主机识别出的厂商（与旧行为一致）→ 通用 dashboard 口径；
+协议闸不变（只有 openai / openai_compat），响应里的 `probe` 名沿用（`openai_dashboard` / `deepseek` / `siliconflow` / `openrouter` / `moonshot`）。
+没配 `api_base` 的 `openai_compat` 渠道回 400 param=`api_base`（不再对着空地址发请求）。新增 `siliconflow` / `openrouter` 两个内置厂商；探针 2026-10-25 对照各家文档核对过，
+记下的限制：OpenRouter 的 `/credits` 只有**管理密钥**能查（普通密钥 403），Moonshot 国际站 / SiliconFlow 的币种文档没写，按人民币标注（沿用旧行为）。
+**选了厂商的渠道不看主机名，所以 mock 终于能做端到端**：`console_channel_test::channel_balance_follows_the_chosen_vendor` 把四家的路径、凭证与解析都走一遍
+（此前这四家按主机名硬匹配、mock 只能起在 `127.0.0.1` 上，一直只有响应形状的单测）。
+
 ### 11.34 负毛利自动熔断（2026-09-06，对照 Sub2API profit control）
 
 **问题**：§11.18 之后毛利能看见了，但"看见亏钱"和"止损"之间还是人。折扣组（倍率 0.5）配到了成本系数 1.0
@@ -3143,6 +3152,22 @@ new-api 迁移来的令牌分组、管理员在后台给 key 直接钉的组都�
 `legacy_equivalence`（旧函数逐字复刻作对照）；`okapi-store::compat_rules`（迁移复制、发布版本、三层装配、失败开放、渠道复制）；
 `console_compat`（保存 / 冲突 / 校验码 / 敏感权限 / 护栏 / dry-run / 创建与修改渠道）、`gateway_strip_fields`（厂商层只对选了的渠道生效、护栏最后执行、诊断轨迹）；
 前端 `compat-rules.spec`（转换往返）、`write-forms.spec`（抽屉）。
+
+**P2（2026-10-25）**：适配档案、响应 / 错误 / 能力三个阶段、声明式余额探针、规则页与只读蓝图、MCP 工具、`openai_compat` 去掉缺省地址。落地与差异见 `docs/compat-rules.md` §18，这里记要点：
+
+- **引擎**：操作 8 → 14 个（新增 `each` / `usage_map` / `capability` / `retry_same` / `failover` / `fail`，规则多 `when`），按阶段限定可用操作；响应阶段只接 OpenAI chat 方言的上游
+  （流式逐帧改写后用 `parse_event` 重算元数据），错误阶段只对 Fatal 类上游 HTTP 错误生效（`retry_same` 每候选总共 ≤ 3 次），能力事实在候选加载时合并（渠道自己的列优先）。
+  `fail` 只改状态码 / 错误码，不带自然语言（i18n 红线）。`catalog.rs` 把操作 / 选择器 / 路径分级 / 配方整份自描述，蓝图、表单、MCP 共读。
+- **存储**：迁移 `0007`——`compat_profiles` 表，`rule_sets` 多 `base_version` / `source` / `rationale` 与「每范围至多一份草稿」索引。四层：厂商 100 → 档案 200 → 渠道 300 → 护栏 900。
+- **管理面**：`/admin/compat/sets/{scope}/{id}`（概览 / 版本 / 草稿 / 批准发布 / 回滚 / 直接保存）、`/admin/compat/drafts` 收件箱、`/admin/compat/profiles`、`/admin/compat/catalog`、
+  `/admin/compat/explain/{request_id}`；新权限点 `compat.publish` / `compat.profile.write`。AI（MCP）**只能落草稿**，批准发布永远是人的动作，批准人没有 `compat.sensitive` 就批不了含新增敏感写入的草稿。
+- **MCP**：`compat_catalog` / `compat_effective` / `compat_validate` / `compat_dry_run` / `compat_explain` 只读，`compat_propose` 写草稿（`rationale` 必填、来源 `mcp`、审计 `mcp:{key_id}`）。
+- **余额探针数据化**（§11.33 的探针现在是厂商数据）：见 §11.33 的更新段。
+- **`openai_compat` 没有缺省地址**：配置了地址用配置的，没配只有官方 `openai` 有缺省；兼容渠道被跳过（记 warn），不回退到别家的地址；创建时选了厂商 / 档案，按它的端点表补地址并落库。
+- **前端**：`/admin/compat` 页（档案 / 待批准 / 全局护栏 / 参考），档案抽屉里规则 / 蓝图 / 试跑 / 历史 / 设置；渠道抽屉新建兼容渠道有「厂商预设」。
+
+**P2 验收**：`okapi-compat` 的 `phases` / `properties`（含响应规则永远动不了计费事实、重发改不了主链字段）/ `fixtures` / `probes`；`okapi-store::compat_profiles`；
+`gateway_compat_phases` / `gateway_missing_api_base`；`console_compat_p2` / `console_mcp_compat` / `console_channel_test`（四家官方余额探针端到端）；前端 `compat-page.spec`。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

@@ -593,3 +593,178 @@ embeddings、rerank、images、videos、audio、realtime 各有自己的转发�
 - `guard-no-float`：P1 没有用量模块，`okapi-compat` 暂不在扫描范围；`clamp` 的比较是纯整数十进制，代码里没有浮点类型。
 - 简化度量「配置项预算」：渠道 `settings` 被运行期读取的键集合由 `okapi-store` 的快照测试锁定，新增一个键必须同时改测试并说明为什么不能写成规则。
 
+
+## 17. P2 设计（2026-10-25）
+
+范围就是 §15 的 P2：适配档案；响应、错误、能力三个阶段；声明式 `ProbeSpec`；只读蓝图；MCP 只读与 `propose`；`openai_compat` 默认地址的修正。
+下面记**动手前定下的取舍**；做完后的差异写在 §18。
+
+### 17.1 规则格式的变化（schema 仍是 v1，只加不改）
+
+- 所有操作仍放 `do`，**按阶段限定可用集合**（校验器给 `op_not_allowed_in_phase`）：
+
+  | 操作 | request | response | error | capability |
+  |---|:-:|:-:|:-:|:-:|
+  | `remove` `set` `rename` `copy` `clamp` `map_value` | ✓ | ✓ | | |
+  | `keep_only` `role_map` | ✓ | | | |
+  | `each` | ✓ | ✓ | | |
+  | `usage_map` | | ✓ | | |
+  | `capability` | | | | ✓ |
+  | `retry_same` `failover` `fail` | | | ✓ | |
+
+- 新字段 `when`（只在 `error` 阶段，且必填）：`{status: [404, 405], code: ["model_not_found"], body_contains: ["…"]}`。字段之间 AND，同一字段内 OR，
+  至少一项；`code` 匹配 JSON 错误体里的 `error.code` / `error.type` / 顶层 `code` / `type`，`body_contains` 对前 8 KiB 不区分大小写。
+- **`each {path, do}`**：对 `path` 指向的数组（或对象）的每个元素执行子操作，子操作的路径相对元素（仍以 `/` 开头）。嵌套 ≤ 2 层；
+  子操作不含 `keep_only` / `role_map`；一条规则里的操作总数（含子操作）仍 ≤ 32。受保护 / 敏感 / 计费关键的判定用拼起来的**绝对路径**（`path` + `/*` + 子路径）。
+  它让「响应里把 `reasoning` 抄成 `reasoning_content`」「每个 choice 里改名」这类批量改写不必给 `rename` / `copy` 开通配，原语集合只多一个。
+- **`usage_map {slots}`**（只在 `response`，OpenAI chat 形状）：把用量槽位写成**整数表达式**的结果。槽位固定：`prompt` `completion` `total` `cache_read`
+  `reasoning` `audio_prompt` `audio_completion`，分别对应 `usage.prompt_tokens` `completion_tokens` `total_tokens` `prompt_tokens_details.cached_tokens`
+  `completion_tokens_details.reasoning_tokens` `prompt_tokens_details.audio_tokens` `completion_tokens_details.audio_tokens`。表达式只有槽位名、非负整数字面量、
+  `+` `-`、括号、`max(a, b)` `min(a, b)`；全程 `i128` 饱和运算，结果下限 0；引用的槽位缺失 / 不是非负整数就**整条不写**（失败开放）。没有浮点，没有除法。
+- **`capability {facts}`**（只在 `capability`）：`{"vision": false, "tools": true}`，事实名取自 `ExecutionPlan` 认的能力名；值只能是布尔。
+- **`retry_same {mutate?, max?}`**：在**同一候选**上改请求体后重发。`mutate` 是请求阶段的操作列表（同请求阶段的校验），`max` 缺省 1、上限 3；
+  不计 failover、不标 key 失败。**`failover {cooldown_secs?}`**：把这个上游错误当作「换下一个候选」处理，不惩罚 key；带 `cooldown_secs` 则让这把 key 冷却那么久。
+  **`fail {status?, code?, message?}`**：改写返回给客户端的错误（状态码 400–599、错误码、消息），不重试。每条错误规则**恰好一个动作**。
+- 校验器的阶段限制：`select` 在 `capability` 里只许 `vendor` `host` `model` `dialect` `operation`（能力是模型 / 厂商的事实，没有 `stream` / `client` 语义）；
+  `response` 规则必须写 `select.dialect: ["openai.chat"]`（网关只在 OpenAI chat 方言上游接响应规则，其余方言写了也不会生效，所以拒绝）；
+  `required` 只许 `request`；`when` 只许 `error`；`request_pre` / `wire` 仍是 `phase_not_enabled`；`if` 仍是 `cel_not_enabled`。
+
+### 17.2 响应阶段的路径分级
+
+响应文档有自己的一张注册表（请求那张不变）：
+- **计费关键**（要 `billing_critical_ack`，且写入需要 `compat.sensitive`——动用量事实就是动账）：`/usage` 子树、`/model`（`bill_by_response_model` 的渠道按它计价）、`/service_tier`（档位倍率）。移除也算。`usage_map` 恒为计费关键。
+- **敏感**（写入需要 `compat.sensitive`，移除不需要）：`/choices/*/message/{content,tool_calls,function_call,refusal}` 与 `/choices/*/delta/` 下同名四项——模型输出本体。
+- 其余自由（`reasoning_content`、`finish_reason`、各种厂商私有字段）。响应没有「受保护」项，也就没有运行期快照还原。
+
+### 17.3 挂载与失败语义
+
+- **响应**：只包 `openai_chat(...)` 的四处调用（同方言透传与三个转回向的 OpenAI 上游），在 `wrap_*` 转回客户端方言**之前**。非流式整体改写后重算 `usage`；流式逐帧：
+  有匹配规则才解析，改写后用 `parse_event` 重算 `has_output` / `content_chars` / `usage`（与提供者原来产生元数据是同一个函数），解析不了的帧原样放行。失败开放：任何一条规则出问题只记 `skipped`。
+- **错误**：在 `try_model` 重试循环里，上游 HTTP 错误（`Status`）进入默认处理之前先问规则；命中则按动作处理，没命中走原来的矩阵。`retry_same` 按（规则 id）计数，超过 `max` 就当没命中。
+  两条写死的反应（Responses 的加密推理项重发、404/405 降级）**暂不迁入数据**：它们要 `apply` 内置变换和 `plan` 动作，是另一轮的事。
+- **能力**：事实合并进 `ExecutionPlan` 的 caps，**渠道自己的 `capabilities` 列优先**（显式值，真或假，都压过规则给的）。
+- 诊断：`compat` 记录里多 `phase` 维度：`{request: {fired, skipped}, response: {…}, error: {…}}`，沿用「只记有动静的」。
+
+### 17.4 草稿、审批与权限
+
+- `rule_sets.status = 'draft'`：**每个范围至多一个草稿**（唯一部分索引），带 `base_version`（起草时的已发布版本）、`source`（`admin` / `mcp`）、`rationale`。
+  发布草稿 = 在一个事务里把当前已发布版本归档、草稿改成已发布并取新版本号；`base_version` 与当前已发布版本不一致就 409（`rules_version_conflict`），要重新起草。
+- P1 的「`PUT` 保存即发布」保持：有 `channel.write` 的人可以直接发布渠道层规则。草稿是另一条路，AI（MCP）**只能**走草稿。
+- 新权限点：`compat.publish`（发布草稿、回滚版本）、`compat.profile.write`（建 / 改 / 删档案及其草稿）。全局护栏仍是 `compat.guard.write`；敏感 / 计费关键写入仍是 `compat.sensitive`。
+- 回滚 = 把旧版本内容作为新版本重新发布（版本号只增；历史行不可变）。
+
+### 17.5 适配档案
+
+- `compat_profiles(slug, name, description, extends, hosts)`；`channels.vendor = custom:<slug>` 指向它。**可 `extends` 一个内置厂商**（档案层叠在那个厂商层之上：厂商 100 → 档案 200 → 渠道 300 → 护栏 900），
+  所以「基本是 DeepSeek 但某个模型要特殊处理」只写差异。档案的规则集是 `scope_kind = 'profile'`。被渠道引用的档案不能删（409 `profile_in_use`）。
+- `hosts` 只用于「检测到这个地址，要套用某某档案吗？」的建议，**不静默改变渠道行为**（与内置厂商同）。
+
+### 17.6 `ProbeSpec`（余额 / 模型列表探针）
+
+厂商数据里 `probes.balance` 是声明式的：`requests`（路径、可选日期查询、`root: true` 表示去掉 `/v1` 后缀）加 `fields`（`remaining` / `total` / `used`，
+每个是「JSON 指针 + 可选 `scale` 或整数算式」），`currency` 是常量或指针加映射表。金额沿用 `decimal_micro` 的定点解析，不经浮点。
+现有的 DeepSeek / SiliconFlow / OpenRouter / Moonshot / OpenAI dashboard 五个解析函数改成五份数据，旧测试逐个对照等价。
+
+### 17.7 蓝图（只读）与 MCP
+
+- **蓝图**是 `/admin/compat` 页里的一个视图（另一个是列表 / 表单）：自动排版的节点图（选择器 → 条件 → 依次的操作），用样本回放，在每个节点标出命中与改动，右侧是编译出的规则 JSON。
+  节点库由后端 `GET /admin/compat/catalog` 生成（阶段、操作、选择器字段、槽位、事实名、错误条件），Rust 新增一个操作，前端自动多一个节点。拖拽编辑留给 P3。
+- **MCP**：`compat_catalog` `compat_effective` `compat_validate` `compat_dry_run` `compat_explain` 只读（按权限点过滤）；`compat_propose` 是写工具，走现有三道闸（全局开关 + `mcp.write` + 行级权限），
+  **只落草稿**，由人在页面上批准发布。核心闭环：上游 400 → AI 读诊断 → 提议规则 → 对那条失败请求回放通过 → 人批准发布。
+
+### 17.8 `openai_compat` 默认地址
+
+`openai_compat` 的 `default_base` 去掉（`registry` 里是 `None`），网关各处原先写死的 `https://api.openai.com/v1` 兜底（chat、count_tokens、videos、realtime、`openai_base`）统一走 `registry::effective_base`：
+配置了地址用配置的，没配只有官方 `openai` 有缺省，兼容渠道返回 `None`——**渠道被跳过（记 warn），不回退到别家的地址**。创建 / 修改渠道必须给 `api_base`；选了带端点表的厂商时，创建渠道由服务端按厂商端点补全并落库
+（落库的是明确的地址，不是运行期的隐含缺省）。线上没有 openai_compat 渠道（2026-10-25 探过），所以不写数据迁移；导入工具遇到缺 `base_url` 的兼容渠道会在报告里提醒。
+
+## 18. P2 实现状态（2026-10-25）
+
+### 18.1 做了什么
+
+对应 §15 / §17 的 P2：
+
+- **引擎 `okapi-compat`**：阶段 `response` / `error` / `capability` 启用（`request_pre` / `wire` 仍是 `phase_not_enabled`）；操作集合 8 → 14 个（`OP_NAMES`），
+  新增 `each` `usage_map` `capability` `retry_same` `failover` `fail`，规则新增 `when`（错误阶段）；操作按阶段限定可用集合（`op_not_allowed_in_phase`）；
+  `expr.rs` 是只有整数加减 / `max` / `min` 的用量表达式；响应阶段有自己的路径注册表（`/usage`、`/model`、`/service_tier` 计费关键，消息正文 / 工具调用写入敏感）；
+  `catalog.rs` 把阶段 / 操作 / 选择器 / 槽位 / 能力事实 / 受保护路径 / 限额 / 配方整份自描述（蓝图、表单、MCP 共读）；`probe.rs` 是声明式余额探针（§18.5）；
+  `vendors.rs` 厂商带「协议 → 基址」端点表与探针。
+- **存储**：迁移 `0007`——`compat_profiles` 表，`rule_sets` 多 `base_version` / `source` / `rationale` 三列和「每个范围至多一份草稿」的部分唯一索引（见 `docs/database.md`）。
+  `okapi_store::compat` 多了草稿（存 / 丢 / 发布）、版本历史、回滚、档案 CRUD、`Layers` 里的档案层（厂商 100 → 档案 200 → 渠道 300 → 护栏 900）、
+  `candidate_capabilities`（能力事实在候选加载时合并）、`builtin_vendor_of_channel`（渠道实际叠加的内置厂商，档案取它的 `extends`）。
+- **网关**：响应规则只接 `openai_chat(...)` 的四处调用，流式逐帧改写后用 `openai::parse_event` 重算元数据，非流式重算 `usage_from_chat`；错误规则挂在 `try_model`
+  重试循环里，只对 Fatal 类上游 HTTP 错误（400–499，排除 401 / 402 / 403 / 408 / 429）生效，每个候选总共最多重发 3 次、每条规则按自己的 `max` 计数；
+  能力事实在候选加载时合并进 `ChannelCandidate.capabilities`（渠道自己的列优先）。`openai_compat` 没有缺省地址，没配地址的渠道被跳过并记 warn。
+- **控制台接口**：`GET /admin/compat/catalog`；规则集三类范围共用 `/admin/compat/sets/{scope}/{id}`（`channel` / `profile` / `guard`，护栏的 id 写 0）下的
+  概览、`/versions`、`/versions/{v}`、`/draft`（PUT 存 / DELETE 丢）、`/draft/publish`、`/rollback`、`/rules`（直接保存即发布）；`GET /admin/compat/drafts` 是待批准收件箱；
+  `/admin/compat/profiles[/{id}]` 档案 CRUD；`GET /admin/compat/explain/{request_id}` 按请求 id 读诊断里的命中轨迹并取出当时用的各版规则；
+  `GET /admin/compat/vendors` 现在带档案、端点与探针。新权限点 `compat.publish`（批准草稿、回滚）、`compat.profile.write`；`compat.guard.write` / `compat.sensitive` 沿用。
+- **MCP**：`compat_catalog` `compat_effective` `compat_validate` `compat_dry_run` `compat_explain` 五个只读工具；`compat_propose` 是写工具（全局开关 + `mcp.write` + 行级权限三道闸），
+  **只落草稿**、`rationale` 必填、来源记 `mcp`、审计 actor 是 `mcp:{key_id}`，发布永远是人的动作。实现复用 REST 的内核（`channel_view` / `run_dry` / `explain_request` / `store_draft` / `check`）。
+- **前端**：`/admin/compat` 页（侧栏「供应商接入」组）——适配档案（列表、新建、设置、删除）、待批准收件箱（有 `compat.publish` 才出现）、全局护栏、参考（内置厂商端点与探针、操作表、阶段、选择器、受保护字段、配方、限额）；
+  档案抽屉与护栏共用一个工作区：规则（JSON 编辑器 + 配方 + 实时校验 + 草稿横幅与差异 + 存草稿 / 发布 / 丢弃）、蓝图（只读节点图 + 命中标记）、试跑（四个阶段）、历史（差异 + 回滚）。
+  渠道抽屉：新建兼容渠道多一个「厂商预设」（内置厂商或档案，按端点表填接入地址，手填的地址不被覆盖），「行为」页签的厂商下拉含档案。
+- **内置厂商**：新增 `siliconflow` / `openrouter`（只带端点与余额探针）；`deepseek` / `moonshot` 补余额探针；`xai` 补一条响应规则 `xai.completion-includes-reasoning`（见 §18.3 第 7 条）。
+
+### 18.2 影响范围
+
+不是全局，也不改现有渠道的行为：
+
+| 变化 | 影响谁 | 说明 |
+|---|---|---|
+| 响应 / 错误 / 能力规则 | 只有写了这类规则、并且被某个渠道的有效规则包含的那几层 | 线上现有的规则集全是迁移来的请求阶段规则，上线后零变化 |
+| 内置规则 `xai.completion-includes-reasoning` | 只有 `channels.vendor = builtin:xai` 的渠道 | 厂商层仍是「选了才生效」，按地址识别只做建议 |
+| 适配档案 | 只有 `channels.vendor = custom:<slug>` 的渠道 | 档案改动会影响所有选了它的渠道，所以先存草稿、有 `compat.publish` 的人批准；被渠道引用时删不掉 |
+| `openai_compat` 无缺省地址 | 没配 `api_base` 的兼容渠道 | 线上没有这类渠道（2026-10-25 探过）；创建 / 修改必须给地址 |
+| 余额探针数据化 | 查余额的渠道 | 按主机选探针的结果与旧行为一致；新增「选了厂商就按厂商查，不看主机」 |
+| 新权限点 | 自定义角色 | 默认全权管理员自动拥有；自定义角色要在「角色与权限」里勾选 |
+
+响应阶段只在 OpenAI chat 方言的上游上执行；其余方言的上游写了响应规则会被校验器拒绝（要求 `select.dialect: ["openai.chat"]`），不会写了却静默不生效。
+
+### 18.3 与设计稿 §17 的差异
+
+1. **`fail` 没有 `message`。** 网关不返回自然语言（i18n 红线），`fail {status?, code?}` 只改状态码与错误码，文案由前端按 `errors` 命名空间本地化；只给 `status` 时保留上游错误体。
+2. **能力规则的选择器只许 `vendor` `host` `model`。** §17.1 写的 `dialect` / `operation` 也去掉了：事实在候选加载时合并，那时还没有请求，没有这些维度（`selector_not_supported_in_phase`）。
+3. **能力事实不是合并进 `ExecutionPlan`，而是在候选加载时合并进 `ChannelCandidate.capabilities`**（store 的 `candidate_capabilities`），所有读 `c.capabilities` 的地方自动看到，网关不用改；
+   渠道自己的 `capabilities` 列优先（显式的真或假都压过规则）。事实名限定为网关真会读的那几个（`CAPABILITY_FACTS`）。
+4. **版本号跨草稿 / 已发布 / 已归档统一递增，草稿的号是暂时的。** 草稿创建时占下一个号，发布时取新的号（草稿 v3 发布后成为 v4），所以首个发布版可能不是 v1；
+   界面与接口一律以发布返回的版本号为准。
+5. **没有「保存草稿」的越权捷径**：存草稿不检查 `compat.sensitive`，批准的人检查——权限只看相对**当前线上版本**新增的敏感写入，批准人没有 `compat.sensitive` 就批不了含新增敏感写入的草稿。
+6. **档案的 `hosts` 与 `extends`**：`hosts` 只用于建议；`extends` 除了叠规则，还决定创建兼容渠道时按哪家的端点补地址（档案自己没有端点表）。
+7. **xAI 的用量取证。** Okapi 的用量解析在 `total_tokens ≠ prompt + completion` 时判用量无效（502），而 xAI 的 `completion_tokens` 不含推理 token——没有这条规则时 xAI 的推理模型会被整条拒收。
+   规则 `completion = total − prompt` 在上游已把推理算进 `completion_tokens` 时两边相等，什么也不改（幂等），所以放进厂商层是安全的；它是计费关键，带 `billing_critical_ack`。
+8. **模型列表探针没做。** 各家都是 `GET {base}/models`，没有需要数据化的差异；`probes` 结构留了位置，出现不同写法再加。
+9. **蓝图只读，且是「规则的视图」而不是独立画布**：每条规则一行（选择 → 条件 → 依次的操作），试跑后在规则上打命中 / 跳过标记；拖拽编辑仍在 P3。
+   试跑把编辑器里的规则当作**渠道层**叠在所选厂商之上——对 2 层（厂商 + 档案）的组合与线上等价，护栏层只在渠道 / 档案范围的试跑里按已发布版本参与。
+10. **写死的两条错误反应仍在代码里**（Responses 加密推理项重发、404 / 405 降级到 Chat Completions），不迁入数据，原因见 §17.3。
+11. **校验问题的 `detail` 是引擎写的中文技术细节**，英文界面也直接显示它；`code` 是稳定的，将来可以按 `code` 本地化。
+12. **直接保存即发布不动现有草稿。** 渠道层的 `PUT .../rules` 与有 `compat.publish` 的人点「保存并发布」都是发新版本，已有的草稿保持原样、只是 `base_version` 对不上线上版本而被标成「已过期」
+    （批准不了，只能丢弃或重新起草）。不自动丢草稿，是因为那可能是 AI 的提议，该由人看过再决定。
+
+### 18.4 验收对照
+
+- 引擎：`crates/okapi-compat` 的单测、`tests/phases.rs`（阶段 × 操作矩阵、各阶段的校验约束、`each` 限额与路径分级、`usage_map` 表达式与槽位、流式帧、`when` 匹配与执行顺序、重发预算与能力合并）、`tests/properties.rs`
+  （响应规则放行的永远动不了计费事实、不 panic、确定；重发的改写动不了主链字段；变异检查：故意改坏四处，属性测试全部抓到）、`tests/fixtures.rs`（含 xAI 的响应阶段夹具）、`tests/probes.rs`（四家官方响应样本与 URL 的拼法）。
+- 存储：`okapi-store::compat_profiles`（草稿唯一且受 `base_version` 保护、历史与回滚、档案 slug 唯一且被引用不可删、表约束、厂商 / 档案 / 渠道 / 护栏四层装配、能力合并且渠道自己的声明优先、`hosts` 规整）。
+- 网关：`gateway_compat_phases`（响应改写含流式、xAI 式用量经 `usage_map` 变得可计费、错误规则的重发 / 重发预算 / 换渠道 / 改写、能力规则在发请求前排除候选、诊断记响应规则）、`gateway_missing_api_base`（没地址的兼容渠道被跳过）。
+- 控制台：`console_compat_p2`（目录、档案、草稿审批与权限、过期草稿、敏感门槛、历史与回滚、护栏、四阶段 dry-run、explain、创建渠道选档案补地址）、
+  `console_channel_test`（**四家官方余额探针第一次有了端到端用例**：选了厂商的渠道按厂商口径查，不再受「mock 只能起在 127.0.0.1」限制）、`console_mcp_compat`（六个工具、三道闸、只落草稿、审计 actor）。
+- 前端：`compat-page.spec`（档案新建与前端先拦的标识格式、存草稿 → 批准、无发布权限的形态、收件箱审阅与过期草稿、编辑器校验、蓝图与试跑、历史回滚、档案设置与删除、参考页、渠道抽屉预设）、
+  `compat-rules.spec`（渠道抽屉的剥 / 注转换，沿用）。
+- 仍保留的闸：`guard-i18n-keys`（两种语言对齐）、`guard-error-codes`（三个新错误码 `profile_in_use` / `profile_slug_taken` / `rules_schema_too_new` 有文案）、`guard-frontend-permissions`、`guard-e2e-specs`。
+
+### 18.5 声明式余额探针（`ProbeSpec`）
+
+厂商数据里 `probes.balance` 描述「怎么向上游查余额」，引擎只做两件纯事：把规格加渠道基址拼成 URL 列表、把响应按规格解析成统一形状；HTTP（渠道凭证、渠道自己的代理、8 KB 响应上限、不跟随重定向）仍由网关执行。
+
+- 规格：`requests[{path, root?, query?}]`（`root: true` 先去掉基址末尾的 `/v1`；查询值是文本或 `{days_from_today}`）、`remaining` / `total` / `used`（`{from?, at, divide?}`：取自第几个响应的 JSON 指针，`divide` 是整数除数，美分换美元写 100）、
+  `currency`（三位大写常量，或 `{from?, at, map, default}`）、`doc`（来源与核对日期）。不写 `remaining` 就由 `total − used` 算；金额沿用 `decimal_micro` 的定点解析，不经浮点。构建期 `check()` 把不合规的规格整家厂商丢掉并进 `catalog_errors`（CI 断言为空）。
+- 选择顺序：渠道明确选了的厂商（档案取它 `extends` 的）→ 按 `api_base` 主机识别出的厂商 → 通用 dashboard 口径（`/dashboard/billing/subscription` + `/usage`，额度 − 美分用量）。协议闸不变：只有 `openai` / `openai_compat` 有余额探针。
+- 内置探针 2026-10-25 对照各家文档核对过（`doc.verified_at`）。核对时发现并记下的限制：**OpenRouter 的 `/credits` 只有管理密钥能查**，普通 API 密钥得 403；Moonshot 国际站与 SiliconFlow 的币种文档没写，按人民币标注（沿用旧行为）。
+
+### 18.6 上线与回滚注意
+
+- 迁移 `0007` 只增表增列增索引，没有数据改写；服务启动时自动应用。
+- **回滚到 P1 镜像**：旧镜像不认识版本 7，启动时会因「已应用的迁移在镜像里找不到」拒绝启动。要先把 `channels.vendor LIKE 'custom:%'` 置 NULL（P1 不认档案），删 `rule_sets` 里 `scope_kind = 'profile'` 与草稿行，
+  去掉 `rule_sets` 的 `base_version` / `source` / `rationale` 三列和 `uq_rule_sets_draft` 索引，`DROP TABLE compat_profiles`，最后 `DELETE FROM _sqlx_migrations WHERE version = 7`。
+- 不部署时对线上零影响；部署后第一件事是确认 `/admin/compat` 能打开、渠道余额查询仍通（`probe` 名与旧版一致：`openai_dashboard` / `deepseek` / `siliconflow` / `openrouter` / `moonshot`）。

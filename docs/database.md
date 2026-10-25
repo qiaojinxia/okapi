@@ -21,7 +21,7 @@
 | 域 | 表 | 里程碑 |
 | --- | --- | --- |
 | 身份权限 | admin_roles, users, oauth_bindings, price_groups, user_groups, group_channel_bindings, api_keys | M1–M2 |
-| 渠道模型 | channels, channel_keys, models, model_aliases, proxies, proxy_groups, proxy_group_members, rule_sets | M1–M2 |
+| 渠道模型 | channels, channel_keys, models, model_aliases, proxies, proxy_groups, proxy_group_members, rule_sets, compat_profiles | M1–M2 |
 | 定价 | model_pricing, user_pricing, pricing_rules, pricing_epochs | M0–M2 |
 | 计费账本 | billing_records, billing_events, billing_event_carry, billing_record_receipts, billing_outbox, billing_dlq | M1–M2 |
 | 营收运营 | recharge_orders, redemption_codes, redemption_records | M2–M4 |
@@ -1361,7 +1361,7 @@ v11 独立校验仍复现 Kolkata 空结果；实际 ClickHouse 表达式确认�
 
 `rule_sets` 是规则集的版本表（适配规则与将来的模型路由共用）：`(kind, scope_kind, scope_id, version)` 唯一；
 `kind` = `compat` | `route`（预留），`scope_kind` = `channel`（`scope_id` = 渠道 id）| `global`（整个网关的护栏，`scope_id` 为 NULL）
-| `profile`（预留）；`status` = `draft` | `published` | `archived`，每个范围**至多一个已发布版本**（部分唯一索引，`COALESCE(scope_id, 0)`
+| `profile`（适配档案，`scope_id` = `compat_profiles.id`；0007 起）；`status` = `draft` | `published` | `archived`，每个范围**至多一个已发布版本**（部分唯一索引，`COALESCE(scope_id, 0)`
 让 NULL 也唯一）；`rules` 是规则数组（JSON，格式见设计文档 §6，库里存规范化的最小形态）。已发布的行不可变：改规则 = 新增版本再发布
 （同一事务里归档旧版本），回滚 = 把旧版本重新发布。写入口（控制台）与加载口（网关）走 `okapi_compat::validate` 同一份校验；
 加载时校验不过的规则集只记日志并跳过那一层（失败开放），schema 版本比本程序新的同样跳过。
@@ -1374,6 +1374,17 @@ v11 独立校验仍复现 Kolkata 空结果；实际 ClickHouse 表达式确认�
 剥 / 注 `stream_options` 的规则带 `billing_critical_ack`。只复制不删原键——回滚到旧镜像时旧代码还读得到，剥字段 / 注入不会静默失效；
 新代码不再读它们，原键等确认稳定后用后续迁移清掉（在新版本里保存过 `settings` 的渠道，原键随整体回写被清掉，回滚后它的剥 / 注字段不再生效）。复制脚本在迁移文件里用 `-- >>> legacy copy` / `-- <<< legacy copy` 标出，
 `crates/okapi-store/tests/compat_rules.rs` 对种好的旧数据重跑这一段并核对结果（`ON CONFLICT DO NOTHING`，可重复执行）。
+
+### 适配规则 P2（migration 0007，设计见 [compat-rules.md](compat-rules.md) §17–§18）
+
+`compat_profiles` 是**适配档案**——管理员命名的可复用规则包，等于自定义厂商：`slug`（唯一，`^[a-z0-9][a-z0-9._-]*$`，创建后不可改）、`name`、`description`、
+`extends`（可空，`builtin:<id>`：档案叠在某个内置厂商之上，只写差异）、`hosts`（≤ 16 个小写主机，**只用于「这个地址要套这个档案吗」的建议**，不静默改变渠道行为）。
+渠道用 `channels.vendor = 'custom:<slug>'` 引用它；档案的规则集在 `rule_sets`（`scope_kind = 'profile'`，`scope_id` = 档案 id）。被渠道引用的档案不能删（控制台删除时检查，
+同事务里连带清掉它的规则集，409 `profile_in_use`）。四层的优先级：厂商 100 → 档案 200 → 渠道 300 → 护栏 900。
+
+`rule_sets` 多三列与一个索引：`base_version`（草稿起草时的已发布版本，发布时与当前不一致就拒绝）、`source`（`admin` / `mcp` / `system`，CHECK 限定）、
+`rationale`（提议的依据，≤ 1000 字，给批准的人看）；部分唯一索引 `uq_rule_sets_draft` 保证**每个范围至多一份草稿**。版本号跨草稿 / 已发布 / 已归档统一递增，
+草稿发布时取新的号（草稿的号是暂时的）；回滚 = 把旧版本内容作为新版本重新发布。迁移只增表增列增索引，不改写任何数据。
 
 ### Channel account controls (migration 0034)
 
