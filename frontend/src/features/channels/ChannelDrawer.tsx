@@ -40,7 +40,8 @@ import { ExtraHeadersEditor } from '@/features/channels/KeyValueEditors'
 import { CompatPanel } from '@/features/channels/CompatPanel'
 import { withoutSaved } from '@/features/channels/CompatPanel'
 import type { CompatDraft } from '@/features/channels/CompatPanel'
-import { readSimpleRules, sameRules, useChannelCompat, writeSimpleRules } from '@/features/channels/compat'
+import { presetEndpoints, readSimpleRules, sameRules, useChannelCompat, useCompatVendors, writeSimpleRules } from '@/features/channels/compat'
+import { VendorPreset } from '@/features/channels/VendorPreset'
 import type { CompatView } from '@/features/channels/compat'
 import {
   PoolMembership,
@@ -112,6 +113,8 @@ export function ChannelDrawer({
   // 适配规则：厂商与剥 / 注字段的未保存改动（缺省字段 = 没动），保存时才折算成请求体
   const [compatDraft, setCompatDraft] = useState<CompatDraft>({})
   const compatView = useChannelCompat(channel?.id)
+  // 新建兼容渠道时的厂商预设：目录只在新建时要（编辑走「行为」页签里的适配面板）
+  const presetCatalog = useCompatVendors(channel === undefined)
   const [controlValid, setControlValid] = useState(true)
   const [newConcurrency, setNewConcurrency] = useState('')
   const concurrency = parseLimit(newConcurrency)
@@ -142,6 +145,8 @@ export function ChannelDrawer({
           cost_milli: costMilli ?? undefined,
           // 继承是后端缺省：只在选了别的出口时才带，默认提交体保持不变
           ...(egressBinding !== null && egressBinding.mode !== 'inherit' ? { egress: egressBinding } : {}),
+          // 厂商预设只对兼容渠道开放；随创建一起落库（地址缺省由它的端点表补全）
+          ...(form.provider === 'openai_compat' && typeof compatDraft.vendor === 'string' ? { vendor: compatDraft.vendor } : {}),
         },
       }),
     onSuccess: () => {
@@ -257,6 +262,7 @@ export function ChannelDrawer({
     <Label htmlFor="d-base">{t('admin:apiBase')}</Label>
     <Input id="d-base" value={form.api_base} placeholder={defaultBase ?? apiBasePlaceholder(form.provider)} required={endpointRequired}
       onChange={(e) => setForm((f) => ({ ...f, api_base: e.target.value }))} />
+    {form.provider === 'openai_compat' && <p className="text-xs text-muted-foreground">{t('admin:openaiCompatApiBaseHint')}</p>}
     {form.provider === 'azure' && <p className="text-xs text-muted-foreground">{t('admin:azureApiBaseHint')}</p>}
     {form.provider === 'bedrock' && <p className="text-xs text-muted-foreground">{t('admin:bedrockApiBaseHint')}</p>}
     {form.provider === 'vertex' && <p className="text-xs text-muted-foreground">{t('admin:vertexApiBaseHint')}</p>}
@@ -333,7 +339,10 @@ export function ChannelDrawer({
                     id="d-provider"
                     value={form.provider}
                     onChange={(v) => {
-                      setForm((f) => ({ ...f, provider: v }))
+                      // 换协议：预设不再适用，它填进去的地址也一并清掉（手填的不动）
+                      const filled = presetEndpoints(presetCatalog.data, compatDraft.vendor).map((e) => e.base)
+                      setForm((f) => ({ ...f, provider: v, api_base: filled.includes(f.api_base.trim()) ? '' : f.api_base }))
+                      setCompatDraft((d) => ({ ...d, vendor: undefined }))
                       setCredential('')
                       setOauthInput('login')
                       setSettings(({ extensions: _drop, ...s }) => s)
@@ -342,6 +351,18 @@ export function ChannelDrawer({
                   />
                 )}
               </div>
+              {!isEdit && form.provider === 'openai_compat' && (
+                <div className="col-span-2">
+                  <VendorPreset
+                    vendor={compatDraft.vendor}
+                    apiBase={form.api_base}
+                    onPick={(vendor, base) => {
+                      setCompatDraft((d) => ({ ...d, vendor: vendor ?? undefined }))
+                      if (base !== undefined) setForm((f) => ({ ...f, api_base: base }))
+                    }}
+                  />
+                </div>
+              )}
               {endpointRequired && <div className="col-span-2">{baseField}</div>}
             </div>
           </FieldGroup>

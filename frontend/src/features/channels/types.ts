@@ -51,14 +51,17 @@ export function apiBasePlaceholder(provider: string): string {
       return 'https://chatgpt.com/backend-api/codex'
     case 'custom_pass':
       return 'https://upstream.example.com'
+    case 'openai_compat':
+      return 'https://api.example.com/v1'
     default:
       return 'https://api.openai.com/v1'
   }
 }
 
 /// UI defaults mirror the provider registry; unknown/cloud endpoints must stay visible.
+/// `openai_compat` points at an arbitrary third party, so it has no default: the address is required.
 export function defaultApiBase(provider: string): string | undefined {
-  return ['openai', 'openai_compat', 'anthropic', 'gemini', 'anthropic_max', 'codex'].includes(provider)
+  return ['openai', 'anthropic', 'gemini', 'anthropic_max', 'codex'].includes(provider)
     ? apiBasePlaceholder(provider) : undefined
 }
 
@@ -199,7 +202,7 @@ export interface ChannelBalance {
   at: string
 }
 
-/// 哪些协议有可查的余额接口（与后端 `Probe::for_channel` 一致）：
+/// 哪些协议有可查的余额接口（与后端 `channel_balance::select_probe` 一致）：
 /// anthropic / gemini / azure / custom_pass 没有公开余额接口，按钮不显示。
 export function balanceSupported(provider: string): boolean {
   return provider === 'openai' || provider === 'openai_compat'

@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiFetch } from '@/lib/api'
+import type { VendorInfo } from '@/features/compat/types'
 import { qk } from '@/lib/query-keys'
 
 /// 适配规则（docs/compat-rules.md）在前端的形状：渠道抽屉里的「剥字段 / 注入字段」两个编辑器
@@ -14,6 +15,8 @@ export interface CompatRule {
   id: string
   phase?: string
   select?: Record<string, unknown>
+  /// 错误阶段的触发条件（状态码 / 错误码 / 错误体片段）。
+  when?: Record<string, unknown>
   do?: CompatOp[]
   order?: number
   disabled?: boolean
@@ -42,12 +45,23 @@ export interface CompatView {
   }
 }
 
-export interface VendorOption {
+/// 内置厂商（目录项）：主机、协议→基址表（创建兼容渠道时补全地址）、声明式探针、特殊要求条数。
+export type VendorOption = VendorInfo
+
+/// 适配档案（`custom:<slug>`）：渠道的 `vendor` 也可以选它。
+export interface ProfileOption {
   id: string
+  slug: string
   display_name: string
-  group: string
+  description: string | null
+  /// 它叠加的内置厂商（`builtin:<id>`）。
+  extends: string | null
   hosts: string[]
-  rules: number
+}
+
+export interface VendorCatalog {
+  data: VendorOption[]
+  profiles: ProfileOption[]
 }
 
 /// 缺字段按「没有」处理：接口以后加字段、桩数据少字段都不该把整个抽屉渲染崩掉。
@@ -73,13 +87,34 @@ export function useChannelCompat(channelId: number | undefined) {
   })
 }
 
+/// 缺字段按「没有」处理（桩数据、旧版本接口都不该让下拉渲染崩掉）。
+export function normalizeVendors(raw: Partial<VendorCatalog> | null | undefined): VendorCatalog {
+  return {
+    data: (raw?.data ?? []).map((v) => ({ ...v, hosts: v.hosts ?? [], endpoints: v.endpoints ?? [], probes: v.probes ?? {} })),
+    profiles: (raw?.profiles ?? []).map((p) => ({ ...p, hosts: p.hosts ?? [], description: p.description ?? null, extends: p.extends ?? null })),
+  }
+}
+
 export function useCompatVendors(enabled: boolean) {
   return useQuery({
     queryKey: qk.compatVendors,
     enabled,
     staleTime: 300_000,
-    queryFn: () => apiFetch<{ data: VendorOption[] }>('/admin/compat/vendors'),
+    queryFn: async () => normalizeVendors(await apiFetch<Partial<VendorCatalog>>('/admin/compat/vendors')),
   })
+}
+
+/// 选了厂商（或叠加了厂商的档案）后，这个协议的端点表；创建兼容渠道时拿来补全 / 让管理员选地址。
+/// 档案自己没有端点，取它 `extends` 的内置厂商的。
+export function presetEndpoints(
+  vendors: VendorCatalog | undefined,
+  id: string | null | undefined,
+  protocol = 'openai.chat',
+): { base: string; label?: string }[] {
+  if (id === null || id === undefined || vendors === undefined) return []
+  const builtin = vendors.profiles.find((p) => p.id === id)?.extends ?? id
+  const entry = vendors.data.find((v) => v.id === builtin)
+  return (entry?.endpoints ?? []).filter((e) => e.protocol === protocol)
 }
 
 /// 两条约定规则的 id：编辑器只管它们，别的规则一概不动。

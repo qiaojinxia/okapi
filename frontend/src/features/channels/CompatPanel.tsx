@@ -79,13 +79,13 @@ export function CompatPanel({
   const suggestion = data.suggested_vendor
   // 版本变了（保存成功后刷新）就让编辑器按新数据重新挂载，草稿状态不会越过版本
   const editorKey = data.channel?.version ?? 0
-  const vendorOptions = [
+  const known = [
     ...(vendors.data?.data ?? []).map((v) => ({ value: v.id, label: v.display_name })),
-    // 目录里没有的旧值也要能显示出来，否则下拉会悄悄显示成「不使用」
-    ...(vendor !== null && !(vendors.data?.data ?? []).some((v) => v.id === vendor)
-      ? [{ value: vendor, label: vendor }]
-      : []),
+    // 适配档案（custom:<slug>）：同一个下拉，标出这是档案
+    ...(vendors.data?.profiles ?? []).map((p) => ({ value: p.id, label: t('compat:profileOption', { name: p.display_name }) })),
   ]
+  // 目录里没有的旧值也要能显示出来，否则下拉会悄悄显示成「不使用」
+  const vendorOptions = vendor !== null && !known.some((o) => o.value === vendor) ? [...known, { value: vendor, label: vendor }] : known
   const stripValue = draft.strip ?? simple.strip
   const stripsUsage = stripValue.includes('stream_options') || 'stream_options' in (draft.inject ?? simple.inject)
   const shadowed = data.effective.shadowed

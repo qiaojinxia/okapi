@@ -19,6 +19,7 @@ import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminAuditRouteImport } from './routes/admin.audit'
 import { Route as AdminChannelsRouteImport } from './routes/admin.channels'
 import { Route as AdminCodesRouteImport } from './routes/admin.codes'
+import { Route as AdminCompatRouteImport } from './routes/admin.compat'
 import { Route as AdminGroupsRouteImport } from './routes/admin.groups'
 import { Route as AdminKeysRouteImport } from './routes/admin.keys'
 import { Route as AdminLogsRouteImport } from './routes/admin.logs'
@@ -95,6 +96,11 @@ const AdminChannelsRoute = AdminChannelsRouteImport.update({
 const AdminCodesRoute = AdminCodesRouteImport.update({
   id: '/codes',
   path: '/codes',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminCompatRoute = AdminCompatRouteImport.update({
+  id: '/compat',
+  path: '/compat',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminGroupsRoute = AdminGroupsRouteImport.update({
@@ -243,6 +249,7 @@ export interface FileRoutesByFullPath {
   '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/compat': typeof AdminCompatRoute
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/logs': typeof AdminLogsRoute
@@ -280,6 +287,7 @@ export interface FileRoutesByTo {
   '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/compat': typeof AdminCompatRoute
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/logs': typeof AdminLogsRoute
@@ -320,6 +328,7 @@ export interface FileRoutesById {
   '/admin/audit': typeof AdminAuditRoute
   '/admin/channels': typeof AdminChannelsRoute
   '/admin/codes': typeof AdminCodesRoute
+  '/admin/compat': typeof AdminCompatRoute
   '/admin/groups': typeof AdminGroupsRoute
   '/admin/keys': typeof AdminKeysRoute
   '/admin/logs': typeof AdminLogsRoute
@@ -361,6 +370,7 @@ export interface FileRouteTypes {
     | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/compat'
     | '/admin/groups'
     | '/admin/keys'
     | '/admin/logs'
@@ -398,6 +408,7 @@ export interface FileRouteTypes {
     | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/compat'
     | '/admin/groups'
     | '/admin/keys'
     | '/admin/logs'
@@ -437,6 +448,7 @@ export interface FileRouteTypes {
     | '/admin/audit'
     | '/admin/channels'
     | '/admin/codes'
+    | '/admin/compat'
     | '/admin/groups'
     | '/admin/keys'
     | '/admin/logs'
@@ -546,6 +558,13 @@ declare module '@tanstack/react-router' {
       path: '/codes'
       fullPath: '/admin/codes'
       preLoaderRoute: typeof AdminCodesRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/compat': {
+      id: '/admin/compat'
+      path: '/compat'
+      fullPath: '/admin/compat'
+      preLoaderRoute: typeof AdminCompatRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/groups': {
@@ -744,6 +763,7 @@ interface AdminRouteChildren {
   AdminAuditRoute: typeof AdminAuditRoute
   AdminChannelsRoute: typeof AdminChannelsRoute
   AdminCodesRoute: typeof AdminCodesRoute
+  AdminCompatRoute: typeof AdminCompatRoute
   AdminGroupsRoute: typeof AdminGroupsRoute
   AdminKeysRoute: typeof AdminKeysRoute
   AdminLogsRoute: typeof AdminLogsRoute
@@ -767,6 +787,7 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminAuditRoute: AdminAuditRoute,
   AdminChannelsRoute: AdminChannelsRoute,
   AdminCodesRoute: AdminCodesRoute,
+  AdminCompatRoute: AdminCompatRoute,
   AdminGroupsRoute: AdminGroupsRoute,
   AdminKeysRoute: AdminKeysRoute,
   AdminLogsRoute: AdminLogsRoute,
