@@ -24,7 +24,7 @@
 | 缺口 | 代码 | 后果 |
 |---|---|---|
 | 模型契约是编译期精确 ID 表 | `crates/okapi-providers/src/model_parameters.rs::profile()`（`gpt-6-*`、`gpt-5.x`、`claude-*`、`kimi-k3`…逐个写死） | 新模型的 effort、预算、温度范围要改代码、发版（服务器构建约 14 分钟） |
-| 渠道级只有顶层、无条件的剥与注 | `bins/okapi/src/gateway/chat.rs::adjust_request_fields`（先剥后注） | 不分模型、改不了嵌套路径、不能改名与限幅；一个渠道里多个模型怪癖不同，只能拆渠道 |
+| 渠道级只有顶层、无条件的剥与注 | `bins/okapi/src/gateway/chat.rs::adjust_request_fields`（先剥后注） | 不分模型、改不了嵌套路径、不能改名与限幅；一个渠道里多个模型的特殊要求不同，只能拆渠道 |
 | 响应、流、错误侧没有声明式入口 | 思考字段只认 `reasoning_content`（字符估算处明确忽略别名 `reasoning`）；用量字段变体、错误映射都是代码；`try_model` 重试循环里写死 `dropped_reasoning`、Responses 404/405 降级 | 每个新变体都要改 Rust |
 | 厂商身份是代码 | 余额探针按写死的主机名选厂商（DeepSeek / SiliconFlow / OpenRouter / Moonshot 各一个解析函数，`bins/okapi/src/console/channel_balance.rs`）；`openai_compat` 的 `default_base` 是 `https://api.openai.com/v1`（`crates/okapi-providers/src/registry.rs`） | 空地址的第三方渠道会把第三方 key 发给 OpenAI；`openai` 适配器的认证头是写死的 `Authorization: Bearer`（Azure 另用 `api-key`），换认证方式要改代码 |
 
@@ -36,7 +36,7 @@
 
 | | new-api | sub2api | 本设计 |
 |---|---|---|---|
-| 厂商适配 | 40 个 Go 包，各自实现 14 个方法的 `Adaptor` 接口，大半是样板（`relay/channel/moonshot/adaptor.go` 135 行，真正的怪癖只有 URL 布局和一个模型的温度） | `domain/platforms.go` 单一平台清单 + `service/provider_profile.go`（"协议→端点"表，`by_inbound` / `by_model` 两种选路），但行为怪癖是 `if account.Platform == PlatformDeepseek` 散在至少 6 个文件，`openai_chat_roles.go` 把厂商域名写死在代码里 | 厂商 = 数据；翻译器留 Rust；怪癖 = 规则 |
+| 厂商适配 | 40 个 Go 包，各自实现 14 个方法的 `Adaptor` 接口，大半是样板（`relay/channel/moonshot/adaptor.go` 135 行，真正的特殊要求只有 URL 布局和一个模型的温度） | `domain/platforms.go` 单一平台清单 + `service/provider_profile.go`（"协议→端点"表，`by_inbound` / `by_model` 两种选路），但行为上的特殊要求是 `if account.Platform == PlatformDeepseek` 散在至少 6 个文件，`openai_chat_roles.go` 把厂商域名写死在代码里 | 厂商 = 数据；翻译器留 Rust；特殊要求 = 规则 |
 | 参数覆盖 | `relay/common/override.go`：23 种操作、条件 AND/OR、敏感路径审计；字符串 `mode`、gjson 路径、无静态检查、只挂渠道 | 账号级头覆盖 + 禁止覆盖清单；`model/error_passthrough_rule.go`（库里的错误规则：状态码 / 关键词 → 透传或自定义） | 带类型的闭合原语、JSON Pointer、分层、版本、回放 |
 | 扩展 | JS 插件（sobek，5 秒超时）只用于异步任务（10 个插件、6.3k 行 JS），治理很重：schema、d.ts、夹具、版本、dry-run、代际切换 | 签名的外部二进制插件，只用于 OAuth 传输 | 不嵌脚本：CEL → Rust 适配器 → 外挂转换服务 |
 | 配置形态 | `relaykit/dto/channel_settings.go` 里 20 多个字段（多为布尔开关）的杂物袋；`advanced_custom` 路由表与 40 个适配包是两套并行机制 | 平台特例散在代码 | 同一份规则表达；默认拒绝的白名单规则取代一堆开关 |
@@ -46,7 +46,7 @@
 ## 3. 设计原则
 
 1. **数据，不是脚本。** 规则是 JSON 文档，不是程序。
-2. **原语优先于特例。** 遇到表达不了的怪癖，加一个**通用**原语（操作、CEL 函数、变量），不写厂商特例；原语集合只增不减。"不改通用代码"是目标，不是承诺（见 §14 的边界样本）。
+2. **原语优先于特例。** 遇到表达不了的特殊要求，加一个**通用**原语（操作、CEL 函数、变量），不写厂商特例；原语集合只增不减。"不改通用代码"是目标，不是承诺（见 §14 的边界样本）。
 3. **纯函数、幂等、可回放。** 无网络、无时间、无随机；应用两次等于应用一次；同一输入同一输出。
 4. **事实，不是金额。** 响应规则只能把字段映射到用量槽位（整数运算），价格由价簿算。
 5. **先预过滤，再求值。** 选择器可索引；没有规则的渠道零开销（沿用价簿 `has_volume_rules()` 那种门控）。
@@ -91,14 +91,14 @@
 |---|---|---|---|---|---|
 | 厂商预设 | `channels.vendor`（可空） | 我们，随二进制发布，带夹具 | 内嵌 JSON | 严格 role、推理模型去采样参数、用量字段映射、错误映射 | 渠道可按 id 禁用或改写 |
 | 适配档案（P2） | `channels.vendor = custom:<id>` | 管理员 | 版本表 | 自定义长尾厂商；一批渠道共用的规则 | 渠道覆盖 |
-| 渠道覆盖 | 渠道本身 | 管理员，或 AI 起草后人批 | 版本表 | 本渠道特例：转售商的怪癖、隐私剥字段、注入头 | 不能改护栏 |
+| 渠道覆盖 | 渠道本身 | 管理员，或 AI 起草后人批 | 版本表 | 本渠道特例：转售商的特殊要求、隐私剥字段、注入头 | 不能改护栏 |
 | 全局护栏 | 整个网关 | 管理员（高权限） | 版本表 | 合规：永不转发某些字段，最后执行 | 谁也不能改 |
 
 ### 5.2 不绑定的对象
 
 | 对象 | 为什么不绑 |
 |---|---|
-| 渠道池 | 池里可能混着多个厂商，怪癖是每个候选自己的；规则按候选解析 |
+| 渠道池 | 池里可能混着多个厂商，特殊要求是每个候选自己的；规则按候选解析 |
 | 分组 / 用户 / API key | 产品策略，不是上游适配；需要时作为 CEL 的只读变量（P3 再开放） |
 | 价簿里的模型 | 那是对客户端的名字、定价和权限，同一个客户端模型可经不同渠道走到不同的上游模型；规则里用**映射后的上游模型**写选择器 |
 | 客户端伪装（`extensions.client_profile`） | 客户端身份由适配器拥有，规则只能读 |
@@ -196,7 +196,7 @@
 
 **请求 / 响应的 JSON 操作**
 
-| 操作 | 阶段 | 作用 | 来源怪癖 |
+| 操作 | 阶段 | 作用 | 对应的特殊要求 |
 |---|---|---|---|
 | `remove {paths}` | request, response | 删除路径 | #18 |
 | `keep_only {paths}` | request | 白名单：只保留列出的路径 | #8 |
@@ -414,13 +414,13 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 - **边界**：做"事前选一次"，不做"先用便宜模型、不行再升"的级联（要看输出，成本翻倍）。
 - **与现有机制的分工**：路由选模型；池与调度选渠道；`models.fallback_models` 与重试处理失败。
 
-## 14. 怪癖语料库（前 30 条）
+## 14. 特殊要求语料库（前 30 条）
 
 用途：**验收这套原语是否够用**。每条都要有"规则表达 + 夹具"，新增厂商只提交数据与夹具；表达不了的记为缺口，决定加通用原语还是写适配器。`Y` = 用本文已有原语即可；`Y+` = 需要新增一个通用原语 / 函数 / 变量（已在 §6–§7 列出）；`B` = 计费关键，有保护规则；`N` = 内置命名变换。来源路径的仓库：new-api、sub2api 为对照仓库，其余是 Okapi 自己。
 
 ### 14.1 端点、认证、头
 
-| # | 来源 | 怪癖 | 阶段 | 表达 | 评估 |
+| # | 来源 | 特殊要求 | 阶段 | 表达 | 评估 |
 |---|---|---|---|---|---|
 | 1 | new-api `relay/channel/moonshot/adaptor.go` | Claude 格式走 `/anthropic/v1/messages`，chat 走 `/v1/chat/completions`，rerank 走 `/v1/rerank`；另有"特殊基址"表 | 厂商 | `endpoints` 表 | Y |
 | 2 | new-api `relay/channel/volcengine/adaptor.go` | `bot*` 模型走 `/api/v3/bots/chat/completions`，其余走 `/api/v3/chat/completions` | 厂商 | `endpoints[].when.model` | Y+（端点带选择器） |
@@ -431,7 +431,7 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 
 ### 14.2 请求字段
 
-| # | 来源 | 怪癖 | 阶段 | 表达 | 评估 |
+| # | 来源 | 特殊要求 | 阶段 | 表达 | 评估 |
 |---|---|---|---|---|---|
 | 7 | new-api `moonshot/adaptor.go` | `kimi-k2.6` 只接受 `temperature=1` | request | `set /temperature 1.0`，选择器 `model` | Y |
 | 8 | new-api `perplexity/relay-perplexity.go`、`mistral/text.go` | 输出只含固定字段，其余一律丢弃 | request | `keep_only` | Y+（白名单原语） |
@@ -450,7 +450,7 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 
 ### 14.3 流式、用量、响应
 
-| # | 来源 | 怪癖 | 阶段 | 表达 | 评估 |
+| # | 来源 | 特殊要求 | 阶段 | 表达 | 评估 |
 |---|---|---|---|---|---|
 | 21 | Okapi `crates/okapi-providers/src/openai.rs::ensure_stream_usage` 与 new-api `openai/adaptor.go` | Okapi 对流式请求强制 `stream_options.include_usage=true`（否则结算落字符估算，实测漏收约七成）；new-api 对非 OpenAI / Azure 渠道清掉 `stream_options`。两者冲突 | request | 允许 `remove /stream_options`，但必须带 `billing_critical_ack` 并告警 | B |
 | 22 | new-api `relay/channel/xai/text.go` | xAI 的 `completion_tokens` 不含推理 token，要用 `total_tokens − prompt_tokens` 算 | response | `usage_map` 整数减法 | Y+（整数加减） |
@@ -460,7 +460,7 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 
 ### 14.4 错误与重试
 
-| # | 来源 | 怪癖 | 阶段 | 表达 | 评估 |
+| # | 来源 | 特殊要求 | 阶段 | 表达 | 评估 |
 |---|---|---|---|---|---|
 | 26 | Okapi `chat.rs::try_model` 与 `okapi_providers::responses::rejects_foreign_encrypted_content` | 会话换了账号，上个账号签发的加密推理项验不过：去掉推理项在同一候选上重发一次，不计 failover | error | `retry_same{mutate: apply without_reasoning_items, max: 1}` | Y+（`retry_same` + 内置变换） |
 | 27 | Okapi `chat.rs::try_model` | Responses 直转撞上 404 / 405（上游没有 `/responses`）：同一候选改走 chat 降级链，仍受 `tool_loss_policy` 约束 | error | `retry_same{plan: {responses_native: false}}` | Y+（`plan` 动作） |
@@ -468,7 +468,7 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 
 ### 14.5 策略与护栏
 
-| # | 来源 | 怪癖 | 阶段 | 表达 | 评估 |
+| # | 来源 | 特殊要求 | 阶段 | 表达 | 评估 |
 |---|---|---|---|---|---|
 | 29 | new-api `relaykit/dto/channel_settings.go` `ChannelOtherSettings` | `AllowServiceTier`、`AllowInferenceGeo`、`AllowSpeed`、`AllowSafetyIdentifier`、`DisableStore`、`AllowIncludeObfuscation` 六个布尔开关，默认过滤敏感字段 | 护栏 | 一条默认拒绝的 `remove` 规则 + 放行白名单，取代六个开关 | Y |
 | 30 | new-api `ChannelSettings.SystemPrompt` / `SystemPromptOverride` | 渠道级注入或覆盖系统提示词 | request | `inject_message`（敏感路径，需 `compat.sensitive`） | Y+（敏感路径权限） |
@@ -495,7 +495,7 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 **P3**：启用 CEL；蓝图编辑；路由阶段；"上游报不支持某参数 → 丢掉并重试一次 → 给管理员一条可固化成规则的建议"的自愈建议；按入口方言选同协议端点。
 
 **验收**：
-- 怪癖语料库（§14）的每一条有规则表达加夹具，覆盖率进 CI 报告；
+- 特殊要求语料库（§14）的每一条有规则表达加夹具，覆盖率进 CI 报告；
 - 每条内置规则有夹具，且"应用两次等于应用一次"；
 - 属性测试：规则永远写不进受保护路径；
 - `okapi-compat` 的用量模块纳入 `scripts/guard-no-float.sh` 的扫描范围；

@@ -1795,7 +1795,7 @@ export default {
       '剥离之后浅合并到请求顶层。数字 / 布尔 / 对象写成 JSON。model、messages、stream、provider 受保护。',
     injectFieldsAdd: '添加字段',
     compatVendor: '上游厂商预设',
-    compatVendorHint: '选了内置厂商，就按它已知的怪癖自动适配请求（例如严格校验角色的上游，开发者消息会改成系统消息）。不选则原样转发，不会按地址悄悄套用。',
+    compatVendorHint: '选了内置厂商，就按它已知的特殊要求自动适配请求（例如严格校验角色的上游，开发者消息会改成系统消息）。不选则原样转发，不会按地址悄悄套用。',
     compatVendorNone: '不使用',
     compatVendorSuggest: '地址看起来是 {{name}}，要套用它的预设吗？',
     compatVendorApply: '套用',

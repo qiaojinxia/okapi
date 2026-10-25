@@ -148,7 +148,7 @@ impl Mode {
     }
 }
 
-/// 请求阶段的操作。封闭集合：只增不减，表达不了的怪癖加一个**通用**原语，不写厂商特例。
+/// 请求阶段的操作。封闭集合：只增不减，表达不了的特殊要求加一个**通用**原语，不写厂商特例。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
