@@ -1,6 +1,7 @@
 //! 操作的编译形态与执行。执行只依赖输入的 JSON：无 IO、无时间、无随机，同输入同输出。
 
 use crate::decimal::Decimal;
+use crate::expr::Expr;
 use crate::pointer::{self, KeepTree, Pointer, Seg};
 use serde_json::{Number, Value};
 use std::collections::BTreeMap;
@@ -45,6 +46,34 @@ pub(crate) enum CompiledOp {
         from: String,
         to: String,
     },
+    /// 对 `items`（容器路径加 `/*`）命中的每个元素执行子操作，元素当作子操作的根。
+    Each {
+        items: Pointer,
+        ops: Vec<CompiledOp>,
+    },
+    /// 响应阶段：槽位 ← 整数表达式。每项带上槽位的目标指针，免得每次求值再解析。
+    UsageMap(Vec<UsageSlot>),
+    /// 能力阶段：给候选补的事实。不作用于文档，由 [`crate::EffectiveRules::capabilities`] 汇总。
+    Capability(BTreeMap<String, bool>),
+    /// 错误阶段的反应（不作用于文档，由 [`crate::EffectiveRules::react`] 交给网关执行）。
+    RetrySame {
+        mutate: Vec<CompiledOp>,
+        max: u8,
+    },
+    Failover {
+        cooldown_secs: Option<u32>,
+    },
+    Fail {
+        status: Option<u16>,
+        code: Option<String>,
+    },
+}
+
+/// `usage_map` 的一项：槽位在响应文档里的位置，和写进去的算式。
+#[derive(Debug, Clone)]
+pub(crate) struct UsageSlot {
+    pub target: Pointer,
+    pub expr: Expr,
 }
 
 fn clamp_number(number: &Number, min: Option<&Bound>, max: Option<&Bound>) -> Option<Number> {
@@ -95,7 +124,15 @@ impl CompiledOp {
                 is_top_level(path, field)
                     && matches!((min, max), (Some(lo), Some(hi)) if lo.decimal == hi.decimal)
             }
-            Self::Copy { .. } | Self::MapValue { .. } | Self::RoleMap { .. } => false,
+            Self::Copy { .. }
+            | Self::MapValue { .. }
+            | Self::RoleMap { .. }
+            | Self::Each { .. }
+            | Self::UsageMap(_)
+            | Self::Capability(_)
+            | Self::RetrySame { .. }
+            | Self::Failover { .. }
+            | Self::Fail { .. } => false,
         }
     }
 
@@ -176,6 +213,29 @@ impl CompiledOp {
                 }
                 changed
             }
+            Self::Each { items, ops } => {
+                let mut changed = 0;
+                pointer::each_mut(doc, items, &mut |element| {
+                    changed += ops.iter().map(|op| op.apply(element)).sum::<usize>();
+                });
+                changed
+            }
+            Self::UsageMap(slots) => {
+                // 先把每个槽位的新值都算出来再写：表达式读的是应用前的用量，与槽位顺序无关
+                let values: Vec<(&Pointer, i64)> = slots
+                    .iter()
+                    .filter_map(|item| item.expr.eval(doc).map(|v| (&item.target, v)))
+                    .collect();
+                values
+                    .into_iter()
+                    .map(|(target, value)| pointer::set(doc, target, &Value::from(value), false))
+                    .sum()
+            }
+            // 这几个不是文档编辑：由各自阶段的入口解释
+            Self::Capability(_)
+            | Self::RetrySame { .. }
+            | Self::Failover { .. }
+            | Self::Fail { .. } => 0,
         }
     }
 }

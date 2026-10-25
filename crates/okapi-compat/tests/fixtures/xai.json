@@ -34,5 +34,45 @@
     "input": { "model": "grok-4", "max_tokens": 10 },
     "expect": { "model": "grok-4", "max_tokens": 10 },
     "fires": false
+  },
+  {
+    "name": "reasoning tokens that the upstream left out of completion_tokens are added back",
+    "vendor": "xai",
+    "rule": "xai.completion-includes-reasoning",
+    "phase": "response",
+    "context": {"vendor": "builtin:xai", "host": "api.x.ai", "model": "grok-3-mini", "dialect": "openai.chat"},
+    "input": {"id": "c1", "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 25, "completion_tokens_details": {"reasoning_tokens": 10}}},
+    "expect": {"id": "c1", "choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25, "completion_tokens_details": {"reasoning_tokens": 10}}},
+    "fires": true
+  },
+  {
+    "name": "a usage that already counts reasoning in completion_tokens is left alone",
+    "vendor": "xai",
+    "rule": "xai.completion-includes-reasoning",
+    "phase": "response",
+    "context": {"vendor": "builtin:xai", "host": "api.x.ai", "model": "grok-3-mini", "dialect": "openai.chat"},
+    "input": {"usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25}},
+    "expect": {"usage": {"prompt_tokens": 10, "completion_tokens": 15, "total_tokens": 25}},
+    "fires": false
+  },
+  {
+    "name": "a chunk without usage is passed through",
+    "vendor": "xai",
+    "rule": "xai.completion-includes-reasoning",
+    "phase": "response",
+    "context": {"vendor": "builtin:xai", "host": "api.x.ai", "model": "grok-3-mini", "dialect": "openai.chat"},
+    "input": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "hi"}}]},
+    "expect": {"object": "chat.completion.chunk", "choices": [{"index": 0, "delta": {"content": "hi"}}]},
+    "fires": false
+  },
+  {
+    "name": "a usage without total_tokens is not guessed at",
+    "vendor": "xai",
+    "rule": "xai.completion-includes-reasoning",
+    "phase": "response",
+    "context": {"vendor": "builtin:xai", "host": "api.x.ai", "model": "grok-3-mini", "dialect": "openai.chat"},
+    "input": {"usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+    "expect": {"usage": {"prompt_tokens": 10, "completion_tokens": 5}},
+    "fires": false
   }
 ]

@@ -4,6 +4,8 @@
 //! 的 `STRIP_PROTECTED` / `INJECT_PROTECTED`），靠注释约定「同一份」。现在校验（写入时）与执行
 //! （运行期的后置断言）都读这里。
 //!
+//! 请求体与响应体各有一张表（`classify_in` 按阶段选）；请求那张还管运行期的后置断言。
+//!
 //! 四个等级，由低到高：
 //! - [`PathClass::Free`]：随便写。
 //! - [`PathClass::Sensitive`]：写入需要更高权限并留审计（提示词、指令、`service_tier`…）。
@@ -13,6 +15,7 @@
 //! - [`PathClass::Protected`]：任何规则都不可写。
 
 use crate::pointer::{KeepTree, Pointer, Seg};
+use crate::rule::Phase;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -34,6 +37,7 @@ pub enum Access {
 }
 
 struct Entry {
+    /// 键序列；片段 `*` 表示「任意数组下标 / 对象键」。
     path: &'static [&'static str],
     class: PathClass,
     /// 只保护节点本身（不能删 / 整个替换），不保护它的后代。
@@ -58,6 +62,7 @@ pub const PROTECTED_KEYS: [&str; 5] = [
     "provider",
 ];
 
+/// 请求体的注册表（发往上游的那份 JSON）。
 const REGISTRY: &[Entry] = &[
     // 主链：模型名只能经渠道的模型映射改；流式开关与会话续接牵动协议与结算。
     entry(&["model"], PathClass::Protected),
@@ -88,6 +93,73 @@ const REGISTRY: &[Entry] = &[
     entry(&["service_tier"], PathClass::Sensitive),
 ];
 
+/// 响应体的注册表（OpenAI chat 形状）。响应里没有「受保护」项：没有主链字段需要钉住，
+/// 也就没有运行期快照还原；要管的是两件事——
+/// - **用量事实**（`usage`、`bill_by_response_model` 渠道按它计价的 `model`、档位倍率用的 `service_tier`）
+///   是计费关键：动它就是动账，规则要 `billing_critical_ack`，写入还需要 `compat.sensitive`；
+/// - **模型输出本体**（正文、工具调用、拒答）写入需要 `compat.sensitive`，移除不需要。
+const RESPONSE_REGISTRY: &[Entry] = &[
+    entry(&["usage"], PathClass::BillingCritical),
+    entry(&["model"], PathClass::BillingCritical),
+    entry(&["service_tier"], PathClass::BillingCritical),
+    entry(
+        &["choices", "*", "message", "content"],
+        PathClass::Sensitive,
+    ),
+    entry(
+        &["choices", "*", "message", "tool_calls"],
+        PathClass::Sensitive,
+    ),
+    entry(
+        &["choices", "*", "message", "function_call"],
+        PathClass::Sensitive,
+    ),
+    entry(
+        &["choices", "*", "message", "refusal"],
+        PathClass::Sensitive,
+    ),
+    entry(&["choices", "*", "delta", "content"], PathClass::Sensitive),
+    entry(
+        &["choices", "*", "delta", "tool_calls"],
+        PathClass::Sensitive,
+    ),
+    entry(
+        &["choices", "*", "delta", "function_call"],
+        PathClass::Sensitive,
+    ),
+    entry(&["choices", "*", "delta", "refusal"], PathClass::Sensitive),
+];
+
+fn registry(phase: Phase) -> &'static [Entry] {
+    match phase {
+        Phase::Response => RESPONSE_REGISTRY,
+        _ => REGISTRY,
+    }
+}
+
+/// 注册表的一行，给目录 / 界面看的形态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryInfo {
+    /// RFC 6901 指针；`*` 表示任意数组下标 / 对象键。
+    pub path: String,
+    pub class: PathClass,
+    /// 只保护节点本身（不能删 / 整个替换），不保护它的后代。
+    pub node_only: bool,
+}
+
+/// 某个阶段用的注册表（响应看响应那张，其余看请求那张）。
+#[must_use]
+pub fn describe(phase: Phase) -> Vec<EntryInfo> {
+    registry(phase)
+        .iter()
+        .map(|e| EntryInfo {
+            path: Pointer::from_keys(e.path.iter().copied()),
+            class: e.class,
+            node_only: e.node_only,
+        })
+        .collect()
+}
+
 /// `keep_only` 永远保留的路径：注册表里等级为 Protected 的项（含 `/messages` 这种只保护节点本身的）。
 #[must_use]
 pub fn implicit_keep() -> Vec<Pointer> {
@@ -105,6 +177,7 @@ fn overlaps(written: &[Seg], entry: &Entry) -> bool {
     for (seg, key) in written.iter().zip(entry.path).take(common) {
         if let Seg::Key(k) = seg
             && k != key
+            && *key != "*"
         {
             return false;
         }
@@ -112,10 +185,16 @@ fn overlaps(written: &[Seg], entry: &Entry) -> bool {
     written.len() <= entry.path.len() || !entry.node_only
 }
 
-/// 这条指针在给定访问方式下的最高等级。
+/// 这条指针在给定访问方式下的最高等级（请求体）。
 #[must_use]
 pub fn classify(ptr: &Pointer, access: Access) -> PathClass {
-    REGISTRY
+    classify_in(Phase::Request, ptr, access)
+}
+
+/// 同 [`classify`]，按阶段选注册表：`response` 看响应体那张，其余看请求体那张。
+#[must_use]
+pub fn classify_in(phase: Phase, ptr: &Pointer, access: Access) -> PathClass {
+    registry(phase)
         .iter()
         .filter(|e| overlaps(ptr.segs(), e))
         .map(|e| e.class)
@@ -348,6 +427,78 @@ mod tests {
         assert!(!keeps(&["/model", "/stream_options"]));
         assert!(!keeps(&["/stream_options/include_usage"]));
         assert!(keeps(&["/stream_options/other"]));
+    }
+
+    #[test]
+    fn usage_facts_are_billing_critical_in_responses_only() {
+        for path in [
+            "/usage",
+            "/usage/prompt_tokens",
+            "/usage/prompt_tokens_details/cached_tokens",
+            "/model",
+            "/service_tier",
+        ] {
+            for access in [Access::Write, Access::Remove] {
+                assert_eq!(
+                    classify_in(Phase::Response, &p(path), access),
+                    PathClass::BillingCritical,
+                    "{path} {access:?}"
+                );
+            }
+        }
+        // 同一个键在请求体里是另一回事
+        assert_eq!(classify(&p("/usage"), Access::Write), PathClass::Free);
+        assert_eq!(classify(&p("/model"), Access::Write), PathClass::Protected);
+        // 通配可能落在 usage 上
+        assert_eq!(
+            classify_in(Phase::Response, &p("/*/prompt_tokens"), Access::Write),
+            PathClass::BillingCritical
+        );
+    }
+
+    #[test]
+    fn model_output_is_sensitive_to_write_but_free_to_remove() {
+        for path in [
+            "/choices/0/message/content",
+            "/choices/*/message/tool_calls",
+            "/choices/*/delta/content",
+            "/choices/1/delta/refusal",
+            "/choices/*/message/function_call",
+        ] {
+            assert_eq!(
+                classify_in(Phase::Response, &p(path), Access::Write),
+                PathClass::Sensitive,
+                "{path}"
+            );
+            assert_eq!(
+                classify_in(Phase::Response, &p(path), Access::Remove),
+                PathClass::Free,
+                "{path}"
+            );
+        }
+        // 抄 / 改名推理字段、改 finish_reason 都是自由的
+        for path in [
+            "/choices/*/message/reasoning_content",
+            "/choices/*/delta/reasoning",
+            "/choices/*/finish_reason",
+            "/id",
+            "/system_fingerprint",
+        ] {
+            assert_eq!(
+                classify_in(Phase::Response, &p(path), Access::Write),
+                PathClass::Free,
+                "{path}"
+            );
+        }
+        // 整个 message / delta 被换掉会连带改到正文
+        assert_eq!(
+            classify_in(Phase::Response, &p("/choices/*/message"), Access::Write),
+            PathClass::Sensitive
+        );
+        assert_eq!(
+            classify_in(Phase::Response, &p("/choices"), Access::Write),
+            PathClass::Sensitive
+        );
     }
 
     #[test]

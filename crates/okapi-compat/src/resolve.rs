@@ -1,24 +1,25 @@
-//! 分层合并与请求阶段执行。
+//! 分层合并与各阶段执行（请求 / 响应 / 错误 / 能力）。
 //!
-//! 有效规则 = 厂商 ⊕（档案，P2）⊕ 渠道 ⊕ 护栏：
+//! 有效规则 = 厂商 ⊕ 档案 ⊕ 渠道 ⊕ 护栏：
 //! - 规则有 `id`，**更靠后的层里同 id 的规则覆盖前面的**；`disabled: true` 把前面的同 id 规则关掉；
 //! - 护栏排在最后，所以谁也覆盖不了它；
 //! - 执行顺序：阶段 → 层级（厂商 100、档案 200、渠道 300、护栏 900）→ `order` → 文档顺序。
 
+use crate::exec::CompiledOp;
 use crate::protect::Snapshot;
 use crate::rule::{Phase, Rule};
 use crate::select::Context;
 use crate::validate::{ValidRule, Validated};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layer {
     Vendor,
-    /// 适配档案（P2）。
+    /// 适配档案：管理员命名的可复用规则包（`channels.vendor = custom:<slug>`）。
     Profile,
     Channel,
     Guard,
@@ -179,6 +180,63 @@ pub struct Outcome {
     pub report: Report,
 }
 
+/// 错误阶段命中的一条规则和它要网关做的事。
+#[derive(Debug, Clone, Copy)]
+pub struct Reaction<'a> {
+    pub rule: &'a str,
+    pub layer: Layer,
+    pub action: Action<'a>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Action<'a> {
+    /// 同一候选上改请求体后重发；网关按（规则 id）计次，超过 `max` 就当没命中。
+    RetrySame { mutation: Mutation<'a>, max: u8 },
+    /// 当作「换下一个候选」；带 `cooldown_secs` 则让这把 key 冷却那么久。
+    Failover { cooldown_secs: Option<u32> },
+    /// 改写返回给客户端的错误：给了 `code` 就换成网关的稳定错误壳，否则保留上游错误体只换状态码。
+    Fail {
+        status: Option<u16>,
+        code: Option<&'a str>,
+    },
+}
+
+impl Reaction<'_> {
+    /// 诊断里用的一行摘要（不含请求内容）。
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        let action = match self.action {
+            Action::RetrySame { .. } => "retry_same",
+            Action::Failover { .. } => "failover",
+            Action::Fail { .. } => "fail",
+        };
+        serde_json::json!({"rule": self.rule, "layer": self.layer, "action": action})
+    }
+}
+
+/// `retry_same` 的请求改写：一组已校验过的请求阶段操作。
+#[derive(Debug, Clone, Copy)]
+pub struct Mutation<'a>(&'a [CompiledOp]);
+
+impl Mutation<'_> {
+    /// 对要重发的请求体执行这些操作。没有任何变化（或体不是 JSON 对象）返回 `None`——
+    /// 调用方据此放弃重发，免得把同一个请求再发一遍得到同一个错误。
+    #[must_use]
+    pub fn apply(&self, body: &[u8]) -> Option<Vec<u8>> {
+        let mut doc: Value = serde_json::from_slice(body).ok()?;
+        if !doc.is_object() {
+            return None;
+        }
+        let snapshot = Snapshot::capture(&doc);
+        let changes: usize = self.0.iter().map(|op| op.apply(&mut doc)).sum();
+        // 校验器已经拦住了写受保护路径的规则；这里是兜底，主链字段被动了就放弃这次重发
+        if changes == 0 || !snapshot.intact(&doc) {
+            return None;
+        }
+        serde_json::to_vec(&doc).ok()
+    }
+}
+
 /// 只有标了 `required` 的规则没能应用时才失败（失败关闭）；其余规则出问题一律跳过并记录。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Failure {
@@ -232,6 +290,164 @@ impl EffectiveRules {
     #[must_use]
     pub fn selects(&self, ctx: &Context<'_>) -> bool {
         self.selected(ctx).next().is_some()
+    }
+
+    /// 有效规则里有没有 `phase` 阶段的规则（不看选择器）。网关据此决定要不要为这个阶段包一层。
+    #[must_use]
+    pub fn has_phase(&self, phase: Phase) -> bool {
+        self.active
+            .iter()
+            .any(|slot| slot.valid().rule.phase == phase)
+    }
+
+    fn selected_in<'a>(
+        &'a self,
+        phase: Phase,
+        ctx: &'a Context<'a>,
+    ) -> impl Iterator<Item = &'a Active> {
+        self.active.iter().filter(move |slot| {
+            let valid = slot.valid();
+            valid.rule.phase == phase && valid.selector.matches(ctx)
+        })
+    }
+
+    /// 有没有响应规则会被选中。先于解析响应体调用：没有就不付解析成本。
+    #[must_use]
+    pub fn selects_response(&self, ctx: &Context<'_>) -> bool {
+        self.selected_in(Phase::Response, ctx).next().is_some()
+    }
+
+    /// 对一份已解析的响应文档（非流式的整体，或流式的一帧）执行响应阶段规则。
+    /// 失败开放：响应已经从上游回来了，规则出问题只跳过并记录，不让合法响应失败。
+    pub fn apply_response_value(&self, ctx: &Context<'_>, doc: &mut Value) -> Report {
+        let mut report = Report::default();
+        let object = doc.is_object();
+        for slot in self.selected_in(Phase::Response, ctx) {
+            let valid = slot.valid();
+            if !object {
+                report.skipped.push(Skipped {
+                    rule: valid.rule.id.clone(),
+                    layer: slot.layer,
+                    reason: "body_not_object",
+                });
+                continue;
+            }
+            let changes: usize = valid.ops.iter().map(|op| op.apply(doc)).sum();
+            if changes > 0 {
+                report.fired.push(Fired {
+                    rule: valid.rule.id.clone(),
+                    layer: slot.layer,
+                    changes,
+                });
+            }
+        }
+        report
+    }
+
+    /// 对原始响应体字节执行响应阶段规则：没有规则被选中时不解析、不分配；
+    /// 解析后没有任何改动时 `body` 为 `None`，调用方沿用原字节。
+    #[must_use]
+    pub fn apply_response(&self, ctx: &Context<'_>, body: &[u8]) -> Outcome {
+        if !self.selects_response(ctx) {
+            return Outcome::default();
+        }
+        let Ok(mut doc) = serde_json::from_slice::<Value>(body) else {
+            let skipped = self
+                .selected_in(Phase::Response, ctx)
+                .map(|slot| Skipped {
+                    rule: slot.valid().rule.id.clone(),
+                    layer: slot.layer,
+                    reason: "body_not_json",
+                })
+                .collect();
+            return Outcome {
+                body: None,
+                report: Report {
+                    fired: Vec::new(),
+                    skipped,
+                },
+            };
+        };
+        let mut report = self.apply_response_value(ctx, &mut doc);
+        if report.fired.is_empty() {
+            return Outcome { body: None, report };
+        }
+        if let Ok(bytes) = serde_json::to_vec(&doc) {
+            return Outcome {
+                body: Some(bytes),
+                report,
+            };
+        }
+        // 序列化一个刚解析出来的 Value 不会失败；万一失败，宁可不改也不放过一份残缺的体
+        report
+            .skipped
+            .extend(report.fired.drain(..).map(|f| Skipped {
+                rule: f.rule,
+                layer: f.layer,
+                reason: "serialize_failed",
+            }));
+        Outcome { body: None, report }
+    }
+
+    /// 能力阶段：命中规则给出的事实合并成一张表（后执行的层覆盖先执行的）。
+    /// 调用方把它并进渠道自己的 `capabilities`，**渠道已声明的值优先**。
+    #[must_use]
+    pub fn capabilities(&self, ctx: &Context<'_>) -> BTreeMap<String, bool> {
+        let mut facts = BTreeMap::new();
+        for slot in self.selected_in(Phase::Capability, ctx) {
+            for op in &slot.valid().ops {
+                if let CompiledOp::Capability(given) = op {
+                    facts.extend(given.iter().map(|(name, value)| (name.clone(), *value)));
+                }
+            }
+        }
+        facts
+    }
+
+    /// 错误阶段：上游返回了 `status` 与 `body`，按执行顺序列出所有命中的规则的反应。
+    /// 网关依次看：第一条能用的（重发还有次数、改写后确实有变化，或是换渠道 / 改写错误）生效，
+    /// 没有一条能用就走网关原来的处理。
+    #[must_use]
+    pub fn reactions(&self, ctx: &Context<'_>, status: u16, body: &[u8]) -> Vec<Reaction<'_>> {
+        let mut out = Vec::new();
+        for slot in &self.active {
+            let valid = slot.valid();
+            if valid.rule.phase != Phase::Error || !valid.selector.matches(ctx) {
+                continue;
+            }
+            let Some(when) = &valid.when else {
+                continue;
+            };
+            if !when.matches(status, body) {
+                continue;
+            }
+            let action = match valid.ops.first() {
+                Some(CompiledOp::RetrySame { mutate, max }) => Action::RetrySame {
+                    mutation: Mutation(mutate),
+                    max: *max,
+                },
+                Some(CompiledOp::Failover { cooldown_secs }) => Action::Failover {
+                    cooldown_secs: *cooldown_secs,
+                },
+                Some(CompiledOp::Fail { status, code }) => Action::Fail {
+                    status: *status,
+                    code: code.as_deref(),
+                },
+                _ => continue,
+            };
+            out.push(Reaction {
+                rule: &valid.rule.id,
+                layer: slot.layer,
+                action,
+            });
+        }
+        out
+    }
+
+    /// 命中的第一条规则的反应（只想知道有没有命中时用；网关用 [`Self::reactions`] 逐条挑能用的）。
+    #[must_use]
+    pub fn react(&self, ctx: &Context<'_>, status: u16, body: &[u8]) -> Option<Reaction<'_>> {
+        self.reactions(ctx, status, body).into_iter().next()
     }
 
     /// 对一份已解析的请求体执行请求阶段规则。

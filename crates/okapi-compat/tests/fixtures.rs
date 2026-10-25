@@ -7,12 +7,19 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+fn request_phase() -> String {
+    "request".to_owned()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Case {
     name: String,
     vendor: String,
     rule: String,
+    /// `request`（缺省）或 `response`；别的阶段出现内置规则时，先扩展这个 runner。
+    #[serde(default = "request_phase")]
+    phase: String,
     context: ContextInput,
     input: Value,
     expect: Value,
@@ -47,9 +54,13 @@ fn run(case: &Case, body: &Value) -> (Value, bool) {
         .unwrap_or_else(|| panic!("{}: 未知厂商 {}", case.name, case.vendor));
     let effective = resolve(vec![vendor.layer()]);
     let ctx = case.context.as_context();
-    let outcome = effective
-        .apply_request(&ctx, body.to_string().as_bytes())
-        .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+    let outcome = match case.phase.as_str() {
+        "request" => effective
+            .apply_request(&ctx, body.to_string().as_bytes())
+            .unwrap_or_else(|error| panic!("{}: {error}", case.name)),
+        "response" => effective.apply_response(&ctx, body.to_string().as_bytes()),
+        other => panic!("{}: 夹具 runner 还不支持 {other} 阶段", case.name),
+    };
     let fired = outcome.report.fired.iter().any(|f| f.rule == case.rule);
     let after = outcome.body.map_or_else(
         || body.clone(),

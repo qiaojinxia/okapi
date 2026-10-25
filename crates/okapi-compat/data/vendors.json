@@ -4,6 +4,25 @@
     "display_name": "DeepSeek",
     "group": "cn",
     "hosts": ["api.deepseek.com"],
+    "endpoints": [
+      { "protocol": "openai.chat", "base": "https://api.deepseek.com/v1" }
+    ],
+    "probes": {
+      "balance": {
+        "requests": [{ "path": "/user/balance", "root": true }],
+        "remaining": { "at": "/balance_infos/0/total_balance" },
+        "currency": {
+          "at": "/balance_infos/0/currency",
+          "map": { "CNY": "CNY", "USD": "USD" },
+          "default": "CNY"
+        },
+        "doc": {
+          "why": "GET /user/balance 在站点根（不在 /v1 下）；balance_infos 每种币种一项，total_balance 是赠送加充值的字符串，只读第一项。",
+          "url": "https://api-docs.deepseek.com/api/get-user-balance",
+          "verified_at": "2026-10-25"
+        }
+      }
+    },
     "rules": [
       {
         "id": "strict-role.developer-to-system",
@@ -21,6 +40,22 @@
     "display_name": "Moonshot / Kimi",
     "group": "cn",
     "hosts": ["api.moonshot.cn", "api.moonshot.ai", "api.kimi.com"],
+    "endpoints": [
+      { "protocol": "openai.chat", "base": "https://api.moonshot.cn/v1", "label": "国内" },
+      { "protocol": "openai.chat", "base": "https://api.moonshot.ai/v1", "label": "International" }
+    ],
+    "probes": {
+      "balance": {
+        "requests": [{ "path": "/users/me/balance" }],
+        "remaining": { "at": "/data/available_balance" },
+        "currency": "CNY",
+        "doc": {
+          "why": "GET /v1/users/me/balance，data.available_balance 是人民币元的数字（含代金券，≤0 时推理请求会失败）。文档只写了国内站；国际站（api.moonshot.ai）币种没写，同样按人民币标注。",
+          "url": "https://platform.kimi.com/docs/api/balance",
+          "verified_at": "2026-10-25"
+        }
+      }
+    },
     "rules": [
       {
         "id": "strict-role.developer-to-system",
@@ -47,6 +82,10 @@
     "display_name": "智谱 / Z.ai",
     "group": "cn",
     "hosts": ["open.bigmodel.cn", "api.z.ai"],
+    "endpoints": [
+      { "protocol": "openai.chat", "base": "https://open.bigmodel.cn/api/paas/v4", "label": "国内" },
+      { "protocol": "openai.chat", "base": "https://api.z.ai/api/paas/v4", "label": "International" }
+    ],
     "rules": [
       {
         "id": "strict-role.developer-to-system",
@@ -60,11 +99,48 @@
     ]
   },
   {
+    "id": "siliconflow",
+    "display_name": "SiliconFlow / 硅基流动",
+    "group": "cn",
+    "hosts": ["api.siliconflow.cn", "api.siliconflow.com"],
+    "endpoints": [
+      { "protocol": "openai.chat", "base": "https://api.siliconflow.cn/v1", "label": "国内" },
+      { "protocol": "openai.chat", "base": "https://api.siliconflow.com/v1", "label": "International" }
+    ],
+    "probes": {
+      "balance": {
+        "requests": [{ "path": "/user/info" }],
+        "remaining": { "at": "/data/totalBalance" },
+        "currency": "CNY",
+        "doc": {
+          "why": "GET /v1/user/info，data.totalBalance 是十进制字符串。文档没写币种：国内站按人民币标注，国际站（api.siliconflow.com）同。",
+          "url": "https://docs.siliconflow.com/en/api-reference/userinfo/get-user-info",
+          "verified_at": "2026-10-25"
+        }
+      }
+    },
+    "rules": []
+  },
+  {
     "id": "xai",
     "display_name": "xAI",
     "group": "western",
     "hosts": ["api.x.ai"],
+    "endpoints": [
+      { "protocol": "openai.chat", "base": "https://api.x.ai/v1" }
+    ],
     "rules": [
+      {
+        "id": "xai.completion-includes-reasoning",
+        "phase": "response",
+        "select": { "dialect": ["openai.chat"] },
+        "do": [{ "op": "usage_map", "slots": { "completion": "total - prompt" } }],
+        "billing_critical_ack": true,
+        "doc": {
+          "why": "xAI 的 completion_tokens 不含推理 token，全部输出要用 total_tokens − prompt_tokens 算。上游已把推理算进 completion_tokens 时两者相等，规则什么也不改。来源：new-api relay/channel/xai/text.go。",
+          "verified_at": "2026-10-24"
+        }
+      },
       {
         "id": "xai.grok-3-mini-max-completion-tokens",
         "select": { "model": ["grok-3-mini*"], "dialect": ["openai.chat"] },
@@ -75,5 +151,28 @@
         }
       }
     ]
+  },
+  {
+    "id": "openrouter",
+    "display_name": "OpenRouter",
+    "group": "western",
+    "hosts": ["openrouter.ai"],
+    "endpoints": [
+      { "protocol": "openai.chat", "base": "https://openrouter.ai/api/v1" }
+    ],
+    "probes": {
+      "balance": {
+        "requests": [{ "path": "/credits" }],
+        "total": { "at": "/data/total_credits" },
+        "used": { "at": "/data/total_usage" },
+        "currency": "USD",
+        "doc": {
+          "why": "GET /api/v1/credits 返回 data.total_credits（累计购买）与 data.total_usage（累计使用），剩余是差值。只有管理密钥（management key）能查，普通 API 密钥得 403。单位是 credits，文档没写币种，按美元标注。",
+          "url": "https://openrouter.ai/docs/api/api-reference/credits/get-credits",
+          "verified_at": "2026-10-25"
+        }
+      }
+    },
+    "rules": []
   }
 ]

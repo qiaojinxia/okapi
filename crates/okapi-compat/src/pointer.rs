@@ -111,6 +111,34 @@ impl Pointer {
         self.segs.len() <= other.segs.len()
             && self.segs.iter().zip(&other.segs).all(|(a, b)| a == b)
     }
+
+    /// 指向 `self` 的每个子元素：`/choices` → `/choices/*`（`each` 遍历用）。
+    pub fn children(&self) -> Result<Pointer, PointerError> {
+        if self.segs.len() >= MAX_DEPTH {
+            return Err(PointerError::TooDeep);
+        }
+        let text = format!("{}/*", self.text);
+        if text.len() > MAX_POINTER_LEN {
+            return Err(PointerError::TooLong);
+        }
+        let mut segs = self.segs.clone();
+        segs.push(Seg::Any);
+        Ok(Self { segs, text })
+    }
+
+    /// 把 `tail` 接在 `self` 后面（`each` 子操作用拼起来的绝对路径做分级）。
+    pub fn join(&self, tail: &Pointer) -> Result<Pointer, PointerError> {
+        if self.segs.len() + tail.segs.len() > MAX_DEPTH {
+            return Err(PointerError::TooDeep);
+        }
+        let text = format!("{}{}", self.text, tail.text);
+        if text.len() > MAX_POINTER_LEN {
+            return Err(PointerError::TooLong);
+        }
+        let mut segs = self.segs.clone();
+        segs.extend(tail.segs.iter().cloned());
+        Ok(Self { segs, text })
+    }
 }
 
 impl fmt::Display for Pointer {

@@ -167,6 +167,78 @@ impl CompiledSelector {
     }
 }
 
+/// 错误体只看前这么多字节：上游的错误说明都在开头，不为一个大体积响应付线性成本。
+pub const ERROR_BODY_WINDOW: usize = 8 * 1024;
+/// 解析错误体 JSON 的上限（超过就只能按子串匹配）。
+const ERROR_JSON_LIMIT: usize = 64 * 1024;
+
+/// 错误阶段 `when` 的编译形态：比较前统一小写。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct CompiledWhen {
+    status: Vec<u16>,
+    code: Vec<String>,
+    body_contains: Vec<String>,
+}
+
+impl CompiledWhen {
+    pub(crate) fn compile(when: &crate::rule::ErrorWhen) -> Self {
+        Self {
+            status: when.status.clone(),
+            code: lower(&when.code),
+            body_contains: lower(&when.body_contains),
+        }
+    }
+
+    /// 字段之间 AND，同一字段内 OR。
+    pub(crate) fn matches(&self, status: u16, body: &[u8]) -> bool {
+        if !self.status.is_empty() && !self.status.contains(&status) {
+            return false;
+        }
+        if !self.body_contains.is_empty() {
+            let head = &body[..body.len().min(ERROR_BODY_WINDOW)];
+            let text = String::from_utf8_lossy(head).to_ascii_lowercase();
+            if !self
+                .body_contains
+                .iter()
+                .any(|needle| text.contains(needle))
+            {
+                return false;
+            }
+        }
+        if !self.code.is_empty() {
+            let codes = error_codes(body);
+            if !self.code.iter().any(|wanted| codes.contains(wanted)) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// JSON 错误体里能当「错误码」的字符串：`error.code` / `error.type` / 顶层 `code` / `type`
+/// （数字码按十进制文本算），统一小写。不是 JSON 或体积太大就没有。
+fn error_codes(body: &[u8]) -> Vec<String> {
+    if body.len() > ERROR_JSON_LIMIT {
+        return Vec::new();
+    }
+    let Ok(doc) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut take = |node: Option<&serde_json::Value>| match node {
+        Some(serde_json::Value::String(s)) => out.push(s.to_ascii_lowercase()),
+        Some(serde_json::Value::Number(n)) => out.push(n.to_string()),
+        _ => {}
+    };
+    take(doc.get("code"));
+    take(doc.get("type"));
+    if let Some(error) = doc.get("error") {
+        take(error.get("code"));
+        take(error.get("type"));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
