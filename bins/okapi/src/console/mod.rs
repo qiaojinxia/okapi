@@ -19,6 +19,7 @@ mod channel_credentials;
 pub mod channel_oauth;
 pub mod channel_try;
 mod cloud_probe;
+pub mod compat;
 mod core_source;
 pub mod dlq;
 pub mod egress;
@@ -220,6 +221,16 @@ fn channel_routes() -> ConsoleRouter {
             post(admin::create_channel).get(admin::list_channels),
         )
         .route("/admin/channels/providers", get(admin::channel_providers))
+        .route(
+            "/admin/channels/{id}/compat",
+            get(compat::get_channel_compat).put(compat::put_channel_compat),
+        )
+        .route("/admin/compat/vendors", get(compat::list_vendors))
+        .route("/admin/compat/dry-run", post(compat::dry_run))
+        .route(
+            "/admin/compat/guard",
+            get(compat::get_guard).put(compat::put_guard),
+        )
         .route("/admin/channels/{id}/usage", get(admin::channel_usage))
         .route(
             "/admin/channels/{id}",

@@ -217,6 +217,17 @@ impl EffectiveRules {
         })
     }
 
+    /// 被选中的请求阶段规则有没有接管请求顶层的 `field`（删掉、强制写值、改名走、不在白名单里）。
+    #[must_use]
+    pub fn manages_top_level(&self, ctx: &Context<'_>, field: &str) -> bool {
+        self.selected(ctx).any(|slot| {
+            slot.valid()
+                .ops
+                .iter()
+                .any(|op| op.manages_top_level(field))
+        })
+    }
+
     /// 有没有规则会被选中。先于解析请求体调用：没有就不付解析成本（无规则零开销）。
     #[must_use]
     pub fn selects(&self, ctx: &Context<'_>) -> bool {
@@ -490,6 +501,52 @@ mod tests {
         let mut other = ctx();
         other.model = "claude-x";
         assert!(!effective.selects(&other));
+    }
+
+    #[test]
+    fn manages_top_level_reports_the_fields_rules_take_over() {
+        let effective = resolve(vec![layer(
+            Layer::Channel,
+            "c",
+            json!([
+                {"id": "a", "select": {"model": ["kimi-*"]}, "do": [
+                    {"op": "remove", "paths": ["/user", "/metadata/x"]},
+                    {"op": "set", "path": "/thinking", "value": {}},
+                    {"op": "set", "path": "/soft", "value": 1, "mode": "if_absent"},
+                    {"op": "clamp", "path": "/temperature", "min": 1, "max": 1},
+                    {"op": "clamp", "path": "/top_p", "min": 0, "max": 1},
+                    {"op": "rename", "from": "/max_tokens", "to": "/max_completion_tokens"}
+                ]},
+                {"id": "other-model", "select": {"model": ["gpt-*"]}, "do": [
+                    {"op": "remove", "paths": ["/seed"]}
+                ]}
+            ]),
+        )]);
+        let ctx = ctx();
+        for field in ["user", "thinking", "temperature", "max_tokens"] {
+            assert!(effective.manages_top_level(&ctx, field), "{field}");
+        }
+        for field in [
+            "metadata",
+            "soft",
+            "top_p",
+            "messages",
+            "seed",
+            "max_completion_tokens",
+        ] {
+            assert!(!effective.manages_top_level(&ctx, field), "{field}");
+        }
+        let whitelist = resolve(vec![layer(
+            Layer::Channel,
+            "c",
+            json!([{"id": "w", "do": [{"op": "keep_only", "paths": ["/messages", "/temperature", "/stream_options"]}]}]),
+        )]);
+        assert!(whitelist.manages_top_level(&ctx, "top_p"));
+        assert!(!whitelist.manages_top_level(&ctx, "temperature"));
+        assert!(
+            !whitelist.manages_top_level(&ctx, "model"),
+            "受保护键永远保留"
+        );
     }
 
     #[test]

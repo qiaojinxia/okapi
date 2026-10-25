@@ -456,15 +456,24 @@ async fn outbound_settings_write_validation() {
     })))
     .await;
     assert_eq!(status, 200, "{body}");
-    let (status, body) = post(with(
-        json!({"settings": {"inject_request_fields": {"model": "x"}}}),
-    ))
+    // 剥 / 注字段两个设置键已迁成渠道层适配规则（compat.rules）：写进 settings 一律拒，
+    // 免得旧客户端以为配上了、其实不再生效
+    for key in ["inject_request_fields", "strip_request_fields"] {
+        let (status, body) = post(with(json!({"settings": {key: {"temperature": 0.2}}}))).await;
+        assert_eq!(status, 400, "{key}");
+        assert_eq!(body["error"]["param"], key);
+    }
+    // 新写法：规则随创建请求一起带；写受保护路径不放行
+    let (status, body) = post(with(json!({
+        "compat": {"rules": [{"id": "pin", "do": [{"op": "set", "path": "/model", "value": "x"}]}]}
+    })))
     .await;
     assert_eq!(status, 400);
-    assert_eq!(body["error"]["param"], "inject_request_fields");
+    assert_eq!(body["error"]["code"], "compat_rules_invalid");
+    assert_eq!(body["error"]["param"], "pin:protected_path");
     let (status, body) = post(with(json!({
         "name": format!("ob-inj-{}", env.suffix),
-        "settings": {"inject_request_fields": {"temperature": 0.2}}
+        "compat": {"rules": [{"id": "pin", "do": [{"op": "set", "path": "/temperature", "value": 0.2}]}]}
     })))
     .await;
     assert_eq!(status, 200, "{body}");

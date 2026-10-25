@@ -291,11 +291,14 @@ async fn rotated_credential_is_sealed_used_upstream_and_resets_key_state() {
 async fn list_returns_settings_so_editing_one_field_keeps_the_rest() {
     let _serial = SERIAL.lock().await;
     let bed = setup().await;
-    let advanced = json!({"thinking_to_content": true,
-        "extra_headers": {"x-tenant": "t1"}, "strip_request_fields": ["user"]});
+    let advanced = json!({"thinking_to_content": true, "extra_headers": {"x-tenant": "t1"}});
+    // 库里还留着已迁成适配规则的旧键（只为回滚旧镜像）：列表不外露，保存时随整体回写自然清掉
+    let mut stored_legacy = advanced.clone();
+    stored_legacy["strip_request_fields"] = json!(["user"]);
+    stored_legacy["inject_request_fields"] = json!({"a": 1});
     sqlx::query("UPDATE channels SET settings = $2 WHERE id = $1")
         .bind(bed.channel_id)
-        .bind(&advanced)
+        .bind(&stored_legacy)
         .execute(&bed.pg)
         .await
         .unwrap();
@@ -315,8 +318,7 @@ async fn list_returns_settings_so_editing_one_field_keeps_the_rest() {
         .find(|c| c["id"] == bed.channel_id)
         .expect("channel listed")
         .clone();
-    assert_eq!(row["settings"]["extra_headers"]["x-tenant"], "t1");
-    assert_eq!(row["settings"]["thinking_to_content"], true);
+    assert_eq!(row["settings"], advanced, "旧的剥 / 注字段键不外露");
     // 出口绑定（§11.41）随列表回显，抽屉据此渲染当前出口
     assert_eq!(row["egress"], json!({"mode": "inherit"}));
 

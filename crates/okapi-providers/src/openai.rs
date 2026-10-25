@@ -89,8 +89,8 @@ pub fn rewrite_model(
 /// `{"include_usage": false}` 就能让上游不返 usage、结算落到字符估算，是可以刻意构造的少收
 /// （英文 prompt + 中文补全时补全轴少三四倍）。跨方言三条路的转换器同样无条件注入。
 /// **调用方须自行保证 `body` 是流式请求**：非流式带此字段会被 OpenAI 判 400，故不在此处再
-/// 解析一次 body 复核。挑食的兼容上游可用渠道
-/// `settings.strip_request_fields = ["stream_options"]` 逐个摘掉。
+/// 解析一次 body 复核。挑食的兼容上游可用渠道层适配规则 `remove /stream_options` 逐个摘掉
+/// （规则要带 `billing_critical_ack`：摘掉之后这个渠道的流式结算就只剩字符估算）。
 pub fn ensure_stream_usage(body: &Bytes) -> Result<Bytes, UpstreamError> {
     let mut value: serde_json::Value =
         serde_json::from_slice(body).map_err(|e| UpstreamError::Build(e.to_string()))?;

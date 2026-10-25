@@ -3249,6 +3249,8 @@ export default {
       'Model is still on another model’s fallback chain — remove it from the chain first',
     refund_not_committed: 'This request never billed successfully — nothing to refund',
     group_is_default: 'The default group cannot be deleted',
+    compat_rules_invalid: 'Invalid compat rules ({{param}})',
+    rules_version_conflict: 'The compat rules were changed by someone else — refresh and try again',
     plan_in_use: 'Plan is still referenced by redemption codes, subscriptions, or payment orders and cannot be deleted',
     subscription_active: 'A subscription ({{param}}) is already active — it must end before switching plans',
     plan_not_purchasable: 'This plan is not for sale; it can only be obtained via a redemption code or an administrator',

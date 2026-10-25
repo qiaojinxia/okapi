@@ -135,20 +135,31 @@ async fn absent_whole_usage_over_cap_and_function_name_are_not_authorized_paid_u
 
 #[tokio::test]
 async fn channel_native_tool_mutation_refunds_before_any_upstream_call() {
-    for setting in [
-        json!({"strip_request_fields":["tools"]}),
-        json!({"inject_request_fields":{"tools":[{"type":"web_search_20250305","name":"web_search"}]}}),
-        json!({"inject_request_fields":{"tools":[{"type":"web_search_20250305","name":"web_search","max_uses":9}]}}),
-        json!({"inject_request_fields":{"tools":[{"type":"web_fetch_20250910","name":"web_fetch","max_uses":2}]}}),
+    for operation in [
+        json!({"op": "remove", "paths": ["/tools"]}),
+        json!({"op": "set", "path": "/tools", "value": [{"type":"web_search_20250305","name":"web_search"}]}),
+        json!({"op": "set", "path": "/tools", "value": [{"type":"web_search_20250305","name":"web_search","max_uses":9}]}),
+        json!({"op": "set", "path": "/tools", "value": [{"type":"web_fetch_20250910","name":"web_fetch","max_uses":2}]}),
     ] {
         let env = setup(Protocol::Anthropic, anthropic_usage::fixture()).await;
         publish(&env, 10000).await;
-        sqlx::query("UPDATE channels SET settings=$2 WHERE name=$1")
+        let channel: i64 = sqlx::query_scalar("SELECT id FROM channels WHERE name=$1")
             .bind(&env.model)
-            .bind(setting)
-            .execute(&env.state.pg)
+            .fetch_one(&env.state.pg)
             .await
             .unwrap();
+        let mut conn = env.state.pg.acquire().await.unwrap();
+        okapi_store::compat::publish(
+            &mut conn,
+            okapi_store::compat::Scope::Channel(channel),
+            &json!([{"id": "mutate-tools", "do": [operation]}]),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        drop(conn);
         let response = call(&env, native(Some(2)), false).await;
         assert_eq!(response.status(), 502);
         assert!(response.text().await.unwrap().contains("upstream_error"));

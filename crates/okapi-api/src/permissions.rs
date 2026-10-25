@@ -31,6 +31,10 @@ pub const MCP_WRITE: &str = "mcp.write";
 /// 审计日志只读（谁在何时改了什么；含登录记录）。独立权限点：合规/只读运营角色
 /// 需要它却不该顺带拿到系统设置。
 pub const AUDIT_READ: &str = "audit.read";
+/// 适配规则：改全局护栏（整个网关最后执行、谁也覆盖不了的规则，影响面是所有渠道）。
+pub const COMPAT_GUARD_WRITE: &str = "compat.guard.write";
+/// 适配规则：新增写入提示词 / 指令 / 档位等敏感路径的操作（只是删字段不需要）。
+pub const COMPAT_SENSITIVE: &str = "compat.sensitive";
 
 /// 全部权限点清单：由 `GET /admin/permissions` 暴露给前端角色编辑器，
 /// 避免前端硬编码字符串与后端漂移。新增权限点必须同步登记到此处（有用例把关）。
@@ -52,6 +56,8 @@ pub const ALL: &[&str] = &[
     CACHE_FLUSH,
     MCP_WRITE,
     AUDIT_READ,
+    COMPAT_GUARD_WRITE,
+    COMPAT_SENSITIVE,
 ];
 
 #[cfg(test)]

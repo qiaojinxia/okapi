@@ -156,7 +156,7 @@ pub async fn exchange(
         ));
     }
     let prepared = if req.channel_id.is_none() {
-        Some(super::channel_creation::prepare(&state, &provider, req.options, scope).await?)
+        Some(super::channel_creation::prepare(&state, &provider, req.options, scope, &actor).await?)
     } else {
         super::admin::ensure_max_concurrency(req.options.max_concurrency)?;
         super::admin::validate_channel_settings(&state, &provider, req.options.settings.as_ref())
@@ -368,7 +368,8 @@ pub async fn exchange(
             prepared.settings["oauth_token_url"] = json!(url);
         }
         let models: Vec<&str> = req.models.iter().map(String::as_str).collect();
-        okapi_store::provision::create_channel_configured(
+        let compat = prepared.compat_create(actor.user_id);
+        okapi_store::provision::create_channel_with_compat(
             &state.pg,
             okapi_store::provision::ChannelCreate {
                 name: req.name.as_deref().ok_or_else(AppError::internal)?.trim(),
@@ -386,6 +387,7 @@ pub async fn exchange(
                 egress: Some(&prepared.egress),
                 egress_preassigned,
             },
+            compat,
             state.master_key.as_deref(),
         )
         .await?

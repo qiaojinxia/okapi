@@ -13,6 +13,7 @@ test-support = []
 [dependencies]
 okapi-domain = { workspace = true }
 okapi-api = { workspace = true }
+okapi-compat = { workspace = true }
 
 argon2 = { workspace = true }
 aes-gcm = { workspace = true }

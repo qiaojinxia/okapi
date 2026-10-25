@@ -213,9 +213,30 @@ pub struct ChannelCreate<'a> {
     pub egress_preassigned: Option<i64>,
 }
 
+/// 创建时一并落库的适配规则设置：厂商与渠道层初始规则（均可缺省）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompatCreate<'a> {
+    /// 带命名空间的内置厂商（`builtin:deepseek`）。
+    pub vendor: Option<&'a str>,
+    /// 渠道层规则（调用方已校验）；`None` 或空数组都不写规则集。
+    pub rules: Option<&'a serde_json::Value>,
+    pub note: Option<&'a str>,
+    pub actor: Option<i64>,
+}
+
 pub async fn create_channel_configured(
     pool: &PgPool,
     input: ChannelCreate<'_>,
+    master_key: Option<&str>,
+) -> Result<(i64, i64), StoreError> {
+    create_channel_with_compat(pool, input, CompatCreate::default(), master_key).await
+}
+
+/// 同 [`create_channel_configured`]，另在同一事务里落厂商与初始适配规则。
+pub async fn create_channel_with_compat(
+    pool: &PgPool,
+    input: ChannelCreate<'_>,
+    compat: CompatCreate<'_>,
     master_key: Option<&str>,
 ) -> Result<(i64, i64), StoreError> {
     let sealed = crate::credential::seal_or_plain(master_key, input.credential)?;
@@ -229,10 +250,24 @@ pub async fn create_channel_configured(
         .map(|cost| serde_json::json!({"relative_cost_milli":cost}));
     let mut tx = pool.begin().await?;
     let channel_id: i64 = sqlx::query_scalar(
-        "INSERT INTO channels (name,provider,api_base,models,trust_upstream_usage,owner_id,settings,priority,upstream_unit_cost) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+        "INSERT INTO channels (name,provider,api_base,models,trust_upstream_usage,owner_id,settings,priority,upstream_unit_cost,vendor) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id",
     ).bind(input.name).bind(input.provider).bind(input.api_base).bind(models)
         .bind(input.trust_upstream_usage).bind(input.owner_id).bind(settings)
-        .bind(input.priority).bind(costs).fetch_one(&mut *tx).await?;
+        .bind(input.priority).bind(costs).bind(compat.vendor).fetch_one(&mut *tx).await?;
+    if let Some(rules) = compat
+        .rules
+        .filter(|r| r.as_array().is_some_and(|a| !a.is_empty()))
+    {
+        crate::compat::publish(
+            &mut tx,
+            crate::compat::Scope::Channel(channel_id),
+            rules,
+            compat.note,
+            compat.actor,
+            None,
+        )
+        .await?;
+    }
     let key_id: i64 = sqlx::query_scalar(
         "INSERT INTO channel_keys (channel_id,credential_ciphertext,credential_kind,max_concurrency) VALUES ($1,$2,$3,$4) RETURNING id",
     ).bind(channel_id).bind(sealed)

@@ -3155,6 +3155,8 @@ export default {
     model_in_fallback_chain: '该模型仍在其他模型的降级链上，请先从降级链移除再删除',
     refund_not_committed: '这笔请求未成功扣费（失败或未结算），没有款可退',
     group_is_default: '默认分组不可删除',
+    compat_rules_invalid: '适配规则不合法（{{param}}）',
+    rules_version_conflict: '适配规则已被别人改过，请刷新后再改',
     plan_in_use: '该套餐仍被兑换码、订阅或支付订单引用，无法删除（历史记录需保留套餐语义）',
     subscription_active: '已有生效中的订阅（{{param}}），需先结束才能换套餐',
     plan_not_purchasable: '该套餐不售卖，只能通过兑换码或管理员发放获得',

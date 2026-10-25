@@ -33,12 +33,12 @@ pub struct ChannelCandidate {
     /// 渠道开关：按上游响应报告的模型计费（channels.settings.bill_by_response_model，
     /// Sub2API 0.1.175 对齐；映射改名场景计费跟实际模型，价簿无价则回退请求模型）。
     pub bill_by_response_model: bool,
-    /// 不透传给上游的请求顶层字段（channels.settings.strip_request_fields，
-    /// new-api rc.23 #6847 对齐；model/messages/stream 受保护不可剥）。
-    pub strip_request_fields: Vec<String>,
-    /// 强制写入请求顶层的字段（channels.settings.inject_request_fields）；
-    /// 在 strip 之后浅合并。model/messages/stream/provider 受保护。
-    pub inject_request_fields: serde_json::Map<String, serde_json::Value>,
+    /// 渠道选定的内置厂商（`channels.vendor`，带命名空间如 `builtin:deepseek`）；None = 没选。
+    pub vendor: Option<String>,
+    /// 适配规则：厂商 ⊕ 渠道 ⊕ 护栏 解析后的有效规则（设计见 docs/compat-rules.md）。
+    /// 取代原来的 strip_request_fields / inject_request_fields 两个设置键；
+    /// 随候选一起加载并缓存，所以一个请求内的重试沿用加载时的版本。没有规则时是共享的空集合。
+    pub compat: Arc<okapi_compat::EffectiveRules>,
     /// 跨方言转换会丢工具时怎么办（channels.settings.tool_loss_policy：safe / strict / allow；
     /// None = 缺省 safe，解析见 `okapi_providers::convert::tool_loss::ToolLossPolicy`）。
     pub tool_loss_policy: Option<String>,
@@ -242,8 +242,7 @@ pub async fn candidates_for_model(
                c.model_mapping,
                COALESCE((c.settings ->> 'thinking_to_content')::boolean, false) AS "thinking_to_content!",
                COALESCE((c.settings ->> 'bill_by_response_model')::boolean, false) AS "bill_by_response_model!",
-               c.settings -> 'strip_request_fields' AS strip_request_fields,
-               c.settings -> 'inject_request_fields' AS inject_request_fields,
+               c.vendor,
                (c.settings ->> 'responses_native')::boolean AS responses_native,
                NULLIF(c.settings ->> 'tool_loss_policy', '') AS tool_loss_policy,
                NULLIF(c.settings ->> 'api_version', '') AS api_version,
@@ -304,8 +303,19 @@ pub async fn candidates_for_model(
 
     // 同一把 key 经两个池各出一行：保留池序靠前的那行（SQL 已按池序排好）
     let mut seen = std::collections::HashSet::new();
-    rows.into_iter()
+    let rows: Vec<_> = rows
+        .into_iter()
         .filter(|r| seen.insert(r.channel_key_id))
+        .collect();
+    // 适配规则：一个渠道可能有多把 key，只装配一次、共享同一份
+    let mut channel_vendors: Vec<(i64, Option<String>)> = Vec::new();
+    for r in &rows {
+        if !channel_vendors.iter().any(|(id, _)| *id == r.channel_id) {
+            channel_vendors.push((r.channel_id, r.vendor.clone()));
+        }
+    }
+    let compat = crate::compat::load_effective(pool, &channel_vendors).await?;
+    rows.into_iter()
         .map(|r| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
             let responses_native = responses_native_for(&r.provider, r.responses_native);
@@ -351,21 +361,8 @@ pub async fn candidates_for_model(
                 model_mapping: r.model_mapping,
                 thinking_to_content: r.thinking_to_content,
                 bill_by_response_model: r.bill_by_response_model,
-                strip_request_fields: r
-                    .strip_request_fields
-                    .and_then(|v| {
-                        serde_json::from_value(v)
-                            .inspect_err(|error| {
-                                // 控制台写入时已校验；读到坏值说明行被改过，按「不剥」走但要留痕
-                                tracing::warn!(channel_id = r.channel_id, %error, "settings.strip_request_fields is not a string list; ignored");
-                            })
-                            .ok()
-                    })
-                    .unwrap_or_default(),
-                inject_request_fields: r
-                    .inject_request_fields
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default(),
+                compat: compat.get(&r.channel_id).cloned().unwrap_or_default(),
+                vendor: r.vendor,
                 responses_native,
                 tool_loss_policy: r.tool_loss_policy,
                 capabilities: r.capabilities,
@@ -878,4 +875,48 @@ pub async fn resolve_model(
         max_output: r.max_output,
         fallback_models: serde_json::from_value(r.fallback_models).unwrap_or_default(),
     }))
+}
+
+#[cfg(test)]
+mod settings_budget {
+    use std::collections::BTreeSet;
+
+    /// 候选加载读取的渠道 `settings` 键。适配规则的简化度量（docs/compat-rules.md §15）：
+    /// 这个集合只减不增。新增一个键就是新增一个管理员要学的开关——必须在评审里说明为什么
+    /// 不能写成一条适配规则，再同步改这份清单。
+    const READ_KEYS: [&str; 9] = [
+        "api_version",
+        "aws_region",
+        "bill_by_response_model",
+        "extensions",
+        "extra_headers",
+        "oauth_token_url",
+        "responses_native",
+        "thinking_to_content",
+        "tool_loss_policy",
+    ];
+
+    #[test]
+    fn the_candidate_loader_reads_no_new_settings_keys() {
+        let source = include_str!("channels.rs");
+        let start = source
+            .find("pub async fn candidates_for_model")
+            .expect("candidate loader");
+        let end = start
+            + source[start..]
+                .find("/// `channels.retry_policy` 的两个生效值")
+                .expect("end of the candidate loader");
+        let mut found = BTreeSet::new();
+        // `c.settings ->> 'k'`、`c.settings -> 'k'`，以及包在 NULLIF(...) 里的同样写法
+        for marker in ["c.settings ->> '", "c.settings -> '"] {
+            for part in source[start..end].split(marker).skip(1) {
+                found.insert(part.split('\'').next().unwrap_or_default().to_owned());
+            }
+        }
+        let expected: BTreeSet<String> = READ_KEYS.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            found, expected,
+            "渠道 settings 被读取的键变了：新增键要在评审里说明为什么不能写成适配规则，然后改本文件的 READ_KEYS"
+        );
+    }
 }

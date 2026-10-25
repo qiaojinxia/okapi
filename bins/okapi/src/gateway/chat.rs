@@ -6,7 +6,7 @@ use super::clients::detect_client_type;
 use super::error::AppError;
 use super::error::with_request_id;
 use super::estimate::{self, estimate_prompt_tokens};
-use super::execution_plan::{ExecutionPlan, Requirements};
+use super::execution_plan::{ExecutionPlan, Operation, Requirements};
 use super::sched_redis::response_affinity::{
     self, ResponseBinding, ResponseParent, ResponseWriter,
 };
@@ -42,6 +42,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+pub(crate) mod compat;
 pub mod websocket;
 
 const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1";
@@ -2109,10 +2110,21 @@ pub(crate) async fn playground_parameters(
         let upstream = c.upstream_model(&meta.canonical);
         let dialect = super::dialect::upstream_dialect(&c.provider, upstream);
         let mut p = model_parameters::profile(dialect, upstream, c.api_base.as_deref());
-        let controlled = |field: &str| {
-            c.strip_request_fields.iter().any(|f| f == field)
-                || c.inject_request_fields.contains_key(field)
-        };
+        // 渠道的适配规则已经接管的参数（删掉、强制写值、改名走），面板上就不再给用户调
+        let operation =
+            ExecutionPlan::compile(Ingress::OpenAi, c, &meta.canonical, Requirements::default())
+                .map_or(Operation::ChatCompletions, |plan| plan.operation);
+        let host = compat::host_of(c.api_base.as_deref());
+        let ctx = compat::context(
+            c,
+            operation,
+            &meta.canonical,
+            &meta.canonical,
+            false,
+            "",
+            host.as_deref(),
+        );
+        let controlled = |field: &str| c.compat.manages_top_level(&ctx, field);
         if controlled("temperature")
             || c.capabilities
                 .get("temperature")
@@ -2789,77 +2801,26 @@ fn wrap_thinking_to_content(resp: ChatResponse) -> ChatResponse {
     }
 }
 
-/// 入口协议 × 渠道协议 分派：返回的事件流/JSON 一律已是**客户端方言**形状，
-/// 泵送与结算无感。
-// 四象限线性分派，拆分破坏矩阵完整视野
-#[allow(clippy::too_many_lines)]
-/// 渠道字段透传控制（new-api rc.23 #6847 对齐）：先剥除配置的顶层字段，再浅合并强制注入的字段。
-/// 方言无关（对入口原文生效，转换路径自然继承）；受保护键两边都不动（防误配打断主链）。
-/// 两项都没配时不解析（缺省零开销）；配了也只解析一次。
-fn adjust_request_fields(
-    body: &Bytes,
-    strip: &[String],
-    inject: &serde_json::Map<String, serde_json::Value>,
-) -> Option<Bytes> {
-    const STRIP_PROTECTED: [&str; 5] = [
-        "model",
-        "messages",
-        "stream",
-        "previous_response_id",
-        "conversation",
-    ];
-    const INJECT_PROTECTED: [&str; 6] = [
-        "model",
-        "messages",
-        "stream",
-        "provider",
-        "previous_response_id",
-        "conversation",
-    ];
-    if strip.is_empty() && inject.is_empty() {
-        return None;
-    }
-    let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let obj = value.as_object_mut()?;
-    let mut changed = false;
-    for field in strip {
-        if !STRIP_PROTECTED.contains(&field.as_str()) && obj.remove(field).is_some() {
-            changed = true;
-        }
-    }
-    for (key, val) in inject {
-        if !INJECT_PROTECTED.contains(&key.as_str()) {
-            obj.insert(key.clone(), val.clone());
-            changed = true;
-        }
-    }
-    changed.then(|| Bytes::from(serde_json::to_vec(&value).unwrap_or_default()))
-}
-
+/// 发往上游前的最后一道整形：先剥掉 okapi 自己的指令与统一 reasoning 对象（协议要求，不可关），
+/// 再跑适配规则（厂商 ⊕ 渠道 ⊕ 护栏；取代原来的渠道 strip / inject 设置，设计见
+/// docs/compat-rules.md），最后复核续接 id 没被动过。每次尝试都会走一遍，规则必须幂等。
 fn shape_upstream_body(
     bill: &RequestBilling,
     cand: &ChannelCandidate,
     body: Bytes,
 ) -> Result<Bytes, UpstreamError> {
     // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
-    // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
+    // 与适配规则分开做——规则是管理员的配置，这是协议要求，不可关。
     let body = super::routing_prefs::strip(&body).unwrap_or(body);
-    let native_responses =
-        ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?
-            .native_responses();
+    let plan = ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?;
     // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）。
     // Responses 直转是唯一的例外——`reasoning.effort` 就是上游的原生键，只摘非原生键。
-    let body = if native_responses {
+    let body = if plan.native_responses() {
         reasoning::strip_unified_for_responses(&body).unwrap_or(body)
     } else {
         reasoning::strip_unified(&body).unwrap_or(body)
     };
-    let body = adjust_request_fields(
-        &body,
-        &cand.strip_request_fields,
-        &cand.inject_request_fields,
-    )
-    .unwrap_or(body);
+    let body = compat::apply(bill, cand, plan, body)?;
     if let Some(parent) = &bill.response_parent {
         let parsed: serde_json::Value =
             serde_json::from_slice(&body).map_err(|e| UpstreamError::Build(e.to_string()))?;

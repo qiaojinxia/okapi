@@ -50,6 +50,23 @@ fn default_phase() -> Phase {
     Phase::Request
 }
 
+// 序列化时不写默认值：库里存的、API 回显的、手写的文档形态一致，也省空间。
+// serde 的 skip_serializing_if 只接受 `fn(&T) -> bool`，所以下面几个按引用接收是必须的。
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_request(phase: &Phase) -> bool {
+    *phase == Phase::Request
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(n: &i32) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// 选择器：全部字段 AND；缺省 = 不限。结构化而不是表达式，所以能建索引、能画成表单。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -77,6 +94,21 @@ pub struct Selector {
     /// 入口客户端类别（UA 识别，如 `claude-code`、`codex`）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub client: Vec<String>,
+}
+
+impl Selector {
+    /// 没有任何约束（匹配一切）。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vendor.is_empty()
+            && self.host.is_empty()
+            && self.model.is_empty()
+            && self.client_model.is_empty()
+            && self.dialect.is_empty()
+            && self.operation.is_empty()
+            && self.stream.is_none()
+            && self.client.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +140,12 @@ impl Mode {
     pub const fn if_absent(self) -> bool {
         matches!(self, Self::IfAbsent)
     }
+
+    #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde 的 skip_serializing_if 只接受 `fn(&T) -> bool`
+    pub const fn is_always(&self) -> bool {
+        matches!(self, Self::Always)
+    }
 }
 
 /// 请求阶段的操作。封闭集合：只增不减，表达不了的怪癖加一个**通用**原语，不写厂商特例。
@@ -122,21 +160,21 @@ pub enum Op {
     Set {
         path: String,
         value: Value,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Mode::is_always")]
         mode: Mode,
     },
     /// 移动：来源删掉、目标写入。来源缺失则不动。
     Rename {
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Mode::is_always")]
         mode: Mode,
     },
     /// 复制：来源保留。
     Copy {
         from: String,
         to: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Mode::is_always")]
         mode: Mode,
     },
     /// 数值夹取；整数路径保持整数，按精确十进制比较，不经过浮点。
@@ -189,26 +227,26 @@ pub const OP_NAMES: [&str; 8] = [
 pub struct Rule {
     /// 规则集内唯一；跨层同 id = 后面的层覆盖前面的。
     pub id: String,
-    #[serde(default = "default_phase")]
+    #[serde(default = "default_phase", skip_serializing_if = "is_request")]
     pub phase: Phase,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Selector::is_empty")]
     pub select: Selector,
     /// CEL 条件。P1 不启用：保留字段，校验器返回 `cel_not_enabled`，存量规则以后不用迁移。
     #[serde(default, rename = "if", skip_serializing_if = "Option::is_none")]
     pub cond: Option<String>,
-    #[serde(default, rename = "do")]
+    #[serde(default, rename = "do", skip_serializing_if = "Vec::is_empty")]
     pub ops: Vec<Op>,
     /// 同层内的微调；越小越先执行。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub order: i32,
     /// 把前面层里同 id 的规则关掉（本规则自己不执行）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub disabled: bool,
     /// 失败关闭：这条规则没能应用（如请求体不是 JSON 对象）就拒绝请求，而不是放行。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub required: bool,
     /// 允许这条规则动计费关键路径（见 [`crate::protect`]）。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub billing_critical_ack: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc: Option<RuleDoc>,
@@ -248,6 +286,36 @@ mod tests {
                 "{doc}"
             );
         }
+    }
+
+    #[test]
+    fn serialization_omits_every_default() {
+        let rule: Rule = serde_json::from_value(json!({
+            "id": "a", "phase": "request", "select": {}, "order": 0, "disabled": false,
+            "required": false, "billing_critical_ack": false,
+            "do": [{"op": "set", "path": "/x", "value": 1, "mode": "always"}]
+        }))
+        .expect("rule");
+        assert_eq!(
+            serde_json::to_value(&rule).expect("json"),
+            json!({"id": "a", "do": [{"op": "set", "path": "/x", "value": 1}]})
+        );
+        let tombstone: Rule =
+            serde_json::from_value(json!({"id": "a", "disabled": true})).expect("rule");
+        assert_eq!(
+            serde_json::to_value(&tombstone).expect("json"),
+            json!({"id": "a", "disabled": true})
+        );
+        let explicit: Rule = serde_json::from_value(json!({
+            "id": "a", "order": 3, "required": true, "select": {"stream": false},
+            "do": [{"op": "rename", "from": "/a", "to": "/b", "mode": "if_absent"}]
+        }))
+        .expect("rule");
+        let back = serde_json::to_value(&explicit).expect("json");
+        assert_eq!(back["order"], 3);
+        assert_eq!(back["required"], true);
+        assert_eq!(back["select"], json!({"stream": false}));
+        assert_eq!(back["do"][0]["mode"], "if_absent");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # 适配规则（compat）：上游与终端差异的数据化设计
 
-> 状态：**设计稿，尚未实现、尚未立项**（2026-10-24）。第一阶段只预留可扩展性：本文定约定与接缝，不要求立刻写引擎。
-> 已定的方向见 §0，命名见 §10，五项决定记录与风险见 §15。代码引用均为 2026-10-24 的 `main`；行号随代码漂移，所以只写文件与函数名。
+> 状态：**P1 已实现**（2026-10-24，实现情况与同设计稿的差异见 §16）；P2 以后仍是设计。
+> 已定的方向见 §0，命名见 §10，五项决定记录与风险见 §15。设计部分的代码引用均为 2026-10-24 实现之前的 `main`；行号随代码漂移，所以只写文件与函数名。
 
 ## 0. 摘要与已定的方向
 
@@ -525,3 +525,71 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 - 规则数量膨胀与顺序冲突，靠夹具、dry-run、命中轨迹控制；
 - 内置厂商数据会随厂商变化过期，靠 `verified_at` 与监控（按规则统计错误率）发现；
 - `ensure_stream_usage`（强制 `include_usage`）与厂商"拒收 `stream_options`"之间的优先级，见 #21，由 `billing_critical_ack` 兜住。
+
+## 16. P1 实现状态（2026-10-24）
+
+### 16.1 做了什么
+
+对应 §15 的 P1，外加把旧的渠道 strip / inject **直接替换**（不并存）：
+
+- **纯引擎 crate `okapi-compat`**（无 IO）：规则 schema 与校验（限额、受保护 / 计费关键 / 敏感路径唯一注册表、`if` 与非 `request` 阶段明确拒绝）、
+  JSON Pointer（含 `*` 通配）、八个请求阶段操作（`remove` / `keep_only` / `set` / `rename` / `copy` / `clamp` / `map_value` / `role_map`）、
+  选择器、厂商 ⊕ 渠道 ⊕ 护栏的分层合并（同 id 后者覆盖前者、`disabled` 关掉前者、护栏最后执行）、执行轨迹（命中 / 跳过）。
+  `clamp` 按精确十进制比较，不经过浮点。
+- **存储**：迁移 `0006`（`rule_sets` 版本表、`channels.vendor`、旧设置复制成渠道层规则，见 `docs/database.md`）；`okapi_store::compat`
+  读已发布的规则集、事务内发布新版本（`base_version` 防互相覆盖）、渠道复制时克隆规则；`ChannelCandidate` 带着装配好的 `compat`（`Arc<EffectiveRules>`）
+  随候选缓存，所以**一个请求内的重试沿用加载候选时的版本**。
+- **网关**：`shape_upstream_body` 里原来的 `adjust_request_fields` 换成 `chat::compat::apply`；每次尝试都跑，规则幂等。
+  诊断里记 `compat: {versions, fired, skipped}`（用到的各层版本标签、命中并改了东西的规则、被跳过的规则），不记请求内容。
+  试玩面板的「渠道接管了哪些参数」改读有效规则（`EffectiveRules::manages_top_level`）。
+- **管理接口**：`GET / PUT /admin/channels/{id}/compat`、`POST /admin/compat/dry-run`、`GET /admin/compat/vendors`、`GET / PUT /admin/compat/guard`；
+  创建 / 修改渠道的请求体可带 `vendor` 与 `compat: {rules, base_version?, note?}`；`settings` 里再写 `strip_request_fields` /
+  `inject_request_fields` 回 400（与 `proxy_url` 同样的退役处理）。新权限点 `compat.guard.write`、`compat.sensitive`。
+- **前端**：渠道抽屉「行为」页签的剥 / 注字段编辑器读写渠道层的两条约定规则（`strip-request-fields` / `inject-request-fields`），
+  另有厂商预设下拉（地址命中时给「套用」建议）与合并后的「生效中的适配规则」只读视图；编辑器表达不了的写法（嵌套路径、条件…）原样保留且只读。
+- **内置厂商**：`deepseek` / `moonshot` / `zhipu` / `xai`，五条形状类规则（开发者角色改系统角色、`kimi-k2.6` 温度、`grok-3-mini` 的 token 字段），
+  每条有「触发」与「不触发」两个夹具并核对幂等。
+
+### 16.2 影响范围
+
+不是全局的。规则按候选渠道解析，范围由层决定：
+
+| 层 | 影响谁 | P1 状态 |
+|---|---|---|
+| 渠道层 | 只那一个渠道 | 旧的 strip / inject 迁到这一层，语义不变 |
+| 厂商层 | 只有 `channels.vendor` 选了该厂商的渠道 | 列是新增的可空列，现有渠道全是 NULL，上线后行为零变化；按地址识别只做建议 |
+| 护栏 | 整个网关，最后执行、谁也覆盖不了 | 唯一全局的一层；写需要 `compat.guard.write`，默认空 |
+
+挂载点只覆盖聊天家族（chat / messages / responses / Gemini generate 入口与 Responses WebSocket，它们共用 `dispatch_chat` / `shape_upstream_body`）；
+embeddings、rerank、images、videos、audio、realtime 各有自己的转发，不经过——与旧的 strip / inject 相同。没有规则时直接早退，不解析请求体。
+定价与预扣在挂载点之前，规则看不到价簿；P1 没有响应阶段，不产生用量映射。
+
+### 16.3 与设计稿的差异
+
+1. **保存即发布，没有草稿阶段。** 草稿 / 审批随 AI 起草一起在 P2；因此也没有引入 `compat.publish`，渠道层沿用 `channel.write`（含 own / all 范围）。
+2. **发布后的生效**不是单独的 NATS reload 消息，而是复用现有的路由缓存失效（`invalidate_routing_caches`：本进程立即清候选缓存，NATS 广播给其它副本，5 秒 TTL 兜底）。
+3. **敏感路径只管「写」不管「删」。** 新增写入提示词 / 指令 / 推理 / 档位（`set` / `rename` 与 `copy` 的目标 / `clamp` / `map_value` / `role_map`）需要 `compat.sensitive`；
+   `remove` 与 `keep_only` 不需要——删字段只会让请求更干净，不会注入内容或抬高成本，也保持旧 strip 设置对所有能写渠道的人可用。
+   权限只看**新增**：新版本相对当前已发布版本多出来的敏感写入才需要，原样保存旧规则（含迁移来的）不受阻。
+4. **整个 `/messages` 数组是受保护节点**（旧清单就是这样：不能删、不能整个替换），数组里的元素字段（如 `role`）属敏感路径。
+   往流式请求写 `stream_options.include_usage: true` 是在加固计费，不需要 `billing_critical_ack`，其余动到它的写法都需要。
+5. **库里存规范化的最小形态**（默认值 `phase: request`、`order: 0`、各布尔 `false`、空选择器、`mode: always` 都不写），手写与迁移来的文档形态一致。
+6. **运行期兜底不做整条回滚**：规则应用后若主链字段被改（校验器已拦住，理论上不会发生），只恢复这几个字段并记 `protected_field_changed`——
+   整条回滚要先克隆整个请求体，对长对话太贵。属性测试要求这条兜底**从不被触发**。
+7. **操作集比 §6.3 小**：`each` / `coerce` / `inject_message` / `reject` / `apply`、`wire` / `response` / `error` / `capability` 阶段、CEL 都没做，
+   校验器对它们返回各自的错误码（`unknown_op` / `phase_not_enabled` / `cel_not_enabled`），不会写了却静默不生效。
+8. **数据迁移只复制不删原键**：回滚到旧镜像时旧代码还读得到 `settings` 里的 strip / inject，隐私剥字段不会静默失效；新代码不读，列表接口不外露，
+   原键等确认稳定后由后续迁移清掉。代价：某个渠道在新版本里被编辑保存过 `settings`（整体回写，原键随之清掉），回滚后它的剥 / 注字段就不再生效——
+   回滚窗口内不要改这类渠道的设置，或回滚后重新配置。
+9. **渠道复制**同时克隆厂商与渠道层规则集（版本 1 起），并去掉复制体 `settings` 里的退役键。
+
+### 16.4 验收对照（§15）
+
+- 内置规则：`crates/okapi-compat/tests/fixtures.rs`（每条规则至少一个触发与一个不触发的夹具、应用两次等于一次、夹具指向的厂商 / 主机真实存在）。
+- 属性测试：`tests/properties.rs`——任意规则集，校验放行的永远写不进受保护路径（运行期兜底从不被触发）、不 panic、结果确定、序列化往返稳定。
+- 等价替换：`tests/legacy_equivalence.rs`——旧 `adjust_request_fields` 的逐字复刻作对照，迁移出的规则对任意请求体结果一致；
+  迁移 SQL 本身由 `okapi-store` 的 `compat_rules.rs` 对种好的旧数据重跑核对。
+- dry-run 与线上同一份代码路径：控制台试跑调用的就是网关用的 `EffectiveRules::apply_request_value`。
+- `guard-no-float`：P1 没有用量模块，`okapi-compat` 暂不在扫描范围；`clamp` 的比较是纯整数十进制，代码里没有浮点类型。
+- 简化度量「配置项预算」：渠道 `settings` 被运行期读取的键集合由 `okapi-store` 的快照测试锁定，新增一个键必须同时改测试并说明为什么不能写成规则。
+

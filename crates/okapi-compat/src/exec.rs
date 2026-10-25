@@ -1,7 +1,7 @@
 //! 操作的编译形态与执行。执行只依赖输入的 JSON：无 IO、无时间、无随机，同输入同输出。
 
 use crate::decimal::Decimal;
-use crate::pointer::{self, KeepTree, Pointer};
+use crate::pointer::{self, KeepTree, Pointer, Seg};
 use serde_json::{Number, Value};
 use std::collections::BTreeMap;
 
@@ -76,7 +76,29 @@ fn replace_string(node: &mut Value, mut next: impl FnMut(&str) -> Option<Value>)
     }
 }
 
+fn is_top_level(ptr: &Pointer, field: &str) -> bool {
+    matches!(ptr.segs(), [Seg::Key(key)] if key == field)
+}
+
 impl CompiledOp {
+    /// 这个操作是不是把请求顶层的 `field` 接管了（删掉、强制写成某值、整个改名走、
+    /// 不在白名单里，或被夹成一个固定值）。控制台试玩据此把渠道已经管着的参数从面板里去掉。
+    pub(crate) fn manages_top_level(&self, field: &str) -> bool {
+        match self {
+            Self::Remove(paths) => paths.iter().any(|p| is_top_level(p, field)),
+            Self::KeepOnly(tree) => !tree.keeps_whole(&[field]),
+            Self::Set {
+                path, if_absent, ..
+            } => !if_absent && is_top_level(path, field),
+            Self::Rename { from, .. } => is_top_level(from, field),
+            Self::Clamp { path, min, max } => {
+                is_top_level(path, field)
+                    && matches!((min, max), (Some(lo), Some(hi)) if lo.decimal == hi.decimal)
+            }
+            Self::Copy { .. } | Self::MapValue { .. } | Self::RoleMap { .. } => false,
+        }
+    }
+
     /// 应用到 `doc`，返回真正改变的节点个数（0 = 没有任何变化）。
     pub(crate) fn apply(&self, doc: &mut Value) -> usize {
         match self {
