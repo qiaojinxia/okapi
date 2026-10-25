@@ -1,7 +1,7 @@
 # 适配规则（compat）：上游与终端差异的数据化设计
 
 > 状态：**设计稿，尚未实现、尚未立项**（2026-10-24）。第一阶段只预留可扩展性：本文定约定与接缝，不要求立刻写引擎。
-> 已定的方向见 §0，仍待拍板的见 §15。代码引用均为 2026-10-24 的 `main`；行号随代码漂移，所以只写文件与函数名。
+> 已定的方向见 §0，命名见 §10，五项决定记录与风险见 §15。代码引用均为 2026-10-24 的 `main`；行号随代码漂移，所以只写文件与函数名。
 
 ## 0. 摘要与已定的方向
 
@@ -354,7 +354,18 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 | 计费规则 `pricing_rules`（价簿快照 + epoch） | **不并入** | 金额永远走整数引擎。只对齐三点：选择器词汇（模型、分组）、发布快照语义、"没规则零开销"门控。将来若用 CEL 做计费规则的条件，也只产出布尔或整数倍率 |
 | 客户端伪装（`client_profile`、`profiles/`）、账号控制（`account_control`）、`routing_prefs`、凭证与健康状态机 | 不并入 | 适配器与凭证域；规则只读，不写它们拥有的路径 |
 
-**命名**：计费规则 / 适配 / 路由，三个名字分开。现有的"规则"页（`features/rules`）是计费规则，新功能叫"适配"，避免混淆。
+### 命名（2026-10-24 定）
+
+| 名字 | 指什么 | 落在哪 |
+|---|---|---|
+| 适配规则（简称"适配"，英文 `compat`） | **整个功能**：规则、三层绑定、版本、引擎、管理页 | 菜单"适配规则"、路由 `/admin/compat`、crate `okapi-compat`、权限 `compat.*`、`rule_sets.kind = 'compat'` |
+| 规则 | 适配里的一条条规则 | 文档、API |
+| 蓝图 | 适配页里的一种**视图**（另一种是列表 / 表单），不是独立功能 | 页签"蓝图 / 列表" |
+| 适配档案 | P2 的可复用规则包（等于自定义厂商） | `scope_kind = 'profile'` |
+| 模型路由 | 将来的另一个功能：定价之前选模型 | `rule_sets.kind = 'route'`，菜单另起 |
+| 计费规则 | 现有页面，**不改名** | 菜单"计费规则"（`admin:rulesTitle`），路由 `/admin/rules` |
+
+`/admin/rules` 已被计费规则占用，所以新页面用 `/admin/compat`；两个菜单名都以"规则"结尾，前缀不同，不会混。
 
 ## 11. 预留的接缝（现在几乎零成本，不写引擎）
 
@@ -473,7 +484,7 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 | B5 | sub2api `service/openai_gateway_forward.go`（`adaptOpenAIResponsesClientTools`、`setOpenAIResponsesClientToolMapping`） | 请求侧改工具名，响应侧要按映射还原：需要请求级暂存的"可逆改写" | `apply: responses_tool_names`（Rust 内置命名变换：请求登记映射，响应自动还原） |
 | B6 | Okapi `crates/okapi-providers/src/profiles/*`、`client_tls.rs` | 客户端指纹伪装（TLS、线序、签名校验） | 适配器域，永远不进规则 |
 
-## 15. 分期、验收与待拍板
+## 15. 分期、验收与决定记录
 
 **P0（只预留，不写引擎）**：落实 §11 的接缝与约定：schema 与 `phase` 枚举、`if` 字段保留、保护键唯一注册表、`ModelResolver` 接口抽取、诊断里预留 `compat` 字段、`rule_sets` 的表结构定稿。
 
@@ -490,12 +501,12 @@ CREATE UNIQUE INDEX uq_rule_sets_published
 - `okapi-compat` 的用量模块纳入 `scripts/guard-no-float.sh` 的扫描范围；
 - dry-run 与线上走同一份代码路径。
 
-**待拍板**：
-1. strip / inject 直接替换（建议，符合"不做历史兼容"，数据一次性迁移）还是并存一段时间；
-2. 功能名是否叫"适配（compat）"；
-3. 厂商自动识别只做建议（建议）还是静默应用；
-4. 内置规则的更新节奏：每条带 `verified_at`，按月复核；
-5. `usage_map` 允许整数加减（建议允许，否则 xAI、Gemini 这类要写代码）。
+**已定（2026-10-24）**：
+1. strip / inject **直接替换**，数据一次性迁移（符合"不做历史兼容"）；
+2. 功能名叫"适配规则"（`compat`），蓝图只是它的一种视图（见 §10 命名表）；
+3. 厂商自动识别**只做建议**，不静默改变现有渠道的行为；
+4. 内置规则每条带 `verified_at`，**按月复核**；
+5. `usage_map` **允许整数加减**（饱和、非负，仍然只产出事实），否则 xAI、Gemini 这类要写代码。
 
 **风险**：
 - `cel` crate 没有文档化的类型检查与资源上限，要自建（§7.3）；
