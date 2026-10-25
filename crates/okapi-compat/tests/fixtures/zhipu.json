@@ -1,0 +1,20 @@
+[
+  {
+    "name": "developer messages become system",
+    "vendor": "zhipu",
+    "rule": "strict-role.developer-to-system",
+    "context": { "vendor": "builtin:zhipu", "host": "open.bigmodel.cn", "model": "glm-4.6", "dialect": "openai.chat" },
+    "input": { "model": "glm-4.6", "messages": [{ "role": "developer", "content": "x" }] },
+    "expect": { "model": "glm-4.6", "messages": [{ "role": "system", "content": "x" }] },
+    "fires": true
+  },
+  {
+    "name": "a request on the Anthropic dialect is untouched",
+    "vendor": "zhipu",
+    "rule": "strict-role.developer-to-system",
+    "context": { "vendor": "builtin:zhipu", "host": "api.z.ai", "model": "glm-4.6", "dialect": "anthropic.messages" },
+    "input": { "model": "glm-4.6", "messages": [{ "role": "user", "content": "x" }] },
+    "expect": { "model": "glm-4.6", "messages": [{ "role": "user", "content": "x" }] },
+    "fires": false
+  }
+]

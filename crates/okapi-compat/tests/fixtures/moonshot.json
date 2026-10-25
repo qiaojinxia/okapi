@@ -1,0 +1,65 @@
+[
+  {
+    "name": "developer messages become system",
+    "vendor": "moonshot",
+    "rule": "strict-role.developer-to-system",
+    "context": { "vendor": "builtin:moonshot", "host": "api.moonshot.cn", "model": "kimi-k2-0905-preview", "dialect": "openai.chat" },
+    "input": { "model": "kimi-k2-0905-preview", "messages": [{ "role": "developer", "content": "x" }, { "role": "user", "content": "y" }] },
+    "expect": { "model": "kimi-k2-0905-preview", "messages": [{ "role": "system", "content": "x" }, { "role": "user", "content": "y" }] },
+    "fires": true
+  },
+  {
+    "name": "a conversation without developer messages is left alone",
+    "vendor": "moonshot",
+    "rule": "strict-role.developer-to-system",
+    "context": { "vendor": "builtin:moonshot", "host": "api.kimi.com", "model": "kimi-k2-0905-preview", "dialect": "openai.chat" },
+    "input": { "model": "kimi-k2-0905-preview", "messages": [{ "role": "system", "content": "x" }, { "role": "user", "content": "y" }] },
+    "expect": { "model": "kimi-k2-0905-preview", "messages": [{ "role": "system", "content": "x" }, { "role": "user", "content": "y" }] },
+    "fires": false
+  },
+  {
+    "name": "kimi-k2.6 temperature other than 1 is pinned to 1",
+    "vendor": "moonshot",
+    "rule": "moonshot.k2-6-temperature-one",
+    "context": { "vendor": "builtin:moonshot", "host": "api.moonshot.cn", "model": "kimi-k2.6", "dialect": "openai.chat" },
+    "input": { "model": "kimi-k2.6", "temperature": 0.3, "messages": [] },
+    "expect": { "model": "kimi-k2.6", "temperature": 1, "messages": [] },
+    "fires": true
+  },
+  {
+    "name": "kimi-k2.6 model name matches case-insensitively",
+    "vendor": "moonshot",
+    "rule": "moonshot.k2-6-temperature-one",
+    "context": { "vendor": "builtin:moonshot", "host": "api.moonshot.cn", "model": "Kimi-K2.6", "dialect": "openai.chat" },
+    "input": { "model": "Kimi-K2.6", "temperature": 1.7 },
+    "expect": { "model": "Kimi-K2.6", "temperature": 1 },
+    "fires": true
+  },
+  {
+    "name": "temperature already 1.0 stays exactly as sent",
+    "vendor": "moonshot",
+    "rule": "moonshot.k2-6-temperature-one",
+    "context": { "vendor": "builtin:moonshot", "host": "api.moonshot.cn", "model": "kimi-k2.6", "dialect": "openai.chat" },
+    "input": { "model": "kimi-k2.6", "temperature": 1.0 },
+    "expect": { "model": "kimi-k2.6", "temperature": 1.0 },
+    "fires": false
+  },
+  {
+    "name": "an absent temperature is not invented",
+    "vendor": "moonshot",
+    "rule": "moonshot.k2-6-temperature-one",
+    "context": { "vendor": "builtin:moonshot", "host": "api.moonshot.cn", "model": "kimi-k2.6", "dialect": "openai.chat" },
+    "input": { "model": "kimi-k2.6", "top_p": 0.9 },
+    "expect": { "model": "kimi-k2.6", "top_p": 0.9 },
+    "fires": false
+  },
+  {
+    "name": "other kimi models keep their temperature",
+    "vendor": "moonshot",
+    "rule": "moonshot.k2-6-temperature-one",
+    "context": { "vendor": "builtin:moonshot", "host": "api.moonshot.cn", "model": "kimi-k2-0905-preview", "dialect": "openai.chat" },
+    "input": { "model": "kimi-k2-0905-preview", "temperature": 0.3 },
+    "expect": { "model": "kimi-k2-0905-preview", "temperature": 0.3 },
+    "fires": false
+  }
+]

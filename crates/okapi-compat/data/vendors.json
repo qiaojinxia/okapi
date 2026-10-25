@@ -1,0 +1,79 @@
+[
+  {
+    "id": "deepseek",
+    "display_name": "DeepSeek",
+    "group": "cn",
+    "hosts": ["api.deepseek.com"],
+    "rules": [
+      {
+        "id": "strict-role.developer-to-system",
+        "select": { "dialect": ["openai.chat"] },
+        "do": [{ "op": "role_map", "from": "developer", "to": "system" }],
+        "doc": {
+          "why": "DeepSeek 拒收 developer 角色。来源：sub2api backend/internal/service/openai_chat_roles.go requiresSystemChatRole（按目标主机判断）。",
+          "verified_at": "2026-10-24"
+        }
+      }
+    ]
+  },
+  {
+    "id": "moonshot",
+    "display_name": "Moonshot / Kimi",
+    "group": "cn",
+    "hosts": ["api.moonshot.cn", "api.moonshot.ai", "api.kimi.com"],
+    "rules": [
+      {
+        "id": "strict-role.developer-to-system",
+        "select": { "dialect": ["openai.chat"] },
+        "do": [{ "op": "role_map", "from": "developer", "to": "system" }],
+        "doc": {
+          "why": "Moonshot / Kimi 拒收 developer 角色。来源：sub2api backend/internal/service/openai_chat_roles.go requiresSystemChatRole。",
+          "verified_at": "2026-10-24"
+        }
+      },
+      {
+        "id": "moonshot.k2-6-temperature-one",
+        "select": { "model": ["kimi-k2.6"], "dialect": ["openai.chat"] },
+        "do": [{ "op": "clamp", "path": "/temperature", "min": 1, "max": 1 }],
+        "doc": {
+          "why": "kimi-k2.6 只接受 temperature=1：请求带了别的值就改成 1，没带不补。来源：new-api relay/channel/moonshot/adaptor.go isTemperatureOneOnlyModel。",
+          "verified_at": "2026-10-24"
+        }
+      }
+    ]
+  },
+  {
+    "id": "zhipu",
+    "display_name": "智谱 / Z.ai",
+    "group": "cn",
+    "hosts": ["open.bigmodel.cn", "api.z.ai"],
+    "rules": [
+      {
+        "id": "strict-role.developer-to-system",
+        "select": { "dialect": ["openai.chat"] },
+        "do": [{ "op": "role_map", "from": "developer", "to": "system" }],
+        "doc": {
+          "why": "智谱 / Z.ai 拒收 developer 角色。来源：sub2api backend/internal/service/openai_chat_roles.go requiresSystemChatRole。",
+          "verified_at": "2026-10-24"
+        }
+      }
+    ]
+  },
+  {
+    "id": "xai",
+    "display_name": "xAI",
+    "group": "western",
+    "hosts": ["api.x.ai"],
+    "rules": [
+      {
+        "id": "xai.grok-3-mini-max-completion-tokens",
+        "select": { "model": ["grok-3-mini*"], "dialect": ["openai.chat"] },
+        "do": [{ "op": "rename", "from": "/max_tokens", "to": "/max_completion_tokens", "mode": "if_absent" }],
+        "doc": {
+          "why": "grok-3-mini 系列要 max_completion_tokens：只带了 max_tokens 时改名，两者都带则不动。来源：new-api relay/channel/xai/adaptor.go。",
+          "verified_at": "2026-10-24"
+        }
+      }
+    ]
+  }
+]

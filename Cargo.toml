@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/okapi-domain",
     "crates/okapi-pricing",
+    "crates/okapi-compat",
     "crates/okapi-ledger",
     "crates/okapi-providers",
     "crates/okapi-store",
@@ -19,6 +20,7 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 okapi-domain = { path = "crates/okapi-domain" }
 okapi-pricing = { path = "crates/okapi-pricing" }
+okapi-compat = { path = "crates/okapi-compat" }
 okapi-ledger = { path = "crates/okapi-ledger" }
 okapi-providers = { path = "crates/okapi-providers" }
 okapi-store = { path = "crates/okapi-store" }

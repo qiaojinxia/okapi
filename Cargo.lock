@@ -2246,6 +2246,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "okapi-compat"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "okapi-domain"
 version = "0.1.0"
 dependencies = [
