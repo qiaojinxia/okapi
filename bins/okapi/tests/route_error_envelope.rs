@@ -49,6 +49,11 @@ fn fill_params(path: &str) -> String {
         let name = &rest[open + 1..open + close];
         out.push_str(if name == "model_action" {
             "audit-model:generateContent"
+        } else if name == "scope" {
+            // 适配规则集的范围：channel / profile / guard，写成别的会在鉴权之前就 404
+            "channel"
+        } else if name == "version" {
+            "1"
         } else if name.contains("uuid") || name.contains("request") || name.contains("batch") {
             "00000000-0000-0000-0000-000000000000"
         } else if name.contains("id") || name == "key" {
@@ -223,7 +228,12 @@ fn console_probe_body(path: &str) -> Value {
         "/admin/users/{id}/subscription" => json!({"plan_code": "audit"}),
         "/admin/channels/{id}/egress" | "/admin/egress/default" => json!({"mode": "direct"}),
         "/admin/channels/{id}/try" => json!({"model": "audit-model"}),
-        "/admin/channels/{id}/compat" | "/admin/compat/guard" => json!({"rules": []}),
+        "/admin/channels/{id}/compat"
+        | "/admin/compat/guard"
+        | "/admin/compat/sets/{scope}/{id}/draft"
+        | "/admin/compat/sets/{scope}/{id}/rules" => json!({"rules": []}),
+        "/admin/compat/sets/{scope}/{id}/rollback" => json!({"version": 1}),
+        "/admin/compat/profiles" => json!({"slug": "audit", "name": "Audit"}),
         "/admin/compat/dry-run" => json!({"context": {"model": "audit-model"}, "request": {}}),
         "/admin/proxies" | "/admin/proxies/test" => json!({"url": "http://127.0.0.1:9"}),
         "/admin/proxies/import" => json!({"text": "127.0.0.1:9"}),

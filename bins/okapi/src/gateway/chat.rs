@@ -2205,6 +2205,19 @@ async fn try_model(
             );
             continue;
         }
+        // 没有地址、协议又没有缺省地址的渠道（兼容渠道漏填 api_base）永远连不上：跳过它，别回退到
+        // 别家的地址——那会把第三方的 key 发给 api.openai.com。管理面建 / 改渠道时已校验，这里是兜底
+        let Some(base) =
+            okapi_providers::registry::effective_base(&cand.provider, cand.api_base.as_deref())
+        else {
+            tracing::warn!(
+                request_id = %bill.request_id,
+                channel = cand.channel_id,
+                provider = %cand.provider,
+                "渠道没有 api_base 且协议没有缺省地址，跳过这个候选"
+            );
+            continue;
+        };
         attempted += 1;
 
         let upstream_model = cand.upstream_model(&bill.model).to_owned();
@@ -2222,12 +2235,6 @@ async fn try_model(
                 ));
             }
         };
-        let base = cand.api_base.clone().unwrap_or_else(|| {
-            okapi_providers::registry::lookup(&cand.provider)
-                .and_then(|adapter| adapter.default_base)
-                .unwrap_or_default()
-                .to_owned()
-        });
         // 被并发 / 准入挡下的候选不算一次真实尝试，届时恢复成上一次真实失败的渠道与上游
         let previous_attempt = (last_channel, last_upstream.clone());
         last_channel = Some((cand.channel_id, cand.channel_key_id));
@@ -2249,6 +2256,8 @@ async fn try_model(
         let oauth = super::oauth_cred::is_oauth_provider(&cand.provider);
         let mut refreshed_401 = false;
         let mut dropped_reasoning = false;
+        // 适配规则的错误阶段按规则重发了几次（同一个候选上，全部规则合计有上限）
+        let mut compat_retries = compat::RuleRetries::default();
         let attempt = loop {
             // Keep the candidate equal to the token actually sent; a forced refresh can
             // then distinguish a rejected token from one another request just rotated.
@@ -2355,6 +2364,60 @@ async fn try_model(
                 }) = &mut result
             {
                 *retry_after_secs = Some(retry_after_secs.unwrap_or(5));
+            }
+            // 适配规则的错误阶段：上游返回了网关不替规则决定去向的那类 HTTP 错误（400 / 404 / 422…），
+            // 先问规则——改请求重发、换下一个候选、或改写返回给客户端的错误；没命中走下面原来的处理
+            let decision = match &result {
+                Err(AttemptError::Fatal(ForwardFailure {
+                    reply: FailureReply::Upstream { status, body },
+                    ..
+                })) => compat::react_to_error(
+                    bill,
+                    &cand,
+                    *status,
+                    body,
+                    &body_up,
+                    &mut compat_retries,
+                ),
+                _ => None,
+            };
+            match decision {
+                Some(compat::ErrorDecision::Resend(resend)) => {
+                    tracing::info!(
+                        request_id = %bill.request_id,
+                        channel_key = cand.channel_key_id,
+                        "适配规则：改写请求后在同一候选上重发"
+                    );
+                    body_up = resend;
+                    continue;
+                }
+                Some(compat::ErrorDecision::Failover { cooldown_secs }) => {
+                    let upstream_status = match &result {
+                        Err(AttemptError::Fatal(failure)) => failure.upstream_status,
+                        _ => None,
+                    };
+                    result = Err(AttemptError::Retriable {
+                        code: codes::UPSTREAM_ERROR,
+                        upstream_status,
+                        // 不带冷却就不动 key 的健康（错误出在请求或这个上游账号上，不是凭证坏了）
+                        failure_kind: cooldown_secs.map_or(KeyFailure::Request, |secs| {
+                            KeyFailure::RateLimited {
+                                retry_after_secs: Some(i64::from(secs)),
+                            }
+                        }),
+                    });
+                }
+                Some(compat::ErrorDecision::Fail { status, code }) => {
+                    if let Err(AttemptError::Fatal(failure)) = &mut result {
+                        compat::rewrite_failure(
+                            &mut failure.reply,
+                            &mut failure.error_code,
+                            status,
+                            code,
+                        );
+                    }
+                }
+                None => {}
             }
             // 会话换了账号（额度切换、并发满、粘性过期）：历史里上个账号签发的加密推理项新账号
             // 验不过。去掉推理项在同一候选上重发一次——不计 failover、不标 key 失败；换别的
@@ -2911,9 +2974,7 @@ async fn dispatch_chat(
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model))
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // Gemini 客户端 + OpenAI(兼容 / Azure) 上游：chat 形状 → Gemini 形状
-        (Ingress::Gemini, _) => bill
-            .state
-            .openai_chat(cand, &upstream_model, body, stream)
+        (Ingress::Gemini, _) => openai_chat_shaped(bill, cand, plan, &upstream_model, body, stream)
             .await
             .and_then(|resp| conv_g2o::wrap_chat_as_gemini(resp, &upstream_model)),
         // OpenAI/Responses 客户端 + gemini 方言上游：providers 内转回 OpenAI 形状
@@ -2930,9 +2991,7 @@ async fn dispatch_chat(
             .and_then(|resp| convert::wrap_messages(resp, &upstream_model)),
         // 同方言 OpenAI（官方 / 兼容 / Azure）：原样，仅 URL 与鉴权头按 provider 分派
         (Ingress::OpenAi | Ingress::Responses, _) => {
-            bill.state
-                .openai_chat(cand, &upstream_model, body, stream)
-                .await
+            openai_chat_shaped(bill, cand, plan, &upstream_model, body, stream).await
         }
         // Anthropic 客户端 + anthropic 方言上游：透传 + 计费元数据扫描
         (Ingress::Anthropic, "anthropic") => {
@@ -2970,11 +3029,7 @@ async fn dispatch_chat(
         }
         // Anthropic 客户端 + OpenAI(兼容 / Azure) 上游：回向转换为 Anthropic 事件/JSON
         (Ingress::Anthropic, _) => {
-            match bill
-                .state
-                .openai_chat(cand, &upstream_model, body, stream)
-                .await?
-            {
+            match openai_chat_shaped(bill, cand, plan, &upstream_model, body, stream).await? {
                 ChatResponse::Json {
                     status,
                     upstream_request_id,
@@ -3017,6 +3072,22 @@ async fn dispatch_chat(
         resp = wrap_responses_egress(resp, &upstream_model)?;
     }
     Ok(resp)
+}
+
+/// OpenAI chat 方言上游的一次调用，外加适配规则的响应阶段（在转回客户端方言之前改写）。
+async fn openai_chat_shaped(
+    bill: &RequestBilling,
+    cand: &ChannelCandidate,
+    plan: ExecutionPlan,
+    upstream_model: &str,
+    body: Bytes,
+    stream: bool,
+) -> Result<ChatResponse, UpstreamError> {
+    let resp = bill
+        .state
+        .openai_chat(cand, upstream_model, body, stream)
+        .await?;
+    Ok(compat::shape_response(bill, cand, plan, resp))
 }
 
 /// chat 形状 → Responses 方言（response.created/.output_text.delta/.completed 事件骨架）。

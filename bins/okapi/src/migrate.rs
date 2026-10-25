@@ -346,6 +346,12 @@ pub async fn run_newapi(
             stats.skipped.push(format!(
                 "channels:{name} type={newapi_type} 按 openai_compat 导入"
             ));
+            // 兼容渠道没有缺省地址（不再回退到 api.openai.com），源渠道没填 base_url 的要在导入后补上
+            if s(&row, "base_url").is_none_or(str::is_empty) {
+                stats.skipped.push(format!(
+                    "channels:{name} 缺 base_url，补上 api_base 之前这个渠道不会被调用"
+                ));
+            }
         }
         let models: Vec<String> = s(&row, "models")
             .map(|m| {
@@ -954,6 +960,12 @@ pub async fn run_okapi_old(
         let base_url = s(&row, "base_url")
             .filter(|b| !b.is_empty())
             .unwrap_or(endpoint);
+        if provider == "openai_compat" && base_url.is_empty() {
+            // 兼容渠道没有缺省地址（不再回退到 api.openai.com），导入后要补上
+            stats.skipped.push(format!(
+                "channels:{name} 缺 base_url，补上 api_base 之前这个渠道不会被调用"
+            ));
+        }
         let models = model_list(&row, "supported_models");
         let row_status = old_status(s(&row, "status"));
         let priority = i(&row, "priority")

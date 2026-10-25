@@ -41,14 +41,37 @@ pub struct Prepared {
     pub rules: Option<(Value, Option<String>)>,
 }
 
+/// 选了内置厂商时，渠道协议对应的上游方言（厂商端点表按它取地址）。
+fn vendor_protocol(provider: &str) -> Option<&'static str> {
+    match provider {
+        "openai" | "openai_compat" => Some("openai.chat"),
+        "anthropic" => Some("anthropic.messages"),
+        "gemini" => Some("gemini.generate"),
+        _ => None,
+    }
+}
+
+/// 渠道要连的地址：填了的 > 选定厂商为这个协议给的端点 > 协议的缺省地址（官方 openai / anthropic …）。
+/// 都没有就拒绝——`openai_compat` 没有缺省，不能悄悄发往 OpenAI。厂商给的地址在这里**落成明确的值**，
+/// 之后的路由只认渠道上存的地址，不依赖运行期的隐含缺省。选了适配档案（`custom:<slug>`）时取它叠加的
+/// 内置厂商的端点（档案自己没有端点表）。
 pub async fn endpoint<'a>(
     state: &AppState,
     provider: &str,
     configured: Option<&'a str>,
+    vendor: Option<&str>,
 ) -> Result<&'a str, AppError> {
+    let extended = match vendor.and_then(okapi_store::compat::profile_slug) {
+        Some(slug) => okapi_store::compat::profile_by_slug(&state.pg, slug)
+            .await?
+            .and_then(|profile| profile.extends),
+        None => None,
+    };
+    let vendor = extended.as_deref().or(vendor);
     let base = configured
         .map(str::trim)
         .filter(|base| !base.is_empty())
+        .or_else(|| okapi_compat::vendors::endpoint_base(vendor?, vendor_protocol(provider)?))
         .or_else(|| {
             okapi_providers::registry::lookup(provider).and_then(|adapter| adapter.default_base)
         })
@@ -84,11 +107,10 @@ pub async fn prepare(
         }],
     };
     let settings = options.settings.unwrap_or_else(|| json!({}));
-    let vendor = options
-        .vendor
-        .as_deref()
-        .map(super::compat::normalize_vendor)
-        .transpose()?;
+    let vendor = match options.vendor.as_deref() {
+        Some(raw) => Some(super::compat::normalize_vendor(state, raw).await?),
+        None => None,
+    };
     let rules = match &options.compat {
         Some(input) => {
             let prepared = super::compat::prepare_rules(state, actor, None, input).await?;

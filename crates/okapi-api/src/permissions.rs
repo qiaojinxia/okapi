@@ -33,8 +33,13 @@ pub const MCP_WRITE: &str = "mcp.write";
 pub const AUDIT_READ: &str = "audit.read";
 /// 适配规则：改全局护栏（整个网关最后执行、谁也覆盖不了的规则，影响面是所有渠道）。
 pub const COMPAT_GUARD_WRITE: &str = "compat.guard.write";
-/// 适配规则：新增写入提示词 / 指令 / 档位等敏感路径的操作（只是删字段不需要）。
+/// 适配规则：新增写入提示词 / 指令 / 档位等敏感路径的操作，以及响应里动用量 / 计价事实的操作
+/// （只是删字段不需要）。
 pub const COMPAT_SENSITIVE: &str = "compat.sensitive";
+/// 适配规则：发布草稿、回滚版本（AI 经 MCP 只能写草稿，发布要有这个权限的人批准）。
+pub const COMPAT_PUBLISH: &str = "compat.publish";
+/// 适配规则：建 / 改 / 删适配档案及其草稿（档案一改会影响所有选了它的渠道）。
+pub const COMPAT_PROFILE_WRITE: &str = "compat.profile.write";
 
 /// 全部权限点清单：由 `GET /admin/permissions` 暴露给前端角色编辑器，
 /// 避免前端硬编码字符串与后端漂移。新增权限点必须同步登记到此处（有用例把关）。
@@ -58,6 +63,8 @@ pub const ALL: &[&str] = &[
     AUDIT_READ,
     COMPAT_GUARD_WRITE,
     COMPAT_SENSITIVE,
+    COMPAT_PUBLISH,
+    COMPAT_PROFILE_WRITE,
 ];
 
 #[cfg(test)]

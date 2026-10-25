@@ -261,8 +261,13 @@ pub async fn create_channel(
     if okapi_providers::registry::lookup(&req.provider).is_none() {
         return Err(AppError::bad_request().with_param("provider"));
     }
-    let api_base =
-        super::channel_creation::endpoint(&state, &req.provider, Some(&req.api_base)).await?;
+    let api_base = super::channel_creation::endpoint(
+        &state,
+        &req.provider,
+        Some(&req.api_base),
+        req.options.vendor.as_deref(),
+    )
+    .await?;
     ensure_azure_api_base(&req.provider, Some(api_base))?;
     super::ssrf::validate_credential(&state, &req.credential).await?;
     let prepared =
@@ -721,8 +726,9 @@ async fn ensure_settings_oauth_token_url(
     super::ssrf::validate_api_base(state, url).await
 }
 
-/// azure / bedrock / vertex 渠道必须有地址：三家都没有全局缺省，缺了只能拼出打向
-/// api.openai.com 的错误请求。vertex 还要求带 `/projects/{p}/locations/{l}`（§11.35）。
+/// azure / bedrock / vertex / openai_compat 渠道必须有地址：这几家都没有全局缺省，缺了只能拼出
+/// 打向 api.openai.com 的错误请求（兼容渠道还会把第三方的 key 一起发过去）。
+/// vertex 还要求带 `/projects/{p}/locations/{l}`（§11.35）。
 /// `provider` 是本次生效的协议，`api_base` 是本次生效的地址。
 pub(super) fn ensure_azure_api_base(
     provider: &str,
@@ -730,7 +736,7 @@ pub(super) fn ensure_azure_api_base(
 ) -> Result<(), AppError> {
     let base = api_base.map(str::trim).filter(|b| !b.is_empty());
     match provider {
-        "azure" | "bedrock" if base.is_none() => {
+        "azure" | "bedrock" | "openai_compat" if base.is_none() => {
             Err(AppError::bad_request().with_param("api_base"))
         }
         "vertex" if !base.is_some_and(okapi_providers::vertex::api_base_ok) => {
@@ -822,7 +828,7 @@ pub async fn update_channel(
     if let Some(provider) = req
         .provider
         .as_deref()
-        .filter(|p| matches!(*p, "azure" | "bedrock" | "vertex"))
+        .filter(|p| matches!(*p, "azure" | "bedrock" | "vertex" | "openai_compat"))
     {
         if req.api_base.is_some() {
             ensure_azure_api_base(provider, req.api_base.as_deref())?;
@@ -873,7 +879,7 @@ pub async fn update_channel(
     ensure_cost_milli(req.cost_milli)?;
     // 适配规则先校验、先检查版本，再写任何东西：校验不过 / 版本冲突不留下改了一半的渠道
     let vendor = match &req.vendor {
-        Some(Some(raw)) => Some(Some(super::compat::normalize_vendor(raw)?)),
+        Some(Some(raw)) => Some(Some(super::compat::normalize_vendor(&state, raw).await?)),
         Some(None) => Some(None),
         None => None,
     };
@@ -3572,6 +3578,9 @@ pub struct DraftModelsReq {
     pub settings: Option<Value>,
     #[serde(default)]
     pub egress: Option<okapi_store::egress::Binding>,
+    /// 选定的内置厂商：没填地址时按它的端点表补全（与建渠道同一规则）。
+    #[serde(default)]
+    pub vendor: Option<String>,
 }
 
 /// 新建渠道时的上游模型发现：渠道还没落库，用表单里刚填的地址 / 凭证 / 设置 / 出口。
@@ -3599,7 +3608,13 @@ pub async fn fetch_draft_models(
     validate_channel_settings(&state, provider, req.settings.as_ref()).await?;
     let binding = req.egress.unwrap_or(okapi_store::egress::Binding::Inherit);
     super::egress::validate_binding(&state, &binding, &actor, scope).await?;
-    let base = super::channel_creation::endpoint(&state, provider, req.api_base.as_deref()).await?;
+    let base = super::channel_creation::endpoint(
+        &state,
+        provider,
+        req.api_base.as_deref(),
+        req.vendor.as_deref(),
+    )
+    .await?;
     let (resolved, _) =
         okapi_store::egress::pick_for_new_key(&state.pg, &binding, state.master_key.as_deref())
             .await?;

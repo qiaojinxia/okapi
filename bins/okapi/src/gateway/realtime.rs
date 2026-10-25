@@ -339,10 +339,17 @@ async fn prepare(
         ));
     };
     let upstream_model = cand.upstream_model(&canonical).to_owned();
-    let base = cand
-        .api_base
-        .clone()
-        .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
+    // 兼容渠道漏填地址时不回退到 api.openai.com（会把第三方的 key 发给 OpenAI）
+    let Some(base) =
+        okapi_providers::registry::effective_base(&cand.provider, cand.api_base.as_deref())
+    else {
+        admission.disarm();
+        release_reservation_and_slot(state, key, request_id, reservation_pool).await;
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            codes::NO_AVAILABLE_CHANNEL,
+        ));
+    };
     let ws_base = base
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);

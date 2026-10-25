@@ -280,8 +280,13 @@ async fn invalid_rules_are_rejected_with_the_first_problem_in_param() {
             "s:billing_critical_ack_required",
         ),
         (
-            json!([{"id": "r", "phase": "response", "do": [{"op": "remove", "paths": ["/x"]}]}]),
+            json!([{"id": "r", "phase": "wire", "do": [{"op": "remove", "paths": ["/x"]}]}]),
             "r:phase_not_enabled",
+        ),
+        (
+            // 响应阶段已启用，但只在 OpenAI chat 方言的上游上执行：不写方言就拒绝
+            json!([{"id": "r", "phase": "response", "do": [{"op": "remove", "paths": ["/x"]}]}]),
+            "r:response_dialect_unsupported",
         ),
         (json!({"not": "an array"}), "not_array"),
     ] {
@@ -553,7 +558,8 @@ async fn the_vendor_catalog_lists_builtins_and_suggests_by_host() {
     )
     .await;
     assert_eq!(status, 200, "{body}");
-    assert_eq!(body["suggestion"], "builtin:moonshot");
+    assert_eq!(body["suggestion"]["id"], "builtin:moonshot");
+    assert_eq!(body["suggestion"]["kind"], "builtin");
     let ids: Vec<&str> = body["data"]
         .as_array()
         .unwrap()

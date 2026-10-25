@@ -173,7 +173,10 @@ pub async fn exchange(
         if req.models.is_empty() {
             return Err(AppError::bad_request().with_param("models"));
         }
-        Some(super::channel_creation::endpoint(&state, &provider, req.api_base.as_deref()).await?)
+        Some(
+            super::channel_creation::endpoint(&state, &provider, req.api_base.as_deref(), None)
+                .await?,
+        )
     } else {
         None
     };

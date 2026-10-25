@@ -318,6 +318,20 @@ pub async fn candidates_for_model(
     rows.into_iter()
         .map(|r| {
             let credential = crate::credential::open(master_key, &r.credential_ciphertext)?;
+            let effective = compat.get(&r.channel_id).cloned().unwrap_or_default();
+            // 能力阶段的规则在这里并进渠道自己声明的能力（渠道声明过的优先）：之后所有读
+            // `capabilities` 的地方都自动看得见，网关不用再各自去问规则
+            let capabilities = crate::compat::candidate_capabilities(
+                &effective,
+                r.vendor.as_deref(),
+                r.api_base.as_deref(),
+                model,
+                r.model_mapping
+                    .get(model)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(model),
+                r.capabilities,
+            );
             let responses_native = responses_native_for(&r.provider, r.responses_native);
             let (same_key_retries, first_output_timeout_secs) =
                 retry_knobs(r.retry_policy.as_ref());
@@ -361,11 +375,11 @@ pub async fn candidates_for_model(
                 model_mapping: r.model_mapping,
                 thinking_to_content: r.thinking_to_content,
                 bill_by_response_model: r.bill_by_response_model,
-                compat: compat.get(&r.channel_id).cloned().unwrap_or_default(),
+                capabilities,
+                compat: effective,
                 vendor: r.vendor,
                 responses_native,
                 tool_loss_policy: r.tool_loss_policy,
-                capabilities: r.capabilities,
                 cost_milli: r.cost_milli,
                 same_key_retries,
                 first_output_timeout_secs,
@@ -436,6 +450,7 @@ pub struct PassChannel {
 #[derive(Debug)]
 pub struct ChannelKeyRef {
     pub channel_id: i64,
+    pub provider: String,
     pub api_base: Option<String>,
     pub credential: String,
     pub proxy_url: Option<String>,
@@ -451,7 +466,7 @@ pub async fn channel_key_ref(
 ) -> Result<Option<ChannelKeyRef>, StoreError> {
     let row = sqlx::query!(
         r#"
-        SELECT c.id AS channel_id, c.api_base, ck.credential_ciphertext,
+        SELECT c.id AS channel_id, c.provider, c.api_base, ck.credential_ciphertext,
                ep.mode AS "egress_mode!", ep.proxy_id AS "egress_proxy_id?",
                ep.url_ciphertext AS "egress_url?",
                c.settings -> 'extra_headers' AS extra_headers
@@ -482,6 +497,7 @@ pub async fn channel_key_ref(
     };
     Ok(Some(ChannelKeyRef {
         channel_id: r.channel_id,
+        provider: r.provider,
         api_base: r.api_base,
         credential: crate::credential::open(master_key, &r.credential_ciphertext)?,
         proxy_url,

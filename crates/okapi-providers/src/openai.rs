@@ -567,7 +567,10 @@ impl OpenAiUpstream {
     }
 }
 
-fn parse_event(data: &str) -> ChatEvent {
+/// 一条 SSE data 负载 → 流式事件（含首字 / 字符数 / 用量元数据）。上游适配器产生事件和适配规则的
+/// 响应阶段改写帧后重算元数据都走它，所以改写后的帧与原生的帧在计费上是同一种东西。
+#[must_use]
+pub fn parse_event(data: &str) -> ChatEvent {
     if data.trim() == "[DONE]" {
         return ChatEvent::Done;
     }

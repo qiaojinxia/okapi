@@ -20,6 +20,8 @@ pub mod channel_oauth;
 pub mod channel_try;
 mod cloud_probe;
 pub mod compat;
+mod compat_profiles;
+mod compat_sets;
 mod core_source;
 pub mod dlq;
 pub mod egress;
@@ -31,6 +33,7 @@ pub mod logs;
 pub mod manage;
 pub mod margin;
 pub mod mcp;
+mod mcp_compat;
 mod measurement_coverage;
 mod monitor;
 pub mod oauth;
@@ -125,6 +128,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(channel_routes())
+        .merge(compat_routes())
         .merge(pricing_routes())
         .merge(user_admin_routes())
         .merge(ops_routes())
@@ -213,6 +217,65 @@ async fn spa_index_bytes() -> Option<Vec<u8>> {
 
 type ConsoleRouter = Router<AppState>;
 
+/// 适配规则：渠道层规则、规则集（草稿 / 审批 / 历史 / 回滚）、适配档案、护栏、试跑与解释、目录。
+fn compat_routes() -> ConsoleRouter {
+    Router::new()
+        .route(
+            "/admin/channels/{id}/compat",
+            get(compat::get_channel_compat).put(compat::put_channel_compat),
+        )
+        .route("/admin/compat/vendors", get(compat::list_vendors))
+        .route("/admin/compat/catalog", get(compat::catalog))
+        .route("/admin/compat/dry-run", post(compat::dry_run))
+        .route(
+            "/admin/compat/guard",
+            get(compat::get_guard).put(compat::put_guard),
+        )
+        .route("/admin/compat/drafts", get(compat_sets::inbox))
+        .route(
+            "/admin/compat/sets/{scope}/{id}",
+            get(compat_sets::overview),
+        )
+        .route(
+            "/admin/compat/sets/{scope}/{id}/versions",
+            get(compat_sets::versions),
+        )
+        .route(
+            "/admin/compat/sets/{scope}/{id}/versions/{version}",
+            get(compat_sets::version_detail),
+        )
+        .route(
+            "/admin/compat/sets/{scope}/{id}/draft",
+            axum::routing::put(compat_sets::save_draft).delete(compat_sets::discard_draft),
+        )
+        .route(
+            "/admin/compat/sets/{scope}/{id}/draft/publish",
+            post(compat_sets::publish_draft),
+        )
+        .route(
+            "/admin/compat/sets/{scope}/{id}/rollback",
+            post(compat_sets::rollback),
+        )
+        .route(
+            "/admin/compat/sets/{scope}/{id}/rules",
+            axum::routing::put(compat_sets::publish_direct),
+        )
+        .route(
+            "/admin/compat/profiles",
+            get(compat_profiles::list).post(compat_profiles::create),
+        )
+        .route(
+            "/admin/compat/profiles/{id}",
+            get(compat_profiles::get)
+                .patch(compat_profiles::patch)
+                .delete(compat_profiles::delete),
+        )
+        .route(
+            "/admin/compat/explain/{request_id}",
+            get(compat_profiles::explain),
+        )
+}
+
 /// 供应商接入面（渠道）：CRUD + 凭证轮换 + 状态机 + 可见组 + 批量/复制 + 测活 + 模型发现。
 fn channel_routes() -> ConsoleRouter {
     Router::new()
@@ -221,16 +284,6 @@ fn channel_routes() -> ConsoleRouter {
             post(admin::create_channel).get(admin::list_channels),
         )
         .route("/admin/channels/providers", get(admin::channel_providers))
-        .route(
-            "/admin/channels/{id}/compat",
-            get(compat::get_channel_compat).put(compat::put_channel_compat),
-        )
-        .route("/admin/compat/vendors", get(compat::list_vendors))
-        .route("/admin/compat/dry-run", post(compat::dry_run))
-        .route(
-            "/admin/compat/guard",
-            get(compat::get_guard).put(compat::put_guard),
-        )
         .route("/admin/channels/{id}/usage", get(admin::channel_usage))
         .route(
             "/admin/channels/{id}",

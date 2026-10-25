@@ -337,6 +337,108 @@ async fn azure_channel_write_validation() {
     assert_eq!(stored.as_deref(), Some("2024-10-21"));
 }
 
+#[tokio::test]
+// openai_compat 没有缺省地址：建渠道必须给 api_base，否则会把第三方的 key 发去 api.openai.com；
+// 改渠道把协议换成 openai_compat 而现有地址是空的（老数据），同样拦在管理面。
+async fn openai_compat_channel_requires_an_address() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let with = |extra: Value| {
+        let mut b = json!({
+            "name": format!("oc-{}", env.suffix), "credential": "k", "models": [env.model],
+            "provider": "openai_compat",
+        });
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+    // 没填地址（空白）：拒绝，且不回退到官方地址
+    let (status, body) = post(with(json!({"api_base": "  "}))).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["param"], "api_base");
+    // 官方 openai 仍然有缺省地址：空白落成官方地址
+    let (status, body) = post(json!({
+        "name": format!("oc-official-{}", env.suffix), "credential": "k", "models": [env.model],
+        "provider": "openai", "api_base": "  ",
+    }))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let official: Option<String> =
+        sqlx::query_scalar("SELECT api_base FROM channels WHERE id = $1")
+            .bind(body["channel_id"].as_i64().unwrap())
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(official.as_deref(), Some("https://api.openai.com/v1"));
+    // 给了地址：放行
+    let (status, body) = post(with(json!({"api_base": "https://api.deepseek.com/v1"}))).await;
+    assert_eq!(status, 200, "{body}");
+    // 没填地址但选了内置厂商：服务端按厂商的端点表补全，并把明确的地址落库（运行期不靠隐含缺省）
+    let (status, body) = post(with(json!({
+        "name": format!("oc-vendor-{}", env.suffix), "api_base": "", "vendor": "builtin:moonshot"
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (stored_base, stored_vendor): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT api_base, vendor FROM channels WHERE id = $1")
+            .bind(body["channel_id"].as_i64().unwrap())
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(stored_base.as_deref(), Some("https://api.moonshot.cn/v1"));
+    assert_eq!(stored_vendor.as_deref(), Some("builtin:moonshot"));
+    // 厂商没有这个协议的端点：补不出来，照样拒绝
+    let (status, body) = post(json!({
+        "name": format!("oc-gem-{}", env.suffix), "credential": "k", "models": [env.model],
+        "provider": "azure", "api_base": "", "vendor": "builtin:deepseek",
+    }))
+    .await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["param"], "api_base");
+
+    // 老数据：渠道的地址是空的，把协议换成 openai_compat 而不补地址 → 拒绝；补上就放行
+    sqlx::query("UPDATE channels SET api_base = NULL WHERE id = $1")
+        .bind(env.channel_id)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let patch_path = format!("/admin/channels/{}", env.channel_id);
+    let patch = |body: Value| {
+        req(
+            reqwest::Method::PATCH,
+            env.console,
+            &patch_path,
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let (status, body) = patch(json!({"provider": "openai_compat"})).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["param"], "api_base");
+    let (status, body) = patch(json!({
+        "provider": "openai_compat", "api_base": "https://api.deepseek.com/v1"
+    }))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (provider, api_base): (String, Option<String>) =
+        sqlx::query_as("SELECT provider, api_base FROM channels WHERE id = $1")
+            .bind(env.channel_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(provider, "openai_compat");
+    assert_eq!(api_base.as_deref(), Some("https://api.deepseek.com/v1"));
+}
+
 /// bedrock / vertex（§11.35）：地址必填、vertex 须含 projects/locations、aws_region 形状。
 #[tokio::test]
 async fn cloud_channel_write_validation() {

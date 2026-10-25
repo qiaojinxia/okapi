@@ -31,20 +31,21 @@ pub fn outbound(cand: &ChannelCandidate) -> Outbound {
     }
 }
 
-/// 官方 OpenAI 缺省地址（渠道未配置 api_base 时）。
-pub const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
-
 /// 渠道是否走 Azure 分派。
 pub fn is_azure(cand: &ChannelCandidate) -> bool {
     okapi_providers::registry::lookup(&cand.provider)
         .is_some_and(|adapter| adapter.kind == okapi_providers::registry::AdapterKind::Azure)
 }
 
-/// 非 Azure 渠道的 api_base（缺省官方地址）。
-pub fn openai_base(cand: &ChannelCandidate) -> String {
-    cand.api_base
-        .clone()
-        .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned())
+/// 配置里缺少地址、协议又没有缺省地址时的构造错误原因（`classify_fatal` 据此换下一个候选）。
+pub const API_BASE_MISSING: &str = "api_base_missing";
+
+/// 非 Azure 渠道的基址：配置的 `api_base`；没配时只有官方 `openai` 有缺省（官方地址）。
+/// `openai_compat` 没有缺省——缺了是配置不完整，按构造错误处理，**不回退到 api.openai.com**：
+/// 那会把第三方的 key 发给 OpenAI。
+pub fn openai_base(cand: &ChannelCandidate) -> Result<String, UpstreamError> {
+    okapi_providers::registry::effective_base(&cand.provider, cand.api_base.as_deref())
+        .ok_or_else(|| UpstreamError::Build(API_BASE_MISSING.to_owned()))
 }
 
 /// Azure 渠道的（端点, api-version）；端点缺失即构造错误。
@@ -86,7 +87,7 @@ impl AppState {
             } else {
                 self.upstream
                     .image_stream(
-                        &openai_base(cand),
+                        &openai_base(cand)?,
                         path,
                         &cand.credential,
                         body,
@@ -111,7 +112,7 @@ impl AppState {
             .infer_via(
                 cand,
                 okapi_providers::inference::Surface::Chat,
-                &openai_base(cand),
+                &openai_base(cand)?,
                 upstream_model,
                 body,
                 stream,
@@ -154,7 +155,7 @@ impl AppState {
             } else {
                 self.upstream
                     .json_relay(
-                        &openai_base(cand),
+                        &openai_base(cand)?,
                         path,
                         &cand.credential,
                         body,
@@ -188,7 +189,7 @@ impl AppState {
                     .await
             } else {
                 self.upstream
-                    .speech(&openai_base(cand), &cand.credential, body, &outbound(cand))
+                    .speech(&openai_base(cand)?, &cand.credential, body, &outbound(cand))
                     .await
             }
         })
@@ -220,7 +221,7 @@ impl AppState {
             } else {
                 self.upstream
                     .audio_multipart(
-                        &openai_base(cand),
+                        &openai_base(cand)?,
                         path,
                         &cand.credential,
                         parts,
