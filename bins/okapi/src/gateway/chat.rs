@@ -82,6 +82,15 @@ struct ProbeInfo {
     service_tier: Option<String>,
 }
 
+/// 请求体顶层有没有统一 `reasoning` 对象（入口解析时看一眼）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnifiedReasoning {
+    /// 没有：转发前什么也摘不到，别为确认这句「没有」再解析整份请求体。
+    Absent,
+    /// 有，或没法确认：转发前照旧走摘除。
+    Present,
+}
+
 /// 每请求计费上下文（转发与异步结算共享）。
 #[derive(Clone)]
 struct RequestBilling {
@@ -112,6 +121,8 @@ struct RequestBilling {
     directive: Option<ReasoningDirective>,
     /// 请求级路由偏好（§11.24；缺省即此前行为）。
     prefs: super::routing_prefs::RoutingPrefs,
+    /// 转发前要不要摘统一 `reasoning` 对象（每次尝试不必再读原文确认「没有」）。
+    unified_reasoning: UnifiedReasoning,
     /// canonical 模型名（别名解析后；记账与调度用）。
     model: String,
     requested_model: String,
@@ -1488,11 +1499,27 @@ async fn prepare_chat(
     // 合并到同一个 directive 后交给三向注入。**参数优先**——它是本次请求的显式意图。
     // 合并只影响"往上游注入什么"，不影响上面 `variant` 已经定下的计费名：
     // 与 OpenRouter 一致，只有模型名上的变体改计价，请求参数不改。
-    let directive = reasoning::parse_request(body).merge(directive);
+    // 请求体上面已经解析过一次（`parsed`），推理意图与路由偏好直接从它取，别再各读一遍原文：
+    // 带 thinking 的请求（Claude Code 几乎全是）会让原文版的子串粗筛恒为真，白白多出整份解析。
+    let request_reasoning = match parsed.as_ref() {
+        Some(value) => reasoning::parse_request_value(value),
+        None => reasoning::parse_request(body),
+    };
+    let directive = request_reasoning.merge(directive);
+    // 顶层有没有统一 `reasoning` 对象：没有的话转发前的摘除什么也摘不到。解析失败（理论上不会：
+    // 入口已经解析过）按「有」走原来的路径。
+    let unified_reasoning = if parsed.as_ref().is_none_or(reasoning::has_unified_object) {
+        UnifiedReasoning::Present
+    } else {
+        UnifiedReasoning::Absent
+    };
 
     // 请求级单价上限（§11.24）：拿快照里的**最终**单价判——它已经过模型/分组/个人系数与
     // 修饰器全链，正是这次真会按之的价。判在预扣之前：超限直接拒，别扣了钱再让用户发现贵。
-    let prefs = super::routing_prefs::parse(body)?;
+    let prefs = match parsed.as_ref() {
+        Some(value) => super::routing_prefs::parse_value(value)?,
+        None => super::routing_prefs::parse(body)?,
+    };
     if let Some(over) = price_above_max(&est_quote, &prefs) {
         return Err(
             AppError::new(StatusCode::PAYMENT_REQUIRED, codes::PRICE_ABOVE_MAX).with_param(over),
@@ -1667,6 +1694,7 @@ async fn prepare_chat(
         book: Arc::clone(&book),
         calc,
         prefs,
+        unified_reasoning,
         user_id: key.user_id,
         key_id: key.key_id,
         member_user_id: key.member_user_id,
@@ -2855,7 +2883,10 @@ fn shape_upstream_body(
             .native_responses();
     // 统一 `reasoning` 对象同理：意图已翻译进各方言的原生字段，原对象上游不认识（§11.26）。
     // Responses 直转是唯一的例外——`reasoning.effort` 就是上游的原生键，只摘非原生键。
-    let body = if native_responses {
+    // 顶层没有这个对象时什么也摘不到（入口解析时已经看过）：跳过，别为一句「没有」再解析整份请求体。
+    let body = if bill.unified_reasoning == UnifiedReasoning::Absent {
+        body
+    } else if native_responses {
         reasoning::strip_unified_for_responses(&body).unwrap_or(body)
     } else {
         reasoning::strip_unified(&body).unwrap_or(body)

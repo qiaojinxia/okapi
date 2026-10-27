@@ -171,9 +171,16 @@ pub fn parse_request(body: &Bytes) -> RequestReasoning {
     if !mentions_reasoning(body) {
         return RequestReasoning::Unspecified;
     }
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
-        return RequestReasoning::Unspecified;
-    };
+    serde_json::from_slice::<Value>(body).map_or(RequestReasoning::Unspecified, |value| {
+        parse_request_value(&value)
+    })
+}
+
+/// 同 [`parse_request`]，但请求体已经解析成 `Value`（chat 入口手里就有一份）：直接查键，
+/// 不必为它再把整份原文读一遍——长上下文请求体每多一遍都是毫秒级 CPU，而带 `thinking` 的请求
+/// （Claude Code 几乎全是）会让 [`mentions_reasoning`] 的粗筛恒为真。
+#[must_use]
+pub fn parse_request_value(value: &Value) -> RequestReasoning {
     let Some(obj) = value.as_object() else {
         return RequestReasoning::Unspecified;
     };
@@ -248,6 +255,13 @@ fn consumed_key(key: &str, value: &Value) -> bool {
         "enabled" => value.is_boolean(),
         _ => false,
     }
+}
+
+/// 请求体顶层是否带着统一 `reasoning` 对象。没有的话 [`strip_unified`] 一定什么都不摘，
+/// 调用方手里有解析好的请求体时先问这一句，省掉每次尝试一遍的整份解析。
+#[must_use]
+pub fn has_unified_object(value: &Value) -> bool {
+    value.get(UNIFIED_FIELD).is_some_and(Value::is_object)
 }
 
 /// 转发前处理统一 `reasoning` 对象：**只摘走我们已经消化的键**，
@@ -659,5 +673,61 @@ mod tests {
             v["reasoning"]["effort"],
             budget_only.effective_effort().as_str()
         );
+    }
+
+    /// 请求体里能出现的各种写法（含只在内容里提到、顶层没有的）。
+    const BODIES: [&str; 17] = [
+        r#"{"model":"m"}"#,
+        r#"{"model":"m","messages":[{"role":"user","content":"explain \"reasoning\" and \"thinking\" to me"}]}"#,
+        r#"{"model":"m","reasoning":{"effort":"high"}}"#,
+        r#"{"model":"m","reasoning":{"effort":"none"}}"#,
+        r#"{"model":"m","reasoning":{"enabled":false}}"#,
+        r#"{"model":"m","reasoning":{"enabled":true}}"#,
+        r#"{"model":"m","reasoning":{"max_tokens":2048,"summary":"auto"}}"#,
+        r#"{"model":"m","reasoning":{"exclude":true}}"#,
+        r#"{"model":"m","reasoning":"high"}"#,
+        r#"{"model":"m","reasoning_effort":"low"}"#,
+        r#"{"model":"m","reasoning_effort":"none"}"#,
+        r#"{"model":"m","reasoning_effort":"bogus"}"#,
+        r#"{"model":"m","thinking":{"type":"enabled","budget_tokens":4096}}"#,
+        r#"{"model":"m","thinking":{"type":"disabled"}}"#,
+        r#"{"model":"m","thinking":{"type":"enabled"},"messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"hm\nhm","signature":"x"}]}]}"#,
+        r#"{"model":"m","reasoning":{"effort":"low"},"reasoning_effort":"high","thinking":{"type":"disabled"}}"#,
+        r"[1,2,3]",
+    ];
+
+    /// chat 入口用已解析的 `Value`（`parse_request_value`），其余入口按原文（`parse_request`）：
+    /// 两条路必须逐例一致，否则同一个请求换个入口得到不同的待遇。
+    #[test]
+    fn parsing_the_value_agrees_with_parsing_the_bytes() {
+        for body in BODIES {
+            let value: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(
+                parse_request_value(&value),
+                parse_request(&Bytes::from(body.to_owned())),
+                "{body}"
+            );
+        }
+    }
+
+    /// 顶层没有统一 `reasoning` 对象就一定摘不到东西：转发前据此跳过整份解析不会改变任何一次转发的请求体。
+    #[test]
+    fn no_unified_object_means_nothing_to_strip() {
+        for body in BODIES {
+            let value: Value = serde_json::from_str(body).unwrap();
+            let bytes = Bytes::from(body.to_owned());
+            if !has_unified_object(&value) {
+                assert!(strip_unified(&bytes).is_none(), "{body}");
+                assert!(strip_unified_for_responses(&bytes).is_none(), "{body}");
+            }
+        }
+        assert!(has_unified_object(
+            &json!({"reasoning": {"effort": "high"}})
+        ));
+        assert!(!has_unified_object(&json!({"reasoning": "high"})));
+        assert!(!has_unified_object(
+            &json!({"thinking": {"type": "enabled"}})
+        ));
+        assert!(!has_unified_object(&json!([1, 2])));
     }
 }

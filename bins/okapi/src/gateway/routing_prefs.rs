@@ -50,6 +50,18 @@ impl Default for RoutingPrefs {
 }
 
 impl RoutingPrefs {
+    /// `"provider": null`：没有偏好，但键在，转发前仍要剥掉（上游不认识它）。
+    const fn null_directive() -> Self {
+        Self {
+            allow_fallbacks: true,
+            max_price: MaxPrice {
+                prompt: None,
+                completion: None,
+            },
+            directive_present: true,
+        }
+    }
+
     /// 是否有任何一项生效（都没配时热路径可整段跳过）。
     #[must_use]
     pub const fn is_default(&self) -> bool {
@@ -126,17 +138,35 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     }
     let env: Envelope = serde_json::from_slice(body)
         .map_err(|_| super::error::AppError::bad_request().with_param("provider"))?;
-    let p = match env.provider {
-        Directive::Absent => return Ok(RoutingPrefs::default()),
-        // `"provider": null`：没有偏好，但键在，转发前仍要剥掉
-        Directive::Null => {
-            return Ok(RoutingPrefs {
-                directive_present: true,
-                ..RoutingPrefs::default()
-            });
+    match env.provider {
+        Directive::Absent => Ok(RoutingPrefs::default()),
+        Directive::Null => Ok(RoutingPrefs::null_directive()),
+        Directive::Block(block) => from_block(&block),
+    }
+}
+
+/// 同 [`parse`]，但请求体已经解析成 `Value`（chat 入口手里就有一份）：直接取顶层 `provider`，
+/// 不必为它再把整份原文读一遍。没有这个键时零开销——模块文档说的「零解析开销」在这条路径上是真的。
+/// 结果与 [`parse`] 逐项相同（见测试里的等价性用例）。
+///
+/// 有这个键时只把 `provider` 这一小块重新序列化再解析，而不是把 `Value` 直接当 Deserializer 用：
+/// 后者会把「转成 f64 再转回来写法不变」的数字重新格式化（`0.000001` 变成 `1e-6`），而价格上限按请求原文的
+/// 十进制字面量解析、不收指数写法，同一个请求会因此在两条路上得到不同的结果。序列化会原样写出数字的原始字面量。
+pub fn parse_value(body: &serde_json::Value) -> Result<RoutingPrefs, super::error::AppError> {
+    match body.get(PROVIDER_FIELD) {
+        None => Ok(RoutingPrefs::default()),
+        Some(serde_json::Value::Null) => Ok(RoutingPrefs::null_directive()),
+        Some(provider) => {
+            let rejected = || super::error::AppError::bad_request().with_param("provider");
+            let raw = serde_json::to_vec(provider).map_err(|_| rejected())?;
+            let block: ProviderBlock = serde_json::from_slice(&raw).map_err(|_| rejected())?;
+            from_block(&block)
         }
-        Directive::Block(block) => block,
-    };
+    }
+}
+
+/// `provider` 对象 → 偏好。形状对但价格不合法同样是 400：见 [`parse`] 的说明。
+fn from_block(p: &ProviderBlock) -> Result<RoutingPrefs, super::error::AppError> {
     let cap = |number: Option<&serde_json::Number>| {
         number
             .map(|number| {
@@ -276,5 +306,57 @@ mod tests {
         let p = prefs(r#"{"model":"m","provider":null}"#);
         assert!(p.is_default());
         assert!(p.directive_present);
+    }
+
+    /// chat 入口用已解析的 `Value` 取偏好（`parse_value`），其余入口仍按原文（`parse`）：两条路必须逐项一致，
+    /// 包括被拒绝的形状（同一个状态码、同一个 param），否则同一个请求换个入口会得到不同的待遇。
+    #[test]
+    fn parsing_the_value_agrees_with_parsing_the_bytes() {
+        let bodies = [
+            r#"{"model":"m"}"#,
+            r#"{"model":"m","messages":[{"role":"user","content":"line one\nline two"}]}"#,
+            r#"{"messages":[{"provider":{"allow_fallbacks":false}}],"model":"m"}"#,
+            r#"{"model":"m","provider":null}"#,
+            r#"{"model":"m","provider":{}}"#,
+            r#"{"model":"m","provider":{"zdr":true,"order":["a"]}}"#,
+            r#"{"model":"m","provider":{"allow_fallbacks":false}}"#,
+            r#"{"model":"m","provider":{"allow_fallbacks":true,"max_price":{"prompt":3.0}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":3.0,"completion":9.5}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":0.0000019999}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":12345678901234}}}"#,
+            // 数字写法：f64 往返不变但 ryu 会写成指数的、带多余零的、极小 / 极大的
+            r#"{"model":"m","provider":{"max_price":{"prompt":0.000001}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":0.10,"completion":1.0000000}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":100000000000000000000}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":0.1234567891234}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"completion":1e-6}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"completion":1E3}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":-0.0}}}"#,
+            r#"{"provider":{"allow_fallbacks":false},"model":"m"}"#,
+            // 被拒绝的形状
+            r#"{"model":"m","provider":"openai"}"#,
+            r#"{"model":"m","provider":[1,2]}"#,
+            r#"{"model":"m","provider":{"allow_fallbacks":"no"}}"#,
+            r#"{"model":"m","provider":{"max_price":5}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":-1}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"prompt":"3"}}}"#,
+            r#"{"model":"m","provider":{"max_price":{"completion":1e3}}}"#,
+        ];
+        for body in bodies {
+            let bytes = Bytes::from(body.to_owned());
+            let value: serde_json::Value = serde_json::from_str(body).unwrap();
+            match (parse(&bytes), parse_value(&value)) {
+                (Ok(from_bytes), Ok(from_value)) => assert_eq!(from_bytes, from_value, "{body}"),
+                (Err(from_bytes), Err(from_value)) => {
+                    assert_eq!(from_bytes.status, from_value.status, "{body}");
+                    assert_eq!(from_bytes.param, from_value.param, "{body}");
+                }
+                (from_bytes, from_value) => panic!(
+                    "{body}: bytes gave {:?}, value gave {:?}",
+                    from_bytes.map(|_| ()),
+                    from_value.map(|_| ())
+                ),
+            }
+        }
     }
 }
