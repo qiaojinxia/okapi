@@ -196,7 +196,11 @@ async fn count_authorized(
     if mode == CountMode::Estimate {
         return estimate_response(candidates[0].upstream_model(canonical), &value);
     }
-    let body = super::routing_prefs::strip(&body).unwrap_or(body);
+    let body = if prefs.directive_present {
+        super::routing_prefs::strip(&body).unwrap_or(body)
+    } else {
+        body
+    };
     let mut unsupported = true;
     let mut last_error = AppError::new(StatusCode::NOT_IMPLEMENTED, codes::UPSTREAM_ERROR)
         .with_param("input_tokens_unsupported");

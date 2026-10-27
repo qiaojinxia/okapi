@@ -2843,7 +2843,13 @@ fn shape_upstream_body(
 ) -> Result<Bytes, UpstreamError> {
     // okapi 自己的路由指令必须先剥掉：上游不认识 `provider`，会 400。
     // 与渠道级 strip_request_fields 分开做——那是管理员配置，这是协议要求，不可关。
-    let body = super::routing_prefs::strip(&body).unwrap_or(body);
+    // 请求有没有这个键，入口解析偏好时已经知道：没有就别再把整份请求体解析一遍去确认
+    // （键名粗筛对带反斜杠的请求体一律放行，真实请求几乎都带，每次尝试都白做一次整份 DOM 解析）。
+    let body = if bill.prefs.directive_present {
+        super::routing_prefs::strip(&body).unwrap_or(body)
+    } else {
+        body
+    };
     let native_responses =
         ExecutionPlan::compile(bill.ingress, cand, &bill.model, Requirements::default())?
             .native_responses();

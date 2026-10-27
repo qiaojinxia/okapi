@@ -34,6 +34,9 @@ pub struct RoutingPrefs {
     /// 允许失败后改投其它渠道。缺省 true（保持既有行为）。
     pub allow_fallbacks: bool,
     pub max_price: MaxPrice,
+    /// 请求体顶层确实带了 `provider` 键（含 `null`、含我们不认识的内容）：转发前要把它剥掉。
+    /// 解析时已经看过一遍，没带就不必在每次尝试时再把整份请求体解析一次去确认「没有」。
+    pub directive_present: bool,
 }
 
 impl Default for RoutingPrefs {
@@ -41,6 +44,7 @@ impl Default for RoutingPrefs {
         Self {
             allow_fallbacks: true,
             max_price: MaxPrice::default(),
+            directive_present: false,
         }
     }
 }
@@ -83,10 +87,30 @@ fn cap_micros(number: &serde_json::Number) -> Option<i64> {
     okapi_pricing::ratio::parse_scaled_1e6(&literal).ok()
 }
 
+/// 请求体顶层 `provider` 键的三种状态：没有这个键 / 键在但值是 `null` / 键在且是对象。
+/// 「没有」与「null」都不带偏好，但只有后者转发前还要剥掉，所以要分得开。
+#[derive(Default)]
+enum Directive {
+    #[default]
+    Absent,
+    Null,
+    Block(ProviderBlock),
+}
+
+fn directive<'de, D>(deserializer: D) -> Result<Directive, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<ProviderBlock>::deserialize(deserializer)? {
+        Some(block) => Directive::Block(block),
+        None => Directive::Null,
+    })
+}
+
 #[derive(Deserialize)]
 struct Envelope {
-    #[serde(default)]
-    provider: Option<ProviderBlock>,
+    #[serde(default, deserialize_with = "directive")]
+    provider: Directive,
 }
 
 /// 从请求原文解析路由偏好。
@@ -102,8 +126,16 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     }
     let env: Envelope = serde_json::from_slice(body)
         .map_err(|_| super::error::AppError::bad_request().with_param("provider"))?;
-    let Some(p) = env.provider else {
-        return Ok(RoutingPrefs::default());
+    let p = match env.provider {
+        Directive::Absent => return Ok(RoutingPrefs::default()),
+        // `"provider": null`：没有偏好，但键在，转发前仍要剥掉
+        Directive::Null => {
+            return Ok(RoutingPrefs {
+                directive_present: true,
+                ..RoutingPrefs::default()
+            });
+        }
+        Directive::Block(block) => block,
     };
     let cap = |number: Option<&serde_json::Number>| {
         number
@@ -124,6 +156,7 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
     Ok(RoutingPrefs {
         allow_fallbacks: p.allow_fallbacks.unwrap_or(true),
         max_price,
+        directive_present: true,
     })
 }
 
@@ -207,5 +240,41 @@ mod tests {
         assert_eq!(v["model"], "m");
         assert_eq!(v["stream"], true);
         assert!(strip(&Bytes::from(r#"{"model":"m"}"#.to_owned())).is_none());
+    }
+
+    /// 转发前只在解析时确认过「键在」才剥：没带键的请求体（含带反斜杠、内容里出现 "provider" 字样、
+    /// 嵌套层里有 provider 的）不剥，而剥一遍本来也什么都不会改——跳过不改变任何一次转发的请求体。
+    #[test]
+    fn the_directive_flag_agrees_with_what_strip_would_do() {
+        let without = [
+            r#"{"model":"m"}"#,
+            r#"{"model":"m","messages":[{"role":"user","content":"line one\nline two"}]}"#,
+            r#"{"messages":[{"role":"user","content":"the \"provider\" word"}]}"#,
+            r#"{"messages":[{"provider":{"allow_fallbacks":false}}],"model":"m"}"#,
+        ];
+        for body in without {
+            let bytes = Bytes::from(body.to_owned());
+            assert!(!parse(&bytes).unwrap().directive_present, "{body}");
+            assert!(strip(&bytes).is_none(), "{body}");
+        }
+        let with = [
+            r#"{"model":"m","provider":{"allow_fallbacks":false}}"#,
+            r#"{"model":"m","provider":null}"#,
+            r#"{"model":"m","provider":{"zdr":true}}"#,
+            r#"{"provider":{"zdr":true},"model":"m"}"#,
+        ];
+        for body in with {
+            let bytes = Bytes::from(body.to_owned());
+            assert!(parse(&bytes).unwrap().directive_present, "{body}");
+            assert!(strip(&bytes).is_some(), "{body}");
+        }
+    }
+
+    /// `"provider": null` 没有偏好，但键在，仍要在转发前剥掉（上游不认识它）。
+    #[test]
+    fn a_null_directive_has_no_preferences_but_is_still_stripped() {
+        let p = prefs(r#"{"model":"m","provider":null}"#);
+        assert!(p.is_default());
+        assert!(p.directive_present);
     }
 }
