@@ -212,6 +212,16 @@ pub async fn actions(
     Ok(Json(json!({ "data": rows })))
 }
 
+/// `audit_logs.target` 的列宽（`varchar(128)`，按字符计）。
+const AUDIT_TARGET_CHARS: usize = 128;
+
+/// 登录审计的对象列。邮箱最长可到 254（注册校验的上限），失败登录更是任意长的串；原样写会超出列宽
+/// （SQLSTATE 22001），这条审计——成功的或失败的——就丢了，而超长的撞库尝试恰恰最该留痕。
+/// 截到列宽：记录比精确重要。
+fn login_target(email: &str) -> String {
+    email.chars().take(AUDIT_TARGET_CHARS).collect()
+}
+
 /// 登录审计（成功 / 失败）。失败时按邮箱反查用户：真实用户要能在门户看到
 /// "有人在试我的密码"，所以只要邮箱存在就记到该用户名下；邮箱不存在记 `anon`。
 /// 写失败只打日志——审计不能反过来把登录拖垮。
@@ -250,7 +260,7 @@ pub async fn record_login(
         &state.pg,
         &actor,
         action,
-        email,
+        &login_target(email),
         json!({ "ip": ip, "ua": ua, "reason": reason }),
     )
     .await
@@ -291,4 +301,32 @@ pub async fn my_logins(
         })
         .collect();
     Ok(Json(json!({ "data": data })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AUDIT_TARGET_CHARS, login_target};
+
+    #[test]
+    fn a_login_target_never_exceeds_the_audit_column() {
+        let valid_but_long = format!("{}@{}.example", "a".repeat(64), "b".repeat(180));
+        assert!(valid_but_long.len() > AUDIT_TARGET_CHARS && valid_but_long.len() <= 254);
+        for email in [
+            valid_but_long,
+            "x".repeat(10_000),
+            "邮".repeat(300),
+            "ünï".repeat(100),
+        ] {
+            let target = login_target(&email);
+            assert_eq!(target.chars().count(), AUDIT_TARGET_CHARS);
+            assert!(email.starts_with(&target), "只截尾部，不改动前面的内容");
+        }
+    }
+
+    #[test]
+    fn a_short_login_target_is_kept_as_is() {
+        for email in ["", "a@b.co", &"y".repeat(AUDIT_TARGET_CHARS)] {
+            assert_eq!(login_target(email), email);
+        }
+    }
 }

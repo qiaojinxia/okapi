@@ -198,6 +198,68 @@ async fn admin_writes_are_searchable() {
     assert_eq!(empty["has_more"], false);
 }
 
+/// 邮箱最长可到 254、失败登录更是任意长的串，而审计的对象列只有 128：此前原样写会超宽，整条审计丢失
+/// （连成功登录也一样）。现在对象截到列宽，成功与失败的登录都照样留痕。
+#[tokio::test]
+async fn login_audit_is_kept_when_the_email_is_longer_than_the_target_column() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let ip = format!("198.51.100.{}", 1 + (rand::random::<u8>() % 250));
+    let login = |email: String, password: &'static str| {
+        let request = client
+            .post(format!("http://{}/auth/login", env.addr))
+            .header("x-real-ip", &ip)
+            .json(&json!({"email": email, "password": password}));
+        async move { request.send().await.unwrap() }
+    };
+
+    // 不存在的、远超列宽的邮箱：401 之外还要留下一条 anon 的 user.login_failed，对象是前 128 个字符
+    let junk = format!("junk-{}-{}@example.test", env.suffix, "x".repeat(250));
+    assert_eq!(login(junk.clone(), "x").await.status(), 401);
+    let head: String = junk.chars().take(128).collect();
+    let (status, body) = get(
+        &env,
+        &format!("/admin/audit?action=user.login_failed&target={head}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["actor"], "anon");
+
+    // 合法的长邮箱（注册校验放行到 254）：成功登录同样要留痕，归到真实用户名下
+    let email = format!(
+        "lg{}{}@{}.{}.test",
+        env.suffix,
+        "a".repeat(52),
+        "b".repeat(63),
+        "c".repeat(63)
+    );
+    assert!(email.len() > 128 && email.len() <= 254, "{}", email.len());
+    let registered = client
+        .post(format!("http://{}/auth/register", env.addr))
+        .header("x-real-ip", &ip)
+        .json(&json!({"email": email, "username": format!("au-lg-{}", env.suffix), "password": "hunter2-strong"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), 200);
+    assert_eq!(login(email.clone(), "hunter2-strong").await.status(), 200);
+    let head: String = email.chars().take(128).collect();
+    let (status, body) = get(
+        &env,
+        &format!("/admin/audit?action=user.login&target={head}"),
+        &env.super_token,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let rows = body["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["action"], "user.login");
+    assert!(rows[0]["actor"].as_str().unwrap().starts_with("user:"));
+}
+
 /// 登录审计：成功记 user.login；错密码记 user.login_failed 到真实用户名下（用户在
 /// /api/me/logins 能看到"有人在试我的密码"）；不存在的邮箱记 anon；TOTP 缺失原因单独命名。
 #[tokio::test]
