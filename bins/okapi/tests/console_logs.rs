@@ -718,6 +718,57 @@ async fn log_stat_switches_rate_source() {
     panic!("统计条轮询超时");
 }
 
+/// request_id 过滤：垃圾值是调用方的 400（此前原样交给 ClickHouse，CH 的 400 被映射成 500 + error 日志）；
+/// 等价写法（大写、无连字符）要查到同一笔。
+#[tokio::test]
+async fn the_request_id_filter_rejects_garbage_with_a_400_and_accepts_equivalent_spellings() {
+    let env = setup().await;
+    if env.state.ch.is_none() {
+        return;
+    }
+    seed(&env, 1, &[]).await;
+    let detail = payload(&env, None);
+    let request_id = detail["request_id"].as_str().unwrap().to_owned();
+    sqlx::query("INSERT INTO billing_outbox (topic,payload) VALUES ('request_log',$1)")
+        .bind(detail)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let base = format!("/admin/logs?model={}&hours=1", env.model);
+    // 先用规范写法等这笔落进 CH
+    poll_row(&env, &format!("{base}&request_id={request_id}"), |_| true).await;
+    for spelling in [request_id.to_uppercase(), request_id.replace('-', "")] {
+        let (status, body) = get(
+            &env,
+            &format!("{base}&request_id={spelling}"),
+            &env.super_token,
+        )
+        .await;
+        assert_eq!(status, 200, "{spelling}: {body}");
+        assert_eq!(
+            body["data"].as_array().unwrap().len(),
+            1,
+            "{spelling}: {body}"
+        );
+    }
+    for bad in [
+        "not-a-uuid",
+        "12345",
+        "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+    ] {
+        for path in ["/admin/logs", "/admin/logs/stat"] {
+            let (status, body) = get(
+                &env,
+                &format!("{path}?hours=1&request_id={bad}"),
+                &env.super_token,
+            )
+            .await;
+            assert_eq!(status, 400, "{path} {bad}: {body}");
+            assert_eq!(body["error"]["param"], "request_id", "{path} {bad}: {body}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn unknown_raw_events_remain_visible_but_cannot_be_guessed_as_calls() {
     let mut env = setup().await;

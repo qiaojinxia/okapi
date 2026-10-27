@@ -180,16 +180,19 @@ impl LogQuery {
             "p_ureq",
             self.upstream_request_id.as_ref(),
         );
-        // request_id 是 UUID 列，绑定参数按 UUID 类型解析——传入非法 UUID 时
-        // 由 CH 报错而非静默全表扫，正是我们要的 fail-fast。
+        // request_id 是 UUID 列：非法值必须拒绝而不是静默全表扫。由 CH 解析绑定参数也会拒，但那是
+        // CH 的 400，经 StoreError 映射成了 500 + error 日志；在这里按 UUID 解析，非法就是调用方的 400。
+        // 绑定规范写法（小写带连字符），大小写、花括号、无连字符这些等价写法都认。
         if let Some(v) = self
             .request_id
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
         {
+            let id = uuid::Uuid::parse_str(v)
+                .map_err(|_| AppError::bad_request().with_param("request_id"))?;
             clause.push_str(" AND request_id = {p_reqid:UUID}");
-            params.push(("p_reqid".to_owned(), v.to_owned()));
+            params.push(("p_reqid".to_owned(), id.to_string()));
         }
 
         Ok(Filters { clause, params })
@@ -715,6 +718,68 @@ fn add_summary_details(row: &Value, result: &mut Value) {
 /// 占比 → 基点（万分之一；整数运算，分母 0 返 0）。
 fn rate_bp(part: i64, total: i64) -> i64 {
     super::stats::rate_bp(part, total)
+}
+
+#[cfg(test)]
+mod request_id_filter_tests {
+    use super::*;
+
+    fn query(request_id: &str) -> LogQuery {
+        LogQuery {
+            request_id: Some(request_id.to_owned()),
+            ..LogQuery::default()
+        }
+    }
+
+    /// 非法 request_id 以前被原样交给 ClickHouse，CH 的 400 经 StoreError 映射成 500 + error 日志。
+    #[test]
+    fn a_malformed_request_id_is_the_callers_400() {
+        for bad in [
+            "not-a-uuid",
+            "12345",
+            "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+            &"1".repeat(300),
+        ] {
+            let error = query(bad)
+                .filters()
+                .err()
+                .expect("a malformed id must be rejected");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(error.param.as_deref(), Some("request_id"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn equivalent_uuid_spellings_bind_the_canonical_form() {
+        let canonical = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        for spelling in [
+            canonical,
+            " 0F8FAD5B-D9CB-469F-A165-70867728950E ",
+            "0f8fad5bd9cb469fa16570867728950e",
+            "{0f8fad5b-d9cb-469f-a165-70867728950e}",
+        ] {
+            let filters = query(spelling).filters().unwrap();
+            assert!(
+                filters.clause.contains("request_id = {p_reqid:UUID}"),
+                "{spelling}"
+            );
+            let bound = filters
+                .params
+                .iter()
+                .find(|(name, _)| name == "p_reqid")
+                .map(|(_, value)| value.as_str());
+            assert_eq!(bound, Some(canonical), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn a_blank_request_id_filter_is_ignored() {
+        for blank in ["", "   "] {
+            let filters = query(blank).filters().unwrap();
+            assert!(!filters.clause.contains("p_reqid"));
+            assert!(filters.params.iter().all(|(name, _)| name != "p_reqid"));
+        }
+    }
 }
 
 #[cfg(test)]
