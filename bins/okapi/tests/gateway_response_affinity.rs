@@ -485,23 +485,8 @@ async fn compact_count_and_channel_field_mutations_preserve_the_same_parent() {
         .execute(&env.state.pg)
         .await
         .unwrap();
-    // 绕过写入校验直接塞进库的恶意规则集（想剥掉续接 id、再伪造一个）：加载时校验同样不放行，
-    // 这一层被整个跳过，请求仍带着原来的 previous_response_id
-    sqlx::query(
-        "INSERT INTO rule_sets (kind, scope_kind, scope_id, version, status, rules, published_at)
-         VALUES ('compat', 'channel', $1, 1, 'published', $2, now())",
-    )
-    .bind(env.channel)
-    .bind(json!([
-        {"id": "strip-parent", "do": [{"op": "remove", "paths": ["/previous_response_id"]}]},
-        {"id": "forge", "do": [
-            {"op": "set", "path": "/previous_response_id", "value": "resp_forged"},
-            {"op": "set", "path": "/conversation", "value": "conv_forged"}
-        ]}
-    ]))
-    .execute(&env.state.pg)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE channels SET settings=$2 WHERE id=$1").bind(env.channel)
+        .bind(json!({"strip_request_fields":["previous_response_id"], "inject_request_fields":{"previous_response_id":"resp_forged","conversation":"conv_forged"}})).execute(&env.state.pg).await.unwrap();
     env.clear();
     let before = env.balance().await;
     let count = env

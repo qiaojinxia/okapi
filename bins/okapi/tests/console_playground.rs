@@ -476,18 +476,8 @@ async fn parameter_rules_intersect_failover_models_and_channel_controls() {
     assert_eq!(common["efforts"], json!(["low", "high", "max"]));
     assert_eq!(common["top_p"], false);
     assert!(common["default_effort"].is_null());
-    // 渠道的适配规则把 reasoning_effort 接管（删掉）后，面板上就不再给用户调推理强度
-    let mut conn = env.pg.acquire().await.unwrap();
-    okapi_store::compat::publish(
-        &mut conn,
-        okapi_store::compat::Scope::Channel(channel),
-        &json!([{"id": "strip-effort", "do": [{"op": "remove", "paths": ["/reasoning_effort"]}]}]),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
+    sqlx::query("UPDATE channels SET settings=jsonb_build_object('strip_request_fields',jsonb_build_array('reasoning_effort')) WHERE id=$1")
+        .bind(channel).execute(&env.pg).await.unwrap();
     let controlled: Value = parameter_rules(&env, None).await.json().await.unwrap();
     assert_eq!(controlled["efforts"], json!([]));
 }

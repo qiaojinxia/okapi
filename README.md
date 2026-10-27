@@ -253,7 +253,6 @@ dry-run/confirm 两段式。总开关关闭时，写工具既不出现在 `tools
 crates/
   okapi-domain     # 金额（i64 micro-USD）/ tokens / 计费状态机
   okapi-pricing    # PriceBook 编译器 + 修饰器栈 + ArcSwap 热更
-  okapi-compat     # 适配规则引擎（无 IO）：上游与终端的形状差异数据化，见 docs/compat-rules.md
   okapi-ledger     # Redis Lua 预扣/结算 + PG 事件溯源 + outbox
   okapi-providers  # Provider trait + 按方向拆的协议转换 + Bedrock / Vertex / OAuth
   okapi-store      # sqlx / fred / clickhouse / async-nats 薄封装

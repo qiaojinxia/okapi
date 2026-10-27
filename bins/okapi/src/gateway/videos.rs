@@ -26,6 +26,7 @@ use serde_json::Value;
 use std::time::Instant;
 use uuid::Uuid;
 
+const DEFAULT_OPENAI_BASE: &str = "https://api.openai.com/v1";
 const MAX_ATTEMPTS: usize = 3;
 const DEFAULT_SECONDS: u32 = 4;
 const MAX_SECONDS: u32 = 60;
@@ -234,17 +235,10 @@ async fn handle_create(
             failure.error(&error);
             return Err(error);
         };
-        // 兼容渠道漏填地址时不回退到 api.openai.com（会把第三方的 key 发给 OpenAI）：跳过这个候选
-        let Some(base) =
-            okapi_providers::registry::effective_base(&cand.provider, cand.api_base.as_deref())
-        else {
-            tracing::warn!(
-                channel = cand.channel_id,
-                provider = %cand.provider,
-                "渠道没有 api_base 且协议没有缺省地址，跳过这个候选"
-            );
-            continue;
-        };
+        let base = cand
+            .api_base
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
         if let Some(trace) = super::diagnostics::Trace::current() {
             trace.media(&body_up, true);
         }
@@ -408,14 +402,9 @@ async fn relay_task(
             codes::NO_AVAILABLE_CHANNEL,
         ));
     };
-    let Some(base) =
-        okapi_providers::registry::effective_base(&ch.provider, ch.api_base.as_deref())
-    else {
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            codes::NO_AVAILABLE_CHANNEL,
-        ));
-    };
+    let base = ch
+        .api_base
+        .unwrap_or_else(|| DEFAULT_OPENAI_BASE.to_owned());
     // task_id 来源于上游返回值，仍按路径段白名单字符校验防拼接逃逸
     if !task_id
         .bytes()
@@ -719,15 +708,10 @@ async fn poll_batch(state: &AppState) -> anyhow::Result<usize> {
                     )
                     .await?
                     .ok_or_else(AppError::internal)?;
-                    let base = okapi_providers::registry::effective_base(
-                        &ch.provider,
-                        ch.api_base.as_deref(),
-                    )
-                    .ok_or_else(AppError::internal)?;
                     state
                         .upstream
                         .get_json(
-                            &base,
+                            ch.api_base.as_deref().unwrap_or(DEFAULT_OPENAI_BASE),
                             &format!("/videos/{task_id}"),
                             &ch.credential,
                             &okapi_providers::Outbound {

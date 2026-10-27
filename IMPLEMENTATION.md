@@ -564,7 +564,7 @@ release 构建下启用本模式须同时设 `OKAPI_SINGLE_USER_CONFIRM=true`（
 | 按上游响应模型计费（渠道可选实际返回模型为计费基准） | Sub2API 0.1.175 | **已实现**：channels.settings.bill_by_response_model（缺省关）；响应模型（非流式 body.model / 流式首个报告 model 的 chunk，opt-in 才解析零常态开销）≠ 请求模型且价簿有其精确名定价 → 按其算价并记账（billing_records.model_name 同步）；无价/同名回退请求 canonical（fail-open 不拒付）；别名解析不参与（结算不回 PG）。4 用例（流式/非流式/回退/关断） |
 | service_tier（fast/flex）价格轴 | Sub2API 0.1.179/180 | **已实现**（DESIGN §3-4.5）：model_pricing.tier_ratios（JSONB 档位倍率表，upsert_model 可配）；有效 model_ratio ×= tier_ratio，per_call 同乘；结算档 = 请求声明档与上游响应报告档中倍率较低者（**只降不升**：不为未享受档位付费、上游擅自升档不多收）；预扣按请求档估；快照记 service_tier/tier_ratio；响应档采集与 resp_model 共用元数据通路（模型配了档位才解析，缺省零开销）。4 用例 |
 | 管理接口独立限流（access token / 转账路由） | new-api rc.24 | **已实现**：login/register/totp/redeem 四爆破面每 IP 60s 固定窗（缺省 10/5/10/10 次；settings.critical_rate_limits 覆写，0=关）；**数据面无效 key** 同机制（scope=`invalid_api_key`，缺省 60 次/分）：缺 token / 哈希未命中才计数，鉴权成功后的模型/IP 白名单失败不计；超限 429 `rate_limited` param=`invalid_api_key`（与 401 分开，避免扫 key 打满 401）。IP 取 §14.2 信任闸；Redis 故障放行 |
-| 渠道请求字段透传控制（管理员选择透传字段） | new-api rc.23 #6847 | **已实现**：channels.settings.strip_request_fields（字符串数组）——dispatch 前剥除请求顶层字段；**inject_request_fields**（对象）在 strip 之后浅合并，用来强制覆盖/注入上游参数。二者均方言无关、对入口原文生效；model/messages/stream（及 inject 的 provider）受保护；缺省空配置零解析开销。**2026-10-24 起这两个设置键已迁成渠道层适配规则（§11.49）**，写入 settings 一律 400 |
+| 渠道请求字段透传控制（管理员选择透传字段） | new-api rc.23 #6847 | **已实现**：channels.settings.strip_request_fields（字符串数组）——dispatch 前剥除请求顶层字段；**inject_request_fields**（对象）在 strip 之后浅合并，用来强制覆盖/注入上游参数。二者均方言无关、对入口原文生效；model/messages/stream（及 inject 的 provider）受保护；缺省空配置零解析开销 |
 | （对拍）时间规则区间恒真 bug | new-api rc.27 #6934 修复 | 我方无同类缺陷：minute_in_window 回绕正确、start==end 为空窗永不命中（绝不退化全天折扣）；已加回归用例钉死语义 |
 | （复核 2026-08-30 下午）rc.27 沙盒 JS 插件系统 / GLM responses / Ollama 透传；Sub2API 公开说明停在 0.1.183（镜像 0.1.192 无 notes） | — | 插件运行时不吸收（§1 冻结外的框架依赖 + 热路径纯净）；GLM/Ollama 为 openai_compat 通道覆盖面，无需专门模块 |
 
@@ -2204,15 +2204,6 @@ Moonshot 这类按余额计费的官方上游，站长最常做的运维动作�
 用量 1234.5 美分 → `balance_micro = 87_655_000`、`currency = USD`、列表 `last_balance` 回填；anthropic 渠道 400
 `balance_unsupported`；单测覆盖四家官方响应形状的解析。
 
-**更新（2026-10-25，适配规则 P2）**：探针不再是 `channel_balance.rs` 里的五个解析函数，而是**厂商数据**（`okapi-compat` 的声明式 `ProbeSpec`，`probes.balance`：
-请求列表、`remaining` / `total` / `used` 的 JSON 指针与整数除数、币种常量或映射表、来源与核对日期；金额沿用定点解析，不经浮点）。`channel_balance.rs` 只剩执行：
-选探针 → 带渠道凭证依次 GET → 交给规格解析。选择顺序：渠道**明确选了的厂商**（档案取它 `extends` 的内置厂商）→ 按 `api_base` 主机识别出的厂商（与旧行为一致）→ 通用 dashboard 口径；
-协议闸不变（只有 openai / openai_compat），响应里的 `probe` 名沿用（`openai_dashboard` / `deepseek` / `siliconflow` / `openrouter` / `moonshot`）。
-没配 `api_base` 的 `openai_compat` 渠道回 400 param=`api_base`（不再对着空地址发请求）。新增 `siliconflow` / `openrouter` 两个内置厂商；探针 2026-10-25 对照各家文档核对过，
-记下的限制：OpenRouter 的 `/credits` 只有**管理密钥**能查（普通密钥 403），Moonshot 国际站 / SiliconFlow 的币种文档没写，按人民币标注（沿用旧行为）。
-**选了厂商的渠道不看主机名，所以 mock 终于能做端到端**：`console_channel_test::channel_balance_follows_the_chosen_vendor` 把四家的路径、凭证与解析都走一遍
-（此前这四家按主机名硬匹配、mock 只能起在 `127.0.0.1` 上，一直只有响应形状的单测）。
-
 ### 11.34 负毛利自动熔断（2026-09-06，对照 Sub2API profit control）
 
 **问题**：§11.18 之后毛利能看见了，但"看见亏钱"和"止损"之间还是人。折扣组（倍率 0.5）配到了成本系数 1.0
@@ -3128,46 +3119,6 @@ new-api 迁移来的令牌分组、管理员在后台给 key 直接钉的组都�
 **验收**：`okapi-pricing` `catalog` 单测（匹配 / 换算 / 备选 / 联想 / 坏快照拒绝 / 真快照与前端预设核对价一致）、
 `console_pricing_catalog`（401 / 403 / 400 / 响应形状 / 联想封顶）、`console_channel_test::draft_model_discovery_works_before_the_channel_exists`、
 前端 `model-catalog.spec`、`channel-fetch-models.spec`。
-
-### 11.49 适配规则（`compat`）：上游与终端的形状差异数据化（2026-10-24，P1）
-
-适配一个新厂商 / 新模型的特殊要求，此前要改 Rust 发版：渠道级只有无条件的顶层剥 / 注，模型契约是编译期精确 ID 表，保护键清单有两份靠注释约定。
-设计与取舍见 `docs/compat-rules.md`，这里记落地：
-
-- **纯引擎 `okapi-compat`**（无 IO，线上 / dry-run / 夹具同一份代码）：规则是带类型的闭合操作集合（`remove` / `keep_only` / `set` / `rename` /
-  `copy` / `clamp` / `map_value` / `role_map`，JSON Pointer 加 `*` 通配），不嵌脚本；条件表达式字段与 `request` 以外的阶段已在 schema 里预留，
-  校验器明确拒绝（`cel_not_enabled` / `phase_not_enabled`）。厂商 ⊕ 渠道 ⊕ 护栏分层合并，同 id 后者覆盖前者、`disabled` 关掉前者、护栏最后执行。
-  受保护路径（主链字段、`/messages` 数组本身、okapi 路由指令）、计费关键路径（`stream_options.include_usage`，需 `billing_critical_ack`）、
-  敏感路径（提示词 / 指令 / 档位，新增写入需 `compat.sensitive`，删字段不需要）在**唯一注册表**里，写入校验与运行期后置断言共用。
-- **存储**：迁移 `0006`——`rule_sets` 版本表（已发布不可变，每范围至多一个已发布版本）、`channels.vendor`（NULL = 不套厂商层，现有渠道全 NULL）、
-  把旧的 `settings.strip_request_fields` / `inject_request_fields` **复制**成渠道层规则（只复制不删，回滚旧镜像仍能读到）。
-- **网关**：`shape_upstream_body` 里的 `adjust_request_fields` 换成 `chat::compat::apply`；每次尝试都跑，failover 从原始请求重来；无规则零开销（不解析）。
-  规则随候选缓存，一个请求内的重试沿用加载时的版本；发布后走现有的路由缓存失效（本进程立即 + NATS 广播）。诊断记 `compat: {versions, fired, skipped}`。
-- **管理面**：`GET / PUT /admin/channels/{id}/compat`、`POST /admin/compat/dry-run`、`GET /admin/compat/vendors`、`GET / PUT /admin/compat/guard`；
-  创建 / 修改渠道可带 `vendor` 与 `compat`；`settings` 再写旧的两个键回 400。渠道抽屉的剥 / 注编辑器读写渠道层的两条约定规则，另有厂商预设与有效规则视图。
-- **影响范围**：不是全局。渠道层只管那一个渠道；厂商层只管选了该厂商的渠道（按地址识别只做建议）；护栏是唯一全局的一层，默认空、写需 `compat.guard.write`。
-  挂载点只在聊天家族（chat / messages / responses / Gemini generate 与 Responses WS），embeddings / images / audio / videos / realtime 不经过，与旧 strip / inject 相同。
-
-**验收**：`okapi-compat` 单测 + `fixtures`（每条内置规则触发 / 不触发 / 幂等）+ `properties`（校验放行的规则永远写不进受保护路径，兜底从不被触发）+
-`legacy_equivalence`（旧函数逐字复刻作对照）；`okapi-store::compat_rules`（迁移复制、发布版本、三层装配、失败开放、渠道复制）；
-`console_compat`（保存 / 冲突 / 校验码 / 敏感权限 / 护栏 / dry-run / 创建与修改渠道）、`gateway_strip_fields`（厂商层只对选了的渠道生效、护栏最后执行、诊断轨迹）；
-前端 `compat-rules.spec`（转换往返）、`write-forms.spec`（抽屉）。
-
-**P2（2026-10-25）**：适配档案、响应 / 错误 / 能力三个阶段、声明式余额探针、规则页与只读蓝图、MCP 工具、`openai_compat` 去掉缺省地址。落地与差异见 `docs/compat-rules.md` §18，这里记要点：
-
-- **引擎**：操作 8 → 14 个（新增 `each` / `usage_map` / `capability` / `retry_same` / `failover` / `fail`，规则多 `when`），按阶段限定可用操作；响应阶段只接 OpenAI chat 方言的上游
-  （流式逐帧改写后用 `parse_event` 重算元数据），错误阶段只对 Fatal 类上游 HTTP 错误生效（`retry_same` 每候选总共 ≤ 3 次），能力事实在候选加载时合并（渠道自己的列优先）。
-  `fail` 只改状态码 / 错误码，不带自然语言（i18n 红线）。`catalog.rs` 把操作 / 选择器 / 路径分级 / 配方整份自描述，蓝图、表单、MCP 共读。
-- **存储**：迁移 `0007`——`compat_profiles` 表，`rule_sets` 多 `base_version` / `source` / `rationale` 与「每范围至多一份草稿」索引。四层：厂商 100 → 档案 200 → 渠道 300 → 护栏 900。
-- **管理面**：`/admin/compat/sets/{scope}/{id}`（概览 / 版本 / 草稿 / 批准发布 / 回滚 / 直接保存）、`/admin/compat/drafts` 收件箱、`/admin/compat/profiles`、`/admin/compat/catalog`、
-  `/admin/compat/explain/{request_id}`；新权限点 `compat.publish` / `compat.profile.write`。AI（MCP）**只能落草稿**，批准发布永远是人的动作，批准人没有 `compat.sensitive` 就批不了含新增敏感写入的草稿。
-- **MCP**：`compat_catalog` / `compat_effective` / `compat_validate` / `compat_dry_run` / `compat_explain` 只读，`compat_propose` 写草稿（`rationale` 必填、来源 `mcp`、审计 `mcp:{key_id}`）。
-- **余额探针数据化**（§11.33 的探针现在是厂商数据）：见 §11.33 的更新段。
-- **`openai_compat` 没有缺省地址**：配置了地址用配置的，没配只有官方 `openai` 有缺省；兼容渠道被跳过（记 warn），不回退到别家的地址；创建时选了厂商 / 档案，按它的端点表补地址并落库。
-- **前端**：`/admin/compat` 页（档案 / 待批准 / 全局护栏 / 参考），档案抽屉里规则 / 蓝图 / 试跑 / 历史 / 设置；渠道抽屉新建兼容渠道有「厂商预设」。
-
-**P2 验收**：`okapi-compat` 的 `phases` / `properties`（含响应规则永远动不了计费事实、重发改不了主链字段）/ `fixtures` / `probes`；`okapi-store::compat_profiles`；
-`gateway_compat_phases` / `gateway_missing_api_base`；`console_compat_p2` / `console_mcp_compat` / `console_channel_test`（四家官方余额探针端到端）；前端 `compat-page.spec`。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

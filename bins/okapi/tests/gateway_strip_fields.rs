@@ -1,6 +1,6 @@
-//! 适配规则在聊天链路上的验收（取代原来的渠道 strip / inject 设置，new-api rc.23 #6847 对齐）：
-//! 配置字段被剥、未配置字段照传、受保护键不可动、未配置渠道原样透传，再加上厂商层只对选了它
-//! 的渠道生效、护栏管到所有渠道且最后执行、命中轨迹进诊断。依赖 .env（scripts/dev-deps.sh up）。
+//! 渠道字段透传控制验收（new-api rc.23 #6847 对齐）：
+//! 配置字段被剥、未配置字段照传、受保护键（model/messages/stream）不可剥、
+//! 未配置渠道原样透传。依赖 .env（scripts/dev-deps.sh up）。
 
 #[path = "support/published_pricing.rs"]
 mod published_pricing;
@@ -49,73 +49,13 @@ struct TestEnv {
     token: String,
     model: String,
     captured: Captured,
-    pg: sqlx::PgPool,
-    user_id: i64,
 }
 
-/// 一次测试的适配规则配置；全空 = 原样透传。
-#[derive(Default)]
-struct Config {
-    /// 渠道层规则（走正常发布路径，经过校验）。
-    channel_rules: Option<Value>,
-    /// 渠道选定的内置厂商。
-    vendor: Option<&'static str>,
-    /// 全局护栏（整个网关，最后执行）。
-    guard: Option<Value>,
-    /// 绕过写入校验直接塞进库的渠道层规则集（模拟被手改过的库）。
-    raw_channel_rules: Option<Value>,
+async fn setup(strip: Option<Value>) -> TestEnv {
+    setup_with(strip, None).await
 }
 
-/// 把一次测试的适配规则配置写进库。
-async fn apply_config(pg: &sqlx::PgPool, channel_id: i64, config: &Config) {
-    if let Some(vendor) = config.vendor {
-        sqlx::query("UPDATE channels SET vendor = $2 WHERE id = $1")
-            .bind(channel_id)
-            .bind(vendor)
-            .execute(pg)
-            .await
-            .unwrap();
-    }
-    let mut conn = pg.acquire().await.unwrap();
-    if let Some(rules) = &config.channel_rules {
-        okapi_store::compat::publish(
-            &mut conn,
-            okapi_store::compat::Scope::Channel(channel_id),
-            rules,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    }
-    if let Some(rules) = &config.guard {
-        okapi_store::compat::publish(
-            &mut conn,
-            okapi_store::compat::Scope::Global,
-            rules,
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-    }
-    if let Some(rules) = &config.raw_channel_rules {
-        sqlx::query(
-            "INSERT INTO rule_sets (kind, scope_kind, scope_id, version, status, rules, published_at)
-             VALUES ('compat', 'channel', $1, 1, 'published', $2, now())",
-        )
-        .bind(channel_id)
-        .bind(rules)
-        .execute(&mut *conn)
-        .await
-        .unwrap();
-    }
-    drop(conn);
-}
-
-async fn setup(config: Config) -> TestEnv {
+async fn setup_with(strip: Option<Value>, inject: Option<Value>) -> TestEnv {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -154,7 +94,32 @@ async fn setup(config: Config) -> TestEnv {
     )
     .await
     .unwrap();
-    apply_config(&pg, channel_id, &config).await;
+    if let Some(strip) = strip {
+        sqlx::query!(
+            r#"UPDATE channels
+               SET settings = COALESCE(settings, '{}'::jsonb)
+                   || jsonb_build_object('strip_request_fields', $2::jsonb)
+               WHERE id = $1"#,
+            channel_id,
+            strip
+        )
+        .execute(&pg)
+        .await
+        .unwrap();
+    }
+    if let Some(inject) = inject {
+        sqlx::query!(
+            r#"UPDATE channels
+               SET settings = COALESCE(settings, '{}'::jsonb)
+                   || jsonb_build_object('inject_request_fields', $2::jsonb)
+               WHERE id = $1"#,
+            channel_id,
+            inject
+        )
+        .execute(&pg)
+        .await
+        .unwrap();
+    }
 
     published_pricing::publish(&pg, user_id).await;
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
@@ -177,17 +142,21 @@ async fn setup(config: Config) -> TestEnv {
         token,
         model,
         captured,
-        pg,
-        user_id,
     }
 }
 
-async fn chat(env: &TestEnv, body: Value) -> Value {
+async fn chat_with_extras(env: &TestEnv) -> Value {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{}/v1/chat/completions", env.gateway))
         .bearer_auth(&env.token)
-        .json(&body)
+        .json(&json!({
+            "model": env.model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "logit_bias": {"50256": -100},
+            "user": "end-user-1",
+            "temperature": 0.5
+        }))
         .send()
         .await
         .unwrap();
@@ -197,30 +166,10 @@ async fn chat(env: &TestEnv, body: Value) -> Value {
     captured.expect("mock 应收到上游请求")
 }
 
-async fn chat_with_extras(env: &TestEnv) -> Value {
-    chat(
-        env,
-        json!({
-            "model": env.model,
-            "messages": [{"role": "user", "content": "hi"}],
-            "logit_bias": {"50256": -100},
-            "user": "end-user-1",
-            "temperature": 0.5
-        }),
-    )
-    .await
-}
-
 /// 配置剥除：logit_bias/user 不透传，temperature 照传，受保护键仍在。
 #[tokio::test]
 async fn strips_configured_fields_only() {
-    let env = setup(Config {
-        channel_rules: Some(json!([
-            {"id": "strip-request-fields", "do": [{"op": "remove", "paths": ["/logit_bias", "/user"]}]}
-        ])),
-        ..Config::default()
-    })
-    .await;
+    let env = setup(Some(json!(["logit_bias", "user", "model", "messages"]))).await;
     let upstream = chat_with_extras(&env).await;
     assert!(
         upstream.get("logit_bias").is_none(),
@@ -228,171 +177,37 @@ async fn strips_configured_fields_only() {
     );
     assert!(upstream.get("user").is_none(), "配置字段应被剥");
     assert_eq!(upstream["temperature"], 0.5, "未配置字段照传");
-    assert!(upstream.get("model").is_some());
-    assert!(upstream.get("messages").is_some());
+    assert!(upstream.get("model").is_some(), "受保护键 model 不可剥");
+    assert!(
+        upstream.get("messages").is_some(),
+        "受保护键 messages 不可剥"
+    );
 }
 
 /// 未配置渠道：全部原样透传。
 #[tokio::test]
 async fn passes_through_without_config() {
-    let env = setup(Config::default()).await;
+    let env = setup(None).await;
     let upstream = chat_with_extras(&env).await;
     assert_eq!(upstream["logit_bias"]["50256"], -100, "缺省应原样透传");
     assert_eq!(upstream["user"], "end-user-1");
 }
 
-/// 同一份规则里先剥后注（文档顺序）：强制覆盖 temperature、user。
+/// 注入在剥离之后：强制覆盖 temperature，受保护键不可改。
 #[tokio::test]
 async fn injects_after_strip() {
-    let env = setup(Config {
-        channel_rules: Some(json!([
-            {"id": "strip-request-fields", "do": [{"op": "remove", "paths": ["/logit_bias"]}]},
-            {"id": "inject-request-fields", "do": [
-                {"op": "set", "path": "/temperature", "value": 0.1},
-                {"op": "set", "path": "/user", "value": "forced"}
-            ]}
-        ])),
-        ..Config::default()
-    })
+    let env = setup_with(
+        Some(json!(["logit_bias"])),
+        Some(json!({"temperature": 0.1, "user": "forced", "model": "hijack"})),
+    )
     .await;
     let upstream = chat_with_extras(&env).await;
     assert!(upstream.get("logit_bias").is_none());
     assert_eq!(upstream["temperature"], 0.1);
     assert_eq!(upstream["user"], "forced");
-    assert_eq!(upstream["model"], env.model, "model 受保护，原样不动");
-}
-
-/// 被手改过的库里躺着想剥 / 改主链字段的规则集：加载时校验不放行，这一层整个跳过，
-/// 请求照常成功且主链字段、其余字段都原样。
-#[tokio::test]
-async fn a_stored_rule_set_touching_protected_fields_is_ignored_not_fatal() {
-    let env = setup(Config {
-        raw_channel_rules: Some(json!([
-            {"id": "hijack", "do": [{"op": "set", "path": "/model", "value": "hijack"}]},
-            {"id": "strip", "do": [{"op": "remove", "paths": ["/messages", "/user"]}]}
-        ])),
-        ..Config::default()
-    })
-    .await;
-    let upstream = chat_with_extras(&env).await;
-    assert_eq!(upstream["model"], env.model);
-    assert!(upstream.get("messages").is_some());
-    assert_eq!(
-        upstream["user"], "end-user-1",
-        "坏规则集整层跳过，连合法部分也不执行"
-    );
-}
-
-fn developer_chat(env: &TestEnv) -> Value {
-    json!({
-        "model": env.model,
-        "messages": [
-            {"role": "developer", "content": "be brief"},
-            {"role": "user", "content": "hi"}
-        ]
-    })
-}
-
-/// 厂商层只对**选了它**的渠道生效：同样的请求，没选厂商时 developer 角色原样发给上游。
-#[tokio::test]
-async fn the_vendor_layer_applies_only_to_channels_that_chose_it() {
-    let plain = setup(Config::default()).await;
-    let upstream = chat(&plain, developer_chat(&plain)).await;
-    assert_eq!(upstream["messages"][0]["role"], "developer");
-
-    let chosen = setup(Config {
-        vendor: Some("builtin:deepseek"),
-        ..Config::default()
-    })
-    .await;
-    let upstream = chat(&chosen, developer_chat(&chosen)).await;
-    assert_eq!(
-        upstream["messages"][0]["role"], "system",
-        "严格 role 厂商拒收 developer"
-    );
-    assert_eq!(upstream["messages"][1]["role"], "user");
-}
-
-/// 护栏管到所有渠道且最后执行：渠道层写进去的 user 被护栏删掉。
-#[tokio::test]
-async fn the_guard_runs_last_over_every_channel() {
-    let env = setup(Config {
-        channel_rules: Some(json!([
-            {"id": "put-user", "do": [{"op": "set", "path": "/user", "value": "channel"}]}
-        ])),
-        guard: Some(json!([
-            {"id": "no-user", "do": [{"op": "remove", "paths": ["/user"]}]}
-        ])),
-        ..Config::default()
-    })
-    .await;
-    let upstream = chat_with_extras(&env).await;
-    assert!(upstream.get("user").is_none(), "{upstream}");
-    assert_eq!(upstream["temperature"], 0.5);
-
-    // 没有任何渠道层规则、没选厂商的渠道同样被护栏管到
-    let bystander = setup(Config {
-        guard: Some(json!([{"id": "no-user", "do": [{"op": "remove", "paths": ["/user"]}]}])),
-        ..Config::default()
-    })
-    .await;
-    assert!(chat_with_extras(&bystander).await.get("user").is_none());
-}
-
-/// 命中的规则与用到的各层版本进诊断（`usage_details.diagnostics.compat`），回放时能对上。
-#[tokio::test]
-async fn diagnostics_record_the_layers_and_the_fired_rules() {
-    let env = setup(Config {
-        vendor: Some("builtin:deepseek"),
-        channel_rules: Some(json!([
-            {"id": "strip-request-fields", "do": [{"op": "remove", "paths": ["/user"]}]}
-        ])),
-        ..Config::default()
-    })
-    .await;
-    chat(&env, {
-        let mut body = developer_chat(&env);
-        body["user"] = json!("u");
-        body
-    })
-    .await;
-    let mut compat = Value::Null;
-    for _ in 0..50 {
-        compat = sqlx::query_scalar(
-            "SELECT usage_details->'diagnostics'->'compat' FROM billing_records
-              WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(env.user_id)
-        .fetch_optional(&env.pg)
-        .await
-        .unwrap()
-        .flatten()
-        .unwrap_or(Value::Null);
-        if !compat.is_null() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert!(compat["channel_id"].is_i64(), "{compat}");
-    let versions = compat["versions"].as_array().expect("versions");
-    assert_eq!(versions[0], "builtin:deepseek");
-    assert!(
-        versions[1].as_str().unwrap().starts_with("channel#"),
-        "{compat}"
-    );
-    let fired: Vec<&str> = compat["fired"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|f| f["rule"].as_str().unwrap())
-        .collect();
-    assert_eq!(
-        fired,
-        ["strict-role.developer-to-system", "strip-request-fields"]
-    );
-    assert!(compat["skipped"].as_array().unwrap().is_empty(), "{compat}");
-    assert!(
-        !compat.to_string().contains("be brief"),
-        "诊断只记规则 id，不记请求内容"
+    assert_ne!(
+        upstream["model"].as_str().unwrap_or(""),
+        "hijack",
+        "model 受保护不可注入"
     );
 }

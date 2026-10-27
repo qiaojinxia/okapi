@@ -571,11 +571,9 @@ pub struct ChannelRow {
     pub models: serde_json::Value,
     pub trust_upstream_usage: bool,
     pub owner_id: Option<i64>,
-    /// 渠道行为开关（thinking_to_content / bill_by_response_model 等）。
+    /// 渠道行为开关（thinking_to_content / bill_by_response_model / strip_request_fields）。
     /// 管理端要按当前值渲染开关，否则编辑表单只能默认全关——保存即静默清掉已生效的配置。
     pub settings: serde_json::Value,
-    /// 选定的内置厂商（带命名空间，如 `builtin:deepseek`）；None = 没选。
-    pub vendor: Option<String>,
     /// 所属渠道池代码。同理由：不回显当前值，编辑面一保存就把池成员关系清空。
     pub pools: Vec<String>,
     /// 池成员关系明细（含成员级调度参数覆盖）。
@@ -639,8 +637,6 @@ pub struct ChannelFilter<'a> {
 
 /// 渠道列表；`filter` 的四个维度全部落在 SQL 里，`slice` 不分页时回全量。
 /// `ChannelList::enabled` 与 `Page::total` 都是过滤集内的计数。
-// 一条大查询 + 逐列装配：拆开只会让 SQL 与结构体字段两处失联
-#[allow(clippy::too_many_lines)]
 pub async fn list_channels(
     pool: &PgPool,
     filter: ChannelFilter<'_>,
@@ -658,9 +654,7 @@ pub async fn list_channels(
             r#"
         SELECT c.id, c.name, c.provider, c.api_base, c.status, c.priority, c.models,
                c.trust_upstream_usage, c.owner_id,
-               -- 旧的 strip / inject 设置键已迁成渠道层规则（rule_sets），库里的原键只为回滚留着，不外露
-               COALESCE(c.settings, '{}'::jsonb) - 'strip_request_fields' - 'inject_request_fields' AS "settings!",
-               c.vendor,
+               COALESCE(c.settings, '{}'::jsonb) AS "settings!",
                GREATEST(COALESCE((c.upstream_unit_cost ->> 'relative_cost_milli')::bigint, 1000), 0) AS "cost_milli!",
                c.egress_mode, c.egress_proxy_id, c.egress_group_code,
                COALESCE(
@@ -732,7 +726,6 @@ pub async fn list_channels(
             trust_upstream_usage: r.trust_upstream_usage,
             owner_id: r.owner_id,
             settings: r.settings,
-            vendor: r.vendor,
             pools: r.pools,
             pool_members: serde_json::from_value(r.pool_members).unwrap_or_default(),
             cost_milli: r.cost_milli,
@@ -1461,8 +1454,6 @@ pub struct ChannelPatch<'a> {
     pub trust_upstream_usage: Option<bool>,
     /// 相对成本系数（千分比）；写入 `upstream_unit_cost.relative_cost_milli`，其余键保留。
     pub cost_milli: Option<i64>,
-    /// 厂商：外层 `None` = 不改；`Some(None)` = 清空（不套厂商层）；`Some(Some(id))` = 选定（带命名空间）。
-    pub vendor: Option<Option<&'a str>>,
 }
 
 /// 部分更新渠道配置；返回是否命中（false = 不存在/已删除，调用方转 404）。
@@ -1486,7 +1477,6 @@ pub async fn patch_channel(
             upstream_unit_cost   = CASE WHEN $11::bigint IS NULL THEN upstream_unit_cost
                                         ELSE COALESCE(upstream_unit_cost, '{}'::jsonb)
                                              || jsonb_build_object('relative_cost_milli', $11::bigint) END,
-            vendor               = CASE WHEN $12::boolean THEN $13::varchar ELSE vendor END,
             updated_at           = now()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -1501,8 +1491,6 @@ pub async fn patch_channel(
         patch.priority,
         patch.trust_upstream_usage,
         patch.cost_milli,
-        patch.vendor.is_some(),
-        patch.vendor.flatten(),
     )
     .execute(pool)
     .await?

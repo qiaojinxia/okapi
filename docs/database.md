@@ -21,7 +21,7 @@
 | 域 | 表 | 里程碑 |
 | --- | --- | --- |
 | 身份权限 | admin_roles, users, oauth_bindings, price_groups, user_groups, group_channel_bindings, api_keys | M1–M2 |
-| 渠道模型 | channels, channel_keys, models, model_aliases, proxies, proxy_groups, proxy_group_members, rule_sets, compat_profiles | M1–M2 |
+| 渠道模型 | channels, channel_keys, models, model_aliases, proxies, proxy_groups, proxy_group_members | M1–M2 |
 | 定价 | model_pricing, user_pricing, pricing_rules, pricing_epochs | M0–M2 |
 | 计费账本 | billing_records, billing_events, billing_event_carry, billing_record_receipts, billing_outbox, billing_dlq | M1–M2 |
 | 营收运营 | recharge_orders, redemption_codes, redemption_records | M2–M4 |
@@ -185,12 +185,11 @@ CREATE TABLE pool_channels (                          -- 池 ↔ 渠道（多对
 -- 此前的"无池只看未入池 / strict_group_isolation 三态"已由 0002 迁移退役：那套规则让 vip 组
 -- 看不到任何公共渠道、UI 文案又与之相反。0002 把未入池渠道并入 default 池、无池分组指向 default 池，
 -- 老部署行为不变。历史 group_channel_bindings 已在 0015 迁移为 pool_<group_code> 并删表。
--- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ responses_native（/v1/responses 同方言直转到上游 /responses；缺省 openai=true、openai_compat=false，其它协议忽略恒降级；上游 404/405 自动回退降级）/ extensions.codex_client（Codex 渠道仅限官方客户端：official_only / min_version / max_version，IMPLEMENTATION §11.46）/ tool_loss_policy（跨方言转换会丢工具时：safe 缺省=丢托管工具、拒客户端工具 / strict=会丢就拒 / allow=全丢照转，IMPLEMENTATION §11.46）/ pass_paths（custom_pass 白名单）
+-- channels.settings 已注册键：thinking_to_content / bill_by_response_model（按上游响应模型计费，Sub2API 0.1.175 对齐）/ strip_request_fields（不透传的请求顶层字段，new-api rc.23 #6847；model/messages/stream 受保护）/ inject_request_fields（对象，dispatch 在 strip 之后浅合并到请求顶层；model/messages/stream/provider 受保护不可注入；缺省空=零开销；写入最多 32 键 / 4KB）/ responses_native（/v1/responses 同方言直转到上游 /responses；缺省 openai=true、openai_compat=false，其它协议忽略恒降级；上游 404/405 自动回退降级）/ extensions.codex_client（Codex 渠道仅限官方客户端：official_only / min_version / max_version，IMPLEMENTATION §11.46）/ tool_loss_policy（跨方言转换会丢工具时：safe 缺省=丢托管工具、拒客户端工具 / strict=会丢就拒 / allow=全丢照转，IMPLEMENTATION §11.46）/ pass_paths（custom_pass 白名单）
 -- / api_version（仅 provider=azure：数据面 api-version，`YYYY-MM-DD[-preview]`，管理面写入时校验形状；缺省 2024-10-21；每个出向请求都带 `?api-version=`）
 -- / image_stream_usage（直接 Images SSE 多图计数：cumulative 缺省，最后一份累计值且各计费轴不可回退；per_image 逐完成事件检查求和。写入只接受这两个字符串，派发时冻结，账单快照同步口径和完整性。JSON 回退始终按响应总用量一次结算。）
 -- / aws_region（仅 provider=bedrock：SigV4 签名区域覆写；缺省从 api_base 主机名 `bedrock-runtime.{region}.amazonaws.com` 解析，VPC 端点等解析不出时必填）
 -- / proxy_url（已废弃，写入一律 400：出口改由 channels.egress_* 绑定代理 / 代理组，Realtime WS 同样经此握手，见下文 Egress proxies）
--- / strip_request_fields、inject_request_fields（已退役，写入一律 400，0006 起迁成渠道层适配规则，见下文「适配规则」；库里的原键只为回滚旧镜像留着，列表接口不外露，后续迁移再清）
 -- / extra_headers（对象 string→string，附加到每条上游请求；写入拒 Authorization / api-key / x-api-key / x-goog-api-key / Host / Content-Type / 逐跳头 / x-okapi-request-id，热路径再跳过一次；鉴权头后写覆盖）。
 -- provider=azure 的约定：api_base = 资源端点 `https://{res}.openai.azure.com`（必填，无缺省；贴了 `/openai` 或 `/openai/v1` 后缀网关自行剥掉）；
 -- 出向 URL = `{endpoint}/openai/deployments/{deployment}/{chat/completions|embeddings|images/generations|images/edits|audio/*}?api-version=`，鉴权 `api-key` 头；
@@ -260,7 +259,6 @@ CREATE TABLE channels (
     settings             JSONB NOT NULL DEFAULT '{}', -- 超时/代理/自定义头/透传路径白名单
     owner_id             BIGINT REFERENCES users(id), -- 渠道属主（#6267，own/all 权限范围）
     upstream_unit_cost   JSONB,                       -- relative_cost_milli 整数千分比（缺省 1000 = 官方标价）：调度层内权重除数，也是毛利核算的成本系数（§11.18）
-    vendor               VARCHAR(64),                 -- 选定的内置厂商（builtin:<id>，0006）；NULL = 不套厂商层适配规则，现有渠道一律 NULL
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at           TIMESTAMPTZ
@@ -1356,35 +1354,6 @@ v10 非整小时时区实测发现：缺失分钟后的粗小时在范围过滤�
 
 
 v11 独立校验仍复现 Kolkata 空结果；实际 ClickHouse 表达式确认本地00:00取整后是UTC18:30，而保留聚合的整小时桶为UTC18:00。最终契约要求先将日期窗口端点转为UTC再向小时下/上取整，保证扫描包括所有相交的UTC小时；日/分钟精确过滤仍用原本地窗口，独立完整性校验保留。完整分钟历史必须正确返回单日本地午夜后的首分钟，缺失分钟的相交粗小时必须拒绝猜分。
-
-### 适配规则（migration 0006，设计见 [compat-rules.md](compat-rules.md)）
-
-`rule_sets` 是规则集的版本表（适配规则与将来的模型路由共用）：`(kind, scope_kind, scope_id, version)` 唯一；
-`kind` = `compat` | `route`（预留），`scope_kind` = `channel`（`scope_id` = 渠道 id）| `global`（整个网关的护栏，`scope_id` 为 NULL）
-| `profile`（适配档案，`scope_id` = `compat_profiles.id`；0007 起）；`status` = `draft` | `published` | `archived`，每个范围**至多一个已发布版本**（部分唯一索引，`COALESCE(scope_id, 0)`
-让 NULL 也唯一）；`rules` 是规则数组（JSON，格式见设计文档 §6，库里存规范化的最小形态）。已发布的行不可变：改规则 = 新增版本再发布
-（同一事务里归档旧版本），回滚 = 把旧版本重新发布。写入口（控制台）与加载口（网关）走 `okapi_compat::validate` 同一份校验；
-加载时校验不过的规则集只记日志并跳过那一层（失败开放），schema 版本比本程序新的同样跳过。
-
-`channels.vendor` 选定内置厂商（`builtin:<id>`；CHECK 限定带命名空间的形态）。**NULL = 不套厂商层规则**——按 `api_base` 主机识别厂商
-只做建议（控制台 `suggested_vendor`），不会静默改变现有渠道。
-
-0006 把 `channels.settings.strip_request_fields` / `inject_request_fields` **复制**成每个渠道的渠道层规则集（版本 1，已发布；
-规则 id `strip-request-fields` / `inject-request-fields`，先剥后注）：受保护键、写不成 JSON Pointer 的键（空串、超 128 字符、字面 `*`）丢弃，
-剥 / 注 `stream_options` 的规则带 `billing_critical_ack`。只复制不删原键——回滚到旧镜像时旧代码还读得到，剥字段 / 注入不会静默失效；
-新代码不再读它们，原键等确认稳定后用后续迁移清掉（在新版本里保存过 `settings` 的渠道，原键随整体回写被清掉，回滚后它的剥 / 注字段不再生效）。复制脚本在迁移文件里用 `-- >>> legacy copy` / `-- <<< legacy copy` 标出，
-`crates/okapi-store/tests/compat_rules.rs` 对种好的旧数据重跑这一段并核对结果（`ON CONFLICT DO NOTHING`，可重复执行）。
-
-### 适配规则 P2（migration 0007，设计见 [compat-rules.md](compat-rules.md) §17–§18）
-
-`compat_profiles` 是**适配档案**——管理员命名的可复用规则包，等于自定义厂商：`slug`（唯一，`^[a-z0-9][a-z0-9._-]*$`，创建后不可改）、`name`、`description`、
-`extends`（可空，`builtin:<id>`：档案叠在某个内置厂商之上，只写差异）、`hosts`（≤ 16 个小写主机，**只用于「这个地址要套这个档案吗」的建议**，不静默改变渠道行为）。
-渠道用 `channels.vendor = 'custom:<slug>'` 引用它；档案的规则集在 `rule_sets`（`scope_kind = 'profile'`，`scope_id` = 档案 id）。被渠道引用的档案不能删（控制台删除时检查，
-同事务里连带清掉它的规则集，409 `profile_in_use`）。四层的优先级：厂商 100 → 档案 200 → 渠道 300 → 护栏 900。
-
-`rule_sets` 多三列与一个索引：`base_version`（草稿起草时的已发布版本，发布时与当前不一致就拒绝）、`source`（`admin` / `mcp` / `system`，CHECK 限定）、
-`rationale`（提议的依据，≤ 1000 字，给批准的人看）；部分唯一索引 `uq_rule_sets_draft` 保证**每个范围至多一份草稿**。版本号跨草稿 / 已发布 / 已归档统一递增，
-草稿发布时取新的号（草稿的号是暂时的）；回滚 = 把旧版本内容作为新版本重新发布。迁移只增表增列增索引，不改写任何数据。
 
 ### Channel account controls (migration 0034)
 

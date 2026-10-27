@@ -86,10 +86,10 @@ const CHANNEL = {
   models: ['gpt-5'],
   keys: [],
   settings: {
+    strip_request_fields: ['logit_bias'],
     proxy_url: 'socks5://127.0.0.1:1080',
     extra_headers: { 'OpenAI-Organization': 'org-1' },
   },
-  vendor: null,
   pools: ['default'],
   pool_members: [{ pool_code: 'default', priority_override: null, weight_override: null }],
   cost_milli: 1000,
@@ -97,39 +97,19 @@ const CHANNEL = {
   last_balance: null,
 }
 
-const STRIP_RULE = { id: 'strip-request-fields', do: [{ op: 'remove', paths: ['/logit_bias'] }] }
-
-/// 渠道 42 的适配规则视图（GET /admin/channels/42/compat）。
-function compatView(version: number, rules: Json[], extra: Json = {}) {
-  return {
-    vendor: null,
-    suggested_vendor: null,
-    channel: { version, rules, note: null },
-    guard: null,
-    effective: { layers: [], rules: rules.map((rule) => ({ layer: 'channel', rule })), shadowed: [] },
-    ...extra,
-  }
-}
-
-test('渠道抽屉：注入字段按 JSON 解析写进渠道层规则、额外头可改可清、退役的 proxy_url 不回写；保存体只含有值的键，受保护键由后端拒绝并以错误码文案提示', async ({ page }) => {
+test('渠道抽屉：注入字段按 JSON 解析、额外头可改可清、退役的 proxy_url 不回写，保存体只含有值的键；受保护键的 400 以错误码文案提示', async ({ page }) => {
   await prepare(page)
   const patches: Json[] = []
-  let compat = compatView(3, [STRIP_RULE])
   await page.route('**/admin/channels?*', (route) =>
     route.fulfill({ json: { data: [CHANNEL], total: 1, enabled: 1 } }),
   )
-  await page.route('**/admin/channels/42/compat', (route) => route.fulfill({ json: compat }))
   await page.route('**/admin/channels/42', async (route) => {
-    const body = route.request().postDataJSON() as { settings: Json; compat?: { rules: Json[] } }
+    const body = route.request().postDataJSON() as { settings: Json }
     patches.push(body)
-    const rules = body.compat?.rules ?? []
-    const pinsModel = rules.some((rule) =>
-      ((rule.do ?? []) as Json[]).some((op) => op.path === '/model'),
-    )
-    if (pinsModel) {
-      await route.fulfill(apiError(400, 'compat_rules_invalid', 'inject-request-fields:protected_path'))
+    const inject = body.settings.inject_request_fields as Json | undefined
+    if (inject && 'model' in inject) {
+      await route.fulfill(apiError(400, 'bad_request', 'inject_request_fields'))
     } else {
-      if (body.compat) compat = compatView(4, body.compat.rules)
       await route.fulfill({ json: { ok: true } })
     }
   })
@@ -151,9 +131,6 @@ test('渠道抽屉：注入字段按 JSON 解析写进渠道层规则、额外�
   const headerName = drawer.getByPlaceholder('OpenAI-Organization')
   await expect(headerName).toHaveValue('OpenAI-Organization')
   await expect(drawer.getByPlaceholder('org-…')).toHaveValue('org-1')
-  // 渠道层规则里的剥字段回显在标签输入里
-  await expect(drawer.locator('#d-strip')).toBeVisible()
-  await expect(drawer.getByText('logit_bias', { exact: true })).toBeVisible()
   // 工具无法转换时：未配置显示缺省「安全」，改成「严格」后随 settings 提交
   await expect(drawer.locator('#d-tool-loss')).toHaveValue('safe')
   await drawer.locator('#d-tool-loss').selectOption('strict')
@@ -177,40 +154,25 @@ test('渠道抽屉：注入字段按 JSON 解析写进渠道层规则、额外�
   expect(patches[0].settings).toEqual({
     thinking_to_content: false,
     bill_by_response_model: false,
+    strip_request_fields: ['logit_bias'],
+    inject_request_fields: { temperature: 0.2, user: 'forced' },
     tool_loss_policy: 'strict',
-  })
-  // 剥 / 注字段不再进 settings，而是渠道层的两条约定规则；基于加载时的版本 3 保存，先剥后注
-  expect(patches[0].compat).toEqual({
-    rules: [
-      STRIP_RULE,
-      {
-        id: 'inject-request-fields',
-        do: [
-          { op: 'set', path: '/temperature', value: 0.2 },
-          { op: 'set', path: '/user', value: 'forced' },
-        ],
-      },
-    ],
-    base_version: 3,
   })
   expect(patches[0]).toMatchObject({ name: 'openai-main', models: ['gpt-5'], priority: 0 })
 
-  // 受保护键交给后端拒绝：错误码 + param 渲染成可读文案，抽屉保持打开可改；
-  // 保存成功后规则视图刷新到版本 4，这次基于 4
+  // 受保护键交给后端拒绝：错误码 + param 渲染成可读文案，抽屉保持打开可改
   await drawer.getByRole('button', { name: '添加字段' }).click()
   await drawer.getByPlaceholder('temperature').nth(2).fill('model')
   await drawer.getByPlaceholder('0.2 or "forced"').nth(2).fill('hijack')
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
-  await expect(page.getByRole('alert')).toContainText('protected_path')
+  await expect(page.getByRole('alert')).toContainText('inject_request_fields')
   await expect(drawer).toBeVisible()
   expect(patches).toHaveLength(2)
-  expect((patches[1].compat as { base_version: number }).base_version).toBe(4)
-  const sent = (patches[1].compat as { rules: Json[] }).rules.find((rule) => rule.id === 'inject-request-fields')
-  expect(sent?.do).toEqual([
-    { op: 'set', path: '/temperature', value: 0.2 },
-    { op: 'set', path: '/user', value: 'forced' },
-    { op: 'set', path: '/model', value: 'hijack' },
-  ])
+  expect((patches[1].settings as Json).inject_request_fields).toEqual({
+    temperature: 0.2,
+    user: 'forced',
+    model: 'hijack',
+  })
 
   await page.getByRole('alert').getByRole('button', { name: '关闭', exact: true }).click()
   await page.route('**/admin/channels/42', (route) => {
@@ -219,70 +181,6 @@ test('渠道抽屉：注入字段按 JSON 解析写进渠道层规则、额外�
   })
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.getByRole('alert').filter({ hasText: '服务内部错误' })).toBeVisible()
-})
-
-test('渠道抽屉：选厂商预设、套用按地址给出的建议，保存体带 vendor；规则里编辑器表达不了的写法原样保留且只读', async ({ page }) => {
-  await prepare(page)
-  const patches: Json[] = []
-  const advanced = {
-    id: 'inject-request-fields',
-    do: [{ op: 'set', path: '/thinking/type', value: 'disabled' }],
-  }
-  let view = compatView(5, [advanced], {
-    suggested_vendor: { id: 'builtin:deepseek', display_name: 'DeepSeek' },
-  })
-  await page.route('**/admin/channels?*', (route) =>
-    route.fulfill({ json: { data: [CHANNEL], total: 1, enabled: 1 } }),
-  )
-  await page.route('**/admin/channels/42/compat', (route) => route.fulfill({ json: view }))
-  await page.route('**/admin/compat/vendors', (route) =>
-    route.fulfill({
-      json: {
-        data: [
-          { id: 'builtin:deepseek', display_name: 'DeepSeek', group: 'cn', hosts: ['api.deepseek.com'], rules: 1 },
-          { id: 'builtin:moonshot', display_name: 'Moonshot / Kimi', group: 'cn', hosts: ['api.moonshot.cn'], rules: 2 },
-        ],
-        suggestion: null,
-      },
-    }),
-  )
-  await page.route('**/admin/channels/42', async (route) => {
-    const body = route.request().postDataJSON() as Json
-    patches.push(body)
-    // 保存成功后视图刷新：厂商换成刚存的值，建议随之消失
-    if ('vendor' in body) view = { ...view, vendor: body.vendor as string | null, suggested_vendor: null }
-    await route.fulfill({ json: { ok: true } })
-  })
-
-  await page.goto('/admin/channels')
-  await page
-    .getByRole('row')
-    .filter({ hasText: 'openai-main' })
-    .getByRole('button', { name: '编辑', exact: true })
-    .click()
-  const drawer = await openedDialog(page)
-  await drawer.getByRole('tab', { name: '请求与计费行为' }).click()
-
-  // 只建议：没点「套用」就不会带 vendor
-  await expect(drawer.getByRole('note').filter({ hasText: 'DeepSeek' })).toBeVisible()
-  // 含嵌套路径的约定规则：注入编辑器只读，不会被改写成别的东西
-  await expect(drawer.getByText('表达不了的写法')).toBeVisible()
-  await drawer.getByRole('button', { name: '保存', exact: true }).click()
-  await expect.poll(() => patches.length).toBe(1)
-  expect(patches[0]).not.toHaveProperty('vendor')
-  expect(patches[0]).not.toHaveProperty('compat')
-
-  await drawer.getByRole('button', { name: '套用', exact: true }).click()
-  await expect(drawer.locator('#d-vendor')).toHaveValue('builtin:deepseek')
-  await drawer.getByRole('button', { name: '保存', exact: true }).click()
-  await expect.poll(() => patches.length).toBe(2)
-  expect(patches[1].vendor).toBe('builtin:deepseek')
-  expect(patches[1]).not.toHaveProperty('compat')
-
-  await drawer.locator('#d-vendor').selectOption('')
-  await drawer.getByRole('button', { name: '保存', exact: true }).click()
-  await expect.poll(() => patches.length).toBe(3)
-  expect(patches[2].vendor).toBeNull()
 })
 
 test('安全页会话卡：列出会话并标出当前浏览器，单条吊销与全部吊销各打对应端点，空态文案随之出现', async ({ page }) => {
@@ -571,7 +469,6 @@ test('渠道抽屉键值行：删掉中间一行后剩余行与焦点都不串�
   await prepare(page)
   const patches: Json[] = []
   await page.route('**/admin/channels?*', (route) => route.fulfill({ json: { data: [CHANNEL], total: 1, enabled: 1 } }))
-  await page.route('**/admin/channels/42/compat', (route) => route.fulfill({ json: compatView(3, [STRIP_RULE]) }))
   await page.route('**/admin/channels/42', async (route) => {
     patches.push(route.request().postDataJSON() as Json)
     await route.fulfill({ json: { ok: true } })
@@ -605,12 +502,9 @@ test('渠道抽屉键值行：删掉中间一行后剩余行与焦点都不串�
 
   await drawer.getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => patches.length).toBe(1)
-  const body = patches[0] as { settings: Json; compat: { rules: Json[] } }
-  expect(body.settings.extra_headers).toEqual({ 'OpenAI-Organization': 'org-1', 'X-C': 'c' })
-  expect(body.compat.rules.find((rule) => rule.id === 'inject-request-fields')?.do).toEqual([
-    { op: 'set', path: '/a', value: 1 },
-    { op: 'set', path: '/c', value: 3 },
-  ])
+  const settings = (patches[0] as { settings: Json }).settings
+  expect(settings.extra_headers).toEqual({ 'OpenAI-Organization': 'org-1', 'X-C': 'c' })
+  expect(settings.inject_request_fields).toEqual({ a: 1, c: 3 })
 })
 
 test('模型抽屉档位行：删掉中间一档后倍率不串到别的档位，保存体只剩首尾两档', async ({ page }) => {
@@ -1984,7 +1878,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
     method: 'PATCH',
     body: {
       name: 'openai-main', api_base: 'https://api.openai.com/v1', models: ['gpt-5', 'gpt-5-mini', 'o4'], priority: 7,
-      settings: { thinking_to_content: false, bill_by_response_model: false },
+      settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
       cost_milli: 500,
     },
   })
@@ -2013,7 +1907,7 @@ test('渠道抽屉其余页签：凭证轮换单独提交且清空输入；拉�
     method: 'POST',
     body: {
       name: 'anthropic-eu', provider: 'anthropic', api_base: '', credential: 'sk-ant-1', models: ['claude-sonnet-4'], priority: 0,
-      settings: { thinking_to_content: false, bill_by_response_model: false },
+      settings: { thinking_to_content: false, bill_by_response_model: false, strip_request_fields: [] },
       pools: [{ pool_code: 'default', priority_override: null, weight_override: null }],
       cost_milli: 1000,
     },

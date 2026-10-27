@@ -311,17 +311,17 @@ async fn forward_count(
             auth_headers.push(("chatgpt-account-id", account));
         }
     }
-    // codex 与官方 openai 有缺省地址；openai_compat 没有，缺了不回退到 api.openai.com（会泄第三方的 key）
-    let base = okapi_providers::registry::effective_base(
-        &candidate.provider,
-        candidate.api_base.as_deref(),
-    )
-    .ok_or_else(|| UpstreamError::Build(super::openai_dialect::API_BASE_MISSING.to_owned()))?;
+    let default_base = if oauth.is_some() {
+        okapi_providers::oauth::codex::DEFAULT_API_BASE
+    } else {
+        "https://api.openai.com/v1"
+    };
+    let base = candidate.api_base.as_deref().unwrap_or(default_base);
     tokio::time::timeout(
         Duration::from_secs(candidate.first_output_timeout_secs.min(20)),
         okapi_providers::responses::count_input_tokens_at(
             state.upstream.http(),
-            &base,
+            base,
             &auth_headers,
             body,
             &outbound,

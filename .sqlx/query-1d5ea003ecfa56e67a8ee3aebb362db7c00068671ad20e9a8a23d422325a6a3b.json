@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT c.id AS channel_id, c.provider, c.api_base, ck.credential_ciphertext,\n               ep.mode AS \"egress_mode!\", ep.proxy_id AS \"egress_proxy_id?\",\n               ep.url_ciphertext AS \"egress_url?\",\n               c.settings -> 'extra_headers' AS extra_headers\n        FROM channel_keys ck\n        JOIN channels c ON c.id = ck.channel_id\n        CROSS JOIN LATERAL egress_pick(c.id, ck.id, false) ep\n        WHERE ck.id = $1 AND ck.status = 1 AND c.status = 1 AND c.deleted_at IS NULL\n        ",
+  "query": "\n        SELECT c.id AS channel_id, c.api_base, ck.credential_ciphertext,\n               ep.mode AS \"egress_mode!\", ep.proxy_id AS \"egress_proxy_id?\",\n               ep.url_ciphertext AS \"egress_url?\",\n               c.settings -> 'extra_headers' AS extra_headers\n        FROM channel_keys ck\n        JOIN channels c ON c.id = ck.channel_id\n        CROSS JOIN LATERAL egress_pick(c.id, ck.id, false) ep\n        WHERE ck.id = $1 AND ck.status = 1 AND c.status = 1 AND c.deleted_at IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -16,17 +16,6 @@
       },
       {
         "ordinal": 1,
-        "name": "provider",
-        "type_info": "Varchar",
-        "origin": {
-          "Table": {
-            "table": "channels",
-            "name": "provider"
-          }
-        }
-      },
-      {
-        "ordinal": 2,
         "name": "api_base",
         "type_info": "Varchar",
         "origin": {
@@ -37,7 +26,7 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 2,
         "name": "credential_ciphertext",
         "type_info": "Bytea",
         "origin": {
@@ -48,25 +37,25 @@
         }
       },
       {
-        "ordinal": 4,
+        "ordinal": 3,
         "name": "egress_mode!",
         "type_info": "Text",
         "origin": "Expression"
       },
       {
-        "ordinal": 5,
+        "ordinal": 4,
         "name": "egress_proxy_id?",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 6,
+        "ordinal": 5,
         "name": "egress_url?",
         "type_info": "Bytea",
         "origin": "Expression"
       },
       {
-        "ordinal": 7,
+        "ordinal": 6,
         "name": "extra_headers",
         "type_info": "Jsonb",
         "origin": "Expression"
@@ -79,7 +68,6 @@
     },
     "nullable": [
       false,
-      false,
       true,
       false,
       null,
@@ -88,5 +76,5 @@
       null
     ]
   },
-  "hash": "4ccd9bfe51fa41bd8ca6ed3acc090145877ecfbea0df6411f1c525d93a83f7da"
+  "hash": "1d5ea003ecfa56e67a8ee3aebb362db7c00068671ad20e9a8a23d422325a6a3b"
 }

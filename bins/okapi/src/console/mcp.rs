@@ -4,7 +4,6 @@
 //! reconciliation_status/dlq_list，RBAC 权限点过滤）。
 //! 写工具（M4）走三道闸：全局开关 + mcp.write + dry_run/confirm。
 
-use super::mcp_compat;
 use crate::gateway::auth::authenticate;
 use crate::gateway::error::AppError;
 use crate::gateway::extract::Json as ExtractJson;
@@ -146,41 +145,6 @@ const TOOLS: &[ToolSpec] = &[
         write: false,
     },
     ToolSpec {
-        name: "compat_catalog",
-        description: "Self-description of the compat rules engine (shapes upstream requests/responses per vendor or channel): phases, operations, selector fields, usage slots, capability facts, error conditions and ready-made recipes. Read it before drafting rules.",
-        schema: mcp_compat::catalog_schema,
-        permission: Some(permissions::CHANNEL_READ),
-        write: false,
-    },
-    ToolSpec {
-        name: "compat_effective",
-        description: "Effective compat rules of one channel: vendor/profile layer, channel layer and global guard merged in execution order, with the source layer of every rule and the shadowed ones; also the published versions and the pending draft.",
-        schema: mcp_compat::effective_schema,
-        permission: Some(permissions::CHANNEL_READ),
-        write: false,
-    },
-    ToolSpec {
-        name: "compat_validate",
-        description: "Validate a compat rule set without saving it. Returns the normalized rules and which operations need the compat.sensitive permission, or the list of issues (rule id, code, path).",
-        schema: mcp_compat::validate_schema,
-        permission: Some(permissions::CHANNEL_READ),
-        write: false,
-    },
-    ToolSpec {
-        name: "compat_dry_run",
-        description: "Run compat rules on a sample without saving anything or calling the upstream. phase request|response|error|capability; `rules` tries a channel-layer draft on top of the channel's vendor and guard. Returns the before/after diff and which rules fired or were skipped.",
-        schema: mcp_compat::dry_run_schema,
-        permission: Some(permissions::CHANNEL_READ),
-        write: false,
-    },
-    ToolSpec {
-        name: "compat_explain",
-        description: "Which compat rules ran for one finished request (by request_id): the per-phase trace and the content of the rule versions that were used. Carries no request or response bodies.",
-        schema: mcp_compat::explain_schema,
-        permission: Some(permissions::BILLING_READ),
-        write: false,
-    },
-    ToolSpec {
         name: "channel_create",
         description: "Create a channel with one key (writes require mcp_write_enabled).",
         schema: || {
@@ -215,13 +179,6 @@ const TOOLS: &[ToolSpec] = &[
                 "channel_id": {"type": "integer"},
                 "model": {"type": "string"}}})
         },
-        permission: Some(permissions::CHANNEL_WRITE),
-        write: true,
-    },
-    ToolSpec {
-        name: "compat_propose",
-        description: "Propose compat rules as a DRAFT for a channel, a profile or the global guard. It never publishes: a human with compat.publish approves the draft in the console (compat page, inbox). Always give a rationale (what failed, which request or error showed it, why these rules fix it) and check the rules with compat_dry_run first. The rules are the complete set for that scope and replace any existing draft.",
-        schema: mcp_compat::propose_schema,
         permission: Some(permissions::CHANNEL_WRITE),
         write: true,
     },
@@ -320,15 +277,7 @@ fn allowed(key: &AuthedKey, spec: &ToolSpec) -> bool {
         Some(perm)
             if matches!(
                 spec.name,
-                "channel_create"
-                    | "channel_toggle"
-                    | "channel_test"
-                    | "explain_bill"
-                    | "compat_catalog"
-                    | "compat_effective"
-                    | "compat_validate"
-                    | "compat_dry_run"
-                    | "compat_propose"
+                "channel_create" | "channel_toggle" | "channel_test" | "explain_bill"
             ) =>
         {
             key.permission_scope(perm) != PermScope::Denied
@@ -429,12 +378,6 @@ async fn tools_call(state: &AppState, key: &Arc<AuthedKey>, params: &Value) -> R
         "reconciliation_status" => reconciliation_status(state, &args).await,
         "dlq_list" => dlq_list(state, &args).await,
         "diagnose" => diagnose(state).await,
-        "compat_catalog" => Ok(mcp_compat::catalog()),
-        "compat_effective" => mcp_compat::effective(state, key, &args).await,
-        "compat_validate" => mcp_compat::validate(&args),
-        "compat_dry_run" => mcp_compat::dry_run(state, key, &args).await,
-        "compat_explain" => mcp_compat::explain(state, &args).await,
-        "compat_propose" => mcp_compat::propose(state, key, &args).await,
         "channel_create" => channel_create(state, key, &args).await,
         "channel_toggle" => channel_toggle(state, key, &args).await,
         "channel_test" => mcp_channel_test(state, key, &args).await,
@@ -761,13 +704,7 @@ async fn reconciliation_status(state: &AppState, args: &Value) -> Result<Value, 
 // ---- 写工具（§7.3 三道闸之上按需 confirm 两段式）与 diagnose ----
 
 /// MCP 审计（actor = `mcp:{key_id}`，§7.1）。
-pub(super) async fn mcp_audit(
-    state: &AppState,
-    key: &AuthedKey,
-    action: &str,
-    target: &str,
-    detail: Value,
-) {
+async fn mcp_audit(state: &AppState, key: &AuthedKey, action: &str, target: &str, detail: Value) {
     if let Err(err) = okapi_store::admin::record_audit(
         &state.pg,
         &format!("mcp:{}", key.key_id),
@@ -854,7 +791,6 @@ async fn channel_create(
         state,
         provider,
         args.get("api_base").and_then(Value::as_str),
-        None,
     )
     .await?;
     super::admin::ensure_azure_api_base(provider, Some(api_base))?;

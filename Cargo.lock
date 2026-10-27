@@ -2208,7 +2208,6 @@ dependencies = [
  "mime_guess",
  "moka",
  "okapi-api",
- "okapi-compat",
  "okapi-domain",
  "okapi-ledger",
  "okapi-pricing",
@@ -2244,16 +2243,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "uuid",
-]
-
-[[package]]
-name = "okapi-compat"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -2348,7 +2337,6 @@ dependencies = [
  "hex",
  "hmac",
  "okapi-api",
- "okapi-compat",
  "okapi-domain",
  "okapi-store",
  "rand 0.10.2",

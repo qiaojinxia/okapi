@@ -180,9 +180,7 @@ pub const BUILT_INS: &[ProviderDescriptor] = &[
         dialect_for_model: openai_dialect,
         chat_only: false,
         credential: CredentialKind::StaticKey,
-        // 兼容渠道指向任意第三方：没有缺省地址，必须填 api_base（或选带端点表的厂商），
-        // 否则会把第三方的 key 发给 api.openai.com
-        default_base: None,
+        default_base: Some("https://api.openai.com/v1"),
         native_responses: okapi_api::provider_contract::OPENAI_COMPAT.native_responses,
         ingress: CHAT_FORMATS,
         // Preserve the existing WS ingress boundary; compatibility requires separate verification.
@@ -318,20 +316,6 @@ pub fn lookup(id: &str) -> Option<&'static ProviderDescriptor> {
     BUILT_INS.iter().find(|registration| registration.id == id)
 }
 
-/// 渠道实际要连的基址：配置的 `api_base`（去掉首尾空白，空串当没配）；没配才取协议的缺省地址。
-///
-/// 没有缺省地址的协议（`openai_compat`、`azure`、`bedrock`、`vertex`…）缺地址时返回 `None`，
-/// 调用方按「配置不完整」处理。**不能回退到别家的地址**：兼容渠道指向的是任意第三方，
-/// 回退到 api.openai.com 会把第三方的 key 发给 OpenAI。
-#[must_use]
-pub fn effective_base(provider: &str, api_base: Option<&str>) -> Option<String> {
-    api_base
-        .map(str::trim)
-        .filter(|base| !base.is_empty())
-        .map(str::to_owned)
-        .or_else(|| lookup(provider)?.default_base.map(str::to_owned))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,28 +391,6 @@ mod tests {
         for id in ["vertex", "bedrock", "azure"] {
             assert!(lookup(id).unwrap().default_base.is_none());
         }
-    }
-
-    #[test]
-    fn only_the_official_providers_have_a_default_address() {
-        // 兼容渠道指向任意第三方，缺地址必须是配置错误，而不是悄悄发往 OpenAI
-        assert!(lookup("openai_compat").unwrap().default_base.is_none());
-        assert_eq!(
-            effective_base("openai", None).as_deref(),
-            Some("https://api.openai.com/v1")
-        );
-        assert_eq!(
-            effective_base("openai", Some("  ")).as_deref(),
-            effective_base("openai", None).as_deref()
-        );
-        assert_eq!(effective_base("openai_compat", None), None);
-        assert_eq!(effective_base("openai_compat", Some("")), None);
-        assert_eq!(effective_base("openai_compat", Some("   ")), None);
-        assert_eq!(
-            effective_base("openai_compat", Some(" https://api.deepseek.com/v1 ")).as_deref(),
-            Some("https://api.deepseek.com/v1")
-        );
-        assert_eq!(effective_base("no-such-provider", None), None);
     }
 
     #[test]

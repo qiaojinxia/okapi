@@ -18,7 +18,6 @@ okapi-api = { workspace = true }
 okapi-domain = { workspace = true }
 okapi-ledger = { workspace = true }
 okapi-pricing = { workspace = true }
-okapi-compat = { workspace = true }
 okapi-providers = { workspace = true }
 okapi-store = { workspace = true }
 

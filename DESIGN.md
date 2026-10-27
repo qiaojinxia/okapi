@@ -667,7 +667,6 @@ okapi/
 ├── crates/
 │   ├── okapi-domain     # money（i64 microUSD newtype，禁 float）/ tokens / 计费状态机（enum + 穷举转移）
 │   ├── okapi-pricing    # PriceBook 编译器 + ArcSwap L1 缓存 + epoch 订阅
-│   ├── okapi-compat     # 适配规则引擎（无 IO）：规则校验 / 分层合并 / 请求阶段执行，设计见 docs/compat-rules.md
 │   ├── okapi-ledger     # Redis Lua 预扣/结算 + PG 事件溯源 append + outbox（对应现 billing-core Pipeline）
 │   ├── okapi-providers  # Provider trait + openai/claude/gemini/deepseek SSE 适配器
 │   ├── okapi-store      # sqlx(PG) / fred(Redis) / clickhouse / async-nats 薄封装

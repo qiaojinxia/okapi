@@ -155,11 +155,10 @@ pub async fn duplicate_channel(
         INSERT INTO channels
             (name, provider, api_base, status, priority, weight, models, model_mapping,
              capabilities, settings, retry_policy, upstream_unit_cost,
-             trust_upstream_usage, owner_id, egress_mode, egress_proxy_id, egress_group_code, vendor)
+             trust_upstream_usage, owner_id, egress_mode, egress_proxy_id, egress_group_code)
         SELECT $2, provider, api_base, 2, priority, weight, models, model_mapping,
-               capabilities, settings - 'strip_request_fields' - 'inject_request_fields',
-               retry_policy, upstream_unit_cost,
-               trust_upstream_usage, owner_id, egress_mode, egress_proxy_id, egress_group_code, vendor
+               capabilities, settings, retry_policy, upstream_unit_cost,
+               trust_upstream_usage, owner_id, egress_mode, egress_proxy_id, egress_group_code
         FROM channels WHERE id = $1 AND deleted_at IS NULL
         RETURNING id
         "#,
@@ -172,8 +171,6 @@ pub async fn duplicate_channel(
         tx.rollback().await?;
         return Ok(None);
     };
-    // 适配规则跟着渠道走：复制体和源一样的厂商（上面已带）与渠道层规则，从版本 1 起
-    crate::compat::copy_channel_rules(&mut tx, channel_id, new_id, None).await?;
     // 复制体与源用的是同一份凭证 = 同一个上游账号：固定分配的出口一并带过去（§11.41），
     // 同一账号不能因为复制就多出一个出口 IP。key 级护栏（rpm / 日消费上限 / 模型子集）同理要带，
     // 丢了就是同一个账号、不再受限；人工封禁(5) / 凭证失效(6) 只能人工恢复，复制后保持原状态，

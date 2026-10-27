@@ -555,18 +555,12 @@ async fn live_channel_changes_cannot_reuse_pinned_account_or_change_protocol_fie
         .execute(&env.state.pg)
         .await
         .unwrap();
-    let mut conn = env.state.pg.acquire().await.unwrap();
-    okapi_store::compat::publish(
-        &mut conn,
-        okapi_store::compat::Scope::Channel(env.channel),
-        &json!([{"id": "force-generate", "do": [{"op": "set", "path": "/generate", "value": true}]}]),
-        None,
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    drop(conn);
+    sqlx::query("UPDATE channels SET settings=$2 WHERE id=$1")
+        .bind(env.channel)
+        .bind(json!({"inject_request_fields":{"generate":true}}))
+        .execute(&env.state.pg)
+        .await
+        .unwrap();
     let mut warmup = env.body(None);
     warmup["generate"] = false.into();
     send(&mut client, warmup).await;

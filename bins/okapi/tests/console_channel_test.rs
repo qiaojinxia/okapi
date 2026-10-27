@@ -52,46 +52,6 @@ async fn mock_usage(headers: axum::http::HeaderMap) -> axum::response::Response 
     axum::Json(json!({"object": "list", "total_usage": 1234.5})).into_response()
 }
 
-/// 四家官方余额接口的 mock（响应样本取自各家文档示例）：DeepSeek 的在站点根，其余在 /v1 下。
-fn authorized_json(headers: &axum::http::HeaderMap, body: Value) -> axum::response::Response {
-    if authorized(headers) {
-        axum::Json(body).into_response()
-    } else {
-        axum::http::StatusCode::UNAUTHORIZED.into_response()
-    }
-}
-
-async fn mock_deepseek_balance(headers: axum::http::HeaderMap) -> axum::response::Response {
-    authorized_json(
-        &headers,
-        json!({"is_available": true, "balance_infos": [{"currency": "CNY",
-            "total_balance": "110.00", "granted_balance": "10.00", "topped_up_balance": "100.00"}]}),
-    )
-}
-
-async fn mock_moonshot_balance(headers: axum::http::HeaderMap) -> axum::response::Response {
-    authorized_json(
-        &headers,
-        json!({"code": 0, "data": {"available_balance": 49.58894, "voucher_balance": 46.58893,
-            "cash_balance": 3.00001}, "scode": "0x0", "status": true}),
-    )
-}
-
-async fn mock_siliconflow_info(headers: axum::http::HeaderMap) -> axum::response::Response {
-    authorized_json(
-        &headers,
-        json!({"code": 20000, "message": "OK", "status": true, "data": {"balance": "0.88",
-            "chargeBalance": "88.00", "totalBalance": "88.88"}}),
-    )
-}
-
-async fn mock_openrouter_credits(headers: axum::http::HeaderMap) -> axum::response::Response {
-    authorized_json(
-        &headers,
-        json!({"data": {"total_credits": 100.5, "total_usage": 25.75}}),
-    )
-}
-
 fn authorized(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get("authorization")
@@ -103,11 +63,7 @@ async fn spawn_mock() -> SocketAddr {
     let router = Router::new()
         .route("/v1/models", get(mock_models))
         .route("/v1/dashboard/billing/subscription", get(mock_subscription))
-        .route("/v1/dashboard/billing/usage", get(mock_usage))
-        .route("/user/balance", get(mock_deepseek_balance))
-        .route("/v1/users/me/balance", get(mock_moonshot_balance))
-        .route("/v1/user/info", get(mock_siliconflow_info))
-        .route("/v1/credits", get(mock_openrouter_credits));
+        .route("/v1/dashboard/billing/usage", get(mock_usage));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -335,128 +291,6 @@ async fn channel_balance_probe() {
         .unwrap();
     assert_eq!(row["last_balance"]["balance_micro"], 87_655_000, "{row}");
     assert_eq!(row["last_balance"]["currency"], "USD");
-}
-
-async fn balance_of(env: &TestEnv, id: i64) -> (u16, Value) {
-    let resp = reqwest::Client::new()
-        .get(format!("http://{}/admin/channels/{id}/balance", env.addr))
-        .bearer_auth(&env.admin_token)
-        .send()
-        .await
-        .unwrap();
-    (resp.status().as_u16(), resp.json().await.unwrap())
-}
-
-async fn put_vendor(env: &TestEnv, id: i64, vendor: &str) {
-    let resp = reqwest::Client::new()
-        .put(format!("http://{}/admin/channels/{id}/compat", env.addr))
-        .bearer_auth(&env.admin_token)
-        .json(&json!({"vendor": vendor}))
-        .send()
-        .await
-        .unwrap();
-    let status = resp.status();
-    assert_eq!(status, 200, "{}", resp.text().await.unwrap());
-}
-
-/// 余额探针是厂商数据：选了厂商的渠道按那家的口径查，不看主机名。mock 只能起在 127.0.0.1 上，
-/// 过去四家官方探针因此做不了端到端；现在每家的路径 / 凭证 / 解析都在这里走一遍。
-/// 档案叠加内置厂商时取它叠加的那个；没有专属探针的厂商与没选厂商的渠道仍走通用 dashboard 口径。
-#[tokio::test]
-async fn channel_balance_follows_the_chosen_vendor() {
-    let env = setup().await;
-    let base = format!("http://{}/v1", env.mock);
-    let channel = mk_channel(&env, "good-credential", &base).await;
-
-    let (status, body) = balance_of(&env, channel).await;
-    assert_eq!(
-        (status, body["probe"].as_str()),
-        (200, Some("openai_dashboard")),
-        "{body}"
-    );
-
-    // (厂商, 币种, 剩余, 总额, 已用)
-    let cases = [
-        ("deepseek", "CNY", 110_000_000, None, None),
-        ("moonshot", "CNY", 49_588_940, None, None),
-        ("siliconflow", "CNY", 88_880_000, None, None),
-        (
-            "openrouter",
-            "USD",
-            74_750_000,
-            Some(100_500_000),
-            Some(25_750_000),
-        ),
-    ];
-    for (vendor, currency, remaining, total, used) in cases {
-        put_vendor(&env, channel, vendor).await;
-        let (status, body) = balance_of(&env, channel).await;
-        assert_eq!(status, 200, "{vendor}: {body}");
-        assert_eq!(body["probe"], vendor, "{body}");
-        assert_eq!(body["currency"], currency, "{vendor}");
-        assert_eq!(body["balance_micro"], remaining, "{vendor}");
-        assert_eq!(body["total_micro"], json!(total), "{vendor}");
-        assert_eq!(body["used_micro"], json!(used), "{vendor}");
-    }
-
-    // 凭证不对：照常 502 带上游状态（这次是厂商探针的路径）
-    let bad = mk_channel(&env, "bad-credential", &base).await;
-    put_vendor(&env, bad, "deepseek").await;
-    let (status, body) = balance_of(&env, bad).await;
-    assert_eq!(status, 502, "{body}");
-    assert_eq!(body["error"]["param"], "status_401");
-
-    // 选了没有专属探针的厂商：回到通用口径
-    put_vendor(&env, channel, "zhipu").await;
-    let (status, body) = balance_of(&env, channel).await;
-    assert_eq!(
-        (status, body["probe"].as_str()),
-        (200, Some("openai_dashboard")),
-        "{body}"
-    );
-    assert_eq!(body["balance_micro"], 87_655_000);
-
-    // 档案：叠加了内置厂商就用那家的探针，没叠加就是通用口径
-    let slug = format!("bal-{}", Uuid::new_v4().simple());
-    let client = reqwest::Client::new();
-    for (profile_slug, extends) in [
-        (format!("{slug}-ds"), Some("deepseek")),
-        (format!("{slug}-bare"), None),
-    ] {
-        let resp = client
-            .post(format!("http://{}/admin/compat/profiles", env.addr))
-            .bearer_auth(&env.admin_token)
-            .json(&json!({"slug": profile_slug, "name": "余额测试", "extends": extends}))
-            .send()
-            .await
-            .unwrap();
-        let status = resp.status();
-        assert_eq!(status, 200, "{}", resp.text().await.unwrap());
-        put_vendor(&env, channel, &format!("custom:{profile_slug}")).await;
-        let (status, body) = balance_of(&env, channel).await;
-        assert_eq!(status, 200, "{body}");
-        let expected = if extends.is_some() {
-            "deepseek"
-        } else {
-            "openai_dashboard"
-        };
-        assert_eq!(body["probe"], expected, "{profile_slug}: {body}");
-    }
-}
-
-/// 兼容渠道没有缺省地址：没配 api_base 就查不了，明确告诉管理员缺哪个字段，而不是去问别人家的地址。
-#[tokio::test]
-async fn channel_balance_needs_an_api_base_for_compat_channels() {
-    let env = setup().await;
-    let channel = mk_channel(&env, "good-credential", &format!("http://{}/v1", env.mock)).await;
-    sqlx::query("UPDATE channels SET provider = 'openai_compat', api_base = NULL WHERE id = $1")
-        .bind(channel)
-        .execute(&env.pg)
-        .await
-        .unwrap();
-    let (status, body) = balance_of(&env, channel).await;
-    assert_eq!(status, 400, "{body}");
-    assert_eq!(body["error"]["param"], "api_base");
 }
 
 /// 管理面探针不跟随重定向：SSRF 闸只看得到管理员填的 api_base，上游一跳 302 不能把探测

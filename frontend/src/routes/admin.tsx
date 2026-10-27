@@ -20,7 +20,6 @@ import {
   ShieldCheck,
   User,
   Users,
-  Workflow,
   Wrench,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -54,7 +53,6 @@ function AdminLayout() {
         { to: '/admin/channels', label: t('admin:channels'), icon: Server, permission: 'channel.read' },
         { to: '/admin/pools', label: t('admin:poolsTitle'), icon: Layers, permission: 'channel.read' },
         { to: '/admin/proxies', label: t('admin:proxiesTitle'), icon: Globe, permission: 'channel.read' },
-        { to: '/admin/compat', label: t('compat:navTitle'), icon: Workflow, permission: 'channel.read' },
       ],
     },
     {
