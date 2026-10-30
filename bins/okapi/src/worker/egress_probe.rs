@@ -225,10 +225,11 @@ async fn probe_one(
         let _: Result<i64, _> = state.sched.client().del(&streak_key).await;
         0
     } else {
-        // Redis 不可用时按已达阈值处理：宁可多告警，不能把真故障压下去
+        // Redis 不可用时按已达阈值处理：宁可多告警，不能把真故障压下去。
+        // 滑动窗：固定窗从第一次失败起算，长故障时每 `streak_ttl` 归一次（线上代理 4 的日志是 1,2,3,1,2,3）
         state
             .sched
-            .incr_by_with_ttl(&streak_key, 1, streak_ttl)
+            .incr_sliding(&streak_key, streak_ttl)
             .await
             .unwrap_or(DOWN_AFTER)
     };

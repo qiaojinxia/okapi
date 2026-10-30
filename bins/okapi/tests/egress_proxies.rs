@@ -1425,12 +1425,63 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
     assert_eq!(breaker, (0, true));
     assert!(live_hits.load(Ordering::SeqCst) >= 2);
 
+    // 连续失败计数是滑动窗：把它剩下的寿命压到 1 秒，紧接着再探一轮（第三轮），隔 1.3 秒再探第四轮。
+    // 每次失败都顺延过期时间，第四轮才接得上、报 4；固定窗口下计数已过期，这里会归 1 而根本不告警。
+    let streak_key = format!("egress:probe:fail:{dead}");
+    let _: bool = fred::interfaces::KeysInterface::expire(&redis, &streak_key, 1, None)
+        .await
+        .unwrap();
+    egress_probe::probe_round(&state, &policy, &notifier)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+    bodies.lock().unwrap().clear();
+    egress_probe::probe_round(&state, &policy, &notifier)
+        .await
+        .unwrap();
+    let sent: Vec<Value> = std::mem::take(&mut *bodies.lock().unwrap());
+    let down = sent
+        .iter()
+        .find(|b| b["event"] == "egress_down")
+        .expect("故障还在继续，第四轮仍要告警");
+    assert_eq!(
+        down["payload"]["proxies"][0]["consecutive_failures"], 4,
+        "计数不能因为固定窗口到期而归零：{down}"
+    );
+
     pg.close().await;
     let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#
     )))
     .execute(&admin)
     .await;
+}
+
+/// 「连续失败几轮」的计数是滑动窗：只要还连着失败就不归零，隔了一个 TTL 没再失败才作废。
+/// 固定窗从第一次失败起算，长故障时每个窗口归一次——2026-10-29 线上代理 4 不通了 50 分钟，
+/// 探测日志里的 consecutive 是 1,2,3,1,2,3。
+#[tokio::test]
+async fn consecutive_failure_counter_slides_with_every_failure() {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
+        .await
+        .unwrap();
+    let key = format!("egress:probe:fail:test-{}", Uuid::new_v4().simple());
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        seen.push(state.sched.incr_sliding(&key, 2).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    }
+    assert_eq!(seen, [1, 2, 3, 4], "每次失败都顺延过期，持续失败不能归零");
+    // 隔了一个 TTL 没再失败：作废，重新从 1 数
+    tokio::time::sleep(std::time::Duration::from_millis(2300)).await;
+    assert_eq!(state.sched.incr_sliding(&key, 2).await.unwrap(), 1);
+    let redis = okapi_store::connect_redis(&redis_url).await.unwrap();
+    let _: Option<i64> = fred::interfaces::KeysInterface::del(&redis, &key)
+        .await
+        .unwrap();
 }
 
 /// 分不清是代理还是目标的连接失败（隧道建立中断），先由网关后台经同一代理探一次探测地址再定：
