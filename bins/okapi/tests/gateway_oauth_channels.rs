@@ -52,6 +52,8 @@ struct Mock {
     last_body: Arc<std::sync::Mutex<Option<Value>>>,
     /// Codex 上游把收到的推理项都当成别的账号签发的（会话换了账号）：回 400 invalid_encrypted_content。
     foreign_reasoning: Arc<std::sync::atomic::AtomicBool>,
+    /// Codex 上游先回 200 和开场事件，再在流里发这个错误对象（`error` 事件），不给任何产出。
+    codex_stream_error: Arc<std::sync::Mutex<Option<Value>>>,
 }
 
 impl Mock {
@@ -324,6 +326,15 @@ async fn mock_codex_responses(
             .is_none_or(|items| items.iter().all(|i| i["role"] != "system")),
         "system 角色改 developer"
     );
+    if let Some(error) = st.codex_stream_error.lock().unwrap().clone() {
+        // ChatGPT 后端过载时的形状（2026-10-29 线上）：200 + 开场事件，随后流里一个 error 事件，没有产出
+        let sse = format!(
+            "event: response.created\ndata: {}\n\nevent: error\ndata: {}\n\n",
+            json!({"type":"response.created","response":{"id":"resp_e","status":"in_progress"}}),
+            json!({"type":"error","sequence_number":3,"error":error}),
+        );
+        return ([("content-type", "text/event-stream")], sse).into_response();
+    }
     let sse = concat!(
         "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_o\",\"status\":\"in_progress\"}}\n\n",
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello codex\"}\n\n",
@@ -455,6 +466,7 @@ async fn setup() -> Env {
         last_headers: Arc::default(),
         last_body: Arc::default(),
         foreign_reasoning: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        codex_stream_error: Arc::default(),
     };
     let mock = spawn_mock(mock_state.clone()).await;
 
@@ -1182,6 +1194,149 @@ async fn codex_foreign_encrypted_reasoning_is_dropped_and_retried_once() {
         env.mock_state.codex_calls.load(Ordering::SeqCst),
         2,
         "最多重发一次"
+    );
+}
+
+/// 请求一次 Codex 流并返回（状态码、请求 id、响应体）。
+async fn codex_stream_request(env: &Env) -> (u16, Uuid, Value) {
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/responses", env.gateway))
+        .bearer_auth(&env.user_token)
+        .json(&json!({"model": env.model, "stream": true, "input": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let request_id: Uuid = response.headers()["x-okapi-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body: Value = response.json().await.unwrap_or_default();
+    (status, request_id, body)
+}
+
+/// 这次请求落库的诊断（结算在后台，轮询等它）。
+async fn recorded_diagnostics(env: &Env, request_id: Uuid) -> Value {
+    for _ in 0..50 {
+        let found: Option<Value> = sqlx::query_scalar(
+            "SELECT usage_details->'diagnostics' FROM billing_records WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_optional(&env.pg)
+        .await
+        .unwrap();
+        if let Some(diagnostics) = found.filter(|d| !d.is_null()) {
+            return diagnostics;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("请求诊断没有落库");
+}
+
+async fn key_status(env: &Env, key: i64) -> (i16, bool) {
+    sqlx::query_as("SELECT status, cooldown_until IS NOT NULL FROM channel_keys WHERE id = $1")
+        .bind(key)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap()
+}
+
+/// ChatGPT 后端过载时先回 200 和开场事件，再在流里发 `error`（`server_is_overloaded`）。
+/// 此前这被当成空流：记成 `empty_completion`，上游的原因丢了，重试矩阵也按"空回复"（直接换渠道）
+/// 而不是按 503（同 key 重试一次）走。
+#[tokio::test]
+async fn codex_overload_error_before_output_is_a_503_with_the_upstream_reason() {
+    let env = setup().await;
+    let (_, key) = login_channel(&env, "codex").await;
+    *env.mock_state.codex_stream_error.lock().unwrap() = Some(json!({
+        "message": "Our servers are currently overloaded. Please try again later.",
+        "type": "service_unavailable_error", "param": null, "code": "server_is_overloaded"}));
+    let (status, request_id, body) = codex_stream_request(&env).await;
+    assert_eq!(status, 502, "{body}");
+    assert_ne!(body["error"]["code"], "empty_completion", "{body}");
+    assert_eq!(
+        env.mock_state.codex_calls.load(Ordering::SeqCst),
+        2,
+        "503 同 key 重试一次，和上游真回 HTTP 503 一样"
+    );
+    let diagnostics = recorded_diagnostics(&env, request_id).await;
+    let attempt = &diagnostics["attempts"][0];
+    assert_eq!(attempt["status"], 503, "{diagnostics}");
+    assert_eq!(attempt["outcome"], "failure");
+    assert_eq!(
+        attempt["error_message"],
+        "Our servers are currently overloaded. Please try again later."
+    );
+    // 没有产出就不计费，也不是凭证问题
+    let balance = env.state.ledger.balance(env.user_id).await.unwrap();
+    assert_eq!(balance.as_micros(), 10_000_000, "没有产出不计费");
+    assert_eq!(key_status(&env, key).await.0, 1, "一次过载不改 key 状态");
+}
+
+/// 流里报"上下文超长"是请求自己的问题：换渠道也一样，按 400 原样回给客户端，不重试、不记 key 故障。
+#[tokio::test]
+async fn codex_context_overflow_error_before_output_is_returned_as_a_400() {
+    let env = setup().await;
+    let (_, key) = login_channel(&env, "codex").await;
+    *env.mock_state.codex_stream_error.lock().unwrap() = Some(json!({
+        "message": "Your input exceeds the context window of this model.",
+        "type": "invalid_request_error", "param": "input", "code": "context_length_exceeded"}));
+    let (status, request_id, body) = codex_stream_request(&env).await;
+    assert_eq!(status, 400, "{body}");
+    assert_eq!(body["error"]["code"], "context_length_exceeded", "{body}");
+    assert_eq!(env.mock_state.codex_calls.load(Ordering::SeqCst), 1);
+    let diagnostics = recorded_diagnostics(&env, request_id).await;
+    assert_eq!(diagnostics["attempts"][0]["status"], 400);
+    assert_eq!(key_status(&env, key).await.0, 1);
+    let balance = env.state.ledger.balance(env.user_id).await.unwrap();
+    assert_eq!(balance.as_micros(), 10_000_000);
+}
+
+/// 订阅窗口用完（`usage_limit_reached`）按 429 冷却这把 key，冷却时长取上游给的恢复时间。
+#[tokio::test]
+async fn codex_usage_limit_error_before_output_cools_the_key_until_the_reset() {
+    let env = setup().await;
+    let (_, key) = login_channel(&env, "codex").await;
+    *env.mock_state.codex_stream_error.lock().unwrap() = Some(json!({
+        "type": "usage_limit_reached", "message": "The usage limit has been reached",
+        "plan_type": "plus", "resets_in_seconds": 5400}));
+    let (status, _, body) = codex_stream_request(&env).await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(key_status(&env, key).await, (3, true), "限流冷却");
+    let remaining: f64 = sqlx::query_scalar(
+        "SELECT EXTRACT(EPOCH FROM cooldown_until - now())::float8 FROM channel_keys WHERE id = $1",
+    )
+    .bind(key)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(
+        (5300.0..=5400.0).contains(&remaining),
+        "冷却到上游给的恢复时间：{remaining}"
+    );
+}
+
+/// 认不出类型的流内失败仍按空流处理（照旧换渠道、不计费），但上游说的话要进诊断，不再只有 empty_completion。
+#[tokio::test]
+async fn codex_unrecognised_stream_error_stays_an_empty_stream_but_is_explained() {
+    let env = setup().await;
+    login_channel(&env, "codex").await;
+    *env.mock_state.codex_stream_error.lock().unwrap() = Some(json!({
+        "message": "The model produced something we do not understand.",
+        "type": "brand_new_error", "param": null, "code": "brand_new_code"}));
+    let (status, request_id, body) = codex_stream_request(&env).await;
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["error"]["code"], "empty_completion", "{body}");
+    assert_eq!(
+        env.mock_state.codex_calls.load(Ordering::SeqCst),
+        1,
+        "空流不做同 key 重试"
+    );
+    let diagnostics = recorded_diagnostics(&env, request_id).await;
+    assert_eq!(
+        diagnostics["attempts"][0]["error_message"],
+        "The model produced something we do not understand."
     );
 }
 

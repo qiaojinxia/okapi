@@ -3199,6 +3199,7 @@ async fn attempt_stream(
     // 窗口分两段：一个事件都没有按渠道的首字窗口判挂死；上游已经开始回事件（message_start、
     // ping）说明在处理，长上下文的预填充与思考常超过 30 秒，改按空闲计、每来一个事件重新计时。
     let mut buffered: Vec<ChatEvent> = Vec::new();
+    let mut note: Option<String> = None;
     let first: Result<Result<bool, UpstreamError>, tokio::time::error::Elapsed> = async {
         let mut window = first_output_window;
         loop {
@@ -3212,6 +3213,9 @@ async fn attempt_stream(
                             ..
                         }
                     );
+                    if let Some(error) = stream_failure_in(&event, &mut note) {
+                        return Ok(Err(error));
+                    }
                     if first_output_buffer_full(&buffered) {
                         return Ok(Err(UpstreamError::Stream(
                             "first_output_buffer_limit".into(),
@@ -3242,11 +3246,7 @@ async fn attempt_stream(
             })
         }
         Ok(Err(err)) => Err(classify_fatal(err, failover, channel)),
-        Ok(Ok(false)) => {
-            bill.trace
-                .failure(&UpstreamError::Stream(codes::EMPTY_COMPLETION.into()));
-            Err(empty_completion(bill.ingress, &buffered))
-        }
+        Ok(Ok(false)) => Err(empty_stream(bill, &buffered, note)),
         Ok(Ok(true)) => {
             let mut writer = response_writer(bill, cand);
             for event in &buffered {
@@ -3316,6 +3316,40 @@ fn with_relayed(
         }
     }
     resp
+}
+
+/// 首字缓冲里读到上游在流里说的失败（Responses 的 `error` / `response.failed`）：认得出的类型变成带
+/// 等价 HTTP 状态的上游错误，走重试矩阵与 key 冷却，不再混进"空回复"；认不出的把说明记进 `note`，
+/// 照旧当空流处理、原因只写进诊断。已经有产出的事件不看。
+fn stream_failure_in(event: &ChatEvent, note: &mut Option<String>) -> Option<UpstreamError> {
+    let ChatEvent::Data {
+        raw,
+        has_output: false,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    let failure = okapi_providers::stream_failure::detect(raw)?;
+    match failure.into_upstream_error() {
+        Ok(error) => Some(error),
+        Err(failure) => {
+            *note = Some(failure.message());
+            None
+        }
+    }
+}
+
+/// 空流的收尾：诊断里写上游在流里留下的说明（有的话），其余照旧按空回复处理。
+fn empty_stream(
+    bill: &RequestBilling,
+    buffered: &[ChatEvent],
+    note: Option<String>,
+) -> AttemptError {
+    bill.trace.failure(&UpstreamError::Stream(
+        note.unwrap_or_else(|| codes::EMPTY_COMPLETION.into()),
+    ));
+    empty_completion(bill.ingress, buffered)
 }
 
 /// 空流照旧换渠道、不计费；只有说不出原因的空流才记成这把 key 的瞬态失败。

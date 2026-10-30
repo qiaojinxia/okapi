@@ -47,6 +47,7 @@ pub mod responses_bridge;
 pub mod responses_ws;
 mod retry_after;
 pub mod ssrf;
+pub mod stream_failure;
 pub mod types;
 pub mod vertex;
 

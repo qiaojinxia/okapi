@@ -20,6 +20,9 @@ struct Data {
     fields: Value,
     secrets: Vec<String>,
     attempt_started: Option<Instant>,
+    /// 当前这次尝试的起点，收尾后仍保留：响应头一到就收过一次尾，之后才发现失败（首字前的空流 /
+    /// 流内错误）时，耗时要算到失败的时刻，不然诊断里写着 0.8 秒，整条请求其实等了 8 秒。
+    attempt_origin: Option<Instant>,
     attempt_recorded: bool,
 }
 
@@ -54,6 +57,7 @@ impl Trace {
             fields,
             secrets,
             attempt_started: None,
+            attempt_origin: None,
             attempt_recorded: false,
         })))
     }
@@ -189,6 +193,7 @@ impl Trace {
         if attempts.len() >= MAX_ATTEMPTS {
             data.fields["attempts_truncated"] = json!(true);
             data.attempt_started = None;
+            data.attempt_origin = None;
             data.attempt_recorded = false;
             return;
         }
@@ -202,7 +207,9 @@ impl Trace {
             attempt["egress_proxy_id"] = json!(proxy);
         }
         attempts.push(attempt);
-        data.attempt_started = Some(Instant::now());
+        let now = Instant::now();
+        data.attempt_started = Some(now);
+        data.attempt_origin = Some(now);
         data.attempt_recorded = true;
     }
 
@@ -211,10 +218,13 @@ impl Trace {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let elapsed_ms = |t: Instant| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX);
         let ms = data
             .attempt_started
             .take()
-            .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX));
+            .map(elapsed_ms)
+            // 已经收过尾的尝试又失败了：以失败的时刻为准
+            .or_else(|| error.and(data.attempt_origin).map(elapsed_ms));
         let details = error.map(|err| error_details(err, &data.secrets));
         if let Some((phase, message)) = &details {
             data.fields["error_phase"] = json!(phase);
@@ -412,6 +422,32 @@ mod tests {
             json!({"image_size":"1024x1024", "image_quality":"high", "requested_images":2})
         );
         assert!(!snapshot.to_string().contains("private prompt"));
+    }
+
+    #[test]
+    fn a_failure_after_the_response_headers_is_timed_to_the_failure() {
+        use std::time::Duration;
+        let trace = Trace::new(&HeaderMap::new());
+        {
+            // 响应头在 0.8 秒时到，失败在 8 秒时才发现（两个起点模拟时间的流逝）
+            let mut data = trace.0.lock().unwrap();
+            data.fields["attempts"] = json!([{"channel_key_id": 8}]);
+            data.attempt_origin = Instant::now().checked_sub(Duration::from_secs(8));
+            data.attempt_started = Instant::now().checked_sub(Duration::from_millis(800));
+            data.attempt_recorded = true;
+        }
+        trace.finish(Some(200), None);
+        let snapshot = trace.snapshot();
+        let at_headers = snapshot["attempts"][0]["duration_ms"].as_u64().unwrap();
+        assert!((800..2_000).contains(&at_headers), "{at_headers}");
+        assert_eq!(snapshot["attempts"][0]["outcome"], "success");
+        // 首字前才发现是空流：整次尝试从开始算，诊断要如实写
+        trace.failure(&UpstreamError::Stream("empty_completion".into()));
+        let snapshot = trace.snapshot();
+        let at_failure = snapshot["attempts"][0]["duration_ms"].as_u64().unwrap();
+        assert!(at_failure >= 8_000, "{at_failure}");
+        assert_eq!(snapshot["attempts"][0]["outcome"], "failure");
+        assert_eq!(snapshot["error_message"], "empty_completion");
     }
 
     #[test]

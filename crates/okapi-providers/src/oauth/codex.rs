@@ -405,11 +405,15 @@ async fn collect_json(mut handle: StreamHandle) -> Result<ChatResponse, Upstream
                 break;
             }
             "error" => {
-                return Err(UpstreamError::Status {
-                    status: 502,
-                    body: Bytes::from(raw),
-                    retry_after_secs: None,
-                });
+                // 认得出的类型按等价状态走重试矩阵 / key 冷却（过载 503、用量用完 429、上下文超长 400 …），
+                // 认不出的照旧 502 带原文，与流式路径同一套分类
+                return Err(crate::stream_failure::detect(&raw)
+                    .and_then(|failure| failure.into_upstream_error().ok())
+                    .unwrap_or_else(|| UpstreamError::Status {
+                        status: 502,
+                        body: Bytes::from(raw),
+                        retry_after_secs: None,
+                    }));
             }
             _ => {}
         }
@@ -596,16 +600,41 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["output"][0]["id"], "fresh", "终态自带 output 时以它为准");
 
-        let failing = StreamHandle {
-            upstream_request_id: None,
-            events: Box::pin(futures::stream::iter(vec![data(
+        // 认得出的流内错误按等价状态返回；认不出的仍是 502 带原文
+        for (raw, expected) in [
+            (
                 r#"{"type":"error","code":"server_error","message":"boom"}"#,
-            )])),
-        };
-        assert!(matches!(
-            collect_json(failing).await,
-            Err(UpstreamError::Status { status: 502, .. })
-        ));
+                500,
+            ),
+            (
+                r#"{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"busy"}}"#,
+                503,
+            ),
+            (
+                r#"{"type":"error","error":{"type":"usage_limit_reached","message":"used up","resets_in_seconds":60}}"#,
+                429,
+            ),
+            (
+                r#"{"type":"error","error":{"code":"context_length_exceeded","message":"too long"}}"#,
+                400,
+            ),
+            (
+                r#"{"type":"error","error":{"code":"brand_new_code","message":"?"}}"#,
+                502,
+            ),
+        ] {
+            let failing = StreamHandle {
+                upstream_request_id: None,
+                events: Box::pin(futures::stream::iter(vec![data(raw)])),
+            };
+            assert!(
+                matches!(
+                    collect_json(failing).await,
+                    Err(UpstreamError::Status { status, .. }) if status == expected
+                ),
+                "{raw}"
+            );
+        }
 
         let truncated = StreamHandle {
             upstream_request_id: None,
