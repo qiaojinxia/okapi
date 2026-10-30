@@ -121,6 +121,19 @@ async fn mock_token(
         st.refresh_started.notify_one();
         st.refresh_continue.notified().await;
     }
+    if grant == "authorization_code" && body.contains("bad-code") && client_id.starts_with("app_") {
+        // auth.openai.com 的原文（2026-10-29 线上：换码被拒，错误是对象形，没有字符串 invalid_grant）
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": {
+                "message": "Invalid request. Please try again later.",
+                "type": "invalid_request_error",
+                "param": null,
+                "code": "token_exchange_user_error",
+            }})),
+        )
+            .into_response();
+    }
     if grant == "authorization_code" && body.contains("bad-code") {
         // 上游原文（2026-10-15 线上：贴错的授权码）
         return (
@@ -1196,6 +1209,41 @@ async fn rejected_authorization_code_is_a_client_error() {
         .bearer_auth(&env.admin_token)
         .json(&json!({"state": state, "code": format!("bad-code#{state}"),
             "name": format!("bad-{}", Uuid::new_v4().simple()), "models": [env.model],
+            "token_url": format!("http://{}/token", env.mock)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "oauth_code_invalid", "{body}");
+}
+
+/// Codex 的拒绝是 OpenAI 的对象形错误（`token_exchange_user_error`），同样是操作问题：
+/// 2026-10-29 线上这条被当成上游故障回了 502，页面只能显示「网关错误」。
+#[tokio::test]
+async fn rejected_codex_authorization_code_is_a_client_error() {
+    let env = setup().await;
+    let client = reqwest::Client::new();
+    let started: Value = client
+        .post(format!("http://{}/admin/channels/oauth/start", env.console))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"provider": "codex"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let state = started["state"].as_str().unwrap();
+    let response = client
+        .post(format!(
+            "http://{}/admin/channels/oauth/exchange",
+            env.console
+        ))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"state": state,
+            "code": format!("http://localhost:1455/auth/callback?code=bad-code&state={state}"),
+            "name": format!("bad-codex-{}", Uuid::new_v4().simple()), "models": [env.model],
             "token_url": format!("http://{}/token", env.mock)}))
         .send()
         .await

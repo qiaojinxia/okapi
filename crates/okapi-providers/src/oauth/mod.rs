@@ -155,6 +155,23 @@ pub fn is_invalid_grant(status: u16, body: &[u8]) -> bool {
     }
 }
 
+/// 换码（authorization_code）被上游拒掉：授权码贴错、过期、已用过，或 PKCE / state 对不上——
+/// 是操作问题，重新授权即可，不是网关故障。标准形是 `{"error":"invalid_grant"}`；auth.openai.com
+/// 回对象形 `{"error":{"code":"token_exchange_user_error",…}}`（"用户侧错误"的统称，说明只有一句
+/// "Invalid request. Please try again later."），2026-10-29 线上因此被当成上游故障回了 502。
+#[must_use]
+pub fn is_rejected_code(status: u16, body: &[u8]) -> bool {
+    if !matches!(status, 400 | 401) {
+        return false;
+    }
+    let v: Value = serde_json::from_slice(body).unwrap_or_default();
+    let code = v
+        .get("error")
+        .and_then(|e| e.as_str().or_else(|| e.get("code").and_then(Value::as_str)))
+        .unwrap_or_default();
+    matches!(code, "invalid_grant" | "token_exchange_user_error")
+}
+
 /// 说明里是不是在讲凭据本身失效。按词比对：`grant_type` 里的 grant 不算 grant；
 /// 讲缺参数 / 不认识的参数的是形状错，哪怕参数名里带 grant、refresh_token。
 fn names_dead_credential(text: &str) -> bool {
@@ -325,6 +342,30 @@ mod tests {
         }
         assert!(!is_invalid_grant(500, b"upstream down"));
         assert!(!is_invalid_grant(429, br#"{"error":"rate_limited"}"#));
+    }
+
+    #[test]
+    fn rejected_authorization_code_detection() {
+        // 标准形与 auth.openai.com 的对象形（2026-10-29 线上原文）
+        assert!(is_rejected_code(400, br#"{"error":"invalid_grant"}"#));
+        assert!(is_rejected_code(
+            401,
+            br#"{"error":"invalid_grant","error_description":"Invalid 'code' in request."}"#
+        ));
+        assert!(is_rejected_code(
+            400,
+            br#"{"error":{"message":"Invalid request. Please try again later.","type":"invalid_request_error","param":null,"code":"token_exchange_user_error"}}"#
+        ));
+        // 上游自己的故障、限流、缺参数都不是"码贴错了"，仍按网关侧失败处理
+        for (status, body) in [
+            (400, br#"{"error":"invalid_request","error_description":"Missing required parameter: client_id"}"#.as_slice()),
+            (400, br#"{"error":{"type":"invalid_request_error","code":"invalid_value","message":"x"}}"#.as_slice()),
+            (400, b"not json".as_slice()),
+            (429, br#"{"error":"invalid_grant"}"#.as_slice()),
+            (500, br#"{"error":{"code":"token_exchange_user_error"}}"#.as_slice()),
+        ] {
+            assert!(!is_rejected_code(status, body), "{status} {}", String::from_utf8_lossy(body));
+        }
     }
 
     #[test]

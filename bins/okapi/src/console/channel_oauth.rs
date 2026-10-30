@@ -267,13 +267,10 @@ pub async fn exchange(
             tracing::warn!(provider, error = %err, detail, "oauth code exchange failed");
             match err {
                 // 授权码贴错、过期或已用过：是操作问题不是网关故障，回 400 让页面提示重新授权
+                // （Anthropic 回字符串形 invalid_grant，OpenAI 回对象形 token_exchange_user_error）
                 UpstreamError::Status {
-                    status: 400 | 401,
-                    ref body,
-                    ..
-                } if serde_json::from_slice::<serde_json::Value>(body)
-                    .is_ok_and(|v| v["error"] == "invalid_grant") =>
-                {
+                    status, ref body, ..
+                } if okapi_providers::oauth::is_rejected_code(status, body) => {
                     AppError::new(StatusCode::BAD_REQUEST, "oauth_code_invalid")
                 }
                 UpstreamError::Status { status, .. } => {
