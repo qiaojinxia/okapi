@@ -268,6 +268,76 @@ async fn worker_alerts_carry_actionable_payloads() {
     tmp.teardown().await;
 }
 
+/// 对账恰好扫在结算窗口里（Redis 已扣、PG 事件还没落）看到的差异不是漂移：不记「不会自愈」的 error，
+/// 也不发 `drift` 通知。线上 2026-10-29 为此记过一条，差额正好是同一秒结算的那笔请求（66,249µ），
+/// 之后十几个小时零差异。真漂移（隔了窗口仍在）照报，并且复核会让这一轮多等一个窗口。
+#[tokio::test]
+async fn a_gap_that_closes_within_the_settle_window_is_not_alerted() {
+    okapi_store::test_support::assert_isolated();
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let (sink, hits, bodies) = spawn_sink().await;
+    let (notifier, redis, tmp) = temp_db_notifier(&sink).await;
+    let ledger =
+        okapi_ledger::BalanceLedger::new(okapi_store::connect_redis(&redis_url).await.unwrap());
+
+    // 起手三处一致：Redis 入账 + PG 事件 + 展示快照
+    let suffix = Uuid::new_v4().simple().to_string();
+    let user = okapi_store::provision::create_user(&tmp.pool, &format!("st-{suffix}"))
+        .await
+        .unwrap();
+    let amount = okapi_domain::Money::from_micros(9_000_000);
+    ledger.credit(user, amount).await.unwrap();
+    okapi_ledger::pg::record_credit(&tmp.pool, user, amount, "adjust", "test", json!({}))
+        .await
+        .unwrap();
+    assert!(
+        okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, None, &notifier)
+            .await
+            .unwrap()
+            .is_empty(),
+        "起手应当一致"
+    );
+
+    // Redis 先动了，账本 0.7 秒后才追平：首轮能扫到，但窗口内就消失了
+    ledger.drain(user).await.unwrap();
+    let catch_up = {
+        let ledger = ledger.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            ledger.credit(user, amount).await.unwrap();
+        })
+    };
+    let drifts = okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, None, &notifier)
+        .await
+        .unwrap();
+    catch_up.await.unwrap();
+    assert!(drifts.is_empty(), "窗口里的瞬时态不是漂移：{drifts:?}");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "瞬时态不得惊动运维");
+
+    // 真漂移：窗口过了仍然对不上 → 照报，且是复核时的读数；这一轮确实多等了一个窗口
+    ledger.drain(user).await.unwrap();
+    let started = std::time::Instant::now();
+    let drifts = okapi::worker::reconcile_and_notify(&tmp.pool, &ledger, 1000, None, &notifier)
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1400),
+        "复核要隔一个结算窗口：{:?}",
+        started.elapsed()
+    );
+    assert_eq!(drifts.len(), 1, "{drifts:?}");
+    assert_eq!(drifts[0].user_id, user);
+    assert_eq!(drifts[0].events_sum_micro, 9_000_000);
+    assert_eq!(drifts[0].redis_effective_micro, 0);
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "真漂移要告警一次");
+    let sent = std::mem::take(&mut *bodies.lock().unwrap());
+    assert_eq!(sent[0]["event"], "drift");
+    assert_eq!(sent[0]["payload"]["user_ids"], json!([user]));
+
+    drop(redis);
+    tmp.teardown().await;
+}
+
 /// 订阅命中才发、频率闸生效、事件包络字段完整。
 #[tokio::test]
 async fn notify_dispatch_and_mute() {

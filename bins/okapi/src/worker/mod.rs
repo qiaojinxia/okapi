@@ -722,6 +722,15 @@ pub struct BalanceDrift {
     pub sub_redis_effective_micro: i64,
 }
 
+impl BalanceDrift {
+    /// 任一池的 Redis 有效值、或钱包展示快照，与账本总额对不上。
+    fn is_drifting(&self) -> bool {
+        self.redis_effective_micro != self.events_sum_micro
+            || self.pg_snapshot_micro != self.events_sum_micro
+            || self.sub_redis_effective_micro != self.sub_events_sum_micro
+    }
+}
+
 /// Redis 两池有效值：`(avail + 钱包在途, sub + 订阅在途)`。
 async fn redis_effective(ledger: &BalanceLedger, user_id: i64) -> anyhow::Result<(i64, i64)> {
     let avail = ledger.balance(user_id).await?.as_micros();
@@ -772,7 +781,7 @@ fn log_drifts(drifts: &[BalanceDrift]) {
     }
 }
 
-/// 对账一轮 + 告警（`since` 见 [`reconcile_active_balances`]，None = 全量）：有差异就记 error 日志（逐条最多 20 个用户，其余合并成一条汇总）并派发 `drift`（只带前 20 个用户，够运维定位即可）。
+/// 对账一轮 + 告警（`since` 见 [`reconcile_active_balances`]，None = 全量）：有差异（隔一个结算窗口复核后仍在）就记 error 日志（逐条最多 20 个用户，其余合并成一条汇总）并派发 `drift`（只带前 20 个用户，够运维定位即可）。
 ///
 /// 载荷拼在这里而不是 worker 主循环的 `select!` 臂里，理由同 `notify::balance_low_and_notify`。
 pub async fn reconcile_and_notify(
@@ -783,6 +792,8 @@ pub async fn reconcile_and_notify(
     notifier: &notify::Notifier,
 ) -> anyhow::Result<Vec<BalanceDrift>> {
     let drifts = reconcile_scoped(pg, ledger, limit, since).await?;
+    // 先过结算窗口复核：只在窗口里存在的差异不是漂移，不值得一条「不会自愈」的 error 和一次通知
+    let drifts = confirm_drifts(pg, ledger, drifts).await;
     if drifts.is_empty() {
         tracing::debug!("对账零差异");
         return Ok(drifts);
@@ -946,18 +957,16 @@ async fn reconcile_scoped(
                     continue;
                 }
             };
-            if wallet != row.events_sum
-                || row.balance_micro != row.events_sum
-                || sub != row.sub_events_sum
-            {
-                drifts.push(BalanceDrift {
-                    user_id: row.user_id,
-                    events_sum_micro: row.events_sum,
-                    redis_effective_micro: wallet,
-                    pg_snapshot_micro: row.balance_micro,
-                    sub_events_sum_micro: row.sub_events_sum,
-                    sub_redis_effective_micro: sub,
-                });
+            let drift = BalanceDrift {
+                user_id: row.user_id,
+                events_sum_micro: row.events_sum,
+                redis_effective_micro: wallet,
+                pg_snapshot_micro: row.balance_micro,
+                sub_events_sum_micro: row.sub_events_sum,
+                sub_redis_effective_micro: sub,
+            };
+            if drift.is_drifting() {
+                drifts.push(drift);
             }
         }
     }
@@ -965,6 +974,70 @@ async fn reconcile_scoped(
         tracing::warn!(skipped, %error, "reconcile skipped users whose Redis balance could not be read");
     }
     Ok(drifts)
+}
+
+/// 单个用户此刻的账本总额、展示快照与 Redis 有效值。None = 用户不存在或已删除。
+async fn sample_drift(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    user_id: i64,
+) -> anyhow::Result<Option<BalanceDrift>> {
+    let mut history = okapi_store::history::read(pg).await?;
+    let row: Option<(i64, i64, i64)> = sqlx::query_as(
+        r"
+        SELECT u.balance_micro,
+               COALESCE((SELECT SUM(delta_micro) FROM billing_balance_totals e WHERE e.user_id = u.id AND e.pool = 0), 0)::bigint,
+               COALESCE((SELECT SUM(delta_micro) FROM billing_balance_totals e WHERE e.user_id = u.id AND e.pool = 1), 0)::bigint
+        FROM users u WHERE u.id = $1 AND u.deleted_at IS NULL
+        ",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *history)
+    .await?;
+    // Release the retention lock and PG connection before any Redis IO.
+    history.commit().await?;
+    let Some((pg_snapshot_micro, events_sum_micro, sub_events_sum_micro)) = row else {
+        return Ok(None);
+    };
+    let (redis_effective_micro, sub_redis_effective_micro) =
+        redis_effective(ledger, user_id).await?;
+    Ok(Some(BalanceDrift {
+        user_id,
+        events_sum_micro,
+        redis_effective_micro,
+        pg_snapshot_micro,
+        sub_events_sum_micro,
+        sub_redis_effective_micro,
+    }))
+}
+
+/// 首轮扫出的差异隔一个结算窗口再看一眼，仍不平的才算漂移（报告复核时的读数）。
+///
+/// 结算是响应返回后的后台任务：Redis commit 与 PG 事件落库不在同一瞬间（[`SETTLE_WINDOW`]），
+/// 一遍扫描恰好落在两者之间，就会看到「Redis 比账本低一笔」。线上 2026-10-29 因此记过一条
+/// 「不会自愈」的 error，差额正好是同一秒结算的那笔请求，随后十几小时零差异。真漂移
+/// （Redis 被清空、回滚到旧快照）一直都在，不会被复核放过；复核读失败时保留首轮读数，宁可多报。
+async fn confirm_drifts(
+    pg: &PgPool,
+    ledger: &BalanceLedger,
+    first: Vec<BalanceDrift>,
+) -> Vec<BalanceDrift> {
+    if first.is_empty() {
+        return first;
+    }
+    tokio::time::sleep(SETTLE_WINDOW).await;
+    let mut confirmed = Vec::with_capacity(first.len());
+    for earlier in first {
+        match sample_drift(pg, ledger, earlier.user_id).await {
+            Ok(Some(now)) if now.is_drifting() => confirmed.push(now),
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(user_id = earlier.user_id, %error, "reconcile re-check failed; keeping the first reading");
+                confirmed.push(earlier);
+            }
+        }
+    }
+    confirmed
 }
 
 /// 一个用户的对账修复结果。
@@ -1048,7 +1121,8 @@ pub async fn repair_balance(
 /// 还要过 `settle_gate` 信号量），窗口内 Redis 比账本**低一笔**——对账会把它看成漂移。
 ///
 /// 这对修复是致命的：照着尚未记入那笔扣费的账本去重建，等于把正在结算的钱退回去。
-/// 所以修复前采两次样，只有两次完全一致才动手。
+/// 所以修复前采两次样，只有两次完全一致才动手；对账告警同样隔一个窗口复核
+/// （[`confirm_drifts`]），免得把窗口里的瞬时态报成「不会自愈」的漂移。
 const SETTLE_WINDOW: Duration = Duration::from_millis(1500);
 
 /// 漂移是否稳定（不是结算窗口的瞬时态）。稳定则返回该用户的账本权威值。
