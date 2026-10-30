@@ -3120,6 +3120,39 @@ new-api 迁移来的令牌分组、管理员在后台给 key 直接钉的组都�
 `console_pricing_catalog`（401 / 403 / 400 / 响应形状 / 联想封顶）、`console_channel_test::draft_model_discovery_works_before_the_channel_exists`、
 前端 `model-catalog.spec`、`channel-fetch-models.spec`。
 
+### 11.49 线上日志排查（2026-10-30）：四处误报 / 误分类
+
+读 25 小时的应用日志（WARN 以上 20 来条）加 ClickHouse 请求日志、PG 审计，逐条归因后修了四处；其余（代理 2 / 4 的传输故障、
+`quota observation unavailable`）是外部原因，同 key 重试 + failover 都按预期工作，没动。
+
+- **对账告警把结算窗口当成漂移**：`reconcile_and_notify` 一遍扫描恰好落在"Redis 已扣、PG 事件还没落"之间，就记一条
+  「对账差异（不会自愈）」error 并派发 `drift`。线上那条差额 66,249µ 正好等于同一秒结算的一笔请求，之后十几个小时零差异。
+  修复路径早有这层保护（`stable_drift` / `repair_drifted` 隔 `SETTLE_WINDOW` 采两次样），告警路径没有。现在首轮扫出的差异隔一个窗口
+  逐用户复核（`confirm_drifts`），仍不平的才记 error / 通知，报复核时的读数；复核读失败保留首轮结果（宁可多报）。
+  真漂移不受影响，只是这一轮多等 1.5 秒。`GET /admin/reconciliation` 与 `repair_drifted` 不变。
+- **Codex 换码被拒回 502**：控制台只认字符串形 `{"error":"invalid_grant"}`，auth.openai.com 回对象形
+  `{"error":{"code":"token_exchange_user_error",…}}`（授权码贴错 / 过期 / 已用过 / PKCE 对不上的统称），落进"上游故障"分支回了
+  502 `upstream_error`，页面只能显示网关错误。`okapi_providers::oauth::is_rejected_code` 两种形状一起认，回 400 `oauth_code_invalid`。
+- **首字前的流内 error 事件被记成 `empty_completion`**：ChatGPT 后端过载时先回 200 和开场事件，约 7 秒后在流里发
+  `{"type":"error","error":{"code":"server_is_overloaded",…}}`。Anthropic 适配器早把流内 `error` 翻成带等价 HTTP 状态的错误；
+  Responses / OpenAI chat 的流没有这一步，网关只看到一条没有产出的流：原因丢了（渠道"测试"按钮的审计里倒是留着原文），
+  重试矩阵与 key 冷却也按空回复走。新增 `okapi_providers::stream_failure`，网关的首字缓冲遇到失败事件（Responses 的
+  `error` / `response.failed`，chat 流里没有 `type` 的块带顶层 `error` 对象）时：认得出的 `code` / `type` 按等价状态走原有矩阵
+  （`server_is_overloaded` / `slow_down` / `service_unavailable_error` → 503；`rate_limit_exceeded` / `usage_limit_reached` /
+  `insufficient_quota` → 429，冷却取上游给的 `resets_in_seconds` / `resets_at`；`server_error` → 500；`context_length_exceeded` /
+  `invalid_prompt` → 400 原样回给客户端）；认不出的照旧当空流、不计费，只把说明写进诊断。**不**从流里的一句话推 401 / 403：
+  状态会驱动 key 状态机，判一把 key 失效不能凭它。Codex 非流式聚合（`collect_json`）遇到 `error` 事件走同一套分类（此前一律 502）。
+- **attempt 的 `duration_ms` 只算到响应头**：上面那两次失败的诊断写着 0.7 / 0.8 秒，整条请求却是 7 / 8 秒，白白怀疑了一阵"请求前
+  有 7 秒空转"。响应头一到就收过一次尾，之后才发现失败时不再更新。现在失败按尝试起点重算，成功仍记到响应头。
+- **出口代理探测的连续失败计数是固定窗口**：`incr_by_with_ttl` 的 TTL 从第一次失败起算，不顺延；代理 4 不通了 50 分钟，日志里的
+  `consecutive` 是 1,2,3,1,2,3（每 3 个周期归一）。探测专用 `incr_sliding`（INCR 与 EXPIRE 同一脚本，每次失败顺延），
+  "跨三轮有效"的本意才成立。其余固定窗口的调用方（限流、月累计、配额退避）语义不变。
+
+**验收**：`worker_notify::a_gap_that_closes_within_the_settle_window_is_not_alerted`（瞬时态不报、真漂移照报且多等一个窗口）、
+`oauth` 单测 + `gateway_oauth_channels::rejected_codex_authorization_code_is_a_client_error`、`stream_failure` 单测 +
+`gateway_oauth_channels` 的四个 `codex_*_error_before_output_*` 用例（503 重试与诊断原话 / 400 原样回 / 429 按恢复时间冷却 /
+认不出的仍是 `empty_completion` 但诊断有原话）、`diagnostics` 单测、`egress_proxies::consecutive_failure_counter_slides_with_every_failure`。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
