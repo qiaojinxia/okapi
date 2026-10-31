@@ -101,6 +101,11 @@ async fn mock(provider: &str) -> (SocketAddr, Seen) {
 /// 建一条 `provider` 方言的渠道 + 一个基座模型（倍率 1.0）+ 一个 `@effort:low`
 /// 定价变体（倍率 3.0，用来验证"参数改注入、不改计费名"）。
 async fn setup(provider: &str) -> Bed {
+    setup_as(provider, None).await
+}
+
+/// 同 [`setup`]，基座模型名可指定：参数档位表按上游真实模型名匹配，随机名永远落在透传档。
+async fn setup_as(provider: &str, model: Option<&str>) -> Bed {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
     let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
@@ -110,7 +115,7 @@ async fn setup(provider: &str) -> Bed {
 
     let (upstream, seen) = mock(provider).await;
 
-    let base = format!("rp-{suffix}");
+    let base = model.map_or_else(|| format!("rp-{suffix}"), str::to_owned);
     okapi_store::provision::create_model_ratio(&pg, &base, "1.0", "1.0", "1.0")
         .await
         .unwrap();
@@ -331,4 +336,35 @@ async fn anthropic_thinking_budget_reaches_an_openai_upstream() {
         up["reasoning_effort"], "low",
         "预算 4096 应按逆映射折成 low：{up}"
     );
+}
+
+/// 原生 Messages 客户端（Claude Code）：`thinking:{adaptive}` + 自己选的 `output_config.effort`。
+/// 此前整个 effort 被 thinking 折出的缺省档（medium）盖掉，`/effort high|max` 形同虚设。
+#[tokio::test]
+async fn native_messages_effort_reaches_the_upstream_unchanged() {
+    let bed = setup_as("anthropic", Some("claude-sonnet-5-5")).await;
+    for (i, effort) in ["low", "high", "xhigh", "max"].into_iter().enumerate() {
+        let status = reqwest::Client::new()
+            .post(format!("http://{}/v1/messages", bed.gateway))
+            .bearer_auth(&bed.token)
+            .json(&json!({
+                "model": bed.base, "max_tokens": 4096,
+                "messages": [{"role": "user", "content": format!("native-{i}")}],
+                "thinking": {"type": "adaptive", "display": "updates"},
+                "output_config": {"effort": effort}
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16();
+        assert_eq!(status, 200, "{effort}");
+        let up = bed.upstream();
+        assert_eq!(
+            up["output_config"]["effort"], effort,
+            "客户端选的档位必须原样到上游：{up}"
+        );
+        assert_eq!(up["thinking"]["type"], "adaptive");
+        assert_eq!(up["thinking"]["display"], "updates", "thinking 对象原样");
+    }
 }

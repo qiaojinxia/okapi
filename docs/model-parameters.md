@@ -28,6 +28,12 @@ Gemini 2.5 instead offer an optional positive thinking-token budget. Budget is
 not equivalent to effort; defaults remain with the model. The output cap includes
 reasoning and is never enlarged by the modern effort translator.
 
+A native Messages request that already carries `output_config.effort` (Claude Code
+always does) keeps it exactly as written: it is neither replaced by the level folded
+from its `thinking` object nor judged against this table, because the table can lag
+the upstream and the upstream rejects what it does not accept. The unified spellings
+(`reasoning_effort`, `reasoning.effort`) still take precedence and are still validated.
+
 Model/key changes reset model-specific parameters; old local settings and presets
 remain readable but incompatible fields cannot be sent. Kimi K3 follow-up turns
 include the assistant's `reasoning_content` for the same requested model. Signed

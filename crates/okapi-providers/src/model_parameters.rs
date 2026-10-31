@@ -310,16 +310,24 @@ pub fn apply_effort(
     let result = (|| {
         let original: Value =
             serde_json::from_slice(source).map_err(|e| UpstreamError::Build(e.to_string()))?;
-        let level = original
+        let unified = original
             .pointer("/reasoning/effort")
             .or_else(|| original.get("reasoning_effort"))
             .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| directive.map(|d| d.effective_effort().as_str().to_owned()));
+            .map(str::to_owned);
+        // 同方言的原生写法：客户端自己写了 `output_config.effort`（Claude Code 一直带着）是显式选择，
+        // 原样保留。`thinking` 对象折出的档位只是缺省猜测（没有预算时恒为 medium），不能压过它；
+        // 上游认不认这个档位也由上游裁决，这张表可能落后于上游，不替它拒。统一字段另有明说才改写。
+        let keep_native = dialect == "anthropic"
+            && unified.is_none()
+            && original
+                .pointer("/output_config/effort")
+                .is_some_and(Value::is_string);
+        let level = unified.or_else(|| directive.map(|d| d.effective_effort().as_str().to_owned()));
         let Some(level) = level else {
             return Ok(built.clone());
         };
-        if !profile.efforts.contains(&level.as_str()) {
+        if !keep_native && !profile.efforts.contains(&level.as_str()) {
             return Err(UpstreamError::Status { status: 400, body: Bytes::from(serde_json::to_vec(&json!({"error": {"type": "invalid_request_error", "code": "invalid_request_error", "param": "reasoning_effort", "message": format!("Unsupported reasoning effort: {level}")}})).unwrap_or_default()), retry_after_secs: None });
         }
         let mut v: Value =
@@ -333,11 +341,13 @@ pub fn apply_effort(
         }
         match dialect {
             "anthropic" => {
-                obj.entry("output_config")
-                    .or_insert_with(|| json!({}))
-                    .as_object_mut()
-                    .ok_or_else(|| UpstreamError::Build("output_config".into()))?
-                    .insert("effort".into(), json!(level));
+                if !keep_native {
+                    obj.entry("output_config")
+                        .or_insert_with(|| json!({}))
+                        .as_object_mut()
+                        .ok_or_else(|| UpstreamError::Build("output_config".into()))?
+                        .insert("effort".into(), json!(level));
+                }
                 // Opus 4.5 supports effort independently of thinking; newer
                 // models support adaptive. Don't overwrite explicit native thinking.
                 if original.get("thinking").is_none()
@@ -561,5 +571,146 @@ mod tests {
         let v: Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["max_tokens"], 2049);
         assert_eq!(v["thinking"]["budget_tokens"], 2048);
+    }
+
+    /// 同方言透传一份原生 Messages 请求（built = source），指令按网关的做法从请求体解析。
+    fn native_messages(model: &str, source: &Value) -> Result<Value, UpstreamError> {
+        let bytes = Bytes::from(source.to_string());
+        let directive = crate::reasoning::parse_request_value(source).merge(None);
+        apply_effort(
+            &profile("anthropic", model, None),
+            "anthropic",
+            &bytes,
+            &bytes,
+            directive,
+            false,
+        )
+        .expect("按档位的 Claude 模型走 apply_effort")
+        .map(|out| serde_json::from_slice(&out).unwrap())
+    }
+
+    /// Claude Code 的原生请求：`thinking:{adaptive}` + `output_config.effort`。此前 `thinking` 对象
+    /// 折出的缺省档（没有预算时恒为 medium）把客户端自己选的档位整个盖掉：`/effort high`、`max`
+    /// 一律变 medium，`low` 反而更费。
+    #[test]
+    fn native_effort_survives_adaptive_thinking() {
+        let all: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+        for (model, efforts) in [
+            ("claude-sonnet-5-5", all),
+            ("claude-opus-5-5", all),
+            ("claude-opus-4-6", &all[..3]),
+        ] {
+            for effort in efforts {
+                let source = json!({
+                    "model": model, "max_tokens": 4096,
+                    "thinking": {"type": "adaptive", "display": "updates"},
+                    "output_config": {"effort": effort},
+                    "messages": [{"role": "user", "content": "hi"}],
+                });
+                let out = native_messages(model, &source).unwrap();
+                assert_eq!(out["output_config"]["effort"], *effort, "{model}");
+                assert_eq!(
+                    out["thinking"], source["thinking"],
+                    "{model}: thinking 原样"
+                );
+            }
+        }
+    }
+
+    /// 原生档位是客户端对上游说的话：这张表可能落后于上游，不替上游拒（上游不认会自己 400）。
+    #[test]
+    fn native_effort_is_not_judged_by_the_table() {
+        let source = json!({
+            "model": "claude-opus-4-6", "max_tokens": 4096,
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "xhigh"},
+            "messages": [],
+        });
+        assert!(
+            !profile("anthropic", "claude-opus-4-6", None)
+                .efforts
+                .contains(&"xhigh")
+        );
+        let out = native_messages("claude-opus-4-6", &source).unwrap();
+        assert_eq!(out["output_config"]["effort"], "xhigh");
+    }
+
+    /// 模型名后缀负责打开思考，档位仍是客户端原生写的那个。
+    #[test]
+    fn native_effort_is_kept_when_a_suffix_enables_thinking() {
+        let source = json!({
+            "model": "claude-sonnet-5-5", "max_tokens": 4096,
+            "output_config": {"effort": "max"},
+            "messages": [],
+        });
+        let bytes = Bytes::from(source.to_string());
+        let suffix = ReasoningDirective {
+            effort: Some(crate::reasoning::Effort::Low),
+            budget_tokens: None,
+        };
+        let out = apply_effort(
+            &profile("anthropic", "claude-sonnet-5-5", None),
+            "anthropic",
+            &bytes,
+            &bytes,
+            Some(suffix),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["output_config"]["effort"], "max");
+        assert_eq!(v["thinking"], json!({"type": "adaptive"}));
+    }
+
+    /// 只写 effort、没开思考的原生请求不被动：不替客户端打开 thinking。
+    #[test]
+    fn native_effort_without_thinking_is_untouched() {
+        let source = json!({
+            "model": "claude-opus-5-5", "max_tokens": 4096,
+            "output_config": {"effort": "high"},
+            "messages": [],
+        });
+        let out = native_messages("claude-opus-5-5", &source).unwrap();
+        assert_eq!(out, source);
+    }
+
+    /// 统一写法（`reasoning_effort` / `reasoning.effort`）是另一种显式选择：照旧压过原生字段并受这张表约束。
+    #[test]
+    fn unified_effort_still_wins_over_the_native_field() {
+        let source = json!({
+            "model": "claude-sonnet-5-5", "max_tokens": 4096,
+            "thinking": {"type": "adaptive"},
+            "reasoning_effort": "high",
+            "output_config": {"effort": "low"},
+            "messages": [],
+        });
+        let out = native_messages("claude-sonnet-5-5", &source).unwrap();
+        assert_eq!(out["output_config"]["effort"], "high");
+        assert!(out.get("reasoning_effort").is_none());
+
+        let rejected = json!({
+            "model": "claude-sonnet-5-5", "max_tokens": 4096,
+            "reasoning_effort": "minimal",
+            "output_config": {"effort": "low"},
+            "messages": [],
+        });
+        assert!(matches!(
+            native_messages("claude-sonnet-5-5", &rejected),
+            Err(UpstreamError::Status { status: 400, .. })
+        ));
+    }
+
+    /// 没有原生档位时，预算式 thinking 仍折成档位（新模型不收预算）；`thinking` 对象原样留着。
+    #[test]
+    fn budget_thinking_without_native_effort_still_translates() {
+        let source = json!({
+            "model": "claude-opus-5-5", "max_tokens": 64000,
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "messages": [],
+        });
+        let out = native_messages("claude-opus-5-5", &source).unwrap();
+        assert_eq!(out["output_config"]["effort"], "high");
+        assert_eq!(out["thinking"], source["thinking"]);
     }
 }
