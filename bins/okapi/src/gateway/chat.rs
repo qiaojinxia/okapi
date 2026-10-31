@@ -25,6 +25,7 @@ use okapi_api::{ChatRequestProbe, MessagesRequestProbe, ResponsesRequestProbe, U
 use okapi_domain::{BillingState, GroupCode, ModelCode, Money, TokenUsage, UserId};
 use okapi_ledger::{LimitCaps, Pool, ReserveOutcome, SettlementInput};
 use okapi_pricing::{CalcContext, PriceBook, Quote, RatioFp};
+use okapi_providers::account_fault::AccountFault;
 use okapi_providers::convert::tool_loss::{ForeignTools, ToolLossPolicy};
 use okapi_providers::convert::{
     anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o, openai_to_anthropic as convert,
@@ -449,8 +450,14 @@ pub(super) fn failure_kind_of(err: &UpstreamError) -> KeyFailure {
         UpstreamError::Unreachable { proxy_hop, .. } => KeyFailure::Unreachable {
             proxy_hop: *proxy_hop,
         },
-        UpstreamError::Status { .. }
-        | UpstreamError::Connect(_)
+        // 状态码看不出来、正文明说账号不能用了（余额耗尽 / 组织停用 / key 无效，常被包成 400 或
+        // 不带关键词的 403）：这把 key 要按账号级故障登记，否则它会一直被选中、一直失败
+        UpstreamError::Status { .. } => match err.account_fault() {
+            Some(AccountFault::QuotaExhausted) => KeyFailure::QuotaExhausted,
+            Some(AccountFault::Invalid) => KeyFailure::Invalid,
+            None => KeyFailure::Request,
+        },
+        UpstreamError::Connect(_)
         | UpstreamError::Timeout
         | UpstreamError::Stream(_)
         | UpstreamError::Session { .. }
@@ -2190,9 +2197,13 @@ async fn try_model(
     let mut last_status: Option<i16> = None;
     let mut last_channel: Option<(i64, i64)> = None;
     let mut last_upstream = None;
+    let mut last_kind: Option<KeyFailure> = None;
+    // 次数用尽或请求不许改投：候选里可能还有好的，与「整个池都试过了」是两回事（见 `exhausted_reply`）
+    let mut stopped_early = false;
 
     for mut cand in candidates {
         if attempted >= MAX_ATTEMPTS {
+            stopped_early = true;
             break;
         }
         // key 级 RPM 闸：未配置上限时不产生任何 Redis 往返
@@ -2493,6 +2504,7 @@ async fn try_model(
                 super::key_health::failure(&bill.state, &cand, code, failure_kind).await;
                 last_code = code;
                 last_status = upstream_status;
+                last_kind = Some(failure_kind);
                 // allow_fallbacks:false（§11.24）——失败即返回，不改投其它渠道。
                 //
                 // 先判再自增：`failover_count` 记的是"这次请求换了几回渠道"，我们**拒绝**
@@ -2504,6 +2516,7 @@ async fn try_model(
                         request_id = %bill.request_id,
                         "请求声明 allow_fallbacks=false，不再改投"
                     );
+                    stopped_early = true;
                     break;
                 }
                 failover = failover.saturating_add(1);
@@ -2526,21 +2539,43 @@ async fn try_model(
     }
 
     let err_code = last_code;
-    let mut failure = ForwardFailure::app(
-        AppError::new(
-            if err_code == codes::NO_AVAILABLE_CHANNEL {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::BAD_GATEWAY
-            },
-            err_code,
-        ),
-        failover,
-        last_channel,
-    );
+    let reply = exhausted_reply(bill, err_code, last_status, last_kind, stopped_early).await;
+    let mut failure = ForwardFailure::app(reply, failover, last_channel);
+    // 请求日志里仍记真实的上游失败原因；客户端看到的状态与它可以不同（见 `exhausted_reply`）
+    err_code.clone_into(&mut failure.error_code);
     failure.upstream_status = last_status;
     failure.upstream = last_upstream.map(Box::new);
     Err(failure)
+}
+
+/// 所有尝试都在首字前失败后给客户端的回复。上游限流 / 过载的语义要带到客户端：429 让 SDK 按
+/// `Retry-After` 退避，503 表示服务暂时不可用——一律回 502 会让客户端把它当成网关故障。
+/// 其余失败仍是 502 加上一次失败的错误码；日志里的错误码与上游状态不受这里影响。
+///
+/// `Retry-After` 只在整个池都试过了（不是次数用尽或请求不许改投）时给：此时没有候选可试，
+/// 最早有 key 回来的时刻就是客户端该等的时间；候选里可能还有好的，就不替客户端编一个等待时间。
+async fn exhausted_reply(
+    bill: &RequestBilling,
+    code: &'static str,
+    status: Option<i16>,
+    kind: Option<KeyFailure>,
+    stopped_early: bool,
+) -> AppError {
+    let rate_limited = status == Some(429) && matches!(kind, Some(KeyFailure::RateLimited { .. }));
+    let reply = if code == codes::NO_AVAILABLE_CHANNEL || status == Some(529) {
+        AppError::new(StatusCode::SERVICE_UNAVAILABLE, code)
+    } else if rate_limited {
+        AppError::new(StatusCode::TOO_MANY_REQUESTS, codes::RATE_LIMITED).with_param("upstream")
+    } else {
+        return AppError::new(StatusCode::BAD_GATEWAY, code);
+    };
+    if stopped_early {
+        return reply;
+    }
+    match recovery_secs(bill, None).await {
+        Some(secs) => reply.with_retry_after(secs),
+        None => reply,
+    }
 }
 
 /// 按 入口协议 × 渠道协议 构造上游请求体：同方言重写 model 透传，跨方言走出向转换；
@@ -5106,6 +5141,60 @@ mod failure_scope_tests {
         assert!(matches!(
             failure_kind_of(&status(503, "")),
             KeyFailure::Transient
+        ));
+    }
+
+    /// Google 系的 429 把等待时间放在正文的 `RetryInfo.retryDelay`：key 的冷却按它走，不再落到缺省 60 秒。
+    #[test]
+    fn google_retry_info_sets_the_key_cooldown() {
+        let body = r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"34s"}]}}"#;
+        assert!(matches!(
+            failure_kind_of(&status(429, body)),
+            KeyFailure::RateLimited {
+                retry_after_secs: Some(34)
+            }
+        ));
+    }
+
+    #[test]
+    fn account_level_errors_inside_request_statuses_register_on_the_key_and_fail_over() {
+        let credit = r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}}"#;
+        let org = r#"{"type":"error","error":{"type":"invalid_request_error","message":"This organization has been disabled."}}"#;
+        let plain = r#"{"type":"error","error":{"type":"invalid_request_error","message":"messages: bad"}}"#;
+        assert!(matches!(
+            failure_kind_of(&status(400, credit)),
+            KeyFailure::QuotaExhausted
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(400, org)),
+            KeyFailure::Invalid
+        ));
+        // 403 没带凭证关键词，但正文说了组织停用：不再按「资源级拒绝」放过
+        assert!(matches!(
+            failure_kind_of(&status(403, org)),
+            KeyFailure::Invalid
+        ));
+        assert!(matches!(
+            failure_kind_of(&status(400, plain)),
+            KeyFailure::Request
+        ));
+
+        // 入口分类：被包进 400 的账号级错误是可换渠道的失败；同状态的普通请求错误仍原样回客户端
+        match classify_fatal(status(400, credit), 0, (1, 2)) {
+            AttemptError::Retriable {
+                code,
+                upstream_status,
+                failure_kind,
+            } => {
+                assert_eq!(code, "upstream_status");
+                assert_eq!(upstream_status, Some(400));
+                assert!(matches!(failure_kind, KeyFailure::QuotaExhausted));
+            }
+            AttemptError::Fatal(_) => panic!("账号级错误应换渠道"),
+        }
+        assert!(matches!(
+            classify_fatal(status(400, plain), 0, (1, 2)),
+            AttemptError::Fatal(_)
         ));
     }
 }

@@ -90,16 +90,38 @@ impl UpstreamError {
         false
     }
 
-    /// 首字前是否允许 failover 换渠道（§3.6）。402（上游配额/余额耗尽）同样换渠道。
+    /// 首字前是否允许 failover 换渠道（§3.6）。402（上游配额/余额耗尽）同样换渠道；
+    /// 账号级错误即使被包在 400 一类的请求错误里（见 [`Self::account_fault`]）也换——
+    /// 问题在这把 key，不在请求，换个渠道就能成功。
     #[must_use]
     pub fn retriable_before_first_token(&self) -> bool {
         match self {
-            Self::Connect(_) | Self::Unreachable { .. } | Self::Timeout | Self::Stream(_) => true,
-            Self::Status { status, .. } => {
-                matches!(status, 401 | 402 | 403 | 408 | 429 | 500..=599)
-            }
+            Self::Connect(_)
+            | Self::Unreachable { .. }
+            | Self::Timeout
+            | Self::Stream(_)
+            | Self::Status {
+                status: 401 | 402 | 403 | 408 | 429 | 500..=599,
+                ..
+            } => true,
+            Self::Status { .. } => self.account_fault().is_some(),
             Self::Build(reason) => reason.starts_with("channel_control:"),
             Self::Session { .. } => false,
+        }
+    }
+
+    /// 正文明说「这把 key / 账号不能用了」（余额耗尽、组织停用、key 无效）的上游错误。
+    /// 只读 `Status` 错误的正文，且只认不回显调用方输入的位置（见 [`crate::account_fault`]）。
+    #[must_use]
+    pub fn account_fault(&self) -> Option<crate::account_fault::AccountFault> {
+        match self {
+            Self::Status { body, .. } => crate::account_fault::classify(body),
+            Self::Connect(_)
+            | Self::Unreachable { .. }
+            | Self::Timeout
+            | Self::Stream(_)
+            | Self::Build(_)
+            | Self::Session { .. } => None,
         }
     }
 

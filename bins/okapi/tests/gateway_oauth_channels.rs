@@ -1302,7 +1302,9 @@ async fn codex_usage_limit_error_before_output_cools_the_key_until_the_reset() {
         "type": "usage_limit_reached", "message": "The usage limit has been reached",
         "plan_type": "plus", "resets_in_seconds": 5400}));
     let (status, _, body) = codex_stream_request(&env).await;
-    assert_eq!(status, 502, "{body}");
+    // 订阅窗口用完是上游限流：客户端看到 429（而不是网关故障 502），池里只有这一把，Retry-After 随冷却给出
+    assert_eq!(status, 429, "{body}");
+    assert_eq!(body["error"]["code"], "rate_limited", "{body}");
     assert_eq!(key_status(&env, key).await, (3, true), "限流冷却");
     let remaining: f64 = sqlx::query_scalar(
         "SELECT EXTRACT(EPOCH FROM cooldown_until - now())::float8 FROM channel_keys WHERE id = $1",

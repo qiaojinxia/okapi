@@ -81,6 +81,51 @@ async fn mock_401(_body: axum::body::Bytes) -> axum::response::Response {
         .into_response()
 }
 
+/// Anthropic 的 529：服务级过载，不是这把 key 的问题。
+async fn mock_529(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::from_u16(529).unwrap(),
+        axum::Json(
+            json!({"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}),
+        ),
+    )
+        .into_response()
+}
+
+/// Anthropic API key 预付费余额用完：HTTP 400 invalid_request_error，不是 402。
+async fn mock_400_credit(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(json!({"type":"error","error":{"type":"invalid_request_error",
+            "message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}})),
+    )
+        .into_response()
+}
+
+/// 组织被停用：同样是 400。
+async fn mock_400_org(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(
+            json!({"type":"error","error":{"type":"invalid_request_error",
+            "message":"This organization has been disabled."}}),
+        ),
+    )
+        .into_response()
+}
+
+/// 普通的请求错误：问题在请求本身，换哪个渠道都一样。
+async fn mock_400_plain(_body: axum::body::Bytes) -> axum::response::Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        axum::Json(
+            json!({"error":{"message":"messages.0.content: Input should be a valid list",
+            "type":"invalid_request_error"}}),
+        ),
+    )
+        .into_response()
+}
+
 /// `/flip`：置位后像额度用完的账号一样回 429（只给粘性切换用例用）。
 static FLIP_EXHAUSTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -106,6 +151,10 @@ async fn spawn_mock() -> SocketAddr {
         .route("/r429/v1/chat/completions", post(mock_429))
         .route("/r429q/v1/chat/completions", post(mock_429_quota))
         .route("/r401/v1/chat/completions", post(mock_401))
+        .route("/r529/v1/chat/completions", post(mock_529))
+        .route("/r400c/v1/chat/completions", post(mock_400_credit))
+        .route("/r400o/v1/chat/completions", post(mock_400_org))
+        .route("/r400p/v1/chat/completions", post(mock_400_plain))
         .route("/r500/v1/chat/completions", post(mock_500));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -515,7 +564,7 @@ async fn key_state_machine_branches() {
     // 429
     let env = setup(&[("/r429/v1", 0)]).await;
     let resp = post_chat(&env, &env.model, None).await;
-    assert_eq!(resp.status(), 502);
+    assert_eq!(resp.status(), 429, "上游限流的语义带到客户端，不再包成 502");
     let row = sqlx::query!(
         r#"SELECT status, cooldown_until, last_error FROM channel_keys WHERE id = $1"#,
         env.channel_keys[0]
@@ -544,6 +593,140 @@ async fn key_state_machine_branches() {
     .unwrap();
     assert_eq!(row.status, 6, "401 应转 invalid（仅人工恢复）");
     assert!(row.cooldown_until.is_none());
+}
+
+/// 一把 key 的 (status, failed_count, 是否在冷却)。运行时查询：不给 `.sqlx` 缓存添新条目。
+async fn key_row(env: &TestEnv, key: i64) -> (i64, i64, bool) {
+    sqlx::query_as(
+        "SELECT status::bigint, failed_count::bigint, cooldown_until IS NOT NULL FROM channel_keys WHERE id = $1",
+    )
+    .bind(key)
+    .fetch_one(&env.pg)
+    .await
+    .unwrap()
+}
+
+/// 账号级错误被上游包在 400 里（Anthropic 预付费余额用完、组织被停用）：请求本身没错，坏的是这把 key。
+/// 当次改投下一个渠道并成功；这把 key 登记成 quota_exhausted（冷却到次日）/ invalid（仅人工恢复），
+/// 否则它下一次还会被选中、再白白失败一次，落到它头上的那部分请求全部 400。
+#[tokio::test]
+async fn account_level_400_fails_over_and_registers_on_the_key() {
+    for (path, status, cooling) in [("/r400c/v1", 4_i64, true), ("/r400o/v1", 6, false)] {
+        let env = setup(&[(path, 10), ("/ok/v1", 0)]).await;
+        let resp = post_chat(&env, &env.model, None).await;
+        assert_eq!(
+            served_by(&env, resp).await,
+            env.channel_keys[1],
+            "{path}: 应改投到好渠道"
+        );
+        let (key_status, failed, cooldown) = key_row(&env, env.channel_keys[0]).await;
+        assert_eq!(key_status, status, "{path}");
+        assert_eq!(failed, 1, "{path}");
+        assert_eq!(cooldown, cooling, "{path}");
+        let (healthy, _, _) = key_row(&env, env.channel_keys[1]).await;
+        assert_eq!(healthy, 1, "{path}: 好 key 不受牵连");
+    }
+}
+
+/// 对照：同样是 400，普通的请求错误仍是请求本身的问题——原样回给客户端，不换渠道，不动 key。
+#[tokio::test]
+async fn a_plain_400_still_reaches_the_client_and_leaves_the_key_alone() {
+    let env = setup(&[("/r400p/v1", 10), ("/ok/v1", 0)]).await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(resp.status(), 400);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body.to_string().contains("Input should be a valid list"),
+        "上游原文透传：{body}"
+    );
+    let (key_status, failed, _) = key_row(&env, env.channel_keys[0]).await;
+    assert_eq!((key_status, failed), (1, 0));
+}
+
+/// 池里每把 key 都试过且最后一次是上游限流：回 429，`Retry-After` 是最早有 key 回来的时刻（这里是
+/// 上游给的 7 秒），日志里仍记真实的上游错误码与状态。此前一律 502，SDK 把它当网关故障重试。
+#[tokio::test]
+async fn exhausted_rate_limit_reaches_the_client_as_429_with_the_earliest_return() {
+    let env = setup(&[("/r429/v1", 0)]).await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(resp.status(), 429);
+    let seconds: u64 = resp.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((4..=8).contains(&seconds), "Retry-After = {seconds}");
+    let id = rid(&resp);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limited", "{body}");
+    assert_eq!(body["error"]["param"], "upstream", "{body}");
+    let (error_code, upstream_status): (Option<String>, Option<i16>) = {
+        let mut row = None;
+        for _ in 0..50 {
+            row = sqlx::query_as(
+                "SELECT error_code, upstream_status FROM billing_records WHERE request_id = $1",
+            )
+            .bind(id)
+            .fetch_optional(&env.pg)
+            .await
+            .unwrap();
+            if row.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        row.expect("失败也要有记录")
+    };
+    assert_eq!(
+        error_code.as_deref(),
+        Some("upstream_status"),
+        "日志记真实原因，不记对外的 rate_limited"
+    );
+    assert_eq!(upstream_status, Some(429));
+}
+
+/// 次数用尽（MAX_ATTEMPTS）而候选里还有没试过的 key：仍回 429，但不替客户端编一个等待时间。
+#[tokio::test]
+async fn rate_limit_with_untried_keys_left_has_no_retry_after() {
+    let env = setup(&[
+        ("/r429/v1", 0),
+        ("/r429/v1", 0),
+        ("/r429/v1", 0),
+        ("/r429/v1", 0),
+    ])
+    .await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(resp.status(), 429);
+    assert!(
+        !resp.headers().contains_key("retry-after"),
+        "还有好 key 可能在后面，不该让客户端干等"
+    );
+    let untouched: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM channel_keys WHERE id = ANY($1) AND status = 1")
+            .bind(&env.channel_keys)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(untouched, 1, "三次尝试冷却三把，第四把没碰");
+}
+
+/// 以最后一次失败为准：先 429 再 5xx 仍是 502（真实的最后一个故障），不被前面的限流带偏。
+#[tokio::test]
+async fn the_last_failure_decides_what_the_client_sees() {
+    let env = setup(&[("/r429/v1", 10), ("/r500/v1", 0)]).await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(resp.status(), 502);
+    assert!(!resp.headers().contains_key("retry-after"));
+}
+
+/// 上游 529（服务级过载）：对客户端是 503，不是 502；key 状态机照旧按它登记。
+#[tokio::test]
+async fn upstream_overload_reaches_the_client_as_503() {
+    let env = setup(&[("/r529/v1", 0)]).await;
+    let resp = post_chat(&env, &env.model, None).await;
+    assert_eq!(resp.status(), 503);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "upstream_status", "{body}");
 }
 
 /// 给令牌单独建一个池（全部渠道只在这个池里），选路策略由参数给出。

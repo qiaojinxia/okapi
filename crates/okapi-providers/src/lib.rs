@@ -14,6 +14,7 @@
 //! 协议转换全部复用（IMPLEMENTATION §11.35）。
 
 pub mod account;
+pub mod account_fault;
 pub mod anthropic;
 mod anthropic_usage;
 pub mod aws_eventstream;
