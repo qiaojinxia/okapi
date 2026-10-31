@@ -413,3 +413,40 @@ select:not(.appearance-none, [multiple], [size]) {
     linear-gradient(to bottom, color-mix(in oklch, var(--border) 70%, transparent) 1px, transparent 1px);
   background-size: 32px 32px;
 }
+
+/* 渠道编辑抽屉：沿用渠道列表的轻量分区与语义层级。只装饰顶层段落，
+   嵌套的 key / 模型选择器仍保留自己的密度，不会出现层层套卡。 */
+.channel-editor {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1rem;
+}
+.channel-editor > [data-slot="field-group"],
+.channel-editor > [data-slot="optional-section"],
+.channel-editor > [data-slot="channel-key-schedule"] {
+  border: 1px solid color-mix(in oklch, var(--border) 78%, transparent);
+  border-radius: 0.875rem;
+  background: color-mix(in oklch, var(--muted) 34%, transparent);
+  padding: 1rem;
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.025);
+}
+.channel-editor > [data-slot="field-group"] [data-slot="field-group-title"],
+.channel-editor > [data-slot="channel-key-schedule"] [data-slot="field-group-title"] {
+  color: var(--fg);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.channel-editor > [data-slot="optional-section"] [data-slot="optional-section-title"] {
+  color: var(--fg);
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.channel-editor > [data-slot="optional-section"] > details > summary {
+  border-radius: 0.5rem;
+}
+.channel-editor > [data-slot="optional-section"] > details > summary:hover [data-slot="optional-section-title"] {
+  color: var(--primary);
+}

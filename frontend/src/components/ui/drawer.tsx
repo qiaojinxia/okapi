@@ -12,6 +12,8 @@ interface DrawerProps {
   title: string
   /// 一句话说明这个抽屉在做什么。表单字段再清楚，也不如先告诉用户"这一步是干什么的"。
   description?: string
+  /// 标题前的实体标识（如渠道品牌），帮助用户在浮层里确认正在编辑的对象。
+  icon?: React.ReactNode
   /// 底部固定操作区（保存/取消）。放在底部而非表单末尾，长表单滚动时按钮始终可达。
   footer?: React.ReactNode
   /// 宽度档：md 适合单列表单，lg 给带表格/图的抽屉（用户管理、路由诊断）。
@@ -41,6 +43,7 @@ export function Drawer({
   onClose,
   title,
   description,
+  icon,
   footer,
   size = 'md',
   children,
@@ -70,11 +73,14 @@ export function Drawer({
         )}
       >
         <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-6">
-          <div className="flex min-w-0 flex-col gap-1">
-            <h2 className="truncate text-base font-semibold">{title}</h2>
-            {description !== undefined && (
-              <p className="text-xs leading-5 text-muted-foreground">{description}</p>
-            )}
+          <div className="flex min-w-0 flex-1 items-start gap-3">
+            {icon}
+            <div className="flex min-w-0 flex-col gap-1 pt-0.5">
+              <h2 className="truncate text-[17px] leading-6 font-semibold tracking-[-0.015em]">{title}</h2>
+              {description !== undefined && (
+                <p className="text-xs leading-5 text-muted-foreground">{description}</p>
+              )}
+            </div>
           </div>
           <Button size="icon" variant="ghost" className="-mt-1 -mr-2 h-10 w-10 shrink-0" aria-label={t('common:close')} onClick={onClose}>
             <X className="h-4 w-4" />
@@ -106,9 +112,9 @@ export function FieldGroup({
   children: React.ReactNode
 }) {
   return (
-    <section className="flex flex-col gap-3 border-t border-border py-4 first:border-t-0 first:pt-0 last:pb-0">
+    <section data-slot="field-group" className="flex flex-col gap-3 border-t border-border py-4 first:border-t-0 first:pt-0 last:pb-0">
       <div className="flex flex-col gap-0.5">
-        <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+        <h3 data-slot="field-group-title" className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
           {title}
         </h3>
         {hint !== undefined && <p className="text-xs leading-5 text-muted-foreground/80">{hint}</p>}

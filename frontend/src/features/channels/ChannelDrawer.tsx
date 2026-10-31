@@ -1,4 +1,5 @@
 import { ModelTagsInput } from '@/features/models/model-input'
+import { Plus } from 'lucide-react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -12,6 +13,7 @@ import { KeyParamRow } from '@/features/channels/KeyParamRow'
 import { OAuthKeyHealth } from '@/features/channels/oauth-key-health'
 import { ModelPicker } from '@/features/channels/ModelPicker'
 import { OAuthLoginCard } from '@/features/channels/OAuthLoginCard'
+import { ProviderMark } from '@/features/channels/ProviderChip'
 import { ClientProfileEditor } from '@/features/channels/ClientProfileEditor'
 import { CodexClientEditor } from '@/features/channels/CodexClientEditor'
 import { ChannelControlEditor } from '@/features/channels/ChannelControlEditor'
@@ -85,23 +87,27 @@ function ExtraHeadersEditor({
   const setRow = (id: number, patch: Partial<KeyValueRow>) => commit(draft.map((row) => (row.id === id ? { ...row, ...patch } : row)))
   const removeRow = (id: number) => commit(draft.filter((row) => row.id !== id))
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{t('admin:extraHeaders')}</Label>
-      <p className="text-xs text-muted-foreground">{t('admin:extraHeadersHint')}</p>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1">
+        <Label className="text-[13px] text-foreground">{t('admin:extraHeaders')}</Label>
+        <p className="text-xs leading-5 text-muted-foreground">{t('admin:extraHeadersHint')}</p>
+      </div>
       {draft.map((row) => (
-        <div key={row.id} className="flex gap-2">
+        <div key={row.id} className="flex items-center gap-2 rounded-lg border border-border/60 bg-card/70 p-1.5">
           <Input
+            className="h-8 border-transparent bg-transparent shadow-none"
             value={row.name}
             placeholder="OpenAI-Organization"
             onChange={(e) => setRow(row.id, { name: e.target.value })}
           />
-          <Input value={row.val} placeholder="org-…" onChange={(e) => setRow(row.id, { val: e.target.value })} />
-          <Button type="button" variant="ghost" onClick={() => removeRow(row.id)}>
+          <Input className="h-8 border-transparent bg-transparent shadow-none" value={row.val} placeholder="org-…" onChange={(e) => setRow(row.id, { val: e.target.value })} />
+          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => removeRow(row.id)}>
             ×
           </Button>
         </div>
       ))}
-      <Button type="button" variant="outline" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
+      <Button type="button" size="sm" variant="outline" className="self-start" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
+        <Plus className="h-3.5 w-3.5" />
         {t('admin:extraHeadersAdd')}
       </Button>
     </div>
@@ -151,27 +157,32 @@ function InjectFieldsEditor({
   const setRow = (id: number, patch: Partial<KeyValueRow>) => commit(draft.map((row) => (row.id === id ? { ...row, ...patch } : row)))
   const removeRow = (id: number) => commit(draft.filter((row) => row.id !== id))
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{t('admin:injectFields')}</Label>
-      <p className="text-xs text-muted-foreground">{t('admin:injectFieldsHint')}</p>
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1">
+        <Label className="text-[13px] text-foreground">{t('admin:injectFields')}</Label>
+        <p className="text-xs leading-5 text-muted-foreground">{t('admin:injectFieldsHint')}</p>
+      </div>
       {draft.map((row) => (
-        <div key={row.id} className="flex gap-2">
+        <div key={row.id} className="flex items-center gap-2 rounded-lg border border-border/60 bg-card/70 p-1.5">
           <Input
+            className="h-8 border-transparent bg-transparent shadow-none"
             value={row.name}
             placeholder="temperature"
             onChange={(e) => setRow(row.id, { name: e.target.value })}
           />
           <Input
+            className="h-8 border-transparent bg-transparent shadow-none"
             value={row.val}
             placeholder='0.2 or "forced"'
             onChange={(e) => setRow(row.id, { val: e.target.value })}
           />
-          <Button type="button" variant="ghost" onClick={() => removeRow(row.id)}>
+          <Button type="button" size="icon" variant="ghost" className="h-8 w-8 shrink-0 text-muted-foreground hover:text-destructive" onClick={() => removeRow(row.id)}>
             ×
           </Button>
         </div>
       ))}
-      <Button type="button" variant="outline" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
+      <Button type="button" size="sm" variant="outline" className="self-start" onClick={() => commit([...draft, { id: nextId.current++, name: '', val: '' }])}>
+        <Plus className="h-3.5 w-3.5" />
         {t('admin:injectFieldsAdd')}
       </Button>
     </div>
@@ -365,12 +376,16 @@ export function ChannelDrawer({
       onClose={onClose}
       title={isEdit ? t('admin:editChannel', { name: maskChannelName(channel.name, channel.keys.map((k) => k.account_label)) }) : t('admin:createChannel')}
       description={t('admin:channelDrawerDesc')}
+      icon={<ProviderMark provider={form.provider} />}
+      size={isEdit ? 'lg' : 'md'}
       footer={
         <>
-          <Button variant="ghost" onClick={onClose}>
+          <Button variant="ghost" className="rounded-lg" onClick={onClose}>
             {t('common:cancel')}
           </Button>
           <Button
+            className="rounded-lg px-5 shadow-[0_5px_14px_-8px_var(--primary)]"
+            loading={create.isPending || save.isPending}
             disabled={!canSubmit || !endpointValid || !controlValid || !concurrencyValid || costMilli === null || priority === null || create.isPending || save.isPending}
             onClick={() => (isEdit ? save.mutate() : create.mutate())}
           >
@@ -379,9 +394,10 @@ export function ChannelDrawer({
         </>
       }
     >
+      <div className="channel-editor">
       {isEdit && (
         <Tabs
-          className="mb-4"
+          className="w-full [&_[role=tablist]]:w-full [&_[role=tab]]:flex-1 [&_[role=tab]]:justify-center"
           items={EDIT_TABS.map((id) => ({
             id,
             label: t(
@@ -407,7 +423,7 @@ export function ChannelDrawer({
       {(!isEdit || tab === 'conn') && (
         <>
           <FieldGroup title={t('admin:groupBasic')} hint={t('admin:groupBasicHint')}>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-1.5">
                 <Label htmlFor="d-name">{t('admin:channelName')}</Label>
                 <Input
@@ -496,7 +512,7 @@ export function ChannelDrawer({
           )}
 
           {authorization?.access_token_prefix && (
-            <div data-slot="channel-auth-method" className="flex pb-4">
+            <div data-slot="channel-auth-method" className="flex">
               <Tabs ariaLabel={t('admin:oauthInputMethod')} active={oauthInput}
                 items={[{ id: 'login', label: t('admin:oauthBrowserLogin') }, { id: 'import', label: t('admin:oauthTokenImport') }]}
                 onChange={(mode) => {
@@ -719,12 +735,14 @@ export function ChannelDrawer({
         <OptionalSection id="channel-behavior-options" title={t('admin:groupBehavior')} hint={t('admin:groupBehaviorHint')} defaultOpen
           summary={t(behaviorCustom ? 'admin:channelOptionsCustomized' : 'admin:channelOptionsDefault')}>
           <Switch
+            className="rounded-lg border border-border/60 bg-card/65 px-3 py-3"
             label={t('admin:thinkingToContent')}
             description={t('admin:thinkingToContentHint')}
             checked={settings.thinking_to_content}
             onChange={(v) => setSettings((s) => ({ ...s, thinking_to_content: v }))}
           />
           <Switch
+            className="rounded-lg border border-border/60 bg-card/65 px-3 py-3"
             label={t('admin:billByResponseModel')}
             description={t('admin:billByResponseModelHint')}
             checked={settings.bill_by_response_model}
@@ -732,15 +750,17 @@ export function ChannelDrawer({
           />
           {speaksOpenAi(channel.provider) && (
             <Switch
+              className="rounded-lg border border-border/60 bg-card/65 px-3 py-3"
               label={t('admin:responsesNative')}
               description={t('admin:responsesNativeHint')}
               checked={settings.responses_native ?? defaultResponsesNative(channel.provider)}
               onChange={(v) => setSettings((s) => ({ ...s, responses_native: v }))}
             />
           )}
+          <div className="flex flex-col gap-4 border-t border-border/60 pt-4">
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="d-tool-loss">{t('admin:toolLossPolicy')}</Label>
-            <p className="text-xs text-muted-foreground">{t('admin:toolLossPolicyHint')}</p>
+            <Label htmlFor="d-tool-loss" className="text-[13px] text-foreground">{t('admin:toolLossPolicy')}</Label>
+            <p className="text-xs leading-5 text-muted-foreground">{t('admin:toolLossPolicyHint')}</p>
             <Select
               id="d-tool-loss"
               className="w-72"
@@ -750,8 +770,8 @@ export function ChannelDrawer({
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label htmlFor="d-strip">{t('admin:stripFields')}</Label>
-            <p className="text-xs text-muted-foreground">{t('admin:stripFieldsHint')}</p>
+            <Label htmlFor="d-strip" className="text-[13px] text-foreground">{t('admin:stripFields')}</Label>
+            <p className="text-xs leading-5 text-muted-foreground">{t('admin:stripFieldsHint')}</p>
             <TagInput
               id="d-strip"
               value={settings.strip_request_fields}
@@ -775,8 +795,10 @@ export function ChannelDrawer({
               )
             }
           />
+          </div>
         </OptionalSection>
       )}
+      </div>
     </Drawer>
   )
 }
@@ -790,9 +812,8 @@ function KeySchedule({ channel, onDone }: { channel: ChannelRow; onDone: () => v
     <KeyParamRow key={k.id} channelId={channel.id} provider={channel.provider} row={k}
       showIdentity={keys.length > 1} showCredential={false} refreshEnabled={refreshEnabled} onDone={onDone} />
   ))
-  // 折叠区块包在 key 行里时拿不到同级的 first/last 间距规则，这里补上与其他区块一致的分隔和留白
   return (
-    <section className="border-t border-border py-4 first:border-t-0 first:pt-0 last:pb-0">
+    <section data-slot="channel-key-schedule" className="border-t border-border py-4 first:border-t-0 first:pt-0 last:pb-0">
       {keys.length <= 1 ? rows
         : <FieldGroup title={t('admin:channelKeys')} hint={t('admin:channelKeysHint')}>{rows}</FieldGroup>}
     </section>
@@ -804,9 +825,8 @@ function CredentialStatus({ channel, onDone }: { channel: ChannelRow; onDone: ()
   const keys = (channel.keys ?? []).filter((k) => k.credential_kind === 1)
   const refreshEnabled = channel.settings?.account_control?.refresh_mode !== 'external'
   if (keys.length === 0) return null
-  // 夹在分节之间的普通块自带下留白（同 channel-auth-method），否则下一节的分隔线贴住按钮
   return (
-    <div data-slot="channel-credential-status" className="flex flex-col gap-3 pb-4">
+    <div data-slot="channel-credential-status" className="flex flex-col gap-3">
       {keys.map((k) => (
         <div key={k.id} className="flex flex-col gap-1">
           {keys.length > 1 && <span className="text-xs font-medium">#{k.id}</span>}
