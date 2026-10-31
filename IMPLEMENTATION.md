@@ -3153,6 +3153,53 @@ new-api 迁移来的令牌分组、管理员在后台给 key 直接钉的组都�
 `gateway_oauth_channels` 的四个 `codex_*_error_before_output_*` 用例（503 重试与诊断原话 / 400 原样回 / 429 按恢复时间冷却 /
 认不出的仍是 `empty_completion` 但诊断有原话）、`diagnostics` 单测、`egress_proxies::consecutive_failure_counter_slides_with_every_failure`。
 
+### 11.50 对照 new-api / Sub2API 的适配与故障恢复差距（2026-10-31）：一个真 bug 与三处补齐
+
+对照 new-api（main d04c118，2026-09-23 的浅克隆，未必等于线上 rc.37）与 Sub2API（v0.2.19）的源码，逐条核对我们自己的
+代码。key 状态机、首字窗口、流前失败分类、失败退款与对账不输两家；下面几处是确认该修的，其余见"没动"。
+
+- **原生 `output_config.effort` 被改写成 `medium`（真 bug，c785c03 起）**：Claude Code 的请求带 `thinking:{adaptive}` 加
+  `output_config.effort`，`reasoning::parse_request_value` 不读后者，把 `thinking` 对象映射成"开启、缺省档"，
+  `effective_effort()` 取缺省预算 8000 → medium；`apply_effort` 再无条件 `insert("effort", …)` 覆盖。`/effort high|xhigh|max`
+  一律变 medium，`low` 反而更费（对 sonnet-5-5 / opus-5-5 / opus-4-6 实测 15 组全中；不带 `thinking` 才幸免）。
+  现在档位来源按「统一字段（`reasoning_effort` / `reasoning.effort`）> 同方言原生 `output_config.effort` > thinking / 后缀折出的档位」；
+  原生值原样保留，也不拿档位表去裁决（表可能落后于上游，上游不认会自己 400）。后缀负责打开思考时仍补 `thinking:{adaptive}`，
+  只写 effort、没开思考的请求不被动。
+- **账号级错误被包在 400 里**：Anthropic 预付费余额用完是 `400 invalid_request_error "Your credit balance is too low…"`，
+  组织停用是 `400 "This organization has been disabled."`，Gemini 的 key 无效 / 过期也是 400（`details[].reason=API_KEY_INVALID`）。
+  400 一类状态一律按"请求本身有问题"原样回客户端，key 状态机看不见——这把 key 会一直被选中，落到它头上的那部分请求全部白白失败
+  （new-api 能靠关键词摘但当次不重试，Sub2API 摘并当次换号）。新增 `okapi_providers::account_fault`：只认**不回显调用方输入**的位置——
+  `error.code` / `error.type` / 顶层 `code` 的枚举值（`billing_hard_limit_reached`、`billing_not_active`、`insufficient_quota`、百炼 `Arrearage`）、
+  Gemini 的 `details[].reason`、`error.message` / 顶层 `message` 的**句首**（回显的模型名 / 工具名不会出现在句首，
+  所以任何能指定模型名的用户都没法把共用 key 打失效）；不做整段正文的子串匹配，正文超过 16 KiB 不读。命中后
+  `UpstreamError::retriable_before_first_token` 为真（chat / embeddings / 视频 / count_tokens / WS 一并换渠道；图片仍不重发但登记 key），
+  `failure_kind_of` 把余额类登记成 `quota_exhausted`（冷却到次日 UTC 0 点）、凭证 / 组织类登记成 `invalid`（仅人工恢复）；
+  同一个 403 不带凭证关键词、正文说组织停用时也一样。普通的 400 不变。
+- **全部失败后客户端只见 502**：上游限流 / 过载的语义和 `Retry-After` 丢了，SDK 把它当网关故障重试。现在以最后一次失败为准：
+  429（key 登记为限流，不含 `insufficient_quota`）→ 429 `rate_limited`（`param=upstream`），529 → 503；其余仍是 502 加上一次失败的错误码。
+  `Retry-After` 只在整个池都试过了时给，取最早有 key 回来的时刻（与"零候选"同一个 `recovery_secs`）；次数用尽（`MAX_ATTEMPTS`）
+  或请求不许改投时候选里可能还有好的，不替客户端编等待时间。请求日志的 `error_code` / `upstream_status` 仍记真实的上游失败，
+  不随对外状态变。
+- **Retry-After 来源补全**：`retry-after-ms`（OpenAI / Azure OpenAI；标准头缺席或读不出来时用，向上取整）、`x-ratelimit-reset-requests|tokens`
+  （"1s"、"6m0s" 这类时长，只取余量已为 0 的维度，两个都用完取较晚的，排在标准头之后）、Google 系正文里的 `RetryInfo.retryDelay`
+  （头里没给时由 `UpstreamError::retry_after_secs` 退而读正文）。key 冷却不再统一落到缺省 60 秒。
+
+**没动（核实后的取舍或未验证）**：404 / `model_not_found` 仍是请求错误——Responses 直转撞上 404 / 405 改走降级链的判断依赖它；
+Gemini 工具 schema 不清洗（两家竞品都清洗；没有 Gemini key 没法实测，线上也没有 Gemini 渠道）；Anthropic API-key 渠道不转发客户端
+`anthropic-beta`（线上只有 `anthropic_max`，它会转）；公共路径不修补采样参数（`docs/model-parameters.md` 写明"拒绝不静默改写"）；
+thinking 签名失配没有矫正（"签名是否绑账号"没验证）；key 冷却不分模型；没有主动探测、`invalid` 不自愈；OpenAI 兼容非流式的
+200 + 错误体当成功；`MAX_ATTEMPTS=3` 写死。另有一处同源的小问题没改：`thinking:{adaptive}` 且没带 effort 时仍会折成 `medium`
+写进去，而 sonnet-5-5 的上游缺省是 high。
+
+**验收**：`model_parameters` 六条单测（含"后缀开思考、档位仍是原生值""统一字段仍压过原生字段并受表约束""预算式 thinking 仍折档位"）+
+`gateway_reasoning_param::native_messages_effort_reaches_the_upstream_unchanged`；`account_fault` 九条单测（含防回显的反例）、
+`chat::failure_scope_tests` 两条、`gateway_m2_sched` 新增 `account_level_400_fails_over_and_registers_on_the_key` /
+`a_plain_400_still_reaches_the_client_and_leaves_the_key_alone` / `exhausted_rate_limit_reaches_the_client_as_429_with_the_earliest_return` /
+`rate_limit_with_untried_keys_left_has_no_retry_after` / `the_last_failure_decides_what_the_client_sees` /
+`upstream_overload_reaches_the_client_as_503`；`retry_after` 五条单测。期望随之改动的旧用例：
+`gateway_m2_sched::key_state_machine_branches` 的 429 分支、`gateway_oauth_channels::codex_usage_limit_error_before_output_cools_the_key_until_the_reset`
+（流内 `usage_limit_reached`）由 502 改为 429。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
