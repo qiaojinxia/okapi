@@ -148,13 +148,16 @@ impl UpstreamError {
         }
     }
 
-    /// Retry-After（仅 429/5xx 场景可能存在）。
+    /// Retry-After（仅 429/5xx 场景可能存在）。响应头没给时，Google 系把等待时间放在正文的
+    /// `RetryInfo.retryDelay` 里，退而读那里。
     #[must_use]
     pub fn retry_after_secs(&self) -> Option<i64> {
         match self {
             Self::Status {
-                retry_after_secs, ..
-            } => *retry_after_secs,
+                retry_after_secs,
+                body,
+                ..
+            } => retry_after_secs.or_else(|| crate::retry_after::from_body(body)),
             Self::Connect(_)
             | Self::Unreachable { .. }
             | Self::Timeout
