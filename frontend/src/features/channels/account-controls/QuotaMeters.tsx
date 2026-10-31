@@ -45,7 +45,7 @@ export function QuotaMeters({ quota, limits, compact = false }: {
   }
   if (compact) {
     return (
-      <div className="grid max-w-full grid-cols-[auto_minmax(4rem,14.75rem)_2rem_auto] items-center gap-x-3 gap-y-1.5">
+      <div className="grid w-full max-w-full grid-cols-[auto_minmax(3rem,1fr)_2.25rem_auto] items-center gap-x-2.5 gap-y-2.5">
         {quota.allowed === false && <p className="col-span-4 text-destructive">{t('admin:channelQuotaBlocked')}</p>}
         {quota.windows.map((window) => {
           const stale = window.resets_at !== null && window.resets_at * 1000 <= now
@@ -54,20 +54,20 @@ export function QuotaMeters({ quota, limits, compact = false }: {
           const label = windowLabel(window.window_secs)
           return (
             <div key={window.name} className="contents">
-              <span className="whitespace-nowrap text-muted-foreground/80">{label}</span>
-              <div className="h-1.5 overflow-hidden rounded-full bg-muted" role="progressbar"
+              <span className="whitespace-nowrap text-xs font-medium text-muted-foreground/80">{label}</span>
+              <div className="h-[7px] overflow-hidden rounded-full bg-muted shadow-[inset_0_0_0_1px_oklch(0_0_0/0.025)]" role="progressbar"
                 aria-label={t('admin:channelQuotaMeterLabel', { window: label })}
                 aria-valuemin={0} aria-valuemax={100} aria-valuenow={stale ? undefined : percent}>
-                {!stale && <div className={cn('h-full rounded-full', tone.bar)} style={{ width: `${percent}%` }} />}
+                {!stale && <div className={cn('h-full rounded-full transition-[width]', tone.bar)} style={{ width: `${percent}%` }} />}
               </div>
-              <span className={cn('text-right font-semibold tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
+              <span className={cn('text-right text-[13px] font-semibold tabular-nums', stale ? 'text-muted-foreground' : tone.text)}>
                 {stale ? '—' : `${percent}%`}
               </span>
               {/* 行内只放剩余时长，具体重置时刻进悬停提示：表格不必为它横向滚动 */}
-              <span className="inline-flex items-center gap-1 whitespace-nowrap text-muted-foreground/70 tabular-nums"
+              <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-muted-foreground/75 tabular-nums"
                 title={!stale && window.resets_at !== null ? resetCompact(window.resets_at).full : undefined}>
                 {stale ? t('admin:channelQuotaRefreshing') : window.resets_at !== null && <>
-                  <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-2.5 w-2.5 shrink-0" />
+                  <RotateCw aria-label={t('admin:channelQuotaResetLabel')} className="h-3 w-3 shrink-0" />
                   {resetCompact(window.resets_at).span}
                 </>}
               </span>

@@ -12,7 +12,7 @@ export function ChannelQuotaCell({ channelId, provider }: { channelId: number; p
     : undefined
   if (!capabilities?.quota || !quota || !Array.isArray(quota.windows) || quota.windows.length === 0) return null
   return (
-    <div className="w-full">
+    <div className="w-full pt-0.5">
       <QuotaMeters quota={quota} compact />
     </div>
   )

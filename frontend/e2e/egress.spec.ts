@@ -157,10 +157,11 @@ test('全局默认出口在系统设置：代理页页头直达「出口代理�
   await expect(row).toContainText('jp-1')
 })
 
-test('渠道：列表标出显式出口；编辑抽屉单独保存出口；批量设置出口', async ({ page }) => {
+test('渠道：出口在编辑抽屉里维护，列表不重复；编辑抽屉单独保存出口；批量设置出口', async ({ page }) => {
   await prepare(page, '/admin/channels')
   const row = page.getByRole('row').filter({ hasText: 'claude-max-a' })
-  await expect(row).toContainText('代理 hk-1')
+  // 列表只保留扫读所需的健康信息：出口明细不再列在状态列里，抽屉里才有
+  await expect(row).not.toContainText('代理 hk-1')
 
   let bound: Json | undefined
   await page.route('**/admin/channels/42/egress', async (route) => {

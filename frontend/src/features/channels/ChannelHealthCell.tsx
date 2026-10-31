@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { Clock3, Wallet, type LucideIcon } from 'lucide-react'
 import dayjs from 'dayjs'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -59,12 +60,15 @@ function keyStateOf(keys: ChannelKeyRow[], enabled: boolean): KeyStateView {
 /// 状态点 + 文字（没有底色胶囊）：一眼扫过去只看点的颜色，细节写在后面。
 function StateDot({ tone, title, children }: { tone: 'success' | 'warning' | 'destructive' | 'muted'; title?: string; children: ReactNode }) {
   const color = { success: 'text-success', warning: 'text-warning', destructive: 'text-destructive', muted: 'text-muted-foreground' }[tone]
-  // 点用伪元素画在文字前面：整块仍是一个行内元素，基线与右边的测试延迟对得上
+  const surface = { success: 'bg-success/10', warning: 'bg-warning/12', destructive: 'bg-destructive/10', muted: 'bg-muted/75' }[tone]
+  // 状态是这一列的视觉锚点：轻量语义底色 + 状态点，扫视时不必逐字阅读。
   return (
     <span
       className={cn(
-        'font-medium whitespace-nowrap before:mr-1.5 before:inline-block before:size-1.5 before:rounded-full before:bg-current before:align-middle',
+        'inline-flex min-h-6 items-center rounded-md px-2 py-0.5 text-xs leading-4 font-semibold whitespace-nowrap',
+        'before:mr-1.5 before:inline-block before:size-1.5 before:shrink-0 before:rounded-full before:bg-current before:content-[""]',
         color,
+        surface,
       )}
       title={title}
     >
@@ -106,7 +110,7 @@ export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabl
   return (
     <>
       {state.counts.map(([name, n]) => (
-        <Badge key={name} variant="muted" title={state.titles.get(name) ?? ''}>
+        <Badge key={name} variant="muted" className="min-h-5 rounded-md px-1.5 py-0 text-[11px]" title={state.titles.get(name) ?? ''}>
           {t(`admin:keyState_${name}`, { n })}
         </Badge>
       ))}
@@ -121,37 +125,18 @@ export function KeyStateDetail({ keys, enabled }: { keys: ChannelKeyRow[]; enabl
 
 /// 状态列的明细行：左列短标签说明是什么，右列是值。放在 `<dl>` 两列网格里，标签自然对齐。
 /// 值默认常规字色，只有慢、失败、错误率高才上色——主状态看状态点，明细只在异常时抢眼。
-export function StatusLine({ label, title, children }: { label: string; title?: string; children: ReactNode }) {
+export function StatusLine({ label, title, icon: Icon, children }: { label: string; title?: string; icon?: LucideIcon; children: ReactNode }) {
   return (
     <>
-      <dt className="whitespace-nowrap text-muted-foreground/80">{label}</dt>
-      <dd className="min-w-0 whitespace-nowrap" title={title}>{children}</dd>
+      <dt className="flex h-5 items-center whitespace-nowrap text-xs leading-5 text-muted-foreground/75" title={label}>
+        {Icon ? <><Icon aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} /><span className="sr-only">{label}</span></> : label}
+      </dt>
+      <dd className="min-w-0 whitespace-nowrap leading-5" title={title}>{children}</dd>
     </>
   )
 }
 
 const stampOf = (when: dayjs.Dayjs) => (when.isSame(dayjs(), 'day') ? when.format('HH:mm') : when.format('MM-DD HH:mm'))
-
-/// 订阅 OAuth 凭证（§11.38）的 access token 到期：最早到期的那把。过期不是故障——
-/// 下次请求会刷新——所以只占一行明细，不进状态点。
-export function CredentialExpiry({ keys }: { keys: ChannelKeyRow[] }) {
-  const { t } = useTranslation()
-  const soonest = keys
-    .map((k) => k.credential_expires_at)
-    .filter((v): v is number => typeof v === 'number')
-    .sort((a, b) => a - b)[0]
-  if (soonest === undefined) return null
-  const when = dayjs.unix(soonest)
-  return (
-    <StatusLine label={t('admin:channelStatusCredential')} title={when.format('YYYY-MM-DD HH:mm')}>
-      {when.isAfter(dayjs()) ? (
-        <span className="tabular-nums">{t('admin:keyOAuthExpires', { when: stampOf(when) })}</span>
-      ) : (
-        <span className="text-muted-foreground">{t('admin:keyOAuthExpired')}</span>
-      )}
-    </StatusLine>
-  )
-}
 
 /// 最近测试（new-api 渠道页"响应时间"列的对齐）：延迟 + 何时测的；失败给原因。
 /// 时间只显示到分钟——这行回答"最近一次探测多快、还新鲜吗"，不是精确时间戳。
@@ -170,9 +155,12 @@ export function LastProbe({ probe }: { probe: ChannelProbe | null }) {
     </span>
   )
   return (
-    <span className="inline-flex items-baseline gap-1">
+    <span className="inline-flex max-w-full flex-wrap items-baseline gap-x-1">
       {result}
-      <span className="text-muted-foreground/70 tabular-nums" title={when.format('YYYY-MM-DD HH:mm')}>{stampOf(when)}</span>
+      <span className="inline-flex items-center gap-1 text-xs text-muted-foreground/75 tabular-nums" title={when.format('YYYY-MM-DD HH:mm')}>
+        <Clock3 aria-hidden className="h-3 w-3" strokeWidth={1.8} />
+        {stampOf(when)}
+      </span>
     </span>
   )
 }
@@ -185,14 +173,17 @@ export function LastBalance({ balance }: { balance: ChannelBalance | null | unde
   const when = dayjs(balance.at)
   return (
     <span
-      className="inline-flex items-baseline gap-1.5 whitespace-nowrap"
+      className="flex w-full items-baseline gap-1.5 whitespace-nowrap"
       title={t('admin:balanceProbe', { probe: balance.probe })}
     >
-      <span className="text-muted-foreground/80">{t('admin:channelBalanceLabel')}</span>
-      <span className={cn('font-medium tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
+      <span className="inline-flex items-center text-muted-foreground/75" title={t('admin:channelBalanceLabel')}>
+        <Wallet aria-hidden className="h-3.5 w-3.5" strokeWidth={1.8} />
+        <span className="sr-only">{t('admin:channelBalanceLabel')}</span>
+      </span>
+      <span className={cn('text-[15px] font-semibold tracking-[-0.015em] tabular-nums', balance.balance_micro <= 0 ? 'text-destructive' : 'text-foreground')}>
         {formatUpstreamBalance(balance.balance_micro, balance.currency, i18n.language)}
       </span>
-      <span className="text-muted-foreground/70 tabular-nums">{stampOf(when)}</span>
+      <span className="ml-auto text-xs text-muted-foreground/70 tabular-nums">{stampOf(when)}</span>
     </span>
   )
 }
@@ -295,12 +286,16 @@ export function ChannelUsage({ usage }: { usage: ChannelUsageRow | undefined }) 
   })
   const compact = new Intl.NumberFormat(lang, { notation: 'compact', maximumFractionDigits: 1 })
   return (
-    <span className="whitespace-nowrap text-muted-foreground tabular-nums" title={detail}>
-      {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
-      {' · '}
-      {t('admin:channelUsageTokens', { n: compact.format(total) })}
-      {' · '}
-      <span className="font-medium text-foreground">{formatMoneyAggregate(usage.amount_micro, lang)}</span>
+    <span className="flex w-full flex-wrap items-baseline gap-x-2 gap-y-0.5 whitespace-nowrap text-xs text-muted-foreground tabular-nums" title={detail}>
+      <span>
+        {t('admin:channelUsageRequests', { n: formatCount(usage.requests, lang) })}
+        {' · '}
+        {t('admin:channelUsageTokens', { n: compact.format(total) })}
+      </span>
+      {' '}
+      <span className="ml-auto text-base font-semibold tracking-[-0.025em] text-foreground">
+        {formatMoneyAggregate(usage.amount_micro, lang)}
+      </span>
     </span>
   )
 }

@@ -152,6 +152,49 @@ const ALICE_MASKED = 'al***ev@gmail.com'
 const BOB_MASKED = 'b***@hot-shot.com'
 const CAROL_MASKED = 'c***l@outlook.com'
 
+test('视觉评审：渠道页当前设计截图', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await prepare(page)
+  await expect(page.getByRole('progressbar').first()).toBeVisible()
+  await page.screenshot({ path: 'test-results/channel-after.png', fullPage: true })
+  await page.evaluate(() => document.documentElement.classList.add('dark'))
+  await page.waitForTimeout(300)
+  await page.screenshot({ path: 'test-results/channel-after-dark.png', fullPage: true })
+  await page.evaluate(() => document.documentElement.classList.remove('dark'))
+  await page.waitForTimeout(300)
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.screenshot({ path: 'test-results/channel-after-1280.png', fullPage: true })
+})
+
+test('视觉评审：渠道页英文截图', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await prepare(page)
+  await page.addInitScript(() => localStorage.setItem('okapi.lang', 'en'))
+  await page.reload()
+  await expect(page.locator('#main-content').getByRole('heading', { name: 'Channels' })).toBeVisible()
+  await expect(page.getByRole('progressbar').first()).toBeVisible()
+  await page.screenshot({ path: 'test-results/channel-after-en.png', fullPage: true })
+})
+
+test('视觉评审：渠道编辑抽屉截图', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await prepare(page)
+  await rowOf(page, 'openai-main').getByRole('button', { name: '编辑', exact: true }).click()
+  const drawer = page.getByRole('dialog')
+  await expect(drawer.getByRole('heading', { name: /编辑渠道/ })).toBeVisible()
+  await page.waitForTimeout(350)
+  await page.screenshot({ path: 'test-results/channel-drawer-conn.png', fullPage: true })
+  for (const [tab, name] of [['模型与渠道池', 'models'], ['调度', 'sched'], ['请求与计费行为', 'behavior']] as const) {
+    await drawer.getByRole('tab', { name: tab, exact: true }).click()
+    await page.waitForTimeout(200)
+    await page.screenshot({ path: `test-results/channel-drawer-${name}.png`, fullPage: true })
+  }
+  await drawer.getByRole('tab', { name: '接入信息', exact: true }).click()
+  await page.evaluate(() => document.documentElement.classList.add('dark'))
+  await page.waitForTimeout(300)
+  await page.screenshot({ path: 'test-results/channel-drawer-dark.png', fullPage: true })
+})
+
 test('渠道列表：页头统计是朴素文字，按钮无图标，新建渠道的加号只是装饰', async ({ page }) => {
   await prepare(page)
   const header = page.locator('[data-slot="page-header"]')
@@ -247,15 +290,17 @@ test('渠道列表：一行五块信息——渠道 / 状态 / 用量窗口 / �
   await expect(state.locator('dd').first()).toContainText('10-16 22:06')
   await expect(state).toContainText('近 24h')
   await expect(state).toContainText('0.0% 错误 · 1 次')
-  await expect(state).toContainText('凭证')
-  await expect(state).toContainText('10-24 01:50 到期')
-  await expect(state).toContainText('出口')
-  await expect(state).toContainText('代理 216.167.15.231')
+  // 列表只保留扫读所需的健康信息；凭证与出口在编辑抽屉里维护
+  await expect(state).not.toContainText('凭证')
+  await expect(state).not.toContainText('10-24 01:50 到期')
+  await expect(state).not.toContainText('出口')
+  await expect(state).not.toContainText('代理 216.167.15.231')
   // 旧的「测试」标签行已并进第一行
   await expect(state.locator('dt', { hasText: /^测试$/ })).toHaveCount(0)
 
   // 用量窗口：计数一行（金额是重点）+ 额度窗口条
-  await expect(alice).toContainText('2,085 次 · 6.4亿 tokens · US$314.68')
+  await expect(alice).toContainText('2,085 次 · 6.4亿 tokens US$314.68')
+  await expect(alice).not.toContainText('tokens · US$314.68')
   const fiveHour = alice.getByRole('progressbar', { name: '5小时额度用量' })
   const sevenDay = alice.getByRole('progressbar', { name: '7天额度用量' })
   await expect(fiveHour).toHaveAttribute('aria-valuenow', '0')
@@ -307,11 +352,11 @@ test('渠道列表：部分 key 不可用时状态点转黄并补计数 / 恢复
   // 最近一次测试失败：写错误码而不是延迟
   await expect(carol.locator('dd').first()).toContainText('upstream_timeout')
   await expect(carol).toContainText('15.0% 错误 · 80 次')
-  await expect(carol).toContainText('已过期')
+  await expect(carol).not.toContainText('已过期')
 
   const openai = rowOf(page, 'openai-main')
   await expect(openai).toContainText('未入池')
-  await expect(openai).toContainText('直连')
+  await expect(openai).not.toContainText('直连')
   // 上游余额：带标签，不和上面的计费金额混在一起
   await expect(openai).toContainText('余额')
   await expect(openai).toContainText('US$12.34')

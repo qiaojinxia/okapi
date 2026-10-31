@@ -3059,7 +3059,8 @@ test('渠道 key 状态与近 24h：部分可用/冷却/未入池；健康查询
   await expect(page.getByText('未入池')).toBeVisible()
   await expect(page.getByText('25.0%').or(page.getByText('25%'))).toBeVisible()
   await expect(page.getByText('80 次')).toBeVisible()
-  await expect(page.getByText('已过期（下次请求时刷新）')).toBeVisible()
+  // 凭证到期不再列在列表里（在编辑抽屉里看）
+  await expect(page.getByText('已过期（下次请求时刷新）')).toHaveCount(0)
   await expect(page.getByText('120 ms')).toBeVisible()
   await expect(page.getByText('HTTP 429')).toBeVisible()
   await expect(page.getByText('没有 key')).toBeVisible()

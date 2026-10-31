@@ -24,11 +24,10 @@ import { ICON_BUTTON_CLASS, IconButton } from '@/components/ui/icon-button'
 import { ChannelQuotaCell } from '@/features/channels/account-controls/ChannelQuotaCell'
 import { ChannelDrawer } from '@/features/channels/ChannelDrawer'
 import { ChannelTryDrawer } from '@/features/channels/ChannelTryDrawer'
-import { ProviderChip } from '@/features/channels/ProviderChip'
+import { ProviderChip, ProviderMark } from '@/features/channels/ProviderChip'
 import { Switch } from '@/components/ui/switch'
 import {
   ChannelUsage,
-  CredentialExpiry,
   Health24h,
   KeyStateDetail,
   KeyStateSummary,
@@ -40,8 +39,6 @@ import {
 } from '@/features/channels/ChannelHealthCell'
 import { RouteDiagnosisDrawer } from '@/features/channels/RouteDiagnosis'
 import { BatchEgressDrawer } from '@/features/channels/ChannelEgress'
-import { describeEgress } from '@/features/proxies/EgressPicker'
-import { proxyGroupOptions, proxyOptions } from '@/features/proxies/options'
 import { Checkbox } from '@/components/ui/checkbox'
 import { EmptyState, ErrorState } from '@/components/ui/state'
 import { Menu, MenuItem, MenuSeparator } from '@/components/ui/menu'
@@ -103,9 +100,6 @@ export function ChannelsPage() {
   const [diagnosing, setDiagnosing] = useState(false)
   const [trying, setTrying] = useState<ChannelRow | null>(null)
   const [batchEgress, setBatchEgress] = useState(false)
-  // 出口徽章要代理 / 组的名字（§11.41）；目录整表缓存，列表翻页不重拉
-  const proxies = useQuery(proxyOptions())
-  const proxyGroups = useQuery(proxyGroupOptions())
   const [testingId, setTestingId] = useState<number | null>(null)
   const [balancingId, setBalancingId] = useState<number | null>(null)
   const { confirm, dialog } = useConfirm()
@@ -309,6 +303,7 @@ export function ChannelsPage() {
   return (
     <div className="list-page">
       <PageHeader
+        className="[&_h1]:text-[22px] [&_h1]:leading-7 [&_h1]:tracking-[-0.025em] [&_p]:max-w-2xl [&_p]:text-[13px]"
         title={t('admin:channelsTitle')}
         description={t('admin:channelsDesc')}
         meta={channels.data && t('admin:channelsSummary', { total, enabled: enabledCount })}
@@ -327,7 +322,7 @@ export function ChannelsPage() {
             <Button variant="outline" className="px-3.5" onClick={() => setDiagnosing(true)}>
               {t('admin:diagTitle')}
             </Button>
-            <Button className="gap-1.5" onClick={() => setDrawer({ mode: 'create' })}>
+            <Button className="gap-1.5 rounded-lg px-4 shadow-[0_5px_14px_-8px_var(--primary)]" onClick={() => setDrawer({ mode: 'create' })}>
               <span aria-hidden>+</span>
               {t('admin:createChannel')}
             </Button>
@@ -406,8 +401,8 @@ export function ChannelsPage() {
           />
         )
       ) : (
-        <Table stickyHeader>
-          <THead>
+        <Table stickyHeader wrapperClassName="rounded-[18px] border-border/70 shadow-[0_1px_2px_oklch(0_0_0/0.035),0_18px_40px_-30px_oklch(0_0_0/0.26)]">
+          <THead className="bg-muted/30 [&_th]:h-10 [&_th]:bg-muted/30 [&_th]:text-[11px] [&_th]:font-semibold [&_th]:tracking-[0.045em] [&_th]:text-muted-foreground/85">
             <Tr>
               <Th className="w-11 min-w-11 pr-0 pl-5">
                 <Checkbox
@@ -426,29 +421,29 @@ export function ChannelsPage() {
                   }
                 />
               </Th>
-              <Th className="w-[29%] min-w-60">{t('admin:channelsTitle')}</Th>
-              <Th className="w-[27%] min-w-56">{t('common:status')}</Th>
-              <Th className="w-[31%] min-w-64">{t('admin:channelColUsage')}</Th>
+              <Th className="w-[28%] min-w-60">{t('admin:channelsTitle')}</Th>
+              <Th className="w-[29%] min-w-56">{t('common:status')}</Th>
+              <Th className="w-[30%] min-w-64">{t('admin:channelColUsage')}</Th>
               <Th className="w-[9%] min-w-36 pr-5 text-right">{t('admin:channelColActions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {rows.map((c) => (
-              <Tr key={c.id} selected={picked.has(c.id)} className="group/row">
-                <Td className="py-3.5 pr-0 pl-5">
+              <Tr key={c.id} selected={picked.has(c.id)} className="group/row hover:bg-accent/30 data-[selected]:shadow-[inset_2px_0_0_var(--primary)]">
+                <Td className="py-3 pr-0 pl-5 align-top">
                   <Checkbox
                     srLabel={t('admin:batchPick', { name: shownName(c) })}
                     checked={picked.has(c.id)}
                     onChange={() => togglePick(c.id)}
                   />
                 </Td>
-                <Td className="py-3.5">
+                <Td className="py-3 align-top">
                   <ChannelNameCell channel={c} />
                 </Td>
                 {/* 渠道"启用"≠ 能打：首行是状态点（key 状态机汇总）+ 最近一次测试，
-                    下面是带标签的明细：近 24h、凭证到期、出口，一行一项不混排 */}
-                <Td className="py-3.5">
-                  <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2.5 gap-y-px text-foreground/80">
+                    第二行只保留近 24h 健康；凭证与出口明细留在编辑抽屉，列表不重复展示。 */}
+                <Td className="py-3 align-top">
+                  <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-baseline gap-x-2.5 gap-y-0.5 text-foreground/90">
                     <dt>
                       <KeyStateSummary keys={c.keys} enabled={c.status === 1} />
                     </dt>
@@ -457,36 +452,29 @@ export function ChannelsPage() {
                       <KeyStateDetail keys={c.keys} enabled={c.status === 1} />
                       {/* 不在任何池 = 对谁都不可达：渠道开关绿着、key 全可用也打不到，必须在列表就看见 */}
                       {c.status === 1 && (c.pools ?? []).length === 0 && (
-                        <Badge variant="destructive" title={t('admin:poolOrphanWarning')}>
+                        <Badge variant="destructive" className="min-h-5 rounded-md px-1.5 py-0 text-[11px]" title={t('admin:poolOrphanWarning')}>
                           {t('admin:channelOrphan')}
                         </Badge>
                       )}
                     </dd>
-                    <StatusLine label={t('admin:channelStatus24h')}>
+                    <StatusLine label={t('admin:channelStatus24h')} icon={Activity}>
                       <Health24h
                         stat={health.data?.data.find((s) => s.channel_id === c.id)}
                         channel={{ id: c.id, name: c.name, provider: c.provider }}
                       />
                     </StatusLine>
-                    <CredentialExpiry keys={c.keys} />
-                    {/* 显式出口（代理 / 组 / 直连）才列；继承全局默认的不列，免得每行多一行 */}
-                    {c.egress !== undefined && c.egress.mode !== 'inherit' && (
-                      <StatusLine label={t('admin:channelStatusEgress')} title={t('admin:egressTitle')}>
-                        {describeEgress(t, c.egress, proxies.data, proxyGroups.data)}
-                      </StatusLine>
-                    )}
                   </dl>
                 </Td>
                 {/* 用量窗口：近 30 天用量一行 + 订阅额度窗口 + 上游余额，回答「还剩多少」 */}
-                <Td className="py-3.5">
-                  <div className="flex flex-col items-start gap-1.5">
+                <Td className="py-3 align-top">
+                  <div className="flex w-full flex-col items-start gap-2.5">
                     <ChannelUsage usage={usage.data?.data.find((u) => u.channel_id === c.id)} />
                     {c.status === 1 && <ChannelQuotaCell channelId={c.id} provider={c.provider} />}
                     <LastBalance balance={c.last_balance} />
                   </div>
                 </Td>
                 {/* 调度开关在上，常用动作（测试 / 编辑）在下，其余动作收进「···」菜单 */}
-                <Td className="py-3.5 pr-5">
+                <Td className="py-3 pr-5 align-top">
                   <div className="flex flex-col items-end gap-3">
                     <Switch
                       hideLabel
@@ -497,7 +485,7 @@ export function ChannelsPage() {
                     />
                     {/* 图标动作：平时淡一档，悬停整行变深，悬停自己才有底色；名字在悬停提示（便签）与读屏名里。
                         「更多」菜单的触发器不套悬停提示：提示常驻时 Esc 会先关提示，菜单得按两次才关 */}
-                    <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-0.5 rounded-lg border border-border/60 bg-background/45 p-0.5 shadow-xs">
                       <IconButton
                         icon={Activity}
                         label={t('admin:testChannel')}
@@ -631,39 +619,46 @@ function ChannelNameCell({ channel: c }: { channel: ChannelRow }) {
   const extra = accounts.filter((label) => label !== c.name)
   const consoleUrl = providerConsoleUrl(c.provider, c.api_base)
   return (
-    <div className="flex w-0 min-w-full flex-col gap-0.5">
-      <span className="flex min-w-0 items-baseline gap-1.5">
-        <span className="shrink-0 text-xs text-muted-foreground/60 tabular-nums">#{c.id}</span>
-        <span className="truncate text-sm" title={shownName(c)}>{shownName(c)}</span>
-      </span>
-      <span className="truncate font-mono text-xs text-muted-foreground/80" title={c.api_base ?? undefined}>
-        {c.api_base ?? '—'}
-      </span>
-      {extra.length > 0 && (
-        <span className="flex min-w-0 items-baseline gap-1.5 text-xs text-muted-foreground" title={accounts.map(maskAccount).join('\n')}>
-          <span className="shrink-0">{t('admin:channelAccount')}</span>
-          <span className="truncate">{maskAccount(extra[0])}</span>
-          {extra.length > 1 && <span className="shrink-0">+{extra.length - 1}</span>}
+    <div className="flex w-0 min-w-full items-start gap-3">
+      <ProviderMark provider={c.provider} className="mt-0.5" />
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="flex min-w-0 items-center gap-2 leading-5">
+          <span className="truncate text-[15px] font-semibold tracking-[-0.012em]" title={shownName(c)}>
+            {shownName(c)}
+          </span>
+          <span className="shrink-0 font-mono text-[11px] font-normal tracking-normal text-muted-foreground/60 tabular-nums">
+            #{c.id}
+          </span>
+          {consoleUrl !== null && (
+            <a
+              href={consoleUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="ml-auto -mr-1 shrink-0 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
+              title={t('admin:providerConsole')}
+              aria-label={t('admin:providerConsole')}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          )}
         </span>
-      )}
-      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <ProviderChip provider={c.provider} plans={plans} />
-        <span className="whitespace-nowrap text-[13px] text-muted-foreground tabular-nums">
-          {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
+        <span className="truncate font-mono text-xs leading-4 text-muted-foreground/75" title={c.api_base ?? undefined}>
+          {c.api_base ?? '—'}
         </span>
-        {consoleUrl !== null && (
-          <a
-            href={consoleUrl}
-            target="_blank"
-            rel="noreferrer noopener"
-            className="-ml-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity group-hover/row:opacity-100 hover:bg-muted hover:text-foreground focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
-            title={t('admin:providerConsole')}
-            aria-label={t('admin:providerConsole')}
-          >
-            <ExternalLink className="h-3 w-3" />
-          </a>
+        {extra.length > 0 && (
+          <span className="flex min-w-0 items-baseline gap-1.5 text-xs leading-4 text-muted-foreground" title={accounts.map(maskAccount).join('\n')}>
+            <span className="shrink-0 text-muted-foreground/75">{t('admin:channelAccount')}</span>
+            <span className="truncate">{maskAccount(extra[0])}</span>
+            {extra.length > 1 && <span className="shrink-0">+{extra.length - 1}</span>}
+          </span>
         )}
-      </span>
+        <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <ProviderChip provider={c.provider} plans={plans} />
+          <span className="whitespace-nowrap text-xs text-muted-foreground/85 tabular-nums">
+            {t('admin:channelModelsPriority', { n: c.models.length, priority: c.priority })}
+          </span>
+        </span>
+      </div>
     </div>
   )
 }
