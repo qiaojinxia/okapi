@@ -812,7 +812,7 @@ pub async fn update_channel(
         return Err(AppError::bad_request().with_param("provider"));
     }
     if let Some(api_base) = &req.api_base {
-        super::ssrf::validate_api_base(&state, api_base).await?;
+        super::ssrf::validate_upstream_base(&state, api_base).await?;
     }
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;

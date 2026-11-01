@@ -1,10 +1,18 @@
 //! 上游 URL SSRF 校验（IMPLEMENTATION §14.4，Sub2API url_allowlist 吸收）：
 //! 管理面写入 channels.api_base、`settings.oauth_token_url` 与 Vertex 服务账号 `token_uri`
-//! 时执行——scheme 默认仅 https、
-//! 目标默认禁私网/环回/链路本地（IP 字面量 + 保存时解析一次域名）。这是第一层；
+//! 时执行——目标默认禁私网/环回/链路本地（IP 字面量 + 保存时解析一次域名）。这是第一层；
 //! 域名保存之后可以改指内网（DNS 重绑定），所以出站直连在**连接时**还会按同一判据再校验一次、
 //! 并只连校验过的地址（第二层，`okapi_providers::ssrf`，策略由 `gateway::sync_ssrf_policy` 同步）。
-//! 内网上游场景经 settings.ssrf_policy 放开：`{"allow_http": bool, "allow_private": bool}`。
+//!
+//! scheme 按地址的用途分两档（`settings.ssrf_policy`）：
+//! - 渠道的 API 地址（[`validate_upstream_base`]）缺省**接受 http**——自建 / 转售上游常常只有一个明文端口；
+//!   scheme 不是 SSRF 的防线（防的是私网目标，那道闸不变），明文传输的风险交给管理员自己取舍，
+//!   `allow_http_upstream: false` 可以强制只收 https；
+//! - 其余地址（令牌端点、回调、支付网关、探测地址……，[`validate_api_base`] / [`validate_url`]）缺省仅 https，
+//!   `allow_http: true` 放开。
+//!
+//! 内网上游场景另需 `allow_private: true`。完整形状：
+//! `{"allow_http": bool, "allow_http_upstream": bool（缺省 true）, "allow_private": bool}`。
 
 use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
@@ -14,10 +22,32 @@ use std::net::IpAddr;
 
 #[derive(Deserialize, Default)]
 pub struct SsrfPolicy {
+    /// 渠道 API 地址以外的地址是否接受 http（缺省不接受）。
     #[serde(default)]
     pub allow_http: bool,
     #[serde(default)]
     pub allow_private: bool,
+    /// 渠道 API 地址是否接受 http；没写就是接受。
+    #[serde(default)]
+    pub allow_http_upstream: Option<bool>,
+}
+
+/// 地址的用途：决定 http 缺省放不放行。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// 渠道的 API 地址（`channels.api_base`）。
+    UpstreamBase,
+    /// 令牌端点、回调、支付网关、探测地址等。
+    Other,
+}
+
+impl SsrfPolicy {
+    fn http_allowed(&self, purpose: Purpose) -> bool {
+        match purpose {
+            Purpose::UpstreamBase => self.allow_http_upstream.unwrap_or(true),
+            Purpose::Other => self.allow_http,
+        }
+    }
 }
 
 async fn load_policy(pg: &sqlx::PgPool) -> SsrfPolicy {
@@ -42,12 +72,27 @@ fn host_of(url: &str) -> Option<&str> {
     Some(authority.split(':').next().unwrap_or(authority))
 }
 
-/// 校验 api_base；violation 返回 400（error_code 带原因参数）。
+/// 校验渠道的 API 地址（`channels.api_base`）：缺省 http / https 都收，私网目标照旧要 `allow_private`。
+/// violation 返回 400（error_code 带原因参数）。
+pub async fn validate_upstream_base(state: &AppState, api_base: &str) -> Result<(), AppError> {
+    validate_with(&state.pg, api_base, Purpose::UpstreamBase).await
+}
+
+/// 校验其余的出站地址（令牌端点、回调、支付网关、探测地址……）：缺省仅 https。
+/// 名字沿用旧的；渠道 API 地址请走 [`validate_upstream_base`]。
 pub async fn validate_api_base(state: &AppState, api_base: &str) -> Result<(), AppError> {
     validate_url(&state.pg, api_base).await
 }
 
 pub(crate) async fn validate_url(pg: &sqlx::PgPool, api_base: &str) -> Result<(), AppError> {
+    validate_with(pg, api_base, Purpose::Other).await
+}
+
+async fn validate_with(
+    pg: &sqlx::PgPool,
+    api_base: &str,
+    purpose: Purpose,
+) -> Result<(), AppError> {
     let policy = load_policy(pg).await;
     let parsed = reqwest::Url::parse(api_base)
         .map_err(|_| AppError::bad_request().with_param("api_base_host"))?;
@@ -61,7 +106,7 @@ pub(crate) async fn validate_url(pg: &sqlx::PgPool, api_base: &str) -> Result<()
     if lower.starts_with("https://") {
         // scheme ok
     } else if lower.starts_with("http://") {
-        if !policy.allow_http {
+        if !policy.http_allowed(purpose) {
             return Err(AppError::bad_request().with_param("api_base_scheme_https_only"));
         }
     } else {
@@ -124,6 +169,37 @@ mod tests {
         assert_eq!(host_of("http://127.0.0.1:8080/v1"), Some("127.0.0.1"));
         assert_eq!(host_of("http://[::1]:9/v1"), Some("::1"));
         assert_eq!(host_of("https://u:p@evil.com/x"), Some("evil.com"));
+    }
+
+    /// http 缺省只对渠道 API 地址放行；其余地址要 `allow_http`；两个开关互不牵连。
+    #[test]
+    fn http_policy_is_decided_per_purpose() {
+        let policy = |json: serde_json::Value| serde_json::from_value::<SsrfPolicy>(json).unwrap();
+        let none = policy(serde_json::json!({}));
+        assert!(
+            none.http_allowed(Purpose::UpstreamBase),
+            "渠道地址缺省接受 http"
+        );
+        assert!(!none.http_allowed(Purpose::Other), "其它地址缺省仅 https");
+        // 老的策略行（只有 allow_http / allow_private）：渠道地址也接受 http——这是缺省的变化
+        let legacy_strict =
+            policy(serde_json::json!({"allow_http": false, "allow_private": false}));
+        assert!(legacy_strict.http_allowed(Purpose::UpstreamBase));
+        assert!(!legacy_strict.http_allowed(Purpose::Other));
+        let legacy_open = policy(serde_json::json!({"allow_http": true, "allow_private": true}));
+        assert!(legacy_open.http_allowed(Purpose::UpstreamBase));
+        assert!(legacy_open.http_allowed(Purpose::Other));
+        // 强制渠道地址只收 https，不影响其它地址
+        let strict_upstream =
+            policy(serde_json::json!({"allow_http": true, "allow_http_upstream": false}));
+        assert!(!strict_upstream.http_allowed(Purpose::UpstreamBase));
+        assert!(strict_upstream.http_allowed(Purpose::Other));
+        // null 当没写
+        let null = policy(serde_json::json!({"allow_http_upstream": null}));
+        assert!(null.http_allowed(Purpose::UpstreamBase));
+        let explicit = policy(serde_json::json!({"allow_http_upstream": true}));
+        assert!(explicit.http_allowed(Purpose::UpstreamBase));
+        assert!(!explicit.http_allowed(Purpose::Other));
     }
 
     #[test]

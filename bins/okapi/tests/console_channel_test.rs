@@ -429,10 +429,11 @@ async fn draft_model_discovery_works_before_the_channel_exists() {
         (403, &json!("channel.write"))
     );
 
-    // 缺省策略下回环 http 地址过不了 SSRF 闸（与建渠道同一道闸），凭证没有发出去
+    // 缺省策略下回环地址过不了 SSRF 闸（与建渠道同一道闸；渠道地址的 http 缺省放行，挡下它的是私网目标），
+    // 凭证没有发出去
     let (status, body) = post(Some(&env.admin_token), draft("good-credential")).await;
     assert_eq!(status, 400, "{body}");
-    assert_eq!(body["error"]["param"], "api_base_scheme_https_only");
+    assert_eq!(body["error"]["param"], "api_base_private_target");
 
     // 放开策略后：按表单里的凭证拉到列表，去重排序
     sqlx::query("INSERT INTO settings(key,value) VALUES('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")

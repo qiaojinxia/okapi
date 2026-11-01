@@ -1063,7 +1063,7 @@ smoke 只验流水空签与登录能进门；质量页图表套件只验共享�
 | 功能面 | 结论 | 处置 |
 | --- | --- | --- |
 | 模型请求限流 | 只钉 `model-a: 2` / `model-b: 0` | 首次保存前 500 → toast，还原路由后再保存成功 |
-| 上游访问策略 | 只钉 `allow_http: false` + 扩展字段 | 切「允许 HTTP 上游」后保存前 500 → toast，再保存成功 |
+| 上游访问策略 | 只钉 `allow_http: false` + `allow_http_upstream` + 扩展字段（渠道 API 地址缺省允许 HTTP，没写就是开）| 切「其它地址允许 HTTP」后保存前 500 → toast，再保存成功；再关「渠道 API 地址允许 HTTP」→ 列表徽标变「渠道仅 HTTPS」 |
 | 第三方登录 | 只钉 github + `client-new` 且保留密钥 | 改客户端 ID 后保存前 500 → toast，再保存成功 |
 
 #### 三十九续：Stripe / 扩展 JSON / MCP 保存 500；复跑 L4

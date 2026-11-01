@@ -535,7 +535,7 @@ release 构建下启用本模式须同时设 `OKAPI_SINGLE_USER_CONFIRM=true`（
 | SSE 行缓冲上限、请求体解压后上限 | new-api 环境变量 | §3.7 | M1【请求体 ✓；SSE 行缓冲随自实现解析器（backlog，见 §3.7-7 状态）】 |
 | Discord OAuth、TOTP 2FA、Turnstile 注册风控 | new-api / Sub2API | §6.4 | M3 |
 | 用户×模型级限流（Redis key 后缀扩展，机制复用） | new-api | database.md §2.1 | M3【已实现：settings.model_rpm_limits + rl:{uid}:m:* 分钟桶（尽力语义），60s settings 进程缓存】 |
-| 上游 URL SSRF 校验（channels.api_base） | Sub2API url_allowlist | §14.4 | M2【已实现：console/MCP 写入口校验，缺省仅 https + 禁私网/环回/localhost；settings.ssrf_policy 放开内网场景；DNS rebinding 深化 backlog】 |
+| 上游 URL SSRF 校验（channels.api_base） | Sub2API url_allowlist | §14.4 | M2【已实现：console/MCP 写入口校验，渠道 API 地址缺省收 http / https（§11.52），其余出站地址缺省仅 https，私网/环回/localhost 一律要 `allow_private`；settings.ssrf_policy 放开内网场景；DNS rebinding 深化 backlog】 |
 | 邀请返利 aff（aff_code / inviter_id + adjust 事件 tag=aff_rebate） | 行业标配（new-api / done-hub） | database.md users 列 + §5.3 | M4【已实现：GET /api/me/aff 惰性生成 8 位邀请码 + 邀请人数/累计返利；注册带 aff_code 绑定 inviter_id（无效/自邀静默忽略不阻注册）；充值核销后按 settings.aff_percent_bp（基点，缺省 0=关闭）给邀请人 credit，事件 adjust actor=system:aff；兑换码核销不返利防套利】 |
 | 敏感词/内容安全中间件（可选，与 §6.6 三态联动） | one-api 系 | settings + gateway 中间件 | M4 |
 | Setup 初始化向导、key 余额公开查询端点 | new-api / Sub2API | console | M3【Setup ✓；余额查询 ✓：/v1/dashboard/billing/subscription + /usage（new-api/OpenAI 生态口径，客户端差值显示剩余）】 |
@@ -3238,6 +3238,29 @@ thinking 签名失配没有矫正（"签名是否绑账号"没验证）；key �
 保留线让热会话继续而新会话与过期会话被拒；准入函数直接喂请求形状；整数轮询路径上的双阈值端到端（含逐次尝试的闸）；单位不对的读数留在诊断里但不进预判）。
 全部 121 个集成套件通过；16 处变异（观测钩子漏报错误 / 不挂钩子、解析放过离谱值、结算不记烧速、粘性时刻写错、保留线失效、enforce 不排除、
 `warm_affinity` 不打标、热窗口边界、缺省改成 off、重置边界、跨窗口配对、并列取舍、单位丢弃、热候选按放置线、轮询不带基线）都被对应用例抓住。
+
+### 11.52 渠道 API 地址允许 http（2026-11-01）
+
+起因：站长把渠道的 API 地址填成自建 / 转售上游的明文端口（`http://<公网 IP>:8893/v1`），保存被拒——写入口校验缺省只收 https，
+放开它要去「设置 → 上游访问策略」里开 `allow_http`，而线上没有这条设置行，表单里也看不出原因。scheme 并不是 SSRF 的防线
+（防的是私网 / 环回 / 云元数据目标，那道闸在保存时和连接时各查一次，与 scheme 无关），明文传输的风险是管理员自己的取舍，
+所以渠道地址缺省放开 http，并留一个强制 https 的开关。
+
+- **按用途分两档**：`console::ssrf` 里 `Purpose::UpstreamBase`（渠道的 `api_base`）缺省接受 http；其余出站地址（`oauth_token_url`、Vertex `token_uri`、
+  回调 / 通知、支付网关、探测地址、比价源……）仍缺省仅 https，`allow_http: true` 才放开。两档由 `settings.ssrf_policy` 里两个互不牵连的键决定：
+  `allow_http_upstream`（缺省 true）管渠道地址、`allow_http`（缺省 false）管其余；`allow_private` 不变。强制渠道地址只收 https：`{"allow_http_upstream": false}`。
+  只有一个入口改了：`validate_upstream_base`，用在建渠道 / 拉上游模型 / MCP / OAuth 登录建渠道共用的 `channel_creation::endpoint`、更新渠道的 `api_base`、
+  图片批任务绑定里的渠道地址；原来的 `validate_api_base` / `validate_url` 语义不变。
+- **升级影响**：已有 `ssrf_policy` 行里 `allow_http: false` 的站点，渠道地址从此也能填 http（想保持只收 https 就加 `allow_http_upstream: false`）；
+  `allow_http: true` 的站点行为不变。http 地址的私网目标照旧被拒（`api_base_private_target`，scheme 放开不等于放开私网）。
+- **界面**：渠道抽屉的 API 地址是 `http://` 时（不分大小写、忽略首尾空白）在输入框下提示明文传输；设置页「上游访问策略」编辑器多一个
+  「渠道 API 地址允许 HTTP」开关（缺省开，没写 `allow_http_upstream` 也显示为开），原「允许 HTTP 上游」改名「其它地址允许 HTTP」，
+  列表徽标分成「渠道…」「其它地址…」两条；保存时显式写出三个布尔，未识别字段照旧保留。
+
+**验收**：`ssrf::tests::http_policy_is_decided_per_purpose`（真值表：缺省 / 老策略行 / 强制渠道 https 而放开其它 / null 当没写）；`console_ssrf`
+（缺省下公网 http 建渠道与改地址都过、私网 http 照拒；`allow_http_upstream:false` 后 http（含大写 scheme）被拒而 https 照过；`allow_http:true` 不放开渠道地址、
+却放开令牌端点；令牌端点缺省仍仅 https）与 `console_channel_test`（回环地址被私网闸而不是 scheme 拦下）；前端 e2e：抽屉提示（大小写 / 空白 / 清空）、
+设置页两个开关互不牵连并保留未识别字段、列表徽标，五处变异（去掉提示、提示区分大小写、缺省读成关、保存丢键、徽标无视新键）均被抓住。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 

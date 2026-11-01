@@ -1,5 +1,5 @@
-//! SSRF 校验验收（§14.4）：缺省策略拒 http/私网/环回/localhost，
-//! 公网 https 放行；用独立临时库保证缺省策略（共享库被其他套件放行）。
+//! SSRF 校验验收（§14.4）：缺省策略拒私网/环回/localhost，公网 https 放行，渠道的 API 地址也接受
+//! 公网 http（令牌端点等其它地址仍仅 https）；用独立临时库保证缺省策略（共享库被其他套件放行）。
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
 use okapi::{console, gateway};
@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // 一份完整的缺省策略剧本：建库 / 起服务 / 缺省放行与拒绝 / 强制 https 开关 / 令牌端点，拆开要重复建库
 async fn ssrf_default_policy_blocks_private_targets() {
     okapi_store::test_support::assert_isolated();
     let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
@@ -73,11 +74,77 @@ async fn ssrf_default_policy_blocks_private_targets() {
         }
     };
 
-    // http：缺省仅 https
+    // http：渠道的 API 地址缺省也接受（自建 / 转售上游常常只有一个明文端口）
     let resp = create("http://api.example.com/v1").await;
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let http_channel = resp.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
+    let patch_base = |channel: i64, api_base: &str| {
+        let client = client.clone();
+        let token = token.clone();
+        let api_base = api_base.to_owned();
+        async move {
+            client
+                .patch(format!("http://{addr}/admin/channels/{channel}"))
+                .bearer_auth(&token)
+                .json(&json!({"api_base": api_base}))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    // 改地址走同一条规则：公网 http 过，私网 http 照旧被拒
+    let resp = patch_base(http_channel, "http://38.92.24.38:8893/v1").await;
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    let resp = patch_base(http_channel, "http://10.0.0.8:8893/v1").await;
     assert_eq!(resp.status(), 400);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["param"], "api_base_scheme_https_only");
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["error"]["param"],
+        "api_base_private_target"
+    );
+
+    // 强制渠道地址只收 https：只关渠道这一档，其它地址的开关不受牵连
+    let set_policy = |value: Value| {
+        let pg = pg.clone();
+        async move {
+            sqlx::query("INSERT INTO settings(key,value) VALUES('ssrf_policy',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
+                .bind(value)
+                .execute(&pg)
+                .await
+                .unwrap();
+        }
+    };
+    set_policy(json!({"allow_http_upstream": false})).await;
+    for api_base in ["http://api.example.com/v1", "HTTP://api.example.com/v1"] {
+        let resp = create(api_base).await;
+        assert_eq!(resp.status(), 400, "{api_base}");
+        assert_eq!(
+            resp.json::<Value>().await.unwrap()["error"]["param"],
+            "api_base_scheme_https_only"
+        );
+    }
+    let resp = patch_base(http_channel, "http://38.92.24.38:8893/v1").await;
+    assert_eq!(resp.status(), 400);
+    let resp = patch_base(http_channel, "https://api.example.com/v1").await;
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    // allow_http 管的是其它地址：渠道地址被强制 https 时，令牌端点照样可以放开 http
+    set_policy(json!({"allow_http": true, "allow_http_upstream": false})).await;
+    let resp = patch_base(http_channel, "http://api.example.com/v1").await;
+    assert_eq!(resp.status(), 400, "allow_http 不放开渠道地址");
+    let resp = client
+        .patch(format!("http://{addr}/admin/channels/{http_channel}"))
+        .bearer_auth(&token)
+        .json(&json!({"settings": {"oauth_token_url": "http://auth.example.com/token"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{:?}", resp.text().await);
+    // 恢复缺省，后面的断言按缺省策略走
+    sqlx::query("DELETE FROM settings WHERE key = 'ssrf_policy'")
+        .execute(&pg)
+        .await
+        .unwrap();
 
     // 私网/环回/localhost（https 也拒）
     for target in [
@@ -90,6 +157,10 @@ async fn ssrf_default_policy_blocks_private_targets() {
         "https://100.100.100.200/latest/meta-data",
         "https://[::ffff:169.254.169.254]/v1",
         "https://[64:ff9b::a9fe:a9fe]/v1",
+        // scheme 放开不等于放开私网：http 的私网目标一样被拒
+        "http://10.0.0.8/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://localhost/v1",
     ] {
         let resp = create(target).await;
         assert_eq!(resp.status(), 400, "{target} 必须被拒");

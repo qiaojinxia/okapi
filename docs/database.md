@@ -663,7 +663,7 @@ CREATE TABLE settings (                               -- 全局 KV（site_notice
 
 已注册键（M4 收口清单；读写走 `POST /admin/settings` + `GET /admin/settings/{key}`）：
 `pricing_base_per_1m_micro`（倍率基准价草稿，正整数 micro-USD / 1M 输入 tokens，默认 2,000,000，最大 1,000,000,000,000；发布时以 `base_price_per_1m_micro` 写入 `pricing_epochs.snapshot`。网关启动/热更只读对应 epoch 的已发布基准，旧 epoch 缺字段取默认值；不改变按次价、阶梯绝对价、用户绝对单价、历史账单或 USD/quota 汇率。新 token 账单快照记录 `base_price_per_1m_usd`，绝对价换算仍使用固定 $2 的内部归一化基准。详见 [倍率基准价](pricing-base.md)）、
-`strict_group_isolation`（组可见性两态）、`ssrf_policy`（渠道 api_base 校验策略）、
+`strict_group_isolation`（组可见性两态）、`ssrf_policy`（出站地址校验策略：`allow_http_upstream` 渠道 API 地址是否接受 http，缺省 true；`allow_http` 其它地址（令牌端点 / 回调 / 支付 / 探测）是否接受 http，缺省 false；`allow_private` 是否允许私网目标，缺省 false）、
 `mcp_write_enabled`（MCP 写工具总闸）、`single_user_release_ack`（单用户模式生产确认）、
 `image_tasks_enabled`（异步图片创建开关，布尔值，缺省 false；关闭仍允许已有任务执行/查询/取消/下载，见 [图片契约](images-contract.md)）、
 `turnstile_secret`、`turnstile_verify_url`（siteverify 地址覆写，缺省 Cloudflare 官方端点；内网出口代理或自动化用例的 mock 用）、`oauth_providers`、`payment_epay` / `payment_stripe`、

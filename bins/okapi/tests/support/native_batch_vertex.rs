@@ -346,6 +346,13 @@ struct VertexEnv {
 impl VertexEnv {
     async fn new() -> Self {
         let env = Env::new().await;
+        // Vertex 的令牌地址（凭证里的 token_uri）与 GCS 端点属于「其它地址」，mock 是 http，仍要 allow_http；
+        // 其余协议的批任务只靠「渠道 API 地址缺省接受 http」（见 Env::new）
+        sqlx::query("UPDATE settings SET value=$1 WHERE key='ssrf_policy'")
+            .bind(json!({"allow_http":true,"allow_private":true}))
+            .execute(&env.state.pg)
+            .await
+            .unwrap();
         let peer = Arc::new(Mutex::new(VertexPeer {
             create_status: 200,
             state: "JOB_STATE_SUCCEEDED".into(),

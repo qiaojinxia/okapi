@@ -43,7 +43,7 @@ pub async fn endpoint<'a>(
             okapi_providers::registry::lookup(provider).and_then(|adapter| adapter.default_base)
         })
         .ok_or_else(|| AppError::bad_request().with_param("api_base"))?;
-    super::ssrf::validate_api_base(state, base).await?;
+    super::ssrf::validate_upstream_base(state, base).await?;
     Ok(base)
 }
 

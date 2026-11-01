@@ -323,7 +323,8 @@ impl Env {
         okapi_store::run_migrations(&pg).await.unwrap();
         Self::isolate_ids(&pg).await;
         sqlx::query("INSERT INTO settings(key,value) VALUES('ssrf_policy',$1)")
-            .bind(json!({"allow_http":true,"allow_private":true}))
+            // 渠道地址是 http 的 mock：只靠「渠道 API 地址缺省接受 http」放行（allow_http 管的是其它地址）
+            .bind(json!({"allow_http":false,"allow_private":true}))
             .execute(&pg)
             .await
             .unwrap();
