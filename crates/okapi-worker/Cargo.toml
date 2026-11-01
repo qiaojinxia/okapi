@@ -29,5 +29,11 @@ sqlx.workspace = true
 chrono.workspace = true
 reqwest = { workspace = true }
 
+[dev-dependencies]
+okapi-store = { workspace = true, features = ["test-support"] }
+base64 = { workspace = true }
+okapi-pricing = { workspace = true }
+axum = { workspace = true }
+
 [lints]
 workspace = true

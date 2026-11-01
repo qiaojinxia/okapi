@@ -2,7 +2,7 @@
 //! 一个钱包主体（合作商）+ 两把员工 key → 各自请求 → key 视角只见自己、
 //! user 视角见汇总、/api/me/keys 分账正确。
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 use axum::Router;

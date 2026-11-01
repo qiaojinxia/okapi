@@ -9,7 +9,7 @@
 //!
 //! 依赖 .env（scripts/dev-deps.sh up）。
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 use axum::Router;

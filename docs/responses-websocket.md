@@ -98,7 +98,7 @@ WS 继续执行证书链与域名校验。测试 CA 只加入单个测试 client
 
 ## 验证与剩余边界
 
-`bins/okapi/tests/gateway_responses_ws.rs` 使用真实 gateway upgrade、客户端/上游 WebSocket 帧及隔离 PG/Redis，
+`crates/okapi-gateway/tests/gateway_responses_ws.rs` 使用真实 gateway upgrade、客户端/上游 WebSocket 帧及隔离 PG/Redis，
 验证逐轮账单金额、余额、预扣释放、权限变更、账号固定、FIFO/并行、超时不重放、断开后终态结算等。
 `gateway_responses_ws_bridge.rs` 的 15 项测试覆盖真实 WS → HTTP/SSE 转发、策略选择、快照、OAuth、按次定价预热、权限、失败隔离与迟到 usage。
 原有 `responses_ws_transport.rs` 的 16 项传输测试与 5 项 TLS 测试继续保留；这些不能代替网关验收。

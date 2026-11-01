@@ -1,6 +1,6 @@
 //! One real gateway call and HTTP refund must retain call and measurement populations.
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 use axum::Router;

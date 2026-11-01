@@ -12,7 +12,7 @@ mod client_profiles;
 mod oauth_maintenance;
 #[path = "support/programming_clients.rs"]
 mod programming_clients;
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 #[path = "support/token_imports.rs"]
 mod token_imports;

@@ -1,5 +1,5 @@
 //! Admission failures must not call providers, charge funds or leak reservations.
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 use axum::response::IntoResponse;

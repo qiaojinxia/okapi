@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
-#[path = "support/paged_lists.rs"]
+#[path = "../../../crates/okapi-console/tests/support/paged_lists.rs"]
 mod paged_lists;
 
 /// 本文件的用例串行执行。

@@ -1,6 +1,6 @@
 //! M2 运维批验收：按日志退款（事件溯源冲销 + CH 口径一致）/ 代客查看 / 缓存清理。
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 use axum::Router;

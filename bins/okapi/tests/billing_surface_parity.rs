@@ -37,7 +37,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use uuid::Uuid;
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 /// 上游报的 usage 固定，好让"应扣多少"只取决于价簿而非随机量。

@@ -22,7 +22,7 @@ use uuid::Uuid;
 mod usage_tests;
 
 #[allow(dead_code)]
-#[path = "support/raw_ws.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/raw_ws.rs"]
 mod raw_ws;
 
 // ---- mock 上游 WS ----
@@ -86,7 +86,7 @@ async fn serve(router: Router) -> SocketAddr {
     addr
 }
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 // ---- 测试环境 ----

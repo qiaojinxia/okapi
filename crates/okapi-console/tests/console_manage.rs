@@ -1,0 +1,1353 @@
+//! 管理面接口清单验收（IMPLEMENTATION §11.6）：目标要求的六类接口面 + 权限分级。
+//!
+//! 覆盖：模型配置/分组/套餐/兑换码/令牌/设置列表读、渠道批量与复制、
+//! 用户统一管理动作（含 super_admin 保护与令牌吊销）、占用冲突 409、
+//! 设置敏感键脱敏、权限点清单、统计端点（CH 启用查 MV / 未启用 fail-closed 501）。
+
+use axum::Router;
+use okapi_console as console;
+use okapi_gateway as gateway;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use uuid::Uuid;
+
+#[path = "support/paged_lists.rs"]
+mod paged_lists;
+
+fn hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+async fn serve(app: Router) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    addr
+}
+
+struct Env {
+    pg: PgPool,
+    console: SocketAddr,
+    suffix: String,
+    admin_token: String,
+    plain_token: String,
+    victim_id: i64,
+    victim_token: String,
+    channel_id: i64,
+    model: String,
+    group: String,
+    ch_enabled: bool,
+}
+
+async fn setup() -> Env {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let ch_url = okapi_store::test_support::optional_service("OKAPI_CLICKHOUSE_URL");
+    let pg = okapi_store::connect_pg(&database_url).await.unwrap();
+    okapi_store::run_migrations(&pg).await.unwrap();
+
+    let suffix = Uuid::new_v4().simple().to_string()[..10].to_owned();
+
+    let admin_id = okapi_store::provision::create_user(&pg, &format!("mg-a-{suffix}"))
+        .await
+        .unwrap();
+    sqlx::query!("UPDATE users SET role = 100 WHERE id = $1", admin_id)
+        .execute(&pg)
+        .await
+        .unwrap();
+    let admin_token = format!("sk-okapi-mg-a-{suffix}");
+    okapi_store::provision::create_api_key(&pg, admin_id, &hash(&admin_token), "sk-mg-a")
+        .await
+        .unwrap();
+
+    // 普通用户：验证权限分级（一律 403）
+    let plain_id = okapi_store::provision::create_user(&pg, &format!("mg-p-{suffix}"))
+        .await
+        .unwrap();
+    let plain_token = format!("sk-okapi-mg-p-{suffix}");
+    okapi_store::provision::create_api_key(&pg, plain_id, &hash(&plain_token), "sk-mg-p")
+        .await
+        .unwrap();
+
+    // 被管理对象：验证封禁连带吊销令牌
+    let victim_id = okapi_store::provision::create_user(&pg, &format!("mg-v-{suffix}"))
+        .await
+        .unwrap();
+    let victim_token = format!("sk-okapi-mg-v-{suffix}");
+    okapi_store::provision::create_api_key(&pg, victim_id, &hash(&victim_token), "sk-mg-v")
+        .await
+        .unwrap();
+
+    let model = format!("m-mg-{suffix}");
+    okapi_store::provision::create_model_ratio(&pg, &model, "1.5", "2", "0.1")
+        .await
+        .unwrap();
+    let group = format!("g-mg-{suffix}");
+    okapi_store::admin::upsert_price_group(
+        &pg,
+        okapi_store::admin::PriceGroupInput {
+            group_code: &group,
+            group_ratio: "0.9",
+            description: "测试组",
+            pool_code: None,
+            self_select: false,
+            rpm_limit: None,
+            rph_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let (channel_id, _key_id) = okapi_store::provision::create_channel(
+        &pg,
+        &format!("mg-ch-{suffix}"),
+        "openai",
+        "https://api.openai.com/v1",
+        "mock-credential",
+        &[model.as_str()],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let state = gateway::build_state(
+        &database_url,
+        &redis_url,
+        "test-node",
+        ch_url.as_deref(),
+        None,
+    )
+    .await
+    .unwrap();
+    // A cold test instance has no worker to bootstrap the statistics schema.
+    if let Some(ch) = &state.ch {
+        ch.ensure_schema().await.unwrap();
+    }
+    let ch_enabled = state.ch.is_some();
+    let console = serve(console::router(state)).await;
+
+    Env {
+        pg,
+        console,
+        suffix,
+        admin_token,
+        plain_token,
+        victim_id,
+        victim_token,
+        channel_id,
+        model,
+        group,
+        ch_enabled,
+    }
+}
+
+async fn req(
+    method: reqwest::Method,
+    addr: SocketAddr,
+    path: &str,
+    token: &str,
+    body: Option<Value>,
+) -> (u16, Value) {
+    let client = reqwest::Client::new();
+    let mut b = client
+        .request(method, format!("http://{addr}{path}"))
+        .bearer_auth(token);
+    if let Some(body) = body {
+        b = b.json(&body);
+    }
+    let resp = b.send().await.unwrap();
+    let status = resp.status().as_u16();
+    let value: Value = resp.json().await.unwrap_or(Value::Null);
+    (status, value)
+}
+
+async fn get(addr: SocketAddr, path: &str, token: &str) -> (u16, Value) {
+    req(reqwest::Method::GET, addr, path, token, None).await
+}
+
+#[tokio::test]
+async fn payment_order_reference_blocks_plan_deletion_with_conflict() {
+    let env = setup().await;
+    let code = format!("order-plan-{}", env.suffix);
+    let plan: i64 = sqlx::query_scalar("INSERT INTO plans(plan_code,display_name,grant_micro) VALUES($1,'order plan',1000) RETURNING id")
+        .bind(&code).fetch_one(&env.pg).await.unwrap();
+    sqlx::query("INSERT INTO recharge_orders(order_no,user_id,amount_micro,gateway,plan_id) VALUES($1,$2,1000,'manual',$3)")
+        .bind(format!("order-{}", env.suffix)).bind(env.victim_id).bind(plan)
+        .execute(&env.pg).await.unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/plans/{code}"),
+        &env.admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "plan_in_use");
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM plans WHERE id=$1)")
+        .bind(plan)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert!(exists, "拒删必须保留历史订单引用的套餐");
+}
+
+#[tokio::test]
+async fn price_group_pagination_matches_database_pages() {
+    let env = setup().await;
+    let all = okapi_store::listing::list_groups(&env.pg, okapi_store::listing::Slice::ALL)
+        .await
+        .unwrap();
+    for (limit, offset) in [(20, 0), (20, 20), (99999, 0), (20, all.data.len())] {
+        let (status, body) = get(
+            env.console,
+            &format!("/admin/groups?limit={limit}&offset={offset}"),
+            &env.admin_token,
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body["total"], all.total, "每一页必须返回真实总数");
+        let actual: Vec<&str> = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["group_code"].as_str().unwrap())
+            .collect();
+        let expected: Vec<&str> = all
+            .data
+            .iter()
+            .skip(offset)
+            .take(limit.min(200))
+            .map(|row| row.group_code.as_str())
+            .collect();
+        assert_eq!(actual, expected, "数据库分页必须稳定排序、不漏行、不重复");
+    }
+}
+
+#[tokio::test]
+// 查询串解析失败必须走 AppError：axum 缺省的 text/plain 英文句子违反 i18n 红线
+async fn malformed_query_string_is_rejected_as_error_code() {
+    let env = setup().await;
+    let (status, body) = get(env.console, "/admin/groups?limit=abc", &env.admin_token).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert_eq!(body["error"]["param"], "query");
+    assert_eq!(
+        body["error"]["message"], "bad_request",
+        "message 只放 error_code，不带自然语言"
+    );
+    // 其他接入 Query 的列表同样：兑换码 batch 非 uuid、用户 offset 非整数
+    for path in [
+        "/admin/redemptions?batch=not-a-uuid",
+        "/admin/users?offset=1.5",
+    ] {
+        let (status, body) = get(env.console, path, &env.admin_token).await;
+        assert_eq!(status, 400, "{path}");
+        assert_eq!(body["error"]["code"], "bad_request", "{path}");
+    }
+}
+
+#[tokio::test]
+// azure 渠道的写入校验（§11.29）：协议白名单、必填资源端点、api_version 形状；
+// 改渠道时清空地址 / api_version 写错同样拦在管理面，不让坏配置流到热路径才 404。
+async fn azure_channel_write_validation() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let base = json!({
+        "name": format!("az-{}", env.suffix), "credential": "k", "models": [env.model],
+    });
+    let with = |extra: Value| {
+        let mut b = base.clone();
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+
+    // 协议不在白名单
+    let (status, body) = post(with(
+        json!({"provider": "bogus", "api_base": "https://x.example"}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "provider");
+    // azure 缺资源端点
+    let (status, body) = post(with(json!({"provider": "azure", "api_base": "  "}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+    // api_version 形状不对
+    let (status, body) = post(with(json!({
+        "provider": "azure", "api_base": "https://r.openai.azure.com",
+        "settings": {"api_version": "latest"}
+    })))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_version");
+    // 合法：日期版 / 预览版都收
+    let (status, body) = post(with(json!({
+        "provider": "azure", "api_base": "https://r.openai.azure.com/openai",
+        "settings": {"api_version": "2025-01-01-preview"}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["channel_id"].as_i64().unwrap();
+
+    // 改渠道：清空地址被拦；改 api_version 走同一校验；合法改动放行
+    let patch_path = format!("/admin/channels/{id}");
+    let patch = |body: Value| {
+        req(
+            reqwest::Method::PATCH,
+            env.console,
+            &patch_path,
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let (status, body) = patch(json!({"api_base": ""})).await;
+    assert_eq!(
+        status, 400,
+        "azure 渠道不能失去端点（SSRF 校验先拦下空地址）"
+    );
+    assert_eq!(body["error"]["param"], "api_base_host");
+    let (status, body) = patch(json!({"settings": {"api_version": "2024-10"}})).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_version");
+    let (status, _) = patch(json!({"settings": {"api_version": "2024-10-21"}})).await;
+    assert_eq!(status, 200);
+    let stored = sqlx::query_scalar!(
+        r#"SELECT settings ->> 'api_version' FROM channels WHERE id = $1"#,
+        id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(stored.as_deref(), Some("2024-10-21"));
+}
+
+/// bedrock / vertex（§11.35）：地址必填、vertex 须含 projects/locations、aws_region 形状。
+#[tokio::test]
+async fn cloud_channel_write_validation() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let base = json!({
+        "name": format!("cloud-{}", env.suffix), "credential": "AKIAIOSFODNN7EXAMPLE:secret",
+        "models": [env.model],
+    });
+    let with = |extra: Value| {
+        let mut b = base.clone();
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+
+    let (status, body) = post(with(json!({"provider": "bedrock", "api_base": " "}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+    let (status, body) = post(with(json!({
+        "provider": "bedrock", "api_base": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "settings": {"aws_region": "US East"}
+    })))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "aws_region");
+    let (status, body) = post(with(json!({
+        "provider": "bedrock", "api_base": "https://bedrock-runtime.us-east-1.amazonaws.com",
+        "settings": {"aws_region": "us-east-1"}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+
+    // vertex：缺 /projects/{p}/locations/{l} 的地址拒
+    let (status, body) = post(with(json!({
+        "name": format!("vx-{}", env.suffix),
+        "provider": "vertex", "api_base": "https://aiplatform.googleapis.com/v1"
+    })))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+    let (status, body) = post(with(json!({
+        "name": format!("vx-{}", env.suffix),
+        "provider": "vertex",
+        "api_base": "https://us-central1-aiplatform.googleapis.com/v1/projects/p/locations/us-central1"
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let id = body["channel_id"].as_i64().unwrap();
+    // 只改地址：仍按 vertex 形状校验
+    let (status, body) = req(
+        reqwest::Method::PATCH,
+        env.console,
+        &format!("/admin/channels/{id}"),
+        &env.admin_token,
+        Some(json!({"api_base": "https://aiplatform.googleapis.com/v1/publishers/google"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "api_base");
+}
+
+#[tokio::test]
+async fn outbound_settings_write_validation() {
+    let env = setup().await;
+    let post = |body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/channels",
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    let base = json!({
+        "name": format!("ob-{}", env.suffix),
+        "provider": "openai",
+        "api_base": "https://api.openai.com/v1",
+        "credential": "k",
+        "models": [env.model],
+    });
+    let with = |extra: Value| {
+        let mut b = base.clone();
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+
+    let (status, body) = post(with(json!({"settings": {"proxy_url": "ftp://x"}}))).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "proxy_url");
+    let (status, body) = post(with(
+        json!({"settings": {"extra_headers": {"Authorization": "x"}}}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "extra_headers");
+    // settings.proxy_url 已退役（§11.41 出口绑定）：合法地址也拒，免得旧客户端以为配上了代理
+    let (status, body) = post(with(
+        json!({"settings": {"proxy_url": "socks5://127.0.0.1:1080"}}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "proxy_url");
+    let (status, body) = post(with(json!({
+        "settings": {"extra_headers": {"OpenAI-Organization": "org-1"}}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post(with(
+        json!({"settings": {"inject_request_fields": {"model": "x"}}}),
+    ))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "inject_request_fields");
+    let (status, body) = post(with(json!({
+        "name": format!("ob-inj-{}", env.suffix),
+        "settings": {"inject_request_fields": {"temperature": 0.2}}
+    })))
+    .await;
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test]
+async fn image_stream_usage_mode_is_validated_on_create_and_update() {
+    let env = setup().await;
+    for mode in [
+        json!("guess"),
+        json!(null),
+        json!(true),
+        json!(1),
+        json!({}),
+    ] {
+        let (status, error) = req(reqwest::Method::POST,env.console,"/admin/channels",&env.admin_token,Some(json!({
+            "name":format!("stream-{}",env.suffix),"provider":"openai","api_base":"https://api.openai.com/v1",
+            "credential":"fixture","models":[env.model],"settings":{"image_stream_usage":mode}
+        }))).await;
+        assert_eq!(status, 400);
+        assert_eq!(error["error"]["param"], "image_stream_usage");
+        let (status, error) = req(
+            reqwest::Method::PATCH,
+            env.console,
+            &format!("/admin/channels/{}", env.channel_id),
+            &env.admin_token,
+            Some(json!({"settings":{"image_stream_usage":mode}})),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert_eq!(error["error"]["param"], "image_stream_usage");
+    }
+    for mode in ["per_image", "cumulative"] {
+        let (status, result) = req(
+            reqwest::Method::PATCH,
+            env.console,
+            &format!("/admin/channels/{}", env.channel_id),
+            &env.admin_token,
+            Some(json!({"settings":{"image_stream_usage":mode}})),
+        )
+        .await;
+        assert_eq!(status, 200, "{result}");
+        let settings: Value = sqlx::query_scalar("SELECT settings FROM channels WHERE id=$1")
+            .bind(env.channel_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+        assert_eq!(settings["image_stream_usage"], mode);
+    }
+}
+
+#[tokio::test]
+// 接口清单逐资源验收，一体断言便于对照 §11.6
+#[allow(clippy::too_many_lines)]
+async fn admin_list_surface_covers_every_resource() {
+    let env = setup().await;
+    let t = &env.admin_token;
+
+    // ---- 模型配置列表（四轴倍率 text 精确出库）----
+    let (status, body) = get(env.console, &format!("/admin/models?q={}", env.model), t).await;
+    assert_eq!(status, 200);
+    let mine = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model_name"] == env.model.as_str())
+        .expect("新建模型必须出现在列表");
+    assert_eq!(mine["pricing_mode"], "ratio");
+    assert_eq!(mine["model_ratio"], "1.500000");
+    assert_eq!(mine["completion_ratio"], "2.000000");
+    assert_eq!(mine["cache_ratio"], "0.100000");
+    assert_eq!(
+        mine["cache_write_ratio"], "1.000000",
+        "缓存写入轴缺省 1.0 必须可见"
+    );
+
+    // ---- 分组列表（含占用计数，供删除前检查）----
+    let (status, body) = paged_lists::get_all(env.console, "/admin/groups", t).await;
+    assert_eq!(status, 200);
+    let g = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["group_code"] == env.group.as_str())
+        .expect("分组必须在列表");
+    assert_eq!(g["group_ratio"], "0.900000");
+    assert_eq!(g["user_count"], 0);
+    // 分组必有池：未指定即 default 池，渠道数 = default 池成员数（新渠道缺省都在里面）
+    assert_eq!(g["pool_code"], "default");
+    assert_eq!(g["self_select"], false);
+    assert!(g["channel_count"].as_i64().unwrap() >= 0);
+    // 完整列表由调用方逐页读取；每页 total 是总数，不受 limit/offset 影响
+    let total = body["total"].as_i64().expect("列表必须附 total");
+    assert!(total >= 2, "至少 default 组 + 测试组");
+    let (status, page) = get(env.console, "/admin/groups?limit=1&offset=1", t).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        page["data"].as_array().unwrap().len(),
+        1,
+        "limit=1 只回一条"
+    );
+    assert!(page["total"].as_i64().unwrap() >= 2, "切片不改变总数");
+
+    // ---- 池详情（`GET /admin/pools/{code}` 此前零 HTTP 直打）----
+    let (status, body) = get(env.console, "/admin/pools/default", t).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["pool_code"], "default");
+    assert!(
+        body["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["channel_id"] == env.channel_id),
+        "新渠道缺省进 default 池：{body}"
+    );
+    assert!(
+        body["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m == env.model.as_str()),
+        "成员模型并集必须含本用例模型：{body}"
+    );
+    let (status, body) = get(env.console, "/admin/pools/nope-no-such", t).await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "not_found");
+
+    // ---- 渠道列表：关键词 + 协议过滤 + 过滤集内启用数；切片越界回空但 total 不变 ----
+    let mine = format!("mg-ch-{}", env.suffix);
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/channels?q={mine}&provider=openai"),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["enabled"], 1);
+    assert_eq!(body["data"][0]["id"], env.channel_id);
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/channels?q={mine}&provider=anthropic"),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 0);
+    assert!(
+        body["data"].as_array().unwrap().is_empty(),
+        "body[\"data\"].as_array().unwrap() should be empty"
+    );
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/channels?q={mine}&limit=1&offset=1"),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        body["data"].as_array().unwrap().is_empty(),
+        "offset 越界回空页"
+    );
+    assert_eq!(body["total"], 1, "但 total 仍是过滤集总数");
+
+    // ---- 搜索词按字面匹配：`\` 是 LIKE 的转义符、`_` 是单字符通配，都不能被当成通配 / 吞掉 ----
+    let literal = format!(r"mg-bs-{}\x_y", env.suffix);
+    okapi_store::provision::create_channel(
+        &env.pg,
+        &literal,
+        "openai",
+        "http://127.0.0.1:1/v1",
+        "cred",
+        &[],
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    for (query, expected) in [
+        (literal.clone(), 1),
+        (format!(r"mg-bs-{}\xAy", env.suffix), 0),
+        (format!("mg-bs-{}x_y", env.suffix), 0),
+    ] {
+        let path = format!("/admin/channels?q={}", query.replace('\\', "%5C"));
+        let (status, body) = get(env.console, &path, t).await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["total"], expected, "q={query}: {body}");
+    }
+
+    // ---- 模型列表：关键词 + 只看未定价（测试模型已定价，不该出现在未定价视图）----
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/models?q={}&unpriced=true", env.model),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 0);
+    assert_eq!(body["unpriced"], 0);
+    let (status, body) = get(env.console, &format!("/admin/models?q={}", env.model), t).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 1);
+    assert_eq!(body["unpriced"], 0);
+    assert_eq!(body["data"][0]["model_name"], env.model.as_str());
+
+    // ---- 令牌列表：管理员跨用户 + 按用户过滤 + 只回前缀 ----
+    let (status, body) = get(
+        env.console,
+        &format!("/admin/keys?user_id={}", env.victim_id),
+        t,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["total"], 1);
+    let key = &body["data"][0];
+    assert_eq!(key["username"], format!("mg-v-{}", env.suffix));
+    assert_eq!(key["key_prefix"], "sk-mg-v");
+    assert!(
+        !key.as_object().unwrap().contains_key("key_hash"),
+        "列表不得暴露哈希"
+    );
+    // limit 上限钳制：传超大值不得放大扫描
+    let (status, body) = get(env.console, "/admin/keys?limit=99999", t).await;
+    assert_eq!(status, 200);
+    assert!(
+        body["data"].as_array().unwrap().len() <= 200,
+        "limit 必须被钳制到 MAX_PAGE"
+    );
+
+    // ---- 套餐 / 兑换码列表 ----
+    let (status, body) = get(env.console, "/admin/plans", t).await;
+    assert_eq!(status, 200);
+    assert!(body["data"].is_array());
+    let (status, body) = get(env.console, "/admin/redemptions?limit=10", t).await;
+    assert_eq!(status, 200);
+    assert!(body["data"].is_array() && body["total"].is_i64());
+
+    // ---- 权限点清单（前端角色编辑器数据源）----
+    let (status, body) = get(env.console, "/admin/permissions", t).await;
+    assert_eq!(status, 200);
+    let perms: Vec<&str> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    for expect in [
+        "channel.write",
+        "pricing.read",
+        "pricing.write",
+        "user.read",
+        "user.manage",
+        "billing.read",
+        "settings.read",
+        "role.manage",
+    ] {
+        assert!(perms.contains(&expect), "权限点清单缺 {expect}");
+    }
+
+    // ---- 系统设置：敏感键脱敏 ----
+    // 注：这只是一个"名字看起来像密钥"的夹具，用来验脱敏；生产的收款配置是单个
+    // payment_epay 对象，不存在 epay_key_* 这种键。用完必须删——settings 是站点级表，
+    // 每跑一轮就多一条，系统设置页会被几十条一模一样的"支付凭证"塞满。
+    let secret_key = format!("epay_key_{}", env.suffix);
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/settings",
+        t,
+        Some(json!({"key":secret_key,"value":"super-secret-value"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let audit: Value = sqlx::query_scalar("SELECT detail FROM audit_logs WHERE action='settings.set' AND target=$1 ORDER BY created_at DESC LIMIT 1")
+        .bind(&secret_key).fetch_one(&env.pg).await.unwrap();
+    assert_eq!(audit, json!({"redacted":true,"configured":true}));
+    let (status, body) = get(env.console, "/admin/settings", t).await;
+    assert_eq!(status, 200);
+    let s = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["key"] == secret_key.as_str())
+        .expect("设置项必须在列表");
+    assert_eq!(s["is_secret"], true);
+    assert_eq!(s["value"], Value::Null, "敏感值必须脱敏");
+    assert_eq!(s["configured"], true, "但要告知已配置");
+    assert!(
+        !serde_json::to_string(&body)
+            .unwrap()
+            .contains("super-secret-value"),
+        "明文绝不可出现在响应中"
+    );
+
+    // ---- 数据保留月数：只收非负整数，写错不落库（清理任务按 bigint 读，坏值让它每轮报错） ----
+    for bad in [
+        json!(null),
+        json!("abc"),
+        json!(2.5),
+        json!(-1),
+        json!(1201),
+    ] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            "/admin/settings",
+            t,
+            Some(json!({"key":"retention_months","value":bad})),
+        )
+        .await;
+        assert_eq!(status, 400, "retention_months={bad} 必须拒绝");
+    }
+
+    // ---- 权限分级：普通用户对管理面一律 403 ----
+    for path in [
+        "/admin/models",
+        "/admin/groups",
+        "/admin/plans",
+        "/admin/keys",
+        "/admin/settings",
+        "/admin/permissions",
+        "/admin/redemptions",
+        "/admin/stats/overview",
+        "/admin/pools/default",
+    ] {
+        let (status, _) = get(env.console, path, &env.plain_token).await;
+        assert_eq!(status, 403, "{path} 必须拒绝普通用户");
+    }
+    // 收尾：删掉本用例造的敏感键夹具
+    sqlx::query!(r#"DELETE FROM settings WHERE key = $1"#, secret_key)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+// 渠道批量/复制 + 用户与令牌管理动作 + 占用冲突
+#[allow(clippy::too_many_lines)]
+async fn channel_batch_and_user_actions() {
+    let env = setup().await;
+    let t = &env.admin_token;
+    let id = env.channel_id;
+
+    // ---- 复制渠道：连带 key，默认停用 ----
+    let dup_name = format!("mg-dup-{}", env.suffix);
+    let (status, body) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/channels/{id}/duplicate"),
+        t,
+        Some(json!({"name": dup_name})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let dup_id = body["id"].as_i64().unwrap();
+    assert_eq!(body["status"], 2, "复制体默认停用，避免半配置进调度");
+    let dup_keys = sqlx::query_scalar!(
+        r#"SELECT COUNT(*)::bigint AS "c!" FROM channel_keys WHERE channel_id = $1"#,
+        dup_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(dup_keys, 1, "key 必须一并克隆");
+
+    // ---- 批量启停 ----
+    let (status, body) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/channels/batch",
+        t,
+        Some(json!({"ids": [id, dup_id], "action": "enable"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["affected"], 2);
+    let enabled = sqlx::query_scalar!(
+        r#"SELECT COUNT(*)::bigint AS "c!" FROM channels
+           WHERE id = ANY($1) AND status = 1"#,
+        &[id, dup_id][..]
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(enabled, 2);
+
+    // 非法 action 必须 400（不静默放过）
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/channels/batch",
+        t,
+        Some(json!({"ids": [id], "action": "drop-table"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    // 空 ids 同样拒绝
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/channels/batch",
+        t,
+        Some(json!({"ids": [], "action": "enable"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // ---- 批量软删：渠道与其 key 同时停用 ----
+    let (status, body) = req(
+        reqwest::Method::POST,
+        env.console,
+        "/admin/channels/batch",
+        t,
+        Some(json!({"ids": [dup_id], "action": "delete"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["affected"], 1);
+    let gone = sqlx::query!(
+        r#"SELECT deleted_at, status FROM channels WHERE id = $1"#,
+        dup_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(gone.deleted_at.is_some(), "软删保留行以维持账本外键");
+    assert_eq!(gone.status, 2);
+    let key_status = sqlx::query_scalar!(
+        r#"SELECT status FROM channel_keys WHERE channel_id = $1"#,
+        dup_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(key_status, 2, "key 必须同步停用，防调度取到孤儿");
+
+    // ---- 单条软删（`DELETE /admin/channels/{id}` 此前只走 batch）----
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/channels/{id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true);
+    let gone = sqlx::query!(
+        r#"SELECT deleted_at, status FROM channels WHERE id = $1"#,
+        id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert!(
+        gone.deleted_at.is_some(),
+        "单条删除是软删，调度按 deleted_at 过滤"
+    );
+    assert_eq!(gone.status, 2, "单条 DELETE 与 batch 同口径：渠道 status=2");
+    let key_status = sqlx::query_scalar!(
+        r#"SELECT status FROM channel_keys WHERE channel_id = $1"#,
+        id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(key_status, 2, "单条删除也停用其下 key");
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/channels/{id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    // ---- 分组占用冲突 409（不静默解绑，避免计费口径突变）----
+    okapi_store::admin::add_user_group(&env.pg, env.victim_id, &env.group)
+        .await
+        .unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/groups/{}", env.group),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 409, "被占用的分组不得删除");
+    assert_eq!(body["error"]["code"], "group_in_use");
+
+    // default 分组永不可删
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        "/admin/groups/default",
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "group_is_default");
+
+    // 不存在的资源 → 404
+    let (status, _) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        "/admin/groups/no-such-group-xyz",
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+
+    // ---- 用户统一管理动作：封禁连带吊销令牌 ----
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{}/manage", env.victim_id),
+        t,
+        Some(json!({"action": "ban"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let after = sqlx::query!(
+        r#"SELECT u.status AS user_status,
+                  (SELECT COUNT(*)::bigint FROM api_keys k
+                    WHERE k.user_id = u.id AND k.status = 1) AS "active_keys!"
+           FROM users u WHERE u.id = $1"#,
+        env.victim_id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(after.user_status, 2);
+    assert_eq!(
+        after.active_keys, 0,
+        "封禁必须吊销令牌，否则已发出的 key 仍能打数据面"
+    );
+    let (status, _) = get(env.console, "/api/me", &env.victim_token).await;
+    assert_eq!(status, 401, "吊销后必须立刻失效（含鉴权缓存刷新）");
+
+    // 解封后恢复可用
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{}/manage", env.victim_id),
+        t,
+        Some(json!({"action": "unban"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // 非法动作 400
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{}/manage", env.victim_id),
+        t,
+        Some(json!({"action": "nuke"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+
+    // 不可作用于自己
+    let admin_id = sqlx::query_scalar!(
+        r#"SELECT id FROM users WHERE username = $1"#,
+        format!("mg-a-{}", env.suffix)
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let (status, body) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{admin_id}/manage"),
+        t,
+        Some(json!({"action": "demote"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["param"], "self_target");
+
+    // super_admin 受保护（防互踢导致站点失去最高权限）
+    let other_super =
+        okapi_store::provision::create_user(&env.pg, &format!("mg-s2-{}", env.suffix))
+            .await
+            .unwrap();
+    sqlx::query!("UPDATE users SET role = 100 WHERE id = $1", other_super)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let (status, body) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{other_super}/manage"),
+        t,
+        Some(json!({"action": "ban"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["error"]["param"], "super_admin_protected");
+
+    // ---- 吊销令牌：门户只动自己的；管理面按 id；重复删 404 ----
+    let plain_id = sqlx::query_scalar!(
+        r#"SELECT id FROM users WHERE username = $1"#,
+        format!("mg-p-{}", env.suffix)
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    let extra = format!("sk-okapi-mg-x-{}", env.suffix);
+    let extra_id =
+        okapi_store::provision::create_api_key(&env.pg, plain_id, &hash(&extra), "sk-mg-x")
+            .await
+            .unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/api/me/keys/{extra_id}"),
+        &env.plain_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["key_id"], extra_id);
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/api/me/keys/{extra_id}"),
+        &env.plain_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["code"], "not_found");
+
+    let managed_token = format!("sk-okapi-mg-y-{}", env.suffix);
+    let managed_key_id =
+        okapi_store::provision::create_api_key(&env.pg, plain_id, &hash(&managed_token), "sk-mg-y")
+            .await
+            .unwrap();
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/keys/{managed_key_id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["ok"], true);
+    let (status, _) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/keys/{managed_key_id}"),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    let (status, _) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/keys/{managed_key_id}"),
+        &env.plain_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "管理面吊销对普通用户仍是 403");
+
+    // ---- 模型删除需提示重新发布 epoch ----
+    let (status, body) = req(
+        reqwest::Method::DELETE,
+        env.console,
+        &format!("/admin/models/{}", env.model),
+        t,
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["requires_publish"], true,
+        "PriceBook 是编译期快照，删除后必须提示发布"
+    );
+}
+
+#[tokio::test]
+async fn stats_surface_exposes_clickhouse_views() {
+    let env = setup().await;
+    let t = &env.admin_token;
+    for path in [
+        "/admin/stats/overview",
+        "/admin/stats/overview?days=30",
+        "/admin/stats/models?days=7",
+        "/admin/stats/channels?days=1&limit=5",
+        "/admin/stats/margin?days=3",
+    ] {
+        let (status, body) = get(env.console, path, t).await;
+        if env.ch_enabled {
+            assert_eq!(status, 200, "{path} 应返回聚合结果：{body}");
+        } else {
+            // CH 未启用时 fail-closed：501 + error_code，计费与账本不受影响
+            assert_eq!(status, 501, "{path} 未启用 CH 时须 501");
+            assert_eq!(body["error"]["code"], "stats_disabled");
+        }
+    }
+
+    if env.ch_enabled {
+        let (_, body) = get(env.console, "/admin/stats/overview", t).await;
+        // 站点 KPI 必备字段：毛利与活跃用户是 margin 端点未覆盖的增量价值
+        for field in ["requests", "amount_micro", "active_users"] {
+            assert!(
+                body["window"][field].is_i64(),
+                "overview.window 缺字段 {field}：{body}"
+            );
+            assert!(
+                body["today"][field].is_i64(),
+                "overview.today 缺字段 {field}"
+            );
+        }
+        // margin_micro 按契约只在成本覆盖率 100% 时给值，否则显式 null（见
+        // stats::apply_cost_coverage）。断言"必须是数字"会把本用例绑死在
+        // 空 ClickHouse 上：长期 dev 库里攒着成本特性之前的历史行，覆盖率
+        // 永远回不到 100%，CI 绿而本地必红。这里改为校验那条契约本身。
+        for scope in ["window", "today"] {
+            let row = &body[scope];
+            let coverage_full = row["cost_coverage_bp"].as_i64() == Some(10_000);
+            assert!(
+                row.get("margin_micro").is_some(),
+                "overview.{scope} 缺字段 margin_micro：{body}"
+            );
+            if coverage_full {
+                assert!(
+                    row["margin_micro"].is_i64(),
+                    "覆盖率 100% 时 margin_micro 必须有值：{body}"
+                );
+            } else {
+                assert!(
+                    row["margin_micro"].is_null(),
+                    "覆盖率不足时 margin_micro 必须是 null 而非估算值：{body}"
+                );
+            }
+        }
+        assert_eq!(body["days"], 7, "缺省窗口 7 天");
+        // 窗口参数钳制：超大 days 收敛到支持的最大 366 天
+        let (_, body) = get(env.console, "/admin/stats/overview?days=9999", t).await;
+        assert_eq!(body["days"], 366);
+    }
+
+    // 用户自助按日统计：只看自己，无需管理权限
+    let (status, body) = get(env.console, "/api/me/stats/daily?days=3", &env.plain_token).await;
+    if env.ch_enabled {
+        assert_eq!(status, 200);
+        assert!(body["data"].is_array());
+        assert_eq!(body["days"], 3);
+    } else {
+        assert_eq!(status, 501);
+    }
+}
+
+#[tokio::test]
+async fn unrestricted_admin_cannot_promote_or_demote_users() {
+    let env = setup().await;
+    let operator =
+        okapi_store::provision::create_user(&env.pg, &format!("role-gate-{}", env.suffix))
+            .await
+            .unwrap();
+    sqlx::query("UPDATE users SET role=10 WHERE id=$1")
+        .bind(operator)
+        .execute(&env.pg)
+        .await
+        .unwrap();
+    let token = format!("sk-role-gate-{}", env.suffix);
+    okapi_store::provision::create_api_key(&env.pg, operator, &hash(&token), "sk-role-gate")
+        .await
+        .unwrap();
+    for action in ["promote", "demote"] {
+        let (status, _) = req(
+            reqwest::Method::POST,
+            env.console,
+            &format!("/admin/users/{}/manage", env.victim_id),
+            &token,
+            Some(json!({"action":action})),
+        )
+        .await;
+        assert_eq!(
+            status, 403,
+            "user.manage cannot mint unrestricted administrators"
+        );
+    }
+    let (status, _) = req(
+        reqwest::Method::POST,
+        env.console,
+        &format!("/admin/users/{}/manage", env.victim_id),
+        &env.admin_token,
+        Some(json!({"action":"promote"})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (role, binding): (i16, Option<i64>) =
+        sqlx::query_as("SELECT role,admin_role_id FROM users WHERE id=$1")
+            .bind(env.victim_id)
+            .fetch_one(&env.pg)
+            .await
+            .unwrap();
+    assert_eq!(role, 10);
+    assert_eq!(binding, None);
+}
+
+/// 第十一轮：分组 / 池 / 套餐的 code 会拼进 Redis 键与 `<group>|<channel_id>` 字段，只收
+/// `[A-Za-z0-9_.-]`；漏校验的文本超出列宽时回 400（`value_too_long`），不再是 500 + ERROR 日志。
+#[tokio::test]
+async fn codes_reject_separators_and_overlong_text_is_a_bad_request() {
+    let env = setup().await;
+    let post = |path: &'static str, body: Value| {
+        req(
+            reqwest::Method::POST,
+            env.console,
+            path,
+            &env.admin_token,
+            Some(body),
+        )
+    };
+    for (path, body, param) in [
+        (
+            "/admin/groups",
+            json!({"group_code": "a|0|999", "group_ratio": "1"}),
+            "group_code",
+        ),
+        (
+            "/admin/groups",
+            json!({"group_code": "x\nrl:1", "group_ratio": "1"}),
+            "group_code",
+        ),
+        ("/admin/pools", json!({"pool_code": "x:y"}), "pool_code"),
+        (
+            "/admin/plans",
+            json!({"plan_code": "bad code", "display_name": "x", "kind": 0, "grant_micro": 1}),
+            "plan_code",
+        ),
+        // 规则码是 varchar(64) 的主键：空串、超长此前直接进库（空串当主键、超长 500）
+        (
+            "/admin/pricing/rules",
+            json!({"rule_code": "", "rule_type": "discount", "multiplier": "0.9"}),
+            "rule_code",
+        ),
+        (
+            "/admin/pricing/rules",
+            json!({"rule_code": "r".repeat(65), "rule_type": "discount", "multiplier": "0.9"}),
+            "rule_code",
+        ),
+        // 解析得过却放不进 numeric(12,6) 的倍率、超出账本范围的金额：400，不是落库时 500
+        (
+            "/admin/groups",
+            json!({"group_code": "ratio-too-big", "group_ratio": "1234567"}),
+            "group_ratio",
+        ),
+        (
+            "/admin/redemptions",
+            json!({"count": 1, "amount_micro": 9_007_199_254_740_992_i64}),
+            "count_or_amount",
+        ),
+        (
+            "/admin/models",
+            json!({"model_name": "per-call-too-dear", "model_ratio": "1",
+                   "pricing_mode": "per_call", "per_call_price_micro": 9_007_199_254_740_992_i64}),
+            "per_call_price_micro",
+        ),
+    ] {
+        let (status, resp) = post(path, body).await;
+        assert_eq!(status, 400, "{path}: {resp}");
+        assert_eq!(resp["error"]["param"], param, "{path}: {resp}");
+    }
+    let code = format!("len-{}", &env.suffix[..8]);
+    let (status, resp) = post(
+        "/admin/groups",
+        json!({"group_code": code, "group_ratio": "1", "description": "d".repeat(300)}),
+    )
+    .await;
+    assert_eq!(status, 400, "{resp}");
+    assert_eq!(resp["error"]["param"], "value_too_long");
+}

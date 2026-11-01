@@ -65,4 +65,4 @@ curl "$OKAPI_BASE_URL/v1/responses/input_tokens" \
 
 单次上游超时取渠道首响应超时与 20 秒的较小值；整个 handler 最长 60 秒。禁止跟随上游重定向，响应体最多 32 KiB。成功、失败、超时和已取得租约后的 handler 取消都会归还占用；进程崩溃或 Redis 清理失败依靠租约/信号量 TTL 兜底，不能把正常取消测试当成全故障释放证明。
 
-验证入口：`bins/okapi/tests/gateway_token_count.rs`。运行记录及尚未完成的对标项目见 [核心验证记录](core-api-verification.md)。
+验证入口：`crates/okapi-gateway/tests/gateway_token_count.rs`。运行记录及尚未完成的对标项目见 [核心验证记录](core-api-verification.md)。

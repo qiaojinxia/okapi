@@ -1,0 +1,526 @@
+//! M2 收尾批验收：own/all 渠道属主范围（#6267）+ 分组可见性矩阵与分组定价（§6.3）。
+
+use axum::Router;
+use axum::response::IntoResponse;
+use axum::routing::post;
+use okapi_console as console;
+use okapi_domain::Money;
+use okapi_gateway as gateway;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use std::net::SocketAddr;
+use std::time::Duration;
+use uuid::Uuid;
+
+async fn mock_ok(_body: axum::body::Bytes) -> axum::response::Response {
+    use std::fmt::Write as _;
+    let chunks = [
+        json!({"choices":[{"index":0,"delta":{"role":"assistant"}}]}),
+        json!({"choices":[{"index":0,"delta":{"content":"hi"}}]}),
+        json!({"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,
+            "prompt_tokens_details":{"cached_tokens":0}}}),
+    ];
+    let mut body = String::new();
+    for c in chunks {
+        let _ = write!(body, "data: {c}\n\n");
+    }
+    body.push_str("data: [DONE]\n\n");
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+        body,
+    )
+        .into_response()
+}
+
+fn hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+async fn serve(app: Router) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    addr
+}
+
+struct Env {
+    pg: PgPool,
+    state: gateway::state::AppState,
+    console: SocketAddr,
+    gateway: SocketAddr,
+    mock: SocketAddr,
+}
+
+async fn setup() -> Env {
+    okapi_store::test_support::assert_isolated();
+    let database_url = std::env::var("DATABASE_URL").expect("需要 DATABASE_URL");
+    let redis_url = std::env::var("OKAPI_REDIS_URL").expect("需要 OKAPI_REDIS_URL");
+    let pg = okapi_store::connect_pg(&database_url).await.unwrap();
+    okapi_store::run_migrations(&pg).await.unwrap();
+
+    sqlx::query!(
+        r#"INSERT INTO settings (key, value) VALUES ('ssrf_policy', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"#,
+        serde_json::json!({"allow_http": true, "allow_private": true})
+    )
+    .execute(&pg)
+    .await
+    .unwrap();
+    let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
+        .await
+        .unwrap();
+    let console = serve(console::router(state.clone())).await;
+    let gw = serve(gateway::router(state.clone())).await;
+    let mock = serve(Router::new().route("/ok/v1/chat/completions", post(mock_ok))).await;
+    Env {
+        pg,
+        state,
+        console,
+        gateway: gw,
+        mock,
+    }
+}
+
+async fn mk_user(pg: &PgPool, role: i16, admin_role_id: Option<i64>) -> (i64, String) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let user_id = okapi_store::provision::create_user(pg, &format!("v-{suffix}"))
+        .await
+        .unwrap();
+    sqlx::query!(
+        "UPDATE users SET role = $2, admin_role_id = $3 WHERE id = $1",
+        user_id,
+        role,
+        admin_role_id
+    )
+    .execute(pg)
+    .await
+    .unwrap();
+    let token = format!("sk-okapi-vis-{suffix}");
+    okapi_store::provision::create_api_key(pg, user_id, &hash(&token), "sk-vis")
+        .await
+        .unwrap();
+    (user_id, token)
+}
+
+async fn cpost(env: &Env, token: &str, path: &str, body: Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{}{path}", env.console))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn cget(env: &Env, token: &str, path: &str) -> Value {
+    reqwest::Client::new()
+        .get(format!("http://{}{path}", env.console))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn chat(env: &Env, token: &str, model: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/chat/completions", env.gateway))
+        .bearer_auth(token)
+        .json(&json!({
+            "model": model, "stream": true, "max_tokens": 32,
+            "messages": [{"role":"user","content":"hello visibility"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn settled_amount(pg: &PgPool, resp: reqwest::Response) -> i64 {
+    let request_id = resp
+        .headers()
+        .get("x-okapi-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .unwrap();
+    let _ = resp.text().await.unwrap();
+    for _ in 0..50 {
+        // 只认已结算（status=20）的那一行，同 console_m2 / request_population 里的同类辅助函数
+        if let Some(r) = sqlx::query!(
+            r#"SELECT amount_micro FROM billing_records WHERE request_id = $1 AND status = 20"#,
+            request_id
+        )
+        .fetch_optional(pg)
+        .await
+        .unwrap()
+        {
+            return r.amount_micro;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("结算未出现");
+}
+
+/// own 范围：channel_admin 只能看到/操作自己创建的渠道。
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // 一条 own 范围的完整隔离剧本，拆开反而看不出各断言的先后关系
+async fn own_scope_isolates_channel_admins() {
+    let env = setup().await;
+    let (_, super_token) = mk_user(&env.pg, 100, None).await;
+    let code = format!("chadmin-{}", Uuid::new_v4().simple());
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/roles",
+        json!({"role_code": code, "display_name": "渠道管理员",
+               "permissions": ["channel.read.own", "channel.write.own", "mcp.write", "billing.read.own"]}),
+    )
+    .await;
+    let role_id = r.json::<Value>().await.unwrap()["admin_role_id"]
+        .as_i64()
+        .unwrap();
+    let (x_id, x_token) = mk_user(&env.pg, 10, Some(role_id)).await;
+    let (_, y_token) = mk_user(&env.pg, 10, Some(role_id)).await;
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let r = cpost(
+        &env,
+        &x_token,
+        "/admin/channels",
+        json!({"name": format!("own-{suffix}"), "api_base": "http://127.0.0.1:9/v1",
+               "credential": "c", "models": [format!("m-own-{suffix}")]}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let channel_id = r.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
+
+    // 属主传播
+    let owner = sqlx::query_scalar!(r#"SELECT owner_id FROM channels WHERE id = $1"#, channel_id)
+        .fetch_one(&env.pg)
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(x_id), "创建人即属主");
+
+    // 入池只有 all 范围能做：own 范围建的渠道是孤儿，显式选池 / 改成员关系都 403。
+    // 否则把自己的渠道挂进 default 池，全站请求就会路由到它的 api_base。
+    let pools: Vec<String> =
+        sqlx::query_scalar("SELECT pool_code::text FROM pool_channels WHERE channel_id = $1")
+            .bind(channel_id)
+            .fetch_all(&env.pg)
+            .await
+            .unwrap();
+    assert!(pools.is_empty(), "own 范围建的渠道不进任何池：{pools:?}");
+    let r = cpost(
+        &env,
+        &x_token,
+        "/admin/channels",
+        json!({"name": format!("own-pool-{suffix}"), "api_base": "http://127.0.0.1:9/v1",
+               "credential": "c", "models": [format!("m-own-{suffix}")], "pools": ["default"]}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["param"],
+        "pools_require_all_scope"
+    );
+    let r = cpost(
+        &env,
+        &x_token,
+        &format!("/admin/channels/{channel_id}/pools"),
+        json!({"pools": [{"pool_code": "default", "priority_override": 1000}]}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["param"],
+        "pools_require_all_scope"
+    );
+    // 池本身的增改删同样只给全站范围：own 管理员改不了路由策略 / 回退池，也删不掉池让渠道变孤儿
+    let r = cpost(
+        &env,
+        &x_token,
+        "/admin/pools",
+        json!({"pool_code": format!("own-pool-{suffix}"), "routing_strategy": "priority_weighted"}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    let r = reqwest::Client::new()
+        .delete(format!("http://{}/admin/pools/default", env.console))
+        .bearer_auth(&x_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    // 在同一搜索范围核对 X/super 可见、Y 不可见，不把第一页当成全量。
+    let listing = format!("/admin/channels?q=own-{suffix}");
+    let in_list = |body: &Value, id: i64| {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["id"].as_i64() == Some(id))
+    };
+    assert!(in_list(&cget(&env, &x_token, &listing).await, channel_id));
+    assert!(!in_list(&cget(&env, &y_token, &listing).await, channel_id));
+    assert!(in_list(
+        &cget(&env, &super_token, &listing).await,
+        channel_id
+    ));
+
+    // Y 改不动，X 改得动
+    let r = cpost(
+        &env,
+        &y_token,
+        &format!("/admin/channels/{channel_id}/status"),
+        json!({"status": 2}),
+    )
+    .await;
+    assert_eq!(r.status(), 403);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["error"]["param"], "owner");
+    let r = cpost(
+        &env,
+        &x_token,
+        &format!("/admin/channels/{channel_id}/status"),
+        json!({"status": 2}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+
+    sqlx::query("INSERT INTO settings(key,value) VALUES('mcp_write_enabled','true') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").execute(&env.pg).await.unwrap();
+    for tool in ["channel_toggle", "channel_test"] {
+        let response: Value = cpost(&env, &y_token, "/mcp", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":{"channel_id":channel_id,"enabled":true,"confirm":true}}})).await.json().await.unwrap();
+        assert_eq!(response["result"]["isError"], true, "{tool}: {response}");
+        assert_eq!(
+            response["result"]["content"][0]["text"], "permission_denied",
+            "{response}"
+        );
+    }
+    let response: Value = cpost(&env, &y_token, "/mcp", json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"platform_kpi","arguments":{}}})).await.json().await.unwrap();
+    assert_eq!(
+        response["error"]["message"], "permission_denied",
+        "own billing grant cannot read global rank: {response}"
+    );
+}
+
+/// 池可见性 + 分组定价：池内渠道仅该池的分组可用、并按组倍率计价；
+/// 严格模式下未入池的渠道对所有人不可见。
+///
+/// 这一对语义在改造前由 price_groups 一张表兼任，现在拆成 price_groups（价）
+/// 与 channel_pools（可见性 + 选路）；本测试同时守住"拆开后行为不变"。
+// 线性场景用例：建池建组建渠道 → 宽松模式断言 → 切严格模式再断言。
+// 拆开会把"同一组前置数据"复制两遍，读者反而要来回对照才知道断言基于什么状态。
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn group_visibility_matrix_and_group_pricing() {
+    let env = setup().await;
+    let (_super_id, super_token) = mk_user(&env.pg, 100, None).await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let vip = format!("vip-{}", &suffix[..8]);
+    let vip_pool = format!("pool-vip-{}", &suffix[..8]);
+    let m_bound = format!("m-vb-{}", &suffix[..8]);
+    let m_free = format!("m-vf-{}", &suffix[..8]);
+
+    // 池 + 组（半价，指向该池）+ 两个模型 + 两条渠道（一条只在 vip 池，一条缺省进 default 池）
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/pools",
+        json!({"pool_code": vip_pool, "description": "vip 专属"}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/groups",
+        json!({"group_code": vip, "group_ratio": "0.5", "pool_code": vip_pool}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    for m in [&m_bound, &m_free] {
+        let r = cpost(
+            &env,
+            &super_token,
+            "/admin/models",
+            json!({"model_name": m, "model_ratio": "1"}),
+        )
+        .await;
+        assert_eq!(r.status(), 200);
+    }
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/channels",
+        json!({"name": format!("vb-{suffix}"), "api_base": format!("http://{}/ok/v1", env.mock),
+               "credential": "c", "models": [m_bound], "pools": [vip_pool]}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    // 不传 pools = 缺省进 default 池（站长第一条渠道建出来就能用）
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/channels",
+        json!({"name": format!("vf-{suffix}"), "api_base": format!("http://{}/ok/v1", env.mock),
+               "credential": "c", "models": [m_free]}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let free_channel = r.json::<Value>().await.unwrap()["channel_id"]
+        .as_i64()
+        .unwrap();
+
+    // 发布（组倍率进 PriceBook）并热更
+    let r = cpost(&env, &super_token, "/admin/pricing/publish", json!({})).await;
+    assert_eq!(r.status(), 200);
+    gateway::refresh_pricebook_if_newer(&env.state)
+        .await
+        .unwrap();
+
+    // 用户：D 默认组；U 归入 vip（先分组再首次鉴权，避开缓存）
+    let (d_id, d_token) = mk_user(&env.pg, 1, None).await;
+    let (u_id, u_token) = mk_user(&env.pg, 1, None).await;
+    let r = cpost(
+        &env,
+        &super_token,
+        &format!("/admin/users/{u_id}/groups"),
+        json!({"groups": [{"group_code": vip, "priority": 10}]}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    for uid in [d_id, u_id] {
+        env.state
+            .ledger
+            .credit(uid, Money::from_micros(1_000_000))
+            .await
+            .unwrap();
+    }
+
+    // 唯一规则：渠道只服务它所在的池
+    let resp = chat(&env, &d_token, &m_bound).await;
+    assert_eq!(
+        resp.status(),
+        503,
+        "默认组（default 池）不应看见 vip 池内渠道"
+    );
+    let resp = chat(&env, &u_token, &m_bound).await;
+    assert_eq!(resp.status(), 200, "vip 用户应可用其池内渠道");
+    let amount = settled_amount(&env.pg, resp).await;
+    assert_eq!(
+        amount, 120,
+        "vip 组倍率 0.5：240 → 120（价与可见性拆开后倍率照旧生效）"
+    );
+    let resp = chat(&env, &d_token, &m_free).await;
+    assert_eq!(resp.status(), 200, "default 池渠道对 default 组可用");
+    let _ = settled_amount(&env.pg, resp).await;
+    // 此前从未测过的一格：vip 用户打 default 池渠道——未配降级时不可达。
+    // 旧语义下这一格永远是 503 且没人知道（vip 比 default 能用的还少）。
+    let resp = chat(&env, &u_token, &m_free).await;
+    assert_eq!(
+        resp.status(),
+        503,
+        "未配降级：vip 池用户看不到 default 池渠道"
+    );
+    let _ = resp.text().await;
+
+    // 池级降级：vip 池 → default 池。vip 用户可用 default 池渠道，且仍按 vip 倍率计费
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/pools",
+        json!({"pool_code": vip_pool, "description": "vip 专属", "fallback_pool_code": "default"}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let resp = chat(&env, &u_token, &m_free).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "配了降级后 vip 用户应能经 default 池打到公共渠道"
+    );
+    let amount = settled_amount(&env.pg, resp).await;
+    assert_eq!(
+        amount, 120,
+        "经降级池服务仍按请求者分组倍率（0.5）计费，不按池"
+    );
+
+    // 自引用降级被拒
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/pools",
+        json!({"pool_code": vip_pool, "fallback_pool_code": vip_pool}),
+    )
+    .await;
+    assert_eq!(r.status(), 400, "池不能把自己配成降级目标");
+
+    // 孤儿：显式移出所有池 → 对谁都不可达，响应明示 orphan
+    let r = cpost(
+        &env,
+        &super_token,
+        &format!("/admin/channels/{free_channel}/pools"),
+        json!({"pools": []}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["orphan"], true);
+    let resp = chat(&env, &d_token, &m_free).await;
+    assert_eq!(resp.status(), 503, "孤儿渠道对 default 组不可达");
+    let resp = chat(&env, &u_token, &m_free).await;
+    assert_eq!(resp.status(), 503, "孤儿渠道经降级链也不可达");
+    let _ = resp.text().await;
+
+    // 放回 default 池（带成员级覆盖）后恢复；不存在的池 404 带 param
+    let r = cpost(
+        &env,
+        &super_token,
+        &format!("/admin/channels/{free_channel}/pools"),
+        json!({"pools": [{"pool_code": "default", "priority_override": 5, "weight_override": 3}]}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let resp = chat(&env, &d_token, &m_free).await;
+    assert_eq!(resp.status(), 200);
+    let _ = settled_amount(&env.pg, resp).await;
+    let r = cpost(
+        &env,
+        &super_token,
+        &format!("/admin/channels/{free_channel}/pools"),
+        json!({"pools": ["pool-that-does-not-exist"]}),
+    )
+    .await;
+    assert_eq!(r.status(), 404);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["param"],
+        "pool-that-does-not-exist"
+    );
+
+    // 分组指向不存在的池 → 404；内置 default 池不可删 → 409
+    let r = cpost(
+        &env,
+        &super_token,
+        "/admin/groups",
+        json!({"group_code": vip, "group_ratio": "0.5", "pool_code": "nope-pool"}),
+    )
+    .await;
+    assert_eq!(r.status(), 404);
+    let r = reqwest::Client::new()
+        .delete(format!("http://{}/admin/pools/default", env.console))
+        .bearer_auth(&super_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 409);
+    assert_eq!(
+        r.json::<Value>().await.unwrap()["error"]["code"],
+        "builtin_pool"
+    );
+}

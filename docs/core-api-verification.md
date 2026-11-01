@@ -151,7 +151,7 @@
 
 ## 全路由验证的已知漏洞
 
-原 `bins/okapi/tests/route_error_envelope.rs` 存在以下问题，不能证明“每个 API 正确”：
+原 `crates/okapi-console/tests/route_error_envelope.rs` 存在以下问题，不能证明“每个 API 正确”：
 
 1. 用字符串窗口搜索方法，可能把相邻代码或注释中的 `get/post` 算进路由。
 2. 用路径作唯一键，合并 console/gateway 上同路径的两个实际入口；例如两个 `/healthz`。
@@ -526,7 +526,7 @@ Gemini/Vertex/GCS 新协议层、固定版本依据、20 项协议测试以及�
 
 - 完整工作区 `/tmp/okapi-batch-statistics-full.log` 已观察实际退出 **101**；对应 `...-full-report.json` 为 **862 passed、1 failed、0 ignored、0 软跳过**，129 个完整套件，无未完成套件或解析错误。42 项 Batch HTTP、47 项账本/存储、31 项原生协议均通过。427 条 API 探针全部完成，分类与前述定向一致，未相加为业务测试数量。
 - 唯一失败 `compact_filters_incompatible_and_explicitly_disabled_channels` 是并行新增 Ingress 错误分类后遗漏的旧 `503` 断言：有渠道但入口不兼容现在返回 `400 unsupported_endpoint`，并列出允许的入口。保留生产行为，只强化该测试，精确断言 400/错误码/端点提示/request_id，再停用渠道验证 503/no_available_channel，且两种拒绝都不调用上游、不扣费。`/tmp/okapi-batch-statistics-responses-contract.log` 实际退出 **0**，完整 Responses 套件 **13 passed、0 failed**，不是仅重跑一个断言。
-- 全量结束后的严格 `/tmp/okapi-batch-statistics-clippy-contract-final.log` 实际退出 **0**；格式、diff、金额、错误码、API 清单检查通过。`...-final-source-verification.json` 核对 1,205 文件：全量后仅 `bins/okapi/tests/gateway_responses.rs` 变化，无新增/删除，生产源码、依赖、迁移和内嵌资源不变。修正后的完整文件指纹见 `...-responses-source-manifest.json`。因只改一个测试，未再次执行完整工作区；保留全量失败报告，不拼接结果宣称单次 863 项全过。
+- 全量结束后的严格 `/tmp/okapi-batch-statistics-clippy-contract-final.log` 实际退出 **0**；格式、diff、金额、错误码、API 清单检查通过。`...-final-source-verification.json` 核对 1,205 文件：全量后仅 `crates/okapi-gateway/tests/gateway_responses.rs` 变化，无新增/删除，生产源码、依赖、迁移和内嵌资源不变。修正后的完整文件指纹见 `...-responses-source-manifest.json`。因只改一个测试，未再次执行完整工作区；保留全量失败报告，不拼接结果宣称单次 863 项全过。
 
 本轮仅编辑后端、测试和验证文档，未运行前端构建，未应用迁移到开发数据库。完整限流、全在途硬预算、多模态用量细分、目录响应体规模及真实云端验收等核心差距仍在继续处理。
 

@@ -67,5 +67,5 @@
 - `frontend/e2e/charts.spec.ts`：稀疏日历、闰日、加权平均、特殊模型名、长尾守恒、七种指标切换、图例与导出、自定义日期、错误与缺失状态、手机／深色模式、单日标记、质量及经营图表。
 - `bins/okapi/tests/console_stats.rs`：真实 PostgreSQL／Redis／ClickHouse 集成，覆盖日期校验、缓存写入采集与历史缺失、性能单位、年度历史与账户隔离；经营和首页的成本覆盖一致性。
 - `bins/okapi/tests/console_analytics.rs` 与 `console_portal.rs`：高级维度过滤、长尾与可选阶段流向守恒、历史残差合并、账户／密钥数据隔离。
-- `bins/okapi/tests/gateway_upstream_cost.rs`：真实网关请求验证原始别名、计费模型、渠道映射后的上游模型与成本已知标记。
+- `crates/okapi-console/tests/gateway_upstream_cost.rs`：真实网关请求验证原始别名、计费模型、渠道映射后的上游模型与成本已知标记。
 - 图表截图位于 `frontend/test-results/*charts*.png` 和 `frontend/test-results/advanced-*.png`，均使用测试演示数据，不是实际账单。

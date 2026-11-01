@@ -5,7 +5,7 @@
 //! 查询一律用运行期检查的 `sqlx::query*`：测试专用的查询不进 `.sqlx` 缓存。
 //! 全局默认出口是全站状态：本文件串行执行，改过默认的用例结束前改回直连。
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 use axum::Router;

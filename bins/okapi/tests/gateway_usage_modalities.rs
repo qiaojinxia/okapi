@@ -15,7 +15,7 @@ use std::{
 };
 use uuid::Uuid;
 
-#[path = "support/published_pricing.rs"]
+#[path = "../../../crates/okapi-gateway/tests/support/published_pricing.rs"]
 mod published_pricing;
 
 #[path = "support/anthropic_usage.rs"]

@@ -39,21 +39,14 @@ okapi-store = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["process"] }
 reqwest = { workspace = true }
 bcrypt = { workspace = true }
-aws-lc-rs = { workspace = true }
-okapi-api = { workspace = true }
 okapi-pricing = { workspace = true }
 okapi-providers = { workspace = true }
 async-nats = { workspace = true }
-async_zip = { workspace = true }
-base32 = { workspace = true }
-sha1 = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 fred = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
-serde = { workspace = true }
-tower = { workspace = true }
 md-5 = { workspace = true }
 tokio-tungstenite = { workspace = true }
 # examples/loadgen 读 .env

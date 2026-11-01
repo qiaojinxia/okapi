@@ -28,7 +28,7 @@
 | --- | --- | --- | --- |
 | L0 静态守卫 | rustfmt、clippy `-D warnings`（含测试目标，**用 CI 的 stable 版本**，见注意事项）、sqlx 离线快照完整、cargo-deny（advisories / bans / licenses / sources，09-07 起四项全 ok）、前端 tsc / oxlint、六道守卫（浮点 / i18n 裸文案 / i18n 键对齐 / 前端权限点 / 部署模板 / 后端错误码反向核对） | `cargo fmt --all -- --check` · `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` · `cargo deny --all-features check` · `cd frontend && pnpm exec tsc -b && pnpm exec oxlint` · `bash scripts/guard-no-float.sh && bash scripts/guard-i18n.sh && python3 scripts/guard-i18n-keys.py && python3 scripts/guard-frontend-permissions.py && python3 scripts/guard-deploy-manifests.py && python3 scripts/guard-error-codes.py` | 部署模板守卫需 PyYAML 或系统 ruby |
 | L1 单元 / 性质 | crate 内 `#[cfg(test)]` 与 `crates/*/tests`（pricing 对拍 + proptest、providers 转换 parity、ledger Lua 契约） | `cargo test -p okapi-domain -p okapi-pricing -p okapi-ledger -p okapi-providers -p okapi-api -p okapi-store` | ledger 契约需 Redis；store 部分用例需 PG |
-| L2 集成 | `bins/okapi/tests/*.rs` 71 个套件（gateway / console / worker / migrate） | `cargo test --workspace --no-fail-fast` | 四容器；CH / NATS 缺失时相关套件自跳过 |
+| L2 集成 | 各角色 crate 的 `tests/*.rs`（gateway 45 / console 40 / worker 8，只依赖本角色及以下）+ `bins/okapi/tests/*.rs` 26 个跨角色端到端（含迁移、真实二进制） | `cargo test --workspace --no-fail-fast` | 四容器；CH / NATS 缺失时相关套件自跳过 |
 | L3 前端交互 e2e | 构建产物 + 接口桩，不碰数据库 | `cd frontend && pnpm test:interactions`（= `pnpm build` + `playwright test -c playwright.interactions.config.ts`） | 无（自起 vite preview :4175） |
 | L4 前端冒烟 e2e | 打真实 console（API + SPA 同源），注册真实用户；管理端用例需演示超管（`scripts/dev-reset.sh` 灌注），缺则跳过 | `CARGO_TARGET_DIR=target cargo build --bin okapi && cd frontend && pnpm build && pnpm exec playwright test -c playwright.config.ts smoke.spec.ts` | 四容器 + `target/debug/okapi` + `frontend/dist` |
 | L5 部署形态 | `okapi all` 一进程三角色：双 healthz、root key 引导、SPA 可达、数据面 fail-closed；embed-web 发布形态：模板守卫 + `--features embed-web` 构建 + 无 dist 目录起 console 服出首页 / 哈希资源 / SPA 深链 / API 不受影响 | `bash scripts/smoke-all.sh` · `bash scripts/verify-deploy.sh` | 四容器；smoke-all 占用 :8080 / :8081；verify-deploy 独立 target 目录 `target/embed-web`，首次约 1 分钟 |
@@ -44,7 +44,7 @@
 
 ## 2. 覆盖矩阵
 
-「维度」列只登记**有自动化用例**的维度；括号内为主要套件（`bins/okapi/tests/<name>.rs` 省略路径）。
+「维度」列只登记**有自动化用例**的维度；括号内为主要套件（集成测试文件名，省略所在 crate 的 `tests/` 路径）。
 
 ### 2.1 领域 crates
 
@@ -215,7 +215,7 @@
 4. **沙箱环境两处重定向**会让人跑到旧产物：`CARGO_TARGET_DIR` 与 `PLAYWRIGHT_BROWSERS_PATH`。已写入第 1 节注意事项。
 5. 覆盖缺口未变化，见第 3 节；本轮没有新增自动化用例（只修 flake），下一轮优先补第 3 节第 1、2 条。
 
-本轮改动清单（均为验证配套，不含功能）：`bins/okapi/tests/console_analytics.rs`（两处 poll_until）、`bins/okapi/tests/gateway_invalid_key_rate.rs`（去 `mut`）、`crates/okapi-gateway/src/sched_redis.rs`（`sort_by_key`）、`deny.toml`（两个许可证放行）、`.sqlx/`（重生成）、rustfmt 触及的 13 个文件、本文档。
+本轮改动清单（均为验证配套，不含功能）：`bins/okapi/tests/console_analytics.rs`（两处 poll_until）、`crates/okapi-gateway/tests/gateway_invalid_key_rate.rs`（去 `mut`）、`crates/okapi-gateway/src/sched_redis.rs`（`sort_by_key`）、`deny.toml`（两个许可证放行）、`.sqlx/`（重生成）、rustfmt 触及的 13 个文件、本文档。
 
 ### 2026-09-06 第二轮：补第 3 节前两条缺口
 
@@ -235,7 +235,7 @@
 
 | 新增 | 用例 | 结果 |
 | --- | --- | --- |
-| `bins/okapi/tests/gateway_midstream.rs` | 上游吐两段正文后掐连接：客户端收到两段、无 `[DONE]`、备用渠道零调用、掐流渠道只被打一次；记录 committed、`failover_count = 0`、金额 = (本地估算 prompt + completion) × 2 micro、余额精确收口、无悬置预扣 | 1 / 1 一次通过（实现本就符合 §3.6，此前只是缺用例） |
+| `crates/okapi-gateway/tests/gateway_midstream.rs` | 上游吐两段正文后掐连接：客户端收到两段、无 `[DONE]`、备用渠道零调用、掐流渠道只被打一次；记录 committed、`failover_count = 0`、金额 = (本地估算 prompt + completion) × 2 micro、余额精确收口、无悬置预扣 | 1 / 1 一次通过（实现本就符合 §3.6，此前只是缺用例） |
 | `bins/okapi/tests/gateway_shutdown.rs` | 真实二进制子进程 + 慢流 mock：首块后 `kill -TERM`，流完整到 `[DONE]`、5s 内新连接被拒、15s 内退出码 0、记录 committed 金额 240、无悬置预扣 | **首跑失败**（见发现 ①），修复后 3 连跑通过 |
 | `frontend/e2e/write-forms.spec.ts` +2 | 用户抽屉：入账 12.34 / 0.29 USD → 12_340_000 / 290_000 micro、系数 `'0.8'` 字符串且 `-1` / 未改动禁用、分组 `[default:2, vip:1]`、封禁经确认框且翻成解封；模型抽屉：七轴字符串、空档位行过滤、`tier_expr` 去空格、无档位不发 `tier_ratios`、降级链回传、编辑态名只读 | 2 / 2 通过；写法改为 `waitForRequest` 等真实 POST，避免并行负载下的竞态 |
 
@@ -289,7 +289,7 @@
 | 发布镜像构建（`git archive HEAD` → `docker build`） | 首跑在前端阶段失败：`@/features/logs/LogsPage` 不存在——`frontend/.gitignore` 的 `logs` 规则把 `src/features/logs/` 整个目录挡在版本库外，门户日志页从未提交过，本机能跑、fresh clone / CI / 镜像全挂。改为 `/logs`（只忽略根目录日志）并把 `LogsPage.tsx` 入库；顺手扫了全部 `@/` 导入，无第二处 | **修复** |
 | 同上，第二跑 | 镜像能建，`okapi --version` 报 `GLIBC_2.38 not found`：`rust:1-slim` 已跟到 Debian trixie，运行阶段是 bookworm-slim。builder 钉到 `rust:1-slim-bookworm` | **修复**；重建后 `okapi 0.1.0`、console 对临时空库起立、内嵌前端、Setup 向导、uid 65534 |
 | `scripts/verify-deploy.sh` 增 `OKAPI_VERIFY_IMAGE=1` 阶段 | 上面两步自动化：干净快照构建、`--version`、临时库 console 冒烟（healthz / SPA / setup 状态 / 非 root）、用完删库 | 通过 |
-| `bins/okapi/tests/console_turnstile.rs` | `settings.turnstile_verify_url` 覆写 siteverify 地址（写入 `docs/database.md` 注册表）；独立临时库 + 本地 mock：缺 token → `turnstile_token`、校验失败 → `turnstile_failed`、端点不可达 → `turnstile_unreachable`、表单体 `secret=…&response=…`、撤秘钥即关且不外呼 | 1 / 1 一次通过 |
+| `crates/okapi-console/tests/console_turnstile.rs` | `settings.turnstile_verify_url` 覆写 siteverify 地址（写入 `docs/database.md` 注册表）；独立临时库 + 本地 mock：缺 token → `turnstile_token`、校验失败 → `turnstile_failed`、端点不可达 → `turnstile_unreachable`、表单体 `secret=…&response=…`、撤秘钥即关且不外呼 | 1 / 1 一次通过 |
 | `frontend/e2e/write-forms.spec.ts` +3 | 团队（建团 / 成员上限换算 / 发 key 一次性 / 401 降级）、渠道池抽屉与列表、渠道抽屉接入 / 模型 / 调度页签 + 新建 | 3 / 3 通过；渠道池用例首跑把 `/admin/pools` 导航请求也当接口回了 JSON，路由桩加 `isNavigationRequest` 放行；渠道抽屉用例被右下角 toast 堆叠盖住"取消"，改 Esc 关抽屉 |
 
 复核：interactions 配置 74 / 74；oxlint 干净；Rust 侧因并行会话的半成品（`console/admin.rs` `similar_names`、新文件 `channel_balance.rs` `struct_field_names`）全工作区 clippy 暂不能绿，豁免这两条后本轮改动干净；两条 lint 属对方待收口项。已提交 `4497934`，并从 HEAD 快照重建镜像复核通过。
@@ -298,7 +298,7 @@
 
 | 新增 | 内容 | 结果 |
 | --- | --- | --- |
-| `bins/okapi/tests/console_oauth_presets.rs`（独立临时库） | 三预设只配 client 凭证 + 指向 mock 的 URL，字段名与 scopes 走 `preset()`：授权跳转带预设 scopes；GitHub 数字 `id`、Discord snowflake、LinuxDO 数字都转成字符串作绑定键，`login` / `username` 作展示名与首登用户名；**身份稳定性**：改 handle 不换账号（展示名保留首登审计值）、同 handle 不同 `id` 是另一个账号且用户名撞了加盐、userinfo 缺 `id` 拒绝且不落绑定、token 端点 500 → `oauth_upstream_error` / `status_500` | 2 / 2 通过（一处断言按 RFC 3986 修正：`:` 留在 query 里不转义） |
+| `crates/okapi-console/tests/console_oauth_presets.rs`（独立临时库） | 三预设只配 client 凭证 + 指向 mock 的 URL，字段名与 scopes 走 `preset()`：授权跳转带预设 scopes；GitHub 数字 `id`、Discord snowflake、LinuxDO 数字都转成字符串作绑定键，`login` / `username` 作展示名与首登用户名；**身份稳定性**：改 handle 不换账号（展示名保留首登审计值）、同 handle 不同 `id` 是另一个账号且用户名撞了加盐、userinfo 缺 `id` 拒绝且不落绑定、token 端点 500 → `oauth_upstream_error` / `status_500` | 2 / 2 通过（一处断言按 RFC 3986 修正：`:` 留在 query 里不转义） |
 | `frontend/e2e/write-forms.spec.ts` +2 | 用户抽屉角色 / 订阅 / 余额有效期三段；渠道 key 级参数、套餐删除、模型页发布 | 2 / 2 通过；`write-forms` 累计 17 例 |
 
 复核：oxlint 干净；interactions 配置 75 / 76——唯一失败是既有的 `interactions.spec 列表分页` 用例：并行会话给渠道行新增的 `LastBalance` 组件在夹具缺 `last_balance` 字段时崩掉整行，属对方特性引入的回归，应随其特性一起把夹具补上或让组件容忍 `undefined`；本文件的 17 例均通过。SMTP TLS 与性能维度维持"按需 / 不做"。

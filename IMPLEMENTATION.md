@@ -989,7 +989,7 @@ upsert 校验链条目须为已存在模型（≤8、去重去自引用），删
 压平的等价性用机器验证而非肉眼 diff：按增量链条建的库与按压平文件建的库逐项对拍
 列定义 / 索引 / 约束（328 列、74 约束全等，唯一差异是一个索引名——旧路径先建 `code`
 列再改名 `code_hash`，索引名留在了旧名上，压平后名字反而与列一致）。此后由
-`bins/okapi/tests/schema_shape.rs` 长期守形状：关键列在、废弃表不在、明文列不在、
+`crates/okapi-store/tests/schema_shape.rs` 长期守形状：关键列在、废弃表不在、明文列不在、
 池策略 CHECK 生效；该守卫做过变异验证（故意加一个不存在的必需列与一张废弃表，
 两处都被抓出）。
 
@@ -2995,7 +2995,7 @@ PG 连接打满、Redis 逼近上限、ClickHouse 吃满磁盘都要等出事才
     （`ALTER ROLE … SET statement_timeout`）设；`nats_relay` 结算每行一个事务（每行要单独 `FOR UPDATE` 复核租约）与 chsink 每轮 create-or-update consumer
     （一次 JetStream API 调用）；每个上游适配器自带一个 `HttpPool`（共享要改所有 `Upstream::new()` 的构造，收益只是少几个空闲连接池）；
     `MetaScanner` 解析失败的事件按空值原样透传（透传形态不因解析失败断流）；`ProfilePage` 热力图 60 秒轮询（后台标签页 react-query 自动暂停）；
-    `use-paged-catalog` 的 `gcTime: 0` 与每次挂载一个 scope（不同 key 的分组过滤结果不留在缓存里）；`bins/okapi/tests/responses_ws_transport.rs` 里
+    `use-paged-catalog` 的 `gcTime: 0` 与每次挂载一个 scope（不同 key 的分组过滤结果不留在缓存里）；`crates/okapi-providers/tests/responses_ws_transport.rs` 里
     30 秒的 sleep 是最后被 `abort` 的「沉默上游」，用例自己断言 3 秒内结束。
 
 ### 11.45 线上日志排查后的修正（2026-10-19）
@@ -3431,6 +3431,29 @@ playground、测活、OAuth 刷新、诊断这些确实要调数据面的，继�
 - **日志 target 变了**：tracing 的 target 来自模块路径，`okapi::gateway::…` 现在是 `okapi_gateway::…`。默认过滤（`info,sqlx=warn`）与运维日志面板不按 target 过滤，
   只有自己设 `RUST_LOG=okapi::gateway=debug` 之类的要改写成 `okapi_gateway=debug`。
 - **编译**：改控制面只重编 okapi-console 与门面（约 26k 行，原先是整个 66k 行的库）；改 worker 约 3k 行；console 与 worker 互不依赖，可以并行编译。改 kernel 仍会带动全部。
+
+### 11.61 集成测试按 crate 拆开（2026-11-01）
+
+§11.60 之后 122 个集成测试仍全在 `bins/okapi/tests`：它们同属依赖四个角色的 `okapi` 包，改哪个角色都要把 122 个测试目标全部重编。
+现在每个测试按它（连同 `#[path]` 引进来的 support 文件）实际用到的角色放进对应 crate：
+
+| 位置 | 套件数 | 放进来的条件 |
+|---|---|---|
+| `crates/okapi-gateway/tests` | 45 | 只用到 gateway 及以下 |
+| `crates/okapi-console/tests` | 40 | 用到 console、不用 worker（含 5 个借控制面接口造数据或核对结果的 `gateway_*`） |
+| `crates/okapi-worker/tests` | 8 | 用到 worker、不用 console |
+| `crates/okapi-store/tests`、`crates/okapi-providers/tests` | 2 + 1 | 只用到这两个底层 crate：`channel_pools`、`schema_shape`；`responses_ws_transport` |
+| `bins/okapi/tests` | 26 | 同时用 console 与 worker 的端到端，以及迁移工具（`migrate_*`）、真实二进制（`gateway_shutdown`） |
+
+- **support 文件**：只有一个 crate 用的跟着它走；三个跨 crate 共用的放在使用方共同依赖的最低一层——`published_pricing.rs`、`raw_ws.rs` 在 okapi-gateway，
+  `paged_lists.rs` 在 okapi-console，上层的测试用相对 `#[path]` 引用。只许顺着依赖方向引：console / worker / 门面的测试可以引 gateway 的 support，反过来不行。
+- **路径**：搬走的文件不再经门面，`okapi::gateway::…` 写成 `okapi_gateway::…`，`use okapi::{console, gateway}` 写成 `use okapi_console as console;`
+  加 `use okapi_gateway as gateway;`；留在门面的测试照旧写 `okapi::…`。测试逻辑没有改动。
+- **依赖**：各 crate 的 dev-dependencies 只补它的测试用到的；门面删掉不再用到的 7 个。
+- **怎么跑**：测试目标名（文件名）不变，`scripts/test-isolated.py` 与 CI 的逐套件报告按目标名收集，不受影响；
+  单跑一个套件要换包名，例如 `cargo test -p okapi-gateway --test gateway_m1`、`cargo test -p okapi-console --test console_manage`。
+- **效果**（实测：`touch` 一个 crate 的 `lib.rs` 后 `cargo test --workspace --no-run`，数重编的集成测试目标）：改 okapi-console 重编 66 个（console 40 + 端到端 26），
+  改 okapi-worker 重编 34 个（worker 8 + 端到端 26），改 okapi-gateway 重编 119 个（它下游的全部）；拆之前这三种情况都是 122 个。
 
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
