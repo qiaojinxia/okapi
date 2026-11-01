@@ -15,7 +15,6 @@
 //! `{"allow_http": bool, "allow_http_upstream": bool（缺省 true）, "allow_private": bool}`。
 
 use crate::gateway::error::AppError;
-use crate::gateway::state::AppState;
 use okapi_providers::ssrf::is_private_ip;
 use serde::Deserialize;
 use std::net::IpAddr;
@@ -74,14 +73,14 @@ fn host_of(url: &str) -> Option<&str> {
 
 /// 校验渠道的 API 地址（`channels.api_base`）：缺省 http / https 都收，私网目标照旧要 `allow_private`。
 /// violation 返回 400（error_code 带原因参数）。
-pub async fn validate_upstream_base(state: &AppState, api_base: &str) -> Result<(), AppError> {
-    validate_with(&state.pg, api_base, Purpose::UpstreamBase).await
+pub async fn validate_upstream_base(pg: &sqlx::PgPool, api_base: &str) -> Result<(), AppError> {
+    validate_with(pg, api_base, Purpose::UpstreamBase).await
 }
 
 /// 校验其余的出站地址（令牌端点、回调、支付网关、探测地址……）：缺省仅 https。
 /// 名字沿用旧的；渠道 API 地址请走 [`validate_upstream_base`]。
-pub async fn validate_api_base(state: &AppState, api_base: &str) -> Result<(), AppError> {
-    validate_url(&state.pg, api_base).await
+pub async fn validate_api_base(pg: &sqlx::PgPool, api_base: &str) -> Result<(), AppError> {
+    validate_url(pg, api_base).await
 }
 
 pub(crate) async fn validate_url(pg: &sqlx::PgPool, api_base: &str) -> Result<(), AppError> {
@@ -147,11 +146,11 @@ async fn validate_with(
 /// 把 JWT 断言 POST 到它，测活还会把非 2xx 响应体前 300 字回给管理员。凭证密封存储，写入口是
 /// 唯一能看见它的地方；按凭证形状判断而不按 provider，先以别的协议存下再 PATCH 成 vertex 也
 /// 绕不过去。违规统一回 `credential_token_uri`（管理员没动 api_base，不该看到 api_base 的参数名）。
-pub async fn validate_credential(state: &AppState, credential: &str) -> Result<(), AppError> {
+pub async fn validate_credential(pg: &sqlx::PgPool, credential: &str) -> Result<(), AppError> {
     let Some(sa) = okapi_providers::vertex::ServiceAccount::parse(credential) else {
         return Ok(());
     };
-    validate_api_base(state, &sa.token_uri)
+    validate_api_base(pg, &sa.token_uri)
         .await
         .map_err(|_| AppError::bad_request().with_param("credential_token_uri"))
 }

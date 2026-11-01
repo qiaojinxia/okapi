@@ -3,6 +3,7 @@ pub mod forecast;
 pub mod policy;
 pub mod quota;
 
+use super::sched_redis::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
 use super::{diagnostics, scheduler::CandidateSet, state::AppState};
 use okapi_providers::UpstreamError;
 use okapi_store::ChannelCandidate;
@@ -36,15 +37,11 @@ const MAX_EXCLUDED: usize = 24;
 fn reason(error: &UpstreamError) -> String {
     match error {
         UpstreamError::Build(text) => text
-            .strip_prefix("channel_control:")
+            .strip_prefix(CHANNEL_CONTROL_PREFIX)
             .unwrap_or(text)
             .to_owned(),
         other => other.error_code().to_owned(),
     }
-}
-
-pub fn blocked(reason: &str) -> UpstreamError {
-    UpstreamError::Build(format!("channel_control:{reason}"))
 }
 
 pub fn attempt_error(error: &UpstreamError) -> super::error::AppError {

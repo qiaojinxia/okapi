@@ -161,7 +161,7 @@ pub(super) async fn spawn_stream_pump(
                     if let Err(err) = capture_response_event(&mut writer, &bill, &event).await {
                         // 首字已发送：终止而不改投，保留终态 usage 供实际产出结算。
                         if let ChatEvent::Data { usage: Some(reported), .. } = &event { usage = Some(reported.with_previous(usage)); }
-                        let event = super::super::error::stream_error_event(bill.ingress, &err, request_id, Some(next_sequence));
+                        let event = super::super::ingress::stream_error_event(bill.ingress, &err, request_id, Some(next_sequence));
                         let _ = tokio::time::timeout(Duration::from_secs(5), tx.send(Ok(event))).await;
                         break;
                     }
@@ -193,7 +193,7 @@ pub(super) async fn spawn_stream_pump(
                     info.outcome = Some((err.upstream_status().unwrap_or(502), err.error_code().into()));
                     tracing::warn!(request_id = %request_id, error = %err, "首字后断流，按已产出结算");
                     let error = AppError::new(if matches!(err, UpstreamError::Timeout | UpstreamError::Unreachable { timed_out: true, .. }) { StatusCode::GATEWAY_TIMEOUT } else { StatusCode::BAD_GATEWAY }, err.error_code());
-                    let event = super::super::error::stream_error_event(bill.ingress, &error, request_id, Some(next_sequence));
+                    let event = super::super::ingress::stream_error_event(bill.ingress, &error, request_id, Some(next_sequence));
                     let _ = tokio::time::timeout(Duration::from_secs(5),tx.send(Ok(event))).await;
                     break;
                 }
@@ -271,7 +271,7 @@ pub(super) async fn finish_settled_stream(
 ) {
     if let Err(error) = result {
         tracing::error!(%request_id, ?error, "stream usage persistence failed");
-        let event = super::super::error::stream_error_event(
+        let event = super::super::ingress::stream_error_event(
             ingress,
             &error,
             request_id,

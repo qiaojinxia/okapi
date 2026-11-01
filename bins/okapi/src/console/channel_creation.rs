@@ -43,7 +43,7 @@ pub async fn endpoint<'a>(
             okapi_providers::registry::lookup(provider).and_then(|adapter| adapter.default_base)
         })
         .ok_or_else(|| AppError::bad_request().with_param("api_base"))?;
-    crate::gateway::ssrf::validate_upstream_base(state, base).await?;
+    crate::gateway::ssrf::validate_upstream_base(&state.pg, base).await?;
     Ok(base)
 }
 

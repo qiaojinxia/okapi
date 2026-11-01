@@ -153,7 +153,7 @@ pub(super) async fn ensure_settings_oauth_token_url(
         .map(str::trim)
         .filter(|u| !u.is_empty())
         .ok_or_else(|| AppError::bad_request().with_param("oauth_token_url"))?;
-    crate::gateway::ssrf::validate_api_base(state, url).await
+    crate::gateway::ssrf::validate_api_base(&state.pg, url).await
 }
 
 /// `inject_request_fields`：对象、最多 32 键 / 4KB，受保护键不可写。

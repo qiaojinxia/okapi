@@ -13,6 +13,14 @@ use std::{
 };
 use uuid::Uuid;
 
+/// 渠道准入被挡下（并发满、额度窗、渠道停用……）的错误前缀；`account_control` 据它取回原因。
+pub const CHANNEL_CONTROL_PREFIX: &str = "channel_control:";
+
+/// 渠道准入被挡下：还没发给上游，换下一个候选是安全的（对外是 503 `no_available_channel`）。
+pub fn blocked(reason: &str) -> UpstreamError {
+    UpstreamError::Build(format!("{CHANNEL_CONTROL_PREFIX}{reason}"))
+}
+
 const LEASE_MS: u64 = 90_000;
 const ACQUIRE: &str = r"
  local t=redis.call('TIME'); local now=tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)
@@ -127,9 +135,7 @@ impl ChannelPermit {
                 permit.release().await;
                 return match admitted {
                     Ok(_) => Ok(None),
-                    Err(_) => Err(super::super::account_control::blocked(
-                        "concurrency_unavailable",
-                    )),
+                    Err(_) => Err(blocked("concurrency_unavailable")),
                 };
             }
             permit.leases.push((name.clone(), id.clone()));

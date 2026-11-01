@@ -183,10 +183,10 @@ async fn handle(
             channel.egress_proxy_id.zip(channel.egress_max_concurrency),
         )
         .await?
-        .ok_or_else(|| super::account_control::blocked("concurrency"))?;
+        .ok_or_else(|| super::sched_redis::channel_permit::blocked("concurrency"))?;
         let response = tokio::select! {
             result = state.pass.forward(pass_req) => result,
-            () = permit.expired() => Err(super::account_control::blocked("concurrency_lease_lost")),
+            () = permit.expired() => Err(super::sched_redis::channel_permit::blocked("concurrency_lease_lost")),
         }?;
         Ok(response.with_guard(permit))
     }
