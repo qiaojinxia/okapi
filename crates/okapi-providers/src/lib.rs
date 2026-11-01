@@ -50,6 +50,7 @@ mod retry_after;
 pub mod ssrf;
 pub mod stream_failure;
 pub mod types;
+pub mod unified_limits;
 pub mod vertex;
 
 pub use anthropic::AnthropicUpstream;

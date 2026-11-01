@@ -154,6 +154,8 @@ pub async fn send_messages_at(
 
     let resp = http.send(req, outbound).await?;
     let status = resp.status().as_u16();
+    // 订阅账号的额度窗口头：成功与失败的响应都报给网关挂上的观测钩子（没挂则无事发生）
+    crate::unified_limits::report(status, resp.headers());
     let upstream_request_id = ["request-id", "x-request-id"]
         .iter()
         .find_map(|h| resp.headers().get(*h))
