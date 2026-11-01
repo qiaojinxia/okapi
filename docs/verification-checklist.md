@@ -215,7 +215,7 @@
 4. **沙箱环境两处重定向**会让人跑到旧产物：`CARGO_TARGET_DIR` 与 `PLAYWRIGHT_BROWSERS_PATH`。已写入第 1 节注意事项。
 5. 覆盖缺口未变化，见第 3 节；本轮没有新增自动化用例（只修 flake），下一轮优先补第 3 节第 1、2 条。
 
-本轮改动清单（均为验证配套，不含功能）：`bins/okapi/tests/console_analytics.rs`（两处 poll_until）、`crates/okapi-gateway/tests/gateway_invalid_key_rate.rs`（去 `mut`）、`crates/okapi-gateway/src/sched_redis.rs`（`sort_by_key`）、`deny.toml`（两个许可证放行）、`.sqlx/`（重生成）、rustfmt 触及的 13 个文件、本文档。
+本轮改动清单（均为验证配套，不含功能）：`bins/okapi/tests/console_analytics.rs`（两处 poll_until）、`crates/okapi-gateway/tests/gateway_invalid_key_rate.rs`（去 `mut`）、`crates/okapi-kernel/src/sched_redis.rs`（`sort_by_key`）、`deny.toml`（两个许可证放行）、`.sqlx/`（重生成）、rustfmt 触及的 13 个文件、本文档。
 
 ### 2026-09-06 第二轮：补第 3 节前两条缺口
 
@@ -243,12 +243,12 @@
 
 发现与处置：
 
-1. **SIGTERM 会把进程直接掐死（已修）**：三角色的 `shutdown_signal` 只听 `ctrl_c()`（SIGINT），而 Docker / K8s stop 发的是 SIGTERM——用例首跑时客户端立刻读到 `unexpected EOF during chunk size line`，账本留下一笔 Redis 预扣。修正：新增 `bins/okapi/src/shutdown.rs`，`signal()` 同时等 SIGINT / SIGTERM，gateway / console / worker 共用；worker 的信号监听建一次挂在循环外。
+1. **SIGTERM 会把进程直接掐死（已修）**：三角色的 `shutdown_signal` 只听 `ctrl_c()`（SIGINT），而 Docker / K8s stop 发的是 SIGTERM——用例首跑时客户端立刻读到 `unexpected EOF during chunk size line`，账本留下一笔 Redis 预扣。修正：新增 `crates/okapi-kernel/src/shutdown.rs`，`signal()` 同时等 SIGINT / SIGTERM，gateway / console / worker 共用；worker 的信号监听建一次挂在循环外。
 2. **连接排完不等于账已落（已修）**：chat 流式 / 非流式两条路径都是"响应先行、结算后台"（perf-report 的热路径优化），`axum::serve` 的 graceful shutdown 只等连接关闭，进程随后退出会掐掉正在跑的结算任务。修正：`shutdown::Pending` 计数这两处 spawn，`gateway::run` 在排水后等计数归零（上限 30s，超时告警交对账）。IMPLEMENTATION §14.3 已加实现状态注记（SSE 排水无 5min 上限、无独立 readiness 端点两点如实写明）。
 3. **`console_analytics` 再抓到一例同类竞态**：`flow_links_conserve_and_fold_other` 的谓词只等 `total`，`coverage_bp` 来自另一条查询。连同 `advanced_filters…`（previous / cost_known 分属不同查询）与 `flow_names…`（nodes 另查）一起把谓词补全；本轮全量复跑干净。
 4. 「双副本并发凭证刷新锁」核实为不适用：§4.3 主线只实现 static_key，没有会刷新的凭证类型；矩阵已改注。
 
-本轮改动清单：新增 `bins/okapi/src/shutdown.rs`；`gateway/mod.rs`（run 等结算归零、去本地 shutdown_signal）、`gateway/state.rs`（`settlements` 字段）、`gateway/chat.rs`（两处 spawn 改经计数）、`console/mod.rs`、`worker/mod.rs`（信号）；新增三个测试文件 / 两条 e2e；`console_analytics.rs` 三处谓词；`IMPLEMENTATION.md` §14.3 注记；本文档。
+本轮改动清单：新增 `crates/okapi-kernel/src/shutdown.rs`；`gateway/mod.rs`（run 等结算归零、去本地 shutdown_signal）、`gateway/state.rs`（`settlements` 字段）、`gateway/chat.rs`（两处 spawn 改经计数）、`console/mod.rs`、`worker/mod.rs`（信号）；新增三个测试文件 / 两条 e2e；`console_analytics.rs` 三处谓词；`IMPLEMENTATION.md` §14.3 注记；本文档。
 
 ### 2026-09-06 第四轮：PG 记账契约 + 套餐 / 角色表单
 

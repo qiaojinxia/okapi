@@ -40,7 +40,7 @@ python3 scripts/guard-deploy-manifests.py
 
 | ID | 问题 / 修复 | 实现 | 验证 |
 |---|---|---|---|
-| A01 | **任务退出计数**：PendingTask 在 Drop 中退计数，panic/取消也可停机 | [bins/okapi/src/shutdown.rs](../bins/okapi/src/shutdown.rs) | shutdown 单测：panic_does_not_block_shutdown / cancelling_an_unpolled_task_drains_its_counter |
+| A01 | **任务退出计数**：PendingTask 在 Drop 中退计数，panic/取消也可停机 | [crates/okapi-kernel/src/shutdown.rs](../crates/okapi-kernel/src/shutdown.rs) | shutdown 单测：panic_does_not_block_shutdown / cancelling_an_unpolled_task_drains_its_counter |
 | A02 | **候选排序与复制**：共享 Arc 候选快照、只排列索引；加权无放回排序改为 O(n log n)，时延批量读取 | [crates/okapi-gateway/src/scheduler.rs](../crates/okapi-gateway/src/scheduler.rs) | scheduler 排序/权重/借用单测；release CPU 基准 |
 | A03 | **未到期 OAuth 热路径**：使用缓存渠道策略，未到期凭证直接返回，避免每请求重读 PG | [crates/okapi-gateway/src/credentials/oauth.rs](../crates/okapi-gateway/src/credentials/oauth.rs) | channel_controls::fresh_managed_oauth_uses_the_cached_policy_without_reading_postgres |
 | A04 | **负数按次价格**：价簿编译边界拒绝负数按次价格 | [crates/okapi-pricing/src/model.rs](../crates/okapi-pricing/src/model.rs) | okapi-pricing/tests/audit_regressions::negative_fixed_price_is_rejected_by_library_compilation |
@@ -84,7 +84,7 @@ python3 scripts/guard-deploy-manifests.py
 | A42 | **团队身份与钱包所有人混淆**：分离 actor/wallet 身份；验证成员存在/状态；个人 Key 操作仅授权属主 | [crates/okapi-store/src/auth.rs](../crates/okapi-store/src/auth.rs) | audit_regressions::team_members_cannot_delete_peer_keys_and_banned_members_cannot_authenticate；console_teams |
 | A43 | **分析查询重复维护观测字段**：共享 Source/Kind/Grain 目录与字段归属，保留各来源独立恢复语义 | [crates/okapi-console/src/observation_sources.rs](../crates/okapi-console/src/observation_sources.rs) | 目录唯一性/完整性单测；console_analytics / console_stats / 观测来源套件 |
 | A44 | **堆叠趋势丢失成本覆盖分母**：统一加法指标目录，financial_records 在分桶/折叠/合计中守恒 | [crates/okapi-console/src/analytics.rs](../crates/okapi-console/src/analytics.rs) | audit_regressions::stacked_cost_buckets_preserve_financial_records_coverage_and_margin（实际 HTTP + CH）；console_analytics / 成本与退款统计套件 |
-| A45 | **毛利熔断覆盖人工解除**：评估与清理使用 Redis CAS，过期判断以当前条目为准 | [bins/okapi/src/margin.rs](../bins/okapi/src/margin.rs) | audit_regressions::old_margin_evaluation_cannot_overwrite_manual_lift |
+| A45 | **毛利熔断覆盖人工解除**：评估与清理使用 Redis CAS，过期判断以当前条目为准 | [crates/okapi-kernel/src/margin.rs](../crates/okapi-kernel/src/margin.rs) | audit_regressions::old_margin_evaluation_cannot_overwrite_manual_lift |
 | A46 | **定价批量写入部分成功**：先校验完整批次，排序锁模型，价格与审计在同一事务提交 | [crates/okapi-console/src/ratio_sync.rs](../crates/okapi-console/src/ratio_sync.rs) | audit_regressions::failed_pricing_batch_rolls_back_every_model |
 | A47 | **模态键盘误确认/关错层**：共享栈管理顶层 Escape、滚动锁与焦点；取消按钮遵循原生 Enter，排除 IME | [frontend/src/hooks/use-modal-focus.ts](../frontend/src/hooks/use-modal-focus.ts) | write-forms 嵌套确认 Cancel Enter/Escape；security-layout 移动端弹层 |
 | A48 | **非法并发输入清空上限**：共享正整数解析器，区分无修改、无限制和非法值，非法状态禁保存 | [frontend/src/features/channels/KeyParamRow.tsx](../frontend/src/features/channels/KeyParamRow.tsx) | channel-controls / write-forms 并发参数交互 |
