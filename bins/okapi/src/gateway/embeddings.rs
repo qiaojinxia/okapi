@@ -403,6 +403,30 @@ fn validated_usage(
 }
 
 /// 候选循环：anthropic 渠道跳过（无 embeddings 端点）；瞬态失败 failover。
+/// 上游回了 2xx 却不是 JSON 对象（站点的网页前端 / 网关页）：不是一次成功的调用，
+/// 不转发、不计费，当作这个候选的瞬态失败换下一个。None = 是 JSON，照常处理。
+async fn non_json_failure(
+    state: &AppState,
+    cand: &okapi_store::ChannelCandidate,
+    request_id: Uuid,
+    body: &[u8],
+) -> Option<AppError> {
+    let kind = super::chat::non_json_kind(body)?;
+    super::key_health::failure(
+        state,
+        cand,
+        codes::UPSTREAM_ERROR,
+        okapi_store::channels::KeyFailure::Transient,
+    )
+    .await;
+    tracing::warn!(request_id = %request_id, channel_key = cand.channel_key_id,
+        kind, bytes = body.len(), "embeddings 上游回了非 JSON，failover 下一候选");
+    Some(AppError::new(
+        StatusCode::BAD_GATEWAY,
+        codes::UPSTREAM_ERROR,
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn forward(
     state: &AppState,
@@ -464,19 +488,8 @@ async fn forward(
             .await
         {
             Ok(resp) => {
-                // 上游回了 2xx 却不是 JSON 对象（站点的网页前端 / 网关页）：不是一次成功的调用，
-                // 不转发、不计费，当作这个候选的瞬态失败换下一个。
-                if let Some(kind) = super::chat::non_json_kind(&resp.body) {
-                    last_error = AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR);
-                    super::key_health::failure(
-                        state,
-                        &cand,
-                        codes::UPSTREAM_ERROR,
-                        okapi_store::channels::KeyFailure::Transient,
-                    )
-                    .await;
-                    tracing::warn!(request_id = %request_id, channel_key = cand.channel_key_id,
-                        kind, bytes = resp.body.len(), "embeddings 上游回了非 JSON，failover 下一候选");
+                if let Some(error) = non_json_failure(state, &cand, request_id, &resp.body).await {
+                    last_error = error;
                     failover = failover.saturating_add(1);
                     continue;
                 }
