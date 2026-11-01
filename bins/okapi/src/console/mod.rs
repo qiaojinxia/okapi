@@ -59,8 +59,8 @@ mod usage_observations;
 mod usage_sources;
 mod user_management;
 
-use crate::config::Config;
 use crate::gateway::{self, state::AppState};
+use crate::kernel::config::Config;
 use axum::Router;
 use axum::extract::Request;
 use axum::http::{Method, header};
@@ -108,7 +108,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(crate::shutdown::signal())
+    .with_graceful_shutdown(crate::kernel::shutdown::signal())
     .await?;
     // 同 gateway：Playground 中继与渠道试用走的是数据面处理器，结算在响应之后的后台任务里，
     // 连接排完不等于账已落，等它们归零再退出，免得滚动发布时留下只剩 Redis 预扣的请求
@@ -146,7 +146,9 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(
             crate::kernel::clients::stamp_peer_ip,
         ))
-        .layer(axum::middleware::from_fn(crate::security_headers::apply))
+        .layer(axum::middleware::from_fn(
+            crate::kernel::security_headers::apply,
+        ))
         .layer(TraceLayer::new_for_http().make_span_with(crate::kernel::clients::request_span))
         .with_state(state)
 }

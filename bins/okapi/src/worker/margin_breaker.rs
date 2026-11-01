@@ -1,8 +1,8 @@
 //! 负毛利自动熔断评估（IMPLEMENTATION §11.34）：worker 每轮读 `settings.margin_breaker`，
 //! 按（分组, 渠道）聚合 CH `mv_analysis_hour` 窗口内**成本已知**的行，亏钱的对写进
-//! Redis `mb:blocks`（契约见 `crate::margin`）。到期条目剪掉；管理员 `lifted` 的对跳过。
+//! Redis `mb:blocks`（契约见 `crate::kernel::margin`）。到期条目剪掉；管理员 `lifted` 的对跳过。
 
-use crate::margin::{self, BlockEntry, BlockState, BreakerConfig};
+use crate::kernel::margin::{self, BlockEntry, BlockState, BreakerConfig};
 use okapi_store::ChClient;
 use sqlx::PgPool;
 use std::collections::HashMap;

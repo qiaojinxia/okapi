@@ -8,7 +8,7 @@
 //! - **邮箱**：单个 `@`、ASCII dot-atom 本地部分、带点的域名；`:`、空白、控制字符进不来。
 
 use crate::kernel::error::AppError;
-use crate::text::is_invisible;
+use crate::kernel::text::is_invisible;
 use unicode_normalization::UnicodeNormalization;
 
 /// 机器标识：trim 后 1..=`max` 字节，只含字母、数字与 `_` `.` `-`。

@@ -10,7 +10,7 @@
 //! 先在后台经同一代理探一次独立的探测地址，探不通才熔断代理——一个上游挂了，不能把同一代理上的
 //! 其他渠道一起拖下水（全局默认出口是代理时就是整站）。
 use super::state::AppState;
-use crate::worker::egress_probe::{ProbePolicy, SETTING as PROBE_SETTING};
+use crate::kernel::policies::{EGRESS_PROBE_SETTING as PROBE_SETTING, ProbePolicy};
 use okapi_store::ChannelCandidate;
 use okapi_store::channels::{self, KeyFailure};
 

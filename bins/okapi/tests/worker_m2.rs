@@ -177,7 +177,7 @@ async fn reconcile_detects_one_sided_credit() {
         .await
         .unwrap();
 
-    let drifts = worker::reconcile_balances(&pg, &ledger, 1_000_000)
+    let drifts = okapi::kernel::reconcile::reconcile_balances(&pg, &ledger, 1_000_000)
         .await
         .unwrap();
     assert!(

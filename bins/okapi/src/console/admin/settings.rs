@@ -35,12 +35,12 @@ pub async fn set_setting(
         return Err(AppError::bad_request().with_param("streaming_policy"));
     }
     if req.key == "oauth_refresh_policy"
-        && crate::worker::oauth_refresh::RefreshPolicy::parse(&req.value).is_none()
+        && crate::kernel::policies::RefreshPolicy::parse(&req.value).is_none()
     {
         return Err(AppError::bad_request().with_param("oauth_refresh_policy"));
     }
     if req.key == "egress_probe_policy" {
-        let Some(policy) = crate::worker::egress_probe::ProbePolicy::parse(&req.value) else {
+        let Some(policy) = crate::kernel::policies::ProbePolicy::parse(&req.value) else {
             return Err(AppError::bad_request().with_param("egress_probe_policy"));
         };
         // 探测地址由后台按时请求：与上游地址同一道 SSRF 闸
@@ -112,10 +112,10 @@ pub async fn smtp_test(
         return Err(AppError::bad_request().with_param("to"));
     }
     // 绕过 60s 设置缓存：配置页"保存→测试"是连贯操作，必须读到刚保存的值
-    let mailer = crate::mail::Mailer::from_pg(&state.pg)
+    let mailer = crate::kernel::mail::Mailer::from_pg(&state.pg)
         .await
         .map_err(|error| match error {
-            crate::mail::MailError::NotConfigured => {
+            crate::kernel::mail::MailError::NotConfigured => {
                 AppError::new(StatusCode::NOT_IMPLEMENTED, "smtp_not_configured")
             }
             other => {
@@ -126,7 +126,7 @@ pub async fn smtp_test(
     let accept = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok());
-    let lang = crate::mail::templates::Lang::resolve(req.lang.as_deref(), accept);
+    let lang = crate::kernel::mail::templates::Lang::resolve(req.lang.as_deref(), accept);
     let site = state
         .setting_cached("site_name")
         .await
@@ -135,7 +135,9 @@ pub async fn smtp_test(
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_else(|| "Okapi".to_owned());
     if let Err(err) = mailer
-        .send(crate::mail::templates::test_message(lang, &site, to))
+        .send(crate::kernel::mail::templates::test_message(
+            lang, &site, to,
+        ))
         .await
     {
         tracing::warn!(error = %err, "SMTP 测试发送失败");

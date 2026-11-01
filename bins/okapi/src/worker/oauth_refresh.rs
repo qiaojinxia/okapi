@@ -1,51 +1,11 @@
 //! Bounded OAuth pre-refresh; credentials stay in the shared gateway manager.
 use crate::gateway::credentials::{health, oauth};
 use crate::gateway::state::AppState;
+use crate::kernel::policies::RefreshPolicy;
 use futures::{StreamExt, stream};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RefreshPolicy {
-    pub enabled: bool,
-    pub interval_secs: u64,
-    pub refresh_margin_secs: i64,
-    pub batch_size: u16,
-    pub concurrency: u8,
-    pub requests_per_second: u8,
-}
-
-impl Default for RefreshPolicy {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            interval_secs: 30,
-            refresh_margin_secs: 300,
-            batch_size: 100,
-            concurrency: 2,
-            requests_per_second: 1,
-        }
-    }
-}
-
-impl RefreshPolicy {
-    pub fn parse(value: &Value) -> Option<Self> {
-        let policy = if value.is_null() {
-            Self::default()
-        } else {
-            serde_json::from_value::<Self>(value.clone()).ok()?
-        };
-        ((5..=300).contains(&policy.interval_secs)
-            && (120..=3600).contains(&policy.refresh_margin_secs)
-            && (1..=1000).contains(&policy.batch_size)
-            && (1..=8).contains(&policy.concurrency)
-            && (1..=5).contains(&policy.requests_per_second))
-        .then_some(policy)
-    }
-}
 
 pub async fn run(state: AppState, mut stop: tokio::sync::watch::Receiver<bool>) {
     let mut after = 0;

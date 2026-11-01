@@ -95,7 +95,7 @@ pub struct Mailer {
 
 impl Mailer {
     /// 从 settings 缓存读取配置；未配置返回 `NotConfigured`。
-    pub async fn from_state(state: &crate::gateway::state::AppState) -> Result<Self, MailError> {
+    pub async fn from_state(state: &crate::kernel::state::CoreState) -> Result<Self, MailError> {
         let value = state.setting_cached(SETTING_KEY).await;
         Self::from_config(SmtpConfig::from_value(value.as_ref().as_ref()))
     }

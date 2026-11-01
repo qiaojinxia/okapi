@@ -1,11 +1,11 @@
 //! 负毛利熔断管理面（IMPLEMENTATION §11.34）：列出当前熔断 / 解除。
-//! 状态在 Redis `mb:blocks`（契约见 `crate::margin`），配置在 `settings.margin_breaker`。
+//! 状态在 Redis `mb:blocks`（契约见 `crate::kernel::margin`），配置在 `settings.margin_breaker`。
 
 use super::admin::{audit, guard};
 use crate::gateway::state::AppState;
 use crate::kernel::error::AppError;
 use crate::kernel::extract::Json as ExtractJson;
-use crate::margin::{self, BlockEntry, BlockState, BreakerConfig};
+use crate::kernel::margin::{self, BlockEntry, BlockState, BreakerConfig};
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

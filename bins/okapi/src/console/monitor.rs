@@ -4,7 +4,7 @@
 use super::query::Query;
 use crate::gateway::state::AppState;
 use crate::kernel::error::AppError;
-use crate::ops::{host, logbuf, probes::Probes, sampler};
+use crate::kernel::ops::{host, logbuf, probes::Probes, sampler};
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

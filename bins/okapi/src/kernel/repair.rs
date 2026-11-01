@@ -1,5 +1,5 @@
-//! 漂移修复：结算窗口过后仍不一致的余额按 PG 账本重建（网关的热余额自愈也走这里）。
-use super::{BalanceDrift, reconcile_balances, redis_effective};
+//! 漂移修复：结算窗口过后仍不一致的余额按 PG 账本重建（网关的热余额自愈、控制台的手动修复与 worker 的定时对账共用）。
+use super::reconcile::{BalanceDrift, reconcile_balances, redis_effective};
 use okapi_ledger::BalanceLedger;
 use sqlx::{Connection, PgPool};
 use std::time::Duration;

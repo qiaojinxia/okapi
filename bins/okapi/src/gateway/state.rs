@@ -242,7 +242,9 @@ impl AppState {
                 user_id = request.user_id,
                 "hot balance missing; rebuilding from the ledger"
             );
-            match crate::worker::repair_balance(&self.pg, &self.ledger, request.user_id).await {
+            match crate::kernel::repair::repair_balance(&self.pg, &self.ledger, request.user_id)
+                .await
+            {
                 Ok(Some(_)) => {
                     return self
                         .ledger
@@ -408,7 +410,8 @@ impl AppState {
             };
         }
         let before = candidates.len();
-        candidates.retain(|c| !blocked.contains(&crate::margin::field(group, c.channel_id)));
+        candidates
+            .retain(|c| !blocked.contains(&crate::kernel::margin::field(group, c.channel_id)));
         Retained {
             margin_removed: before - candidates.len(),
             next_quota_reset,

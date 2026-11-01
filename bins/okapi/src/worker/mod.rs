@@ -9,7 +9,8 @@
 //! chsink（outbox → ClickHouse）已接入（单机直连形态）；NATS 传输在后续批次拆分。
 //!
 //! 本文件只放入口 `run`（拉起各后台任务与维护时钟）；维护调度在 maintenance，悬置预扣清理在
-//! reservations，对账与漂移修复在 reconcile / repair，分区、到期、订阅与冷却恢复在 housekeeping。
+//! reservations，定时对账的告警在 reconcile（对账与漂移修复本身在 `kernel::reconcile` / `kernel::repair`，网关与控制台也用），
+//! 分区、到期、订阅与冷却恢复在 housekeeping。
 
 pub mod chsink;
 mod delivery;
@@ -22,7 +23,6 @@ pub mod nats_relay;
 pub mod notify;
 pub mod oauth_refresh;
 mod reconcile;
-mod repair;
 mod reservations;
 mod supervision;
 
@@ -33,15 +33,10 @@ pub use self::housekeeping::{
 use self::maintenance::{
     ChSink, MaintenanceContext, MaintenanceJob, run_maintenance, run_recovery,
 };
-use self::reconcile::redis_effective;
-pub use self::reconcile::{
-    BalanceDrift, reconcile_active_balances, reconcile_and_notify, reconcile_balances,
-};
-use self::repair::SETTLE_WINDOW;
-pub use self::repair::{BalanceRepair, repair_balance, repair_drifted, stable_drift};
+pub use self::reconcile::reconcile_and_notify;
 pub use self::reservations::{SweptReservation, sweep_expired_reservations};
 
-use crate::config::Config;
+use crate::kernel::config::Config;
 use okapi_ledger::BalanceLedger;
 use std::time::Duration;
 
@@ -201,7 +196,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // 运维监控趋势采样（§11.43）：每分钟一个点，保留 24 小时
     let ops_sampler = tokio::spawn(supervision::run("ops_sampler", image_stopped.clone(), {
-        let probes = crate::ops::probes::Probes {
+        let probes = crate::kernel::ops::probes::Probes {
             pg: pg.clone(),
             redis: redis.clone(),
             // 探针拿配置好的客户端，不论启动时连没连上：连不上要报"异常"而不是"未配置"
@@ -210,7 +205,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         };
         let node = cfg.node.clone();
         let stop = image_stopped.clone();
-        move || crate::ops::sampler::run(probes.clone(), node.clone(), stop.clone())
+        move || crate::kernel::ops::sampler::run(probes.clone(), node.clone(), stop.clone())
     }));
 
     tracing::info!(
@@ -256,7 +251,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             },
         )));
     }
-    crate::shutdown::signal().await;
+    crate::kernel::shutdown::signal().await;
     let _ = image_stop.send(true);
     // Cancel-safe maintenance transactions roll back on stop. Other workers get a bounded drain.
     if tokio::time::timeout(

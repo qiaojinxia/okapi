@@ -38,7 +38,7 @@ pub(crate) mod upstream_cost;
 pub mod user_turns;
 pub mod videos;
 
-use crate::config::Config;
+use crate::kernel::config::Config;
 use axum::Router;
 use axum::routing::{get, post};
 use okapi_ledger::BalanceLedger;
@@ -122,7 +122,7 @@ pub(crate) async fn build_state_with_resources(
             stats_query_cache: crate::kernel::state::build_query_cache(),
             nats,
             master_key: {
-                let key = crate::config::master_key_from_env();
+                let key = crate::kernel::config::master_key_from_env();
                 okapi_store::credential::warn_if_unprotected(key.as_deref());
                 key.map(Arc::from)
             },
@@ -131,7 +131,7 @@ pub(crate) async fn build_state_with_resources(
                 .time_to_live(std::time::Duration::from_mins(1))
                 .build(),
             in_flight,
-            settlements: crate::shutdown::Pending::default(),
+            settlements: crate::kernel::shutdown::Pending::default(),
         },
         upstreams: state::Upstreams {
             azure: okapi_providers::AzureUpstream::new(upstream.clone()),
@@ -367,7 +367,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(crate::shutdown::signal())
+    .with_graceful_shutdown(crate::kernel::shutdown::signal())
     .await?;
     // 连接排完 ≠ 账已落：流式/非流式 chat 的结算在响应之后的后台任务里，
     // 这里等它们归零再退出，否则最后一批请求只剩 Redis 预扣、要靠对账才能收口
@@ -487,7 +487,9 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
         .layer(axum::middleware::from_fn(diagnostics::scope))
-        .layer(axum::middleware::from_fn(crate::security_headers::apply))
+        .layer(axum::middleware::from_fn(
+            crate::kernel::security_headers::apply,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             rule_inputs::track_in_flight,

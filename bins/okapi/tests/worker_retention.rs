@@ -311,7 +311,7 @@ async fn pruned_events_still_repair_both_balances_and_preserve_inflight() {
     b.age().await;
     let dropped = b.prune().await;
     assert!(dropped.iter().any(|name| name == "billing_events_y2020m01"));
-    let drifts = worker::reconcile_balances(&b.pg, &b.ledger, 100)
+    let drifts = okapi::kernel::reconcile::reconcile_balances(&b.pg, &b.ledger, 100)
         .await
         .unwrap();
     b.ledger.drain(b.uid).await.unwrap();

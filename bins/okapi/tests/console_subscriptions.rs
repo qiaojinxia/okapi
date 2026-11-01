@@ -615,11 +615,11 @@ async fn gateway_bills_subscription_pool_first() {
 
     // 两池对账零漂移；管理端 reconcile 也不报这个用户
     bed.assert_zero_drift().await;
-    let drift = worker::stable_drift(&bed.pg, &bed.ledger, bed.user_id)
+    let drift = okapi::kernel::repair::stable_drift(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap();
     assert!(drift.is_some(), "稳定（无结算中间态）");
-    let repaired = worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    let repaired = okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap()
         .unwrap();

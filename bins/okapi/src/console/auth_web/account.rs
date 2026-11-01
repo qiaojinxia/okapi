@@ -138,16 +138,16 @@ pub struct EmailCodeReq {
 pub(super) fn mail_lang(
     headers: &HeaderMap,
     explicit: Option<&str>,
-) -> crate::mail::templates::Lang {
+) -> crate::kernel::mail::templates::Lang {
     let accept = headers
         .get(header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok());
-    crate::mail::templates::Lang::resolve(explicit, accept)
+    crate::kernel::mail::templates::Lang::resolve(explicit, accept)
 }
 
-pub(super) fn map_mail_error(err: crate::mail::MailError) -> AppError {
+pub(super) fn map_mail_error(err: crate::kernel::mail::MailError) -> AppError {
     match err {
-        crate::mail::MailError::NotConfigured => {
+        crate::kernel::mail::MailError::NotConfigured => {
             AppError::new(StatusCode::NOT_IMPLEMENTED, "smtp_not_configured")
         }
         other => {
@@ -176,7 +176,7 @@ pub async fn email_code(
         // 策略没开验证却来取码：不是错误，但也没必要发信
         return Err(AppError::bad_request().with_param("email_verification_disabled"));
     }
-    let mailer = crate::mail::Mailer::from_state(&state)
+    let mailer = crate::kernel::mail::Mailer::from_state(&state)
         .await
         .map_err(map_mail_error)?;
     if !state
@@ -202,7 +202,7 @@ pub async fn email_code(
     let site = site_name(&state).await;
     let ttl_min = u32::try_from(EMAIL_CODE_TTL_SECS / 60).unwrap_or(10);
     mailer
-        .send(crate::mail::templates::verification_code(
+        .send(crate::kernel::mail::templates::verification_code(
             lang, &site, &email, &code, ttl_min,
         ))
         .await
@@ -231,7 +231,7 @@ pub async fn password_forgot(
     if !super::super::identifiers::valid_email(&email) {
         return Err(AppError::bad_request().with_param("email"));
     }
-    let mailer = crate::mail::Mailer::from_state(&state)
+    let mailer = crate::kernel::mail::Mailer::from_state(&state)
         .await
         .map_err(map_mail_error)?;
     let base = site_base_url(&state).await?;
@@ -254,7 +254,7 @@ pub async fn password_forgot(
     let ttl_min = u32::try_from(PWRESET_TTL_SECS / 60).unwrap_or(30);
     // 发信失败对外仍 ok：否则"发信失败"与"邮箱不存在"可被区分出来；细节进日志
     if let Err(err) = mailer
-        .send(crate::mail::templates::password_reset(
+        .send(crate::kernel::mail::templates::password_reset(
             lang, &site, &email, &link, ttl_min,
         ))
         .await

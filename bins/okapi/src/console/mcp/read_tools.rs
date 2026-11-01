@@ -298,7 +298,7 @@ pub(super) async fn reconciliation_status(
         .and_then(Value::as_i64)
         .unwrap_or(1000)
         .clamp(1, 5000);
-    let drifts = crate::worker::reconcile_balances(&state.pg, &state.ledger, limit)
+    let drifts = crate::kernel::reconcile::reconcile_balances(&state.pg, &state.ledger, limit)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "MCP 对账查询失败");

@@ -147,9 +147,9 @@ impl Notifier {
         if recipients.is_empty() {
             return false;
         }
-        let mailer = match crate::mail::Mailer::from_pg(&self.pg).await {
+        let mailer = match crate::kernel::mail::Mailer::from_pg(&self.pg).await {
             Ok(m) => m,
-            Err(crate::mail::MailError::NotConfigured) => {
+            Err(crate::kernel::mail::MailError::NotConfigured) => {
                 tracing::warn!(event, "email 通知通道跳过：SMTP 未配置");
                 return false;
             }
@@ -158,8 +158,10 @@ impl Notifier {
                 return false;
             }
         };
-        let lang =
-            crate::mail::templates::Lang::resolve(ch.get("lang").and_then(Value::as_str), None);
+        let lang = crate::kernel::mail::templates::Lang::resolve(
+            ch.get("lang").and_then(Value::as_str),
+            None,
+        );
         let site = match sqlx::query_scalar!(
             r#"SELECT value #>> '{}' AS "v!" FROM settings WHERE key = 'site_name'"#
         )
@@ -176,7 +178,8 @@ impl Notifier {
         .unwrap_or_else(|| "Okapi".to_owned());
         let mut success = true;
         for to in recipients {
-            let mail = crate::mail::templates::event_notice(lang, &site, to, event, at, payload);
+            let mail =
+                crate::kernel::mail::templates::event_notice(lang, &site, to, event, at, payload);
             if let Err(err) = mailer.send(mail).await {
                 success = false;
                 tracing::warn!(event, to, error = %err, "通知邮件发送失败");

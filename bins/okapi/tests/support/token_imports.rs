@@ -99,7 +99,7 @@ async fn bare_token_mimics_client_and_settles_once_without_refresh() {
     let mut cursor = key - 1;
     okapi::worker::oauth_refresh::refresh_once(
         &env.state,
-        okapi::worker::oauth_refresh::RefreshPolicy {
+        okapi::kernel::policies::RefreshPolicy {
             batch_size: 1,
             requests_per_second: 5,
             ..Default::default()

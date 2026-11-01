@@ -162,7 +162,7 @@ pub async fn list_settings(
     }
     if !data.iter().any(|r| r["key"] == "oauth_refresh_policy") {
         data.push(json!({"key":"oauth_refresh_policy",
-            "value":crate::worker::oauth_refresh::RefreshPolicy::default(),
+            "value":crate::kernel::policies::RefreshPolicy::default(),
             "is_secret":false,"configured":false,"updated_at":null}));
     }
     Ok(Json(json!({ "data": data })))

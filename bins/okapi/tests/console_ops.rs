@@ -339,9 +339,10 @@ async fn admin_refund_full_cycle() {
     }
 
     // 对账干净（消费-240 + 退款+240 + 充值 1_000_000 = redis 余额）
-    let drifts = okapi::worker::reconcile_balances(&env.pg, &env.state.ledger, 1_000_000)
-        .await
-        .unwrap();
+    let drifts =
+        okapi::kernel::reconcile::reconcile_balances(&env.pg, &env.state.ledger, 1_000_000)
+            .await
+            .unwrap();
     assert!(
         !drifts.iter().any(|d| d.user_id == env.user_id),
         "退款后三方对账必须干净"

@@ -1,6 +1,7 @@
 use super::*;
 use okapi::gateway::credentials::health;
-use okapi::worker::oauth_refresh::{RefreshPolicy, refresh_once};
+use okapi::kernel::policies::RefreshPolicy;
+use okapi::worker::oauth_refresh::refresh_once;
 use std::time::Duration;
 
 async fn soon(env: &Env, key: i64) {

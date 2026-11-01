@@ -201,7 +201,7 @@ impl<S: Subscriber> Layer<S> for OpsLogLayer {
         msg.text.push_str(&msg.fields);
         // 换行与控制字符转义：上游错误原文、用户填的邮箱都可能带 `\n`，面板按行渲染，
         // 不转义的话一条 WARN 能伪造出一行假的 ERROR
-        let mut message = crate::text::escape_for_log(&msg.text).into_owned();
+        let mut message = crate::kernel::text::escape_for_log(&msg.text).into_owned();
         if message.len() > MESSAGE_MAX {
             let cut = (0..=MESSAGE_MAX)
                 .rev()

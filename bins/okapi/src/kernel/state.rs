@@ -51,7 +51,7 @@ pub struct CoreState {
     /// 计数覆盖响应体流完为止；仅在价簿含 surge 规则时才挂计数中间件。
     pub in_flight: InFlightGauge,
     /// 后台结算任务计数（响应先行、结算后台的两条 chat 路径）；优雅下线等它归零（§14.3）。
-    pub settlements: crate::shutdown::Pending,
+    pub settlements: crate::kernel::shutdown::Pending,
 }
 
 impl CoreState {

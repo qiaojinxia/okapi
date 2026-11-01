@@ -16,17 +16,17 @@ impl SchedulerRedis {
     /// 负毛利熔断表整读（§11.34，`mb:blocks`）；Redis 故障 None = 调用方按不熔处理。
     pub async fn margin_blocks(
         &self,
-    ) -> Option<std::collections::HashMap<String, crate::margin::BlockEntry>> {
-        crate::margin::load_blocks(&self.client).await
+    ) -> Option<std::collections::HashMap<String, crate::kernel::margin::BlockEntry>> {
+        crate::kernel::margin::load_blocks(&self.client).await
     }
 
     /// 写一条熔断表条目（管理面解除 / 测试用）。
     pub async fn margin_block_set(
         &self,
         field: &str,
-        entry: &crate::margin::BlockEntry,
+        entry: &crate::kernel::margin::BlockEntry,
     ) -> Result<(), fred::error::Error> {
-        crate::margin::set_block(&self.client, field, entry).await
+        crate::kernel::margin::set_block(&self.client, field, entry).await
     }
 
     /// 渠道 key 当日累计消费（micro）。读不到按 0 处理 = 不拦。

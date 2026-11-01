@@ -94,7 +94,7 @@ pub async fn repair_reconciliation(
         (Some(user_id), false) => {
             // 先确认漂移是稳定的：结算是异步的，「Redis 已扣、PG 事件还没落」的中间态
             // 看起来和真丢数据一模一样，照着修等于把正在结算的那笔退回去
-            match crate::worker::stable_drift(&state.pg, &state.ledger, user_id).await {
+            match crate::kernel::repair::stable_drift(&state.pg, &state.ledger, user_id).await {
                 Ok(None) => {
                     let exists = sqlx::query_scalar!(
                         r#"SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)
@@ -117,7 +117,7 @@ pub async fn repair_reconciliation(
                 }
                 Ok(Some(_)) => {}
             }
-            match crate::worker::repair_balance(&state.pg, &state.ledger, user_id).await {
+            match crate::kernel::repair::repair_balance(&state.pg, &state.ledger, user_id).await {
                 Ok(Some(one)) => vec![one],
                 Ok(None) => return Err(AppError::new(StatusCode::NOT_FOUND, codes::NOT_FOUND)),
                 Err(err) => {
@@ -126,7 +126,7 @@ pub async fn repair_reconciliation(
                 }
             }
         }
-        (None, true) => crate::worker::repair_drifted(&state.pg, &state.ledger, req.limit)
+        (None, true) => crate::kernel::repair::repair_drifted(&state.pg, &state.ledger, req.limit)
             .await
             .map_err(|err| {
                 tracing::error!(error = %err, "批量对账修复失败");
@@ -155,7 +155,7 @@ pub async fn reconciliation(
     Query(q): Query<ReconQuery>,
 ) -> Result<Json<Value>, AppError> {
     let _ = guard(&state, &headers, permissions::BILLING_READ).await?;
-    let drifts = crate::worker::reconcile_balances(&state.pg, &state.ledger, q.limit)
+    let drifts = crate::kernel::reconcile::reconcile_balances(&state.pg, &state.ledger, q.limit)
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "对账查询失败");

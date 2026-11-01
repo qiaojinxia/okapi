@@ -511,7 +511,7 @@ mod tests {
         unavailable.flow.settle_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
         unavailable.flow.settle_backlog =
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        unavailable.settlements = crate::shutdown::Pending::default();
+        unavailable.settlements = crate::kernel::shutdown::Pending::default();
         let mut failed = input.clone();
         failed.request_id = uuid::Uuid::new_v4();
         failed.log_type = 5;

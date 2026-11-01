@@ -96,8 +96,8 @@ async fn setup() -> Bed {
 }
 
 /// 只看这一个用户的漂移（对账扫全表，别的用例造的漂移不关我们的事）。
-async fn drift_of(bed: &Bed) -> Option<worker::BalanceDrift> {
-    worker::reconcile_balances(&bed.pg, &bed.ledger, 100_000)
+async fn drift_of(bed: &Bed) -> Option<okapi::kernel::reconcile::BalanceDrift> {
+    okapi::kernel::reconcile::reconcile_balances(&bed.pg, &bed.ledger, 100_000)
         .await
         .unwrap()
         .into_iter()
@@ -125,7 +125,7 @@ async fn repair_rebuilds_hot_balance_from_the_ledger() {
     assert_eq!(drift.events_sum_micro, 9_000_000);
     assert_eq!(drift.redis_effective_micro, 0, "这正是全站拒服务的那个 0");
 
-    let fixed = worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    let fixed = okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap()
         .expect("用户存在");
@@ -139,7 +139,7 @@ async fn repair_rebuilds_hot_balance_from_the_ledger() {
     assert!(drift_of(&bed).await.is_none(), "修完不该再有差额");
 
     // 幂等：同一权威值重跑不改变结果
-    let again = worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    let again = okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap()
         .unwrap();
@@ -148,7 +148,7 @@ async fn repair_rebuilds_hot_balance_from_the_ledger() {
 
     // 不存在的用户 → None（端点据此转 404）
     assert!(
-        worker::repair_balance(&bed.pg, &bed.ledger, 99_999_999)
+        okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, 99_999_999)
             .await
             .unwrap()
             .is_none()
@@ -188,7 +188,7 @@ async fn repair_preserves_in_flight_reservations() {
     assert!(drift_of(&bed).await.is_none());
 
     lose_hot_balance(&bed).await;
-    let fixed = worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    let fixed = okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap()
         .unwrap();
@@ -279,7 +279,7 @@ async fn durable_holds_survive_expiry_sweeps_and_worker_repair()
             format!("hold:{{{}}}:{id}", bed.user_id),
         ])
         .await?;
-    let repaired = worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    let repaired = okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await?
         .ok_or("missing user")?;
     assert_eq!(repaired.redis_after_micro, 7_500_000);
@@ -388,7 +388,7 @@ async fn repair_endpoint_guards_and_repairs() {
     churn.await.unwrap();
     // churn 只加 Redis 不写账本事件，本身就是一份漂移——用例造的脏数据不能留在开发库里
     // 挂着（运维页会一直显示一个假的差异用户），跑完按账本收干净
-    worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap();
     assert!(drift_of(&bed).await.is_none(), "用例不得留下漂移");
@@ -407,7 +407,7 @@ async fn repair_endpoint_guards_and_repairs() {
 async fn reconciliation_reaches_users_beyond_the_first_page() {
     let bed = setup().await;
     lose_hot_balance(&bed).await;
-    let drift = worker::reconcile_balances(&bed.pg, &bed.ledger, 25)
+    let drift = okapi::kernel::reconcile::reconcile_balances(&bed.pg, &bed.ledger, 25)
         .await
         .unwrap();
     assert!(
@@ -415,7 +415,7 @@ async fn reconciliation_reaches_users_beyond_the_first_page() {
             .iter()
             .any(|row| row.user_id == bed.user_id && row.events_sum_micro == 9_000_000)
     );
-    worker::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
+    okapi::kernel::repair::repair_balance(&bed.pg, &bed.ledger, bed.user_id)
         .await
         .unwrap();
 }
@@ -428,11 +428,16 @@ async fn active_reconcile_only_covers_users_with_recent_events() {
     let active = |since: chrono::DateTime<chrono::Utc>| {
         let bed = &bed;
         async move {
-            worker::reconcile_active_balances(&bed.pg, &bed.ledger, 100_000, since)
-                .await
-                .unwrap()
-                .into_iter()
-                .any(|d| d.user_id == bed.user_id)
+            okapi::kernel::reconcile::reconcile_active_balances(
+                &bed.pg,
+                &bed.ledger,
+                100_000,
+                since,
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .any(|d| d.user_id == bed.user_id)
         }
     };
     let now = chrono::Utc::now();

@@ -975,7 +975,7 @@ async fn subscription_quota_is_observed_without_a_configured_percentage_cap() {
     let mut after = env.key - 1;
     okapi::worker::oauth_refresh::refresh_once(
         &env.state,
-        okapi::worker::oauth_refresh::RefreshPolicy {
+        okapi::kernel::policies::RefreshPolicy {
             enabled: false,
             batch_size: 1,
             ..Default::default()

@@ -1346,7 +1346,7 @@ async fn background_probe_tracks_exit_ip_changes_and_alerts_on_down_proxies() {
         .unwrap()
         .unwrap();
     }
-    let policy = egress_probe::ProbePolicy::parse(&json!({
+    let policy = okapi::kernel::policies::ProbePolicy::parse(&json!({
         "target": format!("http://{target}/trace"), "concurrency": 2
     }))
     .unwrap();

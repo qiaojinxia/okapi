@@ -3,7 +3,7 @@
 //!
 //! 对不上代理 id 的地址（控制台测试还没保存的地址、已删除的代理）丢弃；写库失败就把量放回，
 //! 下一轮一起写。
-use crate::config::Config;
+use crate::kernel::config::Config;
 use okapi_providers::egress_meter::{self, Sample};
 use okapi_store::egress_traffic::{self, MinuteRow};
 use std::collections::HashMap;

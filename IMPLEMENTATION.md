@@ -3397,6 +3397,18 @@ console / worker 拿到的永远是整个数据面。现在拆成两层，行为
 之后若要让 console 的处理器只依赖 kernel，只读共用部分的处理器可以改用 `State<CoreState>`（axum `FromRef`）；
 playground、测活、OAuth 刷新、诊断这些确实要调数据面的，继续用 `AppState`。
 
+### 11.59 角色之间的依赖理成一棵树（2026-11-01）
+
+拆 crate 之前先把模块之间的环断开，现在是 kernel ← gateway ← {console, worker}，console 与 worker 互不依赖，kernel 不依赖任何角色。行为不变：
+
+- **对账与修复进 `kernel`**：`kernel::reconcile`（三方对账、漂移复核）与 `kernel::repair`（按 PG 账本重建余额）原在 worker，
+  网关的热余额自愈、控制台的手动对账也在调，于是网关反过来依赖 worker。worker 只留定时对账的告警（`worker::reconcile::reconcile_and_notify`）。
+- **后台任务策略进 `kernel::policies`**：`RefreshPolicy`（OAuth 预刷新）与 `ProbePolicy` / `EGRESS_PROBE_SETTING`（出口探测）只是 settings 的形状与取值域，
+  控制台写入时校验、网关核实出口时读、worker 按它跑；跑的循环仍在 worker。
+- **原在 crate 根的共用模块进 `kernel`**：config、shutdown、margin（负毛利熔断表）、text、security_headers、mail、ops。
+  `mail::Mailer::from_state` 改收 `&CoreState`（只读 settings）。`okapi::config` / `okapi::mail` / `okapi::margin` / `okapi::ops` / `okapi::shutdown`
+  由 lib.rs 再导出，bin 入口与集成测试的写法不变。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）
