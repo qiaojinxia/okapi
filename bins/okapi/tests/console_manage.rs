@@ -923,10 +923,15 @@ async fn channel_batch_and_user_actions() {
         gone.deleted_at.is_some(),
         "单条删除是软删，调度按 deleted_at 过滤"
     );
-    assert_eq!(
-        gone.status, 1,
-        "单条 DELETE 只盖 tombstone，不像 batch 那样顺手 status=2 并停 key"
-    );
+    assert_eq!(gone.status, 2, "单条 DELETE 与 batch 同口径：渠道 status=2");
+    let key_status = sqlx::query_scalar!(
+        r#"SELECT status FROM channel_keys WHERE channel_id = $1"#,
+        id
+    )
+    .fetch_one(&env.pg)
+    .await
+    .unwrap();
+    assert_eq!(key_status, 2, "单条删除也停用其下 key");
     let (status, body) = req(
         reqwest::Method::DELETE,
         env.console,
