@@ -65,11 +65,11 @@ async fn cancel(env: &Env, task: &Value) -> Value {
     assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
     response.json().await.unwrap()
 }
-fn worker(env: &Env) -> tokio::task::JoinHandle<Result<bool, gateway::error::AppError>> {
+fn worker(env: &Env) -> tokio::task::JoinHandle<Result<bool, okapi::kernel::error::AppError>> {
     let state = env.state.clone();
     tokio::spawn(async move { run_one(&state).await })
 }
-async fn join(worker: tokio::task::JoinHandle<Result<bool, gateway::error::AppError>>) {
+async fn join(worker: tokio::task::JoinHandle<Result<bool, okapi::kernel::error::AppError>>) {
     assert!(timeout(WAIT, worker).await.unwrap().unwrap().unwrap());
 }
 async fn expire(env: &Env, task: &Value) {

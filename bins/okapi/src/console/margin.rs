@@ -2,9 +2,9 @@
 //! 状态在 Redis `mb:blocks`（契约见 `crate::margin`），配置在 `settings.margin_breaker`。
 
 use super::admin::{audit, guard};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use crate::margin::{self, BlockEntry, BlockState, BreakerConfig};
 use axum::Json;
 use axum::extract::State;

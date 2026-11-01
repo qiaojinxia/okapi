@@ -144,10 +144,10 @@ pub fn router(state: AppState) -> Router {
         // 与 gateway 同一把闸：登录 / 注册 / 兑换的每 IP 限流与审计 IP 都经
         // clients::client_ip，没有对端锚点就无从判断转发头可不可信（§14.2）
         .layer(axum::middleware::from_fn(
-            crate::gateway::clients::stamp_peer_ip,
+            crate::kernel::clients::stamp_peer_ip,
         ))
         .layer(axum::middleware::from_fn(crate::security_headers::apply))
-        .layer(TraceLayer::new_for_http().make_span_with(crate::gateway::clients::request_span))
+        .layer(TraceLayer::new_for_http().make_span_with(crate::kernel::clients::request_span))
         .with_state(state)
 }
 

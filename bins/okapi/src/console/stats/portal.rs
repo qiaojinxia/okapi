@@ -1,8 +1,8 @@
 //! 门户：用户自己的用量拆分与每日用量。
 use super::super::query::Query;
 use super::{WindowQuery, ch_i64, ch_or_disabled, rate_bp, scaled_ratio};
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

@@ -5,8 +5,8 @@
 
 use super::admin::guard;
 use super::query::Query;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

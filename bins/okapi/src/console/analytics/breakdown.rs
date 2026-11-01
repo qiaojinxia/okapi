@@ -5,8 +5,8 @@ use super::{
     CubeQuery, Names, Scope, accumulate_core_metrics, accumulate_original, aggregate_metrics,
     describe_scope, pack_core_metrics, pack_metrics, resolve_names,
 };
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

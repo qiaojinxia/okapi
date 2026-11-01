@@ -8,9 +8,9 @@
 //! 丢弃不删行——留着错误原文与谁处理的，审计要看得见"这笔账为什么没进统计"。
 
 use super::query::Query;
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

@@ -2,8 +2,8 @@
 //! 客户端（ChatGPT-Next-Web 等）用 subscription/usage 差值显示剩余额度。
 //! 口径：hard_limit_usd = (余额 + 累计消费) 即总额度；usage 返回美分。
 
-use super::error::AppError;
 use super::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

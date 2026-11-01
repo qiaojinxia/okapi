@@ -3345,6 +3345,33 @@ RPM / 当日消费闸只在 chat 里生效；渠道删除、api_key 删除在 st
 
 之后若把 gateway 里各角色共用的部分（error / extract / state / auth / ssrf 等）抽成独立模块或 crate，这几项随之一起走。
 
+### 11.57 各角色共用的底层抽成 `kernel`（2026-11-01）
+
+gateway 原先兼做「数据面」和「各角色共用的底层」：console 对 gateway 的引用里，大半是错误类型、提取器、客户端识别这类
+与数据面无关的东西。不依赖数据面的那部分挪到新模块 `crate::kernel`，行为不变：
+
+| kernel 里的模块 | 内容 |
+|---|---|
+| `kernel::error` | `AppError`、各存储 / 账本 / 定价错误的转换、协议错误壳、Retry-After |
+| `kernel::extract` | 返回 `AppError` 合同的 `Json` / `Path` / `Query` / `Multipart` 提取器 |
+| `kernel::clients` | 客户端类型识别、来源 IP 与信任代理策略 |
+| `kernel::ssrf` | 出站地址的 SSRF 校验（入参改为 `&PgPool`，此前要整个 `AppState` 只为取 `pg`） |
+| `kernel::pricing_loader` | 从 PG 装载价簿 |
+| `kernel::sched_redis` | 调度用 Redis 门面 `SchedulerRedis` 及其各领域子模块 |
+
+规矩：kernel 不引用 gateway / console / worker 的任何东西；三个角色都可以引用 kernel。为此先切断了三处与数据面的牵连：
+按入口协议生成流内错误事件的 `stream_error_event` 从 error 挪到 `gateway::ingress`（它要用 `Ingress`）；渠道准入被挡的
+`blocked()` 从 `account_control` 挪到 `kernel::sched_redis::channel_permit`，前缀改成常量 `CHANNEL_CONTROL_PREFIX`，
+两边共用；ssrf 的入参如上。
+
+`AppState`（`gateway::state`）与鉴权（`gateway::auth`）仍在 gateway：AppState 的字段（上游客户端、图片对象存储、额度策略缓存……）
+与方法（结算重试、候选缓存、额度预判……）都挂着数据面，鉴权又读写 AppState。console 现在对 gateway 的引用主要就是这两个
+（state 74 处、auth 21 处），其余是它真要调用的数据面能力（playground、测活、OAuth 刷新、诊断）。拆开 AppState 之后它们才能进 kernel。
+
+早先章节里的 `gateway::extract`、`gateway::clients::TrustPolicy`、`gateway/sched_redis.rs`、`console::ssrf` / `gateway/ssrf.rs` 指的就是上表这几个模块。
+`scripts/guard-error-codes.py` 对 `Self::new(StatusCode::…)` 的扫描限定在 error.rs 所在路径，已随之改成 `kernel/error.rs`——不改的话这几处
+error_code 会被静默漏扫（CI 照样绿）。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

@@ -7,18 +7,15 @@ pub mod auth;
 pub mod bootstrap;
 pub mod channel_test;
 pub mod chat;
-pub mod clients;
 pub mod credentials;
 pub mod custom_pass;
 pub mod dashboard;
 pub(crate) mod diagnostics;
 pub mod dialect;
 pub mod embeddings;
-pub mod error;
 pub mod estimate;
 pub(crate) mod execution_plan;
 pub(crate) mod extensions;
-pub mod extract;
 pub(crate) mod failure;
 pub mod images;
 pub mod inflight;
@@ -28,16 +25,13 @@ pub(crate) mod key_health;
 pub mod models;
 pub mod oauth_cred;
 pub mod openai_dialect;
-pub mod pricing_loader;
 pub mod realtime;
 pub(crate) mod reservation;
 pub mod routing_prefs;
 pub mod rule_inputs;
-pub mod sched_redis;
 pub mod scheduler;
 pub(crate) mod server_tools;
 pub(crate) mod settlement_retry;
-pub mod ssrf;
 pub mod state;
 pub(crate) mod stream_policy;
 pub mod token_count;
@@ -85,10 +79,10 @@ pub(crate) async fn build_state_with_resources(
 ) -> anyhow::Result<AppState> {
     estimate::warm_up();
     let ledger = BalanceLedger::new(redis.clone());
-    let sched = sched_redis::SchedulerRedis::new(redis);
+    let sched = crate::kernel::sched_redis::SchedulerRedis::new(redis);
     let in_flight = inflight::InFlightGauge::new(sched.clone(), node);
 
-    let book = pricing_loader::load_pricebook(&pg).await?;
+    let book = crate::kernel::pricing_loader::load_pricebook(&pg).await?;
     tracing::info!(epoch = book.epoch(), "PriceBook 已装载");
 
     let nats = match nats_url {
@@ -249,7 +243,7 @@ pub async fn refresh_pricebook_if_newer(state: &AppState) -> anyhow::Result<bool
     if latest <= state.pricebook.epoch() {
         return Ok(false);
     }
-    let book = pricing_loader::load_pricebook(&state.pg).await?;
+    let book = crate::kernel::pricing_loader::load_pricebook(&state.pg).await?;
     Ok(state.pricebook.swap_if_newer(book))
 }
 
@@ -487,10 +481,12 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             rule_inputs::track_in_flight,
         ))
-        .layer(axum::middleware::from_fn(clients::stamp_peer_ip))
+        .layer(axum::middleware::from_fn(
+            crate::kernel::clients::stamp_peer_ip,
+        ))
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(clients::request_span)
+                .make_span_with(crate::kernel::clients::request_span)
                 .on_failure(
                     |class: ServerErrorsFailureClass, latency: Duration, _span: &tracing::Span| {
                         log_response_failure(&class, latency);

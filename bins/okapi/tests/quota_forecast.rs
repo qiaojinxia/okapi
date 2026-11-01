@@ -14,9 +14,10 @@ use axum::{
     routing::{get, post},
 };
 use fred::interfaces::{KeysInterface, LuaInterface};
+use okapi::kernel::sched_redis::session_hash;
 use okapi::{
     gateway::account_control::forecast::RequestShape,
-    gateway::{self, account_control, sched_redis::session_hash, state::AppState},
+    gateway::{self, account_control, state::AppState},
 };
 use okapi_store::credential::OAuthCredential;
 use serde_json::{Value, json};

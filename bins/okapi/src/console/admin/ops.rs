@@ -1,9 +1,9 @@
 //! 运维：缓存清理与对账（查看 / 修复）。
 use super::super::query::Query;
 use super::{audit, guard};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -31,7 +31,7 @@ pub async fn cache_flush(
         "auth" => state.sched.auth_flush().await,
         "routing" => state.invalidate_routing_caches(),
         "pricebook" => {
-            let book = crate::gateway::pricing_loader::load_pricebook(&state.pg)
+            let book = crate::kernel::pricing_loader::load_pricebook(&state.pg)
                 .await
                 .map_err(|err| {
                     tracing::error!(error = %err, "pricebook 重载失败");

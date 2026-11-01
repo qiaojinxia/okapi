@@ -1,5 +1,5 @@
 //! Store-to-provider bridge. The gateway carries context; adapters own extension behavior.
-use super::sched_redis::response_affinity::ResponseBinding;
+use crate::kernel::sched_redis::response_affinity::ResponseBinding;
 use okapi_providers::{Outbound, profiles, registry, response_relay::TURN_STATE_HEADER};
 use okapi_store::ChannelCandidate;
 

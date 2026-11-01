@@ -1,11 +1,11 @@
 //! 流式首字前：缓冲首段事件、识别空流 / 空补全 / 请求导致的停止。
-use super::super::error::AppError;
 use super::super::ingress::Ingress;
-use super::super::sched_redis::response_affinity::ResponseWriter;
 use super::{
     AttemptError, ForwardFailure, RequestBilling, STARTED_IDLE_WINDOW, cand_info, classify_fatal,
     dispatch_chat, elapsed_ms_i32, first_output_window, response_writer, spawn_stream_pump,
 };
+use crate::kernel::error::AppError;
+use crate::kernel::sched_redis::response_affinity::ResponseWriter;
 use axum::response::Response;
 use bytes::Bytes;
 use futures::StreamExt;

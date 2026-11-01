@@ -7,9 +7,9 @@
 //! `parse_scaled_1e6` 定点解析，不经浮点。
 
 use super::admin::{ensure_channel_owner, guard_scoped};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

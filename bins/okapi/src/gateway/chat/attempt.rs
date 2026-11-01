@@ -1,5 +1,4 @@
 //! failover 主循环：逐个候选尝试、401 强刷、429 冷却、耗尽后的回复与致命错误分类。
-use super::super::error::AppError;
 use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
 use super::{
@@ -7,6 +6,7 @@ use super::{
     attempt_json, attempt_stream, build_upstream_body, eligible_candidates, failure_kind_of,
     lost_tools, recovery_secs, upstream_endpoint,
 };
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use axum::response::Response;
 use bytes::Bytes;

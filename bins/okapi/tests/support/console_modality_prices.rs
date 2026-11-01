@@ -67,7 +67,7 @@ async fn modal_prices_validate_publish_preserve_clear_and_inherit_user_overrides
     sqlx::query("INSERT INTO user_pricing (user_id,model_id,override_kind,custom_model_ratio,custom_completion_ratio,custom_cache_ratio) SELECT $1,id,'ratio',5,4,0.25 FROM models WHERE model_name=$2")
         .bind(bed.user_id).bind(&bed.model).execute(&bed.pg).await.unwrap();
     published_pricing::publish(&bed.pg, bed.user_id).await;
-    let book = gateway::pricing_loader::load_pricebook(&bed.pg)
+    let book = okapi::kernel::pricing_loader::load_pricebook(&bed.pg)
         .await
         .unwrap();
     let ctx = okapi_pricing::CalcContext {

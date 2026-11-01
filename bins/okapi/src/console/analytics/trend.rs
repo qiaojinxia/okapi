@@ -6,8 +6,8 @@ use super::{
     aggregate_metrics, ch_str, describe_scope, pack_core_metrics, pack_metrics, resolve_names,
     row_key, sum_core_rows, sum_metric_rows,
 };
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

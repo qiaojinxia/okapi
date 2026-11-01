@@ -102,7 +102,7 @@
 | `subscriptions.rs` | 套餐 CRUD、购买、配额窗、订阅池优先扣 | A B | `console_subscriptions`（Lua 契约、网关优先扣、worker 滚窗、回调激活、校验）、e2e `subscriptions.spec`（接口桩） | 升降级 / 多订阅并存 backlog |
 | `teams.rs` | 建团 / 成员限额 / 团 key / 分账 | A B C | 单元；`console_teams` 全生命周期 | — |
 | 兑换码（manage + portal） | 批量生成、核销、绑用户、限 IP | A C | `console_redemption`（并发恰一成功、过期拒绝、IP 上限）、e2e `redemptions.spec` | 多次核销 `max_uses` backlog |
-| `gateway/ssrf.rs`（2026-11-01 前在 console） | 上游 URL 校验：`api_base`、`settings.oauth_token_url`、Vertex 服务账号 `token_uri`（凭证三个写入口） | C | 单元；`console_ssrf`（三种地址各自的 400 参数与放行） | — |
+| `kernel/ssrf.rs`（2026-11-01 前在 console，之后经 gateway） | 上游 URL 校验：`api_base`、`settings.oauth_token_url`、Vertex 服务账号 `token_uri`（凭证三个写入口） | C | 单元；`console_ssrf`（三种地址各自的 400 参数与放行） | — |
 | SPA 托管 / 内容协商 | `/admin/*` 同挂 API 与 SPA | A | `console_spa_navigation` | — |
 | 公告 / settings | `site_notice` 公开端点、设置读写 | A | `console_portal_pages::public_notice_whitelists_and_gates`、`console_ops::settings_get_and_leaderboard`、e2e smoke 公告 | — |
 | `playground.rs` | Playground 同源流式中继 + 站点预设（§11.39） | A B C | `console_playground`（中继强制流式回 SSE、逐块透出与记账落同一 key、无 key 401、超 1MB 413；`GET /api/playground/presets` 白名单收口）；单元 `force_stream` / `sanitize_presets` | 中继直调数据面处理器，鉴权 / 限流 / 计费全部复用 gateway，不另测 |
@@ -407,7 +407,7 @@ release 复测（同机，缺省上界 20000）：json 档 15s **25,905 成功 /
 | `gateway/oauth_cred.rs` | 四步锁：进程内单飞 → `lock:cred` `SET NX EX 30`（自愈）→ 加锁重读 → 刷新回写；无锁方就用未过期旧 token；`invalid_grant` 二次重读识别他副本轮转，否则 key 置 invalid ✅。边角：回写 PG 失败时本次用新 token 但不落库，下次会拿旧 refresh token 再刷——对 refresh token 轮转的提供方等于把 key 刷成 invalid（只在 PG 写失败时发生） | 记录，不改 |
 | `gateway/dialect.rs` | `(provider, model)` → 三种方言的分派干净，bedrock / vertex 缺 `api_base` 是构造错误不回退公网 ✅ | — |
 | `console/playground.rs` | 直调 `gateway::chat::chat_completions`，鉴权 / 限流 / 计费 / 结算积压准入与真实 SDK 一致 ✅；1MB 体上限、强制流式 ✅；预设白名单收口 ✅。两点备注：① 拆分部署时 console 进程因此成为数据面节点（要有上游出网、同一 `OKAPI_MASTER_KEY`、结算积压计数各算各的）；② `/api/playground/presets` 无鉴权公开，站点预设的 `system` 提示词对匿名可见，按设计但站长得知道 | 记录 |
-| `gateway/sched_redis.rs` 分组限流 / `auth_web.rs` 会话上限 | 固定窗计数、TTL 与键名与 database.md 一致 ✅；会话上限踢最早、新建那条永不被踢 ✅ | — |
+| `kernel/sched_redis.rs`（原 gateway/sched_redis.rs）分组限流 / `auth_web.rs` 会话上限 | 固定窗计数、TTL 与键名与 database.md 一致 ✅；会话上限踢最早、新建那条永不被踢 ✅ | — |
 | Bedrock / Vertex 传输层 | 无浮点；服务账号 JWT 用 `aws-lc-rs`（已在依赖树），`hmac` / `sha2` 做 SigV4，IMPLEMENTATION §11.35 已登记依赖 ✅。签名正确性当时无真实上游可验——第十五轮用 botocore 当参考实现对拍，**抓到规范 URI 少一次编码**（见第十五轮） | **已修** `8e0ee4c` |
 | 合规边界 | 见第 3 节第 11 条 | 记录 |
 

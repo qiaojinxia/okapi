@@ -103,7 +103,7 @@ async fn run(archived: bool) {
             let published = post(&env, "/admin/pricing/publish", &json!({})).await;
             assert!(published["epoch"].as_i64().unwrap() > original.4);
             env.state.pricebook.replace(
-                okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+                okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
                     .await
                     .unwrap(),
             );

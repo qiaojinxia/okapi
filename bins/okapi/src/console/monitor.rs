@@ -2,8 +2,8 @@
 //! 都是只读，但涉及主机与中间件内部状态，按 `settings.read` 把关（与系统设置同级）。
 
 use super::query::Query;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use crate::ops::{host, logbuf, probes::Probes, sampler};
 use axum::Json;
 use axum::extract::State;

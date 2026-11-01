@@ -5,9 +5,9 @@
 //! 余额不足即断开（`topup`），断开按累计 commit，无产出全额退款。治理（§14.4）：per-key WS 并发上限（Redis 计数 + 兜底 TTL）、
 //! 首消息 30s、空闲 5min。
 
-use super::error::AppError;
-use super::extract::Query;
 use super::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Query;
 use axum::extract::State;
 use axum::extract::ws::{
     CloseFrame as AxumCloseFrame, Message as AxumMsg, WebSocket, WebSocketUpgrade,
@@ -90,7 +90,7 @@ pub async fn realtime(
     match prepare(&state, &key, &q.model, request_id).await {
         Ok(mut prep) => {
             prep.auth_headers = auth_headers.unwrap_or_default();
-            prep.client_ip = super::clients::detect_client_ip(&headers);
+            prep.client_ip = crate::kernel::clients::detect_client_ip(&headers);
             ws.protocols(["realtime"])
                 .on_upgrade(move |socket| async move {
                     // 受下线跟踪：进程退出前等会话收尾落账，不留给 10 分钟后的过期退款
@@ -370,7 +370,7 @@ async fn bridge_session(state: AppState, client: WebSocket, mut prep: Prep) {
     // 会话接手收尾：此后每条路径都显式结算或 fail_session
     prep.admission.disarm();
     let request_id = prep.request_id;
-    let permit = super::sched_redis::channel_permit::ChannelPermit::acquire_parts(
+    let permit = crate::kernel::sched_redis::channel_permit::ChannelPermit::acquire_parts(
         &state.sched,
         prep.channel.1,
         prep.channel_concurrency,

@@ -94,7 +94,7 @@ async fn execute(state: &AppState, claimed: &store::Claimed, lease: Lease) -> Re
     if let Some(ip) = &claimed.client_ip
         && let Ok(ip) = HeaderValue::from_str(ip)
     {
-        headers.insert(crate::gateway::clients::PEER_IP_HEADER, ip);
+        headers.insert(crate::kernel::clients::PEER_IP_HEADER, ip);
     }
     super::super::handle(
         state,

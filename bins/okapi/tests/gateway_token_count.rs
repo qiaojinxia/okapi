@@ -163,8 +163,9 @@ async fn setup(provider: &str) -> Env {
     let candidates = okapi_store::channels::candidates_for_model(&pg, &model, &["default"], None)
         .await
         .unwrap();
-    let binding =
-        gateway::sched_redis::response_affinity::ResponseBinding::from_candidate(&candidates[0]);
+    let binding = okapi::kernel::sched_redis::response_affinity::ResponseBinding::from_candidate(
+        &candidates[0],
+    );
     state
         .sched
         .response_binding_set(user_id, key_id, "resp-count", &binding)
@@ -667,7 +668,7 @@ async fn count_concurrency_releases_on_success_failure_and_timeout() {
         &json!({"object":"response.input_tokens","input_tokens":9}),
     );
     assert_eq!(env.post(&env.body()).await.status(), 200);
-    let occupied = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+    let occupied = okapi::kernel::sched_redis::channel_permit::ChannelPermit::acquire_key(
         &env.state.sched,
         env.channel_key,
         Some(1),
@@ -806,7 +807,7 @@ async fn cancelling_count_handler_releases_both_leases() {
         "cancelled handler leaked request/channel concurrency"
     );
     assert_eq!(env.mock.count(), 2);
-    let occupied = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+    let occupied = okapi::kernel::sched_redis::channel_permit::ChannelPermit::acquire_key(
         &env.state.sched,
         env.channel_key,
         Some(1),
@@ -815,7 +816,7 @@ async fn cancelling_count_handler_releases_both_leases() {
     .unwrap()
     .unwrap();
     assert!(
-        okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+        okapi::kernel::sched_redis::channel_permit::ChannelPermit::acquire_key(
             &env.state.sched,
             env.channel_key,
             Some(1)

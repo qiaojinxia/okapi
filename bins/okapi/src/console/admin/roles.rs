@@ -1,10 +1,10 @@
 //! 管理角色：创建、分配与权限点校验。
 use super::super::query::{PageQuery, Query};
 use super::{audit, guard, guard_super_admin};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

@@ -2,10 +2,8 @@
 //! 缓存本体挂在 `AppState` 上，类型与构造在 `gateway::state`（网关构造状态时不引用 console）。
 #[cfg(test)]
 use crate::gateway::state::build_query_cache as build;
-use crate::gateway::{
-    error::AppError,
-    state::{AppState, QueryCache},
-};
+use crate::gateway::state::{AppState, QueryCache};
+use crate::kernel::error::AppError;
 use axum::http::HeaderMap;
 use serde_json::Value;
 use std::{future::Future, sync::Arc};

@@ -747,8 +747,9 @@ async fn seed_codex_previous_response(env: &Env) {
     )
     .await
     .unwrap();
-    let binding =
-        gateway::sched_redis::response_affinity::ResponseBinding::from_candidate(&candidates[0]);
+    let binding = okapi::kernel::sched_redis::response_affinity::ResponseBinding::from_candidate(
+        &candidates[0],
+    );
     env.state
         .sched
         .response_binding_set(env.user_id, api_key_id, "resp_prev", &binding)

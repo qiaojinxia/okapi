@@ -1,9 +1,9 @@
 //! 批量导入代理（每行一个 URL）。
 use super::super::admin::{audit, guard_scoped};
 use super::{ensure_group, ensure_max_concurrency, ensure_max_keys, owner_filter, store_endpoint};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

@@ -1,5 +1,6 @@
 //! 展示真实消费水位与积压，查询时刻不充当数据更新时间。
-use crate::gateway::{error::AppError, state::AppState};
+use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 

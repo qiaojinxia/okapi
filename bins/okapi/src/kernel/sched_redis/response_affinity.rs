@@ -1,6 +1,6 @@
 //! Responses 历史是上游账号资源；与可降级的 L2 cache 亲和分开。
 use super::SchedulerRedis;
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use fred::interfaces::{KeysInterface, LuaInterface};
 use okapi_api::codes;

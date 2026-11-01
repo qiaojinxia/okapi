@@ -161,7 +161,7 @@ async fn pricing_failure_refunds_and_records_failed_terminal() {
     );
     published_pricing::publish(&env.pg, env.user_id).await;
     env.state.pricebook.replace(
-        gateway::pricing_loader::load_pricebook(&env.pg)
+        okapi::kernel::pricing_loader::load_pricebook(&env.pg)
             .await
             .unwrap(),
     );

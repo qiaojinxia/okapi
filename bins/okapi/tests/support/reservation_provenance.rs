@@ -48,7 +48,7 @@ async fn publish(env: &Env) -> i64 {
         .as_i64()
         .unwrap();
     env.state.pricebook.replace(
-        okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+        okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
             .await
             .unwrap(),
     );

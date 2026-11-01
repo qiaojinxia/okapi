@@ -1,7 +1,7 @@
 //! 入站请求的校验与特征：工具丢失、图片 / 附件 / PDF / 音频的 token 估算。
-use super::super::error::AppError;
 use super::super::ingress::Ingress;
 use super::{ProbeInfo, RequestBilling};
+use crate::kernel::error::AppError;
 use okapi_providers::convert::tool_loss::ForeignTools;
 
 /// 探针之外的入参口径：负 temperature 和 max_tokens 负值一样在入口拒掉，不原样透传给上游；

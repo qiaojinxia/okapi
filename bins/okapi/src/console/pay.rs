@@ -8,9 +8,9 @@
 //!   payment_stripe = {secret_key, webhook_secret, api_base?=https://api.stripe.com}
 
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -302,7 +302,7 @@ pub async fn place_order(
                 .unwrap_or("https://api.stripe.com")
                 .trim_end_matches('/')
                 .to_owned();
-            crate::gateway::ssrf::validate_api_base(&state.pg, &api).await?;
+            crate::kernel::ssrf::validate_api_base(&state.pg, &api).await?;
             let resp = state
                 .pass
                 .probe(PassRequest {

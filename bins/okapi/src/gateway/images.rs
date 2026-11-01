@@ -2,10 +2,10 @@
 //! per_call 按成功张数，ratio/tiered 按响应总用量；价簿固定于准入时。
 //! 仅路由 openai 系渠道。edits 支持 JSON 与 multipart，共用验证、路由和结算。
 
-use super::clients::detect_client_type;
-use super::error::AppError;
-use super::error::with_request_id;
 use super::state::AppState;
+use crate::kernel::clients::detect_client_type;
+use crate::kernel::error::AppError;
+use crate::kernel::error::with_request_id;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -467,7 +467,7 @@ async fn commit_and_record(
         snapshot["image_stream_incomplete"] = serde_json::json!(stream.incomplete);
     }
     let usage = usage.unwrap_or_default();
-    let client_ip = super::clients::detect_client_ip(headers);
+    let client_ip = crate::kernel::clients::detect_client_ip(headers);
     let mut input = SettlementInput {
         source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(

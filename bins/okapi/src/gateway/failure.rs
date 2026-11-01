@@ -65,11 +65,11 @@ impl Guard {
     pub fn arm(&mut self) {
         self.armed = true;
     }
-    pub fn settlement_failed(&mut self, error: &super::error::AppError) {
+    pub fn settlement_failed(&mut self, error: &crate::kernel::error::AppError) {
         self.arm();
         self.error(error);
     }
-    pub fn error(&mut self, error: &super::error::AppError) {
+    pub fn error(&mut self, error: &crate::kernel::error::AppError) {
         self.error_code.clone_from(&error.code);
     }
     pub fn upstream(&mut self, model: &str, channel: (i64, i64)) {

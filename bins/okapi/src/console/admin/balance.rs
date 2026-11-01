@@ -1,9 +1,9 @@
 //! 余额操作：充值 / 扣减、个人系数、余额到期、按请求退款。
 use super::{audit, guard};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

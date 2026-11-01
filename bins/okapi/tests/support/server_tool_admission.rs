@@ -176,7 +176,7 @@ async fn primary(env: &Env) -> String {
     assert_eq!(response.status(), 200);
     response.text().await.unwrap();
     env.state.pricebook.replace(
-        okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+        okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
             .await
             .unwrap(),
     );
@@ -309,7 +309,7 @@ async fn response_model_tool_prices_cannot_raise_or_remove_the_admitted_profile(
             assert_eq!(response.status(), 200);
             response.text().await.unwrap();
             env.state.pricebook.replace(
-                okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+                okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
                     .await
                     .unwrap(),
             );

@@ -1,12 +1,12 @@
 //! 非流式：上游 JSON 应答的取数、非 JSON 2xx 的判定与透传。
-use super::super::error::AppError;
-use super::super::error::with_request_id;
 use super::super::estimate;
 use super::super::ingress::Ingress;
 use super::{
     AttemptError, ForwardFailure, RequestBilling, cand_info, classify_fatal, dispatch_chat,
     response_writer, settle_commit, with_relayed,
 };
+use crate::kernel::error::AppError;
+use crate::kernel::error::with_request_id;
 use axum::body::Body;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -312,7 +312,7 @@ pub(super) fn upstream_passthrough_response(
                     "error": {
                         "code": status.as_u16(),
                         "message": message,
-                        "status": super::super::error::gemini_status_name(status),
+                        "status": crate::kernel::error::gemini_status_name(status),
                     },
                 })
                 .to_string(),

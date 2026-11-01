@@ -3,9 +3,9 @@
 //! 安全两道闸：api_base 固定 + settings.allowed_paths 前缀白名单（空 = 拒绝）。
 //! 计费红线：settings.billing_model 必填（models 表 per_call 模型），按次预扣/结算。
 
-use super::error::AppError;
 use super::state::AppState;
-use crate::gateway::extract::Path;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Path;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
@@ -67,7 +67,7 @@ async fn handle(
     started: Instant,
 ) -> Result<Response, AppError> {
     let key = super::auth::authenticate_data_plane(state, headers).await?;
-    let client_ip = super::clients::detect_client_ip(headers);
+    let client_ip = crate::kernel::clients::detect_client_ip(headers);
 
     // 渠道点查（透传非热路径，直接 PG；可见性与 chat 同一矩阵语义）
     let channel = okapi_store::channels::custom_pass_channel(
@@ -176,17 +176,17 @@ async fn handle(
     let result = async {
         use okapi_providers::response_lifetime::ResponseLifetime;
         super::account_control::admit(state, channel_id, Some(channel.key_id)).await?;
-        let mut permit = super::sched_redis::channel_permit::ChannelPermit::acquire_parts(
+        let mut permit = crate::kernel::sched_redis::channel_permit::ChannelPermit::acquire_parts(
             &state.sched,
             channel.key_id,
             channel.max_concurrency,
             channel.egress_proxy_id.zip(channel.egress_max_concurrency),
         )
         .await?
-        .ok_or_else(|| super::sched_redis::channel_permit::blocked("concurrency"))?;
+        .ok_or_else(|| crate::kernel::sched_redis::channel_permit::blocked("concurrency"))?;
         let response = tokio::select! {
             result = state.pass.forward(pass_req) => result,
-            () = permit.expired() => Err(super::sched_redis::channel_permit::blocked("concurrency_lease_lost")),
+            () = permit.expired() => Err(crate::kernel::sched_redis::channel_permit::blocked("concurrency_lease_lost")),
         }?;
         Ok(response.with_guard(permit))
     }

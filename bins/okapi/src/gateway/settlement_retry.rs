@@ -507,7 +507,7 @@ mod tests {
             })
             .build()
             .unwrap();
-        unavailable.sched = crate::gateway::sched_redis::SchedulerRedis::new(client);
+        unavailable.sched = crate::kernel::sched_redis::SchedulerRedis::new(client);
         unavailable.settle_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
         unavailable.settle_backlog = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         unavailable.settlements = crate::shutdown::Pending::default();

@@ -1,8 +1,8 @@
 //! 首页总览（今日 / 昨日 / 七日三个窗口）与实时 KPI。
 use super::super::query::Query;
 use super::{apply_cost_coverage, ch_i64, ch_or_disabled, rate_bp};
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -236,6 +236,6 @@ impl RealtimeQuery {
     fn window(&self) -> i64 {
         self.window
             .unwrap_or(60)
-            .clamp(1, crate::gateway::sched_redis::KPI_WINDOW_MAX)
+            .clamp(1, crate::kernel::sched_redis::KPI_WINDOW_MAX)
     }
 }

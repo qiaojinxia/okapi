@@ -1,6 +1,6 @@
 //! 不产生账本预扣的计数准入。独立 RPM/RPD 窗口与带 TTL 的请求租约；Redis 故障拒绝。
 use super::SchedulerRedis;
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use fred::interfaces::{LuaInterface, SortedSetsInterface};
 use okapi_api::codes;

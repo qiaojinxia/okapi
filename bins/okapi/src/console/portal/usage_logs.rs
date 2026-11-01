@@ -3,7 +3,8 @@
 
 use super::{LogWindow, LogsQuery};
 use crate::console::query::Query;
-use crate::gateway::{auth::authenticate, error::AppError, state::AppState};
+use crate::gateway::{auth::authenticate, state::AppState};
+use crate::kernel::error::AppError;
 use axum::{Json, extract::State, http::HeaderMap};
 use serde_json::{Value, json};
 use sqlx::{Postgres, QueryBuilder};

@@ -10,8 +10,8 @@
 //! 故一律走 `query_with_params` 绑定参数，SQL 里只出现 clamp 过的整数。
 
 use super::query::Query;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

@@ -3,8 +3,8 @@ pub mod forecast;
 pub mod policy;
 pub mod quota;
 
-use super::sched_redis::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
 use super::{diagnostics, scheduler::CandidateSet, state::AppState};
+use crate::kernel::sched_redis::channel_permit::{CHANNEL_CONTROL_PREFIX, blocked};
 use okapi_providers::UpstreamError;
 use okapi_store::ChannelCandidate;
 use policy::{ForecastMode, Policy};
@@ -44,8 +44,8 @@ fn reason(error: &UpstreamError) -> String {
     }
 }
 
-pub fn attempt_error(error: &UpstreamError) -> super::error::AppError {
-    super::error::AppError::new(
+pub fn attempt_error(error: &UpstreamError) -> crate::kernel::error::AppError {
+    crate::kernel::error::AppError::new(
         if error.error_code() == okapi_api::codes::NO_AVAILABLE_CHANNEL {
             axum::http::StatusCode::SERVICE_UNAVAILABLE
         } else {
@@ -363,10 +363,12 @@ pub fn execute<'a, T: okapi_providers::response_lifetime::ResponseLifetime + 'a>
             candidate.warm_affinity,
         )
         .await?;
-        let mut permit =
-            super::sched_redis::channel_permit::ChannelPermit::acquire(&state.sched, candidate)
-                .await?
-                .ok_or_else(|| blocked("concurrency"))?;
+        let mut permit = crate::kernel::sched_redis::channel_permit::ChannelPermit::acquire(
+            &state.sched,
+            candidate,
+        )
+        .await?
+        .ok_or_else(|| blocked("concurrency"))?;
         let result = tokio::select! {
             result = diagnostics::upstream(candidate, model, endpoint, future) => result,
             () = permit.expired() => Err(blocked("concurrency_lease_lost")),

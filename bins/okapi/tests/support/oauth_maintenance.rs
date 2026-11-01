@@ -343,7 +343,7 @@ async fn refresh_lease_release_cannot_remove_a_new_owner() {
     let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL").unwrap())
         .await
         .unwrap();
-    let sched = gateway::sched_redis::SchedulerRedis::new(redis.clone());
+    let sched = okapi::kernel::sched_redis::SchedulerRedis::new(redis.clone());
     let key = i64::MAX - 100;
     let old = sched.cred_lock_acquire(key).await.unwrap().unwrap();
     let _: i64 = redis.del(format!("lock:cred:{key}")).await.unwrap();

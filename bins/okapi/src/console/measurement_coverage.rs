@@ -4,8 +4,8 @@
 //! 开发阶段不保留旧历史的兼容（库可以重置），所以不再有「逐粒度对账 → 回原始表补齐」
 //! 的恢复路径：那条路径把一次查询膨胀到几十 KB，ClickHouse 光规划就要秒级。
 use super::stats::ch_i64;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 
 /// 预聚合来源：`aggregate` 是不带 GROUP BY 的 `SELECT {keys}, … FROM mv_… WHERE …`。
 pub(super) fn aggregate_source(keys: &str, aggregate: &str) -> String {

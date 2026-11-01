@@ -1,7 +1,10 @@
 use super::*;
 
 impl Env {
-    pub(super) async fn cleanup(&self, job: &Value) -> Result<bool, gateway::error::AppError> {
+    pub(super) async fn cleanup(
+        &self,
+        job: &Value,
+    ) -> Result<bool, okapi::kernel::error::AppError> {
         sqlx::query("UPDATE image_batches SET next_run_at=now() WHERE id=$1")
             .bind(id(job))
             .execute(&self.state.pg)

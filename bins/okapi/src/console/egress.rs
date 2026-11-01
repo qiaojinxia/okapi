@@ -8,8 +8,8 @@
 //! 本文件放属主范围与字段校验；代理 CRUD 在 proxies，测活在 probe，批量导入在 import，
 //! 分组 / 绑定 / 缺省出口在 groups。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use okapi_api::codes;
 use okapi_providers::http::ProxyEndpoint;

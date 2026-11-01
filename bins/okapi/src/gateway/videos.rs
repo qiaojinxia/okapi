@@ -6,11 +6,11 @@
 //!
 //! 轮询/下载不计费；JSON 提交（multipart input_reference 列 backlog）。
 
-use super::clients::detect_client_type;
-use super::error::AppError;
-use super::error::with_request_id;
 use super::state::AppState;
-use crate::gateway::extract::Path;
+use crate::kernel::clients::detect_client_type;
+use crate::kernel::error::AppError;
+use crate::kernel::error::with_request_id;
+use crate::kernel::extract::Path;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -473,7 +473,7 @@ async fn download_response(
         if url.scheme() == "https" && next.scheme() != "https" {
             return Err(invalid("video_download_redirect_scheme"));
         }
-        crate::gateway::ssrf::validate_url(&state.pg, next.as_str())
+        crate::kernel::ssrf::validate_url(&state.pg, next.as_str())
             .await
             .map_err(|_| invalid("video_download_redirect_target"))?;
         url = next;
@@ -509,7 +509,7 @@ async fn commit_and_record(
     source_window: Option<&str>,
     failure: &mut super::failure::Guard,
 ) -> Result<(), AppError> {
-    let client_ip = super::clients::detect_client_ip(headers);
+    let client_ip = crate::kernel::clients::detect_client_ip(headers);
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(

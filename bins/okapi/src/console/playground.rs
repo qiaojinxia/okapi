@@ -5,8 +5,8 @@
 //! key），鉴权 / 限流 / 计费 / 日志与真实 SDK 调用逐字节一致——试用台看到的就是用户会看到的。
 //! 中继只做三件事：强制 `stream: true`、请求体上限 1MB、按请求头选用同一用户的另一把令牌。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Query, State};

@@ -1,9 +1,9 @@
 //! 管理面改 / 删任意用户的 API key。
 use super::{audit, ensure_group_usable, guard};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

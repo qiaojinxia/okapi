@@ -9,8 +9,8 @@
 //! 本文件放共用的窗口参数、取数小工具与成本覆盖率注解；各看板端点按主题分在子模块
 //! （channels / models / overview / health / finance / portal），并从这里原路径再导出。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use okapi_api::codes;
 use okapi_store::ChClient;

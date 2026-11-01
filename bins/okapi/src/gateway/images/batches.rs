@@ -92,7 +92,7 @@ fn respond(value: Value, status: StatusCode, id: Uuid) -> Response {
         "cache-control",
         axum::http::HeaderValue::from_static("private, no-store"),
     );
-    crate::gateway::error::with_request_id(response, id)
+    crate::kernel::error::with_request_id(response, id)
 }
 pub async fn create(State(state): State<AppState>, req: Request) -> Response {
     let id = Uuid::new_v4();
@@ -241,7 +241,7 @@ async fn submit(state: &AppState, req: Request, id: Uuid) -> Result<Batch, AppEr
         })
         .collect();
     let admission = rate::Admission::load(state, &key, &prepared.canonical, units).await;
-    let ip = crate::gateway::clients::client_ip(&headers).map(|v| v.to_string());
+    let ip = crate::kernel::clients::client_ip(&headers).map(|v| v.to_string());
     let created = store::create_admitted(
         &state.pg,
         store::NewBatch {
@@ -265,7 +265,7 @@ async fn submit(state: &AppState, req: Request, id: Uuid) -> Result<Batch, AppEr
             binding: &serialized,
             items: &items,
             client_ip: ip.as_deref(),
-            client_type: crate::gateway::clients::detect_client_type(&headers),
+            client_type: crate::kernel::clients::detect_client_type(&headers),
         },
         store::Limits {
             per_key_active: key

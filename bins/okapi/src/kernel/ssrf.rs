@@ -14,7 +14,7 @@
 //! 内网上游场景另需 `allow_private: true`。完整形状：
 //! `{"allow_http": bool, "allow_http_upstream": bool（缺省 true）, "allow_private": bool}`。
 
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use okapi_providers::ssrf::is_private_ip;
 use serde::Deserialize;
 use std::net::IpAddr;

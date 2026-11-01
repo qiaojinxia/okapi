@@ -1,6 +1,6 @@
 //! Shared chat endpoint compatibility for routing, diagnostics and connection examples.
-use super::error::{AppError, gemini_status_name};
 use super::execution_plan::{ExecutionPlan, Requirements};
+use crate::kernel::error::{AppError, gemini_status_name};
 use okapi_api::ErrorBody;
 use okapi_store::ChannelCandidate;
 use serde::{Deserialize, Serialize};

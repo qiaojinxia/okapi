@@ -1,5 +1,5 @@
-use super::error::AppError;
 use super::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::HeaderMap;
 use okapi_api::codes;
 use okapi_store::AuthedKey;
@@ -118,7 +118,7 @@ async fn reject_invalid_key(state: &AppState, headers: &HeaderMap) -> AppError {
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(60);
     if limit > 0
-        && let Some(ip) = super::clients::detect_client_ip(headers)
+        && let Some(ip) = crate::kernel::clients::detect_client_ip(headers)
     {
         let count = state.sched.crit_rate_incr("invalid_api_key", &ip).await;
         if count > limit {
@@ -153,7 +153,7 @@ pub async fn authenticate_data_plane(
         .as_deref()
         .is_some_and(|l| !l.is_empty())
     {
-        let ip = super::clients::client_ip(headers);
+        let ip = crate::kernel::clients::client_ip(headers);
         if !authed.allows_ip(ip) {
             return Err(
                 AppError::new(axum::http::StatusCode::FORBIDDEN, codes::IP_NOT_ALLOWED)

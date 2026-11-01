@@ -181,7 +181,7 @@ pub async fn download(
             .header("cache-control", "private, no-store")
             .header("x-content-type-options", "nosniff")
             .body(body)
-            .map(|r| crate::gateway::error::with_request_id(r, rid))
+            .map(|r| crate::kernel::error::with_request_id(r, rid))
             .map_err(|_| AppError::internal())
     }
     .await;

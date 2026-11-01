@@ -1,6 +1,6 @@
 //! Responses WS uses a separate, fail-closed connection lease.
 use super::SchedulerRedis;
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use fred::interfaces::{LuaInterface, SortedSetsInterface};
 use okapi_api::codes;

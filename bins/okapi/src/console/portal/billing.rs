@@ -2,8 +2,8 @@
 use super::super::query::Query;
 use super::{ch_i64, ch_or_disabled, default_limit};
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

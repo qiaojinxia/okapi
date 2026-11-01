@@ -1,8 +1,8 @@
 //! 模型：分位延迟与吞吐、按模型的趋势。
 use super::super::query::Query;
 use super::{WindowQuery, ch_i64, ch_or_disabled, page_summary};
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

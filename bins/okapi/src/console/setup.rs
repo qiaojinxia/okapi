@@ -3,9 +3,9 @@
 //! 排他性：事务级表锁保证并发首启只成功一次；已初始化恒 409。
 //! 单用户模式（OKAPI_SINGLE_USER_MODE，§6.5）是另一条免注册路径，两者互不依赖。
 
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

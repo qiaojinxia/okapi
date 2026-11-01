@@ -200,7 +200,7 @@ pub(super) async fn route(
         if !slot(bill, &cand).await {
             continue;
         }
-        let permit = crate::gateway::sched_redis::channel_permit::ChannelPermit::acquire(
+        let permit = crate::kernel::sched_redis::channel_permit::ChannelPermit::acquire(
             &bill.state.sched,
             &cand,
         )
@@ -382,7 +382,7 @@ async fn create_turn(
     cand: &ChannelCandidate,
     sticky: Option<i64>,
     failover: i16,
-    permit: crate::gateway::sched_redis::channel_permit::ChannelPermit,
+    permit: crate::kernel::sched_redis::channel_permit::ChannelPermit,
 ) -> Result<Routed, ForwardFailure> {
     // create may already have sent a frame when it fails. Never replay or switch accounts here.
     let result = match crate::gateway::account_control::admit(

@@ -5,8 +5,8 @@
 //! 分在子模块里，并从这里原路径再导出（`console/mod.rs` 的路由与其它模块的引用不变）。
 
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use okapi_api::{codes, permissions};

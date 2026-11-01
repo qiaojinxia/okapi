@@ -521,7 +521,7 @@ async fn late_headers_and_disconnect_drain_usage_without_resending() {
     assert_eq!(env.amount(&delta).await.0, 240);
     assert_eq!(env.posts.load(Ordering::SeqCst), 2);
     env.no_post().await;
-    let permit = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+    let permit = okapi::kernel::sched_redis::channel_permit::ChannelPermit::acquire_key(
         &env.state.sched,
         env.channel_key,
         Some(4),

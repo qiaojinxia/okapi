@@ -1,7 +1,7 @@
 //! Session-owned profile editing. API keys cannot change their owner's identity.
-use crate::gateway::{
-    auth::authenticate, error::AppError, extract::Json as ExtractJson, state::AppState,
-};
+use crate::gateway::{auth::authenticate, state::AppState};
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::{
     Json,
     extract::State,

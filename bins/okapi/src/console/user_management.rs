@@ -1,5 +1,6 @@
 //! Actor-aware user management shared by HTTP and MCP.
-use crate::gateway::{error::AppError, state::AppState};
+use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use okapi_api::codes;
 use okapi_store::{

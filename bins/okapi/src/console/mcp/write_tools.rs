@@ -1,7 +1,7 @@
 //! 写工具（需开启 mcp_write）：渠道创建 / 启停 / 测活、用户调余额 / 封禁、定价试算与发布、死信重投、兑换码、缓存清理。
 use super::mcp_audit;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use okapi_api::permissions;
 use okapi_store::auth::{AuthedKey, PermScope};
 use serde_json::{Value, json};
@@ -35,7 +35,7 @@ pub(super) async fn channel_create(
         .get("credential")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::bad_request().with_param("credential"))?;
-    crate::gateway::ssrf::validate_credential(&state.pg, credential).await?;
+    crate::kernel::ssrf::validate_credential(&state.pg, credential).await?;
     let credential = super::super::channel_credentials::normalize(provider, credential)?;
     let name = super::super::identifiers::ensure_display_name("name", name, 128)?;
     let requested: Vec<String> = args
@@ -239,11 +239,11 @@ pub(super) async fn user_ban(
 
 pub(super) async fn simulate_pricing(state: &AppState) -> Result<Value, AppError> {
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
-    let source = crate::gateway::pricing_loader::build_source(&rows);
+    let source = crate::kernel::pricing_loader::build_source(&rows);
     let models = source.models.len();
     let groups = source.groups.len();
-    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
-    match crate::gateway::pricing_loader::compile_rows(&rows, base) {
+    let base = crate::kernel::pricing_loader::draft_base_price(&state.pg).await?;
+    match crate::kernel::pricing_loader::compile_rows(&rows, base) {
         Ok(_) => Ok(json!({"ok": true, "models": models, "groups": groups})),
         Err(err) => Ok(json!({"ok": false, "compile_error": err.to_string()})),
     }
@@ -262,8 +262,8 @@ pub(super) async fn apply_pricing(
         return Ok(json!({"dry_run": true, "validation": sim}));
     }
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
-    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
-    crate::gateway::pricing_loader::compile_rows(&rows, base)
+    let base = crate::kernel::pricing_loader::draft_base_price(&state.pg).await?;
+    crate::kernel::pricing_loader::compile_rows(&rows, base)
         .map_err(|err| AppError::bad_request().with_param(format!("compile: {err}")))?;
     let mut snapshot = serde_json::to_value(&rows).map_err(|_| AppError::internal())?;
     snapshot["base_price_per_1m_micro"] = json!(base);
@@ -373,7 +373,7 @@ pub(super) async fn mcp_cache_flush(
         "auth" => state.sched.auth_flush().await,
         "routing" => state.invalidate_routing_caches(),
         "pricebook" => {
-            let book = crate::gateway::pricing_loader::load_pricebook(&state.pg)
+            let book = crate::kernel::pricing_loader::load_pricebook(&state.pg)
                 .await
                 .map_err(|_| AppError::internal())?;
             state.pricebook.replace(book);

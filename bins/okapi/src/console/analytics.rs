@@ -12,8 +12,8 @@
 //! 本文件放查询参数（`CubeQuery` → 过滤条件 `Scope`）、度量列与名称解析；四个端点与它们的
 //! 折叠逻辑在子模块（trend / breakdown / flow / inventory），度量累加与打包在 metrics。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use chrono::Days;
 use okapi_api::codes;

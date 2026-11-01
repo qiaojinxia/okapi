@@ -10,7 +10,8 @@ use axum::{
     response::IntoResponse,
 };
 use fred::interfaces::{KeysInterface, ListInterface};
-use okapi::{gateway, gateway::sched_redis::response_affinity::ResponseBinding};
+use okapi::gateway;
+use okapi::kernel::sched_redis::response_affinity::ResponseBinding;
 use okapi_domain::Money;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -731,7 +732,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
         .execute(&env.state.pg)
         .await
         .unwrap();
-    let occupied = okapi::gateway::sched_redis::channel_permit::ChannelPermit::acquire_key(
+    let occupied = okapi::kernel::sched_redis::channel_permit::ChannelPermit::acquire_key(
         &env.state.sched,
         env.channel_key,
         Some(1),
@@ -778,7 +779,7 @@ async fn history_never_uses_model_fallback_or_bypasses_channel_limits() {
 async fn disconnected_binding_storage_has_bounded_fail_closed_reads_and_writes() {
     let client = fred::types::Builder::default_centralized().build().unwrap();
     // 不启动连接，模拟存储不可用；由接口自身超时界限结束。
-    let sched = gateway::sched_redis::SchedulerRedis::new(client);
+    let sched = okapi::kernel::sched_redis::SchedulerRedis::new(client);
     let started = std::time::Instant::now();
     assert_eq!(
         sched

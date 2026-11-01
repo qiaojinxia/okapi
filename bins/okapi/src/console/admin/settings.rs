@@ -1,9 +1,9 @@
 //! 站点设置读写与 SMTP 测试。
 use super::{audit, guard};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -28,7 +28,7 @@ pub async fn set_setting(
     if req.key == okapi_store::egress::DEFAULT_SETTING {
         return Err(AppError::bad_request().with_param("egress_default"));
     }
-    let is_pricing_base = req.key == crate::gateway::pricing_loader::BASE_PRICE_SETTING;
+    let is_pricing_base = req.key == crate::kernel::pricing_loader::BASE_PRICE_SETTING;
     if req.key == "streaming_policy"
         && !crate::gateway::stream_policy::StreamPolicy::valid(&req.value)
     {
@@ -45,14 +45,14 @@ pub async fn set_setting(
         };
         // 探测地址由后台按时请求：与上游地址同一道 SSRF 闸
         if let Some(target) = policy.target.as_deref() {
-            crate::gateway::ssrf::validate_api_base(&state.pg, target).await?;
+            crate::kernel::ssrf::validate_api_base(&state.pg, target).await?;
         }
     }
     // 清理任务按 `(value #>> '{}')::bigint` 读：null / 小数 / 字符串会让它每轮报错且永不清理
     if req.key == "retention_months" && req.value.as_u64().is_none_or(|months| months > 1200) {
         return Err(AppError::bad_request().with_param("retention_months"));
     }
-    if is_pricing_base && crate::gateway::pricing_loader::valid_base_price(&req.value).is_none() {
+    if is_pricing_base && crate::kernel::pricing_loader::valid_base_price(&req.value).is_none() {
         return Err(AppError::bad_request().with_param("pricing_base_per_1m_micro"));
     }
     okapi_store::admin::set_setting(&state.pg, &req.key, &req.value, actor.actor_user_id()).await?;

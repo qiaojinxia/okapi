@@ -7,7 +7,7 @@
 //! - **用户名**：显示文本规则 + NFC 规范化后入库，`é` 的组合 / 预组合两种写法撞同一个唯一键。
 //! - **邮箱**：单个 `@`、ASCII dot-atom 本地部分、带点的域名；`:`、空白、控制字符进不来。
 
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use crate::text::is_invisible;
 use unicode_normalization::UnicodeNormalization;
 

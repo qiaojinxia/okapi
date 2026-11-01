@@ -7,7 +7,7 @@ use axum::{
     routing::get,
 };
 use futures::{SinkExt, StreamExt};
-use okapi::gateway::sched_redis::channel_permit::ChannelPermit;
+use okapi::kernel::sched_redis::channel_permit::ChannelPermit;
 use okapi::{gateway, gateway::state::AppState};
 use okapi_domain::Money;
 use serde_json::{Value, json};

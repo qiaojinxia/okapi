@@ -1038,7 +1038,7 @@ async fn fresh_managed_oauth_uses_the_cached_policy_without_reading_postgres() {
 
 #[tokio::test]
 async fn a_busy_channel_blocks_every_shared_wire_surface_without_polling_the_transport() {
-    use gateway::sched_redis::channel_permit::ChannelPermit;
+    use okapi::kernel::sched_redis::channel_permit::ChannelPermit;
     let env = setup("openai", json!({})).await;
     let mut candidates =
         okapi_store::channels::candidates_for_model(&env.state.pg, &env.model, &["default"], None)

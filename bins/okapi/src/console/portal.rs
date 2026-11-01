@@ -26,8 +26,8 @@ pub(super) use self::keys::{normalize_allowlist, normalize_ip_allowlist, validat
 pub use self::redeem::{RedeemReq, redeem};
 
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

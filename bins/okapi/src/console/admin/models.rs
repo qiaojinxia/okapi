@@ -1,8 +1,8 @@
 //! 模型与模型定价的写入（草稿校验、价格模式选择）。
 use super::{audit, guard, ratio_fits};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

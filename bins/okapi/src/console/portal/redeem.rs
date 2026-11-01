@@ -1,8 +1,8 @@
 //! 兑换码核销（钱包与订阅两类）。
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -33,7 +33,7 @@ pub async fn redeem(
     let mut ip_charge: Option<(uuid::Uuid, String)> = None;
     if let Some(pre) = &precheck
         && let Some(cap) = pre.max_per_ip
-        && let Some(ip) = crate::gateway::clients::detect_client_ip(&headers)
+        && let Some(ip) = crate::kernel::clients::detect_client_ip(&headers)
     {
         let count = state.sched.redeem_ip_incr(pre.batch_id, &ip).await;
         if count > i64::from(cap) {

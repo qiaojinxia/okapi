@@ -4,6 +4,7 @@
 pub mod config;
 pub mod console;
 pub mod gateway;
+pub mod kernel;
 pub mod mail;
 pub mod margin;
 pub mod migrate;

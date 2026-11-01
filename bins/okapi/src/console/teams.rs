@@ -3,10 +3,10 @@
 //! 钱包入账走既有 admin credit（team 的 user_id 即钱包主体）。
 
 use super::query::{PageQuery, Query};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

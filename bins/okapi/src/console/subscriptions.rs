@@ -5,10 +5,10 @@
 
 use super::admin::{audit, guard};
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Path;
-use crate::gateway::extract::{Json as ExtractJson, Query};
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Path;
+use crate::kernel::extract::{Json as ExtractJson, Query};
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

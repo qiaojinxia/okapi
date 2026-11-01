@@ -40,7 +40,7 @@ async fn rejected_http_requests_only_fail_over_for_explicit_refusals() {
 /// chat 主链都这样；流式路径此前直接回 502，池里其余健康渠道白白闲着。
 #[tokio::test]
 async fn admission_rejection_fails_over_to_the_next_candidate() {
-    use okapi::gateway::sched_redis::channel_permit::ChannelPermit;
+    use okapi::kernel::sched_redis::channel_permit::ChannelPermit;
     let mut env = setup().await;
     let first_key: i64 = sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id=$1")
         .bind(env.channels[0])
@@ -87,7 +87,7 @@ async fn admission_rejection_fails_over_to_the_next_candidate() {
 /// 所有候选都是准入被拒：回 503 `no_available_channel`（与非流式路径同口径），不是 502。
 #[tokio::test]
 async fn all_candidates_rejected_by_admission_answer_503() {
-    use okapi::gateway::sched_redis::channel_permit::ChannelPermit;
+    use okapi::kernel::sched_redis::channel_permit::ChannelPermit;
     let env = setup().await;
     let keys: Vec<i64> = sqlx::query_scalar("SELECT id FROM channel_keys WHERE channel_id=ANY($1)")
         .bind(&env.channels)

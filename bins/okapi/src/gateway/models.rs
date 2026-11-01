@@ -1,5 +1,5 @@
-use super::error::AppError;
 use super::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -45,7 +45,7 @@ async fn gemini_models(
     uri: &axum::http::Uri,
     mut headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let query: GeminiModelsQuery = super::extract::query_from_uri(uri)?;
+    let query: GeminiModelsQuery = crate::kernel::extract::query_from_uri(uri)?;
     if !headers.contains_key("x-goog-api-key")
         && !headers.contains_key(axum::http::header::AUTHORIZATION)
         && let Some(token) = query.key

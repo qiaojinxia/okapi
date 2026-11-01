@@ -6,8 +6,8 @@
 //! 本文件放会话 cookie 与会话读取、敏感端点限速等共用部分；注册 / 验证码 / 密码在 account，
 //! 登录与会话管理在 sessions，会话 key / TOTP / 自建 key 在 credentials。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::{HeaderMap, StatusCode};
 use rand::RngExt;
 use rand::distr::Alphanumeric;
@@ -79,7 +79,7 @@ pub async fn critical_rate_guard(
     if limit <= 0 {
         return Ok(());
     }
-    let ip = crate::gateway::clients::detect_client_ip(headers)
+    let ip = crate::kernel::clients::detect_client_ip(headers)
         .or_else(|| conn.map(|a| a.ip().to_string()));
     let Some(ip) = ip else {
         return Ok(());

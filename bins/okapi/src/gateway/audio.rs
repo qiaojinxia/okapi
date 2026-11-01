@@ -3,10 +3,10 @@
 //! - transcriptions：per_call 模式必须（时长无法本地解码）；multipart 解析重组转发，
 //!   上游 verbose_json 的 duration 若在则记入快照 media_units（秒，审计用）。
 
-use super::clients::detect_client_type;
-use super::error::AppError;
 use super::state::AppState;
-use crate::gateway::extract::Multipart;
+use crate::kernel::clients::detect_client_type;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Multipart;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -451,7 +451,7 @@ async fn settle(
             quote.list_price,
         );
     }
-    let client_ip = super::clients::detect_client_ip(headers);
+    let client_ip = crate::kernel::clients::detect_client_ip(headers);
     let input = SettlementInput {
         source_window: source_window.map(str::to_owned),
         dimensions: okapi_ledger::pg::UsageDimensions::new(

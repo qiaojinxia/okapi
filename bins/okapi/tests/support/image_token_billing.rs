@@ -11,7 +11,7 @@ pub(super) async fn token_env() -> Env {
         .await
         .unwrap();
     published_pricing::publish(&env.state.pg, env.user).await;
-    let book = gateway::pricing_loader::load_pricebook(&env.state.pg)
+    let book = okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
         .await
         .unwrap();
     env.state.pricebook.replace(book);
@@ -210,7 +210,7 @@ async fn pricing_remains_frozen_while_provider_is_running() {
         .bind(&env.model).execute(&env.state.pg).await.unwrap();
     published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(
-        gateway::pricing_loader::load_pricebook(&env.state.pg)
+        okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
             .await
             .unwrap(),
     );
@@ -349,7 +349,7 @@ async fn token_pricing_preserves_group_user_rules_cost_and_monthly_usage() {
     let rows = okapi_store::pricing::load_pricing_source_rows(&env.state.pg)
         .await
         .unwrap();
-    let mut source = gateway::pricing_loader::build_source(&rows);
+    let mut source = okapi::kernel::pricing_loader::build_source(&rows);
     source
         .groups
         .iter_mut()
@@ -399,7 +399,7 @@ async fn tiered_images_use_actual_response_input_for_price_band() {
         .bind(&env.model).execute(&env.state.pg).await.unwrap();
     published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(
-        gateway::pricing_loader::load_pricebook(&env.state.pg)
+        okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
             .await
             .unwrap(),
     );

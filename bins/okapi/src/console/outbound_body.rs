@@ -1,5 +1,5 @@
 //! Bounded control-plane response collection; stream failures never look like EOF.
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use bytes::Bytes;
 use futures::Stream;

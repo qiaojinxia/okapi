@@ -479,7 +479,7 @@ async fn seed_protocol_history(
         .find(|c| c.channel_id == channel_id)
         .unwrap();
     let binding =
-        gateway::sched_redis::response_affinity::ResponseBinding::from_candidate(candidate);
+        okapi::kernel::sched_redis::response_affinity::ResponseBinding::from_candidate(candidate);
     for previous in ["resp_prev_1", "resp_previous"] {
         state
             .sched

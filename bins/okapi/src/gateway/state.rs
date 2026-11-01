@@ -1,6 +1,6 @@
 mod settlement;
-use super::error::AppError;
-use super::sched_redis::SchedulerRedis;
+use crate::kernel::error::AppError;
+use crate::kernel::sched_redis::SchedulerRedis;
 use moka::future::Cache;
 use okapi_ledger::BalanceLedger;
 use okapi_pricing::PriceBookHandle;
@@ -154,7 +154,7 @@ impl AppState {
     /// 放在鉴权之前——被拒的请求不预扣、不碰上游，连 Redis 鉴权往返也省掉。
     /// 带滞回：超过上界进入泄压，回落到上界的 3/4 以下才恢复——不然积压在阈值附近
     /// 每落几笔就放几笔，状态每秒翻转十来次，翻转日志本身就成了刷屏。
-    pub fn check_settle_backlog(&self) -> Result<(), super::error::AppError> {
+    pub fn check_settle_backlog(&self) -> Result<(), crate::kernel::error::AppError> {
         use std::sync::atomic::Ordering;
         let max = self.settle_backlog_max;
         if max == 0 {
@@ -184,7 +184,7 @@ impl AppState {
             }
         }
         if shedding {
-            return Err(super::error::AppError::new(
+            return Err(crate::kernel::error::AppError::new(
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 okapi_api::codes::OVERLOADED,
             )

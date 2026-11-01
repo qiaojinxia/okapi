@@ -1,7 +1,8 @@
 //! Native tool analytics share the ordinary billing read and owner boundaries.
 use super::query::Query;
 use super::usage_details::CalendarWindow;
-use crate::gateway::{error::AppError, state::AppState};
+use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::{
     Json,
     extract::State,

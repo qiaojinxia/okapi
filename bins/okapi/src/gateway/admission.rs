@@ -4,9 +4,9 @@
 //! 漏改一处只有那条路径看得见（例：时区换算、限额字段）。准入顺序（成员月限、分组限流、
 //! 渠道选择、失败退款）仍由各入口自己编排，这里只收它们逐字相同的那几步。
 
-use super::error::AppError;
 use super::rule_inputs::RuleInputs;
 use super::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use okapi_api::codes;
 use okapi_domain::{GroupCode, ModelCode, Money, UserId};

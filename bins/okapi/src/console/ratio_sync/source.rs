@@ -20,7 +20,7 @@ async fn collect(
     raw: &str,
     timeout: Duration,
 ) -> Result<PricingTable, &'static str> {
-    crate::gateway::ssrf::validate_api_base(&state.pg, raw)
+    crate::kernel::ssrf::validate_api_base(&state.pg, raw)
         .await
         .map_err(|_| "source_url_rejected")?;
     let mut url = reqwest::Url::parse(raw).map_err(|_| "source_url_rejected")?;

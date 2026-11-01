@@ -3,7 +3,7 @@
 //! request aggregate before percentiles can represent the entire selected period.
 
 use super::stats::{ch_i64, rate_bp};
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use okapi_store::ChClient;
 use serde_json::{Value, json};
 use std::collections::HashMap;

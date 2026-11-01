@@ -110,7 +110,7 @@ async fn realtime_modal_usage_replays_and_partial_reports_match_ledger_and_stati
             .bind(&env.model).bind(json!({"audio_cache_read":"2","image_cache_read":"1"})).execute(&env.pg).await.unwrap();
         published_pricing::publish(&env.pg, env.user_id).await;
         env.state.pricebook.replace(
-            gateway::pricing_loader::load_pricebook(&env.pg)
+            okapi::kernel::pricing_loader::load_pricebook(&env.pg)
                 .await
                 .unwrap(),
         );

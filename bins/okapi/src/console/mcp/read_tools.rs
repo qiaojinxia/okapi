@@ -1,7 +1,7 @@
 //! 只读工具：余额 / 用量 / key / 价目、账单解释、平台 KPI、渠道健康、日志检索、对账与死信。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use okapi_api::permissions;
 use okapi_store::auth::{AuthedKey, PermScope};
 use serde_json::{Value, json};

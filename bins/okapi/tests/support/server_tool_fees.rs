@@ -66,7 +66,7 @@ pub(super) async fn activate(env: &Env, profile: &Value) -> i64 {
         catalog["models"][0]["server_tool_prices"].is_null(),
         "draft leaked: {catalog}"
     );
-    let old = okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+    let old = okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
         .await
         .unwrap();
     assert_eq!(old.epoch(), old_epoch);
@@ -74,7 +74,7 @@ pub(super) async fn activate(env: &Env, profile: &Value) -> i64 {
     assert_eq!(status, 200, "{body}");
     let epoch = body["epoch"].as_i64().unwrap();
     assert!(epoch > old_epoch);
-    let book = okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+    let book = okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
         .await
         .unwrap();
     assert_eq!(book.epoch(), epoch);
@@ -180,7 +180,7 @@ async fn published_native_tool_fees_reach_all_ingresses_and_refund_once() {
             )
             .await;
             env.state.pricebook.replace(
-                okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+                okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
                     .await
                     .unwrap(),
             );

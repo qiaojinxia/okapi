@@ -7,9 +7,9 @@
 //! 本文件放协议、工具清单、权限过滤与分派；工具实现在 read_tools / write_tools。
 
 use crate::gateway::auth::authenticate;
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

@@ -117,7 +117,7 @@ async fn setup() -> Bed {
     let state = gateway::build_state(&database_url, &redis_url, "test-node", None, None)
         .await
         .unwrap();
-    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+    let sid = okapi::kernel::sched_redis::SchedulerRedis::web_session_sid(
         user_id,
         &Uuid::new_v4().simple().to_string(),
     );

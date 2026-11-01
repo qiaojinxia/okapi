@@ -5,10 +5,10 @@ use super::{
     ensure_max_concurrency, ensure_max_keys, ensure_name, ensure_note, ensure_proxy, ensure_status,
     not_found, owner_filter, parse_url, store_endpoint,
 };
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

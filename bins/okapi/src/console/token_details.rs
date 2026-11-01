@@ -1,6 +1,6 @@
 //! Retained detail observations; raw and aggregates overlap and are selected per grain.
 use super::stats::{ch_i64, scaled_ratio};
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use okapi_store::ChClient;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;

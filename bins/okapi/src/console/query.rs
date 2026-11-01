@@ -1,8 +1,8 @@
-//! console 层列表通用分页参数 `PageQuery`；`Query<T>` 提取器本体在 `gateway::extract`
+//! console 层列表通用分页参数 `PageQuery`；`Query<T>` 提取器本体在 `kernel::extract`
 //! （两个角色共用，拒绝时回 `AppError` 而非 axum 的英文纯文本），这里再导出一份省得
-//! 每个 console 模块都写 `crate::gateway::extract::Query`。
+//! 每个 console 模块都写 `crate::kernel::extract::Query`。
 
-pub use crate::gateway::extract::Query;
+pub use crate::kernel::extract::Query;
 use okapi_store::listing::Slice;
 use serde::Deserialize;
 use uuid::Uuid;

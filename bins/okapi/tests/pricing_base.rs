@@ -113,7 +113,7 @@ async fn create_token(pg: &sqlx::PgPool, role: i32) -> String {
 }
 
 async fn validate_setting(client: &reqwest::Client, root: &str, tokens: &[String; 2]) {
-    let key = gateway::pricing_loader::BASE_PRICE_SETTING;
+    let key = okapi::kernel::pricing_loader::BASE_PRICE_SETTING;
     let default = client
         .get(format!("{root}/admin/settings"))
         .bearer_auth(&tokens[0])
@@ -167,7 +167,7 @@ fn save_base(
     client
         .post(format!("{root}/admin/settings"))
         .bearer_auth(token)
-        .json(&json!({"key":gateway::pricing_loader::BASE_PRICE_SETTING,"value":value}))
+        .json(&json!({"key":okapi::kernel::pricing_loader::BASE_PRICE_SETTING,"value":value}))
 }
 
 async fn response_json(request: reqwest::RequestBuilder) -> Value {
@@ -183,7 +183,7 @@ async fn response_json(request: reqwest::RequestBuilder) -> Value {
 }
 
 async fn loaded_base(pg: &sqlx::PgPool) -> i64 {
-    gateway::pricing_loader::load_pricebook(pg)
+    okapi::kernel::pricing_loader::load_pricebook(pg)
         .await
         .unwrap()
         .base_price_per_1m_micro()

@@ -62,7 +62,7 @@ async fn advance(
     env: &Env,
     state: &gateway::state::AppState,
     job: &Value,
-) -> Result<bool, gateway::error::AppError> {
+) -> Result<bool, okapi::kernel::error::AppError> {
     sqlx::query("UPDATE image_batches SET next_run_at=now() WHERE id=$1")
         .bind(id(job))
         .execute(&env.state.pg)

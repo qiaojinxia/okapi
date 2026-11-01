@@ -55,12 +55,12 @@ async fn sessions_reject_orphans_slide_all_ttls_and_revoke_atomically() -> Resul
     let state = state().await?;
     let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
     let uid = user(&state.pg).await?;
-    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+    let sid = okapi::kernel::sched_redis::SchedulerRedis::web_session_sid(
         uid,
         &Uuid::new_v4().simple().to_string(),
     );
     let (web, index, meta) =
-        okapi::gateway::sched_redis::SchedulerRedis::web_session_keys(&sid).unwrap();
+        okapi::kernel::sched_redis::SchedulerRedis::web_session_keys(&sid).unwrap();
     let _: () = redis.set(&index, "wrong-type", None, None, false).await?;
     state.sched.web_session_set(&sid, uid, None, None).await;
     assert_eq!(state.sched.web_session_get(&sid).await, None);
@@ -95,12 +95,12 @@ async fn a_failed_session_read_leaves_the_session_in_its_index() -> Result {
     let state = state().await?;
     let redis = okapi_store::connect_redis(&std::env::var("OKAPI_REDIS_URL")?).await?;
     let uid = user(&state.pg).await?;
-    let sid = okapi::gateway::sched_redis::SchedulerRedis::web_session_sid(
+    let sid = okapi::kernel::sched_redis::SchedulerRedis::web_session_sid(
         uid,
         &Uuid::new_v4().simple().to_string(),
     );
     let (web, index, _) =
-        okapi::gateway::sched_redis::SchedulerRedis::web_session_keys(&sid).unwrap();
+        okapi::kernel::sched_redis::SchedulerRedis::web_session_keys(&sid).unwrap();
     state.sched.web_session_set(&sid, uid, None, None).await;
     assert_eq!(state.sched.web_session_get(&sid).await, Some(uid));
 
@@ -755,7 +755,7 @@ async fn all_chat_ingresses_authenticate_before_parsing_or_estimating_body() -> 
 
 #[tokio::test]
 async fn media_routers_share_the_channel_concurrency_fence_and_refund_denied_admission() -> Result {
-    use gateway::sched_redis::channel_permit::ChannelPermit;
+    use okapi::kernel::sched_redis::channel_permit::ChannelPermit;
     let state = state().await?;
     let uid = user(&state.pg).await?;
     let (_, token, _) = token(&state.pg, uid).await?;

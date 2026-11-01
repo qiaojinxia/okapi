@@ -1,8 +1,8 @@
 //! 上游请求体：按入口 × 渠道方言构造与改写，并分派到注册的上游实现。
 use super::super::execution_plan::{ExecutionPlan, Requirements};
 use super::super::ingress::Ingress;
-use super::super::sched_redis::response_affinity::{ResponseBinding, ResponseWriter};
 use super::{ProbeInfo, RequestBilling, UnifiedReasoning, bound_default_output, lost_tools};
+use crate::kernel::sched_redis::response_affinity::{ResponseBinding, ResponseWriter};
 use bytes::Bytes;
 use okapi_providers::convert::{
     anthropic_to_openai as conv_a2o, gemini_to_openai as conv_g2o, openai_to_anthropic as convert,

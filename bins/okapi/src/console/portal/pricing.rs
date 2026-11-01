@@ -291,7 +291,7 @@ async fn fetch(
     let mut response = if method == Method::HEAD {
         empty_response()
     } else {
-        let base = crate::gateway::pricing_loader::publication_base_price(&publication)?;
+        let base = crate::kernel::pricing_loader::publication_base_price(&publication)?;
         catalog(
             &mut models,
             &groups,

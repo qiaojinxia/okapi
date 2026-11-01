@@ -1,5 +1,5 @@
 //! Normalize administrator credential imports once; forwarding keeps the shared manager.
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use okapi_providers::registry::{self, CredentialKind};
 use okapi_store::credential::OAuthCredential;
 

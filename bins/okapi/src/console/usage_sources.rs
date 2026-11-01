@@ -1,6 +1,6 @@
 //! Token provenance is additive; raw and the new aggregate overlap and must not be added.
 use super::stats::{ch_i64, rate_bp};
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use okapi_store::ChClient;
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};

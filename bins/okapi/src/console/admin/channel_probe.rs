@@ -1,9 +1,9 @@
 //! 渠道测活与上游模型发现（保存前的草稿渠道也能拉模型）。
 use super::{audit, ensure_channel_owner, guard_scoped, validate_channel_settings};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

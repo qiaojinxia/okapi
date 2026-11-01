@@ -1,9 +1,9 @@
 //! 定价分组、渠道池与用户分组归属。
 use super::{RATIO_COLUMN_MAX_SCALED, audit, ensure_pool_scope, guard, guard_scoped};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};

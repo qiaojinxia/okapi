@@ -1,6 +1,7 @@
 //! Validated creation settings shared by API keys and account authorization plugins.
 use super::admin::{self, PoolMemberReq};
-use crate::gateway::{error::AppError, state::AppState};
+use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -43,7 +44,7 @@ pub async fn endpoint<'a>(
             okapi_providers::registry::lookup(provider).and_then(|adapter| adapter.default_base)
         })
         .ok_or_else(|| AppError::bad_request().with_param("api_base"))?;
-    crate::gateway::ssrf::validate_upstream_base(&state.pg, base).await?;
+    crate::kernel::ssrf::validate_upstream_base(&state.pg, base).await?;
     Ok(base)
 }
 

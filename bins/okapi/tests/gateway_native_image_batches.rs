@@ -433,14 +433,14 @@ impl Env {
         assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
         response.json().await.unwrap()
     }
-    async fn step(&self, job: &Value) -> Result<bool, gateway::error::AppError> {
+    async fn step(&self, job: &Value) -> Result<bool, okapi::kernel::error::AppError> {
         self.step_with(&self.state, job).await
     }
     async fn step_with(
         &self,
         state: &gateway::state::AppState,
         job: &Value,
-    ) -> Result<bool, gateway::error::AppError> {
+    ) -> Result<bool, okapi::kernel::error::AppError> {
         sqlx::query("UPDATE image_batches SET next_run_at=now() WHERE id=$1")
             .bind(id(job))
             .execute(&self.state.pg)

@@ -117,7 +117,7 @@ def main() -> int:
         (re.compile(r"\bStoreError::Conflict\("), 0, None),
         (re.compile(r"\bErrorBody::new\("), 0, None),
         # AppError 自己的 From 实现里用 Self::new（StatusCode 打头的才是它）
-        (re.compile(r"\bSelf::new\((?=StatusCode::)"), 1, "bins/okapi/src/gateway/error.rs"),
+        (re.compile(r"\bSelf::new\((?=StatusCode::)"), 1, "bins/okapi/src/kernel/error.rs"),
     ]
     for rust_dir in RUST_DIRS:
         for path in sorted(rust_dir.rglob("*.rs")):

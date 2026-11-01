@@ -1,6 +1,7 @@
 //! Explicit owner-session secret retrieval. Never expose secrets in key lists or logs.
 use super::auth_web::{MaybeConnectInfo, critical_rate_guard, require_session};
-use crate::gateway::{error::AppError, state::AppState};
+use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::{
     Json,
     extract::{Path, State},

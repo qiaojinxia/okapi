@@ -65,7 +65,7 @@ async fn check_publication(database: &str, redis: &str) {
         assert_eq!(empty["pricing_epoch"], 0);
     }
     assert!(
-        !gateway::pricing_loader::load_pricebook(pg)
+        !okapi::kernel::pricing_loader::load_pricebook(pg)
             .await
             .unwrap()
             .has_model(&ModelCode::from("published-model"))
@@ -109,7 +109,7 @@ async fn check_publication(database: &str, redis: &str) {
         .await
         .unwrap();
     sqlx::query("INSERT INTO settings(key,value) VALUES($1,'9000000') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")
-        .bind(gateway::pricing_loader::BASE_PRICE_SETTING).execute(pg).await.unwrap();
+        .bind(okapi::kernel::pricing_loader::BASE_PRICE_SETTING).execute(pg).await.unwrap();
     for path in ["/api/pricing", "/api/pricing/models"] {
         let page = get(&client, &root, path).await;
         assert_eq!(page["total"], 1);
@@ -186,7 +186,9 @@ async fn check_publication(database: &str, redis: &str) {
         get(&client, &root, "/api/pricing/groups?code=draft-group").await["total"],
         1
     );
-    let loaded = gateway::pricing_loader::load_pricebook(pg).await.unwrap();
+    let loaded = okapi::kernel::pricing_loader::load_pricebook(pg)
+        .await
+        .unwrap();
     assert_eq!(loaded.epoch(), next);
     assert_eq!(charge(&loaded), 243_000_000);
     assert!(loaded.has_model(&ModelCode::from("draft-model")));
@@ -195,7 +197,11 @@ async fn check_publication(database: &str, redis: &str) {
     okapi_store::admin::publish_epoch(pg, actor, &json!({}))
         .await
         .unwrap();
-    assert!(gateway::pricing_loader::load_pricebook(pg).await.is_err());
+    assert!(
+        okapi::kernel::pricing_loader::load_pricebook(pg)
+            .await
+            .is_err()
+    );
     assert!(gateway::refresh_pricebook_if_newer(&state).await.is_err());
     assert_eq!(
         state.pricebook.epoch(),

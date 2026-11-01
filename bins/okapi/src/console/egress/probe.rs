@@ -1,10 +1,10 @@
 //! 代理测活：按代理或按地址探一次目标。
 use super::super::admin::{audit, guard_scoped};
 use super::{ensure_proxy, not_found, parse_url};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -36,7 +36,7 @@ pub(super) async fn probe_target(
         .filter(|t| !t.is_empty())
         .unwrap_or(okapi_providers::egress_probe::DEFAULT_TARGET);
     // 探测地址是管理员给的：与上游地址同一道 SSRF 闸（代理自身不过闸，见 §11.30）
-    crate::gateway::ssrf::validate_api_base(&state.pg, target).await?;
+    crate::kernel::ssrf::validate_api_base(&state.pg, target).await?;
     Ok(target.to_owned())
 }
 

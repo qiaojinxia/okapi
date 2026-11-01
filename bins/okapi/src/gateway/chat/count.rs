@@ -1,5 +1,4 @@
 //! count_tokens：本地估算或转给上游 tokenizer（不计费）。
-use super::super::error::AppError;
 use super::super::estimate::estimate_prompt_tokens;
 use super::super::ingress::Ingress;
 use super::super::scheduler::order_candidates;
@@ -7,6 +6,7 @@ use super::super::state::AppState;
 use super::{
     DEFAULT_ANTHROPIC_BASE, non_json_failure, non_json_kind, parse_checked, resolve_model_cached,
 };
+use crate::kernel::error::AppError;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -60,7 +60,7 @@ pub(super) async fn count_tokens_inner(
 ) -> Result<Response, AppError> {
     let key = super::super::auth::authenticate_data_plane(state, headers).await?;
     let _permit =
-        super::super::sched_redis::token_count::CountPermit::acquire(&state.sched, &key).await?;
+        crate::kernel::sched_redis::token_count::CountPermit::acquire(&state.sched, &key).await?;
     // 不计费，但有 anthropic 候选时会拿渠道凭证打上游 tokenizer：按分组窗限速（§11.32）。
     // 不过 check_member_limit——那是月度消费上限，不该挡住不花钱的调用
     super::super::auth::check_group_rate(state, &key).await?;
@@ -104,7 +104,7 @@ pub(super) async fn count_tokens_inner(
             continue;
         }
         let Some(_slot) =
-            super::super::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
+            crate::kernel::sched_redis::token_count::ChannelPermit::acquire(&state.sched, &cand)
                 .await
                 .map_err(|error| super::super::account_control::attempt_error(&error))?
         else {

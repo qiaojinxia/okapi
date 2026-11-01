@@ -171,7 +171,7 @@ pub async fn content(
                 .header("content-disposition", "attachment")
                 .header("x-content-type-options", "nosniff")
                 .body(Body::empty())
-                .map(|r| crate::gateway::error::with_request_id(r, rid))
+                .map(|r| crate::kernel::error::with_request_id(r, rid))
                 .map_err(|_| AppError::internal());
         }
         let permit = state
@@ -211,7 +211,7 @@ pub async fn content(
             .header("content-disposition", "attachment")
             .header("x-content-type-options", "nosniff")
             .body(Body::from_stream(stream))
-            .map(|r| crate::gateway::error::with_request_id(r, rid))
+            .map(|r| crate::kernel::error::with_request_id(r, rid))
             .map_err(|_| AppError::internal())
     }
     .await;

@@ -1,8 +1,8 @@
 //! 订阅套餐与兑换码批次。
 use super::{audit, ensure_group_usable, ensure_redemption_amount, guard};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

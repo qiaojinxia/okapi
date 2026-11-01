@@ -2,10 +2,10 @@
 use super::{
     MaybeConnectInfo, SESSION_COOKIE, critical_rate_guard, rand_token, session_hash, session_id,
 };
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -33,7 +33,7 @@ pub async fn login(
 ) -> Result<Response, AppError> {
     critical_rate_guard(&state, &headers, conn.0.as_ref(), "login", 10).await?;
     let email = req.email.trim().to_lowercase();
-    let ip = crate::gateway::clients::detect_client_ip(&headers)
+    let ip = crate::kernel::clients::detect_client_ip(&headers)
         .or_else(|| conn.0.as_ref().map(|a| a.ip().to_string()));
 
     // 凭证与 TOTP 校验单独成段：成功与失败都要落审计（§3.5 登录 = 审计 user.login），
@@ -82,8 +82,7 @@ pub(in crate::console) async fn open_web_session(
     ip: Option<&str>,
     headers: &HeaderMap,
 ) -> String {
-    let sid =
-        crate::gateway::sched_redis::SchedulerRedis::web_session_sid(user_id, &rand_token(48));
+    let sid = crate::kernel::sched_redis::SchedulerRedis::web_session_sid(user_id, &rand_token(48));
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok());

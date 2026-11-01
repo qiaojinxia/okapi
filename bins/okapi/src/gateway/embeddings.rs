@@ -2,10 +2,10 @@
 //! 非流式单跳，复用 chat 同款调度语义（并发槽/状态机/退款兜底），
 //! anthropic 渠道无 embeddings 端点，候选层跳过。
 
-use super::clients::detect_client_type;
-use super::error::AppError;
-use super::error::with_request_id;
 use super::state::AppState;
+use crate::kernel::clients::detect_client_type;
+use crate::kernel::error::AppError;
+use crate::kernel::error::with_request_id;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -238,7 +238,7 @@ async fn handle(
                         channel.2,
                         quote.list_price,
                     );
-                    let client_ip = super::clients::detect_client_ip(headers);
+                    let client_ip = crate::kernel::clients::detect_client_ip(headers);
                     let input = SettlementInput {
                         source_window: source_window.clone(),
                         dimensions: okapi_ledger::pg::UsageDimensions::new(
@@ -328,7 +328,7 @@ async fn handle(
                     reservation_pool
                 }
             };
-            let client_ip = super::clients::detect_client_ip(headers);
+            let client_ip = crate::kernel::clients::detect_client_ip(headers);
             let input = SettlementInput {
                 source_window: source_window.clone(),
                 dimensions: okapi_ledger::pg::UsageDimensions::new(

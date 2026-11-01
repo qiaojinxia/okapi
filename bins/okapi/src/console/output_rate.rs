@@ -147,7 +147,7 @@ pub(super) async fn enrich_entities(
     key: &str,
     table: &str,
     predicate: &str,
-) -> Result<(), crate::gateway::error::AppError> {
+) -> Result<(), crate::kernel::error::AppError> {
     let source = prepared(key, table, predicate);
     let data = ch
         .query_json_each_row(&format!(
@@ -177,7 +177,7 @@ pub(super) async fn enrich_model_days(
     rows: &mut [Value],
     table: &str,
     predicate: &str,
-) -> Result<(), crate::gateway::error::AppError> {
+) -> Result<(), crate::kernel::error::AppError> {
     let source = prepared("day, model", table, predicate);
     let data = ch
         .query_json_each_row(&format!("SELECT * FROM {source}"))
@@ -205,7 +205,7 @@ pub(super) async fn enrich_quality(
     rows: &mut [Value],
     scope: super::ttft::Scope,
     since: i64,
-) -> Result<(), crate::gateway::error::AppError> {
+) -> Result<(), crate::kernel::error::AppError> {
     use super::ttft::Scope;
     let (key, row_key, table, predicate, kind) = match scope {
         Scope::Model => (

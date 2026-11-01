@@ -1,7 +1,7 @@
 //! 本节点 HTTP 在途量：持有守卫计数，空闲时不写 Redis，活动期间定期续报。
 //! 后台任务只持有 receiver，不延长网关/守卫的寿命；最后一个持有者离开时收尾归零。
 
-use super::sched_redis::SchedulerRedis;
+use crate::kernel::sched_redis::SchedulerRedis;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, watch};

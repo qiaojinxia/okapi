@@ -1,8 +1,8 @@
 //! 账号：注册、邮箱验证码、找回 / 重置密码、邀请人绑定与 Turnstile 校验。
 use super::{MaybeConnectInfo, critical_rate_guard, rand_token, site_base_url, site_name};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -364,7 +364,7 @@ pub(super) async fn verify_turnstile(
         urlencoding_escape(token)
     );
     let verify_url = verify_url.unwrap_or_else(|| TURNSTILE_VERIFY_URL.to_owned());
-    crate::gateway::ssrf::validate_url(&state.pg, &verify_url).await?;
+    crate::kernel::ssrf::validate_url(&state.pg, &verify_url).await?;
     let outcome = state
         .pass
         .probe(okapi_providers::custom_pass::PassRequest {

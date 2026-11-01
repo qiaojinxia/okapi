@@ -100,7 +100,7 @@ fn response(task: &Task, status: StatusCode) -> Response {
     if let Ok(location) = poll_url(task.id).parse() {
         response.headers_mut().insert("location", location);
     }
-    super::super::error::with_request_id(response, task.id)
+    crate::kernel::error::with_request_id(response, task.id)
 }
 
 async fn submit(state: AppState, req: Request, edit: bool) -> Response {
@@ -136,7 +136,7 @@ async fn submit(state: AppState, req: Request, edit: bool) -> Response {
                 Ok(hash(value.as_bytes()))
             })
             .transpose()?;
-        let ip = super::super::clients::client_ip(&headers).map(|ip| ip.to_string());
+        let ip = crate::kernel::clients::client_ip(&headers).map(|ip| ip.to_string());
         let queued = store::enqueue(
             &state.pg,
             NewTask {
@@ -149,7 +149,7 @@ async fn submit(state: AppState, req: Request, edit: bool) -> Response {
                 idempotency_hash: idempotency.as_deref(),
                 payload: &payload,
                 client_ip: ip.as_deref(),
-                client_type: super::super::clients::detect_client_type(&headers),
+                client_type: crate::kernel::clients::detect_client_type(&headers),
             },
             store::Limits::default(),
         )
@@ -250,7 +250,7 @@ pub async fn content(
             .header("x-content-type-options", "nosniff")
             .header("content-disposition", "attachment")
             .body(Body::from_stream(stream))
-            .map(|r| super::super::error::with_request_id(r, request_id))
+            .map(|r| crate::kernel::error::with_request_id(r, request_id))
             .map_err(|_| AppError::internal())
     }
     .await;

@@ -6,10 +6,10 @@
 //! 不监听本地回调端口：网关多半跑在服务器上、浏览器在站长电脑上，贴回 code 对所有形态都成立。
 
 use super::admin::{audit, ensure_channel_owner, guard_scoped};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -244,7 +244,7 @@ pub async fn exchange(
     }
 
     if let Some(url) = token_url.as_deref() {
-        crate::gateway::ssrf::validate_api_base(&state.pg, url).await?;
+        crate::kernel::ssrf::validate_api_base(&state.pg, url).await?;
     }
     let http = state.upstream.http();
     let tokens: Tokens = hook
@@ -426,7 +426,7 @@ pub async fn refresh(
         okapi_store::credential::open(state.master_key.as_deref(), &row.credential_ciphertext)?;
     let token_url = row.settings.get("oauth_token_url").and_then(Value::as_str);
     if let Some(url) = token_url {
-        crate::gateway::ssrf::validate_api_base(&state.pg, url).await?;
+        crate::kernel::ssrf::validate_api_base(&state.pg, url).await?;
     }
     let proxy = super::egress::key_proxy(&state, key).await?;
     let credential = crate::gateway::credentials::oauth::force_refresh_for(

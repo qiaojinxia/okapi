@@ -6,10 +6,10 @@ use super::{
     ensure_settings_oauth_token_url, ensure_settings_outbound, ensure_settings_tool_loss_policy,
     guard_scoped,
 };
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -155,7 +155,7 @@ pub async fn create_channel(
         super::super::channel_creation::endpoint(&state, &req.provider, Some(&req.api_base))
             .await?;
     ensure_azure_api_base(&req.provider, Some(api_base))?;
-    crate::gateway::ssrf::validate_credential(&state.pg, &req.credential).await?;
+    crate::kernel::ssrf::validate_credential(&state.pg, &req.credential).await?;
     let prepared =
         super::super::channel_creation::prepare(&state, &req.provider, req.options, scope).await?;
     super::super::egress::validate_binding(&state, &prepared.egress, &actor, scope).await?;
@@ -507,7 +507,7 @@ pub async fn update_channel(
         return Err(AppError::bad_request().with_param("provider"));
     }
     if let Some(api_base) = &req.api_base {
-        crate::gateway::ssrf::validate_upstream_base(&state.pg, api_base).await?;
+        crate::kernel::ssrf::validate_upstream_base(&state.pg, api_base).await?;
     }
     ensure_settings_api_version(req.settings.as_ref())?;
     ensure_settings_outbound(req.settings.as_ref())?;
@@ -659,7 +659,7 @@ pub async fn rotate_channel_credential(
     if req.credential.trim().is_empty() {
         return Err(AppError::bad_request().with_param("credential"));
     }
-    crate::gateway::ssrf::validate_credential(&state.pg, &req.credential).await?;
+    crate::kernel::ssrf::validate_credential(&state.pg, &req.credential).await?;
     let provider: String =
         sqlx::query_scalar("SELECT provider FROM channels WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)

@@ -1,6 +1,6 @@
 //! Independent input units; unknown history never becomes a measured character zero.
 use super::stats::{ch_i64, scaled_ratio};
-use crate::gateway::error::AppError;
+use crate::kernel::error::AppError;
 use serde_json::{Map, Value, json};
 
 pub(super) const FIELDS: [&str; 6] = [

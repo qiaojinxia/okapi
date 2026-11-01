@@ -1,8 +1,8 @@
 //! 分组收支、现金流与毛利。
 use super::super::query::Query;
 use super::{WindowQuery, apply_cost_coverage, ch_i64, ch_or_disabled, rate_bp};
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;

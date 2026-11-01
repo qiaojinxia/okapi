@@ -1,10 +1,10 @@
 //! 定价规则、价簿发布与 new-api 倍率导入。
 use super::super::query::{PageQuery, Query};
 use super::{audit, guard, ratio_fits};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -219,14 +219,14 @@ pub async fn publish_pricing(
     let actor = guard(&state, &headers, permissions::PRICING_PUBLISH).await?;
 
     let rows = okapi_store::pricing::load_pricing_source_rows(&state.pg).await?;
-    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
+    let base = crate::kernel::pricing_loader::draft_base_price(&state.pg).await?;
     if query
         .expected_base_per_1m_micro
         .is_some_and(|expected| expected != base)
     {
         return Err(AppError::bad_request().with_param("pricing_base_changed"));
     }
-    if let Err(err) = crate::gateway::pricing_loader::compile_rows(&rows, base) {
+    if let Err(err) = crate::kernel::pricing_loader::compile_rows(&rows, base) {
         tracing::warn!(error = %err, "定价配置编译失败，拒绝发布");
         return Err(AppError::bad_request().with_param(format!("compile: {err}")));
     }

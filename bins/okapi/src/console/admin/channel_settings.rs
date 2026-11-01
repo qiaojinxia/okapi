@@ -1,6 +1,6 @@
 //! 渠道 `settings` 的写入校验（API 版本、出口、模拟、额外字段、账号控制、OAuth 地址、Azure / Vertex 地址形状）。
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use serde_json::Value;
 
 /// `settings.api_version`（azure 数据面版本）形状校验：`YYYY-MM-DD` 或 `YYYY-MM-DD-preview`。
@@ -153,7 +153,7 @@ pub(super) async fn ensure_settings_oauth_token_url(
         .map(str::trim)
         .filter(|u| !u.is_empty())
         .ok_or_else(|| AppError::bad_request().with_param("oauth_token_url"))?;
-    crate::gateway::ssrf::validate_api_base(&state.pg, url).await
+    crate::kernel::ssrf::validate_api_base(&state.pg, url).await
 }
 
 /// `inject_request_fields`：对象、最多 32 键 / 4KB，受保护键不可写。

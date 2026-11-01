@@ -9,7 +9,7 @@ pub(super) async fn cache_env() -> Env {
         .execute(&env.state.pg).await.unwrap();
     published_pricing::publish(&env.state.pg, env.user).await;
     env.state.pricebook.replace(
-        gateway::pricing_loader::load_pricebook(&env.state.pg)
+        okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
             .await
             .unwrap(),
     );

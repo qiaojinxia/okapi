@@ -153,7 +153,7 @@ impl AppState {
     pub async fn settle_success(
         &self,
         mut input: SettlementInput<'_>,
-    ) -> Result<bool, crate::gateway::error::AppError> {
+    ) -> Result<bool, crate::kernel::error::AppError> {
         // 诊断挂在调用方任务的 task-local 上，离开前取走
         if input.dimensions.diagnostics.is_none() {
             input.dimensions.diagnostics = super::super::diagnostics::snapshot();
@@ -166,13 +166,13 @@ impl AppState {
         });
         result
             .await
-            .map_err(|_| crate::gateway::error::AppError::internal())?
+            .map_err(|_| crate::kernel::error::AppError::internal())?
     }
 
     async fn settle_success_attached(
         &self,
         mut input: SettlementInput<'_>,
-    ) -> Result<bool, crate::gateway::error::AppError> {
+    ) -> Result<bool, crate::kernel::error::AppError> {
         let _backlog = super::BacklogGuard::enter(&self.settle_backlog);
         self.prepare_settlement(&mut input).await;
         let journaled = super::super::settlement_retry::save_in_flight(self, &input)
@@ -225,7 +225,7 @@ impl AppState {
                 }
             }
         }
-        Err(crate::gateway::error::AppError::internal())
+        Err(crate::kernel::error::AppError::internal())
     }
 }
 

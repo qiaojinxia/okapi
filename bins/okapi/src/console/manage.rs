@@ -13,11 +13,11 @@ use super::admin::{
     audit, ensure_channel_owner, ensure_pool_scope, guard, guard_scoped, guard_super_admin,
 };
 use super::query::{PageQuery, Query};
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Json as ExtractJson;
-use crate::gateway::extract::Path;
 use crate::gateway::ingress::Ingress;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Json as ExtractJson;
+use crate::kernel::extract::Path;
 use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -42,8 +42,8 @@ pub async fn list_models(
     guard(&state, &headers, permissions::PRICING_READ).await?;
     let list =
         okapi_store::listing::list_models(&state.pg, q.keyword(), q.unpriced, q.slice()).await?;
-    let base = crate::gateway::pricing_loader::draft_base_price(&state.pg).await?;
-    let published = crate::gateway::pricing_loader::published_base_price(&state.pg, None).await?;
+    let base = crate::kernel::pricing_loader::draft_base_price(&state.pg).await?;
+    let published = crate::kernel::pricing_loader::published_base_price(&state.pg, None).await?;
     Ok(Json(
         json!({ "data": list.page.data, "total": list.page.total, "unpriced": list.unpriced,
             "base_price_per_1m_micro": base, "published_base_price_per_1m_micro": published }),
@@ -152,8 +152,8 @@ pub async fn list_settings(
             })
         })
         .collect();
-    let key = crate::gateway::pricing_loader::BASE_PRICE_SETTING;
-    let published = crate::gateway::pricing_loader::published_base_price(&state.pg, None).await?;
+    let key = crate::kernel::pricing_loader::BASE_PRICE_SETTING;
+    let published = crate::kernel::pricing_loader::published_base_price(&state.pg, None).await?;
     if let Some(row) = data.iter_mut().find(|r| r["key"] == key) {
         row["published_value"] = json!(published);
     } else {

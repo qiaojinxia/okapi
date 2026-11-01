@@ -3,8 +3,8 @@
 //! 这两家的请求要签名 / 换 token，走不了 `PassUpstream` 那条"拼 URL + 一个鉴权头"的通用探测，
 //! 直接用各自的上游客户端。结果形状与 `admin::probe_channel` 完全一致，前端不感知。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::http::StatusCode;
 use bytes::Bytes;
 use okapi_providers::UpstreamError;

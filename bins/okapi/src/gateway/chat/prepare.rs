@@ -1,9 +1,6 @@
 //! 准入：模型解析（含变体与推理指令）、估价与预扣、兜底模型冻结，以及候选缓存。
-use super::super::clients::detect_client_type;
-use super::super::error::AppError;
 use super::super::estimate;
 use super::super::ingress::Ingress;
-use super::super::sched_redis::response_affinity;
 use super::super::state::AppState;
 use super::{
     AdmittedFallback, CancelRefund, FailureReply, ForwardFailure, IMAGE_INPUT_TOKENS, ProbeInfo,
@@ -11,6 +8,9 @@ use super::{
     attachment_tokens, default_output_cap, image_inputs, price_above_max, settle_failure,
     try_model, upstream_passthrough_response, user_agent,
 };
+use crate::kernel::clients::detect_client_type;
+use crate::kernel::error::AppError;
+use crate::kernel::sched_redis::response_affinity;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
@@ -407,7 +407,7 @@ pub(super) async fn prepare_chat(
         claude_code_native: ingress == Ingress::Anthropic
             && okapi_providers::profiles::is_native_claude_code(body, user_agent(headers)),
         codex_client: okapi_providers::profiles::codex_client::detect(headers),
-        client_ip: super::super::clients::detect_client_ip(headers),
+        client_ip: crate::kernel::clients::detect_client_ip(headers),
         client_headers: Arc::new(super::super::oauth_cred::client_headers(headers)),
         pool_chain: pool_chain.iter().map(|p| (*p).to_owned()).collect(),
         pin: pin.map(Arc::new),

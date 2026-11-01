@@ -305,7 +305,7 @@ async fn publish_changed_price(env: &Env, epoch: i64) {
     assert_eq!(draft["requires_publish"], true);
     let published = post(env, "/admin/pricing/publish", &json!({})).await;
     assert!(published["epoch"].as_i64().unwrap() > epoch);
-    let book = okapi::gateway::pricing_loader::load_pricebook(&env.state.pg)
+    let book = okapi::kernel::pricing_loader::load_pricebook(&env.state.pg)
         .await
         .unwrap();
     assert!(env.state.pricebook.swap_if_newer(book));

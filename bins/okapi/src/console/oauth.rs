@@ -6,9 +6,9 @@
 //! 成功后发 web session（前端经 /auth/keys 兑 key，保持 key 单轨）。
 
 use super::query::Query;
-use crate::gateway::error::AppError;
-use crate::gateway::extract::Path;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::extract::Path;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -288,7 +288,7 @@ pub async fn callback(
             .await?;
 
     // web session（含会话数上限裁剪，§11.37）+ 回前端（?oauth=done 触发兑 key）
-    let ip = crate::gateway::clients::detect_client_ip(&headers);
+    let ip = crate::kernel::clients::detect_client_ip(&headers);
     let sid = super::auth_web::open_web_session(&state, user_id, ip.as_deref(), &headers).await;
     let mut resp = (
         StatusCode::FOUND,
@@ -303,7 +303,7 @@ pub async fn callback(
 
 /// 经 PassUpstream 请求并解析 JSON（token/userinfo 共用）。
 async fn fetch_json(state: &AppState, req: PassRequest) -> Result<Value, AppError> {
-    crate::gateway::ssrf::validate_api_base(&state.pg, &req.url).await?;
+    crate::kernel::ssrf::validate_api_base(&state.pg, &req.url).await?;
     match state.pass.probe(req).await {
         Ok(PassResponse::Ok { stream, .. }) => {
             let buf = super::outbound_body::collect(stream, 1024 * 1024).await?;

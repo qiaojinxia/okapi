@@ -1,10 +1,10 @@
 //! HTTP 入口：chat completions / responses（含 compact）/ gemini generateContent / messages。
-use super::super::error::AppError;
 use super::super::estimate::estimate_prompt_tokens;
 use super::super::ingress::Ingress;
-use super::super::sched_redis::session_hash;
 use super::super::state::AppState;
 use super::{ProbeInfo, check_input, handle_chat, request_features};
+use crate::kernel::error::AppError;
+use crate::kernel::sched_redis::session_hash;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
@@ -188,7 +188,7 @@ pub async fn gemini_generate(
     let request_id = Uuid::new_v4();
     let started = Instant::now();
     // 自己解析查询串：axum 的 Query 拒绝时回框架的纯文本 400（如重复的 `?key=`），不走 Gemini 错误壳
-    let query: GeminiQuery = match super::super::extract::query_from_uri(&uri) {
+    let query: GeminiQuery = match crate::kernel::extract::query_from_uri(&uri) {
         Ok(query) => query,
         Err(error) => return error.into_gemini_response_with(Some(request_id)),
     };

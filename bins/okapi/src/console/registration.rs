@@ -7,8 +7,8 @@
 //! 策略只在 `/auth/register` 一处生效，读取走 60s 进程缓存（与其它 settings 同一取舍）；
 //! 公开端点 `GET /api/registration` 只透出登录页渲染需要的三个字段。
 
-use crate::gateway::error::AppError;
 use crate::gateway::state::AppState;
+use crate::kernel::error::AppError;
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;

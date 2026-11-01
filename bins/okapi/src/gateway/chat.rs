@@ -8,12 +8,14 @@
 //! 首字后）或 json（非流式）→ settle（结算）；另有 count（count_tokens）与 limits（上限）。
 //! 子模块的条目都从这里原路径再导出，媒体端点、WebSocket 与控制面的引用不变。
 
-use super::error::AppError;
-use super::error::with_request_id;
 use super::estimate::estimate_prompt_tokens;
-use super::sched_redis::response_affinity::{ResponseBinding, ResponseParent, ResponseWriter};
-use super::sched_redis::session_hash;
 use super::state::AppState;
+use crate::kernel::error::AppError;
+use crate::kernel::error::with_request_id;
+use crate::kernel::sched_redis::response_affinity::{
+    ResponseBinding, ResponseParent, ResponseWriter,
+};
+use crate::kernel::sched_redis::session_hash;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use bytes::Bytes;

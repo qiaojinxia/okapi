@@ -131,13 +131,13 @@ struct Envelope {
 /// 有 `provider` 但形状不对（不是对象、`allow_fallbacks` 不是布尔、`max_price` 不是合法价格）→ 400
 /// `param=provider*`：`max_price` 是调用方给自己设的花费上限，按缺省走通等于悄悄把上限拿掉、
 /// 按更贵的渠道扣钱；`allow_fallbacks:false` 写错同理会悄悄允许换渠道。宁可拒，让调用方看见。
-pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
+pub fn parse(body: &Bytes) -> Result<RoutingPrefs, crate::kernel::error::AppError> {
     // 绝大多数请求没有这个键，先做一次子串预检省掉整体反序列化
     if !contains_provider_key(body) {
         return Ok(RoutingPrefs::default());
     }
     let env: Envelope = serde_json::from_slice(body)
-        .map_err(|_| super::error::AppError::bad_request().with_param("provider"))?;
+        .map_err(|_| crate::kernel::error::AppError::bad_request().with_param("provider"))?;
     match env.provider {
         Directive::Absent => Ok(RoutingPrefs::default()),
         Directive::Null => Ok(RoutingPrefs::null_directive()),
@@ -152,12 +152,14 @@ pub fn parse(body: &Bytes) -> Result<RoutingPrefs, super::error::AppError> {
 /// 有这个键时只把 `provider` 这一小块重新序列化再解析，而不是把 `Value` 直接当 Deserializer 用：
 /// 后者会把「转成 f64 再转回来写法不变」的数字重新格式化（`0.000001` 变成 `1e-6`），而价格上限按请求原文的
 /// 十进制字面量解析、不收指数写法，同一个请求会因此在两条路上得到不同的结果。序列化会原样写出数字的原始字面量。
-pub fn parse_value(body: &serde_json::Value) -> Result<RoutingPrefs, super::error::AppError> {
+pub fn parse_value(
+    body: &serde_json::Value,
+) -> Result<RoutingPrefs, crate::kernel::error::AppError> {
     match body.get(PROVIDER_FIELD) {
         None => Ok(RoutingPrefs::default()),
         Some(serde_json::Value::Null) => Ok(RoutingPrefs::null_directive()),
         Some(provider) => {
-            let rejected = || super::error::AppError::bad_request().with_param("provider");
+            let rejected = || crate::kernel::error::AppError::bad_request().with_param("provider");
             let raw = serde_json::to_vec(provider).map_err(|_| rejected())?;
             let block: ProviderBlock = serde_json::from_slice(&raw).map_err(|_| rejected())?;
             from_block(&block)
@@ -166,12 +168,12 @@ pub fn parse_value(body: &serde_json::Value) -> Result<RoutingPrefs, super::erro
 }
 
 /// `provider` 对象 → 偏好。形状对但价格不合法同样是 400：见 [`parse`] 的说明。
-fn from_block(p: &ProviderBlock) -> Result<RoutingPrefs, super::error::AppError> {
+fn from_block(p: &ProviderBlock) -> Result<RoutingPrefs, crate::kernel::error::AppError> {
     let cap = |number: Option<&serde_json::Number>| {
         number
             .map(|number| {
                 cap_micros(number).ok_or_else(|| {
-                    super::error::AppError::bad_request().with_param("provider.max_price")
+                    crate::kernel::error::AppError::bad_request().with_param("provider.max_price")
                 })
             })
             .transpose()
