@@ -501,6 +501,22 @@ async fn forward(
             .await
         {
             Ok(resp) => {
+                // 上游回了 2xx 却不是 JSON 对象（站点的网页前端 / 网关页）：不是一次成功的调用，
+                // 不转发、不计费，当作这个候选的瞬态失败换下一个。
+                if let Some(kind) = super::chat::non_json_kind(&resp.body) {
+                    last_error = AppError::new(StatusCode::BAD_GATEWAY, codes::UPSTREAM_ERROR);
+                    super::key_health::failure(
+                        state,
+                        &cand,
+                        codes::UPSTREAM_ERROR,
+                        okapi_store::channels::KeyFailure::Transient,
+                    )
+                    .await;
+                    tracing::warn!(request_id = %request_id, channel_key = cand.channel_key_id,
+                        kind, bytes = resp.body.len(), "embeddings 上游回了非 JSON，failover 下一候选");
+                    failover = failover.saturating_add(1);
+                    continue;
+                }
                 super::key_health::success(state, &cand).await;
                 let usage = validated_usage(resp.usage, est_prompt)
                     .map_err(|error| (error, last.clone(), failover))?;

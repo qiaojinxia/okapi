@@ -3282,6 +3282,29 @@ thinking 签名失配没有矫正（"签名是否绑账号"没验证）；key �
 地址含 `/v1` 时带模型测活命中 `POST /v1/messages`、不带模型命中 `GET /v1/models`、拉模型同路，三次都带 `anthropic-version` 与 `x-api-key`；地址缺 `/v1` 时
 两种范围都 `ok:false / upstream_not_json`、带网页开头、无 `http_status`，命中路径是 `POST /messages` 与 `GET /models`）与 `admin::probe_request_tests`（三条单测）。
 
+### 11.54 上游 2xx 回了网页不算成功（2026-11-01）
+
+起因同 §11.53：渠道地址缺 `/v1` 时，上游站点的网页前端对任何未知路径回 `200 text/html`。流式请求会因为没有任何输出事件记成 `empty_completion`
+（换渠道、不计费），非流式却不会：`attempt_json` 把这页 HTML 当成功补全转发给客户端（还贴着 `content-type: application/json`），
+用量解析不出来就走估算，**照常计费**——线上 Claude Desktop 的一次非流式请求就这样记成了 463 / 1 token 的成功；`count_tokens` 把网页悄悄换成
+`{"input_tokens": 0}` 回给客户端（客户端据此以为上下文是空的）；embeddings / rerank 同样把网页当成功并按估算付费。
+
+- **判据** `chat::non_json_kind(body)`：2xx 的体不是 JSON 对象就返回它是什么（`empty` / `html` / `malformed_json` / `other`），是则 `None`。UTF-8 BOM
+  与前导空白不算错（个别 Windows 上游的 JSON 带 BOM，此前能用，现在也要能用）；用 `serde::de::IgnoredAny` 校验，不分配 `Value`。
+- **三处接入**：`attempt_json`（所有入口方言的非流式，在写回执 / 估算用量 / 结算之前）、`count_tokens`（改回 502，客户端自己会退本地估算）、
+  `embeddings::forward`（embeddings 与 rerank 共用的候选循环）。流式不用改（空流本来就不计费、换渠道），images 的信封解析本来就严格，audio 的体可以是文本 / 二进制。
+- **失败语义**：`Retriable`、错误码 `upstream_error`、`upstream_status` 记真实的 2xx（同 key 重试只对 5xx / 无状态的瞬态失败生效，这种确定性的失败不必再试一遍）、
+  `KeyFailure::Transient`（和空流一样计入 key 的失败阈值，指错地址的渠道不会一直吃流量）；换到下一个候选，全部失败回 502。诊断只记种类与长度——
+  `upstream_not_json (html, 1166 bytes)`，不留体的内容（体里可能回显提示词，与 `error_details` 不存上游正文同一原则）。
+- **界面**：渠道抽屉里 Anthropic / Gemini 的地址只写了主机名（没有 `/v1`、`/v1beta`）时提示要带版本段（OpenAI 兼容不提示：有的厂商本来就不带）；
+  行测试返回 `upstream_not_json` 时直说「上游返回的是网页而不是 JSON」；拉取上游模型的 400（`upstream_models_not_json`）也换成同样的说明，
+  不再是「请求参数有误（upstream_models_not_json）」。
+
+**验收**：`gateway_non_json_200`（单渠道指到网页：502 `upstream_error`、失败终态行金额 0、无成功记账、余额不动、只请求一次；Anthropic 入口两个候选第一个是网页：
+200、只为第二个付费、`failover_count` 1；正常 JSON 对照；`count_tokens` 网页 502 / 正常 42；embeddings 网页换渠道只付 240 micro，单渠道 502 且不扣费）与
+`chat::non_json_body_tests`（种类归类、BOM / 空白、诊断文本）；七处后端变异（不检查、不记 2xx 状态、count_tokens 编 0、embeddings 不检查、html / 残缺 JSON 当成功、
+不容忍 BOM）与五处前端变异（提示不显示 / 对 OpenAI 兼容也显示 / 带路径也显示、拉取失败回通用文案、测试 toast 丢专用文案）均被抓住。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

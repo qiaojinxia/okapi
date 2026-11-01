@@ -960,12 +960,17 @@ async fn count_via_upstream(
             .count_tokens(&base, &cand.credential, body_up, &outbound)
             .await
     };
-    match counted {
-        Ok(up) => Ok(axum::Json(
-            serde_json::from_slice::<serde_json::Value>(&up)
-                .unwrap_or_else(|_| serde_json::json!({"input_tokens": 0})),
+    // 上游 tokenizer 回了网页之类不是 JSON 的体：别替它编一个 `input_tokens: 0` 回给客户端
+    // （客户端会据此以为上下文是空的），按上游失败处理，客户端自己会退本地估算。
+    let counted = counted.and_then(|up| match non_json_kind(&up) {
+        Some(kind) => Err(non_json_failure(kind, up.len())),
+        None => serde_json::from_slice::<serde_json::Value>(
+            up.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&up),
         )
-        .into_response()),
+        .map_err(|_| non_json_failure("malformed_json", up.len())),
+    });
+    match counted {
+        Ok(value) => Ok(axum::Json(value).into_response()),
         Err(error) => {
             log_count_upstream_failure(cand, &error);
             Err(AppError::new(
@@ -984,6 +989,12 @@ fn log_count_upstream_failure(
     let detail = match error {
         okapi_providers::UpstreamError::Status { body, .. } => {
             String::from_utf8_lossy(&body[..body.len().min(300)]).into_owned()
+        }
+        // 只认我们自己写的「体不是 JSON」说明（种类 + 长度）；别的 Stream 原因可能带 URL，不进日志
+        okapi_providers::UpstreamError::Stream(reason)
+            if reason.starts_with("upstream_not_json") =>
+        {
+            reason.clone()
         }
         _ => String::new(),
     };
@@ -4147,6 +4158,17 @@ async fn attempt_json(
             body,
             usage,
         }) => {
+            // 上游回了 2xx 却不是 JSON 对象（站点的网页前端 / 网关页）：不是一次成功的补全。
+            // 不转发、不计费，当作这个候选的瞬态失败换下一个；状态码记真实的 2xx，
+            // 同 key 重试只对 5xx / 无状态的瞬态失败生效，这种确定性的失败不必再试一遍。
+            if let Some(kind) = non_json_kind(&body) {
+                bill.trace.failure(&non_json_failure(kind, body.len()));
+                return Err(AttemptError::Retriable {
+                    code: codes::UPSTREAM_ERROR,
+                    upstream_status: i16::try_from(status).ok(),
+                    failure_kind: KeyFailure::Transient,
+                });
+            }
             if let Some(mut writer) = response_writer(bill, cand) {
                 writer
                     .capture(&bill.state.sched, bill.user_id, bill.key_id, &body)
@@ -4222,6 +4244,27 @@ async fn attempt_json(
         }),
         Err(err) => Err(classify_fatal(err, failover, channel)),
     }
+}
+
+/// 对话 / 消息 / Responses / Gemini / embeddings / rerank / count_tokens 的 2xx 响应都是 JSON 对象。
+/// 体不是时返回它是什么（诊断里只留种类与长度，不留内容——体里可能回显提示词）。
+///
+/// 站点的网页前端、网关的错误页对任何未知路径回 `200 text/html` 是常态：渠道地址缺了版本段（`/v1`）、
+/// 指到了网页端口时就是这样。把它当成功转给客户端再按估算计费是错的。UTF-8 BOM 与前导空白不算错。
+pub(super) fn non_json_kind(body: &[u8]) -> Option<&'static str> {
+    let body = body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body);
+    match body.iter().find(|b| !b.is_ascii_whitespace()) {
+        None => Some("empty"),
+        Some(b'<') => Some("html"),
+        Some(b'{') if serde_json::from_slice::<serde::de::IgnoredAny>(body).is_ok() => None,
+        Some(b'{') => Some("malformed_json"),
+        Some(_) => Some("other"),
+    }
+}
+
+/// [`non_json_kind`] 在诊断里的样子：种类 + 长度。
+pub(super) fn non_json_failure(kind: &str, len: usize) -> UpstreamError {
+    UpstreamError::Stream(format!("upstream_not_json ({kind}, {len} bytes)"))
 }
 
 fn non_stream_content_chars(ingress: Ingress, body: &Bytes) -> usize {
@@ -5325,5 +5368,48 @@ mod check_input_tests {
         );
         // Responses 的输入可以只靠 previous_response_id 续上，这里不要求
         assert!(check_input(Ingress::Responses, &json!({"model": "m"})).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod non_json_body_tests {
+    use super::{non_json_failure, non_json_kind};
+
+    /// 2xx 的体只有是 JSON 对象才算一次成功的调用；其余按种类归类，诊断里只留种类与长度。
+    #[test]
+    fn only_a_json_object_counts_as_an_answer() {
+        for ok in [
+            r#"{"id":"msg_1","usage":{"input_tokens":1}}"#,
+            "  \n{\"a\":1}\n",
+            // 个别 Windows 上游的 JSON 带 UTF-8 BOM，之前能用，现在也要能用
+            "\u{feff}{\"a\":1}",
+            "\u{feff}  {\"a\":1}",
+        ] {
+            assert_eq!(non_json_kind(ok.as_bytes()), None, "{ok:?}");
+        }
+        for (body, kind) in [
+            ("", "empty"),
+            ("  \n\t ", "empty"),
+            ("\u{feff}", "empty"),
+            ("<!doctype html>\n<html lang=\"en\"></html>", "html"),
+            ("  <html>", "html"),
+            (r#"{"id":"msg_1""#, "malformed_json"),
+            (r#"{"a":1} {"b":2}"#, "malformed_json"),
+            ("OK", "other"),
+            ("[1,2]", "other"),
+            ("null", "other"),
+            ("\"text\"", "other"),
+        ] {
+            assert_eq!(non_json_kind(body.as_bytes()), Some(kind), "{body:?}");
+        }
+    }
+
+    /// 诊断（`error_details`）读的是 `Stream` 的原因文本：种类 + 长度，不含体的内容。
+    #[test]
+    fn the_diagnostic_names_the_kind_and_the_size_but_never_the_content() {
+        let okapi_providers::UpstreamError::Stream(reason) = non_json_failure("html", 1166) else {
+            panic!("a stream-phase failure carries the reason the diagnostics print");
+        };
+        assert_eq!(reason, "upstream_not_json (html, 1166 bytes)");
     }
 }
