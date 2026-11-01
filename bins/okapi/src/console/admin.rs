@@ -3309,6 +3309,10 @@ fn azure_deployments_url(base: &str) -> String {
 /// 按协议与探测范围拼探测请求：`(method, url, body)`。
 /// 无 model = GET 协议各自的模型列表端点；有 model = POST 一次最小补全。
 /// `model` 已是上游名（azure 下即部署名）；`api_version` 只对 azure 有意义。
+///
+/// 地址的约定与真实请求一致：`api_base` 已含版本段（`anthropic` 缺省 `https://api.anthropic.com/v1`、
+/// OpenAI 兼容缺省 `…/v1`），探测只在后面接各协议自己的路径——探测走的路必须和流量是同一条，
+/// 否则「测试通过却发不出去」或「地址对了测试反而红」都会误导运维。
 fn probe_request(
     provider: &str,
     base: &str,
@@ -3325,7 +3329,7 @@ fn probe_request(
     };
     let (url, payload) = match provider {
         "anthropic" => (
-            format!("{base}/v1/messages"),
+            format!("{base}/messages"),
             json!({"model": m, "max_tokens": PROBE_MAX_TOKENS,
                    "messages": [{"role": "user", "content": "ping"}]}),
         ),
@@ -3362,6 +3366,49 @@ fn probe_request(
         url,
         bytes::Bytes::from(serde_json::to_vec(&payload).unwrap_or_default()),
     ))
+}
+
+/// 探测要带上网关真实请求同款的协议头：`anthropic` 直连渠道的 `anthropic-version`（官方端点缺它直接 400）；
+/// 站长在设置里额外配了同名头就用站长的。
+fn with_protocol_headers(
+    provider: &str,
+    mut headers: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    if provider == "anthropic"
+        && !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("anthropic-version"))
+    {
+        headers.push((
+            "anthropic-version".to_owned(),
+            okapi_providers::anthropic::ANTHROPIC_VERSION.to_owned(),
+        ));
+    }
+    headers
+}
+
+/// 2xx 不等于通：很多站点的网页前端对任何未知路径都回 `200 text/html`，地址缺了版本段（`/v1`）时探测会被它接住，
+/// 看上去一切正常、真实请求却打不通。模型列表与补全都该是 JSON；不是就返回原因。
+/// `custom_pass` 是任意路径透传，体不一定是 JSON，不在此列。
+async fn probe_body_problem(
+    provider: &str,
+    stream: impl futures::Stream<Item = Result<bytes::Bytes, okapi_providers::UpstreamError>> + Unpin,
+) -> Option<(&'static str, String)> {
+    if provider == "custom_pass" {
+        return None;
+    }
+    let Ok(body) = super::outbound_body::collect(stream, FETCH_MODELS_MAX_BYTES).await else {
+        return Some(("upstream_body_unreadable", String::new()));
+    };
+    if serde_json::from_slice::<Value>(&body).is_ok() {
+        return None;
+    }
+    let head: String = String::from_utf8_lossy(&body)
+        .chars()
+        .filter(|c| !c.is_control() || *c == ' ')
+        .take(160)
+        .collect();
+    Some(("upstream_not_json", head))
 }
 
 /// 渠道探测核心（REST 与 MCP channel_test 共用）。
@@ -3464,7 +3511,7 @@ pub(crate) async fn probe_channel(
             content_type,
             body,
             proxy_url: outbound.proxy_url,
-            extra_headers: outbound.extra_headers,
+            extra_headers: with_protocol_headers(&row.provider, outbound.extra_headers),
         })
         .await;
     let latency_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
@@ -3477,9 +3524,19 @@ pub(crate) async fn probe_channel(
         "credential"
     };
     let result = match outcome {
-        Ok(okapi_providers::custom_pass::PassResponse::Ok { status, .. }) => {
-            json!({"ok": true, "http_status": status, "latency_ms": latency_ms, "at": at,
-                   "scope": scope, "model": model})
+        Ok(okapi_providers::custom_pass::PassResponse::Ok { status, stream, .. }) => {
+            match probe_body_problem(&row.provider, stream).await {
+                None => {
+                    json!({"ok": true, "http_status": status, "latency_ms": latency_ms, "at": at,
+                               "scope": scope, "model": model})
+                }
+                // 不带 http_status：列表的「最近测试」列有它就只显示「HTTP 200」，看不出为什么算失败
+                Some((code, head)) => {
+                    json!({"ok": false, "error_code": code, "latency_ms": latency_ms,
+                                             "at": at, "scope": scope, "model": model,
+                                             "upstream_body": head})
+                }
+            }
         }
         Ok(okapi_providers::custom_pass::PassResponse::ErrStatus { status, body }) => {
             // 失败带上游原文（截断）：403 到底是凭证问题还是模型没开通，全在这句话里
@@ -3653,7 +3710,7 @@ async fn discover_models(
             content_type: None,
             body: bytes::Bytes::new(),
             proxy_url: outbound.proxy_url,
-            extra_headers: outbound.extra_headers,
+            extra_headers: with_protocol_headers(provider, outbound.extra_headers),
         })
         .await;
     let body = match outcome {
@@ -3934,5 +3991,81 @@ mod unicode_settings_tests {
                     .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_request_tests {
+    use super::*;
+
+    fn url(provider: &str, base: &str, model: Option<&str>) -> String {
+        probe_request(provider, base, model, None).unwrap().1
+    }
+
+    /// 探测与真实请求同一条路：地址已含版本段，探测只在后面接各协议自己的路径。
+    #[test]
+    fn probes_follow_the_traffic_path_for_a_base_that_carries_the_version_segment() {
+        let anthropic = "https://api.anthropic.com/v1";
+        assert_eq!(
+            url("anthropic", anthropic, Some("m")),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            url("anthropic", anthropic, None),
+            "https://api.anthropic.com/v1/models"
+        );
+        let openai = "https://api.openai.com/v1";
+        assert_eq!(
+            url("openai", openai, Some("m")),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            url("openai", openai, None),
+            "https://api.openai.com/v1/models"
+        );
+    }
+
+    #[test]
+    fn anthropic_probes_carry_the_version_header_unless_the_operator_set_one() {
+        let version = okapi_providers::anthropic::ANTHROPIC_VERSION;
+        let added = with_protocol_headers("anthropic", vec![("x-extra".into(), "1".into())]);
+        assert!(added.contains(&("anthropic-version".to_owned(), version.to_owned())));
+        let own = with_protocol_headers(
+            "anthropic",
+            vec![("Anthropic-Version".into(), "2099-01-01".into())],
+        );
+        assert_eq!(own.len(), 1, "站长配的同名头不重复添加：{own:?}");
+        for provider in ["openai", "gemini", "azure", "custom_pass"] {
+            assert!(
+                with_protocol_headers(provider, Vec::new()).is_empty(),
+                "{provider}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_probe_body_must_be_json_unless_the_channel_is_a_passthrough() {
+        let stream = |text: &'static str| {
+            futures::stream::iter(vec![Ok::<_, okapi_providers::UpstreamError>(
+                bytes::Bytes::from_static(text.as_bytes()),
+            )])
+        };
+        assert!(
+            probe_body_problem("anthropic", stream(r#"{"data":[]}"#))
+                .await
+                .is_none()
+        );
+        let (code, head) =
+            probe_body_problem("anthropic", stream("<!doctype html>\n<html lang=\"en\">"))
+                .await
+                .unwrap();
+        assert_eq!(code, "upstream_not_json");
+        assert!(head.starts_with("<!doctype html>"), "{head}");
+        assert!(!head.contains('\n'), "控制字符不进结果：{head:?}");
+        assert!(
+            probe_body_problem("custom_pass", stream("<html>"))
+                .await
+                .is_none()
+        );
     }
 }

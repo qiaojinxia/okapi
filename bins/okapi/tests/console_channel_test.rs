@@ -378,6 +378,166 @@ async fn channel_test_prefers_an_enabled_key() {
     assert_eq!(models["models"], json!(["gpt-x-1", "gpt-x-2"]), "{models}");
 }
 
+/// 一次探测命中上游时留下的痕迹：方法、路径，以及协议头对不对。
+#[derive(Clone, Debug)]
+struct Hit {
+    method: String,
+    path: String,
+    versioned: bool,
+    keyed: bool,
+}
+type Hits = Arc<std::sync::Mutex<Vec<Hit>>>;
+
+/// 像一台 new-api 站点：`/v1/models`、`/v1/messages` 是 API，其余任何路径都是网页前端（200 text/html）。
+async fn site_with_a_web_front(
+    axum::extract::State(hits): axum::extract::State<Hits>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    hits.lock().unwrap().push(Hit {
+        method: method.to_string(),
+        path: uri.path().to_owned(),
+        versioned: header("anthropic-version") == Some("2023-06-01"),
+        keyed: header("x-api-key") == Some("good-credential"),
+    });
+    match uri.path() {
+        "/v1/models" => axum::Json(json!({"data": [{"id": "claude-x"}]})).into_response(),
+        "/v1/messages" => axum::Json(
+            json!({"id": "msg_1", "type": "message", "role": "assistant",
+            "content": [{"type": "text", "text": "pong"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}}),
+        )
+        .into_response(),
+        _ => (
+            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            "<!doctype html>\n<html lang=\"en\"><head><title>console</title></head></html>",
+        )
+            .into_response(),
+    }
+}
+
+async fn spawn_site() -> (SocketAddr, Hits) {
+    let hits = Hits::default();
+    let router = Router::new()
+        .fallback(site_with_a_web_front)
+        .with_state(Arc::clone(&hits));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (addr, hits)
+}
+
+async fn mk_anthropic_channel(env: &TestEnv, base: &str) -> i64 {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let (id, _) = okapi_store::provision::create_channel(
+        &env.pg,
+        &format!("a-{suffix}"),
+        "anthropic",
+        base,
+        "good-credential",
+        &["claude-x"],
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    id
+}
+
+/// 带模型的测活走的路和真实请求是同一条（`{地址}/messages`，地址已含 `/v1`），带上 `anthropic-version`；
+/// 拉模型同样。地址缺了 `/v1` 时站点前端回的 200 网页不算通：此前这种情况测活报 ok、真实请求却打不通，
+/// 而地址写对了带模型的测活反而 404（`/v1/v1/messages`）。
+#[tokio::test]
+async fn channel_test_follows_the_traffic_path_and_a_web_page_is_not_ok() {
+    let env = setup().await;
+    let (site, hits) = spawn_site().await;
+    let seen = || hits.lock().unwrap().clone();
+
+    // 地址含 /v1：带模型 -> POST /v1/messages；不带模型 -> GET /v1/models；拉模型同路
+    let proper = mk_anthropic_channel(&env, &format!("http://{site}/v1")).await;
+    let probed: Value = reqwest::Client::new()
+        .post(format!("http://{}/admin/channels/{proper}/test", env.addr))
+        .bearer_auth(&env.admin_token)
+        .json(&json!({"model": "claude-x"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(probed["ok"], true, "{probed}");
+    assert_eq!(probed["scope"], "model");
+    let credential_only = test_channel(&env, proper).await;
+    assert_eq!(credential_only["ok"], true, "{credential_only}");
+    let fetched: Value = reqwest::Client::new()
+        .get(format!(
+            "http://{}/admin/channels/{proper}/fetch-models",
+            env.addr
+        ))
+        .bearer_auth(&env.admin_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(fetched["models"], json!(["claude-x"]), "{fetched}");
+    let on_the_api: Vec<(String, String, bool, bool)> = seen()
+        .into_iter()
+        .map(|h| (h.method, h.path, h.versioned, h.keyed))
+        .collect();
+    assert_eq!(
+        on_the_api,
+        vec![
+            ("POST".to_owned(), "/v1/messages".to_owned(), true, true),
+            ("GET".to_owned(), "/v1/models".to_owned(), true, true),
+            ("GET".to_owned(), "/v1/models".to_owned(), true, true),
+        ],
+        "探测走真实流量的路径，并带 anthropic-version 与 x-api-key"
+    );
+
+    // 地址缺 /v1：探测落在站点的网页上 —— 200 text/html，不是 JSON，必须报失败并带上原因
+    let bare = mk_anthropic_channel(&env, &format!("http://{site}")).await;
+    for model in [Some("claude-x"), None] {
+        let body = match model {
+            Some(model) => json!({"model": model}),
+            None => json!({}),
+        };
+        let r: Value = reqwest::Client::new()
+            .post(format!("http://{}/admin/channels/{bare}/test", env.addr))
+            .bearer_auth(&env.admin_token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(r["ok"], false, "网页不是通：{r}");
+        assert_eq!(r["error_code"], "upstream_not_json", "{r}");
+        assert!(
+            r["upstream_body"]
+                .as_str()
+                .is_some_and(|b| b.starts_with("<!doctype html>")),
+            "带上网页开头，一眼看出打到的是网页：{r}"
+        );
+        assert!(
+            r.get("http_status").is_none(),
+            "有 http_status 列表会只显示 HTTP 200：{r}"
+        );
+    }
+    let bare_paths: Vec<String> = seen()
+        .into_iter()
+        .skip(3)
+        .map(|h| format!("{} {}", h.method, h.path))
+        .collect();
+    assert_eq!(bare_paths, ["POST /messages", "GET /models"]);
+}
+
 /// 新建渠道时的上游模型发现：渠道还没落库，用表单里刚填的地址 / 凭证。校验与建渠道同一套
 /// （地址过 SSRF 闸、设置合法、出口对操作者可见）；订阅账号要先建渠道；什么都不落库。
 #[tokio::test]

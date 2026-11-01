@@ -3262,6 +3262,26 @@ thinking 签名失配没有矫正（"签名是否绑账号"没验证）；key �
 却放开令牌端点；令牌端点缺省仍仅 https）与 `console_channel_test`（回环地址被私网闸而不是 scheme 拦下）；前端 e2e：抽屉提示（大小写 / 空白 / 清空）、
 设置页两个开关互不牵连并保留未识别字段、列表徽标，五处变异（去掉提示、提示区分大小写、缺省读成关、保存丢键、徽标无视新键）均被抓住。
 
+### 11.53 渠道测活与真实请求走同一条路（2026-11-01）
+
+起因：站长把一台 new-api 站点配成 `anthropic` 渠道，地址先后填成 `https://<ip>:8893/v1`、`https://<ip>:8893`、`http://<ip>:8893`、`http://<ip>:8893/v1`。
+审计里的测活结果恰好相反：地址**缺** `/v1` 时带模型的测活 `ok:true`（2.2s，真调通了），而真实请求与「拉取上游」都落在站点的网页前端
+（`200 text/html`）上，分别记成 `empty_completion`（502）与 `upstream_models_not_json`（400）；地址**写对**后，带模型的测活反而 404
+（`Invalid URL (POST /v1/v1/messages)`），真实请求却是通的。根因是两套约定：真实请求与模型发现都是「`api_base`（已含 `/v1`，缺省
+`https://api.anthropic.com/v1`）+ `/messages` / `/models`」，唯独 `probe_request` 的 anthropic 带模型分支在地址后面又拼了 `/v1/messages`。
+
+- **探测改成与流量同一条路**：anthropic 带模型探测 = `{api_base}/messages`；其余协议路径不变。官方端点缺 `anthropic-version` 直接 400，
+  探测与模型发现现在都带上网关真实请求同款的头（`anthropic::ANTHROPIC_VERSION` 改为 `pub`，站长在设置里额外配了同名头就用站长的）。
+- **2xx 不等于通**：测活（两种范围）与此前就有的模型发现一样，要求 2xx 的体是 JSON，否则 `ok:false`、`error_code: upstream_not_json`，
+  `upstream_body` 带体的前 160 个字符（一眼看出打到的是网页）；不带 `http_status`——列表「最近测试」列有它就只显示「HTTP 200」，看不出为什么算失败。
+  体读不出来是 `upstream_body_unreadable`；`custom_pass` 是任意路径透传，体不一定是 JSON，不检查。
+- **没改**：数据面（真实请求）完全不经过测活代码，订阅（`anthropic_max` / `codex`）与 bedrock / vertex 走各自的探测，不受影响。
+  非流式真实请求遇到上游 200 + 非 JSON 仍按成功转发并按估算计费，另案处理。
+
+**验收**：`console_channel_test::channel_test_follows_the_traffic_path_and_a_web_page_is_not_ok`（mock 站点：`/v1/models`、`/v1/messages` 是 API，其余路径 200 网页；
+地址含 `/v1` 时带模型测活命中 `POST /v1/messages`、不带模型命中 `GET /v1/models`、拉模型同路，三次都带 `anthropic-version` 与 `x-api-key`；地址缺 `/v1` 时
+两种范围都 `ok:false / upstream_not_json`、带网页开头、无 `http_status`，命中路径是 `POST /messages` 与 `GET /models`）与 `admin::probe_request_tests`（三条单测）。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

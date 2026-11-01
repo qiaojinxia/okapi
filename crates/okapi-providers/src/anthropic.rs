@@ -13,7 +13,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 const NON_STREAM_TIMEOUT: Duration = Duration::from_mins(2);
-pub(crate) const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// `anthropic-version` 头的值：真实请求与管理面的测活 / 拉模型共用，探测才和流量走同一种协议。
+pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// 原生 Anthropic SSE 事件（event 行 + data 行原文）。
 #[derive(Debug, Clone)]
