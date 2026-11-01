@@ -96,7 +96,7 @@ not a dollar allowance from the subscription supplier.
 The bounded maintenance worker queries registered account hooks even when the
 percentage field is empty. Query leases are shared across instances (one per key
 per minute), response sizes/timeouts are bounded, and failures back off without
-changing inference health. Observations expire after 120 seconds; individual windows
+changing inference health. Observations expire after 600 seconds; individual windows
 stop governing admission after their upstream reset time. Observation identity is
 bound to the credential/account, so reauthorization cannot inherit another account's
 quota. Cached payloads contain no access or refresh tokens.
@@ -107,6 +107,26 @@ again before each inference attempt, including retries. Pool and priority orderi
 remain intact; known headroom refines ordering within those boundaries. Unknown
 headroom is neutral. Account affinity never bypasses limits or moves upstream-bound
 history to another account. Safe failover returns `no_available_channel` if none remain.
+
+### Request-level forecast and the keep line
+
+The five-minute poll reports whole, rounded-up percentage points, so it cannot tell that
+a cache-cold request on a long conversation will push an account over its cap. Two
+optional `account_control` keys address that; both are described, with the model and the
+diagnostics, in [quota-forecast.md](quota-forecast.md):
+
+- `quota_forecast`: `"shadow"` (default) records an assessment in the request diagnostics
+  and never changes routing; `"enforce"` excludes a candidate whose predicted usage after
+  this request would exceed its line; `"off"` disables the assessment. Without a
+  `quota_limits` entry the line is 100 %.
+- `quota_keep_limits`: per-window keep lines (same units as `quota_limits`). A session whose
+  prompt cache is still warm (sticky hit, last successful request under 270 seconds ago)
+  may run up to its keep line, while new sessions and cache-cold requests stop at the
+  `quota_limits` line. This stops a hot conversation from being evicted, and re-placed
+  cold, the moment its account crosses the placement cap. A keep line below the placement
+  line is ignored, and a keep line without a placement line has no effect.
+
+Older binaries reject these keys (unknown fields), so remove them before rolling back.
 
 ## Renewal ownership
 

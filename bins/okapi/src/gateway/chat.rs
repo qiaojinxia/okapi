@@ -2045,9 +2045,30 @@ async fn eligible_candidates(
             super::account_control::QuotaOrder::Keep
         }
     };
+    // L2 会话粘性映射：额度准入要先知道缓存还热不热（热会话可以用到保留线，冷请求按整段 prompt
+    // 估增量），所以读取放在准入之前；把它提到候选首位仍在准入之后——被额度挡下的账号，
+    // 亲和不越过准入。
+    let sticky_hit = match bill.session.as_ref().filter(|_| bill.pin.is_none()) {
+        Some(session) => bill.state.sched.sticky_get(bill.user_id, session).await,
+        None => None,
+    };
+    let warm_key = sticky_hit
+        .filter(|hit| {
+            hit.is_warm(
+                chrono::Utc::now().timestamp(),
+                super::account_control::forecast::WARM_WINDOW_SECS,
+            )
+        })
+        .map(|hit| hit.key);
+    // 额度预判只对有额度观测的订阅渠道有意义；候选里没有就不必估价
+    let shape = candidates
+        .iter()
+        .any(|c| super::account_control::has_quota_hook(&c.provider))
+        .then(|| forecast_shape(bill, warm_key))
+        .flatten();
     let retained = bill
         .state
-        .retain_margin_ok_ordered(&bill.group, &mut candidates, quota_order)
+        .retain_margin_ok_ordered(&bill.group, &mut candidates, quota_order, shape.as_ref())
         .await;
     if candidates.is_empty() {
         let mut err = AppError::new(
@@ -2075,18 +2096,57 @@ async fn eligible_candidates(
     }
 
     // L2 会话粘性命中：把映射的 channel_key 提到候选首位（§3.2）
-    let mut sticky_key: Option<i64> = None;
-    if let Some(session) = bill.session.as_ref().filter(|_| bill.pin.is_none()) {
-        sticky_key = bill.state.sched.sticky_get(bill.user_id, session).await;
-        let position =
-            sticky_key.and_then(|kid| candidates.iter().position(|c| c.channel_key_id == kid));
-        if let Some(position) = position {
-            let hit = candidates.remove(position);
-            candidates.insert(0, hit);
-        }
+    let sticky_key = sticky_hit.map(|hit| hit.key);
+    let position =
+        sticky_key.and_then(|kid| candidates.iter().position(|c| c.channel_key_id == kid));
+    if let Some(position) = position {
+        let hit = candidates.remove(position);
+        candidates.insert(0, hit);
     }
 
-    Ok((candidates, sticky_key))
+    Ok((candidates.with_warm_key(warm_key), sticky_key))
+}
+
+/// 额度预判用的请求形状：冷启动与热请求各按价簿折一次 API 等价美元，与结算同一个计价器。
+/// 价簿算不出来（模型没配价）就不预判。
+#[allow(clippy::cast_precision_loss)] // micro-USD 远小于 2^53
+fn forecast_shape(
+    bill: &RequestBilling,
+    warm_key: Option<i64>,
+) -> Option<super::account_control::forecast::RequestShape> {
+    /// 一次调用的输出 token 均值（线上两周实测约 0.7k）。
+    const EXPECTED_COMPLETION: u32 = 700;
+    /// 热请求每轮新增、需要写进缓存的内容（工具结果、新问题）。
+    const WARM_NEW_TOKENS: u32 = 3_000;
+    /// 预扣用的是 tiktoken 口径，Claude 的真实计数偏高；冷启动是额度消耗的大头，宁可高估。
+    const PROMPT_MARGIN_PERCENT: u32 = 110;
+    let prompt = bill
+        .est_prompt
+        .saturating_mul(PROMPT_MARGIN_PERCENT)
+        .saturating_div(100);
+    let usage = |read: u32, written: u32| TokenUsage {
+        prompt_tokens: prompt,
+        cached_tokens: read,
+        cache_read_reported: true,
+        cache_write_reported: true,
+        cache_write_tokens: written,
+        cache_write_5m_tokens: Some(written),
+        cache_write_1h_tokens: Some(0),
+        completion_tokens: EXPECTED_COMPLETION,
+        ..TokenUsage::default()
+    };
+    let price = |usage: TokenUsage| {
+        okapi_pricing::calculate(&bill.book, &bill.calc, usage)
+            .ok()
+            .map(|quote| quote.list_price.as_micros() as f64 / 1_000_000.0)
+    };
+    let fresh = WARM_NEW_TOKENS.min(prompt);
+    Some(super::account_control::forecast::RequestShape {
+        prompt_tokens: bill.est_prompt,
+        cold_usd: price(usage(0, prompt))?,
+        warm_usd: price(usage(prompt - fresh, fresh))?,
+        warm_key,
+    })
 }
 
 /// 候选全空时最早多少秒后可能有账号回来：被上游额度挡下的账号窗口重置、池里冷却中的 key 到期，

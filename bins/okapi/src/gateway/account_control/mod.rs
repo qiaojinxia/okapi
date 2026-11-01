@@ -1,11 +1,12 @@
 //! Shared channel admission, independent of ingress, OAuth and provider extensions.
+pub mod forecast;
 pub mod policy;
 pub mod quota;
 
 use super::{diagnostics, scheduler::CandidateSet, state::AppState};
 use okapi_providers::UpstreamError;
 use okapi_store::ChannelCandidate;
-use policy::Policy;
+use policy::{ForecastMode, Policy};
 use std::{future::Future, sync::Arc};
 
 pub async fn policy(state: &AppState, channel: i64) -> Result<Arc<Policy>, UpstreamError> {
@@ -61,8 +62,19 @@ fn quota_blocked(
     policy: &Policy,
     quota: &okapi_providers::account::quota::Snapshot,
     now: i64,
+    warm: bool,
 ) -> bool {
-    quota_block(policy, quota, now).is_some()
+    quota_block(policy, quota, now, warm).is_some()
+}
+
+/// 窗口的封顶线。`warm`（会话粘性命中且缓存还热）且配了保留线时用保留线（不低于放置线），
+/// 否则用放置线 `quota_limits`；没配放置线就没有封顶——保留线单独存在没有意义。
+fn cap_for(policy: &Policy, window_secs: i64, warm: bool) -> Option<&u8> {
+    let place = policy.quota_limits.get(&window_secs)?;
+    match policy.quota_keep_limits.get(&window_secs) {
+        Some(keep) if warm => Some(keep.max(place)),
+        _ => Some(place),
+    }
 }
 
 /// 账号为什么被上游额度挡下：写进请求诊断的结构化原因（哪条规则、哪个窗口、用了多少、
@@ -72,6 +84,7 @@ fn quota_block(
     policy: &Policy,
     quota: &okapi_providers::account::quota::Snapshot,
     now: i64,
+    warm: bool,
 ) -> Option<serde_json::Value> {
     if let Some(headroom) = quota.headroom(now) {
         if headroom == 0 {
@@ -97,7 +110,7 @@ fn quota_block(
     quota.windows.iter().find_map(|window| {
         let cap = window
             .window_secs
-            .and_then(|seconds| policy.quota_limits.get(&seconds))?;
+            .and_then(|seconds| cap_for(policy, seconds, warm))?;
         (window.resets_at.is_none_or(|at| at > now) && window.used_percent >= *cap).then(|| {
             serde_json::json!({
                 "rule": "window_limit",
@@ -157,9 +170,21 @@ pub async fn retain_available(
     state: &AppState,
     candidates: &mut impl CandidateSet,
     order: QuotaOrder,
+    shape: Option<&forecast::RequestShape>,
 ) -> Option<i64> {
     let mut excluded: Vec<serde_json::Value> = Vec::new();
     let mut earliest_reset: Option<i64> = None;
+    let now = chrono::Utc::now().timestamp();
+    // 额度预判的输入一次管道读齐；没有订阅渠道的候选集不多一次往返
+    let forecast_state = match shape {
+        Some(_) if candidates.iter().any(|c| has_quota_hook(&c.provider)) => {
+            let keys: Vec<i64> = candidates.iter().map(|c| c.channel_key_id).collect();
+            forecast::load(state, &keys).await
+        }
+        _ => std::collections::HashMap::new(),
+    };
+    let mut assessments: Vec<serde_json::Value> = Vec::new();
+    let mut enforcing = false;
     let mut exclude =
         |candidate: &ChannelCandidate, reason: &str, detail: Option<serde_json::Value>| {
             if excluded.len() < MAX_EXCLUDED {
@@ -212,9 +237,11 @@ pub async fn retain_available(
             exclude(candidate, "local_tokens", None);
             continue;
         }
-        if let Some(quota) = quota::read_for(state, candidate).await {
-            let now = chrono::Utc::now().timestamp();
-            if let Some(detail) = quota_block(&policy, &quota, now) {
+        // 缓存还热的会话可以用到保留线；其余按放置线（没配保留线时两者相同）
+        let warm = shape.is_some_and(|s| s.warm_key == Some(candidate.channel_key_id));
+        let observed = quota::read_for_with_burn(state, candidate).await;
+        if let Some((quota, _)) = &observed {
+            if let Some(detail) = quota_block(&policy, quota, now, warm) {
                 if let Some(at) = detail["resets_at"].as_i64() {
                     earliest_reset = Some(earliest_reset.map_or(at, |seen| seen.min(at)));
                 }
@@ -228,9 +255,39 @@ pub async fn retain_available(
                 resets.insert(candidate.channel_key_id, at);
             }
         }
+        if let Some(shape) = shape.filter(|_| policy.quota_forecast != ForecastMode::Off)
+            && let Some(assessment) = forecast::assess(
+                &policy,
+                candidate,
+                observed.as_ref(),
+                forecast_state.get(&candidate.channel_key_id),
+                shape,
+                now,
+            )
+        {
+            assessments.push(assessment.entry);
+            if policy.quota_forecast == ForecastMode::Enforce {
+                enforcing = true;
+                if let Some(detail) = assessment.block {
+                    if let Some(at) = detail["resets_at"].as_i64() {
+                        earliest_reset = Some(earliest_reset.map_or(at, |seen| seen.min(at)));
+                    }
+                    exclude(candidate, "forecast", Some(detail));
+                    continue;
+                }
+            }
+        }
         available.insert(candidate.channel_key_id);
     }
     candidates.retain(|c| available.contains(&c.channel_key_id));
+    if let Some(shape) = shape {
+        let mode = if enforcing {
+            ForecastMode::Enforce
+        } else {
+            ForecastMode::Shadow
+        };
+        forecast::trace_assessments(mode, shape, &assessments);
+    }
     if !excluded.is_empty()
         && let Some(trace) = diagnostics::Trace::current()
     {
@@ -302,7 +359,13 @@ pub fn execute<'a, T: okapi_providers::response_lifetime::ResponseLifetime + 'a>
 ) -> impl Future<Output = Result<T, UpstreamError>> + 'a {
     // Keep the shared gate's PG/Redis futures off every ingress task's stack.
     Box::pin(async move {
-        admit(state, candidate.channel_id, Some(candidate.channel_key_id)).await?;
+        admit_with(
+            state,
+            candidate.channel_id,
+            Some(candidate.channel_key_id),
+            candidate.warm_affinity,
+        )
+        .await?;
         let mut permit =
             super::sched_redis::channel_permit::ChannelPermit::acquire(&state.sched, candidate)
                 .await?
@@ -316,17 +379,34 @@ pub fn execute<'a, T: okapi_providers::response_lifetime::ResponseLifetime + 'a>
 }
 
 pub async fn admit(state: &AppState, channel: i64, key: Option<i64>) -> Result<(), UpstreamError> {
+    admit_with(state, channel, key, false).await
+}
+
+/// 同 [`admit`]；`warm` 为真（本次尝试的候选是缓存还热的粘性账号）时封顶线取保留线。
+pub async fn admit_with(
+    state: &AppState,
+    channel: i64,
+    key: Option<i64>,
+    warm: bool,
+) -> Result<(), UpstreamError> {
     let policy = policy(state, channel).await?;
     if token_blocked(state, channel, &policy).await? {
         return Err(blocked("local_tokens"));
     }
     if let Some(key) = key
         && let Some(quota) = quota::read(state, key).await
-        && quota_blocked(&policy, &quota, chrono::Utc::now().timestamp())
+        && quota_blocked(&policy, &quota, chrono::Utc::now().timestamp(), warm)
     {
         return Err(blocked("upstream_quota"));
     }
     Ok(())
+}
+
+/// 这个 provider 有没有额度观测能力（订阅渠道）。
+pub(crate) fn has_quota_hook(provider: &str) -> bool {
+    okapi_providers::registry::lookup(provider)
+        .and_then(|adapter| adapter.account)
+        .is_some_and(|hook| hook.capabilities().quota)
 }
 
 #[cfg(test)]
@@ -348,25 +428,25 @@ mod tests {
                 &json!({"account_control":{"quota_limits":{"18000":90,"604800":80}}}),
             )
             .unwrap();
-            assert!(quota_blocked(&policy, &quota, 1000));
+            assert!(quota_blocked(&policy, &quota, 1000, false));
             let policy = Policy::parse(
                 &json!({"account_control":{"quota_limits":{"18000":20,"604800":90}}}),
             )
             .unwrap();
-            assert!(quota_blocked(&policy, &quota, 1000));
+            assert!(quota_blocked(&policy, &quota, 1000, false));
             // 两次轮询之间（观测后 200 秒）阈值仍然生效；过了有效期才放行
-            assert!(quota_blocked(&policy, &quota, 1200));
-            assert!(!quota_blocked(&policy, &quota, 1601));
+            assert!(quota_blocked(&policy, &quota, 1200, false));
+            assert!(!quota_blocked(&policy, &quota, 1601, false));
             let policy = Policy::parse(
                 &json!({"account_control":{"quota_limits":{"18000":21,"604800":81}}}),
             )
             .unwrap();
-            assert!(!quota_blocked(&policy, &quota, 1000));
+            assert!(!quota_blocked(&policy, &quota, 1000, false));
             let mut fresh = quota.clone();
             fresh.observed_at = 1900;
             let policy =
                 Policy::parse(&json!({"account_control":{"quota_limits":{"18000":20}}})).unwrap();
-            assert!(!quota_blocked(&policy, &fresh, 1900));
+            assert!(!quota_blocked(&policy, &fresh, 1900, false));
         }
     }
 
@@ -385,7 +465,7 @@ mod tests {
         let policy =
             Policy::parse(&json!({"account_control":{"quota_limits":{"604800":80}}})).unwrap();
         assert_eq!(
-            quota_block(&policy, &quota(&windows), 1000).unwrap(),
+            quota_block(&policy, &quota(&windows), 1000, false).unwrap(),
             json!({"rule": "window_limit", "window": "seven_day", "window_secs": 604_800,
                    "used_percent": 85, "limit_percent": 80, "resets_at": 2400})
         );
@@ -395,16 +475,16 @@ mod tests {
         .unwrap();
         let tight = json!([{"name": "five_hour", "used_percent": 95, "resets_at": 1800, "window_secs": 18000}]);
         assert_eq!(
-            quota_block(&policy, &quota(&tight), 1000).unwrap(),
+            quota_block(&policy, &quota(&tight), 1000, false).unwrap(),
             json!({"rule": "threshold", "headroom_percent": 5, "threshold_percent": 90, "window": null,
                    "resets_at": 1800})
         );
         let full = json!([{"name": "five_hour", "used_percent": 100, "resets_at": 1800, "window_secs": 18000}]);
         assert_eq!(
-            quota_block(&policy, &quota(&full), 1000).unwrap()["rule"],
+            quota_block(&policy, &quota(&full), 1000, false).unwrap()["rule"],
             "exhausted"
         );
-        assert!(quota_block(&policy, &quota(&windows), 1000).is_none());
+        assert!(quota_block(&policy, &quota(&windows), 1000, false).is_none());
     }
 
     fn keys(candidates: &[ChannelCandidate]) -> Vec<i64> {

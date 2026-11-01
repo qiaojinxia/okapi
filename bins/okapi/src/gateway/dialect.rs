@@ -38,23 +38,32 @@ impl AppState {
             let account_id = credential
                 .oauth()
                 .and_then(|credential| credential.account_id.as_deref());
-            self.inference
-                .infer(
-                    &cand.provider,
-                    Request {
-                        surface,
-                        base,
-                        model,
-                        credential: credential.material(),
-                        account_id,
-                        region: cand.aws_region.as_deref(),
-                        api_version: cand.api_version.as_deref(),
-                        body,
-                        stream,
-                        outbound,
-                    },
+            let inference = self.inference.infer(
+                &cand.provider,
+                Request {
+                    surface,
+                    base,
+                    model,
+                    credential: credential.material(),
+                    account_id,
+                    region: cand.aws_region.as_deref(),
+                    api_version: cand.api_version.as_deref(),
+                    body,
+                    stream,
+                    outbound,
+                },
+            );
+            // 订阅账号：上游响应（成功与失败都算）带回的额度窗口头记进本次尝试的诊断，
+            // 并在后台喂给额度预判。别的 provider 没有这类头，不挂钩子。
+            if super::oauth_cred::is_oauth_provider(&cand.provider) {
+                okapi_providers::unified_limits::observe_responses(
+                    super::account_control::forecast::header_sink(self, cand),
+                    inference,
                 )
                 .await
+            } else {
+                inference.await
+            }
         })
         .await
     }

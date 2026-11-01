@@ -359,20 +359,23 @@ impl AppState {
             group,
             candidates,
             super::account_control::QuotaOrder::HeadroomTiers,
+            None,
         )
         .await
         .margin_removed
     }
 
-    /// 同 [`Self::retain_margin_ok`]，额度观测按池策略参与层内排序（见 `QuotaOrder`）。
+    /// 同 [`Self::retain_margin_ok`]，额度观测按池策略参与层内排序（见 `QuotaOrder`）；
+    /// `shape` 给出请求的形状时，额度预判据此评估每个订阅候选（见 `account_control::forecast`）。
     pub async fn retain_margin_ok_ordered(
         &self,
         group: &str,
         candidates: &mut impl super::scheduler::CandidateSet,
         order: super::account_control::QuotaOrder,
+        shape: Option<&super::account_control::forecast::RequestShape>,
     ) -> Retained {
         let next_quota_reset =
-            super::account_control::retain_available(self, candidates, order).await;
+            super::account_control::retain_available(self, candidates, order, shape).await;
         let blocked = self.margin_blocked_fields().await;
         if blocked.is_empty() {
             return Retained {

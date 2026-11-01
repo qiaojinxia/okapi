@@ -39,6 +39,17 @@ impl AppState {
         self.prepare_upstream_cost(input).await;
     }
 
+    /// 这笔账的上游成本（API 等价）记进渠道 key 的烧速计数：额度预判拿它外推两次观测之间的用量。
+    /// 只算聊天类请求；成本未知（没有定价基准）就不记。
+    pub(in crate::gateway) async fn record_key_burn(&self, input: &SettlementInput<'_>) {
+        if input.log_type != 2 {
+            return;
+        }
+        if let (Some(key), Some(cost)) = (input.channel_key_id, input.upstream_cost) {
+            super::super::account_control::forecast::record_burn(self, key, cost.as_micros()).await;
+        }
+    }
+
     async fn prepare_upstream_cost(&self, input: &mut SettlementInput<'_>) {
         if input.log_type == 2 {
             if input
@@ -160,6 +171,7 @@ impl AppState {
                         self.sched
                             .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
                             .await;
+                        self.record_key_burn(&input).await;
                     }
                     let _ = super::super::settlement_retry::remove(self, input.request_id).await;
                     return Ok(inserted);

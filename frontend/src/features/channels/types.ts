@@ -166,6 +166,10 @@ export interface AccountControl {
   quota_threshold_pct: number
   /** Upstream window seconds mapped to independently configured percentages. */
   quota_limits?: Record<string, number>
+  /** Keep lines for sessions whose prompt cache is still warm; new placements use `quota_limits`. */
+  quota_keep_limits?: Record<string, number>
+  /** Request-level quota forecast: `shadow` (default) only records diagnostics, `enforce` excludes accounts a cold start would push over the line. */
+  quota_forecast?: 'off' | 'shadow' | 'enforce'
   local_tokens?: { cap: number; period?: 'total' | 'day' | 'week' } | null
   rate_limit_cooldown_secs: number
   failure_threshold: number

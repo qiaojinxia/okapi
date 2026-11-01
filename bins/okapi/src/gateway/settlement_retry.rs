@@ -224,6 +224,7 @@ async fn recover_one(state: &AppState, id: String) -> anyhow::Result<Option<Stri
                     .sched
                     .kpi_record(input.usage.total_raw(), input.amount.as_micros(), false)
                     .await;
+                state.record_key_burn(&input).await;
             }
             Ok(Some(id))
         }

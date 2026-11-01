@@ -62,6 +62,8 @@ pub struct CandidateQueue {
     indices: Vec<usize>,
     /// 发出的候选带上 `count_in_flight`（`least_concurrency` 池要读在途数）。
     count_in_flight: bool,
+    /// 会话粘性命中且缓存还热的那把 key：发出时给它打上 `warm_affinity`（额度准入用保留线）。
+    warm_key: Option<i64>,
 }
 
 pub trait CandidateSet: Send + Sync {
@@ -129,7 +131,14 @@ impl CandidateQueue {
             source,
             indices,
             count_in_flight: false,
+            warm_key: None,
         }
+    }
+    /// 登记缓存还热的粘性账号：它被发出时带 `warm_affinity`。
+    #[must_use]
+    pub fn with_warm_key(mut self, key: Option<i64>) -> Self {
+        self.warm_key = key;
+        self
     }
     /// 发出的每个候选都登记在途（不设并发上限也登记，只计数）。
     #[must_use]
@@ -156,6 +165,7 @@ impl IntoIterator for CandidateQueue {
             source: self.source,
             indices: self.indices.into_iter(),
             count_in_flight: self.count_in_flight,
+            warm_key: self.warm_key,
         }
     }
 }
@@ -164,6 +174,7 @@ pub struct CandidateIter {
     source: Arc<Vec<ChannelCandidate>>,
     indices: std::vec::IntoIter<usize>,
     count_in_flight: bool,
+    warm_key: Option<i64>,
 }
 impl Iterator for CandidateIter {
     type Item = ChannelCandidate;
@@ -173,6 +184,7 @@ impl Iterator for CandidateIter {
             // 候选快照会缓存几秒：轮换组在每次真正发出前重抽，而不是一个 TTL 内钉死一个出口
             candidate.reroll_egress();
             candidate.count_in_flight |= self.count_in_flight;
+            candidate.warm_affinity = self.warm_key == Some(candidate.channel_key_id);
             candidate
         })
     }
@@ -330,6 +342,7 @@ pub(crate) mod tests {
             cost_milli,
             pool_rank: 0,
             count_in_flight: false,
+            warm_affinity: false,
         }
     }
 
@@ -561,6 +574,28 @@ pub(crate) mod tests {
             (3300..4200).contains(&heavy_first),
             "idle heavy first {heavy_first}/5000"
         );
+    }
+
+    /// 缓存还热的粘性账号被发出时带 warm_affinity，其余不带；缓存里的快照不被改动。
+    #[test]
+    fn warm_affinity_marks_only_the_sticky_candidate_when_emitted() {
+        let source = Arc::new(vec![cand_with_key(1, 0), cand_with_key(2, 0)]);
+        let flags = |warm: Option<i64>| -> Vec<(i64, bool)> {
+            CandidateQueue::weighted(source.clone())
+                .with_warm_key(warm)
+                .into_iter()
+                .map(|c| (c.channel_key_id, c.warm_affinity))
+                .collect()
+        };
+        assert!(flags(None).iter().all(|(_, warm)| !warm));
+        let marked = flags(Some(2));
+        assert_eq!(marked.iter().filter(|(_, warm)| *warm).count(), 1);
+        assert!(marked.contains(&(2, true)) && marked.contains(&(1, false)));
+        assert!(
+            flags(Some(99)).iter().all(|(_, warm)| !warm),
+            "粘性账号不在候选里就谁也不标"
+        );
+        assert!(source.iter().all(|c| !c.warm_affinity));
     }
 
     /// 只有 least_concurrency 的队列发出的候选带 count_in_flight；缓存里的快照不被改动。

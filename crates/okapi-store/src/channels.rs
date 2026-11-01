@@ -88,6 +88,9 @@ pub struct ChannelCandidate {
     /// 本次尝试是否在 Redis `conc:ck:*` 登记在途：没设并发上限也登记，只计数不拦截。
     /// 候选缓存里恒为 false，由 `least_concurrency` 池的调度队列逐个发出时打开。
     pub count_in_flight: bool,
+    /// 本次请求的会话粘性命中了这把 key，且距上次成功请求不到缓存 TTL（缓存大概率还热）。
+    /// 额度准入据此对它用保留线而不是放置线。候选缓存里恒为 false，由调度队列发出时打开。
+    pub warm_affinity: bool,
 }
 
 /// 内置默认池：新渠道缺省加入、未指定池的分组走这里。
@@ -374,6 +377,7 @@ pub async fn candidates_for_model(
                 first_output_timeout_secs,
                 pool_rank: r.pool_rank,
                 count_in_flight: false,
+                warm_affinity: false,
             })
         })
         .collect()

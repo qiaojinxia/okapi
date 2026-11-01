@@ -213,6 +213,21 @@ impl Trace {
         data.attempt_recorded = true;
     }
 
+    /// 给当前（最近一次）尝试挂一条观测（如上游返回的订阅限额头）。没有进行中的尝试则丢弃。
+    pub(crate) fn attempt_note(&self, name: &str, value: Value) {
+        let mut data = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if data.attempt_recorded
+            && let Some(last) = data.fields["attempts"]
+                .as_array_mut()
+                .and_then(|attempts| attempts.last_mut())
+        {
+            last[name] = value;
+        }
+    }
+
     pub(crate) fn finish(&self, status: Option<i16>, error: Option<&UpstreamError>) {
         let mut data = self
             .0
@@ -448,6 +463,25 @@ mod tests {
         assert!(at_failure >= 8_000, "{at_failure}");
         assert_eq!(snapshot["attempts"][0]["outcome"], "failure");
         assert_eq!(snapshot["error_message"], "empty_completion");
+    }
+
+    /// 上游限额头挂在当前这次尝试上；没有进行中的尝试就丢弃，不写到别处。
+    #[test]
+    fn attempt_notes_attach_to_the_latest_attempt_only() {
+        let trace = Trace::new(&HeaderMap::new());
+        trace.attempt_note("rate_limit", json!({"claim": "lost"}));
+        assert_eq!(trace.snapshot()["attempts"], json!([]));
+        {
+            let mut data = trace.0.lock().unwrap();
+            data.fields["attempts"] = json!([{"channel_key_id": 8}, {"channel_key_id": 9}]);
+            data.attempt_recorded = true;
+        }
+        trace.attempt_note("rate_limit", json!({"claim": "five_hour"}));
+        let snapshot = trace.snapshot();
+        assert!(snapshot["attempts"][0].get("rate_limit").is_none());
+        assert_eq!(snapshot["attempts"][1]["rate_limit"]["claim"], "five_hour");
+        // 个人日志的投影不暴露它
+        assert!(public(&snapshot).get("attempts").is_none());
     }
 
     #[test]

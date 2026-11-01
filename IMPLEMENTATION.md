@@ -3200,6 +3200,45 @@ thinking 签名失配没有矫正（"签名是否绑账号"没验证）；key �
 `gateway_m2_sched::key_state_machine_branches` 的 429 分支、`gateway_oauth_channels::codex_usage_limit_error_before_output_cools_the_key_until_the_reset`
 （流内 `usage_limit_reached`）由 502 改为 429。
 
+### 11.51 订阅额度预判（2026-11-01）：补上轮询看不见的那一段，缺省只记不拦
+
+线上取证（2026-10-31，两周 15 375 次订阅请求）：账号不同质（4 个 Pro + 1 个 Max 5x，调度里 weight 全是 1）；Pro 的 5 小时窗只值
+约 $30–39 的 API 等价成本，一笔 300k 的 Opus 冷启动 ≈ $1.5（≈ 窗口的 5%），907k 的 ≈ $4.5（≈ 14%）；8 次上游 429 全落在没有
+`quota_limits` 的 Pro 渠道上，其中三簇是「一笔大冷请求落在已用 80–100% 的窗口」，之后该号 4–23 小时没有成功请求；冷请求只占 4.9% 的
+调用却占 47% 的成本，其中同账号空闲 ≥ 5 分钟后重写缓存的 464 笔（≈ $809）缓存早已失效，换账号零代价，却被 1 小时粘性钉回原账号，
+真正的热迁移只有 63 笔（≈ $105）。准入看的是 5 分钟一次、整数向上取整、最长 10 分钟有效的观测，既追不上烧速，也不看请求大小。
+
+- **观测（P1）**：①上游响应的 `anthropic-ratelimit-unified-*` 头由 `okapi_providers::unified_limits` 解析，传输层拿到响应头就报给
+  网关挂上的钩子（task-local sink，成功与失败都报；没挂钩子的调用方零代价；钩子 panic 当场吞掉）。`infer_via` 只给订阅 provider 挂：
+  写进本次尝试的诊断 `attempts[].rate_limit`（429 也有，P4 分类要用），并在后台喂预判。头是否出现在 200 响应上、`utilization` 的单位
+  （按 0–1 的小数处理，折成百分点后超过 105 的读数丢弃）都是待线上核实的假设。②粘性映射新增伴随键 `…:at`（该会话上一次**成功**的时刻），
+  映射本身的值不变——回滚到旧版仍读得懂；旧映射没有伴随键按「热」算，保持此前行为。③结算后把 `upstream_cost_micro` 累加进
+  `burn:ck:{key}`（单调计数，两条结算路径各一处）；轮询与响应头读数都带上当时的计数作外推基线；样本落 `quota:hist:ck:{key}`（Redis 列表，封顶 6 000，
+  响应头样本每分钟一条）。没有新迁移、没有新依赖。
+- **预判（P2）**：每个账号 × 窗口一个换算系数 θ（窗口百分点 / API 等价美元），先验按档位（Pro 5h 100/33、周 100/240；Max 5x 100/161、100/1200），
+  用相邻读数的 Δu/ΔC 之比在线标定（折扣按花费量、先验权重 $3、夹在先验的 0.2–5 倍；跨窗口 / 零花费 / 计数回退的配对作废）。现在的用量估计
+  û = u_obs + θ·（观测后又花的成本），σ 由取整、θ 误差（30%）与外部使用漂移（0.8 点/√小时）合成；观测过期（20 分钟）或窗口已过重置点就是「未知」，
+  不外推也不据此拦。请求自己的增量用价簿同一个计价器对合成用量折价：冷（新会话，或会话上一次成功已超过 270 秒）= 整段 prompt（估计值 ×1.1）
+  写缓存；热 = 只有 3 000 token 要写、其余读缓存；再加 700 个输出 token、乘渠道相对成本。û + 1.28σ + 增量 > 线即标记。
+- **开关与双阈值**：`account_control.quota_forecast` = `shadow`（缺省，只写诊断 `forecast`，不影响选路）/ `enforce`（排除被标记的候选，理由 `forecast`，
+  最早重置时刻进 `Retry-After`）/ `off`；`quota_limits` 在预判下就是**放置线**（新会话与冷请求），新增的 `quota_keep_limits` 是**保留线**
+  （缓存还热的粘性会话可以用到它，不低于放置线；没配放置线则无效），连逐次尝试的 `admit` 也认（`ChannelCandidate.warm_affinity`，由调度队列发出时给粘性命中且缓存还热的那把 key 打上），
+  热会话不会在触线那一刻被踢去冷迁移。缺省不配保留线，既有渠道行为不变。粘性映射的读取挪到准入之前（要先知道缓存热不热），
+  提到候选首位仍在准入之后——被额度挡下的账号，亲和不越过准入。
+- **回滚**：`account_control` 带 `deny_unknown_fields`，旧版遇到含 `quota_forecast` / `quota_keep_limits` 的渠道设置会判成无效策略、整条渠道不可用；
+  回滚前先清掉这两个键（没写过的渠道不受影响）。新增的 Redis 键旧版都忽略，`quota:ck` 里多出的 `burn_micro` 旧版也忽略。
+- **没做**：按预测的投影利用率重新放置（含空闲超过缓存 TTL 的会话每次重新选号）、429 按 `unified-status` / `representative-claim` 分类冷却、离线回放评估器
+  （P3–P5）；评估口径、ClickHouse 查询配方与转 `enforce` 的判据见 `docs/quota-forecast.md`。
+
+**验收**：`unified_limits` 六条单测 + `unified_limits_sink` 两条本地 mock 上游用例（200 / 429 / 流式都在拿到响应头时上报，429 的 `Retry-After` 语义不变）；
+`forecast::model` 十二条（θ 在量化读数、跨窗口下收敛，窗口变化 / 零花费 / 计数回退不入估计，nowcast 外推与未知条件）、`forecast::tests` 七条（冷 / 热 / 保留线 /
+观测取新 / 学到的 θ 与档位先验 / 成本系数 / 老的整数轮询路径上的保留线）、`sticky_hit_tests` 两条、`scheduler::warm_affinity_marks_only_the_sticky_candidate_when_emitted`、
+`diagnostics::attempt_notes_attach_to_the_latest_attempt_only`、`policy::forecast_defaults_to_shadow_without_keep_lines`；集成套件 `quota_forecast` 八条
+（限额头进诊断 / 烧速计数等于账上的上游成本 / 粘性时刻；升级前的映射照常路由；轮询带烧速基线并教会 θ；shadow 只记、enforce 拒绝并给 `Retry-After`、off 不写；
+保留线让热会话继续而新会话与过期会话被拒；准入函数直接喂请求形状；整数轮询路径上的双阈值端到端（含逐次尝试的闸）；单位不对的读数留在诊断里但不进预判）。
+全部 121 个集成套件通过；16 处变异（观测钩子漏报错误 / 不挂钩子、解析放过离谱值、结算不记烧速、粘性时刻写错、保留线失效、enforce 不排除、
+`warm_affinity` 不打标、热窗口边界、缺省改成 off、重置边界、跨窗口配对、并列取舍、单位丢弃、热候选按放置线、轮询不带基线）都被对应用例抓住。
+
 ## 12. 容量阶梯与故障模式（架构 Review 结论）
 
 ### 12.1 容量三档位（前两档只改部署不改代码）

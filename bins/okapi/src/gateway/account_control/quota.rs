@@ -12,6 +12,10 @@ use sha2::{Digest, Sha256};
 struct Observation {
     identity: String,
     snapshot: okapi_providers::account::quota::Snapshot,
+    /// 观测时刻这把 key 的累计烧速计数（API 等价 micro-USD）：额度预判据此外推观测之后又花了多少。
+    /// 旧记录与读不到计数时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    burn_micro: Option<i64>,
 }
 
 fn identity(provider: &str, credential: &ResolvedCredential<'_>) -> String {
@@ -66,6 +70,16 @@ pub async fn read_for(
     state: &AppState,
     candidate: &okapi_store::ChannelCandidate,
 ) -> Option<okapi_providers::account::quota::Snapshot> {
+    read_for_with_burn(state, candidate)
+        .await
+        .map(|(snapshot, _)| snapshot)
+}
+
+/// 同 [`read_for`]，另带观测时刻的烧速计数（额度预判的外推基线）。
+pub async fn read_for_with_burn(
+    state: &AppState,
+    candidate: &okapi_store::ChannelCandidate,
+) -> Option<(okapi_providers::account::quota::Snapshot, Option<i64>)> {
     let hook = okapi_providers::registry::lookup(&candidate.provider)?
         .account
         .filter(|hook| hook.capabilities().quota)?;
@@ -73,7 +87,7 @@ pub async fn read_for(
     hook.scope_quota(&mut observation.snapshot);
     let credential = stored_credential(&candidate.provider, &candidate.credential).ok()?;
     (identity(&candidate.provider, &credential) == observation.identity)
-        .then_some(observation.snapshot)
+        .then_some((observation.snapshot, observation.burn_micro))
 }
 
 pub async fn read(state: &AppState, key: i64) -> Option<okapi_providers::account::quota::Snapshot> {
@@ -223,9 +237,12 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
     match hook.quota(context()).await {
         Ok(mut snapshot) => {
             let reported_plan = snapshot.plan.take();
+            // 先读烧速计数再落观测：预判拿「观测之后又花了多少」外推，基线必须不晚于观测
+            let burn_micro = super::forecast::current_burn(state, row.id).await;
             let observation = Observation {
                 identity: identity(&row.provider, &credential),
                 snapshot,
+                burn_micro,
             };
             // 路由靠额度观测：先落库，档位（只供展示，可能还要再请求一次上游）放在后面
             if let Ok(payload) = serde_json::to_string(&observation) {
@@ -249,6 +266,7 @@ pub async fn poll(state: &AppState, row: &okapi_store::oauth_credentials::KeyRow
                     tracing::warn!(key=row.id,%error,"quota observation persistence failed");
                 }
             }
+            super::forecast::record_poll(state, row.id, &observation.snapshot, burn_micro).await;
             refresh_plan(
                 state,
                 row.id,
